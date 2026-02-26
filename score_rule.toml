@@ -1,0 +1,10 @@
+version = 1
+
+[[rule]]
+name = ""
+scope_windows = 10
+scope_way = ""
+when = ""
+points = 10
+explain = ""
+tag = ""

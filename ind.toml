@@ -1,0 +1,6 @@
+version = 1
+
+[[ind]]
+output_name = "bbi"
+expr = "(MA(C,3) + MA(C,6) + MA(C,12) + MA(C,24)) / 4;"
+prec = 2
