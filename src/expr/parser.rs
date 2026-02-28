@@ -217,12 +217,10 @@ impl Parser {
             // 数字分支
             TokenKind::Number(_) => match self.pop_token() {
                 TokenKind::Number(num) => Ok(Expr::Number(num)),
-                other => {
-                    Err(ParseErr {
-                        msg: format!("表达式数字错误:{:?}", other),
-                        idx: self.idx,
-                    })
-                }
+                other => Err(ParseErr {
+                    msg: format!("表达式数字错误:{:?}", other),
+                    idx: self.idx,
+                }),
             },
             // 左括号分支
             TokenKind::LParen => {
@@ -230,12 +228,10 @@ impl Parser {
                 let inner = self.parse_expr(0);
                 match self.pop_token() {
                     TokenKind::RParen => inner,
-                    _ => {
-                        Err(ParseErr {
-                            msg: "表达式缺少右边括号".to_string(),
-                            idx: self.idx,
-                        })
-                    }
+                    _ => Err(ParseErr {
+                        msg: "表达式缺少右边括号".to_string(),
+                        idx: self.idx,
+                    }),
                 }
             }
             // 负号分支
@@ -257,12 +253,10 @@ impl Parser {
                 })
             }
 
-            other => {
-                Err(ParseErr {
-                    msg: format!("表达式token处理异常,错误字符:{:?}", other),
-                    idx: self.idx,
-                })
-            }
+            other => Err(ParseErr {
+                msg: format!("表达式token处理异常,错误字符:{:?}", other),
+                idx: self.idx,
+            }),
         }
     }
 

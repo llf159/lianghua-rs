@@ -1,9 +1,11 @@
 // use lianghua_rs::expr;
-// use lianghua_rs::expr::eval::{Runtime, Value};
+use lianghua_rs::expr::eval::{Runtime, Value};
 // use lianghua_rs::expr::lexer::Lexer;
 // use lianghua_rs::expr::parser::{Expr, Parser, lex_all};
 // use lianghua_rs::strategy::loader::IndConfig;
 // use std::fs;
+use lianghua_rs::scoring::data::{DataRow, ScoreDetails, ScoreSummary};
+use lianghua_rs::scoring::scoring_rules_details;
 
 fn main() {
     // 读取toml测试
@@ -63,4 +65,78 @@ fn main() {
     //     Err(e) => println!("{}", e.msg),
     // }
 
+    // 打分测试
+    // use lianghua_rs::expr::eval::{Runtime, Value};
+    // use lianghua_rs::scoring::scoring_rules_details;
+
+    // let mut rt = Runtime::default();
+
+    // rt.vars.insert(
+    //     "C".to_string(),
+    //     Value::NumSeries(vec![
+    //         Some(10.0),
+    //         Some(10.5),
+    //         Some(10.2),
+    //         Some(10.8),
+    //         Some(11.0),
+    //     ]),
+    // );
+    // rt.vars.insert(
+    //     "O".to_string(),
+    //     Value::NumSeries(vec![
+    //         Some(9.8),
+    //         Some(10.6),
+    //         Some(10.1),
+    //         Some(10.7),
+    //         Some(10.9),
+    //     ]),
+    // );
+
+    // match scoring_rules_details(&mut rt) {
+    //     Ok((total, details)) => {
+    //         println!("total = {:?}", total);
+    //         for d in details {
+    //             println!("{} => {:?}", d.name, d.series);
+    //         }
+    //     }
+    //     Err(e) => {
+    //         println!("scoring err: {}", e);
+    //     }
+    // }
+
+    // 计算流程测试
+    let ts_code = "600968.SH".to_string();
+    let data = DataRow::load_data(
+        "./stock_data/stock_data.db",
+        &ts_code,
+        "qfq",
+        "20250825",
+        "20250901",
+    );
+    // let mut rt:HashMap<&str, Vec<Option<f64>>> = HashMap::new();
+    let mut rt = Runtime::default();
+    let mut trade_date: Vec<String> = Vec::new();
+    match data {
+        // Ok(v) => println!("{:?}", v),
+        Ok(v) => {
+            trade_date = v.trade_dates;
+            for (name, col) in &v.cols {
+                let n_series = Value::NumSeries(col.clone());
+                rt.vars.insert(name.clone(), n_series);
+
+                // rt.insert(name, col.to_vec());
+            }
+            // println!("{:?}", &rt);
+        }
+        Err(e) => println!("有错:{e}"),
+    }
+    let mut scoring_result = ScoreDetails::default();
+    if let Ok((v, t)) = scoring_rules_details(&mut rt) {
+        // println!("{:?}{:?}", v, t);
+        let summary = ScoreSummary::build(&ts_code, &trade_date, &v);
+        let details = ScoreDetails::build(&ts_code, &trade_date, &t);
+        println!("{:#?}", summary);
+        println!("{:#?}", details);
+        // let _ = ScoreSummary::write_csv("./111.csv", &summary);
+    }
 }

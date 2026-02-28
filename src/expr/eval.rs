@@ -1,7 +1,7 @@
 use crate::expr::parser::{BinaryOp, Expr, Stmt, Stmts, UnaryOp};
-use std::{collections::HashMap};
+use std::collections::HashMap;
 
-const EPS:f64 = 1e-12;
+const EPS: f64 = 1e-12;
 
 #[derive(Debug, Clone)]
 pub struct EvalErr {
@@ -559,7 +559,9 @@ impl Runtime {
         let ori_n = Value::as_num(&self.eval_expr(&args[3])?)?;
         let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
 
-        let len = Value::len_of(&c).max(Value::len_of(&h)).max(Value::len_of(&l));
+        let len = Value::len_of(&c)
+            .max(Value::len_of(&h))
+            .max(Value::len_of(&l));
         let c_s = Value::as_num_series(&c, len)?;
         let h_s = Value::as_num_series(&h, len)?;
         let l_s = Value::as_num_series(&l, len)?;
@@ -574,7 +576,10 @@ impl Runtime {
 
             let c = match c_s[i] {
                 Some(v) => v,
-                None => { out.push(None); continue; }
+                None => {
+                    out.push(None);
+                    continue;
+                }
             };
 
             let mut llv = f64::INFINITY;
@@ -584,10 +589,17 @@ impl Runtime {
             for j in start..=i {
                 match (l_s[j], h_s[j]) {
                     (Some(l), Some(h)) => {
-                        if l < llv { llv = l; }
-                        if h > hhv { hhv = h; }
+                        if l < llv {
+                            llv = l;
+                        }
+                        if h > hhv {
+                            hhv = h;
+                        }
                     }
-                    _ => { bad = true; break; }
+                    _ => {
+                        bad = true;
+                        break;
+                    }
                 }
             }
             if bad {
@@ -627,7 +639,7 @@ impl Runtime {
                 continue;
             }
             let start = i + 1 - std_n;
-            let mut count:usize = 1;
+            let mut count: usize = 1;
             let mut bad = false;
             let curr = match n_series[i] {
                 Some(v) => v,
@@ -678,7 +690,7 @@ impl Runtime {
                 continue;
             }
             let start = i + 1 - std_n;
-            let mut count:usize = 1;
+            let mut count: usize = 1;
             let mut bad = false;
             let a = match n_series[i] {
                 Some(v) => v,
@@ -737,7 +749,6 @@ impl Runtime {
 
         Ok(Value::NumSeries(out))
     }
-
 }
 
 impl Runtime {
@@ -782,11 +793,9 @@ impl Runtime {
             "LRANK" => Ok(self.impl_lrank(args)?),
             "GET" => Ok(self.impl_get(args)?),
 
-            other => {
-                Err(EvalErr {
-                    msg: format!("未定义函数:{:?}", other),
-                })
-            }
+            other => Err(EvalErr {
+                msg: format!("未定义函数:{:?}", other),
+            }),
         }
     }
 
@@ -812,12 +821,7 @@ impl Runtime {
         }
     }
 
-    fn eval_binary(
-        &mut self,
-        op: &BinaryOp,
-        lhs: &Expr,
-        rhs: &Expr,
-    ) -> Result<Value, EvalErr> {
+    fn eval_binary(&mut self, op: &BinaryOp, lhs: &Expr, rhs: &Expr) -> Result<Value, EvalErr> {
         let lv = self.eval_expr(lhs)?;
         let rv = self.eval_expr(rhs)?;
         let len = usize::max(Value::len_of(&lv), Value::len_of(&rv));
@@ -995,7 +999,6 @@ impl Runtime {
         }
         Ok(last)
     }
-
 }
 
 #[derive(Debug, Clone, PartialEq)]

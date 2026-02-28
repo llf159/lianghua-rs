@@ -31,7 +31,7 @@ pub struct ScoreRule {
     pub points: f64,
     pub dist_points: Option<Vec<DistPoint>>,
     pub explain: String,
-    pub tag:RuleTag,
+    pub tag: RuleTag,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -52,14 +52,15 @@ pub enum RuleTag {
 pub struct DistPoint {
     pub min: usize,
     pub max: usize,
-    pub points : f64,
+    pub points: f64,
 }
 
 impl ScoreRule {
     pub fn load_rules() -> Result<Vec<ScoreRule>, String> {
         let rule_toml = fs::read_to_string("score_rule.toml")
             .map_err(|e| format!("规则文件不存在或不可读: {e}"))?;
-        let cfg: ScoreConfig = toml::from_str(&rule_toml).map_err(|e| format!("规则文件格式错误: {e}"))?;
+        let cfg: ScoreConfig =
+            toml::from_str(&rule_toml).map_err(|e| format!("规则文件格式错误: {e}"))?;
         Self::validate_rules(&cfg.rule)?;
         Ok(cfg.rule)
     }
@@ -77,11 +78,15 @@ impl ScoreRule {
             let has_points = r.points.is_finite();
             let has_dist = matches!(r.dist_points.as_ref(), Some(v) if !v.is_empty());
             if !has_points && !has_dist {
-                return Err(format!("第{n}条规则 points 和 dist_points 不能同时无效/为空"));
+                return Err(format!(
+                    "第{n}条规则 points 和 dist_points 不能同时无效/为空"
+                ));
             }
 
             if r.dist_points.is_some() {
-                let Some(dist) = &r.dist_points else { return Err(format!("第{:?}个表达式dist_points字段错误", n)); };
+                let Some(dist) = &r.dist_points else {
+                    return Err(format!("第{:?}个表达式dist_points字段错误", n));
+                };
                 for (j, v) in dist.iter().enumerate() {
                     if v.min > v.max {
                         return Err(format!("第{n}条规则 dist_points 第{}段 min > max", j + 1));
@@ -114,10 +119,10 @@ impl ScoreRule {
 
 impl IndConfig {
     pub fn load_inds() -> Result<Vec<IndDef>, String> {
-        let ind_toml = fs::read_to_string("ind.toml")
-            .map_err(|e| format!("指标文件不存在或不可读: {e}"))?;
-        let cfg: IndConfig = toml::from_str(&ind_toml)
-            .map_err(|e| format!("指标文件格式错误: {e}"))?;
+        let ind_toml =
+            fs::read_to_string("ind.toml").map_err(|e| format!("指标文件不存在或不可读: {e}"))?;
+        let cfg: IndConfig =
+            toml::from_str(&ind_toml).map_err(|e| format!("指标文件格式错误: {e}"))?;
         Self::validate_inds(&cfg.ind)?;
         Ok(cfg.ind)
     }
