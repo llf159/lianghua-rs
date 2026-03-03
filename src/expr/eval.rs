@@ -824,6 +824,35 @@ impl Runtime {
     fn eval_binary(&mut self, op: &BinaryOp, lhs: &Expr, rhs: &Expr) -> Result<Value, EvalErr> {
         let lv = self.eval_expr(lhs)?;
         let rv = self.eval_expr(rhs)?;
+
+        if matches!(lv, Value::Num(_) | Value::Bool(_))
+            && matches!(rv, Value::Num(_) | Value::Bool(_))
+        {
+            let l = Value::as_num(&lv)?;
+            let r = Value::as_num(&rv)?;
+
+            return match op {
+                BinaryOp::Add => Ok(Value::Num(l + r)),
+                BinaryOp::Sub => Ok(Value::Num(l - r)),
+                BinaryOp::Mul => Ok(Value::Num(l * r)),
+                BinaryOp::Div => {
+                    if r.abs() < EPS {
+                        Ok(Value::Num(0.0))
+                    } else {
+                        Ok(Value::Num(l / r))
+                    }
+                }
+                BinaryOp::Ge => Ok(Value::Bool(l > r + EPS || (l - r).abs() <= EPS)),
+                BinaryOp::Gt => Ok(Value::Bool(l > r + EPS)),
+                BinaryOp::Le => Ok(Value::Bool(l < r - EPS || (l - r).abs() <= EPS)),
+                BinaryOp::Lt => Ok(Value::Bool(l < r - EPS)),
+                BinaryOp::Eq => Ok(Value::Bool((l - r).abs() <= EPS)),
+                BinaryOp::Ne => Ok(Value::Bool((l - r).abs() > EPS)),
+                BinaryOp::And => Ok(Value::Bool(to_bool(l) && to_bool(r))),
+                BinaryOp::Or => Ok(Value::Bool(to_bool(l) || to_bool(r))),
+            };
+        }
+
         let len = usize::max(Value::len_of(&lv), Value::len_of(&rv));
         let ls = Value::as_num_series(&lv, len)?;
         let rs = Value::as_num_series(&rv, len)?;
@@ -1125,4 +1154,31 @@ fn call_test() {
     );
     let out = rt.eval_program(&stmts).expect("eval failed");
     println!("{out:?}");
+}
+
+#[test]
+fn scalar_binary_keeps_scalar() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let expr = "WINDOW := 10 + 10; REF(C, WINDOW);";
+    let toks = lex_all(expr);
+    let mut p = Parser::new(toks);
+    let stmts = p.parse_main().expect("parse failed");
+    let mut rt = Runtime::default();
+
+    rt.vars.insert(
+        "C".to_string(),
+        Value::NumSeries((1..=25).map(|x| Some(x as f64)).collect()),
+    );
+
+    let out = rt.eval_program(&stmts).expect("eval failed");
+    match out {
+        Value::NumSeries(ns) => {
+            assert_eq!(ns.len(), 25);
+            assert_eq!(ns[19], None);
+            assert_eq!(ns[20], Some(1.0));
+            assert_eq!(ns[24], Some(5.0));
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
 }

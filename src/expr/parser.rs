@@ -3,7 +3,7 @@ use crate::expr::lexer::{Lexer, Token, TokenKind};
 //循环解析表达式字符到数组
 pub fn lex_all(expr: &str) -> Vec<Token> {
     let mut lx = Lexer::new(expr);
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(256);
     loop {
         let tok = lx.next_token();
         let is_eof = tok.kind == TokenKind::Eof; // 在tok被消耗之前获取kind

@@ -1,14 +1,27 @@
 use duckdb::{Connection, params};
-use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fs::create_dir_all;
+use std::{collections::HashMap, path::Path};
 // use std::fs::File;
 // use std::io::{BufWriter, Write};
 
-use crate::scoring::RuleScoreSeries;
+use crate::scoring::tools::{calc_zhang_pct, load_st_list};
+use crate::{
+    expr::eval::{Runtime, Value},
+    scoring::RuleScoreSeries,
+};
 
 #[derive(Debug, Clone)]
-pub struct DataRow {
+pub struct RowData {
     pub trade_dates: Vec<String>,
     pub cols: HashMap<String, Vec<Option<f64>>>,
+}
+
+pub struct DataReader {
+    pub conn: duckdb::Connection,
+    pub query_sql: String,
+    pub cols_table: Vec<(String, String)>,
+    pub st_list: HashSet<String>,
 }
 
 #[derive(Debug, Default)]
@@ -16,6 +29,7 @@ pub struct ScoreSummary {
     pub ts_code: String,
     pub trade_date: String,
     pub total_score: f64,
+    pub rank: Option<i64>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -26,7 +40,7 @@ pub struct ScoreDetails {
     pub rule_score: f64,
 }
 
-impl DataRow {
+impl RowData {
     pub fn validate(&self) -> Result<(), String> {
         if self.trade_dates.is_empty() {
             return Err("trade_dates为空".to_string());
@@ -48,7 +62,7 @@ impl DataRow {
         end_date: &str,
     ) -> Result<usize, String> {
         let conn = Connection::open(db_path).map_err(|e| format!("连接数据库错误:{e}"))?;
-        let sql = r#"SELECT COUNT(*) FROM stock_data WHERE ts_code = ? AND adj_type = ? AND trade_date >= ? AND trade_date <= ?"#;
+        let sql = r#"SELECT COUNT FROM stock_data WHERE ts_code = ? AND adj_type = ? AND trade_date >= ? AND trade_date <= ?"#;
         let cnt: i64 = conn
             .query_row(
                 sql,
@@ -62,27 +76,22 @@ impl DataRow {
         }
         Ok(cnt as usize)
     }
+}
 
-    pub fn load_data(
-        db_path: &str,
-        ts_code: &str,
-        adj_type: &str,
-        start_date: &str,
-        end_date: &str,
-    ) -> Result<Self, String> {
-        let conn = Connection::open(db_path).map_err(|e| format!("连接数据库错误:{e}"))?;
+impl DataReader {
+    pub fn new(db_path: &str) -> Result<DataReader, String> {
+        let st_list = load_st_list(db_path)?;
+        let conn = Connection::open(db_path).map_err(|e| format!("数据库连接错误:{e}"))?;
 
         let mut sql_to_colsname = conn
             .prepare("DESCRIBE stock_data")
             .map_err(|e| format!("预编译SQL失败:{e}"))?;
-        let mut sql_all_cols = sql_to_colsname
+        let mut all_cols = sql_to_colsname
             .query([])
             .map_err(|e| format!("执行查询失败:{e}"))?;
-        let mut all_cols_name: Vec<String> = Vec::new();
-        while let Some(col) = sql_all_cols
-            .next()
-            .map_err(|e| format!("读取表名失败:{e}"))?
-        {
+
+        let mut all_cols_name: Vec<String> = Vec::with_capacity(128);
+        while let Some(col) = all_cols.next().map_err(|e| format!("读取表名失败:{e}"))? {
             let name: String = col.get(0).map_err(|e| format!("读取列名失败:{e}"))?;
             all_cols_name.push(name);
         }
@@ -122,7 +131,6 @@ impl DataRow {
             db_cols_table.push((col.clone(), col.to_ascii_uppercase()));
         }
 
-        // 注入sql
         let mut select_inds = vec!["trade_date".to_string()];
         for (db_cols, _) in &db_cols_table {
             select_inds.push(format!(
@@ -145,8 +153,24 @@ impl DataRow {
             select_inds.join(",\n")
         );
 
-        let mut stmt = conn
-            .prepare(&sql)
+        Ok(Self {
+            conn,
+            query_sql: sql,
+            cols_table: db_cols_table,
+            st_list,
+        })
+    }
+
+    pub fn load_one(
+        &self,
+        ts_code: &str,
+        adj_type: &str,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<RowData, String> {
+        let mut stmt = self
+            .conn
+            .prepare(&self.query_sql)
             .map_err(|e| format!("预编译SQL失败:{e}"))?;
         let mut rows = stmt
             .query(params![ts_code, adj_type, start_date, end_date])
@@ -154,7 +178,7 @@ impl DataRow {
 
         let mut trade_date: Vec<String> = Vec::new();
         let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
-        for (_, key) in &db_cols_table {
+        for (_, key) in &self.cols_table {
             cols.entry(key.clone()).or_default();
         }
 
@@ -162,20 +186,56 @@ impl DataRow {
             let d: String = row.get(0).map_err(|e| format!("读取trade_date失败:{e}"))?;
             trade_date.push(d);
 
-            for (i, (_, key)) in db_cols_table.iter().enumerate() {
+            for (i, (_, key)) in self.cols_table.iter().enumerate() {
                 let v: Option<f64> = row.get(i + 1).map_err(|e| format!("读取{}失败:{e}", key))?;
+                // series是cols里面key对应的那一行的vec
                 if let Some(series) = cols.get_mut(key) {
                     series.push(v);
                 }
             }
         }
 
-        let out = Self {
+        let is_st = self.st_list.contains(ts_code);
+        let zhang = calc_zhang_pct(ts_code, is_st);
+        let zhang_series = vec![Some(zhang); trade_date.len()];
+        cols.insert("ZHANG".to_string(), zhang_series);
+
+        let out = RowData {
             trade_dates: trade_date,
             cols,
         };
         out.validate()?;
         Ok(out)
+    }
+
+    pub fn list_ts_code(
+        &self,
+        adj_type: &str,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<Vec<String>, String> {
+        let sql = r#"
+                SELECT DISTINCT ts_code
+                FROM stock_data
+                WHERE adj_type = ?
+                AND trade_date >= ?
+                AND trade_date <= ?
+                ORDER BY ts_code ASC
+            "#;
+        let mut list = Vec::with_capacity(512);
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| format!("sql预编译失败:{e}"))?;
+        let mut rows = stmt
+            .query(params![adj_type, start_date, end_date])
+            .map_err(|e| format!("数据库查询失败:{e}"))?;
+        while let Some(v) = rows.next().map_err(|e| format!("{e}"))? {
+            let tc: String = v.get(0).map_err(|e| format!("{e}"))?;
+            list.push(tc);
+        }
+
+        Ok(list)
     }
 }
 
@@ -187,6 +247,7 @@ impl ScoreSummary {
             score.ts_code = ts_code.to_string();
             score.trade_date = trade_dates[i].clone();
             score.total_score = total_scores[i];
+            score.rank = None;
             sum.push(score);
         }
         sum
@@ -215,23 +276,37 @@ impl ScoreSummary {
     // }
 
     pub fn write_db(db_path: &str, rows: &[ScoreSummary]) -> Result<(), String> {
-        let mut conn = Connection::open(db_path).map_err(|e| format!("summary数据库连接失败:{e}"))?;
-        let tx = conn.transaction().map_err(|e| format!("创建数据库事务失败:{e}"))?;
-        let del_sql =
-            r#"
+        let mut conn =
+            Connection::open(db_path).map_err(|e| format!("summary数据库连接失败:{e}"))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("创建数据库事务失败:{e}"))?;
+        let del_sql = r#"
                 DELETE FROM score_summary
                 WHERE ts_code = ? AND trade_date = ?
             "#;
-        let ins_sql =
-            r#"
+        let ins_sql = r#"
                 INSERT INTO score_summary (ts_code, trade_date, total_score, rank)
                 VALUES (?, ?, ?, ?)
             "#;
-        let mut del = tx.prepare(del_sql).map_err(|e| format!("预编译del_sql失败:{e}"))?;
-        let mut ins = tx.prepare(ins_sql).map_err(|e| format!("预编译ins_sql失败:{e}"))?;
+        let mut del = tx
+            .prepare(del_sql)
+            .map_err(|e| format!("预编译del_sql失败:{e}"))?;
+        let mut ins = tx
+            .prepare(ins_sql)
+            .map_err(|e| format!("预编译ins_sql失败:{e}"))?;
         for row in rows {
-            let _ = del.execute(params![&row.ts_code, &row.trade_date]).map_err(|e| format!("删除数据库旧数据失败:{e}"))?;
-            let _ = ins.execute(params![&row.ts_code, &row.trade_date, &row.total_score, Option::<i64>::None]).map_err(|e| format!("插入数据库新数据失败:{e}"))?;
+            let _ = del
+                .execute(params![&row.ts_code, &row.trade_date])
+                .map_err(|e| format!("删除数据库旧数据失败:{e}"))?;
+            let _ = ins
+                .execute(params![
+                    &row.ts_code,
+                    &row.trade_date,
+                    &row.total_score,
+                    Option::<i64>::None
+                ])
+                .map_err(|e| format!("插入数据库新数据失败:{e}"))?;
         }
         tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
         Ok(())
@@ -262,34 +337,55 @@ impl ScoreDetails {
     }
 
     pub fn write_db(db_path: &str, rows: &[ScoreDetails]) -> Result<(), String> {
-        let mut conn = Connection::open(db_path).map_err(|e| format!("details数据库连接失败:{e}"))?;
-        let tx = conn.transaction().map_err(|e| format!("事务创建失败:{e}"))?;
-        let del_sql =
-            r#"
+        let mut conn =
+            Connection::open(db_path).map_err(|e| format!("details数据库连接失败:{e}"))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("事务创建失败:{e}"))?;
+        let del_sql = r#"
                 DELETE FROM score_details
                 WHERE ts_code = ? AND trade_date = ? AND rule_name = ?
             "#;
-        let ins_sql =
-            r#"
+        let ins_sql = r#"
                 INSERT INTO score_details (ts_code, trade_date, rule_name, rule_score)
                 VALUES (?, ?, ?, ?)
             "#;
-        let mut del = tx.prepare(del_sql).map_err(|e| format!("预编译del_sql失败:{e}"))?;
-        let mut ins = tx.prepare(ins_sql).map_err(|e| format!("预编译ins_sql失败:{e}"))?;
+        let mut del = tx
+            .prepare(del_sql)
+            .map_err(|e| format!("预编译del_sql失败:{e}"))?;
+        let mut ins = tx
+            .prepare(ins_sql)
+            .map_err(|e| format!("预编译ins_sql失败:{e}"))?;
         for row in rows {
-            let _ = del.execute(params![&row.ts_code, &row.trade_date, &row.rule_name]).map_err(|e| format!("删除数据库旧数据失败:{e}"))?;
-            let _ = ins.execute(params![&row.ts_code, &row.trade_date, &row.rule_name, row.rule_score]).map_err(|e| format!("插入数据库新数据失败:{e}"))?;
+            let _ = del
+                .execute(params![&row.ts_code, &row.trade_date, &row.rule_name])
+                .map_err(|e| format!("删除数据库旧数据失败:{e}"))?;
+            let _ = ins
+                .execute(params![
+                    &row.ts_code,
+                    &row.trade_date,
+                    &row.rule_name,
+                    row.rule_score
+                ])
+                .map_err(|e| format!("插入数据库新数据失败:{e}"))?;
         }
         tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
         Ok(())
     }
 }
 
-pub fn init_duckdb_database(db_path: &str) -> Result<(), String> {
-    let conn = Connection::open(db_path).map_err(|e| format!("打开数据库失败:{e}"))?;
+pub fn init_duckdb_database(out_path: &Path) -> Result<(), String> {
+    let db_file = Path::new(out_path);
+    if let Some(parent_dir) = db_file.parent() {
+        if !parent_dir.as_os_str().is_empty() {
+            create_dir_all(parent_dir).map_err(|e| format!("创建输出目录失败:{e}"))?;
+        }
+    }
+
+    let conn = Connection::open(out_path).map_err(|e| format!("打开数据库失败:{e}"))?;
 
     conn.execute(
-    r#"
+        r#"
         CREATE TABLE IF NOT EXISTS score_summary (
             ts_code VARCHAR,
             trade_date VARCHAR,
@@ -297,10 +393,13 @@ pub fn init_duckdb_database(db_path: &str) -> Result<(), String> {
             rank INTEGER,
             PRIMARY KEY (ts_code, trade_date)
         )
-        "#, []).map_err(|e| format!("创建score_summary失败:{e}"))?;
+        "#,
+        [],
+    )
+    .map_err(|e| format!("创建score_summary失败:{e}"))?;
 
     conn.execute(
-    r#"
+        r#"
         CREATE TABLE IF NOT EXISTS score_details (
             ts_code VARCHAR,
             trade_date VARCHAR,
@@ -308,6 +407,21 @@ pub fn init_duckdb_database(db_path: &str) -> Result<(), String> {
             rule_score DOUBLE,
             PRIMARY KEY (ts_code, trade_date, rule_name)
         )
-        "#, []).map_err(|e| format!("创建score_details失败:{e}"))?;
+        "#,
+        [],
+    )
+    .map_err(|e| format!("创建score_details失败:{e}"))?;
     Ok(())
+}
+
+pub fn row_into_rt(row_data: RowData) -> Result<Runtime, String> {
+    let mut rt = Runtime::default();
+    // let trade_date = row_data.trade_dates;
+
+    for (name, col) in &row_data.cols {
+        let n_series = Value::NumSeries(col.clone());
+        rt.vars.insert(name.clone(), n_series);
+    }
+
+    Ok(rt)
 }

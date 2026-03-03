@@ -1,0 +1,7 @@
+[data]
+source_db = "./stock_data/stock_data.db"
+adj_type = "qfq"
+
+[output]
+dir = "./output"
+result_db = "scoring_result.db"

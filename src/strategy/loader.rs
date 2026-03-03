@@ -31,6 +31,7 @@ pub struct ScoreRule {
     pub points: f64,
     pub dist_points: Option<Vec<DistPoint>>,
     pub explain: String,
+    #[serde(default)]
     pub tag: RuleTag,
 }
 
@@ -43,8 +44,10 @@ pub enum ScopeWay {
     Consec(usize),
 }
 
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
 pub enum RuleTag {
+    #[default]
+    Normal,
     Opportunity,
 }
 
