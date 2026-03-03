@@ -1,4 +1,5 @@
-use std::path::Path;
+use rayon::prelude::*;
+use std::{path::Path, time};
 
 use crate::scoring::{
     CachedRule,
@@ -59,17 +60,62 @@ fn scoring_all_core(
         .to_str()
         .ok_or_else(|| "数据库父目录不是有效UTF-8".to_string())?;
 
+    let time = time::Instant::now();
     let warmup_need = warmup_rows_estimate()?;
     let std_start_date = calc_query_start_date(csv_path, warmup_need, start_date)?;
 
     let rules_cache = cache_rule_build()?;
-    for ts_code in tc_list {
-        let row = dr.load_one(&ts_code, adj_type, std_start_date.as_str(), end_date)?;
-        let (s, d) = scoring_single_core(row, &ts_code, start_date, &rules_cache)?;
-        all_summary.extend(s);
+
+    let result_collect = tc_list
+        .par_chunks(256)
+        .map(
+            |ts_group| -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>), String> {
+                let worker_reader = DataReader::new(db_path)?;
+                let mut group_summary = Vec::new();
+                let mut group_details = Vec::new();
+
+                for ts_code in ts_group {
+                    let row = worker_reader.load_one(
+                        ts_code,
+                        adj_type,
+                        std_start_date.as_str(),
+                        end_date,
+                    )?;
+                    let (s, d) = scoring_single_core(row, ts_code, start_date, &rules_cache)?;
+                    group_summary.extend(s);
+                    group_details.extend(d);
+                }
+
+                Ok((group_summary, group_details))
+            },
+        )
+        .collect::<Vec<_>>();
+
+    // 单例并行
+    // let result_collect = tc_list
+    //     .par_iter()
+    //     .map(|ts_code| {
+    //         let worker_reader = DataReader::new(db_path)?;
+    //         let row =
+    //             worker_reader.load_one(ts_code, adj_type, std_start_date.as_str(), end_date)?;
+    //         scoring_single_core(row, ts_code, start_date, &rules_cache)
+    //     })
+    //     .collect::<Vec<_>>();
+
+    // 原先串行方案备份
+    // for ts_code in tc_list {
+    //     let row = dr.load_one(&ts_code, adj_type, std_start_date.as_str(), end_date)?;
+    //     let (s, d) = scoring_single_core(row, &ts_code, start_date, &rules_cache)?;
+    //     all_summary.extend(s);
+    //     all_details.extend(d);
+    // }
+
+    for result in result_collect {
+        let (a, d) = result?;
+        all_summary.extend(a);
         all_details.extend(d);
     }
-
+    println!("排名主流程结束:{:.3?}", time.elapsed());
     Ok((all_summary, all_details))
 }
 

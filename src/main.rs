@@ -14,7 +14,7 @@
 
 use std::time::Instant;
 
-use lianghua_rs::scoring::runner::scoring_all_to_db;
+use lianghua_rs::scoring::{TieBreakWay, build_rank_tiebreak, runner::scoring_all_to_db};
 
 fn main() -> Result<(), String> {
     let source_db_path = "./stock_data/stock_data.db";
@@ -29,6 +29,7 @@ fn main() -> Result<(), String> {
     let scoring_start = Instant::now();
     // let (a, b) = scoring_single_period(source_db_path, ts_code, adj_type, start_date, end_date)?;
     scoring_all_to_db(source_db_path, adj_type, start_date, end_date)?;
+    build_rank_tiebreak(result_db_path, source_db_path, adj_type, TieBreakWay::KdjJ)?;
     println!("scoring_all_to_db took: {:.3?}", scoring_start.elapsed());
 
     // let rank_start = Instant::now();

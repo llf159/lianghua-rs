@@ -1,6 +1,7 @@
 use duckdb::{Connection, params};
 use std::collections::HashSet;
 use std::fs::create_dir_all;
+use std::time;
 use std::{collections::HashMap, path::Path};
 // use std::fs::File;
 // use std::io::{BufWriter, Write};
@@ -170,7 +171,7 @@ impl DataReader {
     ) -> Result<RowData, String> {
         let mut stmt = self
             .conn
-            .prepare(&self.query_sql)
+            .prepare_cached(&self.query_sql)
             .map_err(|e| format!("预编译SQL失败:{e}"))?;
         let mut rows = stmt
             .query(params![ts_code, adj_type, start_date, end_date])
@@ -276,6 +277,7 @@ impl ScoreSummary {
     // }
 
     pub fn write_db(db_path: &str, rows: &[ScoreSummary]) -> Result<(), String> {
+        let time = time::Instant::now();
         let mut conn =
             Connection::open(db_path).map_err(|e| format!("summary数据库连接失败:{e}"))?;
         let tx = conn
@@ -283,32 +285,39 @@ impl ScoreSummary {
             .map_err(|e| format!("创建数据库事务失败:{e}"))?;
         let del_sql = r#"
                 DELETE FROM score_summary
-                WHERE ts_code = ? AND trade_date = ?
-            "#;
-        let ins_sql = r#"
-                INSERT INTO score_summary (ts_code, trade_date, total_score, rank)
-                VALUES (?, ?, ?, ?)
+                WHERE trade_date = ?
             "#;
         let mut del = tx
             .prepare(del_sql)
             .map_err(|e| format!("预编译del_sql失败:{e}"))?;
-        let mut ins = tx
-            .prepare(ins_sql)
-            .map_err(|e| format!("预编译ins_sql失败:{e}"))?;
+        let mut del_dates = HashSet::new();
         for row in rows {
+            del_dates.insert(&row.trade_date);
+        }
+        for day in del_dates {
             let _ = del
-                .execute(params![&row.ts_code, &row.trade_date])
+                .execute(params![day])
                 .map_err(|e| format!("删除数据库旧数据失败:{e}"))?;
-            let _ = ins
-                .execute(params![
-                    &row.ts_code,
-                    &row.trade_date,
-                    &row.total_score,
-                    Option::<i64>::None
-                ])
+        }
+        {
+            let mut app = tx
+                .appender("score_summary")
+                .map_err(|e| format!("summary数据库插入错误:{e}"))?;
+            for row in rows {
+                let _ = app
+                    .append_row(params![
+                        &row.ts_code,
+                        &row.trade_date,
+                        &row.total_score,
+                        Option::<i64>::None
+                    ])
+                    .map_err(|e| format!("插入数据库新数据失败:{e}"))?;
+            }
+            app.flush()
                 .map_err(|e| format!("插入数据库新数据失败:{e}"))?;
         }
         tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
+        println!("summary写入耗时:{:.3?}", time.elapsed());
         Ok(())
     }
 }
@@ -337,6 +346,7 @@ impl ScoreDetails {
     }
 
     pub fn write_db(db_path: &str, rows: &[ScoreDetails]) -> Result<(), String> {
+        let time = time::Instant::now();
         let mut conn =
             Connection::open(db_path).map_err(|e| format!("details数据库连接失败:{e}"))?;
         let tx = conn
@@ -344,32 +354,41 @@ impl ScoreDetails {
             .map_err(|e| format!("事务创建失败:{e}"))?;
         let del_sql = r#"
                 DELETE FROM score_details
-                WHERE ts_code = ? AND trade_date = ? AND rule_name = ?
-            "#;
-        let ins_sql = r#"
-                INSERT INTO score_details (ts_code, trade_date, rule_name, rule_score)
-                VALUES (?, ?, ?, ?)
+                WHERE trade_date = ?
             "#;
         let mut del = tx
             .prepare(del_sql)
             .map_err(|e| format!("预编译del_sql失败:{e}"))?;
-        let mut ins = tx
-            .prepare(ins_sql)
-            .map_err(|e| format!("预编译ins_sql失败:{e}"))?;
+        let mut del_dates = HashSet::new();
         for row in rows {
+            del_dates.insert(&row.trade_date);
+        }
+        for day in del_dates {
             let _ = del
-                .execute(params![&row.ts_code, &row.trade_date, &row.rule_name])
+                .execute(params![day])
                 .map_err(|e| format!("删除数据库旧数据失败:{e}"))?;
-            let _ = ins
-                .execute(params![
-                    &row.ts_code,
-                    &row.trade_date,
-                    &row.rule_name,
-                    row.rule_score
-                ])
+        }
+        
+        {
+            let mut app = tx
+                .appender("score_details")
+                .map_err(|e| format!("details数据库插入错误:{e}"))?;
+            for row in rows {
+                let _ = app
+                    .append_row(params![
+                        &row.ts_code,
+                        &row.trade_date,
+                        &row.rule_name,
+                        row.rule_score
+                    ])
+                    .map_err(|e| format!("插入数据库新数据失败:{e}"))?;
+            }
+            app.flush()
                 .map_err(|e| format!("插入数据库新数据失败:{e}"))?;
         }
         tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
+
+        println!("details写入耗时:{:.3?}", time.elapsed());
         Ok(())
     }
 }

@@ -52,21 +52,6 @@ pub fn load_trade_date_list(dir: &str) -> Result<Vec<String>, String> {
     Ok(trade_date_list)
 }
 
-pub fn calc_zhang_pct(ts_code: &str, is_st: bool) -> f64 {
-    let ts = ts_code.trim().to_ascii_uppercase();
-    let (core, suffix) = ts.split_once('.').unwrap_or((ts.as_str(), ""));
-
-    if is_st {
-        0.045
-    } else if suffix == "BJ" {
-        0.295
-    } else if core.starts_with("30") || core.starts_with("68") {
-        0.195
-    } else {
-        0.095
-    }
-}
-
 fn eval_binary_for_warmup(
     op: &BinaryOp,
     lhs: &Expr,
@@ -374,21 +359,6 @@ pub fn calc_query_start_date(
     Ok(trade_dates[start_idx].clone())
 }
 
-pub fn rt_max_len(rt: &Runtime) -> usize {
-    let mut max_len = 1;
-    for v in rt.vars.values() {
-        let len = match v {
-            Value::Num(_) | Value::Bool(_) => 1,
-            Value::NumSeries(ns) => ns.len(),
-            Value::BoolSeries(bs) => bs.len(),
-        };
-        if len > max_len {
-            max_len = len;
-        }
-    }
-    max_len
-}
-
 pub fn cache_rule_build() -> Result<Vec<CachedRule>, String> {
     let rules = ScoreRule::load_rules()?;
     let mut out = Vec::with_capacity(128);
@@ -410,4 +380,34 @@ pub fn cache_rule_build() -> Result<Vec<CachedRule>, String> {
         });
     }
     Ok(out)
+}
+
+pub fn rt_max_len(rt: &Runtime) -> usize {
+    let mut max_len = 1;
+    for v in rt.vars.values() {
+        let len = match v {
+            Value::Num(_) | Value::Bool(_) => 1,
+            Value::NumSeries(ns) => ns.len(),
+            Value::BoolSeries(bs) => bs.len(),
+        };
+        if len > max_len {
+            max_len = len;
+        }
+    }
+    max_len
+}
+
+pub fn calc_zhang_pct(ts_code: &str, is_st: bool) -> f64 {
+    let ts = ts_code.trim().to_ascii_uppercase();
+    let (core, suffix) = ts.split_once('.').unwrap_or((ts.as_str(), ""));
+
+    if is_st {
+        0.045
+    } else if suffix == "BJ" {
+        0.295
+    } else if core.starts_with("30") || core.starts_with("68") {
+        0.195
+    } else {
+        0.095
+    }
 }

@@ -1,5 +1,6 @@
 /target
 /stock_data
+/output/
 prompt.md
 flutter
 build
