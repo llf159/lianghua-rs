@@ -14,22 +14,32 @@
 
 use std::time::Instant;
 
-use lianghua_rs::scoring::{TieBreakWay, build_rank_tiebreak, runner::scoring_all_to_db};
+use lianghua_rs::{
+    scoring::{TieBreakWay, build_rank_tiebreak, runner::scoring_all_to_db, tools::load_st_list},
+    utils::utils::load_ths_concepts_list,
+};
 
 fn main() -> Result<(), String> {
-    let source_db_path = "./stock_data/stock_data.db";
-    let result_db_path = "./output/scoring_result.db";
-    let ts_code = "002432.SZ";
+    let source_dir = "./source";
+    let result_db_path = "./source/output/scoring_result.db";
+    // let ts_code = "002432.SZ";
     let adj_type = "qfq";
-    let start_date = "20260227";
-    let end_date = "20260227";
+    let start_date = "20260201";
+    let end_date = "20260306";
 
     let total_start = Instant::now();
 
     let scoring_start = Instant::now();
-    // let (a, b) = scoring_single_period(source_db_path, ts_code, adj_type, start_date, end_date)?;
-    scoring_all_to_db(source_db_path, adj_type, start_date, end_date)?;
-    build_rank_tiebreak(result_db_path, source_db_path, adj_type, TieBreakWay::KdjJ)?;
+    // let st_list = load_st_list(source_dir);
+    // let (a, b) = scoring_single_period(source_dir, ts_code, adj_type, start_date, end_date)?;
+    scoring_all_to_db(source_dir, adj_type, start_date, end_date)?;
+    build_rank_tiebreak(
+        result_db_path,
+        "./source/stock_data.db",
+        adj_type,
+        TieBreakWay::KdjJ,
+    )?;
+    // println!("{:#?}", st_list);
     println!("scoring_all_to_db took: {:.3?}", scoring_start.elapsed());
 
     // let rank_start = Instant::now();

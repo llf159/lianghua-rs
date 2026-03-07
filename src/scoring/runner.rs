@@ -1,5 +1,5 @@
 use rayon::prelude::*;
-use std::{path::Path, time};
+use std::time;
 
 use crate::scoring::{
     CachedRule,
@@ -7,6 +7,7 @@ use crate::scoring::{
     scoring_rules_details_cache,
     tools::{cache_rule_build, calc_query_start_date, warmup_rows_estimate},
 };
+use crate::utils::utils::result_db_path;
 
 fn scoring_single_core(
     row_data: RowData,
@@ -42,27 +43,19 @@ fn scoring_single_core(
 }
 
 fn scoring_all_core(
-    db_path: &str,
+    source_dir: &str,
     adj_type: &str,
     start_date: &str,
     end_date: &str,
 ) -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>), String> {
-    let dr = DataReader::new(db_path)?;
+    let dr = DataReader::new(source_dir)?;
     let tc_list = DataReader::list_ts_code(&dr, adj_type, start_date, end_date)?;
     let mut all_summary: Vec<ScoreSummary> = Vec::with_capacity(8192);
     let mut all_details: Vec<ScoreDetails> = Vec::with_capacity(8192);
 
-    let path = Path::new(db_path);
-    let csv_path = path
-        .parent()
-        .ok_or_else(|| "数据库路径缺少父目录".to_string())?;
-    let csv_path = csv_path
-        .to_str()
-        .ok_or_else(|| "数据库父目录不是有效UTF-8".to_string())?;
-
     let time = time::Instant::now();
     let warmup_need = warmup_rows_estimate()?;
-    let std_start_date = calc_query_start_date(csv_path, warmup_need, start_date)?;
+    let std_start_date = calc_query_start_date(source_dir, warmup_need, start_date)?;
 
     let rules_cache = cache_rule_build()?;
 
@@ -70,7 +63,7 @@ fn scoring_all_core(
         .par_chunks(256)
         .map(
             |ts_group| -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>), String> {
-                let worker_reader = DataReader::new(db_path)?;
+                let worker_reader = DataReader::new(source_dir)?;
                 let mut group_summary = Vec::new();
                 let mut group_details = Vec::new();
 
@@ -120,14 +113,13 @@ fn scoring_all_core(
 }
 
 pub fn scoring_all_to_db(
-    db_path: &str,
+    source_dir: &str,
     adj_type: &str,
     start_date: &str,
     end_date: &str,
 ) -> Result<(), String> {
-    let out_dir = Path::new("./output");
-    let out_db = out_dir.join("scoring_result.db");
-    let (all_summary, all_details) = scoring_all_core(db_path, adj_type, start_date, end_date)?;
+    let out_db = result_db_path(source_dir);
+    let (all_summary, all_details) = scoring_all_core(source_dir, adj_type, start_date, end_date)?;
     init_duckdb_database(&out_db)?;
     let out_db_path = out_db
         .to_str()
@@ -138,22 +130,15 @@ pub fn scoring_all_to_db(
 }
 
 pub fn scoring_single_period(
-    db_path: &str,
+    source_dir: &str,
     ts_code: &str,
     adj_type: &str,
     start_date: &str,
     end_date: &str,
 ) -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>), String> {
-    let dr = DataReader::new(db_path)?;
+    let dr = DataReader::new(source_dir)?;
     let warmup_need = warmup_rows_estimate()?;
-    let path = Path::new(db_path);
-    let csv_path = path
-        .parent()
-        .ok_or_else(|| "数据库路径缺少父目录".to_string())?;
-    let csv_path = csv_path
-        .to_str()
-        .ok_or_else(|| "数据库父目录不是有效UTF-8".to_string())?;
-    let std_start_date = calc_query_start_date(csv_path, warmup_need, start_date)?;
+    let std_start_date = calc_query_start_date(source_dir, warmup_need, start_date)?;
 
     let row_data = DataReader::load_one(&dr, ts_code, adj_type, &std_start_date, end_date)?;
     let rules_cache = cache_rule_build()?;

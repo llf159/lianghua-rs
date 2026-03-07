@@ -3,10 +3,10 @@ use duckdb::Connection;
 use crate::{
     expr::{
         eval::{Runtime, Value},
-        parser::{Parser, Stmts, lex_all},
+        parser::Stmts,
     },
     scoring::tools::rt_max_len,
-    strategy::loader::{DistPoint, RuleTag, ScopeWay, ScoreRule},
+    strategy::loader::{DistPoint, RuleTag, ScopeWay},
 };
 pub mod data;
 pub mod runner;
@@ -39,21 +39,6 @@ pub struct CachedRule {
     pub tag: RuleTag,
     pub when_src: String,
     pub when_ast: Stmts,
-}
-
-fn hit_when(when: &str, rt: &mut Runtime) -> Result<Vec<bool>, String> {
-    // 无缓存版本
-    let tok = lex_all(when);
-    let mut expr = Parser::new(tok);
-    let stmts = expr
-        .parse_main()
-        .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
-    let value = rt
-        .eval_program(&stmts)
-        .map_err(|e| format!("表达式计算错误:{}", e.msg))?;
-    let len = rt_max_len(rt);
-
-    Value::as_bool_series(&value, len).map_err(|e| format!("表达式返回值非布尔:{}", e.msg))
 }
 
 fn hit_when_cache(rule: &CachedRule, rt: &mut Runtime) -> Result<Vec<bool>, String> {
@@ -158,20 +143,6 @@ fn score_at(scopeway: ScopeHit, dps: Option<&[DistPoint]>, points: f64) -> f64 {
     }
 }
 
-fn score_rule(rule: &ScoreRule, rt: &mut Runtime) -> Result<Vec<f64>, String> {
-    // 无缓存版本
-    let bs = hit_when(&rule.when, rt)?;
-    let mut out = Vec::with_capacity(bs.len());
-
-    for i in 0..bs.len() {
-        let hit = hit_scopeway(rule.scope_way, rule.scope_windows, &bs, i);
-        let s = score_at(hit, rule.dist_points.as_deref(), rule.points);
-        out.push(s);
-    }
-
-    Ok(out)
-}
-
 fn score_rule_cache(rule: &CachedRule, rt: &mut Runtime) -> Result<Vec<f64>, String> {
     let bs = hit_when_cache(&rule, rt)?;
     let mut out = Vec::with_capacity(bs.len());
@@ -183,48 +154,6 @@ fn score_rule_cache(rule: &CachedRule, rt: &mut Runtime) -> Result<Vec<f64>, Str
     }
 
     Ok(out)
-}
-
-pub fn scoring_rules(rt: &mut Runtime) -> Result<Vec<f64>, String> {
-    // 无缓存版本
-    let rules = ScoreRule::load_rules()?;
-    let len = rt_max_len(rt);
-    let basic_score = 50.0;
-    let mut total = vec![50.0; len];
-
-    for rule in rules {
-        let single_score = score_rule(&rule, rt)?;
-        let min_len = usize::min(total.len(), single_score.len());
-        for i in 0..min_len {
-            total[i] += single_score[i];
-        }
-    }
-
-    Ok(total)
-}
-
-pub fn scoring_rules_details(rt: &mut Runtime) -> Result<(Vec<f64>, Vec<RuleScoreSeries>), String> {
-    // 无缓存版本
-    let len = rt_max_len(rt);
-    // let basic_score = 50.0;
-    let rules = ScoreRule::load_rules()?;
-
-    let mut total = vec![50.0; len];
-    let mut details = Vec::with_capacity(rules.len());
-
-    for rule in rules {
-        let score = score_rule(&rule, rt)?;
-        let min_len = usize::min(total.len(), score.len());
-        for i in 0..min_len {
-            total[i] += score[i];
-        }
-
-        details.push(RuleScoreSeries {
-            name: rule.name.clone(),
-            series: score,
-        });
-    }
-    Ok((total, details))
 }
 
 pub fn scoring_rules_details_cache(

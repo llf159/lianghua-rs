@@ -7,6 +7,7 @@ use std::{collections::HashMap, path::Path};
 // use std::io::{BufWriter, Write};
 
 use crate::scoring::tools::{calc_zhang_pct, load_st_list};
+use crate::utils::utils::source_db_path;
 use crate::{
     expr::eval::{Runtime, Value},
     scoring::RuleScoreSeries,
@@ -55,34 +56,38 @@ impl RowData {
         Ok(())
     }
 
-    fn count_row(
-        db_path: &str,
-        ts_code: &str,
-        adj_type: &str,
-        start_date: &str,
-        end_date: &str,
-    ) -> Result<usize, String> {
-        let conn = Connection::open(db_path).map_err(|e| format!("连接数据库错误:{e}"))?;
-        let sql = r#"SELECT COUNT FROM stock_data WHERE ts_code = ? AND adj_type = ? AND trade_date >= ? AND trade_date <= ?"#;
-        let cnt: i64 = conn
-            .query_row(
-                sql,
-                params![ts_code, adj_type, start_date, end_date],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("COUNT查询执行失败:{e}"))?;
+    // fn count_row(
+    //     db_path: &str,
+    //     ts_code: &str,
+    //     adj_type: &str,
+    //     start_date: &str,
+    //     end_date: &str,
+    // ) -> Result<usize, String> {
+    //     let conn = Connection::open(db_path).map_err(|e| format!("连接数据库错误:{e}"))?;
+    //     let sql = r#"SELECT COUNT FROM stock_data WHERE ts_code = ? AND adj_type = ? AND trade_date >= ? AND trade_date <= ?"#;
+    //     let cnt: i64 = conn
+    //         .query_row(
+    //             sql,
+    //             params![ts_code, adj_type, start_date, end_date],
+    //             |row| row.get(0),
+    //         )
+    //         .map_err(|e| format!("COUNT查询执行失败:{e}"))?;
 
-        if cnt < 0 {
-            return Err(format!("COUNT查询异常:{cnt}"));
-        }
-        Ok(cnt as usize)
-    }
+    //     if cnt < 0 {
+    //         return Err(format!("COUNT查询异常:{cnt}"));
+    //     }
+    //     Ok(cnt as usize)
+    // }
 }
 
 impl DataReader {
-    pub fn new(db_path: &str) -> Result<DataReader, String> {
-        let st_list = load_st_list(db_path)?;
-        let conn = Connection::open(db_path).map_err(|e| format!("数据库连接错误:{e}"))?;
+    pub fn new(source_dir: &str) -> Result<DataReader, String> {
+        let st_list = load_st_list(source_dir)?;
+        let source_db = source_db_path(source_dir);
+        let source_db_str = source_db
+            .to_str()
+            .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
+        let conn = Connection::open(source_db_str).map_err(|e| format!("数据库连接错误:{e}"))?;
 
         let mut sql_to_colsname = conn
             .prepare("DESCRIBE stock_data")
@@ -368,7 +373,7 @@ impl ScoreDetails {
                 .execute(params![day])
                 .map_err(|e| format!("删除数据库旧数据失败:{e}"))?;
         }
-        
+
         {
             let mut app = tx
                 .appender("score_details")

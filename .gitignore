@@ -1,7 +1,9 @@
 /target
 /stock_data
-/output/
+/source
 prompt.md
+prompt-web.md
 flutter
 build
 score_rule.toml
+/ui

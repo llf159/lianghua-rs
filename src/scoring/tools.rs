@@ -1,55 +1,29 @@
 use std::collections::HashMap;
-use std::fs;
-use std::{collections::HashSet, path::Path};
+use std::collections::HashSet;
 
 use crate::expr::eval::{Runtime, Value};
 use crate::expr::parser::{BinaryOp, Expr, Parser, Stmt, lex_all};
 use crate::scoring::CachedRule;
 use crate::strategy::loader::{ScopeWay, ScoreRule};
+use crate::utils::utils::{load_stock_list, load_trade_date_list};
 
-pub fn load_st_list(db_path: &str) -> Result<HashSet<String>, String> {
-    let db_file = Path::new(db_path);
-    let db_dir = db_file
-        .parent()
-        .ok_or_else(|| "数据库路径缺少父目录".to_string())?;
-
-    let stock_list_path = db_dir.join("stock_list.csv");
-    let text = std::fs::read_to_string(&stock_list_path)
-        .map_err(|e| format!("读取stock_list.csv失败:{e}"))?;
-
+pub fn load_st_list(source_dir: &str) -> Result<HashSet<String>, String> {
+    let rows = load_stock_list(source_dir)?;
     let mut st_list = HashSet::new();
+    for cols in rows {
+        let ts_code = cols
+            .first()
+            .ok_or_else(|| "stock_list.csv格式错误: 缺少ts_code列".to_string())?;
+        let name = cols
+            .get(2)
+            .ok_or_else(|| "stock_list.csv格式错误: 缺少name列".to_string())?;
 
-    for (idx, line) in text.lines().enumerate() {
-        if idx == 0 {
-            continue;
-        }
-
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let parts: Vec<&str> = line.split(',').collect();
-        let ts_code = parts[0].trim();
-        let name = parts[2].trim();
-
-        let upper_name = name.to_ascii_uppercase();
-        if upper_name.contains("ST") {
-            st_list.insert(ts_code.to_string());
+        if name.to_ascii_uppercase().contains("ST") {
+            st_list.insert(ts_code.trim().to_string());
         }
     }
 
     Ok(st_list)
-}
-
-pub fn load_trade_date_list(dir: &str) -> Result<Vec<String>, String> {
-    let path = Path::new(dir).join("trade_calendar.csv");
-    let text = fs::read_to_string(path).map_err(|e| format!("读取trade_calendar.csv失败:{e}"))?;
-    let mut trade_date_list = Vec::with_capacity(1024);
-    for line in text.lines() {
-        trade_date_list.push(line.to_string());
-    }
-    Ok(trade_date_list)
 }
 
 fn eval_binary_for_warmup(
@@ -341,11 +315,11 @@ pub fn warmup_rows_estimate() -> Result<usize, String> {
 }
 
 pub fn calc_query_start_date(
-    db_path: &str,
+    source_dir: &str,
     warmup_need: usize,
     ori_start_date: &str,
 ) -> Result<String, String> {
-    let trade_dates = load_trade_date_list(db_path)?;
+    let trade_dates = load_trade_date_list(source_dir)?;
     let anchor_idx = match trade_dates.binary_search_by(|d| d.as_str().cmp(ori_start_date)) {
         Ok(i) => i,
         Err(i) => i,
