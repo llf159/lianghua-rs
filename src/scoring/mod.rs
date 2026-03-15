@@ -1,14 +1,14 @@
 use duckdb::Connection;
 
 use crate::{
+    data::{DistPoint, RuleTag, ScopeWay},
     expr::{
         eval::{Runtime, Value},
         parser::Stmts,
     },
     scoring::tools::rt_max_len,
-    strategy::loader::{DistPoint, RuleTag, ScopeWay},
 };
-pub mod data;
+
 pub mod runner;
 pub mod tools;
 
@@ -143,7 +143,7 @@ fn score_at(scopeway: ScopeHit, dps: Option<&[DistPoint]>, points: f64) -> f64 {
     }
 }
 
-fn score_rule_cache(rule: &CachedRule, rt: &mut Runtime) -> Result<Vec<f64>, String> {
+fn scoring_rule_cache(rule: &CachedRule, rt: &mut Runtime) -> Result<Vec<f64>, String> {
     let bs = hit_when_cache(&rule, rt)?;
     let mut out = Vec::with_capacity(bs.len());
 
@@ -165,7 +165,7 @@ pub fn scoring_rules_details_cache(
     let mut details = Vec::with_capacity(rules_cache.len());
 
     for rule in rules_cache {
-        let score = score_rule_cache(&rule, rt)?;
+        let score = scoring_rule_cache(&rule, rt)?;
         let min_len = usize::min(total.len(), score.len());
         for i in 0..min_len {
             total[i] += score[i];

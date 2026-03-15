@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
+use crate::data::{ScopeWay, ScoreRule};
+use crate::data::{load_stock_list, load_trade_date_list};
 use crate::expr::eval::{Runtime, Value};
-use crate::expr::parser::{BinaryOp, Expr, Parser, Stmt, lex_all};
-use crate::scoring::CachedRule;
-use crate::strategy::loader::{ScopeWay, ScoreRule};
-use crate::utils::utils::{load_stock_list, load_trade_date_list};
+use crate::expr::parser::{Expr, Parser, Stmt, lex_all};
+use crate::utils::utils::eval_binary_for_warmup;
+use crate::utils::utils::impl_expr_warmup;
 
 pub fn load_st_list(source_dir: &str) -> Result<HashSet<String>, String> {
     let rows = load_stock_list(source_dir)?;
@@ -26,236 +27,9 @@ pub fn load_st_list(source_dir: &str) -> Result<HashSet<String>, String> {
     Ok(st_list)
 }
 
-fn eval_binary_for_warmup(
-    op: &BinaryOp,
-    lhs: &Expr,
-    rhs: &Expr,
-    consts: &HashMap<String, usize>,
-) -> Result<Option<f64>, String> {
-    let mut out = 0.0;
-    let const_pair = match (&*lhs, &*rhs) {
-        (Expr::Number(l), Expr::Number(r)) => Some((*l, *r)),
-        (Expr::Ident(l), Expr::Number(r)) => consts.get(l).copied().map(|lv| (lv as f64, *r)),
-        (Expr::Number(l), Expr::Ident(r)) => consts.get(r).copied().map(|rv| (*l, rv as f64)),
-        (Expr::Ident(l), Expr::Ident(r)) => {
-            match (consts.get(l).copied(), consts.get(r).copied()) {
-                (Some(lv), Some(rv)) => Some((lv as f64, rv as f64)),
-                _ => None,
-            }
-        }
-        _ => None,
-    };
-
-    if const_pair.is_none() {
-        return Ok(None);
-    }
-
-    if let Some((v_lhs, v_rhs)) = const_pair {
-        out = match op {
-            BinaryOp::Add => v_lhs + v_rhs,
-            BinaryOp::Sub => v_lhs - v_rhs,
-            BinaryOp::Mul => v_lhs * v_rhs,
-            BinaryOp::Div => {
-                if v_rhs.abs() < f64::EPSILON {
-                    return Err("表达式常量赋值不支持除以0".to_string());
-                }
-                v_lhs / v_rhs
-            }
-            _ => {
-                return Err("表达式常量赋值只支持加减乘除".to_string());
-            }
-        };
-
-        if out < 0.0 {
-            return Err("表达式常量赋值结果不能为负数".to_string());
-        }
-    }
-    Ok(Some(out))
-}
-
-fn impl_expr_warmup(
-    expr: Expr,
-    locals: &HashMap<String, usize>,
-    consts: &HashMap<String, usize>,
-) -> Result<usize, String> {
-    let mut max_need = 0;
-    match expr {
-        Expr::Binary { op: _, lhs, rhs } => {
-            let l_need = impl_expr_warmup(*lhs, locals, consts)?;
-            let r_need = impl_expr_warmup(*rhs, locals, consts)?;
-            let out = l_need.max(r_need);
-            max_need = out;
-        }
-        Expr::Unary { op: _, rhs } => {
-            let r_need = impl_expr_warmup(*rhs, locals, consts)?;
-            max_need = r_need;
-        }
-        Expr::Call { name, args } => {
-            let name = name.to_ascii_uppercase();
-            match name.as_str() {
-                "REF" => {
-                    let mut it = args.into_iter();
-                    let src = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第1个参数: src"))?;
-                    let win = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第2个参数: win"))?;
-
-                    let src_need = impl_expr_warmup(src, locals, consts)?;
-                    let win_need = match win {
-                        Expr::Number(v) => v as usize,
-                        Expr::Ident(name) => {
-                            let mut ident_need = 0;
-                            if let Some(v) = consts.get(&name) {
-                                ident_need = *v
-                            }
-                            ident_need
-                        }
-                        Expr::Binary { op, lhs, rhs } => {
-                            match eval_binary_for_warmup(&op, &*lhs, &*rhs, consts)? {
-                                Some(v) => v as usize,
-                                None => return Err("REF参数warmup解析错误".to_string()),
-                            }
-                        }
-                        _ => return Err("REF参数warmup解析错误".to_string()),
-                    };
-
-                    max_need = src_need + win_need;
-                }
-                "HHV" | "LLV" | "MA" | "SUM" | "STD" | "COUNT" | "LRANK" | "GRANK" => {
-                    let mut it = args.into_iter();
-                    let src = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第1个参数: src"))?;
-                    let win = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第2个参数: win"))?;
-
-                    let src_need = impl_expr_warmup(src, locals, consts)?;
-                    let win_need = match win {
-                        Expr::Number(v) => v as usize,
-                        Expr::Ident(name) => {
-                            let mut ident_need = 0;
-                            if let Some(v) = consts.get(&name) {
-                                ident_need = *v
-                            }
-                            ident_need
-                        }
-                        Expr::Binary { op, lhs, rhs } => {
-                            match eval_binary_for_warmup(&op, &*lhs, &*rhs, consts)? {
-                                Some(v) => v as usize,
-                                None => return Err(format!("{name}参数warmup解析错误")),
-                            }
-                        }
-                        _ => return Err(format!("{name}参数warmup解析错误")),
-                    };
-
-                    max_need = (src_need + win_need).saturating_sub(1);
-                }
-                "CROSS" => {
-                    let mut it = args.into_iter();
-                    let left = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第1个参数: left"))?;
-                    let right = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第2个参数: right"))?;
-
-                    let l_need = impl_expr_warmup(left, locals, consts)?;
-                    let r_need = impl_expr_warmup(right, locals, consts)?;
-
-                    max_need = l_need.max(r_need) + 1;
-                }
-                "GET" => {
-                    let mut it = args.into_iter();
-                    let cond = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第1个参数: cond"))?;
-                    let value = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第2个参数: value"))?;
-                    let win = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第3个参数: win"))?;
-
-                    let cond_need = impl_expr_warmup(cond, locals, consts)?;
-                    let value_need = impl_expr_warmup(value, locals, consts)?;
-                    let win_need = match win {
-                        Expr::Number(v) => v as usize,
-                        Expr::Ident(name) => {
-                            let mut ident_need = 0;
-                            if let Some(v) = consts.get(&name) {
-                                ident_need = *v
-                            }
-                            ident_need
-                        }
-                        Expr::Binary { op, lhs, rhs } => {
-                            match eval_binary_for_warmup(&op, &*lhs, &*rhs, consts)? {
-                                Some(v) => v as usize,
-                                None => return Err("GET参数warmup解析错误".to_string()),
-                            }
-                        }
-                        _ => return Err("GET参数warmup解析错误".to_string()),
-                    };
-                    max_need = cond_need.max(value_need) + win_need;
-                }
-                "ABS" => {
-                    let mut it = args.into_iter();
-                    let src = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第1个参数: src"))?;
-                    max_need = impl_expr_warmup(src, locals, consts)?;
-                }
-
-                "MAX" | "MIN" => {
-                    let mut it = args.into_iter();
-                    let left = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第1个参数: left"))?;
-                    let right = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第2个参数: right"))?;
-
-                    let l_need = impl_expr_warmup(left, locals, consts)?;
-                    let r_need = impl_expr_warmup(right, locals, consts)?;
-
-                    max_need = l_need.max(r_need);
-                }
-
-                "IF" => {
-                    let mut it = args.into_iter();
-                    let cond = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第1个参数: cond"))?;
-                    let left = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第2个参数: left"))?;
-                    let right = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第3个参数: right"))?;
-
-                    let c_need = impl_expr_warmup(cond, locals, consts)?;
-                    let l_need = impl_expr_warmup(left, locals, consts)?;
-                    let r_need = impl_expr_warmup(right, locals, consts)?;
-
-                    max_need = c_need.max(l_need).max(r_need);
-                }
-                _ => {}
-            }
-        }
-        Expr::Number(_) => {}
-        Expr::Ident(name) => {
-            if let Some(need) = locals.get(&name) {
-                max_need = *need
-            }
-        }
-    }
-    Ok(max_need)
-}
-
-pub fn warmup_rows_estimate() -> Result<usize, String> {
-    let rules = ScoreRule::load_rules()?;
+pub fn warmup_rows_estimate(source_dir: &str) -> Result<usize, String> {
+    // 从拿rule原数据开始计算warmup
+    let rules = ScoreRule::load_rules(source_dir)?;
     let mut all_expr_max_need = 0;
 
     for rule in rules {
@@ -333,27 +107,29 @@ pub fn calc_query_start_date(
     Ok(trade_dates[start_idx].clone())
 }
 
-pub fn cache_rule_build() -> Result<Vec<CachedRule>, String> {
-    let rules = ScoreRule::load_rules()?;
-    let mut out = Vec::with_capacity(128);
-    for rule in rules {
-        let tok = lex_all(&rule.when);
-        let mut parser = Parser::new(tok);
-        let stmt = parser
-            .parse_main()
-            .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
-        out.push(CachedRule {
-            name: rule.name,
-            scope_windows: rule.scope_windows,
-            scope_way: rule.scope_way,
-            points: rule.points,
-            dist_points: rule.dist_points,
-            tag: rule.tag,
-            when_src: rule.when,
-            when_ast: stmt,
-        });
+pub fn calc_query_need_rows(
+    source_dir: &str,
+    warmup_need: usize,
+    start_date: &str,
+    end_date: &str,
+) -> Result<usize, String> {
+    let trade_dates = load_trade_date_list(source_dir)?;
+    let start_idx = match trade_dates.binary_search_by(|d| d.as_str().cmp(start_date)) {
+        Ok(i) => i,
+        Err(i) => i,
+    };
+
+    if start_idx >= trade_dates.len() {
+        return Err(format!("起始日期{start_date}晚于交易日历最后一天"));
     }
-    Ok(out)
+
+    let end_exclusive = match trade_dates.binary_search_by(|d| d.as_str().cmp(end_date)) {
+        Ok(i) => i + 1,
+        Err(i) => i,
+    };
+
+    let range_need = end_exclusive.saturating_sub(start_idx);
+    Ok((warmup_need + range_need).max(1))
 }
 
 pub fn rt_max_len(rt: &Runtime) -> usize {

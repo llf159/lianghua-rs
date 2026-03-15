@@ -1,7 +1,0 @@
-[data]
-source_db = "./source/stock_data.db"
-adj_type = "qfq"
-
-[output]
-dir = "./source/output"
-result_db = "scoring_result.db"

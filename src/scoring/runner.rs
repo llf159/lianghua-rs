@@ -1,13 +1,25 @@
 use rayon::prelude::*;
 use std::time;
 
-use crate::scoring::{
-    CachedRule,
-    data::{DataReader, RowData, ScoreDetails, ScoreSummary, init_duckdb_database, row_into_rt},
-    scoring_rules_details_cache,
-    tools::{cache_rule_build, calc_query_start_date, warmup_rows_estimate},
+use crate::data::scoring_data::{
+    ScoreDetails, ScoreSummary, cache_rule_build, init_result_db, row_into_rt,
 };
-use crate::utils::utils::result_db_path;
+use crate::data::{DataReader, RowData, result_db_path};
+use crate::scoring::{
+    CachedRule, scoring_rules_details_cache,
+    tools::{calc_query_need_rows, calc_zhang_pct, load_st_list, warmup_rows_estimate},
+};
+
+fn fill_scoring_extra_fields(
+    row_data: &mut RowData,
+    ts_code: &str,
+    is_st: bool,
+) -> Result<(), String> {
+    let zhang = calc_zhang_pct(ts_code, is_st);
+    let zhang_series = vec![Some(zhang); row_data.trade_dates.len()];
+    row_data.cols.insert("ZHANG".to_string(), zhang_series);
+    row_data.validate()
+}
 
 fn scoring_single_core(
     row_data: RowData,
@@ -50,14 +62,15 @@ fn scoring_all_core(
 ) -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>), String> {
     let dr = DataReader::new(source_dir)?;
     let tc_list = DataReader::list_ts_code(&dr, adj_type, start_date, end_date)?;
+    let st_list = load_st_list(source_dir)?;
     let mut all_summary: Vec<ScoreSummary> = Vec::with_capacity(8192);
     let mut all_details: Vec<ScoreDetails> = Vec::with_capacity(8192);
 
     let time = time::Instant::now();
-    let warmup_need = warmup_rows_estimate()?;
-    let std_start_date = calc_query_start_date(source_dir, warmup_need, start_date)?;
+    let warmup_need = warmup_rows_estimate(source_dir)?;
+    let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
 
-    let rules_cache = cache_rule_build()?;
+    let rules_cache = cache_rule_build(source_dir)?;
 
     let result_collect = tc_list
         .par_chunks(256)
@@ -68,12 +81,9 @@ fn scoring_all_core(
                 let mut group_details = Vec::new();
 
                 for ts_code in ts_group {
-                    let row = worker_reader.load_one(
-                        ts_code,
-                        adj_type,
-                        std_start_date.as_str(),
-                        end_date,
-                    )?;
+                    let mut row =
+                        worker_reader.load_one_tail_rows(ts_code, adj_type, end_date, need_rows)?;
+                    fill_scoring_extra_fields(&mut row, ts_code, st_list.contains(ts_code))?;
                     let (s, d) = scoring_single_core(row, ts_code, start_date, &rules_cache)?;
                     group_summary.extend(s);
                     group_details.extend(d);
@@ -120,7 +130,7 @@ pub fn scoring_all_to_db(
 ) -> Result<(), String> {
     let out_db = result_db_path(source_dir);
     let (all_summary, all_details) = scoring_all_core(source_dir, adj_type, start_date, end_date)?;
-    init_duckdb_database(&out_db)?;
+    init_result_db(&out_db)?;
     let out_db_path = out_db
         .to_str()
         .ok_or_else(|| "结果数据库路径不是有效UTF-8".to_string())?;
@@ -137,11 +147,13 @@ pub fn scoring_single_period(
     end_date: &str,
 ) -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>), String> {
     let dr = DataReader::new(source_dir)?;
-    let warmup_need = warmup_rows_estimate()?;
-    let std_start_date = calc_query_start_date(source_dir, warmup_need, start_date)?;
+    let st_list = load_st_list(source_dir)?;
+    let warmup_need = warmup_rows_estimate(source_dir)?;
+    let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
 
-    let row_data = DataReader::load_one(&dr, ts_code, adj_type, &std_start_date, end_date)?;
-    let rules_cache = cache_rule_build()?;
+    let mut row_data = DataReader::load_one_tail_rows(&dr, ts_code, adj_type, end_date, need_rows)?;
+    fill_scoring_extra_fields(&mut row_data, ts_code, st_list.contains(ts_code))?;
+    let rules_cache = cache_rule_build(source_dir)?;
     Ok(scoring_single_core(
         row_data,
         ts_code,

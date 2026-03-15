@@ -669,6 +669,90 @@ impl Runtime {
         Ok(Value::NumSeries(out))
     }
 
+    fn impl_rank_topcount(
+        &mut self,
+        args: &[Expr],
+        greater_first: bool,
+        fn_name: &str,
+    ) -> Result<Value, EvalErr> {
+        // 在第一个参数的排名中, 取满足第二个参数的k线,第三个参数的周期内取第一个参数的第四个参数个数的top
+        if args.len() != 4 {
+            return Err(EvalErr {
+                msg: format!("{fn_name}需要四个参数"),
+            });
+        }
+
+        let value = self.eval_expr(&args[0])?;
+        let cond = self.eval_expr(&args[1])?;
+        let len = Value::len_of(&value).max(Value::len_of(&cond));
+        let value_series = Value::as_num_series(&value, len)?;
+        let cond_series = Value::as_bool_series(&cond, len)?;
+        let ori_win = Value::as_num(&self.eval_expr(&args[2])?)?;
+        let ori_topn = Value::as_num(&self.eval_expr(&args[3])?)?;
+        let std_win = if ori_win as i64 <= 0 {
+            1
+        } else {
+            ori_win as usize
+        };
+        let std_topn = if ori_topn as i64 <= 0 {
+            1
+        } else {
+            ori_topn as usize
+        };
+
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            if i + 1 < std_win {
+                out.push(None);
+                continue;
+            }
+
+            let start = i + 1 - std_win;
+            let mut rows: Vec<(usize, f64, bool)> = Vec::with_capacity(std_win);
+            let mut has_none = false;
+            for j in start..=i {
+                match value_series[j] {
+                    Some(v) => rows.push((j, v, cond_series[j])),
+                    None => {
+                        has_none = true;
+                        break;
+                    }
+                }
+            } // v是需要rank的值,cond_s是是否满足条件, j留着tiebreak
+
+            if has_none {
+                out.push(None);
+                continue;
+            }
+
+            rows.sort_by(|a, b| {
+                let primary = if greater_first {
+                    b.1.partial_cmp(&a.1)
+                } else {
+                    a.1.partial_cmp(&b.1)
+                };
+
+                primary
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.0.cmp(&a.0))
+            });
+
+            let keep_n = rows.len().min(std_topn);
+            let hit_count = rows.iter().take(keep_n).filter(|(_, _, ok)| *ok).count();
+            out.push(Some(hit_count as f64));
+        }
+
+        Ok(Value::NumSeries(out))
+    }
+
+    fn impl_gtopcount(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
+        self.impl_rank_topcount(args, true, "GTOPCOUNT")
+    }
+
+    fn impl_ltopcount(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
+        self.impl_rank_topcount(args, false, "LTOPCOUNT")
+    }
+
     fn impl_lrank(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
         // 小数字排在前面
         if args.len() != 2 {
@@ -790,6 +874,8 @@ impl Runtime {
             "BARSLAST" => Ok(self.impl_barslast(args)?),
             "RSV" => Ok(self.impl_rsv(args)?),
             "GRANK" => Ok(self.impl_grank(args)?),
+            "GTOPCOUNT" => Ok(self.impl_gtopcount(args)?),
+            "LTOPCOUNT" => Ok(self.impl_ltopcount(args)?),
             "LRANK" => Ok(self.impl_lrank(args)?),
             "GET" => Ok(self.impl_get(args)?),
 
@@ -1178,6 +1264,116 @@ fn scalar_binary_keeps_scalar() {
             assert_eq!(ns[19], None);
             assert_eq!(ns[20], Some(1.0));
             assert_eq!(ns[24], Some(5.0));
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn gtopcount_anchors_to_current_window() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let expr = "GTOPCOUNT(V, C > REF(C, 1), 5, 3);";
+    let toks = lex_all(expr);
+    let mut p = Parser::new(toks);
+    let stmts = p.parse_main().expect("parse failed");
+    let mut rt = Runtime::default();
+
+    rt.vars.insert(
+        "V".to_string(),
+        Value::NumSeries(vec![Some(1.0), Some(5.0), Some(2.0), Some(4.0), Some(3.0)]),
+    );
+    rt.vars.insert(
+        "C".to_string(),
+        Value::NumSeries(vec![Some(1.0), Some(2.0), Some(1.0), Some(3.0), Some(2.0)]),
+    );
+
+    let out = rt.eval_program(&stmts).expect("eval failed");
+    match out {
+        Value::NumSeries(ns) => {
+            assert_eq!(ns[0], None);
+            assert_eq!(ns[1], None);
+            assert_eq!(ns[2], None);
+            assert_eq!(ns[3], None);
+            assert_eq!(ns[4], Some(2.0));
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn ltopcount_anchors_to_current_window() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let expr = "LTOPCOUNT(V, C > REF(C, 1), 5, 3);";
+    let toks = lex_all(expr);
+    let mut p = Parser::new(toks);
+    let stmts = p.parse_main().expect("parse failed");
+    let mut rt = Runtime::default();
+
+    rt.vars.insert(
+        "V".to_string(),
+        Value::NumSeries(vec![Some(5.0), Some(1.0), Some(4.0), Some(2.0), Some(3.0)]),
+    );
+    rt.vars.insert(
+        "C".to_string(),
+        Value::NumSeries(vec![Some(1.0), Some(2.0), Some(1.0), Some(3.0), Some(4.0)]),
+    );
+
+    let out = rt.eval_program(&stmts).expect("eval failed");
+    match out {
+        Value::NumSeries(ns) => {
+            assert_eq!(ns[0], None);
+            assert_eq!(ns[1], None);
+            assert_eq!(ns[2], None);
+            assert_eq!(ns[3], None);
+            assert_eq!(ns[4], Some(3.0));
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn repeated_ref_comparisons_keep_the_same_reference_low_per_bar() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let expr = "C >= REF(L, 4) AND REF(C, 1) >= REF(L, 4) AND REF(C, 2) >= REF(L, 4);";
+    let toks = lex_all(expr);
+    let mut p = Parser::new(toks);
+    let stmts = p.parse_main().expect("parse failed");
+    let mut rt = Runtime::default();
+
+    rt.vars.insert(
+        "L".to_string(),
+        Value::NumSeries(vec![
+            Some(10.0),
+            Some(9.0),
+            Some(8.0),
+            Some(7.0),
+            Some(6.0),
+            Some(5.0),
+            Some(4.0),
+        ]),
+    );
+    rt.vars.insert(
+        "C".to_string(),
+        Value::NumSeries(vec![
+            Some(10.0),
+            Some(9.0),
+            Some(8.0),
+            Some(9.0),
+            Some(8.0),
+            Some(8.0),
+            Some(8.0),
+        ]),
+    );
+
+    let out = rt.eval_program(&stmts).expect("eval failed");
+    match out {
+        Value::BoolSeries(bs) => {
+            assert_eq!(bs.len(), 7);
+            assert!(!bs[5]);
+            assert!(bs[6]);
         }
         other => panic!("unexpected result: {other:?}"),
     }
