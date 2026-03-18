@@ -4,7 +4,7 @@ use duckdb::{Connection, params};
 use serde::Serialize;
 
 use crate::{
-    data::{ScoreRule, ScopeWay, result_db_path},
+    data::{ScopeWay, ScoreRule, result_db_path},
     ui_tools::{build_concepts_map, build_name_map},
 };
 
@@ -41,6 +41,8 @@ pub struct StrategyDailyRow {
     pub sample_count: Option<i64>,
     pub trigger_count: Option<i64>,
     pub coverage: Option<f64>,
+    pub contribution_score: Option<f64>,
+    pub contribution_per_trigger: Option<f64>,
     pub median_trigger_count: Option<f64>,
     pub top100_trigger_count: Option<i64>,
     pub best_rank: Option<i64>,
@@ -239,18 +241,37 @@ fn query_daily_rows(
 ) -> Result<Vec<StrategyDailyRow>, String> {
     let each_medians = query_each_rule_medians(conn, meta_map)?;
     let sql = r#"
+        WITH daily_rank_bounds AS (
+            SELECT
+                trade_date,
+                MAX(rank) AS max_rank
+            FROM score_summary
+            GROUP BY 1
+        )
         SELECT
             d.trade_date,
             d.rule_name,
             COUNT(*) AS sample_count,
             SUM(CASE WHEN d.rule_score != 0 THEN 1 ELSE 0 END) AS trigger_count,
             AVG(CASE WHEN d.rule_score != 0 THEN 1.0 ELSE 0.0 END) AS coverage,
+            SUM(
+                CASE
+                    WHEN d.rule_score > 0
+                      AND s.rank IS NOT NULL
+                      AND b.max_rank IS NOT NULL
+                      AND b.max_rank > 0
+                    THEN d.rule_score * CAST((b.max_rank + 1 - s.rank) AS DOUBLE) / CAST(b.max_rank AS DOUBLE)
+                    ELSE 0
+                END
+            ) AS contribution_score,
             SUM(CASE WHEN d.rule_score != 0 AND s.rank <= ? THEN 1 ELSE 0 END) AS top100_trigger_count,
             MIN(CASE WHEN d.rule_score != 0 THEN s.rank END) AS best_rank
         FROM score_details AS d
         LEFT JOIN score_summary AS s
           ON s.ts_code = d.ts_code
          AND s.trade_date = d.trade_date
+        LEFT JOIN daily_rank_bounds AS b
+          ON b.trade_date = d.trade_date
         GROUP BY 1, 2
         ORDER BY d.trade_date ASC, d.rule_name ASC
     "#;
@@ -263,23 +284,38 @@ fn query_daily_rows(
         .map_err(|e| format!("执行日度策略统计 SQL 失败: {e}"))?;
 
     let mut out = Vec::new();
-    while let Some(row) = rows.next().map_err(|e| format!("读取日度策略统计失败: {e}"))? {
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取日度策略统计失败: {e}"))?
+    {
         let trade_date: String = row.get(0).map_err(|e| format!("读取交易日失败: {e}"))?;
         let rule_name: String = row.get(1).map_err(|e| format!("读取策略名失败: {e}"))?;
         let meta = meta_map.get(&rule_name);
+        let trigger_count: Option<i64> =
+            row.get(3).map_err(|e| format!("读取触发次数失败: {e}"))?;
+        let contribution_score: Option<f64> =
+            row.get(5).map_err(|e| format!("读取策略贡献度失败: {e}"))?;
+        let contribution_per_trigger = match (contribution_score, trigger_count) {
+            (Some(score), Some(count)) if count > 0 => Some(score / count as f64),
+            _ => None,
+        };
 
         out.push(StrategyDailyRow {
-            median_trigger_count: each_medians.get(&(trade_date.clone(), rule_name.clone())).copied(),
+            median_trigger_count: each_medians
+                .get(&(trade_date.clone(), rule_name.clone()))
+                .copied(),
             trade_date,
             rule_name,
             trigger_mode: meta.map(|v| v.trigger_mode.clone()),
             sample_count: row.get(2).map_err(|e| format!("读取样本数失败: {e}"))?,
-            trigger_count: row.get(3).map_err(|e| format!("读取触发次数失败: {e}"))?,
+            trigger_count,
             coverage: row.get(4).map_err(|e| format!("读取覆盖率失败: {e}"))?,
+            contribution_score,
+            contribution_per_trigger,
             top100_trigger_count: row
-                .get(5)
+                .get(6)
                 .map_err(|e| format!("读取前100触发次数失败: {e}"))?,
-            best_rank: row.get(6).map_err(|e| format!("读取最优排名失败: {e}"))?,
+            best_rank: row.get(7).map_err(|e| format!("读取最优排名失败: {e}"))?,
         });
     }
 
@@ -295,7 +331,7 @@ fn resolve_strategy_name(requested: Option<String>, strategy_options: &[String])
             return Some(name);
         }
     }
-    strategy_options.first().cloned()
+    None
 }
 
 fn resolve_analysis_trade_date(
@@ -386,18 +422,18 @@ pub fn get_strategy_statistics_page(
 
     let resolved_strategy_name = resolve_strategy_name(strategy_name, &strategy_options);
 
-    let strategy_rows: Vec<StrategyDailyRow> = if let Some(selected_name) = resolved_strategy_name.as_ref()
-    {
-        detail_rows_all
-            .iter()
-            .filter(|row| row.rule_name == *selected_name)
-            .cloned()
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let strategy_rows: Vec<StrategyDailyRow> =
+        if let Some(selected_name) = resolved_strategy_name.as_ref() {
+            detail_rows_all
+                .iter()
+                .filter(|row| row.rule_name == *selected_name)
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
 
-    let mut analysis_trade_date_options: Vec<String> = strategy_rows
+    let mut analysis_trade_date_options: Vec<String> = detail_rows_all
         .iter()
         .filter(|row| row.trigger_count.unwrap_or(0) > 0)
         .map(|row| row.trade_date.clone())
@@ -407,7 +443,7 @@ pub fn get_strategy_statistics_page(
     analysis_trade_date_options.reverse();
 
     if analysis_trade_date_options.is_empty() {
-        analysis_trade_date_options = strategy_rows
+        analysis_trade_date_options = detail_rows_all
             .iter()
             .map(|row| row.trade_date.clone())
             .collect();
@@ -432,7 +468,11 @@ pub fn get_strategy_statistics_page(
     detail_rows.sort_by(|a, b| {
         b.trade_date
             .cmp(&a.trade_date)
-            .then_with(|| b.trigger_count.unwrap_or(0).cmp(&a.trigger_count.unwrap_or(0)))
+            .then_with(|| {
+                b.trigger_count
+                    .unwrap_or(0)
+                    .cmp(&a.trigger_count.unwrap_or(0))
+            })
             .then_with(|| a.rule_name.cmp(&b.rule_name))
     });
 
@@ -597,9 +637,20 @@ mod tests {
         assert_eq!(latest_each_row.top100_trigger_count, Some(2));
         assert_eq!(latest_each_row.best_rank, Some(2));
         assert_eq!(latest_each_row.median_trigger_count, Some(2.0));
+        let contribution_score = latest_each_row
+            .contribution_score
+            .expect("latest each contribution score");
+        assert!((contribution_score - 7.3).abs() < 1e-9);
+        let contribution_per_trigger = latest_each_row
+            .contribution_per_trigger
+            .expect("latest each contribution per trigger");
+        assert!((contribution_per_trigger - 3.65).abs() < 1e-9);
 
         assert_eq!(page.resolved_strategy_name.as_deref(), Some("R_EACH"));
-        assert_eq!(page.resolved_analysis_trade_date.as_deref(), Some("20240102"));
+        assert_eq!(
+            page.resolved_analysis_trade_date.as_deref(),
+            Some("20240102")
+        );
 
         let triggered_stocks = page.triggered_stocks.expect("triggered stocks");
         assert_eq!(triggered_stocks.len(), 2);
@@ -607,6 +658,37 @@ mod tests {
         assert_eq!(triggered_stocks[0].rank, Some(2));
         assert_eq!(triggered_stocks[0].name.as_deref(), Some("平安银行"));
         assert_eq!(triggered_stocks[1].ts_code, "000002.SZ");
+
+        let _ = fs::remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn strategy_statistics_page_does_not_default_to_first_strategy() {
+        let source_dir = unique_temp_dir();
+        write_fixture_files(&source_dir);
+        write_fixture_db(&source_dir);
+
+        let page = get_strategy_statistics_page(
+            source_dir.to_str().expect("utf8 path").to_string(),
+            None,
+            Some("20240102".to_string()),
+        )
+        .expect("build strategy statistics page");
+
+        assert_eq!(page.resolved_strategy_name, None);
+        assert_eq!(
+            page.resolved_analysis_trade_date.as_deref(),
+            Some("20240102")
+        );
+        assert_eq!(
+            page.analysis_trade_date_options,
+            Some(vec!["20240102".to_string(), "20240101".to_string()])
+        );
+        assert_eq!(
+            page.chart.expect("chart").items.expect("chart items").len(),
+            0
+        );
+        assert_eq!(page.triggered_stocks.expect("triggered stocks").len(), 0);
 
         let _ = fs::remove_dir_all(source_dir);
     }

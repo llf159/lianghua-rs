@@ -7,9 +7,12 @@ use crate::{
     data::{RuleTag, ScoreConfig},
     data::{result_db_path, score_rule_path, source_db_path},
     ui_tools::{
-        build_circ_mv_map, build_concepts_map, build_name_map, build_total_mv_map,
+        build_area_map, build_circ_mv_map, build_concepts_map, build_industry_map, build_name_map,
+        build_total_mv_map,
+        realtime::{RealtimeFetchMeta, fetch_realtime_quote_map, normalize_quote_trade_date},
         resolve_trade_date,
     },
+    utils::utils::board_category,
 };
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
@@ -19,6 +22,9 @@ const DEFAULT_ROW_WEIGHTS: [u32; 4] = [46, 18, 18, 18];
 pub struct DetailOverview {
     pub ts_code: String,
     pub name: Option<String>,
+    pub board: Option<String>,
+    pub area: Option<String>,
+    pub industry: Option<String>,
     pub trade_date: Option<String>,
     pub total_score: Option<f64>,
     pub rank: Option<i64>,
@@ -51,6 +57,8 @@ pub struct DetailKlineRow {
     pub duokong_long: Option<f64>,
     pub bupiao_short: Option<f64>,
     pub bupiao_long: Option<f64>,
+    pub is_realtime: Option<bool>,
+    pub realtime_color_hint: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,6 +106,17 @@ pub struct StockDetailPageData {
     pub prev_ranks: Option<Vec<DetailPrevRankRow>>,
     pub kline: Option<DetailKlinePayload>,
     pub strategy_triggers: Option<DetailStrategyPayload>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StockDetailRealtimeData {
+    pub ts_code: String,
+    pub refreshed_at: Option<String>,
+    pub quote_trade_date: Option<String>,
+    pub quote_time: Option<String>,
+    pub has_database_trade_date: bool,
+    pub kline: DetailKlinePayload,
 }
 
 #[derive(Debug)]
@@ -196,6 +215,8 @@ fn query_detail_overview(
 
     let total = query_total_for_trade_date(conn, effective_trade_date)?;
     let name_map = build_name_map(source_path)?;
+    let area_map = build_area_map(source_path)?;
+    let industry_map = build_industry_map(source_path)?;
     let total_mv_map = build_total_mv_map(source_path)?;
     let circ_mv_map = build_circ_mv_map(source_path)?;
     let concept_map = build_concepts_map(source_path)?;
@@ -203,6 +224,9 @@ fn query_detail_overview(
     Ok(DetailOverview {
         ts_code: ts_code.to_string(),
         name: name_map.get(ts_code).cloned(),
+        board: Some(board_category(ts_code).to_string()),
+        area: area_map.get(ts_code).cloned(),
+        industry: industry_map.get(ts_code).cloned(),
         trade_date: Some(effective_trade_date.to_string()),
         total_score: row
             .get(0)
@@ -358,6 +382,8 @@ fn query_kline(
             bupiao_long: row
                 .get(13)
                 .map_err(|e| format!("读取 bupiao_long 失败: {e}"))?,
+            is_realtime: None,
+            realtime_color_hint: None,
         });
     }
 
@@ -370,6 +396,57 @@ fn query_kline(
         watermark_name,
         watermark_code: Some(split_ts_code(ts_code)),
     })
+}
+
+fn build_realtime_kline_row(quote: &crate::crawler::SinaQuote) -> Option<DetailKlineRow> {
+    let trade_date = normalize_quote_trade_date(&quote.date)?;
+    let realtime_color_hint = match quote.change_pct {
+        Some(value) if value > 0.0 => Some("up".to_string()),
+        Some(value) if value < 0.0 => Some("down".to_string()),
+        _ => Some("flat".to_string()),
+    };
+
+    Some(DetailKlineRow {
+        trade_date,
+        open: Some(quote.open),
+        high: Some(quote.high),
+        low: Some(quote.low),
+        close: Some(quote.price),
+        vol: Some(quote.vol),
+        amount: None,
+        tor: None,
+        brick: None,
+        j: None,
+        duokong_short: None,
+        duokong_long: None,
+        bupiao_short: None,
+        bupiao_long: None,
+        is_realtime: Some(true),
+        realtime_color_hint,
+    })
+}
+
+fn merge_realtime_kline(
+    mut kline: DetailKlinePayload,
+    quote: &crate::crawler::SinaQuote,
+) -> (DetailKlinePayload, bool) {
+    let Some(items) = kline.items.as_mut() else {
+        return (kline, false);
+    };
+    let Some(mut realtime_row) = build_realtime_kline_row(quote) else {
+        return (kline, false);
+    };
+
+    if let Some(last_row) = items.last_mut() {
+        if last_row.trade_date == realtime_row.trade_date {
+            realtime_row.realtime_color_hint = None;
+            *last_row = realtime_row;
+            return (kline, true);
+        }
+    }
+
+    items.push(realtime_row);
+    (kline, false)
 }
 
 fn load_rule_meta_list(source_path: &str) -> Result<Vec<RuleMeta>, String> {
@@ -403,6 +480,7 @@ fn tag_label(tag: RuleTag) -> &'static str {
     match tag {
         RuleTag::Normal => "普通",
         RuleTag::Opportunity => "机会",
+        RuleTag::Rare => "稀有",
     }
 }
 
@@ -600,6 +678,54 @@ pub fn get_stock_detail_page(
         prev_ranks: Some(prev_ranks),
         kline: Some(kline),
         strategy_triggers: Some(strategy_triggers),
+    })
+}
+
+pub fn get_stock_detail_realtime(
+    source_path: String,
+    ts_code: String,
+    chart_window_days: Option<u32>,
+) -> Result<StockDetailRealtimeData, String> {
+    let normalized_ts_code = normalize_ts_code(&ts_code);
+    let (quote_map, fetch_meta) =
+        fetch_realtime_quote_map(std::slice::from_ref(&normalized_ts_code))?;
+    build_stock_detail_realtime_from_quote_map(
+        source_path,
+        normalized_ts_code,
+        chart_window_days,
+        quote_map,
+        fetch_meta,
+    )
+}
+
+pub fn build_stock_detail_realtime_from_quote_map(
+    source_path: String,
+    normalized_ts_code: String,
+    chart_window_days: Option<u32>,
+    quote_map: HashMap<String, crate::crawler::SinaQuote>,
+    fetch_meta: RealtimeFetchMeta,
+) -> Result<StockDetailRealtimeData, String> {
+    let source_conn = open_source_conn(&source_path)?;
+    let name_map = build_name_map(&source_path).unwrap_or_default();
+    let watermark_name = name_map.get(&normalized_ts_code).cloned();
+    let kline = query_kline(
+        &source_conn,
+        &normalized_ts_code,
+        chart_window_days.unwrap_or(280) as usize,
+        watermark_name,
+    )?;
+    let quote = quote_map
+        .get(&normalized_ts_code)
+        .ok_or_else(|| format!("未获取到 {} 的实时行情", normalized_ts_code))?;
+    let (kline, has_database_trade_date) = merge_realtime_kline(kline, quote);
+
+    Ok(StockDetailRealtimeData {
+        ts_code: normalized_ts_code,
+        refreshed_at: fetch_meta.refreshed_at,
+        quote_trade_date: fetch_meta.quote_trade_date,
+        quote_time: fetch_meta.quote_time,
+        has_database_trade_date,
+        kline,
     })
 }
 

@@ -122,7 +122,7 @@ pub struct DataReader {
     pub conn: Connection,
     pub query_sql: String,
     pub query_tail_rows_sql: String,
-    pub cols_table: Vec<(String, String)>,      // 数据库列名, runtime规范列名
+    pub cols_table: Vec<(String, String)>, // 数据库列名, runtime规范列名
 }
 
 impl DataReader {
@@ -393,11 +393,12 @@ pub enum ScopeWay {
     Consec(usize),
 }
 
-#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize, serde::Serialize)]
 pub enum RuleTag {
     #[default]
     Normal,
     Opportunity,
+    Rare,
 }
 
 #[derive(Debug, Deserialize)]

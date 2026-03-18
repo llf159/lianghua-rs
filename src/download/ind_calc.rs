@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use crate::{
     data::IndsData,
-    expr::parser::{Expr, Parser, Stmt, Stmts, lex_all}, utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
+    expr::parser::{Expr, Parser, Stmt, Stmts, lex_all},
+    utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
 };
 
 pub struct IndsCache {
@@ -37,7 +38,9 @@ pub fn warmup_ind_estimate(source_dir: &str) -> Result<usize, String> {
     for ind in inds {
         let tok = lex_all(&ind.expr);
         let mut parser = Parser::new(tok);
-        let stmts = parser.parse_main().map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
+        let stmts = parser
+            .parse_main()
+            .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
         let mut locals = HashMap::new();
         let mut consts: HashMap<String, usize> = HashMap::new();
         let mut all_expr_need = 0;
@@ -72,7 +75,7 @@ pub fn warmup_ind_estimate(source_dir: &str) -> Result<usize, String> {
             }
         }
 
-        if  all_expr_need > all_ind_max_need {
+        if all_expr_need > all_ind_max_need {
             all_ind_max_need = all_expr_need;
         }
     }

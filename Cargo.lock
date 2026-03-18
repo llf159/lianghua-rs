@@ -1194,6 +1194,7 @@ version = "0.1.0"
 dependencies = [
  "csv",
  "duckdb",
+ "encoding_rs",
  "rayon",
  "reqwest 0.13.2",
  "serde",
@@ -1736,6 +1737,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",

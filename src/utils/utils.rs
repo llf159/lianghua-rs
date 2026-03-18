@@ -275,15 +275,9 @@ pub fn impl_expr_warmup(
 
                 "RSV" => {
                     let mut it = args.into_iter();
-                    let c = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第1个参数: c"))?;
-                    let h = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第2个参数: h"))?;
-                    let l = it
-                        .next()
-                        .ok_or_else(|| format!("{name}缺少第3个参数: l"))?;
+                    let c = it.next().ok_or_else(|| format!("{name}缺少第1个参数: c"))?;
+                    let h = it.next().ok_or_else(|| format!("{name}缺少第2个参数: h"))?;
+                    let l = it.next().ok_or_else(|| format!("{name}缺少第3个参数: l"))?;
                     let win = it
                         .next()
                         .ok_or_else(|| format!("{name}缺少第4个参数: win"))?;

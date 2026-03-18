@@ -53,12 +53,11 @@ struct TushareTable {
 }
 
 #[derive(Deserialize)]
-struct PostTable<P>{
+struct PostTable<P> {
     api_name: String,
     params: P,
     fields: HashMap<String, String>,
 }
-
 
 impl TushareClient {
     pub fn new(token: String) -> Result<Self, String> {

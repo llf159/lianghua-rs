@@ -14,7 +14,6 @@ use crate::{
     scoring::RuleScoreSeries,
 };
 
-
 #[derive(Debug, Default)]
 pub struct ScoreSummary {
     pub ts_code: String,

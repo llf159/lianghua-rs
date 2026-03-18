@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 
 use crate::{
-    data::{DataReader, RowData, score_rule_path},
     data::scoring_data::row_into_rt,
+    data::{DataReader, RowData, RuleTag, score_rule_path},
     expr::{
         eval::Value,
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
@@ -69,7 +69,7 @@ struct StrategyRuleFileRule {
     dist_points: Option<Vec<StrategyRuleFileDistPoint>>,
     explain: String,
     #[serde(default, skip_serializing_if = "is_normal_tag")]
-    tag: StrategyRuleFileTag,
+    tag: RuleTag,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -77,13 +77,6 @@ struct StrategyRuleFileDistPoint {
     min: usize,
     max: usize,
     points: f64,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-enum StrategyRuleFileTag {
-    #[default]
-    Normal,
-    Opportunity,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -95,8 +88,8 @@ enum StrategyScopeWay {
     Consec(usize),
 }
 
-fn is_normal_tag(tag: &StrategyRuleFileTag) -> bool {
-    matches!(tag, StrategyRuleFileTag::Normal)
+fn is_normal_tag(tag: &RuleTag) -> bool {
+    matches!(tag, RuleTag::Normal)
 }
 
 fn load_rule_file(source_path: &str) -> Result<StrategyRuleFile, String> {
@@ -127,15 +120,20 @@ fn parse_scope_way(scope_way: &str) -> Result<StrategyScopeWay, String> {
     }
 }
 
-fn parse_tag(tag: &str) -> Result<StrategyRuleFileTag, String> {
+fn parse_tag(tag: &str) -> Result<RuleTag, String> {
     match tag.trim().to_ascii_lowercase().as_str() {
-        "" | "normal" => Ok(StrategyRuleFileTag::Normal),
-        "opportunity" => Ok(StrategyRuleFileTag::Opportunity),
+        "" | "normal" => Ok(RuleTag::Normal),
+        "opportunity" => Ok(RuleTag::Opportunity),
+        "rare" => Ok(RuleTag::Rare),
         other => Err(format!("tag 不支持: {other}")),
     }
 }
 
-fn estimate_rule_warmup(stmts: &Stmts, scope_way: StrategyScopeWay, scope_windows: usize) -> Result<usize, String> {
+fn estimate_rule_warmup(
+    stmts: &Stmts,
+    scope_way: StrategyScopeWay,
+    scope_windows: usize,
+) -> Result<usize, String> {
     let mut locals = std::collections::HashMap::new();
     let mut consts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut expr_need = 0usize;
@@ -219,10 +217,18 @@ fn validate_rule_definition(
     if let Some(dist_points) = &rule.dist_points {
         for (index, item) in dist_points.iter().enumerate() {
             if item.min > item.max {
-                return Err(format!("策略 {} 的 dist_points 第{}段 min > max", rule.name, index + 1));
+                return Err(format!(
+                    "策略 {} 的 dist_points 第{}段 min > max",
+                    rule.name,
+                    index + 1
+                ));
             }
             if !item.points.is_finite() {
-                return Err(format!("策略 {} 的 dist_points 第{}段 points 非法", rule.name, index + 1));
+                return Err(format!(
+                    "策略 {} 的 dist_points 第{}段 points 非法",
+                    rule.name,
+                    index + 1
+                ));
             }
         }
     }
@@ -239,9 +245,17 @@ fn validate_rule_definition(
     {
         let warmup_need = estimate_rule_warmup(&stmts, scope_way, rule.scope_windows)?;
         let need_rows = (warmup_need + rule.scope_windows).max(1);
-        let mut row_data =
-            reader.load_one_tail_rows(sample_ts_code, DEFAULT_ADJ_TYPE, latest_trade_date, need_rows)?;
-        fill_validation_extra_fields(&mut row_data, sample_ts_code, st_list.contains(sample_ts_code))?;
+        let mut row_data = reader.load_one_tail_rows(
+            sample_ts_code,
+            DEFAULT_ADJ_TYPE,
+            latest_trade_date,
+            need_rows,
+        )?;
+        fill_validation_extra_fields(
+            &mut row_data,
+            sample_ts_code,
+            st_list.contains(sample_ts_code),
+        )?;
         let mut runtime = row_into_rt(row_data)?;
         let value = runtime
             .eval_program(&stmts)
@@ -276,13 +290,19 @@ fn validate_rule_file(source_path: &str, rule_file: &StrategyRuleFile) -> Result
         let row = rows.next().ok()??;
         row.get::<_, Option<String>>(0).ok().flatten()
     });
-    let sample_ts_code = if let (Some(reader), Some(latest_trade_date)) = (&reader, &latest_trade_date) {
-        DataReader::list_ts_code(reader, DEFAULT_ADJ_TYPE, latest_trade_date, latest_trade_date)
+    let sample_ts_code =
+        if let (Some(reader), Some(latest_trade_date)) = (&reader, &latest_trade_date) {
+            DataReader::list_ts_code(
+                reader,
+                DEFAULT_ADJ_TYPE,
+                latest_trade_date,
+                latest_trade_date,
+            )
             .ok()
             .and_then(|values| values.into_iter().next())
-    } else {
-        None
-    };
+        } else {
+            None
+        };
     let st_list = if sample_ts_code.is_some() {
         load_st_list(source_path).ok()
     } else {
@@ -311,7 +331,8 @@ fn build_rule_file_rule(draft: StrategyManageRuleDraft) -> Result<StrategyRuleFi
         when: draft.when.trim().to_string(),
         points: draft.points,
         dist_points: draft.dist_points.map(|items| {
-            items.into_iter()
+            items
+                .into_iter()
                 .map(|item| StrategyRuleFileDistPoint {
                     min: item.min,
                     max: item.max,
@@ -332,6 +353,48 @@ fn write_rule_file(source_path: &str, rule_file: &StrategyRuleFile) -> Result<()
         .map_err(|e| format!("写入策略规则文件失败: path={}, err={e}", path.display()))
 }
 
+fn build_rule_file_with_draft(
+    source_path: &str,
+    original_name: Option<&str>,
+    draft: StrategyManageRuleDraft,
+) -> Result<StrategyRuleFile, String> {
+    let mut rule_file = load_rule_file(source_path)?;
+    let next_rule = build_rule_file_rule(draft)?;
+
+    if let Some(target_name) = original_name.map(|value| value.trim()) {
+        let Some(target_index) = rule_file
+            .rule
+            .iter()
+            .position(|item| item.name == target_name)
+        else {
+            return Err(format!("未找到待修改策略: {target_name}"));
+        };
+
+        if rule_file
+            .rule
+            .iter()
+            .enumerate()
+            .any(|(index, item)| index != target_index && item.name == next_rule.name)
+        {
+            return Err(format!("策略名重复: {}", next_rule.name));
+        }
+
+        rule_file.rule[target_index] = next_rule;
+    } else {
+        if rule_file
+            .rule
+            .iter()
+            .any(|item| item.name == next_rule.name)
+        {
+            return Err(format!("策略名重复: {}", next_rule.name));
+        }
+        rule_file.rule.push(next_rule);
+    }
+
+    validate_rule_file(source_path, &rule_file)?;
+    Ok(rule_file)
+}
+
 fn build_rule_item(index: usize, rule: StrategyRuleFileRule) -> StrategyManageRuleItem {
     StrategyManageRuleItem {
         index,
@@ -342,11 +405,13 @@ fn build_rule_item(index: usize, rule: StrategyRuleFileRule) -> StrategyManageRu
         explain: rule.explain,
         when: rule.when,
         tag: match rule.tag {
-            StrategyRuleFileTag::Normal => "Normal".to_string(),
-            StrategyRuleFileTag::Opportunity => "Opportunity".to_string(),
+            RuleTag::Normal => "Normal".to_string(),
+            RuleTag::Opportunity => "Opportunity".to_string(),
+            RuleTag::Rare => "Rare".to_string(),
         },
         dist_points: rule.dist_points.map(|items| {
-            items.into_iter()
+            items
+                .into_iter()
                 .map(|item| StrategyManageDistPoint {
                     min: item.min,
                     max: item.max,
@@ -387,7 +452,11 @@ pub fn get_strategy_manage_page(source_path: &str) -> Result<StrategyManagePageD
 
 pub fn add_strategy_manage_rule(source_path: &str) -> Result<StrategyManagePageData, String> {
     let mut rule_file = load_rule_file(source_path)?;
-    let existing_names: Vec<String> = rule_file.rule.iter().map(|item| item.name.clone()).collect();
+    let existing_names: Vec<String> = rule_file
+        .rule
+        .iter()
+        .map(|item| item.name.clone())
+        .collect();
     let next_name = next_strategy_name(&existing_names);
 
     rule_file.rule.push(StrategyRuleFileRule {
@@ -398,10 +467,28 @@ pub fn add_strategy_manage_rule(source_path: &str) -> Result<StrategyManagePageD
         points: 0.0,
         dist_points: None,
         explain: "待补充".to_string(),
-        tag: StrategyRuleFileTag::Normal,
+        tag: RuleTag::Normal,
     });
 
     validate_rule_file(source_path, &rule_file)?;
+    write_rule_file(source_path, &rule_file)?;
+    get_strategy_manage_page(source_path)
+}
+
+pub fn check_strategy_manage_rule_draft(
+    source_path: &str,
+    original_name: Option<&str>,
+    draft: StrategyManageRuleDraft,
+) -> Result<String, String> {
+    let _ = build_rule_file_with_draft(source_path, original_name, draft)?;
+    Ok("策略草稿校验通过，可保存".to_string())
+}
+
+pub fn create_strategy_manage_rule(
+    source_path: &str,
+    draft: StrategyManageRuleDraft,
+) -> Result<StrategyManagePageData, String> {
+    let rule_file = build_rule_file_with_draft(source_path, None, draft)?;
     write_rule_file(source_path, &rule_file)?;
     get_strategy_manage_page(source_path)
 }
@@ -411,7 +498,9 @@ pub fn remove_strategy_manage_rules(
     names: &[String],
 ) -> Result<StrategyManagePageData, String> {
     let mut rule_file = load_rule_file(source_path)?;
-    rule_file.rule.retain(|item| !names.iter().any(|name| name == &item.name));
+    rule_file
+        .rule
+        .retain(|item| !names.iter().any(|name| name == &item.name));
     validate_rule_file(source_path, &rule_file)?;
     write_rule_file(source_path, &rule_file)?;
     get_strategy_manage_page(source_path)
@@ -422,30 +511,7 @@ pub fn update_strategy_manage_rule(
     original_name: &str,
     draft: StrategyManageRuleDraft,
 ) -> Result<StrategyManagePageData, String> {
-    let mut rule_file = load_rule_file(source_path)?;
-    let target_name = original_name.trim();
-    let Some(target_index) = rule_file.rule.iter().position(|item| item.name == target_name) else {
-        return Err(format!("未找到待修改策略: {target_name}"));
-    };
-
-    let next_rule = build_rule_file_rule(draft)?;
-    if rule_file
-        .rule
-        .iter()
-        .enumerate()
-        .any(|(index, item)| index != target_index && item.name == next_rule.name)
-    {
-        return Err(format!("策略名重复: {}", next_rule.name));
-    }
-
-    let previous_rule = rule_file.rule[target_index].clone();
-    rule_file.rule[target_index] = next_rule;
-
-    if let Err(error) = validate_rule_file(source_path, &rule_file) {
-        rule_file.rule[target_index] = previous_rule;
-        return Err(format!("保存已回滚: {error}"));
-    }
-
+    let rule_file = build_rule_file_with_draft(source_path, Some(original_name), draft)?;
     write_rule_file(source_path, &rule_file)?;
     get_strategy_manage_page(source_path)
 }

@@ -1,8 +1,11 @@
 pub mod details;
+pub mod market_monitor;
 pub mod overview;
+pub mod realtime;
+pub mod return_backtest;
+pub mod statistics;
 pub mod stock_pick;
 pub mod strategy_manage;
-pub mod statistics;
 pub mod watch_observe;
 
 use std::collections::HashMap;
@@ -10,6 +13,33 @@ use std::collections::HashMap;
 use duckdb::Connection;
 
 use crate::data::{load_stock_list, load_ths_concepts_list};
+
+fn build_stock_list_text_map(
+    source_dir: &str,
+    value_index: usize,
+) -> Result<HashMap<String, String>, String> {
+    let stock_list = load_stock_list(source_dir)?;
+    let mut out = HashMap::with_capacity(stock_list.len());
+
+    for cols in stock_list {
+        let Some(ts_code) = cols.first() else {
+            continue;
+        };
+        let Some(value) = cols.get(value_index) else {
+            continue;
+        };
+
+        let ts_code = ts_code.trim();
+        let value = value.trim();
+        if ts_code.is_empty() || value.is_empty() {
+            continue;
+        }
+
+        out.insert(ts_code.to_string(), value.to_string());
+    }
+
+    Ok(out)
+}
 
 fn build_total_mv_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
     let stock_list = load_stock_list(source_dir)?;
@@ -97,21 +127,15 @@ fn build_concepts_map(source_dir: &str) -> Result<HashMap<String, String>, Strin
 // }
 
 fn build_name_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
-    let stock_list = load_stock_list(source_dir)?;
-    let mut out = HashMap::with_capacity(stock_list.len());
+    build_stock_list_text_map(source_dir, 2)
+}
 
-    for cols in stock_list {
-        let Some(ts_code) = cols.first() else {
-            continue;
-        };
-        let Some(name) = cols.get(2) else {
-            continue;
-        };
+fn build_area_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
+    build_stock_list_text_map(source_dir, 3)
+}
 
-        out.insert(ts_code.trim().to_string(), name.trim().to_string());
-    }
-
-    Ok(out)
+fn build_industry_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
+    build_stock_list_text_map(source_dir, 4)
 }
 
 fn resolve_trade_date(conn: &Connection, trade_date: Option<String>) -> Result<String, String> {

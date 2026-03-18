@@ -6,6 +6,6 @@ prompt-web.md
 flutter
 build
 score_rule.toml
-/ui
 download_new.py
 __pycache__
+.cargo

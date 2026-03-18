@@ -5,8 +5,8 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::{
-    data::{DataReader, RowData, load_ths_concepts_list, result_db_path},
     data::scoring_data::row_into_rt,
+    data::{DataReader, RowData, load_ths_concepts_list, result_db_path},
     expr::{
         eval::Value,
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
@@ -66,7 +66,10 @@ struct SummaryInfo {
     total_score: Option<f64>,
 }
 
-fn parse_scope_way(scope_way: &str, consec_threshold: Option<usize>) -> Result<PickScopeWay, String> {
+fn parse_scope_way(
+    scope_way: &str,
+    consec_threshold: Option<usize>,
+) -> Result<PickScopeWay, String> {
     match scope_way.trim().to_ascii_uppercase().as_str() {
         "LAST" => Ok(PickScopeWay::Last),
         "ANY" => Ok(PickScopeWay::Any),
@@ -382,9 +385,16 @@ pub fn run_expression_stock_pick(
     )?;
 
     let reader = DataReader::new(source_path)?;
-    let ts_codes =
-        DataReader::list_ts_code(&reader, DEFAULT_ADJ_TYPE, &resolved_start_date, &resolved_end_date)?;
-    let board_filter = board.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let ts_codes = DataReader::list_ts_code(
+        &reader,
+        DEFAULT_ADJ_TYPE,
+        &resolved_start_date,
+        &resolved_end_date,
+    )?;
+    let board_filter = board
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let filtered_ts_codes = ts_codes
         .into_iter()
         .filter(|ts_code| filter_board(ts_code, board_filter))
@@ -482,7 +492,10 @@ pub fn run_concept_stock_pick(
     let summary_map = load_summary_map(source_path, &resolved_trade_date);
     let name_map = build_name_map(source_path).unwrap_or_default();
     let concept_map = build_concepts_map(source_path).unwrap_or_default();
-    let board_filter = board.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let board_filter = board
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
 
     let mut rows = concept_map
         .into_iter()

@@ -1,9 +1,14 @@
 use duckdb::{Connection, params};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::{
     data::{result_db_path, source_db_path},
-    ui_tools::{build_concepts_map, build_name_map, resolve_trade_date},
+    ui_tools::{
+        build_concepts_map, build_name_map,
+        realtime::{RealtimeFetchMeta, fetch_realtime_quote_map},
+        resolve_trade_date,
+    },
 };
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
@@ -32,6 +37,19 @@ pub struct WatchObserveRow {
     pub tag: String,
     pub concept: String,
     pub trade_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchObserveSnapshotData {
+    pub mode: String,
+    pub rows: Vec<WatchObserveRow>,
+    pub refreshed_at: Option<String>,
+    pub reference_trade_date: Option<String>,
+    pub requested_count: usize,
+    pub effective_count: usize,
+    pub fetched_count: usize,
+    pub truncated: bool,
 }
 
 fn open_result_conn(source_path: &str) -> Result<Connection, String> {
@@ -227,6 +245,7 @@ fn calc_post_watch_return_pct(
     source_conn: &Connection,
     trade_date: &str,
     ts_code: &str,
+    latest_price_override: Option<f64>,
 ) -> Result<Option<f64>, String> {
     let Some(next_open) = query_optional_next_open(source_conn, trade_date, ts_code)? else {
         return Ok(None);
@@ -235,7 +254,9 @@ fn calc_post_watch_return_pct(
         return Ok(None);
     }
 
-    let Some(latest_close) = query_optional_latest_close(source_conn, ts_code)? else {
+    let Some(latest_close) =
+        latest_price_override.or(query_optional_latest_close(source_conn, ts_code)?)
+    else {
         return Ok(None);
     };
 
@@ -245,6 +266,7 @@ fn calc_post_watch_return_pct(
 pub fn hydrate_watch_observe_rows(
     source_path: Option<&str>,
     stored_rows: &[WatchObserveStoredRow],
+    reference_trade_date: Option<String>,
 ) -> Result<Vec<WatchObserveRow>, String> {
     let Some(source_path) = source_path.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(stored_rows
@@ -268,9 +290,10 @@ pub fn hydrate_watch_observe_rows(
     let concepts_map = build_concepts_map(source_path).unwrap_or_default();
     let source_conn = open_source_conn(source_path).ok();
     let result_conn = open_result_conn(source_path).ok();
-    let latest_rank_trade_date = result_conn
-        .as_ref()
-        .and_then(|conn| resolve_trade_date(conn, None).ok());
+    let resolved_rank_trade_date = match (result_conn.as_ref(), reference_trade_date) {
+        (Some(conn), trade_date) => Some(resolve_trade_date(conn, trade_date)?),
+        (None, trade_date) => trade_date,
+    };
 
     let mut out = Vec::with_capacity(stored_rows.len());
     for row in stored_rows {
@@ -288,7 +311,7 @@ pub fn hydrate_watch_observe_rows(
             .as_ref()
             .and_then(|conn| query_latest_snapshot(conn, &row.ts_code).ok())
             .unwrap_or((None, None));
-        let today_rank = match (result_conn.as_ref(), latest_rank_trade_date.as_deref()) {
+        let today_rank = match (result_conn.as_ref(), resolved_rank_trade_date.as_deref()) {
             (Some(conn), Some(trade_date)) => query_optional_rank(conn, trade_date, &row.ts_code)?,
             _ => None,
         };
@@ -299,7 +322,7 @@ pub fn hydrate_watch_observe_rows(
             .or_else(|| normalize_trade_date(&row.added_date));
         let post_watch_return_pct = match (source_conn.as_ref(), observe_trade_date.as_deref()) {
             (Some(conn), Some(trade_date)) => {
-                calc_post_watch_return_pct(conn, trade_date, &row.ts_code)?
+                calc_post_watch_return_pct(conn, trade_date, &row.ts_code, None)?
             }
             _ => None,
         };
@@ -319,4 +342,108 @@ pub fn hydrate_watch_observe_rows(
     }
 
     Ok(out)
+}
+
+pub fn refresh_watch_observe_rows(
+    source_path: Option<&str>,
+    stored_rows: &[WatchObserveStoredRow],
+    reference_trade_date: Option<String>,
+) -> Result<WatchObserveSnapshotData, String> {
+    let ts_codes: Vec<String> = stored_rows.iter().map(|row| row.ts_code.clone()).collect();
+    let (quote_map, fetch_meta) = fetch_realtime_quote_map(&ts_codes)?;
+    build_watch_observe_snapshot_data(
+        source_path,
+        stored_rows,
+        reference_trade_date,
+        quote_map,
+        fetch_meta,
+    )
+}
+
+pub fn build_watch_observe_snapshot_data(
+    source_path: Option<&str>,
+    stored_rows: &[WatchObserveStoredRow],
+    reference_trade_date: Option<String>,
+    quote_map: HashMap<String, crate::crawler::SinaQuote>,
+    fetch_meta: RealtimeFetchMeta,
+) -> Result<WatchObserveSnapshotData, String> {
+    let name_map = source_path
+        .map(build_name_map)
+        .transpose()?
+        .unwrap_or_default();
+    let concepts_map = source_path
+        .map(build_concepts_map)
+        .transpose()?
+        .unwrap_or_default();
+    let source_conn = source_path.and_then(|path| open_source_conn(path).ok());
+    let result_conn = source_path.and_then(|path| open_result_conn(path).ok());
+    let resolved_reference_trade_date = match (result_conn.as_ref(), reference_trade_date) {
+        (Some(conn), trade_date) => Some(resolve_trade_date(conn, trade_date)?),
+        (None, trade_date) => trade_date.and_then(|value| normalize_trade_date(&value)),
+    };
+
+    let mut out = Vec::with_capacity(stored_rows.len());
+    for row in stored_rows {
+        let name = name_map
+            .get(&row.ts_code)
+            .cloned()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| row.name.clone());
+        let concept = concepts_map
+            .get(&row.ts_code)
+            .cloned()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| row.concept.clone());
+        let quote = quote_map.get(&row.ts_code);
+        let fallback_snapshot = source_conn
+            .as_ref()
+            .and_then(|conn| query_latest_snapshot(conn, &row.ts_code).ok())
+            .unwrap_or((None, None));
+        let latest_close = quote.map(|item| item.price).or(fallback_snapshot.0);
+        let latest_change_pct = quote
+            .and_then(|item| item.change_pct)
+            .or(fallback_snapshot.1);
+        let observe_trade_date = row
+            .trade_date
+            .as_deref()
+            .and_then(normalize_trade_date)
+            .or_else(|| normalize_trade_date(&row.added_date));
+        let post_watch_return_pct = match (source_conn.as_ref(), observe_trade_date.as_deref()) {
+            (Some(conn), Some(trade_date)) => {
+                calc_post_watch_return_pct(conn, trade_date, &row.ts_code, latest_close)?
+            }
+            _ => None,
+        };
+        let today_rank = match (
+            result_conn.as_ref(),
+            resolved_reference_trade_date.as_deref(),
+        ) {
+            (Some(conn), Some(trade_date)) => query_optional_rank(conn, trade_date, &row.ts_code)?,
+            _ => None,
+        };
+
+        out.push(WatchObserveRow {
+            ts_code: row.ts_code.clone(),
+            name,
+            latest_close,
+            latest_change_pct,
+            added_date: row.added_date.clone(),
+            post_watch_return_pct,
+            today_rank,
+            tag: row.tag.clone(),
+            concept,
+            trade_date: row.trade_date.clone(),
+        });
+    }
+
+    Ok(WatchObserveSnapshotData {
+        mode: "realtime".to_string(),
+        rows: out,
+        refreshed_at: fetch_meta.refreshed_at,
+        reference_trade_date: resolved_reference_trade_date,
+        requested_count: fetch_meta.requested_count,
+        effective_count: fetch_meta.effective_count,
+        fetched_count: fetch_meta.fetched_count,
+        truncated: fetch_meta.truncated,
+    })
 }
