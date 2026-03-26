@@ -1,3 +1,5 @@
+pub mod board_analysis;
+pub mod data_download;
 pub mod details;
 pub mod market_monitor;
 pub mod overview;
@@ -6,6 +8,7 @@ pub mod return_backtest;
 pub mod statistics;
 pub mod stock_pick;
 pub mod strategy_manage;
+pub mod strategy_performance;
 pub mod watch_observe;
 
 use std::collections::HashMap;

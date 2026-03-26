@@ -221,7 +221,7 @@ pub fn impl_expr_warmup(
                     max_need = impl_expr_warmup(src, locals, consts)?;
                 }
 
-                "MAX" | "MIN" => {
+                "MAX" | "MIN" | "DIV" => {
                     let mut it = args.into_iter();
                     let left = it
                         .next()

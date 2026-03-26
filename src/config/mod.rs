@@ -48,28 +48,22 @@ pub struct DownloadConfig {
     pub end_date: String,
     pub threads: usize,
     pub retry_times: usize,
-    pub batch_size: usize,
-    pub rate_limit_calls_per_min: usize,
-    pub safe_calls_per_min: usize,
+    pub limit_calls_per_min: usize,
     pub refresh_stock_list: bool,
     pub include_turnover: bool,
-    pub stock_list: Vec<String>,
 }
 
 impl Default for DownloadConfig {
     fn default() -> Self {
         Self {
             token: String::new(),
-            start_date: "20200101".to_string(),
+            start_date: "20240101".to_string(),
             end_date: "today".to_string(),
             threads: 4,
             retry_times: 3,
-            batch_size: 32,
-            rate_limit_calls_per_min: 480,
-            safe_calls_per_min: 460,
+            limit_calls_per_min: 190,
             refresh_stock_list: true,
-            include_turnover: false,
-            stock_list: Vec::new(),
+            include_turnover: true,
         }
     }
 }

@@ -1,0 +1,71 @@
+.details-overlay-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  padding: 18px;
+  background: rgba(10, 18, 28, 0.48);
+  backdrop-filter: blur(8px);
+}
+
+.details-overlay-shell {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(250, 248, 244, 0.98));
+  box-shadow: 0 24px 80px rgba(10, 18, 28, 0.3);
+}
+
+.details-overlay-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 14px 0;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 255, 255, 0));
+}
+
+.details-overlay-close {
+  border: 1px solid rgba(33, 52, 72, 0.14);
+  border-radius: 999px;
+  padding: 8px 14px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #1f3348;
+  font: inherit;
+  cursor: pointer;
+}
+
+.details-overlay-close:hover {
+  background: #ffffff;
+}
+
+.details-overlay-body {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 0 14px 14px;
+}
+
+@media (max-width: 960px) {
+  .details-overlay-backdrop {
+    padding: 0;
+  }
+
+  .details-overlay-shell {
+    border-radius: 0;
+  }
+
+  .details-overlay-body {
+    padding: 0 10px 10px;
+  }
+}

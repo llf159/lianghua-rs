@@ -83,6 +83,16 @@ pub struct StrategyStatisticsPageData {
     pub triggered_stocks: Option<Vec<TriggeredStockRow>>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct StrategyStatisticsDetailData {
+    pub strategy_name: String,
+    pub analysis_trade_date_options: Vec<String>,
+    pub resolved_analysis_trade_date: Option<String>,
+    pub selected_daily_row: Option<StrategyDailyRow>,
+    pub chart: Option<StrategyChartPayload>,
+    pub triggered_stocks: Vec<TriggeredStockRow>,
+}
+
 fn open_result_conn(source_path: &str) -> Result<Connection, String> {
     let result_db = result_db_path(source_path);
     let result_db_str = result_db
@@ -410,6 +420,83 @@ fn query_triggered_stocks(
     Ok(out)
 }
 
+pub fn get_strategy_triggered_stocks(
+    source_path: String,
+    strategy_name: String,
+    analysis_trade_date: String,
+) -> Result<Vec<TriggeredStockRow>, String> {
+    let strategy_name = strategy_name.trim();
+    let analysis_trade_date = analysis_trade_date.trim();
+    if strategy_name.is_empty() || analysis_trade_date.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let conn = open_result_conn(&source_path)?;
+    query_triggered_stocks(&conn, &source_path, strategy_name, analysis_trade_date)
+}
+
+pub fn get_strategy_statistics_detail(
+    source_path: String,
+    strategy_name: String,
+    analysis_trade_date: Option<String>,
+) -> Result<StrategyStatisticsDetailData, String> {
+    let strategy_name = strategy_name.trim().to_string();
+    if strategy_name.is_empty() {
+        return Err("策略名不能为空".to_string());
+    }
+
+    let conn = open_result_conn(&source_path)?;
+    let (_, meta_map) = load_rule_meta(&source_path)?;
+    let detail_rows_all = query_daily_rows(&conn, &meta_map)?;
+    let strategy_rows = detail_rows_all
+        .iter()
+        .filter(|row| row.rule_name == strategy_name)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut analysis_trade_date_options = strategy_rows
+        .iter()
+        .filter(|row| row.trigger_count.unwrap_or(0) > 0)
+        .map(|row| row.trade_date.clone())
+        .collect::<Vec<_>>();
+    analysis_trade_date_options.sort();
+    analysis_trade_date_options.dedup();
+    analysis_trade_date_options.reverse();
+    if analysis_trade_date_options.is_empty() {
+        analysis_trade_date_options = strategy_rows
+            .iter()
+            .map(|row| row.trade_date.clone())
+            .collect::<Vec<_>>();
+        analysis_trade_date_options.sort();
+        analysis_trade_date_options.dedup();
+        analysis_trade_date_options.reverse();
+    }
+    let resolved_analysis_trade_date =
+        resolve_analysis_trade_date(analysis_trade_date, &analysis_trade_date_options);
+    let selected_daily_row = resolved_analysis_trade_date
+        .as_ref()
+        .and_then(|trade_date| {
+            strategy_rows
+                .iter()
+                .find(|row| row.trade_date == *trade_date)
+                .cloned()
+        });
+    let triggered_stocks = if let Some(trade_date) = resolved_analysis_trade_date.as_deref() {
+        query_triggered_stocks(&conn, &source_path, &strategy_name, trade_date)?
+    } else {
+        Vec::new()
+    };
+
+    Ok(StrategyStatisticsDetailData {
+        strategy_name,
+        analysis_trade_date_options,
+        resolved_analysis_trade_date,
+        selected_daily_row,
+        chart: Some(build_chart(&strategy_rows)),
+        triggered_stocks,
+    })
+}
+
 pub fn get_strategy_statistics_page(
     source_path: String,
     strategy_name: Option<String>,
@@ -689,6 +776,28 @@ mod tests {
             0
         );
         assert_eq!(page.triggered_stocks.expect("triggered stocks").len(), 0);
+
+        let _ = fs::remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn get_strategy_triggered_stocks_queries_single_strategy_date_only() {
+        let source_dir = unique_temp_dir();
+        write_fixture_files(&source_dir);
+        write_fixture_db(&source_dir);
+
+        let triggered_stocks = get_strategy_triggered_stocks(
+            source_dir.to_str().expect("utf8 path").to_string(),
+            "R_LAST".to_string(),
+            "20240101".to_string(),
+        )
+        .expect("query triggered stocks");
+
+        assert_eq!(triggered_stocks.len(), 2);
+        assert_eq!(triggered_stocks[0].ts_code, "000001.SZ");
+        assert_eq!(triggered_stocks[0].rank, Some(1));
+        assert_eq!(triggered_stocks[1].ts_code, "000003.SZ");
+        assert_eq!(triggered_stocks[1].rank, Some(150));
 
         let _ = fs::remove_dir_all(source_dir);
     }

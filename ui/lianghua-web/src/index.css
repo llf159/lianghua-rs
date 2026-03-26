@@ -1,0 +1,52 @@
+:root {
+  --theme-orange-50: #fff7ed;
+  --theme-orange-100: #ffedd5;
+  --theme-orange-200: #fed7aa;
+  --theme-orange-300: #fdba74;
+  --theme-orange-400: #fb923c;
+  --theme-orange-500: #f97316;
+  --theme-orange-600: #ea580c;
+  --theme-orange-700: #c2410c;
+  --theme-orange-800: #9a3412;
+  --theme-orange-ring: rgba(249, 115, 22, 0.22);
+  --theme-orange-shadow: rgba(234, 88, 12, 0.18);
+  --theme-orange-soft: rgba(249, 115, 22, 0.08);
+  --theme-orange-soft-strong: rgba(249, 115, 22, 0.12);
+  --theme-orange-soft-border: rgba(234, 88, 12, 0.14);
+  --theme-orange-gradient: linear-gradient(180deg, #fb923c 0%, #ea580c 100%);
+  --theme-orange-gradient-soft: linear-gradient(180deg, #ffffff 0%, #fff7ed 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+.table-sort-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font: inherit;
+  font-weight: inherit;
+  cursor: pointer;
+}
+
+.table-sort-button:focus-visible {
+  outline: 2px solid var(--theme-orange-300);
+  outline-offset: 2px;
+}
+
+.table-sort-indicator {
+  flex: 0 0 auto;
+  color: inherit;
+}

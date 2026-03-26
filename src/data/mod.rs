@@ -40,21 +40,15 @@ pub fn ind_toml_path(source_dir: &str) -> PathBuf {
 
 pub fn load_stock_list(source_dir: &str) -> Result<Vec<Vec<String>>, String> {
     let path = stock_list_path(source_dir);
-    let text = fs::read_to_string(&path)
-        .map_err(|e| format!("读取stock_list.csv失败:路径:{:?},错误:{e}", path))?;
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(&path)
+        .map_err(|e| format!("打开stock_list.csv失败:路径:{:?},错误:{e}", path))?;
+
     let mut rows = Vec::new();
-
-    for (idx, line) in text.lines().enumerate() {
-        if idx == 0 {
-            continue;
-        }
-
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        rows.push(line.split(',').map(|s| s.to_string()).collect());
+    for row_result in reader.records() {
+        let row = row_result.map_err(|e| format!("解析stock_list.csv失败:{e}"))?;
+        rows.push(row.iter().map(|value| value.to_string()).collect());
     }
 
     Ok(rows)
@@ -153,6 +147,9 @@ impl DataReader {
             ("close", "C"),
             ("vol", "V"),
             ("amount", "AMOUNT"),
+            ("pre_close", "PRE_CLOSE"),
+            ("change", "CHANGE"),
+            ("pct_chg", "PCT_CHG"),
         ];
 
         let mut db_cols_table: Vec<(String, String)> = Vec::new();
@@ -172,7 +169,15 @@ impl DataReader {
             }
             if matches!(
                 low.as_str(),
-                "open" | "high" | "low" | "close" | "vol" | "amount"
+                "open"
+                    | "high"
+                    | "low"
+                    | "close"
+                    | "vol"
+                    | "amount"
+                    | "pre_close"
+                    | "change"
+                    | "pct_chg"
             ) {
                 continue;
             }
@@ -401,7 +406,7 @@ pub enum RuleTag {
     Rare,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct DistPoint {
     pub min: usize,
     pub max: usize,
@@ -508,7 +513,7 @@ impl IndsData {
         let ind_path = ind_toml_path(source_dir);
         let ind_toml = fs::read_to_string(&ind_path).map_err(|e| {
             format!(
-                "规则文件不存在或不可读: path={}, err={e}",
+                "指标文件不存在或不可读: path={}, err={e}",
                 ind_path.display()
             )
         })?;

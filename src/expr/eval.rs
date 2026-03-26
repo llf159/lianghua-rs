@@ -89,6 +89,49 @@ impl Runtime {
         Ok(Value::NumSeries(out))
     }
 
+    fn impl_div(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
+        if args.len() != 2 {
+            return Err(EvalErr {
+                msg: "DIV需要两个参数".to_string(),
+            });
+        }
+
+        let a = self.eval_expr(&args[0])?;
+        let b = self.eval_expr(&args[1])?;
+
+        if matches!(a, Value::Num(_) | Value::Bool(_))
+            && matches!(b, Value::Num(_) | Value::Bool(_))
+        {
+            let l = Value::as_num(&a)?;
+            let r = Value::as_num(&b)?;
+            return if r.abs() < EPS {
+                Ok(Value::Num(0.0))
+            } else {
+                Ok(Value::Num(l / r))
+            };
+        }
+
+        let len = usize::max(Value::len_of(&a), Value::len_of(&b));
+        let ls = Value::as_num_series(&a, len)?;
+        let rs = Value::as_num_series(&b, len)?;
+        let mut out: Vec<Option<f64>> = Vec::with_capacity(len);
+
+        for i in 0..len {
+            match (ls[i], rs[i]) {
+                (Some(l), Some(r)) => {
+                    if r.abs() < EPS {
+                        out.push(Some(0.0));
+                    } else {
+                        out.push(Some(l / r));
+                    }
+                }
+                _ => out.push(None),
+            }
+        }
+
+        Ok(Value::NumSeries(out))
+    }
+
     fn impl_count(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
         if args.len() != 2 {
             return Err(EvalErr {
@@ -860,6 +903,7 @@ impl Runtime {
             "ABS" => Ok(self.impl_abs(args)?),
             "MAX" => Ok(self.impl_max(args)?),
             "MIN" => Ok(self.impl_min(args)?),
+            "DIV" => Ok(self.impl_div(args)?),
             "HHV" => Ok(self.impl_hhv(args)?),
             "LLV" => Ok(self.impl_llv(args)?),
             "COUNT" => Ok(self.impl_count(args)?),

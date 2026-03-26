@@ -425,6 +425,7 @@ fn tag_label(tag: RuleTag) -> &'static str {
     match tag {
         RuleTag::Normal => "普通",
         RuleTag::Opportunity => "机会",
+        RuleTag::Rare => "稀有",
     }
 }
 

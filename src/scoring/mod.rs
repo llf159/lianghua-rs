@@ -30,6 +30,7 @@ pub struct RuleScoreSeries {
     pub series: Vec<f64>,
 }
 
+#[derive(Clone)]
 pub struct CachedRule {
     pub name: String,
     pub scope_windows: usize,

@@ -1,0 +1,529 @@
+.data-download-page {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.data-download-card {
+  border: 1px solid #d9e0e8;
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 248, 241, 0.9) 0%, rgba(255, 255, 255, 1) 30%),
+    #fff;
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+  box-shadow: 0 10px 28px rgba(197, 122, 38, 0.08);
+  min-width: 0;
+}
+
+.data-download-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.data-download-head h2 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.data-download-head p,
+.data-download-summary-item small,
+.data-download-field small,
+.data-download-action-card p,
+.data-download-actions-note,
+.data-download-progress-text {
+  margin: 6px 0 0;
+  color: #5f6978;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.data-download-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 10px;
+}
+
+.data-download-top-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.data-download-status-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.data-download-summary-item,
+.data-download-action-card,
+.data-download-check,
+.data-download-panel,
+.data-download-runbar {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 12px;
+  min-width: 0;
+}
+
+.data-download-summary-item {
+  display: grid;
+  gap: 5px;
+  background: rgba(255, 255, 255, 0.84);
+}
+
+.data-download-summary-item-wide {
+  grid-column: span 3;
+}
+
+.data-download-summary-item-path strong {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
+.data-download-summary-item span,
+.data-download-field span,
+.data-download-action-head span {
+  color: #667487;
+  font-size: 12px;
+}
+
+.data-download-summary-item strong,
+.data-download-action-head strong {
+  font-size: 15px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.data-download-action-card {
+  display: grid;
+  gap: 6px;
+  background:
+    radial-gradient(circle at top right, rgba(245, 174, 66, 0.14), transparent 38%),
+    #fffdf9;
+}
+
+.data-download-action-card-hero {
+  min-height: 100%;
+  align-content: start;
+}
+
+.data-download-action-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.data-download-mode-pill {
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: #fff0d8;
+  color: #9a4e03;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.data-download-mode-pill.is-incremental {
+  background: #edf6ff;
+  color: #175b93;
+}
+
+.data-download-hero-metrics,
+.data-download-incremental-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
+  gap: 10px;
+}
+
+.data-download-hero-metric,
+.data-download-incremental-item {
+  border: 1px solid rgba(226, 232, 240, 0.95);
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.9);
+  display: grid;
+  gap: 4px;
+}
+
+.data-download-hero-metric span,
+.data-download-incremental-item span {
+  color: #667487;
+  font-size: 12px;
+}
+
+.data-download-hero-metric strong,
+.data-download-incremental-item strong {
+  font-size: 14px;
+}
+
+.data-download-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: 10px 12px;
+}
+
+.data-download-field {
+  display: grid;
+  gap: 6px;
+}
+
+.data-download-field-span-2 {
+  grid-column: span 2;
+}
+
+.data-download-check-span-2 {
+  grid-column: span 2;
+}
+
+.data-download-field input {
+  box-sizing: border-box;
+  width: 100%;
+  border: 1px solid #c7d1dc;
+  border-radius: 10px;
+  padding: 9px 10px;
+  font-size: 14px;
+  background: #fff;
+}
+
+.data-download-field input:focus {
+  outline: 2px solid rgba(237, 137, 54, 0.35);
+  outline-offset: 1px;
+}
+
+.data-download-form-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr));
+  gap: 10px;
+}
+
+.data-download-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: #fbfcfe;
+}
+
+.data-download-check input {
+  margin: 0;
+}
+
+.data-download-check span {
+  color: #39475a;
+  font-size: 14px;
+}
+
+.data-download-panel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: 12px;
+}
+
+.data-download-panel {
+  display: grid;
+  gap: 12px;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.data-download-panel-head {
+  display: grid;
+  gap: 4px;
+}
+
+.data-download-panel-head h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.data-download-panel-head p {
+  margin: 0;
+  color: #5f6978;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.data-download-incremental-box {
+  display: grid;
+  gap: 12px;
+}
+
+.data-download-runbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.96), rgba(255, 247, 237, 0.96));
+}
+
+.data-download-runbar-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.data-download-runbar-copy strong {
+  font-size: 16px;
+}
+
+.data-download-primary-btn,
+.data-download-secondary-btn {
+  border-radius: 10px;
+  padding: 8px 15px;
+  cursor: pointer;
+  max-width: 100%;
+}
+
+.data-download-primary-btn {
+  border: 1px solid #d66a0d;
+  background:
+    linear-gradient(135deg, #f5973d 0%, #dd6b20 100%);
+  color: #fff;
+  box-shadow: 0 10px 22px rgba(221, 107, 32, 0.22);
+}
+
+.data-download-secondary-btn {
+  border: 1px solid #c7d1dc;
+  background: #fff;
+  color: #425367;
+}
+
+.data-download-primary-btn:disabled,
+.data-download-secondary-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.data-download-progress {
+  display: grid;
+  gap: 12px;
+  border: 1px solid rgba(232, 176, 113, 0.45);
+  border-radius: 16px;
+  padding: 14px;
+  background:
+    radial-gradient(circle at top right, rgba(255, 205, 148, 0.28), transparent 34%),
+    linear-gradient(180deg, rgba(255, 250, 244, 0.98), rgba(255, 245, 233, 0.98));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.data-download-progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.data-download-progress-title {
+  display: grid;
+  gap: 6px;
+}
+
+.data-download-progress-title strong {
+  font-size: 15px;
+  color: #2f3a48;
+}
+
+.data-download-progress-phase-pill {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(255, 236, 212, 0.95);
+  color: #9a4e03;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.data-download-progress-value {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+}
+
+.data-download-progress-value strong {
+  color: #8a3f00;
+  font-size: 28px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.data-download-progress-value span {
+  color: #8a4b08;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.data-download-progress-bar {
+  position: relative;
+  height: 14px;
+  overflow: hidden;
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(250, 218, 182, 0.64)),
+    rgba(230, 141, 47, 0.12);
+  box-shadow:
+    inset 0 1px 2px rgba(144, 74, 0, 0.12),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.44);
+}
+
+.data-download-progress-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  min-width: 10%;
+  border-radius: inherit;
+  background:
+    linear-gradient(90deg, #f7b955 0%, #ec8d2f 48%, #d6671e 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    0 8px 16px rgba(217, 103, 30, 0.22);
+  transition: width 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.data-download-progress-bar-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 0%, rgba(255, 255, 255, 0.38) 40%, transparent 72%);
+  animation: data-download-progress-sheen 2.2s linear infinite;
+}
+
+.data-download-progress-bar-fill.is-indeterminate {
+  min-width: 22%;
+}
+
+.data-download-progress-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
+  gap: 10px;
+}
+
+.data-download-progress-stat {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(232, 176, 113, 0.34);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.data-download-progress-stat span {
+  color: #8d5b27;
+  font-size: 12px;
+}
+
+.data-download-progress-stat strong {
+  color: #2f3a48;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.data-download-progress-stat-wide {
+  grid-column: span 2;
+}
+
+.data-download-notice,
+.data-download-error {
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.data-download-notice {
+  color: #8a4b08;
+  background: #fff5e8;
+  border: 1px solid #f4cf9f;
+}
+
+.data-download-error {
+  color: #b00020;
+  background: #fff3f5;
+  border: 1px solid #ffc7d0;
+}
+
+@keyframes data-download-progress-sheen {
+  0% {
+    transform: translateX(-140%);
+  }
+
+  100% {
+    transform: translateX(180%);
+  }
+}
+
+@media (max-width: 1080px) {
+  .data-download-top-grid,
+  .data-download-panel-grid,
+  .data-download-summary,
+  .data-download-form-grid,
+  .data-download-form-row,
+  .data-download-hero-metrics,
+  .data-download-incremental-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .data-download-summary-item-wide,
+  .data-download-field-span-2,
+  .data-download-check-span-2 {
+    grid-column: span 1;
+  }
+}
+
+@media (max-width: 720px) {
+  .data-download-card {
+    padding: 12px;
+    border-radius: 12px;
+  }
+
+  .data-download-head h2 {
+    font-size: 20px;
+  }
+
+  .data-download-action-head,
+  .data-download-runbar,
+  .data-download-progress-head {
+    align-items: flex-start;
+  }
+
+  .data-download-progress-value {
+    justify-items: start;
+  }
+
+  .data-download-progress-stat-wide {
+    grid-column: span 1;
+  }
+
+  .data-download-primary-btn,
+  .data-download-secondary-btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .data-download-runbar {
+    display: grid;
+  }
+
+  .data-download-runbar-copy strong,
+  .data-download-summary-item strong,
+  .data-download-action-head strong {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .data-download-progress-text,
+  .data-download-panel-head p,
+  .data-download-head p {
+    font-size: 12px;
+  }
+}
