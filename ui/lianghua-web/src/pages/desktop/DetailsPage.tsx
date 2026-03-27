@@ -65,6 +65,7 @@ import {
   type WatchObserveRow,
   upsertWatchObserveRow,
 } from "../../apis/watchObserve";
+import type { DetailsNavigationItem } from "../../shared/detailsLinkState";
 import "./css/DetailsPage.css";
 
 const DEFAULT_TOP_LIMIT = "100";
@@ -81,6 +82,10 @@ const CHART_CURSOR_Y_MAX = 94;
 const CHART_TOOLTIP_LEFT_THRESHOLD = 62;
 const CHART_POINTER_DRAG_THRESHOLD = 6;
 const CHART_TOUCH_FOCUS_HIT_SLOP = 24;
+const STRATEGY_SPLIT_DEFAULT = 0.64;
+const STRATEGY_SPLIT_MIN = 0.24;
+const STRATEGY_SPLIT_MAX = 0.76;
+const STRATEGY_STACK_BREAKPOINT = 1180;
 const WATERMARK_CONCEPT_LIMIT = 3;
 const MAX_STOCK_NAME_CANDIDATES = 12;
 const CANDLE_UP_COLOR = "#d9485f";
@@ -144,6 +149,13 @@ type StrategyCompareSnapshot = {
   rows: DetailStrategyTriggerRow[];
 };
 
+type DetailsPageVariant = "default" | "linked-overlay";
+
+export type DetailsPageProps = {
+  variant?: DetailsPageVariant;
+  navigationItems?: DetailsNavigationItem[] | null;
+};
+
 function formatNumber(value: unknown, digits = 2) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return "--";
@@ -178,6 +190,13 @@ function getStrategyRuleScore(row: DetailStrategyTriggerRow | null | undefined) 
     : 0;
 }
 
+function isStrategyTriggered(row: DetailStrategyTriggerRow | null | undefined) {
+  if (typeof row?.is_triggered === "boolean") {
+    return row.is_triggered;
+  }
+  return getStrategyRuleScore(row) !== 0;
+}
+
 function getComparedStrategyRuleScore(
   ruleName: string,
   compareRowMap: Map<string, DetailStrategyTriggerRow> | null | undefined,
@@ -188,19 +207,29 @@ function getComparedStrategyRuleScore(
   return getStrategyRuleScore(compareRowMap.get(ruleName));
 }
 
+function getComparedStrategyTriggered(
+  ruleName: string,
+  compareRowMap: Map<string, DetailStrategyTriggerRow> | null | undefined,
+) {
+  if (!compareRowMap) {
+    return null;
+  }
+  return isStrategyTriggered(compareRowMap.get(ruleName));
+}
+
 function isStrategyOutRow(
   row: DetailStrategyTriggerRow | null | undefined,
   compareRowMap: Map<string, DetailStrategyTriggerRow> | null | undefined,
   compareTradeDate?: string | null,
   outReferenceTradeDate?: string | null,
 ) {
-  if (!row || getStrategyRuleScore(row) !== 0) {
+  if (!row || isStrategyTriggered(row)) {
     return false;
   }
 
   const normalizedCompareTradeDate = compareTradeDate?.trim() ?? "";
   if (compareRowMap && normalizedCompareTradeDate !== "") {
-    return getComparedStrategyRuleScore(row.rule_name, compareRowMap) !== 0;
+    return getComparedStrategyTriggered(row.rule_name, compareRowMap) === true;
   }
 
   const normalizedOutReferenceTradeDate = outReferenceTradeDate?.trim() ?? "";
@@ -298,6 +327,54 @@ function toPositiveInt(raw: string) {
 function findMatchingTopValue(rows: OverviewRow[], codeInput: string) {
   const hit = rows.find((row) => splitTsCode(row.ts_code) === codeInput);
   return hit?.ts_code ?? "";
+}
+
+function buildNavigationItemFromOverviewRow(
+  row: OverviewRow,
+  fallbackTradeDate: string,
+  sourcePath: string,
+): DetailsNavigationItem {
+  const tradeDate =
+    typeof row.trade_date === "string" && row.trade_date.trim() !== ""
+      ? row.trade_date.trim()
+      : fallbackTradeDate.trim() || undefined;
+  const name =
+    typeof row.name === "string" && row.name.trim() !== ""
+      ? row.name.trim()
+      : undefined;
+
+  return {
+    tsCode: row.ts_code,
+    tradeDate,
+    sourcePath: sourcePath.trim() || undefined,
+    name,
+  };
+}
+
+function findNavigationIndex(
+  items: DetailsNavigationItem[],
+  tsCode: string,
+  tradeDate: string,
+) {
+  const normalizedCode = sanitizeCodeInput(splitTsCode(tsCode));
+  const normalizedTradeDate = tradeDate.trim() === "--" ? "" : tradeDate.trim();
+
+  const exactIndex = items.findIndex((item) => {
+    const itemCode = sanitizeCodeInput(splitTsCode(item.tsCode));
+    const itemTradeDate = item.tradeDate?.trim() ?? "";
+    return itemCode === normalizedCode && itemTradeDate === normalizedTradeDate;
+  });
+  if (exactIndex >= 0) {
+    return exactIndex;
+  }
+
+  return items.findIndex(
+    (item) => sanitizeCodeInput(splitTsCode(item.tsCode)) === normalizedCode,
+  );
+}
+
+function clampStrategySplitRatio(value: number) {
+  return Math.min(STRATEGY_SPLIT_MAX, Math.max(STRATEGY_SPLIT_MIN, value));
 }
 
 function buildOverviewRows(
@@ -876,10 +953,10 @@ function buildChartPointerSnapshot(
 }
 
 function isPointerNearChartFocus(
-  panelKey: string,
+  _panelKey: string,
   viewport: HTMLDivElement,
   clientX: number,
-  clientY: number,
+  _clientY: number,
   focus: ChartFocus | null,
 ) {
   if (!focus) {
@@ -892,16 +969,7 @@ function isPointerNearChartFocus(
   }
 
   const focusClientX = rect.left + (rect.width * focus.cursorXPercent) / 100;
-  if (Math.abs(clientX - focusClientX) <= CHART_TOUCH_FOCUS_HIT_SLOP) {
-    return true;
-  }
-
-  if (focus.panelKey !== panelKey) {
-    return false;
-  }
-
-  const focusClientY = rect.top + (rect.height * focus.cursorYPercent) / 100;
-  return Math.abs(clientY - focusClientY) <= CHART_TOUCH_FOCUS_HIT_SLOP;
+  return Math.abs(clientX - focusClientX) <= CHART_TOUCH_FOCUS_HIT_SLOP;
 }
 
 function buildBrickBodies(
@@ -1555,6 +1623,7 @@ function StrategyTableSection({
   compareTradeDate?: string | null;
   outReferenceTradeDate?: string | null;
 }) {
+  const showScoreColumn = sectionKind !== "untriggered";
   const effectiveRows = useMemo(() => {
     const nextRows = [...(rows ?? [])];
     if (sectionKind !== "mixed" && sectionKind !== "untriggered") {
@@ -1585,13 +1654,19 @@ function StrategyTableSection({
   const sortDefinitions = useMemo(
     () =>
       ({
-        rule_score: { value: (row) => row.rule_score },
+        ...(showScoreColumn
+          ? {
+              rule_score: {
+                value: (row: DetailStrategyTriggerRow) => row.rule_score,
+              },
+            }
+          : {}),
         hit_date: { value: (row) => row.hit_date },
         lag: { value: (row) => row.lag },
       }) satisfies Partial<
         Record<DetailStrategySortKey, SortDefinition<DetailStrategyTriggerRow>>
       >,
-    [],
+    [showScoreColumn],
   );
   const { sortKey, sortDirection, sortedRows, toggleSort } = useTableSort<
     DetailStrategyTriggerRow,
@@ -1608,7 +1683,7 @@ function StrategyTableSection({
           <table className="details-table details-table-strategy">
             <colgroup>
               <col className="details-col-rule" />
-              <col className="details-col-score" />
+              {showScoreColumn ? <col className="details-col-score" /> : null}
               <col className="details-col-date" />
               <col className="details-col-lag" />
               <col className="details-col-tag" />
@@ -1617,20 +1692,22 @@ function StrategyTableSection({
             <thead>
               <tr>
                 <th>策略</th>
-                <th
-                  aria-sort={getAriaSort(
-                    sortKey === "rule_score",
-                    sortDirection,
-                  )}
-                >
-                  <TableSortButton
-                    label="分值"
-                    isActive={sortKey === "rule_score"}
-                    direction={sortDirection}
-                    onClick={() => toggleSort("rule_score")}
-                    title={`按${title}中的分值排序`}
-                  />
-                </th>
+                {showScoreColumn ? (
+                  <th
+                    aria-sort={getAriaSort(
+                      sortKey === "rule_score",
+                      sortDirection,
+                    )}
+                  >
+                    <TableSortButton
+                      label="分值"
+                      isActive={sortKey === "rule_score"}
+                      direction={sortDirection}
+                      onClick={() => toggleSort("rule_score")}
+                      title={`按${title}中的分值排序`}
+                    />
+                  </th>
+                ) : null}
                 <th
                   aria-sort={getAriaSort(sortKey === "hit_date", sortDirection)}
                 >
@@ -1667,8 +1744,12 @@ function StrategyTableSection({
                     ? getComparedStrategyRuleScore(row.rule_name, compareRowMap)
                     : null;
                 const hasCompareScore = compareScore !== null;
-                const wasTriggered = (compareScore ?? 0) !== 0;
-                const isTriggered = currentScore !== 0;
+                const compareTriggered =
+                  compareRowMap && normalizedCompareTradeDate !== ""
+                    ? getComparedStrategyTriggered(row.rule_name, compareRowMap)
+                    : null;
+                const wasTriggered = compareTriggered === true;
+                const isTriggered = isStrategyTriggered(row);
                 const scoreDelta = currentScore - (compareScore ?? 0);
                 const rowIsOut = isStrategyOutRow(
                   row,
@@ -1714,19 +1795,21 @@ function StrategyTableSection({
                     key={key}
                   >
                     <td>{formatFieldValue(row.rule_name)}</td>
-                    <td>
-                      <div className="details-strategy-score-cell">
-                        <span>{formatFieldValue(row.rule_score)}</span>
-                        {badgeText ? (
-                          <span
-                            className={`details-strategy-delta details-strategy-delta-${changeType}`}
-                            title={badgeTitle}
-                          >
-                            {badgeText}
-                          </span>
-                        ) : null}
-                      </div>
-                    </td>
+                    {showScoreColumn ? (
+                      <td>
+                        <div className="details-strategy-score-cell">
+                          <span>{formatFieldValue(row.rule_score)}</span>
+                          {badgeText ? (
+                            <span
+                              className={`details-strategy-delta details-strategy-delta-${changeType}`}
+                              title={badgeTitle}
+                            >
+                              {badgeText}
+                            </span>
+                          ) : null}
+                        </div>
+                      </td>
+                    ) : null}
                     <td>{formatFieldValue(row.hit_date)}</td>
                     <td>{formatFieldValue(row.lag)}</td>
                     <td>{formatFieldValue(row.tag)}</td>
@@ -1744,7 +1827,10 @@ function StrategyTableSection({
   );
 }
 
-export default function DetailsPage() {
+export default function DetailsPage({
+  variant = "default",
+  navigationItems,
+}: DetailsPageProps) {
   const [searchParams] = useSearchParams();
   const { excludedConcepts } = useConceptExclusions();
   const [sourcePath, setSourcePath] = useState(() => readStoredSourcePath());
@@ -1769,6 +1855,11 @@ export default function DetailsPage() {
   const [visibleBarCount, setVisibleBarCount] = useState(DEFAULT_VISIBLE_BARS);
   const [visibleStartIndex, setVisibleStartIndex] = useState(0);
   const [chartFocus, setChartFocus] = useState<ChartFocus | null>(null);
+  const [strategySplitRatio, setStrategySplitRatio] = useState(
+    STRATEGY_SPLIT_DEFAULT,
+  );
+  const [strategySplitDragging, setStrategySplitDragging] = useState(false);
+  const [isStrategyStacked, setIsStrategyStacked] = useState(false);
   const [watchObserveItems, setWatchObserveItems] = useState<WatchObserveRow[]>(
     [],
   );
@@ -1780,12 +1871,15 @@ export default function DetailsPage() {
   const [strategyCompareSnapshot, setStrategyCompareSnapshot] =
     useState<StrategyCompareSnapshot | null>(null);
   const chartDragRef = useRef<ChartDragState | null>(null);
+  const strategyGridRef = useRef<HTMLDivElement | null>(null);
+  const strategyResizePointerIdRef = useRef<number | null>(null);
   const currentRankRowRef = useRef<HTMLTableRowElement | null>(null);
   const rankTableWrapRef = useRef<HTMLDivElement | null>(null);
   const pendingPageScrollRef = useRef<ScrollSnapshot | null>(null);
   const autoFillTopRef = useRef(true);
 
   const sourcePathTrimmed = sourcePath.trim();
+  const isLinkedOverlay = variant === "linked-overlay";
   const routeTsCode = sanitizeCodeInput(searchParams.get("tsCode") ?? "");
   const routeTradeDate = searchParams.get("tradeDate")?.trim() ?? "";
   const routeSourcePath = searchParams.get("sourcePath")?.trim() ?? "";
@@ -1819,6 +1913,27 @@ export default function DetailsPage() {
     lookupFocused &&
     lookupInput.trim() !== "" &&
     stockNameCandidates.length > 0;
+  const linkedNavigationItems = useMemo(
+    () =>
+      (navigationItems ?? [])
+        .map((item) => {
+          const normalizedCode = sanitizeCodeInput(splitTsCode(item.tsCode));
+          if (normalizedCode === "") {
+            return null;
+          }
+
+          return {
+            tsCode: stdTsCode(normalizedCode),
+            tradeDate: item.tradeDate?.trim() || undefined,
+            sourcePath: item.sourcePath?.trim() || undefined,
+            name: item.name?.trim() || undefined,
+          } satisfies DetailsNavigationItem;
+        })
+        .filter(
+          (item): item is NonNullable<typeof item> => item !== null,
+        ),
+    [navigationItems],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -2064,23 +2179,57 @@ export default function DetailsPage() {
     void readDetail(sourcePathTrimmed, tradeDateInput, readTargetCode);
   }
 
+  function onAutoReadDetail(
+    nextTradeDate: string,
+    nextNormalizedCode: string,
+    nextLookupValue?: string,
+  ) {
+    if (sourcePathTrimmed === "" || nextNormalizedCode.trim() === "") {
+      return;
+    }
+
+    autoFillTopRef.current = false;
+    if (nextLookupValue !== undefined) {
+      setLookupInput(nextLookupValue);
+    }
+    setDetailError("");
+    setStrategyCompareSnapshot(null);
+    void readDetail(sourcePathTrimmed, nextTradeDate, nextNormalizedCode);
+  }
+
   function onSelectStockCandidate(row: StockLookupRow) {
     const nextCode = getLookupDigits(row.ts_code);
     if (nextCode === "") {
       return;
     }
 
-    autoFillTopRef.current = false;
     setLookupFocused(false);
-    setLookupInput(row.name || nextCode);
-    setDetailError("");
+    onAutoReadDetail(
+      tradeDateInput,
+      stdTsCode(nextCode),
+      row.name || nextCode,
+    );
   }
 
   function onSelectTopRow(value: string) {
-    autoFillTopRef.current = false;
     const matchedRow = topRows.find((row) => row.ts_code === value) ?? null;
-    setLookupInput(
-      matchedRow?.name?.trim() || sanitizeCodeInput(splitTsCode(value)),
+    const nextCode = sanitizeCodeInput(
+      splitTsCode(matchedRow?.ts_code ?? value),
+    );
+    if (nextCode === "") {
+      return;
+    }
+
+    const nextTradeDate =
+      typeof matchedRow?.trade_date === "string" &&
+      matchedRow.trade_date.trim() !== ""
+        ? matchedRow.trade_date.trim()
+        : tradeDateInput;
+
+    onAutoReadDetail(
+      nextTradeDate,
+      stdTsCode(nextCode),
+      matchedRow?.name?.trim() || nextCode,
     );
   }
 
@@ -2263,20 +2412,45 @@ export default function DetailsPage() {
     kline?.watermark_name ?? detailData?.overview?.name ?? "个股详情";
   const watermarkCode = kline?.watermark_code ?? splitTsCode(resolvedTsCode);
   const matchedTopDate = topResolvedDate || "--";
-  const currentTopRowIndex = topRows.findIndex(
-    (row) => row.ts_code === resolvedTsCode,
+  const defaultNavigationItems = useMemo(
+    () =>
+      topRows.map((row) =>
+        buildNavigationItemFromOverviewRow(row, tradeDateInput, sourcePathTrimmed),
+      ),
+    [sourcePathTrimmed, topRows, tradeDateInput],
   );
-  const prevTopRow =
-    currentTopRowIndex > 0 ? topRows[currentTopRowIndex - 1] : null;
-  const nextTopRow =
-    currentTopRowIndex >= 0 && currentTopRowIndex < topRows.length - 1
-      ? topRows[currentTopRowIndex + 1]
+  const activeNavigationItems =
+    linkedNavigationItems.length > 0
+      ? linkedNavigationItems
+      : defaultNavigationItems;
+  const currentNavigationIndex = findNavigationIndex(
+    activeNavigationItems,
+    resolvedTsCode,
+    resolvedTradeDate,
+  );
+  const prevNavigationItem =
+    currentNavigationIndex > 0
+      ? activeNavigationItems[currentNavigationIndex - 1]
+      : null;
+  const nextNavigationItem =
+    currentNavigationIndex >= 0 &&
+    currentNavigationIndex < activeNavigationItems.length - 1
+      ? activeNavigationItems[currentNavigationIndex + 1]
       : null;
   const rankLookup = buildRankLookup(detailData?.overview, prevRanks);
   const chartRangeText =
     chartItems.length > 0
       ? `${chartItems[0].trade_date} -> ${chartItems[chartItems.length - 1].trade_date}`
       : "--";
+  const strategyGridStyle = useMemo(
+    () =>
+      isStrategyStacked
+        ? undefined
+        : {
+            gridTemplateColumns: `minmax(0, ${strategySplitRatio}fr) 14px minmax(0, ${1 - strategySplitRatio}fr)`,
+          },
+    [isStrategyStacked, strategySplitRatio],
+  );
 
   useEffect(() => {
     if (totalChartItems === 0) {
@@ -2314,6 +2488,103 @@ export default function DetailsPage() {
     resolvedTradeDate,
     totalChartItems,
   ]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const updateStrategyLayoutMode = () => {
+      const grid = strategyGridRef.current;
+      const gridWidth = grid?.getBoundingClientRect().width ?? window.innerWidth;
+      const isPortraitViewport = window.innerHeight > window.innerWidth;
+      setIsStrategyStacked(
+        gridWidth <= STRATEGY_STACK_BREAKPOINT ||
+          (isPortraitViewport && gridWidth <= 1360),
+      );
+    };
+
+    updateStrategyLayoutMode();
+    window.addEventListener("resize", updateStrategyLayoutMode);
+
+    const grid = strategyGridRef.current;
+    const observer =
+      typeof ResizeObserver === "undefined" || !grid
+        ? null
+        : new ResizeObserver(() => {
+            updateStrategyLayoutMode();
+          });
+    if (observer && grid) {
+      observer.observe(grid);
+    }
+
+    return () => {
+      window.removeEventListener("resize", updateStrategyLayoutMode);
+      observer?.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isStrategyStacked || !strategySplitDragging) {
+      return;
+    }
+
+    strategyResizePointerIdRef.current = null;
+    setStrategySplitDragging(false);
+  }, [isStrategyStacked, strategySplitDragging]);
+
+  useEffect(() => {
+    if (!strategySplitDragging) {
+      return;
+    }
+
+    const onPointerMove = (event: PointerEvent) => {
+      if (
+        strategyResizePointerIdRef.current !== null &&
+        event.pointerId !== strategyResizePointerIdRef.current
+      ) {
+        return;
+      }
+
+      const grid = strategyGridRef.current;
+      if (!grid) {
+        return;
+      }
+
+      const rect = grid.getBoundingClientRect();
+      if (rect.width <= 0) {
+        return;
+      }
+
+      const nextRatio = clampStrategySplitRatio(
+        (event.clientX - rect.left) / rect.width,
+      );
+      setStrategySplitRatio(nextRatio);
+    };
+
+    const stopDragging = (event?: PointerEvent) => {
+      if (
+        event &&
+        strategyResizePointerIdRef.current !== null &&
+        event.pointerId !== strategyResizePointerIdRef.current
+      ) {
+        return;
+      }
+
+      strategyResizePointerIdRef.current = null;
+      setStrategySplitDragging(false);
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", stopDragging);
+    window.addEventListener("pointercancel", stopDragging);
+
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", stopDragging);
+      window.removeEventListener("pointercancel", stopDragging);
+    };
+  }, [strategySplitDragging]);
 
   useEffect(() => {
     const row = currentRankRowRef.current;
@@ -2790,17 +3061,15 @@ export default function DetailsPage() {
     })();
   }
 
-  function onJumpTopRow(targetRow: OverviewRow | null) {
-    if (!targetRow || sourcePathTrimmed === "") {
+  function onJumpNavigationTarget(target: DetailsNavigationItem | null) {
+    const nextSourcePath = target?.sourcePath?.trim() || sourcePathTrimmed;
+    if (!target || nextSourcePath === "") {
       return;
     }
 
-    const nextCode = sanitizeCodeInput(splitTsCode(targetRow.ts_code));
+    const nextCode = sanitizeCodeInput(splitTsCode(target.tsCode));
     const nextTradeDate =
-      typeof targetRow.trade_date === "string" &&
-      targetRow.trade_date.trim() !== ""
-        ? targetRow.trade_date.trim()
-        : tradeDateInput.trim();
+      target.tradeDate?.trim() || tradeDateInput.trim();
 
     if (nextCode === "") {
       return;
@@ -2811,140 +3080,179 @@ export default function DetailsPage() {
       ? { left: contentElement.scrollLeft, top: contentElement.scrollTop }
       : { left: window.scrollX, top: window.scrollY };
     autoFillTopRef.current = false;
-    setLookupInput(targetRow.name?.trim() || nextCode);
+    setSourcePath(nextSourcePath);
+    setLookupInput(target.name?.trim() || nextCode);
     if (nextTradeDate !== "") {
       setTradeDateInput(nextTradeDate);
     }
     setDetailError("");
     setStrategyCompareSnapshot(null);
-    void readDetail(sourcePathTrimmed, nextTradeDate, stdTsCode(nextCode));
+    void readDetail(nextSourcePath, nextTradeDate, stdTsCode(nextCode));
+  }
+
+  function onStrategyResizePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.pointerType === "mouse" && event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    strategyResizePointerIdRef.current = event.pointerId;
+    setStrategySplitDragging(true);
   }
 
   return (
-    <div className="details-page">
-      <section className="details-card">
-        <h2 className="details-title">个股详情</h2>
-        <div className="details-source-note">
-          数据目录由“数据管理”页统一管理，当前路径：
-          {sourcePathTrimmed || "读取中..."}
-        </div>
+    <div
+      className={
+        isLinkedOverlay
+          ? "details-page details-page-linked-overlay"
+          : "details-page"
+      }
+    >
+      {isLinkedOverlay ? null : (
+        <section className="details-card details-query-card">
+          <h2 className="details-title">个股详情</h2>
+          <div className="details-source-note">
+            数据目录由“数据管理”页统一管理，当前路径：
+            {sourcePathTrimmed || "读取中..."}
+          </div>
 
-        <div className="details-form-grid">
-          <label className="details-field">
-            <span>参考日</span>
-            <select
-              value={tradeDateInput}
-              onChange={(event) => setTradeDateInput(event.target.value)}
-              disabled={dateOptionsLoading || dateOptions.length === 0}
-            >
-              {dateOptions.length === 0 ? (
-                <option value="">
-                  {dateOptionsLoading ? "读取日期中..." : "暂无可选日期"}
-                </option>
-              ) : null}
-              {dateOptions.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="details-form-grid">
+            <label className="details-field">
+              <span>参考日</span>
+              <select
+                value={tradeDateInput}
+                onChange={(event) => {
+                  const nextTradeDate = event.target.value;
+                  setTradeDateInput(nextTradeDate);
 
-          <label className="details-field">
-            <span>前列数量</span>
-            <input
-              type="number"
-              min={1}
-              step={1}
-              value={topLimitInput}
-              onChange={(event) => setTopLimitInput(event.target.value)}
-              placeholder={DEFAULT_TOP_LIMIT}
-            />
-          </label>
-
-          <label className="details-field details-field-span-2">
-            <span>代码/名称输入，预览代码：{readTargetCode || "--"}</span>
-            <div className="details-autocomplete">
-              <input
-                type="text"
-                value={lookupInput}
-                onChange={(event) => onLookupInputChange(event.target.value)}
-                onFocus={() => setLookupFocused(true)}
-                onBlur={() => setLookupFocused(false)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && stockNameCandidates.length > 0) {
-                    event.preventDefault();
-                    onSelectStockCandidate(stockNameCandidates[0]);
+                  const nextTargetCode =
+                    readTargetCode ||
+                    (resolvedTsCode !== "--" ? resolvedTsCode : "");
+                  if (nextTargetCode !== "") {
+                    onAutoReadDetail(
+                      nextTradeDate,
+                      nextTargetCode,
+                      lookupInput,
+                    );
                   }
                 }}
-                placeholder="输入股票名称、代码或拼音首字母，支持候选补全"
-              />
-              {showStockNameCandidates ? (
-                <div
-                  className="details-autocomplete-menu"
-                  onWheel={onCandidateWheel}
-                >
-                  {stockNameCandidates.map((row) => {
-                    const code = getLookupDigits(row.ts_code);
-                    return (
-                      <button
-                        className="details-autocomplete-option"
-                        key={row.ts_code}
-                        type="button"
-                        onMouseDown={(event) => {
-                          event.preventDefault();
-                          onSelectStockCandidate(row);
-                        }}
-                      >
-                        <strong>{row.name}</strong>
-                        <span>{code || row.ts_code}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : null}
-            </div>
-          </label>
-
-          <label className="details-field details-field-span-2">
-            <span>从排名前列选择</span>
-            <div className="details-inline-row">
-              <select
-                value={selectedTopValue}
-                onChange={(event) => onSelectTopRow(event.target.value)}
+                disabled={dateOptionsLoading || dateOptions.length === 0}
               >
-                <option value="">请选择</option>
-                {topRows.map((row) => (
-                  <option key={row.ts_code} value={row.ts_code}>
-                    {buildTopOptionLabel(row)}
+                {dateOptions.length === 0 ? (
+                  <option value="">
+                    {dateOptionsLoading ? "读取日期中..." : "暂无可选日期"}
+                  </option>
+                ) : null}
+                {dateOptions.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
                   </option>
                 ))}
               </select>
-              <button
-                className="details-primary-btn details-primary-btn-alt"
-                type="button"
-                disabled={
-                  detailLoading ||
-                  sourcePathTrimmed === "" ||
-                  readTargetCode === ""
-                }
-                onClick={onReadDetail}
-              >
-                {detailLoading ? "读取详情中..." : "读取详情"}
-              </button>
-            </div>
-            <small>
-              候选来源日期: {matchedTopDate}
-              {topLoading ? "（更新中...）" : ""}
-            </small>
-          </label>
-        </div>
+            </label>
 
-        {topError ? <div className="details-error">{topError}</div> : null}
-        {detailError ? (
-          <div className="details-error">{detailError}</div>
-        ) : null}
-      </section>
+            <label className="details-field">
+              <span>前列数量</span>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={topLimitInput}
+                onChange={(event) => setTopLimitInput(event.target.value)}
+                placeholder={DEFAULT_TOP_LIMIT}
+              />
+            </label>
+
+            <label className="details-field details-field-span-2">
+              <span>代码/名称输入，预览代码：{readTargetCode || "--"}</span>
+              <div className="details-autocomplete">
+                <input
+                  type="text"
+                  value={lookupInput}
+                  onChange={(event) => onLookupInputChange(event.target.value)}
+                  onFocus={() => setLookupFocused(true)}
+                  onBlur={() => setLookupFocused(false)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && stockNameCandidates.length > 0) {
+                      event.preventDefault();
+                      onSelectStockCandidate(stockNameCandidates[0]);
+                    }
+                  }}
+                  placeholder="输入股票名称、代码或拼音首字母，支持候选补全"
+                />
+                {showStockNameCandidates ? (
+                  <div
+                    className="details-autocomplete-menu"
+                    onWheel={onCandidateWheel}
+                  >
+                    {stockNameCandidates.map((row) => {
+                      const code = getLookupDigits(row.ts_code);
+                      return (
+                        <button
+                          className="details-autocomplete-option"
+                          key={row.ts_code}
+                          type="button"
+                          onMouseDown={(event) => {
+                            event.preventDefault();
+                            onSelectStockCandidate(row);
+                          }}
+                        >
+                          <strong>{row.name}</strong>
+                          <span>{code || row.ts_code}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            </label>
+
+            <label className="details-field details-field-span-2">
+              <span>从排名前列选择</span>
+              <div className="details-inline-row">
+                <select
+                  value={selectedTopValue}
+                  onChange={(event) => onSelectTopRow(event.target.value)}
+                >
+                  <option value="">请选择</option>
+                  {topRows.map((row) => (
+                    <option key={row.ts_code} value={row.ts_code}>
+                      {buildTopOptionLabel(row)}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="details-primary-btn details-primary-btn-alt"
+                  type="button"
+                  disabled={
+                    detailLoading ||
+                    sourcePathTrimmed === "" ||
+                    readTargetCode === ""
+                  }
+                  onClick={onReadDetail}
+                >
+                  {detailLoading ? "读取详情中..." : "读取详情"}
+                </button>
+              </div>
+              <small>
+                候选来源日期: {matchedTopDate}
+                {topLoading ? "（更新中...）" : ""}
+              </small>
+            </label>
+          </div>
+          {topError ? <div className="details-error">{topError}</div> : null}
+          {detailError ? (
+            <div className="details-error">{detailError}</div>
+          ) : null}
+        </section>
+      )}
+
+      {isLinkedOverlay && topError ? (
+        <div className="details-error">{topError}</div>
+      ) : null}
+      {isLinkedOverlay && detailError ? (
+        <div className="details-error">{detailError}</div>
+      ) : null}
 
       <div className="details-overview-grid">
         <section className="details-card details-overview-card">
@@ -3049,7 +3357,7 @@ export default function DetailsPage() {
         </section>
       </div>
 
-      <section className="details-card">
+      <section className="details-card details-chart-card">
         <h3 className="details-subtitle">K线图</h3>
 
         <div className="details-chart-toolbar">
@@ -3185,7 +3493,7 @@ export default function DetailsPage() {
         </div>
       </section>
 
-      <section className="details-card">
+      <section className="details-card details-strategy-card">
         <div className="details-section-head details-section-head-strategy">
           <h3 className="details-subtitle">策略触发</h3>
           <div className="details-strategy-toolbar">
@@ -3218,24 +3526,46 @@ export default function DetailsPage() {
           </div>
         </div>
 
-        <div className="details-strategy-grid">
-          <StrategyTableSection
-            title="已触发"
-            rows={strategyActiveRows}
-            emptyText="暂无已触发"
-            sectionKind="mixed"
-            compareRowMap={strategyCompareRowMap}
-            compareTradeDate={strategySnapshotTradeDate}
-            outReferenceTradeDate={previousStrategyTradeDate}
-          />
-          <StrategyTableSection
-            title="未触发"
-            rows={strategyIdleRows}
-            emptyText="暂无未触发"
-            sectionKind="untriggered"
-            compareRowMap={strategyCompareRowMap}
-            compareTradeDate={strategySnapshotTradeDate}
-          />
+        <div
+          className={[
+            "details-strategy-grid",
+            isStrategyStacked ? "is-stacked" : "",
+            strategySplitDragging ? "is-dragging" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+          ref={strategyGridRef}
+          style={strategyGridStyle}
+        >
+          <div className="details-strategy-panel">
+            <StrategyTableSection
+              title="已触发"
+              rows={strategyActiveRows}
+              emptyText="暂无已触发"
+              sectionKind="mixed"
+              compareRowMap={strategyCompareRowMap}
+              compareTradeDate={strategySnapshotTradeDate}
+              outReferenceTradeDate={previousStrategyTradeDate}
+            />
+          </div>
+          {isStrategyStacked ? null : (
+            <div
+              className="details-strategy-resize"
+              onPointerDown={onStrategyResizePointerDown}
+            >
+              <span className="details-strategy-resize-line" />
+            </div>
+          )}
+          <div className="details-strategy-panel">
+            <StrategyTableSection
+              title="未触发"
+              rows={strategyIdleRows}
+              emptyText="暂无未触发"
+              sectionKind="untriggered"
+              compareRowMap={strategyCompareRowMap}
+              compareTradeDate={strategySnapshotTradeDate}
+            />
+          </div>
         </div>
       </section>
 
@@ -3243,16 +3573,16 @@ export default function DetailsPage() {
         <button
           className="details-float-nav-btn"
           type="button"
-          disabled={!prevTopRow || detailLoading}
-          onClick={() => onJumpTopRow(prevTopRow)}
+          disabled={!prevNavigationItem || detailLoading}
+          onClick={() => onJumpNavigationTarget(prevNavigationItem)}
         >
           上一条
         </button>
         <button
           className="details-float-nav-btn"
           type="button"
-          disabled={!nextTopRow || detailLoading}
-          onClick={() => onJumpTopRow(nextTopRow)}
+          disabled={!nextNavigationItem || detailLoading}
+          onClick={() => onJumpNavigationTarget(nextNavigationItem)}
         >
           下一条
         </button>

@@ -28,6 +28,7 @@ pub enum TieBreakWay {
 pub struct RuleScoreSeries {
     pub name: String,
     pub series: Vec<f64>,
+    pub triggered: Vec<bool>,
 }
 
 #[derive(Clone)]
@@ -144,29 +145,35 @@ fn score_at(scopeway: ScopeHit, dps: Option<&[DistPoint]>, points: f64) -> f64 {
     }
 }
 
-fn scoring_rule_cache(rule: &CachedRule, rt: &mut Runtime) -> Result<Vec<f64>, String> {
+fn scoring_rule_cache(rule: &CachedRule, rt: &mut Runtime) -> Result<(Vec<f64>, Vec<bool>), String> {
     let bs = hit_when_cache(&rule, rt)?;
     let mut out = Vec::with_capacity(bs.len());
+    let mut triggered = Vec::with_capacity(bs.len());
 
     for i in 0..bs.len() {
         let hit = hit_scopeway(rule.scope_way, rule.scope_windows, &bs, i);
+        triggered.push(match hit {
+            ScopeHit::Bool(ok) => ok,
+            ScopeHit::Count(n) => n > 0,
+            ScopeHit::Recent(v) => v.is_some(),
+        });
         let s = score_at(hit, rule.dist_points.as_deref(), rule.points);
         out.push(s);
     }
 
-    Ok(out)
+    Ok((out, triggered))
 }
 
 pub fn scoring_rules_details_cache(
     rt: &mut Runtime,
-    rules_cache: &Vec<CachedRule>,
+    rules_cache: &[CachedRule],
 ) -> Result<(Vec<f64>, Vec<RuleScoreSeries>), String> {
     let len = rt_max_len(rt);
     let mut total = vec![50.0; len];
     let mut details = Vec::with_capacity(rules_cache.len());
 
     for rule in rules_cache {
-        let score = scoring_rule_cache(&rule, rt)?;
+        let (score, triggered) = scoring_rule_cache(&rule, rt)?;
         let min_len = usize::min(total.len(), score.len());
         for i in 0..min_len {
             total[i] += score[i];
@@ -175,6 +182,7 @@ pub fn scoring_rules_details_cache(
         details.push(RuleScoreSeries {
             name: rule.name.clone(),
             series: score,
+            triggered,
         });
     }
 

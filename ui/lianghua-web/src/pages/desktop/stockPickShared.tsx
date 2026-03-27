@@ -67,6 +67,15 @@ export function StockPickResultTable({
     () => sortRows(rows, sortKey, sortDirection, sortDefinitions),
     [rows, sortDefinitions, sortDirection, sortKey],
   );
+  const detailNavigationItems = useMemo(
+    () =>
+      sortedRows.map((row) => ({
+        tsCode: row.ts_code,
+        tradeDate: tradeDate || undefined,
+        name: row.name ?? undefined,
+      })),
+    [sortedRows, tradeDate],
+  );
   const tableWrapRef = useRouteScrollRegion<HTMLDivElement>(
     "stock-pick-result-table",
     [sortedRows.length, tradeDate],
@@ -137,6 +146,7 @@ export function StockPickResultTable({
                     className="stock-pick-link-btn"
                     tsCode={row.ts_code}
                     tradeDate={tradeDate}
+                    navigationItems={detailNavigationItems}
                   >
                     {row.name ?? row.ts_code}
                   </DetailsLink>

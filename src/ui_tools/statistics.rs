@@ -137,7 +137,7 @@ fn query_overview(conn: &Connection) -> Result<StrategyOverviewPayload, String> 
             SELECT
                 trade_date,
                 ts_code,
-                SUM(CASE WHEN rule_score != 0 THEN 1 ELSE 0 END) AS hit_rule_count
+                COUNT(*) AS hit_rule_count
             FROM score_details
             GROUP BY 1, 2
         ),
@@ -218,7 +218,6 @@ fn query_each_rule_medians(
                     QUANTILE_CONT(ABS(rule_score / ?), 0.5) AS median_trigger_count
                 FROM score_details
                 WHERE rule_name = ?
-                  AND rule_score != 0
                 GROUP BY 1
                 ORDER BY 1 ASC
                 "#,
@@ -262,8 +261,8 @@ fn query_daily_rows(
             d.trade_date,
             d.rule_name,
             COUNT(*) AS sample_count,
-            SUM(CASE WHEN d.rule_score != 0 THEN 1 ELSE 0 END) AS trigger_count,
-            AVG(CASE WHEN d.rule_score != 0 THEN 1.0 ELSE 0.0 END) AS coverage,
+            COUNT(*) AS trigger_count,
+            AVG(1.0) AS coverage,
             SUM(
                 CASE
                     WHEN d.rule_score > 0
@@ -274,8 +273,8 @@ fn query_daily_rows(
                     ELSE 0
                 END
             ) AS contribution_score,
-            SUM(CASE WHEN d.rule_score != 0 AND s.rank <= ? THEN 1 ELSE 0 END) AS top100_trigger_count,
-            MIN(CASE WHEN d.rule_score != 0 THEN s.rank END) AS best_rank
+            SUM(CASE WHEN s.rank <= ? THEN 1 ELSE 0 END) AS top100_trigger_count,
+            MIN(s.rank) AS best_rank
         FROM score_details AS d
         LEFT JOIN score_summary AS s
           ON s.ts_code = d.ts_code
@@ -395,7 +394,6 @@ fn query_triggered_stocks(
              AND s.trade_date = d.trade_date
             WHERE d.trade_date = ?
               AND d.rule_name = ?
-              AND d.rule_score != 0
             ORDER BY s.rank ASC NULLS LAST, d.ts_code ASC
             "#,
         )

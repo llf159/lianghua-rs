@@ -20,6 +20,7 @@ export type WatchObserveRow = {
   name: string
   latestClose: number | null
   latestChangePct: number | null
+  volumeRatio: number | null
   addedDate: string
   postWatchReturnPct: number | null
   todayRank: number | null
@@ -73,6 +74,7 @@ function mergeWatchObserveRow(primary: WatchObserveRow, secondary: WatchObserveR
     name: primary.name || secondary.name,
     latestClose: primary.latestClose ?? secondary.latestClose,
     latestChangePct: primary.latestChangePct ?? secondary.latestChangePct,
+    volumeRatio: primary.volumeRatio ?? secondary.volumeRatio,
     addedDate: primary.addedDate || secondary.addedDate,
     postWatchReturnPct: primary.postWatchReturnPct ?? secondary.postWatchReturnPct,
     todayRank: primary.todayRank ?? secondary.todayRank,
@@ -102,6 +104,10 @@ function normalizeRowInput(
     latestChangePct:
       typeof input.latestChangePct === 'number' && Number.isFinite(input.latestChangePct)
         ? input.latestChangePct
+        : null,
+    volumeRatio:
+      typeof input.volumeRatio === 'number' && Number.isFinite(input.volumeRatio)
+        ? input.volumeRatio
         : null,
     addedDate: normalizeDateValue(input.addedDate ?? ''),
     postWatchReturnPct:
@@ -155,6 +161,7 @@ function buildWatchRowFromRecord(record: Record<string, unknown>) {
       'changePct',
       'chgPct',
     ]),
+    volumeRatio: extractNumberValue(record, ['volume_ratio', 'volumeRatio', 'vol_ratio', 'volRatio']),
     addedDate: normalizeDateValue(
       extractTextValue(record, [
         'watch_date',
@@ -201,6 +208,7 @@ function buildWatchRowFromUnknown(value: unknown): WatchObserveRow | null {
       name: '',
       latestClose: null,
       latestChangePct: null,
+      volumeRatio: null,
       addedDate: '',
       postWatchReturnPct: null,
       todayRank: null,
@@ -215,17 +223,37 @@ function buildWatchRowFromUnknown(value: unknown): WatchObserveRow | null {
     if (!tsCode) {
       return null
     }
+    const hasVolumeRatioField = value.length >= 11
     return {
       tsCode,
       name: typeof value[1] === 'string' ? value[1].trim() : '',
       latestClose: typeof value[2] === 'number' && Number.isFinite(value[2]) ? value[2] : null,
       latestChangePct: typeof value[3] === 'number' && Number.isFinite(value[3]) ? value[3] : null,
-      addedDate: normalizeDateValue(value[4]),
-      postWatchReturnPct: typeof value[5] === 'number' && Number.isFinite(value[5]) ? value[5] : null,
-      todayRank: typeof value[6] === 'number' && Number.isFinite(value[6]) ? value[6] : null,
-      tag: typeof value[7] === 'string' ? value[7].trim() : '',
-      concept: typeof value[8] === 'string' ? value[8].trim() : '',
-      tradeDate: value[9] ? normalizeDateValue(value[9]) : null,
+      volumeRatio:
+        hasVolumeRatioField &&
+        typeof value[4] === 'number' &&
+        Number.isFinite(value[4])
+          ? value[4]
+          : null,
+      addedDate: normalizeDateValue(hasVolumeRatioField ? value[5] : value[4]),
+      postWatchReturnPct:
+        typeof value[hasVolumeRatioField ? 6 : 5] === 'number' &&
+        Number.isFinite(value[hasVolumeRatioField ? 6 : 5])
+          ? value[hasVolumeRatioField ? 6 : 5]
+          : null,
+      todayRank:
+        typeof value[hasVolumeRatioField ? 7 : 6] === 'number' &&
+        Number.isFinite(value[hasVolumeRatioField ? 7 : 6])
+          ? value[hasVolumeRatioField ? 7 : 6]
+          : null,
+      tag: typeof value[hasVolumeRatioField ? 8 : 7] === 'string' ? value[hasVolumeRatioField ? 8 : 7].trim() : '',
+      concept:
+        typeof value[hasVolumeRatioField ? 9 : 8] === 'string'
+          ? value[hasVolumeRatioField ? 9 : 8].trim()
+          : '',
+      tradeDate: value[hasVolumeRatioField ? 10 : 9]
+        ? normalizeDateValue(value[hasVolumeRatioField ? 10 : 9])
+        : null,
     }
   }
 
@@ -364,6 +392,7 @@ export function writeWatchObserveRowsToCache(rows: WatchObserveRow[]) {
     name: row.name || undefined,
     latest_close: row.latestClose,
     latest_change_pct: row.latestChangePct,
+    volume_ratio: row.volumeRatio,
     watch_date: row.addedDate || undefined,
     post_watch_return_pct: row.postWatchReturnPct,
     today_rank: row.todayRank,

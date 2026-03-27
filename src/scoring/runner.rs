@@ -1,14 +1,19 @@
 use rayon::prelude::*;
-use std::time;
+use std::{collections::HashSet, sync::mpsc::sync_channel, thread, time};
 
 use crate::data::scoring_data::{
-    ScoreDetails, ScoreSummary, cache_rule_build, init_result_db, row_into_rt,
+    ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage, cache_rule_build, init_result_db,
+    row_into_rt,
+    write_score_batches_from_channel,
 };
 use crate::data::{DataReader, RowData, result_db_path};
 use crate::scoring::{
     CachedRule, scoring_rules_details_cache,
     tools::{calc_query_need_rows, calc_zhang_pct, load_st_list, warmup_rows_estimate},
 };
+
+const SCORING_GROUP_SIZE: usize = 16;
+const SCORING_QUEUE_BOUND: usize = 4;
 
 fn fill_scoring_extra_fields(
     row_data: &mut RowData,
@@ -25,7 +30,7 @@ fn scoring_single_core(
     row_data: RowData,
     ts_code: &str,
     score_start_date: &str,
-    rules_cache: &Vec<CachedRule>,
+    rules_cache: &[CachedRule],
 ) -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>), String> {
     let trade_dates = row_data.trade_dates.clone();
     let mut rt = row_into_rt(row_data)?;
@@ -46,6 +51,7 @@ fn scoring_single_core(
 
     for rule in &mut d {
         rule.series = rule.series.split_off(keep_from);
+        rule.triggered = rule.triggered.split_off(keep_from);
     }
 
     let summary = ScoreSummary::build(ts_code, kept_trade_dates, kept_scores);
@@ -54,72 +60,32 @@ fn scoring_single_core(
     Ok((summary, details))
 }
 
-fn scoring_all_core(
+fn scoring_group_batch(
     source_dir: &str,
     adj_type: &str,
-    start_date: &str,
+    score_start_date: &str,
     end_date: &str,
-) -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>), String> {
-    let dr = DataReader::new(source_dir)?;
-    let tc_list = DataReader::list_ts_code(&dr, adj_type, start_date, end_date)?;
-    let st_list = load_st_list(source_dir)?;
-    let mut all_summary: Vec<ScoreSummary> = Vec::with_capacity(8192);
-    let mut all_details: Vec<ScoreDetails> = Vec::with_capacity(8192);
+    need_rows: usize,
+    rules_cache: &[CachedRule],
+    st_list: &HashSet<String>,
+    ts_group: &[String],
+) -> Result<ScoreBatch, String> {
+    let worker_reader = DataReader::new(source_dir)?;
+    let mut group_summary = Vec::new();
+    let mut group_details = Vec::new();
 
-    let time = time::Instant::now();
-    let warmup_need = warmup_rows_estimate(source_dir)?;
-    let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
-
-    let rules_cache = cache_rule_build(source_dir)?;
-
-    let result_collect = tc_list
-        .par_chunks(256)
-        .map(
-            |ts_group| -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>), String> {
-                let worker_reader = DataReader::new(source_dir)?;
-                let mut group_summary = Vec::new();
-                let mut group_details = Vec::new();
-
-                for ts_code in ts_group {
-                    let mut row =
-                        worker_reader.load_one_tail_rows(ts_code, adj_type, end_date, need_rows)?;
-                    fill_scoring_extra_fields(&mut row, ts_code, st_list.contains(ts_code))?;
-                    let (s, d) = scoring_single_core(row, ts_code, start_date, &rules_cache)?;
-                    group_summary.extend(s);
-                    group_details.extend(d);
-                }
-
-                Ok((group_summary, group_details))
-            },
-        )
-        .collect::<Vec<_>>();
-
-    // 单例并行
-    // let result_collect = tc_list
-    //     .par_iter()
-    //     .map(|ts_code| {
-    //         let worker_reader = DataReader::new(db_path)?;
-    //         let row =
-    //             worker_reader.load_one(ts_code, adj_type, std_start_date.as_str(), end_date)?;
-    //         scoring_single_core(row, ts_code, start_date, &rules_cache)
-    //     })
-    //     .collect::<Vec<_>>();
-
-    // 原先串行方案备份
-    // for ts_code in tc_list {
-    //     let row = dr.load_one(&ts_code, adj_type, std_start_date.as_str(), end_date)?;
-    //     let (s, d) = scoring_single_core(row, &ts_code, start_date, &rules_cache)?;
-    //     all_summary.extend(s);
-    //     all_details.extend(d);
-    // }
-
-    for result in result_collect {
-        let (a, d) = result?;
-        all_summary.extend(a);
-        all_details.extend(d);
+    for ts_code in ts_group {
+        let mut row = worker_reader.load_one_tail_rows(ts_code, adj_type, end_date, need_rows)?;
+        fill_scoring_extra_fields(&mut row, ts_code, st_list.contains(ts_code))?;
+        let (s, d) = scoring_single_core(row, ts_code, score_start_date, rules_cache)?;
+        group_summary.extend(s);
+        group_details.extend(d);
     }
-    println!("排名主流程结束:{:.3?}", time.elapsed());
-    Ok((all_summary, all_details))
+
+    Ok(ScoreBatch {
+        summary_rows: group_summary,
+        detail_rows: group_details,
+    })
 }
 
 pub fn scoring_all_to_db(
@@ -128,14 +94,62 @@ pub fn scoring_all_to_db(
     start_date: &str,
     end_date: &str,
 ) -> Result<(), String> {
+    let time = time::Instant::now();
     let out_db = result_db_path(source_dir);
-    let (all_summary, all_details) = scoring_all_core(source_dir, adj_type, start_date, end_date)?;
     init_result_db(&out_db)?;
+
+    let dr = DataReader::new(source_dir)?;
+    let tc_list = DataReader::list_ts_code(&dr, adj_type, start_date, end_date)?;
+    let st_list = load_st_list(source_dir)?;
+    let warmup_need = warmup_rows_estimate(source_dir)?;
+    let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
+    let rules_cache = cache_rule_build(source_dir)?;
+
     let out_db_path = out_db
         .to_str()
         .ok_or_else(|| "结果数据库路径不是有效UTF-8".to_string())?;
-    ScoreSummary::write_db(out_db_path, &all_summary)?;
-    ScoreDetails::write_db(out_db_path, &all_details)?;
+
+    let (tx, rx) = sync_channel(SCORING_QUEUE_BOUND);
+    let abort_tx = tx.clone();
+    let db_path = out_db_path.to_string();
+    let start_date_owned = start_date.to_string();
+    let end_date_owned = end_date.to_string();
+    let writer_handle = thread::spawn(move || {
+        write_score_batches_from_channel(&db_path, &start_date_owned, &end_date_owned, rx)
+    });
+
+    let compute_result = tc_list
+        .par_chunks(SCORING_GROUP_SIZE)
+        .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
+            let batch = scoring_group_batch(
+                source_dir,
+                adj_type,
+                start_date,
+                end_date,
+                need_rows,
+                &rules_cache,
+                &st_list,
+                ts_group,
+            )?;
+            sender
+                .send(ScoreWriteMessage::Batch(batch))
+                .map_err(|e| format!("发送评分批次失败:{e}"))?;
+            Ok(())
+        });
+
+    if let Err(err) = &compute_result {
+        let _ = abort_tx.send(ScoreWriteMessage::Abort(err.clone()));
+    }
+    drop(abort_tx);
+
+    let writer_result = match writer_handle.join() {
+        Ok(result) => result,
+        Err(_) => Err("结果库写线程异常退出".to_string()),
+    };
+
+    compute_result?;
+    writer_result?;
+    println!("排名主流程结束:{:.3?}", time.elapsed());
     Ok(())
 }
 

@@ -315,6 +315,12 @@ export default function OverviewPage() {
     [visibleColumns],
   );
   const sourcePathTrimmed = sourcePath.trim();
+  const detailNavigationItems = sortedRows.map((row) => ({
+    tsCode: row.ts_code,
+    tradeDate: getRowDetailsTradeDate(row),
+    sourcePath: sourcePathTrimmed || undefined,
+    name: typeof row.name === "string" ? row.name : undefined,
+  }));
   const tableWrapRef = useRouteScrollRegion<HTMLDivElement>(
     "overview-table",
     [rows.length, tableMinWidth],
@@ -760,7 +766,9 @@ export default function OverviewPage() {
                               className="overview-stock-link"
                               tsCode={row.ts_code}
                               tradeDate={getRowDetailsTradeDate(row)}
+                              sourcePath={sourcePathTrimmed}
                               title={`查看 ${cellValue} 详情`}
+                              navigationItems={detailNavigationItems}
                             >
                               {cellValue}
                             </DetailsLink>

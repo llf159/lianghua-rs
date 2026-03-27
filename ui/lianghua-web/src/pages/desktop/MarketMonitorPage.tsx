@@ -37,6 +37,7 @@ type MarketMonitorSortKey =
   | "totalScore"
   | "latestPrice"
   | "latestChangePct"
+  | "volumeRatio"
   | "open";
 
 type PersistedMarketMonitorState = {
@@ -59,6 +60,13 @@ function formatPercent(value: number | null | undefined) {
     return "--";
   }
   return `${value.toFixed(2)}%`;
+}
+
+function formatRatio(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "--";
+  }
+  return value.toFixed(2);
 }
 
 function getPercentClassName(value: number | null | undefined) {
@@ -230,6 +238,7 @@ export default function MarketMonitorPage() {
         totalScore: { value: (row) => row.totalScore },
         latestPrice: { value: (row) => row.latestPrice },
         latestChangePct: { value: (row) => row.latestChangePct },
+        volumeRatio: { value: (row) => row.volumeRatio },
         open: { value: (row) => row.open },
       }) satisfies Partial<
         Record<MarketMonitorSortKey, SortDefinition<(typeof rows)[number]>>
@@ -240,6 +249,12 @@ export default function MarketMonitorPage() {
     (typeof rows)[number],
     MarketMonitorSortKey
   >(rows, sortDefinitions);
+  const detailNavigationItems = sortedRows.map((row) => ({
+    tsCode: row.tsCode,
+    tradeDate: pageData?.referenceTradeDate ?? referenceTradeDate,
+    sourcePath: sourcePathTrimmed || undefined,
+    name: row.name || undefined,
+  }));
   const tableWrapRef = useRouteScrollRegion<HTMLDivElement>(
     "market-monitor-table",
     [sortedRows.length],
@@ -329,6 +344,7 @@ export default function MarketMonitorPage() {
                 <col style={{ width: "96px" }} />
                 <col style={{ width: "96px" }} />
                 <col style={{ width: "96px" }} />
+                <col style={{ width: "88px" }} />
                 <col style={{ width: "96px" }} />
                 <col />
               </colgroup>
@@ -393,6 +409,20 @@ export default function MarketMonitorPage() {
                     />
                   </th>
                   <th
+                    aria-sort={getAriaSort(
+                      sortKey === "volumeRatio",
+                      sortDirection,
+                    )}
+                  >
+                    <TableSortButton
+                      label="量比"
+                      isActive={sortKey === "volumeRatio"}
+                      direction={sortDirection}
+                      onClick={() => toggleSort("volumeRatio")}
+                      title="按量比排序"
+                    />
+                  </th>
+                  <th
                     aria-sort={getAriaSort(sortKey === "open", sortDirection)}
                   >
                     <TableSortButton
@@ -424,6 +454,7 @@ export default function MarketMonitorPage() {
                             pageData?.referenceTradeDate ?? referenceTradeDate
                           }
                           sourcePath={sourcePathTrimmed}
+                          navigationItems={detailNavigationItems}
                         >
                           {row.name || "--"}
                         </DetailsLink>
@@ -436,6 +467,9 @@ export default function MarketMonitorPage() {
                         title={formatPercent(row.latestChangePct)}
                       >
                         {formatPercent(row.latestChangePct)}
+                      </td>
+                      <td title={formatRatio(row.volumeRatio)}>
+                        {formatRatio(row.volumeRatio)}
                       </td>
                       <td>{formatNumber(row.open)}</td>
                       <td

@@ -16,10 +16,17 @@ use lianghua_rs::{
         data_download::{
             DataDownloadRunInput as CoreDataDownloadRunInput,
             DataDownloadRunResult,
+            IndicatorManageDraft as CoreIndicatorManageDraft,
+            IndicatorManagePageData,
+            MissingStockRepairRunInput as CoreMissingStockRepairRunInput,
             DataDownloadStatus,
             get_data_download_status as core_get_data_download_status,
+            get_indicator_manage_page as core_get_indicator_manage_page,
             prepare_data_download_run as core_prepare_data_download_run,
+            prepare_missing_stock_repair_run as core_prepare_missing_stock_repair_run,
             run_prepared_data_download as core_run_prepared_data_download,
+            run_prepared_missing_stock_repair as core_run_prepared_missing_stock_repair,
+            save_indicator_manage_page as core_save_indicator_manage_page,
         },
         details::{
             build_stock_detail_realtime_from_quote_map,
@@ -175,6 +182,18 @@ struct DataDownloadRequest {
     token: String,
     start_date: String,
     end_date: String,
+    threads: usize,
+    retry_times: usize,
+    limit_calls_per_min: usize,
+    include_turnover: bool,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MissingStockRepairRequest {
+    download_id: String,
+    source_path: String,
+    token: String,
     threads: usize,
     retry_times: usize,
     limit_calls_per_min: usize,
@@ -394,11 +413,12 @@ async fn load_market_monitor_page_data(
         .map(|row| row.ts_code.clone())
         .collect();
     let (quote_map, fetch_meta) = fetch_realtime_quote_map_platform(ts_codes).await?;
-    Ok(build_market_monitor_page_from_rows(
+    build_market_monitor_page_from_rows(
+        &source_path,
         overview_rows,
         quote_map,
         fetch_meta,
-    ))
+    )
 }
 
 async fn load_watch_observe_realtime_snapshot(
@@ -830,6 +850,19 @@ fn get_data_download_status(source_path: String) -> Result<DataDownloadStatus, S
 }
 
 #[tauri::command]
+fn get_indicator_manage_page(source_path: String) -> Result<IndicatorManagePageData, String> {
+    core_get_indicator_manage_page(&source_path)
+}
+
+#[tauri::command]
+fn save_indicator_manage_page(
+    source_path: String,
+    items: Vec<CoreIndicatorManageDraft>,
+) -> Result<IndicatorManagePageData, String> {
+    core_save_indicator_manage_page(&source_path, items)
+}
+
+#[tauri::command]
 async fn run_data_download(
     app: tauri::AppHandle,
     request: DataDownloadRequest,
@@ -886,6 +919,108 @@ async fn run_data_download(
             };
 
             let mut run_result = core_run_prepared_data_download(&prepared, Some(&progress_cb))?;
+            run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
+            Ok(run_result)
+        })();
+
+        match &result {
+            Ok(run_result) => emit_data_download_event(
+                &app,
+                DataDownloadEventPayload {
+                    download_id: download_id.clone(),
+                    phase: "completed".to_string(),
+                    action: action.clone(),
+                    action_label: action_label.clone(),
+                    elapsed_ms: run_result.elapsed_ms,
+                    finished: run_result.summary.success_count + run_result.summary.failed_count,
+                    total: run_result.summary.success_count + run_result.summary.failed_count,
+                    current_label: None,
+                    message: format!(
+                        "{} 已完成，成功 {} 只，失败 {} 只。",
+                        action_label,
+                        run_result.summary.success_count,
+                        run_result.summary.failed_count
+                    ),
+                },
+            ),
+            Err(error) => emit_data_download_event(
+                &app,
+                DataDownloadEventPayload {
+                    download_id: download_id.clone(),
+                    phase: "failed".to_string(),
+                    action: action.clone(),
+                    action_label: action_label.clone(),
+                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    finished: 0,
+                    total: 0,
+                    current_label: None,
+                    message: format!("{} 失败: {}", action_label, error),
+                },
+            ),
+        }
+
+        result
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn run_missing_stock_repair(
+    app: tauri::AppHandle,
+    request: MissingStockRepairRequest,
+) -> Result<DataDownloadRunResult, String> {
+    let download_id = request.download_id.trim().to_string();
+    if download_id.is_empty() {
+        return Err("download_id 不能为空".to_string());
+    }
+
+    let prepared = core_prepare_missing_stock_repair_run(CoreMissingStockRepairRunInput {
+        source_path: request.source_path,
+        token: request.token,
+        threads: request.threads,
+        retry_times: request.retry_times,
+        limit_calls_per_min: request.limit_calls_per_min,
+        include_turnover: request.include_turnover,
+    })?;
+    let action = prepared.action.clone();
+    let action_label = prepared.action_label.clone();
+    emit_data_download_event(
+        &app,
+        DataDownloadEventPayload {
+            download_id: download_id.clone(),
+            phase: "started".to_string(),
+            action: action.clone(),
+            action_label: action_label.clone(),
+            elapsed_ms: 0,
+            finished: 0,
+            total: 0,
+            current_label: None,
+            message: format!("{action_label} 已启动，正在准备缺失股票补全。"),
+        },
+    );
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let started_at = Instant::now();
+        let result = (|| -> Result<DataDownloadRunResult, String> {
+            let progress_app = app.clone();
+            let progress_download_id = download_id.clone();
+            let progress_action = action.clone();
+            let progress_action_label = action_label.clone();
+            let progress_started_at = started_at;
+            let progress_cb = move |progress: CoreDownloadProgress| {
+                emit_core_download_progress(
+                    &progress_app,
+                    progress_download_id.as_str(),
+                    progress_action.as_str(),
+                    progress_action_label.as_str(),
+                    progress_started_at.elapsed().as_millis() as u64,
+                    progress,
+                );
+            };
+
+            let mut run_result =
+                core_run_prepared_missing_stock_repair(&prepared, Some(&progress_cb))?;
             run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
             Ok(run_result)
         })();
@@ -2659,6 +2794,7 @@ pub fn run() {
             export_managed_source_directory_mobile,
             export_managed_source_file,
             get_data_download_status,
+            get_indicator_manage_page,
             get_ranking_compute_status,
             get_rank_overview,
             get_rank_trade_date_options,
@@ -2689,7 +2825,9 @@ pub fn run() {
             update_strategy_manage_rule,
             export_strategy_rule_file,
             run_data_download,
+            run_missing_stock_repair,
             run_ranking_score_calculation,
+            save_indicator_manage_page,
             run_ranking_tiebreak_fill,
             list_watch_observe_rows,
             refresh_watch_observe_rows,

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashSet, fs, path::Path};
 
 use duckdb::Connection;
 use serde::{Deserialize, Serialize};
@@ -6,12 +6,17 @@ use serde::{Deserialize, Serialize};
 use crate::{
     config::{AppConfig, DataConfig, DownloadConfig, OutputConfig},
     data::{
-        load_stock_list, load_trade_date_list, source_db_path, stock_list_path, trade_calendar_path,
+        IndsData, ind_toml_path, load_stock_list, load_trade_date_list, source_db_path,
+        stock_list_path, trade_calendar_path,
     },
     download::{
         DownloadSummary,
-        runner::{DownloadProgressCallback, download as core_run_download_with_progress},
+        runner::{
+            DownloadProgressCallback, download as core_run_download_with_progress,
+            download_selected_stocks as core_run_selected_stock_download_with_progress,
+        },
     },
+    expr::parser::{Parser, lex_all},
 };
 
 use super::watch_observe::normalize_trade_date;
@@ -45,6 +50,7 @@ pub struct DataDownloadStatus {
     pub source_db: DataDownloadDbRange,
     pub stock_list: DataDownloadFileStatus,
     pub trade_calendar: DataDownloadFileStatus,
+    pub missing_stock_repair: DataDownloadMissingStockRepairStatus,
     pub planned_action: String,
     pub planned_action_label: String,
     pub planned_action_detail: String,
@@ -57,6 +63,17 @@ pub struct DataDownloadRunInput {
     pub token: String,
     pub start_date: String,
     pub end_date: String,
+    pub threads: usize,
+    pub retry_times: usize,
+    pub limit_calls_per_min: usize,
+    pub include_turnover: bool,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MissingStockRepairRunInput {
+    pub source_path: String,
+    pub token: String,
     pub threads: usize,
     pub retry_times: usize,
     pub limit_calls_per_min: usize,
@@ -82,6 +99,55 @@ pub struct DataDownloadRunResult {
     pub status: DataDownloadStatus,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataDownloadMissingStockRepairStatus {
+    pub ready: bool,
+    pub missing_count: u64,
+    pub missing_samples: Vec<String>,
+    pub suggested_start_date: Option<String>,
+    pub suggested_end_date: Option<String>,
+    pub detail: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndicatorManageItem {
+    pub index: usize,
+    pub name: String,
+    pub expr: String,
+    pub prec: usize,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndicatorManagePageData {
+    pub exists: bool,
+    pub file_path: String,
+    pub items: Vec<IndicatorManageItem>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndicatorManageDraft {
+    pub name: String,
+    pub expr: String,
+    pub prec: usize,
+}
+
+#[derive(Serialize)]
+struct IndicatorManageFile {
+    version: u32,
+    ind: Vec<IndicatorManageFileItem>,
+}
+
+#[derive(Serialize)]
+struct IndicatorManageFileItem {
+    name: String,
+    expr: String,
+    prec: usize,
+}
+
 #[derive(Clone)]
 pub struct PreparedDataDownloadRun {
     pub source_path: String,
@@ -94,6 +160,21 @@ pub struct PreparedDataDownloadRun {
     pub include_turnover: bool,
     pub action: String,
     pub action_label: String,
+}
+
+#[derive(Clone)]
+pub struct PreparedMissingStockRepairRun {
+    pub source_path: String,
+    pub token: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub threads: usize,
+    pub retry_times: usize,
+    pub limit_calls_per_min: usize,
+    pub include_turnover: bool,
+    pub action: String,
+    pub action_label: String,
+    pub missing_ts_codes: Vec<String>,
 }
 
 fn normalize_download_date(raw: &str, field_name: &str) -> Result<String, String> {
@@ -284,6 +365,125 @@ fn plan_download_action(source_db: &DataDownloadDbRange) -> (String, String, Str
     }
 }
 
+fn query_existing_stock_codes(source_path: &str) -> Result<HashSet<String>, String> {
+    let db_path = source_db_path(source_path);
+    if !db_path.exists() {
+        return Ok(HashSet::new());
+    }
+
+    let db_path_str = db_path
+        .to_str()
+        .ok_or_else(|| "stock_data.db 路径不是有效 UTF-8".to_string())?;
+    let conn =
+        Connection::open(db_path_str).map_err(|e| format!("打开 stock_data.db 失败: {e}"))?;
+    let table_exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+            ["stock_data"],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("检查 stock_data 表结构失败: {e}"))?;
+    if table_exists <= 0 {
+        return Ok(HashSet::new());
+    }
+
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT DISTINCT ts_code
+            FROM stock_data
+            WHERE adj_type = ? AND ts_code IS NOT NULL AND TRIM(ts_code) <> ''
+            "#,
+        )
+        .map_err(|e| format!("预编译现有股票代码查询失败: {e}"))?;
+    let mut rows = stmt
+        .query(["qfq"])
+        .map_err(|e| format!("查询现有股票代码失败: {e}"))?;
+
+    let mut out = HashSet::new();
+    while let Some(row) = rows.next().map_err(|e| format!("读取现有股票代码失败: {e}"))? {
+        let ts_code: String = row.get(0).map_err(|e| format!("读取 ts_code 失败: {e}"))?;
+        if !ts_code.trim().is_empty() {
+            out.insert(ts_code);
+        }
+    }
+
+    Ok(out)
+}
+
+fn scan_missing_stock_codes(
+    source_path: &str,
+    source_db: &DataDownloadDbRange,
+    stock_list: &DataDownloadFileStatus,
+    trade_calendar: &DataDownloadFileStatus,
+) -> Result<(Vec<String>, DataDownloadMissingStockRepairStatus), String> {
+    if !stock_list.exists || stock_list.row_count == 0 {
+        return Ok((
+            Vec::new(),
+            DataDownloadMissingStockRepairStatus {
+                ready: false,
+                missing_count: 0,
+                missing_samples: Vec::new(),
+                suggested_start_date: None,
+                suggested_end_date: None,
+                detail: "股票列表不存在或为空，先刷新基础状态。".to_string(),
+            },
+        ));
+    }
+
+    if !source_db.exists || source_db.row_count == 0 {
+        return Ok((
+            Vec::new(),
+            DataDownloadMissingStockRepairStatus {
+                ready: false,
+                missing_count: 0,
+                missing_samples: Vec::new(),
+                suggested_start_date: None,
+                suggested_end_date: None,
+                detail: "原始库为空，请直接执行首次全量下载。".to_string(),
+            },
+        ));
+    }
+
+    let list_codes: Vec<String> = load_stock_list(source_path)?
+        .into_iter()
+        .filter_map(|row| row.first().cloned())
+        .filter(|value| !value.trim().is_empty())
+        .collect();
+    let existing_codes = query_existing_stock_codes(source_path)?;
+
+    let mut missing_codes: Vec<String> = list_codes
+        .into_iter()
+        .filter(|ts_code| !existing_codes.contains(ts_code))
+        .collect();
+    missing_codes.sort();
+    missing_codes.dedup();
+
+    let detail = if missing_codes.is_empty() {
+        "当前 stock_list.csv 中的股票都已在原始库里出现过，无需补全。".to_string()
+    } else {
+        format!(
+            "将按当前原始库起始日期到当前有效交易日，补全 {} 只完全缺失的股票。",
+            missing_codes.len()
+        )
+    };
+
+    Ok((
+        missing_codes.clone(),
+        DataDownloadMissingStockRepairStatus {
+            ready: true,
+            missing_count: missing_codes.len() as u64,
+            missing_samples: missing_codes.into_iter().take(12).collect(),
+            suggested_start_date: source_db.min_trade_date.clone(),
+            suggested_end_date: trade_calendar
+                .max_trade_date
+                .clone()
+                .or_else(|| source_db.max_trade_date.clone()),
+            detail,
+        },
+    ))
+}
+
 fn build_data_download_summary(summary: DownloadSummary) -> DataDownloadSummary {
     DataDownloadSummary {
         success_count: summary.success_count as u64,
@@ -308,6 +508,8 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
         query_trade_date_range(&source_db_path(trimmed), "stock_data.db", "stock_data")?;
     let trade_calendar = query_trade_calendar_status(trimmed)?;
     let stock_list = query_stock_list_status(trimmed)?;
+    let (_, missing_stock_repair) =
+        scan_missing_stock_codes(trimmed, &source_db, &stock_list, &trade_calendar)?;
     let (planned_action, planned_action_label, planned_action_detail) =
         plan_download_action(&source_db);
 
@@ -316,9 +518,58 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
         source_db,
         stock_list,
         trade_calendar,
+        missing_stock_repair,
         planned_action,
         planned_action_label,
         planned_action_detail,
+    })
+}
+
+pub fn prepare_missing_stock_repair_run(
+    input: MissingStockRepairRunInput,
+) -> Result<PreparedMissingStockRepairRun, String> {
+    let source_path = input.source_path.trim().to_string();
+    if source_path.is_empty() {
+        return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
+    }
+
+    let token = input.token.trim().to_string();
+    if token.is_empty() {
+        return Err("Token 不能为空".to_string());
+    }
+
+    let status = get_data_download_status(&source_path)?;
+    if !status.missing_stock_repair.ready {
+        return Err(status.missing_stock_repair.detail);
+    }
+    if status.missing_stock_repair.missing_count == 0 {
+        return Err("当前没有需要补全的缺失股票".to_string());
+    }
+    let start_date = status
+        .missing_stock_repair
+        .suggested_start_date
+        .clone()
+        .ok_or_else(|| "缺失股票补全缺少可用起始日期".to_string())?;
+    let end_date = "today".to_string();
+    let (missing_ts_codes, _) = scan_missing_stock_codes(
+        &source_path,
+        &status.source_db,
+        &status.stock_list,
+        &status.trade_calendar,
+    )?;
+
+    Ok(PreparedMissingStockRepairRun {
+        source_path,
+        token,
+        start_date,
+        end_date,
+        threads: input.threads.max(1),
+        retry_times: input.retry_times,
+        limit_calls_per_min: input.limit_calls_per_min.max(1),
+        include_turnover: input.include_turnover,
+        action: "repair-missing-stocks".to_string(),
+        action_label: "缺失股票补全".to_string(),
+        missing_ts_codes,
     })
 }
 
@@ -398,4 +649,145 @@ pub fn run_prepared_data_download(
         summary: build_data_download_summary(summary),
         status,
     })
+}
+
+pub fn run_prepared_missing_stock_repair(
+    prepared: &PreparedMissingStockRepairRun,
+    progress_cb: Option<&DownloadProgressCallback>,
+) -> Result<DataDownloadRunResult, String> {
+    let source_db = source_db_path(&prepared.source_path);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "原始库路径不是有效 UTF-8".to_string())?
+        .to_string();
+
+    let config = AppConfig {
+        data: DataConfig {
+            source_db: source_db_str,
+            adj_type: "qfq".to_string(),
+        },
+        output: OutputConfig {
+            dir: prepared.source_path.clone(),
+            result_db: "scoring_result.db".to_string(),
+        },
+        download: DownloadConfig {
+            token: prepared.token.clone(),
+            start_date: prepared.start_date.clone(),
+            end_date: prepared.end_date.clone(),
+            threads: prepared.threads,
+            retry_times: prepared.retry_times,
+            limit_calls_per_min: prepared.limit_calls_per_min,
+            refresh_stock_list: true,
+            include_turnover: prepared.include_turnover,
+        },
+    };
+
+    let summary = core_run_selected_stock_download_with_progress(
+        &config,
+        &prepared.missing_ts_codes,
+        progress_cb,
+    )?;
+    let status = get_data_download_status(&prepared.source_path)?;
+
+    Ok(DataDownloadRunResult {
+        action: prepared.action.clone(),
+        action_label: prepared.action_label.clone(),
+        elapsed_ms: 0,
+        summary: build_data_download_summary(summary),
+        status,
+    })
+}
+
+pub fn get_indicator_manage_page(source_path: &str) -> Result<IndicatorManagePageData, String> {
+    let trimmed = source_path.trim();
+    if trimmed.is_empty() {
+        return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
+    }
+
+    let path = ind_toml_path(trimmed);
+    if !path.exists() {
+        return Ok(IndicatorManagePageData {
+            exists: false,
+            file_path: path.display().to_string(),
+            items: Vec::new(),
+        });
+    }
+
+    let content = fs::read_to_string(&path)
+        .map_err(|e| format!("读取指标配置失败: path={}, err={e}", path.display()))?;
+    let items = if content.trim().is_empty() {
+        Vec::new()
+    } else {
+        IndsData::parse_from_text(&content)?
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| IndicatorManageItem {
+                index,
+                name: item.name,
+                expr: item.expr,
+                prec: item.prec,
+            })
+            .collect()
+    };
+
+    Ok(IndicatorManagePageData {
+        exists: true,
+        file_path: path.display().to_string(),
+        items,
+    })
+}
+
+fn build_indicator_manage_toml(items: &[IndicatorManageDraft]) -> Result<String, String> {
+    let normalized_items = items
+        .iter()
+        .map(|item| {
+            let name = item.name.trim().to_ascii_uppercase();
+            let expr = item.expr.trim().to_string();
+            if name.is_empty() {
+                return Err("指标名称不能为空".to_string());
+            }
+            if expr.is_empty() {
+                return Err(format!("指标 {name} 的表达式不能为空"));
+            }
+
+            Ok(IndicatorManageFileItem {
+                name,
+                expr,
+                prec: item.prec,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let text = toml::to_string_pretty(&IndicatorManageFile {
+        version: 1,
+        ind: normalized_items,
+    })
+    .map_err(|e| format!("序列化指标配置失败: {e}"))?;
+
+    let parsed_items = IndsData::parse_from_text(&text)?;
+    for item in parsed_items {
+        let tokens = lex_all(&item.expr);
+        let mut parser = Parser::new(tokens);
+        parser
+            .parse_main()
+            .map_err(|e| format!("指标 {} 表达式解析错误在{}:{}", item.name, e.idx, e.msg))?;
+    }
+
+    Ok(text)
+}
+
+pub fn save_indicator_manage_page(
+    source_path: &str,
+    items: Vec<IndicatorManageDraft>,
+) -> Result<IndicatorManagePageData, String> {
+    let trimmed = source_path.trim();
+    if trimmed.is_empty() {
+        return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
+    }
+
+    let path = ind_toml_path(trimmed);
+    let text = build_indicator_manage_toml(&items)?;
+    fs::write(&path, text)
+        .map_err(|e| format!("写入指标配置失败: path={}, err={e}", path.display()))?;
+    get_indicator_manage_page(trimmed)
 }

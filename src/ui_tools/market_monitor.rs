@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 use crate::ui_tools::{
+    build_latest_vol_map,
     overview::{OverviewRow, get_rank_overview},
     realtime::{RealtimeFetchMeta, fetch_realtime_quote_map},
 };
@@ -15,6 +16,7 @@ pub struct MarketMonitorRow {
     pub total_score: Option<f64>,
     pub latest_price: Option<f64>,
     pub latest_change_pct: Option<f64>,
+    pub volume_ratio: Option<f64>,
     pub open: Option<f64>,
     pub high: Option<f64>,
     pub low: Option<f64>,
@@ -36,11 +38,21 @@ pub struct MarketMonitorPageData {
 pub fn build_market_monitor_rows(
     overview_rows: Vec<OverviewRow>,
     quote_map: &std::collections::HashMap<String, crate::crawler::SinaQuote>,
+    latest_vol_map: &std::collections::HashMap<String, f64>,
 ) -> Vec<MarketMonitorRow> {
     overview_rows
         .into_iter()
         .map(|row| {
             let quote = quote_map.get(&row.ts_code);
+            let volume_ratio = match (
+                quote.map(|item| item.vol),
+                latest_vol_map.get(&row.ts_code).copied(),
+            ) {
+                (Some(current_vol), Some(previous_vol)) if previous_vol > 0.0 => {
+                    Some(current_vol / previous_vol)
+                }
+                _ => None,
+            };
             MarketMonitorRow {
                 ts_code: row.ts_code,
                 name: row.name,
@@ -49,6 +61,7 @@ pub fn build_market_monitor_rows(
                 total_score: row.total_score,
                 latest_price: quote.map(|item| item.price),
                 latest_change_pct: quote.and_then(|item| item.change_pct),
+                volume_ratio,
                 open: quote.map(|item| item.open),
                 high: quote.map(|item| item.high),
                 low: quote.map(|item| item.low),
@@ -59,15 +72,18 @@ pub fn build_market_monitor_rows(
 }
 
 pub fn build_market_monitor_page_from_rows(
+    source_path: &str,
     overview_rows: Vec<OverviewRow>,
     quote_map: std::collections::HashMap<String, crate::crawler::SinaQuote>,
     fetch_meta: RealtimeFetchMeta,
-) -> MarketMonitorPageData {
+) -> Result<MarketMonitorPageData, String> {
     let resolved_reference_trade_date =
         overview_rows.first().and_then(|row| row.trade_date.clone());
-    let rows = build_market_monitor_rows(overview_rows, &quote_map);
+    let ts_codes: Vec<String> = overview_rows.iter().map(|row| row.ts_code.clone()).collect();
+    let latest_vol_map = build_latest_vol_map(source_path, &ts_codes)?;
+    let rows = build_market_monitor_rows(overview_rows, &quote_map, &latest_vol_map);
 
-    MarketMonitorPageData {
+    Ok(MarketMonitorPageData {
         rows,
         requested_count: fetch_meta.requested_count,
         effective_count: fetch_meta.effective_count,
@@ -75,7 +91,7 @@ pub fn build_market_monitor_page_from_rows(
         truncated: fetch_meta.truncated,
         refreshed_at: fetch_meta.refreshed_at,
         reference_trade_date: resolved_reference_trade_date,
-    }
+    })
 }
 
 pub fn get_market_monitor_page(
@@ -85,7 +101,7 @@ pub fn get_market_monitor_page(
 ) -> Result<MarketMonitorPageData, String> {
     let limit = top_limit.unwrap_or(20).max(1);
     let overview_rows = get_rank_overview(
-        source_path,
+        source_path.clone(),
         reference_trade_date,
         Some(limit),
         None,
@@ -97,16 +113,5 @@ pub fn get_market_monitor_page(
         .map(|row| row.ts_code.clone())
         .collect();
     let (quote_map, fetch_meta) = fetch_realtime_quote_map(&ts_codes)?;
-    let resolved_reference_trade_date =
-        overview_rows.first().and_then(|row| row.trade_date.clone());
-
-    Ok(MarketMonitorPageData {
-        rows: build_market_monitor_rows(overview_rows, &quote_map),
-        requested_count: fetch_meta.requested_count,
-        effective_count: fetch_meta.effective_count,
-        fetched_count: fetch_meta.fetched_count,
-        truncated: fetch_meta.truncated,
-        refreshed_at: fetch_meta.refreshed_at,
-        reference_trade_date: resolved_reference_trade_date,
-    })
+    build_market_monitor_page_from_rows(&source_path, overview_rows, quote_map, fetch_meta)
 }

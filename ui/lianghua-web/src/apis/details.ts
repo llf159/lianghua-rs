@@ -79,6 +79,7 @@ export type DetailStrategyTriggerRow = {
   // 策略触发表用数据
   rule_name: string
   rule_score?: number | null
+  is_triggered?: boolean | null
   hit_date?: string
   lag?: number | null
   explain?: string

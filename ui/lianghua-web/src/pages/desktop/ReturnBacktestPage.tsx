@@ -339,6 +339,12 @@ function ReturnTable({
     scrollRegionKey,
     [sortedRows.length, rows.length],
   );
+  const detailNavigationItems = sortedRows.map((row) => ({
+    tsCode: row.ts_code,
+    tradeDate: tradeDate || undefined,
+    sourcePath: sourcePath || undefined,
+    name: row.name ?? undefined,
+  }));
 
   return (
     <section className="return-backtest-panel-card">
@@ -417,6 +423,7 @@ function ReturnTable({
                     tsCode={row.ts_code}
                     tradeDate={tradeDate || undefined}
                     sourcePath={sourcePath}
+                    navigationItems={detailNavigationItems}
                   >
                     {row.name ?? row.ts_code}
                   </DetailsLink>

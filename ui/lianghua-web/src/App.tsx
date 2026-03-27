@@ -28,6 +28,8 @@ import BoardAnalysisPage from './pages/desktop/BoardAnalysisPage.tsx'
 import StrategyPerformanceBacktestPage from './pages/desktop/StrategyPerformanceBacktestPage.tsx'
 import StrategyValidationBacktestPage from './pages/desktop/StrategyValidationBacktestPage.tsx'
 import DetailsOverlayRoute from './shared/DetailsOverlayRoute.tsx'
+import DetailsLinkedOverlayRoute from './shared/DetailsLinkedOverlayRoute.tsx'
+import DetailsLinkedPage from './pages/desktop/DetailsLinkedPage.tsx'
 
 type BackgroundLocationState = {
   backgroundLocation?: Location
@@ -49,6 +51,7 @@ function AppRoutes() {
           <Route path="watch-observe" element={<WatchObservePage />} />
           <Route path="overview" element={<OverviewPage />} />
           <Route path="details" element={<DetailsPage />} />
+          <Route path="details-linked" element={<DetailsLinkedPage />} />
           <Route path="stock-pick" element={<StockPickPage />}>
             <Route index element={<Navigate to="/stock-pick/expression" replace />} />
             <Route path="expression" element={<ExpressionStockPickPage />} />
@@ -81,6 +84,7 @@ function AppRoutes() {
       {backgroundLocation ? (
         <Routes>
           <Route path="/details" element={<DetailsOverlayRoute />} />
+          <Route path="/details-linked" element={<DetailsLinkedOverlayRoute />} />
         </Routes>
       ) : null}
     </>

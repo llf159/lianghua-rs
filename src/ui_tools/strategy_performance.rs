@@ -770,10 +770,11 @@ fn collect_validation_rule_hits(
                     if !signal_date_set.contains(trade_date) {
                         continue;
                     }
-                    let rule_score = rule_series.series.get(offset).copied().unwrap_or(0.0);
-                    if rule_score == 0.0 {
+                    let is_triggered = rule_series.triggered.get(offset).copied().unwrap_or(false);
+                    if !is_triggered {
                         continue;
                     }
+                    let rule_score = rule_series.series.get(offset).copied().unwrap_or(0.0);
                     group_rows.push(ScoreDetails {
                         ts_code: ts_code.clone(),
                         trade_date: trade_date.clone(),

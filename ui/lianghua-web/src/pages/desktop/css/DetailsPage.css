@@ -4,6 +4,22 @@
   min-width: 0;
 }
 
+.details-page-linked-overlay > .details-chart-card {
+  order: 2;
+}
+
+.details-page-linked-overlay > .details-overview-grid {
+  order: 3;
+}
+
+.details-page-linked-overlay > .details-strategy-card {
+  order: 4;
+}
+
+.details-page-linked-overlay > .details-query-card {
+  padding-bottom: 10px;
+}
+
 .details-card {
   border: 1px solid #d8dee6;
   border-radius: 10px;
@@ -738,7 +754,7 @@
   justify-items: center;
   gap: 3px;
   max-width: min(72%, 520px);
-  color: rgba(62, 76, 94, 0.14);
+  color: rgba(62, 76, 94, 0.25);
   pointer-events: none;
   text-align: center;
 }
@@ -765,8 +781,55 @@
 .details-strategy-grid {
   margin-top: 12px;
   display: grid;
-  grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 0.64fr) 14px minmax(0, 0.36fr);
+  gap: 10px;
+  align-items: stretch;
+}
+
+.details-strategy-grid.is-dragging {
+  user-select: none;
+  cursor: col-resize;
+}
+
+.details-strategy-grid.is-stacked {
+  grid-template-columns: 1fr;
   gap: 12px;
+}
+
+.details-strategy-panel {
+  min-width: 0;
+}
+
+.details-strategy-panel > .details-subcard {
+  height: 100%;
+}
+
+.details-strategy-resize {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.details-strategy-grid.is-stacked .details-strategy-resize {
+  display: none;
+}
+
+.details-strategy-resize-line {
+  width: 2px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #d5dde8, #aebdce, #d5dde8);
+  box-shadow: 0 0 0 4px rgba(223, 231, 240, 0.55);
+}
+
+.details-strategy-resize:hover .details-strategy-resize-line,
+.details-strategy-resize:focus-visible .details-strategy-resize-line,
+.details-strategy-grid.is-dragging .details-strategy-resize-line {
+  background: linear-gradient(180deg, #f29f50, #dc6b17, #f29f50);
+  box-shadow: 0 0 0 4px rgba(249, 115, 22, 0.18);
 }
 
 .details-strategy-toolbar {
@@ -985,6 +1048,14 @@
   .details-overview-grid,
   .details-strategy-grid {
     grid-template-columns: 1fr;
+  }
+
+  .details-strategy-grid {
+    gap: 12px;
+  }
+
+  .details-strategy-resize {
+    display: none;
   }
 
   .details-overview-card-body,

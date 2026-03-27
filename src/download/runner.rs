@@ -524,7 +524,6 @@ fn download_first_all_market(
         download_config.limit_calls_per_min,
     )?;
     let pool = build_download_pool(download_config.threads)?;
-    let mut total = DownloadSummary::default();
     let db_path = source_db_path(source_dir);
     let db_path_str = db_path
         .to_str()
@@ -540,7 +539,57 @@ fn download_first_all_market(
             .collect()
     };
 
-    let tasks = build_download_task(&ts_codes, start_date, end_date, adj_type, with_factors);
+    download_selected_stocks_with_context(
+        source_dir,
+        &effective_trade_date,
+        &client,
+        &pool,
+        &conn,
+        &mut indicator_columns_ready,
+        &ts_codes,
+        start_date,
+        end_date,
+        adj_type,
+        with_factors,
+        download_config.retry_times,
+        "首次全量下载开始",
+        "首次全量下载结束",
+        progress_cb,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn download_selected_stocks_with_context(
+    source_dir: &str,
+    effective_trade_date: &str,
+    client: &TushareClient,
+    pool: &ThreadPool,
+    conn: &Connection,
+    indicator_columns_ready: &mut bool,
+    ts_codes: &[String],
+    start_date: &str,
+    end_date: &str,
+    adj_type: AdjType,
+    with_factors: bool,
+    retry_times: usize,
+    start_message: &str,
+    done_message: &str,
+    progress_cb: Option<&DownloadProgressCallback>,
+) -> Result<DownloadSummary, String> {
+    if ts_codes.is_empty() {
+        emit_progress(
+            progress_cb,
+            "done",
+            0,
+            0,
+            Some(effective_trade_date.to_string()),
+            "没有需要处理的股票。",
+        );
+        return Ok(DownloadSummary::default());
+    }
+
+    let mut total = DownloadSummary::default();
+    let tasks = build_download_task(ts_codes, start_date, end_date, adj_type, with_factors);
     let total_tasks = tasks.len();
     let mut processed_tasks = 0usize;
     emit_progress(
@@ -549,16 +598,16 @@ fn download_first_all_market(
         0,
         total_tasks,
         None,
-        format!("首次全量下载开始，共 {} 只股票待处理。", total_tasks),
+        format!("{start_message}，共 {total_tasks} 只股票待处理。"),
     );
 
-    for (batch_idx, batch) in tasks.chunks(download_config.threads.max(1)).enumerate() {
+    for (batch_idx, batch) in tasks.chunks(pool.current_num_threads().max(1)).enumerate() {
         let prepared_batch = pool.install(|| client.prepare_stock_downloads(source_dir, batch));
         let batch_summary = prepared_batch.summary();
-        if !indicator_columns_ready && !prepared_batch.prepared_items.is_empty() {
+        if !*indicator_columns_ready && !prepared_batch.prepared_items.is_empty() {
             let indicator_names = collect_indicator_names(&prepared_batch.prepared_items);
-            ensure_indicator_columns(&conn, &indicator_names)?;
-            indicator_columns_ready = true;
+            ensure_indicator_columns(conn, &indicator_names)?;
+            *indicator_columns_ready = true;
         }
         emit_progress(
             progress_cb,
@@ -572,7 +621,7 @@ fn download_first_all_market(
                 batch.len()
             ),
         );
-        write_prepared_stock_batch(&conn, &prepared_batch.prepared_items)?;
+        write_prepared_stock_batch(conn, &prepared_batch.prepared_items)?;
         merge_summary(&mut total, batch_summary);
         processed_tasks += batch.len();
         emit_progress(
@@ -585,29 +634,29 @@ fn download_first_all_market(
         );
     }
 
-    if !total.failed_items.is_empty() && download_config.retry_times > 0 {
+    if !total.failed_items.is_empty() && retry_times > 0 {
         let failed_tasks = keep_failed_tasks(tasks, &total.failed_items);
         let retry_task_count = failed_tasks.len();
         emit_progress(
             progress_cb,
             "retry_failed",
             0,
-            download_config.retry_times.max(1),
+            retry_times.max(1),
             Some(format!("待重试 {} 只", retry_task_count)),
             format!("共有 {} 只股票失败，准备进入重试阶段。", retry_task_count),
         );
         let retry_batch = retry_failed_downloads(
-            &client,
+            client,
             source_dir,
             failed_tasks,
-            download_config.retry_times,
-            &pool,
+            retry_times,
+            pool,
             progress_cb,
         );
         let retry_summary = retry_batch.summary();
-        if !indicator_columns_ready && !retry_batch.prepared_items.is_empty() {
+        if !*indicator_columns_ready && !retry_batch.prepared_items.is_empty() {
             let indicator_names = collect_indicator_names(&retry_batch.prepared_items);
-            ensure_indicator_columns(&conn, &indicator_names)?;
+            ensure_indicator_columns(conn, &indicator_names)?;
         }
         emit_progress(
             progress_cb,
@@ -620,7 +669,7 @@ fn download_first_all_market(
                 retry_batch.prepared_items.len()
             ),
         );
-        write_prepared_stock_batch(&conn, &retry_batch.prepared_items)?;
+        write_prepared_stock_batch(conn, &retry_batch.prepared_items)?;
 
         total.success_count += retry_summary.success_count;
         total.saved_rows += retry_summary.saved_rows;
@@ -628,21 +677,76 @@ fn download_first_all_market(
         total.failed_items = retry_summary.failed_items;
     }
 
-    checkpoint_stock_data(&conn)?;
+    checkpoint_stock_data(conn)?;
 
     emit_progress(
         progress_cb,
         "done",
         total_tasks,
         total_tasks,
-        Some(effective_trade_date),
+        Some(effective_trade_date.to_string()),
         format!(
-            "首次全量下载结束，成功 {} 只，失败 {} 只。",
+            "{done_message}，成功 {} 只，失败 {} 只。",
             total.success_count, total.failed_count
         ),
     );
 
     Ok(total)
+}
+
+pub fn download_selected_stocks(
+    config: &AppConfig,
+    ts_codes: &[String],
+    progress_cb: Option<&DownloadProgressCallback>,
+) -> Result<DownloadSummary, String> {
+    let effective_trade_date = init_stock_basic_data(config, progress_cb)?;
+
+    let adj_type = match config.data.adj_type.trim().to_ascii_lowercase().as_str() {
+        "qfq" => Ok(AdjType::Qfq),
+        "hfq" => Ok(AdjType::Hfq),
+        "raw" => Ok(AdjType::Raw),
+        other => Err(format!("不支持的复权类型: {other}")),
+    }?;
+
+    let download_config = &config.download;
+    let source_dir = config.output.dir.as_str();
+    let start_date = download_config.start_date.as_str();
+    let end_date = if download_config.end_date.eq_ignore_ascii_case("today") {
+        effective_trade_date.as_str()
+    } else {
+        download_config.end_date.as_str()
+    };
+    let with_factors = download_config.include_turnover;
+    let client = TushareClient::new(
+        download_config.token.clone(),
+        download_config.limit_calls_per_min,
+    )?;
+    let pool = build_download_pool(download_config.threads)?;
+    let db_path = source_db_path(source_dir);
+    let db_path_str = db_path
+        .to_str()
+        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
+    init_stock_data_db(db_path_str)?;
+    let conn = Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
+    let mut indicator_columns_ready = false;
+
+    download_selected_stocks_with_context(
+        source_dir,
+        &effective_trade_date,
+        &client,
+        &pool,
+        &conn,
+        &mut indicator_columns_ready,
+        ts_codes,
+        start_date,
+        end_date,
+        adj_type,
+        with_factors,
+        download_config.retry_times,
+        "缺失股票补全开始",
+        "缺失股票补全结束",
+        progress_cb,
+    )
 }
 
 // 增量部分

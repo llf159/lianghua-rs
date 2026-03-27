@@ -225,6 +225,20 @@ function buildScopeWayValue(mode: ScopeMode, consecThreshold: number) {
   return mode
 }
 
+function normalizePositiveIntegerInput(raw: string, fallback: number) {
+  const trimmed = raw.trim()
+  if (!trimmed) {
+    return Math.max(1, Math.floor(fallback || 1))
+  }
+
+  const parsed = Number(trimmed)
+  if (!Number.isFinite(parsed)) {
+    return Math.max(1, Math.floor(fallback || 1))
+  }
+
+  return Math.max(1, Math.floor(parsed))
+}
+
 function getScopeFilterValue(scopeWay: string) {
   const normalized = scopeWay.trim().toUpperCase()
   return normalized.startsWith('CONSEC>=') ? 'CONSEC' : normalized
@@ -251,6 +265,8 @@ export default function StrategyManagePage() {
   const [draft, setDraft] = useState<StrategyManageRuleDraft | null>(null)
   const [distPointsText, setDistPointsText] = useState('')
   const [fixedPointsText, setFixedPointsText] = useState('')
+  const [scopeWindowsInput, setScopeWindowsInput] = useState('1')
+  const [consecThresholdInput, setConsecThresholdInput] = useState('2')
   const [scoreMode, setScoreMode] = useState<ScoreMode>('fixed')
   const [deleteTarget, setDeleteTarget] = useState<StrategyManageRuleItem | null>(null)
   const [loading, setLoading] = useState(true)
@@ -399,6 +415,8 @@ export default function StrategyManagePage() {
     setDraft(null)
     setDistPointsText('')
     setFixedPointsText('')
+    setScopeWindowsInput('1')
+    setConsecThresholdInput('2')
     setScoreMode('fixed')
     setCheckNotice('')
   }
@@ -409,6 +427,8 @@ export default function StrategyManagePage() {
     setDraft(buildEmptyDraft())
     setDistPointsText('')
     setFixedPointsText('')
+    setScopeWindowsInput('1')
+    setConsecThresholdInput('2')
     setScoreMode('fixed')
     setCheckNotice('')
     setNotice('')
@@ -421,6 +441,8 @@ export default function StrategyManagePage() {
     setDraft(buildDraftFromRule(rule))
     setDistPointsText(distPointsToText(rule.dist_points))
     setFixedPointsText(String(rule.points))
+    setScopeWindowsInput(String(rule.scope_windows))
+    setConsecThresholdInput(String(parseScopeWayDraft(rule.scope_way).consecThreshold))
     setScoreMode(hasDistPoints(rule.dist_points) ? 'dist' : 'fixed')
     setCheckNotice('')
     setNotice('')
@@ -882,17 +904,42 @@ export default function StrategyManagePage() {
                     type="number"
                     min={1}
                     step={1}
-                    value={draftScopeState.consecThreshold}
+                    value={consecThresholdInput}
                     onChange={(event) =>
+                      {
+                        const raw = event.target.value
+                        setConsecThresholdInput(raw)
+                        if (!raw.trim()) {
+                          return
+                        }
+                        setDraft((current) =>
+                          current
+                            ? {
+                                ...current,
+                                scope_way: buildScopeWayValue(
+                                  'CONSEC',
+                                  normalizePositiveIntegerInput(raw, draftScopeState.consecThreshold),
+                                ),
+                              }
+                            : current,
+                        )
+                      }
+                    }
+                    onBlur={() => {
+                      const normalized = normalizePositiveIntegerInput(
+                        consecThresholdInput,
+                        draftScopeState.consecThreshold,
+                      )
+                      setConsecThresholdInput(String(normalized))
                       setDraft((current) =>
                         current
                           ? {
                               ...current,
-                              scope_way: buildScopeWayValue('CONSEC', Number(event.target.value) || 1),
+                              scope_way: buildScopeWayValue('CONSEC', normalized),
                             }
                           : current,
                       )
-                    }
+                    }}
                   />
                 </label>
               ) : null}
@@ -903,12 +950,32 @@ export default function StrategyManagePage() {
                   type="number"
                   min={1}
                   step={1}
-                  value={draft.scope_windows}
-                  onChange={(event) =>
+                  value={scopeWindowsInput}
+                  onChange={(event) => {
+                    const raw = event.target.value
+                    setScopeWindowsInput(raw)
+                    if (!raw.trim()) {
+                      return
+                    }
                     setDraft((current) =>
-                      current ? { ...current, scope_windows: Number(event.target.value) || 1 } : current,
+                      current
+                        ? {
+                            ...current,
+                            scope_windows: normalizePositiveIntegerInput(raw, current.scope_windows),
+                          }
+                        : current,
                     )
-                  }
+                  }}
+                  onBlur={() => {
+                    if (!draft) {
+                      return
+                    }
+                    const normalized = normalizePositiveIntegerInput(scopeWindowsInput, draft.scope_windows)
+                    setScopeWindowsInput(String(normalized))
+                    setDraft((current) =>
+                      current ? { ...current, scope_windows: normalized } : current,
+                    )
+                  }}
                 />
               </label>
 

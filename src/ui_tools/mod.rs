@@ -13,9 +13,11 @@ pub mod watch_observe;
 
 use std::collections::HashMap;
 
-use duckdb::Connection;
+use duckdb::{Connection, params_from_iter};
 
-use crate::data::{load_stock_list, load_ths_concepts_list};
+use crate::data::{load_stock_list, load_ths_concepts_list, source_db_path};
+
+const DEFAULT_ADJ_TYPE: &str = "qfq";
 
 fn build_stock_list_text_map(
     source_dir: &str,
@@ -139,6 +141,63 @@ fn build_area_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
 
 fn build_industry_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
     build_stock_list_text_map(source_dir, 4)
+}
+
+fn build_latest_vol_map(
+    source_dir: &str,
+    ts_codes: &[String],
+) -> Result<HashMap<String, f64>, String> {
+    if ts_codes.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let source_db = source_db_path(source_dir);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
+    let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+
+    let placeholders = std::iter::repeat_n("?", ts_codes.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        r#"
+        SELECT ts_code, latest_vol
+        FROM (
+            SELECT
+                ts_code,
+                TRY_CAST(vol AS DOUBLE) AS latest_vol,
+                ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS row_num
+            FROM stock_data
+            WHERE adj_type = ? AND ts_code IN ({placeholders})
+        ) latest_rows
+        WHERE row_num = 1
+        "#
+    );
+
+    let mut params = Vec::with_capacity(ts_codes.len() + 1);
+    params.push(DEFAULT_ADJ_TYPE.to_string());
+    params.extend(ts_codes.iter().cloned());
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("预编译最新成交量查询失败: {e}"))?;
+    let mut rows = stmt
+        .query(params_from_iter(params.iter()))
+        .map_err(|e| format!("查询最新成交量失败: {e}"))?;
+
+    let mut out = HashMap::with_capacity(ts_codes.len());
+    while let Some(row) = rows.next().map_err(|e| format!("读取最新成交量失败: {e}"))? {
+        let ts_code: String = row.get(0).map_err(|e| format!("读取 ts_code 失败: {e}"))?;
+        let latest_vol: Option<f64> = row
+            .get(1)
+            .map_err(|e| format!("读取最新成交量字段失败: {e}"))?;
+        if let Some(value) = latest_vol.filter(|value| value.is_finite()) {
+            out.insert(ts_code, value);
+        }
+    }
+
+    Ok(out)
 }
 
 fn resolve_trade_date(conn: &Connection, trade_date: Option<String>) -> Result<String, String> {

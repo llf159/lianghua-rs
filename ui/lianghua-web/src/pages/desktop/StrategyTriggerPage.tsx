@@ -1384,6 +1384,12 @@ function StrategyDetailModal({
     `strategy-trigger-detail-stocks:${strategyName || "default"}`,
     [detailTradeDate, sortedRows.length],
   );
+  const detailNavigationItems = sortedRows.map((row) => ({
+    tsCode: row.ts_code,
+    tradeDate: detailTradeDate || undefined,
+    sourcePath: sourcePath.trim() || undefined,
+    name: row.name ?? undefined,
+  }));
 
   if (typeof document === "undefined") {
     return null;
@@ -1617,6 +1623,7 @@ function StrategyDetailModal({
                                   tsCode={row.ts_code}
                                   tradeDate={detailTradeDate || undefined}
                                   sourcePath={sourcePath.trim()}
+                                  navigationItems={detailNavigationItems}
                                 >
                                   {row.name ?? row.ts_code}
                                 </DetailsLink>

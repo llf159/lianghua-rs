@@ -1,11 +1,13 @@
 import { type ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { buildDetailsPath, type DetailsRouteInput } from "./detailsRoute";
+import { buildLinkedDetailsPath, type DetailsRouteInput } from "./detailsRoute";
+import type { DetailsNavigationItem, DetailsLinkLocationState } from "./detailsLinkState";
 
 type DetailsLinkProps = DetailsRouteInput & {
   children: ReactNode;
   className?: string;
   title?: string;
+  navigationItems?: DetailsNavigationItem[];
 };
 
 export default function DetailsLink({
@@ -15,6 +17,7 @@ export default function DetailsLink({
   children,
   className,
   title,
+  navigationItems,
 }: DetailsLinkProps) {
   const location = useLocation();
   const backgroundLocation =
@@ -30,8 +33,13 @@ export default function DetailsLink({
       className={className}
       preventScrollReset
       title={title}
-      to={buildDetailsPath({ tsCode, tradeDate, sourcePath })}
-      state={{ backgroundLocation }}
+      to={buildLinkedDetailsPath({ tsCode, tradeDate, sourcePath })}
+      state={
+        {
+          backgroundLocation,
+          navigationItems,
+        } satisfies DetailsLinkLocationState
+      }
     >
       {children}
     </Link>

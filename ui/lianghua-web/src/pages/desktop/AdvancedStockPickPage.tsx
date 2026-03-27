@@ -297,6 +297,12 @@ function AdvancedStockPickTable({
     AdvancedStockPickRow,
     AdvancedRowSortKey
   >(rows, sortDefinitions);
+  const detailNavigationItems = sortedRows.map((row) => ({
+    tsCode: row.ts_code,
+    tradeDate: tradeDate || undefined,
+    sourcePath: sourcePath || undefined,
+    name: row.name ?? undefined,
+  }));
   const tableWrapRef = useRouteScrollRegion<HTMLDivElement>(
     "advanced-stock-pick-table",
     [sortedRows.length, tradeDate, sourcePath],
@@ -395,6 +401,7 @@ function AdvancedStockPickTable({
                   tsCode={row.ts_code}
                   tradeDate={tradeDate}
                   sourcePath={sourcePath}
+                  navigationItems={detailNavigationItems}
                 >
                   {row.name ?? row.ts_code}
                 </DetailsLink>

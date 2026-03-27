@@ -14,6 +14,7 @@ export type WatchObserveRow = {
   name: string
   latestClose: number | null
   latestChangePct: number | null
+  volumeRatio: number | null
   addedDate: string
   postWatchReturnPct: number | null
   todayRank: number | null

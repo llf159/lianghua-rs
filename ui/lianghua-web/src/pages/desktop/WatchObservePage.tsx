@@ -37,6 +37,7 @@ type ViewMode = "db" | "realtime";
 type WatchObserveSortKey =
   | "latestClose"
   | "latestChangePct"
+  | "volumeRatio"
   | "addedDate"
   | "postWatchReturnPct"
   | "todayRank";
@@ -65,6 +66,13 @@ function formatPercent(value: number | null) {
     return "--";
   }
   return `${value.toFixed(2)}%`;
+}
+
+function formatRatio(value: number | null) {
+  if (value === null || !Number.isFinite(value)) {
+    return "--";
+  }
+  return value.toFixed(2);
 }
 
 function getPercentClassName(value: number | null) {
@@ -154,6 +162,7 @@ export default function WatchObservePage() {
       ({
         latestClose: { value: (row) => row.latestClose },
         latestChangePct: { value: (row) => row.latestChangePct },
+        volumeRatio: { value: (row) => row.volumeRatio },
         addedDate: { value: (row) => row.addedDate },
         postWatchReturnPct: { value: (row) => row.postWatchReturnPct },
         todayRank: { value: (row) => row.todayRank },
@@ -166,6 +175,12 @@ export default function WatchObservePage() {
     WatchObserveRow,
     WatchObserveSortKey
   >(rows, sortDefinitions);
+  const detailNavigationItems = sortedRows.map((row) => ({
+    tsCode: row.tsCode,
+    tradeDate: resolvedReferenceTradeDate ?? row.tradeDate,
+    sourcePath: sourcePathTrimmed || undefined,
+    name: row.name || undefined,
+  }));
   const tableWrapRef = useRouteScrollRegion<HTMLDivElement>(
     "watch-observe-table",
     [sortedRows.length, isDeleteMode, viewMode],
@@ -532,7 +547,7 @@ export default function WatchObservePage() {
             <div className="watch-observe-table-wrap" ref={tableWrapRef}>
               <table
                 className="watch-observe-table"
-                style={{ minWidth: isDeleteMode ? "1128px" : "1080px" }}
+                style={{ minWidth: isDeleteMode ? "1216px" : "1168px" }}
               >
                 <colgroup>
                   {isDeleteMode ? <col style={{ width: "48px" }} /> : null}
@@ -540,6 +555,7 @@ export default function WatchObservePage() {
                   <col style={{ width: "88px" }} />
                   <col style={{ width: "104px" }} />
                   <col style={{ width: "96px" }} />
+                  <col style={{ width: "88px" }} />
                   <col style={{ width: "92px" }} />
                   <col style={{ width: "118px" }} />
                   <col style={{ width: "120px" }} />
@@ -579,6 +595,20 @@ export default function WatchObservePage() {
                         direction={sortDirection}
                         onClick={() => toggleSort("latestChangePct")}
                         title={`按${latestChangeHeader}排序`}
+                      />
+                    </th>
+                    <th
+                      aria-sort={getAriaSort(
+                        sortKey === "volumeRatio",
+                        sortDirection,
+                      )}
+                    >
+                      <TableSortButton
+                        label="量比"
+                        isActive={sortKey === "volumeRatio"}
+                        direction={sortDirection}
+                        onClick={() => toggleSort("volumeRatio")}
+                        title="按量比排序"
                       />
                     </th>
                     <th
@@ -676,6 +706,7 @@ export default function WatchObservePage() {
                               tradeDate={resolvedReferenceTradeDate ?? row.tradeDate}
                               sourcePath={sourcePathTrimmed}
                               title={`查看 ${row.name} 详情`}
+                              navigationItems={detailNavigationItems}
                             >
                               {row.name}
                             </DetailsLink>
@@ -691,6 +722,9 @@ export default function WatchObservePage() {
                           title={formatPercent(row.latestChangePct)}
                         >
                           {formatPercent(row.latestChangePct)}
+                        </td>
+                        <td title={formatRatio(row.volumeRatio)}>
+                          {formatRatio(row.volumeRatio)}
                         </td>
                         <td title={row.addedDate || "--"}>
                           {row.addedDate || "--"}

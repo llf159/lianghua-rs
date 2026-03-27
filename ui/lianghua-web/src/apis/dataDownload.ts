@@ -26,9 +26,19 @@ export type DataDownloadStatus = {
   sourceDb: RankComputeDbRange
   stockList: DataDownloadFileStatus
   tradeCalendar: DataDownloadFileStatus
+  missingStockRepair: DataDownloadMissingStockRepairStatus
   plannedAction: string
   plannedActionLabel: string
   plannedActionDetail: string
+}
+
+export type DataDownloadMissingStockRepairStatus = {
+  ready: boolean
+  missingCount: number
+  missingSamples: string[]
+  suggestedStartDate: string | null
+  suggestedEndDate: string | null
+  detail: string
 }
 
 export type DataDownloadRequest = {
@@ -37,6 +47,16 @@ export type DataDownloadRequest = {
   token: string
   startDate: string
   endDate: string
+  threads: number
+  retryTimes: number
+  limitCallsPerMin: number
+  includeTurnover: boolean
+}
+
+export type MissingStockRepairRequest = {
+  downloadId: string
+  sourcePath: string
+  token: string
   threads: number
   retryTimes: number
   limitCallsPerMin: number
@@ -70,12 +90,43 @@ export type DataDownloadProgress = {
   message: string
 }
 
+export type IndicatorManageItem = {
+  index: number
+  name: string
+  expr: string
+  prec: number
+}
+
+export type IndicatorManageDraft = {
+  name: string
+  expr: string
+  prec: number
+}
+
+export type IndicatorManagePageData = {
+  exists: boolean
+  filePath: string
+  items: IndicatorManageItem[]
+}
+
 export async function getDataDownloadStatus(sourcePath: string) {
   return invoke<DataDownloadStatus>('get_data_download_status', { sourcePath })
 }
 
 export async function runDataDownload(request: DataDownloadRequest) {
   return invoke<DataDownloadRunResult>('run_data_download', { request })
+}
+
+export async function runMissingStockRepair(request: MissingStockRepairRequest) {
+  return invoke<DataDownloadRunResult>('run_missing_stock_repair', { request })
+}
+
+export async function getIndicatorManagePage(sourcePath: string) {
+  return invoke<IndicatorManagePageData>('get_indicator_manage_page', { sourcePath })
+}
+
+export async function saveIndicatorManagePage(sourcePath: string, items: IndicatorManageDraft[]) {
+  return invoke<IndicatorManagePageData>('save_indicator_manage_page', { sourcePath, items })
 }
 
 export async function listenDataDownloadProgress(

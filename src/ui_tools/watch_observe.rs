@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::{
     data::{result_db_path, source_db_path},
     ui_tools::{
-        build_concepts_map, build_name_map,
+        build_concepts_map, build_latest_vol_map, build_name_map,
         realtime::{RealtimeFetchMeta, fetch_realtime_quote_map},
         resolve_trade_date,
     },
@@ -31,6 +31,7 @@ pub struct WatchObserveRow {
     pub name: String,
     pub latest_close: Option<f64>,
     pub latest_change_pct: Option<f64>,
+    pub volume_ratio: Option<f64>,
     pub added_date: String,
     pub post_watch_return_pct: Option<f64>,
     pub today_rank: Option<i64>,
@@ -276,6 +277,7 @@ pub fn hydrate_watch_observe_rows(
                 name: row.name.clone(),
                 latest_close: None,
                 latest_change_pct: None,
+                volume_ratio: None,
                 added_date: row.added_date.clone(),
                 post_watch_return_pct: None,
                 today_rank: None,
@@ -311,6 +313,7 @@ pub fn hydrate_watch_observe_rows(
             .as_ref()
             .and_then(|conn| query_latest_snapshot(conn, &row.ts_code).ok())
             .unwrap_or((None, None));
+        let volume_ratio = None;
         let today_rank = match (result_conn.as_ref(), resolved_rank_trade_date.as_deref()) {
             (Some(conn), Some(trade_date)) => query_optional_rank(conn, trade_date, &row.ts_code)?,
             _ => None,
@@ -332,6 +335,7 @@ pub fn hydrate_watch_observe_rows(
             name,
             latest_close,
             latest_change_pct,
+            volume_ratio,
             added_date: row.added_date.clone(),
             post_watch_return_pct,
             today_rank,
@@ -377,6 +381,10 @@ pub fn build_watch_observe_snapshot_data(
         .unwrap_or_default();
     let source_conn = source_path.and_then(|path| open_source_conn(path).ok());
     let result_conn = source_path.and_then(|path| open_result_conn(path).ok());
+    let ts_codes: Vec<String> = stored_rows.iter().map(|row| row.ts_code.clone()).collect();
+    let latest_vol_map = source_path
+        .and_then(|path| build_latest_vol_map(path, &ts_codes).ok())
+        .unwrap_or_default();
     let resolved_reference_trade_date = match (result_conn.as_ref(), reference_trade_date) {
         (Some(conn), trade_date) => Some(resolve_trade_date(conn, trade_date)?),
         (None, trade_date) => trade_date.and_then(|value| normalize_trade_date(&value)),
@@ -403,6 +411,15 @@ pub fn build_watch_observe_snapshot_data(
         let latest_change_pct = quote
             .and_then(|item| item.change_pct)
             .or(fallback_snapshot.1);
+        let volume_ratio = match (
+            quote.map(|item| item.vol),
+            latest_vol_map.get(&row.ts_code).copied(),
+        ) {
+            (Some(current_vol), Some(previous_vol)) if previous_vol > 0.0 => {
+                Some(current_vol / previous_vol)
+            }
+            _ => None,
+        };
         let observe_trade_date = row
             .trade_date
             .as_deref()
@@ -427,6 +444,7 @@ pub fn build_watch_observe_snapshot_data(
             name,
             latest_close,
             latest_change_pct,
+            volume_ratio,
             added_date: row.added_date.clone(),
             post_watch_return_pct,
             today_rank,

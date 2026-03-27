@@ -509,6 +509,18 @@ pub struct IndData {
 }
 
 impl IndsData {
+    pub fn parse_from_text(ind_toml: &str) -> Result<Vec<IndData>, String> {
+        let mut cfg: IndsData =
+            toml::from_str(ind_toml).map_err(|e| format!("指标文件格式错误: {e}"))?;
+
+        for ind in &mut cfg.ind {
+            ind.name = ind.name.trim().to_ascii_uppercase();
+        }
+
+        Self::validate_inds(&cfg.ind)?;
+        Ok(cfg.ind)
+    }
+
     pub fn load_inds(source_dir: &str) -> Result<Vec<IndData>, String> {
         let ind_path = ind_toml_path(source_dir);
         let ind_toml = fs::read_to_string(&ind_path).map_err(|e| {
@@ -517,15 +529,7 @@ impl IndsData {
                 ind_path.display()
             )
         })?;
-        let mut cfg: IndsData =
-            toml::from_str(&ind_toml).map_err(|e| format!("指标文件格式错误: {e}"))?;
-
-        for ind in &mut cfg.ind {
-            ind.name = ind.name.trim().to_ascii_uppercase();
-        }
-
-        Self::validate_inds(&cfg.ind)?;
-        Ok(cfg.ind)
+        Self::parse_from_text(&ind_toml)
     }
 
     fn validate_inds(inds: &[IndData]) -> Result<(), String> {

@@ -56,6 +56,18 @@
   padding: 0 14px 14px;
 }
 
+.details-overlay-loading {
+  display: grid;
+  place-items: center;
+  min-height: 240px;
+  border: 1px solid rgba(215, 224, 234, 0.9);
+  border-radius: 18px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(247, 244, 238, 0.92));
+  color: #526273;
+  font-size: 14px;
+}
+
 @media (max-width: 960px) {
   .details-overlay-backdrop {
     padding: 0;

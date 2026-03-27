@@ -85,6 +85,7 @@ pub struct DetailKlinePayload {
 pub struct DetailStrategyTriggerRow {
     pub rule_name: String,
     pub rule_score: Option<f64>,
+    pub is_triggered: Option<bool>,
     pub hit_date: Option<String>,
     pub lag: Option<i64>,
     pub explain: Option<String>,
@@ -125,6 +126,12 @@ struct RuleMeta {
     explain: String,
     tag: String,
     when: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CurrentRuleState {
+    rule_score: f64,
+    is_triggered: bool,
 }
 
 fn open_result_conn(source_path: &str) -> Result<Connection, String> {
@@ -484,11 +491,11 @@ fn tag_label(tag: RuleTag) -> &'static str {
     }
 }
 
-fn load_current_rule_score_map(
+fn load_current_rule_state_map(
     conn: &Connection,
     ts_code: &str,
     effective_trade_date: &str,
-) -> Result<HashMap<String, f64>, String> {
+) -> Result<HashMap<String, CurrentRuleState>, String> {
     let mut stmt = conn
         .prepare(
             r#"
@@ -513,7 +520,13 @@ fn load_current_rule_score_map(
         let rule_score: Option<f64> = row
             .get(1)
             .map_err(|e| format!("读取 rule_score 失败: {e}"))?;
-        out.insert(rule_name, rule_score.unwrap_or(0.0));
+        out.insert(
+            rule_name,
+            CurrentRuleState {
+                rule_score: rule_score.unwrap_or(0.0),
+                is_triggered: true,
+            },
+        );
     }
 
     Ok(out)
@@ -529,7 +542,7 @@ fn load_latest_hit_date_map(
             r#"
             SELECT rule_name, MAX(trade_date) AS hit_date
             FROM score_details
-            WHERE ts_code = ? AND trade_date <= ? AND rule_score != 0
+            WHERE ts_code = ? AND trade_date <= ?
             GROUP BY rule_name
             "#,
         )
@@ -599,7 +612,7 @@ fn query_strategy_triggers(
     effective_trade_date: &str,
 ) -> Result<DetailStrategyPayload, String> {
     let rule_meta_list = load_rule_meta_list(source_path)?;
-    let current_score_map = load_current_rule_score_map(conn, ts_code, effective_trade_date)?;
+    let current_state_map = load_current_rule_state_map(conn, ts_code, effective_trade_date)?;
     let latest_hit_date_map = load_latest_hit_date_map(conn, ts_code, effective_trade_date)?;
     let trade_day_index_map = build_trade_day_index_map(conn)?;
 
@@ -607,14 +620,18 @@ fn query_strategy_triggers(
     let mut untriggered = Vec::new();
 
     for meta in rule_meta_list {
-        let current_score = current_score_map
+        let current_state = current_state_map
             .get(&meta.rule_name)
             .copied()
-            .unwrap_or(0.0);
+            .unwrap_or(CurrentRuleState {
+                rule_score: 0.0,
+                is_triggered: false,
+            });
         let hit_date = latest_hit_date_map.get(&meta.rule_name).cloned();
         let row = DetailStrategyTriggerRow {
             rule_name: meta.rule_name.clone(),
-            rule_score: Some(current_score),
+            rule_score: Some(current_state.rule_score),
+            is_triggered: Some(current_state.is_triggered),
             hit_date: hit_date.clone(),
             lag: calc_lag(
                 &trade_day_index_map,
@@ -626,7 +643,7 @@ fn query_strategy_triggers(
             when: Some(meta.when),
         };
 
-        if current_score != 0.0 {
+        if current_state.is_triggered {
             triggered.push(row);
         } else {
             untriggered.push(row);

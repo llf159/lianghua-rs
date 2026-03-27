@@ -1,7 +1,8 @@
-use duckdb::{Connection, params};
+use duckdb::{Appender, Connection, Transaction, params};
 use std::collections::HashSet;
 use std::fs::create_dir_all;
 use std::path::Path;
+use std::sync::mpsc::Receiver;
 use std::time;
 // use std::fs::File;
 // use std::io::{BufWriter, Write};
@@ -28,6 +29,18 @@ pub struct ScoreDetails {
     pub trade_date: String,
     pub rule_name: String,
     pub rule_score: f64,
+}
+
+#[derive(Debug, Default)]
+pub struct ScoreBatch {
+    pub summary_rows: Vec<ScoreSummary>,
+    pub detail_rows: Vec<ScoreDetails>,
+}
+
+#[derive(Debug)]
+pub enum ScoreWriteMessage {
+    Batch(ScoreBatch),
+    Abort(String),
 }
 
 impl ScoreSummary {
@@ -121,13 +134,19 @@ impl ScoreDetails {
         let mut out = Vec::new();
         for sin_rule in rule_score_series.iter() {
             let rule_name = sin_rule.name.clone();
-            if trade_dates.len() == sin_rule.series.len() {
+            if trade_dates.len() == sin_rule.series.len()
+                && trade_dates.len() == sin_rule.triggered.len()
+            {
                 for i in 0..trade_dates.len() {
+                    if !sin_rule.triggered[i] {
+                        continue;
+                    }
+                    let rule_score = sin_rule.series[i];
                     let mut rule_details = Self::default();
                     rule_details.ts_code = ts_code.to_string();
                     rule_details.rule_name = rule_name.clone();
                     rule_details.trade_date = trade_dates[i].clone();
-                    rule_details.rule_score = sin_rule.series[i];
+                    rule_details.rule_score = rule_score;
                     out.push(rule_details);
                 }
             }
@@ -220,6 +239,104 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
         [],
     )
     .map_err(|e| format!("创建score_details失败:{e}"))?;
+    Ok(())
+}
+
+fn delete_score_range(tx: &Transaction<'_>, start_date: &str, end_date: &str) -> Result<(), String> {
+    tx.execute(
+        "DELETE FROM score_summary WHERE trade_date >= ? AND trade_date <= ?",
+        params![start_date, end_date],
+    )
+    .map_err(|e| format!("删除score_summary旧数据失败:{e}"))?;
+    tx.execute(
+        "DELETE FROM score_details WHERE trade_date >= ? AND trade_date <= ?",
+        params![start_date, end_date],
+    )
+    .map_err(|e| format!("删除score_details旧数据失败:{e}"))?;
+    Ok(())
+}
+
+fn append_summary_rows(app: &mut Appender<'_>, rows: &[ScoreSummary]) -> Result<(), String> {
+    for row in rows {
+        app.append_row(params![
+            &row.ts_code,
+            &row.trade_date,
+            &row.total_score,
+            Option::<i64>::None
+        ])
+        .map_err(|e| format!("插入score_summary失败:{e}"))?;
+    }
+    Ok(())
+}
+
+fn append_detail_rows(app: &mut Appender<'_>, rows: &[ScoreDetails]) -> Result<(), String> {
+    for row in rows {
+        app.append_row(params![
+            &row.ts_code,
+            &row.trade_date,
+            &row.rule_name,
+            row.rule_score
+        ])
+        .map_err(|e| format!("插入score_details失败:{e}"))?;
+    }
+    Ok(())
+}
+
+pub fn write_score_batches_from_channel(
+    db_path: &str,
+    start_date: &str,
+    end_date: &str,
+    rx: Receiver<ScoreWriteMessage>,
+) -> Result<(), String> {
+    let time = time::Instant::now();
+    let mut conn = Connection::open(db_path).map_err(|e| format!("结果库连接失败:{e}"))?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("创建数据库事务失败:{e}"))?;
+
+    delete_score_range(&tx, start_date, end_date)?;
+
+    {
+        let mut summary_app = tx
+            .appender("score_summary")
+            .map_err(|e| format!("score_summary appender创建失败:{e}"))?;
+        let mut detail_app = tx
+            .appender("score_details")
+            .map_err(|e| format!("score_details appender创建失败:{e}"))?;
+
+        let mut batch_count = 0usize;
+        for message in rx {
+            let batch = match message {
+                ScoreWriteMessage::Batch(batch) => batch,
+                ScoreWriteMessage::Abort(reason) => {
+                    return Err(format!("评分计算中断，结果库回滚:{reason}"));
+                }
+            };
+
+            append_summary_rows(&mut summary_app, &batch.summary_rows)?;
+            append_detail_rows(&mut detail_app, &batch.detail_rows)?;
+            batch_count += 1;
+
+            if batch_count % 8 == 0 {
+                summary_app
+                    .flush()
+                    .map_err(|e| format!("刷新score_summary失败:{e}"))?;
+                detail_app
+                    .flush()
+                    .map_err(|e| format!("刷新score_details失败:{e}"))?;
+            }
+        }
+
+        summary_app
+            .flush()
+            .map_err(|e| format!("刷新score_summary失败:{e}"))?;
+        detail_app
+            .flush()
+            .map_err(|e| format!("刷新score_details失败:{e}"))?;
+    }
+
+    tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
+    println!("流式写入结果库耗时:{:.3?}", time.elapsed());
     Ok(())
 }
 

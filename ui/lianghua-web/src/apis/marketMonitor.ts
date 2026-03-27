@@ -8,6 +8,7 @@ export type MarketMonitorRow = {
   totalScore?: number | null
   latestPrice?: number | null
   latestChangePct?: number | null
+  volumeRatio?: number | null
   open?: number | null
   high?: number | null
   low?: number | null

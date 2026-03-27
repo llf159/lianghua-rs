@@ -364,6 +364,12 @@ function ConstituentsTable({
     `board-analysis-detail-table:${detailData.group_kind}:${detailData.metric_kind}:${detailData.group_name}`,
     [sortedRows.length, detailData.resolved_ref_date],
   );
+  const detailNavigationItems = sortedRows.map((row) => ({
+    tsCode: row.ts_code,
+    tradeDate: detailData.resolved_ref_date ?? undefined,
+    sourcePath: sourcePath || undefined,
+    name: row.name ?? undefined,
+  }));
 
   return (
     <div className="board-analysis-detail-table-wrap" ref={tableWrapRef}>
@@ -423,6 +429,7 @@ function ConstituentsTable({
                   tsCode={row.ts_code}
                   tradeDate={detailData.resolved_ref_date ?? undefined}
                   sourcePath={sourcePath}
+                  navigationItems={detailNavigationItems}
                 >
                   {row.name ?? row.ts_code}
                 </DetailsLink>
