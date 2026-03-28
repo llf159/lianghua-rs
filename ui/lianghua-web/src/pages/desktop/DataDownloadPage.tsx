@@ -6,6 +6,7 @@ import {
   listenDataDownloadProgress,
   runDataDownload,
   runMissingStockRepair,
+  runThsConceptDownload,
   saveIndicatorManagePage,
   type DataDownloadProgress,
   type DataDownloadRunResult,
@@ -19,6 +20,7 @@ import './css/DataDownloadPage.css'
 
 type BusyAction = 'idle' | 'loading' | 'running'
 type IndicatorEditorMode = 'create' | 'edit'
+type TaskSection = 'main' | 'concept'
 
 type DataDownloadDraft = {
   token: string
@@ -29,6 +31,11 @@ type DataDownloadDraft = {
   retryTimes: number
   limitCallsPerMin: number
   includeTurnover: boolean
+  thsConceptRetryEnabled: boolean
+  thsConceptRetryTimes: number
+  thsConceptRetryIntervalSecs: number
+  thsConceptConcurrentEnabled: boolean
+  thsConceptWorkerThreads: number
 }
 
 const DATA_DOWNLOAD_DRAFT_KEY = 'lh_data_download_draft_v1'
@@ -91,6 +98,19 @@ function formatPhaseLabel(phase: string | null | undefined) {
       return '增量下载'
     case 'write_db':
       return '写入数据库'
+    case 'prepare_ths_concepts':
+      return '准备概念下载'
+    case 'fetch_ths_concept':
+      return '抓取概念'
+    case 'retry_ths_concepts':
+    case 'retry_ths_concept':
+      return '概念重试'
+    case 'write_ths_concepts':
+      return '写入概念文件'
+    case 'done_ths_concepts':
+      return '概念下载完成'
+    case 'failed_ths_concept':
+      return '概念下载失败'
     case 'done':
       return '下载完成'
     case 'started':
@@ -117,6 +137,16 @@ function getPhaseStep(phase: string | null | undefined) {
       return { current: 5, total: 5 }
     case 'done':
       return { current: 5, total: 5 }
+    case 'prepare_ths_concepts':
+      return { current: 1, total: 3 }
+    case 'fetch_ths_concept':
+    case 'retry_ths_concepts':
+    case 'retry_ths_concept':
+    case 'failed_ths_concept':
+      return { current: 2, total: 3 }
+    case 'write_ths_concepts':
+    case 'done_ths_concepts':
+      return { current: 3, total: 3 }
     default:
       return null
   }
@@ -140,7 +170,12 @@ function formatDbRange(status: DataDownloadStatus | null) {
 }
 
 function formatFileRange(
-  fileStatus: DataDownloadStatus['tradeCalendar'] | DataDownloadStatus['stockList'] | null | undefined,
+  fileStatus:
+    | DataDownloadStatus['tradeCalendar']
+    | DataDownloadStatus['stockList']
+    | DataDownloadStatus['thsConcepts']
+    | null
+    | undefined,
 ) {
   if (!fileStatus) {
     return '读取中...'
@@ -188,6 +223,11 @@ function readDraft(): DataDownloadDraft {
     retryTimes: 3,
     limitCallsPerMin: 190,
     includeTurnover: true,
+    thsConceptRetryEnabled: true,
+    thsConceptRetryTimes: 4,
+    thsConceptRetryIntervalSecs: 30,
+    thsConceptConcurrentEnabled: false,
+    thsConceptWorkerThreads: 4,
   }
 
   const parsed = readJsonStorage<Partial<DataDownloadDraft>>(typeof window === 'undefined' ? null : window.localStorage, DATA_DOWNLOAD_DRAFT_KEY)
@@ -213,6 +253,26 @@ function readDraft(): DataDownloadDraft {
       typeof parsed.includeTurnover === 'boolean'
         ? parsed.includeTurnover
         : fallback.includeTurnover,
+    thsConceptRetryEnabled:
+      typeof parsed.thsConceptRetryEnabled === 'boolean'
+        ? parsed.thsConceptRetryEnabled
+        : fallback.thsConceptRetryEnabled,
+    thsConceptRetryTimes:
+      typeof parsed.thsConceptRetryTimes === 'number' && Number.isFinite(parsed.thsConceptRetryTimes)
+        ? parsed.thsConceptRetryTimes
+        : fallback.thsConceptRetryTimes,
+    thsConceptRetryIntervalSecs:
+      typeof parsed.thsConceptRetryIntervalSecs === 'number' && Number.isFinite(parsed.thsConceptRetryIntervalSecs)
+        ? parsed.thsConceptRetryIntervalSecs
+        : fallback.thsConceptRetryIntervalSecs,
+    thsConceptConcurrentEnabled:
+      typeof parsed.thsConceptConcurrentEnabled === 'boolean'
+        ? parsed.thsConceptConcurrentEnabled
+        : fallback.thsConceptConcurrentEnabled,
+    thsConceptWorkerThreads:
+      typeof parsed.thsConceptWorkerThreads === 'number' && Number.isFinite(parsed.thsConceptWorkerThreads)
+        ? parsed.thsConceptWorkerThreads
+        : fallback.thsConceptWorkerThreads,
   }
 }
 
@@ -228,9 +288,16 @@ export default function DataDownloadPage() {
   const [retryTimes, setRetryTimes] = useState(String(draft.retryTimes))
   const [limitCallsPerMin, setLimitCallsPerMin] = useState(String(draft.limitCallsPerMin))
   const [includeTurnover, setIncludeTurnover] = useState(draft.includeTurnover)
+  const [thsConceptRetryEnabled, setThsConceptRetryEnabled] = useState(draft.thsConceptRetryEnabled)
+  const [thsConceptRetryTimes, setThsConceptRetryTimes] = useState(String(draft.thsConceptRetryTimes))
+  const [thsConceptRetryIntervalSecs, setThsConceptRetryIntervalSecs] = useState(String(draft.thsConceptRetryIntervalSecs))
+  const [thsConceptConcurrentEnabled, setThsConceptConcurrentEnabled] = useState(draft.thsConceptConcurrentEnabled)
+  const [thsConceptWorkerThreads, setThsConceptWorkerThreads] = useState(String(draft.thsConceptWorkerThreads))
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [progress, setProgress] = useState<DataDownloadProgress | null>(null)
+  const [activeTaskSection, setActiveTaskSection] = useState<TaskSection | null>(null)
+  const [feedbackSection, setFeedbackSection] = useState<TaskSection>('main')
   const [displayProgressPercent, setDisplayProgressPercent] = useState(0)
   const [indicatorModalOpen, setIndicatorModalOpen] = useState(false)
   const [indicatorItems, setIndicatorItems] = useState<IndicatorManageItem[]>([])
@@ -251,7 +318,6 @@ export default function DataDownloadPage() {
   const isBusy = busyAction !== 'idle'
   const isFirstDownload = status?.plannedAction === 'first-download'
   const latestDbTradeDate = formatTradeDate(status?.sourceDb.maxTradeDate)
-  const earliestDbTradeDate = formatTradeDate(status?.sourceDb.minTradeDate)
   const deferredProgress = useDeferredValue(progress)
   const resolvedIncrementalStartDate =
     inputDateToCompact(startDateInput) || status?.sourceDb.minTradeDate || '20240101'
@@ -263,6 +329,12 @@ export default function DataDownloadPage() {
       ? '等待后端返回分段进度'
       : `${deferredProgress?.finished ?? 0} / ${deferredProgress?.total ?? 0}`
   const missingStockRepair = status?.missingStockRepair ?? null
+  const showMainProgress = busyAction === 'running' && activeTaskSection === 'main'
+  const showConceptProgress = busyAction === 'running' && activeTaskSection === 'concept'
+  const showMainNotice = Boolean(notice) && feedbackSection === 'main'
+  const showConceptNotice = Boolean(notice) && feedbackSection === 'concept'
+  const showMainError = Boolean(error) && feedbackSection === 'main'
+  const showConceptError = Boolean(error) && feedbackSection === 'concept'
 
   function applyIndicatorPage(page: IndicatorManagePageData) {
     setIndicatorItems(page.items)
@@ -282,6 +354,7 @@ export default function DataDownloadPage() {
 
   useEffect(() => {
     if (busyAction !== 'running') {
+      setActiveTaskSection(null)
       displayProgressPercentRef.current = 0
       setDisplayProgressPercent(0)
       return
@@ -333,6 +406,11 @@ export default function DataDownloadPage() {
       retryTimes: Number(retryTimes),
       limitCallsPerMin: Number(limitCallsPerMin),
       includeTurnover,
+      thsConceptRetryEnabled,
+      thsConceptRetryTimes: Number(thsConceptRetryTimes),
+      thsConceptRetryIntervalSecs: Number(thsConceptRetryIntervalSecs),
+      thsConceptConcurrentEnabled,
+      thsConceptWorkerThreads: Number(thsConceptWorkerThreads),
     })
   }, [
     endDateInput,
@@ -340,13 +418,65 @@ export default function DataDownloadPage() {
     limitCallsPerMin,
     retryTimes,
     startDateInput,
+    thsConceptRetryEnabled,
+    thsConceptRetryIntervalSecs,
+    thsConceptRetryTimes,
+    thsConceptConcurrentEnabled,
+    thsConceptWorkerThreads,
     threads,
     token,
     useTodayEnd,
   ])
 
+  function renderProgressBlock(fallbackTitle: string) {
+    return (
+      <div className="data-download-progress">
+        <div className="data-download-progress-head">
+          <div className="data-download-progress-title">
+            <span className="data-download-progress-phase-pill">
+              {formatPhaseLabel(deferredProgress?.phase)}
+              {phaseStep ? ` · ${phaseStep.current}/${phaseStep.total}` : ''}
+            </span>
+            <strong>{deferredProgress?.actionLabel ?? fallbackTitle}</strong>
+          </div>
+          <div className="data-download-progress-value">
+            <strong>{progressPercent === null ? '--' : `${progressPercent}%`}</strong>
+            <span>{formatElapsedMs(deferredProgress?.elapsedMs ?? 0)}</span>
+          </div>
+        </div>
+        <div className="data-download-progress-bar">
+          <div
+            className={`data-download-progress-bar-fill ${progressPercent === null ? 'is-indeterminate' : ''}`}
+            style={{ width: `${Math.max(shownProgressPercent, 10)}%` }}
+          />
+        </div>
+        <div className="data-download-progress-stats">
+          <div className="data-download-progress-stat">
+            <span>阶段</span>
+            <strong>
+              {formatPhaseLabel(deferredProgress?.phase)}
+              {phaseStep ? ` ${phaseStep.current}/${phaseStep.total}` : ''}
+            </strong>
+          </div>
+          <div className="data-download-progress-stat">
+            <span>进度</span>
+            <strong>{progressCounterText}</strong>
+          </div>
+          <div className="data-download-progress-stat data-download-progress-stat-wide">
+            <span>当前对象</span>
+            <strong>{deferredProgress?.currentLabel ?? '等待后端分派任务'}</strong>
+          </div>
+        </div>
+        <div className="data-download-progress-text">
+          {deferredProgress?.message ?? '下载已经启动，正在等待后端返回当前状态。安卓端长时间无响应时，可以先看这里的阶段提示和耗时。'}
+        </div>
+      </div>
+    )
+  }
+
   async function loadStatus() {
     setBusyAction('loading')
+    setFeedbackSection('main')
     setError('')
 
     try {
@@ -483,8 +613,13 @@ export default function DataDownloadPage() {
     }
   }, [])
 
-  async function runDataTask(executor: (downloadId: string) => Promise<DataDownloadRunResult>) {
+  async function runDataTask(
+    section: TaskSection,
+    executor: (downloadId: string) => Promise<DataDownloadRunResult>,
+  ) {
     setBusyAction('running')
+    setActiveTaskSection(section)
+    setFeedbackSection(section)
     setError('')
     setNotice('')
     setProgress(null)
@@ -538,11 +673,13 @@ export default function DataDownloadPage() {
 
   async function onRunDownload() {
     if (!sourcePath) {
+      setFeedbackSection('main')
       setError('当前数据目录为空，请先到数据管理页确认目录。')
       return
     }
 
     if (!token.trim()) {
+      setFeedbackSection('main')
       setError('请先填写 Tushare Token。')
       return
     }
@@ -551,6 +688,7 @@ export default function DataDownloadPage() {
       ? inputDateToCompact(startDateInput)
       : resolvedIncrementalStartDate
     if (!startDate) {
+      setFeedbackSection('main')
       setError(isFirstDownload ? '请先填写开始日期。' : '请先提供增量补救起点。')
       return
     }
@@ -559,16 +697,18 @@ export default function DataDownloadPage() {
       ? (useTodayEnd ? 'today' : inputDateToCompact(endDateInput))
       : 'today'
     if (isFirstDownload && !endDate) {
+      setFeedbackSection('main')
       setError('请先填写结束日期，或勾选自动到当前交易日。')
       return
     }
 
     if (endDate !== 'today' && startDate > endDate) {
+      setFeedbackSection('main')
       setError('开始日期不能晚于结束日期。')
       return
     }
 
-    await runDataTask((downloadId) =>
+    await runDataTask('main', (downloadId) =>
       runDataDownload({
         downloadId,
         sourcePath,
@@ -585,23 +725,27 @@ export default function DataDownloadPage() {
 
   async function onRunMissingStockRepair() {
     if (!sourcePath) {
+      setFeedbackSection('main')
       setError('当前数据目录为空，请先到数据管理页确认目录。')
       return
     }
     if (!token.trim()) {
+      setFeedbackSection('main')
       setError('请先填写 Tushare Token。')
       return
     }
     if (!missingStockRepair?.ready) {
+      setFeedbackSection('main')
       setError(missingStockRepair?.detail ?? '当前缺失股票补全不可执行。')
       return
     }
     if ((missingStockRepair?.missingCount ?? 0) <= 0) {
+      setFeedbackSection('main')
       setError('当前没有需要补全的缺失股票。')
       return
     }
 
-    await runDataTask((downloadId) =>
+    await runDataTask('main', (downloadId) =>
       runMissingStockRepair({
         downloadId,
         sourcePath,
@@ -610,6 +754,26 @@ export default function DataDownloadPage() {
         retryTimes: Math.max(0, Number(retryTimes) || 0),
         limitCallsPerMin: Math.max(1, Number(limitCallsPerMin) || 1),
         includeTurnover,
+      }),
+    )
+  }
+
+  async function onRunThsConceptDownload() {
+    if (!sourcePath) {
+      setFeedbackSection('concept')
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    await runDataTask('concept', (downloadId) =>
+      runThsConceptDownload({
+        downloadId,
+        sourcePath,
+        retryEnabled: thsConceptRetryEnabled,
+        retryTimes: Math.max(0, Number(thsConceptRetryTimes) || 0),
+        retryIntervalSecs: Math.max(0, Number(thsConceptRetryIntervalSecs) || 0),
+        concurrentEnabled: thsConceptConcurrentEnabled,
+        workerThreads: Math.max(1, Number(thsConceptWorkerThreads) || 1),
       }),
     )
   }
@@ -679,16 +843,37 @@ export default function DataDownloadPage() {
                 </div>
               </div>
             ) : (
-              <div className="data-download-hero-metrics">
-                <div className="data-download-hero-metric">
-                  <span>当前原始库最新日期</span>
-                  <strong>{latestDbTradeDate}</strong>
+              <>
+                <div className="data-download-hero-metrics">
+                  <div className="data-download-hero-metric">
+                    <span>当前原始库最新日期</span>
+                    <strong>{latestDbTradeDate}</strong>
+                  </div>
+                  <div className="data-download-hero-metric">
+                    <span>本次结束方式</span>
+                    <strong>固定更新到当前有效交易日</strong>
+                  </div>
                 </div>
-                <div className="data-download-hero-metric">
-                  <span>本次结束方式</span>
-                  <strong>固定更新到当前有效交易日</strong>
+
+                <div className="data-download-hero-config">
+                  <div className="data-download-hero-config-head">
+                    <strong>增量更新参数</strong>
+                    <span>只在少量校验失败股票需要整段重下时使用</span>
+                  </div>
+                  <label className="data-download-field data-download-hero-field">
+                    <span>补救回补起点</span>
+                    <input
+                      type="date"
+                      value={startDateInput}
+                      onChange={(event) => setStartDateInput(event.target.value)}
+                    />
+                    <small>
+                      为空时，默认取当前原始库最早日期
+                      {status?.sourceDb.minTradeDate ? ` ${formatTradeDate(status.sourceDb.minTradeDate)}` : ''}。
+                    </small>
+                  </label>
                 </div>
-              </div>
+              </>
             )}
           </div>
 
@@ -726,6 +911,15 @@ export default function DataDownloadPage() {
                 </small>
               </div>
               <div className="data-download-summary-item">
+                <span>概念文件</span>
+                <strong>{formatFileRange(status?.thsConcepts)}</strong>
+                <small>
+                  {status?.thsConcepts
+                    ? `${status.thsConcepts.rowCount} 行`
+                    : '读取中...'}
+                </small>
+              </div>
+              <div className="data-download-summary-item">
                 <span>缺失股票补全</span>
                 <strong>{formatMissingStockSummary(status)}</strong>
                 <small>
@@ -741,8 +935,8 @@ export default function DataDownloadPage() {
         <div className="data-download-panel-grid">
           <section className="data-download-panel">
             <div className="data-download-panel-head">
-              <h3>通用配置</h3>
-              <p>所有模式都需要。Token 只存当前浏览器，不会自动写回配置文件。</p>
+              <h3>通用参数</h3>
+              <p>所有模式共用。Token 只存当前浏览器，不会自动写回配置文件，执行性能参数也统一放在这里。</p>
             </div>
 
             <div className="data-download-form-grid">
@@ -757,28 +951,56 @@ export default function DataDownloadPage() {
                 <small>如果切浏览器或清缓存，需要重新填写。</small>
               </label>
 
-              <label className="data-download-check data-download-check-span-2">
-                <input
-                  type="checkbox"
-                  checked={includeTurnover}
-                  onChange={(event) => setIncludeTurnover(event.target.checked)}
-                />
-                <span>下载换手率与量比字段，并在写库时一并保存</span>
-              </label>
+              <div className="data-download-inline-grid data-download-field-span-2">
+                <label className="data-download-check data-download-check-compact">
+                  <input
+                    type="checkbox"
+                    checked={includeTurnover}
+                    onChange={(event) => setIncludeTurnover(event.target.checked)}
+                  />
+                  <span>下载换手率</span>
+                </label>
+
+                <label className="data-download-field data-download-field-compact">
+                  <span>每分钟限频</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={limitCallsPerMin}
+                    onChange={(event) => setLimitCallsPerMin(event.target.value)}
+                  />
+                </label>
+
+                <label className="data-download-field data-download-field-compact">
+                  <span>线程数</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={threads}
+                    onChange={(event) => setThreads(event.target.value)}
+                  />
+                </label>
+
+                <label className="data-download-field data-download-field-compact">
+                  <span>重试次数</span>
+                  <input
+                    type="number"
+                    min="0"
+                    value={retryTimes}
+                    onChange={(event) => setRetryTimes(event.target.value)}
+                  />
+                </label>
+              </div>
             </div>
           </section>
 
-          <section className="data-download-panel">
-            <div className="data-download-panel-head">
-              <h3>{isFirstDownload ? '首次下载参数' : '增量更新参数'}</h3>
-              <p>
-                {isFirstDownload
-                  ? '首次下载需要明确历史区间。结束日期可以固定，也可以跟随当前有效交易日。'
-                  : '增量更新默认更新到当前有效交易日，不再要求你填写结束日期。'}
-              </p>
-            </div>
+          {isFirstDownload ? (
+            <section className="data-download-panel">
+              <div className="data-download-panel-head">
+                <h3>首次下载参数</h3>
+                <p>首次下载需要明确历史区间。结束日期可以固定，也可以跟随当前有效交易日。</p>
+              </div>
 
-            {isFirstDownload ? (
               <div className="data-download-form-grid">
                 <label className="data-download-field">
                   <span>开始日期</span>
@@ -809,76 +1031,9 @@ export default function DataDownloadPage() {
                   <span>结束日期使用当前有效交易日（today）</span>
                 </label>
               </div>
-            ) : (
-              <div className="data-download-incremental-box">
-                <div className="data-download-incremental-summary">
-                  <div className="data-download-incremental-item">
-                    <span>当前原始库区间</span>
-                    <strong>
-                      {earliestDbTradeDate} 至 {latestDbTradeDate}
-                    </strong>
-                  </div>
-                  <div className="data-download-incremental-item">
-                    <span>本次更新终点</span>
-                    <strong>当前有效交易日（today）</strong>
-                  </div>
-                </div>
-
-                <label className="data-download-field">
-                  <span>补救回补起点</span>
-                  <input
-                    type="date"
-                    value={startDateInput}
-                    onChange={(event) => setStartDateInput(event.target.value)}
-                  />
-                  <small>
-                    只在少量校验失败股票需要整段重下时使用。为空时，默认取当前原始库最早日期
-                    {status?.sourceDb.minTradeDate ? ` ${formatTradeDate(status.sourceDb.minTradeDate)}` : ''}。
-                  </small>
-                </label>
-              </div>
-            )}
-          </section>
+            </section>
+          ) : null}
         </div>
-
-        <section className="data-download-panel">
-          <div className="data-download-panel-head">
-            <h3>执行性能</h3>
-            <p>这些参数会影响下载速度与请求节奏，首次下载和增量更新共用这一组。</p>
-          </div>
-
-          <div className="data-download-form-row">
-            <label className="data-download-field">
-              <span>线程数</span>
-              <input
-                type="number"
-                min="1"
-                value={threads}
-                onChange={(event) => setThreads(event.target.value)}
-              />
-            </label>
-
-            <label className="data-download-field">
-              <span>重试次数</span>
-              <input
-                type="number"
-                min="0"
-                value={retryTimes}
-                onChange={(event) => setRetryTimes(event.target.value)}
-              />
-            </label>
-
-            <label className="data-download-field">
-              <span>每分钟限频</span>
-              <input
-                type="number"
-                min="1"
-                value={limitCallsPerMin}
-                onChange={(event) => setLimitCallsPerMin(event.target.value)}
-              />
-            </label>
-          </div>
-        </section>
 
         <div className="data-download-runbar">
           <div className="data-download-runbar-copy">
@@ -893,56 +1048,97 @@ export default function DataDownloadPage() {
             onClick={() => void onRunDownload()}
             disabled={isBusy || !sourcePath}
           >
-            {busyAction === 'running' ? '下载执行中...' : (status?.plannedActionLabel ?? '开始下载')}
+            {showMainProgress ? '下载执行中...' : isBusy ? '任务执行中...' : (status?.plannedActionLabel ?? '开始下载')}
           </button>
         </div>
 
-        {busyAction === 'running' ? (
-          <div className="data-download-progress">
-            <div className="data-download-progress-head">
-              <div className="data-download-progress-title">
-                <span className="data-download-progress-phase-pill">
-                  {formatPhaseLabel(deferredProgress?.phase)}
-                  {phaseStep ? ` · ${phaseStep.current}/${phaseStep.total}` : ''}
-                </span>
-                <strong>{deferredProgress?.actionLabel ?? status?.plannedActionLabel ?? '下载执行中'}</strong>
-              </div>
-              <div className="data-download-progress-value">
-                <strong>{progressPercent === null ? '--' : `${progressPercent}%`}</strong>
-                <span>{formatElapsedMs(deferredProgress?.elapsedMs ?? 0)}</span>
-              </div>
-            </div>
-            <div className="data-download-progress-bar">
-              <div
-                className={`data-download-progress-bar-fill ${progressPercent === null ? 'is-indeterminate' : ''}`}
-                style={{ width: `${Math.max(shownProgressPercent, 10)}%` }}
+        {showMainProgress ? renderProgressBlock(status?.plannedActionLabel ?? '下载执行中') : null}
+
+        {showMainNotice ? <div className="data-download-notice">{notice}</div> : null}
+        {showMainError ? <div className="data-download-error">{error}</div> : null}
+      </section>
+
+      <section className="data-download-card">
+        <section className="data-download-panel">
+          <div className="data-download-panel-head">
+            <h3>概念数据下载</h3>
+            <p>按当前 `stock_list.csv` 补齐 `stock_concepts.csv`。串行和并发模式都遵循整轮失败后整体重试。</p>
+          </div>
+
+          <div className="data-download-inline-grid">
+                <label className="data-download-check data-download-check-compact">
+                  <input
+                    type="checkbox"
+                    checked={thsConceptConcurrentEnabled}
+                    onChange={(event) => setThsConceptConcurrentEnabled(event.target.checked)}
+                  />
+                  <span>并发模式</span>
+                </label>
+
+            <label className="data-download-field data-download-field-compact">
+                  <span>并发线程数</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={thsConceptWorkerThreads}
+                    onChange={(event) => setThsConceptWorkerThreads(event.target.value)}
+                    disabled={!thsConceptConcurrentEnabled}
+                  />
+                </label>
+
+            <label className="data-download-check data-download-check-compact">
+              <input
+                type="checkbox"
+                checked={thsConceptRetryEnabled}
+                onChange={(event) => setThsConceptRetryEnabled(event.target.checked)}
               />
-            </div>
-            <div className="data-download-progress-stats">
-              <div className="data-download-progress-stat">
-                <span>阶段</span>
-                <strong>
-                  {formatPhaseLabel(deferredProgress?.phase)}
-                  {phaseStep ? ` ${phaseStep.current}/${phaseStep.total}` : ''}
-                </strong>
-              </div>
-              <div className="data-download-progress-stat">
-                <span>进度</span>
-                <strong>{progressCounterText}</strong>
-              </div>
-              <div className="data-download-progress-stat data-download-progress-stat-wide">
-                <span>当前对象</span>
-                <strong>{deferredProgress?.currentLabel ?? '等待后端分派任务'}</strong>
-              </div>
-            </div>
-            <div className="data-download-progress-text">
-              {deferredProgress?.message ?? '下载已经启动，正在等待后端返回当前状态。安卓端长时间无响应时，可以先看这里的阶段提示和耗时。'}
+              <span>失败后重试</span>
+            </label>
+
+            <label className="data-download-field data-download-field-compact">
+              <span>重试次数</span>
+              <input
+                type="number"
+                min="0"
+                value={thsConceptRetryTimes}
+                onChange={(event) => setThsConceptRetryTimes(event.target.value)}
+                disabled={!thsConceptRetryEnabled}
+              />
+            </label>
+
+            <label className="data-download-field data-download-field-compact">
+              <span>重试间隔(秒)</span>
+              <input
+                type="number"
+                min="0"
+                value={thsConceptRetryIntervalSecs}
+                onChange={(event) => setThsConceptRetryIntervalSecs(event.target.value)}
+                disabled={!thsConceptRetryEnabled}
+              />
+            </label>
+
+            <div className="data-download-panel-tip">
+              {thsConceptConcurrentEnabled
+                ? `当前使用并发抓取，线程数 ${Math.max(1, Number(thsConceptWorkerThreads) || 1)}。任一线程失败后会停止整轮，并按整轮重试逻辑处理。`
+                : '当前使用串行抓取。失败后如果开启重试，会按整轮任务重新执行。'}
             </div>
           </div>
-        ) : null}
 
-        {notice ? <div className="data-download-notice">{notice}</div> : null}
-        {error ? <div className="data-download-error">{error}</div> : null}
+          <div className="data-download-panel-actions">
+            <button
+              className="data-download-secondary-btn"
+              type="button"
+              onClick={() => void onRunThsConceptDownload()}
+              disabled={isBusy || !sourcePath}
+            >
+              {showConceptProgress ? '概念下载中...' : isBusy ? '任务执行中...' : '开始概念下载'}
+            </button>
+          </div>
+
+          {showConceptProgress ? renderProgressBlock('概念数据下载') : null}
+          {showConceptNotice ? <div className="data-download-notice">{notice}</div> : null}
+          {showConceptError ? <div className="data-download-error">{error}</div> : null}
+        </section>
       </section>
 
       {indicatorModalOpen ? (

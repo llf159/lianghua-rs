@@ -187,7 +187,10 @@ fn build_latest_vol_map(
         .map_err(|e| format!("查询最新成交量失败: {e}"))?;
 
     let mut out = HashMap::with_capacity(ts_codes.len());
-    while let Some(row) = rows.next().map_err(|e| format!("读取最新成交量失败: {e}"))? {
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取最新成交量失败: {e}"))?
+    {
         let ts_code: String = row.get(0).map_err(|e| format!("读取 ts_code 失败: {e}"))?;
         let latest_vol: Option<f64> = row
             .get(1)

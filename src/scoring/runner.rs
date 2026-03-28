@@ -3,8 +3,7 @@ use std::{collections::HashSet, sync::mpsc::sync_channel, thread, time};
 
 use crate::data::scoring_data::{
     ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage, cache_rule_build, init_result_db,
-    row_into_rt,
-    write_score_batches_from_channel,
+    row_into_rt, write_score_batches_from_channel,
 };
 use crate::data::{DataReader, RowData, result_db_path};
 use crate::scoring::{
@@ -118,9 +117,9 @@ pub fn scoring_all_to_db(
         write_score_batches_from_channel(&db_path, &start_date_owned, &end_date_owned, rx)
     });
 
-    let compute_result = tc_list
-        .par_chunks(SCORING_GROUP_SIZE)
-        .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
+    let compute_result = tc_list.par_chunks(SCORING_GROUP_SIZE).try_for_each_with(
+        tx,
+        |sender, ts_group| -> Result<(), String> {
             let batch = scoring_group_batch(
                 source_dir,
                 adj_type,
@@ -135,7 +134,8 @@ pub fn scoring_all_to_db(
                 .send(ScoreWriteMessage::Batch(batch))
                 .map_err(|e| format!("发送评分批次失败:{e}"))?;
             Ok(())
-        });
+        },
+    );
 
     if let Err(err) = &compute_result {
         let _ = abort_tx.send(ScoreWriteMessage::Abort(err.clone()));

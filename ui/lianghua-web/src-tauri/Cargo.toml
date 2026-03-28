@@ -34,3 +34,5 @@ duckdb = "1.4.4"
 
 [target.'cfg(target_os = "android")'.dependencies]
 duckdb = { version = "1.4.4", features = ["bundled"] }
+jni = "0.21.1"
+rustls-platform-verifier = "0.6.2"

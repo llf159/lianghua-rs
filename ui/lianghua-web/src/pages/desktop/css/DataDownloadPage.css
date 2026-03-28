@@ -122,6 +122,35 @@
   align-content: start;
 }
 
+.data-download-hero-config {
+  display: grid;
+  gap: 10px;
+  margin-top: 4px;
+  padding-top: 4px;
+}
+
+.data-download-hero-config-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.data-download-hero-config-head strong {
+  font-size: 14px;
+  color: #2f3a48;
+}
+
+.data-download-hero-config-head span {
+  color: #667487;
+  font-size: 12px;
+}
+
+.data-download-hero-field {
+  max-width: 320px;
+}
+
 .data-download-action-head {
   display: flex;
   justify-content: space-between;
@@ -178,9 +207,20 @@
   gap: 10px 12px;
 }
 
+.data-download-inline-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 10px 12px;
+  align-items: end;
+}
+
 .data-download-field {
   display: grid;
   gap: 6px;
+}
+
+.data-download-field-compact {
+  min-width: 0;
 }
 
 .data-download-field-span-2 {
@@ -220,6 +260,11 @@
   background: #fbfcfe;
 }
 
+.data-download-check-compact {
+  min-height: 44px;
+  align-self: end;
+}
+
 .data-download-check input {
   margin: 0;
 }
@@ -241,6 +286,24 @@
   background: rgba(255, 255, 255, 0.92);
 }
 
+.data-download-panel-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.data-download-panel-tip {
+  grid-column: 1 / -1;
+  border: 1px dashed #e9c28f;
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: rgba(255, 248, 239, 0.92);
+  color: #7c5422;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .data-download-panel-head {
   display: grid;
   gap: 4px;
@@ -256,11 +319,6 @@
   color: #5f6978;
   font-size: 13px;
   line-height: 1.6;
-}
-
-.data-download-incremental-box {
-  display: grid;
-  gap: 12px;
 }
 
 .data-download-runbar {
@@ -656,6 +714,7 @@
   .data-download-panel-grid,
   .data-download-summary,
   .data-download-form-grid,
+  .data-download-inline-grid,
   .data-download-form-row,
   .data-download-hero-metrics,
   .data-download-incremental-summary {
@@ -681,6 +740,7 @@
 
   .data-download-head-actions,
   .data-download-action-head,
+  .data-download-hero-config-head,
   .data-download-runbar,
   .data-download-progress-head {
     align-items: flex-start;
@@ -716,7 +776,8 @@
   .data-download-modal-actions,
   .data-download-head-actions,
   .data-download-indicator-toolbar,
-  .data-download-indicator-card-actions {
+  .data-download-indicator-card-actions,
+  .data-download-panel-actions {
     display: grid;
     width: 100%;
   }

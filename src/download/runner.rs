@@ -1,6 +1,13 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::Path,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread::{self, sleep},
+    time::Duration,
 };
 
 use chrono::{Datelike, Local, Timelike};
@@ -9,21 +16,24 @@ use rayon::{ThreadPool, ThreadPoolBuilder, prelude::*};
 
 use crate::{
     config::AppConfig,
+    crawler::concept::{ThsConceptFetchItem, ThsConceptRow, fetch_one_ths_concept_row},
     data::{
-        download_data::{
-            LatestCloseRow, append_stage_pro_bar_rows, checkpoint_stock_data,
-            delete_one_stock_range, delete_trade_date_rows, ensure_indicator_columns,
-            flush_stock_data_stage_table, init_stock_data_db, load_latest_close_map_before,
-            load_latest_trade_date, reset_stock_data_stage_table,
-        },
-        load_stock_list, load_trade_date_list, source_db_path, stock_list_path,
         DataReader,
-        trade_calendar_path,
+        download_data::{
+            append_stage_pro_bar_rows, checkpoint_stock_data, delete_one_stock_range,
+            delete_trade_date_rows, ensure_indicator_columns, flush_stock_data_stage_table,
+            init_stock_data_db, load_latest_close_map_before, load_latest_trade_date,
+            reset_stock_data_stage_table, write_ths_concepts_csv,
+        },
+        load_stock_list, load_ths_concepts_list, load_trade_date_list, source_db_path,
+        stock_list_path, trade_calendar_path,
     },
     download::{
         AdjType, BarFreq, DownloadSummary, DownloadTask, PreparedDownloadBatch,
         PreparedStockDownload, ProBarRow, TushareClient,
-        ind_calc::{IndsCache, cache_ind_build, calc_increment_one_stock_inds, warmup_ind_estimate},
+        ind_calc::{
+            IndsCache, cache_ind_build, calc_increment_one_stock_inds, warmup_ind_estimate,
+        },
     },
 };
 
@@ -43,6 +53,35 @@ pub struct DownloadProgress {
 pub type DownloadProgressCallback = dyn Fn(DownloadProgress) + Send + Sync;
 
 const INCREMENTAL_INDICATOR_CHUNK_SIZE: usize = 256;
+const THS_CONCEPT_RETRY_DELAY_SECS: u64 = 30;
+const THS_CONCEPT_RETRY_LIMIT: usize = 5;
+
+#[derive(Debug, Clone, Copy)]
+pub struct ThsConceptDownloadConfig {
+    pub retry_enabled: bool,
+    pub retry_times: usize,
+    pub retry_interval_secs: u64,
+    pub concurrent_enabled: bool,
+    pub worker_threads: usize,
+}
+
+impl Default for ThsConceptDownloadConfig {
+    fn default() -> Self {
+        Self {
+            retry_enabled: true,
+            retry_times: THS_CONCEPT_RETRY_LIMIT.saturating_sub(1),
+            retry_interval_secs: THS_CONCEPT_RETRY_DELAY_SECS,
+            concurrent_enabled: false,
+            worker_threads: 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ThsConceptDownloadSummary {
+    pub total_items: usize,
+    pub saved_rows: usize,
+}
 
 fn trade_calendar_needs_refresh(
     source_dir: &str,
@@ -97,6 +136,527 @@ fn emit_progress(
             message: message.into(),
         });
     }
+}
+
+fn load_existing_ths_concept_map(
+    source_dir: &str,
+) -> Result<HashMap<String, ThsConceptRow>, String> {
+    let mut out = HashMap::new();
+    let rows = match load_ths_concepts_list(source_dir) {
+        Ok(rows) => rows,
+        Err(error) if error.contains("打开stock_concepts.csv失败") => return Ok(out),
+        Err(error) => return Err(error),
+    };
+
+    for cols in rows {
+        let Some(ts_code) = cols.first().map(|value| value.trim()) else {
+            continue;
+        };
+        let Some(name) = cols.get(1).map(|value| value.trim()) else {
+            continue;
+        };
+        let Some(concept) = cols.get(2).map(|value| value.trim()) else {
+            continue;
+        };
+        if ts_code.is_empty() {
+            continue;
+        }
+
+        out.insert(
+            ts_code.to_string(),
+            ThsConceptRow {
+                ts_code: ts_code.to_string(),
+                name: name.to_string(),
+                concept: concept.to_string(),
+            },
+        );
+    }
+
+    Ok(out)
+}
+
+fn build_missing_ths_concept_items(
+    source_dir: &str,
+) -> Result<
+    (
+        Vec<ThsConceptFetchItem>,
+        Vec<ThsConceptFetchItem>,
+        HashMap<String, ThsConceptRow>,
+    ),
+    String,
+> {
+    let stock_list = load_stock_list(source_dir)?;
+    let existing_map = load_existing_ths_concept_map(source_dir)?;
+    let mut all_items = Vec::new();
+    let mut missing_items = Vec::new();
+
+    for cols in stock_list {
+        let Some(ts_code) = cols.first().map(|value| value.trim()) else {
+            continue;
+        };
+        let Some(name) = cols.get(2).map(|value| value.trim()) else {
+            continue;
+        };
+        if ts_code.is_empty() || name.is_empty() {
+            continue;
+        }
+
+        let item = ThsConceptFetchItem {
+            ts_code: ts_code.to_string(),
+            name: name.to_string(),
+        };
+        if !existing_map.contains_key(ts_code) {
+            missing_items.push(item.clone());
+        }
+        all_items.push(item);
+    }
+
+    Ok((all_items, missing_items, existing_map))
+}
+
+fn build_ordered_ths_concept_rows(
+    all_items: &[ThsConceptFetchItem],
+    concept_map: &HashMap<String, ThsConceptRow>,
+) -> Vec<ThsConceptRow> {
+    let mut rows = Vec::with_capacity(all_items.len());
+
+    for item in all_items {
+        let Some(existing) = concept_map.get(&item.ts_code) else {
+            continue;
+        };
+        rows.push(ThsConceptRow {
+            ts_code: item.ts_code.clone(),
+            name: item.name.clone(),
+            concept: existing.concept.clone(),
+        });
+    }
+
+    rows
+}
+
+fn download_ths_concepts_once(
+    source_dir: &str,
+    progress_cb: Option<&DownloadProgressCallback>,
+) -> Result<ThsConceptDownloadSummary, String> {
+    let (all_items, missing_items, mut concept_map) = build_missing_ths_concept_items(source_dir)?;
+
+    emit_progress(
+        progress_cb,
+        "prepare_ths_concepts",
+        all_items.len().saturating_sub(missing_items.len()),
+        all_items.len(),
+        None,
+        format!(
+            "同花顺概念已存在 {} 只，待补抓 {} 只。",
+            all_items.len().saturating_sub(missing_items.len()),
+            missing_items.len()
+        ),
+    );
+
+    if all_items.is_empty() {
+        emit_progress(
+            progress_cb,
+            "done_ths_concepts",
+            0,
+            0,
+            None,
+            "股票列表为空，跳过同花顺概念同步。",
+        );
+        return Ok(ThsConceptDownloadSummary::default());
+    }
+
+    if missing_items.is_empty() {
+        emit_progress(
+            progress_cb,
+            "done_ths_concepts",
+            all_items.len(),
+            all_items.len(),
+            None,
+            "同花顺概念已完整，跳过同步。",
+        );
+        return Ok(ThsConceptDownloadSummary {
+            total_items: all_items.len(),
+            saved_rows: all_items.len(),
+        });
+    }
+
+    let http = reqwest::blocking::Client::builder()
+        .build()
+        .map_err(|e| format!("创建同花顺概念 HTTP 客户端失败: {e}"))?;
+
+    let mut completed = all_items.len().saturating_sub(missing_items.len());
+    let total = all_items.len();
+
+    for item in &missing_items {
+        emit_progress(
+            progress_cb,
+            "fetch_ths_concept",
+            completed,
+            total,
+            Some(item.ts_code.clone()),
+            format!(
+                "正在抓取 {}/{}: {} {}",
+                completed + 1,
+                total,
+                item.ts_code,
+                item.name
+            ),
+        );
+
+        let row = fetch_one_ths_concept_row(&http, &item.ts_code, &item.name).map_err(|error| {
+            emit_progress(
+                progress_cb,
+                "failed_ths_concept",
+                completed,
+                total,
+                Some(item.ts_code.clone()),
+                format!("{} {} 抓取失败并停止: {}", item.ts_code, item.name, error),
+            );
+            format!(
+                "抓取中断: ts_code={}, name={}, err={}",
+                item.ts_code, item.name, error
+            )
+        })?;
+
+        concept_map.insert(row.ts_code.clone(), row);
+        let ordered_rows = build_ordered_ths_concept_rows(&all_items, &concept_map);
+        emit_progress(
+            progress_cb,
+            "write_ths_concepts",
+            completed + 1,
+            total,
+            Some(item.ts_code.clone()),
+            format!(
+                "正在写入 stock_concepts.csv，当前共 {} 只。",
+                ordered_rows.len()
+            ),
+        );
+        write_ths_concepts_csv(source_dir, &ordered_rows)?;
+        completed += 1;
+        emit_progress(
+            progress_cb,
+            "fetch_ths_concept",
+            completed,
+            total,
+            Some(item.ts_code.clone()),
+            format!(
+                "已完成 {}/{}: {} {}",
+                completed, total, item.ts_code, item.name
+            ),
+        );
+    }
+
+    emit_progress(
+        progress_cb,
+        "done_ths_concepts",
+        completed,
+        total,
+        None,
+        format!("同花顺概念同步完成，共 {} 只。", completed),
+    );
+
+    Ok(ThsConceptDownloadSummary {
+        total_items: total,
+        saved_rows: completed,
+    })
+}
+
+enum ThsConceptConcurrentMessage {
+    Success {
+        item: ThsConceptFetchItem,
+        row: ThsConceptRow,
+    },
+    Failure {
+        item: Option<ThsConceptFetchItem>,
+        error: String,
+    },
+}
+
+fn download_ths_concepts_concurrent_once(
+    source_dir: &str,
+    worker_threads: usize,
+    progress_cb: Option<&DownloadProgressCallback>,
+) -> Result<ThsConceptDownloadSummary, String> {
+    let (all_items, missing_items, mut concept_map) = build_missing_ths_concept_items(source_dir)?;
+    let existing_count = all_items.len().saturating_sub(missing_items.len());
+
+    emit_progress(
+        progress_cb,
+        "prepare_ths_concepts",
+        existing_count,
+        all_items.len(),
+        None,
+        format!(
+            "同花顺概念已存在 {} 只，待补抓 {} 只，并行线程 {}。",
+            existing_count,
+            missing_items.len(),
+            worker_threads.max(1)
+        ),
+    );
+
+    if all_items.is_empty() {
+        emit_progress(
+            progress_cb,
+            "done_ths_concepts",
+            0,
+            0,
+            None,
+            "股票列表为空，跳过同花顺概念同步。",
+        );
+        return Ok(ThsConceptDownloadSummary::default());
+    }
+
+    if missing_items.is_empty() {
+        emit_progress(
+            progress_cb,
+            "done_ths_concepts",
+            all_items.len(),
+            all_items.len(),
+            None,
+            "同花顺概念已完整，跳过同步。",
+        );
+        return Ok(ThsConceptDownloadSummary {
+            total_items: all_items.len(),
+            saved_rows: all_items.len(),
+        });
+    }
+
+    let worker_count = worker_threads.max(1).min(missing_items.len().max(1));
+    let total = all_items.len();
+    let mut completed = existing_count;
+    let queue = Arc::new(Mutex::new(VecDeque::from(missing_items.clone())));
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel::<ThsConceptConcurrentMessage>();
+    let mut handles = Vec::with_capacity(worker_count);
+
+    for worker_idx in 0..worker_count {
+        let queue = Arc::clone(&queue);
+        let stop_flag = Arc::clone(&stop_flag);
+        let tx = tx.clone();
+        let handle = thread::Builder::new()
+            .name(format!("ths-concept-worker-{worker_idx}"))
+            .spawn(move || {
+                let http = match reqwest::blocking::Client::builder().build() {
+                    Ok(client) => client,
+                    Err(error) => {
+                        let _ = tx.send(ThsConceptConcurrentMessage::Failure {
+                            item: None,
+                            error: format!("创建同花顺概念 HTTP 客户端失败: {error}"),
+                        });
+                        stop_flag.store(true, Ordering::Release);
+                        return;
+                    }
+                };
+
+                loop {
+                    if stop_flag.load(Ordering::Acquire) {
+                        break;
+                    }
+
+                    let item = match queue.lock() {
+                        Ok(mut pending) => pending.pop_front(),
+                        Err(_) => {
+                            let _ = tx.send(ThsConceptConcurrentMessage::Failure {
+                                item: None,
+                                error: "概念下载任务队列锁已损坏".to_string(),
+                            });
+                            stop_flag.store(true, Ordering::Release);
+                            break;
+                        }
+                    };
+
+                    let Some(item) = item else {
+                        break;
+                    };
+
+                    if stop_flag.load(Ordering::Acquire) {
+                        break;
+                    }
+
+                    match fetch_one_ths_concept_row(&http, &item.ts_code, &item.name) {
+                        Ok(row) => {
+                            if tx
+                                .send(ThsConceptConcurrentMessage::Success {
+                                    item,
+                                    row,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            stop_flag.store(true, Ordering::Release);
+                            let _ = tx.send(ThsConceptConcurrentMessage::Failure {
+                                item: Some(item),
+                                error,
+                            });
+                            break;
+                        }
+                    }
+                }
+            })
+            .map_err(|error| format!("创建概念下载线程失败: {error}"))?;
+        handles.push(handle);
+    }
+    drop(tx);
+
+    let mut fatal_error = None;
+
+    while completed < total {
+        let message = match rx.recv() {
+            Ok(message) => message,
+            Err(_) => break,
+        };
+
+        match message {
+            ThsConceptConcurrentMessage::Success { item, row } => {
+                concept_map.insert(row.ts_code.clone(), row);
+                let ordered_rows = build_ordered_ths_concept_rows(&all_items, &concept_map);
+                emit_progress(
+                    progress_cb,
+                    "write_ths_concepts",
+                    completed + 1,
+                    total,
+                    Some(item.ts_code.clone()),
+                    format!(
+                        "并行抓取完成，正在写入 stock_concepts.csv，当前共 {} 只。",
+                        ordered_rows.len()
+                    ),
+                );
+                if let Err(error) = write_ths_concepts_csv(source_dir, &ordered_rows) {
+                    stop_flag.store(true, Ordering::Release);
+                    fatal_error = Some(error);
+                    break;
+                }
+
+                completed += 1;
+                emit_progress(
+                    progress_cb,
+                    "fetch_ths_concept",
+                    completed,
+                    total,
+                    Some(item.ts_code.clone()),
+                    format!(
+                        "并行已完成 {}/{}: {} {}",
+                        completed, total, item.ts_code, item.name
+                    ),
+                );
+            }
+            ThsConceptConcurrentMessage::Failure { item, error } => {
+                stop_flag.store(true, Ordering::Release);
+                let current_label = item.as_ref().map(|value| value.ts_code.clone());
+                let message = match item {
+                    Some(item) => format!("{} {} 抓取失败并停止: {}", item.ts_code, item.name, error),
+                    None => format!("概念并行任务初始化失败并停止: {error}"),
+                };
+                emit_progress(
+                    progress_cb,
+                    "failed_ths_concept",
+                    completed,
+                    total,
+                    current_label,
+                    message,
+                );
+                fatal_error = Some(error);
+                break;
+            }
+        }
+    }
+
+    stop_flag.store(true, Ordering::Release);
+    for handle in handles {
+        handle
+            .join()
+            .map_err(|_| "概念下载线程异常退出".to_string())?;
+    }
+
+    if let Some(error) = fatal_error {
+        return Err(error);
+    }
+
+    if completed < total {
+        return Err(format!(
+            "概念并行下载提前结束: 已完成 {} / {}",
+            completed, total
+        ));
+    }
+
+    emit_progress(
+        progress_cb,
+        "done_ths_concepts",
+        completed,
+        total,
+        None,
+        format!("同花顺概念同步完成，共 {} 只。", completed),
+    );
+
+    Ok(ThsConceptDownloadSummary {
+        total_items: total,
+        saved_rows: completed,
+    })
+}
+
+pub fn download_ths_concepts(
+    source_dir: &str,
+    download_config: ThsConceptDownloadConfig,
+    progress_cb: Option<&DownloadProgressCallback>,
+) -> Result<ThsConceptDownloadSummary, String> {
+    let retry_total = if download_config.retry_enabled {
+        download_config.retry_times.saturating_add(1).max(1)
+    } else {
+        1
+    };
+
+    for attempt_idx in 0..retry_total {
+        let attempt_result = if download_config.concurrent_enabled {
+            download_ths_concepts_concurrent_once(
+                source_dir,
+                download_config.worker_threads,
+                progress_cb,
+            )
+        } else {
+            download_ths_concepts_once(source_dir, progress_cb)
+        };
+
+        match attempt_result {
+            Ok(summary) => return Ok(summary),
+            Err(error) => {
+                let attempt = attempt_idx + 1;
+                if attempt >= retry_total {
+                    return Err(format!(
+                        "同花顺概念同步失败，已达到最大重试次数 {}: {}",
+                        retry_total, error
+                    ));
+                }
+
+                emit_progress(
+                    progress_cb,
+                    "retry_ths_concepts",
+                    0,
+                    0,
+                    None,
+                    format!(
+                        "同花顺概念{}同步第 {}/{} 次失败，{} 秒后整体重试: {}",
+                        if download_config.concurrent_enabled {
+                            format!("并发({}线程)", download_config.worker_threads.max(1))
+                        } else {
+                            "串行".to_string()
+                        },
+                        attempt,
+                        retry_total,
+                        download_config.retry_interval_secs,
+                        error
+                    ),
+                );
+                if download_config.retry_interval_secs > 0 {
+                    sleep(Duration::from_secs(download_config.retry_interval_secs));
+                }
+            }
+        }
+    }
+
+    Err("同花顺概念同步进入未知重试状态".to_string())
 }
 
 pub fn init_stock_basic_data(
@@ -287,69 +847,77 @@ fn build_download_pool(threads: usize) -> Result<ThreadPool, String> {
         .map_err(|e| format!("创建下载线程池失败: {e}"))
 }
 
-struct PendingTradeDateWrite {
+struct PendingTradeDateBatch {
     trade_date: String,
-    passed_rows: Vec<ProBarRow>,
-    passed_indicator_updates: Vec<PendingIndicatorRows>,
-    recovered_prepared_items: Vec<PreparedStockDownload>,
-}
-
-struct PendingIndicatorRows {
-    ts_code: String,
     rows: Vec<ProBarRow>,
     indicators: HashMap<String, Vec<Option<f64>>>,
 }
 
-fn build_trade_date_indicator_matrix(
-    rows: &[ProBarRow],
-    indicator_updates: &[PendingIndicatorRows],
-) -> Result<HashMap<String, Vec<Option<f64>>>, String> {
-    if rows.is_empty() {
-        return Ok(HashMap::new());
-    }
+fn build_trade_date_write_batches(
+    prepared_items: &[PreparedStockDownload],
+) -> Result<Vec<PendingTradeDateBatch>, String> {
+    let mut rows_map = HashMap::<String, Vec<ProBarRow>>::new();
+    let mut indicator_map = HashMap::<String, HashMap<String, Vec<Option<f64>>>>::new();
 
-    let mut indicator_names = HashSet::new();
-    let mut per_stock = HashMap::<String, HashMap<String, Option<f64>>>::new();
-
-    for item in indicator_updates {
-        if item.rows.len() != 1 {
-            return Err(format!(
-                "按交易日构建指标矩阵时发现非单行更新: ts_code={}",
-                item.ts_code
-            ));
-        }
-
-        let mut row_map = HashMap::new();
-        for (name, series) in &item.indicators {
-            if series.len() != 1 {
+    for item in prepared_items {
+        for series in item.indicators.values() {
+            if series.len() != item.rows.len() {
                 return Err(format!(
-                    "按交易日构建指标矩阵时长度不为1: ts_code={}, indicator={}, len={}",
-                    item.ts_code,
-                    name,
-                    series.len()
+                    "按交易日重组写库批次失败: ts_code={} 指标长度与行数不一致",
+                    item.ts_code
                 ));
             }
-            indicator_names.insert(name.clone());
-            row_map.insert(name.clone(), series[0]);
         }
-        per_stock.insert(item.ts_code.clone(), row_map);
+
+        for (row_idx, row) in item.rows.iter().enumerate() {
+            rows_map
+                .entry(row.trade_date.clone())
+                .or_default()
+                .push(row.clone());
+
+            let trade_date_indicators = indicator_map.entry(row.trade_date.clone()).or_default();
+            for (name, series) in &item.indicators {
+                trade_date_indicators
+                    .entry(name.clone())
+                    .or_default()
+                    .push(series[row_idx]);
+            }
+        }
     }
 
-    let mut ordered_names = indicator_names.into_iter().collect::<Vec<_>>();
-    ordered_names.sort();
+    let mut trade_dates = rows_map.keys().cloned().collect::<Vec<_>>();
+    trade_dates.sort();
 
-    let mut out = HashMap::with_capacity(ordered_names.len());
-    for name in ordered_names {
-        let mut series = Vec::with_capacity(rows.len());
-        for row in rows {
-            let value = per_stock
-                .get(&row.ts_code)
-                .and_then(|item| item.get(&name))
-                .copied()
-                .flatten();
-            series.push(value);
+    let mut out = Vec::with_capacity(trade_dates.len());
+    for trade_date in trade_dates {
+        let rows = rows_map.remove(&trade_date).unwrap_or_default();
+        let mut indicators = indicator_map.remove(&trade_date).unwrap_or_default();
+
+        let mut order = rows
+            .iter()
+            .enumerate()
+            .map(|(idx, row)| (idx, row.ts_code.clone()))
+            .collect::<Vec<_>>();
+        order.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let reordered_rows = order
+            .iter()
+            .map(|(idx, _)| rows[*idx].clone())
+            .collect::<Vec<_>>();
+
+        for series in indicators.values_mut() {
+            let reordered_series = order
+                .iter()
+                .map(|(idx, _)| series[*idx])
+                .collect::<Vec<_>>();
+            *series = reordered_series;
         }
-        out.insert(name, series);
+
+        out.push(PendingTradeDateBatch {
+            trade_date,
+            rows: reordered_rows,
+            indicators,
+        });
     }
 
     Ok(out)
@@ -399,7 +967,7 @@ fn redownload_failed_stocks(
     adj_type: AdjType,
     with_factors: bool,
     pool: &ThreadPool,
-)-> Result<PreparedDownloadBatch, String> {
+) -> Result<PreparedDownloadBatch, String> {
     if failed_items.is_empty() {
         return Ok(PreparedDownloadBatch::default());
     }
@@ -751,91 +1319,58 @@ pub fn download_selected_stocks(
 
 // 增量部分
 
-fn validate_market_daily_rows(
-    rows: Vec<ProBarRow>,
-    latest_map: &HashMap<String, LatestCloseRow>,
-) -> (Vec<ProBarRow>, Vec<(String, String)>) {
-    let mut passed_rows = Vec::with_capacity(rows.len());
-    let mut failed_items = Vec::new();
-
-    for row in rows {
-        match latest_map.get(&row.ts_code) {
-            Some(latest) => {
-                if price_equal(latest.close, row.pre_close) {
-                    passed_rows.push(row);
-                } else {
-                    failed_items.push((
-                        row.ts_code.clone(),
-                        format!(
-                            "trade_date={} pre_close校验失败: db_latest_date={}, db_close={}, daily_pre_close={}",
-                            row.trade_date,
-                            latest.trade_date,
-                            latest.close,
-                            row.pre_close
-                        ),
-                    ));
-                }
-            }
-            None => {
-                passed_rows.push(row);
-            }
-        }
-    }
-
-    (passed_rows, failed_items)
-}
-
-fn update_latest_close_map(
-    latest_map: &mut HashMap<String, LatestCloseRow>,
-    passed_rows: &[ProBarRow],
-) {
-    for row in passed_rows {
-        latest_map.insert(
-            row.ts_code.clone(),
-            LatestCloseRow {
-                ts_code: row.ts_code.clone(),
-                trade_date: row.trade_date.clone(),
-                close: row.close,
-            },
-        );
-    }
-}
-
-fn calc_passed_indicator_updates(
+fn calc_passed_prepared_items(
     pool: &ThreadPool,
     source_dir: &str,
+    adj_type: AdjType,
     inds_cache: &[IndsCache],
     warmup_need: usize,
-    latest_map: &HashMap<String, LatestCloseRow>,
-    passed_rows: &[ProBarRow],
-) -> Result<Vec<PendingIndicatorRows>, String> {
-    if passed_rows.is_empty() {
+    history_end_dates: &HashMap<String, String>,
+    passed_rows_by_stock: &HashMap<String, Vec<ProBarRow>>,
+) -> Result<Vec<PreparedStockDownload>, String> {
+    if passed_rows_by_stock.is_empty() {
         return Ok(Vec::new());
     }
 
+    let mut stock_rows = passed_rows_by_stock
+        .iter()
+        .map(|(ts_code, rows)| (ts_code.clone(), rows.clone()))
+        .collect::<Vec<_>>();
+    stock_rows.sort_by(|a, b| a.0.cmp(&b.0));
+
     let chunk_results = pool.install(|| {
-        passed_rows
+        stock_rows
             .par_chunks(INCREMENTAL_INDICATOR_CHUNK_SIZE)
-            .map(|chunk| -> Result<Vec<PendingIndicatorRows>, String> {
+            .map(|chunk| -> Result<Vec<PreparedStockDownload>, String> {
                 let dr = DataReader::new(source_dir)?;
                 let mut chunk_out = Vec::with_capacity(chunk.len());
 
-                for row in chunk {
-                    let history_end_date = latest_map
-                        .get(&row.ts_code)
-                        .map(|latest| latest.trade_date.as_str());
+                for (ts_code, rows) in chunk {
+                    let history_end_date = history_end_dates.get(ts_code).map(String::as_str);
                     let indicators = calc_increment_one_stock_inds(
                         &dr,
                         inds_cache,
                         warmup_need,
-                        row.ts_code.as_str(),
+                        ts_code.as_str(),
                         "qfq",
                         history_end_date,
-                        std::slice::from_ref(row),
+                        rows.as_slice(),
                     )?;
-                    chunk_out.push(PendingIndicatorRows {
-                        ts_code: row.ts_code.clone(),
-                        rows: vec![row.clone()],
+                    let start_date = rows
+                        .first()
+                        .map(|row| row.trade_date.clone())
+                        .ok_or_else(|| format!("缺少通过校验的增量行: ts_code={ts_code}"))?;
+                    let end_date = rows
+                        .last()
+                        .map(|row| row.trade_date.clone())
+                        .ok_or_else(|| format!("缺少通过校验的增量行: ts_code={ts_code}"))?;
+
+                    chunk_out.push(PreparedStockDownload {
+                        ts_code: ts_code.clone(),
+                        start_date,
+                        end_date,
+                        adj_type,
+                        rows: rows.clone(),
                         indicators,
                     });
                 }
@@ -845,13 +1380,15 @@ fn calc_passed_indicator_updates(
             .collect::<Vec<_>>()
     });
 
-    let mut out = Vec::with_capacity(passed_rows.len());
+    let mut out = Vec::with_capacity(stock_rows.len());
     for chunk_result in chunk_results {
         out.extend(chunk_result?);
     }
+    out.sort_by(|a, b| a.ts_code.cmp(&b.ts_code));
 
     Ok(out)
 }
+
 pub fn download_pending_all_market(
     config: &AppConfig,
     progress_cb: Option<&DownloadProgressCallback>,
@@ -923,12 +1460,16 @@ pub fn download_pending_all_market(
             total_trade_dates
         ),
     );
-    let mut latest_map =
+    let latest_map_before =
         load_latest_close_map_before(source_dir, "qfq", pending_trade_dates[0].as_str())?;
+    let history_end_dates = latest_map_before
+        .iter()
+        .map(|(ts_code, latest)| (ts_code.clone(), latest.trade_date.clone()))
+        .collect::<HashMap<_, _>>();
     let mut total = DownloadSummary::default();
-    let mut pending_writes = Vec::with_capacity(pending_trade_dates.len());
+    let mut fetched_trade_dates = Vec::with_capacity(total_trade_dates);
 
-    for (trade_date_idx, trade_date) in pending_trade_dates.into_iter().enumerate() {
+    for (trade_date_idx, trade_date) in pending_trade_dates.iter().enumerate() {
         emit_progress(
             progress_cb,
             "download_pending_trade_dates",
@@ -938,94 +1479,7 @@ pub fn download_pending_all_market(
             format!("正在拉取交易日 {} 的全市场行情。", trade_date),
         );
         let rows = client.fetch_market_daily(trade_date.as_str(), with_factors)?;
-        let market_rows_len = rows.len();
-        let (passed_rows, failed_items) = validate_market_daily_rows(rows, &latest_map);
-        emit_progress(
-            progress_cb,
-            "download_pending_trade_dates",
-            trade_date_idx,
-            total_trade_dates,
-            Some(format!("{trade_date} · 计算通过校验股票指标")),
-            format!(
-                "交易日 {} 已拿到 {} 条行情，正在计算 {} 只通过校验股票的增量指标。",
-                trade_date,
-                market_rows_len,
-                passed_rows.len()
-            ),
-        );
-        let passed_indicator_updates = calc_passed_indicator_updates(
-            &pool,
-            source_dir,
-            &inds_cache,
-            warmup_need,
-            &latest_map,
-            &passed_rows,
-        )?;
-
-        let recovered_batch = if failed_items.is_empty() {
-            PreparedDownloadBatch::default()
-        } else {
-            emit_progress(
-                progress_cb,
-                "download_pending_trade_dates",
-                trade_date_idx,
-                total_trade_dates,
-                Some(format!("{trade_date} · 补救重下失败股票")),
-                format!(
-                    "交易日 {} 有 {} 只股票未通过 pre_close 校验，正在逐股补救重下。",
-                    trade_date,
-                    failed_items.len()
-                ),
-            );
-            redownload_failed_stocks(
-                &client,
-                source_dir,
-                &failed_items,
-                start_date,
-                trade_date.as_str(),
-                adj_type,
-                with_factors,
-                &pool,
-            )?
-        };
-        emit_progress(
-            progress_cb,
-            "download_pending_trade_dates",
-            trade_date_idx,
-            total_trade_dates,
-            Some(format!("{trade_date} · 整理补救股票写入数据")),
-            format!(
-                "交易日 {} 补救重下完成，已准备 {} 只补救股票的整段写入数据。",
-                trade_date,
-                recovered_batch.prepared_items.len()
-            ),
-        );
-
-        let recovered_history_rows = recovered_batch
-            .prepared_items
-            .iter()
-            .map(|item| item.rows.len())
-            .sum::<usize>();
-
-        if !passed_rows.is_empty() {
-            update_latest_close_map(&mut latest_map, &passed_rows);
-        }
-        for item in &recovered_batch.prepared_items {
-            if let Some(last_row) = item.rows.last() {
-                update_latest_close_map(&mut latest_map, std::slice::from_ref(last_row));
-            }
-        }
-
-        if !passed_rows.is_empty() || !recovered_batch.prepared_items.is_empty() {
-            pending_writes.push(PendingTradeDateWrite {
-                trade_date: trade_date.clone(),
-                passed_rows,
-                passed_indicator_updates,
-                recovered_prepared_items: recovered_batch.prepared_items,
-            });
-            total.success_count += market_rows_len;
-            total.saved_rows += market_rows_len + recovered_history_rows;
-        }
+        total.success_count += rows.len();
         emit_progress(
             progress_cb,
             "download_pending_trade_dates",
@@ -1033,17 +1487,182 @@ pub fn download_pending_all_market(
             total_trade_dates,
             Some(trade_date.clone()),
             format!(
-                "增量交易日 {} 已处理完成，进度 {}/{}。",
+                "交易日 {} 全市场行情拉取完成，共 {} 条，进度 {}/{}。",
                 trade_date,
+                rows.len(),
                 trade_date_idx + 1,
                 total_trade_dates
             ),
         );
+        fetched_trade_dates.push(PendingTradeDateBatch {
+            trade_date: trade_date.clone(),
+            rows,
+            indicators: HashMap::new(),
+        });
     }
 
-    if pending_writes.is_empty() {
+    emit_progress(
+        progress_cb,
+        "validate_pending_trade_dates",
+        0,
+        total_trade_dates,
+        None,
+        format!(
+            "全市场行情已拉取完成，开始按时间顺序统一校验 {} 个缺失交易日。",
+            total_trade_dates
+        ),
+    );
+
+    let mut latest_close_map = latest_map_before
+        .iter()
+        .map(|(ts_code, latest)| (ts_code.clone(), (latest.trade_date.clone(), latest.close)))
+        .collect::<HashMap<_, _>>();
+    let mut failed_ts_codes = HashSet::new();
+    let mut failed_items = Vec::new();
+    let mut passed_rows_by_stock: HashMap<String, Vec<ProBarRow>> = HashMap::new();
+
+    for (trade_date_idx, pending) in fetched_trade_dates.iter().enumerate() {
+        let mut passed_count = 0usize;
+        let mut skipped_count = 0usize;
+
+        for row in &pending.rows {
+            if failed_ts_codes.contains(&row.ts_code) {
+                skipped_count += 1;
+                continue;
+            }
+
+            let validation_failed = match latest_close_map.get(&row.ts_code) {
+                Some((latest_trade_date, latest_close))
+                    if !price_equal(*latest_close, row.pre_close) =>
+                {
+                    Some(format!(
+                        "trade_date={} pre_close校验失败: db_latest_date={}, db_close={}, daily_pre_close={}",
+                        row.trade_date, latest_trade_date, latest_close, row.pre_close
+                    ))
+                }
+                _ => None,
+            };
+
+            if let Some(error) = validation_failed {
+                failed_ts_codes.insert(row.ts_code.clone());
+                passed_rows_by_stock.remove(&row.ts_code);
+                failed_items.push((row.ts_code.clone(), error));
+                continue;
+            }
+
+            latest_close_map.insert(row.ts_code.clone(), (row.trade_date.clone(), row.close));
+            passed_rows_by_stock
+                .entry(row.ts_code.clone())
+                .or_default()
+                .push(row.clone());
+            passed_count += 1;
+        }
+
+        emit_progress(
+            progress_cb,
+            "validate_pending_trade_dates",
+            trade_date_idx + 1,
+            total_trade_dates,
+            Some(pending.trade_date.clone()),
+            format!(
+                "交易日 {} 校验完成，通过 {} 条，待整段补救 {} 只股票，已跳过 {} 条后续重复校验记录。",
+                pending.trade_date,
+                passed_count,
+                failed_ts_codes.len(),
+                skipped_count
+            ),
+        );
+    }
+
+    let mut passed_prepared_items = Vec::new();
+    if !passed_rows_by_stock.is_empty() {
+        emit_progress(
+            progress_cb,
+            "calc_incremental_indicators",
+            0,
+            passed_rows_by_stock.len(),
+            None,
+            format!(
+                "统一校验完成，开始按股票整段计算 {} 只通过校验股票的增量指标。",
+                passed_rows_by_stock.len()
+            ),
+        );
+        passed_prepared_items = calc_passed_prepared_items(
+            &pool,
+            source_dir,
+            adj_type,
+            &inds_cache,
+            warmup_need,
+            &history_end_dates,
+            &passed_rows_by_stock,
+        )?;
+        emit_progress(
+            progress_cb,
+            "calc_incremental_indicators",
+            passed_prepared_items.len(),
+            passed_rows_by_stock.len(),
+            None,
+            format!(
+                "通过校验股票的整段增量指标计算完成，共 {} 只。",
+                passed_prepared_items.len()
+            ),
+        );
+    }
+
+    let recovered_batch = if failed_items.is_empty() {
+        PreparedDownloadBatch::default()
+    } else {
+        emit_progress(
+            progress_cb,
+            "recover_failed_stocks",
+            0,
+            failed_items.len(),
+            None,
+            format!(
+                "共有 {} 只股票在缺失区间内出现 pre_close 断点，开始整段补救重下。",
+                failed_items.len()
+            ),
+        );
+        let recovered = redownload_failed_stocks(
+            &client,
+            source_dir,
+            &failed_items,
+            start_date,
+            effective_trade_date.as_str(),
+            adj_type,
+            with_factors,
+            &pool,
+        )?;
+        emit_progress(
+            progress_cb,
+            "recover_failed_stocks",
+            recovered.prepared_items.len(),
+            failed_items.len(),
+            None,
+            format!(
+                "整段补救重下完成，成功准备 {} 只股票的数据。",
+                recovered.prepared_items.len()
+            ),
+        );
+        recovered
+    };
+
+    let passed_write_batches = build_trade_date_write_batches(&passed_prepared_items)?;
+    let recovered_items = recovered_batch.prepared_items;
+
+    if passed_write_batches.is_empty() && recovered_items.is_empty() {
         return Ok(total);
     }
+
+    total.saved_rows = passed_write_batches
+        .iter()
+        .map(|batch| batch.rows.len())
+        .sum::<usize>()
+        + recovered_items
+            .iter()
+            .map(|item| item.rows.len())
+            .sum::<usize>();
+    let write_total = passed_write_batches.len() + recovered_items.len();
 
     let db_path = source_db_path(source_dir);
     let db_path_str = db_path
@@ -1054,57 +1673,58 @@ pub fn download_pending_all_market(
         progress_cb,
         "write_db",
         0,
-        pending_writes.len(),
+        write_total,
         None,
         format!(
-            "增量下载完成，准备写入 {} 个交易日的数据。",
-            pending_writes.len()
+            "增量校验与补救完成，准备写入 {} 个交易日批次和 {} 只补救股票。",
+            passed_write_batches.len(),
+            recovered_items.len()
         ),
     );
 
-    let mut written_trade_dates = 0usize;
+    let mut written_steps = 0usize;
     with_transaction(&conn, |tx| {
         ensure_indicator_columns(tx, &indicator_names)?;
         reset_stock_data_stage_table(tx)?;
 
-        for pending in &pending_writes {
-            if !pending.passed_rows.is_empty() {
-                let passed_indicator_matrix = build_trade_date_indicator_matrix(
-                    &pending.passed_rows,
-                    &pending.passed_indicator_updates,
-                )?;
-                delete_trade_date_rows(tx, adj_type, pending.trade_date.as_str())?;
-                append_stage_pro_bar_rows(
-                    tx,
-                    adj_type,
-                    &pending.passed_rows,
-                    &passed_indicator_matrix,
-                )?;
-            }
+        for batch in &passed_write_batches {
+            delete_trade_date_rows(tx, adj_type, batch.trade_date.as_str())?;
+            append_stage_pro_bar_rows(tx, adj_type, &batch.rows, &batch.indicators)?;
 
-            for item in &pending.recovered_prepared_items {
-                delete_one_stock_range(
-                    tx,
-                    item.ts_code.as_str(),
-                    adj_type,
-                    start_date,
-                    pending.trade_date.as_str(),
-                )?;
-                append_stage_pro_bar_rows(tx, adj_type, &item.rows, &item.indicators)?;
-            }
-
-            written_trade_dates += 1;
+            written_steps += 1;
             emit_progress(
                 progress_cb,
                 "write_db",
-                written_trade_dates,
-                pending_writes.len(),
-                Some(pending.trade_date.clone()),
+                written_steps,
+                write_total,
+                Some(batch.trade_date.clone()),
                 format!(
-                    "已写入 {}/{} 个交易日，当前 {}。",
-                    written_trade_dates,
-                    pending_writes.len(),
-                    pending.trade_date
+                    "已写入 {}/{} 个批次，当前交易日 {}。",
+                    written_steps, write_total, batch.trade_date
+                ),
+            );
+        }
+
+        for item in &recovered_items {
+            delete_one_stock_range(
+                tx,
+                item.ts_code.as_str(),
+                adj_type,
+                item.start_date.as_str(),
+                item.end_date.as_str(),
+            )?;
+            append_stage_pro_bar_rows(tx, adj_type, &item.rows, &item.indicators)?;
+
+            written_steps += 1;
+            emit_progress(
+                progress_cb,
+                "write_db",
+                written_steps,
+                write_total,
+                Some(item.ts_code.clone()),
+                format!(
+                    "已写入 {}/{} 个批次，当前补救股票 {}。",
+                    written_steps, write_total, item.ts_code
                 ),
             );
         }
@@ -1120,8 +1740,10 @@ pub fn download_pending_all_market(
         total_trade_dates,
         Some(effective_trade_date),
         format!(
-            "增量更新完成，共处理 {} 个交易日，写入 {} 行。",
-            total_trade_dates, total.saved_rows
+            "增量更新完成，共处理 {} 个交易日，写入 {} 行，整段补救 {} 只股票。",
+            total_trade_dates,
+            total.saved_rows,
+            failed_items.len()
         ),
     );
 

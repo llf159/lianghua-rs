@@ -1,3 +1,5 @@
+pub mod concept;
+
 use encoding_rs::GBK;
 use serde::Serialize;
 

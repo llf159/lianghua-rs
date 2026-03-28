@@ -19,13 +19,16 @@ use lianghua_rs::{
             IndicatorManageDraft as CoreIndicatorManageDraft,
             IndicatorManagePageData,
             MissingStockRepairRunInput as CoreMissingStockRepairRunInput,
+            ThsConceptDownloadRunInput as CoreThsConceptDownloadRunInput,
             DataDownloadStatus,
             get_data_download_status as core_get_data_download_status,
             get_indicator_manage_page as core_get_indicator_manage_page,
             prepare_data_download_run as core_prepare_data_download_run,
             prepare_missing_stock_repair_run as core_prepare_missing_stock_repair_run,
+            prepare_ths_concept_download_run as core_prepare_ths_concept_download_run,
             run_prepared_data_download as core_run_prepared_data_download,
             run_prepared_missing_stock_repair as core_run_prepared_missing_stock_repair,
+            run_prepared_ths_concept_download as core_run_prepared_ths_concept_download,
             save_indicator_manage_page as core_save_indicator_manage_page,
         },
         details::{
@@ -96,6 +99,9 @@ use tauri_plugin_fs::FsExt;
 use zip::{CompressionMethod, ZipWriter, write::FileOptions};
 
 #[cfg(target_os = "android")]
+use jni::{JNIEnv, objects::JObject, sys::jboolean};
+
+#[cfg(target_os = "android")]
 use lianghua_rs::ui_tools::realtime::fetch_realtime_quote_map_async;
 
 const MANAGED_SOURCE_IMPORT_EVENT: &str = "managed-source-import";
@@ -103,6 +109,22 @@ const DATA_DOWNLOAD_EVENT: &str = "data-download-status";
 const WATCH_OBSERVE_STORAGE_FILE: &str = "watch_observe.json";
 const IMPORT_BUFFER_SIZE: usize = 1024 * 1024;
 const IMPORT_PROGRESS_STEP_BYTES: u64 = 32 * 1024 * 1024;
+
+#[cfg(target_os = "android")]
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "system" fn Java_com_lmingyuanl_lianghua_MainActivity_initRustlsPlatformVerifier(
+    mut env: JNIEnv,
+    activity: JObject,
+) -> jboolean {
+    match rustls_platform_verifier::android::init_hosted(&mut env, activity) {
+        Ok(()) => 1,
+        Err(error) => {
+            eprintln!("初始化 rustls-platform-verifier 失败: {error}");
+            0
+        }
+    }
+}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,6 +220,18 @@ struct MissingStockRepairRequest {
     retry_times: usize,
     limit_calls_per_min: usize,
     include_turnover: bool,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThsConceptDownloadRequest {
+    download_id: String,
+    source_path: String,
+    retry_enabled: bool,
+    retry_times: usize,
+    retry_interval_secs: u64,
+    concurrent_enabled: bool,
+    worker_threads: usize,
 }
 
 #[derive(Clone, Serialize)]
@@ -1021,6 +1055,108 @@ async fn run_missing_stock_repair(
 
             let mut run_result =
                 core_run_prepared_missing_stock_repair(&prepared, Some(&progress_cb))?;
+            run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
+            Ok(run_result)
+        })();
+
+        match &result {
+            Ok(run_result) => emit_data_download_event(
+                &app,
+                DataDownloadEventPayload {
+                    download_id: download_id.clone(),
+                    phase: "completed".to_string(),
+                    action: action.clone(),
+                    action_label: action_label.clone(),
+                    elapsed_ms: run_result.elapsed_ms,
+                    finished: run_result.summary.success_count + run_result.summary.failed_count,
+                    total: run_result.summary.success_count + run_result.summary.failed_count,
+                    current_label: None,
+                    message: format!(
+                        "{} 已完成，成功 {} 只，失败 {} 只。",
+                        action_label,
+                        run_result.summary.success_count,
+                        run_result.summary.failed_count
+                    ),
+                },
+            ),
+            Err(error) => emit_data_download_event(
+                &app,
+                DataDownloadEventPayload {
+                    download_id: download_id.clone(),
+                    phase: "failed".to_string(),
+                    action: action.clone(),
+                    action_label: action_label.clone(),
+                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    finished: 0,
+                    total: 0,
+                    current_label: None,
+                    message: format!("{} 失败: {}", action_label, error),
+                },
+            ),
+        }
+
+        result
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn run_ths_concept_download(
+    app: tauri::AppHandle,
+    request: ThsConceptDownloadRequest,
+) -> Result<DataDownloadRunResult, String> {
+    let download_id = request.download_id.trim().to_string();
+    if download_id.is_empty() {
+        return Err("download_id 不能为空".to_string());
+    }
+
+    let prepared = core_prepare_ths_concept_download_run(CoreThsConceptDownloadRunInput {
+        source_path: request.source_path,
+        retry_enabled: request.retry_enabled,
+        retry_times: request.retry_times,
+        retry_interval_secs: request.retry_interval_secs,
+        concurrent_enabled: request.concurrent_enabled,
+        worker_threads: request.worker_threads,
+    })?;
+    let action = prepared.action.clone();
+    let action_label = prepared.action_label.clone();
+    emit_data_download_event(
+        &app,
+        DataDownloadEventPayload {
+            download_id: download_id.clone(),
+            phase: "started".to_string(),
+            action: action.clone(),
+            action_label: action_label.clone(),
+            elapsed_ms: 0,
+            finished: 0,
+            total: 0,
+            current_label: None,
+            message: format!("{action_label} 已启动，正在准备概念数据下载。"),
+        },
+    );
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let started_at = Instant::now();
+        let result = (|| -> Result<DataDownloadRunResult, String> {
+            let progress_app = app.clone();
+            let progress_download_id = download_id.clone();
+            let progress_action = action.clone();
+            let progress_action_label = action_label.clone();
+            let progress_started_at = started_at;
+            let progress_cb = move |progress: CoreDownloadProgress| {
+                emit_core_download_progress(
+                    &progress_app,
+                    progress_download_id.as_str(),
+                    progress_action.as_str(),
+                    progress_action_label.as_str(),
+                    progress_started_at.elapsed().as_millis() as u64,
+                    progress,
+                );
+            };
+
+            let mut run_result =
+                core_run_prepared_ths_concept_download(&prepared, Some(&progress_cb))?;
             run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
             Ok(run_result)
         })();
@@ -2826,6 +2962,7 @@ pub fn run() {
             export_strategy_rule_file,
             run_data_download,
             run_missing_stock_repair,
+            run_ths_concept_download,
             run_ranking_score_calculation,
             save_indicator_manage_page,
             run_ranking_tiebreak_fill,

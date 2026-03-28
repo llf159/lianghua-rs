@@ -3,7 +3,8 @@ use std::{collections::HashMap, fs::create_dir_all, path::Path};
 use duckdb::{Connection, ToSql, params, params_from_iter};
 
 use crate::{
-    data::{source_db_path, stock_list_path, trade_calendar_path},
+    crawler::concept::ThsConceptRow,
+    data::{source_db_path, stock_list_path, ths_concepts_path, trade_calendar_path},
     download::{AdjType, ProBarRow, StockListRow, TradeCalRow},
 };
 
@@ -535,6 +536,40 @@ pub fn write_trade_calendar_csv(source_dir: &str, rows: &[TradeCalRow]) -> Resul
         .map_err(|e| format!("刷新trade_calendar.csv失败:{e}"))?;
 
     Ok(())
+}
+
+fn write_ths_concepts_csv_by_path(path: &Path, rows: &[ThsConceptRow]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            create_dir_all(parent).map_err(|e| format!("创建概念目录失败:{e}"))?;
+        }
+    }
+
+    let mut writer = csv::Writer::from_path(path)
+        .map_err(|e| format!("创建概念CSV失败:路径:{:?},错误:{e}", path))?;
+
+    writer
+        .write_record(["ts_code", "name", "concept"])
+        .map_err(|e| format!("写入概念CSV表头失败:{e}"))?;
+
+    for row in rows {
+        writer
+            .write_record([
+                row.ts_code.as_str(),
+                row.name.as_str(),
+                row.concept.as_str(),
+            ])
+            .map_err(|e| format!("写入概念CSV失败, ts_code={}: {e}", row.ts_code))?;
+    }
+
+    writer.flush().map_err(|e| format!("刷新概念CSV失败:{e}"))?;
+
+    Ok(())
+}
+
+pub fn write_ths_concepts_csv(source_dir: &str, rows: &[ThsConceptRow]) -> Result<(), String> {
+    let path = ths_concepts_path(source_dir);
+    write_ths_concepts_csv_by_path(&path, rows)
 }
 
 pub struct LatestCloseRow {

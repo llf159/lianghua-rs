@@ -145,7 +145,10 @@ fn score_at(scopeway: ScopeHit, dps: Option<&[DistPoint]>, points: f64) -> f64 {
     }
 }
 
-fn scoring_rule_cache(rule: &CachedRule, rt: &mut Runtime) -> Result<(Vec<f64>, Vec<bool>), String> {
+fn scoring_rule_cache(
+    rule: &CachedRule,
+    rt: &mut Runtime,
+) -> Result<(Vec<f64>, Vec<bool>), String> {
     let bs = hit_when_cache(&rule, rt)?;
     let mut out = Vec::with_capacity(bs.len());
     let mut triggered = Vec::with_capacity(bs.len());

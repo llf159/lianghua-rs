@@ -620,13 +620,14 @@ fn query_strategy_triggers(
     let mut untriggered = Vec::new();
 
     for meta in rule_meta_list {
-        let current_state = current_state_map
-            .get(&meta.rule_name)
-            .copied()
-            .unwrap_or(CurrentRuleState {
-                rule_score: 0.0,
-                is_triggered: false,
-            });
+        let current_state =
+            current_state_map
+                .get(&meta.rule_name)
+                .copied()
+                .unwrap_or(CurrentRuleState {
+                    rule_score: 0.0,
+                    is_triggered: false,
+                });
         let hit_date = latest_hit_date_map.get(&meta.rule_name).cloned();
         let row = DetailStrategyTriggerRow {
             rule_name: meta.rule_name.clone(),

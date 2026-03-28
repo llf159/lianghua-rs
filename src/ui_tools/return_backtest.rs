@@ -284,7 +284,9 @@ fn query_backtest_rows(
                 .map_err(|e| format!("读取 top_row_num 失败: {e}"))?,
             board: row.get(2).map_err(|e| format!("读取 board 失败: {e}"))?,
             rank: row.get(3).map_err(|e| format!("读取 rank 失败: {e}"))?,
-            best_rank: row.get(4).map_err(|e| format!("读取 best_rank 失败: {e}"))?,
+            best_rank: row
+                .get(4)
+                .map_err(|e| format!("读取 best_rank 失败: {e}"))?,
             total_score: row
                 .get(5)
                 .map_err(|e| format!("读取 total_score 失败: {e}"))?,

@@ -79,7 +79,10 @@ pub fn build_market_monitor_page_from_rows(
 ) -> Result<MarketMonitorPageData, String> {
     let resolved_reference_trade_date =
         overview_rows.first().and_then(|row| row.trade_date.clone());
-    let ts_codes: Vec<String> = overview_rows.iter().map(|row| row.ts_code.clone()).collect();
+    let ts_codes: Vec<String> = overview_rows
+        .iter()
+        .map(|row| row.ts_code.clone())
+        .collect();
     let latest_vol_map = build_latest_vol_map(source_path, &ts_codes)?;
     let rows = build_market_monitor_rows(overview_rows, &quote_map, &latest_vol_map);
 

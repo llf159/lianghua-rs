@@ -6,13 +6,15 @@ use serde::{Deserialize, Serialize};
 use crate::{
     config::{AppConfig, DataConfig, DownloadConfig, OutputConfig},
     data::{
-        IndsData, ind_toml_path, load_stock_list, load_trade_date_list, source_db_path,
-        stock_list_path, trade_calendar_path,
+        IndsData, ind_toml_path, load_stock_list, load_ths_concepts_list, load_trade_date_list,
+        source_db_path, stock_list_path, ths_concepts_path, trade_calendar_path,
     },
     download::{
         DownloadSummary,
         runner::{
-            DownloadProgressCallback, download as core_run_download_with_progress,
+            DownloadProgressCallback, ThsConceptDownloadConfig,
+            download as core_run_download_with_progress,
+            download_ths_concepts as core_download_ths_concepts,
             download_selected_stocks as core_run_selected_stock_download_with_progress,
         },
     },
@@ -50,6 +52,7 @@ pub struct DataDownloadStatus {
     pub source_db: DataDownloadDbRange,
     pub stock_list: DataDownloadFileStatus,
     pub trade_calendar: DataDownloadFileStatus,
+    pub ths_concepts: DataDownloadFileStatus,
     pub missing_stock_repair: DataDownloadMissingStockRepairStatus,
     pub planned_action: String,
     pub planned_action_label: String,
@@ -78,6 +81,17 @@ pub struct MissingStockRepairRunInput {
     pub retry_times: usize,
     pub limit_calls_per_min: usize,
     pub include_turnover: bool,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThsConceptDownloadRunInput {
+    pub source_path: String,
+    pub retry_enabled: bool,
+    pub retry_times: usize,
+    pub retry_interval_secs: u64,
+    pub concurrent_enabled: bool,
+    pub worker_threads: usize,
 }
 
 #[derive(Clone, Serialize)]
@@ -175,6 +189,18 @@ pub struct PreparedMissingStockRepairRun {
     pub action: String,
     pub action_label: String,
     pub missing_ts_codes: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct PreparedThsConceptDownloadRun {
+    pub source_path: String,
+    pub retry_enabled: bool,
+    pub retry_times: usize,
+    pub retry_interval_secs: u64,
+    pub concurrent_enabled: bool,
+    pub worker_threads: usize,
+    pub action: String,
+    pub action_label: String,
 }
 
 fn normalize_download_date(raw: &str, field_name: &str) -> Result<String, String> {
@@ -347,6 +373,28 @@ fn query_stock_list_status(source_path: &str) -> Result<DataDownloadFileStatus, 
     })
 }
 
+fn query_ths_concepts_status(source_path: &str) -> Result<DataDownloadFileStatus, String> {
+    let file_path = ths_concepts_path(source_path);
+    if !file_path.exists() {
+        return Ok(DataDownloadFileStatus {
+            file_name: "stock_concepts.csv".to_string(),
+            exists: false,
+            row_count: 0,
+            min_trade_date: None,
+            max_trade_date: None,
+        });
+    }
+
+    let rows = load_ths_concepts_list(source_path)?;
+    Ok(DataDownloadFileStatus {
+        file_name: "stock_concepts.csv".to_string(),
+        exists: true,
+        row_count: rows.len() as u64,
+        min_trade_date: None,
+        max_trade_date: None,
+    })
+}
+
 fn plan_download_action(source_db: &DataDownloadDbRange) -> (String, String, String) {
     match source_db.max_trade_date.as_deref() {
         Some(max_trade_date) if source_db.row_count > 0 => (
@@ -401,7 +449,10 @@ fn query_existing_stock_codes(source_path: &str) -> Result<HashSet<String>, Stri
         .map_err(|e| format!("查询现有股票代码失败: {e}"))?;
 
     let mut out = HashSet::new();
-    while let Some(row) = rows.next().map_err(|e| format!("读取现有股票代码失败: {e}"))? {
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取现有股票代码失败: {e}"))?
+    {
         let ts_code: String = row.get(0).map_err(|e| format!("读取 ts_code 失败: {e}"))?;
         if !ts_code.trim().is_empty() {
             out.insert(ts_code);
@@ -415,7 +466,7 @@ fn scan_missing_stock_codes(
     source_path: &str,
     source_db: &DataDownloadDbRange,
     stock_list: &DataDownloadFileStatus,
-    trade_calendar: &DataDownloadFileStatus,
+    _trade_calendar: &DataDownloadFileStatus,
 ) -> Result<(Vec<String>, DataDownloadMissingStockRepairStatus), String> {
     if !stock_list.exists || stock_list.row_count == 0 {
         return Ok((
@@ -463,7 +514,7 @@ fn scan_missing_stock_codes(
         "当前 stock_list.csv 中的股票都已在原始库里出现过，无需补全。".to_string()
     } else {
         format!(
-            "将按当前原始库起始日期到当前有效交易日，补全 {} 只完全缺失的股票。",
+            "将按当前原始库起始日期到当前原始库最新交易日，补全 {} 只完全缺失的股票。",
             missing_codes.len()
         )
     };
@@ -475,10 +526,7 @@ fn scan_missing_stock_codes(
             missing_count: missing_codes.len() as u64,
             missing_samples: missing_codes.into_iter().take(12).collect(),
             suggested_start_date: source_db.min_trade_date.clone(),
-            suggested_end_date: trade_calendar
-                .max_trade_date
-                .clone()
-                .or_else(|| source_db.max_trade_date.clone()),
+            suggested_end_date: source_db.max_trade_date.clone(),
             detail,
         },
     ))
@@ -508,6 +556,7 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
         query_trade_date_range(&source_db_path(trimmed), "stock_data.db", "stock_data")?;
     let trade_calendar = query_trade_calendar_status(trimmed)?;
     let stock_list = query_stock_list_status(trimmed)?;
+    let ths_concepts = query_ths_concepts_status(trimmed)?;
     let (_, missing_stock_repair) =
         scan_missing_stock_codes(trimmed, &source_db, &stock_list, &trade_calendar)?;
     let (planned_action, planned_action_label, planned_action_detail) =
@@ -518,6 +567,7 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
         source_db,
         stock_list,
         trade_calendar,
+        ths_concepts,
         missing_stock_repair,
         planned_action,
         planned_action_label,
@@ -550,7 +600,11 @@ pub fn prepare_missing_stock_repair_run(
         .suggested_start_date
         .clone()
         .ok_or_else(|| "缺失股票补全缺少可用起始日期".to_string())?;
-    let end_date = "today".to_string();
+    let end_date = status
+        .missing_stock_repair
+        .suggested_end_date
+        .clone()
+        .ok_or_else(|| "缺失股票补全缺少可用结束日期".to_string())?;
     let (missing_ts_codes, _) = scan_missing_stock_codes(
         &source_path,
         &status.source_db,
@@ -605,6 +659,31 @@ pub fn prepare_data_download_run(
         include_turnover: input.include_turnover,
         action: status.planned_action,
         action_label: status.planned_action_label,
+    })
+}
+
+pub fn prepare_ths_concept_download_run(
+    input: ThsConceptDownloadRunInput,
+) -> Result<PreparedThsConceptDownloadRun, String> {
+    let source_path = input.source_path.trim().to_string();
+    if source_path.is_empty() {
+        return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
+    }
+
+    let status = get_data_download_status(&source_path)?;
+    if !status.stock_list.exists || status.stock_list.row_count == 0 {
+        return Err("股票列表不存在或为空，请先完成基础数据刷新。".to_string());
+    }
+
+    Ok(PreparedThsConceptDownloadRun {
+        source_path,
+        retry_enabled: input.retry_enabled,
+        retry_times: input.retry_times,
+        retry_interval_secs: input.retry_interval_secs,
+        concurrent_enabled: input.concurrent_enabled,
+        worker_threads: input.worker_threads.max(1),
+        action: "download-ths-concepts".to_string(),
+        action_label: "概念数据下载".to_string(),
     })
 }
 
@@ -694,6 +773,37 @@ pub fn run_prepared_missing_stock_repair(
         action_label: prepared.action_label.clone(),
         elapsed_ms: 0,
         summary: build_data_download_summary(summary),
+        status,
+    })
+}
+
+pub fn run_prepared_ths_concept_download(
+    prepared: &PreparedThsConceptDownloadRun,
+    progress_cb: Option<&DownloadProgressCallback>,
+) -> Result<DataDownloadRunResult, String> {
+    let summary = core_download_ths_concepts(
+        &prepared.source_path,
+        ThsConceptDownloadConfig {
+            retry_enabled: prepared.retry_enabled,
+            retry_times: prepared.retry_times,
+            retry_interval_secs: prepared.retry_interval_secs,
+            concurrent_enabled: prepared.concurrent_enabled,
+            worker_threads: prepared.worker_threads,
+        },
+        progress_cb,
+    )?;
+    let status = get_data_download_status(&prepared.source_path)?;
+
+    Ok(DataDownloadRunResult {
+        action: prepared.action.clone(),
+        action_label: prepared.action_label.clone(),
+        elapsed_ms: 0,
+        summary: DataDownloadSummary {
+            success_count: summary.saved_rows as u64,
+            failed_count: 0,
+            saved_rows: summary.saved_rows as u64,
+            failed_items: Vec::new(),
+        },
         status,
     })
 }

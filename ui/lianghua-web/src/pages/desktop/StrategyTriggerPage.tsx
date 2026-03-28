@@ -351,18 +351,42 @@ function isPointerNearOverviewChartFocus(
 
 function buildOverviewDeltaCandleTitle(
   item: StrategyHeatmapCell,
-  open: number,
-  close: number,
+  deltaValue: number | null,
 ) {
-  const delta = getOverviewDeltaValue(item);
   return [
     `日期: ${formatDateLabel(item.trade_date)}`,
-    `开: ${formatSignedNumber(open)}`,
-    `收: ${formatSignedNumber(close)}`,
-    `当日差值: ${formatSignedNumber(delta ?? close - open)}`,
+    `当日差值: ${formatSignedNumber(deltaValue)}`,
     `当日值: ${formatNumber(item.day_level)}`,
     `平均值: ${formatNumber(item.avg_level)}`,
   ].join("\n");
+}
+
+function buildChartValueDomain(values: number[], includeZero = false) {
+  if (values.length === 0) {
+    return null;
+  }
+
+  let min = Math.min(...values);
+  let max = Math.max(...values);
+
+  if (includeZero) {
+    min = Math.min(min, 0);
+    max = Math.max(max, 0);
+  }
+
+  if (min === max) {
+    const padding = Math.max(Math.abs(min) * 0.08, 1);
+    return { min: min - padding, max: max + padding };
+  }
+
+  const span = max - min;
+  const paddingTop = span * 0.08;
+  const paddingBottom = includeZero && min >= 0 ? 0 : span * 0.08;
+
+  return {
+    min: min - paddingBottom,
+    max: max + paddingTop,
+  };
 }
 
 function buildCalendarMonths(items: StrategyHeatmapCell[]) {
@@ -481,15 +505,12 @@ function buildOverviewDeltaGeometry(
     runningValue += delta;
     cumulativeValues.push(runningValue);
   }
-  const rawMin = Math.min(...cumulativeValues);
-  const rawMax = Math.max(...cumulativeValues);
-  const rawSpan = rawMax - rawMin;
-  const padding =
-    rawSpan > 0
-      ? rawSpan * 0.12
-      : Math.max(Math.abs(rawMax || rawMin) * 0.08, 0.5);
-  const scaledMin = rawMin - padding;
-  const scaledMax = rawMax + padding;
+  const domain = buildChartValueDomain(cumulativeValues, true);
+  if (!domain) {
+    return null;
+  }
+  const scaledMin = domain.min;
+  const scaledMax = domain.max;
   const domainSpan = Math.max(scaledMax - scaledMin, 0.01);
   const valueToY = (value: number) =>
     marginTop + ((scaledMax - value) / domainSpan) * plotHeight;
@@ -785,13 +806,6 @@ function StrategyOverviewDeltaChart({
   }
 
   const chartGeometry = geometry;
-  const latestDelta = geometry.latestDelta ?? 0;
-  const latestDeltaClassName =
-    latestDelta > 0
-      ? "is-positive"
-      : latestDelta < 0
-        ? "is-negative"
-        : "is-flat";
   const focusCandle =
     focus !== null ? (chartGeometry.candles[focus.index] ?? null) : null;
   const tooltipHorizontalClass =
@@ -1007,17 +1021,6 @@ function StrategyOverviewDeltaChart({
           <strong>差值累计小K线</strong>
           <span>开收按累计差值延展，实体长度 = 当日差值</span>
         </div>
-        <div
-          className={[
-            "strategy-trigger-overview-mini-chart-latest",
-            latestDeltaClassName,
-          ]
-            .filter(Boolean)
-            .join(" ")}
-        >
-          <span>{formatDateLabel(geometry.latestTradeDate)}</span>
-          <strong>{formatSignedNumber(geometry.latestDelta)}</strong>
-        </div>
       </div>
       <div className="strategy-trigger-overview-mini-chart-scroll" ref={scrollRef}>
         <div
@@ -1113,8 +1116,7 @@ function StrategyOverviewDeltaChart({
                     <title>
                       {buildOverviewDeltaCandleTitle(
                         candle.item,
-                        candle.open,
-                        candle.close,
+                        getOverviewDeltaValue(candle.item),
                       )}
                     </title>
                   </rect>
@@ -1182,14 +1184,6 @@ function StrategyOverviewDeltaChart({
               </div>
               <div className="strategy-trigger-overview-mini-chart-tooltip-body">
                 <div className="strategy-trigger-overview-mini-chart-tooltip-grid">
-                  <div className="strategy-trigger-overview-mini-chart-tooltip-row">
-                    <span>开</span>
-                    <strong>{formatSignedNumber(focusCandle.open)}</strong>
-                  </div>
-                  <div className="strategy-trigger-overview-mini-chart-tooltip-row">
-                    <span>收</span>
-                    <strong>{formatSignedNumber(focusCandle.close)}</strong>
-                  </div>
                   <div className="strategy-trigger-overview-mini-chart-tooltip-row">
                     <span>当日差值</span>
                     <strong>

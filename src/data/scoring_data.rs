@@ -242,7 +242,11 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn delete_score_range(tx: &Transaction<'_>, start_date: &str, end_date: &str) -> Result<(), String> {
+fn delete_score_range(
+    tx: &Transaction<'_>,
+    start_date: &str,
+    end_date: &str,
+) -> Result<(), String> {
     tx.execute(
         "DELETE FROM score_summary WHERE trade_date >= ? AND trade_date <= ?",
         params![start_date, end_date],

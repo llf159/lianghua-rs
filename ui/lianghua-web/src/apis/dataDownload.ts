@@ -26,6 +26,7 @@ export type DataDownloadStatus = {
   sourceDb: RankComputeDbRange
   stockList: DataDownloadFileStatus
   tradeCalendar: DataDownloadFileStatus
+  thsConcepts: DataDownloadFileStatus
   missingStockRepair: DataDownloadMissingStockRepairStatus
   plannedAction: string
   plannedActionLabel: string
@@ -61,6 +62,16 @@ export type MissingStockRepairRequest = {
   retryTimes: number
   limitCallsPerMin: number
   includeTurnover: boolean
+}
+
+export type ThsConceptDownloadRequest = {
+  downloadId: string
+  sourcePath: string
+  retryEnabled: boolean
+  retryTimes: number
+  retryIntervalSecs: number
+  concurrentEnabled: boolean
+  workerThreads: number
 }
 
 export type DataDownloadSummary = {
@@ -119,6 +130,10 @@ export async function runDataDownload(request: DataDownloadRequest) {
 
 export async function runMissingStockRepair(request: MissingStockRepairRequest) {
   return invoke<DataDownloadRunResult>('run_missing_stock_repair', { request })
+}
+
+export async function runThsConceptDownload(request: ThsConceptDownloadRequest) {
+  return invoke<DataDownloadRunResult>('run_ths_concept_download', { request })
 }
 
 export async function getIndicatorManagePage(sourcePath: string) {

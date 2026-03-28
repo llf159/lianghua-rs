@@ -19,3 +19,6 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# rustls-platform-verifier is referenced through JNI and would look unused to Proguard.
+-keep,includedescriptorclasses class org.rustls.platformverifier.** { *; }
