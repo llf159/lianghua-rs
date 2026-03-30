@@ -1774,11 +1774,7 @@ export default function StrategyTriggerPage() {
     [heatmapSlots, selectedOverviewDate],
   );
   const rowsForAnalysisDate = useMemo(
-    () =>
-      detailRows.filter(
-        (row) =>
-          row.trade_date === analysisTradeDate && (row.trigger_count ?? 0) > 0,
-      ),
+    () => detailRows.filter((row) => row.trade_date === analysisTradeDate),
     [analysisTradeDate, detailRows],
   );
   const dailySortDefinitions = useMemo(

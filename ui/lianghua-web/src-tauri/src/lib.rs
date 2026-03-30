@@ -1590,8 +1590,8 @@ fn get_stock_pick_options(source_path: String) -> Result<StockPickOptionsData, S
 async fn run_expression_stock_pick(
     source_path: String,
     board: Option<String>,
-    start_date: Option<String>,
-    end_date: Option<String>,
+    reference_trade_date: Option<String>,
+    lookback_periods: Option<usize>,
     scope_way: String,
     expression: String,
     consec_threshold: Option<usize>,
@@ -1605,8 +1605,8 @@ async fn run_expression_stock_pick(
         core_run_expression_stock_pick(
             &source_path,
             board,
-            start_date,
-            end_date,
+            reference_trade_date,
+            lookback_periods,
             scope_way,
             expression,
             consec_threshold,

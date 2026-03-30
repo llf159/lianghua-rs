@@ -29,7 +29,7 @@ import {
 } from "./stockPickShared";
 import { useStockPickOutletContext } from "./StockPickPage";
 
-const ADVANCED_STOCK_PICK_STATE_KEY = "advanced-stock-pick-state-v5";
+const ADVANCED_STOCK_PICK_STATE_KEY = "advanced-stock-pick-state";
 const HORIZON_OPTIONS = [2, 3, 5, 10] as const;
 const QUANTILE_OPTIONS = [0.8, 0.9, 0.95] as const;
 const DEFAULT_AUTO_MIN_SAMPLES = {
@@ -493,7 +493,7 @@ export default function AdvancedStockPickPage() {
     () => persistedState?.methodKey ?? "mixed_topn",
   );
   const [selectedHorizon, setSelectedHorizon] = useState(
-    () => persistedState?.selectedHorizon ?? "10",
+    () => persistedState?.selectedHorizon ?? "2",
   );
   const [strongQuantile, setStrongQuantile] = useState(
     () => persistedState?.strongQuantile ?? "0.9",
@@ -541,7 +541,7 @@ export default function AdvancedStockPickPage() {
     () => persistedState?.topLimit ?? "100",
   );
   const [rankMax, setRankMax] = useState(
-    () => persistedState?.rankMax ?? "100",
+    () => persistedState?.rankMax ?? "1000",
   );
   const [mixedSortKeys, setMixedSortKeys] = useState<string[]>(
     () =>
@@ -634,7 +634,7 @@ export default function AdvancedStockPickPage() {
     () =>
       JSON.stringify({
         sourcePath: sourcePath.trim(),
-        selectedHorizon: parsePositiveInt(selectedHorizon, 10),
+        selectedHorizon: parsePositiveInt(selectedHorizon, 2),
         strongQuantile: Number(strongQuantile),
         autoMinSamples2: parsePositiveInt(autoMinSamples2, DEFAULT_AUTO_MIN_SAMPLES[2]),
         autoMinSamples3: parsePositiveInt(autoMinSamples3, DEFAULT_AUTO_MIN_SAMPLES[3]),
@@ -670,7 +670,7 @@ export default function AdvancedStockPickPage() {
         manualRuleNames: currentAdvantageRuleNames,
         minAdvHits: parsePositiveInt(minAdvHits, 1),
         topLimit: parsePositiveInt(topLimit, 100),
-        rankMax: parsePositiveInt(rankMax, 100),
+        rankMax: parsePositiveInt(rankMax, 1000),
         mixedSortKeys: normalizedMixedSortKeys,
       }),
     [
@@ -836,7 +836,7 @@ export default function AdvancedStockPickPage() {
     try {
       const pageData = await getStrategyPerformancePage({
         sourcePath,
-        selectedHorizon: parsePositiveInt(selectedHorizon, 10),
+        selectedHorizon: parsePositiveInt(selectedHorizon, 2),
         strongQuantile: Number(strongQuantile),
         advantageRuleMode: "auto",
         autoMinSamples2: parsePositiveInt(autoMinSamples2, DEFAULT_AUTO_MIN_SAMPLES[2]),
@@ -886,14 +886,14 @@ export default function AdvancedStockPickPage() {
         excludeConcepts: normalizedExcludeConcepts,
         conceptMatchMode,
         methodKey,
-        selectedHorizon: parsePositiveInt(selectedHorizon, 10),
+        selectedHorizon: parsePositiveInt(selectedHorizon, 2),
         strongQuantile: Number(strongQuantile),
         advantageRuleMode: "manual",
         manualRuleNames: normalizeStringArray(currentAdvantageRuleNames),
         minAdvHits: parsePositiveInt(minAdvHits, 1),
         topLimit: parsePositiveInt(topLimit, 100),
         mixedSortKeys: normalizedMixedSortKeys,
-        rankMax: parsePositiveInt(rankMax, 100),
+        rankMax: parsePositiveInt(rankMax, 1000),
       });
       setResult(nextResult);
       setRunSignature(runConfigSignature);

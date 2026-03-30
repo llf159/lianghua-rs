@@ -63,8 +63,8 @@ export type AdvancedStockPickResultData = {
 export type ExpressionStockPickQuery = {
   sourcePath: string
   board?: string
-  startDate?: string
-  endDate?: string
+  referenceTradeDate?: string
+  lookbackPeriods?: number
   scopeWay: string
   expression: string
   consecThreshold?: number

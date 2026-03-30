@@ -194,6 +194,36 @@ fn normalize_date_range(
     Ok((resolved_start, resolved_end))
 }
 
+fn resolve_expression_trade_window(
+    trade_date_options: &[String],
+    reference_trade_date: Option<String>,
+    lookback_periods: Option<usize>,
+    scope_way: PickScopeWay,
+) -> Result<(String, String), String> {
+    let resolved_reference_trade_date =
+        normalize_single_trade_date(trade_date_options, reference_trade_date)?;
+    let reference_index = trade_date_options
+        .iter()
+        .position(|item| item == &resolved_reference_trade_date)
+        .ok_or_else(|| format!("交易日不存在: {resolved_reference_trade_date}"))?;
+
+    let resolved_start_index = match scope_way {
+        PickScopeWay::Last => reference_index,
+        _ => {
+            let periods = lookback_periods.unwrap_or(1);
+            if periods == 0 {
+                return Err("前推周期数必须 >= 1".to_string());
+            }
+            reference_index.saturating_sub(periods.saturating_sub(1))
+        }
+    };
+
+    Ok((
+        trade_date_options[resolved_start_index].clone(),
+        resolved_reference_trade_date,
+    ))
+}
+
 fn load_trade_date_options(source_path: &str) -> Result<Vec<String>, String> {
     let reader = DataReader::new(source_path)?;
     let mut stmt = reader
@@ -481,7 +511,9 @@ fn scope_hit_note(hit: &ScopeHit, scope_way: PickScopeWay) -> String {
         (PickScopeWay::Any, ScopeHit::Bool(true)) => "周期内命中".to_string(),
         (PickScopeWay::Consec(threshold), ScopeHit::Bool(true)) => format!("连续命中>={threshold}"),
         (PickScopeWay::Each, ScopeHit::Count(value)) => format!("命中 {value} 次"),
-        (PickScopeWay::Recent, ScopeHit::Recent(Some(value))) => format!("最近命中距今 {value} 天"),
+        (PickScopeWay::Recent, ScopeHit::Recent(Some(value))) => {
+            format!("最近命中距今 {value} 个交易日")
+        }
         _ => "--".to_string(),
     }
 }
@@ -713,16 +745,20 @@ fn format_rule_hits(items: &[(String, f64)]) -> String {
 pub fn run_expression_stock_pick(
     source_path: &str,
     board: Option<String>,
-    start_date: Option<String>,
-    end_date: Option<String>,
+    reference_trade_date: Option<String>,
+    lookback_periods: Option<usize>,
     scope_way: String,
     expression: String,
     consec_threshold: Option<usize>,
 ) -> Result<StockPickResultData, String> {
     let trade_date_options = load_trade_date_options(source_path)?;
-    let (resolved_start_date, resolved_end_date) =
-        normalize_date_range(&trade_date_options, start_date, end_date)?;
     let parsed_scope_way = parse_scope_way(&scope_way, consec_threshold)?;
+    let (resolved_start_date, resolved_end_date) = resolve_expression_trade_window(
+        &trade_date_options,
+        reference_trade_date,
+        lookback_periods,
+        parsed_scope_way,
+    )?;
 
     let expression = expression.trim();
     if expression.is_empty() {

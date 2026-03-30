@@ -5,23 +5,35 @@ import { useStockPickOutletContext } from './StockPickPage'
 import { readJsonStorage } from '../../shared/storage'
 
 const DEFAULT_EXPRESSION = ''
-const EXPRESSION_STOCK_PICK_STATE_KEY = 'expression-stock-pick-state-v1'
+const EXPRESSION_STOCK_PICK_STATE_KEY = 'expression-stock-pick-state'
 
 type PersistedExpressionStockPickState = {
   board: (typeof STOCK_PICK_BOARD_OPTIONS)[number]
-  startDate: string
-  endDate: string
+  referenceTradeDate: string
+  lookbackPeriods: string
   scopeWay: (typeof STOCK_PICK_SCOPE_OPTIONS)[number]
   consecThreshold: string
   expression: string
   rows: StockPickRow[]
-  resolvedEndDate: string
+  resolvedStartDate: string
+  resolvedReferenceTradeDate: string
+}
+
+type LegacyPersistedExpressionStockPickState = Partial<PersistedExpressionStockPickState> & {
+  startDate?: string
+  endDate?: string
+  resolvedEndDate?: string
+}
+
+function parsePositiveInt(value: string, fallback: number) {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
 export default function ExpressionStockPickPage() {
   const { sourcePath, tradeDateOptions, latestTradeDate, optionsLoading } = useStockPickOutletContext()
   const persistedState = useMemo(() => {
-    const parsed = readJsonStorage<Partial<PersistedExpressionStockPickState>>(
+    const parsed = readJsonStorage<LegacyPersistedExpressionStockPickState>(
       typeof window === 'undefined' ? null : window.sessionStorage,
       EXPRESSION_STOCK_PICK_STATE_KEY,
     )
@@ -34,8 +46,14 @@ export default function ExpressionStockPickPage() {
         parsed.board && STOCK_PICK_BOARD_OPTIONS.includes(parsed.board)
           ? parsed.board
           : '全部',
-      startDate: typeof parsed.startDate === 'string' ? parsed.startDate : '',
-      endDate: typeof parsed.endDate === 'string' ? parsed.endDate : '',
+      referenceTradeDate:
+        typeof parsed.referenceTradeDate === 'string'
+          ? parsed.referenceTradeDate
+          : typeof parsed.endDate === 'string'
+            ? parsed.endDate
+            : '',
+      lookbackPeriods:
+        typeof parsed.lookbackPeriods === 'string' ? parsed.lookbackPeriods : '1',
       scopeWay:
         parsed.scopeWay && STOCK_PICK_SCOPE_OPTIONS.includes(parsed.scopeWay)
           ? parsed.scopeWay
@@ -43,17 +61,26 @@ export default function ExpressionStockPickPage() {
       consecThreshold: typeof parsed.consecThreshold === 'string' ? parsed.consecThreshold : '2',
       expression: typeof parsed.expression === 'string' ? parsed.expression : DEFAULT_EXPRESSION,
       rows: Array.isArray(parsed.rows) ? parsed.rows : [],
-      resolvedEndDate: typeof parsed.resolvedEndDate === 'string' ? parsed.resolvedEndDate : '',
+      resolvedStartDate: typeof parsed.resolvedStartDate === 'string' ? parsed.resolvedStartDate : '',
+      resolvedReferenceTradeDate:
+        typeof parsed.resolvedReferenceTradeDate === 'string'
+          ? parsed.resolvedReferenceTradeDate
+          : typeof parsed.resolvedEndDate === 'string'
+            ? parsed.resolvedEndDate
+            : '',
     } satisfies PersistedExpressionStockPickState
   }, [])
   const [board, setBoard] = useState<(typeof STOCK_PICK_BOARD_OPTIONS)[number]>(() => persistedState?.board ?? '全部')
-  const [startDate, setStartDate] = useState(() => persistedState?.startDate ?? '')
-  const [endDate, setEndDate] = useState(() => persistedState?.endDate ?? '')
+  const [referenceTradeDate, setReferenceTradeDate] = useState(() => persistedState?.referenceTradeDate ?? '')
+  const [lookbackPeriods, setLookbackPeriods] = useState(() => persistedState?.lookbackPeriods ?? '1')
   const [scopeWay, setScopeWay] = useState<(typeof STOCK_PICK_SCOPE_OPTIONS)[number]>(() => persistedState?.scopeWay ?? 'LAST')
   const [consecThreshold, setConsecThreshold] = useState(() => persistedState?.consecThreshold ?? '2')
   const [expression, setExpression] = useState(() => persistedState?.expression ?? DEFAULT_EXPRESSION)
   const [rows, setRows] = useState<StockPickRow[]>(() => persistedState?.rows ?? [])
-  const [resolvedEndDate, setResolvedEndDate] = useState(() => persistedState?.resolvedEndDate ?? '')
+  const [resolvedStartDate, setResolvedStartDate] = useState(() => persistedState?.resolvedStartDate ?? '')
+  const [resolvedReferenceTradeDate, setResolvedReferenceTradeDate] = useState(
+    () => persistedState?.resolvedReferenceTradeDate ?? '',
+  )
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
@@ -61,8 +88,7 @@ export default function ExpressionStockPickPage() {
     if (!latestTradeDate) {
       return
     }
-    setStartDate((current) => current || latestTradeDate)
-    setEndDate((current) => current || latestTradeDate)
+    setReferenceTradeDate((current) => current || latestTradeDate)
   }, [latestTradeDate])
 
   useEffect(() => {
@@ -71,19 +97,30 @@ export default function ExpressionStockPickPage() {
         EXPRESSION_STOCK_PICK_STATE_KEY,
         JSON.stringify({
           board,
-          startDate,
-          endDate,
+          referenceTradeDate,
+          lookbackPeriods,
           scopeWay,
           consecThreshold,
           expression,
           rows,
-          resolvedEndDate,
+          resolvedStartDate,
+          resolvedReferenceTradeDate,
         } satisfies PersistedExpressionStockPickState),
       )
     } catch {
       // Ignore storage failures. The page still works without persistence.
     }
-  }, [board, startDate, endDate, scopeWay, consecThreshold, expression, rows, resolvedEndDate])
+  }, [
+    board,
+    referenceTradeDate,
+    lookbackPeriods,
+    scopeWay,
+    consecThreshold,
+    expression,
+    rows,
+    resolvedStartDate,
+    resolvedReferenceTradeDate,
+  ])
 
   async function onRun() {
     if (!sourcePath.trim()) {
@@ -97,17 +134,19 @@ export default function ExpressionStockPickPage() {
       const result = await runExpressionStockPick({
         sourcePath,
         board,
-        startDate,
-        endDate,
+        referenceTradeDate,
+        lookbackPeriods: scopeWay === 'LAST' ? undefined : parsePositiveInt(lookbackPeriods, 1),
         scopeWay,
         expression,
         consecThreshold: scopeWay === 'CONSEC' ? Number(consecThreshold) : undefined,
       })
       setRows(result.rows ?? [])
-      setResolvedEndDate(result.resolved_end_date ?? endDate)
+      setResolvedStartDate(result.resolved_start_date ?? '')
+      setResolvedReferenceTradeDate(result.resolved_end_date ?? referenceTradeDate)
     } catch (runError) {
       setRows([])
-      setResolvedEndDate('')
+      setResolvedStartDate('')
+      setResolvedReferenceTradeDate('')
       setError(`表达式选股失败: ${String(runError)}`)
     } finally {
       setLoading(false)
@@ -135,19 +174,12 @@ export default function ExpressionStockPickPage() {
         </label>
 
         <label className="stock-pick-field">
-          <span>起始日期</span>
-          <select value={startDate} onChange={(event) => setStartDate(event.target.value)} disabled={optionsLoading}>
-            {tradeDateOptions.map((item) => (
-              <option key={item} value={item}>
-                {formatDateLabel(item)}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="stock-pick-field">
-          <span>结束日期</span>
-          <select value={endDate} onChange={(event) => setEndDate(event.target.value)} disabled={optionsLoading}>
+          <span>参考日</span>
+          <select
+            value={referenceTradeDate}
+            onChange={(event) => setReferenceTradeDate(event.target.value)}
+            disabled={optionsLoading}
+          >
             {tradeDateOptions.map((item) => (
               <option key={item} value={item}>
                 {formatDateLabel(item)}
@@ -165,6 +197,18 @@ export default function ExpressionStockPickPage() {
               </option>
             ))}
           </select>
+        </label>
+
+        <label className="stock-pick-field">
+          <span>前推周期数</span>
+          <input
+            type="number"
+            min={1}
+            step={1}
+            value={lookbackPeriods}
+            onChange={(event) => setLookbackPeriods(event.target.value)}
+            disabled={scopeWay === 'LAST'}
+          />
         </label>
 
         {scopeWay === 'CONSEC' ? (
@@ -196,9 +240,14 @@ export default function ExpressionStockPickPage() {
 
       <div className="stock-pick-result-head">
         <strong>结果列表</strong>
-        <span>共 {rows.length} 只，排序日期：{formatDateLabel(resolvedEndDate)}</span>
+        <span>
+          共 {rows.length} 只，参考日：{formatDateLabel(resolvedReferenceTradeDate)}
+          {resolvedStartDate && resolvedReferenceTradeDate && resolvedStartDate !== resolvedReferenceTradeDate
+            ? `，窗口：${formatDateLabel(resolvedStartDate)} ~ ${formatDateLabel(resolvedReferenceTradeDate)}`
+            : ''}
+        </span>
       </div>
-      <StockPickResultTable rows={rows} tradeDate={resolvedEndDate} />
+      <StockPickResultTable rows={rows} tradeDate={resolvedReferenceTradeDate} />
     </section>
   )
 }

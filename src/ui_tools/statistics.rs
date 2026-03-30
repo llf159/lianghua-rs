@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use duckdb::{Connection, params};
+use duckdb::{params, Connection};
 use serde::Serialize;
 
 use crate::{
-    data::{ScopeWay, ScoreRule, result_db_path},
+    data::{result_db_path, ScopeWay, ScoreRule},
     ui_tools::{build_concepts_map, build_name_map},
 };
 
@@ -15,6 +15,14 @@ struct RuleMeta {
     trigger_mode: String,
     is_each: bool,
     points: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RuleDayAgg {
+    trigger_count: i64,
+    contribution_score: f64,
+    top100_trigger_count: i64,
+    best_rank: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -139,6 +147,8 @@ fn query_overview(conn: &Connection) -> Result<StrategyOverviewPayload, String> 
                 ts_code,
                 COUNT(*) AS hit_rule_count
             FROM score_details
+            WHERE rule_score IS NOT NULL
+              AND ABS(rule_score) > 1e-12
             GROUP BY 1, 2
         ),
         daily_level AS (
@@ -218,6 +228,8 @@ fn query_each_rule_medians(
                     QUANTILE_CONT(ABS(rule_score / ?), 0.5) AS median_trigger_count
                 FROM score_details
                 WHERE rule_name = ?
+                  AND rule_score IS NOT NULL
+                  AND ABS(rule_score) > 1e-12
                 GROUP BY 1
                 ORDER BY 1 ASC
                 "#,
@@ -246,9 +258,36 @@ fn query_each_rule_medians(
 
 fn query_daily_rows(
     conn: &Connection,
+    rule_order: &[String],
     meta_map: &HashMap<String, RuleMeta>,
 ) -> Result<Vec<StrategyDailyRow>, String> {
     let each_medians = query_each_rule_medians(conn, meta_map)?;
+    let mut sample_stmt = conn
+        .prepare(
+            r#"
+        SELECT
+            trade_date,
+            COUNT(*) AS sample_count
+        FROM score_summary
+        GROUP BY 1
+        ORDER BY 1 ASC
+        "#,
+        )
+        .map_err(|e| format!("预编译日度样本数 SQL 失败: {e}"))?;
+    let mut sample_rows = sample_stmt
+        .query([])
+        .map_err(|e| format!("执行日度样本数 SQL 失败: {e}"))?;
+
+    let mut daily_samples = Vec::new();
+    while let Some(row) = sample_rows
+        .next()
+        .map_err(|e| format!("读取日度样本数失败: {e}"))?
+    {
+        let trade_date: String = row.get(0).map_err(|e| format!("读取交易日失败: {e}"))?;
+        let sample_count: i64 = row.get(1).map_err(|e| format!("读取样本数失败: {e}"))?;
+        daily_samples.push((trade_date, sample_count));
+    }
+
     let sql = r#"
         WITH daily_rank_bounds AS (
             SELECT
@@ -256,17 +295,20 @@ fn query_daily_rows(
                 MAX(rank) AS max_rank
             FROM score_summary
             GROUP BY 1
+        ),
+        triggered_rule_rows AS (
+            SELECT *
+            FROM score_details
+            WHERE rule_score IS NOT NULL
+              AND ABS(rule_score) > 1e-12
         )
         SELECT
             d.trade_date,
             d.rule_name,
-            COUNT(*) AS sample_count,
             COUNT(*) AS trigger_count,
-            AVG(1.0) AS coverage,
             SUM(
                 CASE
-                    WHEN d.rule_score > 0
-                      AND s.rank IS NOT NULL
+                    WHEN s.rank IS NOT NULL
                       AND b.max_rank IS NOT NULL
                       AND b.max_rank > 0
                     THEN d.rule_score * CAST((b.max_rank + 1 - s.rank) AS DOUBLE) / CAST(b.max_rank AS DOUBLE)
@@ -275,7 +317,7 @@ fn query_daily_rows(
             ) AS contribution_score,
             SUM(CASE WHEN s.rank <= ? THEN 1 ELSE 0 END) AS top100_trigger_count,
             MIN(s.rank) AS best_rank
-        FROM score_details AS d
+        FROM triggered_rule_rows AS d
         LEFT JOIN score_summary AS s
           ON s.ts_code = d.ts_code
          AND s.trade_date = d.trade_date
@@ -293,39 +335,66 @@ fn query_daily_rows(
         .map_err(|e| format!("执行日度策略统计 SQL 失败: {e}"))?;
 
     let mut out = Vec::new();
+    let mut daily_agg_map: HashMap<(String, String), RuleDayAgg> = HashMap::new();
     while let Some(row) = rows
         .next()
         .map_err(|e| format!("读取日度策略统计失败: {e}"))?
     {
         let trade_date: String = row.get(0).map_err(|e| format!("读取交易日失败: {e}"))?;
         let rule_name: String = row.get(1).map_err(|e| format!("读取策略名失败: {e}"))?;
-        let meta = meta_map.get(&rule_name);
-        let trigger_count: Option<i64> =
-            row.get(3).map_err(|e| format!("读取触发次数失败: {e}"))?;
-        let contribution_score: Option<f64> =
-            row.get(5).map_err(|e| format!("读取策略贡献度失败: {e}"))?;
-        let contribution_per_trigger = match (contribution_score, trigger_count) {
-            (Some(score), Some(count)) if count > 0 => Some(score / count as f64),
-            _ => None,
-        };
+        daily_agg_map.insert(
+            (trade_date, rule_name),
+            RuleDayAgg {
+                trigger_count: row.get(2).map_err(|e| format!("读取触发次数失败: {e}"))?,
+                contribution_score: row
+                    .get::<usize, Option<f64>>(3)
+                    .map_err(|e| format!("读取策略贡献度失败: {e}"))?
+                    .unwrap_or(0.0),
+                top100_trigger_count: row
+                    .get::<usize, Option<i64>>(4)
+                    .map_err(|e| format!("读取前100触发次数失败: {e}"))?
+                    .unwrap_or(0),
+                best_rank: row.get(5).map_err(|e| format!("读取最优排名失败: {e}"))?,
+            },
+        );
+    }
 
-        out.push(StrategyDailyRow {
-            median_trigger_count: each_medians
+    for (trade_date, sample_count) in daily_samples {
+        for rule_name in rule_order {
+            let agg = daily_agg_map
                 .get(&(trade_date.clone(), rule_name.clone()))
-                .copied(),
-            trade_date,
-            rule_name,
-            trigger_mode: meta.map(|v| v.trigger_mode.clone()),
-            sample_count: row.get(2).map_err(|e| format!("读取样本数失败: {e}"))?,
-            trigger_count,
-            coverage: row.get(4).map_err(|e| format!("读取覆盖率失败: {e}"))?,
-            contribution_score,
-            contribution_per_trigger,
-            top100_trigger_count: row
-                .get(6)
-                .map_err(|e| format!("读取前100触发次数失败: {e}"))?,
-            best_rank: row.get(7).map_err(|e| format!("读取最优排名失败: {e}"))?,
-        });
+                .cloned()
+                .unwrap_or_default();
+            let meta = meta_map.get(rule_name);
+            let contribution_score = if agg.trigger_count > 0 {
+                Some(agg.contribution_score)
+            } else {
+                None
+            };
+            let contribution_per_trigger =
+                contribution_score.map(|score| score / agg.trigger_count as f64);
+            let coverage = if sample_count > 0 {
+                Some(agg.trigger_count as f64 / sample_count as f64)
+            } else {
+                None
+            };
+
+            out.push(StrategyDailyRow {
+                median_trigger_count: each_medians
+                    .get(&(trade_date.clone(), rule_name.clone()))
+                    .copied(),
+                trade_date: trade_date.clone(),
+                rule_name: rule_name.clone(),
+                trigger_mode: meta.map(|v| v.trigger_mode.clone()),
+                sample_count: Some(sample_count),
+                trigger_count: Some(agg.trigger_count),
+                coverage,
+                contribution_score,
+                contribution_per_trigger,
+                top100_trigger_count: Some(agg.top100_trigger_count),
+                best_rank: agg.best_rank,
+            });
+        }
     }
 
     Ok(out)
@@ -394,6 +463,8 @@ fn query_triggered_stocks(
              AND s.trade_date = d.trade_date
             WHERE d.trade_date = ?
               AND d.rule_name = ?
+              AND d.rule_score IS NOT NULL
+              AND ABS(d.rule_score) > 1e-12
             ORDER BY s.rank ASC NULLS LAST, d.ts_code ASC
             "#,
         )
@@ -444,8 +515,8 @@ pub fn get_strategy_statistics_detail(
     }
 
     let conn = open_result_conn(&source_path)?;
-    let (_, meta_map) = load_rule_meta(&source_path)?;
-    let detail_rows_all = query_daily_rows(&conn, &meta_map)?;
+    let (rule_order, meta_map) = load_rule_meta(&source_path)?;
+    let detail_rows_all = query_daily_rows(&conn, &rule_order, &meta_map)?;
     let strategy_rows = detail_rows_all
         .iter()
         .filter(|row| row.rule_name == strategy_name)
@@ -503,7 +574,7 @@ pub fn get_strategy_statistics_page(
     let conn = open_result_conn(&source_path)?;
     let overview = query_overview(&conn)?;
     let (strategy_options, meta_map) = load_rule_meta(&source_path)?;
-    let detail_rows_all = query_daily_rows(&conn, &meta_map)?;
+    let detail_rows_all = query_daily_rows(&conn, &strategy_options, &meta_map)?;
 
     let resolved_strategy_name = resolve_strategy_name(strategy_name, &strategy_options);
 
@@ -633,7 +704,14 @@ mod tests {
                 "scope_way = \"EACH\"\n",
                 "when = \"C > O\"\n",
                 "points = 2.0\n",
-                "explain = \"each\"\n"
+                "explain = \"each\"\n\n",
+                "[[rule]]\n",
+                "name = \"R_NEVER\"\n",
+                "scope_windows = 3\n",
+                "scope_way = \"LAST\"\n",
+                "when = \"C > O\"\n",
+                "points = 1.0\n",
+                "explain = \"never\"\n"
             ),
         )
         .expect("write score_rule.toml");
@@ -662,17 +740,12 @@ mod tests {
 
         let detail_rows = [
             ("000001.SZ", "20240101", "R_LAST", 1.0),
-            ("000002.SZ", "20240101", "R_LAST", 0.0),
             ("000003.SZ", "20240101", "R_LAST", 1.0),
-            ("000001.SZ", "20240102", "R_LAST", 0.0),
             ("000002.SZ", "20240102", "R_LAST", 1.0),
-            ("000003.SZ", "20240102", "R_LAST", 0.0),
             ("000001.SZ", "20240101", "R_EACH", 4.0),
-            ("000002.SZ", "20240101", "R_EACH", 0.0),
             ("000003.SZ", "20240101", "R_EACH", 2.0),
             ("000001.SZ", "20240102", "R_EACH", 6.0),
             ("000002.SZ", "20240102", "R_EACH", 2.0),
-            ("000003.SZ", "20240102", "R_EACH", 0.0),
         ];
         for (ts_code, trade_date, rule_name, rule_score) in detail_rows {
             conn.execute(
@@ -717,8 +790,10 @@ mod tests {
             .iter()
             .find(|row| row.trade_date == "20240102" && row.rule_name == "R_EACH")
             .expect("latest each row");
+        assert_eq!(latest_each_row.sample_count, Some(3));
         assert_eq!(latest_each_row.trigger_mode.as_deref(), Some("each"));
         assert_eq!(latest_each_row.trigger_count, Some(2));
+        assert_eq!(latest_each_row.coverage, Some(2.0 / 3.0));
         assert_eq!(latest_each_row.top100_trigger_count, Some(2));
         assert_eq!(latest_each_row.best_rank, Some(2));
         assert_eq!(latest_each_row.median_trigger_count, Some(2.0));
@@ -730,6 +805,16 @@ mod tests {
             .contribution_per_trigger
             .expect("latest each contribution per trigger");
         assert!((contribution_per_trigger - 3.65).abs() < 1e-9);
+        let never_row = detail_rows
+            .iter()
+            .find(|row| row.trade_date == "20240102" && row.rule_name == "R_NEVER")
+            .expect("never row");
+        assert_eq!(never_row.sample_count, Some(3));
+        assert_eq!(never_row.trigger_count, Some(0));
+        assert_eq!(never_row.coverage, Some(0.0));
+        assert_eq!(never_row.top100_trigger_count, Some(0));
+        assert_eq!(never_row.best_rank, None);
+        assert_eq!(never_row.contribution_score, None);
 
         assert_eq!(page.resolved_strategy_name.as_deref(), Some("R_EACH"));
         assert_eq!(
