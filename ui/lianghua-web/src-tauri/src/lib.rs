@@ -1438,7 +1438,6 @@ async fn get_strategy_performance_page(
     min_adv_hits: Option<u32>,
     top_limit: Option<u32>,
     max_combination_size: Option<u32>,
-    mixed_sort_keys: Option<Vec<String>>,
     noisy_companion_rule_names: Option<Vec<String>>,
     selected_rule_name: Option<String>,
 ) -> Result<StrategyPerformancePageData, String> {
@@ -1458,7 +1457,6 @@ async fn get_strategy_performance_page(
             min_adv_hits,
             top_limit,
             max_combination_size,
-            mixed_sort_keys,
             noisy_companion_rule_names,
             selected_rule_name,
         )
@@ -1528,7 +1526,6 @@ async fn get_strategy_performance_horizon_view(
     min_adv_hits: Option<u32>,
     top_limit: Option<u32>,
     max_combination_size: Option<u32>,
-    mixed_sort_keys: Option<Vec<String>>,
     noisy_companion_rule_names: Option<Vec<String>>,
 ) -> Result<StrategyPerformanceHorizonViewData, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -1546,7 +1543,6 @@ async fn get_strategy_performance_horizon_view(
             min_adv_hits,
             top_limit,
             max_combination_size,
-            mixed_sort_keys,
             noisy_companion_rule_names,
         )
     })

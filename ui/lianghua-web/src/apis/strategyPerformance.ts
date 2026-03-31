@@ -191,7 +191,6 @@ export type StrategyPerformancePageData = {
   min_adv_hits: number;
   top_limit: number;
   max_combination_size: number;
-  mixed_sort_keys: string[];
   noisy_companion_rule_names: string[];
   rule_rows: StrategyPerformanceRuleRow[];
   companion_rows: StrategyPerformanceCompanionRow[];
@@ -243,7 +242,6 @@ export type StrategyPerformanceQuery = {
   minAdvHits?: number;
   topLimit?: number;
   maxCombinationSize?: number;
-  mixedSortKeys?: string[];
   noisyCompanionRuleNames?: string[];
   selectedRuleName?: string;
 };
@@ -295,7 +293,6 @@ export async function getStrategyPerformanceHorizonView(query: {
   minAdvHits?: number;
   topLimit?: number;
   maxCombinationSize?: number;
-  mixedSortKeys?: string[];
   noisyCompanionRuleNames?: string[];
 }) {
   return invoke<StrategyPerformanceHorizonViewData>(

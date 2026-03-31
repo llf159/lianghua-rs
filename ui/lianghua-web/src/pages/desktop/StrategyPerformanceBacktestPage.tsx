@@ -37,13 +37,6 @@ const DEFAULT_AUTO_MIN_SAMPLES = {
   10: 20,
 } as const;
 const DEFAULT_MAX_COMBINATION_SIZE = 3;
-const MIXED_SORT_KEY_OPTIONS = [
-  { value: "adv_hit_cnt", label: "优势命中数" },
-  { value: "adv_score_sum", label: "优势得分和" },
-  { value: "pos_hit_cnt", label: "正向命中数" },
-  { value: "pos_score_sum", label: "正向得分和" },
-  { value: "rank", label: "原始排名" },
-] as const;
 
 type SubmittedQuery = {
   sourcePath: string;
@@ -59,7 +52,6 @@ type SubmittedQuery = {
   minAdvHits: number;
   topLimit: number;
   maxCombinationSize: number;
-  mixedSortKeys: string[];
 };
 
 type PersistedState = {
@@ -77,7 +69,6 @@ type PersistedState = {
   minAdvHits: string;
   topLimit: string;
   maxCombinationSize: string;
-  mixedSortKeys: string[];
   selectedRuleName: string;
   pageData: PersistedStrategyPerformancePageData | null;
   submittedQuery: SubmittedQuery | null;
@@ -368,7 +359,6 @@ function restorePageDataFromStorage(
     min_adv_hits: 1,
     top_limit: 100,
     max_combination_size: DEFAULT_MAX_COMBINATION_SIZE,
-    mixed_sort_keys: [],
     noisy_companion_rule_names: [],
     rule_rows: Array.isArray(pageData.rule_rows)
       ? (pageData.rule_rows as StrategyPerformanceRuleRow[])
@@ -454,8 +444,7 @@ function sameSubmittedQuery(
     left.minPassHorizons === right.minPassHorizons &&
     left.minAdvHits === right.minAdvHits &&
     left.topLimit === right.topLimit &&
-    left.maxCombinationSize === right.maxCombinationSize &&
-    sameStringArray(left.mixedSortKeys, right.mixedSortKeys)
+    left.maxCombinationSize === right.maxCombinationSize
   );
 }
 
@@ -478,8 +467,7 @@ function sameSubmittedQueryExceptHorizon(
     left.minPassHorizons === right.minPassHorizons &&
     left.minAdvHits === right.minAdvHits &&
     left.topLimit === right.topLimit &&
-    left.maxCombinationSize === right.maxCombinationSize &&
-    sameStringArray(left.mixedSortKeys, right.mixedSortKeys)
+    left.maxCombinationSize === right.maxCombinationSize
   );
 }
 
@@ -1906,11 +1894,6 @@ export default function StrategyPerformanceBacktestPage() {
   const [maxCombinationSizeInput, setMaxCombinationSizeInput] = useState(
     persistedState?.maxCombinationSize ?? String(DEFAULT_MAX_COMBINATION_SIZE),
   );
-  const [mixedSortKeys, setMixedSortKeys] = useState<string[]>(() =>
-    arrayFromUnknown(persistedState?.mixedSortKeys).length > 0
-      ? arrayFromUnknown(persistedState?.mixedSortKeys)
-      : ["adv_hit_cnt", "adv_score_sum", "rank"],
-  );
   const [selectedRuleNameInput, setSelectedRuleNameInput] = useState(
     persistedState?.selectedRuleName ?? "",
   );
@@ -1981,7 +1964,6 @@ export default function StrategyPerformanceBacktestPage() {
           typeof query.maxCombinationSize === "number"
             ? query.maxCombinationSize
             : DEFAULT_MAX_COMBINATION_SIZE,
-        mixedSortKeys: arrayFromUnknown(query.mixedSortKeys),
       };
     },
   );
@@ -2080,7 +2062,6 @@ export default function StrategyPerformanceBacktestPage() {
         maxCombinationSizeInput,
         DEFAULT_MAX_COMBINATION_SIZE,
       ),
-      mixedSortKeys: normalizeStringArray(mixedSortKeys),
     };
   };
 
@@ -2141,7 +2122,6 @@ export default function StrategyPerformanceBacktestPage() {
         minAdvHits: nextQuery.minAdvHits,
         topLimit: nextQuery.topLimit,
         maxCombinationSize: nextQuery.maxCombinationSize,
-        mixedSortKeys: nextQuery.mixedSortKeys,
       });
       setPageData((current) =>
         current
@@ -2226,11 +2206,7 @@ export default function StrategyPerformanceBacktestPage() {
       submittedQuery.minPassHorizons !== currentQuery.minPassHorizons ||
       submittedQuery.minAdvHits !== currentQuery.minAdvHits ||
       submittedQuery.topLimit !== currentQuery.topLimit ||
-      submittedQuery.maxCombinationSize !== currentQuery.maxCombinationSize ||
-      !sameStringArray(
-        submittedQuery.mixedSortKeys,
-        currentQuery.mixedSortKeys,
-      )
+      submittedQuery.maxCombinationSize !== currentQuery.maxCombinationSize
     );
   }, [
     autoMinSamples2,
@@ -2240,7 +2216,6 @@ export default function StrategyPerformanceBacktestPage() {
     minAdvHitsInput,
     minPassHorizonsInput,
     maxCombinationSizeInput,
-    mixedSortKeys,
     currentAdvantageRuleNames,
     requireWinRateAboveMarket,
     selectedHorizonInput,
@@ -2283,7 +2258,6 @@ export default function StrategyPerformanceBacktestPage() {
       minAdvHits: minAdvHitsInput,
       topLimit: topLimitInput,
       maxCombinationSize: maxCombinationSizeInput,
-      mixedSortKeys,
       selectedRuleName: selectedRuleNameInput,
       pageData,
       submittedQuery,
@@ -2304,7 +2278,6 @@ export default function StrategyPerformanceBacktestPage() {
       minAdvHits: minAdvHitsInput,
       topLimit: topLimitInput,
       maxCombinationSize: maxCombinationSizeInput,
-      mixedSortKeys,
       selectedRuleName: selectedRuleNameInput,
       pageData: compactPageData,
       submittedQuery,
@@ -2323,7 +2296,6 @@ export default function StrategyPerformanceBacktestPage() {
     manualRuleNames,
     minAdvHitsInput,
     minPassHorizonsInput,
-    mixedSortKeys,
     pageData,
     requireWinRateAboveMarket,
     selectedHorizonInput,
@@ -2395,17 +2367,6 @@ export default function StrategyPerformanceBacktestPage() {
 
   const moveRuleToCompanion = (ruleName: string) => {
     setManualRuleNames((current) => current.filter((item) => item !== ruleName));
-  };
-
-  const toggleMixedSortKey = (key: string) => {
-    setMixedSortKeys((current) => {
-      const hasKey = current.includes(key);
-      if (hasKey) {
-        const next = current.filter((item) => item !== key);
-        return next.length > 0 ? next : current;
-      }
-      return [...current, key];
-    });
   };
 
   const loadRuleDetail = async (ruleName: string, horizonOverride?: number) => {
@@ -2588,29 +2549,6 @@ export default function StrategyPerformanceBacktestPage() {
               />
               <span>要求胜率高于市场</span>
             </label>
-          </div>
-        </div>
-
-        <div className="strategy-performance-control-stack">
-          <div className="strategy-performance-mixed-sort">
-            <span>混合排序 TopN 的排序键顺序</span>
-            <div className="strategy-performance-chip-wrap">
-              {MIXED_SORT_KEY_OPTIONS.map((option) => (
-                <button
-                  className={
-                    mixedSortKeys.includes(option.value)
-                      ? "strategy-performance-chip is-active"
-                      : "strategy-performance-chip"
-                  }
-                  key={option.value}
-                  onClick={() => toggleMixedSortKey(option.value)}
-                  type="button"
-                  aria-pressed={mixedSortKeys.includes(option.value)}
-                >
-                  <span>{option.label}</span>
-                </button>
-              ))}
-            </div>
           </div>
         </div>
 

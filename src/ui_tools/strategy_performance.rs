@@ -240,7 +240,6 @@ pub struct StrategyPerformancePageData {
     pub min_adv_hits: u32,
     pub top_limit: u32,
     pub max_combination_size: u32,
-    pub mixed_sort_keys: Vec<String>,
     pub noisy_companion_rule_names: Vec<String>,
     pub rule_rows: Vec<StrategyPerformanceRuleRow>,
     pub companion_rows: Vec<StrategyPerformanceCompanionRow>,
@@ -357,8 +356,6 @@ struct SampleFeatureRow {
     future_return_pct: f64,
     adv_hit_cnt: u32,
     adv_score_sum: f64,
-    pos_hit_cnt: u32,
-    pos_score_sum: f64,
     noisy_companion_cnt: u32,
 }
 
@@ -382,16 +379,6 @@ enum AdvantageRuleMode {
     Auto,
     Manual,
     Combined,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SortKey {
-    AdvHitCnt,
-    AdvScoreSum,
-    PosHitCnt,
-    PosScoreSum,
-    TotalScore,
-    Rank,
 }
 
 fn open_source_conn(source_path: &str) -> Result<Connection, String> {
@@ -681,47 +668,6 @@ fn save_strategy_pick_cache(
         )
         .map_err(|e| format!("写入策略选股缓存失败: {e}"))?;
     Ok(())
-}
-
-fn normalize_sort_keys(requested: Option<Vec<String>>) -> Vec<SortKey> {
-    let mut out = Vec::new();
-    for raw in requested.unwrap_or_default() {
-        let key = match raw.trim() {
-            "adv_hit_cnt" => Some(SortKey::AdvHitCnt),
-            "adv_score_sum" => Some(SortKey::AdvScoreSum),
-            "pos_hit_cnt" => Some(SortKey::PosHitCnt),
-            "pos_score_sum" => Some(SortKey::PosScoreSum),
-            "total_score" => Some(SortKey::TotalScore),
-            "rank" => Some(SortKey::Rank),
-            _ => None,
-        };
-        if let Some(key) = key {
-            if !out.contains(&key) {
-                out.push(key);
-            }
-        }
-    }
-    if out.is_empty() {
-        vec![
-            SortKey::AdvHitCnt,
-            SortKey::AdvScoreSum,
-            SortKey::TotalScore,
-            SortKey::Rank,
-        ]
-    } else {
-        out
-    }
-}
-
-fn sort_key_label(key: SortKey) -> &'static str {
-    match key {
-        SortKey::AdvHitCnt => "adv_hit_cnt",
-        SortKey::AdvScoreSum => "adv_score_sum",
-        SortKey::PosHitCnt => "pos_hit_cnt",
-        SortKey::PosScoreSum => "pos_score_sum",
-        SortKey::TotalScore => "total_score",
-        SortKey::Rank => "rank",
-    }
 }
 
 fn normalize_noisy_rule_names(
@@ -2403,8 +2349,6 @@ fn rebuild_temp_sample_features(
                 r.future_return_pct,
                 SUM(CASE WHEN a.rule_name IS NOT NULL AND d.rule_score > 0 THEN 1 ELSE 0 END) AS adv_hit_cnt,
                 SUM(CASE WHEN a.rule_name IS NOT NULL AND d.rule_score > 0 THEN d.rule_score ELSE 0 END) AS adv_score_sum,
-                SUM(CASE WHEN d.rule_score > 0 THEN 1 ELSE 0 END) AS pos_hit_cnt,
-                SUM(CASE WHEN d.rule_score > 0 THEN d.rule_score ELSE 0 END) AS pos_score_sum,
                 SUM(CASE WHEN d.rule_score != 0 THEN 1 ELSE 0 END) AS all_hit_cnt,
                 SUM(CASE WHEN d.rule_score != 0 THEN d.rule_score ELSE 0 END) AS all_score_sum,
                 SUM(CASE WHEN n.rule_name IS NOT NULL AND d.rule_score > 0 THEN 1 ELSE 0 END) AS noisy_companion_cnt
@@ -2551,8 +2495,6 @@ fn load_sample_feature_rows(source_conn: &Connection) -> Result<Vec<SampleFeatur
                 future_return_pct,
                 adv_hit_cnt,
                 adv_score_sum,
-                pos_hit_cnt,
-                pos_score_sum,
                 noisy_companion_cnt
             FROM strategy_perf_sample_features
             ORDER BY signal_date ASC, ts_code ASC
@@ -2585,16 +2527,8 @@ fn load_sample_feature_rows(source_conn: &Connection) -> Result<Vec<SampleFeatur
                 .get::<_, Option<f64>>(6)
                 .map_err(|e| format!("读取 adv_score_sum 失败: {e}"))?
                 .unwrap_or(0.0),
-            pos_hit_cnt: row
-                .get::<_, i64>(7)
-                .map_err(|e| format!("读取 pos_hit_cnt 失败: {e}"))?
-                .max(0) as u32,
-            pos_score_sum: row
-                .get::<_, Option<f64>>(8)
-                .map_err(|e| format!("读取 pos_score_sum 失败: {e}"))?
-                .unwrap_or(0.0),
             noisy_companion_cnt: row
-                .get::<_, i64>(9)
+                .get::<_, i64>(7)
                 .map_err(|e| format!("读取 noisy_companion_cnt 失败: {e}"))?
                 .max(0) as u32,
         });
@@ -2613,35 +2547,6 @@ fn compare_option_i64_asc(left: Option<i64>, right: Option<i64>) -> Ordering {
         (None, Some(_)) => Ordering::Greater,
         (None, None) => Ordering::Equal,
     }
-}
-
-fn compare_sort_key(left: &SampleFeatureRow, right: &SampleFeatureRow, key: SortKey) -> Ordering {
-    match key {
-        SortKey::AdvHitCnt => right.adv_hit_cnt.cmp(&left.adv_hit_cnt),
-        SortKey::AdvScoreSum => {
-            compare_option_f64_desc(Some(left.adv_score_sum), Some(right.adv_score_sum))
-        }
-        SortKey::PosHitCnt => right.pos_hit_cnt.cmp(&left.pos_hit_cnt),
-        SortKey::PosScoreSum => {
-            compare_option_f64_desc(Some(left.pos_score_sum), Some(right.pos_score_sum))
-        }
-        SortKey::TotalScore => compare_option_f64_desc(left.total_score, right.total_score),
-        SortKey::Rank => compare_option_i64_asc(left.rank, right.rank),
-    }
-}
-
-fn sort_rows_with_keys(rows: &mut [SampleFeatureRow], keys: &[SortKey]) {
-    rows.sort_by(|left, right| {
-        for key in keys {
-            let ord = compare_sort_key(left, right, *key);
-            if ord != Ordering::Equal {
-                return ord;
-            }
-        }
-        compare_option_i64_asc(left.rank, right.rank)
-            .then_with(|| compare_option_f64_desc(left.total_score, right.total_score))
-            .then_with(|| left.ts_code.cmp(&right.ts_code))
-    });
 }
 
 fn build_market_daily_returns(rows: &[SampleFeatureRow]) -> BTreeMap<String, f64> {
@@ -2998,7 +2903,6 @@ fn build_portfolio_rows(
     sample_rows: &[SampleFeatureRow],
     min_adv_hits: u32,
     top_limit: u32,
-    mixed_sort_keys: &[SortKey],
     noisy_rule_names: &[String],
 ) -> Vec<StrategyPerformancePortfolioRow> {
     let market_daily = build_market_daily_returns(sample_rows);
@@ -3014,7 +2918,6 @@ fn build_portfolio_rows(
     let mut only_adv_points = Vec::new();
     let mut adv_hit_points = Vec::new();
     let mut adv_score_points = Vec::new();
-    let mut mixed_points = Vec::new();
     let mut companion_penalty_points = Vec::new();
 
     for (signal_date, rows) in grouped_by_date {
@@ -3115,25 +3018,6 @@ fn build_portfolio_rows(
                 });
             }
 
-            let mut mixed_rows = eligible_rows.clone();
-            sort_rows_with_keys(&mut mixed_rows, mixed_sort_keys);
-            let mixed_selected = mixed_rows
-                .into_iter()
-                .take(top_limit as usize)
-                .collect::<Vec<_>>();
-            if !mixed_selected.is_empty() {
-                mixed_points.push(DailyPortfolioPoint {
-                    signal_date: signal_date.clone(),
-                    portfolio_return_pct: mixed_selected
-                        .iter()
-                        .map(|row| row.future_return_pct)
-                        .sum::<f64>()
-                        / mixed_selected.len() as f64,
-                    market_return_pct,
-                    selected_count: mixed_selected.len(),
-                });
-            }
-
             if !noisy_rule_names.is_empty() {
                 let mut penalty_rows = eligible_rows.clone();
                 penalty_rows.sort_by(|left, right| {
@@ -3202,21 +3086,6 @@ fn build_portfolio_rows(
             "在优势池内优先按优势得分和降序，再按 rank 升序",
             None,
             &adv_score_points,
-            None,
-        ),
-        summarize_daily_points(
-            "mixed_topn",
-            "混合排序 TopN",
-            &format!(
-                "在优势池内按 {} 做字典序排序",
-                mixed_sort_keys
-                    .iter()
-                    .map(|key| sort_key_label(*key))
-                    .collect::<Vec<_>>()
-                    .join(" > ")
-            ),
-            None,
-            &mixed_points,
             None,
         ),
     ];
@@ -4129,7 +3998,6 @@ pub fn get_or_build_strategy_pick_cache(
         Some(max_combination_size),
         None,
         None,
-        None,
     )?;
 
     Ok(build_strategy_pick_cache_payload(
@@ -4206,7 +4074,6 @@ fn build_strategy_performance_horizon_view(
     min_adv_hits: u32,
     top_limit: u32,
     max_combination_size: u32,
-    mixed_sort_keys: &[SortKey],
     resolved_advantage_rule_names: &[String],
     requested_noisy_companion_rule_names: &[String],
 ) -> Result<StrategyPerformanceHorizonViewData, String> {
@@ -4244,7 +4111,6 @@ fn build_strategy_performance_horizon_view(
         &sample_feature_rows,
         min_adv_hits,
         top_limit,
-        mixed_sort_keys,
         &noisy_companion_rule_names,
     );
     let combo_hit_map = load_advantage_hit_map(source_conn)?;
@@ -4288,7 +4154,6 @@ pub fn get_strategy_performance_horizon_view(
     min_adv_hits: Option<u32>,
     top_limit: Option<u32>,
     max_combination_size: Option<u32>,
-    mixed_sort_keys: Option<Vec<String>>,
     noisy_companion_rule_names: Option<Vec<String>>,
 ) -> Result<StrategyPerformanceHorizonViewData, String> {
     let selected_horizon = normalize_selected_horizon(selected_horizon);
@@ -4304,7 +4169,6 @@ pub fn get_strategy_performance_horizon_view(
     let min_adv_hits = min_adv_hits.unwrap_or(DEFAULT_MIN_ADV_HITS).max(1);
     let top_limit = top_limit.unwrap_or(DEFAULT_TOP_LIMIT).max(1);
     let max_combination_size = max_combination_size.unwrap_or(2).clamp(2, 4);
-    let mixed_sort_keys = normalize_sort_keys(mixed_sort_keys);
     let strategy_options = load_rule_meta(&source_path)?.0;
     let resolved_advantage_rule_names =
         normalize_manual_rule_names(Some(resolved_advantage_rule_names), &strategy_options).0;
@@ -4323,7 +4187,6 @@ pub fn get_strategy_performance_horizon_view(
         min_adv_hits,
         top_limit,
         max_combination_size,
-        &mixed_sort_keys,
         &resolved_advantage_rule_names,
         &requested_noisy_companion_rule_names,
     )
@@ -4344,7 +4207,6 @@ pub fn get_strategy_performance_page(
     min_adv_hits: Option<u32>,
     top_limit: Option<u32>,
     max_combination_size: Option<u32>,
-    mixed_sort_keys: Option<Vec<String>>,
     noisy_companion_rule_names: Option<Vec<String>>,
     selected_rule_name: Option<String>,
 ) -> Result<StrategyPerformancePageData, String> {
@@ -4369,7 +4231,6 @@ pub fn get_strategy_performance_page(
         normalize_manual_rule_names(manual_rule_names, &strategy_options);
     let requested_noisy_companion_rule_names =
         normalize_noisy_rule_names(noisy_companion_rule_names, &strategy_options);
-    let mixed_sort_keys = normalize_sort_keys(mixed_sort_keys);
     let advantage_rule_mode = normalize_advantage_mode(advantage_rule_mode);
 
     let source_conn = open_source_conn(&source_path)?;
@@ -4457,7 +4318,6 @@ pub fn get_strategy_performance_page(
         min_adv_hits,
         top_limit,
         max_combination_size,
-        &mixed_sort_keys,
         &resolved_advantage_rule_names,
         &requested_noisy_companion_rule_names,
     )?;
@@ -4516,10 +4376,6 @@ pub fn get_strategy_performance_page(
         min_adv_hits,
         top_limit,
         max_combination_size,
-        mixed_sort_keys: mixed_sort_keys
-            .iter()
-            .map(|key| sort_key_label(*key).to_string())
-            .collect(),
         noisy_companion_rule_names: horizon_view.noisy_companion_rule_names,
         rule_rows,
         companion_rows: horizon_view.companion_rows,
@@ -5459,8 +5315,6 @@ mod tests {
                 future_return_pct: 2.0,
                 adv_hit_cnt: 2,
                 adv_score_sum: 4.0,
-                pos_hit_cnt: 2,
-                pos_score_sum: 4.0,
                 noisy_companion_cnt: 0,
             },
             SampleFeatureRow {
@@ -5471,8 +5325,6 @@ mod tests {
                 future_return_pct: 4.0,
                 adv_hit_cnt: 2,
                 adv_score_sum: 3.0,
-                pos_hit_cnt: 2,
-                pos_score_sum: 3.0,
                 noisy_companion_cnt: 0,
             },
             SampleFeatureRow {
@@ -5483,8 +5335,6 @@ mod tests {
                 future_return_pct: 10.0,
                 adv_hit_cnt: 1,
                 adv_score_sum: 2.0,
-                pos_hit_cnt: 1,
-                pos_score_sum: 2.0,
                 noisy_companion_cnt: 0,
             },
         ];
@@ -5930,7 +5780,6 @@ mod tests {
             Some(2),
             None,
             None,
-            None,
             Some("ADV".to_string()),
         )
         .expect("load page");
@@ -6025,7 +5874,6 @@ mod tests {
             Some(2),
             None,
             None,
-            None,
             Some("ADV".to_string()),
         )
         .expect("load page");
@@ -6043,7 +5891,6 @@ mod tests {
             Some(1),
             Some(1),
             Some(2),
-            None,
             None,
             None,
         )
