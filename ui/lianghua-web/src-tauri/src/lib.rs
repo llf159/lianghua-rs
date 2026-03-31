@@ -6,21 +6,18 @@ use lianghua_rs::{
         stock_list_path, ths_concepts_path, trade_calendar_path,
     },
     download::runner::DownloadProgress as CoreDownloadProgress,
-    scoring::{build_rank_tiebreak, runner::scoring_all_to_db, TieBreakWay},
+    scoring::{TieBreakWay, build_rank_tiebreak, runner::scoring_all_to_db},
     ui_tools::{
         board_analysis::{
+            BoardAnalysisGroupDetail, BoardAnalysisPageData,
             get_board_analysis_group_detail as core_get_board_analysis_group_detail,
-            get_board_analysis_page as core_get_board_analysis_page, BoardAnalysisGroupDetail,
-            BoardAnalysisPageData,
+            get_board_analysis_page as core_get_board_analysis_page,
         },
         data_download::{
-            DataDownloadRunInput as CoreDataDownloadRunInput,
-            DataDownloadRunResult,
-            IndicatorManageDraft as CoreIndicatorManageDraft,
-            IndicatorManagePageData,
-            MissingStockRepairRunInput as CoreMissingStockRepairRunInput,
+            DataDownloadRunInput as CoreDataDownloadRunInput, DataDownloadRunResult,
+            DataDownloadStatus, IndicatorManageDraft as CoreIndicatorManageDraft,
+            IndicatorManagePageData, MissingStockRepairRunInput as CoreMissingStockRepairRunInput,
             ThsConceptDownloadRunInput as CoreThsConceptDownloadRunInput,
-            DataDownloadStatus,
             get_data_download_status as core_get_data_download_status,
             get_indicator_manage_page as core_get_indicator_manage_page,
             prepare_data_download_run as core_prepare_data_download_run,
@@ -32,56 +29,59 @@ use lianghua_rs::{
             save_indicator_manage_page as core_save_indicator_manage_page,
         },
         details::{
+            StockDetailPageData, StockDetailRealtimeData,
             build_stock_detail_realtime_from_quote_map,
-            get_stock_detail_page as core_get_stock_detail_page, StockDetailPageData,
-            StockDetailRealtimeData,
+            get_stock_detail_page as core_get_stock_detail_page,
         },
-        market_monitor::{build_market_monitor_page_from_rows, MarketMonitorPageData},
+        market_monitor::{MarketMonitorPageData, build_market_monitor_page_from_rows},
         overview::{
-            get_rank_overview as core_get_rank_overview,
+            OverviewPageData, OverviewRow, get_rank_overview as core_get_rank_overview,
             get_rank_overview_page as core_get_rank_overview_page,
-            get_rank_trade_date_options as core_get_rank_trade_date_options, OverviewPageData,
-            OverviewRow,
+            get_rank_trade_date_options as core_get_rank_trade_date_options,
         },
-        realtime::{fetch_realtime_quote_map, RealtimeFetchMeta},
+        realtime::{RealtimeFetchMeta, fetch_realtime_quote_map},
         return_backtest::{
+            ReturnBacktestPageData, ReturnBacktestStrengthOverviewData,
             get_return_backtest_page as core_get_return_backtest_page,
             get_return_backtest_strength_overview as core_get_return_backtest_strength_overview,
-            ReturnBacktestPageData, ReturnBacktestStrengthOverviewData,
         },
         statistics::{
-            get_strategy_statistics_page as core_get_strategy_statistics_page,
-            get_strategy_statistics_detail as core_get_strategy_statistics_detail,
-            get_strategy_triggered_stocks as core_get_strategy_triggered_stocks,
             StrategyStatisticsDetailData, StrategyStatisticsPageData, TriggeredStockRow,
+            get_strategy_statistics_detail as core_get_strategy_statistics_detail,
+            get_strategy_statistics_page as core_get_strategy_statistics_page,
+            get_strategy_triggered_stocks as core_get_strategy_triggered_stocks,
         },
         stock_pick::{
-            run_advanced_stock_pick as core_run_advanced_stock_pick,
+            AdvancedStockPickResultData, StockPickOptionsData, StockPickResultData,
             get_stock_pick_options as core_get_stock_pick_options,
+            run_advanced_stock_pick as core_run_advanced_stock_pick,
             run_concept_stock_pick as core_run_concept_stock_pick,
-            run_expression_stock_pick as core_run_expression_stock_pick, StockPickOptionsData,
-            AdvancedStockPickResultData, StockPickResultData,
+            run_expression_stock_pick as core_run_expression_stock_pick,
         },
         strategy_manage::{
+            StrategyManagePageData, StrategyManageRuleDraft,
             add_strategy_manage_rule as core_add_strategy_manage_rule,
             check_strategy_manage_rule_draft as core_check_strategy_manage_rule_draft,
             create_strategy_manage_rule as core_create_strategy_manage_rule,
             get_strategy_manage_page as core_get_strategy_manage_page,
             remove_strategy_manage_rules as core_remove_strategy_manage_rules,
             update_strategy_manage_rule as core_update_strategy_manage_rule,
-            StrategyManagePageData, StrategyManageRuleDraft,
         },
         strategy_performance::{
+            StrategyPerformanceHorizonViewData, StrategyPerformancePageData,
+            StrategyPerformanceRuleDetail, StrategyPerformanceValidationPageData,
+            get_strategy_performance_horizon_view as core_get_strategy_performance_horizon_view,
+            get_latest_strategy_pick_cache as core_get_latest_strategy_pick_cache,
+            get_strategy_pick_cache as core_get_strategy_pick_cache,
             get_strategy_performance_page as core_get_strategy_performance_page,
+            StrategyPerformancePickCachePayload,
             get_strategy_performance_rule_detail as core_get_strategy_performance_rule_detail,
             get_strategy_performance_validation_page as core_get_strategy_performance_validation_page,
-            StrategyPerformancePageData, StrategyPerformanceRuleDetail,
-            StrategyPerformanceValidationPageData,
         },
         watch_observe::{
-            build_watch_observe_snapshot_data, hydrate_watch_observe_rows, normalize_trade_date,
-            normalize_ts_code, WatchObserveRow as CoreWatchObserveRow, WatchObserveSnapshotData,
-            WatchObserveStoredRow,
+            WatchObserveRow as CoreWatchObserveRow, WatchObserveSnapshotData,
+            WatchObserveStoredRow, build_watch_observe_snapshot_data, hydrate_watch_observe_rows,
+            normalize_trade_date, normalize_ts_code,
         },
     },
 };
@@ -447,12 +447,7 @@ async fn load_market_monitor_page_data(
         .map(|row| row.ts_code.clone())
         .collect();
     let (quote_map, fetch_meta) = fetch_realtime_quote_map_platform(ts_codes).await?;
-    build_market_monitor_page_from_rows(
-        &source_path,
-        overview_rows,
-        quote_map,
-        fetch_meta,
-    )
+    build_market_monitor_page_from_rows(&source_path, overview_rows, quote_map, fetch_meta)
 }
 
 async fn load_watch_observe_realtime_snapshot(
@@ -808,7 +803,8 @@ fn check_result_db_continuity(
         expected_dates.iter().map(String::as_str).collect();
 
     let result_db = result_db_path(source_path);
-    let actual_dates = query_distinct_trade_dates(&result_db, "scoring_result.db", "score_summary")?;
+    let actual_dates =
+        query_distinct_trade_dates(&result_db, "scoring_result.db", "score_summary")?;
     let actual_set: std::collections::HashSet<&str> =
         actual_dates.iter().map(String::as_str).collect();
 
@@ -1310,7 +1306,10 @@ fn list_stock_lookup_rows(source_path: String) -> Result<Vec<StockLookupRow>, St
         let Some(name) = cols.get(2) else {
             continue;
         };
-        let cnspell = cols.get(13).map(|value| value.trim()).filter(|value| !value.is_empty());
+        let cnspell = cols
+            .get(13)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty());
 
         let ts_code = ts_code.trim();
         let name = name.trim();
@@ -1462,6 +1461,93 @@ async fn get_strategy_performance_page(
             mixed_sort_keys,
             noisy_companion_rule_names,
             selected_rule_name,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_strategy_pick_cache(
+    source_path: String,
+    selected_horizon: Option<u32>,
+    strong_quantile: Option<f64>,
+    advantage_rule_mode: Option<String>,
+    manual_rule_names: Option<Vec<String>>,
+    auto_min_samples_2: Option<u32>,
+    auto_min_samples_3: Option<u32>,
+    auto_min_samples_5: Option<u32>,
+    auto_min_samples_10: Option<u32>,
+    require_win_rate_above_market: Option<bool>,
+    min_pass_horizons: Option<u32>,
+    min_adv_hits: Option<u32>,
+    max_combination_size: Option<u32>,
+) -> Result<StrategyPerformancePickCachePayload, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_strategy_pick_cache(
+            source_path,
+            selected_horizon,
+            strong_quantile,
+            advantage_rule_mode,
+            manual_rule_names,
+            auto_min_samples_2,
+            auto_min_samples_3,
+            auto_min_samples_5,
+            auto_min_samples_10,
+            require_win_rate_above_market,
+            min_pass_horizons,
+            min_adv_hits,
+            max_combination_size,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_latest_strategy_pick_cache(
+    source_path: String,
+) -> Result<StrategyPerformancePickCachePayload, String> {
+    tauri::async_runtime::spawn_blocking(move || core_get_latest_strategy_pick_cache(source_path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_strategy_performance_horizon_view(
+    source_path: String,
+    selected_horizon: Option<u32>,
+    strong_quantile: Option<f64>,
+    resolved_advantage_rule_names: Vec<String>,
+    auto_min_samples_2: Option<u32>,
+    auto_min_samples_3: Option<u32>,
+    auto_min_samples_5: Option<u32>,
+    auto_min_samples_10: Option<u32>,
+    require_win_rate_above_market: Option<bool>,
+    min_pass_horizons: Option<u32>,
+    min_adv_hits: Option<u32>,
+    top_limit: Option<u32>,
+    max_combination_size: Option<u32>,
+    mixed_sort_keys: Option<Vec<String>>,
+    noisy_companion_rule_names: Option<Vec<String>>,
+) -> Result<StrategyPerformanceHorizonViewData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_strategy_performance_horizon_view(
+            source_path,
+            selected_horizon,
+            strong_quantile,
+            resolved_advantage_rule_names,
+            auto_min_samples_2,
+            auto_min_samples_3,
+            auto_min_samples_5,
+            auto_min_samples_10,
+            require_win_rate_above_market,
+            min_pass_horizons,
+            min_adv_hits,
+            top_limit,
+            max_combination_size,
+            mixed_sort_keys,
+            noisy_companion_rule_names,
         )
     })
     .await
@@ -1963,7 +2049,10 @@ fn preview_managed_source_dataset_inner(
                 .map(|column| (*column).to_string())
                 .collect::<Vec<_>>();
             for column in &columns {
-                if base_columns.iter().any(|item| item.eq_ignore_ascii_case(column)) {
+                if base_columns
+                    .iter()
+                    .any(|item| item.eq_ignore_ascii_case(column))
+                {
                     continue;
                 }
                 selected.push(column.clone());
@@ -2094,7 +2183,8 @@ fn preview_managed_source_dataset_inner(
         let db_path_str = db_path
             .to_str()
             .ok_or_else(|| "stock_data.db 路径不是有效 UTF-8".to_string())?;
-        Connection::open(db_path_str).map_err(|error| format!("打开 stock_data.db 失败: {error}"))?
+        Connection::open(db_path_str)
+            .map_err(|error| format!("打开 stock_data.db 失败: {error}"))?
     } else {
         let db_path = result_db_path(source_path_str);
         let db_path_str = db_path
@@ -2106,7 +2196,10 @@ fn preview_managed_source_dataset_inner(
 
     let mut where_clauses = Vec::with_capacity(2);
     if let (Some(column), Some(value)) = (filter_trade_column, normalized_trade_date.as_deref()) {
-        if all_columns.iter().any(|item| item.eq_ignore_ascii_case(column)) {
+        if all_columns
+            .iter()
+            .any(|item| item.eq_ignore_ascii_case(column))
+        {
             where_clauses.push(format!(
                 "{} = {}",
                 quote_ident(column),
@@ -2115,7 +2208,10 @@ fn preview_managed_source_dataset_inner(
         }
     }
     if let (Some(column), Some(value)) = (filter_ts_code_column, normalized_ts_code.as_deref()) {
-        if all_columns.iter().any(|item| item.eq_ignore_ascii_case(column)) {
+        if all_columns
+            .iter()
+            .any(|item| item.eq_ignore_ascii_case(column))
+        {
             where_clauses.push(format!(
                 "{} = {}",
                 quote_ident(column),
@@ -2220,8 +2316,7 @@ fn append_directory_to_zip<W: Write + Seek>(
     current_dir: &Path,
     archive_root: &str,
 ) -> Result<u64, String> {
-    let file_options =
-        FileOptions::default().compression_method(CompressionMethod::Deflated);
+    let file_options = FileOptions::default().compression_method(CompressionMethod::Deflated);
     let mut file_count = 0u64;
 
     for entry in fs::read_dir(current_dir).map_err(|error| error.to_string())? {
@@ -2241,12 +2336,8 @@ fn append_directory_to_zip<W: Write + Seek>(
             zip_writer
                 .add_directory(archive_name, file_options)
                 .map_err(|error| error.to_string())?;
-            file_count += append_directory_to_zip(
-                zip_writer,
-                source_root,
-                &entry_path,
-                archive_root,
-            )?;
+            file_count +=
+                append_directory_to_zip(zip_writer, source_root, &entry_path, archive_root)?;
             continue;
         }
 
@@ -2254,10 +2345,8 @@ fn append_directory_to_zip<W: Write + Seek>(
             zip_writer
                 .start_file(archive_name, file_options)
                 .map_err(|error| error.to_string())?;
-            let mut source_file =
-                fs::File::open(&entry_path).map_err(|error| error.to_string())?;
-            std::io::copy(&mut source_file, zip_writer)
-                .map_err(|error| error.to_string())?;
+            let mut source_file = fs::File::open(&entry_path).map_err(|error| error.to_string())?;
+            std::io::copy(&mut source_file, zip_writer).map_err(|error| error.to_string())?;
             file_count += 1;
         }
     }
@@ -2319,12 +2408,13 @@ fn preview_managed_source_stock_data_inner(
     };
 
     let row_count_i64 = conn
-        .query_row("SELECT COUNT(*) FROM stock_data", [], |row| row.get::<_, i64>(0))
+        .query_row("SELECT COUNT(*) FROM stock_data", [], |row| {
+            row.get::<_, i64>(0)
+        })
         .map_err(|error| format!("读取 stock_data 总行数失败: {error}"))?;
 
-    let summary_sql = format!(
-        "SELECT COUNT(*), MIN(trade_date), MAX(trade_date) FROM stock_data{where_sql}"
-    );
+    let summary_sql =
+        format!("SELECT COUNT(*), MIN(trade_date), MAX(trade_date) FROM stock_data{where_sql}");
     let (matched_rows_i64, min_trade_date, max_trade_date) = conn
         .query_row(&summary_sql, [], |row| {
             Ok((
@@ -2568,12 +2658,7 @@ async fn preview_managed_source_dataset(
     let limit = limit.unwrap_or(100).clamp(20, 500);
     tauri::async_runtime::spawn_blocking(move || {
         preview_managed_source_dataset_inner(
-            app,
-            source_dir,
-            dataset_id,
-            trade_date,
-            ts_code,
-            limit,
+            app, source_dir, dataset_id, trade_date, ts_code, limit,
         )
     })
     .await
@@ -2663,8 +2748,8 @@ fn export_managed_source_directory_mobile(
 
     let mut open_options = tauri_plugin_fs::OpenOptions::new();
     open_options.write(true).truncate(true).create(true);
-    let destination_file = FilePath::from_str(destination_file)
-        .map_err(|error| error.to_string())?;
+    let destination_file =
+        FilePath::from_str(destination_file).map_err(|error| error.to_string())?;
     let destination_label = destination_file.to_string();
     let target_file = app
         .fs()
@@ -2734,17 +2819,24 @@ fn export_managed_source_file_inner(
         .map_err(|error| error.to_string())?;
 
     if !source_path.exists() {
-        return Err(format!("当前应用数据目录缺少文件: {}", source_path.display()));
+        return Err(format!(
+            "当前应用数据目录缺少文件: {}",
+            source_path.display()
+        ));
     }
 
     if !source_path.is_file() {
-        return Err(format!("当前应用数据目录目标不是文件: {}", source_path.display()));
+        return Err(format!(
+            "当前应用数据目录目标不是文件: {}",
+            source_path.display()
+        ));
     }
 
     let mut source = std::fs::File::open(&source_path).map_err(|error| error.to_string())?;
     let mut open_options = tauri_plugin_fs::OpenOptions::new();
     open_options.write(true).truncate(true).create(true);
-    let destination_file = FilePath::from_str(destination_file).map_err(|error| error.to_string())?;
+    let destination_file =
+        FilePath::from_str(destination_file).map_err(|error| error.to_string())?;
     let destination_label = destination_file.to_string();
     let mut target = app
         .fs()
@@ -2753,7 +2845,9 @@ fn export_managed_source_file_inner(
 
     let mut buffer = vec![0u8; IMPORT_BUFFER_SIZE];
     loop {
-        let read_bytes = source.read(&mut buffer).map_err(|error| error.to_string())?;
+        let read_bytes = source
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
         if read_bytes == 0 {
             break;
         }
@@ -2945,6 +3039,9 @@ pub fn run() {
             get_strategy_statistics_detail,
             get_strategy_triggered_stocks,
             get_strategy_performance_page,
+            get_strategy_pick_cache,
+            get_latest_strategy_pick_cache,
+            get_strategy_performance_horizon_view,
             get_strategy_performance_rule_detail,
             get_strategy_performance_validation_page,
             get_return_backtest_page,

@@ -7,13 +7,13 @@ import {
   type ReturnBacktestStrengthOverviewData,
 } from "../../apis/returnBacktest";
 import { readStoredSourcePath } from "../../shared/storage";
+import { STOCK_PICK_BOARD_OPTIONS } from "../desktop/stockPickShared";
 import "./css/ReturnBacktestStrengthWindow.css";
 
-const BOARD_OPTIONS = ["全部", "主板", "创业/科创", "北交所"] as const;
 const DEFAULT_TOP_LIMIT = "100";
 const DEFAULT_HOLDING_DAYS = "5";
 const WEEKDAY_LABELS = ["一", "二", "三", "四", "五", "六", "日"] as const;
-type BoardOption = (typeof BOARD_OPTIONS)[number];
+type BoardOption = (typeof STOCK_PICK_BOARD_OPTIONS)[number];
 
 type HeatmapSlot = {
   key: string;
@@ -66,7 +66,7 @@ function formatInteger(value?: number | null) {
 
 function normalizeBoardOption(value?: string | null): BoardOption {
   const candidate = value?.trim();
-  return candidate && BOARD_OPTIONS.includes(candidate as BoardOption)
+  return candidate && STOCK_PICK_BOARD_OPTIONS.includes(candidate as BoardOption)
     ? (candidate as BoardOption)
     : "全部";
 }
@@ -428,10 +428,12 @@ export function ReturnBacktestStrengthPanel({
             <select
               value={boardFilter}
               onChange={(event) =>
-                setBoardFilter(event.target.value as (typeof BOARD_OPTIONS)[number])
+                setBoardFilter(
+                  event.target.value as (typeof STOCK_PICK_BOARD_OPTIONS)[number],
+                )
               }
             >
-              {BOARD_OPTIONS.map((option) => (
+              {STOCK_PICK_BOARD_OPTIONS.map((option) => (
                 <option key={option} value={option}>
                   {option}
                 </option>

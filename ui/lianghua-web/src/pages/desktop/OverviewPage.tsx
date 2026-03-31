@@ -26,10 +26,10 @@ import {
   type SortDirection,
   useTableSort,
 } from "../../shared/tableSort";
+import { STOCK_PICK_BOARD_OPTIONS } from "./stockPickShared";
 import "./css/OverviewPage.css";
 
 const OVERVIEW_PAGE_STATE_KEY = "lh_overview_page_state";
-const BOARD_OPTIONS = ["全部", "主板", "创业/科创", "北交所"] as const;
 const FIXED_VISIBLE_COLUMNS = [
   "rank",
   "ts_code",
@@ -65,7 +65,7 @@ type PersistedOverviewState = {
   rankDateInput: string;
   refDateInput: string;
   limitInput: string;
-  boardFilter: (typeof BOARD_OPTIONS)[number];
+  boardFilter: (typeof STOCK_PICK_BOARD_OPTIONS)[number];
   totalMvMinInput: string;
   totalMvMaxInput: string;
   rows: OverviewRow[];
@@ -221,7 +221,8 @@ export default function OverviewPage() {
       limitInput:
         typeof parsed.limitInput === "string" ? parsed.limitInput : "100",
       boardFilter:
-        parsed.boardFilter && BOARD_OPTIONS.includes(parsed.boardFilter)
+        parsed.boardFilter &&
+        STOCK_PICK_BOARD_OPTIONS.includes(parsed.boardFilter)
           ? parsed.boardFilter
           : "全部",
       totalMvMinInput:
@@ -258,7 +259,7 @@ export default function OverviewPage() {
     () => persistedState?.limitInput ?? "100",
   );
   const [boardFilter, setBoardFilter] = useState<
-    (typeof BOARD_OPTIONS)[number]
+    (typeof STOCK_PICK_BOARD_OPTIONS)[number]
   >(() => persistedState?.boardFilter ?? "全部");
   const [totalMvMinInput, setTotalMvMinInput] = useState(
     () => persistedState?.totalMvMinInput ?? "",
@@ -610,10 +611,12 @@ export default function OverviewPage() {
             <select
               value={boardFilter}
               onChange={(e) =>
-                setBoardFilter(e.target.value as (typeof BOARD_OPTIONS)[number])
+                setBoardFilter(
+                  e.target.value as (typeof STOCK_PICK_BOARD_OPTIONS)[number],
+                )
               }
             >
-              {BOARD_OPTIONS.map((board) => (
+              {STOCK_PICK_BOARD_OPTIONS.map((board) => (
                 <option key={board} value={board}>
                   {board}
                 </option>

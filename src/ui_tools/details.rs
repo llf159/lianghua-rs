@@ -1,11 +1,16 @@
-use std::{collections::HashMap, fs, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
 
 use duckdb::{Connection, params};
 use serde::Serialize;
 
 use crate::{
-    data::{RuleTag, ScoreConfig},
-    data::{result_db_path, score_rule_path, source_db_path},
+    data::{RowData, RuleTag, ScoreConfig},
+    data::{ind_toml_path, result_db_path, score_rule_path, source_db_path},
+    download::ind_calc::{cache_ind_build_from_path, calc_inds_with_cache_lossy},
     ui_tools::{
         build_area_map, build_circ_mv_map, build_concepts_map, build_industry_map, build_name_map,
         build_total_mv_map,
@@ -231,7 +236,7 @@ fn query_detail_overview(
     Ok(DetailOverview {
         ts_code: ts_code.to_string(),
         name: name_map.get(ts_code).cloned(),
-        board: Some(board_category(ts_code).to_string()),
+        board: Some(board_category(ts_code, name_map.get(ts_code).map(|value| value.as_str())).to_string()),
         area: area_map.get(ts_code).cloned(),
         industry: industry_map.get(ts_code).cloned(),
         trade_date: Some(effective_trade_date.to_string()),
@@ -405,6 +410,184 @@ fn query_kline(
     })
 }
 
+fn detail_indicator_file_path(source_path: &str) -> std::path::PathBuf {
+    let imported_ind_path = ind_toml_path(source_path);
+    if imported_ind_path.exists() {
+        imported_ind_path
+    } else {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("source")
+            .join("ind.toml")
+    }
+}
+
+fn is_builtin_kline_series_key(key: &str) -> bool {
+    matches!(
+        key.trim().to_ascii_lowercase().as_str(),
+        "open" | "high" | "low" | "close" | "vol" | "amount" | "tor"
+    )
+}
+
+fn collect_realtime_indicator_names(panels: Option<&[DetailKlinePanel]>) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let fallback_panels;
+    let panels = match panels {
+        Some(value) => value,
+        None => {
+            fallback_panels = default_kline_panels();
+            &fallback_panels
+        }
+    };
+
+    for key in panels
+        .iter()
+        .flat_map(|panel| panel.series_keys.as_deref().unwrap_or(&[]))
+    {
+        if is_builtin_kline_series_key(key) {
+            continue;
+        }
+
+        let normalized = key.trim().to_ascii_uppercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        out.insert(normalized);
+    }
+
+    out
+}
+
+fn build_realtime_indicator_row_data(
+    items: &[DetailKlineRow],
+    realtime_pre_close: Option<f64>,
+) -> Result<RowData, String> {
+    if items.is_empty() {
+        return Err("详情实时指标计算失败: items为空".to_string());
+    }
+
+    let mut trade_dates = Vec::with_capacity(items.len());
+    let mut cols = HashMap::with_capacity(10);
+    for key in [
+        "O",
+        "H",
+        "L",
+        "C",
+        "V",
+        "AMOUNT",
+        "PRE_CLOSE",
+        "CHANGE",
+        "PCT_CHG",
+        "TURNOVER_RATE",
+    ] {
+        cols.insert(key.to_string(), Vec::with_capacity(items.len()));
+    }
+
+    let mut prev_close = None;
+    let last_index = items.len().saturating_sub(1);
+    for (index, item) in items.iter().enumerate() {
+        trade_dates.push(item.trade_date.clone());
+
+        let pre_close = if index == last_index && item.is_realtime == Some(true) {
+            realtime_pre_close.or(prev_close)
+        } else {
+            prev_close
+        };
+        let change = match (item.close, pre_close) {
+            (Some(close), Some(previous)) => Some(close - previous),
+            _ => None,
+        };
+        let pct_chg = match (change, pre_close) {
+            (Some(change_value), Some(previous)) if previous.abs() > f64::EPSILON => {
+                Some(change_value / previous * 100.0)
+            }
+            _ => None,
+        };
+
+        cols.get_mut("O").expect("O should exist").push(item.open);
+        cols.get_mut("H").expect("H should exist").push(item.high);
+        cols.get_mut("L").expect("L should exist").push(item.low);
+        cols.get_mut("C").expect("C should exist").push(item.close);
+        cols.get_mut("V").expect("V should exist").push(item.vol);
+        cols.get_mut("AMOUNT")
+            .expect("AMOUNT should exist")
+            .push(item.amount);
+        cols.get_mut("PRE_CLOSE")
+            .expect("PRE_CLOSE should exist")
+            .push(pre_close);
+        cols.get_mut("CHANGE")
+            .expect("CHANGE should exist")
+            .push(change);
+        cols.get_mut("PCT_CHG")
+            .expect("PCT_CHG should exist")
+            .push(pct_chg);
+        cols.get_mut("TURNOVER_RATE")
+            .expect("TURNOVER_RATE should exist")
+            .push(item.tor);
+
+        prev_close = item.close;
+    }
+
+    let row_data = RowData { trade_dates, cols };
+    row_data.validate()?;
+    Ok(row_data)
+}
+
+fn set_realtime_indicator_value(row: &mut DetailKlineRow, name: &str, value: Option<f64>) {
+    match name {
+        "J" => row.j = value,
+        "BRICK" => row.brick = value,
+        "DUOKONG_SHORT" => row.duokong_short = value,
+        "DUOKONG_LONG" => row.duokong_long = value,
+        "BUPIAO_SHORT" => row.bupiao_short = value,
+        "BUPIAO_LONG" => row.bupiao_long = value,
+        _ => {}
+    }
+}
+
+fn fill_realtime_kline_indicators(
+    source_path: &str,
+    indicator_names: &HashSet<String>,
+    items: &mut [DetailKlineRow],
+    realtime_pre_close: f64,
+) {
+    if items.is_empty() || items.last().and_then(|row| row.is_realtime) != Some(true) {
+        return;
+    }
+
+    if indicator_names.is_empty() {
+        return;
+    }
+
+    let indicator_path = detail_indicator_file_path(source_path);
+    let indicator_defs = match cache_ind_build_from_path(&indicator_path) {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    let indicator_defs = indicator_defs
+        .into_iter()
+        .filter(|item| indicator_names.contains(&item.name))
+        .collect::<Vec<_>>();
+    if indicator_defs.is_empty() {
+        return;
+    }
+
+    let row_data = match build_realtime_indicator_row_data(items, Some(realtime_pre_close)) {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    let indicator_values = calc_inds_with_cache_lossy(&indicator_defs, row_data);
+
+    let Some(last_row) = items.last_mut() else {
+        return;
+    };
+    for name in indicator_names {
+        let value = indicator_values
+            .get(name)
+            .and_then(|series| series.last().copied().flatten());
+        set_realtime_indicator_value(last_row, name, value);
+    }
+}
+
 fn build_realtime_kline_row(quote: &crate::crawler::SinaQuote) -> Option<DetailKlineRow> {
     let trade_date = normalize_quote_trade_date(&quote.date)?;
     let realtime_color_hint = match quote.change_pct {
@@ -420,7 +603,7 @@ fn build_realtime_kline_row(quote: &crate::crawler::SinaQuote) -> Option<DetailK
         low: Some(quote.low),
         close: Some(quote.price),
         vol: Some(quote.vol),
-        amount: None,
+        amount: Some(quote.amount),
         tor: None,
         brick: None,
         j: None,
@@ -446,8 +629,15 @@ fn merge_realtime_kline(
 
     if let Some(last_row) = items.last_mut() {
         if last_row.trade_date == realtime_row.trade_date {
+            last_row.open = realtime_row.open;
+            last_row.high = realtime_row.high;
+            last_row.low = realtime_row.low;
+            last_row.close = realtime_row.close;
+            last_row.vol = realtime_row.vol;
+            last_row.amount = realtime_row.amount;
+            last_row.is_realtime = realtime_row.is_realtime;
             realtime_row.realtime_color_hint = None;
-            *last_row = realtime_row;
+            last_row.realtime_color_hint = realtime_row.realtime_color_hint;
             return (kline, true);
         }
     }
@@ -735,7 +925,11 @@ pub fn build_stock_detail_realtime_from_quote_map(
     let quote = quote_map
         .get(&normalized_ts_code)
         .ok_or_else(|| format!("未获取到 {} 的实时行情", normalized_ts_code))?;
-    let (kline, has_database_trade_date) = merge_realtime_kline(kline, quote);
+    let (mut kline, has_database_trade_date) = merge_realtime_kline(kline, quote);
+    let indicator_names = collect_realtime_indicator_names(kline.panels.as_deref());
+    if let Some(items) = kline.items.as_mut() {
+        fill_realtime_kline_indicators(&source_path, &indicator_names, items, quote.pre_close);
+    }
 
     Ok(StockDetailRealtimeData {
         ts_code: normalized_ts_code,

@@ -17,6 +17,7 @@ pub struct SinaQuote {
     pub pre_close: f64,
     pub price: f64,
     pub vol: f64,
+    pub amount: f64,
     pub change_pct: Option<f64>,
 }
 
@@ -168,6 +169,7 @@ fn parse_sina_quote_line(line: &str) -> Result<Option<SinaQuote>, String> {
     let low = parse_f64_field(&fields, 5, "low")?;
     // 新浪 level-1 返回的是成交股数；库里的 stock_data.vol 使用“手”，这里统一 /100。
     let vol = parse_f64_field(&fields, 8, "volume")? / 100.0;
+    let amount = parse_f64_field(&fields, 9, "amount")?;
     let date = fields[30].to_string();
     let time = fields[31].to_string();
     let change_pct = {
@@ -189,6 +191,7 @@ fn parse_sina_quote_line(line: &str) -> Result<Option<SinaQuote>, String> {
         pre_close,
         price,
         vol,
+        amount,
         change_pct,
     }))
 }

@@ -413,7 +413,11 @@ fn build_snapshot(
             SnapshotRow {
                 ts_code: row.ts_code.clone(),
                 name: name_map.get(&row.ts_code).cloned(),
-                market_board: board_category(&row.ts_code).to_string(),
+                market_board: board_category(
+                    &row.ts_code,
+                    name_map.get(&row.ts_code).map(|value| value.as_str()),
+                )
+                .to_string(),
                 industry: industry_map.get(&row.ts_code).cloned(),
                 concept_text,
                 concept_items,

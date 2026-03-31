@@ -79,6 +79,7 @@ export type StrategyPerformancePortfolioWindow = {
   window_key: string;
   label: string;
   sample_days: number;
+  sample_count: number;
   avg_portfolio_return_pct?: number | null;
   avg_market_return_pct?: number | null;
   avg_excess_return_pct?: number | null;
@@ -87,6 +88,7 @@ export type StrategyPerformancePortfolioWindow = {
   rank_ic_mean?: number | null;
   icir?: number | null;
   layer_return_spread_pct?: number | null;
+  composite_score?: number | null;
   sharpe_ratio?: number | null;
 };
 
@@ -96,6 +98,20 @@ export type StrategyPerformancePortfolioRow = {
   sort_description: string;
   factor_count?: number | null;
   windows: StrategyPerformancePortfolioWindow[];
+};
+
+export type StrategyPerformanceOverallScoreAnalysis = {
+  horizon: number;
+  sample_count: number;
+  avg_future_return_pct?: number | null;
+  strong_hit_rate?: number | null;
+  win_rate?: number | null;
+  spearman_corr?: number | null;
+  rank_ic_mean?: number | null;
+  icir?: number | null;
+  layer_return_spread_pct?: number | null;
+  bucket_mode: string;
+  score_rows: StrategyPerformanceScoreBucketRow[];
 };
 
 export type StrategyPerformanceScoreBucketRow = {
@@ -180,9 +196,36 @@ export type StrategyPerformancePageData = {
   rule_rows: StrategyPerformanceRuleRow[];
   companion_rows: StrategyPerformanceCompanionRow[];
   portfolio_rows: StrategyPerformancePortfolioRow[];
+  overall_score_analysis?: StrategyPerformanceOverallScoreAnalysis | null;
   selected_rule_name?: string | null;
   rule_detail?: StrategyPerformanceRuleDetail | null;
   methods: StrategyPerformanceMethodNote[];
+};
+
+export type StrategyPerformanceHorizonViewData = {
+  selected_horizon: number;
+  noisy_companion_rule_names: string[];
+  companion_rows: StrategyPerformanceCompanionRow[];
+  portfolio_rows: StrategyPerformancePortfolioRow[];
+  overall_score_analysis?: StrategyPerformanceOverallScoreAnalysis | null;
+};
+
+export type StrategyPerformancePickCacheCombination = {
+  strategy_key: string;
+  strategy_label: string;
+  factor_count: number;
+  rule_names: string[];
+  rank_ic_mean: number;
+  composite_score?: number | null;
+};
+
+export type StrategyPerformancePickCachePayload = {
+  selected_horizon: number;
+  strong_quantile: number;
+  resolved_advantage_rule_names: string[];
+  resolved_noisy_companion_rule_names: string[];
+  resolved_advantage_combinations: StrategyPerformancePickCacheCombination[];
+  resolved_noisy_combinations: StrategyPerformancePickCacheCombination[];
 };
 
 export type StrategyPerformanceQuery = {
@@ -210,6 +253,53 @@ export async function getStrategyPerformancePage(
 ) {
   return invoke<StrategyPerformancePageData>(
     "get_strategy_performance_page",
+    query,
+  );
+}
+
+export async function getStrategyPickCache(query: {
+  sourcePath: string;
+  selectedHorizon?: number;
+  strongQuantile?: number;
+  advantageRuleMode?: string;
+  manualRuleNames?: string[];
+  autoMinSamples2?: number;
+  autoMinSamples3?: number;
+  autoMinSamples5?: number;
+  autoMinSamples10?: number;
+  requireWinRateAboveMarket?: boolean;
+  minPassHorizons?: number;
+  minAdvHits?: number;
+  maxCombinationSize?: number;
+}) {
+  return invoke<StrategyPerformancePickCachePayload>("get_strategy_pick_cache", query);
+}
+
+export async function getLatestStrategyPickCache(sourcePath: string) {
+  return invoke<StrategyPerformancePickCachePayload>("get_latest_strategy_pick_cache", {
+    sourcePath,
+  });
+}
+
+export async function getStrategyPerformanceHorizonView(query: {
+  sourcePath: string;
+  selectedHorizon?: number;
+  strongQuantile?: number;
+  resolvedAdvantageRuleNames: string[];
+  autoMinSamples2?: number;
+  autoMinSamples3?: number;
+  autoMinSamples5?: number;
+  autoMinSamples10?: number;
+  requireWinRateAboveMarket?: boolean;
+  minPassHorizons?: number;
+  minAdvHits?: number;
+  topLimit?: number;
+  maxCombinationSize?: number;
+  mixedSortKeys?: string[];
+  noisyCompanionRuleNames?: string[];
+}) {
+  return invoke<StrategyPerformanceHorizonViewData>(
+    "get_strategy_performance_horizon_view",
     query,
   );
 }

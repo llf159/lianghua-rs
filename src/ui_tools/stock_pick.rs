@@ -16,7 +16,10 @@ use crate::{
     ui_tools::{
         build_area_map, build_circ_mv_map, build_concepts_map, build_industry_map, build_name_map,
         build_total_mv_map,
-        strategy_performance::get_strategy_performance_page as core_get_strategy_performance_page,
+        strategy_performance::{
+            StrategyPerformancePickCacheCombination,
+            get_latest_strategy_pick_cache as core_get_latest_strategy_pick_cache,
+        },
     },
     utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
 };
@@ -75,12 +78,21 @@ pub struct AdvancedStockPickRow {
     pub total_score: Option<f64>,
     pub adv_hit_cnt: u32,
     pub adv_score_sum: f64,
+    pub adv_combo_hit_cnt: u32,
+    pub adv_combo_score_sum: f64,
+    pub adv_combo_alpha_score: f64,
+    pub noisy_combo_hit_cnt: u32,
+    pub noisy_combo_score_sum: f64,
+    pub noisy_combo_penalty_score: f64,
+    pub combo_net_score: f64,
     pub pos_hit_cnt: u32,
     pub pos_score_sum: f64,
     pub all_hit_cnt: u32,
     pub all_score_sum: f64,
     pub noisy_companion_cnt: u32,
     pub advantage_hits: String,
+    pub advantage_combo_hits: String,
+    pub noisy_combo_hits: String,
     pub companion_hits: String,
     pub pick_note: String,
 }
@@ -95,11 +107,14 @@ pub struct AdvancedStockPickResultData {
     pub eligible_candidate_count: u32,
     pub selected_count: u32,
     pub resolved_advantage_rule_names: Vec<String>,
+    pub resolved_advantage_combination_labels: Vec<String>,
     pub resolved_noisy_companion_rule_names: Vec<String>,
+    pub resolved_noisy_combination_labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdvancedPickMethod {
+    ComboBiasTopN,
     RawTopN,
     AdvantagePool,
     AdvHitTopN,
@@ -113,8 +128,16 @@ enum AdvancedPickMethod {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum AdvancedMixedSortKey {
+    ComboNetScore,
     AdvHitCnt,
     AdvScoreSum,
+    AdvComboHitCnt,
+    AdvComboScoreSum,
+    AdvComboAlphaScore,
+    NoisyCompanionCnt,
+    NoisyComboHitCnt,
+    NoisyComboScoreSum,
+    NoisyComboPenaltyScore,
     PosHitCnt,
     PosScoreSum,
     TotalScore,
@@ -127,13 +150,23 @@ struct AdvancedPickAggRow {
     total_score: Option<f64>,
     adv_hit_cnt: u32,
     adv_score_sum: f64,
+    adv_combo_hit_cnt: u32,
+    adv_combo_score_sum: f64,
+    adv_combo_alpha_score: f64,
+    noisy_combo_hit_cnt: u32,
+    noisy_combo_score_sum: f64,
+    noisy_combo_penalty_score: f64,
+    combo_net_score: f64,
     pos_hit_cnt: u32,
     pos_score_sum: f64,
     all_hit_cnt: u32,
     all_score_sum: f64,
     noisy_companion_cnt: u32,
     advantage_hits: Vec<(String, f64)>,
+    advantage_combo_hits: Vec<(String, f64)>,
+    noisy_combo_hits: Vec<(String, f64)>,
     companion_hits: Vec<(String, f64)>,
+    positive_rule_scores: HashMap<String, f64>,
 }
 
 #[derive(Debug)]
@@ -555,14 +588,14 @@ fn load_summary_map(source_path: &str, trade_date: &str) -> HashMap<String, Summ
     out
 }
 
-fn filter_board(ts_code: &str, board: Option<&str>) -> bool {
+fn filter_board(ts_code: &str, stock_name: Option<&str>, board: Option<&str>) -> bool {
     let Some(board) = board else {
         return true;
     };
     if board.is_empty() || board == BOARD_ALL {
         return true;
     }
-    board_category(ts_code) == board
+    board_category(ts_code, stock_name) == board
 }
 
 fn filter_text_option(value: Option<&str>, selected: Option<&str>) -> bool {
@@ -579,10 +612,11 @@ fn normalize_method(method_key: Option<String>) -> AdvancedPickMethod {
     match method_key
         .as_deref()
         .map(str::trim)
-        .unwrap_or("adv_score_topn")
+        .unwrap_or("mixed_topn")
         .to_ascii_lowercase()
         .as_str()
     {
+        "combo_bias_topn" => AdvancedPickMethod::ComboBiasTopN,
         "raw_topn" => AdvancedPickMethod::RawTopN,
         "advantage_pool" => AdvancedPickMethod::AdvantagePool,
         "adv_hit_topn" => AdvancedPickMethod::AdvHitTopN,
@@ -592,12 +626,13 @@ fn normalize_method(method_key: Option<String>) -> AdvancedPickMethod {
         "pos_hit_topn" => AdvancedPickMethod::PosHitTopN,
         "pos_score_topn" => AdvancedPickMethod::PosScoreTopN,
         "clean_adv_topn" => AdvancedPickMethod::CleanAdvTopN,
-        _ => AdvancedPickMethod::AdvScoreTopN,
+        _ => AdvancedPickMethod::MixedTopN,
     }
 }
 
 fn advanced_method_key(method: AdvancedPickMethod) -> &'static str {
     match method {
+        AdvancedPickMethod::ComboBiasTopN => "combo_bias_topn",
         AdvancedPickMethod::RawTopN => "raw_topn",
         AdvancedPickMethod::AdvantagePool => "advantage_pool",
         AdvancedPickMethod::AdvHitTopN => "adv_hit_topn",
@@ -612,11 +647,12 @@ fn advanced_method_key(method: AdvancedPickMethod) -> &'static str {
 
 fn advanced_method_label(method: AdvancedPickMethod) -> &'static str {
     match method {
+        AdvancedPickMethod::ComboBiasTopN => "组合优先",
         AdvancedPickMethod::RawTopN => "原始 TopN",
         AdvancedPickMethod::AdvantagePool => "优势池优先",
         AdvancedPickMethod::AdvHitTopN => "优势命中优先",
         AdvancedPickMethod::AdvScoreTopN => "优势得分优先",
-        AdvancedPickMethod::MixedTopN => "混合排序",
+        AdvancedPickMethod::MixedTopN => "综合排序",
         AdvancedPickMethod::CompanionPenaltyTopN => "噪音惩罚",
         AdvancedPickMethod::PosHitTopN => "正向命中优先",
         AdvancedPickMethod::PosScoreTopN => "正向得分优先",
@@ -629,8 +665,16 @@ fn normalize_mixed_sort_keys(keys: Option<Vec<String>>) -> Vec<AdvancedMixedSort
     let mut seen = HashSet::new();
     for key in keys.unwrap_or_default() {
         let normalized = match key.trim().to_ascii_lowercase().as_str() {
+            "combo_net_score" => Some(AdvancedMixedSortKey::ComboNetScore),
             "adv_hit_cnt" => Some(AdvancedMixedSortKey::AdvHitCnt),
             "adv_score_sum" => Some(AdvancedMixedSortKey::AdvScoreSum),
+            "adv_combo_hit_cnt" => Some(AdvancedMixedSortKey::AdvComboHitCnt),
+            "adv_combo_score_sum" => Some(AdvancedMixedSortKey::AdvComboScoreSum),
+            "adv_combo_alpha_score" => Some(AdvancedMixedSortKey::AdvComboAlphaScore),
+            "noisy_companion_cnt" => Some(AdvancedMixedSortKey::NoisyCompanionCnt),
+            "noisy_combo_hit_cnt" => Some(AdvancedMixedSortKey::NoisyComboHitCnt),
+            "noisy_combo_score_sum" => Some(AdvancedMixedSortKey::NoisyComboScoreSum),
+            "noisy_combo_penalty_score" => Some(AdvancedMixedSortKey::NoisyComboPenaltyScore),
             "pos_hit_cnt" => Some(AdvancedMixedSortKey::PosHitCnt),
             "pos_score_sum" => Some(AdvancedMixedSortKey::PosScoreSum),
             "total_score" => Some(AdvancedMixedSortKey::TotalScore),
@@ -645,9 +689,8 @@ fn normalize_mixed_sort_keys(keys: Option<Vec<String>>) -> Vec<AdvancedMixedSort
     }
     if out.is_empty() {
         vec![
+            AdvancedMixedSortKey::ComboNetScore,
             AdvancedMixedSortKey::AdvHitCnt,
-            AdvancedMixedSortKey::AdvScoreSum,
-            AdvancedMixedSortKey::TotalScore,
             AdvancedMixedSortKey::Rank,
         ]
     } else {
@@ -674,10 +717,38 @@ fn compare_advanced_rows_with_key(
     key: AdvancedMixedSortKey,
 ) -> Ordering {
     match key {
+        AdvancedMixedSortKey::ComboNetScore => {
+            compare_option_f64_desc(Some(left.combo_net_score), Some(right.combo_net_score))
+        }
         AdvancedMixedSortKey::AdvHitCnt => right.adv_hit_cnt.cmp(&left.adv_hit_cnt),
         AdvancedMixedSortKey::AdvScoreSum => {
             compare_option_f64_desc(Some(left.adv_score_sum), Some(right.adv_score_sum))
         }
+        AdvancedMixedSortKey::AdvComboHitCnt => {
+            right.adv_combo_hit_cnt.cmp(&left.adv_combo_hit_cnt)
+        }
+        AdvancedMixedSortKey::AdvComboScoreSum => compare_option_f64_desc(
+            Some(left.adv_combo_score_sum),
+            Some(right.adv_combo_score_sum),
+        ),
+        AdvancedMixedSortKey::AdvComboAlphaScore => compare_option_f64_desc(
+            Some(left.adv_combo_alpha_score),
+            Some(right.adv_combo_alpha_score),
+        ),
+        AdvancedMixedSortKey::NoisyCompanionCnt => {
+            left.noisy_companion_cnt.cmp(&right.noisy_companion_cnt)
+        }
+        AdvancedMixedSortKey::NoisyComboHitCnt => {
+            left.noisy_combo_hit_cnt.cmp(&right.noisy_combo_hit_cnt)
+        }
+        AdvancedMixedSortKey::NoisyComboScoreSum => compare_option_f64_desc(
+            Some(right.noisy_combo_score_sum),
+            Some(left.noisy_combo_score_sum),
+        ),
+        AdvancedMixedSortKey::NoisyComboPenaltyScore => compare_option_f64_desc(
+            Some(right.noisy_combo_penalty_score),
+            Some(left.noisy_combo_penalty_score),
+        ),
         AdvancedMixedSortKey::PosHitCnt => right.pos_hit_cnt.cmp(&left.pos_hit_cnt),
         AdvancedMixedSortKey::PosScoreSum => {
             compare_option_f64_desc(Some(left.pos_score_sum), Some(right.pos_score_sum))
@@ -699,6 +770,53 @@ fn sort_advanced_rows_with_keys(rows: &mut [AdvancedStockPickRow], keys: &[Advan
         }
         left.ts_code.cmp(&right.ts_code)
     });
+}
+
+fn combo_quality_score(combo: &StrategyPerformancePickCacheCombination) -> f64 {
+    combo.composite_score.unwrap_or(combo.rank_ic_mean)
+}
+
+fn combo_activation_score(
+    combo: &StrategyPerformancePickCacheCombination,
+    positive_rule_scores: &HashMap<String, f64>,
+) -> Option<f64> {
+    let scores = combo
+        .rule_names
+        .iter()
+        .map(|rule_name| positive_rule_scores.get(rule_name).copied())
+        .collect::<Option<Vec<_>>>()?;
+    if scores.is_empty() {
+        return None;
+    }
+    Some(scores.iter().sum::<f64>() / scores.len() as f64)
+}
+
+fn combo_bias_eligible(row: &AdvancedStockPickRow, min_adv_hits: u32) -> bool {
+    row.adv_combo_hit_cnt > 0 || row.adv_hit_cnt >= min_adv_hits
+}
+
+fn compare_combo_bias_rows(left: &AdvancedStockPickRow, right: &AdvancedStockPickRow) -> Ordering {
+    compare_option_f64_desc(Some(left.combo_net_score), Some(right.combo_net_score))
+        .then_with(|| right.adv_combo_hit_cnt.cmp(&left.adv_combo_hit_cnt))
+        .then_with(|| {
+            compare_option_f64_desc(
+                Some(left.adv_combo_alpha_score),
+                Some(right.adv_combo_alpha_score),
+            )
+        })
+        .then_with(|| left.noisy_combo_hit_cnt.cmp(&right.noisy_combo_hit_cnt))
+        .then_with(|| {
+            compare_option_f64_desc(
+                Some(right.noisy_combo_penalty_score),
+                Some(left.noisy_combo_penalty_score),
+            )
+        })
+        .then_with(|| compare_option_f64_desc(Some(left.adv_score_sum), Some(right.adv_score_sum)))
+        .then_with(|| right.adv_hit_cnt.cmp(&left.adv_hit_cnt))
+        .then_with(|| left.noisy_companion_cnt.cmp(&right.noisy_companion_cnt))
+        .then_with(|| compare_option_f64_desc(left.total_score, right.total_score))
+        .then_with(|| compare_option_i64_asc(left.rank, right.rank))
+        .then_with(|| left.ts_code.cmp(&right.ts_code))
 }
 
 fn concept_matches(
@@ -790,14 +908,17 @@ pub fn run_expression_stock_pick(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let filtered_ts_codes = ts_codes
-        .into_iter()
-        .filter(|ts_code| filter_board(ts_code, board_filter))
-        .collect::<Vec<_>>();
     let st_list = load_st_list(source_path)?;
     let name_map = build_name_map(source_path).unwrap_or_default();
     let concept_map = build_concepts_map(source_path).unwrap_or_default();
     let summary_map = load_summary_map(source_path, &resolved_end_date);
+    let filtered_ts_codes = ts_codes
+        .into_iter()
+        .filter(|ts_code| {
+            let stock_name = name_map.get(ts_code).map(|value| value.as_str());
+            filter_board(ts_code, stock_name, board_filter)
+        })
+        .collect::<Vec<_>>();
 
     let rows = filtered_ts_codes
         .par_chunks(256)
@@ -838,7 +959,8 @@ pub fn run_expression_stock_pick(
                 group_rows.push(StockPickRow {
                     ts_code: ts_code.clone(),
                     name: name_map.get(ts_code).cloned(),
-                    board: board_category(ts_code).to_string(),
+                    board: board_category(ts_code, name_map.get(ts_code).map(|value| value.as_str()))
+                        .to_string(),
                     concept: concept_map.get(ts_code).cloned(),
                     rank: summary.and_then(|item| item.rank),
                     total_score: summary.and_then(|item| item.total_score),
@@ -894,7 +1016,10 @@ pub fn run_concept_stock_pick(
 
     let mut rows = concept_map
         .into_iter()
-        .filter(|(ts_code, _)| filter_board(ts_code, board_filter))
+        .filter(|(ts_code, _)| {
+            let stock_name = name_map.get(ts_code).map(|value| value.as_str());
+            filter_board(ts_code, stock_name, board_filter)
+        })
         .filter_map(|(ts_code, concept_text)| {
             let concept_items = split_concept_items(&concept_text);
             let matched = if selected_concepts.is_empty() {
@@ -916,7 +1041,8 @@ pub fn run_concept_stock_pick(
             Some(StockPickRow {
                 ts_code: ts_code.clone(),
                 name: name_map.get(&ts_code).cloned(),
-                board: board_category(&ts_code).to_string(),
+                board: board_category(&ts_code, name_map.get(&ts_code).map(|value| value.as_str()))
+                    .to_string(),
                 concept: Some(concept_text),
                 rank: summary.and_then(|item| item.rank),
                 total_score: summary.and_then(|item| item.total_score),
@@ -954,16 +1080,16 @@ pub fn run_advanced_stock_pick(
     exclude_concepts: Vec<String>,
     concept_match_mode: Option<String>,
     method_key: Option<String>,
-    selected_horizon: Option<u32>,
-    strong_quantile: Option<f64>,
-    advantage_rule_mode: Option<String>,
-    manual_rule_names: Option<Vec<String>>,
-    auto_min_samples_2: Option<u32>,
-    auto_min_samples_3: Option<u32>,
-    auto_min_samples_5: Option<u32>,
-    auto_min_samples_10: Option<u32>,
-    require_win_rate_above_market: Option<bool>,
-    min_pass_horizons: Option<u32>,
+    _selected_horizon: Option<u32>,
+    _strong_quantile: Option<f64>,
+    _advantage_rule_mode: Option<String>,
+    _manual_rule_names: Option<Vec<String>>,
+    _auto_min_samples_2: Option<u32>,
+    _auto_min_samples_3: Option<u32>,
+    _auto_min_samples_5: Option<u32>,
+    _auto_min_samples_10: Option<u32>,
+    _require_win_rate_above_market: Option<bool>,
+    _min_pass_horizons: Option<u32>,
     min_adv_hits: Option<u32>,
     top_limit: Option<u32>,
     mixed_sort_keys: Option<Vec<String>>,
@@ -1010,44 +1136,42 @@ pub fn run_advanced_stock_pick(
     let mixed_sort_keys = normalize_mixed_sort_keys(mixed_sort_keys);
     let rank_max = rank_max.map(|value| value.max(1) as i64);
 
-    let strategy_page = core_get_strategy_performance_page(
-        source_path.to_string(),
-        selected_horizon,
-        strong_quantile,
-        advantage_rule_mode,
-        manual_rule_names,
-        auto_min_samples_2,
-        auto_min_samples_3,
-        auto_min_samples_5,
-        auto_min_samples_10,
-        require_win_rate_above_market,
-        min_pass_horizons,
-        Some(min_adv_hits),
-        Some(top_limit),
-        None,
-        Some(
-            mixed_sort_keys
-                .iter()
-                .map(|key| match key {
-                    AdvancedMixedSortKey::AdvHitCnt => "adv_hit_cnt".to_string(),
-                    AdvancedMixedSortKey::AdvScoreSum => "adv_score_sum".to_string(),
-                    AdvancedMixedSortKey::PosHitCnt => "pos_hit_cnt".to_string(),
-                    AdvancedMixedSortKey::PosScoreSum => "pos_score_sum".to_string(),
-                    AdvancedMixedSortKey::TotalScore => "total_score".to_string(),
-                    AdvancedMixedSortKey::Rank => "rank".to_string(),
-                })
-                .collect(),
-        ),
-        noisy_companion_rule_names.clone(),
-        None,
-    )?;
-    let advantage_rule_set = strategy_page
+    let strategy_pick_cache = core_get_latest_strategy_pick_cache(source_path.to_string())?;
+    let advantage_rule_set = strategy_pick_cache
         .resolved_advantage_rule_names
         .iter()
         .cloned()
         .collect::<HashSet<_>>();
-    let noisy_rule_names = noisy_companion_rule_names.unwrap_or_default();
+    let noisy_rule_names = noisy_companion_rule_names.unwrap_or_else(|| {
+        strategy_pick_cache
+            .resolved_noisy_companion_rule_names
+            .clone()
+    });
     let noisy_rule_set = noisy_rule_names.iter().cloned().collect::<HashSet<_>>();
+    let advantage_combinations = strategy_pick_cache
+        .resolved_advantage_combinations
+        .iter()
+        .filter(|combo| {
+            combo.rule_names.len() >= 2
+                && combo
+                    .composite_score
+                    .map(|value| value > 0.0)
+                    .unwrap_or(combo.rank_ic_mean > 0.05)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let noisy_combinations = strategy_pick_cache
+        .resolved_noisy_combinations
+        .iter()
+        .filter(|combo| {
+            combo.rule_names.len() >= 2
+                && combo
+                    .composite_score
+                    .map(|value| value < 0.0)
+                    .unwrap_or(combo.rank_ic_mean < -0.05)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
 
     let result_db = result_db_path(source_path);
     let result_db_str = result_db
@@ -1103,17 +1227,68 @@ pub fn run_advanced_stock_pick(
         if rule_score > 0.0 {
             entry.pos_hit_cnt += 1;
             entry.pos_score_sum += rule_score;
-            if advantage_rule_set.contains(&rule_name) {
-                entry.adv_hit_cnt += 1;
-                entry.adv_score_sum += rule_score;
-                entry.advantage_hits.push((rule_name.clone(), rule_score));
-            } else {
-                entry.companion_hits.push((rule_name.clone(), rule_score));
-            }
+            entry
+                .positive_rule_scores
+                .insert(rule_name.clone(), rule_score);
             if noisy_rule_set.contains(&rule_name) {
                 entry.noisy_companion_cnt += 1;
             }
         }
+    }
+
+    for agg in agg_map.values_mut() {
+        for (rule_name, rule_score) in &agg.positive_rule_scores {
+            if advantage_rule_set.contains(rule_name) {
+                agg.adv_hit_cnt += 1;
+                agg.adv_score_sum += *rule_score;
+                agg.advantage_hits.push((rule_name.clone(), *rule_score));
+            } else {
+                agg.companion_hits.push((rule_name.clone(), *rule_score));
+            }
+        }
+        for combo in &advantage_combinations {
+            let Some(combo_strength) =
+                combo_activation_score(combo, &agg.positive_rule_scores)
+            else {
+                continue;
+            };
+            let combo_score = combo
+                .rule_names
+                .iter()
+                .filter_map(|rule_name| agg.positive_rule_scores.get(rule_name))
+                .sum::<f64>();
+            let combo_quality = combo_quality_score(combo).max(0.0);
+            agg.adv_combo_hit_cnt += 1;
+            agg.adv_combo_score_sum += combo_score;
+            agg.adv_combo_alpha_score += combo_quality * combo_strength;
+            agg.advantage_combo_hits
+                .push((
+                    format!("[组合] {} / 质{combo_quality:.2}", combo.strategy_label),
+                    combo_score,
+                ));
+        }
+        for combo in &noisy_combinations {
+            let Some(combo_strength) =
+                combo_activation_score(combo, &agg.positive_rule_scores)
+            else {
+                continue;
+            };
+            let combo_score = combo
+                .rule_names
+                .iter()
+                .filter_map(|rule_name| agg.positive_rule_scores.get(rule_name))
+                .sum::<f64>();
+            let combo_penalty = combo_quality_score(combo).abs() * combo_strength;
+            agg.noisy_combo_hit_cnt += 1;
+            agg.noisy_combo_score_sum += combo_score;
+            agg.noisy_combo_penalty_score += combo_penalty;
+            agg.noisy_combo_hits
+                .push((
+                    format!("[噪音组合] {} / 罚{combo_penalty:.2}", combo.strategy_label),
+                    combo_score,
+                ));
+        }
+        agg.combo_net_score = agg.adv_combo_alpha_score - agg.noisy_combo_penalty_score;
     }
 
     let name_map = build_name_map(source_path).unwrap_or_default();
@@ -1130,7 +1305,11 @@ pub fn run_advanced_stock_pick(
             let area_text = area_map.get(&ts_code).cloned();
             let industry_text = industry_map.get(&ts_code).cloned();
 
-            if !filter_board(&ts_code, board_filter) {
+            if !filter_board(
+                &ts_code,
+                name_map.get(&ts_code).map(|value| value.as_str()),
+                board_filter,
+            ) {
                 return None;
             }
             if !filter_text_option(area_text.as_deref(), area_filter) {
@@ -1180,11 +1359,14 @@ pub fn run_advanced_stock_pick(
             }
 
             let advantage_hits = format_rule_hits(&agg.advantage_hits);
+            let advantage_combo_hits = format_rule_hits(&agg.advantage_combo_hits);
+            let noisy_combo_hits = format_rule_hits(&agg.noisy_combo_hits);
             let companion_hits = format_rule_hits(&agg.companion_hits);
             Some(AdvancedStockPickRow {
                 ts_code: ts_code.clone(),
                 name: name_map.get(&ts_code).cloned(),
-                board: board_category(&ts_code).to_string(),
+                board: board_category(&ts_code, name_map.get(&ts_code).map(|value| value.as_str()))
+                    .to_string(),
                 area: area_text,
                 industry: industry_text,
                 concept: concept_text,
@@ -1192,30 +1374,59 @@ pub fn run_advanced_stock_pick(
                 total_score: agg.total_score,
                 adv_hit_cnt: agg.adv_hit_cnt,
                 adv_score_sum: agg.adv_score_sum,
+                adv_combo_hit_cnt: agg.adv_combo_hit_cnt,
+                adv_combo_score_sum: agg.adv_combo_score_sum,
+                adv_combo_alpha_score: agg.adv_combo_alpha_score,
+                noisy_combo_hit_cnt: agg.noisy_combo_hit_cnt,
+                noisy_combo_score_sum: agg.noisy_combo_score_sum,
+                noisy_combo_penalty_score: agg.noisy_combo_penalty_score,
+                combo_net_score: agg.combo_net_score,
                 pos_hit_cnt: agg.pos_hit_cnt,
                 pos_score_sum: agg.pos_score_sum,
                 all_hit_cnt: agg.all_hit_cnt,
                 all_score_sum: agg.all_score_sum,
                 noisy_companion_cnt: agg.noisy_companion_cnt,
                 advantage_hits: advantage_hits.clone(),
+                advantage_combo_hits: advantage_combo_hits.clone(),
+                noisy_combo_hits: noisy_combo_hits.clone(),
                 companion_hits: companion_hits.clone(),
                 pick_note: format!(
-                    "优势{}条 / 优势分{:.2} / 正向{}条 / 噪音{}条",
-                    agg.adv_hit_cnt, agg.adv_score_sum, agg.pos_hit_cnt, agg.noisy_companion_cnt
+                    "净组分{:.2} / 好组合{}个({:.2}) / 坏组合{}个(罚{:.2}) / 优势因子{}条({:.2}) / 正向{}条 / 噪音因子{}条",
+                    agg.combo_net_score,
+                    agg.adv_combo_hit_cnt,
+                    agg.adv_combo_alpha_score,
+                    agg.noisy_combo_hit_cnt,
+                    agg.noisy_combo_penalty_score,
+                    agg.adv_hit_cnt,
+                    agg.adv_score_sum,
+                    agg.pos_hit_cnt,
+                    agg.noisy_companion_cnt
                 ),
             })
         })
         .collect::<Vec<_>>();
     let total_candidate_count = all_rows.len() as u32;
 
-    let mut eligible_rows = all_rows
+    let mut factor_eligible_rows = all_rows
         .iter()
         .filter(|row| row.adv_hit_cnt >= min_adv_hits)
         .cloned()
         .collect::<Vec<_>>();
-    let eligible_candidate_count = eligible_rows.len() as u32;
+    let combo_eligible_rows = all_rows
+        .iter()
+        .filter(|row| combo_bias_eligible(row, min_adv_hits))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut eligible_candidate_count = factor_eligible_rows.len() as u32;
 
     match method {
+        AdvancedPickMethod::ComboBiasTopN => {
+            let mut combo_rows = combo_eligible_rows;
+            eligible_candidate_count = combo_rows.len() as u32;
+            combo_rows.sort_by(compare_combo_bias_rows);
+            combo_rows.truncate(top_limit as usize);
+            all_rows = combo_rows;
+        }
         AdvancedPickMethod::RawTopN => {
             all_rows.sort_by(|left, right| {
                 compare_option_i64_asc(left.rank, right.rank)
@@ -1225,16 +1436,16 @@ pub fn run_advanced_stock_pick(
             all_rows.truncate(top_limit as usize);
         }
         AdvancedPickMethod::AdvantagePool => {
-            eligible_rows.sort_by(|left, right| {
+            factor_eligible_rows.sort_by(|left, right| {
                 compare_option_i64_asc(left.rank, right.rank)
                     .then_with(|| compare_option_f64_desc(left.total_score, right.total_score))
                     .then_with(|| left.ts_code.cmp(&right.ts_code))
             });
-            eligible_rows.truncate(top_limit as usize);
-            all_rows = eligible_rows;
+            factor_eligible_rows.truncate(top_limit as usize);
+            all_rows = factor_eligible_rows;
         }
         AdvancedPickMethod::AdvHitTopN => {
-            eligible_rows.sort_by(|left, right| {
+            factor_eligible_rows.sort_by(|left, right| {
                 right
                     .adv_hit_cnt
                     .cmp(&left.adv_hit_cnt)
@@ -1242,29 +1453,30 @@ pub fn run_advanced_stock_pick(
                     .then_with(|| compare_option_f64_desc(left.total_score, right.total_score))
                     .then_with(|| left.ts_code.cmp(&right.ts_code))
             });
-            eligible_rows.truncate(top_limit as usize);
-            all_rows = eligible_rows;
+            factor_eligible_rows.truncate(top_limit as usize);
+            all_rows = factor_eligible_rows;
         }
         AdvancedPickMethod::AdvScoreTopN => {
-            eligible_rows.sort_by(|left, right| {
+            factor_eligible_rows.sort_by(|left, right| {
                 compare_option_f64_desc(Some(left.adv_score_sum), Some(right.adv_score_sum))
                     .then_with(|| compare_option_i64_asc(left.rank, right.rank))
                     .then_with(|| compare_option_f64_desc(left.total_score, right.total_score))
                     .then_with(|| left.ts_code.cmp(&right.ts_code))
             });
-            eligible_rows.truncate(top_limit as usize);
-            all_rows = eligible_rows;
+            factor_eligible_rows.truncate(top_limit as usize);
+            all_rows = factor_eligible_rows;
         }
         AdvancedPickMethod::MixedTopN => {
-            sort_advanced_rows_with_keys(&mut eligible_rows, &mixed_sort_keys);
-            eligible_rows.truncate(top_limit as usize);
-            all_rows = eligible_rows;
+            sort_advanced_rows_with_keys(&mut factor_eligible_rows, &mixed_sort_keys);
+            factor_eligible_rows.truncate(top_limit as usize);
+            all_rows = factor_eligible_rows;
         }
         AdvancedPickMethod::CompanionPenaltyTopN => {
-            eligible_rows.sort_by(|left, right| {
+            factor_eligible_rows.sort_by(|left, right| {
                 right
                     .adv_hit_cnt
                     .cmp(&left.adv_hit_cnt)
+                    .then_with(|| left.noisy_combo_hit_cnt.cmp(&right.noisy_combo_hit_cnt))
                     .then_with(|| left.noisy_companion_cnt.cmp(&right.noisy_companion_cnt))
                     .then_with(|| {
                         compare_option_f64_desc(Some(left.adv_score_sum), Some(right.adv_score_sum))
@@ -1273,8 +1485,8 @@ pub fn run_advanced_stock_pick(
                     .then_with(|| compare_option_f64_desc(left.total_score, right.total_score))
                     .then_with(|| left.ts_code.cmp(&right.ts_code))
             });
-            eligible_rows.truncate(top_limit as usize);
-            all_rows = eligible_rows;
+            factor_eligible_rows.truncate(top_limit as usize);
+            all_rows = factor_eligible_rows;
         }
         AdvancedPickMethod::PosHitTopN => {
             all_rows.sort_by(|left, right| {
@@ -1297,15 +1509,17 @@ pub fn run_advanced_stock_pick(
             all_rows.truncate(top_limit as usize);
         }
         AdvancedPickMethod::CleanAdvTopN => {
-            eligible_rows.retain(|row| row.noisy_companion_cnt == 0);
-            eligible_rows.sort_by(|left, right| {
+            factor_eligible_rows
+                .retain(|row| row.noisy_companion_cnt == 0 && row.noisy_combo_hit_cnt == 0);
+            eligible_candidate_count = factor_eligible_rows.len() as u32;
+            factor_eligible_rows.sort_by(|left, right| {
                 compare_option_f64_desc(Some(left.adv_score_sum), Some(right.adv_score_sum))
                     .then_with(|| right.adv_hit_cnt.cmp(&left.adv_hit_cnt))
                     .then_with(|| compare_option_i64_asc(left.rank, right.rank))
                     .then_with(|| left.ts_code.cmp(&right.ts_code))
             });
-            eligible_rows.truncate(top_limit as usize);
-            all_rows = eligible_rows;
+            factor_eligible_rows.truncate(top_limit as usize);
+            all_rows = factor_eligible_rows;
         }
     }
 
@@ -1317,7 +1531,79 @@ pub fn run_advanced_stock_pick(
         resolved_method_label: advanced_method_label(method).to_string(),
         total_candidate_count,
         eligible_candidate_count,
-        resolved_advantage_rule_names: strategy_page.resolved_advantage_rule_names,
+        resolved_advantage_rule_names: strategy_pick_cache.resolved_advantage_rule_names,
+        resolved_advantage_combination_labels: strategy_pick_cache
+            .resolved_advantage_combinations
+            .iter()
+            .map(|item| item.strategy_label.clone())
+            .collect(),
         resolved_noisy_companion_rule_names: noisy_rule_names,
-    })
+        resolved_noisy_combination_labels: strategy_pick_cache
+            .resolved_noisy_combinations
+            .iter()
+            .map(|item| item.strategy_label.clone())
+            .collect(),
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_row(
+        ts_code: &str,
+        combo_net_score: f64,
+        adv_combo_hit_cnt: u32,
+        adv_combo_alpha_score: f64,
+        noisy_combo_hit_cnt: u32,
+        noisy_combo_penalty_score: f64,
+        adv_hit_cnt: u32,
+        adv_score_sum: f64,
+    ) -> AdvancedStockPickRow {
+        AdvancedStockPickRow {
+            ts_code: ts_code.to_string(),
+            name: None,
+            board: "主板".to_string(),
+            area: None,
+            industry: None,
+            concept: None,
+            rank: None,
+            total_score: None,
+            adv_hit_cnt,
+            adv_score_sum,
+            adv_combo_hit_cnt,
+            adv_combo_score_sum: 0.0,
+            adv_combo_alpha_score,
+            noisy_combo_hit_cnt,
+            noisy_combo_score_sum: 0.0,
+            noisy_combo_penalty_score,
+            combo_net_score,
+            pos_hit_cnt: 0,
+            pos_score_sum: 0.0,
+            all_hit_cnt: 0,
+            all_score_sum: 0.0,
+            noisy_companion_cnt: 0,
+            advantage_hits: String::new(),
+            advantage_combo_hits: String::new(),
+            noisy_combo_hits: String::new(),
+            companion_hits: String::new(),
+            pick_note: String::new(),
+        }
+    }
+
+    #[test]
+    fn combo_bias_prefers_combo_confirmation_over_factor_only_support() {
+        let combo_row = build_row("000001.SZ", 0.8, 1, 1.0, 0, 0.0, 1, 1.0);
+        let factor_row = build_row("000002.SZ", 0.0, 0, 0.0, 0, 0.0, 3, 6.0);
+        assert_eq!(compare_combo_bias_rows(&combo_row, &factor_row), Ordering::Less);
+        assert!(combo_bias_eligible(&combo_row, 1));
+        assert!(combo_bias_eligible(&factor_row, 1));
+    }
+
+    #[test]
+    fn combo_bias_penalizes_bad_combinations() {
+        let clean_row = build_row("000001.SZ", 0.6, 1, 0.9, 0, 0.0, 1, 1.0);
+        let noisy_row = build_row("000002.SZ", 0.2, 1, 0.9, 1, 0.7, 1, 1.0);
+        assert_eq!(compare_combo_bias_rows(&clean_row, &noisy_row), Ordering::Less);
+    }
 }

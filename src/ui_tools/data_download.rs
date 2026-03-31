@@ -14,8 +14,8 @@ use crate::{
         runner::{
             DownloadProgressCallback, ThsConceptDownloadConfig,
             download as core_run_download_with_progress,
-            download_ths_concepts as core_download_ths_concepts,
             download_selected_stocks as core_run_selected_stock_download_with_progress,
+            download_ths_concepts as core_download_ths_concepts,
         },
     },
     expr::parser::{Parser, lex_all},

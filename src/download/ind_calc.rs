@@ -1,4 +1,10 @@
-use std::{collections::HashMap, fs};
+use std::{
+    collections::HashMap,
+    fs,
+    path::Path,
+    sync::{Mutex, OnceLock},
+    time::SystemTime,
+};
 
 use crate::{
     data::scoring_data::row_into_rt,
@@ -22,11 +28,26 @@ const IND_INPUT_KEYS: [&str; 10] = [
     "TURNOVER_RATE",
 ];
 
+#[derive(Clone)]
 pub struct IndsCache {
     pub name: String,
     pub expr: Stmts,
     pub perc: usize,
 }
+
+#[derive(Clone, PartialEq, Eq)]
+struct IndicatorFileStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+#[derive(Clone)]
+struct IndicatorCacheEntry {
+    stamp: IndicatorFileStamp,
+    caches: Vec<IndsCache>,
+}
+
+static INDICATOR_CACHE: OnceLock<Mutex<HashMap<String, IndicatorCacheEntry>>> = OnceLock::new();
 
 fn round_to(value: f64, scale: usize) -> f64 {
     let factor = 10_f64.powi(scale as i32);
@@ -38,6 +59,38 @@ fn round_series(series: Vec<Option<f64>>, scale: usize) -> Vec<Option<f64>> {
         .into_iter()
         .map(|value| value.map(|number| round_to(number, scale)))
         .collect()
+}
+
+fn indicator_cache_store() -> &'static Mutex<HashMap<String, IndicatorCacheEntry>> {
+    INDICATOR_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn build_indicator_file_stamp(path: &Path) -> Result<IndicatorFileStamp, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|e| format!("读取指标文件元数据失败: path={}, err={e}", path.display()))?;
+    let modified = metadata.modified().ok();
+
+    Ok(IndicatorFileStamp {
+        modified,
+        len: metadata.len(),
+    })
+}
+
+fn compile_indicator_defs(inds: Vec<crate::data::IndData>) -> Result<Vec<IndsCache>, String> {
+    let mut out = Vec::with_capacity(128);
+    for ind in inds {
+        let tok = lex_all(&ind.expr);
+        let mut parser = Parser::new(tok);
+        let stmt = parser
+            .parse_main()
+            .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
+        out.push(IndsCache {
+            name: ind.name,
+            expr: stmt,
+            perc: ind.prec,
+        });
+    }
+    Ok(out)
 }
 
 fn load_optional_inds(source_dir: &str) -> Result<Option<Vec<crate::data::IndData>>, String> {
@@ -64,20 +117,50 @@ pub fn cache_ind_build(source_dir: &str) -> Result<Vec<IndsCache>, String> {
     let Some(inds) = load_optional_inds(source_dir)? else {
         return Ok(Vec::new());
     };
-    let mut out = Vec::with_capacity(128);
-    for ind in inds {
-        let tok = lex_all(&ind.expr);
-        let mut parser = Parser::new(tok);
-        let stmt = parser
-            .parse_main()
-            .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
-        out.push(IndsCache {
-            name: ind.name,
-            expr: stmt,
-            perc: ind.prec,
-        });
+    compile_indicator_defs(inds)
+}
+
+pub fn cache_ind_build_from_path(indicator_path: &Path) -> Result<Vec<IndsCache>, String> {
+    let stamp = build_indicator_file_stamp(indicator_path)?;
+    let cache_key = indicator_path.to_string_lossy().to_string();
+    let cache_store = indicator_cache_store();
+
+    {
+        let cache_map = cache_store
+            .lock()
+            .map_err(|_| "指标缓存锁已中毒".to_string())?;
+        if let Some(entry) = cache_map.get(&cache_key) {
+            if entry.stamp == stamp {
+                return Ok(entry.caches.clone());
+            }
+        }
     }
-    Ok(out)
+
+    let text = fs::read_to_string(indicator_path).map_err(|e| {
+        format!(
+            "读取指标文件失败: path={}, err={e}",
+            indicator_path.display()
+        )
+    })?;
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let inds = IndsData::parse_from_text(&text)?;
+    let caches = compile_indicator_defs(inds)?;
+
+    let mut cache_map = cache_store
+        .lock()
+        .map_err(|_| "指标缓存锁已中毒".to_string())?;
+    cache_map.insert(
+        cache_key,
+        IndicatorCacheEntry {
+            stamp,
+            caches: caches.clone(),
+        },
+    );
+
+    Ok(caches)
 }
 
 pub fn warmup_ind_estimate(source_dir: &str) -> Result<usize, String> {
@@ -247,7 +330,7 @@ fn merge_history_with_rows(
     Ok(history)
 }
 
-fn calc_inds_with_cache(
+pub fn calc_inds_with_cache(
     inds_cache: &[IndsCache],
     row_data: RowData,
 ) -> Result<HashMap<String, Vec<Option<f64>>>, String> {
@@ -269,6 +352,33 @@ fn calc_inds_with_cache(
     }
 
     Ok(out)
+}
+
+pub fn calc_inds_with_cache_lossy(
+    inds_cache: &[IndsCache],
+    row_data: RowData,
+) -> HashMap<String, Vec<Option<f64>>> {
+    let series_len = row_data.trade_dates.len();
+    let Ok(mut rt) = row_into_rt(row_data) else {
+        return HashMap::new();
+    };
+    let mut out = HashMap::with_capacity(inds_cache.len());
+
+    for ind in inds_cache {
+        let Ok(value) = rt.eval_program(&ind.expr) else {
+            continue;
+        };
+        let Ok(series) = Value::as_num_series(&value, series_len) else {
+            continue;
+        };
+        let rounded_series = round_series(series, ind.perc);
+
+        rt.vars
+            .insert(ind.name.clone(), Value::NumSeries(rounded_series.clone()));
+        out.insert(ind.name.clone(), rounded_series);
+    }
+
+    out
 }
 
 pub fn calc_increment_one_stock_inds(

@@ -20,6 +20,8 @@ export const STOCK_PICK_BOARD_OPTIONS = [
   "主板",
   "创业/科创",
   "北交所",
+  "ST",
+  "*ST",
 ] as const;
 export const STOCK_PICK_SCOPE_OPTIONS = [
   "LAST",

@@ -426,11 +426,22 @@
   display: grid;
   gap: 8px;
   min-width: 0;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  appearance: none;
+  font: inherit;
+  color: inherit;
 }
 
 .strategy-performance-summary-card.is-active {
   border-color: #f3b154;
   box-shadow: inset 0 0 0 1px rgba(243, 177, 84, 0.35);
+}
+
+.strategy-performance-summary-card:disabled {
+  cursor: wait;
+  opacity: 0.72;
 }
 
 .strategy-performance-summary-head {

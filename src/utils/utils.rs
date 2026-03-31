@@ -319,7 +319,31 @@ pub fn impl_expr_warmup(
     Ok(max_need)
 }
 
-pub fn board_category(ts_code: &str) -> &'static str {
+fn st_board_category(stock_name: Option<&str>) -> Option<&'static str> {
+    let normalized = stock_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .to_ascii_uppercase()
+                .replace(' ', "")
+                .replace('＊', "*")
+        })?;
+
+    if normalized.starts_with("*ST") {
+        Some("*ST")
+    } else if normalized.starts_with("ST") {
+        Some("ST")
+    } else {
+        None
+    }
+}
+
+pub fn board_category(ts_code: &str, stock_name: Option<&str>) -> &'static str {
+    if let Some(st_board) = st_board_category(stock_name) {
+        return st_board;
+    }
+
     let ts = ts_code.trim().to_ascii_uppercase();
     if ts.ends_with(".BJ") {
         return "北交所";

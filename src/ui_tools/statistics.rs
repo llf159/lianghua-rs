@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use duckdb::{params, Connection};
+use duckdb::{Connection, params};
 use serde::Serialize;
 
 use crate::{
-    data::{result_db_path, ScopeWay, ScoreRule},
+    data::{ScopeWay, ScoreRule, result_db_path},
     ui_tools::{build_concepts_map, build_name_map},
 };
 

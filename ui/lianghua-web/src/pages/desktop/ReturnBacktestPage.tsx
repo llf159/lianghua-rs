@@ -31,11 +31,11 @@ import {
   type SortDefinition,
   useTableSort,
 } from "../../shared/tableSort";
+import { STOCK_PICK_BOARD_OPTIONS } from "./stockPickShared";
 import { ReturnBacktestStrengthPanel } from "../popup/ReturnBacktestStrengthWindow";
 import "./css/ReturnBacktestPage.css";
 
 const RETURN_BACKTEST_STATE_KEY = "lh_return_backtest_page_v1";
-const BOARD_OPTIONS = ["全部", "主板", "创业/科创", "北交所"] as const;
 const DEFAULT_TOP_LIMIT = "100";
 const DEFAULT_HEATMAP_HOLDING_DAYS = 5;
 
@@ -45,7 +45,7 @@ type PersistedReturnBacktestState = {
   rankDateInput: string;
   refDateInput: string;
   topLimitInput: string;
-  boardFilter: (typeof BOARD_OPTIONS)[number];
+  boardFilter: (typeof STOCK_PICK_BOARD_OPTIONS)[number];
   pageData: ReturnBacktestPageData | null;
   submittedQuery: SubmittedBacktestQuery | null;
 };
@@ -68,7 +68,7 @@ type StrengthWindowConfig = {
   sourcePath: string;
   holdingDays: number;
   topLimit: number;
-  board: (typeof BOARD_OPTIONS)[number];
+  board: (typeof STOCK_PICK_BOARD_OPTIONS)[number];
   instanceKey: number;
 };
 
@@ -499,8 +499,11 @@ export default function ReturnBacktestPage() {
   const [topLimitInput, setTopLimitInput] = useState(
     persistedState?.topLimitInput ?? DEFAULT_TOP_LIMIT,
   );
-  const [boardFilter, setBoardFilter] = useState<(typeof BOARD_OPTIONS)[number]>(
-    persistedState?.boardFilter && BOARD_OPTIONS.includes(persistedState.boardFilter)
+  const [boardFilter, setBoardFilter] = useState<
+    (typeof STOCK_PICK_BOARD_OPTIONS)[number]
+  >(
+    persistedState?.boardFilter &&
+      STOCK_PICK_BOARD_OPTIONS.includes(persistedState.boardFilter)
       ? persistedState.boardFilter
       : "全部",
   );
@@ -560,7 +563,7 @@ export default function ReturnBacktestPage() {
     nextRankDate: string,
     nextRefDate: string,
     nextTopLimitInput: string,
-    nextBoardFilter: (typeof BOARD_OPTIONS)[number],
+    nextBoardFilter: (typeof STOCK_PICK_BOARD_OPTIONS)[number],
   ): SubmittedBacktestQuery | null => {
     if (!nextSourcePath || !nextRankDate || !nextRefDate) {
       return null;
@@ -839,10 +842,12 @@ export default function ReturnBacktestPage() {
             <select
               value={boardFilter}
               onChange={(event) =>
-                setBoardFilter(event.target.value as (typeof BOARD_OPTIONS)[number])
+                setBoardFilter(
+                  event.target.value as (typeof STOCK_PICK_BOARD_OPTIONS)[number],
+                )
               }
             >
-              {BOARD_OPTIONS.map((option) => (
+              {STOCK_PICK_BOARD_OPTIONS.map((option) => (
                 <option key={option} value={option}>
                   {option}
                 </option>

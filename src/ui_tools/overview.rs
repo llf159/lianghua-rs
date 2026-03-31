@@ -270,7 +270,7 @@ pub fn get_rank_overview(
     let mut out = Vec::new();
     while let Some(row) = rows.next().map_err(|e| format!("读行失败: {e}"))? {
         let ts_code: String = row.get(0).map_err(|e| format!("读取 ts_code 失败: {e}"))?;
-        let board_value = board_category(&ts_code).to_string();
+        let board_value = board_category(&ts_code, name_map.get(&ts_code).map(|value| value.as_str())).to_string();
 
         if let Some(ref board_value_filter) = board_filter {
             if &board_value != board_value_filter {

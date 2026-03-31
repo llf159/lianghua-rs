@@ -38,12 +38,21 @@ export type AdvancedStockPickRow = {
   total_score?: number | null
   adv_hit_cnt: number
   adv_score_sum: number
+  adv_combo_hit_cnt: number
+  adv_combo_score_sum: number
+  adv_combo_alpha_score: number
+  noisy_combo_hit_cnt: number
+  noisy_combo_score_sum: number
+  noisy_combo_penalty_score: number
+  combo_net_score: number
   pos_hit_cnt: number
   pos_score_sum: number
   all_hit_cnt: number
   all_score_sum: number
   noisy_companion_cnt: number
   advantage_hits: string
+  advantage_combo_hits: string
+  noisy_combo_hits: string
   companion_hits: string
   pick_note: string
 }
@@ -57,7 +66,9 @@ export type AdvancedStockPickResultData = {
   eligible_candidate_count: number
   selected_count: number
   resolved_advantage_rule_names: string[]
+  resolved_advantage_combination_labels: string[]
   resolved_noisy_companion_rule_names: string[]
+  resolved_noisy_combination_labels: string[]
 }
 
 export type ExpressionStockPickQuery = {

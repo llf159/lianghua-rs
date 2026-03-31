@@ -4,6 +4,7 @@ use serde::Serialize;
 use crate::{
     data::{load_trade_date_list, result_db_path, source_db_path},
     ui_tools::{build_concepts_map, build_name_map, resolve_trade_date},
+    utils::utils::board_category,
 };
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
@@ -149,48 +150,22 @@ fn normalize_board_filter(board: Option<String>) -> Option<String> {
     })
 }
 
-fn board_case_sql(ts_code_expr: &str) -> String {
-    format!(
-        "CASE
-            WHEN UPPER({ts_code_expr}) LIKE '%.BJ' THEN '北交所'
-            WHEN (UPPER({ts_code_expr}) LIKE '30%.SZ' OR UPPER({ts_code_expr}) LIKE '688%.SH') THEN '创业/科创'
-            WHEN (UPPER({ts_code_expr}) LIKE '%.SH' OR UPPER({ts_code_expr}) LIKE '%.SZ') THEN '主板'
-            ELSE '其他'
-        END"
-    )
-}
-
 fn query_backtest_rows(
     source_conn: &Connection,
     rank_date: &str,
     ref_date: &str,
     board_filter: Option<&str>,
+    name_map: &std::collections::HashMap<String, String>,
 ) -> Result<Vec<QueryBacktestRow>, String> {
-    let board_case = board_case_sql("s.ts_code");
-    let board_condition = if let Some(board_filter) = board_filter {
-        format!("AND {board_case} = '{}'", board_filter.replace('\'', "''"))
-    } else {
-        String::new()
-    };
     let sql = format!(
         r#"
         WITH rank_pool AS (
             SELECT
                 s.ts_code,
                 s.rank,
-                s.total_score,
-                {board_case} AS board
+                s.total_score
             FROM result_db.score_summary AS s
             WHERE s.trade_date = ?
-            {board_condition}
-        ),
-        ranked_pool AS (
-            SELECT
-                p.*,
-                ROW_NUMBER() OVER (
-                    ORDER BY COALESCE(p.rank, 999999) ASC, p.total_score DESC, p.ts_code ASC
-                ) AS top_row_num
-            FROM rank_pool AS p
         ),
         next_open AS (
             SELECT ts_code, trade_date AS entry_trade_date, entry_open
@@ -235,8 +210,6 @@ fn query_backtest_rows(
         )
         SELECT
             p.ts_code,
-            p.top_row_num,
-            p.board,
             p.rank,
             b.best_rank,
             p.total_score,
@@ -245,7 +218,7 @@ fn query_backtest_rows(
             c.exit_trade_date,
             c.exit_close,
             (c.exit_close / n.entry_open - 1.0) * 100.0 AS return_pct
-        FROM ranked_pool AS p
+        FROM rank_pool AS p
         INNER JOIN next_open AS n
             ON n.ts_code = p.ts_code
         INNER JOIN ref_close AS c
@@ -254,7 +227,7 @@ fn query_backtest_rows(
             ON b.ts_code = p.ts_code
         WHERE n.entry_open > 0
           AND n.entry_trade_date <= ?
-        ORDER BY p.top_row_num ASC
+        ORDER BY p.rank ASC NULLS LAST, p.total_score DESC NULLS LAST, p.ts_code ASC
         "#
     );
     let mut stmt = source_conn
@@ -279,36 +252,56 @@ fn query_backtest_rows(
     {
         out.push(QueryBacktestRow {
             ts_code: row.get(0).map_err(|e| format!("读取 ts_code 失败: {e}"))?,
-            top_row_num: row
-                .get(1)
-                .map_err(|e| format!("读取 top_row_num 失败: {e}"))?,
-            board: row.get(2).map_err(|e| format!("读取 board 失败: {e}"))?,
-            rank: row.get(3).map_err(|e| format!("读取 rank 失败: {e}"))?,
+            top_row_num: 0,
+            board: String::new(),
+            rank: row.get(1).map_err(|e| format!("读取 rank 失败: {e}"))?,
             best_rank: row
-                .get(4)
+                .get(2)
                 .map_err(|e| format!("读取 best_rank 失败: {e}"))?,
             total_score: row
-                .get(5)
+                .get(3)
                 .map_err(|e| format!("读取 total_score 失败: {e}"))?,
             entry_trade_date: row
-                .get(6)
+                .get(4)
                 .map_err(|e| format!("读取 entry_trade_date 失败: {e}"))?,
             entry_open: row
-                .get::<_, Option<f64>>(7)
+                .get::<_, Option<f64>>(5)
                 .map_err(|e| format!("读取 entry_open 失败: {e}"))?
                 .ok_or_else(|| "批量回测返回缺失 entry_open".to_string())?,
             exit_trade_date: row
-                .get(8)
+                .get(6)
                 .map_err(|e| format!("读取 exit_trade_date 失败: {e}"))?,
             exit_close: row
-                .get::<_, Option<f64>>(9)
+                .get::<_, Option<f64>>(7)
                 .map_err(|e| format!("读取 exit_close 失败: {e}"))?
                 .ok_or_else(|| "批量回测返回缺失 exit_close".to_string())?,
             return_pct: row
-                .get::<_, Option<f64>>(10)
+                .get::<_, Option<f64>>(8)
                 .map_err(|e| format!("读取 return_pct 失败: {e}"))?
                 .ok_or_else(|| "批量回测返回缺失 return_pct".to_string())?,
         });
+    }
+
+    out.retain(|row| {
+        let board_value = board_category(
+            &row.ts_code,
+            name_map.get(&row.ts_code).map(|value| value.as_str()),
+        );
+        board_filter.map(|filter| filter == board_value).unwrap_or(true)
+    });
+    out.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| right.total_score.partial_cmp(&left.total_score).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| left.ts_code.cmp(&right.ts_code))
+    });
+    for (index, row) in out.iter_mut().enumerate() {
+        row.top_row_num = index as i64 + 1;
+        row.board = board_category(
+            &row.ts_code,
+            name_map.get(&row.ts_code).map(|value| value.as_str()),
+        )
+        .to_string();
     }
 
     Ok(out)
@@ -509,17 +502,18 @@ pub fn get_return_backtest_page(
     } else {
         format!("{board_label}样本")
     };
+    let name_map = build_name_map(&source_path).unwrap_or_default();
 
     let query_rows = query_backtest_rows(
         &source_conn,
         &resolved_rank_date,
         &resolved_ref_date,
         board_filter.as_deref(),
+        &name_map,
     )?;
     let (summary, benchmark_returns, top_return_values, top_excess_values) =
         build_backtest_summary(&query_rows, top_limit);
     let benchmark_return_pct = summary.benchmark_return_pct;
-    let name_map = build_name_map(&source_path).unwrap_or_default();
     let concept_map = build_concepts_map(&source_path).unwrap_or_default();
 
     let mut rank_rows = query_rows
@@ -612,6 +606,7 @@ pub fn get_return_backtest_strength_overview(
     let board_label = board_filter
         .clone()
         .unwrap_or_else(|| BOARD_ALL.to_string());
+    let name_map = build_name_map(&source_path).unwrap_or_default();
 
     let mut items = Vec::new();
     for rank_date in rank_dates {
@@ -621,8 +616,13 @@ pub fn get_return_backtest_strength_overview(
             continue;
         };
 
-        let query_rows =
-            query_backtest_rows(&source_conn, &rank_date, &ref_date, board_filter.as_deref())?;
+        let query_rows = query_backtest_rows(
+            &source_conn,
+            &rank_date,
+            &ref_date,
+            board_filter.as_deref(),
+            &name_map,
+        )?;
         let (summary, _, _, _) = build_backtest_summary(&query_rows, top_limit);
         items.push(ReturnBacktestStrengthHeatmapItem {
             rank_date,

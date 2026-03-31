@@ -2,10 +2,12 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import {
+  getStrategyPerformanceHorizonView,
   getStrategyPerformancePage,
   getStrategyPerformanceRuleDetail,
   type StrategyPerformanceCompanionRow,
   type StrategyPerformanceFutureSummary,
+  type StrategyPerformanceOverallScoreAnalysis,
   type StrategyPerformancePageData,
   type StrategyPerformanceRuleDetail,
   type StrategyPerformancePortfolioRow,
@@ -25,7 +27,7 @@ import {
 } from "../../shared/tableSort";
 import "./css/StrategyPerformanceBacktestPage.css";
 
-const STRATEGY_PERFORMANCE_STATE_KEY = "lh_strategy_performance_page_v8";
+const STRATEGY_PERFORMANCE_STATE_KEY = "lh_strategy_performance_page_v9";
 const HORIZON_OPTIONS = [2, 3, 5] as const;
 const QUANTILE_OPTIONS = [0.8, 0.9, 0.95] as const;
 const DEFAULT_AUTO_MIN_SAMPLES = {
@@ -77,8 +79,115 @@ type PersistedState = {
   maxCombinationSize: string;
   mixedSortKeys: string[];
   selectedRuleName: string;
-  pageData: StrategyPerformancePageData | null;
+  pageData: PersistedStrategyPerformancePageData | null;
   submittedQuery: SubmittedQuery | null;
+};
+
+type StrategyPerformanceRuntimeState = Omit<PersistedState, "pageData"> & {
+  pageData: StrategyPerformancePageData | null;
+};
+
+let strategyPerformanceRuntimeState: StrategyPerformanceRuntimeState | null = null;
+
+type PersistedStrategyPerformanceMetric = Pick<
+  StrategyPerformanceRuleRow["metrics"][number],
+  | "horizon"
+  | "hit_n"
+  | "avg_future_return_pct"
+  | "strong_hit_rate"
+  | "strong_lift"
+  | "rank_ic_mean"
+  | "icir"
+  | "sharpe_ratio"
+  | "composite_score"
+  | "hit_vs_non_hit_delta_pct"
+  | "low_confidence"
+>;
+
+type PersistedStrategyPerformanceRuleRow = Pick<
+  StrategyPerformanceRuleRow,
+  | "rule_name"
+  | "explain"
+  | "tag"
+  | "scope_way"
+  | "scope_windows"
+  | "points"
+  | "has_dist_points"
+  | "signal_direction"
+  | "direction_label"
+  | "auto_candidate"
+  | "manually_selected"
+  | "in_advantage_set"
+  | "in_companion_set"
+  | "negative_effective"
+  | "negative_effectiveness_label"
+  | "negative_review_notes"
+  | "overall_composite_score"
+> & {
+  metrics: PersistedStrategyPerformanceMetric[];
+};
+
+type PersistedStrategyPerformanceWindow = Pick<
+  StrategyPerformancePortfolioRow["windows"][number],
+  | "window_key"
+  | "sample_days"
+  | "sample_count"
+  | "avg_portfolio_return_pct"
+  | "avg_market_return_pct"
+  | "avg_excess_return_pct"
+  | "excess_win_rate"
+  | "avg_selected_count"
+  | "rank_ic_mean"
+  | "icir"
+  | "layer_return_spread_pct"
+  | "composite_score"
+  | "sharpe_ratio"
+>;
+
+type PersistedStrategyPerformancePortfolioRow = Pick<
+  StrategyPerformancePortfolioRow,
+  "strategy_key" | "strategy_label" | "sort_description" | "factor_count"
+> & {
+  windows: PersistedStrategyPerformanceWindow[];
+};
+
+type PersistedStrategyPerformanceScoreBucketRow = Pick<
+  NonNullable<StrategyPerformanceOverallScoreAnalysis>["score_rows"][number],
+  | "bucket_label"
+  | "sample_count"
+  | "avg_future_return_pct"
+  | "strong_hit_rate"
+  | "win_rate"
+>;
+
+type PersistedStrategyPerformanceOverallScoreAnalysis = Pick<
+  NonNullable<StrategyPerformanceOverallScoreAnalysis>,
+  | "horizon"
+  | "sample_count"
+  | "avg_future_return_pct"
+  | "strong_hit_rate"
+  | "win_rate"
+  | "spearman_corr"
+  | "rank_ic_mean"
+  | "icir"
+  | "layer_return_spread_pct"
+  | "bucket_mode"
+> & {
+  score_rows: PersistedStrategyPerformanceScoreBucketRow[];
+};
+
+type PersistedStrategyPerformancePageData = {
+  selected_horizon: number;
+  future_summaries: StrategyPerformancePageData["future_summaries"];
+  auto_candidate_rule_names: string[];
+  ignored_manual_rule_names: string[];
+  resolved_advantage_rule_names: string[];
+  effective_negative_rule_names: string[];
+  ineffective_negative_rule_names: string[];
+  rule_rows: PersistedStrategyPerformanceRuleRow[];
+  companion_rows: StrategyPerformancePageData["companion_rows"];
+  portfolio_rows: PersistedStrategyPerformancePortfolioRow[];
+  overall_score_analysis?: PersistedStrategyPerformanceOverallScoreAnalysis | null;
 };
 
 function arrayFromUnknown(value: unknown) {
@@ -112,6 +221,172 @@ function normalizeStringArray(values: string[]) {
     out.push(trimmed);
   });
   return out;
+}
+
+function compactPageDataForStorage(
+  pageData: StrategyPerformancePageData | null,
+): PersistedStrategyPerformancePageData | null {
+  if (!pageData) {
+    return null;
+  }
+
+  return {
+    selected_horizon: pageData.selected_horizon,
+    future_summaries: pageData.future_summaries,
+    auto_candidate_rule_names: pageData.auto_candidate_rule_names,
+    ignored_manual_rule_names: pageData.ignored_manual_rule_names,
+    resolved_advantage_rule_names: pageData.resolved_advantage_rule_names,
+    effective_negative_rule_names: pageData.effective_negative_rule_names,
+    ineffective_negative_rule_names: pageData.ineffective_negative_rule_names,
+    rule_rows: pageData.rule_rows.map((row) => ({
+      rule_name: row.rule_name,
+      explain: row.explain,
+      tag: row.tag,
+      scope_way: row.scope_way,
+      scope_windows: row.scope_windows,
+      points: row.points,
+      has_dist_points: row.has_dist_points,
+      signal_direction: row.signal_direction,
+      direction_label: row.direction_label,
+      auto_candidate: row.auto_candidate,
+      manually_selected: row.manually_selected,
+      in_advantage_set: row.in_advantage_set,
+      in_companion_set: row.in_companion_set,
+      negative_effective: row.negative_effective,
+      negative_effectiveness_label: row.negative_effectiveness_label,
+      negative_review_notes: row.negative_review_notes,
+      overall_composite_score: row.overall_composite_score,
+      metrics: row.metrics.map((metric) => ({
+        horizon: metric.horizon,
+        hit_n: metric.hit_n,
+        avg_future_return_pct: metric.avg_future_return_pct,
+        strong_hit_rate: metric.strong_hit_rate,
+        strong_lift: metric.strong_lift,
+        rank_ic_mean: metric.rank_ic_mean,
+        icir: metric.icir,
+        sharpe_ratio: metric.sharpe_ratio,
+        composite_score: metric.composite_score,
+        hit_vs_non_hit_delta_pct: metric.hit_vs_non_hit_delta_pct,
+        low_confidence: metric.low_confidence,
+      })),
+    })),
+    companion_rows: pageData.companion_rows,
+    portfolio_rows: pageData.portfolio_rows
+      .filter((row) => (row.factor_count ?? 0) >= 2)
+      .map((row) => ({
+        strategy_key: row.strategy_key,
+        strategy_label: row.strategy_label,
+        sort_description: row.sort_description,
+        factor_count: row.factor_count,
+        windows: row.windows.map((window) => ({
+          window_key: window.window_key,
+          sample_days: window.sample_days,
+          sample_count: window.sample_count,
+          avg_portfolio_return_pct: window.avg_portfolio_return_pct,
+          avg_market_return_pct: window.avg_market_return_pct,
+          avg_excess_return_pct: window.avg_excess_return_pct,
+          excess_win_rate: window.excess_win_rate,
+          avg_selected_count: window.avg_selected_count,
+          rank_ic_mean: window.rank_ic_mean,
+          icir: window.icir,
+          layer_return_spread_pct: window.layer_return_spread_pct,
+          composite_score: window.composite_score,
+          sharpe_ratio: window.sharpe_ratio,
+        })),
+      })),
+    overall_score_analysis: pageData.overall_score_analysis
+      ? {
+          horizon: pageData.overall_score_analysis.horizon,
+          sample_count: pageData.overall_score_analysis.sample_count,
+          avg_future_return_pct:
+            pageData.overall_score_analysis.avg_future_return_pct,
+          strong_hit_rate: pageData.overall_score_analysis.strong_hit_rate,
+          win_rate: pageData.overall_score_analysis.win_rate,
+          spearman_corr: pageData.overall_score_analysis.spearman_corr,
+          rank_ic_mean: pageData.overall_score_analysis.rank_ic_mean,
+          icir: pageData.overall_score_analysis.icir,
+          layer_return_spread_pct:
+            pageData.overall_score_analysis.layer_return_spread_pct,
+          bucket_mode: pageData.overall_score_analysis.bucket_mode,
+          score_rows: pageData.overall_score_analysis.score_rows.map((row) => ({
+            bucket_label: row.bucket_label,
+            sample_count: row.sample_count,
+            avg_future_return_pct: row.avg_future_return_pct,
+            strong_hit_rate: row.strong_hit_rate,
+            win_rate: row.win_rate,
+          })),
+        }
+      : null,
+  };
+}
+
+function restorePageDataFromStorage(
+  raw: PersistedStrategyPerformancePageData | StrategyPerformancePageData | null | undefined,
+): StrategyPerformancePageData | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+
+  const pageData = raw as Partial<PersistedStrategyPerformancePageData>;
+  return {
+    horizons: [...HORIZON_OPTIONS],
+    selected_horizon:
+      typeof pageData.selected_horizon === "number"
+        ? pageData.selected_horizon
+        : 2,
+    strong_quantile: 0.9,
+    strategy_options: [],
+    future_summaries: Array.isArray(pageData.future_summaries)
+      ? pageData.future_summaries
+      : [],
+    auto_filter: {
+      min_samples_2: DEFAULT_AUTO_MIN_SAMPLES[2],
+      min_samples_3: DEFAULT_AUTO_MIN_SAMPLES[3],
+      min_samples_5: DEFAULT_AUTO_MIN_SAMPLES[5],
+      min_samples_10: DEFAULT_AUTO_MIN_SAMPLES[10],
+      require_win_rate_above_market: false,
+      min_pass_horizons: 2,
+    },
+    resolved_advantage_mode: "",
+    auto_candidate_rule_names: Array.isArray(pageData.auto_candidate_rule_names)
+      ? pageData.auto_candidate_rule_names
+      : [],
+    manual_rule_names: [],
+    ignored_manual_rule_names: Array.isArray(pageData.ignored_manual_rule_names)
+      ? pageData.ignored_manual_rule_names
+      : [],
+    resolved_advantage_rule_names: Array.isArray(pageData.resolved_advantage_rule_names)
+      ? pageData.resolved_advantage_rule_names
+      : [],
+    resolved_companion_rule_names: [],
+    effective_negative_rule_names: Array.isArray(pageData.effective_negative_rule_names)
+      ? pageData.effective_negative_rule_names
+      : [],
+    ineffective_negative_rule_names: Array.isArray(pageData.ineffective_negative_rule_names)
+      ? pageData.ineffective_negative_rule_names
+      : [],
+    min_adv_hits: 1,
+    top_limit: 100,
+    max_combination_size: DEFAULT_MAX_COMBINATION_SIZE,
+    mixed_sort_keys: [],
+    noisy_companion_rule_names: [],
+    rule_rows: Array.isArray(pageData.rule_rows)
+      ? (pageData.rule_rows as StrategyPerformanceRuleRow[])
+      : [],
+    companion_rows: Array.isArray(pageData.companion_rows)
+      ? pageData.companion_rows
+      : [],
+    portfolio_rows: Array.isArray(pageData.portfolio_rows)
+      ? (pageData.portfolio_rows as StrategyPerformancePortfolioRow[])
+      : [],
+    overall_score_analysis:
+      pageData.overall_score_analysis && typeof pageData.overall_score_analysis === "object"
+        ? (pageData.overall_score_analysis as StrategyPerformanceOverallScoreAnalysis)
+        : null,
+    selected_rule_name: null,
+    rule_detail: null,
+    methods: [],
+  };
 }
 
 function hasLegacyAutoMinSampleStrings(
@@ -184,6 +459,30 @@ function sameSubmittedQuery(
   );
 }
 
+function sameSubmittedQueryExceptHorizon(
+  left: SubmittedQuery | null,
+  right: SubmittedQuery | null,
+) {
+  if (!left || !right) {
+    return false;
+  }
+  return (
+    left.sourcePath === right.sourcePath &&
+    left.strongQuantile === right.strongQuantile &&
+    sameStringArray(left.manualRuleNames, right.manualRuleNames) &&
+    left.autoMinSamples2 === right.autoMinSamples2 &&
+    left.autoMinSamples3 === right.autoMinSamples3 &&
+    left.autoMinSamples5 === right.autoMinSamples5 &&
+    left.autoMinSamples10 === right.autoMinSamples10 &&
+    left.requireWinRateAboveMarket === right.requireWinRateAboveMarket &&
+    left.minPassHorizons === right.minPassHorizons &&
+    left.minAdvHits === right.minAdvHits &&
+    left.topLimit === right.topLimit &&
+    left.maxCombinationSize === right.maxCombinationSize &&
+    sameStringArray(left.mixedSortKeys, right.mixedSortKeys)
+  );
+}
+
 function formatNumber(value?: number | null, digits = 2) {
   if (value === null || value === undefined || !Number.isFinite(value)) {
     return "--";
@@ -241,10 +540,10 @@ function compareDescNumber(left?: number | null, right?: number | null) {
 function compareRuleRows(
   left: StrategyPerformanceRuleRow,
   right: StrategyPerformanceRuleRow,
-  selectedHorizon: number,
+  horizon: number,
 ) {
-  const leftMetric = metricForHorizon(left, selectedHorizon);
-  const rightMetric = metricForHorizon(right, selectedHorizon);
+  const leftMetric = metricForHorizon(left, horizon);
+  const rightMetric = metricForHorizon(right, horizon);
 
   if (
     left.signal_direction === "negative" &&
@@ -281,7 +580,6 @@ function compareRuleRows(
   return (
     Number(right.in_advantage_set) - Number(left.in_advantage_set) ||
     Number(right.auto_candidate) - Number(left.auto_candidate) ||
-    compareDescNumber(left.overall_composite_score, right.overall_composite_score) ||
     compareDescNumber(leftMetric?.composite_score, rightMetric?.composite_score) ||
     compareDescNumber(leftMetric?.rank_ic_mean, rightMetric?.rank_ic_mean) ||
     compareDescNumber(leftMetric?.icir, rightMetric?.icir) ||
@@ -290,16 +588,8 @@ function compareRuleRows(
       rightMetric?.avg_future_return_pct,
     ) ||
     (rightMetric?.hit_n ?? 0) - (leftMetric?.hit_n ?? 0) ||
+    compareDescNumber(left.overall_composite_score, right.overall_composite_score) ||
     left.rule_name.localeCompare(right.rule_name)
-  );
-}
-
-function sortRuleRows(
-  rows: StrategyPerformanceRuleRow[],
-  selectedHorizon: number,
-) {
-  return [...rows].sort((left, right) =>
-    compareRuleRows(left, right, selectedHorizon),
   );
 }
 
@@ -391,12 +681,6 @@ function MetricCell({
         </strong>
       </div>
       <div>
-        <span>分层差</span>
-        <strong className={valueClassName(metric.layer_return_spread_pct)}>
-          {formatPercent(metric.layer_return_spread_pct)}
-        </strong>
-      </div>
-      <div>
         <span>强势命中</span>
         <strong>{formatRate(metric.strong_hit_rate)}</strong>
       </div>
@@ -422,9 +706,15 @@ function MetricCell({
 function SummarySection({
   summaries,
   selectedHorizon,
+  pendingHorizon,
+  loading,
+  onSelectHorizon,
 }: {
   summaries: StrategyPerformanceFutureSummary[];
   selectedHorizon: number;
+  pendingHorizon: number;
+  loading: boolean;
+  onSelectHorizon: (horizon: number) => void;
 }) {
   return (
     <section className="strategy-performance-card">
@@ -435,18 +725,23 @@ function SummarySection({
       </div>
       <div className="strategy-performance-summary-grid">
         {summaries.map((summary) => (
-          <article
+          <button
             className={
               summary.horizon === selectedHorizon
                 ? "strategy-performance-summary-card is-active"
                 : "strategy-performance-summary-card"
             }
             key={summary.horizon}
+            onClick={() => onSelectHorizon(summary.horizon)}
+            type="button"
+            disabled={loading}
           >
             <div className="strategy-performance-summary-head">
               <strong>{summary.horizon} 日</strong>
               {summary.horizon === selectedHorizon ? (
                 <StatusBadge tone="good">当前视角</StatusBadge>
+              ) : loading && summary.horizon === pendingHorizon ? (
+                <StatusBadge tone="warn">切换中</StatusBadge>
               ) : null}
             </div>
             <div className="strategy-performance-summary-rows">
@@ -486,9 +781,118 @@ function SummarySection({
                 </strong>
               </div>
             </div>
-          </article>
+          </button>
         ))}
       </div>
+    </section>
+  );
+}
+
+function OverallScoreAnalysisSection({
+  detail,
+  selectedHorizon,
+  pendingHorizon,
+  loading,
+}: {
+  detail: StrategyPerformanceOverallScoreAnalysis | null | undefined;
+  selectedHorizon: number;
+  pendingHorizon: number;
+  loading: boolean;
+}) {
+  return (
+    <section className="strategy-performance-card">
+      <div className="strategy-performance-section-head">
+        <div>
+          <h3>2. 策略整体分层分析</h3>
+          <p>按总分 `total_score` 分层，观察整体策略分高分低时的未来收益差异。</p>
+          {loading && pendingHorizon !== selectedHorizon ? (
+            <p>
+              当前展示 {selectedHorizon} 日已加载结果，{pendingHorizon} 日切换中。
+            </p>
+          ) : null}
+        </div>
+      </div>
+      {!detail ? (
+        <div className="strategy-performance-empty">当前没有可展示的整体分层数据。</div>
+      ) : (
+        <>
+          <div className="strategy-performance-detail-summary">
+            <div>
+              <span>持有周期</span>
+              <strong>{formatNumber(detail.horizon, 0)} 日</strong>
+            </div>
+            <div>
+              <span>样本数</span>
+              <strong>{formatNumber(detail.sample_count, 0)}</strong>
+            </div>
+            <div>
+              <span>均收益</span>
+              <strong className={valueClassName(detail.avg_future_return_pct)}>
+                {formatPercent(detail.avg_future_return_pct)}
+              </strong>
+            </div>
+            <div>
+              <span>强势命中率</span>
+              <strong>{formatRate(detail.strong_hit_rate)}</strong>
+            </div>
+            <div>
+              <span>胜率</span>
+              <strong>{formatRate(detail.win_rate)}</strong>
+            </div>
+            <div>
+              <span>全样本相关</span>
+              <strong>{formatNumber(detail.spearman_corr, 3)}</strong>
+            </div>
+            <div>
+              <span>IC</span>
+              <strong className={valueClassName(detail.rank_ic_mean)}>
+                {formatNumber(detail.rank_ic_mean, 3)}
+              </strong>
+            </div>
+            <div>
+              <span>ICIR</span>
+              <strong className={valueClassName(detail.icir)}>
+                {formatNumber(detail.icir, 2)}
+              </strong>
+            </div>
+            <div>
+              <span>分层差</span>
+              <strong className={valueClassName(detail.layer_return_spread_pct)}>
+                {formatPercent(detail.layer_return_spread_pct)}
+              </strong>
+            </div>
+          </div>
+
+          <div className="strategy-performance-table-wrap">
+            <table className="strategy-performance-table">
+              <thead>
+                <tr>
+                  <th>
+                    {detail.bucket_mode === "score_value" ? "总分" : "总分桶"}
+                  </th>
+                  <th>样本数</th>
+                  <th>均收益</th>
+                  <th>强势命中率</th>
+                  <th>胜率</th>
+                </tr>
+              </thead>
+              <tbody>
+                {detail.score_rows.map((row) => (
+                  <tr key={row.bucket_label}>
+                    <td>{row.bucket_label}</td>
+                    <td>{formatNumber(row.sample_count, 0)}</td>
+                    <td className={valueClassName(row.avg_future_return_pct)}>
+                      {formatPercent(row.avg_future_return_pct)}
+                    </td>
+                    <td>{formatRate(row.strong_hit_rate)}</td>
+                    <td>{formatRate(row.win_rate)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
     </section>
   );
 }
@@ -908,6 +1312,10 @@ function PortfolioTable({ rows }: { rows: StrategyPerformancePortfolioRow[] }) {
             const rightWindow = findPortfolioWindow(right, "full");
             return (
               compareDescNumber(
+                leftWindow?.composite_score,
+                rightWindow?.composite_score,
+              ) ||
+              compareDescNumber(
                 leftWindow?.avg_excess_return_pct,
                 rightWindow?.avg_excess_return_pct,
               ) ||
@@ -926,6 +1334,10 @@ function PortfolioTable({ rows }: { rows: StrategyPerformancePortfolioRow[] }) {
             const rightWindow = findPortfolioWindow(right, "recent_40");
             return (
               compareDescNumber(
+                leftWindow?.composite_score,
+                rightWindow?.composite_score,
+              ) ||
+              compareDescNumber(
                 leftWindow?.avg_excess_return_pct,
                 rightWindow?.avg_excess_return_pct,
               ) ||
@@ -943,6 +1355,10 @@ function PortfolioTable({ rows }: { rows: StrategyPerformancePortfolioRow[] }) {
             const leftWindow = findPortfolioWindow(left, "recent_20");
             const rightWindow = findPortfolioWindow(right, "recent_20");
             return (
+              compareDescNumber(
+                leftWindow?.composite_score,
+                rightWindow?.composite_score,
+              ) ||
               compareDescNumber(
                 leftWindow?.avg_excess_return_pct,
                 rightWindow?.avg_excess_return_pct,
@@ -971,19 +1387,31 @@ function PortfolioTable({ rows }: { rows: StrategyPerformancePortfolioRow[] }) {
     key: "full",
     direction: "desc",
   });
+  const comboRankMap = useMemo(() => {
+    let comboRank = 0;
+    const rankMap = new Map<string, number>();
+    sortedRows.forEach((row) => {
+      if ((row.factor_count ?? 0) >= 2) {
+        comboRank += 1;
+        rankMap.set(row.strategy_key, comboRank);
+      }
+    });
+    return rankMap;
+  }, [sortedRows]);
 
   return (
     <section className="strategy-performance-card">
       <div className="strategy-performance-section-head">
         <div>
-          <h3>6. 单因子 / 多因子组合回测</h3>
-          <p>TopN 组合结果。</p>
+          <h3>7. 多因子组合回测</h3>
+          <p>只展示真正的多因子同时触发组合；组合得分为触发因子 rule_score 求和。组合总样本数低于 50 不展示，窗口内样本不足 50 时 IC/ICIR/分层差留空。</p>
         </div>
       </div>
       <div className="strategy-performance-table-wrap">
         <table className="strategy-performance-table">
           <thead>
             <tr>
+              <th>排名</th>
               <th
                 aria-sort={getAriaSort(
                   sortKey === "strategy_label",
@@ -1033,8 +1461,18 @@ function PortfolioTable({ rows }: { rows: StrategyPerformancePortfolioRow[] }) {
             </tr>
           </thead>
           <tbody>
-            {sortedRows.map((row) => (
+            {sortedRows.map((row, index) => (
               <tr key={row.strategy_key}>
+                <td>
+                  {(row.factor_count ?? 0) >= 2 ? (
+                    <>
+                      <strong>#{comboRankMap.get(row.strategy_key) ?? index + 1}</strong>
+                      <div className="strategy-performance-rule-meta">因子组合</div>
+                    </>
+                  ) : (
+                    <span className="strategy-performance-rule-meta">基准</span>
+                  )}
+                </td>
                 <td>
                   <div className="strategy-performance-rule-name">
                     <strong>{row.strategy_label}</strong>
@@ -1059,6 +1497,12 @@ function PortfolioTable({ rows }: { rows: StrategyPerformancePortfolioRow[] }) {
                           <span>样本期数</span>
                           <strong>
                             {formatNumber(summary?.sample_days, 0)}
+                          </strong>
+                        </div>
+                        <div>
+                          <span>总样本数</span>
+                          <strong>
+                            {formatNumber(summary?.sample_count, 0)}
                           </strong>
                         </div>
                         <div>
@@ -1234,16 +1678,6 @@ function RuleDirectionCard({
             {formatNumber(detail.sharpe_ratio, 2)}
           </strong>
         </div>
-        <div>
-          <span>高分层 - 低分层</span>
-          <strong
-            className={valueClassName(
-              detail.extreme_score_minus_mild_score_pct,
-            )}
-          >
-            {formatPercent(detail.extreme_score_minus_mild_score_pct)}
-          </strong>
-        </div>
       </div>
 
       <div className="strategy-performance-detail-split">
@@ -1403,16 +1837,18 @@ function RuleDetailModal({
 }
 
 export default function StrategyPerformanceBacktestPage() {
-  const persistedState = useMemo(
-    () =>
-      typeof window === "undefined"
-        ? null
-        : readJsonStorage<Partial<PersistedState>>(
-            window.localStorage,
-            STRATEGY_PERFORMANCE_STATE_KEY,
-          ),
-    [],
-  );
+  const persistedState = useMemo(() => {
+    if (strategyPerformanceRuntimeState) {
+      return strategyPerformanceRuntimeState;
+    }
+    if (typeof window === "undefined") {
+      return null;
+    }
+    return readJsonStorage<Partial<PersistedState>>(
+      window.localStorage,
+      STRATEGY_PERFORMANCE_STATE_KEY,
+    );
+  }, []);
   const useMigratedAutoMinSampleDefaults =
     hasLegacyAutoMinSampleStrings(persistedState);
 
@@ -1420,7 +1856,7 @@ export default function StrategyPerformanceBacktestPage() {
     () => persistedState?.sourcePath ?? readStoredSourcePath(),
   );
   const [selectedHorizonInput, setSelectedHorizonInput] = useState(
-    persistedState?.selectedHorizon ?? "5",
+    persistedState?.selectedHorizon ?? "2",
   );
   const [strongQuantileInput, setStrongQuantileInput] = useState(
     persistedState?.strongQuantile ?? "0.9",
@@ -1480,9 +1916,15 @@ export default function StrategyPerformanceBacktestPage() {
   );
   const [pageData, setPageData] = useState<StrategyPerformancePageData | null>(
     () =>
-      persistedState?.pageData && typeof persistedState.pageData === "object"
+      persistedState?.pageData && "strategy_options" in persistedState.pageData
         ? (persistedState.pageData as StrategyPerformancePageData)
-        : null,
+        : restorePageDataFromStorage(
+            persistedState?.pageData as
+              | PersistedStrategyPerformancePageData
+              | StrategyPerformancePageData
+              | null
+              | undefined,
+          ),
   );
   const [submittedQuery, setSubmittedQuery] = useState<SubmittedQuery | null>(
     () => {
@@ -1502,7 +1944,7 @@ export default function StrategyPerformanceBacktestPage() {
         selectedHorizon:
           typeof query.selectedHorizon === "number"
             ? query.selectedHorizon
-            : 5,
+            : 2,
         strongQuantile:
           typeof query.strongQuantile === "number" ? query.strongQuantile : 0.9,
         manualRuleNames: arrayFromUnknown(query.manualRuleNames),
@@ -1555,7 +1997,6 @@ export default function StrategyPerformanceBacktestPage() {
   >({});
 
   const sourcePathTrimmed = sourcePath.trim();
-  const selectedHorizonValue = Number(selectedHorizonInput);
 
   const positiveRuleNames = useMemo(
     () =>
@@ -1612,11 +2053,14 @@ export default function StrategyPerformanceBacktestPage() {
     );
   }, [currentCompanionRuleNames, strategyKeyword]);
 
-  const buildSubmittedQuery = (): SubmittedQuery | null => {
+  const buildSubmittedQuery = (
+    overrides?: Partial<Pick<SubmittedQuery, "selectedHorizon">>,
+  ): SubmittedQuery | null => {
     if (!sourcePathTrimmed) {
       return null;
     }
-    const selectedHorizon = parsePositiveInt(selectedHorizonInput, 5);
+    const selectedHorizon =
+      overrides?.selectedHorizon ?? parsePositiveInt(selectedHorizonInput, 2);
     const strongQuantile = parseQuantile(strongQuantileInput);
     const normalizedManualRuleNames = normalizeStringArray(currentAdvantageRuleNames);
     return {
@@ -1649,6 +2093,11 @@ export default function StrategyPerformanceBacktestPage() {
         advantageRuleMode:
           nextQuery.manualRuleNames.length > 0 ? "manual" : "auto",
       });
+      const nextRuleName =
+        selectedRuleNameInput &&
+        nextPageData.strategy_options.includes(selectedRuleNameInput)
+          ? selectedRuleNameInput
+          : nextPageData.selected_rule_name ?? "";
       setPageData(nextPageData);
       setSubmittedQuery(nextQuery);
       setSelectedRuleNameInput((current) => {
@@ -1660,6 +2109,58 @@ export default function StrategyPerformanceBacktestPage() {
         }
         return nextPageData.selected_rule_name ?? current;
       });
+      if (ruleDetailOpen && nextRuleName) {
+        void loadRuleDetail(nextRuleName, nextQuery.selectedHorizon);
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const runHorizonQuery = async (nextQuery: SubmittedQuery) => {
+    if (!pageData) {
+      await runPageQuery(nextQuery);
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      const nextHorizonData = await getStrategyPerformanceHorizonView({
+        sourcePath: nextQuery.sourcePath,
+        selectedHorizon: nextQuery.selectedHorizon,
+        strongQuantile: nextQuery.strongQuantile,
+        resolvedAdvantageRuleNames: pageData.resolved_advantage_rule_names,
+        autoMinSamples2: nextQuery.autoMinSamples2,
+        autoMinSamples3: nextQuery.autoMinSamples3,
+        autoMinSamples5: nextQuery.autoMinSamples5,
+        autoMinSamples10: nextQuery.autoMinSamples10,
+        requireWinRateAboveMarket: nextQuery.requireWinRateAboveMarket,
+        minPassHorizons: nextQuery.minPassHorizons,
+        minAdvHits: nextQuery.minAdvHits,
+        topLimit: nextQuery.topLimit,
+        maxCombinationSize: nextQuery.maxCombinationSize,
+        mixedSortKeys: nextQuery.mixedSortKeys,
+      });
+      setPageData((current) =>
+        current
+          ? {
+              ...current,
+              selected_horizon: nextHorizonData.selected_horizon,
+              noisy_companion_rule_names:
+                nextHorizonData.noisy_companion_rule_names,
+              companion_rows: nextHorizonData.companion_rows,
+              portfolio_rows: nextHorizonData.portfolio_rows,
+              overall_score_analysis:
+                nextHorizonData.overall_score_analysis ?? null,
+            }
+          : current,
+      );
+      setSubmittedQuery(nextQuery);
+      if (ruleDetailOpen && selectedRuleNameInput) {
+        void loadRuleDetail(selectedRuleNameInput, nextQuery.selectedHorizon);
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -1680,7 +2181,27 @@ export default function StrategyPerformanceBacktestPage() {
     void runPageQuery(nextQuery);
   };
 
+  const switchHorizon = (horizon: number) => {
+    const nextHorizon = String(horizon);
+    setSelectedHorizonInput(nextHorizon);
+    const nextQuery = buildSubmittedQuery({ selectedHorizon: horizon });
+    if (!nextQuery) {
+      return;
+    }
+    if (sameSubmittedQuery(nextQuery, submittedQuery) && pageData) {
+      return;
+    }
+    if (sameSubmittedQueryExceptHorizon(nextQuery, submittedQuery) && pageData) {
+      void runHorizonQuery(nextQuery);
+      return;
+    }
+    void runPageQuery(nextQuery);
+  };
+
   const hasPendingChanges = useMemo(() => {
+    if (!pageData) {
+      return true;
+    }
     if (!submittedQuery) {
       return true;
     }
@@ -1747,7 +2268,7 @@ export default function StrategyPerformanceBacktestPage() {
     if (typeof window === "undefined") {
       return;
     }
-    writeJsonStorage(window.localStorage, STRATEGY_PERFORMANCE_STATE_KEY, {
+    strategyPerformanceRuntimeState = {
       sourcePath: sourcePathTrimmed,
       selectedHorizon: selectedHorizonInput,
       strongQuantile: strongQuantileInput,
@@ -1766,7 +2287,34 @@ export default function StrategyPerformanceBacktestPage() {
       selectedRuleName: selectedRuleNameInput,
       pageData,
       submittedQuery,
-    } satisfies PersistedState);
+    };
+    const compactPageData = compactPageDataForStorage(pageData);
+    const payload = {
+      sourcePath: sourcePathTrimmed,
+      selectedHorizon: selectedHorizonInput,
+      strongQuantile: strongQuantileInput,
+      manualRuleNames,
+      strategyKeyword,
+      autoMinSamples2,
+      autoMinSamples3,
+      autoMinSamples5,
+      autoMinSamples10,
+      requireWinRateAboveMarket,
+      minPassHorizons: minPassHorizonsInput,
+      minAdvHits: minAdvHitsInput,
+      topLimit: topLimitInput,
+      maxCombinationSize: maxCombinationSizeInput,
+      mixedSortKeys,
+      selectedRuleName: selectedRuleNameInput,
+      pageData: compactPageData,
+      submittedQuery,
+    } satisfies PersistedState;
+    if (!writeJsonStorage(window.localStorage, STRATEGY_PERFORMANCE_STATE_KEY, payload)) {
+      writeJsonStorage(window.localStorage, STRATEGY_PERFORMANCE_STATE_KEY, {
+        ...payload,
+        pageData: null,
+      } satisfies PersistedState);
+    }
   }, [
     autoMinSamples2,
     autoMinSamples3,
@@ -1788,30 +2336,26 @@ export default function StrategyPerformanceBacktestPage() {
   ]);
 
   const advantageRuleRows = useMemo(() => {
-    const rows = (pageData?.rule_rows ?? []).filter(
+    return (pageData?.rule_rows ?? []).filter(
       (row) => row.signal_direction === "positive" && row.in_advantage_set,
     );
-    return sortRuleRows(rows, selectedHorizonValue);
-  }, [pageData, selectedHorizonValue]);
+  }, [pageData]);
   const companionRuleRows = useMemo(() => {
-    const rows = (pageData?.rule_rows ?? []).filter(
+    return (pageData?.rule_rows ?? []).filter(
       (row) => row.signal_direction === "positive" && row.in_companion_set,
     );
-    return sortRuleRows(rows, selectedHorizonValue);
-  }, [pageData, selectedHorizonValue]);
+  }, [pageData]);
   const effectiveNegativeRuleRows = useMemo(() => {
-    const rows = (pageData?.rule_rows ?? []).filter(
+    return (pageData?.rule_rows ?? []).filter(
       (row) => row.signal_direction === "negative" && row.negative_effective,
     );
-    return sortRuleRows(rows, selectedHorizonValue);
-  }, [pageData, selectedHorizonValue]);
+  }, [pageData]);
   const ineffectiveNegativeRuleRows = useMemo(() => {
-    const rows = (pageData?.rule_rows ?? []).filter(
+    return (pageData?.rule_rows ?? []).filter(
       (row) =>
         row.signal_direction === "negative" && row.negative_effective === false,
     );
-    return sortRuleRows(rows, selectedHorizonValue);
-  }, [pageData, selectedHorizonValue]);
+  }, [pageData]);
   const enhancingCompanionRows = useMemo(
     () =>
       (pageData?.companion_rows ?? []).filter(
@@ -1826,11 +2370,22 @@ export default function StrategyPerformanceBacktestPage() {
       ),
     [pageData],
   );
-  const selectedSummary = useMemo(
-    () => findSummary(pageData?.future_summaries ?? [], selectedHorizonValue),
-    [pageData, selectedHorizonValue],
+  const factorCombinationRows = useMemo(
+    () =>
+      (pageData?.portfolio_rows ?? []).filter(
+        (row) => (row.factor_count ?? 0) >= 2,
+      ),
+    [pageData],
   );
-  const pendingSelectedHorizon = parsePositiveInt(selectedHorizonInput, 5);
+  const loadedSelectedHorizon =
+    pageData?.selected_horizon ??
+    submittedQuery?.selectedHorizon ??
+    parsePositiveInt(selectedHorizonInput, 2);
+  const selectedSummary = useMemo(
+    () => findSummary(pageData?.future_summaries ?? [], loadedSelectedHorizon),
+    [loadedSelectedHorizon, pageData],
+  );
+  const pendingSelectedHorizon = parsePositiveInt(selectedHorizonInput, 2);
 
   const moveRuleToAdvantage = (ruleName: string) => {
     setManualRuleNames((current) =>
@@ -1853,16 +2408,18 @@ export default function StrategyPerformanceBacktestPage() {
     });
   };
 
-  const loadRuleDetail = async (ruleName: string) => {
+  const loadRuleDetail = async (ruleName: string, horizonOverride?: number) => {
     const normalizedRuleName = ruleName.trim();
     if (!sourcePathTrimmed || !normalizedRuleName) {
       setRuleDetailError("缺少可用的数据源路径或策略名");
       setRuleDetailData(null);
       return;
     }
+    const detailHorizon =
+      horizonOverride ?? parsePositiveInt(selectedHorizonInput, 2);
     const cacheKey = [
       sourcePathTrimmed,
-      parsePositiveInt(selectedHorizonInput, 5),
+      detailHorizon,
       parseQuantile(strongQuantileInput),
       normalizedRuleName,
     ].join("|");
@@ -1877,7 +2434,7 @@ export default function StrategyPerformanceBacktestPage() {
     try {
       const nextDetail = await getStrategyPerformanceRuleDetail({
         sourcePath: sourcePathTrimmed,
-        selectedHorizon: parsePositiveInt(selectedHorizonInput, 5),
+        selectedHorizon: detailHorizon,
         strongQuantile: parseQuantile(strongQuantileInput),
         selectedRuleName: normalizedRuleName,
       });
@@ -2204,33 +2761,43 @@ export default function StrategyPerformanceBacktestPage() {
 
       <SummarySection
         summaries={pageData?.future_summaries ?? []}
-        selectedHorizon={selectedHorizonValue}
+        selectedHorizon={loadedSelectedHorizon}
+        pendingHorizon={pendingSelectedHorizon}
+        loading={loading}
+        onSelectHorizon={switchHorizon}
+      />
+
+      <OverallScoreAnalysisSection
+        detail={pageData?.overall_score_analysis ?? null}
+        selectedHorizon={loadedSelectedHorizon}
+        pendingHorizon={pendingSelectedHorizon}
+        loading={loading}
       />
 
       <RuleTable
-        title="2. 优势策略集"
+        title="3. 优势策略集"
         subtitle=""
         rows={advantageRuleRows}
-        selectedHorizon={selectedHorizonValue}
+        selectedHorizon={loadedSelectedHorizon}
         selectedRuleName={selectedRuleNameInput}
         onPickRule={pickRule}
       />
 
       <RuleTable
-        title="3. 伴随策略集"
+        title="4. 伴随策略集"
         subtitle=""
         rows={companionRuleRows}
-        selectedHorizon={selectedHorizonValue}
+        selectedHorizon={loadedSelectedHorizon}
         selectedRuleName={selectedRuleNameInput}
         onPickRule={pickRule}
       />
 
       <div className="strategy-performance-grid-2">
         <RuleTable
-          title="4. 方向明确负向"
+          title="5. 方向明确负向"
           subtitle=""
           rows={effectiveNegativeRuleRows}
-          selectedHorizon={selectedHorizonValue}
+          selectedHorizon={loadedSelectedHorizon}
           selectedRuleName={selectedRuleNameInput}
           onPickRule={pickRule}
         />
@@ -2238,7 +2805,7 @@ export default function StrategyPerformanceBacktestPage() {
           title="待验证负向"
           subtitle=""
           rows={ineffectiveNegativeRuleRows}
-          selectedHorizon={selectedHorizonValue}
+          selectedHorizon={loadedSelectedHorizon}
           selectedRuleName={selectedRuleNameInput}
           onPickRule={pickRule}
         />
@@ -2246,7 +2813,7 @@ export default function StrategyPerformanceBacktestPage() {
 
       <div className="strategy-performance-grid-2">
         <CompanionTable
-          title="5. 伴随策略分析: 增强项"
+          title="6. 伴随策略分析: 增强项"
           subtitle=""
           rows={enhancingCompanionRows}
           defaultSortDirection="desc"
@@ -2259,7 +2826,7 @@ export default function StrategyPerformanceBacktestPage() {
         />
       </div>
 
-      <PortfolioTable rows={pageData?.portfolio_rows ?? []} />
+      <PortfolioTable rows={factorCombinationRows} />
 
       {ruleDetailOpen ? (
         <RuleDetailModal

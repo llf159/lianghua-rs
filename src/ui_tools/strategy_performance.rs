@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use duckdb::{Connection, params};
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::data::{
     DataReader, DistPoint, RowData, RuleTag, ScopeWay, ScoreRule, load_trade_date_list,
@@ -28,6 +28,7 @@ const DEFAULT_MIN_PASS_HORIZONS: u32 = 2;
 const DEFAULT_MIN_ADV_HITS: u32 = 1;
 const DEFAULT_TOP_LIMIT: u32 = 100;
 const DEFAULT_AUTO_ADVANTAGE_LIMIT: usize = 10;
+const PORTFOLIO_MIN_SAMPLE_COUNT: u32 = 50;
 const RECENT_WINDOWS: [usize; 2] = [20, 40];
 const SCORE_BUCKET_LIMIT: usize = 8;
 const SCORE_BUCKET_QUANTILES: usize = 5;
@@ -119,6 +120,7 @@ pub struct StrategyPerformancePortfolioWindow {
     pub window_key: String,
     pub label: String,
     pub sample_days: u32,
+    pub sample_count: u32,
     pub avg_portfolio_return_pct: Option<f64>,
     pub avg_market_return_pct: Option<f64>,
     pub avg_excess_return_pct: Option<f64>,
@@ -127,6 +129,7 @@ pub struct StrategyPerformancePortfolioWindow {
     pub rank_ic_mean: Option<f64>,
     pub icir: Option<f64>,
     pub layer_return_spread_pct: Option<f64>,
+    pub composite_score: Option<f64>,
     pub sharpe_ratio: Option<f64>,
 }
 
@@ -137,6 +140,21 @@ pub struct StrategyPerformancePortfolioRow {
     pub sort_description: String,
     pub factor_count: Option<u32>,
     pub windows: Vec<StrategyPerformancePortfolioWindow>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct StrategyPerformanceOverallScoreAnalysis {
+    pub horizon: u32,
+    pub sample_count: u32,
+    pub avg_future_return_pct: Option<f64>,
+    pub strong_hit_rate: Option<f64>,
+    pub win_rate: Option<f64>,
+    pub spearman_corr: Option<f64>,
+    pub rank_ic_mean: Option<f64>,
+    pub icir: Option<f64>,
+    pub layer_return_spread_pct: Option<f64>,
+    pub bucket_mode: String,
+    pub score_rows: Vec<StrategyPerformanceScoreBucketRow>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -227,9 +245,42 @@ pub struct StrategyPerformancePageData {
     pub rule_rows: Vec<StrategyPerformanceRuleRow>,
     pub companion_rows: Vec<StrategyPerformanceCompanionRow>,
     pub portfolio_rows: Vec<StrategyPerformancePortfolioRow>,
+    pub overall_score_analysis: Option<StrategyPerformanceOverallScoreAnalysis>,
     pub selected_rule_name: Option<String>,
     pub rule_detail: Option<StrategyPerformanceRuleDetail>,
     pub methods: Vec<StrategyPerformanceMethodNote>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct StrategyPerformanceHorizonViewData {
+    pub selected_horizon: u32,
+    pub noisy_companion_rule_names: Vec<String>,
+    pub companion_rows: Vec<StrategyPerformanceCompanionRow>,
+    pub portfolio_rows: Vec<StrategyPerformancePortfolioRow>,
+    pub overall_score_analysis: Option<StrategyPerformanceOverallScoreAnalysis>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StrategyPerformancePickCacheCombination {
+    pub strategy_key: String,
+    pub strategy_label: String,
+    pub factor_count: u32,
+    pub rule_names: Vec<String>,
+    pub rank_ic_mean: f64,
+    #[serde(default)]
+    pub composite_score: Option<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StrategyPerformancePickCachePayload {
+    pub selected_horizon: u32,
+    pub strong_quantile: f64,
+    pub resolved_advantage_rule_names: Vec<String>,
+    pub resolved_noisy_companion_rule_names: Vec<String>,
+    #[serde(default)]
+    pub resolved_advantage_combinations: Vec<StrategyPerformancePickCacheCombination>,
+    #[serde(default)]
+    pub resolved_noisy_combinations: Vec<StrategyPerformancePickCacheCombination>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -351,6 +402,14 @@ fn open_source_conn(source_path: &str) -> Result<Connection, String> {
     Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))
 }
 
+fn open_result_conn(source_path: &str) -> Result<Connection, String> {
+    let result_db = result_db_path(source_path);
+    let result_db_str = result_db
+        .to_str()
+        .ok_or_else(|| "结果库路径不是有效UTF-8".to_string())?;
+    Connection::open(result_db_str).map_err(|e| format!("打开结果库失败: {e}"))
+}
+
 fn attach_result_db(source_conn: &Connection, source_path: &str) -> Result<(), String> {
     let result_db = result_db_path(source_path);
     let result_db_str = result_db
@@ -360,6 +419,20 @@ fn attach_result_db(source_conn: &Connection, source_path: &str) -> Result<(), S
     source_conn
         .execute_batch(&format!("ATTACH '{}' AS result_db (READ_ONLY);", escaped))
         .map_err(|e| format!("挂载结果库失败: {e}"))
+}
+
+fn ensure_strategy_pick_cache_table(result_conn: &Connection) -> Result<(), String> {
+    result_conn
+        .execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS strategy_pick_cache (
+                cache_key VARCHAR PRIMARY KEY,
+                payload_json VARCHAR,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            "#,
+        )
+        .map_err(|e| format!("创建策略选股缓存表失败: {e}"))
 }
 
 fn normalize_selected_horizon(value: Option<u32>) -> u32 {
@@ -422,6 +495,192 @@ fn advantage_mode_label(mode: AdvantageRuleMode) -> String {
         AdvantageRuleMode::Manual => "manual".to_string(),
         AdvantageRuleMode::Combined => "combined".to_string(),
     }
+}
+
+fn build_strategy_pick_cache_key(
+    selected_horizon: u32,
+    strong_quantile: f64,
+    advantage_rule_mode: AdvantageRuleMode,
+    manual_rule_names: &[String],
+    auto_filter: &StrategyPerformanceAutoFilterConfig,
+    min_adv_hits: u32,
+    max_combination_size: u32,
+) -> String {
+    format!(
+        "v4|h={selected_horizon}|q={strong_quantile:.6}|mode={}|manual={}|s2={}|s3={}|s5={}|s10={}|win={}|pass={}|adv_hits={}|combo={}",
+        advantage_mode_label(advantage_rule_mode),
+        serde_json::to_string(manual_rule_names).unwrap_or_else(|_| "[]".to_string()),
+        auto_filter.min_samples_2,
+        auto_filter.min_samples_3,
+        auto_filter.min_samples_5,
+        auto_filter.min_samples_10,
+        auto_filter.require_win_rate_above_market,
+        auto_filter.min_pass_horizons,
+        min_adv_hits,
+        max_combination_size,
+    )
+}
+
+fn parse_combination_rule_names(strategy_key: &str, strategy_label: &str) -> Vec<String> {
+    strategy_key
+        .strip_prefix("combo_")
+        .map(|raw| {
+            raw.split("__")
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(|item| item.to_string())
+                .collect::<Vec<_>>()
+        })
+        .filter(|items| !items.is_empty())
+        .unwrap_or_else(|| {
+            strategy_label
+                .split('+')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(|item| item.to_string())
+                .collect::<Vec<_>>()
+        })
+}
+
+fn build_strategy_pick_cache_payload(
+    selected_horizon: u32,
+    strong_quantile: f64,
+    resolved_advantage_rule_names: &[String],
+    resolved_noisy_companion_rule_names: &[String],
+    portfolio_rows: &[StrategyPerformancePortfolioRow],
+) -> StrategyPerformancePickCachePayload {
+    let resolved_advantage_combinations = portfolio_rows
+        .iter()
+        .filter(|row| row.factor_count.unwrap_or(0) >= 2)
+        .filter_map(|row| {
+            let full_window = row
+                .windows
+                .iter()
+                .find(|window| window.window_key == "full")?;
+            let rank_ic_mean = full_window.rank_ic_mean?;
+            let composite_score = full_window.composite_score;
+            if composite_score.unwrap_or(f64::NEG_INFINITY) <= 0.0 {
+                return None;
+            }
+            Some(StrategyPerformancePickCacheCombination {
+                strategy_key: row.strategy_key.clone(),
+                strategy_label: row.strategy_label.clone(),
+                factor_count: row.factor_count.unwrap_or(0),
+                rule_names: parse_combination_rule_names(&row.strategy_key, &row.strategy_label),
+                rank_ic_mean,
+                composite_score,
+            })
+        })
+        .collect::<Vec<_>>();
+    let resolved_noisy_combinations = portfolio_rows
+        .iter()
+        .filter(|row| row.factor_count.unwrap_or(0) >= 2)
+        .filter_map(|row| {
+            let full_window = row
+                .windows
+                .iter()
+                .find(|window| window.window_key == "full")?;
+            let rank_ic_mean = full_window.rank_ic_mean?;
+            let composite_score = full_window.composite_score;
+            if composite_score.unwrap_or(f64::INFINITY) >= 0.0 {
+                return None;
+            }
+            Some(StrategyPerformancePickCacheCombination {
+                strategy_key: row.strategy_key.clone(),
+                strategy_label: row.strategy_label.clone(),
+                factor_count: row.factor_count.unwrap_or(0),
+                rule_names: parse_combination_rule_names(&row.strategy_key, &row.strategy_label),
+                rank_ic_mean,
+                composite_score,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    StrategyPerformancePickCachePayload {
+        selected_horizon,
+        strong_quantile,
+        resolved_advantage_rule_names: resolved_advantage_rule_names.to_vec(),
+        resolved_noisy_companion_rule_names: resolved_noisy_companion_rule_names.to_vec(),
+        resolved_advantage_combinations,
+        resolved_noisy_combinations,
+    }
+}
+
+fn load_strategy_pick_cache(
+    source_path: &str,
+    cache_key: &str,
+) -> Result<Option<StrategyPerformancePickCachePayload>, String> {
+    let result_conn = open_result_conn(source_path)?;
+    ensure_strategy_pick_cache_table(&result_conn)?;
+    let mut stmt = result_conn
+        .prepare("SELECT payload_json FROM strategy_pick_cache WHERE cache_key = ?")
+        .map_err(|e| format!("预编译策略选股缓存读取失败: {e}"))?;
+    let mut rows = stmt
+        .query(params![cache_key])
+        .map_err(|e| format!("查询策略选股缓存失败: {e}"))?;
+    let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取策略选股缓存失败: {e}"))?
+    else {
+        return Ok(None);
+    };
+    let payload_json: String = row
+        .get(0)
+        .map_err(|e| format!("读取策略选股缓存内容失败: {e}"))?;
+    let payload = serde_json::from_str::<StrategyPerformancePickCachePayload>(&payload_json)
+        .map_err(|e| format!("解析策略选股缓存失败: {e}"))?;
+    Ok(Some(payload))
+}
+
+fn load_latest_strategy_pick_cache(
+    source_path: &str,
+) -> Result<Option<StrategyPerformancePickCachePayload>, String> {
+    let result_conn = open_result_conn(source_path)?;
+    ensure_strategy_pick_cache_table(&result_conn)?;
+    let mut stmt = result_conn
+        .prepare(
+            "SELECT payload_json FROM strategy_pick_cache ORDER BY updated_at DESC NULLS LAST LIMIT 1",
+        )
+        .map_err(|e| format!("预编译最新策略选股缓存读取失败: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("查询最新策略选股缓存失败: {e}"))?;
+    let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取最新策略选股缓存失败: {e}"))?
+    else {
+        return Ok(None);
+    };
+    let payload_json: String = row
+        .get(0)
+        .map_err(|e| format!("读取最新策略选股缓存内容失败: {e}"))?;
+    let payload = serde_json::from_str::<StrategyPerformancePickCachePayload>(&payload_json)
+        .map_err(|e| format!("解析最新策略选股缓存失败: {e}"))?;
+    Ok(Some(payload))
+}
+
+fn save_strategy_pick_cache(
+    source_path: &str,
+    cache_key: &str,
+    payload: &StrategyPerformancePickCachePayload,
+) -> Result<(), String> {
+    let result_conn = open_result_conn(source_path)?;
+    ensure_strategy_pick_cache_table(&result_conn)?;
+    let payload_json =
+        serde_json::to_string(payload).map_err(|e| format!("序列化策略选股缓存失败: {e}"))?;
+    result_conn
+        .execute(
+            r#"
+            INSERT INTO strategy_pick_cache (cache_key, payload_json, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT (cache_key) DO UPDATE
+            SET payload_json = EXCLUDED.payload_json,
+                updated_at = EXCLUDED.updated_at
+            "#,
+            params![cache_key, payload_json],
+        )
+        .map_err(|e| format!("写入策略选股缓存失败: {e}"))?;
+    Ok(())
 }
 
 fn normalize_sort_keys(requested: Option<Vec<String>>) -> Vec<SortKey> {
@@ -1322,62 +1581,57 @@ fn build_rule_factor_metrics(
             .push((signal_date.clone(), *metric));
     }
 
-    let mut out = HashMap::new();
-    for ((rule_name, horizon), daily_metrics) in grouped {
-        let mut daily_ics = Vec::new();
-        let mut daily_hit_returns = Vec::new();
-        for (signal_date, metric) in daily_metrics {
-            let Some(summary) = daily_return_summaries.get(&(horizon, signal_date)) else {
-                continue;
-            };
-            let total_n = summary.sample_count;
-            if total_n == 0 || metric.hit_n == 0 || metric.hit_n >= total_n {
-                continue;
+    grouped
+        .into_par_iter()
+        .map(|((rule_name, horizon), daily_metrics)| {
+            let mut daily_ics = Vec::new();
+            let mut daily_hit_returns = Vec::new();
+            for (signal_date, metric) in daily_metrics {
+                let Some(summary) = daily_return_summaries.get(&(horizon, signal_date)) else {
+                    continue;
+                };
+                let total_n = summary.sample_count;
+                if total_n == 0 || metric.hit_n == 0 || metric.hit_n >= total_n {
+                    continue;
+                }
+                let p = metric.hit_n as f64 / total_n as f64;
+                let var_x = p * (1.0 - p);
+                if var_x <= 0.0 {
+                    continue;
+                }
+                let mean_y = summary.mean_return_pct;
+                let mean_square_y = summary.mean_square_return_pct;
+                let var_y = (mean_square_y - mean_y * mean_y).max(0.0);
+                if var_y <= 0.0 {
+                    continue;
+                }
+                let mean_xy = metric.sum_return_pct / total_n as f64;
+                let covariance = mean_xy - p * mean_y;
+                daily_ics.push(covariance / (var_x.sqrt() * var_y.sqrt()));
+                daily_hit_returns.push(metric.sum_return_pct / metric.hit_n as f64);
             }
-            let p = metric.hit_n as f64 / total_n as f64;
-            let var_x = p * (1.0 - p);
-            if var_x <= 0.0 {
-                continue;
-            }
-            let mean_y = summary.mean_return_pct;
-            let mean_square_y = summary.mean_square_return_pct;
-            let var_y = (mean_square_y - mean_y * mean_y).max(0.0);
-            if var_y <= 0.0 {
-                continue;
-            }
-            let mean_xy = metric.sum_return_pct / total_n as f64;
-            let covariance = mean_xy - p * mean_y;
-            daily_ics.push(covariance / (var_x.sqrt() * var_y.sqrt()));
-            daily_hit_returns.push(metric.sum_return_pct / metric.hit_n as f64);
-        }
 
-        let rank_ic_mean = mean_and_std(&daily_ics).map(|(mean, _)| mean);
-        let icir = mean_and_std(&daily_ics).and_then(|(mean, std)| {
-            if std > 0.0 {
-                Some(mean / std)
-            } else {
-                None
-            }
-        });
-        let sharpe_ratio = mean_and_std(&daily_hit_returns).and_then(|(mean, std)| {
-            if std > 0.0 {
-                Some(mean / std)
-            } else {
-                None
-            }
-        });
+            let rank_ic_mean = mean_and_std(&daily_ics).map(|(mean, _)| mean);
+            let icir =
+                mean_and_std(&daily_ics).and_then(
+                    |(mean, std)| {
+                        if std > 0.0 { Some(mean / std) } else { None }
+                    },
+                );
+            let sharpe_ratio = mean_and_std(&daily_hit_returns).and_then(|(mean, std)| {
+                if std > 0.0 { Some(mean / std) } else { None }
+            });
 
-        out.insert(
-            (rule_name, horizon),
-            RuleFactorMetric {
-                rank_ic_mean,
-                icir,
-                sharpe_ratio,
-            },
-        );
-    }
-
-    out
+            (
+                (rule_name, horizon),
+                RuleFactorMetric {
+                    rank_ic_mean,
+                    icir,
+                    sharpe_ratio,
+                },
+            )
+        })
+        .collect()
 }
 
 fn min_sample_for_horizon(config: &StrategyPerformanceAutoFilterConfig, horizon: u32) -> u32 {
@@ -1505,7 +1759,7 @@ fn build_positive_composite_score(
     let ic_component = clamp_score(
         factor_metric
             .rank_ic_mean
-            .map(|value| (value - 0.01) * 100.0)
+            .map(|value| value * 100.0)
             .unwrap_or(-1.0),
         -2.0,
         3.0,
@@ -1515,11 +1769,165 @@ fn build_positive_composite_score(
     let strong_component = clamp_score((strong_lift.unwrap_or(1.0) - 1.0) * 2.0, -2.0, 3.0);
     let sharpe_component = clamp_score(factor_metric.sharpe_ratio.unwrap_or(0.0), -2.0, 3.0);
 
-    let group_primary = (icir_component + layer_component) / 2.0;
-    let group_secondary = (ic_component + strong_component + avg_return_component) / 3.0;
-    let group_reference = sharpe_component;
+    Some(
+        strong_component * 0.25
+            + avg_return_component * 0.25
+            + ic_component * 0.15
+            + icir_component * 0.15
+            + sharpe_component * 0.10
+            + layer_component * 0.10,
+    )
+}
 
-    Some((group_primary * 5.0 + group_secondary * 4.0 + group_reference) / 10.0)
+fn build_portfolio_composite_score(
+    rank_ic_mean: Option<f64>,
+    icir: Option<f64>,
+    layer_return_spread_pct: Option<f64>,
+    avg_excess_return_pct: Option<f64>,
+    excess_win_rate: Option<f64>,
+) -> Option<f64> {
+    let layer_component = clamp_score(layer_return_spread_pct? / 2.0, -2.0, 3.0);
+    let ic_component = clamp_score(rank_ic_mean? * 100.0, -2.0, 3.0);
+    let icir_component = clamp_score(icir.unwrap_or(0.0), -2.0, 3.0);
+    let excess_return_component =
+        clamp_score(avg_excess_return_pct.unwrap_or(0.0) / 2.0, -2.0, 3.0);
+    let excess_win_component =
+        clamp_score((excess_win_rate.unwrap_or(0.5) - 0.5) * 10.0, -2.0, 3.0);
+
+    Some(
+        layer_component * 0.40
+            + ic_component * 0.30
+            + icir_component * 0.10
+            + excess_return_component * 0.10
+            + excess_win_component * 0.10,
+    )
+}
+
+fn relative_rank_component_scores(values: &[Option<f64>]) -> Vec<Option<f64>> {
+    let indexed = values
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| value.map(|inner| (index, inner)))
+        .collect::<Vec<_>>();
+    if indexed.is_empty() {
+        return vec![None; values.len()];
+    }
+
+    let ranks = rank_values(&indexed.iter().map(|(_, value)| *value).collect::<Vec<_>>());
+    let denominator = (indexed.len().saturating_sub(1)) as f64;
+    let mut out = vec![None; values.len()];
+    for ((index, _), rank) in indexed.into_iter().zip(ranks.into_iter()) {
+        let score = if denominator <= 0.0 {
+            0.0
+        } else {
+            ((rank - 1.0) / denominator) * 2.0 - 1.0
+        };
+        out[index] = Some(clamp_score(score, -1.0, 1.0));
+    }
+    out
+}
+
+fn blend_relative_scores(items: &[(Option<f64>, f64)]) -> Option<f64> {
+    let mut weighted_sum = 0.0;
+    let mut total_weight = 0.0;
+    for (value, weight) in items {
+        if let Some(inner) = value {
+            weighted_sum += inner * *weight;
+            total_weight += *weight;
+        }
+    }
+    if total_weight > 0.0 {
+        Some(weighted_sum / total_weight)
+    } else {
+        None
+    }
+}
+
+fn apply_relative_portfolio_composite_scores(rows: &mut [StrategyPerformancePortfolioRow]) {
+    let combination_indices = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| (row.factor_count.unwrap_or(0) >= 2).then_some(index))
+        .collect::<Vec<_>>();
+    if combination_indices.is_empty() {
+        return;
+    }
+
+    let window_keys = combination_indices
+        .first()
+        .map(|index| {
+            rows[*index]
+                .windows
+                .iter()
+                .map(|window| window.window_key.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    for window_key in window_keys {
+        let window_index_pairs = combination_indices
+            .iter()
+            .filter_map(|row_index| {
+                rows[*row_index]
+                    .windows
+                    .iter()
+                    .position(|window| window.window_key == window_key)
+                    .map(|window_index| (*row_index, window_index))
+            })
+            .collect::<Vec<_>>();
+        if window_index_pairs.is_empty() {
+            continue;
+        }
+
+        let layer_scores = relative_rank_component_scores(
+            &window_index_pairs
+                .iter()
+                .map(|(row_index, window_index)| {
+                    rows[*row_index].windows[*window_index].layer_return_spread_pct
+                })
+                .collect::<Vec<_>>(),
+        );
+        let ic_scores = relative_rank_component_scores(
+            &window_index_pairs
+                .iter()
+                .map(|(row_index, window_index)| {
+                    rows[*row_index].windows[*window_index].rank_ic_mean
+                })
+                .collect::<Vec<_>>(),
+        );
+        let icir_scores = relative_rank_component_scores(
+            &window_index_pairs
+                .iter()
+                .map(|(row_index, window_index)| rows[*row_index].windows[*window_index].icir)
+                .collect::<Vec<_>>(),
+        );
+        let excess_return_scores = relative_rank_component_scores(
+            &window_index_pairs
+                .iter()
+                .map(|(row_index, window_index)| {
+                    rows[*row_index].windows[*window_index].avg_excess_return_pct
+                })
+                .collect::<Vec<_>>(),
+        );
+        let excess_win_scores = relative_rank_component_scores(
+            &window_index_pairs
+                .iter()
+                .map(|(row_index, window_index)| {
+                    rows[*row_index].windows[*window_index].excess_win_rate
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        for (position, (row_index, window_index)) in window_index_pairs.iter().enumerate() {
+            rows[*row_index].windows[*window_index].composite_score = blend_relative_scores(&[
+                (layer_scores[position], 0.40),
+                (ic_scores[position], 0.30),
+                (icir_scores[position], 0.10),
+                (excess_return_scores[position], 0.10),
+                (excess_win_scores[position], 0.10),
+            ]);
+        }
+    }
 }
 
 fn build_rule_rows(
@@ -1534,194 +1942,206 @@ fn build_rule_rows(
     resolved_advantage_rules: &HashSet<String>,
 ) -> (Vec<StrategyPerformanceRuleRow>, Vec<String>) {
     let manual_set = manual_rule_names.iter().cloned().collect::<HashSet<_>>();
-    let mut auto_candidates = Vec::new();
-    let mut rows = Vec::new();
+    let per_rule_results = strategy_options
+        .par_iter()
+        .filter_map(|rule_name| {
+            let meta = rule_meta.get(rule_name)?;
+            let mut local_rows = Vec::new();
+            let mut local_auto_candidate = None;
 
-    for rule_name in strategy_options {
-        let Some(meta) = rule_meta.get(rule_name) else {
-            continue;
-        };
+            for is_positive in [true, false] {
+                let mut metrics = Vec::with_capacity(HORIZONS.len());
+                let mut any_hit = false;
+                let mut negative_pass_count = 0u32;
 
-        for is_positive in [true, false] {
-            let mut metrics = Vec::with_capacity(HORIZONS.len());
-            let mut any_hit = false;
-            let mut negative_pass_count = 0u32;
-
-            for horizon in HORIZONS {
-                let agg = rule_aggregates
-                    .get(&(rule_name.clone(), is_positive, horizon))
-                    .copied()
-                    .unwrap_or_default();
-                if agg.hit_n > 0 {
-                    any_hit = true;
-                }
-                let market_summary = future_summary_map.get(&horizon);
-                let strong_lift = match (
-                    agg.strong_hit_rate,
-                    market_summary.and_then(|summary| summary.strong_base_rate),
-                ) {
-                    (Some(rule_rate), Some(base_rate)) if base_rate > 0.0 => {
-                        Some(rule_rate / base_rate)
+                for horizon in HORIZONS {
+                    let agg = rule_aggregates
+                        .get(&(rule_name.clone(), is_positive, horizon))
+                        .copied()
+                        .unwrap_or_default();
+                    if agg.hit_n > 0 {
+                        any_hit = true;
                     }
-                    _ => None,
-                };
-                let factor_metric = rule_factor_metrics
-                    .get(&(rule_name.clone(), horizon))
-                    .copied()
-                    .unwrap_or_default();
-                let low_confidence = agg.hit_n < min_sample_for_horizon(auto_filter, horizon);
-                let hit_vs_non_hit_delta_pct = match (
-                    agg.avg_future_return_pct,
-                    non_hit_avg(
-                        market_summary
-                            .map(|summary| summary.sample_count)
-                            .unwrap_or_default(),
-                        market_summary.and_then(|summary| summary.avg_future_return_pct),
-                        agg.hit_n,
+                    let market_summary = future_summary_map.get(&horizon);
+                    let strong_lift = match (
+                        agg.strong_hit_rate,
+                        market_summary.and_then(|summary| summary.strong_base_rate),
+                    ) {
+                        (Some(rule_rate), Some(base_rate)) if base_rate > 0.0 => {
+                            Some(rule_rate / base_rate)
+                        }
+                        _ => None,
+                    };
+                    let factor_metric = rule_factor_metrics
+                        .get(&(rule_name.clone(), horizon))
+                        .copied()
+                        .unwrap_or_default();
+                    let low_confidence = agg.hit_n < min_sample_for_horizon(auto_filter, horizon);
+                    let hit_vs_non_hit_delta_pct = match (
                         agg.avg_future_return_pct,
-                    ),
-                ) {
-                    (Some(hit_avg), Some(non_hit_avg)) => Some(hit_avg - non_hit_avg),
-                    _ => None,
-                };
-                let composite_score = if is_positive {
-                    build_positive_composite_score(
-                        agg,
-                        market_summary,
+                        non_hit_avg(
+                            market_summary
+                                .map(|summary| summary.sample_count)
+                                .unwrap_or_default(),
+                            market_summary.and_then(|summary| summary.avg_future_return_pct),
+                            agg.hit_n,
+                            agg.avg_future_return_pct,
+                        ),
+                    ) {
+                        (Some(hit_avg), Some(non_hit_avg)) => Some(hit_avg - non_hit_avg),
+                        _ => None,
+                    };
+                    let composite_score = if is_positive {
+                        build_positive_composite_score(
+                            agg,
+                            market_summary,
+                            strong_lift,
+                            hit_vs_non_hit_delta_pct,
+                            factor_metric,
+                        )
+                    } else {
+                        None
+                    };
+                    let has_rank_ic = factor_metric.rank_ic_mean.is_some();
+                    let passes_auto_filter = if is_positive {
+                        agg.hit_n >= min_sample_for_horizon(auto_filter, horizon)
+                            && has_rank_ic
+                            && composite_score.unwrap_or(f64::NEG_INFINITY) > 0.0
+                    } else {
+                        false
+                    };
+                    let passes_negative_filter = if is_positive {
+                        false
+                    } else {
+                        passes_negative_effective_filter(
+                            agg,
+                            market_summary,
+                            strong_lift,
+                            hit_vs_non_hit_delta_pct,
+                            auto_filter,
+                            horizon,
+                        )
+                    };
+                    if passes_negative_filter {
+                        negative_pass_count += 1;
+                    }
+                    metrics.push(StrategyPerformanceHorizonMetric {
+                        horizon,
+                        hit_n: agg.hit_n,
+                        avg_future_return_pct: agg.avg_future_return_pct,
+                        strong_hit_rate: agg.strong_hit_rate,
                         strong_lift,
+                        win_rate: agg.win_rate,
+                        avg_total_score: agg.avg_total_score,
+                        avg_rank: agg.avg_rank,
                         hit_vs_non_hit_delta_pct,
-                        factor_metric,
-                    )
+                        rank_ic_mean: factor_metric.rank_ic_mean,
+                        icir: factor_metric.icir,
+                        sharpe_ratio: factor_metric.sharpe_ratio,
+                        layer_return_spread_pct: hit_vs_non_hit_delta_pct,
+                        composite_score,
+                        ic_passes_floor: has_rank_ic,
+                        low_confidence,
+                        passes_auto_filter,
+                        passes_negative_filter,
+                    });
+                }
+
+                if !is_positive && !any_hit {
+                    continue;
+                }
+
+                let overall_composite_score = if is_positive {
+                    let values = metrics
+                        .iter()
+                        .filter_map(|metric| metric.composite_score)
+                        .collect::<Vec<_>>();
+                    mean_and_std(&values).map(|(mean, _)| mean)
                 } else {
                     None
                 };
-                let passes_auto_filter = if is_positive {
-                    agg.hit_n >= min_sample_for_horizon(auto_filter, horizon)
-                        && factor_metric.rank_ic_mean.unwrap_or(f64::NEG_INFINITY) >= 0.01
-                        && composite_score.unwrap_or(f64::NEG_INFINITY) > 0.0
+                let avg_rank_ic_mean = if is_positive {
+                    let values = metrics
+                        .iter()
+                        .filter_map(|metric| metric.rank_ic_mean)
+                        .collect::<Vec<_>>();
+                    mean_and_std(&values).map(|(mean, _)| mean)
                 } else {
-                    false
+                    None
                 };
-                let passes_negative_filter = if is_positive {
-                    false
+                let auto_candidate = is_positive
+                    && overall_composite_score.unwrap_or(f64::NEG_INFINITY) > 0.0
+                    && metrics.iter().any(|metric| metric.ic_passes_floor);
+                if auto_candidate {
+                    local_auto_candidate = Some(rule_name.clone());
+                }
+                let negative_review_notes = if is_positive {
+                    Vec::new()
                 } else {
-                    passes_negative_effective_filter(
-                        agg,
-                        market_summary,
-                        strong_lift,
-                        hit_vs_non_hit_delta_pct,
+                    build_negative_review_notes(
+                        &metrics,
+                        selected_horizon,
+                        future_summary_map.get(&selected_horizon),
                         auto_filter,
-                        horizon,
                     )
                 };
-                if passes_negative_filter {
-                    negative_pass_count += 1;
-                }
-                metrics.push(StrategyPerformanceHorizonMetric {
-                    horizon,
-                    hit_n: agg.hit_n,
-                    avg_future_return_pct: agg.avg_future_return_pct,
-                    strong_hit_rate: agg.strong_hit_rate,
-                    strong_lift,
-                    win_rate: agg.win_rate,
-                    avg_total_score: agg.avg_total_score,
-                    avg_rank: agg.avg_rank,
-                    hit_vs_non_hit_delta_pct,
-                    rank_ic_mean: factor_metric.rank_ic_mean,
-                    icir: factor_metric.icir,
-                    sharpe_ratio: factor_metric.sharpe_ratio,
-                    layer_return_spread_pct: hit_vs_non_hit_delta_pct,
-                    composite_score,
-                    ic_passes_floor: factor_metric.rank_ic_mean.unwrap_or(f64::NEG_INFINITY) >= 0.01,
-                    low_confidence,
-                    passes_auto_filter,
-                    passes_negative_filter,
+                let negative_effective = if is_positive {
+                    None
+                } else {
+                    Some(
+                        negative_pass_count >= auto_filter.min_pass_horizons
+                            && metric_for_horizon(&metrics, selected_horizon)
+                                .map(|metric| metric.passes_negative_filter)
+                                .unwrap_or(false),
+                    )
+                };
+                local_rows.push(StrategyPerformanceRuleRow {
+                    rule_name: rule_name.clone(),
+                    explain: Some(meta.explain.clone()),
+                    tag: rule_tag_label(meta.tag),
+                    scope_way: Some(meta.scope_way_label.clone()),
+                    scope_windows: Some(meta.scope_windows),
+                    points: Some(meta.points),
+                    has_dist_points: meta.has_dist_points,
+                    signal_direction: if is_positive {
+                        "positive".to_string()
+                    } else {
+                        "negative".to_string()
+                    },
+                    direction_label: if is_positive {
+                        "正向命中".to_string()
+                    } else {
+                        "负向命中".to_string()
+                    },
+                    auto_candidate,
+                    manually_selected: is_positive && manual_set.contains(rule_name),
+                    in_advantage_set: is_positive && resolved_advantage_rules.contains(rule_name),
+                    in_companion_set: false,
+                    negative_effective,
+                    negative_effectiveness_label: negative_effective.map(|is_effective| {
+                        if is_effective {
+                            "方向明确负向".to_string()
+                        } else {
+                            "待验证负向".to_string()
+                        }
+                    }),
+                    negative_review_notes,
+                    overall_composite_score,
+                    avg_rank_ic_mean,
+                    metrics,
                 });
             }
 
-            if !is_positive && !any_hit {
-                continue;
-            }
+            Some((local_rows, local_auto_candidate))
+        })
+        .collect::<Vec<_>>();
 
-            let overall_composite_score = if is_positive {
-                let values = metrics
-                    .iter()
-                    .filter_map(|metric| metric.composite_score)
-                    .collect::<Vec<_>>();
-                mean_and_std(&values).map(|(mean, _)| mean)
-            } else {
-                None
-            };
-            let avg_rank_ic_mean = if is_positive {
-                let values = metrics
-                    .iter()
-                    .filter_map(|metric| metric.rank_ic_mean)
-                    .collect::<Vec<_>>();
-                mean_and_std(&values).map(|(mean, _)| mean)
-            } else {
-                None
-            };
-            let auto_candidate = is_positive
-                && overall_composite_score.unwrap_or(f64::NEG_INFINITY) > 0.0
-                && metrics.iter().any(|metric| metric.ic_passes_floor);
-            if auto_candidate {
-                auto_candidates.push(rule_name.clone());
-            }
-            let negative_review_notes = if is_positive {
-                Vec::new()
-            } else {
-                build_negative_review_notes(
-                    &metrics,
-                    selected_horizon,
-                    future_summary_map.get(&selected_horizon),
-                    auto_filter,
-                )
-            };
-            let negative_effective = if is_positive {
-                None
-            } else {
-                Some(
-                    negative_pass_count >= auto_filter.min_pass_horizons
-                        && metric_for_horizon(&metrics, selected_horizon)
-                            .map(|metric| metric.passes_negative_filter)
-                            .unwrap_or(false),
-                )
-            };
-            rows.push(StrategyPerformanceRuleRow {
-                rule_name: rule_name.clone(),
-                explain: Some(meta.explain.clone()),
-                tag: rule_tag_label(meta.tag),
-                scope_way: Some(meta.scope_way_label.clone()),
-                scope_windows: Some(meta.scope_windows),
-                points: Some(meta.points),
-                has_dist_points: meta.has_dist_points,
-                signal_direction: if is_positive {
-                    "positive".to_string()
-                } else {
-                    "negative".to_string()
-                },
-                direction_label: if is_positive {
-                    "正向命中".to_string()
-                } else {
-                    "负向命中".to_string()
-                },
-                auto_candidate,
-                manually_selected: is_positive && manual_set.contains(rule_name),
-                in_advantage_set: is_positive && resolved_advantage_rules.contains(rule_name),
-                in_companion_set: false,
-                negative_effective,
-                negative_effectiveness_label: negative_effective.map(|is_effective| {
-                    if is_effective {
-                        "方向明确负向".to_string()
-                    } else {
-                        "待验证负向".to_string()
-                    }
-                }),
-                negative_review_notes,
-                overall_composite_score,
-                avg_rank_ic_mean,
-                metrics,
-            });
+    let mut auto_candidates = Vec::new();
+    let mut rows = Vec::new();
+    for (local_rows, local_auto_candidate) in per_rule_results {
+        rows.extend(local_rows);
+        if let Some(rule_name) = local_auto_candidate {
+            auto_candidates.push(rule_name);
         }
     }
 
@@ -1831,23 +2251,20 @@ fn build_rule_rows(
             })
     });
 
+    let positive_row_map = rows
+        .iter()
+        .filter(|row| row.signal_direction == "positive")
+        .map(|row| (row.rule_name.as_str(), row))
+        .collect::<HashMap<_, _>>();
     auto_candidates.sort_by(|left, right| {
-        let left_metric = rows
-            .iter()
-            .find(|row| row.rule_name == *left && row.signal_direction == "positive")
+        let left_row = positive_row_map.get(left.as_str()).copied();
+        let right_row = positive_row_map.get(right.as_str()).copied();
+        let left_metric = left_row
             .and_then(|row| metric_for_horizon(&row.metrics, selected_horizon))
             .cloned();
-        let right_metric = rows
-            .iter()
-            .find(|row| row.rule_name == *right && row.signal_direction == "positive")
+        let right_metric = right_row
             .and_then(|row| metric_for_horizon(&row.metrics, selected_horizon))
             .cloned();
-        let left_row = rows
-            .iter()
-            .find(|row| row.rule_name == *left && row.signal_direction == "positive");
-        let right_row = rows
-            .iter()
-            .find(|row| row.rule_name == *right && row.signal_direction == "positive");
         right_row
             .and_then(|row| row.overall_composite_score)
             .partial_cmp(&left_row.and_then(|row| row.overall_composite_score))
@@ -2312,7 +2729,7 @@ fn build_rule_combinations(rule_names: &[String], max_combination_size: u32) -> 
 
     let mut out = Vec::new();
     let max_len = max_combination_size.max(1) as usize;
-    for target_len in 1..=max_len.min(rule_names.len()) {
+    for target_len in 2..=max_len.min(rule_names.len()) {
         let mut current = Vec::new();
         backtrack(rule_names, 0, target_len, &mut current, &mut out);
     }
@@ -2324,9 +2741,8 @@ fn build_combination_portfolio_rows(
     hit_map: &HashMap<(String, String), HashMap<String, f64>>,
     advantage_rule_names: &[String],
     max_combination_size: u32,
-    top_limit: u32,
 ) -> Vec<StrategyPerformancePortfolioRow> {
-    if advantage_rule_names.is_empty() || top_limit == 0 {
+    if advantage_rule_names.len() < 2 {
         return Vec::new();
     }
 
@@ -2340,77 +2756,75 @@ fn build_combination_portfolio_rows(
     }
 
     let combinations = build_rule_combinations(advantage_rule_names, max_combination_size);
-    let mut out = Vec::new();
-    for combo in combinations {
-        let combo_set = combo.iter().cloned().collect::<HashSet<_>>();
-        let mut daily_points = Vec::new();
-        let mut combo_observations = Vec::new();
-        for (signal_date, rows) in &grouped_by_date {
-            let Some(market_return_pct) = market_daily.get(signal_date).copied() else {
-                continue;
-            };
-            let mut selected = rows
-                .iter()
-                .filter_map(|row| {
-                    let key = (signal_date.clone(), row.ts_code.clone());
-                    let rule_scores = hit_map.get(&key)?;
-                    if !combo_set.iter().all(|rule_name| rule_scores.contains_key(rule_name)) {
-                        return None;
-                    }
-                    let combo_score = combo
-                        .iter()
-                        .filter_map(|rule_name| rule_scores.get(rule_name))
-                        .sum::<f64>();
-                    Some((row.clone(), combo_score))
-                })
-                .collect::<Vec<_>>();
-            selected.sort_by(|left, right| {
-                compare_option_f64_desc(Some(left.1), Some(right.1))
-                    .then_with(|| compare_option_i64_asc(left.0.rank, right.0.rank))
-                    .then_with(|| compare_option_f64_desc(left.0.total_score, right.0.total_score))
-                    .then_with(|| left.0.ts_code.cmp(&right.0.ts_code))
-            });
-            combo_observations.extend(selected.iter().map(|item| ScoreObservation {
-                signal_date: signal_date.clone(),
-                score: item.1,
-                future_return_pct: item.0.future_return_pct,
-            }));
-            let picked = selected
-                .into_iter()
-                .take(top_limit as usize)
-                .map(|item| item.0)
-                .collect::<Vec<_>>();
-            if picked.is_empty() {
-                continue;
-            }
-            daily_points.push(DailyPortfolioPoint {
-                signal_date: signal_date.clone(),
-                portfolio_return_pct: picked
+    combinations
+        .into_par_iter()
+        .map(|combo| {
+            let combo_set = combo.iter().cloned().collect::<HashSet<_>>();
+            let mut daily_points = Vec::new();
+            let mut combo_observations = Vec::new();
+            for (signal_date, rows) in &grouped_by_date {
+                let Some(market_return_pct) = market_daily.get(signal_date).copied() else {
+                    continue;
+                };
+                let selected = rows
                     .iter()
-                    .map(|row| row.future_return_pct)
-                    .sum::<f64>()
-                    / picked.len() as f64,
-                market_return_pct,
-                selected_count: picked.len(),
-            });
-        }
-        if daily_points.is_empty() {
-            continue;
-        }
-        let factor_count = combo.len() as u32;
-        out.push(summarize_daily_points(
-            &format!("combo_{}", combo.join("__")),
-            &combo.join(" + "),
-            &format!(
-                "{} 因子共振，按组合得分降序取前 {}",
-                factor_count, top_limit
-            ),
-            Some(factor_count),
-            &daily_points,
-            Some(combo_observations.as_slice()),
-        ));
-    }
-    out
+                    .filter_map(|row| {
+                        let key = (signal_date.clone(), row.ts_code.clone());
+                        let rule_scores = hit_map.get(&key)?;
+                        if !combo_set
+                            .iter()
+                            .all(|rule_name| rule_scores.contains_key(rule_name))
+                        {
+                            return None;
+                        }
+                        let combo_score = combo
+                            .iter()
+                            .filter_map(|rule_name| rule_scores.get(rule_name))
+                            .sum::<f64>();
+                        Some((row.clone(), combo_score))
+                    })
+                    .collect::<Vec<_>>();
+                if selected.is_empty() {
+                    continue;
+                }
+                combo_observations.extend(selected.iter().map(|(row, combo_score)| {
+                    ScoreObservation {
+                        signal_date: signal_date.clone(),
+                        score: *combo_score,
+                        future_return_pct: row.future_return_pct,
+                    }
+                }));
+                daily_points.push(DailyPortfolioPoint {
+                    signal_date: signal_date.clone(),
+                    portfolio_return_pct: selected
+                        .iter()
+                        .map(|(row, _)| row.future_return_pct)
+                        .sum::<f64>()
+                        / selected.len() as f64,
+                    market_return_pct,
+                    selected_count: selected.len(),
+                });
+            }
+            if daily_points.is_empty() {
+                return None;
+            }
+            let factor_count = combo.len() as u32;
+            Some(summarize_daily_points(
+                &format!("combo_{}", combo.join("__")),
+                &combo.join(" + "),
+                &format!(
+                    "{} 因子同时正向触发；组合得分=触发因子 rule_score 求和；IC/分层基于组合得分",
+                    factor_count
+                ),
+                Some(factor_count),
+                &daily_points,
+                Some(combo_observations.as_slice()),
+            ))
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 fn summarize_daily_points(
@@ -2454,6 +2868,7 @@ fn build_portfolio_window(
             window_key: window_key.to_string(),
             label: label.to_string(),
             sample_days: 0,
+            sample_count: 0,
             avg_portfolio_return_pct: None,
             avg_market_return_pct: None,
             avg_excess_return_pct: None,
@@ -2462,11 +2877,16 @@ fn build_portfolio_window(
             rank_ic_mean: None,
             icir: None,
             layer_return_spread_pct: None,
+            composite_score: None,
             sharpe_ratio: None,
         };
     }
 
     let sample_days = daily_points.len() as u32;
+    let sample_count = daily_points
+        .iter()
+        .map(|item| item.selected_count as u32)
+        .sum::<u32>();
     let avg_portfolio_return_pct = Some(
         daily_points
             .iter()
@@ -2512,27 +2932,20 @@ fn build_portfolio_window(
         .collect::<HashSet<_>>();
     let filtered_observations = score_observations
         .map(|items| {
-            items.iter()
+            items
+                .iter()
                 .filter(|item| included_dates.contains(&item.signal_date))
                 .cloned()
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let mut grouped_observations = BTreeMap::<String, Vec<ScoreObservation>>::new();
-    for observation in &filtered_observations {
-        grouped_observations
-            .entry(observation.signal_date.clone())
-            .or_default()
-            .push(observation.clone());
-    }
-    let daily_ics = grouped_observations
-        .values()
-        .filter_map(|samples| spearman_corr(samples, false))
-        .collect::<Vec<_>>();
-    let rank_ic_mean = mean_and_std(&daily_ics).map(|(mean, _)| mean);
-    let icir = mean_and_std(&daily_ics)
-        .and_then(|(mean, std)| if std > 0.0 { Some(mean / std) } else { None });
-    let layer_return_spread_pct = {
+    let enough_samples_for_score_metrics = sample_count >= PORTFOLIO_MIN_SAMPLE_COUNT;
+    let (rank_ic_mean, icir) = compute_rank_ic_with_fallback(
+        &filtered_observations,
+        sample_count,
+        PORTFOLIO_MIN_SAMPLE_COUNT,
+    );
+    let layer_return_spread_pct = if enough_samples_for_score_metrics {
         let (_, score_rows) = build_score_bucket_rows(&filtered_observations, None);
         match (score_rows.first(), score_rows.last()) {
             (Some(first), Some(last)) if score_rows.len() >= 2 => {
@@ -2543,6 +2956,19 @@ fn build_portfolio_window(
             }
             _ => None,
         }
+    } else {
+        None
+    };
+    let composite_score = if enough_samples_for_score_metrics {
+        build_portfolio_composite_score(
+            rank_ic_mean,
+            icir,
+            layer_return_spread_pct,
+            avg_excess_return_pct,
+            excess_win_rate,
+        )
+    } else {
+        None
     };
 
     let _ = daily_points
@@ -2554,6 +2980,7 @@ fn build_portfolio_window(
         window_key: window_key.to_string(),
         label: label.to_string(),
         sample_days,
+        sample_count,
         avg_portfolio_return_pct,
         avg_market_return_pct,
         avg_excess_return_pct,
@@ -2562,6 +2989,7 @@ fn build_portfolio_window(
         rank_ic_mean,
         icir,
         layer_return_spread_pct,
+        composite_score,
         sharpe_ratio,
     }
 }
@@ -2807,6 +3235,24 @@ fn build_portfolio_rows(
     out
 }
 
+fn filter_low_sample_combination_rows(
+    rows: Vec<StrategyPerformancePortfolioRow>,
+    min_sample_count: u32,
+) -> Vec<StrategyPerformancePortfolioRow> {
+    rows.into_iter()
+        .filter(|row| {
+            if row.factor_count.unwrap_or(0) < 2 {
+                return true;
+            }
+            row.windows
+                .iter()
+                .find(|window| window.window_key == "full")
+                .map(|window| window.sample_count >= min_sample_count)
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 fn resolve_selected_rule_name(
     requested: Option<String>,
     resolved_advantage_rule_names: &[String],
@@ -2901,6 +3347,39 @@ fn spearman_corr(samples: &[ScoreObservation], use_abs_score: bool) -> Option<f6
     let score_ranks = rank_values(&scores);
     let return_ranks = rank_values(&returns);
     pearson_corr(&score_ranks, &return_ranks)
+}
+
+fn build_daily_spearman_ics(samples: &[ScoreObservation]) -> Vec<f64> {
+    let mut grouped = BTreeMap::<String, Vec<ScoreObservation>>::new();
+    for sample in samples {
+        grouped
+            .entry(sample.signal_date.clone())
+            .or_default()
+            .push(sample.clone());
+    }
+    grouped
+        .values()
+        .filter_map(|date_samples| spearman_corr(date_samples, false))
+        .collect()
+}
+
+fn compute_rank_ic_with_fallback(
+    samples: &[ScoreObservation],
+    sample_count: u32,
+    min_sample_count: u32,
+) -> (Option<f64>, Option<f64>) {
+    if sample_count < min_sample_count {
+        return (None, None);
+    }
+
+    let daily_ics = build_daily_spearman_ics(samples);
+    let rank_ic_mean = mean_and_std(&daily_ics)
+        .map(|(mean, _)| mean)
+        .or_else(|| spearman_corr(samples, false));
+    let icir = mean_and_std(&daily_ics)
+        .and_then(|(mean, std)| if std > 0.0 { Some(mean / std) } else { None });
+
+    (rank_ic_mean, icir)
 }
 
 fn build_score_bucket_rows(
@@ -3034,6 +3513,115 @@ fn build_score_bucket_rows(
     }
 
     ("score_bucket".to_string(), rows)
+}
+
+fn load_strategy_score_observations(
+    source_conn: &Connection,
+    selected_horizon: u32,
+) -> Result<Vec<ScoreObservation>, String> {
+    let mut stmt = source_conn
+        .prepare(
+            r#"
+            SELECT
+                signal_date,
+                total_score,
+                future_return_pct
+            FROM strategy_perf_sample_returns
+            WHERE horizon = ?
+              AND total_score IS NOT NULL
+              AND future_return_pct IS NOT NULL
+            ORDER BY signal_date ASC, ts_code ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译策略整体得分分层读取失败: {e}"))?;
+    let mut rows = stmt
+        .query(params![selected_horizon as i64])
+        .map_err(|e| format!("查询策略整体得分分层失败: {e}"))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取策略整体得分分层失败: {e}"))?
+    {
+        out.push(ScoreObservation {
+            signal_date: row
+                .get(0)
+                .map_err(|e| format!("读取 signal_date 失败: {e}"))?,
+            score: row
+                .get::<_, Option<f64>>(1)
+                .map_err(|e| format!("读取 total_score 失败: {e}"))?
+                .unwrap_or(0.0),
+            future_return_pct: row
+                .get::<_, Option<f64>>(2)
+                .map_err(|e| format!("读取 future_return_pct 失败: {e}"))?
+                .unwrap_or(0.0),
+        });
+    }
+    Ok(out)
+}
+
+fn build_overall_score_analysis(
+    source_conn: &Connection,
+    selected_horizon: u32,
+    future_summary_map: &HashMap<u32, StrategyPerformanceFutureSummary>,
+) -> Result<Option<StrategyPerformanceOverallScoreAnalysis>, String> {
+    let Some(future_summary) = future_summary_map.get(&selected_horizon) else {
+        return Ok(None);
+    };
+    let samples = load_strategy_score_observations(source_conn, selected_horizon)?;
+    if samples.is_empty() {
+        return Ok(None);
+    }
+
+    let sample_count = samples.len() as u32;
+    let avg_future_return_pct = Some(
+        samples
+            .iter()
+            .map(|item| item.future_return_pct)
+            .sum::<f64>()
+            / sample_count as f64,
+    );
+    let strong_hit_rate = future_summary.strong_threshold_pct.map(|threshold| {
+        samples
+            .iter()
+            .filter(|item| item.future_return_pct >= threshold)
+            .count() as f64
+            / sample_count as f64
+    });
+    let win_rate = Some(
+        samples
+            .iter()
+            .filter(|item| item.future_return_pct > 0.0)
+            .count() as f64
+            / sample_count as f64,
+    );
+    let (bucket_mode, score_rows) =
+        build_score_bucket_rows(&samples, future_summary.strong_threshold_pct);
+    let layer_return_spread_pct = match (score_rows.first(), score_rows.last()) {
+        (Some(first), Some(last)) if score_rows.len() >= 2 => {
+            match (first.avg_future_return_pct, last.avg_future_return_pct) {
+                (Some(low), Some(high)) => Some(high - low),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+
+    let (rank_ic_mean, icir) =
+        compute_rank_ic_with_fallback(&samples, sample_count, PORTFOLIO_MIN_SAMPLE_COUNT);
+
+    Ok(Some(StrategyPerformanceOverallScoreAnalysis {
+        horizon: selected_horizon,
+        sample_count,
+        avg_future_return_pct,
+        strong_hit_rate,
+        win_rate,
+        spearman_corr: spearman_corr(&samples, false),
+        rank_ic_mean,
+        icir,
+        layer_return_spread_pct,
+        bucket_mode,
+        score_rows,
+    }))
 }
 
 fn build_hit_count_rows(
@@ -3210,7 +3798,8 @@ fn build_rule_detail(
         positive_samples.len() as u32,
         avg_future_return_pct,
     );
-    let (bucket_mode, score_rows) = build_score_bucket_rows(&samples, future_summary.strong_threshold_pct);
+    let (bucket_mode, score_rows) =
+        build_score_bucket_rows(&samples, future_summary.strong_threshold_pct);
     let extreme_score_minus_mild_score_pct = match (score_rows.first(), score_rows.last()) {
         (Some(first), Some(last)) if score_rows.len() >= 2 => {
             match (last.avg_future_return_pct, first.avg_future_return_pct) {
@@ -3230,7 +3819,8 @@ fn build_rule_detail(
         Vec::new()
     };
 
-    let mut daily_ics = Vec::new();
+    let (rank_ic_mean, icir) =
+        compute_rank_ic_with_fallback(&samples, samples.len() as u32, 2);
     let mut daily_hit_returns = Vec::new();
     let mut grouped = BTreeMap::<String, Vec<&ScoreObservation>>::new();
     for sample in &samples {
@@ -3241,24 +3831,25 @@ fn build_rule_detail(
     }
     for date_samples in grouped.values() {
         let total_n = date_samples.len() as u32;
-        let hit_n = date_samples.iter().filter(|sample| sample.score > 0.0).count() as u32;
+        let hit_n = date_samples
+            .iter()
+            .filter(|sample| sample.score > 0.0)
+            .count() as u32;
         if hit_n == 0 || hit_n >= total_n {
             continue;
         }
-        let mean_y = date_samples
-            .iter()
-            .map(|sample| sample.future_return_pct)
-            .sum::<f64>()
-            / total_n as f64;
         let mean_square_y = date_samples
             .iter()
             .map(|sample| sample.future_return_pct * sample.future_return_pct)
             .sum::<f64>()
             / total_n as f64;
+        let mean_y = date_samples
+            .iter()
+            .map(|sample| sample.future_return_pct)
+            .sum::<f64>()
+            / total_n as f64;
         let var_y = (mean_square_y - mean_y * mean_y).max(0.0);
-        let p = hit_n as f64 / total_n as f64;
-        let var_x = p * (1.0 - p);
-        if var_x <= 0.0 || var_y <= 0.0 {
+        if var_y <= 0.0 {
             continue;
         }
         let hit_sum = date_samples
@@ -3266,14 +3857,8 @@ fn build_rule_detail(
             .filter(|sample| sample.score > 0.0)
             .map(|sample| sample.future_return_pct)
             .sum::<f64>();
-        let mean_xy = hit_sum / total_n as f64;
-        let covariance = mean_xy - p * mean_y;
-        daily_ics.push(covariance / (var_x.sqrt() * var_y.sqrt()));
         daily_hit_returns.push(hit_sum / hit_n as f64);
     }
-    let rank_ic_mean = mean_and_std(&daily_ics).map(|(mean, _)| mean);
-    let icir = mean_and_std(&daily_ics)
-        .and_then(|(mean, std)| if std > 0.0 { Some(mean / std) } else { None });
     let sharpe_ratio = mean_and_std(&daily_hit_returns)
         .and_then(|(mean, std)| if std > 0.0 { Some(mean / std) } else { None });
     let directions = vec![StrategyPerformanceRuleDirectionDetail {
@@ -3347,7 +3932,7 @@ fn build_method_notes() -> Vec<StrategyPerformanceMethodNote> {
         StrategyPerformanceMethodNote {
             key: "portfolio".to_string(),
             title: "组合回测".to_string(),
-            description: "对每个信号日横截面构造组合并做日度等权收益，再统计全样本、近40期、近20期的平均组合收益、市场收益、超额收益和超额胜率。原始 TopN 为基准，其余组合只在 adv_hit_cnt >= min_adv_hits 的优势样本池内排序。".to_string(),
+            description: "对每个信号日横截面构造组合并做日度等权收益，再统计全样本、近40期、近20期的平均组合收益、市场收益、超额收益和超额胜率。原始 TopN 为基准；多因子组合则按优势因子在同一标的上当日同时正向触发的交集样本统计，不再按组合得分取 TopN。".to_string(),
         },
     ]
 }
@@ -3481,6 +4066,269 @@ pub fn get_strategy_performance_validation_page(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn get_or_build_strategy_pick_cache(
+    source_path: String,
+    selected_horizon: Option<u32>,
+    strong_quantile: Option<f64>,
+    advantage_rule_mode: Option<String>,
+    manual_rule_names: Option<Vec<String>>,
+    auto_min_samples_2: Option<u32>,
+    auto_min_samples_3: Option<u32>,
+    auto_min_samples_5: Option<u32>,
+    auto_min_samples_10: Option<u32>,
+    require_win_rate_above_market: Option<bool>,
+    min_pass_horizons: Option<u32>,
+    min_adv_hits: Option<u32>,
+    max_combination_size: Option<u32>,
+) -> Result<StrategyPerformancePickCachePayload, String> {
+    let selected_horizon = normalize_selected_horizon(selected_horizon);
+    let strong_quantile = normalize_strong_quantile(strong_quantile)?;
+    let advantage_rule_mode = normalize_advantage_mode(advantage_rule_mode);
+    let max_combination_size = max_combination_size.unwrap_or(3).clamp(2, 6);
+    let auto_filter = StrategyPerformanceAutoFilterConfig {
+        min_samples_2: auto_min_samples_2.unwrap_or(DEFAULT_MIN_SAMPLE).max(1),
+        min_samples_3: auto_min_samples_3.unwrap_or(DEFAULT_MIN_SAMPLE).max(1),
+        min_samples_5: auto_min_samples_5.unwrap_or(DEFAULT_MIN_SAMPLE).max(1),
+        min_samples_10: auto_min_samples_10.unwrap_or(DEFAULT_MIN_SAMPLE).max(1),
+        require_win_rate_above_market: require_win_rate_above_market.unwrap_or(false),
+        min_pass_horizons: min_pass_horizons
+            .unwrap_or(DEFAULT_MIN_PASS_HORIZONS)
+            .clamp(1, HORIZONS.len() as u32),
+    };
+    let min_adv_hits = min_adv_hits.unwrap_or(DEFAULT_MIN_ADV_HITS).max(1);
+    let (strategy_options, _) = load_rule_meta(&source_path)?;
+    let (manual_rule_names, _) = normalize_manual_rule_names(manual_rule_names, &strategy_options);
+    let cache_key = build_strategy_pick_cache_key(
+        selected_horizon,
+        strong_quantile,
+        advantage_rule_mode,
+        &manual_rule_names,
+        &auto_filter,
+        min_adv_hits,
+        max_combination_size,
+    );
+    if let Some(payload) = load_strategy_pick_cache(&source_path, &cache_key)? {
+        return Ok(payload);
+    }
+
+    let page = get_strategy_performance_page(
+        source_path.clone(),
+        Some(selected_horizon),
+        Some(strong_quantile),
+        Some(advantage_mode_label(advantage_rule_mode)),
+        Some(manual_rule_names),
+        Some(auto_filter.min_samples_2),
+        Some(auto_filter.min_samples_3),
+        Some(auto_filter.min_samples_5),
+        Some(auto_filter.min_samples_10),
+        Some(auto_filter.require_win_rate_above_market),
+        Some(auto_filter.min_pass_horizons),
+        Some(min_adv_hits),
+        None,
+        Some(max_combination_size),
+        None,
+        None,
+        None,
+    )?;
+
+    Ok(build_strategy_pick_cache_payload(
+        page.selected_horizon,
+        strong_quantile,
+        &page.resolved_advantage_rule_names,
+        &page.noisy_companion_rule_names,
+        &page.portfolio_rows,
+    ))
+}
+
+pub fn get_strategy_pick_cache(
+    source_path: String,
+    selected_horizon: Option<u32>,
+    strong_quantile: Option<f64>,
+    advantage_rule_mode: Option<String>,
+    manual_rule_names: Option<Vec<String>>,
+    auto_min_samples_2: Option<u32>,
+    auto_min_samples_3: Option<u32>,
+    auto_min_samples_5: Option<u32>,
+    auto_min_samples_10: Option<u32>,
+    require_win_rate_above_market: Option<bool>,
+    min_pass_horizons: Option<u32>,
+    min_adv_hits: Option<u32>,
+    max_combination_size: Option<u32>,
+) -> Result<StrategyPerformancePickCachePayload, String> {
+    let selected_horizon = normalize_selected_horizon(selected_horizon);
+    let strong_quantile = normalize_strong_quantile(strong_quantile)?;
+    let advantage_rule_mode = normalize_advantage_mode(advantage_rule_mode);
+    let max_combination_size = max_combination_size.unwrap_or(3).clamp(2, 6);
+    let auto_filter = StrategyPerformanceAutoFilterConfig {
+        min_samples_2: auto_min_samples_2.unwrap_or(DEFAULT_MIN_SAMPLE).max(1),
+        min_samples_3: auto_min_samples_3.unwrap_or(DEFAULT_MIN_SAMPLE).max(1),
+        min_samples_5: auto_min_samples_5.unwrap_or(DEFAULT_MIN_SAMPLE).max(1),
+        min_samples_10: auto_min_samples_10.unwrap_or(DEFAULT_MIN_SAMPLE).max(1),
+        require_win_rate_above_market: require_win_rate_above_market.unwrap_or(false),
+        min_pass_horizons: min_pass_horizons
+            .unwrap_or(DEFAULT_MIN_PASS_HORIZONS)
+            .clamp(1, HORIZONS.len() as u32),
+    };
+    let min_adv_hits = min_adv_hits.unwrap_or(DEFAULT_MIN_ADV_HITS).max(1);
+    let (strategy_options, _) = load_rule_meta(&source_path)?;
+    let (manual_rule_names, _) = normalize_manual_rule_names(manual_rule_names, &strategy_options);
+    let cache_key = build_strategy_pick_cache_key(
+        selected_horizon,
+        strong_quantile,
+        advantage_rule_mode,
+        &manual_rule_names,
+        &auto_filter,
+        min_adv_hits,
+        max_combination_size,
+    );
+    load_strategy_pick_cache(&source_path, &cache_key)?.ok_or_else(|| {
+        format!(
+            "未找到对应的策略回测缓存。请先到策略回测页按同样参数运行一次回测后，再来高级选股。当前周期={}日",
+            selected_horizon
+        )
+    })
+}
+
+pub fn get_latest_strategy_pick_cache(
+    source_path: String,
+) -> Result<StrategyPerformancePickCachePayload, String> {
+    load_latest_strategy_pick_cache(&source_path)?.ok_or_else(|| {
+        "未找到策略回测缓存。请先到策略回测页运行一次回测后，再来高级选股。".to_string()
+    })
+}
+
+fn build_strategy_performance_horizon_view(
+    source_conn: &Connection,
+    selected_horizon: u32,
+    strong_quantile: f64,
+    auto_filter: &StrategyPerformanceAutoFilterConfig,
+    min_adv_hits: u32,
+    top_limit: u32,
+    max_combination_size: u32,
+    mixed_sort_keys: &[SortKey],
+    resolved_advantage_rule_names: &[String],
+    requested_noisy_companion_rule_names: &[String],
+) -> Result<StrategyPerformanceHorizonViewData, String> {
+    prepare_temp_thresholds(source_conn, strong_quantile)?;
+    prepare_temp_string_table(
+        source_conn,
+        "strategy_perf_advantage_rules",
+        resolved_advantage_rule_names,
+    )?;
+    prepare_temp_string_table(source_conn, "strategy_perf_noisy_rules", &Vec::new())?;
+    rebuild_temp_sample_features(source_conn, selected_horizon)?;
+
+    let companion_rows = load_companion_rows(
+        source_conn,
+        min_adv_hits,
+        min_sample_for_horizon(auto_filter, selected_horizon),
+    )?;
+    let noisy_companion_rule_names = if requested_noisy_companion_rule_names.is_empty() {
+        companion_rows
+            .iter()
+            .filter(|row| row.delta_return_pct.unwrap_or(0.0) < 0.0)
+            .map(|row| row.rule_name.clone())
+            .collect::<Vec<_>>()
+    } else {
+        requested_noisy_companion_rule_names.to_vec()
+    };
+    prepare_temp_string_table(
+        source_conn,
+        "strategy_perf_noisy_rules",
+        &noisy_companion_rule_names,
+    )?;
+    rebuild_temp_sample_features(source_conn, selected_horizon)?;
+    let sample_feature_rows = load_sample_feature_rows(source_conn)?;
+    let mut portfolio_rows = build_portfolio_rows(
+        &sample_feature_rows,
+        min_adv_hits,
+        top_limit,
+        mixed_sort_keys,
+        &noisy_companion_rule_names,
+    );
+    let combo_hit_map = load_advantage_hit_map(source_conn)?;
+    portfolio_rows.extend(build_combination_portfolio_rows(
+        &sample_feature_rows,
+        &combo_hit_map,
+        resolved_advantage_rule_names,
+        max_combination_size,
+    ));
+    let mut portfolio_rows =
+        filter_low_sample_combination_rows(portfolio_rows, PORTFOLIO_MIN_SAMPLE_COUNT);
+    apply_relative_portfolio_composite_scores(&mut portfolio_rows);
+    let future_summaries = load_future_summaries(source_conn, strong_quantile)?;
+    let future_summary_map = future_summaries
+        .into_iter()
+        .map(|summary| (summary.horizon, summary))
+        .collect::<HashMap<_, _>>();
+    let overall_score_analysis =
+        build_overall_score_analysis(source_conn, selected_horizon, &future_summary_map)?;
+
+    Ok(StrategyPerformanceHorizonViewData {
+        selected_horizon: selected_horizon,
+        noisy_companion_rule_names,
+        companion_rows,
+        portfolio_rows,
+        overall_score_analysis,
+    })
+}
+
+pub fn get_strategy_performance_horizon_view(
+    source_path: String,
+    selected_horizon: Option<u32>,
+    strong_quantile: Option<f64>,
+    resolved_advantage_rule_names: Vec<String>,
+    auto_min_samples_2: Option<u32>,
+    auto_min_samples_3: Option<u32>,
+    auto_min_samples_5: Option<u32>,
+    auto_min_samples_10: Option<u32>,
+    require_win_rate_above_market: Option<bool>,
+    min_pass_horizons: Option<u32>,
+    min_adv_hits: Option<u32>,
+    top_limit: Option<u32>,
+    max_combination_size: Option<u32>,
+    mixed_sort_keys: Option<Vec<String>>,
+    noisy_companion_rule_names: Option<Vec<String>>,
+) -> Result<StrategyPerformanceHorizonViewData, String> {
+    let selected_horizon = normalize_selected_horizon(selected_horizon);
+    let strong_quantile = normalize_strong_quantile(strong_quantile)?;
+    let auto_filter = StrategyPerformanceAutoFilterConfig {
+        min_samples_2: auto_min_samples_2.unwrap_or(DEFAULT_MIN_SAMPLE),
+        min_samples_3: auto_min_samples_3.unwrap_or(DEFAULT_MIN_SAMPLE),
+        min_samples_5: auto_min_samples_5.unwrap_or(DEFAULT_MIN_SAMPLE),
+        min_samples_10: auto_min_samples_10.unwrap_or(DEFAULT_MIN_SAMPLE),
+        require_win_rate_above_market: require_win_rate_above_market.unwrap_or(false),
+        min_pass_horizons: min_pass_horizons.unwrap_or(DEFAULT_MIN_PASS_HORIZONS),
+    };
+    let min_adv_hits = min_adv_hits.unwrap_or(DEFAULT_MIN_ADV_HITS).max(1);
+    let top_limit = top_limit.unwrap_or(DEFAULT_TOP_LIMIT).max(1);
+    let max_combination_size = max_combination_size.unwrap_or(2).clamp(2, 4);
+    let mixed_sort_keys = normalize_sort_keys(mixed_sort_keys);
+    let strategy_options = load_rule_meta(&source_path)?.0;
+    let resolved_advantage_rule_names =
+        normalize_manual_rule_names(Some(resolved_advantage_rule_names), &strategy_options).0;
+    let requested_noisy_companion_rule_names = noisy_companion_rule_names.unwrap_or_default();
+
+    let source_conn = open_source_conn(&source_path)?;
+    attach_result_db(&source_conn, &source_path)?;
+    prepare_temp_exit_map(&source_conn, &source_path)?;
+    prepare_temp_sample_returns(&source_conn)?;
+
+    build_strategy_performance_horizon_view(
+        &source_conn,
+        selected_horizon,
+        strong_quantile,
+        &auto_filter,
+        min_adv_hits,
+        top_limit,
+        max_combination_size,
+        &mixed_sort_keys,
+        &resolved_advantage_rule_names,
+        &requested_noisy_companion_rule_names,
+    )
+}
+
 pub fn get_strategy_performance_page(
     source_path: String,
     selected_horizon: Option<u32>,
@@ -3601,50 +4449,35 @@ pub fn get_strategy_performance_page(
     let effective_negative_rule_names = build_negative_rule_names(&rule_rows, true);
     let ineffective_negative_rule_names = build_negative_rule_names(&rule_rows, false);
 
-    prepare_temp_string_table(
+    let horizon_view = build_strategy_performance_horizon_view(
         &source_conn,
-        "strategy_perf_advantage_rules",
-        &resolved_advantage_rule_names,
-    )?;
-    prepare_temp_string_table(&source_conn, "strategy_perf_noisy_rules", &Vec::new())?;
-    rebuild_temp_sample_features(&source_conn, selected_horizon)?;
-
-    let companion_rows = load_companion_rows(
-        &source_conn,
-        min_adv_hits,
-        min_sample_for_horizon(&auto_filter, selected_horizon),
-    )?;
-    let noisy_companion_rule_names = if requested_noisy_companion_rule_names.is_empty() {
-        companion_rows
-            .iter()
-            .filter(|row| row.delta_return_pct.unwrap_or(0.0) < 0.0)
-            .map(|row| row.rule_name.clone())
-            .collect::<Vec<_>>()
-    } else {
-        requested_noisy_companion_rule_names
-    };
-    prepare_temp_string_table(
-        &source_conn,
-        "strategy_perf_noisy_rules",
-        &noisy_companion_rule_names,
-    )?;
-    rebuild_temp_sample_features(&source_conn, selected_horizon)?;
-    let sample_feature_rows = load_sample_feature_rows(&source_conn)?;
-    let mut portfolio_rows = build_portfolio_rows(
-        &sample_feature_rows,
+        selected_horizon,
+        strong_quantile,
+        &auto_filter,
         min_adv_hits,
         top_limit,
-        &mixed_sort_keys,
-        &noisy_companion_rule_names,
-    );
-    let combo_hit_map = load_advantage_hit_map(&source_conn)?;
-    portfolio_rows.extend(build_combination_portfolio_rows(
-        &sample_feature_rows,
-        &combo_hit_map,
-        &resolved_advantage_rule_names,
         max_combination_size,
-        top_limit,
-    ));
+        &mixed_sort_keys,
+        &resolved_advantage_rule_names,
+        &requested_noisy_companion_rule_names,
+    )?;
+    let pick_cache_payload = build_strategy_pick_cache_payload(
+        selected_horizon,
+        strong_quantile,
+        &resolved_advantage_rule_names,
+        &horizon_view.noisy_companion_rule_names,
+        &horizon_view.portfolio_rows,
+    );
+    let pick_cache_key = build_strategy_pick_cache_key(
+        selected_horizon,
+        strong_quantile,
+        advantage_rule_mode,
+        &manual_rule_names,
+        &auto_filter,
+        min_adv_hits,
+        max_combination_size,
+    );
+    save_strategy_pick_cache(&source_path, &pick_cache_key, &pick_cache_payload)?;
 
     let selected_rule_name = resolve_selected_rule_name(
         selected_rule_name,
@@ -3687,10 +4520,11 @@ pub fn get_strategy_performance_page(
             .iter()
             .map(|key| sort_key_label(*key).to_string())
             .collect(),
-        noisy_companion_rule_names,
+        noisy_companion_rule_names: horizon_view.noisy_companion_rule_names,
         rule_rows,
-        companion_rows,
-        portfolio_rows,
+        companion_rows: horizon_view.companion_rows,
+        portfolio_rows: horizon_view.portfolio_rows,
+        overall_score_analysis: horizon_view.overall_score_analysis,
         selected_rule_name,
         rule_detail,
         methods: build_method_notes(),
@@ -3784,8 +4618,10 @@ mod tests {
                 open DOUBLE,
                 high DOUBLE,
                 low DOUBLE,
-                close DOUBLE
-                ,
+                close DOUBLE,
+                pre_close DOUBLE,
+                change DOUBLE,
+                pct_chg DOUBLE,
                 vol DOUBLE,
                 amount DOUBLE
             )
@@ -3803,6 +4639,9 @@ mod tests {
                 10.2,
                 9.8,
                 10.1,
+                10.0,
+                0.1,
+                1.0,
                 1000.0,
                 10000.0,
             ),
@@ -3814,6 +4653,9 @@ mod tests {
                 10.2,
                 9.8,
                 10.0,
+                10.1,
+                -0.1,
+                -0.9900990099009901,
                 1000.0,
                 10000.0,
             ),
@@ -3825,6 +4667,9 @@ mod tests {
                 10.3,
                 9.9,
                 10.2,
+                10.0,
+                0.2,
+                2.0,
                 1000.0,
                 10000.0,
             ),
@@ -3836,6 +4681,9 @@ mod tests {
                 10.4,
                 9.9,
                 10.3,
+                10.2,
+                0.1,
+                0.9803921568627451,
                 1000.0,
                 10000.0,
             ),
@@ -3847,6 +4695,9 @@ mod tests {
                 10.5,
                 9.9,
                 10.4,
+                10.3,
+                0.1,
+                0.9708737864077669,
                 1000.0,
                 10000.0,
             ),
@@ -3858,6 +4709,9 @@ mod tests {
                 10.6,
                 9.9,
                 10.5,
+                10.4,
+                0.1,
+                0.9615384615384615,
                 1000.0,
                 10000.0,
             ),
@@ -3869,6 +4723,9 @@ mod tests {
                 11.3,
                 9.9,
                 11.2,
+                10.5,
+                0.7,
+                6.666666666666667,
                 1000.0,
                 10000.0,
             ),
@@ -3880,6 +4737,9 @@ mod tests {
                 11.7,
                 9.9,
                 11.6,
+                11.2,
+                0.4,
+                3.5714285714285716,
                 1000.0,
                 10000.0,
             ),
@@ -3891,6 +4751,9 @@ mod tests {
                 12.0,
                 9.9,
                 11.9,
+                11.6,
+                0.3,
+                2.586206896551724,
                 1000.0,
                 10000.0,
             ),
@@ -3902,6 +4765,9 @@ mod tests {
                 12.3,
                 9.9,
                 12.2,
+                11.9,
+                0.3,
+                2.521008403361345,
                 1000.0,
                 10000.0,
             ),
@@ -3913,6 +4779,9 @@ mod tests {
                 12.7,
                 9.9,
                 12.6,
+                12.2,
+                0.4,
+                3.278688524590164,
                 1000.0,
                 10000.0,
             ),
@@ -3924,6 +4793,9 @@ mod tests {
                 12.9,
                 9.9,
                 12.8,
+                12.6,
+                0.2,
+                1.5873015873015872,
                 1000.0,
                 10000.0,
             ),
@@ -3935,6 +4807,9 @@ mod tests {
                 13.1,
                 9.9,
                 13.0,
+                12.8,
+                0.2,
+                1.5625,
                 1000.0,
                 10000.0,
             ),
@@ -3946,6 +4821,9 @@ mod tests {
                 10.1,
                 9.7,
                 9.9,
+                10.0,
+                -0.1,
+                -1.0,
                 1000.0,
                 10000.0,
             ),
@@ -3957,6 +4835,9 @@ mod tests {
                 10.1,
                 9.7,
                 10.0,
+                9.9,
+                0.1,
+                1.0101010101010102,
                 1000.0,
                 10000.0,
             ),
@@ -3968,6 +4849,9 @@ mod tests {
                 10.0,
                 9.8,
                 9.9,
+                10.0,
+                -0.1,
+                -1.0,
                 1000.0,
                 10000.0,
             ),
@@ -3979,6 +4863,9 @@ mod tests {
                 9.9,
                 9.7,
                 9.8,
+                9.9,
+                -0.1,
+                -1.0101010101010102,
                 1000.0,
                 10000.0,
             ),
@@ -3990,6 +4877,9 @@ mod tests {
                 9.8,
                 9.6,
                 9.7,
+                9.8,
+                -0.1,
+                -1.0204081632653061,
                 1000.0,
                 10000.0,
             ),
@@ -4001,6 +4891,9 @@ mod tests {
                 9.7,
                 9.5,
                 9.6,
+                9.7,
+                -0.1,
+                -1.0309278350515463,
                 1000.0,
                 10000.0,
             ),
@@ -4012,6 +4905,9 @@ mod tests {
                 9.2,
                 8.9,
                 9.1,
+                9.6,
+                -0.5,
+                -5.208333333333333,
                 1000.0,
                 10000.0,
             ),
@@ -4023,6 +4919,9 @@ mod tests {
                 9.1,
                 8.8,
                 9.0,
+                9.1,
+                -0.1,
+                -1.098901098901099,
                 1000.0,
                 10000.0,
             ),
@@ -4034,6 +4933,9 @@ mod tests {
                 8.9,
                 8.6,
                 8.8,
+                9.0,
+                -0.2,
+                -2.2222222222222223,
                 1000.0,
                 10000.0,
             ),
@@ -4045,6 +4947,9 @@ mod tests {
                 8.7,
                 8.4,
                 8.6,
+                8.8,
+                -0.2,
+                -2.272727272727273,
                 1000.0,
                 10000.0,
             ),
@@ -4056,6 +4961,9 @@ mod tests {
                 8.5,
                 8.2,
                 8.4,
+                8.6,
+                -0.2,
+                -2.3255813953488373,
                 1000.0,
                 10000.0,
             ),
@@ -4067,6 +4975,9 @@ mod tests {
                 8.3,
                 8.0,
                 8.2,
+                8.4,
+                -0.2,
+                -2.380952380952381,
                 1000.0,
                 10000.0,
             ),
@@ -4078,6 +4989,9 @@ mod tests {
                 8.2,
                 7.9,
                 8.1,
+                8.2,
+                -0.1,
+                -1.2195121951219512,
                 1000.0,
                 10000.0,
             ),
@@ -4089,6 +5003,9 @@ mod tests {
                 10.1,
                 9.9,
                 10.0,
+                10.0,
+                0.0,
+                0.0,
                 1000.0,
                 10000.0,
             ),
@@ -4100,6 +5017,9 @@ mod tests {
                 10.1,
                 9.9,
                 10.0,
+                10.0,
+                0.0,
+                0.0,
                 1000.0,
                 10000.0,
             ),
@@ -4111,6 +5031,9 @@ mod tests {
                 10.1,
                 9.9,
                 10.0,
+                10.0,
+                0.0,
+                0.0,
                 1000.0,
                 10000.0,
             ),
@@ -4122,6 +5045,9 @@ mod tests {
                 10.1,
                 9.9,
                 10.0,
+                10.0,
+                0.0,
+                0.0,
                 1000.0,
                 10000.0,
             ),
@@ -4133,6 +5059,9 @@ mod tests {
                 10.1,
                 9.9,
                 10.0,
+                10.0,
+                0.0,
+                0.0,
                 1000.0,
                 10000.0,
             ),
@@ -4144,6 +5073,9 @@ mod tests {
                 10.1,
                 9.9,
                 10.0,
+                10.0,
+                0.0,
+                0.0,
                 1000.0,
                 10000.0,
             ),
@@ -4155,6 +5087,9 @@ mod tests {
                 10.3,
                 9.9,
                 10.2,
+                10.0,
+                0.2,
+                2.0,
                 1000.0,
                 10000.0,
             ),
@@ -4166,6 +5101,9 @@ mod tests {
                 10.2,
                 9.9,
                 10.1,
+                10.2,
+                -0.1,
+                -0.9803921568627451,
                 1000.0,
                 10000.0,
             ),
@@ -4177,6 +5115,9 @@ mod tests {
                 10.1,
                 9.9,
                 10.0,
+                10.1,
+                -0.1,
+                -0.9900990099009901,
                 1000.0,
                 10000.0,
             ),
@@ -4188,6 +5129,9 @@ mod tests {
                 10.2,
                 9.9,
                 10.1,
+                10.0,
+                0.1,
+                1.0,
                 1000.0,
                 10000.0,
             ),
@@ -4199,6 +5143,9 @@ mod tests {
                 10.1,
                 9.9,
                 10.0,
+                10.1,
+                -0.1,
+                -0.9900990099009901,
                 1000.0,
                 10000.0,
             ),
@@ -4210,6 +5157,9 @@ mod tests {
                 10.2,
                 9.9,
                 10.1,
+                10.0,
+                0.1,
+                1.0,
                 1000.0,
                 10000.0,
             ),
@@ -4221,14 +5171,44 @@ mod tests {
                 10.1,
                 9.9,
                 10.0,
+                10.1,
+                -0.1,
+                -0.9900990099009901,
                 1000.0,
                 10000.0,
             ),
         ];
-        for (ts_code, trade_date, adj_type, open, high, low, close, vol, amount) in rows {
+        for (
+            ts_code,
+            trade_date,
+            adj_type,
+            open,
+            high,
+            low,
+            close,
+            pre_close,
+            change,
+            pct_chg,
+            vol,
+            amount,
+        ) in rows
+        {
             conn.execute(
-                "INSERT INTO stock_data (ts_code, trade_date, adj_type, open, high, low, close, vol, amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![ts_code, trade_date, adj_type, open, high, low, close, vol, amount],
+                "INSERT INTO stock_data (ts_code, trade_date, adj_type, open, high, low, close, pre_close, change, pct_chg, vol, amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    ts_code,
+                    trade_date,
+                    adj_type,
+                    open,
+                    high,
+                    low,
+                    close,
+                    pre_close,
+                    change,
+                    pct_chg,
+                    vol,
+                    amount
+                ],
             )
             .expect("insert stock_data");
         }
@@ -4268,7 +5248,7 @@ mod tests {
     }
 
     #[test]
-    fn positive_composite_score_uses_group_weights_with_equal_inner_weights() {
+    fn positive_composite_score_uses_requested_single_factor_weights() {
         let score = build_positive_composite_score(
             RuleAggMetric {
                 avg_future_return_pct: Some(5.0),
@@ -4297,25 +5277,262 @@ mod tests {
         )
         .expect("score");
 
-        let expected_primary = (1.5 + 2.0) / 2.0;
-        let expected_secondary = (2.0 + 1.0 + 2.0) / 3.0;
-        let expected_reference = 2.0;
-        let expected = (expected_primary * 5.0 + expected_secondary * 4.0 + expected_reference)
-            / 10.0;
+        let expected = 1.0 * 0.25 + 2.0 * 0.25 + 3.0 * 0.15 + 1.5 * 0.15 + 2.0 * 0.10 + 2.0 * 0.10;
         assert_close(score, expected, 1e-9);
     }
 
     #[test]
-    fn build_rule_combinations_expands_up_to_requested_size() {
-        let combos = build_rule_combinations(
-            &["A".to_string(), "B".to_string(), "C".to_string()],
-            2,
-        );
+    fn build_rule_combinations_only_keeps_multi_factor_sets() {
+        let combos =
+            build_rule_combinations(&["A".to_string(), "B".to_string(), "C".to_string()], 2);
         let labels = combos
             .into_iter()
             .map(|combo| combo.join("+"))
             .collect::<Vec<_>>();
-        assert_eq!(labels, vec!["A", "B", "C", "A+B", "A+C", "B+C"]);
+        assert_eq!(labels, vec!["A+B", "A+C", "B+C"]);
+    }
+
+    #[test]
+    fn build_rule_rows_accepts_small_positive_ic_for_auto_candidates() {
+        let strategy_options = vec!["ADV".to_string()];
+        let rule_meta = HashMap::from([(
+            "ADV".to_string(),
+            RuleMeta {
+                explain: "adv".to_string(),
+                tag: RuleTag::Normal,
+                scope_way_label: "LAST".to_string(),
+                scope_windows: 1,
+                points: 1.0,
+                has_dist_points: false,
+            },
+        )]);
+        let rule_aggregates = HashMap::from([
+            (
+                ("ADV".to_string(), true, 2),
+                RuleAggMetric {
+                    hit_n: 20,
+                    avg_future_return_pct: Some(3.0),
+                    strong_hit_rate: Some(0.4),
+                    win_rate: Some(0.6),
+                    avg_total_score: Some(10.0),
+                    avg_rank: Some(5.0),
+                },
+            ),
+            (
+                ("ADV".to_string(), true, 3),
+                RuleAggMetric {
+                    hit_n: 20,
+                    avg_future_return_pct: Some(3.0),
+                    strong_hit_rate: Some(0.4),
+                    win_rate: Some(0.6),
+                    avg_total_score: Some(10.0),
+                    avg_rank: Some(5.0),
+                },
+            ),
+            (
+                ("ADV".to_string(), true, 5),
+                RuleAggMetric {
+                    hit_n: 20,
+                    avg_future_return_pct: Some(3.0),
+                    strong_hit_rate: Some(0.4),
+                    win_rate: Some(0.6),
+                    avg_total_score: Some(10.0),
+                    avg_rank: Some(5.0),
+                },
+            ),
+        ]);
+        let rule_factor_metrics = HashMap::from([
+            (
+                ("ADV".to_string(), 2),
+                RuleFactorMetric {
+                    rank_ic_mean: Some(0.001),
+                    icir: Some(1.0),
+                    sharpe_ratio: Some(1.0),
+                },
+            ),
+            (
+                ("ADV".to_string(), 3),
+                RuleFactorMetric {
+                    rank_ic_mean: Some(0.001),
+                    icir: Some(1.0),
+                    sharpe_ratio: Some(1.0),
+                },
+            ),
+            (
+                ("ADV".to_string(), 5),
+                RuleFactorMetric {
+                    rank_ic_mean: Some(0.001),
+                    icir: Some(1.0),
+                    sharpe_ratio: Some(1.0),
+                },
+            ),
+        ]);
+        let future_summary_map = HashMap::from([
+            (
+                2,
+                StrategyPerformanceFutureSummary {
+                    horizon: 2,
+                    sample_count: 100,
+                    avg_future_return_pct: Some(1.0),
+                    p80_return_pct: None,
+                    p90_return_pct: None,
+                    p95_return_pct: None,
+                    strong_quantile: 0.9,
+                    strong_threshold_pct: None,
+                    strong_base_rate: Some(0.2),
+                    win_rate: Some(0.5),
+                    max_future_return_pct: None,
+                },
+            ),
+            (
+                3,
+                StrategyPerformanceFutureSummary {
+                    horizon: 3,
+                    sample_count: 100,
+                    avg_future_return_pct: Some(1.0),
+                    p80_return_pct: None,
+                    p90_return_pct: None,
+                    p95_return_pct: None,
+                    strong_quantile: 0.9,
+                    strong_threshold_pct: None,
+                    strong_base_rate: Some(0.2),
+                    win_rate: Some(0.5),
+                    max_future_return_pct: None,
+                },
+            ),
+            (
+                5,
+                StrategyPerformanceFutureSummary {
+                    horizon: 5,
+                    sample_count: 100,
+                    avg_future_return_pct: Some(1.0),
+                    p80_return_pct: None,
+                    p90_return_pct: None,
+                    p95_return_pct: None,
+                    strong_quantile: 0.9,
+                    strong_threshold_pct: None,
+                    strong_base_rate: Some(0.2),
+                    win_rate: Some(0.5),
+                    max_future_return_pct: None,
+                },
+            ),
+        ]);
+        let auto_filter = StrategyPerformanceAutoFilterConfig {
+            min_samples_2: 1,
+            min_samples_3: 1,
+            min_samples_5: 1,
+            min_samples_10: 1,
+            require_win_rate_above_market: false,
+            min_pass_horizons: 1,
+        };
+
+        let (rows, auto_candidates) = build_rule_rows(
+            &strategy_options,
+            &rule_meta,
+            &rule_aggregates,
+            &rule_factor_metrics,
+            &future_summary_map,
+            &auto_filter,
+            5,
+            &[],
+            &HashSet::new(),
+        );
+
+        assert_eq!(auto_candidates, vec!["ADV".to_string()]);
+        let row = rows
+            .iter()
+            .find(|row| row.rule_name == "ADV" && row.signal_direction == "positive")
+            .expect("positive row");
+        assert!(row.auto_candidate);
+        assert!(row.metrics.iter().all(|metric| metric.ic_passes_floor));
+        assert!(row.metrics.iter().all(|metric| metric.passes_auto_filter));
+    }
+
+    #[test]
+    fn combination_portfolio_rows_use_all_jointly_triggered_samples_per_day() {
+        let sample_rows = vec![
+            SampleFeatureRow {
+                signal_date: "20240101".to_string(),
+                ts_code: "000001.SZ".to_string(),
+                rank: Some(1),
+                total_score: Some(10.0),
+                future_return_pct: 2.0,
+                adv_hit_cnt: 2,
+                adv_score_sum: 4.0,
+                pos_hit_cnt: 2,
+                pos_score_sum: 4.0,
+                noisy_companion_cnt: 0,
+            },
+            SampleFeatureRow {
+                signal_date: "20240101".to_string(),
+                ts_code: "000002.SZ".to_string(),
+                rank: Some(2),
+                total_score: Some(9.0),
+                future_return_pct: 4.0,
+                adv_hit_cnt: 2,
+                adv_score_sum: 3.0,
+                pos_hit_cnt: 2,
+                pos_score_sum: 3.0,
+                noisy_companion_cnt: 0,
+            },
+            SampleFeatureRow {
+                signal_date: "20240101".to_string(),
+                ts_code: "000003.SZ".to_string(),
+                rank: Some(3),
+                total_score: Some(8.0),
+                future_return_pct: 10.0,
+                adv_hit_cnt: 1,
+                adv_score_sum: 2.0,
+                pos_hit_cnt: 1,
+                pos_score_sum: 2.0,
+                noisy_companion_cnt: 0,
+            },
+        ];
+        let hit_map = HashMap::from([
+            (
+                ("20240101".to_string(), "000001.SZ".to_string()),
+                HashMap::from([("A".to_string(), 2.0), ("B".to_string(), 1.0)]),
+            ),
+            (
+                ("20240101".to_string(), "000002.SZ".to_string()),
+                HashMap::from([("A".to_string(), 1.0), ("B".to_string(), 3.0)]),
+            ),
+            (
+                ("20240101".to_string(), "000003.SZ".to_string()),
+                HashMap::from([("A".to_string(), 3.0)]),
+            ),
+        ]);
+
+        let rows = build_combination_portfolio_rows(
+            &sample_rows,
+            &hit_map,
+            &["A".to_string(), "B".to_string()],
+            2,
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].strategy_label, "A + B");
+        assert_eq!(rows[0].factor_count, Some(2));
+        let full = rows[0]
+            .windows
+            .iter()
+            .find(|window| window.window_key == "full")
+            .expect("full window");
+        assert_close(
+            full.avg_portfolio_return_pct
+                .expect("avg_portfolio_return_pct"),
+            3.0,
+            1e-9,
+        );
+        assert_close(
+            full.avg_selected_count.expect("avg_selected_count"),
+            2.0,
+            1e-9,
+        );
+        assert_eq!(full.sample_count, 2);
+        assert!(full.rank_ic_mean.is_none());
+        assert!(full.icir.is_none());
+        assert!(full.layer_return_spread_pct.is_none());
     }
 
     #[test]
@@ -4325,13 +5542,13 @@ mod tests {
                 signal_date: "20240101".to_string(),
                 portfolio_return_pct: 2.0,
                 market_return_pct: 1.0,
-                selected_count: 2,
+                selected_count: 25,
             },
             DailyPortfolioPoint {
                 signal_date: "20240102".to_string(),
                 portfolio_return_pct: 1.5,
                 market_return_pct: 0.5,
-                selected_count: 2,
+                selected_count: 25,
             },
         ];
         let observations = vec![
@@ -4370,6 +5587,7 @@ mod tests {
         let window = build_portfolio_window("full", "全样本", &daily_points, Some(&observations));
 
         assert_eq!(window.sample_days, 2);
+        assert_eq!(window.sample_count, 50);
         assert_close(window.rank_ic_mean.expect("rank_ic_mean"), 0.75, 1e-9);
         assert_close(window.icir.expect("icir"), 2.1213203435596424, 1e-9);
         assert_close(
@@ -4379,6 +5597,291 @@ mod tests {
             1.5,
             1e-9,
         );
+        assert_close(
+            window.composite_score.expect("composite_score"),
+            1.7621320343559642,
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn portfolio_window_falls_back_to_overall_ic_when_daily_ic_is_unavailable() {
+        let daily_points = vec![
+            DailyPortfolioPoint {
+                signal_date: "20240101".to_string(),
+                portfolio_return_pct: 2.0,
+                market_return_pct: 1.0,
+                selected_count: 25,
+            },
+            DailyPortfolioPoint {
+                signal_date: "20240102".to_string(),
+                portfolio_return_pct: 3.0,
+                market_return_pct: 1.0,
+                selected_count: 25,
+            },
+        ];
+        let observations = vec![
+            ScoreObservation {
+                signal_date: "20240101".to_string(),
+                score: 1.0,
+                future_return_pct: 1.0,
+            },
+            ScoreObservation {
+                signal_date: "20240101".to_string(),
+                score: 1.0,
+                future_return_pct: 2.0,
+            },
+            ScoreObservation {
+                signal_date: "20240102".to_string(),
+                score: 2.0,
+                future_return_pct: 3.0,
+            },
+            ScoreObservation {
+                signal_date: "20240102".to_string(),
+                score: 2.0,
+                future_return_pct: 4.0,
+            },
+        ];
+
+        let window = build_portfolio_window("full", "全样本", &daily_points, Some(&observations));
+
+        assert_eq!(window.sample_count, 50);
+        assert_close(
+            window.rank_ic_mean.expect("rank_ic_mean"),
+            0.8944271909999159,
+            1e-9,
+        );
+        assert!(window.icir.is_none());
+        assert_close(
+            window
+                .layer_return_spread_pct
+                .expect("layer_return_spread_pct"),
+            2.0,
+            1e-9,
+        );
+        assert_close(
+            window.composite_score.expect("composite_score"),
+            1.675,
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn relative_portfolio_composite_score_uses_group_rank() {
+        let mut rows = vec![
+            StrategyPerformancePortfolioRow {
+                strategy_key: "combo_a".to_string(),
+                strategy_label: "A + B".to_string(),
+                sort_description: String::new(),
+                factor_count: Some(2),
+                windows: vec![StrategyPerformancePortfolioWindow {
+                    window_key: "full".to_string(),
+                    label: "全样本".to_string(),
+                    sample_days: 10,
+                    sample_count: 60,
+                    avg_portfolio_return_pct: Some(6.0),
+                    avg_market_return_pct: Some(2.0),
+                    avg_excess_return_pct: Some(4.0),
+                    excess_win_rate: Some(0.8),
+                    avg_selected_count: Some(5.0),
+                    rank_ic_mean: Some(0.05),
+                    icir: Some(2.0),
+                    layer_return_spread_pct: Some(5.0),
+                    composite_score: None,
+                    sharpe_ratio: Some(1.0),
+                }],
+            },
+            StrategyPerformancePortfolioRow {
+                strategy_key: "combo_b".to_string(),
+                strategy_label: "A + C".to_string(),
+                sort_description: String::new(),
+                factor_count: Some(2),
+                windows: vec![StrategyPerformancePortfolioWindow {
+                    window_key: "full".to_string(),
+                    label: "全样本".to_string(),
+                    sample_days: 10,
+                    sample_count: 60,
+                    avg_portfolio_return_pct: Some(4.0),
+                    avg_market_return_pct: Some(2.0),
+                    avg_excess_return_pct: Some(2.0),
+                    excess_win_rate: Some(0.6),
+                    avg_selected_count: Some(5.0),
+                    rank_ic_mean: Some(0.03),
+                    icir: Some(1.0),
+                    layer_return_spread_pct: Some(3.0),
+                    composite_score: None,
+                    sharpe_ratio: Some(0.5),
+                }],
+            },
+            StrategyPerformancePortfolioRow {
+                strategy_key: "combo_c".to_string(),
+                strategy_label: "B + C".to_string(),
+                sort_description: String::new(),
+                factor_count: Some(2),
+                windows: vec![StrategyPerformancePortfolioWindow {
+                    window_key: "full".to_string(),
+                    label: "全样本".to_string(),
+                    sample_days: 10,
+                    sample_count: 60,
+                    avg_portfolio_return_pct: Some(2.0),
+                    avg_market_return_pct: Some(2.0),
+                    avg_excess_return_pct: Some(0.0),
+                    excess_win_rate: Some(0.4),
+                    avg_selected_count: Some(5.0),
+                    rank_ic_mean: Some(0.01),
+                    icir: Some(0.0),
+                    layer_return_spread_pct: Some(1.0),
+                    composite_score: None,
+                    sharpe_ratio: Some(0.1),
+                }],
+            },
+        ];
+
+        apply_relative_portfolio_composite_scores(&mut rows);
+
+        assert_close(
+            rows[0].windows[0].composite_score.expect("top composite_score"),
+            1.0,
+            1e-9,
+        );
+        assert_close(
+            rows[1].windows[0].composite_score.expect("mid composite_score"),
+            0.0,
+            1e-9,
+        );
+        assert_close(
+            rows[2].windows[0].composite_score.expect("bottom composite_score"),
+            -1.0,
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn overall_score_analysis_falls_back_to_overall_ic_when_daily_ic_is_unavailable() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute(
+            r#"
+            CREATE TABLE strategy_perf_sample_returns (
+                signal_date VARCHAR,
+                ts_code VARCHAR,
+                horizon INTEGER,
+                total_score DOUBLE,
+                future_return_pct DOUBLE
+            )
+            "#,
+            [],
+        )
+        .expect("create strategy_perf_sample_returns");
+
+        for index in 0..25 {
+            conn.execute(
+                "INSERT INTO strategy_perf_sample_returns (signal_date, ts_code, horizon, total_score, future_return_pct) VALUES (?, ?, ?, ?, ?)",
+                params![
+                    "20240101",
+                    format!("0001{index:02}.SZ"),
+                    5i64,
+                    1.0f64,
+                    (index + 1) as f64,
+                ],
+            )
+            .expect("insert day1 row");
+            conn.execute(
+                "INSERT INTO strategy_perf_sample_returns (signal_date, ts_code, horizon, total_score, future_return_pct) VALUES (?, ?, ?, ?, ?)",
+                params![
+                    "20240102",
+                    format!("0002{index:02}.SZ"),
+                    5i64,
+                    2.0f64,
+                    (index + 26) as f64,
+                ],
+            )
+            .expect("insert day2 row");
+        }
+
+        let future_summary_map = HashMap::from([(
+            5,
+            StrategyPerformanceFutureSummary {
+                horizon: 5,
+                sample_count: 50,
+                avg_future_return_pct: Some(25.5),
+                p80_return_pct: None,
+                p90_return_pct: None,
+                p95_return_pct: None,
+                strong_quantile: 0.9,
+                strong_threshold_pct: Some(40.0),
+                strong_base_rate: Some(0.2),
+                win_rate: Some(1.0),
+                max_future_return_pct: Some(50.0),
+            },
+        )]);
+
+        let analysis = build_overall_score_analysis(&conn, 5, &future_summary_map)
+            .expect("overall score analysis")
+            .expect("analysis row");
+
+        assert_eq!(analysis.sample_count, 50);
+        assert_close(
+            analysis.rank_ic_mean.expect("rank_ic_mean"),
+            0.8661986608440465,
+            1e-9,
+        );
+        assert!(analysis.icir.is_none());
+        assert_close(
+            analysis.spearman_corr.expect("spearman_corr"),
+            0.8661986608440465,
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn filter_low_sample_combination_rows_keeps_benchmarks_and_drops_small_combos() {
+        let kept = summarize_daily_points(
+            "combo_keep",
+            "A + B",
+            "combo",
+            Some(2),
+            &[DailyPortfolioPoint {
+                signal_date: "20240101".to_string(),
+                portfolio_return_pct: 1.0,
+                market_return_pct: 0.0,
+                selected_count: 3,
+            }],
+            None,
+        );
+        let dropped = summarize_daily_points(
+            "combo_drop",
+            "A + C",
+            "combo",
+            Some(2),
+            &[DailyPortfolioPoint {
+                signal_date: "20240101".to_string(),
+                portfolio_return_pct: 1.0,
+                market_return_pct: 0.0,
+                selected_count: 1,
+            }],
+            None,
+        );
+        let benchmark = summarize_daily_points(
+            "raw_topn",
+            "原始 TopN",
+            "raw",
+            None,
+            &[DailyPortfolioPoint {
+                signal_date: "20240101".to_string(),
+                portfolio_return_pct: 1.0,
+                market_return_pct: 0.0,
+                selected_count: 1,
+            }],
+            None,
+        );
+
+        let rows = filter_low_sample_combination_rows(vec![kept, dropped, benchmark], 2);
+        let keys = rows
+            .into_iter()
+            .map(|row| row.strategy_key)
+            .collect::<Vec<_>>();
+
+        assert_eq!(keys, vec!["combo_keep".to_string(), "raw_topn".to_string()]);
     }
 
     #[test]
@@ -4465,7 +5968,102 @@ mod tests {
                 .expect("rule detail")
                 .directions
                 .iter()
-                .any(|direction| direction.signal_direction == "positive")
+                .any(|direction| direction.signal_direction == "factor")
+        );
+    }
+
+    #[test]
+    fn rule_detail_rank_ic_uses_full_score_cross_section() {
+        let source_dir = unique_temp_dir();
+        write_fixture_files(&source_dir);
+        write_fixture_source_db(&source_dir);
+        write_fixture_result_db(&source_dir);
+
+        let detail = get_strategy_performance_rule_detail(
+            source_dir.to_str().expect("utf8").to_string(),
+            Some(5),
+            Some(0.9),
+            "ADV".to_string(),
+        )
+        .expect("load detail")
+        .expect("detail row");
+
+        let factor = detail
+            .directions
+            .iter()
+            .find(|direction| direction.signal_direction == "factor")
+            .expect("factor direction");
+
+        assert_close(
+            factor.rank_ic_mean.expect("rank_ic_mean"),
+            factor.spearman_corr.expect("spearman_corr"),
+            1e-9,
+        );
+        assert!(factor.icir.is_none());
+    }
+
+    #[test]
+    fn strategy_performance_horizon_view_matches_page_horizon_sections() {
+        let source_dir = unique_temp_dir();
+        write_fixture_files(&source_dir);
+        write_fixture_source_db(&source_dir);
+        write_fixture_result_db(&source_dir);
+
+        let page = get_strategy_performance_page(
+            source_dir.to_str().expect("utf8").to_string(),
+            Some(3),
+            Some(0.9),
+            Some("manual".to_string()),
+            Some(vec!["ADV".to_string()]),
+            Some(1),
+            Some(1),
+            Some(1),
+            Some(1),
+            Some(false),
+            Some(1),
+            Some(1),
+            Some(2),
+            None,
+            None,
+            None,
+            Some("ADV".to_string()),
+        )
+        .expect("load page");
+
+        let horizon_view = get_strategy_performance_horizon_view(
+            source_dir.to_str().expect("utf8").to_string(),
+            Some(3),
+            Some(0.9),
+            page.resolved_advantage_rule_names.clone(),
+            Some(1),
+            Some(1),
+            Some(1),
+            Some(1),
+            Some(false),
+            Some(1),
+            Some(1),
+            Some(2),
+            None,
+            None,
+            None,
+        )
+        .expect("load horizon view");
+
+        assert_eq!(horizon_view.selected_horizon, page.selected_horizon);
+        assert_eq!(
+            horizon_view.noisy_companion_rule_names,
+            page.noisy_companion_rule_names
+        );
+        assert_eq!(horizon_view.companion_rows.len(), page.companion_rows.len());
+        assert_eq!(horizon_view.portfolio_rows.len(), page.portfolio_rows.len());
+        assert_eq!(
+            horizon_view
+                .overall_score_analysis
+                .as_ref()
+                .map(|item| item.horizon),
+            page.overall_score_analysis
+                .as_ref()
+                .map(|item| item.horizon)
         );
     }
 
@@ -4506,7 +6104,7 @@ mod tests {
                 .expect("rule detail")
                 .directions
                 .iter()
-                .any(|direction| direction.signal_direction == "positive")
+                .any(|direction| direction.signal_direction == "factor")
         );
     }
 }

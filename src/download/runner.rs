@@ -476,10 +476,7 @@ fn download_ths_concepts_concurrent_once(
                     match fetch_one_ths_concept_row(&http, &item.ts_code, &item.name) {
                         Ok(row) => {
                             if tx
-                                .send(ThsConceptConcurrentMessage::Success {
-                                    item,
-                                    row,
-                                })
+                                .send(ThsConceptConcurrentMessage::Success { item, row })
                                 .is_err()
                             {
                                 break;
@@ -547,7 +544,9 @@ fn download_ths_concepts_concurrent_once(
                 stop_flag.store(true, Ordering::Release);
                 let current_label = item.as_ref().map(|value| value.ts_code.clone());
                 let message = match item {
-                    Some(item) => format!("{} {} 抓取失败并停止: {}", item.ts_code, item.name, error),
+                    Some(item) => {
+                        format!("{} {} 抓取失败并停止: {}", item.ts_code, item.name, error)
+                    }
                     None => format!("概念并行任务初始化失败并停止: {error}"),
                 };
                 emit_progress(
