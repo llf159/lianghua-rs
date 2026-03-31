@@ -25,8 +25,8 @@ import {
 } from "../../shared/tableSort";
 import "./css/StrategyPerformanceBacktestPage.css";
 
-const STRATEGY_PERFORMANCE_STATE_KEY = "lh_strategy_performance_page_v7";
-const HORIZON_OPTIONS = [2, 3, 5, 10] as const;
+const STRATEGY_PERFORMANCE_STATE_KEY = "lh_strategy_performance_page_v8";
+const HORIZON_OPTIONS = [2, 3, 5] as const;
 const QUANTILE_OPTIONS = [0.8, 0.9, 0.95] as const;
 const DEFAULT_AUTO_MIN_SAMPLES = {
   2: 5,
@@ -34,6 +34,7 @@ const DEFAULT_AUTO_MIN_SAMPLES = {
   5: 10,
   10: 20,
 } as const;
+const DEFAULT_MAX_COMBINATION_SIZE = 3;
 const MIXED_SORT_KEY_OPTIONS = [
   { value: "adv_hit_cnt", label: "优势命中数" },
   { value: "adv_score_sum", label: "优势得分和" },
@@ -55,6 +56,7 @@ type SubmittedQuery = {
   minPassHorizons: number;
   minAdvHits: number;
   topLimit: number;
+  maxCombinationSize: number;
   mixedSortKeys: string[];
 };
 
@@ -72,6 +74,7 @@ type PersistedState = {
   minPassHorizons: string;
   minAdvHits: string;
   topLimit: string;
+  maxCombinationSize: string;
   mixedSortKeys: string[];
   selectedRuleName: string;
   pageData: StrategyPerformancePageData | null;
@@ -176,6 +179,7 @@ function sameSubmittedQuery(
     left.minPassHorizons === right.minPassHorizons &&
     left.minAdvHits === right.minAdvHits &&
     left.topLimit === right.topLimit &&
+    left.maxCombinationSize === right.maxCombinationSize &&
     sameStringArray(left.mixedSortKeys, right.mixedSortKeys)
   );
 }
@@ -199,13 +203,6 @@ function formatRate(value?: number | null, digits = 1) {
     return "--";
   }
   return `${(value * 100).toFixed(digits)}%`;
-}
-
-function formatLift(value?: number | null) {
-  if (value === null || value === undefined || !Number.isFinite(value)) {
-    return "--";
-  }
-  return `${value.toFixed(2)}x`;
 }
 
 function valueClassName(value?: number | null) {
@@ -284,7 +281,10 @@ function compareRuleRows(
   return (
     Number(right.in_advantage_set) - Number(left.in_advantage_set) ||
     Number(right.auto_candidate) - Number(left.auto_candidate) ||
-    compareDescNumber(leftMetric?.strong_lift, rightMetric?.strong_lift) ||
+    compareDescNumber(left.overall_composite_score, right.overall_composite_score) ||
+    compareDescNumber(leftMetric?.composite_score, rightMetric?.composite_score) ||
+    compareDescNumber(leftMetric?.rank_ic_mean, rightMetric?.rank_ic_mean) ||
+    compareDescNumber(leftMetric?.icir, rightMetric?.icir) ||
     compareDescNumber(
       leftMetric?.avg_future_return_pct,
       rightMetric?.avg_future_return_pct,
@@ -303,7 +303,7 @@ function sortRuleRows(
   );
 }
 
-type RuleTableSortKey = "rule_name" | "h2" | "h3" | "h5" | "h10";
+type RuleTableSortKey = "rule_name" | "h2" | "h3" | "h5";
 type CompanionTableSortKey =
   | "rule_name"
   | "hit_n"
@@ -328,7 +328,7 @@ function horizonSortKey(horizon: number): RuleTableSortKey {
   if (horizon === 5) {
     return "h5";
   }
-  return "h10";
+  return "h5";
 }
 
 function findPortfolioWindow(
@@ -379,27 +379,39 @@ function MetricCell({
         <strong>{formatNumber(metric.hit_n, 0)}</strong>
       </div>
       <div>
-        <span>均收益</span>
-        <strong className={valueClassName(metric.avg_future_return_pct)}>
-          {formatPercent(metric.avg_future_return_pct)}
+        <span>IC</span>
+        <strong className={valueClassName(metric.rank_ic_mean)}>
+          {formatNumber(metric.rank_ic_mean, 3)}
         </strong>
       </div>
       <div>
-        <span>Lift</span>
-        <strong>{formatLift(metric.strong_lift)}</strong>
+        <span>ICIR</span>
+        <strong className={valueClassName(metric.icir)}>
+          {formatNumber(metric.icir, 2)}
+        </strong>
       </div>
       <div>
-        <span>胜率</span>
-        <strong>{formatRate(metric.win_rate)}</strong>
+        <span>分层差</span>
+        <strong className={valueClassName(metric.layer_return_spread_pct)}>
+          {formatPercent(metric.layer_return_spread_pct)}
+        </strong>
       </div>
-      {row.signal_direction === "negative" ? (
-        <div>
-          <span>Hit差</span>
-          <strong className={valueClassName(metric.hit_vs_non_hit_delta_pct)}>
-            {formatPercent(metric.hit_vs_non_hit_delta_pct)}
-          </strong>
-        </div>
-      ) : null}
+      <div>
+        <span>强势命中</span>
+        <strong>{formatRate(metric.strong_hit_rate)}</strong>
+      </div>
+      <div>
+        <span>Sharpe</span>
+        <strong className={valueClassName(metric.sharpe_ratio)}>
+          {formatNumber(metric.sharpe_ratio, 2)}
+        </strong>
+      </div>
+      <div>
+        <span>综合分</span>
+        <strong className={valueClassName(metric.composite_score)}>
+          {formatNumber(metric.composite_score, 2)}
+        </strong>
+      </div>
       {metric.low_confidence ? (
         <small className="strategy-performance-low-confidence">低样本</small>
       ) : null}
@@ -419,10 +431,6 @@ function SummarySection({
       <div className="strategy-performance-section-head">
         <div>
           <h3>1. 强势股定义</h3>
-          <p>
-            对每个持有周期单独统计未来收益分布；当前页面的强势样本阈值来自所选持有周期下的
-            quantile_cont。
-          </p>
         </div>
       </div>
       <div className="strategy-performance-summary-grid">
@@ -494,7 +502,7 @@ function RuleTable({
   onPickRule,
 }: {
   title: string;
-  subtitle: string;
+  subtitle?: string;
   rows: StrategyPerformanceRuleRow[];
   selectedHorizon: number;
   selectedRuleName: string;
@@ -517,9 +525,6 @@ function RuleTable({
         },
         h5: {
           compare: (left, right) => compareRuleRows(left, right, 5),
-        },
-        h10: {
-          compare: (left, right) => compareRuleRows(left, right, 10),
         },
       }) satisfies Partial<
         Record<RuleTableSortKey, SortDefinition<StrategyPerformanceRuleRow>>
@@ -554,7 +559,7 @@ function RuleTable({
       <div className="strategy-performance-section-head">
         <div>
           <h3>{title}</h3>
-          <p>{subtitle}</p>
+          {subtitle ? <p>{subtitle}</p> : null}
         </div>
       </div>
       {rows.length === 0 ? (
@@ -644,7 +649,7 @@ function RuleTable({
                     <td className="strategy-performance-col-status">
                       <div className="strategy-performance-inline-badges">
                         {row.auto_candidate ? (
-                          <StatusBadge tone="good">自动前十</StatusBadge>
+                          <StatusBadge tone="good">综合候选</StatusBadge>
                         ) : null}
                         {row.manually_selected ? (
                           <StatusBadge tone="neutral">手工</StatusBadge>
@@ -717,7 +722,7 @@ function CompanionTable({
   defaultSortDirection = "desc",
 }: {
   title: string;
-  subtitle: string;
+  subtitle?: string;
   rows: StrategyPerformanceCompanionRow[];
   defaultSortDirection?: "desc" | "asc";
 }) {
@@ -756,7 +761,7 @@ function CompanionTable({
       <div className="strategy-performance-section-head">
         <div>
           <h3>{title}</h3>
-          <p>{subtitle}</p>
+          {subtitle ? <p>{subtitle}</p> : null}
         </div>
       </div>
       {rows.length === 0 ? (
@@ -971,11 +976,8 @@ function PortfolioTable({ rows }: { rows: StrategyPerformancePortfolioRow[] }) {
     <section className="strategy-performance-card">
       <div className="strategy-performance-section-head">
         <div>
-          <h3>6. 基于优势策略的买法回测</h3>
-          <p>
-            原始 TopN 作为基准；其余组合只在优势样本池内比较，指标按全样本、近
-            40 期、近 20 期展示。
-          </p>
+          <h3>6. 单因子 / 多因子组合回测</h3>
+          <p>TopN 组合结果。</p>
         </div>
       </div>
       <div className="strategy-performance-table-wrap">
@@ -1037,6 +1039,11 @@ function PortfolioTable({ rows }: { rows: StrategyPerformancePortfolioRow[] }) {
                   <div className="strategy-performance-rule-name">
                     <strong>{row.strategy_label}</strong>
                   </div>
+                  {row.factor_count ? (
+                    <div className="strategy-performance-rule-meta">
+                      {row.factor_count} 因子
+                    </div>
+                  ) : null}
                 </td>
                 <td className="strategy-performance-rule-meta">
                   {row.sort_description}
@@ -1092,6 +1099,32 @@ function PortfolioTable({ rows }: { rows: StrategyPerformancePortfolioRow[] }) {
                             {formatNumber(summary?.avg_selected_count)}
                           </strong>
                         </div>
+                        <div>
+                          <span>IC</span>
+                          <strong className={valueClassName(summary?.rank_ic_mean)}>
+                            {formatNumber(summary?.rank_ic_mean, 3)}
+                          </strong>
+                        </div>
+                        <div>
+                          <span>ICIR</span>
+                          <strong className={valueClassName(summary?.icir)}>
+                            {formatNumber(summary?.icir, 2)}
+                          </strong>
+                        </div>
+                        <div>
+                          <span>分层差</span>
+                          <strong
+                            className={valueClassName(
+                              summary?.layer_return_spread_pct,
+                            )}
+                          >
+                            {formatPercent(summary?.layer_return_spread_pct)}
+                          </strong>
+                        </div>
+                        <div>
+                          <span>Sharpe</span>
+                          <strong>{formatNumber(summary?.sharpe_ratio, 2)}</strong>
+                        </div>
                       </div>
                     </td>
                   );
@@ -1129,8 +1162,8 @@ function ApplyActionCard({
       <div className="strategy-performance-note-strip">
         <span className="strategy-performance-note">
           {hasPendingChanges
-            ? "筛选条件或当前优势/伴随集合有变更，点击“应用统计”后刷新结果。"
-            : "当前页已同步显示最近一次统计结果。"}
+            ? "参数已变更，重新应用后刷新。"
+            : "显示最近一次结果。"}
         </span>
       </div>
     </div>
@@ -1147,13 +1180,6 @@ function RuleDirectionCard({
       <div className="strategy-performance-section-head">
         <div>
           <h4>{detail.direction_label}</h4>
-          <p>
-            该方向下的 rule_score 与 future_return 关系，按
-            {detail.bucket_mode === "score_value"
-              ? "精确 score 值"
-              : "score 分桶"}
-            分层。
-          </p>
         </div>
         <div className="strategy-performance-inline-badges">
           {detail.has_dist_points ? (
@@ -1167,7 +1193,7 @@ function RuleDirectionCard({
           <strong>{formatNumber(detail.sample_count, 0)}</strong>
         </div>
         <div>
-          <span>均收益</span>
+          <span>命中均收益</span>
           <strong className={valueClassName(detail.avg_future_return_pct)}>
             {formatPercent(detail.avg_future_return_pct)}
           </strong>
@@ -1181,21 +1207,35 @@ function RuleDirectionCard({
           <strong>{formatRate(detail.win_rate)}</strong>
         </div>
         <div>
-          <span>corr(score, ret)</span>
+          <span>全样本相关</span>
           <strong>{formatNumber(detail.spearman_corr, 3)}</strong>
         </div>
         <div>
-          <span>corr(|score|, ret)</span>
-          <strong>{formatNumber(detail.abs_spearman_corr, 3)}</strong>
+          <span>ICIR</span>
+          <strong className={valueClassName(detail.icir)}>
+            {formatNumber(detail.icir, 2)}
+          </strong>
         </div>
         <div>
-          <span>hit vs non-hit</span>
+          <span>Hit vs Non-hit</span>
           <strong className={valueClassName(detail.hit_vs_non_hit_delta_pct)}>
             {formatPercent(detail.hit_vs_non_hit_delta_pct)}
           </strong>
         </div>
         <div>
-          <span>极端分值 - 温和分值</span>
+          <span>IC</span>
+          <strong className={valueClassName(detail.rank_ic_mean)}>
+            {formatNumber(detail.rank_ic_mean, 3)}
+          </strong>
+        </div>
+        <div>
+          <span>Sharpe</span>
+          <strong className={valueClassName(detail.sharpe_ratio)}>
+            {formatNumber(detail.sharpe_ratio, 2)}
+          </strong>
+        </div>
+        <div>
+          <span>高分层 - 低分层</span>
           <strong
             className={valueClassName(
               detail.extreme_score_minus_mild_score_pct,
@@ -1319,10 +1359,6 @@ function RuleDetailModal({
               <h3 id="strategy-performance-rule-detail-title">
                 策略得分影响
               </h3>
-              <p>
-                不只看是否命中，而是直接看该策略的 rule_score、极端分值和
-                hit_count 是否真能解释未来收益差异。
-              </p>
             </div>
           </div>
 
@@ -1349,7 +1385,7 @@ function RuleDetailModal({
                 ) : null}
               </div>
               <div className="strategy-performance-note-box">
-                {detail.explain || "当前策略无补充说明。"}
+                {detail.explain || "--"}
               </div>
               {detail.directions.map((directionDetail) => (
                 <RuleDirectionCard
@@ -1384,7 +1420,7 @@ export default function StrategyPerformanceBacktestPage() {
     () => persistedState?.sourcePath ?? readStoredSourcePath(),
   );
   const [selectedHorizonInput, setSelectedHorizonInput] = useState(
-    persistedState?.selectedHorizon ?? "10",
+    persistedState?.selectedHorizon ?? "5",
   );
   const [strongQuantileInput, setStrongQuantileInput] = useState(
     persistedState?.strongQuantile ?? "0.9",
@@ -1413,7 +1449,7 @@ export default function StrategyPerformanceBacktestPage() {
         ? String(DEFAULT_AUTO_MIN_SAMPLES[5])
         : (persistedState?.autoMinSamples5 ?? String(DEFAULT_AUTO_MIN_SAMPLES[5])),
   );
-  const [autoMinSamples10, setAutoMinSamples10] = useState(
+  const [autoMinSamples10] = useState(
     () =>
       useMigratedAutoMinSampleDefaults
         ? String(DEFAULT_AUTO_MIN_SAMPLES[10])
@@ -1430,6 +1466,9 @@ export default function StrategyPerformanceBacktestPage() {
   );
   const [topLimitInput, setTopLimitInput] = useState(
     persistedState?.topLimit ?? "100",
+  );
+  const [maxCombinationSizeInput, setMaxCombinationSizeInput] = useState(
+    persistedState?.maxCombinationSize ?? String(DEFAULT_MAX_COMBINATION_SIZE),
   );
   const [mixedSortKeys, setMixedSortKeys] = useState<string[]>(() =>
     arrayFromUnknown(persistedState?.mixedSortKeys).length > 0
@@ -1463,7 +1502,7 @@ export default function StrategyPerformanceBacktestPage() {
         selectedHorizon:
           typeof query.selectedHorizon === "number"
             ? query.selectedHorizon
-            : 10,
+            : 5,
         strongQuantile:
           typeof query.strongQuantile === "number" ? query.strongQuantile : 0.9,
         manualRuleNames: arrayFromUnknown(query.manualRuleNames),
@@ -1496,6 +1535,10 @@ export default function StrategyPerformanceBacktestPage() {
           typeof query.minPassHorizons === "number" ? query.minPassHorizons : 2,
         minAdvHits: typeof query.minAdvHits === "number" ? query.minAdvHits : 1,
         topLimit: typeof query.topLimit === "number" ? query.topLimit : 100,
+        maxCombinationSize:
+          typeof query.maxCombinationSize === "number"
+            ? query.maxCombinationSize
+            : DEFAULT_MAX_COMBINATION_SIZE,
         mixedSortKeys: arrayFromUnknown(query.mixedSortKeys),
       };
     },
@@ -1573,7 +1616,7 @@ export default function StrategyPerformanceBacktestPage() {
     if (!sourcePathTrimmed) {
       return null;
     }
-    const selectedHorizon = parsePositiveInt(selectedHorizonInput, 10);
+    const selectedHorizon = parsePositiveInt(selectedHorizonInput, 5);
     const strongQuantile = parseQuantile(strongQuantileInput);
     const normalizedManualRuleNames = normalizeStringArray(currentAdvantageRuleNames);
     return {
@@ -1589,6 +1632,10 @@ export default function StrategyPerformanceBacktestPage() {
       minPassHorizons: parsePositiveInt(minPassHorizonsInput, 2),
       minAdvHits: parsePositiveInt(minAdvHitsInput, 1),
       topLimit: parsePositiveInt(topLimitInput, 100),
+      maxCombinationSize: parsePositiveInt(
+        maxCombinationSizeInput,
+        DEFAULT_MAX_COMBINATION_SIZE,
+      ),
       mixedSortKeys: normalizeStringArray(mixedSortKeys),
     };
   };
@@ -1658,6 +1705,7 @@ export default function StrategyPerformanceBacktestPage() {
       submittedQuery.minPassHorizons !== currentQuery.minPassHorizons ||
       submittedQuery.minAdvHits !== currentQuery.minAdvHits ||
       submittedQuery.topLimit !== currentQuery.topLimit ||
+      submittedQuery.maxCombinationSize !== currentQuery.maxCombinationSize ||
       !sameStringArray(
         submittedQuery.mixedSortKeys,
         currentQuery.mixedSortKeys,
@@ -1670,6 +1718,7 @@ export default function StrategyPerformanceBacktestPage() {
     autoMinSamples5,
     minAdvHitsInput,
     minPassHorizonsInput,
+    maxCombinationSizeInput,
     mixedSortKeys,
     currentAdvantageRuleNames,
     requireWinRateAboveMarket,
@@ -1712,6 +1761,7 @@ export default function StrategyPerformanceBacktestPage() {
       minPassHorizons: minPassHorizonsInput,
       minAdvHits: minAdvHitsInput,
       topLimit: topLimitInput,
+      maxCombinationSize: maxCombinationSizeInput,
       mixedSortKeys,
       selectedRuleName: selectedRuleNameInput,
       pageData,
@@ -1780,7 +1830,7 @@ export default function StrategyPerformanceBacktestPage() {
     () => findSummary(pageData?.future_summaries ?? [], selectedHorizonValue),
     [pageData, selectedHorizonValue],
   );
-  const pendingSelectedHorizon = parsePositiveInt(selectedHorizonInput, 10);
+  const pendingSelectedHorizon = parsePositiveInt(selectedHorizonInput, 5);
 
   const moveRuleToAdvantage = (ruleName: string) => {
     setManualRuleNames((current) =>
@@ -1812,7 +1862,7 @@ export default function StrategyPerformanceBacktestPage() {
     }
     const cacheKey = [
       sourcePathTrimmed,
-      parsePositiveInt(selectedHorizonInput, 10),
+      parsePositiveInt(selectedHorizonInput, 5),
       parseQuantile(strongQuantileInput),
       normalizedRuleName,
     ].join("|");
@@ -1827,7 +1877,7 @@ export default function StrategyPerformanceBacktestPage() {
     try {
       const nextDetail = await getStrategyPerformanceRuleDetail({
         sourcePath: sourcePathTrimmed,
-        selectedHorizon: parsePositiveInt(selectedHorizonInput, 10),
+        selectedHorizon: parsePositiveInt(selectedHorizonInput, 5),
         strongQuantile: parseQuantile(strongQuantileInput),
         selectedRuleName: normalizedRuleName,
       });
@@ -1858,10 +1908,7 @@ export default function StrategyPerformanceBacktestPage() {
         <div className="strategy-performance-section-head">
           <div>
             <h2>策略表现回测 / 优势策略分析</h2>
-            <p>
-              从未来强势股反推优势策略，验证得分强度，分析伴随增强/噪音，
-              并回测基于优势策略过滤后的买法。统一展示 2 / 3 / 5 / 10 日四个持有周期。
-            </p>
+            <p>2 / 3 / 5 日统计。</p>
           </div>
           <div className="strategy-performance-inline-badges">
             <StatusBadge tone="neutral">
@@ -1934,15 +1981,15 @@ export default function StrategyPerformanceBacktestPage() {
           </label>
 
           <label className="strategy-performance-field">
-            <span>10 日最小样本</span>
+            <span>组合因子上限</span>
             <input
-              value={autoMinSamples10}
-              onChange={(event) => setAutoMinSamples10(event.target.value)}
+              value={maxCombinationSizeInput}
+              onChange={(event) => setMaxCombinationSizeInput(event.target.value)}
             />
           </label>
 
           <label className="strategy-performance-field">
-            <span>至少通过几个持有周期</span>
+            <span>负向判定最少周期</span>
             <select
               value={minPassHorizonsInput}
               onChange={(event) => setMinPassHorizonsInput(event.target.value)}
@@ -1950,7 +1997,6 @@ export default function StrategyPerformanceBacktestPage() {
               <option value="1">1</option>
               <option value="2">2</option>
               <option value="3">3</option>
-              <option value="4">4</option>
             </select>
           </label>
 
@@ -2066,7 +2112,6 @@ export default function StrategyPerformanceBacktestPage() {
             <div className="strategy-performance-pool-card strategy-performance-pool-card-editor">
               <div className="strategy-performance-pool-card-head">
                 <strong>当前优势 / 伴随集</strong>
-                <span>点击规则可在两侧移动</span>
               </div>
               <div className="strategy-performance-pool-toolbar">
                 <input
@@ -2094,7 +2139,6 @@ export default function StrategyPerformanceBacktestPage() {
               <div className="strategy-performance-pool-dual-grid">
                 <div className="strategy-performance-pool-subcard">
                   <strong>当前优势集</strong>
-                  <span className="strategy-performance-muted">点击移出到伴随集</span>
                   <div className="strategy-performance-pool-chip-wrap">
                     {filteredCurrentAdvantageRuleNames.length > 0 ? (
                       filteredCurrentAdvantageRuleNames.map((ruleName) => (
@@ -2116,7 +2160,6 @@ export default function StrategyPerformanceBacktestPage() {
                 </div>
                 <div className="strategy-performance-pool-subcard">
                   <strong>当前伴随集</strong>
-                  <span className="strategy-performance-muted">点击纳入优势集</span>
                   <div className="strategy-performance-pool-chip-wrap">
                     {filteredCurrentCompanionRuleNames.length > 0 ? (
                       filteredCurrentCompanionRuleNames.map((ruleName) => (
@@ -2166,7 +2209,7 @@ export default function StrategyPerformanceBacktestPage() {
 
       <RuleTable
         title="2. 优势策略集"
-        subtitle="优势策略要求同时满足三件事：在赢家里更常见、自身未来收益也不错、触发样本别太少。首次统计默认先用自动前十；你也可以在上面的当前优势/伴随集合里微调后再次应用统计。"
+        subtitle=""
         rows={advantageRuleRows}
         selectedHorizon={selectedHorizonValue}
         selectedRuleName={selectedRuleNameInput}
@@ -2175,7 +2218,7 @@ export default function StrategyPerformanceBacktestPage() {
 
       <RuleTable
         title="3. 伴随策略集"
-        subtitle="伴随集 = 当前样本期内有正向命中、但不在优势集中的其他规则。它们只是陪同出现，不代表一定增强，增强或噪音要看下一块的条件分析。"
+        subtitle=""
         rows={companionRuleRows}
         selectedHorizon={selectedHorizonValue}
         selectedRuleName={selectedRuleNameInput}
@@ -2185,7 +2228,7 @@ export default function StrategyPerformanceBacktestPage() {
       <div className="strategy-performance-grid-2">
         <RuleTable
           title="4. 方向明确负向"
-          subtitle="方向明确负向要求同时满足：样本不太少、强势命中率低于市场、胜率低于市场、命中组相对 non-hit 组收益更差，并且要在多个持有周期上保持方向一致。"
+          subtitle=""
           rows={effectiveNegativeRuleRows}
           selectedHorizon={selectedHorizonValue}
           selectedRuleName={selectedRuleNameInput}
@@ -2193,7 +2236,7 @@ export default function StrategyPerformanceBacktestPage() {
         />
         <RuleTable
           title="待验证负向"
-          subtitle="待验证负向指当前还不能稳健地当成风险信号，常见情况是赢家占比仍偏高、均收益不弱、命中后并不比 non-hit 更差，或只在单一持有周期偶然转弱。"
+          subtitle=""
           rows={ineffectiveNegativeRuleRows}
           selectedHorizon={selectedHorizonValue}
           selectedRuleName={selectedRuleNameInput}
@@ -2204,41 +2247,19 @@ export default function StrategyPerformanceBacktestPage() {
       <div className="strategy-performance-grid-2">
         <CompanionTable
           title="5. 伴随策略分析: 增强项"
-          subtitle="只在优势命中数 >= min_adv_hits 的样本池内统计。收益差 > 0，表示在已经命中优势策略的前提下，这条伴随策略进一步增强。"
+          subtitle=""
           rows={enhancingCompanionRows}
           defaultSortDirection="desc"
         />
         <CompanionTable
           title="伴随策略分析: 噪音项"
-          subtitle="收益差 < 0，表示在已命中优势策略的前提下，这条伴随策略更像噪音。"
+          subtitle=""
           rows={noisyCompanionRows}
           defaultSortDirection="asc"
         />
       </div>
 
       <PortfolioTable rows={pageData?.portfolio_rows ?? []} />
-
-      <section className="strategy-performance-card">
-        <div className="strategy-performance-section-head">
-          <div>
-            <h3>方法说明</h3>
-            <p>
-              这里区分稀缺性、收益性、得分强度、伴随增强和伴随噪音，避免把单次结论直接当成规则白名单。
-            </p>
-          </div>
-        </div>
-        <div className="strategy-performance-method-list">
-          {(pageData?.methods ?? []).map((method) => (
-            <article
-              className="strategy-performance-method-card"
-              key={method.key}
-            >
-              <strong>{method.title}</strong>
-              <p>{method.description}</p>
-            </article>
-          ))}
-        </div>
-      </section>
 
       {ruleDetailOpen ? (
         <RuleDetailModal

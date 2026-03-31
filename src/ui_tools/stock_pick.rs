@@ -1024,6 +1024,7 @@ pub fn run_advanced_stock_pick(
         min_pass_horizons,
         Some(min_adv_hits),
         Some(top_limit),
+        None,
         Some(
             mixed_sort_keys
                 .iter()

@@ -30,7 +30,7 @@ import {
 import { useStockPickOutletContext } from "./StockPickPage";
 
 const ADVANCED_STOCK_PICK_STATE_KEY = "advanced-stock-pick-state";
-const HORIZON_OPTIONS = [2, 3, 5, 10] as const;
+const HORIZON_OPTIONS = [2, 3, 5] as const;
 const QUANTILE_OPTIONS = [0.8, 0.9, 0.95] as const;
 const DEFAULT_AUTO_MIN_SAMPLES = {
   2: 5,
@@ -522,7 +522,7 @@ export default function AdvancedStockPickPage() {
         ? String(DEFAULT_AUTO_MIN_SAMPLES[5])
         : (persistedState?.autoMinSamples5 ?? String(DEFAULT_AUTO_MIN_SAMPLES[5])),
   );
-  const [autoMinSamples10, setAutoMinSamples10] = useState(
+  const [autoMinSamples10] = useState(
     () =>
       useMigratedAutoMinSampleDefaults
         ? String(DEFAULT_AUTO_MIN_SAMPLES[10])
@@ -910,9 +910,7 @@ export default function AdvancedStockPickPage() {
       <div className="stock-pick-section-head">
         <div>
           <h3 className="stock-pick-subtitle">高级选股</h3>
-          <p className="stock-pick-note">
-            先刷新策略口径得到自动优势集，再手工核验当前优势/伴随集，最后叠加评分日、板块、概念和排序方法执行选股。板块、行业、地域、概念筛选不会影响上面的优势集识别。
-          </p>
+          <p className="stock-pick-note">先刷新优势集，再执行选股。</p>
         </div>
       </div>
 
@@ -960,7 +958,6 @@ export default function AdvancedStockPickPage() {
                 <option value="1">1</option>
                 <option value="2">2</option>
                 <option value="3">3</option>
-                <option value="4">4</option>
               </select>
             </label>
 
@@ -1001,13 +998,6 @@ export default function AdvancedStockPickPage() {
                 onChange={(event) => setAutoMinSamples5(event.target.value)}
               />
             </label>
-            <label className="stock-pick-field stock-pick-field-compact">
-              <span>10 日最小样本</span>
-              <input
-                value={autoMinSamples10}
-                onChange={(event) => setAutoMinSamples10(event.target.value)}
-              />
-            </label>
           </div>
 
           <div className="stock-pick-actions stock-pick-actions-split">
@@ -1020,7 +1010,7 @@ export default function AdvancedStockPickPage() {
               {preprocessLoading ? "刷新中..." : "刷新优势集"}
             </button>
             <span className="stock-pick-tip">
-              这里只决定自动优势集怎么识别，不看板块、行业、地域和概念筛选。
+              这里只刷新优势集。
             </span>
           </div>
 
@@ -1066,10 +1056,9 @@ export default function AdvancedStockPickPage() {
                 emptyText="当前搜索条件下没有匹配的自动优势策略。"
               />
               <div className="stock-pick-concept-panel stock-pick-advanced-panel">
-                <div className="stock-pick-concept-head">
-                  <strong>当前优势 / 伴随集</strong>
-                  <span>点击规则可在两侧移动</span>
-                </div>
+              <div className="stock-pick-concept-head">
+                <strong>当前优势 / 伴随集</strong>
+              </div>
                 <div className="stock-pick-concept-toolbar">
                   <input
                     type="text"
@@ -1089,7 +1078,6 @@ export default function AdvancedStockPickPage() {
                 <div className="stock-pick-advanced-dual-grid">
                   <div className="stock-pick-advanced-chip-card">
                     <strong>当前优势集</strong>
-                    <span className="stock-pick-note">点击移出到伴随集</span>
                     <div className="stock-pick-concept-list stock-pick-concept-list-inline">
                       {filteredCurrentAdvantageRuleNames.length > 0 ? (
                         filteredCurrentAdvantageRuleNames.map((item) => (
@@ -1109,7 +1097,6 @@ export default function AdvancedStockPickPage() {
                   </div>
                   <div className="stock-pick-advanced-chip-card">
                     <strong>当前伴随集</strong>
-                    <span className="stock-pick-note">点击纳入优势集</span>
                     <div className="stock-pick-concept-list stock-pick-concept-list-inline">
                       {filteredCurrentCompanionRuleNames.length > 0 ? (
                         filteredCurrentCompanionRuleNames.map((item) => (

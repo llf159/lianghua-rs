@@ -30,6 +30,12 @@ export type StrategyPerformanceHorizonMetric = {
   avg_total_score?: number | null;
   avg_rank?: number | null;
   hit_vs_non_hit_delta_pct?: number | null;
+  rank_ic_mean?: number | null;
+  icir?: number | null;
+  sharpe_ratio?: number | null;
+  layer_return_spread_pct?: number | null;
+  composite_score?: number | null;
+  ic_passes_floor: boolean;
   low_confidence: boolean;
   passes_auto_filter: boolean;
   passes_negative_filter: boolean;
@@ -52,6 +58,8 @@ export type StrategyPerformanceRuleRow = {
   negative_effective?: boolean | null;
   negative_effectiveness_label?: string | null;
   negative_review_notes: string[];
+  overall_composite_score?: number | null;
+  avg_rank_ic_mean?: number | null;
   metrics: StrategyPerformanceHorizonMetric[];
 };
 
@@ -76,12 +84,17 @@ export type StrategyPerformancePortfolioWindow = {
   avg_excess_return_pct?: number | null;
   excess_win_rate?: number | null;
   avg_selected_count?: number | null;
+  rank_ic_mean?: number | null;
+  icir?: number | null;
+  layer_return_spread_pct?: number | null;
+  sharpe_ratio?: number | null;
 };
 
 export type StrategyPerformancePortfolioRow = {
   strategy_key: string;
   strategy_label: string;
   sort_description: string;
+  factor_count?: number | null;
   windows: StrategyPerformancePortfolioWindow[];
 };
 
@@ -113,6 +126,9 @@ export type StrategyPerformanceRuleDirectionDetail = {
   win_rate?: number | null;
   spearman_corr?: number | null;
   abs_spearman_corr?: number | null;
+  rank_ic_mean?: number | null;
+  icir?: number | null;
+  sharpe_ratio?: number | null;
   hit_vs_non_hit_delta_pct?: number | null;
   extreme_score_minus_mild_score_pct?: number | null;
   has_dist_points: boolean;
@@ -158,6 +174,7 @@ export type StrategyPerformancePageData = {
   ineffective_negative_rule_names: string[];
   min_adv_hits: number;
   top_limit: number;
+  max_combination_size: number;
   mixed_sort_keys: string[];
   noisy_companion_rule_names: string[];
   rule_rows: StrategyPerformanceRuleRow[];
@@ -182,6 +199,7 @@ export type StrategyPerformanceQuery = {
   minPassHorizons?: number;
   minAdvHits?: number;
   topLimit?: number;
+  maxCombinationSize?: number;
   mixedSortKeys?: string[];
   noisyCompanionRuleNames?: string[];
   selectedRuleName?: string;

@@ -21,7 +21,7 @@ import "./css/StrategyValidationBacktestPage.css";
 
 const STRATEGY_VALIDATION_STATE_KEY = "lh_strategy_validation_backtest_v1";
 const QUANTILE_OPTIONS = [0.8, 0.9, 0.95] as const;
-const HORIZON_OPTIONS = [2, 3, 5, 10] as const;
+const HORIZON_OPTIONS = [2, 3, 5] as const;
 const TAG_OPTIONS = ["Normal", "Opportunity", "Rare"] as const;
 const SCOPE_OPTIONS = ["LAST", "ANY", "EACH", "RECENT", "CONSEC"] as const;
 
@@ -459,12 +459,10 @@ export default function StrategyValidationBacktestPage() {
         <div className="strategy-manage-section-head">
           <div>
             <h2 className="strategy-manage-title">策略验证微调</h2>
-            <p className="strategy-manage-note">
-              固定页面配置单条策略草稿，可直接导入现有策略，检查表达式与参数后，复用策略表现回测底层口径跑出该策略自身的未来表现。
-            </p>
+            <p className="strategy-manage-note">单策略验证。</p>
           </div>
           <span className="strategy-manage-tip">
-            仅在点击“运行验证”后计算，避免进页即重算
+            点击后计算
           </span>
         </div>
 
@@ -767,9 +765,6 @@ export default function StrategyValidationBacktestPage() {
             <div className="strategy-manage-section-head">
               <div>
                 <h3 className="strategy-manage-subtitle">策略草稿概览</h3>
-                <p className="strategy-manage-note">
-                  这里展示当前草稿在既有数据库样本上的整体表现。正向命中和负向命中分开统计，口径与策略表现回测一致。
-                </p>
               </div>
               <div className="strategy-validation-chip-row">
                 <span className="strategy-validation-chip is-warm">
@@ -815,9 +810,6 @@ export default function StrategyValidationBacktestPage() {
             <div className="strategy-manage-section-head">
               <div>
                 <h3 className="strategy-manage-subtitle">未来强势股阈值</h3>
-                <p className="strategy-manage-note">
-                  四个持有周期共用一行展示，用来校准这条草稿命中后到底处在什么收益分布位置。
-                </p>
               </div>
             </div>
 
@@ -879,9 +871,6 @@ export default function StrategyValidationBacktestPage() {
             <div className="strategy-manage-section-head">
               <div>
                 <h3 className="strategy-manage-subtitle">命中方向表现</h3>
-                <p className="strategy-manage-note">
-                  正向命中看这条策略是否真能抓到更好的未来收益；负向命中看风险提示是否成立。每个方向都按 2 / 3 / 5 / 10 日分别统计。
-                </p>
               </div>
             </div>
 
@@ -949,7 +938,7 @@ export default function StrategyValidationBacktestPage() {
                     {row.signal_direction === "negative" &&
                     row.negative_review_notes.length > 0 ? (
                       <div className="strategy-validation-note-box is-soft">
-                        <strong>判定说明</strong>
+                        <strong>负向标签</strong>
                         <ul>
                           {row.negative_review_notes.map((note) => (
                             <li key={note}>{note}</li>
@@ -967,9 +956,6 @@ export default function StrategyValidationBacktestPage() {
               <div className="strategy-manage-section-head">
                 <div>
                   <h3 className="strategy-manage-subtitle">得分强度与命中分层</h3>
-                  <p className="strategy-manage-note">
-                    当前展示 {pageData.rule_detail.horizon} 日持有周期下的分数分层、相关性和命中次数效果，用来判断这条草稿的分值设计是否真的有解释力。
-                  </p>
                 </div>
               </div>
 
@@ -980,9 +966,7 @@ export default function StrategyValidationBacktestPage() {
                       <div>
                         <h4>{direction.direction_label}</h4>
                         <p>
-                          {direction.bucket_mode === "exact"
-                            ? "按精确分值分层"
-                            : "按分位桶分层"}
+                          {direction.bucket_mode === "exact" ? "精确分值" : "分位桶"}
                         </p>
                       </div>
                     </div>
@@ -1007,8 +991,12 @@ export default function StrategyValidationBacktestPage() {
                         <strong>{formatRate(direction.win_rate)}</strong>
                       </div>
                       <div className="strategy-manage-rule-metric">
-                        <span>Spearman</span>
-                        <strong>{formatNumber(direction.spearman_corr, 3)}</strong>
+                        <span>IC</span>
+                        <strong>{formatNumber(direction.rank_ic_mean, 3)}</strong>
+                      </div>
+                      <div className="strategy-manage-rule-metric">
+                        <span>ICIR</span>
+                        <strong>{formatNumber(direction.icir, 2)}</strong>
                       </div>
                       <div className="strategy-manage-rule-metric">
                         <span>Hit vs Non-hit</span>
