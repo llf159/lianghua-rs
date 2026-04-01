@@ -16,9 +16,7 @@ use crate::{
     ui_tools::{
         build_area_map, build_circ_mv_map, build_concepts_map, build_industry_map, build_name_map,
         build_total_mv_map,
-        strategy_performance::{
-            get_latest_strategy_pick_cache as core_get_latest_strategy_pick_cache,
-        },
+        strategy_performance::get_latest_strategy_pick_cache as core_get_latest_strategy_pick_cache,
     },
     utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
 };
@@ -726,17 +724,13 @@ fn compare_advanced_rows_with_key(
         AdvancedMixedSortKey::AdvScoreSum => {
             compare_option_f64_desc(Some(left.adv_score_sum), Some(right.adv_score_sum))
         }
-        AdvancedMixedSortKey::AdvComboHitCnt => {
-            right.adv_hit_cnt.cmp(&left.adv_hit_cnt)
+        AdvancedMixedSortKey::AdvComboHitCnt => right.adv_hit_cnt.cmp(&left.adv_hit_cnt),
+        AdvancedMixedSortKey::AdvComboScoreSum => {
+            compare_option_f64_desc(Some(left.adv_score_sum), Some(right.adv_score_sum))
         }
-        AdvancedMixedSortKey::AdvComboScoreSum => compare_option_f64_desc(
-            Some(left.adv_score_sum),
-            Some(right.adv_score_sum),
-        ),
-        AdvancedMixedSortKey::AdvComboAlphaScore => compare_option_f64_desc(
-            Some(left.adv_score_sum),
-            Some(right.adv_score_sum),
-        ),
+        AdvancedMixedSortKey::AdvComboAlphaScore => {
+            compare_option_f64_desc(Some(left.adv_score_sum), Some(right.adv_score_sum))
+        }
         AdvancedMixedSortKey::NoisyCompanionCnt => {
             left.noisy_companion_cnt.cmp(&right.noisy_companion_cnt)
         }
@@ -914,8 +908,11 @@ pub fn run_expression_stock_pick(
                 group_rows.push(StockPickRow {
                     ts_code: ts_code.clone(),
                     name: name_map.get(ts_code).cloned(),
-                    board: board_category(ts_code, name_map.get(ts_code).map(|value| value.as_str()))
-                        .to_string(),
+                    board: board_category(
+                        ts_code,
+                        name_map.get(ts_code).map(|value| value.as_str()),
+                    )
+                    .to_string(),
                     concept: concept_map.get(ts_code).cloned(),
                     rank: summary.and_then(|item| item.rank),
                     total_score: summary.and_then(|item| item.total_score),
@@ -1414,5 +1411,5 @@ pub fn run_advanced_stock_pick(
         resolved_advantage_combination_labels: Vec::new(),
         resolved_noisy_companion_rule_names: noisy_rule_names,
         resolved_noisy_combination_labels: Vec::new(),
-        })
+    })
 }

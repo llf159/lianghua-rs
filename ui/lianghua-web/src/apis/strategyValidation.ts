@@ -2,7 +2,6 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   StrategyPerformanceFutureSummary,
   StrategyPerformanceMethodNote,
-  StrategyPerformancePortfolioRow,
   StrategyPerformanceRuleRow,
 } from "./strategyPerformance";
 
@@ -32,14 +31,19 @@ export type StrategyPerformanceValidationComboSummary = {
   import_name?: string | null;
   formula: string;
   unknown_values: StrategyPerformanceValidationUnknownValue[];
+  score_mode: string;
   trigger_samples: number;
   triggered_days: number;
   avg_daily_trigger: number;
-  positive_final_strength_score?: number | null;
+  positive_overall_composite_score?: number | null;
   positive_avg_future_return_pct?: number | null;
+  positive_primary_metric?: number | null;
+  positive_secondary_metric?: number | null;
   positive_hit_n: number;
   negative_effective: boolean;
   negative_avg_future_return_pct?: number | null;
+  negative_primary_metric?: number | null;
+  negative_secondary_metric?: number | null;
   negative_hit_n: number;
 };
 
@@ -68,7 +72,6 @@ export type StrategyPerformanceValidationCaseData = {
   layer_mode: string;
   layer_rows: StrategyPerformanceValidationLayerRow[];
   similarity_rows: StrategyPerformanceValidationSimilarityRow[];
-  portfolio_rows: StrategyPerformancePortfolioRow[];
 };
 
 export type StrategyPerformanceValidationPageData = {

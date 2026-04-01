@@ -287,12 +287,19 @@ fn query_backtest_rows(
             &row.ts_code,
             name_map.get(&row.ts_code).map(|value| value.as_str()),
         );
-        board_filter.map(|filter| filter == board_value).unwrap_or(true)
+        board_filter
+            .map(|filter| filter == board_value)
+            .unwrap_or(true)
     });
     out.sort_by(|left, right| {
         left.rank
             .cmp(&right.rank)
-            .then_with(|| right.total_score.partial_cmp(&left.total_score).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| {
+                right
+                    .total_score
+                    .partial_cmp(&left.total_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| left.ts_code.cmp(&right.ts_code))
     });
     for (index, row) in out.iter_mut().enumerate() {

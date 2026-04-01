@@ -22,6 +22,7 @@ export type StrategyPerformanceFutureSummary = {
 
 export type StrategyPerformanceHorizonMetric = {
   horizon: number;
+  score_mode: string;
   hit_n: number;
   avg_future_return_pct?: number | null;
   strong_hit_rate?: number | null;
@@ -58,11 +59,6 @@ export type StrategyPerformanceRuleRow = {
   negative_effective?: boolean | null;
   negative_effectiveness_label?: string | null;
   negative_review_notes: string[];
-  base_composite_score?: number | null;
-  combo_positive_score?: number | null;
-  combo_negative_score?: number | null;
-  confidence_adjustment?: number | null;
-  final_strength_score?: number | null;
   overall_composite_score?: number | null;
   avg_rank_ic_mean?: number | null;
   metrics: StrategyPerformanceHorizonMetric[];
@@ -103,7 +99,6 @@ export type StrategyPerformancePortfolioRow = {
   strategy_key: string;
   strategy_label: string;
   sort_description: string;
-  factor_count?: number | null;
   windows: StrategyPerformancePortfolioWindow[];
 };
 
@@ -142,6 +137,7 @@ export type StrategyPerformanceHitCountRow = {
 export type StrategyPerformanceRuleDirectionDetail = {
   signal_direction: string;
   direction_label: string;
+  score_mode: string;
   bucket_mode: string;
   sample_count: number;
   avg_future_return_pct?: number | null;
@@ -197,11 +193,9 @@ export type StrategyPerformancePageData = {
   ineffective_negative_rule_names: string[];
   min_adv_hits: number;
   top_limit: number;
-  max_combination_size: number;
   noisy_companion_rule_names: string[];
   rule_rows: StrategyPerformanceRuleRow[];
   companion_rows: StrategyPerformanceCompanionRow[];
-  portfolio_rows: StrategyPerformancePortfolioRow[];
   overall_score_analysis?: StrategyPerformanceOverallScoreAnalysis | null;
   selected_rule_name?: string | null;
   rule_detail?: StrategyPerformanceRuleDetail | null;
@@ -212,17 +206,7 @@ export type StrategyPerformanceHorizonViewData = {
   selected_horizon: number;
   noisy_companion_rule_names: string[];
   companion_rows: StrategyPerformanceCompanionRow[];
-  portfolio_rows: StrategyPerformancePortfolioRow[];
   overall_score_analysis?: StrategyPerformanceOverallScoreAnalysis | null;
-};
-
-export type StrategyPerformancePickCacheCombination = {
-  strategy_key: string;
-  strategy_label: string;
-  factor_count: number;
-  rule_names: string[];
-  rank_ic_mean: number;
-  composite_score?: number | null;
 };
 
 export type StrategyPerformancePickCachePayload = {
@@ -230,8 +214,6 @@ export type StrategyPerformancePickCachePayload = {
   strong_quantile: number;
   resolved_advantage_rule_names: string[];
   resolved_noisy_companion_rule_names: string[];
-  resolved_advantage_combinations: StrategyPerformancePickCacheCombination[];
-  resolved_noisy_combinations: StrategyPerformancePickCacheCombination[];
 };
 
 export type StrategyPerformanceQuery = {
@@ -248,7 +230,6 @@ export type StrategyPerformanceQuery = {
   minPassHorizons?: number;
   minAdvHits?: number;
   topLimit?: number;
-  maxCombinationSize?: number;
   noisyCompanionRuleNames?: string[];
   selectedRuleName?: string;
 };
@@ -275,15 +256,20 @@ export async function getStrategyPickCache(query: {
   requireWinRateAboveMarket?: boolean;
   minPassHorizons?: number;
   minAdvHits?: number;
-  maxCombinationSize?: number;
 }) {
-  return invoke<StrategyPerformancePickCachePayload>("get_strategy_pick_cache", query);
+  return invoke<StrategyPerformancePickCachePayload>(
+    "get_strategy_pick_cache",
+    query,
+  );
 }
 
 export async function getLatestStrategyPickCache(sourcePath: string) {
-  return invoke<StrategyPerformancePickCachePayload>("get_latest_strategy_pick_cache", {
-    sourcePath,
-  });
+  return invoke<StrategyPerformancePickCachePayload>(
+    "get_latest_strategy_pick_cache",
+    {
+      sourcePath,
+    },
+  );
 }
 
 export async function getStrategyPerformanceHorizonView(query: {
@@ -298,8 +284,6 @@ export async function getStrategyPerformanceHorizonView(query: {
   requireWinRateAboveMarket?: boolean;
   minPassHorizons?: number;
   minAdvHits?: number;
-  topLimit?: number;
-  maxCombinationSize?: number;
   noisyCompanionRuleNames?: string[];
 }) {
   return invoke<StrategyPerformanceHorizonViewData>(

@@ -440,19 +440,6 @@ export default function AdvancedStockPickPage() {
     () => buildAvailableConceptOptions(conceptOptions, excludedConcepts),
     [conceptOptions, excludedConcepts],
   );
-  const preprocessAutoCandidateRuleNames = useMemo(
-    () => preprocessData?.resolved_advantage_rule_names ?? [],
-    [preprocessData],
-  );
-  const filteredPreprocessAutoCandidateRuleNames = useMemo(() => {
-    const keyword = strategyKeyword.trim().toLowerCase();
-    if (!keyword) {
-      return preprocessAutoCandidateRuleNames;
-    }
-    return preprocessAutoCandidateRuleNames.filter((item) =>
-      item.toLowerCase().includes(keyword),
-    );
-  }, [preprocessAutoCandidateRuleNames, strategyKeyword]);
   const currentAdvantageRuleNames = useMemo(
     () => preprocessData?.resolved_advantage_rule_names ?? [],
     [preprocessData],
@@ -757,9 +744,6 @@ export default function AdvancedStockPickPage() {
 
           {preprocessData ? (
             <div className="stock-pick-advanced-status-strip">
-              <span className="stock-pick-chip-btn is-neutral">
-                自动优势 {preprocessAutoCandidateRuleNames.length}
-              </span>
               <span className="stock-pick-chip-btn is-active">
                 当前优势 {currentAdvantageRuleNames.length}
               </span>
@@ -805,11 +789,6 @@ export default function AdvancedStockPickPage() {
                   />
                 </div>
               </div>
-              <ReadonlyRuleChipPanel
-                title="自动优势集"
-                items={filteredPreprocessAutoCandidateRuleNames}
-                emptyText="当前搜索条件下没有匹配的自动优势策略。"
-              />
               <ReadonlyRuleChipPanel
                 title="当前优势集"
                 items={filteredCurrentAdvantageRuleNames}

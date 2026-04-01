@@ -29,9 +29,69 @@
 }
 
 .strategy-validation-unknown-block {
-  margin-top: 16px;
+  margin-top: 8px;
   display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fbfdff;
+}
+
+.strategy-validation-unknown-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   gap: 12px;
+  flex-wrap: wrap;
+}
+
+.strategy-validation-unknown-label {
+  color: #364152;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.strategy-validation-unknown-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.strategy-validation-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  border: 1px solid #c6d0da;
+  border-radius: 8px;
+  padding: 0 12px;
+  background: #fff;
+  box-sizing: border-box;
+  cursor: pointer;
+  color: #334155;
+}
+
+.strategy-validation-checkbox input {
+  margin: 0;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--theme-orange-600);
+  cursor: pointer;
+}
+
+.strategy-validation-checkbox span {
+  white-space: nowrap;
+}
+
+.strategy-validation-unknown-add,
+.strategy-validation-unknown-remove {
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .strategy-validation-unknown-list {
@@ -44,6 +104,10 @@
   grid-template-columns: minmax(0, 1.2fr) repeat(3, minmax(120px, 1fr)) auto;
   gap: 10px;
   align-items: end;
+  padding: 10px;
+  border: 1px solid #e7edf5;
+  border-radius: 10px;
+  background: #fff;
 }
 
 .strategy-validation-unknown-remove {

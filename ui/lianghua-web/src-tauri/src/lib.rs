@@ -1438,7 +1438,6 @@ async fn get_strategy_performance_page(
     min_pass_horizons: Option<u32>,
     min_adv_hits: Option<u32>,
     top_limit: Option<u32>,
-    max_combination_size: Option<u32>,
     noisy_companion_rule_names: Option<Vec<String>>,
     selected_rule_name: Option<String>,
 ) -> Result<StrategyPerformancePageData, String> {
@@ -1457,7 +1456,6 @@ async fn get_strategy_performance_page(
             min_pass_horizons,
             min_adv_hits,
             top_limit,
-            max_combination_size,
             noisy_companion_rule_names,
             selected_rule_name,
         )
@@ -1480,7 +1478,6 @@ async fn get_strategy_pick_cache(
     require_win_rate_above_market: Option<bool>,
     min_pass_horizons: Option<u32>,
     min_adv_hits: Option<u32>,
-    max_combination_size: Option<u32>,
 ) -> Result<StrategyPerformancePickCachePayload, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_get_strategy_pick_cache(
@@ -1496,7 +1493,6 @@ async fn get_strategy_pick_cache(
             require_win_rate_above_market,
             min_pass_horizons,
             min_adv_hits,
-            max_combination_size,
         )
     })
     .await
@@ -1525,8 +1521,6 @@ async fn get_strategy_performance_horizon_view(
     require_win_rate_above_market: Option<bool>,
     min_pass_horizons: Option<u32>,
     min_adv_hits: Option<u32>,
-    top_limit: Option<u32>,
-    max_combination_size: Option<u32>,
     noisy_companion_rule_names: Option<Vec<String>>,
 ) -> Result<StrategyPerformanceHorizonViewData, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -1542,8 +1536,6 @@ async fn get_strategy_performance_horizon_view(
             require_win_rate_above_market,
             min_pass_horizons,
             min_adv_hits,
-            top_limit,
-            max_combination_size,
             noisy_companion_rule_names,
         )
     })

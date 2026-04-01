@@ -236,7 +236,9 @@ fn query_detail_overview(
     Ok(DetailOverview {
         ts_code: ts_code.to_string(),
         name: name_map.get(ts_code).cloned(),
-        board: Some(board_category(ts_code, name_map.get(ts_code).map(|value| value.as_str())).to_string()),
+        board: Some(
+            board_category(ts_code, name_map.get(ts_code).map(|value| value.as_str())).to_string(),
+        ),
         area: area_map.get(ts_code).cloned(),
         industry: industry_map.get(ts_code).cloned(),
         trade_date: Some(effective_trade_date.to_string()),
