@@ -88,6 +88,8 @@ const STRATEGY_SPLIT_MAX = 0.76;
 const STRATEGY_STACK_BREAKPOINT = 1180;
 const WATERMARK_CONCEPT_LIMIT = 3;
 const MAX_STOCK_NAME_CANDIDATES = 12;
+const DETAIL_REALTIME_AUTO_REFRESH_INTERVAL_MS = 15_000;
+const DETAIL_REALTIME_LONG_PRESS_MS = 600;
 const CANDLE_UP_COLOR = "#d9485f";
 const CANDLE_DOWN_COLOR = "#178f68";
 const CANDLE_FLAT_COLOR = "#536273";
@@ -427,6 +429,10 @@ function buildConceptPreview(items: string[], limit = WATERMARK_CONCEPT_LIMIT) {
 
   const preview = items.slice(0, limit).join(" / ");
   return items.length > limit ? `${preview} 等${items.length}项` : preview;
+}
+
+function formatAutoRefreshSeconds(intervalMs: number) {
+  return `${Math.max(1, Math.round(intervalMs / 1000))}秒`;
 }
 
 function getContentScrollElement() {
@@ -1868,6 +1874,7 @@ export default function DetailsPage({
     useState<StockDetailRealtimeData | null>(null);
   const [detailRealtimeLoading, setDetailRealtimeLoading] = useState(false);
   const [detailRealtimeNotice, setDetailRealtimeNotice] = useState("");
+  const [detailRealtimePinned, setDetailRealtimePinned] = useState(false);
   const [strategyCompareSnapshot, setStrategyCompareSnapshot] =
     useState<StrategyCompareSnapshot | null>(null);
   const chartDragRef = useRef<ChartDragState | null>(null);
@@ -1877,6 +1884,9 @@ export default function DetailsPage({
   const rankTableWrapRef = useRef<HTMLDivElement | null>(null);
   const pendingPageScrollRef = useRef<ScrollSnapshot | null>(null);
   const autoFillTopRef = useRef(true);
+  const detailRealtimeLongPressTimerRef = useRef<number | null>(null);
+  const detailRealtimeLongPressHandledRef = useRef(false);
+  const detailRealtimeAutoRefreshKeyRef = useRef("");
 
   const sourcePathTrimmed = sourcePath.trim();
   const isLinkedOverlay = variant === "linked-overlay";
@@ -2671,6 +2681,14 @@ export default function DetailsPage({
   }, [detailData?.resolved_trade_date, detailData?.resolved_ts_code]);
 
   useEffect(() => {
+    return () => {
+      if (detailRealtimeLongPressTimerRef.current !== null) {
+        window.clearTimeout(detailRealtimeLongPressTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     if (routeTsCode === "") {
       return;
     }
@@ -3002,7 +3020,14 @@ export default function DetailsPage({
     }
   }
 
-  async function onRefreshRealtimeDetail() {
+  const clearDetailRealtimeLongPressTimer = useCallback(() => {
+    if (detailRealtimeLongPressTimerRef.current !== null) {
+      window.clearTimeout(detailRealtimeLongPressTimerRef.current);
+      detailRealtimeLongPressTimerRef.current = null;
+    }
+  }, []);
+
+  const onRefreshRealtimeDetail = useCallback(async () => {
     if (resolvedTsCode === "--" || sourcePathTrimmed === "") {
       return;
     }
@@ -3021,7 +3046,106 @@ export default function DetailsPage({
     } finally {
       setDetailRealtimeLoading(false);
     }
-  }
+  }, [resolvedTsCode, sourcePathTrimmed]);
+
+  const toggleDetailRealtimePinned = useCallback(() => {
+    let nextPinned = false;
+    setDetailRealtimePinned((current) => {
+      nextPinned = !current;
+      return nextPinned;
+    });
+    detailRealtimeLongPressHandledRef.current = true;
+    if (nextPinned) {
+      void onRefreshRealtimeDetail();
+    }
+  }, [onRefreshRealtimeDetail]);
+
+  const handleDetailRealtimeRefreshPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLButtonElement>) => {
+      event.stopPropagation();
+      if (resolvedTsCode === "--" || detailRealtimeLoading) {
+        return;
+      }
+
+      detailRealtimeLongPressHandledRef.current = false;
+      clearDetailRealtimeLongPressTimer();
+      detailRealtimeLongPressTimerRef.current = window.setTimeout(() => {
+        toggleDetailRealtimePinned();
+      }, DETAIL_REALTIME_LONG_PRESS_MS);
+    },
+    [
+      clearDetailRealtimeLongPressTimer,
+      detailRealtimeLoading,
+      resolvedTsCode,
+      toggleDetailRealtimePinned,
+    ],
+  );
+
+  const handleDetailRealtimeRefreshPointerRelease = useCallback(
+    (event: ReactPointerEvent<HTMLButtonElement>) => {
+      event.stopPropagation();
+      clearDetailRealtimeLongPressTimer();
+    },
+    [clearDetailRealtimeLongPressTimer],
+  );
+
+  useEffect(() => {
+    if (!detailRealtimePinned) {
+      detailRealtimeAutoRefreshKeyRef.current = "";
+      return;
+    }
+
+    const nextResolvedTsCode = detailData?.resolved_ts_code?.trim() ?? "";
+    const nextResolvedTradeDate = detailData?.resolved_trade_date?.trim() ?? "";
+    if (nextResolvedTsCode === "" || sourcePathTrimmed === "") {
+      detailRealtimeAutoRefreshKeyRef.current = "";
+      return;
+    }
+
+    const nextAutoRefreshKey = [
+      sourcePathTrimmed,
+      nextResolvedTsCode,
+      nextResolvedTradeDate,
+    ].join("|");
+    if (detailRealtimeAutoRefreshKeyRef.current === nextAutoRefreshKey) {
+      return;
+    }
+
+    detailRealtimeAutoRefreshKeyRef.current = nextAutoRefreshKey;
+    void onRefreshRealtimeDetail();
+  }, [
+    detailRealtimePinned,
+    detailData?.resolved_trade_date,
+    detailData?.resolved_ts_code,
+    onRefreshRealtimeDetail,
+    sourcePathTrimmed,
+  ]);
+
+  useEffect(() => {
+    if (!detailRealtimePinned) {
+      return;
+    }
+    if (resolvedTsCode === "--" || sourcePathTrimmed === "") {
+      setDetailRealtimePinned(false);
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      if (!detailRealtimeLoading) {
+        void onRefreshRealtimeDetail();
+      }
+    }, DETAIL_REALTIME_AUTO_REFRESH_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [
+    detailRealtimeLoading,
+    detailRealtimePinned,
+    onRefreshRealtimeDetail,
+    resolvedTsCode,
+    sourcePathTrimmed,
+  ]);
 
   function onJumpStrategyTradeDate(nextTradeDate: string | null) {
     if (
@@ -3424,24 +3548,41 @@ export default function DetailsPage({
                     {detailRealtimeData?.refreshedAt ?? "未刷新"}
                   </span>
                   <button
-                    className="details-chart-watch-btn details-chart-watch-btn-refresh"
+                    className={[
+                      "details-chart-watch-btn",
+                      "details-chart-watch-btn-refresh",
+                      detailRealtimePinned ? "is-fixed" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
                     type="button"
                     disabled={resolvedTsCode === "--" || detailRealtimeLoading}
-                    onPointerDown={(event) => {
-                      event.stopPropagation();
-                    }}
-                    onPointerUp={(event) => {
-                      event.stopPropagation();
-                    }}
+                    title={
+                      detailRealtimePinned
+                        ? `固定自动刷新中（${formatAutoRefreshSeconds(DETAIL_REALTIME_AUTO_REFRESH_INTERVAL_MS)} / 次），长按取消`
+                        : `点击立即刷新，长按固定自动刷新（${formatAutoRefreshSeconds(DETAIL_REALTIME_AUTO_REFRESH_INTERVAL_MS)} / 次）`
+                    }
+                    onPointerDown={handleDetailRealtimeRefreshPointerDown}
+                    onPointerUp={handleDetailRealtimeRefreshPointerRelease}
+                    onPointerLeave={handleDetailRealtimeRefreshPointerRelease}
+                    onPointerCancel={handleDetailRealtimeRefreshPointerRelease}
                     onMouseDown={(event) => {
                       event.stopPropagation();
                     }}
                     onClick={(event) => {
                       event.stopPropagation();
+                      if (detailRealtimeLongPressHandledRef.current) {
+                        detailRealtimeLongPressHandledRef.current = false;
+                        return;
+                      }
                       void onRefreshRealtimeDetail();
                     }}
                   >
-                    {detailRealtimeLoading ? "刷新中..." : "刷新实时"}
+                    {detailRealtimeLoading
+                      ? "刷新中..."
+                      : detailRealtimePinned
+                        ? "固定刷新中"
+                        : "刷新实时"}
                   </button>
                   <button
                     className={[
@@ -3480,6 +3621,11 @@ export default function DetailsPage({
                 {detailRealtimeNotice ? (
                   <span className="details-chart-watch-note">
                     {detailRealtimeNotice}
+                  </span>
+                ) : null}
+                {detailRealtimePinned ? (
+                  <span className="details-chart-watch-note">
+                    固定自动刷新中 {formatAutoRefreshSeconds(DETAIL_REALTIME_AUTO_REFRESH_INTERVAL_MS)} / 次，长按按钮取消
                   </span>
                 ) : null}
                 {watchObserveNotice ? (

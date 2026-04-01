@@ -102,7 +102,7 @@
   width: 100%;
   min-width: 980px;
   border-collapse: collapse;
-  table-layout: fixed;
+  table-layout: auto;
 }
 
 .market-monitor-table th,
@@ -153,6 +153,27 @@
 
 .market-monitor-value-flat {
   color: #526375;
+}
+
+.market-monitor-value-inline {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.market-monitor-value-inline small {
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.market-monitor-table th.market-monitor-cell-concept,
+.market-monitor-table td.market-monitor-cell-concept {
+  min-width: 240px;
+  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
 }
 
 @media (max-width: 960px) {

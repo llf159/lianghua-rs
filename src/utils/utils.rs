@@ -330,9 +330,7 @@ fn st_board_category(stock_name: Option<&str>) -> Option<&'static str> {
                 .replace('＊', "*")
         })?;
 
-    if normalized.starts_with("*ST") {
-        Some("*ST")
-    } else if normalized.starts_with("ST") {
+    if normalized.starts_with("*ST") || normalized.starts_with("ST") {
         Some("ST")
     } else {
         None

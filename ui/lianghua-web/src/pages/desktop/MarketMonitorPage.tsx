@@ -48,6 +48,12 @@ type PersistedMarketMonitorState = {
   pageData: MarketMonitorPageData | null;
 };
 
+type MarketMonitorRowDelta = {
+  latestPrice: number | null;
+  latestChangePct: number | null;
+  volumeRatio: number | null;
+};
+
 function formatNumber(value: number | null | undefined, digits = 2) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return "--";
@@ -62,6 +68,22 @@ function formatPercent(value: number | null | undefined) {
   return `${value.toFixed(2)}%`;
 }
 
+function formatSignedNumber(value: number | null | undefined, digits = 2) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "--";
+  }
+  const formatted = value.toFixed(digits);
+  return value > 0 ? `+${formatted}` : formatted;
+}
+
+function formatSignedPercent(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "--";
+  }
+  const formatted = value.toFixed(2);
+  return value > 0 ? `+${formatted}%` : `${formatted}%`;
+}
+
 function formatRatio(value: number | null | undefined) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return "--";
@@ -74,6 +96,53 @@ function getPercentClassName(value: number | null | undefined) {
     return "market-monitor-value-flat";
   }
   return value > 0 ? "market-monitor-value-up" : "market-monitor-value-down";
+}
+
+function getSignedValueClassName(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value === 0) {
+    return "market-monitor-value-flat";
+  }
+  return value > 0 ? "market-monitor-value-up" : "market-monitor-value-down";
+}
+
+function computeDelta(
+  nextValue: number | null | undefined,
+  previousValue: number | null | undefined,
+) {
+  if (
+    typeof nextValue !== "number" ||
+    !Number.isFinite(nextValue) ||
+    typeof previousValue !== "number" ||
+    !Number.isFinite(previousValue)
+  ) {
+    return null;
+  }
+  return nextValue - previousValue;
+}
+
+function ValueWithDelta({
+  value,
+  delta,
+  valueClassName,
+  deltaClassName,
+  title,
+}: {
+  value: string;
+  delta: string | null;
+  valueClassName?: string;
+  deltaClassName?: string;
+  title?: string;
+}) {
+  return (
+    <span className="market-monitor-value-inline" title={title}>
+      <span className={valueClassName}>{value}</span>
+      {delta ? (
+        <small className={deltaClassName ?? "market-monitor-value-flat"}>
+          {delta}
+        </small>
+      ) : null}
+    </span>
+  );
 }
 
 function toPositiveInt(raw: string) {
@@ -135,6 +204,9 @@ export default function MarketMonitorPage() {
   const [pageData, setPageData] = useState<MarketMonitorPageData | null>(
     () => persistedState?.pageData ?? null,
   );
+  const [rowDeltas, setRowDeltas] = useState<
+    Record<string, MarketMonitorRowDelta>
+  >({});
 
   const sourcePathTrimmed = sourcePath.trim();
 
@@ -222,6 +294,30 @@ export default function MarketMonitorPage() {
         referenceTradeDate: referenceTradeDate.trim() || undefined,
         topLimit,
       });
+      const previousRows =
+        pageData?.referenceTradeDate === nextPageData.referenceTradeDate
+          ? new Map((pageData?.rows ?? []).map((row) => [row.tsCode, row] as const))
+          : new Map<string, (typeof nextPageData.rows)[number]>();
+      const nextRowDeltas = Object.fromEntries(
+        nextPageData.rows.map((row) => [
+          row.tsCode,
+          {
+            latestPrice: computeDelta(
+              row.latestPrice,
+              previousRows.get(row.tsCode)?.latestPrice,
+            ),
+            latestChangePct: computeDelta(
+              row.latestChangePct,
+              previousRows.get(row.tsCode)?.latestChangePct,
+            ),
+            volumeRatio: computeDelta(
+              row.volumeRatio,
+              previousRows.get(row.tsCode)?.volumeRatio,
+            ),
+          } satisfies MarketMonitorRowDelta,
+        ]),
+      );
+      setRowDeltas(nextRowDeltas);
       setPageData(nextPageData);
     } catch (refreshError) {
       setError(`刷新盘中监控失败: ${String(refreshError)}`);
@@ -434,7 +530,7 @@ export default function MarketMonitorPage() {
                     />
                   </th>
                   <th>区间</th>
-                  <th>概念</th>
+                  <th className="market-monitor-cell-concept">概念</th>
                 </tr>
               </thead>
               <tbody>
@@ -443,6 +539,7 @@ export default function MarketMonitorPage() {
                     row.concept,
                     excludedConcepts,
                   );
+                  const rowDelta = rowDeltas[row.tsCode];
                   return (
                     <tr key={row.tsCode}>
                       <td>{row.tsCode}</td>
@@ -461,15 +558,68 @@ export default function MarketMonitorPage() {
                       </td>
                       <td>{formatNumber(row.referenceRank, 0)}</td>
                       <td>{formatNumber(row.totalScore)}</td>
-                      <td>{formatNumber(row.latestPrice)}</td>
-                      <td
-                        className={getPercentClassName(row.latestChangePct)}
-                        title={formatPercent(row.latestChangePct)}
-                      >
-                        {formatPercent(row.latestChangePct)}
+                      <td>
+                        <ValueWithDelta
+                          value={formatNumber(row.latestPrice)}
+                          delta={
+                            rowDelta?.latestPrice !== null &&
+                            rowDelta?.latestPrice !== undefined
+                              ? formatSignedNumber(rowDelta.latestPrice)
+                              : null
+                          }
+                          deltaClassName={getSignedValueClassName(
+                            rowDelta?.latestPrice,
+                          )}
+                          title={
+                            rowDelta?.latestPrice !== null &&
+                            rowDelta?.latestPrice !== undefined
+                              ? `${formatNumber(row.latestPrice)} | 较上次 ${formatSignedNumber(rowDelta.latestPrice)}`
+                              : formatNumber(row.latestPrice)
+                          }
+                        />
+                      </td>
+                      <td title={formatPercent(row.latestChangePct)}>
+                        <ValueWithDelta
+                          value={formatPercent(row.latestChangePct)}
+                          delta={
+                            rowDelta?.latestChangePct !== null &&
+                            rowDelta?.latestChangePct !== undefined
+                              ? formatSignedPercent(rowDelta.latestChangePct)
+                              : null
+                          }
+                          valueClassName={getPercentClassName(
+                            row.latestChangePct,
+                          )}
+                          deltaClassName={getSignedValueClassName(
+                            rowDelta?.latestChangePct,
+                          )}
+                          title={
+                            rowDelta?.latestChangePct !== null &&
+                            rowDelta?.latestChangePct !== undefined
+                              ? `${formatPercent(row.latestChangePct)} | 较上次 ${formatSignedPercent(rowDelta.latestChangePct)}`
+                              : formatPercent(row.latestChangePct)
+                          }
+                        />
                       </td>
                       <td title={formatRatio(row.volumeRatio)}>
-                        {formatRatio(row.volumeRatio)}
+                        <ValueWithDelta
+                          value={formatRatio(row.volumeRatio)}
+                          delta={
+                            rowDelta?.volumeRatio !== null &&
+                            rowDelta?.volumeRatio !== undefined
+                              ? formatSignedNumber(rowDelta.volumeRatio)
+                              : null
+                          }
+                          deltaClassName={getSignedValueClassName(
+                            rowDelta?.volumeRatio,
+                          )}
+                          title={
+                            rowDelta?.volumeRatio !== null &&
+                            rowDelta?.volumeRatio !== undefined
+                              ? `${formatRatio(row.volumeRatio)} | 较上次 ${formatSignedNumber(rowDelta.volumeRatio)}`
+                              : formatRatio(row.volumeRatio)
+                          }
+                        />
                       </td>
                       <td>{formatNumber(row.open)}</td>
                       <td
@@ -477,7 +627,12 @@ export default function MarketMonitorPage() {
                       >
                         {formatNumber(row.low)} - {formatNumber(row.high)}
                       </td>
-                      <td title={conceptText}>{conceptText}</td>
+                      <td
+                        className="market-monitor-cell-concept"
+                        title={conceptText}
+                      >
+                        {conceptText}
+                      </td>
                     </tr>
                   );
                 })}

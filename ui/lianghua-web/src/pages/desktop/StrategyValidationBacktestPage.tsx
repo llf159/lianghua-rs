@@ -1,15 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import {
-  checkStrategyManageRuleDraft,
   getStrategyManagePage,
-  type StrategyManageDistPoint,
-  type StrategyManageRuleDraft,
   type StrategyManageRuleItem,
 } from "../../apis/strategyManage";
 import {
   getStrategyPerformanceValidationPage,
+  type StrategyPerformanceValidationCaseData,
+  type StrategyPerformanceValidationDraft,
   type StrategyPerformanceValidationPageData,
+  type StrategyValidationUnknownConfig,
 } from "../../apis/strategyValidation";
 import {
   readJsonStorage,
@@ -19,13 +19,11 @@ import {
 import "./css/StrategyManagePage.css";
 import "./css/StrategyValidationBacktestPage.css";
 
-const STRATEGY_VALIDATION_STATE_KEY = "lh_strategy_validation_backtest_v1";
+const STRATEGY_VALIDATION_STATE_KEY = "lh_strategy_validation_backtest_v2";
 const QUANTILE_OPTIONS = [0.8, 0.9, 0.95] as const;
 const HORIZON_OPTIONS = [2, 3, 5] as const;
-const TAG_OPTIONS = ["Normal", "Opportunity", "Rare"] as const;
 const SCOPE_OPTIONS = ["LAST", "ANY", "EACH", "RECENT", "CONSEC"] as const;
 
-type ScoreMode = "fixed" | "dist";
 type ScopeMode = (typeof SCOPE_OPTIONS)[number];
 
 type PersistedState = {
@@ -33,111 +31,27 @@ type PersistedState = {
   selectedImportName: string;
   selectedHorizon: string;
   strongQuantile: string;
-  draft: StrategyManageRuleDraft;
-  scoreMode: ScoreMode;
-  distPointsText: string;
-  fixedPointsText: string;
+  draft: StrategyPerformanceValidationDraft;
   pageData: StrategyPerformanceValidationPageData | null;
 };
 
-function hasDistPoints(items?: StrategyManageDistPoint[] | null) {
-  return Boolean(items && items.length > 0);
-}
-
-function buildDraftFromRule(rule: StrategyManageRuleItem): StrategyManageRuleDraft {
+function buildEmptyUnknown(): StrategyValidationUnknownConfig {
   return {
-    name: rule.name,
-    scope_way: rule.scope_way,
-    scope_windows: rule.scope_windows,
-    when: rule.when,
-    points: rule.points,
-    dist_points: rule.dist_points ?? null,
-    explain: rule.explain,
-    tag: rule.tag,
+    name: "",
+    start: 0,
+    end: 0,
+    step: 1,
   };
 }
 
-function buildEmptyDraft(): StrategyManageRuleDraft {
+function buildEmptyDraft(): StrategyPerformanceValidationDraft {
   return {
-    name: "",
     scope_way: "LAST",
     scope_windows: 1,
     when: "",
-    points: 0,
-    dist_points: null,
-    explain: "",
-    tag: "Normal",
+    import_name: null,
+    unknown_configs: [buildEmptyUnknown()],
   };
-}
-
-function distPointsToText(items?: StrategyManageDistPoint[] | null) {
-  if (!items || items.length === 0) {
-    return "";
-  }
-  return items.map((item) => `${item.min},${item.max},${item.points}`).join("\n");
-}
-
-function parseDistPointsText(raw: string) {
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  return trimmed.split("\n").map((line, index) => {
-    const parts = line
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean);
-    if (parts.length !== 3) {
-      throw new Error(`字典得分第 ${index + 1} 行格式错误，应为 min,max,points`);
-    }
-
-    const min = Number(parts[0]);
-    const max = Number(parts[1]);
-    const points = Number(parts[2]);
-    if (!Number.isInteger(min) || !Number.isInteger(max) || !Number.isFinite(points)) {
-      throw new Error(`字典得分第 ${index + 1} 行存在非法数值`);
-    }
-    return { min, max, points };
-  });
-}
-
-function parseFixedPointsText(raw: string) {
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    throw new Error("固定分值不能为空");
-  }
-
-  const parsed = Number(trimmed);
-  if (!Number.isFinite(parsed)) {
-    throw new Error("固定分值必须是合法数字");
-  }
-  return parsed;
-}
-
-function buildPreparedDraft(
-  draft: StrategyManageRuleDraft,
-  scoreMode: ScoreMode,
-  distPointsText: string,
-  fixedPointsText: string,
-) {
-  const parsedDistPoints = scoreMode === "dist" ? parseDistPointsText(distPointsText) : null;
-  if (scoreMode === "dist" && (!parsedDistPoints || parsedDistPoints.length === 0)) {
-    throw new Error("当前选择的是字典分，至少需要填写一条字典得分");
-  }
-  const parsedFixedPoints =
-    scoreMode === "fixed" ? parseFixedPointsText(fixedPointsText) : draft.points;
-
-  return {
-    ...draft,
-    name: draft.name.trim(),
-    scope_way: draft.scope_way.trim().toUpperCase(),
-    when: draft.when.trim(),
-    explain: draft.explain.trim(),
-    tag: draft.tag.trim() || "Normal",
-    dist_points: parsedDistPoints,
-    points: parsedFixedPoints,
-  } satisfies StrategyManageRuleDraft;
 }
 
 function parseScopeWayDraft(scopeWay: string): { mode: ScopeMode; consecThreshold: number } {
@@ -149,20 +63,72 @@ function parseScopeWayDraft(scopeWay: string): { mode: ScopeMode; consecThreshol
       consecThreshold: Number.isInteger(raw) && raw > 0 ? raw : 2,
     };
   }
-
   if (SCOPE_OPTIONS.includes(normalized as ScopeMode)) {
     return { mode: normalized as ScopeMode, consecThreshold: 2 };
   }
-
   return { mode: "LAST", consecThreshold: 2 };
 }
 
 function buildScopeWayValue(mode: ScopeMode, consecThreshold: number) {
   if (mode === "CONSEC") {
-    const normalized = Math.max(1, Math.floor(consecThreshold || 1));
-    return `CONSEC>=${normalized}`;
+    return `CONSEC>=${Math.max(1, Math.floor(consecThreshold || 1))}`;
   }
   return mode;
+}
+
+function buildDraftFromRule(rule: StrategyManageRuleItem): StrategyPerformanceValidationDraft {
+  return {
+    scope_way: rule.scope_way,
+    scope_windows: rule.scope_windows,
+    when: rule.when,
+    import_name: rule.name,
+    unknown_configs: [buildEmptyUnknown()],
+  };
+}
+
+function buildInitialState(): PersistedState {
+  const fallbackDraft = buildEmptyDraft();
+  if (typeof window === "undefined") {
+    return {
+      sourcePath: "",
+      selectedImportName: "",
+      selectedHorizon: "5",
+      strongQuantile: "0.9",
+      draft: fallbackDraft,
+      pageData: null,
+    };
+  }
+
+  const stored = readJsonStorage<Partial<PersistedState>>(
+    window.localStorage,
+    STRATEGY_VALIDATION_STATE_KEY,
+  );
+
+  return {
+    sourcePath:
+      typeof stored?.sourcePath === "string" ? stored.sourcePath : readStoredSourcePath(),
+    selectedImportName:
+      typeof stored?.selectedImportName === "string" ? stored.selectedImportName : "",
+    selectedHorizon:
+      typeof stored?.selectedHorizon === "string" ? stored.selectedHorizon : "5",
+    strongQuantile:
+      typeof stored?.strongQuantile === "string" ? stored.strongQuantile : "0.9",
+    draft:
+      stored?.draft && typeof stored.draft === "object"
+        ? {
+            ...fallbackDraft,
+            ...stored.draft,
+            unknown_configs:
+              Array.isArray(stored.draft.unknown_configs) && stored.draft.unknown_configs.length > 0
+                ? stored.draft.unknown_configs
+                : [buildEmptyUnknown()],
+          }
+        : fallbackDraft,
+    pageData:
+      stored?.pageData && typeof stored.pageData === "object"
+        ? (stored.pageData as StrategyPerformanceValidationPageData)
+        : null,
+  };
 }
 
 function formatNumber(value?: number | null, digits = 2) {
@@ -207,113 +173,294 @@ function valueClassName(value?: number | null) {
 }
 
 function metricForHorizon(
-  row: NonNullable<StrategyPerformanceValidationPageData["rule_rows"]>[number],
+  row: StrategyPerformanceValidationCaseData["positive_row"] | StrategyPerformanceValidationCaseData["negative_row"],
   horizon: number,
 ) {
-  return row.metrics.find((item) => item.horizon === horizon) ?? null;
+  return row?.metrics.find((item) => item.horizon === horizon) ?? null;
 }
 
-function findRuleByName(rules: StrategyManageRuleItem[], name: string) {
-  return rules.find((item) => item.name === name) ?? null;
-}
-
-function buildInitialState(): PersistedState {
-  const fallbackDraft = buildEmptyDraft();
-  if (typeof window === "undefined") {
-    return {
-      sourcePath: "",
-      selectedImportName: "",
-      selectedHorizon: "10",
-      strongQuantile: "0.9",
-      draft: fallbackDraft,
-      scoreMode: "fixed",
-      distPointsText: "",
-      fixedPointsText: "0",
-      pageData: null,
-    };
-  }
-
-  const stored = readJsonStorage<Partial<PersistedState>>(
-    window.localStorage,
-    STRATEGY_VALIDATION_STATE_KEY,
-  );
+function sanitizeDraft(draft: StrategyPerformanceValidationDraft) {
+  const unknown_configs = draft.unknown_configs
+    .map((item) => ({
+      name: item.name.trim(),
+      start: Number(item.start),
+      end: Number(item.end),
+      step: Number(item.step),
+    }))
+    .filter((item) => item.name.length > 0);
 
   return {
-    sourcePath:
-      typeof stored?.sourcePath === "string"
-        ? stored.sourcePath
-        : readStoredSourcePath(),
-    selectedImportName:
-      typeof stored?.selectedImportName === "string" ? stored.selectedImportName : "",
-    selectedHorizon:
-      typeof stored?.selectedHorizon === "string" ? stored.selectedHorizon : "10",
-    strongQuantile:
-      typeof stored?.strongQuantile === "string" ? stored.strongQuantile : "0.9",
-    draft:
-      stored?.draft && typeof stored.draft === "object"
-        ? {
-            ...fallbackDraft,
-            ...stored.draft,
-          }
-        : fallbackDraft,
-    scoreMode:
-      stored?.scoreMode === "dist" || stored?.scoreMode === "fixed"
-        ? stored.scoreMode
-        : "fixed",
-    distPointsText:
-      typeof stored?.distPointsText === "string" ? stored.distPointsText : "",
-    fixedPointsText:
-      typeof stored?.fixedPointsText === "string" ? stored.fixedPointsText : "0",
-    pageData:
-      stored?.pageData && typeof stored.pageData === "object"
-        ? (stored.pageData as StrategyPerformanceValidationPageData)
-        : null,
-  };
+    scope_way: draft.scope_way.trim().toUpperCase(),
+    scope_windows: Math.max(1, Math.floor(draft.scope_windows || 1)),
+    when: draft.when.trim(),
+    import_name: draft.import_name?.trim() || null,
+    unknown_configs,
+  } satisfies StrategyPerformanceValidationDraft;
+}
+
+function ValidationCaseSection({
+  title,
+  caseData,
+  horizons,
+}: {
+  title: string;
+  caseData?: StrategyPerformanceValidationCaseData | null;
+  horizons: number[];
+}) {
+  if (!caseData) {
+    return null;
+  }
+
+  const portfolioRows = caseData.portfolio_rows.slice(0, 8);
+
+  return (
+    <section className="strategy-manage-card strategy-validation-card">
+      <div className="strategy-manage-section-head">
+        <div>
+          <h3 className="strategy-manage-subtitle">{title}</h3>
+          <p className="strategy-manage-note">{caseData.combo_summary.combo_label}</p>
+        </div>
+        <div className="strategy-validation-chip-row">
+          <span className="strategy-validation-chip is-warm">
+            触发样本 {formatNumber(caseData.combo_summary.trigger_samples, 0)}
+          </span>
+          <span className="strategy-validation-chip">
+            平均每日触发 {formatNumber(caseData.combo_summary.avg_daily_trigger)}
+          </span>
+        </div>
+      </div>
+
+      <div className="strategy-validation-note-box">
+        <strong>替换后公式</strong>
+        <p>{caseData.combo_summary.formula || "--"}</p>
+      </div>
+
+      <div className="strategy-validation-direction-layout">
+        {[caseData.positive_row, caseData.negative_row]
+          .filter(Boolean)
+          .map((row) => {
+            const actualRow = row!;
+            return (
+              <article key={actualRow.signal_direction} className="strategy-validation-direction-card">
+                <div className="strategy-validation-direction-head">
+                  <div>
+                    <h4>{actualRow.direction_label}</h4>
+                    <p>{actualRow.explain || "--"}</p>
+                  </div>
+                  <div className="strategy-validation-chip-row">
+                    {actualRow.signal_direction === "positive" ? (
+                      <span
+                        className={
+                          actualRow.auto_candidate
+                            ? "strategy-validation-chip is-positive"
+                            : "strategy-validation-chip"
+                        }
+                      >
+                        {actualRow.auto_candidate ? "偏正向" : "正向优势一般"}
+                      </span>
+                    ) : (
+                      <span
+                        className={
+                          actualRow.negative_effective
+                            ? "strategy-validation-chip is-negative"
+                            : "strategy-validation-chip"
+                        }
+                      >
+                        {actualRow.negative_effective ? "偏负向" : "负向未定"}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="strategy-validation-metric-row">
+                  {horizons.map((horizon) => {
+                    const metric = metricForHorizon(actualRow, horizon);
+                    return (
+                      <div key={horizon} className="strategy-validation-metric-card">
+                        <div className="strategy-validation-metric-title">{horizon} 日</div>
+                        <div className="strategy-validation-metric-stack">
+                          <span>样本 {formatNumber(metric?.hit_n, 0)}</span>
+                          <span className={valueClassName(metric?.avg_future_return_pct)}>
+                            均收益 {formatPercent(metric?.avg_future_return_pct)}
+                          </span>
+                          <span>Lift {formatLift(metric?.strong_lift)}</span>
+                          <span>胜率 {formatRate(metric?.win_rate)}</span>
+                          <span className={valueClassName(metric?.hit_vs_non_hit_delta_pct)}>
+                            Hit差 {formatPercent(metric?.hit_vs_non_hit_delta_pct)}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {actualRow.signal_direction === "negative" &&
+                actualRow.negative_review_notes.length > 0 ? (
+                  <div className="strategy-validation-note-box is-soft">
+                    <strong>负向判断备注</strong>
+                    <ul>
+                      {actualRow.negative_review_notes.map((note) => (
+                        <li key={note}>{note}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </article>
+            );
+          })}
+      </div>
+
+      <div className="strategy-validation-detail-layout">
+        <article className="strategy-validation-detail-card">
+          <div className="strategy-validation-direction-head">
+            <div>
+              <h4>触发分层</h4>
+              <p>
+                {caseData.layer_mode === "each_count"
+                  ? "按 EACH 的触发次数分层"
+                  : caseData.layer_mode === "recent_distance"
+                    ? "按 RECENT 的最近触发距离分层"
+                    : "当前模式没有额外层级，展示整体触发样本"}
+              </p>
+            </div>
+          </div>
+          <div className="strategy-validation-table-wrap">
+            <table className="strategy-validation-table">
+              <thead>
+                <tr>
+                  <th>层级</th>
+                  <th>样本数</th>
+                  <th>均收益</th>
+                  <th>强势命中率</th>
+                  <th>胜率</th>
+                </tr>
+              </thead>
+              <tbody>
+                {caseData.layer_rows.map((row) => (
+                  <tr key={`${row.label}-${row.layer_value}`}>
+                    <td>{row.label}</td>
+                    <td>{formatNumber(row.sample_count, 0)}</td>
+                    <td className={valueClassName(row.avg_future_return_pct)}>
+                      {formatPercent(row.avg_future_return_pct)}
+                    </td>
+                    <td>{formatRate(row.strong_hit_rate)}</td>
+                    <td>{formatRate(row.win_rate)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <article className="strategy-validation-detail-card">
+          <div className="strategy-validation-direction-head">
+            <div>
+              <h4>触发相似度</h4>
+              <p>观察它与现有策略在同一标的同一日期同时触发的占比。</p>
+            </div>
+          </div>
+          <div className="strategy-validation-table-wrap">
+            <table className="strategy-validation-table">
+              <thead>
+                <tr>
+                  <th>现有策略</th>
+                  <th>同时触发样本</th>
+                  <th>占当前组合</th>
+                  <th>占现有策略</th>
+                  <th>Lift</th>
+                </tr>
+              </thead>
+              <tbody>
+                {caseData.similarity_rows.map((row) => (
+                  <tr key={row.rule_name}>
+                    <td>
+                      <strong>{row.rule_name}</strong>
+                      {row.explain ? <div>{row.explain}</div> : null}
+                    </td>
+                    <td>{formatNumber(row.overlap_samples, 0)}</td>
+                    <td>{formatRate(row.overlap_rate_vs_validation)}</td>
+                    <td>{formatRate(row.overlap_rate_vs_existing)}</td>
+                    <td>{formatLift(row.overlap_lift)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        {portfolioRows.length > 0 ? (
+          <article className="strategy-validation-detail-card">
+            <div className="strategy-validation-direction-head">
+              <div>
+                <h4>多因子分析</h4>
+                <p>仅展示包含当前验证组合的同时触发组合，口径与策略表现回测保持一致。</p>
+              </div>
+            </div>
+            <div className="strategy-validation-table-wrap">
+              <table className="strategy-validation-table">
+                <thead>
+                  <tr>
+                    <th>组合</th>
+                    <th>全样本超额</th>
+                    <th>近40期超额</th>
+                    <th>近20期超额</th>
+                    <th>全样本 Lift</th>
+                    <th>全样本 IC</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {portfolioRows.map((row) => {
+                    const full = row.windows.find((item) => item.window_key === "full");
+                    const recent40 = row.windows.find((item) => item.window_key === "recent_40");
+                    const recent20 = row.windows.find((item) => item.window_key === "recent_20");
+                    return (
+                      <tr key={row.strategy_key}>
+                        <td>{row.strategy_label}</td>
+                        <td className={valueClassName(full?.avg_excess_return_pct)}>
+                          {formatPercent(full?.avg_excess_return_pct)}
+                        </td>
+                        <td className={valueClassName(recent40?.avg_excess_return_pct)}>
+                          {formatPercent(recent40?.avg_excess_return_pct)}
+                        </td>
+                        <td className={valueClassName(recent20?.avg_excess_return_pct)}>
+                          {formatPercent(recent20?.avg_excess_return_pct)}
+                        </td>
+                        <td>{formatLift(full?.strong_lift)}</td>
+                        <td>{formatNumber(full?.rank_ic_mean, 3)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </article>
+        ) : null}
+      </div>
+    </section>
+  );
 }
 
 export default function StrategyValidationBacktestPage() {
   const initialState = useMemo(buildInitialState, []);
   const [sourcePath, setSourcePath] = useState(initialState.sourcePath);
   const [rules, setRules] = useState<StrategyManageRuleItem[]>([]);
-  const [selectedImportName, setSelectedImportName] = useState(
-    initialState.selectedImportName,
-  );
-  const [selectedHorizon, setSelectedHorizon] = useState(
-    initialState.selectedHorizon,
-  );
-  const [strongQuantile, setStrongQuantile] = useState(
-    initialState.strongQuantile,
-  );
-  const [draft, setDraft] = useState<StrategyManageRuleDraft>(initialState.draft);
-  const [scoreMode, setScoreMode] = useState<ScoreMode>(initialState.scoreMode);
-  const [distPointsText, setDistPointsText] = useState(initialState.distPointsText);
-  const [fixedPointsText, setFixedPointsText] = useState(initialState.fixedPointsText);
+  const [selectedImportName, setSelectedImportName] = useState(initialState.selectedImportName);
+  const [selectedHorizon, setSelectedHorizon] = useState(initialState.selectedHorizon);
+  const [strongQuantile, setStrongQuantile] = useState(initialState.strongQuantile);
+  const [draft, setDraft] = useState<StrategyPerformanceValidationDraft>(initialState.draft);
   const [pageData, setPageData] = useState<StrategyPerformanceValidationPageData | null>(
     initialState.pageData,
   );
   const [loadingRules, setLoadingRules] = useState(true);
-  const [checking, setChecking] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [checkNotice, setCheckNotice] = useState("");
 
   const sourcePathTrimmed = sourcePath.trim();
   const draftScopeState = useMemo(
     () => parseScopeWayDraft(draft.scope_way ?? "LAST"),
     [draft.scope_way],
   );
-  const distPreviewError = useMemo(() => {
-    if (scoreMode !== "dist") {
-      return "";
-    }
-    try {
-      parseDistPointsText(distPointsText);
-      return "";
-    } catch (previewError) {
-      return String(previewError);
-    }
-  }, [distPointsText, scoreMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -328,14 +475,15 @@ export default function StrategyValidationBacktestPage() {
         }
         setSourcePath(resolvedSourcePath);
         setRules(data.rules ?? []);
-        setLoadingRules(false);
       } catch (loadError) {
-        if (cancelled) {
-          return;
+        if (!cancelled) {
+          setRules([]);
+          setError(`读取策略列表失败: ${String(loadError)}`);
         }
-        setLoadingRules(false);
-        setRules([]);
-        setError(`读取策略列表失败: ${String(loadError)}`);
+      } finally {
+        if (!cancelled) {
+          setLoadingRules(false);
+        }
       }
     };
 
@@ -355,30 +503,13 @@ export default function StrategyValidationBacktestPage() {
       selectedHorizon,
       strongQuantile,
       draft,
-      scoreMode,
-      distPointsText,
-      fixedPointsText,
       pageData,
     } satisfies PersistedState);
-  }, [
-    distPointsText,
-    draft,
-    fixedPointsText,
-    pageData,
-    scoreMode,
-    selectedHorizon,
-    selectedImportName,
-    sourcePath,
-    strongQuantile,
-  ]);
+  }, [draft, pageData, selectedHorizon, selectedImportName, sourcePath, strongQuantile]);
 
   function applyImportedRule(rule: StrategyManageRuleItem) {
     setSelectedImportName(rule.name);
     setDraft(buildDraftFromRule(rule));
-    setScoreMode(hasDistPoints(rule.dist_points) ? "dist" : "fixed");
-    setDistPointsText(distPointsToText(rule.dist_points));
-    setFixedPointsText(String(rule.points));
-    setCheckNotice("");
     setNotice(`已导入策略：${rule.name}`);
     setError("");
   }
@@ -386,39 +517,9 @@ export default function StrategyValidationBacktestPage() {
   function resetDraft() {
     setSelectedImportName("");
     setDraft(buildEmptyDraft());
-    setScoreMode("fixed");
-    setDistPointsText("");
-    setFixedPointsText("0");
-    setCheckNotice("");
-    setNotice("已清空草稿，可从零开始配置。");
+    setPageData(null);
+    setNotice("已清空验证草稿。");
     setError("");
-  }
-
-  function getPreparedDraft() {
-    return buildPreparedDraft(draft, scoreMode, distPointsText, fixedPointsText);
-  }
-
-  async function onCheckDraft() {
-    if (!sourcePathTrimmed) {
-      setError("当前数据目录为空，无法检查策略草稿。");
-      return;
-    }
-
-    setChecking(true);
-    setError("");
-    setNotice("");
-    try {
-      const preparedDraft = getPreparedDraft();
-      const message = await checkStrategyManageRuleDraft(
-        sourcePathTrimmed,
-        preparedDraft,
-      );
-      setCheckNotice(message);
-    } catch (checkError) {
-      setError(`检查策略失败: ${String(checkError)}`);
-    } finally {
-      setChecking(false);
-    }
   }
 
   async function onRunValidation() {
@@ -427,11 +528,16 @@ export default function StrategyValidationBacktestPage() {
       return;
     }
 
+    const preparedDraft = sanitizeDraft(draft);
+    if (!preparedDraft.when) {
+      setError("表达式不能为空。");
+      return;
+    }
+
     setRunning(true);
     setError("");
     setNotice("");
     try {
-      const preparedDraft = getPreparedDraft();
       const result = await getStrategyPerformanceValidationPage({
         sourcePath: sourcePathTrimmed,
         selectedHorizon: Number(selectedHorizon),
@@ -439,8 +545,7 @@ export default function StrategyValidationBacktestPage() {
         draft: preparedDraft,
       });
       setPageData(result);
-      setCheckNotice("");
-      setNotice(`已完成策略验证：${preparedDraft.name}`);
+      setNotice(`已完成策略验证，共评估 ${result.combo_summaries.length} 组未知数组合。`);
     } catch (runError) {
       setError(`运行策略验证失败: ${String(runError)}`);
     } finally {
@@ -448,22 +553,17 @@ export default function StrategyValidationBacktestPage() {
     }
   }
 
-  const positiveRow =
-    pageData?.rule_rows.find((item) => item.signal_direction === "positive") ?? null;
-  const negativeRow =
-    pageData?.rule_rows.find((item) => item.signal_direction === "negative") ?? null;
-
   return (
     <div className="strategy-validation-page">
       <section className="strategy-manage-card strategy-validation-card">
         <div className="strategy-manage-section-head">
           <div>
             <h2 className="strategy-manage-title">策略验证微调</h2>
-            <p className="strategy-manage-note">单策略验证。</p>
+            <p className="strategy-manage-note">
+              手动配置未知数区间，运行前按字符串替换展开组合，再统一做触发与回测验证。
+            </p>
           </div>
-          <span className="strategy-manage-tip">
-            点击后计算
-          </span>
+          <span className="strategy-manage-tip">点击后计算</span>
         </div>
 
         <div className="strategy-manage-source-note">
@@ -478,12 +578,12 @@ export default function StrategyValidationBacktestPage() {
               onChange={(event) => {
                 const nextName = event.target.value;
                 setSelectedImportName(nextName);
-                const matched = findRuleByName(rules, nextName);
+                const matched = rules.find((item) => item.name === nextName);
                 if (matched) {
                   applyImportedRule(matched);
                 }
               }}
-              disabled={loadingRules || checking || running}
+              disabled={loadingRules || running}
             >
               <option value="">请选择现有策略</option>
               {rules.map((rule) => (
@@ -499,7 +599,7 @@ export default function StrategyValidationBacktestPage() {
               type="button"
               className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary"
               onClick={resetDraft}
-              disabled={checking || running}
+              disabled={running}
             >
               清空草稿
             </button>
@@ -523,7 +623,7 @@ export default function StrategyValidationBacktestPage() {
                   }
                 })();
               }}
-              disabled={loadingRules || checking || running}
+              disabled={loadingRules || running}
             >
               {loadingRules ? "刷新中..." : "刷新策略列表"}
             </button>
@@ -532,44 +632,14 @@ export default function StrategyValidationBacktestPage() {
 
         <div className="strategy-manage-editor-grid strategy-validation-editor-grid">
           <label className="strategy-manage-field">
-            <span>策略名称</span>
-            <input
-              value={draft.name}
-              onChange={(event) =>
-                setDraft((current) => ({ ...current, name: event.target.value }))
-              }
-              placeholder="例如：涨停后放量加强版"
-            />
-          </label>
-
-          <label className="strategy-manage-field">
-            <span>标签</span>
-            <select
-              value={draft.tag}
-              onChange={(event) =>
-                setDraft((current) => ({ ...current, tag: event.target.value }))
-              }
-            >
-              {TAG_OPTIONS.map((item) => (
-                <option key={item} value={item}>
-                  {item}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="strategy-manage-field">
-            <span>得分方法</span>
+            <span>触发方式</span>
             <select
               value={draftScopeState.mode}
               onChange={(event) => {
                 const nextMode = event.target.value as ScopeMode;
                 setDraft((current) => ({
                   ...current,
-                  scope_way: buildScopeWayValue(
-                    nextMode,
-                    draftScopeState.consecThreshold,
-                  ),
+                  scope_way: buildScopeWayValue(nextMode, draftScopeState.consecThreshold),
                 }));
               }}
             >
@@ -604,10 +674,7 @@ export default function StrategyValidationBacktestPage() {
                 min={1}
                 value={draftScopeState.consecThreshold}
                 onChange={(event) => {
-                  const nextThreshold = Math.max(
-                    1,
-                    Number(event.target.value) || 1,
-                  );
+                  const nextThreshold = Math.max(1, Number(event.target.value) || 1);
                   setDraft((current) => ({
                     ...current,
                     scope_way: buildScopeWayValue("CONSEC", nextThreshold),
@@ -616,66 +683,6 @@ export default function StrategyValidationBacktestPage() {
               />
             </label>
           ) : null}
-
-          <label className="strategy-manage-field strategy-manage-field-span-full">
-            <span>策略说明</span>
-            <input
-              value={draft.explain}
-              onChange={(event) =>
-                setDraft((current) => ({ ...current, explain: event.target.value }))
-              }
-              placeholder="描述这条策略想捕捉的形态和预期"
-            />
-          </label>
-
-          <div className="strategy-manage-field">
-            <span>得分方式</span>
-            <div className="strategy-manage-score-mode">
-              <button
-                type="button"
-                className={
-                  scoreMode === "fixed"
-                    ? "strategy-manage-score-mode-btn is-active"
-                    : "strategy-manage-score-mode-btn"
-                }
-                onClick={() => setScoreMode("fixed")}
-              >
-                固定分
-              </button>
-              <button
-                type="button"
-                className={
-                  scoreMode === "dist"
-                    ? "strategy-manage-score-mode-btn is-active"
-                    : "strategy-manage-score-mode-btn"
-                }
-                onClick={() => setScoreMode("dist")}
-              >
-                字典分
-              </button>
-            </div>
-          </div>
-
-          {scoreMode === "fixed" ? (
-            <label className="strategy-manage-field">
-              <span>固定分值</span>
-              <input
-                value={fixedPointsText}
-                onChange={(event) => setFixedPointsText(event.target.value)}
-                placeholder="例如：2 或 -3"
-              />
-            </label>
-          ) : (
-            <label className="strategy-manage-field strategy-manage-field-span-full">
-              <span>字典得分</span>
-              <textarea
-                rows={5}
-                value={distPointsText}
-                onChange={(event) => setDistPointsText(event.target.value)}
-                placeholder={"每行一段：min,max,points\n例如：0,1,4\n2,4,2"}
-              />
-            </label>
-          )}
 
           <label className="strategy-manage-field">
             <span>回测持有周期</span>
@@ -713,46 +720,139 @@ export default function StrategyValidationBacktestPage() {
               onChange={(event) =>
                 setDraft((current) => ({ ...current, when: event.target.value }))
               }
-              placeholder="例如：C > O and V > REF(V, 1)"
+              placeholder={"例如：C > REF(C, N) and V > MA(V, M)\nN、M 由下面的未知数配置手动替换"}
             />
           </label>
         </div>
 
-        {distPreviewError ? (
-          <div className="strategy-manage-message strategy-manage-message-error">
-            {distPreviewError}
+        <div className="strategy-validation-unknown-block">
+          <div className="strategy-manage-section-head">
+            <div>
+              <h3 className="strategy-manage-subtitle">未知数配置</h3>
+              <p className="strategy-manage-note">
+                变量名按字符串替换回填到表达式里，再对所有组合运行验证。
+              </p>
+            </div>
+            <button
+              type="button"
+              className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary"
+              onClick={() =>
+                setDraft((current) => ({
+                  ...current,
+                  unknown_configs: [...current.unknown_configs, buildEmptyUnknown()],
+                }))
+              }
+              disabled={running}
+            >
+              + 增加未知数
+            </button>
           </div>
-        ) : null}
+
+          <div className="strategy-validation-unknown-list">
+            {draft.unknown_configs.map((item, index) => (
+              <div key={`unknown-${index}`} className="strategy-validation-unknown-row">
+                <label className="strategy-manage-field">
+                  <span>变量名</span>
+                  <input
+                    value={item.name}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        unknown_configs: current.unknown_configs.map((config, configIndex) =>
+                          configIndex === index
+                            ? { ...config, name: event.target.value }
+                            : config,
+                        ),
+                      }))
+                    }
+                    placeholder="例如 N"
+                  />
+                </label>
+                <label className="strategy-manage-field">
+                  <span>起始</span>
+                  <input
+                    type="number"
+                    value={item.start}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        unknown_configs: current.unknown_configs.map((config, configIndex) =>
+                          configIndex === index
+                            ? { ...config, start: Number(event.target.value) }
+                            : config,
+                        ),
+                      }))
+                    }
+                  />
+                </label>
+                <label className="strategy-manage-field">
+                  <span>结束</span>
+                  <input
+                    type="number"
+                    value={item.end}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        unknown_configs: current.unknown_configs.map((config, configIndex) =>
+                          configIndex === index
+                            ? { ...config, end: Number(event.target.value) }
+                            : config,
+                        ),
+                      }))
+                    }
+                  />
+                </label>
+                <label className="strategy-manage-field">
+                  <span>步长</span>
+                  <input
+                    type="number"
+                    value={item.step}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        unknown_configs: current.unknown_configs.map((config, configIndex) =>
+                          configIndex === index
+                            ? { ...config, step: Number(event.target.value) }
+                            : config,
+                        ),
+                      }))
+                    }
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary strategy-validation-unknown-remove"
+                  onClick={() =>
+                    setDraft((current) => ({
+                      ...current,
+                      unknown_configs:
+                        current.unknown_configs.length <= 1
+                          ? [buildEmptyUnknown()]
+                          : current.unknown_configs.filter((_, configIndex) => configIndex !== index),
+                    }))
+                  }
+                  disabled={running}
+                >
+                  删除
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+
         {error ? (
-          <div className="strategy-manage-message strategy-manage-message-error">
-            {error}
-          </div>
-        ) : null}
-        {checkNotice ? (
-          <div className="strategy-manage-message strategy-manage-message-notice">
-            {checkNotice}
-          </div>
+          <div className="strategy-manage-message strategy-manage-message-error">{error}</div>
         ) : null}
         {notice ? (
-          <div className="strategy-manage-message strategy-manage-message-notice">
-            {notice}
-          </div>
+          <div className="strategy-manage-message strategy-manage-message-notice">{notice}</div>
         ) : null}
 
         <div className="strategy-manage-editor-actions strategy-validation-actions">
           <button
             type="button"
-            className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary"
-            onClick={() => void onCheckDraft()}
-            disabled={checking || running}
-          >
-            {checking ? "检查中..." : "检查草稿"}
-          </button>
-          <button
-            type="button"
             className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary"
             onClick={() => void onRunValidation()}
-            disabled={checking || running}
+            disabled={running}
           >
             {running ? "验证中..." : "运行验证"}
           </button>
@@ -761,51 +861,6 @@ export default function StrategyValidationBacktestPage() {
 
       {pageData ? (
         <>
-          <section className="strategy-manage-card strategy-validation-card">
-            <div className="strategy-manage-section-head">
-              <div>
-                <h3 className="strategy-manage-subtitle">策略草稿概览</h3>
-              </div>
-              <div className="strategy-validation-chip-row">
-                <span className="strategy-validation-chip is-warm">
-                  {pageData.draft_summary.scope_way} / {pageData.draft_summary.scope_windows} 窗口
-                </span>
-                <span className="strategy-validation-chip">
-                  {pageData.draft_summary.score_mode === "dist" ? "字典分" : "固定分"}
-                </span>
-                {pageData.draft_summary.tag ? (
-                  <span className="strategy-validation-chip">
-                    标签 {pageData.draft_summary.tag}
-                  </span>
-                ) : null}
-              </div>
-            </div>
-
-            <div className="strategy-manage-rule-metrics strategy-manage-rule-metrics-detail strategy-validation-summary-grid">
-              <div className="strategy-manage-rule-metric is-score">
-                <span>策略名称</span>
-                <strong>{pageData.draft_summary.name}</strong>
-              </div>
-              <div className="strategy-manage-rule-metric">
-                <span>基础分值</span>
-                <strong>{formatNumber(pageData.draft_summary.points)}</strong>
-              </div>
-              <div className="strategy-manage-rule-metric">
-                <span>当前持有周期</span>
-                <strong>{pageData.selected_horizon} 日</strong>
-              </div>
-              <div className="strategy-manage-rule-metric">
-                <span>强势阈值口径</span>
-                <strong>{pageData.strong_quantile.toFixed(2)}</strong>
-              </div>
-            </div>
-
-            <div className="strategy-validation-note-box">
-              <strong>策略说明</strong>
-              <p>{pageData.draft_summary.explain || "--"}</p>
-            </div>
-          </section>
-
           <section className="strategy-manage-card strategy-validation-card">
             <div className="strategy-manage-section-head">
               <div>
@@ -825,9 +880,6 @@ export default function StrategyValidationBacktestPage() {
                 >
                   <div className="strategy-validation-future-card-head">
                     <strong>{summary.horizon} 日</strong>
-                    {summary.horizon === pageData.selected_horizon ? (
-                      <span className="strategy-validation-pill">当前视角</span>
-                    ) : null}
                   </div>
                   <dl className="strategy-validation-future-list">
                     <div>
@@ -841,24 +893,13 @@ export default function StrategyValidationBacktestPage() {
                       </dd>
                     </div>
                     <div>
-                      <dt>p80 / p90 / p95</dt>
-                      <dd>
-                        {formatPercent(summary.p80_return_pct)} /{" "}
-                        {formatPercent(summary.p90_return_pct)} /{" "}
-                        {formatPercent(summary.p95_return_pct)}
-                      </dd>
-                    </div>
-                    <div>
                       <dt>强势阈值</dt>
-                      <dd className={valueClassName(summary.strong_threshold_pct)}>
-                        {formatPercent(summary.strong_threshold_pct)}
-                      </dd>
+                      <dd>{formatPercent(summary.strong_threshold_pct)}</dd>
                     </div>
                     <div>
-                      <dt>胜率 / 最大收益</dt>
+                      <dt>强势基准 / 胜率</dt>
                       <dd>
-                        {formatRate(summary.win_rate)} /{" "}
-                        {formatPercent(summary.max_future_return_pct)}
+                        {formatRate(summary.strong_base_rate)} / {formatRate(summary.win_rate)}
                       </dd>
                     </div>
                   </dl>
@@ -870,202 +911,65 @@ export default function StrategyValidationBacktestPage() {
           <section className="strategy-manage-card strategy-validation-card">
             <div className="strategy-manage-section-head">
               <div>
-                <h3 className="strategy-manage-subtitle">命中方向表现</h3>
+                <h3 className="strategy-manage-subtitle">未知数组合汇总</h3>
+                <p className="strategy-manage-note">
+                  同时给出触发样本、平均每日触发，以及该组合更偏正向还是负向。
+                </p>
               </div>
+              <span className="strategy-validation-pill">
+                共 {pageData.combo_summaries.length} 组
+              </span>
             </div>
 
-            <div className="strategy-validation-direction-layout">
-              {[positiveRow, negativeRow]
-                .filter((item): item is NonNullable<typeof positiveRow> => Boolean(item))
-                .map((row) => (
-                  <article key={row.signal_direction} className="strategy-validation-direction-card">
-                    <div className="strategy-validation-direction-head">
-                      <div>
-                        <h4>{row.direction_label}</h4>
-                        <p>{row.explain || "--"}</p>
-                      </div>
-                      <div className="strategy-validation-chip-row">
-                        {row.signal_direction === "positive" ? (
-                          <span
-                            className={
-                              row.auto_candidate
-                                ? "strategy-validation-chip is-positive"
-                                : "strategy-validation-chip"
-                            }
-                          >
-                            {row.auto_candidate
-                              ? "满足默认优势候选口径"
-                              : "未满足默认优势候选口径"}
-                          </span>
-                        ) : row.negative_effectiveness_label ? (
-                          <span
-                            className={
-                              row.negative_effective
-                                ? "strategy-validation-chip is-negative"
-                                : "strategy-validation-chip"
-                            }
-                          >
-                            {row.negative_effectiveness_label}
-                          </span>
-                        ) : null}
-                      </div>
-                    </div>
-
-                    <div className="strategy-validation-metric-row">
-                      {pageData.horizons.map((horizon) => {
-                        const metric = metricForHorizon(row, horizon);
-                        return (
-                          <div key={horizon} className="strategy-validation-metric-card">
-                            <div className="strategy-validation-metric-title">
-                              {horizon} 日
-                            </div>
-                            <div className="strategy-validation-metric-stack">
-                              <span>样本 {formatNumber(metric?.hit_n, 0)}</span>
-                              <span className={valueClassName(metric?.avg_future_return_pct)}>
-                                均收益 {formatPercent(metric?.avg_future_return_pct)}
-                              </span>
-                              <span>Lift {formatLift(metric?.strong_lift)}</span>
-                              <span>胜率 {formatRate(metric?.win_rate)}</span>
-                              <span className={valueClassName(metric?.hit_vs_non_hit_delta_pct)}>
-                                Hit差 {formatPercent(metric?.hit_vs_non_hit_delta_pct)}
-                              </span>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-
-                    {row.signal_direction === "negative" &&
-                    row.negative_review_notes.length > 0 ? (
-                      <div className="strategy-validation-note-box is-soft">
-                        <strong>负向标签</strong>
-                        <ul>
-                          {row.negative_review_notes.map((note) => (
-                            <li key={note}>{note}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    ) : null}
-                  </article>
-                ))}
+            <div className="strategy-validation-table-wrap">
+              <table className="strategy-validation-table">
+                <thead>
+                  <tr>
+                    <th>组合</th>
+                    <th>触发样本</th>
+                    <th>触发日</th>
+                    <th>平均每日触发</th>
+                    <th>正向强度</th>
+                    <th>正向均收益</th>
+                    <th>负向判定</th>
+                    <th>负向均收益</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pageData.combo_summaries.map((row) => (
+                    <tr key={row.combo_key}>
+                      <td>
+                        <strong>{row.combo_label}</strong>
+                        <div>{row.formula}</div>
+                      </td>
+                      <td>{formatNumber(row.trigger_samples, 0)}</td>
+                      <td>{formatNumber(row.triggered_days, 0)}</td>
+                      <td>{formatNumber(row.avg_daily_trigger)}</td>
+                      <td>{formatNumber(row.positive_final_strength_score, 3)}</td>
+                      <td className={valueClassName(row.positive_avg_future_return_pct)}>
+                        {formatPercent(row.positive_avg_future_return_pct)}
+                      </td>
+                      <td>{row.negative_effective ? "偏负向" : "未确定"}</td>
+                      <td className={valueClassName(row.negative_avg_future_return_pct)}>
+                        {formatPercent(row.negative_avg_future_return_pct)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </section>
 
-          {pageData.rule_detail ? (
-            <section className="strategy-manage-card strategy-validation-card">
-              <div className="strategy-manage-section-head">
-                <div>
-                  <h3 className="strategy-manage-subtitle">得分强度与命中分层</h3>
-                </div>
-              </div>
-
-              <div className="strategy-validation-detail-layout">
-                {pageData.rule_detail.directions.map((direction) => (
-                  <article key={direction.signal_direction} className="strategy-validation-detail-card">
-                    <div className="strategy-validation-direction-head">
-                      <div>
-                        <h4>{direction.direction_label}</h4>
-                        <p>
-                          {direction.bucket_mode === "exact" ? "精确分值" : "分位桶"}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="strategy-manage-rule-metrics strategy-manage-rule-metrics-compact">
-                      <div className="strategy-manage-rule-metric">
-                        <span>样本数</span>
-                        <strong>{formatNumber(direction.sample_count, 0)}</strong>
-                      </div>
-                      <div className="strategy-manage-rule-metric">
-                        <span>均收益</span>
-                        <strong className={valueClassName(direction.avg_future_return_pct)}>
-                          {formatPercent(direction.avg_future_return_pct)}
-                        </strong>
-                      </div>
-                      <div className="strategy-manage-rule-metric">
-                        <span>强势命中率</span>
-                        <strong>{formatRate(direction.strong_hit_rate)}</strong>
-                      </div>
-                      <div className="strategy-manage-rule-metric">
-                        <span>胜率</span>
-                        <strong>{formatRate(direction.win_rate)}</strong>
-                      </div>
-                      <div className="strategy-manage-rule-metric">
-                        <span>IC</span>
-                        <strong>{formatNumber(direction.rank_ic_mean, 3)}</strong>
-                      </div>
-                      <div className="strategy-manage-rule-metric">
-                        <span>ICIR</span>
-                        <strong>{formatNumber(direction.icir, 2)}</strong>
-                      </div>
-                      <div className="strategy-manage-rule-metric">
-                        <span>Hit vs Non-hit</span>
-                        <strong className={valueClassName(direction.hit_vs_non_hit_delta_pct)}>
-                          {formatPercent(direction.hit_vs_non_hit_delta_pct)}
-                        </strong>
-                      </div>
-                    </div>
-
-                    <div className="strategy-validation-table-wrap">
-                      <table className="strategy-validation-table">
-                        <thead>
-                          <tr>
-                            <th>分值组</th>
-                            <th>样本数</th>
-                            <th>均收益</th>
-                            <th>强势命中率</th>
-                            <th>胜率</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {direction.score_rows.map((row) => (
-                            <tr key={row.bucket_label}>
-                              <td>{row.bucket_label}</td>
-                              <td>{formatNumber(row.sample_count, 0)}</td>
-                              <td className={valueClassName(row.avg_future_return_pct)}>
-                                {formatPercent(row.avg_future_return_pct)}
-                              </td>
-                              <td>{formatRate(row.strong_hit_rate)}</td>
-                              <td>{formatRate(row.win_rate)}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    {direction.hit_count_rows.length > 0 ? (
-                      <div className="strategy-validation-table-wrap">
-                        <table className="strategy-validation-table">
-                          <thead>
-                            <tr>
-                              <th>命中次数</th>
-                              <th>样本数</th>
-                              <th>均收益</th>
-                              <th>强势命中率</th>
-                              <th>胜率</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {direction.hit_count_rows.map((row) => (
-                              <tr key={row.hit_count}>
-                                <td>{row.hit_count}</td>
-                                <td>{formatNumber(row.sample_count, 0)}</td>
-                                <td className={valueClassName(row.avg_future_return_pct)}>
-                                  {formatPercent(row.avg_future_return_pct)}
-                                </td>
-                                <td>{formatRate(row.strong_hit_rate)}</td>
-                                <td>{formatRate(row.win_rate)}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    ) : null}
-                  </article>
-                ))}
-              </div>
-            </section>
-          ) : null}
+          <ValidationCaseSection
+            title="最优正向组合"
+            caseData={pageData.best_positive_case}
+            horizons={pageData.horizons}
+          />
+          <ValidationCaseSection
+            title="最优负向组合"
+            caseData={pageData.best_negative_case}
+            horizons={pageData.horizons}
+          />
 
           <section className="strategy-manage-card strategy-validation-card">
             <div className="strategy-manage-section-head">

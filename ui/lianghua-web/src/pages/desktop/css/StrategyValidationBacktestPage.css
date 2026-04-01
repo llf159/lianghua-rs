@@ -28,6 +28,28 @@
   margin-top: 14px;
 }
 
+.strategy-validation-unknown-block {
+  margin-top: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.strategy-validation-unknown-list {
+  display: grid;
+  gap: 10px;
+}
+
+.strategy-validation-unknown-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) repeat(3, minmax(120px, 1fr)) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.strategy-validation-unknown-remove {
+  align-self: end;
+}
+
 .strategy-validation-chip-row {
   display: flex;
   flex-wrap: wrap;
@@ -256,6 +278,33 @@
   color: #607286;
   background: #f8fbfe;
   font-weight: 600;
+}
+
+.strategy-validation-table td div {
+  margin-top: 4px;
+  color: #607286;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@media (max-width: 1100px) {
+  .strategy-validation-future-grid,
+  .strategy-validation-metric-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .strategy-validation-unknown-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .strategy-validation-import-bar,
+  .strategy-validation-future-grid,
+  .strategy-validation-metric-row,
+  .strategy-validation-unknown-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .strategy-validation-method-card {

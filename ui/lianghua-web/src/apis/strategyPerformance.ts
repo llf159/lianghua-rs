@@ -58,6 +58,11 @@ export type StrategyPerformanceRuleRow = {
   negative_effective?: boolean | null;
   negative_effectiveness_label?: string | null;
   negative_review_notes: string[];
+  base_composite_score?: number | null;
+  combo_positive_score?: number | null;
+  combo_negative_score?: number | null;
+  confidence_adjustment?: number | null;
+  final_strength_score?: number | null;
   overall_composite_score?: number | null;
   avg_rank_ic_mean?: number | null;
   metrics: StrategyPerformanceHorizonMetric[];
@@ -84,6 +89,8 @@ export type StrategyPerformancePortfolioWindow = {
   avg_market_return_pct?: number | null;
   avg_excess_return_pct?: number | null;
   excess_win_rate?: number | null;
+  strong_hit_rate?: number | null;
+  strong_lift?: number | null;
   avg_selected_count?: number | null;
   rank_ic_mean?: number | null;
   icir?: number | null;

@@ -1,22 +1,74 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { StrategyManageRuleDraft } from "./strategyManage";
 import type {
-  StrategyPerformanceAutoFilterConfig,
   StrategyPerformanceFutureSummary,
   StrategyPerformanceMethodNote,
-  StrategyPerformanceRuleDetail,
+  StrategyPerformancePortfolioRow,
   StrategyPerformanceRuleRow,
 } from "./strategyPerformance";
 
-export type StrategyPerformanceValidationDraftSummary = {
+export type StrategyValidationUnknownConfig = {
   name: string;
-  explain: string;
-  tag?: string | null;
+  start: number;
+  end: number;
+  step: number;
+};
+
+export type StrategyPerformanceValidationDraft = {
   scope_way: string;
   scope_windows: number;
-  points: number;
-  has_dist_points: boolean;
-  score_mode: string;
+  when: string;
+  import_name?: string | null;
+  unknown_configs: StrategyValidationUnknownConfig[];
+};
+
+export type StrategyPerformanceValidationUnknownValue = {
+  name: string;
+  value: number;
+};
+
+export type StrategyPerformanceValidationComboSummary = {
+  combo_key: string;
+  combo_label: string;
+  import_name?: string | null;
+  formula: string;
+  unknown_values: StrategyPerformanceValidationUnknownValue[];
+  trigger_samples: number;
+  triggered_days: number;
+  avg_daily_trigger: number;
+  positive_final_strength_score?: number | null;
+  positive_avg_future_return_pct?: number | null;
+  positive_hit_n: number;
+  negative_effective: boolean;
+  negative_avg_future_return_pct?: number | null;
+  negative_hit_n: number;
+};
+
+export type StrategyPerformanceValidationLayerRow = {
+  label: string;
+  layer_value: number;
+  sample_count: number;
+  avg_future_return_pct?: number | null;
+  strong_hit_rate?: number | null;
+  win_rate?: number | null;
+};
+
+export type StrategyPerformanceValidationSimilarityRow = {
+  rule_name: string;
+  explain?: string | null;
+  overlap_samples: number;
+  overlap_rate_vs_validation?: number | null;
+  overlap_rate_vs_existing?: number | null;
+  overlap_lift?: number | null;
+};
+
+export type StrategyPerformanceValidationCaseData = {
+  combo_summary: StrategyPerformanceValidationComboSummary;
+  positive_row?: StrategyPerformanceRuleRow | null;
+  negative_row?: StrategyPerformanceRuleRow | null;
+  layer_mode: string;
+  layer_rows: StrategyPerformanceValidationLayerRow[];
+  similarity_rows: StrategyPerformanceValidationSimilarityRow[];
+  portfolio_rows: StrategyPerformancePortfolioRow[];
 };
 
 export type StrategyPerformanceValidationPageData = {
@@ -24,10 +76,9 @@ export type StrategyPerformanceValidationPageData = {
   selected_horizon: number;
   strong_quantile: number;
   future_summaries: StrategyPerformanceFutureSummary[];
-  auto_filter: StrategyPerformanceAutoFilterConfig;
-  draft_summary: StrategyPerformanceValidationDraftSummary;
-  rule_rows: StrategyPerformanceRuleRow[];
-  rule_detail?: StrategyPerformanceRuleDetail | null;
+  combo_summaries: StrategyPerformanceValidationComboSummary[];
+  best_positive_case?: StrategyPerformanceValidationCaseData | null;
+  best_negative_case?: StrategyPerformanceValidationCaseData | null;
   methods: StrategyPerformanceMethodNote[];
 };
 
@@ -35,7 +86,7 @@ export async function getStrategyPerformanceValidationPage(query: {
   sourcePath: string;
   selectedHorizon?: number;
   strongQuantile?: number;
-  draft: StrategyManageRuleDraft;
+  draft: StrategyPerformanceValidationDraft;
 }) {
   return invoke<StrategyPerformanceValidationPageData>(
     "get_strategy_performance_validation_page",

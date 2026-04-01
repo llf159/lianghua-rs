@@ -70,6 +70,7 @@ use lianghua_rs::{
         strategy_performance::{
             StrategyPerformanceHorizonViewData, StrategyPerformancePageData,
             StrategyPerformanceRuleDetail, StrategyPerformanceValidationPageData,
+            StrategyPerformanceValidationDraft,
             get_strategy_performance_horizon_view as core_get_strategy_performance_horizon_view,
             get_latest_strategy_pick_cache as core_get_latest_strategy_pick_cache,
             get_strategy_pick_cache as core_get_strategy_pick_cache,
@@ -1574,7 +1575,7 @@ async fn get_strategy_performance_validation_page(
     source_path: String,
     selected_horizon: Option<u32>,
     strong_quantile: Option<f64>,
-    draft: StrategyManageRuleDraft,
+    draft: StrategyPerformanceValidationDraft,
 ) -> Result<StrategyPerformanceValidationPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_get_strategy_performance_validation_page(
@@ -1705,10 +1706,18 @@ fn run_concept_stock_pick(
     source_path: String,
     board: Option<String>,
     trade_date: Option<String>,
-    concepts: Vec<String>,
+    include_concepts: Vec<String>,
+    exclude_concepts: Vec<String>,
     match_mode: String,
 ) -> Result<StockPickResultData, String> {
-    core_run_concept_stock_pick(&source_path, board, trade_date, concepts, match_mode)
+    core_run_concept_stock_pick(
+        &source_path,
+        board,
+        trade_date,
+        include_concepts,
+        exclude_concepts,
+        match_mode,
+    )
 }
 
 #[tauri::command]

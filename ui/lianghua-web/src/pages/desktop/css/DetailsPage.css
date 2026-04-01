@@ -517,6 +517,12 @@
   box-shadow: 0 6px 16px rgba(235, 122, 52, 0.18);
 }
 
+.details-chart-watch-btn-refresh.is-fixed {
+  border-color: #d45c14;
+  background: rgba(212, 92, 20, 0.96);
+  box-shadow: 0 8px 20px rgba(212, 92, 20, 0.24);
+}
+
 .details-chart-watch-btn.is-added {
   border-color: var(--theme-orange-500);
   background: rgba(249, 115, 22, 0.94);

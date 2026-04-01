@@ -26,6 +26,12 @@ import {
   formatDateLabel,
   formatNumber,
 } from "./stockPickShared";
+import {
+  ConceptIncludeExcludePanels,
+  buildAvailableConceptOptions,
+  normalizeStringArray,
+  toggleStringSelection,
+} from "./stockPickConceptFilter";
 import { useStockPickOutletContext } from "./StockPickPage";
 
 const ADVANCED_STOCK_PICK_STATE_KEY = "advanced-stock-pick-state";
@@ -35,29 +41,23 @@ const DEFAULT_MIN_ADV_HITS = "1";
 const DEFAULT_TOP_LIMIT = "100";
 const DEFAULT_RANK_MAX = "500";
 const DEFAULT_MIXED_SORT_KEYS = [
-  "combo_net_score",
+  "adv_score_sum",
   "adv_hit_cnt",
   "rank",
 ] as const;
 const MIXED_SORT_KEY_OPTIONS = [
-  { value: "combo_net_score", label: "组合净分" },
   { value: "adv_hit_cnt", label: "优势命中数" },
   { value: "adv_score_sum", label: "优势得分和" },
-  { value: "adv_combo_hit_cnt", label: "组合命中数" },
-  { value: "adv_combo_score_sum", label: "组合得分和" },
-  { value: "adv_combo_alpha_score", label: "好组合强度" },
   { value: "noisy_companion_cnt", label: "噪音伴随数(少优先)" },
-  { value: "noisy_combo_hit_cnt", label: "噪音组合数(少优先)" },
-  { value: "noisy_combo_score_sum", label: "噪音组合分(少优先)" },
-  { value: "noisy_combo_penalty_score", label: "坏组合罚分(少优先)" },
   { value: "pos_hit_cnt", label: "正向命中数" },
   { value: "pos_score_sum", label: "正向得分和" },
   { value: "rank", label: "原始排名" },
 ] as const;
 const METHOD_OPTIONS = [
-  { value: "combo_bias_topn", label: "组合优先" },
   { value: "mixed_topn", label: "综合排序" },
-  { value: "clean_adv_topn", label: "纯净优势池" },
+  { value: "adv_hit_topn", label: "优势命中" },
+  { value: "adv_score_topn", label: "优势得分" },
+  { value: "companion_penalty_topn", label: "噪音更少" },
 ] as const;
 type MethodOptionValue = (typeof METHOD_OPTIONS)[number]["value"];
 type MixedSortKeyOptionValue = (typeof MIXED_SORT_KEY_OPTIONS)[number]["value"];
@@ -65,16 +65,9 @@ type MixedSortKeyOptionValue = (typeof MIXED_SORT_KEY_OPTIONS)[number]["value"];
 type AdvancedRowSortKey =
   | "rank"
   | "total_score"
-  | "combo_net_score"
   | "adv_hit_cnt"
   | "adv_score_sum"
-  | "adv_combo_hit_cnt"
-  | "adv_combo_score_sum"
-  | "adv_combo_alpha_score"
   | "noisy_companion_cnt"
-  | "noisy_combo_hit_cnt"
-  | "noisy_combo_score_sum"
-  | "noisy_combo_penalty_score"
   | "pos_hit_cnt"
   | "pos_score_sum"
   ;
@@ -103,20 +96,6 @@ function parsePositiveInt(value: string, fallback: number) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function normalizeStringArray(values: string[]) {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  values.forEach((value) => {
-    const trimmed = value.trim();
-    if (!trimmed || seen.has(trimmed)) {
-      return;
-    }
-    seen.add(trimmed);
-    out.push(trimmed);
-  });
-  return out;
-}
-
 function normalizeMixedSortKeyValues(
   values?: string[] | null,
 ): MixedSortKeyOptionValue[] {
@@ -135,12 +114,14 @@ function formatPlainText(value?: string | null) {
 
 function methodHint(methodKey: MethodOptionValue) {
   switch (methodKey) {
-    case "combo_bias_topn":
-      return "组合优先会先看好组合净得分，再看坏组合罚分，最后才回退到优势因子支持度。";
     case "mixed_topn":
       return "综合排序会按下方排序键做字典序比较，越靠左优先级越高。";
-    case "clean_adv_topn":
-      return "纯净优势池会优先保留没有噪音伴随的样本。";
+    case "adv_hit_topn":
+      return "优先选优势因子命中更多的股票。";
+    case "adv_score_topn":
+      return "优先选优势因子得分和更高的股票。";
+    case "companion_penalty_topn":
+      return "优先保留优势因子强、同时噪音伴随更少的股票。";
     default:
       return "按当前条件生成选股结果。";
   }
@@ -199,71 +180,6 @@ function ReadonlyRuleChipPanel({
   );
 }
 
-function FilterChipList({
-  title,
-  selectedItems,
-  availableItems,
-  onToggle,
-  keyword,
-  onKeywordChange,
-  activeTone = "primary",
-}: {
-  title: string;
-  selectedItems: string[];
-  availableItems: string[];
-  onToggle: (value: string) => void;
-  keyword: string;
-  onKeywordChange: (value: string) => void;
-  activeTone?: "primary" | "warn" | "neutral";
-}) {
-  const filteredItems = useMemo(() => {
-    const needle = keyword.trim().toLowerCase();
-    if (!needle) {
-      return availableItems;
-    }
-    return availableItems.filter((item) => item.toLowerCase().includes(needle));
-  }, [availableItems, keyword]);
-
-  return (
-    <div className="stock-pick-concept-panel stock-pick-advanced-panel">
-      <div className="stock-pick-concept-head">
-        <strong>{title}</strong>
-        <span>已选 {selectedItems.length} 项</span>
-      </div>
-      <div className="stock-pick-concept-toolbar">
-        <input
-          type="text"
-          value={keyword}
-          onChange={(event) => onKeywordChange(event.target.value)}
-          placeholder="搜索"
-          className="stock-pick-concept-search"
-        />
-      </div>
-      <div className="stock-pick-concept-list">
-        {filteredItems.map((item) => {
-          const active = selectedItems.includes(item);
-          const toneClass =
-            activeTone === "warn"
-              ? "stock-pick-chip-btn is-warn"
-              : activeTone === "neutral"
-                ? "stock-pick-chip-btn is-neutral"
-                : "stock-pick-chip-btn is-active";
-          return (
-            <button
-              key={item}
-              type="button"
-              className={active ? toneClass : "stock-pick-chip-btn"}
-              onClick={() => onToggle(item)}
-            >
-              {item}
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 function AdvancedStockPickTable({
   rows,
   tradeDate,
@@ -279,18 +195,11 @@ function AdvancedStockPickTable({
       ({
         rank: { value: (row) => row.rank },
         total_score: { value: (row) => row.total_score },
-        combo_net_score: { value: (row) => row.combo_net_score },
         adv_hit_cnt: { value: (row) => row.adv_hit_cnt },
         adv_score_sum: { value: (row) => row.adv_score_sum },
-        adv_combo_hit_cnt: { value: (row) => row.adv_combo_hit_cnt },
-        adv_combo_score_sum: { value: (row) => row.adv_combo_score_sum },
-        adv_combo_alpha_score: { value: (row) => row.adv_combo_alpha_score },
         pos_hit_cnt: { value: (row) => row.pos_hit_cnt },
         pos_score_sum: { value: (row) => row.pos_score_sum },
         noisy_companion_cnt: { value: (row) => row.noisy_companion_cnt },
-        noisy_combo_hit_cnt: { value: (row) => row.noisy_combo_hit_cnt },
-        noisy_combo_score_sum: { value: (row) => row.noisy_combo_score_sum },
-        noisy_combo_penalty_score: { value: (row) => row.noisy_combo_penalty_score },
       }) satisfies Partial<
         Record<AdvancedRowSortKey, SortDefinition<AdvancedStockPickRow>>
       >,
@@ -342,15 +251,6 @@ function AdvancedStockPickTable({
                 title="按总分排序"
               />
             </th>
-            <th aria-sort={getAriaSort(sortKey === "combo_net_score", sortDirection)}>
-              <TableSortButton
-                label="组合净分"
-                isActive={sortKey === "combo_net_score"}
-                direction={sortDirection}
-                onClick={() => toggleSort("combo_net_score")}
-                title="按好组合减坏组合后的净分排序"
-              />
-            </th>
             <th aria-sort={getAriaSort(sortKey === "adv_hit_cnt", sortDirection)}>
               <TableSortButton
                 label="优势命中"
@@ -396,28 +296,8 @@ function AdvancedStockPickTable({
                 title="按噪音伴随数量排序"
               />
             </th>
-            <th aria-sort={getAriaSort(sortKey === "noisy_combo_hit_cnt", sortDirection)}>
-              <TableSortButton
-                label="噪音组合"
-                isActive={sortKey === "noisy_combo_hit_cnt"}
-                direction={sortDirection}
-                onClick={() => toggleSort("noisy_combo_hit_cnt")}
-                title="按噪音组合数量排序"
-              />
-            </th>
-            <th aria-sort={getAriaSort(sortKey === "noisy_combo_penalty_score", sortDirection)}>
-              <TableSortButton
-                label="坏组合罚分"
-                isActive={sortKey === "noisy_combo_penalty_score"}
-                direction={sortDirection}
-                onClick={() => toggleSort("noisy_combo_penalty_score")}
-                title="按坏组合罚分排序"
-              />
-            </th>
             <th>行业 / 地域</th>
             <th>优势命中</th>
-            <th>优势组合</th>
-            <th>噪音组合</th>
             <th>伴随命中</th>
             <th>概念</th>
             <th>选股说明</th>
@@ -442,14 +322,11 @@ function AdvancedStockPickTable({
                 </div>
               </td>
               <td>{formatNumber(row.total_score)}</td>
-              <td>{formatNumber(row.combo_net_score, 2)}</td>
               <td>{formatNumber(row.adv_hit_cnt, 0)}</td>
               <td>{formatNumber(row.adv_score_sum)}</td>
               <td>{formatNumber(row.pos_hit_cnt, 0)}</td>
               <td>{formatNumber(row.pos_score_sum)}</td>
               <td>{formatNumber(row.noisy_companion_cnt, 0)}</td>
-              <td>{formatNumber(row.noisy_combo_hit_cnt, 0)}</td>
-              <td>{formatNumber(row.noisy_combo_penalty_score, 2)}</td>
               <td className="stock-pick-cell-concept">
                 <div className="stock-pick-advanced-cell-sub">
                   {formatPlainText(row.industry)}
@@ -460,12 +337,6 @@ function AdvancedStockPickTable({
               </td>
               <td className="stock-pick-cell-concept">
                 {row.advantage_hits || "--"}
-              </td>
-              <td className="stock-pick-cell-concept">
-                {row.advantage_combo_hits || "--"}
-              </td>
-              <td className="stock-pick-cell-concept">
-                {row.noisy_combo_hits || "--"}
               </td>
               <td className="stock-pick-cell-concept">
                 {row.companion_hits || "--"}
@@ -566,7 +437,7 @@ export default function AdvancedStockPickPage() {
   const [runSignature, setRunSignature] = useState("");
 
   const availableConceptOptions = useMemo(
-    () => conceptOptions.filter((item) => !excludedConcepts.includes(item)),
+    () => buildAvailableConceptOptions(conceptOptions, excludedConcepts),
     [conceptOptions, excludedConcepts],
   );
   const preprocessAutoCandidateRuleNames = useMemo(
@@ -582,38 +453,6 @@ export default function AdvancedStockPickPage() {
       item.toLowerCase().includes(keyword),
     );
   }, [preprocessAutoCandidateRuleNames, strategyKeyword]);
-  const preprocessAdvantageCombinationLabels = useMemo(
-    () =>
-      (preprocessData?.resolved_advantage_combinations ?? []).map(
-        (row) => row.strategy_label,
-      ),
-    [preprocessData],
-  );
-  const filteredPreprocessAdvantageCombinationLabels = useMemo(() => {
-    const keyword = strategyKeyword.trim().toLowerCase();
-    if (!keyword) {
-      return preprocessAdvantageCombinationLabels;
-    }
-    return preprocessAdvantageCombinationLabels.filter((item) =>
-      item.toLowerCase().includes(keyword),
-    );
-  }, [preprocessAdvantageCombinationLabels, strategyKeyword]);
-  const preprocessNoisyCombinationLabels = useMemo(
-    () =>
-      (preprocessData?.resolved_noisy_combinations ?? []).map(
-        (row) => row.strategy_label,
-      ),
-    [preprocessData],
-  );
-  const filteredPreprocessNoisyCombinationLabels = useMemo(() => {
-    const keyword = strategyKeyword.trim().toLowerCase();
-    if (!keyword) {
-      return preprocessNoisyCombinationLabels;
-    }
-    return preprocessNoisyCombinationLabels.filter((item) =>
-      item.toLowerCase().includes(keyword),
-    );
-  }, [preprocessNoisyCombinationLabels, strategyKeyword]);
   const currentAdvantageRuleNames = useMemo(
     () => preprocessData?.resolved_advantage_rule_names ?? [],
     [preprocessData],
@@ -719,6 +558,29 @@ export default function AdvancedStockPickPage() {
   }, [latestScoreTradeDate]);
 
   useEffect(() => {
+    setIncludeConcepts((current) => {
+      const nextIncludeConcepts = buildAvailableConceptOptions(
+        current,
+        excludedConcepts,
+      );
+      return nextIncludeConcepts.length === current.length &&
+        nextIncludeConcepts.every((item, index) => item === current[index])
+        ? current
+        : nextIncludeConcepts;
+    });
+    setExcludeConcepts((current) => {
+      const nextExcludeConcepts = buildAvailableConceptOptions(
+        current,
+        excludedConcepts,
+      );
+      return nextExcludeConcepts.length === current.length &&
+        nextExcludeConcepts.every((item, index) => item === current[index])
+        ? current
+        : nextExcludeConcepts;
+    });
+  }, [excludedConcepts]);
+
+  useEffect(() => {
     try {
       window.sessionStorage.setItem(
         ADVANCED_STOCK_PICK_STATE_KEY,
@@ -795,20 +657,12 @@ export default function AdvancedStockPickPage() {
   }
 
   function toggleIncludeConcept(value: string) {
-    setIncludeConcepts((current) =>
-      current.includes(value)
-        ? current.filter((item) => item !== value)
-        : [...current, value],
-    );
+    setIncludeConcepts((current) => toggleStringSelection(current, value));
     setExcludeConcepts((current) => current.filter((item) => item !== value));
   }
 
   function toggleExcludeConcept(value: string) {
-    setExcludeConcepts((current) =>
-      current.includes(value)
-        ? current.filter((item) => item !== value)
-        : [...current, value],
-    );
+    setExcludeConcepts((current) => toggleStringSelection(current, value));
     setIncludeConcepts((current) => current.filter((item) => item !== value));
   }
 
@@ -913,12 +767,6 @@ export default function AdvancedStockPickPage() {
                 当前噪音伴随 {currentCompanionRuleNames.length}
               </span>
               <span className="stock-pick-chip-btn is-neutral">
-                当前优势组合 {preprocessAdvantageCombinationLabels.length}
-              </span>
-              <span className="stock-pick-chip-btn is-warn">
-                当前噪音组合 {preprocessNoisyCombinationLabels.length}
-              </span>
-              <span className="stock-pick-chip-btn is-neutral">
                 缓存周期 {preprocessData.selected_horizon} 日
               </span>
               <span className="stock-pick-chip-btn is-neutral">
@@ -961,17 +809,6 @@ export default function AdvancedStockPickPage() {
                 title="自动优势集"
                 items={filteredPreprocessAutoCandidateRuleNames}
                 emptyText="当前搜索条件下没有匹配的自动优势策略。"
-              />
-              <ReadonlyRuleChipPanel
-                title="当前优势组合"
-                items={filteredPreprocessAdvantageCombinationLabels}
-                emptyText="当前没有满足综合分为正的优势组合。"
-              />
-              <ReadonlyRuleChipPanel
-                title="当前噪音组合"
-                items={filteredPreprocessNoisyCombinationLabels}
-                emptyText="当前没有满足综合分为负的噪音组合。"
-                tone="warn"
               />
               <ReadonlyRuleChipPanel
                 title="当前优势集"
@@ -1194,25 +1031,18 @@ export default function AdvancedStockPickPage() {
           ) : null}
 
           {enableConceptFilter ? (
-            <div className="stock-pick-advanced-grid">
-              <FilterChipList
-                title="包含概念"
-                selectedItems={includeConcepts}
-                availableItems={availableConceptOptions}
-                onToggle={toggleIncludeConcept}
-                keyword={conceptKeyword}
-                onKeywordChange={setConceptKeyword}
-              />
-              <FilterChipList
-                title="排除概念"
-                selectedItems={excludeConcepts}
-                availableItems={availableConceptOptions}
-                onToggle={toggleExcludeConcept}
-                keyword={conceptKeyword}
-                onKeywordChange={setConceptKeyword}
-                activeTone="warn"
-              />
-            </div>
+            <ConceptIncludeExcludePanels
+              includeConcepts={includeConcepts}
+              excludeConcepts={excludeConcepts}
+              availableConceptOptions={availableConceptOptions}
+              keyword={conceptKeyword}
+              onKeywordChange={setConceptKeyword}
+              onToggleInclude={toggleIncludeConcept}
+              onToggleExclude={toggleExcludeConcept}
+              onClearInclude={() => setIncludeConcepts([])}
+              onClearExclude={() => setExcludeConcepts([])}
+              panelClassName="stock-pick-advanced-panel"
+            />
           ) : null}
 
           <div className="stock-pick-actions stock-pick-actions-split">
@@ -1269,18 +1099,6 @@ export default function AdvancedStockPickPage() {
               <span>优势规则数</span>
               <strong>{formatNumber(result.resolved_advantage_rule_names.length, 0)}</strong>
             </div>
-            <div className="stock-pick-advanced-summary-item">
-              <span>优势组合数</span>
-              <strong>
-                {formatNumber(result.resolved_advantage_combination_labels.length, 0)}
-              </strong>
-            </div>
-            <div className="stock-pick-advanced-summary-item">
-              <span>噪音组合数</span>
-              <strong>
-                {formatNumber(result.resolved_noisy_combination_labels.length, 0)}
-              </strong>
-            </div>
           </div>
 
           <div className="stock-pick-advanced-chip-grid">
@@ -1299,20 +1117,6 @@ export default function AdvancedStockPickPage() {
               </div>
             </div>
             <div className="stock-pick-advanced-chip-card">
-              <strong>优势组合</strong>
-              <div className="stock-pick-concept-list stock-pick-concept-list-inline">
-                {result.resolved_advantage_combination_labels.length > 0 ? (
-                  result.resolved_advantage_combination_labels.map((item) => (
-                    <span className="stock-pick-chip-btn is-active" key={item}>
-                      {item}
-                    </span>
-                  ))
-                ) : (
-                  <span className="stock-pick-note">当前没有优势组合。</span>
-                )}
-              </div>
-            </div>
-            <div className="stock-pick-advanced-chip-card">
               <strong>噪音伴随集</strong>
               <div className="stock-pick-concept-list stock-pick-concept-list-inline">
                 {result.resolved_noisy_companion_rule_names.length > 0 ? (
@@ -1323,20 +1127,6 @@ export default function AdvancedStockPickPage() {
                   ))
                 ) : (
                   <span className="stock-pick-note">当前未设置噪音伴随。</span>
-                )}
-              </div>
-            </div>
-            <div className="stock-pick-advanced-chip-card">
-              <strong>噪音组合</strong>
-              <div className="stock-pick-concept-list stock-pick-concept-list-inline">
-                {result.resolved_noisy_combination_labels.length > 0 ? (
-                  result.resolved_noisy_combination_labels.map((item) => (
-                    <span className="stock-pick-chip-btn is-warn" key={item}>
-                      {item}
-                    </span>
-                  ))
-                ) : (
-                  <span className="stock-pick-note">当前没有噪音组合。</span>
                 )}
               </div>
             </div>

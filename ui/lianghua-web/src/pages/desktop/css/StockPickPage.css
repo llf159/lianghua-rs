@@ -311,6 +311,7 @@
   grid-template-columns: repeat(4, minmax(180px, 1fr));
 }
 
+.stock-pick-concept-grid,
 .stock-pick-advanced-grid {
   margin-top: 12px;
   display: grid;
@@ -536,6 +537,7 @@
     grid-template-columns: repeat(2, minmax(220px, 1fr));
   }
 
+  .stock-pick-concept-grid,
   .stock-pick-advanced-grid,
   .stock-pick-advanced-chip-grid,
   .stock-pick-advanced-dual-grid {

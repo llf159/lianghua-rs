@@ -9,6 +9,12 @@ import {
 import { filterConceptItems, useConceptExclusions } from '../../shared/conceptExclusions'
 import { useStockPickOutletContext } from './StockPickPage'
 import { readJsonStorage } from '../../shared/storage'
+import {
+  ConceptIncludeExcludePanels,
+  buildAvailableConceptOptions,
+  normalizeStringArray,
+  toggleStringSelection,
+} from './stockPickConceptFilter'
 
 const CONCEPT_STOCK_PICK_STATE_KEY = 'concept-stock-pick-state-v1'
 
@@ -17,7 +23,9 @@ type PersistedConceptStockPickState = {
   tradeDate: string
   matchMode: (typeof STOCK_PICK_MATCH_MODE_OPTIONS)[number]
   conceptKeyword: string
-  selectedConcepts: string[]
+  includeConcepts: string[]
+  excludeConcepts: string[]
+  selectedConcepts?: string[]
   rows: StockPickRow[]
   resolvedTradeDate: string
 }
@@ -45,9 +53,18 @@ export default function ConceptStockPickPage() {
           ? parsed.matchMode
           : 'OR',
       conceptKeyword: typeof parsed.conceptKeyword === 'string' ? parsed.conceptKeyword : '',
-      selectedConcepts: Array.isArray(parsed.selectedConcepts)
-        ? parsed.selectedConcepts.filter((item): item is string => typeof item === 'string')
-        : [],
+      includeConcepts: normalizeStringArray(
+        Array.isArray(parsed.includeConcepts)
+          ? parsed.includeConcepts.filter((item): item is string => typeof item === 'string')
+          : Array.isArray(parsed.selectedConcepts)
+            ? parsed.selectedConcepts.filter((item): item is string => typeof item === 'string')
+            : [],
+      ),
+      excludeConcepts: normalizeStringArray(
+        Array.isArray(parsed.excludeConcepts)
+          ? parsed.excludeConcepts.filter((item): item is string => typeof item === 'string')
+          : [],
+      ),
       rows: Array.isArray(parsed.rows) ? parsed.rows : [],
       resolvedTradeDate: typeof parsed.resolvedTradeDate === 'string' ? parsed.resolvedTradeDate : '',
     } satisfies PersistedConceptStockPickState
@@ -56,7 +73,8 @@ export default function ConceptStockPickPage() {
   const [tradeDate, setTradeDate] = useState(() => persistedState?.tradeDate ?? '')
   const [matchMode, setMatchMode] = useState<(typeof STOCK_PICK_MATCH_MODE_OPTIONS)[number]>(() => persistedState?.matchMode ?? 'OR')
   const [conceptKeyword, setConceptKeyword] = useState(() => persistedState?.conceptKeyword ?? '')
-  const [selectedConcepts, setSelectedConcepts] = useState<string[]>(() => persistedState?.selectedConcepts ?? [])
+  const [includeConcepts, setIncludeConcepts] = useState<string[]>(() => persistedState?.includeConcepts ?? [])
+  const [excludeConcepts, setExcludeConcepts] = useState<string[]>(() => persistedState?.excludeConcepts ?? [])
   const [rows, setRows] = useState<StockPickRow[]>(() => persistedState?.rows ?? [])
   const [resolvedTradeDate, setResolvedTradeDate] = useState(() => persistedState?.resolvedTradeDate ?? '')
   const [loading, setLoading] = useState(false)
@@ -70,12 +88,19 @@ export default function ConceptStockPickPage() {
   }, [latestTradeDate])
 
   useEffect(() => {
-    setSelectedConcepts((current) => {
-      const nextSelectedConcepts = filterConceptItems(current, excludedConcepts)
-      return nextSelectedConcepts.length === current.length &&
-        nextSelectedConcepts.every((item, index) => item === current[index])
+    setIncludeConcepts((current) => {
+      const nextIncludeConcepts = filterConceptItems(current, excludedConcepts)
+      return nextIncludeConcepts.length === current.length &&
+        nextIncludeConcepts.every((item, index) => item === current[index])
         ? current
-        : nextSelectedConcepts
+        : nextIncludeConcepts
+    })
+    setExcludeConcepts((current) => {
+      const nextExcludeConcepts = filterConceptItems(current, excludedConcepts)
+      return nextExcludeConcepts.length === current.length &&
+        nextExcludeConcepts.every((item, index) => item === current[index])
+        ? current
+        : nextExcludeConcepts
     })
   }, [excludedConcepts])
 
@@ -88,7 +113,8 @@ export default function ConceptStockPickPage() {
           tradeDate,
           matchMode,
           conceptKeyword,
-          selectedConcepts,
+          includeConcepts,
+          excludeConcepts,
           rows,
           resolvedTradeDate,
         } satisfies PersistedConceptStockPickState),
@@ -96,25 +122,21 @@ export default function ConceptStockPickPage() {
     } catch {
       // Ignore storage failures. The page still works without persistence.
     }
-  }, [board, tradeDate, matchMode, conceptKeyword, selectedConcepts, rows, resolvedTradeDate])
+  }, [board, tradeDate, matchMode, conceptKeyword, includeConcepts, excludeConcepts, rows, resolvedTradeDate])
 
   const availableConceptOptions = useMemo(
-    () => filterConceptItems(conceptOptions, excludedConcepts),
+    () => buildAvailableConceptOptions(conceptOptions, excludedConcepts),
     [conceptOptions, excludedConcepts],
   )
 
-  const filteredConceptOptions = useMemo(() => {
-    const keyword = conceptKeyword.trim().toLowerCase()
-    if (!keyword) {
-      return availableConceptOptions
-    }
-    return availableConceptOptions.filter((item) => item.toLowerCase().includes(keyword))
-  }, [availableConceptOptions, conceptKeyword])
+  function toggleIncludeConcept(value: string) {
+    setIncludeConcepts((current) => toggleStringSelection(current, value))
+    setExcludeConcepts((current) => current.filter((item) => item !== value))
+  }
 
-  function toggleConcept(value: string) {
-    setSelectedConcepts((current) =>
-      current.includes(value) ? current.filter((item) => item !== value) : [...current, value],
-    )
+  function toggleExcludeConcept(value: string) {
+    setExcludeConcepts((current) => toggleStringSelection(current, value))
+    setIncludeConcepts((current) => current.filter((item) => item !== value))
   }
 
   async function onRun() {
@@ -130,7 +152,8 @@ export default function ConceptStockPickPage() {
         sourcePath,
         board,
         tradeDate,
-        concepts: selectedConcepts,
+        includeConcepts,
+        excludeConcepts,
         matchMode,
       })
       setRows(result.rows ?? [])
@@ -187,39 +210,17 @@ export default function ConceptStockPickPage() {
         </label>
       </div>
 
-      <div className="stock-pick-concept-panel">
-        <div className="stock-pick-concept-head">
-          <strong>概念选择</strong>
-          <span>已选 {selectedConcepts.length} 项</span>
-        </div>
-        <div className="stock-pick-concept-toolbar">
-          <input
-            type="text"
-            value={conceptKeyword}
-            onChange={(event) => setConceptKeyword(event.target.value)}
-            placeholder="搜索概念"
-            className="stock-pick-concept-search"
-          />
-          <button type="button" className="stock-pick-chip-btn" onClick={() => setSelectedConcepts([])}>
-            清空选择
-          </button>
-        </div>
-        <div className="stock-pick-concept-list">
-          {filteredConceptOptions.map((item) => {
-            const active = selectedConcepts.includes(item)
-            return (
-              <button
-                key={item}
-                type="button"
-                className={active ? 'stock-pick-chip-btn is-active' : 'stock-pick-chip-btn'}
-                onClick={() => toggleConcept(item)}
-              >
-                {item}
-              </button>
-            )
-          })}
-        </div>
-      </div>
+      <ConceptIncludeExcludePanels
+        includeConcepts={includeConcepts}
+        excludeConcepts={excludeConcepts}
+        availableConceptOptions={availableConceptOptions}
+        keyword={conceptKeyword}
+        onKeywordChange={setConceptKeyword}
+        onToggleInclude={toggleIncludeConcept}
+        onToggleExclude={toggleExcludeConcept}
+        onClearInclude={() => setIncludeConcepts([])}
+        onClearExclude={() => setExcludeConcepts([])}
+      />
 
       <div className="stock-pick-actions">
         <button type="button" className="stock-pick-primary-btn" onClick={() => void onRun()} disabled={loading || optionsLoading}>

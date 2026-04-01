@@ -113,6 +113,11 @@ type PersistedStrategyPerformanceRuleRow = Pick<
   | "negative_effective"
   | "negative_effectiveness_label"
   | "negative_review_notes"
+  | "base_composite_score"
+  | "combo_positive_score"
+  | "combo_negative_score"
+  | "confidence_adjustment"
+  | "final_strength_score"
   | "overall_composite_score"
 > & {
   metrics: PersistedStrategyPerformanceMetric[];
@@ -127,6 +132,8 @@ type PersistedStrategyPerformanceWindow = Pick<
   | "avg_market_return_pct"
   | "avg_excess_return_pct"
   | "excess_win_rate"
+  | "strong_hit_rate"
+  | "strong_lift"
   | "avg_selected_count"
   | "rank_ic_mean"
   | "icir"
@@ -246,6 +253,11 @@ function compactPageDataForStorage(
       negative_effective: row.negative_effective,
       negative_effectiveness_label: row.negative_effectiveness_label,
       negative_review_notes: row.negative_review_notes,
+      base_composite_score: row.base_composite_score,
+      combo_positive_score: row.combo_positive_score,
+      combo_negative_score: row.combo_negative_score,
+      confidence_adjustment: row.confidence_adjustment,
+      final_strength_score: row.final_strength_score,
       overall_composite_score: row.overall_composite_score,
       metrics: row.metrics.map((metric) => ({
         horizon: metric.horizon,
@@ -277,6 +289,8 @@ function compactPageDataForStorage(
           avg_market_return_pct: window.avg_market_return_pct,
           avg_excess_return_pct: window.avg_excess_return_pct,
           excess_win_rate: window.excess_win_rate,
+          strong_hit_rate: window.strong_hit_rate,
+          strong_lift: window.strong_lift,
           avg_selected_count: window.avg_selected_count,
           rank_ic_mean: window.rank_ic_mean,
           icir: window.icir,
@@ -541,6 +555,14 @@ function compareRuleRows(
       Number(right.negative_effective === true) -
         Number(left.negative_effective === true) ||
       compareDescNumber(
+        left.overall_composite_score != null ? -left.overall_composite_score : null,
+        right.overall_composite_score != null ? -right.overall_composite_score : null,
+      ) ||
+      compareDescNumber(
+        leftMetric?.composite_score != null ? -leftMetric.composite_score : null,
+        rightMetric?.composite_score != null ? -rightMetric.composite_score : null,
+      ) ||
+      compareDescNumber(
         leftMetric?.hit_vs_non_hit_delta_pct != null
           ? -leftMetric.hit_vs_non_hit_delta_pct
           : null,
@@ -687,6 +709,60 @@ function MetricCell({
       {metric.low_confidence ? (
         <small className="strategy-performance-low-confidence">低样本</small>
       ) : null}
+    </div>
+  );
+}
+
+function StrengthBreakdownCell({ row }: { row: StrategyPerformanceRuleRow }) {
+  const positiveComboLabel =
+    row.signal_direction === "positive" ? "组合加分" : "反向拖累";
+  const negativeComboLabel =
+    row.signal_direction === "positive" ? "组合减分" : "负向共振";
+  const positiveComboClassValue =
+    row.signal_direction === "positive"
+      ? row.combo_positive_score
+      : row.combo_positive_score != null
+        ? -row.combo_positive_score
+        : null;
+  const negativeComboClassValue =
+    row.signal_direction === "positive"
+      ? row.combo_negative_score != null
+        ? -row.combo_negative_score
+        : null
+      : row.combo_negative_score;
+
+  return (
+    <div className="strategy-performance-metric-cell">
+      <div>
+        <span>{row.signal_direction === "positive" ? "最终强度" : "最终负向强度"}</span>
+        <strong className={valueClassName(row.final_strength_score)}>
+          {formatNumber(row.final_strength_score, 2)}
+        </strong>
+      </div>
+      <div>
+        <span>{row.signal_direction === "positive" ? "单因子" : "单因子镜像分"}</span>
+        <strong className={valueClassName(row.base_composite_score)}>
+          {formatNumber(row.base_composite_score, 2)}
+        </strong>
+      </div>
+      <div>
+        <span>{positiveComboLabel}</span>
+        <strong className={valueClassName(positiveComboClassValue)}>
+          {formatNumber(row.combo_positive_score, 2)}
+        </strong>
+      </div>
+      <div>
+        <span>{negativeComboLabel}</span>
+        <strong className={valueClassName(negativeComboClassValue)}>
+          {formatNumber(row.combo_negative_score, 2)}
+        </strong>
+      </div>
+      <div>
+        <span>置信修正</span>
+        <strong className={valueClassName(row.confidence_adjustment)}>
+          {formatNumber(row.confidence_adjustment, 2)}
+        </strong>
+      </div>
     </div>
   );
 }
@@ -995,7 +1071,8 @@ function RuleTable({
                 {hasNegativeNotes ? (
                   <th className="strategy-performance-col-notes">判定说明</th>
                 ) : null}
-                <th>得分影响</th>
+                <th>强度拆解</th>
+                <th>详情</th>
               </tr>
             </thead>
             <tbody>
@@ -1083,6 +1160,9 @@ function RuleTable({
                         </div>
                       </td>
                     ) : null}
+                    <td>
+                      <StrengthBreakdownCell row={row} />
+                    </td>
                     <td>
                       <button
                         className={
@@ -1391,8 +1471,8 @@ function PortfolioTable({ rows }: { rows: StrategyPerformancePortfolioRow[] }) {
     <section className="strategy-performance-card">
       <div className="strategy-performance-section-head">
         <div>
-          <h3>7. 多因子组合回测</h3>
-          <p>只展示真正的多因子同时触发组合；组合得分为触发因子 rule_score 求和。组合总样本数低于 50 不展示，窗口内样本不足 50 时 IC/ICIR/分层差留空。</p>
+          <h3>7. 多因子贡献回测</h3>
+          <p>这里展示多因子同时触发后的组合表现，组合分数会按参与因子回流到最终强度。组合总样本数低于 50 不展示，窗口内样本不足 50 时 IC/ICIR/分层差留空。</p>
         </div>
       </div>
       <div className="strategy-performance-table-wrap">

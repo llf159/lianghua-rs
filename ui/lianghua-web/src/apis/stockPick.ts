@@ -85,7 +85,8 @@ export type ConceptStockPickQuery = {
   sourcePath: string
   board?: string
   tradeDate?: string
-  concepts: string[]
+  includeConcepts: string[]
+  excludeConcepts: string[]
   matchMode: string
 }
 
