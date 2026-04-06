@@ -37,6 +37,14 @@ const VALIDATION_MAX_COMBINATIONS: usize = 512;
 const SCORE_MODE_IC_IR: &str = "ic_ir";
 const SCORE_MODE_HIT_VS_NON_HIT: &str = "hit_vs_non_hit";
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ValidationStrategyDirection {
+    #[default]
+    Positive,
+    Negative,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct StrategyPerformanceMethodNote {
     pub key: String,
@@ -283,6 +291,7 @@ pub struct StrategyPerformanceValidationDraftSummary {
 
 #[derive(Debug, Serialize, Clone)]
 pub struct StrategyPerformanceValidationPageData {
+    pub strategy_direction: ValidationStrategyDirection,
     pub horizons: Vec<u32>,
     pub selected_horizon: u32,
     pub strong_quantile: f64,
@@ -303,6 +312,8 @@ pub struct StrategyValidationUnknownConfig {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct StrategyPerformanceValidationDraft {
+    #[serde(default)]
+    pub strategy_direction: ValidationStrategyDirection,
     pub scope_way: String,
     pub scope_windows: usize,
     pub when: String,
@@ -857,6 +868,51 @@ fn expand_unknown_config(config: &StrategyValidationUnknownConfig) -> Result<Vec
     Ok(values)
 }
 
+fn validation_summary_matches_direction(
+    summary: &StrategyPerformanceValidationComboSummary,
+    strategy_direction: ValidationStrategyDirection,
+) -> bool {
+    match strategy_direction {
+        ValidationStrategyDirection::Positive => summary.positive_hit_n > 0,
+        ValidationStrategyDirection::Negative => summary.negative_hit_n > 0,
+    }
+}
+
+fn select_best_validation_summary(
+    combo_summaries: &[StrategyPerformanceValidationComboSummary],
+    strategy_direction: ValidationStrategyDirection,
+) -> Option<StrategyPerformanceValidationComboSummary> {
+    combo_summaries
+        .iter()
+        .filter(|summary| validation_summary_matches_direction(summary, strategy_direction))
+        .max_by(|left, right| match strategy_direction {
+            ValidationStrategyDirection::Positive => compare_option_f64_desc(
+                left.positive_overall_composite_score,
+                right.positive_overall_composite_score,
+            )
+            .then_with(|| {
+                compare_option_f64_desc(
+                    left.positive_avg_future_return_pct,
+                    right.positive_avg_future_return_pct,
+                )
+            })
+            .then_with(|| right.positive_hit_n.cmp(&left.positive_hit_n))
+            .then_with(|| left.combo_key.cmp(&right.combo_key)),
+            ValidationStrategyDirection::Negative => left
+                .negative_effective
+                .cmp(&right.negative_effective)
+                .then_with(|| {
+                    compare_option_f64_asc(
+                        left.negative_avg_future_return_pct,
+                        right.negative_avg_future_return_pct,
+                    )
+                })
+                .then_with(|| right.negative_hit_n.cmp(&left.negative_hit_n))
+                .then_with(|| left.combo_key.cmp(&right.combo_key)),
+        })
+        .cloned()
+}
+
 fn build_validation_variants(
     draft: &StrategyPerformanceValidationDraft,
 ) -> Result<Vec<ValidationVariant>, String> {
@@ -899,6 +955,43 @@ fn build_validation_variants(
     let mut variants = Vec::new();
     let mut assignments = Vec::<(String, f64)>::new();
 
+    fn replace_validation_unknowns(formula: &str, assignments: &[(String, f64)]) -> String {
+        if assignments.is_empty() {
+            return formula.to_string();
+        }
+
+        let replace_map = assignments
+            .iter()
+            .map(|(name, value)| (name.as_str(), format_validation_number(*value)))
+            .collect::<HashMap<_, _>>();
+        let tokens = lex_all(formula);
+        let mut out = String::with_capacity(formula.len() + assignments.len() * 4);
+        let mut cursor = 0usize;
+
+        for token in tokens {
+            if token.start > cursor {
+                out.push_str(&formula[cursor..token.start]);
+            }
+            match token.kind {
+                crate::expr::lexer::TokenKind::Ident(name) => {
+                    if let Some(replacement) = replace_map.get(name.as_str()) {
+                        out.push_str(replacement);
+                    } else {
+                        out.push_str(&formula[token.start..token.end]);
+                    }
+                }
+                crate::expr::lexer::TokenKind::Eof => {}
+                _ => out.push_str(&formula[token.start..token.end]),
+            }
+            cursor = token.end;
+        }
+
+        if cursor < formula.len() {
+            out.push_str(&formula[cursor..]);
+        }
+        out
+    }
+
     fn walk_variants(
         index: usize,
         unknown_groups: &[(String, Vec<f64>)],
@@ -909,7 +1002,6 @@ fn build_validation_variants(
         out: &mut Vec<ValidationVariant>,
     ) -> Result<(), String> {
         if index >= unknown_groups.len() {
-            let mut formula = draft.when.trim().to_string();
             let mut sorted = assignments.clone();
             sorted
                 .sort_by(|left, right| right.0.len().cmp(&left.0.len()).then(left.0.cmp(&right.0)));
@@ -920,9 +1012,7 @@ fn build_validation_variants(
                     value: *value,
                 })
                 .collect::<Vec<_>>();
-            for (name, value) in &sorted {
-                formula = formula.replace(name, &format_validation_number(*value));
-            }
+            let formula = replace_validation_unknowns(draft.when.trim(), &sorted);
 
             let tokens = lex_all(&formula);
             let mut parser = Parser::new(tokens);
@@ -3329,6 +3419,11 @@ fn load_companion_rows(
 fn compare_option_f64_desc(left: Option<f64>, right: Option<f64>) -> Ordering {
     right.partial_cmp(&left).unwrap_or(Ordering::Equal)
 }
+
+fn compare_option_f64_asc(left: Option<f64>, right: Option<f64>) -> Ordering {
+    left.partial_cmp(&right).unwrap_or(Ordering::Equal)
+}
+
 fn resolve_selected_rule_name(
     requested: Option<String>,
     resolved_advantage_rule_names: &[String],
@@ -4054,6 +4149,7 @@ pub fn get_strategy_performance_validation_page(
     strong_quantile: Option<f64>,
     draft: StrategyPerformanceValidationDraft,
 ) -> Result<StrategyPerformanceValidationPageData, String> {
+    let strategy_direction = draft.strategy_direction;
     let selected_horizon = normalize_selected_horizon(selected_horizon);
     let strong_quantile = normalize_strong_quantile(strong_quantile)?;
     let auto_filter = StrategyPerformanceAutoFilterConfig {
@@ -4120,37 +4216,10 @@ pub fn get_strategy_performance_validation_page(
         .map(|(_, meta)| meta)
         .unwrap_or_default();
 
-    let best_positive_summary = combo_summaries
-        .iter()
-        .max_by(|left, right| {
-            compare_option_f64_desc(
-                left.positive_overall_composite_score,
-                right.positive_overall_composite_score,
-            )
-            .then_with(|| {
-                compare_option_f64_desc(
-                    left.positive_avg_future_return_pct,
-                    right.positive_avg_future_return_pct,
-                )
-            })
-            .then_with(|| left.combo_key.cmp(&right.combo_key))
-        })
-        .cloned();
-    let best_negative_summary = combo_summaries
-        .iter()
-        .max_by(|left, right| {
-            left.negative_effective
-                .cmp(&right.negative_effective)
-                .then_with(|| {
-                    right
-                        .negative_avg_future_return_pct
-                        .unwrap_or(f64::INFINITY)
-                        .partial_cmp(&left.negative_avg_future_return_pct.unwrap_or(f64::INFINITY))
-                        .unwrap_or(Ordering::Equal)
-                })
-                .then_with(|| right.negative_hit_n.cmp(&left.negative_hit_n))
-        })
-        .cloned();
+    let best_positive_summary =
+        select_best_validation_summary(&combo_summaries, ValidationStrategyDirection::Positive);
+    let best_negative_summary =
+        select_best_validation_summary(&combo_summaries, ValidationStrategyDirection::Negative);
 
     let best_positive_case = best_positive_summary
         .as_ref()
@@ -4200,6 +4269,7 @@ pub fn get_strategy_performance_validation_page(
         .transpose()?;
 
     Ok(StrategyPerformanceValidationPageData {
+        strategy_direction,
         horizons: HORIZONS.to_vec(),
         selected_horizon,
         strong_quantile,
@@ -5779,6 +5849,7 @@ mod tests {
             Some(5),
             Some(0.9),
             StrategyPerformanceValidationDraft {
+                strategy_direction: ValidationStrategyDirection::Positive,
                 scope_way: "LAST".to_string(),
                 scope_windows: 1,
                 when: "C > O".to_string(),
@@ -5804,6 +5875,7 @@ mod tests {
             Some(5),
             Some(0.9),
             StrategyPerformanceValidationDraft {
+                strategy_direction: ValidationStrategyDirection::Positive,
                 scope_way: "LAST".to_string(),
                 scope_windows: 1,
                 when: "C > O and C >= N".to_string(),
@@ -5852,6 +5924,7 @@ mod tests {
             Some(5),
             Some(0.9),
             StrategyPerformanceValidationDraft {
+                strategy_direction: ValidationStrategyDirection::Positive,
                 scope_way: "LAST".to_string(),
                 scope_windows: 1,
                 when: "C > O".to_string(),
@@ -5881,6 +5954,7 @@ mod tests {
             Some(5),
             Some(0.9),
             StrategyPerformanceValidationDraft {
+                strategy_direction: ValidationStrategyDirection::Positive,
                 scope_way: "EACH".to_string(),
                 scope_windows: 3,
                 when: "C > O and C >= N".to_string(),
@@ -5907,5 +5981,36 @@ mod tests {
                     .all(|metric| metric.score_mode == SCORE_MODE_IC_IR))
                 .unwrap_or(false)
         );
+    }
+
+    #[test]
+    fn strategy_validation_unknown_replacement_only_replaces_full_identifier() {
+        let source_dir = unique_temp_dir();
+        write_fixture_files(&source_dir);
+        write_fixture_source_db(&source_dir);
+        write_fixture_result_db(&source_dir);
+
+        let page = get_strategy_performance_validation_page(
+            source_dir.to_str().expect("utf8").to_string(),
+            Some(5),
+            Some(0.9),
+            StrategyPerformanceValidationDraft {
+                strategy_direction: ValidationStrategyDirection::Positive,
+                scope_way: "LAST".to_string(),
+                scope_windows: 1,
+                when: "C > O and V > MA(V, M)".to_string(),
+                import_name: Some("ADV_DRAFT".to_string()),
+                unknown_configs: vec![StrategyValidationUnknownConfig {
+                    name: "M".to_string(),
+                    start: 1.0,
+                    end: 1.0,
+                    step: 1.0,
+                }],
+            },
+        )
+        .expect("load validation page with identifier-safe replacement");
+
+        assert_eq!(page.combo_summaries.len(), 1);
+        assert_eq!(page.combo_summaries[0].formula, "C > O and V > MA(V, 1)");
     }
 }

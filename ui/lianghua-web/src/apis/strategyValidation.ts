@@ -5,6 +5,8 @@ import type {
   StrategyPerformanceRuleRow,
 } from "./strategyPerformance";
 
+export type StrategyDirection = "positive" | "negative";
+
 export type StrategyValidationUnknownConfig = {
   name: string;
   start: number;
@@ -13,6 +15,7 @@ export type StrategyValidationUnknownConfig = {
 };
 
 export type StrategyPerformanceValidationDraft = {
+  strategy_direction: StrategyDirection;
   scope_way: string;
   scope_windows: number;
   when: string;
@@ -75,6 +78,7 @@ export type StrategyPerformanceValidationCaseData = {
 };
 
 export type StrategyPerformanceValidationPageData = {
+  strategy_direction: StrategyDirection;
   horizons: number[];
   selected_horizon: number;
   strong_quantile: number;

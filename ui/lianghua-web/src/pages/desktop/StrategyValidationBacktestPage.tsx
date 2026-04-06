@@ -6,6 +6,7 @@ import {
 } from "../../apis/strategyManage";
 import {
   getStrategyPerformanceValidationPage,
+  type StrategyDirection,
   type StrategyPerformanceValidationCaseData,
   type StrategyPerformanceValidationDraft,
   type StrategyPerformanceValidationPageData,
@@ -22,6 +23,7 @@ import "./css/StrategyValidationBacktestPage.css";
 const STRATEGY_VALIDATION_STATE_KEY = "lh_strategy_validation_backtest_v6";
 const QUANTILE_OPTIONS = [0.8, 0.9, 0.95] as const;
 const HORIZON_OPTIONS = [2, 3, 5] as const;
+const DIRECTION_OPTIONS = ["positive", "negative"] as const;
 const SCOPE_OPTIONS = ["LAST", "ANY", "EACH", "RECENT", "CONSEC"] as const;
 
 type ScopeMode = (typeof SCOPE_OPTIONS)[number];
@@ -47,6 +49,7 @@ function buildEmptyUnknown(): StrategyValidationUnknownConfig {
 
 function buildEmptyDraft(): StrategyPerformanceValidationDraft {
   return {
+    strategy_direction: "positive",
     scope_way: "LAST",
     scope_windows: 1,
     when: "",
@@ -84,12 +87,94 @@ function buildDraftFromRule(
   rule: StrategyManageRuleItem,
 ): StrategyPerformanceValidationDraft {
   return {
+    strategy_direction: "positive",
     scope_way: rule.scope_way,
     scope_windows: rule.scope_windows,
     when: rule.when,
     import_name: rule.name,
     unknown_configs: [],
   };
+}
+
+function strategyDirectionLabel(direction: StrategyDirection) {
+  return direction === "negative" ? "负向" : "正向";
+}
+
+function normalizeNumberInput(
+  raw: string,
+  fallback: number,
+  options?: {
+    integer?: boolean;
+    min?: number;
+  },
+) {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return fallback;
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  const normalized = options?.integer ? Math.floor(parsed) : parsed;
+  if (options?.min !== undefined) {
+    return Math.max(options.min, normalized);
+  }
+  return normalized;
+}
+
+function DraftNumberInput({
+  value,
+  onCommit,
+  min,
+  step,
+  integer = false,
+  disabled = false,
+}: {
+  value: number;
+  onCommit: (value: number) => void;
+  min?: number;
+  step?: number | string;
+  integer?: boolean;
+  disabled?: boolean;
+}) {
+  const [text, setText] = useState(
+    Number.isFinite(value) ? String(value) : "",
+  );
+
+  useEffect(() => {
+    setText(Number.isFinite(value) ? String(value) : "");
+  }, [value]);
+
+  return (
+    <input
+      type="number"
+      min={min}
+      step={step}
+      value={text}
+      disabled={disabled}
+      onChange={(event) => {
+        const raw = event.target.value;
+        setText(raw);
+        if (!raw.trim()) {
+          return;
+        }
+        const nextValue = normalizeNumberInput(raw, value, { integer, min });
+        onCommit(nextValue);
+      }}
+      onBlur={() => {
+        const fallback = Number.isFinite(value) ? value : min ?? 0;
+        const normalized = normalizeNumberInput(text, fallback, {
+          integer,
+          min,
+        });
+        setText(String(normalized));
+        if (normalized !== value) {
+          onCommit(normalized);
+        }
+      }}
+    />
+  );
 }
 
 function buildInitialState(): PersistedState {
@@ -240,6 +325,7 @@ function sanitizeDraft(
     : [];
 
   return {
+    strategy_direction: draft.strategy_direction,
     scope_way: draft.scope_way.trim().toUpperCase(),
     scope_windows: Math.max(1, Math.floor(draft.scope_windows || 1)),
     when: draft.when.trim(),
@@ -557,6 +643,14 @@ export default function StrategyValidationBacktestPage() {
   );
   const bestPositiveCase = pageData?.best_positive_case ?? null;
   const bestNegativeCase = pageData?.best_negative_case ?? null;
+  const strategyDirection = pageData?.strategy_direction ?? draft.strategy_direction;
+  const primaryDirection = strategyDirection;
+  const secondaryDirection =
+    primaryDirection === "positive" ? "negative" : "positive";
+  const primaryCase =
+    primaryDirection === "positive" ? bestPositiveCase : bestNegativeCase;
+  const secondaryCase =
+    primaryDirection === "positive" ? bestNegativeCase : bestPositiveCase;
   const sharedCaseData = useMemo(() => {
     if (!bestPositiveCase || !bestNegativeCase) {
       return null;
@@ -566,6 +660,12 @@ export default function StrategyValidationBacktestPage() {
       ? bestPositiveCase
       : null;
   }, [bestNegativeCase, bestPositiveCase]);
+  const primaryCaseTitle = hasUnknownVariants
+    ? `最优${strategyDirectionLabel(primaryDirection)}方案`
+    : `当前草稿${strategyDirectionLabel(primaryDirection)}表现`;
+  const secondaryCaseTitle = hasUnknownVariants
+    ? `${strategyDirectionLabel(secondaryDirection)}参考方案`
+    : `${strategyDirectionLabel(secondaryDirection)}参考`;
 
   useEffect(() => {
     let cancelled = false;
@@ -690,6 +790,10 @@ export default function StrategyValidationBacktestPage() {
           当前数据目录：<strong>{sourcePathTrimmed || "--"}</strong>
         </div>
 
+        <div className="strategy-manage-source-note">
+          当前临时策略方向：<strong>{strategyDirectionLabel(strategyDirection)}</strong>
+        </div>
+
         <div className="strategy-validation-import-bar">
           <label className="strategy-manage-field strategy-validation-import-field">
             <span>从现有策略导入</span>
@@ -753,6 +857,25 @@ export default function StrategyValidationBacktestPage() {
 
         <div className="strategy-manage-editor-grid strategy-validation-editor-grid">
           <label className="strategy-manage-field">
+            <span>临时策略方向</span>
+            <select
+              value={draft.strategy_direction}
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  strategy_direction: event.target.value as StrategyDirection,
+                }))
+              }
+            >
+              {DIRECTION_OPTIONS.map((item) => (
+                <option key={item} value={item}>
+                  {strategyDirectionLabel(item)}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="strategy-manage-field">
             <span>触发方式</span>
             <select
               value={draftScopeState.mode}
@@ -777,14 +900,14 @@ export default function StrategyValidationBacktestPage() {
 
           <label className="strategy-manage-field">
             <span>窗口长度</span>
-            <input
-              type="number"
+            <DraftNumberInput
               min={1}
               value={draft.scope_windows}
-              onChange={(event) =>
+              integer
+              onCommit={(value) =>
                 setDraft((current) => ({
                   ...current,
-                  scope_windows: Math.max(1, Number(event.target.value) || 1),
+                  scope_windows: value,
                 }))
               }
             />
@@ -793,15 +916,11 @@ export default function StrategyValidationBacktestPage() {
           {draftScopeState.mode === "CONSEC" ? (
             <label className="strategy-manage-field">
               <span>连续命中阈值</span>
-              <input
-                type="number"
+              <DraftNumberInput
                 min={1}
                 value={draftScopeState.consecThreshold}
-                onChange={(event) => {
-                  const nextThreshold = Math.max(
-                    1,
-                    Number(event.target.value) || 1,
-                  );
+                integer
+                onCommit={(nextThreshold) => {
                   setDraft((current) => ({
                     ...current,
                     scope_way: buildScopeWayValue("CONSEC", nextThreshold),
@@ -912,10 +1031,10 @@ export default function StrategyValidationBacktestPage() {
                     </label>
                     <label className="strategy-manage-field">
                       <span>起始</span>
-                      <input
-                        type="number"
+                      <DraftNumberInput
                         value={item.start}
-                        onChange={(event) =>
+                        step="any"
+                        onCommit={(value) =>
                           setDraft((current) => ({
                             ...current,
                             unknown_configs: current.unknown_configs.map(
@@ -923,7 +1042,7 @@ export default function StrategyValidationBacktestPage() {
                                 configIndex === index
                                   ? {
                                       ...config,
-                                      start: Number(event.target.value),
+                                      start: value,
                                     }
                                   : config,
                             ),
@@ -933,10 +1052,10 @@ export default function StrategyValidationBacktestPage() {
                     </label>
                     <label className="strategy-manage-field">
                       <span>结束</span>
-                      <input
-                        type="number"
+                      <DraftNumberInput
                         value={item.end}
-                        onChange={(event) =>
+                        step="any"
+                        onCommit={(value) =>
                           setDraft((current) => ({
                             ...current,
                             unknown_configs: current.unknown_configs.map(
@@ -944,7 +1063,7 @@ export default function StrategyValidationBacktestPage() {
                                 configIndex === index
                                   ? {
                                       ...config,
-                                      end: Number(event.target.value),
+                                      end: value,
                                     }
                                   : config,
                             ),
@@ -954,10 +1073,10 @@ export default function StrategyValidationBacktestPage() {
                     </label>
                     <label className="strategy-manage-field">
                       <span>步长</span>
-                      <input
-                        type="number"
+                      <DraftNumberInput
                         value={item.step}
-                        onChange={(event) =>
+                        step="any"
+                        onCommit={(value) =>
                           setDraft((current) => ({
                             ...current,
                             unknown_configs: current.unknown_configs.map(
@@ -965,7 +1084,7 @@ export default function StrategyValidationBacktestPage() {
                                 configIndex === index
                                   ? {
                                       ...config,
-                                      step: Number(event.target.value),
+                                      step: value,
                                     }
                                   : config,
                             ),
@@ -1186,16 +1305,16 @@ export default function StrategyValidationBacktestPage() {
           ) : null}
 
           <ValidationCaseSection
-            title={hasUnknownVariants ? "最优正向方案" : "当前草稿正向表现"}
-            direction="positive"
-            caseData={bestPositiveCase}
+            title={primaryCaseTitle}
+            direction={primaryDirection}
+            caseData={primaryCase}
             horizons={pageData.horizons}
             showSharedDetails={!sharedCaseData}
           />
           <ValidationCaseSection
-            title={hasUnknownVariants ? "最优负向方案" : "当前草稿负向表现"}
-            direction="negative"
-            caseData={bestNegativeCase}
+            title={secondaryCaseTitle}
+            direction={secondaryDirection}
+            caseData={secondaryCase}
             horizons={pageData.horizons}
             showSharedDetails={!sharedCaseData}
           />
