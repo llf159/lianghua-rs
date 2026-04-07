@@ -120,7 +120,6 @@ export default function ConceptStockPickPage() {
         } satisfies PersistedConceptStockPickState),
       )
     } catch {
-      // Ignore storage failures. The page still works without persistence.
     }
   }, [board, tradeDate, matchMode, conceptKeyword, includeConcepts, excludeConcepts, rows, resolvedTradeDate])
 

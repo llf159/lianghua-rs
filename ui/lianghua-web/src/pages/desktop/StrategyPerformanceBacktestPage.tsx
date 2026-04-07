@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import {
+  getStrategyPickCache,
   getStrategyPerformanceHorizonView,
   getStrategyPerformancePage,
   getStrategyPerformanceRuleDetail,
+  saveManualStrategyPickCache,
   type StrategyPerformanceCompanionRow,
   type StrategyPerformanceFutureSummary,
   type StrategyPerformanceHorizonViewData,
@@ -19,6 +21,12 @@ import {
   readStoredSourcePath,
   writeJsonStorage,
 } from "../../shared/storage";
+import {
+  readStrategyPerformanceAdvancedPickSynced,
+  type StrategyPerformanceManualAdvantageSelection,
+  writeStrategyPerformanceAdvancedPickDraft,
+  writeStrategyPerformanceAdvancedPickSynced,
+} from "../../shared/strategyPerformanceAdvancedPickStorage";
 import {
   TableSortButton,
   getAriaSort,
@@ -186,6 +194,32 @@ function normalizeStringArray(values: string[]) {
     out.push(trimmed);
   });
   return out;
+}
+
+function sameManualAdvantageSelection(
+  left: StrategyPerformanceManualAdvantageSelection | null,
+  right: StrategyPerformanceManualAdvantageSelection | null,
+) {
+  if (!left || !right) {
+    return false;
+  }
+  return (
+    left.sourcePath === right.sourcePath &&
+    left.selectedHorizon === right.selectedHorizon &&
+    left.strongQuantile === right.strongQuantile &&
+    left.autoMinSamples2 === right.autoMinSamples2 &&
+    left.autoMinSamples3 === right.autoMinSamples3 &&
+    left.autoMinSamples5 === right.autoMinSamples5 &&
+    left.autoMinSamples10 === right.autoMinSamples10 &&
+    left.requireWinRateAboveMarket === right.requireWinRateAboveMarket &&
+    left.minPassHorizons === right.minPassHorizons &&
+    left.minAdvHits === right.minAdvHits &&
+    left.manualAdvantageRuleNames.length ===
+      right.manualAdvantageRuleNames.length &&
+    left.manualAdvantageRuleNames.every(
+      (item, index) => item === right.manualAdvantageRuleNames[index],
+    )
+  );
 }
 
 function compactPageDataForStorage(
@@ -1725,10 +1759,19 @@ export default function StrategyPerformanceBacktestPage() {
   const [ruleDetailCache, setRuleDetailCache] = useState<
     Record<string, StrategyPerformanceRuleDetail | null>
   >({});
+  const [syncedManualSelection, setSyncedManualSelection] =
+    useState<StrategyPerformanceManualAdvantageSelection | null>(() =>
+      readStrategyPerformanceAdvancedPickSynced(),
+    );
   const [manualValidationData, setManualValidationData] =
     useState<StrategyPerformanceHorizonViewData | null>(null);
+  const [manualSyncLoading, setManualSyncLoading] = useState(false);
+  const [manualSyncError, setManualSyncError] = useState("");
   const [manualValidationLoading, setManualValidationLoading] = useState(false);
   const [manualValidationError, setManualValidationError] = useState("");
+  const [manualValidationSelection, setManualValidationSelection] =
+    useState<StrategyPerformanceManualAdvantageSelection | null>(null);
+  const manualSyncRequestIdRef = useRef(0);
 
   const sourcePathTrimmed = sourcePath.trim();
 
@@ -1748,21 +1791,29 @@ export default function StrategyPerformanceBacktestPage() {
       ),
     [pageData, positiveRuleNames],
   );
-  const manualAdvantageRuleNames = useMemo(
+  const autoAdvantageRuleNameSet = useMemo(
+    () => new Set(autoAdvantageRuleNames),
+    [autoAdvantageRuleNames],
+  );
+  const draftManualAdvantageRuleNames = useMemo(
     () =>
       normalizeStringArray(
         manualRuleNames.filter((item) => positiveRuleNames.includes(item)),
       ),
     [manualRuleNames, positiveRuleNames],
   );
-  const currentCompanionRuleNames = useMemo(
+  const draftManualAdvantageRuleNameSet = useMemo(
+    () => new Set(draftManualAdvantageRuleNames),
+    [draftManualAdvantageRuleNames],
+  );
+  const currentCandidateRuleNames = useMemo(
     () =>
       normalizeStringArray(
-        (pageData?.resolved_companion_rule_names ?? []).filter((item) =>
-          positiveRuleNames.includes(item),
+        positiveRuleNames.filter(
+          (item) => !draftManualAdvantageRuleNameSet.has(item),
         ),
       ),
-    [pageData, positiveRuleNames],
+    [draftManualAdvantageRuleNameSet, positiveRuleNames],
   );
   const filteredAutoAdvantageRuleNames = useMemo(() => {
     const keyword = strategyKeyword.trim().toLowerCase();
@@ -1776,21 +1827,86 @@ export default function StrategyPerformanceBacktestPage() {
   const filteredManualAdvantageRuleNames = useMemo(() => {
     const keyword = strategyKeyword.trim().toLowerCase();
     if (!keyword) {
-      return manualAdvantageRuleNames;
+      return draftManualAdvantageRuleNames;
     }
-    return manualAdvantageRuleNames.filter((item) =>
+    return draftManualAdvantageRuleNames.filter((item) =>
       item.toLowerCase().includes(keyword),
     );
-  }, [manualAdvantageRuleNames, strategyKeyword]);
-  const filteredCurrentCompanionRuleNames = useMemo(() => {
+  }, [draftManualAdvantageRuleNames, strategyKeyword]);
+  const filteredCurrentCandidateRuleNames = useMemo(() => {
     const keyword = strategyKeyword.trim().toLowerCase();
     if (!keyword) {
-      return currentCompanionRuleNames;
+      return currentCandidateRuleNames;
     }
-    return currentCompanionRuleNames.filter((item) =>
+    return currentCandidateRuleNames.filter((item) =>
       item.toLowerCase().includes(keyword),
     );
-  }, [currentCompanionRuleNames, strategyKeyword]);
+  }, [currentCandidateRuleNames, strategyKeyword]);
+  const manualAdvantageSelectionDraft =
+    useMemo<StrategyPerformanceManualAdvantageSelection | null>(() => {
+      if (!sourcePathTrimmed) {
+        return null;
+      }
+      return {
+        sourcePath: sourcePathTrimmed,
+        selectedHorizon: parsePositiveInt(selectedHorizonInput, 2),
+        strongQuantile: parseQuantile(strongQuantileInput),
+        manualAdvantageRuleNames: draftManualAdvantageRuleNames,
+        autoMinSamples2: parsePositiveInt(
+          autoMinSamples2,
+          DEFAULT_AUTO_MIN_SAMPLES[2],
+        ),
+        autoMinSamples3: parsePositiveInt(
+          autoMinSamples3,
+          DEFAULT_AUTO_MIN_SAMPLES[3],
+        ),
+        autoMinSamples5: parsePositiveInt(
+          autoMinSamples5,
+          DEFAULT_AUTO_MIN_SAMPLES[5],
+        ),
+        autoMinSamples10: parsePositiveInt(
+          autoMinSamples10,
+          DEFAULT_AUTO_MIN_SAMPLES[10],
+        ),
+        requireWinRateAboveMarket,
+        minPassHorizons: parsePositiveInt(minPassHorizonsInput, 2),
+        minAdvHits: parsePositiveInt(minAdvHitsInput, 1),
+      };
+    }, [
+      autoMinSamples2,
+      autoMinSamples3,
+      autoMinSamples5,
+      autoMinSamples10,
+      draftManualAdvantageRuleNames,
+      minAdvHitsInput,
+      minPassHorizonsInput,
+      requireWinRateAboveMarket,
+      selectedHorizonInput,
+      sourcePathTrimmed,
+      strongQuantileInput,
+    ]);
+  const syncedManualSelectionForSource = useMemo(
+    () =>
+      syncedManualSelection?.sourcePath === sourcePathTrimmed
+        ? syncedManualSelection
+        : null,
+    [sourcePathTrimmed, syncedManualSelection],
+  );
+  const manualValidationSelectionForSource = useMemo(
+    () =>
+      manualValidationSelection?.sourcePath === sourcePathTrimmed
+        ? manualValidationSelection
+        : null,
+    [manualValidationSelection, sourcePathTrimmed],
+  );
+  const isManualDraftSynced = useMemo(
+    () =>
+      sameManualAdvantageSelection(
+        manualAdvantageSelectionDraft,
+        syncedManualSelectionForSource,
+      ),
+    [manualAdvantageSelectionDraft, syncedManualSelectionForSource],
+  );
 
   const buildSubmittedQuery = (
     overrides?: Partial<Pick<SubmittedQuery, "selectedHorizon">>,
@@ -1990,21 +2106,19 @@ export default function StrategyPerformanceBacktestPage() {
   }, []);
 
   useEffect(() => {
-    setManualValidationData(null);
+    if (typeof window === "undefined") {
+      return;
+    }
+    writeStrategyPerformanceAdvancedPickDraft(
+      window.localStorage,
+      manualAdvantageSelectionDraft,
+    );
+  }, [manualAdvantageSelectionDraft]);
+
+  useEffect(() => {
+    setManualSyncError("");
     setManualValidationError("");
-  }, [
-    autoMinSamples2,
-    autoMinSamples3,
-    autoMinSamples5,
-    autoMinSamples10,
-    manualAdvantageRuleNames,
-    minAdvHitsInput,
-    minPassHorizonsInput,
-    requireWinRateAboveMarket,
-    selectedHorizonInput,
-    sourcePathTrimmed,
-    strongQuantileInput,
-  ]);
+  }, [manualAdvantageSelectionDraft]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -2109,7 +2223,7 @@ export default function StrategyPerformanceBacktestPage() {
   const noisyCompanionRows = useMemo(
     () =>
       (pageData?.companion_rows ?? []).filter(
-      (row) => (row.delta_return_pct ?? Number.POSITIVE_INFINITY) < 0,
+        (row) => (row.delta_return_pct ?? Number.POSITIVE_INFINITY) < 0,
       ),
     [pageData],
   );
@@ -2123,58 +2237,199 @@ export default function StrategyPerformanceBacktestPage() {
   );
   const pendingSelectedHorizon = parsePositiveInt(selectedHorizonInput, 2);
 
-  const addRuleToManualAdvantage = (ruleName: string) => {
-    setManualRuleNames((current) =>
-      current.includes(ruleName) ? current : [...current, ruleName],
+  const buildManualAdvantageSelectionDraft = (
+    nextManualRuleNames: string[],
+  ): StrategyPerformanceManualAdvantageSelection | null => {
+    if (!sourcePathTrimmed) {
+      return null;
+    }
+    const nextPositiveManualRuleNames = normalizeStringArray(
+      nextManualRuleNames.filter((item) => positiveRuleNames.includes(item)),
     );
+    return {
+      sourcePath: sourcePathTrimmed,
+      selectedHorizon: parsePositiveInt(selectedHorizonInput, 2),
+      strongQuantile: parseQuantile(strongQuantileInput),
+      manualAdvantageRuleNames: nextPositiveManualRuleNames,
+      autoMinSamples2: parsePositiveInt(
+        autoMinSamples2,
+        DEFAULT_AUTO_MIN_SAMPLES[2],
+      ),
+      autoMinSamples3: parsePositiveInt(
+        autoMinSamples3,
+        DEFAULT_AUTO_MIN_SAMPLES[3],
+      ),
+      autoMinSamples5: parsePositiveInt(
+        autoMinSamples5,
+        DEFAULT_AUTO_MIN_SAMPLES[5],
+      ),
+      autoMinSamples10: parsePositiveInt(
+        autoMinSamples10,
+        DEFAULT_AUTO_MIN_SAMPLES[10],
+      ),
+      requireWinRateAboveMarket,
+      minPassHorizons: parsePositiveInt(minPassHorizonsInput, 2),
+      minAdvHits: parsePositiveInt(minAdvHitsInput, 1),
+    };
+  };
+
+  const applySyncedManualSelection = (
+    nextSelection: StrategyPerformanceManualAdvantageSelection | null,
+  ) => {
+    if (typeof window !== "undefined") {
+      writeStrategyPerformanceAdvancedPickSynced(
+        window.localStorage,
+        nextSelection,
+      );
+    }
+    setSyncedManualSelection(nextSelection);
+  };
+
+  const syncManualAdvantageSelection = async (
+    nextSelection: StrategyPerformanceManualAdvantageSelection | null,
+  ) => {
+    const requestId = manualSyncRequestIdRef.current + 1;
+    manualSyncRequestIdRef.current = requestId;
+    applySyncedManualSelection(null);
+    setManualValidationSelection(null);
+    setManualValidationData(null);
+    setManualValidationError("");
+    if (!nextSelection || nextSelection.manualAdvantageRuleNames.length === 0) {
+      setManualSyncLoading(false);
+      setManualSyncError("");
+      return;
+    }
+    setManualSyncLoading(true);
+    setManualSyncError("");
+    try {
+      const manualPickCache = await saveManualStrategyPickCache({
+        sourcePath: nextSelection.sourcePath,
+        selectedHorizon: nextSelection.selectedHorizon,
+        strongQuantile: nextSelection.strongQuantile,
+        manualRuleNames: nextSelection.manualAdvantageRuleNames,
+        autoMinSamples2: nextSelection.autoMinSamples2,
+        autoMinSamples3: nextSelection.autoMinSamples3,
+        autoMinSamples5: nextSelection.autoMinSamples5,
+        autoMinSamples10: nextSelection.autoMinSamples10,
+        requireWinRateAboveMarket: nextSelection.requireWinRateAboveMarket,
+        minPassHorizons: nextSelection.minPassHorizons,
+        minAdvHits: nextSelection.minAdvHits,
+      });
+      if (manualSyncRequestIdRef.current !== requestId) {
+        return;
+      }
+      applySyncedManualSelection({
+        ...nextSelection,
+        selectedHorizon: manualPickCache.selected_horizon,
+        strongQuantile: manualPickCache.strong_quantile,
+        manualAdvantageRuleNames: normalizeStringArray(
+          (manualPickCache.manual_rule_names ?? []).length > 0
+            ? manualPickCache.manual_rule_names ?? []
+            : nextSelection.manualAdvantageRuleNames,
+        ),
+      });
+    } catch (reason) {
+      if (manualSyncRequestIdRef.current !== requestId) {
+        return;
+      }
+      setManualSyncError(
+        reason instanceof Error ? reason.message : String(reason),
+      );
+    } finally {
+      if (manualSyncRequestIdRef.current === requestId) {
+        setManualSyncLoading(false);
+      }
+    }
+  };
+
+  const applyManualRuleNames = (nextManualRuleNames: string[]) => {
+    const normalizedManualRuleNames = normalizeStringArray(nextManualRuleNames);
+    if (
+      normalizedManualRuleNames.length === manualRuleNames.length &&
+      normalizedManualRuleNames.every(
+        (item, index) => item === manualRuleNames[index],
+      )
+    ) {
+      return;
+    }
+    const nextSelection =
+      buildManualAdvantageSelectionDraft(normalizedManualRuleNames);
+    setManualRuleNames(normalizedManualRuleNames);
+    if (typeof window !== "undefined") {
+      writeStrategyPerformanceAdvancedPickDraft(
+        window.localStorage,
+        nextSelection,
+      );
+    }
+    void syncManualAdvantageSelection(nextSelection);
+  };
+
+  const addRuleToManualAdvantage = (ruleName: string) => {
+    if (manualRuleNames.includes(ruleName)) {
+      return;
+    }
+    applyManualRuleNames([...manualRuleNames, ruleName]);
   };
 
   const removeRuleFromManualAdvantage = (ruleName: string) => {
-    setManualRuleNames((current) =>
-      current.filter((item) => item !== ruleName),
-    );
+    if (!manualRuleNames.includes(ruleName)) {
+      return;
+    }
+    applyManualRuleNames(manualRuleNames.filter((item) => item !== ruleName));
   };
 
   const validateManualAdvantageSet = async () => {
-    if (!sourcePathTrimmed) {
-      setManualValidationError("缺少可用的数据源路径");
+    if (manualSyncLoading) {
+      setManualValidationError("手动优势集缓存还在自动同步，请稍后再验证。");
       return;
     }
-    if (manualAdvantageRuleNames.length === 0) {
-      setManualValidationError("请先加入手动优势集，再执行验证。");
+    const cachedSelection = syncedManualSelectionForSource;
+    if (!cachedSelection || !isManualDraftSynced) {
+      setManualValidationError(
+        "当前手动优势集还没有同步到缓存，请先调整手动优势集并等待自动同步完成。",
+      );
+      return;
+    }
+    if (cachedSelection.manualAdvantageRuleNames.length === 0) {
+      setManualValidationError("当前已同步缓存里没有手动优势集。");
       return;
     }
     setManualValidationLoading(true);
     setManualValidationError("");
     try {
-      const nextValidationData = await getStrategyPerformanceHorizonView({
-        sourcePath: sourcePathTrimmed,
-        selectedHorizon: parsePositiveInt(selectedHorizonInput, 2),
-        strongQuantile: parseQuantile(strongQuantileInput),
-        resolvedAdvantageRuleNames: manualAdvantageRuleNames,
-        autoMinSamples2: parsePositiveInt(
-          autoMinSamples2,
-          DEFAULT_AUTO_MIN_SAMPLES[2],
-        ),
-        autoMinSamples3: parsePositiveInt(
-          autoMinSamples3,
-          DEFAULT_AUTO_MIN_SAMPLES[3],
-        ),
-        autoMinSamples5: parsePositiveInt(
-          autoMinSamples5,
-          DEFAULT_AUTO_MIN_SAMPLES[5],
-        ),
-        autoMinSamples10: parsePositiveInt(
-          autoMinSamples10,
-          DEFAULT_AUTO_MIN_SAMPLES[10],
-        ),
-        requireWinRateAboveMarket,
-        minPassHorizons: parsePositiveInt(minPassHorizonsInput, 2),
-        minAdvHits: parsePositiveInt(minAdvHitsInput, 1),
+      const manualPickCache = await getStrategyPickCache({
+        sourcePath: cachedSelection.sourcePath,
+        selectedHorizon: cachedSelection.selectedHorizon,
+        strongQuantile: cachedSelection.strongQuantile,
+        advantageRuleMode: "manual",
+        manualRuleNames: cachedSelection.manualAdvantageRuleNames,
+        autoMinSamples2: cachedSelection.autoMinSamples2,
+        autoMinSamples3: cachedSelection.autoMinSamples3,
+        autoMinSamples5: cachedSelection.autoMinSamples5,
+        autoMinSamples10: cachedSelection.autoMinSamples10,
+        requireWinRateAboveMarket:
+          cachedSelection.requireWinRateAboveMarket,
+        minPassHorizons: cachedSelection.minPassHorizons,
+        minAdvHits: cachedSelection.minAdvHits,
       });
+      const nextValidationData = await getStrategyPerformanceHorizonView({
+        sourcePath: cachedSelection.sourcePath,
+        selectedHorizon: cachedSelection.selectedHorizon,
+        strongQuantile: cachedSelection.strongQuantile,
+        resolvedAdvantageRuleNames:
+          manualPickCache.resolved_advantage_rule_names,
+        autoMinSamples2: cachedSelection.autoMinSamples2,
+        autoMinSamples3: cachedSelection.autoMinSamples3,
+        autoMinSamples5: cachedSelection.autoMinSamples5,
+        autoMinSamples10: cachedSelection.autoMinSamples10,
+        requireWinRateAboveMarket:
+          cachedSelection.requireWinRateAboveMarket,
+        minPassHorizons: cachedSelection.minPassHorizons,
+        minAdvHits: cachedSelection.minAdvHits,
+      });
+      setManualValidationSelection(cachedSelection);
       setManualValidationData(nextValidationData);
     } catch (reason) {
-      setManualValidationData(null);
       setManualValidationError(
         reason instanceof Error ? reason.message : String(reason),
       );
@@ -2372,10 +2627,15 @@ export default function StrategyPerformanceBacktestPage() {
               自动优势集 {autoAdvantageRuleNames.length}
             </StatusBadge>
             <StatusBadge tone="good">
-              手动优势集 {manualAdvantageRuleNames.length}
+              手动草稿 {draftManualAdvantageRuleNames.length}
+            </StatusBadge>
+            <StatusBadge tone={isManualDraftSynced ? "good" : "neutral"}>
+              已同步缓存{" "}
+              {syncedManualSelectionForSource?.manualAdvantageRuleNames.length ??
+                0}
             </StatusBadge>
             <StatusBadge tone="neutral">
-              伴随集 {currentCompanionRuleNames.length}
+              候选集 {currentCandidateRuleNames.length}
             </StatusBadge>
             <StatusBadge tone="warn">
               明确负向 {(pageData.effective_negative_rule_names ?? []).length}
@@ -2391,7 +2651,7 @@ export default function StrategyPerformanceBacktestPage() {
           <div className="strategy-performance-pool-grid strategy-performance-pool-grid-edit">
             <div className="strategy-performance-pool-card strategy-performance-pool-card-editor">
               <div className="strategy-performance-pool-card-head">
-                <strong>自动优势集 / 手动优势集 / 伴随集</strong>
+                <strong>自动优势集 / 手动优势集 / 候选集</strong>
               </div>
               <div className="strategy-performance-pool-toolbar">
                 <input
@@ -2404,14 +2664,14 @@ export default function StrategyPerformanceBacktestPage() {
                 <button
                   type="button"
                   className="strategy-performance-secondary-btn"
-                  onClick={() => setManualRuleNames(autoAdvantageRuleNames)}
+                  onClick={() => applyManualRuleNames(autoAdvantageRuleNames)}
                 >
                   自动填入手动集
                 </button>
                 <button
                   type="button"
                   className="strategy-performance-secondary-btn"
-                  onClick={() => setManualRuleNames([])}
+                  onClick={() => applyManualRuleNames([])}
                 >
                   清空手动集
                 </button>
@@ -2420,13 +2680,27 @@ export default function StrategyPerformanceBacktestPage() {
                   className="strategy-performance-secondary-btn"
                   onClick={() => void validateManualAdvantageSet()}
                   disabled={
+                    manualSyncLoading ||
                     manualValidationLoading ||
-                    manualAdvantageRuleNames.length === 0
+                    !syncedManualSelectionForSource ||
+                    !isManualDraftSynced
                   }
                 >
                   {manualValidationLoading ? "验证中..." : "验证手动优势集"}
                 </button>
               </div>
+              <div className="strategy-performance-note-box">
+                {manualSyncLoading
+                  ? "当前正在自动同步手动优势集缓存，验证会读取同步完成后的缓存。"
+                  : isManualDraftSynced
+                    ? "当前手动优势集已自动同步到缓存，验证只读取这份缓存。"
+                    : "当前手动优势集和缓存还不一致。点击策略调整手动集后会自动同步。"}
+              </div>
+              {manualSyncError ? (
+                <div className="strategy-performance-error">
+                  {manualSyncError}
+                </div>
+              ) : null}
               <div className="strategy-performance-pool-triple-grid">
                 <div className="strategy-performance-pool-subcard">
                   <strong>自动优势集</strong>
@@ -2455,9 +2729,15 @@ export default function StrategyPerformanceBacktestPage() {
                     {filteredManualAdvantageRuleNames.length > 0 ? (
                       filteredManualAdvantageRuleNames.map((ruleName) => (
                         <button
-                          className="strategy-performance-pool-chip is-manual"
+                          className={
+                            autoAdvantageRuleNameSet.has(ruleName)
+                              ? "strategy-performance-pool-chip is-manual is-manual-auto"
+                              : "strategy-performance-pool-chip is-manual"
+                          }
                           key={`manual:${ruleName}`}
-                          onClick={() => removeRuleFromManualAdvantage(ruleName)}
+                          onClick={() =>
+                            removeRuleFromManualAdvantage(ruleName)
+                          }
                           type="button"
                         >
                           {ruleName}
@@ -2471,13 +2751,17 @@ export default function StrategyPerformanceBacktestPage() {
                   </div>
                 </div>
                 <div className="strategy-performance-pool-subcard">
-                  <strong>伴随集</strong>
+                  <strong>候选集</strong>
                   <div className="strategy-performance-pool-chip-wrap">
-                    {filteredCurrentCompanionRuleNames.length > 0 ? (
-                      filteredCurrentCompanionRuleNames.map((ruleName) => (
+                    {filteredCurrentCandidateRuleNames.length > 0 ? (
+                      filteredCurrentCandidateRuleNames.map((ruleName) => (
                         <button
-                          className="strategy-performance-pool-chip is-companion"
-                          key={`companion:${ruleName}`}
+                          className={
+                            autoAdvantageRuleNameSet.has(ruleName)
+                              ? "strategy-performance-pool-chip is-candidate is-candidate-auto"
+                              : "strategy-performance-pool-chip is-candidate"
+                          }
+                          key={`candidate:${ruleName}`}
                           onClick={() => addRuleToManualAdvantage(ruleName)}
                           type="button"
                         >
@@ -2486,7 +2770,7 @@ export default function StrategyPerformanceBacktestPage() {
                       ))
                     ) : (
                       <span className="strategy-performance-muted">
-                        当前伴随策略集为空。
+                        当前候选策略集为空。
                       </span>
                     )}
                   </div>
@@ -2529,17 +2813,23 @@ export default function StrategyPerformanceBacktestPage() {
         loading={loading}
       />
 
-      {(manualAdvantageRuleNames.length > 0 ||
+      {(manualValidationSelectionForSource ||
         manualValidationLoading ||
         manualValidationError) && (
         <>
           <OverallScoreAnalysisSection
-            title="2B. 手动优势集验证"
-            description="按手动优势集在样本中的命中总分 `adv_score_sum` 分层，观察这组手动策略组合是否具备稳定优势。"
-            emptyText="当前还没有手动优势集验证结果。"
-            detail={manualValidationData?.advantage_score_analysis ?? null}
+            title="2. 手动优势集验证"
+            description="按已同步手动优势集缓存中的命中总分 `adv_score_sum` 分层，观察这组手动策略组合是否具备稳定优势。"
+            emptyText="当前还没有读取到手动优势集缓存验证结果。"
+            detail={
+              manualValidationSelectionForSource
+                ? manualValidationData?.advantage_score_analysis ?? null
+                : null
+            }
             selectedHorizon={
-              manualValidationData?.selected_horizon ?? loadedSelectedHorizon
+              manualValidationData?.selected_horizon ??
+              manualValidationSelectionForSource?.selectedHorizon ??
+              loadedSelectedHorizon
             }
             pendingHorizon={pendingSelectedHorizon}
             loading={manualValidationLoading}

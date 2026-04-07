@@ -236,7 +236,6 @@ export default function DataImportPage() {
         }
         reconcileStatus(nextStatus)
       } catch {
-        // 静默同步，失败时不打断当前页面交互
       }
     }
 

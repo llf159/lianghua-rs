@@ -2884,7 +2884,6 @@ export default function DetailsPage({
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
-      // Pointer capture is a progressive enhancement.
     }
 
     chartDragRef.current = {
@@ -2988,7 +2987,6 @@ export default function DetailsPage({
           event.currentTarget.releasePointerCapture(event.pointerId);
         }
       } catch {
-        // Ignore browsers that do not fully support pointer capture.
       }
     }
     chartDragRef.current = null;

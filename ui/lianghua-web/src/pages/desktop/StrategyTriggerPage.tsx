@@ -844,7 +844,6 @@ function StrategyOverviewDeltaChart({
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
-      // Pointer capture is a progressive enhancement.
     }
   }
 
@@ -854,7 +853,6 @@ function StrategyOverviewDeltaChart({
         event.currentTarget.releasePointerCapture(event.pointerId);
       }
     } catch {
-      // Ignore browsers that do not fully support pointer capture.
     }
   }
 

@@ -361,7 +361,6 @@ export default function OverviewPage() {
         } satisfies PersistedOverviewState),
       );
     } catch {
-      // Ignore storage quota and serialization failures; the page still works without persistence.
     }
   }, [
     sourcePath,

@@ -289,6 +289,25 @@ export async function getOrBuildStrategyPickCache(query: {
   );
 }
 
+export async function saveManualStrategyPickCache(query: {
+  sourcePath: string;
+  selectedHorizon?: number;
+  strongQuantile?: number;
+  manualRuleNames: string[];
+  autoMinSamples2?: number;
+  autoMinSamples3?: number;
+  autoMinSamples5?: number;
+  autoMinSamples10?: number;
+  requireWinRateAboveMarket?: boolean;
+  minPassHorizons?: number;
+  minAdvHits?: number;
+}) {
+  return invoke<StrategyPerformancePickCachePayload>(
+    "save_manual_strategy_pick_cache",
+    query,
+  );
+}
+
 export async function getLatestStrategyPickCache(sourcePath: string) {
   return invoke<StrategyPerformancePickCachePayload>(
     "get_latest_strategy_pick_cache",

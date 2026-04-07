@@ -22,6 +22,10 @@ import {
 } from "../../shared/tableSort";
 import { readJsonStorage } from "../../shared/storage";
 import {
+  readStrategyPerformanceAdvancedPickSynced,
+  type StrategyPerformanceManualAdvantageSelection,
+} from "../../shared/strategyPerformanceAdvancedPickStorage";
+import {
   STOCK_PICK_BOARD_OPTIONS,
   formatDateLabel,
   formatNumber,
@@ -35,7 +39,6 @@ import {
 import { useStockPickOutletContext } from "./StockPickPage";
 
 const ADVANCED_STOCK_PICK_STATE_KEY = "advanced-stock-pick-state";
-const STRATEGY_PERFORMANCE_STATE_KEY = "lh_strategy_performance_page_v13";
 const DEFAULT_METHOD_KEY = "mixed_topn";
 const DEFAULT_BOARD = "主板";
 const DEFAULT_MIN_ADV_HITS = "1";
@@ -49,7 +52,6 @@ const DEFAULT_MIXED_SORT_KEYS = [
 const MIXED_SORT_KEY_OPTIONS = [
   { value: "adv_hit_cnt", label: "优势命中数" },
   { value: "adv_score_sum", label: "优势得分和" },
-  { value: "noisy_companion_cnt", label: "噪音伴随数(少优先)" },
   { value: "pos_hit_cnt", label: "正向命中数" },
   { value: "pos_score_sum", label: "正向得分和" },
   { value: "rank", label: "原始排名" },
@@ -58,7 +60,6 @@ const METHOD_OPTIONS = [
   { value: "mixed_topn", label: "综合排序" },
   { value: "adv_hit_topn", label: "优势命中" },
   { value: "adv_score_topn", label: "优势得分" },
-  { value: "companion_penalty_topn", label: "噪音更少" },
 ] as const;
 type MethodOptionValue = (typeof METHOD_OPTIONS)[number]["value"];
 type MixedSortKeyOptionValue = (typeof MIXED_SORT_KEY_OPTIONS)[number]["value"];
@@ -68,10 +69,8 @@ type AdvancedRowSortKey =
   | "total_score"
   | "adv_hit_cnt"
   | "adv_score_sum"
-  | "noisy_companion_cnt"
   | "pos_hit_cnt"
-  | "pos_score_sum"
-  ;
+  | "pos_score_sum";
 
 type PersistedAdvancedState = {
   tradeDate: string;
@@ -92,137 +91,18 @@ type PersistedAdvancedState = {
   result: AdvancedStockPickResultData | null;
 };
 
-type StrategyPerformanceSelectionState = {
-  selectedHorizon: number;
-  strongQuantile: number;
-  manualRuleNames: string[];
-  autoMinSamples2: number;
-  autoMinSamples3: number;
-  autoMinSamples5: number;
-  autoMinSamples10: number;
-  requireWinRateAboveMarket: boolean;
-  minPassHorizons: number;
-  minAdvHits: number;
-};
-
 function parsePositiveInt(value: string, fallback: number) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function parseStrategyPerformanceSelectionState() {
-  const stored = readJsonStorage<Record<string, unknown>>(
-    typeof window === "undefined" ? null : window.localStorage,
-    STRATEGY_PERFORMANCE_STATE_KEY,
-  );
-  if (!stored) {
-    return null;
-  }
-  const selectedHorizon = parsePositiveInt(
-    typeof stored.selectedHorizon === "string" ? stored.selectedHorizon : "2",
-    2,
-  );
-  const strongQuantileRaw =
-    typeof stored.strongQuantile === "string" ? Number(stored.strongQuantile) : 0.9;
-  return {
-    selectedHorizon,
-    strongQuantile:
-      Number.isFinite(strongQuantileRaw) &&
-      strongQuantileRaw > 0 &&
-      strongQuantileRaw < 1
-        ? strongQuantileRaw
-        : 0.9,
-    manualRuleNames: normalizeStringArray(
-      Array.isArray(stored.manualRuleNames)
-        ? stored.manualRuleNames.filter(
-            (item): item is string => typeof item === "string",
-          )
-        : [],
-    ),
-    autoMinSamples2: parsePositiveInt(
-      typeof stored.autoMinSamples2 === "string" ? stored.autoMinSamples2 : "5",
-      5,
-    ),
-    autoMinSamples3: parsePositiveInt(
-      typeof stored.autoMinSamples3 === "string" ? stored.autoMinSamples3 : "5",
-      5,
-    ),
-    autoMinSamples5: parsePositiveInt(
-      typeof stored.autoMinSamples5 === "string" ? stored.autoMinSamples5 : "10",
-      10,
-    ),
-    autoMinSamples10: parsePositiveInt(
-      typeof stored.autoMinSamples10 === "string" ? stored.autoMinSamples10 : "20",
-      20,
-    ),
-    requireWinRateAboveMarket: stored.requireWinRateAboveMarket === true,
-    minPassHorizons: parsePositiveInt(
-      typeof stored.minPassHorizons === "string" ? stored.minPassHorizons : "2",
-      2,
-    ),
-    minAdvHits: parsePositiveInt(
-      typeof stored.minAdvHits === "string" ? stored.minAdvHits : "1",
-      1,
-    ),
-  } satisfies StrategyPerformanceSelectionState;
-}
-
 function buildPreprocessConfigSignature(
   sourcePath: string,
-  strategySelection: StrategyPerformanceSelectionState | null,
+  strategySelection: StrategyPerformanceManualAdvantageSelection | null,
 ) {
   return JSON.stringify({
     sourcePath: sourcePath.trim(),
     strategySelection,
-  });
-}
-
-function buildRunConfigSignature({
-  preprocessConfigSignature,
-  tradeDate,
-  board,
-  area,
-  industry,
-  enableConceptFilter,
-  effectiveIncludeConcepts,
-  effectiveExcludeConcepts,
-  conceptMatchMode,
-  methodKey,
-  minAdvHits,
-  topLimit,
-  rankMax,
-  mixedSortKeys,
-}: {
-  preprocessConfigSignature: string;
-  tradeDate: string;
-  board: (typeof STOCK_PICK_BOARD_OPTIONS)[number];
-  area: string;
-  industry: string;
-  enableConceptFilter: boolean;
-  effectiveIncludeConcepts: string[];
-  effectiveExcludeConcepts: string[];
-  conceptMatchMode: string;
-  methodKey: MethodOptionValue;
-  minAdvHits: number;
-  topLimit: number;
-  rankMax: number;
-  mixedSortKeys: MixedSortKeyOptionValue[];
-}) {
-  return JSON.stringify({
-    preprocessConfigSignature,
-    tradeDate,
-    board,
-    area,
-    industry,
-    enableConceptFilter,
-    includeConcepts: effectiveIncludeConcepts,
-    excludeConcepts: effectiveExcludeConcepts,
-    conceptMatchMode: enableConceptFilter ? conceptMatchMode : "OR",
-    methodKey,
-    minAdvHits,
-    topLimit,
-    rankMax,
-    mixedSortKeys,
   });
 }
 
@@ -232,29 +112,12 @@ function normalizeMixedSortKeyValues(
   const normalized = normalizeStringArray(values ?? []).filter((value) =>
     MIXED_SORT_KEY_OPTIONS.some((option) => option.value === value),
   ) as MixedSortKeyOptionValue[];
-  return normalized.length > 0
-    ? normalized
-    : [...DEFAULT_MIXED_SORT_KEYS];
+  return normalized.length > 0 ? normalized : [...DEFAULT_MIXED_SORT_KEYS];
 }
 
 function formatPlainText(value?: string | null) {
   const trimmed = value?.trim();
   return trimmed ? trimmed : "--";
-}
-
-function methodHint(methodKey: MethodOptionValue) {
-  switch (methodKey) {
-    case "mixed_topn":
-      return "综合排序会按下方排序键做字典序比较，越靠左优先级越高。";
-    case "adv_hit_topn":
-      return "优先选优势因子命中更多的股票。";
-    case "adv_score_topn":
-      return "优先选优势因子得分和更高的股票。";
-    case "companion_penalty_topn":
-      return "优先保留优势因子强、同时噪音伴随更少的股票。";
-    default:
-      return "按当前条件生成选股结果。";
-  }
 }
 
 function normalizeMethodKey(value?: string | null) {
@@ -265,7 +128,8 @@ function normalizeMethodKey(value?: string | null) {
 
 function mixedSortKeyLabel(value: string) {
   return (
-    MIXED_SORT_KEY_OPTIONS.find((option) => option.value === value)?.label ?? value
+    MIXED_SORT_KEY_OPTIONS.find((option) => option.value === value)?.label ??
+    value
   );
 }
 
@@ -329,7 +193,6 @@ function AdvancedStockPickTable({
         adv_score_sum: { value: (row) => row.adv_score_sum },
         pos_hit_cnt: { value: (row) => row.pos_hit_cnt },
         pos_score_sum: { value: (row) => row.pos_score_sum },
-        noisy_companion_cnt: { value: (row) => row.noisy_companion_cnt },
       }) satisfies Partial<
         Record<AdvancedRowSortKey, SortDefinition<AdvancedStockPickRow>>
       >,
@@ -372,7 +235,9 @@ function AdvancedStockPickTable({
               />
             </th>
             <th>股票</th>
-            <th aria-sort={getAriaSort(sortKey === "total_score", sortDirection)}>
+            <th
+              aria-sort={getAriaSort(sortKey === "total_score", sortDirection)}
+            >
               <TableSortButton
                 label="总分"
                 isActive={sortKey === "total_score"}
@@ -381,7 +246,9 @@ function AdvancedStockPickTable({
                 title="按总分排序"
               />
             </th>
-            <th aria-sort={getAriaSort(sortKey === "adv_hit_cnt", sortDirection)}>
+            <th
+              aria-sort={getAriaSort(sortKey === "adv_hit_cnt", sortDirection)}
+            >
               <TableSortButton
                 label="优势命中"
                 isActive={sortKey === "adv_hit_cnt"}
@@ -390,7 +257,12 @@ function AdvancedStockPickTable({
                 title="按优势命中数排序"
               />
             </th>
-            <th aria-sort={getAriaSort(sortKey === "adv_score_sum", sortDirection)}>
+            <th
+              aria-sort={getAriaSort(
+                sortKey === "adv_score_sum",
+                sortDirection,
+              )}
+            >
               <TableSortButton
                 label="优势得分"
                 isActive={sortKey === "adv_score_sum"}
@@ -399,7 +271,9 @@ function AdvancedStockPickTable({
                 title="按优势得分和排序"
               />
             </th>
-            <th aria-sort={getAriaSort(sortKey === "pos_hit_cnt", sortDirection)}>
+            <th
+              aria-sort={getAriaSort(sortKey === "pos_hit_cnt", sortDirection)}
+            >
               <TableSortButton
                 label="正向命中"
                 isActive={sortKey === "pos_hit_cnt"}
@@ -408,22 +282,18 @@ function AdvancedStockPickTable({
                 title="按正向命中数排序"
               />
             </th>
-            <th aria-sort={getAriaSort(sortKey === "pos_score_sum", sortDirection)}>
+            <th
+              aria-sort={getAriaSort(
+                sortKey === "pos_score_sum",
+                sortDirection,
+              )}
+            >
               <TableSortButton
                 label="正向得分"
                 isActive={sortKey === "pos_score_sum"}
                 direction={sortDirection}
                 onClick={() => toggleSort("pos_score_sum")}
                 title="按正向得分和排序"
-              />
-            </th>
-            <th aria-sort={getAriaSort(sortKey === "noisy_companion_cnt", sortDirection)}>
-              <TableSortButton
-                label="噪音伴随"
-                isActive={sortKey === "noisy_companion_cnt"}
-                direction={sortDirection}
-                onClick={() => toggleSort("noisy_companion_cnt")}
-                title="按噪音伴随数量排序"
               />
             </th>
             <th>行业 / 地域</th>
@@ -456,7 +326,6 @@ function AdvancedStockPickTable({
               <td>{formatNumber(row.adv_score_sum)}</td>
               <td>{formatNumber(row.pos_hit_cnt, 0)}</td>
               <td>{formatNumber(row.pos_score_sum)}</td>
-              <td>{formatNumber(row.noisy_companion_cnt, 0)}</td>
               <td className="stock-pick-cell-concept">
                 <div className="stock-pick-advanced-cell-sub">
                   {formatPlainText(row.industry)}
@@ -521,7 +390,7 @@ export default function AdvancedStockPickPage() {
       persistedState?.enableConceptFilter ??
       Boolean(
         (persistedState?.includeConcepts?.length ?? 0) > 0 ||
-          (persistedState?.excludeConcepts?.length ?? 0) > 0,
+        (persistedState?.excludeConcepts?.length ?? 0) > 0,
       ),
   );
   const [includeConcepts, setIncludeConcepts] = useState<string[]>(
@@ -536,8 +405,8 @@ export default function AdvancedStockPickPage() {
   const [conceptMatchMode, setConceptMatchMode] = useState(
     () => persistedState?.conceptMatchMode ?? "OR",
   );
-  const [methodKey, setMethodKey] = useState<MethodOptionValue>(
-    () => normalizeMethodKey(persistedState?.methodKey),
+  const [methodKey, setMethodKey] = useState<MethodOptionValue>(() =>
+    normalizeMethodKey(persistedState?.methodKey),
   );
   const [strategyKeyword, setStrategyKeyword] = useState(
     () => persistedState?.strategyKeyword ?? "",
@@ -564,14 +433,13 @@ export default function AdvancedStockPickPage() {
   const [preprocessSignature, setPreprocessSignature] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [runSignature, setRunSignature] = useState("");
   const [strategyPerformanceSelection, setStrategyPerformanceSelection] =
-    useState<StrategyPerformanceSelectionState | null>(() =>
-      parseStrategyPerformanceSelectionState(),
+    useState<StrategyPerformanceManualAdvantageSelection | null>(() =>
+      readStrategyPerformanceAdvancedPickSynced(),
     );
 
   function refreshStrategyPerformanceSelection() {
-    const nextSelection = parseStrategyPerformanceSelectionState();
+    const nextSelection = readStrategyPerformanceAdvancedPickSynced();
     setStrategyPerformanceSelection(nextSelection);
     return nextSelection;
   }
@@ -581,7 +449,9 @@ export default function AdvancedStockPickPage() {
       return;
     }
     const syncSelection = () => {
-      setStrategyPerformanceSelection(parseStrategyPerformanceSelectionState());
+      setStrategyPerformanceSelection(
+        readStrategyPerformanceAdvancedPickSynced(),
+      );
     };
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
@@ -604,14 +474,10 @@ export default function AdvancedStockPickPage() {
     () =>
       normalizeStringArray(
         preprocessData?.manual_rule_names ??
-          strategyPerformanceSelection?.manualRuleNames ??
+          strategyPerformanceSelection?.manualAdvantageRuleNames ??
           [],
       ),
     [preprocessData, strategyPerformanceSelection],
-  );
-  const currentCompanionRuleNames = useMemo(
-    () => preprocessData?.resolved_noisy_companion_rule_names ?? [],
-    [preprocessData],
   );
   const filteredCurrentManualRuleNames = useMemo(() => {
     const keyword = strategyKeyword.trim().toLowerCase();
@@ -622,15 +488,6 @@ export default function AdvancedStockPickPage() {
       item.toLowerCase().includes(keyword),
     );
   }, [currentManualRuleNames, strategyKeyword]);
-  const filteredCurrentCompanionRuleNames = useMemo(() => {
-    const keyword = strategyKeyword.trim().toLowerCase();
-    if (!keyword) {
-      return currentCompanionRuleNames;
-    }
-    return currentCompanionRuleNames.filter((item) =>
-      item.toLowerCase().includes(keyword),
-    );
-  }, [currentCompanionRuleNames, strategyKeyword]);
   const normalizedIncludeConcepts = useMemo(
     () => normalizeStringArray(includeConcepts),
     [includeConcepts],
@@ -650,54 +507,6 @@ export default function AdvancedStockPickPage() {
   const normalizedMixedSortKeys = useMemo(
     () => normalizeMixedSortKeyValues(mixedSortKeys),
     [mixedSortKeys],
-  );
-  const preprocessConfigSignature = useMemo(
-    () =>
-      buildPreprocessConfigSignature(sourcePath, strategyPerformanceSelection),
-    [sourcePath, strategyPerformanceSelection],
-  );
-  const runConfigSignature = useMemo(
-    () =>
-      buildRunConfigSignature({
-        preprocessConfigSignature,
-        tradeDate,
-        board,
-        area,
-        industry,
-        enableConceptFilter,
-        effectiveIncludeConcepts,
-        effectiveExcludeConcepts,
-        conceptMatchMode,
-        methodKey,
-        minAdvHits: parsePositiveInt(minAdvHits, 1),
-        topLimit: parsePositiveInt(topLimit, 100),
-        rankMax: parsePositiveInt(rankMax, 1000),
-        mixedSortKeys: normalizedMixedSortKeys,
-      }),
-    [
-      area,
-      board,
-      conceptMatchMode,
-      enableConceptFilter,
-      industry,
-      methodKey,
-      minAdvHits,
-      effectiveExcludeConcepts,
-      effectiveIncludeConcepts,
-      normalizedMixedSortKeys,
-      preprocessConfigSignature,
-      rankMax,
-      topLimit,
-      tradeDate,
-    ],
-  );
-  const preprocessDirty = useMemo(
-    () => Boolean(preprocessData) && preprocessSignature !== preprocessConfigSignature,
-    [preprocessConfigSignature, preprocessData, preprocessSignature],
-  );
-  const resultDirty = useMemo(
-    () => Boolean(result) && runSignature !== runConfigSignature,
-    [result, runConfigSignature, runSignature],
   );
 
   useEffect(() => {
@@ -754,7 +563,6 @@ export default function AdvancedStockPickPage() {
         } satisfies PersistedAdvancedState),
       );
     } catch {
-      // Ignore storage failures.
     }
   }, [
     area,
@@ -827,11 +635,20 @@ export default function AdvancedStockPickPage() {
       return;
     }
     if (!selection) {
-      setPreprocessError("请先到策略回测页保存一组手动优势集，再回来读取。");
+      setPreprocessError("请先到策略回测页同步一组手动优势集，再回来读取。");
       return;
     }
-    if (selection.manualRuleNames.length === 0) {
-      setPreprocessError("策略回测页当前还没有手动优势集。");
+    if (selection.sourcePath !== sourcePath.trim()) {
+      setPreprocessError(
+        "当前数据目录和策略回测页已同步的高级选股数据不一致，请先回策略回测页在当前目录下重新保存。",
+      );
+      return;
+    }
+    const syncedManualRuleNames = normalizeStringArray(
+      selection.manualAdvantageRuleNames,
+    );
+    if (syncedManualRuleNames.length === 0) {
+      setPreprocessError("请先到策略回测页验证手动优势集，再回来读取。");
       return;
     }
     setPreprocessLoading(true);
@@ -842,7 +659,7 @@ export default function AdvancedStockPickPage() {
         selectedHorizon: selection.selectedHorizon,
         strongQuantile: selection.strongQuantile,
         advantageRuleMode: "manual",
-        manualRuleNames: selection.manualRuleNames,
+        manualRuleNames: syncedManualRuleNames,
         autoMinSamples2: selection.autoMinSamples2,
         autoMinSamples3: selection.autoMinSamples3,
         autoMinSamples5: selection.autoMinSamples5,
@@ -854,13 +671,10 @@ export default function AdvancedStockPickPage() {
       setPreprocessData(pageData);
       setPreprocessSignature(nextPreprocessSignature);
       setResult(null);
-      setRunSignature("");
       setError("");
     } catch (loadError) {
       setPreprocessData(null);
-      setPreprocessError(
-        `读取手动优势集失败: ${String(loadError)}。请先到策略回测页按同样参数手动运行一次回测并生成缓存。`,
-      );
+      setPreprocessError(`读取手动优势集失败: ${String(loadError)}`);
     } finally {
       setPreprocessLoading(false);
     }
@@ -877,7 +691,13 @@ export default function AdvancedStockPickPage() {
       return;
     }
     if (!selection) {
-      setError("请先到策略回测页保存一组手动优势集，再回来读取。");
+      setError("请先到策略回测页同步一组手动优势集，再回来读取。");
+      return;
+    }
+    if (selection.sourcePath !== sourcePath.trim()) {
+      setError(
+        "当前数据目录和策略回测页已同步的高级选股数据不一致，请先回策略回测页在当前目录下重新保存。",
+      );
       return;
     }
     if (!preprocessData || preprocessSignature !== nextPreprocessSignature) {
@@ -885,28 +705,13 @@ export default function AdvancedStockPickPage() {
       return;
     }
     const nextManualRuleNames = normalizeStringArray(
-      preprocessData.manual_rule_names ?? selection.manualRuleNames ?? [],
+      preprocessData.manual_rule_names ??
+        selection.manualAdvantageRuleNames,
     );
     if (nextManualRuleNames.length === 0) {
-      setError("策略回测页当前没有可用的手动优势集。");
+      setError("策略回测页当前没有可用于高级选股的手动优势集。");
       return;
     }
-    const nextRunSignature = buildRunConfigSignature({
-      preprocessConfigSignature: nextPreprocessSignature,
-      tradeDate,
-      board,
-      area,
-      industry,
-      enableConceptFilter,
-      effectiveIncludeConcepts,
-      effectiveExcludeConcepts,
-      conceptMatchMode,
-      methodKey,
-      minAdvHits: parsePositiveInt(minAdvHits, 1),
-      topLimit: parsePositiveInt(topLimit, 100),
-      rankMax: parsePositiveInt(rankMax, 1000),
-      mixedSortKeys: normalizedMixedSortKeys,
-    });
     setLoading(true);
     setError("");
     try {
@@ -934,10 +739,8 @@ export default function AdvancedStockPickPage() {
         topLimit: parsePositiveInt(topLimit, 100),
         mixedSortKeys: normalizedMixedSortKeys,
         rankMax: parsePositiveInt(rankMax, 1000),
-        noisyCompanionRuleNames: currentCompanionRuleNames,
       });
       setResult(nextResult);
-      setRunSignature(nextRunSignature);
     } catch (runError) {
       setResult(null);
       setError(`高级选股失败: ${String(runError)}`);
@@ -951,16 +754,13 @@ export default function AdvancedStockPickPage() {
       <div className="stock-pick-section-head">
         <div>
           <h3 className="stock-pick-subtitle">高级选股</h3>
-          <p className="stock-pick-note">高级选股只读取策略回测页已经生成好的手动优势集缓存；缺缓存时需要先回策略回测页按同参手动重建。</p>
         </div>
       </div>
 
       <div className="stock-pick-advanced-flow">
         <section className="stock-pick-advanced-step">
           <div className="stock-pick-concept-head">
-            <strong>1. 读取回测页手动优势集</strong>
-            <span>优势因子只读取策略回测页当前保存的手动优势集</span>
-            <span>这里不会自动重建缓存，缺缓存时请回策略回测页手动重建</span>
+            <strong>1. 读取缓存</strong>
           </div>
 
           <div className="stock-pick-actions stock-pick-actions-split">
@@ -970,20 +770,14 @@ export default function AdvancedStockPickPage() {
               onClick={() => void preprocessAdvantageRules()}
               disabled={preprocessLoading || optionsLoading}
             >
-              {preprocessLoading ? "读取中..." : "读取手动优势集"}
+              {preprocessLoading ? "读取中..." : "读取手动优势集缓存"}
             </button>
-            <span className="stock-pick-tip">
-              高级选股会直接使用策略回测页当前手动优势集里的因子。
-            </span>
           </div>
 
           {preprocessData ? (
             <div className="stock-pick-advanced-status-strip">
               <span className="stock-pick-chip-btn is-active">
                 手动优势 {currentManualRuleNames.length}
-              </span>
-              <span className="stock-pick-chip-btn">
-                噪音伴随 {currentCompanionRuleNames.length}
               </span>
               <span className="stock-pick-chip-btn is-neutral">
                 缓存周期 {preprocessData.selected_horizon} 日
@@ -994,23 +788,15 @@ export default function AdvancedStockPickPage() {
             </div>
           ) : null}
 
-          {preprocessDirty ? (
-            <div className="stock-pick-advanced-callout is-warn">
-              参数和当前缓存不一致。请先到策略回测页按同样参数重跑一次，再回来读取缓存。
-            </div>
-          ) : null}
         </section>
 
         <section className="stock-pick-advanced-step">
           <div className="stock-pick-concept-head">
-            <strong>2. 查看已读取集合</strong>
-            <span>这里展示高级选股实际会使用的手动优势集与噪音伴随集</span>
+            <strong>2. 已读取集合</strong>
           </div>
 
           {!preprocessData ? (
-            <div className="stock-pick-empty">
-              先去策略回测页配置手动优势集，再在上一步读取。
-            </div>
+            <div className="stock-pick-empty">暂无数据</div>
           ) : (
             <div className="stock-pick-advanced-stack">
               <div className="stock-pick-concept-panel stock-pick-advanced-panel">
@@ -1030,12 +816,6 @@ export default function AdvancedStockPickPage() {
                 emptyText="当前没有手动优势集。"
                 tone="warn"
               />
-              <ReadonlyRuleChipPanel
-                title="噪音伴随集"
-                items={filteredCurrentCompanionRuleNames}
-                emptyText="当前没有噪音伴随集。"
-                tone="neutral"
-              />
             </div>
           )}
         </section>
@@ -1043,7 +823,6 @@ export default function AdvancedStockPickPage() {
         <section className="stock-pick-advanced-step">
           <div className="stock-pick-concept-head">
             <strong>3. 执行高级选股</strong>
-            <span>生成选股结果</span>
           </div>
 
           <div className="stock-pick-form-grid stock-pick-form-grid-advanced-run">
@@ -1111,7 +890,8 @@ export default function AdvancedStockPickPage() {
                 value={board}
                 onChange={(event) =>
                   setBoard(
-                    event.target.value as (typeof STOCK_PICK_BOARD_OPTIONS)[number],
+                    event.target
+                      .value as (typeof STOCK_PICK_BOARD_OPTIONS)[number],
                   )
                 }
               >
@@ -1125,7 +905,10 @@ export default function AdvancedStockPickPage() {
 
             <label className="stock-pick-field">
               <span>地域</span>
-              <select value={area} onChange={(event) => setArea(event.target.value)}>
+              <select
+                value={area}
+                onChange={(event) => setArea(event.target.value)}
+              >
                 <option value="全部">全部</option>
                 {areaOptions.map((item) => (
                   <option key={item} value={item}>
@@ -1156,7 +939,9 @@ export default function AdvancedStockPickPage() {
                 <input
                   type="checkbox"
                   checked={enableConceptFilter}
-                  onChange={(event) => setEnableConceptFilter(event.target.checked)}
+                  onChange={(event) =>
+                    setEnableConceptFilter(event.target.checked)
+                  }
                 />
                 <span>启用概念筛选</span>
               </label>
@@ -1175,15 +960,10 @@ export default function AdvancedStockPickPage() {
             </label>
           </div>
 
-          <div className="stock-pick-advanced-callout">
-            {methodHint(methodKey)}
-          </div>
-
           {methodKey === "mixed_topn" ? (
             <div className="stock-pick-concept-panel stock-pick-advanced-panel">
               <div className="stock-pick-concept-head">
                 <strong>混合排序键顺序</strong>
-                <span>支持自定义先后顺序</span>
               </div>
               <div className="stock-pick-advanced-sort-builder">
                 <div className="stock-pick-advanced-sort-list">
@@ -1206,7 +986,9 @@ export default function AdvancedStockPickPage() {
                           type="button"
                           className="stock-pick-chip-btn"
                           onClick={() => moveMixedSortKey(key, 1)}
-                          disabled={index === normalizedMixedSortKeys.length - 1}
+                          disabled={
+                            index === normalizedMixedSortKeys.length - 1
+                          }
                         >
                           后移
                         </button>
@@ -1223,12 +1005,10 @@ export default function AdvancedStockPickPage() {
                   ))}
                 </div>
                 <div className="stock-pick-advanced-sort-palette">
-                  <span className="stock-pick-note">
-                    可加入排序键：先比较第 1 项，再比较第 2 项，最后再比较后续项。
-                  </span>
                   <div className="stock-pick-concept-list stock-pick-concept-list-inline">
                     {MIXED_SORT_KEY_OPTIONS.filter(
-                      (option) => !normalizedMixedSortKeys.includes(option.value),
+                      (option) =>
+                        !normalizedMixedSortKeys.includes(option.value),
                     ).map((option) => (
                       <button
                         key={option.value}
@@ -1269,23 +1049,20 @@ export default function AdvancedStockPickPage() {
             >
               {loading ? "选股中..." : "执行高级选股"}
             </button>
-            <span className="stock-pick-tip">
-              {!preprocessData
-                ? "请先去策略回测页运行，再回来读取缓存。"
-                : preprocessDirty
-                  ? "当前参数和缓存不一致；请先去策略回测页按同参数重跑。"
-                  : resultDirty
-                    ? "当前结果未同步最近一次改动，执行后会刷新结果。"
-                    : "当前结果已和最近一次参数保持一致。"}
-            </span>
           </div>
         </section>
       </div>
 
       {preprocessError ? (
-        <div className="stock-pick-message stock-pick-message-error">{preprocessError}</div>
+        <div className="stock-pick-message stock-pick-message-error">
+          {preprocessError}
+        </div>
       ) : null}
-      {error ? <div className="stock-pick-message stock-pick-message-error">{error}</div> : null}
+      {error ? (
+        <div className="stock-pick-message stock-pick-message-error">
+          {error}
+        </div>
+      ) : null}
 
       {result ? (
         <>
@@ -1304,7 +1081,9 @@ export default function AdvancedStockPickPage() {
             </div>
             <div className="stock-pick-advanced-summary-item">
               <span>入池候选</span>
-              <strong>{formatNumber(result.eligible_candidate_count, 0)}</strong>
+              <strong>
+                {formatNumber(result.eligible_candidate_count, 0)}
+              </strong>
             </div>
             <div className="stock-pick-advanced-summary-item">
               <span>最终入选</span>
@@ -1312,7 +1091,9 @@ export default function AdvancedStockPickPage() {
             </div>
             <div className="stock-pick-advanced-summary-item">
               <span>优势规则数</span>
-              <strong>{formatNumber(result.resolved_advantage_rule_names.length, 0)}</strong>
+              <strong>
+                {formatNumber(result.resolved_advantage_rule_names.length, 0)}
+              </strong>
             </div>
           </div>
 
@@ -1328,20 +1109,6 @@ export default function AdvancedStockPickPage() {
                   ))
                 ) : (
                   <span className="stock-pick-note">当前手动优势集为空。</span>
-                )}
-              </div>
-            </div>
-            <div className="stock-pick-advanced-chip-card">
-              <strong>噪音伴随集</strong>
-              <div className="stock-pick-concept-list stock-pick-concept-list-inline">
-                {result.resolved_noisy_companion_rule_names.length > 0 ? (
-                  result.resolved_noisy_companion_rule_names.map((item) => (
-                    <span className="stock-pick-chip-btn is-neutral" key={item}>
-                      {item}
-                    </span>
-                  ))
-                ) : (
-                  <span className="stock-pick-note">当前未设置噪音伴随。</span>
                 )}
               </div>
             </div>

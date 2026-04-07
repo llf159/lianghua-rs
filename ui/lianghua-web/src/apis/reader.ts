@@ -1,7 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export type OverviewRow = {
-  // 表格需要的列
   ts_code: string;
   trade_date?: string;
   ref_date?: string;
@@ -21,7 +20,6 @@ export type OverviewRow = {
 };
 
 export type OverviewQuery = {
-  // 旧版请求参数
   sourcePath: string;
   tradeDate?: string;
   limit?: number;
@@ -31,7 +29,6 @@ export type OverviewQuery = {
 };
 
 export type OverviewPageQuery = {
-  // 新版带排名日和参考日的请求参数结构
   sourcePath: string;
   rankDate?: string;
   refDate?: string;
@@ -42,7 +39,6 @@ export type OverviewPageQuery = {
 };
 
 export type OverviewPageData = {
-  // 返回列
   rows: OverviewRow[];
   rank_date_options?: string[];
   resolved_rank_date?: string;

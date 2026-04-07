@@ -108,7 +108,6 @@ export default function ExpressionStockPickPage() {
         } satisfies PersistedExpressionStockPickState),
       )
     } catch {
-      // Ignore storage failures. The page still works without persistence.
     }
   }, [
     board,

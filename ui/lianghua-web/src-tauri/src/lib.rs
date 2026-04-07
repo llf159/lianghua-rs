@@ -80,6 +80,7 @@ use lianghua_rs::{
             get_strategy_performance_horizon_view as core_get_strategy_performance_horizon_view,
             get_latest_strategy_pick_cache as core_get_latest_strategy_pick_cache,
             get_or_build_strategy_pick_cache as core_get_or_build_strategy_pick_cache,
+            save_manual_strategy_pick_cache as core_save_manual_strategy_pick_cache,
             get_strategy_pick_cache as core_get_strategy_pick_cache,
             get_strategy_performance_page as core_get_strategy_performance_page,
             StrategyPerformancePickCachePayload,
@@ -1642,6 +1643,39 @@ async fn get_or_build_strategy_pick_cache(
 }
 
 #[tauri::command]
+async fn save_manual_strategy_pick_cache(
+    source_path: String,
+    selected_horizon: Option<u32>,
+    strong_quantile: Option<f64>,
+    manual_rule_names: Vec<String>,
+    auto_min_samples_2: Option<u32>,
+    auto_min_samples_3: Option<u32>,
+    auto_min_samples_5: Option<u32>,
+    auto_min_samples_10: Option<u32>,
+    require_win_rate_above_market: Option<bool>,
+    min_pass_horizons: Option<u32>,
+    min_adv_hits: Option<u32>,
+) -> Result<StrategyPerformancePickCachePayload, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_save_manual_strategy_pick_cache(
+            source_path,
+            selected_horizon,
+            strong_quantile,
+            manual_rule_names,
+            auto_min_samples_2,
+            auto_min_samples_3,
+            auto_min_samples_5,
+            auto_min_samples_10,
+            require_win_rate_above_market,
+            min_pass_horizons,
+            min_adv_hits,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn get_latest_strategy_pick_cache(
     source_path: String,
 ) -> Result<StrategyPerformancePickCachePayload, String> {
@@ -1878,7 +1912,6 @@ async fn run_advanced_stock_pick(
     min_adv_hits: Option<u32>,
     top_limit: Option<u32>,
     mixed_sort_keys: Option<Vec<String>>,
-    noisy_companion_rule_names: Option<Vec<String>>,
     rank_max: Option<u32>,
     total_score_min: Option<f64>,
     total_score_max: Option<f64>,
@@ -1916,7 +1949,6 @@ async fn run_advanced_stock_pick(
             min_adv_hits,
             top_limit,
             mixed_sort_keys,
-            noisy_companion_rule_names,
             rank_max,
             total_score_min,
             total_score_max,
@@ -3182,6 +3214,7 @@ pub fn run() {
             get_strategy_performance_page,
             get_strategy_pick_cache,
             get_or_build_strategy_pick_cache,
+            save_manual_strategy_pick_cache,
             get_latest_strategy_pick_cache,
             get_strategy_performance_horizon_view,
             get_strategy_performance_rule_detail,

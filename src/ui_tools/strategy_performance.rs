@@ -4441,6 +4441,63 @@ pub fn get_or_build_strategy_pick_cache(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn save_manual_strategy_pick_cache(
+    source_path: String,
+    selected_horizon: Option<u32>,
+    strong_quantile: Option<f64>,
+    manual_rule_names: Vec<String>,
+    auto_min_samples_2: Option<u32>,
+    auto_min_samples_3: Option<u32>,
+    auto_min_samples_5: Option<u32>,
+    auto_min_samples_10: Option<u32>,
+    require_win_rate_above_market: Option<bool>,
+    min_pass_horizons: Option<u32>,
+    min_adv_hits: Option<u32>,
+) -> Result<StrategyPerformancePickCachePayload, String> {
+    let selected_horizon = normalize_selected_horizon(selected_horizon);
+    let strong_quantile = normalize_strong_quantile(strong_quantile)?;
+    let auto_filter = StrategyPerformanceAutoFilterConfig {
+        min_samples_2: auto_min_samples_2.unwrap_or(DEFAULT_MIN_SAMPLE).max(1),
+        min_samples_3: auto_min_samples_3.unwrap_or(DEFAULT_MIN_SAMPLE).max(1),
+        min_samples_5: auto_min_samples_5.unwrap_or(DEFAULT_MIN_SAMPLE).max(1),
+        min_samples_10: auto_min_samples_10.unwrap_or(DEFAULT_MIN_SAMPLE).max(1),
+        require_win_rate_above_market: require_win_rate_above_market.unwrap_or(false),
+        min_pass_horizons: min_pass_horizons
+            .unwrap_or(DEFAULT_MIN_PASS_HORIZONS)
+            .clamp(1, HORIZONS.len() as u32),
+    };
+    let min_adv_hits = min_adv_hits.unwrap_or(DEFAULT_MIN_ADV_HITS).max(1);
+    let strategy_options = load_rule_meta(&source_path)?.0;
+    let (manual_rule_names, _) =
+        normalize_manual_rule_names(Some(manual_rule_names), &strategy_options);
+    let resolved_advantage_rule_names = resolve_advantage_rule_names(
+        &strategy_options,
+        AdvantageRuleMode::Manual,
+        &Vec::new(),
+        &manual_rule_names,
+    );
+    let payload = build_strategy_pick_cache_payload(
+        selected_horizon,
+        strong_quantile,
+        &advantage_mode_label(AdvantageRuleMode::Manual),
+        &Vec::new(),
+        &manual_rule_names,
+        &resolved_advantage_rule_names,
+        &Vec::new(),
+    );
+    let cache_key = build_strategy_pick_cache_key(
+        selected_horizon,
+        strong_quantile,
+        AdvantageRuleMode::Manual,
+        &manual_rule_names,
+        &auto_filter,
+        min_adv_hits,
+    );
+    save_strategy_pick_cache(&source_path, &cache_key, &payload)?;
+    Ok(payload)
+}
+
 pub fn get_strategy_pick_cache(
     source_path: String,
     selected_horizon: Option<u32>,
@@ -4481,7 +4538,7 @@ pub fn get_strategy_pick_cache(
     );
     load_strategy_pick_cache(&source_path, &cache_key)?.ok_or_else(|| {
         format!(
-            "未找到对应的策略回测缓存。请先到策略回测页按同样参数运行一次回测后，再来高级选股。当前周期={}日",
+            "未找到对应的策略回测缓存。请先到策略回测页应用统计或等待手动优势集缓存同步完成后，再来高级选股。当前周期={}日",
             selected_horizon
         )
     })

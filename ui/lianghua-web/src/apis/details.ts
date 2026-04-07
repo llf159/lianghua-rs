@@ -11,7 +11,6 @@ export type StockDetailQuery = {
 }
 
 export type DetailOverview = {
-  // 总览栏的所需数据结构
   ts_code: string
   name?: string
   board?: string
@@ -28,14 +27,12 @@ export type DetailOverview = {
 }
 
 export type DetailPrevRankRow = {
-  // 前日排名数据
   trade_date: string
   rank?: number | null
   total?: number | null
 }
 
 export type DetailKlineRow = {
-  // k线画图数据
   trade_date: string
   open?: number | null
   high?: number | null
@@ -56,7 +53,6 @@ export type DetailKlineRow = {
 }
 
 export type DetailKlinePanel = {
-  // ?
   key: string
   label: string
   kind?: 'candles' | 'line' | 'bar' | 'brick'
@@ -65,7 +61,6 @@ export type DetailKlinePanel = {
 }
 
 export type DetailKlinePayload = {
-  // 画图参数?
   items?: DetailKlineRow[]
   panels?: DetailKlinePanel[]
   default_window?: number
@@ -76,7 +71,6 @@ export type DetailKlinePayload = {
 }
 
 export type DetailStrategyTriggerRow = {
-  // 策略触发表用数据
   rule_name: string
   rule_score?: number | null
   is_triggered?: boolean | null
@@ -88,13 +82,11 @@ export type DetailStrategyTriggerRow = {
 }
 
 export type DetailStrategyPayload = {
-  // 触发和不触发区分
   triggered?: DetailStrategyTriggerRow[]
   untriggered?: DetailStrategyTriggerRow[]
 }
 
 export type StockDetailPageData = {
-  // 总返回数据结构
   resolved_trade_date?: string
   resolved_ts_code?: string
   overview?: DetailOverview | null

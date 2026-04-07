@@ -385,10 +385,24 @@
   color: #9a5a06;
 }
 
-.strategy-performance-pool-chip.is-companion {
+.strategy-performance-pool-chip.is-manual-auto {
+  border-color: #d96b3b;
+  background: linear-gradient(135deg, #fff1e8 0%, #fff6ea 100%);
+  color: #a63d14;
+  box-shadow: inset 0 0 0 1px rgba(217, 107, 59, 0.12);
+}
+
+.strategy-performance-pool-chip.is-candidate {
   border-color: #bed4f4;
   background: #eef5ff;
   color: #1f5da8;
+}
+
+.strategy-performance-pool-chip.is-candidate-auto {
+  border-color: #6e8dd8;
+  background: linear-gradient(135deg, #e9f1ff 0%, #eef5ff 100%);
+  color: #244f98;
+  box-shadow: inset 0 0 0 1px rgba(110, 141, 216, 0.14);
 }
 
 .strategy-performance-pool-chip.is-negative-effective {

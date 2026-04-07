@@ -97,9 +97,6 @@ export default function StockPickPage() {
         <div className="stock-pick-section-head">
           <div>
             <h2 className="stock-pick-title">选股工具</h2>
-            <p className="stock-pick-note">
-              支持表达式、概念和基于优势策略的高级选股。高级选股会复用策略表现回测里的优势集口径，但只在你点击按钮后执行。
-            </p>
           </div>
           <div className="stock-pick-source-note">
             当前数据目录：<strong>{sourcePath || "--"}</strong>
