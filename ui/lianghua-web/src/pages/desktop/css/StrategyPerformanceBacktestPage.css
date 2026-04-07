@@ -328,9 +328,9 @@
   background: #fff;
 }
 
-.strategy-performance-pool-dual-grid {
+.strategy-performance-pool-triple-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -378,7 +378,7 @@
   color: #b42318;
 }
 
-.strategy-performance-pool-chip.is-advantage {
+.strategy-performance-pool-chip.is-manual {
   border-color: #f0bb63;
   background: #fff7ea;
   color: #9a5a06;
@@ -736,7 +736,7 @@
   .strategy-performance-detail-summary,
   .strategy-performance-method-list,
   .strategy-performance-pool-grid,
-  .strategy-performance-pool-dual-grid,
+  .strategy-performance-pool-triple-grid,
   .strategy-performance-detail-entry {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -750,7 +750,7 @@
   .strategy-performance-detail-summary,
   .strategy-performance-method-list,
   .strategy-performance-pool-grid,
-  .strategy-performance-pool-dual-grid,
+  .strategy-performance-pool-triple-grid,
   .strategy-performance-detail-entry {
     grid-template-columns: minmax(0, 1fr);
   }

@@ -113,14 +113,11 @@ function strengthClassName(value?: string | null) {
   return "return-backtest-strength-flat";
 }
 
-function pickRankDate(currentValue: string, options: string[]) {
+function pickRankDate(options: string[]) {
   if (options.length === 0) {
     return DEFAULT_DATE_OPTION;
   }
-  if (currentValue && options.includes(currentValue)) {
-    return currentValue;
-  }
-  return options[1] ?? options[0];
+  return options[Math.min(2, options.length - 1)] ?? options[0];
 }
 
 function pickRefDate(currentValue: string, options: string[], rankDate: string) {
@@ -483,19 +480,10 @@ export default function ReturnBacktestPage() {
     () => persistedState?.sourcePath ?? readStoredSourcePath(),
   );
   const [dateOptions, setDateOptions] = useState<string[]>(
-    () =>
-      Array.isArray(persistedState?.dateOptions)
-        ? persistedState.dateOptions.filter(
-            (item): item is string => typeof item === "string",
-          )
-        : [],
+    [],
   );
-  const [rankDateInput, setRankDateInput] = useState(
-    persistedState?.rankDateInput ?? DEFAULT_DATE_OPTION,
-  );
-  const [refDateInput, setRefDateInput] = useState(
-    persistedState?.refDateInput ?? DEFAULT_DATE_OPTION,
-  );
+  const [rankDateInput, setRankDateInput] = useState(DEFAULT_DATE_OPTION);
+  const [refDateInput, setRefDateInput] = useState(DEFAULT_DATE_OPTION);
   const [topLimitInput, setTopLimitInput] = useState(
     persistedState?.topLimitInput ?? DEFAULT_TOP_LIMIT,
   );
@@ -507,12 +495,7 @@ export default function ReturnBacktestPage() {
       ? persistedState.boardFilter
       : "全部",
   );
-  const [pageData, setPageData] = useState<ReturnBacktestPageData | null>(
-    () =>
-      persistedState?.pageData && typeof persistedState.pageData === "object"
-        ? (persistedState.pageData as ReturnBacktestPageData)
-        : null,
-  );
+  const [pageData, setPageData] = useState<ReturnBacktestPageData | null>(null);
   const [loading, setLoading] = useState(false);
   const [dateLoading, setDateLoading] = useState(false);
   const [error, setError] = useState("");
@@ -520,35 +503,11 @@ export default function ReturnBacktestPage() {
   const [strengthWindowConfig, setStrengthWindowConfig] =
     useState<StrengthWindowConfig | null>(null);
   const [submittedQuery, setSubmittedQuery] = useState<SubmittedBacktestQuery | null>(
-    () => {
-      const query = persistedState?.submittedQuery;
-      if (!query || typeof query !== "object") {
-        return null;
-      }
-
-      const sourcePath =
-        typeof query.sourcePath === "string" ? query.sourcePath.trim() : "";
-      const rankDate = typeof query.rankDate === "string" ? query.rankDate.trim() : "";
-      const refDate = typeof query.refDate === "string" ? query.refDate.trim() : "";
-      const topLimit =
-        typeof query.topLimit === "number" && Number.isInteger(query.topLimit)
-          ? query.topLimit
-          : 0;
-      if (!sourcePath || !rankDate || !refDate || topLimit <= 0) {
-        return null;
-      }
-
-      return {
-        sourcePath:
-          sourcePath,
-        rankDate,
-        refDate,
-        topLimit,
-        board: typeof query.board === "string" ? query.board : undefined,
-      };
-    },
+    null,
   );
   const sourcePathRef = useRef(sourcePath.trim());
+  const topLimitInputRef = useRef(topLimitInput);
+  const boardFilterRef = useRef(boardFilter);
 
   const sourcePathTrimmed = sourcePath.trim();
   const rankRows = pageData?.rank_rows ?? [];
@@ -614,6 +573,14 @@ export default function ReturnBacktestPage() {
       instanceKey: Date.now(),
     });
   };
+
+  useEffect(() => {
+    topLimitInputRef.current = topLimitInput;
+  }, [topLimitInput]);
+
+  useEffect(() => {
+    boardFilterRef.current = boardFilter;
+  }, [boardFilter]);
 
   useEffect(() => {
     let cancelled = false;
@@ -709,13 +676,25 @@ export default function ReturnBacktestPage() {
           return;
         }
         setDateOptions(values);
-        const nextRankDate = pickRankDate(rankDateInput, values);
-        const nextRefDate = pickRefDate(refDateInput, values, nextRankDate);
+        const nextRankDate = pickRankDate(values);
+        const nextRefDate = pickRefDate(DEFAULT_DATE_OPTION, values, nextRankDate);
         setRankDateInput(nextRankDate);
         setRefDateInput(nextRefDate);
+        const nextQuery = buildSubmittedQuery(
+          sourcePathTrimmed,
+          nextRankDate,
+          nextRefDate,
+          topLimitInputRef.current,
+          boardFilterRef.current,
+        );
+        setSubmittedQuery(
+          nextRefDate > nextRankDate && nextQuery ? nextQuery : null,
+        );
       } catch (loadError) {
         if (!cancelled) {
           setDateOptions([]);
+          setSubmittedQuery(null);
+          setPageData(null);
           setError(`读取日期列表失败: ${String(loadError)}`);
         }
       } finally {

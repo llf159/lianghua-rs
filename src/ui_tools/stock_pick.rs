@@ -16,6 +16,7 @@ use crate::{
     ui_tools::{
         build_area_map, build_circ_mv_map, build_concepts_map, build_industry_map, build_name_map,
         build_total_mv_map,
+        strategy_performance::get_or_build_strategy_pick_cache as core_get_or_build_strategy_pick_cache,
         strategy_performance::get_latest_strategy_pick_cache as core_get_latest_strategy_pick_cache,
     },
     utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
@@ -1038,16 +1039,16 @@ pub fn run_advanced_stock_pick(
     exclude_concepts: Vec<String>,
     concept_match_mode: Option<String>,
     method_key: Option<String>,
-    _selected_horizon: Option<u32>,
-    _strong_quantile: Option<f64>,
-    _advantage_rule_mode: Option<String>,
-    _manual_rule_names: Option<Vec<String>>,
-    _auto_min_samples_2: Option<u32>,
-    _auto_min_samples_3: Option<u32>,
-    _auto_min_samples_5: Option<u32>,
-    _auto_min_samples_10: Option<u32>,
-    _require_win_rate_above_market: Option<bool>,
-    _min_pass_horizons: Option<u32>,
+    selected_horizon: Option<u32>,
+    strong_quantile: Option<f64>,
+    advantage_rule_mode: Option<String>,
+    manual_rule_names: Option<Vec<String>>,
+    auto_min_samples_2: Option<u32>,
+    auto_min_samples_3: Option<u32>,
+    auto_min_samples_5: Option<u32>,
+    auto_min_samples_10: Option<u32>,
+    require_win_rate_above_market: Option<bool>,
+    min_pass_horizons: Option<u32>,
     min_adv_hits: Option<u32>,
     top_limit: Option<u32>,
     mixed_sort_keys: Option<Vec<String>>,
@@ -1094,7 +1095,37 @@ pub fn run_advanced_stock_pick(
     let mixed_sort_keys = normalize_mixed_sort_keys(mixed_sort_keys);
     let rank_max = rank_max.map(|value| value.max(1) as i64);
 
-    let strategy_pick_cache = core_get_latest_strategy_pick_cache(source_path.to_string())?;
+    let strategy_pick_cache = if selected_horizon.is_some()
+        || strong_quantile.is_some()
+        || advantage_rule_mode.is_some()
+        || manual_rule_names
+            .as_ref()
+            .map(|items| !items.is_empty())
+            .unwrap_or(false)
+        || auto_min_samples_2.is_some()
+        || auto_min_samples_3.is_some()
+        || auto_min_samples_5.is_some()
+        || auto_min_samples_10.is_some()
+        || require_win_rate_above_market.is_some()
+        || min_pass_horizons.is_some()
+    {
+        core_get_or_build_strategy_pick_cache(
+            source_path.to_string(),
+            selected_horizon,
+            strong_quantile,
+            advantage_rule_mode,
+            manual_rule_names,
+            auto_min_samples_2,
+            auto_min_samples_3,
+            auto_min_samples_5,
+            auto_min_samples_10,
+            require_win_rate_above_market,
+            min_pass_horizons,
+            Some(min_adv_hits),
+        )?
+    } else {
+        core_get_latest_strategy_pick_cache(source_path.to_string())?
+    };
     let advantage_rule_set = strategy_pick_cache
         .resolved_advantage_rule_names
         .iter()

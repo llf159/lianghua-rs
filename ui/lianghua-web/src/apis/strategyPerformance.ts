@@ -184,6 +184,8 @@ export type StrategyPerformancePageData = {
   future_summaries: StrategyPerformanceFutureSummary[];
   auto_filter: StrategyPerformanceAutoFilterConfig;
   resolved_advantage_mode: string;
+  auto_advantage_rule_names: string[];
+  manual_advantage_rule_names: string[];
   auto_candidate_rule_names: string[];
   manual_rule_names: string[];
   ignored_manual_rule_names: string[];
@@ -207,11 +209,15 @@ export type StrategyPerformanceHorizonViewData = {
   noisy_companion_rule_names: string[];
   companion_rows: StrategyPerformanceCompanionRow[];
   overall_score_analysis?: StrategyPerformanceOverallScoreAnalysis | null;
+  advantage_score_analysis?: StrategyPerformanceOverallScoreAnalysis | null;
 };
 
 export type StrategyPerformancePickCachePayload = {
   selected_horizon: number;
   strong_quantile: number;
+  resolved_advantage_mode?: string;
+  auto_advantage_rule_names?: string[];
+  manual_rule_names?: string[];
   resolved_advantage_rule_names: string[];
   resolved_noisy_companion_rule_names: string[];
 };
@@ -259,6 +265,26 @@ export async function getStrategyPickCache(query: {
 }) {
   return invoke<StrategyPerformancePickCachePayload>(
     "get_strategy_pick_cache",
+    query,
+  );
+}
+
+export async function getOrBuildStrategyPickCache(query: {
+  sourcePath: string;
+  selectedHorizon?: number;
+  strongQuantile?: number;
+  advantageRuleMode?: string;
+  manualRuleNames?: string[];
+  autoMinSamples2?: number;
+  autoMinSamples3?: number;
+  autoMinSamples5?: number;
+  autoMinSamples10?: number;
+  requireWinRateAboveMarket?: boolean;
+  minPassHorizons?: number;
+  minAdvHits?: number;
+}) {
+  return invoke<StrategyPerformancePickCachePayload>(
+    "get_or_build_strategy_pick_cache",
     query,
   );
 }

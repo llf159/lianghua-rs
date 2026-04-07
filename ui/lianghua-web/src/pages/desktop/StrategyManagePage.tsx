@@ -271,7 +271,8 @@ export default function StrategyManagePage() {
   const [deleteTarget, setDeleteTarget] = useState<StrategyManageRuleItem | null>(null)
   const [loading, setLoading] = useState(true)
   const [busyAction, setBusyAction] = useState<BusyAction>('idle')
-  const [error, setError] = useState('')
+  const [pageError, setPageError] = useState('')
+  const [editorError, setEditorError] = useState('')
   const [notice, setNotice] = useState('')
   const [checkNotice, setCheckNotice] = useState('')
   const [searchKeyword, setSearchKeyword] = useState('')
@@ -305,7 +306,7 @@ export default function StrategyManagePage() {
 
   async function loadPage() {
     setLoading(true)
-    setError('')
+    setPageError('')
     try {
       const resolvedSourcePath = await ensureManagedSourcePath()
       const data = await getStrategyManagePage(resolvedSourcePath)
@@ -313,7 +314,7 @@ export default function StrategyManagePage() {
       setRules(data.rules ?? [])
     } catch (loadError) {
       setRules([])
-      setError(`读取策略规则失败: ${String(loadError)}`)
+      setPageError(`读取策略规则失败: ${String(loadError)}`)
     } finally {
       setLoading(false)
     }
@@ -328,7 +329,7 @@ export default function StrategyManagePage() {
         const data = await getStrategyManagePage(resolvedSourcePath)
         if (!cancelled) {
           setLoading(false)
-          setError('')
+          setPageError('')
           setSourcePath(resolvedSourcePath)
           setRules(data.rules ?? [])
         }
@@ -336,7 +337,7 @@ export default function StrategyManagePage() {
         if (!cancelled) {
           setLoading(false)
           setRules([])
-          setError(`读取策略规则失败: ${String(loadError)}`)
+          setPageError(`读取策略规则失败: ${String(loadError)}`)
         }
       }
     }
@@ -419,6 +420,7 @@ export default function StrategyManagePage() {
     setConsecThresholdInput('2')
     setScoreMode('fixed')
     setCheckNotice('')
+    setEditorError('')
   }
 
   function openCreateEditor() {
@@ -431,8 +433,9 @@ export default function StrategyManagePage() {
     setConsecThresholdInput('2')
     setScoreMode('fixed')
     setCheckNotice('')
+    setEditorError('')
     setNotice('')
-    setError('')
+    setPageError('')
   }
 
   function openEditEditor(rule: StrategyManageRuleItem) {
@@ -445,21 +448,23 @@ export default function StrategyManagePage() {
     setConsecThresholdInput(String(parseScopeWayDraft(rule.scope_way).consecThreshold))
     setScoreMode(hasDistPoints(rule.dist_points) ? 'dist' : 'fixed')
     setCheckNotice('')
+    setEditorError('')
     setNotice('')
-    setError('')
+    setPageError('')
   }
 
   async function runAction(
     action: Exclude<BusyAction, 'idle'>,
     errorPrefix: string,
+    setErrorTarget: (message: string) => void,
     runner: () => Promise<void>,
   ) {
     setBusyAction(action)
-    setError('')
+    setErrorTarget('')
     try {
       await runner()
     } catch (actionError) {
-      setError(`${errorPrefix}: ${String(actionError)}`)
+      setErrorTarget(`${errorPrefix}: ${String(actionError)}`)
     } finally {
       setBusyAction('idle')
     }
@@ -474,31 +479,41 @@ export default function StrategyManagePage() {
 
   async function onCheckDraft() {
     if (!sourcePathTrimmed) {
-      setError('当前数据目录为空，无法检查策略草稿。')
+      setEditorError('当前数据目录为空，无法检查策略草稿。')
       return
     }
 
-    await runAction('checking', '检查策略失败', async () => {
+    try {
       const preparedDraft = getPreparedDraft()
-      const message = await checkStrategyManageRuleDraft(
-        sourcePathTrimmed,
-        preparedDraft,
-        editorMode === 'edit' ? editingOriginalName ?? undefined : undefined,
-      )
-      setCheckNotice(message)
-      setNotice('')
-    })
+      await runAction('checking', '检查策略失败', setEditorError, async () => {
+        const message = await checkStrategyManageRuleDraft(
+          sourcePathTrimmed,
+          preparedDraft,
+          editorMode === 'edit' ? editingOriginalName ?? undefined : undefined,
+        )
+        setCheckNotice(message)
+        setNotice('')
+      })
+    } catch (actionError) {
+      setEditorError(`检查策略失败: ${String(actionError)}`)
+    }
   }
 
   async function onSaveDraft() {
     if (!sourcePathTrimmed) {
-      setError(editorMode === 'create' ? '当前数据目录为空，无法新增策略。' : '当前数据目录为空，无法保存策略。')
+      setEditorError(editorMode === 'create' ? '当前数据目录为空，无法新增策略。' : '当前数据目录为空，无法保存策略。')
       return
     }
 
-    const preparedDraft = getPreparedDraft()
+    let preparedDraft: StrategyManageRuleDraft
+    try {
+      preparedDraft = getPreparedDraft()
+    } catch (actionError) {
+      setEditorError(String(actionError))
+      return
+    }
     if (editorMode === 'create') {
-      await runAction('creating', '新增策略失败', async () => {
+      await runAction('creating', '新增策略失败', setEditorError, async () => {
         const data = await createStrategyManageRule(sourcePathTrimmed, preparedDraft)
         setRules(data.rules ?? [])
         setNotice(`已新增策略：${preparedDraft.name.trim()}`)
@@ -508,11 +523,11 @@ export default function StrategyManagePage() {
     }
 
     if (!editingOriginalName) {
-      setError('缺少待修改策略名')
+      setEditorError('缺少待修改策略名')
       return
     }
 
-    await runAction('saving', '保存策略失败', async () => {
+    await runAction('saving', '保存策略失败', setEditorError, async () => {
       const data = await updateStrategyManageRule(sourcePathTrimmed, editingOriginalName, preparedDraft)
       setRules(data.rules ?? [])
       setNotice(`已保存策略：${preparedDraft.name.trim()}`)
@@ -525,7 +540,7 @@ export default function StrategyManagePage() {
       return
     }
 
-    await runAction('deleting', '删除策略失败', async () => {
+    await runAction('deleting', '删除策略失败', setPageError, async () => {
       const data = await removeStrategyManageRules(sourcePathTrimmed, [deleteTarget.name])
       setRules(data.rules ?? [])
       setNotice(`已删除策略：${deleteTarget.name}`)
@@ -538,11 +553,11 @@ export default function StrategyManagePage() {
 
   async function onExportRuleFile() {
     if (!sourcePathTrimmed) {
-      setError('当前数据目录为空，无法导出策略文件。')
+      setPageError('当前数据目录为空，无法导出策略文件。')
       return
     }
 
-    await runAction('exporting', '导出策略文件失败', async () => {
+    await runAction('exporting', '导出策略文件失败', setPageError, async () => {
       const exportedPath = await exportStrategyRuleFile(sourcePathTrimmed)
       if (!exportedPath) {
         return
@@ -688,7 +703,7 @@ export default function StrategyManagePage() {
           </label>
         </div>
 
-        {error ? <div className="strategy-manage-message strategy-manage-message-error">{error}</div> : null}
+        {pageError ? <div className="strategy-manage-message strategy-manage-message-error">{pageError}</div> : null}
         {notice ? <div className="strategy-manage-message strategy-manage-message-notice">{notice}</div> : null}
       </section>
 
@@ -847,6 +862,7 @@ export default function StrategyManagePage() {
               </button>
             </div>
 
+            {editorError ? <div className="strategy-manage-message strategy-manage-message-error">{editorError}</div> : null}
             {checkNotice ? <div className="strategy-manage-message strategy-manage-message-notice">{checkNotice}</div> : null}
 
             <div className="strategy-manage-editor-grid">

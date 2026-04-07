@@ -243,6 +243,8 @@ pub struct StrategyPerformancePageData {
     pub future_summaries: Vec<StrategyPerformanceFutureSummary>,
     pub auto_filter: StrategyPerformanceAutoFilterConfig,
     pub resolved_advantage_mode: String,
+    pub auto_advantage_rule_names: Vec<String>,
+    pub manual_advantage_rule_names: Vec<String>,
     pub auto_candidate_rule_names: Vec<String>,
     pub manual_rule_names: Vec<String>,
     pub ignored_manual_rule_names: Vec<String>,
@@ -267,12 +269,19 @@ pub struct StrategyPerformanceHorizonViewData {
     pub noisy_companion_rule_names: Vec<String>,
     pub companion_rows: Vec<StrategyPerformanceCompanionRow>,
     pub overall_score_analysis: Option<StrategyPerformanceOverallScoreAnalysis>,
+    pub advantage_score_analysis: Option<StrategyPerformanceOverallScoreAnalysis>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct StrategyPerformancePickCachePayload {
     pub selected_horizon: u32,
     pub strong_quantile: f64,
+    #[serde(default)]
+    pub resolved_advantage_mode: String,
+    #[serde(default)]
+    pub auto_advantage_rule_names: Vec<String>,
+    #[serde(default)]
+    pub manual_rule_names: Vec<String>,
     pub resolved_advantage_rule_names: Vec<String>,
     pub resolved_noisy_companion_rule_names: Vec<String>,
 }
@@ -345,6 +354,7 @@ pub struct StrategyPerformanceValidationComboSummary {
     pub positive_primary_metric: Option<f64>,
     pub positive_secondary_metric: Option<f64>,
     pub positive_hit_n: u32,
+    pub negative_overall_composite_score: Option<f64>,
     pub negative_effective: bool,
     pub negative_avg_future_return_pct: Option<f64>,
     pub negative_primary_metric: Option<f64>,
@@ -591,12 +601,18 @@ fn build_strategy_pick_cache_key(
 fn build_strategy_pick_cache_payload(
     selected_horizon: u32,
     strong_quantile: f64,
+    resolved_advantage_mode: &str,
+    auto_advantage_rule_names: &[String],
+    manual_rule_names: &[String],
     resolved_advantage_rule_names: &[String],
     resolved_noisy_companion_rule_names: &[String],
 ) -> StrategyPerformancePickCachePayload {
     StrategyPerformancePickCachePayload {
         selected_horizon,
         strong_quantile,
+        resolved_advantage_mode: resolved_advantage_mode.to_string(),
+        auto_advantage_rule_names: auto_advantage_rule_names.to_vec(),
+        manual_rule_names: manual_rule_names.to_vec(),
         resolved_advantage_rule_names: resolved_advantage_rule_names.to_vec(),
         resolved_noisy_companion_rule_names: resolved_noisy_companion_rule_names.to_vec(),
     }
@@ -901,6 +917,12 @@ fn select_best_validation_summary(
             ValidationStrategyDirection::Negative => left
                 .negative_effective
                 .cmp(&right.negative_effective)
+                .then_with(|| {
+                    compare_option_f64_asc(
+                        left.negative_overall_composite_score,
+                        right.negative_overall_composite_score,
+                    )
+                })
                 .then_with(|| {
                     compare_option_f64_asc(
                         left.negative_avg_future_return_pct,
@@ -1876,6 +1898,8 @@ fn build_validation_combo_summaries(
             positive_primary_metric: positive_metric.and_then(metric_primary_score),
             positive_secondary_metric: positive_metric.and_then(metric_secondary_score),
             positive_hit_n: positive_metric.map(|metric| metric.hit_n).unwrap_or(0),
+            negative_overall_composite_score: negative_row
+                .and_then(|row| row.overall_composite_score),
             negative_effective: negative_row
                 .and_then(|row| row.negative_effective)
                 .unwrap_or(false),
@@ -3730,17 +3754,55 @@ fn load_strategy_score_observations(
     Ok(out)
 }
 
-fn build_overall_score_analysis(
+fn load_advantage_score_observations(
     source_conn: &Connection,
+) -> Result<Vec<ScoreObservation>, String> {
+    let mut stmt = source_conn
+        .prepare(
+            r#"
+            SELECT
+                signal_date,
+                adv_score_sum,
+                future_return_pct
+            FROM strategy_perf_sample_features
+            WHERE adv_score_sum IS NOT NULL
+            ORDER BY signal_date ASC, ts_code ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译优势集分层读取失败: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("查询优势集分层失败: {e}"))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取优势集分层失败: {e}"))?
+    {
+        out.push(ScoreObservation {
+            signal_date: row
+                .get(0)
+                .map_err(|e| format!("读取 signal_date 失败: {e}"))?,
+            score: row
+                .get::<_, Option<f64>>(1)
+                .map_err(|e| format!("读取 adv_score_sum 失败: {e}"))?
+                .unwrap_or(0.0),
+            future_return_pct: row
+                .get::<_, Option<f64>>(2)
+                .map_err(|e| format!("读取 future_return_pct 失败: {e}"))?
+                .unwrap_or(0.0),
+        });
+    }
+    Ok(out)
+}
+
+fn build_score_analysis_from_samples(
+    samples: &[ScoreObservation],
     selected_horizon: u32,
     future_summary_map: &HashMap<u32, StrategyPerformanceFutureSummary>,
-) -> Result<Option<StrategyPerformanceOverallScoreAnalysis>, String> {
-    let Some(future_summary) = future_summary_map.get(&selected_horizon) else {
-        return Ok(None);
-    };
-    let samples = load_strategy_score_observations(source_conn, selected_horizon)?;
+) -> Option<StrategyPerformanceOverallScoreAnalysis> {
+    let future_summary = future_summary_map.get(&selected_horizon)?;
     if samples.is_empty() {
-        return Ok(None);
+        return None;
     }
 
     let sample_count = samples.len() as u32;
@@ -3766,7 +3828,7 @@ fn build_overall_score_analysis(
             / sample_count as f64,
     );
     let (bucket_mode, score_rows) =
-        build_score_bucket_rows(&samples, future_summary.strong_threshold_pct);
+        build_score_bucket_rows(samples, future_summary.strong_threshold_pct);
     let layer_return_spread_pct = match (score_rows.first(), score_rows.last()) {
         (Some(first), Some(last)) if score_rows.len() >= 2 => {
             match (first.avg_future_return_pct, last.avg_future_return_pct) {
@@ -3778,21 +3840,47 @@ fn build_overall_score_analysis(
     };
 
     let (rank_ic_mean, icir) =
-        compute_rank_ic_with_fallback(&samples, sample_count, PORTFOLIO_MIN_SAMPLE_COUNT);
+        compute_rank_ic_with_fallback(samples, sample_count, PORTFOLIO_MIN_SAMPLE_COUNT);
 
-    Ok(Some(StrategyPerformanceOverallScoreAnalysis {
+    Some(StrategyPerformanceOverallScoreAnalysis {
         horizon: selected_horizon,
         sample_count,
         avg_future_return_pct,
         strong_hit_rate,
         win_rate,
-        spearman_corr: spearman_corr(&samples, false),
+        spearman_corr: spearman_corr(samples, false),
         rank_ic_mean,
         icir,
         layer_return_spread_pct,
         bucket_mode,
         score_rows,
-    }))
+    })
+}
+
+fn build_overall_score_analysis(
+    source_conn: &Connection,
+    selected_horizon: u32,
+    future_summary_map: &HashMap<u32, StrategyPerformanceFutureSummary>,
+) -> Result<Option<StrategyPerformanceOverallScoreAnalysis>, String> {
+    let samples = load_strategy_score_observations(source_conn, selected_horizon)?;
+    Ok(build_score_analysis_from_samples(
+        &samples,
+        selected_horizon,
+        future_summary_map,
+    ))
+}
+
+fn build_advantage_score_analysis(
+    source_conn: &Connection,
+    selected_horizon: u32,
+    future_summary_map: &HashMap<u32, StrategyPerformanceFutureSummary>,
+) -> Result<Option<StrategyPerformanceOverallScoreAnalysis>, String> {
+    let samples = load_advantage_score_observations(source_conn)?;
+    Ok(build_score_analysis_from_samples(
+        &samples,
+        selected_horizon,
+        future_summary_map,
+    ))
 }
 
 fn build_hit_count_rows(
@@ -4345,6 +4433,9 @@ pub fn get_or_build_strategy_pick_cache(
     Ok(build_strategy_pick_cache_payload(
         page.selected_horizon,
         strong_quantile,
+        &page.resolved_advantage_mode,
+        &page.auto_advantage_rule_names,
+        &page.manual_advantage_rule_names,
         &page.resolved_advantage_rule_names,
         &page.noisy_companion_rule_names,
     ))
@@ -4437,12 +4528,15 @@ fn build_strategy_performance_horizon_view_with_future_summary_map(
     };
     let overall_score_analysis =
         build_overall_score_analysis(source_conn, selected_horizon, &future_summary_map)?;
+    let advantage_score_analysis =
+        build_advantage_score_analysis(source_conn, selected_horizon, &future_summary_map)?;
 
     Ok(StrategyPerformanceHorizonViewData {
         selected_horizon: selected_horizon,
         noisy_companion_rule_names,
         companion_rows,
         overall_score_analysis,
+        advantage_score_analysis,
     })
 }
 
@@ -4638,6 +4732,9 @@ pub fn get_strategy_performance_page(
     let pick_cache_payload = build_strategy_pick_cache_payload(
         selected_horizon,
         strong_quantile,
+        &advantage_mode_label(advantage_rule_mode),
+        &auto_candidate_rule_names_final,
+        &manual_rule_names,
         &resolved_advantage_rule_names,
         &horizon_view.noisy_companion_rule_names,
     );
@@ -4673,6 +4770,7 @@ pub fn get_strategy_performance_page(
         noisy_companion_rule_names,
         companion_rows,
         overall_score_analysis,
+        advantage_score_analysis: _,
         ..
     } = horizon_view;
 
@@ -4684,6 +4782,8 @@ pub fn get_strategy_performance_page(
         future_summaries,
         auto_filter,
         resolved_advantage_mode: advantage_mode_label(advantage_rule_mode),
+        auto_advantage_rule_names: auto_candidate_rule_names_final.clone(),
+        manual_advantage_rule_names: manual_rule_names.clone(),
         auto_candidate_rule_names: auto_candidate_rule_names_final,
         manual_rule_names,
         ignored_manual_rule_names,

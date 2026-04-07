@@ -43,6 +43,7 @@ export type StrategyPerformanceValidationComboSummary = {
   positive_primary_metric?: number | null;
   positive_secondary_metric?: number | null;
   positive_hit_n: number;
+  negative_overall_composite_score?: number | null;
   negative_effective: boolean;
   negative_avg_future_return_pct?: number | null;
   negative_primary_metric?: number | null;

@@ -7,6 +7,7 @@ import {
   getStrategyPerformanceRuleDetail,
   type StrategyPerformanceCompanionRow,
   type StrategyPerformanceFutureSummary,
+  type StrategyPerformanceHorizonViewData,
   type StrategyPerformanceOverallScoreAnalysis,
   type StrategyPerformancePageData,
   type StrategyPerformanceRuleDetail,
@@ -39,7 +40,6 @@ type SubmittedQuery = {
   sourcePath: string;
   selectedHorizon: number;
   strongQuantile: number;
-  manualRuleNames: string[];
   autoMinSamples2: number;
   autoMinSamples3: number;
   autoMinSamples5: number;
@@ -143,6 +143,8 @@ type PersistedStrategyPerformanceOverallScoreAnalysis = Pick<
 type PersistedStrategyPerformancePageData = {
   selected_horizon: number;
   future_summaries: StrategyPerformancePageData["future_summaries"];
+  auto_advantage_rule_names: string[];
+  manual_advantage_rule_names: string[];
   auto_candidate_rule_names: string[];
   ignored_manual_rule_names: string[];
   resolved_advantage_rule_names: string[];
@@ -196,6 +198,8 @@ function compactPageDataForStorage(
   return {
     selected_horizon: pageData.selected_horizon,
     future_summaries: pageData.future_summaries,
+    auto_advantage_rule_names: pageData.auto_advantage_rule_names,
+    manual_advantage_rule_names: pageData.manual_advantage_rule_names,
     auto_candidate_rule_names: pageData.auto_candidate_rule_names,
     ignored_manual_rule_names: pageData.ignored_manual_rule_names,
     resolved_advantage_rule_names: pageData.resolved_advantage_rule_names,
@@ -293,6 +297,14 @@ function restorePageDataFromStorage(
       min_pass_horizons: 2,
     },
     resolved_advantage_mode: "",
+    auto_advantage_rule_names: Array.isArray(pageData.auto_advantage_rule_names)
+      ? pageData.auto_advantage_rule_names
+      : [],
+    manual_advantage_rule_names: Array.isArray(
+      pageData.manual_advantage_rule_names,
+    )
+      ? pageData.manual_advantage_rule_names
+      : [],
     auto_candidate_rule_names: Array.isArray(pageData.auto_candidate_rule_names)
       ? pageData.auto_candidate_rule_names
       : [],
@@ -374,13 +386,6 @@ function hasLegacyAutoMinSampleNumbers(
   );
 }
 
-function sameStringArray(left: string[], right: string[]) {
-  if (left.length !== right.length) {
-    return false;
-  }
-  return left.every((item, index) => item === right[index]);
-}
-
 function sameSubmittedQuery(
   left: SubmittedQuery | null,
   right: SubmittedQuery | null,
@@ -392,7 +397,6 @@ function sameSubmittedQuery(
     left.sourcePath === right.sourcePath &&
     left.selectedHorizon === right.selectedHorizon &&
     left.strongQuantile === right.strongQuantile &&
-    sameStringArray(left.manualRuleNames, right.manualRuleNames) &&
     left.autoMinSamples2 === right.autoMinSamples2 &&
     left.autoMinSamples3 === right.autoMinSamples3 &&
     left.autoMinSamples5 === right.autoMinSamples5 &&
@@ -414,7 +418,6 @@ function sameSubmittedQueryExceptHorizon(
   return (
     left.sourcePath === right.sourcePath &&
     left.strongQuantile === right.strongQuantile &&
-    sameStringArray(left.manualRuleNames, right.manualRuleNames) &&
     left.autoMinSamples2 === right.autoMinSamples2 &&
     left.autoMinSamples3 === right.autoMinSamples3 &&
     left.autoMinSamples5 === right.autoMinSamples5 &&
@@ -789,11 +792,17 @@ function SummarySection({
 }
 
 function OverallScoreAnalysisSection({
+  title = "2. 策略整体分层分析",
+  description = "按总分 `total_score` 分层，观察整体策略分高分低时的未来收益差异。",
+  emptyText = "当前没有可展示的整体分层数据。",
   detail,
   selectedHorizon,
   pendingHorizon,
   loading,
 }: {
+  title?: string;
+  description?: string;
+  emptyText?: string;
   detail: StrategyPerformanceOverallScoreAnalysis | null | undefined;
   selectedHorizon: number;
   pendingHorizon: number;
@@ -803,10 +812,8 @@ function OverallScoreAnalysisSection({
     <section className="strategy-performance-card">
       <div className="strategy-performance-section-head">
         <div>
-          <h3>2. 策略整体分层分析</h3>
-          <p>
-            按总分 `total_score` 分层，观察整体策略分高分低时的未来收益差异。
-          </p>
+          <h3>{title}</h3>
+          <p>{description}</p>
           {loading && pendingHorizon !== selectedHorizon ? (
             <p>
               当前展示 {selectedHorizon} 日已加载结果，{pendingHorizon}{" "}
@@ -816,9 +823,7 @@ function OverallScoreAnalysisSection({
         </div>
       </div>
       {!detail ? (
-        <div className="strategy-performance-empty">
-          当前没有可展示的整体分层数据。
-        </div>
+        <div className="strategy-performance-empty">{emptyText}</div>
       ) : (
         <>
           <div className="strategy-performance-detail-summary">
@@ -1336,8 +1341,8 @@ function ApplyActionCard({
       <div className="strategy-performance-note-strip">
         <span className="strategy-performance-note">
           {hasPendingChanges
-            ? "参数已变更，重新应用后刷新。"
-            : "显示最近一次结果。"}
+            ? "参数已变更，重新应用后刷新自动优势集。"
+            : "点击后会重新运行自动统计，并刷新自动优势集。"}
         </span>
       </div>
     </div>
@@ -1682,7 +1687,6 @@ export default function StrategyPerformanceBacktestPage() {
           typeof query.selectedHorizon === "number" ? query.selectedHorizon : 2,
         strongQuantile:
           typeof query.strongQuantile === "number" ? query.strongQuantile : 0.9,
-        manualRuleNames: arrayFromUnknown(query.manualRuleNames),
         autoMinSamples2: useMigratedQueryAutoMinSamples
           ? DEFAULT_AUTO_MIN_SAMPLES[2]
           : typeof query.autoMinSamples2 === "number"
@@ -1721,6 +1725,10 @@ export default function StrategyPerformanceBacktestPage() {
   const [ruleDetailCache, setRuleDetailCache] = useState<
     Record<string, StrategyPerformanceRuleDetail | null>
   >({});
+  const [manualValidationData, setManualValidationData] =
+    useState<StrategyPerformanceHorizonViewData | null>(null);
+  const [manualValidationLoading, setManualValidationLoading] = useState(false);
+  const [manualValidationError, setManualValidationError] = useState("");
 
   const sourcePathTrimmed = sourcePath.trim();
 
@@ -1731,35 +1739,49 @@ export default function StrategyPerformanceBacktestPage() {
         .map((row) => row.rule_name),
     [pageData],
   );
-  const autoCandidateRuleNames = useMemo(
-    () => pageData?.auto_candidate_rule_names ?? [],
-    [pageData],
-  );
-  const currentAdvantageRuleNames = useMemo(() => {
-    if (manualRuleNames.length > 0) {
-      return normalizeStringArray(
-        manualRuleNames.filter((item) => positiveRuleNames.includes(item)),
-      );
-    }
-    return normalizeStringArray(
-      (pageData?.resolved_advantage_rule_names ?? []).filter((item) =>
-        positiveRuleNames.includes(item),
+  const autoAdvantageRuleNames = useMemo(
+    () =>
+      normalizeStringArray(
+        (pageData?.auto_advantage_rule_names ?? []).filter((item) =>
+          positiveRuleNames.includes(item),
+        ),
       ),
-    );
-  }, [manualRuleNames, pageData, positiveRuleNames]);
-  const currentCompanionRuleNames = useMemo(() => {
-    const advantageSet = new Set(currentAdvantageRuleNames);
-    return positiveRuleNames.filter((item) => !advantageSet.has(item));
-  }, [currentAdvantageRuleNames, positiveRuleNames]);
-  const filteredCurrentAdvantageRuleNames = useMemo(() => {
+    [pageData, positiveRuleNames],
+  );
+  const manualAdvantageRuleNames = useMemo(
+    () =>
+      normalizeStringArray(
+        manualRuleNames.filter((item) => positiveRuleNames.includes(item)),
+      ),
+    [manualRuleNames, positiveRuleNames],
+  );
+  const currentCompanionRuleNames = useMemo(
+    () =>
+      normalizeStringArray(
+        (pageData?.resolved_companion_rule_names ?? []).filter((item) =>
+          positiveRuleNames.includes(item),
+        ),
+      ),
+    [pageData, positiveRuleNames],
+  );
+  const filteredAutoAdvantageRuleNames = useMemo(() => {
     const keyword = strategyKeyword.trim().toLowerCase();
     if (!keyword) {
-      return currentAdvantageRuleNames;
+      return autoAdvantageRuleNames;
     }
-    return currentAdvantageRuleNames.filter((item) =>
+    return autoAdvantageRuleNames.filter((item) =>
       item.toLowerCase().includes(keyword),
     );
-  }, [currentAdvantageRuleNames, strategyKeyword]);
+  }, [autoAdvantageRuleNames, strategyKeyword]);
+  const filteredManualAdvantageRuleNames = useMemo(() => {
+    const keyword = strategyKeyword.trim().toLowerCase();
+    if (!keyword) {
+      return manualAdvantageRuleNames;
+    }
+    return manualAdvantageRuleNames.filter((item) =>
+      item.toLowerCase().includes(keyword),
+    );
+  }, [manualAdvantageRuleNames, strategyKeyword]);
   const filteredCurrentCompanionRuleNames = useMemo(() => {
     const keyword = strategyKeyword.trim().toLowerCase();
     if (!keyword) {
@@ -1779,14 +1801,10 @@ export default function StrategyPerformanceBacktestPage() {
     const selectedHorizon =
       overrides?.selectedHorizon ?? parsePositiveInt(selectedHorizonInput, 2);
     const strongQuantile = parseQuantile(strongQuantileInput);
-    const normalizedManualRuleNames = normalizeStringArray(
-      currentAdvantageRuleNames,
-    );
     return {
       sourcePath: sourcePathTrimmed,
       selectedHorizon,
       strongQuantile,
-      manualRuleNames: normalizedManualRuleNames,
       autoMinSamples2: parsePositiveInt(
         autoMinSamples2,
         DEFAULT_AUTO_MIN_SAMPLES[2],
@@ -1816,8 +1834,7 @@ export default function StrategyPerformanceBacktestPage() {
     try {
       const nextPageData = await getStrategyPerformancePage({
         ...nextQuery,
-        advantageRuleMode:
-          nextQuery.manualRuleNames.length > 0 ? "manual" : "auto",
+        advantageRuleMode: "auto",
       });
       const nextRuleName =
         selectedRuleNameInput &&
@@ -1895,9 +1912,6 @@ export default function StrategyPerformanceBacktestPage() {
       return;
     }
     setError("");
-    if (sameSubmittedQuery(nextQuery, submittedQuery) && pageData) {
-      return;
-    }
     void runPageQuery(nextQuery);
   };
 
@@ -1936,10 +1950,6 @@ export default function StrategyPerformanceBacktestPage() {
       submittedQuery.sourcePath !== currentQuery.sourcePath ||
       submittedQuery.selectedHorizon !== currentQuery.selectedHorizon ||
       submittedQuery.strongQuantile !== currentQuery.strongQuantile ||
-      !sameStringArray(
-        submittedQuery.manualRuleNames,
-        currentQuery.manualRuleNames,
-      ) ||
       submittedQuery.autoMinSamples2 !== currentQuery.autoMinSamples2 ||
       submittedQuery.autoMinSamples3 !== currentQuery.autoMinSamples3 ||
       submittedQuery.autoMinSamples5 !== currentQuery.autoMinSamples5 ||
@@ -1957,7 +1967,6 @@ export default function StrategyPerformanceBacktestPage() {
     autoMinSamples5,
     minAdvHitsInput,
     minPassHorizonsInput,
-    currentAdvantageRuleNames,
     requireWinRateAboveMarket,
     selectedHorizonInput,
     sourcePathTrimmed,
@@ -1979,6 +1988,23 @@ export default function StrategyPerformanceBacktestPage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    setManualValidationData(null);
+    setManualValidationError("");
+  }, [
+    autoMinSamples2,
+    autoMinSamples3,
+    autoMinSamples5,
+    autoMinSamples10,
+    manualAdvantageRuleNames,
+    minAdvHitsInput,
+    minPassHorizonsInput,
+    requireWinRateAboveMarket,
+    selectedHorizonInput,
+    sourcePathTrimmed,
+    strongQuantileInput,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -2057,6 +2083,13 @@ export default function StrategyPerformanceBacktestPage() {
       (row) => row.signal_direction === "positive" && row.in_advantage_set,
     );
   }, [pageData]);
+  const manualAdvantageRuleRows = useMemo(() => {
+    const manualSet = new Set(manualAdvantageRuleNames);
+    return (pageData?.rule_rows ?? []).filter(
+      (row) =>
+        row.signal_direction === "positive" && manualSet.has(row.rule_name),
+    );
+  }, [manualAdvantageRuleNames, pageData]);
   const companionRuleRows = useMemo(() => {
     return (pageData?.rule_rows ?? []).filter(
       (row) => row.signal_direction === "positive" && row.in_companion_set,
@@ -2097,16 +2130,64 @@ export default function StrategyPerformanceBacktestPage() {
   );
   const pendingSelectedHorizon = parsePositiveInt(selectedHorizonInput, 2);
 
-  const moveRuleToAdvantage = (ruleName: string) => {
+  const addRuleToManualAdvantage = (ruleName: string) => {
     setManualRuleNames((current) =>
       current.includes(ruleName) ? current : [...current, ruleName],
     );
   };
 
-  const moveRuleToCompanion = (ruleName: string) => {
+  const removeRuleFromManualAdvantage = (ruleName: string) => {
     setManualRuleNames((current) =>
       current.filter((item) => item !== ruleName),
     );
+  };
+
+  const validateManualAdvantageSet = async () => {
+    if (!sourcePathTrimmed) {
+      setManualValidationError("缺少可用的数据源路径");
+      return;
+    }
+    if (manualAdvantageRuleNames.length === 0) {
+      setManualValidationError("请先加入手动优势集，再执行验证。");
+      return;
+    }
+    setManualValidationLoading(true);
+    setManualValidationError("");
+    try {
+      const nextValidationData = await getStrategyPerformanceHorizonView({
+        sourcePath: sourcePathTrimmed,
+        selectedHorizon: parsePositiveInt(selectedHorizonInput, 2),
+        strongQuantile: parseQuantile(strongQuantileInput),
+        resolvedAdvantageRuleNames: manualAdvantageRuleNames,
+        autoMinSamples2: parsePositiveInt(
+          autoMinSamples2,
+          DEFAULT_AUTO_MIN_SAMPLES[2],
+        ),
+        autoMinSamples3: parsePositiveInt(
+          autoMinSamples3,
+          DEFAULT_AUTO_MIN_SAMPLES[3],
+        ),
+        autoMinSamples5: parsePositiveInt(
+          autoMinSamples5,
+          DEFAULT_AUTO_MIN_SAMPLES[5],
+        ),
+        autoMinSamples10: parsePositiveInt(
+          autoMinSamples10,
+          DEFAULT_AUTO_MIN_SAMPLES[10],
+        ),
+        requireWinRateAboveMarket,
+        minPassHorizons: parsePositiveInt(minPassHorizonsInput, 2),
+        minAdvHits: parsePositiveInt(minAdvHitsInput, 1),
+      });
+      setManualValidationData(nextValidationData);
+    } catch (reason) {
+      setManualValidationData(null);
+      setManualValidationError(
+        reason instanceof Error ? reason.message : String(reason),
+      );
+    } finally {
+      setManualValidationLoading(false);
+    }
   };
 
   const loadRuleDetail = async (ruleName: string, horizonOverride?: number) => {
@@ -2295,10 +2376,13 @@ export default function StrategyPerformanceBacktestPage() {
         {pageData ? (
           <div className="strategy-performance-status-strip">
             <StatusBadge tone="good">
-              当前优势集 {currentAdvantageRuleNames.length}
+              自动优势集 {autoAdvantageRuleNames.length}
+            </StatusBadge>
+            <StatusBadge tone="good">
+              手动优势集 {manualAdvantageRuleNames.length}
             </StatusBadge>
             <StatusBadge tone="neutral">
-              当前伴随集 {currentCompanionRuleNames.length}
+              伴随集 {currentCompanionRuleNames.length}
             </StatusBadge>
             <StatusBadge tone="warn">
               明确负向 {(pageData.effective_negative_rule_names ?? []).length}
@@ -2314,7 +2398,7 @@ export default function StrategyPerformanceBacktestPage() {
           <div className="strategy-performance-pool-grid strategy-performance-pool-grid-edit">
             <div className="strategy-performance-pool-card strategy-performance-pool-card-editor">
               <div className="strategy-performance-pool-card-head">
-                <strong>当前优势 / 伴随集</strong>
+                <strong>自动优势集 / 手动优势集 / 伴随集</strong>
               </div>
               <div className="strategy-performance-pool-toolbar">
                 <input
@@ -2327,28 +2411,39 @@ export default function StrategyPerformanceBacktestPage() {
                 <button
                   type="button"
                   className="strategy-performance-secondary-btn"
-                  onClick={() => setManualRuleNames(autoCandidateRuleNames)}
+                  onClick={() => setManualRuleNames(autoAdvantageRuleNames)}
                 >
-                  恢复自动优势集
+                  自动填入手动集
                 </button>
                 <button
                   type="button"
                   className="strategy-performance-secondary-btn"
                   onClick={() => setManualRuleNames([])}
                 >
-                  清空手工调整
+                  清空手动集
+                </button>
+                <button
+                  type="button"
+                  className="strategy-performance-secondary-btn"
+                  onClick={() => void validateManualAdvantageSet()}
+                  disabled={
+                    manualValidationLoading ||
+                    manualAdvantageRuleNames.length === 0
+                  }
+                >
+                  {manualValidationLoading ? "验证中..." : "验证手动优势集"}
                 </button>
               </div>
-              <div className="strategy-performance-pool-dual-grid">
+              <div className="strategy-performance-pool-triple-grid">
                 <div className="strategy-performance-pool-subcard">
-                  <strong>当前优势集</strong>
+                  <strong>自动优势集</strong>
                   <div className="strategy-performance-pool-chip-wrap">
-                    {filteredCurrentAdvantageRuleNames.length > 0 ? (
-                      filteredCurrentAdvantageRuleNames.map((ruleName) => (
+                    {filteredAutoAdvantageRuleNames.length > 0 ? (
+                      filteredAutoAdvantageRuleNames.map((ruleName) => (
                         <button
-                          className="strategy-performance-pool-chip is-advantage"
-                          key={`resolved:${ruleName}`}
-                          onClick={() => moveRuleToCompanion(ruleName)}
+                          className="strategy-performance-pool-chip is-auto"
+                          key={`auto:${ruleName}`}
+                          onClick={() => addRuleToManualAdvantage(ruleName)}
                           type="button"
                         >
                           {ruleName}
@@ -2356,20 +2451,41 @@ export default function StrategyPerformanceBacktestPage() {
                       ))
                     ) : (
                       <span className="strategy-performance-muted">
-                        当前优势策略集为空。
+                        当前自动优势集为空。
                       </span>
                     )}
                   </div>
                 </div>
                 <div className="strategy-performance-pool-subcard">
-                  <strong>当前伴随集</strong>
+                  <strong>手动优势集</strong>
+                  <div className="strategy-performance-pool-chip-wrap">
+                    {filteredManualAdvantageRuleNames.length > 0 ? (
+                      filteredManualAdvantageRuleNames.map((ruleName) => (
+                        <button
+                          className="strategy-performance-pool-chip is-manual"
+                          key={`manual:${ruleName}`}
+                          onClick={() => removeRuleFromManualAdvantage(ruleName)}
+                          type="button"
+                        >
+                          {ruleName}
+                        </button>
+                      ))
+                    ) : (
+                      <span className="strategy-performance-muted">
+                        当前手动优势集为空。
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="strategy-performance-pool-subcard">
+                  <strong>伴随集</strong>
                   <div className="strategy-performance-pool-chip-wrap">
                     {filteredCurrentCompanionRuleNames.length > 0 ? (
                       filteredCurrentCompanionRuleNames.map((ruleName) => (
                         <button
                           className="strategy-performance-pool-chip is-companion"
                           key={`companion:${ruleName}`}
-                          onClick={() => moveRuleToAdvantage(ruleName)}
+                          onClick={() => addRuleToManualAdvantage(ruleName)}
                           type="button"
                         >
                           {ruleName}
@@ -2420,8 +2536,33 @@ export default function StrategyPerformanceBacktestPage() {
         loading={loading}
       />
 
+      {(manualAdvantageRuleNames.length > 0 ||
+        manualValidationLoading ||
+        manualValidationError) && (
+        <>
+          <OverallScoreAnalysisSection
+            title="2B. 手动优势集验证"
+            description="按手动优势集在样本中的命中总分 `adv_score_sum` 分层，观察这组手动策略组合是否具备稳定优势。"
+            emptyText="当前还没有手动优势集验证结果。"
+            detail={manualValidationData?.advantage_score_analysis ?? null}
+            selectedHorizon={
+              manualValidationData?.selected_horizon ?? loadedSelectedHorizon
+            }
+            pendingHorizon={pendingSelectedHorizon}
+            loading={manualValidationLoading}
+          />
+          {manualValidationError ? (
+            <section className="strategy-performance-card">
+              <div className="strategy-performance-error">
+                {manualValidationError}
+              </div>
+            </section>
+          ) : null}
+        </>
+      )}
+
       <RuleTable
-        title="3. 优势策略集"
+        title="3. 自动优势集"
         subtitle=""
         rows={advantageRuleRows}
         selectedHorizon={loadedSelectedHorizon}
@@ -2430,7 +2571,16 @@ export default function StrategyPerformanceBacktestPage() {
       />
 
       <RuleTable
-        title="4. 伴随策略集"
+        title="4. 手动优势集"
+        subtitle=""
+        rows={manualAdvantageRuleRows}
+        selectedHorizon={loadedSelectedHorizon}
+        selectedRuleName={selectedRuleNameInput}
+        onPickRule={pickRule}
+      />
+
+      <RuleTable
+        title="5. 伴随策略集"
         subtitle=""
         rows={companionRuleRows}
         selectedHorizon={loadedSelectedHorizon}
@@ -2440,7 +2590,7 @@ export default function StrategyPerformanceBacktestPage() {
 
       <div className="strategy-performance-grid-2">
         <RuleTable
-          title="5. 方向明确负向"
+          title="6. 方向明确负向"
           subtitle=""
           rows={effectiveNegativeRuleRows}
           selectedHorizon={loadedSelectedHorizon}
@@ -2459,7 +2609,7 @@ export default function StrategyPerformanceBacktestPage() {
 
       <div className="strategy-performance-grid-2">
         <CompanionTable
-          title="6. 伴随策略分析: 增强项"
+          title="7. 伴随策略分析: 增强项"
           subtitle=""
           rows={enhancingCompanionRows}
           defaultSortDirection="desc"

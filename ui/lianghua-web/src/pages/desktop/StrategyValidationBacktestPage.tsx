@@ -309,6 +309,14 @@ function metricForHorizon(
   return row?.metrics.find((item) => item.horizon === horizon) ?? null;
 }
 
+function overallCompositeScoreForCase(
+  caseData: StrategyPerformanceValidationCaseData,
+  direction: "positive" | "negative",
+) {
+  const row = direction === "positive" ? caseData.positive_row : caseData.negative_row;
+  return row?.overall_composite_score ?? null;
+}
+
 function sanitizeDraft(
   draft: StrategyPerformanceValidationDraft,
   enableUnknownConfigs: boolean,
@@ -370,6 +378,18 @@ function ValidationCaseSection({
             {isHitVsNonHitScoreMode(caseData.combo_summary.score_mode)
               ? "二元触发统计"
               : "多级触发统计"}
+          </span>
+          <span
+            className={`strategy-validation-chip ${
+              direction === "positive"
+                ? "is-positive"
+                : direction === "negative"
+                  ? "is-negative"
+                  : ""
+            }`}
+          >
+            整体综合分{" "}
+            {formatNumber(overallCompositeScoreForCase(caseData, direction), 2)}
           </span>
           <span className="strategy-validation-chip is-warm">
             触发样本 {formatNumber(caseData.combo_summary.trigger_samples, 0)}
@@ -458,6 +478,9 @@ function ValidationCaseSection({
                           Hit差{" "}
                           {formatPercent(metric?.hit_vs_non_hit_delta_pct)}
                         </span>
+                        <span className={valueClassName(metric?.composite_score)}>
+                          综合分 {formatNumber(metric?.composite_score, 2)}
+                        </span>
                       </>
                     ) : (
                       <>
@@ -469,6 +492,9 @@ function ValidationCaseSection({
                         </span>
                         <span className={valueClassName(metric?.sharpe_ratio)}>
                           Sharpe {formatNumber(metric?.sharpe_ratio, 2)}
+                        </span>
+                        <span className={valueClassName(metric?.composite_score)}>
+                          综合分 {formatNumber(metric?.composite_score, 2)}
                         </span>
                       </>
                     )}
@@ -1233,6 +1259,7 @@ export default function StrategyValidationBacktestPage() {
                       <th>平均每日触发</th>
                       <th>评分模式</th>
                       <th>正向综合分</th>
+                      <th>负向综合分</th>
                       <th>正向统计</th>
                       <th>负向判定</th>
                       <th>负向统计</th>
@@ -1256,6 +1283,16 @@ export default function StrategyValidationBacktestPage() {
                         <td>
                           {formatNumber(
                             row.positive_overall_composite_score,
+                            3,
+                          )}
+                        </td>
+                        <td
+                          className={valueClassName(
+                            row.negative_overall_composite_score,
+                          )}
+                        >
+                          {formatNumber(
+                            row.negative_overall_composite_score,
                             3,
                           )}
                         </td>

@@ -1887,6 +1887,7 @@ export default function DetailsPage({
   const detailRealtimeLongPressTimerRef = useRef<number | null>(null);
   const detailRealtimeLongPressHandledRef = useRef(false);
   const detailRealtimeAutoRefreshKeyRef = useRef("");
+  const strategyCompareRequestKeyRef = useRef("");
 
   const sourcePathTrimmed = sourcePath.trim();
   const isLinkedOverlay = variant === "linked-overlay";
@@ -2372,6 +2373,84 @@ export default function DetailsPage({
   );
   const strategyDisplayRelativeTradeDate =
     strategySnapshotTradeDate || previousStrategyTradeDate || "";
+
+  useEffect(() => {
+    if (
+      sourcePathTrimmed === "" ||
+      !detailData ||
+      resolvedTsCode === "--" ||
+      resolvedTradeDate === "--" ||
+      !previousStrategyTradeDate
+    ) {
+      strategyCompareRequestKeyRef.current = "";
+      return;
+    }
+
+    if (
+      strategyCompareSnapshot &&
+      strategyCompareSnapshot.tsCode === resolvedTsCode &&
+      strategyCompareSnapshot.relativeTradeDate.trim() !== ""
+    ) {
+      strategyCompareRequestKeyRef.current = "";
+      return;
+    }
+
+    const requestKey = [
+      sourcePathTrimmed,
+      resolvedTsCode,
+      resolvedTradeDate,
+      previousStrategyTradeDate,
+    ].join("|");
+    if (strategyCompareRequestKeyRef.current === requestKey) {
+      return;
+    }
+
+    strategyCompareRequestKeyRef.current = requestKey;
+    let cancelled = false;
+
+    const loadStrategyCompareSnapshot = async () => {
+      try {
+        const compareDetail = await getStockDetailPage({
+          sourcePath: sourcePathTrimmed,
+          tradeDate: previousStrategyTradeDate,
+          tsCode: resolvedTsCode,
+          chartWindowDays: 1,
+          prevRankDays: 1,
+        });
+        if (cancelled || strategyCompareRequestKeyRef.current !== requestKey) {
+          return;
+        }
+
+        setStrategyCompareSnapshot({
+          tsCode: resolvedTsCode,
+          relativeTradeDate: previousStrategyTradeDate,
+          rows: collectStrategyRows(compareDetail),
+        });
+      } catch {
+        if (cancelled || strategyCompareRequestKeyRef.current !== requestKey) {
+          return;
+        }
+        setStrategyCompareSnapshot(null);
+      } finally {
+        if (strategyCompareRequestKeyRef.current === requestKey) {
+          strategyCompareRequestKeyRef.current = "";
+        }
+      }
+    };
+
+    void loadStrategyCompareSnapshot();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    detailData,
+    previousStrategyTradeDate,
+    resolvedTradeDate,
+    resolvedTsCode,
+    sourcePathTrimmed,
+    strategyCompareSnapshot,
+  ]);
+
   const prevRankSortDefinitions = useMemo(
     () =>
       ({

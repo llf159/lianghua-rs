@@ -5,7 +5,7 @@ import {
   type AdvancedStockPickRow,
 } from "../../apis/stockPick";
 import {
-  getLatestStrategyPickCache,
+  getOrBuildStrategyPickCache,
   type StrategyPerformancePickCachePayload,
 } from "../../apis/strategyPerformance";
 import {
@@ -35,6 +35,7 @@ import {
 import { useStockPickOutletContext } from "./StockPickPage";
 
 const ADVANCED_STOCK_PICK_STATE_KEY = "advanced-stock-pick-state";
+const STRATEGY_PERFORMANCE_STATE_KEY = "lh_strategy_performance_page_v13";
 const DEFAULT_METHOD_KEY = "mixed_topn";
 const DEFAULT_BOARD = "主板";
 const DEFAULT_MIN_ADV_HITS = "1";
@@ -91,9 +92,79 @@ type PersistedAdvancedState = {
   result: AdvancedStockPickResultData | null;
 };
 
+type StrategyPerformanceSelectionState = {
+  selectedHorizon: number;
+  strongQuantile: number;
+  manualRuleNames: string[];
+  autoMinSamples2: number;
+  autoMinSamples3: number;
+  autoMinSamples5: number;
+  autoMinSamples10: number;
+  requireWinRateAboveMarket: boolean;
+  minPassHorizons: number;
+  minAdvHits: number;
+};
+
 function parsePositiveInt(value: string, fallback: number) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseStrategyPerformanceSelectionState() {
+  const stored = readJsonStorage<Record<string, unknown>>(
+    typeof window === "undefined" ? null : window.localStorage,
+    STRATEGY_PERFORMANCE_STATE_KEY,
+  );
+  if (!stored) {
+    return null;
+  }
+  const selectedHorizon = parsePositiveInt(
+    typeof stored.selectedHorizon === "string" ? stored.selectedHorizon : "2",
+    2,
+  );
+  const strongQuantileRaw =
+    typeof stored.strongQuantile === "string" ? Number(stored.strongQuantile) : 0.9;
+  return {
+    selectedHorizon,
+    strongQuantile:
+      Number.isFinite(strongQuantileRaw) &&
+      strongQuantileRaw > 0 &&
+      strongQuantileRaw < 1
+        ? strongQuantileRaw
+        : 0.9,
+    manualRuleNames: normalizeStringArray(
+      Array.isArray(stored.manualRuleNames)
+        ? stored.manualRuleNames.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : [],
+    ),
+    autoMinSamples2: parsePositiveInt(
+      typeof stored.autoMinSamples2 === "string" ? stored.autoMinSamples2 : "5",
+      5,
+    ),
+    autoMinSamples3: parsePositiveInt(
+      typeof stored.autoMinSamples3 === "string" ? stored.autoMinSamples3 : "5",
+      5,
+    ),
+    autoMinSamples5: parsePositiveInt(
+      typeof stored.autoMinSamples5 === "string" ? stored.autoMinSamples5 : "10",
+      10,
+    ),
+    autoMinSamples10: parsePositiveInt(
+      typeof stored.autoMinSamples10 === "string" ? stored.autoMinSamples10 : "20",
+      20,
+    ),
+    requireWinRateAboveMarket: stored.requireWinRateAboveMarket === true,
+    minPassHorizons: parsePositiveInt(
+      typeof stored.minPassHorizons === "string" ? stored.minPassHorizons : "2",
+      2,
+    ),
+    minAdvHits: parsePositiveInt(
+      typeof stored.minAdvHits === "string" ? stored.minAdvHits : "1",
+      1,
+    ),
+  } satisfies StrategyPerformanceSelectionState;
 }
 
 function normalizeMixedSortKeyValues(
@@ -435,28 +506,37 @@ export default function AdvancedStockPickPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [runSignature, setRunSignature] = useState("");
+  const strategyPerformanceSelection = useMemo(
+    () => parseStrategyPerformanceSelectionState(),
+    [],
+  );
 
   const availableConceptOptions = useMemo(
     () => buildAvailableConceptOptions(conceptOptions, excludedConcepts),
     [conceptOptions, excludedConcepts],
   );
-  const currentAdvantageRuleNames = useMemo(
-    () => preprocessData?.resolved_advantage_rule_names ?? [],
-    [preprocessData],
+  const currentManualRuleNames = useMemo(
+    () =>
+      normalizeStringArray(
+        strategyPerformanceSelection?.manualRuleNames ??
+          preprocessData?.manual_rule_names ??
+          [],
+      ),
+    [preprocessData, strategyPerformanceSelection],
   );
   const currentCompanionRuleNames = useMemo(
     () => preprocessData?.resolved_noisy_companion_rule_names ?? [],
     [preprocessData],
   );
-  const filteredCurrentAdvantageRuleNames = useMemo(() => {
+  const filteredCurrentManualRuleNames = useMemo(() => {
     const keyword = strategyKeyword.trim().toLowerCase();
     if (!keyword) {
-      return currentAdvantageRuleNames;
+      return currentManualRuleNames;
     }
-    return currentAdvantageRuleNames.filter((item) =>
+    return currentManualRuleNames.filter((item) =>
       item.toLowerCase().includes(keyword),
     );
-  }, [currentAdvantageRuleNames, strategyKeyword]);
+  }, [currentManualRuleNames, strategyKeyword]);
   const filteredCurrentCompanionRuleNames = useMemo(() => {
     const keyword = strategyKeyword.trim().toLowerCase();
     if (!keyword) {
@@ -490,8 +570,9 @@ export default function AdvancedStockPickPage() {
     () =>
       JSON.stringify({
         sourcePath: sourcePath.trim(),
+        strategySelection: strategyPerformanceSelection,
       }),
-    [sourcePath],
+    [sourcePath, strategyPerformanceSelection],
   );
   const runConfigSignature = useMemo(
     () =>
@@ -658,10 +739,32 @@ export default function AdvancedStockPickPage() {
       setPreprocessError("当前数据目录为空。");
       return;
     }
+    if (!strategyPerformanceSelection) {
+      setPreprocessError("请先到策略回测页保存一组手动优势集，再回来读取。");
+      return;
+    }
+    if (strategyPerformanceSelection.manualRuleNames.length === 0) {
+      setPreprocessError("策略回测页当前还没有手动优势集。");
+      return;
+    }
     setPreprocessLoading(true);
     setPreprocessError("");
     try {
-      const pageData = await getLatestStrategyPickCache(sourcePath);
+      const pageData = await getOrBuildStrategyPickCache({
+        sourcePath,
+        selectedHorizon: strategyPerformanceSelection.selectedHorizon,
+        strongQuantile: strategyPerformanceSelection.strongQuantile,
+        advantageRuleMode: "auto",
+        manualRuleNames: strategyPerformanceSelection.manualRuleNames,
+        autoMinSamples2: strategyPerformanceSelection.autoMinSamples2,
+        autoMinSamples3: strategyPerformanceSelection.autoMinSamples3,
+        autoMinSamples5: strategyPerformanceSelection.autoMinSamples5,
+        autoMinSamples10: strategyPerformanceSelection.autoMinSamples10,
+        requireWinRateAboveMarket:
+          strategyPerformanceSelection.requireWinRateAboveMarket,
+        minPassHorizons: strategyPerformanceSelection.minPassHorizons,
+        minAdvHits: strategyPerformanceSelection.minAdvHits,
+      });
       setPreprocessData(pageData);
       setPreprocessSignature(preprocessConfigSignature);
       setResult(null);
@@ -681,7 +784,11 @@ export default function AdvancedStockPickPage() {
       return;
     }
     if (!preprocessData || preprocessDirty) {
-      setError("请先到策略回测页运行回测，然后回到这里读取同参数缓存。");
+      setError("请先读取回测页的手动优势集和对应缓存，再执行高级选股。");
+      return;
+    }
+    if (currentManualRuleNames.length === 0) {
+      setError("策略回测页当前没有可用的手动优势集。");
       return;
     }
     setLoading(true);
@@ -697,10 +804,22 @@ export default function AdvancedStockPickPage() {
         excludeConcepts: effectiveExcludeConcepts,
         conceptMatchMode: enableConceptFilter ? conceptMatchMode : "OR",
         methodKey,
+        selectedHorizon: strategyPerformanceSelection?.selectedHorizon,
+        strongQuantile: strategyPerformanceSelection?.strongQuantile,
+        advantageRuleMode: "manual",
+        manualRuleNames: currentManualRuleNames,
+        autoMinSamples2: strategyPerformanceSelection?.autoMinSamples2,
+        autoMinSamples3: strategyPerformanceSelection?.autoMinSamples3,
+        autoMinSamples5: strategyPerformanceSelection?.autoMinSamples5,
+        autoMinSamples10: strategyPerformanceSelection?.autoMinSamples10,
+        requireWinRateAboveMarket:
+          strategyPerformanceSelection?.requireWinRateAboveMarket,
+        minPassHorizons: strategyPerformanceSelection?.minPassHorizons,
         minAdvHits: parsePositiveInt(minAdvHits, 1),
         topLimit: parsePositiveInt(topLimit, 100),
         mixedSortKeys: normalizedMixedSortKeys,
         rankMax: parsePositiveInt(rankMax, 1000),
+        noisyCompanionRuleNames: currentCompanionRuleNames,
       });
       setResult(nextResult);
       setRunSignature(runConfigSignature);
@@ -717,15 +836,16 @@ export default function AdvancedStockPickPage() {
       <div className="stock-pick-section-head">
         <div>
           <h3 className="stock-pick-subtitle">高级选股</h3>
-          <p className="stock-pick-note">先去策略回测页跑完回测，再回来读取缓存并执行选股。</p>
+          <p className="stock-pick-note">先去策略回测页整理好手动优势集，再回来读取这组因子并执行高级选股。</p>
         </div>
       </div>
 
       <div className="stock-pick-advanced-flow">
         <section className="stock-pick-advanced-step">
           <div className="stock-pick-concept-head">
-            <strong>1. 读取回测缓存</strong>
-            <span>直接读取最近一次策略回测结果</span>
+            <strong>1. 读取回测页手动优势集</strong>
+            <span>优势因子只读取策略回测页当前保存的手动优势集</span>
+            <span>同时同步对应参数下的噪音伴随集缓存</span>
           </div>
 
           <div className="stock-pick-actions stock-pick-actions-split">
@@ -735,20 +855,20 @@ export default function AdvancedStockPickPage() {
               onClick={() => void preprocessAdvantageRules()}
               disabled={preprocessLoading || optionsLoading}
             >
-              {preprocessLoading ? "读取中..." : "读取回测缓存"}
+              {preprocessLoading ? "读取中..." : "读取手动优势集"}
             </button>
             <span className="stock-pick-tip">
-              高级选股不再触发策略回测，也不再单独设置回测参数。
+              高级选股会直接使用策略回测页当前手动优势集里的因子。
             </span>
           </div>
 
           {preprocessData ? (
             <div className="stock-pick-advanced-status-strip">
               <span className="stock-pick-chip-btn is-active">
-                当前优势 {currentAdvantageRuleNames.length}
+                手动优势 {currentManualRuleNames.length}
               </span>
               <span className="stock-pick-chip-btn">
-                当前噪音伴随 {currentCompanionRuleNames.length}
+                噪音伴随 {currentCompanionRuleNames.length}
               </span>
               <span className="stock-pick-chip-btn is-neutral">
                 缓存周期 {preprocessData.selected_horizon} 日
@@ -768,13 +888,13 @@ export default function AdvancedStockPickPage() {
 
         <section className="stock-pick-advanced-step">
           <div className="stock-pick-concept-head">
-            <strong>2. 查看缓存策略集合</strong>
-            <span>这里展示策略回测页已经确定下来的集合</span>
+            <strong>2. 查看已读取集合</strong>
+            <span>这里展示高级选股实际会使用的手动优势集与噪音伴随集</span>
           </div>
 
           {!preprocessData ? (
             <div className="stock-pick-empty">
-              先去策略回测页跑完回测，再在上一步读取缓存。
+              先去策略回测页配置手动优势集，再在上一步读取。
             </div>
           ) : (
             <div className="stock-pick-advanced-stack">
@@ -790,12 +910,13 @@ export default function AdvancedStockPickPage() {
                 </div>
               </div>
               <ReadonlyRuleChipPanel
-                title="当前优势集"
-                items={filteredCurrentAdvantageRuleNames}
-                emptyText="当前优势集为空。"
+                title="手动优势集"
+                items={filteredCurrentManualRuleNames}
+                emptyText="当前没有手动优势集。"
+                tone="warn"
               />
               <ReadonlyRuleChipPanel
-                title="当前噪音伴随集"
+                title="噪音伴随集"
                 items={filteredCurrentCompanionRuleNames}
                 emptyText="当前没有噪音伴随集。"
                 tone="neutral"
@@ -1082,7 +1203,7 @@ export default function AdvancedStockPickPage() {
 
           <div className="stock-pick-advanced-chip-grid">
             <div className="stock-pick-advanced-chip-card">
-              <strong>当前优势集</strong>
+              <strong>手动优势集</strong>
               <div className="stock-pick-concept-list stock-pick-concept-list-inline">
                 {result.resolved_advantage_rule_names.length > 0 ? (
                   result.resolved_advantage_rule_names.map((item) => (
@@ -1091,7 +1212,7 @@ export default function AdvancedStockPickPage() {
                     </span>
                   ))
                 ) : (
-                  <span className="stock-pick-note">当前优势集为空。</span>
+                  <span className="stock-pick-note">当前手动优势集为空。</span>
                 )}
               </div>
             </div>
