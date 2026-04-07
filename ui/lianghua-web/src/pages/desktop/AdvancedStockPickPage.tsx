@@ -5,7 +5,7 @@ import {
   type AdvancedStockPickRow,
 } from "../../apis/stockPick";
 import {
-  getOrBuildStrategyPickCache,
+  getStrategyPickCache,
   type StrategyPerformancePickCachePayload,
 } from "../../apis/strategyPerformance";
 import {
@@ -165,6 +165,65 @@ function parseStrategyPerformanceSelectionState() {
       1,
     ),
   } satisfies StrategyPerformanceSelectionState;
+}
+
+function buildPreprocessConfigSignature(
+  sourcePath: string,
+  strategySelection: StrategyPerformanceSelectionState | null,
+) {
+  return JSON.stringify({
+    sourcePath: sourcePath.trim(),
+    strategySelection,
+  });
+}
+
+function buildRunConfigSignature({
+  preprocessConfigSignature,
+  tradeDate,
+  board,
+  area,
+  industry,
+  enableConceptFilter,
+  effectiveIncludeConcepts,
+  effectiveExcludeConcepts,
+  conceptMatchMode,
+  methodKey,
+  minAdvHits,
+  topLimit,
+  rankMax,
+  mixedSortKeys,
+}: {
+  preprocessConfigSignature: string;
+  tradeDate: string;
+  board: (typeof STOCK_PICK_BOARD_OPTIONS)[number];
+  area: string;
+  industry: string;
+  enableConceptFilter: boolean;
+  effectiveIncludeConcepts: string[];
+  effectiveExcludeConcepts: string[];
+  conceptMatchMode: string;
+  methodKey: MethodOptionValue;
+  minAdvHits: number;
+  topLimit: number;
+  rankMax: number;
+  mixedSortKeys: MixedSortKeyOptionValue[];
+}) {
+  return JSON.stringify({
+    preprocessConfigSignature,
+    tradeDate,
+    board,
+    area,
+    industry,
+    enableConceptFilter,
+    includeConcepts: effectiveIncludeConcepts,
+    excludeConcepts: effectiveExcludeConcepts,
+    conceptMatchMode: enableConceptFilter ? conceptMatchMode : "OR",
+    methodKey,
+    minAdvHits,
+    topLimit,
+    rankMax,
+    mixedSortKeys,
+  });
 }
 
 function normalizeMixedSortKeyValues(
@@ -506,10 +565,36 @@ export default function AdvancedStockPickPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [runSignature, setRunSignature] = useState("");
-  const strategyPerformanceSelection = useMemo(
-    () => parseStrategyPerformanceSelectionState(),
-    [],
-  );
+  const [strategyPerformanceSelection, setStrategyPerformanceSelection] =
+    useState<StrategyPerformanceSelectionState | null>(() =>
+      parseStrategyPerformanceSelectionState(),
+    );
+
+  function refreshStrategyPerformanceSelection() {
+    const nextSelection = parseStrategyPerformanceSelectionState();
+    setStrategyPerformanceSelection(nextSelection);
+    return nextSelection;
+  }
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const syncSelection = () => {
+      setStrategyPerformanceSelection(parseStrategyPerformanceSelectionState());
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        syncSelection();
+      }
+    };
+    window.addEventListener("focus", syncSelection);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", syncSelection);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
 
   const availableConceptOptions = useMemo(
     () => buildAvailableConceptOptions(conceptOptions, excludedConcepts),
@@ -518,8 +603,8 @@ export default function AdvancedStockPickPage() {
   const currentManualRuleNames = useMemo(
     () =>
       normalizeStringArray(
-        strategyPerformanceSelection?.manualRuleNames ??
-          preprocessData?.manual_rule_names ??
+        preprocessData?.manual_rule_names ??
+          strategyPerformanceSelection?.manualRuleNames ??
           [],
       ),
     [preprocessData, strategyPerformanceSelection],
@@ -568,24 +653,21 @@ export default function AdvancedStockPickPage() {
   );
   const preprocessConfigSignature = useMemo(
     () =>
-      JSON.stringify({
-        sourcePath: sourcePath.trim(),
-        strategySelection: strategyPerformanceSelection,
-      }),
+      buildPreprocessConfigSignature(sourcePath, strategyPerformanceSelection),
     [sourcePath, strategyPerformanceSelection],
   );
   const runConfigSignature = useMemo(
     () =>
-      JSON.stringify({
+      buildRunConfigSignature({
         preprocessConfigSignature,
         tradeDate,
         board,
         area,
         industry,
         enableConceptFilter,
-        includeConcepts: effectiveIncludeConcepts,
-        excludeConcepts: effectiveExcludeConcepts,
-        conceptMatchMode: enableConceptFilter ? conceptMatchMode : "OR",
+        effectiveIncludeConcepts,
+        effectiveExcludeConcepts,
+        conceptMatchMode,
         methodKey,
         minAdvHits: parsePositiveInt(minAdvHits, 1),
         topLimit: parsePositiveInt(topLimit, 100),
@@ -735,62 +817,96 @@ export default function AdvancedStockPickPage() {
   }
 
   async function preprocessAdvantageRules() {
+    const selection = refreshStrategyPerformanceSelection();
+    const nextPreprocessSignature = buildPreprocessConfigSignature(
+      sourcePath,
+      selection,
+    );
     if (!sourcePath.trim()) {
       setPreprocessError("当前数据目录为空。");
       return;
     }
-    if (!strategyPerformanceSelection) {
+    if (!selection) {
       setPreprocessError("请先到策略回测页保存一组手动优势集，再回来读取。");
       return;
     }
-    if (strategyPerformanceSelection.manualRuleNames.length === 0) {
+    if (selection.manualRuleNames.length === 0) {
       setPreprocessError("策略回测页当前还没有手动优势集。");
       return;
     }
     setPreprocessLoading(true);
     setPreprocessError("");
     try {
-      const pageData = await getOrBuildStrategyPickCache({
+      const pageData = await getStrategyPickCache({
         sourcePath,
-        selectedHorizon: strategyPerformanceSelection.selectedHorizon,
-        strongQuantile: strategyPerformanceSelection.strongQuantile,
-        advantageRuleMode: "auto",
-        manualRuleNames: strategyPerformanceSelection.manualRuleNames,
-        autoMinSamples2: strategyPerformanceSelection.autoMinSamples2,
-        autoMinSamples3: strategyPerformanceSelection.autoMinSamples3,
-        autoMinSamples5: strategyPerformanceSelection.autoMinSamples5,
-        autoMinSamples10: strategyPerformanceSelection.autoMinSamples10,
-        requireWinRateAboveMarket:
-          strategyPerformanceSelection.requireWinRateAboveMarket,
-        minPassHorizons: strategyPerformanceSelection.minPassHorizons,
-        minAdvHits: strategyPerformanceSelection.minAdvHits,
+        selectedHorizon: selection.selectedHorizon,
+        strongQuantile: selection.strongQuantile,
+        advantageRuleMode: "manual",
+        manualRuleNames: selection.manualRuleNames,
+        autoMinSamples2: selection.autoMinSamples2,
+        autoMinSamples3: selection.autoMinSamples3,
+        autoMinSamples5: selection.autoMinSamples5,
+        autoMinSamples10: selection.autoMinSamples10,
+        requireWinRateAboveMarket: selection.requireWinRateAboveMarket,
+        minPassHorizons: selection.minPassHorizons,
+        minAdvHits: selection.minAdvHits,
       });
       setPreprocessData(pageData);
-      setPreprocessSignature(preprocessConfigSignature);
+      setPreprocessSignature(nextPreprocessSignature);
       setResult(null);
       setRunSignature("");
       setError("");
     } catch (loadError) {
       setPreprocessData(null);
-      setPreprocessError(`预处理优势集失败: ${String(loadError)}`);
+      setPreprocessError(
+        `读取手动优势集失败: ${String(loadError)}。请先到策略回测页按同样参数手动运行一次回测并生成缓存。`,
+      );
     } finally {
       setPreprocessLoading(false);
     }
   }
 
   async function onRun() {
+    const selection = refreshStrategyPerformanceSelection();
+    const nextPreprocessSignature = buildPreprocessConfigSignature(
+      sourcePath,
+      selection,
+    );
     if (!sourcePath.trim()) {
       setError("当前数据目录为空。");
       return;
     }
-    if (!preprocessData || preprocessDirty) {
+    if (!selection) {
+      setError("请先到策略回测页保存一组手动优势集，再回来读取。");
+      return;
+    }
+    if (!preprocessData || preprocessSignature !== nextPreprocessSignature) {
       setError("请先读取回测页的手动优势集和对应缓存，再执行高级选股。");
       return;
     }
-    if (currentManualRuleNames.length === 0) {
+    const nextManualRuleNames = normalizeStringArray(
+      preprocessData.manual_rule_names ?? selection.manualRuleNames ?? [],
+    );
+    if (nextManualRuleNames.length === 0) {
       setError("策略回测页当前没有可用的手动优势集。");
       return;
     }
+    const nextRunSignature = buildRunConfigSignature({
+      preprocessConfigSignature: nextPreprocessSignature,
+      tradeDate,
+      board,
+      area,
+      industry,
+      enableConceptFilter,
+      effectiveIncludeConcepts,
+      effectiveExcludeConcepts,
+      conceptMatchMode,
+      methodKey,
+      minAdvHits: parsePositiveInt(minAdvHits, 1),
+      topLimit: parsePositiveInt(topLimit, 100),
+      rankMax: parsePositiveInt(rankMax, 1000),
+      mixedSortKeys: normalizedMixedSortKeys,
+    });
     setLoading(true);
     setError("");
     try {
@@ -804,17 +920,16 @@ export default function AdvancedStockPickPage() {
         excludeConcepts: effectiveExcludeConcepts,
         conceptMatchMode: enableConceptFilter ? conceptMatchMode : "OR",
         methodKey,
-        selectedHorizon: strategyPerformanceSelection?.selectedHorizon,
-        strongQuantile: strategyPerformanceSelection?.strongQuantile,
+        selectedHorizon: selection.selectedHorizon,
+        strongQuantile: selection.strongQuantile,
         advantageRuleMode: "manual",
-        manualRuleNames: currentManualRuleNames,
-        autoMinSamples2: strategyPerformanceSelection?.autoMinSamples2,
-        autoMinSamples3: strategyPerformanceSelection?.autoMinSamples3,
-        autoMinSamples5: strategyPerformanceSelection?.autoMinSamples5,
-        autoMinSamples10: strategyPerformanceSelection?.autoMinSamples10,
-        requireWinRateAboveMarket:
-          strategyPerformanceSelection?.requireWinRateAboveMarket,
-        minPassHorizons: strategyPerformanceSelection?.minPassHorizons,
+        manualRuleNames: nextManualRuleNames,
+        autoMinSamples2: selection.autoMinSamples2,
+        autoMinSamples3: selection.autoMinSamples3,
+        autoMinSamples5: selection.autoMinSamples5,
+        autoMinSamples10: selection.autoMinSamples10,
+        requireWinRateAboveMarket: selection.requireWinRateAboveMarket,
+        minPassHorizons: selection.minPassHorizons,
         minAdvHits: parsePositiveInt(minAdvHits, 1),
         topLimit: parsePositiveInt(topLimit, 100),
         mixedSortKeys: normalizedMixedSortKeys,
@@ -822,7 +937,7 @@ export default function AdvancedStockPickPage() {
         noisyCompanionRuleNames: currentCompanionRuleNames,
       });
       setResult(nextResult);
-      setRunSignature(runConfigSignature);
+      setRunSignature(nextRunSignature);
     } catch (runError) {
       setResult(null);
       setError(`高级选股失败: ${String(runError)}`);
@@ -836,7 +951,7 @@ export default function AdvancedStockPickPage() {
       <div className="stock-pick-section-head">
         <div>
           <h3 className="stock-pick-subtitle">高级选股</h3>
-          <p className="stock-pick-note">先去策略回测页整理好手动优势集，再回来读取这组因子并执行高级选股。</p>
+          <p className="stock-pick-note">高级选股只读取策略回测页已经生成好的手动优势集缓存；缺缓存时需要先回策略回测页按同参手动重建。</p>
         </div>
       </div>
 
@@ -845,7 +960,7 @@ export default function AdvancedStockPickPage() {
           <div className="stock-pick-concept-head">
             <strong>1. 读取回测页手动优势集</strong>
             <span>优势因子只读取策略回测页当前保存的手动优势集</span>
-            <span>同时同步对应参数下的噪音伴随集缓存</span>
+            <span>这里不会自动重建缓存，缺缓存时请回策略回测页手动重建</span>
           </div>
 
           <div className="stock-pick-actions stock-pick-actions-split">

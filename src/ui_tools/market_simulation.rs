@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ use crate::{
 };
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
-const FLAT_PCT_TOLERANCE: f64 = 0.5;
+const FLAT_PCT_TOLERANCE: f64 = 1.0;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +84,45 @@ pub struct MarketSimulationPageData {
     pub candidate_count: usize,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketSimulationRealtimeScenarioInput {
+    pub id: String,
+    pub pct_chg: f64,
+    pub ts_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketSimulationRealtimeRowData {
+    pub ts_code: String,
+    pub latest_price: Option<f64>,
+    pub latest_change_pct: Option<f64>,
+    pub volume_ratio: Option<f64>,
+    pub realtime_matched: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketSimulationRealtimeScenarioResult {
+    pub id: String,
+    pub rows: Vec<MarketSimulationRealtimeRowData>,
+    pub matched_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketSimulationRealtimeRefreshData {
+    pub scenarios: Vec<MarketSimulationRealtimeScenarioResult>,
+    pub requested_count: usize,
+    pub effective_count: usize,
+    pub fetched_count: usize,
+    pub truncated: bool,
+    pub refreshed_at: Option<String>,
+    pub quote_trade_date: Option<String>,
+    pub quote_time: Option<String>,
+}
+
 fn validate_scenarios(
     scenarios: Vec<MarketSimulationScenarioInput>,
 ) -> Result<Vec<MarketSimulationScenarioInput>, String> {
@@ -122,6 +161,52 @@ fn validate_scenarios(
     Ok(out)
 }
 
+fn validate_realtime_refresh_scenarios(
+    scenarios: Vec<MarketSimulationRealtimeScenarioInput>,
+) -> Result<Vec<MarketSimulationRealtimeScenarioInput>, String> {
+    if scenarios.is_empty() {
+        return Err("至少需要一个实时刷新场景".to_string());
+    }
+
+    let mut out = Vec::with_capacity(scenarios.len());
+    for (index, scenario) in scenarios.into_iter().enumerate() {
+        let id = scenario.id.trim().to_string();
+        if id.is_empty() {
+            return Err(format!("第 {} 个实时刷新场景缺少 id", index + 1));
+        }
+        if !scenario.pct_chg.is_finite() {
+            return Err(format!("第 {} 个实时刷新场景涨幅非法", index + 1));
+        }
+
+        let ts_codes = scenario
+            .ts_codes
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+
+        out.push(MarketSimulationRealtimeScenarioInput {
+            id,
+            pct_chg: scenario.pct_chg,
+            ts_codes,
+        });
+    }
+
+    Ok(out)
+}
+
+fn empty_realtime_fetch_meta() -> RealtimeFetchMeta {
+    RealtimeFetchMeta {
+        requested_count: 0,
+        effective_count: 0,
+        fetched_count: 0,
+        truncated: false,
+        refreshed_at: None,
+        quote_trade_date: None,
+        quote_time: None,
+    }
+}
+
 fn resolve_sort_mode(sort_mode: Option<String>) -> String {
     match sort_mode
         .as_deref()
@@ -140,10 +225,11 @@ fn resolve_simulated_trade_date(
     reference_trade_date: &str,
 ) -> Result<String, String> {
     let trade_dates = load_trade_date_list(source_path)?;
-    let next_index = match trade_dates.binary_search_by(|item| item.as_str().cmp(reference_trade_date)) {
-        Ok(index) => index + 1,
-        Err(index) => index,
-    };
+    let next_index =
+        match trade_dates.binary_search_by(|item| item.as_str().cmp(reference_trade_date)) {
+            Ok(index) => index + 1,
+            Err(index) => index,
+        };
 
     if let Some(next_trade_date) = trade_dates.get(next_index) {
         Ok(next_trade_date.clone())
@@ -172,9 +258,10 @@ fn fill_simulation_extra_fields(
     is_st: bool,
 ) -> Result<(), String> {
     let zhang = calc_zhang_pct(ts_code, is_st);
-    row_data
-        .cols
-        .insert("ZHANG".to_string(), vec![Some(zhang); row_data.trade_dates.len()]);
+    row_data.cols.insert(
+        "ZHANG".to_string(),
+        vec![Some(zhang); row_data.trade_dates.len()],
+    );
     row_data.validate()
 }
 
@@ -229,10 +316,16 @@ fn sort_simulation_rows(
 ) {
     rows.sort_by(|left, right| {
         let left_strong = strong_score_floor
-            .map(|floor| left.base_total_score.unwrap_or(f64::NEG_INFINITY) >= floor && left.simulated_total_score >= floor)
+            .map(|floor| {
+                left.base_total_score.unwrap_or(f64::NEG_INFINITY) >= floor
+                    && left.simulated_total_score >= floor
+            })
             .unwrap_or(left.strong_hold);
         let right_strong = strong_score_floor
-            .map(|floor| right.base_total_score.unwrap_or(f64::NEG_INFINITY) >= floor && right.simulated_total_score >= floor)
+            .map(|floor| {
+                right.base_total_score.unwrap_or(f64::NEG_INFINITY) >= floor
+                    && right.simulated_total_score >= floor
+            })
             .unwrap_or(right.strong_hold);
 
         right_strong
@@ -300,11 +393,19 @@ pub fn build_market_simulation_page_from_rows(
     };
     let simulated_trade_date =
         resolve_simulated_trade_date(source_path, &reference_trade_date_value)?;
-    let latest_vol_map = build_latest_vol_map(
-        source_path,
-        &overview_rows.iter().map(|row| row.ts_code.clone()).collect::<Vec<_>>(),
-    )?;
-    let candidate_rows = load_candidate_rows(source_path, &reference_trade_date_value, &overview_rows)?;
+    let latest_vol_map = if quote_map.is_empty() {
+        HashMap::new()
+    } else {
+        build_latest_vol_map(
+            source_path,
+            &overview_rows
+                .iter()
+                .map(|row| row.ts_code.clone())
+                .collect::<Vec<_>>(),
+        )?
+    };
+    let candidate_rows =
+        load_candidate_rows(source_path, &reference_trade_date_value, &overview_rows)?;
     let overview_map: HashMap<String, OverviewRow> = overview_rows
         .into_iter()
         .map(|row| (row.ts_code.clone(), row))
@@ -423,6 +524,7 @@ pub fn get_market_simulation_page(
     scenarios: Vec<MarketSimulationScenarioInput>,
     sort_mode: Option<String>,
     strong_score_floor: Option<f64>,
+    fetch_realtime: Option<bool>,
 ) -> Result<MarketSimulationPageData, String> {
     let limit = top_limit.unwrap_or(50).max(1);
     let overview_rows = get_rank_overview(
@@ -433,8 +535,15 @@ pub fn get_market_simulation_page(
         None,
         None,
     )?;
-    let ts_codes: Vec<String> = overview_rows.iter().map(|row| row.ts_code.clone()).collect();
-    let (quote_map, fetch_meta) = fetch_realtime_quote_map(&ts_codes)?;
+    let ts_codes: Vec<String> = overview_rows
+        .iter()
+        .map(|row| row.ts_code.clone())
+        .collect();
+    let (quote_map, fetch_meta) = if fetch_realtime.unwrap_or(false) {
+        fetch_realtime_quote_map(&ts_codes)?
+    } else {
+        (HashMap::new(), empty_realtime_fetch_meta())
+    };
     build_market_simulation_page_from_rows(
         &source_path,
         overview_rows,
@@ -444,4 +553,74 @@ pub fn get_market_simulation_page(
         sort_mode,
         strong_score_floor,
     )
+}
+
+pub fn refresh_market_simulation_realtime(
+    source_path: String,
+    scenarios: Vec<MarketSimulationRealtimeScenarioInput>,
+) -> Result<MarketSimulationRealtimeRefreshData, String> {
+    let scenarios = validate_realtime_refresh_scenarios(scenarios)?;
+    let mut seen = HashSet::new();
+    let mut ts_codes = Vec::new();
+    for scenario in &scenarios {
+        for ts_code in &scenario.ts_codes {
+            if seen.insert(ts_code.clone()) {
+                ts_codes.push(ts_code.clone());
+            }
+        }
+    }
+
+    let (quote_map, fetch_meta) = fetch_realtime_quote_map(&ts_codes)?;
+    let latest_vol_map = if ts_codes.is_empty() {
+        HashMap::new()
+    } else {
+        build_latest_vol_map(&source_path, &ts_codes)?
+    };
+
+    let scenarios = scenarios
+        .into_iter()
+        .map(|scenario| {
+            let mut rows = Vec::with_capacity(scenario.ts_codes.len());
+            for ts_code in scenario.ts_codes {
+                let quote = quote_map.get(&ts_code);
+                let latest_change_pct = quote.and_then(|item| item.change_pct);
+                let volume_ratio = match (
+                    quote.map(|item| item.vol),
+                    latest_vol_map.get(&ts_code).copied(),
+                ) {
+                    (Some(current_vol), Some(previous_vol)) if previous_vol > 0.0 => {
+                        Some(current_vol / previous_vol)
+                    }
+                    _ => None,
+                };
+                rows.push(MarketSimulationRealtimeRowData {
+                    ts_code,
+                    latest_price: quote.map(|item| item.price),
+                    latest_change_pct,
+                    volume_ratio,
+                    realtime_matched: realtime_matches_by_price_only(
+                        latest_change_pct,
+                        scenario.pct_chg,
+                    ),
+                });
+            }
+            let matched_count = rows.iter().filter(|row| row.realtime_matched).count();
+            MarketSimulationRealtimeScenarioResult {
+                id: scenario.id,
+                rows,
+                matched_count,
+            }
+        })
+        .collect();
+
+    Ok(MarketSimulationRealtimeRefreshData {
+        scenarios,
+        requested_count: fetch_meta.requested_count,
+        effective_count: fetch_meta.effective_count,
+        fetched_count: fetch_meta.fetched_count,
+        truncated: fetch_meta.truncated,
+        refreshed_at: fetch_meta.refreshed_at,
+        quote_trade_date: fetch_meta.quote_trade_date,
+        quote_time: fetch_meta.quote_time,
+    })
 }

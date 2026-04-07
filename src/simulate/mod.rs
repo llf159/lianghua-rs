@@ -272,7 +272,10 @@ explain = "test"
         assert_eq!(row_data.trade_dates.len(), 4);
         assert_eq!(row_data.trade_dates[2], "20260408");
         assert_eq!(row_data.trade_dates[3], "20260409");
-        assert_eq!(row_data.cols["PRE_CLOSE"].last().copied().flatten(), Some(10.71));
+        assert_eq!(
+            row_data.cols["PRE_CLOSE"].last().copied().flatten(),
+            Some(10.71)
+        );
     }
 
     #[test]

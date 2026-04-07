@@ -16,8 +16,8 @@ use crate::{
     ui_tools::{
         build_area_map, build_circ_mv_map, build_concepts_map, build_industry_map, build_name_map,
         build_total_mv_map,
-        strategy_performance::get_or_build_strategy_pick_cache as core_get_or_build_strategy_pick_cache,
         strategy_performance::get_latest_strategy_pick_cache as core_get_latest_strategy_pick_cache,
+        strategy_performance::get_strategy_pick_cache as core_get_strategy_pick_cache,
     },
     utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
 };
@@ -1109,7 +1109,7 @@ pub fn run_advanced_stock_pick(
         || require_win_rate_above_market.is_some()
         || min_pass_horizons.is_some()
     {
-        core_get_or_build_strategy_pick_cache(
+        core_get_strategy_pick_cache(
             source_path.to_string(),
             selected_horizon,
             strong_quantile,

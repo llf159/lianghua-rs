@@ -2083,13 +2083,6 @@ export default function StrategyPerformanceBacktestPage() {
       (row) => row.signal_direction === "positive" && row.in_advantage_set,
     );
   }, [pageData]);
-  const manualAdvantageRuleRows = useMemo(() => {
-    const manualSet = new Set(manualAdvantageRuleNames);
-    return (pageData?.rule_rows ?? []).filter(
-      (row) =>
-        row.signal_direction === "positive" && manualSet.has(row.rule_name),
-    );
-  }, [manualAdvantageRuleNames, pageData]);
   const companionRuleRows = useMemo(() => {
     return (pageData?.rule_rows ?? []).filter(
       (row) => row.signal_direction === "positive" && row.in_companion_set,
@@ -2571,16 +2564,7 @@ export default function StrategyPerformanceBacktestPage() {
       />
 
       <RuleTable
-        title="4. 手动优势集"
-        subtitle=""
-        rows={manualAdvantageRuleRows}
-        selectedHorizon={loadedSelectedHorizon}
-        selectedRuleName={selectedRuleNameInput}
-        onPickRule={pickRule}
-      />
-
-      <RuleTable
-        title="5. 伴随策略集"
+        title="4. 伴随策略集"
         subtitle=""
         rows={companionRuleRows}
         selectedHorizon={loadedSelectedHorizon}
@@ -2590,7 +2574,7 @@ export default function StrategyPerformanceBacktestPage() {
 
       <div className="strategy-performance-grid-2">
         <RuleTable
-          title="6. 方向明确负向"
+          title="5. 方向明确负向"
           subtitle=""
           rows={effectiveNegativeRuleRows}
           selectedHorizon={loadedSelectedHorizon}
@@ -2609,7 +2593,7 @@ export default function StrategyPerformanceBacktestPage() {
 
       <div className="strategy-performance-grid-2">
         <CompanionTable
-          title="7. 伴随策略分析: 增强项"
+          title="6. 伴随策略分析: 增强项"
           subtitle=""
           rows={enhancingCompanionRows}
           defaultSortDirection="desc"

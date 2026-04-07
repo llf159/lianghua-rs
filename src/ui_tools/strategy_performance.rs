@@ -1934,13 +1934,12 @@ fn build_validation_case_data(
             .get(&selected_horizon)
             .and_then(|summary| summary.strong_threshold_pct),
     )?;
-    let similarity_rows =
-        load_validation_similarity_rows(
-            source_conn,
-            &summary.combo_key,
-            summary.import_name.as_deref(),
-            existing_rule_meta,
-        )?;
+    let similarity_rows = load_validation_similarity_rows(
+        source_conn,
+        &summary.combo_key,
+        summary.import_name.as_deref(),
+        existing_rule_meta,
+    )?;
     let _ = (
         source_path,
         strong_quantile,
@@ -1963,19 +1962,20 @@ fn build_validation_case_data(
     })
 }
 
-fn prepare_temp_exit_map(source_conn: &Connection, source_path: &str) -> Result<(), String> {
+fn prepare_temp_trade_map(source_conn: &Connection, source_path: &str) -> Result<(), String> {
     source_conn
         .execute_batch(
             r#"
-            DROP TABLE IF EXISTS strategy_perf_exit_map;
-            CREATE TEMP TABLE strategy_perf_exit_map (
+            DROP TABLE IF EXISTS strategy_perf_trade_map;
+            CREATE TEMP TABLE strategy_perf_trade_map (
                 signal_date VARCHAR,
                 horizon INTEGER,
+                entry_trade_date VARCHAR,
                 exit_trade_date VARCHAR
             );
             "#,
         )
-        .map_err(|e| format!("创建临时 horizon 映射表失败: {e}"))?;
+        .map_err(|e| format!("创建临时交易日映射表失败: {e}"))?;
 
     let rank_dates = query_rank_trade_dates(source_conn)?;
     let mut trade_dates = load_trade_date_list(source_path)?;
@@ -1989,11 +1989,15 @@ fn prepare_temp_exit_map(source_conn: &Connection, source_path: &str) -> Result<
 
     {
         let mut appender = source_conn
-            .appender("strategy_perf_exit_map")
-            .map_err(|e| format!("创建 horizon 映射 Appender 失败: {e}"))?;
+            .appender("strategy_perf_trade_map")
+            .map_err(|e| format!("创建交易日映射 Appender 失败: {e}"))?;
 
         for signal_date in rank_dates {
             let Some(&signal_index) = trade_date_index.get(&signal_date) else {
+                continue;
+            };
+            let entry_index = signal_index + 1;
+            let Some(entry_trade_date) = trade_dates.get(entry_index) else {
                 continue;
             };
             for horizon in HORIZONS {
@@ -2002,14 +2006,19 @@ fn prepare_temp_exit_map(source_conn: &Connection, source_path: &str) -> Result<
                     continue;
                 };
                 appender
-                    .append_row(params![signal_date, horizon as i64, exit_trade_date])
-                    .map_err(|e| format!("写入 horizon 映射失败: {e}"))?;
+                    .append_row(params![
+                        signal_date,
+                        horizon as i64,
+                        entry_trade_date,
+                        exit_trade_date
+                    ])
+                    .map_err(|e| format!("写入交易日映射失败: {e}"))?;
             }
         }
 
         appender
             .flush()
-            .map_err(|e| format!("刷新 horizon 映射 Appender 失败: {e}"))?;
+            .map_err(|e| format!("刷新交易日映射 Appender 失败: {e}"))?;
     }
 
     Ok(())
@@ -2028,30 +2037,6 @@ fn prepare_temp_sample_returns(source_conn: &Connection) -> Result<(), String> {
                     total_score,
                     rank
                 FROM result_db.score_summary
-            ),
-            next_open AS (
-                SELECT
-                    ts_code,
-                    signal_date,
-                    entry_trade_date,
-                    entry_open
-                FROM (
-                    SELECT
-                        s.ts_code,
-                        s.signal_date,
-                        d.trade_date AS entry_trade_date,
-                        TRY_CAST(d.open AS DOUBLE) AS entry_open,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY s.ts_code, s.signal_date
-                            ORDER BY d.trade_date ASC
-                        ) AS rn
-                    FROM summary AS s
-                    INNER JOIN stock_data AS d
-                        ON d.ts_code = s.ts_code
-                       AND d.adj_type = '{DEFAULT_ADJ_TYPE}'
-                       AND d.trade_date > s.signal_date
-                ) AS ranked_next_open
-                WHERE rn = 1
             )
             SELECT
                 s.ts_code,
@@ -2059,23 +2044,23 @@ fn prepare_temp_sample_returns(source_conn: &Connection) -> Result<(), String> {
                 s.total_score,
                 s.rank,
                 m.horizon,
-                n.entry_trade_date,
-                n.entry_open,
+                m.entry_trade_date,
+                TRY_CAST(o.open AS DOUBLE) AS entry_open,
                 m.exit_trade_date,
                 TRY_CAST(c.close AS DOUBLE) AS exit_close,
-                (TRY_CAST(c.close AS DOUBLE) / n.entry_open - 1.0) * 100.0 AS future_return_pct
+                (TRY_CAST(c.close AS DOUBLE) / TRY_CAST(o.open AS DOUBLE) - 1.0) * 100.0 AS future_return_pct
             FROM summary AS s
-            INNER JOIN next_open AS n
-                ON n.ts_code = s.ts_code
-               AND n.signal_date = s.signal_date
-            INNER JOIN strategy_perf_exit_map AS m
+            INNER JOIN strategy_perf_trade_map AS m
                 ON m.signal_date = s.signal_date
+            INNER JOIN stock_data AS o
+                ON o.ts_code = s.ts_code
+               AND o.adj_type = '{DEFAULT_ADJ_TYPE}'
+               AND o.trade_date = m.entry_trade_date
             INNER JOIN stock_data AS c
                 ON c.ts_code = s.ts_code
                AND c.adj_type = '{DEFAULT_ADJ_TYPE}'
                AND c.trade_date = m.exit_trade_date
-            WHERE n.entry_open > 0
-              AND n.entry_trade_date <= m.exit_trade_date;
+            WHERE TRY_CAST(o.open AS DOUBLE) > 0;
             "#,
         ))
         .map_err(|e| format!("构建临时未来收益样本失败: {e}"))?;
@@ -3544,17 +3529,40 @@ fn spearman_corr(samples: &[ScoreObservation], use_abs_score: bool) -> Option<f6
     pearson_corr(&score_ranks, &return_ranks)
 }
 
+fn spearman_corr_refs(samples: &[&ScoreObservation], use_abs_score: bool) -> Option<f64> {
+    if samples.len() < 2 {
+        return None;
+    }
+    let scores = samples
+        .iter()
+        .map(|sample| {
+            if use_abs_score {
+                sample.score.abs()
+            } else {
+                sample.score
+            }
+        })
+        .collect::<Vec<_>>();
+    let returns = samples
+        .iter()
+        .map(|sample| sample.future_return_pct)
+        .collect::<Vec<_>>();
+    let score_ranks = rank_values(&scores);
+    let return_ranks = rank_values(&returns);
+    pearson_corr(&score_ranks, &return_ranks)
+}
+
 fn build_daily_spearman_ics(samples: &[ScoreObservation]) -> Vec<f64> {
-    let mut grouped = BTreeMap::<String, Vec<ScoreObservation>>::new();
+    let mut grouped = BTreeMap::<&str, Vec<&ScoreObservation>>::new();
     for sample in samples {
         grouped
-            .entry(sample.signal_date.clone())
+            .entry(sample.signal_date.as_str())
             .or_default()
-            .push(sample.clone());
+            .push(sample);
     }
     grouped
         .values()
-        .filter_map(|date_samples| spearman_corr(date_samples, false))
+        .filter_map(|date_samples| spearman_corr_refs(date_samples, false))
         .collect()
 }
 
@@ -3584,7 +3592,7 @@ fn build_score_bucket_rows(
     if samples.is_empty() {
         return ("none".to_string(), Vec::new());
     }
-    let mut sorted = samples.to_vec();
+    let mut sorted = samples.iter().collect::<Vec<_>>();
     sorted.sort_by(|left, right| {
         left.score
             .partial_cmp(&right.score)
@@ -3609,56 +3617,49 @@ fn build_score_bucket_rows(
     };
 
     if distinct_count <= SCORE_BUCKET_LIMIT {
-        let mut groups = Vec::<Vec<ScoreObservation>>::new();
-        for sample in sorted {
-            if groups
-                .last()
-                .and_then(|group| group.first())
-                .map(|first| {
-                    first
-                        .score
-                        .partial_cmp(&sample.score)
-                        .unwrap_or(Ordering::Equal)
-                        == Ordering::Equal
-                })
-                .unwrap_or(false)
+        let mut rows = Vec::new();
+        let mut start = 0usize;
+        while start < sorted.len() {
+            let score = sorted[start].score;
+            let mut end = start + 1;
+            while end < sorted.len()
+                && sorted[end]
+                    .score
+                    .partial_cmp(&score)
+                    .unwrap_or(Ordering::Equal)
+                    == Ordering::Equal
             {
-                groups.last_mut().expect("group exists").push(sample);
-            } else {
-                groups.push(vec![sample]);
+                end += 1;
             }
-        }
 
-        let rows = groups
-            .into_iter()
-            .map(|group| {
-                let score = group.first().map(|item| item.score).unwrap_or_default();
-                StrategyPerformanceScoreBucketRow {
-                    bucket_label: format!("{score:.2}"),
-                    score_min: Some(score),
-                    score_max: Some(score),
-                    sample_count: group.len() as u32,
-                    avg_future_return_pct: Some(
-                        group.iter().map(|item| item.future_return_pct).sum::<f64>()
-                            / group.len() as f64,
-                    ),
-                    strong_hit_rate: strong_threshold_pct.map(|threshold| {
-                        group
-                            .iter()
-                            .filter(|item| item.future_return_pct >= threshold)
-                            .count() as f64
-                            / group.len() as f64
-                    }),
-                    win_rate: Some(
-                        group
-                            .iter()
-                            .filter(|item| item.future_return_pct > 0.0)
-                            .count() as f64
-                            / group.len() as f64,
-                    ),
-                }
-            })
-            .collect::<Vec<_>>();
+            let group = &sorted[start..end];
+            rows.push(StrategyPerformanceScoreBucketRow {
+                bucket_label: format!("{score:.2}"),
+                score_min: Some(score),
+                score_max: Some(score),
+                sample_count: group.len() as u32,
+                avg_future_return_pct: Some(
+                    group.iter().map(|item| item.future_return_pct).sum::<f64>()
+                        / group.len() as f64,
+                ),
+                strong_hit_rate: strong_threshold_pct.map(|threshold| {
+                    group
+                        .iter()
+                        .filter(|item| item.future_return_pct >= threshold)
+                        .count() as f64
+                        / group.len() as f64
+                }),
+                win_rate: Some(
+                    group
+                        .iter()
+                        .filter(|item| item.future_return_pct > 0.0)
+                        .count() as f64
+                        / group.len() as f64,
+                ),
+            });
+
+            start = end;
+        }
         return ("score_value".to_string(), rows);
     }
 
@@ -3884,7 +3885,7 @@ fn build_advantage_score_analysis(
 }
 
 fn build_hit_count_rows(
-    samples: &[ScoreObservation],
+    samples: &[&ScoreObservation],
     base_points: f64,
     strong_threshold_pct: Option<f64>,
 ) -> Vec<StrategyPerformanceHitCountRow> {
@@ -4016,7 +4017,6 @@ fn build_rule_detail(
     let positive_samples = samples
         .iter()
         .filter(|sample| sample.score > 0.0)
-        .cloned()
         .collect::<Vec<_>>();
     let avg_future_return_pct = if positive_samples.is_empty() {
         None
@@ -4080,10 +4080,10 @@ fn build_rule_detail(
 
     let (rank_ic_mean, icir) = compute_rank_ic_with_fallback(&samples, samples.len() as u32, 2);
     let mut daily_hit_returns = Vec::new();
-    let mut grouped = BTreeMap::<String, Vec<&ScoreObservation>>::new();
+    let mut grouped = BTreeMap::<&str, Vec<&ScoreObservation>>::new();
     for sample in &samples {
         grouped
-            .entry(sample.signal_date.clone())
+            .entry(sample.signal_date.as_str())
             .or_default()
             .push(sample);
     }
@@ -4212,7 +4212,7 @@ pub fn get_strategy_performance_rule_detail(
     let (_, rule_meta) = load_rule_meta(&source_path)?;
     let source_conn = open_source_conn(&source_path)?;
     attach_result_db(&source_conn, &source_path)?;
-    prepare_temp_exit_map(&source_conn, &source_path)?;
+    prepare_temp_trade_map(&source_conn, &source_path)?;
     prepare_temp_sample_returns(&source_conn)?;
     prepare_temp_thresholds(&source_conn, strong_quantile)?;
     let future_summaries = load_future_summaries(&source_conn, strong_quantile)?;
@@ -4251,7 +4251,7 @@ pub fn get_strategy_performance_validation_page(
 
     let source_conn = open_source_conn(&source_path)?;
     attach_result_db(&source_conn, &source_path)?;
-    prepare_temp_exit_map(&source_conn, &source_path)?;
+    prepare_temp_trade_map(&source_conn, &source_path)?;
     prepare_temp_sample_returns(&source_conn)?;
     prepare_temp_thresholds(&source_conn, strong_quantile)?;
     let future_summaries = load_future_summaries(&source_conn, strong_quantile)?;
@@ -4595,7 +4595,7 @@ pub fn get_strategy_performance_horizon_view(
 
     let source_conn = open_source_conn(&source_path)?;
     attach_result_db(&source_conn, &source_path)?;
-    prepare_temp_exit_map(&source_conn, &source_path)?;
+    prepare_temp_trade_map(&source_conn, &source_path)?;
     prepare_temp_sample_returns(&source_conn)?;
 
     build_strategy_performance_horizon_view(
@@ -4650,7 +4650,7 @@ pub fn get_strategy_performance_page(
 
     let source_conn = open_source_conn(&source_path)?;
     attach_result_db(&source_conn, &source_path)?;
-    prepare_temp_exit_map(&source_conn, &source_path)?;
+    prepare_temp_trade_map(&source_conn, &source_path)?;
     prepare_temp_sample_returns(&source_conn)?;
     prepare_temp_thresholds(&source_conn, strong_quantile)?;
 
@@ -5788,6 +5788,64 @@ mod tests {
         ];
         let corr = spearman_corr(&samples, false).expect("corr");
         assert!((corr - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn strategy_perf_trade_map_uses_next_open_and_horizon_exit() {
+        let source_dir = unique_temp_dir();
+        write_fixture_files(&source_dir);
+        write_fixture_source_db(&source_dir);
+        write_fixture_result_db(&source_dir);
+
+        let source_conn =
+            open_source_conn(source_dir.to_str().expect("utf8")).expect("open source");
+        attach_result_db(&source_conn, source_dir.to_str().expect("utf8"))
+            .expect("attach result db");
+        prepare_temp_trade_map(&source_conn, source_dir.to_str().expect("utf8"))
+            .expect("prepare trade map");
+        prepare_temp_sample_returns(&source_conn).expect("prepare sample returns");
+
+        let sample_count = source_conn
+            .query_row(
+                "SELECT COUNT(*) FROM strategy_perf_sample_returns",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count sample rows");
+        assert_eq!(sample_count, 9);
+
+        let row = source_conn
+            .query_row(
+                r#"
+                SELECT
+                    entry_trade_date,
+                    entry_open,
+                    exit_trade_date,
+                    exit_close,
+                    future_return_pct
+                FROM strategy_perf_sample_returns
+                WHERE ts_code = '000001.SZ'
+                  AND signal_date = '20240101'
+                  AND horizon = 5
+                "#,
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, f64>(3)?,
+                        row.get::<_, f64>(4)?,
+                    ))
+                },
+            )
+            .expect("load sample row");
+
+        assert_eq!(row.0, "20240102");
+        assert_close(row.1, 10.0, 1e-9);
+        assert_eq!(row.2, "20240108");
+        assert_close(row.3, 10.5, 1e-9);
+        assert_close(row.4, 5.0, 1e-9);
     }
 
     #[test]

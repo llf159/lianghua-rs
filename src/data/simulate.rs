@@ -93,8 +93,9 @@ pub fn build_simulated_row_data(
     }
 
     let total_len = row_data.trade_dates.len();
-    let has_turnover_col =
-        previous_turnover_rate.is_some() || row_data.cols.contains_key("TURNOVER_RATE") || row_data.cols.contains_key("TOR");
+    let has_turnover_col = previous_turnover_rate.is_some()
+        || row_data.cols.contains_key("TURNOVER_RATE")
+        || row_data.cols.contains_key("TOR");
 
     for (key, value) in [
         ("O", Some(simulated_open)),
@@ -191,8 +192,14 @@ mod tests {
 
         let row_data = build_simulated_row_data(sample_row_data(), &input).expect("simulate row");
 
-        assert_eq!(row_data.trade_dates.last().map(String::as_str), Some("20260408"));
-        assert_eq!(row_data.cols["PRE_CLOSE"].last().copied().flatten(), Some(10.2));
+        assert_eq!(
+            row_data.trade_dates.last().map(String::as_str),
+            Some("20260408")
+        );
+        assert_eq!(
+            row_data.cols["PRE_CLOSE"].last().copied().flatten(),
+            Some(10.2)
+        );
         assert_eq!(row_data.cols["C"].last().copied().flatten(), Some(10.71));
         assert_eq!(row_data.cols["V"].last().copied().flatten(), Some(180.0));
         assert_eq!(row_data.cols["TOR"].last().copied().flatten(), Some(1.8));

@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import {
   getMarketSimulationPage,
+  refreshMarketSimulationRealtime,
   type MarketSimulationPageData,
+  type MarketSimulationRealtimeRefreshData,
   type MarketSimulationRow,
   type MarketSimulationScenarioInput,
 } from "../../apis/marketSimulation";
@@ -27,7 +29,8 @@ import {
 } from "../../shared/tradeDate";
 import "./css/MarketSimulationTab.css";
 
-const DEFAULT_TOP_LIMIT = "50";
+const DEFAULT_TOP_LIMIT = "1000";
+const DEFAULT_DISPLAY_LIMIT = "50";
 const MARKET_SIMULATION_STATE_KEY = "lh_market_simulation_page_state_v1";
 
 type SortMode = "sim_score" | "score_delta";
@@ -51,9 +54,11 @@ type PersistedMarketSimulationState = {
   dateOptions: string[];
   referenceTradeDate: string;
   topLimitInput: string;
+  displayLimitInput: string;
   sortMode: SortMode;
   strongScoreFloorInput: string;
   scenarios: ScenarioDraft[];
+  buildConfigSignature: string;
   pageData: MarketSimulationPageData | null;
 };
 
@@ -63,15 +68,13 @@ type MarketSimulationRowDelta = {
   volumeRatio: number | null;
 };
 
-type MatchBadge = "NEW" | "OUT" | "IN" | null;
-
 const SCENARIO_PRESETS: Record<
   ScenarioPresetKey,
   { label: string; pctChg: string; volumeRatio: string }
 > = {
-  rise_expand: { label: "放量涨", pctChg: "3.0", volumeRatio: "1.8" },
-  rise_shrink: { label: "缩量涨", pctChg: "2.0", volumeRatio: "0.7" },
-  fall_expand: { label: "放量跌", pctChg: "-3.0", volumeRatio: "1.8" },
+  rise_expand: { label: "放量涨", pctChg: "4.0", volumeRatio: "1.5" },
+  rise_shrink: { label: "缩量涨", pctChg: "4.0", volumeRatio: "0.7" },
+  fall_expand: { label: "放量跌", pctChg: "-3.0", volumeRatio: "1.5" },
   fall_shrink: { label: "缩量跌", pctChg: "-2.0", volumeRatio: "0.7" },
   flat: { label: "平量平盘", pctChg: "0.0", volumeRatio: "1.0" },
 };
@@ -233,6 +236,116 @@ function buildStrategyCompareRows(row: MarketSimulationRow): DetailStrategyTrigg
   }));
 }
 
+function buildSimulationConfigSignature({
+  sourcePath,
+  referenceTradeDate,
+  topLimitInput,
+  sortMode,
+  strongScoreFloorInput,
+  scenarios,
+}: {
+  sourcePath: string;
+  referenceTradeDate: string;
+  topLimitInput: string;
+  sortMode: SortMode;
+  strongScoreFloorInput: string;
+  scenarios: ScenarioDraft[];
+}) {
+  return JSON.stringify({
+    sourcePath: sourcePath.trim(),
+    referenceTradeDate: referenceTradeDate.trim(),
+    topLimitInput: topLimitInput.trim(),
+    sortMode,
+    strongScoreFloorInput: strongScoreFloorInput.trim(),
+    scenarios: scenarios.map((scenario) => ({
+      id: scenario.id,
+      presetKey: scenario.presetKey,
+      label: scenario.label.trim(),
+      pctChgInput: scenario.pctChgInput.trim(),
+      volumeRatioInput: scenario.volumeRatioInput.trim(),
+    })),
+  });
+}
+
+function buildRealtimeDeltaState(
+  previousPageData: MarketSimulationPageData | null,
+  nextPageData: MarketSimulationPageData,
+) {
+  const previousScenarioMap =
+    previousPageData?.referenceTradeDate === nextPageData.referenceTradeDate
+      ? new Map(
+          (previousPageData?.scenarios ?? []).map((scenario) => [scenario.id, scenario] as const),
+        )
+      : new Map<string, (typeof nextPageData.scenarios)[number]>();
+
+  const nextRowDeltas: Record<string, Record<string, MarketSimulationRowDelta>> = {};
+
+  for (const scenario of nextPageData.scenarios) {
+    const previousRows = new Map(
+      (previousScenarioMap.get(scenario.id)?.rows ?? []).map((row) => [row.tsCode, row] as const),
+    );
+    nextRowDeltas[scenario.id] = {};
+
+    for (const row of scenario.rows) {
+      const previousRow = previousRows.get(row.tsCode);
+      nextRowDeltas[scenario.id][row.tsCode] = {
+        latestPrice: computeDelta(row.latestPrice, previousRow?.latestPrice),
+        latestChangePct: computeDelta(
+          row.latestChangePct,
+          previousRow?.latestChangePct,
+        ),
+        volumeRatio: computeDelta(row.volumeRatio, previousRow?.volumeRatio),
+      };
+    }
+  }
+
+  return nextRowDeltas;
+}
+
+function applyRealtimeRefreshToPageData(
+  currentPageData: MarketSimulationPageData,
+  refreshData: MarketSimulationRealtimeRefreshData,
+) {
+  const refreshScenarioMap = new Map(
+    refreshData.scenarios.map((scenario) => [scenario.id, scenario] as const),
+  );
+
+  return {
+    ...currentPageData,
+    requestedCount: refreshData.requestedCount,
+    effectiveCount: refreshData.effectiveCount,
+    fetchedCount: refreshData.fetchedCount,
+    truncated: refreshData.truncated,
+    refreshedAt: refreshData.refreshedAt ?? null,
+    scenarios: currentPageData.scenarios.map((scenario) => {
+      const refreshScenario = refreshScenarioMap.get(scenario.id);
+      if (!refreshScenario) {
+        return scenario;
+      }
+      const refreshRowMap = new Map(
+        refreshScenario.rows.map((row) => [row.tsCode, row] as const),
+      );
+      return {
+        ...scenario,
+        matchedCount: refreshScenario.matchedCount,
+        rows: scenario.rows.map((row) => {
+          const refreshRow = refreshRowMap.get(row.tsCode);
+          if (!refreshRow) {
+            return row;
+          }
+          return {
+            ...row,
+            latestPrice: refreshRow.latestPrice ?? null,
+            latestChangePct: refreshRow.latestChangePct ?? null,
+            volumeRatio: refreshRow.volumeRatio ?? null,
+            realtimeMatched: refreshRow.realtimeMatched,
+          };
+        }),
+      };
+    }),
+  } satisfies MarketSimulationPageData;
+}
+
 export default function MarketSimulationTab() {
   const { excludedConcepts } = useConceptExclusions();
   const persistedState = useMemo(() => {
@@ -273,6 +386,10 @@ export default function MarketSimulationTab() {
         typeof parsed.topLimitInput === "string"
           ? parsed.topLimitInput
           : DEFAULT_TOP_LIMIT,
+      displayLimitInput:
+        typeof parsed.displayLimitInput === "string"
+          ? parsed.displayLimitInput
+          : DEFAULT_DISPLAY_LIMIT,
       sortMode:
         parsed.sortMode === "score_delta" ? "score_delta" : "sim_score",
       strongScoreFloorInput:
@@ -287,6 +404,10 @@ export default function MarketSimulationTab() {
         parsed.pageData && typeof parsed.pageData === "object"
           ? (parsed.pageData as MarketSimulationPageData)
           : null,
+      buildConfigSignature:
+        typeof parsed.buildConfigSignature === "string"
+          ? parsed.buildConfigSignature
+          : "",
     } satisfies PersistedMarketSimulationState;
   }, []);
 
@@ -302,6 +423,9 @@ export default function MarketSimulationTab() {
   const [topLimitInput, setTopLimitInput] = useState(
     () => persistedState?.topLimitInput ?? DEFAULT_TOP_LIMIT,
   );
+  const [displayLimitInput, setDisplayLimitInput] = useState(
+    () => persistedState?.displayLimitInput ?? DEFAULT_DISPLAY_LIMIT,
+  );
   const [sortMode, setSortMode] = useState<SortMode>(
     () => persistedState?.sortMode ?? "sim_score",
   );
@@ -311,20 +435,42 @@ export default function MarketSimulationTab() {
   const [scenarios, setScenarios] = useState<ScenarioDraft[]>(
     () => persistedState?.scenarios ?? [createScenarioDraft("rise_expand", "default")],
   );
-  const [loading, setLoading] = useState(false);
+  const [buildLoading, setBuildLoading] = useState(false);
+  const [realtimeLoading, setRealtimeLoading] = useState(false);
   const [dateOptionsLoading, setDateOptionsLoading] = useState(false);
   const [error, setError] = useState("");
   const [pageData, setPageData] = useState<MarketSimulationPageData | null>(
     () => persistedState?.pageData ?? null,
   );
+  const [buildConfigSignature, setBuildConfigSignature] = useState(
+    () => persistedState?.buildConfigSignature ?? "",
+  );
   const [rowDeltas, setRowDeltas] = useState<
     Record<string, Record<string, MarketSimulationRowDelta>>
   >({});
-  const [matchBadges, setMatchBadges] = useState<
-    Record<string, Record<string, MatchBadge>>
-  >({});
 
   const sourcePathTrimmed = sourcePath.trim();
+  const displayLimit = toPositiveInt(displayLimitInput);
+  const currentBuildConfigSignature = useMemo(
+    () =>
+      buildSimulationConfigSignature({
+        sourcePath,
+        referenceTradeDate,
+        topLimitInput,
+        sortMode,
+        strongScoreFloorInput,
+        scenarios,
+      }),
+    [
+      referenceTradeDate,
+      scenarios,
+      sortMode,
+      sourcePath,
+      strongScoreFloorInput,
+      topLimitInput,
+    ],
+  );
+  const buildDirty = Boolean(pageData) && buildConfigSignature !== currentBuildConfigSignature;
 
   useEffect(() => {
     writeJsonStorage(
@@ -335,14 +481,18 @@ export default function MarketSimulationTab() {
         dateOptions,
         referenceTradeDate,
         topLimitInput,
+        displayLimitInput,
         sortMode,
         strongScoreFloorInput,
         scenarios,
+        buildConfigSignature,
         pageData,
       } satisfies PersistedMarketSimulationState,
     );
   }, [
+    buildConfigSignature,
     dateOptions,
+    displayLimitInput,
     pageData,
     referenceTradeDate,
     scenarios,
@@ -403,13 +553,17 @@ export default function MarketSimulationTab() {
     };
   }, [sourcePathTrimmed]);
 
-  async function onRefresh() {
+  async function onBuildList() {
     const topLimit = toPositiveInt(topLimitInput);
     const strongScoreFloor = parseOptionalNumber(strongScoreFloorInput);
     const scenarioQuery = buildScenarioQuery(scenarios);
 
     if (topLimit === null) {
       setError("参与模拟的排名数量必须是正整数");
+      return;
+    }
+    if (displayLimit === null) {
+      setError("展示数量必须是正整数");
       return;
     }
     if (!sourcePathTrimmed) {
@@ -421,7 +575,7 @@ export default function MarketSimulationTab() {
       return;
     }
 
-    setLoading(true);
+    setBuildLoading(true);
     setError("");
     try {
       const nextPageData = await getMarketSimulationPage({
@@ -431,69 +585,72 @@ export default function MarketSimulationTab() {
         scenarios: scenarioQuery,
         sortMode,
         strongScoreFloor: strongScoreFloor ?? undefined,
+        fetchRealtime: false,
       });
-
-      const previousScenarioMap =
-        pageData?.referenceTradeDate === nextPageData.referenceTradeDate
-          ? new Map(
-              (pageData?.scenarios ?? []).map((scenario) => [scenario.id, scenario] as const),
-            )
-          : new Map<string, (typeof nextPageData.scenarios)[number]>();
-
-      const nextRowDeltas: Record<string, Record<string, MarketSimulationRowDelta>> = {};
-      const nextMatchBadges: Record<string, Record<string, MatchBadge>> = {};
-
-      for (const scenario of nextPageData.scenarios) {
-        const previousRows = new Map(
-          (previousScenarioMap.get(scenario.id)?.rows ?? []).map((row) => [row.tsCode, row] as const),
-        );
-        nextRowDeltas[scenario.id] = {};
-        nextMatchBadges[scenario.id] = {};
-
-        for (const row of scenario.rows) {
-          const previousRow = previousRows.get(row.tsCode);
-          nextRowDeltas[scenario.id][row.tsCode] = {
-            latestPrice: computeDelta(row.latestPrice, previousRow?.latestPrice),
-            latestChangePct: computeDelta(
-              row.latestChangePct,
-              previousRow?.latestChangePct,
-            ),
-            volumeRatio: computeDelta(row.volumeRatio, previousRow?.volumeRatio),
-          };
-
-          const previousMatched = previousRow?.realtimeMatched ?? false;
-          nextMatchBadges[scenario.id][row.tsCode] = row.realtimeMatched
-            ? previousMatched
-              ? "IN"
-              : "NEW"
-            : previousMatched
-              ? "OUT"
-              : null;
-        }
-      }
-
-      setRowDeltas(nextRowDeltas);
-      setMatchBadges(nextMatchBadges);
+      setRowDeltas(buildRealtimeDeltaState(pageData, nextPageData));
       setPageData(nextPageData);
+      setBuildConfigSignature(currentBuildConfigSignature);
     } catch (refreshError) {
-      setError(`刷新预演买点失败: ${String(refreshError)}`);
+      setError(`确定预演名单失败: ${String(refreshError)}`);
     } finally {
-      setLoading(false);
+      setBuildLoading(false);
     }
   }
 
-  const scenarioCards = pageData?.scenarios ?? [];
+  async function onRefreshRealtime() {
+    if (!pageData) {
+      setError("请先确定预演名单。");
+      return;
+    }
+    if (buildDirty) {
+      setError("名单参数已变更，请先重新确定名单，再刷新实时。");
+      return;
+    }
+
+    setRealtimeLoading(true);
+    setError("");
+    try {
+      const refreshData = await refreshMarketSimulationRealtime({
+        sourcePath: sourcePathTrimmed,
+        scenarios: pageData.scenarios.map((scenario) => ({
+          id: scenario.id,
+          pctChg: scenario.pctChg,
+          tsCodes: scenario.rows.map((row) => row.tsCode),
+        })),
+      });
+      const nextPageData = applyRealtimeRefreshToPageData(pageData, refreshData);
+      setRowDeltas(buildRealtimeDeltaState(pageData, nextPageData));
+      setPageData(nextPageData);
+    } catch (refreshError) {
+      setError(`刷新实时行情失败: ${String(refreshError)}`);
+    } finally {
+      setRealtimeLoading(false);
+    }
+  }
+
+  const scenarioCards = useMemo(
+    () =>
+      (pageData?.scenarios ?? []).map((scenario) => ({
+        ...scenario,
+        rows:
+          displayLimit != null ? scenario.rows.slice(0, displayLimit) : scenario.rows,
+      })),
+    [displayLimit, pageData],
+  );
   const statusText = pageData
     ? [
         pageData.refreshedAt ? `最新刷新 ${pageData.refreshedAt}` : null,
         pageData.referenceTradeDate ? `参考日 ${pageData.referenceTradeDate}` : null,
         pageData.simulatedTradeDate ? `模拟日 ${pageData.simulatedTradeDate}` : null,
         `候选 ${pageData.candidateCount} 只`,
-        `实时已抓取 ${pageData.fetchedCount}/${pageData.effectiveCount}`,
+        `展示前 ${displayLimit ?? pageData.candidateCount} 只`,
+        pageData.refreshedAt
+          ? `实时已抓取 ${pageData.fetchedCount}/${pageData.effectiveCount}`
+          : "实时未刷新",
       ]
         .filter(Boolean)
         .join(" | ")
-    : "先配置场景，再手动刷新，按参考日前列股票批量模拟并联动实时涨幅判断。";
+    : "先配置场景并确定名单，再单独刷新实时行情。";
   const scenarioGridRef = useRouteScrollRegion<HTMLDivElement>(
     "market-simulation-grid",
     [scenarioCards.length, scenarioCards.map((item) => item.rows.length).join("|")],
@@ -541,6 +698,17 @@ export default function MarketSimulationTab() {
         </label>
 
         <label className="market-simulation-field">
+          <span>每场景展示数</span>
+          <input
+            type="number"
+            min={1}
+            step={1}
+            value={displayLimitInput}
+            onChange={(event) => setDisplayLimitInput(event.target.value)}
+          />
+        </label>
+
+        <label className="market-simulation-field">
           <span>展示方式</span>
           <select
             value={sortMode}
@@ -582,13 +750,38 @@ export default function MarketSimulationTab() {
           <button
             className="market-simulation-refresh-btn"
             type="button"
-            onClick={() => void onRefresh()}
-            disabled={loading || dateOptionsLoading}
+            onClick={() => void onBuildList()}
+            disabled={buildLoading || realtimeLoading || dateOptionsLoading}
           >
-            {loading ? "刷新中..." : "手动刷新"}
+            {buildLoading ? "确定中..." : "确定名单"}
+          </button>
+          <button
+            className="market-simulation-refresh-btn"
+            type="button"
+            onClick={() => void onRefreshRealtime()}
+            disabled={
+              buildLoading ||
+              realtimeLoading ||
+              dateOptionsLoading ||
+              !pageData ||
+              buildDirty
+            }
+            title={
+              buildDirty
+                ? "名单参数已变更，请先重新确定名单"
+                : "只刷新当前已确定名单的实时行情"
+            }
+          >
+            {realtimeLoading ? "刷新中..." : "刷新实时"}
           </button>
         </div>
       </div>
+
+      {buildDirty ? (
+        <div className="market-simulation-tip">
+          名单参数已变更，当前“刷新实时”仍对应上一次已确定名单；点击“确定名单”后才会按新参数重算。
+        </div>
+      ) : null}
 
       <div className="market-simulation-config-grid">
         {scenarios.map((scenario, index) => (
@@ -701,7 +894,7 @@ export default function MarketSimulationTab() {
       {error ? <div className="market-simulation-empty">{error}</div> : null}
       {!error && scenarioCards.length === 0 ? (
         <div className="market-simulation-empty">
-          当前还没有模拟结果，先配置场景再刷新。
+          当前还没有预演名单，先配置场景并确定名单。
         </div>
       ) : null}
 
@@ -709,7 +902,6 @@ export default function MarketSimulationTab() {
         <div className="market-simulation-scenarios" ref={scenarioGridRef}>
           {scenarioCards.map((scenario) => {
             const rowDeltaMap = rowDeltas[scenario.id] ?? {};
-            const matchBadgeMap = matchBadges[scenario.id] ?? {};
             const detailNavigationItems = scenario.rows.map((row) => ({
               tsCode: row.tsCode,
               tradeDate: pageData?.referenceTradeDate ?? referenceTradeDate,
@@ -756,7 +948,10 @@ export default function MarketSimulationTab() {
                           excludedConcepts,
                         );
                         const rowDelta = rowDeltaMap[row.tsCode];
-                        const badge = matchBadgeMap[row.tsCode];
+                        const hasRealtimeStatus =
+                          row.latestPrice != null ||
+                          row.latestChangePct != null ||
+                          row.volumeRatio != null;
                         const compareSnapshot = {
                           tsCode: row.tsCode,
                           relativeTradeDate: `${scenario.label} 模拟`,
@@ -795,11 +990,12 @@ export default function MarketSimulationTab() {
                                       强维持
                                     </span>
                                   ) : null}
-                                  {badge ? (
+                                  {hasRealtimeStatus && row.realtimeMatched ? (
                                     <span
-                                      className={`market-simulation-badge is-${badge.toLowerCase()}`}
+                                      className="market-simulation-badge is-scenario-match"
+                                      title="满足场景预设"
                                     >
-                                      {badge}
+                                      <span className="market-simulation-dot" />
                                     </span>
                                   ) : null}
                                 </div>
