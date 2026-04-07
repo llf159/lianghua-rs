@@ -1,5 +1,6 @@
 pub mod download_data;
 pub mod scoring_data;
+pub mod simulate;
 
 use std::{
     collections::{HashMap, HashSet},

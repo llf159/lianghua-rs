@@ -2,6 +2,7 @@ pub mod board_analysis;
 pub mod data_download;
 pub mod details;
 pub mod market_monitor;
+pub mod market_simulation;
 pub mod overview;
 pub mod realtime;
 pub mod return_backtest;

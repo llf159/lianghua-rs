@@ -34,6 +34,10 @@ use lianghua_rs::{
             get_stock_detail_page as core_get_stock_detail_page,
         },
         market_monitor::{MarketMonitorPageData, build_market_monitor_page_from_rows},
+        market_simulation::{
+            MarketSimulationPageData, MarketSimulationScenarioInput,
+            build_market_simulation_page_from_rows,
+        },
         overview::{
             OverviewPageData, OverviewRow, get_rank_overview as core_get_rank_overview,
             get_rank_overview_page as core_get_rank_overview_page,
@@ -450,6 +454,49 @@ async fn load_market_monitor_page_data(
         .collect();
     let (quote_map, fetch_meta) = fetch_realtime_quote_map_platform(ts_codes).await?;
     build_market_monitor_page_from_rows(&source_path, overview_rows, quote_map, fetch_meta)
+}
+
+async fn load_market_simulation_page_data(
+    source_path: String,
+    reference_trade_date: Option<String>,
+    top_limit: Option<u32>,
+    scenarios: Vec<MarketSimulationScenarioInput>,
+    sort_mode: Option<String>,
+    strong_score_floor: Option<f64>,
+) -> Result<MarketSimulationPageData, String> {
+    let overview_rows = tauri::async_runtime::spawn_blocking({
+        let source_path = source_path.clone();
+        let reference_trade_date = reference_trade_date.clone();
+        move || {
+            core_get_rank_overview(
+                source_path,
+                reference_trade_date,
+                Some(top_limit.unwrap_or(50).max(1)),
+                None,
+                None,
+                None,
+            )
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    let ts_codes: Vec<String> = overview_rows.iter().map(|row| row.ts_code.clone()).collect();
+    let (quote_map, fetch_meta) = fetch_realtime_quote_map_platform(ts_codes).await?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        build_market_simulation_page_from_rows(
+            &source_path,
+            overview_rows,
+            quote_map,
+            fetch_meta,
+            scenarios,
+            sort_mode,
+            strong_score_floor,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 async fn load_watch_observe_realtime_snapshot(
@@ -1383,6 +1430,26 @@ async fn get_market_monitor_page(
     top_limit: Option<u32>,
 ) -> Result<MarketMonitorPageData, String> {
     load_market_monitor_page_data(source_path, reference_trade_date, top_limit).await
+}
+
+#[tauri::command]
+async fn get_market_simulation_page(
+    source_path: String,
+    reference_trade_date: Option<String>,
+    top_limit: Option<u32>,
+    scenarios: Vec<MarketSimulationScenarioInput>,
+    sort_mode: Option<String>,
+    strong_score_floor: Option<f64>,
+) -> Result<MarketSimulationPageData, String> {
+    load_market_simulation_page_data(
+        source_path,
+        reference_trade_date,
+        top_limit,
+        scenarios,
+        sort_mode,
+        strong_score_floor,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -3068,6 +3135,7 @@ pub fn run() {
             get_stock_detail_page,
             get_stock_detail_realtime,
             get_market_monitor_page,
+            get_market_simulation_page,
             get_strategy_statistics_page,
             get_strategy_statistics_detail,
             get_strategy_triggered_stocks,

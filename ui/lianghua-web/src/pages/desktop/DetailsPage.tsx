@@ -66,6 +66,7 @@ import {
   upsertWatchObserveRow,
 } from "../../apis/watchObserve";
 import type { DetailsNavigationItem } from "../../shared/detailsLinkState";
+import type { DetailsStrategyCompareSnapshot } from "../../shared/detailsLinkState";
 import "./css/DetailsPage.css";
 
 const DEFAULT_TOP_LIMIT = "100";
@@ -156,6 +157,7 @@ type DetailsPageVariant = "default" | "linked-overlay";
 export type DetailsPageProps = {
   variant?: DetailsPageVariant;
   navigationItems?: DetailsNavigationItem[] | null;
+  strategyCompareSnapshot?: DetailsStrategyCompareSnapshot | null;
 };
 
 function formatNumber(value: unknown, digits = 2) {
@@ -1836,6 +1838,7 @@ function StrategyTableSection({
 export default function DetailsPage({
   variant = "default",
   navigationItems,
+  strategyCompareSnapshot: externalStrategyCompareSnapshot = null,
 }: DetailsPageProps) {
   const [searchParams] = useSearchParams();
   const { excludedConcepts } = useConceptExclusions();
@@ -1876,7 +1879,9 @@ export default function DetailsPage({
   const [detailRealtimeNotice, setDetailRealtimeNotice] = useState("");
   const [detailRealtimePinned, setDetailRealtimePinned] = useState(false);
   const [strategyCompareSnapshot, setStrategyCompareSnapshot] =
-    useState<StrategyCompareSnapshot | null>(null);
+    useState<StrategyCompareSnapshot | null>(
+      externalStrategyCompareSnapshot ?? null,
+    );
   const chartDragRef = useRef<ChartDragState | null>(null);
   const strategyGridRef = useRef<HTMLDivElement | null>(null);
   const strategyResizePointerIdRef = useRef<number | null>(null);
@@ -1945,6 +1950,10 @@ export default function DetailsPage({
         ),
     [navigationItems],
   );
+
+  useEffect(() => {
+    setStrategyCompareSnapshot(externalStrategyCompareSnapshot ?? null);
+  }, [externalStrategyCompareSnapshot]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2380,7 +2389,8 @@ export default function DetailsPage({
       !detailData ||
       resolvedTsCode === "--" ||
       resolvedTradeDate === "--" ||
-      !previousStrategyTradeDate
+      !previousStrategyTradeDate ||
+      externalStrategyCompareSnapshot
     ) {
       strategyCompareRequestKeyRef.current = "";
       return;
@@ -2448,6 +2458,7 @@ export default function DetailsPage({
     resolvedTradeDate,
     resolvedTsCode,
     sourcePathTrimmed,
+    externalStrategyCompareSnapshot,
     strategyCompareSnapshot,
   ]);
 

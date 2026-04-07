@@ -13,6 +13,7 @@ export default function DetailsLinkedPage() {
     <DetailsPage
       variant="linked-overlay"
       navigationItems={locationState?.navigationItems}
+      strategyCompareSnapshot={locationState?.strategyCompareSnapshot ?? null}
     />
   );
 }

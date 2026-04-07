@@ -12,6 +12,40 @@
   min-width: 0;
 }
 
+.market-monitor-tab-shell {
+  display: grid;
+  gap: 12px;
+}
+
+.market-monitor-route-tabs {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px;
+  border: 1px solid #d8dee6;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.84);
+  width: fit-content;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+}
+
+.market-monitor-route-tab {
+  border: 0;
+  border-radius: 999px;
+  padding: 9px 16px;
+  background: transparent;
+  color: #5b6878;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.market-monitor-route-tab.is-active {
+  background: var(--theme-orange-gradient);
+  color: #fff;
+  box-shadow: 0 8px 18px var(--theme-orange-shadow);
+}
+
 .market-monitor-head {
   display: flex;
   align-items: flex-start;

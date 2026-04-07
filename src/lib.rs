@@ -3,6 +3,7 @@ pub mod crawler;
 pub mod data;
 pub mod download;
 pub mod expr;
+pub mod simulate;
 pub mod scoring;
 pub mod statistics;
 pub mod ui_tools;
