@@ -15,7 +15,6 @@ use duckdb::Connection;
 use rayon::{ThreadPool, ThreadPoolBuilder, prelude::*};
 
 use crate::{
-    config::AppConfig,
     crawler::concept::{ThsConceptFetchItem, ThsConceptRow, fetch_one_ths_concept_row},
     data::{
         DataReader,
@@ -55,6 +54,19 @@ pub type DownloadProgressCallback = dyn Fn(DownloadProgress) + Send + Sync;
 const INCREMENTAL_INDICATOR_CHUNK_SIZE: usize = 256;
 const THS_CONCEPT_RETRY_DELAY_SECS: u64 = 30;
 const THS_CONCEPT_RETRY_LIMIT: usize = 5;
+
+#[derive(Debug, Clone)]
+pub struct DownloadRuntimeConfig {
+    pub source_dir: String,
+    pub adj_type: AdjType,
+    pub token: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub threads: usize,
+    pub retry_times: usize,
+    pub limit_calls_per_min: usize,
+    pub include_turnover: bool,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct ThsConceptDownloadConfig {
@@ -659,16 +671,12 @@ pub fn download_ths_concepts(
 }
 
 pub fn init_stock_basic_data(
-    config: &AppConfig,
+    config: &DownloadRuntimeConfig,
     progress_cb: Option<&DownloadProgressCallback>,
 ) -> Result<String, String> {
     // 初始化基础数据,返回当前有效交易日
-    let download_config = &config.download;
-    let source_dir = config.output.dir.as_str();
-    let client = TushareClient::new(
-        download_config.token.clone(),
-        download_config.limit_calls_per_min,
-    )?;
+    let source_dir = config.source_dir.as_str();
+    let client = TushareClient::new(config.token.clone(), config.limit_calls_per_min)?;
 
     let now = Local::now();
     let today = now.format("%Y%m%d").to_string();
@@ -685,11 +693,7 @@ pub fn init_stock_basic_data(
             Some("trade_calendar.csv".to_string()),
             "正在刷新交易日历。",
         );
-        client.download_trade_calendar_csv(
-            source_dir,
-            download_config.start_date.as_str(),
-            trade_calendar_end.as_str(),
-        )?;
+        client.download_trade_calendar_csv(source_dir, config.start_date.as_str(), trade_calendar_end.as_str())?;
         emit_progress(
             progress_cb,
             "prepare_trade_calendar",
@@ -1064,33 +1068,22 @@ fn retry_failed_downloads(
 }
 
 fn download_first_all_market(
-    config: &AppConfig,
+    config: &DownloadRuntimeConfig,
     progress_cb: Option<&DownloadProgressCallback>,
 ) -> Result<DownloadSummary, String> {
     let effective_trade_date = init_stock_basic_data(config, progress_cb)?;
-
-    let adj_type = match config.data.adj_type.trim().to_ascii_lowercase().as_str() {
-        "qfq" => Ok(AdjType::Qfq),
-        "hfq" => Ok(AdjType::Hfq),
-        "raw" => Ok(AdjType::Raw),
-        other => Err(format!("不支持的复权类型: {other}")),
-    }?;
-
-    let download_config = &config.download;
-    let source_dir = config.output.dir.as_str();
-    let start_date = download_config.start_date.as_str();
-    let end_date = if download_config.end_date.eq_ignore_ascii_case("today") {
+    let adj_type = config.adj_type;
+    let source_dir = config.source_dir.as_str();
+    let start_date = config.start_date.as_str();
+    let end_date = if config.end_date.eq_ignore_ascii_case("today") {
         effective_trade_date.as_str()
     } else {
-        download_config.end_date.as_str()
+        config.end_date.as_str()
     };
-    let with_factors = download_config.include_turnover;
+    let with_factors = config.include_turnover;
 
-    let client = TushareClient::new(
-        download_config.token.clone(),
-        download_config.limit_calls_per_min,
-    )?;
-    let pool = build_download_pool(download_config.threads)?;
+    let client = TushareClient::new(config.token.clone(), config.limit_calls_per_min)?;
+    let pool = build_download_pool(config.threads)?;
     let db_path = source_db_path(source_dir);
     let db_path_str = db_path
         .to_str()
@@ -1118,7 +1111,7 @@ fn download_first_all_market(
         end_date,
         adj_type,
         with_factors,
-        download_config.retry_times,
+        config.retry_times,
         "首次全量下载开始",
         "首次全量下载结束",
         progress_cb,
@@ -1262,33 +1255,22 @@ fn download_selected_stocks_with_context(
 }
 
 pub fn download_selected_stocks(
-    config: &AppConfig,
+    config: &DownloadRuntimeConfig,
     ts_codes: &[String],
     progress_cb: Option<&DownloadProgressCallback>,
 ) -> Result<DownloadSummary, String> {
     let effective_trade_date = init_stock_basic_data(config, progress_cb)?;
-
-    let adj_type = match config.data.adj_type.trim().to_ascii_lowercase().as_str() {
-        "qfq" => Ok(AdjType::Qfq),
-        "hfq" => Ok(AdjType::Hfq),
-        "raw" => Ok(AdjType::Raw),
-        other => Err(format!("不支持的复权类型: {other}")),
-    }?;
-
-    let download_config = &config.download;
-    let source_dir = config.output.dir.as_str();
-    let start_date = download_config.start_date.as_str();
-    let end_date = if download_config.end_date.eq_ignore_ascii_case("today") {
+    let adj_type = config.adj_type;
+    let source_dir = config.source_dir.as_str();
+    let start_date = config.start_date.as_str();
+    let end_date = if config.end_date.eq_ignore_ascii_case("today") {
         effective_trade_date.as_str()
     } else {
-        download_config.end_date.as_str()
+        config.end_date.as_str()
     };
-    let with_factors = download_config.include_turnover;
-    let client = TushareClient::new(
-        download_config.token.clone(),
-        download_config.limit_calls_per_min,
-    )?;
-    let pool = build_download_pool(download_config.threads)?;
+    let with_factors = config.include_turnover;
+    let client = TushareClient::new(config.token.clone(), config.limit_calls_per_min)?;
+    let pool = build_download_pool(config.threads)?;
     let db_path = source_db_path(source_dir);
     let db_path_str = db_path
         .to_str()
@@ -1309,7 +1291,7 @@ pub fn download_selected_stocks(
         end_date,
         adj_type,
         with_factors,
-        download_config.retry_times,
+        config.retry_times,
         "缺失股票补全开始",
         "缺失股票补全结束",
         progress_cb,
@@ -1389,24 +1371,17 @@ fn calc_passed_prepared_items(
 }
 
 pub fn download_pending_all_market(
-    config: &AppConfig,
+    config: &DownloadRuntimeConfig,
     progress_cb: Option<&DownloadProgressCallback>,
 ) -> Result<DownloadSummary, String> {
     let effective_trade_date = init_stock_basic_data(config, progress_cb)?;
-    let download_config = &config.download;
-    let source_dir = config.output.dir.as_str();
-    let start_date = download_config.start_date.as_str();
-    let with_factors = download_config.include_turnover;
-
-    let adj_type = match config.data.adj_type.trim().to_ascii_lowercase().as_str() {
-        "qfq" => AdjType::Qfq,
-        "hfq" | "raw" => {
-            return Err("当前增量pre_close校验只支持 qfq".to_string());
-        }
-        other => {
-            return Err(format!("不支持的复权类型: {other}"));
-        }
-    };
+    let source_dir = config.source_dir.as_str();
+    let start_date = config.start_date.as_str();
+    let with_factors = config.include_turnover;
+    let adj_type = config.adj_type;
+    if adj_type != AdjType::Qfq {
+        return Err("当前增量pre_close校验只支持 qfq".to_string());
+    }
 
     let last_saved_trade_date = load_latest_trade_date(source_dir, adj_type)?
         .ok_or_else(|| "数据库里还没有可用于增量的历史数据，请先做首次下载".to_string())?;
@@ -1436,11 +1411,8 @@ pub fn download_pending_all_market(
         format!("增量更新开始，共 {} 个交易日待处理。", total_trade_dates),
     );
 
-    let client = TushareClient::new(
-        download_config.token.clone(),
-        download_config.limit_calls_per_min,
-    )?;
-    let pool = build_download_pool(download_config.threads)?;
+    let client = TushareClient::new(config.token.clone(), config.limit_calls_per_min)?;
+    let pool = build_download_pool(config.threads)?;
     let inds_cache = cache_ind_build(source_dir)?;
     let warmup_need = warmup_ind_estimate(source_dir)?;
     let indicator_names = inds_cache
@@ -1750,17 +1722,11 @@ pub fn download_pending_all_market(
 }
 
 pub fn download(
-    config: &AppConfig,
+    config: &DownloadRuntimeConfig,
     progress_cb: Option<&DownloadProgressCallback>,
 ) -> Result<DownloadSummary, String> {
-    let adj_type = match config.data.adj_type.trim().to_ascii_lowercase().as_str() {
-        "qfq" => Ok(AdjType::Qfq),
-        "hfq" => Ok(AdjType::Hfq),
-        "raw" => Ok(AdjType::Raw),
-        other => Err(format!("不支持的复权类型: {other}")),
-    }?;
-
-    let source_dir = config.output.dir.as_str();
+    let adj_type = config.adj_type;
+    let source_dir = config.source_dir.as_str();
     let db_path = source_db_path(source_dir);
 
     if !Path::new(&db_path).exists() {

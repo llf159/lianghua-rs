@@ -471,6 +471,15 @@ export default function MarketSimulationTab() {
     ],
   );
   const buildDirty = Boolean(pageData) && buildConfigSignature !== currentBuildConfigSignature;
+  const displayedScenarioRows = useMemo(
+    () =>
+      (pageData?.scenarios ?? []).map((scenario) => ({
+        ...scenario,
+        rows:
+          displayLimit != null ? scenario.rows.slice(0, displayLimit) : scenario.rows,
+      })),
+    [displayLimit, pageData],
+  );
 
   useEffect(() => {
     writeJsonStorage(
@@ -612,7 +621,7 @@ export default function MarketSimulationTab() {
     try {
       const refreshData = await refreshMarketSimulationRealtime({
         sourcePath: sourcePathTrimmed,
-        scenarios: pageData.scenarios.map((scenario) => ({
+        scenarios: displayedScenarioRows.map((scenario) => ({
           id: scenario.id,
           pctChg: scenario.pctChg,
           tsCodes: scenario.rows.map((row) => row.tsCode),
@@ -628,15 +637,7 @@ export default function MarketSimulationTab() {
     }
   }
 
-  const scenarioCards = useMemo(
-    () =>
-      (pageData?.scenarios ?? []).map((scenario) => ({
-        ...scenario,
-        rows:
-          displayLimit != null ? scenario.rows.slice(0, displayLimit) : scenario.rows,
-      })),
-    [displayLimit, pageData],
-  );
+  const scenarioCards = displayedScenarioRows;
   const statusText = pageData
     ? [
         pageData.refreshedAt ? `最新刷新 ${pageData.refreshedAt}` : null,
@@ -769,7 +770,7 @@ export default function MarketSimulationTab() {
             title={
               buildDirty
                 ? "名单参数已变更，请先重新确定名单"
-                : "只刷新当前已确定名单的实时行情"
+                : "只刷新当前展示列表的实时行情"
             }
           >
             {realtimeLoading ? "刷新中..." : "刷新实时"}
@@ -938,7 +939,7 @@ export default function MarketSimulationTab() {
                         <th>实时价</th>
                         <th>实时涨幅</th>
                         <th>量比</th>
-                        <th>模拟规则</th>
+                        <th>概念</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -967,7 +968,6 @@ export default function MarketSimulationTab() {
                               .filter(Boolean)
                               .join(" ")}
                             key={`${scenario.id}:${row.tsCode}`}
-                            title={conceptText}
                           >
                             <td>{row.tsCode}</td>
                             <td>
@@ -1054,24 +1054,8 @@ export default function MarketSimulationTab() {
                                 )}
                               />
                             </td>
-                            <td
-                              className="market-simulation-rule-cell"
-                              title={
-                                row.triggeredRules.length > 0
-                                  ? row.triggeredRules
-                                      .map(
-                                        (item) =>
-                                          `${item.ruleName}(${formatNumber(item.ruleScore)})`,
-                                      )
-                                      .join("、")
-                                  : "暂无触发规则"
-                              }
-                            >
-                              {row.triggeredRules.length > 0
-                                ? row.triggeredRules
-                                    .map((item) => item.ruleName)
-                                    .join("、")
-                                : "--"}
+                            <td className="market-simulation-rule-cell">
+                              {conceptText || "--"}
                             </td>
                           </tr>
                         );

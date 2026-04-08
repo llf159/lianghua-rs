@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  DEFAULT_MANAGED_SOURCE_DIR,
   MANAGED_SOURCE_FILES,
   clearManagedSourceData,
   exportManagedCacheData,
@@ -12,7 +11,6 @@ import {
   inspectManagedSourceStatus,
   isDirectoryImportSupported,
   removeManagedSourceFile,
-  updateManagedSourceDirectory,
   type ManagedSourceImportProgress,
   type ManagedSourceImportProgressCallback,
   type ManagedSourceDirectoryImportResult,
@@ -24,7 +22,6 @@ import './css/DataImportPage.css'
 type BusyAction =
   | 'idle'
   | 'loading'
-  | 'saving-dir'
   | 'importing-dir'
   | 'exporting'
   | 'exporting-cache'
@@ -95,7 +92,6 @@ export default function DataImportPage() {
   const directoryImportSupported = isDirectoryImportSupported()
   const isMobileClient = !directoryImportSupported
   const [status, setStatus] = useState<ManagedSourceStatus | null>(null)
-  const [sourceDirInput, setSourceDirInput] = useState(DEFAULT_MANAGED_SOURCE_DIR)
   const [busyAction, setBusyAction] = useState<BusyAction>('loading')
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
@@ -117,7 +113,6 @@ export default function DataImportPage() {
 
   function applyStatus(nextStatus: ManagedSourceStatus) {
     setStatus(nextStatus)
-    setSourceDirInput(nextStatus.sourceDir)
   }
 
   function onImportProgress(progress: ManagedSourceImportProgress) {
@@ -230,7 +225,7 @@ export default function DataImportPage() {
 
     const refreshWhenVisible = async () => {
       try {
-        const nextStatus = await inspectManagedSourceStatus(sourceDirInput)
+        const nextStatus = await inspectManagedSourceStatus()
         if (cancelled) {
           return
         }
@@ -255,11 +250,11 @@ export default function DataImportPage() {
       window.removeEventListener('focus', handleFocus)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
-  }, [reconcileStatus, sourceDirInput])
+  }, [reconcileStatus])
 
   async function onRefresh() {
     const nextStatus = await runAction('loading', '刷新导入状态失败', () =>
-      inspectManagedSourceStatus(sourceDirInput),
+      inspectManagedSourceStatus(),
     )
     if (!nextStatus) {
       return
@@ -269,21 +264,9 @@ export default function DataImportPage() {
     setNotice('')
   }
 
-  async function onSaveSourceDir() {
-    const nextStatus = await runAction('saving-dir', '更新应用数据目录失败', () =>
-      updateManagedSourceDirectory(sourceDirInput),
-    )
-    if (!nextStatus) {
-      return
-    }
-
-    applyStatus(nextStatus)
-    setNotice('应用数据目录已更新。')
-  }
-
   async function onImportDirectory() {
     const result = await runImportAction('importing-dir', '目录扫描导入失败', (progressHandler) =>
-      importManagedSourceDirectory(sourceDirInput, progressHandler),
+      importManagedSourceDirectory(undefined, progressHandler),
     )
     if (!result) {
       return
@@ -295,7 +278,7 @@ export default function DataImportPage() {
 
   async function onImportFile(fileId: ManagedSourceFileId) {
     const nextStatus = await runImportAction(`file:${fileId}`, '手动导入失败', (progressHandler) =>
-      importManagedSourceFile(fileId, sourceDirInput, progressHandler),
+      importManagedSourceFile(fileId, undefined, progressHandler),
     )
     if (!nextStatus) {
       return
@@ -308,7 +291,7 @@ export default function DataImportPage() {
 
   async function onClearImportedData() {
     const nextStatus = await runAction('clearing', '清空导入目录失败', () =>
-      clearManagedSourceData(sourceDirInput),
+      clearManagedSourceData(),
     )
     if (!nextStatus) {
       return
@@ -320,7 +303,7 @@ export default function DataImportPage() {
 
   async function onDeleteFile(fileId: ManagedSourceFileId) {
     const nextStatus = await runAction(`deleting-file:${fileId}`, '删除文件失败', () =>
-      removeManagedSourceFile(fileId, sourceDirInput),
+      removeManagedSourceFile(fileId),
     )
     if (!nextStatus) {
       return
@@ -333,7 +316,7 @@ export default function DataImportPage() {
 
   async function onExportFile(fileId: ManagedSourceFileId) {
     const result = await runAction(`exporting-file:${fileId}`, '导出文件失败', () =>
-      exportManagedSourceFile(fileId, sourceDirInput),
+      exportManagedSourceFile(fileId),
     )
     if (!result) {
       return
@@ -344,8 +327,7 @@ export default function DataImportPage() {
   }
 
   async function onExportData() {
-    const exportSourceDir = status?.sourceDir ?? sourceDirInput
-    const result = await runAction('exporting', '导出数据失败', () => exportManagedSourceDirectory(exportSourceDir))
+    const result = await runAction('exporting', '导出数据失败', () => exportManagedSourceDirectory())
     if (!result) {
       return
     }
@@ -384,7 +366,7 @@ export default function DataImportPage() {
           <div>
             <h2 className="settings-title">数据管理</h2>
             <p className="settings-subtitle">
-              所有业务与计算文件统一落到系统 `AppData`，并按 `source/` 目录的平铺结构保存。目录导入会递归扫描，手动导入会校验文件名并写入固定目标路径，也支持导出当前应用数据目录，以及导入/导出本地缓存。移动端导出会改成系统保存单个备份文件，不再依赖文件夹选择器。
+              所有业务与计算文件统一落到系统 `AppData/source/`。目录导入会递归扫描，手动导入会校验文件名并写入固定目标路径，也支持导出当前应用数据目录，以及导入/导出本地缓存。移动端导出会改成系统保存单个备份文件，不再依赖文件夹选择器。
             </p>
           </div>
 
@@ -419,7 +401,7 @@ export default function DataImportPage() {
             </strong>
           </div>
           <div className="settings-summary-item">
-            <span>应用数据子目录</span>
+            <span>固定数据目录</span>
             <strong>{status?.sourceDir ?? '读取中...'}</strong>
           </div>
           <div className="settings-summary-item settings-summary-item-wide">
@@ -433,23 +415,9 @@ export default function DataImportPage() {
         </div>
 
         <div className="settings-path-layout">
-          <label className="settings-field">
-            <span>应用数据子目录</span>
-            <input
-              type="text"
-              value={sourceDirInput}
-              onChange={(event) => setSourceDirInput(event.target.value)}
-              placeholder={DEFAULT_MANAGED_SOURCE_DIR}
-            />
-            <small>相对于系统 `AppData`，支持多级目录，例如 `source/prod`。</small>
-          </label>
-
           <div className="settings-field settings-field-actions">
             <span>导入操作</span>
             <div className="settings-inline-actions">
-              <button className="settings-primary-btn" type="button" onClick={() => void onSaveSourceDir()} disabled={isBusy}>
-                {busyAction === 'saving-dir' ? '保存中...' : '保存目录'}
-              </button>
               <button
                 className="settings-primary-btn settings-primary-btn-alt"
                 type="button"
@@ -461,7 +429,7 @@ export default function DataImportPage() {
             </div>
             <small>
               {directoryImportSupported
-                ? '规则文件 `score_rule.toml`、指标配置 `ind.toml` 都按 `source/` 的平铺方式导入。'
+                ? '程序固定写入 `AppData/source/`，规则文件 `score_rule.toml`、指标配置 `ind.toml` 也都按这套平铺方式导入。'
                 : '当前平台不支持文件夹选择，请使用下方逐个导入。'}
             </small>
           </div>
@@ -474,7 +442,7 @@ export default function DataImportPage() {
       <section className="settings-card">
         <div className="settings-section-head">
           <h3 className="settings-subtitle-head">文件清单</h3>
-          <p className="settings-section-note">电脑里能读取到的文件都可以手动导入，最终都会写到上面的应用数据目录；每个文件也支持单独导出和删除。</p>
+          <p className="settings-section-note">电脑里能读取到的文件都可以手动导入，最终都会写到固定的 `AppData/source/`；每个文件也支持单独导出和删除。</p>
         </div>
 
         <div className="settings-file-list">

@@ -449,9 +449,91 @@
   overflow-y: auto;
 }
 
+.strategy-manage-guide-modal {
+  width: min(1180px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
+
 .strategy-manage-dist-preview {
   display: grid;
   gap: 10px;
+}
+
+.strategy-manage-guide-section {
+  display: grid;
+  gap: 10px;
+}
+
+.strategy-manage-guide-section h4 {
+  margin: 0;
+  color: #1f2a37;
+  font-size: 15px;
+}
+
+.strategy-manage-guide-section p {
+  margin: 0;
+  color: #526173;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.strategy-manage-guide-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.strategy-manage-guide-chip {
+  border: 1px solid #f4c7a1;
+  border-radius: 999px;
+  background: #fff7ed;
+  color: #9a3412;
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.strategy-manage-guide-result-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.strategy-manage-guide-table-wrap {
+  overflow-x: auto;
+}
+
+.strategy-manage-guide-table {
+  width: 100%;
+  min-width: 920px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.strategy-manage-guide-table th,
+.strategy-manage-guide-table td {
+  border: 1px solid #e3e8ef;
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+  line-height: 1.6;
+}
+
+.strategy-manage-guide-table thead th {
+  background: #fff7ed;
+  color: #9a3412;
+  font-weight: 700;
+}
+
+.strategy-manage-guide-table tbody tr:nth-child(even) {
+  background: #fcfcfd;
+}
+
+.strategy-manage-guide-table code,
+.strategy-manage-guide-section code {
+  font-family: "JetBrains Mono", "SFMono-Regular", "Consolas", monospace;
+  font-size: 12px;
 }
 
 .strategy-manage-modal h3,
@@ -470,6 +552,10 @@
 
   .strategy-manage-editor-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .strategy-manage-guide-result-grid {
+    grid-template-columns: 1fr;
   }
 
   .strategy-manage-list {

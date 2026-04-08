@@ -33,6 +33,171 @@ type ScoreMode = 'fixed' | 'dist'
 type SortMode = (typeof SORT_OPTIONS)[number]['value']
 type ScopeMode = (typeof SCOPE_OPTIONS)[number]
 
+type SyntaxGuideFunction = {
+  name: string
+  signature: string
+  returns: string
+  description: string
+  example: string
+}
+
+const SYNTAX_GUIDE_FUNCTIONS: SyntaxGuideFunction[] = [
+  {
+    name: 'ABS',
+    signature: 'ABS(x)',
+    returns: '数值序列',
+    description: '取绝对值。',
+    example: '输入 [-2, 3] -> 输出 [2, 3]',
+  },
+  {
+    name: 'MAX',
+    signature: 'MAX(a, b)',
+    returns: '数值序列',
+    description: '逐项取较大值。',
+    example: 'a=[1, 5], b=[2, 3] -> [2, 5]',
+  },
+  {
+    name: 'MIN',
+    signature: 'MIN(a, b)',
+    returns: '数值序列',
+    description: '逐项取较小值。',
+    example: 'a=[1, 5], b=[2, 3] -> [1, 3]',
+  },
+  {
+    name: 'DIV',
+    signature: 'DIV(a, b)',
+    returns: '数值序列',
+    description: '安全除法，除数为 0 时返回 0。',
+    example: 'a=[6, 5], b=[2, 0] -> [3, 0]',
+  },
+  {
+    name: 'COUNT',
+    signature: 'COUNT(cond, n)',
+    returns: '数值序列',
+    description: '统计最近 n 根里条件成立的次数。',
+    example: 'cond=[真, 假, 真, 真], n=3 -> [1, 1, 2, 2]',
+  },
+  {
+    name: 'MA',
+    signature: 'MA(x, n)',
+    returns: '数值序列',
+    description: '简单移动平均。',
+    example: 'x=[1, 2, 3, 4], n=3 -> [空, 空, 2, 3]',
+  },
+  {
+    name: 'REF',
+    signature: 'REF(x, n)',
+    returns: '数值序列',
+    description: '取 n 根之前的值。',
+    example: 'x=[10, 11, 12, 13], n=2 -> [空, 空, 10, 11]',
+  },
+  {
+    name: 'HHV',
+    signature: 'HHV(x, n)',
+    returns: '数值序列',
+    description: '最近 n 根最高值。',
+    example: 'x=[1, 3, 2, 5], n=3 -> [空, 空, 3, 5]',
+  },
+  {
+    name: 'LLV',
+    signature: 'LLV(x, n)',
+    returns: '数值序列',
+    description: '最近 n 根最低值。',
+    example: 'x=[1, 3, 2, 0], n=3 -> [空, 空, 1, 0]',
+  },
+  {
+    name: 'SUM',
+    signature: 'SUM(x, n)',
+    returns: '数值序列',
+    description: '最近 n 根求和。',
+    example: 'x=[1, 2, 3, 4], n=3 -> [空, 空, 6, 9]',
+  },
+  {
+    name: 'STD',
+    signature: 'STD(x, n)',
+    returns: '数值序列',
+    description: '最近 n 根标准差。',
+    example: 'x=[1, 3, 3], n=2 -> [空, 1, 0]',
+  },
+  {
+    name: 'IF',
+    signature: 'IF(cond, a, b)',
+    returns: '数值序列',
+    description: '条件成立取 a，否则取 b。',
+    example: 'cond=[真, 假, 真], a=[1, 1, 1], b=[0, 0, 0] -> [1, 0, 1]',
+  },
+  {
+    name: 'CROSS',
+    signature: 'CROSS(a, b)',
+    returns: '布尔序列',
+    description: 'a 当根上穿 b。',
+    example: 'a=[1, 2, 4], b=[3, 2, 3] -> [假, 假, 真]',
+  },
+  {
+    name: 'EMA',
+    signature: 'EMA(x, n)',
+    returns: '数值序列',
+    description: '指数移动平均。',
+    example: 'x=[1, 2, 3], n=3 -> [1, 1.5, 2.25]',
+  },
+  {
+    name: 'SMA',
+    signature: 'SMA(x, n, m)',
+    returns: '数值序列',
+    description: '平滑移动平均。',
+    example: 'x=[3, 6, 9], n=3, m=1 -> [3, 4, 5.67]',
+  },
+  {
+    name: 'BARSLAST',
+    signature: 'BARSLAST(cond)',
+    returns: '数值序列',
+    description: '距离上一次条件成立过去了多少根。',
+    example: 'cond=[假, 假, 真, 假, 假, 真] -> [空, 空, 0, 1, 2, 0]',
+  },
+  {
+    name: 'RSV',
+    signature: 'RSV(c, h, l, n)',
+    returns: '数值序列',
+    description: '按最近 n 根高低点计算 RSV。',
+    example: 'c=[8, 9, 10], h=[10, 10, 10], l=[6, 7, 8], n=3 -> [空, 空, 100]',
+  },
+  {
+    name: 'GRANK',
+    signature: 'GRANK(x, n)',
+    returns: '数值序列',
+    description: '最近 n 根内，大值排前的名次，1 表示最大。',
+    example: 'x=[5, 3, 4], n=3 -> [空, 空, 2]',
+  },
+  {
+    name: 'LRANK',
+    signature: 'LRANK(x, n)',
+    returns: '数值序列',
+    description: '最近 n 根内，小值排前的名次，1 表示最小。',
+    example: 'x=[5, 3, 1], n=3 -> [空, 空, 1]',
+  },
+  {
+    name: 'GTOPCOUNT',
+    signature: 'GTOPCOUNT(value, cond, win, topn)',
+    returns: '数值序列',
+    description: '最近 win 根里，value 最大的前 topn 根中，cond 成立了几次。',
+    example: 'value=[5, 1, 4], cond=[真, 假, 真], win=3, topn=2 -> [空, 空, 2]',
+  },
+  {
+    name: 'LTOPCOUNT',
+    signature: 'LTOPCOUNT(value, cond, win, topn)',
+    returns: '数值序列',
+    description: '最近 win 根里，value 最小的前 topn 根中，cond 成立了几次。',
+    example: 'value=[5, 1, 4], cond=[真, 假, 真], win=3, topn=2 -> [空, 空, 1]',
+  },
+  {
+    name: 'GET',
+    signature: 'GET(cond, value, n)',
+    returns: '数值序列',
+    description: '向前回看最近 n 根，取最后一次 cond 成立时的 value。',
+    example: 'cond=[假, 真, 假, 假], value=[10, 11, 12, 13], n=3 -> [空, 空, 11, 11]',
+  },
+]
+
 function formatNumber(value: number, digits = 2) {
   if (!Number.isFinite(value)) {
     return '--'
@@ -280,6 +445,7 @@ export default function StrategyManagePage() {
   const [scoreMethodFilter, setScoreMethodFilter] = useState<(typeof SCORE_METHOD_FILTER_OPTIONS)[number]>('ALL')
   const [scopeFilter, setScopeFilter] = useState('ALL')
   const [sortMode, setSortMode] = useState<SortMode>('index')
+  const [isSyntaxGuideOpen, setIsSyntaxGuideOpen] = useState(false)
 
   const sourcePathTrimmed = sourcePath.trim()
 
@@ -569,6 +735,21 @@ export default function StrategyManagePage() {
   const filteredCount = filteredRules.length
   const isEditing = editorMode !== null && draft !== null
 
+  useEffect(() => {
+    if (!isSyntaxGuideOpen) {
+      return
+    }
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setIsSyntaxGuideOpen(false)
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [isSyntaxGuideOpen])
+
   return (
     <div className="strategy-manage-page">
       <section className="strategy-manage-card">
@@ -592,6 +773,13 @@ export default function StrategyManagePage() {
               disabled={busyAction !== 'idle'}
             >
               新增策略
+            </button>
+            <button
+              type="button"
+              className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary"
+              onClick={() => setIsSyntaxGuideOpen(true)}
+            >
+              语法说明书
             </button>
             {isEditing ? <span className="strategy-manage-tip">当前有未提交草稿</span> : null}
           </div>
@@ -836,6 +1024,116 @@ export default function StrategyManagePage() {
                 {busyAction === 'deleting' ? '删除中...' : '确认删除'}
               </button>
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {isSyntaxGuideOpen ? (
+        <div
+          className="strategy-manage-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              setIsSyntaxGuideOpen(false)
+            }
+          }}
+        >
+          <div
+            className="strategy-manage-modal strategy-manage-guide-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="strategy-manage-guide-title"
+          >
+            <div className="strategy-manage-section-head">
+              <div>
+                <h3 className="strategy-manage-subtitle" id="strategy-manage-guide-title">
+                  策略语法说明书
+                </h3>
+                <p className="strategy-manage-note">
+                  这里只讲基础语法。表达式支持多句，最后一句会作为策略最终结果；常见字段可直接写
+                  <code> C / O / H / L / V </code>
+                  ，函数名不区分大小写。
+                </p>
+              </div>
+              <button
+                type="button"
+                className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary"
+                onClick={() => setIsSyntaxGuideOpen(false)}
+              >
+                关闭
+              </button>
+            </div>
+
+            <section className="strategy-manage-guide-section">
+              <h4>1. 赋值</h4>
+              <p>用 <code>:=</code> 给中间变量命名，用 <code>;</code> 分隔多句。</p>
+              <pre className="strategy-manage-text-block strategy-manage-text-block-code">{`N := 20;
+BASE := MA(C, N);
+VOL_OK := V > MA(V, 5);
+C > BASE AND VOL_OK`}</pre>
+            </section>
+
+            <section className="strategy-manage-guide-section">
+              <h4>2. 表达式</h4>
+              <div className="strategy-manage-guide-chip-list">
+                <span className="strategy-manage-guide-chip">算术：+ - * /</span>
+                <span className="strategy-manage-guide-chip">比较：&gt; &gt;= &lt; &lt;= == !=</span>
+                <span className="strategy-manage-guide-chip">逻辑：AND OR NOT</span>
+                <span className="strategy-manage-guide-chip">分组：(...)</span>
+              </div>
+              <pre className="strategy-manage-text-block strategy-manage-text-block-code">{`C > O AND V > MA(V, 5)
+NOT(CROSS(C, MA(C, 10)))
+IF(C > O, C - O, 0)`}</pre>
+            </section>
+
+            <section className="strategy-manage-guide-section">
+              <h4>3. 返回结果</h4>
+              <p>
+                最后一条语句建议返回布尔序列或数值序列。布尔结果适合做“是否命中”，数值结果适合做进一步比较或计数。
+              </p>
+              <div className="strategy-manage-guide-result-grid">
+                <div className="strategy-manage-rule-metric">
+                  <span>布尔序列例子</span>
+                  <strong>C &gt; MA(C, 20)</strong>
+                </div>
+                <div className="strategy-manage-rule-metric">
+                  <span>数值序列例子</span>
+                  <strong>COUNT(C &gt; O, 5)</strong>
+                </div>
+              </div>
+            </section>
+
+            <section className="strategy-manage-guide-section">
+              <h4>4. 支持的函数</h4>
+              <div className="strategy-manage-guide-table-wrap">
+                <table className="strategy-manage-guide-table">
+                  <thead>
+                    <tr>
+                      <th>函数</th>
+                      <th>签名</th>
+                      <th>返回</th>
+                      <th>作用</th>
+                      <th>输入输出例子</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {SYNTAX_GUIDE_FUNCTIONS.map((item) => (
+                      <tr key={item.name}>
+                        <td>
+                          <code>{item.name}</code>
+                        </td>
+                        <td>
+                          <code>{item.signature}</code>
+                        </td>
+                        <td>{item.returns}</td>
+                        <td>{item.description}</td>
+                        <td>{item.example}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
           </div>
         </div>
       ) : null}

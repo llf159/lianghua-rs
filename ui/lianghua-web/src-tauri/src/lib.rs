@@ -2950,7 +2950,6 @@ fn export_managed_source_directory_mobile(
 fn managed_source_file_name(file_id: &str) -> Option<&'static str> {
     match file_id {
         "source-db" => Some("stock_data.db"),
-        "app-config" => Some("config.toml"),
         "stock-list" => Some("stock_list.csv"),
         "trade-calendar" => Some("trade_calendar.csv"),
         "result-db" => Some("scoring_result.db"),

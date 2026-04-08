@@ -4,14 +4,14 @@ use duckdb::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::{AppConfig, DataConfig, DownloadConfig, OutputConfig},
     data::{
         IndsData, ind_toml_path, load_stock_list, load_ths_concepts_list, load_trade_date_list,
         source_db_path, stock_list_path, ths_concepts_path, trade_calendar_path,
     },
     download::{
-        DownloadSummary,
+        AdjType, DownloadSummary,
         runner::{
+            DownloadRuntimeConfig,
             DownloadProgressCallback, ThsConceptDownloadConfig,
             download as core_run_download_with_progress,
             download_selected_stocks as core_run_selected_stock_download_with_progress,
@@ -691,31 +691,16 @@ pub fn run_prepared_data_download(
     prepared: &PreparedDataDownloadRun,
     progress_cb: Option<&DownloadProgressCallback>,
 ) -> Result<DataDownloadRunResult, String> {
-    let source_db = source_db_path(&prepared.source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "原始库路径不是有效 UTF-8".to_string())?
-        .to_string();
-
-    let config = AppConfig {
-        data: DataConfig {
-            source_db: source_db_str,
-            adj_type: "qfq".to_string(),
-        },
-        output: OutputConfig {
-            dir: prepared.source_path.clone(),
-            result_db: "scoring_result.db".to_string(),
-        },
-        download: DownloadConfig {
-            token: prepared.token.clone(),
-            start_date: prepared.start_date.clone(),
-            end_date: prepared.end_date.clone(),
-            threads: prepared.threads,
-            retry_times: prepared.retry_times,
-            limit_calls_per_min: prepared.limit_calls_per_min,
-            refresh_stock_list: true,
-            include_turnover: prepared.include_turnover,
-        },
+    let config = DownloadRuntimeConfig {
+        source_dir: prepared.source_path.clone(),
+        adj_type: AdjType::Qfq,
+        token: prepared.token.clone(),
+        start_date: prepared.start_date.clone(),
+        end_date: prepared.end_date.clone(),
+        threads: prepared.threads,
+        retry_times: prepared.retry_times,
+        limit_calls_per_min: prepared.limit_calls_per_min,
+        include_turnover: prepared.include_turnover,
     };
 
     let summary = core_run_download_with_progress(&config, progress_cb)?;
@@ -734,31 +719,16 @@ pub fn run_prepared_missing_stock_repair(
     prepared: &PreparedMissingStockRepairRun,
     progress_cb: Option<&DownloadProgressCallback>,
 ) -> Result<DataDownloadRunResult, String> {
-    let source_db = source_db_path(&prepared.source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "原始库路径不是有效 UTF-8".to_string())?
-        .to_string();
-
-    let config = AppConfig {
-        data: DataConfig {
-            source_db: source_db_str,
-            adj_type: "qfq".to_string(),
-        },
-        output: OutputConfig {
-            dir: prepared.source_path.clone(),
-            result_db: "scoring_result.db".to_string(),
-        },
-        download: DownloadConfig {
-            token: prepared.token.clone(),
-            start_date: prepared.start_date.clone(),
-            end_date: prepared.end_date.clone(),
-            threads: prepared.threads,
-            retry_times: prepared.retry_times,
-            limit_calls_per_min: prepared.limit_calls_per_min,
-            refresh_stock_list: true,
-            include_turnover: prepared.include_turnover,
-        },
+    let config = DownloadRuntimeConfig {
+        source_dir: prepared.source_path.clone(),
+        adj_type: AdjType::Qfq,
+        token: prepared.token.clone(),
+        start_date: prepared.start_date.clone(),
+        end_date: prepared.end_date.clone(),
+        threads: prepared.threads,
+        retry_times: prepared.retry_times,
+        limit_calls_per_min: prepared.limit_calls_per_min,
+        include_turnover: prepared.include_turnover,
     };
 
     let summary = core_run_selected_stock_download_with_progress(

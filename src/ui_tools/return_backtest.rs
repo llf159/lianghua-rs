@@ -1,4 +1,5 @@
 use duckdb::{Connection, params};
+use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::{
@@ -482,6 +483,42 @@ fn resolve_ref_trade_date_by_holding_days(
         .cloned()
 }
 
+fn build_strength_heatmap_item(
+    source_path: &str,
+    rank_date: &str,
+    ref_date: &str,
+    board_filter: Option<&str>,
+    name_map: &std::collections::HashMap<String, String>,
+    top_limit: u32,
+) -> Result<ReturnBacktestStrengthHeatmapItem, String> {
+    let source_conn = open_source_conn(source_path)?;
+    attach_result_db(&source_conn, source_path)?;
+
+    let query_rows = query_backtest_rows(
+        &source_conn,
+        rank_date,
+        ref_date,
+        board_filter,
+        name_map,
+    )?;
+    let (summary, _, _, _) = build_backtest_summary(&query_rows, top_limit);
+
+    Ok(ReturnBacktestStrengthHeatmapItem {
+        rank_date: rank_date.to_string(),
+        ref_date: ref_date.to_string(),
+        strength_score: summary.strength_score,
+        strength_label: summary.strength_label,
+        top_avg_return_pct: summary.top_avg_return_pct,
+        benchmark_return_pct: summary.benchmark_return_pct,
+        top_strong_hit_rate: summary.top_strong_hit_rate,
+        top_weak_hit_rate: summary.top_weak_hit_rate,
+        benchmark_strong_hit_rate: summary.benchmark_strong_hit_rate,
+        benchmark_weak_hit_rate: summary.benchmark_weak_hit_rate,
+        valid_top_count: summary.valid_top_count,
+        benchmark_sample_count: summary.benchmark_sample_count,
+    })
+}
+
 pub fn get_return_backtest_page(
     source_path: String,
     rank_date: Option<String>,
@@ -599,8 +636,6 @@ pub fn get_return_backtest_strength_overview(
     board: Option<String>,
 ) -> Result<ReturnBacktestStrengthOverviewData, String> {
     let result_conn = open_result_conn(&source_path)?;
-    let source_conn = open_source_conn(&source_path)?;
-    attach_result_db(&source_conn, &source_path)?;
 
     let rank_dates = query_rank_trade_date_options_from_conn(&result_conn)?;
     let mut trade_date_list = load_trade_date_list(&source_path)?;
@@ -615,37 +650,28 @@ pub fn get_return_backtest_strength_overview(
         .unwrap_or_else(|| BOARD_ALL.to_string());
     let name_map = build_name_map(&source_path).unwrap_or_default();
 
-    let mut items = Vec::new();
-    for rank_date in rank_dates {
-        let Some(ref_date) =
+    let jobs = rank_dates
+        .into_iter()
+        .filter_map(|rank_date| {
             resolve_ref_trade_date_by_holding_days(&trade_date_list, &rank_date, holding_days)
-        else {
-            continue;
-        };
+                .map(|ref_date| (rank_date, ref_date))
+        })
+        .collect::<Vec<_>>();
 
-        let query_rows = query_backtest_rows(
-            &source_conn,
-            &rank_date,
-            &ref_date,
-            board_filter.as_deref(),
-            &name_map,
-        )?;
-        let (summary, _, _, _) = build_backtest_summary(&query_rows, top_limit);
-        items.push(ReturnBacktestStrengthHeatmapItem {
-            rank_date,
-            ref_date,
-            strength_score: summary.strength_score,
-            strength_label: summary.strength_label,
-            top_avg_return_pct: summary.top_avg_return_pct,
-            benchmark_return_pct: summary.benchmark_return_pct,
-            top_strong_hit_rate: summary.top_strong_hit_rate,
-            top_weak_hit_rate: summary.top_weak_hit_rate,
-            benchmark_strong_hit_rate: summary.benchmark_strong_hit_rate,
-            benchmark_weak_hit_rate: summary.benchmark_weak_hit_rate,
-            valid_top_count: summary.valid_top_count,
-            benchmark_sample_count: summary.benchmark_sample_count,
-        });
-    }
+    // 每个排名日的格子互相独立，单独开只读连接后可安全并行计算。
+    let items = jobs
+        .par_iter()
+        .map(|(rank_date, ref_date)| {
+            build_strength_heatmap_item(
+                &source_path,
+                rank_date,
+                ref_date,
+                board_filter.as_deref(),
+                &name_map,
+                top_limit,
+            )
+        })
+        .collect::<Result<Vec<_>, String>>()?;
 
     let strong_days = items
         .iter()

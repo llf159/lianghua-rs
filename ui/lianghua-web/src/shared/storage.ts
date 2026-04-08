@@ -17,21 +17,6 @@ export function writeStoredSourcePath(value: string) {
   return value
 }
 
-export function readStoredSourceDir() {
-  if (typeof window === 'undefined') {
-    return ''
-  }
-
-  return window.localStorage.getItem(SOURCE_DIR_KEY) ?? ''
-}
-
-export function writeStoredSourceDir(value: string) {
-  if (typeof window !== 'undefined') {
-    window.localStorage.setItem(SOURCE_DIR_KEY, value)
-  }
-  return value
-}
-
 export function readStoredSourceImportTimestamp() {
   if (typeof window === 'undefined') {
     return null

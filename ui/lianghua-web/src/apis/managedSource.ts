@@ -4,9 +4,7 @@ import { appDataDir, join } from '@tauri-apps/api/path'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { BaseDirectory, exists, mkdir, readDir, readTextFile, remove, writeTextFile } from '@tauri-apps/plugin-fs'
 import {
-  readStoredSourceDir,
   readStoredSourceImportTimestamp,
-  writeStoredSourceDir,
   writeStoredSourceImportTimestamp,
   writeStoredSourcePath,
 } from '../shared/storage'
@@ -23,16 +21,6 @@ export const MANAGED_SOURCE_FILES = [
     targetRelativePathSuffix: 'stock_data.db',
     extensions: ['db'],
     scanPathHints: [] as string[],
-  },
-  {
-    id: 'app-config',
-    label: '计算配置',
-    description: '后端计算流程使用的配置文件。',
-    fileName: 'config.toml',
-    expectedSourcePath: 'source/config.toml',
-    targetRelativePathSuffix: 'config.toml',
-    extensions: ['toml'],
-    scanPathHints: ['config'],
   },
   {
     id: 'stock-list',
@@ -330,24 +318,6 @@ function buildRelativePath(...parts: string[]) {
     .join('/')
 }
 
-function normalizeManagedSourceDir(input: string) {
-  const normalized = input
-    .replace(/\\/g, '/')
-    .trim()
-    .replace(/^\/+|\/+$/g, '')
-
-  if (normalized === '') {
-    return DEFAULT_MANAGED_SOURCE_DIR
-  }
-
-  const segments = normalized.split('/').filter((segment) => segment !== '')
-  if (segments.some((segment) => segment === '.' || segment === '..')) {
-    throw new Error('应用数据目录不能包含 . 或 ..')
-  }
-
-  return segments.join('/')
-}
-
 function decodePathLike(value: string) {
   try {
     return decodeURIComponent(value)
@@ -376,10 +346,6 @@ function scoreSourceCandidate(sourcePath: string, targetFile: (typeof MANAGED_SO
     }
   })
   return score
-}
-
-function getConfiguredManagedSourceDir() {
-  return normalizeManagedSourceDir(readStoredSourceDir())
 }
 
 async function resolveAbsoluteTargetPath(relativePath: string) {
@@ -489,22 +455,20 @@ function applyStorageSnapshot(storage: Storage | null | undefined, payload: Reco
   return Object.keys(payload).length
 }
 
-export async function ensureManagedSourcePath(sourceDirInput?: string) {
-  const sourceDir = normalizeManagedSourceDir(sourceDirInput ?? getConfiguredManagedSourceDir())
-  writeStoredSourceDir(sourceDir)
+export async function ensureManagedSourcePath(_sourceDirInput?: string) {
+  const sourceDir = DEFAULT_MANAGED_SOURCE_DIR
   const sourcePath = await resolveManagedSourceRootPath(sourceDir)
   writeStoredSourcePath(sourcePath)
   return sourcePath
 }
 
-export async function updateManagedSourceDirectory(sourceDirInput: string) {
-  const sourceDir = normalizeManagedSourceDir(sourceDirInput)
-  await ensureManagedSourcePath(sourceDir)
-  return inspectManagedSourceStatus(sourceDir)
+export async function updateManagedSourceDirectory(_sourceDirInput: string) {
+  await ensureManagedSourcePath()
+  return inspectManagedSourceStatus()
 }
 
-export async function inspectManagedSourceStatus(sourceDirInput?: string): Promise<ManagedSourceStatus> {
-  const sourceDir = normalizeManagedSourceDir(sourceDirInput ?? getConfiguredManagedSourceDir())
+export async function inspectManagedSourceStatus(_sourceDirInput?: string): Promise<ManagedSourceStatus> {
+  const sourceDir = DEFAULT_MANAGED_SOURCE_DIR
   const sourcePath = await ensureManagedSourcePath(sourceDir)
   const items = await Promise.all(
     MANAGED_SOURCE_FILES.map(async (item) => {
@@ -527,14 +491,14 @@ export async function inspectManagedSourceStatus(sourceDirInput?: string): Promi
 }
 
 export async function previewManagedSourceStockData(
-  sourceDirInput?: string,
+  _sourceDirInput?: string,
   filters?: {
     tradeDate?: string
     tsCode?: string
     limit?: number
   },
 ) {
-  const sourceDir = normalizeManagedSourceDir(sourceDirInput ?? getConfiguredManagedSourceDir())
+  const sourceDir = DEFAULT_MANAGED_SOURCE_DIR
   await ensureManagedSourcePath(sourceDir)
 
   return invoke<ManagedSourceDbPreviewResult>('preview_managed_source_stock_data', {
@@ -547,14 +511,14 @@ export async function previewManagedSourceStockData(
 
 export async function previewManagedSourceDataset(
   datasetId: ManagedSourceDatasetId,
-  sourceDirInput?: string,
+  _sourceDirInput?: string,
   filters?: {
     tradeDate?: string
     tsCode?: string
     limit?: number
   },
 ) {
-  const sourceDir = normalizeManagedSourceDir(sourceDirInput ?? getConfiguredManagedSourceDir())
+  const sourceDir = DEFAULT_MANAGED_SOURCE_DIR
   await ensureManagedSourcePath(sourceDir)
 
   return invoke<ManagedSourceDatasetPreviewResult>('preview_managed_source_dataset', {
@@ -568,7 +532,7 @@ export async function previewManagedSourceDataset(
 
 export async function importManagedSourceFile(
   fileId: ManagedSourceFileId,
-  sourceDirInput?: string,
+  _sourceDirInput?: string,
   onProgress?: ManagedSourceImportProgressCallback,
 ) {
   const targetFile = findManagedSourceFile(fileId)
@@ -586,7 +550,7 @@ export async function importManagedSourceFile(
     return null
   }
 
-  const sourceDir = normalizeManagedSourceDir(sourceDirInput ?? getConfiguredManagedSourceDir())
+  const sourceDir = DEFAULT_MANAGED_SOURCE_DIR
   const pickedFileName = extractFileName(picked)
   if (pickedFileName.toLowerCase() !== targetFile.fileName.toLowerCase()) {
     throw new Error(`文件名不匹配，应为 ${targetFile.fileName}，当前选择的是 ${pickedFileName}`)
@@ -600,7 +564,7 @@ export async function importManagedSourceFile(
 }
 
 export async function importManagedSourceDirectory(
-  sourceDirInput?: string,
+  _sourceDirInput?: string,
   onProgress?: ManagedSourceImportProgressCallback,
 ) {
   const picked = await open({
@@ -612,7 +576,7 @@ export async function importManagedSourceDirectory(
     return null
   }
 
-  const sourceDir = normalizeManagedSourceDir(sourceDirInput ?? getConfiguredManagedSourceDir())
+  const sourceDir = DEFAULT_MANAGED_SOURCE_DIR
   await allowImportPath(picked, true, true)
   await ensureManagedSourcePath(sourceDir)
 
@@ -642,8 +606,8 @@ export async function importManagedSourceDirectory(
   } satisfies ManagedSourceDirectoryImportResult
 }
 
-export async function clearManagedSourceData(sourceDirInput?: string) {
-  const sourceDir = normalizeManagedSourceDir(sourceDirInput ?? getConfiguredManagedSourceDir())
+export async function clearManagedSourceData(_sourceDirInput?: string) {
+  const sourceDir = DEFAULT_MANAGED_SOURCE_DIR
   await ensureManagedSourcePath(sourceDir)
   if (await exists(sourceDir, { baseDir: BaseDirectory.AppData })) {
     await remove(sourceDir, { baseDir: BaseDirectory.AppData, recursive: true })
@@ -654,14 +618,14 @@ export async function clearManagedSourceData(sourceDirInput?: string) {
 
 export async function removeManagedSourceFile(
   fileId: ManagedSourceFileId,
-  sourceDirInput?: string,
+  _sourceDirInput?: string,
 ) {
   const targetFile = findManagedSourceFile(fileId)
   if (!targetFile) {
     throw new Error(`未知文件项: ${fileId}`)
   }
 
-  const sourceDir = normalizeManagedSourceDir(sourceDirInput ?? getConfiguredManagedSourceDir())
+  const sourceDir = DEFAULT_MANAGED_SOURCE_DIR
   await ensureManagedSourcePath(sourceDir)
   const targetRelativePath = getTargetRelativePath(targetFile, sourceDir)
   if (await exists(targetRelativePath, { baseDir: BaseDirectory.AppData })) {
@@ -671,8 +635,8 @@ export async function removeManagedSourceFile(
   return inspectManagedSourceStatus(sourceDir)
 }
 
-export async function exportManagedSourceDirectory(sourceDirInput?: string) {
-  const sourceDir = normalizeManagedSourceDir(sourceDirInput ?? getConfiguredManagedSourceDir())
+export async function exportManagedSourceDirectory(_sourceDirInput?: string) {
+  const sourceDir = DEFAULT_MANAGED_SOURCE_DIR
   await ensureManagedSourcePath(sourceDir)
 
   if (isMobileClient()) {
@@ -708,14 +672,14 @@ export async function exportManagedSourceDirectory(sourceDirInput?: string) {
 
 export async function exportManagedSourceFile(
   fileId: ManagedSourceFileId,
-  sourceDirInput?: string,
+  _sourceDirInput?: string,
 ) {
   const targetFile = findManagedSourceFile(fileId)
   if (!targetFile) {
     throw new Error(`未知文件项: ${fileId}`)
   }
 
-  const sourceDir = normalizeManagedSourceDir(sourceDirInput ?? getConfiguredManagedSourceDir())
+  const sourceDir = DEFAULT_MANAGED_SOURCE_DIR
   await ensureManagedSourcePath(sourceDir)
 
   const targetRelativePath = getTargetRelativePath(targetFile, sourceDir)
