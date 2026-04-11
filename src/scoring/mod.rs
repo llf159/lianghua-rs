@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use duckdb::Connection;
 
 use crate::{
-    data::{DistPoint, RuleStage, RuleTag, ScopeWay, ScoreScene},
+    data::{DistPoint, RuleStage, ScopeWay, ScoreScene},
     expr::{
         eval::{Runtime, Value},
         parser::Stmts,
@@ -57,7 +57,6 @@ pub struct CachedRule {
     pub scope_way: ScopeWay,
     pub points: f64,
     pub dist_points: Option<Vec<DistPoint>>,
-    pub tag: RuleTag,
     pub when_src: String,
     pub when_ast: Stmts,
 }

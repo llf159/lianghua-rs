@@ -9,5 +9,5 @@ score_rule.toml
 __pycache__
 /.cargo
 /.vscode
-/ui/*
+/ui/lianghua-web
 /src/ui_tools

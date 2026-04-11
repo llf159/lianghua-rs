@@ -405,14 +405,6 @@ pub enum ScopeWay {
     Consec(usize),
 }
 
-#[derive(Debug, Clone, Copy, Default, serde::Deserialize, serde::Serialize)]
-pub enum RuleTag {
-    #[default]
-    Normal,
-    Opportunity,
-    Rare,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct DistPoint {
     pub min: usize,
@@ -454,7 +446,6 @@ pub struct ScoreRule {
     pub scene_points: f64,
     pub dist_points: Option<Vec<DistPoint>>,
     pub explain: String,
-    pub tag: RuleTag,
 }
 
 impl ScoreConfig {
