@@ -83,8 +83,14 @@ fn scoring_group_batch(
     for ts_code in ts_group {
         let mut row = worker_reader.load_one_tail_rows(ts_code, adj_type, end_date, need_rows)?;
         fill_scoring_extra_fields(&mut row, ts_code, st_list.contains(ts_code))?;
-        let (s, d, scene_rows) =
-            scoring_single_core(row, ts_code, score_start_date, rules_cache, rule_scene_meta, scenes)?;
+        let (s, d, scene_rows) = scoring_single_core(
+            row,
+            ts_code,
+            score_start_date,
+            rules_cache,
+            rule_scene_meta,
+            scenes,
+        )?;
         group_summary.extend(s);
         group_details.extend(d);
         group_scenes.extend(scene_rows);
@@ -118,7 +124,7 @@ pub fn scoring_all_to_db(
         .map(|rule| RuleSceneMeta {
             scene_name: rule.scene_name,
             stage: rule.stage,
-            weight: rule.weight,
+            scene_points: rule.scene_points,
         })
         .collect();
     let scenes = ScoreScene::load_scenes(source_dir)?;
@@ -194,7 +200,7 @@ pub fn scoring_single_period(
         .map(|rule| RuleSceneMeta {
             scene_name: rule.scene_name,
             stage: rule.stage,
-            weight: rule.weight,
+            scene_points: rule.scene_points,
         })
         .collect();
     let scenes = ScoreScene::load_scenes(source_dir)?;

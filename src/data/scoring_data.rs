@@ -8,10 +8,10 @@ use std::time;
 // use std::io::{BufWriter, Write};
 
 use crate::data::{RowData, ScoreRule};
+use crate::expr::eval::{Runtime, Value};
 use crate::expr::parser::{Parser, lex_all};
-use crate::scoring::{CachedRule, RuleScoreSeries, SceneScoreSeries};
-use crate::{
-    expr::eval::{Runtime, Value},
+use crate::scoring::{
+    CachedRule, RuleScoreSeries, SceneScoreSeries, TieBreakWay, build_tirbreak_rank_sql,
 };
 
 #[derive(Debug, Default)]
@@ -272,7 +272,7 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
         "#,
         [],
     )
-            .map_err(|e| format!("创建score_summary失败:{e}"))?;
+    .map_err(|e| format!("创建score_summary失败:{e}"))?;
 
     conn.execute(
         r#"
@@ -298,12 +298,18 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
             stage_score DOUBLE,
             evidence_score DOUBLE,
             risk_score DOUBLE,
+            scene_rank INTEGER,
             PRIMARY KEY (ts_code, trade_date, scene_name)
         )
         "#,
         [],
     )
     .map_err(|e| format!("创建scene_details失败:{e}"))?;
+    conn.execute(
+        "ALTER TABLE scene_details ADD COLUMN IF NOT EXISTS scene_rank INTEGER",
+        [],
+    )
+    .map_err(|e| format!("补充scene_rank字段失败:{e}"))?;
     Ok(())
 }
 
@@ -365,10 +371,20 @@ fn append_scene_rows(app: &mut Appender<'_>, rows: &[SceneDetails]) -> Result<()
             &row.stage,
             row.stage_score,
             row.evidence_score,
-            row.risk_score
+            row.risk_score,
+            Option::<i64>::None
         ])
         .map_err(|e| format!("插入scene_details失败:{e}"))?;
     }
+    Ok(())
+}
+
+fn compute_summary_rankings_in_tx(tx: &Transaction<'_>) -> Result<(), String> {
+    let time = time::Instant::now();
+    let sql = build_tirbreak_rank_sql(TieBreakWay::TsCode, "");
+    tx.execute(&sql, [])
+    .map_err(|e| format!("批量更新总榜排名失败:{e}"))?;
+    println!("总榜排名计算耗时:{:.3?}", time.elapsed());
     Ok(())
 }
 
@@ -435,8 +451,58 @@ pub fn write_score_batches_from_channel(
             .map_err(|e| format!("刷新scene_details失败:{e}"))?;
     }
 
+    compute_summary_rankings_in_tx(&tx)?;
+    compute_scene_rankings_in_tx(&tx, start_date, end_date)?;
     tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
     println!("流式写入结果库耗时:{:.3?}", time.elapsed());
+
+    Ok(())
+}
+
+/// 在当前事务内批量计算Scene排名并回写到scene_details。
+fn compute_scene_rankings_in_tx(
+    tx: &Transaction<'_>,
+    start_date: &str,
+    end_date: &str,
+) -> Result<(), String> {
+    let time = time::Instant::now();
+    tx.execute(
+        r#"
+        UPDATE scene_details AS d
+        SET scene_rank = r.scene_rank
+        FROM (
+            SELECT
+                d.ts_code,
+                d.trade_date,
+                d.scene_name,
+                ROW_NUMBER() OVER (
+                    PARTITION BY d.trade_date, d.scene_name
+                    ORDER BY
+                        CASE d.stage
+                            WHEN 'confirm' THEN 3
+                            WHEN 'trigger' THEN 2
+                            WHEN 'observe' THEN 1
+                            WHEN 'fail' THEN 0
+                            ELSE -1
+                        END DESC,
+                        (d.stage_score - d.risk_score) DESC,
+                        s.rank ASC NULLS LAST,
+                        d.ts_code ASC
+                ) AS scene_rank
+            FROM scene_details AS d
+            LEFT JOIN score_summary AS s
+              ON d.ts_code = s.ts_code
+             AND d.trade_date = s.trade_date
+            WHERE d.trade_date BETWEEN ? AND ?
+        ) AS r
+        WHERE d.ts_code = r.ts_code
+          AND d.trade_date = r.trade_date
+          AND d.scene_name = r.scene_name
+        "#,
+        params![start_date, end_date],
+    )
+    .map_err(|e| format!("批量更新Scene排名失败:{e}"))?;
+    println!("Scene排名计算耗时:{:.3?}", time.elapsed());
     Ok(())
 }
 

@@ -47,7 +47,7 @@ pub struct SceneScoreSeries {
 pub struct RuleSceneMeta {
     pub scene_name: String,
     pub stage: RuleStage,
-    pub weight: f64,
+    pub scene_points: f64,
 }
 
 #[derive(Clone)]
@@ -285,21 +285,21 @@ pub fn build_scene_score_series(
 
             match rule_meta.stage {
                 RuleStage::Base => {
-                    scene_row.stage_score[i] += rule_meta.weight;
+                    scene_row.stage_score[i] += rule_meta.scene_points;
                 }
                 RuleStage::Trigger => {
-                    scene_row.stage_score[i] += rule_meta.weight;
+                    scene_row.stage_score[i] += rule_meta.scene_points;
                     has_trigger_rule[scene_pos][i] = true;
                 }
                 RuleStage::Confirm => {
-                    scene_row.stage_score[i] += rule_meta.weight;
+                    scene_row.stage_score[i] += rule_meta.scene_points;
                     has_confirm_rule[scene_pos][i] = true;
                 }
                 RuleStage::Risk => {
-                    scene_row.risk_score[i] += rule_meta.weight;
+                    scene_row.risk_score[i] += rule_meta.scene_points;
                 }
                 RuleStage::Fail => {
-                    scene_row.risk_score[i] += rule_meta.weight;
+                    scene_row.risk_score[i] += rule_meta.scene_points;
                     has_fail_rule[scene_pos][i] = true;
                 }
             }
@@ -325,7 +325,7 @@ pub fn build_scene_score_series(
     out
 }
 
-fn build_tirbreak_rank_sql(tie_break: TieBreakWay, adj_type: &str) -> String {
+pub(crate) fn build_tirbreak_rank_sql(tie_break: TieBreakWay, adj_type: &str) -> String {
     match tie_break {
         TieBreakWay::TsCode => r#"
             UPDATE score_summary AS s

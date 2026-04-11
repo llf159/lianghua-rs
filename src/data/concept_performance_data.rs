@@ -65,8 +65,7 @@ pub fn rebuild_concept_performance_all(source_dir: &str) -> Result<usize, String
     let source_db_str = source_db
         .to_str()
         .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-    let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
+    let source_conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
 
     let biaocunzai = source_conn
         .query_row(
@@ -88,7 +87,10 @@ pub fn rebuild_concept_performance_all(source_dir: &str) -> Result<usize, String
     let mut rows = stmt
         .query(params![MR_FQFS])
         .map_err(|e| format!("查询概念表现全量日期范围失败:{e}"))?;
-    let Some(row) = rows.next().map_err(|e| format!("读取概念表现日期范围失败:{e}"))? else {
+    let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取概念表现日期范围失败:{e}"))?
+    else {
         return Ok(0);
     };
 
@@ -115,7 +117,9 @@ pub fn rebuild_concept_performance_range(
         return Ok(0);
     }
     if start_date > end_date {
-        return Err(format!("概念表现重建日期范围非法: {start_date} > {end_date}"));
+        return Err(format!(
+            "概念表现重建日期范围非法: {start_date} > {end_date}"
+        ));
     }
 
     let gdnm_map = match load_gdnm_map(source_dir)? {
@@ -260,8 +264,13 @@ fn load_trade_dates_in_range(
         .map_err(|e| format!("查询概念表现日期列表失败:{e}"))?;
 
     let mut trade_dates = Vec::new();
-    while let Some(row) = rows.next().map_err(|e| format!("读取概念表现日期列表失败:{e}"))? {
-        let trade_date: String = row.get(0).map_err(|e| format!("读取概念表现交易日失败:{e}"))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取概念表现日期列表失败:{e}"))?
+    {
+        let trade_date: String = row
+            .get(0)
+            .map_err(|e| format!("读取概念表现交易日失败:{e}"))?;
         if !trade_date.trim().is_empty() {
             trade_dates.push(trade_date);
         }
@@ -303,7 +312,10 @@ fn calc_gdnm_bx_rows_chunk(
         .map_err(|e| format!("查询概念表现分块基础数据失败:{e}"))?;
 
     let mut juhe_map: BTreeMap<(String, String), GdNmJxQr> = BTreeMap::new();
-    while let Some(row) = rows.next().map_err(|e| format!("读取概念表现分块基础数据失败:{e}"))? {
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取概念表现分块基础数据失败:{e}"))?
+    {
         let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
         let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
         let pct_chg: Option<f64> = row.get(2).map_err(|e| format!("读取pct_chg失败:{e}"))?;
@@ -403,7 +415,9 @@ fn load_uivi_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
 
 fn split_gdnm_items(value: &str) -> Vec<String> {
     let mut quis_map = HashMap::<String, String>::new();
-    for raw in value.split(|ch| matches!(ch, ',' | ';' | '，' | '；' | '|' | '、' | '/' | '\n' | '\r')) {
+    for raw in
+        value.split(|ch| matches!(ch, ',' | ';' | '，' | '；' | '|' | '、' | '/' | '\n' | '\r'))
+    {
         let trimed = raw.trim();
         if trimed.is_empty() {
             continue;
