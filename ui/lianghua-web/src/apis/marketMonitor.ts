@@ -29,6 +29,7 @@ export type MarketMonitorQuery = {
   sourcePath: string
   referenceTradeDate?: string
   topLimit?: number
+  board?: string
 }
 
 export async function getMarketMonitorPage(query: MarketMonitorQuery) {

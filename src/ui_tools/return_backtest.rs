@@ -494,13 +494,8 @@ fn build_strength_heatmap_item(
     let source_conn = open_source_conn(source_path)?;
     attach_result_db(&source_conn, source_path)?;
 
-    let query_rows = query_backtest_rows(
-        &source_conn,
-        rank_date,
-        ref_date,
-        board_filter,
-        name_map,
-    )?;
+    let query_rows =
+        query_backtest_rows(&source_conn, rank_date, ref_date, board_filter, name_map)?;
     let (summary, _, _, _) = build_backtest_summary(&query_rows, top_limit);
 
     Ok(ReturnBacktestStrengthHeatmapItem {

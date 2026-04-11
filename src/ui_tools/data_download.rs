@@ -5,15 +5,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     data::{
-        IndsData, ind_toml_path, load_stock_list, load_ths_concepts_list, load_trade_date_list,
-        source_db_path, stock_list_path, ths_concepts_path, trade_calendar_path,
+        IndsData, concept_performance_data::rebuild_concept_performance_all,
+        concept_performance_db_path, ind_toml_path, load_stock_list, load_ths_concepts_list,
+        load_trade_date_list, source_db_path, stock_list_path, ths_concepts_path,
+        trade_calendar_path,
     },
     download::{
         AdjType, DownloadSummary,
         runner::{
-            DownloadRuntimeConfig,
-            DownloadProgressCallback, ThsConceptDownloadConfig,
+            DownloadProgressCallback, DownloadRuntimeConfig, ThsConceptDownloadConfig,
             download as core_run_download_with_progress,
+            download_indices as core_run_index_download_with_progress,
             download_selected_stocks as core_run_selected_stock_download_with_progress,
             download_ths_concepts as core_download_ths_concepts,
         },
@@ -50,6 +52,7 @@ pub struct DataDownloadFileStatus {
 pub struct DataDownloadStatus {
     pub source_path: String,
     pub source_db: DataDownloadDbRange,
+    pub concept_performance_db: DataDownloadDbRange,
     pub stock_list: DataDownloadFileStatus,
     pub trade_calendar: DataDownloadFileStatus,
     pub ths_concepts: DataDownloadFileStatus,
@@ -92,6 +95,12 @@ pub struct ThsConceptDownloadRunInput {
     pub retry_interval_secs: u64,
     pub concurrent_enabled: bool,
     pub worker_threads: usize,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConceptPerformanceRepairRunInput {
+    pub source_path: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -199,6 +208,13 @@ pub struct PreparedThsConceptDownloadRun {
     pub retry_interval_secs: u64,
     pub concurrent_enabled: bool,
     pub worker_threads: usize,
+    pub action: String,
+    pub action_label: String,
+}
+
+#[derive(Clone)]
+pub struct PreparedConceptPerformanceRepairRun {
+    pub source_path: String,
     pub action: String,
     pub action_label: String,
 }
@@ -554,6 +570,11 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
 
     let source_db =
         query_trade_date_range(&source_db_path(trimmed), "stock_data.db", "stock_data")?;
+    let concept_performance_db = query_trade_date_range(
+        &concept_performance_db_path(trimmed),
+        "concept_performance.db",
+        "concept_performance",
+    )?;
     let trade_calendar = query_trade_calendar_status(trimmed)?;
     let stock_list = query_stock_list_status(trimmed)?;
     let ths_concepts = query_ths_concepts_status(trimmed)?;
@@ -565,6 +586,7 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
     Ok(DataDownloadStatus {
         source_path: trimmed.to_string(),
         source_db,
+        concept_performance_db,
         stock_list,
         trade_calendar,
         ths_concepts,
@@ -687,11 +709,37 @@ pub fn prepare_ths_concept_download_run(
     })
 }
 
+pub fn prepare_concept_performance_repair_run(
+    input: ConceptPerformanceRepairRunInput,
+) -> Result<PreparedConceptPerformanceRepairRun, String> {
+    let source_path = input.source_path.trim().to_string();
+    if source_path.is_empty() {
+        return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
+    }
+
+    let status = get_data_download_status(&source_path)?;
+    if !status.source_db.exists || status.source_db.row_count == 0 {
+        return Err("原始库不存在或为空，请先完成 qfq 行情下载。".to_string());
+    }
+    if !status.stock_list.exists || status.stock_list.row_count == 0 {
+        return Err("股票列表不存在或为空，请先完成基础数据刷新。".to_string());
+    }
+    if !status.ths_concepts.exists || status.ths_concepts.row_count == 0 {
+        return Err("概念文件不存在或为空，请先完成概念数据下载。".to_string());
+    }
+
+    Ok(PreparedConceptPerformanceRepairRun {
+        source_path,
+        action: "rebuild-concept-performance".to_string(),
+        action_label: "概念表现补全".to_string(),
+    })
+}
+
 pub fn run_prepared_data_download(
     prepared: &PreparedDataDownloadRun,
     progress_cb: Option<&DownloadProgressCallback>,
 ) -> Result<DataDownloadRunResult, String> {
-    let config = DownloadRuntimeConfig {
+    let stock_config = DownloadRuntimeConfig {
         source_dir: prepared.source_path.clone(),
         adj_type: AdjType::Qfq,
         token: prepared.token.clone(),
@@ -703,7 +751,23 @@ pub fn run_prepared_data_download(
         include_turnover: prepared.include_turnover,
     };
 
-    let summary = core_run_download_with_progress(&config, progress_cb)?;
+    let mut summary = core_run_download_with_progress(&stock_config, progress_cb)?;
+    let index_config = DownloadRuntimeConfig {
+        source_dir: prepared.source_path.clone(),
+        adj_type: AdjType::Ind,
+        token: prepared.token.clone(),
+        start_date: prepared.start_date.clone(),
+        end_date: prepared.end_date.clone(),
+        threads: prepared.threads,
+        retry_times: prepared.retry_times,
+        limit_calls_per_min: prepared.limit_calls_per_min,
+        include_turnover: false,
+    };
+    let index_summary = core_run_index_download_with_progress(&index_config, progress_cb)?;
+    summary.success_count += index_summary.success_count;
+    summary.failed_count += index_summary.failed_count;
+    summary.saved_rows += index_summary.saved_rows;
+    summary.failed_items.extend(index_summary.failed_items);
     let status = get_data_download_status(&prepared.source_path)?;
 
     Ok(DataDownloadRunResult {
@@ -772,6 +836,48 @@ pub fn run_prepared_ths_concept_download(
             success_count: summary.saved_rows as u64,
             failed_count: 0,
             saved_rows: summary.saved_rows as u64,
+            failed_items: Vec::new(),
+        },
+        status,
+    })
+}
+
+pub fn run_prepared_concept_performance_repair(
+    prepared: &PreparedConceptPerformanceRepairRun,
+    progress_cb: Option<&DownloadProgressCallback>,
+) -> Result<DataDownloadRunResult, String> {
+    if let Some(cb) = progress_cb {
+        cb(crate::download::runner::DownloadProgress {
+            phase: "rebuild_concept_performance".to_string(),
+            finished: 0,
+            total: 1,
+            current_label: None,
+            message: "开始全量补全概念表现库。".to_string(),
+        });
+    }
+
+    let saved_rows = rebuild_concept_performance_all(&prepared.source_path)?;
+
+    if let Some(cb) = progress_cb {
+        cb(crate::download::runner::DownloadProgress {
+            phase: "rebuild_concept_performance".to_string(),
+            finished: 1,
+            total: 1,
+            current_label: None,
+            message: format!("概念表现补全完成，共写入 {} 行。", saved_rows),
+        });
+    }
+
+    let status = get_data_download_status(&prepared.source_path)?;
+
+    Ok(DataDownloadRunResult {
+        action: prepared.action.clone(),
+        action_label: prepared.action_label.clone(),
+        elapsed_ms: 0,
+        summary: DataDownloadSummary {
+            success_count: 1,
+            failed_count: 0,
+            saved_rows: saved_rows as u64,
             failed_items: Vec::new(),
         },
         status,

@@ -53,6 +53,16 @@ export const MANAGED_SOURCE_FILES = [
     scanPathHints: [] as string[],
   },
   {
+    id: 'concept-performance-db',
+    label: '概念表现库',
+    description: '概念行情表现聚合结果库。',
+    fileName: 'concept_performance.db',
+    expectedSourcePath: 'source/concept_performance.db',
+    targetRelativePathSuffix: 'concept_performance.db',
+    extensions: ['db'],
+    scanPathHints: ['concept'],
+  },
+  {
     id: 'score-rule',
     label: '规则文件',
     description: '个股详情里的规则说明、标签和表达式来源。',
@@ -179,6 +189,7 @@ export type ManagedSourceDatasetId =
   | 'stock-data-indicators'
   | 'score-summary'
   | 'score-details'
+  | 'concept-performance'
   | 'stock-list-csv'
   | 'trade-calendar-csv'
   | 'stock-concepts-csv'

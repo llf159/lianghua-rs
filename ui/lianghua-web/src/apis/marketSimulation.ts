@@ -3,8 +3,12 @@ import { invoke } from '@tauri-apps/api/core'
 export type MarketSimulationScenarioInput = {
   id: string
   label: string
+  openGapPct: number
   pctChg: number
+  pctChgRelativeToOpen: boolean
   volumeRatio: number
+  upperShadowPct: number
+  lowerShadowPct: number
 }
 
 export type MarketSimulationTriggeredRule = {
@@ -24,6 +28,7 @@ export type MarketSimulationRow = {
   latestPrice?: number | null
   latestChangePct?: number | null
   volumeRatio?: number | null
+  pullbackPct?: number | null
   realtimeMatched: boolean
   triggeredRules: MarketSimulationTriggeredRule[]
 }
@@ -31,8 +36,12 @@ export type MarketSimulationRow = {
 export type MarketSimulationScenarioResult = {
   id: string
   label: string
+  openGapPct: number
   pctChg: number
+  pctChgRelativeToOpen: boolean
   volumeRatio: number
+  upperShadowPct: number
+  lowerShadowPct: number
   rows: MarketSimulationRow[]
   matchedCount: number
   strongHoldCount: number
@@ -54,7 +63,11 @@ export type MarketSimulationPageData = {
 
 export type MarketSimulationRealtimeScenarioQuery = {
   id: string
+  pctChgRelativeToOpen: boolean
   pctChg: number
+  volumeRatio: number
+  upperShadowPct: number
+  lowerShadowPct: number
   tsCodes: string[]
 }
 
@@ -63,6 +76,7 @@ export type MarketSimulationRealtimeRowData = {
   latestPrice?: number | null
   latestChangePct?: number | null
   volumeRatio?: number | null
+  pullbackPct?: number | null
   realtimeMatched: boolean
 }
 
@@ -87,6 +101,7 @@ export type MarketSimulationQuery = {
   sourcePath: string
   referenceTradeDate?: string
   topLimit?: number
+  board?: string
   scenarios: MarketSimulationScenarioInput[]
   sortMode?: string
   strongScoreFloor?: number

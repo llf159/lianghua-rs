@@ -2,95 +2,99 @@ use duckdb::Connection;
 use lianghua_rs::{
     crawler::SinaQuote,
     data::{
-        load_stock_list, load_trade_date_list, result_db_path, score_rule_path, source_db_path,
-        stock_list_path, ths_concepts_path, trade_calendar_path,
+        concept_performance_db_path, load_stock_list, load_trade_date_list, result_db_path,
+        score_rule_path, source_db_path, stock_list_path, ths_concepts_path,
+        trade_calendar_path,
     },
     download::runner::DownloadProgress as CoreDownloadProgress,
-    scoring::{TieBreakWay, build_rank_tiebreak, runner::scoring_all_to_db},
+    scoring::{build_rank_tiebreak, runner::scoring_all_to_db, TieBreakWay},
     ui_tools::{
         board_analysis::{
-            BoardAnalysisGroupDetail, BoardAnalysisPageData,
             get_board_analysis_group_detail as core_get_board_analysis_group_detail,
-            get_board_analysis_page as core_get_board_analysis_page,
+            get_board_analysis_page as core_get_board_analysis_page, BoardAnalysisGroupDetail,
+            BoardAnalysisPageData,
         },
         data_download::{
-            DataDownloadRunInput as CoreDataDownloadRunInput, DataDownloadRunResult,
-            DataDownloadStatus, IndicatorManageDraft as CoreIndicatorManageDraft,
-            IndicatorManagePageData, MissingStockRepairRunInput as CoreMissingStockRepairRunInput,
-            ThsConceptDownloadRunInput as CoreThsConceptDownloadRunInput,
+            prepare_concept_performance_repair_run as core_prepare_concept_performance_repair_run,
             get_data_download_status as core_get_data_download_status,
             get_indicator_manage_page as core_get_indicator_manage_page,
             prepare_data_download_run as core_prepare_data_download_run,
             prepare_missing_stock_repair_run as core_prepare_missing_stock_repair_run,
             prepare_ths_concept_download_run as core_prepare_ths_concept_download_run,
+            run_prepared_concept_performance_repair as core_run_prepared_concept_performance_repair,
             run_prepared_data_download as core_run_prepared_data_download,
             run_prepared_missing_stock_repair as core_run_prepared_missing_stock_repair,
             run_prepared_ths_concept_download as core_run_prepared_ths_concept_download,
             save_indicator_manage_page as core_save_indicator_manage_page,
+            ConceptPerformanceRepairRunInput as CoreConceptPerformanceRepairRunInput,
+            DataDownloadRunInput as CoreDataDownloadRunInput, DataDownloadRunResult,
+            DataDownloadStatus, IndicatorManageDraft as CoreIndicatorManageDraft,
+            IndicatorManagePageData, MissingStockRepairRunInput as CoreMissingStockRepairRunInput,
+            ThsConceptDownloadRunInput as CoreThsConceptDownloadRunInput,
         },
         details::{
-            StockDetailPageData, StockDetailRealtimeData,
             build_stock_detail_realtime_from_quote_map,
-            get_stock_detail_page as core_get_stock_detail_page,
+            get_stock_detail_page as core_get_stock_detail_page, StockDetailPageData,
+            StockDetailRealtimeData,
         },
-        market_monitor::{MarketMonitorPageData, build_market_monitor_page_from_rows},
+        market_monitor::{build_market_monitor_page_from_rows, MarketMonitorPageData},
         market_simulation::{
-            MarketSimulationPageData, MarketSimulationRealtimeRefreshData,
-            MarketSimulationRealtimeScenarioInput, MarketSimulationScenarioInput,
             build_market_simulation_page_from_rows,
             refresh_market_simulation_realtime as core_refresh_market_simulation_realtime,
+            MarketSimulationPageData, MarketSimulationRealtimeRefreshData,
+            MarketSimulationRealtimeScenarioInput, MarketSimulationScenarioInput,
         },
         overview::{
-            OverviewPageData, OverviewRow, get_rank_overview as core_get_rank_overview,
+            get_rank_overview as core_get_rank_overview,
             get_rank_overview_page as core_get_rank_overview_page,
-            get_rank_trade_date_options as core_get_rank_trade_date_options,
+            get_rank_trade_date_options as core_get_rank_trade_date_options, OverviewPageData,
+            OverviewRow,
         },
-        realtime::{RealtimeFetchMeta, fetch_realtime_quote_map},
+        realtime::{fetch_realtime_quote_map, RealtimeFetchMeta},
         return_backtest::{
-            ReturnBacktestPageData, ReturnBacktestStrengthOverviewData,
             get_return_backtest_page as core_get_return_backtest_page,
             get_return_backtest_strength_overview as core_get_return_backtest_strength_overview,
+            ReturnBacktestPageData, ReturnBacktestStrengthOverviewData,
         },
         statistics::{
-            StrategyStatisticsDetailData, StrategyStatisticsPageData, TriggeredStockRow,
             get_strategy_statistics_detail as core_get_strategy_statistics_detail,
             get_strategy_statistics_page as core_get_strategy_statistics_page,
             get_strategy_triggered_stocks as core_get_strategy_triggered_stocks,
+            StrategyStatisticsDetailData, StrategyStatisticsPageData, TriggeredStockRow,
         },
         stock_pick::{
-            AdvancedStockPickResultData, StockPickOptionsData, StockPickResultData,
             get_stock_pick_options as core_get_stock_pick_options,
             run_advanced_stock_pick as core_run_advanced_stock_pick,
             run_concept_stock_pick as core_run_concept_stock_pick,
             run_expression_stock_pick as core_run_expression_stock_pick,
+            AdvancedStockPickResultData, StockPickOptionsData, StockPickResultData,
         },
         strategy_manage::{
-            StrategyManagePageData, StrategyManageRuleDraft,
             add_strategy_manage_rule as core_add_strategy_manage_rule,
             check_strategy_manage_rule_draft as core_check_strategy_manage_rule_draft,
             create_strategy_manage_rule as core_create_strategy_manage_rule,
             get_strategy_manage_page as core_get_strategy_manage_page,
             remove_strategy_manage_rules as core_remove_strategy_manage_rules,
             update_strategy_manage_rule as core_update_strategy_manage_rule,
+            StrategyManagePageData, StrategyManageRuleDraft,
         },
         strategy_performance::{
-            StrategyPerformanceHorizonViewData, StrategyPerformancePageData,
-            StrategyPerformanceRuleDetail, StrategyPerformanceValidationPageData,
-            StrategyPerformanceValidationDraft,
-            get_strategy_performance_horizon_view as core_get_strategy_performance_horizon_view,
             get_latest_strategy_pick_cache as core_get_latest_strategy_pick_cache,
             get_or_build_strategy_pick_cache as core_get_or_build_strategy_pick_cache,
-            save_manual_strategy_pick_cache as core_save_manual_strategy_pick_cache,
-            get_strategy_pick_cache as core_get_strategy_pick_cache,
+            get_strategy_performance_horizon_view as core_get_strategy_performance_horizon_view,
             get_strategy_performance_page as core_get_strategy_performance_page,
-            StrategyPerformancePickCachePayload,
             get_strategy_performance_rule_detail as core_get_strategy_performance_rule_detail,
             get_strategy_performance_validation_page as core_get_strategy_performance_validation_page,
+            get_strategy_pick_cache as core_get_strategy_pick_cache,
+            save_manual_strategy_pick_cache as core_save_manual_strategy_pick_cache,
+            StrategyPerformanceHorizonViewData, StrategyPerformancePageData,
+            StrategyPerformancePickCachePayload, StrategyPerformanceRuleDetail,
+            StrategyPerformanceValidationDraft, StrategyPerformanceValidationPageData,
         },
         watch_observe::{
-            WatchObserveRow as CoreWatchObserveRow, WatchObserveSnapshotData,
-            WatchObserveStoredRow, build_watch_observe_snapshot_data, hydrate_watch_observe_rows,
-            normalize_trade_date, normalize_ts_code,
+            build_watch_observe_snapshot_data, hydrate_watch_observe_rows, normalize_trade_date,
+            normalize_ts_code, WatchObserveRow as CoreWatchObserveRow, WatchObserveSnapshotData,
+            WatchObserveStoredRow,
         },
     },
 };
@@ -105,10 +109,10 @@ use tauri::Emitter;
 use tauri::Manager;
 use tauri_plugin_fs::FilePath;
 use tauri_plugin_fs::FsExt;
-use zip::{CompressionMethod, ZipWriter, write::FileOptions};
+use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 
 #[cfg(target_os = "android")]
-use jni::{JNIEnv, objects::JObject, sys::jboolean};
+use jni::{objects::JObject, sys::jboolean, JNIEnv};
 
 #[cfg(target_os = "android")]
 use lianghua_rs::ui_tools::realtime::fetch_realtime_quote_map_async;
@@ -241,6 +245,13 @@ struct ThsConceptDownloadRequest {
     retry_interval_secs: u64,
     concurrent_enabled: bool,
     worker_threads: usize,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConceptPerformanceRepairRequest {
+    download_id: String,
+    source_path: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -433,16 +444,18 @@ async fn load_market_monitor_page_data(
     source_path: String,
     reference_trade_date: Option<String>,
     top_limit: Option<u32>,
+    board: Option<String>,
 ) -> Result<MarketMonitorPageData, String> {
     let overview_rows = tauri::async_runtime::spawn_blocking({
         let source_path = source_path.clone();
         let reference_trade_date = reference_trade_date.clone();
+        let board = board.clone();
         move || {
             core_get_rank_overview(
                 source_path,
                 reference_trade_date,
                 Some(top_limit.unwrap_or(20).max(1)),
-                None,
+                board,
                 None,
                 None,
             )
@@ -463,6 +476,7 @@ async fn load_market_simulation_page_data(
     source_path: String,
     reference_trade_date: Option<String>,
     top_limit: Option<u32>,
+    board: Option<String>,
     scenarios: Vec<MarketSimulationScenarioInput>,
     sort_mode: Option<String>,
     strong_score_floor: Option<f64>,
@@ -471,12 +485,13 @@ async fn load_market_simulation_page_data(
     let overview_rows = tauri::async_runtime::spawn_blocking({
         let source_path = source_path.clone();
         let reference_trade_date = reference_trade_date.clone();
+        let board = board.clone();
         move || {
             core_get_rank_overview(
                 source_path,
                 reference_trade_date,
                 Some(top_limit.unwrap_or(50).max(1)),
-                None,
+                board,
                 None,
                 None,
             )
@@ -486,7 +501,10 @@ async fn load_market_simulation_page_data(
     .map_err(|error| error.to_string())??;
 
     let (quote_map, fetch_meta) = if fetch_realtime.unwrap_or(false) {
-        let ts_codes: Vec<String> = overview_rows.iter().map(|row| row.ts_code.clone()).collect();
+        let ts_codes: Vec<String> = overview_rows
+            .iter()
+            .map(|row| row.ts_code.clone())
+            .collect();
         fetch_realtime_quote_map_platform(ts_codes).await?
     } else {
         (
@@ -1279,6 +1297,101 @@ async fn run_ths_concept_download(
 }
 
 #[tauri::command]
+async fn run_concept_performance_repair(
+    app: tauri::AppHandle,
+    request: ConceptPerformanceRepairRequest,
+) -> Result<DataDownloadRunResult, String> {
+    let download_id = request.download_id.trim().to_string();
+    if download_id.is_empty() {
+        return Err("download_id 不能为空".to_string());
+    }
+
+    let prepared = core_prepare_concept_performance_repair_run(CoreConceptPerformanceRepairRunInput {
+        source_path: request.source_path,
+    })?;
+    let action = prepared.action.clone();
+    let action_label = prepared.action_label.clone();
+    emit_data_download_event(
+        &app,
+        DataDownloadEventPayload {
+            download_id: download_id.clone(),
+            phase: "started".to_string(),
+            action: action.clone(),
+            action_label: action_label.clone(),
+            elapsed_ms: 0,
+            finished: 0,
+            total: 0,
+            current_label: None,
+            message: format!("{action_label} 已启动，正在准备补全概念表现库。"),
+        },
+    );
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let started_at = Instant::now();
+        let result = (|| -> Result<DataDownloadRunResult, String> {
+            let progress_app = app.clone();
+            let progress_download_id = download_id.clone();
+            let progress_action = action.clone();
+            let progress_action_label = action_label.clone();
+            let progress_started_at = started_at;
+            let progress_cb = move |progress: CoreDownloadProgress| {
+                emit_core_download_progress(
+                    &progress_app,
+                    progress_download_id.as_str(),
+                    progress_action.as_str(),
+                    progress_action_label.as_str(),
+                    progress_started_at.elapsed().as_millis() as u64,
+                    progress,
+                );
+            };
+
+            let mut run_result =
+                core_run_prepared_concept_performance_repair(&prepared, Some(&progress_cb))?;
+            run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
+            Ok(run_result)
+        })();
+
+        match &result {
+            Ok(run_result) => emit_data_download_event(
+                &app,
+                DataDownloadEventPayload {
+                    download_id: download_id.clone(),
+                    phase: "completed".to_string(),
+                    action: action.clone(),
+                    action_label: action_label.clone(),
+                    elapsed_ms: run_result.elapsed_ms,
+                    finished: run_result.summary.success_count + run_result.summary.failed_count,
+                    total: run_result.summary.success_count + run_result.summary.failed_count,
+                    current_label: None,
+                    message: format!(
+                        "{} 已完成，写入 {} 行。",
+                        action_label, run_result.summary.saved_rows
+                    ),
+                },
+            ),
+            Err(error) => emit_data_download_event(
+                &app,
+                DataDownloadEventPayload {
+                    download_id: download_id.clone(),
+                    phase: "failed".to_string(),
+                    action: action.clone(),
+                    action_label: action_label.clone(),
+                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    finished: 0,
+                    total: 0,
+                    current_label: None,
+                    message: format!("{} 失败: {}", action_label, error),
+                },
+            ),
+        }
+
+        result
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn run_ranking_score_calculation(
     source_path: String,
     start_date: String,
@@ -1458,8 +1571,9 @@ async fn get_market_monitor_page(
     source_path: String,
     reference_trade_date: Option<String>,
     top_limit: Option<u32>,
+    board: Option<String>,
 ) -> Result<MarketMonitorPageData, String> {
-    load_market_monitor_page_data(source_path, reference_trade_date, top_limit).await
+    load_market_monitor_page_data(source_path, reference_trade_date, top_limit, board).await
 }
 
 #[tauri::command]
@@ -1467,6 +1581,7 @@ async fn get_market_simulation_page(
     source_path: String,
     reference_trade_date: Option<String>,
     top_limit: Option<u32>,
+    board: Option<String>,
     scenarios: Vec<MarketSimulationScenarioInput>,
     sort_mode: Option<String>,
     strong_score_floor: Option<f64>,
@@ -1476,6 +1591,7 @@ async fn get_market_simulation_page(
         source_path,
         reference_trade_date,
         top_limit,
+        board,
         scenarios,
         sort_mode,
         strong_score_floor,
@@ -2282,6 +2398,27 @@ fn preview_managed_source_dataset_inner(
             order_by_sql = "trade_date DESC, ts_code ASC, rule_name ASC";
             drop(conn);
         }
+        "concept-performance" => {
+            let db_path = concept_performance_db_path(source_path_str);
+            if !db_path.exists() {
+                return Err(format!("概念表现库不存在: {}", db_path.display()));
+            }
+            let db_path_str = db_path
+                .to_str()
+                .ok_or_else(|| "concept_performance.db 路径不是有效 UTF-8".to_string())?;
+            let conn = Connection::open(db_path_str)
+                .map_err(|error| format!("打开 concept_performance.db 失败: {error}"))?;
+            let relation = quote_ident("concept_performance");
+            let columns = load_relation_columns(&conn, &relation)?;
+            filter_trade_column = Some("trade_date");
+            dataset_label = "概念表现库";
+            target_path = db_path.display().to_string();
+            relation_sql = relation;
+            selected_columns = columns.clone();
+            all_columns = columns;
+            order_by_sql = "trade_date DESC, concept ASC";
+            drop(conn);
+        }
         "stock-list-csv" => {
             let csv_path = stock_list_path(source_path_str);
             if !csv_path.exists() {
@@ -2349,6 +2486,13 @@ fn preview_managed_source_dataset_inner(
     let uses_memory_conn = normalized_dataset_id.ends_with("-csv");
     let conn = if uses_memory_conn {
         Connection::open_in_memory().map_err(|error| format!("打开内存查询连接失败: {error}"))?
+    } else if normalized_dataset_id == "concept-performance" {
+        let db_path = concept_performance_db_path(source_path_str);
+        let db_path_str = db_path
+            .to_str()
+            .ok_or_else(|| "concept_performance.db 路径不是有效 UTF-8".to_string())?;
+        Connection::open(db_path_str)
+            .map_err(|error| format!("打开 concept_performance.db 失败: {error}"))?
     } else if normalized_dataset_id.starts_with("stock-data-") {
         let db_path = source_db_path(source_path_str);
         let db_path_str = db_path
@@ -2953,6 +3097,7 @@ fn managed_source_file_name(file_id: &str) -> Option<&'static str> {
         "stock-list" => Some("stock_list.csv"),
         "trade-calendar" => Some("trade_calendar.csv"),
         "result-db" => Some("scoring_result.db"),
+        "concept-performance-db" => Some("concept_performance.db"),
         "score-rule" => Some("score_rule.toml"),
         "indicator-config" => Some("ind.toml"),
         "ths-concepts" => Some("stock_concepts.csv"),
@@ -3236,6 +3381,7 @@ pub fn run() {
             run_data_download,
             run_missing_stock_repair,
             run_ths_concept_download,
+            run_concept_performance_repair,
             run_ranking_score_calculation,
             save_indicator_manage_page,
             run_ranking_tiebreak_fill,

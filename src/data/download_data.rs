@@ -13,6 +13,7 @@ fn adj_type_name(adj_type: AdjType) -> &'static str {
         AdjType::Qfq => "qfq",
         AdjType::Hfq => "hfq",
         AdjType::Raw => "raw",
+        AdjType::Ind => "ind",
     }
 }
 

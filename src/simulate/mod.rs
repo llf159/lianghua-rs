@@ -256,13 +256,21 @@ explain = "test"
         let inputs = vec![
             SimulateBarInput {
                 trade_date: Some("20260408".to_string()),
+                open_gap_pct: 0.0,
                 pct_chg: 5.0,
+                pct_chg_relative_to_open: false,
                 volume_ratio: 1.5,
+                upper_shadow_pct: 0.0,
+                lower_shadow_pct: 0.0,
             },
             SimulateBarInput {
                 trade_date: Some("20260409".to_string()),
+                open_gap_pct: 0.0,
                 pct_chg: -3.0,
+                pct_chg_relative_to_open: false,
                 volume_ratio: 0.8,
+                upper_shadow_pct: 0.0,
+                lower_shadow_pct: 0.0,
             },
         ];
 
@@ -284,8 +292,12 @@ explain = "test"
         let source_dir = create_test_source_dir().expect("create source dir");
         let inputs = vec![SimulateBarInput {
             trade_date: Some("20260408".to_string()),
+            open_gap_pct: 0.0,
             pct_chg: 5.0,
+            pct_chg_relative_to_open: false,
             volume_ratio: 1.5,
+            upper_shadow_pct: 0.0,
+            lower_shadow_pct: 0.0,
         }];
 
         let result = run_simulated_scoring(

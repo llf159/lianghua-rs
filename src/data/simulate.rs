@@ -9,12 +9,19 @@ const EPS: f64 = 1e-12;
 #[derive(Debug, Clone)]
 pub struct SimulateBarInput {
     pub trade_date: Option<String>,
+    pub open_gap_pct: f64,
     pub pct_chg: f64,
+    pub pct_chg_relative_to_open: bool,
     pub volume_ratio: f64,
+    pub upper_shadow_pct: f64,
+    pub lower_shadow_pct: f64,
 }
 
 impl SimulateBarInput {
     fn validate(&self) -> Result<(), String> {
+        if !self.open_gap_pct.is_finite() {
+            return Err("模拟开盘幅度必须是有限数字".to_string());
+        }
         if !self.pct_chg.is_finite() {
             return Err("模拟涨幅必须是有限数字".to_string());
         }
@@ -23,6 +30,18 @@ impl SimulateBarInput {
         }
         if self.volume_ratio < 0.0 {
             return Err("模拟量比不能小于0".to_string());
+        }
+        if !self.upper_shadow_pct.is_finite() {
+            return Err("模拟上影线必须是有限数字".to_string());
+        }
+        if self.upper_shadow_pct < 0.0 {
+            return Err("模拟上影线不能小于0".to_string());
+        }
+        if !self.lower_shadow_pct.is_finite() {
+            return Err("模拟下影线必须是有限数字".to_string());
+        }
+        if self.lower_shadow_pct < 0.0 {
+            return Err("模拟下影线不能小于0".to_string());
         }
         Ok(())
     }
@@ -64,11 +83,22 @@ pub fn build_simulated_row_data(
     let previous_amount = latest_value(&["AMOUNT"]).unwrap_or(0.0);
     let previous_turnover_rate = latest_value(&["TURNOVER_RATE", "TOR"]);
 
-    let simulated_close = previous_close * (1.0 + simulate.pct_chg / 100.0);
-    let simulated_open = previous_close;
-    let simulated_high = simulated_open.max(simulated_close);
-    let simulated_low = simulated_open.min(simulated_close);
+    let simulated_open = previous_close * (1.0 + simulate.open_gap_pct / 100.0);
+    let simulated_close = if simulate.pct_chg_relative_to_open {
+        simulated_open * (1.0 + simulate.pct_chg / 100.0)
+    } else {
+        previous_close * (1.0 + simulate.pct_chg / 100.0)
+    };
+    let body_high = simulated_open.max(simulated_close);
+    let body_low = simulated_open.min(simulated_close);
+    let simulated_high = body_high * (1.0 + simulate.upper_shadow_pct / 100.0);
+    let simulated_low = (body_low * (1.0 - simulate.lower_shadow_pct / 100.0)).max(0.0);
     let simulated_change = simulated_close - previous_close;
+    let simulated_pct_chg = if previous_close.abs() >= EPS {
+        simulated_change / previous_close * 100.0
+    } else {
+        0.0
+    };
     let simulated_volume = previous_volume * simulate.volume_ratio;
     let simulated_turnover_rate = previous_turnover_rate.map(|value| value * simulate.volume_ratio);
 
@@ -76,14 +106,19 @@ pub fn build_simulated_row_data(
         0.0
     } else if previous_volume.abs() >= EPS && previous_amount.abs() >= EPS {
         let previous_avg_price = previous_amount / previous_volume;
+        let open_ratio = if previous_close.abs() >= EPS {
+            simulated_open / previous_close
+        } else {
+            1.0
+        };
         let close_ratio = if previous_close.abs() >= EPS {
             simulated_close / previous_close
         } else {
             1.0
         };
-        simulated_volume * (previous_avg_price * (1.0 + close_ratio) / 2.0).max(0.0)
+        simulated_volume * (previous_avg_price * (open_ratio + close_ratio) / 2.0).max(0.0)
     } else {
-        simulated_volume * ((previous_close + simulated_close) / 2.0).max(0.0)
+        simulated_volume * ((simulated_open + simulated_close) / 2.0).max(0.0)
     };
 
     row_data.trade_dates.push(simulated_trade_date);
@@ -104,7 +139,7 @@ pub fn build_simulated_row_data(
         ("C", Some(simulated_close)),
         ("PRE_CLOSE", Some(previous_close)),
         ("CHANGE", Some(simulated_change)),
-        ("PCT_CHG", Some(simulate.pct_chg)),
+        ("PCT_CHG", Some(simulated_pct_chg)),
         ("V", Some(simulated_volume)),
         ("AMOUNT", Some(simulated_amount)),
     ] {
@@ -186,8 +221,12 @@ mod tests {
     fn build_simulated_row_data_appends_new_tail() {
         let input = SimulateBarInput {
             trade_date: Some("20260408".to_string()),
+            open_gap_pct: 0.0,
             pct_chg: 5.0,
+            pct_chg_relative_to_open: false,
             volume_ratio: 1.5,
+            upper_shadow_pct: 0.0,
+            lower_shadow_pct: 0.0,
         };
 
         let row_data = build_simulated_row_data(sample_row_data(), &input).expect("simulate row");
@@ -217,8 +256,12 @@ mod tests {
     fn build_simulated_runtime_keeps_latest_tail_values() {
         let input = SimulateBarInput {
             trade_date: Some("20260408".to_string()),
+            open_gap_pct: 0.0,
             pct_chg: -2.0,
+            pct_chg_relative_to_open: false,
             volume_ratio: 0.5,
+            upper_shadow_pct: 0.0,
+            lower_shadow_pct: 0.0,
         };
 
         let runtime =
@@ -236,5 +279,32 @@ mod tests {
 
         assert_eq!(close_series.last().copied().flatten(), Some(9.996));
         assert_eq!(volume_series.last().copied().flatten(), Some(60.0));
+    }
+
+    #[test]
+    fn build_simulated_row_data_supports_gap_and_shadows() {
+        let input = SimulateBarInput {
+            trade_date: Some("20260408".to_string()),
+            open_gap_pct: 2.0,
+            pct_chg: 3.0,
+            pct_chg_relative_to_open: true,
+            volume_ratio: 1.0,
+            upper_shadow_pct: 1.5,
+            lower_shadow_pct: 2.0,
+        };
+
+        let row_data = build_simulated_row_data(sample_row_data(), &input).expect("simulate row");
+
+        assert_eq!(row_data.cols["O"].last().copied().flatten(), Some(10.404));
+        assert_eq!(row_data.cols["C"].last().copied().flatten(), Some(10.71612));
+        assert_eq!(
+            row_data.cols["H"].last().copied().flatten(),
+            Some(10.8768618)
+        );
+        assert_eq!(row_data.cols["L"].last().copied().flatten(), Some(10.19592));
+        assert_eq!(
+            row_data.cols["PCT_CHG"].last().copied().flatten(),
+            Some(5.060000000000006)
+        );
     }
 }

@@ -20,15 +20,21 @@ use crate::{
 };
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
+const EPS: f64 = 1e-12;
 const FLAT_PCT_TOLERANCE: f64 = 1.0;
+const NEUTRAL_RATIO_TOLERANCE: f64 = 0.1;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketSimulationScenarioInput {
     pub id: String,
     pub label: String,
+    pub open_gap_pct: f64,
     pub pct_chg: f64,
+    pub pct_chg_relative_to_open: bool,
     pub volume_ratio: f64,
+    pub upper_shadow_pct: f64,
+    pub lower_shadow_pct: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -52,6 +58,7 @@ pub struct MarketSimulationRow {
     pub latest_price: Option<f64>,
     pub latest_change_pct: Option<f64>,
     pub volume_ratio: Option<f64>,
+    pub pullback_pct: Option<f64>,
     pub realtime_matched: bool,
     pub triggered_rules: Vec<MarketSimulationTriggeredRule>,
 }
@@ -61,8 +68,12 @@ pub struct MarketSimulationRow {
 pub struct MarketSimulationScenarioResult {
     pub id: String,
     pub label: String,
+    pub open_gap_pct: f64,
     pub pct_chg: f64,
+    pub pct_chg_relative_to_open: bool,
     pub volume_ratio: f64,
+    pub upper_shadow_pct: f64,
+    pub lower_shadow_pct: f64,
     pub rows: Vec<MarketSimulationRow>,
     pub matched_count: usize,
     pub strong_hold_count: usize,
@@ -88,7 +99,11 @@ pub struct MarketSimulationPageData {
 #[serde(rename_all = "camelCase")]
 pub struct MarketSimulationRealtimeScenarioInput {
     pub id: String,
+    pub pct_chg_relative_to_open: bool,
     pub pct_chg: f64,
+    pub volume_ratio: f64,
+    pub upper_shadow_pct: f64,
+    pub lower_shadow_pct: f64,
     pub ts_codes: Vec<String>,
 }
 
@@ -99,6 +114,7 @@ pub struct MarketSimulationRealtimeRowData {
     pub latest_price: Option<f64>,
     pub latest_change_pct: Option<f64>,
     pub volume_ratio: Option<f64>,
+    pub pullback_pct: Option<f64>,
     pub realtime_matched: bool,
 }
 
@@ -146,15 +162,28 @@ fn validate_scenarios(
         if !scenario.pct_chg.is_finite() {
             return Err(format!("第 {} 个模拟场景涨幅非法", index + 1));
         }
+        if !scenario.open_gap_pct.is_finite() {
+            return Err(format!("第 {} 个模拟场景开盘幅度非法", index + 1));
+        }
         if !scenario.volume_ratio.is_finite() || scenario.volume_ratio < 0.0 {
             return Err(format!("第 {} 个模拟场景量比非法", index + 1));
+        }
+        if !scenario.upper_shadow_pct.is_finite() || scenario.upper_shadow_pct < 0.0 {
+            return Err(format!("第 {} 个模拟场景上影线非法", index + 1));
+        }
+        if !scenario.lower_shadow_pct.is_finite() || scenario.lower_shadow_pct < 0.0 {
+            return Err(format!("第 {} 个模拟场景下影线非法", index + 1));
         }
 
         out.push(MarketSimulationScenarioInput {
             id,
             label,
+            open_gap_pct: scenario.open_gap_pct,
             pct_chg: scenario.pct_chg,
+            pct_chg_relative_to_open: scenario.pct_chg_relative_to_open,
             volume_ratio: scenario.volume_ratio,
+            upper_shadow_pct: scenario.upper_shadow_pct,
+            lower_shadow_pct: scenario.lower_shadow_pct,
         });
     }
 
@@ -177,6 +206,15 @@ fn validate_realtime_refresh_scenarios(
         if !scenario.pct_chg.is_finite() {
             return Err(format!("第 {} 个实时刷新场景涨幅非法", index + 1));
         }
+        if !scenario.volume_ratio.is_finite() || scenario.volume_ratio < 0.0 {
+            return Err(format!("第 {} 个实时刷新场景量比非法", index + 1));
+        }
+        if !scenario.upper_shadow_pct.is_finite() || scenario.upper_shadow_pct < 0.0 {
+            return Err(format!("第 {} 个实时刷新场景上影线非法", index + 1));
+        }
+        if !scenario.lower_shadow_pct.is_finite() || scenario.lower_shadow_pct < 0.0 {
+            return Err(format!("第 {} 个实时刷新场景下影线非法", index + 1));
+        }
 
         let ts_codes = scenario
             .ts_codes
@@ -187,7 +225,11 @@ fn validate_realtime_refresh_scenarios(
 
         out.push(MarketSimulationRealtimeScenarioInput {
             id,
+            pct_chg_relative_to_open: scenario.pct_chg_relative_to_open,
             pct_chg: scenario.pct_chg,
+            volume_ratio: scenario.volume_ratio,
+            upper_shadow_pct: scenario.upper_shadow_pct,
+            lower_shadow_pct: scenario.lower_shadow_pct,
             ts_codes,
         });
     }
@@ -238,8 +280,8 @@ fn resolve_simulated_trade_date(
     }
 }
 
-fn realtime_matches_by_price_only(latest_change_pct: Option<f64>, target_pct_chg: f64) -> bool {
-    let Some(actual_change_pct) = latest_change_pct.filter(|value| value.is_finite()) else {
+fn matches_change_pct(actual_change_pct: Option<f64>, target_pct_chg: f64) -> bool {
+    let Some(actual_change_pct) = actual_change_pct.filter(|value| value.is_finite()) else {
         return false;
     };
 
@@ -250,6 +292,91 @@ fn realtime_matches_by_price_only(latest_change_pct: Option<f64>, target_pct_chg
     } else {
         (actual_change_pct - target_pct_chg).abs() <= FLAT_PCT_TOLERANCE
     }
+}
+
+fn matches_volume_ratio(actual_volume_ratio: Option<f64>, target_volume_ratio: f64) -> bool {
+    if target_volume_ratio <= EPS {
+        return true;
+    }
+
+    let Some(actual_volume_ratio) = actual_volume_ratio.filter(|value| value.is_finite()) else {
+        return false;
+    };
+
+    if target_volume_ratio > 1.0 + NEUTRAL_RATIO_TOLERANCE {
+        actual_volume_ratio + EPS >= target_volume_ratio
+    } else if target_volume_ratio < 1.0 - NEUTRAL_RATIO_TOLERANCE {
+        actual_volume_ratio - EPS <= target_volume_ratio
+    } else {
+        (actual_volume_ratio - target_volume_ratio).abs() <= NEUTRAL_RATIO_TOLERANCE
+    }
+}
+
+fn matches_floor(actual_value: Option<f64>, min_value: f64) -> bool {
+    if min_value <= EPS {
+        return true;
+    }
+
+    actual_value
+        .filter(|value| value.is_finite())
+        .map(|value| value + EPS >= min_value)
+        .unwrap_or(false)
+}
+
+fn resolve_realtime_change_pct(
+    quote: Option<&SinaQuote>,
+    pct_chg_relative_to_open: bool,
+) -> Option<f64> {
+    let quote = quote?;
+    if pct_chg_relative_to_open {
+        if quote.open.abs() < EPS {
+            None
+        } else {
+            Some((quote.price / quote.open - 1.0) * 100.0)
+        }
+    } else {
+        quote.change_pct
+    }
+}
+
+fn calculate_pullback_pct(latest_price: Option<f64>, high: Option<f64>) -> Option<f64> {
+    let price = latest_price.filter(|value| value.is_finite())?;
+    let high = high.filter(|value| value.is_finite() && *value > 0.0)?;
+    Some(((high - price).max(0.0) / high) * 100.0)
+}
+
+fn calculate_upper_shadow_pct(quote: Option<&SinaQuote>) -> Option<f64> {
+    let quote = quote?;
+    let body_high = quote.open.max(quote.price);
+    if body_high <= 0.0 {
+        return None;
+    }
+    Some(((quote.high - body_high).max(0.0) / body_high) * 100.0)
+}
+
+fn calculate_lower_shadow_pct(quote: Option<&SinaQuote>) -> Option<f64> {
+    let quote = quote?;
+    let body_low = quote.open.min(quote.price);
+    if body_low <= 0.0 {
+        return None;
+    }
+    Some(((body_low - quote.low).max(0.0) / body_low) * 100.0)
+}
+
+fn realtime_matches_scenario(
+    latest_change_pct: Option<f64>,
+    volume_ratio: Option<f64>,
+    upper_shadow_pct: Option<f64>,
+    lower_shadow_pct: Option<f64>,
+    scenario_pct_chg: f64,
+    scenario_volume_ratio: f64,
+    scenario_upper_shadow_pct: f64,
+    scenario_lower_shadow_pct: f64,
+) -> bool {
+    matches_change_pct(latest_change_pct, scenario_pct_chg)
+        && matches_volume_ratio(volume_ratio, scenario_volume_ratio)
+        && matches_floor(upper_shadow_pct, scenario_upper_shadow_pct)
+        && matches_floor(lower_shadow_pct, scenario_lower_shadow_pct)
 }
 
 fn fill_simulation_extra_fields(
@@ -424,8 +551,12 @@ pub fn build_market_simulation_page_from_rows(
                 .collect(),
             &[crate::data::simulate::SimulateBarInput {
                 trade_date: Some(simulated_trade_date.clone()),
+                open_gap_pct: scenario.open_gap_pct,
                 pct_chg: scenario.pct_chg,
+                pct_chg_relative_to_open: scenario.pct_chg_relative_to_open,
                 volume_ratio: scenario.volume_ratio,
+                upper_shadow_pct: scenario.upper_shadow_pct,
+                lower_shadow_pct: scenario.lower_shadow_pct,
             }],
             &caches,
         )?;
@@ -448,6 +579,8 @@ pub fn build_market_simulation_page_from_rows(
                 }
                 _ => None,
             };
+            let pullback_pct =
+                calculate_pullback_pct(quote.map(|item| item.price), quote.map(|item| item.high));
             let base_total_score = overview_row.total_score;
             let simulated_total_score = day.total_score;
             let score_delta = simulated_total_score - base_total_score.unwrap_or(0.0);
@@ -457,7 +590,10 @@ pub fn build_market_simulation_page_from_rows(
                         && simulated_total_score >= floor
                 })
                 .unwrap_or(false);
-            let latest_change_pct = quote.and_then(|item| item.change_pct);
+            let latest_change_pct =
+                resolve_realtime_change_pct(quote, scenario.pct_chg_relative_to_open);
+            let realtime_upper_shadow_pct = calculate_upper_shadow_pct(quote);
+            let realtime_lower_shadow_pct = calculate_lower_shadow_pct(quote);
 
             rows.push(MarketSimulationRow {
                 ts_code: result.ts_code.clone(),
@@ -471,9 +607,16 @@ pub fn build_market_simulation_page_from_rows(
                 latest_price: quote.map(|item| item.price),
                 latest_change_pct,
                 volume_ratio: realtime_volume_ratio,
-                realtime_matched: realtime_matches_by_price_only(
+                pullback_pct,
+                realtime_matched: realtime_matches_scenario(
                     latest_change_pct,
+                    realtime_volume_ratio,
+                    realtime_upper_shadow_pct,
+                    realtime_lower_shadow_pct,
                     scenario.pct_chg,
+                    scenario.volume_ratio,
+                    scenario.upper_shadow_pct,
+                    scenario.lower_shadow_pct,
                 ),
                 triggered_rules: day
                     .rule_scores
@@ -494,8 +637,12 @@ pub fn build_market_simulation_page_from_rows(
         scenario_results.push(MarketSimulationScenarioResult {
             id: scenario.id,
             label: scenario.label,
+            open_gap_pct: scenario.open_gap_pct,
             pct_chg: scenario.pct_chg,
+            pct_chg_relative_to_open: scenario.pct_chg_relative_to_open,
             volume_ratio: scenario.volume_ratio,
+            upper_shadow_pct: scenario.upper_shadow_pct,
+            lower_shadow_pct: scenario.lower_shadow_pct,
             rows,
             matched_count,
             strong_hold_count,
@@ -521,6 +668,7 @@ pub fn get_market_simulation_page(
     source_path: String,
     reference_trade_date: Option<String>,
     top_limit: Option<u32>,
+    board: Option<String>,
     scenarios: Vec<MarketSimulationScenarioInput>,
     sort_mode: Option<String>,
     strong_score_floor: Option<f64>,
@@ -531,7 +679,7 @@ pub fn get_market_simulation_page(
         source_path.clone(),
         reference_trade_date,
         Some(limit),
-        None,
+        board,
         None,
         None,
     )?;
@@ -583,7 +731,8 @@ pub fn refresh_market_simulation_realtime(
             let mut rows = Vec::with_capacity(scenario.ts_codes.len());
             for ts_code in scenario.ts_codes {
                 let quote = quote_map.get(&ts_code);
-                let latest_change_pct = quote.and_then(|item| item.change_pct);
+                let latest_change_pct =
+                    resolve_realtime_change_pct(quote, scenario.pct_chg_relative_to_open);
                 let volume_ratio = match (
                     quote.map(|item| item.vol),
                     latest_vol_map.get(&ts_code).copied(),
@@ -593,14 +742,27 @@ pub fn refresh_market_simulation_realtime(
                     }
                     _ => None,
                 };
+                let pullback_pct = calculate_pullback_pct(
+                    quote.map(|item| item.price),
+                    quote.map(|item| item.high),
+                );
+                let upper_shadow_pct = calculate_upper_shadow_pct(quote);
+                let lower_shadow_pct = calculate_lower_shadow_pct(quote);
                 rows.push(MarketSimulationRealtimeRowData {
                     ts_code,
                     latest_price: quote.map(|item| item.price),
                     latest_change_pct,
                     volume_ratio,
-                    realtime_matched: realtime_matches_by_price_only(
+                    pullback_pct,
+                    realtime_matched: realtime_matches_scenario(
                         latest_change_pct,
+                        volume_ratio,
+                        upper_shadow_pct,
+                        lower_shadow_pct,
                         scenario.pct_chg,
+                        scenario.volume_ratio,
+                        scenario.upper_shadow_pct,
+                        scenario.lower_shadow_pct,
                     ),
                 });
             }

@@ -27,11 +27,20 @@ import {
   normalizeTradeDates,
   pickDateValue,
 } from "../../shared/tradeDate";
+import {
+  TableSortButton,
+  getAriaSort,
+  getNextSortState,
+  sortRows,
+  type SortDefinition,
+  type SortDirection,
+} from "../../shared/tableSort";
+import { STOCK_PICK_BOARD_OPTIONS } from "./stockPickShared";
 import "./css/MarketSimulationTab.css";
 
 const DEFAULT_TOP_LIMIT = "1000";
 const DEFAULT_DISPLAY_LIMIT = "50";
-const MARKET_SIMULATION_STATE_KEY = "lh_market_simulation_page_state_v1";
+const MARKET_SIMULATION_STATE_KEY = "lh_market_simulation_page_state_v2";
 
 type SortMode = "sim_score" | "score_delta";
 type ScenarioPresetKey =
@@ -45,8 +54,12 @@ type ScenarioDraft = {
   id: string;
   presetKey: ScenarioPresetKey;
   label: string;
+  openGapPctInput: string;
   pctChgInput: string;
+  pctChgRelativeToOpen: boolean;
   volumeRatioInput: string;
+  upperShadowPctInput: string;
+  lowerShadowPctInput: string;
 };
 
 type PersistedMarketSimulationState = {
@@ -54,6 +67,7 @@ type PersistedMarketSimulationState = {
   dateOptions: string[];
   referenceTradeDate: string;
   topLimitInput: string;
+  boardFilter: (typeof STOCK_PICK_BOARD_OPTIONS)[number];
   displayLimitInput: string;
   sortMode: SortMode;
   strongScoreFloorInput: string;
@@ -66,7 +80,21 @@ type MarketSimulationRowDelta = {
   latestPrice: number | null;
   latestChangePct: number | null;
   volumeRatio: number | null;
+  pullbackPct: number | null;
 };
+
+type MarketSimulationSortKey =
+  | "tsCode"
+  | "name"
+  | "referenceRank"
+  | "baseTotalScore"
+  | "simulatedTotalScore"
+  | "scoreDelta"
+  | "latestPrice"
+  | "latestChangePct"
+  | "volumeRatio"
+  | "pullbackPct"
+  | "concept";
 
 const SCENARIO_PRESETS: Record<
   ScenarioPresetKey,
@@ -96,8 +124,12 @@ function createScenarioDraft(
     id: `scenario_${presetKey}_${seed}`,
     presetKey,
     label: preset.label,
+    openGapPctInput: "0.0",
     pctChgInput: preset.pctChg,
+    pctChgRelativeToOpen: false,
     volumeRatioInput: preset.volumeRatio,
+    upperShadowPctInput: "0.0",
+    lowerShadowPctInput: "0.0",
   };
 }
 
@@ -207,16 +239,32 @@ function buildScenarioQuery(
 
   for (let index = 0; index < scenarios.length; index += 1) {
     const scenario = scenarios[index];
+    const openGapPct = parseOptionalNumber(scenario.openGapPctInput);
     const pctChg = parseOptionalNumber(scenario.pctChgInput);
     const volumeRatio = parseOptionalNumber(scenario.volumeRatioInput);
-    if (pctChg === null || volumeRatio === null || volumeRatio < 0) {
+    const upperShadowPct = parseOptionalNumber(scenario.upperShadowPctInput);
+    const lowerShadowPct = parseOptionalNumber(scenario.lowerShadowPctInput);
+    if (
+      openGapPct === null ||
+      pctChg === null ||
+      volumeRatio === null ||
+      upperShadowPct === null ||
+      lowerShadowPct === null ||
+      volumeRatio < 0 ||
+      upperShadowPct < 0 ||
+      lowerShadowPct < 0
+    ) {
       return null;
     }
     out.push({
       id: scenario.id,
       label: scenario.label.trim() || `场景 ${index + 1}`,
+      openGapPct,
       pctChg,
+      pctChgRelativeToOpen: scenario.pctChgRelativeToOpen,
       volumeRatio,
+      upperShadowPct,
+      lowerShadowPct,
     });
   }
 
@@ -240,6 +288,7 @@ function buildSimulationConfigSignature({
   sourcePath,
   referenceTradeDate,
   topLimitInput,
+  boardFilter,
   sortMode,
   strongScoreFloorInput,
   scenarios,
@@ -247,6 +296,7 @@ function buildSimulationConfigSignature({
   sourcePath: string;
   referenceTradeDate: string;
   topLimitInput: string;
+  boardFilter: (typeof STOCK_PICK_BOARD_OPTIONS)[number];
   sortMode: SortMode;
   strongScoreFloorInput: string;
   scenarios: ScenarioDraft[];
@@ -255,14 +305,19 @@ function buildSimulationConfigSignature({
     sourcePath: sourcePath.trim(),
     referenceTradeDate: referenceTradeDate.trim(),
     topLimitInput: topLimitInput.trim(),
+    boardFilter,
     sortMode,
     strongScoreFloorInput: strongScoreFloorInput.trim(),
     scenarios: scenarios.map((scenario) => ({
       id: scenario.id,
       presetKey: scenario.presetKey,
       label: scenario.label.trim(),
+      openGapPctInput: scenario.openGapPctInput.trim(),
       pctChgInput: scenario.pctChgInput.trim(),
+      pctChgRelativeToOpen: scenario.pctChgRelativeToOpen,
       volumeRatioInput: scenario.volumeRatioInput.trim(),
+      upperShadowPctInput: scenario.upperShadowPctInput.trim(),
+      lowerShadowPctInput: scenario.lowerShadowPctInput.trim(),
     })),
   });
 }
@@ -295,6 +350,7 @@ function buildRealtimeDeltaState(
           previousRow?.latestChangePct,
         ),
         volumeRatio: computeDelta(row.volumeRatio, previousRow?.volumeRatio),
+        pullbackPct: computeDelta(row.pullbackPct, previousRow?.pullbackPct),
       };
     }
   }
@@ -338,6 +394,7 @@ function applyRealtimeRefreshToPageData(
             latestPrice: refreshRow.latestPrice ?? null,
             latestChangePct: refreshRow.latestChangePct ?? null,
             volumeRatio: refreshRow.volumeRatio ?? null,
+            pullbackPct: refreshRow.pullbackPct ?? null,
             realtimeMatched: refreshRow.realtimeMatched,
           };
         }),
@@ -364,8 +421,12 @@ export default function MarketSimulationTab() {
             typeof item === "object" &&
             typeof item.id === "string" &&
             typeof item.label === "string" &&
+            typeof item.openGapPctInput === "string" &&
             typeof item.pctChgInput === "string" &&
+            typeof item.pctChgRelativeToOpen === "boolean" &&
             typeof item.volumeRatioInput === "string" &&
+            typeof item.upperShadowPctInput === "string" &&
+            typeof item.lowerShadowPctInput === "string" &&
             typeof item.presetKey === "string",
         )
       : [];
@@ -386,6 +447,11 @@ export default function MarketSimulationTab() {
         typeof parsed.topLimitInput === "string"
           ? parsed.topLimitInput
           : DEFAULT_TOP_LIMIT,
+      boardFilter:
+        parsed.boardFilter &&
+        STOCK_PICK_BOARD_OPTIONS.includes(parsed.boardFilter)
+          ? parsed.boardFilter
+          : "全部",
       displayLimitInput:
         typeof parsed.displayLimitInput === "string"
           ? parsed.displayLimitInput
@@ -423,6 +489,9 @@ export default function MarketSimulationTab() {
   const [topLimitInput, setTopLimitInput] = useState(
     () => persistedState?.topLimitInput ?? DEFAULT_TOP_LIMIT,
   );
+  const [boardFilter, setBoardFilter] = useState<
+    (typeof STOCK_PICK_BOARD_OPTIONS)[number]
+  >(() => persistedState?.boardFilter ?? "全部");
   const [displayLimitInput, setDisplayLimitInput] = useState(
     () => persistedState?.displayLimitInput ?? DEFAULT_DISPLAY_LIMIT,
   );
@@ -448,20 +517,43 @@ export default function MarketSimulationTab() {
   const [rowDeltas, setRowDeltas] = useState<
     Record<string, Record<string, MarketSimulationRowDelta>>
   >({});
+  const [sortKey, setSortKey] = useState<MarketSimulationSortKey | null>(null);
+  const [sortDirection, setSortDirection] = useState<SortDirection>(null);
 
   const sourcePathTrimmed = sourcePath.trim();
   const displayLimit = toPositiveInt(displayLimitInput);
+  const sortDefinitions = useMemo(
+    () =>
+      ({
+        tsCode: { value: (row) => row.tsCode },
+        name: { value: (row) => row.name },
+        referenceRank: { value: (row) => row.referenceRank },
+        baseTotalScore: { value: (row) => row.baseTotalScore },
+        simulatedTotalScore: { value: (row) => row.simulatedTotalScore },
+        scoreDelta: { value: (row) => row.scoreDelta },
+        latestPrice: { value: (row) => row.latestPrice },
+        latestChangePct: { value: (row) => row.latestChangePct },
+        volumeRatio: { value: (row) => row.volumeRatio },
+        pullbackPct: { value: (row) => row.pullbackPct },
+        concept: { value: (row) => row.concept },
+      }) satisfies Partial<
+        Record<MarketSimulationSortKey, SortDefinition<MarketSimulationRow>>
+      >,
+    [],
+  );
   const currentBuildConfigSignature = useMemo(
     () =>
       buildSimulationConfigSignature({
         sourcePath,
         referenceTradeDate,
         topLimitInput,
+        boardFilter,
         sortMode,
         strongScoreFloorInput,
         scenarios,
       }),
     [
+      boardFilter,
       referenceTradeDate,
       scenarios,
       sortMode,
@@ -475,10 +567,13 @@ export default function MarketSimulationTab() {
     () =>
       (pageData?.scenarios ?? []).map((scenario) => ({
         ...scenario,
-        rows:
-          displayLimit != null ? scenario.rows.slice(0, displayLimit) : scenario.rows,
+        rows: (
+          sortKey && sortDirection
+            ? sortRows(scenario.rows, sortKey, sortDirection, sortDefinitions)
+            : scenario.rows
+        ).slice(0, displayLimit ?? scenario.rows.length),
       })),
-    [displayLimit, pageData],
+    [displayLimit, pageData, sortDefinitions, sortDirection, sortKey],
   );
 
   useEffect(() => {
@@ -490,6 +585,7 @@ export default function MarketSimulationTab() {
         dateOptions,
         referenceTradeDate,
         topLimitInput,
+        boardFilter,
         displayLimitInput,
         sortMode,
         strongScoreFloorInput,
@@ -500,6 +596,7 @@ export default function MarketSimulationTab() {
     );
   }, [
     buildConfigSignature,
+    boardFilter,
     dateOptions,
     displayLimitInput,
     pageData,
@@ -580,7 +677,7 @@ export default function MarketSimulationTab() {
       return;
     }
     if (!scenarioQuery) {
-      setError("请检查场景涨跌幅和量比输入");
+      setError("请检查场景的开盘幅度、涨跌幅、量比和影线输入");
       return;
     }
 
@@ -591,6 +688,7 @@ export default function MarketSimulationTab() {
         sourcePath: sourcePathTrimmed,
         referenceTradeDate: referenceTradeDate.trim() || undefined,
         topLimit,
+        board: boardFilter === "全部" ? undefined : boardFilter,
         scenarios: scenarioQuery,
         sortMode,
         strongScoreFloor: strongScoreFloor ?? undefined,
@@ -623,7 +721,11 @@ export default function MarketSimulationTab() {
         sourcePath: sourcePathTrimmed,
         scenarios: displayedScenarioRows.map((scenario) => ({
           id: scenario.id,
+          pctChgRelativeToOpen: scenario.pctChgRelativeToOpen,
           pctChg: scenario.pctChg,
+          volumeRatio: scenario.volumeRatio,
+          upperShadowPct: scenario.upperShadowPct,
+          lowerShadowPct: scenario.lowerShadowPct,
           tsCodes: scenario.rows.map((row) => row.tsCode),
         })),
       });
@@ -635,6 +737,12 @@ export default function MarketSimulationTab() {
     } finally {
       setRealtimeLoading(false);
     }
+  }
+
+  function toggleSort(nextKey: MarketSimulationSortKey) {
+    const nextState = getNextSortState(sortKey, sortDirection, nextKey);
+    setSortKey(nextState.key);
+    setSortDirection(nextState.direction);
   }
 
   const scenarioCards = displayedScenarioRows;
@@ -696,6 +804,24 @@ export default function MarketSimulationTab() {
             value={topLimitInput}
             onChange={(event) => setTopLimitInput(event.target.value)}
           />
+        </label>
+
+        <label className="market-simulation-field">
+          <span>板块筛选</span>
+          <select
+            value={boardFilter}
+            onChange={(event) =>
+              setBoardFilter(
+                event.target.value as (typeof STOCK_PICK_BOARD_OPTIONS)[number],
+              )
+            }
+          >
+            {STOCK_PICK_BOARD_OPTIONS.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
         </label>
 
         <label className="market-simulation-field">
@@ -817,8 +943,12 @@ export default function MarketSimulationTab() {
                             ...item,
                             presetKey,
                             label: preset.label,
+                            openGapPctInput: "0.0",
                             pctChgInput: preset.pctChg,
+                            pctChgRelativeToOpen: false,
                             volumeRatioInput: preset.volumeRatio,
+                            upperShadowPctInput: "0.0",
+                            lowerShadowPctInput: "0.0",
                           }
                         : item,
                     ),
@@ -850,7 +980,45 @@ export default function MarketSimulationTab() {
               />
             </label>
 
+            <label className="market-simulation-checkbox">
+              <input
+                type="checkbox"
+                checked={scenario.pctChgRelativeToOpen}
+                onChange={(event) =>
+                  setScenarios((current) =>
+                    current.map((item) =>
+                      item.id === scenario.id
+                        ? {
+                            ...item,
+                            pctChgRelativeToOpen: event.target.checked,
+                          }
+                        : item,
+                    ),
+                  )
+                }
+              />
+              <span>涨幅相对于开盘价</span>
+            </label>
+
             <div className="market-simulation-field-row">
+              <label className="market-simulation-field market-simulation-field-compact">
+                <span>开盘幅度 %</span>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={scenario.openGapPctInput}
+                  onChange={(event) =>
+                    setScenarios((current) =>
+                      current.map((item) =>
+                        item.id === scenario.id
+                          ? { ...item, openGapPctInput: event.target.value }
+                          : item,
+                      ),
+                    )
+                  }
+                />
+              </label>
+
               <label className="market-simulation-field market-simulation-field-compact">
                 <span>涨跌幅 %</span>
                 <input
@@ -868,7 +1036,9 @@ export default function MarketSimulationTab() {
                   }
                 />
               </label>
+            </div>
 
+            <div className="market-simulation-field-row is-three">
               <label className="market-simulation-field market-simulation-field-compact">
                 <span>量比</span>
                 <input
@@ -881,6 +1051,44 @@ export default function MarketSimulationTab() {
                       current.map((item) =>
                         item.id === scenario.id
                           ? { ...item, volumeRatioInput: event.target.value }
+                          : item,
+                      ),
+                    )
+                  }
+                />
+              </label>
+
+              <label className="market-simulation-field market-simulation-field-compact">
+                <span>上影线 %</span>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={scenario.upperShadowPctInput}
+                  onChange={(event) =>
+                    setScenarios((current) =>
+                      current.map((item) =>
+                        item.id === scenario.id
+                          ? { ...item, upperShadowPctInput: event.target.value }
+                          : item,
+                      ),
+                    )
+                  }
+                />
+              </label>
+
+              <label className="market-simulation-field market-simulation-field-compact">
+                <span>下影线 %</span>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={scenario.lowerShadowPctInput}
+                  onChange={(event) =>
+                    setScenarios((current) =>
+                      current.map((item) =>
+                        item.id === scenario.id
+                          ? { ...item, lowerShadowPctInput: event.target.value }
                           : item,
                       ),
                     )
@@ -916,8 +1124,14 @@ export default function MarketSimulationTab() {
                   <div>
                     <h3>{scenario.label}</h3>
                     <p>
-                      设定 {formatSignedPercent(scenario.pctChg)} / 量比{" "}
-                      {formatRatio(scenario.volumeRatio)}
+                      设定开盘 {formatSignedPercent(scenario.openGapPct)} / 涨幅{" "}
+                      {formatSignedPercent(scenario.pctChg)}
+                      {scenario.pctChgRelativeToOpen ? "（相对开盘）" : ""}
+                    </p>
+                    <p>
+                      量比 {formatRatio(scenario.volumeRatio)} / 上影{" "}
+                      {formatPercent(scenario.upperShadowPct)} / 下影{" "}
+                      {formatPercent(scenario.lowerShadowPct)}
                     </p>
                   </div>
                   <div className="market-simulation-scenario-meta">
@@ -930,16 +1144,125 @@ export default function MarketSimulationTab() {
                   <table className="market-simulation-table">
                     <thead>
                       <tr>
-                        <th>代码</th>
-                        <th>名称</th>
-                        <th>参考排</th>
-                        <th>原分</th>
-                        <th>模拟分</th>
-                        <th>增分</th>
-                        <th>实时价</th>
-                        <th>实时涨幅</th>
-                        <th>量比</th>
-                        <th>概念</th>
+                        <th aria-sort={getAriaSort(sortKey === "tsCode", sortDirection)}>
+                          <TableSortButton
+                            label="代码"
+                            isActive={sortKey === "tsCode"}
+                            direction={sortDirection}
+                            onClick={() => toggleSort("tsCode")}
+                            title="按代码排序"
+                          />
+                        </th>
+                        <th aria-sort={getAriaSort(sortKey === "name", sortDirection)}>
+                          <TableSortButton
+                            label="名称"
+                            isActive={sortKey === "name"}
+                            direction={sortDirection}
+                            onClick={() => toggleSort("name")}
+                            title="按名称排序"
+                          />
+                        </th>
+                        <th
+                          aria-sort={getAriaSort(
+                            sortKey === "referenceRank",
+                            sortDirection,
+                          )}
+                        >
+                          <TableSortButton
+                            label="参考排"
+                            isActive={sortKey === "referenceRank"}
+                            direction={sortDirection}
+                            onClick={() => toggleSort("referenceRank")}
+                            title="按参考日排名排序"
+                          />
+                        </th>
+                        <th
+                          aria-sort={getAriaSort(
+                            sortKey === "baseTotalScore",
+                            sortDirection,
+                          )}
+                        >
+                          <TableSortButton
+                            label="原分"
+                            isActive={sortKey === "baseTotalScore"}
+                            direction={sortDirection}
+                            onClick={() => toggleSort("baseTotalScore")}
+                            title="按原始总分排序"
+                          />
+                        </th>
+                        <th
+                          aria-sort={getAriaSort(
+                            sortKey === "simulatedTotalScore",
+                            sortDirection,
+                          )}
+                        >
+                          <TableSortButton
+                            label="模拟分"
+                            isActive={sortKey === "simulatedTotalScore"}
+                            direction={sortDirection}
+                            onClick={() => toggleSort("simulatedTotalScore")}
+                            title="按模拟总分排序"
+                          />
+                        </th>
+                        <th aria-sort={getAriaSort(sortKey === "scoreDelta", sortDirection)}>
+                          <TableSortButton
+                            label="增分"
+                            isActive={sortKey === "scoreDelta"}
+                            direction={sortDirection}
+                            onClick={() => toggleSort("scoreDelta")}
+                            title="按得分增量排序"
+                          />
+                        </th>
+                        <th aria-sort={getAriaSort(sortKey === "latestPrice", sortDirection)}>
+                          <TableSortButton
+                            label="实时价"
+                            isActive={sortKey === "latestPrice"}
+                            direction={sortDirection}
+                            onClick={() => toggleSort("latestPrice")}
+                            title="按实时价格排序"
+                          />
+                        </th>
+                        <th
+                          aria-sort={getAriaSort(
+                            sortKey === "latestChangePct",
+                            sortDirection,
+                          )}
+                        >
+                          <TableSortButton
+                            label="实时涨幅"
+                            isActive={sortKey === "latestChangePct"}
+                            direction={sortDirection}
+                            onClick={() => toggleSort("latestChangePct")}
+                            title="按实时涨幅排序"
+                          />
+                        </th>
+                        <th aria-sort={getAriaSort(sortKey === "volumeRatio", sortDirection)}>
+                          <TableSortButton
+                            label="量比"
+                            isActive={sortKey === "volumeRatio"}
+                            direction={sortDirection}
+                            onClick={() => toggleSort("volumeRatio")}
+                            title="按量比排序"
+                          />
+                        </th>
+                        <th aria-sort={getAriaSort(sortKey === "pullbackPct", sortDirection)}>
+                          <TableSortButton
+                            label="回落幅度"
+                            isActive={sortKey === "pullbackPct"}
+                            direction={sortDirection}
+                            onClick={() => toggleSort("pullbackPct")}
+                            title="按高点回落幅度排序"
+                          />
+                        </th>
+                        <th aria-sort={getAriaSort(sortKey === "concept", sortDirection)}>
+                          <TableSortButton
+                            label="概念"
+                            isActive={sortKey === "concept"}
+                            direction={sortDirection}
+                            onClick={() => toggleSort("concept")}
+                            title="按概念排序"
+                          />
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
@@ -952,7 +1275,8 @@ export default function MarketSimulationTab() {
                         const hasRealtimeStatus =
                           row.latestPrice != null ||
                           row.latestChangePct != null ||
-                          row.volumeRatio != null;
+                          row.volumeRatio != null ||
+                          row.pullbackPct != null;
                         const compareSnapshot = {
                           tsCode: row.tsCode,
                           relativeTradeDate: `${scenario.label} 模拟`,
@@ -1051,6 +1375,20 @@ export default function MarketSimulationTab() {
                                 }
                                 deltaClassName={getSignedValueClassName(
                                   rowDelta?.volumeRatio,
+                                )}
+                              />
+                            </td>
+                            <td>
+                              <ValueWithDelta
+                                value={formatPercent(row.pullbackPct)}
+                                delta={
+                                  rowDelta?.pullbackPct !== null &&
+                                  rowDelta?.pullbackPct !== undefined
+                                    ? formatSignedPercent(rowDelta.pullbackPct)
+                                    : null
+                                }
+                                deltaClassName={getSignedValueClassName(
+                                  rowDelta?.pullbackPct,
                                 )}
                               />
                             </td>

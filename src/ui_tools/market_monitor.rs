@@ -101,13 +101,14 @@ pub fn get_market_monitor_page(
     source_path: String,
     reference_trade_date: Option<String>,
     top_limit: Option<u32>,
+    board: Option<String>,
 ) -> Result<MarketMonitorPageData, String> {
     let limit = top_limit.unwrap_or(20).max(1);
     let overview_rows = get_rank_overview(
         source_path.clone(),
         reference_trade_date,
         Some(limit),
-        None,
+        board,
         None,
         None,
     )?;

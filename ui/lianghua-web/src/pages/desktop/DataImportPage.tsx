@@ -429,7 +429,7 @@ export default function DataImportPage() {
             </div>
             <small>
               {directoryImportSupported
-                ? '程序固定写入 `AppData/source/`，规则文件 `score_rule.toml`、指标配置 `ind.toml` 也都按这套平铺方式导入。'
+                ? '程序固定写入 `AppData/source/`'
                 : '当前平台不支持文件夹选择，请使用下方逐个导入。'}
             </small>
           </div>

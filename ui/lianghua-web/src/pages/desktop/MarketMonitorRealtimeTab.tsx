@@ -28,6 +28,7 @@ import {
   normalizeTradeDates,
   pickDateValue,
 } from "../../shared/tradeDate";
+import { STOCK_PICK_BOARD_OPTIONS } from "./stockPickShared";
 import "./css/MarketMonitorPage.css";
 
 const DEFAULT_TOP_LIMIT = "50";
@@ -46,6 +47,7 @@ type PersistedMarketMonitorState = {
   dateOptions: string[];
   referenceTradeDate: string;
   topLimitInput: string;
+  boardFilter: (typeof STOCK_PICK_BOARD_OPTIONS)[number];
   pageData: MarketMonitorPageData | null;
 };
 
@@ -181,6 +183,11 @@ export default function MarketMonitorRealtimeTab() {
         typeof parsed.topLimitInput === "string"
           ? parsed.topLimitInput
           : DEFAULT_TOP_LIMIT,
+      boardFilter:
+        parsed.boardFilter &&
+        STOCK_PICK_BOARD_OPTIONS.includes(parsed.boardFilter)
+          ? parsed.boardFilter
+          : "全部",
       pageData:
         parsed.pageData && typeof parsed.pageData === "object"
           ? (parsed.pageData as MarketMonitorPageData)
@@ -199,6 +206,9 @@ export default function MarketMonitorRealtimeTab() {
   const [topLimitInput, setTopLimitInput] = useState(
     () => persistedState?.topLimitInput ?? DEFAULT_TOP_LIMIT,
   );
+  const [boardFilter, setBoardFilter] = useState<
+    (typeof STOCK_PICK_BOARD_OPTIONS)[number]
+  >(() => persistedState?.boardFilter ?? "全部");
   const [loading, setLoading] = useState(false);
   const [dateOptionsLoading, setDateOptionsLoading] = useState(false);
   const [error, setError] = useState("");
@@ -220,10 +230,18 @@ export default function MarketMonitorRealtimeTab() {
         dateOptions,
         referenceTradeDate,
         topLimitInput,
+        boardFilter,
         pageData,
       } satisfies PersistedMarketMonitorState,
     );
-  }, [dateOptions, pageData, referenceTradeDate, sourcePath, topLimitInput]);
+  }, [
+    boardFilter,
+    dateOptions,
+    pageData,
+    referenceTradeDate,
+    sourcePath,
+    topLimitInput,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -294,6 +312,7 @@ export default function MarketMonitorRealtimeTab() {
         sourcePath: sourcePathTrimmed,
         referenceTradeDate: referenceTradeDate.trim() || undefined,
         topLimit,
+        board: boardFilter === "全部" ? undefined : boardFilter,
       });
       const previousRows =
         pageData?.referenceTradeDate === nextPageData.referenceTradeDate
@@ -408,6 +427,24 @@ export default function MarketMonitorRealtimeTab() {
             value={topLimitInput}
             onChange={(event) => setTopLimitInput(event.target.value)}
           />
+        </label>
+
+        <label className="market-monitor-field">
+          <span>板块筛选</span>
+          <select
+            value={boardFilter}
+            onChange={(event) =>
+              setBoardFilter(
+                event.target.value as (typeof STOCK_PICK_BOARD_OPTIONS)[number],
+              )
+            }
+          >
+            {STOCK_PICK_BOARD_OPTIONS.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
         </label>
 
         <div className="market-monitor-actions">

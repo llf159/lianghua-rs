@@ -126,6 +126,22 @@
   gap: 8px;
 }
 
+.market-simulation-field-row.is-three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.market-simulation-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #4f5f70;
+  font-size: 13px;
+}
+
+.market-simulation-checkbox input {
+  margin: 0;
+}
+
 .market-simulation-empty {
   border: 1px dashed #c8d2de;
   border-radius: 8px;
@@ -196,7 +212,7 @@
 
 .market-simulation-table {
   width: 100%;
-  min-width: 920px;
+  min-width: 1120px;
   border-collapse: collapse;
 }
 

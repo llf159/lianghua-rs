@@ -18,6 +18,7 @@ use crate::{
     crawler::concept::{ThsConceptFetchItem, ThsConceptRow, fetch_one_ths_concept_row},
     data::{
         DataReader,
+        concept_performance_data::rebuild_concept_performance_range,
         download_data::{
             append_stage_pro_bar_rows, checkpoint_stock_data, delete_one_stock_range,
             delete_trade_date_rows, ensure_indicator_columns, flush_stock_data_stage_table,
@@ -54,6 +55,15 @@ pub type DownloadProgressCallback = dyn Fn(DownloadProgress) + Send + Sync;
 const INCREMENTAL_INDICATOR_CHUNK_SIZE: usize = 256;
 const THS_CONCEPT_RETRY_DELAY_SECS: u64 = 30;
 const THS_CONCEPT_RETRY_LIMIT: usize = 5;
+const INDEX_TS_CODES: [&str; 7] = [
+    "000001.SH",
+    "399001.SZ",
+    "399300.SZ",
+    "399905.SZ",
+    "399006.SZ",
+    "000016.SH",
+    "000852.SH",
+];
 
 #[derive(Debug, Clone)]
 pub struct DownloadRuntimeConfig {
@@ -131,6 +141,18 @@ fn stock_list_needs_refresh(source_dir: &str, effective_trade_date: &str) -> Res
     })
 }
 
+fn resolve_download_ts_codes(source_dir: &str) -> Result<Vec<String>, String> {
+    let rows = load_stock_list(source_dir)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| row.first().cloned())
+        .collect())
+}
+
+fn resolve_index_ts_codes() -> Vec<String> {
+    INDEX_TS_CODES.iter().map(|item| (*item).to_string()).collect()
+}
+
 fn emit_progress(
     progress_cb: Option<&DownloadProgressCallback>,
     phase: &str,
@@ -148,6 +170,35 @@ fn emit_progress(
             message: message.into(),
         });
     }
+}
+
+fn sync_gaini_bx_range(
+    source_dir: &str,
+    start_date: &str,
+    end_date: &str,
+    progress_cb: Option<&DownloadProgressCallback>,
+) -> Result<usize, String> {
+    emit_progress(
+        progress_cb,
+        "rebuild_concept_performance",
+        0,
+        1,
+        Some(format!("{start_date}-{end_date}")),
+        format!("开始重建概念表现区间 {} ~ {}。", start_date, end_date),
+    );
+    let bx_row_count = rebuild_concept_performance_range(source_dir, start_date, end_date)?;
+    emit_progress(
+        progress_cb,
+        "rebuild_concept_performance",
+        1,
+        1,
+        Some(format!("{start_date}-{end_date}")),
+        format!(
+            "概念表现区间 {} ~ {} 重建完成，共写入 {} 行。",
+            start_date, end_date, bx_row_count
+        ),
+    );
+    Ok(bx_row_count)
 }
 
 fn load_existing_ths_concept_map(
@@ -693,7 +744,11 @@ pub fn init_stock_basic_data(
             Some("trade_calendar.csv".to_string()),
             "正在刷新交易日历。",
         );
-        client.download_trade_calendar_csv(source_dir, config.start_date.as_str(), trade_calendar_end.as_str())?;
+        client.download_trade_calendar_csv(
+            source_dir,
+            config.start_date.as_str(),
+            trade_calendar_end.as_str(),
+        )?;
         emit_progress(
             progress_cb,
             "prepare_trade_calendar",
@@ -772,6 +827,86 @@ pub fn init_stock_basic_data(
     Ok(effective_trade_date)
 }
 
+fn init_index_basic_data(
+    config: &DownloadRuntimeConfig,
+    progress_cb: Option<&DownloadProgressCallback>,
+) -> Result<String, String> {
+    let source_dir = config.source_dir.as_str();
+    let client = TushareClient::new(config.token.clone(), config.limit_calls_per_min)?;
+
+    let now = Local::now();
+    let today = now.format("%Y%m%d").to_string();
+    let trade_calendar_end = format!("{:04}1231", now.year());
+    let current_hhmm = now.hour() * 100 + now.minute();
+
+    if trade_calendar_needs_refresh(source_dir, trade_calendar_end.as_str())? {
+        emit_progress(
+            progress_cb,
+            "prepare_trade_calendar",
+            0,
+            1,
+            Some("trade_calendar.csv".to_string()),
+            "正在刷新交易日历。",
+        );
+        client.download_trade_calendar_csv(
+            source_dir,
+            config.start_date.as_str(),
+            trade_calendar_end.as_str(),
+        )?;
+        emit_progress(
+            progress_cb,
+            "prepare_trade_calendar",
+            1,
+            1,
+            Some("trade_calendar.csv".to_string()),
+            "交易日历刷新完成。",
+        );
+    } else {
+        emit_progress(
+            progress_cb,
+            "prepare_trade_calendar",
+            1,
+            1,
+            Some("trade_calendar.csv".to_string()),
+            "交易日历已覆盖到当年年末，跳过刷新。",
+        );
+    }
+
+    let trade_dates = crate::data::load_trade_date_list(source_dir)?;
+    let effective_trade_date = if let Some(pos) = trade_dates.iter().position(|d| d == &today) {
+        if current_hhmm >= 1600 {
+            trade_dates[pos].clone()
+        } else if pos > 0 {
+            trade_dates[pos - 1].clone()
+        } else {
+            return Err("交易日历中没有前一个交易日".to_string());
+        }
+    } else {
+        match trade_dates
+            .iter()
+            .rev()
+            .find(|d| d.as_str() < today.as_str())
+        {
+            Some(date) => date.clone(),
+            None => return Err("交易日历中找不到小于今天的交易日".to_string()),
+        }
+    };
+
+    emit_progress(
+        progress_cb,
+        "prepare_index_list",
+        1,
+        1,
+        Some(effective_trade_date.clone()),
+        format!(
+            "指数下载使用内置指数池，交易日 {}。",
+            effective_trade_date
+        ),
+    );
+
+    Ok(effective_trade_date)
+}
+
 pub fn build_download_task<'a>(
     ts_codes: &'a [String],
     start_date: &'a str,
@@ -815,6 +950,50 @@ fn collect_indicator_names(prepared_items: &[PreparedStockDownload]) -> Vec<Stri
     }
 
     ordered
+}
+
+fn rebuild_index_indicators_with_history(
+    source_dir: &str,
+    prepared_items: &mut [PreparedStockDownload],
+) -> Result<(), String> {
+    if prepared_items.is_empty() {
+        return Ok(());
+    }
+
+    let inds_cache = cache_ind_build(source_dir)?;
+    if inds_cache.is_empty() {
+        for item in prepared_items {
+            item.indicators.clear();
+        }
+        return Ok(());
+    }
+
+    let warmup_need = warmup_ind_estimate(source_dir)?;
+    let history_anchor_date = prepared_items
+        .iter()
+        .map(|item| item.start_date.as_str())
+        .min()
+        .ok_or_else(|| "缺少指数增量起始日期".to_string())?;
+    let latest_map_before = load_latest_close_map_before(source_dir, "ind", history_anchor_date)?;
+    let history_end_dates = latest_map_before
+        .iter()
+        .map(|(ts_code, latest)| (ts_code.clone(), latest.trade_date.clone()))
+        .collect::<HashMap<_, _>>();
+    let dr = DataReader::new(source_dir)?;
+
+    for item in prepared_items {
+        item.indicators = calc_increment_one_stock_inds(
+            &dr,
+            &inds_cache,
+            warmup_need,
+            item.ts_code.as_str(),
+            "ind",
+            history_end_dates.get(&item.ts_code).map(String::as_str),
+            &item.rows,
+        )?;
+    }
+
+    Ok(())
 }
 
 fn write_prepared_stock_batch(
@@ -1092,12 +1271,7 @@ fn download_first_all_market(
     let conn = Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
     let mut indicator_columns_ready = false;
 
-    let ts_codes: Vec<String> = {
-        let rows = crate::data::load_stock_list(source_dir)?;
-        rows.into_iter()
-            .filter_map(|row| row.first().cloned())
-            .collect()
-    };
+    let ts_codes = resolve_download_ts_codes(source_dir)?;
 
     download_selected_stocks_with_context(
         source_dir,
@@ -1238,6 +1412,9 @@ fn download_selected_stocks_with_context(
     }
 
     checkpoint_stock_data(conn)?;
+    if adj_type == AdjType::Qfq {
+        sync_gaini_bx_range(source_dir, start_date, end_date, progress_cb)?;
+    }
 
     emit_progress(
         progress_cb,
@@ -1296,6 +1473,128 @@ pub fn download_selected_stocks(
         "缺失股票补全结束",
         progress_cb,
     )
+}
+
+fn download_indices_with_context(
+    config: &DownloadRuntimeConfig,
+    start_date: &str,
+    end_date: &str,
+    progress_cb: Option<&DownloadProgressCallback>,
+) -> Result<DownloadSummary, String> {
+    let effective_trade_date = end_date.to_string();
+    let source_dir = config.source_dir.as_str();
+    let client = TushareClient::new(config.token.clone(), config.limit_calls_per_min)?;
+    let pool = build_download_pool(config.threads)?;
+    let db_path = source_db_path(source_dir);
+    let db_path_str = db_path
+        .to_str()
+        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
+    init_stock_data_db(db_path_str)?;
+    let conn = Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
+    let mut indicator_columns_ready = false;
+    let ts_codes = resolve_index_ts_codes();
+
+    if ts_codes.is_empty() {
+        return Ok(DownloadSummary::default());
+    }
+
+    let total_tasks = ts_codes.len();
+    let mut processed_tasks = 0usize;
+    let mut total = DownloadSummary::default();
+    emit_progress(
+        progress_cb,
+        "download_index_bars",
+        0,
+        total_tasks,
+        None,
+        format!("指数下载开始，共 {total_tasks} 只指数待处理。"),
+    );
+
+    for (batch_idx, batch) in ts_codes.chunks(pool.current_num_threads().max(1)).enumerate() {
+        let mut prepared_batch =
+            pool.install(|| client.prepare_index_downloads(source_dir, batch, start_date, end_date));
+        rebuild_index_indicators_with_history(source_dir, prepared_batch.prepared_items.as_mut_slice())?;
+        let batch_summary = prepared_batch.summary();
+        if !indicator_columns_ready && !prepared_batch.prepared_items.is_empty() {
+            let indicator_names = collect_indicator_names(&prepared_batch.prepared_items);
+            ensure_indicator_columns(&conn, &indicator_names)?;
+            indicator_columns_ready = true;
+        }
+        emit_progress(
+            progress_cb,
+            "write_db",
+            processed_tasks,
+            total_tasks,
+            Some(format!("指数第 {} 批", batch_idx + 1)),
+            format!(
+                "指数第 {} 批下载完成，正在写入数据库，本批 {} 只。",
+                batch_idx + 1,
+                batch.len()
+            ),
+        );
+        write_prepared_stock_batch(&conn, &prepared_batch.prepared_items)?;
+        merge_summary(&mut total, batch_summary);
+        processed_tasks += batch.len();
+        emit_progress(
+            progress_cb,
+            "download_index_bars",
+            processed_tasks,
+            total_tasks,
+            Some(format!("指数第 {} 批", batch_idx + 1)),
+            format!("已处理 {} / {} 只指数。", processed_tasks, total_tasks),
+        );
+    }
+
+    checkpoint_stock_data(&conn)?;
+    emit_progress(
+        progress_cb,
+        "done",
+        total_tasks,
+        total_tasks,
+        Some(effective_trade_date),
+        format!(
+            "指数下载结束，成功 {} 只，失败 {} 只。",
+            total.success_count, total.failed_count
+        ),
+    );
+
+    Ok(total)
+}
+
+pub fn download_indices(
+    config: &DownloadRuntimeConfig,
+    progress_cb: Option<&DownloadProgressCallback>,
+) -> Result<DownloadSummary, String> {
+    let effective_trade_date = init_index_basic_data(config, progress_cb)?;
+    let source_dir = config.source_dir.as_str();
+
+    match load_latest_trade_date(source_dir, AdjType::Ind)? {
+        Some(last_saved_trade_date) if last_saved_trade_date < effective_trade_date => {
+            let trade_dates = load_trade_date_list(source_dir)?;
+            let pending_trade_dates: Vec<String> = trade_dates
+                .iter()
+                .filter(|d| d.as_str() > last_saved_trade_date.as_str())
+                .filter(|d| d.as_str() <= effective_trade_date.as_str())
+                .cloned()
+                .collect();
+            if pending_trade_dates.is_empty() {
+                return Ok(DownloadSummary::default());
+            }
+            download_indices_with_context(
+                config,
+                pending_trade_dates[0].as_str(),
+                effective_trade_date.as_str(),
+                progress_cb,
+            )
+        }
+        Some(_) => Ok(DownloadSummary::default()),
+        None => download_indices_with_context(
+            config,
+            config.start_date.as_str(),
+            effective_trade_date.as_str(),
+            progress_cb,
+        ),
+    }
 }
 
 // 增量部分
@@ -1703,6 +2002,12 @@ pub fn download_pending_all_market(
         flush_stock_data_stage_table(tx)
     })?;
     checkpoint_stock_data(&conn)?;
+    sync_gaini_bx_range(
+        source_dir,
+        pending_trade_dates[0].as_str(),
+        effective_trade_date.as_str(),
+        progress_cb,
+    )?;
 
     emit_progress(
         progress_cb,

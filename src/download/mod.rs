@@ -51,6 +51,7 @@ pub enum AdjType {
     Qfq,
     Hfq,
     Raw,
+    Ind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -463,6 +464,25 @@ impl TushareClient {
         )
     }
 
+    fn fetch_single_index_daily_all(
+        &self,
+        ts_code: &str,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<TushareTable, String> {
+        let params = DailyParams {
+            ts_code,
+            start_date,
+            end_date,
+        };
+
+        self.post_table(
+            "index_daily",
+            &params,
+            "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount",
+        )
+    }
+
     fn fetch_single_adj_factor(
         &self,
         ts_code: &str,
@@ -585,6 +605,20 @@ impl TushareClient {
         Ok(rows)
     }
 
+    pub fn fetch_single_index_bar(
+        &self,
+        ts_code: &str,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<Vec<ProBarRow>, String> {
+        let bar_table = self.fetch_single_index_daily_all(ts_code, start_date, end_date)?;
+        let bar_rows = parse_bar_rows(&bar_table)?;
+        let mut rows = build_pro_bar_rows(bar_rows);
+        rows.sort_by(|a, b| a.trade_date.cmp(&b.trade_date));
+        recalc_change_fields(&mut rows);
+        Ok(rows)
+    }
+
     pub fn prepare_one_stock_download(
         &self,
         source_dir: String,
@@ -611,6 +645,27 @@ impl TushareClient {
             start_date: start_date.to_string(),
             end_date: end_date.to_string(),
             adj_type,
+            rows,
+            indicators,
+        })
+    }
+
+    pub fn prepare_one_index_download(
+        &self,
+        source_dir: String,
+        ts_code: String,
+        start_date: String,
+        end_date: String,
+    ) -> Result<PreparedStockDownload, String> {
+        let rows = self.fetch_single_index_bar(&ts_code, &start_date, &end_date)?;
+        let indicators = calc_one_stock_inds(&source_dir, &rows)?;
+
+        println!("指数下载完成:{:?}", &ts_code);
+        Ok(PreparedStockDownload {
+            ts_code,
+            start_date,
+            end_date,
+            adj_type: AdjType::Ind,
             rows,
             indicators,
         })
@@ -646,6 +701,37 @@ impl TushareClient {
                 Err((ts_code, err)) => {
                     batch.failed_items.push((ts_code, err));
                 }
+            }
+        }
+
+        batch
+    }
+
+    pub fn prepare_index_downloads(
+        &self,
+        source_dir: &str,
+        ts_codes: &[String],
+        start_date: &str,
+        end_date: &str,
+    ) -> PreparedDownloadBatch {
+        let results = ts_codes
+            .par_iter()
+            .map(|ts_code| {
+                self.prepare_one_index_download(
+                    source_dir.to_string(),
+                    ts_code.to_string(),
+                    start_date.to_string(),
+                    end_date.to_string(),
+                )
+                .map_err(|err| (ts_code.to_string(), err))
+            })
+            .collect::<Vec<_>>();
+
+        let mut batch = PreparedDownloadBatch::default();
+        for result in results {
+            match result {
+                Ok(prepared) => batch.prepared_items.push(prepared),
+                Err((ts_code, err)) => batch.failed_items.push((ts_code, err)),
             }
         }
 
@@ -1175,7 +1261,7 @@ pub fn apply_adj_to_rows(
                 .last()
                 .ok_or_else(|| "没有可用于前复权的因子".to_string())?,
         ),
-        AdjType::Hfq | AdjType::Raw => None,
+        AdjType::Hfq | AdjType::Raw | AdjType::Ind => None,
     };
 
     for (row, factor) in rows.iter_mut().zip(factors.into_iter()) {
@@ -1183,6 +1269,7 @@ pub fn apply_adj_to_rows(
             AdjType::Raw => 1.0,
             AdjType::Hfq => factor,
             AdjType::Qfq => factor / qfq_base.expect("qfq_base should exist"),
+            AdjType::Ind => 1.0,
         };
 
         row.open *= scale;

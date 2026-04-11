@@ -51,6 +51,14 @@ const DATASET_OPTIONS: DatasetOption[] = [
     supportsTsCode: true,
   },
   {
+    id: 'concept-performance',
+    label: '概念表现库',
+    description: '查看 concept_performance.db 的 concept_performance。',
+    requiredFileId: 'concept-performance-db',
+    supportsTradeDate: true,
+    supportsTsCode: false,
+  },
+  {
     id: 'stock-list-csv',
     label: '股票列表 CSV',
     description: '查看 stock_list.csv，包含名称、市值、拼音首字母等基础信息。',

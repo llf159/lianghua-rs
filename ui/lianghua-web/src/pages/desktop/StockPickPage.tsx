@@ -93,17 +93,6 @@ export default function StockPickPage() {
 
   return (
     <div className="stock-pick-page">
-      <section className="stock-pick-card">
-        <div className="stock-pick-section-head">
-          <div>
-            <h2 className="stock-pick-title">选股工具</h2>
-          </div>
-          <div className="stock-pick-source-note">
-            当前数据目录：<strong>{sourcePath || "--"}</strong>
-          </div>
-        </div>
-      </section>
-
       {error ? (
         <section className="stock-pick-card">
           <div className="stock-pick-message stock-pick-message-error">{error}</div>

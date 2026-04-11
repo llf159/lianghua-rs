@@ -1,3 +1,4 @@
+pub mod concept_performance_data;
 pub mod download_data;
 pub mod scoring_data;
 pub mod simulate;
@@ -17,6 +18,10 @@ pub fn source_db_path(source_dir: &str) -> PathBuf {
 
 pub fn result_db_path(source_dir: &str) -> PathBuf {
     Path::new(source_dir).join("scoring_result.db")
+}
+
+pub fn concept_performance_db_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("concept_performance.db")
 }
 
 pub fn ths_concepts_path(source_dir: &str) -> PathBuf {

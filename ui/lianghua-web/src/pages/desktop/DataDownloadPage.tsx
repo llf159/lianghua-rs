@@ -4,6 +4,7 @@ import {
   getDataDownloadStatus,
   getIndicatorManagePage,
   listenDataDownloadProgress,
+  runConceptPerformanceRepair,
   runDataDownload,
   runMissingStockRepair,
   runThsConceptDownload,
@@ -107,6 +108,8 @@ function formatPhaseLabel(phase: string | null | undefined) {
       return '概念重试'
     case 'write_ths_concepts':
       return '写入概念文件'
+    case 'rebuild_concept_performance':
+      return '补全概念表现'
     case 'done_ths_concepts':
       return '概念下载完成'
     case 'failed_ths_concept':
@@ -147,26 +150,27 @@ function getPhaseStep(phase: string | null | undefined) {
     case 'write_ths_concepts':
     case 'done_ths_concepts':
       return { current: 3, total: 3 }
+    case 'rebuild_concept_performance':
+      return { current: 1, total: 1 }
     default:
       return null
   }
 }
 
-function formatDbRange(status: DataDownloadStatus | null) {
-  const sourceDb = status?.sourceDb
-  if (!sourceDb) {
+function formatDbRange(range: DataDownloadStatus['sourceDb'] | DataDownloadStatus['conceptPerformanceDb'] | null | undefined) {
+  if (!range) {
     return '读取中...'
   }
 
-  if (!sourceDb.exists) {
-    return 'stock_data.db 不存在'
+  if (!range.exists) {
+    return `${range.fileName} 不存在`
   }
 
-  if (!sourceDb.minTradeDate || !sourceDb.maxTradeDate) {
-    return 'stock_data 已存在，但还没有可用交易日'
+  if (!range.minTradeDate || !range.maxTradeDate) {
+    return `${range.tableName} 已存在，但还没有可用交易日`
   }
 
-  return `${formatTradeDate(sourceDb.minTradeDate)} 至 ${formatTradeDate(sourceDb.maxTradeDate)}`
+  return `${formatTradeDate(range.minTradeDate)} 至 ${formatTradeDate(range.maxTradeDate)}`
 }
 
 function formatFileRange(
@@ -653,13 +657,19 @@ export default function DataDownloadPage() {
       const result = await executor(downloadId)
       setStatus(result.status)
 
-      const failedTail =
-        result.summary.failedCount > 0
-          ? ` 失败 ${result.summary.failedCount} 只，前几项: ${result.summary.failedItems.slice(0, 3).join('；')}`
-          : ''
-      setNotice(
-        `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；成功 ${result.summary.successCount} 只，写入 ${result.summary.savedRows} 行。${failedTail}`.trim(),
-      )
+      if (result.action === 'rebuild-concept-performance') {
+        setNotice(
+          `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；写入 ${result.summary.savedRows} 行。`,
+        )
+      } else {
+        const failedTail =
+          result.summary.failedCount > 0
+            ? ` 失败 ${result.summary.failedCount} 只，前几项: ${result.summary.failedItems.slice(0, 3).join('；')}`
+            : ''
+        setNotice(
+          `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；成功 ${result.summary.successCount} 只，写入 ${result.summary.savedRows} 行。${failedTail}`.trim(),
+        )
+      }
     } catch (runError) {
       setNotice('')
       setError(`执行下载失败: ${String(runError)}`)
@@ -778,6 +788,21 @@ export default function DataDownloadPage() {
     )
   }
 
+  async function onRunConceptPerformanceRepair() {
+    if (!sourcePath) {
+      setFeedbackSection('concept')
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    await runDataTask('concept', (downloadId) =>
+      runConceptPerformanceRepair({
+        downloadId,
+        sourcePath,
+      }),
+    )
+  }
+
   return (
     <div className="data-download-page">
       <section className="data-download-card">
@@ -885,10 +910,19 @@ export default function DataDownloadPage() {
             <div className="data-download-summary">
               <div className="data-download-summary-item">
                 <span>原始库状态</span>
-                <strong>{formatDbRange(status)}</strong>
+                <strong>{formatDbRange(status?.sourceDb)}</strong>
                 <small>
                   {status?.sourceDb
                     ? `${status.sourceDb.distinctTradeDates} 个交易日，${status.sourceDb.rowCount} 行`
+                    : '读取中...'}
+                </small>
+              </div>
+              <div className="data-download-summary-item">
+                <span>概念表现库</span>
+                <strong>{formatDbRange(status?.conceptPerformanceDb)}</strong>
+                <small>
+                  {status?.conceptPerformanceDb
+                    ? `${status.conceptPerformanceDb.distinctTradeDates} 个交易日，${status.conceptPerformanceDb.rowCount} 行`
                     : '读取中...'}
                 </small>
               </div>
@@ -1062,7 +1096,28 @@ export default function DataDownloadPage() {
         <section className="data-download-panel">
           <div className="data-download-panel-head">
             <h3>概念数据下载</h3>
-            <p>按当前 `stock_list.csv` 补齐 `stock_concepts.csv`。串行和并发模式都遵循整轮失败后整体重试。</p>
+            <p>按当前 `stock_list.csv` 补齐 `stock_concepts.csv`。概念表现补全会基于当前 `stock_data.db`、`stock_list.csv`、`stock_concepts.csv` 全量重建 `concept_performance.db`，整次写库在同一事务内提交。</p>
+          </div>
+
+          <div className="data-download-summary">
+            <div className="data-download-summary-item">
+              <span>概念文件</span>
+              <strong>{formatFileRange(status?.thsConcepts)}</strong>
+              <small>
+                {status?.thsConcepts
+                  ? `${status.thsConcepts.rowCount} 行`
+                  : '读取中...'}
+              </small>
+            </div>
+            <div className="data-download-summary-item">
+              <span>概念表现库</span>
+              <strong>{formatDbRange(status?.conceptPerformanceDb)}</strong>
+              <small>
+                {status?.conceptPerformanceDb
+                  ? `${status.conceptPerformanceDb.distinctTradeDates} 个交易日，${status.conceptPerformanceDb.rowCount} 行`
+                  : '读取中...'}
+              </small>
+            </div>
           </div>
 
           <div className="data-download-inline-grid">
@@ -1132,6 +1187,14 @@ export default function DataDownloadPage() {
               disabled={isBusy || !sourcePath}
             >
               {showConceptProgress ? '概念下载中...' : isBusy ? '任务执行中...' : '开始概念下载'}
+            </button>
+            <button
+              className="data-download-secondary-btn"
+              type="button"
+              onClick={() => void onRunConceptPerformanceRepair()}
+              disabled={isBusy || !sourcePath}
+            >
+              {showConceptProgress ? '概念补全中...' : isBusy ? '任务执行中...' : '概念表现补全'}
             </button>
           </div>
 

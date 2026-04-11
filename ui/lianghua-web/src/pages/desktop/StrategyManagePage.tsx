@@ -1050,7 +1050,7 @@ export default function StrategyManagePage() {
                   策略语法说明书
                 </h3>
                 <p className="strategy-manage-note">
-                  这里只讲基础语法。表达式支持多句，最后一句会作为策略最终结果；常见字段可直接写
+                  表达式支持多句，最后一句会作为策略最终结果；常见字段可直接写
                   <code> C / O / H / L / V </code>
                   ，函数名不区分大小写。
                 </p>
