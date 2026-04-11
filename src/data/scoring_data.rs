@@ -9,10 +9,9 @@ use std::time;
 
 use crate::data::{RowData, ScoreRule};
 use crate::expr::parser::{Parser, lex_all};
-use crate::scoring::CachedRule;
+use crate::scoring::{CachedRule, RuleScoreSeries, SceneScoreSeries};
 use crate::{
     expr::eval::{Runtime, Value},
-    scoring::RuleScoreSeries,
 };
 
 #[derive(Debug, Default)]
@@ -31,10 +30,22 @@ pub struct ScoreDetails {
     pub rule_score: f64,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct SceneDetails {
+    pub ts_code: String,
+    pub trade_date: String,
+    pub scene_name: String,
+    pub stage: Option<String>,
+    pub stage_score: f64,
+    pub evidence_score: f64,
+    pub risk_score: f64,
+}
+
 #[derive(Debug, Default)]
 pub struct ScoreBatch {
     pub summary_rows: Vec<ScoreSummary>,
     pub detail_rows: Vec<ScoreDetails>,
+    pub scene_rows: Vec<SceneDetails>,
 }
 
 #[derive(Debug)]
@@ -162,7 +173,7 @@ impl ScoreDetails {
             .transaction()
             .map_err(|e| format!("事务创建失败:{e}"))?;
         let del_sql = r#"
-                DELETE FROM score_details
+                DELETE FROM rule_details
                 WHERE trade_date = ?
             "#;
         let mut del = tx
@@ -180,7 +191,7 @@ impl ScoreDetails {
 
         {
             let mut app = tx
-                .appender("score_details")
+                .appender("rule_details")
                 .map_err(|e| format!("details数据库插入错误:{e}"))?;
             for row in rows {
                 let _ = app
@@ -199,6 +210,43 @@ impl ScoreDetails {
 
         println!("details写入耗时:{:.3?}", time.elapsed());
         Ok(())
+    }
+}
+
+impl SceneDetails {
+    pub fn build(
+        ts_code: &str,
+        trade_dates: &[String],
+        scene_score_series: &[SceneScoreSeries],
+    ) -> Vec<SceneDetails> {
+        let mut out = Vec::new();
+        for scene in scene_score_series {
+            let scene_name = scene.name.clone();
+            if trade_dates.len() != scene.triggered.len()
+                || trade_dates.len() != scene.stage_score.len()
+                || trade_dates.len() != scene.evidence_score.len()
+                || trade_dates.len() != scene.risk_score.len()
+                || trade_dates.len() != scene.stage.len()
+            {
+                continue;
+            }
+
+            for i in 0..trade_dates.len() {
+                if !scene.triggered[i] {
+                    continue;
+                }
+                out.push(SceneDetails {
+                    ts_code: ts_code.to_string(),
+                    trade_date: trade_dates[i].clone(),
+                    scene_name: scene_name.clone(),
+                    stage: scene.stage[i].clone(),
+                    stage_score: scene.stage_score[i],
+                    evidence_score: scene.evidence_score[i],
+                    risk_score: scene.risk_score[i],
+                });
+            }
+        }
+        out
     }
 }
 
@@ -224,11 +272,11 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
         "#,
         [],
     )
-    .map_err(|e| format!("创建score_summary失败:{e}"))?;
+            .map_err(|e| format!("创建score_summary失败:{e}"))?;
 
     conn.execute(
         r#"
-        CREATE TABLE IF NOT EXISTS score_details (
+        CREATE TABLE IF NOT EXISTS rule_details (
             ts_code VARCHAR,
             trade_date VARCHAR,
             rule_name VARCHAR,
@@ -238,7 +286,24 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
         "#,
         [],
     )
-    .map_err(|e| format!("创建score_details失败:{e}"))?;
+    .map_err(|e| format!("创建rule_details失败:{e}"))?;
+
+    conn.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS scene_details (
+            ts_code VARCHAR,
+            trade_date VARCHAR,
+            scene_name VARCHAR,
+            stage VARCHAR,
+            stage_score DOUBLE,
+            evidence_score DOUBLE,
+            risk_score DOUBLE,
+            PRIMARY KEY (ts_code, trade_date, scene_name)
+        )
+        "#,
+        [],
+    )
+    .map_err(|e| format!("创建scene_details失败:{e}"))?;
     Ok(())
 }
 
@@ -253,10 +318,15 @@ fn delete_score_range(
     )
     .map_err(|e| format!("删除score_summary旧数据失败:{e}"))?;
     tx.execute(
-        "DELETE FROM score_details WHERE trade_date >= ? AND trade_date <= ?",
+        "DELETE FROM rule_details WHERE trade_date >= ? AND trade_date <= ?",
         params![start_date, end_date],
     )
-    .map_err(|e| format!("删除score_details旧数据失败:{e}"))?;
+    .map_err(|e| format!("删除rule_details旧数据失败:{e}"))?;
+    tx.execute(
+        "DELETE FROM scene_details WHERE trade_date >= ? AND trade_date <= ?",
+        params![start_date, end_date],
+    )
+    .map_err(|e| format!("删除scene_details旧数据失败:{e}"))?;
     Ok(())
 }
 
@@ -281,7 +351,23 @@ fn append_detail_rows(app: &mut Appender<'_>, rows: &[ScoreDetails]) -> Result<(
             &row.rule_name,
             row.rule_score
         ])
-        .map_err(|e| format!("插入score_details失败:{e}"))?;
+        .map_err(|e| format!("插入rule_details失败:{e}"))?;
+    }
+    Ok(())
+}
+
+fn append_scene_rows(app: &mut Appender<'_>, rows: &[SceneDetails]) -> Result<(), String> {
+    for row in rows {
+        app.append_row(params![
+            &row.ts_code,
+            &row.trade_date,
+            &row.scene_name,
+            &row.stage,
+            row.stage_score,
+            row.evidence_score,
+            row.risk_score
+        ])
+        .map_err(|e| format!("插入scene_details失败:{e}"))?;
     }
     Ok(())
 }
@@ -305,8 +391,11 @@ pub fn write_score_batches_from_channel(
             .appender("score_summary")
             .map_err(|e| format!("score_summary appender创建失败:{e}"))?;
         let mut detail_app = tx
-            .appender("score_details")
-            .map_err(|e| format!("score_details appender创建失败:{e}"))?;
+            .appender("rule_details")
+            .map_err(|e| format!("rule_details appender创建失败:{e}"))?;
+        let mut scene_app = tx
+            .appender("scene_details")
+            .map_err(|e| format!("scene_details appender创建失败:{e}"))?;
 
         let mut batch_count = 0usize;
         for message in rx {
@@ -319,6 +408,7 @@ pub fn write_score_batches_from_channel(
 
             append_summary_rows(&mut summary_app, &batch.summary_rows)?;
             append_detail_rows(&mut detail_app, &batch.detail_rows)?;
+            append_scene_rows(&mut scene_app, &batch.scene_rows)?;
             batch_count += 1;
 
             if batch_count % 8 == 0 {
@@ -327,7 +417,10 @@ pub fn write_score_batches_from_channel(
                     .map_err(|e| format!("刷新score_summary失败:{e}"))?;
                 detail_app
                     .flush()
-                    .map_err(|e| format!("刷新score_details失败:{e}"))?;
+                    .map_err(|e| format!("刷新rule_details失败:{e}"))?;
+                scene_app
+                    .flush()
+                    .map_err(|e| format!("刷新scene_details失败:{e}"))?;
             }
         }
 
@@ -336,7 +429,10 @@ pub fn write_score_batches_from_channel(
             .map_err(|e| format!("刷新score_summary失败:{e}"))?;
         detail_app
             .flush()
-            .map_err(|e| format!("刷新score_details失败:{e}"))?;
+            .map_err(|e| format!("刷新rule_details失败:{e}"))?;
+        scene_app
+            .flush()
+            .map_err(|e| format!("刷新scene_details失败:{e}"))?;
     }
 
     tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;

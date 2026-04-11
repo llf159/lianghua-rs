@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use duckdb::Connection;
 
 use crate::{
-    data::{DistPoint, RuleTag, ScopeWay},
+    data::{DistPoint, RuleStage, RuleTag, ScopeWay, ScoreScene},
     expr::{
         eval::{Runtime, Value},
         parser::Stmts,
@@ -29,6 +31,23 @@ pub struct RuleScoreSeries {
     pub name: String,
     pub series: Vec<f64>,
     pub triggered: Vec<bool>,
+}
+
+#[derive(Debug, Default)]
+pub struct SceneScoreSeries {
+    pub name: String,
+    pub stage: Vec<Option<String>>,
+    pub stage_score: Vec<f64>,
+    pub evidence_score: Vec<f64>,
+    pub risk_score: Vec<f64>,
+    pub triggered: Vec<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuleSceneMeta {
+    pub scene_name: String,
+    pub stage: RuleStage,
+    pub weight: f64,
 }
 
 #[derive(Clone)]
@@ -190,6 +209,120 @@ pub fn scoring_rules_details_cache(
     }
 
     Ok((total, details))
+}
+
+fn resolve_scene_stage(
+    scene: &ScoreScene,
+    stage_score: f64,
+    risk_score: f64,
+    has_trigger: bool,
+    has_confirm: bool,
+    has_fail: bool,
+) -> Option<String> {
+    if has_fail && risk_score >= scene.fail_threshold {
+        return Some("fail".to_string());
+    }
+    if has_confirm && stage_score >= scene.confirm_threshold {
+        return Some("confirm".to_string());
+    }
+    if has_trigger && stage_score >= scene.trigger_threshold {
+        return Some("trigger".to_string());
+    }
+    if has_trigger && stage_score >= scene.observe_threshold {
+        return Some("observe".to_string());
+    }
+    None
+}
+
+pub fn build_scene_score_series(
+    rule_scene_meta: &[RuleSceneMeta],
+    rule_details: &[RuleScoreSeries],
+    scenes: &[ScoreScene],
+) -> Vec<SceneScoreSeries> {
+    if scenes.is_empty() || rule_details.is_empty() {
+        return Vec::new();
+    }
+
+    let len = rule_details
+        .first()
+        .map(|item| item.series.len())
+        .unwrap_or_default();
+    let mut scene_index = HashMap::with_capacity(scenes.len());
+    let mut out: Vec<SceneScoreSeries> = scenes
+        .iter()
+        .enumerate()
+        .map(|(index, scene)| {
+            scene_index.insert(scene.name.clone(), index);
+            SceneScoreSeries {
+                name: scene.name.clone(),
+                stage: vec![None; len],
+                stage_score: vec![0.0; len],
+                evidence_score: vec![0.0; len],
+                risk_score: vec![0.0; len],
+                triggered: vec![false; len],
+            }
+        })
+        .collect();
+
+    let mut has_trigger_rule = vec![vec![false; len]; scenes.len()];
+    let mut has_confirm_rule = vec![vec![false; len]; scenes.len()];
+    let mut has_fail_rule = vec![vec![false; len]; scenes.len()];
+
+    for (rule_meta, detail) in rule_scene_meta.iter().zip(rule_details.iter()) {
+        let Some(&scene_pos) = scene_index.get(&rule_meta.scene_name) else {
+            continue;
+        };
+        let scene_row = &mut out[scene_pos];
+        let min_len = usize::min(detail.series.len(), detail.triggered.len()).min(len);
+
+        for i in 0..min_len {
+            if !detail.triggered[i] {
+                continue;
+            }
+
+            scene_row.triggered[i] = true;
+            scene_row.evidence_score[i] += detail.series[i];
+
+            match rule_meta.stage {
+                RuleStage::Base => {
+                    scene_row.stage_score[i] += rule_meta.weight;
+                }
+                RuleStage::Trigger => {
+                    scene_row.stage_score[i] += rule_meta.weight;
+                    has_trigger_rule[scene_pos][i] = true;
+                }
+                RuleStage::Confirm => {
+                    scene_row.stage_score[i] += rule_meta.weight;
+                    has_confirm_rule[scene_pos][i] = true;
+                }
+                RuleStage::Risk => {
+                    scene_row.risk_score[i] += rule_meta.weight;
+                }
+                RuleStage::Fail => {
+                    scene_row.risk_score[i] += rule_meta.weight;
+                    has_fail_rule[scene_pos][i] = true;
+                }
+            }
+        }
+    }
+
+    for (scene_pos, scene) in scenes.iter().enumerate() {
+        for i in 0..len {
+            if !out[scene_pos].triggered[i] {
+                continue;
+            }
+            out[scene_pos].stage[i] = resolve_scene_stage(
+                scene,
+                out[scene_pos].stage_score[i],
+                out[scene_pos].risk_score[i],
+                has_trigger_rule[scene_pos][i],
+                has_confirm_rule[scene_pos][i],
+                has_fail_rule[scene_pos][i],
+            );
+        }
+    }
+
+    out
 }
 
 fn build_tirbreak_rank_sql(tie_break: TieBreakWay, adj_type: &str) -> String {

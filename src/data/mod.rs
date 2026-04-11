@@ -389,9 +389,10 @@ impl<'de> Deserialize<'de> for ScopeWay {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ScoreConfig {
     pub version: u32,
+    pub scene: Vec<ScoreScene>,
     pub rule: Vec<ScoreRule>,
 }
 
@@ -419,21 +420,45 @@ pub struct DistPoint {
     pub points: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScoreScene {
+    pub name: String,
+    pub observe_threshold: f64,
+    pub trigger_threshold: f64,
+    pub confirm_threshold: f64,
+    pub fail_threshold: f64,
+    pub evidence_score: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleStage {
+    #[default]
+    Base,
+    Trigger,
+    Confirm,
+    Risk,
+    Fail,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct ScoreRule {
     pub name: String,
+    #[serde(rename = "scene")]
+    pub scene_name: String,
+    pub stage: RuleStage,
     pub scope_windows: usize,
     pub scope_way: ScopeWay,
     pub when: String,
     pub points: f64,
+    pub weight: f64,
     pub dist_points: Option<Vec<DistPoint>>,
     pub explain: String,
-    #[serde(default)]
     pub tag: RuleTag,
 }
 
-impl ScoreRule {
-    pub fn load_rules(source_dir: &str) -> Result<Vec<ScoreRule>, String> {
+impl ScoreConfig {
+    pub fn load(source_dir: &str) -> Result<ScoreConfig, String> {
         let rule_path = score_rule_path(source_dir);
         let rule_toml = fs::read_to_string(&rule_path).map_err(|e| {
             format!(
@@ -443,19 +468,68 @@ impl ScoreRule {
         })?;
         let cfg: ScoreConfig =
             toml::from_str(&rule_toml).map_err(|e| format!("规则文件格式错误: {e}"))?;
-        Self::validate_rules(&cfg.rule)?;
-        Ok(cfg.rule)
+        Self::validate(&cfg)?;
+        Ok(cfg)
     }
 
-    fn validate_rules(rules: &[ScoreRule]) -> Result<(), String> {
+    fn validate(cfg: &ScoreConfig) -> Result<(), String> {
+        let mut scene_name_set = HashSet::new();
+        for (i, scene) in cfg.scene.iter().enumerate() {
+            let n = i + 1;
+            if scene.name.trim().is_empty() {
+                return Err(format!("第{n}个scene的name字段为空"));
+            }
+            if !scene.observe_threshold.is_finite() {
+                return Err(format!("第{n}个scene的observe_threshold非法"));
+            }
+            if !scene.trigger_threshold.is_finite() {
+                return Err(format!("第{n}个scene的trigger_threshold非法"));
+            }
+            if !scene.confirm_threshold.is_finite() {
+                return Err(format!("第{n}个scene的confirm_threshold非法"));
+            }
+            if !scene.fail_threshold.is_finite() {
+                return Err(format!("第{n}个scene的fail_threshold非法"));
+            }
+            if !scene.evidence_score.is_finite() {
+                return Err(format!("第{n}个scene的evidence_score非法"));
+            }
+            if !scene_name_set.insert(scene.name.trim().to_string()) {
+                return Err(format!("scene名称重复: {}", scene.name));
+            }
+        }
+
+        let rules = &cfg.rule;
+        let mut rule_name_set = HashSet::new();
         for (i, r) in rules.iter().enumerate() {
             let n = i + 1;
             if r.name.trim().is_empty() {
                 return Err(format!("第{:?}个表达式name字段为空", n));
             };
+            if !rule_name_set.insert(r.name.trim().to_string()) {
+                return Err(format!("规则名称重复: {}", r.name));
+            }
+            if r.scene_name.trim().is_empty() {
+                return Err(format!("第{n}条规则 scene 字段为空"));
+            }
+            if !scene_name_set.contains(r.scene_name.trim()) {
+                return Err(format!(
+                    "第{n}条规则引用的scene不存在: {}",
+                    r.scene_name
+                ));
+            }
             if r.when.trim().is_empty() {
                 return Err(format!("第{:?}个表达式when字段为空", n));
             };
+            if r.explain.trim().is_empty() {
+                return Err(format!("第{n}条规则 explain 字段为空"));
+            }
+            if !r.points.is_finite() {
+                return Err(format!("第{n}条规则 score 非法"));
+            }
+            if !r.weight.is_finite() {
+                return Err(format!("第{n}条规则 weight 非法"));
+            }
 
             let has_points = r.points.is_finite();
             let has_dist = matches!(r.dist_points.as_ref(), Some(v) if !v.is_empty());
@@ -496,6 +570,18 @@ impl ScoreRule {
             };
         }
         Ok(())
+    }
+}
+
+impl ScoreScene {
+    pub fn load_scenes(source_dir: &str) -> Result<Vec<ScoreScene>, String> {
+        Ok(ScoreConfig::load(source_dir)?.scene)
+    }
+}
+
+impl ScoreRule {
+    pub fn load_rules(source_dir: &str) -> Result<Vec<ScoreRule>, String> {
+        Ok(ScoreConfig::load(source_dir)?.rule)
     }
 }
 

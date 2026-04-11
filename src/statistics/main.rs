@@ -478,7 +478,7 @@ fn query_hit_summary(conn: &Connection, trade_date: Option<&str>) -> Result<HitS
                 SUM(CASE WHEN rule_score > 0 THEN 1 ELSE 0 END) AS pos_hit_rule_cnt,
                 SUM(CASE WHEN rule_score < 0 THEN 1 ELSE 0 END) AS neg_hit_rule_cnt,
                 SUM(rule_score) + 50.0 AS total_score
-            FROM score_details
+            FROM rule_details
             WHERE (? IS NULL OR trade_date = ?)
             GROUP BY 1, 2
         )
@@ -505,7 +505,7 @@ fn query_hit_summary(conn: &Connection, trade_date: Option<&str>) -> Result<HitS
     let row = rows
         .next()
         .map_err(|e| format!("读取命中汇总失败: {e}"))?
-        .ok_or_else(|| "score_details 没有数据".to_string())?;
+        .ok_or_else(|| "rule_details 没有数据".to_string())?;
 
     Ok(HitSummary {
         trade_date: trade_date.map(|v| v.to_string()),
@@ -540,7 +540,7 @@ fn query_rule_stats(
             AVG(CASE WHEN trade_date = ? THEN rule_score END) AS latest_avg_score,
             AVG(CASE WHEN trade_date = ? AND rule_score != 0 THEN rule_score END) AS latest_avg_score_when_hit,
             SUM(CASE WHEN trade_date = ? THEN rule_score ELSE 0 END) AS latest_total_score
-        FROM score_details
+        FROM rule_details
         GROUP BY rule_name
     "#;
 
@@ -622,7 +622,7 @@ fn query_each_rule_stats(
                 AVG(CASE WHEN trade_date = ? THEN CASE WHEN rule_score != 0 THEN 1.0 ELSE 0.0 END END) AS latest_hit_rate,
                 AVG(CASE WHEN trade_date = ? THEN rule_score / ? END) AS latest_avg_hit_count_overall,
                 AVG(CASE WHEN trade_date = ? AND rule_score != 0 THEN rule_score / ? END) AS latest_avg_hit_count_when_hit
-            FROM score_details
+            FROM rule_details
             WHERE rule_name = ?
         "#;
         let mut stmt = conn
@@ -677,7 +677,7 @@ fn query_daily_stats(conn: &Connection) -> Result<Vec<DailyStatRow>, String> {
                 SUM(CASE WHEN rule_score > 0 THEN 1 ELSE 0 END) AS pos_hit_rule_cnt,
                 SUM(CASE WHEN rule_score < 0 THEN 1 ELSE 0 END) AS neg_hit_rule_cnt,
                 SUM(rule_score) + 50.0 AS total_score
-            FROM score_details
+            FROM rule_details
             GROUP BY 1, 2
         )
         SELECT
@@ -765,7 +765,7 @@ fn query_trigger_pattern_aggs(
             ts_code,
             rule_name,
             rule_score
-        FROM score_details
+        FROM rule_details
         ORDER BY trade_date ASC, ts_code ASC
     "#;
 
