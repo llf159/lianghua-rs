@@ -150,7 +150,10 @@ fn resolve_download_ts_codes(source_dir: &str) -> Result<Vec<String>, String> {
 }
 
 fn resolve_index_ts_codes() -> Vec<String> {
-    INDEX_TS_CODES.iter().map(|item| (*item).to_string()).collect()
+    INDEX_TS_CODES
+        .iter()
+        .map(|item| (*item).to_string())
+        .collect()
 }
 
 fn emit_progress(
@@ -898,10 +901,7 @@ fn init_index_basic_data(
         1,
         1,
         Some(effective_trade_date.clone()),
-        format!(
-            "指数下载使用内置指数池，交易日 {}。",
-            effective_trade_date
-        ),
+        format!("指数下载使用内置指数池，交易日 {}。", effective_trade_date),
     );
 
     Ok(effective_trade_date)
@@ -1510,10 +1510,16 @@ fn download_indices_with_context(
         format!("指数下载开始，共 {total_tasks} 只指数待处理。"),
     );
 
-    for (batch_idx, batch) in ts_codes.chunks(pool.current_num_threads().max(1)).enumerate() {
-        let mut prepared_batch =
-            pool.install(|| client.prepare_index_downloads(source_dir, batch, start_date, end_date));
-        rebuild_index_indicators_with_history(source_dir, prepared_batch.prepared_items.as_mut_slice())?;
+    for (batch_idx, batch) in ts_codes
+        .chunks(pool.current_num_threads().max(1))
+        .enumerate()
+    {
+        let mut prepared_batch = pool
+            .install(|| client.prepare_index_downloads(source_dir, batch, start_date, end_date));
+        rebuild_index_indicators_with_history(
+            source_dir,
+            prepared_batch.prepared_items.as_mut_slice(),
+        )?;
         let batch_summary = prepared_batch.summary();
         if !indicator_columns_ready && !prepared_batch.prepared_items.is_empty() {
             let indicator_names = collect_indicator_names(&prepared_batch.prepared_items);
