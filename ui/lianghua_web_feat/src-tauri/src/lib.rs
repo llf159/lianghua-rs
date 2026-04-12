@@ -18,6 +18,11 @@ use lianghua_rs::ui_tools_feat::{
         StockPickResultData as ExpressionStockPickResultData,
         run_expression_stock_pick as core_run_expression_stock_pick,
     },
+    intraday_monitor::{
+        IntradayMonitorPageData, IntradayMonitorRow,
+        get_intraday_monitor_page as core_get_intraday_monitor_page,
+        refresh_intraday_monitor_realtime as core_refresh_intraday_monitor_realtime,
+    },
     overview::{
         SceneOverviewPageData,
         get_scene_rank_overview_page as core_get_scene_rank_overview_page,
@@ -47,6 +52,12 @@ use lianghua_rs::ui_tools_feat::{
         remove_strategy_manage_rules as core_remove_strategy_manage_rules,
         update_strategy_manage_scene as core_update_strategy_manage_scene,
         update_strategy_manage_rule as core_update_strategy_manage_rule,
+    },
+    statistics::{
+        StrategyStatisticsDetailData, StrategyStatisticsPageData, TriggeredStockRow,
+        get_strategy_statistics_detail as core_get_strategy_statistics_detail,
+        get_strategy_statistics_page as core_get_strategy_statistics_page,
+        get_strategy_triggered_stocks as core_get_strategy_triggered_stocks,
     },
     watch_observe::{
         WatchObserveRow as CoreWatchObserveRow, WatchObserveSnapshotData,
@@ -303,6 +314,35 @@ fn get_scene_rank_overview_page(
 }
 
 #[tauri::command]
+fn get_intraday_monitor_page(
+    source_path: String,
+    rank_date: Option<String>,
+    scene_name: Option<String>,
+    limit: Option<u32>,
+    board: Option<String>,
+    total_mv_min: Option<f64>,
+    total_mv_max: Option<f64>,
+) -> Result<IntradayMonitorPageData, String> {
+    core_get_intraday_monitor_page(
+        &source_path,
+        rank_date,
+        scene_name,
+        limit,
+        board,
+        total_mv_min,
+        total_mv_max,
+    )
+}
+
+#[tauri::command]
+fn refresh_intraday_monitor_realtime(
+    source_path: String,
+    rows: Vec<IntradayMonitorRow>,
+) -> Result<IntradayMonitorPageData, String> {
+    core_refresh_intraday_monitor_realtime(&source_path, rows)
+}
+
+#[tauri::command]
 fn get_strategy_manage_page(source_path: String) -> Result<StrategyManagePageData, String> {
     core_get_strategy_manage_page(&source_path)
 }
@@ -331,6 +371,45 @@ fn get_stock_detail_realtime(
     chart_window_days: Option<u32>,
 ) -> Result<StockDetailRealtimeData, String> {
     core_get_stock_detail_realtime(source_path, ts_code, chart_window_days)
+}
+
+#[tauri::command]
+async fn get_strategy_statistics_page(
+    source_path: String,
+    strategy_name: Option<String>,
+    analysis_trade_date: Option<String>,
+) -> Result<StrategyStatisticsPageData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_strategy_statistics_page(source_path, strategy_name, analysis_trade_date)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_strategy_statistics_detail(
+    source_path: String,
+    strategy_name: String,
+    analysis_trade_date: Option<String>,
+) -> Result<StrategyStatisticsDetailData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_strategy_statistics_detail(source_path, strategy_name, analysis_trade_date)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_strategy_triggered_stocks(
+    source_path: String,
+    strategy_name: String,
+    analysis_trade_date: String,
+) -> Result<Vec<TriggeredStockRow>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_strategy_triggered_stocks(source_path, strategy_name, analysis_trade_date)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -629,8 +708,13 @@ pub fn run() {
             get_rank_overview_page,
             get_scene_rank_trade_date_options,
             get_scene_rank_overview_page,
+            get_intraday_monitor_page,
+            refresh_intraday_monitor_realtime,
             get_stock_detail_page,
             get_stock_detail_realtime,
+            get_strategy_statistics_page,
+            get_strategy_statistics_detail,
+            get_strategy_triggered_stocks,
             get_ranking_compute_status,
             run_ranking_score_calculation,
             run_ranking_tiebreak_fill,

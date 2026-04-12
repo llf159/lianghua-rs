@@ -10,12 +10,14 @@ pub mod data_import;
 pub mod data_viewer;
 pub mod details;
 pub mod expression_stock_pick;
+pub mod intraday_monitor;
 pub mod overview;
 pub mod overview_classic;
 pub mod ranking_compute;
 pub mod realtime;
 pub mod stock_pick;
 pub mod strategy_manage;
+pub mod statistics;
 pub mod watch_observe;
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";

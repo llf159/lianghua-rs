@@ -75,6 +75,46 @@ export type SceneOverviewPageData = {
   resolved_rank_date?: string;
 };
 
+export type IntradayMonitorRow = {
+  ts_code: string;
+  trade_date?: string;
+  scene_name: string;
+  scene_score?: number | null;
+  risk_score?: number | null;
+  scene_status?: string | null;
+  rank?: number | null;
+  name?: string;
+  board?: string;
+  total_mv_yi?: number | null;
+  concept?: string;
+  realtime_price?: number | null;
+  realtime_change_pct?: number | null;
+  realtime_vol_ratio?: number | null;
+  [key: string]: string | number | null | undefined;
+};
+
+export type IntradayMonitorPageQuery = {
+  sourcePath: string;
+  rankDate?: string;
+  sceneName?: string;
+  limit?: number;
+  board?: string;
+  totalMvMin?: number;
+  totalMvMax?: number;
+};
+
+export type IntradayMonitorPageData = {
+  rows: IntradayMonitorRow[];
+  rank_date_options?: string[];
+  resolved_rank_date?: string;
+  refreshed_at?: string;
+};
+
+export type IntradayRealtimeRefreshQuery = {
+  sourcePath: string;
+  rows: IntradayMonitorRow[];
+};
+
 export type StockLookupRow = {
   ts_code: string;
   name: string;
@@ -99,6 +139,14 @@ export async function listSceneRankTradeDates(sourcePath: string) {
 
 export async function sceneRankOverviewPage(query: SceneOverviewPageQuery) {
   return invoke<SceneOverviewPageData>('get_scene_rank_overview_page', query)
+}
+
+export async function intradayMonitorPage(query: IntradayMonitorPageQuery) {
+  return invoke<IntradayMonitorPageData>('get_intraday_monitor_page', query)
+}
+
+export async function refreshIntradayMonitorRealtime(query: IntradayRealtimeRefreshQuery) {
+  return invoke<IntradayMonitorPageData>('refresh_intraday_monitor_realtime', query)
 }
 
 export async function listStockLookupRows(sourcePath: string) {

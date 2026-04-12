@@ -20,6 +20,9 @@ import ExpressionStockPickPage from './pages/desktop/ExpressionStockPickPage'
 import ConceptStockPickPage from './pages/desktop/ConceptStockPickPage'
 import StrategyManagePage from './pages/desktop/StrategyManagePage'
 import WatchObservePage from './pages/desktop/WatchObservePage'
+import IntradayMonitorRealtimePage from './pages/desktop/IntradayMonitorRealtimePage'
+import BacktestPage from './pages/desktop/BacktestPage'
+import StrategyTriggerPage from './pages/desktop/StrategyTriggerPage'
 import DetailsLinkedOverlayRoute from './shared/DetailsLinkedOverlayRoute'
 import DetailsOverlayRoute from './shared/DetailsOverlayRoute'
 import './App.css'
@@ -61,6 +64,14 @@ function AppRoutes() {
             <Route path="data-download" element={<DataDownloadPage />} />
             <Route path="ranking-compute" element={<RankingComputePage />} />
             <Route path="strategy-manage" element={<StrategyManagePage />} />
+          </Route>
+          <Route path="intraday-monitor">
+            <Route index element={<Navigate to="/intraday-monitor/realtime-ranking" replace />} />
+            <Route path="realtime-ranking" element={<IntradayMonitorRealtimePage />} />
+          </Route>
+          <Route path="backtest" element={<BacktestPage />}>
+            <Route index element={<Navigate to="/backtest/strategy-trigger" replace />} />
+            <Route path="strategy-trigger" element={<StrategyTriggerPage />} />
           </Route>
         </Route>
       </Routes>

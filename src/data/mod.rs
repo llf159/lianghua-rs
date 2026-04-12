@@ -389,6 +389,25 @@ impl<'de> Deserialize<'de> for ScopeWay {
     }
 }
 
+impl<'de> Deserialize<'de> for RuleTag {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let tag = raw.trim().to_ascii_lowercase();
+
+        match tag.as_str() {
+            "" | "normal" => Ok(RuleTag::Normal),
+            "opportunity" => Ok(RuleTag::Opportunity),
+            "rare" => Ok(RuleTag::Rare),
+            _ => Err(de::Error::custom(
+                "tag 仅支持 Normal/Opportunity/Rare",
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScoreConfig {
     pub version: u32,
@@ -403,6 +422,14 @@ pub enum ScopeWay {
     Each,
     Recent,
     Consec(usize),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub enum RuleTag {
+    #[default]
+    Normal,
+    Opportunity,
+    Rare,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -446,6 +473,8 @@ pub struct ScoreRule {
     pub scene_points: f64,
     pub dist_points: Option<Vec<DistPoint>>,
     pub explain: String,
+    #[serde(default)]
+    pub tag: RuleTag,
 }
 
 impl ScoreConfig {

@@ -533,6 +533,7 @@ pub fn cache_rule_build(source_dir: &str) -> Result<Vec<CachedRule>, String> {
             scope_way: rule.scope_way,
             points: rule.points,
             dist_points: rule.dist_points,
+            tag: rule.tag,
             when_src: rule.when,
             when_ast: stmt,
         });

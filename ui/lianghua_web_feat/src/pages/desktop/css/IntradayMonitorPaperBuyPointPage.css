@@ -1,0 +1,33 @@
+.intraday-paper-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.intraday-paper-card {
+  background: #fff;
+  border: 1px solid #e7ebf3;
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.intraday-paper-title {
+  margin: 0;
+  font-size: 20px;
+  color: #1f2a44;
+}
+
+.intraday-paper-desc {
+  margin: 0;
+  color: #3a4663;
+  line-height: 1.6;
+}
+
+.intraday-paper-tip {
+  margin: 0;
+  color: #6b7694;
+  font-size: 13px;
+}

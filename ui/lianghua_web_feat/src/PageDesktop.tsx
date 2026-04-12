@@ -8,7 +8,15 @@ const menuList = [
   { path: '/details', label: '个股详情' },
 ]
 
+const intradayMonitorSubRoutes = [
+  { path: '/intraday-monitor/realtime-ranking', label: '排名实时' },
+]
+
 const settingsMenuItem = { path: '/settings', label: '设置' }
+
+const backtestSubRoutes = [
+  { path: '/backtest/strategy-trigger', label: '策略触发统计' },
+]
 
 const stockPickSubRoutes = [
   { path: '/stock-pick/expression', label: '表达式选股' },
@@ -28,9 +36,13 @@ export default function PageDesktop() {
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [isStockPickOpen, setIsStockPickOpen] = useState(true)
   const [isRawDataOpen, setIsRawDataOpen] = useState(true)
+  const [isIntradayMonitorOpen, setIsIntradayMonitorOpen] = useState(true)
+  const [isBacktestOpen, setIsBacktestOpen] = useState(true)
   const contentRef = useRef<HTMLElement | null>(null)
   const isStockPickActive = location.pathname.startsWith('/stock-pick')
   const isRawDataActive = location.pathname.startsWith('/raw-data')
+  const isIntradayMonitorActive = location.pathname.startsWith('/intraday-monitor')
+  const isBacktestActive = location.pathname.startsWith('/backtest')
 
   return (
     <div className={isCollapsed ? 'desktop-shell collapsed' : 'desktop-shell'}>
@@ -50,6 +62,33 @@ export default function PageDesktop() {
               {menuItem.label}
             </NavLink>
           ))}
+
+          <div className="menu-group">
+            <button
+              className={
+                isIntradayMonitorActive ? 'menu-item menu-group-toggle active' : 'menu-item menu-group-toggle'
+              }
+              type="button"
+              onClick={() => setIsIntradayMonitorOpen((value) => !value)}
+            >
+              <span>实时监控</span>
+              <span>{isIntradayMonitorOpen ? '▾' : '▸'}</span>
+            </button>
+
+            {isIntradayMonitorOpen ? (
+              <div className="submenu-wrap">
+                {intradayMonitorSubRoutes.map((menuItem) => (
+                  <NavLink
+                    key={menuItem.path}
+                    to={menuItem.path}
+                    className={({ isActive }) => (isActive ? 'submenu-item active' : 'submenu-item')}
+                  >
+                    {menuItem.label}
+                  </NavLink>
+                ))}
+              </div>
+            ) : null}
+          </div>
 
           <div className="menu-group">
             <button
@@ -89,6 +128,31 @@ export default function PageDesktop() {
             {isRawDataOpen ? (
               <div className="submenu-wrap">
                 {rawDataSubRoutes.map((menuItem) => (
+                  <NavLink
+                    key={menuItem.path}
+                    to={menuItem.path}
+                    className={({ isActive }) => (isActive ? 'submenu-item active' : 'submenu-item')}
+                  >
+                    {menuItem.label}
+                  </NavLink>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="menu-group">
+            <button
+              className={isBacktestActive ? 'menu-item menu-group-toggle active' : 'menu-item menu-group-toggle'}
+              type="button"
+              onClick={() => setIsBacktestOpen((value) => !value)}
+            >
+              <span>统计回测</span>
+              <span>{isBacktestOpen ? '▾' : '▸'}</span>
+            </button>
+
+            {isBacktestOpen ? (
+              <div className="submenu-wrap">
+                {backtestSubRoutes.map((menuItem) => (
                   <NavLink
                     key={menuItem.path}
                     to={menuItem.path}
