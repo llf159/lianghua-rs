@@ -137,6 +137,13 @@ pub struct StockDetailPageData {
 }
 
 #[derive(Debug, Serialize)]
+pub struct StockDetailStrategySnapshotData {
+    pub resolved_trade_date: Option<String>,
+    pub resolved_ts_code: Option<String>,
+    pub strategy_triggers: Option<DetailStrategyPayload>,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StockDetailRealtimeData {
     pub ts_code: String,
@@ -1172,6 +1179,26 @@ pub fn get_stock_detail_page(
         kline: Some(kline),
         strategy_triggers: Some(strategy_triggers),
         strategy_scenes: Some(strategy_scenes),
+    })
+}
+
+pub fn get_stock_detail_strategy_snapshot(
+    source_path: String,
+    trade_date: Option<String>,
+    ts_code: String,
+) -> Result<StockDetailStrategySnapshotData, String> {
+    let normalized_ts_code = normalize_ts_code(&ts_code);
+    let result_conn = open_result_conn(&source_path)?;
+    let effective_trade_date = resolve_trade_date(&result_conn, trade_date)?;
+    let trigger_snapshot =
+        load_detail_trigger_snapshot(&result_conn, &normalized_ts_code, &effective_trade_date)?;
+    let strategy_triggers =
+        build_strategy_triggers(&source_path, &effective_trade_date, &trigger_snapshot)?;
+
+    Ok(StockDetailStrategySnapshotData {
+        resolved_trade_date: Some(effective_trade_date),
+        resolved_ts_code: Some(normalized_ts_code),
+        strategy_triggers: Some(strategy_triggers),
     })
 }
 

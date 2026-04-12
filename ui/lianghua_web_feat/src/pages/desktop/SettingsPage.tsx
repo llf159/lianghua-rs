@@ -1,7 +1,7 @@
 import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import { getStockPickOptions } from '../../apis/stockPick'
-import { filterConceptItems, useConceptExclusions } from '../../share/conceptExclusions'
+import { filterConceptItems, useConceptExclusions } from '../../shared/conceptExclusions'
 import './css/DataImportPage.css'
 import './css/StockPickPage.css'
 import './css/DetailsPage.css'

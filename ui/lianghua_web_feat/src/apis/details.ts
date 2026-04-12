@@ -117,6 +117,12 @@ export type StockDetailPageData = {
   strategy_scenes?: DetailScenePayload | null
 }
 
+export type StockDetailStrategySnapshotData = {
+  resolved_trade_date?: string
+  resolved_ts_code?: string
+  strategy_triggers?: DetailStrategyPayload | null
+}
+
 export type StockDetailRealtimeData = {
   tsCode: string
   refreshedAt?: string | null
@@ -128,6 +134,14 @@ export type StockDetailRealtimeData = {
 
 export async function getStockDetailPage(query: StockDetailQuery) {
   return invoke<StockDetailPageData>('get_stock_detail_page', query)
+}
+
+export async function getStockDetailStrategySnapshot(query: {
+  sourcePath: string
+  tradeDate?: string
+  tsCode: string
+}) {
+  return invoke<StockDetailStrategySnapshotData>('get_stock_detail_strategy_snapshot', query)
 }
 
 export async function getStockDetailRealtime(query: {

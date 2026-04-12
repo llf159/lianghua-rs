@@ -6,7 +6,7 @@ import {
   StockPickResultTable,
   formatDateLabel,
 } from '../../share/stockPickShared'
-import { filterConceptItems, useConceptExclusions } from '../../share/conceptExclusions'
+import { filterConceptItems, useConceptExclusions } from '../../shared/conceptExclusions'
 import { useStockPickOutletContext } from './StockPickPage'
 import { readJsonStorage } from '../../shared/storage'
 import {

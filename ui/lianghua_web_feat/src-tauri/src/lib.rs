@@ -10,9 +10,10 @@ use lianghua_rs::ui_tools_feat::{
     },
     data_viewer::{StockLookupRow, list_stock_lookup_rows as core_list_stock_lookup_rows},
     details::{
-        StockDetailPageData, StockDetailRealtimeData,
+        StockDetailPageData, StockDetailRealtimeData, StockDetailStrategySnapshotData,
         get_stock_detail_page as core_get_stock_detail_page,
         get_stock_detail_realtime as core_get_stock_detail_realtime,
+        get_stock_detail_strategy_snapshot as core_get_stock_detail_strategy_snapshot,
     },
     expression_stock_pick::{
         StockPickResultData as ExpressionStockPickResultData,
@@ -363,6 +364,15 @@ fn get_stock_detail_page(
         chart_window_days,
         prev_rank_days,
     )
+}
+
+#[tauri::command]
+fn get_stock_detail_strategy_snapshot(
+    source_path: String,
+    trade_date: Option<String>,
+    ts_code: String,
+) -> Result<StockDetailStrategySnapshotData, String> {
+    core_get_stock_detail_strategy_snapshot(source_path, trade_date, ts_code)
 }
 
 #[tauri::command]
@@ -721,6 +731,7 @@ pub fn run() {
             get_intraday_monitor_page,
             refresh_intraday_monitor_realtime,
             get_stock_detail_page,
+            get_stock_detail_strategy_snapshot,
             get_stock_detail_realtime,
             get_strategy_statistics_page,
             get_strategy_statistics_detail,

@@ -6,7 +6,7 @@ import {
   type SceneOverviewPageQuery,
   type SceneOverviewRow,
 } from '../../apis/reader'
-import { formatConceptText, useConceptExclusions } from '../../share/conceptExclusions'
+import { formatConceptText, useConceptExclusions } from '../../shared/conceptExclusions'
 import { STOCK_PICK_BOARD_OPTIONS } from '../../share/stockPickShared'
 import DetailsLink from '../../shared/DetailsLink'
 import {
@@ -15,7 +15,7 @@ import {
   type SortDefinition,
   type SortDirection,
   useTableSort,
-} from '../../share/tableSort'
+} from '../../shared/tableSort'
 import { useRouteScrollRegion } from '../../shared/routeScroll'
 import { readJsonStorage, readStoredSourcePath } from '../../shared/storage'
 import { DEFAULT_DATE_OPTION, normalizeTradeDates, pickDateValue } from '../../shared/tradeDate'

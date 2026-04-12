@@ -15,6 +15,7 @@ import { useSearchParams } from "react-router-dom";
 import {
   getStockDetailRealtime,
   getStockDetailPage,
+  getStockDetailStrategySnapshot,
   type DetailKlinePanel,
   type DetailKlineRow,
   type DetailKlinePayload,
@@ -49,7 +50,7 @@ import {
   getAriaSort,
   type SortDefinition,
   useTableSort,
-} from "../../share/tableSort";
+} from "../../shared/tableSort";
 import {
   DEFAULT_DATE_OPTION,
   normalizeTradeDates,
@@ -58,7 +59,7 @@ import {
 import {
   filterConceptItems,
   useConceptExclusions,
-} from "../../share/conceptExclusions";
+} from "../../shared/conceptExclusions";
 import {
   findWatchObserveRow,
   listWatchObserveRows,
@@ -2805,12 +2806,10 @@ export default function DetailsPage({
 
     const loadStrategyCompareSnapshot = async () => {
       try {
-        const compareDetail = await getStockDetailPage({
+        const compareDetail = await getStockDetailStrategySnapshot({
           sourcePath: sourcePathTrimmed,
           tradeDate: previousStrategyTradeDate,
           tsCode: resolvedTsCode,
-          chartWindowDays: 1,
-          prevRankDays: 1,
         });
         if (cancelled || strategyCompareRequestKeyRef.current !== requestKey) {
           return;
@@ -2818,8 +2817,12 @@ export default function DetailsPage({
 
         setStrategyCompareSnapshot({
           tsCode: resolvedTsCode,
-          relativeTradeDate: previousStrategyTradeDate,
-          rows: collectStrategyRows(compareDetail),
+          relativeTradeDate:
+            compareDetail.resolved_trade_date?.trim() || previousStrategyTradeDate,
+          rows: [
+            ...(compareDetail.strategy_triggers?.triggered ?? []),
+            ...(compareDetail.strategy_triggers?.untriggered ?? []),
+          ],
         });
       } catch {
         if (cancelled || strategyCompareRequestKeyRef.current !== requestKey) {

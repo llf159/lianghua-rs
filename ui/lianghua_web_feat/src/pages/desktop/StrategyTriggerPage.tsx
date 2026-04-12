@@ -1991,7 +1991,7 @@ export default function StrategyTriggerPage() {
         <div className="strategy-trigger-source-note">
           当前数据目录：<strong>{sourcePath || "--"}</strong>
           <span>
-            统计口径基于结果库 `score_details / score_summary` 与规则文件。
+            统计口径基于结果库 `rule_details / scene_details / score_summary` 与规则文件。
           </span>
         </div>
         <div className="strategy-trigger-form-grid">

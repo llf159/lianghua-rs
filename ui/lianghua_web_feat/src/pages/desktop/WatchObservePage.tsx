@@ -11,7 +11,7 @@ import {
 import {
   formatConceptText,
   useConceptExclusions,
-} from "../../share/conceptExclusions";
+} from "../../shared/conceptExclusions";
 import DetailsLink from "../../shared/DetailsLink";
 import { splitTsCode } from "../../shared/stockCode";
 import {
@@ -25,7 +25,7 @@ import {
   getAriaSort,
   type SortDefinition,
   useTableSort,
-} from "../../share/tableSort";
+} from "../../shared/tableSort";
 import {
   DEFAULT_DATE_OPTION,
   normalizeTradeDates,
