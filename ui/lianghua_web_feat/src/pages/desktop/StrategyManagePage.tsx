@@ -8,6 +8,7 @@ import {
   getStrategyManagePage,
   removeStrategyManageScene,
   removeStrategyManageRules,
+  saveStrategyManageRefactorFile,
   updateStrategyManageScene,
   updateStrategyManageRule,
   type StrategyManageDistPoint,
@@ -21,6 +22,7 @@ import './css/StrategyManagePage.css'
 
 const SCOPE_OPTIONS = ['LAST', 'ANY', 'EACH', 'RECENT', 'CONSEC>=2'] as const
 const STAGE_OPTIONS = ['base', 'trigger', 'confirm', 'risk', 'fail'] as const
+const STRATEGY_RULE_FILE_NAME = 'score_rule.toml'
 
 type SyntaxGuideFunction = {
   name: string
@@ -50,6 +52,8 @@ type BusyAction = 'idle' | 'loading' | 'saving' | 'deleting'
 type EditorMode = 'create' | 'edit'
 type SceneEditorMode = 'create' | 'edit'
 type DeleteSceneTarget = Pick<StrategyManageSceneItem, 'name' | 'rule_count'>
+type RefactorSceneDraft = StrategyManageSceneDraft & { id: string }
+type RefactorRuleDraft = StrategyManageRuleDraft
 
 function formatNumber(value: number, digits = 2) {
   if (!Number.isFinite(value)) {
@@ -118,6 +122,18 @@ function buildPreparedSceneDraft(draft: StrategyManageSceneDraft): StrategyManag
   return {
     ...draft,
     name: draft.name.trim(),
+  }
+}
+
+function createRefactorSceneDraft(name = ''): RefactorSceneDraft {
+  return {
+    id: `${Date.now()}-${Math.random()}`,
+    name,
+    observe_threshold: 1,
+    trigger_threshold: 2,
+    confirm_threshold: 3,
+    fail_threshold: 1,
+    evidence_score: 1,
   }
 }
 
@@ -246,6 +262,15 @@ export default function StrategyManagePage() {
   const [failThresholdText, setFailThresholdText] = useState('1')
   const [evidenceScoreText, setEvidenceScoreText] = useState('1')
   const [isSyntaxGuideOpen, setIsSyntaxGuideOpen] = useState(false)
+  const [isBulkEditorOpen, setIsBulkEditorOpen] = useState(false)
+  const [refactorFileName, setRefactorFileName] = useState('score_rule_refactor.toml')
+  const [refactorScenes, setRefactorScenes] = useState<RefactorSceneDraft[]>([])
+  const [refactorRules, setRefactorRules] = useState<RefactorRuleDraft[]>([])
+  const [bulkRuleSceneFilter, setBulkRuleSceneFilter] = useState('ALL')
+  const [bulkRuleKeyword, setBulkRuleKeyword] = useState('')
+  const [bulkActiveSceneName, setBulkActiveSceneName] = useState('')
+  const [bulkNewSceneId, setBulkNewSceneId] = useState('')
+  const [bulkError, setBulkError] = useState('')
 
   const selectedScene = useMemo(
     () => scenes.find((item) => item.name === selectedSceneName) ?? null,
@@ -255,6 +280,109 @@ export default function StrategyManagePage() {
     () => rules.filter((item) => item.scene_name === selectedSceneName),
     [rules, selectedSceneName],
   )
+  const bulkFilteredRules = useMemo(() => {
+    const chosenRuleNames = new Set(refactorRules.map((item) => item.name))
+    const sceneFiltered =
+      bulkRuleSceneFilter === 'ALL'
+        ? rules
+        : rules.filter((item) => item.scene_name === bulkRuleSceneFilter)
+
+    const notChosen = sceneFiltered.filter((item) => !chosenRuleNames.has(item.name))
+    const keyword = bulkRuleKeyword.trim().toLowerCase()
+    if (!keyword) {
+      return notChosen
+    }
+
+    return notChosen.filter((item) => {
+      const haystack = `${item.name} ${item.scene_name} ${item.stage} ${item.scope_way} ${item.explain} ${item.when}`.toLowerCase()
+      return haystack.includes(keyword)
+    })
+  }, [rules, bulkRuleSceneFilter, bulkRuleKeyword, refactorRules])
+
+  const bulkValidationIssues = useMemo(() => {
+    const issues: string[] = []
+
+    const fileName = refactorFileName.trim()
+    if (!fileName) {
+      issues.push('输出文件名不能为空')
+    }
+    if (fileName !== STRATEGY_RULE_FILE_NAME) {
+      issues.push(`输出文件名必须为 ${STRATEGY_RULE_FILE_NAME}（覆盖策略文件）`)
+    }
+
+    if (refactorScenes.length === 0) {
+      issues.push('至少需要一个 Scene')
+    }
+
+    if (refactorRules.length === 0) {
+      issues.push('至少需要一条 Rule')
+    }
+
+    const sceneNameSet = new Set<string>()
+    for (const scene of refactorScenes) {
+      const name = scene.name.trim()
+      if (!name) {
+        issues.push('存在空 Scene 名称')
+        continue
+      }
+      if (sceneNameSet.has(name)) {
+        issues.push(`Scene 名称重复: ${name}`)
+      }
+      sceneNameSet.add(name)
+    }
+
+    const ruleNameSet = new Set<string>()
+    for (const rule of refactorRules) {
+      const ruleName = rule.name.trim()
+      if (!ruleName) {
+        issues.push('存在空 Rule 名称')
+      } else if (ruleNameSet.has(ruleName)) {
+        issues.push(`Rule 名称重复: ${ruleName}`)
+      }
+      ruleNameSet.add(ruleName)
+
+      if (!rule.scene_name.trim()) {
+        issues.push(`Rule ${rule.name || '(未命名)'} 未设置 Scene`)
+      } else if (!sceneNameSet.has(rule.scene_name.trim())) {
+        issues.push(`Rule ${rule.name || '(未命名)'} 关联的 Scene 不存在: ${rule.scene_name}`)
+      }
+
+      if (!rule.when.trim()) {
+        issues.push(`Rule ${rule.name || '(未命名)'} 的表达式不能为空`)
+      }
+
+      if (!Number.isInteger(rule.scope_windows) || rule.scope_windows < 1) {
+        issues.push(`Rule ${rule.name || '(未命名)'} 的 scope_windows 必须是 >= 1 的整数`)
+      }
+    }
+
+    const sourceRuleNameSet = new Set(rules.map((item) => item.name))
+    const unclassifiedRules = Array.from(sourceRuleNameSet).filter((name) => !ruleNameSet.has(name))
+    if (unclassifiedRules.length > 0) {
+      issues.push(`仍有 ${unclassifiedRules.length} 条原始 Rule 未分类`) 
+    }
+
+    return Array.from(new Set(issues))
+  }, [refactorFileName, refactorScenes, refactorRules, rules])
+
+  const refactorSceneNames = useMemo(
+    () => refactorScenes.map((item) => item.name.trim()).filter(Boolean),
+    [refactorScenes],
+  )
+
+  const refactorRulesByScene = useMemo(() => {
+    const grouped = new Map<string, Array<{ rule: RefactorRuleDraft; index: number }>>()
+    refactorSceneNames.forEach((name) => grouped.set(name, []))
+    refactorRules.forEach((rule, index) => {
+      const sceneName = rule.scene_name.trim()
+      const list = grouped.get(sceneName)
+      if (list) {
+        list.push({ rule, index })
+      }
+    })
+    return grouped
+  }, [refactorRules, refactorSceneNames])
+
 
   async function loadPage() {
     setBusyAction('loading')
@@ -320,6 +448,94 @@ export default function StrategyManagePage() {
     setSceneEditorError('')
     setError('')
     setNotice('')
+  }
+
+  function openBulkEditor() {
+    const initialSceneName = 'new_scene'
+    const initialScene = createRefactorSceneDraft(initialSceneName)
+    setRefactorFileName(STRATEGY_RULE_FILE_NAME)
+    setRefactorScenes([initialScene])
+    setRefactorRules([])
+    setBulkRuleSceneFilter('ALL')
+    setBulkRuleKeyword('')
+    setBulkActiveSceneName(initialSceneName)
+    setBulkNewSceneId(initialScene.id)
+    setBulkError('')
+    setIsBulkEditorOpen(true)
+    setError('')
+    setNotice('')
+  }
+
+  function closeBulkEditor() {
+    setIsBulkEditorOpen(false)
+    setBulkError('')
+    setBulkRuleKeyword('')
+    setBulkActiveSceneName('')
+    setBulkNewSceneId('')
+  }
+
+  function addRefactorScene() {
+    setRefactorScenes((current) => {
+      const nextName = `scene_${current.length + 1}`
+      const nextScene = createRefactorSceneDraft(nextName)
+      setBulkActiveSceneName(nextName)
+      setBulkNewSceneId(nextScene.id)
+      return [...current, nextScene]
+    })
+  }
+
+  function updateRefactorScene(sceneId: string, key: keyof RefactorSceneDraft, value: string) {
+    setRefactorScenes((current) =>
+      current.map((item) => {
+        if (item.id !== sceneId) {
+          return item
+        }
+        if (key === 'name') {
+          return { ...item, name: value }
+        }
+        return { ...item, [key]: Number(value) }
+      }),
+    )
+    setBulkNewSceneId((current) => (current === sceneId ? sceneId : current))
+  }
+
+  function removeRefactorScene(sceneId: string) {
+    const removingScene = refactorScenes.find((item) => item.id === sceneId)
+    const fallbackSceneName = refactorScenes.find((item) => item.id !== sceneId)?.name ?? ''
+    setRefactorScenes((current) => current.filter((item) => item.id !== sceneId))
+    if (removingScene) {
+      setRefactorRules((current) => current.filter((item) => item.scene_name !== removingScene.name))
+      if (bulkActiveSceneName === removingScene.name) {
+        setBulkActiveSceneName(fallbackSceneName)
+      }
+      if (bulkNewSceneId === removingScene.id) {
+        setBulkNewSceneId('')
+      }
+    }
+  }
+
+  function addRuleToRefactor(rule: StrategyManageRuleItem) {
+    if (!bulkActiveSceneName.trim()) {
+      setBulkError('请先点击一个 Scene 篮子')
+      return
+    }
+    setRefactorRules((current) => {
+      const exists = current.some((item) => item.name === rule.name)
+      const uniqueName = exists ? `${rule.name}_${current.length + 1}` : rule.name
+      return [
+        ...current,
+        {
+          ...buildDraftFromRule(rule),
+          name: uniqueName,
+          scene_name: bulkActiveSceneName,
+        },
+      ]
+    })
+    setBulkError('')
+  }
+
+  function removeRuleFromScene(ruleIndex: number) {
+    setRefactorRules((current) => current.filter((_, idx) => idx !== ruleIndex))
   }
 
   function openEditSceneEditor(scene: StrategyManageSceneItem) {
@@ -497,6 +713,50 @@ export default function StrategyManagePage() {
     }
   }
 
+  async function onSaveBulkScene() {
+    if (!sourcePath.trim()) {
+      setBulkError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    if (bulkValidationIssues.length > 0) {
+      setBulkError(`请先修正后再保存：${bulkValidationIssues[0]}`)
+      return
+    }
+
+    setBusyAction('saving')
+    setBulkError('')
+    setError('')
+    try {
+      const outputPath = await saveStrategyManageRefactorFile(sourcePath, refactorFileName.trim(), {
+        scenes: refactorScenes.map((scene) => ({
+          name: scene.name.trim(),
+          observe_threshold: scene.observe_threshold,
+          trigger_threshold: scene.trigger_threshold,
+          confirm_threshold: scene.confirm_threshold,
+          fail_threshold: scene.fail_threshold,
+          evidence_score: scene.evidence_score,
+        })),
+        rules: refactorRules.map((rule) => ({
+          ...rule,
+          name: rule.name.trim(),
+          scene_name: rule.scene_name.trim(),
+          stage: rule.stage.trim(),
+          scope_way: rule.scope_way.trim(),
+          when: rule.when.trim(),
+          explain: rule.explain.trim(),
+        })),
+      })
+      setNotice(`策略重构文件已保存: ${outputPath}`)
+      setIsBulkEditorOpen(false)
+    } catch (bulkSaveError) {
+      setBulkError(`整体编辑保存失败: ${String(bulkSaveError)}`)
+      setNotice('')
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
   async function onConfirmDeleteScene() {
     if (!deleteSceneTarget) {
       return
@@ -556,6 +816,9 @@ export default function StrategyManagePage() {
 
   const isBusy = busyAction !== 'idle'
   const isEditing = draft !== null
+  const bulkTotalRuleCount = rules.length
+  const bulkClassifiedCount = refactorRules.length
+  const bulkPendingCount = bulkFilteredRules.length
 
   useEffect(() => {
     if (!isSyntaxGuideOpen) {
@@ -588,6 +851,13 @@ export default function StrategyManagePage() {
               onClick={openCreateSceneEditor}
             >
               新建 Scene
+            </button>
+            <button
+              className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary"
+              type="button"
+              onClick={openBulkEditor}
+            >
+              策略整体编辑
             </button>
             <button
               className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary"
@@ -1020,6 +1290,182 @@ export default function StrategyManagePage() {
                 }}
                 disabled={isBusy}
               >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {isBulkEditorOpen ? (
+        <div className="strategy-manage-modal-backdrop" role="presentation">
+          <div className="strategy-manage-modal strategy-manage-editor-modal" role="dialog" aria-modal="true">
+            <div className="strategy-manage-list-head strategy-manage-bulk-head">
+              <strong>策略整理台</strong>
+              <span>候选池点选加入；Scene 方块内点 Rule 即移出</span>
+            </div>
+            {bulkError ? <div className="strategy-manage-message strategy-manage-message-error">{bulkError}</div> : null}
+
+            <div className="strategy-manage-bulk-top-inline">
+              <span className="strategy-manage-tip">将直接覆盖：{refactorFileName}</span>
+              <div className="strategy-manage-bulk-kpi">
+                <div className="strategy-manage-summary-item">
+                  <span>总 Rule</span>
+                  <strong>{bulkTotalRuleCount}</strong>
+                </div>
+                <div className="strategy-manage-summary-item">
+                  <span>已分类</span>
+                  <strong>{bulkClassifiedCount}</strong>
+                </div>
+                <div className="strategy-manage-summary-item">
+                  <span>待分类</span>
+                  <strong>{bulkPendingCount}</strong>
+                </div>
+              </div>
+            </div>
+
+            <div className="strategy-manage-list-head">
+              <div className="strategy-manage-bulk-row-actions">
+                <span className="strategy-manage-tip">当前放入目标：{bulkActiveSceneName || '未选择'}</span>
+                <button className="strategy-manage-inline-btn" type="button" onClick={addRefactorScene}>新增 Scene</button>
+              </div>
+            </div>
+
+            <div className="strategy-manage-bulk-simple-board">
+              <section className="strategy-manage-bulk-board-col">
+                <div className="strategy-manage-list-head">
+                  <strong>候选 Rule 池（点击放入当前目标 Scene）</strong>
+                  <span>{bulkFilteredRules.length} 条待分类</span>
+                </div>
+                <div className="strategy-manage-bulk-filter-bar strategy-manage-bulk-filter-bar-simple strategy-manage-bulk-filter-bar-compact">
+                  <label className="strategy-manage-field">
+                    <span>按 scene 过滤</span>
+                    <select value={bulkRuleSceneFilter} onChange={(event) => setBulkRuleSceneFilter(event.target.value)}>
+                      <option value="ALL">全部</option>
+                      {scenes.map((scene) => (
+                        <option key={scene.name} value={scene.name}>{scene.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="strategy-manage-field strategy-manage-field-grow">
+                    <span>关键词</span>
+                    <input
+                      value={bulkRuleKeyword}
+                      onChange={(event) => setBulkRuleKeyword(event.target.value)}
+                      placeholder="名称 / 表达式 / 说明"
+                    />
+                  </label>
+                </div>
+                <div className="strategy-manage-bulk-rule-list strategy-manage-bulk-rule-pool">
+                  {bulkFilteredRules.map((rule) => (
+                    <button
+                      key={rule.name}
+                      type="button"
+                      className="strategy-manage-bulk-rule-item strategy-manage-bulk-rule-click"
+                      onClick={() => addRuleToRefactor(rule)}
+                    >
+                      <div>
+                        <div className="strategy-manage-rule-card-name">{rule.name}</div>
+                        <div className="strategy-manage-tip">{rule.scene_name} · {rule.stage} · {rule.scope_way}</div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <section className="strategy-manage-bulk-board-col">
+                <div className="strategy-manage-list-head">
+                  <strong>Scene 篮子区（点击 Scene 设为放入目标）</strong>
+                  <span>{refactorRules.length} 条已加入</span>
+                </div>
+                <div className="strategy-manage-bulk-validation">
+                  <div className="strategy-manage-bulk-validation-head">
+                    <strong>校验</strong>
+                    <span>{bulkValidationIssues.length === 0 ? '通过' : `${bulkValidationIssues.length} 个问题`}</span>
+                  </div>
+                </div>
+                <div className="strategy-manage-bulk-rule-list strategy-manage-bulk-classified-list">
+                  {refactorScenes.map((scene) => {
+                    const sceneName = scene.name.trim()
+                    const bucket = sceneName ? (refactorRulesByScene.get(sceneName) ?? []) : []
+                    const active = bulkActiveSceneName === sceneName
+                    const isNewScene = bulkNewSceneId === scene.id
+                    return (
+                      <article key={scene.id} className={active ? 'strategy-manage-bulk-scene-box is-active' : 'strategy-manage-bulk-scene-box'}>
+                        <button
+                          type="button"
+                          className="strategy-manage-bulk-scene-anchor"
+                          onClick={() => setBulkActiveSceneName(sceneName)}
+                        >
+                          <div className="strategy-manage-bulk-row-head">
+                            <strong>{sceneName || '未命名 Scene'}</strong>
+                            <span>{bucket.length} 条</span>
+                          </div>
+                        </button>
+
+                        {isNewScene ? (
+                          <div className="strategy-manage-editor-grid strategy-manage-editor-grid-scene">
+                            <label className="strategy-manage-field strategy-manage-field-span-full">
+                              <span>Scene 名称</span>
+                              <input value={scene.name} onChange={(event) => updateRefactorScene(scene.id, 'name', event.target.value)} />
+                            </label>
+                            <label className="strategy-manage-field"><span>observe</span><input type="number" step="0.1" value={scene.observe_threshold} onChange={(event) => updateRefactorScene(scene.id, 'observe_threshold', event.target.value)} /></label>
+                            <label className="strategy-manage-field"><span>trigger</span><input type="number" step="0.1" value={scene.trigger_threshold} onChange={(event) => updateRefactorScene(scene.id, 'trigger_threshold', event.target.value)} /></label>
+                            <label className="strategy-manage-field"><span>confirm</span><input type="number" step="0.1" value={scene.confirm_threshold} onChange={(event) => updateRefactorScene(scene.id, 'confirm_threshold', event.target.value)} /></label>
+                            <label className="strategy-manage-field"><span>fail</span><input type="number" step="0.1" value={scene.fail_threshold} onChange={(event) => updateRefactorScene(scene.id, 'fail_threshold', event.target.value)} /></label>
+                            <label className="strategy-manage-field"><span>evidence</span><input type="number" step="0.1" value={scene.evidence_score} onChange={(event) => updateRefactorScene(scene.id, 'evidence_score', event.target.value)} /></label>
+                          </div>
+                        ) : (
+                          <div className="strategy-manage-bulk-scene-metrics">
+                            <span>observe {formatNumber(scene.observe_threshold)}</span>
+                            <span>trigger {formatNumber(scene.trigger_threshold)}</span>
+                            <span>confirm {formatNumber(scene.confirm_threshold)}</span>
+                            <span>fail {formatNumber(scene.fail_threshold)}</span>
+                            <span>evidence {formatNumber(scene.evidence_score)}</span>
+                          </div>
+                        )}
+
+                        <div className="strategy-manage-bulk-row-actions">
+                          {isNewScene ? (
+                            <button className="strategy-manage-inline-btn" type="button" onClick={() => setBulkNewSceneId('')}>
+                              完成配置
+                            </button>
+                          ) : (
+                            <button className="strategy-manage-inline-btn" type="button" onClick={() => setBulkNewSceneId(scene.id)}>
+                              编辑配置
+                            </button>
+                          )}
+                          <button className="strategy-manage-inline-btn is-danger" type="button" onClick={() => removeRefactorScene(scene.id)}>
+                            删除 Scene
+                          </button>
+                        </div>
+
+                        <div className="strategy-manage-bulk-scene-rules">
+                          {bucket.length === 0 ? <div className="strategy-manage-empty">篮子内暂无 Rule</div> : null}
+                          {bucket.map(({ rule, index }) => (
+                            <button
+                              key={`${rule.name}-${index}`}
+                              type="button"
+                              className="strategy-manage-bulk-bucket-item strategy-manage-bulk-rule-click"
+                              onClick={() => removeRuleFromScene(index)}
+                            >
+                              <div className="strategy-manage-rule-card-name">{rule.name || '未命名 Rule'}</div>
+                              <div className="strategy-manage-tip">{rule.stage} · {rule.scope_way} · 点击移出</div>
+                            </button>
+                          ))}
+                        </div>
+                      </article>
+                    )
+                  })}
+                </div>
+              </section>
+            </div>
+
+            <div className="strategy-manage-editor-actions">
+              <button className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary" type="button" onClick={() => void onSaveBulkScene()} disabled={isBusy}>
+                {busyAction === 'saving' ? '保存中...' : '保存为新策略文件'}
+              </button>
+              <button className="strategy-manage-toolbar-btn" type="button" onClick={closeBulkEditor} disabled={isBusy}>
                 取消
               </button>
             </div>

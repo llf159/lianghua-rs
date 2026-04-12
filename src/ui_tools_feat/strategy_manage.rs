@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, fs};
+use std::{collections::{HashMap, HashSet}, fs, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -80,6 +80,12 @@ pub struct StrategyManagePageData {
     pub rules: Vec<StrategyManageRuleItem>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct StrategyManageRefactorDraft {
+    pub scenes: Vec<StrategyManageSceneDraft>,
+    pub rules: Vec<StrategyManageRuleDraft>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct StrategyRuleFile {
     version: u32,
@@ -128,6 +134,20 @@ fn load_rule_file(source_path: &str) -> Result<StrategyRuleFile, String> {
     let text = fs::read_to_string(&path)
         .map_err(|e| format!("读取策略规则文件失败: path={}, err={e}", path.display()))?;
     toml::from_str(&text).map_err(|e| format!("解析策略规则文件失败: {e}"))
+}
+
+fn rule_file_output_path(source_path: &str, file_name: &str) -> Result<PathBuf, String> {
+    let trimmed = file_name.trim();
+    if trimmed.is_empty() {
+        return Err("策略文件名不能为空".to_string());
+    }
+    if !trimmed.ends_with(".toml") {
+        return Err("策略文件名必须以 .toml 结尾".to_string());
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err("策略文件名不能包含路径分隔符".to_string());
+    }
+    Ok(std::path::Path::new(source_path).join(trimmed))
 }
 
 fn save_rule_file(source_path: &str, file: &StrategyRuleFile) -> Result<(), String> {
@@ -252,11 +272,7 @@ fn fill_validation_extra_fields(
     row_data.validate()
 }
 
-fn validate_scene_draft_basic(
-    source_path: &str,
-    original_name: Option<&str>,
-    draft: &StrategyManageSceneDraft,
-) -> Result<String, String> {
+fn validate_scene_values(draft: &StrategyManageSceneDraft) -> Result<(), String> {
     let name = draft.name.trim();
     if name.is_empty() {
         return Err("scene 名称不能为空".to_string());
@@ -272,6 +288,16 @@ fn validate_scene_draft_basic(
             return Err(format!("{label} 非法"));
         }
     }
+    Ok(())
+}
+
+fn validate_scene_draft_basic(
+    source_path: &str,
+    original_name: Option<&str>,
+    draft: &StrategyManageSceneDraft,
+) -> Result<String, String> {
+    let name = draft.name.trim();
+    validate_scene_values(draft)?;
 
     let config = ScoreConfig::load(source_path)?;
     let original_name = original_name.map(str::trim);
@@ -622,4 +648,69 @@ pub fn update_strategy_manage_rule(
     *rule = draft_to_rule(draft)?;
     save_rule_file(source_path, &config)?;
     get_strategy_manage_page(source_path)
+}
+
+pub fn save_strategy_manage_refactor_file(
+    source_path: &str,
+    file_name: &str,
+    draft: StrategyManageRefactorDraft,
+) -> Result<String, String> {
+    if draft.scenes.is_empty() {
+        return Err("至少需要一个 scene".to_string());
+    }
+    if draft.rules.is_empty() {
+        return Err("至少需要一条 rule".to_string());
+    }
+
+    let output_path = rule_file_output_path(source_path, file_name)?;
+
+    let mut scene_name_set: HashSet<String> = HashSet::new();
+    let mut scene_items = Vec::with_capacity(draft.scenes.len());
+    for scene in draft.scenes {
+      let checked = StrategyManageSceneDraft {
+          name: scene.name.trim().to_string(),
+          observe_threshold: scene.observe_threshold,
+          trigger_threshold: scene.trigger_threshold,
+          confirm_threshold: scene.confirm_threshold,
+          fail_threshold: scene.fail_threshold,
+          evidence_score: scene.evidence_score,
+      };
+      if !scene_name_set.insert(checked.name.clone()) {
+          return Err(format!("scene 名称重复: {}", checked.name));
+      }
+      validate_scene_values(&checked)?;
+      scene_items.push(scene_draft_to_file(checked));
+    }
+
+    let (reader, sample_ts_code, latest_trade_date, st_list) = load_validation_context(source_path)?;
+    let mut rule_name_set: HashSet<String> = HashSet::new();
+    let mut rule_items = Vec::with_capacity(draft.rules.len());
+    for rule_draft in draft.rules {
+      let rule = draft_to_rule(rule_draft)?;
+      if !rule_name_set.insert(rule.name.clone()) {
+          return Err(format!("规则名称重复: {}", rule.name));
+      }
+      validate_rule_definition(
+          source_path,
+          Some(&reader),
+          sample_ts_code.as_deref(),
+          latest_trade_date.as_deref(),
+          Some(&st_list),
+          &rule,
+          &scene_items,
+      )?;
+      rule_items.push(rule);
+    }
+
+    let file = StrategyRuleFile {
+        version: 1,
+        scene: scene_items,
+        rule: rule_items,
+    };
+
+    let text = toml::to_string_pretty(&file).map_err(|e| format!("序列化策略规则文件失败: {e}"))?;
+    fs::write(&output_path, text)
+        .map_err(|e| format!("写入策略规则文件失败: path={}, err={e}", output_path.display()))?;
+
+    Ok(output_path.display().to_string())
 }

@@ -42,7 +42,7 @@ use lianghua_rs::ui_tools_feat::{
     },
     stock_pick::{StockPickOptionsData, get_stock_pick_options as core_get_stock_pick_options},
     strategy_manage::{
-        StrategyManagePageData, StrategyManageRuleDraft, StrategyManageSceneDraft,
+        StrategyManagePageData, StrategyManageRefactorDraft, StrategyManageRuleDraft, StrategyManageSceneDraft,
         check_strategy_manage_scene_draft as core_check_strategy_manage_scene_draft,
         check_strategy_manage_rule_draft as core_check_strategy_manage_rule_draft,
         create_strategy_manage_scene as core_create_strategy_manage_scene,
@@ -50,6 +50,7 @@ use lianghua_rs::ui_tools_feat::{
         get_strategy_manage_page as core_get_strategy_manage_page,
         remove_strategy_manage_scene as core_remove_strategy_manage_scene,
         remove_strategy_manage_rules as core_remove_strategy_manage_rules,
+        save_strategy_manage_refactor_file as core_save_strategy_manage_refactor_file,
         update_strategy_manage_scene as core_update_strategy_manage_scene,
         update_strategy_manage_rule as core_update_strategy_manage_rule,
     },
@@ -481,6 +482,15 @@ fn update_strategy_manage_rule(
 }
 
 #[tauri::command]
+fn save_strategy_manage_refactor_file(
+    source_path: String,
+    file_name: String,
+    draft: StrategyManageRefactorDraft,
+) -> Result<String, String> {
+    core_save_strategy_manage_refactor_file(&source_path, &file_name, draft)
+}
+
+#[tauri::command]
 async fn run_ranking_score_calculation(
     source_path: String,
     start_date: String,
@@ -727,6 +737,7 @@ pub fn run() {
             create_strategy_manage_rule,
             remove_strategy_manage_rules,
             update_strategy_manage_rule,
+            save_strategy_manage_refactor_file,
             get_stock_pick_options,
             run_expression_stock_pick,
             run_concept_stock_pick,

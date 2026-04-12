@@ -58,6 +58,11 @@ export type StrategyManagePageData = {
   rules: StrategyManageRuleItem[]
 }
 
+export type StrategyManageRefactorDraft = {
+  scenes: StrategyManageSceneDraft[]
+  rules: StrategyManageRuleDraft[]
+}
+
 export async function getStrategyManagePage(sourcePath: string) {
   return invoke<StrategyManagePageData>('get_strategy_manage_page', { sourcePath })
 }
@@ -140,6 +145,18 @@ export async function updateStrategyManageRule(
   return invoke<StrategyManagePageData>('update_strategy_manage_rule', {
     sourcePath,
     originalName,
+    draft,
+  })
+}
+
+export async function saveStrategyManageRefactorFile(
+  sourcePath: string,
+  fileName: string,
+  draft: StrategyManageRefactorDraft,
+) {
+  return invoke<string>('save_strategy_manage_refactor_file', {
+    sourcePath,
+    fileName,
     draft,
   })
 }
