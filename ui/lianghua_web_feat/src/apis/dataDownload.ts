@@ -80,6 +80,11 @@ export type ConceptPerformanceRepairRequest = {
   sourcePath: string
 }
 
+export type ConceptMostRelatedRepairRequest = {
+  downloadId: string
+  sourcePath: string
+}
+
 export type DataDownloadSummary = {
   successCount: number
   failedCount: number
@@ -144,6 +149,10 @@ export async function runThsConceptDownload(request: ThsConceptDownloadRequest) 
 
 export async function runConceptPerformanceRepair(request: ConceptPerformanceRepairRequest) {
   return invoke<DataDownloadRunResult>('run_concept_performance_repair', { request })
+}
+
+export async function runConceptMostRelatedRepair(request: ConceptMostRelatedRepairRequest) {
+  return invoke<DataDownloadRunResult>('run_concept_most_related_repair', { request })
 }
 
 export async function getIndicatorManagePage(sourcePath: string) {

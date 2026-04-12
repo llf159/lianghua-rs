@@ -4,6 +4,7 @@ import {
   getDataDownloadStatus,
   getIndicatorManagePage,
   listenDataDownloadProgress,
+  runConceptMostRelatedRepair,
   runConceptPerformanceRepair,
   runDataDownload,
   runMissingStockRepair,
@@ -657,7 +658,7 @@ export default function DataDownloadPage() {
       const result = await executor(downloadId)
       setStatus(result.status)
 
-      if (result.action === 'rebuild-concept-performance') {
+      if (result.action === 'rebuild-concept-performance' || result.action === 'repair-concept-most-related') {
         setNotice(
           `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；写入 ${result.summary.savedRows} 行。`,
         )
@@ -797,6 +798,21 @@ export default function DataDownloadPage() {
 
     await runDataTask('concept', (downloadId) =>
       runConceptPerformanceRepair({
+        downloadId,
+        sourcePath,
+      }),
+    )
+  }
+
+  async function onRunConceptMostRelatedRepair() {
+    if (!sourcePath) {
+      setFeedbackSection('concept')
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    await runDataTask('concept', (downloadId) =>
+      runConceptMostRelatedRepair({
         downloadId,
         sourcePath,
       }),
@@ -1191,6 +1207,14 @@ export default function DataDownloadPage() {
               disabled={isBusy || !sourcePath}
             >
               {showConceptProgress ? '概念补全中...' : isBusy ? '任务执行中...' : '概念表现补全'}
+            </button>
+            <button
+              className="data-download-secondary-btn"
+              type="button"
+              onClick={() => void onRunConceptMostRelatedRepair()}
+              disabled={isBusy || !sourcePath}
+            >
+              {showConceptProgress ? '补算中...' : isBusy ? '任务执行中...' : '最相关概念补算'}
             </button>
           </div>
 

@@ -1,322 +1,280 @@
-use rayon::prelude::*;
+pub mod scene;
 
-use crate::{
-    data::{
-        RowData,
-        scoring_data::{cache_rule_build, row_into_rt},
-        simulate::{SimulateBarInput, build_simulated_row_data},
-    },
-    download::ind_calc::{IndsCache, cache_ind_build, calc_inds_with_cache},
-    expr::eval::Runtime,
-    scoring::{CachedRule, scoring_rules_details_cache},
-};
+use std::collections::{BTreeSet, HashMap};
 
-const EPS: f64 = 1e-12;
+use duckdb::{Connection, params};
 
-#[derive(Debug)]
-pub struct SimulationRuntimeBundle {
-    pub row_data: RowData,
-    pub runtime: Runtime,
-    pub simulated_days: usize,
-}
-
-#[derive(Clone)]
-pub struct SimulationCaches {
-    pub rule_cache: Vec<CachedRule>,
-    pub indicator_cache: Vec<IndsCache>,
-}
-
-#[derive(Debug)]
-pub struct SimulationBatchInput {
-    pub ts_code: String,
-    pub row_data: RowData,
-}
-
-#[derive(Debug)]
-pub struct SimulationBatchResult {
-    pub ts_code: String,
-    pub scoring: SimulationScoringResult,
-}
+use crate::data::concept_performance_data::load_concept_trend_series;
 
 #[derive(Debug, Clone)]
-pub struct SimulatedRuleScore {
-    pub rule_name: String,
-    pub rule_score: f64,
-    pub triggered: bool,
+pub struct ResidualReturnInput {
+    pub ts_code: String,
+    pub stock_adj_type: String,
+    pub index_ts_code: String,
+    pub concept: String,
+    pub index_beta: f64,
+    pub concept_beta: f64,
+    pub start_date: String,
+    pub end_date: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct SimulatedDayScore {
+impl ResidualReturnInput {
+    fn validate(&self) -> Result<(), String> {
+        if self.ts_code.trim().is_empty() {
+            return Err("股票代码不能为空".to_string());
+        }
+        if self.stock_adj_type.trim().is_empty() {
+            return Err("股票复权类型不能为空".to_string());
+        }
+        if self.index_ts_code.trim().is_empty() {
+            return Err("指数代码不能为空".to_string());
+        }
+        if self.start_date.trim().is_empty() || self.end_date.trim().is_empty() {
+            return Err("区间日期不能为空".to_string());
+        }
+        if self.start_date > self.end_date {
+            return Err(format!(
+                "区间日期非法:start_date({})大于end_date({})",
+                self.start_date, self.end_date
+            ));
+        }
+        if !self.index_beta.is_finite() {
+            return Err("指数系数必须是有限数字".to_string());
+        }
+        if !self.concept_beta.is_finite() {
+            return Err("概念系数必须是有限数字".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResidualReturnPoint {
     pub trade_date: String,
-    pub total_score: f64,
-    pub rule_scores: Vec<SimulatedRuleScore>,
+    pub stock_pct: f64,
+    pub index_pct: f64,
+    pub concept_pct: f64,
+    pub expected_pct: f64,
+    pub residual_pct: f64,
 }
 
-#[derive(Debug)]
-pub struct SimulationScoringResult {
-    pub row_data: RowData,
-    pub simulated_days: usize,
-    pub days: Vec<SimulatedDayScore>,
-}
-
-pub fn load_simulation_caches(source_dir: &str) -> Result<SimulationCaches, String> {
-    Ok(SimulationCaches {
-        rule_cache: cache_rule_build(source_dir)?,
-        indicator_cache: cache_ind_build(source_dir)?,
-    })
-}
-
-pub fn build_simulated_row_data_series(
-    row_data: RowData,
-    inputs: &[SimulateBarInput],
-) -> Result<RowData, String> {
-    let mut row_data = row_data;
-    for input in inputs {
-        row_data = build_simulated_row_data(row_data, input)?;
-    }
-    Ok(row_data)
-}
-
-pub fn build_simulated_runtime_bundle(
+pub fn calc_stock_residual_returns(
+    source_conn: &Connection,
     source_dir: &str,
-    row_data: RowData,
-    inputs: &[SimulateBarInput],
-) -> Result<SimulationRuntimeBundle, String> {
-    let caches = load_simulation_caches(source_dir)?;
-    build_simulated_runtime_bundle_with_cache(row_data, inputs, &caches.indicator_cache)
-}
+    input: &ResidualReturnInput,
+) -> Result<Vec<ResidualReturnPoint>, String> {
+    input.validate()?;
 
-pub fn build_simulated_runtime_bundle_with_cache(
-    row_data: RowData,
-    inputs: &[SimulateBarInput],
-    indicator_cache: &[IndsCache],
-) -> Result<SimulationRuntimeBundle, String> {
-    let mut row_data = build_simulated_row_data_series(row_data, inputs)?;
-
-    if !indicator_cache.is_empty() {
-        for (name, series) in calc_inds_with_cache(indicator_cache, row_data.clone())? {
-            row_data.cols.insert(name, series);
-        }
-        row_data.validate()?;
+    let stock_series = load_pct_chg_series(
+        source_conn,
+        input.ts_code.trim(),
+        input.stock_adj_type.trim(),
+        input.start_date.trim(),
+        input.end_date.trim(),
+    )?;
+    if stock_series.is_empty() {
+        return Ok(Vec::new());
     }
 
-    Ok(SimulationRuntimeBundle {
-        runtime: row_into_rt(row_data.clone())?,
-        row_data,
-        simulated_days: inputs.len(),
-    })
-}
+    let index_series = load_pct_chg_series(
+        source_conn,
+        input.index_ts_code.trim(),
+        "ind",
+        input.start_date.trim(),
+        input.end_date.trim(),
+    )?;
+    if index_series.is_empty() {
+        return Ok(Vec::new());
+    }
 
-pub fn run_simulated_scoring(
-    source_dir: &str,
-    row_data: RowData,
-    inputs: &[SimulateBarInput],
-) -> Result<SimulationScoringResult, String> {
-    let caches = load_simulation_caches(source_dir)?;
-    run_simulated_scoring_with_cache(row_data, inputs, &caches)
-}
-
-pub fn run_simulated_scoring_with_cache(
-    row_data: RowData,
-    inputs: &[SimulateBarInput],
-    caches: &SimulationCaches,
-) -> Result<SimulationScoringResult, String> {
-    let SimulationRuntimeBundle {
-        row_data,
-        mut runtime,
-        simulated_days,
-    } = build_simulated_runtime_bundle_with_cache(row_data, inputs, &caches.indicator_cache)?;
-    let (total_scores, rule_score_series) =
-        scoring_rules_details_cache(&mut runtime, &caches.rule_cache)?;
-
-    let start_idx = row_data.trade_dates.len().saturating_sub(simulated_days);
-    let mut days = Vec::with_capacity(simulated_days);
-
-    for idx in start_idx..row_data.trade_dates.len() {
-        let total_score = total_scores
-            .get(idx)
-            .copied()
-            .ok_or_else(|| format!("总分结果缺少索引:{idx}"))?;
-        let mut rule_scores = Vec::new();
-
-        for item in &rule_score_series {
-            let Some(rule_score) = item.series.get(idx).copied() else {
-                continue;
-            };
-            let triggered = item.triggered.get(idx).copied().unwrap_or(false);
-            if !triggered && rule_score.abs() <= EPS {
-                continue;
-            }
-
-            rule_scores.push(SimulatedRuleScore {
-                rule_name: item.name.clone(),
-                rule_score,
-                triggered,
-            });
+    let concept_map: HashMap<String, f64> = if input.concept.trim().is_empty() {
+        index_series.clone()
+    } else {
+        let concept_series = load_concept_trend_series(
+            source_dir,
+            input.concept.trim(),
+            Some(input.start_date.trim()),
+            Some(input.end_date.trim()),
+        )?;
+        if concept_series.points.is_empty() {
+            return Ok(Vec::new());
         }
 
-        days.push(SimulatedDayScore {
-            trade_date: row_data.trade_dates[idx].clone(),
-            total_score,
-            rule_scores,
+        concept_series
+            .points
+            .into_iter()
+            .map(|point| (point.trade_date, point.performance_pct))
+            .collect()
+    };
+
+    let mut date_set = BTreeSet::new();
+    for date in stock_series.keys() {
+        date_set.insert(date.clone());
+    }
+    for date in index_series.keys() {
+        date_set.insert(date.clone());
+    }
+    for date in concept_map.keys() {
+        date_set.insert(date.clone());
+    }
+
+    let mut points = Vec::new();
+    for trade_date in date_set {
+        let Some(stock_pct) = stock_series.get(&trade_date).copied() else {
+            continue;
+        };
+        let Some(index_pct) = index_series.get(&trade_date).copied() else {
+            continue;
+        };
+        let Some(concept_pct) = concept_map.get(&trade_date).copied() else {
+            continue;
+        };
+
+        let expected_pct = input.index_beta * index_pct + input.concept_beta * concept_pct;
+        let residual_pct = stock_pct - expected_pct;
+
+        points.push(ResidualReturnPoint {
+            trade_date,
+            stock_pct,
+            index_pct,
+            concept_pct,
+            expected_pct,
+            residual_pct,
         });
     }
 
-    Ok(SimulationScoringResult {
-        row_data,
-        simulated_days,
-        days,
-    })
+    Ok(points)
 }
 
-pub fn run_simulated_scoring_batch(
-    source_dir: &str,
-    items: Vec<SimulationBatchInput>,
-    inputs: &[SimulateBarInput],
-) -> Result<Vec<SimulationBatchResult>, String> {
-    let caches = load_simulation_caches(source_dir)?;
-    run_simulated_scoring_batch_with_cache(items, inputs, &caches)
-}
+fn load_pct_chg_series(
+    conn: &Connection,
+    ts_code: &str,
+    adj_type: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<HashMap<String, f64>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                trade_date,
+                TRY_CAST(pct_chg AS DOUBLE)
+            FROM stock_data
+            WHERE ts_code = ?
+              AND adj_type = ?
+              AND trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY trade_date ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译涨跌幅查询失败:{e}"))?;
 
-pub fn run_simulated_scoring_batch_with_cache(
-    items: Vec<SimulationBatchInput>,
-    inputs: &[SimulateBarInput],
-    caches: &SimulationCaches,
-) -> Result<Vec<SimulationBatchResult>, String> {
-    items
-        .into_par_iter()
-        .map(|item| {
-            let scoring = run_simulated_scoring_with_cache(item.row_data, inputs, caches)?;
-            Ok(SimulationBatchResult {
-                ts_code: item.ts_code,
-                scoring,
-            })
-        })
-        .collect()
+    let mut rows = stmt
+        .query(params![ts_code, adj_type, start_date, end_date])
+        .map_err(|e| format!("查询涨跌幅失败:{e}"))?;
+
+    let mut series = HashMap::new();
+    while let Some(row) = rows.next().map_err(|e| format!("读取涨跌幅失败:{e}"))? {
+        let trade_date: String = row.get(0).map_err(|e| format!("读取trade_date失败:{e}"))?;
+        let pct: Option<f64> = row.get(1).map_err(|e| format!("读取pct_chg失败:{e}"))?;
+
+        let Some(pct) = pct.filter(|value| value.is_finite()) else {
+            continue;
+        };
+        series.insert(trade_date, pct);
+    }
+
+    Ok(series)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_simulated_row_data_series, run_simulated_scoring};
-    use crate::data::{RowData, simulate::SimulateBarInput};
     use std::{
-        collections::HashMap,
-        fs::{create_dir_all, remove_dir_all, write},
+        fs::create_dir_all,
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    fn sample_row_data() -> RowData {
-        let mut cols = HashMap::new();
-        cols.insert("O".to_string(), vec![Some(9.8), Some(10.0)]);
-        cols.insert("H".to_string(), vec![Some(10.1), Some(10.3)]);
-        cols.insert("L".to_string(), vec![Some(9.7), Some(9.9)]);
-        cols.insert("C".to_string(), vec![Some(10.0), Some(10.2)]);
-        cols.insert("V".to_string(), vec![Some(100.0), Some(120.0)]);
-        cols.insert("AMOUNT".to_string(), vec![Some(1000.0), Some(1260.0)]);
-        cols.insert("PRE_CLOSE".to_string(), vec![Some(9.7), Some(10.0)]);
-        cols.insert("CHANGE".to_string(), vec![Some(0.3), Some(0.2)]);
-        cols.insert("PCT_CHG".to_string(), vec![Some(3.0928), Some(2.0)]);
-        cols.insert("TOR".to_string(), vec![Some(1.0), Some(1.2)]);
-        cols.insert("ZHANG".to_string(), vec![Some(0.095), Some(0.095)]);
+    use duckdb::{Connection, params};
 
-        RowData {
-            trade_dates: vec!["20260403".to_string(), "20260407".to_string()],
-            cols,
-        }
-    }
+    use crate::{
+        data::source_db_path,
+        simulate::{ResidualReturnInput, calc_stock_residual_returns},
+    };
 
-    fn create_test_source_dir() -> Result<PathBuf, String> {
+    fn temp_source_dir() -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|e| format!("系统时间错误: {e}"))?
+            .expect("clock")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("lianghua-simulate-{unique}"));
-        create_dir_all(&dir).map_err(|e| format!("创建临时目录失败: {e}"))?;
-
-        let rule_toml = r#"
-version = 1
-
-[[rule]]
-name = "UP_DAY"
-scope_windows = 1
-scope_way = "LAST"
-when = "C > PRE_CLOSE"
-points = 10.0
-explain = "test"
-"#;
-
-        write(dir.join("score_rule.toml"), rule_toml)
-            .map_err(|e| format!("写入规则文件失败: {e}"))?;
-        Ok(dir)
+        std::env::temp_dir().join(format!("lianghua_residual_{unique}"))
     }
 
-    #[test]
-    fn build_simulated_row_data_series_supports_multiple_days() {
-        let inputs = vec![
-            SimulateBarInput {
-                trade_date: Some("20260408".to_string()),
-                open_gap_pct: 0.0,
-                pct_chg: 5.0,
-                pct_chg_relative_to_open: false,
-                volume_ratio: 1.5,
-                upper_shadow_pct: 0.0,
-                lower_shadow_pct: 0.0,
-            },
-            SimulateBarInput {
-                trade_date: Some("20260409".to_string()),
-                open_gap_pct: 0.0,
-                pct_chg: -3.0,
-                pct_chg_relative_to_open: false,
-                volume_ratio: 0.8,
-                upper_shadow_pct: 0.0,
-                lower_shadow_pct: 0.0,
-            },
-        ];
-
-        let row_data =
-            build_simulated_row_data_series(sample_row_data(), &inputs).expect("simulate series");
-
-        assert_eq!(row_data.trade_dates.len(), 4);
-        assert_eq!(row_data.trade_dates[2], "20260408");
-        assert_eq!(row_data.trade_dates[3], "20260409");
-        assert_eq!(
-            row_data.cols["PRE_CLOSE"].last().copied().flatten(),
-            Some(10.71)
-        );
-    }
-
-    #[test]
-    fn run_simulated_scoring_returns_last_simulated_days() {
-        const EPS: f64 = 1e-12;
-        let source_dir = create_test_source_dir().expect("create source dir");
-        let inputs = vec![SimulateBarInput {
-            trade_date: Some("20260408".to_string()),
-            open_gap_pct: 0.0,
-            pct_chg: 5.0,
-            pct_chg_relative_to_open: false,
-            volume_ratio: 1.5,
-            upper_shadow_pct: 0.0,
-            lower_shadow_pct: 0.0,
-        }];
-
-        let result = run_simulated_scoring(
-            source_dir
-                .to_str()
-                .expect("temp source dir should be valid utf8"),
-            sample_row_data(),
-            &inputs,
+    fn prepare_source_db(source_dir: &str) -> Connection {
+        let db_path = source_db_path(source_dir);
+        let conn = Connection::open(db_path).expect("open source db");
+        conn.execute(
+            r#"
+            CREATE TABLE stock_data (
+                ts_code VARCHAR,
+                trade_date VARCHAR,
+                adj_type VARCHAR,
+                pct_chg DOUBLE
+            )
+            "#,
+            [],
         )
-        .expect("run simulated scoring");
+        .expect("create stock_data");
 
-        assert_eq!(result.simulated_days, 1);
-        assert_eq!(result.days.len(), 1);
-        assert_eq!(result.days[0].trade_date, "20260408");
-        assert!((result.days[0].total_score - 60.0).abs() <= EPS);
-        assert_eq!(result.days[0].rule_scores.len(), 1);
-        assert_eq!(result.days[0].rule_scores[0].rule_name, "UP_DAY");
-        assert!((result.days[0].rule_scores[0].rule_score - 10.0).abs() <= EPS);
+        {
+            let mut app = conn.appender("stock_data").expect("appender stock_data");
+            app.append_row(params!["000001.SZ", "20240102", "qfq", 3.0_f64])
+                .expect("row1");
+            app.append_row(params!["000001.SZ", "20240103", "qfq", 1.0_f64])
+                .expect("row2");
 
-        let _ = remove_dir_all(source_dir);
+            app.append_row(params!["000300.SH", "20240102", "ind", 1.0_f64])
+                .expect("row3");
+            app.append_row(params!["000300.SH", "20240103", "ind", 0.5_f64])
+                .expect("row4");
+
+            app.flush().expect("flush stock_data");
+        }
+        conn
+    }
+
+    #[test]
+    fn calc_stock_residual_returns_uses_index_as_concept_when_concept_empty() {
+        let source_dir = temp_source_dir();
+        create_dir_all(&source_dir).expect("create source dir");
+        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
+
+        let conn = prepare_source_db(source_dir_str);
+
+        let input = ResidualReturnInput {
+            ts_code: "000001.SZ".to_string(),
+            stock_adj_type: "qfq".to_string(),
+            index_ts_code: "000300.SH".to_string(),
+            concept: "".to_string(),
+            index_beta: 0.5,
+            concept_beta: 0.2,
+            start_date: "20240101".to_string(),
+            end_date: "20240105".to_string(),
+        };
+
+        let points = calc_stock_residual_returns(&conn, source_dir_str, &input).expect("calc ok");
+        assert_eq!(points.len(), 2);
+
+        let p0 = &points[0];
+        assert_eq!(p0.trade_date, "20240102");
+        assert_eq!(p0.concept_pct, 1.0);
+        assert_eq!(p0.expected_pct, 0.7);
+        assert_eq!(p0.residual_pct, 2.3);
+
+        let p1 = &points[1];
+        assert_eq!(p1.trade_date, "20240103");
+        assert_eq!(p1.concept_pct, 0.5);
+        assert_eq!(p1.expected_pct, 0.35);
+        assert_eq!(p1.residual_pct, 0.65);
     }
 }

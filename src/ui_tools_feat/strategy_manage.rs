@@ -1,17 +1,21 @@
-use std::{collections::{HashMap, HashSet}, fs, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::PathBuf,
+};
 
 use serde::{Deserialize, Serialize};
 
+use crate::data::RowData;
+use crate::data::scoring_data::row_into_rt;
+use crate::expr::eval::Value;
+use crate::expr::parser::{Expr, Stmt, Stmts};
 use crate::{
     data::{DataReader, RuleStage, ScoreConfig, score_rule_path},
     expr::parser::{Parser, lex_all},
     scoring::tools::{calc_zhang_pct, load_st_list, rt_max_len},
     utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
 };
-use crate::data::scoring_data::row_into_rt;
-use crate::data::RowData;
-use crate::expr::eval::Value;
-use crate::expr::parser::{Expr, Stmt, Stmts};
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
 
@@ -153,7 +157,8 @@ fn rule_file_output_path(source_path: &str, file_name: &str) -> Result<PathBuf, 
 fn save_rule_file(source_path: &str, file: &StrategyRuleFile) -> Result<(), String> {
     let path = score_rule_path(source_path);
     let text = toml::to_string_pretty(file).map_err(|e| format!("序列化策略规则文件失败: {e}"))?;
-    fs::write(&path, text).map_err(|e| format!("写入策略规则文件失败: path={}, err={e}", path.display()))
+    fs::write(&path, text)
+        .map_err(|e| format!("写入策略规则文件失败: path={}, err={e}", path.display()))
 }
 
 fn parse_scope_way(scope_way: &str) -> Result<StrategyScopeWay, String> {
@@ -322,7 +327,10 @@ fn validate_rule_definition(
     if rule.name.trim().is_empty() {
         return Err("策略名不能为空".to_string());
     }
-    if !scenes.iter().any(|scene| scene.name.trim() == rule.scene_name.trim()) {
+    if !scenes
+        .iter()
+        .any(|scene| scene.name.trim() == rule.scene_name.trim())
+    {
         return Err(format!("规则 {} 引用的 scene 不存在", rule.name));
     }
     if rule.when.trim().is_empty() {
@@ -394,7 +402,9 @@ fn validate_rule_definition(
     Ok(())
 }
 
-fn map_dist_points(values: Option<Vec<StrategyManageDistPoint>>) -> Option<Vec<StrategyManageDistPoint>> {
+fn map_dist_points(
+    values: Option<Vec<StrategyManageDistPoint>>,
+) -> Option<Vec<StrategyManageDistPoint>> {
     values.filter(|items| !items.is_empty())
 }
 
@@ -425,9 +435,7 @@ fn load_validation_context(
     Ok((reader, sample_ts_code, latest_trade_date, st_list))
 }
 
-fn draft_to_rule(
-    draft: StrategyManageRuleDraft,
-) -> Result<StrategyRuleFileRule, String> {
+fn draft_to_rule(draft: StrategyManageRuleDraft) -> Result<StrategyRuleFileRule, String> {
     Ok(StrategyRuleFileRule {
         name: draft.name.trim().to_string(),
         scene_name: draft.scene_name.trim().to_string(),
@@ -566,7 +574,11 @@ pub fn remove_strategy_manage_scene(
     }
 
     let mut config = load_rule_file(source_path)?;
-    if config.rule.iter().any(|item| item.scene_name.trim() == trimmed_name) {
+    if config
+        .rule
+        .iter()
+        .any(|item| item.scene_name.trim() == trimmed_name)
+    {
         return Err(format!("scene 仍被 rule 引用，不能删除: {trimmed_name}"));
     }
 
@@ -588,11 +600,13 @@ pub fn check_strategy_manage_rule_draft(
     let config = load_rule_file(source_path)?;
     let rule = draft_to_rule(draft)?;
     if config.rule.iter().any(|item| {
-        item.name.trim() == rule.name.trim() && original_name.is_none_or(|old| old != item.name.trim())
+        item.name.trim() == rule.name.trim()
+            && original_name.is_none_or(|old| old != item.name.trim())
     }) {
         return Err(format!("规则名称重复: {}", rule.name));
     }
-    let (reader, sample_ts_code, latest_trade_date, st_list) = load_validation_context(source_path)?;
+    let (reader, sample_ts_code, latest_trade_date, st_list) =
+        load_validation_context(source_path)?;
     validate_rule_definition(
         source_path,
         Some(&reader),
@@ -626,7 +640,9 @@ pub fn remove_strategy_manage_rules(
         .filter(|item| !item.is_empty())
         .collect();
     let mut config = load_rule_file(source_path)?;
-    config.rule.retain(|item| !name_set.contains(item.name.trim()));
+    config
+        .rule
+        .retain(|item| !name_set.contains(item.name.trim()));
     save_rule_file(source_path, &config)?;
     get_strategy_manage_page(source_path)
 }
@@ -667,39 +683,40 @@ pub fn save_strategy_manage_refactor_file(
     let mut scene_name_set: HashSet<String> = HashSet::new();
     let mut scene_items = Vec::with_capacity(draft.scenes.len());
     for scene in draft.scenes {
-      let checked = StrategyManageSceneDraft {
-          name: scene.name.trim().to_string(),
-          observe_threshold: scene.observe_threshold,
-          trigger_threshold: scene.trigger_threshold,
-          confirm_threshold: scene.confirm_threshold,
-          fail_threshold: scene.fail_threshold,
-          evidence_score: scene.evidence_score,
-      };
-      if !scene_name_set.insert(checked.name.clone()) {
-          return Err(format!("scene 名称重复: {}", checked.name));
-      }
-      validate_scene_values(&checked)?;
-      scene_items.push(scene_draft_to_file(checked));
+        let checked = StrategyManageSceneDraft {
+            name: scene.name.trim().to_string(),
+            observe_threshold: scene.observe_threshold,
+            trigger_threshold: scene.trigger_threshold,
+            confirm_threshold: scene.confirm_threshold,
+            fail_threshold: scene.fail_threshold,
+            evidence_score: scene.evidence_score,
+        };
+        if !scene_name_set.insert(checked.name.clone()) {
+            return Err(format!("scene 名称重复: {}", checked.name));
+        }
+        validate_scene_values(&checked)?;
+        scene_items.push(scene_draft_to_file(checked));
     }
 
-    let (reader, sample_ts_code, latest_trade_date, st_list) = load_validation_context(source_path)?;
+    let (reader, sample_ts_code, latest_trade_date, st_list) =
+        load_validation_context(source_path)?;
     let mut rule_name_set: HashSet<String> = HashSet::new();
     let mut rule_items = Vec::with_capacity(draft.rules.len());
     for rule_draft in draft.rules {
-      let rule = draft_to_rule(rule_draft)?;
-      if !rule_name_set.insert(rule.name.clone()) {
-          return Err(format!("规则名称重复: {}", rule.name));
-      }
-      validate_rule_definition(
-          source_path,
-          Some(&reader),
-          sample_ts_code.as_deref(),
-          latest_trade_date.as_deref(),
-          Some(&st_list),
-          &rule,
-          &scene_items,
-      )?;
-      rule_items.push(rule);
+        let rule = draft_to_rule(rule_draft)?;
+        if !rule_name_set.insert(rule.name.clone()) {
+            return Err(format!("规则名称重复: {}", rule.name));
+        }
+        validate_rule_definition(
+            source_path,
+            Some(&reader),
+            sample_ts_code.as_deref(),
+            latest_trade_date.as_deref(),
+            Some(&st_list),
+            &rule,
+            &scene_items,
+        )?;
+        rule_items.push(rule);
     }
 
     let file = StrategyRuleFile {
@@ -709,8 +726,12 @@ pub fn save_strategy_manage_refactor_file(
     };
 
     let text = toml::to_string_pretty(&file).map_err(|e| format!("序列化策略规则文件失败: {e}"))?;
-    fs::write(&output_path, text)
-        .map_err(|e| format!("写入策略规则文件失败: path={}, err={e}", output_path.display()))?;
+    fs::write(&output_path, text).map_err(|e| {
+        format!(
+            "写入策略规则文件失败: path={}, err={e}",
+            output_path.display()
+        )
+    })?;
 
     Ok(output_path.display().to_string())
 }

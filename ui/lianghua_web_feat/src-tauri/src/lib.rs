@@ -56,10 +56,13 @@ use lianghua_rs::ui_tools_feat::{
         update_strategy_manage_rule as core_update_strategy_manage_rule,
     },
     statistics::{
-        StrategyStatisticsDetailData, StrategyStatisticsPageData, TriggeredStockRow,
+        SceneLayerBacktestData, SceneLayerBacktestDefaultsData, StrategyStatisticsDetailData,
+        StrategyStatisticsPageData, TriggeredStockRow,
+        get_scene_layer_backtest_defaults as core_get_scene_layer_backtest_defaults,
         get_strategy_statistics_detail as core_get_strategy_statistics_detail,
         get_strategy_statistics_page as core_get_strategy_statistics_page,
         get_strategy_triggered_stocks as core_get_strategy_triggered_stocks,
+        run_scene_layer_backtest as core_run_scene_layer_backtest,
     },
     watch_observe::{
         WatchObserveRow as CoreWatchObserveRow, WatchObserveSnapshotData,
@@ -72,9 +75,9 @@ use lianghua_rs::ui_tools_feat::{
 use serde::{Deserialize, Serialize};
 
 use data_download_bridge::{
-    get_data_download_status, get_indicator_manage_page, run_concept_performance_repair,
-    run_data_download, run_missing_stock_repair, run_ths_concept_download,
-    save_indicator_manage_page,
+    get_data_download_status, get_indicator_manage_page, run_concept_most_related_repair,
+    run_concept_performance_repair, run_data_download, run_missing_stock_repair,
+    run_ths_concept_download, save_indicator_manage_page,
 };
 use managed_source_bridge::{
     allow_import_path, copy_import_file_to_appdata, export_managed_source_directory,
@@ -424,6 +427,42 @@ async fn get_strategy_triggered_stocks(
 }
 
 #[tauri::command]
+fn get_scene_layer_backtest_defaults(
+    source_path: String,
+) -> Result<SceneLayerBacktestDefaultsData, String> {
+    core_get_scene_layer_backtest_defaults(source_path)
+}
+
+#[tauri::command]
+async fn run_scene_layer_backtest(
+    source_path: String,
+    scene_name: String,
+    stock_adj_type: Option<String>,
+    index_ts_code: String,
+    index_beta: Option<f64>,
+    concept_beta: Option<f64>,
+    start_date: String,
+    end_date: String,
+    min_samples_per_scene_day: Option<usize>,
+) -> Result<SceneLayerBacktestData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_run_scene_layer_backtest(
+            source_path,
+            scene_name,
+            stock_adj_type,
+            index_ts_code,
+            index_beta,
+            concept_beta,
+            start_date,
+            end_date,
+            min_samples_per_scene_day,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 fn check_strategy_manage_scene_draft(
     source_path: String,
     original_name: Option<String>,
@@ -722,6 +761,7 @@ pub fn run() {
             run_missing_stock_repair,
             run_ths_concept_download,
             run_concept_performance_repair,
+            run_concept_most_related_repair,
             list_stock_lookup_rows,
             get_rank_overview,
             get_rank_trade_date_options,
@@ -736,6 +776,8 @@ pub fn run() {
             get_strategy_statistics_page,
             get_strategy_statistics_detail,
             get_strategy_triggered_stocks,
+            get_scene_layer_backtest_defaults,
+            run_scene_layer_backtest,
             get_ranking_compute_status,
             run_ranking_score_calculation,
             run_ranking_tiebreak_fill,

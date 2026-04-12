@@ -406,7 +406,8 @@ pub fn preview_managed_source_dataset(
         let db_path_str = db_path
             .to_str()
             .ok_or_else(|| "stock_data.db 路径不是有效 UTF-8".to_string())?;
-        Connection::open(db_path_str).map_err(|error| format!("打开 stock_data.db 失败: {error}"))?
+        Connection::open(db_path_str)
+            .map_err(|error| format!("打开 stock_data.db 失败: {error}"))?
     } else {
         let db_path = result_db_path(source_path_str);
         let db_path_str = db_path
@@ -418,13 +419,27 @@ pub fn preview_managed_source_dataset(
 
     let mut where_clauses = Vec::with_capacity(2);
     if let (Some(column), Some(value)) = (filter_trade_column, normalized_trade_date.as_deref()) {
-        if all_columns.iter().any(|item| item.eq_ignore_ascii_case(column)) {
-            where_clauses.push(format!("{} = {}", quote_ident(column), quote_sql_string(value)));
+        if all_columns
+            .iter()
+            .any(|item| item.eq_ignore_ascii_case(column))
+        {
+            where_clauses.push(format!(
+                "{} = {}",
+                quote_ident(column),
+                quote_sql_string(value)
+            ));
         }
     }
     if let (Some(column), Some(value)) = (filter_ts_code_column, normalized_ts_code.as_deref()) {
-        if all_columns.iter().any(|item| item.eq_ignore_ascii_case(column)) {
-            where_clauses.push(format!("{} = {}", quote_ident(column), quote_sql_string(value)));
+        if all_columns
+            .iter()
+            .any(|item| item.eq_ignore_ascii_case(column))
+        {
+            where_clauses.push(format!(
+                "{} = {}",
+                quote_ident(column),
+                quote_sql_string(value)
+            ));
         }
     }
     let where_sql = if where_clauses.is_empty() {
@@ -434,7 +449,9 @@ pub fn preview_managed_source_dataset(
     };
 
     let row_count_i64 = conn
-        .query_row(&format!("SELECT COUNT(*) FROM {relation_sql}"), [], |row| row.get::<_, i64>(0))
+        .query_row(&format!("SELECT COUNT(*) FROM {relation_sql}"), [], |row| {
+            row.get::<_, i64>(0)
+        })
         .map_err(|error| format!("读取数据集总行数失败: {error}"))?;
     let matched_rows_i64 = conn
         .query_row(
@@ -541,7 +558,9 @@ pub fn preview_managed_source_stock_data(
     };
 
     let row_count_i64 = conn
-        .query_row("SELECT COUNT(*) FROM stock_data", [], |row| row.get::<_, i64>(0))
+        .query_row("SELECT COUNT(*) FROM stock_data", [], |row| {
+            row.get::<_, i64>(0)
+        })
         .map_err(|error| format!("读取 stock_data 总行数失败: {error}"))?;
 
     let summary_sql =
@@ -576,18 +595,42 @@ pub fn preview_managed_source_stock_data(
         .map_err(|error| format!("读取预览行失败: {error}"))?
     {
         preview_rows.push(ManagedSourceDbPreviewRow {
-            ts_code: row.get(0).map_err(|error| format!("读取 ts_code 失败: {error}"))?,
-            trade_date: row.get(1).map_err(|error| format!("读取 trade_date 失败: {error}"))?,
-            adj_type: row.get(2).map_err(|error| format!("读取 adj_type 失败: {error}"))?,
-            open: row.get(3).map_err(|error| format!("读取 open 失败: {error}"))?,
-            high: row.get(4).map_err(|error| format!("读取 high 失败: {error}"))?,
-            low: row.get(5).map_err(|error| format!("读取 low 失败: {error}"))?,
-            close: row.get(6).map_err(|error| format!("读取 close 失败: {error}"))?,
-            pre_close: row.get(7).map_err(|error| format!("读取 pre_close 失败: {error}"))?,
-            pct_chg: row.get(8).map_err(|error| format!("读取 pct_chg 失败: {error}"))?,
-            vol: row.get(9).map_err(|error| format!("读取 vol 失败: {error}"))?,
-            amount: row.get(10).map_err(|error| format!("读取 amount 失败: {error}"))?,
-            tor: row.get(11).map_err(|error| format!("读取 tor 失败: {error}"))?,
+            ts_code: row
+                .get(0)
+                .map_err(|error| format!("读取 ts_code 失败: {error}"))?,
+            trade_date: row
+                .get(1)
+                .map_err(|error| format!("读取 trade_date 失败: {error}"))?,
+            adj_type: row
+                .get(2)
+                .map_err(|error| format!("读取 adj_type 失败: {error}"))?,
+            open: row
+                .get(3)
+                .map_err(|error| format!("读取 open 失败: {error}"))?,
+            high: row
+                .get(4)
+                .map_err(|error| format!("读取 high 失败: {error}"))?,
+            low: row
+                .get(5)
+                .map_err(|error| format!("读取 low 失败: {error}"))?,
+            close: row
+                .get(6)
+                .map_err(|error| format!("读取 close 失败: {error}"))?,
+            pre_close: row
+                .get(7)
+                .map_err(|error| format!("读取 pre_close 失败: {error}"))?,
+            pct_chg: row
+                .get(8)
+                .map_err(|error| format!("读取 pct_chg 失败: {error}"))?,
+            vol: row
+                .get(9)
+                .map_err(|error| format!("读取 vol 失败: {error}"))?,
+            amount: row
+                .get(10)
+                .map_err(|error| format!("读取 amount 失败: {error}"))?,
+            tor: row
+                .get(11)
+                .map_err(|error| format!("读取 tor 失败: {error}"))?,
         });
     }
 

@@ -16,6 +16,7 @@ const settingsMenuItem = { path: '/settings', label: '设置' }
 
 const backtestSubRoutes = [
   { path: '/backtest/strategy-trigger', label: '策略触发统计' },
+  { path: '/backtest/scene-layer', label: '场景整体回测' },
 ]
 
 const stockPickSubRoutes = [

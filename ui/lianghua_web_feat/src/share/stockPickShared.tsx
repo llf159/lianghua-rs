@@ -4,7 +4,7 @@ import { useRouteScrollRegion } from "../shared/routeScroll";
 import {
   formatConceptText,
   useConceptExclusions,
-} from "./conceptExclusions";
+} from "../shared/conceptExclusions";
 import {
   TableSortButton,
   getAriaSort,

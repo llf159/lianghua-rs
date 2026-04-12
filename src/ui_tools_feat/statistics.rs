@@ -4,7 +4,10 @@ use duckdb::{params, Connection};
 use serde::Serialize;
 
 use crate::{
-    data::{result_db_path, ScopeWay, ScoreRule},
+    data::{result_db_path, source_db_path, ScopeWay, ScoreRule, ScoreScene},
+    simulate::scene::{
+        SceneLayerConfig, SceneLayerFromDbInput, calc_scene_layer_metrics_from_db,
+    },
     ui_tools_feat::{build_concepts_map, build_name_map},
 };
 
@@ -101,6 +104,45 @@ pub struct StrategyStatisticsDetailData {
     pub triggered_stocks: Vec<TriggeredStockRow>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct SceneLayerStateAvgResidualReturn {
+    pub scene_state: String,
+    pub avg_residual_return: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SceneLayerPointPayload {
+    pub trade_date: String,
+    pub state_avg_residual_returns: Vec<SceneLayerStateAvgResidualReturn>,
+    pub top_bottom_spread: Option<f64>,
+    pub ic: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SceneLayerBacktestData {
+    pub scene_name: String,
+    pub stock_adj_type: String,
+    pub index_ts_code: String,
+    pub index_beta: f64,
+    pub concept_beta: f64,
+    pub start_date: String,
+    pub end_date: String,
+    pub min_samples_per_scene_day: usize,
+    pub points: Vec<SceneLayerPointPayload>,
+    pub spread_mean: Option<f64>,
+    pub ic_mean: Option<f64>,
+    pub ic_std: Option<f64>,
+    pub icir: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SceneLayerBacktestDefaultsData {
+    pub scene_options: Vec<String>,
+    pub resolved_scene_name: Option<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+}
+
 fn open_result_conn(source_path: &str) -> Result<Connection, String> {
     let result_db = result_db_path(source_path);
     let result_db_str = result_db
@@ -137,6 +179,11 @@ fn load_rule_meta(source_path: &str) -> Result<(Vec<String>, HashMap<String, Rul
     }
 
     Ok((order, meta_map))
+}
+
+fn load_scene_options(source_path: &str) -> Result<Vec<String>, String> {
+    let scenes = ScoreScene::load_scenes(source_path)?;
+    Ok(scenes.into_iter().map(|scene| scene.name).collect())
 }
 
 fn query_overview(conn: &Connection) -> Result<StrategyOverviewPayload, String> {
@@ -635,5 +682,120 @@ pub fn get_strategy_statistics_page(
         resolved_analysis_trade_date,
         chart: Some(build_chart(&strategy_rows)),
         triggered_stocks: Some(triggered_stocks),
+    })
+}
+
+pub fn get_scene_layer_backtest_defaults(
+    source_path: String,
+) -> Result<SceneLayerBacktestDefaultsData, String> {
+    let scene_options = load_scene_options(&source_path)?;
+
+    let conn = open_result_conn(&source_path)?;
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                MIN(trade_date) AS min_trade_date,
+                MAX(trade_date) AS max_trade_date
+            FROM scene_details
+            "#,
+        )
+        .map_err(|e| format!("预编译 scene_details 日期区间 SQL 失败: {e}"))?;
+
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("执行 scene_details 日期区间 SQL 失败: {e}"))?;
+
+    let (start_date, end_date) = if let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取 scene_details 日期区间失败: {e}"))?
+    {
+        let min_trade_date: Option<String> = row
+            .get(0)
+            .map_err(|e| format!("读取最小交易日失败: {e}"))?;
+        let max_trade_date: Option<String> = row
+            .get(1)
+            .map_err(|e| format!("读取最大交易日失败: {e}"))?;
+        (min_trade_date, max_trade_date)
+    } else {
+        (None, None)
+    };
+
+    Ok(SceneLayerBacktestDefaultsData {
+        resolved_scene_name: scene_options.first().cloned(),
+        scene_options,
+        start_date,
+        end_date,
+    })
+}
+
+pub fn run_scene_layer_backtest(
+    source_path: String,
+    scene_name: String,
+    stock_adj_type: Option<String>,
+    index_ts_code: String,
+    index_beta: Option<f64>,
+    concept_beta: Option<f64>,
+    start_date: String,
+    end_date: String,
+    min_samples_per_scene_day: Option<usize>,
+) -> Result<SceneLayerBacktestData, String> {
+    let source_db = source_db_path(&source_path);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
+    let source_conn =
+        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+
+    let input = SceneLayerFromDbInput {
+        scene_name: scene_name.trim().to_string(),
+        stock_adj_type: stock_adj_type
+            .unwrap_or_else(|| "qfq".to_string())
+            .trim()
+            .to_string(),
+        index_ts_code: index_ts_code.trim().to_string(),
+        index_beta: index_beta.unwrap_or(0.5),
+        concept_beta: concept_beta.unwrap_or(0.2),
+        start_date: start_date.trim().to_string(),
+        end_date: end_date.trim().to_string(),
+        layer_config: SceneLayerConfig {
+            min_samples_per_day: min_samples_per_scene_day.unwrap_or(5),
+        },
+    };
+
+    let metrics = calc_scene_layer_metrics_from_db(&source_conn, &source_path, &input)?;
+
+    Ok(SceneLayerBacktestData {
+        scene_name: input.scene_name,
+        stock_adj_type: input.stock_adj_type,
+        index_ts_code: input.index_ts_code,
+        index_beta: input.index_beta,
+        concept_beta: input.concept_beta,
+        start_date: input.start_date,
+        end_date: input.end_date,
+        min_samples_per_scene_day: input.layer_config.min_samples_per_day,
+        points: metrics
+            .points
+            .into_iter()
+            .map(|point| SceneLayerPointPayload {
+                trade_date: point.trade_date,
+                state_avg_residual_returns: point
+                    .state_avg_residual_returns
+                    .into_iter()
+                    .map(|(scene_state, avg_residual_return)| {
+                        SceneLayerStateAvgResidualReturn {
+                            scene_state,
+                            avg_residual_return: Some(avg_residual_return),
+                        }
+                    })
+                    .collect(),
+                top_bottom_spread: point.top_bottom_spread,
+                ic: point.ic,
+            })
+            .collect(),
+        spread_mean: metrics.spread_mean,
+        ic_mean: metrics.ic_mean,
+        ic_std: metrics.ic_std,
+        icir: metrics.icir,
     })
 }

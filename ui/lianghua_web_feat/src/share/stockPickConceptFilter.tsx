@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { filterConceptItems } from './conceptExclusions'
+import { filterConceptItems } from '../shared/conceptExclusions'
 
 type ConceptSelectionTone = 'primary' | 'warn' | 'neutral'
 

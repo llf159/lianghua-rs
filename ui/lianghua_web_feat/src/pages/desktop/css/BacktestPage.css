@@ -1,0 +1,35 @@
+.backtest-page {
+  display: grid;
+  gap: 12px;
+}
+
+.backtest-tabs {
+  display: inline-flex;
+  gap: 8px;
+  padding: 4px;
+  border: 1px solid var(--panel-border, #1f2937);
+  border-radius: 10px;
+  width: fit-content;
+  background: var(--panel-bg, #111827);
+}
+
+.backtest-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  padding: 8px 14px;
+  text-decoration: none;
+  color: var(--text-secondary, #9ca3af);
+  font-size: 13px;
+}
+
+.backtest-tab:hover {
+  color: var(--text-primary, #e5e7eb);
+  background: rgba(59, 130, 246, 0.15);
+}
+
+.backtest-tab-active {
+  color: #dbeafe;
+  background: rgba(59, 130, 246, 0.35);
+}

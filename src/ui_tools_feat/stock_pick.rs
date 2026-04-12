@@ -15,9 +15,7 @@ use crate::{
     utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
 };
 
-use super::{
-    build_area_map, build_concepts_map, build_industry_map, build_name_map,
-};
+use super::{build_area_map, build_concepts_map, build_industry_map, build_name_map};
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
 const BOARD_ALL: &str = "全部";

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::create_dir_all,
     path::Path,
 };
@@ -9,6 +9,7 @@ use rayon::prelude::*;
 
 use crate::data::{
     concept_performance_db_path, load_stock_list, load_ths_concepts_list, source_db_path,
+    ths_concepts_path,
 };
 
 const GDNM_BX_BIAO: &str = "concept_performance";
@@ -430,6 +431,313 @@ fn split_gdnm_items(value: &str) -> Vec<String> {
     let mut gdnm_list = quis_map.into_values().collect::<Vec<_>>();
     gdnm_list.sort();
     gdnm_list
+}
+
+fn cosine_similarity(stock: &[f64], concept: &[f64]) -> Option<f64> {
+    if stock.len() != concept.len() || stock.is_empty() {
+        return None;
+    }
+
+    let mut dot = 0.0_f64;
+    let mut stock_norm = 0.0_f64;
+    let mut concept_norm = 0.0_f64;
+
+    for (s, c) in stock.iter().zip(concept.iter()) {
+        dot += s * c;
+        stock_norm += s * s;
+        concept_norm += c * c;
+    }
+
+    if stock_norm <= f64::EPSILON || concept_norm <= f64::EPSILON {
+        return None;
+    }
+
+    Some(dot / (stock_norm.sqrt() * concept_norm.sqrt()))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConceptTrendPoint {
+    pub trade_date: String,
+    pub performance_pct: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConceptTrendSeries {
+    pub concept: String,
+    pub points: Vec<ConceptTrendPoint>,
+}
+
+pub fn load_concept_trend_series(
+    source_dir: &str,
+    concept: &str,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+) -> Result<ConceptTrendSeries, String> {
+    let concept_name = concept.trim();
+    if concept_name.is_empty() {
+        return Err("概念名称不能为空".to_string());
+    }
+
+    let concept_db = concept_performance_db_path(source_dir);
+    if !concept_db.exists() {
+        return Ok(ConceptTrendSeries {
+            concept: concept_name.to_string(),
+            points: Vec::new(),
+        });
+    }
+
+    let concept_db_str = concept_db
+        .to_str()
+        .ok_or_else(|| "concept_performance_db路径不是有效UTF-8".to_string())?;
+    let conn = Connection::open(concept_db_str)
+        .map_err(|e| format!("打开 concept_performance.db 失败: {e}"))?;
+
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT trade_date, TRY_CAST(performance_pct AS DOUBLE)
+            FROM concept_performance
+            WHERE concept = ?
+              AND (? IS NULL OR trade_date >= ?)
+              AND (? IS NULL OR trade_date <= ?)
+              AND trade_date IS NOT NULL
+            ORDER BY trade_date ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译概念走势查询失败: {e}"))?;
+
+    let mut rows = stmt
+        .query(params![
+            concept_name,
+            start_date,
+            start_date,
+            end_date,
+            end_date
+        ])
+        .map_err(|e| format!("查询概念走势失败: {e}"))?;
+
+    let mut points = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| format!("读取概念走势失败: {e}"))? {
+        let trade_date: String = row
+            .get(0)
+            .map_err(|e| format!("读取概念走势日期失败: {e}"))?;
+        let pct: Option<f64> = row
+            .get(1)
+            .map_err(|e| format!("读取概念走势涨跌幅失败: {e}"))?;
+        let Some(performance_pct) = pct.filter(|v| v.is_finite()) else {
+            continue;
+        };
+        points.push(ConceptTrendPoint {
+            trade_date,
+            performance_pct,
+        });
+    }
+
+    Ok(ConceptTrendSeries {
+        concept: concept_name.to_string(),
+        points,
+    })
+}
+
+pub fn rebuild_most_related_concept_csv(source_dir: &str) -> Result<usize, String> {
+    let source_db = source_db_path(source_dir);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
+    let conn =
+        Connection::open(source_db_str).map_err(|e| format!("打开 stock_data.db 失败: {e}"))?;
+
+    let concept_db = concept_performance_db_path(source_dir);
+    let concept_db_str = concept_db
+        .to_str()
+        .ok_or_else(|| "concept_performance_db路径不是有效UTF-8".to_string())?;
+    let concept_conn = Connection::open(concept_db_str)
+        .map_err(|e| format!("打开 concept_performance.db 失败: {e}"))?;
+
+    let mut concept_stmt = concept_conn
+        .prepare(
+            r#"SELECT trade_date, concept, TRY_CAST(performance_pct AS DOUBLE)
+               FROM concept_performance
+               WHERE trade_date IS NOT NULL AND concept IS NOT NULL
+               ORDER BY trade_date ASC"#,
+        )
+        .map_err(|e| format!("预编译概念表现查询失败: {e}"))?;
+    let mut concept_rows = concept_stmt
+        .query([])
+        .map_err(|e| format!("查询概念表现失败: {e}"))?;
+
+    let mut concept_series_map: HashMap<String, HashMap<String, f64>> = HashMap::new();
+    while let Some(row) = concept_rows
+        .next()
+        .map_err(|e| format!("读取概念表现失败: {e}"))?
+    {
+        let trade_date: String = row
+            .get(0)
+            .map_err(|e| format!("读取概念表现交易日失败: {e}"))?;
+        let concept: String = row.get(1).map_err(|e| format!("读取概念名称失败: {e}"))?;
+        let pct: Option<f64> = row.get(2).map_err(|e| format!("读取概念涨跌幅失败: {e}"))?;
+        let Some(pct) = pct.filter(|v| v.is_finite()) else {
+            continue;
+        };
+        concept_series_map
+            .entry(concept)
+            .or_default()
+            .insert(trade_date, pct);
+    }
+
+    let concepts_path = ths_concepts_path(source_dir);
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(&concepts_path)
+        .map_err(|e| format!("打开 stock_concepts.csv 失败: {e}"))?;
+
+    let headers = reader
+        .headers()
+        .map_err(|e| format!("读取 stock_concepts.csv 表头失败: {e}"))?
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>();
+
+    let mut output_headers = headers;
+    let related_col_name = "most_related_concept".to_string();
+    let related_idx = output_headers
+        .iter()
+        .position(|h| h == &related_col_name)
+        .unwrap_or_else(|| {
+            output_headers.push(related_col_name.clone());
+            output_headers.len() - 1
+        });
+
+    let mut out_rows: Vec<Vec<String>> = Vec::new();
+    let mut ts_code_set: HashSet<String> = HashSet::new();
+
+    for rec in reader.records() {
+        let record = rec.map_err(|e| format!("读取 stock_concepts.csv 记录失败: {e}"))?;
+        let mut row = record.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        while row.len() <= related_idx {
+            row.push(String::new());
+        }
+        if let Some(ts_code) = row.first().map(|v| v.trim()).filter(|v| !v.is_empty()) {
+            ts_code_set.insert(ts_code.to_string());
+        }
+        out_rows.push(row);
+    }
+
+    let mut stock_stmt = conn
+        .prepare(
+            r#"SELECT ts_code, trade_date, TRY_CAST(pct_chg AS DOUBLE)
+               FROM stock_data
+               WHERE adj_type = 'qfq' AND trade_date IS NOT NULL
+               ORDER BY ts_code ASC, trade_date ASC"#,
+        )
+        .map_err(|e| format!("预编译个股涨跌幅查询失败: {e}"))?;
+    let mut stock_rows = stock_stmt
+        .query([])
+        .map_err(|e| format!("查询个股涨跌幅失败: {e}"))?;
+
+    let mut stock_series_by_code: HashMap<String, HashMap<String, f64>> = HashMap::new();
+    while let Some(row) = stock_rows
+        .next()
+        .map_err(|e| format!("读取个股涨跌幅失败: {e}"))?
+    {
+        let ts_code: String = row.get(0).map_err(|e| format!("读取 ts_code 失败: {e}"))?;
+        if !ts_code_set.contains(&ts_code) {
+            continue;
+        }
+        let trade_date: String = row
+            .get(1)
+            .map_err(|e| format!("读取 trade_date 失败: {e}"))?;
+        let pct: Option<f64> = row.get(2).map_err(|e| format!("读取 pct_chg 失败: {e}"))?;
+        if let Some(pct) = pct.filter(|v| v.is_finite()) {
+            stock_series_by_code
+                .entry(ts_code)
+                .or_default()
+                .insert(trade_date, pct);
+        }
+    }
+
+    let best_map: HashMap<String, String> = out_rows
+        .par_iter()
+        .filter_map(|row| {
+            let ts_code = row.first().map(|v| v.trim()).unwrap_or_default();
+            let concept_raw = row.get(2).map(|v| v.trim()).unwrap_or_default();
+            if ts_code.is_empty() || concept_raw.is_empty() {
+                return None;
+            }
+
+            let stock_series_map = stock_series_by_code.get(ts_code)?;
+            if stock_series_map.is_empty() {
+                return None;
+            }
+
+            let candidates = split_gdnm_items(concept_raw);
+            if candidates.is_empty() {
+                return None;
+            }
+
+            let mut best_name = String::new();
+            let mut best_sim = f64::NEG_INFINITY;
+
+            for concept_name in candidates {
+                let Some(concept_series) = concept_series_map.get(&concept_name) else {
+                    continue;
+                };
+
+                let mut stock_vec = Vec::new();
+                let mut concept_vec = Vec::new();
+                for (trade_date, stock_pct) in stock_series_map {
+                    if let Some(concept_pct) = concept_series.get(trade_date) {
+                        stock_vec.push(*stock_pct);
+                        concept_vec.push(*concept_pct);
+                    }
+                }
+
+                if stock_vec.len() < 20 {
+                    continue;
+                }
+
+                let Some(sim) = cosine_similarity(&stock_vec, &concept_vec) else {
+                    continue;
+                };
+
+                if sim > best_sim {
+                    best_sim = sim;
+                    best_name = concept_name;
+                }
+            }
+
+            if best_name.is_empty() {
+                None
+            } else {
+                Some((ts_code.to_string(), best_name))
+            }
+        })
+        .collect();
+
+    let mut updated_count = 0usize;
+    for row in &mut out_rows {
+        let ts_code = row.first().map(|v| v.trim()).unwrap_or_default();
+        if let Some(best_name) = best_map.get(ts_code) {
+            row[related_idx] = best_name.clone();
+            updated_count += 1;
+        }
+    }
+
+    let mut writer = csv::Writer::from_path(&concepts_path)
+        .map_err(|e| format!("重写 stock_concepts.csv 失败: {e}"))?;
+    writer
+        .write_record(output_headers.iter().map(String::as_str))
+        .map_err(|e| format!("写入 stock_concepts.csv 表头失败: {e}"))?;
+    for row in out_rows {
+        writer
+            .write_record(row.iter().map(String::as_str))
+            .map_err(|e| format!("写入 stock_concepts.csv 记录失败: {e}"))?;
+    }
+    writer
+        .flush()
+        .map_err(|e| format!("刷新 stock_concepts.csv 失败: {e}"))?;
+
+    Ok(updated_count)
 }
 
 #[cfg(test)]

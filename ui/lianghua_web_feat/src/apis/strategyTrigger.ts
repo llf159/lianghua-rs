@@ -95,3 +95,58 @@ export async function getStrategyStatisticsDetail(query: {
 export async function getStrategyTriggeredStocks(query: StrategyTriggeredStocksQuery) {
   return invoke<TriggeredStockRow[]>('get_strategy_triggered_stocks', query)
 }
+
+export type SceneLayerStateAvgResidualReturn = {
+  scene_state: string
+  avg_residual_return?: number | null
+}
+
+export type SceneLayerPoint = {
+  trade_date: string
+  state_avg_residual_returns: SceneLayerStateAvgResidualReturn[]
+  top_bottom_spread?: number | null
+  ic?: number | null
+}
+
+export type SceneLayerBacktestData = {
+  scene_name: string
+  stock_adj_type: string
+  index_ts_code: string
+  index_beta: number
+  concept_beta: number
+  start_date: string
+  end_date: string
+  min_samples_per_scene_day: number
+  points: SceneLayerPoint[]
+  spread_mean?: number | null
+  ic_mean?: number | null
+  ic_std?: number | null
+  icir?: number | null
+}
+
+export type SceneLayerBacktestDefaultsData = {
+  scene_options: string[]
+  resolved_scene_name?: string | null
+  start_date?: string | null
+  end_date?: string | null
+}
+
+export type SceneLayerBacktestQuery = {
+  sourcePath: string
+  sceneName: string
+  stockAdjType?: string
+  indexTsCode: string
+  indexBeta?: number
+  conceptBeta?: number
+  startDate: string
+  endDate: string
+  minSamplesPerSceneDay?: number
+}
+
+export async function getSceneLayerBacktestDefaults(sourcePath: string) {
+  return invoke<SceneLayerBacktestDefaultsData>('get_scene_layer_backtest_defaults', { sourcePath })
+}
+
+export async function runSceneLayerBacktest(query: SceneLayerBacktestQuery) {
+  return invoke<SceneLayerBacktestData>('run_scene_layer_backtest', query)
+}

@@ -1,11 +1,19 @@
-use std::{collections::HashSet, fs, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
 
 use duckdb::Connection;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     data::{
-        IndsData, concept_performance_data::rebuild_concept_performance_all,
+        IndsData,
+        concept_performance_data::{
+            rebuild_concept_performance_all, rebuild_most_related_concept_csv,
+        },
         concept_performance_db_path, ind_toml_path, load_stock_list, load_ths_concepts_list,
         load_trade_date_list, source_db_path, stock_list_path, ths_concepts_path,
         trade_calendar_path,
@@ -100,6 +108,12 @@ pub struct ThsConceptDownloadRunInput {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConceptPerformanceRepairRunInput {
+    pub source_path: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConceptMostRelatedRepairRunInput {
     pub source_path: String,
 }
 
@@ -214,6 +228,13 @@ pub struct PreparedThsConceptDownloadRun {
 
 #[derive(Clone)]
 pub struct PreparedConceptPerformanceRepairRun {
+    pub source_path: String,
+    pub action: String,
+    pub action_label: String,
+}
+
+#[derive(Clone)]
+pub struct PreparedConceptMostRelatedRepairRun {
     pub source_path: String,
     pub action: String,
     pub action_label: String,
@@ -735,6 +756,32 @@ pub fn prepare_concept_performance_repair_run(
     })
 }
 
+pub fn prepare_concept_most_related_repair_run(
+    input: ConceptMostRelatedRepairRunInput,
+) -> Result<PreparedConceptMostRelatedRepairRun, String> {
+    let source_path = input.source_path.trim().to_string();
+    if source_path.is_empty() {
+        return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
+    }
+
+    let status = get_data_download_status(&source_path)?;
+    if !status.source_db.exists || status.source_db.row_count == 0 {
+        return Err("原始库不存在或为空，请先完成 qfq 行情下载。".to_string());
+    }
+    if !status.ths_concepts.exists || status.ths_concepts.row_count == 0 {
+        return Err("概念文件不存在或为空，请先完成概念数据下载。".to_string());
+    }
+    if !status.concept_performance_db.exists || status.concept_performance_db.row_count == 0 {
+        return Err("概念表现库不存在或为空，请先执行概念表现补全。".to_string());
+    }
+
+    Ok(PreparedConceptMostRelatedRepairRun {
+        source_path,
+        action: "repair-concept-most-related".to_string(),
+        action_label: "最相关概念补算".to_string(),
+    })
+}
+
 pub fn run_prepared_data_download(
     prepared: &PreparedDataDownloadRun,
     progress_cb: Option<&DownloadProgressCallback>,
@@ -878,6 +925,48 @@ pub fn run_prepared_concept_performance_repair(
             success_count: 1,
             failed_count: 0,
             saved_rows: saved_rows as u64,
+            failed_items: Vec::new(),
+        },
+        status,
+    })
+}
+
+pub fn run_prepared_concept_most_related_repair(
+    prepared: &PreparedConceptMostRelatedRepairRun,
+    progress_cb: Option<&DownloadProgressCallback>,
+) -> Result<DataDownloadRunResult, String> {
+    if let Some(cb) = progress_cb {
+        cb(crate::download::runner::DownloadProgress {
+            phase: "repair_concept_most_related".to_string(),
+            finished: 0,
+            total: 1,
+            current_label: None,
+            message: "开始补算每只股票的最相关概念。".to_string(),
+        });
+    }
+
+    let updated_rows = rebuild_most_related_concept_csv(&prepared.source_path)?;
+
+    if let Some(cb) = progress_cb {
+        cb(crate::download::runner::DownloadProgress {
+            phase: "repair_concept_most_related".to_string(),
+            finished: 1,
+            total: 1,
+            current_label: None,
+            message: format!("最相关概念补算完成，共更新 {} 行。", updated_rows),
+        });
+    }
+
+    let status = get_data_download_status(&prepared.source_path)?;
+
+    Ok(DataDownloadRunResult {
+        action: prepared.action.clone(),
+        action_label: prepared.action_label.clone(),
+        elapsed_ms: 0,
+        summary: DataDownloadSummary {
+            success_count: updated_rows as u64,
+            failed_count: 0,
+            saved_rows: updated_rows as u64,
             failed_items: Vec::new(),
         },
         status,

@@ -185,8 +185,12 @@ pub fn get_scene_rank_overview_page(
                     .map_err(|e| format!("读取 trade_date 失败: {e}"))?,
             ),
             scene_name,
-            scene_score: row.get(3).map_err(|e| format!("读取 scene_score 失败: {e}"))?,
-            risk_score: row.get(4).map_err(|e| format!("读取 risk_score 失败: {e}"))?,
+            scene_score: row
+                .get(3)
+                .map_err(|e| format!("读取 scene_score 失败: {e}"))?,
+            risk_score: row
+                .get(4)
+                .map_err(|e| format!("读取 risk_score 失败: {e}"))?,
             scene_status: row
                 .get::<_, Option<String>>(5)
                 .map_err(|e| format!("读取 scene_status 失败: {e}"))?,

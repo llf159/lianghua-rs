@@ -15,9 +15,9 @@ pub mod overview;
 pub mod overview_classic;
 pub mod ranking_compute;
 pub mod realtime;
+pub mod statistics;
 pub mod stock_pick;
 pub mod strategy_manage;
-pub mod statistics;
 pub mod watch_observe;
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";

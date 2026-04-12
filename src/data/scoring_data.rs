@@ -383,7 +383,7 @@ fn compute_summary_rankings_in_tx(tx: &Transaction<'_>) -> Result<(), String> {
     let time = time::Instant::now();
     let sql = build_tirbreak_rank_sql(TieBreakWay::TsCode, "");
     tx.execute(&sql, [])
-    .map_err(|e| format!("批量更新总榜排名失败:{e}"))?;
+        .map_err(|e| format!("批量更新总榜排名失败:{e}"))?;
     println!("总榜排名计算耗时:{:.3?}", time.elapsed());
     Ok(())
 }

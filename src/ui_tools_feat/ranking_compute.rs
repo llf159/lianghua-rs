@@ -287,7 +287,8 @@ fn check_result_db_continuity(
         .collect();
     let expected_set: HashSet<&str> = expected_dates.iter().map(String::as_str).collect();
     let result_db = result_db_path(source_path);
-    let actual_dates = query_distinct_trade_dates(&result_db, "scoring_result.db", "score_summary")?;
+    let actual_dates =
+        query_distinct_trade_dates(&result_db, "scoring_result.db", "score_summary")?;
     let actual_set: HashSet<&str> = actual_dates.iter().map(String::as_str).collect();
 
     let missing_dates: Vec<String> = expected_dates
@@ -331,7 +332,8 @@ fn get_rank_compute_status_inner(source_path: &str) -> Result<RankComputeStatus,
         (_, None, _) => None,
         (Some(source_min), Some(_), None) => Some(source_min.to_string()),
         (_, Some(source_max), Some(result_max)) if result_max < source_max => {
-            query_next_trade_date_after(&source_db, result_max)?.or_else(|| Some(source_max.to_string()))
+            query_next_trade_date_after(&source_db, result_max)?
+                .or_else(|| Some(source_max.to_string()))
         }
         (_, Some(source_max), _) => Some(source_max.to_string()),
     };

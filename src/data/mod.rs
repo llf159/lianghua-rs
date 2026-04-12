@@ -401,9 +401,7 @@ impl<'de> Deserialize<'de> for RuleTag {
             "" | "normal" => Ok(RuleTag::Normal),
             "opportunity" => Ok(RuleTag::Opportunity),
             "rare" => Ok(RuleTag::Rare),
-            _ => Err(de::Error::custom(
-                "tag 仅支持 Normal/Opportunity/Rare",
-            )),
+            _ => Err(de::Error::custom("tag 仅支持 Normal/Opportunity/Rare")),
         }
     }
 }

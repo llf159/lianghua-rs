@@ -224,7 +224,8 @@ pub fn get_intraday_monitor_page(
         }
 
         let board_value =
-            board_category(&ts_code, name_map.get(&ts_code).map(|value| value.as_str())).to_string();
+            board_category(&ts_code, name_map.get(&ts_code).map(|value| value.as_str()))
+                .to_string();
 
         if let Some(ref board_value_filter) = board_filter {
             if &board_value != board_value_filter {
@@ -246,10 +247,17 @@ pub fn get_intraday_monitor_page(
 
         base_rows.push(IntradayMonitorRow {
             ts_code: ts_code.clone(),
-            trade_date: Some(row.get(1).map_err(|e| format!("读取 trade_date 失败: {e}"))?),
+            trade_date: Some(
+                row.get(1)
+                    .map_err(|e| format!("读取 trade_date 失败: {e}"))?,
+            ),
             scene_name: this_scene_name,
-            scene_score: row.get(3).map_err(|e| format!("读取 scene_score 失败: {e}"))?,
-            risk_score: row.get(4).map_err(|e| format!("读取 risk_score 失败: {e}"))?,
+            scene_score: row
+                .get(3)
+                .map_err(|e| format!("读取 scene_score 失败: {e}"))?,
+            risk_score: row
+                .get(4)
+                .map_err(|e| format!("读取 risk_score 失败: {e}"))?,
             scene_status: row
                 .get::<_, Option<String>>(5)
                 .map_err(|e| format!("读取 scene_status 失败: {e}"))?,

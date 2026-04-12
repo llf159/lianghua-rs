@@ -23,6 +23,7 @@ import WatchObservePage from './pages/desktop/WatchObservePage'
 import IntradayMonitorRealtimePage from './pages/desktop/IntradayMonitorRealtimePage'
 import BacktestPage from './pages/desktop/BacktestPage'
 import StrategyTriggerPage from './pages/desktop/StrategyTriggerPage'
+import SceneLayerBacktestPage from './pages/desktop/SceneLayerBacktestPage'
 import DetailsLinkedOverlayRoute from './shared/DetailsLinkedOverlayRoute'
 import DetailsOverlayRoute from './shared/DetailsOverlayRoute'
 import './App.css'
@@ -43,7 +44,7 @@ function AppRoutes() {
     <>
       <Routes location={backgroundLocation ?? location}>
         <Route path="/" element={<PageDesktop />}>
-          <Route index element={<Navigate to="/raw-data/data-import" replace />} />
+          <Route index element={<Navigate to="/watch-observe" replace />} />
           <Route path="watch-observe" element={<WatchObservePage />} />
           <Route path="overview" element={<OverviewScenePage />} />
           <Route path="details" element={<DetailsPage />} />
@@ -72,6 +73,7 @@ function AppRoutes() {
           <Route path="backtest" element={<BacktestPage />}>
             <Route index element={<Navigate to="/backtest/strategy-trigger" replace />} />
             <Route path="strategy-trigger" element={<StrategyTriggerPage />} />
+            <Route path="scene-layer" element={<SceneLayerBacktestPage />} />
           </Route>
         </Route>
       </Routes>
