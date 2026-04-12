@@ -366,7 +366,7 @@ export default function DataImportPage() {
           <div>
             <h2 className="settings-title">数据管理</h2>
             <p className="settings-subtitle">
-              所有业务与计算文件统一落到系统 `AppData/source/`。目录导入会递归扫描，手动导入会校验文件名并写入固定目标路径，也支持导出当前应用数据目录，以及导入/导出本地缓存。移动端导出会改成系统保存单个备份文件，不再依赖文件夹选择器。
+              统一管理导入文件，支持目录扫描、单文件导入、导出和缓存迁移。
             </p>
           </div>
 
@@ -434,7 +434,7 @@ export default function DataImportPage() {
       <section className="settings-card">
         <div className="settings-section-head">
           <h3 className="settings-subtitle-head">文件清单</h3>
-          <p className="settings-section-note">电脑里能读取到的文件都可以手动导入，最终都会写到固定的 `AppData/source/`；每个文件也支持单独导出和删除。</p>
+          <p className="settings-section-note">支持逐个导入、导出或删除文件。</p>
         </div>
 
         <div className="settings-file-list">
@@ -465,7 +465,12 @@ export default function DataImportPage() {
                 </div>
                 <div className="settings-file-meta">
                   <span>目标路径</span>
-                  <strong title={itemStatus?.targetPath ?? ''}>{itemStatus?.targetPath ?? '读取中...'}</strong>
+                  <strong
+                    className="settings-path-value"
+                    title={itemStatus?.targetPath ?? ''}
+                  >
+                    {itemStatus?.targetPath ?? '读取中...'}
+                  </strong>
                 </div>
 
                 <div className="settings-file-actions">

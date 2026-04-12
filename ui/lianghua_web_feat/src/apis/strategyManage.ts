@@ -96,6 +96,13 @@ export async function updateStrategyManageScene(
   })
 }
 
+export async function removeStrategyManageScene(sourcePath: string, name: string) {
+  return invoke<StrategyManagePageData>('remove_strategy_manage_scene', {
+    sourcePath,
+    name,
+  })
+}
+
 export async function checkStrategyManageRuleDraft(
   sourcePath: string,
   draft: StrategyManageRuleDraft,

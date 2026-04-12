@@ -45,6 +45,36 @@ export type OverviewPageData = {
   resolved_ref_date?: string;
 };
 
+export type SceneOverviewRow = {
+  ts_code: string;
+  trade_date?: string;
+  scene_name: string;
+  scene_score?: number | null;
+  risk_score?: number | null;
+  scene_status?: string | null;
+  rank?: number | null;
+  name?: string;
+  board?: string;
+  total_mv_yi?: number | null;
+  concept?: string;
+  [key: string]: string | number | null | undefined;
+};
+
+export type SceneOverviewPageQuery = {
+  sourcePath: string;
+  rankDate?: string;
+  limit?: number;
+  board?: string;
+  totalMvMin?: number;
+  totalMvMax?: number;
+};
+
+export type SceneOverviewPageData = {
+  rows: SceneOverviewRow[];
+  rank_date_options?: string[];
+  resolved_rank_date?: string;
+};
+
 export type StockLookupRow = {
   ts_code: string;
   name: string;
@@ -61,6 +91,14 @@ export async function rankOverviewPage(query: OverviewPageQuery) {
 
 export async function listRankTradeDates(sourcePath: string) {
   return invoke<string[]>("get_rank_trade_date_options", { sourcePath });
+}
+
+export async function listSceneRankTradeDates(sourcePath: string) {
+  return invoke<string[]>('get_scene_rank_trade_date_options', { sourcePath })
+}
+
+export async function sceneRankOverviewPage(query: SceneOverviewPageQuery) {
+  return invoke<SceneOverviewPageData>('get_scene_rank_overview_page', query)
 }
 
 export async function listStockLookupRows(sourcePath: string) {

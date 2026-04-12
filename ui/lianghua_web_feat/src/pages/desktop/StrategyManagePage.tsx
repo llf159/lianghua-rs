@@ -6,6 +6,7 @@ import {
   createStrategyManageScene,
   createStrategyManageRule,
   getStrategyManagePage,
+  removeStrategyManageScene,
   removeStrategyManageRules,
   updateStrategyManageScene,
   updateStrategyManageRule,
@@ -48,6 +49,7 @@ const SYNTAX_GUIDE_FUNCTIONS: SyntaxGuideFunction[] = [
 type BusyAction = 'idle' | 'loading' | 'saving' | 'deleting'
 type EditorMode = 'create' | 'edit'
 type SceneEditorMode = 'create' | 'edit'
+type DeleteSceneTarget = Pick<StrategyManageSceneItem, 'name' | 'rule_count'>
 
 function formatNumber(value: number, digits = 2) {
   if (!Number.isFinite(value)) {
@@ -110,6 +112,36 @@ function buildDraftFromRule(rule: StrategyManageRuleItem): StrategyManageRuleDra
     dist_points: rule.dist_points ?? null,
     explain: rule.explain,
   }
+}
+
+function buildPreparedSceneDraft(draft: StrategyManageSceneDraft): StrategyManageSceneDraft {
+  return {
+    ...draft,
+    name: draft.name.trim(),
+  }
+}
+
+function parseRequiredNumber(value: string, label: string) {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    throw new Error(`${label} 不能为空`)
+  }
+  const parsed = Number(trimmed)
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${label} 必须是合法数字`)
+  }
+  return parsed
+}
+
+function parseRequiredInteger(value: string, label: string, min?: number) {
+  const parsed = parseRequiredNumber(value, label)
+  if (!Number.isInteger(parsed)) {
+    throw new Error(`${label} 必须是整数`)
+  }
+  if (typeof min === 'number' && parsed < min) {
+    throw new Error(`${label} 必须 >= ${min}`)
+  }
+  return parsed
 }
 
 function distPointsToText(items?: StrategyManageDistPoint[] | null) {
@@ -202,9 +234,17 @@ export default function StrategyManagePage() {
   const [draft, setDraft] = useState<StrategyManageRuleDraft | null>(null)
   const [sceneDraft, setSceneDraft] = useState<StrategyManageSceneDraft | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<StrategyManageRuleItem | null>(null)
+  const [deleteSceneTarget, setDeleteSceneTarget] = useState<DeleteSceneTarget | null>(null)
   const [scoreMode, setScoreMode] = useState<'fixed' | 'dist'>('fixed')
+  const [scopeWindowsText, setScopeWindowsText] = useState('1')
   const [fixedPointsText, setFixedPointsText] = useState('0')
+  const [scenePointsText, setScenePointsText] = useState('1')
   const [distPointsText, setDistPointsText] = useState('')
+  const [observeThresholdText, setObserveThresholdText] = useState('1')
+  const [triggerThresholdText, setTriggerThresholdText] = useState('2')
+  const [confirmThresholdText, setConfirmThresholdText] = useState('3')
+  const [failThresholdText, setFailThresholdText] = useState('1')
+  const [evidenceScoreText, setEvidenceScoreText] = useState('1')
   const [isSyntaxGuideOpen, setIsSyntaxGuideOpen] = useState(false)
 
   const selectedScene = useMemo(
@@ -257,7 +297,9 @@ export default function StrategyManagePage() {
     setEditingOriginalName('')
     setDraft(nextDraft)
     setScoreMode('fixed')
+    setScopeWindowsText(String(nextDraft.scope_windows))
     setFixedPointsText('0')
+    setScenePointsText(String(nextDraft.scene_points))
     setDistPointsText('')
     setEditorError('')
     setCheckNotice('')
@@ -266,18 +308,30 @@ export default function StrategyManagePage() {
   }
 
   function openCreateSceneEditor() {
+    const nextDraft = buildEmptySceneDraft()
     setSceneEditorMode('create')
     setEditingSceneOriginalName('')
-    setSceneDraft(buildEmptySceneDraft())
+    setSceneDraft(nextDraft)
+    setObserveThresholdText(String(nextDraft.observe_threshold))
+    setTriggerThresholdText(String(nextDraft.trigger_threshold))
+    setConfirmThresholdText(String(nextDraft.confirm_threshold))
+    setFailThresholdText(String(nextDraft.fail_threshold))
+    setEvidenceScoreText(String(nextDraft.evidence_score))
     setSceneEditorError('')
     setError('')
     setNotice('')
   }
 
   function openEditSceneEditor(scene: StrategyManageSceneItem) {
+    const nextDraft = buildSceneDraftFromScene(scene)
     setSceneEditorMode('edit')
     setEditingSceneOriginalName(scene.name)
-    setSceneDraft(buildSceneDraftFromScene(scene))
+    setSceneDraft(nextDraft)
+    setObserveThresholdText(String(nextDraft.observe_threshold))
+    setTriggerThresholdText(String(nextDraft.trigger_threshold))
+    setConfirmThresholdText(String(nextDraft.confirm_threshold))
+    setFailThresholdText(String(nextDraft.fail_threshold))
+    setEvidenceScoreText(String(nextDraft.evidence_score))
     setSceneEditorError('')
     setError('')
     setNotice('')
@@ -288,6 +342,7 @@ export default function StrategyManagePage() {
     setEditorMode('edit')
     setEditingOriginalName(rule.name)
     setDraft(nextDraft)
+    setScopeWindowsText(String(nextDraft.scope_windows))
     if (hasDistPoints(rule.dist_points)) {
       setScoreMode('dist')
       setDistPointsText(distPointsToText(rule.dist_points))
@@ -297,6 +352,7 @@ export default function StrategyManagePage() {
       setFixedPointsText(String(rule.points))
       setDistPointsText('')
     }
+    setScenePointsText(String(nextDraft.scene_points))
     setEditorError('')
     setCheckNotice('')
     setError('')
@@ -314,7 +370,16 @@ export default function StrategyManagePage() {
 
     let preparedDraft: StrategyManageRuleDraft
     try {
-      preparedDraft = buildPreparedDraft(draft, scoreMode, fixedPointsText, distPointsText)
+      preparedDraft = buildPreparedDraft(
+        {
+          ...draft,
+          scope_windows: parseRequiredInteger(scopeWindowsText, '窗口', 1),
+          scene_points: parseRequiredNumber(scenePointsText, 'Scene 分'),
+        },
+        scoreMode,
+        fixedPointsText,
+        distPointsText,
+      )
       const message = await checkStrategyManageRuleDraft(
         sourcePath,
         preparedDraft,
@@ -356,7 +421,16 @@ export default function StrategyManagePage() {
       return
     }
     try {
-      const preparedDraft = buildPreparedDraft(draft, scoreMode, fixedPointsText, distPointsText)
+      const preparedDraft = buildPreparedDraft(
+        {
+          ...draft,
+          scope_windows: parseRequiredInteger(scopeWindowsText, '窗口', 1),
+          scene_points: parseRequiredNumber(scenePointsText, 'Scene 分'),
+        },
+        scoreMode,
+        fixedPointsText,
+        distPointsText,
+      )
       const message = await checkStrategyManageRuleDraft(
         sourcePath,
         preparedDraft,
@@ -379,10 +453,24 @@ export default function StrategyManagePage() {
       return
     }
 
+    let preparedSceneDraft: StrategyManageSceneDraft
+    try {
+      preparedSceneDraft = buildPreparedSceneDraft({
+        ...sceneDraft,
+        observe_threshold: parseRequiredNumber(observeThresholdText, 'observe_threshold'),
+        trigger_threshold: parseRequiredNumber(triggerThresholdText, 'trigger_threshold'),
+        confirm_threshold: parseRequiredNumber(confirmThresholdText, 'confirm_threshold'),
+        fail_threshold: parseRequiredNumber(failThresholdText, 'fail_threshold'),
+        evidence_score: parseRequiredNumber(evidenceScoreText, 'evidence_score'),
+      })
+    } catch (parseError) {
+      setSceneEditorError(String(parseError))
+      return
+    }
     try {
       const message = await checkStrategyManageSceneDraft(
         sourcePath,
-        sceneDraft,
+        preparedSceneDraft,
         sceneEditorMode === 'edit' ? editingSceneOriginalName : undefined,
       )
       setNotice(message)
@@ -396,14 +484,44 @@ export default function StrategyManagePage() {
     try {
       const data =
         sceneEditorMode === 'create'
-          ? await createStrategyManageScene(sourcePath, sceneDraft)
-          : await updateStrategyManageScene(sourcePath, editingSceneOriginalName, sceneDraft)
-      applyPageData(data, sceneDraft.name)
+          ? await createStrategyManageScene(sourcePath, preparedSceneDraft)
+          : await updateStrategyManageScene(sourcePath, editingSceneOriginalName, preparedSceneDraft)
+      applyPageData(data, preparedSceneDraft.name)
       setSceneDraft(null)
       setEditingSceneOriginalName('')
       setNotice(sceneEditorMode === 'create' ? 'scene 已创建。' : 'scene 已更新。')
     } catch (saveError) {
       setSceneEditorError(`保存 scene 失败: ${String(saveError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  async function onConfirmDeleteScene() {
+    if (!deleteSceneTarget) {
+      return
+    }
+    if (!sourcePath.trim()) {
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+    setBusyAction('deleting')
+    setError('')
+    try {
+      const data = await removeStrategyManageScene(sourcePath, deleteSceneTarget.name)
+      applyPageData(data)
+      if (editingSceneOriginalName === deleteSceneTarget.name) {
+        setSceneDraft(null)
+        setEditingSceneOriginalName('')
+      }
+      if (selectedSceneName === deleteSceneTarget.name) {
+        setSelectedSceneName('')
+      }
+      setNotice(`已删除 scene: ${deleteSceneTarget.name}`)
+      setDeleteSceneTarget(null)
+    } catch (deleteError) {
+      setError(`删除 scene 失败: ${String(deleteError)}`)
+      setNotice('')
     } finally {
       setBusyAction('idle')
     }
@@ -529,6 +647,17 @@ export default function StrategyManagePage() {
                       >
                         配置
                       </button>
+                      <button
+                        type="button"
+                        className="strategy-manage-inline-btn is-danger"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          setDeleteSceneTarget({ name: scene.name, rule_count: scene.rule_count })
+                        }}
+                        disabled={isBusy}
+                      >
+                        删除
+                      </button>
                     </div>
                   </div>
                   <div className="strategy-manage-scene-metrics">
@@ -562,6 +691,38 @@ export default function StrategyManagePage() {
                 {busyAction === 'deleting' ? '删除中...' : '确认删除'}
               </button>
               <button className="strategy-manage-toolbar-btn" type="button" onClick={() => setDeleteTarget(null)} disabled={isBusy}>
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteSceneTarget ? (
+        <div className="strategy-manage-modal-backdrop" role="presentation">
+          <div className="strategy-manage-modal" role="dialog" aria-modal="true">
+            <h3>删除 Scene</h3>
+            <p>
+              即将删除 scene：<strong>{deleteSceneTarget.name}</strong>
+            </p>
+            {deleteSceneTarget.rule_count > 0 ? (
+              <p className="strategy-manage-note">当前 scene 下还有 {deleteSceneTarget.rule_count} 条 rule，后端会拒绝删除。</p>
+            ) : null}
+            <div className="strategy-manage-modal-actions">
+              <button
+                className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-danger"
+                type="button"
+                onClick={() => void onConfirmDeleteScene()}
+                disabled={isBusy}
+              >
+                {busyAction === 'deleting' ? '删除中...' : '确认删除'}
+              </button>
+              <button
+                className="strategy-manage-toolbar-btn"
+                type="button"
+                onClick={() => setDeleteSceneTarget(null)}
+                disabled={isBusy}
+              >
                 取消
               </button>
             </div>
@@ -705,13 +866,8 @@ export default function StrategyManagePage() {
                   type="number"
                   min={1}
                   step={1}
-                  value={draft.scope_windows}
-                  onChange={(event) =>
-                    setDraft({
-                      ...draft,
-                      scope_windows: Math.max(1, Number(event.target.value) || 1),
-                    })
-                  }
+                  value={scopeWindowsText}
+                  onChange={(event) => setScopeWindowsText(event.target.value)}
                 />
               </label>
               <label className="strategy-manage-field strategy-manage-field-span-full">
@@ -757,8 +913,8 @@ export default function StrategyManagePage() {
                 <input
                   type="number"
                   step="0.1"
-                  value={draft.scene_points}
-                  onChange={(event) => setDraft({ ...draft, scene_points: Number(event.target.value) || 0 })}
+                  value={scenePointsText}
+                  onChange={(event) => setScenePointsText(event.target.value)}
                 />
               </label>
             </div>
@@ -809,8 +965,8 @@ export default function StrategyManagePage() {
                 <input
                   type="number"
                   step="0.1"
-                  value={sceneDraft.observe_threshold}
-                  onChange={(event) => setSceneDraft({ ...sceneDraft, observe_threshold: Number(event.target.value) || 0 })}
+                  value={observeThresholdText}
+                  onChange={(event) => setObserveThresholdText(event.target.value)}
                 />
               </label>
               <label className="strategy-manage-field">
@@ -818,8 +974,8 @@ export default function StrategyManagePage() {
                 <input
                   type="number"
                   step="0.1"
-                  value={sceneDraft.trigger_threshold}
-                  onChange={(event) => setSceneDraft({ ...sceneDraft, trigger_threshold: Number(event.target.value) || 0 })}
+                  value={triggerThresholdText}
+                  onChange={(event) => setTriggerThresholdText(event.target.value)}
                 />
               </label>
               <label className="strategy-manage-field">
@@ -827,8 +983,8 @@ export default function StrategyManagePage() {
                 <input
                   type="number"
                   step="0.1"
-                  value={sceneDraft.confirm_threshold}
-                  onChange={(event) => setSceneDraft({ ...sceneDraft, confirm_threshold: Number(event.target.value) || 0 })}
+                  value={confirmThresholdText}
+                  onChange={(event) => setConfirmThresholdText(event.target.value)}
                 />
               </label>
               <label className="strategy-manage-field">
@@ -836,8 +992,8 @@ export default function StrategyManagePage() {
                 <input
                   type="number"
                   step="0.1"
-                  value={sceneDraft.fail_threshold}
-                  onChange={(event) => setSceneDraft({ ...sceneDraft, fail_threshold: Number(event.target.value) || 0 })}
+                  value={failThresholdText}
+                  onChange={(event) => setFailThresholdText(event.target.value)}
                 />
               </label>
               <label className="strategy-manage-field">
@@ -845,8 +1001,8 @@ export default function StrategyManagePage() {
                 <input
                   type="number"
                   step="0.1"
-                  value={sceneDraft.evidence_score}
-                  onChange={(event) => setSceneDraft({ ...sceneDraft, evidence_score: Number(event.target.value) || 0 })}
+                  value={evidenceScoreText}
+                  onChange={(event) => setEvidenceScoreText(event.target.value)}
                 />
               </label>
             </div>

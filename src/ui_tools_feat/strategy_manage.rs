@@ -530,6 +530,30 @@ pub fn update_strategy_manage_scene(
     get_strategy_manage_page(source_path)
 }
 
+pub fn remove_strategy_manage_scene(
+    source_path: &str,
+    name: &str,
+) -> Result<StrategyManagePageData, String> {
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        return Err("scene 名称不能为空".to_string());
+    }
+
+    let mut config = load_rule_file(source_path)?;
+    if config.rule.iter().any(|item| item.scene_name.trim() == trimmed_name) {
+        return Err(format!("scene 仍被 rule 引用，不能删除: {trimmed_name}"));
+    }
+
+    let original_len = config.scene.len();
+    config.scene.retain(|item| item.name.trim() != trimmed_name);
+    if config.scene.len() == original_len {
+        return Err(format!("scene 不存在: {trimmed_name}"));
+    }
+
+    save_rule_file(source_path, &config)?;
+    get_strategy_manage_page(source_path)
+}
+
 pub fn check_strategy_manage_rule_draft(
     source_path: &str,
     original_name: Option<&str>,

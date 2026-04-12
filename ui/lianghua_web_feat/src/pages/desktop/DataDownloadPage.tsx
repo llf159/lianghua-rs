@@ -1092,7 +1092,7 @@ export default function DataDownloadPage() {
         <section className="data-download-panel">
           <div className="data-download-panel-head">
             <h3>概念数据下载</h3>
-            <p>按当前 `stock_list.csv` 补齐 `stock_concepts.csv`。概念表现补全会基于当前 `stock_data.db`、`stock_list.csv`、`stock_concepts.csv` 全量重建 `concept_performance.db`，整次写库在同一事务内提交。</p>
+            <p>下载并补全概念相关数据。</p>
           </div>
 
           <div className="data-download-summary">

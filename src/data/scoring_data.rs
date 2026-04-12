@@ -486,7 +486,7 @@ fn compute_scene_rankings_in_tx(
                             ELSE -1
                         END DESC,
                         (d.stage_score - d.risk_score) DESC,
-                        s.rank ASC NULLS LAST,
+                        s.total_score DESC NULLS LAST,
                         d.ts_code ASC
                 ) AS scene_rank
             FROM scene_details AS d
