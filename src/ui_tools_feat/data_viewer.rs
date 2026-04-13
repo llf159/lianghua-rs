@@ -330,7 +330,7 @@ pub fn preview_managed_source_dataset(
             relation_sql = relation;
             selected_columns = columns.clone();
             all_columns = columns;
-            order_by_sql = "trade_date DESC, concept ASC";
+            order_by_sql = "trade_date DESC, performance_type ASC, concept ASC";
         }
         "stock-list-csv" => {
             let csv_path = stock_list_path(source_path_str);

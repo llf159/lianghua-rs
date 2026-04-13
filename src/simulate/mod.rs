@@ -4,7 +4,9 @@ use std::collections::{BTreeSet, HashMap};
 
 use duckdb::{Connection, params};
 
-use crate::data::concept_performance_data::load_concept_trend_series;
+use crate::data::concept_performance_data::{
+    load_concept_trend_series, load_performance_trend_series,
+};
 
 #[derive(Debug, Clone)]
 pub struct ResidualReturnInput {
@@ -12,8 +14,10 @@ pub struct ResidualReturnInput {
     pub stock_adj_type: String,
     pub index_ts_code: String,
     pub concept: String,
+    pub board: String,
     pub index_beta: f64,
     pub concept_beta: f64,
+    pub board_beta: f64,
     pub start_date: String,
     pub end_date: String,
 }
@@ -44,6 +48,9 @@ impl ResidualReturnInput {
         if !self.concept_beta.is_finite() {
             return Err("概念系数必须是有限数字".to_string());
         }
+        if !self.board_beta.is_finite() {
+            return Err("板块系数必须是有限数字".to_string());
+        }
         Ok(())
     }
 }
@@ -54,6 +61,7 @@ pub struct ResidualReturnPoint {
     pub stock_pct: f64,
     pub index_pct: f64,
     pub concept_pct: f64,
+    pub board_pct: f64,
     pub expected_pct: f64,
     pub residual_pct: f64,
 }
@@ -87,7 +95,9 @@ pub fn calc_stock_residual_returns(
         return Ok(Vec::new());
     }
 
-    let concept_map: HashMap<String, f64> = if input.concept.trim().is_empty() {
+    let concept_map: HashMap<String, f64> = if input.concept_beta.abs() <= f64::EPSILON {
+        HashMap::new()
+    } else if input.concept.trim().is_empty() {
         index_series.clone()
     } else {
         let concept_series = load_concept_trend_series(
@@ -107,6 +117,29 @@ pub fn calc_stock_residual_returns(
             .collect()
     };
 
+    let board_map: HashMap<String, f64> = if input.board_beta.abs() <= f64::EPSILON {
+        HashMap::new()
+    } else if input.board.trim().is_empty() {
+        index_series.clone()
+    } else {
+        let board_series = load_performance_trend_series(
+            source_dir,
+            "board",
+            input.board.trim(),
+            Some(input.start_date.trim()),
+            Some(input.end_date.trim()),
+        )?;
+        if board_series.points.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        board_series
+            .points
+            .into_iter()
+            .map(|point| (point.trade_date, point.performance_pct))
+            .collect()
+    };
+
     let mut date_set = BTreeSet::new();
     for date in stock_series.keys() {
         date_set.insert(date.clone());
@@ -117,6 +150,12 @@ pub fn calc_stock_residual_returns(
     for date in concept_map.keys() {
         date_set.insert(date.clone());
     }
+    for date in board_map.keys() {
+        date_set.insert(date.clone());
+    }
+
+    let use_concept = input.concept_beta.abs() > f64::EPSILON;
+    let use_board = input.board_beta.abs() > f64::EPSILON;
 
     let mut points = Vec::new();
     for trade_date in date_set {
@@ -126,11 +165,27 @@ pub fn calc_stock_residual_returns(
         let Some(index_pct) = index_series.get(&trade_date).copied() else {
             continue;
         };
-        let Some(concept_pct) = concept_map.get(&trade_date).copied() else {
-            continue;
+
+        let concept_pct = if use_concept {
+            let Some(value) = concept_map.get(&trade_date).copied() else {
+                continue;
+            };
+            value
+        } else {
+            0.0
         };
 
-        let expected_pct = input.index_beta * index_pct + input.concept_beta * concept_pct;
+        let board_pct = if use_board {
+            let Some(value) = board_map.get(&trade_date).copied() else {
+                continue;
+            };
+            value
+        } else {
+            0.0
+        };
+
+        let expected_pct =
+            input.index_beta * index_pct + input.concept_beta * concept_pct + input.board_beta * board_pct;
         let residual_pct = stock_pct - expected_pct;
 
         points.push(ResidualReturnPoint {
@@ -138,6 +193,7 @@ pub fn calc_stock_residual_returns(
             stock_pct,
             index_pct,
             concept_pct,
+            board_pct,
             expected_pct,
             residual_pct,
         });
@@ -256,8 +312,10 @@ mod tests {
             stock_adj_type: "qfq".to_string(),
             index_ts_code: "000300.SH".to_string(),
             concept: "".to_string(),
+            board: "".to_string(),
             index_beta: 0.5,
             concept_beta: 0.2,
+            board_beta: 0.0,
             start_date: "20240101".to_string(),
             end_date: "20240105".to_string(),
         };
@@ -268,12 +326,14 @@ mod tests {
         let p0 = &points[0];
         assert_eq!(p0.trade_date, "20240102");
         assert_eq!(p0.concept_pct, 1.0);
+        assert_eq!(p0.board_pct, 0.0);
         assert_eq!(p0.expected_pct, 0.7);
         assert_eq!(p0.residual_pct, 2.3);
 
         let p1 = &points[1];
         assert_eq!(p1.trade_date, "20240103");
         assert_eq!(p1.concept_pct, 0.5);
+        assert_eq!(p1.board_pct, 0.0);
         assert_eq!(p1.expected_pct, 0.35);
         assert_eq!(p1.residual_pct, 0.65);
     }

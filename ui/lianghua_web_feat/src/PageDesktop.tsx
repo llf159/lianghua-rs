@@ -17,6 +17,7 @@ const settingsMenuItem = { path: '/settings', label: '设置' }
 const backtestSubRoutes = [
   { path: '/backtest/strategy-trigger', label: '策略触发统计' },
   { path: '/backtest/scene-layer', label: '场景整体回测' },
+  { path: '/backtest/market-analysis', label: '市场分析' },
 ]
 
 const stockPickSubRoutes = [
@@ -28,7 +29,7 @@ const rawDataSubRoutes = [
   { path: '/raw-data/data-import', label: '数据管理' },
   { path: '/raw-data/data-viewer', label: '数据查看' },
   { path: '/raw-data/data-download', label: '数据下载' },
-  { path: '/raw-data/ranking-compute', label: '排名计算' },
+  { path: '/raw-data/ranking-compute', label: '数据计算' },
   { path: '/raw-data/strategy-manage', label: '策略管理' },
 ]
 

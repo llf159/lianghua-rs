@@ -108,12 +108,22 @@ export type SceneLayerPoint = {
   ic?: number | null
 }
 
+export type SceneLayerSceneSummary = {
+  scene_name: string
+  point_count: number
+  spread_mean?: number | null
+  ic_mean?: number | null
+  ic_std?: number | null
+  icir?: number | null
+}
+
 export type SceneLayerBacktestData = {
   scene_name: string
   stock_adj_type: string
   index_ts_code: string
   index_beta: number
   concept_beta: number
+  board_beta: number
   start_date: string
   end_date: string
   min_samples_per_scene_day: number
@@ -122,6 +132,8 @@ export type SceneLayerBacktestData = {
   ic_mean?: number | null
   ic_std?: number | null
   icir?: number | null
+  is_all_scenes?: boolean
+  all_scene_summaries?: SceneLayerSceneSummary[]
 }
 
 export type SceneLayerBacktestDefaultsData = {
@@ -131,6 +143,44 @@ export type SceneLayerBacktestDefaultsData = {
   end_date?: string | null
 }
 
+export type MarketRankItem = {
+  name: string
+  value: number
+}
+
+export type MarketAnalysisSnapshot = {
+  trade_date?: string | null
+  concept_top: MarketRankItem[]
+  industry_top: MarketRankItem[]
+  gain_top: MarketRankItem[]
+}
+
+export type MarketAnalysisData = {
+  lookback_period: number
+  latest_trade_date?: string | null
+  resolved_reference_trade_date?: string | null
+  interval: MarketAnalysisSnapshot
+  daily: MarketAnalysisSnapshot
+}
+
+export type MarketContributorItem = {
+  ts_code: string
+  name?: string | null
+  industry?: string | null
+  contribution_pct: number
+}
+
+export type MarketContributionData = {
+  scope: string
+  kind: string
+  name: string
+  trade_date?: string | null
+  start_date?: string | null
+  end_date?: string | null
+  lookback_period: number
+  contributors: MarketContributorItem[]
+}
+
 export type SceneLayerBacktestQuery = {
   sourcePath: string
   sceneName: string
@@ -138,6 +188,7 @@ export type SceneLayerBacktestQuery = {
   indexTsCode: string
   indexBeta?: number
   conceptBeta?: number
+  boardBeta?: number
   startDate: string
   endDate: string
   minSamplesPerSceneDay?: number
@@ -149,4 +200,23 @@ export async function getSceneLayerBacktestDefaults(sourcePath: string) {
 
 export async function runSceneLayerBacktest(query: SceneLayerBacktestQuery) {
   return invoke<SceneLayerBacktestData>('run_scene_layer_backtest', query)
+}
+
+export async function getMarketAnalysis(query: {
+  sourcePath: string
+  lookbackPeriod?: number
+  referenceTradeDate?: string
+}) {
+  return invoke<MarketAnalysisData>('get_market_analysis', query)
+}
+
+export async function getMarketContribution(query: {
+  sourcePath: string
+  scope: 'interval' | 'daily'
+  kind: 'concept' | 'industry'
+  name: string
+  lookbackPeriod?: number
+  referenceTradeDate?: string
+}) {
+  return invoke<MarketContributionData>('get_market_contribution', query)
 }

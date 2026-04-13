@@ -1,10 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use duckdb::{params, Connection};
 use serde::Serialize;
 
 use crate::{
-    data::{result_db_path, source_db_path, ScopeWay, ScoreRule, ScoreScene},
+    data::{
+        concept_performance_db_path, load_stock_list, load_ths_concepts_list, result_db_path,
+        source_db_path, ScopeWay, ScoreRule, ScoreScene,
+    },
     simulate::scene::{
         SceneLayerConfig, SceneLayerFromDbInput, calc_scene_layer_metrics_from_db,
     },
@@ -119,12 +122,23 @@ pub struct SceneLayerPointPayload {
 }
 
 #[derive(Debug, Serialize)]
+pub struct SceneLayerSceneSummary {
+    pub scene_name: String,
+    pub point_count: usize,
+    pub spread_mean: Option<f64>,
+    pub ic_mean: Option<f64>,
+    pub ic_std: Option<f64>,
+    pub icir: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct SceneLayerBacktestData {
     pub scene_name: String,
     pub stock_adj_type: String,
     pub index_ts_code: String,
     pub index_beta: f64,
     pub concept_beta: f64,
+    pub board_beta: f64,
     pub start_date: String,
     pub end_date: String,
     pub min_samples_per_scene_day: usize,
@@ -133,6 +147,8 @@ pub struct SceneLayerBacktestData {
     pub ic_mean: Option<f64>,
     pub ic_std: Option<f64>,
     pub icir: Option<f64>,
+    pub is_all_scenes: bool,
+    pub all_scene_summaries: Vec<SceneLayerSceneSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,6 +157,49 @@ pub struct SceneLayerBacktestDefaultsData {
     pub resolved_scene_name: Option<String>,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MarketRankItem {
+    pub name: String,
+    pub value: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MarketAnalysisSnapshot {
+    pub trade_date: Option<String>,
+    pub concept_top: Vec<MarketRankItem>,
+    pub industry_top: Vec<MarketRankItem>,
+    pub gain_top: Vec<MarketRankItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MarketAnalysisData {
+    pub lookback_period: usize,
+    pub latest_trade_date: Option<String>,
+    pub resolved_reference_trade_date: Option<String>,
+    pub interval: MarketAnalysisSnapshot,
+    pub daily: MarketAnalysisSnapshot,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MarketContributorItem {
+    pub ts_code: String,
+    pub name: Option<String>,
+    pub industry: Option<String>,
+    pub contribution_pct: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MarketContributionData {
+    pub scope: String,
+    pub kind: String,
+    pub name: String,
+    pub trade_date: Option<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub lookback_period: usize,
+    pub contributors: Vec<MarketContributorItem>,
 }
 
 fn open_result_conn(source_path: &str) -> Result<Connection, String> {
@@ -685,6 +744,705 @@ pub fn get_strategy_statistics_page(
     })
 }
 
+fn load_stock_name_map(source_path: &str) -> Result<HashMap<String, String>, String> {
+    let rows = load_stock_list(source_path)?;
+    let mut out = HashMap::with_capacity(rows.len());
+
+    for cols in rows {
+        let Some(ts_code) = cols.first().map(|value| value.trim()) else {
+            continue;
+        };
+        let Some(name_raw) = cols.get(2).map(|value| value.trim()) else {
+            continue;
+        };
+        if ts_code.is_empty() || name_raw.is_empty() {
+            continue;
+        }
+
+        out.insert(ts_code.to_string(), name_raw.to_string());
+    }
+
+    Ok(out)
+}
+
+pub fn get_market_analysis(
+    source_path: String,
+    lookback_period: Option<usize>,
+    reference_trade_date: Option<String>,
+) -> Result<MarketAnalysisData, String> {
+    let lookback_period = lookback_period.unwrap_or(20).max(1);
+
+    let source_db = source_db_path(&source_path);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
+    let source_conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+
+    let latest_trade_date: Option<String> = source_conn
+        .query_row(
+            "SELECT MAX(trade_date) FROM stock_data WHERE adj_type = 'qfq'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("查询最新交易日失败: {e}"))?;
+
+    let resolved_reference_trade_date = reference_trade_date
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| latest_trade_date.clone());
+
+    let Some(ref_date) = resolved_reference_trade_date.clone() else {
+        return Ok(MarketAnalysisData {
+            lookback_period,
+            latest_trade_date,
+            resolved_reference_trade_date: None,
+            interval: MarketAnalysisSnapshot {
+                trade_date: None,
+                concept_top: Vec::new(),
+                industry_top: Vec::new(),
+                gain_top: Vec::new(),
+            },
+            daily: MarketAnalysisSnapshot {
+                trade_date: None,
+                concept_top: Vec::new(),
+                industry_top: Vec::new(),
+                gain_top: Vec::new(),
+            },
+        });
+    };
+
+    let mut date_stmt = source_conn
+        .prepare(
+            r#"
+            SELECT trade_date
+            FROM (
+                SELECT DISTINCT trade_date
+                FROM stock_data
+                WHERE adj_type = 'qfq'
+                  AND trade_date <= ?
+                ORDER BY trade_date DESC
+                LIMIT ?
+            ) AS t
+            ORDER BY trade_date ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译市场分析区间日期 SQL 失败: {e}"))?;
+    let mut date_rows = date_stmt
+        .query(params![&ref_date, lookback_period as i64])
+        .map_err(|e| format!("执行市场分析区间日期 SQL 失败: {e}"))?;
+    let mut dates = Vec::new();
+    while let Some(row) = date_rows
+        .next()
+        .map_err(|e| format!("读取市场分析区间日期失败: {e}"))?
+    {
+        let trade_date: String = row.get(0).map_err(|e| format!("读取交易日失败: {e}"))?;
+        dates.push(trade_date);
+    }
+
+    if dates.is_empty() {
+        return Ok(MarketAnalysisData {
+            lookback_period,
+            latest_trade_date,
+            resolved_reference_trade_date: Some(ref_date.clone()),
+            interval: MarketAnalysisSnapshot {
+                trade_date: None,
+                concept_top: Vec::new(),
+                industry_top: Vec::new(),
+                gain_top: Vec::new(),
+            },
+            daily: MarketAnalysisSnapshot {
+                trade_date: Some(ref_date),
+                concept_top: Vec::new(),
+                industry_top: Vec::new(),
+                gain_top: Vec::new(),
+            },
+        });
+    }
+
+    let interval_start = dates.first().cloned().unwrap_or_else(|| ref_date.clone());
+    let interval_end = dates.last().cloned().unwrap_or_else(|| ref_date.clone());
+
+    let concept_db = concept_performance_db_path(&source_path);
+    let concept_db_str = concept_db
+        .to_str()
+        .ok_or_else(|| "概念表现库路径不是有效UTF-8".to_string())?;
+    let concept_conn = Connection::open(concept_db_str).map_err(|e| format!("打开概念表现库失败: {e}"))?;
+    let has_performance_type = concept_conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('concept_performance') WHERE name = 'performance_type'",
+            [],
+            |row| row.get::<usize, i64>(0),
+        )
+        .map_err(|e| format!("检查 concept_performance 结构失败: {e}"))?
+        > 0;
+
+    let concept_interval_sql = if has_performance_type {
+        r#"
+        SELECT concept, AVG(TRY_CAST(performance_pct AS DOUBLE)) AS avg_pct
+        FROM concept_performance
+        WHERE performance_type = 'concept'
+          AND trade_date >= ?
+          AND trade_date <= ?
+        GROUP BY 1
+        ORDER BY avg_pct DESC NULLS LAST, concept ASC
+        LIMIT ?
+        "#
+    } else {
+        r#"
+        SELECT concept, AVG(TRY_CAST(performance_pct AS DOUBLE)) AS avg_pct
+        FROM concept_performance
+        WHERE trade_date >= ?
+          AND trade_date <= ?
+        GROUP BY 1
+        ORDER BY avg_pct DESC NULLS LAST, concept ASC
+        LIMIT ?
+        "#
+    };
+
+    let mut concept_interval_stmt = concept_conn
+        .prepare(concept_interval_sql)
+        .map_err(|e| format!("预编译概念区间榜 SQL 失败: {e}"))?;
+    let mut concept_interval_rows = concept_interval_stmt
+        .query(params![&interval_start, &interval_end, 20_i64])
+        .map_err(|e| format!("执行概念区间榜 SQL 失败: {e}"))?;
+    let mut interval_concept_top = Vec::new();
+    while let Some(row) = concept_interval_rows
+        .next()
+        .map_err(|e| format!("读取概念区间榜失败: {e}"))?
+    {
+        let name: String = row.get(0).map_err(|e| format!("读取概念名失败: {e}"))?;
+        let value: Option<f64> = row.get(1).map_err(|e| format!("读取概念值失败: {e}"))?;
+        if let Some(value) = value.filter(|v| v.is_finite()) {
+            interval_concept_top.push(MarketRankItem { name, value });
+        }
+    }
+
+    let stock_rows = load_stock_list(&source_path)?;
+    let mut ts_board_map: HashMap<String, Vec<String>> = HashMap::with_capacity(stock_rows.len());
+    for cols in stock_rows {
+        let Some(ts_code) = cols.first().map(|value| value.trim()) else {
+            continue;
+        };
+        let Some(board_raw) = cols.get(4).map(|value| value.trim()) else {
+            continue;
+        };
+        if ts_code.is_empty() || board_raw.is_empty() {
+            continue;
+        }
+        let board_list = board_raw
+            .split(|ch| matches!(ch, ',' | ';' | '，' | '；' | '|' | '、' | '/' | '\n' | '\r'))
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+            .map(|part| part.to_string())
+            .collect::<Vec<_>>();
+        if board_list.is_empty() {
+            continue;
+        }
+        ts_board_map.insert(ts_code.to_string(), board_list);
+    }
+
+    let mut interval_board_stmt = source_conn
+        .prepare(
+            r#"
+            SELECT ts_code, AVG(TRY_CAST(pct_chg AS DOUBLE)) AS avg_pct
+            FROM stock_data
+            WHERE adj_type = 'qfq'
+              AND trade_date >= ?
+              AND trade_date <= ?
+            GROUP BY 1
+            "#,
+        )
+        .map_err(|e| format!("预编译板块区间榜 SQL 失败: {e}"))?;
+    let mut interval_board_rows = interval_board_stmt
+        .query(params![&interval_start, &interval_end])
+        .map_err(|e| format!("执行板块区间榜 SQL 失败: {e}"))?;
+    let mut interval_board_acc: HashMap<String, (f64, usize)> = HashMap::new();
+    while let Some(row) = interval_board_rows
+        .next()
+        .map_err(|e| format!("读取板块区间榜失败: {e}"))?
+    {
+        let ts_code: String = row.get(0).map_err(|e| format!("读取代码失败: {e}"))?;
+        let avg_pct: Option<f64> = row.get(1).map_err(|e| format!("读取板块值失败: {e}"))?;
+        let Some(avg_pct) = avg_pct.filter(|v| v.is_finite()) else {
+            continue;
+        };
+        let Some(board_list) = ts_board_map.get(&ts_code) else {
+            continue;
+        };
+        for board in board_list {
+            let entry = interval_board_acc.entry(board.clone()).or_insert((0.0, 0));
+            entry.0 += avg_pct;
+            entry.1 += 1;
+        }
+    }
+    let mut interval_board_top = interval_board_acc
+        .into_iter()
+        .filter_map(|(name, (sum, cnt))| {
+            if cnt == 0 {
+                return None;
+            }
+            let value = sum / cnt as f64;
+            if !value.is_finite() {
+                return None;
+            }
+            Some(MarketRankItem { name, value })
+        })
+        .collect::<Vec<_>>();
+    interval_board_top.sort_by(|a, b| {
+        b.value
+            .partial_cmp(&a.value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    interval_board_top.truncate(20);
+
+    let stock_name_map = load_stock_name_map(&source_path)?;
+
+    let mut interval_gain_stmt = source_conn
+        .prepare(
+            r#"
+            SELECT ts_code, AVG(TRY_CAST(pct_chg AS DOUBLE)) AS avg_pct
+            FROM stock_data
+            WHERE adj_type = 'qfq'
+              AND trade_date >= ?
+              AND trade_date <= ?
+            GROUP BY 1
+            ORDER BY avg_pct DESC NULLS LAST, ts_code ASC
+            LIMIT ?
+            "#,
+        )
+        .map_err(|e| format!("预编译涨幅区间榜 SQL 失败: {e}"))?;
+    let mut interval_gain_rows = interval_gain_stmt
+        .query(params![&interval_start, &interval_end, 20_i64])
+        .map_err(|e| format!("执行涨幅区间榜 SQL 失败: {e}"))?;
+    let mut interval_gain_top = Vec::new();
+    while let Some(row) = interval_gain_rows
+        .next()
+        .map_err(|e| format!("读取涨幅区间榜失败: {e}"))?
+    {
+        let ts_code: String = row.get(0).map_err(|e| format!("读取代码失败: {e}"))?;
+        let value: Option<f64> = row.get(1).map_err(|e| format!("读取涨幅值失败: {e}"))?;
+        if let Some(value) = value.filter(|v| v.is_finite()) {
+            let name = stock_name_map
+                .get(&ts_code)
+                .cloned()
+                .unwrap_or(ts_code.clone());
+            interval_gain_top.push(MarketRankItem {
+                name: format!("{} ({})", name, ts_code),
+                value,
+            });
+        }
+    }
+
+    let daily_concept_sql = if has_performance_type {
+        r#"
+        SELECT concept, TRY_CAST(performance_pct AS DOUBLE)
+        FROM concept_performance
+        WHERE performance_type = 'concept'
+          AND trade_date = ?
+        ORDER BY TRY_CAST(performance_pct AS DOUBLE) DESC NULLS LAST, concept ASC
+        LIMIT ?
+        "#
+    } else {
+        r#"
+        SELECT concept, TRY_CAST(performance_pct AS DOUBLE)
+        FROM concept_performance
+        WHERE trade_date = ?
+        ORDER BY TRY_CAST(performance_pct AS DOUBLE) DESC NULLS LAST, concept ASC
+        LIMIT ?
+        "#
+    };
+
+    let mut daily_concept_stmt = concept_conn
+        .prepare(daily_concept_sql)
+        .map_err(|e| format!("预编译概念当日榜 SQL 失败: {e}"))?;
+    let mut daily_concept_rows = daily_concept_stmt
+        .query(params![&ref_date, 20_i64])
+        .map_err(|e| format!("执行概念当日榜 SQL 失败: {e}"))?;
+    let mut daily_concept_top = Vec::new();
+    while let Some(row) = daily_concept_rows
+        .next()
+        .map_err(|e| format!("读取概念当日榜失败: {e}"))?
+    {
+        let name: String = row.get(0).map_err(|e| format!("读取概念名失败: {e}"))?;
+        let value: Option<f64> = row.get(1).map_err(|e| format!("读取概念值失败: {e}"))?;
+        if let Some(value) = value.filter(|v| v.is_finite()) {
+            daily_concept_top.push(MarketRankItem { name, value });
+        }
+    }
+
+    let mut daily_board_stmt = source_conn
+        .prepare(
+            r#"
+            SELECT ts_code, TRY_CAST(pct_chg AS DOUBLE) AS pct
+            FROM stock_data
+            WHERE adj_type = 'qfq'
+              AND trade_date = ?
+            "#,
+        )
+        .map_err(|e| format!("预编译板块当日榜 SQL 失败: {e}"))?;
+    let mut daily_board_rows = daily_board_stmt
+        .query(params![&ref_date])
+        .map_err(|e| format!("执行板块当日榜 SQL 失败: {e}"))?;
+    let mut daily_board_acc: HashMap<String, (f64, usize)> = HashMap::new();
+    while let Some(row) = daily_board_rows
+        .next()
+        .map_err(|e| format!("读取板块当日榜失败: {e}"))?
+    {
+        let ts_code: String = row.get(0).map_err(|e| format!("读取代码失败: {e}"))?;
+        let pct: Option<f64> = row.get(1).map_err(|e| format!("读取板块值失败: {e}"))?;
+        let Some(pct) = pct.filter(|v| v.is_finite()) else {
+            continue;
+        };
+        let Some(board_list) = ts_board_map.get(&ts_code) else {
+            continue;
+        };
+        for board in board_list {
+            let entry = daily_board_acc.entry(board.clone()).or_insert((0.0, 0));
+            entry.0 += pct;
+            entry.1 += 1;
+        }
+    }
+    let mut daily_board_top = daily_board_acc
+        .into_iter()
+        .filter_map(|(name, (sum, cnt))| {
+            if cnt == 0 {
+                return None;
+            }
+            let value = sum / cnt as f64;
+            if !value.is_finite() {
+                return None;
+            }
+            Some(MarketRankItem { name, value })
+        })
+        .collect::<Vec<_>>();
+    daily_board_top.sort_by(|a, b| {
+        b.value
+            .partial_cmp(&a.value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    daily_board_top.truncate(20);
+
+    let mut daily_gain_stmt = source_conn
+        .prepare(
+            r#"
+            SELECT ts_code, TRY_CAST(pct_chg AS DOUBLE)
+            FROM stock_data
+            WHERE adj_type = 'qfq'
+              AND trade_date = ?
+            ORDER BY TRY_CAST(pct_chg AS DOUBLE) DESC NULLS LAST, ts_code ASC
+            LIMIT ?
+            "#,
+        )
+        .map_err(|e| format!("预编译涨幅当日榜 SQL 失败: {e}"))?;
+    let mut daily_gain_rows = daily_gain_stmt
+        .query(params![&ref_date, 20_i64])
+        .map_err(|e| format!("执行涨幅当日榜 SQL 失败: {e}"))?;
+    let mut daily_gain_top = Vec::new();
+    while let Some(row) = daily_gain_rows
+        .next()
+        .map_err(|e| format!("读取涨幅当日榜失败: {e}"))?
+    {
+        let ts_code: String = row.get(0).map_err(|e| format!("读取代码失败: {e}"))?;
+        let value: Option<f64> = row.get(1).map_err(|e| format!("读取涨幅值失败: {e}"))?;
+        if let Some(value) = value.filter(|v| v.is_finite()) {
+            let name = stock_name_map
+                .get(&ts_code)
+                .cloned()
+                .unwrap_or(ts_code.clone());
+            daily_gain_top.push(MarketRankItem {
+                name: format!("{} ({})", name, ts_code),
+                value,
+            });
+        }
+    }
+
+    Ok(MarketAnalysisData {
+        lookback_period,
+        latest_trade_date,
+        resolved_reference_trade_date: Some(ref_date.clone()),
+        interval: MarketAnalysisSnapshot {
+            trade_date: Some(format!("{}~{}", interval_start, interval_end)),
+            concept_top: interval_concept_top,
+            industry_top: interval_board_top,
+            gain_top: interval_gain_top,
+        },
+        daily: MarketAnalysisSnapshot {
+            trade_date: Some(ref_date),
+            concept_top: daily_concept_top,
+            industry_top: daily_board_top,
+            gain_top: daily_gain_top,
+        },
+    })
+}
+
+pub fn get_market_contribution(
+    source_path: String,
+    scope: String,
+    kind: String,
+    name: String,
+    lookback_period: Option<usize>,
+    reference_trade_date: Option<String>,
+) -> Result<MarketContributionData, String> {
+    let scope = scope.trim().to_ascii_lowercase();
+    let kind = kind.trim().to_ascii_lowercase();
+    let target_name = name.trim().to_string();
+    if !matches!(scope.as_str(), "interval" | "daily") {
+        return Err("scope 仅支持 interval/daily".to_string());
+    }
+    let kind = match kind.as_str() {
+        "concept" => "concept".to_string(),
+        "industry" | "board" | "market" => "industry".to_string(),
+        _ => return Err("kind 仅支持 concept/industry".to_string()),
+    };
+    if target_name.is_empty() {
+        return Err("名称不能为空".to_string());
+    }
+
+    let lookback_period = lookback_period.unwrap_or(20).max(1);
+    let source_db = source_db_path(&source_path);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
+    let source_conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+
+    let latest_trade_date: Option<String> = source_conn
+        .query_row(
+            "SELECT MAX(trade_date) FROM stock_data WHERE adj_type = 'qfq'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("查询最新交易日失败: {e}"))?;
+    let ref_date = reference_trade_date
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or(latest_trade_date)
+        .ok_or_else(|| "缺少有效参考日".to_string())?;
+
+    let mut date_stmt = source_conn
+        .prepare(
+            r#"
+            SELECT trade_date
+            FROM (
+                SELECT DISTINCT trade_date
+                FROM stock_data
+                WHERE adj_type = 'qfq'
+                  AND trade_date <= ?
+                ORDER BY trade_date DESC
+                LIMIT ?
+            ) AS t
+            ORDER BY trade_date ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译市场贡献区间日期 SQL 失败: {e}"))?;
+    let mut date_rows = date_stmt
+        .query(params![&ref_date, lookback_period as i64])
+        .map_err(|e| format!("执行市场贡献区间日期 SQL 失败: {e}"))?;
+    let mut dates = Vec::new();
+    while let Some(row) = date_rows
+        .next()
+        .map_err(|e| format!("读取市场贡献区间日期失败: {e}"))?
+    {
+        let trade_date: String = row.get(0).map_err(|e| format!("读取交易日失败: {e}"))?;
+        dates.push(trade_date);
+    }
+
+    if dates.is_empty() {
+        return Ok(MarketContributionData {
+            scope,
+            kind,
+            name: target_name,
+            trade_date: Some(ref_date),
+            start_date: None,
+            end_date: None,
+            lookback_period,
+            contributors: Vec::new(),
+        });
+    }
+
+    let interval_start = dates.first().cloned();
+    let interval_end = dates.last().cloned();
+
+    let stock_rows = load_stock_list(&source_path)?;
+    let mut ts_name_map: HashMap<String, String> = HashMap::with_capacity(stock_rows.len());
+    let mut ts_board_map: HashMap<String, String> = HashMap::with_capacity(stock_rows.len());
+    let mut target_codes: HashSet<String> = HashSet::new();
+
+    for cols in stock_rows {
+        let Some(ts_code) = cols.first().map(|value| value.trim()) else {
+            continue;
+        };
+        if ts_code.is_empty() {
+            continue;
+        }
+
+        let stock_name = cols
+            .get(2)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if let Some(stock_name) = stock_name {
+            ts_name_map.insert(ts_code.to_string(), stock_name);
+        }
+
+        let board_name = cols
+            .get(4)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if let Some(board_name) = board_name.clone() {
+            ts_board_map.insert(ts_code.to_string(), board_name.clone());
+        }
+
+        if kind == "industry" {
+            let is_match = board_name
+                .as_deref()
+                .map(|value| {
+                    value
+                        .split(|ch| {
+                            matches!(ch, ',' | ';' | '，' | '；' | '|' | '、' | '/' | '\n' | '\r')
+                        })
+                        .map(|part| part.trim())
+                        .any(|part| !part.is_empty() && part == target_name)
+                })
+                .unwrap_or(false);
+            if is_match {
+                target_codes.insert(ts_code.to_string());
+            }
+        }
+    }
+
+    if kind == "concept" {
+        let concept_rows = load_ths_concepts_list(&source_path)?;
+        for cols in concept_rows {
+            let Some(ts_code) = cols.first().map(|value| value.trim()) else {
+                continue;
+            };
+            let Some(concept_raw) = cols.get(2).map(|value| value.trim()) else {
+                continue;
+            };
+            if ts_code.is_empty() || concept_raw.is_empty() {
+                continue;
+            }
+            let is_match = concept_raw
+                .split(|ch| {
+                    matches!(ch, ',' | ';' | '，' | '；' | '|' | '、' | '/' | '\n' | '\r')
+                })
+                .map(|part| part.trim())
+                .any(|part| !part.is_empty() && part == target_name);
+            if is_match {
+                target_codes.insert(ts_code.to_string());
+            }
+        }
+    }
+
+    if target_codes.is_empty() {
+        return Ok(MarketContributionData {
+            scope,
+            kind,
+            name: target_name,
+            trade_date: Some(ref_date),
+            start_date: interval_start,
+            end_date: interval_end,
+            lookback_period,
+            contributors: Vec::new(),
+        });
+    }
+
+    let mut contributors = Vec::new();
+    if scope == "daily" {
+        let mut stmt = source_conn
+            .prepare(
+                r#"
+                SELECT ts_code, TRY_CAST(pct_chg AS DOUBLE) AS pct
+                FROM stock_data
+                WHERE adj_type = 'qfq'
+                  AND trade_date = ?
+                "#,
+            )
+            .map_err(|e| format!("预编译市场贡献当日 SQL 失败: {e}"))?;
+        let mut rows = stmt
+            .query(params![&ref_date])
+            .map_err(|e| format!("执行市场贡献当日 SQL 失败: {e}"))?;
+
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取市场贡献当日数据失败: {e}"))?
+        {
+            let ts_code: String = row.get(0).map_err(|e| format!("读取代码失败: {e}"))?;
+            if !target_codes.contains(&ts_code) {
+                continue;
+            }
+            let pct: Option<f64> = row.get(1).map_err(|e| format!("读取涨幅失败: {e}"))?;
+            let Some(contribution_pct) = pct.filter(|v| v.is_finite()) else {
+                continue;
+            };
+            contributors.push(MarketContributorItem {
+                ts_code: ts_code.clone(),
+                name: ts_name_map.get(&ts_code).cloned(),
+                industry: ts_board_map.get(&ts_code).cloned(),
+                contribution_pct,
+            });
+        }
+    } else {
+        let start = interval_start.clone().unwrap_or_else(|| ref_date.clone());
+        let end = interval_end.clone().unwrap_or_else(|| ref_date.clone());
+        let mut stmt = source_conn
+            .prepare(
+                r#"
+                SELECT ts_code, AVG(TRY_CAST(pct_chg AS DOUBLE)) AS avg_pct
+                FROM stock_data
+                WHERE adj_type = 'qfq'
+                  AND trade_date >= ?
+                  AND trade_date <= ?
+                GROUP BY 1
+                "#,
+            )
+            .map_err(|e| format!("预编译市场贡献区间 SQL 失败: {e}"))?;
+        let mut rows = stmt
+            .query(params![&start, &end])
+            .map_err(|e| format!("执行市场贡献区间 SQL 失败: {e}"))?;
+
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取市场贡献区间数据失败: {e}"))?
+        {
+            let ts_code: String = row.get(0).map_err(|e| format!("读取代码失败: {e}"))?;
+            if !target_codes.contains(&ts_code) {
+                continue;
+            }
+            let pct: Option<f64> = row.get(1).map_err(|e| format!("读取涨幅失败: {e}"))?;
+            let Some(contribution_pct) = pct.filter(|v| v.is_finite()) else {
+                continue;
+            };
+            contributors.push(MarketContributorItem {
+                ts_code: ts_code.clone(),
+                name: ts_name_map.get(&ts_code).cloned(),
+                industry: ts_board_map.get(&ts_code).cloned(),
+                contribution_pct,
+            });
+        }
+    }
+
+    contributors.sort_by(|a, b| {
+        b.contribution_pct
+            .partial_cmp(&a.contribution_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.ts_code.cmp(&b.ts_code))
+    });
+    contributors.truncate(100);
+
+    Ok(MarketContributionData {
+        scope,
+        kind,
+        name: target_name,
+        trade_date: Some(ref_date),
+        start_date: interval_start,
+        end_date: interval_end,
+        lookback_period,
+        contributors,
+    })
+}
+
 pub fn get_scene_layer_backtest_defaults(
     source_path: String,
 ) -> Result<SceneLayerBacktestDefaultsData, String> {
@@ -736,6 +1494,7 @@ pub fn run_scene_layer_backtest(
     index_ts_code: String,
     index_beta: Option<f64>,
     concept_beta: Option<f64>,
+    board_beta: Option<f64>,
     start_date: String,
     end_date: String,
     min_samples_per_scene_day: Option<usize>,
@@ -747,19 +1506,91 @@ pub fn run_scene_layer_backtest(
     let source_conn =
         Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
 
+    let scene_name = scene_name.trim().to_string();
+    let stock_adj_type = stock_adj_type
+        .unwrap_or_else(|| "qfq".to_string())
+        .trim()
+        .to_string();
+    let index_ts_code = index_ts_code.trim().to_string();
+    let index_beta = index_beta.unwrap_or(0.5);
+    let concept_beta = concept_beta.unwrap_or(0.2);
+    let board_beta = board_beta.unwrap_or(0.0);
+    let start_date = start_date.trim().to_string();
+    let end_date = end_date.trim().to_string();
+    let min_samples_per_scene_day = min_samples_per_scene_day.unwrap_or(5);
+
+    let is_all_scenes = scene_name == "__ALL__";
+
+    if is_all_scenes {
+        let scene_options = load_scene_options(&source_path)?;
+        let mut all_scene_summaries = Vec::new();
+
+        for one_scene_name in scene_options {
+            let input = SceneLayerFromDbInput {
+                scene_name: one_scene_name.clone(),
+                stock_adj_type: stock_adj_type.clone(),
+                index_ts_code: index_ts_code.clone(),
+                index_beta,
+                concept_beta,
+                board_beta,
+                start_date: start_date.clone(),
+                end_date: end_date.clone(),
+                layer_config: SceneLayerConfig {
+                    min_samples_per_day: min_samples_per_scene_day,
+                },
+            };
+
+            let metrics = calc_scene_layer_metrics_from_db(&source_conn, &source_path, &input)?;
+            all_scene_summaries.push(SceneLayerSceneSummary {
+                scene_name: one_scene_name,
+                point_count: metrics.points.len(),
+                spread_mean: metrics.spread_mean,
+                ic_mean: metrics.ic_mean,
+                ic_std: metrics.ic_std,
+                icir: metrics.icir,
+            });
+        }
+
+        all_scene_summaries.sort_by(|a, b| {
+            b.spread_mean
+                .unwrap_or(f64::NEG_INFINITY)
+                .partial_cmp(&a.spread_mean.unwrap_or(f64::NEG_INFINITY))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.point_count.cmp(&a.point_count))
+                .then_with(|| a.scene_name.cmp(&b.scene_name))
+        });
+
+        return Ok(SceneLayerBacktestData {
+            scene_name: "__ALL__".to_string(),
+            stock_adj_type,
+            index_ts_code,
+            index_beta,
+            concept_beta,
+            board_beta,
+            start_date,
+            end_date,
+            min_samples_per_scene_day,
+            points: Vec::new(),
+            spread_mean: None,
+            ic_mean: None,
+            ic_std: None,
+            icir: None,
+            is_all_scenes: true,
+            all_scene_summaries,
+        });
+    }
+
     let input = SceneLayerFromDbInput {
-        scene_name: scene_name.trim().to_string(),
-        stock_adj_type: stock_adj_type
-            .unwrap_or_else(|| "qfq".to_string())
-            .trim()
-            .to_string(),
-        index_ts_code: index_ts_code.trim().to_string(),
-        index_beta: index_beta.unwrap_or(0.5),
-        concept_beta: concept_beta.unwrap_or(0.2),
-        start_date: start_date.trim().to_string(),
-        end_date: end_date.trim().to_string(),
+        scene_name,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        board_beta,
+        start_date,
+        end_date,
         layer_config: SceneLayerConfig {
-            min_samples_per_day: min_samples_per_scene_day.unwrap_or(5),
+            min_samples_per_day: min_samples_per_scene_day,
         },
     };
 
@@ -771,6 +1602,7 @@ pub fn run_scene_layer_backtest(
         index_ts_code: input.index_ts_code,
         index_beta: input.index_beta,
         concept_beta: input.concept_beta,
+        board_beta: input.board_beta,
         start_date: input.start_date,
         end_date: input.end_date,
         min_samples_per_scene_day: input.layer_config.min_samples_per_day,
@@ -797,5 +1629,7 @@ pub fn run_scene_layer_backtest(
         ic_mean: metrics.ic_mean,
         ic_std: metrics.ic_std,
         icir: metrics.icir,
+        is_all_scenes: false,
+        all_scene_summaries: Vec::new(),
     })
 }

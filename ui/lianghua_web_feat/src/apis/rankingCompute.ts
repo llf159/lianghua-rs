@@ -44,12 +44,22 @@ export async function getRankingComputeStatus(sourcePath: string) {
   return invoke<RankingComputeStatus>('get_ranking_compute_status', { sourcePath })
 }
 
+export type ConceptPerformanceComputeResult = {
+  action: string
+  elapsedMs: number
+  savedRows: number
+}
+
 export async function runRankingScoreCalculation(sourcePath: string, startDate: string, endDate: string) {
   return invoke<RankingComputeRunResult>('run_ranking_score_calculation', {
     sourcePath,
     startDate,
     endDate,
   })
+}
+
+export async function runConceptPerformanceCompute(sourcePath: string) {
+  return invoke<ConceptPerformanceComputeResult>('run_concept_performance_compute', { sourcePath })
 }
 
 export async function runRankingTiebreakFill(sourcePath: string) {

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { inspectManagedSourceStatus } from '../../apis/managedSource'
 import {
   getRankingComputeStatus,
+  runConceptPerformanceCompute,
   runRankingScoreCalculation,
   runRankingTiebreakFill,
   type RankComputeDbRange,
@@ -109,7 +110,7 @@ export default function RankingComputePage() {
       setEndDateInput((current) => current || compactDateToInput(nextStatus.suggestedEndDate))
     } catch (loadError) {
       setNotice('')
-      setError(`读取排名计算状态失败: ${String(loadError)}`)
+      setError(`读取数据计算状态失败: ${String(loadError)}`)
     } finally {
       setBusyAction('idle')
     }
@@ -150,12 +151,32 @@ export default function RankingComputePage() {
     }
   }
 
+  async function onRunOtherDataCompute() {
+    if (!sourcePath) {
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    setBusyAction('computing')
+    setError('')
+
+    try {
+      const result = await runConceptPerformanceCompute(sourcePath)
+      setNotice(`概念/板块表现计算完成，写入 ${result.savedRows} 行，耗时 ${formatElapsedMs(result.elapsedMs)}。`)
+    } catch (actionError) {
+      setNotice('')
+      setError(`其他数据计算失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
   return (
     <div className="ranking-compute-page">
       <section className="ranking-compute-card">
         <div className="ranking-compute-head">
           <div>
-            <h2>排名计算</h2>
+            <h2>数据计算</h2>
           </div>
 
           <button className="ranking-compute-secondary-btn" type="button" onClick={() => void loadStatus()} disabled={isBusy}>
@@ -220,6 +241,20 @@ export default function RankingComputePage() {
               {busyAction === 'computing' ? '计算中...' : '计算排名'}
             </button>
           </div>
+        </div>
+
+        <div className="ranking-compute-summary" style={{ marginTop: 20 }}>
+          <div className="ranking-compute-summary-item">
+            <span>其他数据计算</span>
+            <strong>概念/板块表现</strong>
+            <small>重建 concept_performance，包含 concept 和 board 两类表现。</small>
+          </div>
+        </div>
+
+        <div className="ranking-compute-actions">
+          <button className="ranking-compute-secondary-btn" type="button" onClick={() => void onRunOtherDataCompute()} disabled={isBusy || sourcePath === ''}>
+            {busyAction === 'computing' ? '计算中...' : '开始其他数据计算'}
+          </button>
         </div>
 
         {notice ? <div className="ranking-compute-notice">{notice}</div> : null}

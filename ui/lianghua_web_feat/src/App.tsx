@@ -24,6 +24,7 @@ import IntradayMonitorRealtimePage from './pages/desktop/IntradayMonitorRealtime
 import BacktestPage from './pages/desktop/BacktestPage'
 import StrategyTriggerPage from './pages/desktop/StrategyTriggerPage'
 import SceneLayerBacktestPage from './pages/desktop/SceneLayerBacktestPage'
+import MarketAnalysisPage from './pages/desktop/MarketAnalysisPage'
 import DetailsLinkedOverlayRoute from './shared/DetailsLinkedOverlayRoute'
 import DetailsOverlayRoute from './shared/DetailsOverlayRoute'
 import './App.css'
@@ -74,6 +75,7 @@ function AppRoutes() {
             <Route index element={<Navigate to="/backtest/strategy-trigger" replace />} />
             <Route path="strategy-trigger" element={<StrategyTriggerPage />} />
             <Route path="scene-layer" element={<SceneLayerBacktestPage />} />
+            <Route path="market-analysis" element={<MarketAnalysisPage />} />
           </Route>
         </Route>
       </Routes>

@@ -4,9 +4,20 @@ use duckdb::Connection;
 use serde::Serialize;
 
 use crate::{
-    data::{load_trade_date_list, result_db_path, source_db_path},
+    data::{
+        concept_performance_data::rebuild_concept_performance_all, load_trade_date_list,
+        result_db_path, source_db_path,
+    },
     scoring::{TieBreakWay, build_rank_tiebreak, runner::scoring_all_to_db},
 };
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConceptPerformanceComputeResult {
+    pub action: String,
+    pub elapsed_ms: u64,
+    pub saved_rows: usize,
+}
 
 use super::normalize_trade_date;
 
@@ -381,6 +392,23 @@ pub fn run_ranking_score_calculation(
         end_date: Some(end_date),
         elapsed_ms: started_at.elapsed().as_millis() as u64,
         status,
+    })
+}
+
+pub fn run_concept_performance_compute(
+    source_path: &str,
+) -> Result<ConceptPerformanceComputeResult, String> {
+    let source_path = source_path.trim().to_string();
+    if source_path.is_empty() {
+        return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
+    }
+
+    let started_at = Instant::now();
+    let saved_rows = rebuild_concept_performance_all(&source_path)?;
+    Ok(ConceptPerformanceComputeResult {
+        action: "concept-performance".to_string(),
+        elapsed_ms: started_at.elapsed().as_millis() as u64,
+        saved_rows,
     })
 }
 

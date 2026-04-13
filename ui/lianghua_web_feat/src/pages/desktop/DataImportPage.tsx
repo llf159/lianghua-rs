@@ -99,6 +99,18 @@ export default function DataImportPage() {
   const nextImportSessionRef = useRef(0)
   const busyActionRef = useRef<BusyAction>('loading')
 
+  const inspectStatusWithTimeout = useCallback(async () => {
+    const STATUS_TIMEOUT_MS = 20_000
+    return await Promise.race([
+      inspectManagedSourceStatus(),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(new Error('读取状态超时，请重试'))
+        }, STATUS_TIMEOUT_MS)
+      }),
+    ])
+  }, [])
+
   const importedCount = status?.items.filter((item) => item.isImported).length ?? 0
   const isBusy = busyAction !== 'idle'
 
@@ -197,7 +209,7 @@ export default function DataImportPage() {
     const load = async () => {
       updateBusyAction('loading')
       try {
-        const nextStatus = await inspectManagedSourceStatus()
+        const nextStatus = await inspectStatusWithTimeout()
         if (cancelled) {
           return
         }
@@ -218,14 +230,14 @@ export default function DataImportPage() {
     return () => {
       cancelled = true
     }
-  }, [reconcileStatus, updateBusyAction])
+  }, [inspectStatusWithTimeout, reconcileStatus, updateBusyAction])
 
   useEffect(() => {
     let cancelled = false
 
     const refreshWhenVisible = async () => {
       try {
-        const nextStatus = await inspectManagedSourceStatus()
+        const nextStatus = await inspectStatusWithTimeout()
         if (cancelled) {
           return
         }
@@ -250,11 +262,11 @@ export default function DataImportPage() {
       window.removeEventListener('focus', handleFocus)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
-  }, [reconcileStatus])
+  }, [inspectStatusWithTimeout, reconcileStatus])
 
   async function onRefresh() {
     const nextStatus = await runAction('loading', '刷新导入状态失败', () =>
-      inspectManagedSourceStatus(),
+      inspectStatusWithTimeout(),
     )
     if (!nextStatus) {
       return
@@ -352,7 +364,7 @@ export default function DataImportPage() {
       return
     }
 
-    const refreshedStatus = await inspectManagedSourceStatus()
+    const refreshedStatus = await inspectStatusWithTimeout()
     applyStatus(refreshedStatus)
     setNotice(
       `已导入本地缓存 ${result.importedPath}，写入 localStorage ${result.localStorageCount} 项、sessionStorage ${result.sessionStorageCount} 项。`,

@@ -15,10 +15,13 @@ use crate::data::{
 const GDNM_BX_BIAO: &str = "concept_performance";
 const MR_FQFS: &str = "qfq";
 const GDNM_BX_DATES_PER_CHUNK: usize = 32;
+const PERFORMANCE_TYPE_CONCEPT: &str = "concept";
+const PERFORMANCE_TYPE_BOARD: &str = "market";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GdNmBXRow {
     pub trade_date: String,
+    pub performance_type: String,
     pub concept: String,
     pub performance_pct: f64,
 }
@@ -46,14 +49,52 @@ pub fn init_concept_performance_db(db_path: &Path) -> Result<(), String> {
         r#"
         CREATE TABLE IF NOT EXISTS concept_performance (
             trade_date VARCHAR,
+            performance_type VARCHAR,
             concept VARCHAR,
             performance_pct DOUBLE,
-            PRIMARY KEY (trade_date, concept)
+            PRIMARY KEY (trade_date, performance_type, concept)
         )
         "#,
         [],
     )
     .map_err(|e| format!("创建concept_performance失败:{e}"))?;
+
+    let has_performance_type = conn
+        .prepare("PRAGMA table_info('concept_performance')")
+        .map_err(|e| format!("读取concept_performance结构失败:{e}"))?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| format!("查询concept_performance字段失败:{e}"))?
+        .filter_map(Result::ok)
+        .any(|name| name == "performance_type");
+
+    if !has_performance_type {
+        conn.execute("ALTER TABLE concept_performance RENAME TO concept_performance_old", [])
+            .map_err(|e| format!("旧concept_performance重命名失败:{e}"))?;
+        conn.execute(
+            r#"
+            CREATE TABLE concept_performance (
+                trade_date VARCHAR,
+                performance_type VARCHAR,
+                concept VARCHAR,
+                performance_pct DOUBLE,
+                PRIMARY KEY (trade_date, performance_type, concept)
+            )
+            "#,
+            [],
+        )
+        .map_err(|e| format!("重建concept_performance失败:{e}"))?;
+        conn.execute(
+            r#"
+            INSERT INTO concept_performance (trade_date, performance_type, concept, performance_pct)
+            SELECT trade_date, 'concept', concept, performance_pct
+            FROM concept_performance_old
+            "#,
+            [],
+        )
+        .map_err(|e| format!("迁移旧concept_performance失败:{e}"))?;
+        conn.execute("DROP TABLE concept_performance_old", [])
+            .map_err(|e| format!("删除旧concept_performance失败:{e}"))?;
+    }
     Ok(())
 }
 
@@ -123,20 +164,36 @@ pub fn rebuild_concept_performance_range(
         ));
     }
 
-    let gdnm_map = match load_gdnm_map(source_dir)? {
-        Some(map) => map,
-        None => return Ok(0),
-    };
-    if gdnm_map.is_empty() {
-        return Ok(0);
-    }
+    let concept_map = load_concept_map(source_dir)?.unwrap_or_default();
+    let board_map = load_board_map(source_dir)?;
 
     let uivi_map = load_uivi_map(source_dir)?;
     if uivi_map.is_empty() {
         return Ok(0);
     }
 
-    let bx_rows = calc_gdnm_bx_rows(source_dir, start_date, end_date, &gdnm_map, &uivi_map)?;
+    let mut bx_rows = Vec::new();
+    if !concept_map.is_empty() {
+        bx_rows.extend(calc_gdnm_bx_rows(
+            source_dir,
+            start_date,
+            end_date,
+            PERFORMANCE_TYPE_CONCEPT,
+            &concept_map,
+            &uivi_map,
+        )?);
+    }
+    if !board_map.is_empty() {
+        bx_rows.extend(calc_gdnm_bx_rows(
+            source_dir,
+            start_date,
+            end_date,
+            PERFORMANCE_TYPE_BOARD,
+            &board_map,
+            &uivi_map,
+        )?);
+    }
+
     let bx_db = concept_performance_db_path(source_dir);
     init_concept_performance_db(&bx_db)?;
     write_concept_performance_range(&bx_db, start_date, end_date, &bx_rows)?;
@@ -176,13 +233,18 @@ fn write_concept_performance_range(
             .appender(GDNM_BX_BIAO)
             .map_err(|e| format!("创建concept_performance写入器失败:{e}"))?;
         for row in bx_rows {
-            app.append_row(params![&row.trade_date, &row.concept, row.performance_pct])
-                .map_err(|e| {
-                    format!(
-                        "写入概念表现失败, trade_date={}, concept={}: {e}",
-                        row.trade_date, row.concept
-                    )
-                })?;
+            app.append_row(params![
+                &row.trade_date,
+                &row.performance_type,
+                &row.concept,
+                row.performance_pct
+            ])
+            .map_err(|e| {
+                format!(
+                    "写入概念表现失败, trade_date={}, performance_type={}, concept={}: {e}",
+                    row.trade_date, row.performance_type, row.concept
+                )
+            })?;
         }
         app.flush()
             .map_err(|e| format!("刷新concept_performance写入器失败:{e}"))?;
@@ -197,6 +259,7 @@ fn calc_gdnm_bx_rows(
     source_dir: &str,
     start_date: &str,
     end_date: &str,
+    performance_type: &str,
     gdnm_map: &HashMap<String, Vec<String>>,
     uivi_map: &HashMap<String, f64>,
 ) -> Result<Vec<GdNmBXRow>, String> {
@@ -219,7 +282,14 @@ fn calc_gdnm_bx_rows(
     let chunk_results: Vec<Result<Vec<GdNmBXRow>, String>> = date_ranges
         .par_iter()
         .map(|(chunk_start, chunk_end)| {
-            calc_gdnm_bx_rows_chunk(source_dir, chunk_start, chunk_end, gdnm_map, uivi_map)
+            calc_gdnm_bx_rows_chunk(
+                source_dir,
+                chunk_start,
+                chunk_end,
+                performance_type,
+                gdnm_map,
+                uivi_map,
+            )
         })
         .collect();
 
@@ -231,6 +301,7 @@ fn calc_gdnm_bx_rows(
     bx_rows.sort_by(|left, right| {
         left.trade_date
             .cmp(&right.trade_date)
+            .then_with(|| left.performance_type.cmp(&right.performance_type))
             .then_with(|| left.concept.cmp(&right.concept))
     });
 
@@ -284,6 +355,7 @@ fn calc_gdnm_bx_rows_chunk(
     source_dir: &str,
     start_date: &str,
     end_date: &str,
+    performance_type: &str,
     gdnm_map: &HashMap<String, Vec<String>>,
     uivi_map: &HashMap<String, f64>,
 ) -> Result<Vec<GdNmBXRow>, String> {
@@ -351,6 +423,7 @@ fn calc_gdnm_bx_rows_chunk(
         }
         bx_rows.push(GdNmBXRow {
             trade_date,
+            performance_type: performance_type.to_string(),
             concept,
             performance_pct,
         });
@@ -359,7 +432,7 @@ fn calc_gdnm_bx_rows_chunk(
     Ok(bx_rows)
 }
 
-fn load_gdnm_map(source_dir: &str) -> Result<Option<HashMap<String, Vec<String>>>, String> {
+fn load_concept_map(source_dir: &str) -> Result<Option<HashMap<String, Vec<String>>>, String> {
     let rows = match load_ths_concepts_list(source_dir) {
         Ok(rows) => rows,
         Err(error) if error.contains("打开stock_concepts.csv失败") => return Ok(None),
@@ -391,6 +464,34 @@ fn load_gdnm_map(source_dir: &str) -> Result<Option<HashMap<String, Vec<String>>
     }
 
     Ok(Some(gdnm_map))
+}
+
+fn load_board_map(source_dir: &str) -> Result<HashMap<String, Vec<String>>, String> {
+    let rows = load_stock_list(source_dir)?;
+    let mut board_map = HashMap::with_capacity(rows.len());
+    for cols in rows {
+        let Some(ts_code) = cols.first().map(|v| v.trim()) else {
+            continue;
+        };
+        let Some(board_raw) = cols.get(14).map(|v| v.trim()) else {
+            continue;
+        };
+        if ts_code.is_empty() || board_raw.is_empty() {
+            continue;
+        }
+        let board_list = split_gdnm_items(board_raw);
+        if board_list.is_empty() {
+            continue;
+        }
+        board_map
+            .entry(ts_code.to_string())
+            .and_modify(|old_list: &mut Vec<String>| {
+                old_list.extend(board_list.clone());
+                *old_list = split_gdnm_items(&old_list.join(","));
+            })
+            .or_insert(board_list);
+    }
+    Ok(board_map)
 }
 
 fn load_uivi_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
@@ -467,15 +568,20 @@ pub struct ConceptTrendSeries {
     pub points: Vec<ConceptTrendPoint>,
 }
 
-pub fn load_concept_trend_series(
+pub fn load_performance_trend_series(
     source_dir: &str,
+    performance_type: &str,
     concept: &str,
     start_date: Option<&str>,
     end_date: Option<&str>,
 ) -> Result<ConceptTrendSeries, String> {
     let concept_name = concept.trim();
     if concept_name.is_empty() {
-        return Err("概念名称不能为空".to_string());
+        return Err("名称不能为空".to_string());
+    }
+    let performance_type = performance_type.trim();
+    if performance_type.is_empty() {
+        return Err("表现类型不能为空".to_string());
     }
 
     let concept_db = concept_performance_db_path(source_dir);
@@ -497,33 +603,35 @@ pub fn load_concept_trend_series(
             r#"
             SELECT trade_date, TRY_CAST(performance_pct AS DOUBLE)
             FROM concept_performance
-            WHERE concept = ?
+            WHERE performance_type = ?
+              AND concept = ?
               AND (? IS NULL OR trade_date >= ?)
               AND (? IS NULL OR trade_date <= ?)
               AND trade_date IS NOT NULL
             ORDER BY trade_date ASC
             "#,
         )
-        .map_err(|e| format!("预编译概念走势查询失败: {e}"))?;
+        .map_err(|e| format!("预编译表现走势查询失败: {e}"))?;
 
     let mut rows = stmt
         .query(params![
+            performance_type,
             concept_name,
             start_date,
             start_date,
             end_date,
             end_date
         ])
-        .map_err(|e| format!("查询概念走势失败: {e}"))?;
+        .map_err(|e| format!("查询表现走势失败: {e}"))?;
 
     let mut points = Vec::new();
-    while let Some(row) = rows.next().map_err(|e| format!("读取概念走势失败: {e}"))? {
+    while let Some(row) = rows.next().map_err(|e| format!("读取表现走势失败: {e}"))? {
         let trade_date: String = row
             .get(0)
-            .map_err(|e| format!("读取概念走势日期失败: {e}"))?;
+            .map_err(|e| format!("读取表现走势日期失败: {e}"))?;
         let pct: Option<f64> = row
             .get(1)
-            .map_err(|e| format!("读取概念走势涨跌幅失败: {e}"))?;
+            .map_err(|e| format!("读取表现走势涨跌幅失败: {e}"))?;
         let Some(performance_pct) = pct.filter(|v| v.is_finite()) else {
             continue;
         };
@@ -537,6 +645,21 @@ pub fn load_concept_trend_series(
         concept: concept_name.to_string(),
         points,
     })
+}
+
+pub fn load_concept_trend_series(
+    source_dir: &str,
+    concept: &str,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+) -> Result<ConceptTrendSeries, String> {
+    load_performance_trend_series(
+        source_dir,
+        PERFORMANCE_TYPE_CONCEPT,
+        concept,
+        start_date,
+        end_date,
+    )
 }
 
 pub fn rebuild_most_related_concept_csv(source_dir: &str) -> Result<usize, String> {
@@ -558,7 +681,9 @@ pub fn rebuild_most_related_concept_csv(source_dir: &str) -> Result<usize, Strin
         .prepare(
             r#"SELECT trade_date, concept, TRY_CAST(performance_pct AS DOUBLE)
                FROM concept_performance
-               WHERE trade_date IS NOT NULL AND concept IS NOT NULL
+               WHERE performance_type = 'concept'
+                 AND trade_date IS NOT NULL
+                 AND concept IS NOT NULL
                ORDER BY trade_date ASC"#,
         )
         .map_err(|e| format!("预编译概念表现查询失败: {e}"))?;
@@ -856,7 +981,7 @@ ts_code,concepts_code,concepts_name,stock_name
         let conn = Connection::open(bx_db).expect("open bx db");
         let mut stmt = conn
             .prepare(
-                "SELECT trade_date, concept, performance_pct FROM concept_performance ORDER BY trade_date, concept",
+                "SELECT trade_date, performance_type, concept, performance_pct FROM concept_performance ORDER BY trade_date, performance_type, concept",
             )
             .expect("prepare");
         let mut rows = stmt.query([]).expect("query");
@@ -864,8 +989,9 @@ ts_code,concepts_code,concepts_name,stock_name
         while let Some(row) = rows.next().expect("next") {
             shiji.push(GdNmBXRow {
                 trade_date: row.get(0).expect("trade_date"),
-                concept: row.get(1).expect("concept"),
-                performance_pct: row.get(2).expect("performance_pct"),
+                performance_type: row.get(1).expect("performance_type"),
+                concept: row.get(2).expect("concept"),
+                performance_pct: row.get(3).expect("performance_pct"),
             });
         }
 
@@ -874,31 +1000,37 @@ ts_code,concepts_code,concepts_name,stock_name
             vec![
                 GdNmBXRow {
                     trade_date: "20240102".to_string(),
+                    performance_type: PERFORMANCE_TYPE_CONCEPT.to_string(),
                     concept: "AI".to_string(),
                     performance_pct: 10.0,
                 },
                 GdNmBXRow {
                     trade_date: "20240102".to_string(),
+                    performance_type: PERFORMANCE_TYPE_CONCEPT.to_string(),
                     concept: "国产替代".to_string(),
                     performance_pct: 10.0,
                 },
                 GdNmBXRow {
                     trade_date: "20240102".to_string(),
+                    performance_type: PERFORMANCE_TYPE_CONCEPT.to_string(),
                     concept: "算力".to_string(),
                     performance_pct: 17.5,
                 },
                 GdNmBXRow {
                     trade_date: "20240103".to_string(),
+                    performance_type: PERFORMANCE_TYPE_CONCEPT.to_string(),
                     concept: "AI".to_string(),
                     performance_pct: -5.0,
                 },
                 GdNmBXRow {
                     trade_date: "20240103".to_string(),
+                    performance_type: PERFORMANCE_TYPE_CONCEPT.to_string(),
                     concept: "国产替代".to_string(),
                     performance_pct: -5.0,
                 },
                 GdNmBXRow {
                     trade_date: "20240103".to_string(),
+                    performance_type: PERFORMANCE_TYPE_CONCEPT.to_string(),
                     concept: "算力".to_string(),
                     performance_pct: 10.0,
                 },
@@ -931,29 +1063,45 @@ ts_code,concepts_code,concepts_name,stock_name
 
         let first_ai: f64 = conn
             .query_row(
-                "SELECT performance_pct FROM concept_performance WHERE trade_date = ? AND concept = ?",
-                params![trade_dates.first().expect("first trade date"), "AI"],
+                "SELECT performance_pct FROM concept_performance WHERE trade_date = ? AND performance_type = ? AND concept = ?",
+                params![
+                    trade_dates.first().expect("first trade date"),
+                    PERFORMANCE_TYPE_CONCEPT,
+                    "AI"
+                ],
                 |row| row.get(0),
             )
             .expect("query first ai");
         let first_suanli: f64 = conn
             .query_row(
-                "SELECT performance_pct FROM concept_performance WHERE trade_date = ? AND concept = ?",
-                params![trade_dates.first().expect("first trade date"), "算力"],
+                "SELECT performance_pct FROM concept_performance WHERE trade_date = ? AND performance_type = ? AND concept = ?",
+                params![
+                    trade_dates.first().expect("first trade date"),
+                    PERFORMANCE_TYPE_CONCEPT,
+                    "算力"
+                ],
                 |row| row.get(0),
             )
             .expect("query first suanli");
         let last_ai: f64 = conn
             .query_row(
-                "SELECT performance_pct FROM concept_performance WHERE trade_date = ? AND concept = ?",
-                params![trade_dates.last().expect("last trade date"), "AI"],
+                "SELECT performance_pct FROM concept_performance WHERE trade_date = ? AND performance_type = ? AND concept = ?",
+                params![
+                    trade_dates.last().expect("last trade date"),
+                    PERFORMANCE_TYPE_CONCEPT,
+                    "AI"
+                ],
                 |row| row.get(0),
             )
             .expect("query last ai");
         let last_suanli: f64 = conn
             .query_row(
-                "SELECT performance_pct FROM concept_performance WHERE trade_date = ? AND concept = ?",
-                params![trade_dates.last().expect("last trade date"), "算力"],
+                "SELECT performance_pct FROM concept_performance WHERE trade_date = ? AND performance_type = ? AND concept = ?",
+                params![
+                    trade_dates.last().expect("last trade date"),
+                    PERFORMANCE_TYPE_CONCEPT,
+                    "算力"
+                ],
                 |row| row.get(0),
             )
             .expect("query last suanli");
@@ -1006,7 +1154,7 @@ ts_code,concepts_code,concepts_name,stock_name
         let performance_pct: f64 = conn
             .query_row(
                 "SELECT performance_pct FROM concept_performance WHERE trade_date = ? AND concept = ?",
-                params!["20240102", "算力"],
+                params!["20240102", PERFORMANCE_TYPE_CONCEPT, "算力"],
                 |row| row.get(0),
             )
             .expect("query rounded performance");

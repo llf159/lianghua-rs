@@ -1,11 +1,10 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fs,
     path::Path,
 };
 
 use duckdb::Connection;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -815,6 +814,27 @@ pub fn run_prepared_data_download(
     summary.failed_count += index_summary.failed_count;
     summary.saved_rows += index_summary.saved_rows;
     summary.failed_items.extend(index_summary.failed_items);
+
+    if let Some(cb) = progress_cb {
+        cb(crate::download::runner::DownloadProgress {
+            phase: "rebuild_concept_performance".to_string(),
+            finished: 0,
+            total: 1,
+            current_label: None,
+            message: "开始维护概念/板块表现库。".to_string(),
+        });
+    }
+    let _ = rebuild_concept_performance_all(&prepared.source_path)?;
+    if let Some(cb) = progress_cb {
+        cb(crate::download::runner::DownloadProgress {
+            phase: "rebuild_concept_performance".to_string(),
+            finished: 1,
+            total: 1,
+            current_label: None,
+            message: "概念/板块表现维护完成。".to_string(),
+        });
+    }
+
     let status = get_data_download_status(&prepared.source_path)?;
 
     Ok(DataDownloadRunResult {
@@ -899,7 +919,7 @@ pub fn run_prepared_concept_performance_repair(
             finished: 0,
             total: 1,
             current_label: None,
-            message: "开始全量补全概念表现库。".to_string(),
+            message: "开始全量补全概念/板块表现库。".to_string()
         });
     }
 

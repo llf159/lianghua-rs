@@ -36,8 +36,9 @@ use lianghua_rs::ui_tools_feat::{
         get_rank_trade_date_options as core_get_rank_trade_date_options,
     },
     ranking_compute::{
-        RankComputeRunResult, RankComputeStatus,
+        ConceptPerformanceComputeResult, RankComputeRunResult, RankComputeStatus,
         get_ranking_compute_status as core_get_ranking_compute_status,
+        run_concept_performance_compute as core_run_concept_performance_compute,
         run_ranking_score_calculation as core_run_ranking_score_calculation,
         run_ranking_tiebreak_fill as core_run_ranking_tiebreak_fill,
     },
@@ -56,8 +57,10 @@ use lianghua_rs::ui_tools_feat::{
         update_strategy_manage_rule as core_update_strategy_manage_rule,
     },
     statistics::{
-        SceneLayerBacktestData, SceneLayerBacktestDefaultsData, StrategyStatisticsDetailData,
-        StrategyStatisticsPageData, TriggeredStockRow,
+        MarketAnalysisData, MarketContributionData, SceneLayerBacktestData,
+        SceneLayerBacktestDefaultsData, StrategyStatisticsDetailData, StrategyStatisticsPageData,
+        TriggeredStockRow, get_market_analysis as core_get_market_analysis,
+        get_market_contribution as core_get_market_contribution,
         get_scene_layer_backtest_defaults as core_get_scene_layer_backtest_defaults,
         get_strategy_statistics_detail as core_get_strategy_statistics_detail,
         get_strategy_statistics_page as core_get_strategy_statistics_page,
@@ -106,12 +109,7 @@ struct WatchObserveUpsertPayload {
 }
 
 #[cfg(target_os = "android")]
-#[allow(non_snake_case)]
-#[no_mangle]
-pub extern "system" fn Java_com_lmingyuanl_lianghua_MainActivity_initRustlsPlatformVerifier(
-    mut env: JNIEnv,
-    activity: JObject,
-) -> jboolean {
+fn init_rustls_platform_verifier_impl(mut env: JNIEnv, activity: JObject) -> jboolean {
     match rustls_platform_verifier::android::init_hosted(&mut env, activity) {
         Ok(()) => 1,
         Err(error) => {
@@ -119,6 +117,26 @@ pub extern "system" fn Java_com_lmingyuanl_lianghua_MainActivity_initRustlsPlatf
             0
         }
     }
+}
+
+#[cfg(target_os = "android")]
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "system" fn Java_com_lmingyuanl_lianghua_MainActivity_initRustlsPlatformVerifier(
+    env: JNIEnv,
+    activity: JObject,
+) -> jboolean {
+    init_rustls_platform_verifier_impl(env, activity)
+}
+
+#[cfg(target_os = "android")]
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "system" fn Java_com_mingyuan_lianghua_MainActivity_initRustlsPlatformVerifier(
+    env: JNIEnv,
+    activity: JObject,
+) -> jboolean {
+    init_rustls_platform_verifier_impl(env, activity)
 }
 
 fn resolve_watch_observe_storage_path(
@@ -434,6 +452,42 @@ fn get_scene_layer_backtest_defaults(
 }
 
 #[tauri::command]
+async fn get_market_analysis(
+    source_path: String,
+    lookback_period: Option<usize>,
+    reference_trade_date: Option<String>,
+) -> Result<MarketAnalysisData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_market_analysis(source_path, lookback_period, reference_trade_date)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_market_contribution(
+    source_path: String,
+    scope: String,
+    kind: String,
+    name: String,
+    lookback_period: Option<usize>,
+    reference_trade_date: Option<String>,
+) -> Result<MarketContributionData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_market_contribution(
+            source_path,
+            scope,
+            kind,
+            name,
+            lookback_period,
+            reference_trade_date,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn run_scene_layer_backtest(
     source_path: String,
     scene_name: String,
@@ -441,6 +495,7 @@ async fn run_scene_layer_backtest(
     index_ts_code: String,
     index_beta: Option<f64>,
     concept_beta: Option<f64>,
+    board_beta: Option<f64>,
     start_date: String,
     end_date: String,
     min_samples_per_scene_day: Option<usize>,
@@ -453,6 +508,7 @@ async fn run_scene_layer_backtest(
             index_ts_code,
             index_beta,
             concept_beta,
+            board_beta,
             start_date,
             end_date,
             min_samples_per_scene_day,
@@ -547,6 +603,17 @@ async fn run_ranking_score_calculation(
 ) -> Result<RankComputeRunResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_run_ranking_score_calculation(&source_path, &start_date, &end_date)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn run_concept_performance_compute(
+    source_path: String,
+) -> Result<ConceptPerformanceComputeResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_run_concept_performance_compute(&source_path)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -777,9 +844,12 @@ pub fn run() {
             get_strategy_statistics_detail,
             get_strategy_triggered_stocks,
             get_scene_layer_backtest_defaults,
+            get_market_analysis,
+            get_market_contribution,
             run_scene_layer_backtest,
             get_ranking_compute_status,
             run_ranking_score_calculation,
+            run_concept_performance_compute,
             run_ranking_tiebreak_fill,
             get_strategy_manage_page,
             check_strategy_manage_scene_draft,

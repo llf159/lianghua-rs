@@ -4,7 +4,7 @@ use duckdb::{Connection, params};
 use rayon::prelude::*;
 
 use super::{ResidualReturnInput, calc_stock_residual_returns};
-use crate::data::{load_ths_concepts_list, result_db_path, source_db_path};
+use crate::data::{load_stock_list, load_ths_concepts_list, result_db_path, source_db_path};
 
 const EPS: f64 = 1e-12;
 
@@ -37,6 +37,7 @@ pub struct SceneLayerFromDbInput {
     pub index_ts_code: String,
     pub index_beta: f64,
     pub concept_beta: f64,
+    pub board_beta: f64,
     pub start_date: String,
     pub end_date: String,
     pub layer_config: SceneLayerConfig,
@@ -67,6 +68,9 @@ impl SceneLayerFromDbInput {
         }
         if !self.concept_beta.is_finite() {
             return Err("概念系数必须是有限数字".to_string());
+        }
+        if !self.board_beta.is_finite() {
+            return Err("板块系数必须是有限数字".to_string());
         }
         self.layer_config.validate()
     }
@@ -112,6 +116,7 @@ pub fn calc_scene_layer_metrics_from_db(
 
     let scene_rows = load_scene_rows(source_dir, input)?;
     let concept_map = load_most_related_concept_map(source_dir)?;
+    let board_map = load_stock_board_map(source_dir)?;
     if scene_rows.is_empty() {
         return Ok(empty_metrics());
     }
@@ -132,6 +137,7 @@ pub fn calc_scene_layer_metrics_from_db(
     if rows_by_ts.len() <= 1 {
         for (ts_code, rows) in rows_by_ts {
             let most_related_concept = concept_map.get(&ts_code).cloned().unwrap_or_default();
+            let board = board_map.get(&ts_code).cloned().unwrap_or_default();
             let residual_points = calc_stock_residual_returns(
                 _source_conn,
                 source_dir,
@@ -140,8 +146,10 @@ pub fn calc_scene_layer_metrics_from_db(
                     stock_adj_type: input.stock_adj_type.clone(),
                     index_ts_code: input.index_ts_code.clone(),
                     concept: most_related_concept,
+                    board,
                     index_beta: input.index_beta,
                     concept_beta: input.concept_beta,
+                    board_beta: input.board_beta,
                     start_date: input.start_date.clone(),
                     end_date: input.end_date.clone(),
                 },
@@ -170,6 +178,7 @@ pub fn calc_scene_layer_metrics_from_db(
                     .map_err(|e| format!("并发打开source_db失败:{e}"))?;
 
                 let most_related_concept = concept_map.get(&ts_code).cloned().unwrap_or_default();
+                let board = board_map.get(&ts_code).cloned().unwrap_or_default();
                 let residual_points = calc_stock_residual_returns(
                     &conn,
                     source_dir,
@@ -178,8 +187,10 @@ pub fn calc_scene_layer_metrics_from_db(
                         stock_adj_type: input.stock_adj_type.clone(),
                         index_ts_code: input.index_ts_code.clone(),
                         concept: most_related_concept,
+                        board,
                         index_beta: input.index_beta,
                         concept_beta: input.concept_beta,
+                        board_beta: input.board_beta,
                         start_date: input.start_date.clone(),
                         end_date: input.end_date.clone(),
                     },
@@ -417,6 +428,31 @@ fn load_most_related_concept_map(source_dir: &str) -> Result<HashMap<String, Str
             .to_string();
 
         map.entry(ts_code.to_string()).or_insert(most_related);
+    }
+
+    Ok(map)
+}
+
+fn load_stock_board_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
+    let rows = load_stock_list(source_dir)?;
+    let mut map = HashMap::with_capacity(rows.len());
+
+    for row in rows {
+        let Some(ts_code) = row.first().map(|v| v.trim()) else {
+            continue;
+        };
+        if ts_code.is_empty() {
+            continue;
+        }
+
+        let board = row
+            .get(14)
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .unwrap_or("")
+            .to_string();
+
+        map.insert(ts_code.to_string(), board);
     }
 
     Ok(map)

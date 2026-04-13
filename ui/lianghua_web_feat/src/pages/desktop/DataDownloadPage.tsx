@@ -5,7 +5,7 @@ import {
   getIndicatorManagePage,
   listenDataDownloadProgress,
   runConceptMostRelatedRepair,
-  runConceptPerformanceRepair,
+
   runDataDownload,
   runMissingStockRepair,
   runThsConceptDownload,
@@ -789,21 +789,6 @@ export default function DataDownloadPage() {
     )
   }
 
-  async function onRunConceptPerformanceRepair() {
-    if (!sourcePath) {
-      setFeedbackSection('concept')
-      setError('当前数据目录为空，请先到数据管理页确认目录。')
-      return
-    }
-
-    await runDataTask('concept', (downloadId) =>
-      runConceptPerformanceRepair({
-        downloadId,
-        sourcePath,
-      }),
-    )
-  }
-
   async function onRunConceptMostRelatedRepair() {
     if (!sourcePath) {
       setFeedbackSection('concept')
@@ -1200,14 +1185,7 @@ export default function DataDownloadPage() {
             >
               {showConceptProgress ? '概念下载中...' : isBusy ? '任务执行中...' : '开始概念下载'}
             </button>
-            <button
-              className="data-download-secondary-btn"
-              type="button"
-              onClick={() => void onRunConceptPerformanceRepair()}
-              disabled={isBusy || !sourcePath}
-            >
-              {showConceptProgress ? '概念补全中...' : isBusy ? '任务执行中...' : '概念表现补全'}
-            </button>
+
             <button
               className="data-download-secondary-btn"
               type="button"

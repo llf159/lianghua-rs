@@ -324,6 +324,18 @@ export default function WatchObservePage() {
   }, [viewMode]);
 
   const topStatusText = useMemo(() => {
+    if (refreshingRealtime) {
+      return [
+        `当前共 ${rows.length} 条`,
+        "正在刷新实时行情，请稍候…",
+        resolvedReferenceTradeDate
+          ? `参考日 ${resolvedReferenceTradeDate}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" | ");
+    }
+
     if (viewMode === "realtime") {
       return [
         refreshedAt ? `最新刷新 ${refreshedAt}` : null,
@@ -347,6 +359,7 @@ export default function WatchObservePage() {
   }, [
     refreshedAt,
     refreshSummary,
+    refreshingRealtime,
     resolvedReferenceTradeDate,
     rows.length,
     viewMode,
@@ -494,12 +507,18 @@ export default function WatchObservePage() {
                 </label>
 
                 <button
-                  className="watch-observe-toolbar-btn watch-observe-toolbar-btn-primary"
+                  className={[
+                    "watch-observe-toolbar-btn",
+                    "watch-observe-toolbar-btn-primary",
+                    refreshingRealtime ? "is-loading" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
                   type="button"
                   disabled={refreshingRealtime || isDeleteMode}
                   onClick={() => void onRefreshRealtime()}
                 >
-                  {refreshingRealtime ? "刷新实时中..." : "刷新实时"}
+                  {refreshingRealtime ? "刷新实时中" : "刷新实时"}
                 </button>
 
                 {viewMode === "realtime" ? (
@@ -544,7 +563,16 @@ export default function WatchObservePage() {
               </div>
             </div>
 
-            <div className="watch-observe-table-wrap" ref={tableWrapRef}>
+            <div
+              className={[
+                "watch-observe-table-wrap",
+                refreshingRealtime ? "is-refreshing" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              ref={tableWrapRef}
+              aria-busy={refreshingRealtime}
+            >
               <table
                 className="watch-observe-table"
                 style={{ minWidth: isDeleteMode ? "1216px" : "1168px" }}
@@ -804,6 +832,12 @@ export default function WatchObservePage() {
                   })}
                 </tbody>
               </table>
+              {refreshingRealtime ? (
+                <div className="watch-observe-refresh-overlay" role="status">
+                  <span className="watch-observe-refresh-spinner" aria-hidden="true" />
+                  <span>正在刷新实时行情…</span>
+                </div>
+              ) : null}
             </div>
           </>
         )}
