@@ -10,6 +10,7 @@ import DetailsLink from "../../shared/DetailsLink";
 import { splitTsCode } from "../../shared/stockCode";
 import { useConceptExclusions } from "../../shared/conceptExclusions";
 import { readStoredSourcePath } from "../../shared/storage";
+import { STOCK_PICK_BOARD_OPTIONS } from "../../share/stockPickShared";
 import "./css/SceneLayerBacktestPage.css";
 
 function formatDateLabel(value?: string | null) {
@@ -60,11 +61,20 @@ function extractTsCodeFromRankName(value: string) {
   return matched?.[1] ?? null;
 }
 
+function isNonNull<T>(value: T | null): value is T {
+  return value !== null;
+}
+
+const MARKET_BOARD_FILTER_OPTIONS = STOCK_PICK_BOARD_OPTIONS.filter(
+  (item) => item !== "全部",
+);
+
 export default function MarketAnalysisPage() {
   const { excludedConcepts } = useConceptExclusions();
   const [sourcePath, setSourcePath] = useState(() => readStoredSourcePath());
   const [lookbackPeriod, setLookbackPeriod] = useState("20");
   const [referenceDateInput, setReferenceDateInput] = useState("");
+  const [selectedBoard, setSelectedBoard] = useState("");
   const [initializing, setInitializing] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -116,11 +126,13 @@ export default function MarketAnalysisPage() {
         sourcePath,
         lookbackPeriod: Math.max(1, Number(lookbackPeriod) || 1),
         referenceTradeDate: normalizedRefDate || undefined,
+        board: selectedBoard.trim() || undefined,
       });
       setResult(data);
       setContributionResult(null);
       setContributionError("");
       setReferenceDateInput(compactDateToInput(data.resolved_reference_trade_date));
+      setSelectedBoard(data.resolved_board ?? "");
     } catch (runError) {
       setResult(null);
       setError(`执行市场分析失败: ${String(runError)}`);
@@ -166,6 +178,52 @@ export default function MarketAnalysisPage() {
     }));
   }, [contributionResult, result?.resolved_reference_trade_date, sourcePath]);
 
+  const intervalGainNavigationItems = useMemo(() => {
+    if (!result) {
+      return [];
+    }
+    const tradeDate = result.resolved_reference_trade_date ?? undefined;
+    const sourcePathTrimmed = sourcePath.trim() || undefined;
+    return result.interval.gain_top
+      .map((item) => {
+        const tsCode = extractTsCodeFromRankName(item.name);
+        if (!tsCode) {
+          return null;
+        }
+        const displayName = item.name.replace(/\s*\(\d{6}\.[A-Z]{2}\)\s*$/, "");
+        return {
+          tsCode,
+          tradeDate,
+          sourcePath: sourcePathTrimmed,
+          name: displayName,
+        };
+      })
+      .filter(isNonNull);
+  }, [result, sourcePath]);
+
+  const dailyGainNavigationItems = useMemo(() => {
+    if (!result) {
+      return [];
+    }
+    const tradeDate = result.resolved_reference_trade_date ?? undefined;
+    const sourcePathTrimmed = sourcePath.trim() || undefined;
+    return result.daily.gain_top
+      .map((item) => {
+        const tsCode = extractTsCodeFromRankName(item.name);
+        if (!tsCode) {
+          return null;
+        }
+        const displayName = item.name.replace(/\s*\(\d{6}\.[A-Z]{2}\)\s*$/, "");
+        return {
+          tsCode,
+          tradeDate,
+          sourcePath: sourcePathTrimmed,
+          name: displayName,
+        };
+      })
+      .filter(isNonNull);
+  }, [result, sourcePath]);
+
   const excludedConceptSet = useMemo(
     () => new Set(excludedConcepts.map((value) => value.trim().toLocaleLowerCase())),
     [excludedConcepts],
@@ -188,8 +246,8 @@ export default function MarketAnalysisPage() {
   );
 
   return (
-    <div className="scene-layer-page">
-      <section className="scene-layer-card">
+    <div className="scene-layer-page market-analysis-page">
+      <section className="scene-layer-card market-analysis-filter-card">
         <h2 className="scene-layer-title">市场分析</h2>
         <p className="scene-layer-caption">
           根据回看周期和参考日，展示区间与当日的概念榜、行业榜（list.market 分类）、涨幅榜（参考日默认自动取最新交易日）。
@@ -217,6 +275,17 @@ export default function MarketAnalysisPage() {
               onChange={(event) => setReferenceDateInput(event.target.value)}
             />
           </label>
+          <label className="scene-layer-field">
+            <span>板块筛选（应用到个股榜）</span>
+            <select value={selectedBoard} onChange={(event) => setSelectedBoard(event.target.value)}>
+              <option value="">全部板块</option>
+              {MARKET_BOARD_FILTER_OPTIONS.map((board) => (
+                <option key={board} value={board}>
+                  {board}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
 
         <div className="scene-layer-actions">
@@ -234,7 +303,7 @@ export default function MarketAnalysisPage() {
       </section>
 
       {result ? (
-        <section className="scene-layer-card scene-layer-market-main-card">
+        <section className="scene-layer-card scene-layer-market-main-card market-analysis-main-card">
           <div className="scene-layer-market-wrap">
             <div className="scene-layer-summary-grid scene-layer-summary-grid-market">
               <div className="scene-layer-summary-item scene-layer-summary-item-kpi">
@@ -292,7 +361,7 @@ export default function MarketAnalysisPage() {
                           >
                             {item.name}
                           </button>
-                          <strong>{formatPercent(item.value)}</strong>
+                          <strong className={getPercentToneClass(item.value)}>{formatPercent(item.value)}</strong>
                         </li>
                       ))}
                     </ol>
@@ -301,7 +370,7 @@ export default function MarketAnalysisPage() {
               </section>
 
               <section className="scene-layer-market-panel">
-                <h3>当日主题榜单（{formatDateLabel(result.daily.trade_date)}）</h3>
+                <h3>当日主题榜单</h3>
                 <div className="scene-layer-market-lists scene-layer-market-lists-two">
                   <div className="scene-layer-market-list">
                     <h4>概念榜</h4>
@@ -374,6 +443,7 @@ export default function MarketAnalysisPage() {
                                   tradeDate={result.resolved_reference_trade_date ?? undefined}
                                   sourcePath={sourcePath.trim() || undefined}
                                   title={`查看 ${item.name} 详情`}
+                                  navigationItems={intervalGainNavigationItems}
                                 >
                                   {displayName}
                                 </DetailsLink>
@@ -418,6 +488,7 @@ export default function MarketAnalysisPage() {
                                   tradeDate={result.resolved_reference_trade_date ?? undefined}
                                   sourcePath={sourcePath.trim() || undefined}
                                   title={`查看 ${item.name} 详情`}
+                                  navigationItems={dailyGainNavigationItems}
                                 >
                                   {displayName}
                                 </DetailsLink>

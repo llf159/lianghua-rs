@@ -37,7 +37,6 @@ pub struct SceneDetails {
     pub scene_name: String,
     pub stage: Option<String>,
     pub stage_score: f64,
-    pub evidence_score: f64,
     pub risk_score: f64,
 }
 
@@ -224,7 +223,6 @@ impl SceneDetails {
             let scene_name = scene.name.clone();
             if trade_dates.len() != scene.triggered.len()
                 || trade_dates.len() != scene.stage_score.len()
-                || trade_dates.len() != scene.evidence_score.len()
                 || trade_dates.len() != scene.risk_score.len()
                 || trade_dates.len() != scene.stage.len()
             {
@@ -241,7 +239,6 @@ impl SceneDetails {
                     scene_name: scene_name.clone(),
                     stage: scene.stage[i].clone(),
                     stage_score: scene.stage_score[i],
-                    evidence_score: scene.evidence_score[i],
                     risk_score: scene.risk_score[i],
                 });
             }
@@ -296,7 +293,6 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
             scene_name VARCHAR,
             stage VARCHAR,
             stage_score DOUBLE,
-            evidence_score DOUBLE,
             risk_score DOUBLE,
             scene_rank INTEGER,
             PRIMARY KEY (ts_code, trade_date, scene_name)
@@ -370,7 +366,6 @@ fn append_scene_rows(app: &mut Appender<'_>, rows: &[SceneDetails]) -> Result<()
             &row.scene_name,
             &row.stage,
             row.stage_score,
-            row.evidence_score,
             row.risk_score,
             Option::<i64>::None
         ])

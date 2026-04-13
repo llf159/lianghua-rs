@@ -468,7 +468,6 @@ pub struct ScoreRule {
     pub scope_way: ScopeWay,
     pub when: String,
     pub points: f64,
-    pub scene_points: f64,
     pub dist_points: Option<Vec<DistPoint>>,
     pub explain: String,
     #[serde(default)]
@@ -542,10 +541,6 @@ impl ScoreConfig {
             if !r.points.is_finite() {
                 return Err(format!("第{n}条规则 score 非法"));
             }
-            if !r.scene_points.is_finite() {
-                return Err(format!("第{n}条规则 scene_points 非法"));
-            }
-
             let has_points = r.points.is_finite();
             let has_dist = matches!(r.dist_points.as_ref(), Some(v) if !v.is_empty());
             if !has_points && !has_dist {

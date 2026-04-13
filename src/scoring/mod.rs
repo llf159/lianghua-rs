@@ -38,7 +38,6 @@ pub struct SceneScoreSeries {
     pub name: String,
     pub stage: Vec<Option<String>>,
     pub stage_score: Vec<f64>,
-    pub evidence_score: Vec<f64>,
     pub risk_score: Vec<f64>,
     pub triggered: Vec<bool>,
 }
@@ -47,7 +46,6 @@ pub struct SceneScoreSeries {
 pub struct RuleSceneMeta {
     pub scene_name: String,
     pub stage: RuleStage,
-    pub scene_points: f64,
 }
 
 #[derive(Clone)]
@@ -257,7 +255,6 @@ pub fn build_scene_score_series(
                 name: scene.name.clone(),
                 stage: vec![None; len],
                 stage_score: vec![0.0; len],
-                evidence_score: vec![0.0; len],
                 risk_score: vec![0.0; len],
                 triggered: vec![false; len],
             }
@@ -281,25 +278,24 @@ pub fn build_scene_score_series(
             }
 
             scene_row.triggered[i] = true;
-            scene_row.evidence_score[i] += detail.series[i];
 
             match rule_meta.stage {
                 RuleStage::Base => {
-                    scene_row.stage_score[i] += rule_meta.scene_points;
+                    scene_row.stage_score[i] += detail.series[i];
                 }
                 RuleStage::Trigger => {
-                    scene_row.stage_score[i] += rule_meta.scene_points;
+                    scene_row.stage_score[i] += detail.series[i];
                     has_trigger_rule[scene_pos][i] = true;
                 }
                 RuleStage::Confirm => {
-                    scene_row.stage_score[i] += rule_meta.scene_points;
+                    scene_row.stage_score[i] += detail.series[i];
                     has_confirm_rule[scene_pos][i] = true;
                 }
                 RuleStage::Risk => {
-                    scene_row.risk_score[i] += rule_meta.scene_points;
+                    scene_row.risk_score[i] += detail.series[i];
                 }
                 RuleStage::Fail => {
-                    scene_row.risk_score[i] += rule_meta.scene_points;
+                    scene_row.risk_score[i] += detail.series[i];
                     has_fail_rule[scene_pos][i] = true;
                 }
             }

@@ -91,7 +91,6 @@ export type DetailSceneTriggerRow = {
   scene_name: string
   stage?: string | null
   stage_score?: number | null
-  evidence_score?: number | null
   risk_score?: number | null
   scene_rank?: number | null
   hit_date?: string

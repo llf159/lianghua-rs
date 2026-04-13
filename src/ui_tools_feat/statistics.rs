@@ -12,6 +12,7 @@ use crate::{
         SceneLayerConfig, SceneLayerFromDbInput, calc_scene_layer_metrics_from_db,
     },
     ui_tools_feat::{build_concepts_map, build_name_map},
+    utils::utils::board_category,
 };
 
 const TOP_RANK_THRESHOLD: i64 = 100;
@@ -142,6 +143,7 @@ pub struct SceneLayerBacktestData {
     pub start_date: String,
     pub end_date: String,
     pub min_samples_per_scene_day: usize,
+    pub backtest_period: usize,
     pub points: Vec<SceneLayerPointPayload>,
     pub spread_mean: Option<f64>,
     pub ic_mean: Option<f64>,
@@ -178,6 +180,8 @@ pub struct MarketAnalysisData {
     pub lookback_period: usize,
     pub latest_trade_date: Option<String>,
     pub resolved_reference_trade_date: Option<String>,
+    pub board_options: Vec<String>,
+    pub resolved_board: Option<String>,
     pub interval: MarketAnalysisSnapshot,
     pub daily: MarketAnalysisSnapshot,
 }
@@ -765,10 +769,80 @@ fn load_stock_name_map(source_path: &str) -> Result<HashMap<String, String>, Str
     Ok(out)
 }
 
+fn split_board_tags(board_raw: &str) -> Vec<String> {
+    board_raw
+        .split(|ch| matches!(ch, ',' | ';' | '，' | '；' | '|' | '、' | '/' | '\n' | '\r'))
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_string())
+        .collect()
+}
+
+fn build_board_maps(
+    source_path: &str,
+) -> Result<(Vec<String>, HashMap<String, Vec<String>>), String> {
+    let stock_rows = load_stock_list(source_path)?;
+    let mut ts_board_map: HashMap<String, Vec<String>> = HashMap::with_capacity(stock_rows.len());
+    let mut board_set: HashSet<String> = HashSet::new();
+
+    for cols in stock_rows {
+        let Some(ts_code_raw) = cols.first().map(|value| value.trim()) else {
+            continue;
+        };
+        let ts_code = ts_code_raw.to_ascii_uppercase();
+        let stock_name = cols.get(1).map(|value| value.trim()).filter(|value| !value.is_empty());
+
+        let mut board_list = Vec::new();
+        let category_board = board_category(&ts_code, stock_name).to_string();
+        board_set.insert(category_board.clone());
+        board_list.push(category_board);
+
+        if let Some(board_raw) = cols.get(4).map(|value| value.trim()) {
+            if !board_raw.is_empty() {
+                let detail_boards = split_board_tags(board_raw);
+                for board in detail_boards {
+                    if board_list.iter().any(|item| item == &board) {
+                        continue;
+                    }
+                    board_set.insert(board.clone());
+                    board_list.push(board);
+                }
+            }
+        }
+
+        ts_board_map.insert(ts_code, board_list);
+    }
+
+    let mut board_options = board_set.into_iter().collect::<Vec<_>>();
+    board_options.sort();
+
+    Ok((board_options, ts_board_map))
+}
+
+fn resolve_board_filter(requested: Option<String>, board_options: &[String]) -> Option<String> {
+    let requested = requested
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(board) = requested {
+        if board_options.iter().any(|item| item == &board) {
+            return Some(board);
+        }
+    }
+    None
+}
+
+fn match_board_filter(board_list: &[String], selected_board: Option<&str>) -> bool {
+    let Some(selected_board) = selected_board else {
+        return true;
+    };
+    board_list.iter().any(|board| board == selected_board)
+}
+
 pub fn get_market_analysis(
     source_path: String,
     lookback_period: Option<usize>,
     reference_trade_date: Option<String>,
+    board: Option<String>,
 ) -> Result<MarketAnalysisData, String> {
     let lookback_period = lookback_period.unwrap_or(20).max(1);
 
@@ -791,11 +865,16 @@ pub fn get_market_analysis(
         .filter(|value| !value.is_empty())
         .or_else(|| latest_trade_date.clone());
 
+    let (board_options, ts_board_map) = build_board_maps(&source_path)?;
+    let resolved_board = resolve_board_filter(board, &board_options);
+
     let Some(ref_date) = resolved_reference_trade_date.clone() else {
         return Ok(MarketAnalysisData {
             lookback_period,
             latest_trade_date,
             resolved_reference_trade_date: None,
+            board_options,
+            resolved_board,
             interval: MarketAnalysisSnapshot {
                 trade_date: None,
                 concept_top: Vec::new(),
@@ -844,6 +923,8 @@ pub fn get_market_analysis(
             lookback_period,
             latest_trade_date,
             resolved_reference_trade_date: Some(ref_date.clone()),
+            board_options,
+            resolved_board,
             interval: MarketAnalysisSnapshot {
                 trade_date: None,
                 concept_top: Vec::new(),
@@ -917,29 +998,6 @@ pub fn get_market_analysis(
         }
     }
 
-    let stock_rows = load_stock_list(&source_path)?;
-    let mut ts_board_map: HashMap<String, Vec<String>> = HashMap::with_capacity(stock_rows.len());
-    for cols in stock_rows {
-        let Some(ts_code) = cols.first().map(|value| value.trim()) else {
-            continue;
-        };
-        let Some(board_raw) = cols.get(4).map(|value| value.trim()) else {
-            continue;
-        };
-        if ts_code.is_empty() || board_raw.is_empty() {
-            continue;
-        }
-        let board_list = board_raw
-            .split(|ch| matches!(ch, ',' | ';' | '，' | '；' | '|' | '、' | '/' | '\n' | '\r'))
-            .map(|part| part.trim())
-            .filter(|part| !part.is_empty())
-            .map(|part| part.to_string())
-            .collect::<Vec<_>>();
-        if board_list.is_empty() {
-            continue;
-        }
-        ts_board_map.insert(ts_code.to_string(), board_list);
-    }
 
     let mut interval_board_stmt = source_conn
         .prepare(
@@ -966,6 +1024,7 @@ pub fn get_market_analysis(
         let Some(avg_pct) = avg_pct.filter(|v| v.is_finite()) else {
             continue;
         };
+        let ts_code = ts_code.to_ascii_uppercase();
         let Some(board_list) = ts_board_map.get(&ts_code) else {
             continue;
         };
@@ -1008,30 +1067,41 @@ pub fn get_market_analysis(
               AND trade_date <= ?
             GROUP BY 1
             ORDER BY avg_pct DESC NULLS LAST, ts_code ASC
-            LIMIT ?
             "#,
         )
         .map_err(|e| format!("预编译涨幅区间榜 SQL 失败: {e}"))?;
     let mut interval_gain_rows = interval_gain_stmt
-        .query(params![&interval_start, &interval_end, 20_i64])
+        .query(params![&interval_start, &interval_end])
         .map_err(|e| format!("执行涨幅区间榜 SQL 失败: {e}"))?;
     let mut interval_gain_top = Vec::new();
     while let Some(row) = interval_gain_rows
         .next()
         .map_err(|e| format!("读取涨幅区间榜失败: {e}"))?
     {
+        if interval_gain_top.len() >= 20 {
+            break;
+        }
         let ts_code: String = row.get(0).map_err(|e| format!("读取代码失败: {e}"))?;
         let value: Option<f64> = row.get(1).map_err(|e| format!("读取涨幅值失败: {e}"))?;
-        if let Some(value) = value.filter(|v| v.is_finite()) {
-            let name = stock_name_map
-                .get(&ts_code)
-                .cloned()
-                .unwrap_or(ts_code.clone());
-            interval_gain_top.push(MarketRankItem {
-                name: format!("{} ({})", name, ts_code),
-                value,
-            });
+        let Some(value) = value.filter(|v| v.is_finite()) else {
+            continue;
+        };
+        let ts_code = ts_code.to_ascii_uppercase();
+        let Some(board_list) = ts_board_map.get(&ts_code) else {
+            continue;
+        };
+        if !match_board_filter(board_list, resolved_board.as_deref()) {
+            continue;
         }
+
+        let name = stock_name_map
+            .get(&ts_code)
+            .cloned()
+            .unwrap_or(ts_code.clone());
+        interval_gain_top.push(MarketRankItem {
+            name: format!("{} ({})", name, ts_code),
+            value,
+        });
     }
 
     let daily_concept_sql = if has_performance_type {
@@ -1094,6 +1164,7 @@ pub fn get_market_analysis(
         let Some(pct) = pct.filter(|v| v.is_finite()) else {
             continue;
         };
+        let ts_code = ts_code.to_ascii_uppercase();
         let Some(board_list) = ts_board_map.get(&ts_code) else {
             continue;
         };
@@ -1132,36 +1203,49 @@ pub fn get_market_analysis(
             WHERE adj_type = 'qfq'
               AND trade_date = ?
             ORDER BY TRY_CAST(pct_chg AS DOUBLE) DESC NULLS LAST, ts_code ASC
-            LIMIT ?
             "#,
         )
         .map_err(|e| format!("预编译涨幅当日榜 SQL 失败: {e}"))?;
     let mut daily_gain_rows = daily_gain_stmt
-        .query(params![&ref_date, 20_i64])
+        .query(params![&ref_date])
         .map_err(|e| format!("执行涨幅当日榜 SQL 失败: {e}"))?;
     let mut daily_gain_top = Vec::new();
     while let Some(row) = daily_gain_rows
         .next()
         .map_err(|e| format!("读取涨幅当日榜失败: {e}"))?
     {
+        if daily_gain_top.len() >= 20 {
+            break;
+        }
         let ts_code: String = row.get(0).map_err(|e| format!("读取代码失败: {e}"))?;
         let value: Option<f64> = row.get(1).map_err(|e| format!("读取涨幅值失败: {e}"))?;
-        if let Some(value) = value.filter(|v| v.is_finite()) {
-            let name = stock_name_map
-                .get(&ts_code)
-                .cloned()
-                .unwrap_or(ts_code.clone());
-            daily_gain_top.push(MarketRankItem {
-                name: format!("{} ({})", name, ts_code),
-                value,
-            });
+        let Some(value) = value.filter(|v| v.is_finite()) else {
+            continue;
+        };
+        let ts_code = ts_code.to_ascii_uppercase();
+        let Some(board_list) = ts_board_map.get(&ts_code) else {
+            continue;
+        };
+        if !match_board_filter(board_list, resolved_board.as_deref()) {
+            continue;
         }
+
+        let name = stock_name_map
+            .get(&ts_code)
+            .cloned()
+            .unwrap_or(ts_code.clone());
+        daily_gain_top.push(MarketRankItem {
+            name: format!("{} ({})", name, ts_code),
+            value,
+        });
     }
 
     Ok(MarketAnalysisData {
         lookback_period,
         latest_trade_date,
         resolved_reference_trade_date: Some(ref_date.clone()),
+        board_options,
+        resolved_board,
         interval: MarketAnalysisSnapshot {
             trade_date: Some(format!("{}~{}", interval_start, interval_end)),
             concept_top: interval_concept_top,
@@ -1498,6 +1582,7 @@ pub fn run_scene_layer_backtest(
     start_date: String,
     end_date: String,
     min_samples_per_scene_day: Option<usize>,
+    backtest_period: Option<usize>,
 ) -> Result<SceneLayerBacktestData, String> {
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
@@ -1518,6 +1603,7 @@ pub fn run_scene_layer_backtest(
     let start_date = start_date.trim().to_string();
     let end_date = end_date.trim().to_string();
     let min_samples_per_scene_day = min_samples_per_scene_day.unwrap_or(5);
+    let backtest_period = backtest_period.unwrap_or(1);
 
     let is_all_scenes = scene_name == "__ALL__";
 
@@ -1537,6 +1623,7 @@ pub fn run_scene_layer_backtest(
                 end_date: end_date.clone(),
                 layer_config: SceneLayerConfig {
                     min_samples_per_day: min_samples_per_scene_day,
+                    backtest_period,
                 },
             };
 
@@ -1570,6 +1657,7 @@ pub fn run_scene_layer_backtest(
             start_date,
             end_date,
             min_samples_per_scene_day,
+            backtest_period,
             points: Vec::new(),
             spread_mean: None,
             ic_mean: None,
@@ -1591,6 +1679,7 @@ pub fn run_scene_layer_backtest(
         end_date,
         layer_config: SceneLayerConfig {
             min_samples_per_day: min_samples_per_scene_day,
+            backtest_period,
         },
     };
 
@@ -1606,6 +1695,7 @@ pub fn run_scene_layer_backtest(
         start_date: input.start_date,
         end_date: input.end_date,
         min_samples_per_scene_day: input.layer_config.min_samples_per_day,
+        backtest_period: input.layer_config.backtest_period,
         points: metrics
             .points
             .into_iter()

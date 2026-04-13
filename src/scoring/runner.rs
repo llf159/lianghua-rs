@@ -124,7 +124,6 @@ pub fn scoring_all_to_db(
         .map(|rule| RuleSceneMeta {
             scene_name: rule.scene_name,
             stage: rule.stage,
-            scene_points: rule.scene_points,
         })
         .collect();
     let scenes = ScoreScene::load_scenes(source_dir)?;
@@ -200,7 +199,6 @@ pub fn scoring_single_period(
         .map(|rule| RuleSceneMeta {
             scene_name: rule.scene_name,
             stage: rule.stage,
-            scene_points: rule.scene_points,
         })
         .collect();
     let scenes = ScoreScene::load_scenes(source_dir)?;

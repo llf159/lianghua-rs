@@ -11,12 +11,14 @@ const EPS: f64 = 1e-12;
 #[derive(Debug, Clone)]
 pub struct SceneLayerConfig {
     pub min_samples_per_day: usize,
+    pub backtest_period: usize,
 }
 
 impl Default for SceneLayerConfig {
     fn default() -> Self {
         Self {
             min_samples_per_day: 5,
+            backtest_period: 1,
         }
     }
 }
@@ -25,6 +27,9 @@ impl SceneLayerConfig {
     fn validate(&self) -> Result<(), String> {
         if self.min_samples_per_day == 0 {
             return Err("每日最少样本数必须>=1".to_string());
+        }
+        if self.backtest_period == 0 {
+            return Err("回测周期必须>=1".to_string());
         }
         Ok(())
     }
@@ -155,10 +160,10 @@ pub fn calc_scene_layer_metrics_from_db(
                 },
             )?;
 
-            let residual_map: HashMap<String, f64> = residual_points
-                .into_iter()
-                .map(|point| (point.trade_date, point.residual_pct))
-                .collect();
+            let residual_map = build_forward_backtest_residual_map(
+                residual_points,
+                input.layer_config.backtest_period,
+            );
 
             for row in rows {
                 if let Some(residual_return) = residual_map.get(&row.trade_date).copied() {
@@ -196,10 +201,10 @@ pub fn calc_scene_layer_metrics_from_db(
                     },
                 )?;
 
-                let residual_map: HashMap<String, f64> = residual_points
-                    .into_iter()
-                    .map(|point| (point.trade_date, point.residual_pct))
-                    .collect();
+                let residual_map = build_forward_backtest_residual_map(
+                    residual_points,
+                    input.layer_config.backtest_period,
+                );
 
                 let mut one_ts_samples = Vec::new();
                 for row in rows {
@@ -330,6 +335,42 @@ fn empty_metrics() -> SceneLayerMetrics {
         ic_std: None,
         icir: None,
     }
+}
+
+fn build_forward_backtest_residual_map(
+    mut residual_points: Vec<super::ResidualReturnPoint>,
+    backtest_period: usize,
+) -> HashMap<String, f64> {
+    if backtest_period == 0 || residual_points.len() < backtest_period + 1 {
+        return HashMap::new();
+    }
+
+    residual_points.sort_by(|a, b| a.trade_date.cmp(&b.trade_date));
+
+    let mut out = HashMap::new();
+    for i in 0..residual_points.len() {
+        let end = i + backtest_period;
+        if end >= residual_points.len() {
+            break;
+        }
+
+        let mut sum = 0.0_f64;
+        let mut valid = true;
+        for j in (i + 1)..=end {
+            let v = residual_points[j].residual_pct;
+            if !v.is_finite() {
+                valid = false;
+                break;
+            }
+            sum += v;
+        }
+
+        if valid {
+            out.insert(residual_points[i].trade_date.clone(), sum);
+        }
+    }
+
+    out
 }
 
 fn normalize_state(state: &str) -> String {

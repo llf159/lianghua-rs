@@ -77,6 +77,7 @@ export default function SceneLayerBacktestPage() {
   const [startDateInput, setStartDateInput] = useState("");
   const [endDateInput, setEndDateInput] = useState("");
   const [minSamplesPerSceneDay, setMinSamplesPerSceneDay] = useState("5");
+  const [backtestPeriod, setBacktestPeriod] = useState("1");
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(false);
   const [error, setError] = useState("");
@@ -204,6 +205,7 @@ export default function SceneLayerBacktestPage() {
         startDate: normalizedStart,
         endDate: normalizedEnd,
         minSamplesPerSceneDay: Math.max(1, Number(minSamplesPerSceneDay) || 1),
+        backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
       });
       setResult(data);
     } catch (runError) {
@@ -281,6 +283,10 @@ export default function SceneLayerBacktestPage() {
             <span>场景日最少样本</span>
             <input type="number" min="1" value={minSamplesPerSceneDay} onChange={(event) => setMinSamplesPerSceneDay(event.target.value)} />
           </label>
+          <label className="scene-layer-field">
+            <span>回测周期（天）</span>
+            <input type="number" min="1" value={backtestPeriod} onChange={(event) => setBacktestPeriod(event.target.value)} />
+          </label>
         </div>
 
         <div className="scene-layer-actions">
@@ -311,6 +317,10 @@ export default function SceneLayerBacktestPage() {
             <div className="scene-layer-summary-item">
               <span>最小样本阈值</span>
               <strong>{result.min_samples_per_scene_day}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>回测周期（天）</span>
+              <strong>{result.backtest_period}</strong>
             </div>
             {!isAllScenesResult ? (
               <>

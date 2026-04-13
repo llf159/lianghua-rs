@@ -78,6 +78,15 @@
   cursor: not-allowed;
 }
 
+.overview-overview-tab {
+  text-decoration: none;
+}
+
+.overview-overview-tab-active {
+  text-decoration: none;
+  box-shadow: 0 0 0 2px rgba(251, 146, 60, 0.2);
+}
+
 .overview-error {
   margin-top: 10px;
   color: #b00020;
@@ -414,6 +423,16 @@
   outline: 2px solid var(--theme-orange-300);
   outline-offset: 2px;
   border-radius: 2px;
+}
+
+.overview-cell-positive {
+  color: #dc2626;
+  font-weight: 600;
+}
+
+.overview-cell-negative {
+  color: #16a34a;
+  font-weight: 600;
 }
 
 @media (max-width: 1200px) {

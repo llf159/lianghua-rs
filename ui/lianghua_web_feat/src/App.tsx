@@ -13,6 +13,8 @@ import DataViewerPage from './pages/desktop/DataViewerPage'
 import DetailsLinkedPage from './pages/desktop/DetailsLinkedPage'
 import DetailsPage from './pages/desktop/DetailsPage'
 import OverviewScenePage from './pages/desktop/OverviewScenePage'
+import OverviewRawPage from './pages/desktop/OverviewRawPage'
+import RankingOverviewPage from './pages/desktop/RankingOverviewPage'
 import RankingComputePage from './pages/desktop/RankingComputePage'
 import SettingsPage from './pages/desktop/SettingsPage'
 import StockPickPage from './pages/desktop/StockPickPage'
@@ -47,7 +49,11 @@ function AppRoutes() {
         <Route path="/" element={<PageDesktop />}>
           <Route index element={<Navigate to="/watch-observe" replace />} />
           <Route path="watch-observe" element={<WatchObservePage />} />
-          <Route path="overview" element={<OverviewScenePage />} />
+          <Route path="overview" element={<RankingOverviewPage />}>
+            <Route index element={<Navigate to="/overview/raw" replace />} />
+            <Route path="raw" element={<OverviewRawPage />} />
+            <Route path="scene" element={<OverviewScenePage />} />
+          </Route>
           <Route path="details" element={<DetailsPage />} />
           <Route path="details-linked" element={<DetailsLinkedPage />} />
           <Route path="data-import" element={<Navigate to="/raw-data/data-import" replace />} />

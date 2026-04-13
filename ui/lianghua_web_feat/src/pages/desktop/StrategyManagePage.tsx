@@ -75,7 +75,6 @@ function buildEmptyDraft(sceneName = ''): StrategyManageRuleDraft {
     scope_windows: 1,
     when: '',
     points: 0,
-    scene_points: 1,
     dist_points: null,
     explain: '',
   }
@@ -112,7 +111,6 @@ function buildDraftFromRule(rule: StrategyManageRuleItem): StrategyManageRuleDra
     scope_windows: rule.scope_windows,
     when: rule.when,
     points: rule.points,
-    scene_points: rule.scene_points,
     dist_points: rule.dist_points ?? null,
     explain: rule.explain,
   }
@@ -254,7 +252,6 @@ export default function StrategyManagePage() {
   const [scoreMode, setScoreMode] = useState<'fixed' | 'dist'>('fixed')
   const [scopeWindowsText, setScopeWindowsText] = useState('1')
   const [fixedPointsText, setFixedPointsText] = useState('0')
-  const [scenePointsText, setScenePointsText] = useState('1')
   const [distPointsText, setDistPointsText] = useState('')
   const [observeThresholdText, setObserveThresholdText] = useState('1')
   const [triggerThresholdText, setTriggerThresholdText] = useState('2')
@@ -427,7 +424,6 @@ export default function StrategyManagePage() {
     setScoreMode('fixed')
     setScopeWindowsText(String(nextDraft.scope_windows))
     setFixedPointsText('0')
-    setScenePointsText(String(nextDraft.scene_points))
     setDistPointsText('')
     setEditorError('')
     setCheckNotice('')
@@ -568,7 +564,6 @@ export default function StrategyManagePage() {
       setFixedPointsText(String(rule.points))
       setDistPointsText('')
     }
-    setScenePointsText(String(nextDraft.scene_points))
     setEditorError('')
     setCheckNotice('')
     setError('')
@@ -590,7 +585,6 @@ export default function StrategyManagePage() {
         {
           ...draft,
           scope_windows: parseRequiredInteger(scopeWindowsText, '窗口', 1),
-          scene_points: parseRequiredNumber(scenePointsText, 'Scene 分'),
         },
         scoreMode,
         fixedPointsText,
@@ -641,7 +635,6 @@ export default function StrategyManagePage() {
         {
           ...draft,
           scope_windows: parseRequiredInteger(scopeWindowsText, '窗口', 1),
-          scene_points: parseRequiredNumber(scenePointsText, 'Scene 分'),
         },
         scoreMode,
         fixedPointsText,
@@ -1060,10 +1053,6 @@ export default function StrategyManagePage() {
                           <strong>{hasDistPoints(rule.dist_points) ? '区间字典' : formatNumber(rule.points)}</strong>
                         </div>
                         <div className="strategy-manage-summary-item">
-                          <span>Scene 分</span>
-                          <strong>{formatNumber(rule.scene_points)}</strong>
-                        </div>
-                        <div className="strategy-manage-summary-item">
                           <span>Stage</span>
                           <strong>{rule.stage}</strong>
                         </div>
@@ -1178,15 +1167,6 @@ export default function StrategyManagePage() {
                   <textarea rows={6} value={distPointsText} onChange={(event) => setDistPointsText(event.target.value)} />
                 </label>
               )}
-              <label className="strategy-manage-field strategy-manage-field-span-full">
-                <span>Scene 分</span>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={scenePointsText}
-                  onChange={(event) => setScenePointsText(event.target.value)}
-                />
-              </label>
             </div>
             <div className="strategy-manage-editor-actions">
               <button

@@ -57,7 +57,6 @@ pub struct StrategyManageRuleItem {
     pub scope_way: String,
     pub scope_windows: usize,
     pub points: f64,
-    pub scene_points: f64,
     pub explain: String,
     pub when: String,
     pub dist_points: Option<Vec<StrategyManageDistPoint>>,
@@ -72,8 +71,6 @@ pub struct StrategyManageRuleDraft {
     pub scope_windows: usize,
     pub when: String,
     pub points: f64,
-    #[serde(alias = "weight")]
-    pub scene_points: f64,
     pub dist_points: Option<Vec<StrategyManageDistPoint>>,
     pub explain: String,
 }
@@ -117,8 +114,6 @@ struct StrategyRuleFileRule {
     scope_way: String,
     when: String,
     points: f64,
-    #[serde(alias = "weight")]
-    scene_points: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     dist_points: Option<Vec<StrategyManageDistPoint>>,
     explain: String,
@@ -137,7 +132,11 @@ fn load_rule_file(source_path: &str) -> Result<StrategyRuleFile, String> {
     let path = score_rule_path(source_path);
     let text = fs::read_to_string(&path)
         .map_err(|e| format!("读取策略规则文件失败: path={}, err={e}", path.display()))?;
-    toml::from_str(&text).map_err(|e| format!("解析策略规则文件失败: {e}"))
+    parse_rule_file_text(&text).map_err(|e| format!("解析策略规则文件失败: {e}"))
+}
+
+fn parse_rule_file_text(text: &str) -> Result<StrategyRuleFile, toml::de::Error> {
+    toml::from_str(text)
 }
 
 fn rule_file_output_path(source_path: &str, file_name: &str) -> Result<PathBuf, String> {
@@ -345,9 +344,6 @@ fn validate_rule_definition(
     if !rule.points.is_finite() {
         return Err(format!("策略 {} 的 points 非法", rule.name));
     }
-    if !rule.scene_points.is_finite() {
-        return Err(format!("策略 {} 的 scene_points 非法", rule.name));
-    }
     if let Some(dist_points) = &rule.dist_points {
         for (index, item) in dist_points.iter().enumerate() {
             if item.min > item.max {
@@ -444,7 +440,6 @@ fn draft_to_rule(draft: StrategyManageRuleDraft) -> Result<StrategyRuleFileRule,
         scope_way: normalize_scope_way(&draft.scope_way)?,
         when: draft.when.trim().to_string(),
         points: draft.points,
-        scene_points: draft.scene_points,
         dist_points: map_dist_points(draft.dist_points),
         explain: draft.explain.trim().to_string(),
     })
@@ -495,7 +490,6 @@ fn build_page_data(config: &StrategyRuleFile) -> StrategyManagePageData {
             scope_way: rule.scope_way.clone(),
             scope_windows: rule.scope_windows,
             points: rule.points,
-            scene_points: rule.scene_points,
             explain: rule.explain.clone(),
             when: rule.when.clone(),
             dist_points: rule.dist_points.clone(),
@@ -734,4 +728,69 @@ pub fn save_strategy_manage_refactor_file(
     })?;
 
     Ok(output_path.display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_rule_file_text;
+
+    #[test]
+    fn parse_strategy_rule_file_in_current_format() {
+        let text = r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+evidence_score = 1.0
+
+[[rule]]
+name = "启动测试"
+scene = "趋势启动"
+stage = "base"
+scope_windows = 1
+scope_way = "LAST"
+when = "C > O"
+points = 2.0
+explain = "test"
+"#;
+
+        let file = parse_rule_file_text(text).expect("new-format file should parse");
+        assert_eq!(file.scene.len(), 1);
+        assert_eq!(file.rule.len(), 1);
+        assert_eq!(file.rule[0].name, "启动测试");
+    }
+
+    #[test]
+    fn parse_strategy_rule_file_with_legacy_weight() {
+        let text = r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+evidence_score = 1.0
+
+[[rule]]
+name = "启动测试"
+scene = "趋势启动"
+stage = "base"
+scope_windows = 1
+scope_way = "LAST"
+when = "C > O"
+weight = 1.5
+points = 2.0
+explain = "test"
+"#;
+
+        let file = parse_rule_file_text(text).expect("legacy-weight file should parse");
+        assert_eq!(file.rule.len(), 1);
+        assert_eq!(file.rule[0].name, "启动测试");
+    }
 }

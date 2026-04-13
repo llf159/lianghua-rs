@@ -127,6 +127,7 @@ export type SceneLayerBacktestData = {
   start_date: string
   end_date: string
   min_samples_per_scene_day: number
+  backtest_period: number
   points: SceneLayerPoint[]
   spread_mean?: number | null
   ic_mean?: number | null
@@ -159,6 +160,8 @@ export type MarketAnalysisData = {
   lookback_period: number
   latest_trade_date?: string | null
   resolved_reference_trade_date?: string | null
+  board_options: string[]
+  resolved_board?: string | null
   interval: MarketAnalysisSnapshot
   daily: MarketAnalysisSnapshot
 }
@@ -192,6 +195,7 @@ export type SceneLayerBacktestQuery = {
   startDate: string
   endDate: string
   minSamplesPerSceneDay?: number
+  backtestPeriod?: number
 }
 
 export async function getSceneLayerBacktestDefaults(sourcePath: string) {
@@ -206,6 +210,7 @@ export async function getMarketAnalysis(query: {
   sourcePath: string
   lookbackPeriod?: number
   referenceTradeDate?: string
+  board?: string
 }) {
   return invoke<MarketAnalysisData>('get_market_analysis', query)
 }

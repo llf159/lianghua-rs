@@ -102,7 +102,7 @@ const LINE_COLORS = ["#0057ff", "#e13a1f", "#6a00f4", "#00843d"];
 const CANDLE_BASE_SERIES_KEYS = new Set(["open", "high", "low", "close"]);
 type DetailStrategySortKey = "rule_score" | "hit_date" | "lag";
 type PrevRankSortKey = "trade_date" | "rank";
-type SceneSortKey = "scene_name" | "stage_score" | "evidence_score" | "risk_score" | "hit_date" | "lag";
+type SceneSortKey = "scene_name" | "stage_score" | "risk_score" | "hit_date" | "lag";
 const EMPTY_PREV_RANK_ROWS: DetailPrevRankRow[] = [];
 const EMPTY_KLINE_ROWS: DetailKlineRow[] = [];
 const EMPTY_STRATEGY_ROWS: DetailStrategyTriggerRow[] = [];
@@ -2069,7 +2069,6 @@ function SceneTableSection({
       ({
         scene_name: { value: (row: DetailSceneTriggerRow) => row.scene_name },
         stage_score: { value: (row: DetailSceneTriggerRow) => row.stage_score },
-        evidence_score: { value: (row: DetailSceneTriggerRow) => row.evidence_score },
         risk_score: { value: (row: DetailSceneTriggerRow) => row.risk_score },
         hit_date: { value: (row: DetailSceneTriggerRow) => row.hit_date },
         lag: { value: (row: DetailSceneTriggerRow) => row.lag },
@@ -2091,7 +2090,6 @@ function SceneTableSection({
         <colgroup>
           <col className="details-col-scene-name" />
           <col className="details-col-scene-stage" />
-          <col className="details-col-scene-score" />
           <col className="details-col-scene-score" />
           <col className="details-col-scene-score" />
           <col className="details-col-date" />
@@ -2116,15 +2114,6 @@ function SceneTableSection({
                 direction={sortDirection}
                 onClick={() => toggleSort("stage_score")}
                 title="按阶段分排序"
-              />
-            </th>
-            <th aria-sort={getAriaSort(sortKey === "evidence_score", sortDirection)}>
-              <TableSortButton
-                label="证据分"
-                isActive={sortKey === "evidence_score"}
-                direction={sortDirection}
-                onClick={() => toggleSort("evidence_score")}
-                title="按证据分排序"
               />
             </th>
             <th aria-sort={getAriaSort(sortKey === "risk_score", sortDirection)}>
@@ -2185,7 +2174,6 @@ function SceneTableSection({
                   </span>
                 </td>
                 <td>{formatFieldValue(row.stage_score)}</td>
-                <td>{formatFieldValue(row.evidence_score)}</td>
                 <td>{formatFieldValue(row.risk_score)}</td>
                 <td>{formatFieldValue(row.hit_date)}</td>
                 <td>{formatFieldValue(row.lag)}</td>
@@ -4303,7 +4291,6 @@ export default function DetailsPage({
                 <div className="details-strategy-params">
                   <span>状态：{toSceneStageLabel(sceneDetailTarget?.stage)}</span>
                   <span>阶段分：{formatFieldValue(sceneDetailTarget?.stage_score)}</span>
-                  <span>证据分：{formatFieldValue(sceneDetailTarget?.evidence_score)}</span>
                   <span>风险分：{formatFieldValue(sceneDetailTarget?.risk_score)}</span>
                 </div>
                 <div className="details-strategy-nav">

@@ -34,7 +34,6 @@ export type StrategyManageRuleItem = {
   scope_way: string
   scope_windows: number
   points: number
-  scene_points: number
   explain: string
   when: string
   dist_points?: StrategyManageDistPoint[] | null
@@ -48,7 +47,6 @@ export type StrategyManageRuleDraft = {
   scope_windows: number
   when: string
   points: number
-  scene_points: number
   dist_points?: StrategyManageDistPoint[] | null
   explain: string
 }

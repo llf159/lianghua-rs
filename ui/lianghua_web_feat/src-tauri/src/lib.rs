@@ -456,9 +456,10 @@ async fn get_market_analysis(
     source_path: String,
     lookback_period: Option<usize>,
     reference_trade_date: Option<String>,
+    board: Option<String>,
 ) -> Result<MarketAnalysisData, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        core_get_market_analysis(source_path, lookback_period, reference_trade_date)
+        core_get_market_analysis(source_path, lookback_period, reference_trade_date, board)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -499,6 +500,7 @@ async fn run_scene_layer_backtest(
     start_date: String,
     end_date: String,
     min_samples_per_scene_day: Option<usize>,
+    backtest_period: Option<usize>,
 ) -> Result<SceneLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_run_scene_layer_backtest(
@@ -512,6 +514,7 @@ async fn run_scene_layer_backtest(
             start_date,
             end_date,
             min_samples_per_scene_day,
+            backtest_period,
         )
     })
     .await
