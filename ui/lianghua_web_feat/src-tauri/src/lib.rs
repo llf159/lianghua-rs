@@ -57,14 +57,18 @@ use lianghua_rs::ui_tools_feat::{
         update_strategy_manage_rule as core_update_strategy_manage_rule,
     },
     statistics::{
-        MarketAnalysisData, MarketContributionData, SceneLayerBacktestData,
-        SceneLayerBacktestDefaultsData, StrategyStatisticsDetailData, StrategyStatisticsPageData,
+        MarketAnalysisData, MarketContributionData, RuleLayerBacktestData,
+        RuleLayerBacktestDefaultsData, SceneLayerBacktestData, SceneLayerBacktestDefaultsData,
+        SceneStatisticsPageData, StrategyStatisticsDetailData, StrategyStatisticsPageData,
         TriggeredStockRow, get_market_analysis as core_get_market_analysis,
         get_market_contribution as core_get_market_contribution,
+        get_rule_layer_backtest_defaults as core_get_rule_layer_backtest_defaults,
         get_scene_layer_backtest_defaults as core_get_scene_layer_backtest_defaults,
+        get_scene_statistics_page as core_get_scene_statistics_page,
         get_strategy_statistics_detail as core_get_strategy_statistics_detail,
         get_strategy_statistics_page as core_get_strategy_statistics_page,
         get_strategy_triggered_stocks as core_get_strategy_triggered_stocks,
+        run_rule_layer_backtest as core_run_rule_layer_backtest,
         run_scene_layer_backtest as core_run_scene_layer_backtest,
     },
     watch_observe::{
@@ -419,6 +423,19 @@ async fn get_strategy_statistics_page(
 }
 
 #[tauri::command]
+async fn get_scene_statistics_page(
+    source_path: String,
+    scene_name: Option<String>,
+    analysis_trade_date: Option<String>,
+) -> Result<SceneStatisticsPageData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_scene_statistics_page(source_path, scene_name, analysis_trade_date)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn get_strategy_statistics_detail(
     source_path: String,
     strategy_name: String,
@@ -449,6 +466,13 @@ fn get_scene_layer_backtest_defaults(
     source_path: String,
 ) -> Result<SceneLayerBacktestDefaultsData, String> {
     core_get_scene_layer_backtest_defaults(source_path)
+}
+
+#[tauri::command]
+fn get_rule_layer_backtest_defaults(
+    source_path: String,
+) -> Result<RuleLayerBacktestDefaultsData, String> {
+    core_get_rule_layer_backtest_defaults(source_path)
 }
 
 #[tauri::command]
@@ -491,12 +515,11 @@ async fn get_market_contribution(
 #[tauri::command]
 async fn run_scene_layer_backtest(
     source_path: String,
-    scene_name: String,
     stock_adj_type: Option<String>,
     index_ts_code: String,
     index_beta: Option<f64>,
     concept_beta: Option<f64>,
-    board_beta: Option<f64>,
+    industry_beta: Option<f64>,
     start_date: String,
     end_date: String,
     min_samples_per_scene_day: Option<usize>,
@@ -505,15 +528,45 @@ async fn run_scene_layer_backtest(
     tauri::async_runtime::spawn_blocking(move || {
         core_run_scene_layer_backtest(
             source_path,
-            scene_name,
             stock_adj_type,
             index_ts_code,
             index_beta,
             concept_beta,
-            board_beta,
+            industry_beta,
             start_date,
             end_date,
             min_samples_per_scene_day,
+            backtest_period,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn run_rule_layer_backtest(
+    source_path: String,
+    stock_adj_type: Option<String>,
+    index_ts_code: String,
+    index_beta: Option<f64>,
+    concept_beta: Option<f64>,
+    industry_beta: Option<f64>,
+    start_date: String,
+    end_date: String,
+    min_samples_per_rule_day: Option<usize>,
+    backtest_period: Option<usize>,
+) -> Result<RuleLayerBacktestData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_run_rule_layer_backtest(
+            source_path,
+            stock_adj_type,
+            index_ts_code,
+            index_beta,
+            concept_beta,
+            industry_beta,
+            start_date,
+            end_date,
+            min_samples_per_rule_day,
             backtest_period,
         )
     })
@@ -844,12 +897,15 @@ pub fn run() {
             get_stock_detail_strategy_snapshot,
             get_stock_detail_realtime,
             get_strategy_statistics_page,
+            get_scene_statistics_page,
             get_strategy_statistics_detail,
             get_strategy_triggered_stocks,
             get_scene_layer_backtest_defaults,
+            get_rule_layer_backtest_defaults,
             get_market_analysis,
             get_market_contribution,
             run_scene_layer_backtest,
+            run_rule_layer_backtest,
             get_ranking_compute_status,
             run_ranking_score_calculation,
             run_concept_performance_compute,

@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use duckdb::{Connection, params_from_iter};
 
-use crate::data::{load_stock_list, load_ths_concepts_list, source_db_path};
+use crate::data::{
+    load_stock_list, load_ths_concepts_list, load_ths_concepts_named_map, source_db_path,
+};
 
 pub mod concept_stock_pick;
 pub mod data_download;
@@ -170,6 +172,10 @@ pub fn build_concepts_map(source_dir: &str) -> Result<HashMap<String, String>, S
         out.insert(ts_code.to_string(), concept.to_string());
     }
     Ok(out)
+}
+
+pub fn build_most_related_concept_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
+    load_ths_concepts_named_map(source_dir, &["most_related_concept"])
 }
 
 pub fn build_name_map(source_dir: &str) -> Result<HashMap<String, String>, String> {

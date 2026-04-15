@@ -75,6 +75,7 @@ const DEFAULT_TOP_LIMIT = "100";
 const DEFAULT_CHART_HEIGHT = 880;
 const DEFAULT_VISIBLE_BARS = 90;
 const MIN_VISIBLE_BARS = 20;
+const CHART_MIN_RIGHT_ALIGNED_SLOTS = 60;
 const DEFAULT_ROW_WEIGHTS = [52, 16, 16, 16];
 const CHART_VIEWBOX_WIDTH = 1120;
 const CHART_VIEWBOX_HEIGHT = 240;
@@ -102,7 +103,15 @@ const LINE_COLORS = ["#0057ff", "#e13a1f", "#6a00f4", "#00843d"];
 const CANDLE_BASE_SERIES_KEYS = new Set(["open", "high", "low", "close"]);
 type DetailStrategySortKey = "rule_score" | "hit_date" | "lag";
 type PrevRankSortKey = "trade_date" | "rank";
-type SceneSortKey = "scene_name" | "stage_score" | "risk_score" | "hit_date" | "lag";
+type SceneOverviewSortKey =
+  | "scene_name"
+  | "scene_rank"
+  | "stage_score"
+  | "risk_score"
+  | "hit_date"
+  | "lag"
+  | "scene_rule_score"
+  | "contribution_pct";
 const EMPTY_PREV_RANK_ROWS: DetailPrevRankRow[] = [];
 const EMPTY_KLINE_ROWS: DetailKlineRow[] = [];
 const EMPTY_STRATEGY_ROWS: DetailStrategyTriggerRow[] = [];
@@ -406,7 +415,10 @@ function buildOverviewRows(
     { label: "排名", value: buildRankValue(overview?.rank, overview?.total) },
     { label: "总分", value: formatFieldValue(overview?.total_score) },
     { label: "总市值(亿)", value: formatFieldValue(overview?.total_mv_yi) },
-    { label: "流通市值(亿)", value: formatFieldValue(overview?.circ_mv_yi) },
+    {
+      label: "最相似概念",
+      value: formatFieldValue(overview?.most_related_concept),
+    },
   ];
 }
 
@@ -521,6 +533,10 @@ function buildRankLookup(
   return lookup;
 }
 
+function buildSceneRowKey(row: DetailSceneTriggerRow) {
+  return `${row.scene_name}-${row.hit_date ?? "none"}`;
+}
+
 function toSceneStageLabel(value: string | null | undefined) {
   const normalized = value?.trim().toLowerCase() ?? "";
   if (normalized === "observe") {
@@ -600,11 +616,15 @@ type SceneOverviewItem = {
   sceneName: string;
   stage: string | null | undefined;
   stageScore: number | null;
+  riskScore: number | null;
   sceneRank: number | null;
+  hitDate: string;
+  lag: number | null;
   sceneRuleScore: number | null;
   contributionPct: number | null;
   contributionPctDisplay: number | null;
   color: string;
+  sceneRow: DetailSceneTriggerRow;
 };
 
 const SCENE_OVERVIEW_COLORS = [
@@ -693,7 +713,13 @@ function buildSceneOverviewItems(
       sceneName: row.scene_name,
       stage: row.stage,
       stageScore,
+      riskScore:
+        typeof row.risk_score === "number" && Number.isFinite(row.risk_score)
+          ? row.risk_score
+          : null,
       sceneRank: typeof row.scene_rank === "number" ? row.scene_rank : null,
+      hitDate: row.hit_date?.trim() ?? "",
+      lag: typeof row.lag === "number" && Number.isFinite(row.lag) ? row.lag : null,
       sceneRuleScore,
       contributionPct:
         denominator !== null && sceneRuleScore !== null
@@ -701,6 +727,7 @@ function buildSceneOverviewItems(
           : null,
       contributionPctDisplay: null,
       color: getSceneOverviewColor(row.scene_name),
+      sceneRow: row,
     } as SceneOverviewItem;
   });
 
@@ -1063,6 +1090,16 @@ function buildDateTickIndices(count: number, maxTicks = CHART_DATE_TICK_COUNT) {
   return [...ticks].sort((left, right) => left - right);
 }
 
+function getChartLayoutSlotCount(itemCount: number, totalItemCount: number) {
+  if (itemCount <= 0) {
+    return 0;
+  }
+
+  return totalItemCount === itemCount && itemCount < CHART_MIN_RIGHT_ALIGNED_SLOTS
+    ? CHART_MIN_RIGHT_ALIGNED_SLOTS
+    : itemCount;
+}
+
 function buildLineSegments(
   items: DetailKlineRow[],
   key: string,
@@ -1111,8 +1148,9 @@ function clampNumber(value: number, min: number, max: number) {
 function resolveVisibleIndexFromChartX(
   chartXPercent: number,
   itemCount: number,
+  layoutSlotCount = itemCount,
 ) {
-  if (itemCount <= 0) {
+  if (itemCount <= 0 || layoutSlotCount <= 0) {
     return null;
   }
 
@@ -1124,12 +1162,19 @@ function resolveVisibleIndexFromChartX(
     0,
     0.999999,
   );
-
-  return clampNumber(
-    Math.round(plotXPercent * itemCount - 0.5),
+  const leadingSlotCount = Math.max(layoutSlotCount - itemCount, 0);
+  const slotIndex = clampNumber(
+    Math.floor(plotXPercent * layoutSlotCount),
     0,
-    itemCount - 1,
+    layoutSlotCount - 1,
   );
+  const visibleIndex = slotIndex - leadingSlotCount;
+
+  if (visibleIndex < 0 || visibleIndex >= itemCount) {
+    return null;
+  }
+
+  return visibleIndex;
 }
 
 function buildChartPointerSnapshot(
@@ -1137,8 +1182,9 @@ function buildChartPointerSnapshot(
   clientX: number,
   clientY: number,
   itemCount: number,
+  layoutSlotCount = itemCount,
 ): ChartPointerSnapshot | null {
-  if (itemCount <= 0) {
+  if (itemCount <= 0 || layoutSlotCount <= 0) {
     return null;
   }
 
@@ -1157,7 +1203,11 @@ function buildChartPointerSnapshot(
     0,
     99.9999,
   );
-  const visibleIndex = resolveVisibleIndexFromChartX(chartXPercent, itemCount);
+  const visibleIndex = resolveVisibleIndexFromChartX(
+    chartXPercent,
+    itemCount,
+    layoutSlotCount,
+  );
 
   if (visibleIndex === null) {
     return null;
@@ -1288,9 +1338,13 @@ function renderChartPanel(
     CHART_VIEWBOX_WIDTH - CHART_MARGIN.left - CHART_MARGIN.right;
   const plotHeight =
     CHART_VIEWBOX_HEIGHT - CHART_MARGIN.top - CHART_MARGIN.bottom;
-  const step = items.length > 0 ? plotWidth / items.length : plotWidth;
+  const layoutSlotCount = getChartLayoutSlotCount(items.length, allItems.length);
+  const leadingSlotCount = Math.max(layoutSlotCount - items.length, 0);
+  const step = layoutSlotCount > 0 ? plotWidth / layoutSlotCount : plotWidth;
   const xAt = (itemIndex: number) =>
-    CHART_MARGIN.left + step * itemIndex + step / 2;
+    CHART_MARGIN.left +
+    step * (leadingSlotCount + itemIndex) +
+    step / 2;
   const activeVisibleIndex =
     chartFocus &&
     chartFocus.absoluteIndex >= effectiveVisibleStart &&
@@ -1819,19 +1873,6 @@ function renderChartPanel(
   );
 }
 
-function renderFieldGrid(rows: FieldRow[]) {
-  return (
-    <div className="details-info-grid">
-      {rows.map((row) => (
-        <div className="details-info-item" key={row.label}>
-          <span>{row.label}</span>
-          <strong title={row.value}>{row.value}</strong>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function StrategyTableSection({
   title,
   rows,
@@ -2053,13 +2094,13 @@ function StrategyTableSection({
   );
 }
 
-function SceneTableSection({
-  rows,
+function SceneOverviewTableSection({
+  items,
   emptyText,
   selectedKey,
   onSelectRow,
 }: {
-  rows: DetailSceneTriggerRow[];
+  items: SceneOverviewItem[];
   emptyText: string;
   selectedKey?: string | null;
   onSelectRow?: (row: DetailSceneTriggerRow) => void;
@@ -2067,33 +2108,43 @@ function SceneTableSection({
   const sortDefinitions = useMemo(
     () =>
       ({
-        scene_name: { value: (row: DetailSceneTriggerRow) => row.scene_name },
-        stage_score: { value: (row: DetailSceneTriggerRow) => row.stage_score },
-        risk_score: { value: (row: DetailSceneTriggerRow) => row.risk_score },
-        hit_date: { value: (row: DetailSceneTriggerRow) => row.hit_date },
-        lag: { value: (row: DetailSceneTriggerRow) => row.lag },
-      }) satisfies Partial<Record<SceneSortKey, SortDefinition<DetailSceneTriggerRow>>>,
+        scene_name: { value: (item: SceneOverviewItem) => item.sceneName },
+        scene_rank: { value: (item: SceneOverviewItem) => item.sceneRank },
+        stage_score: { value: (item: SceneOverviewItem) => item.stageScore },
+        risk_score: { value: (item: SceneOverviewItem) => item.riskScore },
+        hit_date: { value: (item: SceneOverviewItem) => item.hitDate },
+        lag: { value: (item: SceneOverviewItem) => item.lag },
+        scene_rule_score: {
+          value: (item: SceneOverviewItem) => item.sceneRuleScore,
+        },
+        contribution_pct: {
+          value: (item: SceneOverviewItem) => item.contributionPctDisplay,
+        },
+      }) satisfies Partial<Record<SceneOverviewSortKey, SortDefinition<SceneOverviewItem>>>,
     [],
   );
   const { sortKey, sortDirection, sortedRows, toggleSort } = useTableSort<
-    DetailSceneTriggerRow,
-    SceneSortKey
-  >(rows, sortDefinitions, { key: "stage_score", direction: "desc" });
+    SceneOverviewItem,
+    SceneOverviewSortKey
+  >(items, sortDefinitions, { key: "scene_rank", direction: "asc" });
 
-  if (rows.length === 0) {
+  if (items.length === 0) {
     return <div className="details-empty details-empty-soft">{emptyText}</div>;
   }
 
   return (
-    <div className="details-table-wrap">
-      <table className="details-table details-table-scene">
+    <div className="details-scene-overview-table-wrap">
+      <table className="details-table details-table-scene details-table-scene-overview">
         <colgroup>
           <col className="details-col-scene-name" />
           <col className="details-col-scene-stage" />
+          <col className="details-col-scene-rank" />
           <col className="details-col-scene-score" />
           <col className="details-col-scene-score" />
           <col className="details-col-date" />
           <col className="details-col-lag" />
+          <col className="details-col-scene-score" />
+          <col className="details-col-scene-contrib" />
         </colgroup>
         <thead>
           <tr>
@@ -2107,6 +2158,15 @@ function SceneTableSection({
               />
             </th>
             <th>状态</th>
+            <th aria-sort={getAriaSort(sortKey === "scene_rank", sortDirection)}>
+              <TableSortButton
+                label="全市场截面排名"
+                isActive={sortKey === "scene_rank"}
+                direction={sortDirection}
+                onClick={() => toggleSort("scene_rank")}
+                title="按全市场截面排名排序"
+              />
+            </th>
             <th aria-sort={getAriaSort(sortKey === "stage_score", sortDirection)}>
               <TableSortButton
                 label="阶段分"
@@ -2143,18 +2203,36 @@ function SceneTableSection({
                 title="按距今排序"
               />
             </th>
+            <th aria-sort={getAriaSort(sortKey === "scene_rule_score", sortDirection)}>
+              <TableSortButton
+                label="scene得分"
+                isActive={sortKey === "scene_rule_score"}
+                direction={sortDirection}
+                onClick={() => toggleSort("scene_rule_score")}
+                title="按 scene 得分排序"
+              />
+            </th>
+            <th aria-sort={getAriaSort(sortKey === "contribution_pct", sortDirection)}>
+              <TableSortButton
+                label="scene贡献占比"
+                isActive={sortKey === "contribution_pct"}
+                direction={sortDirection}
+                onClick={() => toggleSort("contribution_pct")}
+                title="按 scene 贡献占比排序"
+              />
+            </th>
           </tr>
         </thead>
         <tbody>
-          {sortedRows.map((row) => {
-            const stageToken = getSceneStageToken(row.stage);
-            const rowKey = `${row.scene_name}-${row.hit_date ?? "none"}`;
+          {sortedRows.map((item) => {
+            const stageToken = getSceneStageToken(item.stage);
+            const rowKey = buildSceneRowKey(item.sceneRow);
             const isSelected = selectedKey === rowKey;
             return (
               <tr
                 className={isSelected ? "details-table-current-row" : ""}
                 key={rowKey}
-                onClick={() => onSelectRow?.(row)}
+                onClick={() => onSelectRow?.(item.sceneRow)}
               >
                 <td>
                   <button
@@ -2162,27 +2240,81 @@ function SceneTableSection({
                     type="button"
                     onClick={(event) => {
                       event.stopPropagation();
-                      onSelectRow?.(row);
+                      onSelectRow?.(item.sceneRow);
                     }}
                   >
-                    {formatFieldValue(row.scene_name)}
+                    {formatFieldValue(item.sceneName)}
                   </button>
                 </td>
                 <td>
                   <span className={`details-scene-stage-chip is-${stageToken}`}>
-                    {toSceneStageLabel(row.stage)}
+                    {toSceneStageLabel(item.stage)}
                   </span>
                 </td>
-                <td>{formatFieldValue(row.stage_score)}</td>
-                <td>{formatFieldValue(row.risk_score)}</td>
-                <td>{formatFieldValue(row.hit_date)}</td>
-                <td>{formatFieldValue(row.lag)}</td>
+                <td>{item.sceneRank === null ? "--" : `#${item.sceneRank}`}</td>
+                <td>{formatFieldValue(item.stageScore)}</td>
+                <td>{formatFieldValue(item.riskScore)}</td>
+                <td>{formatFieldValue(item.hitDate)}</td>
+                <td>{formatFieldValue(item.lag)}</td>
+                <td>{formatFieldValue(item.sceneRuleScore)}</td>
+                <td>
+                  {item.contributionPctDisplay === null
+                    ? "--"
+                    : `${item.contributionPctDisplay.toFixed(1)}%`}
+                </td>
               </tr>
             );
           })}
         </tbody>
       </table>
     </div>
+  );
+}
+
+function renderFieldGrid(rows: FieldRow[]) {
+  return (
+    <div className="details-info-grid">
+      {rows.map((row) => (
+        <div className="details-info-item" key={row.label}>
+          <span>{row.label}</span>
+          <strong title={row.value}>{row.value}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function OverviewSummarySection({
+  rows,
+  conceptText,
+  conceptCount,
+}: {
+  rows: FieldRow[];
+  conceptText: string;
+  conceptCount: number;
+}) {
+  return (
+    <section className="details-card details-overview-card">
+      <h3 className="details-subtitle">总览</h3>
+      <div className="details-overview-card-body">
+        {renderFieldGrid(rows)}
+        <div className="details-concept-block">
+          <div className="details-concept-head">
+            <strong>概念</strong>
+            <span>{conceptCount > 0 ? `${conceptCount} 项` : "暂无概念信息"}</span>
+          </div>
+          <div className="details-concept-panel">
+            {conceptCount > 0 ? (
+              <div className="details-concept-text" title={conceptText}>
+                {conceptText}
+              </div>
+            ) : (
+              <div className="details-empty details-empty-soft">暂无概念信息</div>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -2854,6 +2986,9 @@ export default function DetailsPage({
       ),
     [sceneRows, sceneRuleScoreBundle],
   );
+  const selectedSceneRowKey = sceneDetailTarget
+    ? buildSceneRowKey(sceneDetailTarget)
+    : null;
 
   const prevRankSortDefinitions = useMemo(
     () =>
@@ -2865,10 +3000,12 @@ export default function DetailsPage({
       >,
     [],
   );
-  const { sortedRows: sortedPrevRanks } = useTableSort<
-    DetailPrevRankRow,
-    PrevRankSortKey
-  >(
+  const {
+    sortKey: prevRankSortKey,
+    sortDirection: prevRankSortDirection,
+    sortedRows: sortedPrevRanks,
+    toggleSort: togglePrevRankSort,
+  } = useTableSort<DetailPrevRankRow, PrevRankSortKey>(
     prevRanks,
     prevRankSortDefinitions,
   );
@@ -2893,6 +3030,10 @@ export default function DetailsPage({
   const chartItems = allChartItems.slice(
     effectiveVisibleStart,
     effectiveVisibleStart + effectiveVisibleBarCount,
+  );
+  const chartLayoutSlotCount = getChartLayoutSlotCount(
+    chartItems.length,
+    totalChartItems,
   );
   const panels = kline?.panels?.length ? kline.panels : buildDefaultPanels();
   const chartShellHeight = Math.max(
@@ -3078,6 +3219,29 @@ export default function DetailsPage({
   }, [strategySplitDragging]);
 
   useEffect(() => {
+    setSceneDetailTarget((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const currentSceneName = current.scene_name.trim().toLowerCase();
+      if (currentSceneName === "") {
+        return current;
+      }
+
+      const matchedRow =
+        sceneRows.find(
+          (row) => row.scene_name.trim().toLowerCase() === currentSceneName,
+        ) ?? null;
+      if (!matchedRow) {
+        return current;
+      }
+
+      return matchedRow;
+    });
+  }, [sceneRows]);
+
+  useEffect(() => {
     const row = currentRankRowRef.current;
     const container = rankTableWrapRef.current;
     if (!row || !container) {
@@ -3229,6 +3393,7 @@ export default function DetailsPage({
       clientX,
       clientY,
       chartItems.length,
+      chartLayoutSlotCount,
     );
     if (!pointer) {
       return null;
@@ -3857,219 +4022,6 @@ export default function DetailsPage({
         <div className="details-error">{detailError}</div>
       ) : null}
 
-      <div className="details-overview-grid">
-        <section className="details-card details-overview-card">
-          <h3 className="details-subtitle">总览</h3>
-          <div className="details-overview-card-body">
-            {renderFieldGrid(overviewRows)}
-            <div className="details-concept-block">
-              <div className="details-concept-head">
-                <strong>概念</strong>
-                <span>
-                  {conceptItems.length > 0
-                    ? `${conceptItems.length} 项`
-                    : "暂无概念信息"}
-                </span>
-              </div>
-              <div className="details-concept-panel">
-                {conceptItems.length > 0 ? (
-                  <div className="details-concept-text" title={conceptText}>
-                    {conceptText}
-                  </div>
-                ) : (
-                  <div className="details-empty details-empty-soft">
-                    暂无概念信息
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section className="details-card details-rank-card">
-          <h3 className="details-subtitle">Scene 状态总览</h3>
-          <div className="details-rank-card-body details-scene-overview-card-body">
-            {sceneTotalCount === 0 ? (
-              <div className="details-empty details-empty-soft">暂无 scene 状态数据</div>
-            ) : (
-              <>
-                <div className="details-scene-charts-row">
-                  <div className="details-scene-status-panel">
-                    <h4 className="details-scene-panel-title">状态总览</h4>
-                    <div className="details-scene-donut-wrap">
-                      <svg
-                        className="details-scene-donut"
-                        viewBox="0 0 120 120"
-                        role="img"
-                        aria-label="scene 状态占比"
-                      >
-                        <circle cx="60" cy="60" r="44" fill="none" stroke="#e7edf4" strokeWidth="16" />
-                        {(() => {
-                          const radius = 44;
-                          const strokeWidth = 16;
-                          const center = 60;
-                          const circumference = 2 * Math.PI * radius;
-                          let offset = 0;
-
-                          return sceneStatusStats
-                            .filter((item) => item.count > 0)
-                            .map((item) => {
-                              const dash = (item.ratio / 100) * circumference;
-                              const node = (
-                                <circle
-                                  key={item.key}
-                                  cx={center}
-                                  cy={center}
-                                  r={radius}
-                                  fill="none"
-                                  stroke={item.color}
-                                  strokeWidth={strokeWidth}
-                                  strokeDasharray={`${dash} ${Math.max(circumference - dash, 0)}`}
-                                  strokeDashoffset={-offset}
-                                  strokeLinecap="butt"
-                                  transform="rotate(-90 60 60)"
-                                />
-                              );
-                              offset += dash;
-                              return node;
-                            });
-                        })()}
-                        <circle cx="60" cy="60" r="34" fill="#ffffff" />
-                        <text x="60" y="56" textAnchor="middle" className="details-scene-donut-total-label">
-                          总场景
-                        </text>
-                        <text x="60" y="73" textAnchor="middle" className="details-scene-donut-total-value">
-                          {sceneTotalCount}
-                        </text>
-                      </svg>
-
-                      <div className="details-scene-donut-legend">
-                        {sceneStatusStats.map((item) => (
-                          <div className="details-scene-donut-legend-item" key={item.key}>
-                            <span
-                              className="details-scene-donut-legend-dot"
-                              style={{ backgroundColor: item.color }}
-                            />
-                            <strong>{item.label}</strong>
-                            <span>{item.count}</span>
-                            <span>{item.ratio.toFixed(1)}%</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="details-scene-contrib-panel">
-                    <h4 className="details-scene-panel-title">Scene贡献占比</h4>
-                    <div className="details-scene-donut-wrap">
-                      <svg
-                        className="details-scene-donut"
-                        viewBox="0 0 120 120"
-                        role="img"
-                        aria-label="Scene贡献占比环图"
-                      >
-                        <circle cx="60" cy="60" r="44" fill="none" stroke="#e7edf4" strokeWidth="16" />
-                        {(() => {
-                          const radius = 44;
-                          const strokeWidth = 16;
-                          const center = 60;
-                          const circumference = 2 * Math.PI * radius;
-                          let offset = 0;
-
-                          return sceneOverviewItems
-                            .filter((item) => (item.contributionPctDisplay ?? 0) > 0)
-                            .map((item) => {
-                              const dash = ((item.contributionPctDisplay ?? 0) / 100) * circumference;
-                              const node = (
-                                <circle
-                                  key={`${item.sceneName}-contrib-ring`}
-                                  cx={center}
-                                  cy={center}
-                                  r={radius}
-                                  fill="none"
-                                  stroke={item.color}
-                                  strokeWidth={strokeWidth}
-                                  strokeDasharray={`${dash} ${Math.max(circumference - dash, 0)}`}
-                                  strokeDashoffset={-offset}
-                                  strokeLinecap="butt"
-                                  transform="rotate(-90 60 60)"
-                                />
-                              );
-                              offset += dash;
-                              return node;
-                            });
-                        })()}
-                        <circle cx="60" cy="60" r="34" fill="#ffffff" />
-                        <text x="60" y="56" textAnchor="middle" className="details-scene-donut-total-label">
-                          贡献场景
-                        </text>
-                        <text x="60" y="73" textAnchor="middle" className="details-scene-donut-total-value">
-                          {sceneOverviewItems.length}
-                        </text>
-                      </svg>
-
-                      <div className="details-scene-contrib-legend">
-                        {sceneOverviewItems.map((item) => (
-                          <div
-                            className="details-scene-contrib-legend-item"
-                            key={`${item.sceneName}-contrib`}
-                          >
-                            <span
-                              className="details-scene-donut-legend-dot"
-                              style={{ backgroundColor: item.color }}
-                            />
-                            <strong title={item.sceneName}>{item.sceneName}</strong>
-                            <span>
-                              {item.contributionPctDisplay === null
-                                ? '--'
-                                : `${item.contributionPctDisplay.toFixed(1)}%`}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="details-scene-overview-table-wrap">
-                  <table className="details-table details-table-scene-overview">
-                    <thead>
-                      <tr>
-                        <th>Scene</th>
-                        <th>场景状态</th>
-                        <th>全市场截面排名</th>
-                        <th>scene得分</th>
-                        <th>scene贡献占比</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {sceneOverviewItems.map((item) => (
-                        <tr key={item.sceneName}>
-                          <td>{formatFieldValue(item.sceneName)}</td>
-                          <td>
-                            <span className={`details-scene-stage-chip is-${getSceneStageToken(item.stage)}`}>
-                              {toSceneStageLabel(item.stage)}
-                            </span>
-                          </td>
-                          <td>{item.sceneRank === null ? "--" : `#${item.sceneRank}`}</td>
-                          <td>{formatFieldValue(item.sceneRuleScore)}</td>
-                          <td>
-                            {item.contributionPctDisplay === null
-                              ? "--"
-                              : `${item.contributionPctDisplay.toFixed(1)}%`}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-
-              </>
-            )}
-          </div>
-        </section>
-      </div>
-
       <section className="details-card details-chart-card">
         <h3 className="details-subtitle">K线图</h3>
 
@@ -4228,15 +4180,93 @@ export default function DetailsPage({
         </div>
       </section>
 
-      <section className="details-card details-strategy-card">
-        <div className="details-section-head details-section-head-strategy">
-          <h3 className="details-subtitle">Scene 表现明细</h3>
-          <div className="details-strategy-toolbar">
-            <div className="details-strategy-params">
-              <span>名称：{formatFieldValue(detailData?.overview?.name)}</span>
-              <span>代码：{formatFieldValue(resolvedTsCode)}</span>
-              <span>当前参考日：{formatFieldValue(resolvedTradeDate)}</span>
-              <span>相对日期：{formatFieldValue(strategyDisplayRelativeTradeDate)}</span>
+      <div className="details-overview-grid">
+        <OverviewSummarySection
+          rows={overviewRows}
+          conceptText={conceptText}
+          conceptCount={conceptItems.length}
+        />
+
+        <section className="details-card details-rank-card details-prev-rank-card">
+          <div className="details-section-head details-section-head-strategy details-prev-rank-head">
+            <div>
+              <h3 className="details-subtitle">前日排名</h3>
+              <p className="details-note">支持按日期/排名排序，点击可定位到参考日。</p>
+            </div>
+          </div>
+          <div className="details-rank-card-body details-prev-rank-card-body">
+            {prevRanks.length === 0 ? (
+              <div className="details-empty details-empty-soft">
+                暂无前日排名
+              </div>
+            ) : (
+              <div className="details-table-wrap details-prev-rank-table-wrap" ref={rankTableWrapRef}>
+                <table className="details-table details-prev-rank-table">
+                  <thead>
+                    <tr>
+                      <th
+                        aria-sort={getAriaSort(
+                          prevRankSortKey === "trade_date",
+                          prevRankSortDirection,
+                        )}
+                      >
+                        <TableSortButton
+                          label="日期"
+                          isActive={prevRankSortKey === "trade_date"}
+                          direction={prevRankSortDirection}
+                          onClick={() => togglePrevRankSort("trade_date")}
+                          title="按日期排序"
+                        />
+                      </th>
+                      <th
+                        aria-sort={getAriaSort(
+                          prevRankSortKey === "rank",
+                          prevRankSortDirection,
+                        )}
+                      >
+                        <TableSortButton
+                          label="排名"
+                          isActive={prevRankSortKey === "rank"}
+                          direction={prevRankSortDirection}
+                          onClick={() => togglePrevRankSort("rank")}
+                          title="按排名排序"
+                        />
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedPrevRanks.map((row) => {
+                      const isReferenceDate = row.trade_date === resolvedTradeDate;
+                      return (
+                        <tr
+                          className={isReferenceDate ? "details-table-current-row" : ""}
+                          key={row.trade_date}
+                          ref={isReferenceDate ? currentRankRowRef : null}
+                        >
+                          <td>
+                            {row.trade_date}
+                            {isReferenceDate ? (
+                              <span className="details-current-date-chip">
+                                参考日
+                              </span>
+                            ) : null}
+                          </td>
+                          <td>{buildRankValue(row.rank, row.total)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="details-card details-rank-card details-scene-overview-card">
+          <div className="details-section-head details-section-head-strategy details-scene-overview-head">
+            <div>
+              <h3 className="details-subtitle">Scene 状态总览</h3>
+              <p className="details-note">点击场景可打开明细浮窗；基础信息已收入口径浮窗。</p>
             </div>
             <div className="details-strategy-nav">
               <button
@@ -4259,22 +4289,163 @@ export default function DetailsPage({
               </button>
             </div>
           </div>
-        </div>
+          <div className="details-rank-card-body details-scene-overview-card-body">
+            {sceneTotalCount === 0 ? (
+              <div className="details-empty details-empty-soft">暂无 scene 状态数据</div>
+            ) : (
+              <>
+                <div className="details-scene-charts-row">
+                  <div className="details-scene-status-panel">
+                    <h4 className="details-scene-panel-title">状态总览</h4>
+                    <div className="details-scene-donut-wrap">
+                      <svg
+                        className="details-scene-donut"
+                        viewBox="0 0 120 120"
+                        role="img"
+                        aria-label="scene 状态占比"
+                      >
+                        <circle cx="60" cy="60" r="44" fill="none" stroke="#e7edf4" strokeWidth="16" />
+                        {(() => {
+                          const radius = 44;
+                          const strokeWidth = 16;
+                          const center = 60;
+                          const circumference = 2 * Math.PI * radius;
+                          let offset = 0;
 
-        <SceneTableSection
-          rows={sceneRows}
-          emptyText="暂无 scene 表现明细"
-          selectedKey={
-            sceneDetailTarget
-              ? `${sceneDetailTarget.scene_name}-${sceneDetailTarget.hit_date ?? "none"}`
-              : null
-          }
-          onSelectRow={(row) => {
-            setSceneDetailTarget(row);
-            setSceneDetailModalOpen(true);
-          }}
-        />
-      </section>
+                          return sceneStatusStats
+                            .filter((item) => item.count > 0)
+                            .map((item) => {
+                              const dash = (item.ratio / 100) * circumference;
+                              const node = (
+                                <circle
+                                  key={item.key}
+                                  cx={center}
+                                  cy={center}
+                                  r={radius}
+                                  fill="none"
+                                  stroke={item.color}
+                                  strokeWidth={strokeWidth}
+                                  strokeDasharray={`${dash} ${Math.max(circumference - dash, 0)}`}
+                                  strokeDashoffset={-offset}
+                                  strokeLinecap="butt"
+                                  transform="rotate(-90 60 60)"
+                                />
+                              );
+                              offset += dash;
+                              return node;
+                            });
+                        })()}
+                        <circle cx="60" cy="60" r="34" fill="#ffffff" />
+                        <text x="60" y="56" textAnchor="middle" className="details-scene-donut-total-label">
+                          总场景
+                        </text>
+                        <text x="60" y="73" textAnchor="middle" className="details-scene-donut-total-value">
+                          {sceneTotalCount}
+                        </text>
+                      </svg>
+
+                      <div className="details-scene-donut-legend">
+                        {sceneStatusStats.map((item) => (
+                          <div className="details-scene-donut-legend-item" key={item.key}>
+                            <span
+                              className="details-scene-donut-legend-dot"
+                              style={{ backgroundColor: item.color }}
+                            />
+                            <strong>{item.label}</strong>
+                            <span>{item.count}</span>
+                            <span>{item.ratio.toFixed(1)}%</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="details-scene-contrib-panel">
+                    <h4 className="details-scene-panel-title">Scene贡献占比</h4>
+                    <div className="details-scene-donut-wrap">
+                      <svg
+                        className="details-scene-donut"
+                        viewBox="0 0 120 120"
+                        role="img"
+                        aria-label="Scene贡献占比环图"
+                      >
+                        <circle cx="60" cy="60" r="44" fill="none" stroke="#e7edf4" strokeWidth="16" />
+                        {(() => {
+                          const radius = 44;
+                          const strokeWidth = 16;
+                          const center = 60;
+                          const circumference = 2 * Math.PI * radius;
+                          let offset = 0;
+
+                          return sceneOverviewItems
+                            .filter((item) => (item.contributionPctDisplay ?? 0) > 0)
+                            .map((item) => {
+                              const dash = ((item.contributionPctDisplay ?? 0) / 100) * circumference;
+                              const node = (
+                                <circle
+                                  key={`${item.sceneName}-contrib-ring`}
+                                  cx={center}
+                                  cy={center}
+                                  r={radius}
+                                  fill="none"
+                                  stroke={item.color}
+                                  strokeWidth={strokeWidth}
+                                  strokeDasharray={`${dash} ${Math.max(circumference - dash, 0)}`}
+                                  strokeDashoffset={-offset}
+                                  strokeLinecap="butt"
+                                  transform="rotate(-90 60 60)"
+                                />
+                              );
+                              offset += dash;
+                              return node;
+                            });
+                        })()}
+                        <circle cx="60" cy="60" r="34" fill="#ffffff" />
+                        <text x="60" y="56" textAnchor="middle" className="details-scene-donut-total-label">
+                          贡献场景
+                        </text>
+                        <text x="60" y="73" textAnchor="middle" className="details-scene-donut-total-value">
+                          {sceneOverviewItems.length}
+                        </text>
+                      </svg>
+
+                      <div className="details-scene-contrib-legend">
+                        {sceneOverviewItems.map((item) => (
+                          <div
+                            className="details-scene-contrib-legend-item"
+                            key={`${item.sceneName}-contrib`}
+                          >
+                            <span
+                              className="details-scene-donut-legend-dot"
+                              style={{ backgroundColor: item.color }}
+                            />
+                            <strong title={item.sceneName}>{item.sceneName}</strong>
+                            <span>
+                              {item.contributionPctDisplay === null
+                                ? '--'
+                                : `${item.contributionPctDisplay.toFixed(1)}%`}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <SceneOverviewTableSection
+                  items={sceneOverviewItems}
+                  emptyText="暂无 scene 状态数据"
+                  selectedKey={selectedSceneRowKey}
+                  onSelectRow={(row) => {
+                    setSceneDetailTarget(row);
+                    setSceneDetailModalOpen(true);
+                  }}
+                />
+              </>
+            )}
+          </div>
+        </section>
+      </div>
 
       {sceneDetailModalOpen ? (
         <div
@@ -4286,9 +4457,16 @@ export default function DetailsPage({
             onClick={(event) => event.stopPropagation()}
           >
             <div className="details-section-head details-section-head-strategy">
-              <h3 className="details-subtitle">策略变化明细（{formatFieldValue(sceneDetailTarget?.scene_name)}）</h3>
+              <div>
+                <h3 className="details-subtitle">策略变化明细（{formatFieldValue(sceneDetailTarget?.scene_name)}）</h3>
+                <p className="details-note">基础信息已收入口径浮窗，便于快速切换场景。</p>
+              </div>
               <div className="details-strategy-toolbar">
                 <div className="details-strategy-params">
+                  <span>名称：{formatFieldValue(detailData?.overview?.name)}</span>
+                  <span>代码：{formatFieldValue(resolvedTsCode)}</span>
+                  <span>当前参考日：{formatFieldValue(resolvedTradeDate)}</span>
+                  <span>相对日期：{formatFieldValue(strategyDisplayRelativeTradeDate)}</span>
                   <span>状态：{toSceneStageLabel(sceneDetailTarget?.stage)}</span>
                   <span>阶段分：{formatFieldValue(sceneDetailTarget?.stage_score)}</span>
                   <span>风险分：{formatFieldValue(sceneDetailTarget?.risk_score)}</span>
@@ -4299,6 +4477,7 @@ export default function DetailsPage({
                     type="button"
                     disabled={!previousStrategyTradeDate || detailLoading}
                     onClick={() => onJumpStrategyTradeDate(previousStrategyTradeDate)}
+                    title={previousStrategyTradeDate ? `切换到 ${previousStrategyTradeDate}` : "没有更早的参考日"}
                   >
                     上一天
                   </button>
@@ -4307,6 +4486,7 @@ export default function DetailsPage({
                     type="button"
                     disabled={!nextStrategyTradeDate || detailLoading}
                     onClick={() => onJumpStrategyTradeDate(nextStrategyTradeDate)}
+                    title={nextStrategyTradeDate ? `切换到 ${nextStrategyTradeDate}` : "没有更新的参考日"}
                   >
                     下一天
                   </button>

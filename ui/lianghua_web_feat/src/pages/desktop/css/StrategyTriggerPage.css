@@ -166,6 +166,17 @@
   gap: 8px;
 }
 
+.strategy-trigger-scene-block {
+  display: grid;
+  gap: 12px;
+}
+
+.strategy-trigger-scene-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(148px, 1fr));
+  gap: 8px;
+}
+
 .strategy-trigger-summary-item {
   border: 1px solid #e1e7ef;
   border-radius: 8px;
@@ -741,6 +752,11 @@
   font-size: 15px;
 }
 
+.strategy-trigger-table-scene th,
+.strategy-trigger-table-scene td {
+  font-size: 14px;
+}
+
 .strategy-trigger-table-stocks .strategy-trigger-inline-btn-name {
   font-weight: 400;
 }
@@ -1025,6 +1041,10 @@
     grid-template-columns: repeat(2, minmax(132px, 1fr));
   }
 
+  .strategy-trigger-scene-summary-grid {
+    grid-template-columns: repeat(2, minmax(132px, 1fr));
+  }
+
   .strategy-trigger-analysis-grid {
     grid-template-columns: 1fr;
   }
@@ -1051,6 +1071,10 @@
   .strategy-trigger-summary-grid {
     width: 100%;
     grid-template-columns: 1fr 1fr;
+  }
+
+  .strategy-trigger-scene-summary-grid {
+    grid-template-columns: 1fr;
   }
 
   .strategy-trigger-overview-mini-chart-latest {

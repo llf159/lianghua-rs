@@ -9,8 +9,11 @@ import {
 import { createPortal } from "react-dom";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import {
+  getSceneStatisticsPage,
   getStrategyStatisticsDetail,
   getStrategyStatisticsPage,
+  type SceneStatisticsPageData,
+  type SceneStageRow,
   type StrategyChartPoint,
   type StrategyDailyRow,
   type StrategyHeatmapCell,
@@ -49,6 +52,31 @@ type StrategyDailySortKey =
   | "best_rank";
 
 type TriggeredStockSortKey = "rank" | "total_score" | "rule_score";
+
+type SceneStatisticsSortKey =
+  | "scene_name"
+  | "trigger_count"
+  | "confirm_count"
+  | "observe_count"
+  | "fail_count"
+  | "none_count"
+  | "scene_covered_count"
+  | "scene_total_sample_count"
+  | "scene_coverage_ratio"
+  | "scene_rule_contribution_ratio";
+
+type SceneStatisticsTableRow = {
+  scene_name: string;
+  trigger_count: number;
+  confirm_count: number;
+  observe_count: number;
+  fail_count: number;
+  none_count: number;
+  scene_covered_count?: number | null;
+  scene_total_sample_count?: number | null;
+  scene_coverage_ratio?: number | null;
+  scene_rule_contribution_ratio?: number | null;
+};
 
 type HeatmapSlot = {
   key: string;
@@ -150,6 +178,10 @@ type StrategyChartGeometry = {
 type PersistedStrategyTriggerState = {
   sourcePath: string;
   pageData: StrategyStatisticsPageData | null;
+  scenePageData: SceneStatisticsPageData | null;
+  sceneTableRows: SceneStatisticsTableRow[];
+  sceneName: string;
+  sceneError: string;
   strategyName: string;
   analysisTradeDate: string;
   selectedOverviewDate: string | null;
@@ -159,7 +191,7 @@ type PersistedStrategyTriggerState = {
 };
 
 const WEEKDAY_LABELS = ["一", "二", "三", "四", "五", "六", "日"] as const;
-const STRATEGY_TRIGGER_STATE_KEY = "lh_strategy_trigger_page_state_v5";
+const STRATEGY_TRIGGER_STATE_KEY = "lh_strategy_trigger_page_state_v6";
 const MINI_CANDLE_UP_COLOR = "#d9485f";
 const MINI_CANDLE_DOWN_COLOR = "#178f68";
 const MINI_CANDLE_FLAT_COLOR = "#536273";
@@ -216,6 +248,51 @@ function formatPercent(value?: number | null) {
     return "--";
   }
   return `${(value * 100).toFixed(2)}%`;
+}
+
+function normalizeSceneStageKey(stage: SceneStageRow["stage"]) {
+  const normalized = stage.trim().toLowerCase();
+  if (normalized === "trigger") {
+    return "trigger";
+  }
+  if (normalized === "confirm") {
+    return "confirm";
+  }
+  if (normalized === "observe") {
+    return "observe";
+  }
+  if (normalized === "fail") {
+    return "fail";
+  }
+  return "none";
+}
+
+function buildSceneStatisticsTableRow(sceneName: string, data: SceneStatisticsPageData): SceneStatisticsTableRow {
+  const stageCount = {
+    trigger: 0,
+    confirm: 0,
+    observe: 0,
+    fail: 0,
+    none: 0,
+  };
+
+  for (const item of data.stage_rows ?? []) {
+    const key = normalizeSceneStageKey(item.stage);
+    stageCount[key] += Number(item.sample_count) || 0;
+  }
+
+  return {
+    scene_name: sceneName,
+    trigger_count: stageCount.trigger,
+    confirm_count: stageCount.confirm,
+    observe_count: stageCount.observe,
+    fail_count: stageCount.fail,
+    none_count: stageCount.none,
+    scene_covered_count: data.summary?.scene_covered_count,
+    scene_total_sample_count: data.summary?.scene_total_sample_count,
+    scene_coverage_ratio: data.summary?.scene_coverage_ratio,
+    scene_rule_contribution_ratio: data.summary?.scene_rule_contribution_ratio,
+  };
 }
 
 function clampNumber(value: number, min: number, max: number) {
@@ -1663,6 +1740,15 @@ export default function StrategyTriggerPage() {
         parsed.pageData && typeof parsed.pageData === "object"
           ? (parsed.pageData as StrategyStatisticsPageData)
           : null,
+      scenePageData:
+        parsed.scenePageData && typeof parsed.scenePageData === "object"
+          ? (parsed.scenePageData as SceneStatisticsPageData)
+          : null,
+      sceneTableRows: Array.isArray(parsed.sceneTableRows)
+        ? (parsed.sceneTableRows as SceneStatisticsTableRow[])
+        : [],
+      sceneName: typeof parsed.sceneName === "string" ? parsed.sceneName : "",
+      sceneError: typeof parsed.sceneError === "string" ? parsed.sceneError : "",
       strategyName:
         typeof parsed.strategyName === "string" ? parsed.strategyName : "",
       analysisTradeDate:
@@ -1690,6 +1776,20 @@ export default function StrategyTriggerPage() {
   );
   const [pageData, setPageData] = useState<StrategyStatisticsPageData | null>(
     () => persistedState?.pageData ?? null,
+  );
+  const [scenePageData, setScenePageData] =
+    useState<SceneStatisticsPageData | null>(
+      () => persistedState?.scenePageData ?? null,
+    );
+  const [sceneTableRows, setSceneTableRows] = useState<SceneStatisticsTableRow[]>(
+    () => persistedState?.sceneTableRows ?? [],
+  );
+  const [sceneName, setSceneName] = useState(
+    () => persistedState?.sceneName ?? "",
+  );
+  const [sceneLoading, setSceneLoading] = useState(false);
+  const [sceneError, setSceneError] = useState(
+    () => persistedState?.sceneError ?? "",
   );
   const [strategyName, setStrategyName] = useState(
     () => persistedState?.strategyName ?? "",
@@ -1729,6 +1829,10 @@ export default function StrategyTriggerPage() {
       {
         sourcePath,
         pageData,
+        scenePageData,
+        sceneTableRows,
+        sceneName,
+        sceneError,
         strategyName,
         analysisTradeDate,
         selectedOverviewDate,
@@ -1743,6 +1847,10 @@ export default function StrategyTriggerPage() {
     detailError,
     detailModalOpen,
     pageData,
+    sceneError,
+    sceneName,
+    scenePageData,
+    sceneTableRows,
     selectedOverviewDate,
     sourcePath,
     strategyName,
@@ -1811,6 +1919,43 @@ export default function StrategyTriggerPage() {
     "strategy-trigger-daily-table",
     [sortedRowsForAnalysisDate.length, analysisTradeDate],
   );
+  const sceneSortDefinitions = useMemo(
+    () =>
+      ({
+        scene_name: { value: (row) => row.scene_name },
+        trigger_count: { value: (row) => row.trigger_count },
+        confirm_count: { value: (row) => row.confirm_count },
+        observe_count: { value: (row) => row.observe_count },
+        fail_count: { value: (row) => row.fail_count },
+        none_count: { value: (row) => row.none_count },
+        scene_covered_count: { value: (row) => row.scene_covered_count },
+        scene_total_sample_count: { value: (row) => row.scene_total_sample_count },
+        scene_coverage_ratio: { value: (row) => row.scene_coverage_ratio },
+        scene_rule_contribution_ratio: {
+          value: (row) => row.scene_rule_contribution_ratio,
+        },
+      }) satisfies Partial<
+        Record<SceneStatisticsSortKey, SortDefinition<SceneStatisticsTableRow>>
+      >,
+    [],
+  );
+  const {
+    sortKey: sceneSortKey,
+    sortDirection: sceneSortDirection,
+    sortedRows: sortedSceneRows,
+    toggleSort: toggleSceneSort,
+  } = useTableSort<SceneStatisticsTableRow, SceneStatisticsSortKey>(
+    sceneTableRows,
+    sceneSortDefinitions,
+    {
+      key: "scene_rule_contribution_ratio",
+      direction: "desc",
+    },
+  );
+  const sceneTableWrapRef = useRouteScrollRegion<HTMLDivElement>(
+    "strategy-trigger-scene-table",
+    [sortedSceneRows.length, scenePageData?.resolved_analysis_trade_date ?? analysisTradeDate],
+  );
 
   useEffect(() => {
     const nextSelectedDate = pickInitialHeatmapDate(
@@ -1862,6 +2007,62 @@ export default function StrategyTriggerPage() {
     };
   }, []);
 
+  async function loadSceneStatistics(
+    nextAnalysisTradeDate?: string,
+    nextSourcePath?: string,
+  ) {
+    const requestedTradeDate =
+      nextAnalysisTradeDate?.trim() ?? analysisTradeDate.trim();
+
+    setSceneLoading(true);
+    setSceneError("");
+
+    try {
+      let resolvedSourcePath = nextSourcePath?.trim() ?? sourcePath.trim();
+      if (!resolvedSourcePath) {
+        resolvedSourcePath = await ensureManagedSourcePath();
+      }
+      setSourcePath(resolvedSourcePath);
+
+      const baseData = await getSceneStatisticsPage({
+        sourcePath: resolvedSourcePath,
+        analysisTradeDate: requestedTradeDate || undefined,
+      });
+      const sceneOptions = baseData.scene_options ?? [];
+      const resolvedTradeDate =
+        baseData.resolved_analysis_trade_date?.trim() ?? requestedTradeDate;
+
+      const expandedRows =
+        sceneOptions.length > 0 && resolvedTradeDate
+          ? await Promise.all(
+              sceneOptions.map(async (scene) => {
+                const sceneData = await getSceneStatisticsPage({
+                  sourcePath: resolvedSourcePath,
+                  sceneName: scene,
+                  analysisTradeDate: resolvedTradeDate,
+                });
+                return buildSceneStatisticsTableRow(scene, sceneData);
+              }),
+            )
+          : [];
+
+      setScenePageData(baseData);
+      setSceneTableRows(expandedRows);
+      setSceneName((current) => {
+        if (current && sceneOptions.includes(current)) {
+          return current;
+        }
+        return baseData.resolved_scene_name ?? sceneOptions[0] ?? "";
+      });
+    } catch (loadError) {
+      setScenePageData(null);
+      setSceneTableRows([]);
+      setSceneError(String(loadError));
+    } finally {
+      setSceneLoading(false);
+    }
+  }
+
   async function loadPage(
     nextAnalysisTradeDate?: string,
   ) {
@@ -1886,7 +2087,9 @@ export default function StrategyTriggerPage() {
         }
         return data.resolved_strategy_name ?? current;
       });
-      setAnalysisTradeDate(data.resolved_analysis_trade_date ?? "");
+      const resolvedTradeDate = data.resolved_analysis_trade_date ?? "";
+      setAnalysisTradeDate(resolvedTradeDate);
+      await loadSceneStatistics(resolvedTradeDate, resolvedSourcePath);
     } catch (loadError) {
       setError(String(loadError));
     } finally {
@@ -2208,6 +2411,140 @@ export default function StrategyTriggerPage() {
             <StrategyOverviewDeltaChart items={overviewItems} />
           </div>
         </div>
+      </section>
+
+      <section className="strategy-trigger-card">
+        <div className="strategy-trigger-section-head">
+          <div>
+            <h3 className="strategy-trigger-subtitle">Scene 触发统计</h3>
+            <p className="strategy-trigger-caption">
+              {formatDateLabel(
+                scenePageData?.resolved_analysis_trade_date ?? analysisTradeDate,
+              )} · 按 Scene 直出
+            </p>
+          </div>
+        </div>
+        {sceneError ? <div className="strategy-trigger-error">{sceneError}</div> : null}
+        {sceneLoading ? (
+          <div className="strategy-trigger-empty">Scene 统计读取中...</div>
+        ) : sortedSceneRows.length === 0 ? (
+          <div className="strategy-trigger-empty">该分析日期暂无 Scene 统计样本。</div>
+        ) : (
+          <div className="strategy-trigger-table-wrap" ref={sceneTableWrapRef}>
+            <table className="strategy-trigger-table strategy-trigger-table-scene">
+              <thead>
+                <tr>
+                  <th aria-sort={getAriaSort(sceneSortKey === "scene_name", sceneSortDirection)}>
+                    <TableSortButton
+                      label="Scene"
+                      isActive={sceneSortKey === "scene_name"}
+                      direction={sceneSortDirection}
+                      onClick={() => toggleSceneSort("scene_name")}
+                      title="按 Scene 排序"
+                    />
+                  </th>
+                  <th aria-sort={getAriaSort(sceneSortKey === "trigger_count", sceneSortDirection)}>
+                    <TableSortButton
+                      label="trigger"
+                      isActive={sceneSortKey === "trigger_count"}
+                      direction={sceneSortDirection}
+                      onClick={() => toggleSceneSort("trigger_count")}
+                      title="按 trigger 样本数排序"
+                    />
+                  </th>
+                  <th aria-sort={getAriaSort(sceneSortKey === "confirm_count", sceneSortDirection)}>
+                    <TableSortButton
+                      label="confirm"
+                      isActive={sceneSortKey === "confirm_count"}
+                      direction={sceneSortDirection}
+                      onClick={() => toggleSceneSort("confirm_count")}
+                      title="按 confirm 样本数排序"
+                    />
+                  </th>
+                  <th aria-sort={getAriaSort(sceneSortKey === "observe_count", sceneSortDirection)}>
+                    <TableSortButton
+                      label="observe"
+                      isActive={sceneSortKey === "observe_count"}
+                      direction={sceneSortDirection}
+                      onClick={() => toggleSceneSort("observe_count")}
+                      title="按 observe 样本数排序"
+                    />
+                  </th>
+                  <th aria-sort={getAriaSort(sceneSortKey === "fail_count", sceneSortDirection)}>
+                    <TableSortButton
+                      label="fail"
+                      isActive={sceneSortKey === "fail_count"}
+                      direction={sceneSortDirection}
+                      onClick={() => toggleSceneSort("fail_count")}
+                      title="按 fail 样本数排序"
+                    />
+                  </th>
+                  <th aria-sort={getAriaSort(sceneSortKey === "none_count", sceneSortDirection)}>
+                    <TableSortButton
+                      label="none"
+                      isActive={sceneSortKey === "none_count"}
+                      direction={sceneSortDirection}
+                      onClick={() => toggleSceneSort("none_count")}
+                      title="按 none 样本数排序"
+                    />
+                  </th>
+                  <th aria-sort={getAriaSort(sceneSortKey === "scene_covered_count", sceneSortDirection)}>
+                    <TableSortButton
+                      label="已定级样本数"
+                      isActive={sceneSortKey === "scene_covered_count"}
+                      direction={sceneSortDirection}
+                      onClick={() => toggleSceneSort("scene_covered_count")}
+                      title="按已定级样本数排序"
+                    />
+                  </th>
+                  <th aria-sort={getAriaSort(sceneSortKey === "scene_total_sample_count", sceneSortDirection)}>
+                    <TableSortButton
+                      label="Scene样本总数"
+                      isActive={sceneSortKey === "scene_total_sample_count"}
+                      direction={sceneSortDirection}
+                      onClick={() => toggleSceneSort("scene_total_sample_count")}
+                      title="按 Scene 样本总数排序"
+                    />
+                  </th>
+                  <th aria-sort={getAriaSort(sceneSortKey === "scene_coverage_ratio", sceneSortDirection)}>
+                    <TableSortButton
+                      label="Scene覆盖率"
+                      isActive={sceneSortKey === "scene_coverage_ratio"}
+                      direction={sceneSortDirection}
+                      onClick={() => toggleSceneSort("scene_coverage_ratio")}
+                      title="按 Scene 覆盖率排序"
+                    />
+                  </th>
+                  <th aria-sort={getAriaSort(sceneSortKey === "scene_rule_contribution_ratio", sceneSortDirection)}>
+                    <TableSortButton
+                      label="scene贡献分占比"
+                      isActive={sceneSortKey === "scene_rule_contribution_ratio"}
+                      direction={sceneSortDirection}
+                      onClick={() => toggleSceneSort("scene_rule_contribution_ratio")}
+                      title="按 scene贡献分占比排序"
+                    />
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedSceneRows.map((row) => (
+                  <tr key={`${scenePageData?.resolved_analysis_trade_date ?? analysisTradeDate}-${row.scene_name}`}>
+                    <td>{row.scene_name}</td>
+                    <td>{formatInteger(row.trigger_count)}</td>
+                    <td>{formatInteger(row.confirm_count)}</td>
+                    <td>{formatInteger(row.observe_count)}</td>
+                    <td>{formatInteger(row.fail_count)}</td>
+                    <td>{formatInteger(row.none_count)}</td>
+                    <td>{formatInteger(row.scene_covered_count)}</td>
+                    <td>{formatInteger(row.scene_total_sample_count)}</td>
+                    <td>{formatPercent(row.scene_coverage_ratio)}</td>
+                    <td>{formatPercent(row.scene_rule_contribution_ratio)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       <section className="strategy-trigger-card">

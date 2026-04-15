@@ -22,6 +22,7 @@ export type DetailOverview = {
   total?: number | null
   total_mv_yi?: number
   circ_mv_yi?: number
+  most_related_concept?: string
   concept?: string
   [key: string]: DetailPrimitive
 }

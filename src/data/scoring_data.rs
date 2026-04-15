@@ -301,11 +301,22 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
         [],
     )
     .map_err(|e| format!("创建scene_details失败:{e}"))?;
+
     conn.execute(
-        "ALTER TABLE scene_details ADD COLUMN IF NOT EXISTS scene_rank INTEGER",
+        "CREATE INDEX IF NOT EXISTS idx_score_summary_trade_date_ts ON score_summary(trade_date, ts_code)",
         [],
     )
-    .map_err(|e| format!("补充scene_rank字段失败:{e}"))?;
+    .map_err(|e| format!("创建score_summary索引失败:{e}"))?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rule_details_rule_date_ts ON rule_details(rule_name, trade_date, ts_code)",
+        [],
+    )
+    .map_err(|e| format!("创建rule_details索引失败:{e}"))?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scene_details_scene_date_ts ON scene_details(scene_name, trade_date, ts_code)",
+        [],
+    )
+    .map_err(|e| format!("创建scene_details索引失败:{e}"))?;
     Ok(())
 }
 

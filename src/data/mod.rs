@@ -93,6 +93,52 @@ pub fn load_ths_concepts_list(source_dir: &str) -> Result<Vec<Vec<String>>, Stri
     Ok(concept_list)
 }
 
+pub fn load_ths_concepts_named_map(
+    source_dir: &str,
+    value_column_names: &[&str],
+) -> Result<HashMap<String, String>, String> {
+    let path = ths_concepts_path(source_dir);
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(&path)
+        .map_err(|e| format!("打开stock_concepts.csv失败:路径:{:?},错误:{e}", path))?;
+
+    let headers = reader
+        .headers()
+        .map_err(|e| format!("读取stock_concepts.csv表头失败:{e}"))?
+        .iter()
+        .map(|value| value.trim().to_string())
+        .collect::<Vec<_>>();
+
+    let ts_code_idx = headers
+        .iter()
+        .position(|header| header.eq_ignore_ascii_case("ts_code"))
+        .unwrap_or(0);
+    let Some(value_idx) = value_column_names.iter().find_map(|column_name| {
+        headers
+            .iter()
+            .position(|header| header.eq_ignore_ascii_case(column_name))
+    }) else {
+        return Ok(HashMap::new());
+    };
+
+    let mut out = HashMap::new();
+    for row_result in reader.records() {
+        let row = row_result.map_err(|e| format!("解析stock_concepts.csv失败:{e}"))?;
+        let Some(ts_code) = row.get(ts_code_idx).map(str::trim).filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(value) = row.get(value_idx).map(str::trim).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+
+        out.insert(ts_code.to_string(), value.to_string());
+    }
+
+    Ok(out)
+}
+
 // ============================================ 原数据部分 ================================================
 
 #[derive(Debug, Clone)]

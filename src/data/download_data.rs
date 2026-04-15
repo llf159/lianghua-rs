@@ -225,6 +225,12 @@ pub fn init_stock_data_db(db_path: &str) -> Result<(), String> {
         [],
     )
     .map_err(|e| format!("创建stock_data失败:{e}"))?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_stock_data_ts_adj_date ON stock_data(ts_code, adj_type, trade_date)",
+        [],
+    )
+    .map_err(|e| format!("创建stock_data索引失败:{e}"))?;
     Ok(())
 }
 

@@ -1353,7 +1353,7 @@ export default function StrategyManagePage() {
                 </div>
               </section>
 
-              <section className="strategy-manage-bulk-board-col">
+              <section className="strategy-manage-bulk-board-col strategy-manage-bulk-board-col-center">
                 <div className="strategy-manage-list-head">
                   <strong>Scene 篮子区（点击 Scene 设为放入目标）</strong>
                   <span>{refactorRules.length} 条已加入</span>
@@ -1364,7 +1364,7 @@ export default function StrategyManagePage() {
                     <span>{bulkValidationIssues.length === 0 ? '通过' : `${bulkValidationIssues.length} 个问题`}</span>
                   </div>
                 </div>
-                <div className="strategy-manage-bulk-rule-list strategy-manage-bulk-classified-list">
+                <div className="strategy-manage-bulk-scene-strip">
                   {refactorScenes.map((scene) => {
                     const sceneName = scene.name.trim()
                     const bucket = sceneName ? (refactorRulesByScene.get(sceneName) ?? []) : []

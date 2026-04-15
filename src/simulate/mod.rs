@@ -1,11 +1,12 @@
 pub mod scene;
+pub mod rule;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use duckdb::{Connection, params};
 
 use crate::data::concept_performance_data::{
-    load_concept_trend_series, load_performance_trend_series,
+    load_concept_trend_series, load_industry_trend_series,
 };
 
 #[derive(Debug, Clone)]
@@ -14,10 +15,10 @@ pub struct ResidualReturnInput {
     pub stock_adj_type: String,
     pub index_ts_code: String,
     pub concept: String,
-    pub board: String,
+    pub industry: String,
     pub index_beta: f64,
     pub concept_beta: f64,
-    pub board_beta: f64,
+    pub industry_beta: f64,
     pub start_date: String,
     pub end_date: String,
 }
@@ -48,8 +49,8 @@ impl ResidualReturnInput {
         if !self.concept_beta.is_finite() {
             return Err("概念系数必须是有限数字".to_string());
         }
-        if !self.board_beta.is_finite() {
-            return Err("板块系数必须是有限数字".to_string());
+        if !self.industry_beta.is_finite() {
+            return Err("行业系数必须是有限数字".to_string());
         }
         Ok(())
     }
@@ -61,15 +62,35 @@ pub struct ResidualReturnPoint {
     pub stock_pct: f64,
     pub index_pct: f64,
     pub concept_pct: f64,
-    pub board_pct: f64,
+    pub industry_pct: f64,
     pub expected_pct: f64,
     pub residual_pct: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ResidualFactorSeriesRefs<'a> {
+    pub concept_series: Option<&'a HashMap<String, f64>>,
+    pub industry_series: Option<&'a HashMap<String, f64>>,
 }
 
 pub fn calc_stock_residual_returns(
     source_conn: &Connection,
     source_dir: &str,
     input: &ResidualReturnInput,
+) -> Result<Vec<ResidualReturnPoint>, String> {
+    calc_stock_residual_returns_with_factor_series(
+        source_conn,
+        source_dir,
+        input,
+        ResidualFactorSeriesRefs::default(),
+    )
+}
+
+pub fn calc_stock_residual_returns_with_factor_series(
+    source_conn: &Connection,
+    source_dir: &str,
+    input: &ResidualReturnInput,
+    factor_series: ResidualFactorSeriesRefs<'_>,
 ) -> Result<Vec<ResidualReturnPoint>, String> {
     input.validate()?;
 
@@ -95,11 +116,13 @@ pub fn calc_stock_residual_returns(
         return Ok(Vec::new());
     }
 
-    let concept_map: HashMap<String, f64> = if input.concept_beta.abs() <= f64::EPSILON {
-        HashMap::new()
-    } else if input.concept.trim().is_empty() {
-        index_series.clone()
-    } else {
+    let use_concept = input.concept_beta.abs() > f64::EPSILON;
+    let use_industry = input.industry_beta.abs() > f64::EPSILON;
+
+    let concept_series_owned: Option<HashMap<String, f64>> = if use_concept
+        && !input.concept.trim().is_empty()
+        && factor_series.concept_series.is_none()
+    {
         let concept_series = load_concept_trend_series(
             source_dir,
             input.concept.trim(),
@@ -110,64 +133,92 @@ pub fn calc_stock_residual_returns(
             return Ok(Vec::new());
         }
 
-        concept_series
-            .points
-            .into_iter()
-            .map(|point| (point.trade_date, point.performance_pct))
-            .collect()
+        Some(
+            concept_series
+                .points
+                .into_iter()
+                .map(|point| (point.trade_date, point.performance_pct))
+                .collect(),
+        )
+    } else {
+        None
     };
 
-    let board_map: HashMap<String, f64> = if input.board_beta.abs() <= f64::EPSILON {
-        HashMap::new()
-    } else if input.board.trim().is_empty() {
-        index_series.clone()
-    } else {
-        let board_series = load_performance_trend_series(
+    let industry_series_owned: Option<HashMap<String, f64>> = if use_industry
+        && !input.industry.trim().is_empty()
+        && factor_series.industry_series.is_none()
+    {
+        let industry_series = load_industry_trend_series(
             source_dir,
-            "board",
-            input.board.trim(),
+            input.industry.trim(),
             Some(input.start_date.trim()),
             Some(input.end_date.trim()),
         )?;
-        if board_series.points.is_empty() {
+        if industry_series.points.is_empty() {
             return Ok(Vec::new());
         }
 
-        board_series
-            .points
-            .into_iter()
-            .map(|point| (point.trade_date, point.performance_pct))
-            .collect()
+        Some(
+            industry_series
+                .points
+                .into_iter()
+                .map(|point| (point.trade_date, point.performance_pct))
+                .collect(),
+        )
+    } else {
+        None
     };
 
-    let mut date_set = BTreeSet::new();
-    for date in stock_series.keys() {
-        date_set.insert(date.clone());
-    }
-    for date in index_series.keys() {
-        date_set.insert(date.clone());
-    }
-    for date in concept_map.keys() {
-        date_set.insert(date.clone());
-    }
-    for date in board_map.keys() {
-        date_set.insert(date.clone());
-    }
+    let concept_map: Option<&HashMap<String, f64>> = if use_concept {
+        if input.concept.trim().is_empty() {
+            Some(&index_series)
+        } else if let Some(series) = factor_series.concept_series {
+            if series.is_empty() {
+                return Ok(Vec::new());
+            }
+            Some(series)
+        } else {
+            concept_series_owned.as_ref()
+        }
+    } else {
+        None
+    };
 
-    let use_concept = input.concept_beta.abs() > f64::EPSILON;
-    let use_board = input.board_beta.abs() > f64::EPSILON;
+    let industry_map: Option<&HashMap<String, f64>> = if use_industry {
+        if input.industry.trim().is_empty() {
+            Some(&index_series)
+        } else if let Some(series) = factor_series.industry_series {
+            if series.is_empty() {
+                return Ok(Vec::new());
+            }
+            Some(series)
+        } else {
+            industry_series_owned.as_ref()
+        }
+    } else {
+        None
+    };
 
-    let mut points = Vec::new();
-    for trade_date in date_set {
-        let Some(stock_pct) = stock_series.get(&trade_date).copied() else {
+    let mut trade_dates = stock_series
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    trade_dates.sort_unstable();
+
+    let mut points = Vec::with_capacity(trade_dates.len());
+    for trade_date in trade_dates {
+        let Some(stock_pct) = stock_series.get(trade_date).copied() else {
             continue;
         };
-        let Some(index_pct) = index_series.get(&trade_date).copied() else {
+        let Some(index_pct) = index_series.get(trade_date).copied() else {
             continue;
         };
 
         let concept_pct = if use_concept {
-            let Some(value) = concept_map.get(&trade_date).copied() else {
+            let Some(series) = concept_map else {
+                continue;
+            };
+            let Some(value) = series.get(trade_date).copied() else {
                 continue;
             };
             value
@@ -175,8 +226,11 @@ pub fn calc_stock_residual_returns(
             0.0
         };
 
-        let board_pct = if use_board {
-            let Some(value) = board_map.get(&trade_date).copied() else {
+        let industry_pct = if use_industry {
+            let Some(series) = industry_map else {
+                continue;
+            };
+            let Some(value) = series.get(trade_date).copied() else {
                 continue;
             };
             value
@@ -184,16 +238,17 @@ pub fn calc_stock_residual_returns(
             0.0
         };
 
-        let expected_pct =
-            input.index_beta * index_pct + input.concept_beta * concept_pct + input.board_beta * board_pct;
+        let expected_pct = input.index_beta * index_pct
+            + input.concept_beta * concept_pct
+            + input.industry_beta * industry_pct;
         let residual_pct = stock_pct - expected_pct;
 
         points.push(ResidualReturnPoint {
-            trade_date,
+            trade_date: trade_date.to_string(),
             stock_pct,
             index_pct,
             concept_pct,
-            board_pct,
+            industry_pct,
             expected_pct,
             residual_pct,
         });
@@ -254,7 +309,7 @@ mod tests {
     use duckdb::{Connection, params};
 
     use crate::{
-        data::source_db_path,
+        data::{concept_performance_db_path, source_db_path},
         simulate::{ResidualReturnInput, calc_stock_residual_returns},
     };
 
@@ -299,6 +354,36 @@ mod tests {
         conn
     }
 
+    fn prepare_concept_performance_db(source_dir: &str) {
+        let db_path = concept_performance_db_path(source_dir);
+        let conn = Connection::open(db_path).expect("open concept db");
+        conn.execute(
+            r#"
+            CREATE TABLE concept_performance (
+                trade_date VARCHAR,
+                performance_type VARCHAR,
+                concept VARCHAR,
+                performance_pct DOUBLE
+            )
+            "#,
+            [],
+        )
+        .expect("create concept_performance");
+
+        let mut app = conn
+            .appender("concept_performance")
+            .expect("appender concept_performance");
+        app.append_row(params!["20240102", "industry", "银行", 2.0_f64])
+            .expect("industry row1");
+        app.append_row(params!["20240103", "industry", "银行", 0.5_f64])
+            .expect("industry row2");
+        app.append_row(params!["20240102", "market", "主板", 9.0_f64])
+            .expect("market row1");
+        app.append_row(params!["20240103", "market", "主板", 9.0_f64])
+            .expect("market row2");
+        app.flush().expect("flush concept_performance");
+    }
+
     #[test]
     fn calc_stock_residual_returns_uses_index_as_concept_when_concept_empty() {
         let source_dir = temp_source_dir();
@@ -312,10 +397,10 @@ mod tests {
             stock_adj_type: "qfq".to_string(),
             index_ts_code: "000300.SH".to_string(),
             concept: "".to_string(),
-            board: "".to_string(),
+            industry: "".to_string(),
             index_beta: 0.5,
             concept_beta: 0.2,
-            board_beta: 0.0,
+            industry_beta: 0.0,
             start_date: "20240101".to_string(),
             end_date: "20240105".to_string(),
         };
@@ -326,15 +411,53 @@ mod tests {
         let p0 = &points[0];
         assert_eq!(p0.trade_date, "20240102");
         assert_eq!(p0.concept_pct, 1.0);
-        assert_eq!(p0.board_pct, 0.0);
+        assert_eq!(p0.industry_pct, 0.0);
         assert_eq!(p0.expected_pct, 0.7);
         assert_eq!(p0.residual_pct, 2.3);
 
         let p1 = &points[1];
         assert_eq!(p1.trade_date, "20240103");
         assert_eq!(p1.concept_pct, 0.5);
-        assert_eq!(p1.board_pct, 0.0);
+        assert_eq!(p1.industry_pct, 0.0);
         assert_eq!(p1.expected_pct, 0.35);
         assert_eq!(p1.residual_pct, 0.65);
+    }
+
+    #[test]
+    fn calc_stock_residual_returns_uses_industry_series_for_industry_factor() {
+        let source_dir = temp_source_dir();
+        create_dir_all(&source_dir).expect("create source dir");
+        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
+
+        let conn = prepare_source_db(source_dir_str);
+        prepare_concept_performance_db(source_dir_str);
+
+        let input = ResidualReturnInput {
+            ts_code: "000001.SZ".to_string(),
+            stock_adj_type: "qfq".to_string(),
+            index_ts_code: "000300.SH".to_string(),
+            concept: "".to_string(),
+            industry: "银行".to_string(),
+            index_beta: 0.0,
+            concept_beta: 0.0,
+            industry_beta: 1.0,
+            start_date: "20240101".to_string(),
+            end_date: "20240105".to_string(),
+        };
+
+        let points = calc_stock_residual_returns(&conn, source_dir_str, &input).expect("calc ok");
+        assert_eq!(points.len(), 2);
+
+        let p0 = &points[0];
+        assert_eq!(p0.trade_date, "20240102");
+        assert_eq!(p0.industry_pct, 2.0);
+        assert_eq!(p0.expected_pct, 2.0);
+        assert_eq!(p0.residual_pct, 1.0);
+
+        let p1 = &points[1];
+        assert_eq!(p1.trade_date, "20240103");
+        assert_eq!(p1.industry_pct, 0.5);
+        assert_eq!(p1.expected_pct, 0.5);
+        assert_eq!(p1.residual_pct, 0.5);
     }
 }

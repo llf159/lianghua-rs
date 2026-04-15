@@ -1,12 +1,31 @@
 import { useEffect, useMemo, useState } from "react";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import {
+  getRuleLayerBacktestDefaults,
   getSceneLayerBacktestDefaults,
+  runRuleLayerBacktest,
   runSceneLayerBacktest,
+  type RuleLayerBacktestData,
+  type RuleLayerRuleSummary,
   type SceneLayerBacktestData,
 } from "../../apis/strategyTrigger";
+import {
+  TableSortButton,
+  getAriaSort,
+  useTableSort,
+  type SortDefinition,
+} from "../../shared/tableSort";
 import { readStoredSourcePath } from "../../shared/storage";
 import "./css/SceneLayerBacktestPage.css";
+
+type RuleSummarySortKey =
+  | "rule_name"
+  | "point_count"
+  | "avg_residual_mean"
+  | "spread_mean"
+  | "ic_mean"
+  | "ic_std"
+  | "icir";
 
 function formatDateLabel(value?: string | null) {
   if (!value || value.length !== 8) {
@@ -33,21 +52,6 @@ function compactDateToInput(value?: string | null) {
   return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
 }
 
-function stateRank(state: string) {
-  switch (state) {
-    case "fail":
-      return 0;
-    case "observe":
-      return 1;
-    case "trigger":
-      return 2;
-    case "confirm":
-      return 3;
-    default:
-      return 1;
-  }
-}
-
 function formatPercent(value?: number | null, digits = 2) {
   if (value === null || value === undefined || !Number.isFinite(value)) {
     return "--";
@@ -67,13 +71,11 @@ const INDEX_OPTIONS = [
 
 export default function SceneLayerBacktestPage() {
   const [sourcePath, setSourcePath] = useState(() => readStoredSourcePath());
-  const [sceneOptions, setSceneOptions] = useState<string[]>([]);
-  const [sceneName, setSceneName] = useState("");
   const [stockAdjType, setStockAdjType] = useState("qfq");
   const [indexTsCode, setIndexTsCode] = useState<string>(INDEX_OPTIONS[0].value);
   const [indexBeta, setIndexBeta] = useState("0.5");
   const [conceptBeta, setConceptBeta] = useState("0.2");
-  const [boardBeta, setBoardBeta] = useState("0.0");
+  const [industryBeta, setIndustryBeta] = useState("0.0");
   const [startDateInput, setStartDateInput] = useState("");
   const [endDateInput, setEndDateInput] = useState("");
   const [minSamplesPerSceneDay, setMinSamplesPerSceneDay] = useState("5");
@@ -82,6 +84,19 @@ export default function SceneLayerBacktestPage() {
   const [initializing, setInitializing] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<SceneLayerBacktestData | null>(null);
+
+  const [ruleStockAdjType, setRuleStockAdjType] = useState("qfq");
+  const [ruleIndexTsCode, setRuleIndexTsCode] = useState<string>(INDEX_OPTIONS[0].value);
+  const [ruleIndexBeta, setRuleIndexBeta] = useState("0.5");
+  const [ruleConceptBeta, setRuleConceptBeta] = useState("0.2");
+  const [ruleIndustryBeta, setRuleIndustryBeta] = useState("0.0");
+  const [ruleStartDateInput, setRuleStartDateInput] = useState("");
+  const [ruleEndDateInput, setRuleEndDateInput] = useState("");
+  const [minSamplesPerRuleDay, setMinSamplesPerRuleDay] = useState("5");
+  const [ruleBacktestPeriod, setRuleBacktestPeriod] = useState("1");
+  const [ruleLoading, setRuleLoading] = useState(false);
+  const [ruleError, setRuleError] = useState("");
+  const [ruleResult, setRuleResult] = useState<RuleLayerBacktestData | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -94,17 +109,35 @@ export default function SceneLayerBacktestPage() {
         }
         setSourcePath(resolved);
 
-        const defaults = await getSceneLayerBacktestDefaults(resolved);
-        if (cancelled) {
-          return;
+        try {
+          const sceneDefaults = await getSceneLayerBacktestDefaults(resolved);
+          if (cancelled) {
+            return;
+          }
+          setStartDateInput(compactDateToInput(sceneDefaults.start_date));
+          setEndDateInput(compactDateToInput(sceneDefaults.end_date));
+        } catch (sceneInitError) {
+          if (!cancelled) {
+            setError(`读取场景默认参数失败: ${String(sceneInitError)}`);
+          }
         }
-        setSceneOptions(defaults.scene_options ?? []);
-        setSceneName(defaults.resolved_scene_name ?? defaults.scene_options?.[0] ?? "");
-        setStartDateInput(compactDateToInput(defaults.start_date));
-        setEndDateInput(compactDateToInput(defaults.end_date));
+
+        try {
+          const ruleDefaults = await getRuleLayerBacktestDefaults(resolved);
+          if (cancelled) {
+            return;
+          }
+          setRuleStartDateInput(compactDateToInput(ruleDefaults.start_date));
+          setRuleEndDateInput(compactDateToInput(ruleDefaults.end_date));
+        } catch (ruleInitError) {
+          if (!cancelled) {
+            setRuleError(`读取策略默认参数失败: ${String(ruleInitError)}`);
+          }
+        }
       } catch (initError) {
         if (!cancelled) {
-          setError(`读取场景默认参数失败: ${String(initError)}`);
+          setError(`读取回测默认参数失败: ${String(initError)}`);
+          setRuleError(`读取回测默认参数失败: ${String(initError)}`);
         }
       } finally {
         if (!cancelled) {
@@ -119,52 +152,52 @@ export default function SceneLayerBacktestPage() {
     };
   }, []);
 
-  const layerSummary = useMemo(() => {
-    if (!result || result.points.length === 0) {
-      return [] as Array<{ state: string; count: number; avg: number }>;
-    }
-
-    const acc = new Map<string, { sum: number; count: number }>();
-    for (const point of result.points) {
-      for (const item of point.state_avg_residual_returns ?? []) {
-        const state = (item.scene_state || "unknown").trim().toLowerCase() || "unknown";
-        const value = item.avg_residual_return;
-        if (value === null || value === undefined || !Number.isFinite(value)) {
-          continue;
-        }
-        const prev = acc.get(state) ?? { sum: 0, count: 0 };
-        prev.sum += value;
-        prev.count += 1;
-        acc.set(state, prev);
-      }
-    }
-
-    return Array.from(acc.entries())
-      .map(([state, agg]) => ({
-        state,
-        count: agg.count,
-        avg: agg.count > 0 ? agg.sum / agg.count : 0,
-      }))
-      .sort((a, b) => stateRank(a.state) - stateRank(b.state) || a.state.localeCompare(b.state));
-  }, [result]);
-
-  const layerSpreadSummary = useMemo(() => {
-    if (layerSummary.length < 2) {
-      return null;
-    }
-    const low = layerSummary[0];
-    const high = layerSummary[layerSummary.length - 1];
-    return {
-      lowState: low.state,
-      lowAvg: low.avg,
-      highState: high.state,
-      highAvg: high.avg,
-      spread: high.avg - low.avg,
-    };
-  }, [layerSummary]);
-
-  const isAllScenesResult = Boolean(result?.is_all_scenes);
   const allSceneSummaries = result?.all_scene_summaries ?? [];
+  const allRuleSummaries = ruleResult?.all_rule_summaries ?? [];
+
+  const ruleSummarySortDefinitions = useMemo(
+    () =>
+      ({
+        rule_name: {
+          value: (row: RuleLayerRuleSummary) => row.rule_name,
+        },
+        point_count: {
+          value: (row: RuleLayerRuleSummary) => row.point_count,
+        },
+        avg_residual_mean: {
+          value: (row: RuleLayerRuleSummary) => row.avg_residual_mean,
+        },
+        spread_mean: {
+          value: (row: RuleLayerRuleSummary) => row.spread_mean,
+        },
+        ic_mean: {
+          value: (row: RuleLayerRuleSummary) => row.ic_mean,
+        },
+        ic_std: {
+          value: (row: RuleLayerRuleSummary) => row.ic_std,
+        },
+        icir: {
+          value: (row: RuleLayerRuleSummary) => row.icir,
+        },
+      }) satisfies Partial<
+        Record<RuleSummarySortKey, SortDefinition<RuleLayerRuleSummary>>
+      >,
+    [],
+  );
+
+  const {
+    sortKey: ruleSummarySortKey,
+    sortDirection: ruleSummarySortDirection,
+    sortedRows: sortedRuleSummaries,
+    toggleSort: toggleRuleSummarySort,
+  } = useTableSort<RuleLayerRuleSummary, RuleSummarySortKey>(
+    allRuleSummaries,
+    ruleSummarySortDefinitions,
+    {
+      key: "spread_mean",
+      direction: "desc",
+    },
+  );
 
   async function onRunBacktest() {
     const normalizedStart = normalizeDateInput(startDateInput);
@@ -172,10 +205,6 @@ export default function SceneLayerBacktestPage() {
 
     if (!sourcePath.trim()) {
       setError("当前数据目录为空，请先在数据管理页确认目录。");
-      return;
-    }
-    if (!sceneName.trim()) {
-      setError("请选择场景名。");
       return;
     }
     if (!indexTsCode.trim()) {
@@ -196,12 +225,11 @@ export default function SceneLayerBacktestPage() {
     try {
       const data = await runSceneLayerBacktest({
         sourcePath,
-        sceneName: sceneName.trim(),
         stockAdjType: stockAdjType.trim() || "qfq",
         indexTsCode: indexTsCode.trim(),
         indexBeta: Number(indexBeta),
         conceptBeta: Number(conceptBeta),
-        boardBeta: Number(boardBeta),
+        industryBeta: Number(industryBeta),
         startDate: normalizedStart,
         endDate: normalizedEnd,
         minSamplesPerSceneDay: Math.max(1, Number(minSamplesPerSceneDay) || 1),
@@ -213,6 +241,51 @@ export default function SceneLayerBacktestPage() {
       setError(`执行场景整体回测失败: ${String(runError)}`);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function onRunRuleBacktest() {
+    const normalizedStart = normalizeDateInput(ruleStartDateInput);
+    const normalizedEnd = normalizeDateInput(ruleEndDateInput);
+
+    if (!sourcePath.trim()) {
+      setRuleError("当前数据目录为空，请先在数据管理页确认目录。");
+      return;
+    }
+    if (!ruleIndexTsCode.trim()) {
+      setRuleError("请选择指数。");
+      return;
+    }
+    if (!normalizedStart || !normalizedEnd) {
+      setRuleError("请填写开始和结束日期。");
+      return;
+    }
+    if (normalizedStart > normalizedEnd) {
+      setRuleError("开始日期不能晚于结束日期。");
+      return;
+    }
+
+    setRuleLoading(true);
+    setRuleError("");
+    try {
+      const data = await runRuleLayerBacktest({
+        sourcePath,
+        stockAdjType: ruleStockAdjType.trim() || "qfq",
+        indexTsCode: ruleIndexTsCode.trim(),
+        indexBeta: Number(ruleIndexBeta),
+        conceptBeta: Number(ruleConceptBeta),
+        industryBeta: Number(ruleIndustryBeta),
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+        minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerRuleDay) || 1),
+        backtestPeriod: Math.max(1, Number(ruleBacktestPeriod) || 1),
+      });
+      setRuleResult(data);
+    } catch (runError) {
+      setRuleResult(null);
+      setRuleError(`执行策略回测失败: ${String(runError)}`);
+    } finally {
+      setRuleLoading(false);
     }
   }
 
@@ -229,22 +302,6 @@ export default function SceneLayerBacktestPage() {
         </div>
 
         <div className="scene-layer-form-grid">
-          <label className="scene-layer-field">
-            <span>场景名（现有）</span>
-            <select
-              value={sceneName}
-              onChange={(event) => setSceneName(event.target.value)}
-              disabled={initializing || sceneOptions.length === 0}
-            >
-              {sceneOptions.length === 0 ? <option value="">暂无场景</option> : null}
-              {sceneOptions.length > 0 ? <option value="__ALL__">全部场景</option> : null}
-              {sceneOptions.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </select>
-          </label>
           <label className="scene-layer-field">
             <span>股票复权</span>
             <input value={stockAdjType} onChange={(event) => setStockAdjType(event.target.value)} />
@@ -268,8 +325,8 @@ export default function SceneLayerBacktestPage() {
             <input type="number" step="0.01" value={conceptBeta} onChange={(event) => setConceptBeta(event.target.value)} />
           </label>
           <label className="scene-layer-field">
-            <span>板块 Beta</span>
-            <input type="number" step="0.01" value={boardBeta} onChange={(event) => setBoardBeta(event.target.value)} />
+            <span>行业 Beta</span>
+            <input type="number" step="0.01" value={industryBeta} onChange={(event) => setIndustryBeta(event.target.value)} />
           </label>
           <label className="scene-layer-field">
             <span>开始日期（scene_details 最早）</span>
@@ -290,7 +347,7 @@ export default function SceneLayerBacktestPage() {
         </div>
 
         <div className="scene-layer-actions">
-          <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunBacktest()} disabled={loading || initializing || sceneOptions.length === 0}>
+          <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunBacktest()} disabled={loading || initializing}>
             {loading ? "回测中..." : "执行场景整体回测"}
           </button>
         </div>
@@ -304,15 +361,15 @@ export default function SceneLayerBacktestPage() {
           <div className="scene-layer-summary-grid">
             <div className="scene-layer-summary-item">
               <span>场景</span>
-              <strong>{isAllScenesResult ? "全部场景" : result.scene_name}</strong>
+              <strong>全部场景</strong>
             </div>
             <div className="scene-layer-summary-item">
               <span>区间</span>
               <strong>{formatDateLabel(result.start_date)} ~ {formatDateLabel(result.end_date)}</strong>
             </div>
             <div className="scene-layer-summary-item">
-              <span>{isAllScenesResult ? "场景数" : "有效交易日"}</span>
-              <strong>{isAllScenesResult ? allSceneSummaries.length : result.points.length}</strong>
+              <span>场景数</span>
+              <strong>{allSceneSummaries.length}</strong>
             </div>
             <div className="scene-layer-summary-item">
               <span>最小样本阈值</span>
@@ -322,81 +379,229 @@ export default function SceneLayerBacktestPage() {
               <span>回测周期（天）</span>
               <strong>{result.backtest_period}</strong>
             </div>
-            {!isAllScenesResult ? (
-              <>
-                <div className="scene-layer-summary-item">
-                  <span>Spread 均值（日度高层-低层）</span>
-                  <strong>{formatPercent(result.spread_mean)}</strong>
-                </div>
-                <div className="scene-layer-summary-item">
-                  <span>IC 均值</span>
-                  <strong>{formatNumber(result.ic_mean)}</strong>
-                </div>
-                <div className="scene-layer-summary-item">
-                  <span>ICIR</span>
-                  <strong>{formatNumber(result.icir)}</strong>
-                </div>
-                <div className="scene-layer-summary-item">
-                  <span>板块 Beta</span>
-                  <strong>{formatNumber(result.board_beta, 2)}</strong>
-                </div>
-                <div className="scene-layer-summary-item">
-                  <span>分层均值差（整体）</span>
-                  <strong>{layerSpreadSummary ? formatPercent(layerSpreadSummary.spread) : "--"}</strong>
-                </div>
-                <div className="scene-layer-summary-item">
-                  <span>高低层对比</span>
-                  <strong>
-                    {layerSpreadSummary
-                      ? `${layerSpreadSummary.highState} - ${layerSpreadSummary.lowState}`
-                      : "--"}
-                  </strong>
-                </div>
-              </>
-            ) : null}
           </div>
 
-          {isAllScenesResult ? (
-            allSceneSummaries.length === 0 ? (
-              <div className="scene-layer-empty">当前没有可回测的场景。</div>
-            ) : (
-              <div className="scene-layer-layer-summary">
-                <h3>全部场景汇总（按 Spread 均值降序）</h3>
-                <div className="scene-layer-layer-grid">
-                  {allSceneSummaries.map((item) => (
-                    <div key={item.scene_name} className="scene-layer-layer-item">
-                      <span className="scene-layer-layer-state">{item.scene_name}</span>
-                      <span>有效交易日：{item.point_count}</span>
-                      <span>Spread 均值：{formatPercent(item.spread_mean)}</span>
-                      <span>IC 均值：{formatNumber(item.ic_mean)}</span>
-                      <span>ICIR：{formatNumber(item.icir)}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )
-          ) : layerSummary.length > 0 ? (
+          {allSceneSummaries.length === 0 ? (
+            <div className="scene-layer-empty">当前没有可回测的场景。</div>
+          ) : null}
+
+          {allSceneSummaries.length > 0 ? (
             <div className="scene-layer-layer-summary">
-              <h3>分层差总结</h3>
+              <h3>全部场景汇总（按 Spread 均值降序）</h3>
               <div className="scene-layer-layer-grid">
-                {layerSummary.map((item) => (
-                  <div key={item.state} className="scene-layer-layer-item">
-                    <span className="scene-layer-layer-state">{item.state}</span>
-                    <span>均值残差：{formatPercent(item.avg)}</span>
-                    <span>出现天数：{item.count}</span>
+                {allSceneSummaries.map((item) => (
+                  <div key={item.scene_name} className="scene-layer-layer-item">
+                    <span className="scene-layer-layer-state">{item.scene_name}</span>
+                    <span>有效交易日：{item.point_count}</span>
+                    <span>Spread 均值：{formatPercent(item.spread_mean)}</span>
+                    <span>IC 均值：{formatNumber(item.ic_mean)}</span>
+                    <span>ICIR：{formatNumber(item.icir)}</span>
                   </div>
                 ))}
               </div>
-              {layerSpreadSummary ? (
-                <div className="scene-layer-layer-footnote">
-                  整体分层差 = {layerSpreadSummary.highState}({formatPercent(layerSpreadSummary.highAvg)}) - {layerSpreadSummary.lowState}({formatPercent(layerSpreadSummary.lowAvg)}) = <strong>{formatPercent(layerSpreadSummary.spread)}</strong>
-                </div>
-              ) : null}
             </div>
           ) : null}
+        </section>
+      ) : null}
 
-          {!isAllScenesResult && result.points.length === 0 ? (
-            <div className="scene-layer-empty">当前条件下没有可展示的回测结果。</div>
+      <section className="scene-layer-card">
+        <h2 className="scene-layer-title">策略回测</h2>
+        <p className="scene-layer-caption">
+          使用 rule_details 中的策略得分与残差收益，计算策略日度均值、Top-Bottom Spread、IC / ICIR。
+        </p>
+
+        <div className="scene-layer-source-note">
+          当前数据目录：<strong>{sourcePath || "--"}</strong>
+        </div>
+
+        <div className="scene-layer-form-grid">
+          <label className="scene-layer-field">
+            <span>股票复权</span>
+            <input value={ruleStockAdjType} onChange={(event) => setRuleStockAdjType(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>指数</span>
+            <select value={ruleIndexTsCode} onChange={(event) => setRuleIndexTsCode(event.target.value)}>
+              {INDEX_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="scene-layer-field">
+            <span>指数 Beta</span>
+            <input type="number" step="0.01" value={ruleIndexBeta} onChange={(event) => setRuleIndexBeta(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>概念 Beta</span>
+            <input type="number" step="0.01" value={ruleConceptBeta} onChange={(event) => setRuleConceptBeta(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>行业 Beta</span>
+            <input type="number" step="0.01" value={ruleIndustryBeta} onChange={(event) => setRuleIndustryBeta(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>开始日期（rule_details 最早）</span>
+            <input type="date" value={ruleStartDateInput} onChange={(event) => setRuleStartDateInput(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>结束日期（rule_details 最晚）</span>
+            <input type="date" value={ruleEndDateInput} onChange={(event) => setRuleEndDateInput(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>策略日最少样本</span>
+            <input type="number" min="1" value={minSamplesPerRuleDay} onChange={(event) => setMinSamplesPerRuleDay(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>回测周期（天）</span>
+            <input type="number" min="1" value={ruleBacktestPeriod} onChange={(event) => setRuleBacktestPeriod(event.target.value)} />
+          </label>
+        </div>
+
+        <div className="scene-layer-actions">
+          <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunRuleBacktest()} disabled={ruleLoading || initializing}>
+            {ruleLoading ? "回测中..." : "执行策略回测"}
+          </button>
+        </div>
+
+        {ruleError ? <div className="scene-layer-error">{ruleError}</div> : null}
+      </section>
+
+      {ruleResult ? (
+        <section className="scene-layer-card">
+          <div className="scene-layer-layer-summary">
+            <h3>策略回测汇总</h3>
+            <div className="scene-layer-contrib-table-wrap">
+              <table className="scene-layer-contrib-table">
+                <thead>
+                  <tr>
+                    <th>策略</th>
+                    <th>区间</th>
+                    <th>指数</th>
+                    <th>Beta（指/概/行）</th>
+                    <th>策略数</th>
+                    <th>最小样本阈值</th>
+                    <th>回测周期（天）</th>
+                    <th>残差均值（日度）</th>
+                    <th>Spread 均值（日度高分-低分）</th>
+                    <th>IC 均值</th>
+                    <th>IC 标准差</th>
+                    <th>ICIR</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>全部策略</td>
+                    <td>{formatDateLabel(ruleResult.start_date)} ~ {formatDateLabel(ruleResult.end_date)}</td>
+                    <td>{ruleResult.index_ts_code}</td>
+                    <td>{formatNumber(ruleResult.index_beta, 2)} / {formatNumber(ruleResult.concept_beta, 2)} / {formatNumber(ruleResult.industry_beta, 2)}</td>
+                    <td>{allRuleSummaries.length}</td>
+                    <td>{ruleResult.min_samples_per_rule_day}</td>
+                    <td>{ruleResult.backtest_period}</td>
+                    <td>{formatPercent(ruleResult.avg_residual_mean)}</td>
+                    <td>{formatPercent(ruleResult.spread_mean)}</td>
+                    <td>{formatNumber(ruleResult.ic_mean)}</td>
+                    <td>{formatNumber(ruleResult.ic_std)}</td>
+                    <td>{formatNumber(ruleResult.icir)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {allRuleSummaries.length === 0 ? (
+            <div className="scene-layer-empty">当前没有可回测的策略。</div>
+          ) : null}
+
+          {allRuleSummaries.length > 0 ? (
+            <div className="scene-layer-layer-summary">
+              <h3>全部策略明细（点击表头排序）</h3>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table scene-layer-rule-detail-table">
+                  <thead>
+                    <tr>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "rule_name", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="策略名"
+                          isActive={ruleSummarySortKey === "rule_name" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("rule_name")}
+                          title="按策略名排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "point_count", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="有效交易日"
+                          isActive={ruleSummarySortKey === "point_count" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("point_count")}
+                          title="按有效交易日排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "avg_residual_mean", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="残差均值（日度）"
+                          isActive={ruleSummarySortKey === "avg_residual_mean" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("avg_residual_mean")}
+                          title="按残差均值排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "spread_mean", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="Spread 均值"
+                          isActive={ruleSummarySortKey === "spread_mean" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("spread_mean")}
+                          title="按 Spread 均值排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "ic_mean", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="IC 均值"
+                          isActive={ruleSummarySortKey === "ic_mean" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("ic_mean")}
+                          title="按 IC 均值排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "ic_std", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="IC 标准差"
+                          isActive={ruleSummarySortKey === "ic_std" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("ic_std")}
+                          title="按 IC 标准差排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "icir", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="ICIR"
+                          isActive={ruleSummarySortKey === "icir" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("icir")}
+                          title="按 ICIR 排序"
+                        />
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedRuleSummaries.map((item) => (
+                      <tr key={item.rule_name}>
+                        <td>{item.rule_name}</td>
+                        <td>{item.point_count}</td>
+                        <td>{formatPercent(item.avg_residual_mean)}</td>
+                        <td>{formatPercent(item.spread_mean)}</td>
+                        <td>{formatNumber(item.ic_mean)}</td>
+                        <td>{formatNumber(item.ic_std)}</td>
+                        <td>{formatNumber(item.icir)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           ) : null}
         </section>
       ) : null}

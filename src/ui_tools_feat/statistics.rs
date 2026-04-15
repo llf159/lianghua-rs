@@ -1,15 +1,22 @@
 use std::collections::{HashMap, HashSet};
 
-use duckdb::{params, Connection};
+use duckdb::{Connection, params};
 use serde::Serialize;
 
 use crate::{
     data::{
-        concept_performance_db_path, load_stock_list, load_ths_concepts_list, result_db_path,
-        source_db_path, ScopeWay, ScoreRule, ScoreScene,
+        ScopeWay, ScoreRule, ScoreScene, concept_performance_db_path, load_stock_list,
+        load_ths_concepts_list, result_db_path, source_db_path,
     },
-    simulate::scene::{
-        SceneLayerConfig, SceneLayerFromDbInput, calc_scene_layer_metrics_from_db,
+    simulate::{
+        rule::{
+            RuleLayerConfig, RuleLayerFromDbInput, calc_all_rule_layer_metrics_from_db,
+            calc_rule_layer_metrics_from_db,
+        },
+        scene::{
+            SceneLayerConfig, SceneLayerFromDbInput, calc_all_scene_layer_metrics_from_db,
+            calc_scene_layer_metrics_from_db,
+        },
     },
     ui_tools_feat::{build_concepts_map, build_name_map},
     utils::utils::board_category,
@@ -109,6 +116,33 @@ pub struct StrategyStatisticsDetailData {
 }
 
 #[derive(Debug, Serialize)]
+pub struct SceneStageRow {
+    pub stage: String,
+    pub sample_count: i64,
+    pub stage_ratio_in_scene: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SceneContributionSummary {
+    pub scene_covered_count: i64,
+    pub scene_total_sample_count: i64,
+    pub scene_coverage_ratio: Option<f64>,
+    pub scene_rule_contribution_score: Option<f64>,
+    pub all_rule_contribution_score: Option<f64>,
+    pub scene_rule_contribution_ratio: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SceneStatisticsPageData {
+    pub scene_options: Option<Vec<String>>,
+    pub resolved_scene_name: Option<String>,
+    pub analysis_trade_date_options: Option<Vec<String>>,
+    pub resolved_analysis_trade_date: Option<String>,
+    pub stage_rows: Option<Vec<SceneStageRow>>,
+    pub summary: Option<SceneContributionSummary>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct SceneLayerStateAvgResidualReturn {
     pub scene_state: String,
     pub avg_residual_return: Option<f64>,
@@ -139,7 +173,7 @@ pub struct SceneLayerBacktestData {
     pub index_ts_code: String,
     pub index_beta: f64,
     pub concept_beta: f64,
-    pub board_beta: f64,
+    pub industry_beta: f64,
     pub start_date: String,
     pub end_date: String,
     pub min_samples_per_scene_day: usize,
@@ -157,6 +191,57 @@ pub struct SceneLayerBacktestData {
 pub struct SceneLayerBacktestDefaultsData {
     pub scene_options: Vec<String>,
     pub resolved_scene_name: Option<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleLayerPointPayload {
+    pub trade_date: String,
+    pub sample_count: usize,
+    pub avg_rule_score: Option<f64>,
+    pub avg_residual_return: Option<f64>,
+    pub top_bottom_spread: Option<f64>,
+    pub ic: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleLayerRuleSummary {
+    pub rule_name: String,
+    pub point_count: usize,
+    pub avg_residual_mean: Option<f64>,
+    pub spread_mean: Option<f64>,
+    pub ic_mean: Option<f64>,
+    pub ic_std: Option<f64>,
+    pub icir: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleLayerBacktestData {
+    pub rule_name: String,
+    pub stock_adj_type: String,
+    pub index_ts_code: String,
+    pub index_beta: f64,
+    pub concept_beta: f64,
+    pub industry_beta: f64,
+    pub start_date: String,
+    pub end_date: String,
+    pub min_samples_per_rule_day: usize,
+    pub backtest_period: usize,
+    pub points: Vec<RuleLayerPointPayload>,
+    pub avg_residual_mean: Option<f64>,
+    pub spread_mean: Option<f64>,
+    pub ic_mean: Option<f64>,
+    pub ic_std: Option<f64>,
+    pub icir: Option<f64>,
+    pub is_all_rules: bool,
+    pub all_rule_summaries: Vec<RuleLayerRuleSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleLayerBacktestDefaultsData {
+    pub rule_options: Vec<String>,
+    pub resolved_rule_name: Option<String>,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
 }
@@ -247,6 +332,17 @@ fn load_rule_meta(source_path: &str) -> Result<(Vec<String>, HashMap<String, Rul
 fn load_scene_options(source_path: &str) -> Result<Vec<String>, String> {
     let scenes = ScoreScene::load_scenes(source_path)?;
     Ok(scenes.into_iter().map(|scene| scene.name).collect())
+}
+
+fn load_scene_rule_name_sets(source_path: &str) -> Result<HashMap<String, HashSet<String>>, String> {
+    let rules = ScoreRule::load_rules(source_path)?;
+    let mut out: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for rule in rules {
+        out.entry(rule.scene_name).or_default().insert(rule.name);
+    }
+
+    Ok(out)
 }
 
 fn query_overview(conn: &Connection) -> Result<StrategyOverviewPayload, String> {
@@ -522,6 +618,18 @@ fn resolve_strategy_name(requested: Option<String>, strategy_options: &[String])
     None
 }
 
+fn resolve_scene_name(requested: Option<String>, scene_options: &[String]) -> Option<String> {
+    let requested = requested
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(scene_name) = requested {
+        if scene_options.iter().any(|item| item == &scene_name) {
+            return Some(scene_name);
+        }
+    }
+    scene_options.first().cloned()
+}
+
 fn resolve_analysis_trade_date(
     requested: Option<String>,
     trade_date_options: &[String],
@@ -535,6 +643,206 @@ fn resolve_analysis_trade_date(
         }
     }
     trade_date_options.first().cloned()
+}
+
+fn query_scene_trade_date_options(conn: &Connection) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT DISTINCT trade_date
+            FROM scene_details
+            ORDER BY trade_date DESC
+            "#,
+        )
+        .map_err(|e| format!("预编译 scene 交易日 SQL 失败: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("执行 scene 交易日 SQL 失败: {e}"))?;
+
+    let mut out = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取 scene 交易日失败: {e}"))?
+    {
+        let trade_date: String = row.get(0).map_err(|e| format!("读取交易日字段失败: {e}"))?;
+        if !trade_date.trim().is_empty() {
+            out.push(trade_date);
+        }
+    }
+
+    Ok(out)
+}
+
+fn query_scene_stage_rows(
+    conn: &Connection,
+    scene_name: &str,
+    trade_date: &str,
+) -> Result<(Vec<SceneStageRow>, i64, i64), String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                COALESCE(NULLIF(stage, ''), 'none') AS stage,
+                COUNT(*) AS sample_count
+            FROM scene_details
+            WHERE trade_date = ?
+              AND scene_name = ?
+            GROUP BY 1
+            "#,
+        )
+        .map_err(|e| format!("预编译 scene 阶段统计 SQL 失败: {e}"))?;
+    let mut rows = stmt
+        .query(params![trade_date, scene_name])
+        .map_err(|e| format!("执行 scene 阶段统计 SQL 失败: {e}"))?;
+
+    let mut stage_count_map: HashMap<String, i64> = HashMap::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取 scene 阶段统计失败: {e}"))?
+    {
+        let stage: String = row.get(0).map_err(|e| format!("读取阶段字段失败: {e}"))?;
+        let sample_count: i64 = row.get(1).map_err(|e| format!("读取阶段数量失败: {e}"))?;
+        let normalized_stage = stage.trim().to_ascii_lowercase();
+        stage_count_map.insert(normalized_stage, sample_count);
+    }
+
+    let total_sample_count: i64 = stage_count_map.values().sum();
+    let none_count = stage_count_map.get("none").copied().unwrap_or(0);
+    let covered_count = (total_sample_count - none_count).max(0);
+
+    let mut rows_out = Vec::new();
+    let stage_order = ["trigger", "confirm", "observe", "fail", "none"];
+
+    for stage in stage_order {
+        let sample_count = stage_count_map.remove(stage).unwrap_or(0);
+        rows_out.push(SceneStageRow {
+            stage: stage.to_string(),
+            sample_count,
+            stage_ratio_in_scene: if total_sample_count > 0 {
+                Some(sample_count as f64 / total_sample_count as f64)
+            } else {
+                None
+            },
+        });
+    }
+
+    let mut remain_stages = stage_count_map.into_iter().collect::<Vec<_>>();
+    remain_stages.sort_by(|a, b| a.0.cmp(&b.0));
+    for (stage, sample_count) in remain_stages {
+        rows_out.push(SceneStageRow {
+            stage,
+            sample_count,
+            stage_ratio_in_scene: if total_sample_count > 0 {
+                Some(sample_count as f64 / total_sample_count as f64)
+            } else {
+                None
+            },
+        });
+    }
+
+    Ok((rows_out, total_sample_count, covered_count))
+}
+
+fn query_rule_contribution_by_date(
+    conn: &Connection,
+    trade_date: &str,
+) -> Result<HashMap<String, f64>, String> {
+    let sql = r#"
+        WITH daily_rank_bounds AS (
+            SELECT
+                trade_date,
+                MAX(rank) AS max_rank
+            FROM score_summary
+            WHERE trade_date = ?
+            GROUP BY 1
+        ),
+        triggered_rule_rows AS (
+            SELECT *
+            FROM rule_details
+            WHERE trade_date = ?
+              AND rule_score IS NOT NULL
+              AND ABS(rule_score) > 1e-12
+        )
+        SELECT
+            d.rule_name,
+            SUM(
+                CASE
+                    WHEN s.rank IS NOT NULL
+                      AND b.max_rank IS NOT NULL
+                      AND b.max_rank > 0
+                    THEN d.rule_score * CAST((b.max_rank + 1 - s.rank) AS DOUBLE) / CAST(b.max_rank AS DOUBLE)
+                    ELSE 0
+                END
+            ) AS contribution_score
+        FROM triggered_rule_rows AS d
+        LEFT JOIN score_summary AS s
+          ON s.ts_code = d.ts_code
+         AND s.trade_date = d.trade_date
+        LEFT JOIN daily_rank_bounds AS b
+          ON b.trade_date = d.trade_date
+        GROUP BY 1
+    "#;
+
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| format!("预编译 scene 规则贡献度 SQL 失败: {e}"))?;
+    let mut rows = stmt
+        .query(params![trade_date, trade_date])
+        .map_err(|e| format!("执行 scene 规则贡献度 SQL 失败: {e}"))?;
+
+    let mut out = HashMap::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取 scene 规则贡献度失败: {e}"))?
+    {
+        let rule_name: String = row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?;
+        let contribution_score = row
+            .get::<usize, Option<f64>>(1)
+            .map_err(|e| format!("读取规则贡献度失败: {e}"))?
+            .unwrap_or(0.0);
+        out.insert(rule_name, contribution_score);
+    }
+
+    Ok(out)
+}
+
+fn build_scene_contribution_summary(
+    scene_total_sample_count: i64,
+    scene_covered_count: i64,
+    scene_rule_names: Option<&HashSet<String>>,
+    contribution_by_rule: &HashMap<String, f64>,
+) -> SceneContributionSummary {
+    let scene_rule_contribution_score = scene_rule_names.map(|rule_names| {
+        contribution_by_rule
+            .iter()
+            .filter(|(rule_name, _)| rule_names.contains(*rule_name))
+            .map(|(_, score)| *score)
+            .sum::<f64>()
+    });
+    let all_rule_contribution_score = if contribution_by_rule.is_empty() {
+        None
+    } else {
+        Some(contribution_by_rule.values().sum::<f64>())
+    };
+    let scene_rule_contribution_ratio = match (scene_rule_contribution_score, all_rule_contribution_score) {
+        (Some(scene_score), Some(all_score)) if all_score.abs() > 1e-12 => {
+            Some(scene_score / all_score)
+        }
+        _ => None,
+    };
+
+    SceneContributionSummary {
+        scene_covered_count,
+        scene_total_sample_count,
+        scene_coverage_ratio: if scene_total_sample_count > 0 {
+            Some(scene_covered_count as f64 / scene_total_sample_count as f64)
+        } else {
+            None
+        },
+        scene_rule_contribution_score,
+        all_rule_contribution_score,
+        scene_rule_contribution_ratio,
+    }
 }
 
 fn build_chart(strategy_rows: &[StrategyDailyRow]) -> StrategyChartPayload {
@@ -652,12 +960,14 @@ pub fn get_strategy_statistics_detail(
     }
     let resolved_analysis_trade_date =
         resolve_analysis_trade_date(analysis_trade_date, &analysis_trade_date_options);
-    let selected_daily_row = resolved_analysis_trade_date.as_ref().and_then(|trade_date| {
-        strategy_rows
-            .iter()
-            .find(|row| row.trade_date == *trade_date)
-            .cloned()
-    });
+    let selected_daily_row = resolved_analysis_trade_date
+        .as_ref()
+        .and_then(|trade_date| {
+            strategy_rows
+                .iter()
+                .find(|row| row.trade_date == *trade_date)
+                .cloned()
+        });
     let triggered_stocks = if let Some(trade_date) = resolved_analysis_trade_date.as_deref() {
         query_triggered_stocks(&conn, &source_path, &strategy_name, trade_date)?
     } else {
@@ -732,7 +1042,11 @@ pub fn get_strategy_statistics_page(
     detail_rows.sort_by(|a, b| {
         b.trade_date
             .cmp(&a.trade_date)
-            .then_with(|| b.trigger_count.unwrap_or(0).cmp(&a.trigger_count.unwrap_or(0)))
+            .then_with(|| {
+                b.trigger_count
+                    .unwrap_or(0)
+                    .cmp(&a.trigger_count.unwrap_or(0))
+            })
             .then_with(|| a.rule_name.cmp(&b.rule_name))
     });
 
@@ -745,6 +1059,49 @@ pub fn get_strategy_statistics_page(
         resolved_analysis_trade_date,
         chart: Some(build_chart(&strategy_rows)),
         triggered_stocks: Some(triggered_stocks),
+    })
+}
+
+pub fn get_scene_statistics_page(
+    source_path: String,
+    scene_name: Option<String>,
+    analysis_trade_date: Option<String>,
+) -> Result<SceneStatisticsPageData, String> {
+    let conn = open_result_conn(&source_path)?;
+    let scene_options = load_scene_options(&source_path)?;
+    let resolved_scene_name = resolve_scene_name(scene_name, &scene_options);
+    let analysis_trade_date_options = query_scene_trade_date_options(&conn)?;
+    let resolved_analysis_trade_date =
+        resolve_analysis_trade_date(analysis_trade_date, &analysis_trade_date_options);
+
+    let mut stage_rows = Vec::new();
+    let mut summary = None;
+
+    if let (Some(selected_scene_name), Some(selected_trade_date)) = (
+        resolved_scene_name.as_deref(),
+        resolved_analysis_trade_date.as_deref(),
+    ) {
+        let (next_stage_rows, total_sample_count, covered_count) =
+            query_scene_stage_rows(&conn, selected_scene_name, selected_trade_date)?;
+        stage_rows = next_stage_rows;
+
+        let scene_rule_name_sets = load_scene_rule_name_sets(&source_path)?;
+        let contribution_by_rule = query_rule_contribution_by_date(&conn, selected_trade_date)?;
+        summary = Some(build_scene_contribution_summary(
+            total_sample_count,
+            covered_count,
+            scene_rule_name_sets.get(selected_scene_name),
+            &contribution_by_rule,
+        ));
+    }
+
+    Ok(SceneStatisticsPageData {
+        scene_options: Some(scene_options),
+        resolved_scene_name,
+        analysis_trade_date_options: Some(analysis_trade_date_options),
+        resolved_analysis_trade_date,
+        stage_rows: Some(stage_rows),
+        summary,
     })
 }
 
@@ -790,7 +1147,10 @@ fn build_board_maps(
             continue;
         };
         let ts_code = ts_code_raw.to_ascii_uppercase();
-        let stock_name = cols.get(1).map(|value| value.trim()).filter(|value| !value.is_empty());
+        let stock_name = cols
+            .get(1)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty());
 
         let mut board_list = Vec::new();
         let category_board = board_category(&ts_code, stock_name).to_string();
@@ -850,7 +1210,8 @@ pub fn get_market_analysis(
     let source_db_str = source_db
         .to_str()
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
-    let source_conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+    let source_conn =
+        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
 
     let latest_trade_date: Option<String> = source_conn
         .query_row(
@@ -947,18 +1308,9 @@ pub fn get_market_analysis(
     let concept_db_str = concept_db
         .to_str()
         .ok_or_else(|| "概念表现库路径不是有效UTF-8".to_string())?;
-    let concept_conn = Connection::open(concept_db_str).map_err(|e| format!("打开概念表现库失败: {e}"))?;
-    let has_performance_type = concept_conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('concept_performance') WHERE name = 'performance_type'",
-            [],
-            |row| row.get::<usize, i64>(0),
-        )
-        .map_err(|e| format!("检查 concept_performance 结构失败: {e}"))?
-        > 0;
-
-    let concept_interval_sql = if has_performance_type {
-        r#"
+    let concept_conn =
+        Connection::open(concept_db_str).map_err(|e| format!("打开概念表现库失败: {e}"))?;
+    let concept_interval_sql = r#"
         SELECT concept, AVG(TRY_CAST(performance_pct AS DOUBLE)) AS avg_pct
         FROM concept_performance
         WHERE performance_type = 'concept'
@@ -967,18 +1319,7 @@ pub fn get_market_analysis(
         GROUP BY 1
         ORDER BY avg_pct DESC NULLS LAST, concept ASC
         LIMIT ?
-        "#
-    } else {
-        r#"
-        SELECT concept, AVG(TRY_CAST(performance_pct AS DOUBLE)) AS avg_pct
-        FROM concept_performance
-        WHERE trade_date >= ?
-          AND trade_date <= ?
-        GROUP BY 1
-        ORDER BY avg_pct DESC NULLS LAST, concept ASC
-        LIMIT ?
-        "#
-    };
+        "#;
 
     let mut concept_interval_stmt = concept_conn
         .prepare(concept_interval_sql)
@@ -997,7 +1338,6 @@ pub fn get_market_analysis(
             interval_concept_top.push(MarketRankItem { name, value });
         }
     }
-
 
     let mut interval_board_stmt = source_conn
         .prepare(
@@ -1104,24 +1444,14 @@ pub fn get_market_analysis(
         });
     }
 
-    let daily_concept_sql = if has_performance_type {
-        r#"
+    let daily_concept_sql = r#"
         SELECT concept, TRY_CAST(performance_pct AS DOUBLE)
         FROM concept_performance
         WHERE performance_type = 'concept'
           AND trade_date = ?
         ORDER BY TRY_CAST(performance_pct AS DOUBLE) DESC NULLS LAST, concept ASC
         LIMIT ?
-        "#
-    } else {
-        r#"
-        SELECT concept, TRY_CAST(performance_pct AS DOUBLE)
-        FROM concept_performance
-        WHERE trade_date = ?
-        ORDER BY TRY_CAST(performance_pct AS DOUBLE) DESC NULLS LAST, concept ASC
-        LIMIT ?
-        "#
-    };
+        "#;
 
     let mut daily_concept_stmt = concept_conn
         .prepare(daily_concept_sql)
@@ -1289,7 +1619,8 @@ pub fn get_market_contribution(
     let source_db_str = source_db
         .to_str()
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
-    let source_conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+    let source_conn =
+        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
 
     let latest_trade_date: Option<String> = source_conn
         .query_row(
@@ -1408,9 +1739,7 @@ pub fn get_market_contribution(
                 continue;
             }
             let is_match = concept_raw
-                .split(|ch| {
-                    matches!(ch, ',' | ';' | '，' | '；' | '|' | '、' | '/' | '\n' | '\r')
-                })
+                .split(|ch| matches!(ch, ',' | ';' | '，' | '；' | '|' | '、' | '/' | '\n' | '\r'))
                 .map(|part| part.trim())
                 .any(|part| !part.is_empty() && part == target_name);
             if is_match {
@@ -1552,12 +1881,10 @@ pub fn get_scene_layer_backtest_defaults(
         .next()
         .map_err(|e| format!("读取 scene_details 日期区间失败: {e}"))?
     {
-        let min_trade_date: Option<String> = row
-            .get(0)
-            .map_err(|e| format!("读取最小交易日失败: {e}"))?;
-        let max_trade_date: Option<String> = row
-            .get(1)
-            .map_err(|e| format!("读取最大交易日失败: {e}"))?;
+        let min_trade_date: Option<String> =
+            row.get(0).map_err(|e| format!("读取最小交易日失败: {e}"))?;
+        let max_trade_date: Option<String> =
+            row.get(1).map_err(|e| format!("读取最大交易日失败: {e}"))?;
         (min_trade_date, max_trade_date)
     } else {
         (None, None)
@@ -1571,14 +1898,333 @@ pub fn get_scene_layer_backtest_defaults(
     })
 }
 
+pub fn get_rule_layer_backtest_defaults(
+    source_path: String,
+) -> Result<RuleLayerBacktestDefaultsData, String> {
+    let (rule_options, _) = load_rule_meta(&source_path)?;
+
+    let conn = open_result_conn(&source_path)?;
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                MIN(trade_date) AS min_trade_date,
+                MAX(trade_date) AS max_trade_date
+            FROM rule_details
+            "#,
+        )
+        .map_err(|e| format!("预编译 rule_details 日期区间 SQL 失败: {e}"))?;
+
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("执行 rule_details 日期区间 SQL 失败: {e}"))?;
+
+    let (start_date, end_date) = if let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取 rule_details 日期区间失败: {e}"))?
+    {
+        let min_trade_date: Option<String> =
+            row.get(0).map_err(|e| format!("读取最小交易日失败: {e}"))?;
+        let max_trade_date: Option<String> =
+            row.get(1).map_err(|e| format!("读取最大交易日失败: {e}"))?;
+        (min_trade_date, max_trade_date)
+    } else {
+        (None, None)
+    };
+
+    Ok(RuleLayerBacktestDefaultsData {
+        resolved_rule_name: rule_options.first().cloned(),
+        rule_options,
+        start_date,
+        end_date,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct SceneLayerBacktestRunParams {
+    stock_adj_type: String,
+    index_ts_code: String,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: String,
+    end_date: String,
+    min_samples_per_day: usize,
+    backtest_period: usize,
+}
+
+#[derive(Debug, Clone)]
+struct RuleLayerBacktestRunParams {
+    stock_adj_type: String,
+    index_ts_code: String,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: String,
+    end_date: String,
+    min_samples_per_day: usize,
+    backtest_period: usize,
+}
+
+fn run_scene_layer_backtest_core(
+    source_conn: &Connection,
+    source_path: &str,
+    scene_name: Option<&str>,
+    params: &SceneLayerBacktestRunParams,
+) -> Result<SceneLayerBacktestData, String> {
+    let layer_config = SceneLayerConfig {
+        min_samples_per_day: params.min_samples_per_day,
+        backtest_period: params.backtest_period,
+    };
+
+    if let Some(scene_name) = scene_name {
+        let scene_name = scene_name.trim();
+        if scene_name.is_empty() {
+            return Err("scene_name不能为空".to_string());
+        }
+
+        let input = SceneLayerFromDbInput {
+            scene_name: scene_name.to_string(),
+            stock_adj_type: params.stock_adj_type.clone(),
+            index_ts_code: params.index_ts_code.clone(),
+            index_beta: params.index_beta,
+            concept_beta: params.concept_beta,
+            industry_beta: params.industry_beta,
+            start_date: params.start_date.clone(),
+            end_date: params.end_date.clone(),
+            layer_config,
+        };
+
+        let metrics = calc_scene_layer_metrics_from_db(source_conn, source_path, &input)?;
+
+        return Ok(SceneLayerBacktestData {
+            scene_name: input.scene_name,
+            stock_adj_type: input.stock_adj_type,
+            index_ts_code: input.index_ts_code,
+            index_beta: input.index_beta,
+            concept_beta: input.concept_beta,
+            industry_beta: input.industry_beta,
+            start_date: input.start_date,
+            end_date: input.end_date,
+            min_samples_per_scene_day: input.layer_config.min_samples_per_day,
+            backtest_period: input.layer_config.backtest_period,
+            points: metrics
+                .points
+                .into_iter()
+                .map(|point| SceneLayerPointPayload {
+                    trade_date: point.trade_date,
+                    state_avg_residual_returns: point
+                        .state_avg_residual_returns
+                        .into_iter()
+                        .map(
+                            |(scene_state, avg_residual_return)| {
+                                SceneLayerStateAvgResidualReturn {
+                                    scene_state,
+                                    avg_residual_return: Some(avg_residual_return),
+                                }
+                            },
+                        )
+                        .collect(),
+                    top_bottom_spread: point.top_bottom_spread,
+                    ic: point.ic,
+                })
+                .collect(),
+            spread_mean: metrics.spread_mean,
+            ic_mean: metrics.ic_mean,
+            ic_std: metrics.ic_std,
+            icir: metrics.icir,
+            is_all_scenes: false,
+            all_scene_summaries: Vec::new(),
+        });
+    }
+
+    let scene_options = load_scene_options(source_path)?;
+    let all_metrics = calc_all_scene_layer_metrics_from_db(
+        source_conn,
+        source_path,
+        &scene_options,
+        &params.stock_adj_type,
+        &params.index_ts_code,
+        params.index_beta,
+        params.concept_beta,
+        params.industry_beta,
+        &params.start_date,
+        &params.end_date,
+        &layer_config,
+    )?;
+    let mut all_scene_summaries = Vec::with_capacity(all_metrics.len());
+
+    for (one_scene_name, metrics) in all_metrics {
+        all_scene_summaries.push(SceneLayerSceneSummary {
+            scene_name: one_scene_name,
+            point_count: metrics.points.len(),
+            spread_mean: metrics.spread_mean,
+            ic_mean: metrics.ic_mean,
+            ic_std: metrics.ic_std,
+            icir: metrics.icir,
+        });
+    }
+
+    all_scene_summaries.sort_by(|a, b| {
+        b.spread_mean
+            .unwrap_or(f64::NEG_INFINITY)
+            .partial_cmp(&a.spread_mean.unwrap_or(f64::NEG_INFINITY))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.point_count.cmp(&a.point_count))
+            .then_with(|| a.scene_name.cmp(&b.scene_name))
+    });
+
+    Ok(SceneLayerBacktestData {
+        scene_name: String::new(),
+        stock_adj_type: params.stock_adj_type.clone(),
+        index_ts_code: params.index_ts_code.clone(),
+        index_beta: params.index_beta,
+        concept_beta: params.concept_beta,
+        industry_beta: params.industry_beta,
+        start_date: params.start_date.clone(),
+        end_date: params.end_date.clone(),
+        min_samples_per_scene_day: params.min_samples_per_day,
+        backtest_period: params.backtest_period,
+        points: Vec::new(),
+        spread_mean: None,
+        ic_mean: None,
+        ic_std: None,
+        icir: None,
+        is_all_scenes: true,
+        all_scene_summaries,
+    })
+}
+
+fn run_rule_layer_backtest_core(
+    source_conn: &Connection,
+    source_path: &str,
+    rule_name: Option<&str>,
+    params: &RuleLayerBacktestRunParams,
+) -> Result<RuleLayerBacktestData, String> {
+    let layer_config = RuleLayerConfig {
+        min_samples_per_day: params.min_samples_per_day,
+        backtest_period: params.backtest_period,
+    };
+
+    if let Some(rule_name) = rule_name {
+        let rule_name = rule_name.trim();
+        if rule_name.is_empty() {
+            return Err("rule_name不能为空".to_string());
+        }
+
+        let input = RuleLayerFromDbInput {
+            rule_name: rule_name.to_string(),
+            stock_adj_type: params.stock_adj_type.clone(),
+            index_ts_code: params.index_ts_code.clone(),
+            index_beta: params.index_beta,
+            concept_beta: params.concept_beta,
+            industry_beta: params.industry_beta,
+            start_date: params.start_date.clone(),
+            end_date: params.end_date.clone(),
+            layer_config,
+        };
+
+        let metrics = calc_rule_layer_metrics_from_db(source_conn, source_path, &input)?;
+
+        return Ok(RuleLayerBacktestData {
+            rule_name: input.rule_name,
+            stock_adj_type: input.stock_adj_type,
+            index_ts_code: input.index_ts_code,
+            index_beta: input.index_beta,
+            concept_beta: input.concept_beta,
+            industry_beta: input.industry_beta,
+            start_date: input.start_date,
+            end_date: input.end_date,
+            min_samples_per_rule_day: input.layer_config.min_samples_per_day,
+            backtest_period: input.layer_config.backtest_period,
+            points: metrics
+                .points
+                .into_iter()
+                .map(|point| RuleLayerPointPayload {
+                    trade_date: point.trade_date,
+                    sample_count: point.sample_count,
+                    avg_rule_score: point.avg_rule_score,
+                    avg_residual_return: point.avg_residual_return,
+                    top_bottom_spread: point.top_bottom_spread,
+                    ic: point.ic,
+                })
+                .collect(),
+            avg_residual_mean: metrics.avg_residual_mean,
+            spread_mean: metrics.spread_mean,
+            ic_mean: metrics.ic_mean,
+            ic_std: metrics.ic_std,
+            icir: metrics.icir,
+            is_all_rules: false,
+            all_rule_summaries: Vec::new(),
+        });
+    }
+
+    let (rule_options, _) = load_rule_meta(source_path)?;
+    let all_metrics = calc_all_rule_layer_metrics_from_db(
+        source_conn,
+        source_path,
+        &rule_options,
+        &params.stock_adj_type,
+        &params.index_ts_code,
+        params.index_beta,
+        params.concept_beta,
+        params.industry_beta,
+        &params.start_date,
+        &params.end_date,
+        &layer_config,
+    )?;
+    let mut all_rule_summaries = Vec::with_capacity(all_metrics.len());
+
+    for (one_rule_name, metrics) in all_metrics {
+        all_rule_summaries.push(RuleLayerRuleSummary {
+            rule_name: one_rule_name,
+            point_count: metrics.points.len(),
+            avg_residual_mean: metrics.avg_residual_mean,
+            spread_mean: metrics.spread_mean,
+            ic_mean: metrics.ic_mean,
+            ic_std: metrics.ic_std,
+            icir: metrics.icir,
+        });
+    }
+
+    all_rule_summaries.sort_by(|a, b| {
+        b.spread_mean
+            .unwrap_or(f64::NEG_INFINITY)
+            .partial_cmp(&a.spread_mean.unwrap_or(f64::NEG_INFINITY))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.point_count.cmp(&a.point_count))
+            .then_with(|| a.rule_name.cmp(&b.rule_name))
+    });
+
+    Ok(RuleLayerBacktestData {
+        rule_name: String::new(),
+        stock_adj_type: params.stock_adj_type.clone(),
+        index_ts_code: params.index_ts_code.clone(),
+        index_beta: params.index_beta,
+        concept_beta: params.concept_beta,
+        industry_beta: params.industry_beta,
+        start_date: params.start_date.clone(),
+        end_date: params.end_date.clone(),
+        min_samples_per_rule_day: params.min_samples_per_day,
+        backtest_period: params.backtest_period,
+        points: Vec::new(),
+        avg_residual_mean: None,
+        spread_mean: None,
+        ic_mean: None,
+        ic_std: None,
+        icir: None,
+        is_all_rules: true,
+        all_rule_summaries,
+    })
+}
+
 pub fn run_scene_layer_backtest(
     source_path: String,
-    scene_name: String,
     stock_adj_type: Option<String>,
     index_ts_code: String,
     index_beta: Option<f64>,
     concept_beta: Option<f64>,
-    board_beta: Option<f64>,
+    industry_beta: Option<f64>,
     start_date: String,
     end_date: String,
     min_samples_per_scene_day: Option<usize>,
@@ -1591,135 +2237,59 @@ pub fn run_scene_layer_backtest(
     let source_conn =
         Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
 
-    let scene_name = scene_name.trim().to_string();
-    let stock_adj_type = stock_adj_type
-        .unwrap_or_else(|| "qfq".to_string())
-        .trim()
-        .to_string();
-    let index_ts_code = index_ts_code.trim().to_string();
-    let index_beta = index_beta.unwrap_or(0.5);
-    let concept_beta = concept_beta.unwrap_or(0.2);
-    let board_beta = board_beta.unwrap_or(0.0);
-    let start_date = start_date.trim().to_string();
-    let end_date = end_date.trim().to_string();
-    let min_samples_per_scene_day = min_samples_per_scene_day.unwrap_or(5);
-    let backtest_period = backtest_period.unwrap_or(1);
-
-    let is_all_scenes = scene_name == "__ALL__";
-
-    if is_all_scenes {
-        let scene_options = load_scene_options(&source_path)?;
-        let mut all_scene_summaries = Vec::new();
-
-        for one_scene_name in scene_options {
-            let input = SceneLayerFromDbInput {
-                scene_name: one_scene_name.clone(),
-                stock_adj_type: stock_adj_type.clone(),
-                index_ts_code: index_ts_code.clone(),
-                index_beta,
-                concept_beta,
-                board_beta,
-                start_date: start_date.clone(),
-                end_date: end_date.clone(),
-                layer_config: SceneLayerConfig {
-                    min_samples_per_day: min_samples_per_scene_day,
-                    backtest_period,
-                },
-            };
-
-            let metrics = calc_scene_layer_metrics_from_db(&source_conn, &source_path, &input)?;
-            all_scene_summaries.push(SceneLayerSceneSummary {
-                scene_name: one_scene_name,
-                point_count: metrics.points.len(),
-                spread_mean: metrics.spread_mean,
-                ic_mean: metrics.ic_mean,
-                ic_std: metrics.ic_std,
-                icir: metrics.icir,
-            });
-        }
-
-        all_scene_summaries.sort_by(|a, b| {
-            b.spread_mean
-                .unwrap_or(f64::NEG_INFINITY)
-                .partial_cmp(&a.spread_mean.unwrap_or(f64::NEG_INFINITY))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| b.point_count.cmp(&a.point_count))
-                .then_with(|| a.scene_name.cmp(&b.scene_name))
-        });
-
-        return Ok(SceneLayerBacktestData {
-            scene_name: "__ALL__".to_string(),
-            stock_adj_type,
-            index_ts_code,
-            index_beta,
-            concept_beta,
-            board_beta,
-            start_date,
-            end_date,
-            min_samples_per_scene_day,
-            backtest_period,
-            points: Vec::new(),
-            spread_mean: None,
-            ic_mean: None,
-            ic_std: None,
-            icir: None,
-            is_all_scenes: true,
-            all_scene_summaries,
-        });
-    }
-
-    let input = SceneLayerFromDbInput {
-        scene_name,
-        stock_adj_type,
-        index_ts_code,
-        index_beta,
-        concept_beta,
-        board_beta,
-        start_date,
-        end_date,
-        layer_config: SceneLayerConfig {
-            min_samples_per_day: min_samples_per_scene_day,
-            backtest_period,
-        },
+    let params = SceneLayerBacktestRunParams {
+        stock_adj_type: stock_adj_type
+            .unwrap_or_else(|| "qfq".to_string())
+            .trim()
+            .to_string(),
+        index_ts_code: index_ts_code.trim().to_string(),
+        index_beta: index_beta.unwrap_or(0.5),
+        concept_beta: concept_beta.unwrap_or(0.2),
+        industry_beta: industry_beta.unwrap_or(0.0),
+        start_date: start_date.trim().to_string(),
+        end_date: end_date.trim().to_string(),
+        min_samples_per_day: min_samples_per_scene_day.unwrap_or(5),
+        backtest_period: backtest_period.unwrap_or(1),
     };
 
-    let metrics = calc_scene_layer_metrics_from_db(&source_conn, &source_path, &input)?;
+    // 当前入口固定全量；后续如需恢复单场景，仅需传入 Some(scene_name)。
+    run_scene_layer_backtest_core(&source_conn, &source_path, None, &params)
+}
 
-    Ok(SceneLayerBacktestData {
-        scene_name: input.scene_name,
-        stock_adj_type: input.stock_adj_type,
-        index_ts_code: input.index_ts_code,
-        index_beta: input.index_beta,
-        concept_beta: input.concept_beta,
-        board_beta: input.board_beta,
-        start_date: input.start_date,
-        end_date: input.end_date,
-        min_samples_per_scene_day: input.layer_config.min_samples_per_day,
-        backtest_period: input.layer_config.backtest_period,
-        points: metrics
-            .points
-            .into_iter()
-            .map(|point| SceneLayerPointPayload {
-                trade_date: point.trade_date,
-                state_avg_residual_returns: point
-                    .state_avg_residual_returns
-                    .into_iter()
-                    .map(|(scene_state, avg_residual_return)| {
-                        SceneLayerStateAvgResidualReturn {
-                            scene_state,
-                            avg_residual_return: Some(avg_residual_return),
-                        }
-                    })
-                    .collect(),
-                top_bottom_spread: point.top_bottom_spread,
-                ic: point.ic,
-            })
-            .collect(),
-        spread_mean: metrics.spread_mean,
-        ic_mean: metrics.ic_mean,
-        ic_std: metrics.ic_std,
-        icir: metrics.icir,
-        is_all_scenes: false,
-        all_scene_summaries: Vec::new(),
-    })
+pub fn run_rule_layer_backtest(
+    source_path: String,
+    stock_adj_type: Option<String>,
+    index_ts_code: String,
+    index_beta: Option<f64>,
+    concept_beta: Option<f64>,
+    industry_beta: Option<f64>,
+    start_date: String,
+    end_date: String,
+    min_samples_per_rule_day: Option<usize>,
+    backtest_period: Option<usize>,
+) -> Result<RuleLayerBacktestData, String> {
+    let source_db = source_db_path(&source_path);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
+    let source_conn =
+        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+
+    let params = RuleLayerBacktestRunParams {
+        stock_adj_type: stock_adj_type
+            .unwrap_or_else(|| "qfq".to_string())
+            .trim()
+            .to_string(),
+        index_ts_code: index_ts_code.trim().to_string(),
+        index_beta: index_beta.unwrap_or(0.5),
+        concept_beta: concept_beta.unwrap_or(0.2),
+        industry_beta: industry_beta.unwrap_or(0.0),
+        start_date: start_date.trim().to_string(),
+        end_date: end_date.trim().to_string(),
+        min_samples_per_day: min_samples_per_rule_day.unwrap_or(5),
+        backtest_period: backtest_period.unwrap_or(1),
+    };
+
+    // 当前入口固定全量；后续如需恢复单策略，仅需传入 Some(rule_name)。
+    run_rule_layer_backtest_core(&source_conn, &source_path, None, &params)
 }

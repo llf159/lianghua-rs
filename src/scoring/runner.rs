@@ -11,8 +11,8 @@ use crate::scoring::{
     tools::{calc_query_need_rows, calc_zhang_pct, load_st_list, warmup_rows_estimate},
 };
 
-const SCORING_GROUP_SIZE: usize = 16;
-const SCORING_QUEUE_BOUND: usize = 4;
+const SCORING_GROUP_SIZE: usize = 256;
+const SCORING_QUEUE_BOUND: usize = 8;
 
 fn fill_scoring_extra_fields(
     row_data: &mut RowData,

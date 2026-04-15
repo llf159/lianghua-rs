@@ -14,12 +14,12 @@ use crate::data::{
 const EPS: f64 = 1e-12;
 
 #[derive(Debug, Clone)]
-pub struct SceneLayerConfig {
+pub struct RuleLayerConfig {
     pub min_samples_per_day: usize,
     pub backtest_period: usize,
 }
 
-impl Default for SceneLayerConfig {
+impl Default for RuleLayerConfig {
     fn default() -> Self {
         Self {
             min_samples_per_day: 5,
@@ -28,7 +28,7 @@ impl Default for SceneLayerConfig {
     }
 }
 
-impl SceneLayerConfig {
+impl RuleLayerConfig {
     fn validate(&self) -> Result<(), String> {
         if self.min_samples_per_day == 0 {
             return Err("每日最少样本数必须>=1".to_string());
@@ -41,8 +41,8 @@ impl SceneLayerConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct SceneLayerFromDbInput {
-    pub scene_name: String,
+pub struct RuleLayerFromDbInput {
+    pub rule_name: String,
     pub stock_adj_type: String,
     pub index_ts_code: String,
     pub index_beta: f64,
@@ -50,13 +50,13 @@ pub struct SceneLayerFromDbInput {
     pub industry_beta: f64,
     pub start_date: String,
     pub end_date: String,
-    pub layer_config: SceneLayerConfig,
+    pub layer_config: RuleLayerConfig,
 }
 
-impl SceneLayerFromDbInput {
+impl RuleLayerFromDbInput {
     fn validate(&self) -> Result<(), String> {
-        if self.scene_name.trim().is_empty() {
-            return Err("scene_name不能为空".to_string());
+        if self.rule_name.trim().is_empty() {
+            return Err("rule_name不能为空".to_string());
         }
         if self.stock_adj_type.trim().is_empty() {
             return Err("股票复权类型不能为空".to_string());
@@ -87,23 +87,26 @@ impl SceneLayerFromDbInput {
 }
 
 #[derive(Debug, Clone)]
-pub struct SceneSample {
+pub struct RuleSample {
     pub trade_date: String,
-    pub scene_state: String,
+    pub rule_score: f64,
     pub residual_return: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SceneLayerPoint {
+pub struct RuleLayerPoint {
     pub trade_date: String,
-    pub state_avg_residual_returns: Vec<(String, f64)>,
+    pub sample_count: usize,
+    pub avg_rule_score: Option<f64>,
+    pub avg_residual_return: Option<f64>,
     pub top_bottom_spread: Option<f64>,
     pub ic: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SceneLayerMetrics {
-    pub points: Vec<SceneLayerPoint>,
+pub struct RuleLayerMetrics {
+    pub points: Vec<RuleLayerPoint>,
+    pub avg_residual_mean: Option<f64>,
     pub spread_mean: Option<f64>,
     pub ic_mean: Option<f64>,
     pub ic_std: Option<f64>,
@@ -111,12 +114,20 @@ pub struct SceneLayerMetrics {
 }
 
 #[derive(Debug, Clone)]
-struct SceneDbRow {
-    scene_name: String,
+struct RuleDbRow {
+    rule_name: String,
     ts_code: String,
     trade_date: String,
-    scene_state: String,
+    rule_score: f64,
 }
+
+#[derive(Debug, Clone)]
+struct RuleUniverseRow {
+    ts_code: String,
+    trade_date: String,
+}
+
+type TriggeredScoreMap = HashMap<String, HashMap<String, f64>>;
 
 struct ResidualCacheInput<'a> {
     stock_adj_type: &'a str,
@@ -129,25 +140,35 @@ struct ResidualCacheInput<'a> {
     backtest_period: usize,
 }
 
-pub fn calc_scene_layer_metrics_from_db(
+pub fn calc_rule_layer_metrics_from_db(
     source_conn: &Connection,
     source_dir: &str,
-    input: &SceneLayerFromDbInput,
-) -> Result<SceneLayerMetrics, String> {
+    input: &RuleLayerFromDbInput,
+) -> Result<RuleLayerMetrics, String> {
     input.validate()?;
 
-    let scene_rows = load_scene_rows(source_dir, input)?;
-    let concept_map = load_most_related_concept_map(source_dir)?;
-    let industry_map = load_stock_industry_map(source_dir)?;
-    if scene_rows.is_empty() {
+    let universe_rows = load_rule_universe_rows(source_dir, &input.start_date, &input.end_date)?;
+    if universe_rows.is_empty() {
         return Ok(empty_metrics());
     }
 
-    let rows_by_ts = group_rows_by_ts(scene_rows);
+    let rule_rows = load_rule_rows(source_dir, input)?;
+    let concept_map = load_most_related_concept_map(source_dir)?;
+    let industry_map = load_stock_industry_map(source_dir)?;
+    let triggered_score_map = build_triggered_score_map(rule_rows);
+
+    let mut unique_ts_codes: HashSet<&str> = HashSet::new();
+    for row in &universe_rows {
+        unique_ts_codes.insert(row.ts_code.as_str());
+    }
+
     let residual_map_cache = build_residual_map_cache(
         source_conn,
         source_dir,
-        rows_by_ts.keys().cloned().collect(),
+        unique_ts_codes
+            .into_iter()
+            .map(|ts_code| ts_code.to_string())
+            .collect(),
         &concept_map,
         &industry_map,
         &ResidualCacheInput {
@@ -161,15 +182,19 @@ pub fn calc_scene_layer_metrics_from_db(
             backtest_period: input.layer_config.backtest_period,
         },
     )?;
-    let samples = collect_scene_samples(rows_by_ts, &residual_map_cache);
+    let samples = collect_rule_samples(
+        &universe_rows,
+        Some(&triggered_score_map),
+        &residual_map_cache,
+    );
 
-    calc_scene_layer_metrics(&samples, &input.layer_config)
+    calc_rule_layer_metrics(&samples, &input.layer_config)
 }
 
-pub fn calc_all_scene_layer_metrics_from_db(
+pub fn calc_all_rule_layer_metrics_from_db(
     source_conn: &Connection,
     source_dir: &str,
-    scene_names: &[String],
+    rule_names: &[String],
     stock_adj_type: &str,
     index_ts_code: &str,
     index_beta: f64,
@@ -177,9 +202,9 @@ pub fn calc_all_scene_layer_metrics_from_db(
     industry_beta: f64,
     start_date: &str,
     end_date: &str,
-    layer_config: &SceneLayerConfig,
-) -> Result<Vec<(String, SceneLayerMetrics)>, String> {
-    validate_scene_common_input(
+    layer_config: &RuleLayerConfig,
+) -> Result<Vec<(String, RuleLayerMetrics)>, String> {
+    validate_rule_common_input(
         stock_adj_type,
         index_ts_code,
         index_beta,
@@ -190,30 +215,37 @@ pub fn calc_all_scene_layer_metrics_from_db(
         layer_config,
     )?;
 
-    if scene_names.is_empty() {
+    if rule_names.is_empty() {
         return Ok(Vec::new());
     }
 
-    let scene_rows = load_scene_rows_for_names(source_dir, scene_names, start_date, end_date)?;
+    let universe_rows = load_rule_universe_rows(source_dir, start_date, end_date)?;
+    let rule_rows = load_rule_rows_for_names(source_dir, rule_names, start_date, end_date)?;
     let concept_map = load_most_related_concept_map(source_dir)?;
     let industry_map = load_stock_industry_map(source_dir)?;
-    let mut rows_by_scene: HashMap<String, HashMap<String, Vec<SceneDbRow>>> = HashMap::new();
-    let mut unique_ts_codes = HashSet::new();
+    let mut triggered_score_map_by_rule: HashMap<String, TriggeredScoreMap> = HashMap::new();
+    let mut unique_ts_codes: HashSet<&str> = HashSet::new();
 
-    for row in scene_rows {
-        unique_ts_codes.insert(row.ts_code.clone());
-        rows_by_scene
-            .entry(row.scene_name.clone())
+    for row in &universe_rows {
+        unique_ts_codes.insert(row.ts_code.as_str());
+    }
+
+    for row in rule_rows {
+        triggered_score_map_by_rule
+            .entry(row.rule_name)
             .or_default()
-            .entry(row.ts_code.clone())
+            .entry(row.ts_code)
             .or_default()
-            .push(row);
+            .insert(row.trade_date, row.rule_score);
     }
 
     let residual_map_cache = build_residual_map_cache(
         source_conn,
         source_dir,
-        unique_ts_codes.into_iter().collect(),
+        unique_ts_codes
+            .into_iter()
+            .map(|ts_code| ts_code.to_string())
+            .collect(),
         &concept_map,
         &industry_map,
         &ResidualCacheInput {
@@ -228,35 +260,45 @@ pub fn calc_all_scene_layer_metrics_from_db(
         },
     )?;
 
-    let mut out = Vec::with_capacity(scene_names.len());
-    for scene_name in scene_names {
-        let rows_by_ts = rows_by_scene.remove(scene_name).unwrap_or_default();
-        let samples = collect_scene_samples(rows_by_ts, &residual_map_cache);
-        let metrics = calc_scene_layer_metrics(&samples, layer_config)?;
-        out.push((scene_name.clone(), metrics));
+    // Residual cache is already shared; parallelize per-rule assembly and metric calculation.
+    let grouped_results: Vec<Result<(String, RuleLayerMetrics), String>> = rule_names
+        .par_iter()
+        .map(|rule_name| {
+            let triggered_score_map = triggered_score_map_by_rule.get(rule_name);
+            let samples = collect_rule_samples(&universe_rows, triggered_score_map, &residual_map_cache);
+            let metrics = calc_rule_layer_metrics(&samples, layer_config)?;
+            Ok((rule_name.clone(), metrics))
+        })
+        .collect();
+
+    let mut out = Vec::with_capacity(grouped_results.len());
+    for item in grouped_results {
+        out.push(item?);
     }
 
     Ok(out)
 }
 
-pub fn calc_scene_layer_metrics(
-    samples: &[SceneSample],
-    config: &SceneLayerConfig,
-) -> Result<SceneLayerMetrics, String> {
+pub fn calc_rule_layer_metrics(
+    samples: &[RuleSample],
+    config: &RuleLayerConfig,
+) -> Result<RuleLayerMetrics, String> {
     config.validate()?;
 
-    let mut grouped_by_day: BTreeMap<String, Vec<&SceneSample>> = BTreeMap::new();
+    let mut grouped_by_day: BTreeMap<&str, Vec<&RuleSample>> = BTreeMap::new();
     for sample in samples {
-        if sample.trade_date.trim().is_empty() || !sample.residual_return.is_finite() {
+        let trade_date = sample.trade_date.trim();
+        if trade_date.is_empty()
+            || !sample.rule_score.is_finite()
+            || !sample.residual_return.is_finite()
+        {
             continue;
         }
-        grouped_by_day
-            .entry(sample.trade_date.trim().to_string())
-            .or_default()
-            .push(sample);
+        grouped_by_day.entry(trade_date).or_default().push(sample);
     }
 
     let mut points = Vec::new();
+    let mut avg_residual_values = Vec::new();
     let mut spread_values = Vec::new();
     let mut ic_values = Vec::new();
 
@@ -265,62 +307,41 @@ pub fn calc_scene_layer_metrics(
             continue;
         }
 
-        let mut state_group: BTreeMap<String, Vec<f64>> = BTreeMap::new();
-        let mut state_scores = Vec::new();
-        let mut residuals = Vec::new();
+        let mut rule_scores = Vec::with_capacity(day_samples.len());
+        let mut residuals = Vec::with_capacity(day_samples.len());
 
         for sample in day_samples {
-            let state = normalize_state(&sample.scene_state);
-            state_group
-                .entry(state.clone())
-                .or_default()
-                .push(sample.residual_return);
-
-            state_scores.push(state_rank(&state) as f64);
+            rule_scores.push(sample.rule_score);
             residuals.push(sample.residual_return);
         }
 
-        let mut state_avg_residual_returns = Vec::new();
-        for (state, values) in state_group {
-            if let Some(avg) = mean(&values) {
-                state_avg_residual_returns.push((state, avg));
-            }
+        let avg_rule_score = mean(&rule_scores);
+        let avg_residual_return = mean(&residuals);
+        if let Some(value) = avg_residual_return {
+            avg_residual_values.push(value);
         }
 
-        let top_bottom_spread = if state_avg_residual_returns.len() >= 2 {
-            let mut ordered = state_avg_residual_returns.clone();
-            ordered.sort_by(|a, b| {
-                state_rank(&a.0)
-                    .cmp(&state_rank(&b.0))
-                    .then_with(|| a.0.cmp(&b.0))
-            });
-            let low = ordered.first().map(|(_, v)| *v);
-            let high = ordered.last().map(|(_, v)| *v);
-            match (low, high) {
-                (Some(l), Some(h)) => Some(h - l),
-                _ => None,
-            }
-        } else {
-            None
-        };
-
+        let top_bottom_spread = calc_top_bottom_spread(&rule_scores, &residuals);
         if let Some(spread) = top_bottom_spread {
             spread_values.push(spread);
         }
 
-        let ic = spearman_corr(&state_scores, &residuals);
-        if let Some(v) = ic {
-            ic_values.push(v);
+        let ic = spearman_corr(&rule_scores, &residuals);
+        if let Some(value) = ic {
+            ic_values.push(value);
         }
 
-        points.push(SceneLayerPoint {
-            trade_date,
-            state_avg_residual_returns,
+        points.push(RuleLayerPoint {
+            trade_date: trade_date.to_string(),
+            sample_count: rule_scores.len(),
+            avg_rule_score,
+            avg_residual_return,
             top_bottom_spread,
             ic,
         });
     }
 
+    let avg_residual_mean = mean(&avg_residual_values);
     let spread_mean = mean(&spread_values);
     let ic_mean = mean(&ic_values);
     let ic_std = sample_std(&ic_values);
@@ -329,8 +350,9 @@ pub fn calc_scene_layer_metrics(
         _ => None,
     };
 
-    Ok(SceneLayerMetrics {
+    Ok(RuleLayerMetrics {
         points,
+        avg_residual_mean,
         spread_mean,
         ic_mean,
         ic_std,
@@ -338,9 +360,10 @@ pub fn calc_scene_layer_metrics(
     })
 }
 
-fn empty_metrics() -> SceneLayerMetrics {
-    SceneLayerMetrics {
+fn empty_metrics() -> RuleLayerMetrics {
+    RuleLayerMetrics {
         points: Vec::new(),
+        avg_residual_mean: None,
         spread_mean: None,
         ic_mean: None,
         ic_std: None,
@@ -348,7 +371,7 @@ fn empty_metrics() -> SceneLayerMetrics {
     }
 }
 
-fn validate_scene_common_input(
+fn validate_rule_common_input(
     stock_adj_type: &str,
     index_ts_code: &str,
     index_beta: f64,
@@ -356,7 +379,7 @@ fn validate_scene_common_input(
     industry_beta: f64,
     start_date: &str,
     end_date: &str,
-    layer_config: &SceneLayerConfig,
+    layer_config: &RuleLayerConfig,
 ) -> Result<(), String> {
     if stock_adj_type.trim().is_empty() {
         return Err("股票复权类型不能为空".to_string());
@@ -385,37 +408,105 @@ fn validate_scene_common_input(
     layer_config.validate()
 }
 
-fn group_rows_by_ts(scene_rows: Vec<SceneDbRow>) -> HashMap<String, Vec<SceneDbRow>> {
-    let mut rows_by_ts: HashMap<String, Vec<SceneDbRow>> = HashMap::new();
-    for row in scene_rows {
-        rows_by_ts.entry(row.ts_code.clone()).or_default().push(row);
+fn build_triggered_score_map(rule_rows: Vec<RuleDbRow>) -> TriggeredScoreMap {
+    let mut rows_by_ts: TriggeredScoreMap = HashMap::new();
+    for RuleDbRow {
+        ts_code,
+        trade_date,
+        rule_score,
+        ..
+    } in rule_rows
+    {
+        rows_by_ts
+            .entry(ts_code)
+            .or_default()
+            .insert(trade_date, rule_score);
     }
     rows_by_ts
 }
 
-fn collect_scene_samples(
-    rows_by_ts: HashMap<String, Vec<SceneDbRow>>,
+fn collect_rule_samples(
+    universe_rows: &[RuleUniverseRow],
+    triggered_score_map: Option<&TriggeredScoreMap>,
     residual_map_cache: &HashMap<String, HashMap<String, f64>>,
-) -> Vec<SceneSample> {
-    let mut samples = Vec::new();
+) -> Vec<RuleSample> {
+    let mut samples = Vec::with_capacity(universe_rows.len());
 
-    for (ts_code, rows) in rows_by_ts {
-        let Some(residual_map) = residual_map_cache.get(&ts_code) else {
+    for row in universe_rows {
+        let Some(residual_map) = residual_map_cache.get(&row.ts_code) else {
             continue;
         };
 
-        for row in rows {
-            if let Some(residual_return) = residual_map.get(&row.trade_date).copied() {
-                samples.push(SceneSample {
-                    trade_date: row.trade_date,
-                    scene_state: row.scene_state,
-                    residual_return,
-                });
-            }
-        }
+        let Some(residual_return) = residual_map.get(&row.trade_date).copied() else {
+            continue;
+        };
+
+        let rule_score = triggered_score_map
+            .and_then(|score_map| score_map.get(&row.ts_code))
+            .and_then(|date_score| date_score.get(&row.trade_date))
+            .copied()
+            .unwrap_or(0.0);
+
+        samples.push(RuleSample {
+            trade_date: row.trade_date.clone(),
+            rule_score,
+            residual_return,
+        });
     }
 
     samples
+}
+
+fn load_rule_universe_rows(
+    source_dir: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<Vec<RuleUniverseRow>, String> {
+    let result_db = result_db_path(source_dir);
+    if !result_db.exists() {
+        return Ok(Vec::new());
+    }
+
+    let result_db_str = result_db
+        .to_str()
+        .ok_or_else(|| "result_db路径不是有效UTF-8".to_string())?;
+    let conn =
+        Connection::open(result_db_str).map_err(|e| format!("打开scoring_result.db失败:{e}"))?;
+
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                ts_code,
+                trade_date
+            FROM score_summary
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY trade_date ASC, ts_code ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译score_summary查询失败:{e}"))?;
+
+    let mut rows = stmt
+        .query(params_from_iter([start_date.trim(), end_date.trim()]))
+        .map_err(|e| format!("查询score_summary失败:{e}"))?;
+
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| format!("读取score_summary失败:{e}"))? {
+        let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
+        let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
+
+        if ts_code.trim().is_empty() || trade_date.trim().is_empty() {
+            continue;
+        }
+
+        out.push(RuleUniverseRow {
+            ts_code,
+            trade_date,
+        });
+    }
+
+    Ok(out)
 }
 
 fn build_residual_map_cache(
@@ -519,6 +610,7 @@ fn build_residual_map_for_ts_code(
     } else {
         industry_series_cache.get(industry.trim())
     };
+
     let residual_points = calc_stock_residual_returns_with_factor_series(
         conn,
         source_dir,
@@ -642,7 +734,7 @@ fn build_forward_backtest_residual_map(
 
     residual_points.sort_by(|a, b| a.trade_date.cmp(&b.trade_date));
 
-    let mut out = HashMap::new();
+    let mut out = HashMap::with_capacity(residual_points.len() - backtest_period);
     for i in 0..residual_points.len() {
         let end = i + backtest_period;
         if end >= residual_points.len() {
@@ -651,8 +743,8 @@ fn build_forward_backtest_residual_map(
 
         let mut sum = 0.0_f64;
         let mut valid = true;
-        for j in (i + 1)..=end {
-            let v = residual_points[j].residual_pct;
+        for point in residual_points.iter().take(end + 1).skip(i + 1) {
+            let v = point.residual_pct;
             if !v.is_finite() {
                 valid = false;
                 break;
@@ -668,43 +760,25 @@ fn build_forward_backtest_residual_map(
     out
 }
 
-fn normalize_state(state: &str) -> String {
-    let s = state.trim().to_ascii_lowercase();
-    if s.is_empty() {
-        return "unknown".to_string();
-    }
-    s
-}
-
-fn state_rank(state: &str) -> i32 {
-    match state {
-        "fail" => 0,
-        "observe" => 1,
-        "trigger" => 2,
-        "confirm" => 3,
-        _ => 1,
-    }
-}
-
-fn load_scene_rows(
+fn load_rule_rows(
     source_dir: &str,
-    input: &SceneLayerFromDbInput,
-) -> Result<Vec<SceneDbRow>, String> {
-    load_scene_rows_for_names(
+    input: &RuleLayerFromDbInput,
+) -> Result<Vec<RuleDbRow>, String> {
+    load_rule_rows_for_names(
         source_dir,
-        std::slice::from_ref(&input.scene_name),
+        std::slice::from_ref(&input.rule_name),
         &input.start_date,
         &input.end_date,
     )
 }
 
-fn load_scene_rows_for_names(
+fn load_rule_rows_for_names(
     source_dir: &str,
-    scene_names: &[String],
+    rule_names: &[String],
     start_date: &str,
     end_date: &str,
-) -> Result<Vec<SceneDbRow>, String> {
-    if scene_names.is_empty() {
+) -> Result<Vec<RuleDbRow>, String> {
+    if rule_names.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -719,52 +793,52 @@ fn load_scene_rows_for_names(
     let conn =
         Connection::open(result_db_str).map_err(|e| format!("打开scoring_result.db失败:{e}"))?;
 
-    let placeholders = std::iter::repeat("?")
-        .take(scene_names.len())
+    let placeholders = std::iter::repeat_n("?", rule_names.len())
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
         r#"
             SELECT
-                scene_name,
+                rule_name,
                 ts_code,
                 trade_date,
-                COALESCE(TRY_CAST(stage AS VARCHAR), 'unknown') AS stage
-            FROM scene_details
-            WHERE scene_name IN ({placeholders})
+                TRY_CAST(rule_score AS DOUBLE) AS rule_score
+            FROM rule_details
+            WHERE rule_name IN ({placeholders})
               AND trade_date >= ?
               AND trade_date <= ?
-            ORDER BY scene_name ASC, trade_date ASC, ts_code ASC
+            ORDER BY rule_name ASC, trade_date ASC, ts_code ASC
             "#
     );
     let mut stmt = conn
         .prepare(&sql)
-        .map_err(|e| format!("预编译scene_details查询失败:{e}"))?;
+        .map_err(|e| format!("预编译rule_details查询失败:{e}"))?;
 
-    let query_params = scene_names
+    let query_params = rule_names
         .iter()
         .map(|value| value.trim())
         .chain(std::iter::once(start_date.trim()))
         .chain(std::iter::once(end_date.trim()));
     let mut rows = stmt
         .query(params_from_iter(query_params))
-        .map_err(|e| format!("查询scene_details失败:{e}"))?;
+        .map_err(|e| format!("查询rule_details失败:{e}"))?;
 
     let mut out = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取scene_details失败:{e}"))?
-    {
-        let scene_name: String = row.get(0).map_err(|e| format!("读取scene_name失败:{e}"))?;
+    while let Some(row) = rows.next().map_err(|e| format!("读取rule_details失败:{e}"))? {
+        let rule_name: String = row.get(0).map_err(|e| format!("读取rule_name失败:{e}"))?;
         let ts_code: String = row.get(1).map_err(|e| format!("读取ts_code失败:{e}"))?;
         let trade_date: String = row.get(2).map_err(|e| format!("读取trade_date失败:{e}"))?;
-        let stage: Option<String> = row.get(3).map_err(|e| format!("读取stage失败:{e}"))?;
+        let rule_score: Option<f64> = row.get(3).map_err(|e| format!("读取rule_score失败:{e}"))?;
 
-        out.push(SceneDbRow {
-            scene_name,
+        let Some(rule_score) = rule_score.filter(|value| value.is_finite()) else {
+            continue;
+        };
+
+        out.push(RuleDbRow {
+            rule_name,
             ts_code,
             trade_date,
-            scene_state: stage.unwrap_or_default(),
+            rule_score,
         });
     }
 
@@ -798,6 +872,53 @@ fn load_stock_industry_map(source_dir: &str) -> Result<HashMap<String, String>, 
     }
 
     Ok(map)
+}
+
+fn calc_top_bottom_spread(rule_scores: &[f64], residuals: &[f64]) -> Option<f64> {
+    if rule_scores.len() != residuals.len() || rule_scores.len() < 2 {
+        return None;
+    }
+
+    let mut min_score = f64::INFINITY;
+    let mut max_score = f64::NEG_INFINITY;
+    for score in rule_scores {
+        min_score = min_score.min(*score);
+        max_score = max_score.max(*score);
+    }
+    if (max_score - min_score).abs() < EPS {
+        return None;
+    }
+
+    let mut ordered = rule_scores
+        .iter()
+        .copied()
+        .enumerate()
+        .collect::<Vec<(usize, f64)>>();
+    ordered.sort_by(|a, b| {
+        a.1
+            .partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+
+    let half = ordered.len() / 2;
+    if half == 0 {
+        return None;
+    }
+
+    let low_sum: f64 = ordered
+        .iter()
+        .take(half)
+        .map(|(idx, _)| residuals[*idx])
+        .sum();
+    let high_sum: f64 = ordered
+        .iter()
+        .rev()
+        .take(half)
+        .map(|(idx, _)| residuals[*idx])
+        .sum();
+
+    Some(high_sum / half as f64 - low_sum / half as f64)
 }
 
 fn mean(values: &[f64]) -> Option<f64> {
@@ -894,16 +1015,24 @@ mod tests {
     use crate::data::{result_db_path, source_db_path};
 
     use super::{
-        SceneLayerConfig, SceneLayerFromDbInput, calc_all_scene_layer_metrics_from_db,
-        calc_scene_layer_metrics_from_db,
+        RuleLayerConfig, RuleLayerFromDbInput, calc_all_rule_layer_metrics_from_db,
+        calc_rule_layer_metrics_from_db,
     };
+
+    fn assert_opt_close(left: Option<f64>, right: Option<f64>) {
+        match (left, right) {
+            (Some(a), Some(b)) => assert!((a - b).abs() < 1e-9, "left={a}, right={b}"),
+            (None, None) => {}
+            _ => panic!("left={left:?}, right={right:?}"),
+        }
+    }
 
     fn temp_source_dir() -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        std::env::temp_dir().join(format!("lianghua_scene_layer_{unique}"))
+        std::env::temp_dir().join(format!("lianghua_rule_layer_{unique}"))
     }
 
     fn prepare_test_files(source_dir: &str) {
@@ -911,12 +1040,12 @@ mod tests {
 
         write(
             PathBuf::from(source_dir).join("stock_list.csv"),
-            "ts_code,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,industry\n000001.SZ,,,,,,,,,,,,,,main\n",
+            "ts_code,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,industry\n000001.SZ,,,,,,,,,,,,,,main\n000002.SZ,,,,,,,,,,,,,,main\n",
         )
         .expect("write stock_list.csv");
         write(
             PathBuf::from(source_dir).join("stock_concepts.csv"),
-            "ts_code,c1,c2,c3,concept\n000001.SZ,,,,concept-a\n",
+            "ts_code,c1,c2,c3,concept\n000001.SZ,,,,concept-a\n000002.SZ,,,,concept-b\n",
         )
         .expect("write stock_concepts.csv");
 
@@ -938,23 +1067,35 @@ mod tests {
         let mut source_app = source_conn
             .appender("stock_data")
             .expect("stock_data appender");
+
         source_app
-            .append_row(params!["000001.SZ", "20240102", "qfq", 2.0_f64])
-            .expect("stock row1");
+            .append_row(params!["000001.SZ", "20240102", "qfq", 0.0_f64])
+            .expect("stock a row1");
         source_app
-            .append_row(params!["000001.SZ", "20240103", "qfq", 4.0_f64])
-            .expect("stock row2");
+            .append_row(params!["000001.SZ", "20240103", "qfq", 3.0_f64])
+            .expect("stock a row2");
         source_app
-            .append_row(params!["000001.SZ", "20240104", "qfq", 6.0_f64])
-            .expect("stock row3");
+            .append_row(params!["000001.SZ", "20240104", "qfq", 5.0_f64])
+            .expect("stock a row3");
+
         source_app
-            .append_row(params!["000300.SH", "20240102", "ind", 1.0_f64])
+            .append_row(params!["000002.SZ", "20240102", "qfq", 0.0_f64])
+            .expect("stock b row1");
+        source_app
+            .append_row(params!["000002.SZ", "20240103", "qfq", 1.0_f64])
+            .expect("stock b row2");
+        source_app
+            .append_row(params!["000002.SZ", "20240104", "qfq", -1.0_f64])
+            .expect("stock b row3");
+
+        source_app
+            .append_row(params!["000300.SH", "20240102", "ind", 0.0_f64])
             .expect("index row1");
         source_app
-            .append_row(params!["000300.SH", "20240103", "ind", 1.0_f64])
+            .append_row(params!["000300.SH", "20240103", "ind", 0.0_f64])
             .expect("index row2");
         source_app
-            .append_row(params!["000300.SH", "20240104", "ind", 1.0_f64])
+            .append_row(params!["000300.SH", "20240104", "ind", 0.0_f64])
             .expect("index row3");
         source_app.flush().expect("flush stock_data");
 
@@ -962,55 +1103,197 @@ mod tests {
         result_conn
             .execute(
                 r#"
-                CREATE TABLE scene_details (
-                    scene_name VARCHAR,
+                CREATE TABLE score_summary (
                     ts_code VARCHAR,
                     trade_date VARCHAR,
-                    stage VARCHAR
+                    total_score DOUBLE,
+                    rank BIGINT
                 )
                 "#,
                 [],
             )
-            .expect("create scene_details");
+            .expect("create score_summary");
+        result_conn
+            .execute(
+                r#"
+                CREATE TABLE rule_details (
+                    rule_name VARCHAR,
+                    ts_code VARCHAR,
+                    trade_date VARCHAR,
+                    rule_score DOUBLE
+                )
+                "#,
+                [],
+            )
+            .expect("create rule_details");
+
+        let mut summary_app = result_conn
+            .appender("score_summary")
+            .expect("score_summary appender");
+        summary_app
+            .append_row(params!["000001.SZ", "20240102", 10.0_f64, 1_i64])
+            .expect("summary row1");
+        summary_app
+            .append_row(params!["000002.SZ", "20240102", 9.0_f64, 2_i64])
+            .expect("summary row2");
+        summary_app
+            .append_row(params!["000001.SZ", "20240103", 11.0_f64, 1_i64])
+            .expect("summary row3");
+        summary_app
+            .append_row(params!["000002.SZ", "20240103", 8.0_f64, 2_i64])
+            .expect("summary row4");
+        summary_app.flush().expect("flush score_summary");
 
         let mut result_app = result_conn
-            .appender("scene_details")
-            .expect("scene_details appender");
+            .appender("rule_details")
+            .expect("rule_details appender");
+
         result_app
-            .append_row(params!["场景A", "000001.SZ", "20240102", "trigger"])
-            .expect("scene a row1");
+            .append_row(params!["规则A", "000001.SZ", "20240102", 1.0_f64])
+            .expect("rule a row1");
         result_app
-            .append_row(params!["场景A", "000001.SZ", "20240103", "confirm"])
-            .expect("scene a row2");
+            .append_row(params!["规则A", "000002.SZ", "20240102", -1.0_f64])
+            .expect("rule a row2");
         result_app
-            .append_row(params!["场景B", "000001.SZ", "20240102", "observe"])
-            .expect("scene b row1");
+            .append_row(params!["规则A", "000001.SZ", "20240103", 2.0_f64])
+            .expect("rule a row3");
         result_app
-            .append_row(params!["场景B", "000001.SZ", "20240103", "trigger"])
-            .expect("scene b row2");
-        result_app.flush().expect("flush scene_details");
+            .append_row(params!["规则A", "000002.SZ", "20240103", -2.0_f64])
+            .expect("rule a row4");
+
+        result_app
+            .append_row(params!["规则B", "000001.SZ", "20240102", 0.5_f64])
+            .expect("rule b row1");
+        result_app
+            .append_row(params!["规则B", "000002.SZ", "20240102", 0.2_f64])
+            .expect("rule b row2");
+        result_app
+            .append_row(params!["规则B", "000001.SZ", "20240103", 0.4_f64])
+            .expect("rule b row3");
+        result_app
+            .append_row(params!["规则B", "000002.SZ", "20240103", 0.1_f64])
+            .expect("rule b row4");
+        result_app.flush().expect("flush rule_details");
     }
 
     #[test]
-    fn batch_scene_layer_metrics_match_single_scene_results() {
+    fn calc_rule_layer_metrics_from_db_returns_expected_metrics() {
         let source_dir = temp_source_dir();
         let source_dir_str = source_dir.to_str().expect("utf8 source dir");
         prepare_test_files(source_dir_str);
 
         let source_conn = Connection::open(source_db_path(source_dir_str)).expect("open source db");
-        let scene_names = vec!["场景A".to_string(), "场景B".to_string()];
-        let layer_config = SceneLayerConfig {
+        let metrics = calc_rule_layer_metrics_from_db(
+            &source_conn,
+            source_dir_str,
+            &RuleLayerFromDbInput {
+                rule_name: "规则A".to_string(),
+                stock_adj_type: "qfq".to_string(),
+                index_ts_code: "000300.SH".to_string(),
+                index_beta: 0.0,
+                concept_beta: 0.0,
+                industry_beta: 0.0,
+                start_date: "20240102".to_string(),
+                end_date: "20240104".to_string(),
+                layer_config: RuleLayerConfig {
+                    min_samples_per_day: 2,
+                    backtest_period: 1,
+                },
+            },
+        )
+        .expect("rule metrics");
+
+        assert_eq!(metrics.points.len(), 2);
+
+        let p0 = &metrics.points[0];
+        assert_eq!(p0.trade_date, "20240102");
+        assert_eq!(p0.sample_count, 2);
+        assert_opt_close(p0.avg_rule_score, Some(0.0));
+        assert_opt_close(p0.avg_residual_return, Some(2.0));
+        assert_opt_close(p0.top_bottom_spread, Some(2.0));
+        assert_opt_close(p0.ic, Some(1.0));
+
+        let p1 = &metrics.points[1];
+        assert_eq!(p1.trade_date, "20240103");
+        assert_eq!(p1.sample_count, 2);
+        assert_opt_close(p1.avg_rule_score, Some(0.0));
+        assert_opt_close(p1.avg_residual_return, Some(2.0));
+        assert_opt_close(p1.top_bottom_spread, Some(6.0));
+        assert_opt_close(p1.ic, Some(1.0));
+
+        assert_opt_close(metrics.avg_residual_mean, Some(2.0));
+        assert_opt_close(metrics.spread_mean, Some(4.0));
+        assert_opt_close(metrics.ic_mean, Some(1.0));
+        assert_opt_close(metrics.ic_std, Some(0.0));
+        assert_eq!(metrics.icir, None);
+    }
+
+    #[test]
+    fn calc_rule_layer_metrics_from_db_defaults_non_triggered_to_zero() {
+        let source_dir = temp_source_dir();
+        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
+        prepare_test_files(source_dir_str);
+
+        let source_conn = Connection::open(source_db_path(source_dir_str)).expect("open source db");
+        let metrics = calc_rule_layer_metrics_from_db(
+            &source_conn,
+            source_dir_str,
+            &RuleLayerFromDbInput {
+                rule_name: "规则C".to_string(),
+                stock_adj_type: "qfq".to_string(),
+                index_ts_code: "000300.SH".to_string(),
+                index_beta: 0.0,
+                concept_beta: 0.0,
+                industry_beta: 0.0,
+                start_date: "20240102".to_string(),
+                end_date: "20240104".to_string(),
+                layer_config: RuleLayerConfig {
+                    min_samples_per_day: 2,
+                    backtest_period: 1,
+                },
+            },
+        )
+        .expect("rule metrics");
+
+        assert_eq!(metrics.points.len(), 2);
+
+        let p0 = &metrics.points[0];
+        assert_eq!(p0.trade_date, "20240102");
+        assert_eq!(p0.sample_count, 2);
+        assert_opt_close(p0.avg_rule_score, Some(0.0));
+        assert_opt_close(p0.avg_residual_return, Some(2.0));
+        assert_eq!(p0.top_bottom_spread, None);
+        assert_eq!(p0.ic, None);
+
+        let p1 = &metrics.points[1];
+        assert_eq!(p1.trade_date, "20240103");
+        assert_eq!(p1.sample_count, 2);
+        assert_opt_close(p1.avg_rule_score, Some(0.0));
+        assert_opt_close(p1.avg_residual_return, Some(2.0));
+        assert_eq!(p1.top_bottom_spread, None);
+        assert_eq!(p1.ic, None);
+    }
+
+    #[test]
+    fn batch_rule_layer_metrics_match_single_rule_results() {
+        let source_dir = temp_source_dir();
+        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
+        prepare_test_files(source_dir_str);
+
+        let source_conn = Connection::open(source_db_path(source_dir_str)).expect("open source db");
+        let rule_names = vec!["规则A".to_string(), "规则B".to_string()];
+        let layer_config = RuleLayerConfig {
             min_samples_per_day: 1,
             backtest_period: 1,
         };
 
-        let batch_metrics = calc_all_scene_layer_metrics_from_db(
+        let batch_metrics = calc_all_rule_layer_metrics_from_db(
             &source_conn,
             source_dir_str,
-            &scene_names,
+            &rule_names,
             "qfq",
             "000300.SH",
-            0.5,
+            0.0,
             0.0,
             0.0,
             "20240102",
@@ -1021,15 +1304,15 @@ mod tests {
 
         assert_eq!(batch_metrics.len(), 2);
 
-        for (scene_name, metrics) in batch_metrics {
-            let single_metrics = calc_scene_layer_metrics_from_db(
+        for (rule_name, metrics) in batch_metrics {
+            let single_metrics = calc_rule_layer_metrics_from_db(
                 &source_conn,
                 source_dir_str,
-                &SceneLayerFromDbInput {
-                    scene_name: scene_name.clone(),
+                &RuleLayerFromDbInput {
+                    rule_name: rule_name.clone(),
                     stock_adj_type: "qfq".to_string(),
                     index_ts_code: "000300.SH".to_string(),
-                    index_beta: 0.5,
+                    index_beta: 0.0,
                     concept_beta: 0.0,
                     industry_beta: 0.0,
                     start_date: "20240102".to_string(),

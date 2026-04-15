@@ -304,6 +304,56 @@
   background: #f8fbff;
 }
 
+.scene-layer-rule-detail-table {
+  min-width: 780px;
+}
+
+.scene-layer-rule-detail-table thead th {
+  background: linear-gradient(180deg, #fff8f1 0%, #ffedd5 100%);
+  color: #7c2d12;
+}
+
+.scene-layer-rule-detail-table thead th .table-sort-button {
+  width: 100%;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 1px 0;
+  transition: color 0.15s ease;
+}
+
+.scene-layer-rule-detail-table thead th .table-sort-button:hover,
+.scene-layer-rule-detail-table thead th .table-sort-button.is-active {
+  color: var(--theme-orange-700);
+}
+
+.scene-layer-rule-detail-table thead th[aria-sort="ascending"],
+.scene-layer-rule-detail-table thead th[aria-sort="descending"] {
+  background: linear-gradient(180deg, #fff3e0 0%, #fed7aa 100%);
+  color: var(--theme-orange-800);
+}
+
+.scene-layer-rule-detail-table .table-sort-indicator {
+  font-weight: 700;
+}
+
+.scene-layer-rule-detail-table tbody tr:nth-child(2n) {
+  background: #fcfdff;
+}
+
+.scene-layer-rule-detail-table tbody tr:hover {
+  background: #fff7ed;
+}
+
+.scene-layer-rule-detail-table tbody td:first-child {
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.scene-layer-rule-detail-table tbody td:nth-child(n + 2) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .scene-layer-market-gainers-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));

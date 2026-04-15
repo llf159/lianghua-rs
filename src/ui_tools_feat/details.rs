@@ -12,8 +12,8 @@ use crate::{
     data::{ind_toml_path, result_db_path, score_rule_path, source_db_path},
     download::ind_calc::{cache_ind_build_from_path, calc_inds_with_cache_lossy},
     ui_tools_feat::{
-        build_area_map, build_circ_mv_map, build_concepts_map, build_industry_map, build_name_map,
-        build_total_mv_map,
+        build_area_map, build_circ_mv_map, build_concepts_map, build_industry_map,
+        build_most_related_concept_map, build_name_map, build_total_mv_map,
         realtime::{RealtimeFetchMeta, fetch_realtime_quote_map, normalize_quote_trade_date},
     },
     utils::utils::board_category,
@@ -35,6 +35,7 @@ pub struct DetailOverview {
     pub total: Option<i64>,
     pub total_mv_yi: Option<f64>,
     pub circ_mv_yi: Option<f64>,
+    pub most_related_concept: Option<String>,
     pub concept: Option<String>,
 }
 
@@ -108,7 +109,6 @@ pub struct DetailSceneTriggerRow {
     pub scene_name: String,
     pub stage: Option<String>,
     pub stage_score: Option<f64>,
-    pub evidence_score: Option<f64>,
     pub risk_score: Option<f64>,
     pub scene_rank: Option<i64>,
     pub hit_date: Option<String>,
@@ -181,7 +181,6 @@ struct CurrentRuleState {
 struct CurrentSceneState {
     stage: Option<String>,
     stage_score: f64,
-    evidence_score: f64,
     risk_score: f64,
     scene_rank: Option<i64>,
     is_triggered: bool,
@@ -320,6 +319,7 @@ fn query_detail_overview(
     let total_mv_map = build_total_mv_map(source_path)?;
     let circ_mv_map = build_circ_mv_map(source_path)?;
     let concept_map = build_concepts_map(source_path)?;
+    let most_related_concept_map = build_most_related_concept_map(source_path)?;
 
     Ok(DetailOverview {
         ts_code: ts_code.to_string(),
@@ -337,6 +337,7 @@ fn query_detail_overview(
         total,
         total_mv_yi: total_mv_map.get(ts_code).copied(),
         circ_mv_yi: circ_mv_map.get(ts_code).copied(),
+        most_related_concept: most_related_concept_map.get(ts_code).cloned(),
         concept: concept_map.get(ts_code).cloned(),
     })
 }
@@ -833,7 +834,7 @@ fn load_detail_trigger_snapshot(
                 WHERE ts_code = ? AND trade_date = ?
             ),
             current_scene AS (
-                SELECT scene_name, stage, stage_score, evidence_score, risk_score, scene_rank
+                SELECT scene_name, stage, stage_score, risk_score, scene_rank
                 FROM scene_details
                 WHERE ts_code = ? AND trade_date = ?
             )
@@ -843,7 +844,6 @@ fn load_detail_trigger_snapshot(
                 cr.rule_score,
                 CAST(NULL AS VARCHAR) AS stage,
                 CAST(NULL AS DOUBLE) AS stage_score,
-                CAST(NULL AS DOUBLE) AS evidence_score,
                 CAST(NULL AS DOUBLE) AS risk_score,
                 CAST(NULL AS BIGINT) AS scene_rank,
                 CAST(NULL AS VARCHAR) AS hit_date
@@ -855,7 +855,6 @@ fn load_detail_trigger_snapshot(
                 CAST(NULL AS DOUBLE) AS rule_score,
                 cs.stage,
                 cs.stage_score,
-                cs.evidence_score,
                 cs.risk_score,
                 cs.scene_rank,
                 CAST(NULL AS VARCHAR) AS hit_date
@@ -909,18 +908,14 @@ fn load_detail_trigger_snapshot(
                 let stage_score: Option<f64> = row
                     .get(4)
                     .map_err(|e| format!("读取 stage_score 失败: {e}"))?;
-                let evidence_score: Option<f64> = row
-                    .get(5)
-                    .map_err(|e| format!("读取 evidence_score 失败: {e}"))?;
                 let risk_score: Option<f64> = row
-                    .get(6)
+                    .get(5)
                     .map_err(|e| format!("读取 risk_score 失败: {e}"))?;
                 let scene_rank: Option<i64> = row
-                    .get(7)
+                    .get(6)
                     .map_err(|e| format!("读取 scene_rank 失败: {e}"))?;
                 if stage.is_some()
                     || stage_score.is_some()
-                    || evidence_score.is_some()
                     || risk_score.is_some()
                     || scene_rank.is_some()
                 {
@@ -929,7 +924,6 @@ fn load_detail_trigger_snapshot(
                         CurrentSceneState {
                             stage,
                             stage_score: stage_score.unwrap_or(0.0),
-                            evidence_score: evidence_score.unwrap_or(0.0),
                             risk_score: risk_score.unwrap_or(0.0),
                             scene_rank,
                             is_triggered: true,
@@ -1097,7 +1091,6 @@ fn build_scene_triggers(
             .unwrap_or(CurrentSceneState {
                 stage: None,
                 stage_score: 0.0,
-                evidence_score: 0.0,
                 risk_score: 0.0,
                 scene_rank: None,
                 is_triggered: false,
@@ -1110,7 +1103,6 @@ fn build_scene_triggers(
             scene_name: meta.scene_name.clone(),
             stage: current_state.stage.clone(),
             stage_score: Some(current_state.stage_score),
-            evidence_score: Some(current_state.evidence_score),
             risk_score: Some(current_state.risk_score),
             scene_rank: current_state.scene_rank,
             hit_date: hit_date.clone(),

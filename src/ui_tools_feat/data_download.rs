@@ -1,8 +1,4 @@
-use std::{
-    collections::HashSet,
-    fs,
-    path::Path,
-};
+use std::{collections::HashSet, fs, path::Path};
 
 use duckdb::Connection;
 use serde::{Deserialize, Serialize};
@@ -919,7 +915,7 @@ pub fn run_prepared_concept_performance_repair(
             finished: 0,
             total: 1,
             current_label: None,
-            message: "开始全量补全概念/板块表现库。".to_string()
+            message: "开始全量补全概念/板块表现库。".to_string(),
         });
     }
 

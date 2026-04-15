@@ -16,6 +16,7 @@ const GDNM_BX_BIAO: &str = "concept_performance";
 const MR_FQFS: &str = "qfq";
 const GDNM_BX_DATES_PER_CHUNK: usize = 32;
 const PERFORMANCE_TYPE_CONCEPT: &str = "concept";
+const PERFORMANCE_TYPE_INDUSTRY: &str = "industry";
 const PERFORMANCE_TYPE_BOARD: &str = "market";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,42 +60,11 @@ pub fn init_concept_performance_db(db_path: &Path) -> Result<(), String> {
     )
     .map_err(|e| format!("创建concept_performance失败:{e}"))?;
 
-    let has_performance_type = conn
-        .prepare("PRAGMA table_info('concept_performance')")
-        .map_err(|e| format!("读取concept_performance结构失败:{e}"))?
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|e| format!("查询concept_performance字段失败:{e}"))?
-        .filter_map(Result::ok)
-        .any(|name| name == "performance_type");
-
-    if !has_performance_type {
-        conn.execute("ALTER TABLE concept_performance RENAME TO concept_performance_old", [])
-            .map_err(|e| format!("旧concept_performance重命名失败:{e}"))?;
-        conn.execute(
-            r#"
-            CREATE TABLE concept_performance (
-                trade_date VARCHAR,
-                performance_type VARCHAR,
-                concept VARCHAR,
-                performance_pct DOUBLE,
-                PRIMARY KEY (trade_date, performance_type, concept)
-            )
-            "#,
-            [],
-        )
-        .map_err(|e| format!("重建concept_performance失败:{e}"))?;
-        conn.execute(
-            r#"
-            INSERT INTO concept_performance (trade_date, performance_type, concept, performance_pct)
-            SELECT trade_date, 'concept', concept, performance_pct
-            FROM concept_performance_old
-            "#,
-            [],
-        )
-        .map_err(|e| format!("迁移旧concept_performance失败:{e}"))?;
-        conn.execute("DROP TABLE concept_performance_old", [])
-            .map_err(|e| format!("删除旧concept_performance失败:{e}"))?;
-    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_concept_perf_type_name_date ON concept_performance(performance_type, concept, trade_date)",
+        [],
+    )
+    .map_err(|e| format!("创建concept_performance索引失败:{e}"))?;
     Ok(())
 }
 
@@ -165,6 +135,7 @@ pub fn rebuild_concept_performance_range(
     }
 
     let concept_map = load_concept_map(source_dir)?.unwrap_or_default();
+    let industry_map = load_industry_map(source_dir)?;
     let board_map = load_board_map(source_dir)?;
 
     let uivi_map = load_uivi_map(source_dir)?;
@@ -180,6 +151,16 @@ pub fn rebuild_concept_performance_range(
             end_date,
             PERFORMANCE_TYPE_CONCEPT,
             &concept_map,
+            &uivi_map,
+        )?);
+    }
+    if !industry_map.is_empty() {
+        bx_rows.extend(calc_gdnm_bx_rows(
+            source_dir,
+            start_date,
+            end_date,
+            PERFORMANCE_TYPE_INDUSTRY,
+            &industry_map,
             &uivi_map,
         )?);
     }
@@ -494,6 +475,34 @@ fn load_board_map(source_dir: &str) -> Result<HashMap<String, Vec<String>>, Stri
     Ok(board_map)
 }
 
+fn load_industry_map(source_dir: &str) -> Result<HashMap<String, Vec<String>>, String> {
+    let rows = load_stock_list(source_dir)?;
+    let mut industry_map = HashMap::with_capacity(rows.len());
+    for cols in rows {
+        let Some(ts_code) = cols.first().map(|v| v.trim()) else {
+            continue;
+        };
+        let Some(industry_raw) = cols.get(4).map(|v| v.trim()) else {
+            continue;
+        };
+        if ts_code.is_empty() || industry_raw.is_empty() {
+            continue;
+        }
+        let industry_list = split_gdnm_items(industry_raw);
+        if industry_list.is_empty() {
+            continue;
+        }
+        industry_map
+            .entry(ts_code.to_string())
+            .and_modify(|old_list: &mut Vec<String>| {
+                old_list.extend(industry_list.clone());
+                *old_list = split_gdnm_items(&old_list.join(","));
+            })
+            .or_insert(industry_list);
+    }
+    Ok(industry_map)
+}
+
 fn load_uivi_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
     let rows = load_stock_list(source_dir)?;
     let mut uivi_map = HashMap::with_capacity(rows.len());
@@ -657,6 +666,21 @@ pub fn load_concept_trend_series(
         source_dir,
         PERFORMANCE_TYPE_CONCEPT,
         concept,
+        start_date,
+        end_date,
+    )
+}
+
+pub fn load_industry_trend_series(
+    source_dir: &str,
+    industry: &str,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+) -> Result<ConceptTrendSeries, String> {
+    load_performance_trend_series(
+        source_dir,
+        PERFORMANCE_TYPE_INDUSTRY,
+        industry,
         start_date,
         end_date,
     )
@@ -975,7 +999,7 @@ ts_code,concepts_code,concepts_name,stock_name
             "20240103",
         )
         .expect("rebuild range");
-        assert_eq!(row_count, 6);
+        assert_eq!(row_count, 10);
 
         let bx_db = concept_performance_db_path(source_dir.to_str().expect("utf8 path"));
         let conn = Connection::open(bx_db).expect("open bx db");
@@ -1017,6 +1041,18 @@ ts_code,concepts_code,concepts_name,stock_name
                     performance_pct: 17.5,
                 },
                 GdNmBXRow {
+                    trade_date: "20240102".to_string(),
+                    performance_type: PERFORMANCE_TYPE_INDUSTRY.to_string(),
+                    concept: "地产".to_string(),
+                    performance_pct: 20.0,
+                },
+                GdNmBXRow {
+                    trade_date: "20240102".to_string(),
+                    performance_type: PERFORMANCE_TYPE_INDUSTRY.to_string(),
+                    concept: "银行".to_string(),
+                    performance_pct: 10.0,
+                },
+                GdNmBXRow {
                     trade_date: "20240103".to_string(),
                     performance_type: PERFORMANCE_TYPE_CONCEPT.to_string(),
                     concept: "AI".to_string(),
@@ -1033,6 +1069,18 @@ ts_code,concepts_code,concepts_name,stock_name
                     performance_type: PERFORMANCE_TYPE_CONCEPT.to_string(),
                     concept: "算力".to_string(),
                     performance_pct: 10.0,
+                },
+                GdNmBXRow {
+                    trade_date: "20240103".to_string(),
+                    performance_type: PERFORMANCE_TYPE_INDUSTRY.to_string(),
+                    concept: "地产".to_string(),
+                    performance_pct: 15.0,
+                },
+                GdNmBXRow {
+                    trade_date: "20240103".to_string(),
+                    performance_type: PERFORMANCE_TYPE_INDUSTRY.to_string(),
+                    concept: "银行".to_string(),
+                    performance_pct: -5.0,
                 },
             ]
         );
@@ -1056,7 +1104,7 @@ ts_code,concepts_code,concepts_name,stock_name
             trade_dates.last().expect("last trade date"),
         )
         .expect("rebuild range");
-        assert_eq!(row_count, 120);
+        assert_eq!(row_count, 200);
 
         let bx_db = concept_performance_db_path(source_dir.to_str().expect("utf8 path"));
         let conn = Connection::open(bx_db).expect("open bx db");
@@ -1083,6 +1131,17 @@ ts_code,concepts_code,concepts_name,stock_name
                 |row| row.get(0),
             )
             .expect("query first suanli");
+        let first_bank: f64 = conn
+            .query_row(
+                "SELECT performance_pct FROM concept_performance WHERE trade_date = ? AND performance_type = ? AND concept = ?",
+                params![
+                    trade_dates.first().expect("first trade date"),
+                    PERFORMANCE_TYPE_INDUSTRY,
+                    "银行"
+                ],
+                |row| row.get(0),
+            )
+            .expect("query first bank");
         let last_ai: f64 = conn
             .query_row(
                 "SELECT performance_pct FROM concept_performance WHERE trade_date = ? AND performance_type = ? AND concept = ?",
@@ -1105,11 +1164,24 @@ ts_code,concepts_code,concepts_name,stock_name
                 |row| row.get(0),
             )
             .expect("query last suanli");
+        let last_bank: f64 = conn
+            .query_row(
+                "SELECT performance_pct FROM concept_performance WHERE trade_date = ? AND performance_type = ? AND concept = ?",
+                params![
+                    trade_dates.last().expect("last trade date"),
+                    PERFORMANCE_TYPE_INDUSTRY,
+                    "银行"
+                ],
+                |row| row.get(0),
+            )
+            .expect("query last bank");
 
         assert_eq!(first_ai, 1.0);
         assert_eq!(first_suanli, 1.75);
+        assert_eq!(first_bank, 1.0);
         assert_eq!(last_ai, 40.0);
         assert_eq!(last_suanli, 70.0);
+        assert_eq!(last_bank, 40.0);
 
         let _ = remove_dir_all(source_dir);
     }
@@ -1153,7 +1225,7 @@ ts_code,concepts_code,concepts_name,stock_name
         let conn = Connection::open(bx_db).expect("open bx db");
         let performance_pct: f64 = conn
             .query_row(
-                "SELECT performance_pct FROM concept_performance WHERE trade_date = ? AND concept = ?",
+                "SELECT performance_pct FROM concept_performance WHERE trade_date = ? AND performance_type = ? AND concept = ?",
                 params!["20240102", PERFORMANCE_TYPE_CONCEPT, "算力"],
                 |row| row.get(0),
             )

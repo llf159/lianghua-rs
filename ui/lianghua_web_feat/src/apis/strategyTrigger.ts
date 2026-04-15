@@ -68,6 +68,30 @@ export type StrategyStatisticsDetailData = {
   triggered_stocks: TriggeredStockRow[]
 }
 
+export type SceneStageRow = {
+  stage: string
+  sample_count: number
+  stage_ratio_in_scene?: number | null
+}
+
+export type SceneContributionSummary = {
+  scene_covered_count: number
+  scene_total_sample_count: number
+  scene_coverage_ratio?: number | null
+  scene_rule_contribution_score?: number | null
+  all_rule_contribution_score?: number | null
+  scene_rule_contribution_ratio?: number | null
+}
+
+export type SceneStatisticsPageData = {
+  scene_options?: string[]
+  resolved_scene_name?: string | null
+  analysis_trade_date_options?: string[]
+  resolved_analysis_trade_date?: string | null
+  stage_rows?: SceneStageRow[]
+  summary?: SceneContributionSummary | null
+}
+
 export type StrategyStatisticsQuery = {
   sourcePath: string
   strategyName?: string
@@ -78,6 +102,12 @@ export type StrategyTriggeredStocksQuery = {
   sourcePath: string
   strategyName: string
   analysisTradeDate: string
+}
+
+export type SceneStatisticsQuery = {
+  sourcePath: string
+  sceneName?: string
+  analysisTradeDate?: string
 }
 
 export async function getStrategyStatisticsPage(query: StrategyStatisticsQuery) {
@@ -94,6 +124,10 @@ export async function getStrategyStatisticsDetail(query: {
 
 export async function getStrategyTriggeredStocks(query: StrategyTriggeredStocksQuery) {
   return invoke<TriggeredStockRow[]>('get_strategy_triggered_stocks', query)
+}
+
+export async function getSceneStatisticsPage(query: SceneStatisticsQuery) {
+  return invoke<SceneStatisticsPageData>('get_scene_statistics_page', query)
 }
 
 export type SceneLayerStateAvgResidualReturn = {
@@ -123,7 +157,7 @@ export type SceneLayerBacktestData = {
   index_ts_code: string
   index_beta: number
   concept_beta: number
-  board_beta: number
+  industry_beta: number
   start_date: string
   end_date: string
   min_samples_per_scene_day: number
@@ -140,6 +174,53 @@ export type SceneLayerBacktestData = {
 export type SceneLayerBacktestDefaultsData = {
   scene_options: string[]
   resolved_scene_name?: string | null
+  start_date?: string | null
+  end_date?: string | null
+}
+
+export type RuleLayerPoint = {
+  trade_date: string
+  sample_count: number
+  avg_rule_score?: number | null
+  avg_residual_return?: number | null
+  top_bottom_spread?: number | null
+  ic?: number | null
+}
+
+export type RuleLayerRuleSummary = {
+  rule_name: string
+  point_count: number
+  avg_residual_mean?: number | null
+  spread_mean?: number | null
+  ic_mean?: number | null
+  ic_std?: number | null
+  icir?: number | null
+}
+
+export type RuleLayerBacktestData = {
+  rule_name: string
+  stock_adj_type: string
+  index_ts_code: string
+  index_beta: number
+  concept_beta: number
+  industry_beta: number
+  start_date: string
+  end_date: string
+  min_samples_per_rule_day: number
+  backtest_period: number
+  points: RuleLayerPoint[]
+  avg_residual_mean?: number | null
+  spread_mean?: number | null
+  ic_mean?: number | null
+  ic_std?: number | null
+  icir?: number | null
+  is_all_rules?: boolean
+  all_rule_summaries?: RuleLayerRuleSummary[]
+}
+
+export type RuleLayerBacktestDefaultsData = {
+  rule_options: string[]
+  resolved_rule_name?: string | null
   start_date?: string | null
   end_date?: string | null
 }
@@ -186,15 +267,27 @@ export type MarketContributionData = {
 
 export type SceneLayerBacktestQuery = {
   sourcePath: string
-  sceneName: string
   stockAdjType?: string
   indexTsCode: string
   indexBeta?: number
   conceptBeta?: number
-  boardBeta?: number
+  industryBeta?: number
   startDate: string
   endDate: string
   minSamplesPerSceneDay?: number
+  backtestPeriod?: number
+}
+
+export type RuleLayerBacktestQuery = {
+  sourcePath: string
+  stockAdjType?: string
+  indexTsCode: string
+  indexBeta?: number
+  conceptBeta?: number
+  industryBeta?: number
+  startDate: string
+  endDate: string
+  minSamplesPerRuleDay?: number
   backtestPeriod?: number
 }
 
@@ -204,6 +297,14 @@ export async function getSceneLayerBacktestDefaults(sourcePath: string) {
 
 export async function runSceneLayerBacktest(query: SceneLayerBacktestQuery) {
   return invoke<SceneLayerBacktestData>('run_scene_layer_backtest', query)
+}
+
+export async function getRuleLayerBacktestDefaults(sourcePath: string) {
+  return invoke<RuleLayerBacktestDefaultsData>('get_rule_layer_backtest_defaults', { sourcePath })
+}
+
+export async function runRuleLayerBacktest(query: RuleLayerBacktestQuery) {
+  return invoke<RuleLayerBacktestData>('run_rule_layer_backtest', query)
 }
 
 export async function getMarketAnalysis(query: {
