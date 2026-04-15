@@ -35,9 +35,12 @@ pub struct SceneDetails {
     pub ts_code: String,
     pub trade_date: String,
     pub scene_name: String,
+    pub direction: String,
     pub stage: Option<String>,
     pub stage_score: f64,
     pub risk_score: f64,
+    pub confirm_strength: f64,
+    pub risk_intensity: f64,
 }
 
 #[derive(Debug, Default)]
@@ -224,6 +227,8 @@ impl SceneDetails {
             if trade_dates.len() != scene.triggered.len()
                 || trade_dates.len() != scene.stage_score.len()
                 || trade_dates.len() != scene.risk_score.len()
+                || trade_dates.len() != scene.confirm_strength.len()
+                || trade_dates.len() != scene.risk_intensity.len()
                 || trade_dates.len() != scene.stage.len()
             {
                 continue;
@@ -237,9 +242,12 @@ impl SceneDetails {
                     ts_code: ts_code.to_string(),
                     trade_date: trade_dates[i].clone(),
                     scene_name: scene_name.clone(),
+                    direction: scene.direction.as_str().to_string(),
                     stage: scene.stage[i].clone(),
                     stage_score: scene.stage_score[i],
                     risk_score: scene.risk_score[i],
+                    confirm_strength: scene.confirm_strength[i],
+                    risk_intensity: scene.risk_intensity[i],
                 });
             }
         }
@@ -286,14 +294,23 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
     .map_err(|e| format!("创建rule_details失败:{e}"))?;
 
     conn.execute(
+        "DROP TABLE IF EXISTS scene_details",
+        [],
+    )
+    .map_err(|e| format!("重建scene_details前删除旧表失败:{e}"))?;
+
+    conn.execute(
         r#"
-        CREATE TABLE IF NOT EXISTS scene_details (
+        CREATE TABLE scene_details (
             ts_code VARCHAR,
             trade_date VARCHAR,
             scene_name VARCHAR,
+            direction VARCHAR,
             stage VARCHAR,
             stage_score DOUBLE,
             risk_score DOUBLE,
+            confirm_strength DOUBLE,
+            risk_intensity DOUBLE,
             scene_rank INTEGER,
             PRIMARY KEY (ts_code, trade_date, scene_name)
         )
@@ -375,9 +392,12 @@ fn append_scene_rows(app: &mut Appender<'_>, rows: &[SceneDetails]) -> Result<()
             &row.ts_code,
             &row.trade_date,
             &row.scene_name,
+            &row.direction,
             &row.stage,
             row.stage_score,
             row.risk_score,
+            row.confirm_strength,
+            row.risk_intensity,
             Option::<i64>::None
         ])
         .map_err(|e| format!("插入scene_details失败:{e}"))?;
@@ -491,7 +511,9 @@ fn compute_scene_rankings_in_tx(
                             WHEN 'fail' THEN 0
                             ELSE -1
                         END DESC,
-                        (d.stage_score - d.risk_score) DESC,
+                        COALESCE(d.confirm_strength, 0.0) DESC,
+                        (COALESCE(d.confirm_strength, 0.0) - COALESCE(d.risk_intensity, 0.0)) DESC,
+                        (ABS(d.stage_score) - ABS(d.risk_score)) DESC,
                         s.total_score DESC NULLS LAST,
                         d.ts_code ASC
                 ) AS scene_rank

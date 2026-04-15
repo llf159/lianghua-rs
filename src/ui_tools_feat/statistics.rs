@@ -1,17 +1,24 @@
 use std::collections::{HashMap, HashSet};
 
 use duckdb::{Connection, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     data::{
-        ScopeWay, ScoreRule, ScoreScene, concept_performance_db_path, load_stock_list,
-        load_ths_concepts_list, result_db_path, source_db_path,
+        DataReader, RowData, ScopeWay, ScoreRule, ScoreScene, concept_performance_db_path,
+        load_stock_list, load_ths_concepts_list, result_db_path, source_db_path,
     },
+    data::scoring_data::row_into_rt,
+    expr::{
+        lexer::TokenKind,
+        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+    },
+    scoring::{CachedRule, evaluate_cached_rule_scores},
+    scoring::tools::{calc_zhang_pct, load_st_list},
     simulate::{
         rule::{
             RuleLayerConfig, RuleLayerFromDbInput, calc_all_rule_layer_metrics_from_db,
-            calc_rule_layer_metrics_from_db,
+            calc_rule_layer_metrics_from_db, calc_rule_layer_metrics_from_triggered_scores,
         },
         scene::{
             SceneLayerConfig, SceneLayerFromDbInput, calc_all_scene_layer_metrics_from_db,
@@ -19,6 +26,7 @@ use crate::{
         },
     },
     ui_tools_feat::{build_concepts_map, build_name_map},
+    utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
     utils::utils::board_category,
 };
 
@@ -246,6 +254,64 @@ pub struct RuleLayerBacktestDefaultsData {
     pub end_date: Option<String>,
 }
 
+const VALIDATION_EPS: f64 = 1e-12;
+const VALIDATION_MAX_COMBINATIONS: usize = 256;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuleValidationUnknownConfig {
+    pub name: String,
+    pub start: f64,
+    pub end: f64,
+    pub step: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleValidationUnknownValue {
+    pub name: String,
+    pub value: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleValidationSimilarityRow {
+    pub rule_name: String,
+    pub explain: Option<String>,
+    pub overlap_samples: usize,
+    pub overlap_rate_vs_validation: Option<f64>,
+    pub overlap_rate_vs_existing: Option<f64>,
+    pub overlap_lift: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleValidationComboResult {
+    pub combo_key: String,
+    pub combo_label: String,
+    pub formula: String,
+    pub unknown_values: Vec<RuleValidationUnknownValue>,
+    pub trigger_samples: usize,
+    pub triggered_days: usize,
+    pub avg_daily_trigger: f64,
+    pub backtest: RuleLayerBacktestData,
+    pub similarity_rows: Vec<RuleValidationSimilarityRow>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleExpressionValidationData {
+    pub import_rule_name: String,
+    pub import_rule_explain: String,
+    pub scope_way: String,
+    pub scope_windows: usize,
+    pub combo_results: Vec<RuleValidationComboResult>,
+    pub best_combo_key: Option<String>,
+}
+
+#[derive(Debug)]
+struct ValidationVariant {
+    combo_key: String,
+    combo_label: String,
+    formula: String,
+    unknown_values: Vec<RuleValidationUnknownValue>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct MarketRankItem {
     pub name: String,
@@ -306,6 +372,30 @@ fn scope_way_label(scope_way: ScopeWay) -> String {
         ScopeWay::Each => "each".to_string(),
         ScopeWay::Recent => "recent".to_string(),
         ScopeWay::Consec(n) => format!("consec>={n}"),
+    }
+}
+
+fn parse_scope_way_input(scope_way_raw: &str) -> Result<ScopeWay, String> {
+    let normalized = scope_way_raw.trim().to_ascii_uppercase();
+    match normalized.as_str() {
+        "ANY" => Ok(ScopeWay::Any),
+        "LAST" => Ok(ScopeWay::Last),
+        "EACH" => Ok(ScopeWay::Each),
+        "RECENT" => Ok(ScopeWay::Recent),
+        value => {
+            let Some(num) = value.strip_prefix("CONSEC>=") else {
+                return Err(format!(
+                    "scope_way 不支持: {scope_way_raw}，仅支持 ANY/LAST/EACH/RECENT/CONSEC>=N"
+                ));
+            };
+            let threshold = num
+                .parse::<usize>()
+                .map_err(|_| format!("scope_way 连续阈值非法: {scope_way_raw}"))?;
+            if threshold == 0 {
+                return Err("scope_way 连续阈值必须 >= 1".to_string());
+            }
+            Ok(ScopeWay::Consec(threshold))
+        }
     }
 }
 
@@ -1102,6 +1192,693 @@ pub fn get_scene_statistics_page(
         resolved_analysis_trade_date,
         stage_rows: Some(stage_rows),
         summary,
+    })
+}
+
+fn format_validation_number(value: f64) -> String {
+    let rounded = value.round();
+    if (value - rounded).abs() < 1e-9 {
+        format!("{rounded:.0}")
+    } else {
+        let mut text = format!("{value:.6}");
+        while text.contains('.') && text.ends_with('0') {
+            text.pop();
+        }
+        if text.ends_with('.') {
+            text.pop();
+        }
+        text
+    }
+}
+
+fn expand_unknown_config(config: &RuleValidationUnknownConfig) -> Result<Vec<f64>, String> {
+    let name = config.name.trim();
+    if name.is_empty() {
+        return Err("未知数名称不能为空".to_string());
+    }
+    if !config.start.is_finite() || !config.end.is_finite() || !config.step.is_finite() {
+        return Err(format!("未知数 {name} 存在非法数值"));
+    }
+    if config.step <= 0.0 {
+        return Err(format!("未知数 {name} 的 step 必须 > 0"));
+    }
+    if config.end < config.start {
+        return Err(format!("未知数 {name} 的 end 不能小于 start"));
+    }
+
+    let mut values = Vec::new();
+    let mut current = config.start;
+    let mut guard = 0usize;
+    while current <= config.end + config.step * 1e-9 {
+        values.push(current.min(config.end));
+        current += config.step;
+        guard += 1;
+        if guard > VALIDATION_MAX_COMBINATIONS * 8 {
+            return Err(format!(
+                "未知数 {name} 的取值数量过多，请增大 step 或缩小范围"
+            ));
+        }
+    }
+    if values.is_empty() {
+        values.push(config.start);
+    }
+    Ok(values)
+}
+
+fn replace_validation_unknowns(formula: &str, assignments: &[(String, f64)]) -> String {
+    if assignments.is_empty() {
+        return formula.to_string();
+    }
+
+    let replace_map = assignments
+        .iter()
+        .map(|(name, value)| (name.as_str(), format_validation_number(*value)))
+        .collect::<HashMap<_, _>>();
+
+    let tokens = lex_all(formula);
+    let mut out = String::with_capacity(formula.len() + assignments.len() * 4);
+    let mut cursor = 0usize;
+
+    for token in tokens {
+        if token.start > cursor {
+            out.push_str(&formula[cursor..token.start]);
+        }
+        match token.kind {
+            TokenKind::Ident(name) => {
+                if let Some(replacement) = replace_map.get(name.as_str()) {
+                    out.push_str(replacement);
+                } else {
+                    out.push_str(&formula[token.start..token.end]);
+                }
+            }
+            TokenKind::Eof => {}
+            _ => out.push_str(&formula[token.start..token.end]),
+        }
+        cursor = token.end;
+    }
+
+    if cursor < formula.len() {
+        out.push_str(&formula[cursor..]);
+    }
+
+    out
+}
+
+fn build_validation_variants(
+    formula: &str,
+    unknown_configs: &[RuleValidationUnknownConfig],
+) -> Result<Vec<ValidationVariant>, String> {
+    let formula = formula.trim();
+    if formula.is_empty() {
+        return Err("表达式不能为空".to_string());
+    }
+
+    let mut unknown_groups = Vec::<(String, Vec<f64>)>::new();
+    let mut total_combinations = 1usize;
+    let mut seen = HashSet::new();
+
+    for config in unknown_configs {
+        let name = config.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if !seen.insert(name.to_string()) {
+            return Err(format!("未知数名称重复: {name}"));
+        }
+
+        let values = expand_unknown_config(config)?;
+        total_combinations = total_combinations.saturating_mul(values.len().max(1));
+        if total_combinations > VALIDATION_MAX_COMBINATIONS {
+            return Err(format!(
+                "未知数组合过多({total_combinations})，当前上限为 {VALIDATION_MAX_COMBINATIONS}"
+            ));
+        }
+
+        unknown_groups.push((name.to_string(), values));
+    }
+
+    let mut out = Vec::new();
+    let mut assignments = Vec::<(String, f64)>::new();
+
+    fn walk_variants(
+        index: usize,
+        unknown_groups: &[(String, Vec<f64>)],
+        assignments: &mut Vec<(String, f64)>,
+        formula: &str,
+        out: &mut Vec<ValidationVariant>,
+    ) {
+        if index >= unknown_groups.len() {
+            let mut sorted = assignments.clone();
+            sorted.sort_by(|left, right| {
+                right
+                    .0
+                    .len()
+                    .cmp(&left.0.len())
+                    .then_with(|| left.0.cmp(&right.0))
+            });
+            let unknown_values = sorted
+                .iter()
+                .map(|(name, value)| RuleValidationUnknownValue {
+                    name: name.clone(),
+                    value: *value,
+                })
+                .collect::<Vec<_>>();
+            let replaced_formula = replace_validation_unknowns(formula, &sorted);
+            let combo_key = format!("validation_combo_{:03}", out.len() + 1);
+            let combo_label = if unknown_values.is_empty() {
+                "默认参数".to_string()
+            } else {
+                unknown_values
+                    .iter()
+                    .map(|item| format!("{}={}", item.name, format_validation_number(item.value)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+
+            out.push(ValidationVariant {
+                combo_key,
+                combo_label,
+                formula: replaced_formula,
+                unknown_values,
+            });
+            return;
+        }
+
+        let (name, values) = &unknown_groups[index];
+        for value in values {
+            assignments.push((name.clone(), *value));
+            walk_variants(index + 1, unknown_groups, assignments, formula, out);
+            assignments.pop();
+        }
+    }
+
+    walk_variants(0, &unknown_groups, &mut assignments, formula, &mut out);
+
+    if out.is_empty() {
+        out.push(ValidationVariant {
+            combo_key: "validation_combo_001".to_string(),
+            combo_label: "默认参数".to_string(),
+            formula: formula.to_string(),
+            unknown_values: Vec::new(),
+        });
+    }
+
+    Ok(out)
+}
+
+fn estimate_rule_warmup(
+    stmts: &Stmts,
+    scope_way: ScopeWay,
+    scope_windows: usize,
+) -> Result<usize, String> {
+    let mut locals = std::collections::HashMap::new();
+    let mut consts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut expr_need = 0usize;
+
+    for stmt in stmts.item.clone() {
+        match stmt {
+            Stmt::Assign { name, value } => match value {
+                Expr::Number(v) => {
+                    if v < 0.0 {
+                        return Err("表达式常量赋值结果不能为负数".to_string());
+                    }
+                    consts.insert(name, v as usize);
+                }
+                Expr::Binary { op, lhs, rhs } => {
+                    if let Some(out) = eval_binary_for_warmup(&op, &lhs, &rhs, &consts)? {
+                        consts.insert(name, out as usize);
+                    } else {
+                        let need =
+                            impl_expr_warmup(Expr::Binary { op, lhs, rhs }, &locals, &consts)?;
+                        locals.insert(name, need);
+                    }
+                }
+                other => {
+                    let need = impl_expr_warmup(other, &locals, &consts)?;
+                    locals.insert(name, need);
+                }
+            },
+            Stmt::Expr(expr) => {
+                expr_need = expr_need.max(impl_expr_warmup(expr, &locals, &consts)?);
+            }
+        }
+    }
+
+    let scope_extra = match scope_way {
+        ScopeWay::Last => 0,
+        ScopeWay::Any | ScopeWay::Each | ScopeWay::Recent => scope_windows.saturating_sub(1),
+        ScopeWay::Consec(threshold) => scope_windows
+            .saturating_sub(1)
+            .max(threshold.saturating_sub(1)),
+    };
+
+    Ok(expr_need + scope_extra)
+}
+
+fn fill_validation_extra_fields(
+    row_data: &mut RowData,
+    ts_code: &str,
+    is_st: bool,
+) -> Result<(), String> {
+    let zhang = calc_zhang_pct(ts_code, is_st);
+    let zhang_series = vec![Some(zhang); row_data.trade_dates.len()];
+    row_data.cols.insert("ZHANG".to_string(), zhang_series);
+    row_data.validate()
+}
+
+fn build_validation_cached_rule(
+    rule_name: String,
+    scope_way: ScopeWay,
+    scope_windows: usize,
+    points: f64,
+    dist_points: Option<Vec<crate::data::DistPoint>>,
+    tag: crate::data::RuleTag,
+    formula: &str,
+) -> Result<CachedRule, String> {
+    let tokens = lex_all(formula);
+    let mut parser = Parser::new(tokens);
+    let stmts = parser
+        .parse_main()
+        .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
+
+    Ok(CachedRule {
+        name: rule_name,
+        scope_windows,
+        scope_way,
+        points,
+        dist_points,
+        tag,
+        when_src: formula.to_string(),
+        when_ast: stmts,
+    })
+}
+
+fn build_validation_triggered_scores(
+    source_path: &str,
+    stock_adj_type: &str,
+    start_date: &str,
+    end_date: &str,
+    cached_rule: &CachedRule,
+) -> Result<(HashMap<String, HashMap<String, f64>>, HashSet<(String, String)>), String> {
+    let reader = DataReader::new(source_path)?;
+    let ts_codes = reader.list_ts_code(stock_adj_type, start_date, end_date)?;
+    let st_list = load_st_list(source_path)?;
+    let warmup_need = estimate_rule_warmup(
+        &cached_rule.when_ast,
+        cached_rule.scope_way,
+        cached_rule.scope_windows,
+    )?;
+    let need_rows = (warmup_need + cached_rule.scope_windows).max(1);
+
+    let mut triggered_score_map: HashMap<String, HashMap<String, f64>> = HashMap::new();
+    let mut hit_pairs: HashSet<(String, String)> = HashSet::new();
+
+    for ts_code in ts_codes {
+        let mut row_data = reader.load_one_tail_rows(&ts_code, stock_adj_type, end_date, need_rows)?;
+        fill_validation_extra_fields(&mut row_data, &ts_code, st_list.contains(&ts_code))?;
+
+        let trade_dates = row_data.trade_dates.clone();
+        if trade_dates.is_empty() {
+            continue;
+        }
+
+        let mut rt = row_into_rt(row_data)?;
+        let (scores, triggered_flags) = evaluate_cached_rule_scores(cached_rule, &mut rt)?;
+
+        let keep_from = trade_dates
+            .binary_search_by(|date| date.as_str().cmp(start_date))
+            .unwrap_or_else(|index| index);
+        let min_len = usize::min(trade_dates.len(), usize::min(scores.len(), triggered_flags.len()));
+        if keep_from >= min_len {
+            continue;
+        }
+
+        for index in keep_from..min_len {
+            let Some(score) = normalize_validation_trigger_score(
+                scores[index],
+                triggered_flags[index],
+                cached_rule.points,
+            ) else {
+                continue;
+            };
+            let trade_date = trade_dates[index].clone();
+            triggered_score_map
+                .entry(ts_code.clone())
+                .or_default()
+                .insert(trade_date.clone(), score);
+            hit_pairs.insert((ts_code.clone(), trade_date));
+        }
+    }
+
+    Ok((triggered_score_map, hit_pairs))
+}
+
+fn normalize_validation_trigger_score(score: f64, triggered: bool, rule_points: f64) -> Option<f64> {
+    if !score.is_finite() {
+        return None;
+    }
+    if score.abs() > VALIDATION_EPS {
+        return Some(score);
+    }
+    if !triggered {
+        return None;
+    }
+
+    if rule_points.is_finite() && rule_points.abs() > VALIDATION_EPS {
+        return Some(rule_points.signum());
+    }
+    Some(1.0)
+}
+
+fn build_rule_backtest_payload(
+    combo_key: &str,
+    params: &RuleLayerBacktestRunParams,
+    metrics: crate::simulate::rule::RuleLayerMetrics,
+) -> RuleLayerBacktestData {
+    RuleLayerBacktestData {
+        rule_name: combo_key.to_string(),
+        stock_adj_type: params.stock_adj_type.clone(),
+        index_ts_code: params.index_ts_code.clone(),
+        index_beta: params.index_beta,
+        concept_beta: params.concept_beta,
+        industry_beta: params.industry_beta,
+        start_date: params.start_date.clone(),
+        end_date: params.end_date.clone(),
+        min_samples_per_rule_day: params.min_samples_per_day,
+        backtest_period: params.backtest_period,
+        points: metrics
+            .points
+            .into_iter()
+            .map(|point| RuleLayerPointPayload {
+                trade_date: point.trade_date,
+                sample_count: point.sample_count,
+                avg_rule_score: point.avg_rule_score,
+                avg_residual_return: point.avg_residual_return,
+                top_bottom_spread: point.top_bottom_spread,
+                ic: point.ic,
+            })
+            .collect(),
+        avg_residual_mean: metrics.avg_residual_mean,
+        spread_mean: metrics.spread_mean,
+        ic_mean: metrics.ic_mean,
+        ic_std: metrics.ic_std,
+        icir: metrics.icir,
+        is_all_rules: false,
+        all_rule_summaries: Vec::new(),
+    }
+}
+
+fn load_validation_similarity_rows(
+    result_conn: &Connection,
+    start_date: &str,
+    end_date: &str,
+    hit_pairs: &HashSet<(String, String)>,
+    exclude_rule_name: Option<&str>,
+    explain_map: &HashMap<String, String>,
+) -> Result<Vec<RuleValidationSimilarityRow>, String> {
+    let combo_hit_count = hit_pairs.len() as f64;
+    if combo_hit_count <= 0.0 {
+        return Ok(Vec::new());
+    }
+
+    let excluded_rule_name = exclude_rule_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let total_samples = result_conn
+        .query_row(
+            r#"
+            SELECT COUNT(*)
+            FROM score_summary
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+            "#,
+            params![start_date, end_date],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("读取验证样本总数失败: {e}"))?
+        .max(0) as f64;
+
+    let mut stmt = result_conn
+        .prepare(
+            r#"
+            SELECT
+                rule_name,
+                ts_code,
+                trade_date
+            FROM rule_details
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
+              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > 1e-12
+            "#,
+        )
+        .map_err(|e| format!("预编译触发相似度查询失败: {e}"))?;
+    let mut rows = stmt
+        .query(params![start_date, end_date])
+        .map_err(|e| format!("查询触发相似度失败: {e}"))?;
+
+    let mut existing_hit_count = HashMap::<String, usize>::new();
+    let mut overlap_hit_count = HashMap::<String, usize>::new();
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取触发相似度失败: {e}"))?
+    {
+        let rule_name: String = row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?;
+        if excluded_rule_name
+            .as_deref()
+            .is_some_and(|excluded| rule_name == excluded)
+        {
+            continue;
+        }
+        let ts_code: String = row.get(1).map_err(|e| format!("读取代码失败: {e}"))?;
+        let trade_date: String = row.get(2).map_err(|e| format!("读取交易日失败: {e}"))?;
+
+        *existing_hit_count.entry(rule_name.clone()).or_default() += 1;
+        if hit_pairs.contains(&(ts_code, trade_date)) {
+            *overlap_hit_count.entry(rule_name).or_default() += 1;
+        }
+    }
+
+    let mut out = overlap_hit_count
+        .into_iter()
+        .filter_map(|(rule_name, overlap_samples)| {
+            if overlap_samples == 0 {
+                return None;
+            }
+            let existing_count = existing_hit_count.get(&rule_name).copied().unwrap_or(0) as f64;
+            let overlap_rate_vs_validation = Some(overlap_samples as f64 / combo_hit_count);
+            let overlap_rate_vs_existing = if existing_count > 0.0 {
+                Some(overlap_samples as f64 / existing_count)
+            } else {
+                None
+            };
+            let overlap_lift = if total_samples > 0.0 && existing_count > 0.0 {
+                Some(overlap_samples as f64 * total_samples / (combo_hit_count * existing_count))
+            } else {
+                None
+            };
+
+            Some(RuleValidationSimilarityRow {
+                rule_name: rule_name.clone(),
+                explain: explain_map.get(&rule_name).cloned(),
+                overlap_samples,
+                overlap_rate_vs_validation,
+                overlap_rate_vs_existing,
+                overlap_lift,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    out.sort_by(|left, right| {
+        right
+            .overlap_samples
+            .cmp(&left.overlap_samples)
+            .then_with(|| left.rule_name.cmp(&right.rule_name))
+    });
+    out.truncate(20);
+    Ok(out)
+}
+
+fn compare_option_f64_desc(left: Option<f64>, right: Option<f64>) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(l), Some(r)) => r.partial_cmp(&l).unwrap_or(std::cmp::Ordering::Equal),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+pub fn run_rule_expression_validation(
+    source_path: String,
+    import_rule_name: String,
+    when: Option<String>,
+    scope_way: Option<String>,
+    scope_windows: Option<usize>,
+    stock_adj_type: Option<String>,
+    index_ts_code: String,
+    index_beta: Option<f64>,
+    concept_beta: Option<f64>,
+    industry_beta: Option<f64>,
+    start_date: String,
+    end_date: String,
+    min_samples_per_rule_day: Option<usize>,
+    backtest_period: Option<usize>,
+    unknown_configs: Option<Vec<RuleValidationUnknownConfig>>,
+) -> Result<RuleExpressionValidationData, String> {
+    let source_path = source_path.trim().to_string();
+    if source_path.is_empty() {
+        return Err("数据目录不能为空".to_string());
+    }
+
+    let import_rule_name = import_rule_name.trim().to_string();
+    if import_rule_name.is_empty() {
+        return Err("导入策略不能为空".to_string());
+    }
+
+    let all_rules = ScoreRule::load_rules(&source_path)?;
+    let import_rule = all_rules
+        .iter()
+        .find(|rule| rule.name.trim() == import_rule_name)
+        .cloned()
+        .ok_or_else(|| format!("未找到策略: {import_rule_name}"))?;
+
+    let formula = when
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| import_rule.when.trim().to_string());
+    if formula.is_empty() {
+        return Err("表达式不能为空".to_string());
+    }
+
+    let resolved_scope_way = match scope_way.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        Some(custom_scope_way) => parse_scope_way_input(custom_scope_way)?,
+        None => import_rule.scope_way,
+    };
+    let resolved_scope_windows = scope_windows.unwrap_or(import_rule.scope_windows).max(1);
+    if let ScopeWay::Consec(threshold) = resolved_scope_way {
+        if resolved_scope_windows < threshold {
+            return Err(format!(
+                "scope_windows({resolved_scope_windows}) 不能小于 CONSEC 阈值 {threshold}"
+            ));
+        }
+    }
+
+    let params = RuleLayerBacktestRunParams {
+        stock_adj_type: stock_adj_type
+            .unwrap_or_else(|| "qfq".to_string())
+            .trim()
+            .to_string(),
+        index_ts_code: index_ts_code.trim().to_string(),
+        index_beta: index_beta.unwrap_or(0.5),
+        concept_beta: concept_beta.unwrap_or(0.2),
+        industry_beta: industry_beta.unwrap_or(0.0),
+        start_date: start_date.trim().to_string(),
+        end_date: end_date.trim().to_string(),
+        min_samples_per_day: min_samples_per_rule_day.unwrap_or(5).max(1),
+        backtest_period: backtest_period.unwrap_or(1).max(1),
+    };
+
+    let variants = build_validation_variants(&formula, &unknown_configs.unwrap_or_default())?;
+    let source_db = source_db_path(&source_path);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
+    let source_conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+    let result_conn = open_result_conn(&source_path)?;
+    let explain_map = all_rules
+        .iter()
+        .map(|rule| (rule.name.clone(), rule.explain.clone()))
+        .collect::<HashMap<_, _>>();
+
+    let mut combo_results = Vec::with_capacity(variants.len());
+    for variant in variants {
+        let cached_rule = build_validation_cached_rule(
+            variant.combo_key.clone(),
+            resolved_scope_way,
+            resolved_scope_windows,
+            import_rule.points,
+            import_rule.dist_points.clone(),
+            import_rule.tag,
+            &variant.formula,
+        )?;
+
+        let (triggered_score_map, hit_pairs) = build_validation_triggered_scores(
+            &source_path,
+            &params.stock_adj_type,
+            &params.start_date,
+            &params.end_date,
+            &cached_rule,
+        )?;
+        let metrics = calc_rule_layer_metrics_from_triggered_scores(
+            &source_conn,
+            &source_path,
+            &triggered_score_map,
+            &params.stock_adj_type,
+            &params.index_ts_code,
+            params.index_beta,
+            params.concept_beta,
+            params.industry_beta,
+            &params.start_date,
+            &params.end_date,
+            &RuleLayerConfig {
+                min_samples_per_day: params.min_samples_per_day,
+                backtest_period: params.backtest_period,
+            },
+        )?;
+        let backtest = build_rule_backtest_payload(&variant.combo_key, &params, metrics);
+        let similarity_rows = load_validation_similarity_rows(
+            &result_conn,
+            &params.start_date,
+            &params.end_date,
+            &hit_pairs,
+            Some(&import_rule_name),
+            &explain_map,
+        )?;
+        let triggered_days = hit_pairs
+            .iter()
+            .map(|(_, trade_date)| trade_date.clone())
+            .collect::<HashSet<_>>()
+            .len();
+        let trigger_samples = hit_pairs.len();
+
+        combo_results.push(RuleValidationComboResult {
+            combo_key: variant.combo_key,
+            combo_label: variant.combo_label,
+            formula: variant.formula,
+            unknown_values: variant.unknown_values,
+            trigger_samples,
+            triggered_days,
+            avg_daily_trigger: if triggered_days > 0 {
+                trigger_samples as f64 / triggered_days as f64
+            } else {
+                0.0
+            },
+            backtest,
+            similarity_rows,
+        });
+    }
+
+    combo_results.sort_by(|left, right| {
+        compare_option_f64_desc(left.backtest.spread_mean, right.backtest.spread_mean)
+            .then_with(|| compare_option_f64_desc(left.backtest.icir, right.backtest.icir))
+            .then_with(|| right.trigger_samples.cmp(&left.trigger_samples))
+            .then_with(|| left.combo_key.cmp(&right.combo_key))
+    });
+
+    let best_combo_key = combo_results.first().map(|item| item.combo_key.clone());
+
+    Ok(RuleExpressionValidationData {
+        import_rule_name,
+        import_rule_explain: import_rule.explain,
+        scope_way: scope_way_label(resolved_scope_way),
+        scope_windows: resolved_scope_windows,
+        combo_results,
+        best_combo_key,
     })
 }
 

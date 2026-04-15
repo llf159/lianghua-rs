@@ -225,6 +225,48 @@ export type RuleLayerBacktestDefaultsData = {
   end_date?: string | null
 }
 
+export type RuleValidationUnknownConfig = {
+  name: string
+  start: number
+  end: number
+  step: number
+}
+
+export type RuleValidationUnknownValue = {
+  name: string
+  value: number
+}
+
+export type RuleValidationSimilarityRow = {
+  rule_name: string
+  explain?: string | null
+  overlap_samples: number
+  overlap_rate_vs_validation?: number | null
+  overlap_rate_vs_existing?: number | null
+  overlap_lift?: number | null
+}
+
+export type RuleValidationComboResult = {
+  combo_key: string
+  combo_label: string
+  formula: string
+  unknown_values: RuleValidationUnknownValue[]
+  trigger_samples: number
+  triggered_days: number
+  avg_daily_trigger: number
+  backtest: RuleLayerBacktestData
+  similarity_rows: RuleValidationSimilarityRow[]
+}
+
+export type RuleExpressionValidationData = {
+  import_rule_name: string
+  import_rule_explain: string
+  scope_way: string
+  scope_windows: number
+  combo_results: RuleValidationComboResult[]
+  best_combo_key?: string | null
+}
+
 export type MarketRankItem = {
   name: string
   value: number
@@ -291,6 +333,24 @@ export type RuleLayerBacktestQuery = {
   backtestPeriod?: number
 }
 
+export type RuleExpressionValidationQuery = {
+  sourcePath: string
+  importRuleName: string
+  when?: string
+  scopeWay?: string
+  scopeWindows?: number
+  stockAdjType?: string
+  indexTsCode: string
+  indexBeta?: number
+  conceptBeta?: number
+  industryBeta?: number
+  startDate: string
+  endDate: string
+  minSamplesPerRuleDay?: number
+  backtestPeriod?: number
+  unknownConfigs?: RuleValidationUnknownConfig[]
+}
+
 export async function getSceneLayerBacktestDefaults(sourcePath: string) {
   return invoke<SceneLayerBacktestDefaultsData>('get_scene_layer_backtest_defaults', { sourcePath })
 }
@@ -305,6 +365,10 @@ export async function getRuleLayerBacktestDefaults(sourcePath: string) {
 
 export async function runRuleLayerBacktest(query: RuleLayerBacktestQuery) {
   return invoke<RuleLayerBacktestData>('run_rule_layer_backtest', query)
+}
+
+export async function runRuleExpressionValidation(query: RuleExpressionValidationQuery) {
+  return invoke<RuleExpressionValidationData>('run_rule_expression_validation', query)
 }
 
 export async function getMarketAnalysis(query: {

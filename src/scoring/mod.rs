@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use duckdb::Connection;
 
 use crate::{
-    data::{DistPoint, RuleStage, RuleTag, ScopeWay, ScoreScene},
+    data::{DistPoint, RuleStage, RuleTag, SceneDirection, ScopeWay, ScoreScene},
     expr::{
         eval::{Runtime, Value},
         parser::Stmts,
@@ -36,11 +36,16 @@ pub struct RuleScoreSeries {
 #[derive(Debug, Default)]
 pub struct SceneScoreSeries {
     pub name: String,
+    pub direction: SceneDirection,
     pub stage: Vec<Option<String>>,
     pub stage_score: Vec<f64>,
     pub risk_score: Vec<f64>,
+    pub confirm_strength: Vec<f64>,
+    pub risk_intensity: Vec<f64>,
     pub triggered: Vec<bool>,
 }
+
+const SCENE_EPS: f64 = 1e-12;
 
 #[derive(Debug, Clone)]
 pub struct RuleSceneMeta {
@@ -184,6 +189,13 @@ fn scoring_rule_cache(
     Ok((out, triggered))
 }
 
+pub fn evaluate_cached_rule_scores(
+    rule: &CachedRule,
+    rt: &mut Runtime,
+) -> Result<(Vec<f64>, Vec<bool>), String> {
+    scoring_rule_cache(rule, rt)
+}
+
 pub fn scoring_rules_details_cache(
     rt: &mut Runtime,
     rules_cache: &[CachedRule],
@@ -217,19 +229,26 @@ fn resolve_scene_stage(
     has_confirm: bool,
     has_fail: bool,
 ) -> Option<String> {
-    if has_fail && risk_score >= scene.fail_threshold {
+    if has_fail && risk_score.abs() >= scene.fail_threshold {
         return Some("fail".to_string());
     }
-    if has_confirm && stage_score >= scene.confirm_threshold {
+    if has_confirm && stage_score.abs() >= scene.confirm_threshold {
         return Some("confirm".to_string());
     }
-    if has_trigger && stage_score >= scene.trigger_threshold {
+    if has_trigger && stage_score.abs() >= scene.trigger_threshold {
         return Some("trigger".to_string());
     }
-    if has_trigger && stage_score >= scene.observe_threshold {
+    if has_trigger && stage_score.abs() >= scene.observe_threshold {
         return Some("observe".to_string());
     }
     None
+}
+
+fn calc_intensity(score: f64, threshold: f64) -> f64 {
+    if !score.is_finite() || !threshold.is_finite() || threshold.abs() < SCENE_EPS {
+        return 0.0;
+    }
+    score.abs() / threshold.abs()
 }
 
 pub fn build_scene_score_series(
@@ -253,9 +272,12 @@ pub fn build_scene_score_series(
             scene_index.insert(scene.name.clone(), index);
             SceneScoreSeries {
                 name: scene.name.clone(),
+                direction: scene.direction,
                 stage: vec![None; len],
                 stage_score: vec![0.0; len],
                 risk_score: vec![0.0; len],
+                confirm_strength: vec![0.0; len],
+                risk_intensity: vec![0.0; len],
                 triggered: vec![false; len],
             }
         })
@@ -307,10 +329,14 @@ pub fn build_scene_score_series(
             if !out[scene_pos].triggered[i] {
                 continue;
             }
+            let stage_score = out[scene_pos].stage_score[i];
+            let risk_score = out[scene_pos].risk_score[i];
+            out[scene_pos].confirm_strength[i] = calc_intensity(stage_score, scene.confirm_threshold);
+            out[scene_pos].risk_intensity[i] = calc_intensity(risk_score, scene.fail_threshold);
             out[scene_pos].stage[i] = resolve_scene_stage(
                 scene,
-                out[scene_pos].stage_score[i],
-                out[scene_pos].risk_score[i],
+                stage_score,
+                risk_score,
                 has_trigger_rule[scene_pos][i],
                 has_confirm_rule[scene_pos][i],
                 has_fail_rule[scene_pos][i],

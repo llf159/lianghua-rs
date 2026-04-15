@@ -22,6 +22,7 @@ import './css/StrategyManagePage.css'
 
 const SCOPE_OPTIONS = ['LAST', 'ANY', 'EACH', 'RECENT', 'CONSEC>=2'] as const
 const STAGE_OPTIONS = ['base', 'trigger', 'confirm', 'risk', 'fail'] as const
+const SCENE_DIRECTION_OPTIONS = ['long', 'short'] as const
 const STRATEGY_RULE_FILE_NAME = 'score_rule.toml'
 
 type SyntaxGuideFunction = {
@@ -83,6 +84,7 @@ function buildEmptyDraft(sceneName = ''): StrategyManageRuleDraft {
 function buildEmptySceneDraft(): StrategyManageSceneDraft {
   return {
     name: '',
+    direction: 'long',
     observe_threshold: 1,
     trigger_threshold: 2,
     confirm_threshold: 3,
@@ -94,6 +96,7 @@ function buildEmptySceneDraft(): StrategyManageSceneDraft {
 function buildSceneDraftFromScene(scene: StrategyManageSceneItem): StrategyManageSceneDraft {
   return {
     name: scene.name,
+    direction: scene.direction,
     observe_threshold: scene.observe_threshold,
     trigger_threshold: scene.trigger_threshold,
     confirm_threshold: scene.confirm_threshold,
@@ -120,6 +123,7 @@ function buildPreparedSceneDraft(draft: StrategyManageSceneDraft): StrategyManag
   return {
     ...draft,
     name: draft.name.trim(),
+    direction: draft.direction.trim().toLowerCase(),
   }
 }
 
@@ -127,6 +131,7 @@ function createRefactorSceneDraft(name = ''): RefactorSceneDraft {
   return {
     id: `${Date.now()}-${Math.random()}`,
     name,
+    direction: 'long',
     observe_threshold: 1,
     trigger_threshold: 2,
     confirm_threshold: 3,
@@ -258,6 +263,7 @@ export default function StrategyManagePage() {
   const [confirmThresholdText, setConfirmThresholdText] = useState('3')
   const [failThresholdText, setFailThresholdText] = useState('1')
   const [evidenceScoreText, setEvidenceScoreText] = useState('1')
+  const [sceneDirectionText, setSceneDirectionText] = useState('long')
   const [isSyntaxGuideOpen, setIsSyntaxGuideOpen] = useState(false)
   const [isBulkEditorOpen, setIsBulkEditorOpen] = useState(false)
   const [refactorFileName, setRefactorFileName] = useState('score_rule_refactor.toml')
@@ -321,6 +327,10 @@ export default function StrategyManagePage() {
       if (!name) {
         issues.push('存在空 Scene 名称')
         continue
+      }
+      const normalizedDirection = scene.direction.trim().toLowerCase()
+      if (!SCENE_DIRECTION_OPTIONS.includes(normalizedDirection as (typeof SCENE_DIRECTION_OPTIONS)[number])) {
+        issues.push(`Scene ${name} 的 direction 非法（仅支持 long/short）`)
       }
       if (sceneNameSet.has(name)) {
         issues.push(`Scene 名称重复: ${name}`)
@@ -436,6 +446,7 @@ export default function StrategyManagePage() {
     setSceneEditorMode('create')
     setEditingSceneOriginalName('')
     setSceneDraft(nextDraft)
+    setSceneDirectionText(nextDraft.direction)
     setObserveThresholdText(String(nextDraft.observe_threshold))
     setTriggerThresholdText(String(nextDraft.trigger_threshold))
     setConfirmThresholdText(String(nextDraft.confirm_threshold))
@@ -489,6 +500,9 @@ export default function StrategyManagePage() {
         if (key === 'name') {
           return { ...item, name: value }
         }
+        if (key === 'direction') {
+          return { ...item, direction: value }
+        }
         return { ...item, [key]: Number(value) }
       }),
     )
@@ -539,6 +553,7 @@ export default function StrategyManagePage() {
     setSceneEditorMode('edit')
     setEditingSceneOriginalName(scene.name)
     setSceneDraft(nextDraft)
+    setSceneDirectionText(nextDraft.direction)
     setObserveThresholdText(String(nextDraft.observe_threshold))
     setTriggerThresholdText(String(nextDraft.trigger_threshold))
     setConfirmThresholdText(String(nextDraft.confirm_threshold))
@@ -666,6 +681,7 @@ export default function StrategyManagePage() {
     try {
       preparedSceneDraft = buildPreparedSceneDraft({
         ...sceneDraft,
+        direction: sceneDirectionText,
         observe_threshold: parseRequiredNumber(observeThresholdText, 'observe_threshold'),
         trigger_threshold: parseRequiredNumber(triggerThresholdText, 'trigger_threshold'),
         confirm_threshold: parseRequiredNumber(confirmThresholdText, 'confirm_threshold'),
@@ -724,6 +740,7 @@ export default function StrategyManagePage() {
       const outputPath = await saveStrategyManageRefactorFile(sourcePath, refactorFileName.trim(), {
         scenes: refactorScenes.map((scene) => ({
           name: scene.name.trim(),
+          direction: scene.direction.trim().toLowerCase(),
           observe_threshold: scene.observe_threshold,
           trigger_threshold: scene.trigger_threshold,
           confirm_threshold: scene.confirm_threshold,
@@ -924,6 +941,7 @@ export default function StrategyManagePage() {
                     </div>
                   </div>
                   <div className="strategy-manage-scene-metrics">
+                    <span>direction {scene.direction}</span>
                     <span>observe {formatNumber(scene.observe_threshold)}</span>
                     <span>trigger {formatNumber(scene.trigger_threshold)}</span>
                     <span>confirm {formatNumber(scene.confirm_threshold)}</span>
@@ -1016,6 +1034,7 @@ export default function StrategyManagePage() {
             </div>
 
             <div className="strategy-manage-scene-metrics-panel">
+              <span>direction {selectedScene.direction}</span>
               <span>observe {formatNumber(selectedScene.observe_threshold)}</span>
               <span>trigger {formatNumber(selectedScene.trigger_threshold)}</span>
               <span>confirm {formatNumber(selectedScene.confirm_threshold)}</span>
@@ -1202,13 +1221,23 @@ export default function StrategyManagePage() {
           <div className="strategy-manage-modal" role="dialog" aria-modal="true">
             <div className="strategy-manage-list-head">
               <strong>{sceneEditorMode === 'create' ? '新建 Scene' : `配置 Scene · ${editingSceneOriginalName}`}</strong>
-              <span>scene 阈值与证据分</span>
+              <span>scene 方向、阈值与证据分</span>
             </div>
             {sceneEditorError ? <div className="strategy-manage-message strategy-manage-message-error">{sceneEditorError}</div> : null}
             <div className="strategy-manage-editor-grid strategy-manage-editor-grid-scene">
               <label className="strategy-manage-field strategy-manage-field-span-full">
                 <span>名称</span>
                 <input value={sceneDraft.name} onChange={(event) => setSceneDraft({ ...sceneDraft, name: event.target.value })} />
+              </label>
+              <label className="strategy-manage-field">
+                <span>direction</span>
+                <select value={sceneDirectionText} onChange={(event) => setSceneDirectionText(event.target.value)}>
+                  {SCENE_DIRECTION_OPTIONS.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
               </label>
               <label className="strategy-manage-field">
                 <span>observe_threshold</span>
@@ -1389,6 +1418,16 @@ export default function StrategyManagePage() {
                               <span>Scene 名称</span>
                               <input value={scene.name} onChange={(event) => updateRefactorScene(scene.id, 'name', event.target.value)} />
                             </label>
+                            <label className="strategy-manage-field">
+                              <span>direction</span>
+                              <select value={scene.direction} onChange={(event) => updateRefactorScene(scene.id, 'direction', event.target.value)}>
+                                {SCENE_DIRECTION_OPTIONS.map((item) => (
+                                  <option key={item} value={item}>
+                                    {item}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
                             <label className="strategy-manage-field"><span>observe</span><input type="number" step="0.1" value={scene.observe_threshold} onChange={(event) => updateRefactorScene(scene.id, 'observe_threshold', event.target.value)} /></label>
                             <label className="strategy-manage-field"><span>trigger</span><input type="number" step="0.1" value={scene.trigger_threshold} onChange={(event) => updateRefactorScene(scene.id, 'trigger_threshold', event.target.value)} /></label>
                             <label className="strategy-manage-field"><span>confirm</span><input type="number" step="0.1" value={scene.confirm_threshold} onChange={(event) => updateRefactorScene(scene.id, 'confirm_threshold', event.target.value)} /></label>
@@ -1397,6 +1436,7 @@ export default function StrategyManagePage() {
                           </div>
                         ) : (
                           <div className="strategy-manage-bulk-scene-metrics">
+                            <span>direction {scene.direction}</span>
                             <span>observe {formatNumber(scene.observe_threshold)}</span>
                             <span>trigger {formatNumber(scene.trigger_threshold)}</span>
                             <span>confirm {formatNumber(scene.confirm_threshold)}</span>

@@ -9,6 +9,7 @@ export type StrategyManageDistPoint = {
 export type StrategyManageSceneItem = {
   index: number
   name: string
+  direction: string
   observe_threshold: number
   trigger_threshold: number
   confirm_threshold: number
@@ -19,6 +20,7 @@ export type StrategyManageSceneItem = {
 
 export type StrategyManageSceneDraft = {
   name: string
+  direction: string
   observe_threshold: number
   trigger_threshold: number
   confirm_threshold: number

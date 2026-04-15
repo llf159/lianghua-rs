@@ -279,6 +279,67 @@ pub fn calc_all_rule_layer_metrics_from_db(
     Ok(out)
 }
 
+pub fn calc_rule_layer_metrics_from_triggered_scores(
+    source_conn: &Connection,
+    source_dir: &str,
+    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+) -> Result<RuleLayerMetrics, String> {
+    validate_rule_common_input(
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+
+    let universe_rows = load_rule_universe_rows(source_dir, start_date, end_date)?;
+    if universe_rows.is_empty() {
+        return Ok(empty_metrics());
+    }
+
+    let concept_map = load_most_related_concept_map(source_dir)?;
+    let industry_map = load_stock_industry_map(source_dir)?;
+    let mut unique_ts_codes: HashSet<&str> = HashSet::new();
+    for row in &universe_rows {
+        unique_ts_codes.insert(row.ts_code.as_str());
+    }
+
+    let residual_map_cache = build_residual_map_cache(
+        source_conn,
+        source_dir,
+        unique_ts_codes
+            .into_iter()
+            .map(|ts_code| ts_code.to_string())
+            .collect(),
+        &concept_map,
+        &industry_map,
+        &ResidualCacheInput {
+            stock_adj_type,
+            index_ts_code,
+            index_beta,
+            concept_beta,
+            industry_beta,
+            start_date,
+            end_date,
+            backtest_period: layer_config.backtest_period,
+        },
+    )?;
+
+    let samples = collect_rule_samples(&universe_rows, Some(triggered_score_map), &residual_map_cache);
+    calc_rule_layer_metrics(&samples, layer_config)
+}
+
 pub fn calc_rule_layer_metrics(
     samples: &[RuleSample],
     config: &RuleLayerConfig,

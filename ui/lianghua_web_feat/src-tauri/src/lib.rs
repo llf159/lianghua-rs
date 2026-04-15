@@ -57,10 +57,11 @@ use lianghua_rs::ui_tools_feat::{
         update_strategy_manage_rule as core_update_strategy_manage_rule,
     },
     statistics::{
-        MarketAnalysisData, MarketContributionData, RuleLayerBacktestData,
-        RuleLayerBacktestDefaultsData, SceneLayerBacktestData, SceneLayerBacktestDefaultsData,
-        SceneStatisticsPageData, StrategyStatisticsDetailData, StrategyStatisticsPageData,
-        TriggeredStockRow, get_market_analysis as core_get_market_analysis,
+        MarketAnalysisData, MarketContributionData, RuleExpressionValidationData,
+        RuleLayerBacktestData, RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig,
+        SceneLayerBacktestData, SceneLayerBacktestDefaultsData, SceneStatisticsPageData,
+        StrategyStatisticsDetailData, StrategyStatisticsPageData, TriggeredStockRow,
+        get_market_analysis as core_get_market_analysis,
         get_market_contribution as core_get_market_contribution,
         get_rule_layer_backtest_defaults as core_get_rule_layer_backtest_defaults,
         get_scene_layer_backtest_defaults as core_get_scene_layer_backtest_defaults,
@@ -68,6 +69,7 @@ use lianghua_rs::ui_tools_feat::{
         get_strategy_statistics_detail as core_get_strategy_statistics_detail,
         get_strategy_statistics_page as core_get_strategy_statistics_page,
         get_strategy_triggered_stocks as core_get_strategy_triggered_stocks,
+        run_rule_expression_validation as core_run_rule_expression_validation,
         run_rule_layer_backtest as core_run_rule_layer_backtest,
         run_scene_layer_backtest as core_run_scene_layer_backtest,
     },
@@ -575,6 +577,47 @@ async fn run_rule_layer_backtest(
 }
 
 #[tauri::command]
+async fn run_rule_expression_validation(
+    source_path: String,
+    import_rule_name: String,
+    when: Option<String>,
+    scope_way: Option<String>,
+    scope_windows: Option<usize>,
+    stock_adj_type: Option<String>,
+    index_ts_code: String,
+    index_beta: Option<f64>,
+    concept_beta: Option<f64>,
+    industry_beta: Option<f64>,
+    start_date: String,
+    end_date: String,
+    min_samples_per_rule_day: Option<usize>,
+    backtest_period: Option<usize>,
+    unknown_configs: Option<Vec<RuleValidationUnknownConfig>>,
+) -> Result<RuleExpressionValidationData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_run_rule_expression_validation(
+            source_path,
+            import_rule_name,
+            when,
+            scope_way,
+            scope_windows,
+            stock_adj_type,
+            index_ts_code,
+            index_beta,
+            concept_beta,
+            industry_beta,
+            start_date,
+            end_date,
+            min_samples_per_rule_day,
+            backtest_period,
+            unknown_configs,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 fn check_strategy_manage_scene_draft(
     source_path: String,
     original_name: Option<String>,
@@ -906,6 +949,7 @@ pub fn run() {
             get_market_contribution,
             run_scene_layer_backtest,
             run_rule_layer_backtest,
+            run_rule_expression_validation,
             get_ranking_compute_status,
             run_ranking_score_calculation,
             run_concept_performance_compute,

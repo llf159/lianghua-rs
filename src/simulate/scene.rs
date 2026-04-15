@@ -161,7 +161,7 @@ pub fn calc_scene_layer_metrics_from_db(
             backtest_period: input.layer_config.backtest_period,
         },
     )?;
-    let samples = collect_scene_samples(rows_by_ts, &residual_map_cache);
+    let samples = collect_scene_samples(rows_by_ts, &residual_map_cache)?;
 
     calc_scene_layer_metrics(&samples, &input.layer_config)
 }
@@ -231,7 +231,7 @@ pub fn calc_all_scene_layer_metrics_from_db(
     let mut out = Vec::with_capacity(scene_names.len());
     for scene_name in scene_names {
         let rows_by_ts = rows_by_scene.remove(scene_name).unwrap_or_default();
-        let samples = collect_scene_samples(rows_by_ts, &residual_map_cache);
+        let samples = collect_scene_samples(rows_by_ts, &residual_map_cache)?;
         let metrics = calc_scene_layer_metrics(&samples, layer_config)?;
         out.push((scene_name.clone(), metrics));
     }
@@ -396,7 +396,7 @@ fn group_rows_by_ts(scene_rows: Vec<SceneDbRow>) -> HashMap<String, Vec<SceneDbR
 fn collect_scene_samples(
     rows_by_ts: HashMap<String, Vec<SceneDbRow>>,
     residual_map_cache: &HashMap<String, HashMap<String, f64>>,
-) -> Vec<SceneSample> {
+) -> Result<Vec<SceneSample>, String> {
     let mut samples = Vec::new();
 
     for (ts_code, rows) in rows_by_ts {
@@ -415,7 +415,14 @@ fn collect_scene_samples(
         }
     }
 
-    samples
+    Ok(samples)
+}
+
+fn validate_direction(direction: &str) -> Result<(), String> {
+    match direction.trim().to_ascii_lowercase().as_str() {
+        "long" | "short" => Ok(()),
+        other => Err(format!("scene direction非法: {other}，仅支持long/short")),
+    }
 }
 
 fn build_residual_map_cache(
@@ -729,7 +736,8 @@ fn load_scene_rows_for_names(
                 scene_name,
                 ts_code,
                 trade_date,
-                COALESCE(TRY_CAST(stage AS VARCHAR), 'unknown') AS stage
+                direction,
+                stage
             FROM scene_details
             WHERE scene_name IN ({placeholders})
               AND trade_date >= ?
@@ -758,7 +766,9 @@ fn load_scene_rows_for_names(
         let scene_name: String = row.get(0).map_err(|e| format!("读取scene_name失败:{e}"))?;
         let ts_code: String = row.get(1).map_err(|e| format!("读取ts_code失败:{e}"))?;
         let trade_date: String = row.get(2).map_err(|e| format!("读取trade_date失败:{e}"))?;
-        let stage: Option<String> = row.get(3).map_err(|e| format!("读取stage失败:{e}"))?;
+        let direction: String = row.get(3).map_err(|e| format!("读取direction失败:{e}"))?;
+        let stage: Option<String> = row.get(4).map_err(|e| format!("读取stage失败:{e}"))?;
+        validate_direction(&direction)?;
 
         out.push(SceneDbRow {
             scene_name,
@@ -966,6 +976,7 @@ mod tests {
                     scene_name VARCHAR,
                     ts_code VARCHAR,
                     trade_date VARCHAR,
+                    direction VARCHAR,
                     stage VARCHAR
                 )
                 "#,
@@ -977,16 +988,16 @@ mod tests {
             .appender("scene_details")
             .expect("scene_details appender");
         result_app
-            .append_row(params!["场景A", "000001.SZ", "20240102", "trigger"])
+            .append_row(params!["场景A", "000001.SZ", "20240102", "long", "trigger"])
             .expect("scene a row1");
         result_app
-            .append_row(params!["场景A", "000001.SZ", "20240103", "confirm"])
+            .append_row(params!["场景A", "000001.SZ", "20240103", "long", "confirm"])
             .expect("scene a row2");
         result_app
-            .append_row(params!["场景B", "000001.SZ", "20240102", "observe"])
+            .append_row(params!["场景B", "000001.SZ", "20240102", "short", "observe"])
             .expect("scene b row1");
         result_app
-            .append_row(params!["场景B", "000001.SZ", "20240103", "trigger"])
+            .append_row(params!["场景B", "000001.SZ", "20240103", "short", "trigger"])
             .expect("scene b row2");
         result_app.flush().expect("flush scene_details");
     }

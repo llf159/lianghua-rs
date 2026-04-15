@@ -11,7 +11,7 @@ use crate::data::scoring_data::row_into_rt;
 use crate::expr::eval::Value;
 use crate::expr::parser::{Expr, Stmt, Stmts};
 use crate::{
-    data::{DataReader, RuleStage, ScoreConfig, score_rule_path},
+    data::{DataReader, RuleStage, SceneDirection, ScoreConfig, score_rule_path},
     expr::parser::{Parser, lex_all},
     scoring::tools::{calc_zhang_pct, load_st_list, rt_max_len},
     utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
@@ -30,6 +30,7 @@ pub struct StrategyManageDistPoint {
 pub struct StrategyManageSceneItem {
     pub index: usize,
     pub name: String,
+    pub direction: String,
     pub observe_threshold: f64,
     pub trigger_threshold: f64,
     pub confirm_threshold: f64,
@@ -41,6 +42,7 @@ pub struct StrategyManageSceneItem {
 #[derive(Debug, Clone, Deserialize)]
 pub struct StrategyManageSceneDraft {
     pub name: String,
+    pub direction: String,
     pub observe_threshold: f64,
     pub trigger_threshold: f64,
     pub confirm_threshold: f64,
@@ -97,6 +99,7 @@ struct StrategyRuleFile {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct StrategyRuleFileScene {
     name: String,
+    direction: SceneDirection,
     observe_threshold: f64,
     trigger_threshold: f64,
     confirm_threshold: f64,
@@ -203,6 +206,14 @@ fn parse_rule_stage(stage: &str) -> Result<RuleStage, String> {
     }
 }
 
+fn parse_scene_direction(direction: &str) -> Result<SceneDirection, String> {
+    match direction.trim().to_ascii_lowercase().as_str() {
+        "long" => Ok(SceneDirection::Long),
+        "short" => Ok(SceneDirection::Short),
+        other => Err(format!("scene direction 不支持: {other}，仅支持 long/short")),
+    }
+}
+
 fn format_rule_stage(stage: RuleStage) -> String {
     match stage {
         RuleStage::Base => "base",
@@ -281,6 +292,7 @@ fn validate_scene_values(draft: &StrategyManageSceneDraft) -> Result<(), String>
     if name.is_empty() {
         return Err("scene 名称不能为空".to_string());
     }
+    parse_scene_direction(&draft.direction)?;
     for (label, value) in [
         ("observe_threshold", draft.observe_threshold),
         ("trigger_threshold", draft.trigger_threshold),
@@ -290,6 +302,16 @@ fn validate_scene_values(draft: &StrategyManageSceneDraft) -> Result<(), String>
     ] {
         if !value.is_finite() {
             return Err(format!("{label} 非法"));
+        }
+    }
+    for (label, value) in [
+        ("observe_threshold", draft.observe_threshold),
+        ("trigger_threshold", draft.trigger_threshold),
+        ("confirm_threshold", draft.confirm_threshold),
+        ("fail_threshold", draft.fail_threshold),
+    ] {
+        if value <= 0.0 {
+            return Err(format!("{label} 必须 > 0"));
         }
     }
     Ok(())
@@ -445,15 +467,16 @@ fn draft_to_rule(draft: StrategyManageRuleDraft) -> Result<StrategyRuleFileRule,
     })
 }
 
-fn scene_draft_to_file(draft: StrategyManageSceneDraft) -> StrategyRuleFileScene {
-    StrategyRuleFileScene {
+fn scene_draft_to_file(draft: StrategyManageSceneDraft) -> Result<StrategyRuleFileScene, String> {
+    Ok(StrategyRuleFileScene {
         name: draft.name.trim().to_string(),
+        direction: parse_scene_direction(&draft.direction)?,
         observe_threshold: draft.observe_threshold,
         trigger_threshold: draft.trigger_threshold,
         confirm_threshold: draft.confirm_threshold,
         fail_threshold: draft.fail_threshold,
         evidence_score: draft.evidence_score,
-    }
+    })
 }
 
 fn build_page_data(config: &StrategyRuleFile) -> StrategyManagePageData {
@@ -469,6 +492,7 @@ fn build_page_data(config: &StrategyRuleFile) -> StrategyManagePageData {
         .map(|(index, scene)| StrategyManageSceneItem {
             index,
             name: scene.name.clone(),
+            direction: scene.direction.as_str().to_string(),
             observe_threshold: scene.observe_threshold,
             trigger_threshold: scene.trigger_threshold,
             confirm_threshold: scene.confirm_threshold,
@@ -518,7 +542,7 @@ pub fn create_strategy_manage_scene(
 ) -> Result<StrategyManagePageData, String> {
     validate_scene_draft_basic(source_path, None, &draft)?;
     let mut config = load_rule_file(source_path)?;
-    config.scene.push(scene_draft_to_file(draft));
+    config.scene.push(scene_draft_to_file(draft)?);
     save_rule_file(source_path, &config)?;
     get_strategy_manage_page(source_path)
 }
@@ -540,6 +564,7 @@ pub fn update_strategy_manage_scene(
 
     let new_name = draft.name.trim().to_string();
     scene.name = new_name.clone();
+    scene.direction = parse_scene_direction(&draft.direction)?;
     scene.observe_threshold = draft.observe_threshold;
     scene.trigger_threshold = draft.trigger_threshold;
     scene.confirm_threshold = draft.confirm_threshold;
@@ -679,6 +704,7 @@ pub fn save_strategy_manage_refactor_file(
     for scene in draft.scenes {
         let checked = StrategyManageSceneDraft {
             name: scene.name.trim().to_string(),
+            direction: scene.direction.trim().to_string(),
             observe_threshold: scene.observe_threshold,
             trigger_threshold: scene.trigger_threshold,
             confirm_threshold: scene.confirm_threshold,
@@ -689,7 +715,7 @@ pub fn save_strategy_manage_refactor_file(
             return Err(format!("scene 名称重复: {}", checked.name));
         }
         validate_scene_values(&checked)?;
-        scene_items.push(scene_draft_to_file(checked));
+        scene_items.push(scene_draft_to_file(checked)?);
     }
 
     let (reader, sample_ts_code, latest_trade_date, st_list) =
@@ -741,6 +767,7 @@ version = 1
 
 [[scene]]
 name = "趋势启动"
+direction = "long"
 observe_threshold = 1.0
 trigger_threshold = 2.0
 confirm_threshold = 3.0
@@ -771,6 +798,7 @@ version = 1
 
 [[scene]]
 name = "趋势启动"
+direction = "long"
 observe_threshold = 1.0
 trigger_threshold = 2.0
 confirm_threshold = 3.0

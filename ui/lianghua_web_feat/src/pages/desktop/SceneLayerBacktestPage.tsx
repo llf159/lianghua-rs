@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
+import { getStrategyManagePage, type StrategyManageRuleItem } from "../../apis/strategyManage";
 import {
   getRuleLayerBacktestDefaults,
+  runRuleExpressionValidation,
   getSceneLayerBacktestDefaults,
   runRuleLayerBacktest,
   runSceneLayerBacktest,
+  type RuleExpressionValidationData,
   type RuleLayerBacktestData,
   type RuleLayerRuleSummary,
+  type RuleValidationUnknownConfig,
   type SceneLayerBacktestData,
 } from "../../apis/strategyTrigger";
 import {
@@ -26,6 +30,8 @@ type RuleSummarySortKey =
   | "ic_mean"
   | "ic_std"
   | "icir";
+
+type ValidationScopeWayOption = "ANY" | "LAST" | "EACH" | "RECENT" | "CONSEC";
 
 function formatDateLabel(value?: string | null) {
   if (!value || value.length !== 8) {
@@ -59,6 +65,142 @@ function formatPercent(value?: number | null, digits = 2) {
   return `${value.toFixed(digits)}%`;
 }
 
+function formatRate(value?: number | null, digits = 1) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "--";
+  }
+  return `${(value * 100).toFixed(digits)}%`;
+}
+
+function formatLift(value?: number | null) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "--";
+  }
+  return `${value.toFixed(2)}x`;
+}
+
+function buildEmptyUnknownConfig(): RuleValidationUnknownConfig {
+  return {
+    name: "",
+    start: 2,
+    end: 20,
+    step: 2,
+  };
+}
+
+function hasValidUnknownConfig(configs: RuleValidationUnknownConfig[]): boolean {
+  return configs.some((item) => item.name.trim().length > 0);
+}
+
+const BASE_SERIES_IDENTIFIERS = new Set([
+  "O",
+  "H",
+  "L",
+  "C",
+  "V",
+  "AMOUNT",
+  "PRE_CLOSE",
+  "CHANGE",
+  "PCT_CHG",
+  "ZHANG",
+]);
+
+const RESERVED_BOOLEAN_IDENTIFIERS = new Set(["AND", "OR", "NOT", "TRUE", "FALSE"]);
+
+function readNextNonSpaceChar(expression: string, from: number): string {
+  for (let index = from; index < expression.length; index += 1) {
+    const ch = expression[index];
+    if (!/\s/.test(ch)) {
+      return ch;
+    }
+  }
+  return "";
+}
+
+function inferUnknownConfigs(expression: string): RuleValidationUnknownConfig[] {
+  const assigned = new Set<string>();
+  for (const match of expression.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*:=/g)) {
+    const name = match[1]?.trim();
+    if (!name) {
+      continue;
+    }
+    assigned.add(name.toUpperCase());
+  }
+
+  const found = new Set<string>();
+  const tokenRegExp = /\b([A-Za-z_][A-Za-z0-9_]*)\b/g;
+  for (const match of expression.matchAll(tokenRegExp)) {
+    const token = match[1]?.trim();
+    const full = match[0];
+    const matchStart = match.index;
+    if (!token) {
+      continue;
+    }
+    if (matchStart === undefined) {
+      continue;
+    }
+    const upper = token.toUpperCase();
+
+    if (RESERVED_BOOLEAN_IDENTIFIERS.has(upper) || BASE_SERIES_IDENTIFIERS.has(upper) || assigned.has(upper)) {
+      continue;
+    }
+
+    const nextNonSpaceChar = readNextNonSpaceChar(expression, matchStart + full.length);
+    const isFunctionCall = nextNonSpaceChar === "(";
+    if (isFunctionCall) {
+      continue;
+    }
+
+    found.add(token);
+  }
+
+  const names = Array.from(found).sort((left, right) => left.localeCompare(right));
+  if (names.length === 0) {
+    return [buildEmptyUnknownConfig()];
+  }
+
+  return names.map((name) => ({
+    name,
+    start: 2,
+    end: 20,
+    step: 2,
+  }));
+}
+
+function resolveValidationScopeWay(rawValue?: string | null): {
+  scopeWay: ValidationScopeWayOption;
+  consecThreshold: number;
+} {
+  const normalized = (rawValue ?? "").trim().toUpperCase();
+  if (!normalized) {
+    return {
+      scopeWay: "ANY",
+      consecThreshold: 2,
+    };
+  }
+  if (normalized === "ANY" || normalized === "LAST" || normalized === "EACH" || normalized === "RECENT") {
+    return {
+      scopeWay: normalized,
+      consecThreshold: 2,
+    };
+  }
+  if (normalized.startsWith("CONSEC>=")) {
+    const rawThreshold = normalized.slice("CONSEC>=".length).trim();
+    const parsedThreshold = Number(rawThreshold);
+    return {
+      scopeWay: "CONSEC",
+      consecThreshold:
+        Number.isFinite(parsedThreshold) && Number.isInteger(parsedThreshold) && parsedThreshold >= 1
+          ? parsedThreshold
+          : 2,
+    };
+  }
+  return {
+    scopeWay: "ANY",
+    consecThreshold: 2,
+  };
+}
+
 const INDEX_OPTIONS = [
   { value: "000001.SH", label: "上证指数" },
   { value: "399001.SZ", label: "深证成指" },
@@ -69,6 +211,14 @@ const INDEX_OPTIONS = [
   { value: "000688.SH", label: "科创50" },
 ] as const;
 
+const VALIDATION_SCOPE_WAY_OPTIONS: Array<{ value: ValidationScopeWayOption; label: string }> = [
+  { value: "ANY", label: "ANY" },
+  { value: "LAST", label: "LAST" },
+  { value: "EACH", label: "EACH" },
+  { value: "RECENT", label: "RECENT" },
+  { value: "CONSEC", label: "CONSEC" },
+];
+
 export default function SceneLayerBacktestPage() {
   const [sourcePath, setSourcePath] = useState(() => readStoredSourcePath());
   const [stockAdjType, setStockAdjType] = useState("qfq");
@@ -78,25 +228,32 @@ export default function SceneLayerBacktestPage() {
   const [industryBeta, setIndustryBeta] = useState("0.0");
   const [startDateInput, setStartDateInput] = useState("");
   const [endDateInput, setEndDateInput] = useState("");
-  const [minSamplesPerSceneDay, setMinSamplesPerSceneDay] = useState("5");
+  const [minSamplesPerDay, setMinSamplesPerDay] = useState("5");
   const [backtestPeriod, setBacktestPeriod] = useState("1");
+
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<SceneLayerBacktestData | null>(null);
 
-  const [ruleStockAdjType, setRuleStockAdjType] = useState("qfq");
-  const [ruleIndexTsCode, setRuleIndexTsCode] = useState<string>(INDEX_OPTIONS[0].value);
-  const [ruleIndexBeta, setRuleIndexBeta] = useState("0.5");
-  const [ruleConceptBeta, setRuleConceptBeta] = useState("0.2");
-  const [ruleIndustryBeta, setRuleIndustryBeta] = useState("0.0");
-  const [ruleStartDateInput, setRuleStartDateInput] = useState("");
-  const [ruleEndDateInput, setRuleEndDateInput] = useState("");
-  const [minSamplesPerRuleDay, setMinSamplesPerRuleDay] = useState("5");
-  const [ruleBacktestPeriod, setRuleBacktestPeriod] = useState("1");
   const [ruleLoading, setRuleLoading] = useState(false);
   const [ruleError, setRuleError] = useState("");
   const [ruleResult, setRuleResult] = useState<RuleLayerBacktestData | null>(null);
+
+  const [strategyRuleOptions, setStrategyRuleOptions] = useState<StrategyManageRuleItem[]>([]);
+  const [validationImportRuleName, setValidationImportRuleName] = useState("");
+  const [validationExpression, setValidationExpression] = useState("");
+  const [validationScopeWay, setValidationScopeWay] = useState<ValidationScopeWayOption>("ANY");
+  const [validationConsecThresholdText, setValidationConsecThresholdText] = useState("2");
+  const [validationScopeWindowsText, setValidationScopeWindowsText] = useState("1");
+  const [validationEnableUnknown, setValidationEnableUnknown] = useState(false);
+  const [validationUnknownConfigs, setValidationUnknownConfigs] = useState<
+    RuleValidationUnknownConfig[]
+  >([]);
+  const [validationLoading, setValidationLoading] = useState(false);
+  const [validationError, setValidationError] = useState("");
+  const [validationResult, setValidationResult] = useState<RuleExpressionValidationData | null>(null);
+  const [validationSelectedComboKey, setValidationSelectedComboKey] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -109,13 +266,17 @@ export default function SceneLayerBacktestPage() {
         }
         setSourcePath(resolved);
 
+        let hasSceneDates = false;
         try {
           const sceneDefaults = await getSceneLayerBacktestDefaults(resolved);
           if (cancelled) {
             return;
           }
-          setStartDateInput(compactDateToInput(sceneDefaults.start_date));
-          setEndDateInput(compactDateToInput(sceneDefaults.end_date));
+          if (sceneDefaults.start_date && sceneDefaults.end_date) {
+            setStartDateInput(compactDateToInput(sceneDefaults.start_date));
+            setEndDateInput(compactDateToInput(sceneDefaults.end_date));
+            hasSceneDates = true;
+          }
         } catch (sceneInitError) {
           if (!cancelled) {
             setError(`读取场景默认参数失败: ${String(sceneInitError)}`);
@@ -127,17 +288,33 @@ export default function SceneLayerBacktestPage() {
           if (cancelled) {
             return;
           }
-          setRuleStartDateInput(compactDateToInput(ruleDefaults.start_date));
-          setRuleEndDateInput(compactDateToInput(ruleDefaults.end_date));
+          if (!hasSceneDates) {
+            setStartDateInput(compactDateToInput(ruleDefaults.start_date));
+            setEndDateInput(compactDateToInput(ruleDefaults.end_date));
+          }
         } catch (ruleInitError) {
           if (!cancelled) {
             setRuleError(`读取策略默认参数失败: ${String(ruleInitError)}`);
+          }
+        }
+
+        try {
+          const managePage = await getStrategyManagePage(resolved);
+          if (cancelled) {
+            return;
+          }
+          const options = managePage.rules ?? [];
+          setStrategyRuleOptions(options);
+        } catch (strategyInitError) {
+          if (!cancelled) {
+            setValidationError(`读取策略编辑参数失败: ${String(strategyInitError)}`);
           }
         }
       } catch (initError) {
         if (!cancelled) {
           setError(`读取回测默认参数失败: ${String(initError)}`);
           setRuleError(`读取回测默认参数失败: ${String(initError)}`);
+          setValidationError(`读取回测默认参数失败: ${String(initError)}`);
         }
       } finally {
         if (!cancelled) {
@@ -154,6 +331,29 @@ export default function SceneLayerBacktestPage() {
 
   const allSceneSummaries = result?.all_scene_summaries ?? [];
   const allRuleSummaries = ruleResult?.all_rule_summaries ?? [];
+
+  const selectedValidationCombo = useMemo(() => {
+    if (!validationResult) {
+      return null;
+    }
+    return (
+      validationResult.combo_results.find(
+        (item) => item.combo_key === validationSelectedComboKey,
+      ) ?? validationResult.combo_results[0] ?? null
+    );
+  }, [validationResult, validationSelectedComboKey]);
+
+  useEffect(() => {
+    if (!validationResult) {
+      setValidationSelectedComboKey("");
+      return;
+    }
+    const preferred =
+      validationResult.best_combo_key?.trim() ||
+      validationResult.combo_results[0]?.combo_key ||
+      "";
+    setValidationSelectedComboKey(preferred);
+  }, [validationResult]);
 
   const ruleSummarySortDefinitions = useMemo(
     () =>
@@ -232,7 +432,7 @@ export default function SceneLayerBacktestPage() {
         industryBeta: Number(industryBeta),
         startDate: normalizedStart,
         endDate: normalizedEnd,
-        minSamplesPerSceneDay: Math.max(1, Number(minSamplesPerSceneDay) || 1),
+        minSamplesPerSceneDay: Math.max(1, Number(minSamplesPerDay) || 1),
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
       });
       setResult(data);
@@ -245,14 +445,14 @@ export default function SceneLayerBacktestPage() {
   }
 
   async function onRunRuleBacktest() {
-    const normalizedStart = normalizeDateInput(ruleStartDateInput);
-    const normalizedEnd = normalizeDateInput(ruleEndDateInput);
+    const normalizedStart = normalizeDateInput(startDateInput);
+    const normalizedEnd = normalizeDateInput(endDateInput);
 
     if (!sourcePath.trim()) {
       setRuleError("当前数据目录为空，请先在数据管理页确认目录。");
       return;
     }
-    if (!ruleIndexTsCode.trim()) {
+    if (!indexTsCode.trim()) {
       setRuleError("请选择指数。");
       return;
     }
@@ -270,15 +470,15 @@ export default function SceneLayerBacktestPage() {
     try {
       const data = await runRuleLayerBacktest({
         sourcePath,
-        stockAdjType: ruleStockAdjType.trim() || "qfq",
-        indexTsCode: ruleIndexTsCode.trim(),
-        indexBeta: Number(ruleIndexBeta),
-        conceptBeta: Number(ruleConceptBeta),
-        industryBeta: Number(ruleIndustryBeta),
+        stockAdjType: stockAdjType.trim() || "qfq",
+        indexTsCode: indexTsCode.trim(),
+        indexBeta: Number(indexBeta),
+        conceptBeta: Number(conceptBeta),
+        industryBeta: Number(industryBeta),
         startDate: normalizedStart,
         endDate: normalizedEnd,
-        minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerRuleDay) || 1),
-        backtestPeriod: Math.max(1, Number(ruleBacktestPeriod) || 1),
+        minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerDay) || 1),
+        backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
       });
       setRuleResult(data);
     } catch (runError) {
@@ -289,14 +489,151 @@ export default function SceneLayerBacktestPage() {
     }
   }
 
+  function applyValidationRule(ruleName: string) {
+    setValidationImportRuleName(ruleName);
+    const matched = strategyRuleOptions.find((item) => item.name === ruleName);
+    if (!matched) {
+      setValidationExpression("");
+      setValidationScopeWay("ANY");
+      setValidationConsecThresholdText("2");
+      setValidationScopeWindowsText("1");
+      if (validationEnableUnknown) {
+        setValidationUnknownConfigs((current) =>
+          hasValidUnknownConfig(current) ? current : [buildEmptyUnknownConfig()],
+        );
+      } else {
+        setValidationUnknownConfigs([]);
+      }
+      setValidationResult(null);
+      setValidationError("");
+      return;
+    }
+
+    setValidationExpression(matched.when ?? "");
+    const parsedScopeWay = resolveValidationScopeWay(matched.scope_way);
+    setValidationScopeWay(parsedScopeWay.scopeWay);
+    setValidationConsecThresholdText(String(parsedScopeWay.consecThreshold));
+    setValidationScopeWindowsText(String(Math.max(1, matched.scope_windows ?? 1)));
+    if (validationEnableUnknown) {
+      setValidationUnknownConfigs(inferUnknownConfigs(matched.when ?? ""));
+    } else {
+      setValidationUnknownConfigs([]);
+    }
+    setValidationResult(null);
+    setValidationError("");
+  }
+
+  async function onRunRuleExpressionValidation() {
+    const normalizedStart = normalizeDateInput(startDateInput);
+    const normalizedEnd = normalizeDateInput(endDateInput);
+
+    if (!sourcePath.trim()) {
+      setValidationError("当前数据目录为空，请先在数据管理页确认目录。");
+      return;
+    }
+    if (!indexTsCode.trim()) {
+      setValidationError("请选择指数。");
+      return;
+    }
+    if (!normalizedStart || !normalizedEnd) {
+      setValidationError("请填写开始和结束日期。");
+      return;
+    }
+    if (normalizedStart > normalizedEnd) {
+      setValidationError("开始日期不能晚于结束日期。");
+      return;
+    }
+    if (!validationImportRuleName.trim()) {
+      setValidationError("请选择策略。");
+      return;
+    }
+    if (!validationExpression.trim()) {
+      setValidationError("表达式不能为空。");
+      return;
+    }
+    const scopeWindows = Number(validationScopeWindowsText);
+    if (!Number.isFinite(scopeWindows) || !Number.isInteger(scopeWindows) || scopeWindows < 1) {
+      setValidationError("scope_windows 必须是 >= 1 的整数。");
+      return;
+    }
+    let normalizedScopeWay: string = validationScopeWay;
+    if (validationScopeWay === "CONSEC") {
+      const consecThreshold = Number(validationConsecThresholdText);
+      if (!Number.isFinite(consecThreshold) || !Number.isInteger(consecThreshold) || consecThreshold < 1) {
+        setValidationError("CONSEC 阈值必须是 >= 1 的整数。");
+        return;
+      }
+      if (scopeWindows < consecThreshold) {
+        setValidationError("scope_windows 不能小于 CONSEC 阈值。");
+        return;
+      }
+      normalizedScopeWay = `CONSEC>=${consecThreshold}`;
+    }
+
+    const unknownConfigs = validationEnableUnknown
+      ? validationUnknownConfigs
+          .map((item) => ({
+            name: item.name.trim(),
+            start: Number(item.start),
+            end: Number(item.end),
+            step: Number(item.step),
+          }))
+          .filter((item) => item.name.length > 0)
+      : [];
+
+    if (validationEnableUnknown && unknownConfigs.length === 0) {
+      setValidationError("启用未知数后，至少需要一个未知数配置。");
+      return;
+    }
+
+    for (const item of unknownConfigs) {
+      if (!Number.isFinite(item.start) || !Number.isFinite(item.end) || !Number.isFinite(item.step)) {
+        setValidationError(`未知数 ${item.name} 存在非法数值。`);
+        return;
+      }
+      if (item.step <= 0) {
+        setValidationError(`未知数 ${item.name} 的步长必须 > 0。`);
+        return;
+      }
+      if (item.end < item.start) {
+        setValidationError(`未知数 ${item.name} 的结束值不能小于起始值。`);
+        return;
+      }
+    }
+
+    setValidationLoading(true);
+    setValidationError("");
+    try {
+      const data = await runRuleExpressionValidation({
+        sourcePath,
+        importRuleName: validationImportRuleName.trim(),
+        when: validationExpression.trim(),
+        scopeWay: normalizedScopeWay,
+        scopeWindows,
+        stockAdjType: stockAdjType.trim() || "qfq",
+        indexTsCode: indexTsCode.trim(),
+        indexBeta: Number(indexBeta),
+        conceptBeta: Number(conceptBeta),
+        industryBeta: Number(industryBeta),
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+        minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerDay) || 1),
+        backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        unknownConfigs,
+      });
+      setValidationResult(data);
+    } catch (runError) {
+      setValidationResult(null);
+      setValidationError(`执行表达式验证失败: ${String(runError)}`);
+    } finally {
+      setValidationLoading(false);
+    }
+  }
+
   return (
     <div className="scene-layer-page">
       <section className="scene-layer-card">
-        <h2 className="scene-layer-title">场景整体回测</h2>
-        <p className="scene-layer-caption">
-          使用 scene_details 中的场景状态与排序，计算各场景状态下的分层残差收益、Top-Bottom Spread、IC / ICIR。
-        </p>
-
+        <h2 className="scene-layer-title">回测全局参数</h2>
         <div className="scene-layer-source-note">
           当前数据目录：<strong>{sourcePath || "--"}</strong>
         </div>
@@ -329,22 +666,29 @@ export default function SceneLayerBacktestPage() {
             <input type="number" step="0.01" value={industryBeta} onChange={(event) => setIndustryBeta(event.target.value)} />
           </label>
           <label className="scene-layer-field">
-            <span>开始日期（scene_details 最早）</span>
+            <span>开始日期</span>
             <input type="date" value={startDateInput} onChange={(event) => setStartDateInput(event.target.value)} />
           </label>
           <label className="scene-layer-field">
-            <span>结束日期（scene_details 最晚）</span>
+            <span>结束日期</span>
             <input type="date" value={endDateInput} onChange={(event) => setEndDateInput(event.target.value)} />
           </label>
           <label className="scene-layer-field">
-            <span>场景日最少样本</span>
-            <input type="number" min="1" value={minSamplesPerSceneDay} onChange={(event) => setMinSamplesPerSceneDay(event.target.value)} />
+            <span>日最少样本</span>
+            <input type="number" min="1" value={minSamplesPerDay} onChange={(event) => setMinSamplesPerDay(event.target.value)} />
           </label>
           <label className="scene-layer-field">
             <span>回测周期（天）</span>
             <input type="number" min="1" value={backtestPeriod} onChange={(event) => setBacktestPeriod(event.target.value)} />
           </label>
         </div>
+      </section>
+
+      <section className="scene-layer-card">
+        <h2 className="scene-layer-title">场景整体回测</h2>
+        <p className="scene-layer-caption">
+          使用 scene_details 中的场景状态与排序，计算各场景状态下的分层残差收益、Top-Bottom Spread、IC / ICIR。
+        </p>
 
         <div className="scene-layer-actions">
           <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunBacktest()} disabled={loading || initializing}>
@@ -409,55 +753,6 @@ export default function SceneLayerBacktestPage() {
         <p className="scene-layer-caption">
           使用 rule_details 中的策略得分与残差收益，计算策略日度均值、Top-Bottom Spread、IC / ICIR。
         </p>
-
-        <div className="scene-layer-source-note">
-          当前数据目录：<strong>{sourcePath || "--"}</strong>
-        </div>
-
-        <div className="scene-layer-form-grid">
-          <label className="scene-layer-field">
-            <span>股票复权</span>
-            <input value={ruleStockAdjType} onChange={(event) => setRuleStockAdjType(event.target.value)} />
-          </label>
-          <label className="scene-layer-field">
-            <span>指数</span>
-            <select value={ruleIndexTsCode} onChange={(event) => setRuleIndexTsCode(event.target.value)}>
-              {INDEX_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="scene-layer-field">
-            <span>指数 Beta</span>
-            <input type="number" step="0.01" value={ruleIndexBeta} onChange={(event) => setRuleIndexBeta(event.target.value)} />
-          </label>
-          <label className="scene-layer-field">
-            <span>概念 Beta</span>
-            <input type="number" step="0.01" value={ruleConceptBeta} onChange={(event) => setRuleConceptBeta(event.target.value)} />
-          </label>
-          <label className="scene-layer-field">
-            <span>行业 Beta</span>
-            <input type="number" step="0.01" value={ruleIndustryBeta} onChange={(event) => setRuleIndustryBeta(event.target.value)} />
-          </label>
-          <label className="scene-layer-field">
-            <span>开始日期（rule_details 最早）</span>
-            <input type="date" value={ruleStartDateInput} onChange={(event) => setRuleStartDateInput(event.target.value)} />
-          </label>
-          <label className="scene-layer-field">
-            <span>结束日期（rule_details 最晚）</span>
-            <input type="date" value={ruleEndDateInput} onChange={(event) => setRuleEndDateInput(event.target.value)} />
-          </label>
-          <label className="scene-layer-field">
-            <span>策略日最少样本</span>
-            <input type="number" min="1" value={minSamplesPerRuleDay} onChange={(event) => setMinSamplesPerRuleDay(event.target.value)} />
-          </label>
-          <label className="scene-layer-field">
-            <span>回测周期（天）</span>
-            <input type="number" min="1" value={ruleBacktestPeriod} onChange={(event) => setRuleBacktestPeriod(event.target.value)} />
-          </label>
-        </div>
 
         <div className="scene-layer-actions">
           <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunRuleBacktest()} disabled={ruleLoading || initializing}>
@@ -602,6 +897,330 @@ export default function SceneLayerBacktestPage() {
                 </table>
               </div>
             </div>
+          ) : null}
+        </section>
+      ) : null}
+
+      <section className="scene-layer-card">
+        <h2 className="scene-layer-title">表达式验证</h2>
+        <p className="scene-layer-caption">
+          默认空白模板；选择策略后自动带入表达式与参数，后续可继续手动调整并展开参数组合验证。
+        </p>
+
+        <div className="scene-layer-form-grid">
+          <label className="scene-layer-field">
+            <span>策略（来自策略编辑）</span>
+            <select
+              value={validationImportRuleName}
+              onChange={(event) => applyValidationRule(event.target.value)}
+            >
+              <option value="">请选择策略</option>
+              {strategyRuleOptions.map((item) => (
+                <option key={item.name} value={item.name}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="scene-layer-field">
+            <span>scope_way</span>
+            <select
+              value={validationScopeWay}
+              onChange={(event) => setValidationScopeWay(event.target.value as ValidationScopeWayOption)}
+            >
+              {VALIDATION_SCOPE_WAY_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {validationScopeWay === "CONSEC" ? (
+            <label className="scene-layer-field">
+              <span>CONSEC 阈值</span>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={validationConsecThresholdText}
+                onChange={(event) => setValidationConsecThresholdText(event.target.value)}
+              />
+            </label>
+          ) : null}
+          <label className="scene-layer-field">
+            <span>scope_windows</span>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={validationScopeWindowsText}
+              onChange={(event) => setValidationScopeWindowsText(event.target.value)}
+            />
+          </label>
+        </div>
+
+        <label className="scene-layer-field scene-layer-field-span-full">
+          <span>表达式</span>
+          <textarea
+            rows={6}
+            value={validationExpression}
+            onChange={(event) => setValidationExpression(event.target.value)}
+            placeholder="例如: C > REF(C, N) and V > MA(V, M)"
+          />
+        </label>
+
+        <div className="scene-layer-validation-unknown-block">
+          <div className="scene-layer-validation-unknown-toolbar">
+            <label className="scene-layer-validation-checkbox">
+              <input
+                type="checkbox"
+                checked={validationEnableUnknown}
+                onChange={(event) => {
+                  const checked = event.target.checked;
+                  setValidationEnableUnknown(checked);
+                  if (checked) {
+                    setValidationUnknownConfigs((current) =>
+                      hasValidUnknownConfig(current)
+                        ? current
+                        : inferUnknownConfigs(validationExpression),
+                    );
+                  } else {
+                    setValidationUnknownConfigs([]);
+                  }
+                }}
+              />
+              <span>启用未知数</span>
+            </label>
+            {validationEnableUnknown ? (
+              <div className="scene-layer-validation-unknown-actions">
+                <button
+                  type="button"
+                  className="scene-layer-secondary-btn"
+                  onClick={() => setValidationUnknownConfigs(inferUnknownConfigs(validationExpression))}
+                >
+                  自动填入未知数
+                </button>
+                <button
+                  type="button"
+                  className="scene-layer-secondary-btn"
+                  onClick={() =>
+                    setValidationUnknownConfigs((current) => [
+                      ...current,
+                      buildEmptyUnknownConfig(),
+                    ])
+                  }
+                >
+                  + 增加未知数
+                </button>
+              </div>
+            ) : null}
+          </div>
+
+          {validationEnableUnknown ? (
+            <div className="scene-layer-validation-unknown-list">
+              {validationUnknownConfigs.map((item, index) => (
+                <div key={`validation-unknown-${index}`} className="scene-layer-validation-unknown-row">
+                  <label className="scene-layer-field">
+                    <span>变量名</span>
+                    <input
+                      value={item.name}
+                      onChange={(event) =>
+                        setValidationUnknownConfigs((current) =>
+                          current.map((config, configIndex) =>
+                            configIndex === index
+                              ? { ...config, name: event.target.value }
+                              : config,
+                          ),
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="scene-layer-field">
+                    <span>起始</span>
+                    <input
+                      type="number"
+                      step="any"
+                      value={item.start}
+                      onChange={(event) =>
+                        setValidationUnknownConfigs((current) =>
+                          current.map((config, configIndex) =>
+                            configIndex === index
+                              ? { ...config, start: Number(event.target.value) }
+                              : config,
+                          ),
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="scene-layer-field">
+                    <span>结束</span>
+                    <input
+                      type="number"
+                      step="any"
+                      value={item.end}
+                      onChange={(event) =>
+                        setValidationUnknownConfigs((current) =>
+                          current.map((config, configIndex) =>
+                            configIndex === index
+                              ? { ...config, end: Number(event.target.value) }
+                              : config,
+                          ),
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="scene-layer-field">
+                    <span>步长</span>
+                    <input
+                      type="number"
+                      step="any"
+                      value={item.step}
+                      onChange={(event) =>
+                        setValidationUnknownConfigs((current) =>
+                          current.map((config, configIndex) =>
+                            configIndex === index
+                              ? { ...config, step: Number(event.target.value) }
+                              : config,
+                          ),
+                        )
+                      }
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="scene-layer-secondary-btn scene-layer-validation-unknown-remove"
+                    onClick={() =>
+                      setValidationUnknownConfigs((current) =>
+                        current.length <= 1
+                          ? [buildEmptyUnknownConfig()]
+                          : current.filter((_, configIndex) => configIndex !== index),
+                      )
+                    }
+                  >
+                    删除
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="scene-layer-actions">
+          <button
+            type="button"
+            className="scene-layer-primary-btn"
+            onClick={() => void onRunRuleExpressionValidation()}
+            disabled={validationLoading || initializing}
+          >
+            {validationLoading ? "验证中..." : "执行表达式验证"}
+          </button>
+        </div>
+
+        {validationError ? <div className="scene-layer-error">{validationError}</div> : null}
+      </section>
+
+      {validationResult ? (
+        <section className="scene-layer-card">
+          <div className="scene-layer-layer-summary">
+            <h3>参数组合表现（按 Spread / ICIR 排序）</h3>
+            <div className="scene-layer-contrib-table-wrap">
+              <table className="scene-layer-contrib-table scene-layer-validation-table">
+                <thead>
+                  <tr>
+                    <th>组合</th>
+                    <th>未知数</th>
+                    <th>触发样本</th>
+                    <th>触发交易日</th>
+                    <th>平均每日触发</th>
+                    <th>残差均值（日度）</th>
+                    <th>Spread 均值</th>
+                    <th>IC 均值</th>
+                    <th>ICIR</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {validationResult.combo_results.map((item) => {
+                    const isActive = selectedValidationCombo?.combo_key === item.combo_key;
+                    return (
+                      <tr
+                        key={item.combo_key}
+                        className={isActive ? "scene-layer-validation-row-active" : undefined}
+                        onClick={() => setValidationSelectedComboKey(item.combo_key)}
+                      >
+                        <td>
+                          <strong>{item.combo_label}</strong>
+                        </td>
+                        <td>
+                          {item.unknown_values.length > 0
+                            ? item.unknown_values
+                                .map((unknown) => `${unknown.name}=${formatNumber(unknown.value, 4)}`)
+                                .join(", ")
+                            : "默认参数"}
+                        </td>
+                        <td>{item.trigger_samples}</td>
+                        <td>{item.triggered_days}</td>
+                        <td>{formatNumber(item.avg_daily_trigger, 2)}</td>
+                        <td>{formatPercent(item.backtest.avg_residual_mean)}</td>
+                        <td>{formatPercent(item.backtest.spread_mean)}</td>
+                        <td>{formatNumber(item.backtest.ic_mean)}</td>
+                        <td>{formatNumber(item.backtest.icir)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {selectedValidationCombo ? (
+            <>
+              <div className="scene-layer-layer-summary">
+                <h3>选中组合：{selectedValidationCombo.combo_label}</h3>
+                <div className="scene-layer-formula-box">
+                  <strong>替换后表达式</strong>
+                  <p>{selectedValidationCombo.formula || "--"}</p>
+                </div>
+              </div>
+
+              <div className="scene-layer-layer-summary">
+                <h3>策略相似度检查</h3>
+                <div className="scene-layer-contrib-table-wrap">
+                  <table className="scene-layer-contrib-table">
+                    <thead>
+                      <tr>
+                        <th>现有策略</th>
+                        <th>同时触发样本</th>
+                        <th>占当前组合</th>
+                        <th>占现有策略</th>
+                        <th>Lift</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedValidationCombo.similarity_rows.length > 0 ? (
+                        selectedValidationCombo.similarity_rows.map((row) => (
+                          <tr key={row.rule_name}>
+                            <td>
+                              <strong>{row.rule_name}</strong>
+                              {row.explain ? (
+                                <div className="scene-layer-similarity-explain">{row.explain}</div>
+                              ) : null}
+                            </td>
+                            <td>{row.overlap_samples}</td>
+                            <td>{formatRate(row.overlap_rate_vs_validation)}</td>
+                            <td>{formatRate(row.overlap_rate_vs_existing)}</td>
+                            <td>{formatLift(row.overlap_lift)}</td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={5}>暂无与当前组合同日同股同时触发的现有策略。</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </>
           ) : null}
         </section>
       ) : null}

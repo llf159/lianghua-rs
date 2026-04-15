@@ -483,9 +483,34 @@ pub struct DistPoint {
     pub points: f64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SceneDirection {
+    #[default]
+    Long,
+    Short,
+}
+
+impl SceneDirection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Long => "long",
+            Self::Short => "short",
+        }
+    }
+
+    pub fn sign(self) -> f64 {
+        match self {
+            Self::Long => 1.0,
+            Self::Short => -1.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScoreScene {
     pub name: String,
+    pub direction: SceneDirection,
     pub observe_threshold: f64,
     pub trigger_threshold: f64,
     pub confirm_threshold: f64,
@@ -545,14 +570,26 @@ impl ScoreConfig {
             if !scene.observe_threshold.is_finite() {
                 return Err(format!("第{n}个scene的observe_threshold非法"));
             }
+            if scene.observe_threshold <= 0.0 {
+                return Err(format!("第{n}个scene的observe_threshold必须>0"));
+            }
             if !scene.trigger_threshold.is_finite() {
                 return Err(format!("第{n}个scene的trigger_threshold非法"));
+            }
+            if scene.trigger_threshold <= 0.0 {
+                return Err(format!("第{n}个scene的trigger_threshold必须>0"));
             }
             if !scene.confirm_threshold.is_finite() {
                 return Err(format!("第{n}个scene的confirm_threshold非法"));
             }
+            if scene.confirm_threshold <= 0.0 {
+                return Err(format!("第{n}个scene的confirm_threshold必须>0"));
+            }
             if !scene.fail_threshold.is_finite() {
                 return Err(format!("第{n}个scene的fail_threshold非法"));
+            }
+            if scene.fail_threshold <= 0.0 {
+                return Err(format!("第{n}个scene的fail_threshold必须>0"));
             }
             if !scene.evidence_score.is_finite() {
                 return Err(format!("第{n}个scene的evidence_score非法"));

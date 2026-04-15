@@ -13,6 +13,7 @@ import { buildStockLookupCandidates, findExactStockLookupMatch, getLookupDigits 
 import { sanitizeCodeInput, stdTsCode } from '../../shared/stockCode'
 import './css/DataImportPage.css'
 import './css/DetailsPage.css'
+import './css/DataViewerPage.css'
 
 const MAX_STOCK_NAME_CANDIDATES = 12
 
@@ -269,7 +270,7 @@ export default function DataViewerPage() {
           <div>
             <h2 className="settings-title">数据查看</h2>
             <p className="settings-subtitle">
-              单独查看当前应用数据目录里的原始库、结果库和 CSV。页面默认不自动查询，调整筛选后手动点查询。
+              单独查看当前应用数据目录里的原始库、结果库和 CSV。
             </p>
           </div>
 
@@ -306,8 +307,8 @@ export default function DataViewerPage() {
           </div>
         </div>
 
-        <div className="settings-db-toolbar">
-          <label className="settings-field">
+        <div className="settings-db-toolbar data-viewer-toolbar">
+          <label className="settings-field data-viewer-field data-viewer-field-dataset">
             <span>数据源</span>
             <select
               value={datasetId}
@@ -319,10 +320,9 @@ export default function DataViewerPage() {
                 </option>
               ))}
             </select>
-            <small>切换数据源后不会自动刷新，需要手动查询。</small>
           </label>
 
-          <label className="settings-field">
+          <label className="settings-field data-viewer-field data-viewer-field-trade-date">
             <span>交易日</span>
             <input
               type="text"
@@ -331,11 +331,13 @@ export default function DataViewerPage() {
               placeholder={selectedDataset.supportsTradeDate ? '例如 20260324' : '当前数据源不支持'}
               disabled={!selectedDataset.supportsTradeDate}
             />
-            <small>{selectedDataset.supportsTradeDate ? '按交易日精确筛选。' : '该数据源没有交易日列。'}</small>
           </label>
 
-          <label className="settings-field">
-            <span>股票筛选，预览代码：{readTargetCode || '--'}</span>
+          <label className="settings-field data-viewer-field data-viewer-field-stock">
+            <div className="data-viewer-field-head">
+              <span>股票筛选</span>
+              <span className="data-viewer-code-preview">代码：{readTargetCode || '--'}</span>
+            </div>
             <div className="details-autocomplete">
               <input
                 type="text"
@@ -374,10 +376,9 @@ export default function DataViewerPage() {
                 </div>
               ) : null}
             </div>
-            <small>{selectedDataset.supportsTsCode ? '支持名称、代码和拼音首字母。' : '该数据源没有股票代码列。'}</small>
           </label>
 
-          <label className="settings-field">
+          <label className="settings-field data-viewer-field data-viewer-field-limit">
             <span>显示行数</span>
             <select value={limit} onChange={(event) => setLimit(Number(event.target.value))}>
               <option value={50}>50</option>
@@ -385,14 +386,18 @@ export default function DataViewerPage() {
               <option value={200}>200</option>
               <option value={500}>500</option>
             </select>
-            <small>查询结果按数据源默认顺序截取前 N 行。</small>
           </label>
-        </div>
 
-        <div className="settings-actions" style={{ marginTop: 10 }}>
-          <button className="settings-primary-btn" type="button" onClick={() => void onQueryPreview()} disabled={previewLoading || statusLoading}>
-            {previewLoading ? '查询中...' : '查询数据'}
-          </button>
+          <div className="data-viewer-query-cell">
+            <button
+              className="settings-primary-btn data-viewer-query-btn"
+              type="button"
+              onClick={() => void onQueryPreview()}
+              disabled={previewLoading || statusLoading}
+            >
+              {previewLoading ? '查询中...' : '查询数据'}
+            </button>
+          </div>
         </div>
 
         {!requiredFileImported ? (
@@ -472,7 +477,7 @@ export default function DataViewerPage() {
             )}
           </>
         ) : (
-          <div className="settings-empty-soft">默认不自动刷新。设置好数据源和筛选条件后，点击上方“查询数据”。</div>
+          <div className="settings-empty-soft">设置好筛选条件后，点击“查询数据”加载结果。</div>
         )}
       </section>
     </div>

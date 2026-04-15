@@ -107,9 +107,12 @@ pub struct DetailStrategyPayload {
 #[derive(Debug, Serialize)]
 pub struct DetailSceneTriggerRow {
     pub scene_name: String,
+    pub direction: Option<String>,
     pub stage: Option<String>,
     pub stage_score: Option<f64>,
     pub risk_score: Option<f64>,
+    pub confirm_strength: Option<f64>,
+    pub risk_intensity: Option<f64>,
     pub scene_rank: Option<i64>,
     pub hit_date: Option<String>,
     pub lag: Option<i64>,
@@ -165,6 +168,7 @@ struct RuleMeta {
 #[derive(Debug)]
 struct SceneMeta {
     scene_name: String,
+    direction: String,
     observe_threshold: f64,
     trigger_threshold: f64,
     confirm_threshold: f64,
@@ -179,9 +183,12 @@ struct CurrentRuleState {
 
 #[derive(Debug, Clone)]
 struct CurrentSceneState {
+    direction: Option<String>,
     stage: Option<String>,
     stage_score: f64,
     risk_score: f64,
+    confirm_strength: f64,
+    risk_intensity: f64,
     scene_rank: Option<i64>,
     is_triggered: bool,
 }
@@ -784,6 +791,7 @@ fn load_scene_meta_list(source_path: &str) -> Result<Vec<SceneMeta>, String> {
         .into_iter()
         .map(|scene| SceneMeta {
             scene_name: scene.name,
+            direction: scene.direction.as_str().to_string(),
             observe_threshold: scene.observe_threshold,
             trigger_threshold: scene.trigger_threshold,
             confirm_threshold: scene.confirm_threshold,
@@ -834,7 +842,7 @@ fn load_detail_trigger_snapshot(
                 WHERE ts_code = ? AND trade_date = ?
             ),
             current_scene AS (
-                SELECT scene_name, stage, stage_score, risk_score, scene_rank
+                SELECT scene_name, direction, stage, stage_score, risk_score, confirm_strength, risk_intensity, scene_rank
                 FROM scene_details
                 WHERE ts_code = ? AND trade_date = ?
             )
@@ -842,9 +850,12 @@ fn load_detail_trigger_snapshot(
                 'rule' AS item_type,
                 cr.rule_name AS item_name,
                 cr.rule_score,
+                CAST(NULL AS VARCHAR) AS direction,
                 CAST(NULL AS VARCHAR) AS stage,
                 CAST(NULL AS DOUBLE) AS stage_score,
                 CAST(NULL AS DOUBLE) AS risk_score,
+                CAST(NULL AS DOUBLE) AS confirm_strength,
+                CAST(NULL AS DOUBLE) AS risk_intensity,
                 CAST(NULL AS BIGINT) AS scene_rank,
                 CAST(NULL AS VARCHAR) AS hit_date
             FROM current_rule AS cr
@@ -853,9 +864,12 @@ fn load_detail_trigger_snapshot(
                 'scene' AS item_type,
                 cs.scene_name AS item_name,
                 CAST(NULL AS DOUBLE) AS rule_score,
+                cs.direction,
                 cs.stage,
                 cs.stage_score,
                 cs.risk_score,
+                cs.confirm_strength,
+                cs.risk_intensity,
                 cs.scene_rank,
                 CAST(NULL AS VARCHAR) AS hit_date
             FROM current_scene AS cs
@@ -903,28 +917,42 @@ fn load_detail_trigger_snapshot(
                 }
             }
             "scene" => {
+                let direction: Option<String> =
+                    row.get(3).map_err(|e| format!("读取 direction 失败: {e}"))?;
                 let stage: Option<String> =
-                    row.get(3).map_err(|e| format!("读取 stage 失败: {e}"))?;
+                    row.get(4).map_err(|e| format!("读取 stage 失败: {e}"))?;
                 let stage_score: Option<f64> = row
-                    .get(4)
+                    .get(5)
                     .map_err(|e| format!("读取 stage_score 失败: {e}"))?;
                 let risk_score: Option<f64> = row
-                    .get(5)
-                    .map_err(|e| format!("读取 risk_score 失败: {e}"))?;
-                let scene_rank: Option<i64> = row
                     .get(6)
+                    .map_err(|e| format!("读取 risk_score 失败: {e}"))?;
+                let confirm_strength: Option<f64> = row
+                    .get(7)
+                    .map_err(|e| format!("读取 confirm_strength 失败: {e}"))?;
+                let risk_intensity: Option<f64> = row
+                    .get(8)
+                    .map_err(|e| format!("读取 risk_intensity 失败: {e}"))?;
+                let scene_rank: Option<i64> = row
+                    .get(9)
                     .map_err(|e| format!("读取 scene_rank 失败: {e}"))?;
-                if stage.is_some()
+                if direction.is_some()
+                    || stage.is_some()
                     || stage_score.is_some()
                     || risk_score.is_some()
+                    || confirm_strength.is_some()
+                    || risk_intensity.is_some()
                     || scene_rank.is_some()
                 {
                     snapshot.current_scene_state_map.insert(
                         item_name.clone(),
                         CurrentSceneState {
+                            direction,
                             stage,
                             stage_score: stage_score.unwrap_or(0.0),
                             risk_score: risk_score.unwrap_or(0.0),
+                            confirm_strength: confirm_strength.unwrap_or(0.0),
+                            risk_intensity: risk_intensity.unwrap_or(0.0),
                             scene_rank,
                             is_triggered: true,
                         },
@@ -1089,9 +1117,12 @@ fn build_scene_triggers(
             .get(&meta.scene_name)
             .cloned()
             .unwrap_or(CurrentSceneState {
+                direction: None,
                 stage: None,
                 stage_score: 0.0,
                 risk_score: 0.0,
+                confirm_strength: 0.0,
+                risk_intensity: 0.0,
                 scene_rank: None,
                 is_triggered: false,
             });
@@ -1101,9 +1132,12 @@ fn build_scene_triggers(
             .cloned();
         let row = DetailSceneTriggerRow {
             scene_name: meta.scene_name.clone(),
+            direction: current_state.direction.clone().or_else(|| Some(meta.direction.clone())),
             stage: current_state.stage.clone(),
             stage_score: Some(current_state.stage_score),
             risk_score: Some(current_state.risk_score),
+            confirm_strength: Some(current_state.confirm_strength),
+            risk_intensity: Some(current_state.risk_intensity),
             scene_rank: current_state.scene_rank,
             hit_date: hit_date.clone(),
             lag: calc_lag(

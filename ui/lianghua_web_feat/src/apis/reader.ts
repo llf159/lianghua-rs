@@ -49,8 +49,11 @@ export type SceneOverviewRow = {
   ts_code: string;
   trade_date?: string;
   scene_name: string;
+  direction?: string | null;
   scene_score?: number | null;
   risk_score?: number | null;
+  confirm_strength?: number | null;
+  risk_intensity?: number | null;
   scene_status?: string | null;
   rank?: number | null;
   name?: string;
@@ -79,8 +82,11 @@ export type IntradayMonitorRow = {
   ts_code: string;
   trade_date?: string;
   scene_name: string;
+  direction?: string | null;
   scene_score?: number | null;
   risk_score?: number | null;
+  confirm_strength?: number | null;
+  risk_intensity?: number | null;
   scene_status?: string | null;
   rank?: number | null;
   name?: string;

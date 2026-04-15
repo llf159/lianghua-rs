@@ -90,9 +90,12 @@ export type DetailStrategyPayload = {
 
 export type DetailSceneTriggerRow = {
   scene_name: string
+  direction?: string | null
   stage?: string | null
   stage_score?: number | null
   risk_score?: number | null
+  confirm_strength?: number | null
+  risk_intensity?: number | null
   scene_rank?: number | null
   hit_date?: string
   lag?: number | null

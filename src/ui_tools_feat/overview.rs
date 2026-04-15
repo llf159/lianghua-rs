@@ -12,8 +12,11 @@ pub struct SceneOverviewRow {
     pub ts_code: String,
     pub trade_date: Option<String>,
     pub scene_name: String,
+    pub direction: Option<String>,
     pub scene_score: Option<f64>,
     pub risk_score: Option<f64>,
+    pub confirm_strength: Option<f64>,
+    pub risk_intensity: Option<f64>,
     pub scene_status: Option<String>,
     pub rank: Option<i64>,
     pub name: String,
@@ -129,8 +132,11 @@ pub fn get_scene_rank_overview_page(
         ts_code,
         trade_date,
         scene_name,
+        direction,
         stage_score,
         risk_score,
+        confirm_strength,
+        risk_intensity,
         stage,
         scene_rank
     FROM scene_details
@@ -138,7 +144,7 @@ pub fn get_scene_rank_overview_page(
     ORDER BY
         scene_name ASC,
         COALESCE(scene_rank, 999999) ASC,
-        stage_score DESC,
+        COALESCE(confirm_strength, 0.0) DESC,
         ts_code ASC
     "#;
 
@@ -185,16 +191,25 @@ pub fn get_scene_rank_overview_page(
                     .map_err(|e| format!("读取 trade_date 失败: {e}"))?,
             ),
             scene_name,
-            scene_score: row
+            direction: row
                 .get(3)
+                .map_err(|e| format!("读取 direction 失败: {e}"))?,
+            scene_score: row
+                .get(4)
                 .map_err(|e| format!("读取 scene_score 失败: {e}"))?,
             risk_score: row
-                .get(4)
+                .get(5)
                 .map_err(|e| format!("读取 risk_score 失败: {e}"))?,
+            confirm_strength: row
+                .get(6)
+                .map_err(|e| format!("读取 confirm_strength 失败: {e}"))?,
+            risk_intensity: row
+                .get(7)
+                .map_err(|e| format!("读取 risk_intensity 失败: {e}"))?,
             scene_status: row
-                .get::<_, Option<String>>(5)
+                .get::<_, Option<String>>(8)
                 .map_err(|e| format!("读取 scene_status 失败: {e}"))?,
-            rank: row.get(6).map_err(|e| format!("读取 rank 失败: {e}"))?,
+            rank: row.get(9).map_err(|e| format!("读取 rank 失败: {e}"))?,
             name: name_map.get(&ts_code).cloned().unwrap_or_default(),
             board: board_value,
             total_mv_yi,
