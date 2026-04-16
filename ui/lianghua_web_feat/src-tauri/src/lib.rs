@@ -58,6 +58,7 @@ use lianghua_rs::ui_tools_feat::{
     },
     statistics::{
         MarketAnalysisData, MarketContributionData, RuleExpressionValidationData,
+        RuleExpressionValidationManualStrategy,
         RuleLayerBacktestData, RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig,
         SceneLayerBacktestData, SceneLayerBacktestDefaultsData, SceneStatisticsPageData,
         StrategyStatisticsDetailData, StrategyStatisticsPageData, TriggeredStockRow,
@@ -594,6 +595,7 @@ async fn run_rule_expression_validation(
     end_date: String,
     min_samples_per_rule_day: Option<usize>,
     backtest_period: Option<usize>,
+    manual_strategy: Option<RuleExpressionValidationManualStrategy>,
     unknown_configs: Option<Vec<RuleValidationUnknownConfig>>,
     sample_limit_per_group: Option<usize>,
 ) -> Result<RuleExpressionValidationData, String> {
@@ -613,6 +615,7 @@ async fn run_rule_expression_validation(
             end_date,
             min_samples_per_rule_day,
             backtest_period,
+            manual_strategy,
             unknown_configs,
             sample_limit_per_group,
         )

@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use duckdb::{params_from_iter, Connection};
+use duckdb::{Connection, params_from_iter};
 use rayon::prelude::*;
 
 use super::{
-    calc_stock_residual_returns_with_factor_series, ResidualFactorSeriesRefs, ResidualReturnInput,
+    ResidualFactorSeriesRefs, ResidualReturnInput, calc_stock_residual_returns_with_factor_series,
 };
 use crate::data::{
     concept_performance_data::{load_concept_trend_series, load_industry_trend_series},
@@ -1141,13 +1141,13 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use duckdb::{params, Connection};
+    use duckdb::{Connection, params};
 
     use crate::data::{result_db_path, source_db_path};
 
     use super::{
-        calc_all_rule_layer_metrics_from_db, calc_rule_layer_metrics_from_db, RuleLayerConfig,
-        RuleLayerFromDbInput,
+        RuleLayerConfig, RuleLayerFromDbInput, calc_all_rule_layer_metrics_from_db,
+        calc_rule_layer_metrics_from_db,
     };
 
     fn assert_opt_close(left: Option<f64>, right: Option<f64>) {

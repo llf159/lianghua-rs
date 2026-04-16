@@ -14,7 +14,6 @@ export type StrategyManageSceneItem = {
   trigger_threshold: number
   confirm_threshold: number
   fail_threshold: number
-  evidence_score: number
   rule_count: number
 }
 
@@ -25,7 +24,6 @@ export type StrategyManageSceneDraft = {
   trigger_threshold: number
   confirm_threshold: number
   fail_threshold: number
-  evidence_score: number
 }
 
 export type StrategyManageRuleItem = {

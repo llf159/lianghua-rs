@@ -293,11 +293,8 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
     )
     .map_err(|e| format!("创建rule_details失败:{e}"))?;
 
-    conn.execute(
-        "DROP TABLE IF EXISTS scene_details",
-        [],
-    )
-    .map_err(|e| format!("重建scene_details前删除旧表失败:{e}"))?;
+    conn.execute("DROP TABLE IF EXISTS scene_details", [])
+        .map_err(|e| format!("重建scene_details前删除旧表失败:{e}"))?;
 
     conn.execute(
         r#"
@@ -453,7 +450,7 @@ pub fn write_score_batches_from_channel(
             append_scene_rows(&mut scene_app, &batch.scene_rows)?;
             batch_count += 1;
 
-            if batch_count % 8 == 0 {
+            if batch_count % 32 == 0 {
                 summary_app
                     .flush()
                     .map_err(|e| format!("刷新score_summary失败:{e}"))?;

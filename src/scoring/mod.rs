@@ -229,19 +229,39 @@ fn resolve_scene_stage(
     has_confirm: bool,
     has_fail: bool,
 ) -> Option<String> {
-    if has_fail && risk_score.abs() >= scene.fail_threshold {
+    if has_fail && cross_fail_threshold(scene.direction, risk_score, scene.fail_threshold) {
         return Some("fail".to_string());
     }
-    if has_confirm && stage_score.abs() >= scene.confirm_threshold {
+    if has_confirm && cross_stage_threshold(scene.direction, stage_score, scene.confirm_threshold) {
         return Some("confirm".to_string());
     }
-    if has_trigger && stage_score.abs() >= scene.trigger_threshold {
+    if has_trigger && cross_stage_threshold(scene.direction, stage_score, scene.trigger_threshold) {
         return Some("trigger".to_string());
     }
-    if has_trigger && stage_score.abs() >= scene.observe_threshold {
+    if has_trigger && cross_stage_threshold(scene.direction, stage_score, scene.observe_threshold) {
         return Some("observe".to_string());
     }
     None
+}
+
+fn cross_stage_threshold(direction: SceneDirection, score: f64, threshold: f64) -> bool {
+    if !score.is_finite() || !threshold.is_finite() {
+        return false;
+    }
+    match direction {
+        SceneDirection::Long => score >= threshold,
+        SceneDirection::Short => score <= -threshold,
+    }
+}
+
+fn cross_fail_threshold(direction: SceneDirection, risk_score: f64, threshold: f64) -> bool {
+    if !risk_score.is_finite() || !threshold.is_finite() {
+        return false;
+    }
+    match direction {
+        SceneDirection::Long => risk_score <= -threshold,
+        SceneDirection::Short => risk_score >= threshold,
+    }
 }
 
 fn calc_intensity(score: f64, threshold: f64) -> f64 {
@@ -331,7 +351,8 @@ pub fn build_scene_score_series(
             }
             let stage_score = out[scene_pos].stage_score[i];
             let risk_score = out[scene_pos].risk_score[i];
-            out[scene_pos].confirm_strength[i] = calc_intensity(stage_score, scene.confirm_threshold);
+            out[scene_pos].confirm_strength[i] =
+                calc_intensity(stage_score, scene.confirm_threshold);
             out[scene_pos].risk_intensity[i] = calc_intensity(risk_score, scene.fail_threshold);
             out[scene_pos].stage[i] = resolve_scene_stage(
                 scene,

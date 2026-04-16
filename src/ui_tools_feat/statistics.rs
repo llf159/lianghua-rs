@@ -1,30 +1,31 @@
 use std::collections::{HashMap, HashSet};
 
-use duckdb::{params, Connection};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use duckdb::{Connection, params};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     data::scoring_data::row_into_rt,
     data::{
+        DataReader, RowData, RuleStage, RuleTag, ScopeWay, ScoreRule, ScoreScene,
         concept_performance_db_path, load_stock_list, load_ths_concepts_list, result_db_path,
-        source_db_path, DataReader, RowData, ScopeWay, ScoreRule, ScoreScene,
+        source_db_path,
     },
     expr::{
         lexer::TokenKind,
-        parser::{lex_all, Expr, Parser, Stmt, Stmts},
+        parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
     scoring::tools::{calc_zhang_pct, load_st_list},
-    scoring::{evaluate_cached_rule_scores, CachedRule},
+    scoring::{CachedRule, evaluate_cached_rule_scores},
     simulate::{
         rule::{
-            calc_all_rule_layer_metrics_from_db, calc_rule_layer_metrics_from_db,
-            calc_rule_layer_metrics_with_samples_from_triggered_scores, RuleLayerConfig,
-            RuleLayerFromDbInput,
+            RuleLayerConfig, RuleLayerFromDbInput, calc_all_rule_layer_metrics_from_db,
+            calc_rule_layer_metrics_from_db,
+            calc_rule_layer_metrics_with_samples_from_triggered_scores,
         },
         scene::{
-            calc_all_scene_layer_metrics_from_db, calc_scene_layer_metrics_from_db,
-            SceneLayerConfig, SceneLayerFromDbInput,
+            SceneLayerConfig, SceneLayerFromDbInput, calc_all_scene_layer_metrics_from_db,
+            calc_scene_layer_metrics_from_db,
         },
     },
     ui_tools_feat::{build_concepts_map, build_name_map},
@@ -336,12 +337,40 @@ pub struct RuleExpressionValidationData {
     pub best_combo_key: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleExpressionValidationManualStrategy {
+    pub name: Option<String>,
+    pub scene_name: Option<String>,
+    pub stage: Option<String>,
+    pub scope_way: Option<String>,
+    pub scope_windows: Option<usize>,
+    pub when: Option<String>,
+    pub points: Option<f64>,
+    pub dist_points: Option<Vec<crate::data::DistPoint>>,
+    pub explain: Option<String>,
+    pub tag: Option<String>,
+}
+
 #[derive(Debug)]
 struct ValidationVariant {
     combo_key: String,
     combo_label: String,
     formula: String,
     unknown_values: Vec<RuleValidationUnknownValue>,
+}
+
+#[derive(Debug, Clone)]
+struct ValidationSeedRule {
+    rule_name: String,
+    rule_explain: String,
+    scope_way: ScopeWay,
+    scope_windows: usize,
+    formula: String,
+    points: f64,
+    dist_points: Option<Vec<crate::data::DistPoint>>,
+    tag: RuleTag,
+    exclude_rule_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -429,6 +458,200 @@ fn parse_scope_way_input(scope_way_raw: &str) -> Result<ScopeWay, String> {
             Ok(ScopeWay::Consec(threshold))
         }
     }
+}
+
+fn parse_rule_stage_input(stage_raw: &str) -> Result<RuleStage, String> {
+    match stage_raw.trim().to_ascii_lowercase().as_str() {
+        "base" => Ok(RuleStage::Base),
+        "trigger" => Ok(RuleStage::Trigger),
+        "confirm" => Ok(RuleStage::Confirm),
+        "risk" => Ok(RuleStage::Risk),
+        "fail" => Ok(RuleStage::Fail),
+        _ => Err(format!(
+            "stage 不支持: {stage_raw}，仅支持 base/trigger/confirm/risk/fail"
+        )),
+    }
+}
+
+fn parse_rule_tag_input(tag_raw: &str) -> Result<RuleTag, String> {
+    match tag_raw.trim().to_ascii_lowercase().as_str() {
+        "" | "normal" => Ok(RuleTag::Normal),
+        "opportunity" => Ok(RuleTag::Opportunity),
+        "rare" => Ok(RuleTag::Rare),
+        _ => Err(format!(
+            "tag 不支持: {tag_raw}，仅支持 normal/opportunity/rare"
+        )),
+    }
+}
+
+fn read_non_empty_owned(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn resolve_validation_seed_rule(
+    import_rule_name_raw: &str,
+    manual_strategy: Option<&RuleExpressionValidationManualStrategy>,
+    when: Option<&str>,
+    scope_way: Option<&str>,
+    scope_windows: Option<usize>,
+    all_rules: &[ScoreRule],
+) -> Result<ValidationSeedRule, String> {
+    let import_rule_name = import_rule_name_raw.trim();
+    let import_rule = if import_rule_name.is_empty() {
+        None
+    } else {
+        all_rules
+            .iter()
+            .find(|rule| rule.name.trim() == import_rule_name)
+            .cloned()
+    };
+
+    let top_formula = read_non_empty_owned(when);
+    let top_scope_way = read_non_empty_owned(scope_way);
+
+    let manual_name =
+        manual_strategy.and_then(|strategy| read_non_empty_owned(strategy.name.as_deref()));
+    let manual_formula =
+        manual_strategy.and_then(|strategy| read_non_empty_owned(strategy.when.as_deref()));
+    let manual_explain =
+        manual_strategy.and_then(|strategy| read_non_empty_owned(strategy.explain.as_deref()));
+    let manual_scope_windows = manual_strategy.and_then(|strategy| strategy.scope_windows);
+    let manual_points_raw = manual_strategy.and_then(|strategy| strategy.points);
+    let manual_points = manual_points_raw.filter(|value| value.is_finite());
+    if manual_points_raw.is_some() && manual_points.is_none() {
+        return Err("手动策略 points 非法".to_string());
+    }
+    let manual_dist_points = manual_strategy
+        .and_then(|strategy| strategy.dist_points.clone())
+        .and_then(|items| if items.is_empty() { None } else { Some(items) });
+
+    let manual_scope_way = match manual_strategy
+        .and_then(|strategy| read_non_empty_owned(strategy.scope_way.as_deref()))
+    {
+        Some(raw) => Some(parse_scope_way_input(&raw)?),
+        None => None,
+    };
+
+    let manual_tag = match manual_strategy.and_then(|strategy| strategy.tag.as_deref()) {
+        Some(raw) if !raw.trim().is_empty() => Some(parse_rule_tag_input(raw)?),
+        _ => None,
+    };
+
+    if let Some(stage_raw) = manual_strategy.and_then(|strategy| strategy.stage.as_deref()) {
+        if !stage_raw.trim().is_empty() {
+            let _ = parse_rule_stage_input(stage_raw)?;
+        }
+    }
+
+    let has_manual_override = manual_name.is_some()
+        || manual_formula.is_some()
+        || manual_scope_way.is_some()
+        || manual_scope_windows.is_some()
+        || manual_points.is_some()
+        || manual_dist_points.is_some()
+        || manual_explain.is_some()
+        || manual_tag.is_some()
+        || manual_strategy
+            .and_then(|strategy| strategy.scene_name.as_deref())
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+        || manual_strategy
+            .and_then(|strategy| strategy.stage.as_deref())
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty());
+
+    if !import_rule_name.is_empty() && import_rule.is_none() && !has_manual_override {
+        return Err(format!("未找到策略: {import_rule_name}"));
+    }
+
+    let formula = top_formula
+        .or(manual_formula)
+        .or_else(|| {
+            import_rule
+                .as_ref()
+                .map(|rule| rule.when.trim().to_string())
+        })
+        .ok_or_else(|| "表达式不能为空".to_string())?;
+
+    let resolved_scope_way = if let Some(raw) = top_scope_way {
+        parse_scope_way_input(&raw)?
+    } else if let Some(value) = manual_scope_way {
+        value
+    } else if let Some(rule) = import_rule.as_ref() {
+        rule.scope_way
+    } else {
+        ScopeWay::Any
+    };
+
+    let resolved_scope_windows = scope_windows
+        .or(manual_scope_windows)
+        .or_else(|| import_rule.as_ref().map(|rule| rule.scope_windows))
+        .unwrap_or(1)
+        .max(1);
+
+    if let ScopeWay::Consec(threshold) = resolved_scope_way {
+        if resolved_scope_windows < threshold {
+            return Err(format!(
+                "scope_windows({resolved_scope_windows}) 不能小于 CONSEC 阈值 {threshold}"
+            ));
+        }
+    }
+
+    let rule_name = manual_name
+        .or_else(|| {
+            import_rule
+                .as_ref()
+                .map(|rule| rule.name.trim().to_string())
+        })
+        .or_else(|| read_non_empty_owned(Some(import_rule_name)))
+        .unwrap_or_else(|| "manual_validation_rule".to_string());
+
+    let rule_explain = manual_explain
+        .or_else(|| {
+            import_rule
+                .as_ref()
+                .map(|rule| rule.explain.trim().to_string())
+        })
+        .unwrap_or_else(|| format!("表达式验证策略: {rule_name}"));
+
+    let points = manual_points
+        .or_else(|| import_rule.as_ref().map(|rule| rule.points))
+        .unwrap_or(1.0);
+    if !points.is_finite() {
+        return Err("策略 points 非法".to_string());
+    }
+
+    let dist_points = manual_dist_points.or_else(|| {
+        import_rule
+            .as_ref()
+            .and_then(|rule| rule.dist_points.clone())
+    });
+
+    let tag = manual_tag
+        .or_else(|| import_rule.as_ref().map(|rule| rule.tag))
+        .unwrap_or(RuleTag::Normal);
+
+    let exclude_rule_name = if let Some(rule) = import_rule.as_ref() {
+        Some(rule.name.clone())
+    } else if all_rules.iter().any(|rule| rule.name.trim() == rule_name) {
+        Some(rule_name.clone())
+    } else {
+        None
+    };
+
+    Ok(ValidationSeedRule {
+        rule_name,
+        rule_explain,
+        scope_way: resolved_scope_way,
+        scope_windows: resolved_scope_windows,
+        formula,
+        points,
+        dist_points,
+        tag,
+        exclude_rule_name,
+    })
 }
 
 fn load_rule_meta(source_path: &str) -> Result<(Vec<String>, HashMap<String, RuleMeta>), String> {
@@ -1858,6 +2081,7 @@ pub fn run_rule_expression_validation(
     end_date: String,
     min_samples_per_rule_day: Option<usize>,
     backtest_period: Option<usize>,
+    manual_strategy: Option<RuleExpressionValidationManualStrategy>,
     unknown_configs: Option<Vec<RuleValidationUnknownConfig>>,
     sample_limit_per_group: Option<usize>,
 ) -> Result<RuleExpressionValidationData, String> {
@@ -1867,43 +2091,15 @@ pub fn run_rule_expression_validation(
     }
 
     let import_rule_name = import_rule_name.trim().to_string();
-    if import_rule_name.is_empty() {
-        return Err("导入策略不能为空".to_string());
-    }
-
     let all_rules = ScoreRule::load_rules(&source_path)?;
-    let import_rule = all_rules
-        .iter()
-        .find(|rule| rule.name.trim() == import_rule_name)
-        .cloned()
-        .ok_or_else(|| format!("未找到策略: {import_rule_name}"))?;
-
-    let formula = when
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| import_rule.when.trim().to_string());
-    if formula.is_empty() {
-        return Err("表达式不能为空".to_string());
-    }
-
-    let resolved_scope_way = match scope_way
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(custom_scope_way) => parse_scope_way_input(custom_scope_way)?,
-        None => import_rule.scope_way,
-    };
-    let resolved_scope_windows = scope_windows.unwrap_or(import_rule.scope_windows).max(1);
-    if let ScopeWay::Consec(threshold) = resolved_scope_way {
-        if resolved_scope_windows < threshold {
-            return Err(format!(
-                "scope_windows({resolved_scope_windows}) 不能小于 CONSEC 阈值 {threshold}"
-            ));
-        }
-    }
+    let seed_rule = resolve_validation_seed_rule(
+        &import_rule_name,
+        manual_strategy.as_ref(),
+        when.as_deref(),
+        scope_way.as_deref(),
+        scope_windows,
+        &all_rules,
+    )?;
 
     let params = RuleLayerBacktestRunParams {
         stock_adj_type: stock_adj_type
@@ -1920,7 +2116,8 @@ pub fn run_rule_expression_validation(
         backtest_period: backtest_period.unwrap_or(1).max(1),
     };
 
-    let variants = build_validation_variants(&formula, &unknown_configs.unwrap_or_default())?;
+    let variants =
+        build_validation_variants(&seed_rule.formula, &unknown_configs.unwrap_or_default())?;
     let sample_limit_per_group = sample_limit_per_group
         .unwrap_or(VALIDATION_DEFAULT_SAMPLE_LIMIT_PER_GROUP)
         .clamp(1, VALIDATION_MAX_SAMPLE_LIMIT_PER_GROUP);
@@ -1941,11 +2138,11 @@ pub fn run_rule_expression_validation(
     for variant in variants {
         let cached_rule = build_validation_cached_rule(
             variant.combo_key.clone(),
-            resolved_scope_way,
-            resolved_scope_windows,
-            import_rule.points,
-            import_rule.dist_points.clone(),
-            import_rule.tag,
+            seed_rule.scope_way,
+            seed_rule.scope_windows,
+            seed_rule.points,
+            seed_rule.dist_points.clone(),
+            seed_rule.tag,
             &variant.formula,
         )?;
 
@@ -2000,7 +2197,7 @@ pub fn run_rule_expression_validation(
             &params.start_date,
             &params.end_date,
             &hit_pairs,
-            Some(&import_rule_name),
+            seed_rule.exclude_rule_name.as_deref(),
             &explain_map,
         )?;
         let triggered_days = hit_pairs
@@ -2039,10 +2236,10 @@ pub fn run_rule_expression_validation(
     let best_combo_key = combo_results.first().map(|item| item.combo_key.clone());
 
     Ok(RuleExpressionValidationData {
-        import_rule_name,
-        import_rule_explain: import_rule.explain,
-        scope_way: scope_way_label(resolved_scope_way),
-        scope_windows: resolved_scope_windows,
+        import_rule_name: seed_rule.rule_name,
+        import_rule_explain: seed_rule.rule_explain,
+        scope_way: scope_way_label(seed_rule.scope_way),
+        scope_windows: seed_rule.scope_windows,
         sample_limit_per_group,
         combo_results,
         best_combo_key,

@@ -508,17 +508,6 @@ export default function SceneLayerBacktestPage() {
     setValidationImportRuleName(ruleName);
     const matched = strategyRuleOptions.find((item) => item.name === ruleName);
     if (!matched) {
-      setValidationExpression("");
-      setValidationScopeWay("ANY");
-      setValidationConsecThresholdText("2");
-      setValidationScopeWindowsText("1");
-      if (validationEnableUnknown) {
-        setValidationUnknownConfigs((current) =>
-          hasValidUnknownConfig(current) ? current : [buildEmptyUnknownConfig()],
-        );
-      } else {
-        setValidationUnknownConfigs([]);
-      }
       setValidationResult(null);
       setValidationError("");
       return;
@@ -556,10 +545,6 @@ export default function SceneLayerBacktestPage() {
     }
     if (normalizedStart > normalizedEnd) {
       setValidationError("开始日期不能晚于结束日期。");
-      return;
-    }
-    if (!validationImportRuleName.trim()) {
-      setValidationError("请选择策略。");
       return;
     }
     if (!validationExpression.trim()) {
@@ -630,12 +615,36 @@ export default function SceneLayerBacktestPage() {
       sampleLimitPerGroupRaw,
     );
 
+    const selectedRule = strategyRuleOptions.find(
+      (item) => item.name === validationImportRuleName.trim(),
+    );
+    const resolvedRuleName = validationImportRuleName.trim();
+    const manualStrategyName = resolvedRuleName || "manual_expression_strategy";
+    const distPoints = selectedRule?.dist_points?.length
+      ? selectedRule.dist_points.map((item) => ({
+          min: Number(item.min),
+          max: Number(item.max),
+          points: Number(item.points),
+        }))
+      : undefined;
+
     setValidationLoading(true);
     setValidationError("");
     try {
       const data = await runRuleExpressionValidation({
         sourcePath,
-        importRuleName: validationImportRuleName.trim(),
+        importRuleName: resolvedRuleName,
+        manualStrategy: {
+          name: manualStrategyName,
+          sceneName: selectedRule?.scene_name,
+          stage: selectedRule?.stage,
+          scopeWay: normalizedScopeWay,
+          scopeWindows,
+          when: validationExpression.trim(),
+          points: Number.isFinite(selectedRule?.points) ? Number(selectedRule?.points) : 1,
+          distPoints,
+          explain: selectedRule?.explain?.trim() || `手动表达式验证：${manualStrategyName}`,
+        },
         when: validationExpression.trim(),
         scopeWay: normalizedScopeWay,
         scopeWindows,

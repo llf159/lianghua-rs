@@ -1,5 +1,5 @@
-pub mod scene;
 pub mod rule;
+pub mod scene;
 
 use std::collections::HashMap;
 
@@ -199,10 +199,7 @@ pub fn calc_stock_residual_returns_with_factor_series(
         None
     };
 
-    let mut trade_dates = stock_series
-        .keys()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
+    let mut trade_dates = stock_series.keys().map(String::as_str).collect::<Vec<_>>();
     trade_dates.sort_unstable();
 
     let mut points = Vec::with_capacity(trade_dates.len());

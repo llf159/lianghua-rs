@@ -89,7 +89,6 @@ function buildEmptySceneDraft(): StrategyManageSceneDraft {
     trigger_threshold: 2,
     confirm_threshold: 3,
     fail_threshold: 1,
-    evidence_score: 1,
   }
 }
 
@@ -101,7 +100,6 @@ function buildSceneDraftFromScene(scene: StrategyManageSceneItem): StrategyManag
     trigger_threshold: scene.trigger_threshold,
     confirm_threshold: scene.confirm_threshold,
     fail_threshold: scene.fail_threshold,
-    evidence_score: scene.evidence_score,
   }
 }
 
@@ -136,7 +134,6 @@ function createRefactorSceneDraft(name = ''): RefactorSceneDraft {
     trigger_threshold: 2,
     confirm_threshold: 3,
     fail_threshold: 1,
-    evidence_score: 1,
   }
 }
 
@@ -262,7 +259,6 @@ export default function StrategyManagePage() {
   const [triggerThresholdText, setTriggerThresholdText] = useState('2')
   const [confirmThresholdText, setConfirmThresholdText] = useState('3')
   const [failThresholdText, setFailThresholdText] = useState('1')
-  const [evidenceScoreText, setEvidenceScoreText] = useState('1')
   const [sceneDirectionText, setSceneDirectionText] = useState('long')
   const [isSyntaxGuideOpen, setIsSyntaxGuideOpen] = useState(false)
   const [isBulkEditorOpen, setIsBulkEditorOpen] = useState(false)
@@ -451,7 +447,6 @@ export default function StrategyManagePage() {
     setTriggerThresholdText(String(nextDraft.trigger_threshold))
     setConfirmThresholdText(String(nextDraft.confirm_threshold))
     setFailThresholdText(String(nextDraft.fail_threshold))
-    setEvidenceScoreText(String(nextDraft.evidence_score))
     setSceneEditorError('')
     setError('')
     setNotice('')
@@ -558,7 +553,6 @@ export default function StrategyManagePage() {
     setTriggerThresholdText(String(nextDraft.trigger_threshold))
     setConfirmThresholdText(String(nextDraft.confirm_threshold))
     setFailThresholdText(String(nextDraft.fail_threshold))
-    setEvidenceScoreText(String(nextDraft.evidence_score))
     setSceneEditorError('')
     setError('')
     setNotice('')
@@ -686,7 +680,6 @@ export default function StrategyManagePage() {
         trigger_threshold: parseRequiredNumber(triggerThresholdText, 'trigger_threshold'),
         confirm_threshold: parseRequiredNumber(confirmThresholdText, 'confirm_threshold'),
         fail_threshold: parseRequiredNumber(failThresholdText, 'fail_threshold'),
-        evidence_score: parseRequiredNumber(evidenceScoreText, 'evidence_score'),
       })
     } catch (parseError) {
       setSceneEditorError(String(parseError))
@@ -745,7 +738,6 @@ export default function StrategyManagePage() {
           trigger_threshold: scene.trigger_threshold,
           confirm_threshold: scene.confirm_threshold,
           fail_threshold: scene.fail_threshold,
-          evidence_score: scene.evidence_score,
         })),
         rules: refactorRules.map((rule) => ({
           ...rule,
@@ -1039,7 +1031,6 @@ export default function StrategyManagePage() {
               <span>trigger {formatNumber(selectedScene.trigger_threshold)}</span>
               <span>confirm {formatNumber(selectedScene.confirm_threshold)}</span>
               <span>fail {formatNumber(selectedScene.fail_threshold)}</span>
-              <span>evidence {formatNumber(selectedScene.evidence_score)}</span>
             </div>
 
             <div className="strategy-manage-list-panel strategy-manage-list-panel-full">
@@ -1275,15 +1266,6 @@ export default function StrategyManagePage() {
                   onChange={(event) => setFailThresholdText(event.target.value)}
                 />
               </label>
-              <label className="strategy-manage-field">
-                <span>evidence_score</span>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={evidenceScoreText}
-                  onChange={(event) => setEvidenceScoreText(event.target.value)}
-                />
-              </label>
             </div>
             <div className="strategy-manage-editor-actions">
               <button className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary" type="button" onClick={() => void onSaveSceneDraft()} disabled={isBusy}>
@@ -1432,7 +1414,6 @@ export default function StrategyManagePage() {
                             <label className="strategy-manage-field"><span>trigger</span><input type="number" step="0.1" value={scene.trigger_threshold} onChange={(event) => updateRefactorScene(scene.id, 'trigger_threshold', event.target.value)} /></label>
                             <label className="strategy-manage-field"><span>confirm</span><input type="number" step="0.1" value={scene.confirm_threshold} onChange={(event) => updateRefactorScene(scene.id, 'confirm_threshold', event.target.value)} /></label>
                             <label className="strategy-manage-field"><span>fail</span><input type="number" step="0.1" value={scene.fail_threshold} onChange={(event) => updateRefactorScene(scene.id, 'fail_threshold', event.target.value)} /></label>
-                            <label className="strategy-manage-field"><span>evidence</span><input type="number" step="0.1" value={scene.evidence_score} onChange={(event) => updateRefactorScene(scene.id, 'evidence_score', event.target.value)} /></label>
                           </div>
                         ) : (
                           <div className="strategy-manage-bulk-scene-metrics">
@@ -1441,7 +1422,6 @@ export default function StrategyManagePage() {
                             <span>trigger {formatNumber(scene.trigger_threshold)}</span>
                             <span>confirm {formatNumber(scene.confirm_threshold)}</span>
                             <span>fail {formatNumber(scene.fail_threshold)}</span>
-                            <span>evidence {formatNumber(scene.evidence_score)}</span>
                           </div>
                         )}
 

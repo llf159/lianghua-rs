@@ -994,10 +994,22 @@ mod tests {
             .append_row(params!["场景A", "000001.SZ", "20240103", "long", "confirm"])
             .expect("scene a row2");
         result_app
-            .append_row(params!["场景B", "000001.SZ", "20240102", "short", "observe"])
+            .append_row(params![
+                "场景B",
+                "000001.SZ",
+                "20240102",
+                "short",
+                "observe"
+            ])
             .expect("scene b row1");
         result_app
-            .append_row(params!["场景B", "000001.SZ", "20240103", "short", "trigger"])
+            .append_row(params![
+                "场景B",
+                "000001.SZ",
+                "20240103",
+                "short",
+                "trigger"
+            ])
             .expect("scene b row2");
         result_app.flush().expect("flush scene_details");
     }

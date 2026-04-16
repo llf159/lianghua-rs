@@ -125,11 +125,18 @@ pub fn load_ths_concepts_named_map(
     let mut out = HashMap::new();
     for row_result in reader.records() {
         let row = row_result.map_err(|e| format!("解析stock_concepts.csv失败:{e}"))?;
-        let Some(ts_code) = row.get(ts_code_idx).map(str::trim).filter(|value| !value.is_empty())
+        let Some(ts_code) = row
+            .get(ts_code_idx)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
         else {
             continue;
         };
-        let Some(value) = row.get(value_idx).map(str::trim).filter(|value| !value.is_empty()) else {
+        let Some(value) = row
+            .get(value_idx)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
             continue;
         };
 
@@ -515,7 +522,6 @@ pub struct ScoreScene {
     pub trigger_threshold: f64,
     pub confirm_threshold: f64,
     pub fail_threshold: f64,
-    pub evidence_score: f64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
@@ -590,9 +596,6 @@ impl ScoreConfig {
             }
             if scene.fail_threshold <= 0.0 {
                 return Err(format!("第{n}个scene的fail_threshold必须>0"));
-            }
-            if !scene.evidence_score.is_finite() {
-                return Err(format!("第{n}个scene的evidence_score非法"));
             }
             if !scene_name_set.insert(scene.name.trim().to_string()) {
                 return Err(format!("scene名称重复: {}", scene.name));

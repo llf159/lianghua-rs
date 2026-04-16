@@ -360,6 +360,18 @@ export type RuleLayerBacktestQuery = {
 export type RuleExpressionValidationQuery = {
   sourcePath: string
   importRuleName: string
+  manualStrategy?: {
+    name?: string
+    sceneName?: string
+    stage?: string
+    scopeWay?: string
+    scopeWindows?: number
+    when?: string
+    points?: number
+    distPoints?: Array<{ min: number; max: number; points: number }> | null
+    explain?: string
+    tag?: string
+  }
   when?: string
   scopeWay?: string
   scopeWindows?: number

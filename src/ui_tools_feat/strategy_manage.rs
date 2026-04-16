@@ -35,7 +35,6 @@ pub struct StrategyManageSceneItem {
     pub trigger_threshold: f64,
     pub confirm_threshold: f64,
     pub fail_threshold: f64,
-    pub evidence_score: f64,
     pub rule_count: usize,
 }
 
@@ -47,7 +46,6 @@ pub struct StrategyManageSceneDraft {
     pub trigger_threshold: f64,
     pub confirm_threshold: f64,
     pub fail_threshold: f64,
-    pub evidence_score: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -104,7 +102,6 @@ struct StrategyRuleFileScene {
     trigger_threshold: f64,
     confirm_threshold: f64,
     fail_threshold: f64,
-    evidence_score: f64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -210,7 +207,9 @@ fn parse_scene_direction(direction: &str) -> Result<SceneDirection, String> {
     match direction.trim().to_ascii_lowercase().as_str() {
         "long" => Ok(SceneDirection::Long),
         "short" => Ok(SceneDirection::Short),
-        other => Err(format!("scene direction 不支持: {other}，仅支持 long/short")),
+        other => Err(format!(
+            "scene direction 不支持: {other}，仅支持 long/short"
+        )),
     }
 }
 
@@ -298,7 +297,6 @@ fn validate_scene_values(draft: &StrategyManageSceneDraft) -> Result<(), String>
         ("trigger_threshold", draft.trigger_threshold),
         ("confirm_threshold", draft.confirm_threshold),
         ("fail_threshold", draft.fail_threshold),
-        ("evidence_score", draft.evidence_score),
     ] {
         if !value.is_finite() {
             return Err(format!("{label} 非法"));
@@ -475,7 +473,6 @@ fn scene_draft_to_file(draft: StrategyManageSceneDraft) -> Result<StrategyRuleFi
         trigger_threshold: draft.trigger_threshold,
         confirm_threshold: draft.confirm_threshold,
         fail_threshold: draft.fail_threshold,
-        evidence_score: draft.evidence_score,
     })
 }
 
@@ -497,7 +494,6 @@ fn build_page_data(config: &StrategyRuleFile) -> StrategyManagePageData {
             trigger_threshold: scene.trigger_threshold,
             confirm_threshold: scene.confirm_threshold,
             fail_threshold: scene.fail_threshold,
-            evidence_score: scene.evidence_score,
             rule_count: rule_count_map.get(scene.name.trim()).copied().unwrap_or(0),
         })
         .collect();
@@ -569,7 +565,6 @@ pub fn update_strategy_manage_scene(
     scene.trigger_threshold = draft.trigger_threshold;
     scene.confirm_threshold = draft.confirm_threshold;
     scene.fail_threshold = draft.fail_threshold;
-    scene.evidence_score = draft.evidence_score;
 
     if new_name != original_name.trim() {
         for rule in &mut config.rule {
@@ -709,7 +704,6 @@ pub fn save_strategy_manage_refactor_file(
             trigger_threshold: scene.trigger_threshold,
             confirm_threshold: scene.confirm_threshold,
             fail_threshold: scene.fail_threshold,
-            evidence_score: scene.evidence_score,
         };
         if !scene_name_set.insert(checked.name.clone()) {
             return Err(format!("scene 名称重复: {}", checked.name));
@@ -772,7 +766,6 @@ observe_threshold = 1.0
 trigger_threshold = 2.0
 confirm_threshold = 3.0
 fail_threshold = 1.0
-evidence_score = 1.0
 
 [[rule]]
 name = "启动测试"
@@ -803,7 +796,6 @@ observe_threshold = 1.0
 trigger_threshold = 2.0
 confirm_threshold = 3.0
 fail_threshold = 1.0
-evidence_score = 1.0
 
 [[rule]]
 name = "启动测试"

@@ -917,8 +917,9 @@ fn load_detail_trigger_snapshot(
                 }
             }
             "scene" => {
-                let direction: Option<String> =
-                    row.get(3).map_err(|e| format!("读取 direction 失败: {e}"))?;
+                let direction: Option<String> = row
+                    .get(3)
+                    .map_err(|e| format!("读取 direction 失败: {e}"))?;
                 let stage: Option<String> =
                     row.get(4).map_err(|e| format!("读取 stage 失败: {e}"))?;
                 let stage_score: Option<f64> = row
@@ -1132,7 +1133,10 @@ fn build_scene_triggers(
             .cloned();
         let row = DetailSceneTriggerRow {
             scene_name: meta.scene_name.clone(),
-            direction: current_state.direction.clone().or_else(|| Some(meta.direction.clone())),
+            direction: current_state
+                .direction
+                .clone()
+                .or_else(|| Some(meta.direction.clone())),
             stage: current_state.stage.clone(),
             stage_score: Some(current_state.stage_score),
             risk_score: Some(current_state.risk_score),
