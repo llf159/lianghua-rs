@@ -453,11 +453,63 @@
 }
 
 .scene-layer-validation-table tbody tr {
-  cursor: pointer;
+  cursor: default;
 }
 
 .scene-layer-validation-row-active {
   background: #fff7ed;
+}
+
+.scene-layer-validation-row-selectable {
+  cursor: pointer;
+}
+
+.scene-layer-validation-params-text {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+}
+
+.scene-layer-validation-table-hint {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.scene-layer-validation-detail-link {
+  border: 0;
+  background: transparent;
+  color: #1d4ed8;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+}
+
+.scene-layer-validation-detail-link:hover {
+  text-decoration: underline;
+}
+
+.scene-layer-validation-detail-link:focus-visible {
+  outline: 2px solid var(--theme-orange-400);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.scene-layer-validation-detail-modal {
+  max-height: 88vh;
+  overflow: auto;
+  width: min(1200px, 100%);
+}
+
+.scene-layer-validation-detail-section {
+  margin-top: 0;
 }
 
 .scene-layer-formula-box {

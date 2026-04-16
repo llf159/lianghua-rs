@@ -8,6 +8,7 @@ import {
   runRuleLayerBacktest,
   runSceneLayerBacktest,
   type RuleExpressionValidationData,
+  type RuleValidationComboResult,
   type RuleLayerBacktestData,
   type RuleLayerRuleSummary,
   type RuleValidationUnknownConfig,
@@ -102,6 +103,14 @@ function buildEmptyUnknownConfig(): RuleValidationUnknownConfig {
 
 function hasValidUnknownConfig(configs: RuleValidationUnknownConfig[]): boolean {
   return configs.some((item) => item.name.trim().length > 0);
+}
+
+function formatUnknownValuesForCombo(item: RuleValidationComboResult) {
+  return item.unknown_values.length > 0
+    ? item.unknown_values
+        .map((unknown) => `${unknown.name}=${formatNumber(unknown.value, 4)}`)
+        .join(", ")
+    : "默认参数";
 }
 
 const BASE_SERIES_IDENTIFIERS = new Set([
@@ -269,6 +278,7 @@ export default function SceneLayerBacktestPage() {
   const [validationError, setValidationError] = useState("");
   const [validationResult, setValidationResult] = useState<RuleExpressionValidationData | null>(null);
   const [validationSelectedComboKey, setValidationSelectedComboKey] = useState("");
+  const [validationDetailModalOpen, setValidationDetailModalOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -358,9 +368,18 @@ export default function SceneLayerBacktestPage() {
     );
   }, [validationResult, validationSelectedComboKey]);
 
+  const validationComboCount = validationResult?.combo_results.length ?? 0;
+  const hasUnknownValidationCombo =
+    validationResult?.combo_results.some((item) => item.unknown_values.length > 0) ?? false;
+  const shouldUseValidationDetailModal =
+    validationComboCount > 1 && hasUnknownValidationCombo;
+  const shouldUseInlineComboSelection =
+    !shouldUseValidationDetailModal && validationComboCount > 1;
+
   useEffect(() => {
     if (!validationResult) {
       setValidationSelectedComboKey("");
+      setValidationDetailModalOpen(false);
       return;
     }
     const preferred =
@@ -368,7 +387,34 @@ export default function SceneLayerBacktestPage() {
       validationResult.combo_results[0]?.combo_key ||
       "";
     setValidationSelectedComboKey(preferred);
+    setValidationDetailModalOpen(false);
   }, [validationResult]);
+
+  useEffect(() => {
+    if (!validationDetailModalOpen) {
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setValidationDetailModalOpen(false);
+      }
+    };
+
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [validationDetailModalOpen]);
+
+  useEffect(() => {
+    if (!shouldUseValidationDetailModal) {
+      setValidationDetailModalOpen(false);
+    }
+  }, [shouldUseValidationDetailModal]);
 
   const ruleSummarySortDefinitions = useMemo(
     () =>
@@ -668,6 +714,153 @@ export default function SceneLayerBacktestPage() {
     } finally {
       setValidationLoading(false);
     }
+  }
+
+  function openValidationDetail(comboKey: string) {
+    if (!shouldUseValidationDetailModal) {
+      setValidationSelectedComboKey(comboKey);
+      return;
+    }
+    setValidationSelectedComboKey(comboKey);
+    setValidationDetailModalOpen(true);
+  }
+
+  function closeValidationDetailModal() {
+    setValidationDetailModalOpen(false);
+  }
+
+  function renderValidationComboDetailSections(
+    combo: RuleValidationComboResult,
+    useModalLayout = false,
+  ) {
+    if (!validationResult) {
+      return null;
+    }
+
+    const sectionClassName = useModalLayout
+      ? "scene-layer-layer-summary scene-layer-validation-detail-section"
+      : "scene-layer-layer-summary";
+
+    return (
+      <>
+        <div className="scene-layer-formula-box">
+          <strong>替换后表达式</strong>
+          <p>{combo.formula || "--"}</p>
+        </div>
+
+        <div className={sectionClassName}>
+          <h3>
+            触发样本（每组展示 {validationResult.sample_limit_per_group} 条，可在上方调整）
+          </h3>
+          <div className="scene-layer-validation-sample-stats">
+            <span>总样本：{combo.sample_stats.total_samples}</span>
+            <span>正样本：{combo.sample_stats.positive_count}</span>
+            <span>负样本：{combo.sample_stats.negative_count}</span>
+            <span>随机池：{combo.sample_stats.random_count}</span>
+          </div>
+
+          <div className="scene-layer-validation-sample-groups">
+            {VALIDATION_SAMPLE_GROUP_META.map((group) => {
+              const rows = combo.sample_groups[group.key];
+              const totalCount =
+                group.key === "positive"
+                  ? combo.sample_stats.positive_count
+                  : group.key === "negative"
+                    ? combo.sample_stats.negative_count
+                    : combo.sample_stats.random_count;
+              return (
+                <div key={group.key} className="scene-layer-validation-sample-group">
+                  <h4>
+                    {group.title}
+                    <span>
+                      {rows.length} / {totalCount}
+                    </span>
+                  </h4>
+                  <div className="scene-layer-contrib-table-wrap">
+                    <table className="scene-layer-contrib-table scene-layer-validation-sample-table">
+                      <thead>
+                        <tr>
+                          <th>代码</th>
+                          <th>名称</th>
+                          <th>交易日</th>
+                          <th>触发得分</th>
+                          <th>残差收益</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.length > 0 ? (
+                          rows.map((row) => (
+                            <tr key={`${group.key}-${row.ts_code}-${row.trade_date}`}>
+                              <td>{row.ts_code}</td>
+                              <td>
+                                <DetailsLink
+                                  className="scene-layer-validation-sample-link"
+                                  tsCode={row.ts_code}
+                                  tradeDate={row.trade_date}
+                                  sourcePath={sourcePath.trim()}
+                                >
+                                  {row.name?.trim() || row.ts_code}
+                                </DetailsLink>
+                              </td>
+                              <td>{formatDateLabel(row.trade_date)}</td>
+                              <td>{formatNumber(row.rule_score, 4)}</td>
+                              <td>{formatPercent(row.residual_return, 3)}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={5}>暂无样本。</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className={sectionClassName}>
+          <h3>策略相似度检查</h3>
+          <div className="scene-layer-contrib-table-wrap">
+            <table className="scene-layer-contrib-table">
+              <thead>
+                <tr>
+                  <th>现有策略</th>
+                  <th>同时触发样本</th>
+                  <th>占当前组合</th>
+                  <th>占现有策略</th>
+                  <th>Lift</th>
+                </tr>
+              </thead>
+              <tbody>
+                {combo.similarity_rows.length > 0 ? (
+                  combo.similarity_rows.map((row) => (
+                    <tr key={row.rule_name}>
+                      <td>
+                        <strong>{row.rule_name}</strong>
+                        {row.explain ? (
+                          <div className="scene-layer-similarity-explain">{row.explain}</div>
+                        ) : null}
+                      </td>
+                      <td>{row.overlap_samples}</td>
+                      <td>{formatRate(row.overlap_rate_vs_validation)}</td>
+                      <td>{formatRate(row.overlap_rate_vs_existing)}</td>
+                      <td>{formatLift(row.overlap_lift)}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={5}>暂无与当前组合同日同股同时触发的现有策略。</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </>
+    );
   }
 
   return (
@@ -1174,12 +1367,19 @@ export default function SceneLayerBacktestPage() {
         <section className="scene-layer-card">
           <div className="scene-layer-layer-summary">
             <h3>参数组合表现（按 Spread / ICIR 排序）</h3>
+            {shouldUseValidationDetailModal ? (
+              <p className="scene-layer-validation-table-hint">
+                保留基础统计表；点击“策略参数”列可在浮窗中查看样本与相似度明细。
+              </p>
+            ) : shouldUseInlineComboSelection ? (
+              <p className="scene-layer-validation-table-hint">点击任意组合行，切换下方详情内容。</p>
+            ) : null}
             <div className="scene-layer-contrib-table-wrap">
               <table className="scene-layer-contrib-table scene-layer-validation-table">
                 <thead>
                   <tr>
                     <th>组合</th>
-                    <th>未知数</th>
+                    <th>策略参数</th>
                     <th>触发样本</th>
                     <th>触发交易日</th>
                     <th>平均每日触发</th>
@@ -1192,21 +1392,43 @@ export default function SceneLayerBacktestPage() {
                 <tbody>
                   {validationResult.combo_results.map((item) => {
                     const isActive = selectedValidationCombo?.combo_key === item.combo_key;
+                    const rowClassName = [
+                      isActive ? "scene-layer-validation-row-active" : "",
+                      shouldUseInlineComboSelection
+                        ? "scene-layer-validation-row-selectable"
+                        : "",
+                    ]
+                      .filter((name) => name.length > 0)
+                      .join(" ");
+                    const unknownValueText = formatUnknownValuesForCombo(item);
                     return (
                       <tr
                         key={item.combo_key}
-                        className={isActive ? "scene-layer-validation-row-active" : undefined}
-                        onClick={() => setValidationSelectedComboKey(item.combo_key)}
+                        className={rowClassName || undefined}
+                        onClick={
+                          shouldUseInlineComboSelection
+                            ? () => setValidationSelectedComboKey(item.combo_key)
+                            : undefined
+                        }
                       >
                         <td>
                           <strong>{item.combo_label}</strong>
                         </td>
                         <td>
-                          {item.unknown_values.length > 0
-                            ? item.unknown_values
-                                .map((unknown) => `${unknown.name}=${formatNumber(unknown.value, 4)}`)
-                                .join(", ")
-                            : "默认参数"}
+                          {shouldUseValidationDetailModal ? (
+                            <button
+                              type="button"
+                              className="scene-layer-validation-detail-link"
+                              title={unknownValueText}
+                              onClick={() => openValidationDetail(item.combo_key)}
+                            >
+                              {unknownValueText}
+                            </button>
+                          ) : (
+                            <span className="scene-layer-validation-params-text" title={unknownValueText}>
+                              {unknownValueText}
+                            </span>
+                          )}
                         </td>
                         <td>{item.trigger_samples}</td>
                         <td>{item.triggered_days}</td>
@@ -1223,128 +1445,35 @@ export default function SceneLayerBacktestPage() {
             </div>
           </div>
 
-          {selectedValidationCombo ? (
+          {!shouldUseValidationDetailModal && selectedValidationCombo ? (
             <>
-              <div className="scene-layer-layer-summary">
-                <h3>选中组合：{selectedValidationCombo.combo_label}</h3>
-                <div className="scene-layer-formula-box">
-                  <strong>替换后表达式</strong>
-                  <p>{selectedValidationCombo.formula || "--"}</p>
+              {shouldUseInlineComboSelection ? (
+                <div className="scene-layer-layer-summary">
+                  <h3>选中组合：{selectedValidationCombo.combo_label}</h3>
                 </div>
-              </div>
-
-              <div className="scene-layer-layer-summary">
-                <h3>
-                  触发样本（每组展示 {validationResult.sample_limit_per_group} 条，可在上方调整）
-                </h3>
-                <div className="scene-layer-validation-sample-stats">
-                  <span>总样本：{selectedValidationCombo.sample_stats.total_samples}</span>
-                  <span>正样本：{selectedValidationCombo.sample_stats.positive_count}</span>
-                  <span>负样本：{selectedValidationCombo.sample_stats.negative_count}</span>
-                  <span>随机池：{selectedValidationCombo.sample_stats.random_count}</span>
-                </div>
-
-                <div className="scene-layer-validation-sample-groups">
-                  {VALIDATION_SAMPLE_GROUP_META.map((group) => {
-                    const rows = selectedValidationCombo.sample_groups[group.key];
-                    const totalCount =
-                      group.key === "positive"
-                        ? selectedValidationCombo.sample_stats.positive_count
-                        : group.key === "negative"
-                          ? selectedValidationCombo.sample_stats.negative_count
-                          : selectedValidationCombo.sample_stats.random_count;
-                    return (
-                      <div key={group.key} className="scene-layer-validation-sample-group">
-                        <h4>
-                          {group.title}
-                          <span>
-                            {rows.length} / {totalCount}
-                          </span>
-                        </h4>
-                        <div className="scene-layer-contrib-table-wrap">
-                          <table className="scene-layer-contrib-table scene-layer-validation-sample-table">
-                            <thead>
-                              <tr>
-                                <th>代码</th>
-                                <th>名称</th>
-                                <th>交易日</th>
-                                <th>触发得分</th>
-                                <th>残差收益</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {rows.length > 0 ? (
-                                rows.map((row) => (
-                                  <tr key={`${group.key}-${row.ts_code}-${row.trade_date}`}>
-                                    <td>{row.ts_code}</td>
-                                    <td>
-                                      <DetailsLink
-                                        className="scene-layer-validation-sample-link"
-                                        tsCode={row.ts_code}
-                                        tradeDate={row.trade_date}
-                                        sourcePath={sourcePath.trim()}
-                                      >
-                                        {row.name?.trim() || row.ts_code}
-                                      </DetailsLink>
-                                    </td>
-                                    <td>{formatDateLabel(row.trade_date)}</td>
-                                    <td>{formatNumber(row.rule_score, 4)}</td>
-                                    <td>{formatPercent(row.residual_return, 3)}</td>
-                                  </tr>
-                                ))
-                              ) : (
-                                <tr>
-                                  <td colSpan={5}>暂无样本。</td>
-                                </tr>
-                              )}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="scene-layer-layer-summary">
-                <h3>策略相似度检查</h3>
-                <div className="scene-layer-contrib-table-wrap">
-                  <table className="scene-layer-contrib-table">
-                    <thead>
-                      <tr>
-                        <th>现有策略</th>
-                        <th>同时触发样本</th>
-                        <th>占当前组合</th>
-                        <th>占现有策略</th>
-                        <th>Lift</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {selectedValidationCombo.similarity_rows.length > 0 ? (
-                        selectedValidationCombo.similarity_rows.map((row) => (
-                          <tr key={row.rule_name}>
-                            <td>
-                              <strong>{row.rule_name}</strong>
-                              {row.explain ? (
-                                <div className="scene-layer-similarity-explain">{row.explain}</div>
-                              ) : null}
-                            </td>
-                            <td>{row.overlap_samples}</td>
-                            <td>{formatRate(row.overlap_rate_vs_validation)}</td>
-                            <td>{formatRate(row.overlap_rate_vs_existing)}</td>
-                            <td>{formatLift(row.overlap_lift)}</td>
-                          </tr>
-                        ))
-                      ) : (
-                        <tr>
-                          <td colSpan={5}>暂无与当前组合同日同股同时触发的现有策略。</td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+              ) : null}
+              {renderValidationComboDetailSections(selectedValidationCombo)}
             </>
+          ) : null}
+
+          {shouldUseValidationDetailModal && validationDetailModalOpen && selectedValidationCombo ? (
+            <div className="scene-layer-modal-mask" onClick={closeValidationDetailModal}>
+              <div
+                className="scene-layer-modal-card scene-layer-validation-detail-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-label={`参数组合详情：${selectedValidationCombo.combo_label}`}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="scene-layer-modal-header">
+                  <h3>参数组合详情：{selectedValidationCombo.combo_label}</h3>
+                  <button type="button" className="scene-layer-modal-close" onClick={closeValidationDetailModal}>
+                    关闭
+                  </button>
+                </div>
+                {renderValidationComboDetailSections(selectedValidationCombo, true)}
+              </div>
+            </div>
           ) : null}
         </section>
       ) : null}

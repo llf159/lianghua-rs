@@ -1,31 +1,30 @@
 use std::collections::{HashMap, HashSet};
 
-use duckdb::{Connection, params};
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use duckdb::{params, Connection};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     data::scoring_data::row_into_rt,
     data::{
-        DataReader, RowData, RuleStage, RuleTag, ScopeWay, ScoreRule, ScoreScene,
         concept_performance_db_path, load_stock_list, load_ths_concepts_list, result_db_path,
-        source_db_path,
+        source_db_path, DataReader, RowData, RuleStage, RuleTag, ScopeWay, ScoreRule, ScoreScene,
     },
     expr::{
         lexer::TokenKind,
-        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+        parser::{lex_all, Expr, Parser, Stmt, Stmts},
     },
-    scoring::tools::{calc_zhang_pct, load_st_list},
-    scoring::{CachedRule, evaluate_cached_rule_scores},
+    scoring::tools::{calc_query_need_rows, calc_zhang_pct, load_st_list},
+    scoring::{evaluate_cached_rule_scores, CachedRule},
     simulate::{
         rule::{
-            RuleLayerConfig, RuleLayerFromDbInput, calc_all_rule_layer_metrics_from_db,
-            calc_rule_layer_metrics_from_db,
-            calc_rule_layer_metrics_with_samples_from_triggered_scores,
+            calc_all_rule_layer_metrics_from_db, calc_rule_layer_metrics_from_db,
+            calc_rule_layer_metrics_with_samples_from_triggered_scores, RuleLayerConfig,
+            RuleLayerFromDbInput,
         },
         scene::{
-            SceneLayerConfig, SceneLayerFromDbInput, calc_all_scene_layer_metrics_from_db,
-            calc_scene_layer_metrics_from_db,
+            calc_all_scene_layer_metrics_from_db, calc_scene_layer_metrics_from_db,
+            SceneLayerConfig, SceneLayerFromDbInput,
         },
     },
     ui_tools_feat::{build_concepts_map, build_name_map},
@@ -1752,7 +1751,7 @@ fn build_validation_triggered_scores(
         cached_rule.scope_way,
         cached_rule.scope_windows,
     )?;
-    let need_rows = (warmup_need + cached_rule.scope_windows).max(1);
+    let need_rows = calc_query_need_rows(source_path, warmup_need, start_date, end_date)?;
 
     let mut triggered_score_map: HashMap<String, HashMap<String, f64>> = HashMap::new();
     let mut hit_pairs: HashSet<(String, String)> = HashSet::new();
@@ -3431,4 +3430,154 @@ pub fn run_rule_layer_backtest(
 
     // 当前入口固定全量；后续如需恢复单策略，仅需传入 Some(rule_name)。
     run_rule_layer_backtest_core(&source_conn, &source_path, None, &params)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs::{create_dir_all, write},
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use duckdb::{params, Connection};
+
+    use crate::data::{source_db_path, RuleTag};
+
+    use super::{build_validation_cached_rule, build_validation_triggered_scores};
+    use crate::data::ScopeWay;
+
+    fn temp_source_dir() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("lianghua_validation_trigger_scores_{unique}"))
+    }
+
+    fn prepare_validation_source_files(source_dir: &str) {
+        create_dir_all(source_dir).expect("create source dir");
+
+        write(
+            PathBuf::from(source_dir).join("trade_calendar.csv"),
+            "cal_date\n20240102\n20240103\n20240104\n",
+        )
+        .expect("write trade_calendar.csv");
+
+        write(
+            PathBuf::from(source_dir).join("stock_list.csv"),
+            "ts_code,unused,name\n000001.SZ,,样本股\n",
+        )
+        .expect("write stock_list.csv");
+
+        let source_conn = Connection::open(source_db_path(source_dir)).expect("open source db");
+        source_conn
+            .execute(
+                r#"
+                CREATE TABLE stock_data (
+                    ts_code VARCHAR,
+                    trade_date VARCHAR,
+                    adj_type VARCHAR,
+                    open DOUBLE,
+                    high DOUBLE,
+                    low DOUBLE,
+                    close DOUBLE,
+                    vol DOUBLE,
+                    amount DOUBLE,
+                    pre_close DOUBLE,
+                    change DOUBLE,
+                    pct_chg DOUBLE
+                )
+                "#,
+                [],
+            )
+            .expect("create stock_data");
+
+        let mut app = source_conn
+            .appender("stock_data")
+            .expect("stock_data appender");
+        app.append_row(params![
+            "000001.SZ",
+            "20240102",
+            "qfq",
+            10.0_f64,
+            10.5_f64,
+            9.8_f64,
+            10.2_f64,
+            1000.0_f64,
+            10000.0_f64,
+            10.0_f64,
+            0.2_f64,
+            2.0_f64,
+        ])
+        .expect("insert stock row1");
+        app.append_row(params![
+            "000001.SZ",
+            "20240103",
+            "qfq",
+            10.2_f64,
+            11.0_f64,
+            10.1_f64,
+            10.8_f64,
+            1100.0_f64,
+            11000.0_f64,
+            10.2_f64,
+            0.6_f64,
+            5.88_f64,
+        ])
+        .expect("insert stock row2");
+        app.append_row(params![
+            "000001.SZ",
+            "20240104",
+            "qfq",
+            10.8_f64,
+            11.3_f64,
+            10.7_f64,
+            11.1_f64,
+            1200.0_f64,
+            12000.0_f64,
+            10.8_f64,
+            0.3_f64,
+            2.78_f64,
+        ])
+        .expect("insert stock row3");
+        app.flush().expect("flush stock_data");
+    }
+
+    #[test]
+    fn validation_triggered_scores_cover_full_analysis_window() {
+        let source_dir = temp_source_dir();
+        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
+        prepare_validation_source_files(source_dir_str);
+
+        let cached_rule = build_validation_cached_rule(
+            "validation_test_rule".to_string(),
+            ScopeWay::Any,
+            1,
+            1.0,
+            None,
+            RuleTag::Normal,
+            "C > 0",
+        )
+        .expect("build cached rule");
+
+        let (triggered_score_map, hit_pairs) = build_validation_triggered_scores(
+            source_dir_str,
+            "qfq",
+            "20240102",
+            "20240104",
+            &cached_rule,
+        )
+        .expect("build triggered scores");
+
+        let date_score_map = triggered_score_map
+            .get("000001.SZ")
+            .expect("ts_code should have triggered scores");
+
+        assert_eq!(date_score_map.len(), 3);
+        assert!(date_score_map.contains_key("20240102"));
+        assert!(date_score_map.contains_key("20240103"));
+        assert!(date_score_map.contains_key("20240104"));
+        assert_eq!(hit_pairs.len(), 3);
+    }
 }
