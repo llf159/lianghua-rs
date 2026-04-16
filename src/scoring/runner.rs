@@ -2,17 +2,18 @@ use rayon::prelude::*;
 use std::{collections::HashSet, sync::mpsc::sync_channel, thread, time};
 
 use crate::data::scoring_data::{
-    SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage, cache_rule_build,
-    init_result_db, row_into_rt, write_score_batches_from_channel,
+    cache_rule_build, init_result_db, row_into_rt, write_score_batches_from_channel, SceneDetails,
+    ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage,
 };
-use crate::data::{DataReader, RowData, ScoreRule, ScoreScene, result_db_path};
+use crate::data::{result_db_path, DataReader, RowData, ScoreRule, ScoreScene};
 use crate::scoring::{
-    CachedRule, RuleSceneMeta, build_scene_score_series, scoring_rules_details_cache,
+    build_scene_score_series, scoring_rules_details_cache,
     tools::{calc_query_need_rows, calc_zhang_pct, load_st_list, warmup_rows_estimate},
+    CachedRule, RuleSceneMeta,
 };
 
 const SCORING_GROUP_SIZE: usize = 256;
-const SCORING_QUEUE_BOUND: usize = 8;
+const SCORING_QUEUE_BOUND: usize = 4;
 
 fn fill_scoring_extra_fields(
     row_data: &mut RowData,
@@ -63,8 +64,8 @@ fn scoring_single_core(
     Ok((summary, details, scene_details))
 }
 
-fn scoring_group_batch(
-    source_dir: &str,
+fn scoring_stock_batch(
+    worker_reader: &DataReader,
     adj_type: &str,
     score_start_date: &str,
     end_date: &str,
@@ -73,33 +74,23 @@ fn scoring_group_batch(
     rule_scene_meta: &[RuleSceneMeta],
     scenes: &[ScoreScene],
     st_list: &HashSet<String>,
-    ts_group: &[String],
+    ts_code: &str,
 ) -> Result<ScoreBatch, String> {
-    let worker_reader = DataReader::new(source_dir)?;
-    let mut group_summary = Vec::new();
-    let mut group_details = Vec::new();
-    let mut group_scenes = Vec::new();
-
-    for ts_code in ts_group {
-        let mut row = worker_reader.load_one_tail_rows(ts_code, adj_type, end_date, need_rows)?;
-        fill_scoring_extra_fields(&mut row, ts_code, st_list.contains(ts_code))?;
-        let (s, d, scene_rows) = scoring_single_core(
-            row,
-            ts_code,
-            score_start_date,
-            rules_cache,
-            rule_scene_meta,
-            scenes,
-        )?;
-        group_summary.extend(s);
-        group_details.extend(d);
-        group_scenes.extend(scene_rows);
-    }
+    let mut row = worker_reader.load_one_tail_rows(ts_code, adj_type, end_date, need_rows)?;
+    fill_scoring_extra_fields(&mut row, ts_code, st_list.contains(ts_code))?;
+    let (summary_rows, detail_rows, scene_rows) = scoring_single_core(
+        row,
+        ts_code,
+        score_start_date,
+        rules_cache,
+        rule_scene_meta,
+        scenes,
+    )?;
 
     Ok(ScoreBatch {
-        summary_rows: group_summary,
-        detail_rows: group_details,
-        scene_rows: group_scenes,
+        summary_rows,
+        detail_rows,
+        scene_rows,
     })
 }
 
@@ -144,21 +135,24 @@ pub fn scoring_all_to_db(
     let compute_result = tc_list.par_chunks(SCORING_GROUP_SIZE).try_for_each_with(
         tx,
         |sender, ts_group| -> Result<(), String> {
-            let batch = scoring_group_batch(
-                source_dir,
-                adj_type,
-                start_date,
-                end_date,
-                need_rows,
-                &rules_cache,
-                &rule_scene_meta,
-                &scenes,
-                &st_list,
-                ts_group,
-            )?;
-            sender
-                .send(ScoreWriteMessage::Batch(batch))
-                .map_err(|e| format!("发送评分批次失败:{e}"))?;
+            let worker_reader = DataReader::new(source_dir)?;
+            for ts_code in ts_group {
+                let batch = scoring_stock_batch(
+                    &worker_reader,
+                    adj_type,
+                    start_date,
+                    end_date,
+                    need_rows,
+                    &rules_cache,
+                    &rule_scene_meta,
+                    &scenes,
+                    &st_list,
+                    ts_code,
+                )?;
+                sender
+                    .send(ScoreWriteMessage::Batch(batch))
+                    .map_err(|e| format!("发送评分批次失败:{e}"))?;
+            }
             Ok(())
         },
     );

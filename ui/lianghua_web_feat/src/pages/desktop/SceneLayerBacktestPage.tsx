@@ -19,6 +19,7 @@ import {
   useTableSort,
   type SortDefinition,
 } from "../../shared/tableSort";
+import DetailsLink from "../../shared/DetailsLink";
 import { readStoredSourcePath } from "../../shared/storage";
 import "./css/SceneLayerBacktestPage.css";
 
@@ -32,6 +33,17 @@ type RuleSummarySortKey =
   | "icir";
 
 type ValidationScopeWayOption = "ANY" | "LAST" | "EACH" | "RECENT" | "CONSEC";
+
+type ValidationSampleGroupKey = "positive" | "negative" | "random";
+
+const VALIDATION_DEFAULT_SAMPLE_LIMIT = 30;
+const VALIDATION_MAX_SAMPLE_LIMIT = 200;
+
+const VALIDATION_SAMPLE_GROUP_META: Array<{ key: ValidationSampleGroupKey; title: string }> = [
+  { key: "positive", title: "正样本" },
+  { key: "negative", title: "负样本" },
+  { key: "random", title: "随机样本" },
+];
 
 function formatDateLabel(value?: string | null) {
   if (!value || value.length !== 8) {
@@ -250,6 +262,9 @@ export default function SceneLayerBacktestPage() {
   const [validationUnknownConfigs, setValidationUnknownConfigs] = useState<
     RuleValidationUnknownConfig[]
   >([]);
+  const [validationSampleLimitText, setValidationSampleLimitText] = useState(
+    String(VALIDATION_DEFAULT_SAMPLE_LIMIT),
+  );
   const [validationLoading, setValidationLoading] = useState(false);
   const [validationError, setValidationError] = useState("");
   const [validationResult, setValidationResult] = useState<RuleExpressionValidationData | null>(null);
@@ -601,6 +616,20 @@ export default function SceneLayerBacktestPage() {
       }
     }
 
+    const sampleLimitPerGroupRaw = Number(validationSampleLimitText);
+    if (
+      !Number.isFinite(sampleLimitPerGroupRaw) ||
+      !Number.isInteger(sampleLimitPerGroupRaw) ||
+      sampleLimitPerGroupRaw < 1
+    ) {
+      setValidationError("样本展示上限必须是 >= 1 的整数。");
+      return;
+    }
+    const sampleLimitPerGroup = Math.min(
+      VALIDATION_MAX_SAMPLE_LIMIT,
+      sampleLimitPerGroupRaw,
+    );
+
     setValidationLoading(true);
     setValidationError("");
     try {
@@ -620,8 +649,10 @@ export default function SceneLayerBacktestPage() {
         minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerDay) || 1),
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
         unknownConfigs,
+        sampleLimitPerGroup,
       });
       setValidationResult(data);
+      setValidationSampleLimitText(String(data.sample_limit_per_group));
     } catch (runError) {
       setValidationResult(null);
       setValidationError(`执行表达式验证失败: ${String(runError)}`);
@@ -957,6 +988,17 @@ export default function SceneLayerBacktestPage() {
               onChange={(event) => setValidationScopeWindowsText(event.target.value)}
             />
           </label>
+          <label className="scene-layer-field">
+            <span>样本展示上限/组</span>
+            <input
+              type="number"
+              min={1}
+              max={VALIDATION_MAX_SAMPLE_LIMIT}
+              step={1}
+              value={validationSampleLimitText}
+              onChange={(event) => setValidationSampleLimitText(event.target.value)}
+            />
+          </label>
         </div>
 
         <label className="scene-layer-field scene-layer-field-span-full">
@@ -1179,6 +1221,79 @@ export default function SceneLayerBacktestPage() {
                 <div className="scene-layer-formula-box">
                   <strong>替换后表达式</strong>
                   <p>{selectedValidationCombo.formula || "--"}</p>
+                </div>
+              </div>
+
+              <div className="scene-layer-layer-summary">
+                <h3>
+                  触发样本（每组展示 {validationResult.sample_limit_per_group} 条，可在上方调整）
+                </h3>
+                <div className="scene-layer-validation-sample-stats">
+                  <span>总样本：{selectedValidationCombo.sample_stats.total_samples}</span>
+                  <span>正样本：{selectedValidationCombo.sample_stats.positive_count}</span>
+                  <span>负样本：{selectedValidationCombo.sample_stats.negative_count}</span>
+                  <span>随机池：{selectedValidationCombo.sample_stats.random_count}</span>
+                </div>
+
+                <div className="scene-layer-validation-sample-groups">
+                  {VALIDATION_SAMPLE_GROUP_META.map((group) => {
+                    const rows = selectedValidationCombo.sample_groups[group.key];
+                    const totalCount =
+                      group.key === "positive"
+                        ? selectedValidationCombo.sample_stats.positive_count
+                        : group.key === "negative"
+                          ? selectedValidationCombo.sample_stats.negative_count
+                          : selectedValidationCombo.sample_stats.random_count;
+                    return (
+                      <div key={group.key} className="scene-layer-validation-sample-group">
+                        <h4>
+                          {group.title}
+                          <span>
+                            {rows.length} / {totalCount}
+                          </span>
+                        </h4>
+                        <div className="scene-layer-contrib-table-wrap">
+                          <table className="scene-layer-contrib-table scene-layer-validation-sample-table">
+                            <thead>
+                              <tr>
+                                <th>代码</th>
+                                <th>名称</th>
+                                <th>交易日</th>
+                                <th>触发得分</th>
+                                <th>残差收益</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {rows.length > 0 ? (
+                                rows.map((row) => (
+                                  <tr key={`${group.key}-${row.ts_code}-${row.trade_date}`}>
+                                    <td>{row.ts_code}</td>
+                                    <td>
+                                      <DetailsLink
+                                        className="scene-layer-validation-sample-link"
+                                        tsCode={row.ts_code}
+                                        tradeDate={row.trade_date}
+                                        sourcePath={sourcePath.trim()}
+                                      >
+                                        {row.name?.trim() || row.ts_code}
+                                      </DetailsLink>
+                                    </td>
+                                    <td>{formatDateLabel(row.trade_date)}</td>
+                                    <td>{formatNumber(row.rule_score, 4)}</td>
+                                    <td>{formatPercent(row.residual_return, 3)}</td>
+                                  </tr>
+                                ))
+                              ) : (
+                                <tr>
+                                  <td colSpan={5}>暂无样本。</td>
+                                </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 

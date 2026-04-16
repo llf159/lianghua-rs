@@ -2388,6 +2388,7 @@ dependencies = [
  "csv",
  "duckdb",
  "encoding_rs",
+ "rand 0.9.3",
  "rayon",
  "reqwest 0.13.2",
  "serde",

@@ -1,33 +1,35 @@
 use std::collections::{HashMap, HashSet};
 
-use duckdb::{Connection, params};
+use duckdb::{params, Connection};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    data::{
-        DataReader, RowData, ScopeWay, ScoreRule, ScoreScene, concept_performance_db_path,
-        load_stock_list, load_ths_concepts_list, result_db_path, source_db_path,
-    },
     data::scoring_data::row_into_rt,
+    data::{
+        concept_performance_db_path, load_stock_list, load_ths_concepts_list, result_db_path,
+        source_db_path, DataReader, RowData, ScopeWay, ScoreRule, ScoreScene,
+    },
     expr::{
         lexer::TokenKind,
-        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+        parser::{lex_all, Expr, Parser, Stmt, Stmts},
     },
-    scoring::{CachedRule, evaluate_cached_rule_scores},
     scoring::tools::{calc_zhang_pct, load_st_list},
+    scoring::{evaluate_cached_rule_scores, CachedRule},
     simulate::{
         rule::{
-            RuleLayerConfig, RuleLayerFromDbInput, calc_all_rule_layer_metrics_from_db,
-            calc_rule_layer_metrics_from_db, calc_rule_layer_metrics_from_triggered_scores,
+            calc_all_rule_layer_metrics_from_db, calc_rule_layer_metrics_from_db,
+            calc_rule_layer_metrics_with_samples_from_triggered_scores, RuleLayerConfig,
+            RuleLayerFromDbInput,
         },
         scene::{
-            SceneLayerConfig, SceneLayerFromDbInput, calc_all_scene_layer_metrics_from_db,
-            calc_scene_layer_metrics_from_db,
+            calc_all_scene_layer_metrics_from_db, calc_scene_layer_metrics_from_db,
+            SceneLayerConfig, SceneLayerFromDbInput,
         },
     },
     ui_tools_feat::{build_concepts_map, build_name_map},
-    utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
     utils::utils::board_category,
+    utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
 };
 
 const TOP_RANK_THRESHOLD: i64 = 100;
@@ -256,6 +258,9 @@ pub struct RuleLayerBacktestDefaultsData {
 
 const VALIDATION_EPS: f64 = 1e-12;
 const VALIDATION_MAX_COMBINATIONS: usize = 256;
+const VALIDATION_DEFAULT_SAMPLE_LIMIT_PER_GROUP: usize = 30;
+const VALIDATION_MAX_SAMPLE_LIMIT_PER_GROUP: usize = 200;
+const VALIDATION_RANDOM_SAMPLE_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RuleValidationUnknownConfig {
@@ -282,6 +287,30 @@ pub struct RuleValidationSimilarityRow {
 }
 
 #[derive(Debug, Serialize)]
+pub struct RuleValidationSampleStats {
+    pub positive_count: usize,
+    pub negative_count: usize,
+    pub random_count: usize,
+    pub total_samples: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleValidationSampleRow {
+    pub ts_code: String,
+    pub name: Option<String>,
+    pub trade_date: String,
+    pub rule_score: f64,
+    pub residual_return: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleValidationSampleGroups {
+    pub positive: Vec<RuleValidationSampleRow>,
+    pub negative: Vec<RuleValidationSampleRow>,
+    pub random: Vec<RuleValidationSampleRow>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct RuleValidationComboResult {
     pub combo_key: String,
     pub combo_label: String,
@@ -290,6 +319,8 @@ pub struct RuleValidationComboResult {
     pub trigger_samples: usize,
     pub triggered_days: usize,
     pub avg_daily_trigger: f64,
+    pub sample_stats: RuleValidationSampleStats,
+    pub sample_groups: RuleValidationSampleGroups,
     pub backtest: RuleLayerBacktestData,
     pub similarity_rows: Vec<RuleValidationSimilarityRow>,
 }
@@ -300,6 +331,7 @@ pub struct RuleExpressionValidationData {
     pub import_rule_explain: String,
     pub scope_way: String,
     pub scope_windows: usize,
+    pub sample_limit_per_group: usize,
     pub combo_results: Vec<RuleValidationComboResult>,
     pub best_combo_key: Option<String>,
 }
@@ -424,7 +456,9 @@ fn load_scene_options(source_path: &str) -> Result<Vec<String>, String> {
     Ok(scenes.into_iter().map(|scene| scene.name).collect())
 }
 
-fn load_scene_rule_name_sets(source_path: &str) -> Result<HashMap<String, HashSet<String>>, String> {
+fn load_scene_rule_name_sets(
+    source_path: &str,
+) -> Result<HashMap<String, HashSet<String>>, String> {
     let rules = ScoreRule::load_rules(source_path)?;
     let mut out: HashMap<String, HashSet<String>> = HashMap::new();
 
@@ -914,12 +948,13 @@ fn build_scene_contribution_summary(
     } else {
         Some(contribution_by_rule.values().sum::<f64>())
     };
-    let scene_rule_contribution_ratio = match (scene_rule_contribution_score, all_rule_contribution_score) {
-        (Some(scene_score), Some(all_score)) if all_score.abs() > 1e-12 => {
-            Some(scene_score / all_score)
-        }
-        _ => None,
-    };
+    let scene_rule_contribution_ratio =
+        match (scene_rule_contribution_score, all_rule_contribution_score) {
+            (Some(scene_score), Some(all_score)) if all_score.abs() > 1e-12 => {
+                Some(scene_score / all_score)
+            }
+            _ => None,
+        };
 
     SceneContributionSummary {
         scene_covered_count,
@@ -1479,7 +1514,13 @@ fn build_validation_triggered_scores(
     start_date: &str,
     end_date: &str,
     cached_rule: &CachedRule,
-) -> Result<(HashMap<String, HashMap<String, f64>>, HashSet<(String, String)>), String> {
+) -> Result<
+    (
+        HashMap<String, HashMap<String, f64>>,
+        HashSet<(String, String)>,
+    ),
+    String,
+> {
     let reader = DataReader::new(source_path)?;
     let ts_codes = reader.list_ts_code(stock_adj_type, start_date, end_date)?;
     let st_list = load_st_list(source_path)?;
@@ -1494,7 +1535,8 @@ fn build_validation_triggered_scores(
     let mut hit_pairs: HashSet<(String, String)> = HashSet::new();
 
     for ts_code in ts_codes {
-        let mut row_data = reader.load_one_tail_rows(&ts_code, stock_adj_type, end_date, need_rows)?;
+        let mut row_data =
+            reader.load_one_tail_rows(&ts_code, stock_adj_type, end_date, need_rows)?;
         fill_validation_extra_fields(&mut row_data, &ts_code, st_list.contains(&ts_code))?;
 
         let trade_dates = row_data.trade_dates.clone();
@@ -1508,7 +1550,10 @@ fn build_validation_triggered_scores(
         let keep_from = trade_dates
             .binary_search_by(|date| date.as_str().cmp(start_date))
             .unwrap_or_else(|index| index);
-        let min_len = usize::min(trade_dates.len(), usize::min(scores.len(), triggered_flags.len()));
+        let min_len = usize::min(
+            trade_dates.len(),
+            usize::min(scores.len(), triggered_flags.len()),
+        );
         if keep_from >= min_len {
             continue;
         }
@@ -1533,7 +1578,11 @@ fn build_validation_triggered_scores(
     Ok((triggered_score_map, hit_pairs))
 }
 
-fn normalize_validation_trigger_score(score: f64, triggered: bool, rule_points: f64) -> Option<f64> {
+fn normalize_validation_trigger_score(
+    score: f64,
+    triggered: bool,
+    rule_points: f64,
+) -> Option<f64> {
     if !score.is_finite() {
         return None;
     }
@@ -1711,6 +1760,89 @@ fn compare_option_f64_desc(left: Option<f64>, right: Option<f64>) -> std::cmp::O
     }
 }
 
+#[derive(Debug, Clone)]
+struct ValidationSampleRawRow {
+    ts_code: String,
+    trade_date: String,
+    rule_score: f64,
+    residual_return: f64,
+}
+
+fn build_validation_sample_groups(
+    samples: &[ValidationSampleRawRow],
+    sample_limit_per_group: usize,
+    stock_name_map: &HashMap<String, String>,
+) -> (RuleValidationSampleStats, RuleValidationSampleGroups) {
+    let mut positive = Vec::new();
+    let mut negative = Vec::new();
+
+    for row in samples {
+        if row.residual_return > 0.0 {
+            positive.push(row.clone());
+        } else if row.residual_return < 0.0 {
+            negative.push(row.clone());
+        }
+    }
+
+    positive.sort_by(|left, right| {
+        right
+            .residual_return
+            .partial_cmp(&left.residual_return)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.trade_date.cmp(&right.trade_date))
+            .then_with(|| left.ts_code.cmp(&right.ts_code))
+    });
+    negative.sort_by(|left, right| {
+        left.residual_return
+            .partial_cmp(&right.residual_return)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.trade_date.cmp(&right.trade_date))
+            .then_with(|| left.ts_code.cmp(&right.ts_code))
+    });
+
+    let mut rng = StdRng::seed_from_u64(VALIDATION_RANDOM_SAMPLE_SEED);
+    let mut random_pool = samples.to_vec();
+    random_pool.sort_by(|left, right| {
+        left.trade_date
+            .cmp(&right.trade_date)
+            .then_with(|| left.ts_code.cmp(&right.ts_code))
+    });
+    if random_pool.len() > 1 {
+        for index in (1..random_pool.len()).rev() {
+            let swap_index = rng.random_range(0..=index);
+            random_pool.swap(index, swap_index);
+        }
+    }
+
+    let to_payload = |rows: Vec<ValidationSampleRawRow>| {
+        rows.into_iter()
+            .take(sample_limit_per_group)
+            .map(|row| RuleValidationSampleRow {
+                name: stock_name_map.get(&row.ts_code).cloned(),
+                ts_code: row.ts_code,
+                trade_date: row.trade_date,
+                rule_score: row.rule_score,
+                residual_return: row.residual_return,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let stats = RuleValidationSampleStats {
+        positive_count: positive.len(),
+        negative_count: negative.len(),
+        random_count: random_pool.len(),
+        total_samples: samples.len(),
+    };
+
+    let groups = RuleValidationSampleGroups {
+        positive: to_payload(positive),
+        negative: to_payload(negative),
+        random: to_payload(random_pool),
+    };
+
+    (stats, groups)
+}
+
 pub fn run_rule_expression_validation(
     source_path: String,
     import_rule_name: String,
@@ -1727,6 +1859,7 @@ pub fn run_rule_expression_validation(
     min_samples_per_rule_day: Option<usize>,
     backtest_period: Option<usize>,
     unknown_configs: Option<Vec<RuleValidationUnknownConfig>>,
+    sample_limit_per_group: Option<usize>,
 ) -> Result<RuleExpressionValidationData, String> {
     let source_path = source_path.trim().to_string();
     if source_path.is_empty() {
@@ -1755,7 +1888,11 @@ pub fn run_rule_expression_validation(
         return Err("表达式不能为空".to_string());
     }
 
-    let resolved_scope_way = match scope_way.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    let resolved_scope_way = match scope_way
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         Some(custom_scope_way) => parse_scope_way_input(custom_scope_way)?,
         None => import_rule.scope_way,
     };
@@ -1784,16 +1921,21 @@ pub fn run_rule_expression_validation(
     };
 
     let variants = build_validation_variants(&formula, &unknown_configs.unwrap_or_default())?;
+    let sample_limit_per_group = sample_limit_per_group
+        .unwrap_or(VALIDATION_DEFAULT_SAMPLE_LIMIT_PER_GROUP)
+        .clamp(1, VALIDATION_MAX_SAMPLE_LIMIT_PER_GROUP);
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
         .to_str()
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
-    let source_conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+    let source_conn =
+        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
     let result_conn = open_result_conn(&source_path)?;
     let explain_map = all_rules
         .iter()
         .map(|rule| (rule.name.clone(), rule.explain.clone()))
         .collect::<HashMap<_, _>>();
+    let stock_name_map = load_stock_name_map(&source_path)?;
 
     let mut combo_results = Vec::with_capacity(variants.len());
     for variant in variants {
@@ -1814,7 +1956,7 @@ pub fn run_rule_expression_validation(
             &params.end_date,
             &cached_rule,
         )?;
-        let metrics = calc_rule_layer_metrics_from_triggered_scores(
+        let metrics_with_samples = calc_rule_layer_metrics_with_samples_from_triggered_scores(
             &source_conn,
             &source_path,
             &triggered_score_map,
@@ -1830,6 +1972,28 @@ pub fn run_rule_expression_validation(
                 backtest_period: params.backtest_period,
             },
         )?;
+        let triggered_sample_rows = metrics_with_samples
+            .samples
+            .into_iter()
+            .filter_map(|sample| {
+                if !hit_pairs.contains(&(sample.ts_code.clone(), sample.trade_date.clone())) {
+                    return None;
+                }
+                Some(ValidationSampleRawRow {
+                    ts_code: sample.ts_code,
+                    trade_date: sample.trade_date,
+                    rule_score: sample.rule_score,
+                    residual_return: sample.residual_return,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let (sample_stats, sample_groups) = build_validation_sample_groups(
+            &triggered_sample_rows,
+            sample_limit_per_group,
+            &stock_name_map,
+        );
+        let metrics = metrics_with_samples.metrics;
         let backtest = build_rule_backtest_payload(&variant.combo_key, &params, metrics);
         let similarity_rows = load_validation_similarity_rows(
             &result_conn,
@@ -1858,6 +2022,8 @@ pub fn run_rule_expression_validation(
             } else {
                 0.0
             },
+            sample_stats,
+            sample_groups,
             backtest,
             similarity_rows,
         });
@@ -1877,6 +2043,7 @@ pub fn run_rule_expression_validation(
         import_rule_explain: import_rule.explain,
         scope_way: scope_way_label(resolved_scope_way),
         scope_windows: resolved_scope_windows,
+        sample_limit_per_group,
         combo_results,
         best_combo_key,
     })
@@ -2793,14 +2960,12 @@ fn run_scene_layer_backtest_core(
                     state_avg_residual_returns: point
                         .state_avg_residual_returns
                         .into_iter()
-                        .map(
-                            |(scene_state, avg_residual_return)| {
-                                SceneLayerStateAvgResidualReturn {
-                                    scene_state,
-                                    avg_residual_return: Some(avg_residual_return),
-                                }
-                            },
-                        )
+                        .map(|(scene_state, avg_residual_return)| {
+                            SceneLayerStateAvgResidualReturn {
+                                scene_state,
+                                avg_residual_return: Some(avg_residual_return),
+                            }
+                        })
                         .collect(),
                     top_bottom_spread: point.top_bottom_spread,
                     ic: point.ic,

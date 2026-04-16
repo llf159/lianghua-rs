@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use duckdb::{Connection, params_from_iter};
+use duckdb::{params_from_iter, Connection};
 use rayon::prelude::*;
 
 use super::{
-    ResidualFactorSeriesRefs, ResidualReturnInput, calc_stock_residual_returns_with_factor_series,
+    calc_stock_residual_returns_with_factor_series, ResidualFactorSeriesRefs, ResidualReturnInput,
 };
 use crate::data::{
     concept_performance_data::{load_concept_trend_series, load_industry_trend_series},
@@ -88,6 +88,7 @@ impl RuleLayerFromDbInput {
 
 #[derive(Debug, Clone)]
 pub struct RuleSample {
+    pub ts_code: String,
     pub trade_date: String,
     pub rule_score: f64,
     pub residual_return: f64,
@@ -111,6 +112,20 @@ pub struct RuleLayerMetrics {
     pub ic_mean: Option<f64>,
     pub ic_std: Option<f64>,
     pub icir: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleLayerSamplePoint {
+    pub ts_code: String,
+    pub trade_date: String,
+    pub rule_score: f64,
+    pub residual_return: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleLayerMetricsWithSamples {
+    pub metrics: RuleLayerMetrics,
+    pub samples: Vec<RuleLayerSamplePoint>,
 }
 
 #[derive(Debug, Clone)]
@@ -265,7 +280,8 @@ pub fn calc_all_rule_layer_metrics_from_db(
         .par_iter()
         .map(|rule_name| {
             let triggered_score_map = triggered_score_map_by_rule.get(rule_name);
-            let samples = collect_rule_samples(&universe_rows, triggered_score_map, &residual_map_cache);
+            let samples =
+                collect_rule_samples(&universe_rows, triggered_score_map, &residual_map_cache);
             let metrics = calc_rule_layer_metrics(&samples, layer_config)?;
             Ok((rule_name.clone(), metrics))
         })
@@ -292,6 +308,35 @@ pub fn calc_rule_layer_metrics_from_triggered_scores(
     end_date: &str,
     layer_config: &RuleLayerConfig,
 ) -> Result<RuleLayerMetrics, String> {
+    let with_samples = calc_rule_layer_metrics_with_samples_from_triggered_scores(
+        source_conn,
+        source_dir,
+        triggered_score_map,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+    Ok(with_samples.metrics)
+}
+
+pub fn calc_rule_layer_metrics_with_samples_from_triggered_scores(
+    source_conn: &Connection,
+    source_dir: &str,
+    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+) -> Result<RuleLayerMetricsWithSamples, String> {
     validate_rule_common_input(
         stock_adj_type,
         index_ts_code,
@@ -305,7 +350,10 @@ pub fn calc_rule_layer_metrics_from_triggered_scores(
 
     let universe_rows = load_rule_universe_rows(source_dir, start_date, end_date)?;
     if universe_rows.is_empty() {
-        return Ok(empty_metrics());
+        return Ok(RuleLayerMetricsWithSamples {
+            metrics: empty_metrics(),
+            samples: Vec::new(),
+        });
     }
 
     let concept_map = load_most_related_concept_map(source_dir)?;
@@ -336,8 +384,24 @@ pub fn calc_rule_layer_metrics_from_triggered_scores(
         },
     )?;
 
-    let samples = collect_rule_samples(&universe_rows, Some(triggered_score_map), &residual_map_cache);
-    calc_rule_layer_metrics(&samples, layer_config)
+    let samples = collect_rule_samples(
+        &universe_rows,
+        Some(triggered_score_map),
+        &residual_map_cache,
+    );
+    let metrics = calc_rule_layer_metrics(&samples, layer_config)?;
+
+    let samples = samples
+        .into_iter()
+        .map(|sample| RuleLayerSamplePoint {
+            ts_code: sample.ts_code,
+            trade_date: sample.trade_date,
+            rule_score: sample.rule_score,
+            residual_return: sample.residual_return,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(RuleLayerMetricsWithSamples { metrics, samples })
 }
 
 pub fn calc_rule_layer_metrics(
@@ -509,6 +573,7 @@ fn collect_rule_samples(
             .unwrap_or(0.0);
 
         samples.push(RuleSample {
+            ts_code: row.ts_code.clone(),
             trade_date: row.trade_date.clone(),
             rule_score,
             residual_return,
@@ -553,7 +618,10 @@ fn load_rule_universe_rows(
         .map_err(|e| format!("查询score_summary失败:{e}"))?;
 
     let mut out = Vec::new();
-    while let Some(row) = rows.next().map_err(|e| format!("读取score_summary失败:{e}"))? {
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取score_summary失败:{e}"))?
+    {
         let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
         let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
 
@@ -885,7 +953,10 @@ fn load_rule_rows_for_names(
         .map_err(|e| format!("查询rule_details失败:{e}"))?;
 
     let mut out = Vec::new();
-    while let Some(row) = rows.next().map_err(|e| format!("读取rule_details失败:{e}"))? {
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取rule_details失败:{e}"))?
+    {
         let rule_name: String = row.get(0).map_err(|e| format!("读取rule_name失败:{e}"))?;
         let ts_code: String = row.get(1).map_err(|e| format!("读取ts_code失败:{e}"))?;
         let trade_date: String = row.get(2).map_err(|e| format!("读取trade_date失败:{e}"))?;
@@ -956,8 +1027,7 @@ fn calc_top_bottom_spread(rule_scores: &[f64], residuals: &[f64]) -> Option<f64>
         .enumerate()
         .collect::<Vec<(usize, f64)>>();
     ordered.sort_by(|a, b| {
-        a.1
-            .partial_cmp(&b.1)
+        a.1.partial_cmp(&b.1)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.0.cmp(&b.0))
     });
@@ -1071,13 +1141,13 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use duckdb::{Connection, params};
+    use duckdb::{params, Connection};
 
     use crate::data::{result_db_path, source_db_path};
 
     use super::{
-        RuleLayerConfig, RuleLayerFromDbInput, calc_all_rule_layer_metrics_from_db,
-        calc_rule_layer_metrics_from_db,
+        calc_all_rule_layer_metrics_from_db, calc_rule_layer_metrics_from_db, RuleLayerConfig,
+        RuleLayerFromDbInput,
     };
 
     fn assert_opt_close(left: Option<f64>, right: Option<f64>) {

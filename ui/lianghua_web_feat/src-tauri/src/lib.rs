@@ -345,6 +345,7 @@ fn get_scene_rank_overview_page(
 #[tauri::command]
 fn get_intraday_monitor_page(
     source_path: String,
+    rank_mode: Option<String>,
     rank_date: Option<String>,
     scene_name: Option<String>,
     limit: Option<u32>,
@@ -354,6 +355,7 @@ fn get_intraday_monitor_page(
 ) -> Result<IntradayMonitorPageData, String> {
     core_get_intraday_monitor_page(
         &source_path,
+        rank_mode,
         rank_date,
         scene_name,
         limit,
@@ -593,6 +595,7 @@ async fn run_rule_expression_validation(
     min_samples_per_rule_day: Option<usize>,
     backtest_period: Option<usize>,
     unknown_configs: Option<Vec<RuleValidationUnknownConfig>>,
+    sample_limit_per_group: Option<usize>,
 ) -> Result<RuleExpressionValidationData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_run_rule_expression_validation(
@@ -611,6 +614,7 @@ async fn run_rule_expression_validation(
             min_samples_per_rule_day,
             backtest_period,
             unknown_configs,
+            sample_limit_per_group,
         )
     })
     .await

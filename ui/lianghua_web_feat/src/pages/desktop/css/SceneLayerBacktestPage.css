@@ -486,6 +486,61 @@
   font-size: 12px;
 }
 
+.scene-layer-validation-sample-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 13px;
+  color: #475569;
+  margin-bottom: 10px;
+}
+
+.scene-layer-validation-sample-groups {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.scene-layer-validation-sample-group {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 8px;
+  background: #fff;
+  min-width: 0;
+}
+
+.scene-layer-validation-sample-group > h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #334155;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.scene-layer-validation-sample-group > h4 > span {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.scene-layer-validation-sample-table th:nth-child(4),
+.scene-layer-validation-sample-table th:nth-child(5),
+.scene-layer-validation-sample-table td:nth-child(4),
+.scene-layer-validation-sample-table td:nth-child(5) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.scene-layer-validation-sample-link {
+  color: #1d4ed8;
+  text-decoration: none;
+}
+
+.scene-layer-validation-sample-link:hover {
+  text-decoration: underline;
+}
+
 .scene-layer-market-gainers-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));

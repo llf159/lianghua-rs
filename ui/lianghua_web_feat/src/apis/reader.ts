@@ -79,10 +79,12 @@ export type SceneOverviewPageData = {
 };
 
 export type IntradayMonitorRow = {
+  rank_mode: string;
   ts_code: string;
   trade_date?: string;
   scene_name: string;
   direction?: string | null;
+  total_score?: number | null;
   scene_score?: number | null;
   risk_score?: number | null;
   confirm_strength?: number | null;
@@ -95,12 +97,14 @@ export type IntradayMonitorRow = {
   concept?: string;
   realtime_price?: number | null;
   realtime_change_pct?: number | null;
+  realtime_change_open_pct?: number | null;
   realtime_vol_ratio?: number | null;
   [key: string]: string | number | null | undefined;
 };
 
 export type IntradayMonitorPageQuery = {
   sourcePath: string;
+  rankMode?: 'total' | 'scene';
   rankDate?: string;
   sceneName?: string;
   limit?: number;
@@ -113,6 +117,7 @@ export type IntradayMonitorPageData = {
   rows: IntradayMonitorRow[];
   rank_date_options?: string[];
   resolved_rank_date?: string;
+  scene_options?: string[];
   refreshed_at?: string;
 };
 

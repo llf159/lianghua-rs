@@ -246,6 +246,27 @@ export type RuleValidationSimilarityRow = {
   overlap_lift?: number | null
 }
 
+export type RuleValidationSampleStats = {
+  positive_count: number
+  negative_count: number
+  random_count: number
+  total_samples: number
+}
+
+export type RuleValidationSampleRow = {
+  ts_code: string
+  name?: string | null
+  trade_date: string
+  rule_score: number
+  residual_return: number
+}
+
+export type RuleValidationSampleGroups = {
+  positive: RuleValidationSampleRow[]
+  negative: RuleValidationSampleRow[]
+  random: RuleValidationSampleRow[]
+}
+
 export type RuleValidationComboResult = {
   combo_key: string
   combo_label: string
@@ -254,6 +275,8 @@ export type RuleValidationComboResult = {
   trigger_samples: number
   triggered_days: number
   avg_daily_trigger: number
+  sample_stats: RuleValidationSampleStats
+  sample_groups: RuleValidationSampleGroups
   backtest: RuleLayerBacktestData
   similarity_rows: RuleValidationSimilarityRow[]
 }
@@ -263,6 +286,7 @@ export type RuleExpressionValidationData = {
   import_rule_explain: string
   scope_way: string
   scope_windows: number
+  sample_limit_per_group: number
   combo_results: RuleValidationComboResult[]
   best_combo_key?: string | null
 }
@@ -349,6 +373,7 @@ export type RuleExpressionValidationQuery = {
   minSamplesPerRuleDay?: number
   backtestPeriod?: number
   unknownConfigs?: RuleValidationUnknownConfig[]
+  sampleLimitPerGroup?: number
 }
 
 export async function getSceneLayerBacktestDefaults(sourcePath: string) {
