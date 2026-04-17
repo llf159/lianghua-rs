@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use duckdb::{Connection, params_from_iter};
+use duckdb::{params_from_iter, Connection};
 use rayon::prelude::*;
 
 use super::{
-    ResidualFactorSeriesRefs, ResidualReturnInput, calc_stock_residual_returns_with_factor_series,
+    calc_stock_residual_returns_with_factor_series, ResidualFactorSeriesRefs, ResidualReturnInput,
 };
 use crate::data::{
     concept_performance_data::{load_concept_trend_series, load_industry_trend_series},
@@ -126,6 +126,12 @@ pub struct RuleLayerSamplePoint {
 pub struct RuleLayerMetricsWithSamples {
     pub metrics: RuleLayerMetrics,
     pub samples: Vec<RuleLayerSamplePoint>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuleLayerRuntimeCache {
+    universe_rows: Vec<RuleUniverseRow>,
+    residual_map_cache: HashMap<String, HashMap<String, f64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -295,6 +301,71 @@ pub fn calc_all_rule_layer_metrics_from_db(
     Ok(out)
 }
 
+pub fn build_rule_layer_runtime_cache(
+    source_conn: &Connection,
+    source_dir: &str,
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+) -> Result<RuleLayerRuntimeCache, String> {
+    validate_rule_common_input(
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+
+    let universe_rows = load_rule_universe_rows(source_dir, start_date, end_date)?;
+    if universe_rows.is_empty() {
+        return Ok(RuleLayerRuntimeCache {
+            universe_rows,
+            residual_map_cache: HashMap::new(),
+        });
+    }
+
+    let concept_map = load_most_related_concept_map(source_dir)?;
+    let industry_map = load_stock_industry_map(source_dir)?;
+    let mut unique_ts_codes: HashSet<&str> = HashSet::new();
+    for row in &universe_rows {
+        unique_ts_codes.insert(row.ts_code.as_str());
+    }
+
+    let residual_map_cache = build_residual_map_cache(
+        source_conn,
+        source_dir,
+        unique_ts_codes
+            .into_iter()
+            .map(|ts_code| ts_code.to_string())
+            .collect(),
+        &concept_map,
+        &industry_map,
+        &ResidualCacheInput {
+            stock_adj_type,
+            index_ts_code,
+            index_beta,
+            concept_beta,
+            industry_beta,
+            start_date,
+            end_date,
+            backtest_period: layer_config.backtest_period,
+        },
+    )?;
+
+    Ok(RuleLayerRuntimeCache {
+        universe_rows,
+        residual_map_cache,
+    })
+}
+
 pub fn calc_rule_layer_metrics_from_triggered_scores(
     source_conn: &Connection,
     source_dir: &str,
@@ -337,7 +408,9 @@ pub fn calc_rule_layer_metrics_with_samples_from_triggered_scores(
     end_date: &str,
     layer_config: &RuleLayerConfig,
 ) -> Result<RuleLayerMetricsWithSamples, String> {
-    validate_rule_common_input(
+    let runtime_cache = build_rule_layer_runtime_cache(
+        source_conn,
+        source_dir,
         stock_adj_type,
         index_ts_code,
         index_beta,
@@ -348,46 +421,31 @@ pub fn calc_rule_layer_metrics_with_samples_from_triggered_scores(
         layer_config,
     )?;
 
-    let universe_rows = load_rule_universe_rows(source_dir, start_date, end_date)?;
-    if universe_rows.is_empty() {
+    calc_rule_layer_metrics_with_samples_from_cache(
+        &runtime_cache,
+        triggered_score_map,
+        layer_config,
+    )
+}
+
+pub fn calc_rule_layer_metrics_with_samples_from_cache(
+    runtime_cache: &RuleLayerRuntimeCache,
+    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
+    layer_config: &RuleLayerConfig,
+) -> Result<RuleLayerMetricsWithSamples, String> {
+    layer_config.validate()?;
+
+    if runtime_cache.universe_rows.is_empty() {
         return Ok(RuleLayerMetricsWithSamples {
             metrics: empty_metrics(),
             samples: Vec::new(),
         });
     }
 
-    let concept_map = load_most_related_concept_map(source_dir)?;
-    let industry_map = load_stock_industry_map(source_dir)?;
-    let mut unique_ts_codes: HashSet<&str> = HashSet::new();
-    for row in &universe_rows {
-        unique_ts_codes.insert(row.ts_code.as_str());
-    }
-
-    let residual_map_cache = build_residual_map_cache(
-        source_conn,
-        source_dir,
-        unique_ts_codes
-            .into_iter()
-            .map(|ts_code| ts_code.to_string())
-            .collect(),
-        &concept_map,
-        &industry_map,
-        &ResidualCacheInput {
-            stock_adj_type,
-            index_ts_code,
-            index_beta,
-            concept_beta,
-            industry_beta,
-            start_date,
-            end_date,
-            backtest_period: layer_config.backtest_period,
-        },
-    )?;
-
     let samples = collect_rule_samples(
-        &universe_rows,
+        &runtime_cache.universe_rows,
         Some(triggered_score_map),
-        &residual_map_cache,
+        &runtime_cache.residual_map_cache,
     );
     let metrics = calc_rule_layer_metrics(&samples, layer_config)?;
 
@@ -1141,13 +1199,13 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use duckdb::{Connection, params};
+    use duckdb::{params, Connection};
 
     use crate::data::{result_db_path, source_db_path};
 
     use super::{
-        RuleLayerConfig, RuleLayerFromDbInput, calc_all_rule_layer_metrics_from_db,
-        calc_rule_layer_metrics_from_db,
+        calc_all_rule_layer_metrics_from_db, calc_rule_layer_metrics_from_db, RuleLayerConfig,
+        RuleLayerFromDbInput,
     };
 
     fn assert_opt_close(left: Option<f64>, right: Option<f64>) {

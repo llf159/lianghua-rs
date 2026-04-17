@@ -18,9 +18,9 @@ use crate::{
     scoring::{evaluate_cached_rule_scores, CachedRule},
     simulate::{
         rule::{
-            calc_all_rule_layer_metrics_from_db, calc_rule_layer_metrics_from_db,
-            calc_rule_layer_metrics_with_samples_from_triggered_scores, RuleLayerConfig,
-            RuleLayerFromDbInput,
+            build_rule_layer_runtime_cache, calc_all_rule_layer_metrics_from_db,
+            calc_rule_layer_metrics_from_db, calc_rule_layer_metrics_with_samples_from_cache,
+            RuleLayerConfig, RuleLayerFromDbInput,
         },
         scene::{
             calc_all_scene_layer_metrics_from_db, calc_scene_layer_metrics_from_db,
@@ -257,6 +257,7 @@ pub struct RuleLayerBacktestDefaultsData {
 }
 
 const VALIDATION_EPS: f64 = 1e-12;
+const RULE_BACKTEST_EPS: f64 = 1e-12;
 const VALIDATION_MAX_COMBINATIONS: usize = 256;
 const VALIDATION_DEFAULT_SAMPLE_LIMIT_PER_GROUP: usize = 30;
 const VALIDATION_MAX_SAMPLE_LIMIT_PER_GROUP: usize = 200;
@@ -1736,13 +1737,7 @@ fn build_validation_triggered_scores(
     start_date: &str,
     end_date: &str,
     cached_rule: &CachedRule,
-) -> Result<
-    (
-        HashMap<String, HashMap<String, f64>>,
-        HashSet<(String, String)>,
-    ),
-    String,
-> {
+) -> Result<HashMap<String, HashMap<String, f64>>, String> {
     let reader = DataReader::new(source_path)?;
     let ts_codes = reader.list_ts_code(stock_adj_type, start_date, end_date)?;
     let st_list = load_st_list(source_path)?;
@@ -1754,7 +1749,6 @@ fn build_validation_triggered_scores(
     let need_rows = calc_query_need_rows(source_path, warmup_need, start_date, end_date)?;
 
     let mut triggered_score_map: HashMap<String, HashMap<String, f64>> = HashMap::new();
-    let mut hit_pairs: HashSet<(String, String)> = HashSet::new();
 
     for ts_code in ts_codes {
         let mut row_data =
@@ -1792,12 +1786,39 @@ fn build_validation_triggered_scores(
             triggered_score_map
                 .entry(ts_code.clone())
                 .or_default()
-                .insert(trade_date.clone(), score);
-            hit_pairs.insert((ts_code.clone(), trade_date));
+                .insert(trade_date, score);
         }
     }
 
-    Ok((triggered_score_map, hit_pairs))
+    Ok(triggered_score_map)
+}
+
+fn validation_contains_triggered_pair(
+    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
+    ts_code: &str,
+    trade_date: &str,
+) -> bool {
+    triggered_score_map
+        .get(ts_code)
+        .is_some_and(|date_map| date_map.contains_key(trade_date))
+}
+
+fn validation_trigger_samples_count(
+    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
+) -> usize {
+    triggered_score_map.values().map(HashMap::len).sum()
+}
+
+fn validation_triggered_days_count(
+    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
+) -> usize {
+    let mut trade_dates = HashSet::new();
+    for date_map in triggered_score_map.values() {
+        for trade_date in date_map.keys() {
+            trade_dates.insert(trade_date.clone());
+        }
+    }
+    trade_dates.len()
 }
 
 fn normalize_validation_trigger_score(
@@ -1863,11 +1884,12 @@ fn load_validation_similarity_rows(
     result_conn: &Connection,
     start_date: &str,
     end_date: &str,
-    hit_pairs: &HashSet<(String, String)>,
+    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
+    trigger_samples: usize,
     exclude_rule_name: Option<&str>,
     explain_map: &HashMap<String, String>,
 ) -> Result<Vec<RuleValidationSimilarityRow>, String> {
-    let combo_hit_count = hit_pairs.len() as f64;
+    let combo_hit_count = trigger_samples as f64;
     if combo_hit_count <= 0.0 {
         return Ok(Vec::new());
     }
@@ -1928,7 +1950,7 @@ fn load_validation_similarity_rows(
         let trade_date: String = row.get(2).map_err(|e| format!("读取交易日失败: {e}"))?;
 
         *existing_hit_count.entry(rule_name.clone()).or_default() += 1;
-        if hit_pairs.contains(&(ts_code, trade_date)) {
+        if validation_contains_triggered_pair(triggered_score_map, &ts_code, &trade_date) {
             *overlap_hit_count.entry(rule_name).or_default() += 1;
         }
     }
@@ -2127,6 +2149,22 @@ pub fn run_rule_expression_validation(
     let source_conn =
         Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
     let result_conn = open_result_conn(&source_path)?;
+    let layer_config = RuleLayerConfig {
+        min_samples_per_day: params.min_samples_per_day,
+        backtest_period: params.backtest_period,
+    };
+    let runtime_cache = build_rule_layer_runtime_cache(
+        &source_conn,
+        &source_path,
+        &params.stock_adj_type,
+        &params.index_ts_code,
+        params.index_beta,
+        params.concept_beta,
+        params.industry_beta,
+        &params.start_date,
+        &params.end_date,
+        &layer_config,
+    )?;
     let explain_map = all_rules
         .iter()
         .map(|rule| (rule.name.clone(), rule.explain.clone()))
@@ -2145,34 +2183,29 @@ pub fn run_rule_expression_validation(
             &variant.formula,
         )?;
 
-        let (triggered_score_map, hit_pairs) = build_validation_triggered_scores(
+        let triggered_score_map = build_validation_triggered_scores(
             &source_path,
             &params.stock_adj_type,
             &params.start_date,
             &params.end_date,
             &cached_rule,
         )?;
-        let metrics_with_samples = calc_rule_layer_metrics_with_samples_from_triggered_scores(
-            &source_conn,
-            &source_path,
+        let trigger_samples = validation_trigger_samples_count(&triggered_score_map);
+        let triggered_days = validation_triggered_days_count(&triggered_score_map);
+        let metrics_with_samples = calc_rule_layer_metrics_with_samples_from_cache(
+            &runtime_cache,
             &triggered_score_map,
-            &params.stock_adj_type,
-            &params.index_ts_code,
-            params.index_beta,
-            params.concept_beta,
-            params.industry_beta,
-            &params.start_date,
-            &params.end_date,
-            &RuleLayerConfig {
-                min_samples_per_day: params.min_samples_per_day,
-                backtest_period: params.backtest_period,
-            },
+            &layer_config,
         )?;
         let triggered_sample_rows = metrics_with_samples
             .samples
             .into_iter()
             .filter_map(|sample| {
-                if !hit_pairs.contains(&(sample.ts_code.clone(), sample.trade_date.clone())) {
+                if !validation_contains_triggered_pair(
+                    &triggered_score_map,
+                    &sample.ts_code,
+                    &sample.trade_date,
+                ) {
                     return None;
                 }
                 Some(ValidationSampleRawRow {
@@ -2195,16 +2228,11 @@ pub fn run_rule_expression_validation(
             &result_conn,
             &params.start_date,
             &params.end_date,
-            &hit_pairs,
+            &triggered_score_map,
+            trigger_samples,
             seed_rule.exclude_rule_name.as_deref(),
             &explain_map,
         )?;
-        let triggered_days = hit_pairs
-            .iter()
-            .map(|(_, trade_date)| trade_date.clone())
-            .collect::<HashSet<_>>()
-            .len();
-        let trigger_samples = hit_pairs.len();
 
         combo_results.push(RuleValidationComboResult {
             combo_key: variant.combo_key,
@@ -3119,6 +3147,56 @@ struct RuleLayerBacktestRunParams {
     backtest_period: usize,
 }
 
+fn weighted_rule_summary_metric(
+    summaries: &[RuleLayerRuleSummary],
+    value: impl Fn(&RuleLayerRuleSummary) -> Option<f64>,
+) -> Option<f64> {
+    let mut weighted_sum = 0.0;
+    let mut total_weight = 0usize;
+
+    for summary in summaries {
+        if summary.point_count == 0 {
+            continue;
+        }
+        let Some(metric_value) = value(summary) else {
+            continue;
+        };
+        if !metric_value.is_finite() {
+            continue;
+        }
+
+        weighted_sum += metric_value * summary.point_count as f64;
+        total_weight += summary.point_count;
+    }
+
+    if total_weight == 0 {
+        None
+    } else {
+        Some(weighted_sum / total_weight as f64)
+    }
+}
+
+fn aggregate_all_rule_summary_metrics(
+    summaries: &[RuleLayerRuleSummary],
+) -> (
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+) {
+    let avg_residual_mean = weighted_rule_summary_metric(summaries, |item| item.avg_residual_mean);
+    let spread_mean = weighted_rule_summary_metric(summaries, |item| item.spread_mean);
+    let ic_mean = weighted_rule_summary_metric(summaries, |item| item.ic_mean);
+    let ic_std = weighted_rule_summary_metric(summaries, |item| item.ic_std);
+    let icir = match (ic_mean, ic_std) {
+        (Some(mean), Some(std)) if std.abs() >= RULE_BACKTEST_EPS => Some(mean / std),
+        _ => weighted_rule_summary_metric(summaries, |item| item.icir),
+    };
+
+    (avg_residual_mean, spread_mean, ic_mean, ic_std, icir)
+}
+
 fn run_scene_layer_backtest_core(
     source_conn: &Connection,
     source_path: &str,
@@ -3347,6 +3425,9 @@ fn run_rule_layer_backtest_core(
             .then_with(|| a.rule_name.cmp(&b.rule_name))
     });
 
+    let (avg_residual_mean, spread_mean, ic_mean, ic_std, icir) =
+        aggregate_all_rule_summary_metrics(&all_rule_summaries);
+
     Ok(RuleLayerBacktestData {
         rule_name: String::new(),
         stock_adj_type: params.stock_adj_type.clone(),
@@ -3359,11 +3440,11 @@ fn run_rule_layer_backtest_core(
         min_samples_per_rule_day: params.min_samples_per_day,
         backtest_period: params.backtest_period,
         points: Vec::new(),
-        avg_residual_mean: None,
-        spread_mean: None,
-        ic_mean: None,
-        ic_std: None,
-        icir: None,
+        avg_residual_mean,
+        spread_mean,
+        ic_mean,
+        ic_std,
+        icir,
         is_all_rules: true,
         all_rule_summaries,
     })
@@ -3574,7 +3655,7 @@ mod tests {
         )
         .expect("build cached rule");
 
-        let (triggered_score_map, hit_pairs) = build_validation_triggered_scores(
+        let triggered_score_map = build_validation_triggered_scores(
             source_dir_str,
             "qfq",
             "20240102",
@@ -3591,6 +3672,12 @@ mod tests {
         assert!(date_score_map.contains_key("20240102"));
         assert!(date_score_map.contains_key("20240103"));
         assert!(date_score_map.contains_key("20240104"));
-        assert_eq!(hit_pairs.len(), 3);
+        assert_eq!(
+            triggered_score_map
+                .values()
+                .map(|item| item.len())
+                .sum::<usize>(),
+            3
+        );
     }
 }
