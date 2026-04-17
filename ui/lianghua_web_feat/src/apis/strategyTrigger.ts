@@ -256,6 +256,8 @@ export type RuleValidationSampleStats = {
 export type RuleValidationSampleRow = {
   ts_code: string
   name?: string | null
+  board: string
+  volatility_group: string
   trade_date: string
   rule_score: number
   residual_return: number

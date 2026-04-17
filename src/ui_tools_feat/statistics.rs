@@ -1,30 +1,33 @@
 use std::collections::{HashMap, HashSet};
 
-use duckdb::{params, Connection};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use duckdb::{Connection, params};
+use rand::{Rng, SeedableRng, rngs::StdRng};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     data::scoring_data::row_into_rt,
     data::{
+        DataReader, RowData, RuleStage, RuleTag, ScopeWay, ScoreRule, ScoreScene,
         concept_performance_db_path, load_stock_list, load_ths_concepts_list, result_db_path,
-        source_db_path, DataReader, RowData, RuleStage, RuleTag, ScopeWay, ScoreRule, ScoreScene,
+        source_db_path,
     },
     expr::{
         lexer::TokenKind,
-        parser::{lex_all, Expr, Parser, Stmt, Stmts},
+        parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
     scoring::tools::{calc_query_need_rows, calc_zhang_pct, load_st_list},
-    scoring::{evaluate_cached_rule_scores, CachedRule},
+    scoring::{CachedRule, evaluate_cached_rule_scores},
     simulate::{
         rule::{
+            RuleLayerConfig, RuleLayerFromDbInput, RuleLayerRuntimeCache,
             build_rule_layer_runtime_cache, calc_all_rule_layer_metrics_from_db,
-            calc_rule_layer_metrics_from_db, calc_rule_layer_metrics_with_samples_from_cache,
-            RuleLayerConfig, RuleLayerFromDbInput,
+            calc_rule_layer_metrics_from_cache, calc_rule_layer_metrics_from_db,
+            collect_triggered_rule_samples_from_cache,
         },
         scene::{
-            calc_all_scene_layer_metrics_from_db, calc_scene_layer_metrics_from_db,
-            SceneLayerConfig, SceneLayerFromDbInput,
+            SceneLayerConfig, SceneLayerFromDbInput, calc_all_scene_layer_metrics_from_db,
+            calc_scene_layer_metrics_from_db,
         },
     },
     ui_tools_feat::{build_concepts_map, build_name_map},
@@ -299,6 +302,8 @@ pub struct RuleValidationSampleStats {
 pub struct RuleValidationSampleRow {
     pub ts_code: String,
     pub name: Option<String>,
+    pub board: String,
+    pub volatility_group: String,
     pub trade_date: String,
     pub rule_score: f64,
     pub residual_return: f64,
@@ -1731,6 +1736,7 @@ fn build_validation_cached_rule(
     })
 }
 
+#[cfg(test)]
 fn build_validation_triggered_scores(
     source_path: &str,
     stock_adj_type: &str,
@@ -1741,66 +1747,176 @@ fn build_validation_triggered_scores(
     let reader = DataReader::new(source_path)?;
     let ts_codes = reader.list_ts_code(stock_adj_type, start_date, end_date)?;
     let st_list = load_st_list(source_path)?;
+    build_validation_triggered_scores_with_context(
+        source_path,
+        stock_adj_type,
+        start_date,
+        end_date,
+        &ts_codes,
+        &st_list,
+        cached_rule,
+    )
+}
+
+fn build_validation_triggered_scores_with_context(
+    source_path: &str,
+    stock_adj_type: &str,
+    start_date: &str,
+    end_date: &str,
+    ts_codes: &[String],
+    st_list: &HashSet<String>,
+    cached_rule: &CachedRule,
+) -> Result<HashMap<String, HashMap<String, f64>>, String> {
     let warmup_need = estimate_rule_warmup(
         &cached_rule.when_ast,
         cached_rule.scope_way,
         cached_rule.scope_windows,
     )?;
     let need_rows = calc_query_need_rows(source_path, warmup_need, start_date, end_date)?;
+    let grouped_results = ts_codes
+        .par_iter()
+        .map_init(
+            || DataReader::new(source_path),
+            |reader_res, ts_code| -> Result<Option<(String, HashMap<String, f64>)>, String> {
+                let reader = reader_res.as_mut().map_err(|err| err.clone())?;
+                let mut row_data =
+                    reader.load_one_tail_rows(ts_code, stock_adj_type, end_date, need_rows)?;
+                fill_validation_extra_fields(
+                    &mut row_data,
+                    ts_code,
+                    st_list.contains(ts_code.as_str()),
+                )?;
 
-    let mut triggered_score_map: HashMap<String, HashMap<String, f64>> = HashMap::new();
+                let trade_dates = row_data.trade_dates.clone();
+                if trade_dates.is_empty() {
+                    return Ok(None);
+                }
 
-    for ts_code in ts_codes {
-        let mut row_data =
-            reader.load_one_tail_rows(&ts_code, stock_adj_type, end_date, need_rows)?;
-        fill_validation_extra_fields(&mut row_data, &ts_code, st_list.contains(&ts_code))?;
+                let mut rt = row_into_rt(row_data)?;
+                let (scores, triggered_flags) = evaluate_cached_rule_scores(cached_rule, &mut rt)?;
 
-        let trade_dates = row_data.trade_dates.clone();
-        if trade_dates.is_empty() {
-            continue;
-        }
+                let keep_from = trade_dates
+                    .binary_search_by(|date| date.as_str().cmp(start_date))
+                    .unwrap_or_else(|index| index);
+                let min_len = usize::min(
+                    trade_dates.len(),
+                    usize::min(scores.len(), triggered_flags.len()),
+                );
+                if keep_from >= min_len {
+                    return Ok(None);
+                }
 
-        let mut rt = row_into_rt(row_data)?;
-        let (scores, triggered_flags) = evaluate_cached_rule_scores(cached_rule, &mut rt)?;
+                let mut date_score_map = HashMap::new();
+                for index in keep_from..min_len {
+                    let Some(score) = normalize_validation_trigger_score(
+                        scores[index],
+                        triggered_flags[index],
+                        cached_rule.points,
+                    ) else {
+                        continue;
+                    };
+                    date_score_map.insert(trade_dates[index].clone(), score);
+                }
 
-        let keep_from = trade_dates
-            .binary_search_by(|date| date.as_str().cmp(start_date))
-            .unwrap_or_else(|index| index);
-        let min_len = usize::min(
-            trade_dates.len(),
-            usize::min(scores.len(), triggered_flags.len()),
-        );
-        if keep_from >= min_len {
-            continue;
-        }
+                if date_score_map.is_empty() {
+                    return Ok(None);
+                }
 
-        for index in keep_from..min_len {
-            let Some(score) = normalize_validation_trigger_score(
-                scores[index],
-                triggered_flags[index],
-                cached_rule.points,
-            ) else {
-                continue;
-            };
-            let trade_date = trade_dates[index].clone();
-            triggered_score_map
-                .entry(ts_code.clone())
-                .or_default()
-                .insert(trade_date, score);
+                Ok(Some((ts_code.clone(), date_score_map)))
+            },
+        )
+        .collect::<Vec<_>>();
+
+    let mut triggered_score_map: HashMap<String, HashMap<String, f64>> =
+        HashMap::with_capacity(grouped_results.len());
+    for item in grouped_results {
+        if let Some((ts_code, date_score_map)) = item? {
+            triggered_score_map.insert(ts_code, date_score_map);
         }
     }
 
     Ok(triggered_score_map)
 }
 
-fn validation_contains_triggered_pair(
-    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
-    ts_code: &str,
-    trade_date: &str,
-) -> bool {
-    triggered_score_map
-        .get(ts_code)
-        .is_some_and(|date_map| date_map.contains_key(trade_date))
+fn build_validation_combo_result(
+    source_path: &str,
+    params: &RuleLayerBacktestRunParams,
+    seed_rule: &ValidationSeedRule,
+    variant: ValidationVariant,
+    runtime_cache: &RuleLayerRuntimeCache,
+    layer_config: &RuleLayerConfig,
+    similarity_cache: &ValidationSimilarityCache,
+    explain_map: &HashMap<String, String>,
+    stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
+    validation_ts_codes: &[String],
+    st_list: &HashSet<String>,
+    sample_limit_per_group: usize,
+) -> Result<RuleValidationComboResult, String> {
+    let cached_rule = build_validation_cached_rule(
+        variant.combo_key.clone(),
+        seed_rule.scope_way,
+        seed_rule.scope_windows,
+        seed_rule.points,
+        seed_rule.dist_points.clone(),
+        seed_rule.tag,
+        &variant.formula,
+    )?;
+
+    let triggered_score_map = build_validation_triggered_scores_with_context(
+        source_path,
+        &params.stock_adj_type,
+        &params.start_date,
+        &params.end_date,
+        validation_ts_codes,
+        st_list,
+        &cached_rule,
+    )?;
+    let trigger_samples = validation_trigger_samples_count(&triggered_score_map);
+    let triggered_days = validation_triggered_days_count(&triggered_score_map);
+    let metrics =
+        calc_rule_layer_metrics_from_cache(runtime_cache, &triggered_score_map, layer_config)?;
+    let triggered_sample_rows =
+        collect_triggered_rule_samples_from_cache(runtime_cache, &triggered_score_map)
+            .into_iter()
+            .map(|sample| ValidationSampleRawRow {
+                ts_code: sample.ts_code,
+                trade_date: sample.trade_date,
+                rule_score: sample.rule_score,
+                residual_return: sample.residual_return,
+            })
+            .collect::<Vec<_>>();
+
+    let (sample_stats, sample_groups) = build_validation_sample_groups(
+        &triggered_sample_rows,
+        sample_limit_per_group,
+        stock_meta_map,
+    );
+    let backtest = build_rule_backtest_payload(&variant.combo_key, params, metrics);
+    let similarity_rows = build_validation_similarity_rows(
+        similarity_cache,
+        &triggered_score_map,
+        trigger_samples,
+        seed_rule.exclude_rule_name.as_deref(),
+        explain_map,
+    );
+
+    Ok(RuleValidationComboResult {
+        combo_key: variant.combo_key,
+        combo_label: variant.combo_label,
+        formula: variant.formula,
+        unknown_values: variant.unknown_values,
+        trigger_samples,
+        triggered_days,
+        avg_daily_trigger: if triggered_days > 0 {
+            trigger_samples as f64 / triggered_days as f64
+        } else {
+            0.0
+        },
+        sample_stats,
+        sample_groups,
+        backtest,
+        similarity_rows,
+    })
 }
 
 fn validation_trigger_samples_count(
@@ -1880,25 +1996,27 @@ fn build_rule_backtest_payload(
     }
 }
 
-fn load_validation_similarity_rows(
+#[derive(Debug, Clone)]
+struct ValidationSimilarityCache {
+    total_samples: f64,
+    rule_names: Vec<String>,
+    rule_hit_counts: Vec<usize>,
+    pair_to_rule_indices: HashMap<String, Vec<usize>>,
+}
+
+fn build_validation_pair_key(ts_code: &str, trade_date: &str) -> String {
+    let mut key = String::with_capacity(ts_code.len() + trade_date.len() + 1);
+    key.push_str(ts_code);
+    key.push('\x1f');
+    key.push_str(trade_date);
+    key
+}
+
+fn load_validation_similarity_cache(
     result_conn: &Connection,
     start_date: &str,
     end_date: &str,
-    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
-    trigger_samples: usize,
-    exclude_rule_name: Option<&str>,
-    explain_map: &HashMap<String, String>,
-) -> Result<Vec<RuleValidationSimilarityRow>, String> {
-    let combo_hit_count = trigger_samples as f64;
-    if combo_hit_count <= 0.0 {
-        return Ok(Vec::new());
-    }
-
-    let excluded_rule_name = exclude_rule_name
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-
+) -> Result<ValidationSimilarityCache, String> {
     let total_samples = result_conn
         .query_row(
             r#"
@@ -1932,51 +2050,108 @@ fn load_validation_similarity_rows(
         .query(params![start_date, end_date])
         .map_err(|e| format!("查询触发相似度失败: {e}"))?;
 
-    let mut existing_hit_count = HashMap::<String, usize>::new();
-    let mut overlap_hit_count = HashMap::<String, usize>::new();
+    let mut rule_names = Vec::new();
+    let mut rule_name_to_index = HashMap::<String, usize>::new();
+    let mut rule_hit_counts = Vec::new();
+    let mut pair_to_rule_indices = HashMap::<String, Vec<usize>>::new();
 
     while let Some(row) = rows
         .next()
         .map_err(|e| format!("读取触发相似度失败: {e}"))?
     {
         let rule_name: String = row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?;
-        if excluded_rule_name
-            .as_deref()
-            .is_some_and(|excluded| rule_name == excluded)
-        {
-            continue;
-        }
         let ts_code: String = row.get(1).map_err(|e| format!("读取代码失败: {e}"))?;
         let trade_date: String = row.get(2).map_err(|e| format!("读取交易日失败: {e}"))?;
+        let rule_index = if let Some(index) = rule_name_to_index.get(&rule_name) {
+            *index
+        } else {
+            let index = rule_names.len();
+            rule_name_to_index.insert(rule_name.clone(), index);
+            rule_names.push(rule_name);
+            rule_hit_counts.push(0);
+            index
+        };
 
-        *existing_hit_count.entry(rule_name.clone()).or_default() += 1;
-        if validation_contains_triggered_pair(triggered_score_map, &ts_code, &trade_date) {
-            *overlap_hit_count.entry(rule_name).or_default() += 1;
+        rule_hit_counts[rule_index] += 1;
+        pair_to_rule_indices
+            .entry(build_validation_pair_key(&ts_code, &trade_date))
+            .or_default()
+            .push(rule_index);
+    }
+
+    Ok(ValidationSimilarityCache {
+        total_samples,
+        rule_names,
+        rule_hit_counts,
+        pair_to_rule_indices,
+    })
+}
+
+fn build_validation_similarity_rows(
+    similarity_cache: &ValidationSimilarityCache,
+    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
+    trigger_samples: usize,
+    exclude_rule_name: Option<&str>,
+    explain_map: &HashMap<String, String>,
+) -> Vec<RuleValidationSimilarityRow> {
+    let combo_hit_count = trigger_samples as f64;
+    if combo_hit_count <= 0.0 {
+        return Vec::new();
+    }
+
+    let excluded_rule_name = exclude_rule_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut overlap_hit_count = HashMap::<usize, usize>::new();
+
+    for (ts_code, date_score_map) in triggered_score_map {
+        for trade_date in date_score_map.keys() {
+            let pair_key = build_validation_pair_key(ts_code, trade_date);
+            let Some(rule_indices) = similarity_cache.pair_to_rule_indices.get(&pair_key) else {
+                continue;
+            };
+
+            for rule_index in rule_indices {
+                *overlap_hit_count.entry(*rule_index).or_default() += 1;
+            }
         }
     }
 
     let mut out = overlap_hit_count
         .into_iter()
-        .filter_map(|(rule_name, overlap_samples)| {
+        .filter_map(|(rule_index, overlap_samples)| {
             if overlap_samples == 0 {
                 return None;
             }
-            let existing_count = existing_hit_count.get(&rule_name).copied().unwrap_or(0) as f64;
+
+            let rule_name = similarity_cache.rule_names.get(rule_index)?;
+            if excluded_rule_name.is_some_and(|excluded| rule_name == excluded) {
+                return None;
+            }
+
+            let existing_count = similarity_cache
+                .rule_hit_counts
+                .get(rule_index)
+                .copied()
+                .unwrap_or(0) as f64;
             let overlap_rate_vs_validation = Some(overlap_samples as f64 / combo_hit_count);
             let overlap_rate_vs_existing = if existing_count > 0.0 {
                 Some(overlap_samples as f64 / existing_count)
             } else {
                 None
             };
-            let overlap_lift = if total_samples > 0.0 && existing_count > 0.0 {
-                Some(overlap_samples as f64 * total_samples / (combo_hit_count * existing_count))
+            let overlap_lift = if similarity_cache.total_samples > 0.0 && existing_count > 0.0 {
+                Some(
+                    overlap_samples as f64 * similarity_cache.total_samples
+                        / (combo_hit_count * existing_count),
+                )
             } else {
                 None
             };
 
             Some(RuleValidationSimilarityRow {
                 rule_name: rule_name.clone(),
-                explain: explain_map.get(&rule_name).cloned(),
+                explain: explain_map.get(rule_name).cloned(),
                 overlap_samples,
                 overlap_rate_vs_validation,
                 overlap_rate_vs_existing,
@@ -1992,7 +2167,7 @@ fn load_validation_similarity_rows(
             .then_with(|| left.rule_name.cmp(&right.rule_name))
     });
     out.truncate(20);
-    Ok(out)
+    out
 }
 
 fn compare_option_f64_desc(left: Option<f64>, right: Option<f64>) -> std::cmp::Ordering {
@@ -2012,10 +2187,17 @@ struct ValidationSampleRawRow {
     residual_return: f64,
 }
 
+#[derive(Debug, Clone)]
+struct ValidationSampleStockMeta {
+    name: Option<String>,
+    board: String,
+    volatility_group: String,
+}
+
 fn build_validation_sample_groups(
     samples: &[ValidationSampleRawRow],
     sample_limit_per_group: usize,
-    stock_name_map: &HashMap<String, String>,
+    stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
 ) -> (RuleValidationSampleStats, RuleValidationSampleGroups) {
     let mut positive = Vec::new();
     let mut negative = Vec::new();
@@ -2028,7 +2210,7 @@ fn build_validation_sample_groups(
         }
     }
 
-    positive.sort_by(|left, right| {
+    positive.par_sort_by(|left, right| {
         right
             .residual_return
             .partial_cmp(&left.residual_return)
@@ -2036,7 +2218,7 @@ fn build_validation_sample_groups(
             .then_with(|| left.trade_date.cmp(&right.trade_date))
             .then_with(|| left.ts_code.cmp(&right.ts_code))
     });
-    negative.sort_by(|left, right| {
+    negative.par_sort_by(|left, right| {
         left.residual_return
             .partial_cmp(&right.residual_return)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -2046,7 +2228,7 @@ fn build_validation_sample_groups(
 
     let mut rng = StdRng::seed_from_u64(VALIDATION_RANDOM_SAMPLE_SEED);
     let mut random_pool = samples.to_vec();
-    random_pool.sort_by(|left, right| {
+    random_pool.par_sort_by(|left, right| {
         left.trade_date
             .cmp(&right.trade_date)
             .then_with(|| left.ts_code.cmp(&right.ts_code))
@@ -2058,11 +2240,41 @@ fn build_validation_sample_groups(
         }
     }
 
+    let limit_rows_per_board = |rows: Vec<ValidationSampleRawRow>| {
+        let mut board_counts = HashMap::<String, usize>::new();
+        let mut limited = Vec::new();
+
+        for row in rows {
+            let board = stock_meta_map
+                .get(&row.ts_code)
+                .map(|meta| meta.board.clone())
+                .unwrap_or_else(|| "其他".to_string());
+            let count = board_counts.entry(board).or_insert(0);
+            if *count >= sample_limit_per_group {
+                continue;
+            }
+            *count += 1;
+            limited.push(row);
+        }
+
+        limited
+    };
+
     let to_payload = |rows: Vec<ValidationSampleRawRow>| {
-        rows.into_iter()
-            .take(sample_limit_per_group)
+        limit_rows_per_board(rows)
+            .into_iter()
             .map(|row| RuleValidationSampleRow {
-                name: stock_name_map.get(&row.ts_code).cloned(),
+                name: stock_meta_map
+                    .get(&row.ts_code)
+                    .and_then(|meta| meta.name.clone()),
+                board: stock_meta_map
+                    .get(&row.ts_code)
+                    .map(|meta| meta.board.clone())
+                    .unwrap_or_else(|| "其他".to_string()),
+                volatility_group: stock_meta_map
+                    .get(&row.ts_code)
+                    .map(|meta| meta.volatility_group.clone())
+                    .unwrap_or_else(|| "其他波动".to_string()),
                 ts_code: row.ts_code,
                 trade_date: row.trade_date,
                 rule_score: row.rule_score,
@@ -2148,7 +2360,6 @@ pub fn run_rule_expression_validation(
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
     let source_conn =
         Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
-    let result_conn = open_result_conn(&source_path)?;
     let layer_config = RuleLayerConfig {
         min_samples_per_day: params.min_samples_per_day,
         backtest_period: params.backtest_period,
@@ -2165,93 +2376,47 @@ pub fn run_rule_expression_validation(
         &params.end_date,
         &layer_config,
     )?;
+    let validation_reader = DataReader::new(&source_path)?;
+    let validation_ts_codes = validation_reader.list_ts_code(
+        &params.stock_adj_type,
+        &params.start_date,
+        &params.end_date,
+    )?;
+    let st_list = load_st_list(&source_path)?;
     let explain_map = all_rules
         .iter()
         .map(|rule| (rule.name.clone(), rule.explain.clone()))
         .collect::<HashMap<_, _>>();
-    let stock_name_map = load_stock_name_map(&source_path)?;
+    let stock_meta_map = load_validation_sample_stock_meta_map(&source_path)?;
+    let result_conn = open_result_conn(&source_path)?;
+    let similarity_cache =
+        load_validation_similarity_cache(&result_conn, &params.start_date, &params.end_date)?;
 
-    let mut combo_results = Vec::with_capacity(variants.len());
-    for variant in variants {
-        let cached_rule = build_validation_cached_rule(
-            variant.combo_key.clone(),
-            seed_rule.scope_way,
-            seed_rule.scope_windows,
-            seed_rule.points,
-            seed_rule.dist_points.clone(),
-            seed_rule.tag,
-            &variant.formula,
-        )?;
+    let combo_results = variants
+        .into_par_iter()
+        .map(|variant| {
+            build_validation_combo_result(
+                &source_path,
+                &params,
+                &seed_rule,
+                variant,
+                &runtime_cache,
+                &layer_config,
+                &similarity_cache,
+                &explain_map,
+                &stock_meta_map,
+                &validation_ts_codes,
+                &st_list,
+                sample_limit_per_group,
+            )
+        })
+        .collect::<Vec<_>>();
 
-        let triggered_score_map = build_validation_triggered_scores(
-            &source_path,
-            &params.stock_adj_type,
-            &params.start_date,
-            &params.end_date,
-            &cached_rule,
-        )?;
-        let trigger_samples = validation_trigger_samples_count(&triggered_score_map);
-        let triggered_days = validation_triggered_days_count(&triggered_score_map);
-        let metrics_with_samples = calc_rule_layer_metrics_with_samples_from_cache(
-            &runtime_cache,
-            &triggered_score_map,
-            &layer_config,
-        )?;
-        let triggered_sample_rows = metrics_with_samples
-            .samples
-            .into_iter()
-            .filter_map(|sample| {
-                if !validation_contains_triggered_pair(
-                    &triggered_score_map,
-                    &sample.ts_code,
-                    &sample.trade_date,
-                ) {
-                    return None;
-                }
-                Some(ValidationSampleRawRow {
-                    ts_code: sample.ts_code,
-                    trade_date: sample.trade_date,
-                    rule_score: sample.rule_score,
-                    residual_return: sample.residual_return,
-                })
-            })
-            .collect::<Vec<_>>();
-
-        let (sample_stats, sample_groups) = build_validation_sample_groups(
-            &triggered_sample_rows,
-            sample_limit_per_group,
-            &stock_name_map,
-        );
-        let metrics = metrics_with_samples.metrics;
-        let backtest = build_rule_backtest_payload(&variant.combo_key, &params, metrics);
-        let similarity_rows = load_validation_similarity_rows(
-            &result_conn,
-            &params.start_date,
-            &params.end_date,
-            &triggered_score_map,
-            trigger_samples,
-            seed_rule.exclude_rule_name.as_deref(),
-            &explain_map,
-        )?;
-
-        combo_results.push(RuleValidationComboResult {
-            combo_key: variant.combo_key,
-            combo_label: variant.combo_label,
-            formula: variant.formula,
-            unknown_values: variant.unknown_values,
-            trigger_samples,
-            triggered_days,
-            avg_daily_trigger: if triggered_days > 0 {
-                trigger_samples as f64 / triggered_days as f64
-            } else {
-                0.0
-            },
-            sample_stats,
-            sample_groups,
-            backtest,
-            similarity_rows,
-        });
+    let mut combo_results_resolved = Vec::with_capacity(combo_results.len());
+    for item in combo_results {
+        combo_results_resolved.push(item?);
     }
+    let mut combo_results = combo_results_resolved;
 
     combo_results.sort_by(|left, right| {
         compare_option_f64_desc(left.backtest.spread_mean, right.backtest.spread_mean)
@@ -2292,6 +2457,99 @@ fn load_stock_name_map(source_path: &str) -> Result<HashMap<String, String>, Str
     }
 
     Ok(out)
+}
+
+fn load_validation_sample_stock_meta_map(
+    source_path: &str,
+) -> Result<HashMap<String, ValidationSampleStockMeta>, String> {
+    let rows = load_stock_list(source_path)?;
+    let mut out = HashMap::with_capacity(rows.len());
+
+    for cols in rows {
+        let Some(ts_code_raw) = cols.first().map(|value| value.trim()) else {
+            continue;
+        };
+        if ts_code_raw.is_empty() {
+            continue;
+        }
+
+        let ts_code = ts_code_raw.to_ascii_uppercase();
+        let stock_name = cols
+            .get(2)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        let board = resolve_validation_sample_board_label(
+            &ts_code,
+            stock_name.as_deref(),
+            cols.get(14)
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty()),
+        );
+
+        out.insert(
+            ts_code,
+            ValidationSampleStockMeta {
+                name: stock_name,
+                volatility_group: derive_validation_volatility_group(&board).to_string(),
+                board,
+            },
+        );
+    }
+
+    Ok(out)
+}
+
+fn resolve_validation_sample_board_label(
+    ts_code: &str,
+    stock_name: Option<&str>,
+    market_label: Option<&str>,
+) -> String {
+    let category_board = board_category(ts_code, stock_name);
+    if category_board == "ST" {
+        return category_board.to_string();
+    }
+
+    if let Some(board) = market_label.and_then(normalize_validation_market_label) {
+        return board;
+    }
+
+    category_board.to_string()
+}
+
+fn normalize_validation_market_label(market_label: &str) -> Option<String> {
+    let market_label = market_label.trim();
+    if market_label.is_empty() {
+        return None;
+    }
+
+    if market_label.contains("北交") {
+        return Some("北交所".to_string());
+    }
+    if market_label.contains("科创") {
+        return Some("科创板".to_string());
+    }
+    if market_label.contains("创业") {
+        return Some("创业板".to_string());
+    }
+    if market_label.contains("主板") {
+        return Some("主板".to_string());
+    }
+
+    Some(market_label.to_string())
+}
+
+fn derive_validation_volatility_group(board: &str) -> &'static str {
+    let board = board.trim();
+    if board.contains("北交") || board.contains("创业") || board.contains("科创") {
+        "高波动"
+    } else if board == "ST" {
+        "其他波动"
+    } else if board.contains("主板") {
+        "常规波动"
+    } else {
+        "其他波动"
+    }
 }
 
 fn split_board_tags(board_raw: &str) -> Vec<String> {
@@ -3529,16 +3787,22 @@ pub fn run_rule_layer_backtest(
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashMap,
         fs::{create_dir_all, write},
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use duckdb::{params, Connection};
+    use duckdb::{Connection, params};
 
-    use crate::data::{source_db_path, RuleTag};
+    use crate::data::{RuleTag, source_db_path};
 
-    use super::{build_validation_cached_rule, build_validation_triggered_scores};
+    use super::{
+        ValidationSampleRawRow, ValidationSampleStockMeta, ValidationSimilarityCache,
+        build_validation_cached_rule, build_validation_pair_key, build_validation_sample_groups,
+        build_validation_similarity_rows, build_validation_triggered_scores,
+        derive_validation_volatility_group, resolve_validation_sample_board_label,
+    };
     use crate::data::ScopeWay;
 
     fn temp_source_dir() -> PathBuf {
@@ -3679,5 +3943,176 @@ mod tests {
                 .sum::<usize>(),
             3
         );
+    }
+
+    #[test]
+    fn validation_sample_board_prefers_market_label_and_derives_group() {
+        assert_eq!(
+            resolve_validation_sample_board_label("688001.SH", Some("样本股"), Some("科创板")),
+            "科创板"
+        );
+        assert_eq!(derive_validation_volatility_group("科创板"), "高波动");
+    }
+
+    #[test]
+    fn validation_sample_board_keeps_st_override() {
+        assert_eq!(
+            resolve_validation_sample_board_label("000001.SZ", Some("*ST样本"), Some("主板")),
+            "ST"
+        );
+        assert_eq!(derive_validation_volatility_group("ST"), "其他波动");
+    }
+
+    #[test]
+    fn validation_sample_limit_applies_per_board_and_direction() {
+        let samples = vec![
+            ValidationSampleRawRow {
+                ts_code: "BJ0001.BJ".to_string(),
+                trade_date: "20240102".to_string(),
+                rule_score: 1.0,
+                residual_return: 9.0,
+            },
+            ValidationSampleRawRow {
+                ts_code: "BJ0001.BJ".to_string(),
+                trade_date: "20240103".to_string(),
+                rule_score: 1.0,
+                residual_return: 8.0,
+            },
+            ValidationSampleRawRow {
+                ts_code: "MB0001.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                rule_score: 1.0,
+                residual_return: 7.0,
+            },
+            ValidationSampleRawRow {
+                ts_code: "MB0001.SZ".to_string(),
+                trade_date: "20240103".to_string(),
+                rule_score: 1.0,
+                residual_return: 6.0,
+            },
+            ValidationSampleRawRow {
+                ts_code: "BJ0001.BJ".to_string(),
+                trade_date: "20240104".to_string(),
+                rule_score: 1.0,
+                residual_return: -7.0,
+            },
+            ValidationSampleRawRow {
+                ts_code: "BJ0001.BJ".to_string(),
+                trade_date: "20240105".to_string(),
+                rule_score: 1.0,
+                residual_return: -8.0,
+            },
+            ValidationSampleRawRow {
+                ts_code: "MB0001.SZ".to_string(),
+                trade_date: "20240104".to_string(),
+                rule_score: 1.0,
+                residual_return: -5.0,
+            },
+            ValidationSampleRawRow {
+                ts_code: "MB0001.SZ".to_string(),
+                trade_date: "20240105".to_string(),
+                rule_score: 1.0,
+                residual_return: -6.0,
+            },
+        ];
+        let stock_meta_map = HashMap::from([
+            (
+                "BJ0001.BJ".to_string(),
+                ValidationSampleStockMeta {
+                    name: Some("北交样本".to_string()),
+                    board: "北交所".to_string(),
+                    volatility_group: "高波动".to_string(),
+                },
+            ),
+            (
+                "MB0001.SZ".to_string(),
+                ValidationSampleStockMeta {
+                    name: Some("主板样本".to_string()),
+                    board: "主板".to_string(),
+                    volatility_group: "常规波动".to_string(),
+                },
+            ),
+        ]);
+
+        let (stats, groups) = build_validation_sample_groups(&samples, 1, &stock_meta_map);
+
+        assert_eq!(stats.positive_count, 4);
+        assert_eq!(stats.negative_count, 4);
+        assert_eq!(stats.random_count, 8);
+        assert_eq!(stats.total_samples, 8);
+
+        let count_boards = |rows: &[super::RuleValidationSampleRow]| {
+            rows.iter()
+                .fold(HashMap::<String, usize>::new(), |mut acc, row| {
+                    *acc.entry(row.board.clone()).or_insert(0) += 1;
+                    acc
+                })
+        };
+
+        let positive_boards = count_boards(&groups.positive);
+        let negative_boards = count_boards(&groups.negative);
+        let random_boards = count_boards(&groups.random);
+
+        assert_eq!(groups.positive.len(), 2);
+        assert_eq!(positive_boards.get("北交所"), Some(&1));
+        assert_eq!(positive_boards.get("主板"), Some(&1));
+
+        assert_eq!(groups.negative.len(), 2);
+        assert_eq!(negative_boards.get("北交所"), Some(&1));
+        assert_eq!(negative_boards.get("主板"), Some(&1));
+
+        assert_eq!(groups.random.len(), 2);
+        assert_eq!(random_boards.get("北交所"), Some(&1));
+        assert_eq!(random_boards.get("主板"), Some(&1));
+    }
+
+    #[test]
+    fn validation_similarity_rows_use_pair_index_cache() {
+        let similarity_cache = ValidationSimilarityCache {
+            total_samples: 12.0,
+            rule_names: vec!["规则A".to_string(), "规则B".to_string()],
+            rule_hit_counts: vec![3, 1],
+            pair_to_rule_indices: HashMap::from([
+                (
+                    build_validation_pair_key("000001.SZ", "20240102"),
+                    vec![0, 1],
+                ),
+                (build_validation_pair_key("000002.SZ", "20240103"), vec![0]),
+            ]),
+        };
+        let triggered_score_map = HashMap::from([
+            (
+                "000001.SZ".to_string(),
+                HashMap::from([("20240102".to_string(), 1.0)]),
+            ),
+            (
+                "000002.SZ".to_string(),
+                HashMap::from([("20240103".to_string(), 1.0)]),
+            ),
+        ]);
+        let explain_map = HashMap::from([("规则A".to_string(), "说明A".to_string())]);
+
+        let rows = build_validation_similarity_rows(
+            &similarity_cache,
+            &triggered_score_map,
+            2,
+            None,
+            &explain_map,
+        );
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].rule_name, "规则A");
+        assert_eq!(rows[0].overlap_samples, 2);
+        assert_eq!(rows[0].overlap_rate_vs_validation, Some(1.0));
+        assert_eq!(rows[0].overlap_rate_vs_existing, Some(2.0 / 3.0));
+        assert_eq!(rows[0].overlap_lift, Some(4.0));
+        assert_eq!(rows[0].explain.as_deref(), Some("说明A"));
+
+        assert_eq!(rows[1].rule_name, "规则B");
+        assert_eq!(rows[1].overlap_samples, 1);
+        assert_eq!(rows[1].overlap_rate_vs_validation, Some(0.5));
+        assert_eq!(rows[1].overlap_rate_vs_existing, Some(1.0));
+        assert_eq!(rows[1].overlap_lift, Some(6.0));
+        assert!(rows[1].explain.is_none());
     }
 }

@@ -504,8 +504,12 @@
 
 .scene-layer-validation-detail-modal {
   max-height: 88vh;
-  overflow: auto;
   width: min(1200px, 100%);
+}
+
+.scene-layer-validation-samples-modal {
+  max-height: 88vh;
+  width: min(1320px, 100%);
 }
 
 .scene-layer-validation-detail-section {
@@ -544,53 +548,56 @@
   gap: 10px;
   font-size: 13px;
   color: #475569;
-  margin-bottom: 10px;
 }
 
-.scene-layer-validation-sample-groups {
+.scene-layer-validation-sample-summary {
   display: grid;
   gap: 10px;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
 }
 
-.scene-layer-validation-sample-group {
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  padding: 8px;
-  background: #fff;
-  min-width: 0;
+.scene-layer-validation-sample-entry {
+  border: 1px solid var(--theme-orange-soft-border);
+  border-radius: 12px;
+  padding: 12px;
+  background: var(--theme-orange-gradient-soft);
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  color: #7c2d12;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    transform 0.15s ease;
 }
 
-.scene-layer-validation-sample-group > h4 {
-  margin: 0 0 8px;
-  font-size: 13px;
-  color: #334155;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+.scene-layer-validation-sample-entry:hover {
+  border-color: var(--theme-orange-400);
+  box-shadow: 0 8px 20px var(--theme-orange-shadow);
+  transform: translateY(-1px);
 }
 
-.scene-layer-validation-sample-group > h4 > span {
+.scene-layer-validation-sample-entry:focus-visible {
+  outline: 2px solid var(--theme-orange-300);
+  outline-offset: 2px;
+}
+
+.scene-layer-validation-sample-entry-label {
   font-size: 12px;
-  color: #64748b;
+  color: var(--theme-orange-700);
 }
 
-.scene-layer-validation-sample-table th:nth-child(4),
-.scene-layer-validation-sample-table th:nth-child(5),
-.scene-layer-validation-sample-table td:nth-child(4),
-.scene-layer-validation-sample-table td:nth-child(5) {
-  text-align: right;
+.scene-layer-validation-sample-entry strong {
+  font-size: 16px;
+  line-height: 1.2;
   font-variant-numeric: tabular-nums;
 }
 
-.scene-layer-validation-sample-link {
-  color: #1d4ed8;
-  text-decoration: none;
-}
-
-.scene-layer-validation-sample-link:hover {
-  text-decoration: underline;
+.scene-layer-validation-sample-entry-meta {
+  font-size: 12px;
+  color: #9a3412;
+  font-variant-numeric: tabular-nums;
 }
 
 .scene-layer-market-gainers-grid {
@@ -623,7 +630,9 @@
   background: #ffffff;
   box-shadow: 0 18px 40px rgba(15, 23, 42, 0.28);
   padding: 14px;
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   gap: 10px;
 }
 
@@ -632,6 +641,14 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex: 0 0 auto;
+}
+
+.scene-layer-modal-scroll-body {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+  overscroll-behavior: contain;
 }
 
 .scene-layer-modal-header h3 {

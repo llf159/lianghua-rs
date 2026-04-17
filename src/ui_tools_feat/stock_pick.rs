@@ -1,15 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
-use duckdb::{params, Connection};
+use duckdb::{Connection, params};
 use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::{
     data::scoring_data::row_into_rt,
-    data::{load_ths_concepts_list, result_db_path, DataReader, RowData, ScoreRule},
+    data::{DataReader, RowData, ScoreRule, load_ths_concepts_list, result_db_path},
     expr::{
         eval::Value,
-        parser::{lex_all, Expr, Parser, Stmt, Stmts},
+        parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
     scoring::tools::{calc_query_need_rows, calc_zhang_pct, load_st_list, rt_max_len},
     utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},

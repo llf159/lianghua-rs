@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use duckdb::{params_from_iter, Connection};
+use duckdb::{Connection, params_from_iter};
 use rayon::prelude::*;
 
 use super::{
-    calc_stock_residual_returns_with_factor_series, ResidualFactorSeriesRefs, ResidualReturnInput,
+    ResidualFactorSeriesRefs, ResidualReturnInput, calc_stock_residual_returns_with_factor_series,
 };
 use crate::data::{
     concept_performance_data::{load_concept_trend_series, load_industry_trend_series},
@@ -462,6 +462,61 @@ pub fn calc_rule_layer_metrics_with_samples_from_cache(
     Ok(RuleLayerMetricsWithSamples { metrics, samples })
 }
 
+pub fn calc_rule_layer_metrics_from_cache(
+    runtime_cache: &RuleLayerRuntimeCache,
+    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
+    layer_config: &RuleLayerConfig,
+) -> Result<RuleLayerMetrics, String> {
+    layer_config.validate()?;
+
+    if runtime_cache.universe_rows.is_empty() {
+        return Ok(empty_metrics());
+    }
+
+    let samples = collect_rule_samples(
+        &runtime_cache.universe_rows,
+        Some(triggered_score_map),
+        &runtime_cache.residual_map_cache,
+    );
+
+    calc_rule_layer_metrics(&samples, layer_config)
+}
+
+pub fn collect_triggered_rule_samples_from_cache(
+    runtime_cache: &RuleLayerRuntimeCache,
+    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
+) -> Vec<RuleLayerSamplePoint> {
+    let grouped = triggered_score_map
+        .par_iter()
+        .map(|(ts_code, trade_date_score_map)| {
+            let Some(residual_map) = runtime_cache.residual_map_cache.get(ts_code) else {
+                return Vec::new();
+            };
+
+            trade_date_score_map
+                .iter()
+                .filter_map(|(trade_date, rule_score)| {
+                    let residual_return = residual_map.get(trade_date).copied()?;
+                    Some(RuleLayerSamplePoint {
+                        ts_code: ts_code.clone(),
+                        trade_date: trade_date.clone(),
+                        rule_score: *rule_score,
+                        residual_return,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    let total_len = grouped.iter().map(Vec::len).sum();
+    let mut out = Vec::with_capacity(total_len);
+    for rows in grouped {
+        out.extend(rows);
+    }
+
+    out
+}
+
 pub fn calc_rule_layer_metrics(
     samples: &[RuleSample],
     config: &RuleLayerConfig,
@@ -480,48 +535,61 @@ pub fn calc_rule_layer_metrics(
         grouped_by_day.entry(trade_date).or_default().push(sample);
     }
 
-    let mut points = Vec::new();
+    let day_results = grouped_by_day
+        .into_iter()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|(trade_date, day_samples)| {
+            if day_samples.len() < config.min_samples_per_day {
+                return None;
+            }
+
+            let mut rule_scores = Vec::with_capacity(day_samples.len());
+            let mut residuals = Vec::with_capacity(day_samples.len());
+
+            for sample in day_samples {
+                rule_scores.push(sample.rule_score);
+                residuals.push(sample.residual_return);
+            }
+
+            let avg_rule_score = mean(&rule_scores);
+            let avg_residual_return = mean(&residuals);
+            let top_bottom_spread = calc_top_bottom_spread(&rule_scores, &residuals);
+            let ic = spearman_corr(&rule_scores, &residuals);
+
+            Some((
+                RuleLayerPoint {
+                    trade_date: trade_date.to_string(),
+                    sample_count: rule_scores.len(),
+                    avg_rule_score,
+                    avg_residual_return,
+                    top_bottom_spread,
+                    ic,
+                },
+                avg_residual_return,
+                top_bottom_spread,
+                ic,
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    let mut points = Vec::with_capacity(day_results.len());
     let mut avg_residual_values = Vec::new();
     let mut spread_values = Vec::new();
     let mut ic_values = Vec::new();
 
-    for (trade_date, day_samples) in grouped_by_day {
-        if day_samples.len() < config.min_samples_per_day {
-            continue;
-        }
-
-        let mut rule_scores = Vec::with_capacity(day_samples.len());
-        let mut residuals = Vec::with_capacity(day_samples.len());
-
-        for sample in day_samples {
-            rule_scores.push(sample.rule_score);
-            residuals.push(sample.residual_return);
-        }
-
-        let avg_rule_score = mean(&rule_scores);
-        let avg_residual_return = mean(&residuals);
+    for item in day_results.into_iter().flatten() {
+        let (point, avg_residual_return, top_bottom_spread, ic) = item;
         if let Some(value) = avg_residual_return {
             avg_residual_values.push(value);
         }
-
-        let top_bottom_spread = calc_top_bottom_spread(&rule_scores, &residuals);
         if let Some(spread) = top_bottom_spread {
             spread_values.push(spread);
         }
-
-        let ic = spearman_corr(&rule_scores, &residuals);
         if let Some(value) = ic {
             ic_values.push(value);
         }
-
-        points.push(RuleLayerPoint {
-            trade_date: trade_date.to_string(),
-            sample_count: rule_scores.len(),
-            avg_rule_score,
-            avg_residual_return,
-            top_bottom_spread,
-            ic,
-        });
+        points.push(point);
     }
 
     let avg_residual_mean = mean(&avg_residual_values);
@@ -613,32 +681,25 @@ fn collect_rule_samples(
     triggered_score_map: Option<&TriggeredScoreMap>,
     residual_map_cache: &HashMap<String, HashMap<String, f64>>,
 ) -> Vec<RuleSample> {
-    let mut samples = Vec::with_capacity(universe_rows.len());
+    universe_rows
+        .par_iter()
+        .filter_map(|row| {
+            let residual_map = residual_map_cache.get(&row.ts_code)?;
+            let residual_return = residual_map.get(&row.trade_date).copied()?;
+            let rule_score = triggered_score_map
+                .and_then(|score_map| score_map.get(&row.ts_code))
+                .and_then(|date_score| date_score.get(&row.trade_date))
+                .copied()
+                .unwrap_or(0.0);
 
-    for row in universe_rows {
-        let Some(residual_map) = residual_map_cache.get(&row.ts_code) else {
-            continue;
-        };
-
-        let Some(residual_return) = residual_map.get(&row.trade_date).copied() else {
-            continue;
-        };
-
-        let rule_score = triggered_score_map
-            .and_then(|score_map| score_map.get(&row.ts_code))
-            .and_then(|date_score| date_score.get(&row.trade_date))
-            .copied()
-            .unwrap_or(0.0);
-
-        samples.push(RuleSample {
-            ts_code: row.ts_code.clone(),
-            trade_date: row.trade_date.clone(),
-            rule_score,
-            residual_return,
-        });
-    }
-
-    samples
+            Some(RuleSample {
+                ts_code: row.ts_code.clone(),
+                trade_date: row.trade_date.clone(),
+                rule_score,
+                residual_return,
+            })
+        })
+        .collect()
 }
 
 fn load_rule_universe_rows(
@@ -1199,13 +1260,13 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use duckdb::{params, Connection};
+    use duckdb::{Connection, params};
 
     use crate::data::{result_db_path, source_db_path};
 
     use super::{
-        calc_all_rule_layer_metrics_from_db, calc_rule_layer_metrics_from_db, RuleLayerConfig,
-        RuleLayerFromDbInput,
+        RuleLayerConfig, RuleLayerFromDbInput, calc_all_rule_layer_metrics_from_db,
+        calc_rule_layer_metrics_from_db,
     };
 
     fn assert_opt_close(left: Option<f64>, right: Option<f64>) {

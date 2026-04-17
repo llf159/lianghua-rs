@@ -26,6 +26,9 @@ import IntradayMonitorRealtimePage from './pages/desktop/IntradayMonitorRealtime
 import BacktestPage from './pages/desktop/BacktestPage'
 import StrategyTriggerPage from './pages/desktop/StrategyTriggerPage'
 import SceneLayerBacktestPage from './pages/desktop/SceneLayerBacktestPage'
+import ExpressionValidationSamplesPage, {
+  EXPRESSION_VALIDATION_SAMPLES_ROUTE_PATH,
+} from './pages/desktop/ExpressionValidationSamplesPage'
 import MarketAnalysisPage from './pages/desktop/MarketAnalysisPage'
 import DetailsLinkedOverlayRoute from './shared/DetailsLinkedOverlayRoute'
 import DetailsOverlayRoute from './shared/DetailsOverlayRoute'
@@ -81,6 +84,10 @@ function AppRoutes() {
             <Route index element={<Navigate to="/backtest/strategy-trigger" replace />} />
             <Route path="strategy-trigger" element={<StrategyTriggerPage />} />
             <Route path="scene-layer" element={<SceneLayerBacktestPage />} />
+            <Route
+              path={EXPRESSION_VALIDATION_SAMPLES_ROUTE_PATH}
+              element={<ExpressionValidationSamplesPage />}
+            />
             <Route path="market-analysis" element={<MarketAnalysisPage />} />
           </Route>
         </Route>

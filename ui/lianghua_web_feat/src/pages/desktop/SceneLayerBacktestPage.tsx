@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import { getStrategyManagePage, type StrategyManageRuleItem } from "../../apis/strategyManage";
 import {
@@ -20,8 +21,11 @@ import {
   useTableSort,
   type SortDefinition,
 } from "../../shared/tableSort";
-import DetailsLink from "../../shared/DetailsLink";
 import { readStoredSourcePath } from "../../shared/storage";
+import {
+  ExpressionValidationSamplesPanel,
+  type SceneLayerValidationReturnState,
+} from "./ExpressionValidationSamplesPage";
 import "./css/SceneLayerBacktestPage.css";
 
 type RuleSummarySortKey =
@@ -35,16 +39,12 @@ type RuleSummarySortKey =
 
 type ValidationScopeWayOption = "ANY" | "LAST" | "EACH" | "RECENT" | "CONSEC";
 
-type ValidationSampleGroupKey = "positive" | "negative" | "random";
-
-const VALIDATION_DEFAULT_SAMPLE_LIMIT = 30;
+const VALIDATION_DEFAULT_SAMPLE_LIMIT = 5;
 const VALIDATION_MAX_SAMPLE_LIMIT = 200;
 
-const VALIDATION_SAMPLE_GROUP_META: Array<{ key: ValidationSampleGroupKey; title: string }> = [
-  { key: "positive", title: "正样本" },
-  { key: "negative", title: "负样本" },
-  { key: "random", title: "随机样本" },
-];
+type SceneLayerBacktestLocationState = {
+  validationReturnState?: SceneLayerValidationReturnState;
+};
 
 function formatDateLabel(value?: string | null) {
   if (!value || value.length !== 8) {
@@ -241,16 +241,21 @@ const VALIDATION_SCOPE_WAY_OPTIONS: Array<{ value: ValidationScopeWayOption; lab
 ];
 
 export default function SceneLayerBacktestPage() {
+  const location = useLocation();
+  const locationState =
+    location.state && typeof location.state === "object"
+      ? (location.state as SceneLayerBacktestLocationState)
+      : null;
   const [sourcePath, setSourcePath] = useState(() => readStoredSourcePath());
   const [stockAdjType, setStockAdjType] = useState("qfq");
   const [indexTsCode, setIndexTsCode] = useState<string>(INDEX_OPTIONS[0].value);
   const [indexBeta, setIndexBeta] = useState("0.5");
-  const [conceptBeta, setConceptBeta] = useState("0.2");
-  const [industryBeta, setIndustryBeta] = useState("0.0");
+  const [conceptBeta, setConceptBeta] = useState("0.1");
+  const [industryBeta, setIndustryBeta] = useState("0.1");
   const [startDateInput, setStartDateInput] = useState("");
   const [endDateInput, setEndDateInput] = useState("");
   const [minSamplesPerDay, setMinSamplesPerDay] = useState("5");
-  const [backtestPeriod, setBacktestPeriod] = useState("1");
+  const [backtestPeriod, setBacktestPeriod] = useState("3");
 
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(false);
@@ -278,7 +283,40 @@ export default function SceneLayerBacktestPage() {
   const [validationError, setValidationError] = useState("");
   const [validationResult, setValidationResult] = useState<RuleExpressionValidationData | null>(null);
   const [validationSelectedComboKey, setValidationSelectedComboKey] = useState("");
+  const [validationRestoredComboKey, setValidationRestoredComboKey] = useState("");
   const [validationDetailModalOpen, setValidationDetailModalOpen] = useState(false);
+  const [validationSamplesModalOpen, setValidationSamplesModalOpen] = useState(false);
+
+  useEffect(() => {
+    const returnState = locationState?.validationReturnState;
+    if (!returnState) {
+      return;
+    }
+
+    setStockAdjType(returnState.stockAdjType);
+    setIndexTsCode(returnState.indexTsCode);
+    setIndexBeta(returnState.indexBeta);
+    setConceptBeta(returnState.conceptBeta);
+    setIndustryBeta(returnState.industryBeta);
+    setStartDateInput(returnState.startDateInput);
+    setEndDateInput(returnState.endDateInput);
+    setMinSamplesPerDay(returnState.minSamplesPerDay);
+    setBacktestPeriod(returnState.backtestPeriod);
+    setValidationImportRuleName(returnState.validationImportRuleName);
+    setValidationExpression(returnState.validationExpression);
+    setValidationScopeWay(returnState.validationScopeWay);
+    setValidationConsecThresholdText(returnState.validationConsecThresholdText);
+    setValidationScopeWindowsText(returnState.validationScopeWindowsText);
+    setValidationEnableUnknown(returnState.validationEnableUnknown);
+    setValidationUnknownConfigs(returnState.validationUnknownConfigs);
+    setValidationSampleLimitText(returnState.validationSampleLimitText);
+    setValidationError("");
+    setValidationResult(returnState.validationResult);
+    setValidationRestoredComboKey(returnState.validationSelectedComboKey);
+    setValidationSelectedComboKey(returnState.validationSelectedComboKey);
+    setValidationDetailModalOpen(false);
+    setValidationSamplesModalOpen(false);
+  }, [locationState]);
 
   useEffect(() => {
     let cancelled = false;
@@ -297,7 +335,7 @@ export default function SceneLayerBacktestPage() {
           if (cancelled) {
             return;
           }
-          if (sceneDefaults.start_date && sceneDefaults.end_date) {
+          if (!locationState?.validationReturnState && sceneDefaults.start_date && sceneDefaults.end_date) {
             setStartDateInput(compactDateToInput(sceneDefaults.start_date));
             setEndDateInput(compactDateToInput(sceneDefaults.end_date));
             hasSceneDates = true;
@@ -313,7 +351,7 @@ export default function SceneLayerBacktestPage() {
           if (cancelled) {
             return;
           }
-          if (!hasSceneDates) {
+          if (!locationState?.validationReturnState && !hasSceneDates) {
             setStartDateInput(compactDateToInput(ruleDefaults.start_date));
             setEndDateInput(compactDateToInput(ruleDefaults.end_date));
           }
@@ -352,7 +390,7 @@ export default function SceneLayerBacktestPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [locationState]);
 
   const allSceneSummaries = result?.all_scene_summaries ?? [];
   const allRuleSummaries = ruleResult?.all_rule_summaries ?? [];
@@ -378,26 +416,46 @@ export default function SceneLayerBacktestPage() {
 
   useEffect(() => {
     if (!validationResult) {
+      setValidationRestoredComboKey("");
       setValidationSelectedComboKey("");
       setValidationDetailModalOpen(false);
+      setValidationSamplesModalOpen(false);
       return;
     }
+
+    if (
+      validationRestoredComboKey &&
+      validationResult.combo_results.some((item) => item.combo_key === validationRestoredComboKey)
+    ) {
+      setValidationSelectedComboKey(validationRestoredComboKey);
+      setValidationRestoredComboKey("");
+      setValidationDetailModalOpen(false);
+      setValidationSamplesModalOpen(false);
+      return;
+    }
+
     const preferred =
       validationResult.best_combo_key?.trim() ||
       validationResult.combo_results[0]?.combo_key ||
       "";
+    setValidationRestoredComboKey("");
     setValidationSelectedComboKey(preferred);
     setValidationDetailModalOpen(false);
-  }, [validationResult]);
+    setValidationSamplesModalOpen(false);
+  }, [validationResult, validationRestoredComboKey]);
 
   useEffect(() => {
-    if (!validationDetailModalOpen) {
+    if (!validationDetailModalOpen && !validationSamplesModalOpen) {
       return;
     }
 
     const previousOverflow = document.body.style.overflow;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        if (validationSamplesModalOpen) {
+          setValidationSamplesModalOpen(false);
+          return;
+        }
         setValidationDetailModalOpen(false);
       }
     };
@@ -408,7 +466,7 @@ export default function SceneLayerBacktestPage() {
       window.removeEventListener("keydown", onKeyDown);
       document.body.style.overflow = previousOverflow;
     };
-  }, [validationDetailModalOpen]);
+  }, [validationDetailModalOpen, validationSamplesModalOpen]);
 
   useEffect(() => {
     if (!shouldUseValidationDetailModal) {
@@ -729,6 +787,16 @@ export default function SceneLayerBacktestPage() {
     setValidationDetailModalOpen(false);
   }
 
+  function openValidationSamplesModal(comboKey: string) {
+    setValidationSelectedComboKey(comboKey);
+    setValidationDetailModalOpen(false);
+    setValidationSamplesModalOpen(true);
+  }
+
+  function closeValidationSamplesModal() {
+    setValidationSamplesModalOpen(false);
+  }
+
   function renderValidationComboDetailSections(
     combo: RuleValidationComboResult,
     useModalLayout = false,
@@ -750,74 +818,27 @@ export default function SceneLayerBacktestPage() {
 
         <div className={sectionClassName}>
           <h3>
-            触发样本（每组展示 {validationResult.sample_limit_per_group} 条，可在上方调整）
+            触发样本（点击样本卡片在浮窗查看；当前每个板块的正向 / 负向 / 随机最多展示 {validationResult.sample_limit_per_group} 条）
           </h3>
-          <div className="scene-layer-validation-sample-stats">
-            <span>总样本：{combo.sample_stats.total_samples}</span>
-            <span>正样本：{combo.sample_stats.positive_count}</span>
-            <span>负样本：{combo.sample_stats.negative_count}</span>
-            <span>随机池：{combo.sample_stats.random_count}</span>
-          </div>
+          <div className="scene-layer-validation-sample-summary">
+            <div className="scene-layer-validation-sample-stats">
+              <span>总样本：{combo.sample_stats.total_samples}</span>
+              <span>正样本：{combo.sample_stats.positive_count}</span>
+              <span>负样本：{combo.sample_stats.negative_count}</span>
+              <span>随机池：{combo.sample_stats.random_count}</span>
+            </div>
 
-          <div className="scene-layer-validation-sample-groups">
-            {VALIDATION_SAMPLE_GROUP_META.map((group) => {
-              const rows = combo.sample_groups[group.key];
-              const totalCount =
-                group.key === "positive"
-                  ? combo.sample_stats.positive_count
-                  : group.key === "negative"
-                    ? combo.sample_stats.negative_count
-                    : combo.sample_stats.random_count;
-              return (
-                <div key={group.key} className="scene-layer-validation-sample-group">
-                  <h4>
-                    {group.title}
-                    <span>
-                      {rows.length} / {totalCount}
-                    </span>
-                  </h4>
-                  <div className="scene-layer-contrib-table-wrap">
-                    <table className="scene-layer-contrib-table scene-layer-validation-sample-table">
-                      <thead>
-                        <tr>
-                          <th>代码</th>
-                          <th>名称</th>
-                          <th>交易日</th>
-                          <th>触发得分</th>
-                          <th>残差收益</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {rows.length > 0 ? (
-                          rows.map((row) => (
-                            <tr key={`${group.key}-${row.ts_code}-${row.trade_date}`}>
-                              <td>{row.ts_code}</td>
-                              <td>
-                                <DetailsLink
-                                  className="scene-layer-validation-sample-link"
-                                  tsCode={row.ts_code}
-                                  tradeDate={row.trade_date}
-                                  sourcePath={sourcePath.trim()}
-                                >
-                                  {row.name?.trim() || row.ts_code}
-                                </DetailsLink>
-                              </td>
-                              <td>{formatDateLabel(row.trade_date)}</td>
-                              <td>{formatNumber(row.rule_score, 4)}</td>
-                              <td>{formatPercent(row.residual_return, 3)}</td>
-                            </tr>
-                          ))
-                        ) : (
-                          <tr>
-                            <td colSpan={5}>暂无样本。</td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              );
-            })}
+            <button
+              type="button"
+              className="scene-layer-validation-sample-entry"
+              onClick={() => openValidationSamplesModal(combo.combo_key)}
+            >
+              <span className="scene-layer-validation-sample-entry-label">打开样本浮窗</span>
+              <strong>{combo.sample_stats.total_samples} 个样本</strong>
+              <span className="scene-layer-validation-sample-entry-meta">
+                正样本 {combo.sample_stats.positive_count} · 负样本 {combo.sample_stats.negative_count} · 随机池 {combo.sample_stats.random_count}
+              </span>
+            </button>
           </div>
         </div>
 
@@ -1471,7 +1492,46 @@ export default function SceneLayerBacktestPage() {
                     关闭
                   </button>
                 </div>
-                {renderValidationComboDetailSections(selectedValidationCombo, true)}
+                <div className="scene-layer-modal-scroll-body">
+                  {renderValidationComboDetailSections(selectedValidationCombo, true)}
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {validationSamplesModalOpen && validationResult && selectedValidationCombo ? (
+            <div className="scene-layer-modal-mask" onClick={closeValidationSamplesModal}>
+              <div
+                className="scene-layer-modal-card scene-layer-validation-samples-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-label={`触发样本详情：${selectedValidationCombo.combo_label}`}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="scene-layer-modal-header">
+                  <h3>触发样本详情：{selectedValidationCombo.combo_label}</h3>
+                  <button
+                    type="button"
+                    className="scene-layer-modal-close"
+                    onClick={closeValidationSamplesModal}
+                  >
+                    关闭
+                  </button>
+                </div>
+                <div className="scene-layer-modal-scroll-body">
+                  <ExpressionValidationSamplesPanel
+                    data={{
+                      importRuleName: validationResult.import_rule_name,
+                      importRuleExplain: validationResult.import_rule_explain,
+                      expression: validationExpression,
+                      combo: selectedValidationCombo,
+                      comboParamSummary: formatUnknownValuesForCombo(selectedValidationCombo),
+                      sampleLimitPerGroup: validationResult.sample_limit_per_group,
+                      sourcePath,
+                    }}
+                    layout="modal"
+                  />
+                </div>
               </div>
             </div>
           ) : null}
