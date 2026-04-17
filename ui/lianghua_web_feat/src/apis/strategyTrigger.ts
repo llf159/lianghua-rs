@@ -413,6 +413,7 @@ export async function getMarketAnalysis(query: {
   lookbackPeriod?: number
   referenceTradeDate?: string
   board?: string
+  excludeStBoard?: boolean
 }) {
   return invoke<MarketAnalysisData>('get_market_analysis', query)
 }

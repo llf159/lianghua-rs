@@ -1,4 +1,4 @@
-use duckdb::{Connection, params};
+use duckdb::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -9,6 +9,8 @@ use crate::{
     },
     utils::utils::board_category,
 };
+
+const BOARD_ST: &str = "ST";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct IntradayMonitorRow {
@@ -239,6 +241,7 @@ pub fn get_intraday_monitor_page(
     scene_name: Option<String>,
     limit: Option<u32>,
     board: Option<String>,
+    exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<IntradayMonitorPageData, String> {
@@ -279,6 +282,7 @@ pub fn get_intraday_monitor_page(
     let board_filter = board
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty() && value != "全部");
+    let exclude_st_board = exclude_st_board.unwrap_or(false);
 
     let limit = limit.filter(|value| *value > 0).map(|value| value as usize);
     let mut base_rows = Vec::new();
@@ -311,6 +315,10 @@ pub fn get_intraday_monitor_page(
                 let board_value =
                     board_category(&ts_code, name_map.get(&ts_code).map(|value| value.as_str()))
                         .to_string();
+
+                if exclude_st_board && board_value == BOARD_ST {
+                    continue;
+                }
 
                 if let Some(ref board_value_filter) = board_filter {
                     if &board_value != board_value_filter {
@@ -438,6 +446,10 @@ pub fn get_intraday_monitor_page(
                 let board_value =
                     board_category(&ts_code, name_map.get(&ts_code).map(|value| value.as_str()))
                         .to_string();
+
+                if exclude_st_board && board_value == BOARD_ST {
+                    continue;
+                }
 
                 if let Some(ref board_value_filter) = board_filter {
                     if &board_value != board_value_filter {

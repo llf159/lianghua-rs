@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { runExpressionStockPick, type StockPickRow } from '../../apis/stockPick'
 import {
+  buildBoardFilterOptions,
   STOCK_PICK_BOARD_OPTIONS,
   STOCK_PICK_SCOPE_OPTIONS,
   StockPickResultTable,
   formatDateLabel,
 } from '../../share/stockPickShared'
+import { isStBoard, useConceptExclusions } from '../../shared/conceptExclusions'
 import { useStockPickOutletContext } from './StockPickPage'
 import { readJsonStorage } from '../../shared/storage'
 
@@ -37,6 +39,7 @@ function parsePositiveInt(value: string, fallback: number) {
 
 export default function ExpressionStockPickPage() {
   const { sourcePath, tradeDateOptions, latestTradeDate, optionsLoading } = useStockPickOutletContext()
+  const { excludeStBoard } = useConceptExclusions()
   const persistedState = useMemo(() => {
     const parsed = readJsonStorage<LegacyPersistedExpressionStockPickState>(
       typeof window === 'undefined' ? null : window.sessionStorage,
@@ -88,6 +91,10 @@ export default function ExpressionStockPickPage() {
   )
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const boardOptions = useMemo(
+    () => buildBoardFilterOptions(STOCK_PICK_BOARD_OPTIONS, excludeStBoard),
+    [excludeStBoard],
+  )
 
   useEffect(() => {
     if (!latestTradeDate) {
@@ -95,6 +102,12 @@ export default function ExpressionStockPickPage() {
     }
     setReferenceTradeDate((current) => current || latestTradeDate)
   }, [latestTradeDate])
+
+  useEffect(() => {
+    if (excludeStBoard && isStBoard(board)) {
+      setBoard('全部')
+    }
+  }, [board, excludeStBoard])
 
   useEffect(() => {
     try {
@@ -138,6 +151,7 @@ export default function ExpressionStockPickPage() {
       const result = await runExpressionStockPick({
         sourcePath,
         board,
+        excludeStBoard: excludeStBoard || undefined,
         referenceTradeDate,
         lookbackPeriods: scopeWay === 'LAST' ? undefined : parsePositiveInt(lookbackPeriods, 1),
         scopeWay,
@@ -169,7 +183,7 @@ export default function ExpressionStockPickPage() {
         <label className="stock-pick-field">
           <span>选股范围</span>
           <select value={board} onChange={(event) => setBoard(event.target.value as typeof board)} disabled={optionsLoading}>
-            {STOCK_PICK_BOARD_OPTIONS.map((item) => (
+            {boardOptions.map((item) => (
               <option key={item} value={item}>
                 {item}
               </option>

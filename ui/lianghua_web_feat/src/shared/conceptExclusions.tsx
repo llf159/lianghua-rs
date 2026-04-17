@@ -9,11 +9,15 @@ import {
 import { readJsonStorage } from './storage'
 
 const CONCEPT_EXCLUSION_STORAGE_KEY = 'lh_concept_exclusions'
+const EXCLUDE_ST_BOARD_STORAGE_KEY = 'lh_exclude_st_board'
 const CONCEPT_SPLIT_PATTERN = /[;,，；|、/\n]+/
+const ST_BOARD_KEY = 'st'
 
 type ConceptExclusionContextValue = {
   excludedConcepts: string[]
   setExcludedConcepts: (nextConcepts: string[]) => void
+  excludeStBoard: boolean
+  setExcludeStBoard: (nextValue: boolean) => void
 }
 
 const ConceptExclusionContext = createContext<ConceptExclusionContextValue | null>(null)
@@ -71,6 +75,28 @@ function writeStoredConceptExclusions(nextConcepts: readonly string[]) {
   window.localStorage.setItem(CONCEPT_EXCLUSION_STORAGE_KEY, JSON.stringify(normalizedValues))
 }
 
+function readStoredExcludeStBoard() {
+  if (typeof window === 'undefined') {
+    return false
+  }
+
+  const storedValue = readJsonStorage<unknown>(window.localStorage, EXCLUDE_ST_BOARD_STORAGE_KEY)
+  return storedValue === true
+}
+
+function writeStoredExcludeStBoard(nextValue: boolean) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  if (!nextValue) {
+    window.localStorage.removeItem(EXCLUDE_ST_BOARD_STORAGE_KEY)
+    return
+  }
+
+  window.localStorage.setItem(EXCLUDE_ST_BOARD_STORAGE_KEY, JSON.stringify(true))
+}
+
 export function splitConceptText(value: unknown) {
   if (typeof value !== 'string') {
     return []
@@ -110,6 +136,22 @@ export function filterConceptItems(
   return normalizedConcepts.filter((item) => !excludedSet.has(toConceptMatchKey(item)))
 }
 
+export function filterBoardItems(boards: readonly string[], excludeStBoard: boolean) {
+  const normalizedBoards = normalizeConceptList(boards)
+  if (!excludeStBoard) {
+    return normalizedBoards
+  }
+
+  return normalizedBoards.filter((item) => !isStBoard(item))
+}
+
+export function isStBoard(value: unknown) {
+  if (typeof value !== 'string') {
+    return false
+  }
+  return toConceptMatchKey(value) === ST_BOARD_KEY
+}
+
 export function formatConceptText(
   value: unknown,
   excludedConcepts: readonly string[],
@@ -121,13 +163,16 @@ export function formatConceptText(
 
 export function ConceptExclusionProvider({ children }: PropsWithChildren) {
   const [excludedConcepts, setExcludedConceptState] = useState<string[]>(() => readStoredConceptExclusions())
+  const [excludeStBoard, setExcludeStBoardState] = useState<boolean>(() => readStoredExcludeStBoard())
 
   useEffect(() => {
     const handleStorage = (event: StorageEvent) => {
-      if (event.key !== CONCEPT_EXCLUSION_STORAGE_KEY) {
-        return
+      if (event.key === CONCEPT_EXCLUSION_STORAGE_KEY) {
+        setExcludedConceptState(readStoredConceptExclusions())
       }
-      setExcludedConceptState(readStoredConceptExclusions())
+      if (event.key === EXCLUDE_ST_BOARD_STORAGE_KEY) {
+        setExcludeStBoardState(readStoredExcludeStBoard())
+      }
     }
 
     window.addEventListener('storage', handleStorage)
@@ -139,13 +184,19 @@ export function ConceptExclusionProvider({ children }: PropsWithChildren) {
   const contextValue = useMemo<ConceptExclusionContextValue>(
     () => ({
       excludedConcepts,
+      excludeStBoard,
       setExcludedConcepts: (nextConcepts) => {
         const normalizedValues = normalizeConceptList(nextConcepts)
         setExcludedConceptState(normalizedValues)
         writeStoredConceptExclusions(normalizedValues)
       },
+      setExcludeStBoard: (nextValue) => {
+        const normalizedValue = Boolean(nextValue)
+        setExcludeStBoardState(normalizedValue)
+        writeStoredExcludeStBoard(normalizedValue)
+      },
     }),
-    [excludedConcepts],
+    [excludedConcepts, excludeStBoard],
   )
 
   return (

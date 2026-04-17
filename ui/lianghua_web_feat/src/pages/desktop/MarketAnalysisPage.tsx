@@ -8,7 +8,7 @@ import {
 } from "../../apis/strategyTrigger";
 import DetailsLink from "../../shared/DetailsLink";
 import { splitTsCode } from "../../shared/stockCode";
-import { useConceptExclusions } from "../../shared/conceptExclusions";
+import { filterBoardItems, isStBoard, useConceptExclusions } from "../../shared/conceptExclusions";
 import { readStoredSourcePath } from "../../shared/storage";
 import { STOCK_PICK_BOARD_OPTIONS } from "../../share/stockPickShared";
 import "./css/SceneLayerBacktestPage.css";
@@ -70,7 +70,7 @@ const MARKET_BOARD_FILTER_OPTIONS = STOCK_PICK_BOARD_OPTIONS.filter(
 );
 
 export default function MarketAnalysisPage() {
-  const { excludedConcepts } = useConceptExclusions();
+  const { excludedConcepts, excludeStBoard } = useConceptExclusions();
   const [sourcePath, setSourcePath] = useState(() => readStoredSourcePath());
   const [lookbackPeriod, setLookbackPeriod] = useState("20");
   const [referenceDateInput, setReferenceDateInput] = useState("");
@@ -83,6 +83,10 @@ export default function MarketAnalysisPage() {
   const [contributionError, setContributionError] = useState("");
   const [contributionResult, setContributionResult] = useState<MarketContributionData | null>(null);
   const [isContributionModalOpen, setIsContributionModalOpen] = useState(false);
+  const boardFilterOptions = useMemo(
+    () => filterBoardItems(MARKET_BOARD_FILTER_OPTIONS, excludeStBoard),
+    [excludeStBoard],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -111,6 +115,12 @@ export default function MarketAnalysisPage() {
     };
   }, []);
 
+  useEffect(() => {
+    if (excludeStBoard && isStBoard(selectedBoard)) {
+      setSelectedBoard("");
+    }
+  }, [excludeStBoard, selectedBoard]);
+
   async function onRunMarketAnalysis() {
     const normalizedRefDate = normalizeDateInput(referenceDateInput);
 
@@ -127,6 +137,7 @@ export default function MarketAnalysisPage() {
         lookbackPeriod: Math.max(1, Number(lookbackPeriod) || 1),
         referenceTradeDate: normalizedRefDate || undefined,
         board: selectedBoard.trim() || undefined,
+        excludeStBoard: excludeStBoard || undefined,
       });
       setResult(data);
       setContributionResult(null);
@@ -279,7 +290,7 @@ export default function MarketAnalysisPage() {
             <span>板块筛选（应用到个股榜）</span>
             <select value={selectedBoard} onChange={(event) => setSelectedBoard(event.target.value)}>
               <option value="">全部板块</option>
-              {MARKET_BOARD_FILTER_OPTIONS.map((board) => (
+              {boardFilterOptions.map((board) => (
                 <option key={board} value={board}>
                   {board}
                 </option>

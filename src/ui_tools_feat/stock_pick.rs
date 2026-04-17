@@ -1,15 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
-use duckdb::{Connection, params};
+use duckdb::{params, Connection};
 use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::{
     data::scoring_data::row_into_rt,
-    data::{DataReader, RowData, ScoreRule, load_ths_concepts_list, result_db_path},
+    data::{load_ths_concepts_list, result_db_path, DataReader, RowData, ScoreRule},
     expr::{
         eval::Value,
-        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+        parser::{lex_all, Expr, Parser, Stmt, Stmts},
     },
     scoring::tools::{calc_query_need_rows, calc_zhang_pct, load_st_list, rt_max_len},
     utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
@@ -19,6 +19,7 @@ use super::{build_area_map, build_concepts_map, build_industry_map, build_name_m
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
 const BOARD_ALL: &str = "全部";
+const BOARD_ST: &str = "ST";
 
 #[derive(Debug, Clone, Copy)]
 enum PickScopeWay {
@@ -478,14 +479,24 @@ fn load_summary_map(source_path: &str, trade_date: &str) -> HashMap<String, Summ
     out
 }
 
-fn filter_board(ts_code: &str, stock_name: Option<&str>, board: Option<&str>) -> bool {
+fn filter_board(
+    ts_code: &str,
+    stock_name: Option<&str>,
+    board: Option<&str>,
+    exclude_st_board: bool,
+) -> bool {
+    let current_board = board_category(ts_code, stock_name);
+    if exclude_st_board && current_board == BOARD_ST {
+        return false;
+    }
+
     let Some(board) = board else {
         return true;
     };
     if board.is_empty() || board == BOARD_ALL {
         return true;
     }
-    board_category(ts_code, stock_name) == board
+    current_board == board
 }
 
 fn concept_matches(
@@ -521,6 +532,7 @@ fn concept_excluded(concept_text: Option<&str>, exclude_concepts: &[String]) -> 
 pub fn run_expression_stock_pick(
     source_path: &str,
     board: Option<String>,
+    exclude_st_board: Option<bool>,
     reference_trade_date: Option<String>,
     lookback_periods: Option<usize>,
     scope_way: String,
@@ -566,6 +578,7 @@ pub fn run_expression_stock_pick(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let exclude_st_board = exclude_st_board.unwrap_or(false);
     let st_list = load_st_list(source_path)?;
     let name_map = build_name_map(source_path).unwrap_or_default();
     let concept_map = build_concepts_map(source_path).unwrap_or_default();
@@ -574,7 +587,7 @@ pub fn run_expression_stock_pick(
         .into_iter()
         .filter(|ts_code| {
             let stock_name = name_map.get(ts_code).map(|value| value.as_str());
-            filter_board(ts_code, stock_name, board_filter)
+            filter_board(ts_code, stock_name, board_filter, exclude_st_board)
         })
         .collect::<Vec<_>>();
 
@@ -654,6 +667,7 @@ pub fn run_expression_stock_pick(
 pub fn run_concept_stock_pick(
     source_path: &str,
     board: Option<String>,
+    exclude_st_board: Option<bool>,
     trade_date: Option<String>,
     include_concepts: Vec<String>,
     exclude_concepts: Vec<String>,
@@ -680,12 +694,13 @@ pub fn run_concept_stock_pick(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let exclude_st_board = exclude_st_board.unwrap_or(false);
 
     let mut rows = concept_map
         .into_iter()
         .filter(|(ts_code, _)| {
             let stock_name = name_map.get(ts_code).map(|value| value.as_str());
-            filter_board(ts_code, stock_name, board_filter)
+            filter_board(ts_code, stock_name, board_filter, exclude_st_board)
         })
         .filter_map(|(ts_code, concept_text)| {
             if !concept_matches(

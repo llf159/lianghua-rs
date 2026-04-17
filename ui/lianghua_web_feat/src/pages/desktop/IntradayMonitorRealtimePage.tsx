@@ -5,8 +5,12 @@ import {
   refreshIntradayMonitorRealtime,
   type IntradayMonitorRow,
 } from '../../apis/reader'
-import { formatConceptText, useConceptExclusions } from '../../shared/conceptExclusions'
-import { STOCK_PICK_BOARD_OPTIONS } from '../../share/stockPickShared'
+import {
+  formatConceptText,
+  isStBoard,
+  useConceptExclusions,
+} from '../../shared/conceptExclusions'
+import { STOCK_PICK_BOARD_OPTIONS, buildBoardFilterOptions } from '../../share/stockPickShared'
 import DetailsLink from '../../shared/DetailsLink'
 import {
   TableSortButton,
@@ -209,7 +213,7 @@ function getRowMode(row: IntradayMonitorRow): RankMode {
 }
 
 export default function IntradayMonitorRealtimePage() {
-  const { excludedConcepts } = useConceptExclusions()
+  const { excludedConcepts, excludeStBoard } = useConceptExclusions()
 
   const persistedState = useMemo(() => {
     const parsed = readJsonStorage<Partial<PersistedIntradayMonitorState>>(
@@ -296,6 +300,10 @@ export default function IntradayMonitorRealtimePage() {
 
   const [templateModalOpen, setTemplateModalOpen] = useState(false)
   const [draftTemplate, setDraftTemplate] = useState<MarkTemplate>(createTemplate(''))
+  const boardOptions = useMemo(
+    () => buildBoardFilterOptions(STOCK_PICK_BOARD_OPTIONS, excludeStBoard),
+    [excludeStBoard],
+  )
 
   const sourcePathTrimmed = sourcePath.trim()
 
@@ -347,6 +355,12 @@ export default function IntradayMonitorRealtimePage() {
   useEffect(() => {
     void ensureManagedSourcePath().then(setSourcePath).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    if (excludeStBoard && isStBoard(boardFilter)) {
+      setBoardFilter('全部')
+    }
+  }, [boardFilter, excludeStBoard])
 
   useEffect(() => {
     writeJsonStorage(
@@ -571,6 +585,7 @@ export default function IntradayMonitorRealtimePage() {
             sceneName: config.mode === 'scene' && config.sceneName !== '全部' ? config.sceneName : undefined,
             limit,
             board: boardFilter === '全部' ? undefined : boardFilter,
+            excludeStBoard: excludeStBoard || undefined,
             totalMvMin,
             totalMvMax,
           }),
@@ -797,7 +812,7 @@ export default function IntradayMonitorRealtimePage() {
           <label className="intraday-monitor-field">
             <span>板块筛选</span>
             <select value={boardFilter} onChange={(event) => setBoardFilter(event.target.value as (typeof STOCK_PICK_BOARD_OPTIONS)[number])}>
-              {STOCK_PICK_BOARD_OPTIONS.map((board) => (
+              {boardOptions.map((board) => (
                 <option key={board} value={board}>{board}</option>
               ))}
             </select>

@@ -3,6 +3,7 @@ import { type StockPickRow } from "../apis/stockPick";
 import { useRouteScrollRegion } from "../shared/routeScroll";
 import {
   formatConceptText,
+  filterBoardItems,
   useConceptExclusions,
 } from "../shared/conceptExclusions";
 import {
@@ -29,6 +30,13 @@ export const STOCK_PICK_SCOPE_OPTIONS = [
   "CONSEC",
 ] as const;
 export const STOCK_PICK_MATCH_MODE_OPTIONS = ["OR", "AND"] as const;
+
+export function buildBoardFilterOptions(
+  options: readonly (typeof STOCK_PICK_BOARD_OPTIONS)[number][],
+  excludeStBoard: boolean,
+) {
+  return filterBoardItems(options, excludeStBoard) as (typeof STOCK_PICK_BOARD_OPTIONS)[number][];
+}
 
 export function formatDateLabel(value?: string | null) {
   if (!value || value.length !== 8) {

@@ -1,4 +1,4 @@
-use duckdb::{Connection, params};
+use duckdb::{params, Connection};
 use serde::Serialize;
 
 use crate::{
@@ -6,6 +6,8 @@ use crate::{
     ui_tools_feat::{build_concepts_map, build_name_map, build_total_mv_map, filter_mv},
     utils::utils::board_category,
 };
+
+const BOARD_ST: &str = "ST";
 
 #[derive(Debug, Serialize, Clone)]
 pub struct SceneOverviewRow {
@@ -106,6 +108,7 @@ pub fn get_scene_rank_overview_page(
     rank_date: Option<String>,
     limit: Option<u32>,
     board: Option<String>,
+    exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<SceneOverviewPageData, String> {
@@ -126,6 +129,7 @@ pub fn get_scene_rank_overview_page(
     let board_filter = board
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty() && value != "全部");
+    let exclude_st_board = exclude_st_board.unwrap_or(false);
 
     let sql = r#"
     SELECT
@@ -164,6 +168,10 @@ pub fn get_scene_rank_overview_page(
         let board_value =
             board_category(&ts_code, name_map.get(&ts_code).map(|value| value.as_str()))
                 .to_string();
+
+        if exclude_st_board && board_value == BOARD_ST {
+            continue;
+        }
 
         if let Some(ref board_value_filter) = board_filter {
             if &board_value != board_value_filter {

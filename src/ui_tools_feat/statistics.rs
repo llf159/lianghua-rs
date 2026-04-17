@@ -2338,11 +2338,23 @@ fn match_board_filter(board_list: &[String], selected_board: Option<&str>) -> bo
     board_list.iter().any(|board| board == selected_board)
 }
 
+fn match_board_filter_with_st(
+    board_list: &[String],
+    selected_board: Option<&str>,
+    exclude_st_board: bool,
+) -> bool {
+    if exclude_st_board && board_list.iter().any(|board| board == "ST") {
+        return false;
+    }
+    match_board_filter(board_list, selected_board)
+}
+
 pub fn get_market_analysis(
     source_path: String,
     lookback_period: Option<usize>,
     reference_trade_date: Option<String>,
     board: Option<String>,
+    exclude_st_board: Option<bool>,
 ) -> Result<MarketAnalysisData, String> {
     let lookback_period = lookback_period.unwrap_or(20).max(1);
 
@@ -2368,6 +2380,7 @@ pub fn get_market_analysis(
 
     let (board_options, ts_board_map) = build_board_maps(&source_path)?;
     let resolved_board = resolve_board_filter(board, &board_options);
+    let exclude_st_board = exclude_st_board.unwrap_or(false);
 
     let Some(ref_date) = resolved_reference_trade_date.clone() else {
         return Ok(MarketAnalysisData {
@@ -2570,7 +2583,7 @@ pub fn get_market_analysis(
         let Some(board_list) = ts_board_map.get(&ts_code) else {
             continue;
         };
-        if !match_board_filter(board_list, resolved_board.as_deref()) {
+        if !match_board_filter_with_st(board_list, resolved_board.as_deref(), exclude_st_board) {
             continue;
         }
 
@@ -2696,7 +2709,7 @@ pub fn get_market_analysis(
         let Some(board_list) = ts_board_map.get(&ts_code) else {
             continue;
         };
-        if !match_board_filter(board_list, resolved_board.as_deref()) {
+        if !match_board_filter_with_st(board_list, resolved_board.as_deref(), exclude_st_board) {
             continue;
         }
 

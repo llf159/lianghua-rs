@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { runConceptStockPick, type StockPickRow } from '../../apis/stockPick'
 import {
+  buildBoardFilterOptions,
   STOCK_PICK_BOARD_OPTIONS,
   STOCK_PICK_MATCH_MODE_OPTIONS,
   StockPickResultTable,
   formatDateLabel,
 } from '../../share/stockPickShared'
-import { filterConceptItems, useConceptExclusions } from '../../shared/conceptExclusions'
+import { filterConceptItems, isStBoard, useConceptExclusions } from '../../shared/conceptExclusions'
 import { useStockPickOutletContext } from './StockPickPage'
 import { readJsonStorage } from '../../shared/storage'
 import {
@@ -32,7 +33,7 @@ type PersistedConceptStockPickState = {
 
 export default function ConceptStockPickPage() {
   const { sourcePath, tradeDateOptions, latestTradeDate, conceptOptions, optionsLoading } = useStockPickOutletContext()
-  const { excludedConcepts } = useConceptExclusions()
+  const { excludedConcepts, excludeStBoard } = useConceptExclusions()
   const persistedState = useMemo(() => {
     const parsed = readJsonStorage<Partial<PersistedConceptStockPickState>>(
       typeof window === 'undefined' ? null : window.sessionStorage,
@@ -79,6 +80,10 @@ export default function ConceptStockPickPage() {
   const [resolvedTradeDate, setResolvedTradeDate] = useState(() => persistedState?.resolvedTradeDate ?? '')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const boardOptions = useMemo(
+    () => buildBoardFilterOptions(STOCK_PICK_BOARD_OPTIONS, excludeStBoard),
+    [excludeStBoard],
+  )
 
   useEffect(() => {
     if (!latestTradeDate) {
@@ -86,6 +91,12 @@ export default function ConceptStockPickPage() {
     }
     setTradeDate((current) => current || latestTradeDate)
   }, [latestTradeDate])
+
+  useEffect(() => {
+    if (excludeStBoard && isStBoard(board)) {
+      setBoard('全部')
+    }
+  }, [board, excludeStBoard])
 
   useEffect(() => {
     setIncludeConcepts((current) => {
@@ -150,6 +161,7 @@ export default function ConceptStockPickPage() {
       const result = await runConceptStockPick({
         sourcePath,
         board,
+        excludeStBoard: excludeStBoard || undefined,
         tradeDate,
         includeConcepts,
         excludeConcepts,
@@ -178,7 +190,7 @@ export default function ConceptStockPickPage() {
         <label className="stock-pick-field">
           <span>选股范围</span>
           <select value={board} onChange={(event) => setBoard(event.target.value as typeof board)} disabled={optionsLoading}>
-            {STOCK_PICK_BOARD_OPTIONS.map((item) => (
+            {boardOptions.map((item) => (
               <option key={item} value={item}>
                 {item}
               </option>

@@ -1,4 +1,4 @@
-use duckdb::{Connection, params};
+use duckdb::{params, Connection};
 use serde::Serialize;
 
 use crate::{
@@ -10,6 +10,7 @@ use crate::{
 };
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
+const BOARD_ST: &str = "ST";
 
 #[derive(Debug, Serialize, Clone)]
 pub struct OverviewRow {
@@ -231,6 +232,7 @@ pub fn get_rank_overview(
     trade_date: Option<String>,
     limit: Option<u32>,
     board: Option<String>,
+    exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<Vec<OverviewRow>, String> {
@@ -266,6 +268,7 @@ pub fn get_rank_overview(
     let board_filter = board
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty() && value != "全部");
+    let exclude_st_board = exclude_st_board.unwrap_or(false);
 
     let mut out = Vec::new();
     while let Some(row) = rows.next().map_err(|e| format!("读行失败: {e}"))? {
@@ -273,6 +276,10 @@ pub fn get_rank_overview(
         let board_value =
             board_category(&ts_code, name_map.get(&ts_code).map(|value| value.as_str()))
                 .to_string();
+
+        if exclude_st_board && board_value == BOARD_ST {
+            continue;
+        }
 
         if let Some(ref board_value_filter) = board_filter {
             if &board_value != board_value_filter {
@@ -322,6 +329,7 @@ pub fn get_rank_overview_page(
     ref_date: Option<String>,
     limit: Option<u32>,
     board: Option<String>,
+    exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<OverviewPageData, String> {
@@ -335,6 +343,7 @@ pub fn get_rank_overview_page(
         Some(effective_rank_date.clone()),
         limit,
         board,
+        exclude_st_board,
         total_mv_min,
         total_mv_max,
     )?;

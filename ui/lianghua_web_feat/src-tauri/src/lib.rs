@@ -280,6 +280,7 @@ fn get_rank_overview(
     trade_date: Option<String>,
     limit: Option<u32>,
     board: Option<String>,
+    exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<Vec<OverviewRow>, String> {
@@ -288,6 +289,7 @@ fn get_rank_overview(
         trade_date,
         limit,
         board,
+        exclude_st_board,
         total_mv_min,
         total_mv_max,
     )
@@ -305,6 +307,7 @@ fn get_rank_overview_page(
     ref_date: Option<String>,
     limit: Option<u32>,
     board: Option<String>,
+    exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<OverviewPageData, String> {
@@ -314,6 +317,7 @@ fn get_rank_overview_page(
         ref_date,
         limit,
         board,
+        exclude_st_board,
         total_mv_min,
         total_mv_max,
     )
@@ -330,6 +334,7 @@ fn get_scene_rank_overview_page(
     rank_date: Option<String>,
     limit: Option<u32>,
     board: Option<String>,
+    exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<SceneOverviewPageData, String> {
@@ -338,6 +343,7 @@ fn get_scene_rank_overview_page(
         rank_date,
         limit,
         board,
+        exclude_st_board,
         total_mv_min,
         total_mv_max,
     )
@@ -351,6 +357,7 @@ fn get_intraday_monitor_page(
     scene_name: Option<String>,
     limit: Option<u32>,
     board: Option<String>,
+    exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<IntradayMonitorPageData, String> {
@@ -361,6 +368,7 @@ fn get_intraday_monitor_page(
         scene_name,
         limit,
         board,
+        exclude_st_board,
         total_mv_min,
         total_mv_max,
     )
@@ -486,9 +494,16 @@ async fn get_market_analysis(
     lookback_period: Option<usize>,
     reference_trade_date: Option<String>,
     board: Option<String>,
+    exclude_st_board: Option<bool>,
 ) -> Result<MarketAnalysisData, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        core_get_market_analysis(source_path, lookback_period, reference_trade_date, board)
+        core_get_market_analysis(
+            source_path,
+            lookback_period,
+            reference_trade_date,
+            board,
+            exclude_st_board,
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -736,6 +751,7 @@ async fn run_ranking_tiebreak_fill(source_path: String) -> Result<RankComputeRun
 async fn run_expression_stock_pick(
     source_path: String,
     board: Option<String>,
+    exclude_st_board: Option<bool>,
     reference_trade_date: Option<String>,
     lookback_periods: Option<usize>,
     scope_way: String,
@@ -751,6 +767,7 @@ async fn run_expression_stock_pick(
         core_run_expression_stock_pick(
             &source_path,
             board,
+            exclude_st_board,
             reference_trade_date,
             lookback_periods,
             scope_way,
@@ -766,6 +783,7 @@ async fn run_expression_stock_pick(
 fn run_concept_stock_pick(
     source_path: String,
     board: Option<String>,
+    exclude_st_board: Option<bool>,
     trade_date: Option<String>,
     include_concepts: Vec<String>,
     exclude_concepts: Vec<String>,
@@ -774,6 +792,7 @@ fn run_concept_stock_pick(
     core_run_concept_stock_pick(
         &source_path,
         board,
+        exclude_st_board,
         trade_date,
         include_concepts,
         exclude_concepts,

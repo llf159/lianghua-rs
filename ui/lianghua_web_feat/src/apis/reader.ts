@@ -34,6 +34,7 @@ export type OverviewPageQuery = {
   refDate?: string;
   limit?: number;
   board?: string;
+  excludeStBoard?: boolean;
   totalMvMin?: number;
   totalMvMax?: number;
 };
@@ -68,6 +69,7 @@ export type SceneOverviewPageQuery = {
   rankDate?: string;
   limit?: number;
   board?: string;
+  excludeStBoard?: boolean;
   totalMvMin?: number;
   totalMvMax?: number;
 };
@@ -109,6 +111,7 @@ export type IntradayMonitorPageQuery = {
   sceneName?: string;
   limit?: number;
   board?: string;
+  excludeStBoard?: boolean;
   totalMvMin?: number;
   totalMvMax?: number;
 };

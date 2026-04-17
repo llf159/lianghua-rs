@@ -2,13 +2,14 @@ use rayon::prelude::*;
 use std::{collections::HashSet, sync::mpsc::sync_channel, thread, time};
 
 use crate::data::scoring_data::{
-    SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage, cache_rule_build,
-    init_result_db, row_into_rt, write_score_batches_from_channel,
+    cache_rule_build, init_result_db, row_into_rt, write_score_batches_from_channel, SceneDetails,
+    ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage,
 };
-use crate::data::{DataReader, RowData, ScoreRule, ScoreScene, result_db_path};
+use crate::data::{result_db_path, DataReader, RowData, ScoreRule, ScoreScene};
 use crate::scoring::{
-    CachedRule, RuleSceneMeta, build_scene_score_series, scoring_rules_details_cache,
+    build_scene_score_series, scoring_rules_details_cache,
     tools::{calc_query_need_rows, calc_zhang_pct, load_st_list, warmup_rows_estimate},
+    CachedRule, RuleSceneMeta,
 };
 
 const SCORING_GROUP_SIZE: usize = 256;

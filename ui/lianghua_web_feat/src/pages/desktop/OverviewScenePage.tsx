@@ -6,7 +6,12 @@ import {
   type SceneOverviewPageQuery,
   type SceneOverviewRow,
 } from '../../apis/reader'
-import { formatConceptText, useConceptExclusions } from '../../shared/conceptExclusions'
+import {
+  filterBoardItems,
+  formatConceptText,
+  isStBoard,
+  useConceptExclusions,
+} from '../../shared/conceptExclusions'
 import { STOCK_PICK_BOARD_OPTIONS } from '../../share/stockPickShared'
 import DetailsLink from '../../shared/DetailsLink'
 import {
@@ -125,7 +130,7 @@ function isSortableColumn(key: VisibleColumn) {
 }
 
 export default function OverviewScenePage() {
-  const { excludedConcepts } = useConceptExclusions()
+  const { excludedConcepts, excludeStBoard } = useConceptExclusions()
   const persistedState = useMemo(() => {
     const parsed = readJsonStorage<Partial<PersistedSceneOverviewState>>(
       typeof window === 'undefined' ? null : window.sessionStorage,
@@ -190,6 +195,10 @@ export default function OverviewScenePage() {
   const [loading, setLoading] = useState(false)
   const [dateOptionsLoading, setDateOptionsLoading] = useState(false)
   const [error, setError] = useState('')
+  const boardOptions = useMemo(
+    () => filterBoardItems(STOCK_PICK_BOARD_OPTIONS, excludeStBoard) as (typeof STOCK_PICK_BOARD_OPTIONS)[number][],
+    [excludeStBoard],
+  )
 
   const sourcePathTrimmed = sourcePath.trim()
   const sceneNames = useMemo(() => {
@@ -273,6 +282,12 @@ export default function OverviewScenePage() {
       cancelled = true
     }
   }, [])
+
+  useEffect(() => {
+    if (excludeStBoard && isStBoard(boardFilter)) {
+      setBoardFilter('全部')
+    }
+  }, [boardFilter, excludeStBoard])
 
   useEffect(() => {
     try {
@@ -401,6 +416,7 @@ export default function OverviewScenePage() {
       rankDate: rankDateInput.trim() || undefined,
       limit,
       board: boardFilter === '全部' ? undefined : boardFilter,
+      excludeStBoard: excludeStBoard || undefined,
       totalMvMin,
       totalMvMax,
     }
@@ -491,7 +507,7 @@ export default function OverviewScenePage() {
                 setBoardFilter(event.target.value as (typeof STOCK_PICK_BOARD_OPTIONS)[number])
               }
             >
-              {STOCK_PICK_BOARD_OPTIONS.map((board) => (
+              {boardOptions.map((board) => (
                 <option key={board} value={board}>
                   {board}
                 </option>

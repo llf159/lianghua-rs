@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use crate::data::{ScopeWay, ScoreRule};
 use crate::data::{load_stock_list, load_trade_date_list};
+use crate::data::{ScopeWay, ScoreRule};
 use crate::expr::eval::{Runtime, Value};
-use crate::expr::parser::{Expr, Parser, Stmt, lex_all};
+use crate::expr::parser::{lex_all, Expr, Parser, Stmt};
 use crate::utils::utils::eval_binary_for_warmup;
 use crate::utils::utils::impl_expr_warmup;
 

@@ -130,6 +130,17 @@
   font-weight: 700;
 }
 
+.strategy-manage-summary-item small {
+  display: block;
+  color: #5f6f84;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.strategy-manage-summary-item-dist-score {
+  grid-column: span 2;
+}
+
 .strategy-manage-filter-grid,
 .strategy-manage-editor-grid {
   margin-top: 14px;
@@ -790,18 +801,27 @@
   z-index: 1000;
 }
 
+.strategy-manage-modal-backdrop-confirm {
+  align-items: flex-start;
+  overflow-y: auto;
+  padding: 24px 16px;
+  z-index: 1020;
+}
+
 .strategy-manage-modal-backdrop-top {
   z-index: 1010;
 }
 
 .strategy-manage-modal {
   width: min(440px, 100%);
+  max-height: calc(100vh - 48px);
   border-radius: 14px;
   background: #fff;
   padding: 18px;
   display: grid;
   gap: 12px;
   box-shadow: 0 24px 48px rgba(15, 23, 42, 0.18);
+  overflow-y: auto;
 }
 
 .strategy-manage-editor-modal {
@@ -981,6 +1001,10 @@
   .strategy-manage-bulk-kpi {
     grid-template-columns: 1fr;
   }
+
+  .strategy-manage-summary-item-dist-score {
+    grid-column: auto;
+  }
 }
 
 @media (max-width: 720px) {
@@ -1009,5 +1033,14 @@
 
   .strategy-manage-rule-card-actions {
     width: 100%;
+  }
+
+  .strategy-manage-modal-backdrop,
+  .strategy-manage-modal-backdrop-confirm {
+    padding: 10px;
+  }
+
+  .strategy-manage-modal {
+    max-height: calc(100vh - 20px);
   }
 }

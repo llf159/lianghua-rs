@@ -63,6 +63,48 @@ function formatNumber(value: number, digits = 2) {
   return Number.isInteger(value) ? String(value) : value.toFixed(digits)
 }
 
+type DistScoreSummary = {
+  segmentCount: number
+  intervalMin: number
+  intervalMax: number
+  pointsMin: number
+  pointsMax: number
+}
+
+function buildDistScoreSummary(items?: StrategyManageDistPoint[] | null): DistScoreSummary | null {
+  if (!items || items.length === 0) {
+    return null
+  }
+
+  let intervalMin = items[0].min
+  let intervalMax = items[0].max
+  let pointsMin = items[0].points
+  let pointsMax = items[0].points
+
+  for (const item of items) {
+    if (item.min < intervalMin) {
+      intervalMin = item.min
+    }
+    if (item.max > intervalMax) {
+      intervalMax = item.max
+    }
+    if (item.points < pointsMin) {
+      pointsMin = item.points
+    }
+    if (item.points > pointsMax) {
+      pointsMax = item.points
+    }
+  }
+
+  return {
+    segmentCount: items.length,
+    intervalMin,
+    intervalMax,
+    pointsMin,
+    pointsMax,
+  }
+}
+
 function hasDistPoints(items?: StrategyManageDistPoint[] | null) {
   return Boolean(items && items.length > 0)
 }
@@ -818,6 +860,7 @@ export default function StrategyManagePage() {
 
   const isBusy = busyAction !== 'idle'
   const isEditing = draft !== null
+  const isDeleteSceneBlocked = Boolean(deleteSceneTarget && deleteSceneTarget.rule_count > 0)
   const bulkTotalRuleCount = rules.length
   const bulkClassifiedCount = refactorRules.length
   const bulkPendingCount = bulkFilteredRules.length
@@ -948,7 +991,7 @@ export default function StrategyManagePage() {
       </section>
 
       {deleteTarget ? (
-        <div className="strategy-manage-modal-backdrop" role="presentation">
+        <div className="strategy-manage-modal-backdrop strategy-manage-modal-backdrop-confirm" role="presentation">
           <div className="strategy-manage-modal" role="dialog" aria-modal="true">
             <h3>删除 Rule</h3>
             <p>
@@ -972,23 +1015,23 @@ export default function StrategyManagePage() {
       ) : null}
 
       {deleteSceneTarget ? (
-        <div className="strategy-manage-modal-backdrop" role="presentation">
+        <div className="strategy-manage-modal-backdrop strategy-manage-modal-backdrop-confirm" role="presentation">
           <div className="strategy-manage-modal" role="dialog" aria-modal="true">
             <h3>删除 Scene</h3>
             <p>
               即将删除 scene：<strong>{deleteSceneTarget.name}</strong>
             </p>
             {deleteSceneTarget.rule_count > 0 ? (
-              <p className="strategy-manage-note">当前 scene 下还有 {deleteSceneTarget.rule_count} 条 rule，后端会拒绝删除。</p>
+              <p className="strategy-manage-note">当前 scene 下还有 {deleteSceneTarget.rule_count} 条 rule，请先删除这些 rule 后再删除 scene。</p>
             ) : null}
             <div className="strategy-manage-modal-actions">
               <button
                 className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-danger"
                 type="button"
                 onClick={() => void onConfirmDeleteScene()}
-                disabled={isBusy}
+                disabled={isBusy || isDeleteSceneBlocked}
               >
-                {busyAction === 'deleting' ? '删除中...' : '确认删除'}
+                {isDeleteSceneBlocked ? '请先清空 Rule' : busyAction === 'deleting' ? '删除中...' : '确认删除'}
               </button>
               <button
                 className="strategy-manage-toolbar-btn"
@@ -1042,42 +1085,57 @@ export default function StrategyManagePage() {
                 <div className="strategy-manage-empty">当前 scene 下还没有规则。</div>
               ) : (
                 <div className="strategy-manage-scene-rule-list">
-                  {selectedSceneRules.map((rule) => (
-                    <article className="strategy-manage-rule-card strategy-manage-rule-card-compact" key={rule.name}>
-                      <div className="strategy-manage-rule-card-head">
-                        <div>
-                          <div className="strategy-manage-rule-card-name">{rule.name}</div>
+                  {selectedSceneRules.map((rule) => {
+                    const distScoreSummary = buildDistScoreSummary(rule.dist_points)
+
+                    return (
+                      <article className="strategy-manage-rule-card strategy-manage-rule-card-compact" key={rule.name}>
+                        <div className="strategy-manage-rule-card-head">
+                          <div>
+                            <div className="strategy-manage-rule-card-name">{rule.name}</div>
+                          </div>
+                          <div className="strategy-manage-rule-card-actions">
+                            <button className="strategy-manage-inline-btn" type="button" onClick={() => openEditEditor(rule)}>
+                              编辑
+                            </button>
+                            <button className="strategy-manage-inline-btn is-danger" type="button" onClick={() => setDeleteTarget(rule)} disabled={isBusy}>
+                              删除
+                            </button>
+                          </div>
                         </div>
-                        <div className="strategy-manage-rule-card-actions">
-                          <button className="strategy-manage-inline-btn" type="button" onClick={() => openEditEditor(rule)}>
-                            编辑
-                          </button>
-                          <button className="strategy-manage-inline-btn is-danger" type="button" onClick={() => setDeleteTarget(rule)} disabled={isBusy}>
-                            删除
-                          </button>
+                        <div className="strategy-manage-rule-metrics">
+                          {distScoreSummary ? (
+                            <div className="strategy-manage-summary-item strategy-manage-summary-item-dist-score">
+                              <span>得分</span>
+                              <strong>字典分 · {distScoreSummary.segmentCount} 段</strong>
+                              <small>
+                                区间 {formatNumber(distScoreSummary.intervalMin)} ~ {formatNumber(distScoreSummary.intervalMax)} ·
+                                分值 {formatNumber(distScoreSummary.pointsMin)} ~ {formatNumber(distScoreSummary.pointsMax)}
+                              </small>
+                            </div>
+                          ) : (
+                            <div className="strategy-manage-summary-item">
+                              <span>得分</span>
+                              <strong>{formatNumber(rule.points)}</strong>
+                            </div>
+                          )}
+                          <div className="strategy-manage-summary-item">
+                            <span>Stage</span>
+                            <strong>{rule.stage}</strong>
+                          </div>
+                          <div className="strategy-manage-summary-item">
+                            <span>Scope</span>
+                            <strong>{rule.scope_way}</strong>
+                          </div>
+                          <div className="strategy-manage-summary-item">
+                            <span>Windows</span>
+                            <strong>{rule.scope_windows}</strong>
+                          </div>
                         </div>
-                      </div>
-                      <div className="strategy-manage-rule-metrics">
-                        <div className="strategy-manage-summary-item">
-                          <span>得分</span>
-                          <strong>{hasDistPoints(rule.dist_points) ? '区间字典' : formatNumber(rule.points)}</strong>
-                        </div>
-                        <div className="strategy-manage-summary-item">
-                          <span>Stage</span>
-                          <strong>{rule.stage}</strong>
-                        </div>
-                        <div className="strategy-manage-summary-item">
-                          <span>Scope</span>
-                          <strong>{rule.scope_way}</strong>
-                        </div>
-                        <div className="strategy-manage-summary-item">
-                          <span>Windows</span>
-                          <strong>{rule.scope_windows}</strong>
-                        </div>
-                      </div>
-                      <pre className="strategy-manage-expression-preview">{rule.when}</pre>
-                    </article>
-                  ))}
+                        <pre className="strategy-manage-expression-preview">{rule.when}</pre>
+                      </article>
+                    )
+                  })}
                 </div>
               )}
             </div>
@@ -1374,6 +1432,16 @@ export default function StrategyManagePage() {
                     <strong>校验</strong>
                     <span>{bulkValidationIssues.length === 0 ? '通过' : `${bulkValidationIssues.length} 个问题`}</span>
                   </div>
+                  {bulkValidationIssues.length > 0 ? (
+                    <ul className="strategy-manage-bulk-issue-list">
+                      {bulkValidationIssues.slice(0, 6).map((issue) => (
+                        <li key={issue}>{issue}</li>
+                      ))}
+                      {bulkValidationIssues.length > 6 ? <li key="__more">... 另有 {bulkValidationIssues.length - 6} 项</li> : null}
+                    </ul>
+                  ) : (
+                    <p className="strategy-manage-note">当前结构合法，可直接保存覆盖策略文件。</p>
+                  )}
                 </div>
                 <div className="strategy-manage-bulk-scene-strip">
                   {refactorScenes.map((scene) => {

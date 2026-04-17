@@ -16,7 +16,7 @@ pub mod tools;
 
 enum ScopeHit {
     Bool(bool),
-    Count(usize),
+    EachOffsets(Vec<usize>),
     Recent(Option<usize>),
 }
 
@@ -104,13 +104,13 @@ fn hit_scopeway(scopeway: ScopeWay, windows: usize, bs: &[bool], i: usize) -> Sc
         }
         ScopeWay::Each => {
             let start = (i + 1).saturating_sub(windows);
-            let mut cnt = 0;
+            let mut offsets = Vec::new();
             for j in start..=i {
                 if bs[j] {
-                    cnt += 1
+                    offsets.push(i - j);
                 }
             }
-            ScopeHit::Count(cnt)
+            ScopeHit::EachOffsets(offsets)
         }
         ScopeWay::Recent => {
             let start = (i + 1).saturating_sub(windows);
@@ -124,19 +124,9 @@ fn hit_scopeway(scopeway: ScopeWay, windows: usize, bs: &[bool], i: usize) -> Sc
     }
 }
 
-fn impl_scope_at_recent(recent: ScopeHit, dps: &[DistPoint]) -> f64 {
-    let last = match recent {
-        ScopeHit::Recent(v) => match v {
-            Some(n) => n,
-            None => {
-                return 0.0;
-            }
-        },
-        _ => return 0.0,
-    };
-
+fn score_from_dist_points(value: usize, dps: &[DistPoint]) -> f64 {
     for dp in dps {
-        if dp.min <= last && last <= dp.max {
+        if dp.min <= value && value <= dp.max {
             return dp.points;
         }
     }
@@ -153,10 +143,25 @@ fn score_at(scopeway: ScopeHit, dps: Option<&[DistPoint]>, points: f64) -> f64 {
                 0.0
             }
         }
-        ScopeHit::Count(n) => n as f64 * points,
+        ScopeHit::EachOffsets(offsets) => {
+            if offsets.is_empty() {
+                return 0.0;
+            }
+            if let Some(dp) = dps {
+                offsets
+                    .iter()
+                    .map(|distance| score_from_dist_points(*distance, dp))
+                    .sum::<f64>()
+            } else {
+                offsets.len() as f64 * points
+            }
+        }
         ScopeHit::Recent(v) => {
             if let Some(dp) = dps {
-                impl_scope_at_recent(ScopeHit::Recent(v), dp)
+                match v {
+                    Some(last) => score_from_dist_points(last, dp),
+                    None => 0.0,
+                }
             } else {
                 match v {
                     Some(_) => points,
@@ -177,9 +182,9 @@ fn scoring_rule_cache(
 
     for i in 0..bs.len() {
         let hit = hit_scopeway(rule.scope_way, rule.scope_windows, &bs, i);
-        triggered.push(match hit {
-            ScopeHit::Bool(ok) => ok,
-            ScopeHit::Count(n) => n > 0,
+        triggered.push(match &hit {
+            ScopeHit::Bool(ok) => *ok,
+            ScopeHit::EachOffsets(offsets) => !offsets.is_empty(),
             ScopeHit::Recent(v) => v.is_some(),
         });
         let s = score_at(hit, rule.dist_points.as_deref(), rule.points);

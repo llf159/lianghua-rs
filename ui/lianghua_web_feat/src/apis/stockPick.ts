@@ -59,6 +59,7 @@ export type AdvancedStockPickResultData = {
 export type ExpressionStockPickQuery = {
   sourcePath: string
   board?: string
+  excludeStBoard?: boolean
   referenceTradeDate?: string
   lookbackPeriods?: number
   scopeWay: string
@@ -69,6 +70,7 @@ export type ExpressionStockPickQuery = {
 export type ConceptStockPickQuery = {
   sourcePath: string
   board?: string
+  excludeStBoard?: boolean
   tradeDate?: string
   includeConcepts: string[]
   excludeConcepts: string[]

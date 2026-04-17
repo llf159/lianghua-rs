@@ -9,6 +9,8 @@ import {
 import DetailsLink from "../../shared/DetailsLink";
 import {
   formatConceptText,
+  filterBoardItems,
+  isStBoard,
   useConceptExclusions,
 } from "../../shared/conceptExclusions";
 import { readJsonStorage, readStoredSourcePath } from "../../shared/storage";
@@ -210,7 +212,7 @@ function findFirstPopulatedString(rows: OverviewRow[], key: string) {
 }
 
 export default function OverviewRawPage() {
-  const { excludedConcepts } = useConceptExclusions();
+  const { excludedConcepts, excludeStBoard } = useConceptExclusions();
   const persistedState = useMemo(() => {
     const parsed = readJsonStorage<Partial<PersistedOverviewState>>(
       typeof window === "undefined" ? null : window.sessionStorage,
@@ -289,6 +291,10 @@ export default function OverviewRawPage() {
   const [loading, setLoading] = useState(false);
   const [dateOptionsLoading, setDateOptionsLoading] = useState(false);
   const [error, setError] = useState("");
+  const boardOptions = useMemo(
+    () => filterBoardItems(STOCK_PICK_BOARD_OPTIONS, excludeStBoard) as (typeof STOCK_PICK_BOARD_OPTIONS)[number][],
+    [excludeStBoard],
+  );
 
   const visibleColumns = useMemo(() => buildVisibleColumns(rows), [rows]);
   const sortDefinitions = useMemo(
@@ -349,6 +355,12 @@ export default function OverviewRawPage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (excludeStBoard && isStBoard(boardFilter)) {
+      setBoardFilter("全部");
+    }
+  }, [boardFilter, excludeStBoard]);
 
   useEffect(() => {
     try {
@@ -494,6 +506,7 @@ export default function OverviewRawPage() {
       refDate: refDateInput.trim() || undefined,
       limit,
       board: boardFilter === "全部" ? undefined : boardFilter,
+      excludeStBoard: excludeStBoard || undefined,
       totalMvMin,
       totalMvMax,
     };
@@ -624,7 +637,7 @@ export default function OverviewRawPage() {
                 )
               }
             >
-              {STOCK_PICK_BOARD_OPTIONS.map((board) => (
+              {boardOptions.map((board) => (
                 <option key={board} value={board}>
                   {board}
                 </option>
