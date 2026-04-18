@@ -79,25 +79,69 @@ function formatElapsedMs(value: number) {
 }
 
 function calcProgressPercent(progress: DataDownloadProgress | null) {
-  if (!progress || progress.total <= 0) {
+  if (!progress) {
     return null
   }
 
-  return Math.max(0, Math.min(100, Math.round((progress.finished / progress.total) * 100)))
+  const normalizedPhase = normalizeProgressPhase(progress.phase)
+  const workflow = getProgressWorkflow(progress.action)
+  const localRatio =
+    progress.phase === 'done' || progress.phase === 'done_ths_concepts'
+      ? 1
+      : progress.total > 0
+        ? Math.max(0, Math.min(1, progress.finished / progress.total))
+        : null
+
+  if (workflow && normalizedPhase) {
+    const currentIndex = workflow.indexOf(normalizedPhase)
+    if (currentIndex >= 0 && localRatio !== null) {
+      return Math.max(
+        0,
+        Math.min(100, Math.round(((currentIndex + localRatio) / workflow.length) * 100)),
+      )
+    }
+  }
+
+  if (localRatio === null) {
+    return null
+  }
+
+  return Math.max(0, Math.min(100, Math.round(localRatio * 100)))
+}
+
+function normalizeProgressPhase(phase: string | null | undefined) {
+  switch (phase) {
+    case 'retry_ths_concept':
+      return 'retry_ths_concepts'
+    case 'failed_ths_concept':
+      return 'fetch_ths_concept'
+    case 'completed':
+      return 'done'
+    default:
+      return phase ?? null
+  }
 }
 
 function formatPhaseLabel(phase: string | null | undefined) {
-  switch (phase) {
+  switch (normalizeProgressPhase(phase)) {
     case 'prepare_trade_calendar':
       return '刷新交易日历'
     case 'prepare_stock_list':
       return '刷新股票列表'
     case 'download_bars':
-      return '下载行情'
+      return '拉取行情'
+    case 'download_index_bars':
+      return '拉取指数'
+    case 'download_pending_trade_dates':
+      return '拉取增量'
+    case 'validate_pending_trade_dates':
+      return '校验增量'
+    case 'calc_incremental_indicators':
+      return '计算指标'
+    case 'recover_failed_stocks':
+      return '补拉断点股票'
     case 'retry_failed':
       return '失败重试'
-    case 'download_pending_trade_dates':
-      return '增量下载'
     case 'write_db':
       return '写入数据库'
     case 'prepare_ths_concepts':
@@ -110,11 +154,11 @@ function formatPhaseLabel(phase: string | null | undefined) {
     case 'write_ths_concepts':
       return '写入概念文件'
     case 'rebuild_concept_performance':
-      return '补全概念表现'
+      return '维护概念表现'
+    case 'repair_concept_most_related':
+      return '补算最相关概念'
     case 'done_ths_concepts':
       return '概念下载完成'
-    case 'failed_ths_concept':
-      return '概念下载失败'
     case 'done':
       return '下载完成'
     case 'started':
@@ -126,36 +170,85 @@ function formatPhaseLabel(phase: string | null | undefined) {
   }
 }
 
-function getPhaseStep(phase: string | null | undefined) {
-  switch (phase) {
-    case 'prepare_trade_calendar':
-      return { current: 1, total: 5 }
-    case 'prepare_stock_list':
-      return { current: 2, total: 5 }
-    case 'download_bars':
-    case 'download_pending_trade_dates':
-      return { current: 3, total: 5 }
-    case 'retry_failed':
-      return { current: 4, total: 5 }
-    case 'write_db':
-      return { current: 5, total: 5 }
-    case 'done':
-      return { current: 5, total: 5 }
-    case 'prepare_ths_concepts':
-      return { current: 1, total: 3 }
-    case 'fetch_ths_concept':
-    case 'retry_ths_concepts':
-    case 'retry_ths_concept':
-    case 'failed_ths_concept':
-      return { current: 2, total: 3 }
-    case 'write_ths_concepts':
-    case 'done_ths_concepts':
-      return { current: 3, total: 3 }
-    case 'rebuild_concept_performance':
-      return { current: 1, total: 1 }
+function getProgressWorkflow(action: string | null | undefined) {
+  switch (action) {
+    case 'first-download':
+      return [
+        'prepare_trade_calendar',
+        'prepare_stock_list',
+        'download_bars',
+        'retry_failed',
+        'write_db',
+        'download_index_bars',
+        'rebuild_concept_performance',
+        'done',
+      ] as string[]
+    case 'incremental-download':
+      return [
+        'prepare_trade_calendar',
+        'prepare_stock_list',
+        'download_pending_trade_dates',
+        'validate_pending_trade_dates',
+        'calc_incremental_indicators',
+        'recover_failed_stocks',
+        'write_db',
+        'download_index_bars',
+        'rebuild_concept_performance',
+        'done',
+      ] as string[]
+    case 'repair-missing-stocks':
+      return ['download_bars', 'retry_failed', 'write_db', 'rebuild_concept_performance', 'done'] as string[]
+    case 'download-ths-concepts':
+      return [
+        'prepare_ths_concepts',
+        'fetch_ths_concept',
+        'retry_ths_concepts',
+        'write_ths_concepts',
+        'done_ths_concepts',
+      ] as string[]
+    case 'rebuild-concept-performance':
+      return ['rebuild_concept_performance'] as string[]
+    case 'repair-concept-most-related':
+      return ['repair_concept_most_related'] as string[]
     default:
       return null
   }
+}
+
+function getPhaseStep(action: string | null | undefined, phase: string | null | undefined) {
+  const workflow = getProgressWorkflow(action)
+  const normalizedPhase = normalizeProgressPhase(phase)
+  if (!workflow || !normalizedPhase) {
+    return null
+  }
+
+  const current = workflow.indexOf(normalizedPhase)
+  if (current < 0) {
+    return null
+  }
+
+  return { current: current + 1, total: workflow.length }
+}
+
+function getProgressCounterText(progress: DataDownloadProgress | null) {
+  if (!progress) {
+    return '等待后端返回分段进度'
+  }
+
+  const phaseLabel = formatPhaseLabel(progress.phase)
+  if (progress.total > 0) {
+    return `${phaseLabel} · ${progress.finished} / ${progress.total}`
+  }
+
+  return phaseLabel
+}
+
+function getCurrentObjectText(progress: DataDownloadProgress | null) {
+  if (!progress) {
+    return '等待后端分派任务'
+  }
+
+  return progress.currentLabel ?? progress.message ?? '等待后端分派任务'
 }
 
 function formatDbRange(range: DataDownloadStatus['sourceDb'] | DataDownloadStatus['conceptPerformanceDb'] | null | undefined) {
@@ -328,11 +421,8 @@ export default function DataDownloadPage() {
     inputDateToCompact(startDateInput) || status?.sourceDb.minTradeDate || '20240101'
   const progressPercent = calcProgressPercent(deferredProgress)
   const shownProgressPercent = progressPercent === null ? 10 : Math.max(displayProgressPercent, Math.min(progressPercent, 100))
-  const phaseStep = getPhaseStep(deferredProgress?.phase)
-  const progressCounterText =
-    progressPercent === null
-      ? '等待后端返回分段进度'
-      : `${deferredProgress?.finished ?? 0} / ${deferredProgress?.total ?? 0}`
+  const phaseStep = getPhaseStep(deferredProgress?.action, deferredProgress?.phase)
+  const progressCounterText = getProgressCounterText(deferredProgress)
   const missingStockRepair = status?.missingStockRepair ?? null
   const showMainProgress = busyAction === 'running' && activeTaskSection === 'main'
   const showConceptProgress = busyAction === 'running' && activeTaskSection === 'concept'
@@ -469,7 +559,7 @@ export default function DataDownloadPage() {
           </div>
           <div className="data-download-progress-stat data-download-progress-stat-wide">
             <span>当前对象</span>
-            <strong>{deferredProgress?.currentLabel ?? '等待后端分派任务'}</strong>
+            <strong>{getCurrentObjectText(deferredProgress)}</strong>
           </div>
         </div>
         <div className="data-download-progress-text">

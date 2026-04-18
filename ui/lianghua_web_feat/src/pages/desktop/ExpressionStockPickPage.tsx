@@ -265,7 +265,11 @@ export default function ExpressionStockPickPage() {
             : ''}
         </span>
       </div>
-      <StockPickResultTable rows={rows} tradeDate={resolvedReferenceTradeDate} />
+      <StockPickResultTable
+        rows={rows}
+        tradeDate={resolvedReferenceTradeDate}
+        sourcePath={sourcePath}
+      />
     </section>
   )
 }

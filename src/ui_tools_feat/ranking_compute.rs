@@ -102,7 +102,7 @@ fn scoring_run_timings(profile: &ScoringRunProfile) -> Vec<RankComputeTimingItem
             "init-result-db",
             "初始化结果库",
             profile.init_result_db_ms,
-            Some("包含结果表建表与无主键结构迁移检查".to_string()),
+            Some("包含结果表建表与主键结构检查".to_string()),
         ),
         timing_item("prepare", "准备数据与规则", profile.prepare_ms, None),
         timing_item(

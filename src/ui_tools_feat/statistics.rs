@@ -514,6 +514,14 @@ fn read_non_empty_owned(raw: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn normalize_validation_points(raw: Option<f64>) -> Result<f64, String> {
+    match raw {
+        Some(value) if !value.is_finite() => Err("手动策略 points 非法".to_string()),
+        Some(value) if value < 0.0 => Ok(-1.0),
+        Some(_) | None => Ok(1.0),
+    }
+}
+
 fn resolve_validation_seed_rule(
     import_rule_name_raw: &str,
     manual_strategy: Option<&RuleExpressionValidationManualStrategy>,
@@ -542,11 +550,8 @@ fn resolve_validation_seed_rule(
     let manual_explain =
         manual_strategy.and_then(|strategy| read_non_empty_owned(strategy.explain.as_deref()));
     let manual_scope_windows = manual_strategy.and_then(|strategy| strategy.scope_windows);
-    let manual_points_raw = manual_strategy.and_then(|strategy| strategy.points);
-    let manual_points = manual_points_raw.filter(|value| value.is_finite());
-    if manual_points_raw.is_some() && manual_points.is_none() {
-        return Err("手动策略 points 非法".to_string());
-    }
+    let manual_points =
+        normalize_validation_points(manual_strategy.and_then(|strategy| strategy.points))?;
     let manual_dist_points = manual_strategy
         .and_then(|strategy| strategy.dist_points.clone())
         .and_then(|items| if items.is_empty() { None } else { Some(items) });
@@ -573,7 +578,6 @@ fn resolve_validation_seed_rule(
         || manual_formula.is_some()
         || manual_scope_way.is_some()
         || manual_scope_windows.is_some()
-        || manual_points.is_some()
         || manual_dist_points.is_some()
         || manual_explain.is_some()
         || manual_tag.is_some()
@@ -640,18 +644,12 @@ fn resolve_validation_seed_rule(
         })
         .unwrap_or_else(|| format!("表达式验证策略: {rule_name}"));
 
-    let points = manual_points
-        .or_else(|| import_rule.as_ref().map(|rule| rule.points))
-        .unwrap_or(1.0);
+    let points = manual_points;
     if !points.is_finite() {
         return Err("策略 points 非法".to_string());
     }
 
-    let dist_points = manual_dist_points.or_else(|| {
-        import_rule
-            .as_ref()
-            .and_then(|rule| rule.dist_points.clone())
-    });
+    let dist_points = manual_dist_points;
 
     let tag = manual_tag
         .or_else(|| import_rule.as_ref().map(|rule| rule.tag))

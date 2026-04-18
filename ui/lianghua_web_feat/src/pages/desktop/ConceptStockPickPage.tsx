@@ -245,7 +245,11 @@ export default function ConceptStockPickPage() {
         <strong>结果列表</strong>
         <span>共 {rows.length} 只，统计日期：{formatDateLabel(resolvedTradeDate)}</span>
       </div>
-      <StockPickResultTable rows={rows} tradeDate={resolvedTradeDate} />
+      <StockPickResultTable
+        rows={rows}
+        tradeDate={resolvedTradeDate}
+        sourcePath={sourcePath}
+      />
     </section>
   )
 }

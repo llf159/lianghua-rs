@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { type StockPickRow } from "../apis/stockPick";
+import DetailsLink from "../shared/DetailsLink";
 import { useRouteScrollRegion } from "../shared/routeScroll";
 import {
   formatConceptText,
@@ -55,9 +56,11 @@ export function formatNumber(value?: number | null, digits = 2) {
 export function StockPickResultTable({
   rows,
   tradeDate,
+  sourcePath,
 }: {
   rows: StockPickRow[];
   tradeDate?: string;
+  sourcePath?: string;
 }) {
   const { excludedConcepts } = useConceptExclusions();
   const [sortKey, setSortKey] = useState<string | null>(null);
@@ -78,6 +81,16 @@ export function StockPickResultTable({
   const tableWrapRef = useRouteScrollRegion<HTMLDivElement>(
     "stock-pick-result-table",
     [sortedRows.length, tradeDate],
+  );
+  const navigationItems = useMemo(
+    () =>
+      sortedRows.map((row) => ({
+        tsCode: row.ts_code,
+        tradeDate: tradeDate ?? null,
+        sourcePath: sourcePath?.trim() || undefined,
+        name: row.name ?? undefined,
+      })),
+    [sortedRows, sourcePath, tradeDate],
   );
 
   if (rows.length === 0) {
@@ -141,9 +154,16 @@ export function StockPickResultTable({
                 <td>{formatNumber(row.rank, 0)}</td>
                 <td>{row.ts_code}</td>
                 <td>
-                  <span className="stock-pick-link-btn">
+                  <DetailsLink
+                    className="stock-pick-link-btn"
+                    tsCode={row.ts_code}
+                    tradeDate={tradeDate ?? null}
+                    sourcePath={sourcePath?.trim() || undefined}
+                    title={`查看 ${row.name ?? row.ts_code} 详情`}
+                    navigationItems={navigationItems}
+                  >
                     {row.name ?? row.ts_code}
-                  </span>
+                  </DetailsLink>
                 </td>
                 <td>{formatNumber(row.total_score)}</td>
                 <td>{row.board}</td>

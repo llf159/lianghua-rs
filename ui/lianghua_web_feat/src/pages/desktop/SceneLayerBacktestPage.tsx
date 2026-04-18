@@ -38,6 +38,13 @@ type RuleSummarySortKey =
   | "icir";
 
 type ValidationScopeWayOption = "ANY" | "LAST" | "EACH" | "RECENT" | "CONSEC";
+type ValidationDirection = "positive" | "negative";
+type ValidationUnknownConfigDraft = {
+  name: string;
+  start: string;
+  end: string;
+  step: string;
+};
 
 const VALIDATION_DEFAULT_SAMPLE_LIMIT = 5;
 const VALIDATION_MAX_SAMPLE_LIMIT = 200;
@@ -92,16 +99,25 @@ function formatLift(value?: number | null) {
   return `${value.toFixed(2)}x`;
 }
 
-function buildEmptyUnknownConfig(): RuleValidationUnknownConfig {
+function buildEmptyUnknownConfig(): ValidationUnknownConfigDraft {
   return {
     name: "",
-    start: 2,
-    end: 20,
-    step: 2,
+    start: "2",
+    end: "20",
+    step: "2",
   };
 }
 
-function hasValidUnknownConfig(configs: RuleValidationUnknownConfig[]): boolean {
+function toUnknownConfigDraft(item: RuleValidationUnknownConfig): ValidationUnknownConfigDraft {
+  return {
+    name: item.name,
+    start: String(item.start),
+    end: String(item.end),
+    step: String(item.step),
+  };
+}
+
+function hasValidUnknownConfig(configs: ValidationUnknownConfigDraft[]): boolean {
   return configs.some((item) => item.name.trim().length > 0);
 }
 
@@ -138,7 +154,7 @@ function readNextNonSpaceChar(expression: string, from: number): string {
   return "";
 }
 
-function inferUnknownConfigs(expression: string): RuleValidationUnknownConfig[] {
+function inferUnknownConfigs(expression: string): ValidationUnknownConfigDraft[] {
   const assigned = new Set<string>();
   for (const match of expression.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*:=/g)) {
     const name = match[1]?.trim();
@@ -182,9 +198,9 @@ function inferUnknownConfigs(expression: string): RuleValidationUnknownConfig[] 
 
   return names.map((name) => ({
     name,
-    start: 2,
-    end: 20,
-    step: 2,
+    start: "2",
+    end: "20",
+    step: "2",
   }));
 }
 
@@ -269,12 +285,13 @@ export default function SceneLayerBacktestPage() {
   const [strategyRuleOptions, setStrategyRuleOptions] = useState<StrategyManageRuleItem[]>([]);
   const [validationImportRuleName, setValidationImportRuleName] = useState("");
   const [validationExpression, setValidationExpression] = useState("");
+  const [validationDirection, setValidationDirection] = useState<ValidationDirection>("positive");
   const [validationScopeWay, setValidationScopeWay] = useState<ValidationScopeWayOption>("ANY");
   const [validationConsecThresholdText, setValidationConsecThresholdText] = useState("2");
   const [validationScopeWindowsText, setValidationScopeWindowsText] = useState("1");
   const [validationEnableUnknown, setValidationEnableUnknown] = useState(false);
   const [validationUnknownConfigs, setValidationUnknownConfigs] = useState<
-    RuleValidationUnknownConfig[]
+    ValidationUnknownConfigDraft[]
   >([]);
   const [validationSampleLimitText, setValidationSampleLimitText] = useState(
     String(VALIDATION_DEFAULT_SAMPLE_LIMIT),
@@ -304,11 +321,12 @@ export default function SceneLayerBacktestPage() {
     setBacktestPeriod(returnState.backtestPeriod);
     setValidationImportRuleName(returnState.validationImportRuleName);
     setValidationExpression(returnState.validationExpression);
+    setValidationDirection("positive");
     setValidationScopeWay(returnState.validationScopeWay);
     setValidationConsecThresholdText(returnState.validationConsecThresholdText);
     setValidationScopeWindowsText(returnState.validationScopeWindowsText);
     setValidationEnableUnknown(returnState.validationEnableUnknown);
-    setValidationUnknownConfigs(returnState.validationUnknownConfigs);
+    setValidationUnknownConfigs(returnState.validationUnknownConfigs.map(toUnknownConfigDraft));
     setValidationSampleLimitText(returnState.validationSampleLimitText);
     setValidationError("");
     setValidationResult(returnState.validationResult);
@@ -618,6 +636,9 @@ export default function SceneLayerBacktestPage() {
     }
 
     setValidationExpression(matched.when ?? "");
+    setValidationDirection(
+      Number.isFinite(matched.points) && Number(matched.points) < 0 ? "negative" : "positive",
+    );
     const parsedScopeWay = resolveValidationScopeWay(matched.scope_way);
     setValidationScopeWay(parsedScopeWay.scopeWay);
     setValidationConsecThresholdText(String(parsedScopeWay.consecThreshold));
@@ -678,9 +699,9 @@ export default function SceneLayerBacktestPage() {
       ? validationUnknownConfigs
           .map((item) => ({
             name: item.name.trim(),
-            start: Number(item.start),
-            end: Number(item.end),
-            step: Number(item.step),
+            start: Number(item.start.trim()),
+            end: Number(item.end.trim()),
+            step: Number(item.step.trim()),
           }))
           .filter((item) => item.name.length > 0)
       : [];
@@ -724,13 +745,7 @@ export default function SceneLayerBacktestPage() {
     );
     const resolvedRuleName = validationImportRuleName.trim();
     const manualStrategyName = resolvedRuleName || "manual_expression_strategy";
-    const distPoints = selectedRule?.dist_points?.length
-      ? selectedRule.dist_points.map((item) => ({
-          min: Number(item.min),
-          max: Number(item.max),
-          points: Number(item.points),
-        }))
-      : undefined;
+    const normalizedManualPoints = validationDirection === "negative" ? -1 : 1;
 
     setValidationLoading(true);
     setValidationError("");
@@ -745,8 +760,7 @@ export default function SceneLayerBacktestPage() {
           scopeWay: normalizedScopeWay,
           scopeWindows,
           when: validationExpression.trim(),
-          points: Number.isFinite(selectedRule?.points) ? Number(selectedRule?.points) : 1,
-          distPoints,
+          points: normalizedManualPoints,
           explain: selectedRule?.explain?.trim() || `手动表达式验证：${manualStrategyName}`,
         },
         when: validationExpression.trim(),
@@ -1177,6 +1191,16 @@ export default function SceneLayerBacktestPage() {
             </select>
           </label>
           <label className="scene-layer-field">
+            <span>方向</span>
+            <select
+              value={validationDirection}
+              onChange={(event) => setValidationDirection(event.target.value as ValidationDirection)}
+            >
+              <option value="positive">正向</option>
+              <option value="negative">负向</option>
+            </select>
+          </label>
+          <label className="scene-layer-field">
             <span>scope_way</span>
             <select
               value={validationScopeWay}
@@ -1310,7 +1334,7 @@ export default function SceneLayerBacktestPage() {
                         setValidationUnknownConfigs((current) =>
                           current.map((config, configIndex) =>
                             configIndex === index
-                              ? { ...config, start: Number(event.target.value) }
+                              ? { ...config, start: event.target.value }
                               : config,
                           ),
                         )
@@ -1327,7 +1351,7 @@ export default function SceneLayerBacktestPage() {
                         setValidationUnknownConfigs((current) =>
                           current.map((config, configIndex) =>
                             configIndex === index
-                              ? { ...config, end: Number(event.target.value) }
+                              ? { ...config, end: event.target.value }
                               : config,
                           ),
                         )
@@ -1344,7 +1368,7 @@ export default function SceneLayerBacktestPage() {
                         setValidationUnknownConfigs((current) =>
                           current.map((config, configIndex) =>
                             configIndex === index
-                              ? { ...config, step: Number(event.target.value) }
+                              ? { ...config, step: event.target.value }
                               : config,
                           ),
                         )

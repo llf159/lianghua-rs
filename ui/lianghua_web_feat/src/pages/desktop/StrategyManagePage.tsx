@@ -274,10 +274,19 @@ function sceneStageSummary(rules: StrategyManageRuleItem[]) {
     .join(' / ')
 }
 
+function buildRuleSearchText(rule: StrategyManageRuleItem) {
+  return `${rule.name} ${rule.scene_name} ${rule.stage} ${rule.scope_way} ${rule.explain} ${rule.when}`.toLowerCase()
+}
+
+function buildSceneSearchText(scene: StrategyManageSceneItem) {
+  return `${scene.name} ${scene.direction}`.toLowerCase()
+}
+
 export default function StrategyManagePage() {
   const [sourcePath, setSourcePath] = useState('')
   const [scenes, setScenes] = useState<StrategyManageSceneItem[]>([])
   const [rules, setRules] = useState<StrategyManageRuleItem[]>([])
+  const [searchKeyword, setSearchKeyword] = useState('')
   const [selectedSceneName, setSelectedSceneName] = useState('')
   const [busyAction, setBusyAction] = useState<BusyAction>('loading')
   const [notice, setNotice] = useState('')
@@ -321,6 +330,33 @@ export default function StrategyManagePage() {
     () => rules.filter((item) => item.scene_name === selectedSceneName),
     [rules, selectedSceneName],
   )
+  const normalizedSearchKeyword = searchKeyword.trim().toLowerCase()
+  const filteredScenes = useMemo(() => {
+    if (!normalizedSearchKeyword) {
+      return scenes
+    }
+
+    return scenes.filter((scene) => {
+      if (buildSceneSearchText(scene).includes(normalizedSearchKeyword)) {
+        return true
+      }
+
+      return rules.some(
+        (rule) =>
+          rule.scene_name === scene.name &&
+          buildRuleSearchText(rule).includes(normalizedSearchKeyword),
+      )
+    })
+  }, [normalizedSearchKeyword, rules, scenes])
+  const selectedSceneFilteredRules = useMemo(() => {
+    if (!normalizedSearchKeyword) {
+      return selectedSceneRules
+    }
+
+    return selectedSceneRules.filter((rule) =>
+      buildRuleSearchText(rule).includes(normalizedSearchKeyword),
+    )
+  }, [normalizedSearchKeyword, selectedSceneRules])
   const bulkFilteredRules = useMemo(() => {
     const chosenRuleNames = new Set(refactorRules.map((item) => item.name))
     const sceneFiltered =
@@ -926,6 +962,17 @@ export default function StrategyManagePage() {
           </div>
         </div>
 
+        <div className="strategy-manage-filter-grid">
+          <label className="strategy-manage-field strategy-manage-field-span-full">
+            <span>策略搜索</span>
+            <input
+              value={searchKeyword}
+              onChange={(event) => setSearchKeyword(event.target.value)}
+              placeholder="搜索 scene / rule 名称 / 表达式 / 说明 / stage / scope"
+            />
+          </label>
+        </div>
+
         {notice ? <div className="strategy-manage-message strategy-manage-message-notice">{notice}</div> : null}
         {error ? <div className="strategy-manage-message strategy-manage-message-error">{error}</div> : null}
       </section>
@@ -933,14 +980,25 @@ export default function StrategyManagePage() {
       <section className="strategy-manage-card">
         <div className="strategy-manage-list-head">
           <strong>Scene 总览</strong>
-          <span>点击 scene 打开浮窗</span>
+          <span>
+            {normalizedSearchKeyword
+              ? `匹配 ${filteredScenes.length} / ${scenes.length} 个 scene`
+              : '点击 scene 打开浮窗'}
+          </span>
         </div>
-        {scenes.length === 0 ? (
+        {filteredScenes.length === 0 ? (
+          <div className="strategy-manage-empty">没有匹配当前搜索条件的 scene / rule。</div>
+        ) : scenes.length === 0 ? (
           <div className="strategy-manage-empty">当前规则文件里没有 scene。</div>
         ) : (
           <div className="strategy-manage-scene-grid">
-            {scenes.map((scene) => {
+            {filteredScenes.map((scene) => {
               const sceneRules = rules.filter((item) => item.scene_name === scene.name)
+              const matchedRuleCount = normalizedSearchKeyword
+                ? sceneRules.filter((item) =>
+                    buildRuleSearchText(item).includes(normalizedSearchKeyword),
+                  ).length
+                : sceneRules.length
               return (
                 <button
                   key={scene.name}
@@ -951,7 +1009,11 @@ export default function StrategyManagePage() {
                   <div className="strategy-manage-scene-card-head">
                     <strong>{scene.name}</strong>
                     <div className="strategy-manage-rule-card-actions">
-                      <span>{scene.rule_count} 条规则</span>
+                      <span>
+                        {normalizedSearchKeyword
+                          ? `命中 ${matchedRuleCount} / ${scene.rule_count} 条`
+                          : `${scene.rule_count} 条规则`}
+                      </span>
                       <button
                         type="button"
                         className="strategy-manage-inline-btn"
@@ -1079,13 +1141,19 @@ export default function StrategyManagePage() {
             <div className="strategy-manage-list-panel strategy-manage-list-panel-full">
               <div className="strategy-manage-list-head">
                 <strong>Rule 列表</strong>
-                <span>{selectedSceneRules.length} 条</span>
+                <span>
+                  {normalizedSearchKeyword
+                    ? `命中 ${selectedSceneFilteredRules.length} / ${selectedSceneRules.length} 条`
+                    : `${selectedSceneRules.length} 条`}
+                </span>
               </div>
-              {selectedSceneRules.length === 0 ? (
+              {selectedSceneFilteredRules.length === 0 ? (
+                <div className="strategy-manage-empty">当前 scene 下没有匹配搜索条件的规则。</div>
+              ) : selectedSceneRules.length === 0 ? (
                 <div className="strategy-manage-empty">当前 scene 下还没有规则。</div>
               ) : (
                 <div className="strategy-manage-scene-rule-list">
-                  {selectedSceneRules.map((rule) => {
+                  {selectedSceneFilteredRules.map((rule) => {
                     const distScoreSummary = buildDistScoreSummary(rule.dist_points)
 
                     return (

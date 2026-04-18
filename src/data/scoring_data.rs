@@ -300,7 +300,8 @@ fn create_result_table(conn: &Connection, table_name: &str) -> Result<(), String
                 ts_code VARCHAR,
                 trade_date VARCHAR,
                 total_score DOUBLE,
-                rank INTEGER
+                rank INTEGER,
+                PRIMARY KEY (ts_code, trade_date)
             )
             "#
         ),
@@ -310,7 +311,8 @@ fn create_result_table(conn: &Connection, table_name: &str) -> Result<(), String
                 ts_code VARCHAR,
                 trade_date VARCHAR,
                 rule_name VARCHAR,
-                rule_score DOUBLE
+                rule_score DOUBLE,
+                PRIMARY KEY (ts_code, trade_date, rule_name)
             )
             "#
         ),
@@ -326,7 +328,8 @@ fn create_result_table(conn: &Connection, table_name: &str) -> Result<(), String
                 risk_score DOUBLE,
                 confirm_strength DOUBLE,
                 risk_intensity DOUBLE,
-                scene_rank INTEGER
+                scene_rank INTEGER,
+                PRIMARY KEY (ts_code, trade_date, scene_name)
             )
             "#
         ),
@@ -427,7 +430,7 @@ fn ensure_result_table_schema(conn: &Connection, table_name: &str) -> Result<(),
             .collect::<Vec<_>>();
     let has_primary_key = result_table_has_primary_key(conn, table_name)?;
 
-    if columns_match && !has_primary_key {
+    if columns_match && has_primary_key {
         return Ok(());
     }
 
