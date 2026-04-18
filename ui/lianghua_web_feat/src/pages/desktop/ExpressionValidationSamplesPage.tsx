@@ -341,14 +341,6 @@ export function ExpressionValidationSamplesPanel({
                 {data.importRuleExplain ? ` · ${data.importRuleExplain}` : ""}
               </strong>
             </div>
-            <div className="expression-validation-samples-compact-row">
-              <span>表达式摘要</span>
-              <strong>{expressionSummary}</strong>
-            </div>
-            <div className="expression-validation-samples-compact-row">
-              <span>替换后表达式</span>
-              <strong>{data.combo.formula || "--"}</strong>
-            </div>
           </div>
         </section>
       ) : (

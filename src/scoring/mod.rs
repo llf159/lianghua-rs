@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 
 use duckdb::Connection;
 
@@ -24,6 +24,40 @@ enum ScopeHit {
 pub enum TieBreakWay {
     TsCode,
     KdjJ,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct RankTiebreakProfile {
+    pub total_ms: u64,
+    pub attach_source_db_ms: Option<u64>,
+    pub update_rank_ms: u64,
+    pub detach_source_db_ms: Option<u64>,
+}
+
+fn format_elapsed_ms(elapsed_ms: u64) -> String {
+    if elapsed_ms < 1_000 {
+        return format!("{elapsed_ms}ms");
+    }
+
+    format!("{:.3}s", elapsed_ms as f64 / 1_000.0)
+}
+
+fn log_rank_tiebreak_profile(profile: &RankTiebreakProfile) {
+    let attach = profile
+        .attach_source_db_ms
+        .map(format_elapsed_ms)
+        .unwrap_or_else(|| "-".to_string());
+    let detach = profile
+        .detach_source_db_ms
+        .map(format_elapsed_ms)
+        .unwrap_or_else(|| "-".to_string());
+    println!(
+        "补排名耗时: 总计={}；附加原始库={}；补排名回写={}；分离原始库={}",
+        format_elapsed_ms(profile.total_ms),
+        attach,
+        format_elapsed_ms(profile.update_rank_ms),
+        detach,
+    );
 }
 
 #[derive(Debug, Default)]
@@ -427,22 +461,32 @@ pub fn build_rank_tiebreak(
     source_db_path: &str,
     adj_type: &str,
     tie_break: TieBreakWay,
-) -> Result<(), String> {
+) -> Result<RankTiebreakProfile, String> {
+    let total_started_at = Instant::now();
+    let mut profile = RankTiebreakProfile::default();
     let conn = Connection::open(result_db_path).map_err(|e| format!("结果库连接失败:{e}"))?;
 
     if let TieBreakWay::KdjJ = tie_break {
+        let attach_started_at = Instant::now();
         let attach_sql = format!("ATTACH '{}' AS src_db", source_db_path);
         conn.execute(&attach_sql, [])
             .map_err(|e| format!("附加原始库失败:{e}"))?;
+        profile.attach_source_db_ms = Some(attach_started_at.elapsed().as_millis() as u64);
     }
 
     let sql = build_tirbreak_rank_sql(tie_break, adj_type);
+    let update_started_at = Instant::now();
     conn.execute(&sql, [])
         .map_err(|e| format!("补rank失败:{e}"))?;
+    profile.update_rank_ms = update_started_at.elapsed().as_millis() as u64;
 
     if let TieBreakWay::KdjJ = tie_break {
+        let detach_started_at = Instant::now();
         let _ = conn.execute("DETACH src_db", []);
+        profile.detach_source_db_ms = Some(detach_started_at.elapsed().as_millis() as u64);
     }
 
-    Ok(())
+    profile.total_ms = total_started_at.elapsed().as_millis() as u64;
+    log_rank_tiebreak_profile(&profile);
+    Ok(profile)
 }

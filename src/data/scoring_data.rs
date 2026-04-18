@@ -50,11 +50,36 @@ pub struct ScoreBatch {
     pub scene_rows: Vec<SceneDetails>,
 }
 
+impl ScoreBatch {
+    pub fn extend(&mut self, other: ScoreBatch) {
+        self.summary_rows.extend(other.summary_rows);
+        self.detail_rows.extend(other.detail_rows);
+        self.scene_rows.extend(other.scene_rows);
+    }
+}
+
 #[derive(Debug)]
 pub enum ScoreWriteMessage {
     Batch(ScoreBatch),
     Abort(String),
 }
+
+#[derive(Debug, Default, Clone)]
+pub struct ScoreWriteProfile {
+    pub total_ms: u64,
+    pub drop_indexes_ms: u64,
+    pub delete_range_ms: u64,
+    pub receive_and_append_batches_ms: u64,
+    pub summary_rank_ms: u64,
+    pub scene_rank_ms: u64,
+    pub commit_ms: u64,
+    pub recreate_indexes_ms: u64,
+    pub batch_count: usize,
+}
+
+const SCORE_SUMMARY_TABLE: &str = "score_summary";
+const RULE_DETAILS_TABLE: &str = "rule_details";
+const SCENE_DETAILS_TABLE: &str = "scene_details";
 
 impl ScoreSummary {
     pub fn build(ts_code: &str, trade_dates: &[String], total_scores: &[f64]) -> Vec<Self> {
@@ -93,7 +118,6 @@ impl ScoreSummary {
     // }
 
     pub fn write_db(db_path: &str, rows: &[ScoreSummary]) -> Result<(), String> {
-        let time = time::Instant::now();
         let mut conn =
             Connection::open(db_path).map_err(|e| format!("summary数据库连接失败:{e}"))?;
         let tx = conn
@@ -133,7 +157,6 @@ impl ScoreSummary {
                 .map_err(|e| format!("插入数据库新数据失败:{e}"))?;
         }
         tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
-        println!("summary写入耗时:{:.3?}", time.elapsed());
         Ok(())
     }
 }
@@ -168,7 +191,6 @@ impl ScoreDetails {
     }
 
     pub fn write_db(db_path: &str, rows: &[ScoreDetails]) -> Result<(), String> {
-        let time = time::Instant::now();
         let mut conn =
             Connection::open(db_path).map_err(|e| format!("details数据库连接失败:{e}"))?;
         let tx = conn
@@ -209,8 +231,6 @@ impl ScoreDetails {
                 .map_err(|e| format!("插入数据库新数据失败:{e}"))?;
         }
         tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
-
-        println!("details写入耗时:{:.3?}", time.elapsed());
         Ok(())
     }
 }
@@ -265,59 +285,191 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
 
     let conn = Connection::open(db_path).map_err(|e| format!("打开数据库失败:{e}"))?;
 
-    conn.execute(
-        r#"
-        CREATE TABLE IF NOT EXISTS score_summary (
-            ts_code VARCHAR,
-            trade_date VARCHAR,
-            total_score DOUBLE,
-            rank INTEGER,
-            PRIMARY KEY (ts_code, trade_date)
+    ensure_result_table_schema(&conn, SCORE_SUMMARY_TABLE)?;
+    ensure_result_table_schema(&conn, RULE_DETAILS_TABLE)?;
+    ensure_result_table_schema(&conn, SCENE_DETAILS_TABLE)?;
+
+    Ok(())
+}
+
+fn create_result_table(conn: &Connection, table_name: &str) -> Result<(), String> {
+    let sql = match table_name {
+        SCORE_SUMMARY_TABLE => format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                ts_code VARCHAR,
+                trade_date VARCHAR,
+                total_score DOUBLE,
+                rank INTEGER
+            )
+            "#
+        ),
+        RULE_DETAILS_TABLE => format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                ts_code VARCHAR,
+                trade_date VARCHAR,
+                rule_name VARCHAR,
+                rule_score DOUBLE
+            )
+            "#
+        ),
+        SCENE_DETAILS_TABLE => format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                ts_code VARCHAR,
+                trade_date VARCHAR,
+                scene_name VARCHAR,
+                direction VARCHAR,
+                stage VARCHAR,
+                stage_score DOUBLE,
+                risk_score DOUBLE,
+                confirm_strength DOUBLE,
+                risk_intensity DOUBLE,
+                scene_rank INTEGER
+            )
+            "#
+        ),
+        _ => return Err(format!("不支持的结果表:{table_name}")),
+    };
+
+    conn.execute(&sql, [])
+        .map_err(|e| format!("创建{table_name}失败:{e}"))?;
+    Ok(())
+}
+
+fn result_table_expected_columns(table_name: &str) -> Result<Vec<&'static str>, String> {
+    match table_name {
+        SCORE_SUMMARY_TABLE => Ok(vec!["ts_code", "trade_date", "total_score", "rank"]),
+        RULE_DETAILS_TABLE => Ok(vec!["ts_code", "trade_date", "rule_name", "rule_score"]),
+        SCENE_DETAILS_TABLE => Ok(vec![
+            "ts_code",
+            "trade_date",
+            "scene_name",
+            "direction",
+            "stage",
+            "stage_score",
+            "risk_score",
+            "confirm_strength",
+            "risk_intensity",
+            "scene_rank",
+        ]),
+        _ => Err(format!("不支持的结果表:{table_name}")),
+    }
+}
+
+fn result_table_exists(conn: &Connection, table_name: &str) -> Result<bool, String> {
+    let count = conn
+        .query_row(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+            [table_name],
+            |row| row.get::<_, i64>(0),
         )
-        "#,
+        .map_err(|e| format!("检查{table_name}是否存在失败:{e}"))?;
+    Ok(count > 0)
+}
+
+fn query_result_table_columns(conn: &Connection, table_name: &str) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ? ORDER BY ordinal_position",
+        )
+        .map_err(|e| format!("准备{table_name}列结构查询失败:{e}"))?;
+    let mut rows = stmt
+        .query([table_name])
+        .map_err(|e| format!("查询{table_name}列结构失败:{e}"))?;
+    let mut columns = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取{table_name}列结构失败:{e}"))?
+    {
+        columns.push(
+            row.get::<_, String>(0)
+                .map_err(|e| format!("读取{table_name}列名失败:{e}"))?,
+        );
+    }
+    Ok(columns)
+}
+
+fn result_table_has_primary_key(conn: &Connection, table_name: &str) -> Result<bool, String> {
+    let sql = format!("PRAGMA table_info('{table_name}')");
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("准备{table_name}主键检查失败:{e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("查询{table_name}主键信息失败:{e}"))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取{table_name}主键信息失败:{e}"))?
+    {
+        let pk: i64 = row
+            .get(5)
+            .map_err(|e| format!("读取{table_name}主键标记失败:{e}"))?;
+        if pk > 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn ensure_result_table_schema(conn: &Connection, table_name: &str) -> Result<(), String> {
+    if !result_table_exists(conn, table_name)? {
+        return create_result_table(conn, table_name);
+    }
+
+    let expected_columns = result_table_expected_columns(table_name)?;
+    let actual_columns = query_result_table_columns(conn, table_name)?;
+    let columns_match = actual_columns
+        == expected_columns
+            .iter()
+            .map(|column| column.to_string())
+            .collect::<Vec<_>>();
+    let has_primary_key = result_table_has_primary_key(conn, table_name)?;
+
+    if columns_match && !has_primary_key {
+        return Ok(());
+    }
+
+    conn.execute(&format!("DROP TABLE {table_name}"), [])
+        .map_err(|e| format!("删除旧{table_name}失败:{e}"))?;
+    create_result_table(conn, table_name)
+}
+
+fn drop_result_db_indexes(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "DROP INDEX IF EXISTS idx_score_summary_trade_date_rank_ts",
         [],
     )
-    .map_err(|e| format!("创建score_summary失败:{e}"))?;
-
+    .map_err(|e| format!("删除score_summary索引失败:{e}"))?;
+    conn.execute("DROP INDEX IF EXISTS idx_score_summary_ts_date", [])
+        .map_err(|e| format!("删除score_summary索引失败:{e}"))?;
+    conn.execute("DROP INDEX IF EXISTS idx_rule_details_rule_date_ts", [])
+        .map_err(|e| format!("删除rule_details索引失败:{e}"))?;
+    conn.execute("DROP INDEX IF EXISTS idx_rule_details_ts_date_rule", [])
+        .map_err(|e| format!("删除rule_details索引失败:{e}"))?;
     conn.execute(
-        r#"
-        CREATE TABLE IF NOT EXISTS rule_details (
-            ts_code VARCHAR,
-            trade_date VARCHAR,
-            rule_name VARCHAR,
-            rule_score DOUBLE,
-            PRIMARY KEY (ts_code, trade_date, rule_name)
-        )
-        "#,
+        "DROP INDEX IF EXISTS idx_scene_details_trade_date_scene_rank_ts",
         [],
     )
-    .map_err(|e| format!("创建rule_details失败:{e}"))?;
+    .map_err(|e| format!("删除scene_details索引失败:{e}"))?;
+    conn.execute("DROP INDEX IF EXISTS idx_scene_details_ts_date_scene", [])
+        .map_err(|e| format!("删除scene_details索引失败:{e}"))?;
+    conn.execute("DROP INDEX IF EXISTS idx_score_summary_trade_date_ts", [])
+        .map_err(|e| format!("删除旧score_summary索引失败:{e}"))?;
+    conn.execute("DROP INDEX IF EXISTS idx_scene_details_scene_date_ts", [])
+        .map_err(|e| format!("删除scene_details索引失败:{e}"))?;
+    Ok(())
+}
 
-    conn.execute("DROP TABLE IF EXISTS scene_details", [])
-        .map_err(|e| format!("重建scene_details前删除旧表失败:{e}"))?;
-
+fn ensure_result_db_indexes(conn: &Connection) -> Result<(), String> {
     conn.execute(
-        r#"
-        CREATE TABLE scene_details (
-            ts_code VARCHAR,
-            trade_date VARCHAR,
-            scene_name VARCHAR,
-            direction VARCHAR,
-            stage VARCHAR,
-            stage_score DOUBLE,
-            risk_score DOUBLE,
-            confirm_strength DOUBLE,
-            risk_intensity DOUBLE,
-            scene_rank INTEGER,
-            PRIMARY KEY (ts_code, trade_date, scene_name)
-        )
-        "#,
+        "CREATE INDEX IF NOT EXISTS idx_score_summary_trade_date_rank_ts ON score_summary(trade_date, rank, ts_code)",
         [],
     )
-    .map_err(|e| format!("创建scene_details失败:{e}"))?;
-
+    .map_err(|e| format!("创建score_summary索引失败:{e}"))?;
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_score_summary_trade_date_ts ON score_summary(trade_date, ts_code)",
+        "CREATE INDEX IF NOT EXISTS idx_score_summary_ts_date ON score_summary(ts_code, trade_date)",
         [],
     )
     .map_err(|e| format!("创建score_summary索引失败:{e}"))?;
@@ -327,7 +479,17 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
     )
     .map_err(|e| format!("创建rule_details索引失败:{e}"))?;
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_scene_details_scene_date_ts ON scene_details(scene_name, trade_date, ts_code)",
+        "CREATE INDEX IF NOT EXISTS idx_rule_details_ts_date_rule ON rule_details(ts_code, trade_date, rule_name)",
+        [],
+    )
+    .map_err(|e| format!("创建rule_details索引失败:{e}"))?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scene_details_trade_date_scene_rank_ts ON scene_details(trade_date, scene_name, scene_rank, ts_code)",
+        [],
+    )
+    .map_err(|e| format!("创建scene_details索引失败:{e}"))?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scene_details_ts_date_scene ON scene_details(ts_code, trade_date, scene_name)",
         [],
     )
     .map_err(|e| format!("创建scene_details索引失败:{e}"))?;
@@ -403,11 +565,9 @@ fn append_scene_rows(app: &mut Appender<'_>, rows: &[SceneDetails]) -> Result<()
 }
 
 fn compute_summary_rankings_in_tx(tx: &Transaction<'_>) -> Result<(), String> {
-    let time = time::Instant::now();
     let sql = build_tirbreak_rank_sql(TieBreakWay::TsCode, "");
     tx.execute(&sql, [])
         .map_err(|e| format!("批量更新总榜排名失败:{e}"))?;
-    println!("总榜排名计算耗时:{:.3?}", time.elapsed());
     Ok(())
 }
 
@@ -416,70 +576,101 @@ pub fn write_score_batches_from_channel(
     start_date: &str,
     end_date: &str,
     rx: Receiver<ScoreWriteMessage>,
-) -> Result<(), String> {
-    let time = time::Instant::now();
+) -> Result<ScoreWriteProfile, String> {
+    let total_started_at = time::Instant::now();
+    let mut profile = ScoreWriteProfile::default();
     let mut conn = Connection::open(db_path).map_err(|e| format!("结果库连接失败:{e}"))?;
-    let tx = conn
-        .transaction()
-        .map_err(|e| format!("创建数据库事务失败:{e}"))?;
 
-    delete_score_range(&tx, start_date, end_date)?;
+    let drop_indexes_started_at = time::Instant::now();
+    drop_result_db_indexes(&conn)?;
+    profile.drop_indexes_ms = drop_indexes_started_at.elapsed().as_millis() as u64;
 
-    {
-        let mut summary_app = tx
-            .appender("score_summary")
-            .map_err(|e| format!("score_summary appender创建失败:{e}"))?;
-        let mut detail_app = tx
-            .appender("rule_details")
-            .map_err(|e| format!("rule_details appender创建失败:{e}"))?;
-        let mut scene_app = tx
-            .appender("scene_details")
-            .map_err(|e| format!("scene_details appender创建失败:{e}"))?;
+    let write_result = (|| -> Result<(), String> {
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("创建数据库事务失败:{e}"))?;
 
+        let delete_started_at = time::Instant::now();
+        delete_score_range(&tx, start_date, end_date)?;
+        profile.delete_range_ms = delete_started_at.elapsed().as_millis() as u64;
+
+        let receive_and_append_started_at = time::Instant::now();
         let mut batch_count = 0usize;
-        for message in rx {
-            let batch = match message {
-                ScoreWriteMessage::Batch(batch) => batch,
-                ScoreWriteMessage::Abort(reason) => {
-                    return Err(format!("评分计算中断，结果库回滚:{reason}"));
+        {
+            let mut summary_app = tx
+                .appender("score_summary")
+                .map_err(|e| format!("score_summary appender创建失败:{e}"))?;
+            let mut detail_app = tx
+                .appender("rule_details")
+                .map_err(|e| format!("rule_details appender创建失败:{e}"))?;
+            let mut scene_app = tx
+                .appender("scene_details")
+                .map_err(|e| format!("scene_details appender创建失败:{e}"))?;
+
+            for message in rx {
+                let batch = match message {
+                    ScoreWriteMessage::Batch(batch) => batch,
+                    ScoreWriteMessage::Abort(reason) => {
+                        return Err(format!("评分计算中断，结果库回滚:{reason}"));
+                    }
+                };
+
+                append_summary_rows(&mut summary_app, &batch.summary_rows)?;
+                append_detail_rows(&mut detail_app, &batch.detail_rows)?;
+                append_scene_rows(&mut scene_app, &batch.scene_rows)?;
+                batch_count += 1;
+
+                if batch_count % 32 == 0 {
+                    summary_app
+                        .flush()
+                        .map_err(|e| format!("刷新score_summary失败:{e}"))?;
+                    detail_app
+                        .flush()
+                        .map_err(|e| format!("刷新rule_details失败:{e}"))?;
+                    scene_app
+                        .flush()
+                        .map_err(|e| format!("刷新scene_details失败:{e}"))?;
                 }
-            };
-
-            append_summary_rows(&mut summary_app, &batch.summary_rows)?;
-            append_detail_rows(&mut detail_app, &batch.detail_rows)?;
-            append_scene_rows(&mut scene_app, &batch.scene_rows)?;
-            batch_count += 1;
-
-            if batch_count % 32 == 0 {
-                summary_app
-                    .flush()
-                    .map_err(|e| format!("刷新score_summary失败:{e}"))?;
-                detail_app
-                    .flush()
-                    .map_err(|e| format!("刷新rule_details失败:{e}"))?;
-                scene_app
-                    .flush()
-                    .map_err(|e| format!("刷新scene_details失败:{e}"))?;
             }
+
+            summary_app
+                .flush()
+                .map_err(|e| format!("刷新score_summary失败:{e}"))?;
+            detail_app
+                .flush()
+                .map_err(|e| format!("刷新rule_details失败:{e}"))?;
+            scene_app
+                .flush()
+                .map_err(|e| format!("刷新scene_details失败:{e}"))?;
         }
+        profile.receive_and_append_batches_ms =
+            receive_and_append_started_at.elapsed().as_millis() as u64;
+        profile.batch_count = batch_count;
 
-        summary_app
-            .flush()
-            .map_err(|e| format!("刷新score_summary失败:{e}"))?;
-        detail_app
-            .flush()
-            .map_err(|e| format!("刷新rule_details失败:{e}"))?;
-        scene_app
-            .flush()
-            .map_err(|e| format!("刷新scene_details失败:{e}"))?;
-    }
+        let summary_rank_started_at = time::Instant::now();
+        compute_summary_rankings_in_tx(&tx)?;
+        profile.summary_rank_ms = summary_rank_started_at.elapsed().as_millis() as u64;
 
-    compute_summary_rankings_in_tx(&tx)?;
-    compute_scene_rankings_in_tx(&tx, start_date, end_date)?;
-    tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
-    println!("流式写入结果库耗时:{:.3?}", time.elapsed());
+        let scene_rank_started_at = time::Instant::now();
+        compute_scene_rankings_in_tx(&tx, start_date, end_date)?;
+        profile.scene_rank_ms = scene_rank_started_at.elapsed().as_millis() as u64;
 
-    Ok(())
+        let commit_started_at = time::Instant::now();
+        tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
+        profile.commit_ms = commit_started_at.elapsed().as_millis() as u64;
+
+        Ok::<(), String>(())
+    })();
+
+    let recreate_indexes_started_at = time::Instant::now();
+    let recreate_indexes_result = ensure_result_db_indexes(&conn);
+    profile.recreate_indexes_ms = recreate_indexes_started_at.elapsed().as_millis() as u64;
+
+    write_result?;
+    recreate_indexes_result?;
+    profile.total_ms = total_started_at.elapsed().as_millis() as u64;
+
+    Ok(profile)
 }
 
 /// 在当前事务内批量计算Scene排名并回写到scene_details。
@@ -488,7 +679,6 @@ fn compute_scene_rankings_in_tx(
     start_date: &str,
     end_date: &str,
 ) -> Result<(), String> {
-    let time = time::Instant::now();
     tx.execute(
         r#"
         UPDATE scene_details AS d
@@ -527,7 +717,6 @@ fn compute_scene_rankings_in_tx(
         params![start_date, end_date],
     )
     .map_err(|e| format!("批量更新Scene排名失败:{e}"))?;
-    println!("Scene排名计算耗时:{:.3?}", time.elapsed());
     Ok(())
 }
 

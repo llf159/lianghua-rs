@@ -13,6 +13,7 @@ use crate::{
         source_db_path,
     },
     expr::{
+        eval::{Runtime, Value},
         lexer::TokenKind,
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
@@ -22,8 +23,8 @@ use crate::{
         rule::{
             RuleLayerConfig, RuleLayerFromDbInput, RuleLayerRuntimeCache,
             build_rule_layer_runtime_cache, calc_all_rule_layer_metrics_from_db,
-            calc_rule_layer_metrics_from_cache, calc_rule_layer_metrics_from_db,
-            collect_triggered_rule_samples_from_cache,
+            calc_rule_layer_metrics_from_db,
+            calc_rule_layer_metrics_with_triggered_samples_from_cache,
         },
         scene::{
             SceneLayerConfig, SceneLayerFromDbInput, calc_all_scene_layer_metrics_from_db,
@@ -363,6 +364,24 @@ struct ValidationVariant {
     combo_label: String,
     formula: String,
     unknown_values: Vec<RuleValidationUnknownValue>,
+}
+
+type ValidationTriggeredScoreMap = HashMap<String, HashMap<String, f64>>;
+
+struct PreparedValidationCombo {
+    variant: ValidationVariant,
+    cached_rule: CachedRule,
+    assigned_names: Vec<String>,
+}
+
+struct ValidationExecutionPlan {
+    combos: Vec<PreparedValidationCombo>,
+    need_rows: usize,
+}
+
+struct ValidationTsCodeEvaluation {
+    ts_code: String,
+    combo_hits: Vec<(usize, HashMap<String, f64>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -1736,6 +1755,225 @@ fn build_validation_cached_rule(
     })
 }
 
+fn collect_validation_assigned_names(stmts: &Stmts) -> Vec<String> {
+    let mut assigned = HashSet::new();
+    for stmt in &stmts.item {
+        if let Stmt::Assign { name, .. } = stmt {
+            assigned.insert(name.clone());
+        }
+    }
+
+    let mut out = assigned.into_iter().collect::<Vec<_>>();
+    out.sort();
+    out
+}
+
+fn prepare_validation_combo(
+    seed_rule: &ValidationSeedRule,
+    variant: ValidationVariant,
+) -> Result<PreparedValidationCombo, String> {
+    let cached_rule = build_validation_cached_rule(
+        variant.combo_key.clone(),
+        seed_rule.scope_way,
+        seed_rule.scope_windows,
+        seed_rule.points,
+        seed_rule.dist_points.clone(),
+        seed_rule.tag,
+        &variant.formula,
+    )?;
+    let assigned_names = collect_validation_assigned_names(&cached_rule.when_ast);
+
+    Ok(PreparedValidationCombo {
+        variant,
+        cached_rule,
+        assigned_names,
+    })
+}
+
+fn build_validation_execution_plan(
+    source_path: &str,
+    start_date: &str,
+    end_date: &str,
+    seed_rule: &ValidationSeedRule,
+    variants: Vec<ValidationVariant>,
+) -> Result<ValidationExecutionPlan, String> {
+    let mut max_warmup_need = 0usize;
+    let mut combos = Vec::with_capacity(variants.len());
+
+    for variant in variants {
+        let combo = prepare_validation_combo(seed_rule, variant)?;
+        max_warmup_need = max_warmup_need.max(estimate_rule_warmup(
+            &combo.cached_rule.when_ast,
+            combo.cached_rule.scope_way,
+            combo.cached_rule.scope_windows,
+        )?);
+        combos.push(combo);
+    }
+
+    let need_rows = calc_query_need_rows(source_path, max_warmup_need, start_date, end_date)?;
+    Ok(ValidationExecutionPlan { combos, need_rows })
+}
+
+fn snapshot_runtime_values(runtime: &Runtime, names: &[String]) -> Vec<(String, Value)> {
+    names
+        .iter()
+        .filter_map(|name| {
+            runtime
+                .vars
+                .get(name)
+                .cloned()
+                .map(|value| (name.clone(), value))
+        })
+        .collect()
+}
+
+fn restore_runtime_values(runtime: &mut Runtime, values: &[(String, Value)]) {
+    for (name, value) in values {
+        runtime.vars.insert(name.clone(), value.clone());
+    }
+}
+
+fn build_validation_date_score_map(
+    trade_dates: &[String],
+    keep_from: usize,
+    scores: &[f64],
+    triggered_flags: &[bool],
+    rule_points: f64,
+) -> Option<HashMap<String, f64>> {
+    let min_len = usize::min(
+        trade_dates.len(),
+        usize::min(scores.len(), triggered_flags.len()),
+    );
+    if keep_from >= min_len {
+        return None;
+    }
+
+    let mut date_score_map = HashMap::new();
+    for index in keep_from..min_len {
+        let Some(score) =
+            normalize_validation_trigger_score(scores[index], triggered_flags[index], rule_points)
+        else {
+            continue;
+        };
+        date_score_map.insert(trade_dates[index].clone(), score);
+    }
+
+    if date_score_map.is_empty() {
+        None
+    } else {
+        Some(date_score_map)
+    }
+}
+
+fn evaluate_validation_combos_for_ts_code(
+    reader: &mut DataReader,
+    ts_code: &str,
+    stock_adj_type: &str,
+    start_date: &str,
+    end_date: &str,
+    need_rows: usize,
+    st_list: &HashSet<String>,
+    combos: &[PreparedValidationCombo],
+) -> Result<ValidationTsCodeEvaluation, String> {
+    let mut row_data = reader.load_one_tail_rows(ts_code, stock_adj_type, end_date, need_rows)?;
+    fill_validation_extra_fields(&mut row_data, ts_code, st_list.contains(ts_code))?;
+
+    let trade_dates = row_data.trade_dates.clone();
+    if trade_dates.is_empty() {
+        return Ok(ValidationTsCodeEvaluation {
+            ts_code: ts_code.to_string(),
+            combo_hits: Vec::new(),
+        });
+    }
+
+    let keep_from = trade_dates
+        .binary_search_by(|date| date.as_str().cmp(start_date))
+        .unwrap_or_else(|index| index);
+    let mut runtime = row_into_rt(row_data)?;
+    let restore_values = combos
+        .iter()
+        .map(|combo| snapshot_runtime_values(&runtime, &combo.assigned_names))
+        .collect::<Vec<_>>();
+    let mut combo_hits = Vec::new();
+
+    // All combos originate from the same formula template with different constants,
+    // so one runtime load can be reused as long as any overwritten base columns are restored.
+    for (combo_index, combo) in combos.iter().enumerate() {
+        if !restore_values[combo_index].is_empty() {
+            restore_runtime_values(&mut runtime, &restore_values[combo_index]);
+        }
+
+        let (scores, triggered_flags) =
+            evaluate_cached_rule_scores(&combo.cached_rule, &mut runtime)?;
+        let Some(date_score_map) = build_validation_date_score_map(
+            &trade_dates,
+            keep_from,
+            &scores,
+            &triggered_flags,
+            combo.cached_rule.points,
+        ) else {
+            continue;
+        };
+        combo_hits.push((combo_index, date_score_map));
+    }
+
+    Ok(ValidationTsCodeEvaluation {
+        ts_code: ts_code.to_string(),
+        combo_hits,
+    })
+}
+
+fn build_validation_triggered_scores_for_combos(
+    source_path: &str,
+    stock_adj_type: &str,
+    start_date: &str,
+    end_date: &str,
+    need_rows: usize,
+    ts_codes: &[String],
+    st_list: &HashSet<String>,
+    combos: &[PreparedValidationCombo],
+) -> Result<Vec<ValidationTriggeredScoreMap>, String> {
+    if combos.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let grouped_results = ts_codes
+        .par_iter()
+        .map_init(
+            || DataReader::new(source_path),
+            |reader_res, ts_code| {
+                let reader = reader_res.as_mut().map_err(|err| err.clone())?;
+                evaluate_validation_combos_for_ts_code(
+                    reader,
+                    ts_code,
+                    stock_adj_type,
+                    start_date,
+                    end_date,
+                    need_rows,
+                    st_list,
+                    combos,
+                )
+            },
+        )
+        .collect::<Vec<_>>();
+
+    let mut combo_triggered_maps = std::iter::repeat_with(HashMap::new)
+        .take(combos.len())
+        .collect::<Vec<ValidationTriggeredScoreMap>>();
+
+    for result in grouped_results {
+        let ValidationTsCodeEvaluation {
+            ts_code,
+            combo_hits,
+        } = result?;
+        for (combo_index, date_score_map) in combo_hits {
+            combo_triggered_maps[combo_index].insert(ts_code.clone(), date_score_map);
+        }
+    }
+
+    Ok(combo_triggered_maps)
+}
+
 #[cfg(test)]
 fn build_validation_triggered_scores(
     source_path: &str,
@@ -1747,164 +1985,88 @@ fn build_validation_triggered_scores(
     let reader = DataReader::new(source_path)?;
     let ts_codes = reader.list_ts_code(stock_adj_type, start_date, end_date)?;
     let st_list = load_st_list(source_path)?;
-    build_validation_triggered_scores_with_context(
-        source_path,
-        stock_adj_type,
-        start_date,
-        end_date,
-        &ts_codes,
-        &st_list,
-        cached_rule,
-    )
-}
-
-fn build_validation_triggered_scores_with_context(
-    source_path: &str,
-    stock_adj_type: &str,
-    start_date: &str,
-    end_date: &str,
-    ts_codes: &[String],
-    st_list: &HashSet<String>,
-    cached_rule: &CachedRule,
-) -> Result<HashMap<String, HashMap<String, f64>>, String> {
+    let combo = PreparedValidationCombo {
+        variant: ValidationVariant {
+            combo_key: cached_rule.name.clone(),
+            combo_label: cached_rule.name.clone(),
+            formula: cached_rule.when_src.clone(),
+            unknown_values: Vec::new(),
+        },
+        cached_rule: cached_rule.clone(),
+        assigned_names: collect_validation_assigned_names(&cached_rule.when_ast),
+    };
     let warmup_need = estimate_rule_warmup(
         &cached_rule.when_ast,
         cached_rule.scope_way,
         cached_rule.scope_windows,
     )?;
     let need_rows = calc_query_need_rows(source_path, warmup_need, start_date, end_date)?;
-    let grouped_results = ts_codes
-        .par_iter()
-        .map_init(
-            || DataReader::new(source_path),
-            |reader_res, ts_code| -> Result<Option<(String, HashMap<String, f64>)>, String> {
-                let reader = reader_res.as_mut().map_err(|err| err.clone())?;
-                let mut row_data =
-                    reader.load_one_tail_rows(ts_code, stock_adj_type, end_date, need_rows)?;
-                fill_validation_extra_fields(
-                    &mut row_data,
-                    ts_code,
-                    st_list.contains(ts_code.as_str()),
-                )?;
-
-                let trade_dates = row_data.trade_dates.clone();
-                if trade_dates.is_empty() {
-                    return Ok(None);
-                }
-
-                let mut rt = row_into_rt(row_data)?;
-                let (scores, triggered_flags) = evaluate_cached_rule_scores(cached_rule, &mut rt)?;
-
-                let keep_from = trade_dates
-                    .binary_search_by(|date| date.as_str().cmp(start_date))
-                    .unwrap_or_else(|index| index);
-                let min_len = usize::min(
-                    trade_dates.len(),
-                    usize::min(scores.len(), triggered_flags.len()),
-                );
-                if keep_from >= min_len {
-                    return Ok(None);
-                }
-
-                let mut date_score_map = HashMap::new();
-                for index in keep_from..min_len {
-                    let Some(score) = normalize_validation_trigger_score(
-                        scores[index],
-                        triggered_flags[index],
-                        cached_rule.points,
-                    ) else {
-                        continue;
-                    };
-                    date_score_map.insert(trade_dates[index].clone(), score);
-                }
-
-                if date_score_map.is_empty() {
-                    return Ok(None);
-                }
-
-                Ok(Some((ts_code.clone(), date_score_map)))
-            },
-        )
-        .collect::<Vec<_>>();
-
-    let mut triggered_score_map: HashMap<String, HashMap<String, f64>> =
-        HashMap::with_capacity(grouped_results.len());
-    for item in grouped_results {
-        if let Some((ts_code, date_score_map)) = item? {
-            triggered_score_map.insert(ts_code, date_score_map);
-        }
-    }
-
-    Ok(triggered_score_map)
+    let mut triggered_maps = build_validation_triggered_scores_for_combos(
+        source_path,
+        stock_adj_type,
+        start_date,
+        end_date,
+        need_rows,
+        &ts_codes,
+        &st_list,
+        &[combo],
+    )?;
+    Ok(triggered_maps.pop().unwrap_or_default())
 }
 
 fn build_validation_combo_result(
-    source_path: &str,
     params: &RuleLayerBacktestRunParams,
     seed_rule: &ValidationSeedRule,
-    variant: ValidationVariant,
+    combo: PreparedValidationCombo,
+    triggered_score_map: ValidationTriggeredScoreMap,
     runtime_cache: &RuleLayerRuntimeCache,
     layer_config: &RuleLayerConfig,
     similarity_cache: &ValidationSimilarityCache,
     explain_map: &HashMap<String, String>,
     stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
-    validation_ts_codes: &[String],
-    st_list: &HashSet<String>,
     sample_limit_per_group: usize,
 ) -> Result<RuleValidationComboResult, String> {
-    let cached_rule = build_validation_cached_rule(
-        variant.combo_key.clone(),
-        seed_rule.scope_way,
-        seed_rule.scope_windows,
-        seed_rule.points,
-        seed_rule.dist_points.clone(),
-        seed_rule.tag,
-        &variant.formula,
+    let metrics_with_samples = calc_rule_layer_metrics_with_triggered_samples_from_cache(
+        runtime_cache,
+        &triggered_score_map,
+        layer_config,
     )?;
-
-    let triggered_score_map = build_validation_triggered_scores_with_context(
-        source_path,
-        &params.stock_adj_type,
-        &params.start_date,
-        &params.end_date,
-        validation_ts_codes,
-        st_list,
-        &cached_rule,
-    )?;
-    let trigger_samples = validation_trigger_samples_count(&triggered_score_map);
-    let triggered_days = validation_triggered_days_count(&triggered_score_map);
-    let metrics =
-        calc_rule_layer_metrics_from_cache(runtime_cache, &triggered_score_map, layer_config)?;
-    let triggered_sample_rows =
-        collect_triggered_rule_samples_from_cache(runtime_cache, &triggered_score_map)
-            .into_iter()
-            .map(|sample| ValidationSampleRawRow {
-                ts_code: sample.ts_code,
-                trade_date: sample.trade_date,
-                rule_score: sample.rule_score,
-                residual_return: sample.residual_return,
-            })
-            .collect::<Vec<_>>();
+    let trigger_samples = metrics_with_samples.triggered_samples.len();
+    let triggered_days =
+        validation_triggered_days_count_from_samples(&metrics_with_samples.triggered_samples);
+    let triggered_sample_rows = metrics_with_samples
+        .triggered_samples
+        .iter()
+        .map(|sample| ValidationSampleRawRow {
+            ts_code: sample.ts_code.clone(),
+            trade_date: sample.trade_date.clone(),
+            rule_score: sample.rule_score,
+            residual_return: sample.residual_return,
+        })
+        .collect::<Vec<_>>();
 
     let (sample_stats, sample_groups) = build_validation_sample_groups(
         &triggered_sample_rows,
         sample_limit_per_group,
         stock_meta_map,
     );
-    let backtest = build_rule_backtest_payload(&variant.combo_key, params, metrics);
+    let backtest = build_rule_backtest_payload(
+        &combo.variant.combo_key,
+        params,
+        metrics_with_samples.metrics,
+    );
     let similarity_rows = build_validation_similarity_rows(
         similarity_cache,
-        &triggered_score_map,
-        trigger_samples,
+        &metrics_with_samples.triggered_samples,
         seed_rule.exclude_rule_name.as_deref(),
         explain_map,
     );
 
     Ok(RuleValidationComboResult {
-        combo_key: variant.combo_key,
-        combo_label: variant.combo_label,
-        formula: variant.formula,
-        unknown_values: variant.unknown_values,
+        combo_key: combo.variant.combo_key,
+        combo_label: combo.variant.combo_label,
+        formula: combo.variant.formula,
+        unknown_values: combo.variant.unknown_values,
         trigger_samples,
         triggered_days,
         avg_daily_trigger: if triggered_days > 0 {
@@ -1919,20 +2081,12 @@ fn build_validation_combo_result(
     })
 }
 
-fn validation_trigger_samples_count(
-    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
-) -> usize {
-    triggered_score_map.values().map(HashMap::len).sum()
-}
-
-fn validation_triggered_days_count(
-    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
+fn validation_triggered_days_count_from_samples(
+    samples: &[crate::simulate::rule::RuleLayerSamplePoint],
 ) -> usize {
     let mut trade_dates = HashSet::new();
-    for date_map in triggered_score_map.values() {
-        for trade_date in date_map.keys() {
-            trade_dates.insert(trade_date.clone());
-        }
+    for sample in samples {
+        trade_dates.insert(sample.trade_date.clone());
     }
     trade_dates.len()
 }
@@ -2001,15 +2155,7 @@ struct ValidationSimilarityCache {
     total_samples: f64,
     rule_names: Vec<String>,
     rule_hit_counts: Vec<usize>,
-    pair_to_rule_indices: HashMap<String, Vec<usize>>,
-}
-
-fn build_validation_pair_key(ts_code: &str, trade_date: &str) -> String {
-    let mut key = String::with_capacity(ts_code.len() + trade_date.len() + 1);
-    key.push_str(ts_code);
-    key.push('\x1f');
-    key.push_str(trade_date);
-    key
+    pair_to_rule_indices: HashMap<String, HashMap<String, Vec<usize>>>,
 }
 
 fn load_validation_similarity_cache(
@@ -2053,7 +2199,7 @@ fn load_validation_similarity_cache(
     let mut rule_names = Vec::new();
     let mut rule_name_to_index = HashMap::<String, usize>::new();
     let mut rule_hit_counts = Vec::new();
-    let mut pair_to_rule_indices = HashMap::<String, Vec<usize>>::new();
+    let mut pair_to_rule_indices = HashMap::<String, HashMap<String, Vec<usize>>>::new();
 
     while let Some(row) = rows
         .next()
@@ -2074,7 +2220,9 @@ fn load_validation_similarity_cache(
 
         rule_hit_counts[rule_index] += 1;
         pair_to_rule_indices
-            .entry(build_validation_pair_key(&ts_code, &trade_date))
+            .entry(ts_code)
+            .or_default()
+            .entry(trade_date)
             .or_default()
             .push(rule_index);
     }
@@ -2089,12 +2237,11 @@ fn load_validation_similarity_cache(
 
 fn build_validation_similarity_rows(
     similarity_cache: &ValidationSimilarityCache,
-    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
-    trigger_samples: usize,
+    triggered_samples: &[crate::simulate::rule::RuleLayerSamplePoint],
     exclude_rule_name: Option<&str>,
     explain_map: &HashMap<String, String>,
 ) -> Vec<RuleValidationSimilarityRow> {
-    let combo_hit_count = trigger_samples as f64;
+    let combo_hit_count = triggered_samples.len() as f64;
     if combo_hit_count <= 0.0 {
         return Vec::new();
     }
@@ -2104,16 +2251,16 @@ fn build_validation_similarity_rows(
         .filter(|value| !value.is_empty());
     let mut overlap_hit_count = HashMap::<usize, usize>::new();
 
-    for (ts_code, date_score_map) in triggered_score_map {
-        for trade_date in date_score_map.keys() {
-            let pair_key = build_validation_pair_key(ts_code, trade_date);
-            let Some(rule_indices) = similarity_cache.pair_to_rule_indices.get(&pair_key) else {
-                continue;
-            };
+    for sample in triggered_samples {
+        let Some(date_map) = similarity_cache.pair_to_rule_indices.get(&sample.ts_code) else {
+            continue;
+        };
+        let Some(rule_indices) = date_map.get(&sample.trade_date) else {
+            continue;
+        };
 
-            for rule_index in rule_indices {
-                *overlap_hit_count.entry(*rule_index).or_default() += 1;
-            }
+        for rule_index in rule_indices {
+            *overlap_hit_count.entry(*rule_index).or_default() += 1;
         }
     }
 
@@ -2351,6 +2498,13 @@ pub fn run_rule_expression_validation(
 
     let variants =
         build_validation_variants(&seed_rule.formula, &unknown_configs.unwrap_or_default())?;
+    let execution_plan = build_validation_execution_plan(
+        &source_path,
+        &params.start_date,
+        &params.end_date,
+        &seed_rule,
+        variants,
+    )?;
     let sample_limit_per_group = sample_limit_per_group
         .unwrap_or(VALIDATION_DEFAULT_SAMPLE_LIMIT_PER_GROUP)
         .clamp(1, VALIDATION_MAX_SAMPLE_LIMIT_PER_GROUP);
@@ -2391,22 +2545,32 @@ pub fn run_rule_expression_validation(
     let result_conn = open_result_conn(&source_path)?;
     let similarity_cache =
         load_validation_similarity_cache(&result_conn, &params.start_date, &params.end_date)?;
+    let combo_triggered_maps = build_validation_triggered_scores_for_combos(
+        &source_path,
+        &params.stock_adj_type,
+        &params.start_date,
+        &params.end_date,
+        execution_plan.need_rows,
+        &validation_ts_codes,
+        &st_list,
+        &execution_plan.combos,
+    )?;
 
-    let combo_results = variants
+    let combo_results = execution_plan
+        .combos
         .into_par_iter()
-        .map(|variant| {
+        .zip(combo_triggered_maps.into_par_iter())
+        .map(|(combo, triggered_score_map)| {
             build_validation_combo_result(
-                &source_path,
                 &params,
                 &seed_rule,
-                variant,
+                combo,
+                triggered_score_map,
                 &runtime_cache,
                 &layer_config,
                 &similarity_cache,
                 &explain_map,
                 &stock_meta_map,
-                &validation_ts_codes,
-                &st_list,
                 sample_limit_per_group,
             )
         })
@@ -3795,13 +3959,19 @@ mod tests {
 
     use duckdb::{Connection, params};
 
-    use crate::data::{RuleTag, source_db_path};
+    use crate::{
+        data::{DataReader, RuleTag, source_db_path},
+        scoring::tools::load_st_list,
+        simulate::rule::RuleLayerSamplePoint,
+    };
 
     use super::{
-        ValidationSampleRawRow, ValidationSampleStockMeta, ValidationSimilarityCache,
-        build_validation_cached_rule, build_validation_pair_key, build_validation_sample_groups,
-        build_validation_similarity_rows, build_validation_triggered_scores,
-        derive_validation_volatility_group, resolve_validation_sample_board_label,
+        PreparedValidationCombo, ValidationSampleRawRow, ValidationSampleStockMeta,
+        ValidationSimilarityCache, ValidationVariant, build_validation_cached_rule,
+        build_validation_sample_groups, build_validation_similarity_rows,
+        build_validation_triggered_scores, build_validation_triggered_scores_for_combos,
+        collect_validation_assigned_names, derive_validation_volatility_group,
+        resolve_validation_sample_board_label,
     };
     use crate::data::ScopeWay;
 
@@ -4067,6 +4237,95 @@ mod tests {
     }
 
     #[test]
+    fn validation_batch_scores_restore_overwritten_base_series() {
+        let source_dir = temp_source_dir();
+        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
+        prepare_validation_source_files(source_dir_str);
+
+        let first_rule = build_validation_cached_rule(
+            "validation_combo_001".to_string(),
+            ScopeWay::Any,
+            1,
+            1.0,
+            None,
+            RuleTag::Normal,
+            "C := REF(C, 1); C > 0",
+        )
+        .expect("build first cached rule");
+        let second_rule = build_validation_cached_rule(
+            "validation_combo_002".to_string(),
+            ScopeWay::Any,
+            1,
+            1.0,
+            None,
+            RuleTag::Normal,
+            "C := REF(C, 2); C > 0",
+        )
+        .expect("build second cached rule");
+
+        let expected_first = build_validation_triggered_scores(
+            source_dir_str,
+            "qfq",
+            "20240102",
+            "20240104",
+            &first_rule,
+        )
+        .expect("build first triggered scores");
+        let expected_second = build_validation_triggered_scores(
+            source_dir_str,
+            "qfq",
+            "20240102",
+            "20240104",
+            &second_rule,
+        )
+        .expect("build second triggered scores");
+
+        let reader = DataReader::new(source_dir_str).expect("build reader");
+        let ts_codes = reader
+            .list_ts_code("qfq", "20240102", "20240104")
+            .expect("list ts codes");
+        let st_list = load_st_list(source_dir_str).expect("load st list");
+        let combos = vec![
+            PreparedValidationCombo {
+                variant: ValidationVariant {
+                    combo_key: first_rule.name.clone(),
+                    combo_label: first_rule.name.clone(),
+                    formula: first_rule.when_src.clone(),
+                    unknown_values: Vec::new(),
+                },
+                cached_rule: first_rule.clone(),
+                assigned_names: collect_validation_assigned_names(&first_rule.when_ast),
+            },
+            PreparedValidationCombo {
+                variant: ValidationVariant {
+                    combo_key: second_rule.name.clone(),
+                    combo_label: second_rule.name.clone(),
+                    formula: second_rule.when_src.clone(),
+                    unknown_values: Vec::new(),
+                },
+                cached_rule: second_rule.clone(),
+                assigned_names: collect_validation_assigned_names(&second_rule.when_ast),
+            },
+        ];
+
+        let batch_results = build_validation_triggered_scores_for_combos(
+            source_dir_str,
+            "qfq",
+            "20240102",
+            "20240104",
+            3,
+            &ts_codes,
+            &st_list,
+            &combos,
+        )
+        .expect("build batch triggered scores");
+
+        assert_eq!(batch_results.len(), 2);
+        assert_eq!(batch_results[0], expected_first);
+        assert_eq!(batch_results[1], expected_second);
+    }
+
+    #[test]
     fn validation_similarity_rows_use_pair_index_cache() {
         let similarity_cache = ValidationSimilarityCache {
             total_samples: 12.0,
@@ -4074,28 +4333,34 @@ mod tests {
             rule_hit_counts: vec![3, 1],
             pair_to_rule_indices: HashMap::from([
                 (
-                    build_validation_pair_key("000001.SZ", "20240102"),
-                    vec![0, 1],
+                    "000001.SZ".to_string(),
+                    HashMap::from([("20240102".to_string(), vec![0, 1])]),
                 ),
-                (build_validation_pair_key("000002.SZ", "20240103"), vec![0]),
+                (
+                    "000002.SZ".to_string(),
+                    HashMap::from([("20240103".to_string(), vec![0])]),
+                ),
             ]),
         };
-        let triggered_score_map = HashMap::from([
-            (
-                "000001.SZ".to_string(),
-                HashMap::from([("20240102".to_string(), 1.0)]),
-            ),
-            (
-                "000002.SZ".to_string(),
-                HashMap::from([("20240103".to_string(), 1.0)]),
-            ),
-        ]);
+        let triggered_samples = vec![
+            RuleLayerSamplePoint {
+                ts_code: "000001.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                rule_score: 1.0,
+                residual_return: 0.5,
+            },
+            RuleLayerSamplePoint {
+                ts_code: "000002.SZ".to_string(),
+                trade_date: "20240103".to_string(),
+                rule_score: 1.0,
+                residual_return: 0.3,
+            },
+        ];
         let explain_map = HashMap::from([("规则A".to_string(), "说明A".to_string())]);
 
         let rows = build_validation_similarity_rows(
             &similarity_cache,
-            &triggered_score_map,
-            2,
+            &triggered_samples,
             None,
             &explain_map,
         );

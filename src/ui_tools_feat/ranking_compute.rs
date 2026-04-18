@@ -8,7 +8,10 @@ use crate::{
         concept_performance_data::rebuild_concept_performance_all, load_trade_date_list,
         result_db_path, source_db_path,
     },
-    scoring::{TieBreakWay, build_rank_tiebreak, runner::scoring_all_to_db},
+    scoring::{
+        RankTiebreakProfile, TieBreakWay, build_rank_tiebreak,
+        runner::{ScoringRunProfile, scoring_all_to_db},
+    },
 };
 
 #[derive(Clone, Serialize)]
@@ -66,7 +69,125 @@ pub struct RankComputeRunResult {
     pub start_date: Option<String>,
     pub end_date: Option<String>,
     pub elapsed_ms: u64,
+    pub timings: Vec<RankComputeTimingItem>,
     pub status: RankComputeStatus,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RankComputeTimingItem {
+    pub key: String,
+    pub label: String,
+    pub elapsed_ms: u64,
+    pub note: Option<String>,
+}
+
+fn timing_item(
+    key: &str,
+    label: &str,
+    elapsed_ms: u64,
+    note: impl Into<Option<String>>,
+) -> RankComputeTimingItem {
+    RankComputeTimingItem {
+        key: key.to_string(),
+        label: label.to_string(),
+        elapsed_ms,
+        note: note.into(),
+    }
+}
+
+fn scoring_run_timings(profile: &ScoringRunProfile) -> Vec<RankComputeTimingItem> {
+    vec![
+        timing_item(
+            "init-result-db",
+            "初始化结果库",
+            profile.init_result_db_ms,
+            Some("包含结果表建表与无主键结构迁移检查".to_string()),
+        ),
+        timing_item("prepare", "准备数据与规则", profile.prepare_ms, None),
+        timing_item(
+            "compute-and-send-batches",
+            "个股评分并发送批次",
+            profile.compute_and_send_batches_ms,
+            Some(format!(
+                "{} 只股票，与结果库写线程并行",
+                profile.stock_count
+            )),
+        ),
+        timing_item(
+            "writer-total",
+            "结果库写线程总耗时",
+            profile.writer.total_ms,
+            Some(format!(
+                "包含删除/重建二级索引、删旧区间、接收批次并写库、总榜排名、Scene 排名、提交事务；共 {} 个批次",
+                profile.writer.batch_count
+            )),
+        ),
+        timing_item(
+            "drop-indexes",
+            "删除结果库二级索引",
+            profile.writer.drop_indexes_ms,
+            Some("避免 bulk write 期间持续维护二级索引".to_string()),
+        ),
+        timing_item(
+            "delete-range",
+            "删除旧区间",
+            profile.writer.delete_range_ms,
+            None,
+        ),
+        timing_item(
+            "receive-and-append-batches",
+            "接收批次并写入结果库",
+            profile.writer.receive_and_append_batches_ms,
+            Some("包含等待计算线程发送批次的时间".to_string()),
+        ),
+        timing_item(
+            "summary-rank",
+            "回写总榜排名",
+            profile.writer.summary_rank_ms,
+            None,
+        ),
+        timing_item(
+            "scene-rank",
+            "回写 Scene 排名",
+            profile.writer.scene_rank_ms,
+            None,
+        ),
+        timing_item("commit", "提交结果事务", profile.writer.commit_ms, None),
+        timing_item(
+            "recreate-indexes",
+            "重建结果库二级索引",
+            profile.writer.recreate_indexes_ms,
+            Some("bulk write 完成后统一重建，通常比边写边维护更快".to_string()),
+        ),
+    ]
+}
+
+fn tiebreak_timings(profile: &RankTiebreakProfile) -> Vec<RankComputeTimingItem> {
+    let mut timings = Vec::new();
+    if let Some(elapsed_ms) = profile.attach_source_db_ms {
+        timings.push(timing_item(
+            "attach-source-db",
+            "附加原始库",
+            elapsed_ms,
+            None,
+        ));
+    }
+    timings.push(timing_item(
+        "update-rank",
+        "补排名回写",
+        profile.update_rank_ms,
+        None,
+    ));
+    if let Some(elapsed_ms) = profile.detach_source_db_ms {
+        timings.push(timing_item(
+            "detach-source-db",
+            "分离原始库",
+            elapsed_ms,
+            None,
+        ));
+    }
+    timings
 }
 
 fn normalize_rank_compute_date(raw: &str, field_name: &str) -> Result<String, String> {
@@ -384,13 +505,14 @@ pub fn run_ranking_score_calculation(
     }
 
     let started_at = Instant::now();
-    scoring_all_to_db(&source_path, "qfq", &start_date, &end_date)?;
+    let profile = scoring_all_to_db(&source_path, "qfq", &start_date, &end_date)?;
     let status = get_rank_compute_status_inner(&source_path)?;
     Ok(RankComputeRunResult {
         action: "score".to_string(),
         start_date: Some(start_date),
         end_date: Some(end_date),
         elapsed_ms: started_at.elapsed().as_millis() as u64,
+        timings: scoring_run_timings(&profile),
         status,
     })
 }
@@ -428,13 +550,14 @@ pub fn run_ranking_tiebreak_fill(source_path: &str) -> Result<RankComputeRunResu
         .to_str()
         .ok_or_else(|| "原始库路径不是有效 UTF-8".to_string())?;
 
-    build_rank_tiebreak(result_db_str, source_db_str, "qfq", TieBreakWay::KdjJ)?;
+    let profile = build_rank_tiebreak(result_db_str, source_db_str, "qfq", TieBreakWay::KdjJ)?;
     let status = get_rank_compute_status_inner(&source_path)?;
     Ok(RankComputeRunResult {
         action: "tiebreak".to_string(),
         start_date: None,
         end_date: None,
         elapsed_ms: started_at.elapsed().as_millis() as u64,
+        timings: tiebreak_timings(&profile),
         status,
     })
 }

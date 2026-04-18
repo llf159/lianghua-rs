@@ -32,11 +32,19 @@ export type RankingComputeStatus = {
   suggestedEndDate: string | null
 }
 
+export type RankComputeTimingItem = {
+  key: string
+  label: string
+  elapsedMs: number
+  note: string | null
+}
+
 export type RankingComputeRunResult = {
   action: 'score' | 'tiebreak' | string
   startDate?: string | null
   endDate?: string | null
   elapsedMs: number
+  timings: RankComputeTimingItem[]
   status: RankingComputeStatus
 }
 

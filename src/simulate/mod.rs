@@ -199,6 +199,61 @@ pub fn calc_stock_residual_returns_with_factor_series(
         None
     };
 
+    calc_stock_residual_returns_from_loaded_series(
+        input,
+        &stock_series,
+        &index_series,
+        ResidualFactorSeriesRefs {
+            concept_series: concept_map,
+            industry_series: industry_map,
+        },
+    )
+}
+
+pub(super) fn calc_stock_residual_returns_from_loaded_series(
+    input: &ResidualReturnInput,
+    stock_series: &HashMap<String, f64>,
+    index_series: &HashMap<String, f64>,
+    factor_series: ResidualFactorSeriesRefs<'_>,
+) -> Result<Vec<ResidualReturnPoint>, String> {
+    input.validate()?;
+    if stock_series.is_empty() || index_series.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let use_concept = input.concept_beta.abs() > f64::EPSILON;
+    let use_industry = input.industry_beta.abs() > f64::EPSILON;
+
+    let concept_map: Option<&HashMap<String, f64>> = if use_concept {
+        if input.concept.trim().is_empty() {
+            Some(index_series)
+        } else if let Some(series) = factor_series.concept_series {
+            if series.is_empty() {
+                return Ok(Vec::new());
+            }
+            Some(series)
+        } else {
+            return Ok(Vec::new());
+        }
+    } else {
+        None
+    };
+
+    let industry_map: Option<&HashMap<String, f64>> = if use_industry {
+        if input.industry.trim().is_empty() {
+            Some(index_series)
+        } else if let Some(series) = factor_series.industry_series {
+            if series.is_empty() {
+                return Ok(Vec::new());
+            }
+            Some(series)
+        } else {
+            return Ok(Vec::new());
+        }
+    } else {
+        None
+    };
+
     let mut trade_dates = stock_series.keys().map(String::as_str).collect::<Vec<_>>();
     trade_dates.sort_unstable();
 
