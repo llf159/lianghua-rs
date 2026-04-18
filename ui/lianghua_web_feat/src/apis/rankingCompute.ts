@@ -25,6 +25,7 @@ export type RankComputeResultContinuity = {
 
 export type RankingComputeStatus = {
   sourcePath: string
+  strategyPath: string
   sourceDb: RankComputeDbRange
   resultDb: RankComputeDbRange
   resultDbContinuity: RankComputeResultContinuity
@@ -48,8 +49,8 @@ export type RankingComputeRunResult = {
   status: RankingComputeStatus
 }
 
-export async function getRankingComputeStatus(sourcePath: string) {
-  return invoke<RankingComputeStatus>('get_ranking_compute_status', { sourcePath })
+export async function getRankingComputeStatus(sourcePath: string, strategyPath?: string) {
+  return invoke<RankingComputeStatus>('get_ranking_compute_status', { sourcePath, strategyPath })
 }
 
 export type ConceptPerformanceComputeResult = {
@@ -58,9 +59,15 @@ export type ConceptPerformanceComputeResult = {
   savedRows: number
 }
 
-export async function runRankingScoreCalculation(sourcePath: string, startDate: string, endDate: string) {
+export async function runRankingScoreCalculation(
+  sourcePath: string,
+  startDate: string,
+  endDate: string,
+  strategyPath?: string,
+) {
   return invoke<RankingComputeRunResult>('run_ranking_score_calculation', {
     sourcePath,
+    strategyPath,
     startDate,
     endDate,
   })
@@ -70,6 +77,6 @@ export async function runConceptPerformanceCompute(sourcePath: string) {
   return invoke<ConceptPerformanceComputeResult>('run_concept_performance_compute', { sourcePath })
 }
 
-export async function runRankingTiebreakFill(sourcePath: string) {
-  return invoke<RankingComputeRunResult>('run_ranking_tiebreak_fill', { sourcePath })
+export async function runRankingTiebreakFill(sourcePath: string, strategyPath?: string) {
+  return invoke<RankingComputeRunResult>('run_ranking_tiebreak_fill', { sourcePath, strategyPath })
 }

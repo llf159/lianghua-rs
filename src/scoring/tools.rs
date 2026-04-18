@@ -27,9 +27,9 @@ pub fn load_st_list(source_dir: &str) -> Result<HashSet<String>, String> {
     Ok(st_list)
 }
 
-pub fn warmup_rows_estimate(source_dir: &str) -> Result<usize, String> {
+pub fn warmup_rows_estimate(source_dir: &str, strategy_path: Option<&str>) -> Result<usize, String> {
     // 从拿rule原数据开始计算warmup
-    let rules = ScoreRule::load_rules(source_dir)?;
+    let rules = ScoreRule::load_rules_with_strategy_path(source_dir, strategy_path)?;
     let mut all_expr_max_need = 0;
 
     for rule in rules {

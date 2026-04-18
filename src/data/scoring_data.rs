@@ -735,8 +735,11 @@ pub fn row_into_rt(row_data: RowData) -> Result<Runtime, String> {
     Ok(rt)
 }
 
-pub fn cache_rule_build(source_dir: &str) -> Result<Vec<CachedRule>, String> {
-    let rules = ScoreRule::load_rules(source_dir)?;
+pub fn cache_rule_build(
+    source_dir: &str,
+    strategy_path: Option<&str>,
+) -> Result<Vec<CachedRule>, String> {
+    let rules = ScoreRule::load_rules_with_strategy_path(source_dir, strategy_path)?;
     let mut out = Vec::with_capacity(128);
     for rule in rules {
         let tok = lex_all(&rule.when);

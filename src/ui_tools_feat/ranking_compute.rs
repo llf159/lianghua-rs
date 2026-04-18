@@ -55,6 +55,7 @@ pub struct RankComputeResultContinuity {
 #[serde(rename_all = "camelCase")]
 pub struct RankComputeStatus {
     pub source_path: String,
+    pub strategy_path: String,
     pub source_db: RankComputeDbRange,
     pub result_db: RankComputeDbRange,
     pub result_db_continuity: RankComputeResultContinuity,
@@ -448,7 +449,16 @@ fn check_result_db_continuity(
     })
 }
 
-fn get_rank_compute_status_inner(source_path: &str) -> Result<RankComputeStatus, String> {
+fn normalize_strategy_path(source_path: &str, strategy_path: Option<&str>) -> String {
+    crate::data::resolve_strategy_path(source_path, strategy_path)
+        .display()
+        .to_string()
+}
+
+fn get_rank_compute_status_inner(
+    source_path: &str,
+    strategy_path: Option<&str>,
+) -> Result<RankComputeStatus, String> {
     let source_db = source_db_path(source_path);
     let result_db = result_db_path(source_path);
     let source_db_range = query_trade_date_range(&source_db, "stock_data.db", "stock_data")?;
@@ -472,6 +482,7 @@ fn get_rank_compute_status_inner(source_path: &str) -> Result<RankComputeStatus,
 
     Ok(RankComputeStatus {
         source_path: source_path.trim().to_string(),
+        strategy_path: normalize_strategy_path(source_path, strategy_path),
         source_db: source_db_range,
         result_db: result_db_range,
         result_db_continuity,
@@ -480,16 +491,20 @@ fn get_rank_compute_status_inner(source_path: &str) -> Result<RankComputeStatus,
     })
 }
 
-pub fn get_ranking_compute_status(source_path: &str) -> Result<RankComputeStatus, String> {
+pub fn get_ranking_compute_status(
+    source_path: &str,
+    strategy_path: Option<&str>,
+) -> Result<RankComputeStatus, String> {
     let trimmed = source_path.trim();
     if trimmed.is_empty() {
         return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
     }
-    get_rank_compute_status_inner(trimmed)
+    get_rank_compute_status_inner(trimmed, strategy_path)
 }
 
 pub fn run_ranking_score_calculation(
     source_path: &str,
+    strategy_path: Option<&str>,
     start_date: &str,
     end_date: &str,
 ) -> Result<RankComputeRunResult, String> {
@@ -505,8 +520,8 @@ pub fn run_ranking_score_calculation(
     }
 
     let started_at = Instant::now();
-    let profile = scoring_all_to_db(&source_path, "qfq", &start_date, &end_date)?;
-    let status = get_rank_compute_status_inner(&source_path)?;
+    let profile = scoring_all_to_db(&source_path, strategy_path, "qfq", &start_date, &end_date)?;
+    let status = get_rank_compute_status_inner(&source_path, strategy_path)?;
     Ok(RankComputeRunResult {
         action: "score".to_string(),
         start_date: Some(start_date),
@@ -534,7 +549,10 @@ pub fn run_concept_performance_compute(
     })
 }
 
-pub fn run_ranking_tiebreak_fill(source_path: &str) -> Result<RankComputeRunResult, String> {
+pub fn run_ranking_tiebreak_fill(
+    source_path: &str,
+    strategy_path: Option<&str>,
+) -> Result<RankComputeRunResult, String> {
     let source_path = source_path.trim().to_string();
     if source_path.is_empty() {
         return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
@@ -551,7 +569,7 @@ pub fn run_ranking_tiebreak_fill(source_path: &str) -> Result<RankComputeRunResu
         .ok_or_else(|| "原始库路径不是有效 UTF-8".to_string())?;
 
     let profile = build_rank_tiebreak(result_db_str, source_db_str, "qfq", TieBreakWay::KdjJ)?;
-    let status = get_rank_compute_status_inner(&source_path)?;
+    let status = get_rank_compute_status_inner(&source_path, strategy_path)?;
     Ok(RankComputeRunResult {
         action: "tiebreak".to_string(),
         start_date: None,

@@ -40,6 +40,19 @@ pub fn score_rule_path(source_dir: &str) -> PathBuf {
     Path::new(source_dir).join("score_rule.toml")
 }
 
+pub fn resolve_strategy_path(source_dir: &str, strategy_path: Option<&str>) -> PathBuf {
+    let Some(path) = strategy_path.map(str::trim).filter(|value| !value.is_empty()) else {
+        return score_rule_path(source_dir);
+    };
+
+    let raw_path = Path::new(path);
+    if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        Path::new(source_dir).join(raw_path)
+    }
+}
+
 pub fn ind_toml_path(source_dir: &str) -> PathBuf {
     Path::new(source_dir).join("ind.toml")
 }
@@ -553,7 +566,14 @@ pub struct ScoreRule {
 
 impl ScoreConfig {
     pub fn load(source_dir: &str) -> Result<ScoreConfig, String> {
-        let rule_path = score_rule_path(source_dir);
+        Self::load_with_strategy_path(source_dir, None)
+    }
+
+    pub fn load_with_strategy_path(
+        source_dir: &str,
+        strategy_path: Option<&str>,
+    ) -> Result<ScoreConfig, String> {
+        let rule_path = resolve_strategy_path(source_dir, strategy_path);
         let rule_toml = fs::read_to_string(&rule_path).map_err(|e| {
             format!(
                 "规则文件不存在或不可读: path={}, err={e}",
@@ -673,11 +693,25 @@ impl ScoreScene {
     pub fn load_scenes(source_dir: &str) -> Result<Vec<ScoreScene>, String> {
         Ok(ScoreConfig::load(source_dir)?.scene)
     }
+
+    pub fn load_scenes_with_strategy_path(
+        source_dir: &str,
+        strategy_path: Option<&str>,
+    ) -> Result<Vec<ScoreScene>, String> {
+        Ok(ScoreConfig::load_with_strategy_path(source_dir, strategy_path)?.scene)
+    }
 }
 
 impl ScoreRule {
     pub fn load_rules(source_dir: &str) -> Result<Vec<ScoreRule>, String> {
         Ok(ScoreConfig::load(source_dir)?.rule)
+    }
+
+    pub fn load_rules_with_strategy_path(
+        source_dir: &str,
+        strategy_path: Option<&str>,
+    ) -> Result<Vec<ScoreRule>, String> {
+        Ok(ScoreConfig::load_with_strategy_path(source_dir, strategy_path)?.rule)
     }
 }
 

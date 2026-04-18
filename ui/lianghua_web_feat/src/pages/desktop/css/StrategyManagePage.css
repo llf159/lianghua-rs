@@ -104,6 +104,13 @@
   color: #425164;
 }
 
+.strategy-manage-toolbar-btn-accent {
+  border-color: #0f766e;
+  background: linear-gradient(180deg, #2dd4bf 0%, #0f766e 100%);
+  color: #fff;
+  box-shadow: 0 10px 22px rgba(15, 118, 110, 0.16);
+}
+
 .strategy-manage-summary {
   margin-top: 14px;
   display: grid;

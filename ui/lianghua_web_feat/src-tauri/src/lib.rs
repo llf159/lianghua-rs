@@ -90,9 +90,13 @@ use data_download_bridge::{
     run_ths_concept_download, save_indicator_manage_page,
 };
 use managed_source_bridge::{
-    allow_import_path, copy_import_file_to_appdata, export_managed_source_directory,
-    export_managed_source_directory_mobile, export_managed_source_file,
-    preview_managed_source_dataset, preview_managed_source_stock_data,
+    activate_managed_strategy_backup, allow_import_path, backup_managed_active_strategy,
+    copy_import_file_to_appdata, delete_managed_strategy_backup,
+    export_managed_source_directory, export_managed_source_directory_mobile,
+    export_managed_source_file, export_managed_strategy_backup_file,
+    export_managed_strategy_bundle, get_managed_strategy_assets_status,
+    import_managed_strategy_backup, preview_managed_source_dataset,
+    preview_managed_source_stock_data,
 };
 
 #[cfg(target_os = "android")]
@@ -270,8 +274,11 @@ fn get_stock_pick_options(source_path: String) -> Result<StockPickOptionsData, S
 }
 
 #[tauri::command]
-fn get_ranking_compute_status(source_path: String) -> Result<RankComputeStatus, String> {
-    core_get_ranking_compute_status(&source_path)
+fn get_ranking_compute_status(
+    source_path: String,
+    strategy_path: Option<String>,
+) -> Result<RankComputeStatus, String> {
+    core_get_ranking_compute_status(&source_path, strategy_path.as_deref())
 }
 
 #[tauri::command]
@@ -719,11 +726,17 @@ fn save_strategy_manage_refactor_file(
 #[tauri::command]
 async fn run_ranking_score_calculation(
     source_path: String,
+    strategy_path: Option<String>,
     start_date: String,
     end_date: String,
 ) -> Result<RankComputeRunResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        core_run_ranking_score_calculation(&source_path, &start_date, &end_date)
+        core_run_ranking_score_calculation(
+            &source_path,
+            strategy_path.as_deref(),
+            &start_date,
+            &end_date,
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -741,10 +754,15 @@ async fn run_concept_performance_compute(
 }
 
 #[tauri::command]
-async fn run_ranking_tiebreak_fill(source_path: String) -> Result<RankComputeRunResult, String> {
-    tauri::async_runtime::spawn_blocking(move || core_run_ranking_tiebreak_fill(&source_path))
-        .await
-        .map_err(|error| error.to_string())?
+async fn run_ranking_tiebreak_fill(
+    source_path: String,
+    strategy_path: Option<String>,
+) -> Result<RankComputeRunResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_run_ranking_tiebreak_fill(&source_path, strategy_path.as_deref())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -946,6 +964,13 @@ pub fn run() {
             export_managed_source_directory,
             export_managed_source_directory_mobile,
             export_managed_source_file,
+            get_managed_strategy_assets_status,
+            import_managed_strategy_backup,
+            backup_managed_active_strategy,
+            activate_managed_strategy_backup,
+            delete_managed_strategy_backup,
+            export_managed_strategy_backup_file,
+            export_managed_strategy_bundle,
             get_data_download_status,
             get_indicator_manage_page,
             save_indicator_manage_page,

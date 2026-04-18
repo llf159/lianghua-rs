@@ -62,19 +62,21 @@ function formatBytes(value: number | null) {
 }
 
 function buildDirectoryImportNotice(result: ManagedSourceDirectoryImportResult) {
-  const missingLabels = result.missingFileIds
+  const visibleImportedFileIds = result.importedFileIds.filter((fileId) => fileId !== 'score-rule')
+  const visibleMissingFileIds = result.missingFileIds.filter((fileId) => fileId !== 'score-rule')
+  const missingLabels = visibleMissingFileIds
     .map((fileId) => MANAGED_SOURCE_FILES.find((item) => item.id === fileId)?.label ?? fileId)
     .join('、')
 
-  if (result.importedFileIds.length === 0) {
+  if (visibleImportedFileIds.length === 0) {
     return `扫描完成，但目录里没有找到可导入文件: ${result.scannedPath}`
   }
 
-  if (result.missingFileIds.length === 0) {
-    return `目录扫描完成，已导入 ${result.importedFileIds.length} 个文件: ${result.scannedPath}`
+  if (visibleMissingFileIds.length === 0) {
+    return `目录扫描完成，已导入 ${visibleImportedFileIds.length} 个文件: ${result.scannedPath}`
   }
 
-  return `目录扫描完成，已导入 ${result.importedFileIds.length} 个文件；仍缺少 ${missingLabels}: ${result.scannedPath}`
+  return `目录扫描完成，已导入 ${visibleImportedFileIds.length} 个文件；仍缺少 ${missingLabels}: ${result.scannedPath}`
 }
 
 function findManagedSourceFileLabel(targetRelativePath: string) {
@@ -91,6 +93,7 @@ function findManagedSourceFileLabel(targetRelativePath: string) {
 export default function DataImportPage() {
   const directoryImportSupported = isDirectoryImportSupported()
   const isMobileClient = !directoryImportSupported
+  const visibleManagedFiles = MANAGED_SOURCE_FILES.filter((item) => item.id !== 'score-rule')
   const [status, setStatus] = useState<ManagedSourceStatus | null>(null)
   const [busyAction, setBusyAction] = useState<BusyAction>('loading')
   const [notice, setNotice] = useState('')
@@ -111,7 +114,9 @@ export default function DataImportPage() {
     ])
   }, [])
 
-  const importedCount = status?.items.filter((item) => item.isImported).length ?? 0
+  const importedCount =
+    status?.items.filter((item) => item.id !== 'score-rule' && item.isImported).length ?? 0
+  const visibleStatusItems = status?.items.filter((item) => item.id !== 'score-rule') ?? []
   const isBusy = busyAction !== 'idle'
 
   const updateBusyAction = useCallback((nextBusyAction: BusyAction) => {
@@ -404,12 +409,12 @@ export default function DataImportPage() {
         <div className="settings-summary-grid">
           <div className="settings-summary-item">
             <span>当前状态</span>
-            <strong>{status?.isReady ? '数据已齐备' : '仍有缺失文件'}</strong>
+            <strong>{status ? (visibleStatusItems.every((item) => item.isImported) ? '数据已齐备' : '仍有缺失文件') : '读取中...'}</strong>
           </div>
           <div className="settings-summary-item">
             <span>已导入数量</span>
             <strong>
-              {status ? `${importedCount} / ${MANAGED_SOURCE_FILES.length}` : '读取中...'}
+              {status ? `${importedCount} / ${visibleManagedFiles.length}` : '读取中...'}
             </strong>
           </div>
           <div className="settings-summary-item">
@@ -450,7 +455,7 @@ export default function DataImportPage() {
         </div>
 
         <div className="settings-file-list">
-          {MANAGED_SOURCE_FILES.map((file) => {
+          {visibleManagedFiles.map((file) => {
             const itemStatus = status?.items.find((item) => item.id === file.id)
             const isFileBusy = busyAction === `file:${file.id}`
             const isDeleteBusy = busyAction === `deleting-file:${file.id}`

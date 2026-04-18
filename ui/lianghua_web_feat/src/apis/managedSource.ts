@@ -225,7 +225,7 @@ export function isDirectoryImportSupported() {
   return !isMobileClient()
 }
 
-async function allowImportPath(path: string, directory: boolean, recursive: boolean) {
+export async function allowImportPath(path: string, directory: boolean, recursive: boolean) {
   await invoke('allow_import_path', { path, directory, recursive })
 }
 

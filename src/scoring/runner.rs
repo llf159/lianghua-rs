@@ -167,6 +167,7 @@ fn scoring_stock_group_batch(
 
 pub fn scoring_all_to_db(
     source_dir: &str,
+    strategy_path: Option<&str>,
     adj_type: &str,
     start_date: &str,
     end_date: &str,
@@ -181,17 +182,20 @@ pub fn scoring_all_to_db(
     let dr = DataReader::new(source_dir)?;
     let tc_list = DataReader::list_ts_code(&dr, adj_type, start_date, end_date)?;
     let st_list = load_st_list(source_dir)?;
-    let warmup_need = warmup_rows_estimate(source_dir)?;
+    let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
-    let rules_cache = cache_rule_build(source_dir)?;
-    let rule_scene_meta: Vec<RuleSceneMeta> = ScoreRule::load_rules(source_dir)?
+    let rules_cache = cache_rule_build(source_dir, strategy_path)?;
+    let rule_scene_meta: Vec<RuleSceneMeta> = ScoreRule::load_rules_with_strategy_path(
+        source_dir,
+        strategy_path,
+    )?
         .into_iter()
         .map(|rule| RuleSceneMeta {
             scene_name: rule.scene_name,
             stage: rule.stage,
         })
         .collect();
-    let scenes = ScoreScene::load_scenes(source_dir)?;
+    let scenes = ScoreScene::load_scenes_with_strategy_path(source_dir, strategy_path)?;
     let prepare_ms = prepare_started_at.elapsed().as_millis() as u64;
 
     let out_db_path = out_db
@@ -259,6 +263,7 @@ pub fn scoring_all_to_db(
 
 pub fn scoring_single_period(
     source_dir: &str,
+    strategy_path: Option<&str>,
     ts_code: &str,
     adj_type: &str,
     start_date: &str,
@@ -266,20 +271,23 @@ pub fn scoring_single_period(
 ) -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>, Vec<SceneDetails>), String> {
     let dr = DataReader::new(source_dir)?;
     let st_list = load_st_list(source_dir)?;
-    let warmup_need = warmup_rows_estimate(source_dir)?;
+    let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
 
     let mut row_data = DataReader::load_one_tail_rows(&dr, ts_code, adj_type, end_date, need_rows)?;
     fill_scoring_extra_fields(&mut row_data, ts_code, st_list.contains(ts_code))?;
-    let rules_cache = cache_rule_build(source_dir)?;
-    let rule_scene_meta: Vec<RuleSceneMeta> = ScoreRule::load_rules(source_dir)?
+    let rules_cache = cache_rule_build(source_dir, strategy_path)?;
+    let rule_scene_meta: Vec<RuleSceneMeta> = ScoreRule::load_rules_with_strategy_path(
+        source_dir,
+        strategy_path,
+    )?
         .into_iter()
         .map(|rule| RuleSceneMeta {
             scene_name: rule.scene_name,
             stage: rule.stage,
         })
         .collect();
-    let scenes = ScoreScene::load_scenes(source_dir)?;
+    let scenes = ScoreScene::load_scenes_with_strategy_path(source_dir, strategy_path)?;
     Ok(scoring_single_core(
         row_data,
         ts_code,

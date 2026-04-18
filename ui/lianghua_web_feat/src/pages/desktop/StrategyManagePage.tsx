@@ -18,6 +18,7 @@ import {
   type StrategyManageSceneDraft,
   type StrategyManageSceneItem,
 } from '../../apis/strategyManage'
+import StrategyAssetModal from './StrategyAssetModal'
 import './css/StrategyManagePage.css'
 
 const SCOPE_OPTIONS = ['LAST', 'ANY', 'EACH', 'RECENT', 'CONSEC>=2'] as const
@@ -321,6 +322,7 @@ export default function StrategyManagePage() {
   const [bulkActiveSceneName, setBulkActiveSceneName] = useState('')
   const [bulkNewSceneId, setBulkNewSceneId] = useState('')
   const [bulkError, setBulkError] = useState('')
+  const [isAssetModalOpen, setIsAssetModalOpen] = useState(false)
 
   const selectedScene = useMemo(
     () => scenes.find((item) => item.name === selectedSceneName) ?? null,
@@ -920,12 +922,22 @@ export default function StrategyManagePage() {
         <div className="strategy-manage-section-head">
           <div>
             <h2 className="strategy-manage-title">策略管理</h2>
+            <p className="strategy-manage-note">
+              编辑当前生效的策略文件；历史导入和备份都收纳在顶部的策略资产中心里。
+            </p>
           </div>
           <span className="strategy-manage-tip">当前共 {rules.length} 条 rule</span>
         </div>
 
         <div className="strategy-manage-toolbar">
           <div className="strategy-manage-toolbar-left">
+            <button
+              className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-accent"
+              type="button"
+              onClick={() => setIsAssetModalOpen(true)}
+            >
+              策略资产中心
+            </button>
             <button
               className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary"
               type="button"
@@ -1703,6 +1715,14 @@ IF(C > O, C - O, 0)`}</pre>
           </div>
         </div>
       ) : null}
+
+      <StrategyAssetModal
+        open={isAssetModalOpen}
+        onClose={() => setIsAssetModalOpen(false)}
+        onActivated={() => {
+          void loadPage()
+        }}
+      />
     </div>
   )
 }
