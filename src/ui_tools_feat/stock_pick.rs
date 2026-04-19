@@ -18,7 +18,10 @@ use crate::{
     utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
 };
 
-use super::{build_area_map, build_concepts_map, build_industry_map, build_name_map};
+use super::{
+    build_area_map, build_concepts_map, build_industry_map, build_name_map, build_total_mv_map,
+    filter_mv,
+};
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
 const BOARD_ALL: &str = "全部";
@@ -733,6 +736,10 @@ pub fn run_concept_stock_pick(
     board: Option<String>,
     exclude_st_board: Option<bool>,
     trade_date: Option<String>,
+    include_areas: Vec<String>,
+    include_industries: Vec<String>,
+    total_mv_min: Option<f64>,
+    total_mv_max: Option<f64>,
     include_concepts: Vec<String>,
     exclude_concepts: Vec<String>,
     match_mode: String,
@@ -745,6 +752,16 @@ pub fn run_concept_stock_pick(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .collect();
+    let include_industries: Vec<String> = include_industries
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect();
+    let include_areas: Vec<String> = include_areas
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && value != BOARD_ALL)
+        .collect();
     let exclude_concepts: Vec<String> = exclude_concepts
         .into_iter()
         .map(|value| value.trim().to_string())
@@ -754,42 +771,94 @@ pub fn run_concept_stock_pick(
     let summary_map = load_summary_map(source_path, &resolved_trade_date);
     let name_map = build_name_map(source_path).unwrap_or_default();
     let concept_map = build_concepts_map(source_path).unwrap_or_default();
+    let area_map = build_area_map(source_path).unwrap_or_default();
+    let industry_map = build_industry_map(source_path).unwrap_or_default();
+    let total_mv_map = build_total_mv_map(source_path).unwrap_or_default();
     let board_filter = board
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let exclude_st_board = exclude_st_board.unwrap_or(false);
 
-    let mut rows = concept_map
+    let industry_filters = include_industries
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+    let area_filters = include_areas.iter().cloned().collect::<HashSet<_>>();
+    let ts_codes = name_map.keys().cloned().collect::<Vec<_>>();
+
+    let mut rows = ts_codes
         .into_iter()
-        .filter(|(ts_code, _)| {
-            let stock_name = name_map.get(ts_code).map(|value| value.as_str());
-            filter_board(ts_code, stock_name, board_filter, exclude_st_board)
-        })
-        .filter_map(|(ts_code, concept_text)| {
+        .filter_map(|ts_code| {
+            let stock_name = name_map.get(&ts_code).map(|value| value.as_str());
+            if !filter_board(&ts_code, stock_name, board_filter, exclude_st_board) {
+                return None;
+            }
+
+            let name = name_map.get(&ts_code).cloned();
+            let concept_text = concept_map.get(&ts_code).cloned();
+            if !area_filters.is_empty() {
+                let matched = area_map
+                    .get(&ts_code)
+                    .map(|item| area_filters.contains(item))
+                    .unwrap_or(false);
+                if !matched {
+                    return None;
+                }
+            }
+            if !industry_filters.is_empty() {
+                let matched = industry_map
+                    .get(&ts_code)
+                    .map(|item| industry_filters.contains(item))
+                    .unwrap_or(false);
+                if !matched {
+                    return None;
+                }
+            }
+            if !filter_mv(&total_mv_map, &ts_code, total_mv_min, total_mv_max) {
+                return None;
+            }
             if !concept_matches(
-                Some(concept_text.as_str()),
+                concept_text.as_deref(),
                 &include_concepts,
                 match_mode.as_str(),
             ) {
                 return None;
             }
-            if concept_excluded(Some(concept_text.as_str()), &exclude_concepts) {
+            if concept_excluded(concept_text.as_deref(), &exclude_concepts) {
                 return None;
             }
 
             let summary = summary_map.get(&ts_code);
-            let pick_note = if include_concepts.is_empty() {
-                "全部概念".to_string()
+            let mut notes = Vec::new();
+            if include_concepts.is_empty() {
+                notes.push("概念不限".to_string());
             } else {
-                format!("概念{}匹配", if match_mode == "AND" { "AND" } else { "OR" })
-            };
+                notes.push(format!(
+                    "概念{}匹配",
+                    if match_mode == "AND" { "AND" } else { "OR" }
+                ));
+            }
+            if !include_industries.is_empty() {
+                notes.push(format!("行业命中{}项", include_industries.len()));
+            }
+            if !include_areas.is_empty() {
+                notes.push(format!("地区命中{}项", include_areas.len()));
+            }
+            if total_mv_min.is_some() || total_mv_max.is_some() {
+                let min_text = total_mv_min.map(|value| format!("{value}"))
+                    .unwrap_or_else(|| "-inf".to_string());
+                let max_text = total_mv_max.map(|value| format!("{value}"))
+                    .unwrap_or_else(|| "+inf".to_string());
+                notes.push(format!("总市值[{min_text}, {max_text}]亿"));
+            }
+            let pick_note = notes.join("；");
             Some(StockPickRow {
                 ts_code: ts_code.clone(),
-                name: name_map.get(&ts_code).cloned(),
-                board: board_category(&ts_code, name_map.get(&ts_code).map(|value| value.as_str()))
+                name: name.clone(),
+                board: board_category(&ts_code, name.as_deref())
                     .to_string(),
-                concept: Some(concept_text),
+                concept: concept_text,
                 rank: summary.and_then(|item| item.rank),
                 total_score: summary.and_then(|item| item.total_score),
                 pick_note: if exclude_concepts.is_empty() {

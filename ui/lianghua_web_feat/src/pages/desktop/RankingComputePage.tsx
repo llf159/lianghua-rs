@@ -534,7 +534,7 @@ export default function RankingComputePage() {
     }
 
     if (typeof window !== 'undefined') {
-      const confirmed = window.confirm('确认删除当前结果库 `scoring_result.db` 吗？删除后需要重新计算排名。')
+      const confirmed = window.confirm('确认删除当前结果库 `scoring_result.db` 吗？将同时清空 score_summary / rule_details / scene_details，删除后需要重新计算排名。')
       if (!confirmed) {
         return
       }
@@ -548,7 +548,7 @@ export default function RankingComputePage() {
       const managedStatus = await inspectManagedSourceStatus()
       const nextStatus = await getRankingComputeStatus(managedStatus.sourcePath)
       setStatus(nextStatus)
-      setNotice('结果库已删除。下次计算排名时会重新生成新的结果库。')
+      setNotice('结果库已删除。下次计算排名会重新生成 score_summary / rule_details / scene_details。')
     } catch (actionError) {
       setNotice('')
       setError(`删除结果库失败: ${String(actionError)}`)
@@ -613,15 +613,12 @@ export default function RankingComputePage() {
       <section className="ranking-compute-card">
         <div className="ranking-compute-head">
           <div>
-            <h2>数据计算</h2>
+            <h2>数据检查</h2>
           </div>
 
           <div className="ranking-compute-actions">
             <button className="ranking-compute-secondary-btn" type="button" onClick={() => void loadStatus()} disabled={isBusy}>
               {busyAction === 'loading' ? '刷新中...' : '刷新日期信息'}
-            </button>
-            <button className="ranking-compute-danger-btn" type="button" onClick={() => void onDeleteResultDb()} disabled={isBusy || sourcePath === ''}>
-              {busyAction === 'deleting-result-db' ? '删除中...' : '删除结果库'}
             </button>
           </div>
         </div>
@@ -666,6 +663,16 @@ export default function RankingComputePage() {
             ) : null}
           </div>
         </div>
+      </section>
+
+      <section className="ranking-compute-card">
+        <div className="ranking-compute-summary">
+          <div className="ranking-compute-summary-item">
+            <span>排名计算</span>
+            <strong>score_summary / rule_details / scene_details + 补排名</strong>
+            <small>按区间重算总分、规则明细、场景明细，并执行补排名。</small>
+          </div>
+        </div>
 
         <div className="ranking-compute-form">
           <label className="ranking-compute-field">
@@ -682,10 +689,15 @@ export default function RankingComputePage() {
             <button className="ranking-compute-primary-btn" type="button" onClick={() => void onRunCompute()} disabled={isBusy || sourcePath === ''}>
               {busyAction === 'computing' ? '计算中...' : '计算排名'}
             </button>
+            <button className="ranking-compute-danger-btn" type="button" onClick={() => void onDeleteResultDb()} disabled={isBusy || sourcePath === ''}>
+              {busyAction === 'deleting-result-db' ? '删除中...' : '删除结果库'}
+            </button>
           </div>
         </div>
+      </section>
 
-        <div className="ranking-compute-summary" style={{ marginTop: 20 }}>
+      <section className="ranking-compute-card">
+        <div className="ranking-compute-summary">
           <div className="ranking-compute-summary-item">
             <span>其他数据计算</span>
             <strong>概念/行业/板块表现</strong>
@@ -698,8 +710,10 @@ export default function RankingComputePage() {
             {busyAction === 'computing' ? '计算中...' : '开始其他数据计算'}
           </button>
         </div>
+      </section>
 
-        <div className="ranking-compute-summary" style={{ marginTop: 8 }}>
+      <section className="ranking-compute-card">
+        <div className="ranking-compute-summary">
           <div className="ranking-compute-summary-item">
             <span>行情数据指标列维护</span>
             <strong>ind.toml + stock_data 指标列</strong>
@@ -751,10 +765,10 @@ export default function RankingComputePage() {
             fallbackMessage="任务已经启动，正在等待后端返回当前状态。"
           />
         ) : null}
-
-        {notice ? <div className="ranking-compute-notice">{notice}</div> : null}
-        {error ? <div className="ranking-compute-error">{error}</div> : null}
       </section>
+
+      {notice ? <div className="ranking-compute-notice">{notice}</div> : null}
+      {error ? <div className="ranking-compute-error">{error}</div> : null}
 
       {indicatorModalOpen ? (
         <div

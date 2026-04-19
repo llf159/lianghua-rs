@@ -74,6 +74,10 @@ export type ConceptStockPickQuery = {
   tradeDate?: string
   includeConcepts: string[]
   excludeConcepts: string[]
+  includeAreas?: string[]
+  includeIndustries?: string[]
+  totalMvMin?: number
+  totalMvMax?: number
   matchMode: string
 }
 

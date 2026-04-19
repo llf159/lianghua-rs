@@ -27,14 +27,14 @@ const backtestSubRoutes = [
 
 const stockPickSubRoutes = [
   { path: '/stock-pick/expression', label: '表达式选股' },
-  { path: '/stock-pick/concept', label: '概念选股' },
+  { path: '/stock-pick/concept', label: '基础信息选股' },
 ]
 
 const rawDataSubRoutes = [
-  { path: '/raw-data/data-import', label: '数据管理' },
-  { path: '/raw-data/data-viewer', label: '数据查看' },
-  { path: '/raw-data/data-download', label: '数据下载' },
-  { path: '/raw-data/ranking-compute', label: '数据计算' },
+  { path: '/raw-data/data-import', label: '管理' },
+  { path: '/raw-data/data-viewer', label: '查看' },
+  { path: '/raw-data/data-download', label: '下载' },
+  { path: '/raw-data/ranking-compute', label: '计算' },
   { path: '/raw-data/strategy-manage', label: '策略管理' },
 ]
 

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { runConceptStockPick, type StockPickRow } from '../../apis/stockPick'
 import {
+  ConceptSinglePanel,
   ConceptIncludeExcludePanels,
   buildAvailableConceptOptions,
   buildBoardFilterOptions,
@@ -16,7 +17,7 @@ import { useStockPickOutletContext } from './StockPickPage'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
 
 const CONCEPT_STOCK_PICK_STATE_KEY = 'concept-stock-pick-state-v1'
-const CONCEPT_STOCK_PICK_FILTER_STATE_KEY = 'concept-stock-pick-filter-state-v2'
+const CONCEPT_STOCK_PICK_FILTER_STATE_KEY = 'concept-stock-pick-filter-state-v3'
 const CONCEPT_STOCK_PICK_RESULT_STATE_KEY = 'concept-stock-pick-result-state-v2'
 
 type PersistedConceptStockPickFilterState = {
@@ -24,6 +25,13 @@ type PersistedConceptStockPickFilterState = {
   tradeDate: string
   matchMode: (typeof STOCK_PICK_MATCH_MODE_OPTIONS)[number]
   conceptKeyword: string
+  industryKeyword: string
+  areaKeyword: string
+  includeAreas: string[]
+  area?: string
+  includeIndustries: string[]
+  totalMvMinInput: string
+  totalMvMaxInput: string
   includeConcepts: string[]
   excludeConcepts: string[]
   selectedConcepts?: string[]
@@ -38,7 +46,15 @@ type PersistedConceptStockPickState = PersistedConceptStockPickFilterState &
   PersistedConceptStockPickResultState
 
 export default function ConceptStockPickPage() {
-  const { sourcePath, tradeDateOptions, latestTradeDate, conceptOptions, optionsLoading } = useStockPickOutletContext()
+  const {
+    sourcePath,
+    tradeDateOptions,
+    latestTradeDate,
+    conceptOptions,
+    areaOptions,
+    industryOptions,
+    optionsLoading,
+  } = useStockPickOutletContext()
   const { excludedConcepts, excludeStBoard } = useConceptExclusions()
   const persistedState = useMemo(() => {
     const storage = typeof window === 'undefined' ? null : window.sessionStorage
@@ -75,6 +91,22 @@ export default function ConceptStockPickPage() {
           ? merged.matchMode
           : 'OR',
       conceptKeyword: typeof merged.conceptKeyword === 'string' ? merged.conceptKeyword : '',
+      industryKeyword: typeof merged.industryKeyword === 'string' ? merged.industryKeyword : '',
+      areaKeyword: typeof merged.areaKeyword === 'string' ? merged.areaKeyword : '',
+      includeAreas: normalizeStringArray(
+        Array.isArray(merged.includeAreas)
+          ? merged.includeAreas.filter((item): item is string => typeof item === 'string')
+          : typeof merged.area === 'string' && merged.area !== '全部'
+            ? [merged.area]
+            : [],
+      ),
+      includeIndustries: normalizeStringArray(
+        Array.isArray(merged.includeIndustries)
+          ? merged.includeIndustries.filter((item): item is string => typeof item === 'string')
+          : [],
+      ),
+      totalMvMinInput: typeof merged.totalMvMinInput === 'string' ? merged.totalMvMinInput : '',
+      totalMvMaxInput: typeof merged.totalMvMaxInput === 'string' ? merged.totalMvMaxInput : '',
       includeConcepts: normalizeStringArray(
         Array.isArray(merged.includeConcepts)
           ? merged.includeConcepts.filter((item): item is string => typeof item === 'string')
@@ -95,6 +127,12 @@ export default function ConceptStockPickPage() {
   const [tradeDate, setTradeDate] = useState(() => persistedState?.tradeDate ?? '')
   const [matchMode, setMatchMode] = useState<(typeof STOCK_PICK_MATCH_MODE_OPTIONS)[number]>(() => persistedState?.matchMode ?? 'OR')
   const [conceptKeyword, setConceptKeyword] = useState(() => persistedState?.conceptKeyword ?? '')
+  const [industryKeyword, setIndustryKeyword] = useState(() => persistedState?.industryKeyword ?? '')
+  const [areaKeyword, setAreaKeyword] = useState(() => persistedState?.areaKeyword ?? '')
+  const [includeAreas, setIncludeAreas] = useState<string[]>(() => persistedState?.includeAreas ?? [])
+  const [includeIndustries, setIncludeIndustries] = useState<string[]>(() => persistedState?.includeIndustries ?? [])
+  const [totalMvMinInput, setTotalMvMinInput] = useState(() => persistedState?.totalMvMinInput ?? '')
+  const [totalMvMaxInput, setTotalMvMaxInput] = useState(() => persistedState?.totalMvMaxInput ?? '')
   const [includeConcepts, setIncludeConcepts] = useState<string[]>(() => persistedState?.includeConcepts ?? [])
   const [excludeConcepts, setExcludeConcepts] = useState<string[]>(() => persistedState?.excludeConcepts ?? [])
   const [rows, setRows] = useState<StockPickRow[]>(() => persistedState?.rows ?? [])
@@ -136,6 +174,31 @@ export default function ConceptStockPickPage() {
     })
   }, [excludedConcepts])
 
+  const availableConceptOptions = useMemo(
+    () => buildAvailableConceptOptions(conceptOptions, excludedConcepts),
+    [conceptOptions, excludedConcepts],
+  )
+  const availableIndustryOptions = useMemo(
+    () => normalizeStringArray(industryOptions),
+    [industryOptions],
+  )
+  const availableAreaOptions = useMemo(
+    () => normalizeStringArray(areaOptions),
+    [areaOptions],
+  )
+
+  useEffect(() => {
+    setIncludeIndustries((current) =>
+      current.filter((item) => availableIndustryOptions.includes(item)),
+    )
+  }, [availableIndustryOptions])
+
+  useEffect(() => {
+    setIncludeAreas((current) =>
+      current.filter((item) => availableAreaOptions.includes(item)),
+    )
+  }, [availableAreaOptions])
+
   useEffect(() => {
     writeJsonStorage(
       typeof window === 'undefined' ? null : window.sessionStorage,
@@ -145,11 +208,30 @@ export default function ConceptStockPickPage() {
         tradeDate,
         matchMode,
         conceptKeyword,
+        industryKeyword,
+        areaKeyword,
+        includeAreas,
+        includeIndustries,
+        totalMvMinInput,
+        totalMvMaxInput,
         includeConcepts,
         excludeConcepts,
       } satisfies PersistedConceptStockPickFilterState,
     )
-  }, [board, tradeDate, matchMode, conceptKeyword, includeConcepts, excludeConcepts])
+  }, [
+    board,
+    tradeDate,
+    matchMode,
+    conceptKeyword,
+    industryKeyword,
+    areaKeyword,
+    includeAreas,
+    includeIndustries,
+    totalMvMinInput,
+    totalMvMaxInput,
+    includeConcepts,
+    excludeConcepts,
+  ])
 
   useEffect(() => {
     writeJsonStorage(
@@ -162,11 +244,6 @@ export default function ConceptStockPickPage() {
     )
   }, [rows, resolvedTradeDate])
 
-  const availableConceptOptions = useMemo(
-    () => buildAvailableConceptOptions(conceptOptions, excludedConcepts),
-    [conceptOptions, excludedConcepts],
-  )
-
   function toggleIncludeConcept(value: string) {
     setIncludeConcepts((current) => toggleStringSelection(current, value))
     setExcludeConcepts((current) => current.filter((item) => item !== value))
@@ -177,9 +254,31 @@ export default function ConceptStockPickPage() {
     setIncludeConcepts((current) => current.filter((item) => item !== value))
   }
 
+  function toggleIncludeIndustry(value: string) {
+    setIncludeIndustries((current) => toggleStringSelection(current, value))
+  }
+
+  function toggleIncludeArea(value: string) {
+    setIncludeAreas((current) => toggleStringSelection(current, value))
+  }
+
   async function onRun() {
     if (!sourcePath.trim()) {
       setError('当前数据目录为空。')
+      return
+    }
+
+    const totalMvMin = totalMvMinInput.trim() ? Number(totalMvMinInput.trim()) : undefined
+    const totalMvMax = totalMvMaxInput.trim() ? Number(totalMvMaxInput.trim()) : undefined
+    if (
+      (totalMvMinInput.trim() && !Number.isFinite(totalMvMin)) ||
+      (totalMvMaxInput.trim() && !Number.isFinite(totalMvMax))
+    ) {
+      setError('市值范围请输入有效数字。')
+      return
+    }
+    if (totalMvMin !== undefined && totalMvMax !== undefined && totalMvMin > totalMvMax) {
+      setError('市值下限不能大于上限。')
       return
     }
 
@@ -191,6 +290,10 @@ export default function ConceptStockPickPage() {
         board,
         excludeStBoard: excludeStBoard || undefined,
         tradeDate,
+        includeAreas,
+        includeIndustries,
+        totalMvMin,
+        totalMvMax,
         includeConcepts,
         excludeConcepts,
         matchMode,
@@ -200,7 +303,7 @@ export default function ConceptStockPickPage() {
     } catch (runError) {
       setRows([])
       setResolvedTradeDate('')
-      setError(`概念选股失败: ${String(runError)}`)
+      setError(`基础信息选股失败: ${String(runError)}`)
     } finally {
       setLoading(false)
     }
@@ -210,13 +313,13 @@ export default function ConceptStockPickPage() {
     <section className="stock-pick-card">
       <div className="stock-pick-section-head">
         <div>
-          <h3 className="stock-pick-subtitle">概念选股</h3>
+          <h3 className="stock-pick-subtitle">基础信息选股</h3>
         </div>
       </div>
 
       <div className="stock-pick-form-grid">
         <label className="stock-pick-field">
-          <span>选股范围</span>
+          <span>板块</span>
           <select value={board} onChange={(event) => setBoard(event.target.value as typeof board)} disabled={optionsLoading}>
             {boardOptions.map((item) => (
               <option key={item} value={item}>
@@ -238,7 +341,7 @@ export default function ConceptStockPickPage() {
         </label>
 
         <label className="stock-pick-field">
-          <span>匹配模式</span>
+          <span>概念匹配模式</span>
           <select value={matchMode} onChange={(event) => setMatchMode(event.target.value as typeof matchMode)}>
             {STOCK_PICK_MATCH_MODE_OPTIONS.map((item) => (
               <option key={item} value={item}>
@@ -247,6 +350,60 @@ export default function ConceptStockPickPage() {
             ))}
           </select>
         </label>
+      </div>
+
+      <div className="stock-pick-form-grid">
+        <label className="stock-pick-field">
+          <span>总市值下限(亿)</span>
+          <input
+            type="number"
+            inputMode="decimal"
+            value={totalMvMinInput}
+            onChange={(event) => setTotalMvMinInput(event.target.value)}
+            placeholder="如: 50"
+          />
+        </label>
+
+        <label className="stock-pick-field">
+          <span>总市值上限(亿)</span>
+          <input
+            type="number"
+            inputMode="decimal"
+            value={totalMvMaxInput}
+            onChange={(event) => setTotalMvMaxInput(event.target.value)}
+            placeholder="如: 3000"
+          />
+        </label>
+      </div>
+
+      <div className="stock-pick-concept-grid">
+        <ConceptSinglePanel
+          title="包含行业"
+          selectedItems={includeIndustries}
+          availableItems={availableIndustryOptions}
+          keyword={industryKeyword}
+          onKeywordChange={setIndustryKeyword}
+          onToggle={toggleIncludeIndustry}
+          onClear={() => setIncludeIndustries([])}
+          clearLabel="清空行业"
+          searchPlaceholder="搜索行业"
+          emptyText="没有匹配的行业。"
+          noGrid
+        />
+
+        <ConceptSinglePanel
+          title="包含地区"
+          selectedItems={includeAreas}
+          availableItems={availableAreaOptions}
+          keyword={areaKeyword}
+          onKeywordChange={setAreaKeyword}
+          onToggle={toggleIncludeArea}
+          onClear={() => setIncludeAreas([])}
+          clearLabel="清空地区"
+          searchPlaceholder="搜索地区"
+          emptyText="没有匹配的地区。"
+          noGrid
+        />
       </div>
 
       <ConceptIncludeExcludePanels

@@ -72,6 +72,7 @@ function ConceptFilterPanel({
   onKeywordChange,
   activeTone = "primary",
   clearLabel = "清空",
+  searchPlaceholder = "搜索概念",
   emptyText = "没有匹配的概念。",
   panelClassName,
 }: {
@@ -84,6 +85,7 @@ function ConceptFilterPanel({
   onKeywordChange: (value: string) => void;
   activeTone?: ConceptSelectionTone;
   clearLabel?: string;
+  searchPlaceholder?: string;
   emptyText?: string;
   panelClassName?: string;
 }) {
@@ -112,7 +114,7 @@ function ConceptFilterPanel({
           type="text"
           value={keyword}
           onChange={(event) => onKeywordChange(event.target.value)}
-          placeholder="搜索概念"
+          placeholder={searchPlaceholder}
           className="stock-pick-concept-search"
         />
         <button
@@ -207,6 +209,56 @@ export function ConceptIncludeExcludePanels({
       />
     </div>
   );
+}
+
+export function ConceptSinglePanel({
+  title,
+  selectedItems,
+  availableItems,
+  keyword,
+  onKeywordChange,
+  onToggle,
+  onClear,
+  clearLabel = "清空",
+  searchPlaceholder = "搜索",
+  emptyText = "没有匹配项。",
+  panelClassName,
+  noGrid = false,
+}: {
+  title: string;
+  selectedItems: string[];
+  availableItems: string[];
+  keyword: string;
+  onKeywordChange: (value: string) => void;
+  onToggle: (value: string) => void;
+  onClear: () => void;
+  clearLabel?: string;
+  searchPlaceholder?: string;
+  emptyText?: string;
+  panelClassName?: string;
+  noGrid?: boolean;
+}) {
+  const panel = (
+    <ConceptFilterPanel
+      title={title}
+      selectedItems={selectedItems}
+      availableItems={availableItems}
+      onToggle={onToggle}
+      onClear={onClear}
+      keyword={keyword}
+      onKeywordChange={onKeywordChange}
+      clearLabel={clearLabel}
+      searchPlaceholder={searchPlaceholder}
+      emptyText={emptyText}
+      panelClassName={panelClassName}
+    />
+  );
+
+  if (noGrid) {
+    return panel;
+  }
+
+  return <div className="stock-pick-concept-grid">{panel}</div>;
 }
 
 export function buildBoardFilterOptions(

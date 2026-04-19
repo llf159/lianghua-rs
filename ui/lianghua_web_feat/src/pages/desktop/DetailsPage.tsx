@@ -2527,7 +2527,7 @@ export default function DetailsPage({
   const [detailRealtimeLoading, setDetailRealtimeLoading] = useState(false);
   const [detailRealtimeNotice, setDetailRealtimeNotice] = useState("");
   const [detailRealtimePinned, setDetailRealtimePinned] = useState(false);
-  const [screenWidth, setScreenWidth] = useState(() =>
+  const [chartLayoutWidth, setChartLayoutWidth] = useState(() =>
     typeof window === "undefined" ? CHART_VIEWBOX_WIDTH : window.innerWidth,
   );
   const [chartMainWidthRatio, setChartMainWidthRatio] = useState(() =>
@@ -2547,6 +2547,7 @@ export default function DetailsPage({
   const [sceneDetailTarget, setSceneDetailTarget] =
     useState<DetailSceneTriggerRow | null>(null);
   const chartDragRef = useRef<ChartDragState | null>(null);
+  const chartCardRef = useRef<HTMLElement | null>(null);
   const strategyGridRef = useRef<HTMLDivElement | null>(null);
   const strategyResizePointerIdRef = useRef<number | null>(null);
   const currentRankRowRef = useRef<HTMLTableRowElement | null>(null);
@@ -3214,10 +3215,10 @@ export default function DetailsPage({
     totalChartItems,
   );
   const panels = kline?.panels?.length ? kline.panels : buildDefaultPanels();
-  const chartMainPanelHeight = screenWidth * chartMainWidthRatio;
-  const chartIndicatorTotalHeight = screenWidth * chartIndicatorWidthRatio;
+  const chartMainPanelHeight = chartLayoutWidth * chartMainWidthRatio;
+  const chartIndicatorTotalHeight = chartLayoutWidth * chartIndicatorWidthRatio;
   const chartMinHeight =
-    screenWidth <= CHART_MOBILE_BREAKPOINT
+    chartLayoutWidth <= CHART_MOBILE_BREAKPOINT
       ? CHART_MIN_HEIGHT_MOBILE
       : CHART_MIN_HEIGHT_DESKTOP;
   const chartPanelGapTotal = Math.max(0, panels.length - 1) * CHART_PANEL_GAP_PX;
@@ -3315,14 +3316,32 @@ export default function DetailsPage({
       return;
     }
 
-    const onResize = () => {
-      setScreenWidth(window.innerWidth);
+    const updateChartLayoutWidth = () => {
+      const cardWidth = chartCardRef.current?.getBoundingClientRect().width;
+      const nextWidth =
+        typeof cardWidth === "number" && cardWidth > 0
+          ? cardWidth
+          : window.innerWidth;
+      setChartLayoutWidth(nextWidth);
     };
 
-    onResize();
-    window.addEventListener("resize", onResize);
+    updateChartLayoutWidth();
+    window.addEventListener("resize", updateChartLayoutWidth);
+
+    const card = chartCardRef.current;
+    const observer =
+      typeof ResizeObserver === "undefined" || !card
+        ? null
+        : new ResizeObserver(() => {
+            updateChartLayoutWidth();
+          });
+    if (observer && card) {
+      observer.observe(card);
+    }
+
     return () => {
-      window.removeEventListener("resize", onResize);
+      window.removeEventListener("resize", updateChartLayoutWidth);
+      observer?.disconnect();
     };
   }, []);
 
@@ -4256,7 +4275,7 @@ export default function DetailsPage({
         <div className="details-error">{detailError}</div>
       ) : null}
 
-      <section className="details-card details-chart-card">
+      <section className="details-card details-chart-card" ref={chartCardRef}>
         <h3 className="details-subtitle">K线图</h3>
 
         <div className="details-chart-toolbar">
