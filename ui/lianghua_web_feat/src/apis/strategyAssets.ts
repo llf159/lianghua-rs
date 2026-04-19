@@ -27,6 +27,7 @@ export type ManagedStrategyBackupItem = {
   sizeBytes: number
   sourceKind: string
   sourceFileName: string | null
+  description: string | null
 }
 
 export type ManagedStrategyAssetsStatus = {
@@ -95,6 +96,15 @@ export async function deleteManagedStrategyBackup(backupId: string) {
   return invoke<ManagedStrategyAssetsStatus>('delete_managed_strategy_backup', {
     sourceDir: DEFAULT_MANAGED_SOURCE_DIR,
     backupId,
+  })
+}
+
+export async function updateManagedStrategyBackupDescription(backupId: string, description: string) {
+  await ensureManagedSourcePath(DEFAULT_MANAGED_SOURCE_DIR)
+  return invoke<ManagedStrategyAssetsStatus>('update_managed_strategy_backup_description', {
+    sourceDir: DEFAULT_MANAGED_SOURCE_DIR,
+    backupId,
+    description,
   })
 }
 

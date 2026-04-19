@@ -233,6 +233,34 @@
   gap: 12px;
 }
 
+.strategy-asset-desc-editor {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.strategy-asset-desc-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: #0f172a;
+  background: #fff;
+}
+
+.strategy-asset-desc-input:focus {
+  outline: none;
+  border-color: rgba(14, 116, 144, 0.55);
+  box-shadow: 0 0 0 3px rgba(125, 211, 252, 0.35);
+}
+
+.strategy-asset-desc-input:disabled {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
 .strategy-asset-backup-path {
   padding: 12px 14px;
   border-radius: 14px;
@@ -262,6 +290,11 @@
   .strategy-asset-current-grid,
   .strategy-asset-backup-meta-grid {
     grid-template-columns: 1fr;
+  }
+
+  .strategy-asset-desc-editor {
+    flex-direction: column;
+    align-items: stretch;
   }
 }
 

@@ -9,6 +9,7 @@ import {
   exportManagedStrategyBundle,
   getManagedStrategyAssetsStatus,
   importManagedStrategyBackup,
+  updateManagedStrategyBackupDescription,
   type ManagedStrategyAssetsStatus,
   type ManagedStrategyBackupItem,
 } from '../../apis/strategyAssets'
@@ -25,6 +26,7 @@ type BusyAction =
   | `activating:${string}`
   | `deleting:${string}`
   | `exporting:${string}`
+  | `saving-desc:${string}`
 
 type StrategyAssetModalProps = {
   open: boolean
@@ -61,7 +63,7 @@ function formatBytes(value: number | null | undefined) {
 
 function describeBackupSource(item: ManagedStrategyBackupItem) {
   if (item.sourceKind === 'imported') {
-    return `导入 · ${item.sourceFileName ?? '外部文件'}`
+    return '外部导入'
   }
   if (item.sourceKind === 'empty') {
     return '空白模板'
@@ -75,6 +77,7 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
   const [busyAction, setBusyAction] = useState<BusyAction>('idle')
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
+  const [descriptionDrafts, setDescriptionDrafts] = useState<Record<string, string>>({})
 
   const isBusy = busyAction !== 'idle'
   const backupCount = status?.backups.length ?? 0
@@ -89,6 +92,12 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
     try {
       const nextStatus = await getManagedStrategyAssetsStatus()
       setStatus(nextStatus)
+      setDescriptionDrafts(
+        nextStatus.backups.reduce<Record<string, string>>((accumulator, item) => {
+          accumulator[item.backupId] = item.description ?? ''
+          return accumulator
+        }, {}),
+      )
     } catch (loadError) {
       setError(`读取策略资产失败: ${String(loadError)}`)
     } finally {
@@ -262,6 +271,33 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
     }
   }
 
+  async function onSaveDescription(item: ManagedStrategyBackupItem) {
+    const draft = (descriptionDrafts[item.backupId] ?? '').trim()
+    const current = (item.description ?? '').trim()
+    if (draft === current) {
+      return
+    }
+
+    setBusyAction(`saving-desc:${item.backupId}`)
+    setError('')
+    try {
+      const nextStatus = await updateManagedStrategyBackupDescription(item.backupId, draft)
+      setStatus(nextStatus)
+      setDescriptionDrafts(
+        nextStatus.backups.reduce<Record<string, string>>((accumulator, backup) => {
+          accumulator[backup.backupId] = backup.description ?? ''
+          return accumulator
+        }, {}),
+      )
+      setNotice(`已更新 ${item.folderName} 的说明。`)
+    } catch (actionError) {
+      setNotice('')
+      setError(`保存说明失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
   if (!open) {
     return null
   }
@@ -374,6 +410,9 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
                 const isActivating = busyAction === `activating:${item.backupId}`
                 const isDeleting = busyAction === `deleting:${item.backupId}`
                 const isExporting = busyAction === `exporting:${item.backupId}`
+                const isSavingDesc = busyAction === `saving-desc:${item.backupId}`
+                const descriptionDraft = descriptionDrafts[item.backupId] ?? ''
+                const descriptionDirty = descriptionDraft.trim() !== (item.description ?? '').trim()
                 return (
                   <article key={item.backupId} className="strategy-asset-backup-card">
                     <div className="strategy-asset-backup-head">
@@ -404,8 +443,29 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
                         <strong>{formatBytes(item.sizeBytes)}</strong>
                       </div>
                       <div className="strategy-asset-meta">
-                        <span>原文件名</span>
-                        <strong>{item.sourceFileName ?? '--'}</strong>
+                        <span>说明</span>
+                        <div className="strategy-asset-desc-editor">
+                          <input
+                            className="strategy-asset-desc-input"
+                            type="text"
+                            placeholder="例如：回测基线版本 / 导入后待清洗"
+                            maxLength={120}
+                            value={descriptionDraft}
+                            onChange={(event) => {
+                              const nextValue = event.target.value
+                              setDescriptionDrafts((prev) => ({ ...prev, [item.backupId]: nextValue }))
+                            }}
+                            disabled={isBusy}
+                          />
+                          <button
+                            className="strategy-asset-btn"
+                            type="button"
+                            onClick={() => void onSaveDescription(item)}
+                            disabled={(isBusy && !isSavingDesc) || isSavingDesc || !descriptionDirty}
+                          >
+                            {isSavingDesc ? '保存中...' : '保存说明'}
+                          </button>
+                        </div>
                       </div>
                     </div>
 

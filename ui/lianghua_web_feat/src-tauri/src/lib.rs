@@ -100,6 +100,7 @@ use managed_source_bridge::{
     export_managed_strategy_bundle, get_managed_strategy_assets_status,
     import_managed_strategy_backup, preview_managed_source_dataset,
     preview_managed_source_stock_data,
+    update_managed_strategy_backup_description,
 };
 
 #[cfg(target_os = "android")]
@@ -983,6 +984,7 @@ pub fn run() {
             create_managed_empty_strategy_backup,
             activate_managed_strategy_backup,
             delete_managed_strategy_backup,
+            update_managed_strategy_backup_description,
             export_managed_strategy_backup_file,
             export_managed_strategy_bundle,
             get_data_download_status,

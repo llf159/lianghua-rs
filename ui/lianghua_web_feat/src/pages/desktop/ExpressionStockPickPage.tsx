@@ -339,29 +339,41 @@ export default function ExpressionStockPickPage() {
               ? `，窗口：${formatDateLabel(resolvedStartDate)} ~ ${formatDateLabel(resolvedReferenceTradeDate)}`
               : ''}
           </span>
-          <label className="stock-pick-field stock-pick-field-compact">
-            <span>代码格式</span>
-            <select
-              value={copyWithSuffix ? 'with' : 'without'}
-              onChange={(event) => setCopyWithSuffix(event.target.value === 'with')}
-            >
-              <option value="with">带后缀</option>
-              <option value="without">不带后缀</option>
-            </select>
-          </label>
-          <label className="stock-pick-field stock-pick-field-compact">
-            <span>分隔符</span>
-            <select
-              value={copySeparator}
-              onChange={(event) => setCopySeparator(event.target.value as CopySeparatorOption)}
-            >
-              {COPY_SEPARATOR_OPTIONS.map((item) => (
-                <option key={item.value} value={item.value}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="stock-pick-copy-config">
+            <div className="stock-pick-copy-setting">
+              <span>代码格式</span>
+              <div className="stock-pick-copy-toggle" role="group" aria-label="代码格式">
+                <button
+                  type="button"
+                  className={copyWithSuffix ? 'stock-pick-copy-toggle-btn is-active' : 'stock-pick-copy-toggle-btn'}
+                  onClick={() => setCopyWithSuffix(true)}
+                >
+                  带后缀
+                </button>
+                <button
+                  type="button"
+                  className={!copyWithSuffix ? 'stock-pick-copy-toggle-btn is-active' : 'stock-pick-copy-toggle-btn'}
+                  onClick={() => setCopyWithSuffix(false)}
+                >
+                  不带后缀
+                </button>
+              </div>
+            </div>
+            <label className="stock-pick-copy-setting">
+              <span>分隔符</span>
+              <select
+                className="stock-pick-copy-select"
+                value={copySeparator}
+                onChange={(event) => setCopySeparator(event.target.value as CopySeparatorOption)}
+              >
+                {COPY_SEPARATOR_OPTIONS.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
           <button type="button" className="stock-pick-chip-btn" onClick={() => void onCopyStockCodes()}>
             复制股票
           </button>

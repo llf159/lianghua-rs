@@ -99,6 +99,7 @@ pub struct ManagedStrategyBackupItem {
     size_bytes: u64,
     source_kind: String,
     source_file_name: Option<String>,
+    description: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -125,6 +126,20 @@ struct StrategyBackupMeta {
     created_at: String,
     source_kind: String,
     source_file_name: Option<String>,
+    description: Option<String>,
+}
+
+fn normalize_strategy_backup_description(description: &str) -> Result<Option<String>, String> {
+    let trimmed = description.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if trimmed.chars().count() > 120 {
+        return Err("策略说明不能超过 120 个字符".into());
+    }
+
+    Ok(Some(trimmed.to_string()))
 }
 
 fn emit_import_event(
@@ -299,6 +314,7 @@ fn build_managed_strategy_backup_item(
         size_bytes: metadata.len(),
         source_kind: meta.source_kind,
         source_file_name: meta.source_file_name,
+        description: meta.description,
     })
 }
 
@@ -802,6 +818,7 @@ fn import_strategy_backup_inner(
             created_at: Utc::now().to_rfc3339(),
             source_kind: "imported".to_string(),
             source_file_name: Some(source_file_name),
+            description: Some("外部导入策略".to_string()),
         },
     )?;
 
@@ -837,6 +854,7 @@ fn backup_active_strategy_inner(
             created_at: Utc::now().to_rfc3339(),
             source_kind: "backup".to_string(),
             source_file_name: Some(STRATEGY_RULE_FILE_NAME.to_string()),
+            description: Some("手动备份当前生效策略".to_string()),
         },
     )?;
 
@@ -866,6 +884,7 @@ fn create_empty_strategy_backup_inner(
             created_at: Utc::now().to_rfc3339(),
             source_kind: "empty".to_string(),
             source_file_name: Some(STRATEGY_RULE_FILE_NAME.to_string()),
+            description: Some("空白模板策略".to_string()),
         },
     )?;
 
@@ -913,6 +932,23 @@ fn delete_strategy_backup_inner(
             )
         })?;
     }
+    get_managed_strategy_assets_status_inner(app_data_root, &source_dir)
+}
+
+fn update_strategy_backup_description_inner(
+    app_data_root: &Path,
+    source_dir: String,
+    backup_id: String,
+    description: String,
+) -> Result<ManagedStrategyAssetsStatus, String> {
+    let source_root = resolve_source_root(app_data_root, &source_dir)?;
+    let normalized_backup_id = validate_strategy_backup_id(&backup_id)?.to_string();
+    let normalized_description = normalize_strategy_backup_description(&description)?;
+
+    let mut meta = read_strategy_backup_meta(&source_root, &normalized_backup_id)?;
+    meta.description = normalized_description;
+    write_strategy_backup_meta(&source_root, &normalized_backup_id, &meta)?;
+
     get_managed_strategy_assets_status_inner(app_data_root, &source_dir)
 }
 
@@ -1107,6 +1143,24 @@ pub async fn delete_managed_strategy_backup(
         .map_err(|error| error.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
         delete_strategy_backup_inner(&app_data_root, source_dir, backup_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn update_managed_strategy_backup_description(
+    app: tauri::AppHandle,
+    source_dir: String,
+    backup_id: String,
+    description: String,
+) -> Result<ManagedStrategyAssetsStatus, String> {
+    let app_data_root = app
+        .path()
+        .resolve("", tauri::path::BaseDirectory::AppData)
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        update_strategy_backup_description_inner(&app_data_root, source_dir, backup_id, description)
     })
     .await
     .map_err(|error| error.to_string())?
