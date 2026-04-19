@@ -27,6 +27,26 @@ const IMPORT_PROGRESS_STEP_BYTES: u64 = 32 * 1024 * 1024;
 const STRATEGY_BACKUP_DIR_NAME: &str = "strategy_backups";
 const STRATEGY_RULE_FILE_NAME: &str = "score_rule.toml";
 const STRATEGY_META_FILE_NAME: &str = "meta.json";
+const EMPTY_STRATEGY_TEMPLATE: &str = r#"version = 1
+
+[[scene]]
+name = "empty_scene"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "empty_rule"
+scene = "empty_scene"
+stage = "base"
+scope_windows = 1
+scope_way = "LAST"
+when = "C > 99999999"
+points = 0.0
+explain = "空白模板占位规则，可直接编辑替换"
+"#;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -823,6 +843,35 @@ fn backup_active_strategy_inner(
     build_managed_strategy_backup_item(&source_root, &source_dir, &backup_id)
 }
 
+fn create_empty_strategy_backup_inner(
+    app_data_root: &Path,
+    source_dir: String,
+) -> Result<ManagedStrategyBackupItem, String> {
+    let source_root = resolve_source_root(app_data_root, &source_dir)?;
+    let backup_id = current_strategy_backup_id();
+    let backup_dir = managed_strategy_backup_dir(&source_root, &backup_id);
+    std::fs::create_dir_all(&backup_dir).map_err(|error| error.to_string())?;
+    let backup_file_path = backup_dir.join(STRATEGY_RULE_FILE_NAME);
+    std::fs::write(&backup_file_path, EMPTY_STRATEGY_TEMPLATE).map_err(|error| {
+        format!(
+            "写入空白策略模板失败: path={}, err={error}",
+            backup_file_path.display()
+        )
+    })?;
+    write_strategy_backup_meta(
+        &source_root,
+        &backup_id,
+        &StrategyBackupMeta {
+            version: 1,
+            created_at: Utc::now().to_rfc3339(),
+            source_kind: "empty".to_string(),
+            source_file_name: Some(STRATEGY_RULE_FILE_NAME.to_string()),
+        },
+    )?;
+
+    build_managed_strategy_backup_item(&source_root, &source_dir, &backup_id)
+}
+
 fn activate_strategy_backup_inner(
     app_data_root: &Path,
     source_dir: String,
@@ -1011,6 +1060,22 @@ pub async fn backup_managed_active_strategy(
     tauri::async_runtime::spawn_blocking(move || backup_active_strategy_inner(&app_data_root, source_dir))
         .await
         .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn create_managed_empty_strategy_backup(
+    app: tauri::AppHandle,
+    source_dir: String,
+) -> Result<ManagedStrategyBackupItem, String> {
+    let app_data_root = app
+        .path()
+        .resolve("", tauri::path::BaseDirectory::AppData)
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        create_empty_strategy_backup_inner(&app_data_root, source_dir)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

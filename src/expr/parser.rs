@@ -115,6 +115,48 @@ impl Parser {
         &self.token[self.idx].kind
     }
 
+    fn current_token(&self) -> &Token {
+        &self.token[self.idx]
+    }
+
+    fn current_offset(&self) -> usize {
+        self.current_token().start
+    }
+
+    fn err_here(&self, msg: impl Into<String>) -> ParseErr {
+        ParseErr {
+            msg: msg.into(),
+            idx: self.current_offset(),
+        }
+    }
+
+    fn token_brief(kind: &TokenKind) -> String {
+        match kind {
+            TokenKind::Eof => "输入结束".to_string(),
+            TokenKind::Plus => "`+`".to_string(),
+            TokenKind::Minus => "`-`".to_string(),
+            TokenKind::Star => "`*`".to_string(),
+            TokenKind::Slash => "`/`".to_string(),
+            TokenKind::LParen => "`(`".to_string(),
+            TokenKind::RParen => "`)`".to_string(),
+            TokenKind::Comma => "`,`".to_string(),
+            TokenKind::Semi => "`;`".to_string(),
+            TokenKind::And => "`AND`".to_string(),
+            TokenKind::Or => "`OR`".to_string(),
+            TokenKind::Not => "`NOT`".to_string(),
+            TokenKind::Ident(name) => format!("标识符 `{name}`"),
+            TokenKind::Number(num) => format!("数字 `{num}`"),
+            TokenKind::Gt => "`>`".to_string(),
+            TokenKind::Ge => "`>=`".to_string(),
+            TokenKind::Lt => "`<`".to_string(),
+            TokenKind::Le => "`<=`".to_string(),
+            TokenKind::Eq => "`==`".to_string(),
+            TokenKind::Ne => "`!=`".to_string(),
+            TokenKind::ColonEq => "`:=`".to_string(),
+            TokenKind::Unknown(ch) => format!("未知符号 `{ch}`"),
+        }
+    }
+
     fn pop_token(&mut self) -> TokenKind {
         let tok = self.token[self.idx].kind.clone();
         self.idx += 1;
@@ -163,12 +205,7 @@ impl Parser {
             TokenKind::Ident(_) => {
                 let name = match self.pop_token() {
                     TokenKind::Ident(name) => name,
-                    other => {
-                        return Err(ParseErr {
-                            msg: format!("错误字符串:{:?}", other),
-                            idx: self.idx,
-                        });
-                    }
+                    other => return Err(self.err_here(format!("变量名解析失败，当前位置是 {}", Self::token_brief(&other)))),
                 };
                 // 用左括号检查是否是函数
                 if !matches!(self.peek_kind(), TokenKind::LParen) {
@@ -177,10 +214,10 @@ impl Parser {
                 match self.pop_token() {
                     TokenKind::LParen => {}
                     other => {
-                        return Err(ParseErr {
-                            msg: format!("错误符号:{:?}, 应该为左括号'('", other),
-                            idx: self.idx,
-                        });
+                        return Err(self.err_here(format!(
+                            "函数 `{name}` 后需要左括号 `(`，当前位置是 {}",
+                            Self::token_brief(&other)
+                        )));
                     }
                 }
 
@@ -204,10 +241,10 @@ impl Parser {
                             break;
                         }
                         other => {
-                            return Err(ParseErr {
-                                msg: format!("表达式不全,缺少参数或右括号, 错误字符:{:?}", other),
-                                idx: self.idx,
-                            });
+                            return Err(self.err_here(format!(
+                                "函数 `{name}` 的参数列表未正确结束，期望 `,` 或 `)`，当前位置是 {}",
+                                Self::token_brief(other)
+                            )));
                         }
                     }
                 }
@@ -217,21 +254,24 @@ impl Parser {
             // 数字分支
             TokenKind::Number(_) => match self.pop_token() {
                 TokenKind::Number(num) => Ok(Expr::Number(num)),
-                other => Err(ParseErr {
-                    msg: format!("表达式数字错误:{:?}", other),
-                    idx: self.idx,
-                }),
+                other => Err(self.err_here(format!(
+                    "数字解析失败，当前位置是 {}",
+                    Self::token_brief(&other)
+                ))),
             },
             // 左括号分支
             TokenKind::LParen => {
                 self.pop_token();
-                let inner = self.parse_expr(0);
-                match self.pop_token() {
-                    TokenKind::RParen => inner,
-                    _ => Err(ParseErr {
-                        msg: "表达式缺少右边括号".to_string(),
-                        idx: self.idx,
-                    }),
+                let inner = self.parse_expr(0)?;
+                match self.peek_kind() {
+                    TokenKind::RParen => {
+                        self.pop_token();
+                        Ok(inner)
+                    }
+                    other => Err(self.err_here(format!(
+                        "括号表达式没有闭合，期望 `)`，当前位置是 {}",
+                        Self::token_brief(other)
+                    ))),
                 }
             }
             // 负号分支
@@ -253,10 +293,10 @@ impl Parser {
                 })
             }
 
-            other => Err(ParseErr {
-                msg: format!("表达式token处理异常,错误字符:{:?}", other),
-                idx: self.idx,
-            }),
+            other => Err(self.err_here(format!(
+                "这里不能直接开始一个表达式，当前位置是 {}；期望数字、变量、函数调用、括号表达式、负号 `-` 或 `NOT`",
+                Self::token_brief(other)
+            ))),
         }
     }
 
@@ -268,19 +308,16 @@ impl Parser {
                 let name = match self.pop_token() {
                     TokenKind::Ident(x) => x,
                     other => {
-                        return Err(ParseErr {
-                            msg: format!("赋值变量名解析错误:{:?}", other),
-                            idx: self.idx,
-                        });
+                        return Err(self.err_here(format!(
+                            "赋值语句左侧需要变量名，当前位置是 {}",
+                            Self::token_brief(&other)
+                        )));
                     }
                 };
                 match self.pop_token() {
                     TokenKind::ColonEq => {}
                     _ => {
-                        return Err(ParseErr {
-                            msg: "未知赋值符号错误".to_string(),
-                            idx: self.idx,
-                        });
+                        return Err(self.err_here("赋值语句需要使用 `:=`".to_string()));
                     }
                 }
                 let value = self.parse_expr(0)?;
@@ -299,10 +336,9 @@ impl Parser {
             match self.peek_kind() {
                 TokenKind::Eof => break,
                 TokenKind::Semi => {
-                    return Err(ParseErr {
-                        msg: "不允许有空语句".to_string(),
-                        idx: self.idx,
-                    });
+                    return Err(self.err_here(
+                        "不允许空语句；请删除多余的 `;`，或在两侧补上完整表达式".to_string(),
+                    ));
                 }
                 _ => {}
             }
@@ -315,13 +351,51 @@ impl Parser {
                 }
                 TokenKind::Eof => break,
                 _ => {
-                    return Err(ParseErr {
-                        msg: "未知表达式结尾".to_string(),
-                        idx: self.idx,
-                    });
+                    return Err(self.err_here(format!(
+                        "表达式结尾不完整，期望 `;` 或输入结束，当前位置是 {}",
+                        Self::token_brief(self.peek_kind())
+                    )));
                 }
             }
         }
         Ok(Stmts { item: stmts })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Parser, lex_all};
+
+    fn parse_err(input: &str) -> (usize, String) {
+        let mut parser = Parser::new(lex_all(input));
+        let err = parser.parse_main().expect_err("expected parse error");
+        (err.idx, err.msg)
+    }
+
+    #[test]
+    fn reports_missing_function_closer_clearly() {
+        let (idx, msg) = parse_err("max(a, b");
+        assert_eq!(idx, 8);
+        assert!(msg.contains("函数 `max` 的参数列表未正确结束"));
+        assert!(msg.contains("期望 `,` 或 `)`"));
+        assert!(msg.contains("输入结束"));
+    }
+
+    #[test]
+    fn reports_missing_group_closer_clearly() {
+        let (idx, msg) = parse_err("(a + 1");
+        assert_eq!(idx, 6);
+        assert!(msg.contains("括号表达式没有闭合"));
+        assert!(msg.contains("期望 `)`"));
+        assert!(msg.contains("输入结束"));
+    }
+
+    #[test]
+    fn reports_unexpected_statement_ending_clearly() {
+        let (idx, msg) = parse_err("a b");
+        assert_eq!(idx, 2);
+        assert!(msg.contains("表达式结尾不完整"));
+        assert!(msg.contains("期望 `;` 或输入结束"));
+        assert!(msg.contains("标识符 `b`"));
     }
 }

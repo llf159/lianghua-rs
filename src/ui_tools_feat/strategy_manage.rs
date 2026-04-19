@@ -6,14 +6,13 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::data::RowData;
 use crate::data::scoring_data::row_into_rt;
 use crate::expr::eval::Value;
 use crate::expr::parser::{Expr, Stmt, Stmts};
 use crate::{
     data::{DataReader, RuleStage, SceneDirection, ScoreConfig, score_rule_path},
     expr::parser::{Parser, lex_all},
-    scoring::tools::{calc_zhang_pct, load_st_list, rt_max_len},
+    scoring::tools::{inject_stock_extra_fields, load_st_list, rt_max_len},
     utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
 };
 
@@ -275,17 +274,6 @@ fn estimate_rule_warmup(
     Ok(expr_need + scope_extra)
 }
 
-fn fill_validation_extra_fields(
-    row_data: &mut RowData,
-    ts_code: &str,
-    is_st: bool,
-) -> Result<(), String> {
-    let zhang = calc_zhang_pct(ts_code, is_st);
-    let zhang_series = vec![Some(zhang); row_data.trade_dates.len()];
-    row_data.cols.insert("ZHANG".to_string(), zhang_series);
-    row_data.validate()
-}
-
 fn validate_scene_values(draft: &StrategyManageSceneDraft) -> Result<(), String> {
     let name = draft.name.trim();
     if name.is_empty() {
@@ -401,10 +389,11 @@ fn validate_rule_definition(
             latest_trade_date,
             need_rows,
         )?;
-        fill_validation_extra_fields(
+        inject_stock_extra_fields(
             &mut row_data,
             sample_ts_code,
             st_list.contains(sample_ts_code),
+            None,
         )?;
         let mut rt = row_into_rt(row_data)?;
         let value = rt

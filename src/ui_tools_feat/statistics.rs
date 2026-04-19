@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     data::scoring_data::row_into_rt,
     data::{
-        DataReader, RowData, RuleStage, RuleTag, ScopeWay, ScoreRule, ScoreScene,
+        DataReader, RuleStage, RuleTag, ScopeWay, ScoreRule, ScoreScene,
         concept_performance_db_path, load_stock_list, load_ths_concepts_list, result_db_path,
         source_db_path,
     },
@@ -17,7 +17,7 @@ use crate::{
         lexer::TokenKind,
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
-    scoring::tools::{calc_query_need_rows, calc_zhang_pct, load_st_list},
+    scoring::tools::{calc_query_need_rows, inject_stock_extra_fields, load_st_list},
     scoring::{CachedRule, evaluate_cached_rule_scores},
     simulate::{
         rule::{
@@ -1715,17 +1715,6 @@ fn estimate_rule_warmup(
     Ok(expr_need + scope_extra)
 }
 
-fn fill_validation_extra_fields(
-    row_data: &mut RowData,
-    ts_code: &str,
-    is_st: bool,
-) -> Result<(), String> {
-    let zhang = calc_zhang_pct(ts_code, is_st);
-    let zhang_series = vec![Some(zhang); row_data.trade_dates.len()];
-    row_data.cols.insert("ZHANG".to_string(), zhang_series);
-    row_data.validate()
-}
-
 fn build_validation_cached_rule(
     rule_name: String,
     scope_way: ScopeWay,
@@ -1874,7 +1863,7 @@ fn evaluate_validation_combos_for_ts_code(
     combos: &[PreparedValidationCombo],
 ) -> Result<ValidationTsCodeEvaluation, String> {
     let mut row_data = reader.load_one_tail_rows(ts_code, stock_adj_type, end_date, need_rows)?;
-    fill_validation_extra_fields(&mut row_data, ts_code, st_list.contains(ts_code))?;
+    inject_stock_extra_fields(&mut row_data, ts_code, st_list.contains(ts_code), None)?;
 
     let trade_dates = row_data.trade_dates.clone();
     if trade_dates.is_empty() {

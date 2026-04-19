@@ -41,7 +41,10 @@ pub fn score_rule_path(source_dir: &str) -> PathBuf {
 }
 
 pub fn resolve_strategy_path(source_dir: &str, strategy_path: Option<&str>) -> PathBuf {
-    let Some(path) = strategy_path.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(path) = strategy_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return score_rule_path(source_dir);
     };
 

@@ -1,6 +1,6 @@
 use std::{collections::HashSet, fs, path::Path};
 
-use duckdb::Connection;
+use duckdb::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -9,12 +9,17 @@ use crate::{
         concept_performance_data::{
             rebuild_concept_performance_all, rebuild_most_related_concept_csv,
         },
-        concept_performance_db_path, ind_toml_path, load_stock_list, load_ths_concepts_list,
-        load_trade_date_list, source_db_path, stock_list_path, ths_concepts_path,
-        trade_calendar_path,
+        concept_performance_db_path,
+        download_data::{
+            drop_stock_data_columns, ensure_indicator_columns, list_stock_data_indicator_columns,
+            update_one_stock_indicator_rows,
+        },
+        ind_toml_path, load_stock_list, load_ths_concepts_list, load_trade_date_list,
+        source_db_path, stock_list_path, ths_concepts_path, trade_calendar_path,
     },
     download::{
-        AdjType, DownloadSummary,
+        AdjType, DownloadSummary, ProBarRow,
+        ind_calc::{cache_ind_build, calc_inds_for_rows_with_cache},
         runner::{
             DownloadProgressCallback, DownloadRuntimeConfig, ThsConceptDownloadConfig,
             download as core_run_download_with_progress,
@@ -109,6 +114,18 @@ pub struct ConceptPerformanceRepairRunInput {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConceptMostRelatedRepairRunInput {
+    pub source_path: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StockDataIndicatorColumnsDeleteRunInput {
+    pub source_path: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StockDataIndicatorColumnsRebuildRunInput {
     pub source_path: String,
 }
 
@@ -235,6 +252,20 @@ pub struct PreparedConceptMostRelatedRepairRun {
     pub action_label: String,
 }
 
+#[derive(Clone)]
+pub struct PreparedStockDataIndicatorColumnsDeleteRun {
+    pub source_path: String,
+    pub action: String,
+    pub action_label: String,
+}
+
+#[derive(Clone)]
+pub struct PreparedStockDataIndicatorColumnsRebuildRun {
+    pub source_path: String,
+    pub action: String,
+    pub action_label: String,
+}
+
 fn normalize_download_date(raw: &str, field_name: &str) -> Result<String, String> {
     normalize_trade_date(raw)
         .ok_or_else(|| format!("{field_name} 格式无效，应为 YYYYMMDD 或 YYYY-MM-DD"))
@@ -247,6 +278,140 @@ fn normalize_download_end_date(raw: &str) -> Result<String, String> {
     }
 
     normalize_download_date(trimmed, "结束日期")
+}
+
+#[derive(Clone)]
+struct StockDataIndicatorWorkItem {
+    ts_code: String,
+    adj_type: String,
+    row_count: u64,
+}
+
+fn with_transaction<T, F>(conn: &Connection, action: F) -> Result<T, String>
+where
+    F: FnOnce(&Connection) -> Result<T, String>,
+{
+    conn.execute_batch("BEGIN TRANSACTION")
+        .map_err(|e| format!("开启事务失败: {e}"))?;
+
+    match action(conn) {
+        Ok(value) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("提交事务失败: {e}"))?;
+            Ok(value)
+        }
+        Err(err) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(err)
+        }
+    }
+}
+
+fn open_source_db_conn(source_path: &str) -> Result<Connection, String> {
+    let db_path = source_db_path(source_path);
+    let db_path_str = db_path
+        .to_str()
+        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
+    Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))
+}
+
+fn parse_stock_data_adj_type(raw: &str) -> Result<AdjType, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "qfq" => Ok(AdjType::Qfq),
+        "hfq" => Ok(AdjType::Hfq),
+        "raw" => Ok(AdjType::Raw),
+        "ind" => Ok(AdjType::Ind),
+        _ => Err(format!("不支持的adj_type: {raw}")),
+    }
+}
+
+fn list_stock_data_indicator_work_items(
+    conn: &Connection,
+) -> Result<Vec<StockDataIndicatorWorkItem>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT ts_code, adj_type, COUNT(*)
+            FROM stock_data
+            GROUP BY ts_code, adj_type
+            ORDER BY adj_type ASC, ts_code ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译指标补算分组SQL失败:{e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("查询指标补算分组失败:{e}"))?;
+    let mut items = Vec::new();
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取指标补算分组失败:{e}"))?
+    {
+        let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
+        let adj_type: String = row.get(1).map_err(|e| format!("读取adj_type失败:{e}"))?;
+        let row_count: i64 = row.get(2).map_err(|e| format!("读取row_count失败:{e}"))?;
+        items.push(StockDataIndicatorWorkItem {
+            ts_code,
+            adj_type,
+            row_count: row_count.max(0) as u64,
+        });
+    }
+
+    Ok(items)
+}
+
+fn load_stock_data_rows_for_indicator_rebuild(
+    conn: &Connection,
+    ts_code: &str,
+    adj_type: &str,
+) -> Result<Vec<ProBarRow>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                ts_code,
+                trade_date,
+                TRY_CAST(open AS DOUBLE),
+                TRY_CAST(high AS DOUBLE),
+                TRY_CAST(low AS DOUBLE),
+                TRY_CAST(close AS DOUBLE),
+                TRY_CAST(pre_close AS DOUBLE),
+                TRY_CAST(change AS DOUBLE),
+                TRY_CAST(pct_chg AS DOUBLE),
+                TRY_CAST(vol AS DOUBLE),
+                TRY_CAST(amount AS DOUBLE),
+                TRY_CAST(tor AS DOUBLE)
+            FROM stock_data
+            WHERE ts_code = ?
+              AND adj_type = ?
+            ORDER BY trade_date ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译指标补算行情SQL失败:{e}"))?;
+    let mut query = stmt
+        .query(params![ts_code, adj_type])
+        .map_err(|e| format!("查询指标补算行情失败:{e}"))?;
+    let mut rows = Vec::new();
+
+    while let Some(row) = query.next().map_err(|e| format!("读取行情行失败:{e}"))? {
+        rows.push(ProBarRow {
+            ts_code: row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?,
+            trade_date: row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?,
+            open: row.get(2).map_err(|e| format!("读取open失败:{e}"))?,
+            high: row.get(3).map_err(|e| format!("读取high失败:{e}"))?,
+            low: row.get(4).map_err(|e| format!("读取low失败:{e}"))?,
+            close: row.get(5).map_err(|e| format!("读取close失败:{e}"))?,
+            pre_close: row.get(6).map_err(|e| format!("读取pre_close失败:{e}"))?,
+            change: row.get(7).map_err(|e| format!("读取change失败:{e}"))?,
+            pct_chg: row.get(8).map_err(|e| format!("读取pct_chg失败:{e}"))?,
+            vol: row.get(9).map_err(|e| format!("读取vol失败:{e}"))?,
+            amount: row.get(10).map_err(|e| format!("读取amount失败:{e}"))?,
+            turnover_rate: row.get(11).map_err(|e| format!("读取tor失败:{e}"))?,
+            volume_ratio: None,
+        });
+    }
+
+    Ok(rows)
 }
 
 fn query_trade_date_range(
@@ -777,6 +942,51 @@ pub fn prepare_concept_most_related_repair_run(
     })
 }
 
+pub fn prepare_stock_data_indicator_columns_delete_run(
+    input: StockDataIndicatorColumnsDeleteRunInput,
+) -> Result<PreparedStockDataIndicatorColumnsDeleteRun, String> {
+    let source_path = input.source_path.trim().to_string();
+    if source_path.is_empty() {
+        return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
+    }
+
+    let status = get_data_download_status(&source_path)?;
+    if !status.source_db.exists {
+        return Err("原始库不存在，请先完成 qfq 行情下载。".to_string());
+    }
+
+    Ok(PreparedStockDataIndicatorColumnsDeleteRun {
+        source_path,
+        action: "delete-stock-data-indicator-columns".to_string(),
+        action_label: "指标列删除".to_string(),
+    })
+}
+
+pub fn prepare_stock_data_indicator_columns_rebuild_run(
+    input: StockDataIndicatorColumnsRebuildRunInput,
+) -> Result<PreparedStockDataIndicatorColumnsRebuildRun, String> {
+    let source_path = input.source_path.trim().to_string();
+    if source_path.is_empty() {
+        return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
+    }
+
+    let status = get_data_download_status(&source_path)?;
+    if !status.source_db.exists || status.source_db.row_count == 0 {
+        return Err("原始库不存在或为空，请先完成 qfq 行情下载。".to_string());
+    }
+
+    let inds_cache = cache_ind_build(&source_path)?;
+    if inds_cache.is_empty() {
+        return Err("指标配置不存在或为空，请先维护 ind.toml。".to_string());
+    }
+
+    Ok(PreparedStockDataIndicatorColumnsRebuildRun {
+        source_path,
+        action: "rebuild-stock-data-indicator-columns".to_string(),
+        action_label: "指标列补算".to_string(),
+    })
+}
+
 pub fn run_prepared_data_download(
     prepared: &PreparedDataDownloadRun,
     progress_cb: Option<&DownloadProgressCallback>,
@@ -817,7 +1027,7 @@ pub fn run_prepared_data_download(
             finished: 0,
             total: 1,
             current_label: None,
-            message: "开始维护概念/板块表现库。".to_string(),
+            message: "开始维护概念/行业/板块表现库。".to_string(),
         });
     }
     let _ = rebuild_concept_performance_all(&prepared.source_path)?;
@@ -827,7 +1037,7 @@ pub fn run_prepared_data_download(
             finished: 1,
             total: 1,
             current_label: None,
-            message: "概念/板块表现维护完成。".to_string(),
+            message: "概念/行业/板块表现维护完成。".to_string(),
         });
     }
 
@@ -915,7 +1125,7 @@ pub fn run_prepared_concept_performance_repair(
             finished: 0,
             total: 1,
             current_label: None,
-            message: "开始全量补全概念/板块表现库。".to_string(),
+            message: "开始全量补全概念/行业/板块表现库。".to_string(),
         });
     }
 
@@ -983,6 +1193,155 @@ pub fn run_prepared_concept_most_related_repair(
             success_count: updated_rows as u64,
             failed_count: 0,
             saved_rows: updated_rows as u64,
+            failed_items: Vec::new(),
+        },
+        status,
+    })
+}
+
+pub fn run_prepared_stock_data_indicator_columns_delete(
+    prepared: &PreparedStockDataIndicatorColumnsDeleteRun,
+    progress_cb: Option<&DownloadProgressCallback>,
+) -> Result<DataDownloadRunResult, String> {
+    let conn = open_source_db_conn(&prepared.source_path)?;
+    let indicator_columns = list_stock_data_indicator_columns(&conn)?;
+
+    if let Some(cb) = progress_cb {
+        cb(crate::download::runner::DownloadProgress {
+            phase: "delete_stock_data_indicator_columns".to_string(),
+            finished: 0,
+            total: indicator_columns.len(),
+            current_label: None,
+            message: if indicator_columns.is_empty() {
+                "stock_data 当前没有可删除的指标列。".to_string()
+            } else {
+                format!(
+                    "开始删除 {} 个行情指标列，只保留基础行情列。",
+                    indicator_columns.len()
+                )
+            },
+        });
+    }
+
+    with_transaction(&conn, |tx| {
+        drop_stock_data_columns(tx, &indicator_columns)?;
+        Ok(())
+    })?;
+
+    if let Some(cb) = progress_cb {
+        cb(crate::download::runner::DownloadProgress {
+            phase: "delete_stock_data_indicator_columns".to_string(),
+            finished: indicator_columns.len(),
+            total: indicator_columns.len(),
+            current_label: None,
+            message: format!("指标列删除完成，共删除 {} 列。", indicator_columns.len()),
+        });
+    }
+
+    let status = get_data_download_status(&prepared.source_path)?;
+
+    Ok(DataDownloadRunResult {
+        action: prepared.action.clone(),
+        action_label: prepared.action_label.clone(),
+        elapsed_ms: 0,
+        summary: DataDownloadSummary {
+            success_count: indicator_columns.len() as u64,
+            failed_count: 0,
+            saved_rows: 0,
+            failed_items: Vec::new(),
+        },
+        status,
+    })
+}
+
+pub fn run_prepared_stock_data_indicator_columns_rebuild(
+    prepared: &PreparedStockDataIndicatorColumnsRebuildRun,
+    progress_cb: Option<&DownloadProgressCallback>,
+) -> Result<DataDownloadRunResult, String> {
+    let inds_cache = cache_ind_build(&prepared.source_path)?;
+    if inds_cache.is_empty() {
+        return Err("指标配置不存在或为空，请先维护 ind.toml。".to_string());
+    }
+
+    let indicator_names = inds_cache
+        .iter()
+        .map(|item| item.name.clone())
+        .collect::<Vec<_>>();
+    let conn = open_source_db_conn(&prepared.source_path)?;
+    let work_items = list_stock_data_indicator_work_items(&conn)?;
+    if work_items.is_empty() {
+        return Err("stock_data 没有可补算的行情记录。".to_string());
+    }
+
+    if let Some(cb) = progress_cb {
+        cb(crate::download::runner::DownloadProgress {
+            phase: "rebuild_stock_data_indicator_columns".to_string(),
+            finished: 0,
+            total: work_items.len(),
+            current_label: None,
+            message: format!(
+                "开始按现有行情补算 {} 组股票/复权序列的指标列。",
+                work_items.len()
+            ),
+        });
+    }
+
+    let mut updated_rows = 0_u64;
+    with_transaction(&conn, |tx| {
+        ensure_indicator_columns(tx, &indicator_names)?;
+
+        for (index, item) in work_items.iter().enumerate() {
+            let rows = load_stock_data_rows_for_indicator_rebuild(
+                tx,
+                item.ts_code.as_str(),
+                item.adj_type.as_str(),
+            )?;
+            if rows.is_empty() {
+                continue;
+            }
+
+            let indicators = calc_inds_for_rows_with_cache(&inds_cache, &rows)?;
+            let adj_type = parse_stock_data_adj_type(item.adj_type.as_str())?;
+            update_one_stock_indicator_rows(
+                tx,
+                item.ts_code.as_str(),
+                adj_type,
+                &rows,
+                &indicators,
+            )?;
+            updated_rows += rows.len() as u64;
+
+            if let Some(cb) = progress_cb {
+                cb(crate::download::runner::DownloadProgress {
+                    phase: "rebuild_stock_data_indicator_columns".to_string(),
+                    finished: index + 1,
+                    total: work_items.len(),
+                    current_label: Some(format!("{} / {}", item.ts_code, item.adj_type)),
+                    message: format!(
+                        "已补算 {}/{} 组，当前 {} / {}，本组 {} 行。",
+                        index + 1,
+                        work_items.len(),
+                        item.ts_code,
+                        item.adj_type,
+                        item.row_count
+                    ),
+                });
+            }
+        }
+
+        Ok(())
+    })?;
+
+    let status = get_data_download_status(&prepared.source_path)?;
+
+    Ok(DataDownloadRunResult {
+        action: prepared.action.clone(),
+        action_label: prepared.action_label.clone(),
+        elapsed_ms: 0,
+        summary: DataDownloadSummary {
+            success_count: work_items.len() as u64,
+            failed_count: 0,
+            saved_rows: updated_rows,
             failed_items: Vec::new(),
         },
         status,

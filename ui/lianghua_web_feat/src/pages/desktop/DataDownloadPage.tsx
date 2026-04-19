@@ -5,6 +5,8 @@ import {
   getIndicatorManagePage,
   listenDataDownloadProgress,
   runConceptMostRelatedRepair,
+  runStockDataIndicatorColumnsDelete,
+  runStockDataIndicatorColumnsRebuild,
 
   runDataDownload,
   runMissingStockRepair,
@@ -157,6 +159,10 @@ function formatPhaseLabel(phase: string | null | undefined) {
       return '维护概念表现'
     case 'repair_concept_most_related':
       return '补算最相关概念'
+    case 'delete_stock_data_indicator_columns':
+      return '删除指标列'
+    case 'rebuild_stock_data_indicator_columns':
+      return '补算指标列'
     case 'done_ths_concepts':
       return '概念下载完成'
     case 'done':
@@ -210,6 +216,10 @@ function getProgressWorkflow(action: string | null | undefined) {
       return ['rebuild_concept_performance'] as string[]
     case 'repair-concept-most-related':
       return ['repair_concept_most_related'] as string[]
+    case 'delete-stock-data-indicator-columns':
+      return ['delete_stock_data_indicator_columns'] as string[]
+    case 'rebuild-stock-data-indicator-columns':
+      return ['rebuild_stock_data_indicator_columns'] as string[]
     default:
       return null
   }
@@ -748,9 +758,20 @@ export default function DataDownloadPage() {
       const result = await executor(downloadId)
       setStatus(result.status)
 
-      if (result.action === 'rebuild-concept-performance' || result.action === 'repair-concept-most-related') {
+      if (
+        result.action === 'rebuild-concept-performance' ||
+        result.action === 'repair-concept-most-related'
+      ) {
         setNotice(
           `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；写入 ${result.summary.savedRows} 行。`,
+        )
+      } else if (result.action === 'delete-stock-data-indicator-columns') {
+        setNotice(
+          `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；删除 ${result.summary.successCount} 列。`,
+        )
+      } else if (result.action === 'rebuild-stock-data-indicator-columns') {
+        setNotice(
+          `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；补算 ${result.summary.successCount} 组，回写 ${result.summary.savedRows} 行。`,
         )
       } else {
         const failedTail =
@@ -888,6 +909,40 @@ export default function DataDownloadPage() {
 
     await runDataTask('concept', (downloadId) =>
       runConceptMostRelatedRepair({
+        downloadId,
+        sourcePath,
+      }),
+    )
+  }
+
+  async function onRunStockDataIndicatorColumnsDelete() {
+    if (!sourcePath) {
+      setFeedbackSection('concept')
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    if (!window.confirm('确认删除 stock_data 中的所有非基础指标列吗？')) {
+      return
+    }
+
+    await runDataTask('concept', (downloadId) =>
+      runStockDataIndicatorColumnsDelete({
+        downloadId,
+        sourcePath,
+      }),
+    )
+  }
+
+  async function onRunStockDataIndicatorColumnsRebuild() {
+    if (!sourcePath) {
+      setFeedbackSection('concept')
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    await runDataTask('concept', (downloadId) =>
+      runStockDataIndicatorColumnsRebuild({
         downloadId,
         sourcePath,
       }),
@@ -1289,6 +1344,33 @@ export default function DataDownloadPage() {
           {showConceptProgress ? renderProgressBlock('概念数据下载') : null}
           {showConceptNotice ? <div className="data-download-notice">{notice}</div> : null}
           {showConceptError ? <div className="data-download-error">{error}</div> : null}
+        </section>
+
+        <section className="data-download-panel">
+          <div className="data-download-panel-head">
+            <h3>行情数据指标列维护</h3>
+            <p>删除会清空现有指标列；补算会基于当前 stock_data 基础行情和 ind.toml 回写指标列。</p>
+          </div>
+
+          <div className="data-download-panel-actions">
+            <button
+              className="data-download-secondary-btn data-download-danger-btn"
+              type="button"
+              onClick={() => void onRunStockDataIndicatorColumnsDelete()}
+              disabled={isBusy || !sourcePath}
+            >
+              删除指标列
+            </button>
+
+            <button
+              className="data-download-secondary-btn"
+              type="button"
+              onClick={() => void onRunStockDataIndicatorColumnsRebuild()}
+              disabled={isBusy || !sourcePath}
+            >
+              补算指标列
+            </button>
+          </div>
         </section>
       </section>
 

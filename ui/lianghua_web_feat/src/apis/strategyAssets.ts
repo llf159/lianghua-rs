@@ -75,6 +75,13 @@ export async function backupManagedActiveStrategy() {
   })
 }
 
+export async function createManagedEmptyStrategyBackup() {
+  await ensureManagedSourcePath(DEFAULT_MANAGED_SOURCE_DIR)
+  return invoke<ManagedStrategyBackupItem>('create_managed_empty_strategy_backup', {
+    sourceDir: DEFAULT_MANAGED_SOURCE_DIR,
+  })
+}
+
 export async function activateManagedStrategyBackup(backupId: string) {
   await ensureManagedSourcePath(DEFAULT_MANAGED_SOURCE_DIR)
   return invoke<ManagedStrategyAssetsStatus>('activate_managed_strategy_backup', {

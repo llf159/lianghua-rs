@@ -420,6 +420,17 @@ pub fn calc_increment_one_stock_inds(
     Ok(out)
 }
 
+pub fn calc_inds_for_rows_with_cache(
+    inds_cache: &[IndsCache],
+    rows: &[ProBarRow],
+) -> Result<HashMap<String, Vec<Option<f64>>>, String> {
+    if rows.is_empty() {
+        return Err("指标计算失败: rows为空".to_string());
+    }
+
+    calc_inds_with_cache(inds_cache, pro_bar_rows_to_row_data(rows)?)
+}
+
 pub fn calc_one_stock_inds(
     source_dir: &str,
     rows: &[ProBarRow],

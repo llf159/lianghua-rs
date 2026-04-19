@@ -20,7 +20,8 @@ use lianghua_rs::ui_tools_feat::{
         run_expression_stock_pick as core_run_expression_stock_pick,
     },
     intraday_monitor::{
-        IntradayMonitorPageData, IntradayMonitorRow,
+        IntradayMonitorPageData, IntradayMonitorRankModeConfig, IntradayMonitorRow,
+        IntradayMonitorTemplate,
         get_intraday_monitor_page as core_get_intraday_monitor_page,
         refresh_intraday_monitor_realtime as core_refresh_intraday_monitor_realtime,
     },
@@ -87,11 +88,13 @@ use serde::{Deserialize, Serialize};
 use data_download_bridge::{
     get_data_download_status, get_indicator_manage_page, run_concept_most_related_repair,
     run_concept_performance_repair, run_data_download, run_missing_stock_repair,
+    run_stock_data_indicator_columns_delete, run_stock_data_indicator_columns_rebuild,
     run_ths_concept_download, save_indicator_manage_page,
 };
 use managed_source_bridge::{
     activate_managed_strategy_backup, allow_import_path, backup_managed_active_strategy,
-    copy_import_file_to_appdata, delete_managed_strategy_backup,
+    copy_import_file_to_appdata, create_managed_empty_strategy_backup,
+    delete_managed_strategy_backup,
     export_managed_source_directory, export_managed_source_directory_mobile,
     export_managed_source_file, export_managed_strategy_backup_file,
     export_managed_strategy_bundle, get_managed_strategy_assets_status,
@@ -385,8 +388,10 @@ fn get_intraday_monitor_page(
 fn refresh_intraday_monitor_realtime(
     source_path: String,
     rows: Vec<IntradayMonitorRow>,
+    templates: Vec<IntradayMonitorTemplate>,
+    rank_mode_configs: Vec<IntradayMonitorRankModeConfig>,
 ) -> Result<IntradayMonitorPageData, String> {
-    core_refresh_intraday_monitor_realtime(&source_path, rows)
+    core_refresh_intraday_monitor_realtime(&source_path, rows, templates, rank_mode_configs)
 }
 
 #[tauri::command]
@@ -967,6 +972,7 @@ pub fn run() {
             get_managed_strategy_assets_status,
             import_managed_strategy_backup,
             backup_managed_active_strategy,
+            create_managed_empty_strategy_backup,
             activate_managed_strategy_backup,
             delete_managed_strategy_backup,
             export_managed_strategy_backup_file,
@@ -974,6 +980,8 @@ pub fn run() {
             get_data_download_status,
             get_indicator_manage_page,
             save_indicator_manage_page,
+            run_stock_data_indicator_columns_delete,
+            run_stock_data_indicator_columns_rebuild,
             run_data_download,
             run_missing_stock_repair,
             run_ths_concept_download,

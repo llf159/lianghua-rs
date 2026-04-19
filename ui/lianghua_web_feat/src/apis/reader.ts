@@ -101,12 +101,26 @@ export type IntradayMonitorRow = {
   realtime_change_pct?: number | null;
   realtime_change_open_pct?: number | null;
   realtime_vol_ratio?: number | null;
+  template_tag_text?: string | null;
+  template_tag_tone?: string | null;
   [key: string]: string | number | null | undefined;
+};
+
+export type IntradayMonitorTemplate = {
+  id: string;
+  name: string;
+  expression: string;
+};
+
+export type IntradayMonitorRankModeConfig = {
+  mode: "total" | "scene";
+  sceneName: string;
+  templateId: string;
 };
 
 export type IntradayMonitorPageQuery = {
   sourcePath: string;
-  rankMode?: 'total' | 'scene';
+  rankMode?: "total" | "scene";
   rankDate?: string;
   sceneName?: string;
   limit?: number;
@@ -127,6 +141,8 @@ export type IntradayMonitorPageData = {
 export type IntradayRealtimeRefreshQuery = {
   sourcePath: string;
   rows: IntradayMonitorRow[];
+  templates: IntradayMonitorTemplate[];
+  rankModeConfigs: IntradayMonitorRankModeConfig[];
 };
 
 export type StockLookupRow = {
@@ -148,19 +164,24 @@ export async function listRankTradeDates(sourcePath: string) {
 }
 
 export async function listSceneRankTradeDates(sourcePath: string) {
-  return invoke<string[]>('get_scene_rank_trade_date_options', { sourcePath })
+  return invoke<string[]>("get_scene_rank_trade_date_options", { sourcePath });
 }
 
 export async function sceneRankOverviewPage(query: SceneOverviewPageQuery) {
-  return invoke<SceneOverviewPageData>('get_scene_rank_overview_page', query)
+  return invoke<SceneOverviewPageData>("get_scene_rank_overview_page", query);
 }
 
 export async function intradayMonitorPage(query: IntradayMonitorPageQuery) {
-  return invoke<IntradayMonitorPageData>('get_intraday_monitor_page', query)
+  return invoke<IntradayMonitorPageData>("get_intraday_monitor_page", query);
 }
 
-export async function refreshIntradayMonitorRealtime(query: IntradayRealtimeRefreshQuery) {
-  return invoke<IntradayMonitorPageData>('refresh_intraday_monitor_realtime', query)
+export async function refreshIntradayMonitorRealtime(
+  query: IntradayRealtimeRefreshQuery,
+) {
+  return invoke<IntradayMonitorPageData>(
+    "refresh_intraday_monitor_realtime",
+    query,
+  );
 }
 
 export async function listStockLookupRows(sourcePath: string) {

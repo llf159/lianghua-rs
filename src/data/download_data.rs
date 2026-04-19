@@ -375,6 +375,33 @@ pub fn ensure_indicator_columns(
     Ok(())
 }
 
+pub fn list_stock_data_indicator_columns(conn: &Connection) -> Result<Vec<String>, String> {
+    let existing = load_table_columns(conn, STOCK_DATA_TABLE)?;
+    let mut indicator_columns = Vec::new();
+
+    for name in existing {
+        if STOCK_DATA_INSERT_COLUMNS
+            .iter()
+            .any(|base| name.eq_ignore_ascii_case(base))
+        {
+            continue;
+        }
+        indicator_columns.push(name);
+    }
+
+    Ok(indicator_columns)
+}
+
+pub fn drop_stock_data_columns(conn: &Connection, column_names: &[String]) -> Result<(), String> {
+    for name in column_names {
+        let sql = format!("ALTER TABLE stock_data DROP COLUMN {}", quote_ident(name));
+        conn.execute_batch(&sql)
+            .map_err(|e| format!("删除指标列{name}失败:{e}"))?;
+    }
+
+    Ok(())
+}
+
 pub fn update_one_stock_indicator_rows(
     conn: &Connection,
     ts_code: &str,

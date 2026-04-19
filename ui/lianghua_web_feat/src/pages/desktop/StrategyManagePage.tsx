@@ -34,6 +34,19 @@ type SyntaxGuideFunction = {
   example: string
 }
 
+type SyntaxGuideField = {
+  name: string
+  scope: string
+  description: string
+  example: string
+}
+
+type SyntaxGuideFieldSection = {
+  title: string
+  note: string
+  fields: SyntaxGuideField[]
+}
+
 const SYNTAX_GUIDE_FUNCTIONS: SyntaxGuideFunction[] = [
   { name: 'ABS', signature: 'ABS(x)', returns: '数值序列', description: '取绝对值。', example: '输入 [-2, 3] -> 输出 [2, 3]' },
   { name: 'MAX', signature: 'MAX(a, b)', returns: '数值序列', description: '逐项取较大值。', example: 'a=[1,5], b=[2,3] -> [2,5]' },
@@ -48,6 +61,53 @@ const SYNTAX_GUIDE_FUNCTIONS: SyntaxGuideFunction[] = [
   { name: 'STD', signature: 'STD(x, n)', returns: '数值序列', description: '最近 n 根标准差。', example: 'x=[1,3,3], n=2 -> [空,1,0]' },
   { name: 'IF', signature: 'IF(cond, a, b)', returns: '数值序列', description: '条件成立取 a，否则取 b。', example: 'cond=[真,假,真], a=[1,1,1], b=[0,0,0] -> [1,0,1]' },
   { name: 'CROSS', signature: 'CROSS(a, b)', returns: '布尔序列', description: 'a 当根上穿 b。', example: 'a=[1,2,4], b=[3,2,3] -> [假,假,真]' },
+  { name: 'EMA', signature: 'EMA(x, n)', returns: '数值序列', description: '指数移动平均。', example: 'x=[1,2,3], n=3 -> [1,1.5,2.25]' },
+  { name: 'SMA', signature: 'SMA(x, n, m)', returns: '数值序列', description: '平滑移动平均，权重约为 m / n。', example: 'x=[1,2,3], n=3, m=1 -> [1,1.33,1.89]' },
+  { name: 'BARSLAST', signature: 'BARSLAST(cond)', returns: '数值序列', description: '距离上一次 cond 成立已经过去几根；首次命中前为空。', example: 'cond=[假,真,假,假,真] -> [空,0,1,2,0]' },
+  { name: 'RSV', signature: 'RSV(C, H, L, n)', returns: '数值序列', description: '最近 n 根 RSV，常用于 KDJ。', example: 'C=[8,9,10], H=[10,11,12], L=[6,7,8], n=3 -> [空,空,66.67]' },
+  { name: 'GRANK', signature: 'GRANK(x, n)', returns: '数值序列', description: '最近 n 根里，当前值按从大到小的排名；1 表示最大。', example: 'x=[1,4,2], n=3 -> [空,空,2]' },
+  { name: 'LRANK', signature: 'LRANK(x, n)', returns: '数值序列', description: '最近 n 根里，当前值按从小到大的排名；1 表示最小。', example: 'x=[3,2,1], n=3 -> [空,空,1]' },
+  { name: 'GTOPCOUNT', signature: 'GTOPCOUNT(x, cond, win, topn)', returns: '数值序列', description: '最近 win 根按 x 从大到小取前 topn，统计其中 cond 成立的个数。', example: 'x=[1,5,3], cond=[真,假,真], win=3, topn=2 -> [空,空,1]' },
+  { name: 'LTOPCOUNT', signature: 'LTOPCOUNT(x, cond, win, topn)', returns: '数值序列', description: '最近 win 根按 x 从小到大取前 topn，统计其中 cond 成立的个数。', example: 'x=[1,5,3], cond=[真,假,真], win=3, topn=2 -> [空,空,2]' },
+  { name: 'GET', signature: 'GET(cond, x, n)', returns: '数值序列', description: '向前回看最近 n 根，取最后一次 cond 成立时对应的 x；不包含当前这根。', example: '可写 GET(CROSS(C, MA(C, 5)), C, 20) 取最近一次上穿时的收盘价' },
+]
+
+const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
+  {
+    title: '5. 常用行情字段',
+    note: '这些字段来自历史 K 线或实时拼接后的 K 线序列，大部分表达式都可以直接使用。',
+    fields: [
+      { name: 'C / O / H / L / V', scope: '通用', description: '收盘 / 开盘 / 最高 / 最低 / 成交量。', example: 'C > O AND V > MA(V, 5)' },
+      { name: 'AMOUNT', scope: '通用', description: '成交额。', example: 'AMOUNT > MA(AMOUNT, 10)' },
+      { name: 'PRE_CLOSE', scope: '通用', description: '昨收价。', example: 'C > PRE_CLOSE' },
+      { name: 'CHANGE / PCT_CHG', scope: '通用', description: '涨跌额 / 涨跌幅；其中 PCT_CHG 的单位是百分比。', example: 'PCT_CHG >= 5' },
+      { name: 'TURNOVER_RATE', scope: '通用', description: '换手率。', example: 'TURNOVER_RATE > 8' },
+    ],
+  },
+  {
+    title: '6. 额外常数字段',
+    note: '这些字段由后端运行时统一注入，后续新增常量字段也会沿用这套入口。',
+    fields: [
+      { name: 'ZHANG', scope: '通用', description: '涨停幅比例，例如普通股约 0.095、创业板/科创板约 0.195、北交所约 0.295、ST 约 0.045。', example: 'PCT_CHG >= ZHANG * 100' },
+      { name: 'TOTAL_MV_YI', scope: '通用', description: '总市值，单位“亿”；优先由历史 TOTAL_MV 列换算得到。', example: 'TOTAL_MV_YI <= 300' },
+    ],
+  },
+  {
+    title: '7. 历史数值列自动注入',
+    note: 'DataReader 会把 stock_data 里实际存在的数值列自动转成大写变量；这通常是行情基础列之外的指标列，不等于 stock_list.csv 里的市值字段都会天然出现在这里。',
+    fields: [
+      { name: '已落库指标列 / 自定义数值列', scope: '按数据源实际情况', description: '只有已经写进 stock_data 的数值列才可直接引用，变量名会自动转成大写。', example: 'MY_IND > MA(MY_IND, 5)' },
+    ],
+  },
+  {
+    title: '8. 实时监控模板附加字段',
+    note: '下面这些字段只在“实时监控”页面的模板表达式中可用，策略打分、选股或统计表达式里不要直接写。',
+    fields: [
+      { name: 'REALTIME_CHANGE_OPEN_PCT', scope: '实时监控', description: '当前价相对今开涨跌幅，单位是百分比。', example: 'REALTIME_CHANGE_OPEN_PCT >= 2' },
+      { name: 'REALTIME_VOL_RATIO', scope: '实时监控', description: '当前实时累计成交量 ÷ stock_data 中最新历史日的 vol，通常可理解为“相对上一交易日日成交量”的倍数。', example: 'REALTIME_VOL_RATIO >= 2' },
+      { name: 'VOL_RATIO', scope: '实时监控', description: 'REALTIME_VOL_RATIO 的别名，基准相同。', example: 'VOL_RATIO >= 2' },
+    ],
+  },
 ]
 
 type BusyAction = 'idle' | 'loading' | 'saving' | 'deleting'
@@ -1712,6 +1772,35 @@ IF(C > O, C - O, 0)`}</pre>
                 </table>
               </div>
             </section>
+
+            {SYNTAX_GUIDE_FIELD_SECTIONS.map((section) => (
+              <section key={section.title} className="strategy-manage-guide-section">
+                <h4>{section.title}</h4>
+                <p>{section.note}</p>
+                <div className="strategy-manage-guide-table-wrap">
+                  <table className="strategy-manage-guide-table">
+                    <thead>
+                      <tr>
+                        <th>字段</th>
+                        <th>范围</th>
+                        <th>作用</th>
+                        <th>例子</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {section.fields.map((item) => (
+                        <tr key={`${section.title}-${item.name}`}>
+                          <td><code>{item.name}</code></td>
+                          <td>{item.scope}</td>
+                          <td>{item.description}</td>
+                          <td>{item.example}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            ))}
           </div>
         </div>
       ) : null}

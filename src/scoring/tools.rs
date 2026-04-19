@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use crate::data::{ScopeWay, ScoreRule};
+use crate::data::{RowData, ScopeWay, ScoreRule};
 use crate::data::{load_stock_list, load_trade_date_list};
 use crate::expr::eval::{Runtime, Value};
 use crate::expr::parser::{Expr, Parser, Stmt, lex_all};
@@ -27,7 +27,10 @@ pub fn load_st_list(source_dir: &str) -> Result<HashSet<String>, String> {
     Ok(st_list)
 }
 
-pub fn warmup_rows_estimate(source_dir: &str, strategy_path: Option<&str>) -> Result<usize, String> {
+pub fn warmup_rows_estimate(
+    source_dir: &str,
+    strategy_path: Option<&str>,
+) -> Result<usize, String> {
     // 从拿rule原数据开始计算warmup
     let rules = ScoreRule::load_rules_with_strategy_path(source_dir, strategy_path)?;
     let mut all_expr_max_need = 0;
@@ -160,4 +163,64 @@ pub fn calc_zhang_pct(ts_code: &str, is_st: bool) -> f64 {
     } else {
         0.095
     }
+}
+
+pub fn inject_constant_num_fields(
+    row_data: &mut RowData,
+    fields: &[(&str, Option<f64>)],
+) -> Result<(), String> {
+    let len = row_data.trade_dates.len();
+    for (key, value) in fields {
+        row_data.cols.insert((*key).to_string(), vec![*value; len]);
+    }
+    row_data.validate()
+}
+
+pub fn inject_latest_num_fields(
+    row_data: &mut RowData,
+    fields: &[(&str, Option<f64>)],
+) -> Result<(), String> {
+    let len = row_data.trade_dates.len();
+    for (key, value) in fields {
+        let mut series = vec![None; len];
+        if let Some(last) = series.last_mut() {
+            *last = *value;
+        }
+        row_data.cols.insert((*key).to_string(), series);
+    }
+    row_data.validate()
+}
+
+pub fn inject_stock_extra_fields(
+    row_data: &mut RowData,
+    ts_code: &str,
+    is_st: bool,
+    fallback_total_mv_yi: Option<f64>,
+) -> Result<(), String> {
+    inject_constant_num_fields(row_data, &[("ZHANG", Some(calc_zhang_pct(ts_code, is_st)))])?;
+
+    let len = row_data.trade_dates.len();
+    let mut total_mv_yi_series = row_data
+        .cols
+        .get("TOTAL_MV")
+        .map(|series| {
+            series
+                .iter()
+                .map(|value| value.map(|number| number / 1e4))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![fallback_total_mv_yi; len]);
+
+    if let Some(fallback) = fallback_total_mv_yi {
+        for value in &mut total_mv_yi_series {
+            if value.is_none() {
+                *value = Some(fallback);
+            }
+        }
+    }
+
+    row_data
+        .cols
+        .insert("TOTAL_MV_YI".to_string(), total_mv_yi_series);
+    row_data.validate()
 }

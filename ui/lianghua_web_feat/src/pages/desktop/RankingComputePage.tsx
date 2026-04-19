@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { inspectManagedSourceStatus } from '../../apis/managedSource'
+import { inspectManagedSourceStatus, removeManagedSourceFile } from '../../apis/managedSource'
 import {
   getRankingComputeStatus,
   runConceptPerformanceCompute,
@@ -11,7 +11,7 @@ import {
 } from '../../apis/rankingCompute'
 import './css/RankingComputePage.css'
 
-type BusyAction = 'idle' | 'loading' | 'computing'
+type BusyAction = 'idle' | 'loading' | 'computing' | 'deleting-result-db'
 
 function compactDateToInput(value: string | null | undefined) {
   if (!value || !/^\d{8}$/.test(value)) {
@@ -120,6 +120,36 @@ export default function RankingComputePage() {
     void loadStatus()
   }, [])
 
+  async function onDeleteResultDb() {
+    if (!sourcePath) {
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    if (typeof window !== 'undefined') {
+      const confirmed = window.confirm('确认删除当前结果库 `scoring_result.db` 吗？删除后需要重新计算排名。')
+      if (!confirmed) {
+        return
+      }
+    }
+
+    setBusyAction('deleting-result-db')
+    setError('')
+
+    try {
+      await removeManagedSourceFile('result-db')
+      const managedStatus = await inspectManagedSourceStatus()
+      const nextStatus = await getRankingComputeStatus(managedStatus.sourcePath)
+      setStatus(nextStatus)
+      setNotice('结果库已删除。下次计算排名时会重新生成新的结果库。')
+    } catch (actionError) {
+      setNotice('')
+      setError(`删除结果库失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
   async function onRunCompute() {
     if (!sourcePath) {
       setError('当前数据目录为空，请先到数据管理页确认目录。')
@@ -162,7 +192,7 @@ export default function RankingComputePage() {
 
     try {
       const result = await runConceptPerformanceCompute(sourcePath)
-      setNotice(`概念/板块表现计算完成，写入 ${result.savedRows} 行，耗时 ${formatElapsedMs(result.elapsedMs)}。`)
+      setNotice(`概念/行业/板块表现计算完成，写入 ${result.savedRows} 行，耗时 ${formatElapsedMs(result.elapsedMs)}。`)
     } catch (actionError) {
       setNotice('')
       setError(`其他数据计算失败: ${String(actionError)}`)
@@ -179,9 +209,14 @@ export default function RankingComputePage() {
             <h2>数据计算</h2>
           </div>
 
-          <button className="ranking-compute-secondary-btn" type="button" onClick={() => void loadStatus()} disabled={isBusy}>
-            {busyAction === 'loading' ? '刷新中...' : '刷新日期信息'}
-          </button>
+          <div className="ranking-compute-actions">
+            <button className="ranking-compute-secondary-btn" type="button" onClick={() => void loadStatus()} disabled={isBusy}>
+              {busyAction === 'loading' ? '刷新中...' : '刷新日期信息'}
+            </button>
+            <button className="ranking-compute-danger-btn" type="button" onClick={() => void onDeleteResultDb()} disabled={isBusy || sourcePath === ''}>
+              {busyAction === 'deleting-result-db' ? '删除中...' : '删除结果库'}
+            </button>
+          </div>
         </div>
 
         <div className="ranking-compute-summary">
@@ -246,8 +281,8 @@ export default function RankingComputePage() {
         <div className="ranking-compute-summary" style={{ marginTop: 20 }}>
           <div className="ranking-compute-summary-item">
             <span>其他数据计算</span>
-            <strong>概念/板块表现</strong>
-            <small>重建 concept_performance，包含 concept 和 board 两类表现。</small>
+            <strong>概念/行业/板块表现</strong>
+            <small>重建 concept_performance，包含 concept、industry 和 market 三类表现。</small>
           </div>
         </div>
 

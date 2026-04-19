@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   activateManagedStrategyBackup,
   backupManagedActiveStrategy,
+  createManagedEmptyStrategyBackup,
   deleteManagedStrategyBackup,
   exportManagedActiveStrategy,
   exportManagedStrategyBackupFile,
@@ -17,6 +18,7 @@ type BusyAction =
   | 'idle'
   | 'loading'
   | 'importing'
+  | 'creating-empty'
   | 'backing-up'
   | 'exporting-active'
   | 'exporting-bundle'
@@ -60,6 +62,9 @@ function formatBytes(value: number | null | undefined) {
 function describeBackupSource(item: ManagedStrategyBackupItem) {
   if (item.sourceKind === 'imported') {
     return `导入 · ${item.sourceFileName ?? '外部文件'}`
+  }
+  if (item.sourceKind === 'empty') {
+    return '空白模板'
   }
   return '手动备份'
 }
@@ -142,6 +147,22 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
     } catch (actionError) {
       setNotice('')
       setError(`备份当前策略失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  async function onCreateEmptyStrategy() {
+    setBusyAction('creating-empty')
+    setError('')
+    try {
+      const item = await createManagedEmptyStrategyBackup()
+      const nextStatus = await getManagedStrategyAssetsStatus()
+      setStatus(nextStatus)
+      setNotice(`已创建空白模板策略 ${item.folderName}，可先设为生效再进入编辑。`)
+    } catch (actionError) {
+      setNotice('')
+      setError(`创建空白策略失败: ${String(actionError)}`)
     } finally {
       setBusyAction('idle')
     }
@@ -295,6 +316,9 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
           <button className="strategy-asset-btn strategy-asset-btn-primary" type="button" onClick={() => void onImport()} disabled={isBusy}>
             {busyAction === 'importing' ? '导入中...' : '导入策略到备份区'}
           </button>
+          <button className="strategy-asset-btn" type="button" onClick={() => void onCreateEmptyStrategy()} disabled={isBusy}>
+            {busyAction === 'creating-empty' ? '创建中...' : '新增空白策略'}
+          </button>
           <button className="strategy-asset-btn" type="button" onClick={() => void onBackupActive()} disabled={isBusy || !status?.active.exists}>
             {busyAction === 'backing-up' ? '备份中...' : '备份当前生效策略'}
           </button>
@@ -357,8 +381,16 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
                         <strong>{item.folderName}</strong>
                         <p>{describeBackupSource(item)}</p>
                       </div>
-                      <span className={item.sourceKind === 'imported' ? 'strategy-asset-tag is-imported' : 'strategy-asset-tag'}>
-                        {item.sourceKind === 'imported' ? '导入' : '备份'}
+                      <span
+                        className={
+                          item.sourceKind === 'imported'
+                            ? 'strategy-asset-tag is-imported'
+                            : item.sourceKind === 'empty'
+                              ? 'strategy-asset-tag is-empty'
+                              : 'strategy-asset-tag'
+                        }
+                      >
+                        {item.sourceKind === 'imported' ? '导入' : item.sourceKind === 'empty' ? '模板' : '备份'}
                       </span>
                     </div>
 

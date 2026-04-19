@@ -1,16 +1,40 @@
+use std::collections::HashMap;
+
 use duckdb::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    data::result_db_path,
+    crawler::SinaQuote,
+    data::{DataReader, RowData, result_db_path, scoring_data::row_into_rt},
+    download::ind_calc::{
+        IndsCache, cache_ind_build, calc_inds_with_cache_lossy, warmup_ind_estimate,
+    },
+    expr::{
+        eval::Value,
+        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+    },
+    scoring::tools::{inject_latest_num_fields, inject_stock_extra_fields, rt_max_len},
     ui_tools_feat::{
         build_concepts_map, build_latest_vol_map, build_name_map, build_total_mv_map, filter_mv,
-        realtime::fetch_realtime_quote_map,
+        realtime::{fetch_realtime_quote_map, normalize_quote_trade_date},
     },
-    utils::utils::board_category,
+    utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
 };
 
 const BOARD_ST: &str = "ST";
+const DEFAULT_ADJ_TYPE: &str = "qfq";
+const RUNTIME_INPUT_KEYS: [&str; 10] = [
+    "O",
+    "H",
+    "L",
+    "C",
+    "V",
+    "AMOUNT",
+    "PRE_CLOSE",
+    "CHANGE",
+    "PCT_CHG",
+    "TURNOVER_RATE",
+];
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct IntradayMonitorRow {
@@ -34,6 +58,8 @@ pub struct IntradayMonitorRow {
     pub realtime_change_pct: Option<f64>,
     pub realtime_change_open_pct: Option<f64>,
     pub realtime_vol_ratio: Option<f64>,
+    pub template_tag_text: Option<String>,
+    pub template_tag_tone: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,10 +72,39 @@ pub struct IntradayMonitorPageData {
     pub refreshed_at: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct IntradayMonitorTemplate {
+    pub id: String,
+    pub name: String,
+    pub expression: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct IntradayMonitorRankModeConfig {
+    pub mode: String,
+    pub scene_name: String,
+    pub template_id: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IntradayRankMode {
     Total,
     Scene,
+}
+
+#[derive(Debug, Clone)]
+struct ReadyIntradayMonitorTemplate {
+    name: String,
+    ast: Stmts,
+    warmup_need: usize,
+}
+
+#[derive(Debug, Clone)]
+enum CompiledIntradayMonitorTemplate {
+    Ready(ReadyIntradayMonitorTemplate),
+    Invalid { name: String, message: String },
 }
 
 impl IntradayRankMode {
@@ -181,9 +236,405 @@ fn query_scene_options_from_conn(conn: &Connection) -> Result<Vec<String>, Strin
     Ok(out)
 }
 
+fn default_template_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        "未命名模板".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn estimate_intraday_template_warmup(stmts: &Stmts) -> Result<usize, String> {
+    let mut locals = HashMap::new();
+    let mut consts: HashMap<String, usize> = HashMap::new();
+    let mut expr_need = 0usize;
+
+    for stmt in stmts.item.iter().cloned() {
+        match stmt {
+            Stmt::Assign { name, value } => match value {
+                Expr::Number(v) => {
+                    if v < 0.0 {
+                        return Err("表达式常量赋值结果不能为负数".to_string());
+                    }
+                    consts.insert(name, v as usize);
+                }
+                Expr::Binary { op, lhs, rhs } => {
+                    if let Some(out) = eval_binary_for_warmup(&op, &lhs, &rhs, &consts)? {
+                        consts.insert(name, out as usize);
+                    } else {
+                        let value_need =
+                            impl_expr_warmup(Expr::Binary { op, lhs, rhs }, &locals, &consts)?;
+                        locals.insert(name, value_need);
+                    }
+                }
+                _ => {
+                    let value_need = impl_expr_warmup(value, &locals, &consts)?;
+                    locals.insert(name, value_need);
+                }
+            },
+            Stmt::Expr(expr) => {
+                expr_need = expr_need.max(impl_expr_warmup(expr, &locals, &consts)?);
+            }
+        }
+    }
+
+    Ok(expr_need)
+}
+
+fn compile_intraday_templates(
+    templates: &[IntradayMonitorTemplate],
+) -> HashMap<String, CompiledIntradayMonitorTemplate> {
+    let mut out = HashMap::with_capacity(templates.len());
+
+    for template in templates {
+        let id = template.id.trim();
+        if id.is_empty() {
+            continue;
+        }
+
+        let name = default_template_name(&template.name);
+        let expression = template.expression.trim();
+        if expression.is_empty() {
+            out.insert(
+                id.to_string(),
+                CompiledIntradayMonitorTemplate::Invalid {
+                    name,
+                    message: "表达式不能为空".to_string(),
+                },
+            );
+            continue;
+        }
+
+        let compiled = (|| -> Result<ReadyIntradayMonitorTemplate, String> {
+            let tokens = lex_all(expression);
+            let mut parser = Parser::new(tokens);
+            let ast = parser
+                .parse_main()
+                .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
+            let warmup_need = estimate_intraday_template_warmup(&ast)?;
+            Ok(ReadyIntradayMonitorTemplate {
+                name: name.clone(),
+                ast,
+                warmup_need,
+            })
+        })();
+
+        match compiled {
+            Ok(template) => {
+                out.insert(
+                    id.to_string(),
+                    CompiledIntradayMonitorTemplate::Ready(template),
+                );
+            }
+            Err(err) => {
+                out.insert(
+                    id.to_string(),
+                    CompiledIntradayMonitorTemplate::Invalid { name, message: err },
+                );
+            }
+        }
+    }
+
+    out
+}
+
+fn resolve_template_id_for_row<'a>(
+    row: &IntradayMonitorRow,
+    rank_mode_configs: &'a [IntradayMonitorRankModeConfig],
+) -> Option<&'a str> {
+    let row_mode = row.rank_mode.trim().to_ascii_lowercase();
+    if row_mode == "scene" {
+        if let Some(config) = rank_mode_configs.iter().find(|item| {
+            item.mode.trim().eq_ignore_ascii_case("scene")
+                && item.scene_name.trim() == row.scene_name.trim()
+                && !item.template_id.trim().is_empty()
+        }) {
+            return Some(config.template_id.trim());
+        }
+        return rank_mode_configs
+            .iter()
+            .find(|item| {
+                item.mode.trim().eq_ignore_ascii_case("scene")
+                    && item.scene_name.trim() == "全部"
+                    && !item.template_id.trim().is_empty()
+            })
+            .map(|item| item.template_id.trim());
+    }
+
+    rank_mode_configs
+        .iter()
+        .find(|item| {
+            item.mode.trim().eq_ignore_ascii_case("total") && !item.template_id.trim().is_empty()
+        })
+        .map(|item| item.template_id.trim())
+}
+
+fn normalize_runtime_row_data(row_data: RowData) -> Result<RowData, String> {
+    let len = row_data.trade_dates.len();
+    let mut cols = HashMap::with_capacity(RUNTIME_INPUT_KEYS.len());
+
+    for key in RUNTIME_INPUT_KEYS {
+        let series = row_data
+            .cols
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| vec![None; len]);
+        cols.insert(key.to_string(), series);
+    }
+
+    let out = RowData {
+        trade_dates: row_data.trade_dates,
+        cols,
+    };
+    out.validate()?;
+    Ok(out)
+}
+
+fn build_quote_only_runtime_row_data(quote: &SinaQuote) -> Result<RowData, String> {
+    let trade_date = normalize_quote_trade_date(&quote.date)
+        .ok_or_else(|| format!("实时行情日期无法识别: {}", quote.date))?;
+    let change = quote.price - quote.pre_close;
+    let pct_chg = if quote.pre_close.abs() > f64::EPSILON {
+        Some(change / quote.pre_close * 100.0)
+    } else {
+        quote.change_pct
+    };
+    let mut cols = HashMap::with_capacity(RUNTIME_INPUT_KEYS.len());
+    cols.insert("O".to_string(), vec![Some(quote.open)]);
+    cols.insert("H".to_string(), vec![Some(quote.high)]);
+    cols.insert("L".to_string(), vec![Some(quote.low)]);
+    cols.insert("C".to_string(), vec![Some(quote.price)]);
+    cols.insert("V".to_string(), vec![Some(quote.vol)]);
+    cols.insert("AMOUNT".to_string(), vec![Some(quote.amount)]);
+    cols.insert("PRE_CLOSE".to_string(), vec![Some(quote.pre_close)]);
+    cols.insert("CHANGE".to_string(), vec![Some(change)]);
+    cols.insert("PCT_CHG".to_string(), vec![pct_chg]);
+    cols.insert("TURNOVER_RATE".to_string(), vec![None]);
+
+    let out = RowData {
+        trade_dates: vec![trade_date],
+        cols,
+    };
+    out.validate()?;
+    Ok(out)
+}
+
+fn merge_realtime_quote_into_row_data(
+    row_data: &mut RowData,
+    quote: &SinaQuote,
+) -> Result<(), String> {
+    let trade_date = normalize_quote_trade_date(&quote.date)
+        .ok_or_else(|| format!("实时行情日期无法识别: {}", quote.date))?;
+    let replace_last = row_data
+        .trade_dates
+        .last()
+        .map(|value| value == &trade_date)
+        .unwrap_or(false);
+
+    if !replace_last {
+        row_data.trade_dates.push(trade_date);
+        for series in row_data.cols.values_mut() {
+            series.push(None);
+        }
+    }
+
+    let last_index = row_data.trade_dates.len().saturating_sub(1);
+    let change = quote.price - quote.pre_close;
+    let pct_chg = if quote.pre_close.abs() > f64::EPSILON {
+        Some(change / quote.pre_close * 100.0)
+    } else {
+        quote.change_pct
+    };
+
+    for (key, value) in [
+        ("O", Some(quote.open)),
+        ("H", Some(quote.high)),
+        ("L", Some(quote.low)),
+        ("C", Some(quote.price)),
+        ("V", Some(quote.vol)),
+        ("AMOUNT", Some(quote.amount)),
+        ("PRE_CLOSE", Some(quote.pre_close)),
+        ("CHANGE", Some(change)),
+        ("PCT_CHG", pct_chg),
+        ("TURNOVER_RATE", None),
+    ] {
+        let series = row_data
+            .cols
+            .entry(key.to_string())
+            .or_insert_with(|| vec![None; row_data.trade_dates.len()]);
+        if series.len() < row_data.trade_dates.len() {
+            series.resize(row_data.trade_dates.len(), None);
+        }
+        series[last_index] = value;
+    }
+
+    row_data.validate()
+}
+
+fn attach_runtime_extra_series(
+    row_data: &mut RowData,
+    row: &IntradayMonitorRow,
+) -> Result<(), String> {
+    let is_st = row.board.trim() == BOARD_ST;
+    inject_stock_extra_fields(row_data, &row.ts_code, is_st, row.total_mv_yi)?;
+    inject_latest_num_fields(
+        row_data,
+        &[
+            ("REALTIME_CHANGE_OPEN_PCT", row.realtime_change_open_pct),
+            ("REALTIME_VOL_RATIO", row.realtime_vol_ratio),
+            ("VOL_RATIO", row.realtime_vol_ratio),
+        ],
+    )
+}
+
+fn build_intraday_runtime_row_data(
+    reader: &DataReader,
+    row: &IntradayMonitorRow,
+    quote: &SinaQuote,
+    need_rows: usize,
+    indicator_cache: &[IndsCache],
+) -> Result<RowData, String> {
+    let end_date = normalize_quote_trade_date(&quote.date)
+        .or_else(|| row.trade_date.clone())
+        .ok_or_else(|| "缺少可用日期，无法构建实时模板 runtime".to_string())?;
+
+    let mut row_data = match reader.load_one_tail_rows(
+        &row.ts_code,
+        DEFAULT_ADJ_TYPE,
+        &end_date,
+        need_rows.max(1),
+    ) {
+        Ok(history) => {
+            let mut normalized = normalize_runtime_row_data(history)?;
+            merge_realtime_quote_into_row_data(&mut normalized, quote)?;
+            normalized
+        }
+        Err(err) if err.contains("trade_dates为空") => build_quote_only_runtime_row_data(quote)?,
+        Err(err) => return Err(format!("读取 runtime 历史K线失败: {err}")),
+    };
+
+    attach_runtime_extra_series(&mut row_data, row)?;
+
+    if !indicator_cache.is_empty() {
+        for (name, series) in calc_inds_with_cache_lossy(indicator_cache, row_data.clone()) {
+            row_data.cols.insert(name, series);
+        }
+    }
+
+    row_data.validate()?;
+    Ok(row_data)
+}
+
+fn set_template_tag(row: &mut IntradayMonitorRow, text: impl Into<String>, tone: &str) {
+    row.template_tag_text = Some(text.into());
+    row.template_tag_tone = Some(tone.to_string());
+}
+
+fn apply_intraday_template_tags(
+    source_path: &str,
+    rows: &mut [IntradayMonitorRow],
+    quote_map: &HashMap<String, SinaQuote>,
+    templates: &[IntradayMonitorTemplate],
+    rank_mode_configs: &[IntradayMonitorRankModeConfig],
+) {
+    for row in rows.iter_mut() {
+        row.template_tag_text = None;
+        row.template_tag_tone = None;
+    }
+
+    if templates.is_empty() || rank_mode_configs.is_empty() {
+        return;
+    }
+
+    let compiled_templates = compile_intraday_templates(templates);
+    let template_warmup_need = compiled_templates
+        .values()
+        .filter_map(|item| match item {
+            CompiledIntradayMonitorTemplate::Ready(template) => Some(template.warmup_need),
+            CompiledIntradayMonitorTemplate::Invalid { .. } => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let indicator_cache = cache_ind_build(source_path).unwrap_or_default();
+    let indicator_warmup_need = if indicator_cache.is_empty() {
+        0
+    } else {
+        warmup_ind_estimate(source_path).unwrap_or(0)
+    };
+    let need_rows = template_warmup_need.max(indicator_warmup_need).max(1);
+
+    let reader = match DataReader::new(source_path) {
+        Ok(reader) => reader,
+        Err(err) => {
+            for row in rows.iter_mut() {
+                if resolve_template_id_for_row(row, rank_mode_configs).is_some() {
+                    set_template_tag(row, format!("runtime 初始化失败: {err}"), "down");
+                }
+            }
+            return;
+        }
+    };
+
+    for row in rows.iter_mut() {
+        let Some(template_id) = resolve_template_id_for_row(row, rank_mode_configs) else {
+            continue;
+        };
+        let Some(compiled_template) = compiled_templates.get(template_id) else {
+            set_template_tag(row, "模板缺失", "down");
+            continue;
+        };
+        let Some(quote) = quote_map.get(&row.ts_code) else {
+            let template_name = match compiled_template {
+                CompiledIntradayMonitorTemplate::Ready(template) => template.name.as_str(),
+                CompiledIntradayMonitorTemplate::Invalid { name, .. } => name.as_str(),
+            };
+            set_template_tag(row, format!("{template_name} · 无实时"), "neutral");
+            continue;
+        };
+
+        match compiled_template {
+            CompiledIntradayMonitorTemplate::Invalid { name, message } => {
+                set_template_tag(row, format!("{name} · {message}"), "down");
+            }
+            CompiledIntradayMonitorTemplate::Ready(template) => {
+                let result = (|| -> Result<bool, String> {
+                    let row_data = build_intraday_runtime_row_data(
+                        &reader,
+                        row,
+                        quote,
+                        need_rows,
+                        &indicator_cache,
+                    )?;
+                    let mut rt = row_into_rt(row_data)?;
+                    let value = rt
+                        .eval_program(&template.ast)
+                        .map_err(|e| format!("表达式计算错误:{}", e.msg))?;
+                    let len = rt_max_len(&rt);
+                    let series = Value::as_bool_series(&value, len)
+                        .map_err(|e| format!("表达式返回值非布尔:{}", e.msg))?;
+                    Ok(series.last().copied().unwrap_or(false))
+                })();
+
+                match result {
+                    Ok(true) => set_template_tag(row, format!("{} · 命中", template.name), "up"),
+                    Ok(false) => {
+                        set_template_tag(row, format!("{} · 未命中", template.name), "neutral")
+                    }
+                    Err(err) => {
+                        set_template_tag(row, format!("{} · {}", template.name, err), "down")
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn refresh_intraday_monitor_realtime(
     source_path: &str,
     rows: Vec<IntradayMonitorRow>,
+    templates: Vec<IntradayMonitorTemplate>,
+    rank_mode_configs: Vec<IntradayMonitorRankModeConfig>,
 ) -> Result<IntradayMonitorPageData, String> {
     if rows.is_empty() {
         return Ok(IntradayMonitorPageData {
@@ -224,6 +675,14 @@ pub fn refresh_intraday_monitor_realtime(
             row.realtime_vol_ratio = None;
         }
     }
+
+    apply_intraday_template_tags(
+        source_path,
+        &mut next_rows,
+        &quote_map,
+        &templates,
+        &rank_mode_configs,
+    );
 
     Ok(IntradayMonitorPageData {
         rows: next_rows,
@@ -355,6 +814,8 @@ pub fn get_intraday_monitor_page(
                     realtime_change_pct: None,
                     realtime_change_open_pct: None,
                     realtime_vol_ratio: None,
+                    template_tag_text: None,
+                    template_tag_tone: None,
                 });
 
                 if let Some(limit_value) = limit {
@@ -499,6 +960,8 @@ pub fn get_intraday_monitor_page(
                     realtime_change_pct: None,
                     realtime_change_open_pct: None,
                     realtime_vol_ratio: None,
+                    template_tag_text: None,
+                    template_tag_tone: None,
                 });
 
                 if let Some(limit_value) = limit {

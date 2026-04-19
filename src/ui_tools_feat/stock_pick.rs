@@ -6,12 +6,12 @@ use serde::Serialize;
 
 use crate::{
     data::scoring_data::row_into_rt,
-    data::{DataReader, RowData, ScoreRule, load_ths_concepts_list, result_db_path},
+    data::{DataReader, ScoreRule, load_ths_concepts_list, result_db_path},
     expr::{
         eval::Value,
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
-    scoring::tools::{calc_query_need_rows, calc_zhang_pct, load_st_list, rt_max_len},
+    scoring::tools::{calc_query_need_rows, inject_stock_extra_fields, load_st_list, rt_max_len},
     utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
 };
 
@@ -372,17 +372,6 @@ fn estimate_custom_warmup(stmts: &Stmts, scope_way: PickScopeWay) -> Result<usiz
     Ok(expr_need + extra_need)
 }
 
-fn fill_pick_extra_fields(
-    row_data: &mut RowData,
-    ts_code: &str,
-    is_st: bool,
-) -> Result<(), String> {
-    let zhang = calc_zhang_pct(ts_code, is_st);
-    let zhang_series = vec![Some(zhang); row_data.trade_dates.len()];
-    row_data.cols.insert("ZHANG".to_string(), zhang_series);
-    row_data.validate()
-}
-
 fn hit_scope_period(scope_way: PickScopeWay, bs: &[bool]) -> ScopeHit {
     if bs.is_empty() {
         return match scope_way {
@@ -604,7 +593,7 @@ pub fn run_expression_stock_pick(
                     &resolved_end_date,
                     need_rows,
                 )?;
-                fill_pick_extra_fields(&mut row_data, ts_code, st_list.contains(ts_code))?;
+                inject_stock_extra_fields(&mut row_data, ts_code, st_list.contains(ts_code), None)?;
                 let trade_dates = row_data.trade_dates.clone();
                 let keep_from = trade_dates
                     .binary_search_by(|d| d.as_str().cmp(&resolved_start_date))

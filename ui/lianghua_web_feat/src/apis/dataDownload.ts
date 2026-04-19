@@ -85,6 +85,16 @@ export type ConceptMostRelatedRepairRequest = {
   sourcePath: string
 }
 
+export type StockDataIndicatorColumnsDeleteRequest = {
+  downloadId: string
+  sourcePath: string
+}
+
+export type StockDataIndicatorColumnsRebuildRequest = {
+  downloadId: string
+  sourcePath: string
+}
+
 export type DataDownloadSummary = {
   successCount: number
   failedCount: number
@@ -153,6 +163,18 @@ export async function runConceptPerformanceRepair(request: ConceptPerformanceRep
 
 export async function runConceptMostRelatedRepair(request: ConceptMostRelatedRepairRequest) {
   return invoke<DataDownloadRunResult>('run_concept_most_related_repair', { request })
+}
+
+export async function runStockDataIndicatorColumnsDelete(
+  request: StockDataIndicatorColumnsDeleteRequest,
+) {
+  return invoke<DataDownloadRunResult>('run_stock_data_indicator_columns_delete', { request })
+}
+
+export async function runStockDataIndicatorColumnsRebuild(
+  request: StockDataIndicatorColumnsRebuildRequest,
+) {
+  return invoke<DataDownloadRunResult>('run_stock_data_indicator_columns_rebuild', { request })
 }
 
 export async function getIndicatorManagePage(sourcePath: string) {
