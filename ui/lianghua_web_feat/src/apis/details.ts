@@ -48,6 +48,7 @@ export type DetailKlineRow = {
   duokong_long?: number | null
   bupiao_short?: number | null
   bupiao_long?: number | null
+  VOL_SIGMA?: number | null
   is_realtime?: boolean | null
   realtime_color_hint?: 'up' | 'down' | 'flat' | null
   [key: string]: DetailPrimitive

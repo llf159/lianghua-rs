@@ -1,0 +1,247 @@
+.intraday-custom-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.intraday-custom-card {
+  background: #fff;
+  border: 1px solid #e7ebf3;
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.intraday-custom-title {
+  margin: 0;
+  font-size: 20px;
+  color: #1f2a44;
+}
+
+.intraday-custom-desc {
+  margin: 0;
+  color: #3a4663;
+  line-height: 1.6;
+}
+
+.intraday-custom-tip {
+  margin: 0;
+  color: #6b7694;
+  font-size: 13px;
+}
+
+.intraday-custom-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.intraday-custom-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #56607a;
+  font-size: 13px;
+}
+
+.intraday-custom-field-span-full {
+  grid-column: 1 / -1;
+}
+
+.intraday-custom-field input,
+.intraday-custom-field select,
+.intraday-custom-field textarea {
+  width: 100%;
+  border: 1px solid #c6d0da;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+  font-family: inherit;
+}
+
+.intraday-custom-field textarea {
+  resize: vertical;
+  min-height: 110px;
+  font-family: "JetBrains Mono", "SFMono-Regular", "Consolas", monospace;
+}
+
+.intraday-custom-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.intraday-custom-actions button {
+  border: 1px solid #c6d0da;
+  background: #fff;
+  color: #425367;
+  border-radius: 8px;
+  padding: 7px 14px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.intraday-custom-primary-btn {
+  border-color: var(--theme-orange-600) !important;
+  background: var(--theme-orange-600) !important;
+  color: #fff !important;
+}
+
+.intraday-custom-actions button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.intraday-custom-notice {
+  border-radius: 8px;
+  border: 1px solid #b7d6c3;
+  background: #ecfdf3;
+  color: #14653a;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.intraday-custom-error {
+  border-radius: 8px;
+  border: 1px solid #ffc7d0;
+  background: #fff3f5;
+  color: #b00020;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.intraday-custom-refreshed {
+  font-size: 12px;
+  color: #5a6780;
+}
+
+.intraday-custom-table-wrap {
+  border: 1px solid #e1e7ef;
+  border-radius: 10px;
+  overflow: auto;
+}
+
+.intraday-custom-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.intraday-custom-table th,
+.intraday-custom-table td {
+  border-bottom: 1px solid #edf1f8;
+  padding: 9px 10px;
+  text-align: left;
+  font-size: 13px;
+  color: #2a3550;
+  white-space: nowrap;
+}
+
+.intraday-custom-table th {
+  background: #fffaf4;
+  color: #4f5d71;
+  font-weight: 600;
+}
+
+.intraday-custom-stock-link {
+  color: var(--theme-orange-700);
+  text-decoration: none;
+}
+
+.intraday-custom-stock-link:hover {
+  text-decoration: underline;
+}
+
+.intraday-custom-empty-cell {
+  color: #6b7694;
+  text-align: center;
+}
+
+.intraday-custom-modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(22, 30, 45, 0.38);
+  display: grid;
+  place-items: center;
+  z-index: 40;
+}
+
+.intraday-custom-modal {
+  width: min(860px, calc(100vw - 28px));
+  max-height: calc(100vh - 60px);
+  overflow: auto;
+  background: #fff;
+  border-radius: 12px;
+  border: 1px solid #d9e0e8;
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.intraday-custom-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.intraday-custom-modal-head h4 {
+  margin: 0;
+  font-size: 16px;
+  color: #2b3653;
+}
+
+.intraday-custom-modal-head button {
+  border: 1px solid #c6d0da;
+  background: #fff;
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.intraday-custom-modal-form {
+  display: grid;
+  gap: 8px;
+}
+
+.intraday-custom-modal-form input,
+.intraday-custom-modal-form textarea {
+  width: 100%;
+  border: 1px solid #c6d0da;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+}
+
+.intraday-custom-modal-list {
+  display: grid;
+  gap: 8px;
+}
+
+.intraday-custom-modal-item {
+  border: 1px solid #e1e7ef;
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.intraday-custom-modal-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.intraday-custom-modal-item button {
+  border: 1px solid #efc2c8;
+  background: #fff4f6;
+  color: #b42318;
+  border-radius: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+}

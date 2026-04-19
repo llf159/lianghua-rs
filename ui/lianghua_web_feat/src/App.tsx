@@ -23,6 +23,7 @@ import ConceptStockPickPage from './pages/desktop/ConceptStockPickPage'
 import StrategyManagePage from './pages/desktop/StrategyManagePage'
 import WatchObservePage from './pages/desktop/WatchObservePage'
 import IntradayMonitorRealtimePage from './pages/desktop/IntradayMonitorRealtimePage'
+import IntradayMonitorCustomPage from './pages/desktop/IntradayMonitorCustomPage'
 import BacktestPage from './pages/desktop/BacktestPage'
 import StrategyTriggerPage from './pages/desktop/StrategyTriggerPage'
 import SceneLayerBacktestPage from './pages/desktop/SceneLayerBacktestPage'
@@ -79,6 +80,7 @@ function AppRoutes() {
           <Route path="intraday-monitor">
             <Route index element={<Navigate to="/intraday-monitor/realtime-ranking" replace />} />
             <Route path="realtime-ranking" element={<IntradayMonitorRealtimePage />} />
+            <Route path="custom-monitor" element={<IntradayMonitorCustomPage />} />
           </Route>
           <Route path="backtest" element={<BacktestPage />}>
             <Route index element={<Navigate to="/backtest/strategy-trigger" replace />} />

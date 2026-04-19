@@ -1,6 +1,13 @@
-use std::{collections::HashSet, fs, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+    sync::mpsc::{SyncSender, sync_channel},
+    thread,
+};
 
 use duckdb::{Connection, params};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -11,8 +18,10 @@ use crate::{
         },
         concept_performance_db_path,
         download_data::{
-            drop_stock_data_columns, ensure_indicator_columns, list_stock_data_indicator_columns,
-            update_one_stock_indicator_rows,
+            append_stock_data_indicator_stage_rows_with_appender,
+            create_stock_data_indicator_stage_appender_for_columns, drop_stock_data_columns,
+            ensure_indicator_columns, flush_stock_data_indicator_stage_table,
+            list_stock_data_indicator_columns, reset_stock_data_indicator_stage_table,
         },
         ind_toml_path, load_stock_list, load_ths_concepts_list, load_trade_date_list,
         source_db_path, stock_list_path, ths_concepts_path, trade_calendar_path,
@@ -32,6 +41,9 @@ use crate::{
 };
 
 use super::normalize_trade_date;
+
+const STOCK_DATA_INDICATOR_REBUILD_GROUP_SIZE: usize = 256;
+const STOCK_DATA_INDICATOR_REBUILD_QUEUE_BOUND: usize = 16;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -284,7 +296,21 @@ fn normalize_download_end_date(raw: &str) -> Result<String, String> {
 struct StockDataIndicatorWorkItem {
     ts_code: String,
     adj_type: String,
+}
+
+struct StockDataIndicatorRebuildBatch {
+    ts_code: String,
+    adj_type: AdjType,
+    adj_type_label: String,
     row_count: u64,
+    rows: Vec<ProBarRow>,
+    indicators: HashMap<String, Vec<Option<f64>>>,
+}
+
+enum StockDataIndicatorRebuildMessage {
+    Batch(StockDataIndicatorRebuildBatch),
+    Abort(String),
+    Done,
 }
 
 fn with_transaction<T, F>(conn: &Connection, action: F) -> Result<T, String>
@@ -349,12 +375,7 @@ fn list_stock_data_indicator_work_items(
     {
         let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
         let adj_type: String = row.get(1).map_err(|e| format!("读取adj_type失败:{e}"))?;
-        let row_count: i64 = row.get(2).map_err(|e| format!("读取row_count失败:{e}"))?;
-        items.push(StockDataIndicatorWorkItem {
-            ts_code,
-            adj_type,
-            row_count: row_count.max(0) as u64,
-        });
+        items.push(StockDataIndicatorWorkItem { ts_code, adj_type });
     }
 
     Ok(items)
@@ -412,6 +433,49 @@ fn load_stock_data_rows_for_indicator_rebuild(
     }
 
     Ok(rows)
+}
+
+fn compute_stock_data_indicator_rebuild_batch(
+    sender: &SyncSender<StockDataIndicatorRebuildMessage>,
+    source_path: &str,
+    inds_cache: &[crate::download::ind_calc::IndsCache],
+    work_group: &[StockDataIndicatorWorkItem],
+) -> Result<(), String> {
+    let conn = open_source_db_conn(source_path)?;
+
+    for item in work_group {
+        let rows = load_stock_data_rows_for_indicator_rebuild(
+            &conn,
+            item.ts_code.as_str(),
+            item.adj_type.as_str(),
+        )?;
+        if rows.is_empty() {
+            continue;
+        }
+
+        let indicators = calc_inds_for_rows_with_cache(inds_cache, &rows)?;
+        let adj_type = parse_stock_data_adj_type(item.adj_type.as_str())?;
+
+        sender
+            .send(StockDataIndicatorRebuildMessage::Batch(
+                StockDataIndicatorRebuildBatch {
+                    ts_code: item.ts_code.clone(),
+                    adj_type,
+                    adj_type_label: item.adj_type.clone(),
+                    row_count: rows.len() as u64,
+                    rows,
+                    indicators,
+                },
+            ))
+            .map_err(|e| {
+                format!(
+                    "发送指标补算批次失败:{} / {}: {e}",
+                    item.ts_code, item.adj_type
+                )
+            })?;
+    }
+
+    Ok(())
 }
 
 fn query_trade_date_range(
@@ -1286,51 +1350,105 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
         });
     }
 
-    let mut updated_rows = 0_u64;
-    with_transaction(&conn, |tx| {
-        ensure_indicator_columns(tx, &indicator_names)?;
+    let (tx, rx) = sync_channel(STOCK_DATA_INDICATOR_REBUILD_QUEUE_BOUND);
+    let abort_tx = tx.clone();
+    let source_path = prepared.source_path.clone();
+    let inds_cache_for_workers = inds_cache.clone();
+    let work_items_for_workers = work_items.clone();
+    let compute_handle = thread::spawn(move || {
+        let compute_result = work_items_for_workers
+            .par_chunks(STOCK_DATA_INDICATOR_REBUILD_GROUP_SIZE)
+            .try_for_each_with(tx, |sender, work_group| {
+                compute_stock_data_indicator_rebuild_batch(
+                    sender,
+                    &source_path,
+                    &inds_cache_for_workers,
+                    work_group,
+                )
+            });
 
-        for (index, item) in work_items.iter().enumerate() {
-            let rows = load_stock_data_rows_for_indicator_rebuild(
-                tx,
-                item.ts_code.as_str(),
-                item.adj_type.as_str(),
-            )?;
-            if rows.is_empty() {
-                continue;
+        match &compute_result {
+            Ok(_) => {
+                let _ = abort_tx.send(StockDataIndicatorRebuildMessage::Done);
             }
+            Err(err) => {
+                let _ = abort_tx.send(StockDataIndicatorRebuildMessage::Abort(err.clone()));
+            }
+        }
+        drop(abort_tx);
+        compute_result
+    });
 
-            let indicators = calc_inds_for_rows_with_cache(&inds_cache, &rows)?;
-            let adj_type = parse_stock_data_adj_type(item.adj_type.as_str())?;
-            update_one_stock_indicator_rows(
-                tx,
-                item.ts_code.as_str(),
-                adj_type,
-                &rows,
-                &indicators,
-            )?;
-            updated_rows += rows.len() as u64;
+    let mut updated_rows = 0_u64;
+    let mut finished_groups = 0_usize;
+    let write_result = with_transaction(&conn, |tx| {
+        ensure_indicator_columns(tx, &indicator_names)?;
+        reset_stock_data_indicator_stage_table(tx, &indicator_names)?;
+        let mut stage_appender =
+            create_stock_data_indicator_stage_appender_for_columns(tx, &indicator_names)?;
+        let mut compute_done = false;
 
-            if let Some(cb) = progress_cb {
-                cb(crate::download::runner::DownloadProgress {
-                    phase: "rebuild_stock_data_indicator_columns".to_string(),
-                    finished: index + 1,
-                    total: work_items.len(),
-                    current_label: Some(format!("{} / {}", item.ts_code, item.adj_type)),
-                    message: format!(
-                        "已补算 {}/{} 组，当前 {} / {}，本组 {} 行。",
-                        index + 1,
-                        work_items.len(),
-                        item.ts_code,
-                        item.adj_type,
-                        item.row_count
-                    ),
-                });
+        while let Ok(message) = rx.recv() {
+            match message {
+                StockDataIndicatorRebuildMessage::Batch(batch) => {
+                    append_stock_data_indicator_stage_rows_with_appender(
+                        &mut stage_appender,
+                        &indicator_names,
+                        batch.ts_code.as_str(),
+                        batch.adj_type,
+                        &batch.rows,
+                        &batch.indicators,
+                    )?;
+                    updated_rows += batch.row_count;
+                    finished_groups += 1;
+
+                    if let Some(cb) = progress_cb {
+                        cb(crate::download::runner::DownloadProgress {
+                            phase: "rebuild_stock_data_indicator_columns".to_string(),
+                            finished: finished_groups,
+                            total: work_items.len(),
+                            current_label: Some(format!(
+                                "{} / {}",
+                                batch.ts_code, batch.adj_type_label
+                            )),
+                            message: format!(
+                                "已补算 {}/{} 组，当前 {} / {}，本组 {} 行。",
+                                finished_groups,
+                                work_items.len(),
+                                batch.ts_code,
+                                batch.adj_type_label,
+                                batch.row_count
+                            ),
+                        });
+                    }
+                }
+                StockDataIndicatorRebuildMessage::Abort(err) => return Err(err),
+                StockDataIndicatorRebuildMessage::Done => {
+                    compute_done = true;
+                    break;
+                }
             }
         }
 
+        if !compute_done {
+            return Err("指标补算计算线程未正常完成，已回滚本次指标列维护。".to_string());
+        }
+
+        stage_appender
+            .flush()
+            .map_err(|e| format!("刷新指标临时表 Appender 失败: {e}"))?;
+        drop(stage_appender);
+        flush_stock_data_indicator_stage_table(tx, &indicator_names)?;
         Ok(())
-    })?;
+    });
+
+    let compute_result = match compute_handle.join() {
+        Ok(result) => result,
+        Err(_) => Err("指标补算线程异常退出".to_string()),
+    };
+
+    write_result?;
+    compute_result?;
 
     let status = get_data_download_status(&prepared.source_path)?;
 

@@ -108,6 +108,13 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
       { name: 'VOL_RATIO', scope: '实时监控', description: 'REALTIME_VOL_RATIO 的别名，基准相同。', example: 'VOL_RATIO >= 2' },
     ],
   },
+  {
+    title: '9. 表达式选股附加字段',
+    note: '下面这些字段只在“表达式选股”页面运行时注入，策略打分和实时监控模板默认不会注入。',
+    fields: [
+      { name: 'rank / RANK', scope: '表达式选股', description: '个股在 score_summary 中按交易日对齐后的排名序列；1 表示当日排名第一。', example: 'rank <= 100 AND C > MA(C, 20)' },
+    ],
+  },
 ]
 
 type BusyAction = 'idle' | 'loading' | 'saving' | 'deleting'

@@ -4,12 +4,17 @@ import './Desktop.css'
 
 const menuList = [
   { path: '/watch-observe', label: '自选观察' },
-  { path: '/overview', label: '排名总览' },
   { path: '/details', label: '个股详情' },
+]
+
+const overviewSubRoutes = [
+  { path: '/overview/raw', label: '原始排名' },
+  { path: '/overview/scene', label: '场景排名' },
 ]
 
 const intradayMonitorSubRoutes = [
   { path: '/intraday-monitor/realtime-ranking', label: '排名实时' },
+  { path: '/intraday-monitor/custom-monitor', label: '自定义监控' },
 ]
 
 const settingsMenuItem = { path: '/settings', label: '设置' }
@@ -36,11 +41,13 @@ const rawDataSubRoutes = [
 export default function PageDesktop() {
   const location = useLocation()
   const [isCollapsed, setIsCollapsed] = useState(false)
+  const [isOverviewOpen, setIsOverviewOpen] = useState(true)
   const [isStockPickOpen, setIsStockPickOpen] = useState(true)
   const [isRawDataOpen, setIsRawDataOpen] = useState(true)
   const [isIntradayMonitorOpen, setIsIntradayMonitorOpen] = useState(true)
   const [isBacktestOpen, setIsBacktestOpen] = useState(true)
   const contentRef = useRef<HTMLElement | null>(null)
+  const isOverviewActive = location.pathname.startsWith('/overview')
   const isStockPickActive = location.pathname.startsWith('/stock-pick')
   const isRawDataActive = location.pathname.startsWith('/raw-data')
   const isIntradayMonitorActive = location.pathname.startsWith('/intraday-monitor')
@@ -64,6 +71,31 @@ export default function PageDesktop() {
               {menuItem.label}
             </NavLink>
           ))}
+
+          <div className="menu-group">
+            <button
+              className={isOverviewActive ? 'menu-item menu-group-toggle active' : 'menu-item menu-group-toggle'}
+              type="button"
+              onClick={() => setIsOverviewOpen((value) => !value)}
+            >
+              <span>排名总览</span>
+              <span>{isOverviewOpen ? '▾' : '▸'}</span>
+            </button>
+
+            {isOverviewOpen ? (
+              <div className="submenu-wrap">
+                {overviewSubRoutes.map((menuItem) => (
+                  <NavLink
+                    key={menuItem.path}
+                    to={menuItem.path}
+                    className={({ isActive }) => (isActive ? 'submenu-item active' : 'submenu-item')}
+                  >
+                    {menuItem.label}
+                  </NavLink>
+                ))}
+              </div>
+            ) : null}
+          </div>
 
           <div className="menu-group">
             <button

@@ -61,6 +61,11 @@ import {
   useConceptExclusions,
 } from "../../shared/conceptExclusions";
 import {
+  readStoredChartRankMarkerThreshold,
+  readStoredChartIndicatorWidthRatio,
+  readStoredChartMainWidthRatio,
+} from "../../shared/chartSettings";
+import {
   findWatchObserveRow,
   listWatchObserveRows,
   removeWatchObserveRows,
@@ -73,6 +78,9 @@ import "./css/DetailsPage.css";
 
 const DEFAULT_TOP_LIMIT = "100";
 const DEFAULT_CHART_HEIGHT = 880;
+const CHART_MIN_HEIGHT_DESKTOP = DEFAULT_CHART_HEIGHT;
+const CHART_MIN_HEIGHT_MOBILE = 30;
+const CHART_MOBILE_BREAKPOINT = 980;
 const DEFAULT_VISIBLE_BARS = 90;
 const MIN_VISIBLE_BARS = 20;
 const CHART_MIN_RIGHT_ALIGNED_SLOTS = 60;
@@ -86,6 +94,8 @@ const CHART_CURSOR_Y_MAX = 94;
 const CHART_TOOLTIP_LEFT_THRESHOLD = 62;
 const CHART_POINTER_DRAG_THRESHOLD = 6;
 const CHART_TOUCH_FOCUS_HIT_SLOP = 24;
+const VOLUME_OVERLAY_KEYS = ["VOL_SIGMA"] as const;
+const CHART_PANEL_GAP_PX = 8;
 const STRATEGY_SPLIT_DEFAULT = 0.64;
 const STRATEGY_SPLIT_MIN = 0.24;
 const STRATEGY_SPLIT_MAX = 0.76;
@@ -263,7 +273,16 @@ function collectStrategyRows(detail: StockDetailPageData | null | undefined) {
   ];
 }
 
+function isVolumeOverlayKey(key: string) {
+  return VOLUME_OVERLAY_KEYS.some(
+    (overlayKey) => overlayKey.toLowerCase() === key.toLowerCase(),
+  );
+}
+
 function formatSeriesLabel(key: string) {
+  if (key.toLowerCase() === "vol_sigma".toLowerCase()) {
+    return "异动量能";
+  }
   if (key === "j") {
     return "J";
   }
@@ -289,6 +308,9 @@ function formatSeriesLabel(key: string) {
 }
 
 function getSeriesColor(key: string, seriesIndex: number) {
+  if (key.toLowerCase() === "vol_sigma".toLowerCase()) {
+    return "#7dd3fc";
+  }
   if (key === "j" || key === "duokong_short") {
     return "#111111";
   }
@@ -527,6 +549,32 @@ function buildRankLookup(
     const rankValue = buildRankValue(row.rank, row.total);
     if (rankValue !== "--") {
       lookup.set(row.trade_date, rankValue);
+    }
+  });
+
+  return lookup;
+}
+
+function buildRankNumberLookup(
+  overview: DetailOverview | null | undefined,
+  prevRanks: Array<{
+    trade_date: string;
+    rank?: number | null;
+  }>,
+) {
+  const lookup = new Map<string, number>();
+
+  if (
+    overview?.trade_date &&
+    typeof overview.rank === "number" &&
+    Number.isFinite(overview.rank)
+  ) {
+    lookup.set(overview.trade_date, overview.rank);
+  }
+
+  prevRanks.forEach((row) => {
+    if (typeof row.rank === "number" && Number.isFinite(row.rank)) {
+      lookup.set(row.trade_date, row.rank);
     }
   });
 
@@ -837,6 +885,13 @@ function buildDetailTooltipRows(
       prevVol !== null && prevVol !== 0 && currentVol !== null
         ? currentVol / prevVol
         : null;
+    const overlayRows = (panel.series_keys ?? [])
+      .filter((key) => isVolumeOverlayKey(key))
+      .map((key) => ({
+        label: formatSeriesLabel(key),
+        value: formatFieldValue(item[key]),
+      }))
+      .filter((row) => row.value !== "--");
 
     return [
       {
@@ -844,6 +899,7 @@ function buildDetailTooltipRows(
         rows: [
           { label: "量", value: formatFieldValue(item.vol) },
           { label: "量比", value: formatRatioValue(volumeRatio) },
+          ...overlayRows,
         ],
       },
     ];
@@ -899,17 +955,71 @@ function buildDefaultPanels() {
       kind: "line",
       series_keys: ["j", "bupiao_long", "bupiao_short"],
     },
-    { key: "volume", label: "量能", kind: "bar", series_keys: ["vol"] },
+    {
+      key: "volume",
+      label: "量能",
+      kind: "bar",
+      series_keys: ["vol", ...VOLUME_OVERLAY_KEYS],
+    },
     { key: "brick", label: "砖型图", kind: "brick", series_keys: ["brick"] },
   ] satisfies DetailKlinePanel[];
 }
 
-function buildChartTemplateRows(kline: DetailKlinePayload | null | undefined) {
+function buildChartTemplateRows(
+  kline: DetailKlinePayload | null | undefined,
+  panels: DetailKlinePanel[],
+  mainPanelHeight: number,
+  indicatorTotalHeight: number,
+  chartMinHeight: number,
+) {
+  if (panels.length === 0) {
+    return `${Math.max(mainPanelHeight, indicatorTotalHeight, chartMinHeight)}px`;
+  }
+
+  const matchedMainPanelIndex = panels.findIndex(
+    (panel) => panel.key === "price" || panel.kind === "candles",
+  );
+  const mainPanelIndex = matchedMainPanelIndex >= 0 ? matchedMainPanelIndex : 0;
+  const indicatorIndices = panels
+    .map((_, index) => index)
+    .filter((index) => index !== mainPanelIndex);
+
+  if (indicatorIndices.length === 0) {
+    return `${mainPanelHeight.toFixed(2)}px`;
+  }
+
   const resolvedWeights =
     kline?.row_weights?.filter((weight) => weight > 0) ?? [];
   const weights =
-    resolvedWeights.length > 0 ? resolvedWeights : DEFAULT_ROW_WEIGHTS;
-  return weights.map((weight) => `${weight}fr`).join(" ");
+    resolvedWeights.length === panels.length
+      ? resolvedWeights
+      : panels.map(
+          (_, index) =>
+            DEFAULT_ROW_WEIGHTS[index] ??
+            DEFAULT_ROW_WEIGHTS[DEFAULT_ROW_WEIGHTS.length - 1] ??
+            16,
+        );
+
+  const indicatorWeightSum = indicatorIndices.reduce(
+    (sum, index) => sum + Math.max(weights[index] ?? 0, 0),
+    0,
+  );
+
+  return panels
+    .map((_, index) => {
+      if (index === mainPanelIndex) {
+        return `${mainPanelHeight.toFixed(2)}px`;
+      }
+
+      if (indicatorWeightSum <= 0) {
+        return `${(indicatorTotalHeight / indicatorIndices.length).toFixed(2)}px`;
+      }
+
+      const panelWeight = Math.max(weights[index] ?? 0, 0);
+      const panelHeight = (indicatorTotalHeight * panelWeight) / indicatorWeightSum;
+      return `${panelHeight.toFixed(2)}px`;
+    })
+    .join(" ");
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -1304,6 +1414,8 @@ function renderChartPanel(
   allItems: DetailKlineRow[],
   referenceTradeDate: string | null,
   rankLookup: Map<string, string>,
+  rankMarkerThreshold: number,
+  rankNumberLookup: Map<string, number>,
   onChartPointerDown: (
     panelKey: string,
     event: ReactPointerEvent<HTMLDivElement>,
@@ -1374,6 +1486,23 @@ function renderChartPanel(
           allItems,
           rankLookup,
         )
+      : [];
+  const rankMarkerPoints =
+    panel.key === "price" && rankMarkerThreshold > 0
+      ? items.flatMap((row, itemIndex) => {
+          const rankValue = rankNumberLookup.get(row.trade_date);
+          if (rankValue === undefined || rankValue > rankMarkerThreshold) {
+            return [];
+          }
+
+          return [
+            {
+              key: `${panel.key}-rank-marker-${row.trade_date}`,
+              leftPercent: (xAt(itemIndex) / CHART_VIEWBOX_WIDTH) * 100,
+              title: `${row.trade_date} 排名 #${Math.round(rankValue)}`,
+            },
+          ];
+        })
       : [];
 
   let domain: { min: number; max: number } | null = null;
@@ -1513,6 +1642,12 @@ function renderChartPanel(
       });
     }
   } else if (kind === "bar") {
+    const primaryBarKey =
+      seriesKeys.find((key) => !isVolumeOverlayKey(key)) ?? null;
+    const overlayLineKeys =
+      panel.key === "volume"
+        ? seriesKeys.filter((key) => isVolumeOverlayKey(key))
+        : [];
     const values = items.flatMap((row) =>
       seriesKeys.flatMap((key) => {
         const value = getNumericField(row, key);
@@ -1529,12 +1664,12 @@ function renderChartPanel(
           (currentDomain.max - currentDomain.min)) *
           plotHeight;
       zeroY = yAt(0);
+      const zeroBaseline = zeroY;
       const barWidth = Math.max(Math.min(step * 0.72, 18), 3);
 
-      svgContent = items.map((row, itemIndex) => {
-        const value =
-          seriesKeys.length > 0 ? getNumericField(row, seriesKeys[0]) : null;
-        if (value === null || zeroY === null) {
+      const barNodes = items.map((row, itemIndex) => {
+        const value = primaryBarKey ? getNumericField(row, primaryBarKey) : null;
+        if (value === null) {
           return null;
         }
 
@@ -1554,8 +1689,8 @@ function renderChartPanel(
             : CANDLE_FLAT_COLOR;
         const resolvedColor = getRealtimeSeriesColor(row, color);
         const x = xAt(itemIndex);
-        const y = Math.min(yAt(value), zeroY);
-        const height = Math.max(Math.abs(zeroY - yAt(value)), 1);
+        const y = Math.min(yAt(value), zeroBaseline);
+        const height = Math.max(Math.abs(zeroBaseline - yAt(value)), 1);
 
         return (
           <rect
@@ -1570,6 +1705,24 @@ function renderChartPanel(
           />
         );
       });
+      const overlayNodes =
+        overlayLineKeys.flatMap((overlayLineKey, overlayIndex) =>
+          buildLineSegments(
+            items,
+            overlayLineKey,
+            xAt,
+            yAt,
+          ).map((segment, segmentIndex) => (
+            <path
+              className="details-chart-line-path details-chart-line-path-indicator"
+              key={`${panel.key}-${overlayLineKey}-${segmentIndex}`}
+              d={buildLinePath(segment)}
+              stroke={getSeriesColor(overlayLineKey, overlayIndex + 1)}
+            />
+          )),
+        );
+
+      svgContent = [...barNodes, ...overlayNodes];
     }
   } else if (kind === "brick") {
     const brickKey = seriesKeys[0] ?? "brick";
@@ -1778,6 +1931,19 @@ function renderChartPanel(
         ) : (
           <div className="details-chart-empty">暂无有效图表数据</div>
         )}
+
+        {rankMarkerPoints.length > 0 ? (
+          <div className="details-chart-rank-marker-layer" aria-hidden="true">
+            {rankMarkerPoints.map((point) => (
+              <span
+                className="details-chart-rank-marker-dot"
+                key={point.key}
+                style={{ left: `${point.leftPercent}%` }}
+                title={point.title}
+              />
+            ))}
+          </div>
+        ) : null}
 
         {yAxisLabels.length > 0 ? (
           <div className="details-chart-axis-layer details-chart-axis-layer-y">
@@ -2361,6 +2527,18 @@ export default function DetailsPage({
   const [detailRealtimeLoading, setDetailRealtimeLoading] = useState(false);
   const [detailRealtimeNotice, setDetailRealtimeNotice] = useState("");
   const [detailRealtimePinned, setDetailRealtimePinned] = useState(false);
+  const [screenWidth, setScreenWidth] = useState(() =>
+    typeof window === "undefined" ? CHART_VIEWBOX_WIDTH : window.innerWidth,
+  );
+  const [chartMainWidthRatio, setChartMainWidthRatio] = useState(() =>
+    readStoredChartMainWidthRatio(),
+  );
+  const [chartIndicatorWidthRatio, setChartIndicatorWidthRatio] = useState(() =>
+    readStoredChartIndicatorWidthRatio(),
+  );
+  const [chartRankMarkerThreshold, setChartRankMarkerThreshold] = useState(() =>
+    readStoredChartRankMarkerThreshold(),
+  );
   const [strategyCompareSnapshot, setStrategyCompareSnapshot] =
     useState<StrategyCompareSnapshot | null>(
       externalStrategyCompareSnapshot ?? null,
@@ -3036,9 +3214,16 @@ export default function DetailsPage({
     totalChartItems,
   );
   const panels = kline?.panels?.length ? kline.panels : buildDefaultPanels();
+  const chartMainPanelHeight = screenWidth * chartMainWidthRatio;
+  const chartIndicatorTotalHeight = screenWidth * chartIndicatorWidthRatio;
+  const chartMinHeight =
+    screenWidth <= CHART_MOBILE_BREAKPOINT
+      ? CHART_MIN_HEIGHT_MOBILE
+      : CHART_MIN_HEIGHT_DESKTOP;
+  const chartPanelGapTotal = Math.max(0, panels.length - 1) * CHART_PANEL_GAP_PX;
   const chartShellHeight = Math.max(
-    kline?.chart_height ?? DEFAULT_CHART_HEIGHT,
-    DEFAULT_CHART_HEIGHT,
+    chartMainPanelHeight + chartIndicatorTotalHeight + chartPanelGapTotal,
+    chartMinHeight,
   );
   const watermarkName =
     kline?.watermark_name ?? detailData?.overview?.name ?? "个股详情";
@@ -3070,6 +3255,10 @@ export default function DetailsPage({
       ? activeNavigationItems[currentNavigationIndex + 1]
       : null;
   const rankLookup = buildRankLookup(detailData?.overview, prevRanks);
+  const rankNumberLookup = useMemo(
+    () => buildRankNumberLookup(detailData?.overview, prevRanks),
+    [detailData?.overview, prevRanks],
+  );
   const chartRangeText =
     chartItems.length > 0
       ? `${chartItems[0].trade_date} -> ${chartItems[chartItems.length - 1].trade_date}`
@@ -3120,6 +3309,49 @@ export default function DetailsPage({
     resolvedTradeDate,
     totalChartItems,
   ]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const onResize = () => {
+      setScreenWidth(window.innerWidth);
+    };
+
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const onStorage = (event: StorageEvent) => {
+      if (
+        event.key === null ||
+        event.key === "lh_chart_main_width_ratio_v1" ||
+        event.key === "lh_chart_indicator_width_ratio_v1" ||
+        event.key === "lh_chart_rank_marker_threshold_v1"
+      ) {
+        setChartMainWidthRatio(readStoredChartMainWidthRatio());
+        setChartIndicatorWidthRatio(readStoredChartIndicatorWidthRatio());
+        setChartRankMarkerThreshold(readStoredChartRankMarkerThreshold());
+      }
+    };
+
+    setChartMainWidthRatio(readStoredChartMainWidthRatio());
+    setChartIndicatorWidthRatio(readStoredChartIndicatorWidthRatio());
+    setChartRankMarkerThreshold(readStoredChartRankMarkerThreshold());
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -3440,6 +3672,7 @@ export default function DetailsPage({
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
+      // Ignore browsers that do not support pointer capture for this target.
     }
 
     chartDragRef.current = {
@@ -3543,6 +3776,7 @@ export default function DetailsPage({
           event.currentTarget.releasePointerCapture(event.pointerId);
         }
       } catch {
+        // Ignore stale pointer capture state during cleanup.
       }
     }
     chartDragRef.current = null;
@@ -4061,7 +4295,13 @@ export default function DetailsPage({
           className="details-chart-shell"
           style={{
             height: `${chartShellHeight}px`,
-            gridTemplateRows: buildChartTemplateRows(kline),
+            gridTemplateRows: buildChartTemplateRows(
+              kline,
+              panels,
+              chartMainPanelHeight,
+              chartIndicatorTotalHeight,
+              chartMinHeight,
+            ),
           }}
         >
           {panels.map((panel, index) =>
@@ -4078,6 +4318,8 @@ export default function DetailsPage({
               allChartItems,
               resolvedTradeDate !== "--" ? resolvedTradeDate : null,
               rankLookup,
+              chartRankMarkerThreshold,
+              rankNumberLookup,
               onChartPointerDown,
               onChartPointerMove,
               onChartPointerUp,

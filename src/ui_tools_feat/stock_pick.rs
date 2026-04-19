@@ -11,7 +11,10 @@ use crate::{
         eval::Value,
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
-    scoring::tools::{calc_query_need_rows, inject_stock_extra_fields, load_st_list, rt_max_len},
+    scoring::tools::{
+        calc_query_need_rows, calc_query_start_date, inject_stock_extra_fields, load_st_list,
+        rt_max_len,
+    },
     utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
 };
 
@@ -468,6 +471,75 @@ fn load_summary_map(source_path: &str, trade_date: &str) -> HashMap<String, Summ
     out
 }
 
+fn load_rank_series_map(
+    source_path: &str,
+    start_date: &str,
+    end_date: &str,
+) -> HashMap<String, HashMap<String, Option<f64>>> {
+    let result_db = result_db_path(source_path);
+    if !result_db.exists() {
+        return HashMap::new();
+    }
+
+    let Some(result_db_str) = result_db.to_str() else {
+        return HashMap::new();
+    };
+    let Ok(conn) = Connection::open(result_db_str) else {
+        return HashMap::new();
+    };
+    let Ok(mut stmt) = conn.prepare(
+        r#"
+        SELECT ts_code, trade_date, rank
+        FROM score_summary
+        WHERE trade_date >= ? AND trade_date <= ?
+        "#,
+    ) else {
+        return HashMap::new();
+    };
+    let Ok(mut rows) = stmt.query(params![start_date, end_date]) else {
+        return HashMap::new();
+    };
+
+    let mut out: HashMap<String, HashMap<String, Option<f64>>> = HashMap::new();
+    while let Ok(Some(row)) = rows.next() {
+        let Ok(ts_code) = row.get::<_, String>(0) else {
+            continue;
+        };
+        let Ok(trade_date) = row.get::<_, String>(1) else {
+            continue;
+        };
+        let rank = row
+            .get::<_, Option<i64>>(2)
+            .ok()
+            .flatten()
+            .map(|value| value as f64);
+        out.entry(ts_code).or_default().insert(trade_date, rank);
+    }
+
+    out
+}
+
+fn inject_runtime_rank_series(
+    row_data: &mut crate::data::RowData,
+    ts_code: &str,
+    rank_series_map: &HashMap<String, HashMap<String, Option<f64>>>,
+) -> Result<(), String> {
+    let len = row_data.trade_dates.len();
+    let mut rank_series = vec![None; len];
+
+    if let Some(date_to_rank) = rank_series_map.get(ts_code) {
+        for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
+            rank_series[index] = date_to_rank.get(trade_date).copied().flatten();
+        }
+    }
+
+    row_data
+        .cols
+        .insert("RANK".to_string(), rank_series.clone());
+    row_data.cols.insert("rank".to_string(), rank_series);
+    row_data.validate()
+}
+
 fn filter_board(
     ts_code: &str,
     stock_name: Option<&str>,
@@ -549,6 +621,7 @@ pub fn run_expression_stock_pick(
         .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
 
     let warmup_need = estimate_custom_warmup(&stmts, parsed_scope_way)?;
+    let query_start_date = calc_query_start_date(source_path, warmup_need, &resolved_start_date)?;
     let need_rows = calc_query_need_rows(
         source_path,
         warmup_need,
@@ -572,6 +645,7 @@ pub fn run_expression_stock_pick(
     let name_map = build_name_map(source_path).unwrap_or_default();
     let concept_map = build_concepts_map(source_path).unwrap_or_default();
     let summary_map = load_summary_map(source_path, &resolved_end_date);
+    let rank_series_map = load_rank_series_map(source_path, &query_start_date, &resolved_end_date);
     let filtered_ts_codes = ts_codes
         .into_iter()
         .filter(|ts_code| {
@@ -594,6 +668,7 @@ pub fn run_expression_stock_pick(
                     need_rows,
                 )?;
                 inject_stock_extra_fields(&mut row_data, ts_code, st_list.contains(ts_code), None)?;
+                inject_runtime_rank_series(&mut row_data, ts_code, &rank_series_map)?;
                 let trade_dates = row_data.trade_dates.clone();
                 let keep_from = trade_dates
                     .binary_search_by(|d| d.as_str().cmp(&resolved_start_date))

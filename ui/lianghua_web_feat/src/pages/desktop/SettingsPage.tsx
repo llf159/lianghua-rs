@@ -2,11 +2,31 @@ import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import { getStockPickOptions } from '../../apis/stockPick'
 import { filterConceptItems, useConceptExclusions } from '../../shared/conceptExclusions'
+import {
+  CHART_RANK_MARKER_THRESHOLD_MAX,
+  CHART_RANK_MARKER_THRESHOLD_MIN,
+  CHART_INDICATOR_WIDTH_RATIO_MAX,
+  CHART_INDICATOR_WIDTH_RATIO_MIN,
+  CHART_MAIN_WIDTH_RATIO_MAX,
+  CHART_MAIN_WIDTH_RATIO_MIN,
+  clampChartRankMarkerThreshold,
+  clampChartIndicatorWidthRatio,
+  clampChartMainWidthRatio,
+  readStoredChartRankMarkerThreshold,
+  readStoredChartIndicatorWidthRatio,
+  readStoredChartMainWidthRatio,
+  writeStoredChartRankMarkerThreshold,
+  writeStoredChartIndicatorWidthRatio,
+  writeStoredChartMainWidthRatio,
+} from '../../shared/chartSettings'
 import './css/DataImportPage.css'
 import './css/StockPickPage.css'
 import './css/DetailsPage.css'
 
 const AUTOCOMPLETE_LIMIT = 12
+const RATIO_INPUT_STEP = 0.01
+
+type SettingsModalType = 'concept' | 'st' | 'chart-layout' | 'rank-marker' | null
 
 export default function SettingsPage() {
   const {
@@ -18,10 +38,27 @@ export default function SettingsPage() {
   const [conceptOptions, setConceptOptions] = useState<string[]>([])
   const [conceptKeyword, setConceptKeyword] = useState('')
   const [lookupFocused, setLookupFocused] = useState(false)
-  const [isConceptEditorOpen, setIsConceptEditorOpen] = useState(false)
+  const [activeModal, setActiveModal] = useState<SettingsModalType>(null)
+  const [chartMainRatioInput, setChartMainRatioInput] = useState(() =>
+    readStoredChartMainWidthRatio().toFixed(2),
+  )
+  const [chartIndicatorRatioInput, setChartIndicatorRatioInput] = useState(() =>
+    readStoredChartIndicatorWidthRatio().toFixed(2),
+  )
+  const [chartLayoutSettingError, setChartLayoutSettingError] = useState('')
+  const [chartLayoutSettingNotice, setChartLayoutSettingNotice] = useState('')
+  const [chartRankMarkerThresholdInput, setChartRankMarkerThresholdInput] = useState(() =>
+    String(readStoredChartRankMarkerThreshold()),
+  )
+  const [chartRankMarkerSettingError, setChartRankMarkerSettingError] = useState('')
+  const [chartRankMarkerSettingNotice, setChartRankMarkerSettingNotice] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const deferredConceptKeyword = useDeferredValue(conceptKeyword)
+  const isConceptEditorOpen = activeModal === 'concept'
+  const isStSettingOpen = activeModal === 'st'
+  const isChartLayoutSettingOpen = activeModal === 'chart-layout'
+  const isRankMarkerSettingOpen = activeModal === 'rank-marker'
 
   useEffect(() => {
     let cancelled = false
@@ -93,13 +130,13 @@ export default function SettingsPage() {
   const showAutocomplete = lookupFocused && autocompleteOptions.length > 0
 
   useEffect(() => {
-    if (!isConceptEditorOpen) {
+    if (!activeModal) {
       return
     }
 
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
-        setIsConceptEditorOpen(false)
+        setActiveModal(null)
         setConceptKeyword('')
         setLookupFocused(false)
       }
@@ -107,18 +144,101 @@ export default function SettingsPage() {
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [isConceptEditorOpen])
+  }, [activeModal])
+
+  const chartMainWidthRatioPreview = useMemo(() => {
+    const parsedValue = Number(chartMainRatioInput.trim())
+    if (!Number.isFinite(parsedValue)) {
+      return null
+    }
+
+    return clampChartMainWidthRatio(parsedValue)
+  }, [chartMainRatioInput])
+
+  const chartIndicatorWidthRatioPreview = useMemo(() => {
+    const parsedValue = Number(chartIndicatorRatioInput.trim())
+    if (!Number.isFinite(parsedValue)) {
+      return null
+    }
+
+    return clampChartIndicatorWidthRatio(parsedValue)
+  }, [chartIndicatorRatioInput])
+
+  const currentChartMainWidthRatio = readStoredChartMainWidthRatio()
+  const currentChartIndicatorWidthRatio = readStoredChartIndicatorWidthRatio()
+  const currentChartRankMarkerThreshold = readStoredChartRankMarkerThreshold()
+  const chartRankMarkerThresholdPreview = useMemo(() => {
+    const parsedValue = Number(chartRankMarkerThresholdInput.trim())
+    if (!Number.isFinite(parsedValue)) {
+      return null
+    }
+
+    return clampChartRankMarkerThreshold(parsedValue)
+  }, [chartRankMarkerThresholdInput])
 
   function openConceptEditor() {
-    setIsConceptEditorOpen(true)
+    setActiveModal('concept')
     setConceptKeyword('')
     setLookupFocused(false)
   }
 
-  function closeConceptEditor() {
-    setIsConceptEditorOpen(false)
+  function openStSetting() {
+    setActiveModal('st')
+  }
+
+  function openChartLayoutSetting() {
+    setActiveModal('chart-layout')
+    setChartMainRatioInput(readStoredChartMainWidthRatio().toFixed(2))
+    setChartIndicatorRatioInput(readStoredChartIndicatorWidthRatio().toFixed(2))
+    setChartLayoutSettingError('')
+    setChartLayoutSettingNotice('')
+  }
+
+  function openRankMarkerSetting() {
+    setActiveModal('rank-marker')
+    setChartRankMarkerThresholdInput(String(readStoredChartRankMarkerThreshold()))
+    setChartRankMarkerSettingError('')
+    setChartRankMarkerSettingNotice('')
+  }
+
+  function closeActiveModal() {
+    setActiveModal(null)
     setConceptKeyword('')
     setLookupFocused(false)
+  }
+
+  function onSaveChartLayoutRatios() {
+    const parsedMainValue = Number(chartMainRatioInput.trim())
+    const parsedIndicatorValue = Number(chartIndicatorRatioInput.trim())
+    if (!Number.isFinite(parsedMainValue) || !Number.isFinite(parsedIndicatorValue)) {
+      setChartLayoutSettingError('请输入有效数字。')
+      setChartLayoutSettingNotice('')
+      return
+    }
+
+    const normalizedMainValue = clampChartMainWidthRatio(parsedMainValue)
+    const normalizedIndicatorValue = clampChartIndicatorWidthRatio(parsedIndicatorValue)
+    writeStoredChartMainWidthRatio(normalizedMainValue)
+    writeStoredChartIndicatorWidthRatio(normalizedIndicatorValue)
+    setChartMainRatioInput(normalizedMainValue.toFixed(2))
+    setChartIndicatorRatioInput(normalizedIndicatorValue.toFixed(2))
+    setChartLayoutSettingError('')
+    setChartLayoutSettingNotice('已保存。切回详情页后会使用新比例。')
+  }
+
+  function onSaveChartRankMarkerThreshold() {
+    const parsedValue = Number(chartRankMarkerThresholdInput.trim())
+    if (!Number.isFinite(parsedValue)) {
+      setChartRankMarkerSettingError('请输入有效整数。')
+      setChartRankMarkerSettingNotice('')
+      return
+    }
+
+    const normalizedValue = clampChartRankMarkerThreshold(parsedValue)
+    writeStoredChartRankMarkerThreshold(normalizedValue)
+    setChartRankMarkerThresholdInput(String(normalizedValue))
+    setChartRankMarkerSettingError('')
+    setChartRankMarkerSettingNotice('已保存。详情页主图会按该排名阈值标记。')
   }
 
   function toggleConcept(value: string) {
@@ -144,43 +264,200 @@ export default function SettingsPage() {
         <div className="settings-head">
           <div>
             <h2 className="settings-title">设置</h2>
-            <p className="settings-section-note">概念排除名单会同步影响选股页的概念过滤结果。</p>
-          </div>
-          <div className="settings-actions">
-            <button
-              className={excludeStBoard ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
-              type="button"
-              onClick={() => setExcludeStBoard(!excludeStBoard)}
-            >
-              {excludeStBoard ? '已排除 ST 板块' : '排除 ST 板块'}
-            </button>
-            <button
-              className="settings-primary-btn"
-              type="button"
-              onClick={openConceptEditor}
-            >
-              概念筛选
-            </button>
+            <p className="settings-section-note">每项设置单独编辑，点击条目打开对应设置弹窗。</p>
           </div>
         </div>
 
-        <div className="settings-summary-grid">
-          <div className="settings-summary-item">
-            <span>已排除条数</span>
-            <strong>{excludedConcepts.length}</strong>
-          </div>
-          <div className="settings-summary-item">
-            <span>可选概念总数</span>
-            <strong>{conceptOptions.length}</strong>
-          </div>
-          <div className="settings-summary-item">
-            <span>ST 板块过滤</span>
-            <strong>{excludeStBoard ? '已开启' : '未开启'}</strong>
-          </div>
+        <div className="settings-list">
+          <button className="settings-list-item" type="button" onClick={openConceptEditor}>
+            <div className="settings-list-item-main">
+              <strong>概念排除</strong>
+              <span>已排除 {excludedConcepts.length} 项，影响选股页概念过滤。</span>
+            </div>
+            <span className="settings-list-item-value">编辑</span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openStSetting}>
+            <div className="settings-list-item-main">
+              <strong>ST 排除</strong>
+              <span>控制主板筛选是否自动排除 ST 板块。</span>
+            </div>
+            <span className="settings-list-item-value">{excludeStBoard ? '已开启' : '未开启'}</span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openChartLayoutSetting}>
+            <div className="settings-list-item-main">
+              <strong>图表高度比例</strong>
+              <span>统一设置主图区与指标区高度比例。</span>
+            </div>
+            <span className="settings-list-item-value">
+              主 {currentChartMainWidthRatio.toFixed(2)} / 指标 {currentChartIndicatorWidthRatio.toFixed(2)}
+            </span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openRankMarkerSetting}>
+            <div className="settings-list-item-main">
+              <strong>标记阈值排名</strong>
+              <span>详情页主图中，排名进入阈值时在当日K线上方做标记。</span>
+            </div>
+            <span className="settings-list-item-value">TOP {currentChartRankMarkerThreshold}</span>
+          </button>
         </div>
 
-        {error && !isConceptEditorOpen ? <div className="settings-error">{error}</div> : null}
+        {error && !activeModal ? <div className="settings-error">{error}</div> : null}
       </section>
+
+      {isStSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="ST 排除设置">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">ST 排除</h3>
+                <p className="settings-section-note">开启后，选股与榜单中的板块筛选会自动排除 ST。</p>
+              </div>
+              <div className="settings-actions">
+                <button
+                  className={excludeStBoard ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
+                  type="button"
+                  onClick={() => setExcludeStBoard(!excludeStBoard)}
+                >
+                  {excludeStBoard ? '已开启' : '未开启'}
+                </button>
+                <button className="settings-primary-btn" type="button" onClick={closeActiveModal}>
+                  完成
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isChartLayoutSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="图表高度比例设置">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">图表高度比例</h3>
+                <p className="settings-section-note">
+                  主图区与指标区分开设置，保存时会同时写入两项配置。
+                </p>
+              </div>
+              <div className="settings-actions">
+                <button className="settings-secondary-btn" type="button" onClick={closeActiveModal}>
+                  关闭
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-field settings-field-textarea">
+              <span>CHART_MAIN_WIDTH_RATIO</span>
+              <input
+                type="number"
+                min={CHART_MAIN_WIDTH_RATIO_MIN}
+                max={CHART_MAIN_WIDTH_RATIO_MAX}
+                step={RATIO_INPUT_STEP}
+                value={chartMainRatioInput}
+                onChange={(event) => setChartMainRatioInput(event.target.value)}
+              />
+              <small>
+                主图区预览：{chartMainWidthRatioPreview === null ? '--' : chartMainWidthRatioPreview.toFixed(2)}
+              </small>
+            </div>
+
+            <div className="settings-field settings-field-textarea">
+              <span>CHART_INDICATOR_WIDTH_RATIO</span>
+              <input
+                type="number"
+                min={CHART_INDICATOR_WIDTH_RATIO_MIN}
+                max={CHART_INDICATOR_WIDTH_RATIO_MAX}
+                step={RATIO_INPUT_STEP}
+                value={chartIndicatorRatioInput}
+                onChange={(event) => setChartIndicatorRatioInput(event.target.value)}
+              />
+              <small>
+                指标区预览：{chartIndicatorWidthRatioPreview === null ? '--' : chartIndicatorWidthRatioPreview.toFixed(2)}
+              </small>
+            </div>
+
+            {chartLayoutSettingError ? <div className="settings-error">{chartLayoutSettingError}</div> : null}
+            {chartLayoutSettingNotice ? <div className="settings-notice">{chartLayoutSettingNotice}</div> : null}
+
+            <div className="settings-actions">
+              <button className="settings-primary-btn" type="button" onClick={onSaveChartLayoutRatios}>
+                保存
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isRankMarkerSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="标记阈值排名设置">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">标记阈值排名</h3>
+                <p className="settings-section-note">
+                  当日排名小于等于该阈值时，会在详情页主图K线顶部显示标记。
+                </p>
+              </div>
+              <div className="settings-actions">
+                <button className="settings-secondary-btn" type="button" onClick={closeActiveModal}>
+                  关闭
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-field settings-field-textarea">
+              <span>RANK_MARKER_THRESHOLD</span>
+              <input
+                type="number"
+                min={CHART_RANK_MARKER_THRESHOLD_MIN}
+                max={CHART_RANK_MARKER_THRESHOLD_MAX}
+                step={1}
+                value={chartRankMarkerThresholdInput}
+                onChange={(event) => setChartRankMarkerThresholdInput(event.target.value)}
+              />
+              <small>
+                预览：{chartRankMarkerThresholdPreview === null ? '--' : `TOP ${chartRankMarkerThresholdPreview}`}
+              </small>
+            </div>
+
+            {chartRankMarkerSettingError ? <div className="settings-error">{chartRankMarkerSettingError}</div> : null}
+            {chartRankMarkerSettingNotice ? <div className="settings-notice">{chartRankMarkerSettingNotice}</div> : null}
+
+            <div className="settings-actions">
+              <button className="settings-primary-btn" type="button" onClick={onSaveChartRankMarkerThreshold}>
+                保存
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {isConceptEditorOpen ? (
         <div
@@ -188,7 +465,7 @@ export default function SettingsPage() {
           role="presentation"
           onClick={(event) => {
             if (event.target === event.currentTarget) {
-              closeConceptEditor()
+              closeActiveModal()
             }
           }}
         >
@@ -226,7 +503,7 @@ export default function SettingsPage() {
                 >
                   清空排除
                 </button>
-                <button className="settings-primary-btn" type="button" onClick={closeConceptEditor}>
+                <button className="settings-primary-btn" type="button" onClick={closeActiveModal}>
                   完成
                 </button>
               </div>

@@ -6,25 +6,42 @@ import {
   STOCK_PICK_SCOPE_OPTIONS,
   StockPickResultTable,
   formatDateLabel,
-} from '../../share/stockPickShared'
+} from '../../shared/stockPickShared'
 import { isStBoard, useConceptExclusions } from '../../shared/conceptExclusions'
 import { useStockPickOutletContext } from './StockPickPage'
-import { readJsonStorage } from '../../shared/storage'
+import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
 
 const DEFAULT_EXPRESSION = ''
 const EXPRESSION_STOCK_PICK_STATE_KEY = 'expression-stock-pick-state'
+const EXPRESSION_STOCK_PICK_FILTER_STATE_KEY = 'expression-stock-pick-filter-state-v2'
+const EXPRESSION_STOCK_PICK_RESULT_STATE_KEY = 'expression-stock-pick-result-state-v2'
+const COPY_SEPARATOR_OPTIONS = [
+  { label: '逗号 (,)', value: ',' },
+  { label: '分号 (;)', value: ';' },
+  { label: '竖线 (|)', value: '|' },
+  { label: '空格 ( )', value: ' ' },
+  { label: '换行 (\\n)', value: '\n' },
+] as const
 
-type PersistedExpressionStockPickState = {
+type CopySeparatorOption = (typeof COPY_SEPARATOR_OPTIONS)[number]['value']
+
+type PersistedExpressionStockPickFilterState = {
   board: (typeof STOCK_PICK_BOARD_OPTIONS)[number]
   referenceTradeDate: string
   lookbackPeriods: string
   scopeWay: (typeof STOCK_PICK_SCOPE_OPTIONS)[number]
   consecThreshold: string
   expression: string
+}
+
+type PersistedExpressionStockPickResultState = {
   rows: StockPickRow[]
   resolvedStartDate: string
   resolvedReferenceTradeDate: string
 }
+
+type PersistedExpressionStockPickState = PersistedExpressionStockPickFilterState &
+  PersistedExpressionStockPickResultState
 
 type LegacyPersistedExpressionStockPickState = Partial<PersistedExpressionStockPickState> & {
   startDate?: string
@@ -41,40 +58,55 @@ export default function ExpressionStockPickPage() {
   const { sourcePath, tradeDateOptions, latestTradeDate, optionsLoading } = useStockPickOutletContext()
   const { excludeStBoard } = useConceptExclusions()
   const persistedState = useMemo(() => {
+    const storage = typeof window === 'undefined' ? null : window.sessionStorage
     const parsed = readJsonStorage<LegacyPersistedExpressionStockPickState>(
-      typeof window === 'undefined' ? null : window.sessionStorage,
+      storage,
       EXPRESSION_STOCK_PICK_STATE_KEY,
     )
-    if (!parsed || typeof parsed !== 'object') {
+    const filterState = readJsonStorage<Partial<PersistedExpressionStockPickFilterState>>(
+      storage,
+      EXPRESSION_STOCK_PICK_FILTER_STATE_KEY,
+    )
+    const resultState = readJsonStorage<Partial<PersistedExpressionStockPickResultState>>(
+      storage,
+      EXPRESSION_STOCK_PICK_RESULT_STATE_KEY,
+    )
+    const merged = {
+      ...parsed,
+      ...filterState,
+      ...resultState,
+    }
+
+    if (!merged || typeof merged !== 'object') {
       return null
     }
 
     return {
       board:
-        parsed.board && STOCK_PICK_BOARD_OPTIONS.includes(parsed.board)
-          ? parsed.board
+        merged.board && STOCK_PICK_BOARD_OPTIONS.includes(merged.board)
+          ? merged.board
           : '全部',
       referenceTradeDate:
-        typeof parsed.referenceTradeDate === 'string'
-          ? parsed.referenceTradeDate
-          : typeof parsed.endDate === 'string'
-            ? parsed.endDate
+        typeof merged.referenceTradeDate === 'string'
+          ? merged.referenceTradeDate
+          : typeof merged.endDate === 'string'
+            ? merged.endDate
             : '',
       lookbackPeriods:
-        typeof parsed.lookbackPeriods === 'string' ? parsed.lookbackPeriods : '1',
+        typeof merged.lookbackPeriods === 'string' ? merged.lookbackPeriods : '1',
       scopeWay:
-        parsed.scopeWay && STOCK_PICK_SCOPE_OPTIONS.includes(parsed.scopeWay)
-          ? parsed.scopeWay
+        merged.scopeWay && STOCK_PICK_SCOPE_OPTIONS.includes(merged.scopeWay)
+          ? merged.scopeWay
           : 'LAST',
-      consecThreshold: typeof parsed.consecThreshold === 'string' ? parsed.consecThreshold : '2',
-      expression: typeof parsed.expression === 'string' ? parsed.expression : DEFAULT_EXPRESSION,
-      rows: Array.isArray(parsed.rows) ? parsed.rows : [],
-      resolvedStartDate: typeof parsed.resolvedStartDate === 'string' ? parsed.resolvedStartDate : '',
+      consecThreshold: typeof merged.consecThreshold === 'string' ? merged.consecThreshold : '2',
+      expression: typeof merged.expression === 'string' ? merged.expression : DEFAULT_EXPRESSION,
+      rows: Array.isArray(merged.rows) ? merged.rows : [],
+      resolvedStartDate: typeof merged.resolvedStartDate === 'string' ? merged.resolvedStartDate : '',
       resolvedReferenceTradeDate:
-        typeof parsed.resolvedReferenceTradeDate === 'string'
-          ? parsed.resolvedReferenceTradeDate
-          : typeof parsed.resolvedEndDate === 'string'
-            ? parsed.resolvedEndDate
+        typeof merged.resolvedReferenceTradeDate === 'string'
+          ? merged.resolvedReferenceTradeDate
+          : typeof merged.resolvedEndDate === 'string'
+            ? merged.resolvedEndDate
             : '',
     } satisfies PersistedExpressionStockPickState
   }, [])
@@ -91,6 +123,9 @@ export default function ExpressionStockPickPage() {
   )
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [copyWithSuffix, setCopyWithSuffix] = useState(true)
+  const [copySeparator, setCopySeparator] = useState<CopySeparatorOption>(',')
+  const [copyNotice, setCopyNotice] = useState('')
   const boardOptions = useMemo(
     () => buildBoardFilterOptions(STOCK_PICK_BOARD_OPTIONS, excludeStBoard),
     [excludeStBoard],
@@ -110,34 +145,31 @@ export default function ExpressionStockPickPage() {
   }, [board, excludeStBoard])
 
   useEffect(() => {
-    try {
-      window.sessionStorage.setItem(
-        EXPRESSION_STOCK_PICK_STATE_KEY,
-        JSON.stringify({
-          board,
-          referenceTradeDate,
-          lookbackPeriods,
-          scopeWay,
-          consecThreshold,
-          expression,
-          rows,
-          resolvedStartDate,
-          resolvedReferenceTradeDate,
-        } satisfies PersistedExpressionStockPickState),
-      )
-    } catch {
-    }
-  }, [
-    board,
-    referenceTradeDate,
-    lookbackPeriods,
-    scopeWay,
-    consecThreshold,
-    expression,
-    rows,
-    resolvedStartDate,
-    resolvedReferenceTradeDate,
-  ])
+    writeJsonStorage(
+      typeof window === 'undefined' ? null : window.sessionStorage,
+      EXPRESSION_STOCK_PICK_FILTER_STATE_KEY,
+      {
+        board,
+        referenceTradeDate,
+        lookbackPeriods,
+        scopeWay,
+        consecThreshold,
+        expression,
+      } satisfies PersistedExpressionStockPickFilterState,
+    )
+  }, [board, referenceTradeDate, lookbackPeriods, scopeWay, consecThreshold, expression])
+
+  useEffect(() => {
+    writeJsonStorage(
+      typeof window === 'undefined' ? null : window.sessionStorage,
+      EXPRESSION_STOCK_PICK_RESULT_STATE_KEY,
+      {
+        rows,
+        resolvedStartDate,
+        resolvedReferenceTradeDate,
+      } satisfies PersistedExpressionStockPickResultState,
+    )
+  }, [rows, resolvedStartDate, resolvedReferenceTradeDate])
 
   async function onRun() {
     if (!sourcePath.trim()) {
@@ -168,6 +200,47 @@ export default function ExpressionStockPickPage() {
       setError(`表达式选股失败: ${String(runError)}`)
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function onCopyStockCodes() {
+    const normalizedCodes = rows
+      .map((row) => row.ts_code.trim())
+      .filter((value) => value.length > 0)
+      .map((value) => {
+        if (copyWithSuffix) {
+          return value
+        }
+        const [codeOnly] = value.split('.')
+        return codeOnly ?? value
+      })
+
+    if (normalizedCodes.length === 0) {
+      setCopyNotice('当前没有可复制的股票代码。')
+      return
+    }
+
+    const text = normalizedCodes.join(copySeparator)
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text)
+      } else if (typeof document !== 'undefined') {
+        const textarea = document.createElement('textarea')
+        textarea.value = text
+        textarea.setAttribute('readonly', 'true')
+        textarea.style.position = 'absolute'
+        textarea.style.left = '-9999px'
+        document.body.appendChild(textarea)
+        textarea.select()
+        document.execCommand('copy')
+        document.body.removeChild(textarea)
+      } else {
+        throw new Error('当前环境不支持复制')
+      }
+
+      setCopyNotice(`已复制 ${normalizedCodes.length} 个代码。`)
+    } catch (copyError) {
+      setCopyNotice(`复制失败: ${String(copyError)}`)
     }
   }
 
@@ -258,13 +331,43 @@ export default function ExpressionStockPickPage() {
 
       <div className="stock-pick-result-head">
         <strong>结果列表</strong>
-        <span>
-          共 {rows.length} 只，参考日：{formatDateLabel(resolvedReferenceTradeDate)}
-          {resolvedStartDate && resolvedReferenceTradeDate && resolvedStartDate !== resolvedReferenceTradeDate
-            ? `，窗口：${formatDateLabel(resolvedStartDate)} ~ ${formatDateLabel(resolvedReferenceTradeDate)}`
-            : ''}
-        </span>
+        <div className="stock-pick-result-tools">
+          {excludeStBoard ? <span>已应用全局条件：排除 ST</span> : null}
+          <span>
+            共 {rows.length} 只，参考日：{formatDateLabel(resolvedReferenceTradeDate)}
+            {resolvedStartDate && resolvedReferenceTradeDate && resolvedStartDate !== resolvedReferenceTradeDate
+              ? `，窗口：${formatDateLabel(resolvedStartDate)} ~ ${formatDateLabel(resolvedReferenceTradeDate)}`
+              : ''}
+          </span>
+          <label className="stock-pick-field stock-pick-field-compact">
+            <span>代码格式</span>
+            <select
+              value={copyWithSuffix ? 'with' : 'without'}
+              onChange={(event) => setCopyWithSuffix(event.target.value === 'with')}
+            >
+              <option value="with">带后缀</option>
+              <option value="without">不带后缀</option>
+            </select>
+          </label>
+          <label className="stock-pick-field stock-pick-field-compact">
+            <span>分隔符</span>
+            <select
+              value={copySeparator}
+              onChange={(event) => setCopySeparator(event.target.value as CopySeparatorOption)}
+            >
+              {COPY_SEPARATOR_OPTIONS.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button type="button" className="stock-pick-chip-btn" onClick={() => void onCopyStockCodes()}>
+            复制股票
+          </button>
+        </div>
       </div>
+      {copyNotice ? <div className="stock-pick-tip">{copyNotice}</div> : null}
       <StockPickResultTable
         rows={rows}
         tradeDate={resolvedReferenceTradeDate}

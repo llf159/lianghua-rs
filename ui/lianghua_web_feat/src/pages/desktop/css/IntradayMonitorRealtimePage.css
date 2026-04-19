@@ -206,6 +206,12 @@
   padding: 10px;
 }
 
+.intraday-monitor-result-block.is-refreshing,
+.intraday-monitor-scene-block.is-refreshing {
+  opacity: 0.72;
+  transition: opacity 160ms ease;
+}
+
 .intraday-monitor-scene-groups {
   display: flex;
   flex-direction: column;

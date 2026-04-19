@@ -13,7 +13,11 @@ import {
   isStBoard,
   useConceptExclusions,
 } from "../../shared/conceptExclusions";
-import { readJsonStorage, readStoredSourcePath } from "../../shared/storage";
+import {
+  readJsonStorage,
+  readStoredSourcePath,
+  writeJsonStorage,
+} from "../../shared/storage";
 import { useRouteScrollRegion } from "../../shared/routeScroll";
 import {
   DEFAULT_DATE_OPTION,
@@ -27,10 +31,12 @@ import {
   type SortDirection,
   useTableSort,
 } from "../../shared/tableSort";
-import { STOCK_PICK_BOARD_OPTIONS } from "../../share/stockPickShared";
+import { STOCK_PICK_BOARD_OPTIONS } from "../../shared/stockPickShared";
 import "./css/OverviewScenePage.css";
 
 const OVERVIEW_PAGE_STATE_KEY = "lh_overview_page_state";
+const OVERVIEW_PAGE_FILTER_STATE_KEY = "lh_overview_page_filter_state_v2";
+const OVERVIEW_PAGE_RESULT_STATE_KEY = "lh_overview_page_result_state_v2";
 const FIXED_VISIBLE_COLUMNS = [
   "rank",
   "ts_code",
@@ -61,7 +67,7 @@ type AppliedConfig = {
   rowCount: number;
 };
 
-type PersistedOverviewState = {
+type PersistedOverviewFilterState = {
   sourcePath: string;
   rankDateInput: string;
   refDateInput: string;
@@ -69,12 +75,18 @@ type PersistedOverviewState = {
   boardFilter: (typeof STOCK_PICK_BOARD_OPTIONS)[number];
   totalMvMinInput: string;
   totalMvMaxInput: string;
-  rows: OverviewRow[];
-  dateOptions: string[];
-  lastConfig: AppliedConfig | null;
   sortKey: string | null;
   sortDirection: SortDirection;
 };
+
+type PersistedOverviewResultState = {
+  rows: OverviewRow[];
+  dateOptions: string[];
+  lastConfig: AppliedConfig | null;
+};
+
+type PersistedOverviewState = PersistedOverviewFilterState &
+  PersistedOverviewResultState;
 
 const DEFAULT_COLUMN_WIDTH = 120;
 const CONCEPT_COLUMN_MIN_WIDTH = 240;
@@ -214,46 +226,61 @@ function findFirstPopulatedString(rows: OverviewRow[], key: string) {
 export default function OverviewRawPage() {
   const { excludedConcepts, excludeStBoard } = useConceptExclusions();
   const persistedState = useMemo(() => {
+    const storage = typeof window === "undefined" ? null : window.sessionStorage;
     const parsed = readJsonStorage<Partial<PersistedOverviewState>>(
-      typeof window === "undefined" ? null : window.sessionStorage,
+      storage,
       OVERVIEW_PAGE_STATE_KEY,
     );
-    if (!parsed || typeof parsed !== "object") {
+    const filterState = readJsonStorage<Partial<PersistedOverviewFilterState>>(
+      storage,
+      OVERVIEW_PAGE_FILTER_STATE_KEY,
+    );
+    const resultState = readJsonStorage<Partial<PersistedOverviewResultState>>(
+      storage,
+      OVERVIEW_PAGE_RESULT_STATE_KEY,
+    );
+    const merged = {
+      ...parsed,
+      ...filterState,
+      ...resultState,
+    };
+
+    if (!merged || typeof merged !== "object") {
       return null;
     }
 
     return {
       sourcePath:
-        typeof parsed.sourcePath === "string" ? parsed.sourcePath : "",
+        typeof merged.sourcePath === "string" ? merged.sourcePath : "",
       rankDateInput:
-        typeof parsed.rankDateInput === "string" ? parsed.rankDateInput : "",
+        typeof merged.rankDateInput === "string" ? merged.rankDateInput : "",
       refDateInput:
-        typeof parsed.refDateInput === "string" ? parsed.refDateInput : "",
+        typeof merged.refDateInput === "string" ? merged.refDateInput : "",
       limitInput:
-        typeof parsed.limitInput === "string" ? parsed.limitInput : "100",
+        typeof merged.limitInput === "string" ? merged.limitInput : "100",
       boardFilter:
-        parsed.boardFilter &&
-        STOCK_PICK_BOARD_OPTIONS.includes(parsed.boardFilter)
-          ? parsed.boardFilter
+        merged.boardFilter &&
+        STOCK_PICK_BOARD_OPTIONS.includes(merged.boardFilter)
+          ? merged.boardFilter
           : "全部",
       totalMvMinInput:
-        typeof parsed.totalMvMinInput === "string"
-          ? parsed.totalMvMinInput
+        typeof merged.totalMvMinInput === "string"
+          ? merged.totalMvMinInput
           : "",
       totalMvMaxInput:
-        typeof parsed.totalMvMaxInput === "string"
-          ? parsed.totalMvMaxInput
+        typeof merged.totalMvMaxInput === "string"
+          ? merged.totalMvMaxInput
           : "",
-      rows: Array.isArray(parsed.rows) ? parsed.rows : [],
-      dateOptions: Array.isArray(parsed.dateOptions) ? parsed.dateOptions : [],
+      rows: Array.isArray(merged.rows) ? merged.rows : [],
+      dateOptions: Array.isArray(merged.dateOptions) ? merged.dateOptions : [],
       lastConfig:
-        parsed.lastConfig && typeof parsed.lastConfig === "object"
-          ? parsed.lastConfig
+        merged.lastConfig && typeof merged.lastConfig === "object"
+          ? merged.lastConfig
           : null,
-      sortKey: typeof parsed.sortKey === "string" ? parsed.sortKey : null,
+      sortKey: typeof merged.sortKey === "string" ? merged.sortKey : null,
       sortDirection:
-        parsed.sortDirection === "desc" || parsed.sortDirection === "asc"
-          ? parsed.sortDirection
+        merged.sortDirection === "desc" || merged.sortDirection === "asc"
+          ? merged.sortDirection
           : null,
     } satisfies PersistedOverviewState;
   }, []);
@@ -363,26 +390,21 @@ export default function OverviewRawPage() {
   }, [boardFilter, excludeStBoard]);
 
   useEffect(() => {
-    try {
-      window.sessionStorage.setItem(
-        OVERVIEW_PAGE_STATE_KEY,
-        JSON.stringify({
-          sourcePath,
-          rankDateInput,
-          refDateInput,
-          limitInput,
-          boardFilter,
-          totalMvMinInput,
-          totalMvMaxInput,
-          rows,
-          dateOptions,
-          lastConfig,
-          sortKey,
-          sortDirection,
-        } satisfies PersistedOverviewState),
-      );
-    } catch {
-    }
+    writeJsonStorage(
+      typeof window === "undefined" ? null : window.sessionStorage,
+      OVERVIEW_PAGE_FILTER_STATE_KEY,
+      {
+        sourcePath,
+        rankDateInput,
+        refDateInput,
+        limitInput,
+        boardFilter,
+        totalMvMinInput,
+        totalMvMaxInput,
+        sortKey,
+        sortDirection,
+      } satisfies PersistedOverviewFilterState,
+    );
   }, [
     sourcePath,
     rankDateInput,
@@ -391,12 +413,21 @@ export default function OverviewRawPage() {
     boardFilter,
     totalMvMinInput,
     totalMvMaxInput,
-    rows,
-    dateOptions,
-    lastConfig,
     sortKey,
     sortDirection,
   ]);
+
+  useEffect(() => {
+    writeJsonStorage(
+      typeof window === "undefined" ? null : window.sessionStorage,
+      OVERVIEW_PAGE_RESULT_STATE_KEY,
+      {
+        rows,
+        dateOptions,
+        lastConfig,
+      } satisfies PersistedOverviewResultState,
+    );
+  }, [rows, dateOptions, lastConfig]);
 
   useEffect(() => {
     if (!sourcePathTrimmed) {

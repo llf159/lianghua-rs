@@ -486,6 +486,24 @@
   font-size: 12px;
 }
 
+.strategy-manage-bulk-scene-rules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-content: flex-start;
+}
+
+.strategy-manage-bulk-scene-rules .strategy-manage-bulk-bucket-item {
+  flex: 0 1 220px;
+  min-width: 180px;
+  max-width: 100%;
+  gap: 6px;
+}
+
+.strategy-manage-bulk-scene-rules .strategy-manage-empty {
+  flex: 1 1 100%;
+}
+
 .strategy-manage-bulk-progress {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

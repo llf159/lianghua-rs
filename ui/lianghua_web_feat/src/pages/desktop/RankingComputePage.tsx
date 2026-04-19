@@ -1,5 +1,18 @@
-import { useEffect, useState } from 'react'
+import { useDeferredValue, useEffect, useRef, useState } from 'react'
+import type { UnlistenFn } from '@tauri-apps/api/event'
 import { inspectManagedSourceStatus, removeManagedSourceFile } from '../../apis/managedSource'
+import {
+  getIndicatorManagePage,
+  listenDataDownloadProgress,
+  runStockDataIndicatorColumnsDelete,
+  runStockDataIndicatorColumnsRebuild,
+  saveIndicatorManagePage,
+  type DataDownloadProgress,
+  type DataDownloadRunResult,
+  type IndicatorManageDraft,
+  type IndicatorManageItem,
+  type IndicatorManagePageData,
+} from '../../apis/dataDownload'
 import {
   getRankingComputeStatus,
   runConceptPerformanceCompute,
@@ -9,9 +22,20 @@ import {
   type RankComputeResultContinuity,
   type RankingComputeStatus,
 } from '../../apis/rankingCompute'
+import DataTaskProgress from '../../shared/DataTaskProgress'
+import {
+  calcProgressPercent,
+  getCurrentObjectText,
+  getPhaseStep,
+  getProgressCounterText,
+  normalizeProgressPhase,
+  useAnimatedProgressPercent,
+} from '../../shared/dataTaskProgressUtils'
+import './css/DataDownloadPage.css'
 import './css/RankingComputePage.css'
 
-type BusyAction = 'idle' | 'loading' | 'computing' | 'deleting-result-db'
+type BusyAction = 'idle' | 'loading' | 'computing' | 'deleting-result-db' | 'indicator-running'
+type IndicatorEditorMode = 'create' | 'edit'
 
 function compactDateToInput(value: string | null | undefined) {
   if (!value || !/^\d{8}$/.test(value)) {
@@ -85,6 +109,55 @@ function formatDateSample(values: string[]) {
   return values.map((value) => formatTradeDate(value)).join('、')
 }
 
+function buildEmptyIndicatorDraft(): IndicatorManageDraft {
+  return {
+    name: '',
+    expr: '',
+    prec: 2,
+  }
+}
+
+function normalizeIndicatorPrecInput(raw: string, fallback: number) {
+  const trimmed = raw.trim()
+  if (trimmed === '') {
+    return fallback
+  }
+
+  if (!/^\d+$/.test(trimmed)) {
+    return fallback
+  }
+
+  return Math.max(0, Number(trimmed))
+}
+
+function formatPhaseLabel(phase: string | null | undefined) {
+  switch (normalizeProgressPhase(phase)) {
+    case 'delete_stock_data_indicator_columns':
+      return '清空指标列'
+    case 'rebuild_stock_data_indicator_columns':
+      return '补算指标列'
+    case 'done':
+      return '下载完成'
+    case 'started':
+      return '已启动'
+    case 'failed':
+      return '下载失败'
+    default:
+      return '运行中'
+  }
+}
+
+function getProgressWorkflow(action: string | null | undefined) {
+  switch (action) {
+    case 'delete-stock-data-indicator-columns':
+      return ['delete_stock_data_indicator_columns'] as string[]
+    case 'rebuild-stock-data-indicator-columns':
+      return ['rebuild_stock_data_indicator_columns'] as string[]
+    default:
+      return null
+  }
+}
+
 export default function RankingComputePage() {
   const [status, setStatus] = useState<RankingComputeStatus | null>(null)
   const [busyAction, setBusyAction] = useState<BusyAction>('loading')
@@ -92,11 +165,222 @@ export default function RankingComputePage() {
   const [endDateInput, setEndDateInput] = useState('')
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
+  const [progress, setProgress] = useState<DataDownloadProgress | null>(null)
+
+  const [indicatorModalOpen, setIndicatorModalOpen] = useState(false)
+  const [indicatorItems, setIndicatorItems] = useState<IndicatorManageItem[]>([])
+  const [indicatorFilePath, setIndicatorFilePath] = useState('')
+  const [indicatorExists, setIndicatorExists] = useState(false)
+  const [indicatorLoading, setIndicatorLoading] = useState(false)
+  const [indicatorSaving, setIndicatorSaving] = useState(false)
+  const [indicatorError, setIndicatorError] = useState('')
+  const [indicatorNotice, setIndicatorNotice] = useState('')
+  const [indicatorEditorMode, setIndicatorEditorMode] = useState<IndicatorEditorMode | null>(null)
+  const [indicatorDraft, setIndicatorDraft] = useState<IndicatorManageDraft | null>(null)
+  const [indicatorEditingName, setIndicatorEditingName] = useState<string | null>(null)
+
+  const activeDownloadIdRef = useRef('')
+  const progressUnlistenRef = useRef<UnlistenFn | null>(null)
 
   const sourcePath = status?.sourcePath?.trim() ?? ''
   const isBusy = busyAction !== 'idle'
+  const showIndicatorProgress = busyAction === 'indicator-running'
+  const deferredProgress = useDeferredValue(progress)
+  const progressPercent = calcProgressPercent(deferredProgress, getProgressWorkflow, ['done'])
+  const shownProgressPercent = useAnimatedProgressPercent(busyAction === 'indicator-running', progressPercent)
+  const phaseStep = getPhaseStep(deferredProgress?.action, deferredProgress?.phase, getProgressWorkflow)
+  const progressCounterText = getProgressCounterText(deferredProgress, formatPhaseLabel)
 
-  async function loadStatus() {
+  function applyIndicatorPage(page: IndicatorManagePageData) {
+    setIndicatorItems(page.items)
+    setIndicatorFilePath(page.filePath)
+    setIndicatorExists(page.exists)
+  }
+
+  function clearIndicatorEditor() {
+    setIndicatorEditorMode(null)
+    setIndicatorDraft(null)
+    setIndicatorEditingName(null)
+  }
+
+  function updateIndicatorDraftPrec(rawValue: string) {
+    setIndicatorDraft((current) =>
+      current
+        ? {
+            ...current,
+            prec: normalizeIndicatorPrecInput(rawValue, 2),
+          }
+        : current,
+    )
+  }
+
+  function onCreateIndicator() {
+    setIndicatorEditorMode('create')
+    setIndicatorDraft(buildEmptyIndicatorDraft())
+    setIndicatorEditingName(null)
+    setIndicatorNotice('')
+    setIndicatorError('')
+  }
+
+  function onEditIndicator(item: IndicatorManageItem) {
+    setIndicatorEditorMode('edit')
+    setIndicatorDraft({
+      name: item.name,
+      expr: item.expr,
+      prec: item.prec,
+    })
+    setIndicatorEditingName(item.name)
+    setIndicatorNotice('')
+    setIndicatorError('')
+  }
+
+  async function persistIndicatorItems(nextItems: IndicatorManageDraft[], successMessage: string) {
+    if (!sourcePath) {
+      setIndicatorError('当前数据目录为空，无法保存指标配置。')
+      return
+    }
+
+    setIndicatorSaving(true)
+    setIndicatorError('')
+    setIndicatorNotice('')
+    try {
+      const page = await saveIndicatorManagePage(sourcePath, nextItems)
+      applyIndicatorPage(page)
+      clearIndicatorEditor()
+      setIndicatorNotice(successMessage)
+    } catch (saveError) {
+      setIndicatorError(`保存指标配置失败: ${String(saveError)}`)
+    } finally {
+      setIndicatorSaving(false)
+    }
+  }
+
+  async function onSaveIndicatorDraft() {
+    if (!indicatorDraft) {
+      return
+    }
+
+    const nextDraft: IndicatorManageDraft = {
+      name: indicatorDraft.name.trim(),
+      expr: indicatorDraft.expr.trim(),
+      prec: Math.max(0, Number(indicatorDraft.prec) || 0),
+    }
+
+    const currentItems = indicatorItems.map((item) => ({
+      name: item.name,
+      expr: item.expr,
+      prec: item.prec,
+    }))
+
+    const nextItems =
+      indicatorEditorMode === 'edit' && indicatorEditingName
+        ? currentItems.map((item) =>
+            item.name === indicatorEditingName ? nextDraft : item,
+          )
+        : [...currentItems, nextDraft]
+
+    await persistIndicatorItems(
+      nextItems,
+      indicatorEditorMode === 'edit' ? `已保存指标：${nextDraft.name}` : `已新增指标：${nextDraft.name}`,
+    )
+  }
+
+  async function onDeleteIndicator(item: IndicatorManageItem) {
+    if (!window.confirm(`确认删除指标 ${item.name} 吗？`)) {
+      return
+    }
+
+    const nextItems = indicatorItems
+      .filter((current) => current.name !== item.name)
+      .map((current) => ({
+        name: current.name,
+        expr: current.expr,
+        prec: current.prec,
+      }))
+
+    await persistIndicatorItems(nextItems, `已删除指标：${item.name}`)
+  }
+
+  function renderIndicatorEditorCard(title: string) {
+    if (!indicatorDraft) {
+      return null
+    }
+
+    return (
+      <section className="data-download-indicator-editor-card">
+        <div className="data-download-indicator-editor-head">
+          <div>
+            <h4>{title}</h4>
+            <p>只保留名称、表达式和精度三个字段。</p>
+          </div>
+          <button
+            className="data-download-secondary-btn"
+            type="button"
+            onClick={clearIndicatorEditor}
+            disabled={indicatorSaving}
+          >
+            取消
+          </button>
+        </div>
+
+        <div className="data-download-indicator-form-grid data-download-indicator-form-grid-stacked">
+          <label className="data-download-field">
+            <span>指标名</span>
+            <input
+              type="text"
+              value={indicatorDraft.name}
+              onChange={(event) =>
+                setIndicatorDraft((current) =>
+                  current ? { ...current, name: event.target.value } : current,
+                )
+              }
+              placeholder="例如 MA10"
+            />
+          </label>
+
+          <label className="data-download-field">
+            <span>精度</span>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={indicatorDraft.prec}
+              onChange={(event) => updateIndicatorDraftPrec(event.target.value)}
+            />
+          </label>
+
+          <label className="data-download-field data-download-field-span-2">
+            <span>表达式</span>
+            <textarea
+              className="data-download-indicator-editor"
+              value={indicatorDraft.expr}
+              onChange={(event) =>
+                setIndicatorDraft((current) =>
+                  current ? { ...current, expr: event.target.value } : current,
+                )
+              }
+              spellCheck={false}
+              placeholder={'REFV := REF(V, 1);\nDIV(V, REFV);'}
+            />
+          </label>
+        </div>
+
+        <div className="data-download-modal-actions">
+          <button
+            className="data-download-primary-btn"
+            type="button"
+            onClick={() => void onSaveIndicatorDraft()}
+            disabled={indicatorSaving}
+          >
+            {indicatorSaving ? '保存中...' : indicatorEditorMode === 'edit' ? '保存指标' : '新增指标'}
+          </button>
+        </div>
+      </section>
+    )
+  }
+
+  async function loadStatus(options?: { preserveNotice?: boolean }) {
+    const preserveNotice = options?.preserveNotice === true
     setBusyAction('loading')
     setError('')
 
@@ -104,7 +388,9 @@ export default function RankingComputePage() {
       const managedStatus = await inspectManagedSourceStatus()
       const nextStatus = await getRankingComputeStatus(managedStatus.sourcePath)
       setStatus(nextStatus)
-      setNotice('')
+      if (!preserveNotice) {
+        setNotice('')
+      }
 
       setStartDateInput((current) => current || compactDateToInput(nextStatus.suggestedStartDate))
       setEndDateInput((current) => current || compactDateToInput(nextStatus.suggestedEndDate))
@@ -119,6 +405,127 @@ export default function RankingComputePage() {
   useEffect(() => {
     void loadStatus()
   }, [])
+
+  useEffect(() => {
+    return () => {
+      progressUnlistenRef.current?.()
+    }
+  }, [])
+
+  async function openIndicatorManager() {
+    if (!sourcePath) {
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    setIndicatorModalOpen(true)
+    setIndicatorLoading(true)
+    setIndicatorError('')
+    setIndicatorNotice('')
+    try {
+      const page = await getIndicatorManagePage(sourcePath)
+      applyIndicatorPage(page)
+      clearIndicatorEditor()
+    } catch (loadError) {
+      setIndicatorError(`读取指标配置失败: ${String(loadError)}`)
+      setIndicatorItems([])
+      setIndicatorFilePath('')
+      setIndicatorExists(false)
+      clearIndicatorEditor()
+    } finally {
+      setIndicatorLoading(false)
+    }
+  }
+
+  async function runIndicatorTask(executor: (downloadId: string) => Promise<DataDownloadRunResult>) {
+    setBusyAction('indicator-running')
+    setError('')
+    setNotice('')
+    setProgress(null)
+
+    const downloadId = `download-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    activeDownloadIdRef.current = downloadId
+    progressUnlistenRef.current?.()
+    progressUnlistenRef.current = await listenDataDownloadProgress(downloadId, (nextProgress) => {
+      if (activeDownloadIdRef.current !== downloadId) {
+        return
+      }
+      setProgress((prev) => {
+        if (
+          prev &&
+          prev.phase === nextProgress.phase &&
+          prev.elapsedMs === nextProgress.elapsedMs &&
+          prev.finished === nextProgress.finished &&
+          prev.total === nextProgress.total &&
+          prev.currentLabel === nextProgress.currentLabel &&
+          prev.message === nextProgress.message
+        ) {
+          return prev
+        }
+        return nextProgress
+      })
+    })
+
+    try {
+      const result = await executor(downloadId)
+      if (result.action === 'delete-stock-data-indicator-columns') {
+        setNotice(
+          `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；清空 ${result.summary.successCount} 列，基础行情列已保留。`,
+        )
+      } else if (result.action === 'rebuild-stock-data-indicator-columns') {
+        setNotice(
+          `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；补算 ${result.summary.successCount} 组，回写 ${result.summary.savedRows} 行。`,
+        )
+      } else {
+        setNotice(`${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}。`)
+      }
+      await loadStatus({ preserveNotice: true })
+    } catch (runError) {
+      setNotice('')
+      setError(`执行指标列维护失败: ${String(runError)}`)
+    } finally {
+      progressUnlistenRef.current?.()
+      progressUnlistenRef.current = null
+      activeDownloadIdRef.current = ''
+      setBusyAction('idle')
+    }
+  }
+
+  async function onRunStockDataIndicatorColumnsDelete() {
+    if (!sourcePath) {
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    if (
+      !window.confirm(
+        '确认清空 stock_data 中的所有非基础指标列吗？\n\n该操作会重建 stock_data 表，只保留基础行情列和已有基础行情数据；数据量较大时耗时会更久。',
+      )
+    ) {
+      return
+    }
+
+    await runIndicatorTask((downloadId) =>
+      runStockDataIndicatorColumnsDelete({
+        downloadId,
+        sourcePath,
+      }),
+    )
+  }
+
+  async function onRunStockDataIndicatorColumnsRebuild() {
+    if (!sourcePath) {
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    await runIndicatorTask((downloadId) =>
+      runStockDataIndicatorColumnsRebuild({
+        downloadId,
+        sourcePath,
+      }),
+    )
+  }
 
   async function onDeleteResultDb() {
     if (!sourcePath) {
@@ -292,9 +699,190 @@ export default function RankingComputePage() {
           </button>
         </div>
 
+        <div className="ranking-compute-summary" style={{ marginTop: 8 }}>
+          <div className="ranking-compute-summary-item">
+            <span>行情数据指标列维护</span>
+            <strong>ind.toml + stock_data 指标列</strong>
+            <small>这里维护指标配置，并执行清空/补算指标列。</small>
+          </div>
+        </div>
+
+        <div className="ranking-compute-actions">
+          <button
+            className="ranking-compute-secondary-btn"
+            type="button"
+            onClick={() => void openIndicatorManager()}
+            disabled={isBusy}
+          >
+            指标管理
+          </button>
+
+          <button
+            className="ranking-compute-danger-btn"
+            type="button"
+            onClick={() => void onRunStockDataIndicatorColumnsDelete()}
+            disabled={isBusy || sourcePath === ''}
+          >
+            清空指标列
+          </button>
+
+          <button
+            className="ranking-compute-secondary-btn"
+            type="button"
+            onClick={() => void onRunStockDataIndicatorColumnsRebuild()}
+            disabled={isBusy || sourcePath === ''}
+          >
+            {busyAction === 'indicator-running' ? '补算中...' : '补算指标列'}
+          </button>
+        </div>
+
+        {showIndicatorProgress ? (
+          <DataTaskProgress
+            phaseLabel={formatPhaseLabel(deferredProgress?.phase)}
+            phaseStepPillText={phaseStep ? ` · ${phaseStep.current}/${phaseStep.total}` : ''}
+            phaseStepStatText={phaseStep ? ` ${phaseStep.current}/${phaseStep.total}` : ''}
+            actionLabel={deferredProgress?.actionLabel ?? '行情数据指标列维护'}
+            progressPercent={progressPercent}
+            elapsedText={formatElapsedMs(deferredProgress?.elapsedMs ?? 0)}
+            shownProgressPercent={shownProgressPercent}
+            progressCounterText={progressCounterText}
+            currentObjectText={getCurrentObjectText(deferredProgress)}
+            message={deferredProgress?.message}
+            fallbackMessage="任务已经启动，正在等待后端返回当前状态。"
+          />
+        ) : null}
+
         {notice ? <div className="ranking-compute-notice">{notice}</div> : null}
         {error ? <div className="ranking-compute-error">{error}</div> : null}
       </section>
+
+      {indicatorModalOpen ? (
+        <div
+          className="data-download-modal-backdrop"
+          role="presentation"
+          onClick={() => {
+            if (!indicatorSaving) {
+              setIndicatorModalOpen(false)
+            }
+          }}
+        >
+          <div
+            className="data-download-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="指标管理"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="data-download-modal-head">
+              <div>
+                <h3>指标管理</h3>
+                <p>{indicatorFilePath || 'ind.toml'}</p>
+              </div>
+              <button
+                className="data-download-secondary-btn"
+                type="button"
+                onClick={() => setIndicatorModalOpen(false)}
+                disabled={indicatorSaving}
+              >
+                关闭
+              </button>
+            </div>
+
+            {indicatorNotice ? <div className="data-download-notice">{indicatorNotice}</div> : null}
+            {indicatorError ? <div className="data-download-error">{indicatorError}</div> : null}
+
+            {indicatorLoading ? (
+              <div className="data-download-modal-loading">读取指标配置中...</div>
+            ) : (
+              <>
+                <div className="data-download-modal-meta">
+                  <span>{indicatorExists ? '当前文件已存在' : '当前文件不存在，将在保存时创建'}</span>
+                  <span>当前共 {indicatorItems.length} 个指标，保存前会做语法和字段校验</span>
+                </div>
+
+                <div className="data-download-indicator-toolbar">
+                  <button
+                    className="data-download-secondary-btn"
+                    type="button"
+                    onClick={onCreateIndicator}
+                    disabled={indicatorSaving}
+                  >
+                    新增指标
+                  </button>
+                  <button
+                    className="data-download-secondary-btn"
+                    type="button"
+                    onClick={() => void openIndicatorManager()}
+                    disabled={indicatorSaving}
+                  >
+                    重新读取
+                  </button>
+                </div>
+
+                {indicatorDraft && indicatorEditorMode === 'create'
+                  ? renderIndicatorEditorCard('新增指标')
+                  : null}
+
+                {indicatorItems.length === 0 ? (
+                  <div className="data-download-modal-loading">当前没有指标，点“新增指标”开始添加。</div>
+                ) : (
+                  <div className="data-download-indicator-list">
+                    {indicatorItems.map((item) => {
+                      const isEditing =
+                        indicatorEditorMode === 'edit' && indicatorEditingName === item.name
+
+                      return isEditing ? (
+                        <div key={item.name}>
+                          {renderIndicatorEditorCard(`修改指标 · ${indicatorEditingName ?? '--'}`)}
+                        </div>
+                      ) : (
+                        <article key={item.name} className="data-download-indicator-card">
+                          <div className="data-download-indicator-card-head">
+                            <div>
+                              <div className="data-download-indicator-card-name">{item.name}</div>
+                              <div className="data-download-indicator-card-meta">精度 {item.prec}</div>
+                            </div>
+                            <div className="data-download-indicator-card-actions">
+                              <button
+                                className="data-download-secondary-btn"
+                                type="button"
+                                onClick={() => onEditIndicator(item)}
+                                disabled={indicatorSaving}
+                              >
+                                修改
+                              </button>
+                              <button
+                                className="data-download-secondary-btn data-download-danger-btn"
+                                type="button"
+                                onClick={() => void onDeleteIndicator(item)}
+                                disabled={indicatorSaving}
+                              >
+                                删除
+                              </button>
+                            </div>
+                          </div>
+
+                          <pre className="data-download-indicator-card-expr">{item.expr}</pre>
+                        </article>
+                      )
+                    })}
+                  </div>
+                )}
+
+                <div className="data-download-modal-actions">
+                  <button
+                    className="data-download-primary-btn"
+                    type="button"
+                    onClick={() => setIndicatorModalOpen(false)}
+                  >
+                    关闭
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

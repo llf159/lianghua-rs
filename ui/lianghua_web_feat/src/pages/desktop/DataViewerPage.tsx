@@ -108,7 +108,7 @@ export default function DataViewerPage() {
   const [tradeDateInput, setTradeDateInput] = useState('')
   const [lookupInput, setLookupInput] = useState('')
   const [lookupFocused, setLookupFocused] = useState(false)
-  const [limit, setLimit] = useState(100)
+  const [limitInput, setLimitInput] = useState('100')
   const [stockLookupRows, setStockLookupRows] = useState<StockLookupRow[]>([])
 
   const sourceDir = status?.sourceDir ?? DEFAULT_MANAGED_SOURCE_DIR
@@ -246,13 +246,20 @@ export default function DataViewerPage() {
       return
     }
 
+    const parsedLimit = Number(limitInput.trim())
+    if (!Number.isInteger(parsedLimit) || parsedLimit <= 0) {
+      setPreview(null)
+      setPreviewError('显示行数必须是正整数。')
+      return
+    }
+
     setPreviewLoading(true)
     setPreviewError('')
     try {
       const result = await previewManagedSourceDataset(datasetId, sourceDir, {
         tradeDate: selectedDataset.supportsTradeDate ? tradeDateInput : '',
         tsCode: selectedDataset.supportsTsCode ? readTargetCode : '',
-        limit,
+        limit: parsedLimit,
       })
       setPreview(result)
     } catch (error) {
@@ -380,12 +387,14 @@ export default function DataViewerPage() {
 
           <label className="settings-field data-viewer-field data-viewer-field-limit">
             <span>显示行数</span>
-            <select value={limit} onChange={(event) => setLimit(Number(event.target.value))}>
-              <option value={50}>50</option>
-              <option value={100}>100</option>
-              <option value={200}>200</option>
-              <option value={500}>500</option>
-            </select>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={limitInput}
+              onChange={(event) => setLimitInput(event.target.value)}
+              placeholder="例如 100"
+            />
           </label>
 
           <div className="data-viewer-query-cell">

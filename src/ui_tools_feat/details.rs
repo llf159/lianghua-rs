@@ -62,6 +62,8 @@ pub struct DetailKlineRow {
     pub duokong_long: Option<f64>,
     pub bupiao_short: Option<f64>,
     pub bupiao_long: Option<f64>,
+    #[serde(rename = "VOL_SIGMA")]
+    pub vol_sigma: Option<f64>,
     pub is_realtime: Option<bool>,
     pub realtime_color_hint: Option<String>,
 }
@@ -420,7 +422,10 @@ fn default_kline_panels() -> Vec<DetailKlinePanel> {
             key: "volume".to_string(),
             label: "量能".to_string(),
             kind: Some("bar".to_string()),
-            series_keys: Some(vec!["vol".to_string()]),
+            series_keys: Some(vec![
+                "vol".to_string(),
+                "VOL_SIGMA".to_string(),
+            ]),
             row_weight: Some(DEFAULT_ROW_WEIGHTS[2]),
         },
         DetailKlinePanel {
@@ -456,7 +461,8 @@ fn query_kline(
                 TRY_CAST(duokong_short AS DOUBLE) AS duokong_short,
                 TRY_CAST(duokong_long AS DOUBLE) AS duokong_long,
                 TRY_CAST(bupiao_short AS DOUBLE) AS bupiao_short,
-                TRY_CAST(bupiao_long AS DOUBLE) AS bupiao_long
+                TRY_CAST(bupiao_long AS DOUBLE) AS bupiao_long,
+                TRY_CAST(VOL_SIGMA AS DOUBLE) AS VOL_SIGMA
             FROM stock_data
             WHERE ts_code = ? AND adj_type = ?
             ORDER BY trade_date ASC
@@ -492,6 +498,9 @@ fn query_kline(
             bupiao_long: row
                 .get(13)
                 .map_err(|e| format!("读取 bupiao_long 失败: {e}"))?,
+            vol_sigma: row
+                .get(14)
+                .map_err(|e| format!("读取 VOL_SIGMA 失败: {e}"))?,
             is_realtime: None,
             realtime_color_hint: None,
         });
@@ -638,6 +647,7 @@ fn set_realtime_indicator_value(row: &mut DetailKlineRow, name: &str, value: Opt
         "DUOKONG_LONG" => row.duokong_long = value,
         "BUPIAO_SHORT" => row.bupiao_short = value,
         "BUPIAO_LONG" => row.bupiao_long = value,
+        "VOL_SIGMA" => row.vol_sigma = value,
         _ => {}
     }
 }
@@ -709,6 +719,7 @@ fn build_realtime_kline_row(quote: &crate::crawler::SinaQuote) -> Option<DetailK
         duokong_long: None,
         bupiao_short: None,
         bupiao_long: None,
+        vol_sigma: None,
         is_realtime: Some(true),
         realtime_color_hint,
     })
@@ -1324,5 +1335,19 @@ mod tests {
 
         assert!(!indicator_series.iter().any(|key| key == "duokong_short"));
         assert!(!indicator_series.iter().any(|key| key == "duokong_long"));
+
+        let volume_panel = panels
+            .iter()
+            .find(|panel| panel.key == "volume")
+            .expect("missing volume panel");
+        let volume_series = volume_panel
+            .series_keys
+            .as_ref()
+            .expect("volume panel missing series keys");
+
+        assert_eq!(
+            volume_series,
+            &vec!["vol".to_string(), "VOL_SIGMA".to_string()]
+        );
     }
 }

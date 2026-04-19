@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs::create_dir_all, path::Path};
 
-use duckdb::{Connection, ToSql, params, params_from_iter};
+use duckdb::{Appender, Connection, ToSql, params, params_from_iter};
 
 use crate::{
     crawler::concept::ThsConceptRow,
@@ -32,6 +32,8 @@ fn round_opt_to(value: Option<f64>, scale: i32) -> Option<f64> {
 
 const STOCK_DATA_TABLE: &str = "stock_data";
 const STOCK_DATA_STAGE_TABLE: &str = "stock_data_stage";
+const STOCK_DATA_REBUILD_TABLE: &str = "stock_data_rebuild_tmp";
+const STOCK_DATA_INDICATOR_STAGE_TABLE: &str = "stock_data_indicator_stage";
 
 const STOCK_DATA_INSERT_COLUMNS: [&str; 13] = [
     "ts_code",
@@ -48,6 +50,41 @@ const STOCK_DATA_INSERT_COLUMNS: [&str; 13] = [
     "amount",
     "tor",
 ];
+
+const STOCK_DATA_BASE_COLUMN_DEFS: [(&str, &str); 13] = [
+    ("ts_code", "VARCHAR"),
+    ("trade_date", "VARCHAR"),
+    ("adj_type", "VARCHAR"),
+    ("open", "DECIMAL(10,2)"),
+    ("high", "DECIMAL(10,2)"),
+    ("low", "DECIMAL(10,2)"),
+    ("close", "DECIMAL(10,2)"),
+    ("pre_close", "DECIMAL(10,2)"),
+    ("change", "DECIMAL(10,2)"),
+    ("pct_chg", "DECIMAL(10,4)"),
+    ("vol", "DECIMAL(15,2)"),
+    ("amount", "DECIMAL(20,2)"),
+    ("tor", "DECIMAL(10,4)"),
+];
+
+fn build_stock_data_create_sql(table_name: &str, indicator_columns: &[String]) -> String {
+    let mut column_defs = STOCK_DATA_BASE_COLUMN_DEFS
+        .iter()
+        .map(|(name, ty)| format!("{} {}", quote_ident(name), ty))
+        .collect::<Vec<_>>();
+
+    for name in indicator_columns {
+        column_defs.push(format!("{} DOUBLE", quote_ident(name)));
+    }
+
+    column_defs.push("PRIMARY KEY (ts_code, trade_date, adj_type)".to_string());
+
+    format!(
+        "CREATE TABLE IF NOT EXISTS {} ({})",
+        quote_ident(table_name),
+        column_defs.join(", ")
+    )
+}
 
 fn validate_indicator_series(
     rows: &[ProBarRow],
@@ -203,28 +240,8 @@ pub fn init_stock_data_db(db_path: &str) -> Result<(), String> {
     }
     let conn = Connection::open(db_path).map_err(|e| format!("打开数据库失败:{e}"))?;
 
-    conn.execute(
-        r#"
-            CREATE TABLE IF NOT EXISTS stock_data (
-                ts_code VARCHAR,
-                trade_date VARCHAR,
-                adj_type VARCHAR,
-                open DECIMAL(10,2),
-                high DECIMAL(10,2),
-                low DECIMAL(10,2),
-                close DECIMAL(10,2),
-                pre_close DECIMAL(10,2),
-                change DECIMAL(10,2),
-                pct_chg DECIMAL(10,4),
-                vol DECIMAL(15,2),
-                amount DECIMAL(20,2),
-                tor DECIMAL(10,4),
-                PRIMARY KEY (ts_code, trade_date, adj_type)
-            )
-            "#,
-        [],
-    )
-    .map_err(|e| format!("创建stock_data失败:{e}"))?;
+    conn.execute_batch(&build_stock_data_create_sql(STOCK_DATA_TABLE, &[]))
+        .map_err(|e| format!("创建stock_data失败:{e}"))?;
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_stock_data_ts_adj_date ON stock_data(ts_code, adj_type, trade_date)",
@@ -300,6 +317,160 @@ pub fn flush_stock_data_stage_table(conn: &Connection) -> Result<(), String> {
 pub fn checkpoint_stock_data(conn: &Connection) -> Result<(), String> {
     conn.execute_batch("CHECKPOINT")
         .map_err(|e| format!("执行数据库CHECKPOINT失败: {e}"))
+}
+
+pub fn reset_stock_data_indicator_stage_table(
+    conn: &Connection,
+    indicator_names: &[String],
+) -> Result<(), String> {
+    let mut column_defs = vec![
+        "ts_code VARCHAR".to_string(),
+        "trade_date VARCHAR".to_string(),
+        "adj_type VARCHAR".to_string(),
+    ];
+    for name in indicator_names {
+        column_defs.push(format!("{} DOUBLE", quote_ident(name)));
+    }
+
+    conn.execute_batch(&format!(
+        "DROP TABLE IF EXISTS {table};
+         CREATE TEMP TABLE {table} ({columns})",
+        table = STOCK_DATA_INDICATOR_STAGE_TABLE,
+        columns = column_defs.join(", ")
+    ))
+    .map_err(|e| format!("重建指标临时表失败: {e}"))
+}
+
+pub fn append_stock_data_indicator_stage_rows(
+    conn: &Connection,
+    indicator_names: &[String],
+    ts_code: &str,
+    adj_type: AdjType,
+    rows: &[ProBarRow],
+    indicators: &HashMap<String, Vec<Option<f64>>>,
+) -> Result<(), String> {
+    let mut appender =
+        create_stock_data_indicator_stage_appender_for_columns(conn, indicator_names)?;
+    append_stock_data_indicator_stage_rows_with_appender(
+        &mut appender,
+        indicator_names,
+        ts_code,
+        adj_type,
+        rows,
+        indicators,
+    )?;
+    appender
+        .flush()
+        .map_err(|e| format!("刷新指标临时表 Appender 失败: {e}"))?;
+    Ok(())
+}
+
+pub fn create_stock_data_indicator_stage_appender<'a>(
+    conn: &'a Connection,
+    indicators: &HashMap<String, Vec<Option<f64>>>,
+) -> Result<Appender<'a>, String> {
+    let mut indicator_names = indicators.keys().cloned().collect::<Vec<_>>();
+    indicator_names.sort();
+    create_stock_data_indicator_stage_appender_for_columns(conn, &indicator_names)
+}
+
+pub fn create_stock_data_indicator_stage_appender_for_columns<'a>(
+    conn: &'a Connection,
+    indicator_names: &[String],
+) -> Result<Appender<'a>, String> {
+    let mut requested_columns = vec!["ts_code", "trade_date", "adj_type"];
+    requested_columns.extend(indicator_names.iter().map(String::as_str));
+    let resolved_columns =
+        resolve_appender_columns(conn, STOCK_DATA_INDICATOR_STAGE_TABLE, &requested_columns)?;
+    let resolved_column_refs = resolved_columns
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+
+    conn.appender_with_columns(STOCK_DATA_INDICATOR_STAGE_TABLE, &resolved_column_refs)
+        .map_err(|e| format!("创建指标临时表 Appender 失败: {e}"))
+}
+
+pub fn append_stock_data_indicator_stage_rows_with_appender(
+    appender: &mut Appender<'_>,
+    indicator_names: &[String],
+    ts_code: &str,
+    adj_type: AdjType,
+    rows: &[ProBarRow],
+    indicators: &HashMap<String, Vec<Option<f64>>>,
+) -> Result<(), String> {
+    if indicators.is_empty() || rows.is_empty() {
+        return Ok(());
+    }
+
+    let adj_type = adj_type_name(adj_type);
+
+    for name in indicator_names {
+        let Some(series) = indicators.get(name) else {
+            return Err(format!("缺少指标{name}的数据"));
+        };
+        if series.len() != rows.len() {
+            return Err(format!(
+                "指标{name}长度与行情行数不一致: {} != {}",
+                series.len(),
+                rows.len()
+            ));
+        }
+    }
+
+    for (row_idx, row) in rows.iter().enumerate() {
+        let mut values: Vec<&dyn ToSql> = Vec::with_capacity(indicator_names.len() + 3);
+        values.push(&ts_code);
+        values.push(&row.trade_date);
+        values.push(&adj_type);
+        for name in indicator_names {
+            let series = indicators
+                .get(name)
+                .ok_or_else(|| format!("缺少指标{name}的数据"))?;
+            values.push(&series[row_idx]);
+        }
+
+        appender.append_row(values.as_slice()).map_err(|e| {
+            format!(
+                "Appender写入指标临时表失败, ts_code={}, trade_date={}: {e}",
+                ts_code, row.trade_date
+            )
+        })?;
+    }
+    Ok(())
+}
+
+pub fn flush_stock_data_indicator_stage_table(
+    conn: &Connection,
+    indicator_names: &[String],
+) -> Result<(), String> {
+    if indicator_names.is_empty() {
+        conn.execute_batch(&format!(
+            "DROP TABLE IF EXISTS {STOCK_DATA_INDICATOR_STAGE_TABLE}"
+        ))
+        .map_err(|e| format!("删除指标临时表失败: {e}"))?;
+        return Ok(());
+    }
+
+    let set_clause = indicator_names
+        .iter()
+        .map(|name| format!("{0} = stage.{0}", quote_ident(name)))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    conn.execute_batch(&format!(
+        "UPDATE {table} AS data
+         SET {set_clause}
+         FROM {stage} AS stage
+         WHERE data.ts_code = stage.ts_code
+           AND data.trade_date = stage.trade_date
+           AND data.adj_type = stage.adj_type;
+         DROP TABLE IF EXISTS {stage}",
+        table = STOCK_DATA_TABLE,
+        stage = STOCK_DATA_INDICATOR_STAGE_TABLE,
+        set_clause = set_clause
+    ))
+    .map_err(|e| format!("提交指标临时表失败: {e}"))
 }
 
 pub fn replace_one_stock_rows(
@@ -393,11 +564,69 @@ pub fn list_stock_data_indicator_columns(conn: &Connection) -> Result<Vec<String
 }
 
 pub fn drop_stock_data_columns(conn: &Connection, column_names: &[String]) -> Result<(), String> {
-    for name in column_names {
-        let sql = format!("ALTER TABLE stock_data DROP COLUMN {}", quote_ident(name));
-        conn.execute_batch(&sql)
-            .map_err(|e| format!("删除指标列{name}失败:{e}"))?;
+    if column_names.is_empty() {
+        return Ok(());
     }
+
+    let existing = load_table_columns(conn, STOCK_DATA_TABLE)?;
+    let keep_columns = existing
+        .iter()
+        .filter(|name| {
+            !column_names
+                .iter()
+                .any(|drop| drop.eq_ignore_ascii_case(name))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for base in STOCK_DATA_INSERT_COLUMNS {
+        if !keep_columns
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(base))
+        {
+            return Err(format!("不能删除基础行情列{base}"));
+        }
+    }
+
+    let indicator_columns = keep_columns
+        .iter()
+        .filter(|name| {
+            !STOCK_DATA_INSERT_COLUMNS
+                .iter()
+                .any(|base| name.eq_ignore_ascii_case(base))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let create_sql = build_stock_data_create_sql(STOCK_DATA_REBUILD_TABLE, &indicator_columns);
+    conn.execute_batch(&format!(
+        "DROP TABLE IF EXISTS {};
+         {};
+         INSERT INTO {} ({})
+         SELECT {} FROM {};
+         DROP TABLE {};
+         ALTER TABLE {} RENAME TO {};
+         CREATE INDEX IF NOT EXISTS idx_stock_data_ts_adj_date ON {}(ts_code, adj_type, trade_date)",
+        quote_ident(STOCK_DATA_REBUILD_TABLE),
+        create_sql,
+        quote_ident(STOCK_DATA_REBUILD_TABLE),
+        keep_columns
+            .iter()
+            .map(|name| quote_ident(name))
+            .collect::<Vec<_>>()
+            .join(", "),
+        keep_columns
+            .iter()
+            .map(|name| quote_ident(name))
+            .collect::<Vec<_>>()
+            .join(", "),
+        quote_ident(STOCK_DATA_TABLE),
+        quote_ident(STOCK_DATA_TABLE),
+        quote_ident(STOCK_DATA_REBUILD_TABLE),
+        quote_ident(STOCK_DATA_TABLE),
+        quote_ident(STOCK_DATA_TABLE),
+    ))
+    .map_err(|e| format!("删除指标列失败:{e}"))?;
 
     Ok(())
 }
@@ -723,4 +952,78 @@ pub fn replace_trade_date_rows(
     delete_trade_date_rows(conn, adj_type, trade_date)?;
     insert_pro_bar_rows(conn, adj_type, rows)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        fs::{create_dir_all, remove_dir_all},
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn temp_dir_path(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("lianghua-rs-{prefix}-{nanos}"))
+    }
+
+    #[test]
+    fn drop_stock_data_columns_rebuilds_table_and_keeps_remaining_data() {
+        let source_dir = temp_dir_path("drop-stock-data-columns");
+        create_dir_all(&source_dir).expect("create temp dir");
+
+        let db_path = source_dir.join("stock_data.db");
+        init_stock_data_db(db_path.to_str().expect("utf8 path")).expect("init stock_data");
+
+        let conn = Connection::open(&db_path).expect("open db");
+        ensure_indicator_columns(&conn, &["MA5".to_string(), "MA10".to_string()])
+            .expect("add indicator columns");
+        conn.execute(
+            r#"
+            INSERT INTO stock_data (
+                ts_code, trade_date, adj_type, open, high, low, close, pre_close,
+                change, pct_chg, vol, amount, tor, MA5, MA10
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+            params![
+                "000001.SZ",
+                "20240102",
+                "qfq",
+                10.0_f64,
+                11.0_f64,
+                9.5_f64,
+                10.5_f64,
+                10.0_f64,
+                0.5_f64,
+                5.0_f64,
+                1000.0_f64,
+                10_000.0_f64,
+                1.2_f64,
+                10.2_f64,
+                10.1_f64
+            ],
+        )
+        .expect("insert stock_data row");
+
+        drop_stock_data_columns(&conn, &["MA10".to_string()]).expect("drop indicator column");
+
+        let columns = load_table_columns(&conn, STOCK_DATA_TABLE).expect("load columns");
+        assert!(columns.iter().any(|name| name == "MA5"));
+        assert!(!columns.iter().any(|name| name == "MA10"));
+
+        let value: f64 = conn
+            .query_row(
+                "SELECT CAST(MA5 AS DOUBLE) FROM stock_data WHERE ts_code = ? AND trade_date = ? AND adj_type = ?",
+                params!["000001.SZ", "20240102", "qfq"],
+                |row| row.get(0),
+            )
+            .expect("query MA5");
+        assert_eq!(value, 10.2_f64);
+
+        let _ = remove_dir_all(source_dir);
+    }
 }

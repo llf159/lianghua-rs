@@ -827,6 +827,25 @@
   stroke-width: 1.65;
 }
 
+.details-chart-rank-marker-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.details-chart-rank-marker-dot {
+  position: absolute;
+  top: 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  transform: translateX(-50%);
+  background: #dc2626;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 1px 4px rgba(220, 38, 38, 0.45);
+}
+
 .details-chart-watermark {
   position: absolute;
   inset: 42% auto auto 50%;

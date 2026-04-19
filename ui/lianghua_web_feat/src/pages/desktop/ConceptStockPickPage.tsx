@@ -1,25 +1,25 @@
 import { useEffect, useMemo, useState } from 'react'
 import { runConceptStockPick, type StockPickRow } from '../../apis/stockPick'
 import {
+  ConceptIncludeExcludePanels,
+  buildAvailableConceptOptions,
   buildBoardFilterOptions,
+  formatDateLabel,
+  normalizeStringArray,
   STOCK_PICK_BOARD_OPTIONS,
   STOCK_PICK_MATCH_MODE_OPTIONS,
   StockPickResultTable,
-  formatDateLabel,
-} from '../../share/stockPickShared'
+  toggleStringSelection,
+} from '../../shared/stockPickShared'
 import { filterConceptItems, isStBoard, useConceptExclusions } from '../../shared/conceptExclusions'
 import { useStockPickOutletContext } from './StockPickPage'
-import { readJsonStorage } from '../../shared/storage'
-import {
-  ConceptIncludeExcludePanels,
-  buildAvailableConceptOptions,
-  normalizeStringArray,
-  toggleStringSelection,
-} from '../../share/stockPickConceptFilter'
+import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
 
 const CONCEPT_STOCK_PICK_STATE_KEY = 'concept-stock-pick-state-v1'
+const CONCEPT_STOCK_PICK_FILTER_STATE_KEY = 'concept-stock-pick-filter-state-v2'
+const CONCEPT_STOCK_PICK_RESULT_STATE_KEY = 'concept-stock-pick-result-state-v2'
 
-type PersistedConceptStockPickState = {
+type PersistedConceptStockPickFilterState = {
   board: (typeof STOCK_PICK_BOARD_OPTIONS)[number]
   tradeDate: string
   matchMode: (typeof STOCK_PICK_MATCH_MODE_OPTIONS)[number]
@@ -27,47 +27,68 @@ type PersistedConceptStockPickState = {
   includeConcepts: string[]
   excludeConcepts: string[]
   selectedConcepts?: string[]
+}
+
+type PersistedConceptStockPickResultState = {
   rows: StockPickRow[]
   resolvedTradeDate: string
 }
+
+type PersistedConceptStockPickState = PersistedConceptStockPickFilterState &
+  PersistedConceptStockPickResultState
 
 export default function ConceptStockPickPage() {
   const { sourcePath, tradeDateOptions, latestTradeDate, conceptOptions, optionsLoading } = useStockPickOutletContext()
   const { excludedConcepts, excludeStBoard } = useConceptExclusions()
   const persistedState = useMemo(() => {
+    const storage = typeof window === 'undefined' ? null : window.sessionStorage
     const parsed = readJsonStorage<Partial<PersistedConceptStockPickState>>(
-      typeof window === 'undefined' ? null : window.sessionStorage,
+      storage,
       CONCEPT_STOCK_PICK_STATE_KEY,
     )
-    if (!parsed || typeof parsed !== 'object') {
+    const filterState = readJsonStorage<Partial<PersistedConceptStockPickFilterState>>(
+      storage,
+      CONCEPT_STOCK_PICK_FILTER_STATE_KEY,
+    )
+    const resultState = readJsonStorage<Partial<PersistedConceptStockPickResultState>>(
+      storage,
+      CONCEPT_STOCK_PICK_RESULT_STATE_KEY,
+    )
+    const merged = {
+      ...parsed,
+      ...filterState,
+      ...resultState,
+    }
+
+    if (!merged || typeof merged !== 'object') {
       return null
     }
 
     return {
       board:
-        parsed.board && STOCK_PICK_BOARD_OPTIONS.includes(parsed.board)
-          ? parsed.board
+        merged.board && STOCK_PICK_BOARD_OPTIONS.includes(merged.board)
+          ? merged.board
           : '全部',
-      tradeDate: typeof parsed.tradeDate === 'string' ? parsed.tradeDate : '',
+      tradeDate: typeof merged.tradeDate === 'string' ? merged.tradeDate : '',
       matchMode:
-        parsed.matchMode && STOCK_PICK_MATCH_MODE_OPTIONS.includes(parsed.matchMode)
-          ? parsed.matchMode
+        merged.matchMode && STOCK_PICK_MATCH_MODE_OPTIONS.includes(merged.matchMode)
+          ? merged.matchMode
           : 'OR',
-      conceptKeyword: typeof parsed.conceptKeyword === 'string' ? parsed.conceptKeyword : '',
+      conceptKeyword: typeof merged.conceptKeyword === 'string' ? merged.conceptKeyword : '',
       includeConcepts: normalizeStringArray(
-        Array.isArray(parsed.includeConcepts)
-          ? parsed.includeConcepts.filter((item): item is string => typeof item === 'string')
-          : Array.isArray(parsed.selectedConcepts)
-            ? parsed.selectedConcepts.filter((item): item is string => typeof item === 'string')
+        Array.isArray(merged.includeConcepts)
+          ? merged.includeConcepts.filter((item): item is string => typeof item === 'string')
+          : Array.isArray(merged.selectedConcepts)
+            ? merged.selectedConcepts.filter((item): item is string => typeof item === 'string')
             : [],
       ),
       excludeConcepts: normalizeStringArray(
-        Array.isArray(parsed.excludeConcepts)
-          ? parsed.excludeConcepts.filter((item): item is string => typeof item === 'string')
+        Array.isArray(merged.excludeConcepts)
+          ? merged.excludeConcepts.filter((item): item is string => typeof item === 'string')
           : [],
       ),
-      rows: Array.isArray(parsed.rows) ? parsed.rows : [],
-      resolvedTradeDate: typeof parsed.resolvedTradeDate === 'string' ? parsed.resolvedTradeDate : '',
+      rows: Array.isArray(merged.rows) ? merged.rows : [],
+      resolvedTradeDate: typeof merged.resolvedTradeDate === 'string' ? merged.resolvedTradeDate : '',
     } satisfies PersistedConceptStockPickState
   }, [])
   const [board, setBoard] = useState<(typeof STOCK_PICK_BOARD_OPTIONS)[number]>(() => persistedState?.board ?? '全部')
@@ -116,23 +137,30 @@ export default function ConceptStockPickPage() {
   }, [excludedConcepts])
 
   useEffect(() => {
-    try {
-      window.sessionStorage.setItem(
-        CONCEPT_STOCK_PICK_STATE_KEY,
-        JSON.stringify({
-          board,
-          tradeDate,
-          matchMode,
-          conceptKeyword,
-          includeConcepts,
-          excludeConcepts,
-          rows,
-          resolvedTradeDate,
-        } satisfies PersistedConceptStockPickState),
-      )
-    } catch {
-    }
-  }, [board, tradeDate, matchMode, conceptKeyword, includeConcepts, excludeConcepts, rows, resolvedTradeDate])
+    writeJsonStorage(
+      typeof window === 'undefined' ? null : window.sessionStorage,
+      CONCEPT_STOCK_PICK_FILTER_STATE_KEY,
+      {
+        board,
+        tradeDate,
+        matchMode,
+        conceptKeyword,
+        includeConcepts,
+        excludeConcepts,
+      } satisfies PersistedConceptStockPickFilterState,
+    )
+  }, [board, tradeDate, matchMode, conceptKeyword, includeConcepts, excludeConcepts])
+
+  useEffect(() => {
+    writeJsonStorage(
+      typeof window === 'undefined' ? null : window.sessionStorage,
+      CONCEPT_STOCK_PICK_RESULT_STATE_KEY,
+      {
+        rows,
+        resolvedTradeDate,
+      } satisfies PersistedConceptStockPickResultState,
+    )
+  }, [rows, resolvedTradeDate])
 
   const availableConceptOptions = useMemo(
     () => buildAvailableConceptOptions(conceptOptions, excludedConcepts),

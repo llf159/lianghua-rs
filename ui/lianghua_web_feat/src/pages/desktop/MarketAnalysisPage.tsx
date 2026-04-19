@@ -10,7 +10,7 @@ import DetailsLink from "../../shared/DetailsLink";
 import { splitTsCode } from "../../shared/stockCode";
 import { filterBoardItems, isStBoard, useConceptExclusions } from "../../shared/conceptExclusions";
 import { readStoredSourcePath } from "../../shared/storage";
-import { STOCK_PICK_BOARD_OPTIONS } from "../../share/stockPickShared";
+import { STOCK_PICK_BOARD_OPTIONS } from "../../shared/stockPickShared";
 import "./css/SceneLayerBacktestPage.css";
 
 function formatDateLabel(value?: string | null) {
@@ -403,7 +403,7 @@ export default function MarketAnalysisPage() {
                     </ol>
                   </div>
                   <div className="scene-layer-market-list">
-                    <h4>板块榜</h4>
+                    <h4>行业榜</h4>
                     <ol>
                       {result.daily.industry_top.map((item) => (
                         <li key={`daily-board-${item.name}`}>

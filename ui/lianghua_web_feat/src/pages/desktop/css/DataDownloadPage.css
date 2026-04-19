@@ -648,6 +648,10 @@
   gap: 10px 12px;
 }
 
+.data-download-indicator-form-grid-stacked {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .data-download-indicator-editor {
   box-sizing: border-box;
   width: 100%;
@@ -767,6 +771,14 @@
   .data-download-modal {
     padding: 14px;
     border-radius: 14px;
+  }
+
+  .data-download-indicator-form-grid-stacked {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .data-download-indicator-form-grid-stacked .data-download-field-span-2 {
+    grid-column: span 1;
   }
 
   .data-download-indicator-editor {

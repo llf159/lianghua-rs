@@ -15,7 +15,7 @@ import {
 import {
   STOCK_PICK_BOARD_OPTIONS,
   buildBoardFilterOptions,
-} from "../../share/stockPickShared";
+} from "../../shared/stockPickShared";
 import DetailsLink from "../../shared/DetailsLink";
 import {
   TableSortButton,
@@ -36,6 +36,8 @@ const INTRADAY_MONITOR_PAGE_STATE_KEY = "lh_intraday_monitor_realtime_page_v2";
 const INTRADAY_MONITOR_TEMPLATE_STORAGE_KEY =
   "lh_intraday_monitor_realtime_templates_v1";
 const REFRESH_BATCH_SIZE = 50;
+const REFRESH_SCOPE_ALL = "__all__";
+const REFRESH_SCOPE_TOTAL = "__total__";
 
 const TOTAL_MODE_COLUMNS = [
   "rank",
@@ -399,6 +401,7 @@ export default function IntradayMonitorRealtimePage() {
   const [loadingAction, setLoadingAction] = useState<
     "读取" | "刷新实时" | null
   >(null);
+  const [refreshingScope, setRefreshingScope] = useState<string | null>(null);
   const [dateOptionsLoading, setDateOptionsLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -466,6 +469,22 @@ export default function IntradayMonitorRealtimePage() {
     () => rankModeConfigs.some((item) => item.mode === "total"),
     [rankModeConfigs],
   );
+  const isRefreshingAll =
+    loading &&
+    loadingAction === "刷新实时" &&
+    refreshingScope === REFRESH_SCOPE_ALL;
+  const isRefreshingTotal =
+    loading &&
+    loadingAction === "刷新实时" &&
+    refreshingScope === REFRESH_SCOPE_TOTAL;
+
+  function isRefreshingScene(sceneKey: string) {
+    return (
+      loading &&
+      loadingAction === "刷新实时" &&
+      refreshingScope === `scene:${sceneKey}`
+    );
+  }
 
   useEffect(() => {
     void ensureManagedSourcePath()
@@ -744,6 +763,7 @@ export default function IntradayMonitorRealtimePage() {
 
     setLoading(true);
     setLoadingAction(actionLabel);
+    setRefreshingScope(actionLabel === "刷新实时" ? REFRESH_SCOPE_ALL : null);
     setError("");
 
     const requestRankDate =
@@ -853,6 +873,7 @@ export default function IntradayMonitorRealtimePage() {
     } finally {
       setLoading(false);
       setLoadingAction(null);
+      setRefreshingScope(null);
     }
   }
 
@@ -867,6 +888,9 @@ export default function IntradayMonitorRealtimePage() {
 
     setLoading(true);
     setLoadingAction("刷新实时");
+    setRefreshingScope(
+      groupKey === "total" ? REFRESH_SCOPE_TOTAL : `scene:${groupKey}`,
+    );
     setError("");
     try {
       const refreshedRows: IntradayMonitorRow[] = [];
@@ -904,6 +928,7 @@ export default function IntradayMonitorRealtimePage() {
     } finally {
       setLoading(false);
       setLoadingAction(null);
+      setRefreshingScope(null);
     }
   }
 
@@ -1150,9 +1175,7 @@ export default function IntradayMonitorRealtimePage() {
               rows.length === 0
             }
           >
-            {loading && loadingAction === "刷新实时"
-              ? "刷新中..."
-              : "全部刷新实时"}
+            {isRefreshingAll ? "刷新中..." : "全部刷新实时"}
           </button>
         </div>
 
@@ -1309,7 +1332,13 @@ export default function IntradayMonitorRealtimePage() {
         ) : (
           <div className="intraday-monitor-result-sections">
             {rankModeConfigs.some((item) => item.mode === "total") ? (
-              <section className="intraday-monitor-result-block">
+              <section
+                className={
+                  isRefreshingTotal
+                    ? "intraday-monitor-result-block is-refreshing"
+                    : "intraday-monitor-result-block"
+                }
+              >
                 <header className="intraday-monitor-scene-head">
                   <h4>总榜</h4>
                   <button
@@ -1323,9 +1352,7 @@ export default function IntradayMonitorRealtimePage() {
                       totalModeRows.length === 0
                     }
                   >
-                    {loading && loadingAction === "刷新实时"
-                      ? "刷新中..."
-                      : "刷新总榜实时"}
+                    {isRefreshingTotal ? "刷新中..." : "刷新总榜实时"}
                   </button>
                 </header>
                 {sortedTotalRows.length === 0 ? (
@@ -1348,7 +1375,11 @@ export default function IntradayMonitorRealtimePage() {
                     {groupedSceneRows.map((group) => (
                       <section
                         key={group.key}
-                        className="intraday-monitor-scene-block"
+                        className={
+                          isRefreshingScene(group.key)
+                            ? "intraday-monitor-scene-block is-refreshing"
+                            : "intraday-monitor-scene-block"
+                        }
                       >
                         <header className="intraday-monitor-scene-head">
                           <h4>{group.title}</h4>
@@ -1362,7 +1393,7 @@ export default function IntradayMonitorRealtimePage() {
                               sourcePathTrimmed === ""
                             }
                           >
-                            {loading && loadingAction === "刷新实时"
+                            {isRefreshingScene(group.key)
                               ? "刷新中..."
                               : "刷新该Scene实时"}
                           </button>
