@@ -1,6 +1,7 @@
 const CHART_MAIN_WIDTH_RATIO_STORAGE_KEY = 'lh_chart_main_width_ratio_v1'
 const CHART_INDICATOR_WIDTH_RATIO_STORAGE_KEY = 'lh_chart_indicator_width_ratio_v1'
 const CHART_RANK_MARKER_THRESHOLD_STORAGE_KEY = 'lh_chart_rank_marker_threshold_v1'
+const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_STORAGE_KEY = 'lh_details_nav_long_press_interval_seconds_v1'
 
 export const CHART_MAIN_WIDTH_RATIO_DEFAULT = 0.36
 export const CHART_MAIN_WIDTH_RATIO_MIN = 0.1
@@ -11,6 +12,9 @@ export const CHART_INDICATOR_WIDTH_RATIO_MAX = 1.2
 export const CHART_RANK_MARKER_THRESHOLD_DEFAULT = 100
 export const CHART_RANK_MARKER_THRESHOLD_MIN = 1
 export const CHART_RANK_MARKER_THRESHOLD_MAX = 5000
+export const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_DEFAULT = 1
+export const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MIN = 0.2
+export const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MAX = 10
 
 export function clampChartMainWidthRatio(value: number) {
   if (!Number.isFinite(value)) {
@@ -133,6 +137,50 @@ export function writeStoredChartRankMarkerThreshold(nextValue: number) {
   const normalizedValue = clampChartRankMarkerThreshold(nextValue)
   window.localStorage.setItem(
     CHART_RANK_MARKER_THRESHOLD_STORAGE_KEY,
+    normalizedValue.toString(),
+  )
+}
+
+export function clampDetailsNavLongPressIntervalSeconds(value: number) {
+  if (!Number.isFinite(value)) {
+    return DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_DEFAULT
+  }
+
+  const clampedValue = Math.min(
+    DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MAX,
+    Math.max(DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MIN, value),
+  )
+  return Number(clampedValue.toFixed(2))
+}
+
+export function readStoredDetailsNavLongPressIntervalSeconds() {
+  if (typeof window === 'undefined') {
+    return DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_DEFAULT
+  }
+
+  const rawValue = window.localStorage.getItem(
+    DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_STORAGE_KEY,
+  )
+  if (!rawValue) {
+    return DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_DEFAULT
+  }
+
+  const parsedValue = Number(rawValue)
+  if (!Number.isFinite(parsedValue)) {
+    return DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_DEFAULT
+  }
+
+  return clampDetailsNavLongPressIntervalSeconds(parsedValue)
+}
+
+export function writeStoredDetailsNavLongPressIntervalSeconds(nextValue: number) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  const normalizedValue = clampDetailsNavLongPressIntervalSeconds(nextValue)
+  window.localStorage.setItem(
+    DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_STORAGE_KEY,
     normalizedValue.toString(),
   )
 }

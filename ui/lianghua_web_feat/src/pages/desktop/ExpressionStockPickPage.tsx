@@ -126,6 +126,7 @@ export default function ExpressionStockPickPage() {
   const [copyWithSuffix, setCopyWithSuffix] = useState(true)
   const [copySeparator, setCopySeparator] = useState<CopySeparatorOption>(',')
   const [copyNotice, setCopyNotice] = useState('')
+  const [copySucceeded, setCopySucceeded] = useState(false)
   const boardOptions = useMemo(
     () => buildBoardFilterOptions(STOCK_PICK_BOARD_OPTIONS, excludeStBoard),
     [excludeStBoard],
@@ -170,6 +171,15 @@ export default function ExpressionStockPickPage() {
       } satisfies PersistedExpressionStockPickResultState,
     )
   }, [rows, resolvedStartDate, resolvedReferenceTradeDate])
+
+  useEffect(() => {
+    if (!copySucceeded) {
+      return
+    }
+
+    const timer = window.setTimeout(() => setCopySucceeded(false), 1400)
+    return () => window.clearTimeout(timer)
+  }, [copySucceeded])
 
   async function onRun() {
     if (!sourcePath.trim()) {
@@ -216,6 +226,7 @@ export default function ExpressionStockPickPage() {
       })
 
     if (normalizedCodes.length === 0) {
+      setCopySucceeded(false)
       setCopyNotice('当前没有可复制的股票代码。')
       return
     }
@@ -238,8 +249,10 @@ export default function ExpressionStockPickPage() {
         throw new Error('当前环境不支持复制')
       }
 
-      setCopyNotice(`已复制 ${normalizedCodes.length} 个代码。`)
+      setCopySucceeded(true)
+      setCopyNotice('')
     } catch (copyError) {
+      setCopySucceeded(false)
       setCopyNotice(`复制失败: ${String(copyError)}`)
     }
   }
@@ -374,8 +387,12 @@ export default function ExpressionStockPickPage() {
               </select>
             </label>
           </div>
-          <button type="button" className="stock-pick-chip-btn" onClick={() => void onCopyStockCodes()}>
-            复制股票
+          <button
+            type="button"
+            className={copySucceeded ? 'stock-pick-chip-btn is-active' : 'stock-pick-chip-btn'}
+            onClick={() => void onCopyStockCodes()}
+          >
+            {copySucceeded ? '已复制' : '复制股票'}
           </button>
         </div>
       </div>

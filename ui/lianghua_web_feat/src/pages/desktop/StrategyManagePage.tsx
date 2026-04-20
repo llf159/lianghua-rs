@@ -93,7 +93,7 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     ],
   },
   {
-    title: '7. 历史数值列自动注入',
+    title: '7. 指标列自动注入',
     note: 'DataReader 会把 stock_data 里实际存在的数值列自动转成大写变量；这通常是行情基础列之外的指标列，不等于 stock_list.csv 里的市值字段都会天然出现在这里。',
     fields: [
       { name: '已落库指标列 / 自定义数值列', scope: '按数据源实际情况', description: '只有已经写进 stock_data 的数值列才可直接引用，变量名会自动转成大写。', example: 'MY_IND > MA(MY_IND, 5)' },
@@ -104,6 +104,7 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     note: '下面这些字段只在“实时监控”页面的模板表达式中可用，策略打分、选股或统计表达式里不要直接写。',
     fields: [
       { name: 'REALTIME_CHANGE_OPEN_PCT', scope: '实时监控', description: '当前价相对今开涨跌幅，单位是百分比。', example: 'REALTIME_CHANGE_OPEN_PCT >= 2' },
+      { name: 'REALTIME_FALL_FROM_HIGH_PCT', scope: '实时监控', description: '当前价相对于今日高点的跌幅，单位是百分比；计算口径为 max((今日高点 - 当前价) / 今日高点, 0) × 100%。', example: 'REALTIME_FALL_FROM_HIGH_PCT <= 1.5' },
       { name: 'REALTIME_VOL_RATIO', scope: '实时监控', description: '当前实时累计成交量 ÷ stock_data 中最新历史日的 vol，通常可理解为“相对上一交易日日成交量”的倍数。', example: 'REALTIME_VOL_RATIO >= 2' },
       { name: 'VOL_RATIO', scope: '实时监控', description: 'REALTIME_VOL_RATIO 的别名，基准相同。', example: 'VOL_RATIO >= 2' },
     ],

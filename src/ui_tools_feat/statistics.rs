@@ -178,6 +178,7 @@ pub struct SceneLayerSceneSummary {
     pub ic_mean: Option<f64>,
     pub ic_std: Option<f64>,
     pub icir: Option<f64>,
+    pub ic_t_value: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -197,6 +198,7 @@ pub struct SceneLayerBacktestData {
     pub ic_mean: Option<f64>,
     pub ic_std: Option<f64>,
     pub icir: Option<f64>,
+    pub ic_t_value: Option<f64>,
     pub is_all_scenes: bool,
     pub all_scene_summaries: Vec<SceneLayerSceneSummary>,
 }
@@ -228,6 +230,7 @@ pub struct RuleLayerRuleSummary {
     pub ic_mean: Option<f64>,
     pub ic_std: Option<f64>,
     pub icir: Option<f64>,
+    pub ic_t_value: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -248,6 +251,7 @@ pub struct RuleLayerBacktestData {
     pub ic_mean: Option<f64>,
     pub ic_std: Option<f64>,
     pub icir: Option<f64>,
+    pub ic_t_value: Option<f64>,
     pub is_all_rules: bool,
     pub all_rule_summaries: Vec<RuleLayerRuleSummary>,
 }
@@ -2132,6 +2136,7 @@ fn build_rule_backtest_payload(
         ic_mean: metrics.ic_mean,
         ic_std: metrics.ic_std,
         icir: metrics.icir,
+        ic_t_value: metrics.ic_t_value,
         is_all_rules: false,
         all_rule_summaries: Vec::new(),
     }
@@ -3593,6 +3598,7 @@ fn aggregate_all_rule_summary_metrics(
     Option<f64>,
     Option<f64>,
     Option<f64>,
+    Option<f64>,
 ) {
     let avg_residual_mean = weighted_rule_summary_metric(summaries, |item| item.avg_residual_mean);
     let spread_mean = weighted_rule_summary_metric(summaries, |item| item.spread_mean);
@@ -3602,8 +3608,15 @@ fn aggregate_all_rule_summary_metrics(
         (Some(mean), Some(std)) if std.abs() >= RULE_BACKTEST_EPS => Some(mean / std),
         _ => weighted_rule_summary_metric(summaries, |item| item.icir),
     };
+    let total_points = summaries.iter().map(|item| item.point_count).sum::<usize>();
+    let ic_t_value = match (ic_mean, ic_std) {
+        (Some(mean), Some(std)) if total_points > 1 && std.abs() >= RULE_BACKTEST_EPS => {
+            Some(mean * (total_points as f64).sqrt() / std)
+        }
+        _ => weighted_rule_summary_metric(summaries, |item| item.ic_t_value),
+    };
 
-    (avg_residual_mean, spread_mean, ic_mean, ic_std, icir)
+    (avg_residual_mean, spread_mean, ic_mean, ic_std, icir, ic_t_value)
 }
 
 fn run_scene_layer_backtest_core(
@@ -3671,6 +3684,7 @@ fn run_scene_layer_backtest_core(
             ic_mean: metrics.ic_mean,
             ic_std: metrics.ic_std,
             icir: metrics.icir,
+            ic_t_value: metrics.ic_t_value,
             is_all_scenes: false,
             all_scene_summaries: Vec::new(),
         });
@@ -3700,6 +3714,7 @@ fn run_scene_layer_backtest_core(
             ic_mean: metrics.ic_mean,
             ic_std: metrics.ic_std,
             icir: metrics.icir,
+            ic_t_value: metrics.ic_t_value,
         });
     }
 
@@ -3728,6 +3743,7 @@ fn run_scene_layer_backtest_core(
         ic_mean: None,
         ic_std: None,
         icir: None,
+        ic_t_value: None,
         is_all_scenes: true,
         all_scene_summaries,
     })
@@ -3792,6 +3808,7 @@ fn run_rule_layer_backtest_core(
             ic_mean: metrics.ic_mean,
             ic_std: metrics.ic_std,
             icir: metrics.icir,
+            ic_t_value: metrics.ic_t_value,
             is_all_rules: false,
             all_rule_summaries: Vec::new(),
         });
@@ -3822,6 +3839,7 @@ fn run_rule_layer_backtest_core(
             ic_mean: metrics.ic_mean,
             ic_std: metrics.ic_std,
             icir: metrics.icir,
+            ic_t_value: metrics.ic_t_value,
         });
     }
 
@@ -3834,7 +3852,7 @@ fn run_rule_layer_backtest_core(
             .then_with(|| a.rule_name.cmp(&b.rule_name))
     });
 
-    let (avg_residual_mean, spread_mean, ic_mean, ic_std, icir) =
+    let (avg_residual_mean, spread_mean, ic_mean, ic_std, icir, ic_t_value) =
         aggregate_all_rule_summary_metrics(&all_rule_summaries);
 
     Ok(RuleLayerBacktestData {
@@ -3854,6 +3872,7 @@ fn run_rule_layer_backtest_core(
         ic_mean,
         ic_std,
         icir,
+        ic_t_value,
         is_all_rules: true,
         all_rule_summaries,
     })

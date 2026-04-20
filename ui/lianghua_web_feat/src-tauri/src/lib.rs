@@ -21,9 +21,11 @@ use lianghua_rs::ui_tools_feat::{
     },
     intraday_monitor::{
         IntradayMonitorPageData, IntradayMonitorRankModeConfig, IntradayMonitorRow,
-        IntradayMonitorTemplate,
+        IntradayMonitorTemplate, IntradayMonitorTemplateValidationData,
         get_intraday_monitor_page as core_get_intraday_monitor_page,
+        refresh_intraday_monitor_template_tags as core_refresh_intraday_monitor_template_tags,
         refresh_intraday_monitor_realtime as core_refresh_intraday_monitor_realtime,
+        validate_intraday_monitor_template_expression as core_validate_intraday_monitor_template_expression,
     },
     overview::{
         SceneOverviewPageData,
@@ -393,6 +395,23 @@ fn refresh_intraday_monitor_realtime(
     rank_mode_configs: Vec<IntradayMonitorRankModeConfig>,
 ) -> Result<IntradayMonitorPageData, String> {
     core_refresh_intraday_monitor_realtime(&source_path, rows, templates, rank_mode_configs)
+}
+
+#[tauri::command]
+fn refresh_intraday_monitor_template_tags(
+    source_path: String,
+    rows: Vec<IntradayMonitorRow>,
+    templates: Vec<IntradayMonitorTemplate>,
+    rank_mode_configs: Vec<IntradayMonitorRankModeConfig>,
+) -> Result<IntradayMonitorPageData, String> {
+    core_refresh_intraday_monitor_template_tags(&source_path, rows, templates, rank_mode_configs)
+}
+
+#[tauri::command]
+fn validate_intraday_monitor_template_expression(
+    expression: String,
+) -> Result<IntradayMonitorTemplateValidationData, String> {
+    core_validate_intraday_monitor_template_expression(expression)
 }
 
 #[tauri::command]
@@ -1005,6 +1024,8 @@ pub fn run() {
             get_scene_rank_overview_page,
             get_intraday_monitor_page,
             refresh_intraday_monitor_realtime,
+            refresh_intraday_monitor_template_tags,
+            validate_intraday_monitor_template_expression,
             get_stock_detail_page,
             get_stock_detail_strategy_snapshot,
             get_stock_detail_realtime,

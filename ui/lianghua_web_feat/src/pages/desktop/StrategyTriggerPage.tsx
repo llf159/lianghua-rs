@@ -870,10 +870,6 @@ function StrategyOverviewDeltaChart({
     return () => window.cancelAnimationFrame(frameId);
   }, [geometry]);
 
-  useEffect(() => {
-    setFocus(null);
-  }, [geometry]);
-
   if (!geometry) {
     return (
       <div className="strategy-trigger-overview-mini-chart strategy-trigger-overview-mini-chart-empty">
@@ -921,6 +917,7 @@ function StrategyOverviewDeltaChart({
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
+      // Pointer capture can fail on unsupported devices/browsers.
     }
   }
 
@@ -930,6 +927,7 @@ function StrategyOverviewDeltaChart({
         event.currentTarget.releasePointerCapture(event.pointerId);
       }
     } catch {
+      // Pointer release should not block interaction flow.
     }
   }
 

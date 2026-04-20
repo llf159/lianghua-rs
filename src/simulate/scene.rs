@@ -108,6 +108,7 @@ pub struct SceneLayerMetrics {
     pub ic_mean: Option<f64>,
     pub ic_std: Option<f64>,
     pub icir: Option<f64>,
+    pub ic_t_value: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -328,6 +329,7 @@ pub fn calc_scene_layer_metrics(
         (Some(m), Some(s)) if s.abs() >= EPS => Some(m / s),
         _ => None,
     };
+    let ic_t_value = calc_t_value(ic_mean, ic_std, ic_values.len());
 
     Ok(SceneLayerMetrics {
         points,
@@ -335,6 +337,7 @@ pub fn calc_scene_layer_metrics(
         ic_mean,
         ic_std,
         icir,
+        ic_t_value,
     })
 }
 
@@ -345,6 +348,7 @@ fn empty_metrics() -> SceneLayerMetrics {
         ic_mean: None,
         ic_std: None,
         icir: None,
+        ic_t_value: None,
     }
 }
 
@@ -831,6 +835,15 @@ fn sample_std(values: &[f64]) -> Option<f64> {
         .sum::<f64>()
         / (values.len() as f64 - 1.0);
     Some(var.sqrt())
+}
+
+fn calc_t_value(mean: Option<f64>, std: Option<f64>, sample_count: usize) -> Option<f64> {
+    match (mean, std) {
+        (Some(m), Some(s)) if sample_count > 1 && s.abs() >= EPS => {
+            Some(m * (sample_count as f64).sqrt() / s)
+        }
+        _ => None,
+    }
 }
 
 fn spearman_corr(x: &[f64], y: &[f64]) -> Option<f64> {

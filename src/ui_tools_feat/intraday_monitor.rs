@@ -55,8 +55,15 @@ pub struct IntradayMonitorRow {
     pub total_mv_yi: Option<f64>,
     pub concept: String,
     pub realtime_price: Option<f64>,
+    pub realtime_open: Option<f64>,
+    pub realtime_high: Option<f64>,
+    pub realtime_low: Option<f64>,
+    pub realtime_pre_close: Option<f64>,
+    pub realtime_vol: Option<f64>,
+    pub realtime_amount: Option<f64>,
     pub realtime_change_pct: Option<f64>,
     pub realtime_change_open_pct: Option<f64>,
+    pub realtime_fall_from_high_pct: Option<f64>,
     pub realtime_vol_ratio: Option<f64>,
     pub template_tag_text: Option<String>,
     pub template_tag_tone: Option<String>,
@@ -70,6 +77,14 @@ pub struct IntradayMonitorPageData {
     pub resolved_rank_date: Option<String>,
     pub scene_options: Option<Vec<String>>,
     pub refreshed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct IntradayMonitorTemplateValidationData {
+    pub normalized_expression: String,
+    pub warmup_need: usize,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -339,6 +354,28 @@ fn compile_intraday_templates(
     out
 }
 
+pub fn validate_intraday_monitor_template_expression(
+    expression: String,
+) -> Result<IntradayMonitorTemplateValidationData, String> {
+    let normalized = expression.trim().to_string();
+    if normalized.is_empty() {
+        return Err("表达式不能为空".to_string());
+    }
+
+    let tokens = lex_all(&normalized);
+    let mut parser = Parser::new(tokens);
+    let ast = parser
+        .parse_main()
+        .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
+    let warmup_need = estimate_intraday_template_warmup(&ast)?;
+
+    Ok(IntradayMonitorTemplateValidationData {
+        normalized_expression: normalized,
+        warmup_need,
+        message: "表达式可用于实时模板".to_string(),
+    })
+}
+
 fn resolve_template_id_for_row<'a>(
     row: &IntradayMonitorRow,
     rank_mode_configs: &'a [IntradayMonitorRankModeConfig],
@@ -482,6 +519,10 @@ fn attach_runtime_extra_series(
         row_data,
         &[
             ("REALTIME_CHANGE_OPEN_PCT", row.realtime_change_open_pct),
+            (
+                "REALTIME_FALL_FROM_HIGH_PCT",
+                row.realtime_fall_from_high_pct,
+            ),
             ("REALTIME_VOL_RATIO", row.realtime_vol_ratio),
             ("VOL_RATIO", row.realtime_vol_ratio),
         ],
@@ -630,6 +671,31 @@ fn apply_intraday_template_tags(
     }
 }
 
+fn build_quote_from_row(row: &IntradayMonitorRow) -> Option<SinaQuote> {
+    let price = row.realtime_price?;
+    let open = row.realtime_open?;
+    let high = row.realtime_high?;
+    let low = row.realtime_low?;
+    let pre_close = row.realtime_pre_close?;
+    let vol = row.realtime_vol?;
+    let amount = row.realtime_amount?;
+
+    Some(SinaQuote {
+        date: row.trade_date.clone().unwrap_or_default(),
+        time: "00:00:00".to_string(),
+        ts_code: row.ts_code.clone(),
+        name: row.name.clone(),
+        open,
+        high,
+        low,
+        pre_close,
+        price,
+        vol,
+        amount,
+        change_pct: row.realtime_change_pct,
+    })
+}
+
 pub fn refresh_intraday_monitor_realtime(
     source_path: &str,
     rows: Vec<IntradayMonitorRow>,
@@ -657,9 +723,20 @@ pub fn refresh_intraday_monitor_realtime(
     for row in &mut next_rows {
         if let Some(quote) = quote_map.get(&row.ts_code) {
             row.realtime_price = Some(quote.price);
+            row.realtime_open = Some(quote.open);
+            row.realtime_high = Some(quote.high);
+            row.realtime_low = Some(quote.low);
+            row.realtime_pre_close = Some(quote.pre_close);
+            row.realtime_vol = Some(quote.vol);
+            row.realtime_amount = Some(quote.amount);
             row.realtime_change_pct = quote.change_pct;
             row.realtime_change_open_pct = if quote.open > 0.0 {
                 Some((quote.price / quote.open - 1.0) * 100.0)
+            } else {
+                None
+            };
+            row.realtime_fall_from_high_pct = if quote.high > 0.0 {
+                Some(((quote.high - quote.price) / quote.high).max(0.0) * 100.0)
             } else {
                 None
             };
@@ -670,8 +747,15 @@ pub fn refresh_intraday_monitor_realtime(
                 .map(|value| quote.vol / value);
         } else {
             row.realtime_price = None;
+            row.realtime_open = None;
+            row.realtime_high = None;
+            row.realtime_low = None;
+            row.realtime_pre_close = None;
+            row.realtime_vol = None;
+            row.realtime_amount = None;
             row.realtime_change_pct = None;
             row.realtime_change_open_pct = None;
+            row.realtime_fall_from_high_pct = None;
             row.realtime_vol_ratio = None;
         }
     }
@@ -690,6 +774,46 @@ pub fn refresh_intraday_monitor_realtime(
         resolved_rank_date: None,
         scene_options: None,
         refreshed_at: fetch_meta.refreshed_at,
+    })
+}
+
+pub fn refresh_intraday_monitor_template_tags(
+    source_path: &str,
+    rows: Vec<IntradayMonitorRow>,
+    templates: Vec<IntradayMonitorTemplate>,
+    rank_mode_configs: Vec<IntradayMonitorRankModeConfig>,
+) -> Result<IntradayMonitorPageData, String> {
+    if rows.is_empty() {
+        return Ok(IntradayMonitorPageData {
+            rows,
+            rank_date_options: None,
+            resolved_rank_date: None,
+            scene_options: None,
+            refreshed_at: None,
+        });
+    }
+
+    let mut next_rows = rows;
+    let quote_map = next_rows
+        .iter()
+        .filter_map(build_quote_from_row)
+        .map(|quote| (quote.ts_code.clone(), quote))
+        .collect::<HashMap<_, _>>();
+
+    apply_intraday_template_tags(
+        source_path,
+        &mut next_rows,
+        &quote_map,
+        &templates,
+        &rank_mode_configs,
+    );
+
+    Ok(IntradayMonitorPageData {
+        rows: next_rows,
+        rank_date_options: None,
+        resolved_rank_date: None,
+        scene_options: None,
+        refreshed_at: None,
     })
 }
 
@@ -811,8 +935,15 @@ pub fn get_intraday_monitor_page(
                     total_mv_yi: total_mv_map.get(&ts_code).copied(),
                     concept: concepts_map.get(&ts_code).cloned().unwrap_or_default(),
                     realtime_price: None,
+                    realtime_open: None,
+                    realtime_high: None,
+                    realtime_low: None,
+                    realtime_pre_close: None,
+                    realtime_vol: None,
+                    realtime_amount: None,
                     realtime_change_pct: None,
                     realtime_change_open_pct: None,
+                    realtime_fall_from_high_pct: None,
                     realtime_vol_ratio: None,
                     template_tag_text: None,
                     template_tag_tone: None,
@@ -957,8 +1088,15 @@ pub fn get_intraday_monitor_page(
                     total_mv_yi: total_mv_map.get(&ts_code).copied(),
                     concept: concepts_map.get(&ts_code).cloned().unwrap_or_default(),
                     realtime_price: None,
+                    realtime_open: None,
+                    realtime_high: None,
+                    realtime_low: None,
+                    realtime_pre_close: None,
+                    realtime_vol: None,
+                    realtime_amount: None,
                     realtime_change_pct: None,
                     realtime_change_open_pct: None,
+                    realtime_fall_from_high_pct: None,
                     realtime_vol_ratio: None,
                     template_tag_text: None,
                     template_tag_tone: None,

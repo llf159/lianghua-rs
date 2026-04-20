@@ -248,6 +248,7 @@ export default function DataImportPage() {
         }
         reconcileStatus(nextStatus)
       } catch {
+        // Ignore refresh failures when tab visibility changes.
       }
     }
 

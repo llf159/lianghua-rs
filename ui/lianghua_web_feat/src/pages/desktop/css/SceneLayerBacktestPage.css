@@ -392,6 +392,13 @@
   font-variant-numeric: tabular-nums;
 }
 
+.scene-layer-metric-hit {
+  color: #b45309;
+  background: #fff7ed;
+  font-weight: 700;
+  border-radius: 6px;
+}
+
 .scene-layer-validation-unknown-block {
   margin-top: 12px;
   border: 1px dashed #d7e1ed;

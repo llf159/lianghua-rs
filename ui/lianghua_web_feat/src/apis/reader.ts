@@ -98,8 +98,15 @@ export type IntradayMonitorRow = {
   total_mv_yi?: number | null;
   concept?: string;
   realtime_price?: number | null;
+  realtime_open?: number | null;
+  realtime_high?: number | null;
+  realtime_low?: number | null;
+  realtime_pre_close?: number | null;
+  realtime_vol?: number | null;
+  realtime_amount?: number | null;
   realtime_change_pct?: number | null;
   realtime_change_open_pct?: number | null;
+  realtime_fall_from_high_pct?: number | null;
   realtime_vol_ratio?: number | null;
   template_tag_text?: string | null;
   template_tag_tone?: string | null;
@@ -145,6 +152,12 @@ export type IntradayRealtimeRefreshQuery = {
   rankModeConfigs: IntradayMonitorRankModeConfig[];
 };
 
+export type IntradayMonitorTemplateValidationData = {
+  normalizedExpression: string;
+  warmupNeed: number;
+  message: string;
+};
+
 export type StockLookupRow = {
   ts_code: string;
   name: string;
@@ -181,6 +194,24 @@ export async function refreshIntradayMonitorRealtime(
   return invoke<IntradayMonitorPageData>(
     "refresh_intraday_monitor_realtime",
     query,
+  );
+}
+
+export async function refreshIntradayMonitorTemplateTags(
+  query: IntradayRealtimeRefreshQuery,
+) {
+  return invoke<IntradayMonitorPageData>(
+    "refresh_intraday_monitor_template_tags",
+    query,
+  );
+}
+
+export async function validateIntradayMonitorTemplateExpression(
+  expression: string,
+) {
+  return invoke<IntradayMonitorTemplateValidationData>(
+    "validate_intraday_monitor_template_expression",
+    { expression },
   );
 }
 

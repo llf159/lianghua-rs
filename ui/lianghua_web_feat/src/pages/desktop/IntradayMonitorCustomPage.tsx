@@ -2,10 +2,12 @@ import { useEffect, useMemo, useState } from 'react'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import {
   refreshIntradayMonitorRealtime,
+  refreshIntradayMonitorTemplateTags,
   type IntradayMonitorRankModeConfig,
   type IntradayMonitorRow,
   type IntradayMonitorTemplate,
 } from '../../apis/reader'
+import IntradayTemplateManagerModal from './components/IntradayTemplateManagerModal'
 import DetailsLink from '../../shared/DetailsLink'
 import { normalizeTsCode } from '../../shared/stockCode'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
@@ -19,20 +21,6 @@ type PersistedCustomMonitorState = {
   selectedTemplateId: string
   rows: IntradayMonitorRow[]
   refreshedAt: string
-}
-
-function createId() {
-  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-}
-
-function createTemplate(name = '', expression = ''): IntradayMonitorTemplate {
-  return {
-    id: createId(),
-    name,
-    expression,
-  }
 }
 
 function normalizeTemplate(input: unknown): IntradayMonitorTemplate | null {
@@ -99,9 +87,6 @@ export default function IntradayMonitorCustomPage() {
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [templateModalOpen, setTemplateModalOpen] = useState(false)
-  const [draftTemplate, setDraftTemplate] = useState<IntradayMonitorTemplate>(
-    createTemplate(),
-  )
 
   const sourcePathTrimmed = sourcePath.trim()
 
@@ -247,6 +232,48 @@ export default function IntradayMonitorCustomPage() {
     }
   }
 
+  async function onRefreshTemplateTagsOnly() {
+    if (sourcePathTrimmed === '') {
+      setError('请先到“数据管理”页完成数据准备。')
+      return
+    }
+    if (rows.length === 0) {
+      setError('请先输入名单并应用。')
+      return
+    }
+
+    setLoading(true)
+    setError('')
+    setNotice('')
+    try {
+      const rankModeConfigs: IntradayMonitorRankModeConfig[] = [
+        {
+          mode: 'total',
+          sceneName: '全部',
+          templateId: selectedTemplateId,
+        },
+      ]
+      const result = await refreshIntradayMonitorTemplateTags({
+        sourcePath: sourcePathTrimmed,
+        rows,
+        templates,
+        rankModeConfigs,
+      })
+      setRows(result.rows ?? [])
+      setNotice(`仅刷新标记完成，共 ${result.rows?.length ?? 0} 只。`)
+    } catch (runError) {
+      setError(`仅刷新标记失败: ${String(runError)}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  function onTemplateRemoved(templateId: string) {
+    if (selectedTemplateId === templateId) {
+      setSelectedTemplateId('')
+    }
+  }
+
   return (
     <div className="intraday-custom-page">
       <section className="intraday-custom-card">
@@ -296,6 +323,13 @@ export default function IntradayMonitorCustomPage() {
             disabled={loading || rows.length === 0}
           >
             {loading ? '刷新中...' : '刷新实时'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void onRefreshTemplateTagsOnly()}
+            disabled={loading || rows.length === 0}
+          >
+            {loading ? '重算中...' : '仅刷新标记'}
           </button>
         </div>
 
@@ -356,86 +390,14 @@ export default function IntradayMonitorCustomPage() {
         </div>
       </section>
 
-      {templateModalOpen ? (
-        <div
-          className="intraday-custom-modal-mask"
-          onClick={() => setTemplateModalOpen(false)}
-        >
-          <div
-            className="intraday-custom-modal"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="intraday-custom-modal-head">
-              <h4>模板管理</h4>
-              <button type="button" onClick={() => setTemplateModalOpen(false)}>
-                关闭
-              </button>
-            </div>
-
-            <div className="intraday-custom-modal-form">
-              <input
-                value={draftTemplate.name}
-                onChange={(event) =>
-                  setDraftTemplate((draft) => ({
-                    ...draft,
-                    name: event.target.value,
-                  }))
-                }
-                placeholder="模板名，例如：放量突破"
-              />
-              <textarea
-                value={draftTemplate.expression}
-                onChange={(event) =>
-                  setDraftTemplate((draft) => ({
-                    ...draft,
-                    expression: event.target.value,
-                  }))
-                }
-                placeholder="示例：C > MA(C, 5) AND REALTIME_VOL_RATIO >= 2"
-                rows={4}
-              />
-              <div className="intraday-custom-actions">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const name = draftTemplate.name.trim()
-                    const expression = draftTemplate.expression.trim()
-                    if (!name || !expression) {
-                      return
-                    }
-                    setTemplates((current) => [...current, createTemplate(name, expression)])
-                    setDraftTemplate(createTemplate())
-                  }}
-                >
-                  新增模板
-                </button>
-              </div>
-            </div>
-
-            <div className="intraday-custom-modal-list">
-              {templates.length === 0 ? (
-                <div className="intraday-custom-empty-cell">暂无模板</div>
-              ) : (
-                templates.map((item) => (
-                  <div key={item.id} className="intraday-custom-modal-item">
-                    <span>{item.name} · {item.expression}</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setTemplates((current) =>
-                          current.filter((template) => template.id !== item.id),
-                        )
-                      }}
-                    >
-                      删除
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <IntradayTemplateManagerModal
+        open={templateModalOpen}
+        sourcePath={sourcePathTrimmed}
+        templates={templates}
+        onChangeTemplates={setTemplates}
+        onTemplateRemoved={onTemplateRemoved}
+        onClose={() => setTemplateModalOpen(false)}
+      />
     </div>
   )
 }

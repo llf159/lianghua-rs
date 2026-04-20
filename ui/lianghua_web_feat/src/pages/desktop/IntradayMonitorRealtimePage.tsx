@@ -3,10 +3,13 @@ import { ensureManagedSourcePath } from "../../apis/managedSource";
 import {
   intradayMonitorPage,
   refreshIntradayMonitorRealtime,
+  refreshIntradayMonitorTemplateTags,
   type IntradayMonitorRankModeConfig as RankModeConfig,
   type IntradayMonitorRow,
   type IntradayMonitorTemplate as MarkTemplate,
 } from "../../apis/reader";
+import { getStrategyManagePage } from "../../apis/strategyManage";
+import IntradayTemplateManagerModal from "./components/IntradayTemplateManagerModal";
 import {
   formatConceptText,
   isStBoard,
@@ -135,21 +138,6 @@ const COLUMN_WIDTHS: Record<VisibleColumn, number> = {
   total_mv_yi: 116,
   concept: 260,
 };
-
-function createId() {
-  return typeof crypto !== "undefined" &&
-    typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function createTemplate(name = "", expression = ""): MarkTemplate {
-  return {
-    id: createId(),
-    name,
-    expression,
-  };
-}
 
 function createRankModeConfig(
   mode: RankMode,
@@ -406,9 +394,6 @@ export default function IntradayMonitorRealtimePage() {
   const [error, setError] = useState("");
 
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
-  const [draftTemplate, setDraftTemplate] = useState<MarkTemplate>(
-    createTemplate(""),
-  );
   const boardOptions = useMemo(
     () => buildBoardFilterOptions(STOCK_PICK_BOARD_OPTIONS, excludeStBoard),
     [excludeStBoard],
@@ -566,7 +551,7 @@ export default function IntradayMonitorRealtimePage() {
     const loadFilters = async () => {
       setDateOptionsLoading(true);
       try {
-        const [totalResult, sceneResult] = await Promise.allSettled([
+        const [totalResult, sceneResult, strategyResult] = await Promise.allSettled([
           intradayMonitorPage({
             sourcePath: sourcePathTrimmed,
             rankMode: "total",
@@ -579,6 +564,7 @@ export default function IntradayMonitorRealtimePage() {
             rankDate: DEFAULT_DATE_OPTION,
             limit: 1,
           }),
+          getStrategyManagePage(sourcePathTrimmed),
         ]);
         if (cancelled) return;
 
@@ -600,9 +586,16 @@ export default function IntradayMonitorRealtimePage() {
           pickDateValue(current, mergedDateOptions),
         );
 
+        const strategySceneOptions =
+          strategyResult.status === "fulfilled"
+            ? (strategyResult.value.scenes ?? [])
+                .map((item) => item.name.trim())
+                .filter((item) => item !== "")
+            : [];
+
         const nextSceneOptions = Array.from(
           new Set(
-            (sceneData?.scene_options ?? [])
+            [...(sceneData?.scene_options ?? []), ...strategySceneOptions]
               .map((item) => item.trim())
               .filter((item) => item !== ""),
           ),
@@ -932,6 +925,58 @@ export default function IntradayMonitorRealtimePage() {
     }
   }
 
+  async function refreshTemplateTagsByGroup(groupKey: string) {
+    const targetRows =
+      groupKey === "total"
+        ? rows.filter((row) => getRowMode(row) === "total")
+        : rows.filter(
+            (row) => getRowMode(row) === "scene" && row.scene_name === groupKey,
+          );
+    if (targetRows.length === 0 || !sourcePathTrimmed) return;
+
+    setLoading(true);
+    setLoadingAction("刷新实时");
+    setRefreshingScope(
+      groupKey === "total" ? REFRESH_SCOPE_TOTAL : `scene:${groupKey}`,
+    );
+    setError("");
+    try {
+      const data = await refreshIntradayMonitorTemplateTags({
+        sourcePath: sourcePathTrimmed,
+        rows: targetRows,
+        templates,
+        rankModeConfigs,
+      });
+
+      const refreshedMap = new Map(
+        (data.rows ?? []).map((item) => [
+          `${getRowMode(item)}|${item.scene_name}|${item.ts_code}|${item.trade_date ?? ""}`,
+          item,
+        ]),
+      );
+      setRows((currentRows) =>
+        currentRows.map((item) => {
+          const key = `${getRowMode(item)}|${item.scene_name}|${item.ts_code}|${item.trade_date ?? ""}`;
+          return refreshedMap.get(key) ?? item;
+        }),
+      );
+    } catch (refreshError) {
+      setError(`仅刷新标记失败: ${String(refreshError)}`);
+    } finally {
+      setLoading(false);
+      setLoadingAction(null);
+      setRefreshingScope(null);
+    }
+  }
+
+  function onTemplateRemoved(templateId: string) {
+    setRankModeConfigs((current) =>
+      current.map((item) =>
+        item.templateId === templateId ? { ...item, templateId: "" } : item,
+      ),
+    );
+  }
+
   function renderTable(
     displayedRows: IntradayMonitorRow[],
     columns: readonly VisibleColumn[],
@@ -1249,7 +1294,6 @@ export default function IntradayMonitorRealtimePage() {
                           ),
                         );
                       }}
-                      disabled={sceneOptions.length === 0}
                     >
                       <option value="全部">全部</option>
                       {sceneOptions.map((sceneName) => (
@@ -1341,19 +1385,34 @@ export default function IntradayMonitorRealtimePage() {
               >
                 <header className="intraday-monitor-scene-head">
                   <h4>总榜</h4>
-                  <button
-                    className="intraday-monitor-refresh-btn"
-                    type="button"
-                    onClick={() => void refreshRowsByGroup("total")}
-                    disabled={
-                      loading ||
-                      dateOptionsLoading ||
-                      sourcePathTrimmed === "" ||
-                      totalModeRows.length === 0
-                    }
-                  >
-                    {isRefreshingTotal ? "刷新中..." : "刷新总榜实时"}
-                  </button>
+                  <div className="intraday-monitor-scene-head-actions">
+                    <button
+                      className="intraday-monitor-refresh-btn"
+                      type="button"
+                      onClick={() => void refreshRowsByGroup("total")}
+                      disabled={
+                        loading ||
+                        dateOptionsLoading ||
+                        sourcePathTrimmed === "" ||
+                        totalModeRows.length === 0
+                      }
+                    >
+                      {isRefreshingTotal ? "刷新中..." : "刷新总榜实时"}
+                    </button>
+                    <button
+                      className="intraday-monitor-refresh-btn"
+                      type="button"
+                      onClick={() => void refreshTemplateTagsByGroup("total")}
+                      disabled={
+                        loading ||
+                        dateOptionsLoading ||
+                        sourcePathTrimmed === "" ||
+                        totalModeRows.length === 0
+                      }
+                    >
+                      {isRefreshingTotal ? "重算中..." : "仅刷新标记"}
+                    </button>
+                  </div>
                 </header>
                 {sortedTotalRows.length === 0 ? (
                   <div className="intraday-monitor-empty">总榜暂无数据</div>
@@ -1383,20 +1442,38 @@ export default function IntradayMonitorRealtimePage() {
                       >
                         <header className="intraday-monitor-scene-head">
                           <h4>{group.title}</h4>
-                          <button
-                            className="intraday-monitor-refresh-btn"
-                            type="button"
-                            onClick={() => void refreshRowsByGroup(group.key)}
-                            disabled={
-                              loading ||
-                              dateOptionsLoading ||
-                              sourcePathTrimmed === ""
-                            }
-                          >
-                            {isRefreshingScene(group.key)
-                              ? "刷新中..."
-                              : "刷新该Scene实时"}
-                          </button>
+                          <div className="intraday-monitor-scene-head-actions">
+                            <button
+                              className="intraday-monitor-refresh-btn"
+                              type="button"
+                              onClick={() => void refreshRowsByGroup(group.key)}
+                              disabled={
+                                loading ||
+                                dateOptionsLoading ||
+                                sourcePathTrimmed === ""
+                              }
+                            >
+                              {isRefreshingScene(group.key)
+                                ? "刷新中..."
+                                : "刷新该Scene实时"}
+                            </button>
+                            <button
+                              className="intraday-monitor-refresh-btn"
+                              type="button"
+                              onClick={() =>
+                                void refreshTemplateTagsByGroup(group.key)
+                              }
+                              disabled={
+                                loading ||
+                                dateOptionsLoading ||
+                                sourcePathTrimmed === ""
+                              }
+                            >
+                              {isRefreshingScene(group.key)
+                                ? "重算中..."
+                                : "仅刷新标记"}
+                            </button>
+                          </div>
                         </header>
                         {renderTable(group.rows, SCENE_MODE_COLUMNS)}
                       </section>
@@ -1409,117 +1486,14 @@ export default function IntradayMonitorRealtimePage() {
         )}
       </section>
 
-      {templateModalOpen ? (
-        <div
-          className="intraday-monitor-modal-mask"
-          onClick={() => setTemplateModalOpen(false)}
-        >
-          <div
-            className="intraday-monitor-modal"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="intraday-monitor-modal-head">
-              <h4>模板管理（通达信表达式）</h4>
-              <button
-                type="button"
-                className="intraday-monitor-modal-close"
-                onClick={() => setTemplateModalOpen(false)}
-              >
-                关闭
-              </button>
-            </div>
-
-            <div className="intraday-monitor-modal-form intraday-monitor-template-form">
-              <div className="intraday-monitor-template-top-row">
-                <input
-                  className="intraday-monitor-template-name-input"
-                  value={draftTemplate.name}
-                  onChange={(event) =>
-                    setDraftTemplate((draft) => ({
-                      ...draft,
-                      name: event.target.value,
-                    }))
-                  }
-                  placeholder="模板名，例如：放量突破"
-                />
-                <button
-                  type="button"
-                  onClick={() => {
-                    const name = draftTemplate.name.trim();
-                    const expression = draftTemplate.expression.trim();
-                    if (!name || !expression) return;
-                    setTemplates((current) => [
-                      ...current,
-                      {
-                        id: createId(),
-                        name,
-                        expression,
-                      },
-                    ]);
-                    setDraftTemplate(createTemplate(""));
-                  }}
-                >
-                  新增模板
-                </button>
-              </div>
-              <textarea
-                value={draftTemplate.expression}
-                onChange={(event) =>
-                  setDraftTemplate((draft) => ({
-                    ...draft,
-                    expression: event.target.value,
-                  }))
-                }
-                placeholder="示例：C > MA(C, 5) AND REALTIME_VOL_RATIO >= 2"
-              />
-            </div>
-
-            <div className="intraday-monitor-table-tip intraday-monitor-template-tip-block">
-              <div>
-                常用字段：<code>C / O / H / L / V / PCT_CHG / TOTAL_MV_YI / ZHANG</code>
-              </div>
-              <div>
-                实时字段：<code>REALTIME_CHANGE_OPEN_PCT / REALTIME_VOL_RATIO / VOL_RATIO</code>
-              </div>
-              <div>
-                量比基准：<code>REALTIME_VOL_RATIO</code> = 当前实时累计成交量 ÷ 最新历史日 <code>vol</code>
-              </div>
-              <div>也可以直接引用指标配置中的指标名；改完模板后重新“刷新实时”。</div>
-            </div>
-
-            <div className="intraday-monitor-modal-list">
-              {templates.length === 0 ? (
-                <div className="intraday-monitor-empty">暂无模板</div>
-              ) : (
-                templates.map((tpl) => (
-                  <div key={tpl.id} className="intraday-monitor-modal-item">
-                    <span>
-                      {tpl.name} · {tpl.expression}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setTemplates((current) =>
-                          current.filter((item) => item.id !== tpl.id),
-                        );
-                        setRankModeConfigs((current) =>
-                          current.map((item) =>
-                            item.templateId === tpl.id
-                              ? { ...item, templateId: "" }
-                              : item,
-                          ),
-                        );
-                      }}
-                    >
-                      删除
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <IntradayTemplateManagerModal
+        open={templateModalOpen}
+        sourcePath={sourcePathTrimmed}
+        templates={templates}
+        onChangeTemplates={setTemplates}
+        onTemplateRemoved={onTemplateRemoved}
+        onClose={() => setTemplateModalOpen(false)}
+      />
     </div>
   );
 }

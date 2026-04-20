@@ -395,7 +395,9 @@ fn query_result_table_columns(conn: &Connection, table_name: &str) -> Result<Vec
 }
 
 fn result_table_has_primary_key(conn: &Connection, table_name: &str) -> Result<bool, String> {
-    let sql = format!("PRAGMA table_info('{table_name}')");
+    let sql = format!(
+        "SELECT CAST(pk AS BIGINT) AS pk FROM pragma_table_info('{table_name}')"
+    );
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| format!("准备{table_name}主键检查失败:{e}"))?;
@@ -407,7 +409,7 @@ fn result_table_has_primary_key(conn: &Connection, table_name: &str) -> Result<b
         .map_err(|e| format!("读取{table_name}主键信息失败:{e}"))?
     {
         let pk: i64 = row
-            .get(5)
+            .get(0)
             .map_err(|e| format!("读取{table_name}主键标记失败:{e}"))?;
         if pk > 0 {
             return Ok(true);

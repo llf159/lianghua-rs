@@ -149,6 +149,7 @@ export type SceneLayerSceneSummary = {
   ic_mean?: number | null
   ic_std?: number | null
   icir?: number | null
+  ic_t_value?: number | null
 }
 
 export type SceneLayerBacktestData = {
@@ -167,6 +168,7 @@ export type SceneLayerBacktestData = {
   ic_mean?: number | null
   ic_std?: number | null
   icir?: number | null
+  ic_t_value?: number | null
   is_all_scenes?: boolean
   all_scene_summaries?: SceneLayerSceneSummary[]
 }
@@ -195,6 +197,7 @@ export type RuleLayerRuleSummary = {
   ic_mean?: number | null
   ic_std?: number | null
   icir?: number | null
+  ic_t_value?: number | null
 }
 
 export type RuleLayerBacktestData = {
@@ -214,6 +217,7 @@ export type RuleLayerBacktestData = {
   ic_mean?: number | null
   ic_std?: number | null
   icir?: number | null
+  ic_t_value?: number | null
   is_all_rules?: boolean
   all_rule_summaries?: RuleLayerRuleSummary[]
 }

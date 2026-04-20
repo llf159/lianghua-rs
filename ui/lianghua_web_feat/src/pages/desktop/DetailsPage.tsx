@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type WheelEvent as ReactWheelEvent,
@@ -61,6 +62,7 @@ import {
   useConceptExclusions,
 } from "../../shared/conceptExclusions";
 import {
+  readStoredDetailsNavLongPressIntervalSeconds,
   readStoredChartRankMarkerThreshold,
   readStoredChartIndicatorWidthRatio,
   readStoredChartMainWidthRatio,
@@ -104,6 +106,7 @@ const WATERMARK_CONCEPT_LIMIT = 3;
 const MAX_STOCK_NAME_CANDIDATES = 12;
 const DETAIL_REALTIME_AUTO_REFRESH_INTERVAL_MS = 15_000;
 const DETAIL_REALTIME_LONG_PRESS_MS = 600;
+const DETAIL_NAV_LONG_PRESS_MS = 600;
 const CANDLE_UP_COLOR = "#d9485f";
 const CANDLE_DOWN_COLOR = "#178f68";
 const CANDLE_FLAT_COLOR = "#536273";
@@ -176,6 +179,7 @@ type StrategyCompareSnapshot = {
 };
 
 type DetailsPageVariant = "default" | "linked-overlay";
+type DetailsAutoNavDirection = "prev" | "next";
 
 export type DetailsPageProps = {
   variant?: DetailsPageVariant;
@@ -2527,6 +2531,10 @@ export default function DetailsPage({
   const [detailRealtimeLoading, setDetailRealtimeLoading] = useState(false);
   const [detailRealtimeNotice, setDetailRealtimeNotice] = useState("");
   const [detailRealtimePinned, setDetailRealtimePinned] = useState(false);
+  const [detailsNavAutoDirection, setDetailsNavAutoDirection] =
+    useState<DetailsAutoNavDirection | null>(null);
+  const [detailsNavLongPressIntervalSeconds, setDetailsNavLongPressIntervalSeconds] =
+    useState(() => readStoredDetailsNavLongPressIntervalSeconds());
   const [chartLayoutWidth, setChartLayoutWidth] = useState(() =>
     typeof window === "undefined" ? CHART_VIEWBOX_WIDTH : window.innerWidth,
   );
@@ -2557,6 +2565,8 @@ export default function DetailsPage({
   const detailRealtimeLongPressTimerRef = useRef<number | null>(null);
   const detailRealtimeLongPressHandledRef = useRef(false);
   const detailRealtimeAutoRefreshKeyRef = useRef("");
+  const detailsNavLongPressTimerRef = useRef<number | null>(null);
+  const detailsNavLongPressHandledRef = useRef(false);
   const strategyCompareRequestKeyRef = useRef("");
 
   const sourcePathTrimmed = sourcePath.trim();
@@ -3255,6 +3265,8 @@ export default function DetailsPage({
     currentNavigationIndex < activeNavigationItems.length - 1
       ? activeNavigationItems[currentNavigationIndex + 1]
       : null;
+  const isPrevAutoLocked = detailsNavAutoDirection === "prev";
+  const isNextAutoLocked = detailsNavAutoDirection === "next";
   const rankLookup = buildRankLookup(detailData?.overview, prevRanks);
   const rankNumberLookup = useMemo(
     () => buildRankNumberLookup(detailData?.overview, prevRanks),
@@ -3355,17 +3367,24 @@ export default function DetailsPage({
         event.key === null ||
         event.key === "lh_chart_main_width_ratio_v1" ||
         event.key === "lh_chart_indicator_width_ratio_v1" ||
-        event.key === "lh_chart_rank_marker_threshold_v1"
+        event.key === "lh_chart_rank_marker_threshold_v1" ||
+        event.key === "lh_details_nav_long_press_interval_seconds_v1"
       ) {
         setChartMainWidthRatio(readStoredChartMainWidthRatio());
         setChartIndicatorWidthRatio(readStoredChartIndicatorWidthRatio());
         setChartRankMarkerThreshold(readStoredChartRankMarkerThreshold());
+        setDetailsNavLongPressIntervalSeconds(
+          readStoredDetailsNavLongPressIntervalSeconds(),
+        );
       }
     };
 
     setChartMainWidthRatio(readStoredChartMainWidthRatio());
     setChartIndicatorWidthRatio(readStoredChartIndicatorWidthRatio());
     setChartRankMarkerThreshold(readStoredChartRankMarkerThreshold());
+    setDetailsNavLongPressIntervalSeconds(
+      readStoredDetailsNavLongPressIntervalSeconds(),
+    );
     window.addEventListener("storage", onStorage);
     return () => {
       window.removeEventListener("storage", onStorage);
@@ -3580,6 +3599,9 @@ export default function DetailsPage({
     return () => {
       if (detailRealtimeLongPressTimerRef.current !== null) {
         window.clearTimeout(detailRealtimeLongPressTimerRef.current);
+      }
+      if (detailsNavLongPressTimerRef.current !== null) {
+        window.clearTimeout(detailsNavLongPressTimerRef.current);
       }
     };
   }, []);
@@ -4110,6 +4132,122 @@ export default function DetailsPage({
     setStrategyCompareSnapshot(null);
     void readDetail(nextSourcePath, nextTradeDate, stdTsCode(nextCode));
   }
+
+  const clearDetailsNavLongPressTimer = useCallback(() => {
+    if (detailsNavLongPressTimerRef.current !== null) {
+      window.clearTimeout(detailsNavLongPressTimerRef.current);
+      detailsNavLongPressTimerRef.current = null;
+    }
+  }, []);
+
+  const toggleDetailsNavAutoDirection = useCallback(
+    (direction: DetailsAutoNavDirection) => {
+      setDetailsNavAutoDirection((current) =>
+        current === direction ? null : direction,
+      );
+      detailsNavLongPressHandledRef.current = true;
+    },
+    [],
+  );
+
+  const handleDetailsNavPointerDown = useCallback(
+    (
+      direction: DetailsAutoNavDirection,
+      event: ReactPointerEvent<HTMLButtonElement>,
+    ) => {
+      event.stopPropagation();
+
+      const targetItem =
+        direction === "prev" ? prevNavigationItem : nextNavigationItem;
+      if (!targetItem || detailLoading) {
+        return;
+      }
+
+      detailsNavLongPressHandledRef.current = false;
+      clearDetailsNavLongPressTimer();
+      detailsNavLongPressTimerRef.current = window.setTimeout(() => {
+        toggleDetailsNavAutoDirection(direction);
+      }, DETAIL_NAV_LONG_PRESS_MS);
+    },
+    [
+      clearDetailsNavLongPressTimer,
+      detailLoading,
+      nextNavigationItem,
+      prevNavigationItem,
+      toggleDetailsNavAutoDirection,
+    ],
+  );
+
+  const handleDetailsNavPointerRelease = useCallback(
+    (event: ReactPointerEvent<HTMLButtonElement>) => {
+      event.stopPropagation();
+      clearDetailsNavLongPressTimer();
+    },
+    [clearDetailsNavLongPressTimer],
+  );
+
+  const handleDetailsNavClick = useCallback(
+    (
+      direction: DetailsAutoNavDirection,
+      event: ReactMouseEvent<HTMLButtonElement>,
+    ) => {
+      if (detailsNavLongPressHandledRef.current) {
+        event.preventDefault();
+        detailsNavLongPressHandledRef.current = false;
+        return;
+      }
+
+      detailsNavLongPressHandledRef.current = false;
+      if (direction === "prev") {
+        onJumpNavigationTarget(prevNavigationItem);
+        return;
+      }
+      onJumpNavigationTarget(nextNavigationItem);
+    },
+    [nextNavigationItem, onJumpNavigationTarget, prevNavigationItem],
+  );
+
+  useEffect(() => {
+    if (!detailsNavAutoDirection) {
+      return;
+    }
+
+    const intervalMs = Math.max(
+      200,
+      Math.round(detailsNavLongPressIntervalSeconds * 1000),
+    );
+    const intervalId = window.setInterval(() => {
+      if (detailLoading) {
+        return;
+      }
+
+      if (detailsNavAutoDirection === "prev") {
+        if (!prevNavigationItem) {
+          setDetailsNavAutoDirection(null);
+          return;
+        }
+        onJumpNavigationTarget(prevNavigationItem);
+        return;
+      }
+
+      if (!nextNavigationItem) {
+        setDetailsNavAutoDirection(null);
+        return;
+      }
+      onJumpNavigationTarget(nextNavigationItem);
+    }, intervalMs);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [
+    detailLoading,
+    detailsNavAutoDirection,
+    detailsNavLongPressIntervalSeconds,
+    nextNavigationItem,
+    onJumpNavigationTarget,
+    prevNavigationItem,
+  ]);
 
   function onStrategyResizePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
     if (event.pointerType === "mouse" && event.button !== 0) {
@@ -4809,20 +4947,40 @@ export default function DetailsPage({
 
       <div className="details-float-nav">
         <button
-          className="details-float-nav-btn"
+          className={[
+            "details-float-nav-btn",
+            isPrevAutoLocked ? "is-auto-locked" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
           type="button"
           disabled={!prevNavigationItem || detailLoading}
-          onClick={() => onJumpNavigationTarget(prevNavigationItem)}
+          title={isPrevAutoLocked ? "长按锁定中，再长按可取消" : "长按可锁定自动切换"}
+          onPointerDown={(event) => handleDetailsNavPointerDown("prev", event)}
+          onPointerUp={handleDetailsNavPointerRelease}
+          onPointerCancel={handleDetailsNavPointerRelease}
+          onPointerLeave={handleDetailsNavPointerRelease}
+          onClick={(event) => handleDetailsNavClick("prev", event)}
         >
-          上一条
+          {isPrevAutoLocked ? "上一条 自动" : "上一条"}
         </button>
         <button
-          className="details-float-nav-btn"
+          className={[
+            "details-float-nav-btn",
+            isNextAutoLocked ? "is-auto-locked" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
           type="button"
           disabled={!nextNavigationItem || detailLoading}
-          onClick={() => onJumpNavigationTarget(nextNavigationItem)}
+          title={isNextAutoLocked ? "长按锁定中，再长按可取消" : "长按可锁定自动切换"}
+          onPointerDown={(event) => handleDetailsNavPointerDown("next", event)}
+          onPointerUp={handleDetailsNavPointerRelease}
+          onPointerCancel={handleDetailsNavPointerRelease}
+          onPointerLeave={handleDetailsNavPointerRelease}
+          onClick={(event) => handleDetailsNavClick("next", event)}
         >
-          下一条
+          {isNextAutoLocked ? "下一条 自动" : "下一条"}
         </button>
       </div>
     </div>

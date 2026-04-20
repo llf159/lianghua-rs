@@ -5,6 +5,8 @@ import { filterConceptItems, useConceptExclusions } from '../../shared/conceptEx
 import {
   CHART_RANK_MARKER_THRESHOLD_MAX,
   CHART_RANK_MARKER_THRESHOLD_MIN,
+  DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MAX,
+  DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MIN,
   CHART_INDICATOR_WIDTH_RATIO_MAX,
   CHART_INDICATOR_WIDTH_RATIO_MIN,
   CHART_MAIN_WIDTH_RATIO_MAX,
@@ -12,13 +14,24 @@ import {
   clampChartRankMarkerThreshold,
   clampChartIndicatorWidthRatio,
   clampChartMainWidthRatio,
+  clampDetailsNavLongPressIntervalSeconds,
   readStoredChartRankMarkerThreshold,
   readStoredChartIndicatorWidthRatio,
   readStoredChartMainWidthRatio,
+  readStoredDetailsNavLongPressIntervalSeconds,
   writeStoredChartRankMarkerThreshold,
   writeStoredChartIndicatorWidthRatio,
   writeStoredChartMainWidthRatio,
+  writeStoredDetailsNavLongPressIntervalSeconds,
 } from '../../shared/chartSettings'
+import {
+  BACKTEST_IC_THRESHOLD_DEFAULT,
+  BACKTEST_IR_THRESHOLD_DEFAULT,
+  BACKTEST_T_THRESHOLD_DEFAULT,
+  readStoredBacktestHighlightSettings,
+  type BacktestHighlightSettings,
+  writeStoredBacktestHighlightSettings,
+} from '../../shared/backtestHighlightSettings'
 import './css/DataImportPage.css'
 import './css/StockPickPage.css'
 import './css/DetailsPage.css'
@@ -26,7 +39,14 @@ import './css/DetailsPage.css'
 const AUTOCOMPLETE_LIMIT = 12
 const RATIO_INPUT_STEP = 0.01
 
-type SettingsModalType = 'concept' | 'st' | 'chart-layout' | 'rank-marker' | null
+type SettingsModalType =
+  | 'concept'
+  | 'st'
+  | 'chart-layout'
+  | 'rank-marker'
+  | 'details-nav-long-press'
+  | 'backtest-highlight'
+  | null
 
 export default function SettingsPage() {
   const {
@@ -52,6 +72,31 @@ export default function SettingsPage() {
   )
   const [chartRankMarkerSettingError, setChartRankMarkerSettingError] = useState('')
   const [chartRankMarkerSettingNotice, setChartRankMarkerSettingNotice] = useState('')
+  const [detailsNavLongPressIntervalInput, setDetailsNavLongPressIntervalInput] = useState(
+    () => String(readStoredDetailsNavLongPressIntervalSeconds()),
+  )
+  const [detailsNavLongPressSettingError, setDetailsNavLongPressSettingError] = useState('')
+  const [detailsNavLongPressSettingNotice, setDetailsNavLongPressSettingNotice] = useState('')
+  const [backtestHighlightIcThresholdInput, setBacktestHighlightIcThresholdInput] = useState(
+    () => String(readStoredBacktestHighlightSettings().icThreshold),
+  )
+  const [backtestHighlightIrThresholdInput, setBacktestHighlightIrThresholdInput] = useState(
+    () => String(readStoredBacktestHighlightSettings().irThreshold),
+  )
+  const [backtestHighlightTThresholdInput, setBacktestHighlightTThresholdInput] = useState(
+    () => String(readStoredBacktestHighlightSettings().tThreshold),
+  )
+  const [backtestHighlightIcUseAbs, setBacktestHighlightIcUseAbs] = useState(
+    () => readStoredBacktestHighlightSettings().icUseAbs,
+  )
+  const [backtestHighlightIrUseAbs, setBacktestHighlightIrUseAbs] = useState(
+    () => readStoredBacktestHighlightSettings().irUseAbs,
+  )
+  const [backtestHighlightTUseAbs, setBacktestHighlightTUseAbs] = useState(
+    () => readStoredBacktestHighlightSettings().tUseAbs,
+  )
+  const [backtestHighlightSettingError, setBacktestHighlightSettingError] = useState('')
+  const [backtestHighlightSettingNotice, setBacktestHighlightSettingNotice] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const deferredConceptKeyword = useDeferredValue(conceptKeyword)
@@ -59,6 +104,8 @@ export default function SettingsPage() {
   const isStSettingOpen = activeModal === 'st'
   const isChartLayoutSettingOpen = activeModal === 'chart-layout'
   const isRankMarkerSettingOpen = activeModal === 'rank-marker'
+  const isDetailsNavLongPressSettingOpen = activeModal === 'details-nav-long-press'
+  const isBacktestHighlightSettingOpen = activeModal === 'backtest-highlight'
 
   useEffect(() => {
     let cancelled = false
@@ -167,6 +214,8 @@ export default function SettingsPage() {
   const currentChartMainWidthRatio = readStoredChartMainWidthRatio()
   const currentChartIndicatorWidthRatio = readStoredChartIndicatorWidthRatio()
   const currentChartRankMarkerThreshold = readStoredChartRankMarkerThreshold()
+  const currentDetailsNavLongPressInterval = readStoredDetailsNavLongPressIntervalSeconds()
+  const currentBacktestHighlightSettings = readStoredBacktestHighlightSettings()
   const chartRankMarkerThresholdPreview = useMemo(() => {
     const parsedValue = Number(chartRankMarkerThresholdInput.trim())
     if (!Number.isFinite(parsedValue)) {
@@ -175,6 +224,14 @@ export default function SettingsPage() {
 
     return clampChartRankMarkerThreshold(parsedValue)
   }, [chartRankMarkerThresholdInput])
+  const detailsNavLongPressIntervalPreview = useMemo(() => {
+    const parsedValue = Number(detailsNavLongPressIntervalInput.trim())
+    if (!Number.isFinite(parsedValue)) {
+      return null
+    }
+
+    return clampDetailsNavLongPressIntervalSeconds(parsedValue)
+  }, [detailsNavLongPressIntervalInput])
 
   function openConceptEditor() {
     setActiveModal('concept')
@@ -199,6 +256,26 @@ export default function SettingsPage() {
     setChartRankMarkerThresholdInput(String(readStoredChartRankMarkerThreshold()))
     setChartRankMarkerSettingError('')
     setChartRankMarkerSettingNotice('')
+  }
+
+  function openDetailsNavLongPressSetting() {
+    setActiveModal('details-nav-long-press')
+    setDetailsNavLongPressIntervalInput(String(readStoredDetailsNavLongPressIntervalSeconds()))
+    setDetailsNavLongPressSettingError('')
+    setDetailsNavLongPressSettingNotice('')
+  }
+
+  function openBacktestHighlightSetting() {
+    const currentSettings = readStoredBacktestHighlightSettings()
+    setActiveModal('backtest-highlight')
+    setBacktestHighlightIcThresholdInput(String(currentSettings.icThreshold))
+    setBacktestHighlightIrThresholdInput(String(currentSettings.irThreshold))
+    setBacktestHighlightTThresholdInput(String(currentSettings.tThreshold))
+    setBacktestHighlightIcUseAbs(currentSettings.icUseAbs)
+    setBacktestHighlightIrUseAbs(currentSettings.irUseAbs)
+    setBacktestHighlightTUseAbs(currentSettings.tUseAbs)
+    setBacktestHighlightSettingError('')
+    setBacktestHighlightSettingNotice('')
   }
 
   function closeActiveModal() {
@@ -239,6 +316,56 @@ export default function SettingsPage() {
     setChartRankMarkerThresholdInput(String(normalizedValue))
     setChartRankMarkerSettingError('')
     setChartRankMarkerSettingNotice('已保存。详情页主图会按该排名阈值标记。')
+  }
+
+  function onSaveDetailsNavLongPressInterval() {
+    const parsedValue = Number(detailsNavLongPressIntervalInput.trim())
+    if (!Number.isFinite(parsedValue)) {
+      setDetailsNavLongPressSettingError('请输入有效秒数。')
+      setDetailsNavLongPressSettingNotice('')
+      return
+    }
+
+    const normalizedValue = clampDetailsNavLongPressIntervalSeconds(parsedValue)
+    writeStoredDetailsNavLongPressIntervalSeconds(normalizedValue)
+    setDetailsNavLongPressIntervalInput(String(normalizedValue))
+    setDetailsNavLongPressSettingError('')
+    setDetailsNavLongPressSettingNotice('已保存。详情页长按上一条/下一条会按该间隔自动切换。')
+  }
+
+  function onSaveBacktestHighlightSettings() {
+    const parsedIcThreshold = Number(backtestHighlightIcThresholdInput.trim())
+    const parsedIrThreshold = Number(backtestHighlightIrThresholdInput.trim())
+    const parsedTThreshold = Number(backtestHighlightTThresholdInput.trim())
+    if (
+      !Number.isFinite(parsedIcThreshold) ||
+      !Number.isFinite(parsedIrThreshold) ||
+      !Number.isFinite(parsedTThreshold)
+    ) {
+      setBacktestHighlightSettingError('阈值请输入有效数字。')
+      setBacktestHighlightSettingNotice('')
+      return
+    }
+    if (parsedIcThreshold < 0 || parsedIrThreshold < 0 || parsedTThreshold < 0) {
+      setBacktestHighlightSettingError('阈值必须 >= 0。')
+      setBacktestHighlightSettingNotice('')
+      return
+    }
+
+    const nextSettings: BacktestHighlightSettings = {
+      icThreshold: parsedIcThreshold,
+      icUseAbs: backtestHighlightIcUseAbs,
+      irThreshold: parsedIrThreshold,
+      irUseAbs: backtestHighlightIrUseAbs,
+      tThreshold: parsedTThreshold,
+      tUseAbs: backtestHighlightTUseAbs,
+    }
+    writeStoredBacktestHighlightSettings(nextSettings)
+    setBacktestHighlightIcThresholdInput(String(nextSettings.icThreshold))
+    setBacktestHighlightIrThresholdInput(String(nextSettings.irThreshold))
+    setBacktestHighlightTThresholdInput(String(nextSettings.tThreshold))
+    setBacktestHighlightSettingError('')
+    setBacktestHighlightSettingNotice('已保存。场景/策略回测页面会按新阈值高亮。')
   }
 
   function toggleConcept(value: string) {
@@ -301,6 +428,24 @@ export default function SettingsPage() {
               <span>详情页主图中，排名进入阈值时在当日K线上方做标记。</span>
             </div>
             <span className="settings-list-item-value">TOP {currentChartRankMarkerThreshold}</span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openDetailsNavLongPressSetting}>
+            <div className="settings-list-item-main">
+              <strong>详情长按切换间隔</strong>
+              <span>长按详情页上一条/下一条时，按该秒数自动切换。</span>
+            </div>
+            <span className="settings-list-item-value">{currentDetailsNavLongPressInterval} 秒</span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openBacktestHighlightSetting}>
+            <div className="settings-list-item-main">
+              <strong>回测指标高亮阈值</strong>
+              <span>配置 IC / IR / t 的阈值，以及是否按绝对值比较。</span>
+            </div>
+            <span className="settings-list-item-value">
+              IC {currentBacktestHighlightSettings.icThreshold} · IR {currentBacktestHighlightSettings.irThreshold} · t {currentBacktestHighlightSettings.tThreshold}
+            </span>
           </button>
         </div>
 
@@ -459,6 +604,160 @@ export default function SettingsPage() {
         </div>
       ) : null}
 
+      {isDetailsNavLongPressSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="详情长按切换间隔设置">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">详情长按切换间隔</h3>
+                <p className="settings-section-note">
+                  单位秒。详情页长按“上一条 / 下一条”进入锁定后，会按该间隔自动切换。
+                </p>
+              </div>
+              <div className="settings-actions">
+                <button className="settings-secondary-btn" type="button" onClick={closeActiveModal}>
+                  关闭
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-field settings-field-textarea">
+              <span>DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS</span>
+              <input
+                type="number"
+                min={DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MIN}
+                max={DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MAX}
+                step={0.1}
+                value={detailsNavLongPressIntervalInput}
+                onChange={(event) => setDetailsNavLongPressIntervalInput(event.target.value)}
+              />
+              <small>
+                预览：{detailsNavLongPressIntervalPreview === null ? '--' : `${detailsNavLongPressIntervalPreview} 秒`}
+              </small>
+            </div>
+
+            {detailsNavLongPressSettingError ? <div className="settings-error">{detailsNavLongPressSettingError}</div> : null}
+            {detailsNavLongPressSettingNotice ? <div className="settings-notice">{detailsNavLongPressSettingNotice}</div> : null}
+
+            <div className="settings-actions">
+              <button className="settings-primary-btn" type="button" onClick={onSaveDetailsNavLongPressInterval}>
+                保存
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isBacktestHighlightSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="回测高亮阈值设置">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">回测高亮阈值</h3>
+                <p className="settings-section-note">
+                  分别设置 IC / IR / t 的高亮阈值，并可单独控制是否按绝对值判断。
+                </p>
+              </div>
+              <div className="settings-actions">
+                <button className="settings-secondary-btn" type="button" onClick={closeActiveModal}>
+                  关闭
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-backtest-highlight-grid">
+              <div className="settings-backtest-highlight-item">
+                <label className="settings-field">
+                  <span>IC 阈值（默认 {BACKTEST_IC_THRESHOLD_DEFAULT}）</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step="any"
+                    value={backtestHighlightIcThresholdInput}
+                    onChange={(event) => setBacktestHighlightIcThresholdInput(event.target.value)}
+                  />
+                </label>
+                <label className="settings-checkbox-inline">
+                  <input
+                    type="checkbox"
+                    checked={backtestHighlightIcUseAbs}
+                    onChange={(event) => setBacktestHighlightIcUseAbs(event.target.checked)}
+                  />
+                  <span>按绝对值比较</span>
+                </label>
+              </div>
+
+              <div className="settings-backtest-highlight-item">
+                <label className="settings-field">
+                  <span>IR 阈值（默认 {BACKTEST_IR_THRESHOLD_DEFAULT}）</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step="any"
+                    value={backtestHighlightIrThresholdInput}
+                    onChange={(event) => setBacktestHighlightIrThresholdInput(event.target.value)}
+                  />
+                </label>
+                <label className="settings-checkbox-inline">
+                  <input
+                    type="checkbox"
+                    checked={backtestHighlightIrUseAbs}
+                    onChange={(event) => setBacktestHighlightIrUseAbs(event.target.checked)}
+                  />
+                  <span>按绝对值比较</span>
+                </label>
+              </div>
+
+              <div className="settings-backtest-highlight-item">
+                <label className="settings-field">
+                  <span>t 阈值（默认 {BACKTEST_T_THRESHOLD_DEFAULT}）</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step="any"
+                    value={backtestHighlightTThresholdInput}
+                    onChange={(event) => setBacktestHighlightTThresholdInput(event.target.value)}
+                  />
+                </label>
+                <label className="settings-checkbox-inline">
+                  <input
+                    type="checkbox"
+                    checked={backtestHighlightTUseAbs}
+                    onChange={(event) => setBacktestHighlightTUseAbs(event.target.checked)}
+                  />
+                  <span>按绝对值比较</span>
+                </label>
+              </div>
+            </div>
+
+            {backtestHighlightSettingError ? <div className="settings-error">{backtestHighlightSettingError}</div> : null}
+            {backtestHighlightSettingNotice ? <div className="settings-notice">{backtestHighlightSettingNotice}</div> : null}
+
+            <div className="settings-actions">
+              <button className="settings-primary-btn" type="button" onClick={onSaveBacktestHighlightSettings}>
+                保存
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {isConceptEditorOpen ? (
         <div
           className="settings-modal-backdrop"
@@ -595,7 +894,7 @@ export default function SettingsPage() {
                 </div>
               )}
 
-              <div className="settings-section-head">
+              <div className="settings-section-head settings-section-head-loose">
                 <div>
                   <h3 className="settings-subtitle-head">概念选择</h3>
                 </div>

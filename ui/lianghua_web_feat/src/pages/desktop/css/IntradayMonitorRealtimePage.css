@@ -238,6 +238,13 @@
   color: #2b3653;
 }
 
+.intraday-monitor-scene-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .intraday-monitor-error {
   margin-top: 8px;
   border-radius: 8px;
@@ -383,7 +390,7 @@
 }
 
 .intraday-monitor-modal {
-  width: min(640px, 100%);
+  width: min(1040px, 100%);
   max-height: 80vh;
   overflow: auto;
   background: #fff;
@@ -403,6 +410,53 @@
 .intraday-monitor-modal-head h4 {
   margin: 0;
   font-size: 16px;
+}
+
+.intraday-monitor-template-workspace {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.intraday-monitor-template-list-panel,
+.intraday-monitor-template-editor-panel {
+  border: 1px solid #e5eaf1;
+  border-radius: 10px;
+  padding: 10px;
+  background: #fff;
+  min-width: 0;
+}
+
+.intraday-monitor-template-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.intraday-monitor-template-panel-head h5 {
+  margin: 0;
+  font-size: 14px;
+  color: #2b3653;
+}
+
+.intraday-monitor-template-panel-head button,
+.intraday-monitor-template-editor-actions button {
+  border: 1px solid #c6d0da;
+  background: #fff;
+  color: #425367;
+  border-radius: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.intraday-monitor-template-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .intraday-monitor-modal-close {
@@ -478,6 +532,54 @@
   gap: 10px;
 }
 
+.intraday-monitor-modal-item-active {
+  border-color: #ffb56c;
+  background: #fff8ef;
+}
+
+.intraday-monitor-template-item-main {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.intraday-monitor-template-item-main strong {
+  color: #1f2a44;
+  font-size: 14px;
+}
+
+.intraday-monitor-template-item-main span {
+  color: #55647b;
+  font-size: 12px;
+}
+
+.intraday-monitor-template-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.intraday-monitor-template-check {
+  margin-top: 8px;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.intraday-monitor-template-check-ok {
+  border: 1px solid #bfe6cd;
+  background: #edfdf3;
+  color: #165a36;
+}
+
+.intraday-monitor-template-check-error {
+  border: 1px solid #ffc7d0;
+  background: #fff3f5;
+  color: #b00020;
+}
+
 .intraday-monitor-modal-item span {
   flex: 1;
   white-space: pre-wrap;
@@ -494,6 +596,10 @@
 
 @media (max-width: 1080px) {
   .intraday-monitor-config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .intraday-monitor-template-workspace {
     grid-template-columns: 1fr;
   }
 

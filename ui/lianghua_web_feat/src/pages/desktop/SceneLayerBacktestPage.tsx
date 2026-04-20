@@ -21,11 +21,20 @@ import {
   useTableSort,
   type SortDefinition,
 } from "../../shared/tableSort";
+import {
+  readStoredBacktestHighlightSettings,
+  shouldHighlightBacktestMetric,
+  type BacktestHighlightMetric,
+} from "../../shared/backtestHighlightSettings";
 import { readStoredSourcePath } from "../../shared/storage";
 import {
   ExpressionValidationSamplesPanel,
   type SceneLayerValidationReturnState,
 } from "./ExpressionValidationSamplesPage";
+import {
+  readTransientStrategyBacktestResult,
+  writeTransientStrategyBacktestResult,
+} from "../../shared/transientSceneLayerBacktestState";
 import "./css/SceneLayerBacktestPage.css";
 
 type RuleSummarySortKey =
@@ -34,8 +43,8 @@ type RuleSummarySortKey =
   | "avg_residual_mean"
   | "spread_mean"
   | "ic_mean"
-  | "ic_std"
-  | "icir";
+  | "icir"
+  | "ic_t_value";
 
 type ValidationScopeWayOption = "ANY" | "LAST" | "EACH" | "RECENT" | "CONSEC";
 type ValidationDirection = "positive" | "negative";
@@ -280,7 +289,9 @@ export default function SceneLayerBacktestPage() {
 
   const [ruleLoading, setRuleLoading] = useState(false);
   const [ruleError, setRuleError] = useState("");
-  const [ruleResult, setRuleResult] = useState<RuleLayerBacktestData | null>(null);
+  const [ruleResult, setRuleResult] = useState<RuleLayerBacktestData | null>(() =>
+    readTransientStrategyBacktestResult(),
+  );
 
   const [strategyRuleOptions, setStrategyRuleOptions] = useState<StrategyManageRuleItem[]>([]);
   const [validationImportRuleName, setValidationImportRuleName] = useState("");
@@ -412,6 +423,16 @@ export default function SceneLayerBacktestPage() {
 
   const allSceneSummaries = result?.all_scene_summaries ?? [];
   const allRuleSummaries = ruleResult?.all_rule_summaries ?? [];
+  const backtestHighlightSettings = readStoredBacktestHighlightSettings();
+
+  function metricHighlightClass(
+    metric: BacktestHighlightMetric,
+    value?: number | null,
+  ) {
+    return shouldHighlightBacktestMetric(metric, value, backtestHighlightSettings)
+      ? "scene-layer-metric-hit"
+      : undefined;
+  }
 
   const selectedValidationCombo = useMemo(() => {
     if (!validationResult) {
@@ -510,11 +531,11 @@ export default function SceneLayerBacktestPage() {
         ic_mean: {
           value: (row: RuleLayerRuleSummary) => row.ic_mean,
         },
-        ic_std: {
-          value: (row: RuleLayerRuleSummary) => row.ic_std,
-        },
         icir: {
           value: (row: RuleLayerRuleSummary) => row.icir,
+        },
+        ic_t_value: {
+          value: (row: RuleLayerRuleSummary) => row.ic_t_value,
         },
       }) satisfies Partial<
         Record<RuleSummarySortKey, SortDefinition<RuleLayerRuleSummary>>
@@ -618,8 +639,10 @@ export default function SceneLayerBacktestPage() {
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
       });
       setRuleResult(data);
+      writeTransientStrategyBacktestResult(data);
     } catch (runError) {
       setRuleResult(null);
+      writeTransientStrategyBacktestResult(null);
       setRuleError(`执行策略回测失败: ${String(runError)}`);
     } finally {
       setRuleLoading(false);
@@ -1006,8 +1029,9 @@ export default function SceneLayerBacktestPage() {
                     <span className="scene-layer-layer-state">{item.scene_name}</span>
                     <span>有效交易日：{item.point_count}</span>
                     <span>Spread 均值：{formatPercent(item.spread_mean)}</span>
-                    <span>IC 均值：{formatNumber(item.ic_mean)}</span>
-                    <span>ICIR：{formatNumber(item.icir)}</span>
+                    <span className={metricHighlightClass("ic", item.ic_mean)}>IC 均值：{formatNumber(item.ic_mean)}</span>
+                    <span className={metricHighlightClass("ir", item.icir)}>ICIR：{formatNumber(item.icir)}</span>
+                    <span className={metricHighlightClass("t", item.ic_t_value)}>IC t值：{formatNumber(item.ic_t_value)}</span>
                   </div>
                 ))}
               </div>
@@ -1049,7 +1073,7 @@ export default function SceneLayerBacktestPage() {
                     <th>残差均值（日度）</th>
                     <th>Spread 均值（日度高分-低分）</th>
                     <th>IC 均值</th>
-                    <th>IC 标准差</th>
+                    <th>IC t值</th>
                     <th>ICIR</th>
                   </tr>
                 </thead>
@@ -1064,9 +1088,9 @@ export default function SceneLayerBacktestPage() {
                     <td>{ruleResult.backtest_period}</td>
                     <td>{formatPercent(ruleResult.avg_residual_mean)}</td>
                     <td>{formatPercent(ruleResult.spread_mean)}</td>
-                    <td>{formatNumber(ruleResult.ic_mean)}</td>
-                    <td>{formatNumber(ruleResult.ic_std)}</td>
-                    <td>{formatNumber(ruleResult.icir)}</td>
+                    <td className={metricHighlightClass("ic", ruleResult.ic_mean)}>{formatNumber(ruleResult.ic_mean)}</td>
+                    <td className={metricHighlightClass("t", ruleResult.ic_t_value)}>{formatNumber(ruleResult.ic_t_value)}</td>
+                    <td className={metricHighlightClass("ir", ruleResult.icir)}>{formatNumber(ruleResult.icir)}</td>
                   </tr>
                 </tbody>
               </table>
@@ -1129,13 +1153,13 @@ export default function SceneLayerBacktestPage() {
                           title="按 IC 均值排序"
                         />
                       </th>
-                      <th aria-sort={getAriaSort(ruleSummarySortKey === "ic_std", ruleSummarySortDirection)}>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "ic_t_value", ruleSummarySortDirection)}>
                         <TableSortButton
-                          label="IC 标准差"
-                          isActive={ruleSummarySortKey === "ic_std" && ruleSummarySortDirection !== null}
+                          label="IC t值"
+                          isActive={ruleSummarySortKey === "ic_t_value" && ruleSummarySortDirection !== null}
                           direction={ruleSummarySortDirection}
-                          onClick={() => toggleRuleSummarySort("ic_std")}
-                          title="按 IC 标准差排序"
+                          onClick={() => toggleRuleSummarySort("ic_t_value")}
+                          title="按 IC t值 排序"
                         />
                       </th>
                       <th aria-sort={getAriaSort(ruleSummarySortKey === "icir", ruleSummarySortDirection)}>
@@ -1156,9 +1180,9 @@ export default function SceneLayerBacktestPage() {
                         <td>{item.point_count}</td>
                         <td>{formatPercent(item.avg_residual_mean)}</td>
                         <td>{formatPercent(item.spread_mean)}</td>
-                        <td>{formatNumber(item.ic_mean)}</td>
-                        <td>{formatNumber(item.ic_std)}</td>
-                        <td>{formatNumber(item.icir)}</td>
+                        <td className={metricHighlightClass("ic", item.ic_mean)}>{formatNumber(item.ic_mean)}</td>
+                        <td className={metricHighlightClass("t", item.ic_t_value)}>{formatNumber(item.ic_t_value)}</td>
+                        <td className={metricHighlightClass("ir", item.icir)}>{formatNumber(item.icir)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1431,6 +1455,7 @@ export default function SceneLayerBacktestPage() {
                     <th>残差均值（日度）</th>
                     <th>Spread 均值</th>
                     <th>IC 均值</th>
+                    <th>IC t值</th>
                     <th>ICIR</th>
                   </tr>
                 </thead>
@@ -1480,8 +1505,9 @@ export default function SceneLayerBacktestPage() {
                         <td>{formatNumber(item.avg_daily_trigger, 2)}</td>
                         <td>{formatPercent(item.backtest.avg_residual_mean)}</td>
                         <td>{formatPercent(item.backtest.spread_mean)}</td>
-                        <td>{formatNumber(item.backtest.ic_mean)}</td>
-                        <td>{formatNumber(item.backtest.icir)}</td>
+                        <td className={metricHighlightClass("ic", item.backtest.ic_mean)}>{formatNumber(item.backtest.ic_mean)}</td>
+                        <td className={metricHighlightClass("t", item.backtest.ic_t_value)}>{formatNumber(item.backtest.ic_t_value)}</td>
+                        <td className={metricHighlightClass("ir", item.backtest.icir)}>{formatNumber(item.backtest.icir)}</td>
                       </tr>
                     );
                   })}
