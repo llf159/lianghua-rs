@@ -69,7 +69,7 @@ pub fn impl_expr_warmup(
         Expr::Call { name, args } => {
             let name = name.to_ascii_uppercase();
             match name.as_str() {
-                "REF" => {
+                "REF" | "LAST" => {
                     let mut it = args.into_iter();
                     let src = it
                         .next()

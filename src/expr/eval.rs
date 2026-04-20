@@ -230,6 +230,39 @@ impl Runtime {
         Ok(Value::NumSeries(out))
     }
 
+    fn impl_last(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
+        if args.len() != 2 {
+            return Err(EvalErr {
+                msg: "LAST需要两个参数".to_string(),
+            });
+        }
+
+        let v = self.eval_expr(&args[0])?;
+        let ori_n = Value::as_num(&self.eval_expr(&args[1])?)?;
+        let std_n = if ori_n as i64 <= 0 { 0 } else { ori_n as usize };
+
+        let len = Value::len_of(&v);
+
+        if std_n >= len {
+            return Err(EvalErr {
+                msg: format!("LAST偏移越界: 序列长度={len}, 偏移={std_n}"),
+            });
+        }
+
+        let idx = len - 1 - std_n;
+        match v {
+            Value::Num(n) => Ok(Value::Num(n)),
+            Value::Bool(b) => Ok(Value::Bool(b)),
+            Value::NumSeries(ns) => match ns[idx] {
+                Some(n) => Ok(Value::Num(n)),
+                None => Err(EvalErr {
+                    msg: "LAST命中的值为空".to_string(),
+                }),
+            },
+            Value::BoolSeries(bs) => Ok(Value::Bool(bs[idx])),
+        }
+    }
+
     fn impl_hhv(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
         if args.len() != 2 {
             return Err(EvalErr {
@@ -909,6 +942,7 @@ impl Runtime {
             "COUNT" => Ok(self.impl_count(args)?),
             "MA" => Ok(self.impl_ma(args)?),
             "REF" => Ok(self.impl_ref(args)?),
+            "LAST" => Ok(self.impl_last(args)?),
             "SUM" => Ok(self.impl_sum(args)?),
             "STD" => Ok(self.impl_std(args)?),
             "IF" => Ok(self.impl_if(args)?),
@@ -1183,7 +1217,7 @@ impl Value {
             Value::Num(n) => Ok(*n),
             Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
             Value::NumSeries(_) => Err(EvalErr {
-                msg: "需要标量数字，但拿到数值序列".to_string(),
+                msg: "需要标量数字，但拿到数值序列，可用LAST函数转换".to_string(),
             }),
             Value::BoolSeries(_) => Err(EvalErr {
                 msg: "需要标量数字，但拿到布尔序列".to_string(),
@@ -1199,7 +1233,7 @@ impl Value {
                 msg: "需要布尔，但拿到数值序列".to_string(),
             }),
             Value::BoolSeries(_) => Err(EvalErr {
-                msg: "需要布尔，但拿到布尔序列".to_string(),
+                msg: "需要布尔，但拿到布尔序列，可用LAST函数转换".to_string(),
             }),
         }
     }
@@ -1421,4 +1455,42 @@ fn repeated_ref_comparisons_keep_the_same_reference_low_per_bar() {
         }
         other => panic!("unexpected result: {other:?}"),
     }
+}
+
+#[test]
+fn last_returns_latest_or_offset_value_as_scalar() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let expr = "A := LAST(C, 0); B := LAST(C, 2); A - B;";
+    let toks = lex_all(expr);
+    let mut p = Parser::new(toks);
+    let stmts = p.parse_main().expect("parse failed");
+    let mut rt = Runtime::default();
+
+    rt.vars.insert(
+        "C".to_string(),
+        Value::NumSeries(vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)]),
+    );
+
+    let out = rt.eval_program(&stmts).expect("eval failed");
+    assert_eq!(out, Value::Num(2.0));
+}
+
+#[test]
+fn last_supports_bool_series() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let expr = "LAST(C > 2, 1);";
+    let toks = lex_all(expr);
+    let mut p = Parser::new(toks);
+    let stmts = p.parse_main().expect("parse failed");
+    let mut rt = Runtime::default();
+
+    rt.vars.insert(
+        "C".to_string(),
+        Value::NumSeries(vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)]),
+    );
+
+    let out = rt.eval_program(&stmts).expect("eval failed");
+    assert_eq!(out, Value::Bool(true));
 }

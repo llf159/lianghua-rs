@@ -55,6 +55,7 @@ const SYNTAX_GUIDE_FUNCTIONS: SyntaxGuideFunction[] = [
   { name: 'COUNT', signature: 'COUNT(cond, n)', returns: '数值序列', description: '统计最近 n 根里条件成立的次数。', example: 'cond=[真,假,真,真], n=3 -> [1,1,2,2]' },
   { name: 'MA', signature: 'MA(x, n)', returns: '数值序列', description: '简单移动平均。', example: 'x=[1,2,3,4], n=3 -> [空,空,2,3]' },
   { name: 'REF', signature: 'REF(x, n)', returns: '数值序列', description: '取 n 根之前的值。', example: 'x=[10,11,12,13], n=2 -> [空,空,10,11]' },
+  { name: 'LAST', signature: 'LAST(x, n)', returns: '标量(数字或布尔)', description: '取倒数第 n+1 根的值；n=0 表示最新值。', example: 'x=[10,11,12,13], n=0 -> 13；x=[假,真,真], n=1 -> 真' },
   { name: 'HHV', signature: 'HHV(x, n)', returns: '数值序列', description: '最近 n 根最高值。', example: 'x=[1,3,2,5], n=3 -> [空,空,3,5]' },
   { name: 'LLV', signature: 'LLV(x, n)', returns: '数值序列', description: '最近 n 根最低值。', example: 'x=[1,3,2,0], n=3 -> [空,空,1,0]' },
   { name: 'SUM', signature: 'SUM(x, n)', returns: '数值序列', description: '最近 n 根求和。', example: 'x=[1,2,3,4], n=3 -> [空,空,6,9]' },
