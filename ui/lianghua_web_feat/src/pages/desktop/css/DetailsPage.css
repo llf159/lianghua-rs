@@ -209,6 +209,11 @@
   line-height: 1.2;
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
   cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
 
 .details-float-nav-btn:disabled {

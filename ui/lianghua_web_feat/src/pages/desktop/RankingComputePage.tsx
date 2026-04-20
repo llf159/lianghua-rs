@@ -32,11 +32,17 @@ import {
   normalizeProgressPhase,
   useAnimatedProgressPercent,
 } from '../../shared/dataTaskProgressUtils'
+import ConfirmDialog from '../../shared/ConfirmDialog'
 import './css/DataDownloadPage.css'
 import './css/RankingComputePage.css'
 
 type BusyAction = 'idle' | 'loading' | 'computing' | 'deleting-result-db' | 'indicator-running'
 type IndicatorEditorMode = 'create' | 'edit'
+type PendingConfirmState =
+  | { kind: 'delete-indicator'; item: IndicatorManageItem }
+  | { kind: 'delete-stock-indicator-columns' }
+  | { kind: 'delete-result-db' }
+  | null
 
 function compactDateToInput(value: string | null | undefined) {
   if (!value || !/^\d{8}$/.test(value)) {
@@ -189,6 +195,7 @@ export default function RankingComputePage() {
   const [indicatorEditorMode, setIndicatorEditorMode] = useState<IndicatorEditorMode | null>(null)
   const [indicatorDraft, setIndicatorDraft] = useState<IndicatorManageDraft | null>(null)
   const [indicatorEditingName, setIndicatorEditingName] = useState<string | null>(null)
+  const [pendingConfirm, setPendingConfirm] = useState<PendingConfirmState>(null)
 
   const activeDownloadIdRef = useRef('')
   const progressUnlistenRef = useRef<UnlistenFn | null>(null)
@@ -297,10 +304,6 @@ export default function RankingComputePage() {
   }
 
   async function onDeleteIndicator(item: IndicatorManageItem) {
-    if (!window.confirm(`确认删除指标 ${item.name} 吗？`)) {
-      return
-    }
-
     const nextItems = indicatorItems
       .filter((current) => current.name !== item.name)
       .map((current) => ({
@@ -508,14 +511,6 @@ export default function RankingComputePage() {
       return
     }
 
-    if (
-      !window.confirm(
-        '确认清空 stock_data 中的所有非基础指标列吗？\n\n该操作会重建 stock_data 表，只保留基础行情列和已有基础行情数据；数据量较大时耗时会更久。',
-      )
-    ) {
-      return
-    }
-
     await runIndicatorTask((downloadId) =>
       runStockDataIndicatorColumnsDelete({
         downloadId,
@@ -542,13 +537,6 @@ export default function RankingComputePage() {
     if (!sourcePath) {
       setError('当前数据目录为空，请先到数据管理页确认目录。')
       return
-    }
-
-    if (typeof window !== 'undefined') {
-      const confirmed = window.confirm('确认删除当前结果库 `scoring_result.db` 吗？将同时清空 score_summary / rule_details / scene_details，删除后需要重新计算排名。')
-      if (!confirmed) {
-        return
-      }
     }
 
     setBusyAction('deleting-result-db')
@@ -619,6 +607,26 @@ export default function RankingComputePage() {
     } finally {
       setBusyAction('idle')
     }
+  }
+
+  async function onConfirmPendingAction() {
+    const current = pendingConfirm
+    if (!current) {
+      return
+    }
+    setPendingConfirm(null)
+
+    if (current.kind === 'delete-indicator') {
+      await onDeleteIndicator(current.item)
+      return
+    }
+
+    if (current.kind === 'delete-stock-indicator-columns') {
+      await onRunStockDataIndicatorColumnsDelete()
+      return
+    }
+
+    await onDeleteResultDb()
   }
 
   return (
@@ -702,7 +710,7 @@ export default function RankingComputePage() {
             <button className="ranking-compute-primary-btn" type="button" onClick={() => void onRunCompute()} disabled={isBusy || sourcePath === ''}>
               {busyAction === 'computing' ? '计算中...' : '计算排名'}
             </button>
-            <button className="ranking-compute-danger-btn" type="button" onClick={() => void onDeleteResultDb()} disabled={isBusy || sourcePath === ''}>
+            <button className="ranking-compute-danger-btn" type="button" onClick={() => setPendingConfirm({ kind: 'delete-result-db' })} disabled={isBusy || sourcePath === ''}>
               {busyAction === 'deleting-result-db' ? '删除中...' : '删除结果库'}
             </button>
           </div>
@@ -747,7 +755,7 @@ export default function RankingComputePage() {
           <button
             className="ranking-compute-danger-btn"
             type="button"
-            onClick={() => void onRunStockDataIndicatorColumnsDelete()}
+            onClick={() => setPendingConfirm({ kind: 'delete-stock-indicator-columns' })}
             disabled={isBusy || sourcePath === ''}
           >
             清空指标列
@@ -881,7 +889,7 @@ export default function RankingComputePage() {
                               <button
                                 className="data-download-secondary-btn data-download-danger-btn"
                                 type="button"
-                                onClick={() => void onDeleteIndicator(item)}
+                                onClick={() => setPendingConfirm({ kind: 'delete-indicator', item })}
                                 disabled={indicatorSaving}
                               >
                                 删除
@@ -910,6 +918,30 @@ export default function RankingComputePage() {
           </div>
         </div>
       ) : null}
+
+      <ConfirmDialog
+        open={pendingConfirm !== null}
+        title={
+          pendingConfirm?.kind === 'delete-indicator'
+            ? '确认删除指标'
+            : pendingConfirm?.kind === 'delete-stock-indicator-columns'
+              ? '确认清空指标列'
+              : '确认删除结果库'
+        }
+        message={
+          pendingConfirm?.kind === 'delete-indicator'
+            ? `确认删除指标 ${pendingConfirm.item.name} 吗？`
+            : pendingConfirm?.kind === 'delete-stock-indicator-columns'
+              ? '确认清空 stock_data 中的所有非基础指标列吗？\n\n该操作会重建 stock_data 表，只保留基础行情列和已有基础行情数据；数据量较大时耗时会更久。'
+              : '确认删除当前结果库 scoring_result.db 吗？将同时清空 score_summary / rule_details / scene_details，删除后需要重新计算排名。'
+        }
+        confirmText="确认"
+        cancelText="取消"
+        danger
+        busy={isBusy}
+        onCancel={() => setPendingConfirm(null)}
+        onConfirm={() => void onConfirmPendingAction()}
+      />
     </div>
   )
 }

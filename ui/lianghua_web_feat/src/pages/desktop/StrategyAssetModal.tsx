@@ -13,6 +13,7 @@ import {
   type ManagedStrategyAssetsStatus,
   type ManagedStrategyBackupItem,
 } from '../../apis/strategyAssets'
+import ConfirmDialog from '../../shared/ConfirmDialog'
 import './css/StrategyAssetModal.css'
 
 type BusyAction =
@@ -78,6 +79,7 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [descriptionDrafts, setDescriptionDrafts] = useState<Record<string, string>>({})
+  const [pendingDeleteBackup, setPendingDeleteBackup] = useState<ManagedStrategyBackupItem | null>(null)
 
   const isBusy = busyAction !== 'idle'
   const backupCount = status?.backups.length ?? 0
@@ -107,6 +109,7 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
 
   useEffect(() => {
     if (!open) {
+      setPendingDeleteBackup(null)
       return
     }
     void loadStatus()
@@ -250,13 +253,6 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
   }
 
   async function onDeleteBackup(item: ManagedStrategyBackupItem) {
-    if (typeof window !== 'undefined') {
-      const confirmed = window.confirm(`确认删除策略备份 ${item.folderName} 吗？`)
-      if (!confirmed) {
-        return
-      }
-    }
-
     setBusyAction(`deleting:${item.backupId}`)
     setError('')
     try {
@@ -480,7 +476,7 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
                       <button className="strategy-asset-btn" type="button" onClick={() => void onExportBackup(item)} disabled={isBusy}>
                         {isExporting ? '导出中...' : '导出'}
                       </button>
-                      <button className="strategy-asset-btn strategy-asset-btn-danger" type="button" onClick={() => void onDeleteBackup(item)} disabled={isBusy}>
+                      <button className="strategy-asset-btn strategy-asset-btn-danger" type="button" onClick={() => setPendingDeleteBackup(item)} disabled={isBusy}>
                         {isDeleting ? '删除中...' : '删除'}
                       </button>
                     </div>
@@ -495,6 +491,25 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
           )}
         </section>
       </div>
+
+      <ConfirmDialog
+        open={pendingDeleteBackup !== null}
+        title="确认删除策略备份"
+        message={pendingDeleteBackup ? `确认删除策略备份 ${pendingDeleteBackup.folderName} 吗？` : ''}
+        confirmText="确认删除"
+        cancelText="取消"
+        danger
+        busy={isBusy}
+        onCancel={() => setPendingDeleteBackup(null)}
+        onConfirm={() => {
+          if (!pendingDeleteBackup) {
+            return
+          }
+          const target = pendingDeleteBackup
+          setPendingDeleteBackup(null)
+          void onDeleteBackup(target)
+        }}
+      />
     </div>
   )
 }

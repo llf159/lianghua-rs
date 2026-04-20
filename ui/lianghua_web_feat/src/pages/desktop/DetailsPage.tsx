@@ -107,6 +107,7 @@ const MAX_STOCK_NAME_CANDIDATES = 12;
 const DETAIL_REALTIME_AUTO_REFRESH_INTERVAL_MS = 15_000;
 const DETAIL_REALTIME_LONG_PRESS_MS = 600;
 const DETAIL_NAV_LONG_PRESS_MS = 600;
+const DETAIL_NAV_LONG_PRESS_TOUCH_MS = 320;
 const CANDLE_UP_COLOR = "#d9485f";
 const CANDLE_DOWN_COLOR = "#178f68";
 const CANDLE_FLAT_COLOR = "#536273";
@@ -4165,9 +4166,13 @@ export default function DetailsPage({
 
       detailsNavLongPressHandledRef.current = false;
       clearDetailsNavLongPressTimer();
+      const longPressMs =
+        event.pointerType === 'touch'
+          ? DETAIL_NAV_LONG_PRESS_TOUCH_MS
+          : DETAIL_NAV_LONG_PRESS_MS;
       detailsNavLongPressTimerRef.current = window.setTimeout(() => {
         toggleDetailsNavAutoDirection(direction);
-      }, DETAIL_NAV_LONG_PRESS_MS);
+      }, longPressMs);
     },
     [
       clearDetailsNavLongPressTimer,
@@ -4184,6 +4189,14 @@ export default function DetailsPage({
       clearDetailsNavLongPressTimer();
     },
     [clearDetailsNavLongPressTimer],
+  );
+
+  const handleDetailsNavContextMenu = useCallback(
+    (event: ReactPointerEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    [],
   );
 
   const handleDetailsNavClick = useCallback(
@@ -4960,9 +4973,10 @@ export default function DetailsPage({
           onPointerUp={handleDetailsNavPointerRelease}
           onPointerCancel={handleDetailsNavPointerRelease}
           onPointerLeave={handleDetailsNavPointerRelease}
+          onContextMenu={handleDetailsNavContextMenu}
           onClick={(event) => handleDetailsNavClick("prev", event)}
         >
-          {isPrevAutoLocked ? "上一条 自动" : "上一条"}
+          {isPrevAutoLocked ? "上一条 自动中" : "上一条"}
         </button>
         <button
           className={[
@@ -4978,9 +4992,10 @@ export default function DetailsPage({
           onPointerUp={handleDetailsNavPointerRelease}
           onPointerCancel={handleDetailsNavPointerRelease}
           onPointerLeave={handleDetailsNavPointerRelease}
+          onContextMenu={handleDetailsNavContextMenu}
           onClick={(event) => handleDetailsNavClick("next", event)}
         >
-          {isNextAutoLocked ? "下一条 自动" : "下一条"}
+          {isNextAutoLocked ? "下一条 自动中" : "下一条"}
         </button>
       </div>
     </div>
