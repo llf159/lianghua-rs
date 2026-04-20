@@ -365,8 +365,12 @@
 
 .strategy-manage-bulk-scene-strip {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr);
+  grid-auto-rows: minmax(var(--strategy-manage-bulk-scene-box-min-height), auto);
+  gap: var(--strategy-manage-bulk-scene-gap);
+  align-items: start;
+  align-content: start;
+  min-height: var(--strategy-manage-bulk-scene-strip-min-height);
 }
 
 .strategy-manage-bulk-scene-box {
@@ -376,8 +380,10 @@
   padding: 10px;
   display: grid;
   gap: 8px;
+  align-content: start;
   text-align: left;
   cursor: pointer;
+  min-height: var(--strategy-manage-bulk-scene-box-min-height);
 }
 
 .strategy-manage-bulk-scene-box.is-active {
@@ -387,10 +393,17 @@
 }
 
 .strategy-manage-bulk-simple-board {
+  --strategy-manage-bulk-board-gap: 14px;
+  --strategy-manage-bulk-pool-side-min-width: 360px;
+  --strategy-manage-bulk-scene-side-min-width: 560px;
+  --strategy-manage-bulk-scene-gap: 10px;
+  --strategy-manage-bulk-scene-box-min-height: 180px;
+  --strategy-manage-bulk-scene-strip-min-height: calc(
+    var(--strategy-manage-bulk-scene-box-min-height) * 2 + var(--strategy-manage-bulk-scene-gap)
+  );
   display: grid;
-  grid-template-columns: minmax(320px, 0.95fr) minmax(0, 1.25fr);
-  gap: 14px;
-  min-height: 560px;
+  gap: var(--strategy-manage-bulk-board-gap);
+  align-items: start;
 }
 
 .strategy-manage-bulk-head {
@@ -422,16 +435,108 @@
   padding: 10px;
   display: grid;
   gap: 10px;
-  align-content: start;
   min-height: 0;
+  align-self: start;
 }
 
 .strategy-manage-bulk-board-col-center {
   background: linear-gradient(180deg, #fff7ed 0%, #fff 100%);
 }
 
+.strategy-manage-bulk-board-col-pool {
+  min-height: 0;
+}
+
+.strategy-manage-bulk-board-col-scenes {
+  grid-template-rows: auto auto auto;
+  align-content: start;
+  min-height: 0;
+}
+
 .strategy-manage-bulk-rule-pool {
-  max-height: 520px;
+  min-height: 0;
+  align-content: start;
+}
+
+.strategy-manage-bulk-simple-board-split {
+  grid-template-columns:
+    minmax(var(--strategy-manage-bulk-pool-side-min-width), 0.88fr)
+    minmax(var(--strategy-manage-bulk-scene-side-min-width), 1.12fr);
+}
+
+.strategy-manage-bulk-simple-board-split .strategy-manage-bulk-board-col-pool {
+  grid-template-rows: auto auto minmax(0, var(--strategy-manage-bulk-scene-strip-height));
+}
+
+.strategy-manage-bulk-simple-board-split .strategy-manage-bulk-rule-pool {
+  height: var(--strategy-manage-bulk-scene-strip-height);
+  max-height: var(--strategy-manage-bulk-scene-strip-height);
+  overflow: auto;
+}
+
+.strategy-manage-bulk-simple-board-split .strategy-manage-bulk-scene-strip {
+  min-height: var(--strategy-manage-bulk-scene-strip-min-height);
+}
+
+.strategy-manage-bulk-simple-board-stack-double,
+.strategy-manage-bulk-simple-board-stack-single {
+  grid-template-columns: 1fr;
+}
+
+.strategy-manage-bulk-simple-board-stack-double .strategy-manage-bulk-board-col-pool,
+.strategy-manage-bulk-simple-board-stack-single .strategy-manage-bulk-board-col-pool {
+  grid-template-rows: auto auto auto;
+}
+
+.strategy-manage-bulk-simple-board-stack-double .strategy-manage-bulk-rule-pool,
+.strategy-manage-bulk-simple-board-stack-single .strategy-manage-bulk-rule-pool {
+  display: grid;
+  width: 100%;
+  height: auto;
+  max-height: var(--strategy-manage-bulk-stack-rule-pool-max-height);
+  gap: 8px;
+  align-content: start;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.strategy-manage-bulk-simple-board-stack-double .strategy-manage-bulk-rule-pool {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.strategy-manage-bulk-simple-board-stack-double .strategy-manage-bulk-scene-strip {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-height: 0;
+}
+
+.strategy-manage-bulk-simple-board-stack-single .strategy-manage-bulk-rule-pool {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.strategy-manage-bulk-simple-board-stack-single .strategy-manage-bulk-scene-strip {
+  grid-template-columns: 1fr;
+  min-height: 0;
+}
+
+.strategy-manage-bulk-simple-board-stack-double .strategy-manage-bulk-rule-pool .strategy-manage-bulk-rule-item,
+.strategy-manage-bulk-simple-board-stack-single .strategy-manage-bulk-rule-pool .strategy-manage-bulk-rule-item {
+  min-width: 0;
+  max-width: none;
+  padding: 8px 10px;
+  gap: 6px;
+  align-content: start;
+}
+
+.strategy-manage-bulk-simple-board-stack-double .strategy-manage-bulk-rule-pool .strategy-manage-rule-card-name,
+.strategy-manage-bulk-simple-board-stack-single .strategy-manage-bulk-rule-pool .strategy-manage-rule-card-name {
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.strategy-manage-bulk-simple-board-stack-double .strategy-manage-bulk-rule-pool .strategy-manage-tip,
+.strategy-manage-bulk-simple-board-stack-single .strategy-manage-bulk-rule-pool .strategy-manage-tip {
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .strategy-manage-bulk-classified-list {
@@ -1009,7 +1114,7 @@
   }
 }
 
-@media (max-width: 1120px) {
+@media (max-width: 900px) {
   .strategy-manage-workspace {
     grid-template-columns: 1fr;
   }
@@ -1018,11 +1123,6 @@
   .strategy-manage-rule-metrics-compact {
     grid-template-columns: 1fr;
   }
-
-  .strategy-manage-bulk-simple-board {
-    grid-template-columns: 1fr;
-  }
-
   .strategy-manage-bulk-kpi {
     grid-template-columns: 1fr;
   }

@@ -983,7 +983,7 @@ export default function SceneLayerBacktestPage() {
       <section className="scene-layer-card">
         <h2 className="scene-layer-title">场景整体回测</h2>
         <p className="scene-layer-caption">
-          使用 scene_details 中的场景状态与排序，计算各场景状态下的分层残差收益、Top-Bottom Spread、IC / ICIR。
+          使用 scene_details 中的场景状态与排序，计算各场景状态下的分层残差收益、分层差、IC / ICIR。
         </p>
 
         <div className="scene-layer-actions">
@@ -1031,13 +1031,13 @@ export default function SceneLayerBacktestPage() {
 
           {allSceneSummaries.length > 0 ? (
             <div className="scene-layer-layer-summary">
-              <h3>全部场景汇总（按 Spread 均值降序）</h3>
+              <h3>全部场景汇总（按分层差均值降序）</h3>
               <div className="scene-layer-layer-grid">
                 {allSceneSummaries.map((item) => (
                   <div key={item.scene_name} className="scene-layer-layer-item">
                     <span className="scene-layer-layer-state">{item.scene_name}</span>
                     <span>有效交易日：{item.point_count}</span>
-                    <span>Spread 均值：{formatPercent(item.spread_mean)}</span>
+                    <span>分层差均值：{formatPercent(item.spread_mean)}</span>
                     <span className={metricHighlightClass("ic", item.ic_mean)}>IC 均值：{formatNumber(item.ic_mean)}</span>
                     <span className={metricHighlightClass("ir", item.icir)}>ICIR：{formatNumber(item.icir)}</span>
                     <span className={metricHighlightClass("t", item.ic_t_value)}>IC t值：{formatNumber(item.ic_t_value)}</span>
@@ -1052,7 +1052,7 @@ export default function SceneLayerBacktestPage() {
       <section className="scene-layer-card">
         <h2 className="scene-layer-title">策略回测</h2>
         <p className="scene-layer-caption">
-          使用 rule_details 中的策略得分与残差收益，计算策略日度均值、Top-Bottom Spread、IC / ICIR。
+          使用 rule_details 中的策略得分与残差收益，计算策略日度均值、分层差、IC / ICIR。
         </p>
 
         <div className="scene-layer-actions">
@@ -1081,7 +1081,7 @@ export default function SceneLayerBacktestPage() {
                     <th>最少上市交易日</th>
                     <th>回测周期（天）</th>
                     <th>残差均值（日度）</th>
-                    <th>Spread 均值（日度高分-低分）</th>
+                    <th>分层差均值（日度高分-低分）</th>
                     <th>IC 均值</th>
                     <th>IC t值</th>
                     <th>ICIR</th>
@@ -1148,11 +1148,11 @@ export default function SceneLayerBacktestPage() {
                       </th>
                       <th aria-sort={getAriaSort(ruleSummarySortKey === "spread_mean", ruleSummarySortDirection)}>
                         <TableSortButton
-                          label="Spread 均值"
+                          label="分层差均值"
                           isActive={ruleSummarySortKey === "spread_mean" && ruleSummarySortDirection !== null}
                           direction={ruleSummarySortDirection}
                           onClick={() => toggleRuleSummarySort("spread_mean")}
-                          title="按 Spread 均值排序"
+                          title="按分层差均值排序"
                         />
                       </th>
                       <th aria-sort={getAriaSort(ruleSummarySortKey === "ic_mean", ruleSummarySortDirection)}>
@@ -1446,7 +1446,7 @@ export default function SceneLayerBacktestPage() {
       {validationResult ? (
         <section className="scene-layer-card">
           <div className="scene-layer-layer-summary">
-            <h3>参数组合表现（按 Spread / ICIR 排序）</h3>
+            <h3>参数组合表现（按分层差 / ICIR 排序）</h3>
             {shouldUseValidationDetailModal ? (
               <p className="scene-layer-validation-table-hint">
                 保留基础统计表；点击“策略参数”列可在浮窗中查看样本与相似度明细。
@@ -1464,7 +1464,7 @@ export default function SceneLayerBacktestPage() {
                     <th>触发交易日</th>
                     <th>平均每日触发</th>
                     <th>残差均值（日度）</th>
-                    <th>Spread 均值</th>
+                    <th>分层差均值</th>
                     <th>IC 均值</th>
                     <th>IC t值</th>
                     <th>ICIR</th>

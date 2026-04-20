@@ -34,24 +34,12 @@ fn format_elapsed_ms(elapsed_ms: u64) -> String {
 
 fn log_scoring_run_profile(profile: &ScoringRunProfile) {
     println!(
-        concat!(
-            "排名计算耗时: 总计={}；初始化结果库={}；准备数据与规则={}；个股评分并发送批次={}（{}只股票，与结果库写线程并行）；",
-            "结果库写线程={}（删除二级索引={}；删旧区间={}；接收批次并写库={}；总榜排名={}；Scene排名={}；提交事务={}；重建二级索引={}；{}个批次）"
-        ),
+        "排名计算耗时: 总计={}；初始化={}；准备={}；评分={}；写库={}",
         format_elapsed_ms(profile.total_ms),
         format_elapsed_ms(profile.init_result_db_ms),
         format_elapsed_ms(profile.prepare_ms),
         format_elapsed_ms(profile.compute_and_send_batches_ms),
-        profile.stock_count,
         format_elapsed_ms(profile.writer.total_ms),
-        format_elapsed_ms(profile.writer.drop_indexes_ms),
-        format_elapsed_ms(profile.writer.delete_range_ms),
-        format_elapsed_ms(profile.writer.receive_and_append_batches_ms),
-        format_elapsed_ms(profile.writer.summary_rank_ms),
-        format_elapsed_ms(profile.writer.scene_rank_ms),
-        format_elapsed_ms(profile.writer.commit_ms),
-        format_elapsed_ms(profile.writer.recreate_indexes_ms),
-        profile.writer.batch_count,
     );
 }
 

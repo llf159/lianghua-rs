@@ -111,11 +111,48 @@ export type DetailScenePayload = {
   untriggered?: DetailSceneTriggerRow[]
 }
 
+export type StockSimilarityTarget = {
+  tsCode: string
+  name?: string | null
+  industry?: string | null
+  concept?: string | null
+  conceptItems: string[]
+  triggerSceneNames: string[]
+  availableScore: number
+}
+
+export type StockSimilarityRow = {
+  tsCode: string
+  name?: string | null
+  industry?: string | null
+  concept?: string | null
+  totalScore?: number | null
+  rank?: number | null
+  similarityScore: number
+  conceptScore: number
+  industryScore: number
+  sceneScore: number
+  sameIndustry: boolean
+  matchedConcepts: string[]
+  matchedSceneNames: string[]
+  conceptMatchRatio?: number | null
+  sceneMatchRatio?: number | null
+}
+
+export type StockSimilarityPageData = {
+  resolvedTradeDate: string
+  resolvedTsCode: string
+  target: StockSimilarityTarget
+  items: StockSimilarityRow[]
+}
+
 export type StockDetailPageData = {
   resolved_trade_date?: string
   resolved_ts_code?: string
   overview?: DetailOverview | null
   prev_ranks?: DetailPrevRankRow[]
+  stock_similarity?: StockSimilarityPageData | null
+  stock_similarity_error?: string | null
   kline?: DetailKlinePayload | null
   strategy_triggers?: DetailStrategyPayload | null
   strategy_scenes?: DetailScenePayload | null

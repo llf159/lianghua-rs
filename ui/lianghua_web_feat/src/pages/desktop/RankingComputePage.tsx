@@ -20,7 +20,6 @@ import {
   runRankingTiebreakFill,
   type RankComputeDbRange,
   type RankComputeResultContinuity,
-  type RankComputeTimingItem,
   type RankingComputeStatus,
 } from '../../apis/rankingCompute'
 import DataTaskProgress from '../../shared/DataTaskProgress'
@@ -114,16 +113,6 @@ function formatDateSample(values: string[]) {
   }
 
   return values.map((value) => formatTradeDate(value)).join('、')
-}
-
-function formatTimingSummary(items: RankComputeTimingItem[]) {
-  if (items.length === 0) {
-    return '无分项'
-  }
-
-  return items
-    .map((item) => `${item.label}${item.note ? `(${item.note})` : ''} ${formatElapsedMs(item.elapsedMs)}`)
-    .join('；')
 }
 
 function buildEmptyIndicatorDraft(): IndicatorManageDraft {
@@ -576,10 +565,8 @@ export default function RankingComputePage() {
       const scoreResult = await runRankingScoreCalculation(sourcePath, startDate, endDate)
       const tiebreakResult = await runRankingTiebreakFill(sourcePath)
       setStatus(tiebreakResult.status)
-      const scoreStats = formatTimingSummary(scoreResult.timings)
-      const tiebreakStats = formatTimingSummary(tiebreakResult.timings)
       setNotice(
-        `排名计算和补排名完成，区间 ${formatTradeDate(scoreResult.startDate ?? null)} 至 ${formatTradeDate(scoreResult.endDate ?? null)}，总耗时 ${formatElapsedMs(scoreResult.elapsedMs + tiebreakResult.elapsedMs)}。统计：评分阶段 ${scoreStats}；补排名阶段 ${tiebreakStats}。`,
+        `排名计算完成（含补排名），区间 ${formatTradeDate(scoreResult.startDate ?? null)} 至 ${formatTradeDate(scoreResult.endDate ?? null)}，耗时 ${formatElapsedMs(scoreResult.elapsedMs + tiebreakResult.elapsedMs)}。`,
       )
     } catch (actionError) {
       setNotice('')

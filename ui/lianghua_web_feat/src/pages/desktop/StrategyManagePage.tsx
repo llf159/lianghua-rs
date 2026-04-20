@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import {
   checkStrategyManageSceneDraft,
@@ -25,6 +25,15 @@ const SCOPE_OPTIONS = ['LAST', 'ANY', 'EACH', 'RECENT', 'CONSEC>=2'] as const
 const STAGE_OPTIONS = ['base', 'trigger', 'confirm', 'risk', 'fail'] as const
 const SCENE_DIRECTION_OPTIONS = ['long', 'short'] as const
 const STRATEGY_RULE_FILE_NAME = 'score_rule.toml'
+const BULK_BOARD_GAP = 14
+const BULK_POOL_SIDE_MIN_WIDTH = 360
+const BULK_SCENE_SIDE_MIN_WIDTH = 1120
+const BULK_SCENE_DOUBLE_MIN_WIDTH = 640
+const BULK_STACK_BREAKPOINT =
+  BULK_POOL_SIDE_MIN_WIDTH + BULK_SCENE_SIDE_MIN_WIDTH + BULK_BOARD_GAP
+const BULK_STACK_SINGLE_SCENE_BREAKPOINT = BULK_SCENE_DOUBLE_MIN_WIDTH
+const BULK_SCENE_BOX_MIN_HEIGHT = 180
+const BULK_SCENE_GAP = 10
 
 type SyntaxGuideFunction = {
   name: string
@@ -238,15 +247,31 @@ function buildPreparedSceneDraft(draft: StrategyManageSceneDraft): StrategyManag
   }
 }
 
+function createRefactorSceneId() {
+  return `${Date.now()}-${Math.random()}`
+}
+
 function createRefactorSceneDraft(name = ''): RefactorSceneDraft {
   return {
-    id: `${Date.now()}-${Math.random()}`,
+    id: createRefactorSceneId(),
     name,
     direction: 'long',
     observe_threshold: 1,
     trigger_threshold: 2,
     confirm_threshold: 3,
     fail_threshold: 1,
+  }
+}
+
+function buildRefactorSceneDraftFromScene(scene: StrategyManageSceneItem): RefactorSceneDraft {
+  return {
+    id: createRefactorSceneId(),
+    name: scene.name,
+    direction: scene.direction,
+    observe_threshold: scene.observe_threshold,
+    trigger_threshold: scene.trigger_threshold,
+    confirm_threshold: scene.confirm_threshold,
+    fail_threshold: scene.fail_threshold,
   }
 }
 
@@ -354,6 +379,10 @@ function buildSceneSearchText(scene: StrategyManageSceneItem) {
 }
 
 export default function StrategyManagePage() {
+  const bulkModalRef = useRef<HTMLDivElement | null>(null)
+  const bulkBoardRef = useRef<HTMLDivElement | null>(null)
+  const bulkSceneStripRef = useRef<HTMLDivElement | null>(null)
+  const bulkRulePoolRef = useRef<HTMLDivElement | null>(null)
   const [sourcePath, setSourcePath] = useState('')
   const [scenes, setScenes] = useState<StrategyManageSceneItem[]>([])
   const [rules, setRules] = useState<StrategyManageRuleItem[]>([])
@@ -393,6 +422,9 @@ export default function StrategyManagePage() {
   const [bulkNewSceneId, setBulkNewSceneId] = useState('')
   const [bulkError, setBulkError] = useState('')
   const [isAssetModalOpen, setIsAssetModalOpen] = useState(false)
+  const [bulkBoardWidth, setBulkBoardWidth] = useState(0)
+  const [bulkSceneStripHeight, setBulkSceneStripHeight] = useState(0)
+  const [bulkStackRulePoolMaxHeight, setBulkStackRulePoolMaxHeight] = useState(0)
 
   const selectedScene = useMemo(
     () => scenes.find((item) => item.name === selectedSceneName) ?? null,
@@ -447,6 +479,11 @@ export default function StrategyManagePage() {
       return haystack.includes(keyword)
     })
   }, [rules, bulkRuleSceneFilter, bulkRuleKeyword, refactorRules])
+
+  const bulkCandidateRuleCount = useMemo(() => {
+    const chosenRuleNames = new Set(refactorRules.map((item) => item.name))
+    return rules.filter((item) => !chosenRuleNames.has(item.name)).length
+  }, [rules, refactorRules])
 
   const bulkValidationIssues = useMemo(() => {
     const issues: string[] = []
@@ -509,14 +546,12 @@ export default function StrategyManagePage() {
       }
     }
 
-    const sourceRuleNameSet = new Set(rules.map((item) => item.name))
-    const unclassifiedRules = Array.from(sourceRuleNameSet).filter((name) => !ruleNameSet.has(name))
-    if (unclassifiedRules.length > 0) {
-      issues.push(`仍有 ${unclassifiedRules.length} 条原始 Rule 未分类`) 
+    if (bulkCandidateRuleCount > 0) {
+      issues.push(`候选池还有 ${bulkCandidateRuleCount} 条 Rule，必须全部归入 Scene 篮子后才能保存`)
     }
 
     return Array.from(new Set(issues))
-  }, [refactorFileName, refactorScenes, refactorRules, rules])
+  }, [bulkCandidateRuleCount, refactorFileName, refactorScenes, refactorRules])
 
   const refactorSceneNames = useMemo(
     () => refactorScenes.map((item) => item.name.trim()).filter(Boolean),
@@ -603,15 +638,18 @@ export default function StrategyManagePage() {
   }
 
   function openBulkEditor() {
-    const initialSceneName = 'new_scene'
-    const initialScene = createRefactorSceneDraft(initialSceneName)
+    const nextScenes = scenes.map((scene) => buildRefactorSceneDraftFromScene(scene))
+    const initialSceneName =
+      nextScenes.find((scene) => scene.name === selectedSceneName)?.name ??
+      nextScenes[0]?.name ??
+      ''
     setRefactorFileName(STRATEGY_RULE_FILE_NAME)
-    setRefactorScenes([initialScene])
-    setRefactorRules([])
+    setRefactorScenes(nextScenes)
+    setRefactorRules(rules.map((rule) => buildDraftFromRule(rule)))
     setBulkRuleSceneFilter('ALL')
     setBulkRuleKeyword('')
     setBulkActiveSceneName(initialSceneName)
-    setBulkNewSceneId(initialScene.id)
+    setBulkNewSceneId('')
     setBulkError('')
     setIsBulkEditorOpen(true)
     setError('')
@@ -624,6 +662,16 @@ export default function StrategyManagePage() {
     setBulkRuleKeyword('')
     setBulkActiveSceneName('')
     setBulkNewSceneId('')
+  }
+
+  function clearBulkEditor() {
+    setRefactorScenes([])
+    setRefactorRules([])
+    setBulkRuleSceneFilter('ALL')
+    setBulkRuleKeyword('')
+    setBulkActiveSceneName('')
+    setBulkNewSceneId('')
+    setBulkError('')
   }
 
   function addRefactorScene() {
@@ -880,6 +928,7 @@ export default function StrategyManagePage() {
     setBulkError('')
     setError('')
     try {
+      const preferredSceneName = bulkActiveSceneName
       const outputPath = await saveStrategyManageRefactorFile(sourcePath, refactorFileName.trim(), {
         scenes: refactorScenes.map((scene) => ({
           name: scene.name.trim(),
@@ -899,8 +948,10 @@ export default function StrategyManagePage() {
           explain: rule.explain.trim(),
         })),
       })
-      setNotice(`策略重构文件已保存: ${outputPath}`)
-      setIsBulkEditorOpen(false)
+      const refreshedData = await getStrategyManagePage(sourcePath)
+      applyPageData(refreshedData, preferredSceneName)
+      closeBulkEditor()
+      setNotice(`当前策略已保存: ${outputPath}`)
     } catch (bulkSaveError) {
       setBulkError(`整体编辑保存失败: ${String(bulkSaveError)}`)
       setNotice('')
@@ -970,8 +1021,35 @@ export default function StrategyManagePage() {
   const isEditing = draft !== null
   const isDeleteSceneBlocked = Boolean(deleteSceneTarget && deleteSceneTarget.rule_count > 0)
   const bulkTotalRuleCount = rules.length
-  const bulkClassifiedCount = refactorRules.length
-  const bulkPendingCount = bulkFilteredRules.length
+  const bulkBucketRuleCount = refactorRules.length
+  const bulkPendingCount = bulkCandidateRuleCount
+  const bulkSceneStripMinHeight = BULK_SCENE_BOX_MIN_HEIGHT * 2 + BULK_SCENE_GAP
+  const bulkResolvedSceneStripHeight = Math.max(bulkSceneStripHeight, bulkSceneStripMinHeight)
+  const bulkResolvedStackRulePoolMaxHeight = Math.max(bulkStackRulePoolMaxHeight, 240)
+  const bulkLayoutMode =
+    bulkBoardWidth > 0 && bulkBoardWidth <= BULK_STACK_SINGLE_SCENE_BREAKPOINT
+      ? 'stack-single'
+      : bulkBoardWidth > 0 && bulkBoardWidth <= BULK_STACK_BREAKPOINT
+        ? 'stack-double'
+        : 'split'
+  const bulkBoardStyle = useMemo(
+    () =>
+      ({
+        '--strategy-manage-bulk-board-gap': `${BULK_BOARD_GAP}px`,
+        '--strategy-manage-bulk-pool-side-min-width': `${BULK_POOL_SIDE_MIN_WIDTH}px`,
+        '--strategy-manage-bulk-scene-side-min-width': `${BULK_SCENE_SIDE_MIN_WIDTH}px`,
+        '--strategy-manage-bulk-scene-box-min-height': `${BULK_SCENE_BOX_MIN_HEIGHT}px`,
+        '--strategy-manage-bulk-scene-gap': `${BULK_SCENE_GAP}px`,
+        '--strategy-manage-bulk-scene-strip-min-height': `${bulkSceneStripMinHeight}px`,
+        '--strategy-manage-bulk-scene-strip-height': `${bulkResolvedSceneStripHeight}px`,
+        '--strategy-manage-bulk-stack-rule-pool-max-height': `${bulkResolvedStackRulePoolMaxHeight}px`,
+      }) as CSSProperties,
+    [
+      bulkResolvedSceneStripHeight,
+      bulkResolvedStackRulePoolMaxHeight,
+      bulkSceneStripMinHeight,
+    ],
+  )
 
   useEffect(() => {
     if (!isSyntaxGuideOpen) {
@@ -985,6 +1063,71 @@ export default function StrategyManagePage() {
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [isSyntaxGuideOpen])
+
+  useEffect(() => {
+    if (!isBulkEditorOpen) {
+      setBulkBoardWidth(0)
+      setBulkSceneStripHeight(0)
+      setBulkStackRulePoolMaxHeight(0)
+      return
+    }
+
+    const modalElement = bulkModalRef.current
+    const boardElement = bulkBoardRef.current
+    const sceneStripElement = bulkSceneStripRef.current
+    const rulePoolElement = bulkRulePoolRef.current
+    if (
+      !modalElement ||
+      !boardElement ||
+      !sceneStripElement ||
+      !rulePoolElement ||
+      typeof ResizeObserver === 'undefined'
+    ) {
+      return
+    }
+
+    let frameId = 0
+    const syncLayoutMetrics = () => {
+      if (frameId) {
+        window.cancelAnimationFrame(frameId)
+      }
+      frameId = window.requestAnimationFrame(() => {
+        const nextBoardWidth = Math.round(boardElement.getBoundingClientRect().width)
+        const nextSceneStripHeight = Math.round(sceneStripElement.getBoundingClientRect().height)
+        const modalRect = modalElement.getBoundingClientRect()
+        const rulePoolRect = rulePoolElement.getBoundingClientRect()
+        const nextStackRulePoolMaxHeight = Math.max(
+          240,
+          Math.round(modalRect.bottom - rulePoolRect.top - 24),
+        )
+        setBulkBoardWidth((current) => (current === nextBoardWidth ? current : nextBoardWidth))
+        setBulkSceneStripHeight((current) =>
+          current === nextSceneStripHeight ? current : nextSceneStripHeight,
+        )
+        setBulkStackRulePoolMaxHeight((current) =>
+          current === nextStackRulePoolMaxHeight ? current : nextStackRulePoolMaxHeight,
+        )
+      })
+    }
+
+    syncLayoutMetrics()
+    const observer = new ResizeObserver(syncLayoutMetrics)
+    observer.observe(modalElement)
+    observer.observe(boardElement)
+    observer.observe(sceneStripElement)
+    observer.observe(rulePoolElement)
+    modalElement.addEventListener('scroll', syncLayoutMetrics, { passive: true })
+    window.addEventListener('resize', syncLayoutMetrics)
+
+    return () => {
+      observer.disconnect()
+      modalElement.removeEventListener('scroll', syncLayoutMetrics)
+      window.removeEventListener('resize', syncLayoutMetrics)
+      if (frameId) {
+        window.cancelAnimationFrame(frameId)
+      }
+    }
+  }, [isBulkEditorOpen, refactorScenes.length, refactorRules.length, bulkNewSceneId])
 
   return (
     <div className="strategy-manage-page">
@@ -1498,26 +1641,30 @@ export default function StrategyManagePage() {
 
       {isBulkEditorOpen ? (
         <div className="strategy-manage-modal-backdrop" role="presentation">
-          <div className="strategy-manage-modal strategy-manage-editor-modal" role="dialog" aria-modal="true">
+          <div
+            ref={bulkModalRef}
+            className="strategy-manage-modal strategy-manage-editor-modal"
+            role="dialog"
+            aria-modal="true"
+          >
             <div className="strategy-manage-list-head strategy-manage-bulk-head">
-              <strong>策略整理台</strong>
-              <span>候选池点选加入；Scene 方块内点 Rule 即移出</span>
+              <strong>策略整体编辑</strong>
+              <span>候选池点选加入；Scene 方块内点 Rule 即移出；保存前只改临时草稿</span>
             </div>
-            {bulkError ? <div className="strategy-manage-message strategy-manage-message-error">{bulkError}</div> : null}
 
             <div className="strategy-manage-bulk-top-inline">
               <span className="strategy-manage-tip">将直接覆盖：{refactorFileName}</span>
               <div className="strategy-manage-bulk-kpi">
                 <div className="strategy-manage-summary-item">
-                  <span>总 Rule</span>
+                  <span>原始 Rule</span>
                   <strong>{bulkTotalRuleCount}</strong>
                 </div>
                 <div className="strategy-manage-summary-item">
-                  <span>已分类</span>
-                  <strong>{bulkClassifiedCount}</strong>
+                  <span>篮子内</span>
+                  <strong>{bulkBucketRuleCount}</strong>
                 </div>
                 <div className="strategy-manage-summary-item">
-                  <span>待分类</span>
+                  <span>候选池</span>
                   <strong>{bulkPendingCount}</strong>
                 </div>
               </div>
@@ -1527,14 +1674,26 @@ export default function StrategyManagePage() {
               <div className="strategy-manage-bulk-row-actions">
                 <span className="strategy-manage-tip">当前放入目标：{bulkActiveSceneName || '未选择'}</span>
                 <button className="strategy-manage-inline-btn" type="button" onClick={addRefactorScene}>新增 Scene</button>
+                <button
+                  className="strategy-manage-inline-btn is-danger"
+                  type="button"
+                  onClick={clearBulkEditor}
+                  disabled={isBusy || (refactorScenes.length === 0 && refactorRules.length === 0)}
+                >
+                  全部清空
+                </button>
               </div>
             </div>
 
-            <div className="strategy-manage-bulk-simple-board">
-              <section className="strategy-manage-bulk-board-col">
+            <div
+              ref={bulkBoardRef}
+              className={`strategy-manage-bulk-simple-board strategy-manage-bulk-simple-board-${bulkLayoutMode}`}
+              style={bulkBoardStyle}
+            >
+              <section className="strategy-manage-bulk-board-col strategy-manage-bulk-board-col-pool">
                 <div className="strategy-manage-list-head">
                   <strong>候选 Rule 池（点击放入当前目标 Scene）</strong>
-                  <span>{bulkFilteredRules.length} 条待分类</span>
+                  <span>{bulkFilteredRules.length} / {bulkCandidateRuleCount} 条候选</span>
                 </div>
                 <div className="strategy-manage-bulk-filter-bar strategy-manage-bulk-filter-bar-simple strategy-manage-bulk-filter-bar-compact">
                   <label className="strategy-manage-field">
@@ -1555,7 +1714,10 @@ export default function StrategyManagePage() {
                     />
                   </label>
                 </div>
-                <div className="strategy-manage-bulk-rule-list strategy-manage-bulk-rule-pool">
+                <div
+                  ref={bulkRulePoolRef}
+                  className="strategy-manage-bulk-rule-list strategy-manage-bulk-rule-pool"
+                >
                   {bulkFilteredRules.map((rule) => (
                     <button
                       key={rule.name}
@@ -1572,10 +1734,10 @@ export default function StrategyManagePage() {
                 </div>
               </section>
 
-              <section className="strategy-manage-bulk-board-col strategy-manage-bulk-board-col-center">
+              <section className="strategy-manage-bulk-board-col strategy-manage-bulk-board-col-center strategy-manage-bulk-board-col-scenes">
                 <div className="strategy-manage-list-head">
                   <strong>Scene 篮子区（点击 Scene 设为放入目标）</strong>
-                  <span>{refactorRules.length} 条已加入</span>
+                  <span>{refactorRules.length} 条在篮子内</span>
                 </div>
                 <div className="strategy-manage-bulk-validation">
                   <div className="strategy-manage-bulk-validation-head">
@@ -1590,10 +1752,10 @@ export default function StrategyManagePage() {
                       {bulkValidationIssues.length > 6 ? <li key="__more">... 另有 {bulkValidationIssues.length - 6} 项</li> : null}
                     </ul>
                   ) : (
-                    <p className="strategy-manage-note">当前结构合法，可直接保存覆盖策略文件。</p>
+                    <p className="strategy-manage-note">当前临时策略结构合法，可直接保存覆盖策略文件。</p>
                   )}
                 </div>
-                <div className="strategy-manage-bulk-scene-strip">
+                <div className="strategy-manage-bulk-scene-strip" ref={bulkSceneStripRef}>
                   {refactorScenes.map((scene) => {
                     const sceneName = scene.name.trim()
                     const bucket = sceneName ? (refactorRulesByScene.get(sceneName) ?? []) : []
@@ -1679,9 +1841,10 @@ export default function StrategyManagePage() {
               </section>
             </div>
 
+            {bulkError ? <div className="strategy-manage-message strategy-manage-message-error">{bulkError}</div> : null}
             <div className="strategy-manage-editor-actions">
               <button className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary" type="button" onClick={() => void onSaveBulkScene()} disabled={isBusy}>
-                {busyAction === 'saving' ? '保存中...' : '保存为新策略文件'}
+                {busyAction === 'saving' ? '保存中...' : '保存当前策略'}
               </button>
               <button className="strategy-manage-toolbar-btn" type="button" onClick={closeBulkEditor} disabled={isBusy}>
                 取消

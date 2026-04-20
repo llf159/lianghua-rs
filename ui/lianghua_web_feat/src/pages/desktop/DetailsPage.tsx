@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
@@ -24,6 +25,8 @@ import {
   type DetailPrevRankRow,
   type DetailSceneTriggerRow,
   type DetailStrategyTriggerRow,
+  type StockSimilarityPageData,
+  type StockSimilarityRow,
   type StockDetailRealtimeData,
   type StockDetailPageData,
 } from "../../apis/details";
@@ -495,6 +498,22 @@ function buildRankValue(rank: unknown, total: unknown) {
   return totalText === "--" ? rankText : `${rankText} / ${totalText}`;
 }
 
+function buildSimilarityReasonText(row: StockSimilarityRow) {
+  const parts: string[] = [];
+
+  if (row.matchedConcepts.length > 0) {
+    parts.push(`概念 ${row.matchedConcepts.join("、")}`);
+  }
+  if (row.sameIndustry && row.industry) {
+    parts.push(`行业 ${row.industry}`);
+  }
+  if (row.matchedSceneNames.length > 0) {
+    parts.push(`场景 ${row.matchedSceneNames.join("、")}`);
+  }
+
+  return parts.length > 0 ? parts.join(" | ") : "未命中可展示的相似标签";
+}
+
 function formatPercentValue(value: number | null) {
   if (value === null || !Number.isFinite(value)) {
     return "--";
@@ -681,22 +700,20 @@ type SceneOverviewItem = {
 };
 
 const SCENE_OVERVIEW_COLORS = [
-  "#f59e0b",
   "#2563eb",
+  "#dc2626",
   "#16a34a",
-  "#ef4444",
+  "#d97706",
+  "#7c3aed",
   "#0891b2",
-  "#ea580c",
-  "#4f46e5",
-  "#65a30d",
+  "#c026d3",
+  "#92400e",
+  "#4b5563",
+  "#4d7c0f",
 ] as const;
 
-function getSceneOverviewColor(sceneName: string) {
-  let hash = 0;
-  for (const char of sceneName) {
-    hash = (hash * 31 + char.codePointAt(0)!) >>> 0;
-  }
-  return SCENE_OVERVIEW_COLORS[hash % SCENE_OVERVIEW_COLORS.length];
+function getSceneOverviewColor(index: number) {
+  return SCENE_OVERVIEW_COLORS[index % SCENE_OVERVIEW_COLORS.length];
 }
 
 function buildSceneRuleScoreMap(detail: StockDetailPageData | null | undefined) {
@@ -755,7 +772,7 @@ function buildSceneOverviewItems(
 
   const denominator = assignedRuleTotal !== 0 ? assignedRuleTotal : null;
 
-  const baseItems = sortedRows.map((row) => {
+  const baseItems = sortedRows.map((row, index) => {
     const stageScore =
       typeof row.stage_score === "number" && Number.isFinite(row.stage_score)
         ? row.stage_score
@@ -779,7 +796,7 @@ function buildSceneOverviewItems(
           ? (sceneRuleScore / denominator) * 100
           : null,
       contributionPctDisplay: null,
-      color: getSceneOverviewColor(row.scene_name),
+      color: getSceneOverviewColor(index),
       sceneRow: row,
     } as SceneOverviewItem;
   });
@@ -2459,13 +2476,18 @@ function OverviewSummarySection({
   rows,
   conceptText,
   conceptCount,
+  overviewCardRef,
 }: {
   rows: FieldRow[];
   conceptText: string;
   conceptCount: number;
+  overviewCardRef: { current: HTMLElement | null };
 }) {
   return (
-    <section className="details-card details-overview-card">
+    <section
+      className="details-card details-overview-card"
+      ref={overviewCardRef}
+    >
       <h3 className="details-subtitle">总览</h3>
       <div className="details-overview-card-body">
         {renderFieldGrid(rows)}
@@ -2484,6 +2506,68 @@ function OverviewSummarySection({
             )}
           </div>
         </div>
+      </div>
+    </section>
+  );
+}
+
+function SimilaritySection({
+  data,
+  onSelectStock,
+}: {
+  data: StockSimilarityPageData | null | undefined;
+  onSelectStock: (row: StockSimilarityRow) => void;
+}) {
+  const items = data?.items ?? [];
+
+  return (
+    <section className="details-card details-rank-card details-similarity-card">
+      <div className="details-section-head details-section-head-strategy details-similarity-head">
+        <div>
+          <h3 className="details-subtitle">相似股票</h3>
+        </div>
+      </div>
+      <div className="details-rank-card-body details-similarity-card-body">
+        {items.length === 0 ? (
+          <div className="details-empty details-empty-soft">
+            暂无相似股票
+          </div>
+        ) : (
+          <div className="details-table-wrap details-similarity-table-wrap">
+            <table className="details-table details-similarity-table">
+              <thead>
+                <tr>
+                  <th>股票</th>
+                  <th>相似度</th>
+                  <th>总榜</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((row) => (
+                  <tr key={row.tsCode}>
+                    <td>
+                      <button
+                        className="details-similarity-stock-btn"
+                        type="button"
+                        onClick={() => onSelectStock(row)}
+                      >
+                        <strong>{row.name?.trim() || splitTsCode(row.tsCode)}</strong>
+                        <span className="details-similarity-stock-code">
+                          {row.tsCode}
+                        </span>
+                      </button>
+                      <div className="details-similarity-meta" title={buildSimilarityReasonText(row)}>
+                        {buildSimilarityReasonText(row)}
+                      </div>
+                    </td>
+                    <td>{formatNumber(row.similarityScore, 1)}</td>
+                    <td>{row.rank === null || row.rank === undefined ? "--" : `#${row.rank}`}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </section>
   );
@@ -2509,6 +2593,12 @@ export default function DetailsPage({
   );
   const [dateOptions, setDateOptions] = useState<string[]>([]);
   const [lookupFocused, setLookupFocused] = useState(false);
+  const [inlineNavigationItems, setInlineNavigationItems] = useState<
+    DetailsNavigationItem[] | null
+  >(null);
+  const [overviewCardHeight, setOverviewCardHeight] = useState<number | null>(
+    null,
+  );
 
   const [topLoading, setTopLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -2557,6 +2647,7 @@ export default function DetailsPage({
     useState<DetailSceneTriggerRow | null>(null);
   const chartDragRef = useRef<ChartDragState | null>(null);
   const chartCardRef = useRef<HTMLElement | null>(null);
+  const overviewCardRef = useRef<HTMLElement | null>(null);
   const strategyGridRef = useRef<HTMLDivElement | null>(null);
   const strategyResizePointerIdRef = useRef<number | null>(null);
   const currentRankRowRef = useRef<HTMLTableRowElement | null>(null);
@@ -2867,6 +2958,7 @@ export default function DetailsPage({
     }
 
     autoFillTopRef.current = false;
+    setInlineNavigationItems(null);
     if (normalizedCode === "" && exactStockLookupMatch) {
       setLookupInput(exactStockLookupMatch.name);
     }
@@ -2900,6 +2992,7 @@ export default function DetailsPage({
     }
 
     setLookupFocused(false);
+    setInlineNavigationItems(null);
     onAutoReadDetail(
       tradeDateInput,
       stdTsCode(nextCode),
@@ -2922,11 +3015,47 @@ export default function DetailsPage({
         ? matchedRow.trade_date.trim()
         : tradeDateInput;
 
+    setInlineNavigationItems(null);
     onAutoReadDetail(
       nextTradeDate,
       stdTsCode(nextCode),
       matchedRow?.name?.trim() || nextCode,
     );
+  }
+
+  function onSelectSimilarityRow(row: StockSimilarityRow) {
+    const similarityNavigationItems: DetailsNavigationItem[] =
+      stockSimilarity?.items.map((item) => ({
+        tsCode: item.tsCode,
+        tradeDate:
+          stockSimilarity.resolvedTradeDate ||
+          detailData?.resolved_trade_date ||
+          tradeDateInput.trim() ||
+          null,
+        sourcePath: sourcePathTrimmed || null,
+        name: item.name?.trim() || splitTsCode(item.tsCode),
+      })) ?? [];
+    const nextTradeDate =
+      stockSimilarity?.resolvedTradeDate?.trim() ||
+      detailData?.resolved_trade_date?.trim() ||
+      tradeDateInput.trim();
+    const lookupValue = row.name?.trim() || getLookupDigits(row.tsCode);
+    setInlineNavigationItems(
+      similarityNavigationItems.length > 0 ? similarityNavigationItems : null,
+    );
+    onAutoReadDetail(nextTradeDate, row.tsCode, lookupValue);
+  }
+
+  function onSelectPrevRankTradeDate(nextTradeDate: string) {
+    const tradeDate = nextTradeDate.trim();
+    if (!tradeDate || resolvedTsCode === "--") {
+      return;
+    }
+
+    const lookupValue =
+      detailData?.overview?.name?.trim() || getLookupDigits(resolvedTsCode);
+    setInlineNavigationItems(null);
+    onAutoReadDetail(tradeDate, resolvedTsCode, lookupValue);
   }
 
   function onLookupInputChange(rawValue: string) {
@@ -2973,6 +3102,15 @@ export default function DetailsPage({
   const conceptText = conceptItems.length > 0 ? conceptItems.join("、") : "--";
   const watermarkConcept = buildConceptPreview(conceptItems);
   const prevRanks = detailData?.prev_ranks ?? EMPTY_PREV_RANK_ROWS;
+  const stockSimilarity = detailData?.stock_similarity ?? null;
+  const overviewGridStyle = useMemo(() => {
+    if (overviewCardHeight === null) {
+      return undefined;
+    }
+    return {
+      ["--details-side-stack-height" as const]: `${overviewCardHeight}px`,
+    } as CSSProperties;
+  }, [overviewCardHeight]);
   const strategySnapshotTradeDate =
     strategyCompareSnapshot?.tsCode === resolvedTsCode
       ? strategyCompareSnapshot.relativeTradeDate
@@ -3251,6 +3389,8 @@ export default function DetailsPage({
   const activeNavigationItems =
     linkedNavigationItems.length > 0
       ? linkedNavigationItems
+      : inlineNavigationItems && inlineNavigationItems.length > 0
+        ? inlineNavigationItems
       : defaultNavigationItems;
   const currentNavigationIndex = findNavigationIndex(
     activeNavigationItems,
@@ -3286,6 +3426,32 @@ export default function DetailsPage({
           },
     [isStrategyStacked, strategySplitRatio],
   );
+
+  useLayoutEffect(() => {
+    const element = overviewCardRef.current;
+    if (!element) {
+      setOverviewCardHeight(null);
+      return;
+    }
+
+    const syncHeight = () => {
+      const nextHeight = Math.round(element.getBoundingClientRect().height);
+      setOverviewCardHeight(nextHeight > 0 ? nextHeight : null);
+    };
+
+    syncHeight();
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      syncHeight();
+    });
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+    };
+  }, [conceptText, conceptItems.length, overviewRows.length]);
 
   useEffect(() => {
     if (totalChartItems === 0) {
@@ -4588,87 +4754,108 @@ export default function DetailsPage({
         </div>
       </section>
 
-      <div className="details-overview-grid">
+      <div className="details-overview-grid" style={overviewGridStyle}>
         <OverviewSummarySection
           rows={overviewRows}
           conceptText={conceptText}
           conceptCount={conceptItems.length}
+          overviewCardRef={overviewCardRef}
         />
 
-        <section className="details-card details-rank-card details-prev-rank-card">
-          <div className="details-section-head details-section-head-strategy details-prev-rank-head">
-            <div>
-              <h3 className="details-subtitle">前日排名</h3>
-              <p className="details-note">支持按日期/排名排序，点击可定位到参考日。</p>
+        <div className="details-side-stack">
+          <section className="details-card details-rank-card details-prev-rank-card">
+            <div className="details-section-head details-section-head-strategy details-prev-rank-head">
+              <div>
+                <h3 className="details-subtitle">前日排名</h3>
+              </div>
             </div>
-          </div>
-          <div className="details-rank-card-body details-prev-rank-card-body">
-            {prevRanks.length === 0 ? (
-              <div className="details-empty details-empty-soft">
-                暂无前日排名
-              </div>
-            ) : (
-              <div className="details-table-wrap details-prev-rank-table-wrap" ref={rankTableWrapRef}>
-                <table className="details-table details-prev-rank-table">
-                  <thead>
-                    <tr>
-                      <th
-                        aria-sort={getAriaSort(
-                          prevRankSortKey === "trade_date",
-                          prevRankSortDirection,
-                        )}
-                      >
-                        <TableSortButton
-                          label="日期"
-                          isActive={prevRankSortKey === "trade_date"}
-                          direction={prevRankSortDirection}
-                          onClick={() => togglePrevRankSort("trade_date")}
-                          title="按日期排序"
-                        />
-                      </th>
-                      <th
-                        aria-sort={getAriaSort(
-                          prevRankSortKey === "rank",
-                          prevRankSortDirection,
-                        )}
-                      >
-                        <TableSortButton
-                          label="排名"
-                          isActive={prevRankSortKey === "rank"}
-                          direction={prevRankSortDirection}
-                          onClick={() => togglePrevRankSort("rank")}
-                          title="按排名排序"
-                        />
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sortedPrevRanks.map((row) => {
-                      const isReferenceDate = row.trade_date === resolvedTradeDate;
-                      return (
-                        <tr
-                          className={isReferenceDate ? "details-table-current-row" : ""}
-                          key={row.trade_date}
-                          ref={isReferenceDate ? currentRankRowRef : null}
+            <div className="details-rank-card-body details-prev-rank-card-body">
+              {prevRanks.length === 0 ? (
+                <div className="details-empty details-empty-soft">
+                  暂无前日排名
+                </div>
+              ) : (
+                <div className="details-table-wrap details-prev-rank-table-wrap" ref={rankTableWrapRef}>
+                  <table className="details-table details-prev-rank-table">
+                    <thead>
+                      <tr>
+                        <th
+                          aria-sort={getAriaSort(
+                            prevRankSortKey === "trade_date",
+                            prevRankSortDirection,
+                          )}
                         >
-                          <td>
-                            {row.trade_date}
-                            {isReferenceDate ? (
-                              <span className="details-current-date-chip">
-                                参考日
-                              </span>
-                            ) : null}
-                          </td>
-                          <td>{buildRankValue(row.rank, row.total)}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        </section>
+                          <TableSortButton
+                            label="日期"
+                            isActive={prevRankSortKey === "trade_date"}
+                            direction={prevRankSortDirection}
+                            onClick={() => togglePrevRankSort("trade_date")}
+                            title="按日期排序"
+                          />
+                        </th>
+                        <th
+                          aria-sort={getAriaSort(
+                            prevRankSortKey === "rank",
+                            prevRankSortDirection,
+                          )}
+                        >
+                          <TableSortButton
+                            label="排名"
+                            isActive={prevRankSortKey === "rank"}
+                            direction={prevRankSortDirection}
+                            onClick={() => togglePrevRankSort("rank")}
+                            title="按排名排序"
+                          />
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedPrevRanks.map((row) => {
+                        const isReferenceDate = row.trade_date === resolvedTradeDate;
+                        return (
+                          <tr
+                            className={[
+                              isReferenceDate ? "details-table-current-row" : "",
+                              "details-prev-rank-row",
+                            ]
+                              .filter(Boolean)
+                              .join(" ")}
+                            key={row.trade_date}
+                            ref={isReferenceDate ? currentRankRowRef : null}
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => onSelectPrevRankTradeDate(row.trade_date)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                onSelectPrevRankTradeDate(row.trade_date);
+                              }
+                            }}
+                          >
+                            <td>
+                              {row.trade_date}
+                              {isReferenceDate ? (
+                                <span className="details-current-date-chip">
+                                  参考日
+                                </span>
+                              ) : null}
+                            </td>
+                            <td>{buildRankValue(row.rank, row.total)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </section>
+
+          <SimilaritySection
+            data={stockSimilarity}
+            onSelectStock={onSelectSimilarityRow}
+          />
+        </div>
 
         <section className="details-card details-rank-card details-scene-overview-card">
           <div className="details-section-head details-section-head-strategy details-scene-overview-head">

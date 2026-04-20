@@ -43,20 +43,10 @@ fn format_elapsed_ms(elapsed_ms: u64) -> String {
 }
 
 fn log_rank_tiebreak_profile(profile: &RankTiebreakProfile) {
-    let attach = profile
-        .attach_source_db_ms
-        .map(format_elapsed_ms)
-        .unwrap_or_else(|| "-".to_string());
-    let detach = profile
-        .detach_source_db_ms
-        .map(format_elapsed_ms)
-        .unwrap_or_else(|| "-".to_string());
     println!(
-        "补排名耗时: 总计={}；附加原始库={}；补排名回写={}；分离原始库={}",
+        "补排名耗时: 总计={}；补排名={}",
         format_elapsed_ms(profile.total_ms),
-        attach,
         format_elapsed_ms(profile.update_rank_ms),
-        detach,
     );
 }
 

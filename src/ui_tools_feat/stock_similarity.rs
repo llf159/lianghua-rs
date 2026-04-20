@@ -221,15 +221,14 @@ fn calc_ratio_score(
     (score, matched_items)
 }
 
-pub fn get_stock_similarity_page(
-    source_path: String,
-    trade_date: Option<String>,
-    ts_code: String,
+pub(crate) fn get_stock_similarity_page_with_conn(
+    conn: &Connection,
+    source_path: &str,
+    effective_trade_date: &str,
+    ts_code: &str,
     limit: Option<u32>,
 ) -> Result<StockSimilarityPageData, String> {
-    let normalized_ts_code = normalize_ts_code(&ts_code);
-    let conn = open_result_conn(&source_path)?;
-    let effective_trade_date = resolve_trade_date(&conn, trade_date)?;
+    let normalized_ts_code = normalize_ts_code(ts_code);
     let summary_rows = load_summary_rows(&conn, &effective_trade_date)?;
     if summary_rows.is_empty() {
         return Err(format!("未找到 {} 的评分样本", effective_trade_date));
@@ -366,7 +365,7 @@ pub fn get_stock_similarity_page(
     let target_name = name_map.get(&normalized_ts_code).cloned();
 
     Ok(StockSimilarityPageData {
-        resolved_trade_date: effective_trade_date,
+        resolved_trade_date: effective_trade_date.to_string(),
         resolved_ts_code: normalized_ts_code.clone(),
         target: StockSimilarityTarget {
             ts_code: normalized_ts_code,
@@ -379,6 +378,17 @@ pub fn get_stock_similarity_page(
         },
         items,
     })
+}
+
+pub fn get_stock_similarity_page(
+    source_path: String,
+    trade_date: Option<String>,
+    ts_code: String,
+    limit: Option<u32>,
+) -> Result<StockSimilarityPageData, String> {
+    let conn = open_result_conn(&source_path)?;
+    let effective_trade_date = resolve_trade_date(&conn, trade_date)?;
+    get_stock_similarity_page_with_conn(&conn, &source_path, &effective_trade_date, &ts_code, limit)
 }
 
 #[cfg(test)]

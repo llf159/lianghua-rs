@@ -15,6 +15,7 @@ use crate::{
         build_area_map, build_circ_mv_map, build_concepts_map, build_industry_map,
         build_most_related_concept_map, build_name_map, build_total_mv_map,
         realtime::{RealtimeFetchMeta, fetch_realtime_quote_map, normalize_quote_trade_date},
+        stock_similarity::{StockSimilarityPageData, get_stock_similarity_page_with_conn},
     },
     utils::utils::board_category,
 };
@@ -136,6 +137,8 @@ pub struct StockDetailPageData {
     pub resolved_ts_code: Option<String>,
     pub overview: Option<DetailOverview>,
     pub prev_ranks: Option<Vec<DetailPrevRankRow>>,
+    pub stock_similarity: Option<StockSimilarityPageData>,
+    pub stock_similarity_error: Option<String>,
     pub kline: Option<DetailKlinePayload>,
     pub strategy_triggers: Option<DetailStrategyPayload>,
     pub strategy_scenes: Option<DetailScenePayload>,
@@ -351,7 +354,11 @@ fn query_detail_overview(
     })
 }
 
-fn query_rank_history(conn: &Connection, ts_code: &str) -> Result<Vec<DetailPrevRankRow>, String> {
+fn query_rank_history(
+    conn: &Connection,
+    ts_code: &str,
+    limit: Option<usize>,
+) -> Result<Vec<DetailPrevRankRow>, String> {
     let mut stmt = conn
         .prepare(
             r#"
@@ -386,6 +393,12 @@ fn query_rank_history(conn: &Connection, ts_code: &str) -> Result<Vec<DetailPrev
                 .get(2)
                 .map_err(|e| format!("读取排名历史总数失败: {e}"))?,
         });
+    }
+
+    if let Some(limit) = limit {
+        if out.len() > limit {
+            out.truncate(limit);
+        }
     }
 
     Ok(out)
@@ -1181,7 +1194,7 @@ pub fn get_stock_detail_page(
     trade_date: Option<String>,
     ts_code: String,
     chart_window_days: Option<u32>,
-    _prev_rank_days: Option<u32>,
+    prev_rank_days: Option<u32>,
 ) -> Result<StockDetailPageData, String> {
     let normalized_ts_code = normalize_ts_code(&ts_code);
     let result_conn = open_result_conn(&source_path)?;
@@ -1195,7 +1208,23 @@ pub fn get_stock_detail_page(
         &normalized_ts_code,
     )?;
 
-    let prev_ranks = query_rank_history(&result_conn, &normalized_ts_code)?;
+    let prev_ranks = query_rank_history(
+        &result_conn,
+        &normalized_ts_code,
+        prev_rank_days
+            .map(|value| value as usize)
+            .filter(|value| *value > 0),
+    )?;
+    let (stock_similarity, stock_similarity_error) = match get_stock_similarity_page_with_conn(
+        &result_conn,
+        &source_path,
+        &effective_trade_date,
+        &normalized_ts_code,
+        Some(12),
+    ) {
+        Ok(data) => (Some(data), None),
+        Err(error) => (None, Some(error)),
+    };
     let kline = query_kline(
         &source_conn,
         &normalized_ts_code,
@@ -1214,6 +1243,8 @@ pub fn get_stock_detail_page(
         resolved_ts_code: Some(normalized_ts_code),
         overview: Some(overview),
         prev_ranks: Some(prev_ranks),
+        stock_similarity,
+        stock_similarity_error,
         kline: Some(kline),
         strategy_triggers: Some(strategy_triggers),
         strategy_scenes: Some(strategy_scenes),
