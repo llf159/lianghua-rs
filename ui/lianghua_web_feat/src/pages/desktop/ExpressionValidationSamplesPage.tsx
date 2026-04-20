@@ -22,6 +22,7 @@ export type SceneLayerValidationReturnState = {
   startDateInput: string;
   endDateInput: string;
   minSamplesPerDay: string;
+  minListedTradeDays: string;
   backtestPeriod: string;
   validationImportRuleName: string;
   validationExpression: string;

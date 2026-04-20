@@ -20,6 +20,7 @@ use crate::{
     scoring::tools::{calc_query_need_rows, inject_stock_extra_fields, load_st_list},
     scoring::{CachedRule, evaluate_cached_rule_scores},
     simulate::{
+        DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
         rule::{
             RuleLayerConfig, RuleLayerFromDbInput, RuleLayerRuntimeCache,
             build_rule_layer_runtime_cache, calc_all_rule_layer_metrics_from_db,
@@ -192,6 +193,7 @@ pub struct SceneLayerBacktestData {
     pub start_date: String,
     pub end_date: String,
     pub min_samples_per_scene_day: usize,
+    pub min_listed_trade_days: usize,
     pub backtest_period: usize,
     pub points: Vec<SceneLayerPointPayload>,
     pub spread_mean: Option<f64>,
@@ -244,6 +246,7 @@ pub struct RuleLayerBacktestData {
     pub start_date: String,
     pub end_date: String,
     pub min_samples_per_rule_day: usize,
+    pub min_listed_trade_days: usize,
     pub backtest_period: usize,
     pub points: Vec<RuleLayerPointPayload>,
     pub avg_residual_mean: Option<f64>,
@@ -2118,6 +2121,7 @@ fn build_rule_backtest_payload(
         start_date: params.start_date.clone(),
         end_date: params.end_date.clone(),
         min_samples_per_rule_day: params.min_samples_per_day,
+        min_listed_trade_days: params.min_listed_trade_days,
         backtest_period: params.backtest_period,
         points: metrics
             .points
@@ -2452,6 +2456,7 @@ pub fn run_rule_expression_validation(
     start_date: String,
     end_date: String,
     min_samples_per_rule_day: Option<usize>,
+    min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
     manual_strategy: Option<RuleExpressionValidationManualStrategy>,
     unknown_configs: Option<Vec<RuleValidationUnknownConfig>>,
@@ -2485,6 +2490,8 @@ pub fn run_rule_expression_validation(
         start_date: start_date.trim().to_string(),
         end_date: end_date.trim().to_string(),
         min_samples_per_day: min_samples_per_rule_day.unwrap_or(5).max(1),
+        min_listed_trade_days: min_listed_trade_days
+            .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1).max(1),
     };
 
@@ -2509,6 +2516,7 @@ pub fn run_rule_expression_validation(
     let layer_config = RuleLayerConfig {
         min_samples_per_day: params.min_samples_per_day,
         backtest_period: params.backtest_period,
+        min_listed_trade_days: params.min_listed_trade_days,
     };
     let runtime_cache = build_rule_layer_runtime_cache(
         &source_conn,
@@ -3545,6 +3553,7 @@ struct SceneLayerBacktestRunParams {
     start_date: String,
     end_date: String,
     min_samples_per_day: usize,
+    min_listed_trade_days: usize,
     backtest_period: usize,
 }
 
@@ -3558,6 +3567,7 @@ struct RuleLayerBacktestRunParams {
     start_date: String,
     end_date: String,
     min_samples_per_day: usize,
+    min_listed_trade_days: usize,
     backtest_period: usize,
 }
 
@@ -3616,7 +3626,14 @@ fn aggregate_all_rule_summary_metrics(
         _ => weighted_rule_summary_metric(summaries, |item| item.ic_t_value),
     };
 
-    (avg_residual_mean, spread_mean, ic_mean, ic_std, icir, ic_t_value)
+    (
+        avg_residual_mean,
+        spread_mean,
+        ic_mean,
+        ic_std,
+        icir,
+        ic_t_value,
+    )
 }
 
 fn run_scene_layer_backtest_core(
@@ -3628,6 +3645,7 @@ fn run_scene_layer_backtest_core(
     let layer_config = SceneLayerConfig {
         min_samples_per_day: params.min_samples_per_day,
         backtest_period: params.backtest_period,
+        min_listed_trade_days: params.min_listed_trade_days,
     };
 
     if let Some(scene_name) = scene_name {
@@ -3660,6 +3678,7 @@ fn run_scene_layer_backtest_core(
             start_date: input.start_date,
             end_date: input.end_date,
             min_samples_per_scene_day: input.layer_config.min_samples_per_day,
+            min_listed_trade_days: input.layer_config.min_listed_trade_days,
             backtest_period: input.layer_config.backtest_period,
             points: metrics
                 .points
@@ -3737,6 +3756,7 @@ fn run_scene_layer_backtest_core(
         start_date: params.start_date.clone(),
         end_date: params.end_date.clone(),
         min_samples_per_scene_day: params.min_samples_per_day,
+        min_listed_trade_days: params.min_listed_trade_days,
         backtest_period: params.backtest_period,
         points: Vec::new(),
         spread_mean: None,
@@ -3758,6 +3778,7 @@ fn run_rule_layer_backtest_core(
     let layer_config = RuleLayerConfig {
         min_samples_per_day: params.min_samples_per_day,
         backtest_period: params.backtest_period,
+        min_listed_trade_days: params.min_listed_trade_days,
     };
 
     if let Some(rule_name) = rule_name {
@@ -3790,6 +3811,7 @@ fn run_rule_layer_backtest_core(
             start_date: input.start_date,
             end_date: input.end_date,
             min_samples_per_rule_day: input.layer_config.min_samples_per_day,
+            min_listed_trade_days: input.layer_config.min_listed_trade_days,
             backtest_period: input.layer_config.backtest_period,
             points: metrics
                 .points
@@ -3865,6 +3887,7 @@ fn run_rule_layer_backtest_core(
         start_date: params.start_date.clone(),
         end_date: params.end_date.clone(),
         min_samples_per_rule_day: params.min_samples_per_day,
+        min_listed_trade_days: params.min_listed_trade_days,
         backtest_period: params.backtest_period,
         points: Vec::new(),
         avg_residual_mean,
@@ -3888,6 +3911,7 @@ pub fn run_scene_layer_backtest(
     start_date: String,
     end_date: String,
     min_samples_per_scene_day: Option<usize>,
+    min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
 ) -> Result<SceneLayerBacktestData, String> {
     let source_db = source_db_path(&source_path);
@@ -3909,6 +3933,8 @@ pub fn run_scene_layer_backtest(
         start_date: start_date.trim().to_string(),
         end_date: end_date.trim().to_string(),
         min_samples_per_day: min_samples_per_scene_day.unwrap_or(5),
+        min_listed_trade_days: min_listed_trade_days
+            .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1),
     };
 
@@ -3926,6 +3952,7 @@ pub fn run_rule_layer_backtest(
     start_date: String,
     end_date: String,
     min_samples_per_rule_day: Option<usize>,
+    min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
 ) -> Result<RuleLayerBacktestData, String> {
     let source_db = source_db_path(&source_path);
@@ -3947,6 +3974,8 @@ pub fn run_rule_layer_backtest(
         start_date: start_date.trim().to_string(),
         end_date: end_date.trim().to_string(),
         min_samples_per_day: min_samples_per_rule_day.unwrap_or(5),
+        min_listed_trade_days: min_listed_trade_days
+            .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1),
     };
 

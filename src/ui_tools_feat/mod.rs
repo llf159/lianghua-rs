@@ -18,8 +18,8 @@ pub mod overview_classic;
 pub mod ranking_compute;
 pub mod realtime;
 pub mod statistics;
-pub mod stock_similarity;
 pub mod stock_pick;
+pub mod stock_similarity;
 pub mod strategy_manage;
 pub mod watch_observe;
 

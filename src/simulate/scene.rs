@@ -4,7 +4,9 @@ use duckdb::{Connection, params_from_iter};
 use rayon::prelude::*;
 
 use super::{
-    ResidualFactorSeriesRefs, ResidualReturnInput, calc_stock_residual_returns_with_factor_series,
+    BacktestSampleEligibility, DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, ResidualFactorSeriesRefs,
+    ResidualReturnInput, build_backtest_sample_eligibility,
+    calc_stock_residual_returns_with_factor_series,
 };
 use crate::data::{
     concept_performance_data::{load_concept_trend_series, load_industry_trend_series},
@@ -17,6 +19,7 @@ const EPS: f64 = 1e-12;
 pub struct SceneLayerConfig {
     pub min_samples_per_day: usize,
     pub backtest_period: usize,
+    pub min_listed_trade_days: usize,
 }
 
 impl Default for SceneLayerConfig {
@@ -24,6 +27,7 @@ impl Default for SceneLayerConfig {
         Self {
             min_samples_per_day: 5,
             backtest_period: 1,
+            min_listed_trade_days: DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
         }
     }
 }
@@ -128,6 +132,7 @@ struct ResidualCacheInput<'a> {
     start_date: &'a str,
     end_date: &'a str,
     backtest_period: usize,
+    min_listed_trade_days: usize,
 }
 
 pub fn calc_scene_layer_metrics_from_db(
@@ -160,6 +165,7 @@ pub fn calc_scene_layer_metrics_from_db(
             start_date: &input.start_date,
             end_date: &input.end_date,
             backtest_period: input.layer_config.backtest_period,
+            min_listed_trade_days: input.layer_config.min_listed_trade_days,
         },
     )?;
     let samples = collect_scene_samples(rows_by_ts, &residual_map_cache)?;
@@ -226,6 +232,7 @@ pub fn calc_all_scene_layer_metrics_from_db(
             start_date,
             end_date,
             backtest_period: layer_config.backtest_period,
+            min_listed_trade_days: layer_config.min_listed_trade_days,
         },
     )?;
 
@@ -440,6 +447,8 @@ fn build_residual_map_cache(
     if ts_codes.is_empty() {
         return Ok(HashMap::new());
     }
+    let sample_eligibility =
+        build_backtest_sample_eligibility(source_dir, input.min_listed_trade_days)?;
 
     let concept_series_cache = build_concept_series_cache(
         source_dir,
@@ -475,6 +484,7 @@ fn build_residual_map_cache(
             &concept_series_cache,
             &industry_series_cache,
             input,
+            &sample_eligibility,
         )?;
         let mut out = HashMap::with_capacity(1);
         out.insert(ts_code, residual_map);
@@ -495,6 +505,7 @@ fn build_residual_map_cache(
                 &concept_series_cache,
                 &industry_series_cache,
                 input,
+                &sample_eligibility,
             )?;
             Ok((ts_code, residual_map))
         })
@@ -517,6 +528,7 @@ fn build_residual_map_for_ts_code(
     concept_series_cache: &HashMap<String, HashMap<String, f64>>,
     industry_series_cache: &HashMap<String, HashMap<String, f64>>,
     input: &ResidualCacheInput<'_>,
+    sample_eligibility: &BacktestSampleEligibility,
 ) -> Result<HashMap<String, f64>, String> {
     let most_related_concept = concept_map.get(ts_code).cloned().unwrap_or_default();
     let industry = industry_map.get(ts_code).cloned().unwrap_or_default();
@@ -551,10 +563,10 @@ fn build_residual_map_for_ts_code(
         },
     )?;
 
-    Ok(build_forward_backtest_residual_map(
-        residual_points,
-        input.backtest_period,
-    ))
+    let mut residual_map =
+        build_forward_backtest_residual_map(residual_points, input.backtest_period);
+    residual_map.retain(|trade_date, _| sample_eligibility.allows_sample(ts_code, trade_date));
+    Ok(residual_map)
 }
 
 fn build_concept_series_cache(
@@ -934,9 +946,26 @@ mod tests {
 
         write(
             PathBuf::from(source_dir).join("stock_list.csv"),
-            "ts_code,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,industry\n000001.SZ,,,,,,,,,,,,,,main\n",
+            concat!(
+                "ts_code,symbol,name,area,industry,list_date,trade_date,total_share,float_share,total_mv,circ_mv,fullname,enname,cnspell,market,exchange,curr_type,list_status,delist_date,is_hs,act_name,act_ent_type\n",
+                "000001.SZ,,样本股,,main,20230001,,,,,,,,,,,,,,,\n"
+            ),
         )
         .expect("write stock_list.csv");
+        let trade_calendar = std::iter::once("cal_date".to_string())
+            .chain((1..=70).map(|index| format!("202300{:02}", index)))
+            .chain(
+                ["20240102", "20240103", "20240104"]
+                    .into_iter()
+                    .map(str::to_string),
+            )
+            .collect::<Vec<_>>()
+            .join("\n");
+        write(
+            PathBuf::from(source_dir).join("trade_calendar.csv"),
+            format!("{trade_calendar}\n"),
+        )
+        .expect("write trade_calendar.csv");
         write(
             PathBuf::from(source_dir).join("stock_concepts.csv"),
             "ts_code,c1,c2,c3,concept\n000001.SZ,,,,concept-a\n",
@@ -1038,6 +1067,7 @@ mod tests {
         let layer_config = SceneLayerConfig {
             min_samples_per_day: 1,
             backtest_period: 1,
+            min_listed_trade_days: 0,
         };
 
         let batch_metrics = calc_all_scene_layer_metrics_from_db(

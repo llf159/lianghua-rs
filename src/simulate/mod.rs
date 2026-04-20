@@ -8,6 +8,113 @@ use duckdb::{Connection, params};
 use crate::data::concept_performance_data::{
     load_concept_trend_series, load_industry_trend_series,
 };
+use crate::data::{load_trade_date_list, stock_list_path};
+
+pub(crate) const DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS: usize = 60;
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct BacktestSampleEligibility {
+    trade_date_to_index: HashMap<String, usize>,
+    listed_trade_index_by_ts: HashMap<String, usize>,
+    min_listed_trade_days: usize,
+}
+
+impl BacktestSampleEligibility {
+    pub(super) fn allows_sample(&self, ts_code: &str, trade_date: &str) -> bool {
+        if self.min_listed_trade_days == 0 {
+            return true;
+        }
+
+        let Some(sample_idx) = self.trade_date_to_index.get(trade_date).copied() else {
+            return false;
+        };
+        let Some(listed_idx) = self.listed_trade_index_by_ts.get(ts_code).copied() else {
+            return true;
+        };
+
+        sample_idx + 1 >= listed_idx + self.min_listed_trade_days
+    }
+}
+
+pub(super) fn build_backtest_sample_eligibility(
+    source_dir: &str,
+    min_listed_trade_days: usize,
+) -> Result<BacktestSampleEligibility, String> {
+    if min_listed_trade_days == 0 {
+        return Ok(BacktestSampleEligibility::default());
+    }
+
+    let trade_dates = load_trade_date_list(source_dir)?;
+    let mut trade_date_to_index = HashMap::with_capacity(trade_dates.len());
+    for (index, trade_date) in trade_dates.iter().enumerate() {
+        trade_date_to_index.insert(trade_date.clone(), index);
+    }
+
+    let stock_list = stock_list_path(source_dir);
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(&stock_list)
+        .map_err(|e| format!("打开stock_list.csv失败:路径:{:?},错误:{e}", stock_list))?;
+    let headers = reader
+        .headers()
+        .map_err(|e| format!("读取stock_list.csv表头失败:{e}"))?
+        .iter()
+        .map(|value| value.trim().to_string())
+        .collect::<Vec<_>>();
+
+    let Some(ts_code_idx) = headers
+        .iter()
+        .position(|header| header.eq_ignore_ascii_case("ts_code"))
+    else {
+        return Ok(BacktestSampleEligibility {
+            trade_date_to_index,
+            listed_trade_index_by_ts: HashMap::new(),
+            min_listed_trade_days,
+        });
+    };
+    let Some(list_date_idx) = headers
+        .iter()
+        .position(|header| header.eq_ignore_ascii_case("list_date"))
+    else {
+        return Ok(BacktestSampleEligibility {
+            trade_date_to_index,
+            listed_trade_index_by_ts: HashMap::new(),
+            min_listed_trade_days,
+        });
+    };
+
+    let mut listed_trade_index_by_ts = HashMap::new();
+    for row_result in reader.records() {
+        let row = row_result.map_err(|e| format!("解析stock_list.csv失败:{e}"))?;
+        let Some(ts_code) = row
+            .get(ts_code_idx)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(list_date) = row
+            .get(list_date_idx)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+
+        let listed_idx = match trade_dates.binary_search_by(|value| value.as_str().cmp(list_date)) {
+            Ok(index) => index,
+            Err(index) if index < trade_dates.len() => index,
+            Err(_) => continue,
+        };
+        listed_trade_index_by_ts.insert(ts_code.to_string(), listed_idx);
+    }
+
+    Ok(BacktestSampleEligibility {
+        trade_date_to_index,
+        listed_trade_index_by_ts,
+        min_listed_trade_days,
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct ResidualReturnInput {
@@ -353,7 +460,7 @@ fn load_pct_chg_series(
 #[cfg(test)]
 mod tests {
     use std::{
-        fs::create_dir_all,
+        fs::{create_dir_all, write},
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -362,7 +469,9 @@ mod tests {
 
     use crate::{
         data::{concept_performance_db_path, source_db_path},
-        simulate::{ResidualReturnInput, calc_stock_residual_returns},
+        simulate::{
+            ResidualReturnInput, build_backtest_sample_eligibility, calc_stock_residual_returns,
+        },
     };
 
     fn temp_source_dir() -> PathBuf {
@@ -434,6 +543,44 @@ mod tests {
         app.append_row(params!["20240103", "market", "主板", 9.0_f64])
             .expect("market row2");
         app.flush().expect("flush concept_performance");
+    }
+
+    #[test]
+    fn backtest_sample_eligibility_uses_list_date_and_trade_calendar() {
+        let source_dir = temp_source_dir();
+        create_dir_all(&source_dir).expect("create source dir");
+
+        let trade_calendar = std::iter::once("cal_date".to_string())
+            .chain((1..=70).map(|index| format!("202300{:02}", index)))
+            .chain(
+                ["20240102", "20240103", "20240104"]
+                    .into_iter()
+                    .map(str::to_string),
+            )
+            .collect::<Vec<_>>()
+            .join("\n");
+        write(
+            source_dir.join("trade_calendar.csv"),
+            format!("{trade_calendar}\n"),
+        )
+        .expect("write trade_calendar");
+        write(
+            source_dir.join("stock_list.csv"),
+            concat!(
+                "ts_code,symbol,name,area,industry,list_date,trade_date,total_share,float_share,total_mv,circ_mv,fullname,enname,cnspell,market,exchange,curr_type,list_status,delist_date,is_hs,act_name,act_ent_type\n",
+                "000001.SZ,,样本股,,main,20230010,,,,,,,,,,,,,,,\n",
+                "000002.SZ,,次新股,,main,20240103,,,,,,,,,,,,,,,\n"
+            ),
+        )
+        .expect("write stock_list");
+
+        let eligibility = build_backtest_sample_eligibility(source_dir.to_str().expect("utf8"), 60)
+            .expect("eligibility");
+
+        assert!(eligibility.allows_sample("000001.SZ", "20240102"));
+        assert!(eligibility.allows_sample("000001.SZ", "20240103"));
+        assert!(!eligibility.allows_sample("000002.SZ", "20240103"));
+        assert!(!eligibility.allows_sample("000002.SZ", "20240104"));
     }
 
     #[test]

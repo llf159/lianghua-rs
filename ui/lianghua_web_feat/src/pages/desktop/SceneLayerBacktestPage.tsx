@@ -280,6 +280,7 @@ export default function SceneLayerBacktestPage() {
   const [startDateInput, setStartDateInput] = useState("");
   const [endDateInput, setEndDateInput] = useState("");
   const [minSamplesPerDay, setMinSamplesPerDay] = useState("5");
+  const [minListedTradeDays, setMinListedTradeDays] = useState("60");
   const [backtestPeriod, setBacktestPeriod] = useState("3");
 
   const [loading, setLoading] = useState(false);
@@ -329,6 +330,7 @@ export default function SceneLayerBacktestPage() {
     setStartDateInput(returnState.startDateInput);
     setEndDateInput(returnState.endDateInput);
     setMinSamplesPerDay(returnState.minSamplesPerDay);
+    setMinListedTradeDays(returnState.minListedTradeDays ?? "60");
     setBacktestPeriod(returnState.backtestPeriod);
     setValidationImportRuleName(returnState.validationImportRuleName);
     setValidationExpression(returnState.validationExpression);
@@ -591,6 +593,7 @@ export default function SceneLayerBacktestPage() {
         startDate: normalizedStart,
         endDate: normalizedEnd,
         minSamplesPerSceneDay: Math.max(1, Number(minSamplesPerDay) || 1),
+        minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
       });
       setResult(data);
@@ -636,6 +639,7 @@ export default function SceneLayerBacktestPage() {
         startDate: normalizedStart,
         endDate: normalizedEnd,
         minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerDay) || 1),
+        minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
       });
       setRuleResult(data);
@@ -797,6 +801,7 @@ export default function SceneLayerBacktestPage() {
         startDate: normalizedStart,
         endDate: normalizedEnd,
         minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerDay) || 1),
+        minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
         unknownConfigs,
         sampleLimitPerGroup,
@@ -965,6 +970,10 @@ export default function SceneLayerBacktestPage() {
             <input type="number" min="1" value={minSamplesPerDay} onChange={(event) => setMinSamplesPerDay(event.target.value)} />
           </label>
           <label className="scene-layer-field">
+            <span>最少上市交易日</span>
+            <input type="number" min="0" value={minListedTradeDays} onChange={(event) => setMinListedTradeDays(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
             <span>回测周期（天）</span>
             <input type="number" min="1" value={backtestPeriod} onChange={(event) => setBacktestPeriod(event.target.value)} />
           </label>
@@ -1005,6 +1014,10 @@ export default function SceneLayerBacktestPage() {
             <div className="scene-layer-summary-item">
               <span>最小样本阈值</span>
               <strong>{result.min_samples_per_scene_day}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>最少上市交易日</span>
+              <strong>{result.min_listed_trade_days}</strong>
             </div>
             <div className="scene-layer-summary-item">
               <span>回测周期（天）</span>
@@ -1065,6 +1078,7 @@ export default function SceneLayerBacktestPage() {
                     <th>Beta（指/概/行）</th>
                     <th>策略数</th>
                     <th>最小样本阈值</th>
+                    <th>最少上市交易日</th>
                     <th>回测周期（天）</th>
                     <th>残差均值（日度）</th>
                     <th>Spread 均值（日度高分-低分）</th>
@@ -1081,6 +1095,7 @@ export default function SceneLayerBacktestPage() {
                     <td>{formatNumber(ruleResult.index_beta, 2)} / {formatNumber(ruleResult.concept_beta, 2)} / {formatNumber(ruleResult.industry_beta, 2)}</td>
                     <td>{allRuleSummaries.length}</td>
                     <td>{ruleResult.min_samples_per_rule_day}</td>
+                    <td>{ruleResult.min_listed_trade_days}</td>
                     <td>{ruleResult.backtest_period}</td>
                     <td>{formatPercent(ruleResult.avg_residual_mean)}</td>
                     <td>{formatPercent(ruleResult.spread_mean)}</td>

@@ -1,10 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
-import type { IntradayMonitorTemplate } from "../../../apis/reader";
+import { useState } from "react";
 import {
-  checkStrategyManageRuleDraft,
-  getStrategyManagePage,
-  type StrategyManageRuleDraft,
-} from "../../../apis/strategyManage";
+  type IntradayMonitorTemplate,
+  validateIntradayMonitorTemplateExpression,
+} from "../../../apis/reader";
 import "../css/IntradayTemplateManagerModal.css";
 
 type TemplateEditorMode = "create" | "edit";
@@ -58,48 +56,8 @@ export default function IntradayTemplateManagerModal({
   const [templateEditorError, setTemplateEditorError] = useState("");
   const [templateValidationMessage, setTemplateValidationMessage] = useState("");
   const [templateValidating, setTemplateValidating] = useState(false);
-  const [sceneOptions, setSceneOptions] = useState<string[]>([]);
 
   const sourcePathTrimmed = sourcePath.trim();
-
-  const sceneNameForValidation = useMemo(
-    () => sceneOptions.find((item) => item.trim() !== ""),
-    [sceneOptions],
-  );
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-
-    let cancelled = false;
-    const loadScenes = async () => {
-      if (!sourcePathTrimmed) {
-        if (!cancelled) {
-          setSceneOptions([]);
-        }
-        return;
-      }
-      try {
-        const data = await getStrategyManagePage(sourcePathTrimmed);
-        if (cancelled) return;
-        setSceneOptions(
-          (data.scenes ?? [])
-            .map((item) => item.name.trim())
-            .filter((item) => item !== ""),
-        );
-      } catch {
-        if (!cancelled) {
-          setSceneOptions([]);
-        }
-      }
-    };
-
-    void loadScenes();
-    return () => {
-      cancelled = true;
-    };
-  }, [open, sourcePathTrimmed]);
 
   function resetTemplateEditor() {
     setTemplateEditorMode("create");
@@ -119,32 +77,12 @@ export default function IntradayTemplateManagerModal({
     setTemplateValidationMessage("");
   }
 
-  function buildTemplateValidationDraft(
-    expression: string,
-    sceneName: string,
-  ): StrategyManageRuleDraft {
-    return {
-      name: `INTRADAY_TEMPLATE_VALIDATION_${Date.now()}`,
-      scene_name: sceneName,
-      stage: "base",
-      scope_way: "LAST",
-      scope_windows: 1,
-      when: expression,
-      points: 1,
-      dist_points: null,
-      explain: "实时监控模板表达式校验",
-    };
-  }
-
   async function validateTemplateExpressionCore(expression: string) {
     if (!sourcePathTrimmed) {
       throw new Error("请先完成数据目录加载");
     }
-    if (!sceneNameForValidation) {
-      throw new Error("未找到可用场景，请先完成策略配置并重新读取筛选项");
-    }
-    const draft = buildTemplateValidationDraft(expression, sceneNameForValidation);
-    return checkStrategyManageRuleDraft(sourcePathTrimmed, draft);
+    const result = await validateIntradayMonitorTemplateExpression(expression);
+    return result.message;
   }
 
   async function onValidateTemplateExpression() {
@@ -161,7 +99,7 @@ export default function IntradayTemplateManagerModal({
     try {
       const message = await validateTemplateExpressionCore(expression);
       setTemplateValidationMessage(message);
-      setTemplateEditorNotice("表达式校验通过（策略管理同口径）");
+      setTemplateEditorNotice("表达式校验通过");
     } catch (validationError) {
       setTemplateValidationMessage("");
       setTemplateEditorError(`表达式校验失败: ${String(validationError)}`);
@@ -184,7 +122,7 @@ export default function IntradayTemplateManagerModal({
     try {
       const message = await validateTemplateExpressionCore(expression);
       setTemplateValidationMessage(message);
-      setTemplateEditorNotice("表达式校验通过（策略管理同口径）");
+      setTemplateEditorNotice("表达式校验通过");
     } catch (validationError) {
       setTemplateValidationMessage("");
       setTemplateEditorError(`表达式校验失败: ${String(validationError)}`);

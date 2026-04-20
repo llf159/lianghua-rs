@@ -780,10 +780,7 @@ pub fn run_concept_stock_pick(
         .filter(|value| !value.is_empty());
     let exclude_st_board = exclude_st_board.unwrap_or(false);
 
-    let industry_filters = include_industries
-        .iter()
-        .cloned()
-        .collect::<HashSet<_>>();
+    let industry_filters = include_industries.iter().cloned().collect::<HashSet<_>>();
     let area_filters = include_areas.iter().cloned().collect::<HashSet<_>>();
     let ts_codes = name_map.keys().cloned().collect::<Vec<_>>();
 
@@ -846,9 +843,11 @@ pub fn run_concept_stock_pick(
                 notes.push(format!("地区命中{}项", include_areas.len()));
             }
             if total_mv_min.is_some() || total_mv_max.is_some() {
-                let min_text = total_mv_min.map(|value| format!("{value}"))
+                let min_text = total_mv_min
+                    .map(|value| format!("{value}"))
                     .unwrap_or_else(|| "-inf".to_string());
-                let max_text = total_mv_max.map(|value| format!("{value}"))
+                let max_text = total_mv_max
+                    .map(|value| format!("{value}"))
                     .unwrap_or_else(|| "+inf".to_string());
                 notes.push(format!("总市值[{min_text}, {max_text}]亿"));
             }
@@ -856,8 +855,7 @@ pub fn run_concept_stock_pick(
             Some(StockPickRow {
                 ts_code: ts_code.clone(),
                 name: name.clone(),
-                board: board_category(&ts_code, name.as_deref())
-                    .to_string(),
+                board: board_category(&ts_code, name.as_deref()).to_string(),
                 concept: concept_text,
                 rank: summary.and_then(|item| item.rank),
                 total_score: summary.and_then(|item| item.total_score),

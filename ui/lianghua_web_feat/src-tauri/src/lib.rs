@@ -592,6 +592,7 @@ async fn run_scene_layer_backtest(
     start_date: String,
     end_date: String,
     min_samples_per_scene_day: Option<usize>,
+    min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
 ) -> Result<SceneLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -605,6 +606,7 @@ async fn run_scene_layer_backtest(
             start_date,
             end_date,
             min_samples_per_scene_day,
+            min_listed_trade_days,
             backtest_period,
         )
     })
@@ -623,6 +625,7 @@ async fn run_rule_layer_backtest(
     start_date: String,
     end_date: String,
     min_samples_per_rule_day: Option<usize>,
+    min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
 ) -> Result<RuleLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -636,6 +639,7 @@ async fn run_rule_layer_backtest(
             start_date,
             end_date,
             min_samples_per_rule_day,
+            min_listed_trade_days,
             backtest_period,
         )
     })
@@ -658,6 +662,7 @@ async fn run_rule_expression_validation(
     start_date: String,
     end_date: String,
     min_samples_per_rule_day: Option<usize>,
+    min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
     manual_strategy: Option<RuleExpressionValidationManualStrategy>,
     unknown_configs: Option<Vec<RuleValidationUnknownConfig>>,
@@ -678,6 +683,7 @@ async fn run_rule_expression_validation(
             start_date,
             end_date,
             min_samples_per_rule_day,
+            min_listed_trade_days,
             backtest_period,
             manual_strategy,
             unknown_configs,

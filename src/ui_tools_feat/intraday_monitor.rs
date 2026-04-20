@@ -368,6 +368,13 @@ pub fn validate_intraday_monitor_template_expression(
         .parse_main()
         .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
     let warmup_need = estimate_intraday_template_warmup(&ast)?;
+    let row_data = build_intraday_template_validation_row_data(warmup_need)?;
+    let mut rt = row_into_rt(row_data)?;
+    let value = rt
+        .eval_program(&ast)
+        .map_err(|e| format!("表达式运行错误:{}", e.msg))?;
+    let len = rt_max_len(&rt);
+    Value::as_bool_series(&value, len).map_err(|e| format!("表达式返回值非布尔:{}", e.msg))?;
 
     Ok(IntradayMonitorTemplateValidationData {
         normalized_expression: normalized,
@@ -424,6 +431,50 @@ fn normalize_runtime_row_data(row_data: RowData) -> Result<RowData, String> {
         trade_dates: row_data.trade_dates,
         cols,
     };
+    out.validate()?;
+    Ok(out)
+}
+
+fn build_intraday_template_validation_row_data(warmup_need: usize) -> Result<RowData, String> {
+    let len = warmup_need.max(2);
+    let trade_dates = (0..len)
+        .map(|index| format!("202401{:02}", index + 1))
+        .collect::<Vec<_>>();
+    let mut cols = HashMap::with_capacity(RUNTIME_INPUT_KEYS.len() + 8);
+
+    for key in RUNTIME_INPUT_KEYS {
+        let series = (0..len)
+            .map(|index| Some(index as f64 + 1.0))
+            .collect::<Vec<_>>();
+        cols.insert(key.to_string(), series);
+    }
+
+    for key in [
+        "REALTIME_CHANGE_OPEN_PCT",
+        "REALTIME_FALL_FROM_HIGH_PCT",
+        "REALTIME_VOL_RATIO",
+        "VOL_RATIO",
+    ] {
+        let mut series = vec![None; len];
+        if let Some(last) = series.last_mut() {
+            *last = Some(1.0);
+        }
+        cols.insert(key.to_string(), series);
+    }
+
+    cols.insert("ZHANG".to_string(), vec![Some(0.095); len]);
+    cols.insert("TOTAL_MV_YI".to_string(), vec![Some(100.0); len]);
+
+    let mut rank_series = (0..len)
+        .map(|index| Some((index + 1) as f64))
+        .collect::<Vec<_>>();
+    if let Some(last) = rank_series.last_mut() {
+        *last = None;
+    }
+    cols.insert("RANK".to_string(), rank_series.clone());
+    cols.insert("rank".to_string(), rank_series);
+
+    let out = RowData { trade_dates, cols };
     out.validate()?;
     Ok(out)
 }
@@ -529,8 +580,96 @@ fn attach_runtime_extra_series(
     )
 }
 
+fn load_runtime_rank_series_map(
+    conn: &Connection,
+    row: &IntradayMonitorRow,
+    start_date: &str,
+    end_date: &str,
+) -> Result<HashMap<String, Option<f64>>, String> {
+    let rank_mode = IntradayRankMode::parse(Some(&row.rank_mode))?;
+    let (sql, params): (&str, Vec<String>) = match rank_mode {
+        IntradayRankMode::Total => (
+            r#"
+            SELECT trade_date, rank
+            FROM score_summary
+            WHERE ts_code = ?
+              AND trade_date >= ?
+              AND trade_date <= ?
+            "#,
+            vec![
+                row.ts_code.clone(),
+                start_date.to_string(),
+                end_date.to_string(),
+            ],
+        ),
+        IntradayRankMode::Scene => (
+            r#"
+            SELECT trade_date, scene_rank
+            FROM scene_details
+            WHERE ts_code = ?
+              AND scene_name = ?
+              AND trade_date >= ?
+              AND trade_date <= ?
+            "#,
+            vec![
+                row.ts_code.clone(),
+                row.scene_name.clone(),
+                start_date.to_string(),
+                end_date.to_string(),
+            ],
+        ),
+    };
+
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| format!("预编译 rank 序列失败: {e}"))?;
+    let mut rows = stmt
+        .query(duckdb::params_from_iter(params.iter()))
+        .map_err(|e| format!("查询 rank 序列失败: {e}"))?;
+    let mut out = HashMap::new();
+
+    while let Some(db_row) = rows
+        .next()
+        .map_err(|e| format!("读取 rank 序列失败: {e}"))?
+    {
+        let trade_date: String = db_row
+            .get(0)
+            .map_err(|e| format!("读取 rank 日期失败: {e}"))?;
+        let rank = db_row
+            .get::<_, Option<i64>>(1)
+            .map_err(|e| format!("读取 rank 值失败: {e}"))?
+            .map(|value| value as f64);
+        out.insert(trade_date, rank);
+    }
+
+    Ok(out)
+}
+
+fn inject_runtime_rank_series(
+    row_data: &mut RowData,
+    rank_series_map: &HashMap<String, Option<f64>>,
+) -> Result<(), String> {
+    let len = row_data.trade_dates.len();
+    let mut rank_series = vec![None; len];
+
+    for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
+        rank_series[index] = rank_series_map.get(trade_date).copied().flatten();
+    }
+
+    if let Some(last) = rank_series.last_mut() {
+        *last = None;
+    }
+
+    row_data
+        .cols
+        .insert("RANK".to_string(), rank_series.clone());
+    row_data.cols.insert("rank".to_string(), rank_series);
+    row_data.validate()
+}
+
 fn build_intraday_runtime_row_data(
     reader: &DataReader,
+    result_conn: &Connection,
     row: &IntradayMonitorRow,
     quote: &SinaQuote,
     need_rows: usize,
@@ -556,6 +695,18 @@ fn build_intraday_runtime_row_data(
     };
 
     attach_runtime_extra_series(&mut row_data, row)?;
+    let start_date = row_data
+        .trade_dates
+        .first()
+        .cloned()
+        .ok_or_else(|| "runtime trade_dates 为空".to_string())?;
+    let end_date = row_data
+        .trade_dates
+        .last()
+        .cloned()
+        .ok_or_else(|| "runtime trade_dates 为空".to_string())?;
+    let rank_series_map = load_runtime_rank_series_map(result_conn, row, &start_date, &end_date)?;
+    inject_runtime_rank_series(&mut row_data, &rank_series_map)?;
 
     if !indicator_cache.is_empty() {
         for (name, series) in calc_inds_with_cache_lossy(indicator_cache, row_data.clone()) {
@@ -616,6 +767,17 @@ fn apply_intraday_template_tags(
             return;
         }
     };
+    let result_conn = match open_result_conn(source_path) {
+        Ok(conn) => conn,
+        Err(err) => {
+            for row in rows.iter_mut() {
+                if resolve_template_id_for_row(row, rank_mode_configs).is_some() {
+                    set_template_tag(row, format!("runtime 初始化失败: {err}"), "down");
+                }
+            }
+            return;
+        }
+    };
 
     for row in rows.iter_mut() {
         let Some(template_id) = resolve_template_id_for_row(row, rank_mode_configs) else {
@@ -642,6 +804,7 @@ fn apply_intraday_template_tags(
                 let result = (|| -> Result<bool, String> {
                     let row_data = build_intraday_runtime_row_data(
                         &reader,
+                        &result_conn,
                         row,
                         quote,
                         need_rows,

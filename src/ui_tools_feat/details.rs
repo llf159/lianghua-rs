@@ -422,10 +422,7 @@ fn default_kline_panels() -> Vec<DetailKlinePanel> {
             key: "volume".to_string(),
             label: "量能".to_string(),
             kind: Some("bar".to_string()),
-            series_keys: Some(vec![
-                "vol".to_string(),
-                "VOL_SIGMA".to_string(),
-            ]),
+            series_keys: Some(vec!["vol".to_string(), "VOL_SIGMA".to_string()]),
             row_weight: Some(DEFAULT_ROW_WEIGHTS[2]),
         },
         DetailKlinePanel {

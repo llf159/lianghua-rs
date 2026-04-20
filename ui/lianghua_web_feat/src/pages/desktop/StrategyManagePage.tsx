@@ -108,11 +108,12 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
       { name: 'REALTIME_FALL_FROM_HIGH_PCT', scope: '实时监控', description: '当前价相对于今日高点的跌幅，单位是百分比；计算口径为 max((今日高点 - 当前价) / 今日高点, 0) × 100%。', example: 'REALTIME_FALL_FROM_HIGH_PCT <= 1.5' },
       { name: 'REALTIME_VOL_RATIO', scope: '实时监控', description: '当前实时累计成交量 ÷ stock_data 中最新历史日的 vol，通常可理解为“相对上一交易日日成交量”的倍数。', example: 'REALTIME_VOL_RATIO >= 2' },
       { name: 'VOL_RATIO', scope: '实时监控', description: 'REALTIME_VOL_RATIO 的别名，基准相同。', example: 'VOL_RATIO >= 2' },
+      { name: 'rank / RANK', scope: '实时监控', description: '按当前榜单模式注入的历史排名序列；总榜读取 score_summary.rank，场景榜读取 scene_details.scene_rank；runtime 最新一根固定留空。', example: 'rank <= 100 AND REALTIME_CHANGE_OPEN_PCT >= 2' },
     ],
   },
   {
     title: '9. 表达式选股附加字段',
-    note: '下面这些字段只在“表达式选股”页面运行时注入，策略打分和实时监控模板默认不会注入。',
+    note: '下面这些字段会在“表达式选股”页面运行时注入；rank / RANK 也可用于实时监控模板，但只有实时监控会把 runtime 最新一根留空，表达式选股仍按数据库交易日原样对齐。',
     fields: [
       { name: 'rank / RANK', scope: '表达式选股', description: '个股在 score_summary 中按交易日对齐后的排名序列；1 表示当日排名第一。', example: 'rank <= 100 AND C > MA(C, 20)' },
     ],

@@ -83,7 +83,8 @@ fn split_match_items(value: &str) -> Vec<String> {
 
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    for item in normalized.split(|ch| matches!(ch, ';' | ',' | '，' | '；' | '|' | '、' | '/' | '\n'))
+    for item in
+        normalized.split(|ch| matches!(ch, ';' | ',' | '，' | '；' | '|' | '、' | '/' | '\n'))
     {
         let item = item.trim();
         if item.is_empty() {
@@ -125,7 +126,10 @@ fn load_summary_rows(conn: &Connection, trade_date: &str) -> Result<Vec<SummaryR
         .map_err(|e| format!("查询相似股总榜失败: {e}"))?;
 
     let mut out = Vec::new();
-    while let Some(row) = rows.next().map_err(|e| format!("读取相似股总榜失败: {e}"))? {
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取相似股总榜失败: {e}"))?
+    {
         out.push(SummaryRow {
             ts_code: row.get(0).map_err(|e| format!("读取 ts_code 失败: {e}"))?,
             total_score: row
@@ -158,16 +162,19 @@ fn load_trigger_scene_map(
         .map_err(|e| format!("查询相似股场景失败: {e}"))?;
 
     let mut out = HashMap::<String, Vec<String>>::new();
-    while let Some(row) = rows.next().map_err(|e| format!("读取相似股场景失败: {e}"))? {
-        let ts_code: String = row.get(0).map_err(|e| format!("读取场景 ts_code 失败: {e}"))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取相似股场景失败: {e}"))?
+    {
+        let ts_code: String = row
+            .get(0)
+            .map_err(|e| format!("读取场景 ts_code 失败: {e}"))?;
         let scene_name: String = row.get(1).map_err(|e| format!("读取场景名称失败: {e}"))?;
         let scene_name = scene_name.trim();
         if scene_name.is_empty() {
             continue;
         }
-        out.entry(ts_code)
-            .or_default()
-            .push(scene_name.to_string());
+        out.entry(ts_code).or_default().push(scene_name.to_string());
     }
 
     Ok(out)
@@ -194,7 +201,11 @@ fn build_available_score(
     out
 }
 
-fn calc_ratio_score(weight: f64, sample_items: &[String], candidate_items: &[String]) -> (f64, Vec<String>) {
+fn calc_ratio_score(
+    weight: f64,
+    sample_items: &[String],
+    candidate_items: &[String],
+) -> (f64, Vec<String>) {
     if sample_items.is_empty() {
         return (0.0, Vec::new());
     }
@@ -281,8 +292,11 @@ pub fn get_stock_similarity_page(
             .unwrap_or_default();
         let candidate_trigger_scenes = scene_map.get(&row.ts_code).cloned().unwrap_or_default();
 
-        let (concept_score, matched_concepts) =
-            calc_ratio_score(CONCEPT_WEIGHT, &target_concept_items, &candidate_concept_items);
+        let (concept_score, matched_concepts) = calc_ratio_score(
+            CONCEPT_WEIGHT,
+            &target_concept_items,
+            &candidate_concept_items,
+        );
         let (scene_score, matched_scene_names) = calc_ratio_score(
             SCENE_WEIGHT,
             &target_trigger_scenes,
@@ -338,7 +352,11 @@ pub fn get_stock_similarity_page(
             .then_with(|| right.scene_score.total_cmp(&left.scene_score))
             .then_with(|| right.concept_score.total_cmp(&left.concept_score))
             .then_with(|| right.industry_score.total_cmp(&left.industry_score))
-            .then_with(|| left.rank.unwrap_or(i64::MAX).cmp(&right.rank.unwrap_or(i64::MAX)))
+            .then_with(|| {
+                left.rank
+                    .unwrap_or(i64::MAX)
+                    .cmp(&right.rank.unwrap_or(i64::MAX))
+            })
             .then_with(|| left.ts_code.cmp(&right.ts_code))
     });
     if items.len() > limit {

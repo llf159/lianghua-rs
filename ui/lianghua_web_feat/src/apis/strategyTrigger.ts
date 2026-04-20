@@ -162,6 +162,7 @@ export type SceneLayerBacktestData = {
   start_date: string
   end_date: string
   min_samples_per_scene_day: number
+  min_listed_trade_days: number
   backtest_period: number
   points: SceneLayerPoint[]
   spread_mean?: number | null
@@ -210,6 +211,7 @@ export type RuleLayerBacktestData = {
   start_date: string
   end_date: string
   min_samples_per_rule_day: number
+  min_listed_trade_days: number
   backtest_period: number
   points: RuleLayerPoint[]
   avg_residual_mean?: number | null
@@ -347,6 +349,7 @@ export type SceneLayerBacktestQuery = {
   startDate: string
   endDate: string
   minSamplesPerSceneDay?: number
+  minListedTradeDays?: number
   backtestPeriod?: number
 }
 
@@ -360,6 +363,7 @@ export type RuleLayerBacktestQuery = {
   startDate: string
   endDate: string
   minSamplesPerRuleDay?: number
+  minListedTradeDays?: number
   backtestPeriod?: number
 }
 
@@ -389,6 +393,7 @@ export type RuleExpressionValidationQuery = {
   startDate: string
   endDate: string
   minSamplesPerRuleDay?: number
+  minListedTradeDays?: number
   backtestPeriod?: number
   unknownConfigs?: RuleValidationUnknownConfig[]
   sampleLimitPerGroup?: number
