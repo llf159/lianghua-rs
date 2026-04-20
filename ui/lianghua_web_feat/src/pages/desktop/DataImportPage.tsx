@@ -8,6 +8,7 @@ import {
   importManagedCacheData,
   importManagedSourceDirectory,
   importManagedSourceFile,
+  importManagedSourceZip,
   inspectManagedSourceStatus,
   isDirectoryImportSupported,
   removeManagedSourceFile,
@@ -23,6 +24,7 @@ type BusyAction =
   | 'idle'
   | 'loading'
   | 'importing-dir'
+  | 'importing-zip'
   | 'exporting'
   | 'exporting-cache'
   | 'importing-cache'
@@ -294,6 +296,17 @@ export default function DataImportPage() {
     setNotice(buildDirectoryImportNotice(result))
   }
 
+  async function onImportZip() {
+    const result = await runAction('importing-zip', '压缩包导入失败', () => importManagedSourceZip())
+    if (!result) {
+      return
+    }
+
+    const refreshedStatus = await inspectStatusWithTimeout()
+    applyStatus(refreshedStatus)
+    setNotice(`压缩包导入完成，已解压 ${result.extractedFileCount} 个文件: ${result.importedPath}`)
+  }
+
   async function onImportFile(fileId: ManagedSourceFileId) {
     const nextStatus = await runImportAction(`file:${fileId}`, '手动导入失败', (progressHandler) =>
       importManagedSourceFile(fileId, undefined, progressHandler),
@@ -384,7 +397,7 @@ export default function DataImportPage() {
           <div>
             <h2 className="settings-title">数据管理</h2>
             <p className="settings-subtitle">
-              统一管理导入文件，支持目录扫描、单文件导入、导出和缓存迁移。
+              统一管理导入文件，支持目录扫描、压缩包恢复、单文件导入、导出和缓存迁移。
             </p>
           </div>
 
@@ -436,11 +449,19 @@ export default function DataImportPage() {
               >
                 {busyAction === 'importing-dir' ? '扫描中...' : '扫描目录并导入'}
               </button>
+              <button
+                className="settings-primary-btn"
+                type="button"
+                onClick={() => void onImportZip()}
+                disabled={isBusy}
+              >
+                {busyAction === 'importing-zip' ? '导入中...' : '从压缩包导入'}
+              </button>
             </div>
             <small>
               {directoryImportSupported
-                ? '程序固定写入 `AppData/source/`'
-                : '当前平台不支持文件夹选择，请使用下方逐个导入。'}
+                ? '程序固定写入 `AppData/source/`；压缩包导入适用于“导出当前目录 ZIP”生成的文件'
+                : '当前平台不支持文件夹选择，可使用压缩包导入或下方逐个导入。'}
             </small>
           </div>
         </div>

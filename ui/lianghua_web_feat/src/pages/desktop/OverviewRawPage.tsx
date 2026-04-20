@@ -598,10 +598,6 @@ export default function OverviewRawPage() {
     <div className="overview-page">
       <section className="overview-card">
         <h2 className="overview-title">原始排名总览</h2>
-        <div className="overview-source-note">
-          当前数据目录：
-          {sourcePathTrimmed || "读取中..."}
-        </div>
 
         <div className="overview-form-grid">
           <label className="overview-field">

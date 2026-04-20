@@ -4283,10 +4283,6 @@ export default function DetailsPage({
       {isLinkedOverlay ? null : (
         <section className="details-card details-query-card">
           <h2 className="details-title">个股详情</h2>
-          <div className="details-source-note">
-            数据目录由“数据管理”页统一管理，当前路径：
-            {sourcePathTrimmed || "读取中..."}
-          </div>
 
           <div className="details-form-grid">
             <label className="details-field">
@@ -4976,7 +4972,7 @@ export default function DetailsPage({
           onContextMenu={handleDetailsNavContextMenu}
           onClick={(event) => handleDetailsNavClick("prev", event)}
         >
-          {isPrevAutoLocked ? "上一条 自动中" : "上一条"}
+          {isPrevAutoLocked ? "自动中" : "上一条"}
         </button>
         <button
           className={[
@@ -4995,7 +4991,7 @@ export default function DetailsPage({
           onContextMenu={handleDetailsNavContextMenu}
           onClick={(event) => handleDetailsNavClick("next", event)}
         >
-          {isNextAutoLocked ? "下一条 自动中" : "下一条"}
+          {isNextAutoLocked ? "自动中" : "下一条"}
         </button>
       </div>
     </div>

@@ -45,6 +45,9 @@ use lianghua_rs::ui_tools_feat::{
         run_ranking_score_calculation as core_run_ranking_score_calculation,
         run_ranking_tiebreak_fill as core_run_ranking_tiebreak_fill,
     },
+    stock_similarity::{
+        StockSimilarityPageData, get_stock_similarity_page as core_get_stock_similarity_page,
+    },
     stock_pick::{StockPickOptionsData, get_stock_pick_options as core_get_stock_pick_options},
     strategy_manage::{
         StrategyManagePageData, StrategyManageRefactorDraft, StrategyManageRuleDraft, StrategyManageSceneDraft,
@@ -100,7 +103,7 @@ use managed_source_bridge::{
     export_managed_source_directory, export_managed_source_directory_mobile,
     export_managed_source_file, export_managed_strategy_backup_file,
     export_managed_strategy_bundle, get_managed_strategy_assets_status,
-    import_managed_strategy_backup, preview_managed_source_dataset,
+    import_managed_source_zip, import_managed_strategy_backup, preview_managed_source_dataset,
     preview_managed_source_stock_data,
     update_managed_strategy_backup_description,
 };
@@ -452,6 +455,20 @@ fn get_stock_detail_realtime(
     chart_window_days: Option<u32>,
 ) -> Result<StockDetailRealtimeData, String> {
     core_get_stock_detail_realtime(source_path, ts_code, chart_window_days)
+}
+
+#[tauri::command]
+async fn get_stock_similarity_page(
+    source_path: String,
+    trade_date: Option<String>,
+    ts_code: String,
+    limit: Option<u32>,
+) -> Result<StockSimilarityPageData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_stock_similarity_page(source_path, trade_date, ts_code, limit)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -997,6 +1014,7 @@ pub fn run() {
             export_managed_source_directory,
             export_managed_source_directory_mobile,
             export_managed_source_file,
+            import_managed_source_zip,
             get_managed_strategy_assets_status,
             import_managed_strategy_backup,
             backup_managed_active_strategy,
@@ -1029,6 +1047,7 @@ pub fn run() {
             get_stock_detail_page,
             get_stock_detail_strategy_snapshot,
             get_stock_detail_realtime,
+            get_stock_similarity_page,
             get_strategy_statistics_page,
             get_scene_statistics_page,
             get_strategy_statistics_detail,

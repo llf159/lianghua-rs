@@ -250,6 +250,32 @@ function formatPercent(value?: number | null) {
   return `${(value * 100).toFixed(2)}%`;
 }
 
+function formatCompactPercent(value?: number | null) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "--";
+  }
+  return `${Number((value * 100).toFixed(2))}%`;
+}
+
+function formatStageCountWithShare(
+  count?: number | null,
+  totalTriggered?: number | null,
+) {
+  const formattedCount = formatInteger(count);
+  if (formattedCount === "--") {
+    return "--";
+  }
+  if (
+    totalTriggered === null ||
+    totalTriggered === undefined ||
+    !Number.isFinite(totalTriggered) ||
+    totalTriggered <= 0
+  ) {
+    return `${formattedCount} | --`;
+  }
+  return `${formattedCount} | ${formatCompactPercent((count ?? 0) / totalTriggered)}`;
+}
+
 function normalizeSceneStageKey(stage: SceneStageRow["stage"]) {
   const normalized = stage.trim().toLowerCase();
   if (normalized === "trigger") {
@@ -2190,7 +2216,6 @@ export default function StrategyTriggerPage() {
       <section className="strategy-trigger-card">
         <h2 className="strategy-trigger-title">策略触发统计</h2>
         <div className="strategy-trigger-source-note">
-          当前数据目录：<strong>{sourcePath || "--"}</strong>
           <span>
             统计口径基于结果库 `rule_details / scene_details / score_summary` 与规则文件。
           </span>
@@ -2441,15 +2466,6 @@ export default function StrategyTriggerPage() {
                       title="按 Scene 排序"
                     />
                   </th>
-                  <th aria-sort={getAriaSort(sceneSortKey === "trigger_count", sceneSortDirection)}>
-                    <TableSortButton
-                      label="trigger"
-                      isActive={sceneSortKey === "trigger_count"}
-                      direction={sceneSortDirection}
-                      onClick={() => toggleSceneSort("trigger_count")}
-                      title="按 trigger 样本数排序"
-                    />
-                  </th>
                   <th aria-sort={getAriaSort(sceneSortKey === "confirm_count", sceneSortDirection)}>
                     <TableSortButton
                       label="confirm"
@@ -2457,6 +2473,15 @@ export default function StrategyTriggerPage() {
                       direction={sceneSortDirection}
                       onClick={() => toggleSceneSort("confirm_count")}
                       title="按 confirm 样本数排序"
+                    />
+                  </th>
+                  <th aria-sort={getAriaSort(sceneSortKey === "trigger_count", sceneSortDirection)}>
+                    <TableSortButton
+                      label="trigger"
+                      isActive={sceneSortKey === "trigger_count"}
+                      direction={sceneSortDirection}
+                      onClick={() => toggleSceneSort("trigger_count")}
+                      title="按 trigger 样本数排序"
                     />
                   </th>
                   <th aria-sort={getAriaSort(sceneSortKey === "observe_count", sceneSortDirection)}>
@@ -2528,11 +2553,11 @@ export default function StrategyTriggerPage() {
                 {sortedSceneRows.map((row) => (
                   <tr key={`${scenePageData?.resolved_analysis_trade_date ?? analysisTradeDate}-${row.scene_name}`}>
                     <td>{row.scene_name}</td>
-                    <td>{formatInteger(row.trigger_count)}</td>
-                    <td>{formatInteger(row.confirm_count)}</td>
-                    <td>{formatInteger(row.observe_count)}</td>
-                    <td>{formatInteger(row.fail_count)}</td>
-                    <td>{formatInteger(row.none_count)}</td>
+                    <td>{formatStageCountWithShare(row.confirm_count, row.scene_covered_count)}</td>
+                    <td>{formatStageCountWithShare(row.trigger_count, row.scene_covered_count)}</td>
+                    <td>{formatStageCountWithShare(row.observe_count, row.scene_covered_count)}</td>
+                    <td>{formatStageCountWithShare(row.fail_count, row.scene_covered_count)}</td>
+                    <td>{formatStageCountWithShare(row.none_count, row.scene_total_sample_count)}</td>
                     <td>{formatInteger(row.scene_covered_count)}</td>
                     <td>{formatInteger(row.scene_total_sample_count)}</td>
                     <td>{formatPercent(row.scene_coverage_ratio)}</td>

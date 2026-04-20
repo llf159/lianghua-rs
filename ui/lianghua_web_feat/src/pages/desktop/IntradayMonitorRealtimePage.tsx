@@ -103,6 +103,8 @@ type SceneRowsGroup = {
   rows: IntradayMonitorRow[];
 };
 
+type RefreshStage = "idle" | "preparing" | "refreshing" | "retagging";
+
 const COLUMN_LABELS: Record<VisibleColumn, string> = {
   scene_name: "场景",
   rank: "排名",
@@ -271,6 +273,15 @@ function getRowMode(row: IntradayMonitorRow): RankMode {
   return row.rank_mode === "scene" ? "scene" : "total";
 }
 
+function waitForNextPaint() {
+  if (typeof window === "undefined") {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    window.requestAnimationFrame(() => resolve());
+  });
+}
+
 export default function IntradayMonitorRealtimePage() {
   const { excludedConcepts, excludeStBoard } = useConceptExclusions();
 
@@ -389,6 +400,7 @@ export default function IntradayMonitorRealtimePage() {
   const [loadingAction, setLoadingAction] = useState<
     "读取" | "刷新实时" | null
   >(null);
+  const [refreshStage, setRefreshStage] = useState<RefreshStage>("idle");
   const [refreshingScope, setRefreshingScope] = useState<string | null>(null);
   const [dateOptionsLoading, setDateOptionsLoading] = useState(false);
   const [error, setError] = useState("");
@@ -757,6 +769,7 @@ export default function IntradayMonitorRealtimePage() {
     setLoading(true);
     setLoadingAction(actionLabel);
     setRefreshingScope(actionLabel === "刷新实时" ? REFRESH_SCOPE_ALL : null);
+    setRefreshStage(actionLabel === "刷新实时" ? "preparing" : "idle");
     setError("");
 
     const requestRankDate =
@@ -844,6 +857,8 @@ export default function IntradayMonitorRealtimePage() {
           successResults.find((item) => item.refreshed_at)?.refreshed_at ?? "",
         );
       } else {
+        await waitForNextPaint();
+        setRefreshStage("refreshing");
         const refreshedRows: IntradayMonitorRow[] = [];
         let refreshed = "";
         for (let start = 0; start < rows.length; start += REFRESH_BATCH_SIZE) {
@@ -866,6 +881,7 @@ export default function IntradayMonitorRealtimePage() {
     } finally {
       setLoading(false);
       setLoadingAction(null);
+      setRefreshStage("idle");
       setRefreshingScope(null);
     }
   }
@@ -884,8 +900,11 @@ export default function IntradayMonitorRealtimePage() {
     setRefreshingScope(
       groupKey === "total" ? REFRESH_SCOPE_TOTAL : `scene:${groupKey}`,
     );
+    setRefreshStage("preparing");
     setError("");
     try {
+      await waitForNextPaint();
+      setRefreshStage("refreshing");
       const refreshedRows: IntradayMonitorRow[] = [];
       let refreshed = "";
       for (
@@ -921,6 +940,7 @@ export default function IntradayMonitorRealtimePage() {
     } finally {
       setLoading(false);
       setLoadingAction(null);
+      setRefreshStage("idle");
       setRefreshingScope(null);
     }
   }
@@ -939,8 +959,11 @@ export default function IntradayMonitorRealtimePage() {
     setRefreshingScope(
       groupKey === "total" ? REFRESH_SCOPE_TOTAL : `scene:${groupKey}`,
     );
+    setRefreshStage("preparing");
     setError("");
     try {
+      await waitForNextPaint();
+      setRefreshStage("retagging");
       const data = await refreshIntradayMonitorTemplateTags({
         sourcePath: sourcePathTrimmed,
         rows: targetRows,
@@ -965,6 +988,7 @@ export default function IntradayMonitorRealtimePage() {
     } finally {
       setLoading(false);
       setLoadingAction(null);
+      setRefreshStage("idle");
       setRefreshingScope(null);
     }
   }
@@ -1220,7 +1244,11 @@ export default function IntradayMonitorRealtimePage() {
               rows.length === 0
             }
           >
-            {isRefreshingAll ? "刷新中..." : "全部刷新实时"}
+            {isRefreshingAll
+              ? refreshStage === "preparing"
+                ? "准备中..."
+                : "刷新中..."
+              : "全部刷新实时"}
           </button>
         </div>
 
@@ -1397,7 +1425,11 @@ export default function IntradayMonitorRealtimePage() {
                         totalModeRows.length === 0
                       }
                     >
-                      {isRefreshingTotal ? "刷新中..." : "刷新总榜实时"}
+                      {isRefreshingTotal
+                        ? refreshStage === "preparing"
+                          ? "准备中..."
+                          : "刷新中..."
+                        : "刷新总榜实时"}
                     </button>
                     <button
                       className="intraday-monitor-refresh-btn"
@@ -1410,7 +1442,11 @@ export default function IntradayMonitorRealtimePage() {
                         totalModeRows.length === 0
                       }
                     >
-                      {isRefreshingTotal ? "重算中..." : "仅刷新标记"}
+                      {isRefreshingTotal
+                        ? refreshStage === "preparing"
+                          ? "准备中..."
+                          : "重算中..."
+                        : "仅刷新标记"}
                     </button>
                   </div>
                 </header>
@@ -1454,7 +1490,9 @@ export default function IntradayMonitorRealtimePage() {
                               }
                             >
                               {isRefreshingScene(group.key)
-                                ? "刷新中..."
+                                ? refreshStage === "preparing"
+                                  ? "准备中..."
+                                  : "刷新中..."
                                 : "刷新该Scene实时"}
                             </button>
                             <button
@@ -1470,7 +1508,9 @@ export default function IntradayMonitorRealtimePage() {
                               }
                             >
                               {isRefreshingScene(group.key)
-                                ? "重算中..."
+                                ? refreshStage === "preparing"
+                                  ? "准备中..."
+                                  : "重算中..."
                                 : "仅刷新标记"}
                             </button>
                           </div>

@@ -264,10 +264,6 @@ export default function MarketAnalysisPage() {
           根据回看周期和参考日，展示区间与当日的概念榜、行业榜（list.market 分类）、涨幅榜（参考日默认自动取最新交易日）。
         </p>
 
-        <div className="scene-layer-source-note">
-          当前数据目录：<strong>{sourcePath || "--"}</strong>
-        </div>
-
         <div className="scene-layer-form-grid scene-layer-form-grid-market">
           <label className="scene-layer-field">
             <span>回看周期（交易日）</span>

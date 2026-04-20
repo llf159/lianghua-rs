@@ -753,7 +753,6 @@ export default function DataDownloadPage() {
           <section className="data-download-panel">
             <div className="data-download-panel-head">
               <h3>通用参数</h3>
-              <p>所有模式共用。Token 只存当前浏览器，不会自动写回配置文件，执行性能参数也统一放在这里。</p>
             </div>
 
             <div className="data-download-form-grid">
@@ -765,7 +764,6 @@ export default function DataDownloadPage() {
                   onChange={(event) => setToken(event.target.value)}
                   placeholder="输入后缓存在当前浏览器 localStorage"
                 />
-                <small>如果切浏览器或清缓存，需要重新填写。</small>
               </label>
 
               <div className="data-download-inline-grid data-download-field-span-2">
@@ -893,7 +891,6 @@ export default function DataDownloadPage() {
         <section className="data-download-panel">
           <div className="data-download-panel-head">
             <h3>概念数据下载</h3>
-            <p>下载并补全概念相关数据。</p>
           </div>
 
           <div className="data-download-summary">
@@ -972,7 +969,7 @@ export default function DataDownloadPage() {
             <div className="data-download-panel-tip">
               {thsConceptConcurrentEnabled
                 ? `当前使用并发抓取，线程数 ${Math.max(1, Number(thsConceptWorkerThreads) || 1)}。任一线程失败后会停止整轮，并按整轮重试逻辑处理。`
-                : '当前使用串行抓取。失败后如果开启重试，会按整轮任务重新执行。'}
+                : '当前使用串行抓取。失败后如果开启重试，会从上次断点继续。'}
             </div>
           </div>
 

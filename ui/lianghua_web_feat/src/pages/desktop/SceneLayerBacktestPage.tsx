@@ -925,10 +925,6 @@ export default function SceneLayerBacktestPage() {
     <div className="scene-layer-page">
       <section className="scene-layer-card">
         <h2 className="scene-layer-title">回测全局参数</h2>
-        <div className="scene-layer-source-note">
-          当前数据目录：<strong>{sourcePath || "--"}</strong>
-        </div>
-
         <div className="scene-layer-form-grid">
           <label className="scene-layer-field">
             <span>股票复权</span>

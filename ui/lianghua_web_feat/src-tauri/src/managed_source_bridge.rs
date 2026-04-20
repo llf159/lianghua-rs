@@ -1,6 +1,6 @@
 use std::{
     io::{Read, Seek, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     str::FromStr,
 };
 
@@ -19,7 +19,7 @@ use lianghua_rs::ui_tools_feat::{
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 use tauri_plugin_fs::{FilePath, FsExt};
-use zip::{CompressionMethod, ZipWriter, write::FileOptions};
+use zip::{CompressionMethod, ZipArchive, ZipWriter, write::FileOptions};
 
 const MANAGED_SOURCE_IMPORT_EVENT: &str = "managed-source-import";
 const IMPORT_BUFFER_SIZE: usize = 1024 * 1024;
@@ -74,6 +74,14 @@ pub struct ManagedSourceFileExportResult {
     file_name: String,
     source_path: String,
     exported_path: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedSourceZipImportResult {
+    source_path: String,
+    imported_path: String,
+    extracted_file_count: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -212,6 +220,131 @@ fn append_directory_to_zip<W: Write + Seek>(
     }
 
     Ok(file_count)
+}
+
+fn normalize_archive_root(source_dir: &str) -> String {
+    let normalized = source_dir.trim().replace('\\', "/");
+    let trimmed = normalized.trim_matches('/');
+    if trimmed.is_empty() {
+        "source".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn path_to_normalized_segments(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn strip_archive_root(entry_path: &Path, archive_root: &str) -> PathBuf {
+    let entry_segments = path_to_normalized_segments(entry_path);
+    let root_segments = path_to_normalized_segments(Path::new(archive_root));
+
+    if !root_segments.is_empty()
+        && entry_segments.len() >= root_segments.len()
+        && entry_segments
+            .iter()
+            .take(root_segments.len())
+            .zip(root_segments.iter())
+            .all(|(left, right)| left == right)
+    {
+        return entry_segments
+            .iter()
+            .skip(root_segments.len())
+            .fold(PathBuf::new(), |mut current, segment| {
+                current.push(segment);
+                current
+            });
+    }
+
+    entry_path.to_path_buf()
+}
+
+fn import_managed_source_zip_inner(
+    app: tauri::AppHandle,
+    source_dir: String,
+    source_path: String,
+) -> Result<ManagedSourceZipImportResult, String> {
+    let trimmed_source_path = source_path.trim();
+    if trimmed_source_path.is_empty() {
+        return Err("empty import source path".into());
+    }
+
+    let app_data_root = app
+        .path()
+        .resolve("", tauri::path::BaseDirectory::AppData)
+        .map_err(|error| error.to_string())?;
+    let source_root = resolve_source_root(&app_data_root, &source_dir)?;
+    std::fs::create_dir_all(&source_root).map_err(|error| error.to_string())?;
+
+    let mut open_options = tauri_plugin_fs::OpenOptions::new();
+    open_options.read(true);
+    let source_file_path =
+        FilePath::from_str(trimmed_source_path).map_err(|error| error.to_string())?;
+    let source_label = source_file_path.to_string();
+    let source_file = app
+        .fs()
+        .open(source_file_path, open_options)
+        .map_err(|error| error.to_string())?;
+    let mut archive =
+        ZipArchive::new(source_file).map_err(|error| format!("解析 ZIP 文件失败: {error}"))?;
+    let archive_root = normalize_archive_root(&source_dir);
+
+    let mut extracted_file_count = 0u64;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("读取 ZIP 条目失败: {error}"))?;
+        let entry_name = entry.name().replace('\\', "/");
+        if entry_name.trim().is_empty()
+            || entry_name == "__MACOSX"
+            || entry_name.starts_with("__MACOSX/")
+        {
+            continue;
+        }
+
+        let enclosed_name = entry
+            .enclosed_name()
+            .ok_or_else(|| format!("ZIP 包含非法路径: {}", entry.name()))?;
+        let relative_path = strip_archive_root(enclosed_name, &archive_root);
+        if relative_path.as_os_str().is_empty() {
+            continue;
+        }
+
+        let target_path = source_root.join(&relative_path);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&target_path).map_err(|error| {
+                format!("创建导入目录失败: path={}, err={error}", target_path.display())
+            })?;
+            continue;
+        }
+
+        if let Some(parent) = target_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                format!("创建导入目录失败: path={}, err={error}", parent.display())
+            })?;
+        }
+
+        let mut target = std::fs::File::create(&target_path).map_err(|error| {
+            format!("创建导入文件失败: path={}, err={error}", target_path.display())
+        })?;
+        std::io::copy(&mut entry, &mut target).map_err(|error| {
+            format!("写入导入文件失败: path={}, err={error}", target_path.display())
+        })?;
+        target.flush().map_err(|error| error.to_string())?;
+        extracted_file_count += 1;
+    }
+
+    Ok(ManagedSourceZipImportResult {
+        source_path: source_root.display().to_string(),
+        imported_path: source_label,
+        extracted_file_count,
+    })
 }
 
 fn format_system_time(value: std::time::SystemTime) -> String {
@@ -773,6 +906,19 @@ pub async fn export_managed_source_file(
     .map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+pub async fn import_managed_source_zip(
+    app: tauri::AppHandle,
+    source_dir: String,
+    source_path: String,
+) -> Result<ManagedSourceZipImportResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        import_managed_source_zip_inner(app, source_dir, source_path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 fn import_strategy_backup_inner(
     app: tauri::AppHandle,
     source_dir: String,
@@ -1082,6 +1228,39 @@ pub async fn import_managed_strategy_backup(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_archive_root, strip_archive_root};
+    use std::path::Path;
+
+    #[test]
+    fn strip_archive_root_removes_exported_source_prefix() {
+        assert_eq!(
+            strip_archive_root(Path::new("source/stock_data.db"), "source"),
+            Path::new("stock_data.db")
+        );
+        assert_eq!(
+            strip_archive_root(Path::new("source/strategy_backups/20240101/meta.json"), "source"),
+            Path::new("strategy_backups/20240101/meta.json")
+        );
+    }
+
+    #[test]
+    fn strip_archive_root_keeps_rootless_paths() {
+        assert_eq!(
+            strip_archive_root(Path::new("stock_list.csv"), "source"),
+            Path::new("stock_list.csv")
+        );
+    }
+
+    #[test]
+    fn normalize_archive_root_defaults_to_source() {
+        assert_eq!(normalize_archive_root(""), "source");
+        assert_eq!(normalize_archive_root("source"), "source");
+        assert_eq!(normalize_archive_root("/nested/source/"), "nested/source");
+    }
 }
 
 #[tauri::command]

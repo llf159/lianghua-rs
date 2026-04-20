@@ -129,6 +129,12 @@ export type ManagedSourceDirectoryImportResult = {
   status: ManagedSourceStatus
 }
 
+export type ManagedSourceZipImportResult = {
+  sourcePath: string
+  importedPath: string
+  extractedFileCount: number
+}
+
 export type ManagedSourceCacheBackup = {
   version: 1
   exportedAt: string
@@ -616,6 +622,29 @@ export async function importManagedSourceDirectory(
     missingFileIds,
     status: await inspectManagedSourceStatus(sourceDir),
   } satisfies ManagedSourceDirectoryImportResult
+}
+
+export async function importManagedSourceZip(_sourceDirInput?: string) {
+  const picked = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: 'ZIP', extensions: ['zip'] }],
+  })
+
+  if (!picked || Array.isArray(picked)) {
+    return null
+  }
+
+  const sourceDir = DEFAULT_MANAGED_SOURCE_DIR
+  await ensureManagedSourcePath(sourceDir)
+  await allowImportPath(picked, false, false)
+
+  const result = await invoke<ManagedSourceZipImportResult>('import_managed_source_zip', {
+    sourceDir,
+    sourcePath: picked,
+  })
+  writeStoredSourceImportTimestamp(new Date().toISOString())
+  return result
 }
 
 export async function clearManagedSourceData(_sourceDirInput?: string) {
