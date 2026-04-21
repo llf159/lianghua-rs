@@ -400,6 +400,8 @@ export default function ExpressionStockPickPage() {
       <StockPickResultTable
         rows={rows}
         tradeDate={resolvedReferenceTradeDate}
+        intervalStartTradeDate={resolvedStartDate || undefined}
+        intervalEndTradeDate={resolvedReferenceTradeDate || undefined}
         sourcePath={sourcePath}
       />
     </section>

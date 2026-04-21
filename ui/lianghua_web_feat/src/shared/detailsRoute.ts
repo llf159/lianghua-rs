@@ -3,10 +3,18 @@ import { sanitizeCodeInput, splitTsCode } from './stockCode'
 export type DetailsRouteInput = {
   tsCode: string
   tradeDate?: string | null
+  intervalStartTradeDate?: string | null
+  intervalEndTradeDate?: string | null
   sourcePath?: string | null
 }
 
-export function buildDetailsPath({ tsCode, tradeDate, sourcePath }: DetailsRouteInput) {
+export function buildDetailsPath({
+  tsCode,
+  tradeDate,
+  intervalStartTradeDate,
+  intervalEndTradeDate,
+  sourcePath,
+}: DetailsRouteInput) {
   const code = sanitizeCodeInput(splitTsCode(tsCode))
   if (code === '') {
     return '/details'
@@ -19,6 +27,14 @@ export function buildDetailsPath({ tsCode, tradeDate, sourcePath }: DetailsRoute
     params.set('tradeDate', tradeDate.trim())
   }
 
+  if (intervalStartTradeDate?.trim()) {
+    params.set('intervalStartTradeDate', intervalStartTradeDate.trim())
+  }
+
+  if (intervalEndTradeDate?.trim()) {
+    params.set('intervalEndTradeDate', intervalEndTradeDate.trim())
+  }
+
   if (sourcePath?.trim()) {
     params.set('sourcePath', sourcePath.trim())
   }
@@ -26,7 +42,13 @@ export function buildDetailsPath({ tsCode, tradeDate, sourcePath }: DetailsRoute
   return `/details?${params.toString()}`
 }
 
-export function buildLinkedDetailsPath({ tsCode, tradeDate, sourcePath }: DetailsRouteInput) {
+export function buildLinkedDetailsPath({
+  tsCode,
+  tradeDate,
+  intervalStartTradeDate,
+  intervalEndTradeDate,
+  sourcePath,
+}: DetailsRouteInput) {
   const code = sanitizeCodeInput(splitTsCode(tsCode))
   if (code === '') {
     return '/details-linked'
@@ -37,6 +59,14 @@ export function buildLinkedDetailsPath({ tsCode, tradeDate, sourcePath }: Detail
 
   if (tradeDate?.trim()) {
     params.set('tradeDate', tradeDate.trim())
+  }
+
+  if (intervalStartTradeDate?.trim()) {
+    params.set('intervalStartTradeDate', intervalStartTradeDate.trim())
+  }
+
+  if (intervalEndTradeDate?.trim()) {
+    params.set('intervalEndTradeDate', intervalEndTradeDate.trim())
   }
 
   if (sourcePath?.trim()) {

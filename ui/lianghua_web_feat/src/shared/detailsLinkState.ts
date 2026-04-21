@@ -4,6 +4,8 @@ import type { DetailStrategyTriggerRow } from "../apis/details";
 export type DetailsNavigationItem = {
   tsCode: string;
   tradeDate?: string | null;
+  intervalStartTradeDate?: string | null;
+  intervalEndTradeDate?: string | null;
   sourcePath?: string | null;
   name?: string | null;
 };
