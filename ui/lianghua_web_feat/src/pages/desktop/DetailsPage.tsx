@@ -15,9 +15,11 @@ import {
 } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
+  getStockDetailCyq,
   getStockDetailRealtime,
   getStockDetailPage,
   getStockDetailStrategySnapshot,
+  type DetailCyqSnapshot,
   type DetailKlinePanel,
   type DetailKlineRow,
   type DetailKlinePayload,
@@ -27,6 +29,7 @@ import {
   type DetailStrategyTriggerRow,
   type StockSimilarityPageData,
   type StockSimilarityRow,
+  type StockDetailCyqData,
   type StockDetailRealtimeData,
   type StockDetailPageData,
 } from "../../apis/details";
@@ -73,6 +76,7 @@ import {
 import {
   findWatchObserveRow,
   listWatchObserveRows,
+  preloadWatchObserveRows,
   removeWatchObserveRows,
   type WatchObserveRow,
   upsertWatchObserveRow,
@@ -99,6 +103,8 @@ const CHART_CURSOR_Y_MAX = 94;
 const CHART_TOOLTIP_LEFT_THRESHOLD = 62;
 const CHART_POINTER_DRAG_THRESHOLD = 6;
 const CHART_TOUCH_FOCUS_HIT_SLOP = 24;
+const CHART_CYQ_PANEL_WIDTH_RATIO = 0.22;
+const CHART_CYQ_PANEL_GAP = 12;
 const VOLUME_OVERLAY_KEYS = ["VOL_SIGMA"] as const;
 const CHART_PANEL_GAP_PX = 8;
 const STRATEGY_SPLIT_DEFAULT = 0.64;
@@ -116,8 +122,19 @@ const CANDLE_DOWN_COLOR = "#178f68";
 const CANDLE_FLAT_COLOR = "#536273";
 const CANDLE_REALTIME_UP_COLOR = "#eb7a34";
 const CANDLE_REALTIME_DOWN_COLOR = "#2d6cdf";
+const CHART_CYQ_UP_COLOR = "#4d95c9";
+const CHART_CYQ_DOWN_COLOR = "#d9485f";
 const LINE_COLORS = ["#0057ff", "#e13a1f", "#6a00f4", "#00843d"];
 const CANDLE_BASE_SERIES_KEYS = new Set(["open", "high", "low", "close"]);
+
+function waitForNextPaint() {
+  if (typeof window === "undefined") {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    window.requestAnimationFrame(() => resolve());
+  });
+}
 type DetailStrategySortKey = "rule_score" | "hit_date" | "lag";
 type PrevRankSortKey = "trade_date" | "rank";
 type SceneOverviewSortKey =
@@ -603,6 +620,28 @@ function buildRankNumberLookup(
   });
 
   return lookup;
+}
+
+function findCyqSnapshotForTradeDate(
+  snapshots: DetailCyqSnapshot[],
+  tradeDate: string | null,
+) {
+  if (!tradeDate || snapshots.length === 0) {
+    return snapshots[snapshots.length - 1] ?? null;
+  }
+
+  let latestBeforeOrEqual: DetailCyqSnapshot | null = null;
+  for (const snapshot of snapshots) {
+    if (snapshot.trade_date === tradeDate) {
+      return snapshot;
+    }
+    if (snapshot.trade_date <= tradeDate) {
+      latestBeforeOrEqual = snapshot;
+      continue;
+    }
+    break;
+  }
+  return latestBeforeOrEqual ?? snapshots[snapshots.length - 1] ?? null;
 }
 
 function buildSceneRowKey(row: DetailSceneTriggerRow) {
@@ -1458,6 +1497,10 @@ function renderChartPanel(
     panelKey: string,
     event: ReactPointerEvent<HTMLDivElement>,
   ) => void,
+  isCyqPanelVisible: boolean,
+  selectedCyqSnapshot: DetailCyqSnapshot | null,
+  selectedCyqTradeDate: string | null,
+  chipToggleButton: ReactNode,
   watchObserveButton: ReactNode,
 ) {
   const kind = panel.kind ?? "line";
@@ -1468,13 +1511,26 @@ function renderChartPanel(
       ? seriesKeys.filter((key) => !CANDLE_BASE_SERIES_KEYS.has(key))
       : [];
   const headerSeriesKeys = kind === "candles" ? candleOverlayKeys : seriesKeys;
+  const showCyqPanel =
+    panel.key === "price" &&
+    isCyqPanelVisible &&
+    (selectedCyqSnapshot?.bins.length ?? 0) > 0;
   const plotWidth =
     CHART_VIEWBOX_WIDTH - CHART_MARGIN.left - CHART_MARGIN.right;
+  const chipPanelWidth = showCyqPanel ? plotWidth * CHART_CYQ_PANEL_WIDTH_RATIO : 0;
+  const klinePlotWidth = Math.max(
+    plotWidth - chipPanelWidth - (showCyqPanel ? CHART_CYQ_PANEL_GAP : 0),
+    1,
+  );
+  const plotRight = CHART_VIEWBOX_WIDTH - CHART_MARGIN.right;
+  const chipPanelLeft =
+    CHART_MARGIN.left + klinePlotWidth + (showCyqPanel ? CHART_CYQ_PANEL_GAP : 0);
+  const chipPanelRight = plotRight;
   const plotHeight =
     CHART_VIEWBOX_HEIGHT - CHART_MARGIN.top - CHART_MARGIN.bottom;
   const layoutSlotCount = getChartLayoutSlotCount(items.length, allItems.length);
   const leadingSlotCount = Math.max(layoutSlotCount - items.length, 0);
-  const step = layoutSlotCount > 0 ? plotWidth / layoutSlotCount : plotWidth;
+  const step = layoutSlotCount > 0 ? klinePlotWidth / layoutSlotCount : klinePlotWidth;
   const xAt = (itemIndex: number) =>
     CHART_MARGIN.left +
     step * (leadingSlotCount + itemIndex) +
@@ -1530,6 +1586,7 @@ function renderChartPanel(
   let domain: { min: number; max: number } | null = null;
   let zeroY: number | null = null;
   let svgContent: ReactNode = null;
+  let cyqSvgContent: ReactNode = null;
 
   if (kind === "candles") {
     const values = items.flatMap((row) => {
@@ -1627,7 +1684,79 @@ function renderChartPanel(
         );
       });
 
-      svgContent = [...candleNodes, ...overlayNodes];
+      if (showCyqPanel && selectedCyqSnapshot) {
+        const selectedCloseCandidate =
+          items[activeVisibleIndex ?? Math.max(items.length - 1, 0)]?.close ??
+          selectedCyqSnapshot.close;
+        const selectedClose =
+          typeof selectedCloseCandidate === "number" &&
+          Number.isFinite(selectedCloseCandidate)
+            ? selectedCloseCandidate
+            : selectedCyqSnapshot.close;
+        const visibleCyqBins = selectedCyqSnapshot.bins.filter((bin) => {
+          const binLow = Math.min(bin.price_low, bin.price_high);
+          const binHigh = Math.max(bin.price_low, bin.price_high);
+          return !(binHigh < currentDomain.min || binLow > currentDomain.max);
+        });
+        const maxChipPct = visibleCyqBins.reduce((acc, bin) => {
+          return Number.isFinite(bin.chip_pct) ? Math.max(acc, bin.chip_pct) : acc;
+        }, 0);
+
+        if (visibleCyqBins.length > 0 && maxChipPct > 0) {
+          cyqSvgContent = (
+            <g key={`${panel.key}-cyq-${selectedCyqTradeDate ?? selectedCyqSnapshot.trade_date}`}>
+              <line
+                className="details-chart-cyq-divider"
+                x1={chipPanelLeft}
+                y1={CHART_MARGIN.top}
+                x2={chipPanelLeft}
+                y2={CHART_VIEWBOX_HEIGHT - CHART_MARGIN.bottom}
+              />
+              {visibleCyqBins.map((bin, binIndex) => {
+                const clampedLow = Math.max(
+                  Math.min(bin.price_low, bin.price_high),
+                  currentDomain.min,
+                );
+                const clampedHigh = Math.min(
+                  Math.max(bin.price_low, bin.price_high),
+                  currentDomain.max,
+                );
+                if (clampedLow > clampedHigh) {
+                  return null;
+                }
+
+                const yTop = yAt(clampedHigh);
+                const yBottom = yAt(clampedLow);
+                const barHeight = Math.max(yBottom - yTop, 1);
+                const chipPct = Number.isFinite(bin.chip_pct) ? bin.chip_pct : 0;
+                const maxBarWidth = Math.max(chipPanelRight - chipPanelLeft - 4, 0);
+                const barWidth = (chipPct / maxChipPct) * maxBarWidth;
+                const representativePrice = (bin.price_low + bin.price_high) / 2;
+                const fill =
+                  representativePrice > selectedClose
+                    ? CHART_CYQ_UP_COLOR
+                    : CHART_CYQ_DOWN_COLOR;
+
+                return (
+                  <rect
+                    className="details-chart-cyq-bar"
+                    key={`${selectedCyqSnapshot.trade_date}-${binIndex}`}
+                    x={chipPanelRight - Math.max(barWidth, 1)}
+                    y={yTop}
+                    width={Math.max(barWidth, 1)}
+                    height={barHeight}
+                    fill={fill}
+                    opacity={0.86}
+                    rx={1}
+                  />
+                );
+              })}
+            </g>
+          );
+        }
+      }
+
+      svgContent = [...candleNodes, ...overlayNodes, cyqSvgContent];
     }
   } else if (kind === "line") {
     const values = items.flatMap((row) =>
@@ -1891,6 +2020,7 @@ function renderChartPanel(
           </div>
         ) : null}
 
+        {panel.key === "price" ? chipToggleButton : null}
         {panel.key === "price" ? watchObserveButton : null}
 
         {domain && svgContent ? (
@@ -1910,7 +2040,7 @@ function renderChartPanel(
                     className="details-chart-grid-line"
                     x1={CHART_MARGIN.left}
                     y1={y}
-                    x2={CHART_VIEWBOX_WIDTH - CHART_MARGIN.right}
+                    x2={plotRight}
                     y2={y}
                   />
                 </g>
@@ -1943,7 +2073,7 @@ function renderChartPanel(
                 className="details-chart-zero-line"
                 x1={CHART_MARGIN.left}
                 y1={zeroY}
-                x2={CHART_VIEWBOX_WIDTH - CHART_MARGIN.right}
+                x2={plotRight}
                 y2={zeroY}
               />
             ) : null}
@@ -2617,8 +2747,15 @@ export default function DetailsPage({
     [],
   );
   const [watchObserveNotice, setWatchObserveNotice] = useState("");
+  const [watchObserveSaving, setWatchObserveSaving] = useState(false);
   const [detailRealtimeData, setDetailRealtimeData] =
     useState<StockDetailRealtimeData | null>(null);
+  const [detailCyqData, setDetailCyqData] = useState<StockDetailCyqData | null>(
+    null,
+  );
+  const [detailCyqVisible, setDetailCyqVisible] = useState(false);
+  const [detailCyqLoading, setDetailCyqLoading] = useState(false);
+  const [detailCyqError, setDetailCyqError] = useState("");
   const [detailRealtimeLoading, setDetailRealtimeLoading] = useState(false);
   const [detailRealtimeNotice, setDetailRealtimeNotice] = useState("");
   const [detailRealtimePinned, setDetailRealtimePinned] = useState(false);
@@ -2657,6 +2794,7 @@ export default function DetailsPage({
   const detailRealtimeLongPressTimerRef = useRef<number | null>(null);
   const detailRealtimeLongPressHandledRef = useRef(false);
   const detailRealtimeAutoRefreshKeyRef = useRef("");
+  const detailCyqRequestKeyRef = useRef("");
   const detailsNavLongPressTimerRef = useRef<number | null>(null);
   const detailsNavLongPressHandledRef = useRef(false);
   const strategyCompareRequestKeyRef = useRef("");
@@ -2779,6 +2917,51 @@ export default function DetailsPage({
         return null;
       } finally {
         setDetailLoading(false);
+      }
+    },
+    [],
+  );
+
+  const loadDetailCyq = useCallback(
+    async (nextSourcePath: string, nextTsCode: string) => {
+      const normalizedSourcePath = nextSourcePath.trim();
+      const normalizedTsCode = nextTsCode.trim();
+      if (normalizedSourcePath === "" || normalizedTsCode === "") {
+        setDetailCyqData(null);
+        setDetailCyqError("");
+        return null;
+      }
+
+      const requestKey = `${normalizedSourcePath}|${normalizedTsCode}`;
+      if (detailCyqRequestKeyRef.current === requestKey) {
+        return null;
+      }
+
+      detailCyqRequestKeyRef.current = requestKey;
+      setDetailCyqLoading(true);
+      setDetailCyqError("");
+
+      try {
+        const cyq = await getStockDetailCyq({
+          sourcePath: normalizedSourcePath,
+          tsCode: normalizedTsCode,
+        });
+        if (detailCyqRequestKeyRef.current !== requestKey) {
+          return null;
+        }
+        setDetailCyqData(cyq);
+        return cyq;
+      } catch (error) {
+        if (detailCyqRequestKeyRef.current === requestKey) {
+          setDetailCyqData(null);
+          setDetailCyqError(`读取筹码分布失败: ${String(error)}`);
+        }
+        return null;
+      } finally {
+        if (detailCyqRequestKeyRef.current === requestKey) {
+          detailCyqRequestKeyRef.current = "";
+          setDetailCyqLoading(false);
+        }
       }
     },
     [],
@@ -3103,6 +3286,27 @@ export default function DetailsPage({
   const watermarkConcept = buildConceptPreview(conceptItems);
   const prevRanks = detailData?.prev_ranks ?? EMPTY_PREV_RANK_ROWS;
   const stockSimilarity = detailData?.stock_similarity ?? null;
+  useEffect(() => {
+    setDetailCyqData(null);
+    setDetailCyqError("");
+    detailCyqRequestKeyRef.current = "";
+  }, [resolvedTsCode, sourcePathTrimmed]);
+
+  useEffect(() => {
+    if (!detailCyqVisible || resolvedTsCode === "--" || sourcePathTrimmed === "") {
+      return;
+    }
+    if (detailCyqData?.resolved_ts_code === resolvedTsCode) {
+      return;
+    }
+    void loadDetailCyq(sourcePathTrimmed, resolvedTsCode);
+  }, [
+    detailCyqData?.resolved_ts_code,
+    detailCyqVisible,
+    loadDetailCyq,
+    resolvedTsCode,
+    sourcePathTrimmed,
+  ]);
   const overviewGridStyle = useMemo(() => {
     if (overviewCardHeight === null) {
       return undefined;
@@ -3339,6 +3543,7 @@ export default function DetailsPage({
   );
   const kline = detailRealtimeData?.kline ?? detailData?.kline;
   const allChartItems = kline?.items ?? EMPTY_KLINE_ROWS;
+  const detailCyqSnapshots = detailCyqData?.snapshots ?? [];
   const totalChartItems = allChartItems.length;
   const minVisibleBars =
     totalChartItems === 0 ? 0 : Math.min(MIN_VISIBLE_BARS, totalChartItems);
@@ -3358,6 +3563,15 @@ export default function DetailsPage({
   const chartItems = allChartItems.slice(
     effectiveVisibleStart,
     effectiveVisibleStart + effectiveVisibleBarCount,
+  );
+  const selectedCyqTradeDate =
+    chartFocus && chartFocus.absoluteIndex >= 0 && chartFocus.absoluteIndex < allChartItems.length
+      ? allChartItems[chartFocus.absoluteIndex]?.trade_date ?? null
+      : allChartItems[allChartItems.length - 1]?.trade_date ??
+        (resolvedTradeDate !== "--" ? resolvedTradeDate : null);
+  const selectedCyqSnapshot = useMemo(
+    () => findCyqSnapshotForTradeDate(detailCyqSnapshots, selectedCyqTradeDate),
+    [detailCyqSnapshots, selectedCyqTradeDate],
   );
   const chartLayoutSlotCount = getChartLayoutSlotCount(
     chartItems.length,
@@ -3417,6 +3631,13 @@ export default function DetailsPage({
     chartItems.length > 0
       ? `${chartItems[0].trade_date} -> ${chartItems[chartItems.length - 1].trade_date}`
       : "--";
+  const cyqToggleTitle = detailCyqLoading
+    ? "筹码分布加载中..."
+    : detailCyqError
+      ? detailCyqError
+      : detailCyqVisible
+        ? `隐藏筹码分布${selectedCyqTradeDate ? `（${selectedCyqTradeDate}）` : ""}`
+        : "显示筹码分布";
   const strategyGridStyle = useMemo(
     () =>
       isStrategyStacked
@@ -3727,6 +3948,8 @@ export default function DetailsPage({
 
   useEffect(() => {
     let cancelled = false;
+
+    void preloadWatchObserveRows(sourcePathTrimmed).catch(() => {});
 
     const syncWatchObserveItems = async () => {
       try {
@@ -4067,12 +4290,17 @@ export default function DetailsPage({
   }
 
   async function onAddWatchObserve() {
-    if (resolvedTsCode === "--") {
+    if (resolvedTsCode === "--" || watchObserveSaving) {
       return;
     }
 
+    const isRemoving = currentWatchObserveItem !== null;
     try {
-      if (currentWatchObserveItem) {
+      setWatchObserveSaving(true);
+      setWatchObserveNotice(isRemoving ? "正在取消自选..." : "正在加入自选...");
+      await waitForNextPaint();
+
+      if (isRemoving) {
         const nextItems = await removeWatchObserveRows(
           [resolvedTsCode],
           sourcePathTrimmed,
@@ -4101,8 +4329,10 @@ export default function DetailsPage({
       setWatchObserveNotice("");
     } catch {
       setWatchObserveNotice(
-        currentWatchObserveItem ? "取消自选失败" : "加入自选失败",
+        isRemoving ? "取消自选失败" : "加入自选失败",
       );
+    } finally {
+      setWatchObserveSaving(false);
     }
   }
 
@@ -4133,6 +4363,24 @@ export default function DetailsPage({
       setDetailRealtimeLoading(false);
     }
   }, [resolvedTsCode, sourcePathTrimmed]);
+
+  const onToggleCyqPanel = useCallback(async () => {
+    const nextVisible = !detailCyqVisible;
+    setDetailCyqVisible(nextVisible);
+    if (!nextVisible || resolvedTsCode === "--" || sourcePathTrimmed === "") {
+      return;
+    }
+    if (detailCyqData?.resolved_ts_code === resolvedTsCode) {
+      return;
+    }
+    await loadDetailCyq(sourcePathTrimmed, resolvedTsCode);
+  }, [
+    detailCyqData?.resolved_ts_code,
+    detailCyqVisible,
+    loadDetailCyq,
+    resolvedTsCode,
+    sourcePathTrimmed,
+  ]);
 
   const toggleDetailRealtimePinned = useCallback(() => {
     let nextPinned = false;
@@ -4657,6 +4905,29 @@ export default function DetailsPage({
               onChartPointerUp,
               onChartPointerLeave,
               onChartPointerCancel,
+              detailCyqVisible,
+              selectedCyqSnapshot,
+              selectedCyqTradeDate,
+              <button
+                className={[
+                  "details-chart-cyq-toggle",
+                  detailCyqVisible ? "is-active" : "",
+                  detailCyqLoading ? "is-loading" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                type="button"
+                onPointerDown={(event) => {
+                  event.stopPropagation();
+                }}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void onToggleCyqPanel();
+                }}
+                title={cyqToggleTitle}
+              >
+                筹
+              </button>,
               <div className="details-chart-watch-action">
                 <div className="details-chart-watch-row">
                   <span className="details-chart-watch-time">
@@ -4702,12 +4973,14 @@ export default function DetailsPage({
                   <button
                     className={[
                       "details-chart-watch-btn",
+                      watchObserveSaving ? "is-pending" : "",
                       isCurrentWatched ? "is-added" : "",
                     ]
                       .filter(Boolean)
                       .join(" ")}
                     type="button"
                     disabled={
+                      watchObserveSaving ||
                       resolvedTsCode === "--" ||
                       (!isCurrentWatched && resolvedTradeDate === "--")
                     }
@@ -4730,7 +5003,13 @@ export default function DetailsPage({
                       void onAddWatchObserve();
                     }}
                   >
-                    {isCurrentWatched ? "取消自选" : "加自选"}
+                    {watchObserveSaving
+                      ? isCurrentWatched
+                        ? "取消中..."
+                        : "加入中..."
+                      : isCurrentWatched
+                        ? "取消自选"
+                        : "加自选"}
                   </button>
                 </div>
                 {detailRealtimeNotice ? (

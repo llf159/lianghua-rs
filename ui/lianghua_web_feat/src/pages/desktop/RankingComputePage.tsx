@@ -16,6 +16,7 @@ import {
 import {
   getRankingComputeStatus,
   runConceptPerformanceCompute,
+  runCyqCompute,
   runRankingScoreCalculation,
   runRankingTiebreakFill,
   type RankComputeDbRange,
@@ -35,7 +36,13 @@ import ConfirmDialog from '../../shared/ConfirmDialog'
 import './css/DataDownloadPage.css'
 import './css/RankingComputePage.css'
 
-type BusyAction = 'idle' | 'loading' | 'computing' | 'deleting-result-db' | 'indicator-running'
+type BusyAction =
+  | 'idle'
+  | 'loading'
+  | 'computing'
+  | 'cyq-computing'
+  | 'deleting-result-db'
+  | 'indicator-running'
 type IndicatorEditorMode = 'create' | 'edit'
 type PendingConfirmState =
   | { kind: 'delete-indicator'; item: IndicatorManageItem }
@@ -136,6 +143,17 @@ function normalizeIndicatorPrecInput(raw: string, fallback: number) {
   return Math.max(0, Number(trimmed))
 }
 
+function normalizeCyqFactorInput(raw: string) {
+  const trimmed = raw.trim()
+  if (trimmed === '') {
+    return 50
+  }
+  if (!/^\d+$/.test(trimmed)) {
+    return 50
+  }
+  return Math.max(2, Number(trimmed))
+}
+
 function formatPhaseLabel(phase: string | null | undefined) {
   switch (normalizeProgressPhase(phase)) {
     case 'delete_stock_data_indicator_columns':
@@ -169,6 +187,9 @@ export default function RankingComputePage() {
   const [busyAction, setBusyAction] = useState<BusyAction>('loading')
   const [startDateInput, setStartDateInput] = useState('')
   const [endDateInput, setEndDateInput] = useState('')
+  const [cyqFactorInput, setCyqFactorInput] = useState('50')
+  const [cyqStartDateInput, setCyqStartDateInput] = useState('')
+  const [cyqEndDateInput, setCyqEndDateInput] = useState('')
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [progress, setProgress] = useState<DataDownloadProgress | null>(null)
@@ -397,6 +418,9 @@ export default function RankingComputePage() {
 
       setStartDateInput((current) => current || compactDateToInput(nextStatus.suggestedStartDate))
       setEndDateInput((current) => current || compactDateToInput(nextStatus.suggestedEndDate))
+      setCyqFactorInput((current) =>
+        current.trim() !== '' ? current : String(nextStatus.cyqFactor ?? 50),
+      )
     } catch (loadError) {
       setNotice('')
       setError(`读取数据计算状态失败: ${String(loadError)}`)
@@ -596,6 +620,43 @@ export default function RankingComputePage() {
     }
   }
 
+  async function onRunCyqCompute() {
+    if (!sourcePath) {
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    const factor = normalizeCyqFactorInput(cyqFactorInput)
+    const startDate = cyqStartDateInput.trim()
+    const endDate = cyqEndDateInput.trim()
+    setCyqFactorInput(String(factor))
+    setBusyAction('cyq-computing')
+    setError('')
+
+    try {
+      const result = await runCyqCompute(
+        sourcePath,
+        factor,
+        startDate || undefined,
+        endDate || undefined,
+      )
+      const nextStatus = await getRankingComputeStatus(sourcePath)
+      setStatus(nextStatus)
+      const rangeText =
+        result.startDate && result.endDate
+          ? `，区间 ${formatTradeDate(result.startDate)} 至 ${formatTradeDate(result.endDate)}`
+          : ''
+      setNotice(
+        `筹码计算完成，分桶 ${result.factor}${rangeText}，写入 ${result.snapshotRows} 条摘要和 ${result.binRows} 条分桶，用时 ${formatElapsedMs(result.elapsedMs)}。`,
+      )
+    } catch (actionError) {
+      setNotice('')
+      setError(`筹码计算失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
   async function onConfirmPendingAction() {
     const current = pendingConfirm
     if (!current) {
@@ -670,6 +731,15 @@ export default function RankingComputePage() {
               </small>
             ) : null}
           </div>
+          <div className="ranking-compute-summary-item">
+            <span>筹码库日期范围</span>
+            <strong>{describeDbRange(status?.cyqDb)}</strong>
+            <small>
+              {status?.cyqDb
+                ? `${status.cyqDb.distinctTradeDates} 个交易日，${status.cyqDb.rowCount} 条摘要，${status.cyqBinRowCount} 条分桶；当前分桶 ${status.cyqFactor ?? '--'}。`
+                : '读取中...'}
+            </small>
+          </div>
         </div>
       </section>
 
@@ -717,6 +787,70 @@ export default function RankingComputePage() {
           <button className="ranking-compute-secondary-btn" type="button" onClick={() => void onRunOtherDataCompute()} disabled={isBusy || sourcePath === ''}>
             {busyAction === 'computing' ? '计算中...' : '开始其他数据计算'}
           </button>
+        </div>
+      </section>
+
+      <section className="ranking-compute-card">
+        <div className="ranking-compute-summary">
+          <div className="ranking-compute-summary-item">
+            <span>筹码计算</span>
+            <strong>cyq.db / cyq_snapshot / cyq_bin</strong>
+            <small>支持按日期范围重建 CYQ 摘要和分桶明细；日期留空时按原始库全量，默认分桶为 50。</small>
+          </div>
+        </div>
+
+        <div className="ranking-compute-form">
+          <label className="ranking-compute-field">
+            <span>开始日期</span>
+            <input
+              type="date"
+              value={cyqStartDateInput}
+              onChange={(event) => setCyqStartDateInput(event.target.value)}
+              placeholder={compactDateToInput(status?.sourceDb?.minTradeDate)}
+            />
+          </label>
+
+          <label className="ranking-compute-field">
+            <span>结束日期</span>
+            <input
+              type="date"
+              value={cyqEndDateInput}
+              onChange={(event) => setCyqEndDateInput(event.target.value)}
+              placeholder={compactDateToInput(status?.sourceDb?.maxTradeDate)}
+            />
+          </label>
+
+          <label className="ranking-compute-field">
+            <span>分桶数</span>
+            <input
+              type="number"
+              min="2"
+              step="1"
+              value={cyqFactorInput}
+              onChange={(event) => setCyqFactorInput(event.target.value)}
+            />
+          </label>
+
+          <div className="ranking-compute-summary-item">
+            <span>默认范围</span>
+            <small>
+              原始库当前可用区间：
+              {status?.sourceDb?.minTradeDate || status?.sourceDb?.maxTradeDate
+                ? ` ${formatTradeDate(status?.sourceDb?.minTradeDate)} 至 ${formatTradeDate(status?.sourceDb?.maxTradeDate)}`
+                : ' 暂无'}
+            </small>
+          </div>
+
+          <div className="ranking-compute-actions">
+            <button
+              className="ranking-compute-secondary-btn"
+              type="button"
+              onClick={() => void onRunCyqCompute()}
+              disabled={isBusy || sourcePath === ''}
+            >
+              {busyAction === 'cyq-computing' ? '计算中...' : '开始筹码计算'}
+            </button>
+          </div>
         </div>
       </section>
 

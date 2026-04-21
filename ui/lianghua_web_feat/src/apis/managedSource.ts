@@ -63,6 +63,16 @@ export const MANAGED_SOURCE_FILES = [
     scanPathHints: ['concept'],
   },
   {
+    id: 'cyq-db',
+    label: '筹码库',
+    description: 'CYQ 摘要与分桶结果库。',
+    fileName: 'cyq.db',
+    expectedSourcePath: 'source/cyq.db',
+    targetRelativePathSuffix: 'cyq.db',
+    extensions: ['db'],
+    scanPathHints: ['cyq', 'chip'],
+  },
+  {
     id: 'score-rule',
     label: '规则文件',
     description: '个股详情里的规则说明和表达式来源。',
@@ -197,6 +207,8 @@ export type ManagedSourceDatasetId =
   | 'rule-details'
   | 'scene-details'
   | 'concept-performance'
+  | 'cyq-snapshot'
+  | 'cyq-bins'
   | 'stock-list-csv'
   | 'trade-calendar-csv'
   | 'stock-concepts-csv'

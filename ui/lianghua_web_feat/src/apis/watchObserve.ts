@@ -44,6 +44,8 @@ export type WatchObserveInput = {
 }
 
 let watchObserveMigrationPromise: Promise<void> | null = null
+let watchObservePreloadPromise: Promise<WatchObserveRow[]> | null = null
+let watchObservePreloadKey = ''
 
 function resolveSourcePath(sourcePath?: string | null) {
   const trimmed = sourcePath?.trim() ?? ''
@@ -215,4 +217,31 @@ export async function removeWatchObserveRows(tsCodes: string[], sourcePath?: str
   await ensureWatchObserveCacheMigration(sourcePath)
   removeCachedWatchObserveRows(tsCodes)
   return listHydratedWatchObserveRows(sourcePath)
+}
+
+export function preloadWatchObserveRows(
+  sourcePath?: string | null,
+  referenceTradeDate?: string | null,
+) {
+  const preloadKey = `${resolveSourcePath(sourcePath) ?? ''}::${referenceTradeDate?.trim() ?? ''}`
+  if (watchObservePreloadPromise && watchObservePreloadKey === preloadKey) {
+    return watchObservePreloadPromise
+  }
+
+  const preloadPromise = (async () => {
+    await ensureWatchObserveCacheMigration(sourcePath)
+    return listHydratedWatchObserveRows(sourcePath, referenceTradeDate)
+  })()
+
+  watchObservePreloadPromise = preloadPromise
+  watchObservePreloadKey = preloadKey
+
+  void preloadPromise.finally(() => {
+    if (watchObservePreloadPromise === preloadPromise) {
+      watchObservePreloadPromise = null
+      watchObservePreloadKey = ''
+    }
+  })
+
+  return preloadPromise
 }

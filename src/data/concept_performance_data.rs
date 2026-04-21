@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use duckdb::{Connection, params};
+use duckdb::{params, Connection};
 use rayon::prelude::*;
 
 use crate::data::{
@@ -897,7 +897,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use duckdb::{Connection, params};
+    use duckdb::{params, Connection};
 
     use super::*;
 

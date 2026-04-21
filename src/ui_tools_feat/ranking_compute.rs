@@ -5,8 +5,10 @@ use serde::Serialize;
 
 use crate::{
     data::{
-        concept_performance_data::rebuild_concept_performance_all, load_trade_date_list,
-        result_db_path, source_db_path,
+        concept_performance_data::rebuild_concept_performance_all,
+        cyq::CyqConfig,
+        cyq_data::rebuild_cyq_all,
+        cyq_db_path, load_trade_date_list, result_db_path, source_db_path,
     },
     scoring::{
         RankTiebreakProfile, TieBreakWay, build_rank_tiebreak,
@@ -20,6 +22,19 @@ pub struct ConceptPerformanceComputeResult {
     pub action: String,
     pub elapsed_ms: u64,
     pub saved_rows: usize,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CyqComputeResult {
+    pub action: String,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub elapsed_ms: u64,
+    pub snapshot_rows: usize,
+    pub bin_rows: usize,
+    pub factor: usize,
+    pub range: usize,
 }
 
 use super::normalize_trade_date;
@@ -59,6 +74,9 @@ pub struct RankComputeStatus {
     pub source_db: RankComputeDbRange,
     pub result_db: RankComputeDbRange,
     pub result_db_continuity: RankComputeResultContinuity,
+    pub cyq_db: RankComputeDbRange,
+    pub cyq_bin_row_count: u64,
+    pub cyq_factor: Option<u64>,
     pub suggested_start_date: Option<String>,
     pub suggested_end_date: Option<String>,
 }
@@ -286,6 +304,64 @@ fn query_distinct_trade_dates(
     Ok(trade_dates)
 }
 
+fn query_table_row_count(
+    db_path: &Path,
+    file_name: &str,
+    table_name: &str,
+) -> Result<u64, String> {
+    if !db_path.exists() {
+        return Ok(0);
+    }
+
+    let db_path_str = db_path
+        .to_str()
+        .ok_or_else(|| format!("{file_name} 路径不是有效 UTF-8"))?;
+    let conn = Connection::open(db_path_str).map_err(|e| format!("打开 {file_name} 失败: {e}"))?;
+    let table_exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+            [table_name],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("检查 {file_name} 表结构失败: {e}"))?;
+    if table_exists <= 0 {
+        return Ok(0);
+    }
+
+    conn.query_row(&format!("SELECT COUNT(*) FROM {table_name}"), [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .map(|value| value.max(0) as u64)
+    .map_err(|e| format!("读取 {file_name} 行数失败: {e}"))
+}
+
+fn query_cyq_factor(db_path: &Path) -> Result<Option<u64>, String> {
+    if !db_path.exists() {
+        return Ok(None);
+    }
+
+    let db_path_str = db_path
+        .to_str()
+        .ok_or_else(|| "cyq.db 路径不是有效 UTF-8".to_string())?;
+    let conn = Connection::open(db_path_str).map_err(|e| format!("打开 cyq.db 失败: {e}"))?;
+    let table_exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'cyq_snapshot'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("检查 cyq.db 表结构失败: {e}"))?;
+    if table_exists <= 0 {
+        return Ok(None);
+    }
+
+    conn.query_row("SELECT MAX(factor) FROM cyq_snapshot", [], |row| {
+        row.get::<_, Option<i64>>(0)
+    })
+    .map(|value| value.map(|item| item.max(0) as u64))
+    .map_err(|e| format!("读取 cyq.db 分桶数失败: {e}"))
+}
+
 fn sample_trade_dates(values: &[String], limit: usize) -> Vec<String> {
     values.iter().take(limit).cloned().collect()
 }
@@ -385,9 +461,13 @@ fn get_rank_compute_status_inner(
 ) -> Result<RankComputeStatus, String> {
     let source_db = source_db_path(source_path);
     let result_db = result_db_path(source_path);
+    let cyq_db = cyq_db_path(source_path);
     let source_db_range = query_trade_date_range(&source_db, "stock_data.db", "stock_data")?;
     let result_db_range = query_trade_date_range(&result_db, "scoring_result.db", "score_summary")?;
     let result_db_continuity = check_result_db_continuity(source_path, &result_db_range)?;
+    let cyq_db_range = query_trade_date_range(&cyq_db, "cyq.db", "cyq_snapshot")?;
+    let cyq_bin_row_count = query_table_row_count(&cyq_db, "cyq.db", "cyq_bin")?;
+    let cyq_factor = query_cyq_factor(&cyq_db)?;
 
     let suggested_end_date = source_db_range.max_trade_date.clone();
     let suggested_start_date = match (
@@ -410,6 +490,9 @@ fn get_rank_compute_status_inner(
         source_db: source_db_range,
         result_db: result_db_range,
         result_db_continuity,
+        cyq_db: cyq_db_range,
+        cyq_bin_row_count,
+        cyq_factor,
         suggested_start_date,
         suggested_end_date,
     })
@@ -470,6 +553,62 @@ pub fn run_concept_performance_compute(
         action: "concept-performance".to_string(),
         elapsed_ms: started_at.elapsed().as_millis() as u64,
         saved_rows,
+    })
+}
+
+pub fn run_cyq_compute(source_path: &str, factor: usize) -> Result<CyqComputeResult, String> {
+    run_cyq_compute_with_range(source_path, factor, None, None)
+}
+
+pub fn run_cyq_compute_with_range(
+    source_path: &str,
+    factor: usize,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+) -> Result<CyqComputeResult, String> {
+    let source_path = source_path.trim().to_string();
+    if source_path.is_empty() {
+        return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
+    }
+    if factor < 2 {
+        return Err("分桶数必须大于等于 2".to_string());
+    }
+
+    let start_date = start_date
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| normalize_rank_compute_date(value, "开始日期"))
+        .transpose()?;
+    let end_date = end_date
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| normalize_rank_compute_date(value, "结束日期"))
+        .transpose()?;
+    if let (Some(start_date), Some(end_date)) = (start_date.as_deref(), end_date.as_deref()) {
+        if start_date > end_date {
+            return Err("开始日期不能晚于结束日期".to_string());
+        }
+    }
+
+    let started_at = Instant::now();
+    let summary = rebuild_cyq_all(
+        &source_path,
+        CyqConfig {
+            factor,
+            ..CyqConfig::default()
+        },
+        start_date.as_deref(),
+        end_date.as_deref(),
+    )?;
+    Ok(CyqComputeResult {
+        action: "cyq".to_string(),
+        start_date: summary.start_date,
+        end_date: summary.end_date,
+        elapsed_ms: started_at.elapsed().as_millis() as u64,
+        snapshot_rows: summary.snapshot_rows,
+        bin_rows: summary.bin_rows,
+        factor: summary.factor,
+        range: summary.range,
     })
 }
 

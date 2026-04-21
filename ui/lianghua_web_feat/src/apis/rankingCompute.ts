@@ -29,6 +29,9 @@ export type RankingComputeStatus = {
   sourceDb: RankComputeDbRange
   resultDb: RankComputeDbRange
   resultDbContinuity: RankComputeResultContinuity
+  cyqDb: RankComputeDbRange
+  cyqBinRowCount: number
+  cyqFactor: number | null
   suggestedStartDate: string | null
   suggestedEndDate: string | null
 }
@@ -59,6 +62,17 @@ export type ConceptPerformanceComputeResult = {
   savedRows: number
 }
 
+export type CyqComputeResult = {
+  action: string
+  startDate?: string | null
+  endDate?: string | null
+  elapsedMs: number
+  snapshotRows: number
+  binRows: number
+  factor: number
+  range: number
+}
+
 export async function runRankingScoreCalculation(
   sourcePath: string,
   startDate: string,
@@ -75,6 +89,20 @@ export async function runRankingScoreCalculation(
 
 export async function runConceptPerformanceCompute(sourcePath: string) {
   return invoke<ConceptPerformanceComputeResult>('run_concept_performance_compute', { sourcePath })
+}
+
+export async function runCyqCompute(
+  sourcePath: string,
+  factor: number,
+  startDate?: string,
+  endDate?: string,
+) {
+  return invoke<CyqComputeResult>('run_cyq_compute', {
+    sourcePath,
+    factor,
+    startDate,
+    endDate,
+  })
 }
 
 export async function runRankingTiebreakFill(sourcePath: string, strategyPath?: string) {

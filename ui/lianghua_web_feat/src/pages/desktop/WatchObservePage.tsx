@@ -82,6 +82,15 @@ function getPercentClassName(value: number | null) {
   return value > 0 ? "watch-observe-value-up" : "watch-observe-value-down";
 }
 
+function waitForNextPaint() {
+  if (typeof window === "undefined") {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    window.requestAnimationFrame(() => resolve());
+  });
+}
+
 export default function WatchObservePage() {
   const { excludedConcepts } = useConceptExclusions();
   const persistedState = useMemo(() => {
@@ -368,6 +377,7 @@ export default function WatchObservePage() {
   async function onRefreshRealtime() {
     setRefreshingRealtime(true);
     setError("");
+    await waitForNextPaint();
     try {
       const snapshot = await refreshWatchObserveRows(
         referenceTradeDate,

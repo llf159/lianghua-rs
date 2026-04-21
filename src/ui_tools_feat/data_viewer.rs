@@ -4,8 +4,8 @@ use duckdb::Connection;
 use serde::Serialize;
 
 use crate::data::{
-    concept_performance_db_path, load_stock_list, result_db_path, source_db_path, stock_list_path,
-    ths_concepts_path, trade_calendar_path,
+    concept_performance_db_path, cyq_db_path, load_stock_list, result_db_path, source_db_path,
+    stock_list_path, ths_concepts_path, trade_calendar_path,
 };
 
 use super::data_import::{resolve_source_root, validate_target_relative_path};
@@ -332,6 +332,48 @@ pub fn preview_managed_source_dataset(
             all_columns = columns;
             order_by_sql = "trade_date DESC, performance_type ASC, concept ASC";
         }
+        "cyq-snapshot" => {
+            let db_path = cyq_db_path(source_path_str);
+            if !db_path.exists() {
+                return Err(format!("筹码库不存在: {}", db_path.display()));
+            }
+            let db_path_str = db_path
+                .to_str()
+                .ok_or_else(|| "cyq.db 路径不是有效 UTF-8".to_string())?;
+            let conn =
+                Connection::open(db_path_str).map_err(|error| format!("打开 cyq.db 失败: {error}"))?;
+            let relation = quote_ident("cyq_snapshot");
+            let columns = load_relation_columns(&conn, &relation)?;
+            filter_trade_column = Some("trade_date");
+            filter_ts_code_column = Some("ts_code");
+            dataset_label = "筹码库摘要";
+            target_path = db_path.display().to_string();
+            relation_sql = relation;
+            selected_columns = columns.clone();
+            all_columns = columns;
+            order_by_sql = "trade_date DESC, ts_code ASC";
+        }
+        "cyq-bins" => {
+            let db_path = cyq_db_path(source_path_str);
+            if !db_path.exists() {
+                return Err(format!("筹码库不存在: {}", db_path.display()));
+            }
+            let db_path_str = db_path
+                .to_str()
+                .ok_or_else(|| "cyq.db 路径不是有效 UTF-8".to_string())?;
+            let conn =
+                Connection::open(db_path_str).map_err(|error| format!("打开 cyq.db 失败: {error}"))?;
+            let relation = quote_ident("cyq_bin");
+            let columns = load_relation_columns(&conn, &relation)?;
+            filter_trade_column = Some("trade_date");
+            filter_ts_code_column = Some("ts_code");
+            dataset_label = "筹码库分桶";
+            target_path = db_path.display().to_string();
+            relation_sql = relation;
+            selected_columns = columns.clone();
+            all_columns = columns;
+            order_by_sql = "trade_date DESC, ts_code ASC, bin_index ASC";
+        }
         "stock-list-csv" => {
             let csv_path = stock_list_path(source_path_str);
             if !csv_path.exists() {
@@ -401,6 +443,12 @@ pub fn preview_managed_source_dataset(
             .ok_or_else(|| "concept_performance.db 路径不是有效 UTF-8".to_string())?;
         Connection::open(db_path_str)
             .map_err(|error| format!("打开 concept_performance.db 失败: {error}"))?
+    } else if normalized_dataset_id.starts_with("cyq-") {
+        let db_path = cyq_db_path(source_path_str);
+        let db_path_str = db_path
+            .to_str()
+            .ok_or_else(|| "cyq.db 路径不是有效 UTF-8".to_string())?;
+        Connection::open(db_path_str).map_err(|error| format!("打开 cyq.db 失败: {error}"))?
     } else if normalized_dataset_id.starts_with("stock-data-") {
         let db_path = source_db_path(source_path_str);
         let db_path_str = db_path

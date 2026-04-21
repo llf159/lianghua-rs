@@ -10,7 +10,8 @@ use lianghua_rs::ui_tools_feat::{
     },
     data_viewer::{StockLookupRow, list_stock_lookup_rows as core_list_stock_lookup_rows},
     details::{
-        StockDetailPageData, StockDetailRealtimeData, StockDetailStrategySnapshotData,
+        StockDetailCyqData, StockDetailPageData, StockDetailRealtimeData, StockDetailStrategySnapshotData,
+        get_stock_detail_cyq as core_get_stock_detail_cyq,
         get_stock_detail_page as core_get_stock_detail_page,
         get_stock_detail_realtime as core_get_stock_detail_realtime,
         get_stock_detail_strategy_snapshot as core_get_stock_detail_strategy_snapshot,
@@ -39,9 +40,10 @@ use lianghua_rs::ui_tools_feat::{
         get_rank_trade_date_options as core_get_rank_trade_date_options,
     },
     ranking_compute::{
-        ConceptPerformanceComputeResult, RankComputeRunResult, RankComputeStatus,
+        ConceptPerformanceComputeResult, CyqComputeResult, RankComputeRunResult, RankComputeStatus,
         get_ranking_compute_status as core_get_ranking_compute_status,
         run_concept_performance_compute as core_run_concept_performance_compute,
+        run_cyq_compute_with_range as core_run_cyq_compute,
         run_ranking_score_calculation as core_run_ranking_score_calculation,
         run_ranking_tiebreak_fill as core_run_ranking_tiebreak_fill,
     },
@@ -453,6 +455,14 @@ fn get_stock_detail_strategy_snapshot(
     ts_code: String,
 ) -> Result<StockDetailStrategySnapshotData, String> {
     core_get_stock_detail_strategy_snapshot(source_path, trade_date, ts_code)
+}
+
+#[tauri::command]
+fn get_stock_detail_cyq(
+    source_path: String,
+    ts_code: String,
+) -> Result<StockDetailCyqData, String> {
+    core_get_stock_detail_cyq(source_path, ts_code)
 }
 
 #[tauri::command]
@@ -882,6 +892,25 @@ async fn run_concept_performance_compute(
 }
 
 #[tauri::command]
+async fn run_cyq_compute(
+    source_path: String,
+    factor: usize,
+    start_date: Option<String>,
+    end_date: Option<String>,
+) -> Result<CyqComputeResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_run_cyq_compute(
+            &source_path,
+            factor,
+            start_date.as_deref(),
+            end_date.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn run_ranking_tiebreak_fill(
     source_path: String,
     strategy_path: Option<String>,
@@ -1132,6 +1161,7 @@ pub fn run() {
             validate_intraday_monitor_template_expression,
             get_stock_detail_page,
             get_stock_detail_strategy_snapshot,
+            get_stock_detail_cyq,
             get_stock_detail_realtime,
             get_stock_similarity_page,
             get_strategy_statistics_page,
@@ -1151,6 +1181,7 @@ pub fn run() {
             get_ranking_compute_status,
             run_ranking_score_calculation,
             run_concept_performance_compute,
+            run_cyq_compute,
             run_ranking_tiebreak_fill,
             get_strategy_manage_page,
             check_strategy_manage_scene_draft,

@@ -1,5 +1,6 @@
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { preloadWatchObserveRows } from './apis/watchObserve'
 import './Desktop.css'
 
 const menuList = [
@@ -53,6 +54,10 @@ export default function PageDesktop() {
   const isRawDataActive = location.pathname.startsWith('/raw-data')
   const isIntradayMonitorActive = location.pathname.startsWith('/intraday-monitor')
   const isBacktestActive = location.pathname.startsWith('/backtest')
+
+  useEffect(() => {
+    void preloadWatchObserveRows().catch(() => {})
+  }, [])
 
   return (
     <div className={isCollapsed ? 'desktop-shell collapsed' : 'desktop-shell'}>

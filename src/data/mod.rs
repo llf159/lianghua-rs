@@ -1,4 +1,6 @@
 pub mod concept_performance_data;
+pub mod cyq;
+pub mod cyq_data;
 pub mod download_data;
 pub mod scoring_data;
 pub mod simulate;
@@ -9,8 +11,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use duckdb::{Connection, params};
-use serde::{Deserialize, Deserializer, de};
+use duckdb::{params, Connection};
+use serde::{de, Deserialize, Deserializer};
 
 pub fn source_db_path(source_dir: &str) -> PathBuf {
     Path::new(source_dir).join("stock_data.db")
@@ -22,6 +24,10 @@ pub fn result_db_path(source_dir: &str) -> PathBuf {
 
 pub fn concept_performance_db_path(source_dir: &str) -> PathBuf {
     Path::new(source_dir).join("concept_performance.db")
+}
+
+pub fn cyq_db_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("cyq.db")
 }
 
 pub fn ths_concepts_path(source_dir: &str) -> PathBuf {

@@ -173,6 +173,26 @@ export type StockDetailRealtimeData = {
   kline: DetailKlinePayload
 }
 
+export type DetailCyqBin = {
+  price: number
+  price_low: number
+  price_high: number
+  chip: number
+  chip_pct: number
+}
+
+export type DetailCyqSnapshot = {
+  trade_date: string
+  close: number
+  bins: DetailCyqBin[]
+}
+
+export type StockDetailCyqData = {
+  resolved_ts_code: string
+  factor?: number | null
+  snapshots: DetailCyqSnapshot[]
+}
+
 export async function getStockDetailPage(query: StockDetailQuery) {
   return invoke<StockDetailPageData>('get_stock_detail_page', query)
 }
@@ -191,4 +211,11 @@ export async function getStockDetailRealtime(query: {
   chartWindowDays?: number
 }) {
   return invoke<StockDetailRealtimeData>('get_stock_detail_realtime', query)
+}
+
+export async function getStockDetailCyq(query: {
+  sourcePath: string
+  tsCode: string
+}) {
+  return invoke<StockDetailCyqData>('get_stock_detail_cyq', query)
 }

@@ -40,6 +40,7 @@ pub fn managed_source_file_name(file_id: &str) -> Option<&'static str> {
         "trade-calendar" => Some("trade_calendar.csv"),
         "result-db" => Some("scoring_result.db"),
         "concept-performance-db" => Some("concept_performance.db"),
+        "cyq-db" => Some("cyq.db"),
         "score-rule" => Some("score_rule.toml"),
         "indicator-config" => Some("ind.toml"),
         "ths-concepts" => Some("stock_concepts.csv"),
