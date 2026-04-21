@@ -285,10 +285,14 @@ export function formatNumber(value?: number | null, digits = 2) {
 export const StockPickResultTable = memo(function StockPickResultTable({
   rows,
   tradeDate,
+  intervalStartTradeDate,
+  intervalEndTradeDate,
   sourcePath,
 }: {
   rows: StockPickRow[];
   tradeDate?: string;
+  intervalStartTradeDate?: string;
+  intervalEndTradeDate?: string;
   sourcePath?: string;
 }) {
   const { excludedConcepts } = useConceptExclusions();
@@ -316,10 +320,12 @@ export const StockPickResultTable = memo(function StockPickResultTable({
       sortedRows.map((row) => ({
         tsCode: row.ts_code,
         tradeDate: tradeDate ?? null,
+        intervalStartTradeDate: intervalStartTradeDate ?? null,
+        intervalEndTradeDate: intervalEndTradeDate ?? null,
         sourcePath: sourcePath?.trim() || undefined,
         name: row.name ?? undefined,
       })),
-    [sortedRows, sourcePath, tradeDate],
+    [intervalEndTradeDate, intervalStartTradeDate, sortedRows, sourcePath, tradeDate],
   );
 
   if (rows.length === 0) {
@@ -387,6 +393,8 @@ export const StockPickResultTable = memo(function StockPickResultTable({
                     className="stock-pick-link-btn"
                     tsCode={row.ts_code}
                     tradeDate={tradeDate ?? null}
+                    intervalStartTradeDate={intervalStartTradeDate ?? null}
+                    intervalEndTradeDate={intervalEndTradeDate ?? null}
                     sourcePath={sourcePath?.trim() || undefined}
                     title={`查看 ${row.name ?? row.ts_code} 详情`}
                     navigationItems={navigationItems}

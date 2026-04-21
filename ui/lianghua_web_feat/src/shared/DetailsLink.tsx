@@ -18,6 +18,8 @@ type DetailsLinkProps = DetailsRouteInput & {
 export default function DetailsLink({
   tsCode,
   tradeDate,
+  intervalStartTradeDate,
+  intervalEndTradeDate,
   sourcePath,
   children,
   className,
@@ -39,7 +41,13 @@ export default function DetailsLink({
       className={className}
       preventScrollReset
       title={title}
-      to={buildLinkedDetailsPath({ tsCode, tradeDate, sourcePath })}
+      to={buildLinkedDetailsPath({
+        tsCode,
+        tradeDate,
+        intervalStartTradeDate,
+        intervalEndTradeDate,
+        sourcePath,
+      })}
       state={
         {
           backgroundLocation,

@@ -101,6 +101,7 @@ const CHART_DATE_TICK_COUNT = 6;
 const CHART_CURSOR_Y_MIN = 6;
 const CHART_CURSOR_Y_MAX = 94;
 const CHART_TOOLTIP_LEFT_THRESHOLD = 62;
+const CHART_INTERVAL_PANEL_TOP_PERCENT = 18;
 const CHART_POINTER_DRAG_THRESHOLD = 6;
 const CHART_TOUCH_FOCUS_HIT_SLOP = 24;
 const CHART_CYQ_PANEL_WIDTH_RATIO = 0.22;
@@ -179,13 +180,14 @@ type ChartPointerSnapshot = {
 type ChartDragState = {
   pointerId: number;
   panelKey: string;
-  mode: "pan" | "focus" | "tap" | "dismiss";
+  mode: "pan" | "focus" | "tap" | "dismiss" | "interval-select";
   startClientX: number;
   startClientY: number;
   startVisibleStart: number;
   barsPerPixel: number;
   maxVisibleStart: number;
   moved: boolean;
+  anchorAbsoluteIndex?: number;
 };
 
 type ScrollSnapshot = {
@@ -197,6 +199,18 @@ type StrategyCompareSnapshot = {
   tsCode: string;
   relativeTradeDate: string;
   rows: DetailStrategyTriggerRow[];
+};
+
+type IntervalRestoreRequest = {
+  startTradeDate: string;
+  endTradeDate: string;
+};
+
+type ResolvedIntervalRestore = {
+  startAbsoluteIndex: number;
+  endAbsoluteIndex: number;
+  startTradeDate: string;
+  endTradeDate: string;
 };
 
 type DetailsPageVariant = "default" | "linked-overlay";
@@ -415,6 +429,169 @@ function buildNavigationItemFromOverviewRow(
   };
 }
 
+function normalizeIntervalRestoreRequest(
+  startTradeDate: string,
+  endTradeDate: string,
+): IntervalRestoreRequest | null {
+  const normalizedStartTradeDate = startTradeDate.trim();
+  const normalizedEndTradeDate = endTradeDate.trim();
+  if (!normalizedStartTradeDate || !normalizedEndTradeDate) {
+    return null;
+  }
+
+  if (normalizedStartTradeDate <= normalizedEndTradeDate) {
+    return {
+      startTradeDate: normalizedStartTradeDate,
+      endTradeDate: normalizedEndTradeDate,
+    };
+  }
+
+  return {
+    startTradeDate: normalizedEndTradeDate,
+    endTradeDate: normalizedStartTradeDate,
+  };
+}
+
+function toUtcTimeFromTradeDate(tradeDate: string) {
+  if (!/^\d{8}$/.test(tradeDate)) {
+    return null;
+  }
+
+  const year = Number(tradeDate.slice(0, 4));
+  const month = Number(tradeDate.slice(4, 6));
+  const day = Number(tradeDate.slice(6, 8));
+  const utcTime = Date.UTC(year, month - 1, day);
+  return Number.isFinite(utcTime) ? utcTime : null;
+}
+
+function resolveChartWindowDays(intervalRestore: IntervalRestoreRequest | null) {
+  if (!intervalRestore) {
+    return 280;
+  }
+
+  const startUtcTime = toUtcTimeFromTradeDate(intervalRestore.startTradeDate);
+  const endUtcTime = toUtcTimeFromTradeDate(intervalRestore.endTradeDate);
+  if (startUtcTime === null || endUtcTime === null) {
+    return 280;
+  }
+
+  const daySpan = Math.max(
+    1,
+    Math.floor(Math.abs(endUtcTime - startUtcTime) / 86_400_000) + 1,
+  );
+  return Math.max(280, daySpan + 40);
+}
+
+function findNearestPreviousTradeDateIndex(
+  items: DetailKlineRow[],
+  tradeDate: string,
+) {
+  let candidateIndex = -1;
+  for (let index = 0; index < items.length; index += 1) {
+    const currentTradeDate = items[index]?.trade_date?.trim() ?? "";
+    if (!currentTradeDate) {
+      continue;
+    }
+    if (currentTradeDate === tradeDate) {
+      return index;
+    }
+    if (currentTradeDate < tradeDate) {
+      candidateIndex = index;
+      continue;
+    }
+    break;
+  }
+  return candidateIndex;
+}
+
+function resolveIntervalRestore(
+  items: DetailKlineRow[],
+  intervalRestore: IntervalRestoreRequest,
+): ResolvedIntervalRestore | null {
+  if (items.length === 0) {
+    return null;
+  }
+
+  const startAbsoluteIndex = findNearestPreviousTradeDateIndex(
+    items,
+    intervalRestore.startTradeDate,
+  );
+  const endAbsoluteIndex = findNearestPreviousTradeDateIndex(
+    items,
+    intervalRestore.endTradeDate,
+  );
+  if (startAbsoluteIndex < 0 || endAbsoluteIndex < 0) {
+    return null;
+  }
+
+  const normalizedStartAbsoluteIndex = Math.min(
+    startAbsoluteIndex,
+    endAbsoluteIndex,
+  );
+  const normalizedEndAbsoluteIndex = Math.max(startAbsoluteIndex, endAbsoluteIndex);
+  const resolvedStartTradeDate =
+    items[normalizedStartAbsoluteIndex]?.trade_date?.trim() ?? "";
+  const resolvedEndTradeDate =
+    items[normalizedEndAbsoluteIndex]?.trade_date?.trim() ?? "";
+  if (!resolvedStartTradeDate || !resolvedEndTradeDate) {
+    return null;
+  }
+
+  return {
+    startAbsoluteIndex: normalizedStartAbsoluteIndex,
+    endAbsoluteIndex: normalizedEndAbsoluteIndex,
+    startTradeDate: resolvedStartTradeDate,
+    endTradeDate: resolvedEndTradeDate,
+  };
+}
+
+function buildIntervalSelectionFromAbsoluteIndices(
+  items: DetailKlineRow[],
+  startAbsoluteIndex: number,
+  endAbsoluteIndex: number,
+): ResolvedIntervalRestore | null {
+  if (items.length === 0) {
+    return null;
+  }
+
+  const normalizedStartAbsoluteIndex = Math.max(
+    0,
+    Math.min(startAbsoluteIndex, endAbsoluteIndex),
+  );
+  const normalizedEndAbsoluteIndex = Math.min(
+    items.length - 1,
+    Math.max(startAbsoluteIndex, endAbsoluteIndex),
+  );
+  const startTradeDate =
+    items[normalizedStartAbsoluteIndex]?.trade_date?.trim() ?? "";
+  const endTradeDate =
+    items[normalizedEndAbsoluteIndex]?.trade_date?.trim() ?? "";
+  if (!startTradeDate || !endTradeDate) {
+    return null;
+  }
+
+  return {
+    startAbsoluteIndex: normalizedStartAbsoluteIndex,
+    endAbsoluteIndex: normalizedEndAbsoluteIndex,
+    startTradeDate,
+    endTradeDate,
+  };
+}
+
+function buildIntervalRestoreNotice(
+  intervalRestore: IntervalRestoreRequest,
+  resolvedIntervalRestore: ResolvedIntervalRestore,
+) {
+  if (
+    intervalRestore.startTradeDate === resolvedIntervalRestore.startTradeDate &&
+    intervalRestore.endTradeDate === resolvedIntervalRestore.endTradeDate
+  ) {
+    return "";
+  }
+
+  return `区间已按最近可用K线还原：${resolvedIntervalRestore.startTradeDate} ~ ${resolvedIntervalRestore.endTradeDate}`;
+}
+
 function findNavigationIndex(
   items: DetailsNavigationItem[],
   tsCode: string,
@@ -538,18 +715,34 @@ function formatPercentValue(value: number | null) {
   return `${value.toFixed(2)}%`;
 }
 
+const TURNOVER_VALUE_KEYS = [
+  "tor",
+  "turnover_rate",
+  "turnover",
+  "turnover_rate_f",
+] as const;
+
+function findTurnoverNumber(item: DetailKlineRow | null) {
+  if (!item) {
+    return null;
+  }
+
+  for (const key of TURNOVER_VALUE_KEYS) {
+    const value = item[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
 function findTurnoverValue(item: DetailKlineRow | null) {
   if (!item) {
     return null;
   }
 
-  const candidateKeys = [
-    "tor",
-    "turnover_rate",
-    "turnover",
-    "turnover_rate_f",
-  ] as const;
-  for (const key of candidateKeys) {
+  for (const key of TURNOVER_VALUE_KEYS) {
     const value = item[key];
     if (typeof value === "number" && Number.isFinite(value)) {
       return `${value.toFixed(2)}%`;
@@ -991,6 +1184,82 @@ function buildDetailTooltipRows(
         label: formatSeriesLabel(key),
         value: formatFieldValue(item[key]),
       })),
+    },
+  ];
+}
+
+function buildIntervalStatsSections(
+  items: DetailKlineRow[],
+  intervalSelection: ResolvedIntervalRestore | null,
+): TooltipSection[] {
+  if (!intervalSelection) {
+    return [];
+  }
+
+  const selectedItems = items.slice(
+    intervalSelection.startAbsoluteIndex,
+    intervalSelection.endAbsoluteIndex + 1,
+  );
+  if (selectedItems.length === 0) {
+    return [];
+  }
+
+  const startClose = getNumericField(selectedItems[0] ?? null, "close");
+  const endClose = getNumericField(
+    selectedItems[selectedItems.length - 1] ?? null,
+    "close",
+  );
+  const changeAmount =
+    startClose !== null && endClose !== null ? endClose - startClose : null;
+  const changePct =
+    startClose !== null && startClose !== 0 && endClose !== null
+      ? ((endClose - startClose) / startClose) * 100
+      : null;
+
+  let maxHigh: number | null = null;
+  let minLow: number | null = null;
+  let totalTurnover = 0;
+  let hasTurnover = false;
+  selectedItems.forEach((item) => {
+    const high = getNumericField(item, "high");
+    const low = getNumericField(item, "low");
+    const turnover = findTurnoverNumber(item);
+    if (high !== null) {
+      maxHigh = maxHigh === null ? high : Math.max(maxHigh, high);
+    }
+    if (low !== null) {
+      minLow = minLow === null ? low : Math.min(minLow, low);
+    }
+    if (turnover !== null) {
+      totalTurnover += turnover;
+      hasTurnover = true;
+    }
+  });
+
+  const amplitude =
+    maxHigh !== null && minLow !== null && minLow !== 0
+      ? ((maxHigh - minLow) / minLow) * 100
+      : null;
+
+  return [
+    {
+      key: "interval-summary",
+      rows: [
+        { label: "K线数", value: String(selectedItems.length) },
+        {
+          label: "涨跌额",
+          value:
+            changeAmount === null ? "--" : formatSignedNumber(changeAmount) || "--",
+        },
+        { label: "涨跌幅", value: formatPercentValue(changePct) },
+        {
+          label: "总计换手",
+          value: hasTurnover ? `${totalTurnover.toFixed(2)}%` : "--",
+        },
+        { label: "区间最高", value: formatFieldValue(maxHigh) },
+        { label: "区间最低", value: formatFieldValue(minLow) },
+        { label: "振幅", value: formatPercentValue(amplitude) },
+      ],
     },
   ];
 }
@@ -1549,6 +1818,11 @@ function renderChartPanel(
   selectedCyqTradeDate: string | null,
   chipToggleButton: ReactNode,
   watchObserveButton: ReactNode,
+  chartIntervalSelection: ResolvedIntervalRestore | null,
+  chartIntervalDraftSelection: ResolvedIntervalRestore | null,
+  chartIntervalPanelOpen: boolean,
+  intervalStatsSections: TooltipSection[],
+  onCloseChartIntervalPanel: () => void,
 ) {
   const kind = panel.kind ?? "line";
   const showDateAxis = index === panelCount - 1;
@@ -1601,8 +1875,56 @@ function renderChartPanel(
     (focusXPercent ?? 0) > CHART_TOOLTIP_LEFT_THRESHOLD
       ? "details-chart-tooltip-left"
       : "details-chart-tooltip-right";
+  const activeIntervalSelection =
+    panel.key === "price"
+      ? chartIntervalDraftSelection ?? chartIntervalSelection
+      : null;
+  const intervalStartVisibleIndex =
+    activeIntervalSelection &&
+    activeIntervalSelection.startAbsoluteIndex >= effectiveVisibleStart &&
+    activeIntervalSelection.startAbsoluteIndex < effectiveVisibleStart + items.length
+      ? activeIntervalSelection.startAbsoluteIndex - effectiveVisibleStart
+      : null;
+  const intervalEndVisibleIndex =
+    activeIntervalSelection &&
+    activeIntervalSelection.endAbsoluteIndex >= effectiveVisibleStart &&
+    activeIntervalSelection.endAbsoluteIndex < effectiveVisibleStart + items.length
+      ? activeIntervalSelection.endAbsoluteIndex - effectiveVisibleStart
+      : null;
+  const intervalSelectionLeftPercent =
+    intervalStartVisibleIndex !== null && intervalEndVisibleIndex !== null
+      ? (Math.max(
+          0,
+          Math.min(xAt(intervalStartVisibleIndex), xAt(intervalEndVisibleIndex)) -
+            step / 2,
+        ) /
+          CHART_VIEWBOX_WIDTH) *
+        100
+      : null;
+  const intervalSelectionWidthPercent =
+    intervalStartVisibleIndex !== null && intervalEndVisibleIndex !== null
+      ? (Math.min(
+          CHART_VIEWBOX_WIDTH,
+          Math.abs(xAt(intervalEndVisibleIndex) - xAt(intervalStartVisibleIndex)) +
+            step,
+        ) /
+          CHART_VIEWBOX_WIDTH) *
+        100
+      : null;
+  const intervalPanelXPercent =
+    intervalStartVisibleIndex !== null && intervalEndVisibleIndex !== null
+      ? (((xAt(intervalStartVisibleIndex) + xAt(intervalEndVisibleIndex)) / 2) /
+          CHART_VIEWBOX_WIDTH) *
+        100
+      : null;
+  const intervalPanelHorizontalClass =
+    (intervalPanelXPercent ?? 0) > CHART_TOOLTIP_LEFT_THRESHOLD
+      ? "details-chart-tooltip-left"
+      : "details-chart-tooltip-right";
+  const showDefaultTooltip =
+    !(panel.key === "price" && chartIntervalPanelOpen && intervalStatsSections.length > 0);
   const tooltipSections =
-    isActivePanel && activeVisibleIndex !== null
+    showDefaultTooltip && isActivePanel && activeVisibleIndex !== null
       ? buildDetailTooltipRows(
           panel,
           items[activeVisibleIndex] ?? null,
@@ -2171,6 +2493,24 @@ function renderChartPanel(
           </div>
         ) : null}
 
+        {panel.key === "price" &&
+        intervalSelectionLeftPercent !== null &&
+        intervalSelectionWidthPercent !== null ? (
+          <div
+            className={[
+              "details-chart-interval-selection",
+              chartIntervalDraftSelection ? "is-draft" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            data-testid="details-interval-selection"
+            style={{
+              left: `${intervalSelectionLeftPercent}%`,
+              width: `${intervalSelectionWidthPercent}%`,
+            }}
+          />
+        ) : null}
+
         {focusXPercent !== null ? (
           <div
             className="details-chart-crosshair-vertical"
@@ -2231,6 +2571,67 @@ function renderChartPanel(
               </div>
             ) : null}
           </>
+        ) : null}
+
+        {panel.key === "price" &&
+        chartIntervalSelection &&
+        chartIntervalPanelOpen &&
+        intervalStatsSections.length > 0 &&
+        intervalPanelXPercent !== null ? (
+          <div
+            className={[
+              "details-chart-tooltip",
+              "details-chart-interval-panel",
+              intervalPanelHorizontalClass,
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            data-testid="details-interval-panel"
+            style={{
+              left: `${intervalPanelXPercent}%`,
+              top: `${CHART_INTERVAL_PANEL_TOP_PERCENT}%`,
+            }}
+          >
+            <div className="details-chart-tooltip-head details-chart-interval-panel-head">
+              <strong>
+                {chartIntervalSelection.startTradeDate} ~ {chartIntervalSelection.endTradeDate}
+              </strong>
+              <button
+                type="button"
+                className="details-chart-interval-close"
+                data-testid="details-interval-close"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onCloseChartIntervalPanel();
+                }}
+              >
+                关闭
+              </button>
+            </div>
+            <div className="details-chart-tooltip-body">
+              {intervalStatsSections.map((section) => (
+                <div
+                  className={[
+                    "details-chart-tooltip-grid",
+                    section.variant === "ohlc" ? "details-chart-tooltip-grid-ohlc" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                  key={section.key}
+                >
+                  {section.rows.map((row) => (
+                    <div
+                      className="details-chart-tooltip-row"
+                      key={`${section.key}-${row.label}`}
+                    >
+                      <span>{row.label}</span>
+                      <strong>{row.value}</strong>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
         ) : null}
       </div>
     </section>
@@ -2828,6 +3229,17 @@ export default function DetailsPage({
   const [sceneDetailModalOpen, setSceneDetailModalOpen] = useState(false);
   const [sceneDetailTarget, setSceneDetailTarget] =
     useState<DetailSceneTriggerRow | null>(null);
+  const [activeIntervalContext, setActiveIntervalContext] =
+    useState<IntervalRestoreRequest | null>(null);
+  const [pendingIntervalRestore, setPendingIntervalRestore] =
+    useState<IntervalRestoreRequest | null>(null);
+  const [chartIntervalNotice, setChartIntervalNotice] = useState("");
+  const [chartIntervalMode, setChartIntervalMode] = useState(false);
+  const [chartIntervalSelection, setChartIntervalSelection] =
+    useState<ResolvedIntervalRestore | null>(null);
+  const [chartIntervalDraftSelection, setChartIntervalDraftSelection] =
+    useState<ResolvedIntervalRestore | null>(null);
+  const [chartIntervalPanelOpen, setChartIntervalPanelOpen] = useState(false);
   const chartDragRef = useRef<ChartDragState | null>(null);
   const chartCardRef = useRef<HTMLElement | null>(null);
   const overviewCardRef = useRef<HTMLElement | null>(null);
@@ -2849,7 +3261,21 @@ export default function DetailsPage({
   const isLinkedOverlay = variant === "linked-overlay";
   const routeTsCode = sanitizeCodeInput(searchParams.get("tsCode") ?? "");
   const routeTradeDate = searchParams.get("tradeDate")?.trim() ?? "";
+  const routeIntervalStartTradeDate =
+    searchParams.get("intervalStartTradeDate")?.trim() ?? "";
+  const routeIntervalEndTradeDate =
+    searchParams.get("intervalEndTradeDate")?.trim() ?? "";
   const routeSourcePath = searchParams.get("sourcePath")?.trim() ?? "";
+  const routeIntervalRestore = useMemo(
+    () =>
+      normalizeIntervalRestoreRequest(
+        routeIntervalStartTradeDate,
+        routeIntervalEndTradeDate,
+      ),
+    [routeIntervalEndTradeDate, routeIntervalStartTradeDate],
+  );
+  const routeEffectiveTradeDate =
+    routeIntervalRestore?.endTradeDate ?? routeTradeDate;
   const inputCodeDigits = sanitizeCodeInput(lookupInput);
   const normalizedCode =
     inputCodeDigits.length === 6 ? stdTsCode(inputCodeDigits) : "";
@@ -2892,6 +3318,9 @@ export default function DetailsPage({
           return {
             tsCode: stdTsCode(normalizedCode),
             tradeDate: item.tradeDate?.trim() || undefined,
+            intervalStartTradeDate:
+              item.intervalStartTradeDate?.trim() || undefined,
+            intervalEndTradeDate: item.intervalEndTradeDate?.trim() || undefined,
             sourcePath: item.sourcePath?.trim() || undefined,
             name: item.name?.trim() || undefined,
           } satisfies DetailsNavigationItem;
@@ -2925,6 +3354,7 @@ export default function DetailsPage({
       nextSourcePath: string,
       nextTradeDate: string,
       nextNormalizedCode: string,
+      intervalRestore?: IntervalRestoreRequest | null,
     ) => {
       if (!nextSourcePath) {
         setDetailError("请先到“数据管理”页完成数据准备");
@@ -2943,7 +3373,7 @@ export default function DetailsPage({
           sourcePath: nextSourcePath,
           tradeDate: nextTradeDate.trim() || undefined,
           tsCode: nextNormalizedCode,
-          chartWindowDays: 280,
+          chartWindowDays: resolveChartWindowDays(intervalRestore ?? null),
           prevRankDays: 15,
         });
 
@@ -3172,6 +3602,13 @@ export default function DetailsPage({
     autoFillTopRef.current = false;
     setLookupInput(firstRow.name?.trim() || nextCode);
     setDetailError("");
+    setActiveIntervalContext(null);
+    setPendingIntervalRestore(null);
+    setChartIntervalNotice("");
+    setChartIntervalMode(false);
+    setChartIntervalSelection(null);
+    setChartIntervalDraftSelection(null);
+    setChartIntervalPanelOpen(false);
     setStrategyCompareSnapshot(null);
     void readDetail(sourcePathTrimmed, nextTradeDate, stdTsCode(nextCode));
   }, [lookupInput, readDetail, sourcePathTrimmed, topRows, tradeDateInput]);
@@ -3188,6 +3625,13 @@ export default function DetailsPage({
 
     autoFillTopRef.current = false;
     setInlineNavigationItems(null);
+    setActiveIntervalContext(null);
+    setPendingIntervalRestore(null);
+    setChartIntervalNotice("");
+    setChartIntervalMode(false);
+    setChartIntervalSelection(null);
+    setChartIntervalDraftSelection(null);
+    setChartIntervalPanelOpen(false);
     if (normalizedCode === "" && exactStockLookupMatch) {
       setLookupInput(exactStockLookupMatch.name);
     }
@@ -3200,6 +3644,7 @@ export default function DetailsPage({
     nextTradeDate: string,
     nextNormalizedCode: string,
     nextLookupValue?: string,
+    intervalRestore?: IntervalRestoreRequest | null,
   ) {
     if (sourcePathTrimmed === "" || nextNormalizedCode.trim() === "") {
       return;
@@ -3209,9 +3654,21 @@ export default function DetailsPage({
     if (nextLookupValue !== undefined) {
       setLookupInput(nextLookupValue);
     }
+    setActiveIntervalContext(intervalRestore ?? null);
+    setPendingIntervalRestore(intervalRestore ?? null);
+    setChartIntervalNotice("");
+    setChartIntervalMode(Boolean(intervalRestore));
+    setChartIntervalSelection(null);
+    setChartIntervalDraftSelection(null);
+    setChartIntervalPanelOpen(false);
     setDetailError("");
     setStrategyCompareSnapshot(null);
-    void readDetail(sourcePathTrimmed, nextTradeDate, nextNormalizedCode);
+    void readDetail(
+      sourcePathTrimmed,
+      nextTradeDate,
+      nextNormalizedCode,
+      intervalRestore ?? null,
+    );
   }
 
   function onSelectStockCandidate(row: StockLookupRow) {
@@ -3253,6 +3710,7 @@ export default function DetailsPage({
   }
 
   function onSelectSimilarityRow(row: StockSimilarityRow) {
+    const intervalRestore = activeIntervalContext;
     const similarityNavigationItems: DetailsNavigationItem[] =
       stockSimilarity?.items.map((item) => ({
         tsCode: item.tsCode,
@@ -3261,6 +3719,8 @@ export default function DetailsPage({
           detailData?.resolved_trade_date ||
           tradeDateInput.trim() ||
           null,
+        intervalStartTradeDate: intervalRestore?.startTradeDate ?? null,
+        intervalEndTradeDate: intervalRestore?.endTradeDate ?? null,
         sourcePath: sourcePathTrimmed || null,
         name: item.name?.trim() || splitTsCode(item.tsCode),
       })) ?? [];
@@ -3272,7 +3732,7 @@ export default function DetailsPage({
     setInlineNavigationItems(
       similarityNavigationItems.length > 0 ? similarityNavigationItems : null,
     );
-    onAutoReadDetail(nextTradeDate, row.tsCode, lookupValue);
+    onAutoReadDetail(nextTradeDate, row.tsCode, lookupValue, intervalRestore);
   }
 
   function onSelectPrevRankTradeDate(nextTradeDate: string) {
@@ -3688,11 +4148,42 @@ export default function DetailsPage({
     () =>
       isStrategyStacked
         ? undefined
-        : {
-            gridTemplateColumns: `minmax(0, ${strategySplitRatio}fr) 14px minmax(0, ${1 - strategySplitRatio}fr)`,
-          },
+          : {
+              gridTemplateColumns: `minmax(0, ${strategySplitRatio}fr) 14px minmax(0, ${1 - strategySplitRatio}fr)`,
+            },
     [isStrategyStacked, strategySplitRatio],
   );
+  const intervalStatsSections = useMemo(
+    () => buildIntervalStatsSections(allChartItems, chartIntervalSelection),
+    [allChartItems, chartIntervalSelection],
+  );
+
+  const closeChartIntervalPanel = useCallback(() => {
+    setChartIntervalMode(false);
+    setChartIntervalSelection(null);
+    setChartIntervalDraftSelection(null);
+    setChartIntervalPanelOpen(false);
+    setActiveIntervalContext(null);
+    setPendingIntervalRestore(null);
+    setChartIntervalNotice("");
+  }, []);
+
+  const toggleChartIntervalMode = useCallback(() => {
+    if (chartIntervalMode || chartIntervalSelection || chartIntervalDraftSelection) {
+      closeChartIntervalPanel();
+      return;
+    }
+
+    setChartIntervalMode(true);
+    setChartFocus(null);
+    setChartIntervalPanelOpen(false);
+    setChartIntervalNotice("");
+  }, [
+    chartIntervalDraftSelection,
+    chartIntervalMode,
+    chartIntervalSelection,
+    closeChartIntervalPanel,
+  ]);
 
   useLayoutEffect(() => {
     const element = overviewCardRef.current;
@@ -3726,6 +4217,15 @@ export default function DetailsPage({
       setVisibleBarCount(DEFAULT_VISIBLE_BARS);
       setVisibleStartIndex(0);
       setChartFocus(null);
+      setChartIntervalSelection(null);
+      setChartIntervalDraftSelection(null);
+      setChartIntervalPanelOpen(false);
+      if (pendingIntervalRestore) {
+        setChartIntervalNotice("区间超出当前图表窗口，已回退为单参考日。");
+        setActiveIntervalContext(null);
+        setChartIntervalMode(false);
+        setPendingIntervalRestore(null);
+      }
       return;
     }
 
@@ -3745,6 +4245,62 @@ export default function DetailsPage({
             totalChartItems - nextVisibleBarCount,
           )
         : Math.max(totalChartItems - nextVisibleBarCount, 0);
+
+    if (pendingIntervalRestore) {
+      const resolvedIntervalRestore = resolveIntervalRestore(
+        allChartItems,
+        pendingIntervalRestore,
+      );
+      if (resolvedIntervalRestore) {
+        const intervalBarCount =
+          resolvedIntervalRestore.endAbsoluteIndex -
+            resolvedIntervalRestore.startAbsoluteIndex +
+          1;
+        const restoredVisibleBarCount = clampNumber(
+          Math.max(DEFAULT_VISIBLE_BARS, intervalBarCount + 20),
+          Math.min(MIN_VISIBLE_BARS, totalChartItems),
+          totalChartItems,
+        );
+        const intervalMidpoint = Math.floor(
+          (resolvedIntervalRestore.startAbsoluteIndex +
+            resolvedIntervalRestore.endAbsoluteIndex) /
+            2,
+        );
+        const restoredVisibleStart = clampNumber(
+          intervalMidpoint - Math.floor(restoredVisibleBarCount / 2),
+          0,
+          totalChartItems - restoredVisibleBarCount,
+        );
+
+        chartDragRef.current = null;
+        setVisibleBarCount(restoredVisibleBarCount);
+        setVisibleStartIndex(restoredVisibleStart);
+        setChartFocus(null);
+        setActiveIntervalContext({
+          startTradeDate: resolvedIntervalRestore.startTradeDate,
+          endTradeDate: resolvedIntervalRestore.endTradeDate,
+        });
+        setChartIntervalMode(true);
+        setChartIntervalSelection(resolvedIntervalRestore);
+        setChartIntervalDraftSelection(null);
+        setChartIntervalPanelOpen(true);
+        setChartIntervalNotice(buildIntervalRestoreNotice(
+          pendingIntervalRestore,
+          resolvedIntervalRestore,
+        ));
+        setPendingIntervalRestore(null);
+        return;
+      }
+
+      setChartIntervalNotice("区间超出当前图表窗口，已回退为单参考日。");
+      setActiveIntervalContext(null);
+      setChartIntervalMode(false);
+      setChartIntervalSelection(null);
+      setChartIntervalDraftSelection(null);
+      setChartIntervalPanelOpen(false);
+      setPendingIntervalRestore(null);
+    }
+
     chartDragRef.current = null;
     setVisibleBarCount(nextVisibleBarCount);
     setVisibleStartIndex(nextVisibleStart);
@@ -3753,6 +4309,7 @@ export default function DetailsPage({
     allChartItems,
     detailData?.resolved_trade_date,
     detailData?.resolved_ts_code,
+    pendingIntervalRestore,
     resolvedTradeDate,
     totalChartItems,
   ]);
@@ -4055,14 +4612,28 @@ export default function DetailsPage({
 
     autoFillTopRef.current = false;
     setSourcePath(nextSourcePath);
-    setTradeDateInput(routeTradeDate);
+    setTradeDateInput(routeEffectiveTradeDate);
+    setActiveIntervalContext(routeIntervalRestore);
+    setPendingIntervalRestore(routeIntervalRestore);
+    setChartIntervalNotice("");
+    setChartIntervalMode(Boolean(routeIntervalRestore));
+    setChartIntervalSelection(null);
+    setChartIntervalDraftSelection(null);
+    setChartIntervalPanelOpen(false);
     setLookupInput(routeTsCode);
     setTopError("");
     setDetailError("");
     setStrategyCompareSnapshot(null);
-    void readDetail(nextSourcePath, routeTradeDate, stdTsCode(routeTsCode));
+    void readDetail(
+      nextSourcePath,
+      routeEffectiveTradeDate,
+      stdTsCode(routeTsCode),
+      routeIntervalRestore,
+    );
   }, [
     readDetail,
+    routeEffectiveTradeDate,
+    routeIntervalRestore,
     routeSourcePath,
     routeTradeDate,
     routeTsCode,
@@ -4120,6 +4691,33 @@ export default function DetailsPage({
     };
   }
 
+  function buildChartIntervalSelection(
+    viewport: HTMLDivElement,
+    clientX: number,
+    clientY: number,
+    anchorAbsoluteIndex: number,
+  ) {
+    const reserveCyqPanelWidth =
+      detailCyqVisible && (selectedCyqSnapshot?.bins.length ?? 0) > 0;
+    const pointer = buildChartPointerSnapshot(
+      viewport,
+      clientX,
+      clientY,
+      chartItems.length,
+      chartLayoutSlotCount,
+      reserveCyqPanelWidth,
+    );
+    if (!pointer) {
+      return null;
+    }
+
+    return buildIntervalSelectionFromAbsoluteIndices(
+      allChartItems,
+      anchorAbsoluteIndex,
+      effectiveVisibleStart + pointer.visibleIndex,
+    );
+  }
+
   function onChartPointerDown(
     panelKey: string,
     event: ReactPointerEvent<HTMLDivElement>,
@@ -4134,20 +4732,56 @@ export default function DetailsPage({
     }
 
     const isTouchPointer = event.pointerType !== "mouse";
-    const mode = chartFocus?.pinned
-      ? isTouchPointer &&
-        !isPointerNearChartFocus(
-          panelKey,
-          event.currentTarget,
-          event.clientX,
-          event.clientY,
-          chartFocus,
-        )
-        ? "dismiss"
-        : "focus"
-      : maxVisibleStart > 0
-        ? "pan"
-        : "tap";
+    let anchorAbsoluteIndex: number | undefined;
+    const mode =
+      panelKey === "price" && chartIntervalMode
+        ? (() => {
+            const reserveCyqPanelWidth =
+              detailCyqVisible && (selectedCyqSnapshot?.bins.length ?? 0) > 0;
+            const pointer = buildChartPointerSnapshot(
+              event.currentTarget,
+              event.clientX,
+              event.clientY,
+              chartItems.length,
+              chartLayoutSlotCount,
+              reserveCyqPanelWidth,
+            );
+            if (!pointer) {
+              return "interval-select" as const;
+            }
+
+            anchorAbsoluteIndex = effectiveVisibleStart + pointer.visibleIndex;
+            const intervalSelection = buildIntervalSelectionFromAbsoluteIndices(
+              allChartItems,
+              anchorAbsoluteIndex,
+              anchorAbsoluteIndex,
+            );
+            if (intervalSelection) {
+              setChartIntervalDraftSelection(intervalSelection);
+              setChartIntervalPanelOpen(false);
+              setChartFocus(null);
+            }
+            return "interval-select" as const;
+          })()
+        : chartFocus?.pinned
+          ? isTouchPointer &&
+            !isPointerNearChartFocus(
+              panelKey,
+              event.currentTarget,
+              event.clientX,
+              event.clientY,
+              chartFocus,
+            )
+            ? "dismiss"
+            : "focus"
+          : maxVisibleStart > 0
+            ? "pan"
+            : "tap";
+
+    if (mode === "interval-select" && anchorAbsoluteIndex === undefined) {
+      setChartIntervalDraftSelection(null);
+      return;
+    }
 
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -4165,6 +4799,7 @@ export default function DetailsPage({
       barsPerPixel: effectiveVisibleBarCount / rect.width,
       maxVisibleStart,
       moved: false,
+      anchorAbsoluteIndex,
     };
   }
 
@@ -4226,6 +4861,21 @@ export default function DetailsPage({
       return;
     }
 
+    if (dragState.mode === "interval-select") {
+      const nextIntervalSelection = buildChartIntervalSelection(
+        event.currentTarget,
+        event.clientX,
+        event.clientY,
+        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
+      );
+      if (!nextIntervalSelection) {
+        return;
+      }
+
+      setChartIntervalDraftSelection(nextIntervalSelection);
+      return;
+    }
+
     if (dragState.mode === "dismiss") {
       return;
     }
@@ -4284,6 +4934,27 @@ export default function DetailsPage({
       return;
     }
 
+    if (dragState.mode === "interval-select") {
+      const nextIntervalSelection = buildChartIntervalSelection(
+        event.currentTarget,
+        event.clientX,
+        event.clientY,
+        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
+      );
+      if (nextIntervalSelection) {
+        setChartIntervalDraftSelection(null);
+        setChartIntervalSelection(nextIntervalSelection);
+        setActiveIntervalContext({
+          startTradeDate: nextIntervalSelection.startTradeDate,
+          endTradeDate: nextIntervalSelection.endTradeDate,
+        });
+        setChartIntervalMode(true);
+        setChartIntervalPanelOpen(true);
+        setChartIntervalNotice("");
+      }
+      return;
+    }
+
     if (dragState.moved) {
       return;
     }
@@ -4335,6 +5006,9 @@ export default function DetailsPage({
     _panelKey: string,
     event: ReactPointerEvent<HTMLDivElement>,
   ) {
+    if (chartDragRef.current?.mode === "interval-select") {
+      setChartIntervalDraftSelection(null);
+    }
     clearChartPointerState(event);
   }
 
@@ -4555,6 +5229,13 @@ export default function DetailsPage({
     autoFillTopRef.current = false;
     setTradeDateInput(nextTradeDate);
     setLookupInput(detailData?.overview?.name?.trim() || splitTsCode(resolvedTsCode));
+    setActiveIntervalContext(null);
+    setPendingIntervalRestore(null);
+    setChartIntervalMode(false);
+    setChartIntervalSelection(null);
+    setChartIntervalDraftSelection(null);
+    setChartIntervalPanelOpen(false);
+    setChartIntervalNotice("");
     setDetailError("");
     void (async () => {
       const nextDetail = await readDetail(
@@ -4577,6 +5258,11 @@ export default function DetailsPage({
     const nextCode = sanitizeCodeInput(splitTsCode(target.tsCode));
     const nextTradeDate =
       target.tradeDate?.trim() || tradeDateInput.trim();
+    const explicitIntervalRestore = normalizeIntervalRestoreRequest(
+      target.intervalStartTradeDate ?? "",
+      target.intervalEndTradeDate ?? "",
+    );
+    const nextIntervalRestore = explicitIntervalRestore ?? activeIntervalContext;
 
     if (nextCode === "") {
       return;
@@ -4589,12 +5275,24 @@ export default function DetailsPage({
     autoFillTopRef.current = false;
     setSourcePath(nextSourcePath);
     setLookupInput(target.name?.trim() || nextCode);
+    setActiveIntervalContext(nextIntervalRestore);
+    setPendingIntervalRestore(nextIntervalRestore);
+    setChartIntervalMode(Boolean(nextIntervalRestore));
+    setChartIntervalSelection(null);
+    setChartIntervalDraftSelection(null);
+    setChartIntervalPanelOpen(false);
+    setChartIntervalNotice("");
     if (nextTradeDate !== "") {
       setTradeDateInput(nextTradeDate);
     }
     setDetailError("");
     setStrategyCompareSnapshot(null);
-    void readDetail(nextSourcePath, nextTradeDate, stdTsCode(nextCode));
+    void readDetail(
+      nextSourcePath,
+      nextTradeDate,
+      stdTsCode(nextCode),
+      nextIntervalRestore,
+    );
   }
 
   const clearDetailsNavLongPressTimer = useCallback(() => {
@@ -4962,6 +5660,28 @@ export default function DetailsPage({
                 <div className="details-chart-watch-row">
                   <button
                     className={[
+                      "details-chart-watch-btn",
+                      "details-chart-watch-btn-interval",
+                      chartIntervalMode || chartIntervalSelection
+                        ? "is-active"
+                        : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    type="button"
+                    data-testid="details-interval-toggle"
+                    onPointerDown={(event) => {
+                      event.stopPropagation();
+                    }}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      toggleChartIntervalMode();
+                    }}
+                  >
+                    区间统计
+                  </button>
+                  <button
+                    className={[
                       "details-chart-cyq-toggle",
                       "details-chart-cyq-toggle-inline",
                       detailCyqVisible ? "is-active" : "",
@@ -5078,7 +5798,17 @@ export default function DetailsPage({
                     {watchObserveNotice}
                   </span>
                 ) : null}
+                {chartIntervalNotice ? (
+                  <span className="details-chart-watch-note">
+                    {chartIntervalNotice}
+                  </span>
+                ) : null}
               </div>,
+              chartIntervalSelection,
+              chartIntervalDraftSelection,
+              chartIntervalPanelOpen,
+              intervalStatsSections,
+              closeChartIntervalPanel,
             ),
           )}
         </div>

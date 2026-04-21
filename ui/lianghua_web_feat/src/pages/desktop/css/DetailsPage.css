@@ -694,6 +694,18 @@
   box-shadow: 0 8px 20px rgba(212, 92, 20, 0.24);
 }
 
+.details-chart-watch-btn-interval {
+  border-color: #2563eb;
+  background: rgba(37, 99, 235, 0.94);
+  box-shadow: 0 6px 16px rgba(37, 99, 235, 0.2);
+}
+
+.details-chart-watch-btn-interval.is-active {
+  border-color: #1d4ed8;
+  background: rgba(29, 78, 216, 0.98);
+  box-shadow: 0 8px 18px rgba(29, 78, 216, 0.24);
+}
+
 .details-chart-watch-btn.is-added {
   border-color: var(--theme-orange-500);
   background: rgba(249, 115, 22, 0.94);
@@ -771,6 +783,22 @@
   transform: translateY(-0.5px);
 }
 
+.details-chart-interval-selection {
+  position: absolute;
+  z-index: 2;
+  top: 12px;
+  bottom: 28px;
+  border: 1px solid rgba(37, 99, 235, 0.62);
+  background: rgba(59, 130, 246, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.24);
+  pointer-events: none;
+}
+
+.details-chart-interval-selection.is-draft {
+  border-style: dashed;
+  background: rgba(59, 130, 246, 0.1);
+}
+
 .details-chart-y-label,
 .details-chart-x-label {
   position: absolute;
@@ -823,6 +851,28 @@
 
 .details-chart-tooltip-pinned {
   border-color: rgba(42, 92, 176, 0.45);
+}
+
+.details-chart-interval-panel {
+  z-index: 5;
+  min-width: 220px;
+  max-width: 280px;
+  pointer-events: auto;
+}
+
+.details-chart-interval-panel-head {
+  align-items: flex-start;
+}
+
+.details-chart-interval-close {
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  background: rgba(255, 255, 255, 0.92);
+  color: #425466;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
 }
 
 .details-chart-tooltip-head {

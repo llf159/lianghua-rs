@@ -42,6 +42,26 @@ function formatMarketDateRange(value?: string | null) {
   return formatDateLabel(value);
 }
 
+function parseMarketDateRange(value?: string | null) {
+  if (!value) {
+    return { startDate: undefined, endDate: undefined };
+  }
+
+  const [start, end] = value.split("~");
+  if (start && end) {
+    return {
+      startDate: start.trim() || undefined,
+      endDate: end.trim() || undefined,
+    };
+  }
+
+  const normalized = value.trim();
+  return {
+    startDate: normalized || undefined,
+    endDate: normalized || undefined,
+  };
+}
+
 function formatPercent(value?: number | null, digits = 2) {
   if (value === null || value === undefined || !Number.isFinite(value)) {
     return "--";
@@ -182,10 +202,18 @@ export default function MarketAnalysisPage() {
   const detailNavigationItems = useMemo(() => {
     const contributors = contributionResult?.contributors ?? [];
     const tradeDate = contributionResult?.trade_date ?? result?.resolved_reference_trade_date ?? undefined;
+    const intervalStartTradeDate = contributionResult?.scope === "interval"
+      ? contributionResult.start_date ?? undefined
+      : undefined;
+    const intervalEndTradeDate = contributionResult?.scope === "interval"
+      ? contributionResult.end_date ?? result?.resolved_reference_trade_date ?? undefined
+      : undefined;
     const sourcePathTrimmed = sourcePath.trim() || undefined;
     return contributors.map((item) => ({
       tsCode: item.ts_code,
       tradeDate,
+      intervalStartTradeDate,
+      intervalEndTradeDate,
       sourcePath: sourcePathTrimmed,
       name: item.name ?? undefined,
     }));
@@ -196,6 +224,9 @@ export default function MarketAnalysisPage() {
       return [];
     }
     const tradeDate = result.resolved_reference_trade_date ?? undefined;
+    const { startDate: intervalStartTradeDate, endDate: parsedIntervalEndTradeDate } =
+      parseMarketDateRange(result.interval.trade_date);
+    const intervalEndTradeDate = parsedIntervalEndTradeDate ?? result.resolved_reference_trade_date ?? undefined;
     const sourcePathTrimmed = sourcePath.trim() || undefined;
     return result.interval.gain_top
       .map((item) => {
@@ -207,6 +238,8 @@ export default function MarketAnalysisPage() {
         return {
           tsCode,
           tradeDate,
+          intervalStartTradeDate,
+          intervalEndTradeDate,
           sourcePath: sourcePathTrimmed,
           name: displayName,
         };
@@ -459,6 +492,8 @@ export default function MarketAnalysisPage() {
                                   className="scene-layer-market-stock-link"
                                   tsCode={splitTsCode(tsCode)}
                                   tradeDate={result.resolved_reference_trade_date ?? undefined}
+                                  intervalStartTradeDate={parseMarketDateRange(result.interval.trade_date).startDate}
+                                  intervalEndTradeDate={parseMarketDateRange(result.interval.trade_date).endDate ?? result.resolved_reference_trade_date ?? undefined}
                                   sourcePath={sourcePath.trim() || undefined}
                                   title={`查看 ${item.name} 详情`}
                                   navigationItems={intervalGainNavigationItems}
@@ -577,13 +612,23 @@ export default function MarketAnalysisPage() {
                       <td>{index + 1}</td>
                       <td>{item.ts_code}</td>
                       <td>
-                        <DetailsLink
-                          className="scene-layer-market-stock-link"
-                          tsCode={splitTsCode(item.ts_code)}
-                          tradeDate={contributionResult.trade_date ?? result?.resolved_reference_trade_date ?? undefined}
-                          sourcePath={sourcePath.trim() || undefined}
-                          title={`查看 ${item.name ?? item.ts_code} 详情`}
-                          navigationItems={detailNavigationItems}
+                         <DetailsLink
+                           className="scene-layer-market-stock-link"
+                           tsCode={splitTsCode(item.ts_code)}
+                           tradeDate={contributionResult.trade_date ?? result?.resolved_reference_trade_date ?? undefined}
+                           intervalStartTradeDate={
+                             contributionResult.scope === "interval"
+                               ? contributionResult.start_date ?? undefined
+                               : undefined
+                           }
+                           intervalEndTradeDate={
+                             contributionResult.scope === "interval"
+                               ? contributionResult.end_date ?? result?.resolved_reference_trade_date ?? undefined
+                               : undefined
+                           }
+                           sourcePath={sourcePath.trim() || undefined}
+                           title={`查看 ${item.name ?? item.ts_code} 详情`}
+                           navigationItems={detailNavigationItems}
                         >
                           {item.name ?? item.ts_code}
                         </DetailsLink>
