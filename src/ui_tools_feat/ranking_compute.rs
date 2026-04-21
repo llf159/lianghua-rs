@@ -112,12 +112,7 @@ fn scoring_run_timings(profile: &ScoringRunProfile) -> Vec<RankComputeTimingItem
 }
 
 fn tiebreak_timings(profile: &RankTiebreakProfile) -> Vec<RankComputeTimingItem> {
-    vec![timing_item(
-        "update-rank",
-        "补排名",
-        profile.total_ms,
-        None,
-    )]
+    vec![timing_item("update-rank", "补排名", profile.total_ms, None)]
 }
 
 fn normalize_rank_compute_date(raw: &str, field_name: &str) -> Result<String, String> {

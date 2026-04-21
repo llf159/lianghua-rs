@@ -73,6 +73,7 @@ export default function MarketAnalysisPage() {
   const { excludedConcepts, excludeStBoard } = useConceptExclusions();
   const [sourcePath, setSourcePath] = useState(() => readStoredSourcePath());
   const [lookbackPeriod, setLookbackPeriod] = useState("20");
+  const [minListedTradeDays, setMinListedTradeDays] = useState("60");
   const [referenceDateInput, setReferenceDateInput] = useState("");
   const [selectedBoard, setSelectedBoard] = useState("");
   const [initializing, setInitializing] = useState(false);
@@ -138,6 +139,7 @@ export default function MarketAnalysisPage() {
         referenceTradeDate: normalizedRefDate || undefined,
         board: selectedBoard.trim() || undefined,
         excludeStBoard: excludeStBoard || undefined,
+        minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
       });
       setResult(data);
       setContributionResult(null);
@@ -280,6 +282,15 @@ export default function MarketAnalysisPage() {
               type="date"
               value={referenceDateInput}
               onChange={(event) => setReferenceDateInput(event.target.value)}
+            />
+          </label>
+          <label className="scene-layer-field">
+            <span>最少上市交易日</span>
+            <input
+              type="number"
+              min="0"
+              value={minListedTradeDays}
+              onChange={(event) => setMinListedTradeDays(event.target.value)}
             />
           </label>
           <label className="scene-layer-field">

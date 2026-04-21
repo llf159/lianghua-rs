@@ -49,6 +49,11 @@ use lianghua_rs::ui_tools_feat::{
         StockSimilarityPageData, get_stock_similarity_page as core_get_stock_similarity_page,
     },
     stock_pick::{StockPickOptionsData, get_stock_pick_options as core_get_stock_pick_options},
+    strategy_paper_validation::{
+        StrategyPaperValidationData, StrategyPaperValidationDefaultsData,
+        get_strategy_paper_validation_defaults as core_get_strategy_paper_validation_defaults,
+        run_strategy_paper_validation as core_run_strategy_paper_validation,
+    },
     strategy_manage::{
         StrategyManagePageData, StrategyManageRefactorDraft, StrategyManageRuleDraft, StrategyManageSceneDraft,
         check_strategy_manage_scene_draft as core_check_strategy_manage_scene_draft,
@@ -65,6 +70,7 @@ use lianghua_rs::ui_tools_feat::{
     statistics::{
         MarketAnalysisData, MarketContributionData, RuleExpressionValidationData,
         RuleExpressionValidationManualStrategy,
+        RankLayerBacktestData,
         RuleLayerBacktestData, RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig,
         SceneLayerBacktestData, SceneLayerBacktestDefaultsData, SceneStatisticsPageData,
         StrategyStatisticsDetailData, StrategyStatisticsPageData, TriggeredStockRow,
@@ -76,6 +82,7 @@ use lianghua_rs::ui_tools_feat::{
         get_strategy_statistics_detail as core_get_strategy_statistics_detail,
         get_strategy_statistics_page as core_get_strategy_statistics_page,
         get_strategy_triggered_stocks as core_get_strategy_triggered_stocks,
+        run_rank_layer_backtest as core_run_rank_layer_backtest,
         run_rule_expression_validation as core_run_rule_expression_validation,
         run_rule_layer_backtest as core_run_rule_layer_backtest,
         run_scene_layer_backtest as core_run_scene_layer_backtest,
@@ -485,6 +492,44 @@ async fn get_strategy_statistics_page(
 }
 
 #[tauri::command]
+fn get_strategy_paper_validation_defaults(
+    source_path: String,
+) -> Result<StrategyPaperValidationDefaultsData, String> {
+    core_get_strategy_paper_validation_defaults(&source_path)
+}
+
+#[tauri::command]
+async fn run_strategy_paper_validation(
+    source_path: String,
+    start_date: Option<String>,
+    end_date: Option<String>,
+    min_listed_trade_days: Option<usize>,
+    index_ts_code: Option<String>,
+    test_ts_code: Option<String>,
+    buy_price_basis: String,
+    slippage_pct: Option<f64>,
+    buy_expression: String,
+    sell_expression: String,
+) -> Result<StrategyPaperValidationData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_run_strategy_paper_validation(
+            &source_path,
+            start_date,
+            end_date,
+            min_listed_trade_days,
+            index_ts_code,
+            test_ts_code,
+            buy_price_basis,
+            slippage_pct,
+            buy_expression,
+            sell_expression,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn get_scene_statistics_page(
     source_path: String,
     scene_name: Option<String>,
@@ -544,6 +589,7 @@ async fn get_market_analysis(
     reference_trade_date: Option<String>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
+    min_listed_trade_days: Option<usize>,
 ) -> Result<MarketAnalysisData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_get_market_analysis(
@@ -552,6 +598,7 @@ async fn get_market_analysis(
             reference_trade_date,
             board,
             exclude_st_board,
+            min_listed_trade_days,
         )
     })
     .await
@@ -639,6 +686,39 @@ async fn run_rule_layer_backtest(
             start_date,
             end_date,
             min_samples_per_rule_day,
+            min_listed_trade_days,
+            backtest_period,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn run_rank_layer_backtest(
+    source_path: String,
+    stock_adj_type: Option<String>,
+    index_ts_code: String,
+    index_beta: Option<f64>,
+    concept_beta: Option<f64>,
+    industry_beta: Option<f64>,
+    start_date: String,
+    end_date: String,
+    min_samples_per_rank_day: Option<usize>,
+    min_listed_trade_days: Option<usize>,
+    backtest_period: Option<usize>,
+) -> Result<RankLayerBacktestData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_run_rank_layer_backtest(
+            source_path,
+            stock_adj_type,
+            index_ts_code,
+            index_beta,
+            concept_beta,
+            industry_beta,
+            start_date,
+            end_date,
+            min_samples_per_rank_day,
             min_listed_trade_days,
             backtest_period,
         )
@@ -1055,6 +1135,8 @@ pub fn run() {
             get_stock_detail_realtime,
             get_stock_similarity_page,
             get_strategy_statistics_page,
+            get_strategy_paper_validation_defaults,
+            run_strategy_paper_validation,
             get_scene_statistics_page,
             get_strategy_statistics_detail,
             get_strategy_triggered_stocks,
@@ -1062,6 +1144,7 @@ pub fn run() {
             get_rule_layer_backtest_defaults,
             get_market_analysis,
             get_market_contribution,
+            run_rank_layer_backtest,
             run_scene_layer_backtest,
             run_rule_layer_backtest,
             run_rule_expression_validation,

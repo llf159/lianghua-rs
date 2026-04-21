@@ -4,10 +4,12 @@ import { ensureManagedSourcePath } from "../../apis/managedSource";
 import { getStrategyManagePage, type StrategyManageRuleItem } from "../../apis/strategyManage";
 import {
   getRuleLayerBacktestDefaults,
+  runRankLayerBacktest,
   runRuleExpressionValidation,
   getSceneLayerBacktestDefaults,
   runRuleLayerBacktest,
   runSceneLayerBacktest,
+  type RankLayerBacktestData,
   type RuleExpressionValidationData,
   type RuleValidationComboResult,
   type RuleLayerBacktestData,
@@ -286,6 +288,9 @@ export default function SceneLayerBacktestPage() {
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(false);
   const [error, setError] = useState("");
+  const [rankLoading, setRankLoading] = useState(false);
+  const [rankError, setRankError] = useState("");
+  const [rankResult, setRankResult] = useState<RankLayerBacktestData | null>(null);
   const [result, setResult] = useState<SceneLayerBacktestData | null>(null);
 
   const [ruleLoading, setRuleLoading] = useState(false);
@@ -425,6 +430,7 @@ export default function SceneLayerBacktestPage() {
 
   const allSceneSummaries = result?.all_scene_summaries ?? [];
   const allRuleSummaries = ruleResult?.all_rule_summaries ?? [];
+  const rankLayerSummaries = rankResult?.layer_summaries ?? [];
   const backtestHighlightSettings = readStoredBacktestHighlightSettings();
 
   function metricHighlightClass(
@@ -602,6 +608,52 @@ export default function SceneLayerBacktestPage() {
       setError(`执行场景整体回测失败: ${String(runError)}`);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function onRunRankBacktest() {
+    const normalizedStart = normalizeDateInput(startDateInput);
+    const normalizedEnd = normalizeDateInput(endDateInput);
+
+    if (!sourcePath.trim()) {
+      setRankError("当前数据目录为空，请先在数据管理页确认目录。");
+      return;
+    }
+    if (!indexTsCode.trim()) {
+      setRankError("请选择指数。");
+      return;
+    }
+    if (!normalizedStart || !normalizedEnd) {
+      setRankError("请填写开始和结束日期。");
+      return;
+    }
+    if (normalizedStart > normalizedEnd) {
+      setRankError("开始日期不能晚于结束日期。");
+      return;
+    }
+
+    setRankLoading(true);
+    setRankError("");
+    try {
+      const data = await runRankLayerBacktest({
+        sourcePath,
+        stockAdjType: stockAdjType.trim() || "qfq",
+        indexTsCode: indexTsCode.trim(),
+        indexBeta: Number(indexBeta),
+        conceptBeta: Number(conceptBeta),
+        industryBeta: Number(industryBeta),
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+        minSamplesPerRankDay: Math.max(1, Number(minSamplesPerDay) || 1),
+        minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
+        backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+      });
+      setRankResult(data);
+    } catch (runError) {
+      setRankResult(null);
+      setRankError(`执行排名整体回测失败: ${String(runError)}`);
+    } finally {
+      setRankLoading(false);
     }
   }
 
@@ -979,6 +1031,99 @@ export default function SceneLayerBacktestPage() {
           </label>
         </div>
       </section>
+
+      <section className="scene-layer-card">
+        <h2 className="scene-layer-title">排名整体回测</h2>
+        <p className="scene-layer-caption">
+          使用 score_summary 中的总分做五层分层，检验总分对后续残差收益的影响，并展示分层差、IC、t、ICIR 及五层依据表。
+        </p>
+
+        <div className="scene-layer-actions">
+          <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunRankBacktest()} disabled={rankLoading || initializing}>
+            {rankLoading ? "回测中..." : "执行排名整体回测"}
+          </button>
+        </div>
+
+        {rankError ? <div className="scene-layer-error">{rankError}</div> : null}
+      </section>
+
+      {rankResult ? (
+        <section className="scene-layer-card">
+          <div className="scene-layer-layer-summary">
+            <h3>排名整体回测汇总</h3>
+            <div className="scene-layer-contrib-table-wrap">
+              <table className="scene-layer-contrib-table">
+                <thead>
+                  <tr>
+                    <th>对象</th>
+                    <th>区间</th>
+                    <th>指数</th>
+                    <th>Beta（指/概/行）</th>
+                    <th>有效交易日</th>
+                    <th>总样本数</th>
+                    <th>最小样本阈值</th>
+                    <th>最少上市交易日</th>
+                    <th>回测周期（天）</th>
+                    <th>分层差均值（日度第5层-第1层）</th>
+                    <th>IC 均值</th>
+                    <th>IC t值</th>
+                    <th>ICIR</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>总分</td>
+                    <td>{formatDateLabel(rankResult.start_date)} ~ {formatDateLabel(rankResult.end_date)}</td>
+                    <td>{rankResult.index_ts_code}</td>
+                    <td>{formatNumber(rankResult.index_beta, 2)} / {formatNumber(rankResult.concept_beta, 2)} / {formatNumber(rankResult.industry_beta, 2)}</td>
+                    <td>{rankResult.point_count}</td>
+                    <td>{rankResult.sample_count}</td>
+                    <td>{rankResult.min_samples_per_rank_day}</td>
+                    <td>{rankResult.min_listed_trade_days}</td>
+                    <td>{rankResult.backtest_period}</td>
+                    <td>{formatPercent(rankResult.spread_mean)}</td>
+                    <td className={metricHighlightClass("ic", rankResult.ic_mean)}>{formatNumber(rankResult.ic_mean)}</td>
+                    <td className={metricHighlightClass("t", rankResult.ic_t_value)}>{formatNumber(rankResult.ic_t_value)}</td>
+                    <td className={metricHighlightClass("ir", rankResult.icir)}>{formatNumber(rankResult.icir)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {rankLayerSummaries.length === 0 ? (
+            <div className="scene-layer-empty">当前没有可用于五层分层的总分样本。</div>
+          ) : (
+            <div className="scene-layer-layer-summary">
+              <h3>五层分层依据（按总分从低到高）</h3>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table">
+                  <thead>
+                    <tr>
+                      <th>分层</th>
+                      <th>有效交易日</th>
+                      <th>分层样本数</th>
+                      <th>分层均分</th>
+                      <th>层级收益（日度残差均值）</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rankLayerSummaries.map((item) => (
+                      <tr key={item.layer_index}>
+                        <td>{item.layer_label}</td>
+                        <td>{item.point_count}</td>
+                        <td>{item.sample_count}</td>
+                        <td>{formatNumber(item.avg_score, 4)}</td>
+                        <td>{formatPercent(item.avg_residual_return)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </section>
+      ) : null}
 
       <section className="scene-layer-card">
         <h2 className="scene-layer-title">场景整体回测</h2>

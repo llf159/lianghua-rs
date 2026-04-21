@@ -1,3 +1,4 @@
+pub mod rank;
 pub mod rule;
 pub mod scene;
 
@@ -20,7 +21,7 @@ pub(super) struct BacktestSampleEligibility {
 }
 
 impl BacktestSampleEligibility {
-    pub(super) fn allows_sample(&self, ts_code: &str, trade_date: &str) -> bool {
+    pub(crate) fn allows_sample(&self, ts_code: &str, trade_date: &str) -> bool {
         if self.min_listed_trade_days == 0 {
             return true;
         }
@@ -36,7 +37,7 @@ impl BacktestSampleEligibility {
     }
 }
 
-pub(super) fn build_backtest_sample_eligibility(
+pub(crate) fn build_backtest_sample_eligibility(
     source_dir: &str,
     min_listed_trade_days: usize,
 ) -> Result<BacktestSampleEligibility, String> {

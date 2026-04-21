@@ -725,11 +725,9 @@ fn compute_scene_rankings_in_tx(
 
 pub fn row_into_rt(row_data: RowData) -> Result<Runtime, String> {
     let mut rt = Runtime::default();
-    // let trade_date = row_data.trade_dates;
-
-    for (name, col) in &row_data.cols {
-        let n_series = Value::NumSeries(col.clone());
-        rt.vars.insert(name.clone(), n_series);
+    for (name, col) in row_data.cols {
+        let n_series = Value::NumSeries(col);
+        rt.vars.insert(name, n_series);
     }
 
     Ok(rt)

@@ -20,7 +20,8 @@ use crate::{
     scoring::tools::{calc_query_need_rows, inject_stock_extra_fields, load_st_list},
     scoring::{CachedRule, evaluate_cached_rule_scores},
     simulate::{
-        DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
+        DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, build_backtest_sample_eligibility,
+        rank::{RankLayerConfig, RankLayerFromDbInput, calc_rank_layer_metrics_from_db},
         rule::{
             RuleLayerConfig, RuleLayerFromDbInput, RuleLayerRuntimeCache,
             build_rule_layer_runtime_cache, calc_all_rule_layer_metrics_from_db,
@@ -265,6 +266,38 @@ pub struct RuleLayerBacktestDefaultsData {
     pub resolved_rule_name: Option<String>,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RankLayerBucketSummary {
+    pub layer_index: usize,
+    pub layer_label: String,
+    pub point_count: usize,
+    pub sample_count: usize,
+    pub avg_score: Option<f64>,
+    pub avg_residual_return: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RankLayerBacktestData {
+    pub stock_adj_type: String,
+    pub index_ts_code: String,
+    pub index_beta: f64,
+    pub concept_beta: f64,
+    pub industry_beta: f64,
+    pub start_date: String,
+    pub end_date: String,
+    pub min_samples_per_rank_day: usize,
+    pub min_listed_trade_days: usize,
+    pub backtest_period: usize,
+    pub point_count: usize,
+    pub sample_count: usize,
+    pub spread_mean: Option<f64>,
+    pub ic_mean: Option<f64>,
+    pub ic_std: Option<f64>,
+    pub icir: Option<f64>,
+    pub ic_t_value: Option<f64>,
+    pub layer_summaries: Vec<RankLayerBucketSummary>,
 }
 
 const VALIDATION_EPS: f64 = 1e-12;
@@ -2805,8 +2838,11 @@ pub fn get_market_analysis(
     reference_trade_date: Option<String>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
+    min_listed_trade_days: Option<usize>,
 ) -> Result<MarketAnalysisData, String> {
     let lookback_period = lookback_period.unwrap_or(20).max(1);
+    let min_listed_trade_days =
+        min_listed_trade_days.unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS);
 
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
@@ -2831,6 +2867,8 @@ pub fn get_market_analysis(
     let (board_options, ts_board_map) = build_board_maps(&source_path)?;
     let resolved_board = resolve_board_filter(board, &board_options);
     let exclude_st_board = exclude_st_board.unwrap_or(false);
+    let sample_eligibility =
+        build_backtest_sample_eligibility(&source_path, min_listed_trade_days)?;
 
     let Some(ref_date) = resolved_reference_trade_date.clone() else {
         return Ok(MarketAnalysisData {
@@ -3003,49 +3041,70 @@ pub fn get_market_analysis(
     let mut interval_gain_stmt = source_conn
         .prepare(
             r#"
-            SELECT ts_code, AVG(TRY_CAST(pct_chg AS DOUBLE)) AS avg_pct
+            SELECT ts_code, trade_date, TRY_CAST(pct_chg AS DOUBLE) AS pct
             FROM stock_data
             WHERE adj_type = 'qfq'
               AND trade_date >= ?
               AND trade_date <= ?
-            GROUP BY 1
-            ORDER BY avg_pct DESC NULLS LAST, ts_code ASC
+            ORDER BY trade_date ASC, ts_code ASC
             "#,
         )
         .map_err(|e| format!("预编译涨幅区间榜 SQL 失败: {e}"))?;
     let mut interval_gain_rows = interval_gain_stmt
         .query(params![&interval_start, &interval_end])
         .map_err(|e| format!("执行涨幅区间榜 SQL 失败: {e}"))?;
-    let mut interval_gain_top = Vec::new();
+    let mut interval_gain_acc: HashMap<String, (f64, usize)> = HashMap::new();
     while let Some(row) = interval_gain_rows
         .next()
         .map_err(|e| format!("读取涨幅区间榜失败: {e}"))?
     {
-        if interval_gain_top.len() >= 20 {
-            break;
-        }
         let ts_code: String = row.get(0).map_err(|e| format!("读取代码失败: {e}"))?;
-        let value: Option<f64> = row.get(1).map_err(|e| format!("读取涨幅值失败: {e}"))?;
+        let trade_date: String = row.get(1).map_err(|e| format!("读取交易日失败: {e}"))?;
+        let value: Option<f64> = row.get(2).map_err(|e| format!("读取涨幅值失败: {e}"))?;
         let Some(value) = value.filter(|v| v.is_finite()) else {
             continue;
         };
         let ts_code = ts_code.to_ascii_uppercase();
+        if !sample_eligibility.allows_sample(&ts_code, &trade_date) {
+            continue;
+        }
         let Some(board_list) = ts_board_map.get(&ts_code) else {
             continue;
         };
         if !match_board_filter_with_st(board_list, resolved_board.as_deref(), exclude_st_board) {
             continue;
         }
-
-        let name = stock_name_map
-            .get(&ts_code)
-            .cloned()
-            .unwrap_or(ts_code.clone());
-        interval_gain_top.push(MarketRankItem {
-            name: format!("{} ({})", name, ts_code),
-            value,
-        });
+        let entry = interval_gain_acc.entry(ts_code).or_insert((0.0, 0));
+        entry.0 += value;
+        entry.1 += 1;
     }
+    let mut interval_gain_top = interval_gain_acc
+        .into_iter()
+        .filter_map(|(ts_code, (sum, count))| {
+            if count == 0 {
+                return None;
+            }
+            let value = sum / count as f64;
+            if !value.is_finite() {
+                return None;
+            }
+            let name = stock_name_map
+                .get(&ts_code)
+                .cloned()
+                .unwrap_or(ts_code.clone());
+            Some(MarketRankItem {
+                name: format!("{} ({})", name, ts_code),
+                value,
+            })
+        })
+        .collect::<Vec<_>>();
+    interval_gain_top.sort_by(|a, b| {
+        b.value
+            .partial_cmp(&a.value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    interval_gain_top.truncate(20);
 
     let daily_concept_sql = r#"
         SELECT concept, TRY_CAST(performance_pct AS DOUBLE)
@@ -3147,15 +3206,15 @@ pub fn get_market_analysis(
         .next()
         .map_err(|e| format!("读取涨幅当日榜失败: {e}"))?
     {
-        if daily_gain_top.len() >= 20 {
-            break;
-        }
         let ts_code: String = row.get(0).map_err(|e| format!("读取代码失败: {e}"))?;
         let value: Option<f64> = row.get(1).map_err(|e| format!("读取涨幅值失败: {e}"))?;
         let Some(value) = value.filter(|v| v.is_finite()) else {
             continue;
         };
         let ts_code = ts_code.to_ascii_uppercase();
+        if !sample_eligibility.allows_sample(&ts_code, &ref_date) {
+            continue;
+        }
         let Some(board_list) = ts_board_map.get(&ts_code) else {
             continue;
         };
@@ -3171,6 +3230,9 @@ pub fn get_market_analysis(
             name: format!("{} ({})", name, ts_code),
             value,
         });
+        if daily_gain_top.len() >= 20 {
+            break;
+        }
     }
 
     Ok(MarketAnalysisData {
@@ -3571,6 +3633,20 @@ struct RuleLayerBacktestRunParams {
     backtest_period: usize,
 }
 
+#[derive(Debug, Clone)]
+struct RankLayerBacktestRunParams {
+    stock_adj_type: String,
+    index_ts_code: String,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: String,
+    end_date: String,
+    min_samples_per_day: usize,
+    min_listed_trade_days: usize,
+    backtest_period: usize,
+}
+
 fn weighted_rule_summary_metric(
     summaries: &[RuleLayerRuleSummary],
     value: impl Fn(&RuleLayerRuleSummary) -> Option<f64>,
@@ -3901,6 +3977,69 @@ fn run_rule_layer_backtest_core(
     })
 }
 
+fn rank_layer_label(layer_index: usize) -> String {
+    match layer_index {
+        1 => "第1层（低分）".to_string(),
+        5 => "第5层（高分）".to_string(),
+        other => format!("第{other}层"),
+    }
+}
+
+fn run_rank_layer_backtest_core(
+    source_conn: &Connection,
+    source_path: &str,
+    params: &RankLayerBacktestRunParams,
+) -> Result<RankLayerBacktestData, String> {
+    let layer_config = RankLayerConfig {
+        min_samples_per_day: params.min_samples_per_day,
+        backtest_period: params.backtest_period,
+        min_listed_trade_days: params.min_listed_trade_days,
+    };
+    let input = RankLayerFromDbInput {
+        stock_adj_type: params.stock_adj_type.clone(),
+        index_ts_code: params.index_ts_code.clone(),
+        index_beta: params.index_beta,
+        concept_beta: params.concept_beta,
+        industry_beta: params.industry_beta,
+        start_date: params.start_date.clone(),
+        end_date: params.end_date.clone(),
+        layer_config,
+    };
+    let metrics = calc_rank_layer_metrics_from_db(source_conn, source_path, &input)?;
+
+    Ok(RankLayerBacktestData {
+        stock_adj_type: input.stock_adj_type,
+        index_ts_code: input.index_ts_code,
+        index_beta: input.index_beta,
+        concept_beta: input.concept_beta,
+        industry_beta: input.industry_beta,
+        start_date: input.start_date,
+        end_date: input.end_date,
+        min_samples_per_rank_day: input.layer_config.effective_min_samples_per_day(),
+        min_listed_trade_days: input.layer_config.min_listed_trade_days,
+        backtest_period: input.layer_config.backtest_period,
+        point_count: metrics.point_count,
+        sample_count: metrics.sample_count,
+        spread_mean: metrics.spread_mean,
+        ic_mean: metrics.ic_mean,
+        ic_std: metrics.ic_std,
+        icir: metrics.icir,
+        ic_t_value: metrics.ic_t_value,
+        layer_summaries: metrics
+            .layers
+            .into_iter()
+            .map(|item| RankLayerBucketSummary {
+                layer_index: item.layer_index,
+                layer_label: rank_layer_label(item.layer_index),
+                point_count: item.point_count,
+                sample_count: item.sample_count,
+                avg_score: item.avg_score,
+                avg_residual_return: item.avg_residual_return,
+            })
+            .collect(),
+    })
+}
+
 pub fn run_scene_layer_backtest(
     source_path: String,
     stock_adj_type: Option<String>,
@@ -3981,6 +4120,46 @@ pub fn run_rule_layer_backtest(
 
     // 当前入口固定全量；后续如需恢复单策略，仅需传入 Some(rule_name)。
     run_rule_layer_backtest_core(&source_conn, &source_path, None, &params)
+}
+
+pub fn run_rank_layer_backtest(
+    source_path: String,
+    stock_adj_type: Option<String>,
+    index_ts_code: String,
+    index_beta: Option<f64>,
+    concept_beta: Option<f64>,
+    industry_beta: Option<f64>,
+    start_date: String,
+    end_date: String,
+    min_samples_per_rank_day: Option<usize>,
+    min_listed_trade_days: Option<usize>,
+    backtest_period: Option<usize>,
+) -> Result<RankLayerBacktestData, String> {
+    let source_db = source_db_path(&source_path);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
+    let source_conn =
+        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+
+    let params = RankLayerBacktestRunParams {
+        stock_adj_type: stock_adj_type
+            .unwrap_or_else(|| "qfq".to_string())
+            .trim()
+            .to_string(),
+        index_ts_code: index_ts_code.trim().to_string(),
+        index_beta: index_beta.unwrap_or(0.5),
+        concept_beta: concept_beta.unwrap_or(0.2),
+        industry_beta: industry_beta.unwrap_or(0.0),
+        start_date: start_date.trim().to_string(),
+        end_date: end_date.trim().to_string(),
+        min_samples_per_day: min_samples_per_rank_day.unwrap_or(5),
+        min_listed_trade_days: min_listed_trade_days
+            .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
+        backtest_period: backtest_period.unwrap_or(1),
+    };
+
+    run_rank_layer_backtest_core(&source_conn, &source_path, &params)
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ pub struct EvalErr {
     pub msg: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Runtime {
     pub vars: HashMap<String, Value>,
 }

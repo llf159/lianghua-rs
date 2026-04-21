@@ -25,6 +25,7 @@ import WatchObservePage from './pages/desktop/WatchObservePage'
 import IntradayMonitorRealtimePage from './pages/desktop/IntradayMonitorRealtimePage'
 import IntradayMonitorCustomPage from './pages/desktop/IntradayMonitorCustomPage'
 import BacktestPage from './pages/desktop/BacktestPage'
+import StrategyPaperValidationPage from './pages/desktop/StrategyPaperValidationPage'
 import StrategyTriggerPage from './pages/desktop/StrategyTriggerPage'
 import SceneLayerBacktestPage from './pages/desktop/SceneLayerBacktestPage'
 import ExpressionValidationSamplesPage, {
@@ -85,6 +86,7 @@ function AppRoutes() {
           <Route path="backtest" element={<BacktestPage />}>
             <Route index element={<Navigate to="/backtest/strategy-trigger" replace />} />
             <Route path="strategy-trigger" element={<StrategyTriggerPage />} />
+            <Route path="strategy-paper-validation" element={<StrategyPaperValidationPage />} />
             <Route path="scene-layer" element={<SceneLayerBacktestPage />} />
             <Route
               path={EXPRESSION_VALIDATION_SAMPLES_ROUTE_PATH}

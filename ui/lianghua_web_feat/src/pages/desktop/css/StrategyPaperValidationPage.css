@@ -1,0 +1,194 @@
+.strategy-paper-validation-page {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.strategy-paper-validation-card {
+  border: 1px solid #d8dee6;
+  border-radius: 12px;
+  padding: 16px;
+  background: #fff;
+  display: grid;
+  gap: 14px;
+}
+
+.strategy-paper-validation-head,
+.strategy-paper-validation-table-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.strategy-paper-validation-title {
+  margin: 0;
+  font-size: 22px;
+  color: #1f2a37;
+}
+
+.strategy-paper-validation-note {
+  margin: 8px 0 0;
+  color: #566272;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.strategy-paper-validation-form-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.strategy-paper-validation-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.strategy-paper-validation-field-span-full {
+  grid-column: 1 / -1;
+}
+
+.strategy-paper-validation-field span,
+.strategy-paper-validation-summary-item span,
+.strategy-paper-validation-run-meta span {
+  color: #5d6d7f;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.strategy-paper-validation-field input,
+.strategy-paper-validation-field select,
+.strategy-paper-validation-field textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #d6dde7;
+  border-radius: 8px;
+  background: #fff;
+  padding: 9px 10px;
+  color: #1f2a37;
+  font-size: 14px;
+  outline: none;
+}
+
+.strategy-paper-validation-field textarea {
+  resize: vertical;
+  font-family: "JetBrains Mono", "SFMono-Regular", "Consolas", monospace;
+}
+
+.strategy-paper-validation-field input:focus,
+.strategy-paper-validation-field select:focus,
+.strategy-paper-validation-field textarea:focus {
+  border-color: #fb923c;
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.16);
+}
+
+.strategy-paper-validation-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.strategy-paper-validation-primary-btn {
+  border: 1px solid #f97316;
+  border-radius: 8px;
+  padding: 9px 16px;
+  background: linear-gradient(180deg, #fb923c 0%, #f97316 100%);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.strategy-paper-validation-primary-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.strategy-paper-validation-placeholder {
+  color: #5f6f84;
+  font-size: 14px;
+}
+
+.strategy-paper-validation-error {
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: #fff1f2;
+  color: #be123c;
+  font-size: 14px;
+}
+
+.strategy-paper-validation-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.strategy-paper-validation-summary-item {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: linear-gradient(180deg, #fff 0%, #f8fafc 100%);
+  display: grid;
+  gap: 6px;
+}
+
+.strategy-paper-validation-summary-item strong {
+  color: #1f2a37;
+  font-size: 16px;
+}
+
+.strategy-paper-validation-run-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.strategy-paper-validation-table-wrap {
+  overflow: auto;
+}
+
+.strategy-paper-validation-table {
+  width: 100%;
+  min-width: 1120px;
+  border-collapse: collapse;
+}
+
+.strategy-paper-validation-table th,
+.strategy-paper-validation-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #e6ecf2;
+  text-align: left;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.strategy-paper-validation-table thead th {
+  position: sticky;
+  top: 0;
+  background: #f8fafc;
+  color: #4a5a6d;
+  z-index: 1;
+}
+
+.strategy-paper-validation-table tbody tr:hover {
+  background: #fff7ed;
+}
+
+@media (max-width: 1200px) {
+  .strategy-paper-validation-form-grid,
+  .strategy-paper-validation-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .strategy-paper-validation-form-grid,
+  .strategy-paper-validation-summary-grid {
+    grid-template-columns: 1fr;
+  }
+}

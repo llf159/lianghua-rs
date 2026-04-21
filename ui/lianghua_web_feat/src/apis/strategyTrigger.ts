@@ -231,6 +231,36 @@ export type RuleLayerBacktestDefaultsData = {
   end_date?: string | null
 }
 
+export type RankLayerBucketSummary = {
+  layer_index: number
+  layer_label: string
+  point_count: number
+  sample_count: number
+  avg_score?: number | null
+  avg_residual_return?: number | null
+}
+
+export type RankLayerBacktestData = {
+  stock_adj_type: string
+  index_ts_code: string
+  index_beta: number
+  concept_beta: number
+  industry_beta: number
+  start_date: string
+  end_date: string
+  min_samples_per_rank_day: number
+  min_listed_trade_days: number
+  backtest_period: number
+  point_count: number
+  sample_count: number
+  spread_mean?: number | null
+  ic_mean?: number | null
+  ic_std?: number | null
+  icir?: number | null
+  ic_t_value?: number | null
+  layer_summaries: RankLayerBucketSummary[]
+}
+
 export type RuleValidationUnknownConfig = {
   name: string
   start: number
@@ -367,6 +397,20 @@ export type RuleLayerBacktestQuery = {
   backtestPeriod?: number
 }
 
+export type RankLayerBacktestQuery = {
+  sourcePath: string
+  stockAdjType?: string
+  indexTsCode: string
+  indexBeta?: number
+  conceptBeta?: number
+  industryBeta?: number
+  startDate: string
+  endDate: string
+  minSamplesPerRankDay?: number
+  minListedTradeDays?: number
+  backtestPeriod?: number
+}
+
 export type RuleExpressionValidationQuery = {
   sourcePath: string
   importRuleName: string
@@ -415,6 +459,10 @@ export async function runRuleLayerBacktest(query: RuleLayerBacktestQuery) {
   return invoke<RuleLayerBacktestData>('run_rule_layer_backtest', query)
 }
 
+export async function runRankLayerBacktest(query: RankLayerBacktestQuery) {
+  return invoke<RankLayerBacktestData>('run_rank_layer_backtest', query)
+}
+
 export async function runRuleExpressionValidation(query: RuleExpressionValidationQuery) {
   return invoke<RuleExpressionValidationData>('run_rule_expression_validation', query)
 }
@@ -425,6 +473,7 @@ export async function getMarketAnalysis(query: {
   referenceTradeDate?: string
   board?: string
   excludeStBoard?: boolean
+  minListedTradeDays?: number
 }) {
   return invoke<MarketAnalysisData>('get_market_analysis', query)
 }
