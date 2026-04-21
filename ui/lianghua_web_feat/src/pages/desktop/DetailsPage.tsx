@@ -453,36 +453,6 @@ function normalizeIntervalRestoreRequest(
   };
 }
 
-function toUtcTimeFromTradeDate(tradeDate: string) {
-  if (!/^\d{8}$/.test(tradeDate)) {
-    return null;
-  }
-
-  const year = Number(tradeDate.slice(0, 4));
-  const month = Number(tradeDate.slice(4, 6));
-  const day = Number(tradeDate.slice(6, 8));
-  const utcTime = Date.UTC(year, month - 1, day);
-  return Number.isFinite(utcTime) ? utcTime : null;
-}
-
-function resolveChartWindowDays(intervalRestore: IntervalRestoreRequest | null) {
-  if (!intervalRestore) {
-    return 280;
-  }
-
-  const startUtcTime = toUtcTimeFromTradeDate(intervalRestore.startTradeDate);
-  const endUtcTime = toUtcTimeFromTradeDate(intervalRestore.endTradeDate);
-  if (startUtcTime === null || endUtcTime === null) {
-    return 280;
-  }
-
-  const daySpan = Math.max(
-    1,
-    Math.floor(Math.abs(endUtcTime - startUtcTime) / 86_400_000) + 1,
-  );
-  return Math.max(280, daySpan + 40);
-}
-
 function findNearestPreviousTradeDateIndex(
   items: DetailKlineRow[],
   tradeDate: string,
@@ -3366,7 +3336,7 @@ export default function DetailsPage({
       nextSourcePath: string,
       nextTradeDate: string,
       nextNormalizedCode: string,
-      intervalRestore?: IntervalRestoreRequest | null,
+      _intervalRestore?: IntervalRestoreRequest | null,
     ) => {
       if (!nextSourcePath) {
         setDetailError("请先到“数据管理”页完成数据准备");
@@ -5081,15 +5051,6 @@ export default function DetailsPage({
     if (resolvedTsCode === "--" || sourcePathTrimmed === "") {
       return;
     }
-
-    const chartWindowDays = resolveChartWindowDays(
-      chartIntervalSelection
-        ? {
-            startTradeDate: chartIntervalSelection.startTradeDate,
-            endTradeDate: chartIntervalSelection.endTradeDate,
-          }
-        : activeIntervalContext,
-    );
 
     setDetailRealtimeLoading(true);
     setDetailRealtimeNotice("");
