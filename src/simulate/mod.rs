@@ -539,10 +539,6 @@ mod tests {
             .expect("industry row1");
         app.append_row(params!["20240103", "industry", "银行", 0.5_f64])
             .expect("industry row2");
-        app.append_row(params!["20240102", "market", "主板", 9.0_f64])
-            .expect("market row1");
-        app.append_row(params!["20240103", "market", "主板", 9.0_f64])
-            .expect("market row2");
         app.flush().expect("flush concept_performance");
     }
 

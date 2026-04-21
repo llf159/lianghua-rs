@@ -106,6 +106,8 @@ function formatPhaseLabel(phase: string | null | undefined) {
       return '写入概念文件'
     case 'rebuild_concept_performance':
       return '维护概念表现'
+    case 'maintain_cyq_incremental':
+      return '维护筹码数据'
     case 'repair_concept_most_related':
       return '补算最相关概念'
     case 'delete_stock_data_indicator_columns':
@@ -149,6 +151,7 @@ function getProgressWorkflow(action: string | null | undefined) {
         'write_db',
         'download_index_bars',
         'rebuild_concept_performance',
+        'maintain_cyq_incremental',
         'done',
       ] as string[]
     case 'repair-missing-stocks':

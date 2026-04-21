@@ -17,6 +17,7 @@ use crate::{
             rebuild_concept_performance_all, rebuild_most_related_concept_csv,
         },
         concept_performance_db_path,
+        cyq_data::maintain_cyq_incremental_if_db_exists,
         download_data::{
             append_stock_data_indicator_stage_rows_with_appender,
             create_stock_data_indicator_stage_appender_for_columns, drop_stock_data_columns,
@@ -1091,7 +1092,7 @@ pub fn run_prepared_data_download(
             finished: 0,
             total: 1,
             current_label: None,
-            message: "开始维护概念/行业/板块表现库。".to_string(),
+            message: "开始维护概念/行业表现库。".to_string(),
         });
     }
     let _ = rebuild_concept_performance_all(&prepared.source_path)?;
@@ -1101,8 +1102,41 @@ pub fn run_prepared_data_download(
             finished: 1,
             total: 1,
             current_label: None,
-            message: "概念/行业/板块表现维护完成。".to_string(),
+            message: "概念/行业表现维护完成。".to_string(),
         });
+    }
+
+    if prepared.action == "incremental-download" {
+        if let Some(cb) = progress_cb {
+            cb(crate::download::runner::DownloadProgress {
+                phase: "maintain_cyq_incremental".to_string(),
+                finished: 0,
+                total: 1,
+                current_label: None,
+                message: "开始检查筹码库并维护增量筹码数据。".to_string(),
+            });
+        }
+        let cyq_summary = maintain_cyq_incremental_if_db_exists(&prepared.source_path)?;
+        if let Some(cb) = progress_cb {
+            let message = match cyq_summary {
+                Some(summary) if summary.snapshot_rows > 0 || summary.bin_rows > 0 => format!(
+                    "筹码增量维护完成，区间 {} 至 {}，写入 {} 条摘要和 {} 条分桶。",
+                    summary.start_date.as_deref().unwrap_or("--"),
+                    summary.end_date.as_deref().unwrap_or("--"),
+                    summary.snapshot_rows,
+                    summary.bin_rows
+                ),
+                Some(_) => "筹码库已存在，但当前没有需要补算的增量筹码数据。".to_string(),
+                None => "未发现筹码库 cyq.db，已跳过筹码数据维护。".to_string(),
+            };
+            cb(crate::download::runner::DownloadProgress {
+                phase: "maintain_cyq_incremental".to_string(),
+                finished: 1,
+                total: 1,
+                current_label: None,
+                message,
+            });
+        }
     }
 
     let status = get_data_download_status(&prepared.source_path)?;
@@ -1189,7 +1223,7 @@ pub fn run_prepared_concept_performance_repair(
             finished: 0,
             total: 1,
             current_label: None,
-            message: "开始全量补全概念/行业/板块表现库。".to_string(),
+            message: "开始全量补全概念/行业表现库。".to_string(),
         });
     }
 

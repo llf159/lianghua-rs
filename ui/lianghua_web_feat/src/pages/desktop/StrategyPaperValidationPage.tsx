@@ -517,16 +517,59 @@ const StrategyPaperValidationStatusTradeModal = memo(
     onClose,
   }: StrategyPaperValidationStatusTradeModalProps) {
     const title = status === 'closed' ? '已平仓交易明细' : '未平仓交易明细'
+    const tradeSortDefinitions = useMemo(
+      () =>
+        ({
+          ts_code: { value: (row) => row.ts_code },
+          name: { value: (row) => row.name },
+          buy_date: { value: (row) => row.buy_date },
+          sell_date: { value: (row) => row.sell_date },
+          buy_rank: { value: (row) => row.buy_rank },
+          hold_days: { value: (row) => row.hold_days },
+          buy_cost_price: { value: (row) => row.buy_cost_price },
+          sell_price: { value: (row) => row.sell_price },
+          open_return_pct: { value: (row) => row.open_return_pct },
+          high_return_pct: { value: (row) => row.high_return_pct },
+          close_return_pct: { value: (row) => row.close_return_pct },
+          realized_return_pct: { value: (row) => row.realized_return_pct },
+        }) satisfies Partial<Record<TradeSortKey, SortDefinition<StrategyPaperValidationTradeRow>>>,
+      [],
+    )
+    const initialSortKey: TradeSortKey = status === 'closed' ? 'sell_date' : 'buy_date'
+    const {
+      sortKey,
+      sortDirection,
+      sortedRows,
+      toggleSort,
+    } = useTableSort<StrategyPaperValidationTradeRow, TradeSortKey>(
+      rows,
+      tradeSortDefinitions,
+      { key: initialSortKey, direction: 'desc' },
+    )
     const navigationItems = useMemo(
       () =>
-        rows.map((row) => ({
+        sortedRows.map((row) => ({
           tsCode: row.ts_code,
           tradeDate: row.buy_date,
           sourcePath: sourcePath.trim() || undefined,
           name: row.name ?? undefined,
         })),
-      [rows, sourcePath],
+      [sortedRows, sourcePath],
     )
+
+    function renderSortableHeader(key: TradeSortKey, label: string) {
+      const isActive = sortKey === key
+      return (
+        <th aria-sort={getAriaSort(isActive, sortDirection)}>
+          <TableSortButton
+            label={label}
+            isActive={isActive}
+            direction={sortDirection}
+            onClick={() => toggleSort(key)}
+          />
+        </th>
+      )
+    }
 
     return (
       <div
@@ -556,18 +599,18 @@ const StrategyPaperValidationStatusTradeModal = memo(
             <table className="strategy-paper-validation-table strategy-paper-validation-detail-table">
               <thead>
                 <tr>
-                  <th>代码</th>
-                  <th>名称</th>
-                  <th>买入日</th>
-                  <th>卖出日</th>
-                  <th>买入排名</th>
-                  <th>持仓天数</th>
-                  <th>买入成本</th>
-                  <th>卖出价</th>
-                  <th>RATEO</th>
-                  <th>RATEH</th>
-                  <th>收盘收益</th>
-                  <th>记录收益</th>
+                  {renderSortableHeader('ts_code', '代码')}
+                  {renderSortableHeader('name', '名称')}
+                  {renderSortableHeader('buy_date', '买入日')}
+                  {renderSortableHeader('sell_date', '卖出日')}
+                  {renderSortableHeader('buy_rank', '买入排名')}
+                  {renderSortableHeader('hold_days', '持仓天数')}
+                  {renderSortableHeader('buy_cost_price', '买入成本')}
+                  {renderSortableHeader('sell_price', '卖出价')}
+                  {renderSortableHeader('open_return_pct', 'RATEO')}
+                  {renderSortableHeader('high_return_pct', 'RATEH')}
+                  {renderSortableHeader('close_return_pct', '收盘收益')}
+                  {renderSortableHeader('realized_return_pct', '记录收益')}
                 </tr>
               </thead>
               <tbody>
@@ -576,7 +619,7 @@ const StrategyPaperValidationStatusTradeModal = memo(
                     <td colSpan={12}>暂无{status === 'closed' ? '已平仓' : '未平仓'}交易。</td>
                   </tr>
                 ) : (
-                  rows.map((row, index) => (
+                  sortedRows.map((row, index) => (
                     <tr key={`${status}-${row.ts_code}-${row.buy_date}-${row.sell_date ?? 'open'}-${index}`}>
                       <td>{row.ts_code}</td>
                       <td>

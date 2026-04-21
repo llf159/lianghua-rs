@@ -90,6 +90,7 @@ const DEFAULT_CHART_HEIGHT = 880;
 const CHART_MIN_HEIGHT_DESKTOP = DEFAULT_CHART_HEIGHT;
 const CHART_MIN_HEIGHT_MOBILE = 30;
 const CHART_MOBILE_BREAKPOINT = 980;
+const DETAIL_CHART_WINDOW_DAYS = 280;
 const DEFAULT_VISIBLE_BARS = 90;
 const MIN_VISIBLE_BARS = 20;
 const CHART_MIN_RIGHT_ALIGNED_SLOTS = 60;
@@ -2943,8 +2944,7 @@ export default function DetailsPage({
           sourcePath: nextSourcePath,
           tradeDate: nextTradeDate.trim() || undefined,
           tsCode: nextNormalizedCode,
-          chartWindowDays: 280,
-          prevRankDays: 15,
+          chartWindowDays: DETAIL_CHART_WINDOW_DAYS,
         });
 
         startTransition(() => {
@@ -4403,7 +4403,7 @@ export default function DetailsPage({
       const nextRealtimeData = await getStockDetailRealtime({
         sourcePath: sourcePathTrimmed,
         tsCode: resolvedTsCode,
-        chartWindowDays: 280,
+        chartWindowDays: DETAIL_CHART_WINDOW_DAYS,
       });
       setDetailRealtimeData(nextRealtimeData);
     } catch (error) {

@@ -142,6 +142,73 @@ fn source_stock_data_exists(conn: &Connection) -> Result<bool, String> {
     Ok(table_exists > 0)
 }
 
+fn cyq_table_exists(conn: &Connection, table_name: &str) -> Result<bool, String> {
+    let table_exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+            [table_name],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("检查筹码库表结构失败:{e}"))?;
+    Ok(table_exists > 0)
+}
+
+fn query_latest_cyq_metadata(db_path: &Path) -> Result<Option<(String, CyqConfig)>, String> {
+    let conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
+    if !cyq_table_exists(&conn, CYQ_SNAPSHOT_TABLE)? {
+        return Ok(None);
+    }
+
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT trade_date, range, factor, min_accuracy
+            FROM cyq_snapshot
+            WHERE adj_type = ?
+            ORDER BY trade_date DESC
+            LIMIT 1
+            "#,
+        )
+        .map_err(|e| format!("预编译最新筹码元数据查询失败:{e}"))?;
+    let mut rows = stmt
+        .query(params![DEFAULT_ADJ_TYPE])
+        .map_err(|e| format!("查询最新筹码元数据失败:{e}"))?;
+
+    let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取最新筹码元数据失败:{e}"))?
+    else {
+        return Ok(None);
+    };
+
+    let trade_date: String = row
+        .get(0)
+        .map_err(|e| format!("读取最新筹码日期失败:{e}"))?;
+    let range: Option<i64> = row.get(1).map_err(|e| format!("读取筹码 range 失败:{e}"))?;
+    let factor: Option<i64> = row
+        .get(2)
+        .map_err(|e| format!("读取筹码 factor 失败:{e}"))?;
+    let min_accuracy: Option<f64> = row
+        .get(3)
+        .map_err(|e| format!("读取筹码 min_accuracy 失败:{e}"))?;
+    let default_config = CyqConfig::default();
+    let config = CyqConfig {
+        range: range
+            .filter(|value| *value > 0)
+            .map(|value| value as usize)
+            .unwrap_or(default_config.range),
+        factor: factor
+            .filter(|value| *value >= 2)
+            .map(|value| value as usize)
+            .unwrap_or(default_config.factor),
+        min_accuracy: min_accuracy
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(default_config.min_accuracy),
+    };
+
+    Ok(Some((trade_date, config)))
+}
+
 fn query_source_trade_date_range(conn: &Connection) -> Result<Option<(String, String)>, String> {
     let mut stmt = conn
         .prepare("SELECT MIN(trade_date), MAX(trade_date) FROM stock_data WHERE adj_type = ?")
@@ -431,6 +498,237 @@ fn write_cyq_batches_from_channel(
     Ok((snapshot_rows, bin_rows))
 }
 
+fn write_cyq_incremental_batches_from_channel(
+    db_path: &str,
+    rx: Receiver<CyqWriteMessage>,
+    config: CyqConfig,
+    start_date: &str,
+    end_date: &str,
+) -> Result<(usize, usize), String> {
+    let mut conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("创建筹码库事务失败:{e}"))?;
+    tx.execute(
+        "DELETE FROM cyq_bin WHERE adj_type = ? AND trade_date >= ? AND trade_date <= ?",
+        params![DEFAULT_ADJ_TYPE, start_date, end_date],
+    )
+    .map_err(|e| format!("清理增量区间cyq_bin失败:{e}"))?;
+    tx.execute(
+        "DELETE FROM cyq_snapshot WHERE adj_type = ? AND trade_date >= ? AND trade_date <= ?",
+        params![DEFAULT_ADJ_TYPE, start_date, end_date],
+    )
+    .map_err(|e| format!("清理增量区间cyq_snapshot失败:{e}"))?;
+
+    let mut snapshot_rows = 0usize;
+    let mut bin_rows = 0usize;
+    let mut batch_count = 0usize;
+    {
+        let mut snapshot_app = tx
+            .appender(CYQ_SNAPSHOT_TABLE)
+            .map_err(|e| format!("创建cyq_snapshot写入器失败:{e}"))?;
+        let mut bin_app = tx
+            .appender(CYQ_BIN_TABLE)
+            .map_err(|e| format!("创建cyq_bin写入器失败:{e}"))?;
+
+        for message in rx {
+            let batch = match message {
+                CyqWriteMessage::Batch(batch) => batch,
+                CyqWriteMessage::Abort(reason) => {
+                    return Err(format!("筹码增量计算中断，结果库回滚:{reason}"));
+                }
+            };
+
+            let (added_snapshot_rows, added_bin_rows) =
+                append_cyq_batch_rows(&mut snapshot_app, &mut bin_app, batch, config)?;
+            snapshot_rows += added_snapshot_rows;
+            bin_rows += added_bin_rows;
+            batch_count += 1;
+
+            if batch_count % CYQ_FLUSH_BATCH_SIZE == 0 {
+                snapshot_app
+                    .flush()
+                    .map_err(|e| format!("刷新cyq_snapshot写入器失败:{e}"))?;
+                bin_app
+                    .flush()
+                    .map_err(|e| format!("刷新cyq_bin写入器失败:{e}"))?;
+            }
+        }
+
+        snapshot_app
+            .flush()
+            .map_err(|e| format!("刷新cyq_snapshot写入器失败:{e}"))?;
+        bin_app
+            .flush()
+            .map_err(|e| format!("刷新cyq_bin写入器失败:{e}"))?;
+    }
+
+    tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
+    Ok((snapshot_rows, bin_rows))
+}
+
+pub fn maintain_cyq_incremental_if_db_exists(
+    source_dir: &str,
+) -> Result<Option<CyqRebuildSummary>, String> {
+    let cyq_db = cyq_db_path(source_dir);
+    if !cyq_db.exists() {
+        return Ok(None);
+    }
+
+    init_cyq_db(&cyq_db)?;
+
+    let source_db = source_db_path(source_dir);
+    if !source_db.exists() {
+        return Ok(Some(CyqRebuildSummary {
+            snapshot_rows: 0,
+            bin_rows: 0,
+            factor: CyqConfig::default().factor,
+            range: CyqConfig::default().range,
+            start_date: None,
+            end_date: None,
+        }));
+    }
+
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
+    let source_conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
+    if !source_stock_data_exists(&source_conn)? {
+        return Ok(Some(CyqRebuildSummary {
+            snapshot_rows: 0,
+            bin_rows: 0,
+            factor: CyqConfig::default().factor,
+            range: CyqConfig::default().range,
+            start_date: None,
+            end_date: None,
+        }));
+    }
+
+    let Some((source_min_trade_date, source_max_trade_date)) =
+        query_source_trade_date_range(&source_conn)?
+    else {
+        return Ok(Some(CyqRebuildSummary {
+            snapshot_rows: 0,
+            bin_rows: 0,
+            factor: CyqConfig::default().factor,
+            range: CyqConfig::default().range,
+            start_date: None,
+            end_date: None,
+        }));
+    };
+
+    let latest_metadata = query_latest_cyq_metadata(&cyq_db)?;
+    let config = latest_metadata
+        .as_ref()
+        .map(|(_, config)| *config)
+        .unwrap_or_default();
+    let start_date = match latest_metadata.as_ref() {
+        Some((latest_trade_date, _)) if latest_trade_date >= &source_max_trade_date => {
+            return Ok(Some(CyqRebuildSummary {
+                snapshot_rows: 0,
+                bin_rows: 0,
+                factor: config.factor,
+                range: config.range,
+                start_date: None,
+                end_date: None,
+            }));
+        }
+        Some((latest_trade_date, _)) => {
+            let trade_dates = load_trade_date_list(source_dir)?;
+            let Some(next_trade_date) = trade_dates.into_iter().find(|trade_date| {
+                trade_date > latest_trade_date && trade_date <= &source_max_trade_date
+            }) else {
+                return Ok(Some(CyqRebuildSummary {
+                    snapshot_rows: 0,
+                    bin_rows: 0,
+                    factor: config.factor,
+                    range: config.range,
+                    start_date: None,
+                    end_date: None,
+                }));
+            };
+            next_trade_date
+        }
+        None => source_min_trade_date,
+    };
+    let end_date = source_max_trade_date;
+
+    let Some(load_start_date) =
+        resolve_cyq_load_start_date(source_dir, &start_date, &end_date, config.range)?
+    else {
+        return Ok(Some(CyqRebuildSummary {
+            snapshot_rows: 0,
+            bin_rows: 0,
+            factor: config.factor,
+            range: config.range,
+            start_date: Some(start_date),
+            end_date: Some(end_date),
+        }));
+    };
+
+    let reader = DataReader::new(source_dir)?;
+    let ts_codes = reader.list_ts_code(DEFAULT_ADJ_TYPE, &load_start_date, &end_date)?;
+    let cyq_db_str = cyq_db
+        .to_str()
+        .ok_or_else(|| "筹码库路径不是有效UTF-8".to_string())?
+        .to_string();
+
+    let (tx, rx) = sync_channel(CYQ_QUEUE_BOUND);
+    let abort_tx = tx.clone();
+    let write_start_date = start_date.clone();
+    let write_end_date = end_date.clone();
+    let writer_handle = thread::spawn(move || {
+        write_cyq_incremental_batches_from_channel(
+            &cyq_db_str,
+            rx,
+            config,
+            &write_start_date,
+            &write_end_date,
+        )
+    });
+
+    let compute_result = ts_codes.par_chunks(CYQ_GROUP_SIZE).try_for_each_with(
+        tx,
+        |sender, ts_group| -> Result<(), String> {
+            let worker_reader = DataReader::new(source_dir)?;
+            let batch = compute_cyq_stock_group_batch(
+                &worker_reader,
+                &load_start_date,
+                &start_date,
+                &end_date,
+                config,
+                ts_group,
+            )?;
+            sender
+                .send(CyqWriteMessage::Batch(batch))
+                .map_err(|e| format!("发送筹码增量批次失败:{e}"))?;
+            Ok(())
+        },
+    );
+
+    if let Err(err) = &compute_result {
+        let _ = abort_tx.send(CyqWriteMessage::Abort(err.clone()));
+    }
+    drop(abort_tx);
+
+    let writer_result = match writer_handle.join() {
+        Ok(result) => result,
+        Err(_) => Err("筹码库写线程异常退出".to_string()),
+    };
+
+    compute_result?;
+    let (snapshot_rows, bin_rows) = writer_result?;
+
+    Ok(Some(CyqRebuildSummary {
+        snapshot_rows,
+        bin_rows,
+        factor: config.factor,
+        range: config.range,
+        start_date: Some(start_date),
+        end_date: Some(end_date),
+    }))
+}
+
 pub fn rebuild_cyq_all(
     source_dir: &str,
     config: CyqConfig,
@@ -560,7 +858,9 @@ mod tests {
 
     use duckdb::{Connection, params};
 
-    use super::{CYQ_BIN_TABLE, CYQ_SNAPSHOT_TABLE, rebuild_cyq_all};
+    use super::{
+        CYQ_BIN_TABLE, CYQ_SNAPSHOT_TABLE, maintain_cyq_incremental_if_db_exists, rebuild_cyq_all,
+    };
     use crate::data::{cyq::CyqConfig, cyq_db_path, source_db_path, trade_calendar_path};
 
     fn unique_temp_source_dir() -> PathBuf {
@@ -711,6 +1011,78 @@ mod tests {
             )
             .expect("count snapshot rows");
         assert_eq!(snapshot_rows, 1);
+
+        fs::remove_dir_all(source_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn maintain_cyq_incremental_skips_when_db_missing() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+
+        let summary =
+            maintain_cyq_incremental_if_db_exists(source_dir.to_str().expect("utf8 path"))
+                .expect("maintain cyq incremental");
+
+        assert!(summary.is_none());
+        assert!(!cyq_db_path(source_dir.to_str().expect("utf8 path")).exists());
+
+        fs::remove_dir_all(source_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn maintain_cyq_incremental_appends_missing_trade_dates() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+
+        let source_path = source_dir.to_str().expect("utf8 path");
+        rebuild_cyq_all(
+            source_path,
+            CyqConfig {
+                range: 2,
+                factor: 8,
+                min_accuracy: 0.01,
+            },
+            Some("20260401"),
+            Some("20260402"),
+        )
+        .expect("seed cyq db");
+
+        let summary = maintain_cyq_incremental_if_db_exists(source_path)
+            .expect("maintain cyq incremental")
+            .expect("cyq db exists");
+
+        assert_eq!(summary.snapshot_rows, 1);
+        assert_eq!(summary.bin_rows, 8);
+        assert_eq!(summary.factor, 8);
+        assert_eq!(summary.start_date.as_deref(), Some("20260403"));
+        assert_eq!(summary.end_date.as_deref(), Some("20260403"));
+
+        let cyq_db = cyq_db_path(source_path);
+        let conn = Connection::open(&cyq_db).expect("open cyq db");
+        let snapshot_rows = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {CYQ_SNAPSHOT_TABLE}"),
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count snapshot rows");
+        let bin_rows = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {CYQ_BIN_TABLE}"),
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count bin rows");
+        let latest_trade_date = conn
+            .query_row("SELECT MAX(trade_date) FROM cyq_snapshot", [], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .expect("read latest cyq date");
+
+        assert_eq!(snapshot_rows, 3);
+        assert_eq!(bin_rows, 24);
+        assert_eq!(latest_trade_date.as_deref(), Some("20260403"));
 
         fs::remove_dir_all(source_dir).expect("cleanup temp dir");
     }

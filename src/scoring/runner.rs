@@ -76,7 +76,7 @@ fn scoring_single_core(
     let summary = ScoreSummary::build(ts_code, kept_trade_dates, kept_scores);
     let details = ScoreDetails::build(ts_code, kept_trade_dates, &d);
     let scene_series = build_scene_score_series(rule_scene_meta, &d, scenes);
-    let scene_details = SceneDetails::build(ts_code, kept_trade_dates, &scene_series);
+    let scene_details = SceneDetails::build(ts_code, kept_trade_dates, kept_scores, &scene_series);
 
     Ok((summary, details, scene_details))
 }

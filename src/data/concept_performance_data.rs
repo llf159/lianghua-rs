@@ -17,7 +17,6 @@ const MR_FQFS: &str = "qfq";
 const GDNM_BX_DATES_PER_CHUNK: usize = 32;
 const PERFORMANCE_TYPE_CONCEPT: &str = "concept";
 const PERFORMANCE_TYPE_INDUSTRY: &str = "industry";
-const PERFORMANCE_TYPE_BOARD: &str = "market";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GdNmBXRow {
@@ -136,7 +135,6 @@ pub fn rebuild_concept_performance_range(
 
     let concept_map = load_concept_map(source_dir)?.unwrap_or_default();
     let industry_map = load_industry_map(source_dir)?;
-    let board_map = load_board_map(source_dir)?;
 
     let uivi_map = load_uivi_map(source_dir)?;
     if uivi_map.is_empty() {
@@ -161,16 +159,6 @@ pub fn rebuild_concept_performance_range(
             end_date,
             PERFORMANCE_TYPE_INDUSTRY,
             &industry_map,
-            &uivi_map,
-        )?);
-    }
-    if !board_map.is_empty() {
-        bx_rows.extend(calc_gdnm_bx_rows(
-            source_dir,
-            start_date,
-            end_date,
-            PERFORMANCE_TYPE_BOARD,
-            &board_map,
             &uivi_map,
         )?);
     }
@@ -445,34 +433,6 @@ fn load_concept_map(source_dir: &str) -> Result<Option<HashMap<String, Vec<Strin
     }
 
     Ok(Some(gdnm_map))
-}
-
-fn load_board_map(source_dir: &str) -> Result<HashMap<String, Vec<String>>, String> {
-    let rows = load_stock_list(source_dir)?;
-    let mut board_map = HashMap::with_capacity(rows.len());
-    for cols in rows {
-        let Some(ts_code) = cols.first().map(|v| v.trim()) else {
-            continue;
-        };
-        let Some(board_raw) = cols.get(14).map(|v| v.trim()) else {
-            continue;
-        };
-        if ts_code.is_empty() || board_raw.is_empty() {
-            continue;
-        }
-        let board_list = split_gdnm_items(board_raw);
-        if board_list.is_empty() {
-            continue;
-        }
-        board_map
-            .entry(ts_code.to_string())
-            .and_modify(|old_list: &mut Vec<String>| {
-                old_list.extend(board_list.clone());
-                *old_list = split_gdnm_items(&old_list.join(","));
-            })
-            .or_insert(board_list);
-    }
-    Ok(board_map)
 }
 
 fn load_industry_map(source_dir: &str) -> Result<HashMap<String, Vec<String>>, String> {

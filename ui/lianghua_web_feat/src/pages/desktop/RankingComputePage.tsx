@@ -611,7 +611,7 @@ export default function RankingComputePage() {
 
     try {
       const result = await runConceptPerformanceCompute(sourcePath)
-      setNotice(`概念/行业/板块表现计算完成，写入 ${result.savedRows} 行，耗时 ${formatElapsedMs(result.elapsedMs)}。`)
+      setNotice(`概念/行业表现计算完成，写入 ${result.savedRows} 行，耗时 ${formatElapsedMs(result.elapsedMs)}。`)
     } catch (actionError) {
       setNotice('')
       setError(`其他数据计算失败: ${String(actionError)}`)
@@ -778,8 +778,8 @@ export default function RankingComputePage() {
         <div className="ranking-compute-summary">
           <div className="ranking-compute-summary-item">
             <span>其他数据计算</span>
-            <strong>概念/行业/板块表现</strong>
-            <small>重建 concept_performance，包含 concept、industry 和 market 三类表现。</small>
+            <strong>概念/行业表现</strong>
+            <small>重建 concept_performance，包含 concept 和 industry 两类表现。</small>
           </div>
         </div>
 

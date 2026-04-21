@@ -41,6 +41,8 @@ pub struct SceneDetails {
     pub risk_score: f64,
     pub confirm_strength: f64,
     pub risk_intensity: f64,
+    pub total_score: f64,
+    pub scene_rank: Option<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -71,7 +73,6 @@ pub struct ScoreWriteProfile {
     pub delete_range_ms: u64,
     pub receive_and_append_batches_ms: u64,
     pub summary_rank_ms: u64,
-    pub scene_rank_ms: u64,
     pub commit_ms: u64,
     pub recreate_indexes_ms: u64,
     pub batch_count: usize,
@@ -239,12 +240,14 @@ impl SceneDetails {
     pub fn build(
         ts_code: &str,
         trade_dates: &[String],
+        total_scores: &[f64],
         scene_score_series: &[SceneScoreSeries],
     ) -> Vec<SceneDetails> {
         let mut out = Vec::new();
         for scene in scene_score_series {
             let scene_name = scene.name.clone();
             if trade_dates.len() != scene.triggered.len()
+                || trade_dates.len() != total_scores.len()
                 || trade_dates.len() != scene.stage_score.len()
                 || trade_dates.len() != scene.risk_score.len()
                 || trade_dates.len() != scene.confirm_strength.len()
@@ -268,6 +271,8 @@ impl SceneDetails {
                     risk_score: scene.risk_score[i],
                     confirm_strength: scene.confirm_strength[i],
                     risk_intensity: scene.risk_intensity[i],
+                    total_score: total_scores[i],
+                    scene_rank: None,
                 });
             }
         }
@@ -560,11 +565,137 @@ fn append_scene_rows(app: &mut Appender<'_>, rows: &[SceneDetails]) -> Result<()
             row.risk_score,
             row.confirm_strength,
             row.risk_intensity,
-            Option::<i64>::None
+            row.scene_rank
         ])
         .map_err(|e| format!("插入scene_details失败:{e}"))?;
     }
     Ok(())
+}
+
+fn scene_stage_rank_weight(stage: Option<&str>) -> i32 {
+    match stage {
+        Some("confirm") => 3,
+        Some("trigger") => 2,
+        Some("observe") => 1,
+        Some("fail") => 0,
+        _ => -1,
+    }
+}
+
+fn rank_scene_rows(rows: &mut [SceneDetails]) {
+    rows.sort_by(|left, right| {
+        left.trade_date
+            .cmp(&right.trade_date)
+            .then_with(|| left.scene_name.cmp(&right.scene_name))
+            .then_with(|| {
+                scene_stage_rank_weight(right.stage.as_deref())
+                    .cmp(&scene_stage_rank_weight(left.stage.as_deref()))
+            })
+            .then_with(|| {
+                right
+                    .confirm_strength
+                    .partial_cmp(&left.confirm_strength)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                let right_net = right.confirm_strength - right.risk_intensity;
+                let left_net = left.confirm_strength - left.risk_intensity;
+                right_net
+                    .partial_cmp(&left_net)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                let right_balance = right.stage_score.abs() - right.risk_score.abs();
+                let left_balance = left.stage_score.abs() - left.risk_score.abs();
+                right_balance
+                    .partial_cmp(&left_balance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                right
+                    .total_score
+                    .partial_cmp(&left.total_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.ts_code.cmp(&right.ts_code))
+    });
+
+    let mut current_key: Option<(&str, &str)> = None;
+    let mut current_rank = 0i64;
+    for row in rows {
+        let key = (row.trade_date.as_str(), row.scene_name.as_str());
+        if current_key != Some(key) {
+            current_key = Some(key);
+            current_rank = 1;
+        } else {
+            current_rank += 1;
+        }
+        row.scene_rank = Some(current_rank);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SceneDetails, rank_scene_rows};
+
+    fn scene_row(
+        ts_code: &str,
+        scene_name: &str,
+        stage: &str,
+        stage_score: f64,
+        risk_score: f64,
+        confirm_strength: f64,
+        risk_intensity: f64,
+        total_score: f64,
+    ) -> SceneDetails {
+        SceneDetails {
+            ts_code: ts_code.to_string(),
+            trade_date: "20240102".to_string(),
+            scene_name: scene_name.to_string(),
+            direction: "long".to_string(),
+            stage: Some(stage.to_string()),
+            stage_score,
+            risk_score,
+            confirm_strength,
+            risk_intensity,
+            total_score,
+            scene_rank: None,
+        }
+    }
+
+    #[test]
+    fn rank_scene_rows_matches_scene_rank_ordering() {
+        let mut rows = vec![
+            scene_row("000004.SZ", "主升", "trigger", 9.0, 1.0, 1.0, 0.0, 100.0),
+            scene_row("000003.SZ", "主升", "confirm", 5.0, 1.0, 2.0, 0.0, 70.0),
+            scene_row("000002.SZ", "主升", "confirm", 5.0, 1.0, 2.0, 0.0, 80.0),
+            scene_row("000001.SZ", "主升", "confirm", 8.0, 1.0, 2.0, 0.0, 80.0),
+            scene_row("000005.SZ", "防守", "observe", 3.0, 0.0, 0.5, 0.0, 50.0),
+        ];
+
+        rank_scene_rows(&mut rows);
+
+        let main_scene = rows
+            .iter()
+            .filter(|row| row.scene_name == "主升")
+            .map(|row| (row.ts_code.as_str(), row.scene_rank))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            main_scene,
+            vec![
+                ("000001.SZ", Some(1)),
+                ("000002.SZ", Some(2)),
+                ("000003.SZ", Some(3)),
+                ("000004.SZ", Some(4)),
+            ]
+        );
+
+        let defense_rank = rows
+            .iter()
+            .find(|row| row.scene_name == "防守")
+            .and_then(|row| row.scene_rank);
+        assert_eq!(defense_rank, Some(1));
+    }
 }
 
 fn compute_summary_rankings_in_tx(tx: &Transaction<'_>) -> Result<(), String> {
@@ -599,6 +730,7 @@ pub fn write_score_batches_from_channel(
 
         let receive_and_append_started_at = time::Instant::now();
         let mut batch_count = 0usize;
+        let mut scene_rows = Vec::new();
         {
             let mut summary_app = tx
                 .appender("score_summary")
@@ -606,9 +738,6 @@ pub fn write_score_batches_from_channel(
             let mut detail_app = tx
                 .appender("rule_details")
                 .map_err(|e| format!("rule_details appender创建失败:{e}"))?;
-            let mut scene_app = tx
-                .appender("scene_details")
-                .map_err(|e| format!("scene_details appender创建失败:{e}"))?;
 
             for message in rx {
                 let batch = match message {
@@ -620,7 +749,7 @@ pub fn write_score_batches_from_channel(
 
                 append_summary_rows(&mut summary_app, &batch.summary_rows)?;
                 append_detail_rows(&mut detail_app, &batch.detail_rows)?;
-                append_scene_rows(&mut scene_app, &batch.scene_rows)?;
+                scene_rows.extend(batch.scene_rows);
                 batch_count += 1;
 
                 if batch_count % 32 == 0 {
@@ -630,9 +759,6 @@ pub fn write_score_batches_from_channel(
                     detail_app
                         .flush()
                         .map_err(|e| format!("刷新rule_details失败:{e}"))?;
-                    scene_app
-                        .flush()
-                        .map_err(|e| format!("刷新scene_details失败:{e}"))?;
                 }
             }
 
@@ -642,6 +768,13 @@ pub fn write_score_batches_from_channel(
             detail_app
                 .flush()
                 .map_err(|e| format!("刷新rule_details失败:{e}"))?;
+        }
+        rank_scene_rows(&mut scene_rows);
+        {
+            let mut scene_app = tx
+                .appender("scene_details")
+                .map_err(|e| format!("scene_details appender创建失败:{e}"))?;
+            append_scene_rows(&mut scene_app, &scene_rows)?;
             scene_app
                 .flush()
                 .map_err(|e| format!("刷新scene_details失败:{e}"))?;
@@ -653,10 +786,6 @@ pub fn write_score_batches_from_channel(
         let summary_rank_started_at = time::Instant::now();
         compute_summary_rankings_in_tx(&tx)?;
         profile.summary_rank_ms = summary_rank_started_at.elapsed().as_millis() as u64;
-
-        let scene_rank_started_at = time::Instant::now();
-        compute_scene_rankings_in_tx(&tx, start_date, end_date)?;
-        profile.scene_rank_ms = scene_rank_started_at.elapsed().as_millis() as u64;
 
         let commit_started_at = time::Instant::now();
         tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
@@ -674,53 +803,6 @@ pub fn write_score_batches_from_channel(
     profile.total_ms = total_started_at.elapsed().as_millis() as u64;
 
     Ok(profile)
-}
-
-/// 在当前事务内批量计算Scene排名并回写到scene_details。
-fn compute_scene_rankings_in_tx(
-    tx: &Transaction<'_>,
-    start_date: &str,
-    end_date: &str,
-) -> Result<(), String> {
-    tx.execute(
-        r#"
-        UPDATE scene_details AS d
-        SET scene_rank = r.scene_rank
-        FROM (
-            SELECT
-                d.ts_code,
-                d.trade_date,
-                d.scene_name,
-                ROW_NUMBER() OVER (
-                    PARTITION BY d.trade_date, d.scene_name
-                    ORDER BY
-                        CASE d.stage
-                            WHEN 'confirm' THEN 3
-                            WHEN 'trigger' THEN 2
-                            WHEN 'observe' THEN 1
-                            WHEN 'fail' THEN 0
-                            ELSE -1
-                        END DESC,
-                        COALESCE(d.confirm_strength, 0.0) DESC,
-                        (COALESCE(d.confirm_strength, 0.0) - COALESCE(d.risk_intensity, 0.0)) DESC,
-                        (ABS(d.stage_score) - ABS(d.risk_score)) DESC,
-                        s.total_score DESC NULLS LAST,
-                        d.ts_code ASC
-                ) AS scene_rank
-            FROM scene_details AS d
-            LEFT JOIN score_summary AS s
-              ON d.ts_code = s.ts_code
-             AND d.trade_date = s.trade_date
-            WHERE d.trade_date BETWEEN ? AND ?
-        ) AS r
-        WHERE d.ts_code = r.ts_code
-          AND d.trade_date = r.trade_date
-          AND d.scene_name = r.scene_name
-        "#,
-        params![start_date, end_date],
-    )
-    .map_err(|e| format!("批量更新Scene排名失败:{e}"))?;
-    Ok(())
 }
 
 pub fn row_into_rt(row_data: RowData) -> Result<Runtime, String> {
