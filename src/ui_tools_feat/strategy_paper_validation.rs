@@ -27,6 +27,18 @@ const DEFAULT_ADJ_TYPE: &str = "qfq";
 const DEFAULT_INDEX_TS_CODE: &str = "000001.SH";
 const DEFAULT_BUY_PRICE_BASIS: &str = "open";
 const PRICE_EPS: f64 = 1e-12;
+const PAPER_VALIDATION_INPUT_KEYS: [&str; 10] = [
+    "O",
+    "H",
+    "L",
+    "C",
+    "V",
+    "AMOUNT",
+    "PRE_CLOSE",
+    "CHANGE",
+    "PCT_CHG",
+    "TURNOVER_RATE",
+];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StrategyPaperValidationDefaultsData {
@@ -88,10 +100,26 @@ pub struct StrategyPaperValidationData {
     pub trades: Vec<StrategyPaperValidationTradeRow>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyPaperValidationTemplateValidationData {
+    pub normalized_buy_expression: String,
+    pub normalized_sell_expression: String,
+    pub buy_warmup_need: usize,
+    pub sell_warmup_need: usize,
+    pub warmup_need: usize,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum BuyPriceBasis {
     Open,
     Close,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TradeDateResolveMode {
+    Start,
+    End,
 }
 
 impl BuyPriceBasis {
@@ -119,6 +147,7 @@ struct OpenPosition {
     buy_basis_price: f64,
     buy_cost_price: f64,
     last_sell_runtime_index: usize,
+    pending_sell: bool,
     sell_runtime: Runtime,
 }
 
@@ -196,6 +225,7 @@ pub fn run_strategy_paper_validation(
         end_date,
         defaults.end_date.clone(),
         "结束日期",
+        TradeDateResolveMode::End,
     )?;
     let resolved_start_date = normalize_trade_date_input(
         &trade_date_options,
@@ -205,6 +235,7 @@ pub fn run_strategy_paper_validation(
             .clone()
             .or_else(|| defaults.end_date.clone()),
         "开始日期",
+        TradeDateResolveMode::Start,
     )?;
 
     if resolved_start_date > resolved_end_date {
@@ -335,6 +366,87 @@ pub fn run_strategy_paper_validation(
     })
 }
 
+pub fn validate_strategy_paper_validation_template_expressions(
+    buy_expression: String,
+    sell_expression: String,
+) -> Result<StrategyPaperValidationTemplateValidationData, String> {
+    let normalized_buy_expression = buy_expression.trim().to_string();
+    if normalized_buy_expression.is_empty() {
+        return Err("买点方程不能为空".to_string());
+    }
+
+    let normalized_sell_expression = sell_expression.trim().to_string();
+    if normalized_sell_expression.is_empty() {
+        return Err("卖点方程不能为空".to_string());
+    }
+
+    let buy_program = parse_expression_program(&normalized_buy_expression, "买点方程")?;
+    let sell_program = parse_expression_program(&normalized_sell_expression, "卖点方程")?;
+    let buy_warmup_need = estimate_expression_warmup(&buy_program)?;
+    let sell_warmup_need = estimate_expression_warmup(&sell_program)?;
+
+    let mut buy_runtime = build_template_validation_runtime(buy_warmup_need, false);
+    evaluate_program_as_bool_series(&mut buy_runtime, &buy_program)
+        .map_err(|error| format!("买点方程运行失败: {error}"))?;
+
+    let mut sell_runtime = build_template_validation_runtime(sell_warmup_need, true);
+    evaluate_program_as_bool_series(&mut sell_runtime, &sell_program)
+        .map_err(|error| format!("卖点方程运行失败: {error}"))?;
+
+    Ok(StrategyPaperValidationTemplateValidationData {
+        normalized_buy_expression,
+        normalized_sell_expression,
+        buy_warmup_need,
+        sell_warmup_need,
+        warmup_need: buy_warmup_need.max(sell_warmup_need),
+        message: "买点/卖点方程可用于策略模拟盘验证".to_string(),
+    })
+}
+
+fn build_template_validation_runtime(warmup_need: usize, include_sell_fields: bool) -> Runtime {
+    let len = (warmup_need + 2).max(8);
+    let mut vars = HashMap::with_capacity(PAPER_VALIDATION_INPUT_KEYS.len() + 10);
+
+    for key in PAPER_VALIDATION_INPUT_KEYS {
+        let series = (0..len)
+            .map(|index| Some(index as f64 + 1.0))
+            .collect::<Vec<_>>();
+        vars.insert(key.to_string(), Value::NumSeries(series));
+    }
+
+    let rank_series = (0..len)
+        .map(|index| Some((index + 1) as f64))
+        .collect::<Vec<_>>();
+    vars.insert("RANK".to_string(), Value::NumSeries(rank_series.clone()));
+    vars.insert("rank".to_string(), Value::NumSeries(rank_series));
+    vars.insert(
+        "ZHANG".to_string(),
+        Value::NumSeries(vec![Some(0.095); len]),
+    );
+    vars.insert(
+        "TOTAL_MV_YI".to_string(),
+        Value::NumSeries(vec![Some(100.0); len]),
+    );
+
+    if include_sell_fields {
+        let time_series = (0..len).map(|index| Some(index as f64)).collect::<Vec<_>>();
+        let rateo_series = (0..len)
+            .map(|index| Some(index as f64 - 2.0))
+            .collect::<Vec<_>>();
+        let rateh_series = (0..len)
+            .map(|index| Some(index as f64 + 1.0))
+            .collect::<Vec<_>>();
+        vars.insert("TIME".to_string(), Value::NumSeries(time_series.clone()));
+        vars.insert("time".to_string(), Value::NumSeries(time_series));
+        vars.insert("RATEO".to_string(), Value::NumSeries(rateo_series.clone()));
+        vars.insert("rateo".to_string(), Value::NumSeries(rateo_series));
+        vars.insert("RATEH".to_string(), Value::NumSeries(rateh_series.clone()));
+        vars.insert("rateh".to_string(), Value::NumSeries(rateh_series));
+    }
+
+    Runtime { vars }
+}
+
 fn build_trade_summary(
     trades: &[StrategyPaperValidationTradeRow],
 ) -> StrategyPaperValidationSummaryData {
@@ -427,16 +539,47 @@ fn simulate_one_stock_trades(
     }
 
     let base_runtime = row_into_rt(row_data)?;
+    simulate_trade_rows_from_runtime(
+        ts_code,
+        stock_name,
+        &trade_dates,
+        &base_runtime,
+        buy_program,
+        sell_program,
+        eligibility,
+        keep_from,
+        buy_price_basis,
+        slippage_pct,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn simulate_trade_rows_from_runtime(
+    ts_code: &str,
+    stock_name: Option<&String>,
+    trade_dates: &[String],
+    base_runtime: &Runtime,
+    buy_program: &Stmts,
+    sell_program: &Stmts,
+    eligibility: &PaperTradeEligibility,
+    keep_from: usize,
+    buy_price_basis: BuyPriceBasis,
+    slippage_pct: f64,
+) -> Result<Vec<StrategyPaperValidationTradeRow>, String> {
     let mut buy_runtime = base_runtime.clone();
     let buy_signal_series = evaluate_program_as_bool_series(&mut buy_runtime, buy_program)
         .map_err(|error| format!("{ts_code} 买点方程执行失败: {error}"))?;
     let open_series =
-        runtime_num_series(&base_runtime, "O").map_err(|error| format!("{ts_code} {error}"))?;
+        runtime_num_series(base_runtime, "O").map_err(|error| format!("{ts_code} {error}"))?;
     let high_series =
-        runtime_num_series(&base_runtime, "H").map_err(|error| format!("{ts_code} {error}"))?;
+        runtime_num_series(base_runtime, "H").map_err(|error| format!("{ts_code} {error}"))?;
     let close_series =
-        runtime_num_series(&base_runtime, "C").map_err(|error| format!("{ts_code} {error}"))?;
-    let rank_series = runtime_num_series_optional(&base_runtime, "RANK");
+        runtime_num_series(base_runtime, "C").map_err(|error| format!("{ts_code} {error}"))?;
+    let pre_close_series = runtime_num_series(base_runtime, "PRE_CLOSE")
+        .map_err(|error| format!("{ts_code} {error}"))?;
+    let zhang_series =
+        runtime_num_series(base_runtime, "ZHANG").map_err(|error| format!("{ts_code} {error}"))?;
+    let rank_series = runtime_num_series_optional(base_runtime, "RANK");
 
     let mut open_positions = Vec::new();
     let mut trades = Vec::new();
@@ -453,29 +596,34 @@ fn simulate_one_stock_trades(
                 BuyPriceBasis::Close => close_series.get(scan_index).copied().flatten(),
             };
             if let Some(basis_price) = normalize_valid_price(basis_price) {
-                let buy_cost_price = basis_price * (1.0 + slippage_pct / 100.0);
-                if buy_cost_price.is_finite() && buy_cost_price > PRICE_EPS {
-                    let sell_runtime = init_sell_runtime(
-                        &base_runtime,
-                        trade_dates.len(),
-                        &open_series,
-                        &high_series,
-                        scan_index,
-                        buy_cost_price,
-                    )?;
-                    open_positions.push(OpenPosition {
-                        buy_date: trade_date.clone(),
-                        buy_index: scan_index,
-                        buy_rank: rank_series
-                            .and_then(|series| series.get(scan_index))
-                            .copied()
-                            .flatten()
-                            .map(|value| value.round() as i64),
-                        buy_basis_price: basis_price,
-                        buy_cost_price,
-                        last_sell_runtime_index: scan_index,
-                        sell_runtime,
-                    });
+                let pre_close = pre_close_series.get(scan_index).copied().flatten();
+                let zhang_pct = zhang_series.get(scan_index).copied().flatten();
+                if is_buy_basis_executable(basis_price, pre_close, zhang_pct) {
+                    let buy_cost_price = basis_price * (1.0 + slippage_pct / 100.0);
+                    if buy_cost_price.is_finite() && buy_cost_price > PRICE_EPS {
+                        let sell_runtime = init_sell_runtime(
+                            base_runtime,
+                            trade_dates.len(),
+                            open_series,
+                            high_series,
+                            scan_index,
+                            buy_cost_price,
+                        )?;
+                        open_positions.push(OpenPosition {
+                            buy_date: trade_date.clone(),
+                            buy_index: scan_index,
+                            buy_rank: rank_series
+                                .and_then(|series| series.get(scan_index))
+                                .copied()
+                                .flatten()
+                                .map(|value| value.round() as i64),
+                            buy_basis_price: basis_price,
+                            buy_cost_price,
+                            last_sell_runtime_index: scan_index,
+                            pending_sell: false,
+                            sell_runtime,
+                        });
+                    }
                 }
             }
         }
@@ -489,8 +637,8 @@ fn simulate_one_stock_trades(
             if position.last_sell_runtime_index < scan_index {
                 extend_sell_runtime_series(
                     &mut position.sell_runtime,
-                    &open_series,
-                    &high_series,
+                    open_series,
+                    high_series,
                     position.buy_index,
                     position.buy_cost_price,
                     position.last_sell_runtime_index + 1,
@@ -498,10 +646,22 @@ fn simulate_one_stock_trades(
                 )?;
                 position.last_sell_runtime_index = scan_index;
             }
-            let sell_hit = evaluate_sell_hit(&mut position.sell_runtime, sell_program, scan_index)
-                .map_err(|error| format!("{ts_code} 卖点方程执行失败: {error}"))?;
 
-            if sell_hit {
+            let sell_hit = if position.pending_sell {
+                true
+            } else {
+                evaluate_sell_hit(&mut position.sell_runtime, sell_program, scan_index)
+                    .map_err(|error| format!("{ts_code} 卖点方程执行失败: {error}"))?
+            };
+            let sell_price = resolve_normal_sell_price(
+                close_series.get(scan_index).copied().flatten(),
+                open_series.get(scan_index).copied().flatten(),
+            );
+            let pre_close = pre_close_series.get(scan_index).copied().flatten();
+            let zhang_pct = zhang_series.get(scan_index).copied().flatten();
+            let sell_executable = is_sell_price_executable(sell_price, pre_close, zhang_pct);
+
+            if sell_hit && sell_executable {
                 let open_return_pct = calc_return_pct(
                     open_series.get(scan_index).copied().flatten(),
                     position.buy_cost_price,
@@ -513,13 +673,6 @@ fn simulate_one_stock_trades(
                 let close_return_pct = calc_return_pct(
                     close_series.get(scan_index).copied().flatten(),
                     position.buy_cost_price,
-                );
-                let sell_price = normalize_valid_price(
-                    close_series
-                        .get(scan_index)
-                        .copied()
-                        .flatten()
-                        .or_else(|| open_series.get(scan_index).copied().flatten()),
                 );
 
                 trades.push(StrategyPaperValidationTradeRow {
@@ -540,6 +693,9 @@ fn simulate_one_stock_trades(
                     status: "closed".to_string(),
                 });
             } else {
+                if sell_hit {
+                    position.pending_sell = true;
+                }
                 remaining_positions.push(position);
             }
         }
@@ -667,6 +823,56 @@ fn extend_sell_runtime_series(
         set_runtime_num_series_value(runtime, "rateh", index, rateh_value)?;
     }
     Ok(())
+}
+
+fn resolve_limit_up_price(pre_close: Option<f64>, zhang_pct: Option<f64>) -> Option<f64> {
+    let pre_close = normalize_valid_price(pre_close)?;
+    let zhang_pct = zhang_pct.filter(|value| value.is_finite() && *value >= 0.0)?;
+    let limit_up = pre_close * (1.0 + zhang_pct);
+    if limit_up.is_finite() && limit_up > PRICE_EPS {
+        Some(limit_up)
+    } else {
+        None
+    }
+}
+
+fn resolve_limit_down_price(pre_close: Option<f64>, zhang_pct: Option<f64>) -> Option<f64> {
+    let pre_close = normalize_valid_price(pre_close)?;
+    let zhang_pct = zhang_pct.filter(|value| value.is_finite() && *value >= 0.0)?;
+    let limit_down = pre_close * (1.0 - zhang_pct);
+    if limit_down.is_finite() && limit_down > PRICE_EPS {
+        Some(limit_down)
+    } else {
+        None
+    }
+}
+
+fn is_buy_basis_executable(
+    basis_price: f64,
+    pre_close: Option<f64>,
+    zhang_pct: Option<f64>,
+) -> bool {
+    resolve_limit_up_price(pre_close, zhang_pct)
+        .map(|limit_up| basis_price < limit_up - PRICE_EPS)
+        .unwrap_or(true)
+}
+
+fn resolve_normal_sell_price(close_price: Option<f64>, open_price: Option<f64>) -> Option<f64> {
+    normalize_valid_price(close_price).or_else(|| normalize_valid_price(open_price))
+}
+
+fn is_sell_price_executable(
+    sell_price: Option<f64>,
+    pre_close: Option<f64>,
+    zhang_pct: Option<f64>,
+) -> bool {
+    let Some(sell_price) = sell_price else {
+        return false;
+    };
+
+    resolve_limit_down_price(pre_close, zhang_pct)
+        .map(|limit_down| sell_price > limit_down + PRICE_EPS)
+        .unwrap_or(true)
 }
 
 fn calc_return_pct(price: Option<f64>, buy_cost_price: f64) -> Option<f64> {
@@ -856,17 +1062,38 @@ fn normalize_trade_date_input(
     input: Option<String>,
     default_value: Option<String>,
     field_name: &str,
+    mode: TradeDateResolveMode,
 ) -> Result<String, String> {
+    if trade_date_options.is_empty() {
+        return Err("没有可用交易日".to_string());
+    }
+
     let raw = input
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .or(default_value)
         .ok_or_else(|| format!("{field_name}不能为空"))?;
 
-    if trade_date_options.iter().any(|value| value == &raw) {
-        Ok(raw)
-    } else {
-        Err(format!("{field_name}不存在: {raw}"))
+    let digits = raw
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if digits.len() != 8 {
+        return Err(format!("{field_name}格式无效: {raw}"));
+    }
+
+    match trade_date_options.binary_search_by(|value| value.as_str().cmp(&digits)) {
+        Ok(index) => Ok(trade_date_options[index].clone()),
+        Err(index) => match mode {
+            TradeDateResolveMode::Start if index < trade_date_options.len() => {
+                Ok(trade_date_options[index].clone())
+            }
+            TradeDateResolveMode::Start => {
+                Err(format!("{field_name}晚于交易日历最后一天: {digits}"))
+            }
+            TradeDateResolveMode::End if index > 0 => Ok(trade_date_options[index - 1].clone()),
+            TradeDateResolveMode::End => Err(format!("{field_name}早于交易日历第一天: {digits}")),
+        },
     }
 }
 
@@ -952,7 +1179,10 @@ fn inject_runtime_rank_series(
         }
     }
 
-    row_data.cols.insert("RANK".to_string(), rank_series);
+    row_data
+        .cols
+        .insert("RANK".to_string(), rank_series.clone());
+    row_data.cols.insert("rank".to_string(), rank_series);
     row_data.validate()
 }
 
@@ -988,6 +1218,238 @@ fn set_runtime_num_series_value(
     };
     *slot = value;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    use crate::{data::RowData, scoring::tools::calc_zhang_pct};
+
+    #[derive(Clone, Copy)]
+    struct SampleBar {
+        trade_date: &'static str,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+        pre_close: f64,
+    }
+
+    fn build_sample_row_data(ts_code: &str, bars: &[SampleBar]) -> RowData {
+        let mut cols = HashMap::new();
+        let zhang_pct = calc_zhang_pct(ts_code, false);
+        let trade_dates = bars
+            .iter()
+            .map(|bar| bar.trade_date.to_string())
+            .collect::<Vec<_>>();
+        let open_series = bars.iter().map(|bar| Some(bar.open)).collect::<Vec<_>>();
+        let high_series = bars.iter().map(|bar| Some(bar.high)).collect::<Vec<_>>();
+        let low_series = bars.iter().map(|bar| Some(bar.low)).collect::<Vec<_>>();
+        let close_series = bars.iter().map(|bar| Some(bar.close)).collect::<Vec<_>>();
+        let pre_close_series = bars
+            .iter()
+            .map(|bar| Some(bar.pre_close))
+            .collect::<Vec<_>>();
+        let change_series = bars
+            .iter()
+            .map(|bar| Some(bar.close - bar.pre_close))
+            .collect::<Vec<_>>();
+        let pct_chg_series = bars
+            .iter()
+            .map(|bar| Some((bar.close / bar.pre_close - 1.0) * 100.0))
+            .collect::<Vec<_>>();
+        let len = bars.len();
+
+        cols.insert("O".to_string(), open_series);
+        cols.insert("H".to_string(), high_series);
+        cols.insert("L".to_string(), low_series);
+        cols.insert("C".to_string(), close_series);
+        cols.insert("V".to_string(), vec![Some(100.0); len]);
+        cols.insert("AMOUNT".to_string(), vec![Some(1000.0); len]);
+        cols.insert("PRE_CLOSE".to_string(), pre_close_series);
+        cols.insert("CHANGE".to_string(), change_series);
+        cols.insert("PCT_CHG".to_string(), pct_chg_series);
+        cols.insert("TURNOVER_RATE".to_string(), vec![Some(1.0); len]);
+        cols.insert("ZHANG".to_string(), vec![Some(zhang_pct); len]);
+
+        RowData { trade_dates, cols }
+    }
+
+    fn run_runtime_trade_simulation(
+        ts_code: &str,
+        bars: &[SampleBar],
+        buy_expression: &str,
+        sell_expression: &str,
+        buy_price_basis: BuyPriceBasis,
+    ) -> Vec<StrategyPaperValidationTradeRow> {
+        let row_data = build_sample_row_data(ts_code, bars);
+        row_data
+            .validate()
+            .expect("sample row data should be valid");
+        let trade_dates = row_data.trade_dates.clone();
+        let runtime = row_into_rt(row_data).expect("runtime should build");
+        let buy_program = parse_expression_program(buy_expression, "买点方程")
+            .expect("buy expression should parse");
+        let sell_program = parse_expression_program(sell_expression, "卖点方程")
+            .expect("sell expression should parse");
+
+        simulate_trade_rows_from_runtime(
+            ts_code,
+            None,
+            &trade_dates,
+            &runtime,
+            &buy_program,
+            &sell_program,
+            &PaperTradeEligibility::default(),
+            0,
+            buy_price_basis,
+            0.0,
+        )
+        .expect("simulation should succeed")
+    }
+
+    #[test]
+    fn start_date_input_snaps_to_next_trade_date() {
+        let trade_dates = vec![
+            "20240102".to_string(),
+            "20240103".to_string(),
+            "20240105".to_string(),
+        ];
+
+        let resolved = normalize_trade_date_input(
+            &trade_dates,
+            Some("2024-01-04".to_string()),
+            None,
+            "开始日期",
+            TradeDateResolveMode::Start,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, "20240105");
+    }
+
+    #[test]
+    fn end_date_input_snaps_to_previous_trade_date() {
+        let trade_dates = vec![
+            "20240102".to_string(),
+            "20240103".to_string(),
+            "20240105".to_string(),
+        ];
+
+        let resolved = normalize_trade_date_input(
+            &trade_dates,
+            Some("2024-01-04".to_string()),
+            None,
+            "结束日期",
+            TradeDateResolveMode::End,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, "20240103");
+    }
+
+    #[test]
+    fn limit_up_buy_basis_blocks_trade_entry() {
+        let trades = run_runtime_trade_simulation(
+            "000001.SZ",
+            &[SampleBar {
+                trade_date: "20240102",
+                open: 10.0,
+                high: 10.95,
+                low: 10.0,
+                close: 10.95,
+                pre_close: 10.0,
+            }],
+            "C > 0",
+            "TIME > 10",
+            BuyPriceBasis::Close,
+        );
+
+        assert!(trades.is_empty());
+    }
+
+    #[test]
+    fn limit_down_sell_latches_until_first_later_executable_day() {
+        let trades = run_runtime_trade_simulation(
+            "000001.SZ",
+            &[
+                SampleBar {
+                    trade_date: "20240102",
+                    open: 10.0,
+                    high: 10.1,
+                    low: 9.9,
+                    close: 10.0,
+                    pre_close: 10.0,
+                },
+                SampleBar {
+                    trade_date: "20240103",
+                    open: 9.5,
+                    high: 9.5,
+                    low: 9.05,
+                    close: 9.05,
+                    pre_close: 10.0,
+                },
+                SampleBar {
+                    trade_date: "20240104",
+                    open: 9.15,
+                    high: 9.25,
+                    low: 9.1,
+                    close: 9.2,
+                    pre_close: 9.05,
+                },
+            ],
+            "C > 0",
+            "TIME == 1",
+            BuyPriceBasis::Open,
+        );
+
+        assert_eq!(trades.len(), 1);
+        let trade = &trades[0];
+        assert_eq!(trade.status, "closed");
+        assert_eq!(trade.buy_date, "20240102");
+        assert_eq!(trade.sell_date.as_deref(), Some("20240104"));
+        assert_eq!(trade.hold_days, 2);
+        assert_eq!(trade.sell_price, Some(9.2));
+        assert_eq!(trade.realized_return_pct, Some(-8.000000000000007));
+    }
+
+    #[test]
+    fn pending_limit_down_sell_stays_open_when_window_ends() {
+        let trades = run_runtime_trade_simulation(
+            "000001.SZ",
+            &[
+                SampleBar {
+                    trade_date: "20240102",
+                    open: 10.0,
+                    high: 10.1,
+                    low: 9.9,
+                    close: 10.0,
+                    pre_close: 10.0,
+                },
+                SampleBar {
+                    trade_date: "20240103",
+                    open: 9.5,
+                    high: 9.5,
+                    low: 9.05,
+                    close: 9.05,
+                    pre_close: 10.0,
+                },
+            ],
+            "C > 0",
+            "TIME == 1",
+            BuyPriceBasis::Open,
+        );
+
+        assert_eq!(trades.len(), 1);
+        let trade = &trades[0];
+        assert_eq!(trade.status, "open");
+        assert_eq!(trade.sell_date, None);
+        assert_eq!(trade.sell_price, None);
+        assert!((trade.realized_return_pct.unwrap() + 9.5).abs() < 1e-9);
+        assert_eq!(trade.hold_days, 1);
+    }
 }
 
 #[allow(dead_code)]

@@ -340,8 +340,8 @@ pub fn preview_managed_source_dataset(
             let db_path_str = db_path
                 .to_str()
                 .ok_or_else(|| "cyq.db 路径不是有效 UTF-8".to_string())?;
-            let conn =
-                Connection::open(db_path_str).map_err(|error| format!("打开 cyq.db 失败: {error}"))?;
+            let conn = Connection::open(db_path_str)
+                .map_err(|error| format!("打开 cyq.db 失败: {error}"))?;
             let relation = quote_ident("cyq_snapshot");
             let columns = load_relation_columns(&conn, &relation)?;
             filter_trade_column = Some("trade_date");
@@ -361,8 +361,8 @@ pub fn preview_managed_source_dataset(
             let db_path_str = db_path
                 .to_str()
                 .ok_or_else(|| "cyq.db 路径不是有效 UTF-8".to_string())?;
-            let conn =
-                Connection::open(db_path_str).map_err(|error| format!("打开 cyq.db 失败: {error}"))?;
+            let conn = Connection::open(db_path_str)
+                .map_err(|error| format!("打开 cyq.db 失败: {error}"))?;
             let relation = quote_ident("cyq_bin");
             let columns = load_relation_columns(&conn, &relation)?;
             filter_trade_column = Some("trade_date");

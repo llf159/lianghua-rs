@@ -2,6 +2,7 @@ import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import { getStockPickOptions } from '../../apis/stockPick'
 import { filterConceptItems, useConceptExclusions } from '../../shared/conceptExclusions'
+import StrategySyntaxGuideModal from './components/StrategySyntaxGuideModal'
 import {
   CHART_RANK_MARKER_THRESHOLD_MAX,
   CHART_RANK_MARKER_THRESHOLD_MIN,
@@ -59,6 +60,7 @@ export default function SettingsPage() {
   const [conceptKeyword, setConceptKeyword] = useState('')
   const [lookupFocused, setLookupFocused] = useState(false)
   const [activeModal, setActiveModal] = useState<SettingsModalType>(null)
+  const [isSyntaxGuideOpen, setIsSyntaxGuideOpen] = useState(false)
   const [chartMainRatioInput, setChartMainRatioInput] = useState(() =>
     readStoredChartMainWidthRatio().toFixed(2),
   )
@@ -392,6 +394,15 @@ export default function SettingsPage() {
           <div>
             <h2 className="settings-title">设置</h2>
             <p className="settings-section-note">每项设置单独编辑，点击条目打开对应设置弹窗。</p>
+          </div>
+          <div className="settings-actions">
+            <button
+              className="settings-secondary-btn"
+              type="button"
+              onClick={() => setIsSyntaxGuideOpen(true)}
+            >
+              语法说明书
+            </button>
           </div>
         </div>
 
@@ -924,6 +935,11 @@ export default function SettingsPage() {
           </section>
         </div>
       ) : null}
+
+      <StrategySyntaxGuideModal
+        open={isSyntaxGuideOpen}
+        onClose={() => setIsSyntaxGuideOpen(false)}
+      />
     </div>
   )
 }

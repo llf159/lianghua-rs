@@ -253,13 +253,13 @@ fn strip_archive_root(entry_path: &Path, archive_root: &str) -> PathBuf {
             .zip(root_segments.iter())
             .all(|(left, right)| left == right)
     {
-        return entry_segments
-            .iter()
-            .skip(root_segments.len())
-            .fold(PathBuf::new(), |mut current, segment| {
+        return entry_segments.iter().skip(root_segments.len()).fold(
+            PathBuf::new(),
+            |mut current, segment| {
                 current.push(segment);
                 current
-            });
+            },
+        );
     }
 
     entry_path.to_path_buf()
@@ -319,7 +319,10 @@ fn import_managed_source_zip_inner(
         let target_path = source_root.join(&relative_path);
         if entry.is_dir() {
             std::fs::create_dir_all(&target_path).map_err(|error| {
-                format!("创建导入目录失败: path={}, err={error}", target_path.display())
+                format!(
+                    "创建导入目录失败: path={}, err={error}",
+                    target_path.display()
+                )
             })?;
             continue;
         }
@@ -331,10 +334,16 @@ fn import_managed_source_zip_inner(
         }
 
         let mut target = std::fs::File::create(&target_path).map_err(|error| {
-            format!("创建导入文件失败: path={}, err={error}", target_path.display())
+            format!(
+                "创建导入文件失败: path={}, err={error}",
+                target_path.display()
+            )
         })?;
         std::io::copy(&mut entry, &mut target).map_err(|error| {
-            format!("写入导入文件失败: path={}, err={error}", target_path.display())
+            format!(
+                "写入导入文件失败: path={}, err={error}",
+                target_path.display()
+            )
         })?;
         target.flush().map_err(|error| error.to_string())?;
         extracted_file_count += 1;
@@ -382,10 +391,17 @@ fn validate_strategy_backup_id(backup_id: &str) -> Result<&str, String> {
     Ok(trimmed)
 }
 
-fn read_strategy_backup_meta(source_root: &Path, backup_id: &str) -> Result<StrategyBackupMeta, String> {
+fn read_strategy_backup_meta(
+    source_root: &Path,
+    backup_id: &str,
+) -> Result<StrategyBackupMeta, String> {
     let meta_path = managed_strategy_backup_meta_path(source_root, backup_id);
-    let raw = std::fs::read_to_string(&meta_path)
-        .map_err(|error| format!("读取策略备份元数据失败: path={}, err={error}", meta_path.display()))?;
+    let raw = std::fs::read_to_string(&meta_path).map_err(|error| {
+        format!(
+            "读取策略备份元数据失败: path={}, err={error}",
+            meta_path.display()
+        )
+    })?;
     serde_json::from_str(&raw).map_err(|error| {
         format!(
             "解析策略备份元数据失败: path={}, err={error}",
@@ -451,7 +467,10 @@ fn build_managed_strategy_backup_item(
     })
 }
 
-fn build_managed_strategy_active_file(source_root: &Path, source_dir: &str) -> ManagedStrategyActiveFile {
+fn build_managed_strategy_active_file(
+    source_root: &Path,
+    source_dir: &str,
+) -> ManagedStrategyActiveFile {
     let file_path = source_root.join(STRATEGY_RULE_FILE_NAME);
     let metadata = std::fs::metadata(&file_path).ok();
     let modified_at = metadata
@@ -459,9 +478,13 @@ fn build_managed_strategy_active_file(source_root: &Path, source_dir: &str) -> M
         .and_then(|item| item.modified().ok())
         .map(format_system_time);
     let size_bytes = metadata.as_ref().map(std::fs::Metadata::len).unwrap_or(0);
-    let relative_path = format!("{}/{}", source_dir.trim().trim_matches('/'), STRATEGY_RULE_FILE_NAME)
-        .trim_start_matches('/')
-        .to_string();
+    let relative_path = format!(
+        "{}/{}",
+        source_dir.trim().trim_matches('/'),
+        STRATEGY_RULE_FILE_NAME
+    )
+    .trim_start_matches('/')
+    .to_string();
 
     ManagedStrategyActiveFile {
         file_name: STRATEGY_RULE_FILE_NAME.to_string(),
@@ -564,7 +587,9 @@ fn copy_import_file_to_appdata_inner(
     );
 
     loop {
-        let read_bytes = source.read(&mut buffer).map_err(|error| error.to_string())?;
+        let read_bytes = source
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
         if read_bytes == 0 {
             break;
         }
@@ -651,7 +676,9 @@ fn export_managed_source_file_inner(
 
     let mut buffer = vec![0u8; IMPORT_BUFFER_SIZE];
     loop {
-        let read_bytes = source.read(&mut buffer).map_err(|error| error.to_string())?;
+        let read_bytes = source
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
         if read_bytes == 0 {
             break;
         }
@@ -750,7 +777,13 @@ pub async fn preview_managed_source_stock_data(
         .resolve("", tauri::path::BaseDirectory::AppData)
         .map_err(|error| error.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
-        core_preview_managed_source_stock_data(&app_data_root, source_dir, trade_date, ts_code, limit)
+        core_preview_managed_source_stock_data(
+            &app_data_root,
+            source_dir,
+            trade_date,
+            ts_code,
+            limit,
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -816,9 +849,10 @@ pub fn export_managed_source_directory(
     let export_root = normalized_source_dir
         .split('/')
         .filter(|segment| !segment.trim().is_empty())
-        .fold(std::path::PathBuf::from(destination_dir), |current, segment| {
-            current.join(segment)
-        });
+        .fold(
+            std::path::PathBuf::from(destination_dir),
+            |current, segment| current.join(segment),
+        );
 
     if export_root == source_path || export_root.starts_with(&source_path) {
         return Err("导出目录不能选在当前应用数据目录内部".into());
@@ -1132,7 +1166,9 @@ fn export_strategy_backup_file_inner(
         .map_err(|error| error.to_string())?;
     let mut buffer = vec![0u8; IMPORT_BUFFER_SIZE];
     loop {
-        let read_bytes = source.read(&mut buffer).map_err(|error| error.to_string())?;
+        let read_bytes = source
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
         if read_bytes == 0 {
             break;
         }
@@ -1193,7 +1229,9 @@ fn export_strategy_bundle_inner(
 
     let mut backup_count = 0usize;
     if backup_root.exists() && backup_root.is_dir() {
-        backup_count = append_directory_to_zip(&mut zip_writer, &backup_root, &backup_root, "backups")? as usize;
+        backup_count =
+            append_directory_to_zip(&mut zip_writer, &backup_root, &backup_root, "backups")?
+                as usize;
     }
 
     zip_writer.finish().map_err(|error| error.to_string())?;
@@ -1242,7 +1280,10 @@ mod tests {
             Path::new("stock_data.db")
         );
         assert_eq!(
-            strip_archive_root(Path::new("source/strategy_backups/20240101/meta.json"), "source"),
+            strip_archive_root(
+                Path::new("source/strategy_backups/20240101/meta.json"),
+                "source"
+            ),
             Path::new("strategy_backups/20240101/meta.json")
         );
     }
@@ -1272,9 +1313,11 @@ pub async fn backup_managed_active_strategy(
         .path()
         .resolve("", tauri::path::BaseDirectory::AppData)
         .map_err(|error| error.to_string())?;
-    tauri::async_runtime::spawn_blocking(move || backup_active_strategy_inner(&app_data_root, source_dir))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        backup_active_strategy_inner(&app_data_root, source_dir)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

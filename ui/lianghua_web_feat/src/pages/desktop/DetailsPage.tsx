@@ -1271,6 +1271,46 @@ function getChartLayoutSlotCount(itemCount: number, totalItemCount: number) {
     : itemCount;
 }
 
+function getChartKlinePlotWidth(reserveCyqPanelWidth: boolean) {
+  const plotWidth =
+    CHART_VIEWBOX_WIDTH - CHART_MARGIN.left - CHART_MARGIN.right;
+  const chipPanelWidth = reserveCyqPanelWidth
+    ? plotWidth * CHART_CYQ_PANEL_WIDTH_RATIO
+    : 0;
+
+  return Math.max(
+    plotWidth -
+      chipPanelWidth -
+      (reserveCyqPanelWidth ? CHART_CYQ_PANEL_GAP : 0),
+    1,
+  );
+}
+
+function getChartKlinePlotRight(reserveCyqPanelWidth: boolean) {
+  return CHART_MARGIN.left + getChartKlinePlotWidth(reserveCyqPanelWidth);
+}
+
+function getChartItemX(
+  itemIndex: number,
+  itemCount: number,
+  layoutSlotCount: number,
+  reserveCyqPanelWidth: boolean,
+) {
+  const resolvedLayoutSlotCount = Math.max(layoutSlotCount, itemCount);
+  const klinePlotWidth = getChartKlinePlotWidth(reserveCyqPanelWidth);
+  const step =
+    resolvedLayoutSlotCount > 0
+      ? klinePlotWidth / resolvedLayoutSlotCount
+      : klinePlotWidth;
+  const leadingSlotCount = Math.max(resolvedLayoutSlotCount - itemCount, 0);
+
+  return (
+    CHART_MARGIN.left +
+    step * (leadingSlotCount + itemIndex) +
+    step / 2
+  );
+}
+
 function buildLineSegments(
   items: DetailKlineRow[],
   key: string,
@@ -1320,6 +1360,7 @@ function resolveVisibleIndexFromChartX(
   chartXPercent: number,
   itemCount: number,
   layoutSlotCount = itemCount,
+  reserveCyqPanelWidth = false,
 ) {
   if (itemCount <= 0 || layoutSlotCount <= 0) {
     return null;
@@ -1327,7 +1368,7 @@ function resolveVisibleIndexFromChartX(
 
   const plotStartPercent = (CHART_MARGIN.left / CHART_VIEWBOX_WIDTH) * 100;
   const plotEndPercent =
-    ((CHART_VIEWBOX_WIDTH - CHART_MARGIN.right) / CHART_VIEWBOX_WIDTH) * 100;
+    (getChartKlinePlotRight(reserveCyqPanelWidth) / CHART_VIEWBOX_WIDTH) * 100;
   const plotXPercent = clampNumber(
     (chartXPercent - plotStartPercent) / (plotEndPercent - plotStartPercent),
     0,
@@ -1354,6 +1395,7 @@ function buildChartPointerSnapshot(
   clientY: number,
   itemCount: number,
   layoutSlotCount = itemCount,
+  reserveCyqPanelWidth = false,
 ): ChartPointerSnapshot | null {
   if (itemCount <= 0 || layoutSlotCount <= 0) {
     return null;
@@ -1378,6 +1420,7 @@ function buildChartPointerSnapshot(
     chartXPercent,
     itemCount,
     layoutSlotCount,
+    reserveCyqPanelWidth,
   );
 
   if (visibleIndex === null) {
@@ -1385,11 +1428,15 @@ function buildChartPointerSnapshot(
   }
 
   return {
-    cursorXPercent: clampNumber(
-      ((clientX - viewportRect.left) / viewportRect.width) * 100,
-      0,
-      99.9999,
-    ),
+    cursorXPercent:
+      (getChartItemX(
+        visibleIndex,
+        itemCount,
+        layoutSlotCount,
+        reserveCyqPanelWidth,
+      ) /
+        CHART_VIEWBOX_WIDTH) *
+      100,
     cursorYPercent: clampNumber(
       ((clientY - viewportRect.top) / viewportRect.height) * 100,
       CHART_CURSOR_Y_MIN,
@@ -1511,30 +1558,26 @@ function renderChartPanel(
       ? seriesKeys.filter((key) => !CANDLE_BASE_SERIES_KEYS.has(key))
       : [];
   const headerSeriesKeys = kind === "candles" ? candleOverlayKeys : seriesKeys;
-  const showCyqPanel =
-    panel.key === "price" &&
-    isCyqPanelVisible &&
-    (selectedCyqSnapshot?.bins.length ?? 0) > 0;
-  const plotWidth =
-    CHART_VIEWBOX_WIDTH - CHART_MARGIN.left - CHART_MARGIN.right;
-  const chipPanelWidth = showCyqPanel ? plotWidth * CHART_CYQ_PANEL_WIDTH_RATIO : 0;
-  const klinePlotWidth = Math.max(
-    plotWidth - chipPanelWidth - (showCyqPanel ? CHART_CYQ_PANEL_GAP : 0),
-    1,
-  );
+  const reserveCyqPanelWidth =
+    isCyqPanelVisible && (selectedCyqSnapshot?.bins.length ?? 0) > 0;
+  const showCyqPanel = panel.key === "price" && reserveCyqPanelWidth;
+  const klinePlotWidth = getChartKlinePlotWidth(reserveCyqPanelWidth);
   const plotRight = CHART_VIEWBOX_WIDTH - CHART_MARGIN.right;
+  const klinePlotRight = getChartKlinePlotRight(reserveCyqPanelWidth);
   const chipPanelLeft =
-    CHART_MARGIN.left + klinePlotWidth + (showCyqPanel ? CHART_CYQ_PANEL_GAP : 0);
+    klinePlotRight + (reserveCyqPanelWidth ? CHART_CYQ_PANEL_GAP : 0);
   const chipPanelRight = plotRight;
   const plotHeight =
     CHART_VIEWBOX_HEIGHT - CHART_MARGIN.top - CHART_MARGIN.bottom;
   const layoutSlotCount = getChartLayoutSlotCount(items.length, allItems.length);
-  const leadingSlotCount = Math.max(layoutSlotCount - items.length, 0);
   const step = layoutSlotCount > 0 ? klinePlotWidth / layoutSlotCount : klinePlotWidth;
   const xAt = (itemIndex: number) =>
-    CHART_MARGIN.left +
-    step * (leadingSlotCount + itemIndex) +
-    step / 2;
+    getChartItemX(
+      itemIndex,
+      items.length,
+      layoutSlotCount,
+      reserveCyqPanelWidth,
+    );
   const activeVisibleIndex =
     chartFocus &&
     chartFocus.absoluteIndex >= effectiveVisibleStart &&
@@ -1546,13 +1589,16 @@ function renderChartPanel(
       ? effectiveVisibleStart + activeVisibleIndex
       : null;
   const isActivePanel = chartFocus?.panelKey === panel.key;
-  const focusXPercent = chartFocus?.cursorXPercent ?? null;
+  const focusXPercent =
+    activeVisibleIndex !== null
+      ? (xAt(activeVisibleIndex) / CHART_VIEWBOX_WIDTH) * 100
+      : null;
   const referenceVisibleIndex =
     referenceTradeDate !== null
       ? items.findIndex((item) => item.trade_date === referenceTradeDate)
       : -1;
   const tooltipHorizontalClass =
-    (chartFocus?.cursorXPercent ?? 0) > CHART_TOOLTIP_LEFT_THRESHOLD
+    (focusXPercent ?? 0) > CHART_TOOLTIP_LEFT_THRESHOLD
       ? "details-chart-tooltip-left"
       : "details-chart-tooltip-right";
   const tooltipSections =
@@ -2040,7 +2086,7 @@ function renderChartPanel(
                     className="details-chart-grid-line"
                     x1={CHART_MARGIN.left}
                     y1={y}
-                    x2={plotRight}
+                    x2={klinePlotRight}
                     y2={y}
                   />
                 </g>
@@ -2073,7 +2119,7 @@ function renderChartPanel(
                 className="details-chart-zero-line"
                 x1={CHART_MARGIN.left}
                 y1={zeroY}
-                x2={plotRight}
+                x2={klinePlotRight}
                 y2={zeroY}
               />
             ) : null}
@@ -2148,7 +2194,7 @@ function renderChartPanel(
                   .filter(Boolean)
                   .join(" ")}
                 style={{
-                  left: `${chartFocus.cursorXPercent}%`,
+                  left: `${focusXPercent ?? chartFocus.cursorXPercent}%`,
                   top: `${chartFocus.cursorYPercent}%`,
                 }}
               >
@@ -4051,12 +4097,15 @@ export default function DetailsPage({
     clientY: number,
     pinned: boolean,
   ) {
+    const reserveCyqPanelWidth =
+      detailCyqVisible && (selectedCyqSnapshot?.bins.length ?? 0) > 0;
     const pointer = buildChartPointerSnapshot(
       viewport,
       clientX,
       clientY,
       chartItems.length,
       chartLayoutSlotCount,
+      reserveCyqPanelWidth,
     );
     if (!pointer) {
       return null;
@@ -4908,28 +4957,30 @@ export default function DetailsPage({
               detailCyqVisible,
               selectedCyqSnapshot,
               selectedCyqTradeDate,
-              <button
-                className={[
-                  "details-chart-cyq-toggle",
-                  detailCyqVisible ? "is-active" : "",
-                  detailCyqLoading ? "is-loading" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-                type="button"
-                onPointerDown={(event) => {
-                  event.stopPropagation();
-                }}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void onToggleCyqPanel();
-                }}
-                title={cyqToggleTitle}
-              >
-                筹
-              </button>,
+              null,
               <div className="details-chart-watch-action">
                 <div className="details-chart-watch-row">
+                  <button
+                    className={[
+                      "details-chart-cyq-toggle",
+                      "details-chart-cyq-toggle-inline",
+                      detailCyqVisible ? "is-active" : "",
+                      detailCyqLoading ? "is-loading" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    type="button"
+                    onPointerDown={(event) => {
+                      event.stopPropagation();
+                    }}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void onToggleCyqPanel();
+                    }}
+                    title={cyqToggleTitle}
+                  >
+                    筹
+                  </button>
                   <span className="details-chart-watch-time">
                     {detailRealtimeData?.refreshedAt ?? "未刷新"}
                   </span>

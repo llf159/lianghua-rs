@@ -10,8 +10,8 @@ use lianghua_rs::ui_tools_feat::{
     },
     data_viewer::{StockLookupRow, list_stock_lookup_rows as core_list_stock_lookup_rows},
     details::{
-        StockDetailCyqData, StockDetailPageData, StockDetailRealtimeData, StockDetailStrategySnapshotData,
-        get_stock_detail_cyq as core_get_stock_detail_cyq,
+        StockDetailCyqData, StockDetailPageData, StockDetailRealtimeData,
+        StockDetailStrategySnapshotData, get_stock_detail_cyq as core_get_stock_detail_cyq,
         get_stock_detail_page as core_get_stock_detail_page,
         get_stock_detail_realtime as core_get_stock_detail_realtime,
         get_stock_detail_strategy_snapshot as core_get_stock_detail_strategy_snapshot,
@@ -24,18 +24,16 @@ use lianghua_rs::ui_tools_feat::{
         IntradayMonitorPageData, IntradayMonitorRankModeConfig, IntradayMonitorRow,
         IntradayMonitorTemplate, IntradayMonitorTemplateValidationData,
         get_intraday_monitor_page as core_get_intraday_monitor_page,
-        refresh_intraday_monitor_template_tags as core_refresh_intraday_monitor_template_tags,
         refresh_intraday_monitor_realtime as core_refresh_intraday_monitor_realtime,
+        refresh_intraday_monitor_template_tags as core_refresh_intraday_monitor_template_tags,
         validate_intraday_monitor_template_expression as core_validate_intraday_monitor_template_expression,
     },
     overview::{
-        SceneOverviewPageData,
-        get_scene_rank_overview_page as core_get_scene_rank_overview_page,
+        SceneOverviewPageData, get_scene_rank_overview_page as core_get_scene_rank_overview_page,
         get_scene_rank_trade_date_options as core_get_scene_rank_trade_date_options,
     },
     overview_classic::{
-        OverviewPageData, OverviewRow,
-        get_rank_overview as core_get_rank_overview,
+        OverviewPageData, OverviewRow, get_rank_overview as core_get_rank_overview,
         get_rank_overview_page as core_get_rank_overview_page,
         get_rank_trade_date_options as core_get_rank_trade_date_options,
     },
@@ -47,32 +45,9 @@ use lianghua_rs::ui_tools_feat::{
         run_ranking_score_calculation as core_run_ranking_score_calculation,
         run_ranking_tiebreak_fill as core_run_ranking_tiebreak_fill,
     },
-    stock_similarity::{
-        StockSimilarityPageData, get_stock_similarity_page as core_get_stock_similarity_page,
-    },
-    stock_pick::{StockPickOptionsData, get_stock_pick_options as core_get_stock_pick_options},
-    strategy_paper_validation::{
-        StrategyPaperValidationData, StrategyPaperValidationDefaultsData,
-        get_strategy_paper_validation_defaults as core_get_strategy_paper_validation_defaults,
-        run_strategy_paper_validation as core_run_strategy_paper_validation,
-    },
-    strategy_manage::{
-        StrategyManagePageData, StrategyManageRefactorDraft, StrategyManageRuleDraft, StrategyManageSceneDraft,
-        check_strategy_manage_scene_draft as core_check_strategy_manage_scene_draft,
-        check_strategy_manage_rule_draft as core_check_strategy_manage_rule_draft,
-        create_strategy_manage_scene as core_create_strategy_manage_scene,
-        create_strategy_manage_rule as core_create_strategy_manage_rule,
-        get_strategy_manage_page as core_get_strategy_manage_page,
-        remove_strategy_manage_scene as core_remove_strategy_manage_scene,
-        remove_strategy_manage_rules as core_remove_strategy_manage_rules,
-        save_strategy_manage_refactor_file as core_save_strategy_manage_refactor_file,
-        update_strategy_manage_scene as core_update_strategy_manage_scene,
-        update_strategy_manage_rule as core_update_strategy_manage_rule,
-    },
     statistics::{
-        MarketAnalysisData, MarketContributionData, RuleExpressionValidationData,
-        RuleExpressionValidationManualStrategy,
-        RankLayerBacktestData,
+        MarketAnalysisData, MarketContributionData, RankLayerBacktestData,
+        RuleExpressionValidationData, RuleExpressionValidationManualStrategy,
         RuleLayerBacktestData, RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig,
         SceneLayerBacktestData, SceneLayerBacktestDefaultsData, SceneStatisticsPageData,
         StrategyStatisticsDetailData, StrategyStatisticsPageData, TriggeredStockRow,
@@ -89,9 +64,34 @@ use lianghua_rs::ui_tools_feat::{
         run_rule_layer_backtest as core_run_rule_layer_backtest,
         run_scene_layer_backtest as core_run_scene_layer_backtest,
     },
+    stock_pick::{StockPickOptionsData, get_stock_pick_options as core_get_stock_pick_options},
+    stock_similarity::{
+        StockSimilarityPageData, get_stock_similarity_page as core_get_stock_similarity_page,
+    },
+    strategy_manage::{
+        StrategyManagePageData, StrategyManageRefactorDraft, StrategyManageRuleDraft,
+        StrategyManageSceneDraft,
+        check_strategy_manage_rule_draft as core_check_strategy_manage_rule_draft,
+        check_strategy_manage_scene_draft as core_check_strategy_manage_scene_draft,
+        create_strategy_manage_rule as core_create_strategy_manage_rule,
+        create_strategy_manage_scene as core_create_strategy_manage_scene,
+        get_strategy_manage_page as core_get_strategy_manage_page,
+        remove_strategy_manage_rules as core_remove_strategy_manage_rules,
+        remove_strategy_manage_scene as core_remove_strategy_manage_scene,
+        save_strategy_manage_refactor_file as core_save_strategy_manage_refactor_file,
+        update_strategy_manage_rule as core_update_strategy_manage_rule,
+        update_strategy_manage_scene as core_update_strategy_manage_scene,
+    },
+    strategy_paper_validation::{
+        StrategyPaperValidationData, StrategyPaperValidationDefaultsData,
+        StrategyPaperValidationTemplateValidationData,
+        get_strategy_paper_validation_defaults as core_get_strategy_paper_validation_defaults,
+        run_strategy_paper_validation as core_run_strategy_paper_validation,
+        validate_strategy_paper_validation_template_expressions as core_validate_strategy_paper_validation_template_expressions,
+    },
     watch_observe::{
-        WatchObserveRow as CoreWatchObserveRow, WatchObserveSnapshotData,
-        WatchObserveStoredRow, hydrate_watch_observe_rows as core_hydrate_watch_observe_rows,
+        WatchObserveRow as CoreWatchObserveRow, WatchObserveSnapshotData, WatchObserveStoredRow,
+        hydrate_watch_observe_rows as core_hydrate_watch_observe_rows,
         normalize_trade_date as core_normalize_watch_observe_trade_date,
         normalize_ts_code as core_normalize_watch_observe_ts_code,
         refresh_watch_observe_rows as core_refresh_watch_observe_rows,
@@ -108,12 +108,11 @@ use data_download_bridge::{
 use managed_source_bridge::{
     activate_managed_strategy_backup, allow_import_path, backup_managed_active_strategy,
     copy_import_file_to_appdata, create_managed_empty_strategy_backup,
-    delete_managed_strategy_backup,
-    export_managed_source_directory, export_managed_source_directory_mobile,
-    export_managed_source_file, export_managed_strategy_backup_file,
-    export_managed_strategy_bundle, get_managed_strategy_assets_status,
-    import_managed_source_zip, import_managed_strategy_backup, preview_managed_source_dataset,
-    preview_managed_source_stock_data,
+    delete_managed_strategy_backup, export_managed_source_directory,
+    export_managed_source_directory_mobile, export_managed_source_file,
+    export_managed_strategy_backup_file, export_managed_strategy_bundle,
+    get_managed_strategy_assets_status, import_managed_source_zip, import_managed_strategy_backup,
+    preview_managed_source_dataset, preview_managed_source_stock_data,
     update_managed_strategy_backup_description,
 };
 
@@ -509,6 +508,14 @@ fn get_strategy_paper_validation_defaults(
 }
 
 #[tauri::command]
+fn validate_strategy_paper_validation_template_expressions(
+    buy_expression: String,
+    sell_expression: String,
+) -> Result<StrategyPaperValidationTemplateValidationData, String> {
+    core_validate_strategy_paper_validation_template_expressions(buy_expression, sell_expression)
+}
+
+#[tauri::command]
 async fn run_strategy_paper_validation(
     source_path: String,
     start_date: Option<String>,
@@ -884,11 +891,9 @@ async fn run_ranking_score_calculation(
 async fn run_concept_performance_compute(
     source_path: String,
 ) -> Result<ConceptPerformanceComputeResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        core_run_concept_performance_compute(&source_path)
-    })
-    .await
-    .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || core_run_concept_performance_compute(&source_path))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -994,11 +999,7 @@ fn list_watch_observe_rows(
         Some(rows) => normalize_watch_observe_rows_payload(rows)?,
         None => read_watch_observe_storage(&app)?,
     };
-    core_hydrate_watch_observe_rows(
-        source_path.as_deref(),
-        &stored_rows,
-        reference_trade_date,
-    )
+    core_hydrate_watch_observe_rows(source_path.as_deref(), &stored_rows, reference_trade_date)
 }
 
 #[tauri::command]
@@ -1012,11 +1013,7 @@ fn refresh_watch_observe_rows(
         Some(rows) => normalize_watch_observe_rows_payload(rows)?,
         None => read_watch_observe_storage(&app)?,
     };
-    core_refresh_watch_observe_rows(
-        source_path.as_deref(),
-        &stored_rows,
-        reference_trade_date,
-    )
+    core_refresh_watch_observe_rows(source_path.as_deref(), &stored_rows, reference_trade_date)
 }
 
 #[tauri::command]
@@ -1027,7 +1024,10 @@ fn upsert_watch_observe_row(
 ) -> Result<Vec<CoreWatchObserveRow>, String> {
     let incoming = normalize_watch_observe_upsert_payload(row)?;
     let mut rows = read_watch_observe_storage(&app)?;
-    if let Some(existing_index) = rows.iter().position(|item| item.ts_code == incoming.ts_code) {
+    if let Some(existing_index) = rows
+        .iter()
+        .position(|item| item.ts_code == incoming.ts_code)
+    {
         let existing = rows.get(existing_index).cloned();
         rows[existing_index] = merge_stored_watch_observe_row(incoming, existing.as_ref());
     } else {
@@ -1071,10 +1071,13 @@ fn update_watch_observe_tag(
     ts_code: String,
     tag: String,
 ) -> Result<Vec<CoreWatchObserveRow>, String> {
-    let normalized_ts_code = core_normalize_watch_observe_ts_code(&ts_code)
-        .ok_or_else(|| "自选代码无效".to_string())?;
+    let normalized_ts_code =
+        core_normalize_watch_observe_ts_code(&ts_code).ok_or_else(|| "自选代码无效".to_string())?;
     let mut rows = read_watch_observe_storage(&app)?;
-    let Some(existing_row) = rows.iter_mut().find(|item| item.ts_code == normalized_ts_code) else {
+    let Some(existing_row) = rows
+        .iter_mut()
+        .find(|item| item.ts_code == normalized_ts_code)
+    else {
         return Err(format!("未找到自选记录: {normalized_ts_code}"));
     };
 
@@ -1166,6 +1169,7 @@ pub fn run() {
             get_stock_similarity_page,
             get_strategy_statistics_page,
             get_strategy_paper_validation_defaults,
+            validate_strategy_paper_validation_template_expressions,
             run_strategy_paper_validation,
             get_scene_statistics_page,
             get_strategy_statistics_detail,

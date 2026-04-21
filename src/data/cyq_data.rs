@@ -1,16 +1,25 @@
-use std::{fs::create_dir_all, path::Path};
+use std::{
+    fs::create_dir_all,
+    path::Path,
+    sync::mpsc::{Receiver, sync_channel},
+    thread,
+};
 
-use duckdb::{Connection, params};
+use duckdb::{Appender, Connection, params};
+use rayon::prelude::*;
 
 use crate::data::{
     DataReader,
-    cyq::{CyqConfig, compute_cyq_snapshots_from_row_data},
+    cyq::{CyqConfig, CyqSnapshot, compute_cyq_snapshots_from_row_data},
     cyq_db_path, load_trade_date_list, source_db_path,
 };
 
 const CYQ_SNAPSHOT_TABLE: &str = "cyq_snapshot";
 const CYQ_BIN_TABLE: &str = "cyq_bin";
 const DEFAULT_ADJ_TYPE: &str = "qfq";
+const CYQ_GROUP_SIZE: usize = 128;
+const CYQ_QUEUE_BOUND: usize = 8;
+const CYQ_FLUSH_BATCH_SIZE: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CyqRebuildSummary {
@@ -20,6 +29,23 @@ pub struct CyqRebuildSummary {
     pub range: usize,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
+}
+
+#[derive(Debug)]
+struct ComputedCyqStock {
+    ts_code: String,
+    snapshots: Vec<(String, CyqSnapshot)>,
+}
+
+#[derive(Debug, Default)]
+struct CyqWriteBatch {
+    stocks: Vec<ComputedCyqStock>,
+}
+
+#[derive(Debug)]
+enum CyqWriteMessage {
+    Batch(CyqWriteBatch),
+    Abort(String),
 }
 
 pub fn init_cyq_db(db_path: &Path) -> Result<(), String> {
@@ -189,13 +215,10 @@ fn resolve_cyq_load_start_date(
         return Ok(None);
     }
 
-    let Some(first_output_trade_date_index) = trade_dates
-        .iter()
-        .position(|trade_date| {
-            let trade_date = trade_date.as_str();
-            trade_date >= output_start_date && trade_date <= output_end_date
-        })
-    else {
+    let Some(first_output_trade_date_index) = trade_dates.iter().position(|trade_date| {
+        let trade_date = trade_date.as_str();
+        trade_date >= output_start_date && trade_date <= output_end_date
+    }) else {
         return Ok(None);
     };
 
@@ -205,6 +228,207 @@ fn resolve_cyq_load_start_date(
 
     let load_start_index = first_output_trade_date_index.saturating_sub(range - 1);
     Ok(Some(trade_dates[load_start_index].clone()))
+}
+
+fn compute_cyq_stock(
+    reader: &DataReader,
+    ts_code: &str,
+    load_start_date: &str,
+    start_date: &str,
+    end_date: &str,
+    config: CyqConfig,
+) -> Result<ComputedCyqStock, String> {
+    let row_data = reader.load_one(ts_code, DEFAULT_ADJ_TYPE, load_start_date, end_date)?;
+    if row_data.trade_dates.is_empty() {
+        return Ok(ComputedCyqStock {
+            ts_code: ts_code.to_string(),
+            snapshots: Vec::new(),
+        });
+    }
+    if config.range > 0 && row_data.trade_dates.len() < config.range {
+        return Ok(ComputedCyqStock {
+            ts_code: ts_code.to_string(),
+            snapshots: Vec::new(),
+        });
+    }
+
+    let snapshots = compute_cyq_snapshots_from_row_data(&row_data, config)?;
+    let snapshots = snapshots
+        .into_iter()
+        .enumerate()
+        .filter_map(|(snapshot_index, snapshot)| {
+            if config.range > 0 && snapshot_index + 1 < config.range {
+                return None;
+            }
+
+            let trade_date = snapshot.trade_date.clone().unwrap_or_default();
+            if trade_date.as_str() < start_date || trade_date.as_str() > end_date {
+                return None;
+            }
+
+            Some((trade_date, snapshot))
+        })
+        .collect();
+
+    Ok(ComputedCyqStock {
+        ts_code: ts_code.to_string(),
+        snapshots,
+    })
+}
+
+fn compute_cyq_stock_group_batch(
+    worker_reader: &DataReader,
+    load_start_date: &str,
+    start_date: &str,
+    end_date: &str,
+    config: CyqConfig,
+    ts_group: &[String],
+) -> Result<CyqWriteBatch, String> {
+    let mut batch = CyqWriteBatch::default();
+    for ts_code in ts_group {
+        let stock = compute_cyq_stock(
+            worker_reader,
+            ts_code,
+            load_start_date,
+            start_date,
+            end_date,
+            config,
+        )?;
+        if !stock.snapshots.is_empty() {
+            batch.stocks.push(stock);
+        }
+    }
+    Ok(batch)
+}
+
+fn append_cyq_batch_rows(
+    snapshot_app: &mut Appender<'_>,
+    bin_app: &mut Appender<'_>,
+    batch: CyqWriteBatch,
+    config: CyqConfig,
+) -> Result<(usize, usize), String> {
+    let mut snapshot_rows = 0usize;
+    let mut bin_rows = 0usize;
+
+    for stock in batch.stocks {
+        let ts_code = stock.ts_code;
+        for (trade_date, snapshot) in stock.snapshots {
+            snapshot_app
+                .append_row(params![
+                    &ts_code,
+                    &trade_date,
+                    DEFAULT_ADJ_TYPE,
+                    config.range as i32,
+                    config.factor as i32,
+                    config.min_accuracy,
+                    snapshot.close,
+                    snapshot.min_price,
+                    snapshot.max_price,
+                    snapshot.accuracy,
+                    snapshot.total_chips,
+                    snapshot.benefit_part,
+                    snapshot.avg_cost,
+                    snapshot.percent_70.price_low,
+                    snapshot.percent_70.price_high,
+                    snapshot.percent_70.concentration,
+                    snapshot.percent_90.price_low,
+                    snapshot.percent_90.price_high,
+                    snapshot.percent_90.concentration
+                ])
+                .map_err(|e| {
+                    format!(
+                        "写入cyq_snapshot失败, ts_code={}, trade_date={}: {e}",
+                        ts_code, trade_date
+                    )
+                })?;
+            snapshot_rows += 1;
+
+            for bin in snapshot.bins {
+                bin_app
+                    .append_row(params![
+                        &ts_code,
+                        &trade_date,
+                        DEFAULT_ADJ_TYPE,
+                        bin.index as i32,
+                        bin.price,
+                        bin.price_low,
+                        bin.price_high,
+                        bin.chip,
+                        bin.chip_pct
+                    ])
+                    .map_err(|e| {
+                        format!(
+                            "写入cyq_bin失败, ts_code={}, trade_date={}, bin_index={}: {e}",
+                            ts_code, trade_date, bin.index
+                        )
+                    })?;
+                bin_rows += 1;
+            }
+        }
+    }
+
+    Ok((snapshot_rows, bin_rows))
+}
+
+fn write_cyq_batches_from_channel(
+    db_path: &str,
+    rx: Receiver<CyqWriteMessage>,
+    config: CyqConfig,
+) -> Result<(usize, usize), String> {
+    let mut conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("创建筹码库事务失败:{e}"))?;
+    tx.execute("DELETE FROM cyq_bin", [])
+        .map_err(|e| format!("清空cyq_bin失败:{e}"))?;
+    tx.execute("DELETE FROM cyq_snapshot", [])
+        .map_err(|e| format!("清空cyq_snapshot失败:{e}"))?;
+
+    let mut snapshot_rows = 0usize;
+    let mut bin_rows = 0usize;
+    let mut batch_count = 0usize;
+    {
+        let mut snapshot_app = tx
+            .appender(CYQ_SNAPSHOT_TABLE)
+            .map_err(|e| format!("创建cyq_snapshot写入器失败:{e}"))?;
+        let mut bin_app = tx
+            .appender(CYQ_BIN_TABLE)
+            .map_err(|e| format!("创建cyq_bin写入器失败:{e}"))?;
+
+        for message in rx {
+            let batch = match message {
+                CyqWriteMessage::Batch(batch) => batch,
+                CyqWriteMessage::Abort(reason) => {
+                    return Err(format!("筹码计算中断，结果库回滚:{reason}"));
+                }
+            };
+
+            let (added_snapshot_rows, added_bin_rows) =
+                append_cyq_batch_rows(&mut snapshot_app, &mut bin_app, batch, config)?;
+            snapshot_rows += added_snapshot_rows;
+            bin_rows += added_bin_rows;
+            batch_count += 1;
+
+            if batch_count % CYQ_FLUSH_BATCH_SIZE == 0 {
+                snapshot_app
+                    .flush()
+                    .map_err(|e| format!("刷新cyq_snapshot写入器失败:{e}"))?;
+                bin_app
+                    .flush()
+                    .map_err(|e| format!("刷新cyq_bin写入器失败:{e}"))?;
+            }
+        }
+
+        snapshot_app
+            .flush()
+            .map_err(|e| format!("刷新cyq_snapshot写入器失败:{e}"))?;
+        bin_app
+            .flush()
+            .map_err(|e| format!("刷新cyq_bin写入器失败:{e}"))?;
+    }
+
+    tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
+    Ok((snapshot_rows, bin_rows))
 }
 
 pub fn rebuild_cyq_all(
@@ -274,102 +498,47 @@ pub fn rebuild_cyq_all(
 
     let reader = DataReader::new(source_dir)?;
     let ts_codes = reader.list_ts_code(DEFAULT_ADJ_TYPE, &load_start_date, &end_date)?;
+    let cyq_db_str = cyq_db
+        .to_str()
+        .ok_or_else(|| "筹码库路径不是有效UTF-8".to_string())?
+        .to_string();
 
-    let mut conn = Connection::open(&cyq_db).map_err(|e| format!("打开筹码库失败:{e}"))?;
-    let tx = conn
-        .transaction()
-        .map_err(|e| format!("创建筹码库事务失败:{e}"))?;
-    tx.execute("DELETE FROM cyq_bin", [])
-        .map_err(|e| format!("清空cyq_bin失败:{e}"))?;
-    tx.execute("DELETE FROM cyq_snapshot", [])
-        .map_err(|e| format!("清空cyq_snapshot失败:{e}"))?;
+    let (tx, rx) = sync_channel(CYQ_QUEUE_BOUND);
+    let abort_tx = tx.clone();
+    let writer_handle =
+        thread::spawn(move || write_cyq_batches_from_channel(&cyq_db_str, rx, config));
 
-    let mut snapshot_rows = 0usize;
-    let mut bin_rows = 0usize;
-    let mut snapshot_app = tx
-        .appender(CYQ_SNAPSHOT_TABLE)
-        .map_err(|e| format!("创建cyq_snapshot写入器失败:{e}"))?;
-    let mut bin_app = tx
-        .appender(CYQ_BIN_TABLE)
-        .map_err(|e| format!("创建cyq_bin写入器失败:{e}"))?;
+    let compute_result = ts_codes.par_chunks(CYQ_GROUP_SIZE).try_for_each_with(
+        tx,
+        |sender, ts_group| -> Result<(), String> {
+            let worker_reader = DataReader::new(source_dir)?;
+            let batch = compute_cyq_stock_group_batch(
+                &worker_reader,
+                &load_start_date,
+                &start_date,
+                &end_date,
+                config,
+                ts_group,
+            )?;
+            sender
+                .send(CyqWriteMessage::Batch(batch))
+                .map_err(|e| format!("发送筹码批次失败:{e}"))?;
+            Ok(())
+        },
+    );
 
-    for ts_code in ts_codes {
-        let row_data = reader.load_one(&ts_code, DEFAULT_ADJ_TYPE, &load_start_date, &end_date)?;
-        if row_data.trade_dates.is_empty() {
-            continue;
-        }
-        if config.range > 0 && row_data.trade_dates.len() < config.range {
-            continue;
-        }
-
-        let snapshots = compute_cyq_snapshots_from_row_data(&row_data, config)?;
-        for (snapshot_index, snapshot) in snapshots.into_iter().enumerate() {
-            if config.range > 0 && snapshot_index + 1 < config.range {
-                continue;
-            }
-            let trade_date = snapshot.trade_date.unwrap_or_default();
-            if trade_date < start_date || trade_date > end_date {
-                continue;
-            }
-            snapshot_app
-                .append_row(params![
-                    &ts_code,
-                    &trade_date,
-                    DEFAULT_ADJ_TYPE,
-                    config.range as i32,
-                    config.factor as i32,
-                    config.min_accuracy,
-                    snapshot.close,
-                    snapshot.min_price,
-                    snapshot.max_price,
-                    snapshot.accuracy,
-                    snapshot.total_chips,
-                    snapshot.benefit_part,
-                    snapshot.avg_cost,
-                    snapshot.percent_70.price_low,
-                    snapshot.percent_70.price_high,
-                    snapshot.percent_70.concentration,
-                    snapshot.percent_90.price_low,
-                    snapshot.percent_90.price_high,
-                    snapshot.percent_90.concentration
-                ])
-                .map_err(|e| format!("写入cyq_snapshot失败, ts_code={}, trade_date={}: {e}", ts_code, trade_date))?;
-            snapshot_rows += 1;
-
-            for bin in snapshot.bins {
-                bin_app
-                    .append_row(params![
-                        &ts_code,
-                        &trade_date,
-                        DEFAULT_ADJ_TYPE,
-                        bin.index as i32,
-                        bin.price,
-                        bin.price_low,
-                        bin.price_high,
-                        bin.chip,
-                        bin.chip_pct
-                    ])
-                    .map_err(|e| {
-                        format!(
-                            "写入cyq_bin失败, ts_code={}, trade_date={}, bin_index={}: {e}",
-                            ts_code, trade_date, bin.index
-                        )
-                    })?;
-                bin_rows += 1;
-            }
-        }
+    if let Err(err) = &compute_result {
+        let _ = abort_tx.send(CyqWriteMessage::Abort(err.clone()));
     }
+    drop(abort_tx);
 
-    snapshot_app
-        .flush()
-        .map_err(|e| format!("刷新cyq_snapshot写入器失败:{e}"))?;
-    bin_app
-        .flush()
-        .map_err(|e| format!("刷新cyq_bin写入器失败:{e}"))?;
-    drop(snapshot_app);
-    drop(bin_app);
+    let writer_result = match writer_handle.join() {
+        Ok(result) => result,
+        Err(_) => Err("筹码库写线程异常退出".to_string()),
+    };
 
-    tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
+    compute_result?;
+    let (snapshot_rows, bin_rows) = writer_result?;
 
     Ok(CyqRebuildSummary {
         snapshot_rows,
@@ -391,8 +560,8 @@ mod tests {
 
     use duckdb::{Connection, params};
 
-    use super::{rebuild_cyq_all, CYQ_BIN_TABLE, CYQ_SNAPSHOT_TABLE};
-    use crate::data::{cyq::CyqConfig, cyq_db_path, source_db_path};
+    use super::{CYQ_BIN_TABLE, CYQ_SNAPSHOT_TABLE, rebuild_cyq_all};
+    use crate::data::{cyq::CyqConfig, cyq_db_path, source_db_path, trade_calendar_path};
 
     fn unique_temp_source_dir() -> PathBuf {
         let nanos = SystemTime::now()
@@ -404,6 +573,12 @@ mod tests {
 
     fn prepare_source_db(source_dir: &Path) {
         fs::create_dir_all(source_dir).expect("create temp dir");
+        fs::write(
+            trade_calendar_path(source_dir.to_str().expect("utf8 path")),
+            "cal_date\n20260401\n20260402\n20260403\n",
+        )
+        .expect("write trade calendar");
+
         let source_db = source_db_path(source_dir.to_str().expect("utf8 path"));
         let conn = Connection::open(&source_db).expect("open source db");
         conn.execute(
@@ -445,18 +620,8 @@ mod tests {
                 ) VALUES (?, ?, 'qfq', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
                 params![
-                    ts_code,
-                    trade_date,
-                    open,
-                    high,
-                    low,
-                    close,
-                    close,
-                    0.0_f64,
-                    0.0_f64,
-                    1.0_f64,
-                    1.0_f64,
-                    tor
+                    ts_code, trade_date, open, high, low, close, close, 0.0_f64, 0.0_f64, 1.0_f64,
+                    1.0_f64, tor
                 ],
             )
             .expect("insert source row");
@@ -495,9 +660,11 @@ mod tests {
             )
             .expect("count snapshot rows");
         let bin_rows = conn
-            .query_row(&format!("SELECT COUNT(*) FROM {CYQ_BIN_TABLE}"), [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {CYQ_BIN_TABLE}"),
+                [],
+                |row| row.get::<_, i64>(0),
+            )
             .expect("count bin rows");
         assert_eq!(snapshot_rows, 3);
         assert_eq!(bin_rows, 24);

@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useState } from 'react'
+import { memo, useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import { listStockLookupRows, type StockLookupRow } from '../../apis/reader'
 import {
@@ -8,14 +8,35 @@ import {
   type StrategyPaperValidationTradeRow,
 } from '../../apis/strategyPaperValidation'
 import {
+  TableSortButton,
+  getAriaSort,
+  type SortDefinition,
+  useTableSort,
+} from '../../shared/tableSort'
+import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
+import {
   buildStockLookupCandidates,
   findExactStockLookupMatch,
   getLookupDigits,
 } from '../../shared/stockLookup'
 import { normalizeTsCode } from '../../shared/stockCode'
+import DetailsLink from '../../shared/DetailsLink'
+import StrategyPaperValidationTemplateManagerModal, {
+  type StrategyPaperValidationTemplate,
+} from './components/StrategyPaperValidationTemplateManagerModal'
 import './css/StrategyPaperValidationPage.css'
 
 const MAX_STOCK_NAME_CANDIDATES = 8
+const STRATEGY_PAPER_VALIDATION_TEMPLATE_STORAGE_KEY =
+  'lh_strategy_paper_validation_templates_v1'
+const EXTREME_TRADE_LIMIT = 20
+const TRADE_PAGE_SIZE_OPTIONS = [
+  { value: '100', label: '100 / 页' },
+  { value: '200', label: '200 / 页' },
+  { value: '500', label: '500 / 页' },
+  { value: '1000', label: '1000 / 页' },
+  { value: 'all', label: '全部' },
+] as const
 
 const INDEX_OPTIONS = [
   { value: '000001.SH', label: '上证指数' },
@@ -26,6 +47,40 @@ const INDEX_OPTIONS = [
   { value: '000852.SH', label: '中证1000' },
   { value: '000688.SH', label: '科创50' },
 ] as const
+
+type TradeStatusFilter = 'all' | 'closed' | 'open'
+type TradeDetailModalStatus = Exclude<TradeStatusFilter, 'all'>
+type TradePageSize = (typeof TRADE_PAGE_SIZE_OPTIONS)[number]['value']
+
+type TradeSortKey =
+  | 'status'
+  | 'ts_code'
+  | 'name'
+  | 'buy_date'
+  | 'sell_date'
+  | 'buy_rank'
+  | 'hold_days'
+  | 'buy_cost_price'
+  | 'sell_price'
+  | 'open_return_pct'
+  | 'high_return_pct'
+  | 'close_return_pct'
+  | 'realized_return_pct'
+
+function normalizeTemplate(input: unknown): StrategyPaperValidationTemplate | null {
+  if (!input || typeof input !== 'object') return null
+  const item = input as Record<string, unknown>
+  if (typeof item.id !== 'string') return null
+  if (typeof item.name !== 'string') return null
+  if (typeof item.buyExpression !== 'string') return null
+  if (typeof item.sellExpression !== 'string') return null
+  return {
+    id: item.id,
+    name: item.name,
+    buyExpression: item.buyExpression,
+    sellExpression: item.sellExpression,
+  }
+}
 
 function compactDateToInput(value?: string | null) {
   if (!value || !/^\d{8}$/.test(value)) {
@@ -60,15 +115,524 @@ function formatPercent(value?: number | null, digits = 2) {
 }
 
 function statusLabel(row: StrategyPaperValidationTradeRow) {
-  return row.status === 'closed' ? '已平仓' : '持仓中'
+  return row.status === 'closed' ? '已平仓' : '未平仓'
 }
 
+function getRealizedReturnValue(row: StrategyPaperValidationTradeRow) {
+  const value = row.realized_return_pct
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function parseOptionalNumber(value: string) {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  const parsed = Number(trimmed)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function isWithinDateRange(value: string, start: string, end: string) {
+  if (start && value < start) {
+    return false
+  }
+  if (end && value > end) {
+    return false
+  }
+  return true
+}
+
+type StrategyPaperValidationTradesTableProps = {
+  trades: StrategyPaperValidationTradeRow[]
+  sourcePath: string
+}
+
+const StrategyPaperValidationTradesTable = memo(
+  function StrategyPaperValidationTradesTable({
+    trades,
+    sourcePath,
+  }: StrategyPaperValidationTradesTableProps) {
+    const [stockFilter, setStockFilter] = useState('')
+    const [tradeStatusFilter, setTradeStatusFilter] =
+      useState<TradeStatusFilter>('all')
+    const [buyDateStartInput, setBuyDateStartInput] = useState('')
+    const [buyDateEndInput, setBuyDateEndInput] = useState('')
+    const [returnMinInput, setReturnMinInput] = useState('')
+    const [returnMaxInput, setReturnMaxInput] = useState('')
+    const [buyRankMaxInput, setBuyRankMaxInput] = useState('')
+    const [pageSize, setPageSize] = useState<TradePageSize>('100')
+    const [currentPage, setCurrentPage] = useState(1)
+    const deferredStockFilter = useDeferredValue(stockFilter)
+
+    const tradeSortDefinitions = useMemo(
+      () =>
+        ({
+          status: { value: statusLabel },
+          ts_code: { value: (row) => row.ts_code },
+          name: { value: (row) => row.name },
+          buy_date: { value: (row) => row.buy_date },
+          sell_date: { value: (row) => row.sell_date },
+          buy_rank: { value: (row) => row.buy_rank },
+          hold_days: { value: (row) => row.hold_days },
+          buy_cost_price: { value: (row) => row.buy_cost_price },
+          sell_price: { value: (row) => row.sell_price },
+          open_return_pct: { value: (row) => row.open_return_pct },
+          high_return_pct: { value: (row) => row.high_return_pct },
+          close_return_pct: { value: (row) => row.close_return_pct },
+          realized_return_pct: { value: (row) => row.realized_return_pct },
+        }) satisfies Partial<Record<TradeSortKey, SortDefinition<StrategyPaperValidationTradeRow>>>,
+      [],
+    )
+
+    const filteredTrades = useMemo(() => {
+      const normalizedStockFilter = deferredStockFilter.trim().toLowerCase()
+      const buyDateStart = normalizeDateInput(buyDateStartInput)
+      const buyDateEnd = normalizeDateInput(buyDateEndInput)
+      const returnMin = parseOptionalNumber(returnMinInput)
+      const returnMax = parseOptionalNumber(returnMaxInput)
+      const buyRankMax = parseOptionalNumber(buyRankMaxInput)
+
+      return trades.filter((row) => {
+        if (tradeStatusFilter !== 'all' && row.status !== tradeStatusFilter) {
+          return false
+        }
+
+        if (
+          normalizedStockFilter &&
+          !row.ts_code.toLowerCase().includes(normalizedStockFilter) &&
+          !getLookupDigits(row.ts_code).includes(normalizedStockFilter) &&
+          !(row.name ?? '').toLowerCase().includes(normalizedStockFilter)
+        ) {
+          return false
+        }
+
+        if (!isWithinDateRange(row.buy_date, buyDateStart, buyDateEnd)) {
+          return false
+        }
+
+        const realizedReturn = getRealizedReturnValue(row)
+        if (returnMin !== null && (realizedReturn === null || realizedReturn < returnMin)) {
+          return false
+        }
+        if (returnMax !== null && (realizedReturn === null || realizedReturn > returnMax)) {
+          return false
+        }
+
+        if (buyRankMax !== null) {
+          const buyRank = row.buy_rank
+          if (typeof buyRank !== 'number' || !Number.isFinite(buyRank) || buyRank > buyRankMax) {
+            return false
+          }
+        }
+
+        return true
+      })
+    }, [
+      buyDateEndInput,
+      buyDateStartInput,
+      buyRankMaxInput,
+      deferredStockFilter,
+      returnMaxInput,
+      returnMinInput,
+      tradeStatusFilter,
+      trades,
+    ])
+
+    const {
+      sortKey,
+      sortDirection,
+      sortedRows: sortedTrades,
+      toggleSort,
+    } = useTableSort<StrategyPaperValidationTradeRow, TradeSortKey>(
+      filteredTrades,
+      tradeSortDefinitions,
+      { key: 'buy_date', direction: 'desc' },
+    )
+
+    const rowsPerPage = pageSize === 'all' ? sortedTrades.length || 1 : Number(pageSize)
+    const totalPages =
+      pageSize === 'all' ? 1 : Math.max(1, Math.ceil(sortedTrades.length / rowsPerPage))
+    const safeCurrentPage = Math.min(currentPage, totalPages)
+    const visibleTrades = useMemo(() => {
+      if (pageSize === 'all') {
+        return sortedTrades
+      }
+      const start = (safeCurrentPage - 1) * rowsPerPage
+      return sortedTrades.slice(start, start + rowsPerPage)
+    }, [pageSize, rowsPerPage, safeCurrentPage, sortedTrades])
+
+    const navigationItems = useMemo(
+      () =>
+        sortedTrades.map((row) => ({
+          tsCode: row.ts_code,
+          tradeDate: row.buy_date,
+          sourcePath: sourcePath.trim() || undefined,
+          name: row.name ?? undefined,
+        })),
+      [sortedTrades, sourcePath],
+    )
+
+    function resetToFirstPage() {
+      setCurrentPage(1)
+    }
+
+    function renderSortableHeader(key: TradeSortKey, label: string) {
+      const isActive = sortKey === key
+      return (
+        <th aria-sort={getAriaSort(isActive, sortDirection)}>
+          <TableSortButton
+            label={label}
+            isActive={isActive}
+            direction={sortDirection}
+            onClick={() => {
+              toggleSort(key)
+              resetToFirstPage()
+            }}
+          />
+        </th>
+      )
+    }
+
+    return (
+      <section className="strategy-paper-validation-card">
+        <div className="strategy-paper-validation-table-head">
+          <h3>交易明细</h3>
+          <span>
+            筛选 {filteredTrades.length} / 共 {trades.length} 笔
+          </span>
+        </div>
+
+        <div className="strategy-paper-validation-table-filters">
+          <label className="strategy-paper-validation-field">
+            <span>股票</span>
+            <input
+              value={stockFilter}
+              onChange={(event) => {
+                setStockFilter(event.target.value)
+                resetToFirstPage()
+              }}
+              placeholder="代码或名称"
+            />
+          </label>
+          <label className="strategy-paper-validation-field">
+            <span>状态</span>
+            <select
+              value={tradeStatusFilter}
+              onChange={(event) => {
+                setTradeStatusFilter(event.target.value as TradeStatusFilter)
+                resetToFirstPage()
+              }}
+            >
+              <option value="all">全部</option>
+              <option value="closed">已平仓</option>
+              <option value="open">未平仓</option>
+            </select>
+          </label>
+          <label className="strategy-paper-validation-field">
+            <span>买入日起</span>
+            <input
+              type="date"
+              value={buyDateStartInput}
+              onChange={(event) => {
+                setBuyDateStartInput(event.target.value)
+                resetToFirstPage()
+              }}
+            />
+          </label>
+          <label className="strategy-paper-validation-field">
+            <span>买入日止</span>
+            <input
+              type="date"
+              value={buyDateEndInput}
+              onChange={(event) => {
+                setBuyDateEndInput(event.target.value)
+                resetToFirstPage()
+              }}
+            />
+          </label>
+          <label className="strategy-paper-validation-field">
+            <span>记录收益下限(%)</span>
+            <input
+              type="number"
+              step="0.01"
+              value={returnMinInput}
+              onChange={(event) => {
+                setReturnMinInput(event.target.value)
+                resetToFirstPage()
+              }}
+            />
+          </label>
+          <label className="strategy-paper-validation-field">
+            <span>记录收益上限(%)</span>
+            <input
+              type="number"
+              step="0.01"
+              value={returnMaxInput}
+              onChange={(event) => {
+                setReturnMaxInput(event.target.value)
+                resetToFirstPage()
+              }}
+            />
+          </label>
+          <label className="strategy-paper-validation-field">
+            <span>买入排名不高于</span>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              value={buyRankMaxInput}
+              onChange={(event) => {
+                setBuyRankMaxInput(event.target.value)
+                resetToFirstPage()
+              }}
+            />
+          </label>
+          <label className="strategy-paper-validation-field">
+            <span>每页显示</span>
+            <select
+              value={pageSize}
+              onChange={(event) => {
+                setPageSize(event.target.value as TradePageSize)
+                resetToFirstPage()
+              }}
+            >
+              {TRADE_PAGE_SIZE_OPTIONS.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div className="strategy-paper-validation-table-wrap">
+          <table className="strategy-paper-validation-table">
+            <thead>
+              <tr>
+                {renderSortableHeader('status', '状态')}
+                {renderSortableHeader('ts_code', '代码')}
+                {renderSortableHeader('name', '名称')}
+                {renderSortableHeader('buy_date', '买入日')}
+                {renderSortableHeader('sell_date', '卖出日')}
+                {renderSortableHeader('buy_rank', '买入排名')}
+                {renderSortableHeader('hold_days', '持仓天数')}
+                {renderSortableHeader('buy_cost_price', '买入成本')}
+                {renderSortableHeader('sell_price', '卖出价')}
+                {renderSortableHeader('realized_return_pct', '记录收益')}
+              </tr>
+            </thead>
+            <tbody>
+              {visibleTrades.length === 0 ? (
+                <tr>
+                  <td colSpan={10}>没有匹配当前筛选条件的交易。</td>
+                </tr>
+              ) : (
+                visibleTrades.map((row, index) => (
+                  <tr key={`${row.ts_code}-${row.buy_date}-${row.sell_date ?? 'open'}-${index}`}>
+                    <td>{statusLabel(row)}</td>
+                    <td>{row.ts_code}</td>
+                    <td>
+                      <DetailsLink
+                        className="strategy-paper-validation-stock-link"
+                        tsCode={row.ts_code}
+                        tradeDate={row.buy_date}
+                        sourcePath={sourcePath.trim() || undefined}
+                        title={`查看 ${row.name ?? row.ts_code} 买入日详情`}
+                        navigationItems={navigationItems}
+                      >
+                        {row.name ?? row.ts_code}
+                      </DetailsLink>
+                    </td>
+                    <td>{formatDateLabel(row.buy_date)}</td>
+                    <td>{formatDateLabel(row.sell_date)}</td>
+                    <td>{row.buy_rank ?? '--'}</td>
+                    <td>{row.hold_days}</td>
+                    <td>{formatNumber(row.buy_cost_price)}</td>
+                    <td>{formatNumber(row.sell_price)}</td>
+                    <td>{formatPercent(row.realized_return_pct)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="strategy-paper-validation-pagination">
+          <span>
+            第 {safeCurrentPage} / {totalPages} 页，当前显示 {visibleTrades.length} 笔
+          </span>
+          <div className="strategy-paper-validation-pagination-actions">
+            <button
+              type="button"
+              className="strategy-paper-validation-secondary-btn"
+              onClick={() => setCurrentPage(1)}
+              disabled={safeCurrentPage <= 1}
+            >
+              首页
+            </button>
+            <button
+              type="button"
+              className="strategy-paper-validation-secondary-btn"
+              onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+              disabled={safeCurrentPage <= 1}
+            >
+              上一页
+            </button>
+            <button
+              type="button"
+              className="strategy-paper-validation-secondary-btn"
+              onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+              disabled={safeCurrentPage >= totalPages}
+            >
+              下一页
+            </button>
+            <button
+              type="button"
+              className="strategy-paper-validation-secondary-btn"
+              onClick={() => setCurrentPage(totalPages)}
+              disabled={safeCurrentPage >= totalPages}
+            >
+              末页
+            </button>
+          </div>
+        </div>
+      </section>
+    )
+  },
+)
+
+type StrategyPaperValidationStatusTradeModalProps = {
+  status: TradeDetailModalStatus
+  rows: StrategyPaperValidationTradeRow[]
+  sourcePath: string
+  onClose: () => void
+}
+
+const StrategyPaperValidationStatusTradeModal = memo(
+  function StrategyPaperValidationStatusTradeModal({
+    status,
+    rows,
+    sourcePath,
+    onClose,
+  }: StrategyPaperValidationStatusTradeModalProps) {
+    const title = status === 'closed' ? '已平仓交易明细' : '未平仓交易明细'
+    const navigationItems = useMemo(
+      () =>
+        rows.map((row) => ({
+          tsCode: row.ts_code,
+          tradeDate: row.buy_date,
+          sourcePath: sourcePath.trim() || undefined,
+          name: row.name ?? undefined,
+        })),
+      [rows, sourcePath],
+    )
+
+    return (
+      <div
+        className="strategy-paper-validation-modal-backdrop"
+        role="presentation"
+        onClick={(event) => {
+          if (event.target === event.currentTarget) {
+            onClose()
+          }
+        }}
+      >
+        <div className="strategy-paper-validation-modal" role="dialog" aria-modal="true">
+          <div className="strategy-paper-validation-table-head">
+            <div>
+              <h3>{title}</h3>
+              <span>{rows.length} 笔</span>
+            </div>
+            <button
+              type="button"
+              className="strategy-paper-validation-secondary-btn"
+              onClick={onClose}
+            >
+              关闭
+            </button>
+          </div>
+          <div className="strategy-paper-validation-table-wrap strategy-paper-validation-modal-table-wrap">
+            <table className="strategy-paper-validation-table strategy-paper-validation-detail-table">
+              <thead>
+                <tr>
+                  <th>代码</th>
+                  <th>名称</th>
+                  <th>买入日</th>
+                  <th>卖出日</th>
+                  <th>买入排名</th>
+                  <th>持仓天数</th>
+                  <th>买入成本</th>
+                  <th>卖出价</th>
+                  <th>RATEO</th>
+                  <th>RATEH</th>
+                  <th>收盘收益</th>
+                  <th>记录收益</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.length === 0 ? (
+                  <tr>
+                    <td colSpan={12}>暂无{status === 'closed' ? '已平仓' : '未平仓'}交易。</td>
+                  </tr>
+                ) : (
+                  rows.map((row, index) => (
+                    <tr key={`${status}-${row.ts_code}-${row.buy_date}-${row.sell_date ?? 'open'}-${index}`}>
+                      <td>{row.ts_code}</td>
+                      <td>
+                        <DetailsLink
+                          className="strategy-paper-validation-stock-link"
+                          tsCode={row.ts_code}
+                          tradeDate={row.buy_date}
+                          sourcePath={sourcePath.trim() || undefined}
+                          title={`查看 ${row.name ?? row.ts_code} 买入日详情`}
+                          navigationItems={navigationItems}
+                        >
+                          {row.name ?? row.ts_code}
+                        </DetailsLink>
+                      </td>
+                      <td>{formatDateLabel(row.buy_date)}</td>
+                      <td>{formatDateLabel(row.sell_date)}</td>
+                      <td>{row.buy_rank ?? '--'}</td>
+                      <td>{row.hold_days}</td>
+                      <td>{formatNumber(row.buy_cost_price)}</td>
+                      <td>{formatNumber(row.sell_price)}</td>
+                      <td>{formatPercent(row.open_return_pct)}</td>
+                      <td>{formatPercent(row.high_return_pct)}</td>
+                      <td>{formatPercent(row.close_return_pct)}</td>
+                      <td>{formatPercent(row.realized_return_pct)}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    )
+  },
+)
+
 export default function StrategyPaperValidationPage() {
+  const persistedTemplates = useMemo(() => {
+    const parsed = readJsonStorage<unknown>(
+      typeof window === 'undefined' ? null : window.localStorage,
+      STRATEGY_PAPER_VALIDATION_TEMPLATE_STORAGE_KEY,
+    )
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+    return parsed
+      .map(normalizeTemplate)
+      .filter((item): item is StrategyPaperValidationTemplate => item !== null)
+  }, [])
+
   const [sourcePath, setSourcePath] = useState('')
   const [stockLookupRows, setStockLookupRows] = useState<StockLookupRow[]>([])
   const [initializing, setInitializing] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const [result, setResult] = useState<StrategyPaperValidationData | null>(null)
 
   const [startDateInput, setStartDateInput] = useState('')
@@ -79,8 +643,16 @@ export default function StrategyPaperValidationPage() {
   const [slippagePct, setSlippagePct] = useState('0')
   const [testStockInput, setTestStockInput] = useState('')
   const [stockLookupFocused, setStockLookupFocused] = useState(false)
-  const [buyExpression, setBuyExpression] = useState('rank <= 100')
+  const [buyExpression, setBuyExpression] = useState('RANK <= 100')
   const [sellExpression, setSellExpression] = useState('TIME >= 5 OR RATEH >= 8')
+  const [templates, setTemplates] = useState<StrategyPaperValidationTemplate[]>(
+    () => persistedTemplates,
+  )
+  const [selectedTemplateId, setSelectedTemplateId] = useState('')
+  const [templateModalOpen, setTemplateModalOpen] = useState(false)
+  const [extremeModalOpen, setExtremeModalOpen] = useState(false)
+  const [tradeDetailModalStatus, setTradeDetailModalStatus] =
+    useState<TradeDetailModalStatus | null>(null)
   const deferredTestStockInput = useDeferredValue(testStockInput)
   const stockNameCandidates = useMemo(
     () =>
@@ -169,9 +741,46 @@ export default function StrategyPaperValidationPage() {
     }
   }, [sourcePath])
 
+  useEffect(() => {
+    writeJsonStorage(
+      typeof window === 'undefined' ? null : window.localStorage,
+      STRATEGY_PAPER_VALIDATION_TEMPLATE_STORAGE_KEY,
+      templates,
+    )
+  }, [templates])
+
+  useEffect(() => {
+    if (
+      selectedTemplateId !== '' &&
+      !templates.some((item) => item.id === selectedTemplateId)
+    ) {
+      setSelectedTemplateId('')
+    }
+  }, [selectedTemplateId, templates])
+
   function onSelectStockCandidate(row: StockLookupRow) {
     setStockLookupFocused(false)
     setTestStockInput(row.name || getLookupDigits(row.ts_code))
+  }
+
+  function onApplyTemplate() {
+    const template = templates.find((item) => item.id === selectedTemplateId)
+    if (!template) {
+      setError('请先选择一个表达式模板。')
+      setNotice('')
+      return
+    }
+
+    setBuyExpression(template.buyExpression)
+    setSellExpression(template.sellExpression)
+    setError('')
+    setNotice(`已套用模板：${template.name}`)
+  }
+
+  function onTemplateRemoved(templateId: string) {
+    if (selectedTemplateId === templateId) {
+      setSelectedTemplateId('')
+    }
   }
 
   async function onRun() {
@@ -205,6 +814,7 @@ export default function StrategyPaperValidationPage() {
 
     setLoading(true)
     setError('')
+    setNotice('')
     try {
       const data = await runStrategyPaperValidation({
         sourcePath,
@@ -234,7 +844,116 @@ export default function StrategyPaperValidationPage() {
   }
 
   const summary = result?.summary
-  const trades = result?.trades ?? []
+  const trades = useMemo(() => result?.trades ?? [], [result])
+  const selectedTemplate = templates.find((item) => item.id === selectedTemplateId)
+  const closedTrades = useMemo(
+    () => trades.filter((row) => row.status === 'closed'),
+    [trades],
+  )
+  const openTrades = useMemo(
+    () => trades.filter((row) => row.status === 'open'),
+    [trades],
+  )
+  const tradeDetailModalRows =
+    tradeDetailModalStatus === 'closed'
+      ? closedTrades
+      : tradeDetailModalStatus === 'open'
+        ? openTrades
+        : []
+
+  const closedReturnTrades = useMemo(
+    () =>
+      closedTrades.filter((row) => getRealizedReturnValue(row) !== null),
+    [closedTrades],
+  )
+
+  const bestTrades = useMemo(
+    () =>
+      [...closedReturnTrades]
+        .sort(
+          (left, right) =>
+            (getRealizedReturnValue(right) ?? Number.NEGATIVE_INFINITY) -
+            (getRealizedReturnValue(left) ?? Number.NEGATIVE_INFINITY),
+        )
+        .slice(0, EXTREME_TRADE_LIMIT),
+    [closedReturnTrades],
+  )
+
+  const worstTrades = useMemo(
+    () =>
+      [...closedReturnTrades]
+        .sort(
+          (left, right) =>
+            (getRealizedReturnValue(left) ?? Number.POSITIVE_INFINITY) -
+            (getRealizedReturnValue(right) ?? Number.POSITIVE_INFINITY),
+        )
+        .slice(0, EXTREME_TRADE_LIMIT),
+    [closedReturnTrades],
+  )
+
+  const hasExtremeTrades = bestTrades.length > 0 || worstTrades.length > 0
+
+  function renderExtremeTradeTable(
+    title: string,
+    rows: StrategyPaperValidationTradeRow[],
+  ) {
+    const navigationItems = rows.map((row) => ({
+      tsCode: row.ts_code,
+      tradeDate: row.buy_date,
+      sourcePath: sourcePath.trim() || undefined,
+      name: row.name ?? undefined,
+    }))
+
+    return (
+      <section className="strategy-paper-validation-extreme-panel">
+        <div className="strategy-paper-validation-table-head">
+          <h4>{title}</h4>
+          <span>{rows.length} 条</span>
+        </div>
+        <div className="strategy-paper-validation-table-wrap strategy-paper-validation-extreme-table-wrap">
+          <table className="strategy-paper-validation-table strategy-paper-validation-extreme-table">
+            <thead>
+              <tr>
+                <th>代码</th>
+                <th>名称</th>
+                <th>买入日</th>
+                <th>卖出日</th>
+                <th>持仓天数</th>
+                <th>买入成本</th>
+                <th>卖出价</th>
+                <th>记录收益</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr key={`${title}-${row.ts_code}-${row.buy_date}-${row.sell_date ?? 'open'}-${index}`}>
+                  <td>{row.ts_code}</td>
+                  <td>
+                    <DetailsLink
+                      className="strategy-paper-validation-stock-link"
+                      tsCode={row.ts_code}
+                      tradeDate={row.buy_date}
+                      sourcePath={sourcePath.trim() || undefined}
+                      title={`查看 ${row.name ?? row.ts_code} 买入日详情`}
+                      navigationItems={navigationItems}
+                    >
+                      {row.name ?? row.ts_code}
+                    </DetailsLink>
+                  </td>
+                  <td>{formatDateLabel(row.buy_date)}</td>
+                  <td>{formatDateLabel(row.sell_date)}</td>
+                  <td>{row.hold_days}</td>
+                  <td>{formatNumber(row.buy_cost_price)}</td>
+                  <td>{formatNumber(row.sell_price)}</td>
+                  <td>{formatPercent(row.realized_return_pct)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    )
+  }
 
   return (
     <div className="strategy-paper-validation-page">
@@ -340,12 +1059,44 @@ export default function StrategyPaperValidationPage() {
         </div>
 
         <div className="strategy-paper-validation-actions">
+          <button
+            type="button"
+            className="strategy-paper-validation-secondary-btn"
+            onClick={() => setTemplateModalOpen(true)}
+            disabled={loading || initializing}
+          >
+            模板管理
+          </button>
+          <label className="strategy-paper-validation-template-select">
+            <span>表达式模板</span>
+            <select
+              value={selectedTemplateId}
+              onChange={(event) => setSelectedTemplateId(event.target.value)}
+              disabled={loading || initializing || templates.length === 0}
+            >
+              <option value="">未选择</option>
+              {templates.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="strategy-paper-validation-secondary-btn"
+            onClick={onApplyTemplate}
+            disabled={loading || initializing || !selectedTemplate}
+          >
+            套用模板
+          </button>
           <button type="button" className="strategy-paper-validation-primary-btn" onClick={() => void onRun()} disabled={loading || initializing}>
             {loading ? '回放中...' : '开始验证'}
           </button>
         </div>
 
         {initializing ? <div className="strategy-paper-validation-placeholder">默认参数加载中...</div> : null}
+        {notice ? <div className="strategy-paper-validation-notice">{notice}</div> : null}
         {error ? <div className="strategy-paper-validation-error">{error}</div> : null}
       </section>
 
@@ -356,11 +1107,28 @@ export default function StrategyPaperValidationPage() {
               <span>买入信号数</span>
               <strong>{summary.buy_signal_count}</strong>
             </div>
-            <div className="strategy-paper-validation-summary-item">
-              <span>已平仓 / 持仓中</span>
-              <strong>
-                {summary.closed_trade_count} / {summary.open_trade_count}
-              </strong>
+            <div className="strategy-paper-validation-summary-item strategy-paper-validation-summary-trade-actions">
+              <span>交易状态明细</span>
+              <div className="strategy-paper-validation-summary-action-row">
+                <button
+                  type="button"
+                  className="strategy-paper-validation-summary-mini-btn"
+                  onClick={() => setTradeDetailModalStatus('closed')}
+                  disabled={summary.closed_trade_count === 0}
+                >
+                  <span>已平仓</span>
+                  <strong>{summary.closed_trade_count}</strong>
+                </button>
+                <button
+                  type="button"
+                  className="strategy-paper-validation-summary-mini-btn"
+                  onClick={() => setTradeDetailModalStatus('open')}
+                  disabled={summary.open_trade_count === 0}
+                >
+                  <span>未平仓</span>
+                  <strong>{summary.open_trade_count}</strong>
+                </button>
+              </div>
             </div>
             <div className="strategy-paper-validation-summary-item">
               <span>胜率</span>
@@ -380,12 +1148,17 @@ export default function StrategyPaperValidationPage() {
               <span>平均持仓天数</span>
               <strong>{formatNumber(summary.avg_hold_days, 1)}</strong>
             </div>
-            <div className="strategy-paper-validation-summary-item">
+            <button
+              type="button"
+              className="strategy-paper-validation-summary-item strategy-paper-validation-summary-button"
+              onClick={() => setExtremeModalOpen(true)}
+              disabled={!hasExtremeTrades}
+            >
               <span>最好 / 最差</span>
               <strong>
                 {formatPercent(summary.best_return_pct)} / {formatPercent(summary.worst_return_pct)}
               </strong>
-            </div>
+            </button>
           </div>
 
           <div className="strategy-paper-validation-run-meta">
@@ -406,54 +1179,57 @@ export default function StrategyPaperValidationPage() {
       ) : null}
 
       {result ? (
-        <section className="strategy-paper-validation-card">
-          <div className="strategy-paper-validation-table-head">
-            <h3>交易明细</h3>
-            <span>共 {trades.length} 笔</span>
-          </div>
-
-          <div className="strategy-paper-validation-table-wrap">
-            <table className="strategy-paper-validation-table">
-              <thead>
-                <tr>
-                  <th>状态</th>
-                  <th>代码</th>
-                  <th>名称</th>
-                  <th>买入日</th>
-                  <th>卖出日</th>
-                  <th>买入排名</th>
-                  <th>持仓天数</th>
-                  <th>买入成本</th>
-                  <th>卖出价</th>
-                  <th>RATEO</th>
-                  <th>RATEH</th>
-                  <th>收盘收益</th>
-                  <th>记录收益</th>
-                </tr>
-              </thead>
-              <tbody>
-                {trades.map((row, index) => (
-                  <tr key={`${row.ts_code}-${row.buy_date}-${row.sell_date ?? 'open'}-${index}`}>
-                    <td>{statusLabel(row)}</td>
-                    <td>{row.ts_code}</td>
-                    <td>{row.name ?? '--'}</td>
-                    <td>{formatDateLabel(row.buy_date)}</td>
-                    <td>{formatDateLabel(row.sell_date)}</td>
-                    <td>{row.buy_rank ?? '--'}</td>
-                    <td>{row.hold_days}</td>
-                    <td>{formatNumber(row.buy_cost_price)}</td>
-                    <td>{formatNumber(row.sell_price)}</td>
-                    <td>{formatPercent(row.open_return_pct)}</td>
-                    <td>{formatPercent(row.high_return_pct)}</td>
-                    <td>{formatPercent(row.close_return_pct)}</td>
-                    <td>{formatPercent(row.realized_return_pct)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
+        <StrategyPaperValidationTradesTable
+          trades={trades}
+          sourcePath={sourcePath}
+        />
       ) : null}
+
+      {extremeModalOpen ? (
+        <div
+          className="strategy-paper-validation-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              setExtremeModalOpen(false)
+            }
+          }}
+        >
+          <div className="strategy-paper-validation-modal" role="dialog" aria-modal="true">
+            <div className="strategy-paper-validation-table-head">
+              <h3>最好 / 最差交易</h3>
+              <button
+                type="button"
+                className="strategy-paper-validation-secondary-btn"
+                onClick={() => setExtremeModalOpen(false)}
+              >
+                关闭
+              </button>
+            </div>
+            <div className="strategy-paper-validation-extreme-grid">
+              {renderExtremeTradeTable('最好 20 条', bestTrades)}
+              {renderExtremeTradeTable('最差 20 条', worstTrades)}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {tradeDetailModalStatus ? (
+        <StrategyPaperValidationStatusTradeModal
+          status={tradeDetailModalStatus}
+          rows={tradeDetailModalRows}
+          sourcePath={sourcePath}
+          onClose={() => setTradeDetailModalStatus(null)}
+        />
+      ) : null}
+
+      <StrategyPaperValidationTemplateManagerModal
+        open={templateModalOpen}
+        templates={templates}
+        onChangeTemplates={setTemplates}
+        onTemplateRemoved={onTemplateRemoved}
+        onClose={() => setTemplateModalOpen(false)}
+      />
     </div>
   )
 }

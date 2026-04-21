@@ -1,5 +1,5 @@
 use crate::{
-    data::{scoring_data::row_into_rt, RowData},
+    data::{RowData, scoring_data::row_into_rt},
     download::ind_calc::{cache_ind_build, calc_inds_with_cache},
     expr::eval::Runtime,
 };
@@ -193,7 +193,7 @@ pub fn build_simulated_runtime(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_simulated_row_data, build_simulated_runtime, SimulateBarInput};
+    use super::{SimulateBarInput, build_simulated_row_data, build_simulated_runtime};
     use crate::expr::eval::Value;
     use std::collections::HashMap;
 

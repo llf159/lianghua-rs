@@ -639,6 +639,11 @@
   opacity: 0.72;
 }
 
+.details-chart-cyq-toggle-inline {
+  position: static;
+  flex: 0 0 auto;
+}
+
 .details-chart-watch-action {
   position: absolute;
   right: 12px;

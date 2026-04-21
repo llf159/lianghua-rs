@@ -1,4 +1,4 @@
-use duckdb::{params, Appender, Connection, Transaction};
+use duckdb::{Appender, Connection, Transaction, params};
 use std::collections::HashSet;
 use std::fs::create_dir_all;
 use std::path::Path;
@@ -9,9 +9,9 @@ use std::time;
 
 use crate::data::{RowData, ScoreRule};
 use crate::expr::eval::{Runtime, Value};
-use crate::expr::parser::{lex_all, Parser};
+use crate::expr::parser::{Parser, lex_all};
 use crate::scoring::{
-    build_tirbreak_rank_sql, CachedRule, RuleScoreSeries, SceneScoreSeries, TieBreakWay,
+    CachedRule, RuleScoreSeries, SceneScoreSeries, TieBreakWay, build_tirbreak_rank_sql,
 };
 
 #[derive(Debug, Default)]

@@ -391,8 +391,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        build_cyq_bars_from_row_data, compute_cyq_snapshot, compute_cyq_snapshots_from_row_data,
-        CyqConfig,
+        CyqConfig, build_cyq_bars_from_row_data, compute_cyq_snapshot,
+        compute_cyq_snapshots_from_row_data,
     };
     use crate::data::RowData;
 

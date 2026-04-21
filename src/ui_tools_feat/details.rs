@@ -301,10 +301,7 @@ fn cyq_table_exists(conn: &Connection, table_name: &str) -> Result<bool, String>
     Ok(count > 0)
 }
 
-fn query_stock_detail_cyq(
-    source_path: &str,
-    ts_code: &str,
-) -> Result<StockDetailCyqData, String> {
+fn query_stock_detail_cyq(source_path: &str, ts_code: &str) -> Result<StockDetailCyqData, String> {
     let normalized_ts_code = normalize_ts_code(ts_code);
     let Some(conn) = open_cyq_conn(source_path)? else {
         return Ok(StockDetailCyqData {
@@ -322,9 +319,7 @@ fn query_stock_detail_cyq(
     }
 
     let mut factor_stmt = conn
-        .prepare(
-            "SELECT MAX(factor) FROM cyq_snapshot WHERE ts_code = ? AND adj_type = ?",
-        )
+        .prepare("SELECT MAX(factor) FROM cyq_snapshot WHERE ts_code = ? AND adj_type = ?")
         .map_err(|e| format!("预编译筹码分桶查询失败: {e}"))?;
     let mut factor_rows = factor_stmt
         .query(params![&normalized_ts_code, DEFAULT_ADJ_TYPE])

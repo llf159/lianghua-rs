@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs::create_dir_all, path::Path};
 
-use duckdb::{params, params_from_iter, Appender, Connection, ToSql};
+use duckdb::{Appender, Connection, ToSql, params, params_from_iter};
 
 use crate::{
     crawler::concept::ThsConceptRow,

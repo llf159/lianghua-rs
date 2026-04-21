@@ -214,8 +214,10 @@ pub async fn run_stock_data_indicator_columns_delete(
                 );
             };
 
-            let mut run_result =
-                core_run_prepared_stock_data_indicator_columns_delete(&prepared, Some(&progress_cb))?;
+            let mut run_result = core_run_prepared_stock_data_indicator_columns_delete(
+                &prepared,
+                Some(&progress_cb),
+            )?;
             run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
             Ok(run_result)
         })();
@@ -311,8 +313,10 @@ pub async fn run_stock_data_indicator_columns_rebuild(
                 );
             };
 
-            let mut run_result =
-                core_run_prepared_stock_data_indicator_columns_rebuild(&prepared, Some(&progress_cb))?;
+            let mut run_result = core_run_prepared_stock_data_indicator_columns_rebuild(
+                &prepared,
+                Some(&progress_cb),
+            )?;
             run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
             Ok(run_result)
         })();
@@ -331,7 +335,9 @@ pub async fn run_stock_data_indicator_columns_rebuild(
                     current_label: None,
                     message: format!(
                         "{} 已完成，共补算 {} 组，回写 {} 行。",
-                        action_label, run_result.summary.success_count, run_result.summary.saved_rows
+                        action_label,
+                        run_result.summary.success_count,
+                        run_result.summary.saved_rows
                     ),
                 },
             ),
@@ -470,11 +476,10 @@ pub async fn run_concept_most_related_repair(
         return Err("download_id 不能为空".to_string());
     }
 
-    let prepared = core_prepare_concept_most_related_repair_run(
-        CoreConceptMostRelatedRepairRunInput {
+    let prepared =
+        core_prepare_concept_most_related_repair_run(CoreConceptMostRelatedRepairRunInput {
             source_path: request.source_path,
-        },
-    )?;
+        })?;
     let action = prepared.action.clone();
     let action_label = prepared.action_label.clone();
     emit_data_download_event(

@@ -11,8 +11,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use duckdb::{params, Connection};
-use serde::{de, Deserialize, Deserializer};
+use duckdb::{Connection, params};
+use serde::{Deserialize, Deserializer, de};
 
 pub fn source_db_path(source_dir: &str) -> PathBuf {
     Path::new(source_dir).join("stock_data.db")
@@ -464,23 +464,6 @@ impl<'de> Deserialize<'de> for ScopeWay {
     }
 }
 
-impl<'de> Deserialize<'de> for RuleTag {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        let tag = raw.trim().to_ascii_lowercase();
-
-        match tag.as_str() {
-            "" | "normal" => Ok(RuleTag::Normal),
-            "opportunity" => Ok(RuleTag::Opportunity),
-            "rare" => Ok(RuleTag::Rare),
-            _ => Err(de::Error::custom("tag 仅支持 Normal/Opportunity/Rare")),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScoreConfig {
     pub version: u32,
@@ -569,7 +552,7 @@ pub struct ScoreRule {
     pub points: f64,
     pub dist_points: Option<Vec<DistPoint>>,
     pub explain: String,
-    #[serde(default)]
+    #[serde(default, skip_deserializing)]
     pub tag: RuleTag,
 }
 
@@ -801,5 +784,45 @@ impl IndsData {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RuleTag, ScoreConfig};
+
+    fn parse_score_config(text: &str) -> ScoreConfig {
+        toml::from_str(text).expect("score config should parse")
+    }
+
+    #[test]
+    fn score_rule_tag_field_is_ignored_when_parsing_strategy_file() {
+        let cfg = parse_score_config(
+            r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "启动测试"
+scene = "趋势启动"
+stage = "base"
+scope_windows = 1
+scope_way = "LAST"
+when = "C > O"
+points = 2.0
+tag = "rare"
+explain = "test"
+"#,
+        );
+
+        assert_eq!(cfg.rule.len(), 1);
+        assert_eq!(cfg.rule[0].tag, RuleTag::Normal);
     }
 }

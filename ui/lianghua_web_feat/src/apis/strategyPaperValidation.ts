@@ -56,6 +56,15 @@ export type StrategyPaperValidationData = {
   trades: StrategyPaperValidationTradeRow[]
 }
 
+export type StrategyPaperValidationTemplateValidationData = {
+  normalized_buy_expression?: string
+  normalized_sell_expression?: string
+  buy_warmup_need: number
+  sell_warmup_need: number
+  warmup_need: number
+  message: string
+}
+
 export type StrategyPaperValidationQuery = {
   sourcePath: string
   startDate?: string
@@ -77,4 +86,17 @@ export async function getStrategyPaperValidationDefaults(sourcePath: string) {
 
 export async function runStrategyPaperValidation(query: StrategyPaperValidationQuery) {
   return invoke<StrategyPaperValidationData>('run_strategy_paper_validation', query)
+}
+
+export async function validateStrategyPaperValidationTemplateExpressions(
+  buyExpression: string,
+  sellExpression: string,
+) {
+  return invoke<StrategyPaperValidationTemplateValidationData>(
+    'validate_strategy_paper_validation_template_expressions',
+    {
+      buyExpression,
+      sellExpression,
+    },
+  )
 }

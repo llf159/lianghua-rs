@@ -92,20 +92,50 @@
   flex-wrap: wrap;
 }
 
-.strategy-paper-validation-primary-btn {
+.strategy-paper-validation-primary-btn,
+.strategy-paper-validation-secondary-btn {
   border: 1px solid #f97316;
   border-radius: 8px;
   padding: 9px 16px;
-  background: linear-gradient(180deg, #fb923c 0%, #f97316 100%);
-  color: #fff;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
 }
 
-.strategy-paper-validation-primary-btn:disabled {
+.strategy-paper-validation-primary-btn {
+  background: linear-gradient(180deg, #fb923c 0%, #f97316 100%);
+  color: #fff;
+}
+
+.strategy-paper-validation-secondary-btn {
+  border-color: #cfd8e3;
+  background: #fff;
+  color: #425367;
+}
+
+.strategy-paper-validation-primary-btn:disabled,
+.strategy-paper-validation-secondary-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.strategy-paper-validation-template-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #5d6d7f;
+  font-size: 12px;
+}
+
+.strategy-paper-validation-template-select select {
+  min-width: 180px;
+  border: 1px solid #d6dde7;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 10px;
+  color: #1f2a37;
+  font-size: 14px;
+  outline: none;
 }
 
 .strategy-paper-validation-placeholder {
@@ -113,12 +143,21 @@
   font-size: 14px;
 }
 
+.strategy-paper-validation-notice,
 .strategy-paper-validation-error {
   border-radius: 10px;
   padding: 12px 14px;
+  font-size: 14px;
+}
+
+.strategy-paper-validation-notice {
+  background: #ecfdf3;
+  color: #166534;
+}
+
+.strategy-paper-validation-error {
   background: #fff1f2;
   color: #be123c;
-  font-size: 14px;
 }
 
 .strategy-paper-validation-summary-grid {
@@ -141,6 +180,68 @@
   font-size: 16px;
 }
 
+.strategy-paper-validation-summary-trade-actions {
+  align-content: start;
+}
+
+.strategy-paper-validation-summary-action-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.strategy-paper-validation-summary-mini-btn {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fff;
+  color: #1f2a37;
+  text-align: left;
+  cursor: pointer;
+  display: grid;
+  gap: 4px;
+  transition: border-color 0.18s ease, transform 0.18s ease;
+}
+
+.strategy-paper-validation-summary-mini-btn span {
+  color: #5d6d7f;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.strategy-paper-validation-summary-mini-btn strong {
+  font-size: 16px;
+}
+
+.strategy-paper-validation-summary-mini-btn:hover:not(:disabled) {
+  border-color: #fb923c;
+  transform: translateY(-1px);
+}
+
+.strategy-paper-validation-summary-mini-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.strategy-paper-validation-summary-button {
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 0.18s ease, transform 0.18s ease;
+}
+
+.strategy-paper-validation-summary-button:hover:not(:disabled) {
+  border-color: #fb923c;
+  transform: translateY(-1px);
+}
+
+.strategy-paper-validation-summary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
 .strategy-paper-validation-run-meta {
   display: flex;
   align-items: center;
@@ -150,6 +251,13 @@
 
 .strategy-paper-validation-table-wrap {
   overflow: auto;
+}
+
+.strategy-paper-validation-table-filters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  gap: 12px;
+  align-items: end;
 }
 
 .strategy-paper-validation-table {
@@ -175,8 +283,105 @@
   z-index: 1;
 }
 
+.strategy-paper-validation-table thead th .table-sort-button:hover,
+.strategy-paper-validation-table thead th .table-sort-button.is-active {
+  color: #c2410c;
+}
+
 .strategy-paper-validation-table tbody tr:hover {
   background: #fff7ed;
+}
+
+.strategy-paper-validation-stock-link {
+  color: #c2410c;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.strategy-paper-validation-stock-link:hover {
+  color: #9a3412;
+  text-decoration: underline;
+}
+
+.strategy-paper-validation-stock-link:focus-visible {
+  outline: 2px solid #fb923c;
+  outline-offset: 2px;
+}
+
+.strategy-paper-validation-pagination {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: #5d6d7f;
+  font-size: 13px;
+}
+
+.strategy-paper-validation-pagination-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.strategy-paper-validation-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1040;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(15, 23, 42, 0.38);
+}
+
+.strategy-paper-validation-modal {
+  width: min(1320px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  border: 1px solid #dbe3ee;
+  border-radius: 14px;
+  padding: 16px;
+  background: #fff;
+  display: grid;
+  gap: 14px;
+  box-shadow: 0 24px 52px rgba(15, 23, 42, 0.22);
+}
+
+.strategy-paper-validation-modal h3,
+.strategy-paper-validation-extreme-panel h4 {
+  margin: 0;
+  color: #1f2a37;
+}
+
+.strategy-paper-validation-extreme-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.strategy-paper-validation-extreme-panel {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.strategy-paper-validation-extreme-table-wrap {
+  max-height: 520px;
+}
+
+.strategy-paper-validation-extreme-table {
+  min-width: 860px;
+}
+
+.strategy-paper-validation-modal-table-wrap {
+  max-height: min(680px, calc(100vh - 156px));
+}
+
+.strategy-paper-validation-detail-table {
+  min-width: 1220px;
 }
 
 @media (max-width: 1200px) {
@@ -184,11 +389,35 @@
   .strategy-paper-validation-summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .strategy-paper-validation-extreme-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 720px) {
   .strategy-paper-validation-form-grid,
-  .strategy-paper-validation-summary-grid {
+  .strategy-paper-validation-summary-grid,
+  .strategy-paper-validation-table-filters {
     grid-template-columns: 1fr;
+  }
+
+  .strategy-paper-validation-actions {
+    align-items: stretch;
+  }
+
+  .strategy-paper-validation-primary-btn,
+  .strategy-paper-validation-secondary-btn,
+  .strategy-paper-validation-template-select,
+  .strategy-paper-validation-template-select select {
+    width: 100%;
+  }
+
+  .strategy-paper-validation-pagination-actions {
+    width: 100%;
+  }
+
+  .strategy-paper-validation-template-select {
+    display: grid;
   }
 }

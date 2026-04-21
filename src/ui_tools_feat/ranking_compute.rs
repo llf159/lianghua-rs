@@ -5,10 +5,9 @@ use serde::Serialize;
 
 use crate::{
     data::{
-        concept_performance_data::rebuild_concept_performance_all,
-        cyq::CyqConfig,
-        cyq_data::rebuild_cyq_all,
-        cyq_db_path, load_trade_date_list, result_db_path, source_db_path,
+        concept_performance_data::rebuild_concept_performance_all, cyq::CyqConfig,
+        cyq_data::rebuild_cyq_all, cyq_db_path, load_trade_date_list, result_db_path,
+        source_db_path,
     },
     scoring::{
         RankTiebreakProfile, TieBreakWay, build_rank_tiebreak,
@@ -304,11 +303,7 @@ fn query_distinct_trade_dates(
     Ok(trade_dates)
 }
 
-fn query_table_row_count(
-    db_path: &Path,
-    file_name: &str,
-    table_name: &str,
-) -> Result<u64, String> {
+fn query_table_row_count(db_path: &Path, file_name: &str, table_name: &str) -> Result<u64, String> {
     if !db_path.exists() {
         return Ok(0);
     }
