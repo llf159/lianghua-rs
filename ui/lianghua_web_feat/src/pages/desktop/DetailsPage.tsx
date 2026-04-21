@@ -592,6 +592,10 @@ function buildIntervalRestoreNotice(
   return `区间已按最近可用K线还原：${resolvedIntervalRestore.startTradeDate} ~ ${resolvedIntervalRestore.endTradeDate}`;
 }
 
+function stopEventPropagation(event: { stopPropagation: () => void }) {
+  event.stopPropagation();
+}
+
 function findNavigationIndex(
   items: DetailsNavigationItem[],
   tsCode: string,
@@ -2587,6 +2591,11 @@ function renderChartPanel(
               .filter(Boolean)
               .join(" ")}
             data-testid="details-interval-panel"
+            onPointerDown={stopEventPropagation}
+            onPointerMove={stopEventPropagation}
+            onPointerUp={stopEventPropagation}
+            onPointerCancel={stopEventPropagation}
+            onClick={stopEventPropagation}
             style={{
               left: `${intervalPanelXPercent}%`,
               top: `${CHART_INTERVAL_PANEL_TOP_PERCENT}%`,
@@ -2600,6 +2609,8 @@ function renderChartPanel(
                 type="button"
                 className="details-chart-interval-close"
                 data-testid="details-interval-close"
+                onPointerDown={stopEventPropagation}
+                onPointerUp={stopEventPropagation}
                 onClick={(event) => {
                   event.stopPropagation();
                   onCloseChartIntervalPanel();
@@ -3275,7 +3286,7 @@ export default function DetailsPage({
     [routeIntervalEndTradeDate, routeIntervalStartTradeDate],
   );
   const routeEffectiveTradeDate =
-    routeIntervalRestore?.endTradeDate ?? routeTradeDate;
+    routeIntervalEndTradeDate || routeTradeDate;
   const inputCodeDigits = sanitizeCodeInput(lookupInput);
   const normalizedCode =
     inputCodeDigits.length === 6 ? stdTsCode(inputCodeDigits) : "";
@@ -5071,13 +5082,22 @@ export default function DetailsPage({
       return;
     }
 
+    const chartWindowDays = resolveChartWindowDays(
+      chartIntervalSelection
+        ? {
+            startTradeDate: chartIntervalSelection.startTradeDate,
+            endTradeDate: chartIntervalSelection.endTradeDate,
+          }
+        : activeIntervalContext,
+    );
+
     setDetailRealtimeLoading(true);
     setDetailRealtimeNotice("");
     try {
       const nextRealtimeData = await getStockDetailRealtime({
         sourcePath: sourcePathTrimmed,
         tsCode: resolvedTsCode,
-        chartWindowDays: 280,
+        chartWindowDays,
       });
       setDetailRealtimeData(nextRealtimeData);
     } catch (error) {
@@ -5085,7 +5105,7 @@ export default function DetailsPage({
     } finally {
       setDetailRealtimeLoading(false);
     }
-  }, [resolvedTsCode, sourcePathTrimmed]);
+  }, [activeIntervalContext, chartIntervalSelection, resolvedTsCode, sourcePathTrimmed]);
 
   const onToggleCyqPanel = useCallback(async () => {
     const nextVisible = !detailCyqVisible;
