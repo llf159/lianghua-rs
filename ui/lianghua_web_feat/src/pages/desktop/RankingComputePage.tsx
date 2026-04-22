@@ -421,6 +421,7 @@ export default function RankingComputePage() {
       setCyqFactorInput((current) =>
         current.trim() !== '' ? current : String(nextStatus.cyqFactor ?? 50),
       )
+      setCyqEndDateInput((current) => current || compactDateToInput(nextStatus.sourceDb.maxTradeDate))
     } catch (loadError) {
       setNotice('')
       setError(`读取数据计算状态失败: ${String(loadError)}`)
@@ -795,11 +796,11 @@ export default function RankingComputePage() {
           <div className="ranking-compute-summary-item">
             <span>筹码计算</span>
             <strong>cyq.db / cyq_snapshot / cyq_bin</strong>
-            <small>支持按日期范围重建 CYQ 摘要和分桶明细；日期留空时按原始库全量，默认分桶为 50。</small>
+            <small>支持按日期范围重建 CYQ 摘要和分桶明细；起始日留空时走默认范围，结束日默认数据库最新日期。</small>
           </div>
         </div>
 
-        <div className="ranking-compute-form">
+        <div className="ranking-compute-form ranking-compute-cyq-form">
           <label className="ranking-compute-field">
             <span>开始日期</span>
             <input
@@ -831,17 +832,14 @@ export default function RankingComputePage() {
             />
           </label>
 
-          <div className="ranking-compute-summary-item">
-            <span>默认范围</span>
-            <small>
-              原始库当前可用区间：
-              {status?.sourceDb?.minTradeDate || status?.sourceDb?.maxTradeDate
-                ? ` ${formatTradeDate(status?.sourceDb?.minTradeDate)} 至 ${formatTradeDate(status?.sourceDb?.maxTradeDate)}`
-                : ' 暂无'}
-            </small>
-          </div>
+          <small className="ranking-compute-cyq-range">
+            起始日留空走默认：
+            {status?.sourceDb?.minTradeDate || status?.sourceDb?.maxTradeDate
+              ? `原始库 ${formatTradeDate(status?.sourceDb?.minTradeDate)} 至 ${formatTradeDate(status?.sourceDb?.maxTradeDate)}`
+              : '暂无'}
+          </small>
 
-          <div className="ranking-compute-actions">
+          <div className="ranking-compute-actions ranking-compute-cyq-actions">
             <button
               className="ranking-compute-secondary-btn"
               type="button"

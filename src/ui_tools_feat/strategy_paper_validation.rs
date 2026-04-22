@@ -456,8 +456,7 @@ fn build_template_validation_runtime(warmup_need: usize, include_sell_fields: bo
     let rank_series = (0..len)
         .map(|index| Some((index + 1) as f64))
         .collect::<Vec<_>>();
-    vars.insert("RANK".to_string(), Value::NumSeries(rank_series.clone()));
-    vars.insert("rank".to_string(), Value::NumSeries(rank_series));
+    vars.insert("RANK".to_string(), Value::NumSeries(rank_series));
     vars.insert(
         "ZHANG".to_string(),
         Value::NumSeries(vec![Some(0.095); len]),
@@ -1334,10 +1333,7 @@ fn inject_runtime_rank_series(
         }
     }
 
-    row_data
-        .cols
-        .insert("RANK".to_string(), rank_series.clone());
-    row_data.cols.insert("rank".to_string(), rank_series);
+    row_data.cols.insert("RANK".to_string(), rank_series);
     row_data.validate()
 }
 
@@ -1736,6 +1732,22 @@ mod tests {
 
         drop(conn);
         remove_dir_all(&source_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn template_validation_only_injects_uppercase_rank() {
+        validate_strategy_paper_validation_template_expressions(
+            "RANK <= 100".to_string(),
+            "TIME >= 1".to_string(),
+        )
+        .expect("uppercase RANK should validate");
+
+        let error = validate_strategy_paper_validation_template_expressions(
+            "rank <= 100".to_string(),
+            "TIME >= 1".to_string(),
+        )
+        .expect_err("lowercase rank should not be injected");
+        assert!(error.contains("变量不存在:rank"));
     }
 }
 

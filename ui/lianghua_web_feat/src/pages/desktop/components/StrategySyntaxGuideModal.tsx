@@ -83,14 +83,14 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
       { name: 'REALTIME_FALL_FROM_HIGH_PCT', scope: '实时监控', description: '当前价相对于今日高点的回落幅度，单位是百分比；返回值恒为非负数，0 表示当前价等于今日高点，不会返回负数；计算口径为 max((今日高点 - 当前价) / 今日高点, 0) × 100%。', example: 'REALTIME_FALL_FROM_HIGH_PCT <= 1.5' },
       { name: 'REALTIME_VOL_RATIO', scope: '实时监控', description: '当前实时累计成交量 ÷ stock_data 中最新历史日的 vol，通常可理解为“相对上一交易日日成交量”的倍数。', example: 'REALTIME_VOL_RATIO >= 2' },
       { name: 'VOL_RATIO', scope: '实时监控', description: 'REALTIME_VOL_RATIO 的别名，基准相同。', example: 'VOL_RATIO >= 2' },
-      { name: 'rank / RANK', scope: '实时监控', description: '按当前榜单模式注入的历史排名序列；总榜读取 score_summary.rank，场景榜读取 scene_details.scene_rank；runtime 最新一根固定留空。', example: 'rank <= 100 AND REALTIME_CHANGE_OPEN_PCT >= 2' },
+      { name: 'RANK', scope: '实时监控', description: '按当前榜单模式注入的历史排名序列；总榜读取 score_summary.rank，场景榜读取 scene_details.scene_rank；runtime 最新一根固定留空。', example: 'RANK <= 100 AND REALTIME_CHANGE_OPEN_PCT >= 2' },
     ],
   },
   {
     title: '9. 表达式选股 / 模拟盘附加字段',
-    note: 'rank / RANK 在表达式选股与模拟盘买点方程中按交易日对齐；模拟盘卖点方程额外注入持仓相关字段。',
+    note: 'RANK 在表达式选股与模拟盘买点方程中按交易日对齐；模拟盘卖点方程额外注入持仓相关字段。',
     fields: [
-      { name: 'rank / RANK', scope: '表达式选股 / 模拟盘买点', description: '个股在 score_summary 中按交易日对齐后的排名序列；1 表示当日排名第一。', example: 'RANK <= 100 AND C > MA(C, 20)' },
+      { name: 'RANK', scope: '表达式选股 / 模拟盘买点', description: '个股在 score_summary 中按交易日对齐后的排名序列；1 表示当日排名第一。', example: 'RANK <= 100 AND C > MA(C, 20)' },
       { name: 'TIME', scope: '模拟盘卖点', description: '买入后经过的交易日数，买入当日为 0。', example: 'TIME >= 5' },
       { name: 'RATEO', scope: '模拟盘卖点', description: '当日开盘价相对买入成本的收益率，单位是百分比。', example: 'RATEO <= -3' },
       { name: 'RATEH', scope: '模拟盘卖点', description: '当日最高价相对买入成本的收益率，单位是百分比。', example: 'RATEH >= 8' },

@@ -420,9 +420,10 @@ fn refresh_intraday_monitor_template_tags(
 
 #[tauri::command]
 fn validate_intraday_monitor_template_expression(
+    source_path: Option<String>,
     expression: String,
 ) -> Result<IntradayMonitorTemplateValidationData, String> {
-    core_validate_intraday_monitor_template_expression(expression)
+    core_validate_intraday_monitor_template_expression(source_path.as_deref(), expression)
 }
 
 #[tauri::command]

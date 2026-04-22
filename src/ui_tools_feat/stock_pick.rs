@@ -536,10 +536,7 @@ fn inject_runtime_rank_series(
         }
     }
 
-    row_data
-        .cols
-        .insert("RANK".to_string(), rank_series.clone());
-    row_data.cols.insert("rank".to_string(), rank_series);
+    row_data.cols.insert("RANK".to_string(), rank_series);
     row_data.validate()
 }
 

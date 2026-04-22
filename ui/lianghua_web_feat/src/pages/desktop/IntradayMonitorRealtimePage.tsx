@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import {
   intradayMonitorPage,
@@ -278,7 +278,9 @@ function waitForNextPaint() {
     return Promise.resolve();
   }
   return new Promise<void>((resolve) => {
-    window.requestAnimationFrame(() => resolve());
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => resolve());
+    });
   });
 }
 
@@ -515,13 +517,14 @@ export default function IntradayMonitorRealtimePage() {
     }
   }, [boardFilter, excludeStBoard]);
 
-  useEffect(() => {
+  const updateTemplates = useCallback((nextTemplates: MarkTemplate[]) => {
+    setTemplates(nextTemplates);
     writeJsonStorage(
       typeof window === "undefined" ? null : window.localStorage,
       INTRADAY_MONITOR_TEMPLATE_STORAGE_KEY,
-      templates,
+      nextTemplates,
     );
-  }, [templates]);
+  }, []);
 
   useEffect(() => {
     writeJsonStorage(
@@ -796,6 +799,7 @@ export default function IntradayMonitorRealtimePage() {
       actionLabel === "读取" ? rankDateInput : DEFAULT_DATE_OPTION;
 
     try {
+      await waitForNextPaint();
       if (actionLabel === "读取") {
         const normalizedConfigs = rankModeConfigs;
         if (normalizedConfigs.length === 0) {
@@ -880,8 +884,8 @@ export default function IntradayMonitorRealtimePage() {
         );
         setError(mergeStatusMessages([partialFailureMessage, warningMessage]));
       } else {
-        await waitForNextPaint();
         setRefreshStage("refreshing");
+        await waitForNextPaint();
         const refreshedRows: IntradayMonitorRow[] = [];
         let refreshed = "";
         let warningMessage = "";
@@ -916,13 +920,7 @@ export default function IntradayMonitorRealtimePage() {
   }
 
   async function refreshRowsByGroup(groupKey: string) {
-    const targetRows =
-      groupKey === "total"
-        ? rows.filter((row) => getRowMode(row) === "total")
-        : rows.filter(
-            (row) => getRowMode(row) === "scene" && row.scene_name === groupKey,
-          );
-    if (targetRows.length === 0 || !sourcePathTrimmed) return;
+    if (!sourcePathTrimmed) return;
 
     setLoading(true);
     setLoadingAction("刷新实时");
@@ -933,7 +931,17 @@ export default function IntradayMonitorRealtimePage() {
     setError("");
     try {
       await waitForNextPaint();
+      const targetRows =
+        groupKey === "total"
+          ? rows.filter((row) => getRowMode(row) === "total")
+          : rows.filter(
+              (row) =>
+                getRowMode(row) === "scene" && row.scene_name === groupKey,
+            );
+      if (targetRows.length === 0) return;
+
       setRefreshStage("refreshing");
+      await waitForNextPaint();
       const refreshedRows: IntradayMonitorRow[] = [];
       let refreshed = "";
       let warningMessage = "";
@@ -981,13 +989,7 @@ export default function IntradayMonitorRealtimePage() {
   }
 
   async function refreshTemplateTagsByGroup(groupKey: string) {
-    const targetRows =
-      groupKey === "total"
-        ? rows.filter((row) => getRowMode(row) === "total")
-        : rows.filter(
-            (row) => getRowMode(row) === "scene" && row.scene_name === groupKey,
-          );
-    if (targetRows.length === 0 || !sourcePathTrimmed) return;
+    if (!sourcePathTrimmed) return;
 
     setLoading(true);
     setLoadingAction("刷新实时");
@@ -998,7 +1000,17 @@ export default function IntradayMonitorRealtimePage() {
     setError("");
     try {
       await waitForNextPaint();
+      const targetRows =
+        groupKey === "total"
+          ? rows.filter((row) => getRowMode(row) === "total")
+          : rows.filter(
+              (row) =>
+                getRowMode(row) === "scene" && row.scene_name === groupKey,
+            );
+      if (targetRows.length === 0) return;
+
       setRefreshStage("retagging");
+      await waitForNextPaint();
       const data = await refreshIntradayMonitorTemplateTags({
         sourcePath: sourcePathTrimmed,
         rows: targetRows,
@@ -1566,7 +1578,7 @@ export default function IntradayMonitorRealtimePage() {
         open={templateModalOpen}
         sourcePath={sourcePathTrimmed}
         templates={templates}
-        onChangeTemplates={setTemplates}
+        onChangeTemplates={updateTemplates}
         onTemplateRemoved={onTemplateRemoved}
         onClose={() => setTemplateModalOpen(false)}
       />

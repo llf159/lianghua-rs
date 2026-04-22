@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import {
   refreshIntradayMonitorRealtime,
@@ -64,7 +64,9 @@ function waitForNextPaint() {
     return Promise.resolve()
   }
   return new Promise<void>((resolve) => {
-    window.requestAnimationFrame(() => resolve())
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => resolve())
+    })
   })
 }
 
@@ -86,6 +88,19 @@ export default function IntradayMonitorCustomPage() {
     } satisfies PersistedCustomMonitorState
   }, [])
 
+  const persistedTemplates = useMemo(() => {
+    const parsed = readJsonStorage<unknown>(
+      typeof window === 'undefined' ? null : window.localStorage,
+      TEMPLATE_STORAGE_KEY,
+    )
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+    return parsed
+      .map(normalizeTemplate)
+      .filter((item): item is IntradayMonitorTemplate => item !== null)
+  }, [])
+
   const [sourcePath, setSourcePath] = useState('')
   const [codeInput, setCodeInput] = useState(() => persisted?.codeInput ?? '')
   const [rows, setRows] = useState<IntradayMonitorRow[]>(() => persisted?.rows ?? [])
@@ -93,7 +108,9 @@ export default function IntradayMonitorCustomPage() {
   const [selectedTemplateId, setSelectedTemplateId] = useState(
     () => persisted?.selectedTemplateId ?? '',
   )
-  const [templates, setTemplates] = useState<IntradayMonitorTemplate[]>([])
+  const [templates, setTemplates] = useState<IntradayMonitorTemplate[]>(
+    () => persistedTemplates,
+  )
   const [loadingAction, setLoadingAction] = useState<LoadingAction>(null)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
@@ -112,28 +129,14 @@ export default function IntradayMonitorCustomPage() {
       .catch(() => {})
   }, [])
 
-  useEffect(() => {
-    const parsed = readJsonStorage<unknown>(
-      typeof window === 'undefined' ? null : window.localStorage,
-      TEMPLATE_STORAGE_KEY,
-    )
-    if (!Array.isArray(parsed)) {
-      setTemplates([])
-      return
-    }
-    const normalized = parsed
-      .map(normalizeTemplate)
-      .filter((item): item is IntradayMonitorTemplate => item !== null)
-    setTemplates(normalized)
-  }, [])
-
-  useEffect(() => {
+  const updateTemplates = useCallback((nextTemplates: IntradayMonitorTemplate[]) => {
+    setTemplates(nextTemplates)
     writeJsonStorage(
       typeof window === 'undefined' ? null : window.localStorage,
       TEMPLATE_STORAGE_KEY,
-      templates,
+      nextTemplates,
     )
-  }, [templates])
+  }, [])
 
   useEffect(() => {
     writeJsonStorage(
@@ -277,6 +280,7 @@ export default function IntradayMonitorCustomPage() {
     setLoadingAction('refresh-tags')
     setError('')
     setNotice('')
+    await waitForNextPaint()
     try {
       const rankModeConfigs: IntradayMonitorRankModeConfig[] = [
         {
@@ -449,7 +453,7 @@ export default function IntradayMonitorCustomPage() {
         open={templateModalOpen}
         sourcePath={sourcePathTrimmed}
         templates={templates}
-        onChangeTemplates={setTemplates}
+        onChangeTemplates={updateTemplates}
         onTemplateRemoved={onTemplateRemoved}
         onClose={() => setTemplateModalOpen(false)}
       />

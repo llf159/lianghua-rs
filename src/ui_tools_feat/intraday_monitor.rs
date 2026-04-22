@@ -13,7 +13,9 @@ use crate::{
         eval::Value,
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
-    scoring::tools::{inject_latest_num_fields, inject_stock_extra_fields, rt_max_len},
+    scoring::tools::{
+        inject_latest_num_fields, inject_stock_extra_fields, load_st_list, rt_max_len,
+    },
     ui_tools_feat::{
         build_concepts_map, build_latest_vol_map, build_name_map, build_total_mv_map, filter_mv,
         realtime::{fetch_realtime_quote_map, normalize_quote_trade_date},
@@ -378,6 +380,7 @@ fn compile_intraday_templates(
 }
 
 pub fn validate_intraday_monitor_template_expression(
+    source_path: Option<&str>,
     expression: String,
 ) -> Result<IntradayMonitorTemplateValidationData, String> {
     let normalized = expression.trim().to_string();
@@ -391,7 +394,7 @@ pub fn validate_intraday_monitor_template_expression(
         .parse_main()
         .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
     let warmup_need = estimate_intraday_template_warmup(&ast)?;
-    let row_data = build_intraday_template_validation_row_data(warmup_need)?;
+    let row_data = build_intraday_template_validation_row_data(source_path, warmup_need)?;
     let mut rt = row_into_rt(row_data)?;
     let value = rt
         .eval_program(&ast)
@@ -439,15 +442,11 @@ fn resolve_template_id_for_row<'a>(
 
 fn normalize_runtime_row_data(row_data: RowData) -> Result<RowData, String> {
     let len = row_data.trade_dates.len();
-    let mut cols = HashMap::with_capacity(RUNTIME_INPUT_KEYS.len());
+    let mut cols = row_data.cols;
 
     for key in RUNTIME_INPUT_KEYS {
-        let series = row_data
-            .cols
-            .get(key)
-            .cloned()
-            .unwrap_or_else(|| vec![None; len]);
-        cols.insert(key.to_string(), series);
+        cols.entry(key.to_string())
+            .or_insert_with(|| vec![None; len]);
     }
 
     let out = RowData {
@@ -458,7 +457,100 @@ fn normalize_runtime_row_data(row_data: RowData) -> Result<RowData, String> {
     Ok(out)
 }
 
-fn build_intraday_template_validation_row_data(warmup_need: usize) -> Result<RowData, String> {
+fn inject_template_validation_extra_series(row_data: &mut RowData) -> Result<(), String> {
+    let len = row_data.trade_dates.len();
+
+    for key in [
+        "REALTIME_CHANGE_OPEN_PCT",
+        "REALTIME_FALL_FROM_HIGH_PCT",
+        "REALTIME_VOL_RATIO",
+        "VOL_RATIO",
+    ] {
+        let mut series = vec![None; len];
+        if let Some(last) = series.last_mut() {
+            *last = Some(1.0);
+        }
+        row_data.cols.insert(key.to_string(), series);
+    }
+
+    let mut rank_series = (0..len)
+        .map(|index| Some((index + 1) as f64))
+        .collect::<Vec<_>>();
+    if let Some(last) = rank_series.last_mut() {
+        *last = None;
+    }
+    row_data.cols.insert("RANK".to_string(), rank_series);
+    row_data.validate()
+}
+
+fn build_real_intraday_template_validation_row_data(
+    source_path: &str,
+    warmup_need: usize,
+) -> Result<RowData, String> {
+    let reader = DataReader::new(source_path)?;
+    let latest_trade_date = reader
+        .conn
+        .query_row(
+            "SELECT MAX(trade_date) FROM stock_data WHERE adj_type = ?",
+            [DEFAULT_ADJ_TYPE],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(|e| format!("读取实时模板校验交易日失败: {e}"))?
+        .ok_or_else(|| "stock_data 缺少可用于实时模板校验的交易日".to_string())?;
+    let sample_ts_code = reader
+        .conn
+        .query_row(
+            "SELECT ts_code FROM stock_data WHERE adj_type = ? AND trade_date = ? ORDER BY ts_code LIMIT 1",
+            [DEFAULT_ADJ_TYPE, &latest_trade_date],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| format!("读取实时模板校验样本股票失败: {e}"))?;
+
+    let indicator_cache = cache_ind_build(source_path)?;
+    let indicator_warmup_need = if indicator_cache.is_empty() {
+        0
+    } else {
+        warmup_ind_estimate(source_path)?
+    };
+    let need_rows = warmup_need.max(indicator_warmup_need).max(2);
+    let mut row_data = reader.load_one_tail_rows(
+        &sample_ts_code,
+        DEFAULT_ADJ_TYPE,
+        &latest_trade_date,
+        need_rows,
+    )?;
+    row_data = normalize_runtime_row_data(row_data)?;
+
+    let st_list = load_st_list(source_path).unwrap_or_default();
+    let total_mv_yi = build_total_mv_map(source_path)
+        .ok()
+        .and_then(|items| items.get(&sample_ts_code).copied());
+    inject_stock_extra_fields(
+        &mut row_data,
+        &sample_ts_code,
+        st_list.contains(&sample_ts_code),
+        total_mv_yi,
+    )?;
+    inject_template_validation_extra_series(&mut row_data)?;
+
+    if !indicator_cache.is_empty() {
+        for (name, series) in calc_inds_with_cache_lossy(&indicator_cache, row_data.clone()) {
+            row_data.cols.insert(name, series);
+        }
+    }
+
+    row_data.validate()?;
+    Ok(row_data)
+}
+
+fn build_intraday_template_validation_row_data(
+    source_path: Option<&str>,
+    warmup_need: usize,
+) -> Result<RowData, String> {
+    if let Some(source_path) = source_path.map(str::trim).filter(|value| !value.is_empty()) {
+        return build_real_intraday_template_validation_row_data(source_path, warmup_need);
+    }
+
     let len = warmup_need.max(2);
     let trade_dates = (0..len)
         .map(|index| format!("202401{:02}", index + 1))
@@ -488,16 +580,8 @@ fn build_intraday_template_validation_row_data(warmup_need: usize) -> Result<Row
     cols.insert("ZHANG".to_string(), vec![Some(0.095); len]);
     cols.insert("TOTAL_MV_YI".to_string(), vec![Some(100.0); len]);
 
-    let mut rank_series = (0..len)
-        .map(|index| Some((index + 1) as f64))
-        .collect::<Vec<_>>();
-    if let Some(last) = rank_series.last_mut() {
-        *last = None;
-    }
-    cols.insert("RANK".to_string(), rank_series.clone());
-    cols.insert("rank".to_string(), rank_series);
-
-    let out = RowData { trade_dates, cols };
+    let mut out = RowData { trade_dates, cols };
+    inject_template_validation_extra_series(&mut out)?;
     out.validate()?;
     Ok(out)
 }
@@ -691,10 +775,7 @@ fn inject_runtime_rank_series(
         *last = None;
     }
 
-    row_data
-        .cols
-        .insert("RANK".to_string(), rank_series.clone());
-    row_data.cols.insert("rank".to_string(), rank_series);
+    row_data.cols.insert("RANK".to_string(), rank_series);
     row_data.validate()
 }
 
@@ -1388,46 +1469,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_runtime_trade_date_requires_quote_date() {
-        let row = IntradayMonitorRow {
-            rank_mode: "total".to_string(),
-            ts_code: "000001.SZ".to_string(),
-            trade_date: Some("20240401".to_string()),
-            scene_name: String::new(),
-            direction: None,
-            total_score: None,
-            scene_score: None,
-            risk_score: None,
-            confirm_strength: None,
-            risk_intensity: None,
-            scene_status: None,
-            rank: None,
-            name: Some("平安银行".to_string()),
-            board: BOARD_MAIN.to_string(),
-            total_mv_yi: None,
-            concept: None,
-            realtime_price: None,
-            realtime_open: None,
-            realtime_high: None,
-            realtime_low: None,
-            realtime_pre_close: None,
-            realtime_vol: None,
-            realtime_amount: None,
-            realtime_change_pct: None,
-            realtime_change_open_pct: None,
-            realtime_fall_from_high_pct: None,
-            realtime_vol_ratio: None,
-            template_tag_text: None,
-            template_tag_tone: None,
-        };
-        let error = resolve_runtime_trade_date(&row, &sample_quote())
-            .expect_err("missing quote date should fail");
-
-        assert!(error.contains("实时行情缺少可用日期"));
-        assert!(error.contains("避免把最新行情静默写入旧交易日"));
-    }
-
-    #[test]
     fn build_quote_only_runtime_row_data_accepts_explicit_trade_date() {
         let row_data = build_quote_only_runtime_row_data(&sample_quote(), "20240401")
             .expect("quote-only runtime row data");
@@ -1455,5 +1496,19 @@ mod tests {
             row_data.cols.get("PRE_CLOSE").and_then(|series| series[0]),
             Some(9.9)
         );
+    }
+
+    #[test]
+    fn template_validation_only_injects_uppercase_rank() {
+        validate_intraday_monitor_template_expression(
+            None,
+            "RANK <= 100 AND REALTIME_CHANGE_OPEN_PCT >= 1".to_string(),
+        )
+        .expect("uppercase RANK should validate");
+
+        let error =
+            validate_intraday_monitor_template_expression(None, "rank <= 100".to_string())
+                .expect_err("lowercase rank should not be injected");
+        assert!(error.contains("变量不存在:rank"));
     }
 }

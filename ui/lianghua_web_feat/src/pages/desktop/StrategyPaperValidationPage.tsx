@@ -1,4 +1,4 @@
-import { memo, useDeferredValue, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import { listStockLookupRows, type StockLookupRow } from '../../apis/reader'
 import {
@@ -87,7 +87,6 @@ type StrategyPaperValidationRelativeNavPoint = {
   tradeDate: string
   strategyNav: number
   indexNav: number
-  relativeNav: number
   strategyDailyReturn: number
   indexDailyReturn: number
   activeTradeCount: number
@@ -105,17 +104,24 @@ type StrategyPaperValidationRelativeNavChartGeometry = {
   width: number
   height: number
   viewBox: string
+  plotLeft: number
+  plotRightX: number
+  xAxisLabelY: number
   yTicks: Array<{ value: number; y: number }>
   xLabels: Array<{
     value: string
     x: number
     anchor: 'start' | 'middle' | 'end'
   }>
-  linePath: string
-  areaPath: string
-  lastPoint: { x: number; y: number; item: StrategyPaperValidationRelativeNavPoint } | null
+  linePaths: Record<StrategyPaperValidationNavSeriesKey, string>
+  lastPoints: Record<
+    StrategyPaperValidationNavSeriesKey,
+    { x: number; y: number; item: StrategyPaperValidationRelativeNavPoint } | null
+  >
   baselineY: number | null
 }
+
+type StrategyPaperValidationNavSeriesKey = 'strategyNav' | 'indexNav'
 
 type TradeSortKey =
   | 'status'
@@ -266,6 +272,39 @@ function isWithinDateRange(value: string, start: string, end: string) {
   return true
 }
 
+function useMeasuredElementWidth<T extends HTMLElement>(fallbackWidth = 960) {
+  const [element, setElement] = useState<T | null>(null)
+  const [width, setWidth] = useState(fallbackWidth)
+  const ref = useCallback((node: T | null) => {
+    setElement(node)
+  }, [])
+
+  useEffect(() => {
+    if (!element) {
+      return undefined
+    }
+
+    const updateWidth = () => {
+      const nextWidth = Math.round(element.getBoundingClientRect().width)
+      if (Number.isFinite(nextWidth) && nextWidth > 0) {
+        setWidth(nextWidth)
+      }
+    }
+
+    updateWidth()
+
+    if (typeof ResizeObserver === 'undefined') {
+      return undefined
+    }
+
+    const observer = new ResizeObserver(updateWidth)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [element])
+
+  return [ref, width] as const
+}
+
 function getStrategyPaperValidationIndexDailyReturns(result: StrategyPaperValidationData | null) {
   const indexDailyReturns = (
     result as (StrategyPaperValidationData & {
@@ -350,7 +389,7 @@ function buildRealizedOnCloseRelativeNavChartState(
       eligibleTradeCount,
       activeTradeDates: 0,
       latestPoint: null,
-      emptyReason: '当前筛选结果里没有已平仓且带记录收益的交易，暂时无法绘制相对净值。',
+      emptyReason: '当前筛选结果里没有已平仓且带记录收益的交易，暂时无法绘制净值对比。',
     }
   }
 
@@ -361,7 +400,7 @@ function buildRealizedOnCloseRelativeNavChartState(
       eligibleTradeCount,
       activeTradeDates: 0,
       latestPoint: null,
-      emptyReason: '所选指数暂无可用日收益数据，无法绘制相对净值。',
+      emptyReason: '所选指数暂无可用日收益数据，无法绘制净值对比。',
     }
   }
 
@@ -391,7 +430,7 @@ function buildRealizedOnCloseRelativeNavChartState(
         eligibleTradeCount,
         activeTradeDates,
         latestPoint: null,
-        emptyReason: '指数净值序列异常，无法绘制相对净值。',
+        emptyReason: '指数净值序列异常，无法绘制净值对比。',
       }
     }
 
@@ -399,7 +438,6 @@ function buildRealizedOnCloseRelativeNavChartState(
       tradeDate,
       strategyNav,
       indexNav,
-      relativeNav: strategyNav / indexNav,
       strategyDailyReturn,
       indexDailyReturn,
       activeTradeCount: tradeReturns.length,
@@ -412,7 +450,7 @@ function buildRealizedOnCloseRelativeNavChartState(
       eligibleTradeCount,
       activeTradeDates,
       latestPoint: null,
-      emptyReason: '当前筛选后的平仓交易卖出日不在指数日收益区间内，暂时无法绘制相对净值。',
+      emptyReason: '当前筛选后的平仓交易卖出日不在指数日收益区间内，暂时无法绘制净值对比。',
     }
   }
 
@@ -436,7 +474,7 @@ function buildDailyHoldingRelativeNavChartState(
       eligibleTradeCount: 0,
       activeTradeDates: 0,
       latestPoint: null,
-      emptyReason: '所选指数暂无可用日收益数据，无法绘制相对净值。',
+      emptyReason: '所选指数暂无可用日收益数据，无法绘制净值对比。',
     }
   }
 
@@ -482,7 +520,7 @@ function buildDailyHoldingRelativeNavChartState(
               eligibleTradeCount,
               activeTradeDates: 0,
               latestPoint: null,
-              emptyReason: '逐日持仓净值序列异常，无法绘制相对净值。',
+              emptyReason: '逐日持仓净值序列异常，无法绘制净值对比。',
             }
           }
           dailyReturn = 0
@@ -497,7 +535,7 @@ function buildDailyHoldingRelativeNavChartState(
           eligibleTradeCount,
           activeTradeDates: 0,
           latestPoint: null,
-          emptyReason: '逐日持仓净值序列异常，无法绘制相对净值。',
+          emptyReason: '逐日持仓净值序列异常，无法绘制净值对比。',
         }
       }
 
@@ -526,7 +564,7 @@ function buildDailyHoldingRelativeNavChartState(
       eligibleTradeCount,
       activeTradeDates: 0,
       latestPoint: null,
-      emptyReason: '当前筛选结果里没有可用的逐日持仓收盘收益，暂时无法绘制相对净值。',
+      emptyReason: '当前筛选结果里没有可用的逐日持仓收盘收益，暂时无法绘制净值对比。',
     }
   }
 
@@ -562,7 +600,7 @@ function buildDailyHoldingRelativeNavChartState(
         eligibleTradeCount,
         activeTradeDates,
         latestPoint: null,
-        emptyReason: '逐日持仓净值序列异常，无法绘制相对净值。',
+        emptyReason: '逐日持仓净值序列异常，无法绘制净值对比。',
       }
     }
 
@@ -570,7 +608,6 @@ function buildDailyHoldingRelativeNavChartState(
       tradeDate,
       strategyNav,
       indexNav,
-      relativeNav: strategyNav / indexNav,
       strategyDailyReturn,
       indexDailyReturn,
       activeTradeCount: strategyDailyReturns.length,
@@ -583,7 +620,7 @@ function buildDailyHoldingRelativeNavChartState(
       eligibleTradeCount,
       activeTradeDates,
       latestPoint: null,
-      emptyReason: '当前筛选后的逐日持仓收益不在指数日收益区间内，暂时无法绘制相对净值。',
+      emptyReason: '当前筛选后的逐日持仓收益不在指数日收益区间内，暂时无法绘制净值对比。',
     }
   }
 
@@ -606,22 +643,27 @@ function buildRelativeNavChartState(
     : buildRealizedOnCloseRelativeNavChartState(trades, indexDailyReturns)
 }
 
-function buildRelativeNavChartGeometry(points: StrategyPaperValidationRelativeNavPoint[]) {
+function buildRelativeNavChartGeometry(
+  points: StrategyPaperValidationRelativeNavPoint[],
+  measuredWidth: number,
+) {
   if (points.length === 0) {
     return null
   }
 
-  const width = 960
+  const width = Math.max(1, Math.round(measuredWidth) || 960)
   const height = 248
-  const plotLeft = 56
+  const plotLeft = width < 480 ? 48 : 56
   const plotRight = 14
   const plotTop = 18
   const plotBottom = 34
-  const plotWidth = width - plotLeft - plotRight
+  const plotRightX = width - plotRight
+  const xAxisLabelY = height - 18
+  const plotWidth = Math.max(1, width - plotLeft - plotRight)
   const plotHeight = height - plotTop - plotBottom
-  const relativeValues = points.map((item) => item.relativeNav)
-  const minValue = Math.min(1, ...relativeValues)
-  const maxValue = Math.max(1, ...relativeValues)
+  const navValues = points.flatMap((item) => [item.strategyNav, item.indexNav])
+  const minValue = Math.min(1, ...navValues)
+  const maxValue = Math.max(1, ...navValues)
   const span = maxValue - minValue
   const valuePadding = span === 0 ? Math.max(maxValue * 0.06, 0.03) : span * 0.14
   const yMin = Math.max(0, minValue - valuePadding)
@@ -632,23 +674,46 @@ function buildRelativeNavChartGeometry(points: StrategyPaperValidationRelativeNa
     points.length === 1 ? plotLeft + plotWidth / 2 : plotLeft + (plotWidth * index) / (points.length - 1)
   const toY = (value: number) => plotTop + ((yMax - value) / safeRange) * plotHeight
 
-  const plottedPoints = points.map((item, index) => ({
-    x: toX(index),
-    y: toY(item.relativeNav),
-    item,
-  }))
+  const buildPlottedPoints = (seriesKey: StrategyPaperValidationNavSeriesKey) =>
+    points.map((item, index) => ({
+      x: toX(index),
+      y: toY(item[seriesKey]),
+      item,
+    }))
+  const buildLinePath = (
+    plottedPoints: Array<{ x: number; y: number; item: StrategyPaperValidationRelativeNavPoint }>,
+  ) =>
+    plottedPoints
+      .map(
+        (point, index) =>
+          `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`,
+      )
+      .join(' ')
 
-  const linePath = plottedPoints
-    .map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
-    .join(' ')
+  const strategyPlottedPoints = buildPlottedPoints('strategyNav')
+  const indexPlottedPoints = buildPlottedPoints('indexNav')
+  const linePaths = {
+    strategyNav: buildLinePath(strategyPlottedPoints),
+    indexNav: buildLinePath(indexPlottedPoints),
+  }
 
-  const firstPoint = plottedPoints[0]
-  const lastPoint = plottedPoints[plottedPoints.length - 1]
-  const bottomY = plotTop + plotHeight
-  const areaPath =
-    plottedPoints.length === 1
-      ? `M ${firstPoint.x.toFixed(2)} ${bottomY.toFixed(2)} L ${firstPoint.x.toFixed(2)} ${firstPoint.y.toFixed(2)} L ${firstPoint.x.toFixed(2)} ${bottomY.toFixed(2)} Z`
-      : `M ${firstPoint.x.toFixed(2)} ${bottomY.toFixed(2)} ${linePath.slice(1)} L ${lastPoint.x.toFixed(2)} ${bottomY.toFixed(2)} Z`
+  const buildLastPoint = (
+    plottedPoints: Array<{ x: number; y: number; item: StrategyPaperValidationRelativeNavPoint }>,
+  ) => {
+    const point = plottedPoints[plottedPoints.length - 1]
+    return point
+      ? {
+          x: point.x,
+          y: point.y,
+          item: point.item,
+        }
+      : null
+  }
+
+  const lastPoints = {
+    strategyNav: buildLastPoint(strategyPlottedPoints),
+    indexNav: buildLastPoint(indexPlottedPoints),
+  }
 
   const yTickCount = 5
   const yTicks = Array.from({ length: yTickCount }, (_, index) => {
@@ -688,17 +753,13 @@ function buildRelativeNavChartGeometry(points: StrategyPaperValidationRelativeNa
     width,
     height,
     viewBox: `0 0 ${width} ${height}`,
+    plotLeft,
+    plotRightX,
+    xAxisLabelY,
     yTicks,
     xLabels,
-    linePath,
-    areaPath,
-    lastPoint: lastPoint
-      ? {
-          x: lastPoint.x,
-          y: lastPoint.y,
-          item: lastPoint.item,
-        }
-      : null,
+    linePaths,
+    lastPoints,
     baselineY: yMin <= 1 && yMax >= 1 ? toY(1) : null,
   } satisfies StrategyPaperValidationRelativeNavChartGeometry
 }
@@ -713,36 +774,30 @@ const StrategyPaperValidationRelativeNavChart = memo(
   }) {
     const [mode, setMode] =
       useState<StrategyPaperValidationRelativeNavMode>('realized_on_close')
+    const [chartViewportRef, chartWidth] = useMeasuredElementWidth<HTMLDivElement>()
     const chartState = useMemo(
       () => buildRelativeNavChartState(trades, indexDailyReturns, mode),
       [indexDailyReturns, mode, trades],
     )
     const geometry = useMemo(
-      () => buildRelativeNavChartGeometry(chartState.points),
-      [chartState.points],
+      () => buildRelativeNavChartGeometry(chartState.points, chartWidth),
+      [chartState.points, chartWidth],
     )
     const modeDescription =
       mode === 'daily_holding'
-        ? '按当前筛选结果统计逐日持仓收盘收益，按当日持仓等权盯市，并与所选指数日收益做复利对比。'
-        : '按当前筛选结果统计平仓日等权收益，并与所选指数日收益做复利对比。'
+        ? '按当前筛选结果统计逐日持仓收盘收益，按当日持仓等权盯市，对比策略净值和指数净值。'
+        : '按当前筛选结果统计平仓日等权收益，对比策略净值和指数净值。'
     const eligibleTradeCountLabel =
       mode === 'daily_holding' ? '纳入持仓笔数' : '纳入平仓笔数'
     const activeTradeDatesLabel =
       mode === 'daily_holding' ? '有持仓交易日' : '有收益交易日'
-    const tooltipTradeCountLabel = mode === 'daily_holding' ? '当日持仓' : '当日平仓'
     const latestPoint = chartState.latestPoint
-    const latestToneClass =
-      !latestPoint || latestPoint.relativeNav === 1
-        ? 'is-flat'
-        : latestPoint.relativeNav > 1
-          ? 'is-positive'
-          : 'is-negative'
 
     return (
       <section className="strategy-paper-validation-relative-chart">
         <div className="strategy-paper-validation-relative-chart-head">
           <div className="strategy-paper-validation-relative-chart-title">
-            <strong>相对净值</strong>
+            <strong>净值对比</strong>
             <span>{modeDescription}</span>
           </div>
           <div className="strategy-paper-validation-relative-chart-head-side">
@@ -751,7 +806,7 @@ const StrategyPaperValidationRelativeNavChart = memo(
               <div
                 className="strategy-paper-validation-relative-chart-mode-switch"
                 role="group"
-                aria-label="相对净值收益计算模式"
+                aria-label="净值收益计算模式"
               >
                 {RELATIVE_NAV_MODE_OPTIONS.map((item) => {
                   const isActive = item.value === mode
@@ -774,16 +829,9 @@ const StrategyPaperValidationRelativeNavChart = memo(
                 })}
               </div>
             </div>
-            <div
-              className={[
-                'strategy-paper-validation-relative-chart-latest',
-                latestToneClass,
-              ]
-                .filter(Boolean)
-                .join(' ')}
-            >
-              <span>最新 {formatDateLabel(latestPoint?.tradeDate)}</span>
-              <strong>{formatNavValue(latestPoint?.relativeNav)}</strong>
+            <div className="strategy-paper-validation-relative-chart-latest">
+              <span>最新日期</span>
+              <strong>{formatDateLabel(latestPoint?.tradeDate)}</strong>
             </div>
           </div>
         </div>
@@ -807,18 +855,31 @@ const StrategyPaperValidationRelativeNavChart = memo(
           </div>
         </div>
 
+        <div className="strategy-paper-validation-relative-chart-legend" aria-label="净值曲线图例">
+          <span className="strategy-paper-validation-relative-chart-legend-item">
+            <i className="strategy-paper-validation-relative-chart-legend-mark strategy-paper-validation-relative-chart-legend-mark-strategy" />
+            策略净值
+          </span>
+          <span className="strategy-paper-validation-relative-chart-legend-item">
+            <i className="strategy-paper-validation-relative-chart-legend-mark strategy-paper-validation-relative-chart-legend-mark-index" />
+            指数净值
+          </span>
+        </div>
+
         {chartState.emptyReason || !geometry ? (
           <div className="strategy-paper-validation-relative-chart-empty">
-            {chartState.emptyReason ?? '当前区间暂无可展示的相对净值序列。'}
+            {chartState.emptyReason ?? '当前区间暂无可展示的净值对比序列。'}
           </div>
         ) : (
-          <div className="strategy-paper-validation-relative-chart-viewport">
+          <div
+            className="strategy-paper-validation-relative-chart-viewport"
+            ref={chartViewportRef}
+          >
             <svg
               className="strategy-paper-validation-relative-chart-svg"
               viewBox={geometry.viewBox}
-              preserveAspectRatio="none"
               role="img"
-              aria-label={`策略相对净值走势图（${mode === 'daily_holding' ? '逐日持仓计算收益' : '交易完成后计算收益'}）`}
+              aria-label={`策略和指数净值走势图（${mode === 'daily_holding' ? '逐日持仓计算收益' : '交易完成后计算收益'}）`}
             >
               <defs>
                 <linearGradient
@@ -836,14 +897,14 @@ const StrategyPaperValidationRelativeNavChart = memo(
               {geometry.yTicks.map((tick) => (
                 <g key={`relative-y-${tick.y.toFixed(2)}`}>
                   <line
-                    x1={56}
+                    x1={geometry.plotLeft}
                     y1={tick.y}
-                    x2={946}
+                    x2={geometry.plotRightX}
                     y2={tick.y}
                     className="strategy-paper-validation-relative-chart-grid"
                   />
                   <text
-                    x={48}
+                    x={geometry.plotLeft - 8}
                     y={tick.y + 4}
                     className="strategy-paper-validation-relative-chart-axis strategy-paper-validation-relative-chart-axis-y"
                   >
@@ -856,7 +917,7 @@ const StrategyPaperValidationRelativeNavChart = memo(
                 <text
                   key={`relative-x-${label.value}-${label.x.toFixed(2)}`}
                   x={label.x}
-                  y={230}
+                  y={geometry.xAxisLabelY}
                   textAnchor={label.anchor}
                   className="strategy-paper-validation-relative-chart-axis strategy-paper-validation-relative-chart-axis-x"
                 >
@@ -866,32 +927,45 @@ const StrategyPaperValidationRelativeNavChart = memo(
 
               {geometry.baselineY !== null ? (
                 <line
-                  x1={56}
+                  x1={geometry.plotLeft}
                   y1={geometry.baselineY}
-                  x2={946}
+                  x2={geometry.plotRightX}
                   y2={geometry.baselineY}
                   className="strategy-paper-validation-relative-chart-baseline"
                 />
               ) : null}
 
               <path
-                d={geometry.areaPath}
-                className="strategy-paper-validation-relative-chart-area"
+                d={geometry.linePaths.strategyNav}
+                className="strategy-paper-validation-relative-chart-line strategy-paper-validation-relative-chart-line-strategy"
               />
               <path
-                d={geometry.linePath}
-                className="strategy-paper-validation-relative-chart-line"
+                d={geometry.linePaths.indexNav}
+                className="strategy-paper-validation-relative-chart-line strategy-paper-validation-relative-chart-line-index"
               />
 
-              {geometry.lastPoint ? (
+              {geometry.lastPoints.strategyNav ? (
                 <circle
-                  cx={geometry.lastPoint.x}
-                  cy={geometry.lastPoint.y}
-                  r={4.5}
-                  className="strategy-paper-validation-relative-chart-dot"
+                  cx={geometry.lastPoints.strategyNav.x}
+                  cy={geometry.lastPoints.strategyNav.y}
+                  r={4}
+                  className="strategy-paper-validation-relative-chart-dot strategy-paper-validation-relative-chart-dot-strategy"
                 >
                   <title>
-                    {`${formatDateLabel(geometry.lastPoint.item.tradeDate)}\n相对净值 ${formatNavValue(geometry.lastPoint.item.relativeNav)}\n策略净值 ${formatNavValue(geometry.lastPoint.item.strategyNav)}\n指数净值 ${formatNavValue(geometry.lastPoint.item.indexNav)}\n${tooltipTradeCountLabel} ${geometry.lastPoint.item.activeTradeCount} 笔\n策略日收益 ${formatPercent(geometry.lastPoint.item.strategyDailyReturn * 100)}\n指数日收益 ${formatPercent(geometry.lastPoint.item.indexDailyReturn * 100)}`}
+                    {`${formatDateLabel(geometry.lastPoints.strategyNav.item.tradeDate)}\n策略净值 ${formatNavValue(geometry.lastPoints.strategyNav.item.strategyNav)}`}
+                  </title>
+                </circle>
+              ) : null}
+
+              {geometry.lastPoints.indexNav ? (
+                <circle
+                  cx={geometry.lastPoints.indexNav.x}
+                  cy={geometry.lastPoints.indexNav.y}
+                  r={4}
+                  className="strategy-paper-validation-relative-chart-dot strategy-paper-validation-relative-chart-dot-index"
+                >
+                  <title>
+                    {`${formatDateLabel(geometry.lastPoints.indexNav.item.tradeDate)}\n指数净值 ${formatNavValue(geometry.lastPoints.indexNav.item.indexNav)}`}
                   </title>
                 </circle>
               ) : null}

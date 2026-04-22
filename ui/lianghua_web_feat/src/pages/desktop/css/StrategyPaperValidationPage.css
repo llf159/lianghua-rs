@@ -371,18 +371,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-.strategy-paper-validation-relative-chart-latest.is-positive strong {
-  color: #c2410c;
-}
-
-.strategy-paper-validation-relative-chart-latest.is-negative strong {
-  color: #15803d;
-}
-
-.strategy-paper-validation-relative-chart-latest.is-flat strong {
-  color: #475569;
-}
-
 .strategy-paper-validation-relative-chart-metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -404,6 +392,38 @@
   font-size: 15px;
   line-height: 1.2;
   font-variant-numeric: tabular-nums;
+}
+
+.strategy-paper-validation-relative-chart-legend {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.strategy-paper-validation-relative-chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.strategy-paper-validation-relative-chart-legend-mark {
+  width: 18px;
+  height: 3px;
+  border-radius: 999px;
+  background: #94a3b8;
+}
+
+.strategy-paper-validation-relative-chart-legend-mark-strategy {
+  background: var(--theme-orange-500, #f97316);
+}
+
+.strategy-paper-validation-relative-chart-legend-mark-index {
+  background: #2563eb;
 }
 
 .strategy-paper-validation-relative-chart-empty {
@@ -455,22 +475,34 @@
   stroke-dasharray: 4 4;
 }
 
-.strategy-paper-validation-relative-chart-area {
-  fill: url(#strategy-paper-validation-relative-chart-fill);
-}
-
 .strategy-paper-validation-relative-chart-line {
   fill: none;
-  stroke: var(--theme-orange-500, #f97316);
-  stroke-width: 2.5;
+  stroke-width: 2.35;
   stroke-linecap: round;
   stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.strategy-paper-validation-relative-chart-line-strategy {
+  stroke: var(--theme-orange-500, #f97316);
+}
+
+.strategy-paper-validation-relative-chart-line-index {
+  stroke: #2563eb;
 }
 
 .strategy-paper-validation-relative-chart-dot {
-  fill: var(--theme-orange-500, #f97316);
   stroke: #fff;
   stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.strategy-paper-validation-relative-chart-dot-strategy {
+  fill: var(--theme-orange-500, #f97316);
+}
+
+.strategy-paper-validation-relative-chart-dot-index {
+  fill: #2563eb;
 }
 
 .strategy-paper-validation-table {

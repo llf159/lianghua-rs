@@ -54,7 +54,6 @@ export default function IntradayTemplateManagerModal({
     useState<IntradayMonitorTemplate>(createTemplate(""));
   const [templateEditorNotice, setTemplateEditorNotice] = useState("");
   const [templateEditorError, setTemplateEditorError] = useState("");
-  const [templateValidationMessage, setTemplateValidationMessage] = useState("");
   const [templateValidating, setTemplateValidating] = useState(false);
 
   const sourcePathTrimmed = sourcePath.trim();
@@ -65,7 +64,6 @@ export default function IntradayTemplateManagerModal({
     setTemplateEditorDraft(createTemplate(""));
     setTemplateEditorNotice("");
     setTemplateEditorError("");
-    setTemplateValidationMessage("");
   }
 
   function openTemplateEditorForEdit(template: IntradayMonitorTemplate) {
@@ -74,21 +72,22 @@ export default function IntradayTemplateManagerModal({
     setTemplateEditorDraft({ ...template });
     setTemplateEditorNotice("");
     setTemplateEditorError("");
-    setTemplateValidationMessage("");
   }
 
   async function validateTemplateExpressionCore(expression: string) {
     if (!sourcePathTrimmed) {
       throw new Error("请先完成数据目录加载");
     }
-    const result = await validateIntradayMonitorTemplateExpression(expression);
+    const result = await validateIntradayMonitorTemplateExpression(
+      sourcePathTrimmed,
+      expression,
+    );
     return result.message;
   }
 
   async function onValidateTemplateExpression() {
     const expression = templateEditorDraft.expression.trim();
     if (!expression) {
-      setTemplateValidationMessage("");
       setTemplateEditorError("请先填写模板表达式");
       return;
     }
@@ -97,11 +96,9 @@ export default function IntradayTemplateManagerModal({
     setTemplateEditorError("");
     setTemplateEditorNotice("");
     try {
-      const message = await validateTemplateExpressionCore(expression);
-      setTemplateValidationMessage(message);
+      await validateTemplateExpressionCore(expression);
       setTemplateEditorNotice("表达式校验通过");
     } catch (validationError) {
-      setTemplateValidationMessage("");
       setTemplateEditorError(`表达式校验失败: ${String(validationError)}`);
     } finally {
       setTemplateValidating(false);
@@ -120,11 +117,9 @@ export default function IntradayTemplateManagerModal({
     setTemplateEditorError("");
     setTemplateEditorNotice("");
     try {
-      const message = await validateTemplateExpressionCore(expression);
-      setTemplateValidationMessage(message);
-      setTemplateEditorNotice("表达式校验通过");
+      await validateTemplateExpressionCore(expression);
+      setTemplateEditorNotice("");
     } catch (validationError) {
-      setTemplateValidationMessage("");
       setTemplateEditorError(`表达式校验失败: ${String(validationError)}`);
       return;
     } finally {
@@ -142,7 +137,6 @@ export default function IntradayTemplateManagerModal({
       ]);
       setTemplateEditorNotice("模板已新增");
       setTemplateEditorError("");
-      setTemplateValidationMessage("");
       setTemplateEditorDraft(createTemplate(""));
       return;
     }
@@ -277,13 +271,6 @@ export default function IntradayTemplateManagerModal({
               />
             </div>
 
-            {templateValidationMessage ? (
-              <div className="intraday-template-check intraday-template-check-ok">
-                <div>{templateValidationMessage}</div>
-                <div>校验通道：策略管理规则草稿校验</div>
-              </div>
-            ) : null}
-
             {templateEditorNotice ? (
               <div className="intraday-template-check intraday-template-check-ok">
                 {templateEditorNotice}
@@ -301,6 +288,9 @@ export default function IntradayTemplateManagerModal({
         <div className="intraday-template-tip-block">
           <div>
             常用字段：<code>C / O / H / L / V / PCT_CHG / TOTAL_MV_YI / ZHANG</code>
+          </div>
+          <div>
+            指标字段：可直接引用 <code>stock_data</code> 已落库指标列，或 <code>ind.toml</code> 中定义的指标名。
           </div>
           <div>
             实时字段：<code>REALTIME_CHANGE_OPEN_PCT / REALTIME_FALL_FROM_HIGH_PCT / REALTIME_VOL_RATIO / VOL_RATIO</code>

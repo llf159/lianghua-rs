@@ -209,11 +209,12 @@ export async function refreshIntradayMonitorTemplateTags(
 }
 
 export async function validateIntradayMonitorTemplateExpression(
+  sourcePath: string,
   expression: string,
 ) {
   return invoke<IntradayMonitorTemplateValidationData>(
     "validate_intraday_monitor_template_expression",
-    { expression },
+    { sourcePath, expression },
   );
 }
 

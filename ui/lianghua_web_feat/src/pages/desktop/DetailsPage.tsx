@@ -379,6 +379,23 @@ function getRealtimeSeriesColor(row: DetailKlineRow, fallbackColor: string) {
   return fallbackColor;
 }
 
+function getRealtimeDirectionalColor(
+  row: DetailKlineRow | undefined,
+  fallbackColor: string,
+  direction: "up" | "down" | "flat",
+) {
+  if (!row?.is_realtime) {
+    return fallbackColor;
+  }
+  if (direction === "up") {
+    return CANDLE_REALTIME_UP_COLOR;
+  }
+  if (direction === "down") {
+    return CANDLE_REALTIME_DOWN_COLOR;
+  }
+  return CANDLE_FLAT_COLOR;
+}
+
 function buildTopOptionLabel(row: OverviewRow) {
   const rankText =
     typeof row.rank === "number" && Number.isFinite(row.rank)
@@ -2283,17 +2300,24 @@ function renderChartPanel(
         const lowY = yAt(body.low);
         const bodyTop = Math.min(openY, closeY);
         const bodyHeight = Math.max(Math.abs(openY - closeY), 1.6);
-        const color =
+        const direction =
           body.close > body.open
-            ? CANDLE_UP_COLOR
+            ? "up"
             : body.close < body.open
+              ? "down"
+              : "flat";
+        const color =
+          direction === "up"
+            ? CANDLE_UP_COLOR
+            : direction === "down"
               ? CANDLE_DOWN_COLOR
               : CANDLE_FLAT_COLOR;
         const sourceRow = items[body.item_index];
-        const resolvedColor =
-          sourceRow !== undefined
-            ? getRealtimeSeriesColor(sourceRow, color)
-            : color;
+        const resolvedColor = getRealtimeDirectionalColor(
+          sourceRow,
+          color,
+          direction,
+        );
 
         return (
           <g key={`${panel.key}-${body.trade_date}`}>
