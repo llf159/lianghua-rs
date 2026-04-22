@@ -282,6 +282,26 @@ function waitForNextPaint() {
   });
 }
 
+function getWarningMessage(data: {
+  warning_message?: string | null;
+  warningMessage?: string | null;
+}) {
+  return (
+    data.warning_message?.trim() || data.warningMessage?.trim() || ""
+  );
+}
+
+function mergeStatusMessages(messages: Array<string | null | undefined>) {
+  const normalized = Array.from(
+    new Set(
+      messages
+        .map((message) => message?.trim() ?? "")
+        .filter((message) => message !== ""),
+    ),
+  );
+  return normalized.join("；");
+}
+
 export default function IntradayMonitorRealtimePage() {
   const { excludedConcepts, excludeStBoard } = useConceptExclusions();
 
@@ -815,11 +835,10 @@ export default function IntradayMonitorRealtimePage() {
         }
 
         const failedCount = settledResults.length - successResults.length;
-        if (failedCount > 0) {
-          setError(
-            `部分榜单读取失败：${failedCount} 个区块未返回，已展示其余数据`,
-          );
-        }
+        const partialFailureMessage =
+          failedCount > 0
+            ? `部分榜单读取失败：${failedCount} 个区块未返回，已展示其余数据`
+            : "";
 
         const mergedDateOptions = normalizeTradeDates(
           successResults.flatMap((item) => item.rank_date_options ?? []),
@@ -852,19 +871,14 @@ export default function IntradayMonitorRealtimePage() {
             rowMap.set(unique, row);
           }
         }
-        const warningMessage =
-          successResults.find(
-            (item) => item.warning_message || item.warningMessage,
-          )?.warning_message ??
-          successResults.find(
-            (item) => item.warning_message || item.warningMessage,
-          )?.warningMessage ??
-          "";
+        const warningMessage = mergeStatusMessages(
+          successResults.map((item) => getWarningMessage(item)),
+        );
         setRows(Array.from(rowMap.values()));
         setRefreshedAt(
           successResults.find((item) => item.refreshed_at)?.refreshed_at ?? "",
         );
-        setError(warningMessage);
+        setError(mergeStatusMessages([partialFailureMessage, warningMessage]));
       } else {
         await waitForNextPaint();
         setRefreshStage("refreshing");
@@ -880,9 +894,10 @@ export default function IntradayMonitorRealtimePage() {
           });
           refreshedRows.push(...(data.rows ?? []));
           if (!refreshed && data.refreshed_at) refreshed = data.refreshed_at;
-          if (!warningMessage) {
-            warningMessage = data.warning_message ?? data.warningMessage ?? "";
-          }
+          warningMessage = mergeStatusMessages([
+            warningMessage,
+            getWarningMessage(data),
+          ]);
         }
         setRows(refreshedRows);
         setRefreshedAt(refreshed);
@@ -935,9 +950,10 @@ export default function IntradayMonitorRealtimePage() {
         });
         refreshedRows.push(...(data.rows ?? []));
         if (!refreshed && data.refreshed_at) refreshed = data.refreshed_at;
-        if (!warningMessage) {
-          warningMessage = data.warning_message ?? data.warningMessage ?? "";
-        }
+        warningMessage = mergeStatusMessages([
+          warningMessage,
+          getWarningMessage(data),
+        ]);
       }
 
       const refreshedMap = new Map(
@@ -1002,7 +1018,7 @@ export default function IntradayMonitorRealtimePage() {
           return refreshedMap.get(key) ?? item;
         }),
       );
-      setError(data.warning_message ?? data.warningMessage ?? "");
+      setError(getWarningMessage(data));
     } catch (refreshError) {
       setError(`仅刷新标记失败: ${String(refreshError)}`);
     } finally {

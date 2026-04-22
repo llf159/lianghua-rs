@@ -158,41 +158,7 @@ fn open_result_conn(source_path: &str) -> Result<Connection, String> {
     Connection::open(result_db_str).map_err(|e| format!("打开结果库失败: {e}"))
 }
 
-fn load_latest_runtime_trade_date(
-    reader: &DataReader,
-    ts_code: &str,
-    adj_type: &str,
-) -> Result<Option<String>, String> {
-    let mut stmt = reader
-        .conn
-        .prepare(
-            r#"
-            SELECT MAX(trade_date)
-            FROM stock_data
-            WHERE ts_code = ?
-              AND adj_type = ?
-            "#,
-        )
-        .map_err(|e| format!("预编译 runtime 最新交易日失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![ts_code, adj_type])
-        .map_err(|e| format!("查询 runtime 最新交易日失败: {e}"))?;
-
-    if let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取 runtime 最新交易日失败: {e}"))?
-    {
-        let trade_date: Option<String> = row
-            .get(0)
-            .map_err(|e| format!("读取 runtime 最新交易日字段失败: {e}"))?;
-        return Ok(trade_date.filter(|value| !value.trim().is_empty()));
-    }
-
-    Ok(None)
-}
-
 fn resolve_runtime_trade_date(
-    reader: &DataReader,
     row: &IntradayMonitorRow,
     quote: &SinaQuote,
 ) -> Result<String, String> {
@@ -200,30 +166,15 @@ fn resolve_runtime_trade_date(
         return Ok(trade_date);
     }
 
-    if let Some(trade_date) = row
-        .trade_date
-        .as_ref()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-    {
-        return Ok(trade_date.to_string());
-    }
-
-    if let Some(trade_date) =
-        load_latest_runtime_trade_date(reader, &row.ts_code, DEFAULT_ADJ_TYPE)?
-    {
-        return Ok(trade_date);
-    }
-
     let raw_quote_date = quote.date.trim();
     Err(if raw_quote_date.is_empty() {
         format!(
-            "{} 实时行情缺少可用日期，且历史K线无可兜底交易日，无法导入 runtime",
+            "{} 实时行情缺少可用日期，已停止 runtime 计算以避免把最新行情静默写入旧交易日",
             row.ts_code
         )
     } else {
         format!(
-            "{} 实时行情日期无法识别: {}，且历史K线无可兜底交易日，无法导入 runtime",
+            "{} 实时行情日期无法识别: {}，已停止 runtime 计算以避免把最新行情静默写入旧交易日",
             row.ts_code, raw_quote_date
         )
     })
@@ -755,7 +706,7 @@ fn build_intraday_runtime_row_data(
     need_rows: usize,
     indicator_cache: &[IndsCache],
 ) -> Result<RowData, String> {
-    let end_date = resolve_runtime_trade_date(reader, row, quote)?;
+    let end_date = resolve_runtime_trade_date(row, quote)?;
 
     let mut row_data = match reader.load_one_tail_rows(
         &row.ts_code,
@@ -1437,7 +1388,47 @@ mod tests {
     }
 
     #[test]
-    fn build_quote_only_runtime_row_data_accepts_fallback_trade_date() {
+    fn resolve_runtime_trade_date_requires_quote_date() {
+        let row = IntradayMonitorRow {
+            rank_mode: "total".to_string(),
+            ts_code: "000001.SZ".to_string(),
+            trade_date: Some("20240401".to_string()),
+            scene_name: String::new(),
+            direction: None,
+            total_score: None,
+            scene_score: None,
+            risk_score: None,
+            confirm_strength: None,
+            risk_intensity: None,
+            scene_status: None,
+            rank: None,
+            name: Some("平安银行".to_string()),
+            board: BOARD_MAIN.to_string(),
+            total_mv_yi: None,
+            concept: None,
+            realtime_price: None,
+            realtime_open: None,
+            realtime_high: None,
+            realtime_low: None,
+            realtime_pre_close: None,
+            realtime_vol: None,
+            realtime_amount: None,
+            realtime_change_pct: None,
+            realtime_change_open_pct: None,
+            realtime_fall_from_high_pct: None,
+            realtime_vol_ratio: None,
+            template_tag_text: None,
+            template_tag_tone: None,
+        };
+        let error = resolve_runtime_trade_date(&row, &sample_quote())
+            .expect_err("missing quote date should fail");
+
+        assert!(error.contains("实时行情缺少可用日期"));
+        assert!(error.contains("避免把最新行情静默写入旧交易日"));
+    }
+
+    #[test]
+    fn build_quote_only_runtime_row_data_accepts_explicit_trade_date() {
         let row_data = build_quote_only_runtime_row_data(&sample_quote(), "20240401")
             .expect("quote-only runtime row data");
 
@@ -1449,7 +1440,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_realtime_quote_into_row_data_accepts_fallback_trade_date() {
+    fn merge_realtime_quote_into_row_data_accepts_explicit_trade_date() {
         let mut row_data = sample_row_data();
 
         merge_realtime_quote_into_row_data(&mut row_data, &sample_quote(), "20240401")

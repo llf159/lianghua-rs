@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 
 use chrono::{Days, NaiveDate};
-use duckdb::{params, Connection};
+use duckdb::{Connection, params};
 use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::{
     data::scoring_data::row_into_rt,
-    data::{load_stock_list, load_trade_date_list, result_db_path, stock_list_path, DataReader},
+    data::{DataReader, load_stock_list, load_trade_date_list, result_db_path, stock_list_path},
     expr::{
         eval::{Runtime, Value},
-        parser::{lex_all, Expr, Parser, Stmt, Stmts},
+        parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
     scoring::tools::{
         calc_query_need_rows, calc_query_start_date, inject_stock_extra_fields, load_st_list,
@@ -88,6 +88,7 @@ pub struct StrategyPaperValidationTradeRow {
 pub struct StrategyPaperValidationDailyHoldingCloseReturn {
     pub trade_date: String,
     pub close_return_pct: f64,
+    pub daily_return_pct: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -930,11 +931,15 @@ fn is_sell_price_executable(
 }
 
 fn calc_return_pct(price: Option<f64>, buy_cost_price: f64) -> Option<f64> {
+    calc_return_pct_from_base(price, buy_cost_price)
+}
+
+fn calc_return_pct_from_base(price: Option<f64>, base_price: f64) -> Option<f64> {
     let price = normalize_valid_price(price)?;
-    if !buy_cost_price.is_finite() || buy_cost_price.abs() < PRICE_EPS {
+    if !base_price.is_finite() || base_price.abs() < PRICE_EPS {
         return None;
     }
-    Some((price / buy_cost_price - 1.0) * 100.0)
+    Some((price / base_price - 1.0) * 100.0)
 }
 
 fn build_daily_holding_close_returns(
@@ -958,10 +963,24 @@ fn build_daily_holding_close_returns(
         else {
             return Vec::new();
         };
+        let Some(daily_return_pct) = (if index == buy_index {
+            Some(close_return_pct)
+        } else {
+            match close_series.get(index - 1).copied().flatten() {
+                Some(previous_close) => calc_return_pct_from_base(
+                    close_series.get(index).copied().flatten(),
+                    previous_close,
+                ),
+                None => None,
+            }
+        }) else {
+            return Vec::new();
+        };
 
         out.push(StrategyPaperValidationDailyHoldingCloseReturn {
             trade_date: trade_date.clone(),
             close_return_pct,
+            daily_return_pct,
         });
     }
 
@@ -1366,7 +1385,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use duckdb::{params, Connection};
+    use duckdb::{Connection, params};
 
     use crate::{data::RowData, scoring::tools::calc_zhang_pct};
 
@@ -1594,6 +1613,12 @@ mod tests {
         assert!((trade.daily_holding_close_returns[0].close_return_pct - 0.0).abs() < 1e-9);
         assert!((trade.daily_holding_close_returns[1].close_return_pct + 9.5).abs() < 1e-9);
         assert!((trade.daily_holding_close_returns[2].close_return_pct + 8.0).abs() < 1e-9);
+        assert!((trade.daily_holding_close_returns[0].daily_return_pct - 0.0).abs() < 1e-9);
+        assert!((trade.daily_holding_close_returns[1].daily_return_pct + 9.5).abs() < 1e-9);
+        assert!(
+            (trade.daily_holding_close_returns[2].daily_return_pct - 1.6574585635359114).abs()
+                < 1e-9
+        );
     }
 
     #[test]
@@ -1640,6 +1665,8 @@ mod tests {
         );
         assert!((trade.daily_holding_close_returns[0].close_return_pct - 0.0).abs() < 1e-9);
         assert!((trade.daily_holding_close_returns[1].close_return_pct + 9.5).abs() < 1e-9);
+        assert!((trade.daily_holding_close_returns[0].daily_return_pct - 0.0).abs() < 1e-9);
+        assert!((trade.daily_holding_close_returns[1].daily_return_pct + 9.5).abs() < 1e-9);
     }
 
     #[test]

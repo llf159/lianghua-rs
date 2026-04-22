@@ -44,6 +44,7 @@ export type StrategyPaperValidationTradeRow = {
 export type StrategyPaperValidationDailyHoldingCloseReturn = {
   trade_date: string
   close_return_pct: number
+  daily_return_pct: number
 }
 
 export type StrategyPaperValidationIndexDailyReturn = {

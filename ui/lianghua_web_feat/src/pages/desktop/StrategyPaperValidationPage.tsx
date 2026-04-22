@@ -76,6 +76,7 @@ type StrategyPaperValidationIndexDailyReturn = {
 type StrategyPaperValidationHoldingCloseReturn = {
   trade_date?: string | null
   close_return_pct?: number | null
+  daily_return_pct?: number | null
 }
 
 type StrategyPaperValidationChartTradeRow = StrategyPaperValidationTradeRow & {
@@ -285,6 +286,18 @@ function getStrategyPaperValidationChartTrades(result: StrategyPaperValidationDa
   return Array.isArray(trades) ? trades : []
 }
 
+function normalizeMarkedNav(closeReturnPct?: number | null) {
+  if (typeof closeReturnPct !== 'number' || !Number.isFinite(closeReturnPct)) {
+    return null
+  }
+
+  const markedNav = 1 + closeReturnPct / 100
+  if (!Number.isFinite(markedNav) || markedNav < 0) {
+    return null
+  }
+  return markedNav
+}
+
 function buildRelativeNavChartBackbone(
   indexDailyReturns: StrategyPaperValidationIndexDailyReturn[],
 ) {
@@ -427,7 +440,7 @@ function buildDailyHoldingRelativeNavChartState(
     }
   }
 
-  const holdingValuesByDate = new Map<string, number[]>()
+  const holdingDailyReturnsByDate = new Map<string, number[]>()
   let eligibleTradeCount = 0
 
   for (const row of trades) {
@@ -438,37 +451,71 @@ function buildDailyHoldingRelativeNavChartState(
       continue
     }
 
-    const markedValueByDate = new Map<string, number>()
+    const dailyReturnByDate = new Map<string, number>()
+    let previousMarkedValue: number | null = null
+
     for (const item of dailyHoldingReturns) {
       const tradeDate = item.trade_date?.trim() ?? ''
       if (!isCompactTradeDate(tradeDate) || !backboneMap.has(tradeDate)) {
         continue
       }
 
-      const closeReturnPct = item.close_return_pct
-      if (typeof closeReturnPct !== 'number' || !Number.isFinite(closeReturnPct)) {
+      const markedValue = normalizeMarkedNav(item.close_return_pct)
+      if (markedValue === null) {
         continue
       }
 
-      const markedValue = 1 + closeReturnPct / 100
-      if (!Number.isFinite(markedValue) || markedValue < 0) {
-        continue
+      let dailyReturn =
+        typeof item.daily_return_pct === 'number' && Number.isFinite(item.daily_return_pct)
+          ? item.daily_return_pct / 100
+          : markedValue - 1
+      if (
+        !(
+          typeof item.daily_return_pct === 'number' && Number.isFinite(item.daily_return_pct)
+        ) &&
+        previousMarkedValue !== null
+      ) {
+        if (previousMarkedValue === 0) {
+          if (markedValue !== 0) {
+            return {
+              points: [],
+              eligibleTradeCount,
+              activeTradeDates: 0,
+              latestPoint: null,
+              emptyReason: '逐日持仓净值序列异常，无法绘制相对净值。',
+            }
+          }
+          dailyReturn = 0
+        } else {
+          dailyReturn = markedValue / previousMarkedValue - 1
+        }
       }
 
-      markedValueByDate.set(tradeDate, markedValue)
+      if (!Number.isFinite(dailyReturn)) {
+        return {
+          points: [],
+          eligibleTradeCount,
+          activeTradeDates: 0,
+          latestPoint: null,
+          emptyReason: '逐日持仓净值序列异常，无法绘制相对净值。',
+        }
+      }
+
+      dailyReturnByDate.set(tradeDate, dailyReturn)
+      previousMarkedValue = markedValue
     }
 
-    if (markedValueByDate.size === 0) {
+    if (dailyReturnByDate.size === 0) {
       continue
     }
 
     eligibleTradeCount += 1
-    for (const [tradeDate, markedValue] of markedValueByDate) {
-      const existingValues = holdingValuesByDate.get(tradeDate)
+    for (const [tradeDate, dailyReturn] of dailyReturnByDate) {
+      const existingValues = holdingDailyReturnsByDate.get(tradeDate)
       if (existingValues) {
-        existingValues.push(markedValue)
+        existingValues.push(dailyReturn)
       } else {
-        holdingValuesByDate.set(tradeDate, [markedValue])
+        holdingDailyReturnsByDate.set(tradeDate, [dailyReturn])
       }
     }
   }
@@ -486,34 +533,17 @@ function buildDailyHoldingRelativeNavChartState(
   let strategyNav = 1
   let indexNav = 1
   let activeTradeDates = 0
-  let previousMarkedValue: number | null = null
   const points: StrategyPaperValidationRelativeNavPoint[] = []
 
   for (const tradeDate of backboneDates) {
-    const holdingValues = holdingValuesByDate.get(tradeDate) ?? []
-    const currentMarkedValue =
-      holdingValues.length > 0
-        ? holdingValues.reduce((sum, value) => sum + value, 0) / holdingValues.length
-        : null
-    let strategyDailyReturn = 0
+    const strategyDailyReturns = holdingDailyReturnsByDate.get(tradeDate) ?? []
+    const strategyDailyReturn =
+      strategyDailyReturns.length > 0
+        ? strategyDailyReturns.reduce((sum, value) => sum + value, 0) /
+          strategyDailyReturns.length
+        : 0
 
-    if (currentMarkedValue !== null) {
-      if (previousMarkedValue === null) {
-        strategyDailyReturn = currentMarkedValue - 1
-      } else if (previousMarkedValue === 0) {
-        if (currentMarkedValue !== 0) {
-          return {
-            points: [],
-            eligibleTradeCount,
-            activeTradeDates,
-            latestPoint: null,
-            emptyReason: '逐日持仓净值序列异常，无法绘制相对净值。',
-          }
-        }
-        strategyDailyReturn = 0
-      } else {
-        strategyDailyReturn = currentMarkedValue / previousMarkedValue - 1
-      }
+    if (strategyDailyReturns.length > 0) {
       activeTradeDates += 1
     }
 
@@ -543,9 +573,8 @@ function buildDailyHoldingRelativeNavChartState(
       relativeNav: strategyNav / indexNav,
       strategyDailyReturn,
       indexDailyReturn,
-      activeTradeCount: holdingValues.length,
+      activeTradeCount: strategyDailyReturns.length,
     })
-    previousMarkedValue = currentMarkedValue
   }
 
   if (activeTradeDates === 0) {
