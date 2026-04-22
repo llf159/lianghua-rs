@@ -852,15 +852,25 @@ export default function IntradayMonitorRealtimePage() {
             rowMap.set(unique, row);
           }
         }
+        const warningMessage =
+          successResults.find(
+            (item) => item.warning_message || item.warningMessage,
+          )?.warning_message ??
+          successResults.find(
+            (item) => item.warning_message || item.warningMessage,
+          )?.warningMessage ??
+          "";
         setRows(Array.from(rowMap.values()));
         setRefreshedAt(
           successResults.find((item) => item.refreshed_at)?.refreshed_at ?? "",
         );
+        setError(warningMessage);
       } else {
         await waitForNextPaint();
         setRefreshStage("refreshing");
         const refreshedRows: IntradayMonitorRow[] = [];
         let refreshed = "";
+        let warningMessage = "";
         for (let start = 0; start < rows.length; start += REFRESH_BATCH_SIZE) {
           const data = await refreshIntradayMonitorRealtime({
             sourcePath: sourcePathTrimmed,
@@ -870,9 +880,13 @@ export default function IntradayMonitorRealtimePage() {
           });
           refreshedRows.push(...(data.rows ?? []));
           if (!refreshed && data.refreshed_at) refreshed = data.refreshed_at;
+          if (!warningMessage) {
+            warningMessage = data.warning_message ?? data.warningMessage ?? "";
+          }
         }
         setRows(refreshedRows);
         setRefreshedAt(refreshed);
+        setError(warningMessage);
       }
     } catch (readError) {
       setError(`读取失败: ${String(readError)}`);
@@ -907,6 +921,7 @@ export default function IntradayMonitorRealtimePage() {
       setRefreshStage("refreshing");
       const refreshedRows: IntradayMonitorRow[] = [];
       let refreshed = "";
+      let warningMessage = "";
       for (
         let start = 0;
         start < targetRows.length;
@@ -920,6 +935,9 @@ export default function IntradayMonitorRealtimePage() {
         });
         refreshedRows.push(...(data.rows ?? []));
         if (!refreshed && data.refreshed_at) refreshed = data.refreshed_at;
+        if (!warningMessage) {
+          warningMessage = data.warning_message ?? data.warningMessage ?? "";
+        }
       }
 
       const refreshedMap = new Map(
@@ -935,6 +953,7 @@ export default function IntradayMonitorRealtimePage() {
         }),
       );
       setRefreshedAt(refreshed);
+      setError(warningMessage);
     } catch (refreshError) {
       setError(`刷新失败: ${String(refreshError)}`);
     } finally {
@@ -983,6 +1002,7 @@ export default function IntradayMonitorRealtimePage() {
           return refreshedMap.get(key) ?? item;
         }),
       );
+      setError(data.warning_message ?? data.warningMessage ?? "");
     } catch (refreshError) {
       setError(`仅刷新标记失败: ${String(refreshError)}`);
     } finally {

@@ -308,6 +308,20 @@
   outline-offset: 2px;
 }
 
+.strategy-paper-validation-return-value {
+  font-variant-numeric: tabular-nums;
+}
+
+.strategy-paper-validation-return-positive {
+  color: #c2410c;
+  font-weight: 600;
+}
+
+.strategy-paper-validation-return-negative {
+  color: #15803d;
+  font-weight: 600;
+}
+
 .strategy-paper-validation-pagination {
   display: flex;
   justify-content: space-between;

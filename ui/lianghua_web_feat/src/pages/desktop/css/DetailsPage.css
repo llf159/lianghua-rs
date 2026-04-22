@@ -706,6 +706,10 @@
   box-shadow: 0 8px 18px rgba(29, 78, 216, 0.24);
 }
 
+.details-chart-watch-btn-interval.is-selecting {
+  border-style: dashed;
+}
+
 .details-chart-watch-btn.is-added {
   border-color: var(--theme-orange-500);
   background: rgba(249, 115, 22, 0.94);
@@ -735,6 +739,15 @@
   display: block;
   width: 100%;
   height: 100%;
+}
+
+.details-chart-overlay-layer {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  bottom: 6px;
+  left: 4px;
+  pointer-events: none;
 }
 
 .details-chart-cyq-divider {

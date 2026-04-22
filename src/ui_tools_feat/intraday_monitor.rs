@@ -77,6 +77,7 @@ pub struct IntradayMonitorPageData {
     pub resolved_rank_date: Option<String>,
     pub scene_options: Option<Vec<String>>,
     pub refreshed_at: Option<String>,
+    pub warning_message: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -155,6 +156,77 @@ fn open_result_conn(source_path: &str) -> Result<Connection, String> {
         .to_str()
         .ok_or_else(|| "结果库路径不是有效UTF-8".to_string())?;
     Connection::open(result_db_str).map_err(|e| format!("打开结果库失败: {e}"))
+}
+
+fn load_latest_runtime_trade_date(
+    reader: &DataReader,
+    ts_code: &str,
+    adj_type: &str,
+) -> Result<Option<String>, String> {
+    let mut stmt = reader
+        .conn
+        .prepare(
+            r#"
+            SELECT MAX(trade_date)
+            FROM stock_data
+            WHERE ts_code = ?
+              AND adj_type = ?
+            "#,
+        )
+        .map_err(|e| format!("预编译 runtime 最新交易日失败: {e}"))?;
+    let mut rows = stmt
+        .query(params![ts_code, adj_type])
+        .map_err(|e| format!("查询 runtime 最新交易日失败: {e}"))?;
+
+    if let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取 runtime 最新交易日失败: {e}"))?
+    {
+        let trade_date: Option<String> = row
+            .get(0)
+            .map_err(|e| format!("读取 runtime 最新交易日字段失败: {e}"))?;
+        return Ok(trade_date.filter(|value| !value.trim().is_empty()));
+    }
+
+    Ok(None)
+}
+
+fn resolve_runtime_trade_date(
+    reader: &DataReader,
+    row: &IntradayMonitorRow,
+    quote: &SinaQuote,
+) -> Result<String, String> {
+    if let Some(trade_date) = normalize_quote_trade_date(&quote.date) {
+        return Ok(trade_date);
+    }
+
+    if let Some(trade_date) = row
+        .trade_date
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(trade_date.to_string());
+    }
+
+    if let Some(trade_date) =
+        load_latest_runtime_trade_date(reader, &row.ts_code, DEFAULT_ADJ_TYPE)?
+    {
+        return Ok(trade_date);
+    }
+
+    let raw_quote_date = quote.date.trim();
+    Err(if raw_quote_date.is_empty() {
+        format!(
+            "{} 实时行情缺少可用日期，且历史K线无可兜底交易日，无法导入 runtime",
+            row.ts_code
+        )
+    } else {
+        format!(
+            "{} 实时行情日期无法识别: {}，且历史K线无可兜底交易日，无法导入 runtime",
+            row.ts_code, raw_quote_date
+        )
+    })
 }
 
 fn resolve_trade_date(
@@ -479,9 +551,14 @@ fn build_intraday_template_validation_row_data(warmup_need: usize) -> Result<Row
     Ok(out)
 }
 
-fn build_quote_only_runtime_row_data(quote: &SinaQuote) -> Result<RowData, String> {
-    let trade_date = normalize_quote_trade_date(&quote.date)
-        .ok_or_else(|| format!("实时行情日期无法识别: {}", quote.date))?;
+fn build_quote_only_runtime_row_data(
+    quote: &SinaQuote,
+    trade_date: &str,
+) -> Result<RowData, String> {
+    let trade_date = trade_date.trim();
+    if trade_date.is_empty() {
+        return Err("缺少可用日期，无法仅用实时行情构建 runtime".to_string());
+    }
     let change = quote.price - quote.pre_close;
     let pct_chg = if quote.pre_close.abs() > f64::EPSILON {
         Some(change / quote.pre_close * 100.0)
@@ -501,7 +578,7 @@ fn build_quote_only_runtime_row_data(quote: &SinaQuote) -> Result<RowData, Strin
     cols.insert("TURNOVER_RATE".to_string(), vec![None]);
 
     let out = RowData {
-        trade_dates: vec![trade_date],
+        trade_dates: vec![trade_date.to_string()],
         cols,
     };
     out.validate()?;
@@ -511,17 +588,20 @@ fn build_quote_only_runtime_row_data(quote: &SinaQuote) -> Result<RowData, Strin
 fn merge_realtime_quote_into_row_data(
     row_data: &mut RowData,
     quote: &SinaQuote,
+    trade_date: &str,
 ) -> Result<(), String> {
-    let trade_date = normalize_quote_trade_date(&quote.date)
-        .ok_or_else(|| format!("实时行情日期无法识别: {}", quote.date))?;
+    let trade_date = trade_date.trim();
+    if trade_date.is_empty() {
+        return Err("缺少可用日期，无法拼接实时行情".to_string());
+    }
     let replace_last = row_data
         .trade_dates
         .last()
-        .map(|value| value == &trade_date)
+        .map(|value| value == trade_date)
         .unwrap_or(false);
 
     if !replace_last {
-        row_data.trade_dates.push(trade_date);
+        row_data.trade_dates.push(trade_date.to_string());
         for series in row_data.cols.values_mut() {
             series.push(None);
         }
@@ -675,9 +755,7 @@ fn build_intraday_runtime_row_data(
     need_rows: usize,
     indicator_cache: &[IndsCache],
 ) -> Result<RowData, String> {
-    let end_date = normalize_quote_trade_date(&quote.date)
-        .or_else(|| row.trade_date.clone())
-        .ok_or_else(|| "缺少可用日期，无法构建实时模板 runtime".to_string())?;
+    let end_date = resolve_runtime_trade_date(reader, row, quote)?;
 
     let mut row_data = match reader.load_one_tail_rows(
         &row.ts_code,
@@ -687,10 +765,12 @@ fn build_intraday_runtime_row_data(
     ) {
         Ok(history) => {
             let mut normalized = normalize_runtime_row_data(history)?;
-            merge_realtime_quote_into_row_data(&mut normalized, quote)?;
+            merge_realtime_quote_into_row_data(&mut normalized, quote, &end_date)?;
             normalized
         }
-        Err(err) if err.contains("trade_dates为空") => build_quote_only_runtime_row_data(quote)?,
+        Err(err) if err.contains("trade_dates为空") => {
+            build_quote_only_runtime_row_data(quote, &end_date)?
+        }
         Err(err) => return Err(format!("读取 runtime 历史K线失败: {err}")),
     };
 
@@ -723,20 +803,44 @@ fn set_template_tag(row: &mut IntradayMonitorRow, text: impl Into<String>, tone:
     row.template_tag_tone = Some(tone.to_string());
 }
 
+fn build_template_warning_message(rows: &[IntradayMonitorRow]) -> Option<String> {
+    let failed_rows = rows
+        .iter()
+        .filter(|row| row.template_tag_tone.as_deref() == Some("down"))
+        .filter_map(|row| {
+            row.template_tag_text
+                .as_ref()
+                .map(|text| text.trim())
+                .filter(|text| !text.is_empty())
+                .map(|text| format!("{}: {}", row.ts_code, text))
+        })
+        .collect::<Vec<_>>();
+
+    match failed_rows.as_slice() {
+        [] => None,
+        [first] => Some(format!("模板计算异常: {first}")),
+        [first, ..] => Some(format!(
+            "模板计算异常共 {} 条，首条: {}",
+            failed_rows.len(),
+            first
+        )),
+    }
+}
+
 fn apply_intraday_template_tags(
     source_path: &str,
     rows: &mut [IntradayMonitorRow],
     quote_map: &HashMap<String, SinaQuote>,
     templates: &[IntradayMonitorTemplate],
     rank_mode_configs: &[IntradayMonitorRankModeConfig],
-) {
+) -> Option<String> {
     for row in rows.iter_mut() {
         row.template_tag_text = None;
         row.template_tag_tone = None;
     }
 
     if templates.is_empty() || rank_mode_configs.is_empty() {
-        return;
+        return None;
     }
 
     let compiled_templates = compile_intraday_templates(templates);
@@ -764,7 +868,7 @@ fn apply_intraday_template_tags(
                     set_template_tag(row, format!("runtime 初始化失败: {err}"), "down");
                 }
             }
-            return;
+            return build_template_warning_message(rows);
         }
     };
     let result_conn = match open_result_conn(source_path) {
@@ -775,7 +879,7 @@ fn apply_intraday_template_tags(
                     set_template_tag(row, format!("runtime 初始化失败: {err}"), "down");
                 }
             }
-            return;
+            return build_template_warning_message(rows);
         }
     };
 
@@ -832,6 +936,8 @@ fn apply_intraday_template_tags(
             }
         }
     }
+
+    build_template_warning_message(rows)
 }
 
 fn build_quote_from_row(row: &IntradayMonitorRow) -> Option<SinaQuote> {
@@ -872,6 +978,7 @@ pub fn refresh_intraday_monitor_realtime(
             resolved_rank_date: None,
             scene_options: None,
             refreshed_at: None,
+            warning_message: None,
         });
     }
 
@@ -923,7 +1030,7 @@ pub fn refresh_intraday_monitor_realtime(
         }
     }
 
-    apply_intraday_template_tags(
+    let warning_message = apply_intraday_template_tags(
         source_path,
         &mut next_rows,
         &quote_map,
@@ -937,6 +1044,7 @@ pub fn refresh_intraday_monitor_realtime(
         resolved_rank_date: None,
         scene_options: None,
         refreshed_at: fetch_meta.refreshed_at,
+        warning_message,
     })
 }
 
@@ -953,6 +1061,7 @@ pub fn refresh_intraday_monitor_template_tags(
             resolved_rank_date: None,
             scene_options: None,
             refreshed_at: None,
+            warning_message: None,
         });
     }
 
@@ -963,7 +1072,7 @@ pub fn refresh_intraday_monitor_template_tags(
         .map(|quote| (quote.ts_code.clone(), quote))
         .collect::<HashMap<_, _>>();
 
-    apply_intraday_template_tags(
+    let warning_message = apply_intraday_template_tags(
         source_path,
         &mut next_rows,
         &quote_map,
@@ -977,6 +1086,7 @@ pub fn refresh_intraday_monitor_template_tags(
         resolved_rank_date: None,
         scene_options: None,
         refreshed_at: None,
+        warning_message,
     })
 }
 
@@ -1290,5 +1400,69 @@ pub fn get_intraday_monitor_page(
         resolved_rank_date: Some(effective_rank_date),
         scene_options,
         refreshed_at: None,
+        warning_message: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_quote() -> SinaQuote {
+        SinaQuote {
+            date: "".to_string(),
+            time: "09:35:00".to_string(),
+            ts_code: "000001.SZ".to_string(),
+            name: "平安银行".to_string(),
+            open: 10.0,
+            high: 10.5,
+            low: 9.8,
+            pre_close: 9.9,
+            price: 10.2,
+            vol: 1234.0,
+            amount: 5678.0,
+            change_pct: Some(3.03),
+        }
+    }
+
+    fn sample_row_data() -> RowData {
+        let mut cols = HashMap::new();
+        for key in RUNTIME_INPUT_KEYS {
+            cols.insert(key.to_string(), vec![Some(1.0)]);
+        }
+        RowData {
+            trade_dates: vec!["20240401".to_string()],
+            cols,
+        }
+    }
+
+    #[test]
+    fn build_quote_only_runtime_row_data_accepts_fallback_trade_date() {
+        let row_data = build_quote_only_runtime_row_data(&sample_quote(), "20240401")
+            .expect("quote-only runtime row data");
+
+        assert_eq!(row_data.trade_dates, vec!["20240401".to_string()]);
+        assert_eq!(
+            row_data.cols.get("C").and_then(|series| series[0]),
+            Some(10.2)
+        );
+    }
+
+    #[test]
+    fn merge_realtime_quote_into_row_data_accepts_fallback_trade_date() {
+        let mut row_data = sample_row_data();
+
+        merge_realtime_quote_into_row_data(&mut row_data, &sample_quote(), "20240401")
+            .expect("merge realtime row");
+
+        assert_eq!(row_data.trade_dates, vec!["20240401".to_string()]);
+        assert_eq!(
+            row_data.cols.get("C").and_then(|series| series[0]),
+            Some(10.2)
+        );
+        assert_eq!(
+            row_data.cols.get("PRE_CLOSE").and_then(|series| series[0]),
+            Some(9.9)
+        );
+    }
 }

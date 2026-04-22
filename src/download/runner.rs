@@ -32,7 +32,8 @@ use crate::{
         AdjType, BarFreq, DownloadSummary, DownloadTask, PreparedDownloadBatch,
         PreparedStockDownload, ProBarRow, TushareClient,
         ind_calc::{
-            IndsCache, cache_ind_build, calc_increment_one_stock_inds, warmup_ind_estimate,
+            IndsCache, cache_ind_build, calc_increment_inds_from_history,
+            load_many_tail_rows_with_warmup_need, warmup_ind_estimate,
         },
     },
 };
@@ -980,15 +981,13 @@ fn rebuild_index_indicators_with_history(
         .map(|(ts_code, latest)| (ts_code.clone(), latest.trade_date.clone()))
         .collect::<HashMap<_, _>>();
     let dr = DataReader::new(source_dir)?;
+    let history_rows_by_stock =
+        load_many_tail_rows_with_warmup_need(&dr, "ind", &history_end_dates, warmup_need)?;
 
     for item in prepared_items {
-        item.indicators = calc_increment_one_stock_inds(
-            &dr,
+        item.indicators = calc_increment_inds_from_history(
             &inds_cache,
-            warmup_need,
-            item.ts_code.as_str(),
-            "ind",
-            history_end_dates.get(&item.ts_code).map(String::as_str),
+            history_rows_by_stock.get(&item.ts_code).cloned(),
             &item.rows,
         )?;
     }
@@ -1027,6 +1026,15 @@ fn build_download_pool(threads: usize) -> Result<ThreadPool, String> {
         .num_threads(threads.max(1))
         .build()
         .map_err(|e| format!("创建下载线程池失败: {e}"))
+}
+
+fn adj_type_to_db_label(adj_type: AdjType) -> &'static str {
+    match adj_type {
+        AdjType::Qfq => "qfq",
+        AdjType::Hfq => "hfq",
+        AdjType::Raw => "raw",
+        AdjType::Ind => "ind",
+    }
 }
 
 struct PendingTradeDateBatch {
@@ -1629,17 +1637,26 @@ fn calc_passed_prepared_items(
             .par_chunks(INCREMENTAL_INDICATOR_CHUNK_SIZE)
             .map(|chunk| -> Result<Vec<PreparedStockDownload>, String> {
                 let dr = DataReader::new(source_dir)?;
+                let chunk_end_dates = chunk
+                    .iter()
+                    .filter_map(|(ts_code, _)| {
+                        history_end_dates
+                            .get(ts_code)
+                            .map(|end_date| (ts_code.clone(), end_date.clone()))
+                    })
+                    .collect::<HashMap<_, _>>();
+                let mut history_rows_by_stock = load_many_tail_rows_with_warmup_need(
+                    &dr,
+                    adj_type_to_db_label(adj_type),
+                    &chunk_end_dates,
+                    warmup_need,
+                )?;
                 let mut chunk_out = Vec::with_capacity(chunk.len());
 
                 for (ts_code, rows) in chunk {
-                    let history_end_date = history_end_dates.get(ts_code).map(String::as_str);
-                    let indicators = calc_increment_one_stock_inds(
-                        &dr,
+                    let indicators = calc_increment_inds_from_history(
                         inds_cache,
-                        warmup_need,
-                        ts_code.as_str(),
-                        "qfq",
-                        history_end_date,
+                        history_rows_by_stock.remove(ts_code),
                         rows.as_slice(),
                     )?;
                     let start_date = rows

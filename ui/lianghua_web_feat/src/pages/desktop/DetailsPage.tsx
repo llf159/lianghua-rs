@@ -549,6 +549,42 @@ function buildIntervalSelectionFromAbsoluteIndices(
   };
 }
 
+function getCandleBodyWidth(step: number) {
+  return Math.max(Math.min(step * 0.58, 18), 3);
+}
+
+function buildIntervalSelectionBounds(
+  startVisibleIndex: number | null,
+  endVisibleIndex: number | null,
+  xAt: (itemIndex: number) => number,
+  step: number,
+  snapToCandle: boolean,
+) {
+  if (startVisibleIndex === null || endVisibleIndex === null) {
+    return null;
+  }
+
+  const startX = xAt(startVisibleIndex);
+  const endX = xAt(endVisibleIndex);
+  const halfWidth = snapToCandle ? getCandleBodyWidth(step) / 2 : step / 2;
+  const left = clampNumber(
+    Math.min(startX, endX) - halfWidth,
+    0,
+    CHART_VIEWBOX_WIDTH,
+  );
+  const right = clampNumber(
+    Math.max(startX, endX) + halfWidth,
+    0,
+    CHART_VIEWBOX_WIDTH,
+  );
+
+  return {
+    leftPercent: (left / CHART_VIEWBOX_WIDTH) * 100,
+    widthPercent: ((right - left) / CHART_VIEWBOX_WIDTH) * 100,
+    centerPercent: (((startX + endX) / 2) / CHART_VIEWBOX_WIDTH) * 100,
+  };
+}
+
 function buildIntervalRestoreNotice(
   intervalRestore: IntervalRestoreRequest,
   resolvedIntervalRestore: ResolvedIntervalRestore,
@@ -1660,6 +1696,11 @@ function buildChartPointerSnapshot(
     0,
     99.9999,
   );
+  const chartYPercent = clampNumber(
+    ((clientY - svgRect.top) / svgRect.height) * 100,
+    CHART_CURSOR_Y_MIN,
+    CHART_CURSOR_Y_MAX,
+  );
   const visibleIndex = resolveVisibleIndexFromChartX(
     chartXPercent,
     itemCount,
@@ -1681,11 +1722,7 @@ function buildChartPointerSnapshot(
       ) /
         CHART_VIEWBOX_WIDTH) *
       100,
-    cursorYPercent: clampNumber(
-      ((clientY - viewportRect.top) / viewportRect.height) * 100,
-      CHART_CURSOR_Y_MIN,
-      CHART_CURSOR_Y_MAX,
-    ),
+    cursorYPercent: chartYPercent,
     visibleIndex,
   };
 }
@@ -1701,7 +1738,11 @@ function isPointerNearChartFocus(
     return false;
   }
 
-  const rect = viewport.getBoundingClientRect();
+  const svg = viewport.querySelector<SVGSVGElement>(".details-chart-svg");
+  const rect =
+    svg && svg.clientWidth > 0 && svg.clientHeight > 0
+      ? svg.getBoundingClientRect()
+      : viewport.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) {
     return false;
   }
@@ -1866,32 +1907,19 @@ function renderChartPanel(
     activeIntervalSelection.endAbsoluteIndex < effectiveVisibleStart + items.length
       ? activeIntervalSelection.endAbsoluteIndex - effectiveVisibleStart
       : null;
-  const intervalSelectionLeftPercent =
-    intervalStartVisibleIndex !== null && intervalEndVisibleIndex !== null
-      ? (Math.max(
-          0,
-          Math.min(xAt(intervalStartVisibleIndex), xAt(intervalEndVisibleIndex)) -
-            step / 2,
-        ) /
-          CHART_VIEWBOX_WIDTH) *
-        100
+  const intervalSelectionBounds =
+    panel.key === "price"
+      ? buildIntervalSelectionBounds(
+          intervalStartVisibleIndex,
+          intervalEndVisibleIndex,
+          xAt,
+          step,
+          kind === "candles" && !chartIntervalDraftSelection,
+        )
       : null;
-  const intervalSelectionWidthPercent =
-    intervalStartVisibleIndex !== null && intervalEndVisibleIndex !== null
-      ? (Math.min(
-          CHART_VIEWBOX_WIDTH,
-          Math.abs(xAt(intervalEndVisibleIndex) - xAt(intervalStartVisibleIndex)) +
-            step,
-        ) /
-          CHART_VIEWBOX_WIDTH) *
-        100
-      : null;
-  const intervalPanelXPercent =
-    intervalStartVisibleIndex !== null && intervalEndVisibleIndex !== null
-      ? (((xAt(intervalStartVisibleIndex) + xAt(intervalEndVisibleIndex)) / 2) /
-          CHART_VIEWBOX_WIDTH) *
-        100
-      : null;
+  const intervalSelectionLeftPercent = intervalSelectionBounds?.leftPercent ?? null;
+  const intervalSelectionWidthPercent = intervalSelectionBounds?.widthPercent ?? null;
+  const intervalPanelXPercent = intervalSelectionBounds?.centerPercent ?? null;
   const intervalPanelHorizontalClass =
     (intervalPanelXPercent ?? 0) > CHART_TOOLTIP_LEFT_THRESHOLD
       ? "details-chart-tooltip-left"
@@ -2427,126 +2455,128 @@ function renderChartPanel(
           <div className="details-chart-empty">暂无有效图表数据</div>
         )}
 
-        {rankMarkerPoints.length > 0 ? (
-          <div className="details-chart-rank-marker-layer" aria-hidden="true">
-            {rankMarkerPoints.map((point) => (
-              <span
-                className="details-chart-rank-marker-dot"
-                key={point.key}
-                style={{ left: `${point.leftPercent}%` }}
-                title={point.title}
-              />
-            ))}
-          </div>
-        ) : null}
+        <div className="details-chart-overlay-layer" aria-hidden="true">
+          {rankMarkerPoints.length > 0 ? (
+            <div className="details-chart-rank-marker-layer">
+              {rankMarkerPoints.map((point) => (
+                <span
+                  className="details-chart-rank-marker-dot"
+                  key={point.key}
+                  style={{ left: `${point.leftPercent}%` }}
+                  title={point.title}
+                />
+              ))}
+            </div>
+          ) : null}
 
-        {yAxisLabels.length > 0 ? (
-          <div className="details-chart-axis-layer details-chart-axis-layer-y">
-            {yAxisLabels.map((label) => (
-              <span
-                className="details-chart-y-label"
-                key={label.key}
-                style={{ top: `${label.topPercent}%` }}
-              >
-                {label.value}
-              </span>
-            ))}
-          </div>
-        ) : null}
+          {yAxisLabels.length > 0 ? (
+            <div className="details-chart-axis-layer details-chart-axis-layer-y">
+              {yAxisLabels.map((label) => (
+                <span
+                  className="details-chart-y-label"
+                  key={label.key}
+                  style={{ top: `${label.topPercent}%` }}
+                >
+                  {label.value}
+                </span>
+              ))}
+            </div>
+          ) : null}
 
-        {xAxisLabels.length > 0 ? (
-          <div className="details-chart-axis-layer details-chart-axis-layer-x">
-            {xAxisLabels.map((label) => (
-              <span
-                className="details-chart-x-label"
-                key={label.key}
-                style={{ left: `${label.leftPercent}%` }}
-              >
-                {label.value}
-              </span>
-            ))}
-          </div>
-        ) : null}
+          {xAxisLabels.length > 0 ? (
+            <div className="details-chart-axis-layer details-chart-axis-layer-x">
+              {xAxisLabels.map((label) => (
+                <span
+                  className="details-chart-x-label"
+                  key={label.key}
+                  style={{ left: `${label.leftPercent}%` }}
+                >
+                  {label.value}
+                </span>
+              ))}
+            </div>
+          ) : null}
 
-        {panel.key === "price" &&
-        intervalSelectionLeftPercent !== null &&
-        intervalSelectionWidthPercent !== null ? (
-          <div
-            className={[
-              "details-chart-interval-selection",
-              chartIntervalDraftSelection ? "is-draft" : "",
-            ]
-              .filter(Boolean)
-              .join(" ")}
-            data-testid="details-interval-selection"
-            style={{
-              left: `${intervalSelectionLeftPercent}%`,
-              width: `${intervalSelectionWidthPercent}%`,
-            }}
-          />
-        ) : null}
-
-        {focusXPercent !== null ? (
-          <div
-            className="details-chart-crosshair-vertical"
-            style={{ left: `${focusXPercent}%` }}
-          />
-        ) : null}
-
-        {isActivePanel && chartFocus ? (
-          <>
+          {panel.key === "price" &&
+          intervalSelectionLeftPercent !== null &&
+          intervalSelectionWidthPercent !== null ? (
             <div
-              className="details-chart-crosshair-horizontal"
-              style={{ top: `${chartFocus.cursorYPercent}%` }}
+              className={[
+                "details-chart-interval-selection",
+                chartIntervalDraftSelection ? "is-draft" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              data-testid="details-interval-selection"
+              style={{
+                left: `${intervalSelectionLeftPercent}%`,
+                width: `${intervalSelectionWidthPercent}%`,
+              }}
             />
-            {tooltipSections.length > 0 ? (
+          ) : null}
+
+          {focusXPercent !== null ? (
+            <div
+              className="details-chart-crosshair-vertical"
+              style={{ left: `${focusXPercent}%` }}
+            />
+          ) : null}
+
+          {isActivePanel && chartFocus ? (
+            <>
               <div
-                className={[
-                  "details-chart-tooltip",
-                  tooltipHorizontalClass,
-                  chartFocus.pinned ? "details-chart-tooltip-pinned" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-                style={{
-                  left: `${focusXPercent ?? chartFocus.cursorXPercent}%`,
-                  top: `${chartFocus.cursorYPercent}%`,
-                }}
-              >
-                <div className="details-chart-tooltip-head">
-                  <strong>
-                    {items[activeVisibleIndex ?? 0]?.trade_date ?? "--"}
-                  </strong>
+                className="details-chart-crosshair-horizontal"
+                style={{ top: `${chartFocus.cursorYPercent}%` }}
+              />
+              {tooltipSections.length > 0 ? (
+                <div
+                  className={[
+                    "details-chart-tooltip",
+                    tooltipHorizontalClass,
+                    chartFocus.pinned ? "details-chart-tooltip-pinned" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                  style={{
+                    left: `${focusXPercent ?? chartFocus.cursorXPercent}%`,
+                    top: `${chartFocus.cursorYPercent}%`,
+                  }}
+                >
+                  <div className="details-chart-tooltip-head">
+                    <strong>
+                      {items[activeVisibleIndex ?? 0]?.trade_date ?? "--"}
+                    </strong>
+                  </div>
+                  <div className="details-chart-tooltip-body">
+                    {tooltipSections.map((section) => (
+                      <div
+                        className={[
+                          "details-chart-tooltip-grid",
+                          section.variant === "ohlc"
+                            ? "details-chart-tooltip-grid-ohlc"
+                            : "",
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}
+                        key={section.key}
+                      >
+                        {section.rows.map((row) => (
+                          <div
+                            className="details-chart-tooltip-row"
+                            key={`${section.key}-${row.label}`}
+                          >
+                            <span>{row.label}</span>
+                            <strong>{row.value}</strong>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <div className="details-chart-tooltip-body">
-                  {tooltipSections.map((section) => (
-                    <div
-                      className={[
-                        "details-chart-tooltip-grid",
-                        section.variant === "ohlc"
-                          ? "details-chart-tooltip-grid-ohlc"
-                          : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
-                      key={section.key}
-                    >
-                      {section.rows.map((row) => (
-                        <div
-                          className="details-chart-tooltip-row"
-                          key={`${section.key}-${row.label}`}
-                        >
-                          <span>{row.label}</span>
-                          <strong>{row.value}</strong>
-                        </div>
-                      ))}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-          </>
-        ) : null}
+              ) : null}
+            </>
+          ) : null}
+        </div>
 
         {panel.key === "price" &&
         chartIntervalSelection &&
@@ -4138,6 +4168,12 @@ export default function DetailsPage({
     () => buildIntervalStatsSections(allChartItems, chartIntervalSelection),
     [allChartItems, chartIntervalSelection],
   );
+  const chartIntervalSelecting = chartIntervalMode && chartIntervalSelection === null;
+  const chartIntervalButtonLabel = chartIntervalSelection
+    ? "关闭区间"
+    : chartIntervalSelecting
+      ? "选择区间中..."
+      : "区间统计";
 
   const closeChartIntervalPanel = useCallback(() => {
     setChartIntervalMode(false);
@@ -4158,7 +4194,7 @@ export default function DetailsPage({
     setChartIntervalMode(true);
     setChartFocus(null);
     setChartIntervalPanelOpen(false);
-    setChartIntervalNotice("");
+    setChartIntervalNotice("请在主K图上拖拽选择区间");
   }, [
     chartIntervalDraftSelection,
     chartIntervalMode,
@@ -5643,6 +5679,7 @@ export default function DetailsPage({
                     className={[
                       "details-chart-watch-btn",
                       "details-chart-watch-btn-interval",
+                      chartIntervalSelecting ? "is-selecting" : "",
                       chartIntervalMode || chartIntervalSelection
                         ? "is-active"
                         : "",
@@ -5658,8 +5695,9 @@ export default function DetailsPage({
                       event.stopPropagation();
                       toggleChartIntervalMode();
                     }}
+                    aria-busy={chartIntervalSelecting}
                   >
-                    区间统计
+                    {chartIntervalButtonLabel}
                   </button>
                   <button
                     className={[

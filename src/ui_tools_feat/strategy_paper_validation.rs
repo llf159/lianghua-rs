@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 
 use chrono::{Days, NaiveDate};
-use duckdb::{Connection, params};
+use duckdb::{params, Connection};
 use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::{
     data::scoring_data::row_into_rt,
-    data::{DataReader, load_stock_list, load_trade_date_list, result_db_path, stock_list_path},
+    data::{load_stock_list, load_trade_date_list, result_db_path, stock_list_path, DataReader},
     expr::{
         eval::{Runtime, Value},
-        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+        parser::{lex_all, Expr, Parser, Stmt, Stmts},
     },
     scoring::tools::{
         calc_query_need_rows, calc_query_start_date, inject_stock_extra_fields, load_st_list,
@@ -18,7 +18,7 @@ use crate::{
     },
     simulate::DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
     ui_tools_feat::watch_observe::normalize_ts_code,
-    utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
+    utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
 };
 
 use super::build_name_map;
@@ -90,6 +90,7 @@ pub struct StrategyPaperValidationData {
     pub end_date: String,
     pub min_listed_trade_days: usize,
     pub index_ts_code: String,
+    pub resolved_board: Option<String>,
     pub test_ts_code: Option<String>,
     pub test_stock_name: Option<String>,
     pub buy_price_basis: String,
@@ -208,6 +209,7 @@ pub fn run_strategy_paper_validation(
     min_listed_trade_days: Option<usize>,
     index_ts_code: Option<String>,
     test_ts_code: Option<String>,
+    board: Option<String>,
     buy_price_basis: String,
     slippage_pct: Option<f64>,
     buy_expression: String,
@@ -265,6 +267,9 @@ pub fn run_strategy_paper_validation(
                 .ok_or_else(|| "测试股票格式无效，请输入 6 位代码或标准 ts_code".to_string())
         })
         .transpose()?;
+    let resolved_board = board
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
 
     let buy_program = parse_expression_program(&buy_expression, "买点方程")?;
     let sell_program = parse_expression_program(&sell_expression, "卖点方程")?;
@@ -291,6 +296,16 @@ pub fn run_strategy_paper_validation(
             &resolved_end_date,
         )?
     };
+    let ts_codes = ts_codes
+        .into_iter()
+        .filter(|ts_code| {
+            let Some(selected_board) = resolved_board.as_deref() else {
+                return true;
+            };
+            board_category(ts_code, name_map.get(ts_code).map(|value| value.as_str()))
+                == selected_board
+        })
+        .collect::<Vec<_>>();
     let test_stock_name = normalized_test_ts_code
         .as_ref()
         .and_then(|ts_code| name_map.get(ts_code).cloned());
@@ -355,6 +370,7 @@ pub fn run_strategy_paper_validation(
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| DEFAULT_INDEX_TS_CODE.to_string()),
+        resolved_board,
         test_ts_code: normalized_test_ts_code,
         test_stock_name,
         buy_price_basis: parsed_buy_price_basis.as_str().to_string(),

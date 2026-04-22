@@ -16,6 +16,8 @@ import './css/IntradayMonitorCustomPage.css'
 const TEMPLATE_STORAGE_KEY = 'lh_intraday_monitor_realtime_templates_v1'
 const CUSTOM_MONITOR_STATE_KEY = 'lh_intraday_custom_monitor_state_v1'
 
+type LoadingAction = 'refresh-realtime' | 'refresh-tags' | null
+
 type PersistedCustomMonitorState = {
   codeInput: string
   selectedTemplateId: string
@@ -57,6 +59,15 @@ function formatPercent(value?: number | null) {
   return `${value.toFixed(2)}%`
 }
 
+function waitForNextPaint() {
+  if (typeof window === 'undefined') {
+    return Promise.resolve()
+  }
+  return new Promise<void>((resolve) => {
+    window.requestAnimationFrame(() => resolve())
+  })
+}
+
 export default function IntradayMonitorCustomPage() {
   const persisted = useMemo(() => {
     const parsed = readJsonStorage<Partial<PersistedCustomMonitorState>>(
@@ -83,12 +94,15 @@ export default function IntradayMonitorCustomPage() {
     () => persisted?.selectedTemplateId ?? '',
   )
   const [templates, setTemplates] = useState<IntradayMonitorTemplate[]>([])
-  const [loading, setLoading] = useState(false)
+  const [loadingAction, setLoadingAction] = useState<LoadingAction>(null)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [templateModalOpen, setTemplateModalOpen] = useState(false)
 
   const sourcePathTrimmed = sourcePath.trim()
+  const refreshingRealtime = loadingAction === 'refresh-realtime'
+  const refreshingTags = loadingAction === 'refresh-tags'
+  const isBusy = loadingAction !== null
 
   useEffect(() => {
     void ensureManagedSourcePath()
@@ -139,6 +153,22 @@ export default function IntradayMonitorCustomPage() {
       setSelectedTemplateId('')
     }
   }, [selectedTemplateId, templates])
+
+  const topStatusText = useMemo(() => {
+    if (refreshingRealtime) {
+      return [`当前共 ${rows.length} 只`, '正在刷新实时行情，请稍候…']
+        .filter(Boolean)
+        .join(' | ')
+    }
+
+    return [
+      `当前共 ${rows.length} 只`,
+      refreshedAt ? `最新刷新 ${refreshedAt}` : '待刷新实时',
+      selectedTemplateId !== '' ? '已启用模板标记' : '未启用模板标记',
+    ]
+      .filter(Boolean)
+      .join(' | ')
+  }, [refreshedAt, refreshingRealtime, rows.length, selectedTemplateId])
 
   function onApplyCodeList() {
     const parts = splitCodes(codeInput)
@@ -205,9 +235,10 @@ export default function IntradayMonitorCustomPage() {
       return
     }
 
-    setLoading(true)
+    setLoadingAction('refresh-realtime')
     setError('')
     setNotice('')
+    await waitForNextPaint()
     try {
       const rankModeConfigs: IntradayMonitorRankModeConfig[] = [
         {
@@ -224,11 +255,12 @@ export default function IntradayMonitorCustomPage() {
       })
       setRows(result.rows ?? [])
       setRefreshedAt(result.refreshed_at ?? '')
+      setError(result.warning_message ?? result.warningMessage ?? '')
       setNotice(`刷新完成，共 ${result.rows?.length ?? 0} 只。`)
     } catch (runError) {
       setError(`刷新失败: ${String(runError)}`)
     } finally {
-      setLoading(false)
+      setLoadingAction(null)
     }
   }
 
@@ -242,7 +274,7 @@ export default function IntradayMonitorCustomPage() {
       return
     }
 
-    setLoading(true)
+    setLoadingAction('refresh-tags')
     setError('')
     setNotice('')
     try {
@@ -260,11 +292,12 @@ export default function IntradayMonitorCustomPage() {
         rankModeConfigs,
       })
       setRows(result.rows ?? [])
+      setError(result.warning_message ?? result.warningMessage ?? '')
       setNotice(`仅刷新标记完成，共 ${result.rows?.length ?? 0} 只。`)
     } catch (runError) {
       setError(`仅刷新标记失败: ${String(runError)}`)
     } finally {
-      setLoading(false)
+      setLoadingAction(null)
     }
   }
 
@@ -277,7 +310,12 @@ export default function IntradayMonitorCustomPage() {
   return (
     <div className="intraday-custom-page">
       <section className="intraday-custom-card">
-        <h2 className="intraday-custom-title">自定义监控</h2>
+        <div className="intraday-custom-section-head">
+          <div>
+            <h2 className="intraday-custom-title">自定义监控</h2>
+            <div className="intraday-custom-status">{topStatusText}</div>
+          </div>
+        </div>
         <p className="intraday-custom-tip">
           名单支持分隔符：逗号、分号、竖线、空格、换行（含中文符号）。模板检查与实时刷新复用实时监控链路。
         </p>
@@ -310,37 +348,48 @@ export default function IntradayMonitorCustomPage() {
         </div>
 
         <div className="intraday-custom-actions">
-          <button type="button" onClick={() => onApplyCodeList()} disabled={loading}>
+          <button type="button" onClick={() => onApplyCodeList()} disabled={isBusy}>
             应用名单
           </button>
-          <button type="button" onClick={() => setTemplateModalOpen(true)} disabled={loading}>
+          <button type="button" onClick={() => setTemplateModalOpen(true)} disabled={isBusy}>
             模板管理
           </button>
           <button
             type="button"
-            className="intraday-custom-primary-btn"
+            className={[
+              'intraday-custom-primary-btn',
+              'intraday-custom-toolbar-btn',
+              refreshingRealtime ? 'is-loading' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
             onClick={() => void onRefreshRealtime()}
-            disabled={loading || rows.length === 0}
+            disabled={isBusy || rows.length === 0}
           >
-            {loading ? '刷新中...' : '刷新实时'}
+            {refreshingRealtime ? '刷新实时中' : '刷新实时'}
           </button>
           <button
             type="button"
+            className="intraday-custom-toolbar-btn"
             onClick={() => void onRefreshTemplateTagsOnly()}
-            disabled={loading || rows.length === 0}
+            disabled={isBusy || rows.length === 0}
           >
-            {loading ? '重算中...' : '仅刷新标记'}
+            {refreshingTags ? '重算中...' : '仅刷新标记'}
           </button>
         </div>
 
         {notice ? <div className="intraday-custom-notice">{notice}</div> : null}
         {error ? <div className="intraday-custom-error">{error}</div> : null}
 
-        {refreshedAt ? (
-          <div className="intraday-custom-refreshed">最近刷新：{refreshedAt}</div>
-        ) : null}
-
-        <div className="intraday-custom-table-wrap">
+        <div
+          className={[
+            'intraday-custom-table-wrap',
+            refreshingRealtime ? 'is-refreshing' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')}
+          aria-busy={refreshingRealtime}
+        >
           <table className="intraday-custom-table">
             <thead>
               <tr>
@@ -387,6 +436,12 @@ export default function IntradayMonitorCustomPage() {
               )}
             </tbody>
           </table>
+          {refreshingRealtime ? (
+            <div className="intraday-custom-refresh-overlay" role="status">
+              <span className="intraday-custom-refresh-spinner" aria-hidden="true" />
+              <span>正在刷新实时行情…</span>
+            </div>
+          ) : null}
         </div>
       </section>
 

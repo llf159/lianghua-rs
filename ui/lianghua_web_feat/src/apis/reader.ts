@@ -143,6 +143,8 @@ export type IntradayMonitorPageData = {
   resolved_rank_date?: string;
   scene_options?: string[];
   refreshed_at?: string;
+  warning_message?: string;
+  warningMessage?: string;
 };
 
 export type IntradayRealtimeRefreshQuery = {

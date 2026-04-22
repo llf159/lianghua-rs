@@ -306,7 +306,7 @@ export default function IntradayTemplateManagerModal({
             实时字段：<code>REALTIME_CHANGE_OPEN_PCT / REALTIME_FALL_FROM_HIGH_PCT / REALTIME_VOL_RATIO / VOL_RATIO</code>
           </div>
           <div>
-            高点跌幅：<code>REALTIME_FALL_FROM_HIGH_PCT</code> = max((今日高点 - 当前价) / 今日高点, 0) × 100%
+            高点回落：<code>REALTIME_FALL_FROM_HIGH_PCT</code> 为非负百分比值，<code>0</code> 表示当前价等于今日高点，不会返回负数；计算口径 = max((今日高点 - 当前价) / 今日高点, 0) × 100%
           </div>
           <div>
             量比基准：<code>REALTIME_VOL_RATIO</code> = 当前实时累计成交量 ÷ 最新历史日 <code>vol</code>

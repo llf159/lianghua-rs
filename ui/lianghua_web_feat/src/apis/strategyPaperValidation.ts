@@ -46,6 +46,7 @@ export type StrategyPaperValidationData = {
   end_date: string
   min_listed_trade_days: number
   index_ts_code: string
+  resolved_board?: string | null
   test_ts_code?: string | null
   test_stock_name?: string | null
   buy_price_basis: string
@@ -72,6 +73,7 @@ export type StrategyPaperValidationQuery = {
   minListedTradeDays?: number
   indexTsCode?: string
   testTsCode?: string
+  board?: string
   buyPriceBasis: string
   slippagePct?: number
   buyExpression: string

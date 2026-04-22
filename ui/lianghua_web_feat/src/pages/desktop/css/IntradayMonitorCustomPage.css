@@ -20,6 +20,19 @@
   color: #1f2a44;
 }
 
+.intraday-custom-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.intraday-custom-status {
+  color: #566272;
+  font-size: 13px;
+}
+
 .intraday-custom-desc {
   margin: 0;
   color: #3a4663;
@@ -84,6 +97,25 @@
   cursor: pointer;
 }
 
+.intraday-custom-toolbar-btn.is-loading {
+  position: relative;
+  padding-left: 30px;
+}
+
+.intraday-custom-toolbar-btn.is-loading::before {
+  content: '';
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  margin-top: -6px;
+  border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, 0.45);
+  border-top-color: #fff;
+  animation: intraday-custom-spin 0.8s linear infinite;
+}
+
 .intraday-custom-primary-btn {
   border-color: var(--theme-orange-600) !important;
   background: var(--theme-orange-600) !important;
@@ -113,15 +145,16 @@
   font-size: 13px;
 }
 
-.intraday-custom-refreshed {
-  font-size: 12px;
-  color: #5a6780;
-}
-
 .intraday-custom-table-wrap {
   border: 1px solid #e1e7ef;
   border-radius: 10px;
   overflow: auto;
+  position: relative;
+}
+
+.intraday-custom-table-wrap.is-refreshing .intraday-custom-table {
+  opacity: 0.62;
+  transition: opacity 0.2s ease;
 }
 
 .intraday-custom-table {
@@ -157,6 +190,39 @@
 .intraday-custom-empty-cell {
   color: #6b7694;
   text-align: center;
+}
+
+.intraday-custom-refresh-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.66);
+  backdrop-filter: blur(1px);
+  color: #4f5f73;
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.intraday-custom-refresh-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid #d7e0ea;
+  border-top-color: var(--theme-orange-600);
+  animation: intraday-custom-spin 0.8s linear infinite;
+}
+
+@keyframes intraday-custom-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .intraday-custom-modal-mask {

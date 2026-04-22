@@ -48,6 +48,15 @@ const INDEX_OPTIONS = [
   { value: '000688.SH', label: '科创50' },
 ] as const
 
+const BOARD_OPTIONS = [
+  { value: '', label: '全部板块' },
+  { value: '主板', label: '主板' },
+  { value: '创业/科创', label: '创业/科创' },
+  { value: '北交所', label: '北交所' },
+  { value: 'ST', label: 'ST' },
+  { value: '其他', label: '其他' },
+] as const
+
 type TradeStatusFilter = 'all' | 'closed' | 'open'
 type TradeDetailModalStatus = Exclude<TradeStatusFilter, 'all'>
 type TradePageSize = (typeof TRADE_PAGE_SIZE_OPTIONS)[number]['value']
@@ -123,6 +132,46 @@ function getRealizedReturnValue(row: StrategyPaperValidationTradeRow) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
+function getReturnToneClass(value?: number | null) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value === 0) {
+    return ''
+  }
+  return value > 0
+    ? 'strategy-paper-validation-return-positive'
+    : 'strategy-paper-validation-return-negative'
+}
+
+function renderReturnValue(value?: number | null) {
+  const toneClass = getReturnToneClass(value)
+  return (
+    <span className={['strategy-paper-validation-return-value', toneClass].filter(Boolean).join(' ')}>
+      {formatPercent(value)}
+    </span>
+  )
+}
+
+function resolveTradeBoard(tsCode: string, stockName?: string | null) {
+  const normalizedName = stockName?.trim().toUpperCase() ?? ''
+  if (normalizedName.startsWith('*ST') || normalizedName.startsWith('ST')) {
+    return 'ST'
+  }
+
+  const normalizedCode = tsCode.trim().toUpperCase()
+  if (normalizedCode.endsWith('.BJ')) {
+    return '北交所'
+  }
+  if (
+    (normalizedCode.endsWith('.SZ') && normalizedCode.startsWith('30')) ||
+    (normalizedCode.endsWith('.SH') && normalizedCode.startsWith('688'))
+  ) {
+    return '创业/科创'
+  }
+  if (normalizedCode.endsWith('.SH') || normalizedCode.endsWith('.SZ')) {
+    return '主板'
+  }
+  return '其他'
+}
+
 function parseOptionalNumber(value: string) {
   const trimmed = value.trim()
   if (!trimmed) {
@@ -154,6 +203,7 @@ const StrategyPaperValidationTradesTable = memo(
     sourcePath,
   }: StrategyPaperValidationTradesTableProps) {
     const [stockFilter, setStockFilter] = useState('')
+    const [boardFilter, setBoardFilter] = useState('')
     const [tradeStatusFilter, setTradeStatusFilter] =
       useState<TradeStatusFilter>('all')
     const [buyDateStartInput, setBuyDateStartInput] = useState('')
@@ -194,6 +244,10 @@ const StrategyPaperValidationTradesTable = memo(
       const buyRankMax = parseOptionalNumber(buyRankMaxInput)
 
       return trades.filter((row) => {
+        if (boardFilter && resolveTradeBoard(row.ts_code, row.name) !== boardFilter) {
+          return false
+        }
+
         if (tradeStatusFilter !== 'all' && row.status !== tradeStatusFilter) {
           return false
         }
@@ -229,6 +283,7 @@ const StrategyPaperValidationTradesTable = memo(
         return true
       })
     }, [
+      boardFilter,
       buyDateEndInput,
       buyDateStartInput,
       buyRankMaxInput,
@@ -327,6 +382,22 @@ const StrategyPaperValidationTradesTable = memo(
               <option value="all">全部</option>
               <option value="closed">已平仓</option>
               <option value="open">未平仓</option>
+            </select>
+          </label>
+          <label className="strategy-paper-validation-field">
+            <span>板块</span>
+            <select
+              value={boardFilter}
+              onChange={(event) => {
+                setBoardFilter(event.target.value)
+                resetToFirstPage()
+              }}
+            >
+              {BOARD_OPTIONS.map((item) => (
+                <option key={item.value || 'all'} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
             </select>
           </label>
           <label className="strategy-paper-validation-field">
@@ -450,7 +521,7 @@ const StrategyPaperValidationTradesTable = memo(
                     <td>{row.hold_days}</td>
                     <td>{formatNumber(row.buy_cost_price)}</td>
                     <td>{formatNumber(row.sell_price)}</td>
-                    <td>{formatPercent(row.realized_return_pct)}</td>
+                    <td>{renderReturnValue(row.realized_return_pct)}</td>
                   </tr>
                 ))
               )}
@@ -517,6 +588,7 @@ const StrategyPaperValidationStatusTradeModal = memo(
     onClose,
   }: StrategyPaperValidationStatusTradeModalProps) {
     const title = status === 'closed' ? '已平仓交易明细' : '未平仓交易明细'
+    const [boardFilter, setBoardFilter] = useState('')
     const tradeSortDefinitions = useMemo(
       () =>
         ({
@@ -535,6 +607,16 @@ const StrategyPaperValidationStatusTradeModal = memo(
         }) satisfies Partial<Record<TradeSortKey, SortDefinition<StrategyPaperValidationTradeRow>>>,
       [],
     )
+    const filteredRows = useMemo(
+      () =>
+        rows.filter((row) => {
+          if (!boardFilter) {
+            return true
+          }
+          return resolveTradeBoard(row.ts_code, row.name) === boardFilter
+        }),
+      [boardFilter, rows],
+    )
     const initialSortKey: TradeSortKey = status === 'closed' ? 'sell_date' : 'buy_date'
     const {
       sortKey,
@@ -542,7 +624,7 @@ const StrategyPaperValidationStatusTradeModal = memo(
       sortedRows,
       toggleSort,
     } = useTableSort<StrategyPaperValidationTradeRow, TradeSortKey>(
-      rows,
+      filteredRows,
       tradeSortDefinitions,
       { key: initialSortKey, direction: 'desc' },
     )
@@ -585,7 +667,9 @@ const StrategyPaperValidationStatusTradeModal = memo(
           <div className="strategy-paper-validation-table-head">
             <div>
               <h3>{title}</h3>
-              <span>{rows.length} 笔</span>
+              <span>
+                筛选 {filteredRows.length} / 共 {rows.length} 笔
+              </span>
             </div>
             <button
               type="button"
@@ -594,6 +678,18 @@ const StrategyPaperValidationStatusTradeModal = memo(
             >
               关闭
             </button>
+          </div>
+          <div className="strategy-paper-validation-table-filters">
+            <label className="strategy-paper-validation-field">
+              <span>板块</span>
+              <select value={boardFilter} onChange={(event) => setBoardFilter(event.target.value)}>
+                {BOARD_OPTIONS.map((item) => (
+                  <option key={item.value || 'all'} value={item.value}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
           <div className="strategy-paper-validation-table-wrap strategy-paper-validation-modal-table-wrap">
             <table className="strategy-paper-validation-table strategy-paper-validation-detail-table">
@@ -614,9 +710,9 @@ const StrategyPaperValidationStatusTradeModal = memo(
                 </tr>
               </thead>
               <tbody>
-                {rows.length === 0 ? (
+                {sortedRows.length === 0 ? (
                   <tr>
-                    <td colSpan={12}>暂无{status === 'closed' ? '已平仓' : '未平仓'}交易。</td>
+                    <td colSpan={12}>没有匹配当前筛选条件的交易。</td>
                   </tr>
                 ) : (
                   sortedRows.map((row, index) => (
@@ -640,10 +736,10 @@ const StrategyPaperValidationStatusTradeModal = memo(
                       <td>{row.hold_days}</td>
                       <td>{formatNumber(row.buy_cost_price)}</td>
                       <td>{formatNumber(row.sell_price)}</td>
-                      <td>{formatPercent(row.open_return_pct)}</td>
-                      <td>{formatPercent(row.high_return_pct)}</td>
-                      <td>{formatPercent(row.close_return_pct)}</td>
-                      <td>{formatPercent(row.realized_return_pct)}</td>
+                      <td>{renderReturnValue(row.open_return_pct)}</td>
+                      <td>{renderReturnValue(row.high_return_pct)}</td>
+                      <td>{renderReturnValue(row.close_return_pct)}</td>
+                      <td>{renderReturnValue(row.realized_return_pct)}</td>
                     </tr>
                   ))
                 )}
@@ -682,6 +778,7 @@ export default function StrategyPaperValidationPage() {
   const [endDateInput, setEndDateInput] = useState('')
   const [minListedTradeDays, setMinListedTradeDays] = useState('60')
   const [indexTsCode, setIndexTsCode] = useState<string>(INDEX_OPTIONS[0].value)
+  const [boardFilter, setBoardFilter] = useState('')
   const [buyPriceBasis, setBuyPriceBasis] = useState('open')
   const [slippagePct, setSlippagePct] = useState('0')
   const [testStockInput, setTestStockInput] = useState('')
@@ -866,6 +963,7 @@ export default function StrategyPaperValidationPage() {
         minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
         indexTsCode: indexTsCode.trim() || undefined,
         testTsCode: resolvedTestTsCode || undefined,
+        board: boardFilter || undefined,
         buyPriceBasis,
         slippagePct: Number(slippagePct) || 0,
         buyExpression,
@@ -876,6 +974,7 @@ export default function StrategyPaperValidationPage() {
       setEndDateInput(compactDateToInput(data.end_date))
       setMinListedTradeDays(String(data.min_listed_trade_days))
       setIndexTsCode(data.index_ts_code)
+      setBoardFilter(data.resolved_board ?? '')
       setBuyPriceBasis(data.buy_price_basis)
       setSlippagePct(String(data.slippage_pct))
     } catch (runError) {
@@ -988,7 +1087,7 @@ export default function StrategyPaperValidationPage() {
                   <td>{row.hold_days}</td>
                   <td>{formatNumber(row.buy_cost_price)}</td>
                   <td>{formatNumber(row.sell_price)}</td>
-                  <td>{formatPercent(row.realized_return_pct)}</td>
+                  <td>{renderReturnValue(row.realized_return_pct)}</td>
                 </tr>
               ))}
             </tbody>
@@ -1075,6 +1174,16 @@ export default function StrategyPaperValidationPage() {
             <select value={indexTsCode} onChange={(event) => setIndexTsCode(event.target.value)}>
               {INDEX_OPTIONS.map((item) => (
                 <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="strategy-paper-validation-field">
+            <span>板块筛选</span>
+            <select value={boardFilter} onChange={(event) => setBoardFilter(event.target.value)}>
+              {BOARD_OPTIONS.map((item) => (
+                <option key={item.value || 'all'} value={item.value}>
                   {item.label}
                 </option>
               ))}
@@ -1217,6 +1326,7 @@ export default function StrategyPaperValidationPage() {
             <span>买点基准 {result?.buy_price_basis === 'open' ? '开盘价' : '收盘价'}</span>
             <span>滑点 {formatNumber(result?.slippage_pct, 2)}%</span>
             <span>对比指数 {result?.index_ts_code || '--'}</span>
+            <span>板块 {result?.resolved_board || '全部板块'}</span>
           </div>
         </section>
       ) : null}

@@ -6,6 +6,8 @@ use std::{
     time::SystemTime,
 };
 
+use duckdb::params_from_iter;
+
 use crate::{
     data::scoring_data::row_into_rt,
     data::{DataReader, IndsData, RowData, ind_toml_path},
@@ -235,6 +237,143 @@ fn load_one_tail_rows_with_warmup_need(
     }
 }
 
+pub fn load_many_tail_rows_with_warmup_need(
+    dr: &DataReader,
+    adj_type: &str,
+    end_dates: &HashMap<String, String>,
+    warmup_need: usize,
+) -> Result<HashMap<String, RowData>, String> {
+    if warmup_need == 0 || end_dates.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut requests = end_dates
+        .iter()
+        .filter_map(|(ts_code, end_date)| {
+            let end_date = end_date.trim();
+            if end_date.is_empty() {
+                None
+            } else {
+                Some((ts_code.clone(), end_date.to_string()))
+            }
+        })
+        .collect::<Vec<_>>();
+    requests.sort_by(|a, b| a.0.cmp(&b.0));
+    if requests.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let runtime_to_db = dr
+        .cols_table
+        .iter()
+        .map(|(db_col, key)| (key.as_str(), db_col.as_str()))
+        .collect::<HashMap<_, _>>();
+    let input_selects = IND_INPUT_KEYS
+        .iter()
+        .map(|key| match runtime_to_db.get(key) {
+            Some(db_col) => {
+                format!("TRY_CAST(stock_data.\"{db_col}\" AS DOUBLE) AS \"{key}\"")
+            }
+            None => format!("CAST(NULL AS DOUBLE) AS \"{key}\""),
+        })
+        .collect::<Vec<_>>();
+    let output_selects = IND_INPUT_KEYS
+        .iter()
+        .map(|key| format!("ranked.\"{key}\""))
+        .collect::<Vec<_>>();
+    let values_sql = std::iter::repeat_n("(?, ?)", requests.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        r#"
+        WITH requested(ts_code, end_date) AS (
+            VALUES {values_sql}
+        ),
+        ranked AS (
+            SELECT
+                stock_data.ts_code,
+                stock_data.trade_date,
+                {},
+                ROW_NUMBER() OVER (
+                    PARTITION BY stock_data.ts_code
+                    ORDER BY stock_data.trade_date DESC
+                ) AS row_num
+            FROM stock_data
+            INNER JOIN requested
+                ON requested.ts_code = stock_data.ts_code
+            WHERE stock_data.adj_type = ?
+              AND stock_data.trade_date <= requested.end_date
+        )
+        SELECT
+            ranked.ts_code,
+            ranked.trade_date,
+            {}
+        FROM ranked
+        WHERE row_num <= {warmup_need}
+        ORDER BY ranked.ts_code ASC, ranked.trade_date ASC
+        "#,
+        input_selects.join(",\n                "),
+        output_selects.join(",\n            "),
+    );
+
+    let mut params = Vec::with_capacity(requests.len() * 2 + 1);
+    for (ts_code, end_date) in &requests {
+        params.push(ts_code.clone());
+        params.push(end_date.clone());
+    }
+    params.push(adj_type.to_string());
+
+    let mut stmt = dr
+        .conn
+        .prepare(&sql)
+        .map_err(|e| format!("预编译批量warmup历史查询失败: {e}"))?;
+    let mut rows = stmt
+        .query(params_from_iter(params.iter()))
+        .map_err(|e| format!("执行批量warmup历史查询失败: {e}"))?;
+
+    let mut trade_dates_by_stock = HashMap::<String, Vec<String>>::new();
+    let mut cols_by_stock = HashMap::<String, HashMap<String, Vec<Option<f64>>>>::new();
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取批量warmup历史查询结果失败: {e}"))?
+    {
+        let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败: {e}"))?;
+        let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败: {e}"))?;
+        trade_dates_by_stock
+            .entry(ts_code.clone())
+            .or_default()
+            .push(trade_date);
+
+        let cols = cols_by_stock.entry(ts_code).or_insert_with(|| {
+            IND_INPUT_KEYS
+                .iter()
+                .map(|key| (key.to_string(), Vec::new()))
+                .collect::<HashMap<_, _>>()
+        });
+        for (idx, key) in IND_INPUT_KEYS.iter().enumerate() {
+            let value: Option<f64> = row
+                .get(idx + 2)
+                .map_err(|e| format!("读取{key}失败: {e}"))?;
+            cols.get_mut(*key)
+                .expect("indicator input key should exist")
+                .push(value);
+        }
+    }
+
+    let mut out = HashMap::with_capacity(trade_dates_by_stock.len());
+    for (ts_code, trade_dates) in trade_dates_by_stock {
+        let cols = cols_by_stock
+            .remove(&ts_code)
+            .ok_or_else(|| format!("批量warmup缺少列数据: {ts_code}"))?;
+        let row_data = RowData { trade_dates, cols };
+        row_data.validate()?;
+        out.insert(ts_code, row_data);
+    }
+
+    Ok(out)
+}
+
 fn pro_bar_rows_to_row_data(rows: &[ProBarRow]) -> Result<RowData, String> {
     let mut trade_dates = Vec::with_capacity(rows.len());
     let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
@@ -330,6 +469,35 @@ fn merge_history_with_rows(
     Ok(history)
 }
 
+pub fn calc_increment_inds_from_history(
+    inds_cache: &[IndsCache],
+    history: Option<RowData>,
+    new_rows: &[ProBarRow],
+) -> Result<HashMap<String, Vec<Option<f64>>>, String> {
+    if new_rows.is_empty() {
+        return Err("增量指标计算失败: new_rows为空".to_string());
+    }
+
+    let combined = merge_history_with_rows(history, new_rows)?;
+    let indicators = calc_inds_with_cache(inds_cache, combined)?;
+    let keep_len = new_rows.len();
+    let mut out = HashMap::with_capacity(indicators.len());
+
+    for (name, series) in indicators {
+        if series.len() < keep_len {
+            return Err(format!(
+                "指标{}长度不足以切出增量结果: {} < {}",
+                name,
+                series.len(),
+                keep_len
+            ));
+        }
+        out.insert(name, series[series.len() - keep_len..].to_vec());
+    }
+
+    Ok(out)
+}
+
 pub fn calc_inds_with_cache(
     inds_cache: &[IndsCache],
     row_data: RowData,
@@ -390,34 +558,13 @@ pub fn calc_increment_one_stock_inds(
     history_end_date: Option<&str>,
     new_rows: &[ProBarRow],
 ) -> Result<HashMap<String, Vec<Option<f64>>>, String> {
-    if new_rows.is_empty() {
-        return Err("增量指标计算失败: new_rows为空".to_string());
-    }
-
     let history = match history_end_date {
         Some(end_date) => {
             load_one_tail_rows_with_warmup_need(dr, ts_code, adj_type, end_date, warmup_need)?
         }
         None => None,
     };
-    let combined = merge_history_with_rows(history, new_rows)?;
-    let indicators = calc_inds_with_cache(inds_cache, combined)?;
-    let keep_len = new_rows.len();
-    let mut out = HashMap::with_capacity(indicators.len());
-
-    for (name, series) in indicators {
-        if series.len() < keep_len {
-            return Err(format!(
-                "指标{}长度不足以切出增量结果: {} < {}",
-                name,
-                series.len(),
-                keep_len
-            ));
-        }
-        out.insert(name, series[series.len() - keep_len..].to_vec());
-    }
-
-    Ok(out)
+    calc_increment_inds_from_history(inds_cache, history, new_rows)
 }
 
 pub fn calc_inds_for_rows_with_cache(
