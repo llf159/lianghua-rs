@@ -80,7 +80,20 @@ pub struct StrategyPaperValidationTradeRow {
     pub high_return_pct: Option<f64>,
     pub close_return_pct: Option<f64>,
     pub realized_return_pct: Option<f64>,
+    pub daily_holding_close_returns: Vec<StrategyPaperValidationDailyHoldingCloseReturn>,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyPaperValidationDailyHoldingCloseReturn {
+    pub trade_date: String,
+    pub close_return_pct: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyPaperValidationIndexDailyReturn {
+    pub trade_date: String,
+    pub pct_chg: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +112,7 @@ pub struct StrategyPaperValidationData {
     pub sell_expression: String,
     pub summary: StrategyPaperValidationSummaryData,
     pub trades: Vec<StrategyPaperValidationTradeRow>,
+    pub index_daily_returns: Vec<StrategyPaperValidationIndexDailyReturn>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -270,6 +284,10 @@ pub fn run_strategy_paper_validation(
     let resolved_board = board
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    let resolved_index_ts_code = index_ts_code
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_INDEX_TS_CODE.to_string());
 
     let buy_program = parse_expression_program(&buy_expression, "买点方程")?;
     let sell_program = parse_expression_program(&sell_expression, "卖点方程")?;
@@ -360,16 +378,19 @@ pub fn run_strategy_paper_validation(
     });
 
     let summary = build_trade_summary(&trades);
+    let index_daily_returns = load_index_daily_returns(
+        source_path,
+        &resolved_index_ts_code,
+        &resolved_start_date,
+        &resolved_end_date,
+    )?;
 
     Ok(StrategyPaperValidationData {
         latest_trade_date: defaults.latest_trade_date,
         start_date: resolved_start_date,
         end_date: resolved_end_date,
         min_listed_trade_days: eligibility.min_listed_trade_days,
-        index_ts_code: index_ts_code
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| DEFAULT_INDEX_TS_CODE.to_string()),
+        index_ts_code: resolved_index_ts_code,
         resolved_board,
         test_ts_code: normalized_test_ts_code,
         test_stock_name,
@@ -379,6 +400,7 @@ pub fn run_strategy_paper_validation(
         sell_expression,
         summary,
         trades,
+        index_daily_returns,
     })
 }
 
@@ -690,6 +712,13 @@ fn simulate_trade_rows_from_runtime(
                     close_series.get(scan_index).copied().flatten(),
                     position.buy_cost_price,
                 );
+                let daily_holding_close_returns = build_daily_holding_close_returns(
+                    trade_dates,
+                    close_series,
+                    position.buy_index,
+                    scan_index,
+                    position.buy_cost_price,
+                );
 
                 trades.push(StrategyPaperValidationTradeRow {
                     ts_code: ts_code.to_string(),
@@ -706,6 +735,7 @@ fn simulate_trade_rows_from_runtime(
                     high_return_pct,
                     close_return_pct,
                     realized_return_pct: calc_return_pct(sell_price, position.buy_cost_price),
+                    daily_holding_close_returns,
                     status: "closed".to_string(),
                 });
             } else {
@@ -720,6 +750,13 @@ fn simulate_trade_rows_from_runtime(
 
     let last_index = trade_dates.len().saturating_sub(1);
     for position in open_positions {
+        let daily_holding_close_returns = build_daily_holding_close_returns(
+            trade_dates,
+            close_series,
+            position.buy_index,
+            last_index,
+            position.buy_cost_price,
+        );
         trades.push(StrategyPaperValidationTradeRow {
             ts_code: ts_code.to_string(),
             name: stock_name.cloned(),
@@ -747,6 +784,7 @@ fn simulate_trade_rows_from_runtime(
                 close_series.get(last_index).copied().flatten(),
                 position.buy_cost_price,
             ),
+            daily_holding_close_returns,
             status: "open".to_string(),
         });
     }
@@ -897,6 +935,37 @@ fn calc_return_pct(price: Option<f64>, buy_cost_price: f64) -> Option<f64> {
         return None;
     }
     Some((price / buy_cost_price - 1.0) * 100.0)
+}
+
+fn build_daily_holding_close_returns(
+    trade_dates: &[String],
+    close_series: &[Option<f64>],
+    buy_index: usize,
+    end_index: usize,
+    buy_cost_price: f64,
+) -> Vec<StrategyPaperValidationDailyHoldingCloseReturn> {
+    if buy_index > end_index || end_index >= trade_dates.len() || end_index >= close_series.len() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity(end_index - buy_index + 1);
+    for index in buy_index..=end_index {
+        let Some(trade_date) = trade_dates.get(index) else {
+            return Vec::new();
+        };
+        let Some(close_return_pct) =
+            calc_return_pct(close_series.get(index).copied().flatten(), buy_cost_price)
+        else {
+            return Vec::new();
+        };
+
+        out.push(StrategyPaperValidationDailyHoldingCloseReturn {
+            trade_date: trade_date.clone(),
+            close_return_pct,
+        });
+    }
+
+    out
 }
 
 fn normalize_valid_price(price: Option<f64>) -> Option<f64> {
@@ -1073,6 +1142,57 @@ fn load_trade_date_options(source_path: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+fn load_index_daily_returns(
+    source_path: &str,
+    index_ts_code: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<Vec<StrategyPaperValidationIndexDailyReturn>, String> {
+    let source_db = crate::data::source_db_path(source_path);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
+    let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                trade_date,
+                TRY_CAST(pct_chg AS DOUBLE)
+            FROM stock_data
+            WHERE ts_code = ?
+              AND adj_type = 'ind'
+              AND trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY trade_date ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译指数涨跌幅查询失败: {e}"))?;
+    let mut rows = stmt
+        .query(params![index_ts_code, start_date, end_date])
+        .map_err(|e| format!("查询指数涨跌幅失败: {e}"))?;
+
+    let mut out = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取指数涨跌幅行失败: {e}"))?
+    {
+        let trade_date: String = row.get(0).map_err(|e| format!("读取交易日字段失败: {e}"))?;
+        let pct_chg: Option<f64> = row.get(1).map_err(|e| format!("读取pct_chg失败: {e}"))?;
+
+        let Some(pct_chg) = pct_chg.filter(|value| value.is_finite()) else {
+            continue;
+        };
+
+        out.push(StrategyPaperValidationIndexDailyReturn {
+            trade_date,
+            pct_chg,
+        });
+    }
+
+    Ok(out)
+}
+
 fn normalize_trade_date_input(
     trade_date_options: &[String],
     input: Option<String>,
@@ -1239,7 +1359,14 @@ fn set_runtime_num_series_value(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        fs::{create_dir_all, remove_dir_all},
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use duckdb::{params, Connection};
 
     use crate::{data::RowData, scoring::tools::calc_zhang_pct};
 
@@ -1324,6 +1451,33 @@ mod tests {
             0.0,
         )
         .expect("simulation should succeed")
+    }
+
+    fn temp_source_dir() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("lianghua_strategy_paper_validation_{unique}"))
+    }
+
+    fn prepare_source_db(source_dir: &str) -> Connection {
+        create_dir_all(source_dir).expect("create source dir");
+        let db_path = crate::data::source_db_path(source_dir);
+        let conn = Connection::open(db_path).expect("open source db");
+        conn.execute(
+            r#"
+            CREATE TABLE stock_data (
+                ts_code VARCHAR,
+                trade_date VARCHAR,
+                adj_type VARCHAR,
+                pct_chg DOUBLE
+            )
+            "#,
+            [],
+        )
+        .expect("create stock_data");
+        conn
     }
 
     #[test]
@@ -1429,6 +1583,17 @@ mod tests {
         assert_eq!(trade.hold_days, 2);
         assert_eq!(trade.sell_price, Some(9.2));
         assert_eq!(trade.realized_return_pct, Some(-8.000000000000007));
+        assert_eq!(
+            trade
+                .daily_holding_close_returns
+                .iter()
+                .map(|item| item.trade_date.as_str())
+                .collect::<Vec<_>>(),
+            vec!["20240102", "20240103", "20240104"]
+        );
+        assert!((trade.daily_holding_close_returns[0].close_return_pct - 0.0).abs() < 1e-9);
+        assert!((trade.daily_holding_close_returns[1].close_return_pct + 9.5).abs() < 1e-9);
+        assert!((trade.daily_holding_close_returns[2].close_return_pct + 8.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1465,6 +1630,85 @@ mod tests {
         assert_eq!(trade.sell_price, None);
         assert!((trade.realized_return_pct.unwrap() + 9.5).abs() < 1e-9);
         assert_eq!(trade.hold_days, 1);
+        assert_eq!(
+            trade
+                .daily_holding_close_returns
+                .iter()
+                .map(|item| item.trade_date.as_str())
+                .collect::<Vec<_>>(),
+            vec!["20240102", "20240103"]
+        );
+        assert!((trade.daily_holding_close_returns[0].close_return_pct - 0.0).abs() < 1e-9);
+        assert!((trade.daily_holding_close_returns[1].close_return_pct + 9.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn daily_holding_close_returns_is_empty_when_any_close_point_is_missing() {
+        let series = build_daily_holding_close_returns(
+            &[
+                "20240102".to_string(),
+                "20240103".to_string(),
+                "20240104".to_string(),
+            ],
+            &[Some(10.0), None, Some(10.5)],
+            0,
+            2,
+            10.0,
+        );
+
+        assert!(series.is_empty());
+    }
+
+    #[test]
+    fn load_index_daily_returns_returns_sorted_ind_series() {
+        let source_dir = temp_source_dir();
+        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
+        let conn = prepare_source_db(source_dir_str);
+
+        conn.execute(
+            "INSERT INTO stock_data (ts_code, trade_date, adj_type, pct_chg) VALUES (?, ?, ?, ?)",
+            params!["000001.SH", "20240103", "ind", 1.5_f64],
+        )
+        .expect("insert first index row");
+        conn.execute(
+            "INSERT INTO stock_data (ts_code, trade_date, adj_type, pct_chg) VALUES (?, ?, ?, ?)",
+            params!["000001.SH", "20240102", "ind", 0.5_f64],
+        )
+        .expect("insert second index row");
+        conn.execute(
+            "INSERT INTO stock_data (ts_code, trade_date, adj_type, pct_chg) VALUES (?, ?, ?, ?)",
+            params!["000001.SH", "20240102", "qfq", 99.0_f64],
+        )
+        .expect("insert non-index row");
+
+        let series = load_index_daily_returns(source_dir_str, "000001.SH", "20240101", "20240131")
+            .expect("load index series");
+
+        assert_eq!(
+            series
+                .iter()
+                .map(|item| (item.trade_date.as_str(), item.pct_chg))
+                .collect::<Vec<_>>(),
+            vec![("20240102", 0.5_f64), ("20240103", 1.5_f64)]
+        );
+
+        drop(conn);
+        remove_dir_all(&source_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn load_index_daily_returns_returns_empty_when_missing() {
+        let source_dir = temp_source_dir();
+        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
+        let conn = prepare_source_db(source_dir_str);
+
+        let series = load_index_daily_returns(source_dir_str, "000001.SH", "20240101", "20240131")
+            .expect("load empty index series");
+
+        assert!(series.is_empty());
+
+        drop(conn);
+        remove_dir_all(&source_dir).expect("cleanup temp dir");
     }
 }
 

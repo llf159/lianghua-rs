@@ -57,9 +57,64 @@ const BOARD_OPTIONS = [
   { value: '其他', label: '其他' },
 ] as const
 
+const RELATIVE_NAV_MODE_OPTIONS = [
+  { value: 'realized_on_close', label: '交易完成后计算收益' },
+  { value: 'daily_holding', label: '逐日持仓计算收益' },
+] as const
+
 type TradeStatusFilter = 'all' | 'closed' | 'open'
 type TradeDetailModalStatus = Exclude<TradeStatusFilter, 'all'>
 type TradePageSize = (typeof TRADE_PAGE_SIZE_OPTIONS)[number]['value']
+type StrategyPaperValidationRelativeNavMode =
+  (typeof RELATIVE_NAV_MODE_OPTIONS)[number]['value']
+
+type StrategyPaperValidationIndexDailyReturn = {
+  trade_date?: string | null
+  pct_chg?: number | null
+}
+
+type StrategyPaperValidationHoldingCloseReturn = {
+  trade_date?: string | null
+  close_return_pct?: number | null
+}
+
+type StrategyPaperValidationChartTradeRow = StrategyPaperValidationTradeRow & {
+  daily_holding_close_returns?: StrategyPaperValidationHoldingCloseReturn[] | null
+}
+
+type StrategyPaperValidationRelativeNavPoint = {
+  tradeDate: string
+  strategyNav: number
+  indexNav: number
+  relativeNav: number
+  strategyDailyReturn: number
+  indexDailyReturn: number
+  activeTradeCount: number
+}
+
+type StrategyPaperValidationRelativeNavChartState = {
+  points: StrategyPaperValidationRelativeNavPoint[]
+  eligibleTradeCount: number
+  activeTradeDates: number
+  latestPoint: StrategyPaperValidationRelativeNavPoint | null
+  emptyReason: string | null
+}
+
+type StrategyPaperValidationRelativeNavChartGeometry = {
+  width: number
+  height: number
+  viewBox: string
+  yTicks: Array<{ value: number; y: number }>
+  xLabels: Array<{
+    value: string
+    x: number
+    anchor: 'start' | 'middle' | 'end'
+  }>
+  linePath: string
+  areaPath: string
+  lastPoint: { x: number; y: number; item: StrategyPaperValidationRelativeNavPoint } | null
+  baselineY: number | null
+}
 
 type TradeSortKey =
   | 'status'
@@ -121,6 +176,24 @@ function formatPercent(value?: number | null, digits = 2) {
     return '--'
   }
   return `${value.toFixed(digits)}%`
+}
+
+function formatNavValue(value?: number | null, digits = 3) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return '--'
+  }
+  return value.toFixed(digits)
+}
+
+function formatShortDateLabel(value?: string | null) {
+  if (!value || value.length !== 8) {
+    return '--'
+  }
+  return `${value.slice(4, 6)}-${value.slice(6, 8)}`
+}
+
+function isCompactTradeDate(value?: string | null) {
+  return Boolean(value && /^\d{8}$/.test(value))
 }
 
 function statusLabel(row: StrategyPaperValidationTradeRow) {
@@ -192,14 +265,625 @@ function isWithinDateRange(value: string, start: string, end: string) {
   return true
 }
 
+function getStrategyPaperValidationIndexDailyReturns(result: StrategyPaperValidationData | null) {
+  const indexDailyReturns = (
+    result as (StrategyPaperValidationData & {
+      index_daily_returns?: StrategyPaperValidationIndexDailyReturn[] | null
+    }) | null
+  )?.index_daily_returns
+
+  return Array.isArray(indexDailyReturns) ? indexDailyReturns : []
+}
+
+function getStrategyPaperValidationChartTrades(result: StrategyPaperValidationData | null) {
+  const trades = (
+    result as (StrategyPaperValidationData & {
+      trades?: StrategyPaperValidationChartTradeRow[] | null
+    }) | null
+  )?.trades
+
+  return Array.isArray(trades) ? trades : []
+}
+
+function buildRelativeNavChartBackbone(
+  indexDailyReturns: StrategyPaperValidationIndexDailyReturn[],
+) {
+  const backboneMap = new Map<string, number>()
+  for (const item of indexDailyReturns) {
+    const tradeDate = item.trade_date?.trim() ?? ''
+    if (!isCompactTradeDate(tradeDate)) {
+      continue
+    }
+
+    const pctChg = item.pct_chg
+    if (typeof pctChg !== 'number' || !Number.isFinite(pctChg)) {
+      continue
+    }
+    backboneMap.set(tradeDate, pctChg / 100)
+  }
+
+  return {
+    backboneMap,
+    backboneDates: [...backboneMap.keys()].sort((left, right) => left.localeCompare(right)),
+  }
+}
+
+function buildRealizedOnCloseRelativeNavChartState(
+  trades: StrategyPaperValidationChartTradeRow[],
+  indexDailyReturns: StrategyPaperValidationIndexDailyReturn[],
+): StrategyPaperValidationRelativeNavChartState {
+  const tradeReturnsByDate = new Map<string, number[]>()
+  let eligibleTradeCount = 0
+
+  for (const row of trades) {
+    const realizedReturn = getRealizedReturnValue(row)
+    const sellDate = row.sell_date?.trim() ?? ''
+    if (!sellDate || realizedReturn === null) {
+      continue
+    }
+
+    const existingReturns = tradeReturnsByDate.get(sellDate)
+    if (existingReturns) {
+      existingReturns.push(realizedReturn / 100)
+    } else {
+      tradeReturnsByDate.set(sellDate, [realizedReturn / 100])
+    }
+    eligibleTradeCount += 1
+  }
+
+  if (eligibleTradeCount === 0) {
+    return {
+      points: [],
+      eligibleTradeCount,
+      activeTradeDates: 0,
+      latestPoint: null,
+      emptyReason: '当前筛选结果里没有已平仓且带记录收益的交易，暂时无法绘制相对净值。',
+    }
+  }
+
+  const { backboneMap, backboneDates } = buildRelativeNavChartBackbone(indexDailyReturns)
+  if (backboneDates.length === 0) {
+    return {
+      points: [],
+      eligibleTradeCount,
+      activeTradeDates: 0,
+      latestPoint: null,
+      emptyReason: '所选指数暂无可用日收益数据，无法绘制相对净值。',
+    }
+  }
+
+  let strategyNav = 1
+  let indexNav = 1
+  let activeTradeDates = 0
+  const points: StrategyPaperValidationRelativeNavPoint[] = []
+
+  for (const tradeDate of backboneDates) {
+    const tradeReturns = tradeReturnsByDate.get(tradeDate) ?? []
+    const strategyDailyReturn =
+      tradeReturns.length > 0
+        ? tradeReturns.reduce((sum, value) => sum + value, 0) / tradeReturns.length
+        : 0
+    const indexDailyReturn = backboneMap.get(tradeDate) ?? 0
+
+    if (tradeReturns.length > 0) {
+      activeTradeDates += 1
+    }
+
+    strategyNav *= 1 + strategyDailyReturn
+    indexNav *= 1 + indexDailyReturn
+
+    if (!Number.isFinite(strategyNav) || !Number.isFinite(indexNav) || indexNav <= 0) {
+      return {
+        points: [],
+        eligibleTradeCount,
+        activeTradeDates,
+        latestPoint: null,
+        emptyReason: '指数净值序列异常，无法绘制相对净值。',
+      }
+    }
+
+    points.push({
+      tradeDate,
+      strategyNav,
+      indexNav,
+      relativeNav: strategyNav / indexNav,
+      strategyDailyReturn,
+      indexDailyReturn,
+      activeTradeCount: tradeReturns.length,
+    })
+  }
+
+  if (activeTradeDates === 0) {
+    return {
+      points: [],
+      eligibleTradeCount,
+      activeTradeDates,
+      latestPoint: null,
+      emptyReason: '当前筛选后的平仓交易卖出日不在指数日收益区间内，暂时无法绘制相对净值。',
+    }
+  }
+
+  return {
+    points,
+    eligibleTradeCount,
+    activeTradeDates,
+    latestPoint: points[points.length - 1] ?? null,
+    emptyReason: null,
+  }
+}
+
+function buildDailyHoldingRelativeNavChartState(
+  trades: StrategyPaperValidationChartTradeRow[],
+  indexDailyReturns: StrategyPaperValidationIndexDailyReturn[],
+): StrategyPaperValidationRelativeNavChartState {
+  const { backboneMap, backboneDates } = buildRelativeNavChartBackbone(indexDailyReturns)
+  if (backboneDates.length === 0) {
+    return {
+      points: [],
+      eligibleTradeCount: 0,
+      activeTradeDates: 0,
+      latestPoint: null,
+      emptyReason: '所选指数暂无可用日收益数据，无法绘制相对净值。',
+    }
+  }
+
+  const holdingValuesByDate = new Map<string, number[]>()
+  let eligibleTradeCount = 0
+
+  for (const row of trades) {
+    const dailyHoldingReturns = Array.isArray(row.daily_holding_close_returns)
+      ? row.daily_holding_close_returns
+      : []
+    if (dailyHoldingReturns.length === 0) {
+      continue
+    }
+
+    const markedValueByDate = new Map<string, number>()
+    for (const item of dailyHoldingReturns) {
+      const tradeDate = item.trade_date?.trim() ?? ''
+      if (!isCompactTradeDate(tradeDate) || !backboneMap.has(tradeDate)) {
+        continue
+      }
+
+      const closeReturnPct = item.close_return_pct
+      if (typeof closeReturnPct !== 'number' || !Number.isFinite(closeReturnPct)) {
+        continue
+      }
+
+      const markedValue = 1 + closeReturnPct / 100
+      if (!Number.isFinite(markedValue) || markedValue < 0) {
+        continue
+      }
+
+      markedValueByDate.set(tradeDate, markedValue)
+    }
+
+    if (markedValueByDate.size === 0) {
+      continue
+    }
+
+    eligibleTradeCount += 1
+    for (const [tradeDate, markedValue] of markedValueByDate) {
+      const existingValues = holdingValuesByDate.get(tradeDate)
+      if (existingValues) {
+        existingValues.push(markedValue)
+      } else {
+        holdingValuesByDate.set(tradeDate, [markedValue])
+      }
+    }
+  }
+
+  if (eligibleTradeCount === 0) {
+    return {
+      points: [],
+      eligibleTradeCount,
+      activeTradeDates: 0,
+      latestPoint: null,
+      emptyReason: '当前筛选结果里没有可用的逐日持仓收盘收益，暂时无法绘制相对净值。',
+    }
+  }
+
+  let strategyNav = 1
+  let indexNav = 1
+  let activeTradeDates = 0
+  let previousMarkedValue: number | null = null
+  const points: StrategyPaperValidationRelativeNavPoint[] = []
+
+  for (const tradeDate of backboneDates) {
+    const holdingValues = holdingValuesByDate.get(tradeDate) ?? []
+    const currentMarkedValue =
+      holdingValues.length > 0
+        ? holdingValues.reduce((sum, value) => sum + value, 0) / holdingValues.length
+        : null
+    let strategyDailyReturn = 0
+
+    if (currentMarkedValue !== null) {
+      if (previousMarkedValue === null) {
+        strategyDailyReturn = currentMarkedValue - 1
+      } else if (previousMarkedValue === 0) {
+        if (currentMarkedValue !== 0) {
+          return {
+            points: [],
+            eligibleTradeCount,
+            activeTradeDates,
+            latestPoint: null,
+            emptyReason: '逐日持仓净值序列异常，无法绘制相对净值。',
+          }
+        }
+        strategyDailyReturn = 0
+      } else {
+        strategyDailyReturn = currentMarkedValue / previousMarkedValue - 1
+      }
+      activeTradeDates += 1
+    }
+
+    const indexDailyReturn = backboneMap.get(tradeDate) ?? 0
+    strategyNav *= 1 + strategyDailyReturn
+    indexNav *= 1 + indexDailyReturn
+
+    if (
+      !Number.isFinite(strategyDailyReturn) ||
+      !Number.isFinite(strategyNav) ||
+      !Number.isFinite(indexNav) ||
+      indexNav <= 0
+    ) {
+      return {
+        points: [],
+        eligibleTradeCount,
+        activeTradeDates,
+        latestPoint: null,
+        emptyReason: '逐日持仓净值序列异常，无法绘制相对净值。',
+      }
+    }
+
+    points.push({
+      tradeDate,
+      strategyNav,
+      indexNav,
+      relativeNav: strategyNav / indexNav,
+      strategyDailyReturn,
+      indexDailyReturn,
+      activeTradeCount: holdingValues.length,
+    })
+    previousMarkedValue = currentMarkedValue
+  }
+
+  if (activeTradeDates === 0) {
+    return {
+      points: [],
+      eligibleTradeCount,
+      activeTradeDates,
+      latestPoint: null,
+      emptyReason: '当前筛选后的逐日持仓收益不在指数日收益区间内，暂时无法绘制相对净值。',
+    }
+  }
+
+  return {
+    points,
+    eligibleTradeCount,
+    activeTradeDates,
+    latestPoint: points[points.length - 1] ?? null,
+    emptyReason: null,
+  }
+}
+
+function buildRelativeNavChartState(
+  trades: StrategyPaperValidationChartTradeRow[],
+  indexDailyReturns: StrategyPaperValidationIndexDailyReturn[],
+  mode: StrategyPaperValidationRelativeNavMode,
+): StrategyPaperValidationRelativeNavChartState {
+  return mode === 'daily_holding'
+    ? buildDailyHoldingRelativeNavChartState(trades, indexDailyReturns)
+    : buildRealizedOnCloseRelativeNavChartState(trades, indexDailyReturns)
+}
+
+function buildRelativeNavChartGeometry(points: StrategyPaperValidationRelativeNavPoint[]) {
+  if (points.length === 0) {
+    return null
+  }
+
+  const width = 960
+  const height = 248
+  const plotLeft = 56
+  const plotRight = 14
+  const plotTop = 18
+  const plotBottom = 34
+  const plotWidth = width - plotLeft - plotRight
+  const plotHeight = height - plotTop - plotBottom
+  const relativeValues = points.map((item) => item.relativeNav)
+  const minValue = Math.min(1, ...relativeValues)
+  const maxValue = Math.max(1, ...relativeValues)
+  const span = maxValue - minValue
+  const valuePadding = span === 0 ? Math.max(maxValue * 0.06, 0.03) : span * 0.14
+  const yMin = Math.max(0, minValue - valuePadding)
+  const yMax = maxValue + valuePadding
+  const safeRange = yMax - yMin || 1
+
+  const toX = (index: number) =>
+    points.length === 1 ? plotLeft + plotWidth / 2 : plotLeft + (plotWidth * index) / (points.length - 1)
+  const toY = (value: number) => plotTop + ((yMax - value) / safeRange) * plotHeight
+
+  const plottedPoints = points.map((item, index) => ({
+    x: toX(index),
+    y: toY(item.relativeNav),
+    item,
+  }))
+
+  const linePath = plottedPoints
+    .map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
+    .join(' ')
+
+  const firstPoint = plottedPoints[0]
+  const lastPoint = plottedPoints[plottedPoints.length - 1]
+  const bottomY = plotTop + plotHeight
+  const areaPath =
+    plottedPoints.length === 1
+      ? `M ${firstPoint.x.toFixed(2)} ${bottomY.toFixed(2)} L ${firstPoint.x.toFixed(2)} ${firstPoint.y.toFixed(2)} L ${firstPoint.x.toFixed(2)} ${bottomY.toFixed(2)} Z`
+      : `M ${firstPoint.x.toFixed(2)} ${bottomY.toFixed(2)} ${linePath.slice(1)} L ${lastPoint.x.toFixed(2)} ${bottomY.toFixed(2)} Z`
+
+  const yTickCount = 5
+  const yTicks = Array.from({ length: yTickCount }, (_, index) => {
+    const ratio = index / (yTickCount - 1)
+    const value = yMax - safeRange * ratio
+    return {
+      value,
+      y: toY(value),
+    }
+  })
+
+  const xLabelCount = Math.min(5, points.length)
+  const xLabelIndexes = new Set<number>()
+  for (let index = 0; index < xLabelCount; index += 1) {
+    const pointIndex = Math.round((index * (points.length - 1)) / Math.max(1, xLabelCount - 1))
+    xLabelIndexes.add(pointIndex)
+  }
+
+  const xLabels = [...xLabelIndexes]
+    .sort((left, right) => left - right)
+    .map((pointIndex) => {
+      let anchor: 'start' | 'middle' | 'end' = 'middle'
+      if (pointIndex === 0) {
+        anchor = 'start'
+      } else if (pointIndex === points.length - 1) {
+        anchor = 'end'
+      }
+
+      return {
+        value: formatShortDateLabel(points[pointIndex]?.tradeDate),
+        x: toX(pointIndex),
+        anchor,
+      }
+    })
+
+  return {
+    width,
+    height,
+    viewBox: `0 0 ${width} ${height}`,
+    yTicks,
+    xLabels,
+    linePath,
+    areaPath,
+    lastPoint: lastPoint
+      ? {
+          x: lastPoint.x,
+          y: lastPoint.y,
+          item: lastPoint.item,
+        }
+      : null,
+    baselineY: yMin <= 1 && yMax >= 1 ? toY(1) : null,
+  } satisfies StrategyPaperValidationRelativeNavChartGeometry
+}
+
+const StrategyPaperValidationRelativeNavChart = memo(
+  function StrategyPaperValidationRelativeNavChart({
+    trades,
+    indexDailyReturns,
+  }: {
+    trades: StrategyPaperValidationChartTradeRow[]
+    indexDailyReturns: StrategyPaperValidationIndexDailyReturn[]
+  }) {
+    const [mode, setMode] =
+      useState<StrategyPaperValidationRelativeNavMode>('realized_on_close')
+    const chartState = useMemo(
+      () => buildRelativeNavChartState(trades, indexDailyReturns, mode),
+      [indexDailyReturns, mode, trades],
+    )
+    const geometry = useMemo(
+      () => buildRelativeNavChartGeometry(chartState.points),
+      [chartState.points],
+    )
+    const modeDescription =
+      mode === 'daily_holding'
+        ? '按当前筛选结果统计逐日持仓收盘收益，按当日持仓等权盯市，并与所选指数日收益做复利对比。'
+        : '按当前筛选结果统计平仓日等权收益，并与所选指数日收益做复利对比。'
+    const eligibleTradeCountLabel =
+      mode === 'daily_holding' ? '纳入持仓笔数' : '纳入平仓笔数'
+    const activeTradeDatesLabel =
+      mode === 'daily_holding' ? '有持仓交易日' : '有收益交易日'
+    const tooltipTradeCountLabel = mode === 'daily_holding' ? '当日持仓' : '当日平仓'
+    const latestPoint = chartState.latestPoint
+    const latestToneClass =
+      !latestPoint || latestPoint.relativeNav === 1
+        ? 'is-flat'
+        : latestPoint.relativeNav > 1
+          ? 'is-positive'
+          : 'is-negative'
+
+    return (
+      <section className="strategy-paper-validation-relative-chart">
+        <div className="strategy-paper-validation-relative-chart-head">
+          <div className="strategy-paper-validation-relative-chart-title">
+            <strong>相对净值</strong>
+            <span>{modeDescription}</span>
+          </div>
+          <div className="strategy-paper-validation-relative-chart-head-side">
+            <div className="strategy-paper-validation-relative-chart-mode-control">
+              <span>收益口径</span>
+              <div
+                className="strategy-paper-validation-relative-chart-mode-switch"
+                role="group"
+                aria-label="相对净值收益计算模式"
+              >
+                {RELATIVE_NAV_MODE_OPTIONS.map((item) => {
+                  const isActive = item.value === mode
+                  return (
+                    <button
+                      key={item.value}
+                      type="button"
+                      className={[
+                        'strategy-paper-validation-relative-chart-mode-btn',
+                        isActive ? 'is-active' : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' ')}
+                      onClick={() => setMode(item.value)}
+                      aria-pressed={isActive}
+                    >
+                      {item.label}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+            <div
+              className={[
+                'strategy-paper-validation-relative-chart-latest',
+                latestToneClass,
+              ]
+                .filter(Boolean)
+                .join(' ')}
+            >
+              <span>最新 {formatDateLabel(latestPoint?.tradeDate)}</span>
+              <strong>{formatNavValue(latestPoint?.relativeNav)}</strong>
+            </div>
+          </div>
+        </div>
+
+        <div className="strategy-paper-validation-relative-chart-metrics">
+          <div className="strategy-paper-validation-relative-chart-metric">
+            <span>策略净值</span>
+            <strong>{formatNavValue(latestPoint?.strategyNav)}</strong>
+          </div>
+          <div className="strategy-paper-validation-relative-chart-metric">
+            <span>指数净值</span>
+            <strong>{formatNavValue(latestPoint?.indexNav)}</strong>
+          </div>
+          <div className="strategy-paper-validation-relative-chart-metric">
+            <span>{eligibleTradeCountLabel}</span>
+            <strong>{chartState.eligibleTradeCount}</strong>
+          </div>
+          <div className="strategy-paper-validation-relative-chart-metric">
+            <span>{activeTradeDatesLabel}</span>
+            <strong>{chartState.activeTradeDates}</strong>
+          </div>
+        </div>
+
+        {chartState.emptyReason || !geometry ? (
+          <div className="strategy-paper-validation-relative-chart-empty">
+            {chartState.emptyReason ?? '当前区间暂无可展示的相对净值序列。'}
+          </div>
+        ) : (
+          <div className="strategy-paper-validation-relative-chart-viewport">
+            <svg
+              className="strategy-paper-validation-relative-chart-svg"
+              viewBox={geometry.viewBox}
+              preserveAspectRatio="none"
+              role="img"
+              aria-label={`策略相对净值走势图（${mode === 'daily_holding' ? '逐日持仓计算收益' : '交易完成后计算收益'}）`}
+            >
+              <defs>
+                <linearGradient
+                  id="strategy-paper-validation-relative-chart-fill"
+                  x1="0"
+                  y1="0"
+                  x2="0"
+                  y2="1"
+                >
+                  <stop offset="0%" stopColor="rgba(249, 115, 22, 0.24)" />
+                  <stop offset="100%" stopColor="rgba(249, 115, 22, 0.02)" />
+                </linearGradient>
+              </defs>
+
+              {geometry.yTicks.map((tick) => (
+                <g key={`relative-y-${tick.y.toFixed(2)}`}>
+                  <line
+                    x1={56}
+                    y1={tick.y}
+                    x2={946}
+                    y2={tick.y}
+                    className="strategy-paper-validation-relative-chart-grid"
+                  />
+                  <text
+                    x={48}
+                    y={tick.y + 4}
+                    className="strategy-paper-validation-relative-chart-axis strategy-paper-validation-relative-chart-axis-y"
+                  >
+                    {formatNavValue(tick.value)}
+                  </text>
+                </g>
+              ))}
+
+              {geometry.xLabels.map((label) => (
+                <text
+                  key={`relative-x-${label.value}-${label.x.toFixed(2)}`}
+                  x={label.x}
+                  y={230}
+                  textAnchor={label.anchor}
+                  className="strategy-paper-validation-relative-chart-axis strategy-paper-validation-relative-chart-axis-x"
+                >
+                  {label.value}
+                </text>
+              ))}
+
+              {geometry.baselineY !== null ? (
+                <line
+                  x1={56}
+                  y1={geometry.baselineY}
+                  x2={946}
+                  y2={geometry.baselineY}
+                  className="strategy-paper-validation-relative-chart-baseline"
+                />
+              ) : null}
+
+              <path
+                d={geometry.areaPath}
+                className="strategy-paper-validation-relative-chart-area"
+              />
+              <path
+                d={geometry.linePath}
+                className="strategy-paper-validation-relative-chart-line"
+              />
+
+              {geometry.lastPoint ? (
+                <circle
+                  cx={geometry.lastPoint.x}
+                  cy={geometry.lastPoint.y}
+                  r={4.5}
+                  className="strategy-paper-validation-relative-chart-dot"
+                >
+                  <title>
+                    {`${formatDateLabel(geometry.lastPoint.item.tradeDate)}\n相对净值 ${formatNavValue(geometry.lastPoint.item.relativeNav)}\n策略净值 ${formatNavValue(geometry.lastPoint.item.strategyNav)}\n指数净值 ${formatNavValue(geometry.lastPoint.item.indexNav)}\n${tooltipTradeCountLabel} ${geometry.lastPoint.item.activeTradeCount} 笔\n策略日收益 ${formatPercent(geometry.lastPoint.item.strategyDailyReturn * 100)}\n指数日收益 ${formatPercent(geometry.lastPoint.item.indexDailyReturn * 100)}`}
+                  </title>
+                </circle>
+              ) : null}
+            </svg>
+          </div>
+        )}
+      </section>
+    )
+  },
+)
+
 type StrategyPaperValidationTradesTableProps = {
-  trades: StrategyPaperValidationTradeRow[]
+  trades: StrategyPaperValidationChartTradeRow[]
+  indexDailyReturns: StrategyPaperValidationIndexDailyReturn[]
   sourcePath: string
 }
 
 const StrategyPaperValidationTradesTable = memo(
   function StrategyPaperValidationTradesTable({
     trades,
+    indexDailyReturns,
     sourcePath,
   }: StrategyPaperValidationTradesTableProps) {
     const [stockFilter, setStockFilter] = useState('')
@@ -476,6 +1160,11 @@ const StrategyPaperValidationTradesTable = memo(
             </select>
           </label>
         </div>
+
+        <StrategyPaperValidationRelativeNavChart
+          trades={filteredTrades}
+          indexDailyReturns={indexDailyReturns}
+        />
 
         <div className="strategy-paper-validation-table-wrap">
           <table className="strategy-paper-validation-table">
@@ -986,7 +1675,11 @@ export default function StrategyPaperValidationPage() {
   }
 
   const summary = result?.summary
-  const trades = useMemo(() => result?.trades ?? [], [result])
+  const trades = useMemo(() => getStrategyPaperValidationChartTrades(result), [result])
+  const indexDailyReturns = useMemo(
+    () => getStrategyPaperValidationIndexDailyReturns(result),
+    [result],
+  )
   const selectedTemplate = templates.find((item) => item.id === selectedTemplateId)
   const closedTrades = useMemo(
     () => trades.filter((row) => row.status === 'closed'),
@@ -1334,6 +2027,7 @@ export default function StrategyPaperValidationPage() {
       {result ? (
         <StrategyPaperValidationTradesTable
           trades={trades}
+          indexDailyReturns={indexDailyReturns}
           sourcePath={sourcePath}
         />
       ) : null}

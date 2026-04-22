@@ -37,7 +37,18 @@ export type StrategyPaperValidationTradeRow = {
   high_return_pct?: number | null
   close_return_pct?: number | null
   realized_return_pct?: number | null
+  daily_holding_close_returns: StrategyPaperValidationDailyHoldingCloseReturn[]
   status: string
+}
+
+export type StrategyPaperValidationDailyHoldingCloseReturn = {
+  trade_date: string
+  close_return_pct: number
+}
+
+export type StrategyPaperValidationIndexDailyReturn = {
+  trade_date: string
+  pct_chg: number
 }
 
 export type StrategyPaperValidationData = {
@@ -55,6 +66,7 @@ export type StrategyPaperValidationData = {
   sell_expression: string
   summary: StrategyPaperValidationSummaryData
   trades: StrategyPaperValidationTradeRow[]
+  index_daily_returns: StrategyPaperValidationIndexDailyReturn[]
 }
 
 export type StrategyPaperValidationTemplateValidationData = {
