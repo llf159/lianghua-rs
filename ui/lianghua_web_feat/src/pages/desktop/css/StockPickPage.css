@@ -122,9 +122,40 @@
   cursor: pointer;
 }
 
+.stock-pick-secondary-btn {
+  border: 1px solid #d1d9e2;
+  background: #fff;
+  color: #465566;
+  border-radius: 8px;
+  padding: 7px 14px;
+  cursor: pointer;
+}
+
 .stock-pick-primary-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.stock-pick-secondary-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.stock-pick-template-select {
+  display: grid;
+  gap: 4px;
+  color: #566272;
+  font-size: 12px;
+}
+
+.stock-pick-template-select select {
+  min-width: 180px;
+  border: 1px solid #cfd9e6;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 13px;
+  color: #2f3f52;
+  background: #fff;
 }
 
 .stock-pick-tip {
@@ -228,6 +259,15 @@
   font-size: 12px;
   color: #2f3f52;
   background: #fff;
+}
+
+.stock-pick-result-action-stack {
+  display: grid;
+  gap: 6px;
+}
+
+.stock-pick-result-action-stack .stock-pick-chip-btn {
+  width: 100%;
 }
 
 .stock-pick-empty {

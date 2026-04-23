@@ -61,7 +61,7 @@ export default function PageDesktop() {
 
   return (
     <div className={isCollapsed ? 'desktop-shell collapsed' : 'desktop-shell'}>
-      <button className="sidebar-toggle" onClick={() => setIsCollapsed((v) => !v)}>
+      <button className="sidebar-toggle" type="button" onClick={() => setIsCollapsed((v) => !v)}>
         {isCollapsed ? '☰' : '✕'}
       </button>
       <aside className="sidebar">

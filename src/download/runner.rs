@@ -2,9 +2,8 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::Path,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc,
+        mpsc, Arc, Mutex,
     },
     thread::{self, sleep},
     time::Duration,
@@ -12,12 +11,11 @@ use std::{
 
 use chrono::{Datelike, Local, Timelike};
 use duckdb::Connection;
-use rayon::{ThreadPool, ThreadPoolBuilder, prelude::*};
+use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
 
 use crate::{
-    crawler::concept::{ThsConceptFetchItem, ThsConceptRow, fetch_one_ths_concept_row},
+    crawler::concept::{fetch_one_ths_concept_row, ThsConceptFetchItem, ThsConceptRow},
     data::{
-        DataReader,
         concept_performance_data::rebuild_concept_performance_range,
         download_data::{
             append_stage_pro_bar_rows, checkpoint_stock_data, delete_one_stock_range,
@@ -26,15 +24,15 @@ use crate::{
             reset_stock_data_stage_table, write_ths_concepts_csv,
         },
         load_stock_list, load_ths_concepts_list, load_trade_date_list, source_db_path,
-        stock_list_path, trade_calendar_path,
+        stock_list_path, trade_calendar_path, DataReader,
     },
     download::{
+        ind_calc::{
+            cache_ind_build, calc_increment_inds_from_history,
+            load_many_tail_rows_with_warmup_need, warmup_ind_estimate, IndsCache,
+        },
         AdjType, BarFreq, DownloadSummary, DownloadTask, PreparedDownloadBatch,
         PreparedStockDownload, ProBarRow, TushareClient,
-        ind_calc::{
-            IndsCache, cache_ind_build, calc_increment_inds_from_history,
-            load_many_tail_rows_with_warmup_need, warmup_ind_estimate,
-        },
     },
 };
 
@@ -51,7 +49,7 @@ pub struct DownloadProgress {
     pub message: String,
 }
 
-pub type DownloadProgressCallback = dyn Fn(DownloadProgress) + Send + Sync;
+pub type DownloadProgressCallback<'a> = dyn Fn(DownloadProgress) + Send + Sync + 'a;
 
 const INCREMENTAL_INDICATOR_CHUNK_SIZE: usize = 256;
 const THS_CONCEPT_RETRY_DELAY_SECS: u64 = 30;
@@ -158,7 +156,7 @@ fn resolve_index_ts_codes() -> Vec<String> {
 }
 
 fn emit_progress(
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
     phase: &str,
     finished: usize,
     total: usize,
@@ -200,7 +198,7 @@ fn sync_gaini_bx_range(
     source_dir: &str,
     start_date: &str,
     end_date: &str,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<usize, String> {
     emit_progress(
         progress_cb,
@@ -323,7 +321,7 @@ fn build_ordered_ths_concept_rows(
 
 fn download_ths_concepts_once(
     source_dir: &str,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<ThsConceptDownloadSummary, String> {
     let (all_items, missing_items, mut concept_map) = build_missing_ths_concept_items(source_dir)?;
 
@@ -460,7 +458,7 @@ enum ThsConceptConcurrentMessage {
 fn download_ths_concepts_concurrent_once(
     source_dir: &str,
     worker_threads: usize,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<ThsConceptDownloadSummary, String> {
     let (all_items, missing_items, mut concept_map) = build_missing_ths_concept_items(source_dir)?;
     let existing_count = all_items.len().saturating_sub(missing_items.len());
@@ -524,10 +522,7 @@ fn download_ths_concepts_concurrent_once(
                 let http = match build_ths_concept_http_client() {
                     Ok(client) => client,
                     Err(error) => {
-                        let _ = tx.send(ThsConceptConcurrentMessage::Failure {
-                            item: None,
-                            error,
-                        });
+                        let _ = tx.send(ThsConceptConcurrentMessage::Failure { item: None, error });
                         stop_flag.store(true, Ordering::Release);
                         return;
                     }
@@ -684,7 +679,7 @@ fn download_ths_concepts_concurrent_once(
 pub fn download_ths_concepts(
     source_dir: &str,
     download_config: ThsConceptDownloadConfig,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<ThsConceptDownloadSummary, String> {
     let retry_total = if download_config.retry_enabled {
         download_config.retry_times.saturating_add(1).max(1)
@@ -745,7 +740,7 @@ pub fn download_ths_concepts(
 
 pub fn init_stock_basic_data(
     config: &DownloadRuntimeConfig,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<String, String> {
     // 初始化基础数据,返回当前有效交易日
     let source_dir = config.source_dir.as_str();
@@ -851,7 +846,7 @@ pub fn init_stock_basic_data(
 
 fn init_index_basic_data(
     config: &DownloadRuntimeConfig,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<String, String> {
     let source_dir = config.source_dir.as_str();
     let client = TushareClient::new(config.token.clone(), config.limit_calls_per_min)?;
@@ -1216,7 +1211,7 @@ fn retry_failed_downloads(
     tasks: Vec<DownloadTask>,
     retry_times: usize,
     pool: &ThreadPool,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> PreparedDownloadBatch {
     let mut merged_batch = PreparedDownloadBatch::default();
     let mut pending_tasks = tasks;
@@ -1274,7 +1269,7 @@ fn retry_failed_downloads(
 
 fn download_first_all_market(
     config: &DownloadRuntimeConfig,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DownloadSummary, String> {
     let effective_trade_date = init_stock_basic_data(config, progress_cb)?;
     let adj_type = config.adj_type;
@@ -1334,7 +1329,7 @@ fn download_selected_stocks_with_context(
     retry_times: usize,
     start_message: &str,
     done_message: &str,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DownloadSummary, String> {
     if ts_codes.is_empty() {
         emit_progress(
@@ -1460,7 +1455,7 @@ fn download_selected_stocks_with_context(
 pub fn download_selected_stocks(
     config: &DownloadRuntimeConfig,
     ts_codes: &[String],
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DownloadSummary, String> {
     let effective_trade_date = init_stock_basic_data(config, progress_cb)?;
     let adj_type = config.adj_type;
@@ -1505,7 +1500,7 @@ fn download_indices_with_context(
     config: &DownloadRuntimeConfig,
     start_date: &str,
     end_date: &str,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DownloadSummary, String> {
     let effective_trade_date = end_date.to_string();
     let source_dir = config.source_dir.as_str();
@@ -1595,7 +1590,7 @@ fn download_indices_with_context(
 
 pub fn download_indices(
     config: &DownloadRuntimeConfig,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DownloadSummary, String> {
     let effective_trade_date = init_index_basic_data(config, progress_cb)?;
     let source_dir = config.source_dir.as_str();
@@ -1712,7 +1707,7 @@ fn calc_passed_prepared_items(
 
 pub fn download_pending_all_market(
     config: &DownloadRuntimeConfig,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DownloadSummary, String> {
     let effective_trade_date = init_stock_basic_data(config, progress_cb)?;
     let source_dir = config.source_dir.as_str();
@@ -2069,7 +2064,7 @@ pub fn download_pending_all_market(
 
 pub fn download(
     config: &DownloadRuntimeConfig,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DownloadSummary, String> {
     let adj_type = config.adj_type;
     let source_dir = config.source_dir.as_str();

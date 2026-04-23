@@ -83,6 +83,12 @@ function formatPhaseLabel(phase: string | null | undefined) {
       return '拉取行情'
     case 'download_index_bars':
       return '拉取指数'
+    case 'prepare_index_download':
+      return '准备指数'
+    case 'write_index_db':
+      return '写入指数'
+    case 'index_download_done':
+      return '指数阶段完成'
     case 'download_pending_trade_dates':
       return '拉取增量'
     case 'validate_pending_trade_dates':
@@ -104,8 +110,12 @@ function formatPhaseLabel(phase: string | null | undefined) {
       return '概念重试'
     case 'write_ths_concepts':
       return '写入概念文件'
+    case 'rebuild_incremental_concept_performance':
+      return '维护本轮概念表现'
     case 'rebuild_concept_performance':
       return '维护概念表现'
+    case 'stock_download_done':
+      return '行情阶段完成'
     case 'maintain_cyq_incremental':
       return '维护筹码数据'
     case 'repair_concept_most_related':
@@ -136,7 +146,12 @@ function getProgressWorkflow(action: string | null | undefined) {
         'download_bars',
         'retry_failed',
         'write_db',
+        'rebuild_incremental_concept_performance',
+        'stock_download_done',
+        'prepare_index_download',
         'download_index_bars',
+        'write_index_db',
+        'index_download_done',
         'rebuild_concept_performance',
         'done',
       ] as string[]
@@ -149,7 +164,12 @@ function getProgressWorkflow(action: string | null | undefined) {
         'calc_incremental_indicators',
         'recover_failed_stocks',
         'write_db',
+        'rebuild_incremental_concept_performance',
+        'stock_download_done',
+        'prepare_index_download',
         'download_index_bars',
+        'write_index_db',
+        'index_download_done',
         'rebuild_concept_performance',
         'maintain_cyq_incremental',
         'done',

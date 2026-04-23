@@ -2,17 +2,16 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::Path,
-    sync::mpsc::{SyncSender, sync_channel},
+    sync::mpsc::{sync_channel, SyncSender},
     thread,
 };
 
-use duckdb::{Connection, params};
+use duckdb::{params, Connection};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     data::{
-        IndsData,
         concept_performance_data::{
             rebuild_concept_performance_all, rebuild_most_related_concept_csv,
         },
@@ -25,20 +24,20 @@ use crate::{
             list_stock_data_indicator_columns, reset_stock_data_indicator_stage_table,
         },
         ind_toml_path, load_stock_list, load_ths_concepts_list, load_trade_date_list,
-        source_db_path, stock_list_path, ths_concepts_path, trade_calendar_path,
+        source_db_path, stock_list_path, ths_concepts_path, trade_calendar_path, IndsData,
     },
     download::{
-        AdjType, DownloadSummary, ProBarRow,
         ind_calc::{cache_ind_build, calc_inds_for_rows_with_cache},
         runner::{
-            DownloadProgressCallback, DownloadRuntimeConfig, ThsConceptDownloadConfig,
             download as core_run_download_with_progress,
             download_indices as core_run_index_download_with_progress,
             download_selected_stocks as core_run_selected_stock_download_with_progress,
-            download_ths_concepts as core_download_ths_concepts,
+            download_ths_concepts as core_download_ths_concepts, DownloadProgress,
+            DownloadProgressCallback, DownloadRuntimeConfig, ThsConceptDownloadConfig,
         },
+        AdjType, DownloadSummary, ProBarRow,
     },
-    expr::parser::{Parser, lex_all},
+    expr::parser::{lex_all, Parser},
 };
 
 use super::normalize_trade_date;
@@ -312,6 +311,62 @@ enum StockDataIndicatorRebuildMessage {
     Batch(StockDataIndicatorRebuildBatch),
     Abort(String),
     Done,
+}
+
+#[derive(Clone, Copy)]
+enum DataDownloadNestedProgressScope {
+    Stock,
+    Index,
+}
+
+fn normalize_nested_data_download_progress(
+    scope: DataDownloadNestedProgressScope,
+    mut progress: DownloadProgress,
+) -> DownloadProgress {
+    match scope {
+        DataDownloadNestedProgressScope::Stock => match progress.phase.as_str() {
+            "rebuild_concept_performance" => {
+                progress.phase = "rebuild_incremental_concept_performance".to_string();
+            }
+            "done" => {
+                progress.phase = "stock_download_done".to_string();
+                progress.finished = 1;
+                progress.total = 1;
+                progress.current_label = Some("股票行情".to_string());
+                progress.message = "股票行情下载阶段完成，准备下载指数行情。".to_string();
+            }
+            _ => {}
+        },
+        DataDownloadNestedProgressScope::Index => match progress.phase.as_str() {
+            "prepare_trade_calendar" | "prepare_index_list" => {
+                progress.phase = "prepare_index_download".to_string();
+                progress.current_label.get_or_insert("指数行情".to_string());
+            }
+            "write_db" => {
+                progress.phase = "write_index_db".to_string();
+            }
+            "done" => {
+                progress.phase = "index_download_done".to_string();
+                progress.finished = 1;
+                progress.total = 1;
+                progress.current_label = Some("指数行情".to_string());
+                progress.message = "指数行情下载阶段完成，准备维护概念/行业表现库。".to_string();
+            }
+            _ => {}
+        },
+    }
+
+    progress
+}
+
+fn emit_nested_data_download_progress(
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+    scope: DataDownloadNestedProgressScope,
+    progress: DownloadProgress,
+) {
+    if let Some(cb) = progress_cb {
+        cb(normalize_nested_data_download_progress(scope, progress));
+    }
 }
 
 fn with_transaction<T, F>(conn: &Connection, action: F) -> Result<T, String>
@@ -1054,7 +1109,7 @@ pub fn prepare_stock_data_indicator_columns_rebuild_run(
 
 pub fn run_prepared_data_download(
     prepared: &PreparedDataDownloadRun,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DataDownloadRunResult, String> {
     let stock_config = DownloadRuntimeConfig {
         source_dir: prepared.source_path.clone(),
@@ -1068,7 +1123,14 @@ pub fn run_prepared_data_download(
         include_turnover: prepared.include_turnover,
     };
 
-    let mut summary = core_run_download_with_progress(&stock_config, progress_cb)?;
+    let stock_progress_cb = |progress: DownloadProgress| {
+        emit_nested_data_download_progress(
+            progress_cb,
+            DataDownloadNestedProgressScope::Stock,
+            progress,
+        );
+    };
+    let mut summary = core_run_download_with_progress(&stock_config, Some(&stock_progress_cb))?;
     let index_config = DownloadRuntimeConfig {
         source_dir: prepared.source_path.clone(),
         adj_type: AdjType::Ind,
@@ -1080,7 +1142,15 @@ pub fn run_prepared_data_download(
         limit_calls_per_min: prepared.limit_calls_per_min,
         include_turnover: false,
     };
-    let index_summary = core_run_index_download_with_progress(&index_config, progress_cb)?;
+    let index_progress_cb = |progress: DownloadProgress| {
+        emit_nested_data_download_progress(
+            progress_cb,
+            DataDownloadNestedProgressScope::Index,
+            progress,
+        );
+    };
+    let index_summary =
+        core_run_index_download_with_progress(&index_config, Some(&index_progress_cb))?;
     summary.success_count += index_summary.success_count;
     summary.failed_count += index_summary.failed_count;
     summary.saved_rows += index_summary.saved_rows;
@@ -1152,7 +1222,7 @@ pub fn run_prepared_data_download(
 
 pub fn run_prepared_missing_stock_repair(
     prepared: &PreparedMissingStockRepairRun,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DataDownloadRunResult, String> {
     let config = DownloadRuntimeConfig {
         source_dir: prepared.source_path.clone(),
@@ -1184,7 +1254,7 @@ pub fn run_prepared_missing_stock_repair(
 
 pub fn run_prepared_ths_concept_download(
     prepared: &PreparedThsConceptDownloadRun,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DataDownloadRunResult, String> {
     let summary = core_download_ths_concepts(
         &prepared.source_path,
@@ -1215,7 +1285,7 @@ pub fn run_prepared_ths_concept_download(
 
 pub fn run_prepared_concept_performance_repair(
     prepared: &PreparedConceptPerformanceRepairRun,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DataDownloadRunResult, String> {
     if let Some(cb) = progress_cb {
         cb(crate::download::runner::DownloadProgress {
@@ -1257,7 +1327,7 @@ pub fn run_prepared_concept_performance_repair(
 
 pub fn run_prepared_concept_most_related_repair(
     prepared: &PreparedConceptMostRelatedRepairRun,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DataDownloadRunResult, String> {
     if let Some(cb) = progress_cb {
         cb(crate::download::runner::DownloadProgress {
@@ -1299,7 +1369,7 @@ pub fn run_prepared_concept_most_related_repair(
 
 pub fn run_prepared_stock_data_indicator_columns_delete(
     prepared: &PreparedStockDataIndicatorColumnsDeleteRun,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DataDownloadRunResult, String> {
     let conn = open_source_db_conn(&prepared.source_path)?;
     let indicator_columns = list_stock_data_indicator_columns(&conn)?;
@@ -1354,7 +1424,7 @@ pub fn run_prepared_stock_data_indicator_columns_delete(
 
 pub fn run_prepared_stock_data_indicator_columns_rebuild(
     prepared: &PreparedStockDataIndicatorColumnsRebuildRun,
-    progress_cb: Option<&DownloadProgressCallback>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DataDownloadRunResult, String> {
     let inds_cache = cache_ind_build(&prepared.source_path)?;
     if inds_cache.is_empty() {
@@ -1592,4 +1662,47 @@ pub fn save_indicator_manage_page(
     fs::write(&path, text)
         .map_err(|e| format!("写入指标配置失败: path={}, err={e}", path.display()))?;
     get_indicator_manage_page(trimmed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn progress(phase: &str, finished: usize, total: usize) -> DownloadProgress {
+        DownloadProgress {
+            phase: phase.to_string(),
+            finished,
+            total,
+            current_label: None,
+            message: phase.to_string(),
+        }
+    }
+
+    #[test]
+    fn normalizes_stock_nested_terminal_progress_to_non_terminal_phase() {
+        let next = normalize_nested_data_download_progress(
+            DataDownloadNestedProgressScope::Stock,
+            progress("done", 10, 10),
+        );
+
+        assert_eq!(next.phase, "stock_download_done");
+        assert_eq!(next.finished, 1);
+        assert_eq!(next.total, 1);
+        assert_ne!(next.message, "done");
+    }
+
+    #[test]
+    fn normalizes_index_prepare_and_write_phases() {
+        let prepare = normalize_nested_data_download_progress(
+            DataDownloadNestedProgressScope::Index,
+            progress("prepare_index_list", 1, 1),
+        );
+        let write = normalize_nested_data_download_progress(
+            DataDownloadNestedProgressScope::Index,
+            progress("write_db", 0, 7),
+        );
+
+        assert_eq!(prepare.phase, "prepare_index_download");
+        assert_eq!(write.phase, "write_index_db");
+    }
 }

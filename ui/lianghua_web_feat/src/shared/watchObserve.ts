@@ -14,6 +14,10 @@ const WATCH_CACHE_PRIMARY_KEYS = [
 ] as const
 const WATCH_CACHE_DISCOVERY_TOKENS = ['watch', 'observe', 'favorite', '自选'] as const
 const WATCH_CACHE_NESTED_KEYS = ['items', 'list', 'rows', 'data', 'values', 'watchlist'] as const
+const WATCH_CACHE_RESERVED_KEYS = new Set([
+  'lh_watch_observe_browser_cache_migrated_v2',
+  'lh_watch_observe_page_state_v1',
+])
 
 export type WatchObserveRow = {
   tsCode: string
@@ -323,7 +327,11 @@ function collectCandidateKeys(storage: Storage) {
 
   for (let index = 0; index < storage.length; index += 1) {
     const key = storage.key(index)
-    if (typeof key === 'string' && key.trim() !== '') {
+    if (
+      typeof key === 'string' &&
+      key.trim() !== '' &&
+      !WATCH_CACHE_RESERVED_KEYS.has(key)
+    ) {
       existing.add(key)
     }
   }

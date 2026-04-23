@@ -84,6 +84,7 @@ export type IntradayMonitorRow = {
   rank_mode: string;
   ts_code: string;
   trade_date?: string;
+  realtime_trade_date?: string | null;
   scene_name: string;
   direction?: string | null;
   total_score?: number | null;

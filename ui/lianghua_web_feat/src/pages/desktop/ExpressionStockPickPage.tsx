@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { runExpressionStockPick, type StockPickRow } from '../../apis/stockPick'
 import {
   buildBoardFilterOptions,
@@ -10,11 +11,16 @@ import {
 import { isStBoard, useConceptExclusions } from '../../shared/conceptExclusions'
 import { useStockPickOutletContext } from './StockPickPage'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
+import ExpressionStockPickTemplateManagerModal, {
+  type ExpressionStockPickTemplate,
+} from './components/ExpressionStockPickTemplateManagerModal'
 
 const DEFAULT_EXPRESSION = ''
 const EXPRESSION_STOCK_PICK_STATE_KEY = 'expression-stock-pick-state'
 const EXPRESSION_STOCK_PICK_FILTER_STATE_KEY = 'expression-stock-pick-filter-state-v2'
 const EXPRESSION_STOCK_PICK_RESULT_STATE_KEY = 'expression-stock-pick-result-state-v2'
+const EXPRESSION_STOCK_PICK_TEMPLATE_STORAGE_KEY = 'lh_expression_stock_pick_templates_v1'
+const CUSTOM_MONITOR_STATE_KEY = 'lh_intraday_custom_monitor_state_v1'
 const COPY_SEPARATOR_OPTIONS = [
   { label: '逗号 (,)', value: ',' },
   { label: '分号 (;)', value: ';' },
@@ -49,12 +55,51 @@ type LegacyPersistedExpressionStockPickState = Partial<PersistedExpressionStockP
   resolvedEndDate?: string
 }
 
+type CustomMonitorState = {
+  codeInput?: string
+  selectedTemplateId?: string
+  rows?: unknown[]
+  refreshedAt?: string
+}
+
 function parsePositiveInt(value: string, fallback: number) {
   const parsed = Number(value)
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
+function normalizeTemplate(input: unknown): ExpressionStockPickTemplate | null {
+  if (!input || typeof input !== 'object') return null
+  const item = input as Record<string, unknown>
+  if (typeof item.id !== 'string') return null
+  if (typeof item.name !== 'string') return null
+  if (typeof item.expression !== 'string') return null
+  return {
+    id: item.id,
+    name: item.name,
+    expression: item.expression,
+  }
+}
+
+function buildStockCodeText(
+  rows: StockPickRow[],
+  withSuffix: boolean,
+  separator: CopySeparatorOption,
+) {
+  return rows
+    .map((row) => row.ts_code.trim())
+    .filter((value) => value.length > 0)
+    .map((value) => {
+      if (withSuffix) {
+        return value
+      }
+      const [codeOnly] = value.split('.')
+      return codeOnly ?? value
+    })
+    .join(separator)
+}
+
 export default function ExpressionStockPickPage() {
+  const navigate = useNavigate()
   const { sourcePath, tradeDateOptions, latestTradeDate, optionsLoading } = useStockPickOutletContext()
   const { excludeStBoard } = useConceptExclusions()
   const persistedState = useMemo(() => {
@@ -110,6 +155,18 @@ export default function ExpressionStockPickPage() {
             : '',
     } satisfies PersistedExpressionStockPickState
   }, [])
+  const persistedTemplates = useMemo(() => {
+    const parsed = readJsonStorage<unknown>(
+      typeof window === 'undefined' ? null : window.localStorage,
+      EXPRESSION_STOCK_PICK_TEMPLATE_STORAGE_KEY,
+    )
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+    return parsed
+      .map(normalizeTemplate)
+      .filter((item): item is ExpressionStockPickTemplate => item !== null)
+  }, [])
   const [board, setBoard] = useState<(typeof STOCK_PICK_BOARD_OPTIONS)[number]>(() => persistedState?.board ?? '全部')
   const [referenceTradeDate, setReferenceTradeDate] = useState(() => persistedState?.referenceTradeDate ?? '')
   const [lookbackPeriods, setLookbackPeriods] = useState(() => persistedState?.lookbackPeriods ?? '1')
@@ -127,10 +184,17 @@ export default function ExpressionStockPickPage() {
   const [copySeparator, setCopySeparator] = useState<CopySeparatorOption>(',')
   const [copyNotice, setCopyNotice] = useState('')
   const [copySucceeded, setCopySucceeded] = useState(false)
+  const [templates, setTemplates] = useState<ExpressionStockPickTemplate[]>(
+    () => persistedTemplates,
+  )
+  const [selectedTemplateId, setSelectedTemplateId] = useState('')
+  const [templateModalOpen, setTemplateModalOpen] = useState(false)
+  const [templateNotice, setTemplateNotice] = useState('')
   const boardOptions = useMemo(
     () => buildBoardFilterOptions(STOCK_PICK_BOARD_OPTIONS, excludeStBoard),
     [excludeStBoard],
   )
+  const selectedTemplate = templates.find((item) => item.id === selectedTemplateId)
 
   useEffect(() => {
     if (!latestTradeDate) {
@@ -173,6 +237,23 @@ export default function ExpressionStockPickPage() {
   }, [rows, resolvedStartDate, resolvedReferenceTradeDate])
 
   useEffect(() => {
+    writeJsonStorage(
+      typeof window === 'undefined' ? null : window.localStorage,
+      EXPRESSION_STOCK_PICK_TEMPLATE_STORAGE_KEY,
+      templates,
+    )
+  }, [templates])
+
+  useEffect(() => {
+    if (
+      selectedTemplateId !== '' &&
+      !templates.some((item) => item.id === selectedTemplateId)
+    ) {
+      setSelectedTemplateId('')
+    }
+  }, [selectedTemplateId, templates])
+
+  useEffect(() => {
     if (!copySucceeded) {
       return
     }
@@ -213,25 +294,32 @@ export default function ExpressionStockPickPage() {
     }
   }
 
-  async function onCopyStockCodes() {
-    const normalizedCodes = rows
-      .map((row) => row.ts_code.trim())
-      .filter((value) => value.length > 0)
-      .map((value) => {
-        if (copyWithSuffix) {
-          return value
-        }
-        const [codeOnly] = value.split('.')
-        return codeOnly ?? value
-      })
+  function onApplyTemplate() {
+    if (!selectedTemplate) {
+      setError('请先选择一个表达式模板。')
+      setTemplateNotice('')
+      return
+    }
 
-    if (normalizedCodes.length === 0) {
+    setExpression(selectedTemplate.expression)
+    setError('')
+    setTemplateNotice(`已套用模板：${selectedTemplate.name}`)
+  }
+
+  function onTemplateRemoved(templateId: string) {
+    if (selectedTemplateId === templateId) {
+      setSelectedTemplateId('')
+    }
+  }
+
+  async function onCopyStockCodes() {
+    const text = buildStockCodeText(rows, copyWithSuffix, copySeparator)
+    if (text.length === 0) {
       setCopySucceeded(false)
       setCopyNotice('当前没有可复制的股票代码。')
       return
     }
 
-    const text = normalizedCodes.join(copySeparator)
     try {
       if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(text)
@@ -255,6 +343,34 @@ export default function ExpressionStockPickPage() {
       setCopySucceeded(false)
       setCopyNotice(`复制失败: ${String(copyError)}`)
     }
+  }
+
+  function onImportToCustomMonitor() {
+    const text = buildStockCodeText(rows, copyWithSuffix, copySeparator)
+    if (text.length === 0) {
+      setCopySucceeded(false)
+      setCopyNotice('当前没有可导入的股票代码。')
+      return
+    }
+
+    const existingState = readJsonStorage<CustomMonitorState>(
+      typeof window === 'undefined' ? null : window.sessionStorage,
+      CUSTOM_MONITOR_STATE_KEY,
+    )
+    writeJsonStorage(
+      typeof window === 'undefined' ? null : window.sessionStorage,
+      CUSTOM_MONITOR_STATE_KEY,
+      {
+        codeInput: text,
+        selectedTemplateId:
+          typeof existingState?.selectedTemplateId === 'string'
+            ? existingState.selectedTemplateId
+            : '',
+        rows: [],
+        refreshedAt: '',
+      } satisfies CustomMonitorState,
+    )
+    navigate('/intraday-monitor/custom-monitor')
   }
 
   return (
@@ -335,12 +451,44 @@ export default function ExpressionStockPickPage() {
       </div>
 
       <div className="stock-pick-actions">
+        <button
+          type="button"
+          className="stock-pick-secondary-btn"
+          onClick={() => setTemplateModalOpen(true)}
+          disabled={loading || optionsLoading}
+        >
+          模板管理
+        </button>
+        <label className="stock-pick-template-select">
+          <span>表达式模板</span>
+          <select
+            value={selectedTemplateId}
+            onChange={(event) => setSelectedTemplateId(event.target.value)}
+            disabled={loading || optionsLoading || templates.length === 0}
+          >
+            <option value="">未选择</option>
+            {templates.map((template) => (
+              <option key={template.id} value={template.id}>
+                {template.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          className="stock-pick-secondary-btn"
+          onClick={onApplyTemplate}
+          disabled={loading || optionsLoading || !selectedTemplate}
+        >
+          套用模板
+        </button>
         <button type="button" className="stock-pick-primary-btn" onClick={() => void onRun()} disabled={loading || optionsLoading}>
           {loading ? '选股中...' : '执行选股'}
         </button>
       </div>
 
       {error ? <div className="stock-pick-message stock-pick-message-error">{error}</div> : null}
+      {templateNotice ? <div className="stock-pick-tip">{templateNotice}</div> : null}
 
       <div className="stock-pick-result-head">
         <strong>结果列表</strong>
@@ -387,13 +535,23 @@ export default function ExpressionStockPickPage() {
               </select>
             </label>
           </div>
-          <button
-            type="button"
-            className={copySucceeded ? 'stock-pick-chip-btn is-active' : 'stock-pick-chip-btn'}
-            onClick={() => void onCopyStockCodes()}
-          >
-            {copySucceeded ? '已复制' : '复制股票'}
-          </button>
+          <div className="stock-pick-result-action-stack">
+            <button
+              type="button"
+              className="stock-pick-chip-btn"
+              onClick={onImportToCustomMonitor}
+              disabled={rows.length === 0}
+            >
+              导入自定义监控
+            </button>
+            <button
+              type="button"
+              className={copySucceeded ? 'stock-pick-chip-btn is-active' : 'stock-pick-chip-btn'}
+              onClick={() => void onCopyStockCodes()}
+            >
+              {copySucceeded ? '已复制' : '复制股票'}
+            </button>
+          </div>
         </div>
       </div>
       {copyNotice ? <div className="stock-pick-tip">{copyNotice}</div> : null}
@@ -404,6 +562,16 @@ export default function ExpressionStockPickPage() {
         intervalEndTradeDate={resolvedReferenceTradeDate || undefined}
         sourcePath={sourcePath}
       />
+      {templateModalOpen ? (
+        <ExpressionStockPickTemplateManagerModal
+          open={templateModalOpen}
+          templates={templates}
+          initialExpression={expression}
+          onChangeTemplates={setTemplates}
+          onTemplateRemoved={onTemplateRemoved}
+          onClose={() => setTemplateModalOpen(false)}
+        />
+      ) : null}
     </section>
   )
 }

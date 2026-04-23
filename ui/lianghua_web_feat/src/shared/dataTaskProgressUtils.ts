@@ -53,6 +53,12 @@ export function calcProgressPercent(
         Math.min(100, Math.round(((currentIndex + localRatio) / workflow.length) * 100)),
       )
     }
+
+    if (isDone) {
+      return 100
+    }
+
+    return null
   }
 
   if (localRatio === null) {

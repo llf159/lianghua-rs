@@ -1,17 +1,17 @@
 use std::collections::HashMap;
 
-use duckdb::{Connection, params};
+use duckdb::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     crawler::SinaQuote,
-    data::{DataReader, RowData, result_db_path, scoring_data::row_into_rt},
+    data::{result_db_path, scoring_data::row_into_rt, DataReader, RowData},
     download::ind_calc::{
-        IndsCache, cache_ind_build, calc_inds_with_cache_lossy, warmup_ind_estimate,
+        cache_ind_build, calc_inds_with_cache_lossy, warmup_ind_estimate, IndsCache,
     },
     expr::{
         eval::Value,
-        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+        parser::{lex_all, Expr, Parser, Stmt, Stmts},
     },
     scoring::tools::{
         inject_latest_num_fields, inject_stock_extra_fields, load_st_list, rt_max_len,
@@ -43,6 +43,7 @@ pub struct IntradayMonitorRow {
     pub rank_mode: String,
     pub ts_code: String,
     pub trade_date: Option<String>,
+    pub realtime_trade_date: Option<String>,
     pub scene_name: String,
     pub direction: Option<String>,
     pub total_score: Option<f64>,
@@ -123,6 +124,12 @@ struct ReadyIntradayMonitorTemplate {
 enum CompiledIntradayMonitorTemplate {
     Ready(ReadyIntradayMonitorTemplate),
     Invalid { name: String, message: String },
+}
+
+struct LatestTotalRankContext {
+    trade_date: String,
+    rank: Option<i64>,
+    total_score: Option<f64>,
 }
 
 impl IntradayRankMode {
@@ -274,6 +281,138 @@ fn query_scene_options_from_conn(conn: &Connection) -> Result<Vec<String>, Strin
     }
 
     Ok(out)
+}
+
+fn load_latest_total_rank_context_map(
+    conn: &Connection,
+    ts_codes: &[String],
+) -> Result<HashMap<String, LatestTotalRankContext>, String> {
+    if ts_codes.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let placeholders = std::iter::repeat_n("?", ts_codes.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        r#"
+        SELECT ts_code, trade_date, rank, total_score
+        FROM (
+            SELECT
+                ts_code,
+                trade_date,
+                rank,
+                total_score,
+                ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS row_num
+            FROM score_summary
+            WHERE ts_code IN ({placeholders})
+        ) latest_rows
+        WHERE row_num = 1
+        "#
+    );
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("预编译监控总榜上下文失败: {e}"))?;
+    let mut rows = stmt
+        .query(duckdb::params_from_iter(ts_codes.iter()))
+        .map_err(|e| format!("查询监控总榜上下文失败: {e}"))?;
+    let mut out = HashMap::new();
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取监控总榜上下文失败: {e}"))?
+    {
+        let ts_code: String = row
+            .get(0)
+            .map_err(|e| format!("读取监控总榜代码失败: {e}"))?;
+        let trade_date: String = row
+            .get(1)
+            .map_err(|e| format!("读取监控总榜日期失败: {e}"))?;
+        if trade_date.trim().is_empty() {
+            continue;
+        }
+        let rank = row
+            .get(2)
+            .map_err(|e| format!("读取监控总榜排名失败: {e}"))?;
+        let total_score = row
+            .get(3)
+            .map_err(|e| format!("读取监控总榜分数失败: {e}"))?;
+
+        out.insert(
+            ts_code,
+            LatestTotalRankContext {
+                trade_date,
+                rank,
+                total_score,
+            },
+        );
+    }
+
+    Ok(out)
+}
+
+fn hydrate_intraday_monitor_rows_from_shared_context(
+    source_path: &str,
+    rows: &mut [IntradayMonitorRow],
+) {
+    if rows.is_empty() {
+        return;
+    }
+
+    let ts_codes = rows
+        .iter()
+        .map(|item| item.ts_code.clone())
+        .collect::<Vec<_>>();
+    let name_map = build_name_map(source_path).unwrap_or_default();
+    let concepts_map = build_concepts_map(source_path).unwrap_or_default();
+    let total_mv_map = build_total_mv_map(source_path).unwrap_or_default();
+    let latest_total_rank_map = open_result_conn(source_path)
+        .and_then(|conn| load_latest_total_rank_context_map(&conn, &ts_codes))
+        .unwrap_or_default();
+
+    for row in rows {
+        let mapped_name = name_map
+            .get(&row.ts_code)
+            .cloned()
+            .filter(|value| !value.trim().is_empty());
+
+        if let Some(name) = mapped_name.as_ref() {
+            row.name = name.clone();
+        }
+
+        let board_name = mapped_name
+            .as_deref()
+            .or_else(|| (!row.name.trim().is_empty()).then_some(row.name.as_str()));
+        let board_value = board_category(&row.ts_code, board_name).to_string();
+        if mapped_name.is_some() || row.board.trim().is_empty() || row.board.trim() == "--" {
+            row.board = board_value;
+        }
+
+        if let Some(total_mv_yi) = total_mv_map.get(&row.ts_code).copied() {
+            row.total_mv_yi = Some(total_mv_yi);
+        }
+
+        if let Some(concept) = concepts_map
+            .get(&row.ts_code)
+            .cloned()
+            .filter(|value| !value.trim().is_empty())
+        {
+            row.concept = concept;
+        }
+
+        if let Some(context) = latest_total_rank_map.get(&row.ts_code) {
+            if row.trade_date.as_deref().unwrap_or("").trim().is_empty() {
+                row.trade_date = Some(context.trade_date.clone());
+            }
+            if row.rank.is_none() {
+                row.rank = context.rank;
+            }
+            if row.total_score.is_none() {
+                row.total_score = context.total_score;
+            }
+        }
+    }
 }
 
 fn default_template_name(raw: &str) -> String {
@@ -972,17 +1111,43 @@ fn apply_intraday_template_tags(
     build_template_warning_message(rows)
 }
 
-fn build_quote_from_row(row: &IntradayMonitorRow) -> Option<SinaQuote> {
-    let price = row.realtime_price?;
-    let open = row.realtime_open?;
-    let high = row.realtime_high?;
-    let low = row.realtime_low?;
-    let pre_close = row.realtime_pre_close?;
-    let vol = row.realtime_vol?;
-    let amount = row.realtime_amount?;
+fn build_quote_from_row(row: &IntradayMonitorRow) -> Result<Option<SinaQuote>, String> {
+    let Some(price) = row.realtime_price else {
+        return Ok(None);
+    };
+    let Some(open) = row.realtime_open else {
+        return Ok(None);
+    };
+    let Some(high) = row.realtime_high else {
+        return Ok(None);
+    };
+    let Some(low) = row.realtime_low else {
+        return Ok(None);
+    };
+    let Some(pre_close) = row.realtime_pre_close else {
+        return Ok(None);
+    };
+    let Some(vol) = row.realtime_vol else {
+        return Ok(None);
+    };
+    let Some(amount) = row.realtime_amount else {
+        return Ok(None);
+    };
+    let trade_date = row
+        .realtime_trade_date
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{} 缺少实时行情日期，请先刷新实时行情后再刷新模板标记",
+                row.ts_code
+            )
+        })?
+        .to_string();
 
-    Some(SinaQuote {
-        date: row.trade_date.clone().unwrap_or_default(),
+    Ok(Some(SinaQuote {
+        date: trade_date,
         time: "00:00:00".to_string(),
         ts_code: row.ts_code.clone(),
         name: row.name.clone(),
@@ -994,7 +1159,7 @@ fn build_quote_from_row(row: &IntradayMonitorRow) -> Option<SinaQuote> {
         vol,
         amount,
         change_pct: row.realtime_change_pct,
-    })
+    }))
 }
 
 pub fn refresh_intraday_monitor_realtime(
@@ -1014,16 +1179,18 @@ pub fn refresh_intraday_monitor_realtime(
         });
     }
 
-    let ts_codes = rows
+    let mut next_rows = rows;
+    hydrate_intraday_monitor_rows_from_shared_context(source_path, &mut next_rows);
+    let ts_codes = next_rows
         .iter()
         .map(|item| item.ts_code.clone())
         .collect::<Vec<_>>();
     let latest_vol_map = build_latest_vol_map(source_path, &ts_codes).unwrap_or_default();
     let (quote_map, fetch_meta) = fetch_realtime_quote_map(&ts_codes)?;
 
-    let mut next_rows = rows;
     for row in &mut next_rows {
         if let Some(quote) = quote_map.get(&row.ts_code) {
+            row.realtime_trade_date = normalize_quote_trade_date(&quote.date);
             row.realtime_price = Some(quote.price);
             row.realtime_open = Some(quote.open);
             row.realtime_high = Some(quote.high);
@@ -1048,6 +1215,7 @@ pub fn refresh_intraday_monitor_realtime(
                 .filter(|value| *value > 0.0)
                 .map(|value| quote.vol / value);
         } else {
+            row.realtime_trade_date = None;
             row.realtime_price = None;
             row.realtime_open = None;
             row.realtime_high = None;
@@ -1098,11 +1266,13 @@ pub fn refresh_intraday_monitor_template_tags(
     }
 
     let mut next_rows = rows;
-    let quote_map = next_rows
-        .iter()
-        .filter_map(build_quote_from_row)
-        .map(|quote| (quote.ts_code.clone(), quote))
-        .collect::<HashMap<_, _>>();
+    hydrate_intraday_monitor_rows_from_shared_context(source_path, &mut next_rows);
+    let mut quote_map = HashMap::new();
+    for row in &next_rows {
+        if let Some(quote) = build_quote_from_row(row)? {
+            quote_map.insert(quote.ts_code.clone(), quote);
+        }
+    }
 
     let warning_message = apply_intraday_template_tags(
         source_path,
@@ -1224,6 +1394,7 @@ pub fn get_intraday_monitor_page(
                         row.get(1)
                             .map_err(|e| format!("读取 trade_date 失败: {e}"))?,
                     ),
+                    realtime_trade_date: None,
                     scene_name: "总榜".to_string(),
                     direction: None,
                     total_score: row
@@ -1365,6 +1536,7 @@ pub fn get_intraday_monitor_page(
                         row.get(1)
                             .map_err(|e| format!("读取 trade_date 失败: {e}"))?,
                     ),
+                    realtime_trade_date: None,
                     scene_name: this_scene_name.clone(),
                     direction: row
                         .get(3)
@@ -1499,6 +1671,88 @@ mod tests {
     }
 
     #[test]
+    fn build_quote_from_row_prefers_realtime_trade_date() {
+        let row = IntradayMonitorRow {
+            rank_mode: "total".to_string(),
+            ts_code: "000001.SZ".to_string(),
+            trade_date: Some("20240329".to_string()),
+            realtime_trade_date: Some("20240401".to_string()),
+            scene_name: "总榜".to_string(),
+            direction: None,
+            total_score: Some(1.0),
+            scene_score: None,
+            risk_score: None,
+            confirm_strength: None,
+            risk_intensity: None,
+            scene_status: None,
+            rank: Some(1),
+            name: "平安银行".to_string(),
+            board: "主板".to_string(),
+            total_mv_yi: Some(100.0),
+            concept: String::new(),
+            realtime_price: Some(10.2),
+            realtime_open: Some(10.0),
+            realtime_high: Some(10.5),
+            realtime_low: Some(9.8),
+            realtime_pre_close: Some(9.9),
+            realtime_vol: Some(1234.0),
+            realtime_amount: Some(5678.0),
+            realtime_change_pct: Some(3.03),
+            realtime_change_open_pct: Some(2.0),
+            realtime_fall_from_high_pct: Some(1.0),
+            realtime_vol_ratio: Some(1.5),
+            template_tag_text: None,
+            template_tag_tone: None,
+        };
+
+        let quote = build_quote_from_row(&row)
+            .expect("quote should build")
+            .expect("quote should exist");
+
+        assert_eq!(quote.date, "20240401");
+    }
+
+    #[test]
+    fn build_quote_from_row_requires_realtime_trade_date() {
+        let row = IntradayMonitorRow {
+            rank_mode: "total".to_string(),
+            ts_code: "000001.SZ".to_string(),
+            trade_date: Some("20240329".to_string()),
+            realtime_trade_date: None,
+            scene_name: "总榜".to_string(),
+            direction: None,
+            total_score: Some(1.0),
+            scene_score: None,
+            risk_score: None,
+            confirm_strength: None,
+            risk_intensity: None,
+            scene_status: None,
+            rank: Some(1),
+            name: "平安银行".to_string(),
+            board: "主板".to_string(),
+            total_mv_yi: Some(100.0),
+            concept: String::new(),
+            realtime_price: Some(10.2),
+            realtime_open: Some(10.0),
+            realtime_high: Some(10.5),
+            realtime_low: Some(9.8),
+            realtime_pre_close: Some(9.9),
+            realtime_vol: Some(1234.0),
+            realtime_amount: Some(5678.0),
+            realtime_change_pct: Some(3.03),
+            realtime_change_open_pct: Some(2.0),
+            realtime_fall_from_high_pct: Some(1.0),
+            realtime_vol_ratio: Some(1.5),
+            template_tag_text: None,
+            template_tag_tone: None,
+        };
+
+        let error = build_quote_from_row(&row).expect_err("missing realtime date should fail");
+
+        assert!(error.contains("缺少实时行情日期"));
+    }
+
+    #[test]
     fn template_validation_only_injects_uppercase_rank() {
         validate_intraday_monitor_template_expression(
             None,
@@ -1506,9 +1760,8 @@ mod tests {
         )
         .expect("uppercase RANK should validate");
 
-        let error =
-            validate_intraday_monitor_template_expression(None, "rank <= 100".to_string())
-                .expect_err("lowercase rank should not be injected");
+        let error = validate_intraday_monitor_template_expression(None, "rank <= 100".to_string())
+            .expect_err("lowercase rank should not be injected");
         assert!(error.contains("变量不存在:rank"));
     }
 }

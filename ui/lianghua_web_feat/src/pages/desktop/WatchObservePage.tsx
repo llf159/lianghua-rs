@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import { listRankTradeDates } from "../../apis/reader";
 import {
@@ -164,6 +164,7 @@ export default function WatchObservePage() {
   const [refreshSummary, setRefreshSummary] = useState(
     () => persistedState?.refreshSummary ?? "",
   );
+  const databaseLoadRequestRef = useRef(0);
 
   const sourcePathTrimmed = sourcePath.trim();
   const sortDefinitions = useMemo(
@@ -271,33 +272,53 @@ export default function WatchObservePage() {
     };
   }, [sourcePathTrimmed]);
 
-  function applyDatabaseRows(
-    nextRows: WatchObserveRow[],
-    nextReferenceTradeDate = referenceTradeDate,
-  ) {
-    setRows(nextRows);
-    setViewMode("db");
-    setRefreshedAt(null);
-    setResolvedReferenceTradeDate(nextReferenceTradeDate || null);
-    setRefreshSummary("");
-  }
+  const applyDatabaseRows = useCallback(
+    (nextRows: WatchObserveRow[], nextReferenceTradeDate: string) => {
+      setRows(nextRows);
+      setViewMode("db");
+      setRefreshedAt(null);
+      setResolvedReferenceTradeDate(nextReferenceTradeDate || null);
+      setRefreshSummary("");
+    },
+    [],
+  );
 
-  async function loadDatabaseRows() {
-    setLoading(true);
-    setError("");
-    try {
-      const nextRows = await listWatchObserveRows(
-        sourcePathTrimmed,
-        referenceTradeDate,
-      );
-      applyDatabaseRows(nextRows);
-    } catch (loadError) {
-      setRows([]);
-      setError(`读取自选观察失败: ${String(loadError)}`);
-    } finally {
-      setLoading(false);
-    }
-  }
+  const loadDatabaseRows = useCallback(
+    async (options?: { showLoading?: boolean }) => {
+      const showLoading = options?.showLoading ?? true;
+      const requestId = databaseLoadRequestRef.current + 1;
+      const requestedReferenceTradeDate = referenceTradeDate;
+
+      databaseLoadRequestRef.current = requestId;
+      if (showLoading) {
+        setLoading(true);
+      }
+      setError("");
+      try {
+        const nextRows = await listWatchObserveRows(
+          sourcePathTrimmed,
+          requestedReferenceTradeDate,
+        );
+        if (databaseLoadRequestRef.current !== requestId) {
+          return;
+        }
+        applyDatabaseRows(nextRows, requestedReferenceTradeDate);
+      } catch (loadError) {
+        if (databaseLoadRequestRef.current !== requestId) {
+          return;
+        }
+        if (showLoading) {
+          setRows([]);
+        }
+        setError(`读取自选观察失败: ${String(loadError)}`);
+      } finally {
+        if (databaseLoadRequestRef.current === requestId) {
+          setLoading(false);
+        }
+      }
+    },
+    [applyDatabaseRows, referenceTradeDate, sourcePathTrimmed],
+  );
 
   useEffect(() => {
     if (viewMode !== "db") {
@@ -305,7 +326,7 @@ export default function WatchObservePage() {
     }
 
     void loadDatabaseRows();
-  }, [referenceTradeDate, sourcePathTrimmed]);
+  }, [loadDatabaseRows, viewMode]);
 
   useEffect(() => {
     if (viewMode !== "db") {
@@ -315,7 +336,7 @@ export default function WatchObservePage() {
     let cancelled = false;
     const syncRows = () => {
       if (!cancelled) {
-        void loadDatabaseRows();
+        void loadDatabaseRows({ showLoading: false });
       }
     };
 
@@ -324,7 +345,7 @@ export default function WatchObservePage() {
       cancelled = true;
       window.removeEventListener("focus", syncRows);
     };
-  }, [referenceTradeDate, sourcePathTrimmed, viewMode]);
+  }, [loadDatabaseRows, viewMode]);
 
   useEffect(() => {
     if (viewMode === "realtime") {
@@ -375,6 +396,8 @@ export default function WatchObservePage() {
   ]);
 
   async function onRefreshRealtime() {
+    databaseLoadRequestRef.current += 1;
+    setLoading(false);
     setRefreshingRealtime(true);
     setError("");
     await waitForNextPaint();
@@ -403,7 +426,7 @@ export default function WatchObservePage() {
   }
 
   async function onRestoreDatabase() {
-    await loadDatabaseRows();
+    await loadDatabaseRows({ showLoading: false });
   }
 
   function onStartEditTag(row: WatchObserveRow) {
@@ -417,17 +440,25 @@ export default function WatchObservePage() {
   }
 
   async function onSaveTag(tsCode: string) {
+    const requestId = databaseLoadRequestRef.current + 1;
+    databaseLoadRequestRef.current = requestId;
     try {
       await updateWatchObserveTag(tsCode, tagDraft.trim(), sourcePathTrimmed);
       const nextRows = await listWatchObserveRows(
         sourcePathTrimmed,
         referenceTradeDate,
       );
-      applyDatabaseRows(nextRows);
+      if (databaseLoadRequestRef.current !== requestId) {
+        return;
+      }
+      applyDatabaseRows(nextRows, referenceTradeDate);
       setError("");
       setEditingTsCode(null);
       setTagDraft("");
     } catch (saveError) {
+      if (databaseLoadRequestRef.current !== requestId) {
+        return;
+      }
       setError(`保存标签失败: ${String(saveError)}`);
     }
   }
@@ -453,17 +484,25 @@ export default function WatchObservePage() {
   }
 
   async function onSaveDeleteChanges() {
+    const requestId = databaseLoadRequestRef.current + 1;
+    databaseLoadRequestRef.current = requestId;
     try {
       await removeWatchObserveRows(pendingDeleteTsCodes, sourcePathTrimmed);
       const nextRows = await listWatchObserveRows(
         sourcePathTrimmed,
         referenceTradeDate,
       );
-      applyDatabaseRows(nextRows);
+      if (databaseLoadRequestRef.current !== requestId) {
+        return;
+      }
+      applyDatabaseRows(nextRows, referenceTradeDate);
       setError("");
       setIsDeleteMode(false);
       setPendingDeleteTsCodes([]);
     } catch (removeError) {
+      if (databaseLoadRequestRef.current !== requestId) {
+        return;
+      }
       setError(`删除自选失败: ${String(removeError)}`);
     }
   }

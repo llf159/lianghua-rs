@@ -57,16 +57,9 @@ const BOARD_OPTIONS = [
   { value: '其他', label: '其他' },
 ] as const
 
-const RELATIVE_NAV_MODE_OPTIONS = [
-  { value: 'realized_on_close', label: '交易完成后计算收益' },
-  { value: 'daily_holding', label: '逐日持仓计算收益' },
-] as const
-
 type TradeStatusFilter = 'all' | 'closed' | 'open'
 type TradeDetailModalStatus = Exclude<TradeStatusFilter, 'all'>
 type TradePageSize = (typeof TRADE_PAGE_SIZE_OPTIONS)[number]['value']
-type StrategyPaperValidationRelativeNavMode =
-  (typeof RELATIVE_NAV_MODE_OPTIONS)[number]['value']
 
 type StrategyPaperValidationIndexDailyReturn = {
   trade_date?: string | null
@@ -360,109 +353,6 @@ function buildRelativeNavChartBackbone(
   }
 }
 
-function buildRealizedOnCloseRelativeNavChartState(
-  trades: StrategyPaperValidationChartTradeRow[],
-  indexDailyReturns: StrategyPaperValidationIndexDailyReturn[],
-): StrategyPaperValidationRelativeNavChartState {
-  const tradeReturnsByDate = new Map<string, number[]>()
-  let eligibleTradeCount = 0
-
-  for (const row of trades) {
-    const realizedReturn = getRealizedReturnValue(row)
-    const sellDate = row.sell_date?.trim() ?? ''
-    if (!sellDate || realizedReturn === null) {
-      continue
-    }
-
-    const existingReturns = tradeReturnsByDate.get(sellDate)
-    if (existingReturns) {
-      existingReturns.push(realizedReturn / 100)
-    } else {
-      tradeReturnsByDate.set(sellDate, [realizedReturn / 100])
-    }
-    eligibleTradeCount += 1
-  }
-
-  if (eligibleTradeCount === 0) {
-    return {
-      points: [],
-      eligibleTradeCount,
-      activeTradeDates: 0,
-      latestPoint: null,
-      emptyReason: '当前筛选结果里没有已平仓且带记录收益的交易，暂时无法绘制净值对比。',
-    }
-  }
-
-  const { backboneMap, backboneDates } = buildRelativeNavChartBackbone(indexDailyReturns)
-  if (backboneDates.length === 0) {
-    return {
-      points: [],
-      eligibleTradeCount,
-      activeTradeDates: 0,
-      latestPoint: null,
-      emptyReason: '所选指数暂无可用日收益数据，无法绘制净值对比。',
-    }
-  }
-
-  let strategyNav = 1
-  let indexNav = 1
-  let activeTradeDates = 0
-  const points: StrategyPaperValidationRelativeNavPoint[] = []
-
-  for (const tradeDate of backboneDates) {
-    const tradeReturns = tradeReturnsByDate.get(tradeDate) ?? []
-    const strategyDailyReturn =
-      tradeReturns.length > 0
-        ? tradeReturns.reduce((sum, value) => sum + value, 0) / tradeReturns.length
-        : 0
-    const indexDailyReturn = backboneMap.get(tradeDate) ?? 0
-
-    if (tradeReturns.length > 0) {
-      activeTradeDates += 1
-    }
-
-    strategyNav *= 1 + strategyDailyReturn
-    indexNav *= 1 + indexDailyReturn
-
-    if (!Number.isFinite(strategyNav) || !Number.isFinite(indexNav) || indexNav <= 0) {
-      return {
-        points: [],
-        eligibleTradeCount,
-        activeTradeDates,
-        latestPoint: null,
-        emptyReason: '指数净值序列异常，无法绘制净值对比。',
-      }
-    }
-
-    points.push({
-      tradeDate,
-      strategyNav,
-      indexNav,
-      strategyDailyReturn,
-      indexDailyReturn,
-      activeTradeCount: tradeReturns.length,
-    })
-  }
-
-  if (activeTradeDates === 0) {
-    return {
-      points: [],
-      eligibleTradeCount,
-      activeTradeDates,
-      latestPoint: null,
-      emptyReason: '当前筛选后的平仓交易卖出日不在指数日收益区间内，暂时无法绘制净值对比。',
-    }
-  }
-
-  return {
-    points,
-    eligibleTradeCount,
-    activeTradeDates,
-    latestPoint: points[points.length - 1] ?? null,
-    emptyReason: null,
-  }
-}
-
 function buildDailyHoldingRelativeNavChartState(
   trades: StrategyPaperValidationChartTradeRow[],
   indexDailyReturns: StrategyPaperValidationIndexDailyReturn[],
@@ -633,16 +523,6 @@ function buildDailyHoldingRelativeNavChartState(
   }
 }
 
-function buildRelativeNavChartState(
-  trades: StrategyPaperValidationChartTradeRow[],
-  indexDailyReturns: StrategyPaperValidationIndexDailyReturn[],
-  mode: StrategyPaperValidationRelativeNavMode,
-): StrategyPaperValidationRelativeNavChartState {
-  return mode === 'daily_holding'
-    ? buildDailyHoldingRelativeNavChartState(trades, indexDailyReturns)
-    : buildRealizedOnCloseRelativeNavChartState(trades, indexDailyReturns)
-}
-
 function buildRelativeNavChartGeometry(
   points: StrategyPaperValidationRelativeNavPoint[],
   measuredWidth: number,
@@ -772,25 +652,15 @@ const StrategyPaperValidationRelativeNavChart = memo(
     trades: StrategyPaperValidationChartTradeRow[]
     indexDailyReturns: StrategyPaperValidationIndexDailyReturn[]
   }) {
-    const [mode, setMode] =
-      useState<StrategyPaperValidationRelativeNavMode>('realized_on_close')
     const [chartViewportRef, chartWidth] = useMeasuredElementWidth<HTMLDivElement>()
     const chartState = useMemo(
-      () => buildRelativeNavChartState(trades, indexDailyReturns, mode),
-      [indexDailyReturns, mode, trades],
+      () => buildDailyHoldingRelativeNavChartState(trades, indexDailyReturns),
+      [indexDailyReturns, trades],
     )
     const geometry = useMemo(
       () => buildRelativeNavChartGeometry(chartState.points, chartWidth),
       [chartState.points, chartWidth],
     )
-    const modeDescription =
-      mode === 'daily_holding'
-        ? '按当前筛选结果统计逐日持仓收盘收益，按当日持仓等权盯市，对比策略净值和指数净值。'
-        : '按当前筛选结果统计平仓日等权收益，对比策略净值和指数净值。'
-    const eligibleTradeCountLabel =
-      mode === 'daily_holding' ? '纳入持仓笔数' : '纳入平仓笔数'
-    const activeTradeDatesLabel =
-      mode === 'daily_holding' ? '有持仓交易日' : '有收益交易日'
     const latestPoint = chartState.latestPoint
 
     return (
@@ -798,37 +668,9 @@ const StrategyPaperValidationRelativeNavChart = memo(
         <div className="strategy-paper-validation-relative-chart-head">
           <div className="strategy-paper-validation-relative-chart-title">
             <strong>净值对比</strong>
-            <span>{modeDescription}</span>
+            <span>按当前筛选结果统计逐日持仓收盘收益，按当日持仓等权盯市，对比策略净值和指数净值。</span>
           </div>
           <div className="strategy-paper-validation-relative-chart-head-side">
-            <div className="strategy-paper-validation-relative-chart-mode-control">
-              <span>收益口径</span>
-              <div
-                className="strategy-paper-validation-relative-chart-mode-switch"
-                role="group"
-                aria-label="净值收益计算模式"
-              >
-                {RELATIVE_NAV_MODE_OPTIONS.map((item) => {
-                  const isActive = item.value === mode
-                  return (
-                    <button
-                      key={item.value}
-                      type="button"
-                      className={[
-                        'strategy-paper-validation-relative-chart-mode-btn',
-                        isActive ? 'is-active' : '',
-                      ]
-                        .filter(Boolean)
-                        .join(' ')}
-                      onClick={() => setMode(item.value)}
-                      aria-pressed={isActive}
-                    >
-                      {item.label}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
             <div className="strategy-paper-validation-relative-chart-latest">
               <span>最新日期</span>
               <strong>{formatDateLabel(latestPoint?.tradeDate)}</strong>
@@ -846,11 +688,11 @@ const StrategyPaperValidationRelativeNavChart = memo(
             <strong>{formatNavValue(latestPoint?.indexNav)}</strong>
           </div>
           <div className="strategy-paper-validation-relative-chart-metric">
-            <span>{eligibleTradeCountLabel}</span>
+            <span>纳入持仓笔数</span>
             <strong>{chartState.eligibleTradeCount}</strong>
           </div>
           <div className="strategy-paper-validation-relative-chart-metric">
-            <span>{activeTradeDatesLabel}</span>
+            <span>有持仓交易日</span>
             <strong>{chartState.activeTradeDates}</strong>
           </div>
         </div>
@@ -879,7 +721,7 @@ const StrategyPaperValidationRelativeNavChart = memo(
               className="strategy-paper-validation-relative-chart-svg"
               viewBox={geometry.viewBox}
               role="img"
-              aria-label={`策略和指数净值走势图（${mode === 'daily_holding' ? '逐日持仓计算收益' : '交易完成后计算收益'}）`}
+              aria-label="策略和指数净值走势图（逐日持仓计算收益）"
             >
               <defs>
                 <linearGradient
@@ -1695,10 +1537,15 @@ export default function StrategyPaperValidationPage() {
     setTestStockInput(row.name || getLookupDigits(row.ts_code))
   }
 
-  function onApplyTemplate() {
-    const template = templates.find((item) => item.id === selectedTemplateId)
+  function onSelectTemplate(templateId: string) {
+    setSelectedTemplateId(templateId)
+    if (!templateId) {
+      return
+    }
+
+    const template = templates.find((item) => item.id === templateId)
     if (!template) {
-      setError('请先选择一个表达式模板。')
+      setError('未找到表达式模板。')
       setNotice('')
       return
     }
@@ -1783,7 +1630,6 @@ export default function StrategyPaperValidationPage() {
     () => getStrategyPaperValidationIndexDailyReturns(result),
     [result],
   )
-  const selectedTemplate = templates.find((item) => item.id === selectedTemplateId)
   const closedTrades = useMemo(
     () => trades.filter((row) => row.status === 'closed'),
     [trades],
@@ -1996,6 +1842,17 @@ export default function StrategyPaperValidationPage() {
             <span>滑点系数(%)</span>
             <input type="number" step="0.01" value={slippagePct} onChange={(event) => setSlippagePct(event.target.value)} />
           </label>
+          <div className="strategy-paper-validation-field strategy-paper-validation-template-action-field">
+            <span>模板管理</span>
+            <button
+              type="button"
+              className="strategy-paper-validation-secondary-btn"
+              onClick={() => setTemplateModalOpen(true)}
+              disabled={loading || initializing}
+            >
+              模板管理
+            </button>
+          </div>
           <label className="strategy-paper-validation-field strategy-paper-validation-field-span-full">
             <span>买点方程</span>
             <textarea value={buyExpression} onChange={(event) => setBuyExpression(event.target.value)} rows={5} />
@@ -2007,19 +1864,11 @@ export default function StrategyPaperValidationPage() {
         </div>
 
         <div className="strategy-paper-validation-actions">
-          <button
-            type="button"
-            className="strategy-paper-validation-secondary-btn"
-            onClick={() => setTemplateModalOpen(true)}
-            disabled={loading || initializing}
-          >
-            模板管理
-          </button>
           <label className="strategy-paper-validation-template-select">
             <span>表达式模板</span>
             <select
               value={selectedTemplateId}
-              onChange={(event) => setSelectedTemplateId(event.target.value)}
+              onChange={(event) => onSelectTemplate(event.target.value)}
               disabled={loading || initializing || templates.length === 0}
             >
               <option value="">未选择</option>
@@ -2030,14 +1879,6 @@ export default function StrategyPaperValidationPage() {
               ))}
             </select>
           </label>
-          <button
-            type="button"
-            className="strategy-paper-validation-secondary-btn"
-            onClick={onApplyTemplate}
-            disabled={loading || initializing || !selectedTemplate}
-          >
-            套用模板
-          </button>
           <button type="button" className="strategy-paper-validation-primary-btn" onClick={() => void onRun()} disabled={loading || initializing}>
             {loading ? '回放中...' : '开始验证'}
           </button>

@@ -201,6 +201,7 @@ export default function IntradayMonitorCustomPage() {
       board: '--',
       concept: '',
       trade_date: undefined,
+      realtime_trade_date: undefined,
       direction: null,
       total_score: null,
       scene_score: null,
