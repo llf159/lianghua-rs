@@ -5,52 +5,50 @@ use std::fs;
 
 use lianghua_rs::ui_tools_feat::{
     concept_stock_pick::{
-        StockPickResultData as ConceptStockPickResultData,
         run_concept_stock_pick as core_run_concept_stock_pick,
+        StockPickResultData as ConceptStockPickResultData,
     },
-    data_viewer::{StockLookupRow, list_stock_lookup_rows as core_list_stock_lookup_rows},
+    data_viewer::{list_stock_lookup_rows as core_list_stock_lookup_rows, StockLookupRow},
     details::{
-        StockDetailCyqData, StockDetailPageData, StockDetailRealtimeData,
-        StockDetailStrategySnapshotData, get_stock_detail_cyq as core_get_stock_detail_cyq,
+        get_stock_detail_cyq as core_get_stock_detail_cyq,
         get_stock_detail_page as core_get_stock_detail_page,
         get_stock_detail_realtime as core_get_stock_detail_realtime,
         get_stock_detail_strategy_snapshot as core_get_stock_detail_strategy_snapshot,
+        StockDetailCyqData, StockDetailPageData, StockDetailRealtimeData,
+        StockDetailStrategySnapshotData,
     },
     expression_stock_pick::{
-        StockPickResultData as ExpressionStockPickResultData,
         run_expression_stock_pick as core_run_expression_stock_pick,
+        StockPickResultData as ExpressionStockPickResultData,
     },
     intraday_monitor::{
-        IntradayMonitorPageData, IntradayMonitorRankModeConfig, IntradayMonitorRow,
-        IntradayMonitorTemplate, IntradayMonitorTemplateValidationData,
         get_intraday_monitor_page as core_get_intraday_monitor_page,
         refresh_intraday_monitor_realtime as core_refresh_intraday_monitor_realtime,
         refresh_intraday_monitor_template_tags as core_refresh_intraday_monitor_template_tags,
         validate_intraday_monitor_template_expression as core_validate_intraday_monitor_template_expression,
+        IntradayMonitorPageData, IntradayMonitorRankModeConfig, IntradayMonitorRow,
+        IntradayMonitorTemplate, IntradayMonitorTemplateValidationData,
     },
     overview::{
-        SceneOverviewPageData, get_scene_rank_overview_page as core_get_scene_rank_overview_page,
+        get_scene_rank_overview_page as core_get_scene_rank_overview_page,
         get_scene_rank_trade_date_options as core_get_scene_rank_trade_date_options,
+        SceneOverviewPageData,
     },
     overview_classic::{
-        OverviewPageData, OverviewRow, get_rank_overview as core_get_rank_overview,
+        get_rank_overview as core_get_rank_overview,
         get_rank_overview_page as core_get_rank_overview_page,
-        get_rank_trade_date_options as core_get_rank_trade_date_options,
+        get_rank_trade_date_options as core_get_rank_trade_date_options, OverviewPageData,
+        OverviewRow,
     },
     ranking_compute::{
-        ConceptPerformanceComputeResult, CyqComputeResult, RankComputeRunResult, RankComputeStatus,
         get_ranking_compute_status as core_get_ranking_compute_status,
         run_concept_performance_compute as core_run_concept_performance_compute,
         run_cyq_compute_with_range as core_run_cyq_compute,
         run_ranking_score_calculation as core_run_ranking_score_calculation,
         run_ranking_tiebreak_fill as core_run_ranking_tiebreak_fill,
+        ConceptPerformanceComputeResult, CyqComputeResult, RankComputeRunResult, RankComputeStatus,
     },
     statistics::{
-        MarketAnalysisData, MarketContributionData, RankLayerBacktestData,
-        RuleExpressionValidationData, RuleExpressionValidationManualStrategy,
-        RuleLayerBacktestData, RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig,
-        SceneLayerBacktestData, SceneLayerBacktestDefaultsData, SceneStatisticsPageData,
-        StrategyStatisticsDetailData, StrategyStatisticsPageData, TriggeredStockRow,
         get_market_analysis as core_get_market_analysis,
         get_market_contribution as core_get_market_contribution,
         get_rule_layer_backtest_defaults as core_get_rule_layer_backtest_defaults,
@@ -62,15 +60,18 @@ use lianghua_rs::ui_tools_feat::{
         run_rank_layer_backtest as core_run_rank_layer_backtest,
         run_rule_expression_validation as core_run_rule_expression_validation,
         run_rule_layer_backtest as core_run_rule_layer_backtest,
-        run_scene_layer_backtest as core_run_scene_layer_backtest,
+        run_scene_layer_backtest as core_run_scene_layer_backtest, MarketAnalysisData,
+        MarketContributionData, RankLayerBacktestData, RuleExpressionValidationData,
+        RuleExpressionValidationManualStrategy, RuleLayerBacktestData,
+        RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig, SceneLayerBacktestData,
+        SceneLayerBacktestDefaultsData, SceneStatisticsPageData, StrategyStatisticsDetailData,
+        StrategyStatisticsPageData, TriggeredStockRow,
     },
-    stock_pick::{StockPickOptionsData, get_stock_pick_options as core_get_stock_pick_options},
+    stock_pick::{get_stock_pick_options as core_get_stock_pick_options, StockPickOptionsData},
     stock_similarity::{
-        StockSimilarityPageData, get_stock_similarity_page as core_get_stock_similarity_page,
+        get_stock_similarity_page as core_get_stock_similarity_page, StockSimilarityPageData,
     },
     strategy_manage::{
-        StrategyManagePageData, StrategyManageRefactorDraft, StrategyManageRuleDraft,
-        StrategyManageSceneDraft,
         check_strategy_manage_rule_draft as core_check_strategy_manage_rule_draft,
         check_strategy_manage_scene_draft as core_check_strategy_manage_scene_draft,
         create_strategy_manage_rule as core_create_strategy_manage_rule,
@@ -80,21 +81,22 @@ use lianghua_rs::ui_tools_feat::{
         remove_strategy_manage_scene as core_remove_strategy_manage_scene,
         save_strategy_manage_refactor_file as core_save_strategy_manage_refactor_file,
         update_strategy_manage_rule as core_update_strategy_manage_rule,
-        update_strategy_manage_scene as core_update_strategy_manage_scene,
+        update_strategy_manage_scene as core_update_strategy_manage_scene, StrategyManagePageData,
+        StrategyManageRefactorDraft, StrategyManageRuleDraft, StrategyManageSceneDraft,
     },
     strategy_paper_validation::{
-        StrategyPaperValidationData, StrategyPaperValidationDefaultsData,
-        StrategyPaperValidationTemplateValidationData,
         get_strategy_paper_validation_defaults as core_get_strategy_paper_validation_defaults,
         run_strategy_paper_validation as core_run_strategy_paper_validation,
         validate_strategy_paper_validation_template_expressions as core_validate_strategy_paper_validation_template_expressions,
+        StrategyPaperValidationData, StrategyPaperValidationDefaultsData,
+        StrategyPaperValidationTemplateValidationData,
     },
     watch_observe::{
-        WatchObserveRow as CoreWatchObserveRow, WatchObserveSnapshotData, WatchObserveStoredRow,
         hydrate_watch_observe_rows as core_hydrate_watch_observe_rows,
         normalize_trade_date as core_normalize_watch_observe_trade_date,
         normalize_ts_code as core_normalize_watch_observe_ts_code,
         refresh_watch_observe_rows as core_refresh_watch_observe_rows,
+        WatchObserveRow as CoreWatchObserveRow, WatchObserveSnapshotData, WatchObserveStoredRow,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -117,7 +119,7 @@ use managed_source_bridge::{
 };
 
 #[cfg(target_os = "android")]
-use jni::{JNIEnv, objects::JObject, sys::jboolean};
+use jni::{objects::JObject, sys::jboolean, JNIEnv};
 
 #[cfg(target_os = "android")]
 use rustls_platform_verifier;

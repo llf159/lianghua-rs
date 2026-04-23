@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     data::scoring_data::row_into_rt,
     data::{
-        DataReader, RuleStage, RuleTag, ScopeWay, ScoreRule, ScoreScene,
-        concept_performance_db_path, load_stock_list, load_ths_concepts_list, result_db_path,
-        source_db_path,
+        DataReader, RuleStage, RuleTag, RuntimeKeyCollectOptions, ScopeWay, ScoreRule, ScoreScene,
+        collect_runtime_keys_from_expr_programs, concept_performance_db_path, load_stock_list,
+        load_ths_concepts_list, result_db_path, source_db_path,
     },
     expr::{
         eval::{Runtime, Value},
@@ -39,6 +39,8 @@ use crate::{
 };
 
 const TOP_RANK_THRESHOLD: i64 = 100;
+const RULE_VALIDATION_INJECTED_RUNTIME_KEYS: [&str; 2] = ["ZHANG", "TOTAL_MV_YI"];
+const RULE_VALIDATION_RUNTIME_ALIASES: [(&str, &str); 1] = [("TOTAL_MV_YI", "TOTAL_MV")];
 
 #[derive(Debug, Clone)]
 struct RuleMeta {
@@ -1795,6 +1797,22 @@ fn collect_validation_assigned_names(stmts: &Stmts) -> Vec<String> {
     out
 }
 
+fn collect_rule_validation_runtime_keys(combos: &[PreparedValidationCombo]) -> HashSet<String> {
+    let programs = combos
+        .iter()
+        .map(|combo| &combo.cached_rule.when_ast)
+        .collect::<Vec<_>>();
+
+    collect_runtime_keys_from_expr_programs(
+        &programs,
+        RuntimeKeyCollectOptions {
+            always_keys: &[],
+            injected_keys: &RULE_VALIDATION_INJECTED_RUNTIME_KEYS,
+            aliases: &RULE_VALIDATION_RUNTIME_ALIASES,
+        },
+    )
+}
+
 fn prepare_validation_combo(
     seed_rule: &ValidationSeedRule,
     variant: ValidationVariant,
@@ -1964,10 +1982,11 @@ fn build_validation_triggered_scores_for_combos(
         return Ok(Vec::new());
     }
 
+    let required_runtime_keys = collect_rule_validation_runtime_keys(combos);
     let grouped_results = ts_codes
         .par_iter()
         .map_init(
-            || DataReader::new(source_path),
+            || DataReader::new_with_runtime_keys(source_path, &required_runtime_keys),
             |reader_res, ts_code| {
                 let reader = reader_res.as_mut().map_err(|err| err.clone())?;
                 evaluate_validation_combos_for_ts_code(
@@ -2009,9 +2028,6 @@ fn build_validation_triggered_scores(
     end_date: &str,
     cached_rule: &CachedRule,
 ) -> Result<HashMap<String, HashMap<String, f64>>, String> {
-    let reader = DataReader::new(source_path)?;
-    let ts_codes = reader.list_ts_code(stock_adj_type, start_date, end_date)?;
-    let st_list = load_st_list(source_path)?;
     let combo = PreparedValidationCombo {
         variant: ValidationVariant {
             combo_key: cached_rule.name.clone(),
@@ -2022,6 +2038,10 @@ fn build_validation_triggered_scores(
         cached_rule: cached_rule.clone(),
         assigned_names: collect_validation_assigned_names(&cached_rule.when_ast),
     };
+    let required_runtime_keys = collect_rule_validation_runtime_keys(std::slice::from_ref(&combo));
+    let reader = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
+    let ts_codes = reader.list_ts_code(stock_adj_type, start_date, end_date)?;
+    let st_list = load_st_list(source_path)?;
     let warmup_need = estimate_rule_warmup(
         &cached_rule.when_ast,
         cached_rule.scope_way,
@@ -2563,7 +2583,10 @@ pub fn run_rule_expression_validation(
         &params.end_date,
         &layer_config,
     )?;
-    let validation_reader = DataReader::new(&source_path)?;
+    let validation_required_runtime_keys =
+        collect_rule_validation_runtime_keys(&execution_plan.combos);
+    let validation_reader =
+        DataReader::new_with_runtime_keys(&source_path, &validation_required_runtime_keys)?;
     let validation_ts_codes = validation_reader.list_ts_code(
         &params.stock_adj_type,
         &params.start_date,
@@ -4184,8 +4207,8 @@ mod tests {
         ValidationSimilarityCache, ValidationVariant, build_validation_cached_rule,
         build_validation_sample_groups, build_validation_similarity_rows,
         build_validation_triggered_scores, build_validation_triggered_scores_for_combos,
-        collect_validation_assigned_names, derive_validation_volatility_group,
-        resolve_validation_sample_board_label,
+        collect_rule_validation_runtime_keys, collect_validation_assigned_names,
+        derive_validation_volatility_group, resolve_validation_sample_board_label,
     };
     use crate::data::ScopeWay;
 
@@ -4537,6 +4560,40 @@ mod tests {
         assert_eq!(batch_results.len(), 2);
         assert_eq!(batch_results[0], expected_first);
         assert_eq!(batch_results[1], expected_second);
+    }
+
+    #[test]
+    fn rule_validation_runtime_key_collection_skips_injected_fields() {
+        let rule = build_validation_cached_rule(
+            "validation_runtime_keys".to_string(),
+            ScopeWay::Any,
+            1,
+            1.0,
+            None,
+            RuleTag::Normal,
+            "M := MA(C, 5); M > MY_VALIDATION_IND AND ZHANG > 0 AND TOTAL_MV_YI <= 300",
+        )
+        .expect("build cached rule");
+        let combo = PreparedValidationCombo {
+            variant: ValidationVariant {
+                combo_key: rule.name.clone(),
+                combo_label: rule.name.clone(),
+                formula: rule.when_src.clone(),
+                unknown_values: Vec::new(),
+            },
+            cached_rule: rule.clone(),
+            assigned_names: collect_validation_assigned_names(&rule.when_ast),
+        };
+
+        let keys = collect_rule_validation_runtime_keys(&[combo]);
+
+        for required_key in ["C", "MY_VALIDATION_IND", "TOTAL_MV"] {
+            assert!(keys.contains(required_key), "missing {required_key}");
+        }
+        for injected_key in ["ZHANG", "TOTAL_MV_YI"] {
+            assert!(!keys.contains(injected_key), "unexpected {injected_key}");
+        }
+        assert!(!keys.contains("O"));
     }
 
     #[test]

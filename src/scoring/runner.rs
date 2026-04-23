@@ -5,7 +5,10 @@ use crate::data::scoring_data::{
     SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage, ScoreWriteProfile,
     cache_rule_build, init_result_db, row_into_rt, write_score_batches_from_channel,
 };
-use crate::data::{DataReader, RowData, ScoreRule, ScoreScene, result_db_path};
+use crate::data::{
+    DataReader, RowData, RuntimeKeyCollectOptions, ScoreRule, ScoreScene,
+    collect_runtime_keys_from_expr_programs, result_db_path,
+};
 use crate::scoring::{
     CachedRule, RuleSceneMeta, build_scene_score_series, scoring_rules_details_cache,
     tools::{calc_query_need_rows, inject_stock_extra_fields, load_st_list, warmup_rows_estimate},
@@ -13,6 +16,8 @@ use crate::scoring::{
 
 const SCORING_GROUP_SIZE: usize = 128;
 const SCORING_QUEUE_BOUND: usize = 8;
+const SCORING_INJECTED_RUNTIME_KEYS: [&str; 2] = ["ZHANG", "TOTAL_MV_YI"];
+const SCORING_RUNTIME_ALIASES: [(&str, &str); 1] = [("TOTAL_MV_YI", "TOTAL_MV")];
 
 #[derive(Debug, Default, Clone)]
 pub struct ScoringRunProfile {
@@ -79,6 +84,22 @@ fn scoring_single_core(
     let scene_details = SceneDetails::build(ts_code, kept_trade_dates, kept_scores, &scene_series);
 
     Ok((summary, details, scene_details))
+}
+
+fn collect_scoring_runtime_keys(rules_cache: &[CachedRule]) -> HashSet<String> {
+    let programs = rules_cache
+        .iter()
+        .map(|rule| &rule.when_ast)
+        .collect::<Vec<_>>();
+
+    collect_runtime_keys_from_expr_programs(
+        &programs,
+        RuntimeKeyCollectOptions {
+            always_keys: &[],
+            injected_keys: &SCORING_INJECTED_RUNTIME_KEYS,
+            aliases: &SCORING_RUNTIME_ALIASES,
+        },
+    )
 }
 
 fn scoring_stock_batch(
@@ -156,12 +177,13 @@ pub fn scoring_all_to_db(
     let init_result_db_ms = init_result_db_started_at.elapsed().as_millis() as u64;
 
     let prepare_started_at = time::Instant::now();
-    let dr = DataReader::new(source_dir)?;
-    let tc_list = DataReader::list_ts_code(&dr, adj_type, start_date, end_date)?;
     let st_list = load_st_list(source_dir)?;
     let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
+    let required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
+    let dr = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
+    let tc_list = DataReader::list_ts_code(&dr, adj_type, start_date, end_date)?;
     let rule_scene_meta: Vec<RuleSceneMeta> =
         ScoreRule::load_rules_with_strategy_path(source_dir, strategy_path)?
             .into_iter()
@@ -190,7 +212,8 @@ pub fn scoring_all_to_db(
     let compute_result = tc_list.par_chunks(SCORING_GROUP_SIZE).try_for_each_with(
         tx,
         |sender, ts_group| -> Result<(), String> {
-            let worker_reader = DataReader::new(source_dir)?;
+            let worker_reader =
+                DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
             let batch = scoring_stock_group_batch(
                 &worker_reader,
                 adj_type,
@@ -244,14 +267,15 @@ pub fn scoring_single_period(
     start_date: &str,
     end_date: &str,
 ) -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>, Vec<SceneDetails>), String> {
-    let dr = DataReader::new(source_dir)?;
     let st_list = load_st_list(source_dir)?;
     let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
+    let rules_cache = cache_rule_build(source_dir, strategy_path)?;
+    let required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
+    let dr = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
 
     let mut row_data = DataReader::load_one_tail_rows(&dr, ts_code, adj_type, end_date, need_rows)?;
     inject_stock_extra_fields(&mut row_data, ts_code, st_list.contains(ts_code), None)?;
-    let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let rule_scene_meta: Vec<RuleSceneMeta> =
         ScoreRule::load_rules_with_strategy_path(source_dir, strategy_path)?
             .into_iter()
@@ -269,4 +293,48 @@ pub fn scoring_single_period(
         &rule_scene_meta,
         &scenes,
     )?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        data::{RuleTag, ScopeWay},
+        expr::parser::{Parser, lex_all},
+    };
+
+    fn cached_rule(name: &str, expression: &str) -> CachedRule {
+        let tokens = lex_all(expression);
+        let mut parser = Parser::new(tokens);
+        let when_ast = parser.parse_main().expect("expression should parse");
+
+        CachedRule {
+            name: name.to_string(),
+            scope_windows: 1,
+            scope_way: ScopeWay::Last,
+            points: 1.0,
+            dist_points: None,
+            tag: RuleTag::Normal,
+            when_src: expression.to_string(),
+            when_ast,
+        }
+    }
+
+    #[test]
+    fn scoring_runtime_key_collection_skips_injected_fields() {
+        let rules = vec![cached_rule(
+            "rule_a",
+            "M := MA(C, 5); M > MY_SCORE_IND AND ZHANG > 0 AND TOTAL_MV_YI <= 300",
+        )];
+
+        let keys = collect_scoring_runtime_keys(&rules);
+
+        for required_key in ["C", "MY_SCORE_IND", "TOTAL_MV"] {
+            assert!(keys.contains(required_key), "missing {required_key}");
+        }
+        for injected_key in ["ZHANG", "TOTAL_MV_YI"] {
+            assert!(!keys.contains(injected_key), "unexpected {injected_key}");
+        }
+        assert!(!keys.contains("O"));
+    }
 }

@@ -2,8 +2,9 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::Path,
     sync::{
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc,
     },
     thread::{self, sleep},
     time::Duration,
@@ -11,11 +12,12 @@ use std::{
 
 use chrono::{Datelike, Local, Timelike};
 use duckdb::Connection;
-use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
+use rayon::{ThreadPool, ThreadPoolBuilder, prelude::*};
 
 use crate::{
-    crawler::concept::{fetch_one_ths_concept_row, ThsConceptFetchItem, ThsConceptRow},
+    crawler::concept::{ThsConceptFetchItem, ThsConceptRow, fetch_one_ths_concept_row},
     data::{
+        DataReader,
         concept_performance_data::rebuild_concept_performance_range,
         download_data::{
             append_stage_pro_bar_rows, checkpoint_stock_data, delete_one_stock_range,
@@ -24,15 +26,15 @@ use crate::{
             reset_stock_data_stage_table, write_ths_concepts_csv,
         },
         load_stock_list, load_ths_concepts_list, load_trade_date_list, source_db_path,
-        stock_list_path, trade_calendar_path, DataReader,
+        stock_list_path, trade_calendar_path,
     },
     download::{
-        ind_calc::{
-            cache_ind_build, calc_increment_inds_from_history,
-            load_many_tail_rows_with_warmup_need, warmup_ind_estimate, IndsCache,
-        },
         AdjType, BarFreq, DownloadSummary, DownloadTask, PreparedDownloadBatch,
         PreparedStockDownload, ProBarRow, TushareClient,
+        ind_calc::{
+            IndsCache, cache_ind_build, calc_increment_inds_from_history,
+            load_many_tail_rows_with_warmup_need, warmup_ind_estimate,
+        },
     },
 };
 

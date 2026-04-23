@@ -1,17 +1,20 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use duckdb::{params, Connection};
+use duckdb::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     crawler::SinaQuote,
-    data::{result_db_path, scoring_data::row_into_rt, DataReader, RowData},
+    data::{
+        DataReader, RowData, RuntimeKeyCollectOptions, collect_runtime_keys_from_expr_programs,
+        result_db_path, scoring_data::row_into_rt,
+    },
     download::ind_calc::{
-        cache_ind_build, calc_inds_with_cache_lossy, warmup_ind_estimate, IndsCache,
+        IndsCache, cache_ind_build, calc_inds_with_cache_lossy, warmup_ind_estimate,
     },
     expr::{
         eval::Value,
-        parser::{lex_all, Expr, Parser, Stmt, Stmts},
+        parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
     scoring::tools::{
         inject_latest_num_fields, inject_stock_extra_fields, load_st_list, rt_max_len,
@@ -25,6 +28,16 @@ use crate::{
 
 const BOARD_ST: &str = "ST";
 const DEFAULT_ADJ_TYPE: &str = "qfq";
+const INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS: [&str; 7] = [
+    "RANK",
+    "ZHANG",
+    "TOTAL_MV_YI",
+    "REALTIME_CHANGE_OPEN_PCT",
+    "REALTIME_FALL_FROM_HIGH_PCT",
+    "REALTIME_VOL_RATIO",
+    "VOL_RATIO",
+];
+const INTRADAY_TEMPLATE_RUNTIME_ALIASES: [(&str, &str); 1] = [("TOTAL_MV_YI", "TOTAL_MV")];
 const RUNTIME_INPUT_KEYS: [&str; 10] = [
     "O",
     "H",
@@ -461,6 +474,21 @@ fn estimate_intraday_template_warmup(stmts: &Stmts) -> Result<usize, String> {
     Ok(expr_need)
 }
 
+fn collect_intraday_template_runtime_keys(programs: &[&Stmts]) -> HashSet<String> {
+    collect_runtime_keys_from_expr_programs(
+        programs,
+        RuntimeKeyCollectOptions {
+            always_keys: &[],
+            injected_keys: &INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS,
+            aliases: &INTRADAY_TEMPLATE_RUNTIME_ALIASES,
+        },
+    )
+}
+
+fn add_indicator_input_runtime_keys(keys: &mut HashSet<String>) {
+    keys.extend(RUNTIME_INPUT_KEYS.iter().map(|key| (*key).to_string()));
+}
+
 fn compile_intraday_templates(
     templates: &[IntradayMonitorTemplate],
 ) -> HashMap<String, CompiledIntradayMonitorTemplate> {
@@ -533,7 +561,12 @@ pub fn validate_intraday_monitor_template_expression(
         .parse_main()
         .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
     let warmup_need = estimate_intraday_template_warmup(&ast)?;
-    let row_data = build_intraday_template_validation_row_data(source_path, warmup_need)?;
+    let required_runtime_keys = collect_intraday_template_runtime_keys(&[&ast]);
+    let row_data = build_intraday_template_validation_row_data(
+        source_path,
+        warmup_need,
+        &required_runtime_keys,
+    )?;
     let mut rt = row_into_rt(row_data)?;
     let value = rt
         .eval_program(&ast)
@@ -625,8 +658,14 @@ fn inject_template_validation_extra_series(row_data: &mut RowData) -> Result<(),
 fn build_real_intraday_template_validation_row_data(
     source_path: &str,
     warmup_need: usize,
+    required_runtime_keys: &HashSet<String>,
 ) -> Result<RowData, String> {
-    let reader = DataReader::new(source_path)?;
+    let indicator_cache = cache_ind_build(source_path)?;
+    let mut reader_runtime_keys = required_runtime_keys.clone();
+    if !indicator_cache.is_empty() {
+        add_indicator_input_runtime_keys(&mut reader_runtime_keys);
+    }
+    let reader = DataReader::new_with_runtime_keys(source_path, &reader_runtime_keys)?;
     let latest_trade_date = reader
         .conn
         .query_row(
@@ -645,7 +684,6 @@ fn build_real_intraday_template_validation_row_data(
         )
         .map_err(|e| format!("读取实时模板校验样本股票失败: {e}"))?;
 
-    let indicator_cache = cache_ind_build(source_path)?;
     let indicator_warmup_need = if indicator_cache.is_empty() {
         0
     } else {
@@ -685,9 +723,14 @@ fn build_real_intraday_template_validation_row_data(
 fn build_intraday_template_validation_row_data(
     source_path: Option<&str>,
     warmup_need: usize,
+    required_runtime_keys: &HashSet<String>,
 ) -> Result<RowData, String> {
     if let Some(source_path) = source_path.map(str::trim).filter(|value| !value.is_empty()) {
-        return build_real_intraday_template_validation_row_data(source_path, warmup_need);
+        return build_real_intraday_template_validation_row_data(
+            source_path,
+            warmup_need,
+            required_runtime_keys,
+        );
     }
 
     let len = warmup_need.max(2);
@@ -1015,6 +1058,14 @@ fn apply_intraday_template_tags(
     }
 
     let compiled_templates = compile_intraday_templates(templates);
+    let ready_programs = compiled_templates
+        .values()
+        .filter_map(|item| match item {
+            CompiledIntradayMonitorTemplate::Ready(template) => Some(&template.ast),
+            CompiledIntradayMonitorTemplate::Invalid { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let mut required_runtime_keys = collect_intraday_template_runtime_keys(&ready_programs);
     let template_warmup_need = compiled_templates
         .values()
         .filter_map(|item| match item {
@@ -1027,11 +1078,12 @@ fn apply_intraday_template_tags(
     let indicator_warmup_need = if indicator_cache.is_empty() {
         0
     } else {
+        add_indicator_input_runtime_keys(&mut required_runtime_keys);
         warmup_ind_estimate(source_path).unwrap_or(0)
     };
     let need_rows = template_warmup_need.max(indicator_warmup_need).max(1);
 
-    let reader = match DataReader::new(source_path) {
+    let reader = match DataReader::new_with_runtime_keys(source_path, &required_runtime_keys) {
         Ok(reader) => reader,
         Err(err) => {
             for row in rows.iter_mut() {
@@ -1763,5 +1815,30 @@ mod tests {
         let error = validate_intraday_monitor_template_expression(None, "rank <= 100".to_string())
             .expect_err("lowercase rank should not be injected");
         assert!(error.contains("变量不存在:rank"));
+    }
+
+    #[test]
+    fn intraday_template_runtime_key_collection_skips_injected_fields() {
+        let tokens = lex_all(
+            "M := MA(C, 5); M > MY_RT_IND AND RANK <= 50 AND REALTIME_VOL_RATIO > 1 AND TOTAL_MV_YI > 10",
+        );
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_main().expect("expression should parse");
+
+        let keys = collect_intraday_template_runtime_keys(&[&program]);
+
+        for required_key in ["C", "MY_RT_IND", "TOTAL_MV"] {
+            assert!(keys.contains(required_key), "missing {required_key}");
+        }
+        for injected_key in [
+            "RANK",
+            "REALTIME_VOL_RATIO",
+            "TOTAL_MV_YI",
+            "VOL_RATIO",
+            "ZHANG",
+        ] {
+            assert!(!keys.contains(injected_key), "unexpected {injected_key}");
+        }
+        assert!(!keys.contains("O"));
     }
 }

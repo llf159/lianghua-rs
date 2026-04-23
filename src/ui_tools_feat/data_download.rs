@@ -2,16 +2,17 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::Path,
-    sync::mpsc::{sync_channel, SyncSender},
+    sync::mpsc::{SyncSender, sync_channel},
     thread,
 };
 
-use duckdb::{params, Connection};
+use duckdb::{Connection, params};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     data::{
+        IndsData,
         concept_performance_data::{
             rebuild_concept_performance_all, rebuild_most_related_concept_csv,
         },
@@ -24,20 +25,20 @@ use crate::{
             list_stock_data_indicator_columns, reset_stock_data_indicator_stage_table,
         },
         ind_toml_path, load_stock_list, load_ths_concepts_list, load_trade_date_list,
-        source_db_path, stock_list_path, ths_concepts_path, trade_calendar_path, IndsData,
+        source_db_path, stock_list_path, ths_concepts_path, trade_calendar_path,
     },
     download::{
+        AdjType, DownloadSummary, ProBarRow,
         ind_calc::{cache_ind_build, calc_inds_for_rows_with_cache},
         runner::{
-            download as core_run_download_with_progress,
+            DownloadProgress, DownloadProgressCallback, DownloadRuntimeConfig,
+            ThsConceptDownloadConfig, download as core_run_download_with_progress,
             download_indices as core_run_index_download_with_progress,
             download_selected_stocks as core_run_selected_stock_download_with_progress,
-            download_ths_concepts as core_download_ths_concepts, DownloadProgress,
-            DownloadProgressCallback, DownloadRuntimeConfig, ThsConceptDownloadConfig,
+            download_ths_concepts as core_download_ths_concepts,
         },
-        AdjType, DownloadSummary, ProBarRow,
     },
-    expr::parser::{lex_all, Parser},
+    expr::parser::{Parser, lex_all},
 };
 
 use super::normalize_trade_date;

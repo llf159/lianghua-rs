@@ -6,7 +6,10 @@ use serde::Serialize;
 
 use crate::{
     data::scoring_data::row_into_rt,
-    data::{DataReader, ScoreRule, load_ths_concepts_list, result_db_path},
+    data::{
+        DataReader, RuntimeKeyCollectOptions, ScoreRule, collect_runtime_keys_from_expr_programs,
+        expr_program_uses_runtime_key, load_ths_concepts_list, result_db_path,
+    },
     expr::{
         eval::Value,
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
@@ -26,6 +29,8 @@ use super::{
 const DEFAULT_ADJ_TYPE: &str = "qfq";
 const BOARD_ALL: &str = "全部";
 const BOARD_ST: &str = "ST";
+const EXPRESSION_STOCK_PICK_INJECTED_RUNTIME_KEYS: [&str; 3] = ["RANK", "ZHANG", "TOTAL_MV_YI"];
+const EXPRESSION_STOCK_PICK_RUNTIME_ALIASES: [(&str, &str); 1] = [("TOTAL_MV_YI", "TOTAL_MV")];
 
 #[derive(Debug, Clone, Copy)]
 enum PickScopeWay {
@@ -155,9 +160,12 @@ fn resolve_expression_trade_window(
 }
 
 fn load_trade_date_options(source_path: &str) -> Result<Vec<String>, String> {
-    let reader = DataReader::new(source_path)?;
-    let mut stmt = reader
-        .conn
+    let source_db = crate::data::source_db_path(source_path);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
+    let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+    let mut stmt = conn
         .prepare(
             r#"
             SELECT DISTINCT trade_date
@@ -376,6 +384,17 @@ fn estimate_custom_warmup(stmts: &Stmts, scope_way: PickScopeWay) -> Result<usiz
     };
 
     Ok(expr_need + extra_need)
+}
+
+fn collect_expression_stock_pick_runtime_keys(stmts: &Stmts) -> HashSet<String> {
+    collect_runtime_keys_from_expr_programs(
+        &[stmts],
+        RuntimeKeyCollectOptions {
+            always_keys: &[],
+            injected_keys: &EXPRESSION_STOCK_PICK_INJECTED_RUNTIME_KEYS,
+            aliases: &EXPRESSION_STOCK_PICK_RUNTIME_ALIASES,
+        },
+    )
 }
 
 fn hit_scope_period(scope_way: PickScopeWay, bs: &[bool]) -> ScopeHit {
@@ -621,6 +640,8 @@ pub fn run_expression_stock_pick(
         .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
 
     let warmup_need = estimate_custom_warmup(&stmts, parsed_scope_way)?;
+    let required_runtime_keys = collect_expression_stock_pick_runtime_keys(&stmts);
+    let needs_rank = expr_program_uses_runtime_key(&stmts, "RANK");
     let query_start_date = calc_query_start_date(source_path, warmup_need, &resolved_start_date)?;
     let need_rows = calc_query_need_rows(
         source_path,
@@ -629,7 +650,7 @@ pub fn run_expression_stock_pick(
         &resolved_end_date,
     )?;
 
-    let reader = DataReader::new(source_path)?;
+    let reader = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
     let ts_codes = DataReader::list_ts_code(
         &reader,
         DEFAULT_ADJ_TYPE,
@@ -645,7 +666,11 @@ pub fn run_expression_stock_pick(
     let name_map = build_name_map(source_path).unwrap_or_default();
     let concept_map = build_concepts_map(source_path).unwrap_or_default();
     let summary_map = load_summary_map(source_path, &resolved_end_date);
-    let rank_series_map = load_rank_series_map(source_path, &query_start_date, &resolved_end_date);
+    let rank_series_map = if needs_rank {
+        load_rank_series_map(source_path, &query_start_date, &resolved_end_date)
+    } else {
+        HashMap::new()
+    };
     let filtered_ts_codes = ts_codes
         .into_iter()
         .filter(|ts_code| {
@@ -657,7 +682,8 @@ pub fn run_expression_stock_pick(
     let rows = filtered_ts_codes
         .par_chunks(256)
         .map(|ts_group| -> Result<Vec<StockPickRow>, String> {
-            let worker_reader = DataReader::new(source_path)?;
+            let worker_reader =
+                DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
             let mut group_rows = Vec::new();
 
             for ts_code in ts_group {
@@ -668,7 +694,9 @@ pub fn run_expression_stock_pick(
                     need_rows,
                 )?;
                 inject_stock_extra_fields(&mut row_data, ts_code, st_list.contains(ts_code), None)?;
-                inject_runtime_rank_series(&mut row_data, ts_code, &rank_series_map)?;
+                if needs_rank {
+                    inject_runtime_rank_series(&mut row_data, ts_code, &rank_series_map)?;
+                }
                 let trade_dates = row_data.trade_dates.clone();
                 let keep_from = trade_dates
                     .binary_search_by(|d| d.as_str().cmp(&resolved_start_date))
@@ -877,4 +905,33 @@ pub fn run_concept_stock_pick(
         resolved_start_date: Some(resolved_trade_date.clone()),
         resolved_end_date: Some(resolved_trade_date),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_program(expression: &str) -> Stmts {
+        let tokens = lex_all(expression);
+        let mut parser = Parser::new(tokens);
+        parser.parse_main().expect("expression should parse")
+    }
+
+    #[test]
+    fn expression_stock_pick_runtime_key_collection_skips_injected_fields() {
+        let program = parse_program(
+            "M := MA(C, 5); M > MY_IND AND RANK <= 100 AND ZHANG > 0 AND TOTAL_MV_YI <= 300",
+        );
+
+        let keys = collect_expression_stock_pick_runtime_keys(&program);
+
+        for required_key in ["C", "MY_IND", "TOTAL_MV"] {
+            assert!(keys.contains(required_key), "missing {required_key}");
+        }
+        for injected_key in ["RANK", "ZHANG", "TOTAL_MV_YI"] {
+            assert!(!keys.contains(injected_key), "unexpected {injected_key}");
+        }
+        assert!(!keys.contains("O"));
+        assert!(expr_program_uses_runtime_key(&program, "RANK"));
+    }
 }
