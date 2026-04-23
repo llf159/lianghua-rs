@@ -7,7 +7,11 @@ use serde::Serialize;
 
 use crate::{
     data::scoring_data::row_into_rt,
-    data::{DataReader, load_stock_list, load_trade_date_list, result_db_path, stock_list_path},
+    data::{
+        DataReader, RowData, RuntimeKeyCollectOptions, collect_runtime_keys_from_expr_programs,
+        expr_program_uses_runtime_key, load_stock_list, load_trade_date_list, result_db_path,
+        stock_list_path,
+    },
     expr::{
         eval::{Runtime, Value},
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
@@ -27,6 +31,10 @@ const DEFAULT_ADJ_TYPE: &str = "qfq";
 const DEFAULT_INDEX_TS_CODE: &str = "000001.SH";
 const DEFAULT_BUY_PRICE_BASIS: &str = "open";
 const PRICE_EPS: f64 = 1e-12;
+const PAPER_VALIDATION_ALWAYS_RUNTIME_KEYS: [&str; 4] = ["O", "H", "C", "PRE_CLOSE"];
+const PAPER_VALIDATION_INJECTED_RUNTIME_KEYS: [&str; 6] =
+    ["RANK", "ZHANG", "TIME", "RATEO", "RATEH", "TOTAL_MV_YI"];
+const PAPER_VALIDATION_RUNTIME_ALIASES: [(&str, &str); 1] = [("TOTAL_MV_YI", "TOTAL_MV")];
 const PAPER_VALIDATION_INPUT_KEYS: [&str; 10] = [
     "O",
     "H",
@@ -294,6 +302,9 @@ pub fn run_strategy_paper_validation(
     let sell_program = parse_expression_program(&sell_expression, "卖点方程")?;
     let warmup_need =
         estimate_expression_warmup(&buy_program)?.max(estimate_expression_warmup(&sell_program)?);
+    let required_runtime_keys = collect_paper_validation_runtime_keys(&buy_program, &sell_program);
+    let needs_rank = expr_program_uses_runtime_key(&buy_program, "RANK")
+        || expr_program_uses_runtime_key(&sell_program, "RANK");
     let query_start_date = calc_query_start_date(source_path, warmup_need, &resolved_start_date)?;
     let need_rows = calc_query_need_rows(
         source_path,
@@ -302,7 +313,7 @@ pub fn run_strategy_paper_validation(
         &resolved_end_date,
     )?;
 
-    let reader = DataReader::new(source_path)?;
+    let reader = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
     let st_list = load_st_list(source_path)?;
     let name_map = build_name_map(source_path).unwrap_or_default();
     let ts_codes = if let Some(ts_code) = normalized_test_ts_code.as_ref() {
@@ -332,7 +343,11 @@ pub fn run_strategy_paper_validation(
         source_path,
         min_listed_trade_days.unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
     )?;
-    let rank_series_map = load_rank_series_map(source_path, &query_start_date, &resolved_end_date);
+    let rank_series_map = if needs_rank {
+        load_rank_series_map(source_path, &query_start_date, &resolved_end_date)
+    } else {
+        HashMap::new()
+    };
 
     let grouped_rows = ts_codes
         .par_chunks(128)
@@ -340,7 +355,8 @@ pub fn run_strategy_paper_validation(
             |ts_group| -> Result<Vec<StrategyPaperValidationTradeRow>, String> {
                 let worker_buy_program = buy_program.clone();
                 let worker_sell_program = sell_program.clone();
-                let worker_reader = DataReader::new(source_path)?;
+                let worker_reader =
+                    DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
                 let mut out = Vec::new();
 
                 for ts_code in ts_group {
@@ -353,8 +369,11 @@ pub fn run_strategy_paper_validation(
                         &worker_sell_program,
                         &eligibility,
                         &rank_series_map,
+                        needs_rank,
                         &resolved_start_date,
                         &resolved_end_date,
+                        &query_start_date,
+                        warmup_need,
                         need_rows,
                         parsed_buy_price_basis,
                         resolved_slippage_pct,
@@ -554,19 +573,32 @@ fn simulate_one_stock_trades(
     sell_program: &Stmts,
     eligibility: &PaperTradeEligibility,
     rank_series_map: &HashMap<String, HashMap<String, Option<f64>>>,
+    needs_rank: bool,
     start_date: &str,
     end_date: &str,
+    query_start_date: &str,
+    warmup_need: usize,
     need_rows: usize,
     buy_price_basis: BuyPriceBasis,
     slippage_pct: f64,
 ) -> Result<Vec<StrategyPaperValidationTradeRow>, String> {
-    let mut row_data = reader.load_one_tail_rows(ts_code, DEFAULT_ADJ_TYPE, end_date, need_rows)?;
+    let mut row_data = load_paper_validation_row_data(
+        reader,
+        ts_code,
+        query_start_date,
+        start_date,
+        end_date,
+        warmup_need,
+        need_rows,
+    )?;
     if row_data.trade_dates.is_empty() {
         return Ok(Vec::new());
     }
 
     inject_stock_extra_fields(&mut row_data, ts_code, is_st, None)?;
-    inject_runtime_rank_series(&mut row_data, ts_code, rank_series_map)?;
+    if needs_rank {
+        inject_runtime_rank_series(&mut row_data, ts_code, rank_series_map)?;
+    }
 
     let trade_dates = std::mem::take(&mut row_data.trade_dates);
     let keep_from = trade_dates
@@ -589,6 +621,46 @@ fn simulate_one_stock_trades(
         buy_price_basis,
         slippage_pct,
     )
+}
+
+fn load_paper_validation_row_data(
+    reader: &DataReader,
+    ts_code: &str,
+    query_start_date: &str,
+    start_date: &str,
+    end_date: &str,
+    warmup_need: usize,
+    need_rows: usize,
+) -> Result<RowData, String> {
+    match reader.load_one(ts_code, DEFAULT_ADJ_TYPE, query_start_date, end_date) {
+        Ok(row_data)
+            if has_required_paper_warmup(&row_data.trade_dates, start_date, warmup_need) =>
+        {
+            Ok(row_data)
+        }
+        Ok(row_data)
+            if row_data
+                .trade_dates
+                .binary_search_by(|value| value.as_str().cmp(start_date))
+                .unwrap_or_else(|index| index)
+                >= row_data.trade_dates.len() =>
+        {
+            Ok(row_data)
+        }
+        Ok(_) => reader.load_one_tail_rows(ts_code, DEFAULT_ADJ_TYPE, end_date, need_rows),
+        Err(error) if error == "trade_dates为空" => {
+            reader.load_one_tail_rows(ts_code, DEFAULT_ADJ_TYPE, end_date, need_rows)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn has_required_paper_warmup(trade_dates: &[String], start_date: &str, warmup_need: usize) -> bool {
+    let keep_from = trade_dates
+        .binary_search_by(|value| value.as_str().cmp(start_date))
+        .unwrap_or_else(|index| index);
+
+    keep_from < trade_dates.len() && keep_from >= warmup_need
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1049,6 +1121,20 @@ fn estimate_expression_warmup(stmts: &Stmts) -> Result<usize, String> {
     }
 
     Ok(expr_need)
+}
+
+fn collect_paper_validation_runtime_keys(
+    buy_program: &Stmts,
+    sell_program: &Stmts,
+) -> std::collections::HashSet<String> {
+    collect_runtime_keys_from_expr_programs(
+        &[buy_program, sell_program],
+        RuntimeKeyCollectOptions {
+            always_keys: &PAPER_VALIDATION_ALWAYS_RUNTIME_KEYS,
+            injected_keys: &PAPER_VALIDATION_INJECTED_RUNTIME_KEYS,
+            aliases: &PAPER_VALIDATION_RUNTIME_ALIASES,
+        },
+    )
 }
 
 fn build_paper_trade_eligibility(
@@ -1748,6 +1834,38 @@ mod tests {
         )
         .expect_err("lowercase rank should not be injected");
         assert!(error.contains("变量不存在:rank"));
+    }
+
+    #[test]
+    fn runtime_key_collection_skips_injected_validation_fields() {
+        let buy_program = parse_expression_program(
+            "M := MA(C, 5); M > REF(C, 1) AND RANK <= 100 AND TOTAL_MV_YI > 20",
+            "买点方程",
+        )
+        .expect("buy expression should parse");
+        let sell_program = parse_expression_program("TIME >= 2 OR RATEH > 3", "卖点方程")
+            .expect("sell expression should parse");
+
+        let keys = collect_paper_validation_runtime_keys(&buy_program, &sell_program);
+
+        for required_key in ["O", "H", "C", "PRE_CLOSE", "TOTAL_MV"] {
+            assert!(keys.contains(required_key), "missing {required_key}");
+        }
+        for injected_key in ["RANK", "TIME", "RATEH", "TOTAL_MV_YI"] {
+            assert!(!keys.contains(injected_key), "unexpected {injected_key}");
+        }
+        assert!(!keys.contains("V"));
+        assert!(!keys.contains("AMOUNT"));
+        assert!(expr_program_uses_runtime_key(&buy_program, "RANK"));
+        assert!(!expr_program_uses_runtime_key(&sell_program, "RANK"));
+    }
+
+    #[test]
+    fn rank_usage_detection_ignores_local_assignments() {
+        let program =
+            parse_expression_program("RANK := 1; RANK > 0", "买点方程").expect("expression parses");
+
+        assert!(!expr_program_uses_runtime_key(&program, "RANK"));
     }
 }
 

@@ -14,6 +14,8 @@ use std::{
 use duckdb::{Connection, params};
 use serde::{Deserialize, Deserializer, de};
 
+use crate::expr::parser::{Expr, Stmt, Stmts};
+
 pub fn source_db_path(source_dir: &str) -> PathBuf {
     Path::new(source_dir).join("stock_data.db")
 }
@@ -193,6 +195,129 @@ impl RowData {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeKeyCollectOptions<'a> {
+    pub always_keys: &'a [&'a str],
+    pub injected_keys: &'a [&'a str],
+    pub aliases: &'a [(&'a str, &'a str)],
+}
+
+pub fn collect_runtime_keys_from_expr_programs(
+    programs: &[&Stmts],
+    options: RuntimeKeyCollectOptions<'_>,
+) -> HashSet<String> {
+    let mut keys = options
+        .always_keys
+        .iter()
+        .map(|key| (*key).to_string())
+        .collect::<HashSet<_>>();
+
+    for program in programs {
+        collect_stmts_runtime_keys(program, options, &mut keys);
+    }
+
+    keys
+}
+
+pub fn expr_program_uses_runtime_key(stmts: &Stmts, target_key: &str) -> bool {
+    let mut locals = HashSet::new();
+
+    for stmt in &stmts.item {
+        match stmt {
+            Stmt::Assign { name, value } => {
+                if expr_uses_runtime_key(value, &locals, target_key) {
+                    return true;
+                }
+                locals.insert(name.clone());
+            }
+            Stmt::Expr(expr) => {
+                if expr_uses_runtime_key(expr, &locals, target_key) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+fn collect_stmts_runtime_keys(
+    stmts: &Stmts,
+    options: RuntimeKeyCollectOptions<'_>,
+    keys: &mut HashSet<String>,
+) {
+    let mut locals = HashSet::new();
+
+    for stmt in &stmts.item {
+        match stmt {
+            Stmt::Assign { name, value } => {
+                collect_expr_runtime_keys(value, &locals, options, keys);
+                locals.insert(name.clone());
+            }
+            Stmt::Expr(expr) => collect_expr_runtime_keys(expr, &locals, options, keys),
+        }
+    }
+}
+
+fn collect_expr_runtime_keys(
+    expr: &Expr,
+    locals: &HashSet<String>,
+    options: RuntimeKeyCollectOptions<'_>,
+    keys: &mut HashSet<String>,
+) {
+    match expr {
+        Expr::Number(_) => {}
+        Expr::Ident(name) => {
+            if locals.contains(name) {
+                return;
+            }
+
+            let runtime_key = name.to_ascii_uppercase();
+            if let Some((_, db_key)) = options
+                .aliases
+                .iter()
+                .find(|(from_key, _)| runtime_key == *from_key)
+            {
+                keys.insert((*db_key).to_string());
+                return;
+            }
+            if options
+                .injected_keys
+                .iter()
+                .any(|injected_key| runtime_key == *injected_key)
+            {
+                return;
+            }
+            keys.insert(runtime_key);
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_expr_runtime_keys(arg, locals, options, keys);
+            }
+        }
+        Expr::Unary { rhs, .. } => collect_expr_runtime_keys(rhs, locals, options, keys),
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_expr_runtime_keys(lhs, locals, options, keys);
+            collect_expr_runtime_keys(rhs, locals, options, keys);
+        }
+    }
+}
+
+fn expr_uses_runtime_key(expr: &Expr, locals: &HashSet<String>, target_key: &str) -> bool {
+    match expr {
+        Expr::Number(_) => false,
+        Expr::Ident(name) => !locals.contains(name) && name == target_key,
+        Expr::Call { args, .. } => args
+            .iter()
+            .any(|arg| expr_uses_runtime_key(arg, locals, target_key)),
+        Expr::Unary { rhs, .. } => expr_uses_runtime_key(rhs, locals, target_key),
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_uses_runtime_key(lhs, locals, target_key)
+                || expr_uses_runtime_key(rhs, locals, target_key)
+        }
+    }
+}
+
 pub struct DataReader {
     pub conn: Connection,
     pub query_sql: String,
@@ -202,6 +327,20 @@ pub struct DataReader {
 
 impl DataReader {
     pub fn new(source_dir: &str) -> Result<Self, String> {
+        Self::new_inner(source_dir, None)
+    }
+
+    pub fn new_with_runtime_keys(
+        source_dir: &str,
+        required_runtime_keys: &HashSet<String>,
+    ) -> Result<Self, String> {
+        Self::new_inner(source_dir, Some(required_runtime_keys))
+    }
+
+    fn new_inner(
+        source_dir: &str,
+        required_runtime_keys: Option<&HashSet<String>>,
+    ) -> Result<Self, String> {
         let source_db = source_db_path(source_dir);
         let source_db_str = source_db
             .to_str()
@@ -235,6 +374,12 @@ impl DataReader {
 
         let mut db_cols_table: Vec<(String, String)> = Vec::new();
         for (db_col, pair) in base_pairs {
+            if required_runtime_keys
+                .map(|keys| !keys.contains(pair))
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let db_cols = all_cols_name
                 .iter()
                 .find(|c| c.eq_ignore_ascii_case(db_col))
@@ -260,6 +405,13 @@ impl DataReader {
                     | "change"
                     | "pct_chg"
             ) {
+                continue;
+            }
+            let runtime_key = col.to_ascii_uppercase();
+            if required_runtime_keys
+                .map(|keys| !keys.contains(&runtime_key))
+                .unwrap_or(false)
+            {
                 continue;
             }
             db_cols_table.push((col.clone(), col.to_ascii_uppercase()));
