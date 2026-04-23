@@ -176,6 +176,26 @@ fn emit_progress(
     }
 }
 
+fn build_ths_concept_http_client() -> Result<reqwest::blocking::Client, String> {
+    let builder = reqwest::blocking::Client::builder().http1_only();
+
+    #[cfg(target_os = "android")]
+    let builder = {
+        let root_store = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        let mut tls_config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        builder.use_preconfigured_tls(tls_config)
+    };
+
+    builder
+        .build()
+        .map_err(|e| format!("创建同花顺概念 HTTP 客户端失败: {e}"))
+}
+
 fn sync_gaini_bx_range(
     source_dir: &str,
     start_date: &str,
@@ -347,9 +367,7 @@ fn download_ths_concepts_once(
         });
     }
 
-    let http = reqwest::blocking::Client::builder()
-        .build()
-        .map_err(|e| format!("创建同花顺概念 HTTP 客户端失败: {e}"))?;
+    let http = build_ths_concept_http_client()?;
 
     let mut completed = all_items.len().saturating_sub(missing_items.len());
     let total = all_items.len();
@@ -503,12 +521,12 @@ fn download_ths_concepts_concurrent_once(
         let handle = thread::Builder::new()
             .name(format!("ths-concept-worker-{worker_idx}"))
             .spawn(move || {
-                let http = match reqwest::blocking::Client::builder().build() {
+                let http = match build_ths_concept_http_client() {
                     Ok(client) => client,
                     Err(error) => {
                         let _ = tx.send(ThsConceptConcurrentMessage::Failure {
                             item: None,
-                            error: format!("创建同花顺概念 HTTP 客户端失败: {error}"),
+                            error,
                         });
                         stop_flag.store(true, Ordering::Release);
                         return;
