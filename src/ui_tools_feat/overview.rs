@@ -21,6 +21,7 @@ pub struct SceneOverviewRow {
     pub risk_intensity: Option<f64>,
     pub scene_status: Option<String>,
     pub rank: Option<i64>,
+    pub total_rank: Option<i64>,
     pub name: String,
     pub board: String,
     pub total_mv_yi: Option<f64>,
@@ -133,23 +134,27 @@ pub fn get_scene_rank_overview_page(
 
     let sql = r#"
     SELECT
-        ts_code,
-        trade_date,
-        scene_name,
-        direction,
-        stage_score,
-        risk_score,
-        confirm_strength,
-        risk_intensity,
-        stage,
-        scene_rank
-    FROM scene_details
-    WHERE trade_date = ?
+        d.ts_code,
+        d.trade_date,
+        d.scene_name,
+        d.direction,
+        d.stage_score,
+        d.risk_score,
+        d.confirm_strength,
+        d.risk_intensity,
+        d.stage,
+        d.scene_rank,
+        s.rank AS total_rank
+    FROM scene_details AS d
+    LEFT JOIN score_summary AS s
+      ON d.ts_code = s.ts_code
+     AND d.trade_date = s.trade_date
+    WHERE d.trade_date = ?
     ORDER BY
-        scene_name ASC,
-        COALESCE(scene_rank, 999999) ASC,
-        COALESCE(confirm_strength, 0.0) DESC,
-        ts_code ASC
+        d.scene_name ASC,
+        COALESCE(d.scene_rank, 999999) ASC,
+        COALESCE(d.confirm_strength, 0.0) DESC,
+        d.ts_code ASC
     "#;
 
     let mut stmt = conn.prepare(sql).map_err(|e| format!("预编译失败: {e}"))?;
@@ -218,6 +223,9 @@ pub fn get_scene_rank_overview_page(
                 .get::<_, Option<String>>(8)
                 .map_err(|e| format!("读取 scene_status 失败: {e}"))?,
             rank: row.get(9).map_err(|e| format!("读取 rank 失败: {e}"))?,
+            total_rank: row
+                .get(10)
+                .map_err(|e| format!("读取 total_rank 失败: {e}"))?,
             name: name_map.get(&ts_code).cloned().unwrap_or_default(),
             board: board_value,
             total_mv_yi,

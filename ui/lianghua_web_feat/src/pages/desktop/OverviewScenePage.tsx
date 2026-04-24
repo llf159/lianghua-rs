@@ -31,6 +31,7 @@ const OVERVIEW_PAGE_FILTER_STATE_KEY = 'lh_scene_overview_page_filter_state_v2'
 const OVERVIEW_PAGE_RESULT_STATE_KEY = 'lh_scene_overview_page_result_state_v2'
 const VISIBLE_COLUMNS = [
   'rank',
+  'total_rank',
   'ts_code',
   'name',
   'total_mv_yi',
@@ -76,6 +77,7 @@ type PersistedSceneOverviewState = PersistedSceneOverviewFilterState &
 
 const COLUMN_LABELS: Record<VisibleColumn, string> = {
   rank: '排名',
+  total_rank: '当日总榜排名',
   ts_code: '代码',
   name: '名称',
   total_mv_yi: '总市值(亿)',
@@ -88,6 +90,7 @@ const COLUMN_LABELS: Record<VisibleColumn, string> = {
 
 const COLUMN_WIDTHS: Record<VisibleColumn, number> = {
   rank: 64,
+  total_rank: 124,
   ts_code: 120,
   name: 108,
   total_mv_yi: 110,
@@ -115,6 +118,9 @@ function formatCell(
   }
   if (key === 'rank') {
     return formatNumber(row.rank ?? null, 0)
+  }
+  if (key === 'total_rank') {
+    return formatNumber(row.total_rank ?? null, 0)
   }
   if (key === 'scene_score') {
     return formatNumber(row.scene_score ?? null)

@@ -57,6 +57,7 @@ export type SceneOverviewRow = {
   risk_intensity?: number | null;
   scene_status?: string | null;
   rank?: number | null;
+  total_rank?: number | null;
   name?: string;
   board?: string;
   total_mv_yi?: number | null;

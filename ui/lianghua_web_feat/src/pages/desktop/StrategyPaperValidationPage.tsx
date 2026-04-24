@@ -200,6 +200,45 @@ function statusLabel(row: StrategyPaperValidationTradeRow) {
   return row.status === 'closed' ? '已平仓' : '未平仓'
 }
 
+function getTradeHoldingEndDate(row: StrategyPaperValidationTradeRow) {
+  const sellDate = row.sell_date?.trim() ?? ''
+  if (isCompactTradeDate(sellDate)) {
+    return sellDate
+  }
+
+  const dailyHoldingReturns = Array.isArray(row.daily_holding_close_returns)
+    ? row.daily_holding_close_returns
+    : []
+  for (let index = dailyHoldingReturns.length - 1; index >= 0; index -= 1) {
+    const tradeDate = dailyHoldingReturns[index]?.trade_date?.trim() ?? ''
+    if (isCompactTradeDate(tradeDate)) {
+      return tradeDate
+    }
+  }
+
+  return row.buy_date
+}
+
+function getTradeHoldingInterval(row: StrategyPaperValidationTradeRow) {
+  const startTradeDate = row.buy_date.trim()
+  const endTradeDate = getTradeHoldingEndDate(row).trim()
+  if (
+    !isCompactTradeDate(startTradeDate) ||
+    !isCompactTradeDate(endTradeDate) ||
+    endTradeDate < startTradeDate
+  ) {
+    return {
+      startTradeDate,
+      endTradeDate: startTradeDate,
+    }
+  }
+
+  return {
+    startTradeDate,
+    endTradeDate,
+  }
+}
+
 function getRealizedReturnValue(row: StrategyPaperValidationTradeRow) {
   const value = row.realized_return_pct
   return typeof value === 'number' && Number.isFinite(value) ? value : null
@@ -948,12 +987,17 @@ const StrategyPaperValidationTradesTable = memo(
 
     const navigationItems = useMemo(
       () =>
-        sortedTrades.map((row) => ({
-          tsCode: row.ts_code,
-          tradeDate: row.buy_date,
-          sourcePath: sourcePath.trim() || undefined,
-          name: row.name ?? undefined,
-        })),
+        sortedTrades.map((row) => {
+          const interval = getTradeHoldingInterval(row)
+          return {
+            tsCode: row.ts_code,
+            tradeDate: interval.endTradeDate,
+            intervalStartTradeDate: interval.startTradeDate,
+            intervalEndTradeDate: interval.endTradeDate,
+            sourcePath: sourcePath.trim() || undefined,
+            name: row.name ?? undefined,
+          }
+        }),
       [sortedTrades, sourcePath],
     )
 
@@ -1133,31 +1177,36 @@ const StrategyPaperValidationTradesTable = memo(
                   <td colSpan={10}>没有匹配当前筛选条件的交易。</td>
                 </tr>
               ) : (
-                visibleTrades.map((row, index) => (
-                  <tr key={`${row.ts_code}-${row.buy_date}-${row.sell_date ?? 'open'}-${index}`}>
-                    <td>{statusLabel(row)}</td>
-                    <td>{row.ts_code}</td>
-                    <td>
-                      <DetailsLink
-                        className="strategy-paper-validation-stock-link"
-                        tsCode={row.ts_code}
-                        tradeDate={row.buy_date}
-                        sourcePath={sourcePath.trim() || undefined}
-                        title={`查看 ${row.name ?? row.ts_code} 买入日详情`}
-                        navigationItems={navigationItems}
-                      >
-                        {row.name ?? row.ts_code}
-                      </DetailsLink>
-                    </td>
-                    <td>{formatDateLabel(row.buy_date)}</td>
-                    <td>{formatDateLabel(row.sell_date)}</td>
-                    <td>{row.buy_rank ?? '--'}</td>
-                    <td>{row.hold_days}</td>
-                    <td>{formatNumber(row.buy_cost_price)}</td>
-                    <td>{formatNumber(row.sell_price)}</td>
-                    <td>{renderReturnValue(row.realized_return_pct)}</td>
-                  </tr>
-                ))
+                visibleTrades.map((row, index) => {
+                  const interval = getTradeHoldingInterval(row)
+                  return (
+                    <tr key={`${row.ts_code}-${row.buy_date}-${row.sell_date ?? 'open'}-${index}`}>
+                      <td>{statusLabel(row)}</td>
+                      <td>{row.ts_code}</td>
+                      <td>
+                        <DetailsLink
+                          className="strategy-paper-validation-stock-link"
+                          tsCode={row.ts_code}
+                          tradeDate={interval.endTradeDate}
+                          intervalStartTradeDate={interval.startTradeDate}
+                          intervalEndTradeDate={interval.endTradeDate}
+                          sourcePath={sourcePath.trim() || undefined}
+                          title={`查看 ${row.name ?? row.ts_code} 持仓区间详情`}
+                          navigationItems={navigationItems}
+                        >
+                          {row.name ?? row.ts_code}
+                        </DetailsLink>
+                      </td>
+                      <td>{formatDateLabel(row.buy_date)}</td>
+                      <td>{formatDateLabel(row.sell_date)}</td>
+                      <td>{row.buy_rank ?? '--'}</td>
+                      <td>{row.hold_days}</td>
+                      <td>{formatNumber(row.buy_cost_price)}</td>
+                      <td>{formatNumber(row.sell_price)}</td>
+                      <td>{renderReturnValue(row.realized_return_pct)}</td>
+                    </tr>
+                  )
+                })
               )}
             </tbody>
           </table>
@@ -1264,12 +1313,17 @@ const StrategyPaperValidationStatusTradeModal = memo(
     )
     const navigationItems = useMemo(
       () =>
-        sortedRows.map((row) => ({
-          tsCode: row.ts_code,
-          tradeDate: row.buy_date,
-          sourcePath: sourcePath.trim() || undefined,
-          name: row.name ?? undefined,
-        })),
+        sortedRows.map((row) => {
+          const interval = getTradeHoldingInterval(row)
+          return {
+            tsCode: row.ts_code,
+            tradeDate: interval.endTradeDate,
+            intervalStartTradeDate: interval.startTradeDate,
+            intervalEndTradeDate: interval.endTradeDate,
+            sourcePath: sourcePath.trim() || undefined,
+            name: row.name ?? undefined,
+          }
+        }),
       [sortedRows, sourcePath],
     )
 
@@ -1349,33 +1403,38 @@ const StrategyPaperValidationStatusTradeModal = memo(
                     <td colSpan={12}>没有匹配当前筛选条件的交易。</td>
                   </tr>
                 ) : (
-                  sortedRows.map((row, index) => (
-                    <tr key={`${status}-${row.ts_code}-${row.buy_date}-${row.sell_date ?? 'open'}-${index}`}>
-                      <td>{row.ts_code}</td>
-                      <td>
-                        <DetailsLink
-                          className="strategy-paper-validation-stock-link"
-                          tsCode={row.ts_code}
-                          tradeDate={row.buy_date}
-                          sourcePath={sourcePath.trim() || undefined}
-                          title={`查看 ${row.name ?? row.ts_code} 买入日详情`}
-                          navigationItems={navigationItems}
-                        >
-                          {row.name ?? row.ts_code}
-                        </DetailsLink>
-                      </td>
-                      <td>{formatDateLabel(row.buy_date)}</td>
-                      <td>{formatDateLabel(row.sell_date)}</td>
-                      <td>{row.buy_rank ?? '--'}</td>
-                      <td>{row.hold_days}</td>
-                      <td>{formatNumber(row.buy_cost_price)}</td>
-                      <td>{formatNumber(row.sell_price)}</td>
-                      <td>{renderReturnValue(row.open_return_pct)}</td>
-                      <td>{renderReturnValue(row.high_return_pct)}</td>
-                      <td>{renderReturnValue(row.close_return_pct)}</td>
-                      <td>{renderReturnValue(row.realized_return_pct)}</td>
-                    </tr>
-                  ))
+                  sortedRows.map((row, index) => {
+                    const interval = getTradeHoldingInterval(row)
+                    return (
+                      <tr key={`${status}-${row.ts_code}-${row.buy_date}-${row.sell_date ?? 'open'}-${index}`}>
+                        <td>{row.ts_code}</td>
+                        <td>
+                          <DetailsLink
+                            className="strategy-paper-validation-stock-link"
+                            tsCode={row.ts_code}
+                            tradeDate={interval.endTradeDate}
+                            intervalStartTradeDate={interval.startTradeDate}
+                            intervalEndTradeDate={interval.endTradeDate}
+                            sourcePath={sourcePath.trim() || undefined}
+                            title={`查看 ${row.name ?? row.ts_code} 持仓区间详情`}
+                            navigationItems={navigationItems}
+                          >
+                            {row.name ?? row.ts_code}
+                          </DetailsLink>
+                        </td>
+                        <td>{formatDateLabel(row.buy_date)}</td>
+                        <td>{formatDateLabel(row.sell_date)}</td>
+                        <td>{row.buy_rank ?? '--'}</td>
+                        <td>{row.hold_days}</td>
+                        <td>{formatNumber(row.buy_cost_price)}</td>
+                        <td>{formatNumber(row.sell_price)}</td>
+                        <td>{renderReturnValue(row.open_return_pct)}</td>
+                        <td>{renderReturnValue(row.high_return_pct)}</td>
+                        <td>{renderReturnValue(row.close_return_pct)}</td>
+                        <td>{renderReturnValue(row.realized_return_pct)}</td>
+                      </tr>
+                    )
+                  })
                 )}
               </tbody>
             </table>
@@ -1681,12 +1740,17 @@ export default function StrategyPaperValidationPage() {
     title: string,
     rows: StrategyPaperValidationTradeRow[],
   ) {
-    const navigationItems = rows.map((row) => ({
-      tsCode: row.ts_code,
-      tradeDate: row.buy_date,
-      sourcePath: sourcePath.trim() || undefined,
-      name: row.name ?? undefined,
-    }))
+    const navigationItems = rows.map((row) => {
+      const interval = getTradeHoldingInterval(row)
+      return {
+        tsCode: row.ts_code,
+        tradeDate: interval.endTradeDate,
+        intervalStartTradeDate: interval.startTradeDate,
+        intervalEndTradeDate: interval.endTradeDate,
+        sourcePath: sourcePath.trim() || undefined,
+        name: row.name ?? undefined,
+      }
+    })
 
     return (
       <section className="strategy-paper-validation-extreme-panel">
@@ -1709,29 +1773,34 @@ export default function StrategyPaperValidationPage() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((row, index) => (
-                <tr key={`${title}-${row.ts_code}-${row.buy_date}-${row.sell_date ?? 'open'}-${index}`}>
-                  <td>{row.ts_code}</td>
-                  <td>
-                    <DetailsLink
-                      className="strategy-paper-validation-stock-link"
-                      tsCode={row.ts_code}
-                      tradeDate={row.buy_date}
-                      sourcePath={sourcePath.trim() || undefined}
-                      title={`查看 ${row.name ?? row.ts_code} 买入日详情`}
-                      navigationItems={navigationItems}
-                    >
-                      {row.name ?? row.ts_code}
-                    </DetailsLink>
-                  </td>
-                  <td>{formatDateLabel(row.buy_date)}</td>
-                  <td>{formatDateLabel(row.sell_date)}</td>
-                  <td>{row.hold_days}</td>
-                  <td>{formatNumber(row.buy_cost_price)}</td>
-                  <td>{formatNumber(row.sell_price)}</td>
-                  <td>{renderReturnValue(row.realized_return_pct)}</td>
-                </tr>
-              ))}
+              {rows.map((row, index) => {
+                const interval = getTradeHoldingInterval(row)
+                return (
+                  <tr key={`${title}-${row.ts_code}-${row.buy_date}-${row.sell_date ?? 'open'}-${index}`}>
+                    <td>{row.ts_code}</td>
+                    <td>
+                      <DetailsLink
+                        className="strategy-paper-validation-stock-link"
+                        tsCode={row.ts_code}
+                        tradeDate={interval.endTradeDate}
+                        intervalStartTradeDate={interval.startTradeDate}
+                        intervalEndTradeDate={interval.endTradeDate}
+                        sourcePath={sourcePath.trim() || undefined}
+                        title={`查看 ${row.name ?? row.ts_code} 持仓区间详情`}
+                        navigationItems={navigationItems}
+                      >
+                        {row.name ?? row.ts_code}
+                      </DetailsLink>
+                    </td>
+                    <td>{formatDateLabel(row.buy_date)}</td>
+                    <td>{formatDateLabel(row.sell_date)}</td>
+                    <td>{row.hold_days}</td>
+                    <td>{formatNumber(row.buy_cost_price)}</td>
+                    <td>{formatNumber(row.sell_price)}</td>
+                    <td>{renderReturnValue(row.realized_return_pct)}</td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>

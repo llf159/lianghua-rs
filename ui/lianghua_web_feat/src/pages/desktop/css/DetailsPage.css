@@ -807,6 +807,25 @@
   pointer-events: none;
 }
 
+.details-chart-interval-selection::before,
+.details-chart-interval-selection::after {
+  content: "";
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  width: 4px;
+  background: rgba(37, 99, 235, 0.72);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.34);
+}
+
+.details-chart-interval-selection::before {
+  left: -2px;
+}
+
+.details-chart-interval-selection::after {
+  right: -2px;
+}
+
 .details-chart-interval-selection.is-draft {
   border-style: dashed;
   background: rgba(59, 130, 246, 0.1);
@@ -1282,6 +1301,7 @@
   border: 0;
   background: transparent;
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
   color: #1f2a37;
 }

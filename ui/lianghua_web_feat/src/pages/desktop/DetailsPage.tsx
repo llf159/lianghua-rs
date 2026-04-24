@@ -83,6 +83,7 @@ import {
 } from "../../apis/watchObserve";
 import type { DetailsNavigationItem } from "../../shared/detailsLinkState";
 import type { DetailsStrategyCompareSnapshot } from "../../shared/detailsLinkState";
+import DetailsLink from "../../shared/DetailsLink";
 import "./css/DetailsPage.css";
 
 const DEFAULT_TOP_LIMIT = "100";
@@ -104,6 +105,7 @@ const CHART_CURSOR_Y_MAX = 94;
 const CHART_TOOLTIP_LEFT_THRESHOLD = 62;
 const CHART_INTERVAL_PANEL_TOP_PERCENT = 18;
 const CHART_POINTER_DRAG_THRESHOLD = 6;
+const CHART_INTERVAL_EDGE_HIT_SLOP_PX = 12;
 const CHART_TOUCH_FOCUS_HIT_SLOP = 24;
 const CHART_CYQ_PANEL_WIDTH_RATIO = 0.22;
 const CHART_CYQ_PANEL_GAP = 12;
@@ -181,7 +183,14 @@ type ChartPointerSnapshot = {
 type ChartDragState = {
   pointerId: number;
   panelKey: string;
-  mode: "pan" | "focus" | "tap" | "dismiss" | "interval-select";
+  mode:
+    | "pan"
+    | "focus"
+    | "tap"
+    | "dismiss"
+    | "interval-select"
+    | "interval-adjust-start"
+    | "interval-adjust-end";
   startClientX: number;
   startClientY: number;
   startVisibleStart: number;
@@ -190,6 +199,8 @@ type ChartDragState = {
   moved: boolean;
   anchorAbsoluteIndex?: number;
 };
+
+type ChartIntervalAdjustSide = "start" | "end";
 
 type ScrollSnapshot = {
   left: number;
@@ -600,6 +611,13 @@ function buildIntervalSelectionBounds(
     widthPercent: ((right - left) / CHART_VIEWBOX_WIDTH) * 100,
     centerPercent: (((startX + endX) / 2) / CHART_VIEWBOX_WIDTH) * 100,
   };
+}
+
+function getChartViewportContentRect(viewport: HTMLDivElement) {
+  const svg = viewport.querySelector<SVGSVGElement>(".details-chart-svg");
+  return svg && svg.clientWidth > 0 && svg.clientHeight > 0
+    ? svg.getBoundingClientRect()
+    : viewport.getBoundingClientRect();
 }
 
 function buildIntervalRestoreNotice(
@@ -1703,11 +1721,7 @@ function buildChartPointerSnapshot(
     return null;
   }
 
-  const svg = viewport.querySelector<SVGSVGElement>(".details-chart-svg");
-  const svgRect =
-    svg && svg.clientWidth > 0 && svg.clientHeight > 0
-      ? svg.getBoundingClientRect()
-      : viewportRect;
+  const svgRect = getChartViewportContentRect(viewport);
   const chartXPercent = clampNumber(
     ((clientX - svgRect.left) / svgRect.width) * 100,
     0,
@@ -1744,6 +1758,78 @@ function buildChartPointerSnapshot(
   };
 }
 
+function detectChartIntervalAdjustSide(
+  viewport: HTMLDivElement,
+  clientX: number,
+  selection: ResolvedIntervalRestore | null,
+  effectiveVisibleStart: number,
+  itemCount: number,
+  layoutSlotCount: number,
+  reserveCyqPanelWidth: boolean,
+): ChartIntervalAdjustSide | null {
+  if (!selection || itemCount <= 0 || layoutSlotCount <= 0) {
+    return null;
+  }
+
+  const startVisibleIndex =
+    selection.startAbsoluteIndex >= effectiveVisibleStart &&
+    selection.startAbsoluteIndex < effectiveVisibleStart + itemCount
+      ? selection.startAbsoluteIndex - effectiveVisibleStart
+      : null;
+  const endVisibleIndex =
+    selection.endAbsoluteIndex >= effectiveVisibleStart &&
+    selection.endAbsoluteIndex < effectiveVisibleStart + itemCount
+      ? selection.endAbsoluteIndex - effectiveVisibleStart
+      : null;
+  if (startVisibleIndex === null || endVisibleIndex === null) {
+    return null;
+  }
+
+  const klinePlotWidth = getChartKlinePlotWidth(reserveCyqPanelWidth);
+  const step = layoutSlotCount > 0 ? klinePlotWidth / layoutSlotCount : klinePlotWidth;
+  const xAt = (itemIndex: number) =>
+    getChartItemX(
+      itemIndex,
+      itemCount,
+      layoutSlotCount,
+      reserveCyqPanelWidth,
+    );
+  const bounds = buildIntervalSelectionBounds(
+    startVisibleIndex,
+    endVisibleIndex,
+    xAt,
+    step,
+    true,
+  );
+  if (!bounds) {
+    return null;
+  }
+
+  const rect = getChartViewportContentRect(viewport);
+  if (rect.width <= 0) {
+    return null;
+  }
+
+  const leftClientX = rect.left + (bounds.leftPercent / 100) * rect.width;
+  const rightClientX =
+    rect.left + ((bounds.leftPercent + bounds.widthPercent) / 100) * rect.width;
+  const leftDistance = Math.abs(clientX - leftClientX);
+  const rightDistance = Math.abs(clientX - rightClientX);
+  const edgeHitSlop =
+    CHART_INTERVAL_EDGE_HIT_SLOP_PX *
+    (selection.startAbsoluteIndex === selection.endAbsoluteIndex ? 1.5 : 1);
+
+  if (leftDistance > edgeHitSlop && rightDistance > edgeHitSlop) {
+    return null;
+  }
+
+  if (leftDistance <= edgeHitSlop && rightDistance <= edgeHitSlop) {
+    return clientX <= (leftClientX + rightClientX) / 2 ? "start" : "end";
+  }
+
+  return leftDistance < rightDistance ? "start" : "end";
+}
+
 function isPointerNearChartFocus(
   _panelKey: string,
   viewport: HTMLDivElement,
@@ -1755,11 +1841,7 @@ function isPointerNearChartFocus(
     return false;
   }
 
-  const svg = viewport.querySelector<SVGSVGElement>(".details-chart-svg");
-  const rect =
-    svg && svg.clientWidth > 0 && svg.clientHeight > 0
-      ? svg.getBoundingClientRect()
-      : viewport.getBoundingClientRect();
+  const rect = getChartViewportContentRect(viewport);
   if (rect.width <= 0 || rect.height <= 0) {
     return false;
   }
@@ -3126,10 +3208,16 @@ function OverviewSummarySection({
 
 function SimilaritySection({
   data,
-  onSelectStock,
+  tradeDate,
+  sourcePath,
+  intervalRestore,
+  navigationItems,
 }: {
   data: StockSimilarityPageData | null | undefined;
-  onSelectStock: (row: StockSimilarityRow) => void;
+  tradeDate: string | null;
+  sourcePath: string | null;
+  intervalRestore: IntervalRestoreRequest | null;
+  navigationItems: DetailsNavigationItem[];
 }) {
   const items = data?.items ?? [];
 
@@ -3159,16 +3247,21 @@ function SimilaritySection({
                 {items.map((row) => (
                   <tr key={row.tsCode}>
                     <td>
-                      <button
+                      <DetailsLink
                         className="details-similarity-stock-btn"
-                        type="button"
-                        onClick={() => onSelectStock(row)}
+                        tsCode={row.tsCode}
+                        tradeDate={tradeDate}
+                        intervalStartTradeDate={intervalRestore?.startTradeDate ?? null}
+                        intervalEndTradeDate={intervalRestore?.endTradeDate ?? null}
+                        sourcePath={sourcePath}
+                        navigationItems={navigationItems}
+                        title={`查看 ${row.name?.trim() || splitTsCode(row.tsCode)} 详情`}
                       >
                         <strong>{row.name?.trim() || splitTsCode(row.tsCode)}</strong>
                         <span className="details-similarity-stock-code">
                           {row.tsCode}
                         </span>
-                      </button>
+                      </DetailsLink>
                       <div className="details-similarity-meta" title={buildSimilarityReasonText(row)}>
                         {buildSimilarityReasonText(row)}
                       </div>
@@ -3744,32 +3837,6 @@ export default function DetailsPage({
     );
   }
 
-  function onSelectSimilarityRow(row: StockSimilarityRow) {
-    const intervalRestore = activeIntervalContext;
-    const similarityNavigationItems: DetailsNavigationItem[] =
-      stockSimilarity?.items.map((item) => ({
-        tsCode: item.tsCode,
-        tradeDate:
-          stockSimilarity.resolvedTradeDate ||
-          detailData?.resolved_trade_date ||
-          tradeDateInput.trim() ||
-          null,
-        intervalStartTradeDate: intervalRestore?.startTradeDate ?? null,
-        intervalEndTradeDate: intervalRestore?.endTradeDate ?? null,
-        sourcePath: sourcePathTrimmed || null,
-        name: item.name?.trim() || splitTsCode(item.tsCode),
-      })) ?? [];
-    const nextTradeDate =
-      stockSimilarity?.resolvedTradeDate?.trim() ||
-      detailData?.resolved_trade_date?.trim() ||
-      tradeDateInput.trim();
-    const lookupValue = row.name?.trim() || getLookupDigits(row.tsCode);
-    setInlineNavigationItems(
-      similarityNavigationItems.length > 0 ? similarityNavigationItems : null,
-    );
-    onAutoReadDetail(nextTradeDate, row.tsCode, lookupValue, intervalRestore);
-  }
-
   function onSelectPrevRankTradeDate(nextTradeDate: string) {
     const tradeDate = nextTradeDate.trim();
     if (!tradeDate || resolvedTsCode === "--") {
@@ -3827,6 +3894,30 @@ export default function DetailsPage({
   const watermarkConcept = buildConceptPreview(conceptItems);
   const prevRanks = detailData?.prev_ranks ?? EMPTY_PREV_RANK_ROWS;
   const stockSimilarity = detailData?.stock_similarity ?? null;
+  const similarityTradeDate =
+    stockSimilarity?.resolvedTradeDate?.trim() ||
+    detailData?.resolved_trade_date?.trim() ||
+    tradeDateInput.trim() ||
+    null;
+  const similarityIntervalRestore = activeIntervalContext;
+  const similarityNavigationItems = useMemo(
+    () =>
+      stockSimilarity?.items.map((item) => ({
+        tsCode: item.tsCode,
+        tradeDate: similarityTradeDate,
+        intervalStartTradeDate: similarityIntervalRestore?.startTradeDate ?? null,
+        intervalEndTradeDate: similarityIntervalRestore?.endTradeDate ?? null,
+        sourcePath: sourcePathTrimmed || null,
+        name: item.name?.trim() || splitTsCode(item.tsCode),
+      })) ?? [],
+    [
+      similarityIntervalRestore?.endTradeDate,
+      similarityIntervalRestore?.startTradeDate,
+      similarityTradeDate,
+      sourcePathTrimmed,
+      stockSimilarity,
+    ],
+  );
   useEffect(() => {
     setDetailCyqData(null);
     setDetailCyqError("");
@@ -4759,6 +4850,44 @@ export default function DetailsPage({
     );
   }
 
+  function buildAdjustedChartIntervalSelection(
+    viewport: HTMLDivElement,
+    clientX: number,
+    clientY: number,
+    fixedAbsoluteIndex: number,
+    side: ChartIntervalAdjustSide,
+  ) {
+    const reserveCyqPanelWidth =
+      detailCyqVisible && (selectedCyqSnapshot?.bins.length ?? 0) > 0;
+    const pointer = buildChartPointerSnapshot(
+      viewport,
+      clientX,
+      clientY,
+      chartItems.length,
+      chartLayoutSlotCount,
+      reserveCyqPanelWidth,
+    );
+    if (!pointer) {
+      return null;
+    }
+
+    const pointerAbsoluteIndex = effectiveVisibleStart + pointer.visibleIndex;
+    const nextStartAbsoluteIndex =
+      side === "start"
+        ? Math.min(pointerAbsoluteIndex, fixedAbsoluteIndex)
+        : fixedAbsoluteIndex;
+    const nextEndAbsoluteIndex =
+      side === "end"
+        ? Math.max(pointerAbsoluteIndex, fixedAbsoluteIndex)
+        : fixedAbsoluteIndex;
+
+    return buildIntervalSelectionFromAbsoluteIndices(
+      allChartItems,
+      nextStartAbsoluteIndex,
+      nextEndAbsoluteIndex,
+    );
+  }
+
   function onChartPointerDown(
     panelKey: string,
     event: ReactPointerEvent<HTMLDivElement>,
@@ -4779,6 +4908,28 @@ export default function DetailsPage({
         ? (() => {
             const reserveCyqPanelWidth =
               detailCyqVisible && (selectedCyqSnapshot?.bins.length ?? 0) > 0;
+            const adjustSide = detectChartIntervalAdjustSide(
+              event.currentTarget,
+              event.clientX,
+              chartIntervalSelection,
+              effectiveVisibleStart,
+              chartItems.length,
+              chartLayoutSlotCount,
+              reserveCyqPanelWidth,
+            );
+            if (adjustSide && chartIntervalSelection) {
+              anchorAbsoluteIndex =
+                adjustSide === "start"
+                  ? chartIntervalSelection.endAbsoluteIndex
+                  : chartIntervalSelection.startAbsoluteIndex;
+              setChartIntervalDraftSelection(chartIntervalSelection);
+              setChartIntervalPanelOpen(false);
+              setChartFocus(null);
+              return adjustSide === "start"
+                ? "interval-adjust-start"
+                : "interval-adjust-end";
+            }
+
             const pointer = buildChartPointerSnapshot(
               event.currentTarget,
               event.clientX,
@@ -4820,6 +4971,13 @@ export default function DetailsPage({
             : "tap";
 
     if (mode === "interval-select" && anchorAbsoluteIndex === undefined) {
+      setChartIntervalDraftSelection(null);
+      return;
+    }
+    if (
+      (mode === "interval-adjust-start" || mode === "interval-adjust-end") &&
+      anchorAbsoluteIndex === undefined
+    ) {
       setChartIntervalDraftSelection(null);
       return;
     }
@@ -4917,6 +5075,25 @@ export default function DetailsPage({
       return;
     }
 
+    if (
+      dragState.mode === "interval-adjust-start" ||
+      dragState.mode === "interval-adjust-end"
+    ) {
+      const nextIntervalSelection = buildAdjustedChartIntervalSelection(
+        event.currentTarget,
+        event.clientX,
+        event.clientY,
+        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
+        dragState.mode === "interval-adjust-start" ? "start" : "end",
+      );
+      if (!nextIntervalSelection) {
+        return;
+      }
+
+      setChartIntervalDraftSelection(nextIntervalSelection);
+      return;
+    }
+
     if (dragState.mode === "dismiss") {
       return;
     }
@@ -4996,6 +5173,31 @@ export default function DetailsPage({
       return;
     }
 
+    if (
+      dragState.mode === "interval-adjust-start" ||
+      dragState.mode === "interval-adjust-end"
+    ) {
+      const nextIntervalSelection = buildAdjustedChartIntervalSelection(
+        event.currentTarget,
+        event.clientX,
+        event.clientY,
+        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
+        dragState.mode === "interval-adjust-start" ? "start" : "end",
+      );
+      if (nextIntervalSelection) {
+        setChartIntervalDraftSelection(null);
+        setChartIntervalSelection(nextIntervalSelection);
+        setActiveIntervalContext({
+          startTradeDate: nextIntervalSelection.startTradeDate,
+          endTradeDate: nextIntervalSelection.endTradeDate,
+        });
+        setChartIntervalMode(true);
+        setChartIntervalPanelOpen(true);
+        setChartIntervalNotice("");
+      }
+      return;
+    }
+
     if (dragState.moved) {
       return;
     }
@@ -5047,7 +5249,11 @@ export default function DetailsPage({
     _panelKey: string,
     event: ReactPointerEvent<HTMLDivElement>,
   ) {
-    if (chartDragRef.current?.mode === "interval-select") {
+    if (
+      chartDragRef.current?.mode === "interval-select" ||
+      chartDragRef.current?.mode === "interval-adjust-start" ||
+      chartDragRef.current?.mode === "interval-adjust-end"
+    ) {
       setChartIntervalDraftSelection(null);
     }
     clearChartPointerState(event);
@@ -5956,7 +6162,10 @@ export default function DetailsPage({
 
           <SimilaritySection
             data={stockSimilarity}
-            onSelectStock={onSelectSimilarityRow}
+            tradeDate={similarityTradeDate}
+            sourcePath={sourcePathTrimmed || null}
+            intervalRestore={similarityIntervalRestore}
+            navigationItems={similarityNavigationItems}
           />
         </div>
 

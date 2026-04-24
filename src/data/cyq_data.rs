@@ -9,7 +9,7 @@ use duckdb::{Appender, Connection, params};
 use rayon::prelude::*;
 
 use crate::data::{
-    DataReader,
+    DataReader, RowData,
     cyq::{CyqConfig, CyqSnapshot, compute_cyq_snapshots_from_row_data},
     cyq_db_path, load_trade_date_list, source_db_path,
 };
@@ -297,6 +297,38 @@ fn resolve_cyq_load_start_date(
     Ok(Some(trade_dates[load_start_index].clone()))
 }
 
+fn resolve_cyq_tail_rows_fallback_need(
+    row_data: &RowData,
+    start_date: &str,
+    end_date: &str,
+    range: usize,
+) -> Option<usize> {
+    if range == 0 {
+        return None;
+    }
+
+    let mut first_output_index = None;
+    let mut output_rows = 0usize;
+    for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
+        let trade_date = trade_date.as_str();
+        if trade_date < start_date || trade_date > end_date {
+            continue;
+        }
+
+        if first_output_index.is_none() {
+            first_output_index = Some(index);
+        }
+        output_rows += 1;
+    }
+
+    let first_output_index = first_output_index?;
+    if first_output_index + 1 >= range {
+        return None;
+    }
+
+    Some(range + output_rows.saturating_sub(1))
+}
+
 fn compute_cyq_stock(
     reader: &DataReader,
     ts_code: &str,
@@ -305,12 +337,21 @@ fn compute_cyq_stock(
     end_date: &str,
     config: CyqConfig,
 ) -> Result<ComputedCyqStock, String> {
-    let row_data = reader.load_one(ts_code, DEFAULT_ADJ_TYPE, load_start_date, end_date)?;
+    let mut row_data = reader.load_one(ts_code, DEFAULT_ADJ_TYPE, load_start_date, end_date)?;
     if row_data.trade_dates.is_empty() {
         return Ok(ComputedCyqStock {
             ts_code: ts_code.to_string(),
             snapshots: Vec::new(),
         });
+    }
+    if let Some(need_rows) =
+        resolve_cyq_tail_rows_fallback_need(&row_data, start_date, end_date, config.range)
+    {
+        let tail_row_data =
+            reader.load_one_tail_rows(ts_code, DEFAULT_ADJ_TYPE, end_date, need_rows)?;
+        if !tail_row_data.trade_dates.is_empty() {
+            row_data = tail_row_data;
+        }
     }
     if config.range > 0 && row_data.trade_dates.len() < config.range {
         return Ok(ComputedCyqStock {
@@ -1011,6 +1052,81 @@ mod tests {
             )
             .expect("count snapshot rows");
         assert_eq!(snapshot_rows, 1);
+
+        fs::remove_dir_all(source_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn rebuild_cyq_all_falls_back_to_tail_rows_when_calendar_warmup_is_sparse() {
+        let source_dir = unique_temp_source_dir();
+        fs::create_dir_all(&source_dir).expect("create temp dir");
+        fs::write(
+            trade_calendar_path(source_dir.to_str().expect("utf8 path")),
+            "cal_date\n20260331\n20260401\n20260402\n20260403\n",
+        )
+        .expect("write trade calendar");
+
+        let source_db = source_db_path(source_dir.to_str().expect("utf8 path"));
+        let conn = Connection::open(&source_db).expect("open source db");
+        conn.execute(
+            r#"
+            CREATE TABLE stock_data (
+                ts_code VARCHAR,
+                trade_date VARCHAR,
+                adj_type VARCHAR,
+                open DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                close DOUBLE,
+                pre_close DOUBLE,
+                change DOUBLE,
+                pct_chg DOUBLE,
+                vol DOUBLE,
+                amount DOUBLE,
+                tor DOUBLE
+            )
+            "#,
+            [],
+        )
+        .expect("create stock_data");
+
+        let rows = [
+            ("20260331", 9.8, 10.1, 9.7, 10.0, 1.0),
+            ("20260401", 10.0, 10.3, 9.9, 10.2, 1.2),
+            ("20260403", 10.4, 10.6, 10.2, 10.5, 2.1),
+        ];
+        for (trade_date, open, high, low, close, tor) in rows {
+            conn.execute(
+                r#"
+                INSERT INTO stock_data (
+                    ts_code, trade_date, adj_type, open, high, low, close,
+                    pre_close, change, pct_chg, vol, amount, tor
+                ) VALUES ('000001.SZ', ?, 'qfq', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                "#,
+                params![
+                    trade_date, open, high, low, close, close, 0.0_f64, 0.0_f64, 1.0_f64, 1.0_f64,
+                    tor
+                ],
+            )
+            .expect("insert source row");
+        }
+
+        let summary = rebuild_cyq_all(
+            source_dir.to_str().expect("utf8 path"),
+            CyqConfig {
+                range: 3,
+                factor: 8,
+                min_accuracy: 0.01,
+            },
+            Some("20260403"),
+            Some("20260403"),
+        )
+        .expect("rebuild cyq with sparse warmup");
+
+        assert_eq!(summary.snapshot_rows, 1);
+        assert_eq!(summary.bin_rows, 8);
+        assert_eq!(summary.start_date.as_deref(), Some("20260403"));
+        assert_eq!(summary.end_date.as_deref(), Some("20260403"));
 
         fs::remove_dir_all(source_dir).expect("cleanup temp dir");
     }
