@@ -1,5 +1,4 @@
 import {
-  startTransition,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -3505,15 +3504,13 @@ export default function DetailsPage({
           chartWindowDays: DETAIL_CHART_WINDOW_DAYS,
         });
 
-        startTransition(() => {
-          setDetailData(detail);
-          setDetailRealtimeData(null);
-          setDetailRealtimeNotice("");
-          setLookupInput(
-            detail.overview?.name?.trim() ??
-              getLookupDigits(detail.resolved_ts_code ?? nextNormalizedCode),
-          );
-        });
+        setDetailData(detail);
+        setDetailRealtimeData(null);
+        setDetailRealtimeNotice("");
+        setLookupInput(
+          detail.overview?.name?.trim() ??
+            getLookupDigits(detail.resolved_ts_code ?? nextNormalizedCode),
+        );
         return detail;
       } catch (error) {
         setDetailData(null);
@@ -4344,6 +4341,10 @@ export default function DetailsPage({
   }, [conceptText, conceptItems.length, overviewRows.length]);
 
   useEffect(() => {
+    if (pendingIntervalRestore && detailLoading) {
+      return;
+    }
+
     if (totalChartItems === 0) {
       chartDragRef.current = null;
       setVisibleBarCount(DEFAULT_VISIBLE_BARS);
@@ -4441,6 +4442,7 @@ export default function DetailsPage({
     allChartItems,
     detailData?.resolved_trade_date,
     detailData?.resolved_ts_code,
+    detailLoading,
     pendingIntervalRestore,
     resolvedTradeDate,
     totalChartItems,

@@ -52,7 +52,22 @@ fn open_source_conn(source_path: &str) -> Result<Connection, String> {
     Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))
 }
 
+fn table_exists(conn: &Connection, table_name: &str) -> Result<bool, String> {
+    let count = conn
+        .query_row(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+            [table_name],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("检查排名表结构失败: {e}"))?;
+    Ok(count > 0)
+}
+
 fn query_rank_trade_date_options_from_conn(conn: &Connection) -> Result<Vec<String>, String> {
+    if !table_exists(conn, "score_summary")? {
+        return Ok(Vec::new());
+    }
+
     let mut stmt = conn
         .prepare(
             r#"
@@ -223,6 +238,10 @@ fn calc_post_rank_return_pct(
 }
 
 pub fn get_rank_trade_date_options(source_path: String) -> Result<Vec<String>, String> {
+    if !result_db_path(&source_path).exists() {
+        return Ok(Vec::new());
+    }
+
     let conn = open_result_conn(&source_path)?;
     query_rank_trade_date_options_from_conn(&conn)
 }

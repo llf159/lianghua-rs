@@ -573,6 +573,72 @@ fn query_rank_history(
     Ok(out)
 }
 
+fn query_latest_kline_trade_date(
+    source_conn: &Connection,
+    ts_code: &str,
+) -> Result<String, String> {
+    let mut stmt = source_conn
+        .prepare(
+            r#"
+            SELECT MAX(trade_date)
+            FROM stock_data
+            WHERE ts_code = ? AND adj_type = ?
+            "#,
+        )
+        .map_err(|e| format!("预编译最新K线日期失败: {e}"))?;
+    let mut rows = stmt
+        .query(params![ts_code, DEFAULT_ADJ_TYPE])
+        .map_err(|e| format!("查询最新K线日期失败: {e}"))?;
+
+    if let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取最新K线日期失败: {e}"))?
+    {
+        let trade_date: Option<String> = row
+            .get(0)
+            .map_err(|e| format!("读取最新K线日期字段失败: {e}"))?;
+        if let Some(value) = trade_date {
+            if !value.trim().is_empty() {
+                return Ok(value);
+            }
+        }
+    }
+
+    Err(format!("{ts_code} 没有可用K线日期"))
+}
+
+fn build_basic_detail_overview(
+    source_path: &str,
+    effective_trade_date: &str,
+    ts_code: &str,
+) -> DetailOverview {
+    let name_map = build_name_map(source_path).unwrap_or_default();
+    let area_map = build_area_map(source_path).unwrap_or_default();
+    let industry_map = build_industry_map(source_path).unwrap_or_default();
+    let total_mv_map = build_total_mv_map(source_path).unwrap_or_default();
+    let circ_mv_map = build_circ_mv_map(source_path).unwrap_or_default();
+    let concept_map = build_concepts_map(source_path).unwrap_or_default();
+    let most_related_concept_map = build_most_related_concept_map(source_path).unwrap_or_default();
+
+    DetailOverview {
+        ts_code: ts_code.to_string(),
+        name: name_map.get(ts_code).cloned(),
+        board: Some(
+            board_category(ts_code, name_map.get(ts_code).map(|value| value.as_str())).to_string(),
+        ),
+        area: area_map.get(ts_code).cloned(),
+        industry: industry_map.get(ts_code).cloned(),
+        trade_date: Some(effective_trade_date.to_string()),
+        total_score: None,
+        rank: None,
+        total: None,
+        total_mv_yi: total_mv_map.get(ts_code).copied(),
+        circ_mv_yi: circ_mv_map.get(ts_code).copied(),
+        most_related_concept: most_related_concept_map.get(ts_code).cloned(),
+        concept: concept_map.get(ts_code).cloned(),
+    }
+}
+
 fn default_kline_panels() -> Vec<DetailKlinePanel> {
     vec![
         DetailKlinePanel {
@@ -1366,33 +1432,64 @@ pub fn get_stock_detail_page(
     prev_rank_days: Option<u32>,
 ) -> Result<StockDetailPageData, String> {
     let normalized_ts_code = normalize_ts_code(&ts_code);
-    let result_conn = open_result_conn(&source_path)?;
-    let effective_trade_date = resolve_trade_date(&result_conn, trade_date)?;
     let source_conn = open_source_conn(&source_path)?;
+    let result_conn = if result_db_path(&source_path).exists() {
+        open_result_conn(&source_path).ok()
+    } else {
+        None
+    };
+    let requested_trade_date = trade_date
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let effective_trade_date = if let Some(value) = requested_trade_date {
+        value
+    } else if let Some(conn) = result_conn.as_ref() {
+        resolve_trade_date(conn, None)
+            .or_else(|_| query_latest_kline_trade_date(&source_conn, &normalized_ts_code))?
+    } else {
+        query_latest_kline_trade_date(&source_conn, &normalized_ts_code)?
+    };
 
-    let overview = query_detail_overview(
-        &result_conn,
-        &source_path,
-        &effective_trade_date,
-        &normalized_ts_code,
-    )?;
+    let overview = match result_conn.as_ref() {
+        Some(conn) => query_detail_overview(
+            conn,
+            &source_path,
+            &effective_trade_date,
+            &normalized_ts_code,
+        )
+        .unwrap_or_else(|_| {
+            build_basic_detail_overview(&source_path, &effective_trade_date, &normalized_ts_code)
+        }),
+        None => {
+            build_basic_detail_overview(&source_path, &effective_trade_date, &normalized_ts_code)
+        }
+    };
 
-    let prev_ranks = query_rank_history(
-        &result_conn,
-        &normalized_ts_code,
-        prev_rank_days
-            .map(|value| value as usize)
-            .filter(|value| *value > 0),
-    )?;
-    let (stock_similarity, stock_similarity_error) = match get_stock_similarity_page_with_conn(
-        &result_conn,
-        &source_path,
-        &effective_trade_date,
-        &normalized_ts_code,
-        Some(12),
-    ) {
-        Ok(data) => (Some(data), None),
-        Err(error) => (None, Some(error)),
+    let prev_ranks = match result_conn.as_ref() {
+        Some(conn) => query_rank_history(
+            conn,
+            &normalized_ts_code,
+            prev_rank_days
+                .map(|value| value as usize)
+                .filter(|value| *value > 0),
+        )
+        .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let (stock_similarity, stock_similarity_error) = match result_conn.as_ref() {
+        Some(conn) => match get_stock_similarity_page_with_conn(
+            conn,
+            &source_path,
+            &effective_trade_date,
+            &normalized_ts_code,
+            Some(12),
+        ) {
+            Ok(data) => (Some(data), None),
+            Err(error) => (None, Some(error)),
+        },
+        None => (None, None),
     };
     let kline = query_kline(
         &source_conn,
@@ -1400,8 +1497,12 @@ pub fn get_stock_detail_page(
         chart_window_days.unwrap_or(280) as usize,
         overview.name.clone(),
     )?;
-    let trigger_snapshot =
-        load_detail_trigger_snapshot(&result_conn, &normalized_ts_code, &effective_trade_date)?;
+    let trigger_snapshot = result_conn
+        .as_ref()
+        .and_then(|conn| {
+            load_detail_trigger_snapshot(conn, &normalized_ts_code, &effective_trade_date).ok()
+        })
+        .unwrap_or_default();
     let strategy_triggers =
         build_strategy_triggers(&source_path, &effective_trade_date, &trigger_snapshot)?;
     let strategy_scenes =
