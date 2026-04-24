@@ -1,7 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 
-type ProgressWorkflowResolver = (action: string | null | undefined) => string[] | null
+export type ProgressWorkflowStep =
+  | string
+  | {
+      key: string
+      label?: string
+      phases?: string[]
+    }
+
+type ProgressWorkflowResolver = (action: string | null | undefined) => ProgressWorkflowStep[] | null
 type PhaseLabelFormatter = (phase: string | null | undefined) => string
+type ProgressSegmentState = 'done' | 'active' | 'pending'
 
 type TaskProgress = {
   phase: string
@@ -25,6 +34,57 @@ export function normalizeProgressPhase(phase: string | null | undefined) {
   }
 }
 
+function normalizeWorkflowStep(step: ProgressWorkflowStep) {
+  if (typeof step === 'string') {
+    return {
+      key: step,
+      label: null,
+      phases: [step],
+    }
+  }
+
+  const phases = step.phases && step.phases.length > 0 ? step.phases : [step.key]
+  return {
+    key: step.key,
+    label: step.label ?? null,
+    phases,
+  }
+}
+
+function getWorkflowSteps(
+  getProgressWorkflow: ProgressWorkflowResolver,
+  action: string | null | undefined,
+) {
+  return getProgressWorkflow(action)?.map(normalizeWorkflowStep) ?? null
+}
+
+function findWorkflowStep(
+  getProgressWorkflow: ProgressWorkflowResolver,
+  action: string | null | undefined,
+  phase: string | null | undefined,
+) {
+  const workflow = getWorkflowSteps(getProgressWorkflow, action)
+  const normalizedPhase = normalizeProgressPhase(phase)
+  if (!workflow || !normalizedPhase) {
+    return null
+  }
+
+  for (let stepIndex = 0; stepIndex < workflow.length; stepIndex += 1) {
+    const phaseIndex = workflow[stepIndex].phases.indexOf(normalizedPhase)
+    if (phaseIndex >= 0) {
+      return {
+        workflow,
+        step: workflow[stepIndex],
+        stepIndex,
+        phaseIndex,
+        phaseTotal: workflow[stepIndex].phases.length,
+      }
+    }
+  }
+
+  return null
+}
+
 export function calcProgressPercent(
   progress: TaskProgress | null,
   getProgressWorkflow: ProgressWorkflowResolver,
@@ -35,9 +95,10 @@ export function calcProgressPercent(
   }
 
   const normalizedPhase = normalizeProgressPhase(progress.phase)
-  const workflow = getProgressWorkflow(progress.action)
+  const workflowMatch = findWorkflowStep(getProgressWorkflow, progress.action, progress.phase)
   const doneSet = new Set(donePhases)
-  const isDone = doneSet.has(progress.phase) || (normalizedPhase ? doneSet.has(normalizedPhase) : false)
+  const isDone =
+    doneSet.has(progress.phase) || (normalizedPhase ? doneSet.has(normalizedPhase) : false)
   const localRatio =
     isDone
       ? 1
@@ -45,12 +106,15 @@ export function calcProgressPercent(
         ? Math.max(0, Math.min(1, progress.finished / progress.total))
         : null
 
-  if (workflow && normalizedPhase) {
-    const currentIndex = workflow.indexOf(normalizedPhase)
-    if (currentIndex >= 0 && localRatio !== null) {
+  if (workflowMatch) {
+    if (localRatio !== null) {
+      const stepRatio = (workflowMatch.phaseIndex + localRatio) / workflowMatch.phaseTotal
       return Math.max(
         0,
-        Math.min(100, Math.round(((currentIndex + localRatio) / workflow.length) * 100)),
+        Math.min(
+          100,
+          Math.round(((workflowMatch.stepIndex + stepRatio) / workflowMatch.workflow.length) * 100),
+        ),
       )
     }
 
@@ -73,18 +137,56 @@ export function getPhaseStep(
   phase: string | null | undefined,
   getProgressWorkflow: ProgressWorkflowResolver,
 ) {
-  const workflow = getProgressWorkflow(action)
+  const workflowMatch = findWorkflowStep(getProgressWorkflow, action, phase)
+  if (!workflowMatch) {
+    return null
+  }
+
+  return { current: workflowMatch.stepIndex + 1, total: workflowMatch.workflow.length }
+}
+
+export function getProgressTaskLabel(
+  action: string | null | undefined,
+  phase: string | null | undefined,
+  getProgressWorkflow: ProgressWorkflowResolver,
+  formatPhaseLabel: PhaseLabelFormatter,
+) {
+  const workflowMatch = findWorkflowStep(getProgressWorkflow, action, phase)
+  return workflowMatch?.step.label ?? formatPhaseLabel(phase)
+}
+
+export function getProgressSegments(
+  action: string | null | undefined,
+  phase: string | null | undefined,
+  getProgressWorkflow: ProgressWorkflowResolver,
+  donePhases: string[],
+  formatPhaseLabel: PhaseLabelFormatter,
+) {
+  const workflowMatch = findWorkflowStep(getProgressWorkflow, action, phase)
+  const workflow = workflowMatch?.workflow ?? getWorkflowSteps(getProgressWorkflow, action)
+  if (!workflow) {
+    return null
+  }
+
   const normalizedPhase = normalizeProgressPhase(phase)
-  if (!workflow || !normalizedPhase) {
-    return null
-  }
+  const doneSet = new Set(donePhases)
+  const isDone = Boolean(
+    (phase && doneSet.has(phase)) || (normalizedPhase && doneSet.has(normalizedPhase)),
+  )
 
-  const current = workflow.indexOf(normalizedPhase)
-  if (current < 0) {
-    return null
-  }
+  return workflow.map((step, index) => {
+    const state: ProgressSegmentState = isDone || (workflowMatch && index < workflowMatch.stepIndex)
+      ? 'done'
+      : workflowMatch && index === workflowMatch.stepIndex
+        ? 'active'
+        : 'pending'
 
-  return { current: current + 1, total: workflow.length }
+    return {
+      key: step.key,
+      label: step.label ?? formatPhaseLabel(step.key),
+      state,
+    }
+  })
 }
 
 export function getProgressCounterText(

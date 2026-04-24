@@ -4,6 +4,11 @@ type DataTaskProgressProps = {
   phaseStepStatText: string
   actionLabel: string
   progressPercent: number | null
+  progressSegments?: Array<{
+    key: string
+    label: string
+    state: 'done' | 'active' | 'pending'
+  }> | null
   elapsedText: string
   shownProgressPercent: number
   progressCounterText: string
@@ -18,6 +23,7 @@ export default function DataTaskProgress({
   phaseStepStatText,
   actionLabel,
   progressPercent,
+  progressSegments,
   elapsedText,
   shownProgressPercent,
   progressCounterText,
@@ -45,6 +51,21 @@ export default function DataTaskProgress({
           className={`data-download-progress-bar-fill ${progressPercent === null ? 'is-indeterminate' : ''}`}
           style={{ width: `${Math.max(shownProgressPercent, 10)}%` }}
         />
+        {progressSegments && progressSegments.length > 1 ? (
+          <div
+            className="data-download-progress-segments"
+            style={{ gridTemplateColumns: `repeat(${progressSegments.length}, minmax(0, 1fr))` }}
+          >
+            {progressSegments.map((segment) => (
+              <span
+                key={segment.key}
+                className={`data-download-progress-segment is-${segment.state}`}
+                title={segment.label}
+                aria-label={segment.label}
+              />
+            ))}
+          </div>
+        ) : null}
       </div>
       <div className="data-download-progress-stats">
         <div className="data-download-progress-stat">

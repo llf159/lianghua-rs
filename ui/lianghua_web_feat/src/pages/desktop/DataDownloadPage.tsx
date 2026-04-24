@@ -18,7 +18,10 @@ import {
   getCurrentObjectText,
   getPhaseStep,
   getProgressCounterText,
+  getProgressSegments,
+  getProgressTaskLabel,
   normalizeProgressPhase,
+  type ProgressWorkflowStep,
   useAnimatedProgressPercent,
 } from '../../shared/dataTaskProgressUtils'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
@@ -154,28 +157,45 @@ function getProgressWorkflow(action: string | null | undefined) {
         'index_download_done',
         'rebuild_concept_performance',
         'done',
-      ] as string[]
+      ] as ProgressWorkflowStep[]
     case 'incremental-download':
       return [
-        'prepare_trade_calendar',
-        'prepare_stock_list',
-        'download_pending_trade_dates',
-        'validate_pending_trade_dates',
-        'calc_incremental_indicators',
-        'recover_failed_stocks',
-        'write_db',
-        'rebuild_incremental_concept_performance',
-        'stock_download_done',
-        'prepare_index_download',
-        'download_index_bars',
-        'write_index_db',
-        'index_download_done',
+        {
+          key: 'stock_incremental',
+          label: '股票增量',
+          phases: [
+            'prepare_trade_calendar',
+            'prepare_stock_list',
+            'download_pending_trade_dates',
+            'validate_pending_trade_dates',
+            'calc_incremental_indicators',
+            'recover_failed_stocks',
+            'write_db',
+            'rebuild_incremental_concept_performance',
+            'stock_download_done',
+          ],
+        },
+        {
+          key: 'index_incremental',
+          label: '指数行情',
+          phases: [
+            'prepare_index_download',
+            'download_index_bars',
+            'write_index_db',
+            'index_download_done',
+          ],
+        },
         'rebuild_concept_performance',
         'maintain_cyq_incremental',
-        'done',
-      ] as string[]
+      ] as ProgressWorkflowStep[]
     case 'repair-missing-stocks':
-      return ['download_bars', 'retry_failed', 'write_db', 'rebuild_concept_performance', 'done'] as string[]
+      return [
+        'download_bars',
+        'retry_failed',
+        'write_db',
+        'rebuild_concept_performance',
+        'done',
+      ] as ProgressWorkflowStep[]
     case 'download-ths-concepts':
       return [
         'prepare_ths_concepts',
@@ -183,11 +203,11 @@ function getProgressWorkflow(action: string | null | undefined) {
         'retry_ths_concepts',
         'write_ths_concepts',
         'done_ths_concepts',
-      ] as string[]
+      ] as ProgressWorkflowStep[]
     case 'rebuild-concept-performance':
-      return ['rebuild_concept_performance'] as string[]
+      return ['rebuild_concept_performance'] as ProgressWorkflowStep[]
     case 'repair-concept-most-related':
-      return ['repair_concept_most_related'] as string[]
+      return ['repair_concept_most_related'] as ProgressWorkflowStep[]
     default:
       return null
   }
@@ -348,10 +368,30 @@ export default function DataDownloadPage() {
   const deferredProgress = useDeferredValue(progress)
   const resolvedIncrementalStartDate =
     inputDateToCompact(startDateInput) || status?.sourceDb.minTradeDate || '20240101'
-  const progressPercent = calcProgressPercent(deferredProgress, getProgressWorkflow, ['done', 'done_ths_concepts'])
+  const progressPercent = calcProgressPercent(deferredProgress, getProgressWorkflow, [
+    'done',
+    'done_ths_concepts',
+  ])
   const shownProgressPercent = useAnimatedProgressPercent(busyAction === 'running', progressPercent)
   const phaseStep = getPhaseStep(deferredProgress?.action, deferredProgress?.phase, getProgressWorkflow)
-  const progressCounterText = getProgressCounterText(deferredProgress, formatPhaseLabel)
+  const phaseLabel = getProgressTaskLabel(
+    deferredProgress?.action,
+    deferredProgress?.phase,
+    getProgressWorkflow,
+    formatPhaseLabel,
+  )
+  const progressCounterText = getProgressCounterText(
+    deferredProgress,
+    (phase) =>
+      getProgressTaskLabel(deferredProgress?.action, phase, getProgressWorkflow, formatPhaseLabel),
+  )
+  const progressSegments = getProgressSegments(
+    deferredProgress?.action,
+    deferredProgress?.phase,
+    getProgressWorkflow,
+    ['done', 'done_ths_concepts'],
+    formatPhaseLabel,
+  )
   const missingStockRepair = status?.missingStockRepair ?? null
   const showMainProgress = busyAction === 'running' && activeTaskSection === 'main'
   const showConceptProgress = busyAction === 'running' && activeTaskSection === 'concept'
@@ -892,11 +932,12 @@ export default function DataDownloadPage() {
 
         {showMainProgress ? (
           <DataTaskProgress
-            phaseLabel={formatPhaseLabel(deferredProgress?.phase)}
+            phaseLabel={phaseLabel}
             phaseStepPillText={phaseStep ? ` · ${phaseStep.current}/${phaseStep.total}` : ''}
             phaseStepStatText={phaseStep ? ` ${phaseStep.current}/${phaseStep.total}` : ''}
             actionLabel={deferredProgress?.actionLabel ?? (status?.plannedActionLabel ?? '下载执行中')}
             progressPercent={progressPercent}
+            progressSegments={progressSegments}
             elapsedText={formatElapsedMs(deferredProgress?.elapsedMs ?? 0)}
             shownProgressPercent={shownProgressPercent}
             progressCounterText={progressCounterText}
@@ -1018,11 +1059,12 @@ export default function DataDownloadPage() {
 
           {showConceptProgress ? (
             <DataTaskProgress
-              phaseLabel={formatPhaseLabel(deferredProgress?.phase)}
+              phaseLabel={phaseLabel}
               phaseStepPillText={phaseStep ? ` · ${phaseStep.current}/${phaseStep.total}` : ''}
               phaseStepStatText={phaseStep ? ` ${phaseStep.current}/${phaseStep.total}` : ''}
               actionLabel={deferredProgress?.actionLabel ?? '概念数据下载'}
               progressPercent={progressPercent}
+              progressSegments={progressSegments}
               elapsedText={formatElapsedMs(deferredProgress?.elapsedMs ?? 0)}
               shownProgressPercent={shownProgressPercent}
               progressCounterText={progressCounterText}
