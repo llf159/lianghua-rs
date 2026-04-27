@@ -10,6 +10,8 @@ export type ChartMarkerPosition = 'above' | 'below' | 'value'
 
 export type ChartMarkerShape = 'dot' | 'triangle_up' | 'triangle_down' | 'flag'
 
+export type ChartTooltipFormat = 'number' | 'percent' | 'ratio'
+
 export type ChartColorRuleDraft = {
   when: string
   color: string
@@ -38,6 +40,13 @@ export type ChartMarkerDraft = {
   text?: string | null
 }
 
+export type ChartTooltipDraft = {
+  key: string
+  label?: string | null
+  expr: string
+  format?: ChartTooltipFormat | null
+}
+
 export type ChartPanelDraft = {
   key: string
   label: string
@@ -45,6 +54,7 @@ export type ChartPanelDraft = {
   kind: ChartPanelKind
   series?: ChartSeriesDraft[] | null
   marker?: ChartMarkerDraft[] | null
+  tooltip?: ChartTooltipDraft[] | null
 }
 
 export type ChartIndicatorConfigDraft = {
@@ -56,6 +66,7 @@ export type ChartIndicatorSettingsSummary = {
   panelCount: number
   seriesCount: number
   markerCount: number
+  tooltipCount: number
   databaseIndicatorColumns: string[]
 }
 

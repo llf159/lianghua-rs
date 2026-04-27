@@ -17,6 +17,8 @@ use crate::{
 };
 
 pub const CHART_INDICATORS_FILE_NAME: &str = "chart_indicators.toml";
+const CHART_INDICATOR_INJECTED_RUNTIME_KEYS: [&str; 3] = ["RANK", "ZHANG", "TOTAL_MV_YI"];
+const CHART_INDICATOR_RUNTIME_ALIASES: [(&str, &str); 1] = [("TOTAL_MV_YI", "TOTAL_MV")];
 
 static CHART_INDICATOR_COMPILE_CACHE: OnceLock<
     Mutex<HashMap<ChartIndicatorCacheKey, CompiledChartIndicatorConfig>>,
@@ -39,6 +41,8 @@ pub struct ChartPanelConfig {
     pub series: Vec<ChartSeriesConfig>,
     #[serde(default, rename = "marker")]
     pub markers: Vec<ChartMarkerConfig>,
+    #[serde(default, rename = "tooltip")]
+    pub tooltips: Vec<ChartTooltipConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -68,6 +72,14 @@ pub struct ChartMarkerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ChartTooltipConfig {
+    pub key: String,
+    pub label: Option<String>,
+    pub expr: String,
+    pub format: Option<ChartTooltipFormat>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ChartColorRule {
     pub when: String,
     pub color: String,
@@ -87,6 +99,7 @@ pub struct CompiledChartPanel {
     pub kind: ChartPanelKind,
     pub series: Vec<CompiledChartSeries>,
     pub markers: Vec<CompiledChartMarker>,
+    pub tooltips: Vec<CompiledChartTooltip>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +117,14 @@ pub struct CompiledChartMarker {
     pub when_expr: Stmts,
     pub y_key: Option<String>,
     pub render: ChartMarkerRenderConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompiledChartTooltip {
+    pub key: String,
+    pub value_key: String,
+    pub expr: Stmts,
+    pub render: ChartTooltipRenderConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +151,12 @@ pub struct ChartMarkerRenderConfig {
     pub shape: Option<ChartMarkerShape>,
     pub color: Option<String>,
     pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChartTooltipRenderConfig {
+    pub label: Option<String>,
+    pub format: Option<ChartTooltipFormat>,
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +221,14 @@ pub enum ChartMarkerShape {
     Flag,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChartTooltipFormat {
+    Number,
+    Percent,
+    Ratio,
+}
+
 pub fn chart_indicator_config_path(source_path: impl AsRef<Path>) -> PathBuf {
     source_path.as_ref().join(CHART_INDICATORS_FILE_NAME)
 }
@@ -208,6 +243,44 @@ pub fn default_chart_indicator_config() -> ChartIndicatorConfig {
             kind: ChartPanelKind::Candles,
             series: Vec::new(),
             markers: Vec::new(),
+            tooltips: vec![
+                ChartTooltipConfig {
+                    key: "change_pct".to_string(),
+                    label: Some("涨幅".to_string()),
+                    expr: "DIV(C - REF(C, 1), REF(C, 1)) * 100".to_string(),
+                    format: Some(ChartTooltipFormat::Percent),
+                },
+                ChartTooltipConfig {
+                    key: "turnover".to_string(),
+                    label: Some("换手".to_string()),
+                    expr: "TOR".to_string(),
+                    format: Some(ChartTooltipFormat::Percent),
+                },
+                ChartTooltipConfig {
+                    key: "close".to_string(),
+                    label: Some("C".to_string()),
+                    expr: "C".to_string(),
+                    format: Some(ChartTooltipFormat::Number),
+                },
+                ChartTooltipConfig {
+                    key: "open".to_string(),
+                    label: Some("O".to_string()),
+                    expr: "O".to_string(),
+                    format: Some(ChartTooltipFormat::Number),
+                },
+                ChartTooltipConfig {
+                    key: "high".to_string(),
+                    label: Some("H".to_string()),
+                    expr: "H".to_string(),
+                    format: Some(ChartTooltipFormat::Number),
+                },
+                ChartTooltipConfig {
+                    key: "low".to_string(),
+                    label: Some("L".to_string()),
+                    expr: "L".to_string(),
+                    format: Some(ChartTooltipFormat::Number),
+                },
+            ],
         }],
     }
 }
@@ -338,6 +411,7 @@ pub fn validate_chart_indicator_config(config: &ChartIndicatorConfig) -> Result<
         }
 
         let mut panel_marker_keys = HashSet::new();
+        let mut panel_tooltip_keys = HashSet::new();
         for series in &panel.series {
             validate_key("series.key", &series.key)?;
             if !series_keys.insert(series.key.as_str()) {
@@ -373,6 +447,22 @@ pub fn validate_chart_indicator_config(config: &ChartIndicatorConfig) -> Result<
                     &format!("panel.{}.marker.{}.color", panel.key, marker.key),
                     color,
                 )?;
+            }
+        }
+
+        for tooltip in &panel.tooltips {
+            validate_key("tooltip.key", &tooltip.key)?;
+            if !panel_tooltip_keys.insert(tooltip.key.as_str()) {
+                return Err(format!(
+                    "duplicate tooltip.key in panel {}: {}",
+                    panel.key, tooltip.key
+                ));
+            }
+            if tooltip.expr.trim().is_empty() {
+                return Err(format!(
+                    "panel.{}.tooltip.{}.expr must not be empty",
+                    panel.key, tooltip.key
+                ));
             }
         }
 
@@ -501,6 +591,31 @@ pub fn compile_chart_indicator_config(
             });
         }
 
+        let mut compiled_tooltips = Vec::with_capacity(panel.tooltips.len());
+        for tooltip in &panel.tooltips {
+            let expr = compile_expression(
+                &tooltip.expr,
+                &format!("panel.{}.tooltip.{}.expr", panel.key, tooltip.key),
+            )?;
+            collect_database_dependencies(
+                &expr,
+                &format!("panel.{}.tooltip.{}.expr", panel.key, tooltip.key),
+                &all_series_keys,
+                &available_series_keys,
+                db_column_lookup.as_ref(),
+                &mut database_indicator_columns,
+            )?;
+            compiled_tooltips.push(CompiledChartTooltip {
+                key: tooltip.key.clone(),
+                value_key: format!("__tooltip_{}_{}", panel.key, tooltip.key),
+                expr,
+                render: ChartTooltipRenderConfig {
+                    label: tooltip.label.clone(),
+                    format: tooltip.format,
+                },
+            });
+        }
+
         compiled_panels.push(CompiledChartPanel {
             key: panel.key.clone(),
             label: panel.label.clone(),
@@ -508,6 +623,7 @@ pub fn compile_chart_indicator_config(
             kind: panel.kind,
             series: compiled_series,
             markers: compiled_markers,
+            tooltips: compiled_tooltips,
         });
     }
 
@@ -583,6 +699,25 @@ pub fn execute_chart_indicator_config(
             if let Some(y_key) = marker.y_key.as_deref() {
                 expose_marker_y_values(y_key, &runtime, series_len, &mut values)?;
             }
+        }
+
+        for tooltip in &panel.tooltips {
+            let value = runtime.eval_program(&tooltip.expr).map_err(|error| {
+                format!(
+                    "chart tooltip {} compute failed: {}",
+                    tooltip.value_key, error.msg
+                )
+            })?;
+            let num_series = Value::as_num_series(&value, series_len).map_err(|error| {
+                format!(
+                    "chart tooltip {} result is not numeric series: {}",
+                    tooltip.value_key, error.msg
+                )
+            })?;
+            values.insert(
+                tooltip.value_key.clone(),
+                num_series_to_json_values(&num_series),
+            );
         }
     }
 
@@ -721,6 +856,17 @@ fn collect_database_dependencies(
         if is_base_runtime_key(&normalized) {
             continue;
         }
+        if let Some(db_dependency) = injected_runtime_db_dependency(&normalized) {
+            if let Some(db_column_lookup) = db_column_lookup {
+                if let Some(column) = db_column_lookup.get(db_dependency) {
+                    database_indicator_columns.insert(column.clone());
+                }
+            }
+            continue;
+        }
+        if is_injected_runtime_key(&normalized) {
+            continue;
+        }
         if available_series_keys.contains(&normalized) {
             continue;
         }
@@ -755,6 +901,17 @@ fn collect_marker_y_dependency(
     validate_key(path, y_key)?;
     let normalized = normalize_identifier(y_key);
     if is_base_runtime_key(&normalized) || available_series_keys.contains(&normalized) {
+        return Ok(());
+    }
+    if let Some(db_dependency) = injected_runtime_db_dependency(&normalized) {
+        if let Some(db_column_lookup) = db_column_lookup {
+            if let Some(column) = db_column_lookup.get(db_dependency) {
+                database_indicator_columns.insert(column.clone());
+            }
+        }
+        return Ok(());
+    }
+    if is_injected_runtime_key(&normalized) {
         return Ok(());
     }
     if let Some(db_column_lookup) = db_column_lookup {
@@ -879,6 +1036,16 @@ fn validate_expr_functions(expr: &Expr, path: &str) -> Result<(), String> {
 
 fn normalize_identifier(identifier: &str) -> String {
     identifier.trim().to_ascii_uppercase()
+}
+
+fn is_injected_runtime_key(key: &str) -> bool {
+    CHART_INDICATOR_INJECTED_RUNTIME_KEYS.contains(&key)
+}
+
+fn injected_runtime_db_dependency(key: &str) -> Option<&'static str> {
+    CHART_INDICATOR_RUNTIME_ALIASES
+        .iter()
+        .find_map(|(alias, dependency)| (*alias == key).then_some(*dependency))
 }
 
 fn is_expression_function(name: &str) -> bool {
@@ -1016,6 +1183,7 @@ mod tests {
         assert_eq!(config.panels[0].role, ChartPanelRole::Main);
         assert_eq!(config.panels[0].kind, ChartPanelKind::Candles);
         assert!(config.panels[0].series.is_empty());
+        assert_eq!(config.panels[0].tooltips.len(), 6);
     }
 
     #[test]
@@ -1028,6 +1196,42 @@ key = "price"
 label = "主K"
 role = "main"
 kind = "candles"
+
+[[panel.tooltip]]
+key = "change_pct"
+label = "涨幅"
+expr = "DIV(C - REF(C, 1), REF(C, 1)) * 100"
+format = "percent"
+
+[[panel.tooltip]]
+key = "turnover"
+label = "换手"
+expr = "TOR"
+format = "percent"
+
+[[panel.tooltip]]
+key = "close"
+label = "C"
+expr = "C"
+format = "number"
+
+[[panel.tooltip]]
+key = "open"
+label = "O"
+expr = "O"
+format = "number"
+
+[[panel.tooltip]]
+key = "high"
+label = "H"
+expr = "H"
+format = "number"
+
+[[panel.tooltip]]
+key = "low"
+label = "L"
+expr = "L"
+format = "number"
 "##;
 
         let config = parse_chart_indicator_config(example).expect("example config should parse");
@@ -1046,6 +1250,7 @@ kind = "candles"
         assert!(compiled.database_indicator_columns.is_empty());
         assert_eq!(compiled.panels.len(), 1);
         assert!(compiled.panels[0].series.is_empty());
+        assert_eq!(compiled.panels[0].tooltips.len(), 6);
     }
 
     #[test]
@@ -1183,6 +1388,94 @@ shape = "flag"
             execution.values.get("__marker_price_flag_j"),
             Some(&vec![serde_json::json!(false), serde_json::json!(true)])
         );
+    }
+
+    #[test]
+    fn tooltip_expr_executes_as_internal_value() {
+        let config = parse_chart_indicator_config(
+            r##"
+version = 1
+
+[[panel]]
+key = "price"
+label = "Price"
+role = "main"
+kind = "candles"
+
+[[panel]]
+key = "volume"
+label = "Volume"
+role = "sub"
+kind = "bar"
+
+[[panel.series]]
+key = "vol"
+expr = "V"
+kind = "bar"
+
+[[panel.tooltip]]
+key = "vol_ratio"
+label = "量比"
+expr = "DIV(V, REF(V, 1))"
+format = "ratio"
+"##,
+        )
+        .expect("config should parse");
+        let compiled = compile_chart_indicator_config(&config, Some(&HashSet::new()))
+            .expect("tooltip should compile");
+
+        assert_eq!(compiled.panels[1].tooltips[0].value_key, "__tooltip_volume_vol_ratio");
+
+        let execution = execute_chart_indicator_config(
+            &compiled,
+            RowData {
+                trade_dates: vec!["20240101".to_string(), "20240102".to_string()],
+                cols: HashMap::from([("V".to_string(), vec![Some(100.0), Some(150.0)])]),
+            },
+        )
+        .expect("tooltip should execute");
+
+        assert_eq!(
+            execution.values.get("__tooltip_volume_vol_ratio"),
+            Some(&vec![serde_json::Value::Null, serde_json::json!(1.5)])
+        );
+    }
+
+    #[test]
+    fn injected_runtime_keys_compile_without_database_columns() {
+        let config = parse_chart_indicator_config(
+            r##"
+version = 1
+
+[[panel]]
+key = "price"
+label = "Price"
+role = "main"
+kind = "candles"
+
+[[panel.series]]
+key = "rank_line"
+expr = "RANK"
+kind = "line"
+
+[[panel.tooltip]]
+key = "limit_up"
+label = "涨停幅"
+expr = "ZHANG * 100"
+format = "percent"
+
+[[panel.tooltip]]
+key = "mv"
+label = "总市值"
+expr = "TOTAL_MV_YI"
+format = "number"
+"##,
+        )
+        .expect("config should parse");
+        let compiled = compile_chart_indicator_config(&config, Some(&HashSet::new()))
+            .expect("injected runtime fields should compile");
+
+        assert!(compiled.database_indicator_columns.is_empty());
     }
 
     #[test]

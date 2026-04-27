@@ -24,6 +24,7 @@ import {
   type DetailKlineRow,
   type DetailKlinePayload,
   type DetailChartSeries,
+  type DetailChartTooltip,
   type DetailOverview,
   type DetailPrevRankRow,
   type DetailSceneTriggerRow,
@@ -70,7 +71,6 @@ import {
 } from "../../shared/conceptExclusions";
 import {
   readStoredDetailsNavLongPressIntervalSeconds,
-  readStoredChartRankMarkerThreshold,
   readStoredChartIndicatorWidthRatio,
   readStoredChartMainWidthRatio,
 } from "../../shared/chartSettings";
@@ -172,6 +172,15 @@ type ChartPointerSnapshot = {
   cursorXPercent: number;
   cursorYPercent: number;
   visibleIndex: number;
+};
+
+type ChartMarkerOverlayPoint = {
+  key: string;
+  leftPercent: number;
+  topPercent: number;
+  shape: DetailChartMarker["shape"];
+  color: string;
+  text?: string | null;
 };
 
 type ChartDragState = {
@@ -358,6 +367,10 @@ function getPanelSeries(panel: DetailKlinePanel): DetailChartSeries[] {
   return panel.series ?? [];
 }
 
+function getPanelTooltips(panel: DetailKlinePanel): DetailChartTooltip[] {
+  return panel.tooltips ?? [];
+}
+
 function findPanelSeries(panel: DetailKlinePanel, key: string) {
   return getPanelSeries(panel).find((series) => series.key === key) ?? null;
 }
@@ -365,6 +378,26 @@ function findPanelSeries(panel: DetailKlinePanel, key: string) {
 function formatSeriesLabel(key: string, series?: DetailChartSeries | null) {
   const label = series?.label?.trim();
   return label ? label : getFallbackSeriesLabel(key);
+}
+
+function formatTooltipLabel(tooltip: DetailChartTooltip) {
+  const label = tooltip.label?.trim();
+  return label ? label : getFallbackSeriesLabel(tooltip.key);
+}
+
+function formatTooltipValue(row: DetailKlineRow, tooltip: DetailChartTooltip) {
+  const value = row[tooltip.value_key];
+  if (tooltip.format === "percent") {
+    return typeof value === "number" && Number.isFinite(value)
+      ? `${value.toFixed(2)}%`
+      : "--";
+  }
+  if (tooltip.format === "ratio") {
+    return typeof value === "number" && Number.isFinite(value)
+      ? value.toFixed(2)
+      : "--";
+  }
+  return formatFieldValue(value);
 }
 
 function getSeriesColor(seriesIndex: number, series?: DetailChartSeries | null) {
@@ -848,84 +881,6 @@ function findTurnoverNumber(item: DetailKlineRow | null) {
   return null;
 }
 
-function findTurnoverValue(item: DetailKlineRow | null) {
-  if (!item) {
-    return null;
-  }
-
-  for (const key of TURNOVER_VALUE_KEYS) {
-    const value = item[key];
-    if (typeof value === "number" && Number.isFinite(value)) {
-      return `${value.toFixed(2)}%`;
-    }
-    if (typeof value === "string" && value.trim() !== "") {
-      return value;
-    }
-  }
-
-  return null;
-}
-
-function formatRatioValue(value: number | null) {
-  if (value === null || !Number.isFinite(value)) {
-    return "--";
-  }
-  return value.toFixed(2);
-}
-
-function buildRankLookup(
-  overview: DetailOverview | null | undefined,
-  prevRanks: Array<{
-    trade_date: string;
-    rank?: number | null;
-    total?: number | null;
-  }>,
-) {
-  const lookup = new Map<string, string>();
-
-  if (overview?.trade_date) {
-    const currentRankValue = buildRankValue(overview.rank, overview.total);
-    if (currentRankValue !== "--") {
-      lookup.set(overview.trade_date, currentRankValue);
-    }
-  }
-
-  prevRanks.forEach((row) => {
-    const rankValue = buildRankValue(row.rank, row.total);
-    if (rankValue !== "--") {
-      lookup.set(row.trade_date, rankValue);
-    }
-  });
-
-  return lookup;
-}
-
-function buildRankNumberLookup(
-  overview: DetailOverview | null | undefined,
-  prevRanks: Array<{
-    trade_date: string;
-    rank?: number | null;
-  }>,
-) {
-  const lookup = new Map<string, number>();
-
-  if (
-    overview?.trade_date &&
-    typeof overview.rank === "number" &&
-    Number.isFinite(overview.rank)
-  ) {
-    lookup.set(overview.trade_date, overview.rank);
-  }
-
-  prevRanks.forEach((row) => {
-    if (typeof row.rank === "number" && Number.isFinite(row.rank)) {
-      lookup.set(row.trade_date, row.rank);
-    }
-  });
-
-  return lookup;
-}
-
 function findCyqSnapshotForTradeDate(
   snapshots: DetailCyqSnapshot[],
   tradeDate: string | null,
@@ -1178,127 +1133,62 @@ function buildSceneOverviewItems(
 function buildDetailTooltipRows(
   panel: DetailKlinePanel,
   item: DetailKlineRow | null,
-  absoluteIndex: number | null,
-  allItems: DetailKlineRow[],
-  rankLookup: Map<string, string>,
 ): TooltipSection[] {
   if (!item) {
     return [];
   }
 
+  const tooltipRows = getPanelTooltips(panel)
+    .map((tooltip) => ({
+      label: formatTooltipLabel(tooltip),
+      value: formatTooltipValue(item, tooltip),
+    }))
+    .filter((row) => row.value !== "--");
+  const shownLabels = new Set(tooltipRows.map((row) => row.label));
+  const drawingRows = buildPanelDrawingTooltipRows(panel, item).filter(
+    (row) => !shownLabels.has(row.label),
+  );
+
+  const sections: TooltipSection[] = [];
+  if (tooltipRows.length > 0) {
+    sections.push({
+      key: `${panel.key}-tooltip`,
+      rows: tooltipRows,
+    });
+  }
+  if (drawingRows.length > 0) {
+    sections.push({
+      key: `${panel.key}-drawing`,
+      variant: isMainChartPanel(panel) ? "ohlc" : "default",
+      rows: drawingRows,
+    });
+  }
+
+  return sections;
+}
+
+function buildPanelDrawingTooltipRows(
+  panel: DetailKlinePanel,
+  item: DetailKlineRow,
+): FieldRow[] {
+  const rows: FieldRow[] = [];
   if (isMainChartPanel(panel)) {
-    const prevClose =
-      absoluteIndex !== null && absoluteIndex > 0
-        ? getNumericField(allItems[absoluteIndex - 1], "close")
-        : null;
-    const currentClose = getNumericField(item, "close");
-    const changePct =
-      prevClose !== null && prevClose !== 0 && currentClose !== null
-        ? ((currentClose - prevClose) / prevClose) * 100
-        : null;
-    const rows: FieldRow[] = [
-      { label: "涨幅", value: formatPercentValue(changePct) },
-      { label: "换手", value: findTurnoverValue(item) ?? "--" },
-    ];
-
-    const rankValue = rankLookup.get(item.trade_date);
-    if (rankValue) {
-      rows.push({ label: "排名", value: rankValue });
-    }
-
-    const overlayRows = getPanelSeries(panel)
-      .map((series) => ({
-        label: formatSeriesLabel(series.key, series),
-        value: formatFieldValue(item[series.key]),
-      }))
-      .filter((row) => row.value !== "--");
-
-    return [
-      {
-        key: `${panel.key}-summary`,
-        rows,
-      },
-      {
-        key: `${panel.key}-ohlc`,
-        variant: "ohlc",
-        rows: [
-          { label: "C", value: formatFieldValue(item.close) },
-          { label: "O", value: formatFieldValue(item.open) },
-          { label: "H", value: formatFieldValue(item.high) },
-          { label: "L", value: formatFieldValue(item.low) },
-        ],
-      },
-      ...(overlayRows.length > 0
-        ? [
-            {
-              key: `${panel.key}-overlay`,
-              rows: overlayRows,
-            } satisfies TooltipSection,
-          ]
-        : []),
-    ];
+    rows.push(
+      { label: "C", value: formatFieldValue(item.close) },
+      { label: "O", value: formatFieldValue(item.open) },
+      { label: "H", value: formatFieldValue(item.high) },
+      { label: "L", value: formatFieldValue(item.low) },
+    );
   }
 
-  const kind = resolveChartPanelRenderKind(panel);
-  if (kind === "bar") {
-    const prevVol =
-      absoluteIndex !== null && absoluteIndex > 0
-        ? getNumericField(allItems[absoluteIndex - 1], "vol")
-        : null;
-    const currentVol = getNumericField(item, "vol");
-    const volumeRatio =
-      prevVol !== null && prevVol !== 0 && currentVol !== null
-        ? currentVol / prevVol
-        : null;
-    const overlayRows = getPanelSeries(panel)
-      .filter((series) => series.kind === "line")
-      .map((series) => ({
-        label: formatSeriesLabel(series.key, series),
-        value: formatFieldValue(item[series.key]),
-      }))
-      .filter((row) => row.value !== "--");
-
-    return [
-      {
-        key: `${panel.key}-raw`,
-        rows: [
-          { label: "量", value: formatFieldValue(item.vol) },
-          { label: "量比", value: formatRatioValue(volumeRatio) },
-          ...overlayRows,
-        ],
-      },
-    ];
+  for (const series of getPanelSeries(panel)) {
+    rows.push({
+      label: formatSeriesLabel(series.key, series),
+      value: formatFieldValue(item[series.key]),
+    });
   }
 
-  if (kind === "brick") {
-    const brickKey =
-      getPanelSeries(panel).find((series) => series.kind === "brick")?.key ??
-      "brick";
-    const prevBrick =
-      absoluteIndex !== null && absoluteIndex > 0
-        ? getNumericField(allItems[absoluteIndex - 1], brickKey)
-        : null;
-
-    return [
-      {
-        key: `${panel.key}-raw`,
-        rows: [
-          { label: "开", value: formatFieldValue(prevBrick) },
-          { label: "收", value: formatFieldValue(item[brickKey]) },
-        ],
-      },
-    ];
-  }
-
-  return [
-    {
-      key: `${panel.key}-raw`,
-      rows: getPanelSeries(panel).map((series) => ({
-        label: formatSeriesLabel(series.key, series),
-        value: formatFieldValue(item[series.key]),
-      })),
-    },
-  ];
+  return rows.filter((row) => row.value !== "--");
 }
 
 function buildIntervalStatsSections(
@@ -1385,6 +1275,44 @@ function buildDefaultPanels() {
       role: "main",
       kind: "candles",
       series: [],
+      tooltips: [
+        {
+          key: "change_pct",
+          label: "涨幅",
+          value_key: "__tooltip_price_change_pct",
+          format: "percent",
+        },
+        {
+          key: "turnover",
+          label: "换手",
+          value_key: "__tooltip_price_turnover",
+          format: "percent",
+        },
+        {
+          key: "close",
+          label: "C",
+          value_key: "__tooltip_price_close",
+          format: "number",
+        },
+        {
+          key: "open",
+          label: "O",
+          value_key: "__tooltip_price_open",
+          format: "number",
+        },
+        {
+          key: "high",
+          label: "H",
+          value_key: "__tooltip_price_high",
+          format: "number",
+        },
+        {
+          key: "low",
+          label: "L",
+          value_key: "__tooltip_price_low",
+          format: "number",
+        },
+      ],
     },
   ] satisfies DetailKlinePanel[];
 }
@@ -1487,7 +1415,9 @@ function formatAxisValue(value: number) {
 
 function formatTradeDateLabel(value: string) {
   if (/^\d{8}$/.test(value)) {
-    return `${value.slice(2, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+    const month = value.slice(4, 6);
+    const day = value.slice(6, 8);
+    return month === "01" ? `${value.slice(2, 4)}-${month}-${day}` : `${month}-${day}`;
   }
   return value;
 }
@@ -1849,16 +1779,16 @@ function detectChartIntervalDragTarget(
     CHART_INTERVAL_EDGE_HIT_SLOP_PX *
     (selection.startAbsoluteIndex === selection.endAbsoluteIndex ? 1.5 : 1);
 
-  if (leftDistance > edgeHitSlop && rightDistance > edgeHitSlop) {
-    return null;
-  }
-
   if (leftDistance <= edgeHitSlop && rightDistance <= edgeHitSlop) {
     return clientX <= (leftClientX + rightClientX) / 2 ? "start" : "end";
   }
 
-  if (leftDistance <= edgeHitSlop || rightDistance <= edgeHitSlop) {
-    return leftDistance < rightDistance ? "start" : "end";
+  if (leftDistance <= edgeHitSlop) {
+    return "start";
+  }
+
+  if (rightDistance <= edgeHitSlop) {
+    return "end";
   }
 
   if (clientX >= leftClientX && clientX <= rightClientX) {
@@ -1953,12 +1883,12 @@ function getMarkerYValue(row: DetailKlineRow, marker: DetailChartMarker) {
   return getNumericField(row, mappedKey);
 }
 
-function buildChartMarkerNodes(
+function buildChartMarkerOverlayPoints(
   panel: DetailKlinePanel,
   items: DetailKlineRow[],
   xAt: (itemIndex: number) => number,
   yAt: (value: number) => number,
-) {
+): ChartMarkerOverlayPoint[] {
   const markers = panel.markers ?? [];
   if (markers.length === 0) {
     return [];
@@ -1979,64 +1909,47 @@ function buildChartMarkerNodes(
       const position = marker.position ?? "value";
       const y =
         position === "above"
-          ? baseY - 10
+          ? CHART_MARGIN.top + 10
           : position === "below"
-            ? baseY + 10
+            ? CHART_VIEWBOX_HEIGHT - CHART_MARGIN.bottom - 10
             : baseY;
       const color = marker.color ?? CANDLE_UP_COLOR;
       const key = `${panel.key}-${marker.key}-${row.trade_date}`;
 
-      if (marker.shape === "triangle_up") {
-        return [
-          <path
-            className="details-chart-marker"
-            key={key}
-            d={`M ${x} ${y - 5} L ${x - 5} ${y + 5} L ${x + 5} ${y + 5} Z`}
-            fill={color}
-          />,
-        ];
-      }
-      if (marker.shape === "triangle_down") {
-        return [
-          <path
-            className="details-chart-marker"
-            key={key}
-            d={`M ${x} ${y + 5} L ${x - 5} ${y - 5} L ${x + 5} ${y - 5} Z`}
-            fill={color}
-          />,
-        ];
-      }
-      if (marker.shape === "flag" || marker.text) {
-        return [
-          <g className="details-chart-marker" key={key}>
-            <circle cx={x} cy={y} r={5} fill={color} />
-            {marker.text ? (
-              <text
-                x={x}
-                y={y - 8}
-                fill={color}
-                fontSize="11"
-                fontWeight="700"
-                textAnchor="middle"
-              >
-                {marker.text}
-              </text>
-            ) : null}
-          </g>,
-        ];
-      }
-
       return [
-        <circle
-          className="details-chart-marker"
-          key={key}
-          cx={x}
-          cy={y}
-          r={4}
-          fill={color}
-        />,
+        {
+          key,
+          leftPercent: (x / CHART_VIEWBOX_WIDTH) * 100,
+          topPercent: (y / CHART_VIEWBOX_HEIGHT) * 100,
+          shape: marker.shape,
+          color,
+          text: marker.text,
+        },
       ];
     }),
+  );
+}
+
+function renderChartMarkerOverlayPoint(point: ChartMarkerOverlayPoint) {
+  const shape = point.shape ?? "dot";
+  return (
+    <span
+      className={[
+        "details-chart-marker",
+        `details-chart-marker-${shape}`,
+        point.text ? "details-chart-marker-with-text" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      key={point.key}
+      style={{
+        left: `${point.leftPercent}%`,
+        top: `${point.topPercent}%`,
+        "--details-chart-marker-color": point.color,
+      } as CSSProperties}
+    >
+      {point.text ? <span>{point.text}</span> : null}
+    </span>
   );
 }
 
@@ -2052,9 +1965,6 @@ function renderChartPanel(
   effectiveVisibleStart: number,
   allItems: DetailKlineRow[],
   referenceTradeDate: string | null,
-  rankLookup: Map<string, string>,
-  rankMarkerThreshold: number,
-  rankNumberLookup: Map<string, number>,
   onChartPointerDown: (
     panelKey: string,
     event: ReactPointerEvent<HTMLDivElement>,
@@ -2123,10 +2033,6 @@ function renderChartPanel(
     chartFocus.absoluteIndex < effectiveVisibleStart + items.length
       ? chartFocus.absoluteIndex - effectiveVisibleStart
       : null;
-  const activeAbsoluteIndex =
-    activeVisibleIndex !== null
-      ? effectiveVisibleStart + activeVisibleIndex
-      : null;
   const isActivePanel = chartFocus?.panelKey === panel.key;
   const focusXPercent =
     activeVisibleIndex !== null
@@ -2182,27 +2088,7 @@ function renderChartPanel(
       ? buildDetailTooltipRows(
           panel,
           items[activeVisibleIndex] ?? null,
-          activeAbsoluteIndex,
-          allItems,
-          rankLookup,
         )
-      : [];
-  const rankMarkerPoints =
-    isInteractivePricePanel(panel) && rankMarkerThreshold > 0
-      ? items.flatMap((row, itemIndex) => {
-          const rankValue = rankNumberLookup.get(row.trade_date);
-          if (rankValue === undefined || rankValue > rankMarkerThreshold) {
-            return [];
-          }
-
-          return [
-            {
-              key: `${panel.key}-rank-marker-${row.trade_date}`,
-              leftPercent: (xAt(itemIndex) / CHART_VIEWBOX_WIDTH) * 100,
-              title: `${row.trade_date} 排名 #${Math.round(rankValue)}`,
-            },
-          ];
-        })
       : [];
   const headerRuntimeRow =
     isActivePanel && activeVisibleIndex !== null
@@ -2213,6 +2099,7 @@ function renderChartPanel(
   let zeroY: number | null = null;
   let svgContent: ReactNode = null;
   let cyqSvgContent: ReactNode = null;
+  let markerOverlayPoints: ChartMarkerOverlayPoint[] = [];
 
   if (kind === "candles") {
     const values = items.flatMap((row) => {
@@ -2385,8 +2272,8 @@ function renderChartPanel(
         }
       }
 
-      const markerNodes = buildChartMarkerNodes(panel, items, xAt, yAt);
-      svgContent = [...candleNodes, ...overlayNodes, ...markerNodes, cyqSvgContent];
+      markerOverlayPoints = buildChartMarkerOverlayPoints(panel, items, xAt, yAt);
+      svgContent = [...candleNodes, ...overlayNodes, cyqSvgContent];
     }
   } else if (kind === "line") {
     const values = items.flatMap((row) =>
@@ -2424,8 +2311,8 @@ function renderChartPanel(
           </g>
         );
       });
-      const markerNodes = buildChartMarkerNodes(panel, items, xAt, yAt);
-      svgContent = [...lineNodes, ...markerNodes];
+      markerOverlayPoints = buildChartMarkerOverlayPoints(panel, items, xAt, yAt);
+      svgContent = lineNodes;
     }
   } else if (kind === "bar") {
     const primaryBarSeries = panelSeries.find((series) => series.kind === "bar") ?? null;
@@ -2511,8 +2398,8 @@ function renderChartPanel(
           )),
         );
 
-      const markerNodes = buildChartMarkerNodes(panel, items, xAt, yAt);
-      svgContent = [...barNodes, ...overlayNodes, ...markerNodes];
+      markerOverlayPoints = buildChartMarkerOverlayPoints(panel, items, xAt, yAt);
+      svgContent = [...barNodes, ...overlayNodes];
     }
   } else if (kind === "brick") {
     const brickSeries = panelSeries.find((series) => series.kind === "brick") ?? null;
@@ -2600,8 +2487,8 @@ function renderChartPanel(
           </g>
         );
       });
-      const markerNodes = buildChartMarkerNodes(panel, items, xAt, yAt);
-      svgContent = [...brickNodes, ...markerNodes];
+      markerOverlayPoints = buildChartMarkerOverlayPoints(panel, items, xAt, yAt);
+      svgContent = brickNodes;
     }
   }
 
@@ -2745,19 +2632,6 @@ function renderChartPanel(
         )}
 
         <div className="details-chart-overlay-layer" aria-hidden="true">
-          {rankMarkerPoints.length > 0 ? (
-            <div className="details-chart-rank-marker-layer">
-              {rankMarkerPoints.map((point) => (
-                <span
-                  className="details-chart-rank-marker-dot"
-                  key={point.key}
-                  style={{ left: `${point.leftPercent}%` }}
-                  title={point.title}
-                />
-              ))}
-            </div>
-          ) : null}
-
           {yAxisLabels.length > 0 ? (
             <div className="details-chart-axis-layer details-chart-axis-layer-y">
               {yAxisLabels.map((label) => (
@@ -2783,6 +2657,12 @@ function renderChartPanel(
                   {label.value}
                 </span>
               ))}
+            </div>
+          ) : null}
+
+          {markerOverlayPoints.length > 0 ? (
+            <div className="details-chart-marker-layer">
+              {markerOverlayPoints.map(renderChartMarkerOverlayPoint)}
             </div>
           ) : null}
 
@@ -3532,9 +3412,6 @@ export default function DetailsPage({
   );
   const [chartIndicatorWidthRatio, setChartIndicatorWidthRatio] = useState(() =>
     readStoredChartIndicatorWidthRatio(),
-  );
-  const [chartRankMarkerThreshold, setChartRankMarkerThreshold] = useState(() =>
-    readStoredChartRankMarkerThreshold(),
   );
   const [strategyCompareSnapshot, setStrategyCompareSnapshot] =
     useState<StrategyCompareSnapshot | null>(
@@ -4448,11 +4325,6 @@ export default function DetailsPage({
       : null;
   const isPrevAutoLocked = detailsNavAutoDirection === "prev";
   const isNextAutoLocked = detailsNavAutoDirection === "next";
-  const rankLookup = buildRankLookup(detailData?.overview, prevRanks);
-  const rankNumberLookup = useMemo(
-    () => buildRankNumberLookup(detailData?.overview, prevRanks),
-    [detailData?.overview, prevRanks],
-  );
   const chartRangeText =
     chartItems.length > 0
       ? `${chartItems[0].trade_date} -> ${chartItems[chartItems.length - 1].trade_date}`
@@ -4690,12 +4562,10 @@ export default function DetailsPage({
         event.key === null ||
         event.key === "lh_chart_main_width_ratio_v1" ||
         event.key === "lh_chart_indicator_width_ratio_v1" ||
-        event.key === "lh_chart_rank_marker_threshold_v1" ||
         event.key === "lh_details_nav_long_press_interval_seconds_v1"
       ) {
         setChartMainWidthRatio(readStoredChartMainWidthRatio());
         setChartIndicatorWidthRatio(readStoredChartIndicatorWidthRatio());
-        setChartRankMarkerThreshold(readStoredChartRankMarkerThreshold());
         setDetailsNavLongPressIntervalSeconds(
           readStoredDetailsNavLongPressIntervalSeconds(),
         );
@@ -4704,7 +4574,6 @@ export default function DetailsPage({
 
     setChartMainWidthRatio(readStoredChartMainWidthRatio());
     setChartIndicatorWidthRatio(readStoredChartIndicatorWidthRatio());
-    setChartRankMarkerThreshold(readStoredChartRankMarkerThreshold());
     setDetailsNavLongPressIntervalSeconds(
       readStoredDetailsNavLongPressIntervalSeconds(),
     );
@@ -6234,9 +6103,6 @@ export default function DetailsPage({
               effectiveVisibleStart,
               allChartItems,
               resolvedTradeDate !== "--" ? resolvedTradeDate : null,
-              rankLookup,
-              chartRankMarkerThreshold,
-              rankNumberLookup,
               onChartPointerDown,
               onChartPointerMove,
               onChartPointerUp,

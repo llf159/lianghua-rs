@@ -1032,28 +1032,66 @@
   stroke-width: 1.65;
 }
 
-.details-chart-marker {
-  pointer-events: none;
-  vector-effect: non-scaling-stroke;
-}
-
-.details-chart-rank-marker-layer {
+.details-chart-marker-layer {
   position: absolute;
   inset: 0;
   z-index: 2;
   pointer-events: none;
 }
 
-.details-chart-rank-marker-dot {
+.details-chart-marker {
+  --details-chart-marker-color: #d9485f;
   position: absolute;
-  top: 4px;
+  display: block;
   width: 8px;
   height: 8px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.details-chart-marker-dot,
+.details-chart-marker-flag {
   border-radius: 999px;
+  background: var(--details-chart-marker-color);
+}
+
+.details-chart-marker-flag {
+  width: 10px;
+  height: 10px;
+}
+
+.details-chart-marker-triangle_up,
+.details-chart-marker-triangle_down {
+  width: 0;
+  height: 0;
+  background: transparent;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+}
+
+.details-chart-marker-triangle_up {
+  border-bottom: 10px solid var(--details-chart-marker-color);
+}
+
+.details-chart-marker-triangle_down {
+  border-top: 10px solid var(--details-chart-marker-color);
+}
+
+.details-chart-marker-with-text span {
+  position: absolute;
+  left: 50%;
+  bottom: 9px;
   transform: translateX(-50%);
-  background: #dc2626;
-  border: 1px solid rgba(255, 255, 255, 0.9);
-  box-shadow: 0 1px 4px rgba(220, 38, 38, 0.45);
+  color: var(--details-chart-marker-color);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.details-chart-svg .details-chart-marker {
+  pointer-events: none;
+  vector-effect: non-scaling-stroke;
 }
 
 .details-chart-watermark {

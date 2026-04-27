@@ -11,12 +11,13 @@ use crate::{
     data::{RowData, ScoreConfig},
     data::{cyq_db_path, result_db_path, score_rule_path, source_db_path},
     download::ind_calc::{cache_ind_build, calc_inds_with_cache},
+    scoring::tools::{inject_stock_extra_fields, load_st_list},
     ui_tools_feat::{
         build_area_map, build_circ_mv_map, build_concepts_map, build_industry_map,
         build_most_related_concept_map, build_name_map, build_total_mv_map,
         chart_indicator::{
             ChartMarkerPosition, ChartMarkerShape, ChartPanelKind, ChartPanelRole, ChartSeriesKind,
-            CompiledChartIndicatorConfig, execute_chart_indicator_config,
+            ChartTooltipFormat, CompiledChartIndicatorConfig, execute_chart_indicator_config,
             load_compiled_chart_indicator_config,
         },
         realtime::{RealtimeFetchMeta, fetch_realtime_quote_map, normalize_quote_trade_date},
@@ -77,6 +78,7 @@ pub struct DetailKlinePanel {
     pub kind: Option<String>,
     pub series: Option<Vec<DetailKlineSeries>>,
     pub markers: Option<Vec<DetailKlineMarker>>,
+    pub tooltips: Option<Vec<DetailKlineTooltip>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -101,6 +103,14 @@ pub struct DetailKlineMarker {
     pub shape: Option<String>,
     pub color: Option<String>,
     pub text: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DetailKlineTooltip {
+    pub key: String,
+    pub label: Option<String>,
+    pub value_key: String,
+    pub format: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -744,6 +754,22 @@ fn detail_kline_panels_from_compiled(
                 kind: Some(chart_panel_kind_name(panel.kind).to_string()),
                 series: Some(series),
                 markers: Some(markers),
+                tooltips: Some(
+                    panel
+                        .tooltips
+                        .iter()
+                        .map(|tooltip| DetailKlineTooltip {
+                            key: tooltip.key.clone(),
+                            label: tooltip.render.label.clone(),
+                            value_key: tooltip.value_key.clone(),
+                            format: tooltip
+                                .render
+                                .format
+                                .map(chart_tooltip_format_name)
+                                .map(str::to_string),
+                        })
+                        .collect(),
+                ),
             }
         })
         .collect()
@@ -790,6 +816,14 @@ fn chart_marker_shape_name(shape: ChartMarkerShape) -> &'static str {
         ChartMarkerShape::TriangleUp => "triangle_up",
         ChartMarkerShape::TriangleDown => "triangle_down",
         ChartMarkerShape::Flag => "flag",
+    }
+}
+
+fn chart_tooltip_format_name(format: ChartTooltipFormat) -> &'static str {
+    match format {
+        ChartTooltipFormat::Number => "number",
+        ChartTooltipFormat::Percent => "percent",
+        ChartTooltipFormat::Ratio => "ratio",
     }
 }
 
@@ -879,6 +913,98 @@ fn is_fixed_kline_output_key(key: &str) -> bool {
             | "is_realtime"
             | "realtime_color_hint"
     )
+}
+
+fn inject_chart_indicator_extra_runtime_fields(
+    row_data: &mut RowData,
+    source_path: &str,
+    ts_code: &str,
+) -> Result<(), String> {
+    let st_list = load_st_list(source_path).unwrap_or_default();
+    let fallback_total_mv_yi = build_total_mv_map(source_path)
+        .ok()
+        .and_then(|map| map.get(ts_code).copied());
+    inject_stock_extra_fields(
+        row_data,
+        ts_code,
+        st_list.contains(ts_code),
+        fallback_total_mv_yi,
+    )?;
+    inject_chart_indicator_rank_series(row_data, source_path, ts_code)
+}
+
+fn inject_chart_indicator_rank_series(
+    row_data: &mut RowData,
+    source_path: &str,
+    ts_code: &str,
+) -> Result<(), String> {
+    let len = row_data.trade_dates.len();
+    let mut rank_series = vec![None; len];
+    if len == 0 {
+        row_data.cols.insert("RANK".to_string(), rank_series);
+        return row_data.validate();
+    }
+
+    let Some(start_date) = row_data.trade_dates.first() else {
+        row_data.cols.insert("RANK".to_string(), rank_series);
+        return row_data.validate();
+    };
+    let Some(end_date) = row_data.trade_dates.last() else {
+        row_data.cols.insert("RANK".to_string(), rank_series);
+        return row_data.validate();
+    };
+    let rank_map = load_chart_indicator_rank_series_map(source_path, ts_code, start_date, end_date);
+    for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
+        rank_series[index] = rank_map.get(trade_date).copied().flatten();
+    }
+
+    row_data.cols.insert("RANK".to_string(), rank_series);
+    row_data.validate()
+}
+
+fn load_chart_indicator_rank_series_map(
+    source_path: &str,
+    ts_code: &str,
+    start_date: &str,
+    end_date: &str,
+) -> HashMap<String, Option<f64>> {
+    let result_db = result_db_path(source_path);
+    if !result_db.exists() {
+        return HashMap::new();
+    }
+
+    let Some(result_db_str) = result_db.to_str() else {
+        return HashMap::new();
+    };
+    let Ok(conn) = Connection::open(result_db_str) else {
+        return HashMap::new();
+    };
+    let Ok(mut stmt) = conn.prepare(
+        r#"
+        SELECT trade_date, rank
+        FROM score_summary
+        WHERE ts_code = ? AND trade_date >= ? AND trade_date <= ?
+        "#,
+    ) else {
+        return HashMap::new();
+    };
+    let Ok(mut rows) = stmt.query(params![ts_code, start_date, end_date]) else {
+        return HashMap::new();
+    };
+
+    let mut out = HashMap::new();
+    while let Ok(Some(row)) = rows.next() {
+        let Ok(trade_date) = row.get::<_, String>(0) else {
+            continue;
+        };
+        let rank = row
+            .get::<_, Option<i64>>(1)
+            .ok()
+            .flatten()
+            .map(|value| value as f64);
+        out.insert(trade_date, rank);
+    }
+    out
 }
 
 fn query_kline(
@@ -1011,7 +1137,7 @@ fn query_kline(
             runtime_values,
         });
     }
-    row_data.validate()?;
+    inject_chart_indicator_extra_runtime_fields(&mut row_data, source_path, ts_code)?;
     let execution = execute_chart_indicator_config(&compiled, row_data)?;
     apply_chart_indicator_execution(&mut items, execution.values);
 
@@ -1027,6 +1153,8 @@ fn query_kline(
 
 fn build_chart_indicator_row_data_from_items(
     items: &[DetailKlineRow],
+    source_path: &str,
+    ts_code: &str,
     realtime_pre_close: Option<f64>,
     compiled: &CompiledChartIndicatorConfig,
 ) -> Result<RowData, String> {
@@ -1110,8 +1238,8 @@ fn build_chart_indicator_row_data_from_items(
         prev_close = item.close;
     }
 
-    let row_data = RowData { trade_dates, cols };
-    row_data.validate()?;
+    let mut row_data = RowData { trade_dates, cols };
+    inject_chart_indicator_extra_runtime_fields(&mut row_data, source_path, ts_code)?;
     Ok(row_data)
 }
 
@@ -1128,6 +1256,7 @@ fn indicator_value_by_normalized_key(item: &DetailKlineRow, normalized_key: &str
 fn rerun_realtime_chart_indicators(
     source_conn: &Connection,
     source_path: &str,
+    ts_code: &str,
     items: &mut [DetailKlineRow],
     realtime_pre_close: f64,
 ) -> Result<(), String> {
@@ -1137,8 +1266,13 @@ fn rerun_realtime_chart_indicators(
 
     let db_columns = load_stock_data_columns(source_conn)?;
     let compiled = load_compiled_chart_indicator_config(source_path, Some(&db_columns))?;
-    let mut row_data =
-        build_chart_indicator_row_data_from_items(items, Some(realtime_pre_close), &compiled)?;
+    let mut row_data = build_chart_indicator_row_data_from_items(
+        items,
+        source_path,
+        ts_code,
+        Some(realtime_pre_close),
+        &compiled,
+    )?;
     let ind_cache = cache_ind_build(source_path)?;
     if !ind_cache.is_empty() {
         for (name, series) in calc_inds_with_cache(&ind_cache, row_data.clone())? {
@@ -1157,6 +1291,9 @@ fn rerun_realtime_chart_indicators(
             }
             for marker in &panel.markers {
                 item.indicators.remove(&marker.when_key);
+            }
+            for tooltip in &panel.tooltips {
+                item.indicators.remove(&tooltip.value_key);
             }
         }
     }
@@ -1812,7 +1949,13 @@ pub fn build_stock_detail_realtime_from_quote_map(
         .ok_or_else(|| format!("未获取到 {} 的实时行情", normalized_ts_code))?;
     let (mut kline, has_database_trade_date) = merge_realtime_kline(kline, quote);
     if let Some(items) = kline.items.as_mut() {
-        rerun_realtime_chart_indicators(&source_conn, &source_path, items, quote.pre_close)?;
+        rerun_realtime_chart_indicators(
+            &source_conn,
+            &source_path,
+            &normalized_ts_code,
+            items,
+            quote.pre_close,
+        )?;
     }
 
     Ok(StockDetailRealtimeData {
@@ -1961,6 +2104,7 @@ mod tests {
         rerun_realtime_chart_indicators(
             &conn,
             source_path.to_str().expect("temp path should be utf8"),
+            "000001.SZ",
             items,
             quote.pre_close,
         )
@@ -2010,6 +2154,7 @@ mod tests {
         rerun_realtime_chart_indicators(
             &conn,
             source_path.to_str().expect("temp path should be utf8"),
+            "000001.SZ",
             items,
             quote.pre_close,
         )

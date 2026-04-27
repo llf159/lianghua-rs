@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   getChartIndicatorSettings,
-  resetChartIndicatorSettings,
   saveChartIndicatorSettings,
   validateChartIndicatorSettings,
   type ChartColorRuleDraft,
@@ -15,6 +14,8 @@ import {
   type ChartPanelRole,
   type ChartSeriesDraft,
   type ChartSeriesKind,
+  type ChartTooltipDraft,
+  type ChartTooltipFormat,
 } from '../../../apis/chartIndicatorSettings'
 import { ensureManagedSourcePath } from '../../../apis/managedSource'
 import '../css/ChartIndicatorSettingsModal.css'
@@ -39,6 +40,9 @@ const BASE_FIELDS = [
   'PCT_CHG',
   'TOR',
   'TURNOVER_RATE',
+  'RANK',
+  'ZHANG',
+  'TOTAL_MV_YI',
 ]
 
 const FUNCTIONS = [
@@ -68,7 +72,7 @@ const FUNCTIONS = [
 ]
 
 type EditorMode = 'form' | 'source'
-type DetailSelection = { kind: 'series' | 'marker'; index: number } | null
+type DetailSelection = { kind: 'series' | 'marker' | 'tooltip'; index: number } | null
 
 type Props = {
   open: boolean
@@ -147,7 +151,10 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
     const keys: string[] = []
     for (let panelIndex = 0; panelIndex < panels.length; panelIndex += 1) {
       const panel = panels[panelIndex]
-      const limit = panelIndex === selectedPanelIndex ? Math.max(detailSelection?.index ?? 0, 0) : panel.series?.length ?? 0
+      const limit =
+        panelIndex === selectedPanelIndex && detailSelection?.kind === 'series'
+          ? Math.max(detailSelection.index, 0)
+          : panel.series?.length ?? 0
       for (let seriesIndex = 0; seriesIndex < limit; seriesIndex += 1) {
         const key = panel.series?.[seriesIndex]?.key?.trim()
         if (key) {
@@ -159,7 +166,7 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
       }
     }
     return keys
-  }, [detailSelection?.index, panels, selectedPanel, selectedPanelIndex])
+  }, [detailSelection?.index, detailSelection?.kind, panels, selectedPanel, selectedPanelIndex])
 
   if (!open) {
     return null
@@ -385,6 +392,70 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
     setDetailSelection({ kind: 'marker', index: index + direction })
   }
 
+  function updateTooltip(index: number, patch: Partial<ChartTooltipDraft>) {
+    if (!selectedPanel) {
+      return
+    }
+    const nextTooltips = (selectedPanel.tooltip ?? []).map((tooltip, tooltipIndex) =>
+      tooltipIndex === index ? { ...tooltip, ...patch } : tooltip,
+    )
+    updatePanel(selectedPanelIndex, { tooltip: nextTooltips })
+  }
+
+  function addTooltip() {
+    if (!selectedPanel) {
+      return
+    }
+    const existing = selectedPanel.tooltip ?? []
+    const usedKeys = new Set(existing.map((tooltip) => tooltip.key))
+    const tooltip: ChartTooltipDraft = {
+      key: uniqueKey('tooltip', usedKeys),
+      label: null,
+      expr: '',
+      format: 'number',
+    }
+    updatePanel(selectedPanelIndex, { tooltip: [...existing, tooltip] })
+    setDetailSelection({ kind: 'tooltip', index: existing.length })
+  }
+
+  function copyTooltip(index: number) {
+    if (!selectedPanel) {
+      return
+    }
+    const tooltip = selectedPanel.tooltip?.[index]
+    if (!tooltip) {
+      return
+    }
+    const usedKeys = new Set((selectedPanel.tooltip ?? []).map((item) => item.key))
+    usedKeys.delete(tooltip.key)
+    const nextTooltip = {
+      ...tooltip,
+      key: uniqueKey(`${tooltip.key}_copy`, usedKeys),
+      label: `${tooltip.label || tooltip.key}副本`,
+    }
+    const nextList = insertAt(selectedPanel.tooltip ?? [], index + 1, nextTooltip)
+    updatePanel(selectedPanelIndex, { tooltip: nextList })
+    setDetailSelection({ kind: 'tooltip', index: index + 1 })
+  }
+
+  function deleteTooltip(index: number) {
+    if (!selectedPanel) {
+      return
+    }
+    const nextList = (selectedPanel.tooltip ?? []).filter((_, tooltipIndex) => tooltipIndex !== index)
+    updatePanel(selectedPanelIndex, { tooltip: nextList })
+    setDetailSelection(null)
+  }
+
+  function moveTooltip(index: number, direction: -1 | 1) {
+    if (!selectedPanel) {
+      return
+    }
+    const nextList = moveItem(selectedPanel.tooltip ?? [], index, direction)
+    updatePanel(selectedPanelIndex, { tooltip: nextList })
+    setDetailSelection({ kind: 'tooltip', index: index + direction })
+  }
+
   function updateColorRule(seriesIndex: number, ruleIndex: number, patch: Partial<ChartColorRuleDraft>) {
     const series = selectedPanel?.series?.[seriesIndex]
     if (!series) {
@@ -501,38 +572,10 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
       setDraft(normalizeConfig(nextPayload.config))
       setSourceText(nextPayload.text)
       setMode('form')
-      setNotice('已保存。重新进入详情页或刷新当前详情页后生效。')
       onLoaded?.(nextPayload)
+      onClose()
     } catch (saveError) {
       setError(`保存失败: ${String(saveError)}`)
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  async function onReset() {
-    if (!sourcePath) {
-      setError('数据源路径尚未准备好。')
-      return
-    }
-    if (!window.confirm('确认重置为默认图表指标配置吗？')) {
-      return
-    }
-    setSaving(true)
-    setError('')
-    setNotice('')
-    try {
-      const nextPayload = await resetChartIndicatorSettings(sourcePath)
-      setPayload(nextPayload)
-      setDraft(normalizeConfig(nextPayload.config))
-      setSourceText(nextPayload.text)
-      setSelectedPanelIndex(0)
-      setDetailSelection(null)
-      setMode('form')
-      setNotice('已重置为默认配置。重新进入详情页或刷新当前详情页后生效。')
-      onLoaded?.(nextPayload)
-    } catch (resetError) {
-      setError(`重置失败: ${String(resetError)}`)
     } finally {
       setSaving(false)
     }
@@ -556,6 +599,8 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
     detailSelection?.kind === 'series' ? selectedPanel?.series?.[detailSelection.index] : null
   const activeMarker =
     detailSelection?.kind === 'marker' ? selectedPanel?.marker?.[detailSelection.index] : null
+  const activeTooltip =
+    detailSelection?.kind === 'tooltip' ? selectedPanel?.tooltip?.[detailSelection.index] : null
 
   return (
     <div
@@ -589,9 +634,6 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
             <button className="settings-secondary-btn" type="button" onClick={onClose}>
               关闭
             </button>
-            <button className="settings-secondary-btn" type="button" onClick={onReset} disabled={loading || saving}>
-              重置为默认
-            </button>
             <button
               className={mode === 'source' ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
               type="button"
@@ -604,7 +646,7 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
               校验
             </button>
             <button className="settings-primary-btn" type="button" onClick={() => void onSave()} disabled={loading || saving}>
-              {saving ? '处理中...' : '保存'}
+              {saving ? '处理中...' : '保存并关闭'}
             </button>
           </div>
         </div>
@@ -612,15 +654,6 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
         {loading ? <div className="settings-empty-soft">读取配置中...</div> : null}
         {error ? <div className="settings-error">{error}</div> : null}
         {notice ? <div className="settings-notice">{notice}</div> : null}
-
-        <div className="chart-indicator-mode-tabs">
-          <button className={mode === 'form' ? 'is-active' : ''} type="button" onClick={() => void switchMode('form')}>
-            结构化编辑
-          </button>
-          <button className={mode === 'source' ? 'is-active' : ''} type="button" onClick={() => void switchMode('source')}>
-            TOML 源码
-          </button>
-        </div>
 
         {mode === 'source' ? (
           <div className="chart-indicator-source-pane">
@@ -681,11 +714,6 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
               {selectedPanel ? (
                 <>
                   <div className="chart-indicator-section-title">当前面板</div>
-                  {selectedPanel.role === 'main' ? (
-                    <div className="settings-notice">
-                      主图 K 线由行情 O/H/L/C 固定渲染；这里编辑的是叠加在主图上的指标线和信号标记。
-                    </div>
-                  ) : null}
                   <div className="chart-indicator-field-grid">
                     <label className="settings-field">
                       <span>面板标识</span>
@@ -746,6 +774,29 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
                     ))}
                     {(selectedPanel.marker ?? []).length === 0 ? <div className="settings-empty-soft">当前面板还没有标记。</div> : null}
                   </div>
+
+                  <div className="chart-indicator-subsection-head">
+                    <strong>浮窗字段</strong>
+                    <button className="settings-secondary-btn" type="button" onClick={addTooltip}>
+                      新增字段
+                    </button>
+                  </div>
+                  <div className="chart-indicator-card-list">
+                    {(selectedPanel.tooltip ?? []).map((tooltip, index) => (
+                      <button
+                        key={`${tooltip.key}-${index}`}
+                        className={detailSelection?.kind === 'tooltip' && detailSelection.index === index ? 'chart-indicator-card-row is-active' : 'chart-indicator-card-row'}
+                        type="button"
+                        onClick={() => setDetailSelection({ kind: 'tooltip', index })}
+                      >
+                        <strong>{tooltip.label || tooltip.key || '未命名字段'}</strong>
+                        <span>{tooltip.key || '无 key'} · {tooltip.expr || '无表达式'}</span>
+                      </button>
+                    ))}
+                    {(selectedPanel.tooltip ?? []).length === 0 ? <div className="settings-empty-soft">当前面板还没有浮窗字段。</div> : null}
+                  </div>
+                  <div className="chart-indicator-reference-divider" aria-hidden="true" />
+                  <ReferenceStrip previousSeriesKeys={previousSeriesKeys} databaseIndicatorColumns={payload?.summary.databaseIndicatorColumns ?? []} />
                 </>
               ) : (
                 <div className="settings-empty-soft">请选择一个面板。</div>
@@ -772,15 +823,23 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
                   marker={activeMarker}
                   index={detailSelection?.index ?? 0}
                   markerCount={selectedPanel?.marker?.length ?? 0}
-                  previousSeriesKeys={previousSeriesKeys}
-                  databaseIndicatorColumns={payload?.summary.databaseIndicatorColumns ?? []}
                   onUpdate={updateMarker}
                   onMove={moveMarker}
                   onCopy={copyMarker}
                   onDelete={deleteMarker}
                 />
+              ) : activeTooltip ? (
+                <TooltipEditor
+                  tooltip={activeTooltip}
+                  index={detailSelection?.index ?? 0}
+                  tooltipCount={selectedPanel?.tooltip?.length ?? 0}
+                  onUpdate={updateTooltip}
+                  onMove={moveTooltip}
+                  onCopy={copyTooltip}
+                  onDelete={deleteTooltip}
+                />
               ) : (
-                <div className="settings-empty-soft">选择一个序列或标记后，在这里编辑详细参数。</div>
+                <div className="settings-empty-soft">选择一个序列、标记或浮窗字段后，在这里编辑详细参数。</div>
               )}
 
               <div className="chart-indicator-preview">
@@ -797,6 +856,10 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
                   <div className="settings-summary-item">
                     <span>标记</span>
                     <strong>{localSummary.markerCount}</strong>
+                  </div>
+                  <div className="settings-summary-item">
+                    <span>浮窗字段</span>
+                    <strong>{localSummary.tooltipCount}</strong>
                   </div>
                   <div className="settings-summary-item">
                     <span>可引用指标列</span>
@@ -982,7 +1045,7 @@ function SeriesEditor({
       </div>
       <div className="chart-indicator-rule-list">
         {(series.color_when ?? []).map((rule, ruleIndex) => (
-          <div className="chart-indicator-rule-row" key={`${rule.when}-${ruleIndex}`}>
+          <div className="chart-indicator-rule-row" key={`rule-${ruleIndex}`}>
             <input value={rule.when} onChange={(event) => onUpdateColorRule(index, ruleIndex, { when: event.target.value })} placeholder="条件表达式" />
             <input value={rule.color} onChange={(event) => onUpdateColorRule(index, ruleIndex, { color: event.target.value })} placeholder="#d9485f" />
             <button className="settings-danger-btn" type="button" onClick={() => onDeleteColorRule(index, ruleIndex)}>
@@ -1000,8 +1063,6 @@ type MarkerEditorProps = {
   marker: ChartMarkerDraft
   index: number
   markerCount: number
-  previousSeriesKeys: string[]
-  databaseIndicatorColumns: string[]
   onUpdate: (index: number, patch: Partial<ChartMarkerDraft>) => void
   onMove: (index: number, direction: -1 | 1) => void
   onCopy: (index: number) => void
@@ -1012,8 +1073,6 @@ function MarkerEditor({
   marker,
   index,
   markerCount,
-  previousSeriesKeys,
-  databaseIndicatorColumns,
   onUpdate,
   onMove,
   onCopy,
@@ -1050,7 +1109,6 @@ function MarkerEditor({
         <span>出现条件</span>
         <textarea className="settings-textarea chart-indicator-expr-textarea" value={marker.when} onChange={(event) => onUpdate(index, { when: event.target.value })} />
       </label>
-      <ReferenceStrip previousSeriesKeys={previousSeriesKeys} databaseIndicatorColumns={databaseIndicatorColumns} />
       <div className="chart-indicator-field-grid">
         <label className="settings-field">
           <span>定位字段</span>
@@ -1059,8 +1117,8 @@ function MarkerEditor({
         <label className="settings-field">
           <span>位置</span>
           <select value={marker.position ?? 'value'} onChange={(event) => onUpdate(index, { position: event.target.value as ChartMarkerPosition })}>
-            <option value="above">上方</option>
-            <option value="below">下方</option>
+            <option value="above">上方（面板上沿）</option>
+            <option value="below">下方（面板下沿）</option>
             <option value="value">数值处</option>
           </select>
         </label>
@@ -1086,6 +1144,68 @@ function MarkerEditor({
   )
 }
 
+type TooltipEditorProps = {
+  tooltip: ChartTooltipDraft
+  index: number
+  tooltipCount: number
+  onUpdate: (index: number, patch: Partial<ChartTooltipDraft>) => void
+  onMove: (index: number, direction: -1 | 1) => void
+  onCopy: (index: number) => void
+  onDelete: (index: number) => void
+}
+
+function TooltipEditor({
+  tooltip,
+  index,
+  tooltipCount,
+  onUpdate,
+  onMove,
+  onCopy,
+  onDelete,
+}: TooltipEditorProps) {
+  return (
+    <div className="chart-indicator-detail-form">
+      <div className="chart-indicator-subsection-head">
+        <strong>浮窗字段参数</strong>
+        <div className="chart-indicator-inline-actions">
+          <button className="settings-secondary-btn" type="button" onClick={() => onMove(index, -1)} disabled={index <= 0}>
+            上移
+          </button>
+          <button className="settings-secondary-btn" type="button" onClick={() => onMove(index, 1)} disabled={index >= tooltipCount - 1}>
+            下移
+          </button>
+          <button className="settings-secondary-btn" type="button" onClick={() => onCopy(index)}>
+            复制
+          </button>
+          <button className="settings-danger-btn" type="button" onClick={() => onDelete(index)}>
+            删除
+          </button>
+        </div>
+      </div>
+      <label className="settings-field">
+        <span>字段标识</span>
+        <input value={tooltip.key} onChange={(event) => onUpdate(index, { key: event.target.value })} />
+      </label>
+      <label className="settings-field">
+        <span>显示名称</span>
+        <input value={tooltip.label ?? ''} onChange={(event) => onUpdate(index, { label: optionalString(event.target.value) })} />
+      </label>
+      <label className="settings-field settings-field-textarea">
+        <span>计算表达式</span>
+        <textarea className="settings-textarea chart-indicator-expr-textarea" value={tooltip.expr} onChange={(event) => onUpdate(index, { expr: event.target.value })} />
+      </label>
+      <label className="settings-field">
+        <span>显示格式</span>
+        <select value={tooltip.format ?? 'number'} onChange={(event) => onUpdate(index, { format: event.target.value as ChartTooltipFormat })}>
+          <option value="number">数值</option>
+          <option value="percent">百分比</option>
+          <option value="ratio">比值</option>
+        </select>
+      </label>
+    </div>
+  )
+}
+
 function ReferenceStrip({
   previousSeriesKeys,
   databaseIndicatorColumns,
@@ -1103,6 +1223,27 @@ function ReferenceStrip({
   )
 }
 
+function makeDefaultMainTooltips(): ChartTooltipDraft[] {
+  return [
+    {
+      key: 'change_pct',
+      label: '涨幅',
+      expr: 'DIV(C - REF(C, 1), REF(C, 1)) * 100',
+      format: 'percent',
+    },
+    {
+      key: 'turnover',
+      label: '换手',
+      expr: 'TOR',
+      format: 'percent',
+    },
+    { key: 'close', label: 'C', expr: 'C', format: 'number' },
+    { key: 'open', label: 'O', expr: 'O', format: 'number' },
+    { key: 'high', label: 'H', expr: 'H', format: 'number' },
+    { key: 'low', label: 'L', expr: 'L', format: 'number' },
+  ]
+}
+
 function normalizeConfig(config: ChartIndicatorConfigDraft | null | undefined): ChartIndicatorConfigDraft {
   const panels = (config?.panel && config.panel.length > 0 ? config.panel : [{
     key: 'price',
@@ -1111,10 +1252,12 @@ function normalizeConfig(config: ChartIndicatorConfigDraft | null | undefined): 
     kind: 'candles' as ChartPanelKind,
     series: [],
     marker: [],
+    tooltip: makeDefaultMainTooltips(),
   }]).map((panel) => ({
     ...panel,
     series: (panel.series ?? []).map((series) => normalizeSeriesByKind({ ...series, color_when: series.color_when ?? [] })),
     marker: panel.marker ?? [],
+    tooltip: (panel.tooltip ?? []).map((tooltip) => ({ ...tooltip, format: tooltip.format ?? 'number' })),
   }))
   return {
     version: config?.version ?? 1,
@@ -1127,6 +1270,7 @@ function summarizeDraft(config: ChartIndicatorConfigDraft) {
     panelCount: config.panel.length,
     seriesCount: config.panel.reduce((sum, panel) => sum + (panel.series?.length ?? 0), 0),
     markerCount: config.panel.reduce((sum, panel) => sum + (panel.marker?.length ?? 0), 0),
+    tooltipCount: config.panel.reduce((sum, panel) => sum + (panel.tooltip?.length ?? 0), 0),
   }
 }
 
@@ -1162,6 +1306,7 @@ function validateDraft(config: ChartIndicatorConfigDraft) {
     validatePanelSeriesCombination(panel, issues)
 
     const markerKeys = new Set<string>()
+    const tooltipKeys = new Set<string>()
     ;(panel.series ?? []).forEach((series) => {
       if (!KEY_PATTERN.test(series.key.trim())) {
         issues.push(`序列 ${series.label || series.key || '(未命名)'} 的 key 不合法。`)
@@ -1216,6 +1361,18 @@ function validateDraft(config: ChartIndicatorConfigDraft) {
       }
       if (marker.color && !COLOR_PATTERN.test(marker.color)) {
         issues.push(`标记 ${marker.key} 的颜色格式不合法。`)
+      }
+    })
+    ;(panel.tooltip ?? []).forEach((tooltip) => {
+      if (!KEY_PATTERN.test(tooltip.key.trim())) {
+        issues.push(`浮窗字段 ${tooltip.label || tooltip.key || '(未命名)'} 的 key 不合法。`)
+      }
+      if (tooltipKeys.has(tooltip.key.trim())) {
+        issues.push(`面板 ${panel.key} 内浮窗字段 key 重复: ${tooltip.key}`)
+      }
+      tooltipKeys.add(tooltip.key.trim())
+      if (!tooltip.expr.trim()) {
+        issues.push(`浮窗字段 ${tooltip.key || '(未命名)'} 缺少计算表达式。`)
       }
     })
   })
@@ -1296,6 +1453,18 @@ function serializeConfigToToml(config: ChartIndicatorConfigDraft) {
       }
       lines.push('')
     })
+    ;(panel.tooltip ?? []).forEach((tooltip) => {
+      lines.push('[[panel.tooltip]]')
+      lines.push(`key = ${tomlString(tooltip.key.trim())}`)
+      if (tooltip.label?.trim()) {
+        lines.push(`label = ${tomlString(tooltip.label.trim())}`)
+      }
+      lines.push(`expr = ${tomlString(tooltip.expr)}`)
+      if (tooltip.format) {
+        lines.push(`format = ${tomlString(tooltip.format)}`)
+      }
+      lines.push('')
+    })
   })
   return lines.join('\n').trimEnd() + '\n'
 }
@@ -1352,6 +1521,7 @@ function clonePanelWithFreshKeys(panel: ChartPanelDraft, usedPanelKeys: Set<stri
       color_when: (series.color_when ?? []).map((rule) => ({ ...rule })),
     })),
     marker: (panel.marker ?? []).map((marker) => ({ ...marker })),
+    tooltip: (panel.tooltip ?? []).map((tooltip) => ({ ...tooltip })),
   }
   return clonedPanel
 }

@@ -1,6 +1,5 @@
 const CHART_MAIN_WIDTH_RATIO_STORAGE_KEY = 'lh_chart_main_width_ratio_v1'
 const CHART_INDICATOR_WIDTH_RATIO_STORAGE_KEY = 'lh_chart_indicator_width_ratio_v1'
-const CHART_RANK_MARKER_THRESHOLD_STORAGE_KEY = 'lh_chart_rank_marker_threshold_v1'
 const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_STORAGE_KEY = 'lh_details_nav_long_press_interval_seconds_v1'
 
 export const CHART_MAIN_WIDTH_RATIO_DEFAULT = 0.36
@@ -9,9 +8,6 @@ export const CHART_MAIN_WIDTH_RATIO_MAX = 1.2
 export const CHART_INDICATOR_WIDTH_RATIO_DEFAULT = 0.5
 export const CHART_INDICATOR_WIDTH_RATIO_MIN = 0.1
 export const CHART_INDICATOR_WIDTH_RATIO_MAX = 1.2
-export const CHART_RANK_MARKER_THRESHOLD_DEFAULT = 100
-export const CHART_RANK_MARKER_THRESHOLD_MIN = 1
-export const CHART_RANK_MARKER_THRESHOLD_MAX = 5000
 export const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_DEFAULT = 1
 export const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MIN = 0.2
 export const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MAX = 10
@@ -94,49 +90,6 @@ export function writeStoredChartIndicatorWidthRatio(nextValue: number) {
   const normalizedValue = clampChartIndicatorWidthRatio(nextValue)
   window.localStorage.setItem(
     CHART_INDICATOR_WIDTH_RATIO_STORAGE_KEY,
-    normalizedValue.toString(),
-  )
-}
-
-export function clampChartRankMarkerThreshold(value: number) {
-  if (!Number.isFinite(value)) {
-    return CHART_RANK_MARKER_THRESHOLD_DEFAULT
-  }
-
-  return Math.round(
-    Math.min(
-      CHART_RANK_MARKER_THRESHOLD_MAX,
-      Math.max(CHART_RANK_MARKER_THRESHOLD_MIN, value),
-    ),
-  )
-}
-
-export function readStoredChartRankMarkerThreshold() {
-  if (typeof window === 'undefined') {
-    return CHART_RANK_MARKER_THRESHOLD_DEFAULT
-  }
-
-  const rawValue = window.localStorage.getItem(CHART_RANK_MARKER_THRESHOLD_STORAGE_KEY)
-  if (!rawValue) {
-    return CHART_RANK_MARKER_THRESHOLD_DEFAULT
-  }
-
-  const parsedValue = Number(rawValue)
-  if (!Number.isFinite(parsedValue)) {
-    return CHART_RANK_MARKER_THRESHOLD_DEFAULT
-  }
-
-  return clampChartRankMarkerThreshold(parsedValue)
-}
-
-export function writeStoredChartRankMarkerThreshold(nextValue: number) {
-  if (typeof window === 'undefined') {
-    return
-  }
-
-  const normalizedValue = clampChartRankMarkerThreshold(nextValue)
-  window.localStorage.setItem(
-    CHART_RANK_MARKER_THRESHOLD_STORAGE_KEY,
     normalizedValue.toString(),
   )
 }

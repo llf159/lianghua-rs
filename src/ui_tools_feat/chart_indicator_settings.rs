@@ -11,7 +11,7 @@ use crate::{
     data::source_db_path,
     ui_tools_feat::chart_indicator::{
         ChartIndicatorConfig, ChartPanelConfig, ChartPanelKind, ChartPanelRole, ChartSeriesKind,
-        chart_indicator_config_path, compile_chart_indicator_config,
+        ChartTooltipFormat, chart_indicator_config_path, compile_chart_indicator_config,
         default_chart_indicator_config, normalize_chart_indicator_config,
         parse_chart_indicator_config,
     },
@@ -23,6 +23,7 @@ pub struct ChartIndicatorSettingsSummary {
     pub panel_count: usize,
     pub series_count: usize,
     pub marker_count: usize,
+    pub tooltip_count: usize,
     pub database_indicator_columns: Vec<String>,
 }
 
@@ -171,6 +172,11 @@ fn summarize_chart_indicator_config_with_columns(
         .iter()
         .map(|panel| panel.markers.len())
         .sum::<usize>();
+    let tooltip_count = config
+        .panels
+        .iter()
+        .map(|panel| panel.tooltips.len())
+        .sum::<usize>();
     let database_indicator_columns = match db_columns {
         Some(columns) => stock_data_indicator_columns_from_all(columns),
         None => {
@@ -186,6 +192,7 @@ fn summarize_chart_indicator_config_with_columns(
         panel_count,
         series_count,
         marker_count,
+        tooltip_count,
         database_indicator_columns,
     })
 }
@@ -306,6 +313,30 @@ fn serialize_chart_indicator_config(config: &ChartIndicatorConfig) -> Result<Str
                 .filter(|value| !value.trim().is_empty())
             {
                 lines.push(format!("text = {}", toml_string(text)?));
+            }
+            lines.push(String::new());
+        }
+
+        for tooltip in &panel.tooltips {
+            lines.push("[[panel.tooltip]]".to_string());
+            lines.push(format!("key = {}", toml_string(&tooltip.key)?));
+            if let Some(label) = tooltip
+                .label
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                lines.push(format!("label = {}", toml_string(label)?));
+            }
+            lines.push(format!("expr = {}", toml_string(&tooltip.expr)?));
+            if let Some(format) = tooltip.format {
+                lines.push(format!(
+                    "format = {}",
+                    toml_string(match format {
+                        ChartTooltipFormat::Number => "number",
+                        ChartTooltipFormat::Percent => "percent",
+                        ChartTooltipFormat::Ratio => "ratio",
+                    })?
+                ));
             }
             lines.push(String::new());
         }

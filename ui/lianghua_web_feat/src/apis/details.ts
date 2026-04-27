@@ -70,6 +70,13 @@ export type DetailChartMarker = {
   text?: string | null
 }
 
+export type DetailChartTooltip = {
+  key: string
+  label?: string | null
+  value_key: string
+  format?: 'number' | 'percent' | 'ratio' | null
+}
+
 export type DetailKlineRow = {
   trade_date: string
   open?: number | null
@@ -98,6 +105,7 @@ export type DetailKlinePanel = {
   kind?: DetailChartPanelKind
   series?: DetailChartSeries[] | null
   markers?: DetailChartMarker[] | null
+  tooltips?: DetailChartTooltip[] | null
 }
 
 export type DetailKlinePayload = {

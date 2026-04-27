@@ -9,23 +9,18 @@ import { filterConceptItems, useConceptExclusions } from '../../shared/conceptEx
 import ChartIndicatorSettingsModal from './components/ChartIndicatorSettingsModal'
 import StrategySyntaxGuideModal from './components/StrategySyntaxGuideModal'
 import {
-  CHART_RANK_MARKER_THRESHOLD_MAX,
-  CHART_RANK_MARKER_THRESHOLD_MIN,
   DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MAX,
   DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MIN,
   CHART_INDICATOR_WIDTH_RATIO_MAX,
   CHART_INDICATOR_WIDTH_RATIO_MIN,
   CHART_MAIN_WIDTH_RATIO_MAX,
   CHART_MAIN_WIDTH_RATIO_MIN,
-  clampChartRankMarkerThreshold,
   clampChartIndicatorWidthRatio,
   clampChartMainWidthRatio,
   clampDetailsNavLongPressIntervalSeconds,
-  readStoredChartRankMarkerThreshold,
   readStoredChartIndicatorWidthRatio,
   readStoredChartMainWidthRatio,
   readStoredDetailsNavLongPressIntervalSeconds,
-  writeStoredChartRankMarkerThreshold,
   writeStoredChartIndicatorWidthRatio,
   writeStoredChartMainWidthRatio,
   writeStoredDetailsNavLongPressIntervalSeconds,
@@ -60,7 +55,6 @@ type SettingsModalType =
   | 'st'
   | 'chart-layout'
   | 'chart-indicator'
-  | 'rank-marker'
   | 'details-nav-long-press'
   | 'backtest-highlight'
   | null
@@ -88,11 +82,6 @@ export default function SettingsPage() {
   const [chartIndicatorSettingsPayload, setChartIndicatorSettingsPayload] =
     useState<ChartIndicatorSettingsPayload | null>(null)
   const [chartIndicatorSettingsStatus, setChartIndicatorSettingsStatus] = useState('读取中...')
-  const [chartRankMarkerThresholdInput, setChartRankMarkerThresholdInput] = useState(() =>
-    String(readStoredChartRankMarkerThreshold()),
-  )
-  const [chartRankMarkerSettingError, setChartRankMarkerSettingError] = useState('')
-  const [chartRankMarkerSettingNotice, setChartRankMarkerSettingNotice] = useState('')
   const [detailsNavLongPressIntervalInput, setDetailsNavLongPressIntervalInput] = useState(
     () => String(readStoredDetailsNavLongPressIntervalSeconds()),
   )
@@ -125,7 +114,6 @@ export default function SettingsPage() {
   const isStSettingOpen = activeModal === 'st'
   const isChartLayoutSettingOpen = activeModal === 'chart-layout'
   const isChartIndicatorSettingOpen = activeModal === 'chart-indicator'
-  const isRankMarkerSettingOpen = activeModal === 'rank-marker'
   const isDetailsNavLongPressSettingOpen = activeModal === 'details-nav-long-press'
   const isBacktestHighlightSettingOpen = activeModal === 'backtest-highlight'
 
@@ -249,17 +237,8 @@ export default function SettingsPage() {
 
   const currentChartMainWidthRatio = readStoredChartMainWidthRatio()
   const currentChartIndicatorWidthRatio = readStoredChartIndicatorWidthRatio()
-  const currentChartRankMarkerThreshold = readStoredChartRankMarkerThreshold()
   const currentDetailsNavLongPressInterval = readStoredDetailsNavLongPressIntervalSeconds()
   const currentBacktestHighlightSettings = readStoredBacktestHighlightSettings()
-  const chartRankMarkerThresholdPreview = useMemo(() => {
-    const parsedValue = Number(chartRankMarkerThresholdInput.trim())
-    if (!Number.isFinite(parsedValue)) {
-      return null
-    }
-
-    return clampChartRankMarkerThreshold(parsedValue)
-  }, [chartRankMarkerThresholdInput])
   const detailsNavLongPressIntervalPreview = useMemo(() => {
     const parsedValue = Number(detailsNavLongPressIntervalInput.trim())
     if (!Number.isFinite(parsedValue)) {
@@ -295,13 +274,6 @@ export default function SettingsPage() {
     setChartIndicatorSettingsPayload(nextPayload)
     setChartIndicatorSettingsStatus(getChartIndicatorSettingsStatus(nextPayload))
   }, [])
-
-  function openRankMarkerSetting() {
-    setActiveModal('rank-marker')
-    setChartRankMarkerThresholdInput(String(readStoredChartRankMarkerThreshold()))
-    setChartRankMarkerSettingError('')
-    setChartRankMarkerSettingNotice('')
-  }
 
   function openDetailsNavLongPressSetting() {
     setActiveModal('details-nav-long-press')
@@ -346,21 +318,6 @@ export default function SettingsPage() {
     setChartIndicatorRatioInput(normalizedIndicatorValue.toFixed(2))
     setChartLayoutSettingError('')
     setChartLayoutSettingNotice('已保存。切回详情页后会使用新比例。')
-  }
-
-  function onSaveChartRankMarkerThreshold() {
-    const parsedValue = Number(chartRankMarkerThresholdInput.trim())
-    if (!Number.isFinite(parsedValue)) {
-      setChartRankMarkerSettingError('请输入有效整数。')
-      setChartRankMarkerSettingNotice('')
-      return
-    }
-
-    const normalizedValue = clampChartRankMarkerThreshold(parsedValue)
-    writeStoredChartRankMarkerThreshold(normalizedValue)
-    setChartRankMarkerThresholdInput(String(normalizedValue))
-    setChartRankMarkerSettingError('')
-    setChartRankMarkerSettingNotice('已保存。详情页主图会按该排名阈值标记。')
   }
 
   function onSaveDetailsNavLongPressInterval() {
@@ -484,14 +441,6 @@ export default function SettingsPage() {
             <span className="settings-list-item-value">
               {chartIndicatorSettingsPayload ? getChartIndicatorSettingsStatus(chartIndicatorSettingsPayload) : chartIndicatorSettingsStatus}
             </span>
-          </button>
-
-          <button className="settings-list-item" type="button" onClick={openRankMarkerSetting}>
-            <div className="settings-list-item-main">
-              <strong>标记阈值排名</strong>
-              <span>详情页主图中，排名进入阈值时在当日K线上方做标记。</span>
-            </div>
-            <span className="settings-list-item-value">TOP {currentChartRankMarkerThreshold}</span>
           </button>
 
           <button className="settings-list-item" type="button" onClick={openDetailsNavLongPressSetting}>
@@ -621,58 +570,6 @@ export default function SettingsPage() {
         onClose={closeActiveModal}
         onLoaded={onChartIndicatorSettingsLoaded}
       />
-
-      {isRankMarkerSettingOpen ? (
-        <div
-          className="settings-modal-backdrop"
-          role="presentation"
-          onClick={(event) => {
-            if (event.target === event.currentTarget) {
-              closeActiveModal()
-            }
-          }}
-        >
-          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="标记阈值排名设置">
-            <div className="settings-modal-head">
-              <div>
-                <h3 className="settings-subtitle-head">标记阈值排名</h3>
-                <p className="settings-section-note">
-                  当日排名小于等于该阈值时，会在详情页主图K线顶部显示标记。
-                </p>
-              </div>
-              <div className="settings-actions">
-                <button className="settings-secondary-btn" type="button" onClick={closeActiveModal}>
-                  关闭
-                </button>
-              </div>
-            </div>
-
-            <div className="settings-field settings-field-textarea">
-              <span>RANK_MARKER_THRESHOLD</span>
-              <input
-                type="number"
-                min={CHART_RANK_MARKER_THRESHOLD_MIN}
-                max={CHART_RANK_MARKER_THRESHOLD_MAX}
-                step={1}
-                value={chartRankMarkerThresholdInput}
-                onChange={(event) => setChartRankMarkerThresholdInput(event.target.value)}
-              />
-              <small>
-                预览：{chartRankMarkerThresholdPreview === null ? '--' : `TOP ${chartRankMarkerThresholdPreview}`}
-              </small>
-            </div>
-
-            {chartRankMarkerSettingError ? <div className="settings-error">{chartRankMarkerSettingError}</div> : null}
-            {chartRankMarkerSettingNotice ? <div className="settings-notice">{chartRankMarkerSettingNotice}</div> : null}
-
-            <div className="settings-actions">
-              <button className="settings-primary-btn" type="button" onClick={onSaveChartRankMarkerThreshold}>
-                保存
-              </button>
-            </div>
-          </section>
-        </div>
-      ) : null}
 
       {isDetailsNavLongPressSettingOpen ? (
         <div
