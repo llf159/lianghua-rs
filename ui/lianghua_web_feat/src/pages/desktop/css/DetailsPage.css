@@ -1019,6 +1019,11 @@
   stroke-width: 1.65;
 }
 
+.details-chart-marker {
+  pointer-events: none;
+  vector-effect: non-scaling-stroke;
+}
+
 .details-chart-rank-marker-layer {
   position: absolute;
   inset: 0;

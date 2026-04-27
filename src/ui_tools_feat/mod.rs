@@ -6,6 +6,7 @@ use crate::data::{
     load_stock_list, load_ths_concepts_list, load_ths_concepts_named_map, source_db_path,
 };
 
+pub mod chart_indicator;
 pub mod concept_stock_pick;
 pub mod data_download;
 pub mod data_import;

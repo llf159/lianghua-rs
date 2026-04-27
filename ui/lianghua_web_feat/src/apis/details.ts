@@ -33,6 +33,44 @@ export type DetailPrevRankRow = {
   total?: number | null
 }
 
+export type DetailChartPanelRole = 'main' | 'sub'
+
+export type DetailChartPanelKind = 'candles' | 'line' | 'bar' | 'brick'
+
+export type DetailChartSeriesKind = 'line' | 'bar' | 'histogram' | 'area' | 'band' | 'brick'
+
+export type DetailChartMarkerPosition = 'above' | 'below' | 'value'
+
+export type DetailChartMarkerShape = 'dot' | 'triangle_up' | 'triangle_down' | 'flag'
+
+export type DetailChartColorRule = {
+  when_key: string
+  color: string
+}
+
+export type DetailChartSeries = {
+  key: string
+  label?: string | null
+  kind: DetailChartSeriesKind
+  draw_order?: number | null
+  color?: string | null
+  color_when?: DetailChartColorRule[] | null
+  line_width?: number | null
+  opacity?: number | null
+  base_value?: number | null
+}
+
+export type DetailChartMarker = {
+  key: string
+  label?: string | null
+  when_key: string
+  y_key?: string | null
+  position?: DetailChartMarkerPosition | null
+  shape?: DetailChartMarkerShape | null
+  color?: string | null
+  text?: string | null
+}
+
 export type DetailKlineRow = {
   trade_date: string
   open?: number | null
@@ -57,7 +95,11 @@ export type DetailKlineRow = {
 export type DetailKlinePanel = {
   key: string
   label: string
-  kind?: 'candles' | 'line' | 'bar' | 'brick'
+  role?: DetailChartPanelRole | null
+  kind?: DetailChartPanelKind
+  series?: DetailChartSeries[] | null
+  markers?: DetailChartMarker[] | null
+  /** @deprecated Legacy compatibility for the current renderer. Prefer `series`. */
   series_keys?: string[]
   row_weight?: number
 }
@@ -70,6 +112,16 @@ export type DetailKlinePayload = {
   row_weights?: number[]
   watermark_name?: string
   watermark_code?: string
+}
+
+export function getDetailKlinePanelSeriesKeys(panel: DetailKlinePanel) {
+  if (panel.series?.length) {
+    const overlayKeys = panel.series.map((series) => series.key)
+    return panel.kind === 'candles'
+      ? ['open', 'high', 'low', 'close', ...overlayKeys]
+      : overlayKeys
+  }
+  return panel.series_keys ?? []
 }
 
 export type DetailStrategyTriggerRow = {

@@ -14,14 +14,17 @@ import {
 } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
+  getDetailKlinePanelSeriesKeys,
   getStockDetailCyq,
   getStockDetailRealtime,
   getStockDetailPage,
   getStockDetailStrategySnapshot,
+  type DetailChartMarker,
   type DetailCyqSnapshot,
   type DetailKlinePanel,
   type DetailKlineRow,
   type DetailKlinePayload,
+  type DetailChartSeries,
   type DetailOverview,
   type DetailPrevRankRow,
   type DetailSceneTriggerRow,
@@ -329,7 +332,7 @@ function isVolumeOverlayKey(key: string) {
   );
 }
 
-function formatSeriesLabel(key: string) {
+function getFallbackSeriesLabel(key: string) {
   if (key.toLowerCase() === "vol_sigma".toLowerCase()) {
     return "异动量能";
   }
@@ -357,7 +360,7 @@ function formatSeriesLabel(key: string) {
   return key;
 }
 
-function getSeriesColor(key: string, seriesIndex: number) {
+function getFallbackSeriesColor(key: string, seriesIndex: number) {
   if (key.toLowerCase() === "vol_sigma".toLowerCase()) {
     return "#7dd3fc";
   }
@@ -371,6 +374,91 @@ function getSeriesColor(key: string, seriesIndex: number) {
     return "#2ecc71";
   }
   return LINE_COLORS[seriesIndex % LINE_COLORS.length];
+}
+
+function getPanelSeries(panel: DetailKlinePanel): DetailChartSeries[] {
+  const fallbackSeries: DetailChartSeries[] = (panel.series_keys ?? [])
+    .filter((key) => !(panel.kind === "candles" && CANDLE_BASE_SERIES_KEYS.has(key)))
+    .map((key) => ({
+      key,
+      label: getFallbackSeriesLabel(key),
+      kind:
+        panel.kind === "brick"
+          ? "brick"
+          : panel.kind === "bar" && !isVolumeOverlayKey(key)
+            ? "bar"
+            : "line",
+      color: getFallbackSeriesColor(key, 0),
+    }));
+  const series = panel.series?.length ? panel.series : fallbackSeries;
+
+  return [...series].sort((left, right) => {
+    const leftOrder = left.draw_order ?? 0;
+    const rightOrder = right.draw_order ?? 0;
+    return leftOrder - rightOrder;
+  });
+}
+
+function findPanelSeries(panel: DetailKlinePanel, key: string) {
+  return getPanelSeries(panel).find((series) => series.key === key) ?? null;
+}
+
+function formatSeriesLabel(key: string, series?: DetailChartSeries | null) {
+  const label = series?.label?.trim();
+  return label ? label : getFallbackSeriesLabel(key);
+}
+
+function getSeriesColor(
+  key: string,
+  seriesIndex: number,
+  series?: DetailChartSeries | null,
+) {
+  return series?.color ?? getFallbackSeriesColor(key, seriesIndex);
+}
+
+function getSeriesColorForRow(
+  row: DetailKlineRow,
+  key: string,
+  seriesIndex: number,
+  series?: DetailChartSeries | null,
+  fallbackColor?: string,
+) {
+  const matchedRule = series?.color_when?.find(
+    (rule) => row[rule.when_key] === true,
+  );
+  return matchedRule?.color ?? fallbackColor ?? getSeriesColor(key, seriesIndex, series);
+}
+
+function getSeriesLineWidth(series?: DetailChartSeries | null) {
+  return series?.line_width !== null &&
+    series?.line_width !== undefined &&
+    Number.isFinite(series.line_width)
+    ? series.line_width
+    : undefined;
+}
+
+function getSeriesOpacity(series?: DetailChartSeries | null) {
+  return series?.opacity !== null &&
+    series?.opacity !== undefined &&
+    Number.isFinite(series.opacity)
+    ? series.opacity
+    : undefined;
+}
+
+function getSeriesBaseValue(series?: DetailChartSeries | null) {
+  return series?.base_value !== null &&
+    series?.base_value !== undefined &&
+    Number.isFinite(series.base_value)
+    ? series.base_value
+    : 0;
+}
+
+function isMainChartPanel(panel: DetailKlinePanel) {
+  return panel.role === "main" || panel.key === "price" || panel.kind === "candles";
+}
+
+function isInteractivePricePanel(panel: DetailKlinePanel) {
+  return panel.key === "price";
 }
 
 function getRealtimeSeriesColor(row: DetailKlineRow, fallbackColor: string) {
@@ -1120,7 +1208,7 @@ function buildDetailTooltipRows(
     return [];
   }
 
-  if (panel.key === "price" || panel.kind === "candles") {
+  if (isMainChartPanel(panel)) {
     const prevClose =
       absoluteIndex !== null && absoluteIndex > 0
         ? getNumericField(allItems[absoluteIndex - 1], "close")
@@ -1140,10 +1228,10 @@ function buildDetailTooltipRows(
       rows.push({ label: "排名", value: rankValue });
     }
 
-    const overlayRows = (panel.series_keys ?? [])
+    const overlayRows = getDetailKlinePanelSeriesKeys(panel)
       .filter((key) => !CANDLE_BASE_SERIES_KEYS.has(key))
       .map((key) => ({
-        label: formatSeriesLabel(key),
+        label: formatSeriesLabel(key, findPanelSeries(panel, key)),
         value: formatFieldValue(item[key]),
       }))
       .filter((row) => row.value !== "--");
@@ -1174,7 +1262,7 @@ function buildDetailTooltipRows(
     ];
   }
 
-  if (panel.key === "volume" || panel.kind === "bar") {
+  if (panel.kind === "bar") {
     const prevVol =
       absoluteIndex !== null && absoluteIndex > 0
         ? getNumericField(allItems[absoluteIndex - 1], "vol")
@@ -1184,11 +1272,11 @@ function buildDetailTooltipRows(
       prevVol !== null && prevVol !== 0 && currentVol !== null
         ? currentVol / prevVol
         : null;
-    const overlayRows = (panel.series_keys ?? [])
-      .filter((key) => isVolumeOverlayKey(key))
-      .map((key) => ({
-        label: formatSeriesLabel(key),
-        value: formatFieldValue(item[key]),
+    const overlayRows = getPanelSeries(panel)
+      .filter((series) => series.kind === "line")
+      .map((series) => ({
+        label: formatSeriesLabel(series.key, series),
+        value: formatFieldValue(item[series.key]),
       }))
       .filter((row) => row.value !== "--");
 
@@ -1204,10 +1292,13 @@ function buildDetailTooltipRows(
     ];
   }
 
-  if (panel.key === "brick" || panel.kind === "brick") {
+  if (panel.kind === "brick") {
+    const brickKey =
+      getPanelSeries(panel).find((series) => series.kind === "brick")?.key ??
+      "brick";
     const prevBrick =
       absoluteIndex !== null && absoluteIndex > 0
-        ? getNumericField(allItems[absoluteIndex - 1], "brick")
+        ? getNumericField(allItems[absoluteIndex - 1], brickKey)
         : null;
 
     return [
@@ -1215,18 +1306,18 @@ function buildDetailTooltipRows(
         key: `${panel.key}-raw`,
         rows: [
           { label: "开", value: formatFieldValue(prevBrick) },
-          { label: "收", value: formatFieldValue(item.brick) },
+          { label: "收", value: formatFieldValue(item[brickKey]) },
         ],
       },
     ];
   }
 
-  const seriesKeys = panel.series_keys?.length ? panel.series_keys : [];
+  const seriesKeys = getDetailKlinePanelSeriesKeys(panel);
   return [
     {
       key: `${panel.key}-raw`,
       rows: seriesKeys.map((key) => ({
-        label: formatSeriesLabel(key),
+        label: formatSeriesLabel(key, findPanelSeries(panel, key)),
         value: formatFieldValue(item[key]),
       })),
     },
@@ -1314,29 +1405,10 @@ function buildDefaultPanels() {
     {
       key: "price",
       label: "主K",
+      role: "main",
       kind: "candles",
-      series_keys: [
-        "open",
-        "high",
-        "low",
-        "close",
-        "duokong_short",
-        "duokong_long",
-      ],
+      series_keys: ["open", "high", "low", "close"],
     },
-    {
-      key: "indicator",
-      label: "指标",
-      kind: "line",
-      series_keys: ["j", "bupiao_long", "bupiao_short"],
-    },
-    {
-      key: "volume",
-      label: "量能",
-      kind: "bar",
-      series_keys: ["vol", ...VOLUME_OVERLAY_KEYS],
-    },
-    { key: "brick", label: "砖型图", kind: "brick", series_keys: ["brick"] },
   ] satisfies DetailKlinePanel[];
 }
 
@@ -1352,7 +1424,7 @@ function buildChartTemplateRows(
   }
 
   const matchedMainPanelIndex = panels.findIndex(
-    (panel) => panel.key === "price" || panel.kind === "candles",
+    (panel) => isMainChartPanel(panel),
   );
   const mainPanelIndex = matchedMainPanelIndex >= 0 ? matchedMainPanelIndex : 0;
   const indicatorIndices = panels
@@ -1892,6 +1964,115 @@ function buildBrickBodies(
   return bodies;
 }
 
+function getMarkerYValue(row: DetailKlineRow, marker: DetailChartMarker) {
+  const key = marker.y_key?.trim();
+  if (!key) {
+    return getNumericField(row, "close");
+  }
+
+  const normalizedKey = key.toLowerCase();
+  const mappedKey =
+    normalizedKey === "o" || normalizedKey === "open"
+      ? "open"
+      : normalizedKey === "h" || normalizedKey === "high"
+        ? "high"
+        : normalizedKey === "l" || normalizedKey === "low"
+          ? "low"
+          : normalizedKey === "c" || normalizedKey === "close"
+            ? "close"
+            : normalizedKey === "v" || normalizedKey === "vol"
+              ? "vol"
+              : key;
+  return getNumericField(row, mappedKey);
+}
+
+function buildChartMarkerNodes(
+  panel: DetailKlinePanel,
+  items: DetailKlineRow[],
+  xAt: (itemIndex: number) => number,
+  yAt: (value: number) => number,
+) {
+  const markers = panel.markers ?? [];
+  if (markers.length === 0) {
+    return [];
+  }
+
+  return markers.flatMap((marker) =>
+    items.flatMap((row, itemIndex) => {
+      if (row[marker.when_key] !== true) {
+        return [];
+      }
+      const value = getMarkerYValue(row, marker);
+      if (value === null) {
+        return [];
+      }
+
+      const x = xAt(itemIndex);
+      const baseY = yAt(value);
+      const position = marker.position ?? "value";
+      const y =
+        position === "above"
+          ? baseY - 10
+          : position === "below"
+            ? baseY + 10
+            : baseY;
+      const color = marker.color ?? CANDLE_UP_COLOR;
+      const key = `${panel.key}-${marker.key}-${row.trade_date}`;
+
+      if (marker.shape === "triangle_up") {
+        return [
+          <path
+            className="details-chart-marker"
+            key={key}
+            d={`M ${x} ${y - 5} L ${x - 5} ${y + 5} L ${x + 5} ${y + 5} Z`}
+            fill={color}
+          />,
+        ];
+      }
+      if (marker.shape === "triangle_down") {
+        return [
+          <path
+            className="details-chart-marker"
+            key={key}
+            d={`M ${x} ${y + 5} L ${x - 5} ${y - 5} L ${x + 5} ${y - 5} Z`}
+            fill={color}
+          />,
+        ];
+      }
+      if (marker.shape === "flag" || marker.text) {
+        return [
+          <g className="details-chart-marker" key={key}>
+            <circle cx={x} cy={y} r={5} fill={color} />
+            {marker.text ? (
+              <text
+                x={x}
+                y={y - 8}
+                fill={color}
+                fontSize="11"
+                fontWeight="700"
+                textAnchor="middle"
+              >
+                {marker.text}
+              </text>
+            ) : null}
+          </g>,
+        ];
+      }
+
+      return [
+        <circle
+          className="details-chart-marker"
+          key={key}
+          cx={x}
+          cy={y}
+          r={4}
+          fill={color}
+        />,
+      ];
+    }),
+  );
+}
+
 function renderChartPanel(
   panel: DetailKlinePanel,
   items: DetailKlineRow[],
@@ -1930,6 +2111,7 @@ function renderChartPanel(
   isCyqPanelVisible: boolean,
   selectedCyqSnapshot: DetailCyqSnapshot | null,
   selectedCyqTradeDate: string | null,
+  reserveCyqPanelWidthForAllPanels: boolean,
   chipToggleButton: ReactNode,
   watchObserveButton: ReactNode,
   chartIntervalSelection: ResolvedIntervalRestore | null,
@@ -1939,16 +2121,18 @@ function renderChartPanel(
   onCloseChartIntervalPanel: () => void,
 ) {
   const kind = panel.kind ?? "line";
+  const isMainPanel = isMainChartPanel(panel);
+  const panelSeries = getPanelSeries(panel);
   const showDateAxis = index === panelCount - 1;
-  const seriesKeys = panel.series_keys?.length ? panel.series_keys : [];
-  const candleOverlayKeys =
-    kind === "candles"
-      ? seriesKeys.filter((key) => !CANDLE_BASE_SERIES_KEYS.has(key))
-      : [];
-  const headerSeriesKeys = kind === "candles" ? candleOverlayKeys : seriesKeys;
-  const reserveCyqPanelWidth =
-    isCyqPanelVisible && (selectedCyqSnapshot?.bins.length ?? 0) > 0;
-  const showCyqPanel = panel.key === "price" && reserveCyqPanelWidth;
+  const seriesKeys = getDetailKlinePanelSeriesKeys(panel);
+  const candleOverlaySeries = kind === "candles" ? panelSeries : [];
+  const candleOverlayKeys = candleOverlaySeries.map((series) => series.key);
+  const headerSeries = kind === "candles" ? candleOverlaySeries : panelSeries;
+  const reserveCyqPanelWidth = reserveCyqPanelWidthForAllPanels;
+  const showCyqPanel =
+    isInteractivePricePanel(panel) &&
+    isCyqPanelVisible &&
+    reserveCyqPanelWidthForAllPanels;
   const klinePlotWidth = getChartKlinePlotWidth(reserveCyqPanelWidth);
   const plotRight = CHART_VIEWBOX_WIDTH - CHART_MARGIN.right;
   const klinePlotRight = getChartKlinePlotRight(reserveCyqPanelWidth);
@@ -1989,10 +2173,9 @@ function renderChartPanel(
     (focusXPercent ?? 0) > CHART_TOOLTIP_LEFT_THRESHOLD
       ? "details-chart-tooltip-left"
       : "details-chart-tooltip-right";
-  const activeIntervalSelection =
-    panel.key === "price"
-      ? chartIntervalDraftSelection ?? chartIntervalSelection
-      : null;
+  const activeIntervalSelection = isInteractivePricePanel(panel)
+    ? chartIntervalDraftSelection ?? chartIntervalSelection
+    : null;
   const intervalStartVisibleIndex =
     activeIntervalSelection &&
     activeIntervalSelection.startAbsoluteIndex >= effectiveVisibleStart &&
@@ -2005,16 +2188,15 @@ function renderChartPanel(
     activeIntervalSelection.endAbsoluteIndex < effectiveVisibleStart + items.length
       ? activeIntervalSelection.endAbsoluteIndex - effectiveVisibleStart
       : null;
-  const intervalSelectionBounds =
-    panel.key === "price"
-      ? buildIntervalSelectionBounds(
-          intervalStartVisibleIndex,
-          intervalEndVisibleIndex,
-          xAt,
-          step,
-          kind === "candles" && !chartIntervalDraftSelection,
-        )
-      : null;
+  const intervalSelectionBounds = isInteractivePricePanel(panel)
+    ? buildIntervalSelectionBounds(
+        intervalStartVisibleIndex,
+        intervalEndVisibleIndex,
+        xAt,
+        step,
+        kind === "candles" && !chartIntervalDraftSelection,
+      )
+    : null;
   const intervalSelectionLeftPercent = intervalSelectionBounds?.leftPercent ?? null;
   const intervalSelectionWidthPercent = intervalSelectionBounds?.widthPercent ?? null;
   const intervalPanelXPercent = intervalSelectionBounds?.centerPercent ?? null;
@@ -2023,7 +2205,11 @@ function renderChartPanel(
       ? "details-chart-tooltip-left"
       : "details-chart-tooltip-right";
   const showDefaultTooltip =
-    !(panel.key === "price" && chartIntervalPanelOpen && intervalStatsSections.length > 0);
+    !(
+      isInteractivePricePanel(panel) &&
+      chartIntervalPanelOpen &&
+      intervalStatsSections.length > 0
+    );
   const tooltipSections =
     showDefaultTooltip && isActivePanel && activeVisibleIndex !== null
       ? buildDetailTooltipRows(
@@ -2035,7 +2221,7 @@ function renderChartPanel(
         )
       : [];
   const rankMarkerPoints =
-    panel.key === "price" && rankMarkerThreshold > 0
+    isInteractivePricePanel(panel) && rankMarkerThreshold > 0
       ? items.flatMap((row, itemIndex) => {
           const rankValue = rankNumberLookup.get(row.trade_date);
           if (rankValue === undefined || rankValue > rankMarkerThreshold) {
@@ -2134,6 +2320,7 @@ function renderChartPanel(
       });
 
       const overlayNodes = candleOverlayKeys.map((key, seriesIndex) => {
+        const series = findPanelSeries(panel, key);
         const segments = buildLineSegments(items, key, xAt, yAt);
         if (segments.length === 0) {
           return null;
@@ -2146,7 +2333,9 @@ function renderChartPanel(
                 className="details-chart-line-path details-chart-line-path-main"
                 key={`${key}-${segmentIndex}`}
                 d={buildLinePath(segment)}
-                stroke={getSeriesColor(key, seriesIndex)}
+                stroke={getSeriesColor(key, seriesIndex, series)}
+                strokeWidth={getSeriesLineWidth(series)}
+                opacity={getSeriesOpacity(series)}
               />
             ))}
           </g>
@@ -2225,7 +2414,8 @@ function renderChartPanel(
         }
       }
 
-      svgContent = [...candleNodes, ...overlayNodes, cyqSvgContent];
+      const markerNodes = buildChartMarkerNodes(panel, items, xAt, yAt);
+      svgContent = [...candleNodes, ...overlayNodes, ...markerNodes, cyqSvgContent];
     }
   } else if (kind === "line") {
     const values = items.flatMap((row) =>
@@ -2244,7 +2434,8 @@ function renderChartPanel(
           (currentDomain.max - currentDomain.min)) *
           plotHeight;
 
-      svgContent = seriesKeys.map((key, seriesIndex) => {
+      const lineNodes = panelSeries.map((series, seriesIndex) => {
+        const key = series.key;
         const segments = buildLineSegments(items, key, xAt, yAt);
 
         return (
@@ -2254,20 +2445,21 @@ function renderChartPanel(
                 className="details-chart-line-path details-chart-line-path-indicator"
                 key={`${key}-${segmentIndex}`}
                 d={buildLinePath(segment)}
-                stroke={getSeriesColor(key, seriesIndex)}
+                stroke={getSeriesColor(key, seriesIndex, series)}
+                strokeWidth={getSeriesLineWidth(series)}
+                opacity={getSeriesOpacity(series)}
               />
             ))}
           </g>
         );
       });
+      const markerNodes = buildChartMarkerNodes(panel, items, xAt, yAt);
+      svgContent = [...lineNodes, ...markerNodes];
     }
   } else if (kind === "bar") {
-    const primaryBarKey =
-      seriesKeys.find((key) => !isVolumeOverlayKey(key)) ?? null;
-    const overlayLineKeys =
-      panel.key === "volume"
-        ? seriesKeys.filter((key) => isVolumeOverlayKey(key))
-        : [];
+    const primaryBarSeries = panelSeries.find((series) => series.kind === "bar") ?? null;
+    const primaryBarKey = primaryBarSeries?.key ?? null;
+    const overlayLineSeries = panelSeries.filter((series) => series.kind === "line");
     const values = items.flatMap((row) =>
       seriesKeys.flatMap((key) => {
         const value = getNumericField(row, key);
@@ -2275,7 +2467,8 @@ function renderChartPanel(
       }),
     );
 
-    domain = buildDomain(values, true);
+    const baseValue = getSeriesBaseValue(primaryBarSeries);
+    domain = buildDomain([...values, baseValue]);
     if (domain) {
       const currentDomain = domain;
       const yAt = (value: number) =>
@@ -2283,7 +2476,7 @@ function renderChartPanel(
         ((currentDomain.max - value) /
           (currentDomain.max - currentDomain.min)) *
           plotHeight;
-      zeroY = yAt(0);
+      zeroY = yAt(baseValue);
       const zeroBaseline = zeroY;
       const barWidth = Math.max(Math.min(step * 0.72, 18), 3);
 
@@ -2307,7 +2500,10 @@ function renderChartPanel(
                 ? CANDLE_DOWN_COLOR
                 : CANDLE_FLAT_COLOR
             : CANDLE_FLAT_COLOR;
-        const resolvedColor = getRealtimeSeriesColor(row, color);
+        const protocolColor = primaryBarKey
+          ? getSeriesColorForRow(row, primaryBarKey, 0, primaryBarSeries, color)
+          : color;
+        const resolvedColor = getRealtimeSeriesColor(row, protocolColor);
         const x = xAt(itemIndex);
         const y = Math.min(yAt(value), zeroBaseline);
         const height = Math.max(Math.abs(zeroBaseline - yAt(value)), 1);
@@ -2326,26 +2522,30 @@ function renderChartPanel(
         );
       });
       const overlayNodes =
-        overlayLineKeys.flatMap((overlayLineKey, overlayIndex) =>
+        overlayLineSeries.flatMap((overlaySeries, overlayIndex) =>
           buildLineSegments(
             items,
-            overlayLineKey,
+            overlaySeries.key,
             xAt,
             yAt,
           ).map((segment, segmentIndex) => (
             <path
               className="details-chart-line-path details-chart-line-path-indicator"
-              key={`${panel.key}-${overlayLineKey}-${segmentIndex}`}
+              key={`${panel.key}-${overlaySeries.key}-${segmentIndex}`}
               d={buildLinePath(segment)}
-              stroke={getSeriesColor(overlayLineKey, overlayIndex + 1)}
+              stroke={getSeriesColor(overlaySeries.key, overlayIndex + 1, overlaySeries)}
+              strokeWidth={getSeriesLineWidth(overlaySeries)}
+              opacity={getSeriesOpacity(overlaySeries)}
             />
           )),
         );
 
-      svgContent = [...barNodes, ...overlayNodes];
+      const markerNodes = buildChartMarkerNodes(panel, items, xAt, yAt);
+      svgContent = [...barNodes, ...overlayNodes, ...markerNodes];
     }
   } else if (kind === "brick") {
-    const brickKey = seriesKeys[0] ?? "brick";
+    const brickSeries = panelSeries.find((series) => series.kind === "brick") ?? null;
+    const brickKey = brickSeries?.key ?? seriesKeys[0] ?? "brick";
     const previousRow =
       effectiveVisibleStart > 0
         ? allItems[effectiveVisibleStart - 1] ?? null
@@ -2373,7 +2573,7 @@ function renderChartPanel(
           plotHeight;
       const bodyWidth = Math.max(Math.min(step * 0.72, 22), 4);
 
-      svgContent = bodies.map((body) => {
+      const brickNodes = bodies.map((body) => {
         const x = xAt(body.item_index);
         const openY = yAt(body.open);
         const closeY = yAt(body.close);
@@ -2387,13 +2587,20 @@ function renderChartPanel(
             : body.close < body.open
               ? "down"
               : "flat";
-        const color =
+        const fallbackColor =
           direction === "up"
             ? CANDLE_UP_COLOR
             : direction === "down"
               ? CANDLE_DOWN_COLOR
               : CANDLE_FLAT_COLOR;
         const sourceRow = items[body.item_index];
+        const color = getSeriesColorForRow(
+          sourceRow,
+          brickKey,
+          0,
+          brickSeries,
+          fallbackColor,
+        );
         const resolvedColor = getRealtimeDirectionalColor(
           sourceRow,
           color,
@@ -2423,6 +2630,8 @@ function renderChartPanel(
           </g>
         );
       });
+      const markerNodes = buildChartMarkerNodes(panel, items, xAt, yAt);
+      svgContent = [...brickNodes, ...markerNodes];
     }
   }
 
@@ -2459,15 +2668,15 @@ function renderChartPanel(
       <header className="details-chart-panel-head">
         <div className="details-chart-panel-head-main">
           <strong>{panel.label}</strong>
-          {headerSeriesKeys.length > 0 ? (
+          {headerSeries.length > 0 ? (
             <div className="details-chart-panel-head-series">
-              {headerSeriesKeys.map((seriesKey, seriesIndex) => (
+              {headerSeries.map((series, seriesIndex) => (
                 <span
                   className="details-chart-panel-head-series-tag"
-                  key={`${panel.key}-${seriesKey}`}
-                  style={{ color: getSeriesColor(seriesKey, seriesIndex) }}
+                  key={`${panel.key}-${series.key}`}
+                  style={{ color: getSeriesColor(series.key, seriesIndex, series) }}
                 >
-                  {formatSeriesLabel(seriesKey)}
+                  {formatSeriesLabel(series.key, series)}
                 </span>
               ))}
             </div>
@@ -2496,8 +2705,8 @@ function renderChartPanel(
           </div>
         ) : null}
 
-        {panel.key === "price" ? chipToggleButton : null}
-        {panel.key === "price" ? watchObserveButton : null}
+        {isInteractivePricePanel(panel) ? chipToggleButton : null}
+        {isInteractivePricePanel(panel) ? watchObserveButton : null}
 
         {domain && svgContent ? (
           <svg
@@ -2602,7 +2811,8 @@ function renderChartPanel(
             </div>
           ) : null}
 
-          {panel.key === "price" &&
+          {isMainPanel &&
+          isInteractivePricePanel(panel) &&
           intervalSelectionLeftPercent !== null &&
           intervalSelectionWidthPercent !== null ? (
             <div
@@ -2683,7 +2893,8 @@ function renderChartPanel(
           ) : null}
         </div>
 
-        {panel.key === "price" &&
+        {isMainPanel &&
+        isInteractivePricePanel(panel) &&
         chartIntervalSelection &&
         chartIntervalPanelOpen &&
         intervalStatsSections.length > 0 &&
@@ -4207,6 +4418,10 @@ export default function DetailsPage({
     totalChartItems,
   );
   const panels = kline?.panels?.length ? kline.panels : buildDefaultPanels();
+  const shouldReserveCyqPanelWidth =
+    detailCyqVisible &&
+    (selectedCyqSnapshot?.bins.length ?? 0) > 0 &&
+    panels.some((panel) => isInteractivePricePanel(panel));
   const chartMainPanelHeight = chartLayoutWidth * chartMainWidthRatio;
   const chartIndicatorTotalHeight = chartLayoutWidth * chartIndicatorWidthRatio;
   const chartMinHeight =
@@ -4802,15 +5017,13 @@ export default function DetailsPage({
     clientY: number,
     pinned: boolean,
   ) {
-    const reserveCyqPanelWidth =
-      detailCyqVisible && (selectedCyqSnapshot?.bins.length ?? 0) > 0;
     const pointer = buildChartPointerSnapshot(
       viewport,
       clientX,
       clientY,
       chartItems.length,
       chartLayoutSlotCount,
-      reserveCyqPanelWidth,
+      shouldReserveCyqPanelWidth,
     );
     if (!pointer) {
       return null;
@@ -4831,15 +5044,13 @@ export default function DetailsPage({
     clientY: number,
     anchorAbsoluteIndex: number,
   ) {
-    const reserveCyqPanelWidth =
-      detailCyqVisible && (selectedCyqSnapshot?.bins.length ?? 0) > 0;
     const pointer = buildChartPointerSnapshot(
       viewport,
       clientX,
       clientY,
       chartItems.length,
       chartLayoutSlotCount,
-      reserveCyqPanelWidth,
+      shouldReserveCyqPanelWidth,
     );
     if (!pointer) {
       return null;
@@ -4859,15 +5070,13 @@ export default function DetailsPage({
     fixedAbsoluteIndex: number,
     side: ChartIntervalAdjustSide,
   ) {
-    const reserveCyqPanelWidth =
-      detailCyqVisible && (selectedCyqSnapshot?.bins.length ?? 0) > 0;
     const pointer = buildChartPointerSnapshot(
       viewport,
       clientX,
       clientY,
       chartItems.length,
       chartLayoutSlotCount,
-      reserveCyqPanelWidth,
+      shouldReserveCyqPanelWidth,
     );
     if (!pointer) {
       return null;
@@ -4908,8 +5117,6 @@ export default function DetailsPage({
     const mode =
       panelKey === "price" && chartIntervalMode
         ? (() => {
-            const reserveCyqPanelWidth =
-              detailCyqVisible && (selectedCyqSnapshot?.bins.length ?? 0) > 0;
             const adjustSide = detectChartIntervalAdjustSide(
               event.currentTarget,
               event.clientX,
@@ -4917,7 +5124,7 @@ export default function DetailsPage({
               effectiveVisibleStart,
               chartItems.length,
               chartLayoutSlotCount,
-              reserveCyqPanelWidth,
+              shouldReserveCyqPanelWidth,
             );
             if (adjustSide && chartIntervalSelection) {
               anchorAbsoluteIndex =
@@ -4938,7 +5145,7 @@ export default function DetailsPage({
               event.clientY,
               chartItems.length,
               chartLayoutSlotCount,
-              reserveCyqPanelWidth,
+              shouldReserveCyqPanelWidth,
             );
             if (!pointer) {
               return "interval-select" as const;
@@ -5904,6 +6111,7 @@ export default function DetailsPage({
               detailCyqVisible,
               selectedCyqSnapshot,
               selectedCyqTradeDate,
+              shouldReserveCyqPanelWidth,
               null,
               <div className="details-chart-watch-action">
                 <div className="details-chart-watch-row">

@@ -9,11 +9,15 @@ use serde::Serialize;
 
 use crate::{
     data::{RowData, ScoreConfig},
-    data::{cyq_db_path, ind_toml_path, result_db_path, score_rule_path, source_db_path},
-    download::ind_calc::{cache_ind_build_from_path, calc_inds_with_cache_lossy},
+    data::{cyq_db_path, result_db_path, score_rule_path, source_db_path},
     ui_tools_feat::{
         build_area_map, build_circ_mv_map, build_concepts_map, build_industry_map,
         build_most_related_concept_map, build_name_map, build_total_mv_map,
+        chart_indicator::{
+            ChartMarkerPosition, ChartMarkerShape, ChartPanelKind, ChartPanelRole,
+            ChartSeriesKind, CompiledChartIndicatorConfig, execute_chart_indicator_config,
+            load_compiled_chart_indicator_config,
+        },
         realtime::{RealtimeFetchMeta, fetch_realtime_quote_map, normalize_quote_trade_date},
         stock_similarity::{StockSimilarityPageData, get_stock_similarity_page_with_conn},
     },
@@ -21,7 +25,6 @@ use crate::{
 };
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
-const DEFAULT_ROW_WEIGHTS: [u32; 4] = [46, 18, 18, 18];
 
 #[derive(Debug, Serialize)]
 pub struct DetailOverview {
@@ -57,25 +60,55 @@ pub struct DetailKlineRow {
     pub vol: Option<f64>,
     pub amount: Option<f64>,
     pub tor: Option<f64>,
-    pub brick: Option<f64>,
-    pub j: Option<f64>,
-    pub duokong_short: Option<f64>,
-    pub duokong_long: Option<f64>,
-    pub bupiao_short: Option<f64>,
-    pub bupiao_long: Option<f64>,
-    #[serde(rename = "VOL_SIGMA")]
-    pub vol_sigma: Option<f64>,
     pub is_realtime: Option<bool>,
     pub realtime_color_hint: Option<String>,
+    #[serde(flatten)]
+    pub indicators: HashMap<String, serde_json::Value>,
+    #[serde(skip)]
+    runtime_values: HashMap<String, Option<f64>>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct DetailKlinePanel {
     pub key: String,
     pub label: String,
+    pub role: Option<String>,
     pub kind: Option<String>,
+    pub series: Option<Vec<DetailKlineSeries>>,
+    pub markers: Option<Vec<DetailKlineMarker>>,
     pub series_keys: Option<Vec<String>>,
     pub row_weight: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DetailKlineSeries {
+    pub key: String,
+    pub label: Option<String>,
+    pub kind: String,
+    pub draw_order: Option<i32>,
+    pub color: Option<String>,
+    pub color_when: Option<Vec<DetailKlineColorRule>>,
+    pub line_width: Option<f64>,
+    pub opacity: Option<f64>,
+    pub base_value: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DetailKlineMarker {
+    pub key: String,
+    pub label: Option<String>,
+    pub when_key: String,
+    pub y_key: Option<String>,
+    pub position: Option<String>,
+    pub shape: Option<String>,
+    pub color: Option<String>,
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DetailKlineColorRule {
+    pub when_key: String,
+    pub color: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -639,186 +672,393 @@ fn build_basic_detail_overview(
     }
 }
 
+#[cfg(test)]
 fn default_kline_panels() -> Vec<DetailKlinePanel> {
-    vec![
-        DetailKlinePanel {
-            key: "price".to_string(),
-            label: "主K".to_string(),
-            kind: Some("candles".to_string()),
-            series_keys: Some(vec![
-                "open".to_string(),
-                "high".to_string(),
-                "low".to_string(),
-                "close".to_string(),
-                "duokong_short".to_string(),
-                "duokong_long".to_string(),
-            ]),
-            row_weight: Some(DEFAULT_ROW_WEIGHTS[0]),
-        },
-        DetailKlinePanel {
-            key: "indicator".to_string(),
-            label: "指标".to_string(),
-            kind: Some("line".to_string()),
-            series_keys: Some(vec![
-                "j".to_string(),
-                "bupiao_long".to_string(),
-                "bupiao_short".to_string(),
-            ]),
-            row_weight: Some(DEFAULT_ROW_WEIGHTS[1]),
-        },
-        DetailKlinePanel {
-            key: "volume".to_string(),
-            label: "量能".to_string(),
-            kind: Some("bar".to_string()),
-            series_keys: Some(vec!["vol".to_string(), "VOL_SIGMA".to_string()]),
-            row_weight: Some(DEFAULT_ROW_WEIGHTS[2]),
-        },
-        DetailKlinePanel {
-            key: "brick".to_string(),
-            label: "砖型图".to_string(),
-            kind: Some("brick".to_string()),
-            series_keys: Some(vec!["brick".to_string()]),
-            row_weight: Some(DEFAULT_ROW_WEIGHTS[3]),
-        },
-    ]
+    let config = crate::ui_tools_feat::chart_indicator::load_chart_indicator_config("")
+        .unwrap_or_else(|_| {
+            crate::ui_tools_feat::chart_indicator::default_chart_indicator_config()
+        });
+    let compiled =
+        crate::ui_tools_feat::chart_indicator::compile_chart_indicator_config(&config, None)
+            .expect("default chart indicator config should compile");
+    detail_kline_panels_from_compiled(&compiled)
+}
+
+fn detail_kline_panels_from_compiled(
+    compiled: &CompiledChartIndicatorConfig,
+) -> Vec<DetailKlinePanel> {
+    compiled
+        .panels
+        .iter()
+        .map(|panel| {
+            let series = panel
+                .series
+                .iter()
+                .map(|series| DetailKlineSeries {
+                    key: series.key.clone(),
+                    label: series.render.label.clone(),
+                    kind: chart_series_kind_name(series.render.kind).to_string(),
+                    draw_order: series.render.draw_order,
+                    color: series.render.color.clone(),
+                    color_when: if series.color_rules.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            series
+                                .color_rules
+                                .iter()
+                                .map(|rule| DetailKlineColorRule {
+                                    when_key: rule.when_key.clone(),
+                                    color: rule.color.clone(),
+                                })
+                                .collect(),
+                        )
+                    },
+                    line_width: series.render.line_width,
+                    opacity: series.render.opacity,
+                    base_value: series.render.base_value,
+                })
+                .collect::<Vec<_>>();
+            let markers = panel
+                .markers
+                .iter()
+                .map(|marker| DetailKlineMarker {
+                    key: marker.key.clone(),
+                    label: marker.render.label.clone(),
+                    when_key: marker.when_key.clone(),
+                    y_key: marker.y_key.clone(),
+                    position: marker
+                        .render
+                        .position
+                        .map(chart_marker_position_name)
+                        .map(str::to_string),
+                    shape: marker
+                        .render
+                        .shape
+                        .map(chart_marker_shape_name)
+                        .map(str::to_string),
+                    color: marker.render.color.clone(),
+                    text: marker.render.text.clone(),
+                })
+                .collect::<Vec<_>>();
+            let mut series_keys = if panel.kind == ChartPanelKind::Candles {
+                vec![
+                    "open".to_string(),
+                    "high".to_string(),
+                    "low".to_string(),
+                    "close".to_string(),
+                ]
+            } else {
+                Vec::new()
+            };
+            series_keys.extend(panel.series.iter().map(|series| series.key.clone()));
+
+            DetailKlinePanel {
+                key: panel.key.clone(),
+                label: panel.label.clone(),
+                role: Some(chart_panel_role_name(panel.role).to_string()),
+                kind: Some(chart_panel_kind_name(panel.kind).to_string()),
+                series: Some(series),
+                markers: Some(markers),
+                series_keys: Some(series_keys),
+                row_weight: panel.row_weight,
+            }
+        })
+        .collect()
+}
+
+fn chart_panel_role_name(role: ChartPanelRole) -> &'static str {
+    match role {
+        ChartPanelRole::Main => "main",
+        ChartPanelRole::Sub => "sub",
+    }
+}
+
+fn chart_panel_kind_name(kind: ChartPanelKind) -> &'static str {
+    match kind {
+        ChartPanelKind::Candles => "candles",
+        ChartPanelKind::Line => "line",
+        ChartPanelKind::Bar => "bar",
+        ChartPanelKind::Brick => "brick",
+    }
+}
+
+fn chart_series_kind_name(kind: ChartSeriesKind) -> &'static str {
+    match kind {
+        ChartSeriesKind::Line => "line",
+        ChartSeriesKind::Bar => "bar",
+        ChartSeriesKind::Histogram => "histogram",
+        ChartSeriesKind::Area => "area",
+        ChartSeriesKind::Band => "band",
+        ChartSeriesKind::Brick => "brick",
+    }
+}
+
+fn chart_marker_position_name(position: ChartMarkerPosition) -> &'static str {
+    match position {
+        ChartMarkerPosition::Above => "above",
+        ChartMarkerPosition::Below => "below",
+        ChartMarkerPosition::Value => "value",
+    }
+}
+
+fn chart_marker_shape_name(shape: ChartMarkerShape) -> &'static str {
+    match shape {
+        ChartMarkerShape::Dot => "dot",
+        ChartMarkerShape::TriangleUp => "triangle_up",
+        ChartMarkerShape::TriangleDown => "triangle_down",
+        ChartMarkerShape::Flag => "flag",
+    }
+}
+
+fn load_stock_data_columns(source_conn: &Connection) -> Result<HashSet<String>, String> {
+    let mut stmt = source_conn
+        .prepare("DESCRIBE stock_data")
+        .map_err(|e| format!("预编译 stock_data 列查询失败: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("查询 stock_data 列失败: {e}"))?;
+    let mut columns = HashSet::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取 stock_data 列失败: {e}"))?
+    {
+        let name: String = row
+            .get(0)
+            .map_err(|e| format!("读取 stock_data 列名失败: {e}"))?;
+        columns.insert(name);
+    }
+    Ok(columns)
+}
+
+fn build_case_insensitive_column_lookup(columns: &HashSet<String>) -> HashMap<String, String> {
+    columns
+        .iter()
+        .map(|column| (column.to_ascii_lowercase(), column.clone()))
+        .collect()
+}
+
+fn resolve_kline_base_columns(
+    column_lookup: &HashMap<String, String>,
+) -> Result<Vec<(String, String)>, String> {
+    let pairs = [
+        ("open", "O"),
+        ("high", "H"),
+        ("low", "L"),
+        ("close", "C"),
+        ("vol", "V"),
+        ("amount", "AMOUNT"),
+        ("pre_close", "PRE_CLOSE"),
+        ("change", "CHANGE"),
+        ("pct_chg", "PCT_CHG"),
+        ("tor", "TOR"),
+    ];
+
+    pairs
+        .into_iter()
+        .map(|(db_col, runtime_key)| {
+            let Some(actual) = column_lookup.get(db_col).cloned() else {
+                return Err(format!("stock_data 缺少基础列: {db_col}"));
+            };
+            Ok((actual, runtime_key.to_string()))
+        })
+        .collect()
+}
+
+fn quote_sql_ident(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn apply_chart_indicator_execution(
+    items: &mut [DetailKlineRow],
+    values: HashMap<String, Vec<serde_json::Value>>,
+) {
+    for (key, series) in values {
+        if is_fixed_kline_output_key(&key) {
+            continue;
+        }
+        for (item, value) in items.iter_mut().zip(series) {
+            item.indicators.insert(key.clone(), value);
+        }
+    }
+}
+
+fn is_fixed_kline_output_key(key: &str) -> bool {
+    matches!(
+        key.trim().to_ascii_lowercase().as_str(),
+        "trade_date"
+            | "open"
+            | "high"
+            | "low"
+            | "close"
+            | "vol"
+            | "amount"
+            | "tor"
+            | "is_realtime"
+            | "realtime_color_hint"
+    )
 }
 
 fn query_kline(
     source_conn: &Connection,
+    source_path: &str,
     ts_code: &str,
     default_window_days: usize,
     watermark_name: Option<String>,
 ) -> Result<DetailKlinePayload, String> {
-    let mut stmt = source_conn
-        .prepare(
-            r#"
+    let db_columns = load_stock_data_columns(source_conn)?;
+    let compiled = load_compiled_chart_indicator_config(source_path, Some(&db_columns))?;
+    let panels = detail_kline_panels_from_compiled(&compiled);
+    let row_weights = panels
+        .iter()
+        .map(|panel| panel.row_weight.unwrap_or(18))
+        .collect::<Vec<_>>();
+
+    let column_lookup = build_case_insensitive_column_lookup(&db_columns);
+    let base_columns = resolve_kline_base_columns(&column_lookup)?;
+    let dependency_columns = compiled
+        .database_indicator_columns
+        .iter()
+        .filter(|db_col| {
+            !base_columns
+                .iter()
+                .any(|(base_db_col, _)| base_db_col.eq_ignore_ascii_case(db_col))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut select_cols = vec!["trade_date".to_string()];
+    for (db_col, _) in &base_columns {
+        select_cols.push(format!(
+            "TRY_CAST({} AS DOUBLE) AS {}",
+            quote_sql_ident(db_col),
+            quote_sql_ident(db_col)
+        ));
+    }
+    for db_col in &dependency_columns {
+        select_cols.push(format!(
+            "TRY_CAST({} AS DOUBLE) AS {}",
+            quote_sql_ident(db_col),
+            quote_sql_ident(db_col)
+        ));
+    }
+    let query_sql = format!(
+        r#"
             SELECT
-                trade_date,
-                TRY_CAST(open AS DOUBLE) AS open,
-                TRY_CAST(high AS DOUBLE) AS high,
-                TRY_CAST(low AS DOUBLE) AS low,
-                TRY_CAST(close AS DOUBLE) AS close,
-                TRY_CAST(vol AS DOUBLE) AS vol,
-                TRY_CAST(amount AS DOUBLE) AS amount,
-                TRY_CAST(tor AS DOUBLE) AS tor,
-                TRY_CAST(brick AS DOUBLE) AS brick,
-                TRY_CAST(j AS DOUBLE) AS j,
-                TRY_CAST(duokong_short AS DOUBLE) AS duokong_short,
-                TRY_CAST(duokong_long AS DOUBLE) AS duokong_long,
-                TRY_CAST(bupiao_short AS DOUBLE) AS bupiao_short,
-                TRY_CAST(bupiao_long AS DOUBLE) AS bupiao_long,
-                TRY_CAST(VOL_SIGMA AS DOUBLE) AS VOL_SIGMA
+                {}
             FROM stock_data
             WHERE ts_code = ? AND adj_type = ?
             ORDER BY trade_date ASC
             "#,
-        )
+        select_cols.join(",\n")
+    );
+
+    let mut stmt = source_conn
+        .prepare(&query_sql)
         .map_err(|e| format!("预编译K线查询失败: {e}"))?;
     let mut rows = stmt
         .query(params![ts_code, DEFAULT_ADJ_TYPE])
         .map_err(|e| format!("查询K线数据失败: {e}"))?;
 
     let mut items = Vec::new();
+    let mut row_data = RowData {
+        trade_dates: Vec::new(),
+        cols: HashMap::new(),
+    };
+    for (_, runtime_key) in &base_columns {
+        row_data.cols.insert(runtime_key.clone(), Vec::new());
+    }
+    for db_col in &dependency_columns {
+        row_data
+            .cols
+            .entry(db_col.to_ascii_uppercase())
+            .or_default();
+    }
+
     while let Some(row) = rows.next().map_err(|e| format!("读取K线数据失败: {e}"))? {
+        let trade_date: String = row.get(0).map_err(|e| format!("读取K线日期失败: {e}"))?;
+        row_data.trade_dates.push(trade_date.clone());
+        let mut open = None;
+        let mut high = None;
+        let mut low = None;
+        let mut close = None;
+        let mut vol = None;
+        let mut amount = None;
+        let mut tor = None;
+        for (index, (_, runtime_key)) in base_columns.iter().enumerate() {
+            let value: Option<f64> = row
+                .get(index + 1)
+                .map_err(|e| format!("读取 {runtime_key} 失败: {e}"))?;
+            match runtime_key.as_str() {
+                "O" => open = value,
+                "H" => high = value,
+                "L" => low = value,
+                "C" => close = value,
+                "V" => vol = value,
+                "AMOUNT" => amount = value,
+                "TOR" => tor = value,
+                _ => {}
+            }
+            row_data
+                .cols
+                .get_mut(runtime_key)
+                .expect("base runtime key should exist")
+                .push(value);
+        }
+        let dependency_start = 1 + base_columns.len();
+        let mut runtime_values = HashMap::new();
+        for (index, db_col) in dependency_columns.iter().enumerate() {
+            let value: Option<f64> = row
+                .get(dependency_start + index)
+                .map_err(|e| format!("读取 {db_col} 失败: {e}"))?;
+            row_data
+                .cols
+                .entry(db_col.to_ascii_uppercase())
+                .or_default()
+                .push(value);
+            runtime_values.insert(db_col.to_ascii_uppercase(), value);
+        }
+
         items.push(DetailKlineRow {
-            trade_date: row.get(0).map_err(|e| format!("读取K线日期失败: {e}"))?,
-            open: row.get(1).map_err(|e| format!("读取 open 失败: {e}"))?,
-            high: row.get(2).map_err(|e| format!("读取 high 失败: {e}"))?,
-            low: row.get(3).map_err(|e| format!("读取 low 失败: {e}"))?,
-            close: row.get(4).map_err(|e| format!("读取 close 失败: {e}"))?,
-            vol: row.get(5).map_err(|e| format!("读取 vol 失败: {e}"))?,
-            amount: row.get(6).map_err(|e| format!("读取 amount 失败: {e}"))?,
-            tor: row.get(7).map_err(|e| format!("读取 tor 失败: {e}"))?,
-            brick: row.get(8).map_err(|e| format!("读取 brick 失败: {e}"))?,
-            j: row.get(9).map_err(|e| format!("读取 j 失败: {e}"))?,
-            duokong_short: row
-                .get(10)
-                .map_err(|e| format!("读取 duokong_short 失败: {e}"))?,
-            duokong_long: row
-                .get(11)
-                .map_err(|e| format!("读取 duokong_long 失败: {e}"))?,
-            bupiao_short: row
-                .get(12)
-                .map_err(|e| format!("读取 bupiao_short 失败: {e}"))?,
-            bupiao_long: row
-                .get(13)
-                .map_err(|e| format!("读取 bupiao_long 失败: {e}"))?,
-            vol_sigma: row
-                .get(14)
-                .map_err(|e| format!("读取 VOL_SIGMA 失败: {e}"))?,
+            trade_date,
+            open,
+            high,
+            low,
+            close,
+            vol,
+            amount,
+            tor,
             is_realtime: None,
             realtime_color_hint: None,
+            indicators: HashMap::new(),
+            runtime_values,
         });
     }
+    row_data.validate()?;
+    let execution = execute_chart_indicator_config(&compiled, row_data)?;
+    apply_chart_indicator_execution(&mut items, execution.values);
 
     Ok(DetailKlinePayload {
         items: Some(items),
-        panels: Some(default_kline_panels()),
+        panels: Some(panels),
         default_window: Some(default_window_days as u32),
         chart_height: Some(820),
-        row_weights: Some(DEFAULT_ROW_WEIGHTS.to_vec()),
+        row_weights: Some(row_weights),
         watermark_name,
         watermark_code: Some(split_ts_code(ts_code)),
     })
 }
 
-fn detail_indicator_file_path(source_path: &str) -> std::path::PathBuf {
-    let imported_ind_path = ind_toml_path(source_path);
-    if imported_ind_path.exists() {
-        imported_ind_path
-    } else {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("source")
-            .join("ind.toml")
-    }
-}
-
-fn is_builtin_kline_series_key(key: &str) -> bool {
-    matches!(
-        key.trim().to_ascii_lowercase().as_str(),
-        "open" | "high" | "low" | "close" | "vol" | "amount" | "tor"
-    )
-}
-
-fn collect_realtime_indicator_names(panels: Option<&[DetailKlinePanel]>) -> HashSet<String> {
-    let mut out = HashSet::new();
-    let fallback_panels;
-    let panels = match panels {
-        Some(value) => value,
-        None => {
-            fallback_panels = default_kline_panels();
-            &fallback_panels
-        }
-    };
-
-    for key in panels
-        .iter()
-        .flat_map(|panel| panel.series_keys.as_deref().unwrap_or(&[]))
-    {
-        if is_builtin_kline_series_key(key) {
-            continue;
-        }
-
-        let normalized = key.trim().to_ascii_uppercase();
-        if normalized.is_empty() {
-            continue;
-        }
-        out.insert(normalized);
-    }
-
-    out
-}
-
-fn build_realtime_indicator_row_data(
+fn build_chart_indicator_row_data_from_items(
     items: &[DetailKlineRow],
     realtime_pre_close: Option<f64>,
+    compiled: &CompiledChartIndicatorConfig,
 ) -> Result<RowData, String> {
     if items.is_empty() {
-        return Err("详情实时指标计算失败: items为空".to_string());
+        return Err("详情图指标计算失败: items为空".to_string());
     }
 
     let mut trade_dates = Vec::with_capacity(items.len());
-    let mut cols = HashMap::with_capacity(10);
+    let mut cols = HashMap::with_capacity(10 + compiled.database_indicator_columns.len());
     for key in [
         "O",
         "H",
@@ -832,6 +1072,10 @@ fn build_realtime_indicator_row_data(
         "TURNOVER_RATE",
     ] {
         cols.insert(key.to_string(), Vec::with_capacity(items.len()));
+    }
+    for db_col in &compiled.database_indicator_columns {
+        cols.entry(db_col.to_ascii_uppercase())
+            .or_insert_with(|| Vec::with_capacity(items.len()));
     }
 
     let mut prev_close = None;
@@ -875,6 +1119,16 @@ fn build_realtime_indicator_row_data(
         cols.get_mut("TURNOVER_RATE")
             .expect("TURNOVER_RATE should exist")
             .push(item.tor);
+        for db_col in &compiled.database_indicator_columns {
+            let normalized = db_col.to_ascii_uppercase();
+            let value = item
+                .runtime_values
+                .get(&normalized)
+                .copied()
+                .flatten()
+                .or_else(|| indicator_value_by_normalized_key(item, &normalized));
+            cols.entry(normalized).or_default().push(value);
+        }
 
         prev_close = item.close;
     }
@@ -884,61 +1138,47 @@ fn build_realtime_indicator_row_data(
     Ok(row_data)
 }
 
-fn set_realtime_indicator_value(row: &mut DetailKlineRow, name: &str, value: Option<f64>) {
-    match name {
-        "J" => row.j = value,
-        "BRICK" => row.brick = value,
-        "DUOKONG_SHORT" => row.duokong_short = value,
-        "DUOKONG_LONG" => row.duokong_long = value,
-        "BUPIAO_SHORT" => row.bupiao_short = value,
-        "BUPIAO_LONG" => row.bupiao_long = value,
-        "VOL_SIGMA" => row.vol_sigma = value,
-        _ => {}
-    }
+fn indicator_value_by_normalized_key(item: &DetailKlineRow, normalized_key: &str) -> Option<f64> {
+    item.indicators.iter().find_map(|(key, value)| {
+        if key.to_ascii_uppercase() == normalized_key {
+            value.as_f64()
+        } else {
+            None
+        }
+    })
 }
 
-fn fill_realtime_kline_indicators(
+fn rerun_realtime_chart_indicators(
+    source_conn: &Connection,
     source_path: &str,
-    indicator_names: &HashSet<String>,
     items: &mut [DetailKlineRow],
     realtime_pre_close: f64,
-) {
+) -> Result<(), String> {
     if items.is_empty() || items.last().and_then(|row| row.is_realtime) != Some(true) {
-        return;
+        return Ok(());
     }
 
-    if indicator_names.is_empty() {
-        return;
-    }
+    let db_columns = load_stock_data_columns(source_conn)?;
+    let compiled = load_compiled_chart_indicator_config(source_path, Some(&db_columns))?;
+    let row_data =
+        build_chart_indicator_row_data_from_items(items, Some(realtime_pre_close), &compiled)?;
+    let execution = execute_chart_indicator_config(&compiled, row_data)?;
 
-    let indicator_path = detail_indicator_file_path(source_path);
-    let indicator_defs = match cache_ind_build_from_path(&indicator_path) {
-        Ok(value) => value,
-        Err(_) => return,
-    };
-    let indicator_defs = indicator_defs
-        .into_iter()
-        .filter(|item| indicator_names.contains(&item.name))
-        .collect::<Vec<_>>();
-    if indicator_defs.is_empty() {
-        return;
+    for item in items.iter_mut() {
+        for panel in &compiled.panels {
+            for series in &panel.series {
+                item.indicators.remove(&series.key);
+                for rule in &series.color_rules {
+                    item.indicators.remove(&rule.when_key);
+                }
+            }
+            for marker in &panel.markers {
+                item.indicators.remove(&marker.when_key);
+            }
+        }
     }
-
-    let row_data = match build_realtime_indicator_row_data(items, Some(realtime_pre_close)) {
-        Ok(value) => value,
-        Err(_) => return,
-    };
-    let indicator_values = calc_inds_with_cache_lossy(&indicator_defs, row_data);
-
-    let Some(last_row) = items.last_mut() else {
-        return;
-    };
-    for name in indicator_names {
-        let value = indicator_values
-            .get(name)
-            .and_then(|series| series.last().copied().flatten());
-        set_realtime_indicator_value(last_row, name, value);
-    }
+    apply_chart_indicator_execution(items, execution.values);
+    Ok(())
 }
 
 fn build_realtime_kline_row(quote: &crate::crawler::SinaQuote) -> Option<DetailKlineRow> {
@@ -958,15 +1198,10 @@ fn build_realtime_kline_row(quote: &crate::crawler::SinaQuote) -> Option<DetailK
         vol: Some(quote.vol),
         amount: Some(quote.amount),
         tor: None,
-        brick: None,
-        j: None,
-        duokong_short: None,
-        duokong_long: None,
-        bupiao_short: None,
-        bupiao_long: None,
-        vol_sigma: None,
         is_realtime: Some(true),
         realtime_color_hint,
+        indicators: HashMap::new(),
+        runtime_values: HashMap::new(),
     })
 }
 
@@ -1493,6 +1728,7 @@ pub fn get_stock_detail_page(
     };
     let kline = query_kline(
         &source_conn,
+        &source_path,
         &normalized_ts_code,
         chart_window_days.unwrap_or(280) as usize,
         overview.name.clone(),
@@ -1583,6 +1819,7 @@ pub fn build_stock_detail_realtime_from_quote_map(
     let watermark_name = name_map.get(&normalized_ts_code).cloned();
     let kline = query_kline(
         &source_conn,
+        &source_path,
         &normalized_ts_code,
         chart_window_days.unwrap_or(280) as usize,
         watermark_name,
@@ -1591,9 +1828,8 @@ pub fn build_stock_detail_realtime_from_quote_map(
         .get(&normalized_ts_code)
         .ok_or_else(|| format!("未获取到 {} 的实时行情", normalized_ts_code))?;
     let (mut kline, has_database_trade_date) = merge_realtime_kline(kline, quote);
-    let indicator_names = collect_realtime_indicator_names(kline.panels.as_deref());
     if let Some(items) = kline.items.as_mut() {
-        fill_realtime_kline_indicators(&source_path, &indicator_names, items, quote.pre_close);
+        rerun_realtime_chart_indicators(&source_conn, &source_path, items, quote.pre_close)?;
     }
 
     Ok(StockDetailRealtimeData {
@@ -1608,11 +1844,19 @@ pub fn build_stock_detail_realtime_from_quote_map(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use duckdb::Connection;
+
     use super::*;
 
     #[test]
-    fn default_kline_panels_overlay_duokong_on_price_panel() {
+    fn default_kline_panels_only_contains_price_panel() {
         let panels = default_kline_panels();
+        assert_eq!(panels.len(), 1);
 
         let price_panel = panels
             .iter()
@@ -1630,35 +1874,199 @@ mod tests {
                 "high".to_string(),
                 "low".to_string(),
                 "close".to_string(),
-                "duokong_short".to_string(),
-                "duokong_long".to_string(),
             ]
         );
+        assert_eq!(price_panel.role.as_deref(), Some("main"));
+        assert!(price_panel.series.as_ref().is_some_and(|series| series.is_empty()));
+    }
 
-        let indicator_panel = panels
-            .iter()
-            .find(|panel| panel.key == "indicator")
-            .expect("missing indicator panel");
-        let indicator_series = indicator_panel
-            .series_keys
-            .as_ref()
-            .expect("indicator panel missing series keys");
+    #[test]
+    fn query_kline_default_config_runs_chart_indicator_runtime() {
+        let conn = build_test_stock_data_conn();
+        let source_path = unique_temp_dir("details_chart_default");
+        fs::create_dir_all(&source_path).expect("temp dir should be created");
 
-        assert!(!indicator_series.iter().any(|key| key == "duokong_short"));
-        assert!(!indicator_series.iter().any(|key| key == "duokong_long"));
+        let payload = query_kline(
+            &conn,
+            source_path.to_str().expect("temp path should be utf8"),
+            "000001.SZ",
+            280,
+            Some("测试股".to_string()),
+        )
+        .expect("kline should query");
 
-        let volume_panel = panels
-            .iter()
-            .find(|panel| panel.key == "volume")
-            .expect("missing volume panel");
-        let volume_series = volume_panel
-            .series_keys
-            .as_ref()
-            .expect("volume panel missing series keys");
+        let items = payload.items.expect("items should exist");
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| item.indicators.is_empty()));
 
+        let panels = payload.panels.expect("panels should exist");
+        assert_eq!(panels.len(), 1);
+        assert_eq!(panels[0].key, "price");
         assert_eq!(
-            volume_series,
-            &vec!["vol".to_string(), "VOL_SIGMA".to_string()]
+            panels[0].series_keys.as_ref(),
+            Some(&vec![
+                "open".to_string(),
+                "high".to_string(),
+                "low".to_string(),
+                "close".to_string(),
+            ])
         );
+
+        fs::remove_dir_all(source_path).ok();
+    }
+
+    #[test]
+    fn query_kline_external_config_overrides_default_chart_indicators() {
+        let conn = build_test_stock_data_conn();
+        let source_path = unique_temp_dir("details_chart_external");
+        fs::create_dir_all(&source_path).expect("temp dir should be created");
+        write_ma2_chart_config(&source_path);
+
+        let payload = query_kline(
+            &conn,
+            source_path.to_str().expect("temp path should be utf8"),
+            "000001.SZ",
+            280,
+            None,
+        )
+        .expect("kline should query");
+
+        let items = payload.items.expect("items should exist");
+        assert_eq!(
+            items[0].indicators.get("ma2"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            items[1].indicators.get("ma2"),
+            Some(&serde_json::json!(10.5))
+        );
+
+        let panels = payload.panels.expect("panels should exist");
+        assert_eq!(panels.len(), 1);
+        assert_eq!(
+            panels[0].series_keys.as_ref(),
+            Some(&vec![
+                "open".to_string(),
+                "high".to_string(),
+                "low".to_string(),
+                "close".to_string(),
+                "ma2".to_string(),
+            ])
+        );
+
+        fs::remove_dir_all(source_path).ok();
+    }
+
+    #[test]
+    fn realtime_chart_indicators_rerun_same_runtime_after_append() {
+        let conn = build_test_stock_data_conn();
+        let source_path = unique_temp_dir("details_chart_realtime");
+        fs::create_dir_all(&source_path).expect("temp dir should be created");
+        write_ma2_chart_config(&source_path);
+
+        let payload = query_kline(
+            &conn,
+            source_path.to_str().expect("temp path should be utf8"),
+            "000001.SZ",
+            280,
+            None,
+        )
+        .expect("kline should query");
+        let quote = crate::crawler::SinaQuote {
+            date: "2024-01-03".to_string(),
+            time: "10:00:00".to_string(),
+            ts_code: "000001.SZ".to_string(),
+            name: "测试股".to_string(),
+            open: 11.0,
+            high: 13.2,
+            low: 10.8,
+            pre_close: 11.0,
+            price: 13.0,
+            vol: 150.0,
+            amount: 1500.0,
+            change_pct: Some(18.18),
+        };
+        let (mut payload, has_database_trade_date) = merge_realtime_kline(payload, &quote);
+        assert!(!has_database_trade_date);
+        let items = payload.items.as_mut().expect("items should exist");
+
+        rerun_realtime_chart_indicators(
+            &conn,
+            source_path.to_str().expect("temp path should be utf8"),
+            items,
+            quote.pre_close,
+        )
+        .expect("realtime chart indicators should rerun");
+
+        let latest = items.last().expect("latest row should exist");
+        assert_eq!(latest.trade_date, "20240103");
+        assert_eq!(latest.indicators.get("ma2"), Some(&serde_json::json!(12.0)));
+
+        fs::remove_dir_all(source_path).ok();
+    }
+
+    fn write_ma2_chart_config(source_path: &std::path::Path) {
+        fs::write(
+            source_path.join("chart_indicators.toml"),
+            r##"
+version = 1
+
+[[panel]]
+key = "price"
+label = "Price"
+role = "main"
+kind = "candles"
+
+[[panel.series]]
+key = "ma2"
+label = "MA2"
+expr = "MA(C, 2)"
+kind = "line"
+"##,
+        )
+        .expect("config should be written");
+    }
+
+    fn build_test_stock_data_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory db should open");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE stock_data (
+                ts_code TEXT,
+                adj_type TEXT,
+                trade_date TEXT,
+                open DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                close DOUBLE,
+                vol DOUBLE,
+                amount DOUBLE,
+                pre_close DOUBLE,
+                change DOUBLE,
+                pct_chg DOUBLE,
+                tor DOUBLE,
+                brick DOUBLE,
+                j DOUBLE,
+                duokong_short DOUBLE,
+                duokong_long DOUBLE,
+                bupiao_short DOUBLE,
+                bupiao_long DOUBLE,
+                VOL_SIGMA DOUBLE
+            );
+            INSERT INTO stock_data VALUES
+                ('000001.SZ', 'qfq', '20240101', 9.0, 10.5, 8.8, 10.0, 100.0, 1000.0, 9.5, 0.5, 5.0, 1.1, 1.0, 20.0, 9.5, 9.0, 8.5, 8.0, 0.5),
+                ('000001.SZ', 'qfq', '20240102', 10.0, 11.5, 9.8, 11.0, 120.0, 1200.0, 10.0, 1.0, 10.0, 1.2, 2.0, 30.0, 10.5, 9.8, 8.8, 8.2, 0.7);
+            "#,
+        )
+        .expect("test table should be created");
+        conn
+    }
+
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}_{nanos}"))
     }
 }
