@@ -7,6 +7,7 @@ use crate::data::{
 };
 
 pub mod chart_indicator;
+pub mod chart_indicator_settings;
 pub mod concept_stock_pick;
 pub mod data_download;
 pub mod data_import;

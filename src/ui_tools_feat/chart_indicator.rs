@@ -217,9 +217,46 @@ pub fn default_chart_indicator_config() -> ChartIndicatorConfig {
     }
 }
 
+pub fn normalize_chart_indicator_config(config: &ChartIndicatorConfig) -> ChartIndicatorConfig {
+    let mut normalized = config.clone();
+    let main_count = normalized
+        .panels
+        .iter()
+        .filter(|panel| panel.role == ChartPanelRole::Main)
+        .count();
+
+    if main_count == 0 {
+        let mut default_config = default_chart_indicator_config();
+        normalized.panels.insert(0, default_config.panels.remove(0));
+    }
+
+    for panel in &mut normalized.panels {
+        if panel.role == ChartPanelRole::Main {
+            panel.kind = ChartPanelKind::Candles;
+        } else if panel
+            .series
+            .iter()
+            .any(|series| series.kind == ChartSeriesKind::Brick)
+        {
+            panel.kind = ChartPanelKind::Brick;
+        } else if panel
+            .series
+            .iter()
+            .any(|series| series.kind == ChartSeriesKind::Bar)
+        {
+            panel.kind = ChartPanelKind::Bar;
+        } else {
+            panel.kind = ChartPanelKind::Line;
+        }
+    }
+
+    normalized
+}
+
 pub fn parse_chart_indicator_config(text: &str) -> Result<ChartIndicatorConfig, String> {
     let config: ChartIndicatorConfig =
         toml::from_str(text).map_err(|error| format!("parse chart indicators failed: {error}"))?;
+    let config = normalize_chart_indicator_config(&config);
     validate_chart_indicator_config(&config)?;
     Ok(config)
 }
@@ -360,10 +397,11 @@ pub fn compile_chart_indicator_config(
     config: &ChartIndicatorConfig,
     available_db_columns: Option<&HashSet<String>>,
 ) -> Result<CompiledChartIndicatorConfig, String> {
-    validate_chart_indicator_config(config)?;
+    let config = normalize_chart_indicator_config(config);
+    validate_chart_indicator_config(&config)?;
 
     let db_column_lookup = available_db_columns.map(build_db_column_lookup);
-    let all_series_keys = collect_all_series_keys(config);
+    let all_series_keys = collect_all_series_keys(&config);
     let mut available_series_keys = HashSet::new();
     let mut database_indicator_columns = HashSet::new();
     let mut compiled_panels = Vec::with_capacity(config.panels.len());
@@ -901,63 +939,39 @@ fn is_base_runtime_key(key: &str) -> bool {
 }
 
 fn validate_panel_series_combination(panel: &ChartPanelConfig) -> Result<(), String> {
-    match panel.kind {
-        ChartPanelKind::Candles => {
-            for series in &panel.series {
-                if series.kind != ChartSeriesKind::Line {
-                    return Err(format!(
-                        "candles panel {} only supports line series in phase one: {}",
-                        panel.key, series.key
-                    ));
-                }
-            }
-        }
-        ChartPanelKind::Line => {
-            for series in &panel.series {
-                if series.kind != ChartSeriesKind::Line {
-                    return Err(format!(
-                        "line panel {} only supports line series in phase one: {:?} {}",
-                        panel.key, series.kind, series.key
-                    ));
-                }
-            }
-        }
-        ChartPanelKind::Bar => {
-            let bar_count = panel
-                .series
-                .iter()
-                .filter(|series| series.kind == ChartSeriesKind::Bar)
-                .count();
-            if bar_count > 1 {
+    if panel.role == ChartPanelRole::Main {
+        for series in &panel.series {
+            if series.kind != ChartSeriesKind::Line {
                 return Err(format!(
-                    "bar panel {} supports at most one bar series in phase one",
-                    panel.key
+                    "main panel {} only supports line overlay series: {}",
+                    panel.key, series.key
                 ));
             }
-            for series in &panel.series {
-                if !matches!(series.kind, ChartSeriesKind::Bar | ChartSeriesKind::Line) {
-                    return Err(format!(
-                        "bar panel {} does not support {:?} series: {}",
-                        panel.key, series.kind, series.key
-                    ));
-                }
-            }
         }
-        ChartPanelKind::Brick => {
-            if panel.series.len() != 1 {
-                return Err(format!(
-                    "brick panel {} must contain exactly one brick series",
-                    panel.key
-                ));
-            }
-            for series in &panel.series {
-                if series.kind != ChartSeriesKind::Brick {
-                    return Err(format!(
-                        "brick panel {} only supports brick series: {}",
-                        panel.key, series.key
-                    ));
-                }
-            }
+        return Ok(());
+    }
+
+    let brick_count = panel
+        .series
+        .iter()
+        .filter(|series| series.kind == ChartSeriesKind::Brick)
+        .count();
+    if brick_count > 0 {
+        if panel.series.len() != 1 || brick_count != 1 {
+            return Err(format!(
+                "brick series in panel {} must be the only series",
+                panel.key
+            ));
+        }
+        return Ok(());
+    }
+
+    for series in &panel.series {
+        if !matches!(series.kind, ChartSeriesKind::Bar | ChartSeriesKind::Line) {
+            return Err(format!(
+                "sub panel {} does not support {:?} series: {}",
+                panel.key, series.kind, series.key
+            ));
         }
     }
 
@@ -1334,8 +1348,8 @@ kind = "line"
     }
 
     #[test]
-    fn exactly_one_main_panel_is_required() {
-        let error = parse_chart_indicator_config(
+    fn missing_main_panel_gets_fixed_price_panel() {
+        let config = parse_chart_indicator_config(
             r##"
 version = 1
 
@@ -1346,9 +1360,31 @@ role = "sub"
 kind = "line"
 "##,
         )
-        .expect_err("missing main panel should fail");
+        .expect("missing main panel should be normalized");
 
-        assert!(error.contains("exactly one main panel"));
+        assert_eq!(config.panels.len(), 2);
+        assert_eq!(config.panels[0].key, "price");
+        assert_eq!(config.panels[0].role, ChartPanelRole::Main);
+        assert_eq!(config.panels[0].kind, ChartPanelKind::Candles);
+        assert_eq!(config.panels[1].key, "a");
+    }
+
+    #[test]
+    fn main_panel_kind_is_fixed_to_candles() {
+        let config = parse_chart_indicator_config(
+            r##"
+version = 1
+
+[[panel]]
+key = "price"
+label = "Price"
+role = "main"
+kind = "line"
+"##,
+        )
+        .expect("main panel kind should be normalized");
+
+        assert_eq!(config.panels[0].kind, ChartPanelKind::Candles);
     }
 
     #[test]

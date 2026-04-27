@@ -1,0 +1,250 @@
+.settings-modal.settings-modal-wide {
+  width: min(1480px, 100%);
+}
+
+.chart-indicator-modal {
+  color: #172033;
+}
+
+.chart-indicator-modal-head {
+  margin-bottom: 12px;
+}
+
+.chart-indicator-mode-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  margin: 8px 0 12px;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  background: #f7f9fc;
+}
+
+.chart-indicator-mode-tabs button {
+  border: 0;
+  border-radius: 6px;
+  padding: 7px 12px;
+  background: transparent;
+  color: #526173;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.chart-indicator-mode-tabs button.is-active {
+  background: #ffffff;
+  color: #172033;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
+}
+
+.chart-indicator-editor-grid {
+  display: grid;
+  grid-template-columns: 220px minmax(360px, 1fr) minmax(360px, 1fr);
+  gap: 12px;
+  min-height: 640px;
+}
+
+.chart-indicator-panel-list,
+.chart-indicator-panel-editor,
+.chart-indicator-detail-editor,
+.chart-indicator-source-pane {
+  min-width: 0;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  padding: 12px;
+  background: #ffffff;
+}
+
+.chart-indicator-panel-list,
+.chart-indicator-detail-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chart-indicator-section-title {
+  font-size: 13px;
+  font-weight: 800;
+  color: #172033;
+}
+
+.chart-indicator-panel-toolbar {
+  display: flex;
+  gap: 8px;
+}
+
+.chart-indicator-mini-btn {
+  width: 100%;
+  justify-content: center;
+}
+
+.chart-indicator-list,
+.chart-indicator-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chart-indicator-list {
+  overflow: auto;
+}
+
+.chart-indicator-list-item,
+.chart-indicator-card-row {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  border: 1px solid #e3e9f2;
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: #fbfcfe;
+  color: #172033;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chart-indicator-list-item:hover,
+.chart-indicator-card-row:hover,
+.chart-indicator-list-item.is-active,
+.chart-indicator-card-row.is-active {
+  border-color: #90b4f8;
+  background: #f1f6ff;
+}
+
+.chart-indicator-list-item span,
+.chart-indicator-card-row span {
+  overflow: hidden;
+  color: #64748b;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chart-indicator-inline-actions,
+.chart-indicator-subsection-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.chart-indicator-subsection-head {
+  justify-content: space-between;
+  margin-top: 12px;
+}
+
+.chart-indicator-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.chart-indicator-detail-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chart-indicator-expr-textarea {
+  min-height: 92px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.chart-indicator-source-textarea {
+  min-height: 68vh;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.chart-indicator-reference-strip {
+  display: grid;
+  gap: 5px;
+  border: 1px solid #e3e9f2;
+  border-radius: 8px;
+  padding: 8px;
+  background: #fbfcfe;
+  color: #526173;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.chart-indicator-rule-list {
+  display: grid;
+  gap: 8px;
+}
+
+.chart-indicator-rule-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 110px auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.chart-indicator-rule-row input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+}
+
+.chart-indicator-range-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 52px;
+  gap: 8px;
+  align-items: center;
+}
+
+.chart-indicator-range-row input[type="range"] {
+  width: 100%;
+}
+
+.chart-indicator-range-row span {
+  color: #526173;
+  font-size: 12px;
+  text-align: right;
+}
+
+.chart-indicator-preview {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.chart-indicator-summary-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.chart-indicator-issue-list {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #fecdd3;
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: #fff1f2;
+  color: #9f1239;
+  font-size: 13px;
+}
+
+@media (max-width: 1180px) {
+  .chart-indicator-editor-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .chart-indicator-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .chart-indicator-list {
+    display: grid;
+  }
+}
+
+@media (max-width: 720px) {
+  .chart-indicator-field-grid,
+  .chart-indicator-summary-grid,
+  .chart-indicator-rule-row {
+    grid-template-columns: 1fr;
+  }
+}

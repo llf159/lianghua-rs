@@ -92,9 +92,7 @@ const DETAIL_CHART_WINDOW_DAYS = 280;
 const DEFAULT_VISIBLE_BARS = 90;
 const MIN_VISIBLE_BARS = 20;
 const CHART_MIN_RIGHT_ALIGNED_SLOTS = 60;
-const DEFAULT_ROW_WEIGHTS = [52, 16, 16, 16];
 const DEFAULT_INDICATOR_PANEL_COUNT = 3;
-const DEFAULT_INDICATOR_ROW_WEIGHT = 16;
 const CHART_VIEWBOX_WIDTH = 1120;
 const CHART_VIEWBOX_HEIGHT = 240;
 const CHART_MARGIN = { top: 12, right: 8, bottom: 28, left: 52 };
@@ -353,13 +351,7 @@ function getFallbackSeriesColor(seriesIndex: number) {
 }
 
 function getPanelSeries(panel: DetailKlinePanel): DetailChartSeries[] {
-  const series = panel.series ?? [];
-
-  return [...series].sort((left, right) => {
-    const leftOrder = left.draw_order ?? 0;
-    const rightOrder = right.draw_order ?? 0;
-    return leftOrder - rightOrder;
-  });
+  return panel.series ?? [];
 }
 
 function findPanelSeries(panel: DetailKlinePanel, key: string) {
@@ -423,6 +415,20 @@ function buildSeriesRuntimeValue(
 
 function isMainChartPanel(panel: DetailKlinePanel) {
   return panel.role === "main" || panel.key === "price" || panel.kind === "candles";
+}
+
+function resolveChartPanelRenderKind(panel: DetailKlinePanel) {
+  if (isMainChartPanel(panel)) {
+    return "candles";
+  }
+  const series = getPanelSeries(panel);
+  if (series.some((item) => item.kind === "brick")) {
+    return "brick";
+  }
+  if (series.some((item) => item.kind === "bar")) {
+    return "bar";
+  }
+  return "line";
 }
 
 function isInteractivePricePanel(panel: DetailKlinePanel) {
@@ -1229,7 +1235,8 @@ function buildDetailTooltipRows(
     ];
   }
 
-  if (panel.kind === "bar") {
+  const kind = resolveChartPanelRenderKind(panel);
+  if (kind === "bar") {
     const prevVol =
       absoluteIndex !== null && absoluteIndex > 0
         ? getNumericField(allItems[absoluteIndex - 1], "vol")
@@ -1259,7 +1266,7 @@ function buildDetailTooltipRows(
     ];
   }
 
-  if (panel.kind === "brick") {
+  if (kind === "brick") {
     const brickKey =
       getPanelSeries(panel).find((series) => series.kind === "brick")?.key ??
       "brick";
@@ -1378,30 +1385,6 @@ function buildDefaultPanels() {
   ] satisfies DetailKlinePanel[];
 }
 
-function resolveChartPanelWeights(
-  kline: DetailKlinePayload | null | undefined,
-  panels: DetailKlinePanel[],
-) {
-  const legacyWeights = kline?.row_weights ?? [];
-  return panels.map((panel, index) => {
-    const panelWeight = panel.row_weight;
-    if (typeof panelWeight === "number" && panelWeight > 0) {
-      return panelWeight;
-    }
-
-    const legacyWeight = legacyWeights[index];
-    if (typeof legacyWeight === "number" && legacyWeight > 0) {
-      return legacyWeight;
-    }
-
-    return (
-      DEFAULT_ROW_WEIGHTS[index] ??
-      DEFAULT_ROW_WEIGHTS[DEFAULT_ROW_WEIGHTS.length - 1] ??
-      DEFAULT_INDICATOR_ROW_WEIGHT
-    );
-  });
-}
-
 function buildChartPanelHeights(
   kline: DetailKlinePayload | null | undefined,
   panels: DetailKlinePanel[],
@@ -1412,20 +1395,16 @@ function buildChartPanelHeights(
     return [mainPanelHeight];
   }
 
+  void kline;
   const matchedMainPanelIndex = panels.findIndex((panel) => isMainChartPanel(panel));
   const mainPanelIndex = matchedMainPanelIndex >= 0 ? matchedMainPanelIndex : 0;
-  const weights = resolveChartPanelWeights(kline, panels);
 
   return panels.map((_, index) => {
     if (index === mainPanelIndex) {
       return mainPanelHeight;
     }
 
-    const panelWeight = Math.max(weights[index] ?? DEFAULT_INDICATOR_ROW_WEIGHT, 0);
-    return (
-      indicatorPanelBaseHeight *
-      (panelWeight / DEFAULT_INDICATOR_ROW_WEIGHT)
-    );
+    return indicatorPanelBaseHeight;
   });
 }
 
@@ -2096,7 +2075,7 @@ function renderChartPanel(
   intervalStatsSections: TooltipSection[],
   onCloseChartIntervalPanel: () => void,
 ) {
-  const kind = panel.kind ?? "line";
+  const kind = resolveChartPanelRenderKind(panel);
   const isMainPanel = isMainChartPanel(panel);
   const panelSeries = getPanelSeries(panel);
   const showDateAxis = index === panelCount - 1;
@@ -2670,7 +2649,7 @@ function renderChartPanel(
             </small>
           )}
         </div>
-        <span>{panel.kind ?? "line"}</span>
+        <span>{resolveChartPanelRenderKind(panel)}</span>
       </header>
 
       <div

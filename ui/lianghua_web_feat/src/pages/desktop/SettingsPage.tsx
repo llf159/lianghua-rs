@@ -1,7 +1,12 @@
-import { useDeferredValue, useEffect, useMemo, useState } from 'react'
+import { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
+import {
+  getChartIndicatorSettings,
+  type ChartIndicatorSettingsPayload,
+} from '../../apis/chartIndicatorSettings'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import { getStockPickOptions } from '../../apis/stockPick'
 import { filterConceptItems, useConceptExclusions } from '../../shared/conceptExclusions'
+import ChartIndicatorSettingsModal from './components/ChartIndicatorSettingsModal'
 import StrategySyntaxGuideModal from './components/StrategySyntaxGuideModal'
 import {
   CHART_RANK_MARKER_THRESHOLD_MAX,
@@ -40,10 +45,21 @@ import './css/DetailsPage.css'
 const AUTOCOMPLETE_LIMIT = 12
 const RATIO_INPUT_STEP = 0.01
 
+function getChartIndicatorSettingsStatus(payload: ChartIndicatorSettingsPayload) {
+  if (payload.error) {
+    return '需修复'
+  }
+  if (!payload.exists) {
+    return '使用默认'
+  }
+  return `${payload.summary.panelCount} 个面板`
+}
+
 type SettingsModalType =
   | 'concept'
   | 'st'
   | 'chart-layout'
+  | 'chart-indicator'
   | 'rank-marker'
   | 'details-nav-long-press'
   | 'backtest-highlight'
@@ -69,6 +85,9 @@ export default function SettingsPage() {
   )
   const [chartLayoutSettingError, setChartLayoutSettingError] = useState('')
   const [chartLayoutSettingNotice, setChartLayoutSettingNotice] = useState('')
+  const [chartIndicatorSettingsPayload, setChartIndicatorSettingsPayload] =
+    useState<ChartIndicatorSettingsPayload | null>(null)
+  const [chartIndicatorSettingsStatus, setChartIndicatorSettingsStatus] = useState('读取中...')
   const [chartRankMarkerThresholdInput, setChartRankMarkerThresholdInput] = useState(() =>
     String(readStoredChartRankMarkerThreshold()),
   )
@@ -105,6 +124,7 @@ export default function SettingsPage() {
   const isConceptEditorOpen = activeModal === 'concept'
   const isStSettingOpen = activeModal === 'st'
   const isChartLayoutSettingOpen = activeModal === 'chart-layout'
+  const isChartIndicatorSettingOpen = activeModal === 'chart-indicator'
   const isRankMarkerSettingOpen = activeModal === 'rank-marker'
   const isDetailsNavLongPressSettingOpen = activeModal === 'details-nav-long-press'
   const isBacktestHighlightSettingOpen = activeModal === 'backtest-highlight'
@@ -117,12 +137,26 @@ export default function SettingsPage() {
       setError('')
       try {
         const resolvedSourcePath = await ensureManagedSourcePath()
-        const options = await getStockPickOptions(resolvedSourcePath)
+        const [options, chartIndicatorPayload] = await Promise.all([
+          getStockPickOptions(resolvedSourcePath),
+          getChartIndicatorSettings(resolvedSourcePath).catch((chartError) => {
+            if (!cancelled) {
+              setChartIndicatorSettingsPayload(null)
+              setChartIndicatorSettingsStatus('需修复')
+            }
+            console.error('读取图表指标配置失败', chartError)
+            return null
+          }),
+        ])
         if (cancelled) {
           return
         }
 
         setConceptOptions(filterConceptItems(options.concept_options ?? [], []))
+        setChartIndicatorSettingsPayload(chartIndicatorPayload)
+        setChartIndicatorSettingsStatus(
+          chartIndicatorPayload ? getChartIndicatorSettingsStatus(chartIndicatorPayload) : '需修复',
+        )
       } catch (loadError) {
         if (cancelled) {
           return
@@ -252,6 +286,15 @@ export default function SettingsPage() {
     setChartLayoutSettingError('')
     setChartLayoutSettingNotice('')
   }
+
+  function openChartIndicatorSetting() {
+    setActiveModal('chart-indicator')
+  }
+
+  const onChartIndicatorSettingsLoaded = useCallback((nextPayload: ChartIndicatorSettingsPayload) => {
+    setChartIndicatorSettingsPayload(nextPayload)
+    setChartIndicatorSettingsStatus(getChartIndicatorSettingsStatus(nextPayload))
+  }, [])
 
   function openRankMarkerSetting() {
     setActiveModal('rank-marker')
@@ -433,6 +476,16 @@ export default function SettingsPage() {
             </span>
           </button>
 
+          <button className="settings-list-item" type="button" onClick={openChartIndicatorSetting}>
+            <div className="settings-list-item-main">
+              <strong>自定义图表指标</strong>
+              <span>编辑详情页 K 线、指标、量能、砖型图等图表面板。</span>
+            </div>
+            <span className="settings-list-item-value">
+              {chartIndicatorSettingsPayload ? getChartIndicatorSettingsStatus(chartIndicatorSettingsPayload) : chartIndicatorSettingsStatus}
+            </span>
+          </button>
+
           <button className="settings-list-item" type="button" onClick={openRankMarkerSetting}>
             <div className="settings-list-item-main">
               <strong>标记阈值排名</strong>
@@ -562,6 +615,12 @@ export default function SettingsPage() {
           </section>
         </div>
       ) : null}
+
+      <ChartIndicatorSettingsModal
+        open={isChartIndicatorSettingOpen}
+        onClose={closeActiveModal}
+        onLoaded={onChartIndicatorSettingsLoaded}
+      />
 
       {isRankMarkerSettingOpen ? (
         <div

@@ -8,6 +8,13 @@ use lianghua_rs::ui_tools_feat::{
         run_concept_stock_pick as core_run_concept_stock_pick,
         StockPickResultData as ConceptStockPickResultData,
     },
+    chart_indicator_settings::{
+        get_chart_indicator_settings as core_get_chart_indicator_settings,
+        reset_chart_indicator_settings as core_reset_chart_indicator_settings,
+        save_chart_indicator_settings as core_save_chart_indicator_settings,
+        validate_chart_indicator_settings as core_validate_chart_indicator_settings,
+        ChartIndicatorSettingsPayload, ChartIndicatorValidationResult,
+    },
     data_viewer::{list_stock_lookup_rows as core_list_stock_lookup_rows, StockLookupRow},
     details::{
         get_stock_detail_cyq as core_get_stock_detail_cyq,
@@ -290,6 +297,36 @@ fn list_stock_lookup_rows(source_path: String) -> Result<Vec<StockLookupRow>, St
 #[tauri::command]
 fn get_stock_pick_options(source_path: String) -> Result<StockPickOptionsData, String> {
     core_get_stock_pick_options(&source_path)
+}
+
+#[tauri::command]
+fn get_chart_indicator_settings(
+    source_path: String,
+) -> Result<ChartIndicatorSettingsPayload, String> {
+    core_get_chart_indicator_settings(&source_path)
+}
+
+#[tauri::command]
+fn validate_chart_indicator_settings(
+    source_path: String,
+    text: String,
+) -> Result<ChartIndicatorValidationResult, String> {
+    core_validate_chart_indicator_settings(&source_path, &text)
+}
+
+#[tauri::command]
+fn save_chart_indicator_settings(
+    source_path: String,
+    text: String,
+) -> Result<ChartIndicatorSettingsPayload, String> {
+    core_save_chart_indicator_settings(&source_path, &text)
+}
+
+#[tauri::command]
+fn reset_chart_indicator_settings(
+    source_path: String,
+) -> Result<ChartIndicatorSettingsPayload, String> {
+    core_reset_chart_indicator_settings(&source_path)
 }
 
 #[tauri::command]
@@ -1203,6 +1240,10 @@ pub fn run() {
             update_strategy_manage_rule,
             save_strategy_manage_refactor_file,
             get_stock_pick_options,
+            get_chart_indicator_settings,
+            validate_chart_indicator_settings,
+            save_chart_indicator_settings,
+            reset_chart_indicator_settings,
             run_expression_stock_pick,
             run_concept_stock_pick,
             list_watch_observe_rows,
