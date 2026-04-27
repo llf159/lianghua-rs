@@ -231,6 +231,65 @@
   font-size: 13px;
 }
 
+.chart-indicator-colorpicker-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 3200;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.38);
+}
+
+.chart-indicator-colorpicker {
+  width: min(520px, 100%);
+  border: 1px solid #dbe3ee;
+  border-radius: 12px;
+  padding: 14px;
+  background: #ffffff;
+  box-shadow: 0 24px 48px rgba(15, 23, 42, 0.22);
+}
+
+.chart-indicator-colorpicker-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.chart-indicator-colorpicker-main {
+  display: grid;
+  gap: 12px;
+}
+
+.chart-indicator-colorpicker-input input[type='color'] {
+  width: 100%;
+  height: 42px;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  padding: 4px;
+  background: #ffffff;
+}
+
+.chart-indicator-colorpicker-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.chart-indicator-colorpicker-actions code {
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #f8fafc;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 @media (max-width: 1180px) {
   .chart-indicator-editor-grid {
     grid-template-columns: 1fr;
@@ -250,5 +309,10 @@
   .chart-indicator-summary-grid,
   .chart-indicator-rule-row {
     grid-template-columns: 1fr;
+  }
+
+  .chart-indicator-colorpicker-actions {
+    flex-direction: column;
+    align-items: stretch;
   }
 }

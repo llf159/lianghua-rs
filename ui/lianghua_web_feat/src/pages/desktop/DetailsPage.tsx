@@ -184,7 +184,8 @@ type ChartDragState = {
     | "dismiss"
     | "interval-select"
     | "interval-adjust-start"
-    | "interval-adjust-end";
+    | "interval-adjust-end"
+    | "interval-move";
   startClientX: number;
   startClientY: number;
   startVisibleStart: number;
@@ -192,9 +193,12 @@ type ChartDragState = {
   maxVisibleStart: number;
   moved: boolean;
   anchorAbsoluteIndex?: number;
+  moveSelectionStartAbsoluteIndex?: number;
+  moveSelectionEndAbsoluteIndex?: number;
 };
 
 type ChartIntervalAdjustSide = "start" | "end";
+type ChartIntervalDragTarget = ChartIntervalAdjustSide | "move";
 
 type ScrollSnapshot = {
   left: number;
@@ -1784,7 +1788,7 @@ function buildChartPointerSnapshot(
   };
 }
 
-function detectChartIntervalAdjustSide(
+function detectChartIntervalDragTarget(
   viewport: HTMLDivElement,
   clientX: number,
   selection: ResolvedIntervalRestore | null,
@@ -1792,7 +1796,7 @@ function detectChartIntervalAdjustSide(
   itemCount: number,
   layoutSlotCount: number,
   reserveCyqPanelWidth: boolean,
-): ChartIntervalAdjustSide | null {
+): ChartIntervalDragTarget | null {
   if (!selection || itemCount <= 0 || layoutSlotCount <= 0) {
     return null;
   }
@@ -1853,7 +1857,15 @@ function detectChartIntervalAdjustSide(
     return clientX <= (leftClientX + rightClientX) / 2 ? "start" : "end";
   }
 
-  return leftDistance < rightDistance ? "start" : "end";
+  if (leftDistance <= edgeHitSlop || rightDistance <= edgeHitSlop) {
+    return leftDistance < rightDistance ? "start" : "end";
+  }
+
+  if (clientX >= leftClientX && clientX <= rightClientX) {
+    return "move";
+  }
+
+  return null;
 }
 
 function isPointerNearChartFocus(
@@ -5076,6 +5088,47 @@ export default function DetailsPage({
     );
   }
 
+  function buildMovedChartIntervalSelection(
+    viewport: HTMLDivElement,
+    clientX: number,
+    clientY: number,
+    anchorAbsoluteIndex: number,
+    moveSelectionStartAbsoluteIndex: number,
+    moveSelectionEndAbsoluteIndex: number,
+  ) {
+    const pointer = buildChartPointerSnapshot(
+      viewport,
+      clientX,
+      clientY,
+      chartItems.length,
+      chartLayoutSlotCount,
+      shouldReserveCyqPanelWidth,
+    );
+    if (!pointer || allChartItems.length === 0) {
+      return null;
+    }
+
+    const pointerAbsoluteIndex = effectiveVisibleStart + pointer.visibleIndex;
+    const delta = pointerAbsoluteIndex - anchorAbsoluteIndex;
+    const span = Math.max(
+      0,
+      moveSelectionEndAbsoluteIndex - moveSelectionStartAbsoluteIndex,
+    );
+    const maxStartAbsoluteIndex = Math.max(0, allChartItems.length - 1 - span);
+    const nextStartAbsoluteIndex = clampNumber(
+      moveSelectionStartAbsoluteIndex + delta,
+      0,
+      maxStartAbsoluteIndex,
+    );
+    const nextEndAbsoluteIndex = nextStartAbsoluteIndex + span;
+
+    return buildIntervalSelectionFromAbsoluteIndices(
+      allChartItems,
+      nextStartAbsoluteIndex,
+      nextEndAbsoluteIndex,
+    );
+  }
+
   function onChartPointerDown(
     panelKey: string,
     event: ReactPointerEvent<HTMLDivElement>,
@@ -5091,10 +5144,12 @@ export default function DetailsPage({
 
     const isTouchPointer = event.pointerType !== "mouse";
     let anchorAbsoluteIndex: number | undefined;
+    let moveSelectionStartAbsoluteIndex: number | undefined;
+    let moveSelectionEndAbsoluteIndex: number | undefined;
     const mode =
       panelKey === "price" && chartIntervalMode
         ? (() => {
-            const adjustSide = detectChartIntervalAdjustSide(
+            const dragTarget = detectChartIntervalDragTarget(
               event.currentTarget,
               event.clientX,
               chartIntervalSelection,
@@ -5103,17 +5158,40 @@ export default function DetailsPage({
               chartLayoutSlotCount,
               shouldReserveCyqPanelWidth,
             );
-            if (adjustSide && chartIntervalSelection) {
+            if (dragTarget && chartIntervalSelection && dragTarget !== "move") {
               anchorAbsoluteIndex =
-                adjustSide === "start"
+                dragTarget === "start"
                   ? chartIntervalSelection.endAbsoluteIndex
                   : chartIntervalSelection.startAbsoluteIndex;
               setChartIntervalDraftSelection(chartIntervalSelection);
               setChartIntervalPanelOpen(false);
               setChartFocus(null);
-              return adjustSide === "start"
+              return dragTarget === "start"
                 ? "interval-adjust-start"
                 : "interval-adjust-end";
+            }
+
+            if (dragTarget === "move" && chartIntervalSelection) {
+              const pointer = buildChartPointerSnapshot(
+                event.currentTarget,
+                event.clientX,
+                event.clientY,
+                chartItems.length,
+                chartLayoutSlotCount,
+                shouldReserveCyqPanelWidth,
+              );
+              if (!pointer) {
+                return "interval-select" as const;
+              }
+
+              anchorAbsoluteIndex = effectiveVisibleStart + pointer.visibleIndex;
+              moveSelectionStartAbsoluteIndex =
+                chartIntervalSelection.startAbsoluteIndex;
+              moveSelectionEndAbsoluteIndex = chartIntervalSelection.endAbsoluteIndex;
+              setChartIntervalDraftSelection(chartIntervalSelection);
+              setChartIntervalPanelOpen(false);
+              setChartFocus(null);
+              return "interval-move" as const;
             }
 
             const pointer = buildChartPointerSnapshot(
@@ -5167,6 +5245,15 @@ export default function DetailsPage({
       setChartIntervalDraftSelection(null);
       return;
     }
+    if (
+      mode === "interval-move" &&
+      (anchorAbsoluteIndex === undefined ||
+        moveSelectionStartAbsoluteIndex === undefined ||
+        moveSelectionEndAbsoluteIndex === undefined)
+    ) {
+      setChartIntervalDraftSelection(null);
+      return;
+    }
 
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -5185,6 +5272,8 @@ export default function DetailsPage({
       maxVisibleStart,
       moved: false,
       anchorAbsoluteIndex,
+      moveSelectionStartAbsoluteIndex,
+      moveSelectionEndAbsoluteIndex,
     };
   }
 
@@ -5271,6 +5360,33 @@ export default function DetailsPage({
         event.clientY,
         dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
         dragState.mode === "interval-adjust-start" ? "start" : "end",
+      );
+      if (!nextIntervalSelection) {
+        return;
+      }
+
+      setChartIntervalDraftSelection(nextIntervalSelection);
+      return;
+    }
+
+    if (dragState.mode === "interval-move") {
+      const moveSelectionStartAbsoluteIndex =
+        dragState.moveSelectionStartAbsoluteIndex;
+      const moveSelectionEndAbsoluteIndex = dragState.moveSelectionEndAbsoluteIndex;
+      if (
+        moveSelectionStartAbsoluteIndex === undefined ||
+        moveSelectionEndAbsoluteIndex === undefined
+      ) {
+        return;
+      }
+
+      const nextIntervalSelection = buildMovedChartIntervalSelection(
+        event.currentTarget,
+        event.clientX,
+        event.clientY,
+        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
+        moveSelectionStartAbsoluteIndex,
+        moveSelectionEndAbsoluteIndex,
       );
       if (!nextIntervalSelection) {
         return;
@@ -5369,6 +5485,39 @@ export default function DetailsPage({
         event.clientY,
         dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
         dragState.mode === "interval-adjust-start" ? "start" : "end",
+      );
+      if (nextIntervalSelection) {
+        setChartIntervalDraftSelection(null);
+        setChartIntervalSelection(nextIntervalSelection);
+        setActiveIntervalContext({
+          startTradeDate: nextIntervalSelection.startTradeDate,
+          endTradeDate: nextIntervalSelection.endTradeDate,
+        });
+        setChartIntervalMode(true);
+        setChartIntervalPanelOpen(true);
+        setChartIntervalNotice("");
+      }
+      return;
+    }
+
+    if (dragState.mode === "interval-move") {
+      const moveSelectionStartAbsoluteIndex =
+        dragState.moveSelectionStartAbsoluteIndex;
+      const moveSelectionEndAbsoluteIndex = dragState.moveSelectionEndAbsoluteIndex;
+      if (
+        moveSelectionStartAbsoluteIndex === undefined ||
+        moveSelectionEndAbsoluteIndex === undefined
+      ) {
+        return;
+      }
+
+      const nextIntervalSelection = buildMovedChartIntervalSelection(
+        event.currentTarget,
+        event.clientX,
+        event.clientY,
+        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
+        moveSelectionStartAbsoluteIndex,
+        moveSelectionEndAbsoluteIndex,
       );
       if (nextIntervalSelection) {
         setChartIntervalDraftSelection(null);

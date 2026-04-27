@@ -88,6 +88,9 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [paletteColor, setPaletteColor] = useState('#2563eb')
+  const [paletteNotice, setPaletteNotice] = useState('')
 
   useEffect(() => {
     if (!open) {
@@ -535,6 +538,20 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
     }
   }
 
+  async function onCopyPaletteColor() {
+    const color = normalizeHexColor(paletteColor)
+    try {
+      if (window.navigator.clipboard && typeof window.navigator.clipboard.writeText === 'function') {
+        await window.navigator.clipboard.writeText(color)
+      } else if (!legacyCopyText(color)) {
+        throw new Error('复制失败')
+      }
+      setPaletteNotice(`已复制 ${color}`)
+    } catch (copyError) {
+      setPaletteNotice(`复制失败：${String(copyError)}`)
+    }
+  }
+
   const activeSeries =
     detailSelection?.kind === 'series' ? selectedPanel?.series?.[detailSelection.index] : null
   const activeMarker =
@@ -559,6 +576,16 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
             </p>
           </div>
           <div className="settings-actions">
+            <button
+              className="settings-secondary-btn"
+              type="button"
+              onClick={() => {
+                setPaletteOpen(true)
+                setPaletteNotice('')
+              }}
+            >
+              调色盘
+            </button>
             <button className="settings-secondary-btn" type="button" onClick={onClose}>
               关闭
             </button>
@@ -789,6 +816,47 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
             </aside>
           </div>
         )}
+
+        {paletteOpen ? (
+          <div
+            className="chart-indicator-colorpicker-backdrop"
+            role="presentation"
+            onClick={(event) => {
+              if (event.target === event.currentTarget) {
+                setPaletteOpen(false)
+              }
+            }}
+          >
+            <section className="chart-indicator-colorpicker" role="dialog" aria-modal="true" aria-label="颜色调色盘">
+              <div className="chart-indicator-colorpicker-head">
+                <strong>颜色调色盘</strong>
+                <button className="settings-secondary-btn" type="button" onClick={() => setPaletteOpen(false)}>
+                  关闭
+                </button>
+              </div>
+              <div className="chart-indicator-colorpicker-main">
+                <label className="settings-field chart-indicator-colorpicker-input">
+                  <span>自定义颜色</span>
+                  <input
+                    type="color"
+                    value={normalizeHexColor(paletteColor)}
+                    onChange={(event) => {
+                      setPaletteColor(normalizeHexColor(event.target.value))
+                      setPaletteNotice('')
+                    }}
+                  />
+                </label>
+                <div className="chart-indicator-colorpicker-actions">
+                  <code>{normalizeHexColor(paletteColor)}</code>
+                  <button className="settings-primary-btn" type="button" onClick={() => void onCopyPaletteColor()}>
+                    复制十六进制
+                  </button>
+                </div>
+                {paletteNotice ? <div className="settings-notice">{paletteNotice}</div> : null}
+              </div>
+            </section>
+          </div>
+        ) : null}
       </section>
     </div>
   )
@@ -1376,4 +1444,35 @@ function moveItem<T>(items: T[], index: number, direction: -1 | 1) {
   const [item] = nextItems.splice(index, 1)
   nextItems.splice(nextIndex, 0, item)
   return nextItems
+}
+
+function normalizeHexColor(color: string) {
+  const value = color.trim()
+  if (/^#[0-9a-fA-F]{6}$/.test(value)) {
+    return value.toLowerCase()
+  }
+  if (/^#[0-9a-fA-F]{3}$/.test(value)) {
+    const r = value[1]
+    const g = value[2]
+    const b = value[3]
+    return `#${r}${r}${g}${g}${b}${b}`.toLowerCase()
+  }
+  return '#2563eb'
+}
+
+function legacyCopyText(text: string) {
+  try {
+    const input = document.createElement('textarea')
+    input.value = text
+    input.setAttribute('readonly', '')
+    input.style.position = 'absolute'
+    input.style.left = '-9999px'
+    document.body.appendChild(input)
+    input.select()
+    const copied = document.execCommand('copy')
+    document.body.removeChild(input)
+    return copied
+  } catch {
+    return false
+  }
 }
