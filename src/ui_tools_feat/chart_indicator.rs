@@ -35,7 +35,6 @@ pub struct ChartPanelConfig {
     pub label: String,
     pub role: ChartPanelRole,
     pub kind: ChartPanelKind,
-    pub row_weight: Option<u32>,
     #[serde(default, rename = "series")]
     pub series: Vec<ChartSeriesConfig>,
     #[serde(default, rename = "marker")]
@@ -48,7 +47,6 @@ pub struct ChartSeriesConfig {
     pub label: Option<String>,
     pub expr: String,
     pub kind: ChartSeriesKind,
-    pub draw_order: Option<i32>,
     pub color: Option<String>,
     #[serde(default)]
     pub color_when: Vec<ChartColorRule>,
@@ -87,7 +85,6 @@ pub struct CompiledChartPanel {
     pub label: String,
     pub role: ChartPanelRole,
     pub kind: ChartPanelKind,
-    pub row_weight: Option<u32>,
     pub series: Vec<CompiledChartSeries>,
     pub markers: Vec<CompiledChartMarker>,
 }
@@ -120,7 +117,6 @@ pub struct CompiledChartColorRule {
 pub struct ChartSeriesRenderConfig {
     pub label: Option<String>,
     pub kind: ChartSeriesKind,
-    pub draw_order: Option<i32>,
     pub color: Option<String>,
     pub line_width: Option<f64>,
     pub opacity: Option<f64>,
@@ -210,7 +206,6 @@ pub fn default_chart_indicator_config() -> ChartIndicatorConfig {
             label: "主K".to_string(),
             role: ChartPanelRole::Main,
             kind: ChartPanelKind::Candles,
-            row_weight: Some(46),
             series: Vec::new(),
             markers: Vec::new(),
         }],
@@ -458,7 +453,6 @@ pub fn compile_chart_indicator_config(
                 render: ChartSeriesRenderConfig {
                     label: series.label.clone(),
                     kind: series.kind,
-                    draw_order: series.draw_order,
                     color: series.color.clone(),
                     line_width: series.line_width,
                     opacity: series.opacity,
@@ -512,7 +506,6 @@ pub fn compile_chart_indicator_config(
             label: panel.label.clone(),
             role: panel.role,
             kind: panel.kind,
-            row_weight: panel.row_weight,
             series: compiled_series,
             markers: compiled_markers,
         });

@@ -93,6 +93,16 @@ export const MANAGED_SOURCE_FILES = [
     scanPathHints: ['ind'],
   },
   {
+    id: 'chart-indicator-config',
+    label: '图表指标配置',
+    description: '详情页图表渲染使用的配置。',
+    fileName: 'chart_indicators.toml',
+    expectedSourcePath: 'source/chart_indicators.toml',
+    targetRelativePathSuffix: 'chart_indicators.toml',
+    extensions: ['toml'],
+    scanPathHints: ['chart', 'indicator'],
+  },
+  {
     id: 'ths-concepts',
     label: '同花顺概念',
     description: '概念列展示使用的映射表。',

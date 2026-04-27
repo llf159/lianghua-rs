@@ -20,7 +20,6 @@ export type ChartSeriesDraft = {
   label?: string | null
   expr: string
   kind: ChartSeriesKind
-  draw_order?: number | null
   color?: string | null
   color_when?: ChartColorRuleDraft[] | null
   line_width?: number | null
@@ -44,7 +43,6 @@ export type ChartPanelDraft = {
   label: string
   role: ChartPanelRole
   kind: ChartPanelKind
-  row_weight?: number | null
   series?: ChartSeriesDraft[] | null
   marker?: ChartMarkerDraft[] | null
 }

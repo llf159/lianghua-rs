@@ -43,6 +43,7 @@ pub fn managed_source_file_name(file_id: &str) -> Option<&'static str> {
         "cyq-db" => Some("cyq.db"),
         "score-rule" => Some("score_rule.toml"),
         "indicator-config" => Some("ind.toml"),
+        "chart-indicator-config" => Some("chart_indicators.toml"),
         "ths-concepts" => Some("stock_concepts.csv"),
         _ => None,
     }

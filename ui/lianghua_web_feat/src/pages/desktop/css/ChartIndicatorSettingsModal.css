@@ -138,6 +138,10 @@
   gap: 10px;
 }
 
+.chart-indicator-field-grid .settings-field-span-2 {
+  grid-column: span 2;
+}
+
 .chart-indicator-detail-form {
   display: flex;
   flex-direction: column;

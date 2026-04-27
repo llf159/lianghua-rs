@@ -77,7 +77,6 @@ pub struct DetailKlinePanel {
     pub kind: Option<String>,
     pub series: Option<Vec<DetailKlineSeries>>,
     pub markers: Option<Vec<DetailKlineMarker>>,
-    pub row_weight: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -85,7 +84,6 @@ pub struct DetailKlineSeries {
     pub key: String,
     pub label: Option<String>,
     pub kind: String,
-    pub draw_order: Option<i32>,
     pub color: Option<String>,
     pub color_when: Option<Vec<DetailKlineColorRule>>,
     pub line_width: Option<f64>,
@@ -117,7 +115,6 @@ pub struct DetailKlinePayload {
     pub panels: Option<Vec<DetailKlinePanel>>,
     pub default_window: Option<u32>,
     pub chart_height: Option<u32>,
-    pub row_weights: Option<Vec<u32>>,
     pub watermark_name: Option<String>,
     pub watermark_code: Option<String>,
 }
@@ -698,7 +695,6 @@ fn detail_kline_panels_from_compiled(
                     key: series.key.clone(),
                     label: series.render.label.clone(),
                     kind: chart_series_kind_name(series.render.kind).to_string(),
-                    draw_order: series.render.draw_order,
                     color: series.render.color.clone(),
                     color_when: if series.color_rules.is_empty() {
                         None
@@ -748,7 +744,6 @@ fn detail_kline_panels_from_compiled(
                 kind: Some(chart_panel_kind_name(panel.kind).to_string()),
                 series: Some(series),
                 markers: Some(markers),
-                row_weight: panel.row_weight,
             }
         })
         .collect()
@@ -896,10 +891,6 @@ fn query_kline(
     let db_columns = load_stock_data_columns(source_conn)?;
     let compiled = load_compiled_chart_indicator_config(source_path, Some(&db_columns))?;
     let panels = detail_kline_panels_from_compiled(&compiled);
-    let row_weights = panels
-        .iter()
-        .map(|panel| panel.row_weight.unwrap_or(18))
-        .collect::<Vec<_>>();
 
     let column_lookup = build_case_insensitive_column_lookup(&db_columns);
     let base_columns = resolve_kline_base_columns(&column_lookup)?;
@@ -1029,7 +1020,6 @@ fn query_kline(
         panels: Some(panels),
         default_window: Some(default_window_days as u32),
         chart_height: Some(820),
-        row_weights: Some(row_weights),
         watermark_name,
         watermark_code: Some(split_ts_code(ts_code)),
     })

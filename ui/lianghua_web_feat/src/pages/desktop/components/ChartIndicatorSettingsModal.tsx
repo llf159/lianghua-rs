@@ -189,7 +189,7 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
       return
     }
     const nextSeries = (selectedPanel.series ?? []).map((series, seriesIndex) =>
-      seriesIndex === index ? { ...series, ...patch } : series,
+      seriesIndex === index ? normalizeSeriesByKind({ ...series, ...patch }) : series,
     )
     updatePanel(selectedPanelIndex, { series: nextSeries })
   }
@@ -399,7 +399,7 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
       return
     }
     updateSeries(seriesIndex, {
-      color_when: [...(series.color_when ?? []), { when: 'C > REF(C, 1)', color: '#d9485f' }],
+      color_when: [...(series.color_when ?? []), { when: '', color: '' }],
     })
   }
 
@@ -426,7 +426,9 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
     }
 
     if (!sourcePath) {
-      setError('数据源路径尚未准备好。')
+      setError('')
+      setNotice('当前为 Vite 预览模式，未连接 Tauri 数据源；已切回结构化视图（不会执行后端 TOML 校验）。')
+      setMode('form')
       return
     }
     const result = await validateChartIndicatorSettings(sourcePath, sourceText)
@@ -665,7 +667,6 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
                         onChange={(event) => updatePanel(selectedPanelIndex, { key: event.target.value })}
                         disabled={selectedPanel.role === 'main'}
                       />
-                      <small>{selectedPanel.role === 'main' ? '固定主图容器。' : '用于内部渲染 key，保存后不建议频繁修改。'}</small>
                     </label>
                     <label className="settings-field">
                       <span>显示名称</span>
@@ -731,8 +732,6 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
                   panel={selectedPanel}
                   series={activeSeries}
                   index={detailSelection?.index ?? 0}
-                  previousSeriesKeys={previousSeriesKeys}
-                  databaseIndicatorColumns={payload?.summary.databaseIndicatorColumns ?? []}
                   onUpdate={updateSeries}
                   onMove={moveSeries}
                   onCopy={copySeries}
@@ -799,8 +798,6 @@ type SeriesEditorProps = {
   panel: ChartPanelDraft | undefined
   series: ChartSeriesDraft
   index: number
-  previousSeriesKeys: string[]
-  databaseIndicatorColumns: string[]
   onUpdate: (index: number, patch: Partial<ChartSeriesDraft>) => void
   onMove: (index: number, direction: -1 | 1) => void
   onCopy: (index: number) => void
@@ -814,8 +811,6 @@ function SeriesEditor({
   panel,
   series,
   index,
-  previousSeriesKeys,
-  databaseIndicatorColumns,
   onUpdate,
   onMove,
   onCopy,
@@ -826,6 +821,9 @@ function SeriesEditor({
 }: SeriesEditorProps) {
   const allowedKinds = getAllowedSeriesKinds(panel)
   const opacityValue = series.opacity ?? 1
+  const isLineSeries = series.kind === 'line'
+  const isBarSeries = series.kind === 'bar'
+  const isBrickSeries = series.kind === 'brick'
   return (
     <div className="chart-indicator-detail-form">
       <div className="chart-indicator-subsection-head">
@@ -857,7 +855,6 @@ function SeriesEditor({
         <span>计算表达式</span>
         <textarea className="settings-textarea chart-indicator-expr-textarea" value={series.expr} onChange={(event) => onUpdate(index, { expr: event.target.value })} />
       </label>
-      <ReferenceStrip previousSeriesKeys={previousSeriesKeys} databaseIndicatorColumns={databaseIndicatorColumns} />
       <div className="chart-indicator-field-grid">
         <label className="settings-field">
           <span>图法</span>
@@ -872,29 +869,41 @@ function SeriesEditor({
           <span>默认颜色</span>
           <input type="text" value={series.color ?? ''} onChange={(event) => onUpdate(index, { color: optionalString(event.target.value) })} placeholder="#2563eb" />
         </label>
-        <label className="settings-field">
-          <span>线宽</span>
-          <input type="number" min={0.5} max={6} step={0.1} value={series.line_width ?? ''} onChange={(event) => onUpdate(index, { line_width: optionalNumber(event.target.value) })} disabled={series.kind !== 'line'} />
-        </label>
-        <label className="settings-field">
-          <span>透明度</span>
-          <div className="chart-indicator-range-row">
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={opacityValue}
-              onChange={(event) => onUpdate(index, { opacity: Number(event.target.value) })}
-            />
-            <span>{series.opacity === null || series.opacity === undefined ? '默认' : opacityValue.toFixed(2)}</span>
-          </div>
-        </label>
-        <label className="settings-field">
-          <span>基线值</span>
-          <input type="number" step="any" value={series.base_value ?? ''} onChange={(event) => onUpdate(index, { base_value: optionalNumber(event.target.value) })} disabled={series.kind !== 'bar'} />
-          <small>柱体从这条数值线向上或向下画，成交量通常为 0。</small>
-        </label>
+        {isLineSeries ? (
+          <>
+            <label className="settings-field">
+              <span>线宽</span>
+              <input type="number" min={0.5} max={6} step={0.1} value={series.line_width ?? ''} onChange={(event) => onUpdate(index, { line_width: optionalNumber(event.target.value) })} />
+            </label>
+            <label className="settings-field">
+              <span>透明度</span>
+              <div className="chart-indicator-range-row">
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={opacityValue}
+                  onChange={(event) => onUpdate(index, { opacity: Number(event.target.value) })}
+                />
+                <span>{series.opacity === null || series.opacity === undefined ? '默认' : opacityValue.toFixed(2)}</span>
+              </div>
+            </label>
+          </>
+        ) : null}
+        {isBarSeries ? (
+          <label className="settings-field">
+            <span>基线值</span>
+            <input type="number" step="any" value={series.base_value ?? ''} onChange={(event) => onUpdate(index, { base_value: optionalNumber(event.target.value) })} />
+            <small>柱体从这条数值线向上或向下绘制，常见为 0。</small>
+          </label>
+        ) : null}
+        {isBrickSeries ? (
+          <label className="settings-field settings-field-span-2">
+            <span>图法说明</span>
+            <small>砖体序列只使用表达式结果和颜色参数；线宽、透明度、基线值不生效。</small>
+          </label>
+        ) : null}
       </div>
 
       <div className="chart-indicator-subsection-head">
@@ -1036,7 +1045,7 @@ function normalizeConfig(config: ChartIndicatorConfigDraft | null | undefined): 
     marker: [],
   }]).map((panel) => ({
     ...panel,
-    series: (panel.series ?? []).map((series) => ({ ...series, color_when: series.color_when ?? [] })),
+    series: (panel.series ?? []).map((series) => normalizeSeriesByKind({ ...series, color_when: series.color_when ?? [] })),
     marker: panel.marker ?? [],
   }))
   return {
@@ -1104,6 +1113,15 @@ function validateDraft(config: ChartIndicatorConfigDraft) {
       }
       if (series.line_width !== null && series.line_width !== undefined && (series.line_width < 0.5 || series.line_width > 6)) {
         issues.push(`序列 ${series.key} 的线宽建议在 0.5 到 6 之间。`)
+      }
+      if (series.kind !== 'line' && series.line_width !== null && series.line_width !== undefined) {
+        issues.push(`序列 ${series.key} 当前图法不会使用线宽参数。`)
+      }
+      if (series.kind !== 'line' && series.opacity !== null && series.opacity !== undefined) {
+        issues.push(`序列 ${series.key} 当前图法不会使用透明度参数。`)
+      }
+      if (series.kind !== 'bar' && series.base_value !== null && series.base_value !== undefined) {
+        issues.push(`序列 ${series.key} 当前图法不会使用基线值参数。`)
       }
       ;(series.color_when ?? []).forEach((rule, index) => {
         if (!rule.when.trim()) {
@@ -1277,6 +1295,31 @@ function makeBlankSeries(usedKeys: Set<string>): ChartSeriesDraft {
     expr: '',
     kind: 'line',
   }
+}
+
+function normalizeSeriesByKind(series: ChartSeriesDraft): ChartSeriesDraft {
+  if (series.kind === 'line') {
+    return {
+      ...series,
+      base_value: null,
+    }
+  }
+  if (series.kind === 'bar') {
+    return {
+      ...series,
+      line_width: null,
+      opacity: null,
+    }
+  }
+  if (series.kind === 'brick') {
+    return {
+      ...series,
+      line_width: null,
+      opacity: null,
+      base_value: null,
+    }
+  }
+  return series
 }
 
 function getAllowedSeriesKinds(panel: ChartPanelDraft | undefined): ChartSeriesKind[] {

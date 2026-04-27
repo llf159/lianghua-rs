@@ -52,7 +52,6 @@ export type DetailChartSeries = {
   key: string
   label?: string | null
   kind: DetailChartSeriesKind
-  draw_order?: number | null
   color?: string | null
   color_when?: DetailChartColorRule[] | null
   line_width?: number | null
@@ -99,7 +98,6 @@ export type DetailKlinePanel = {
   kind?: DetailChartPanelKind
   series?: DetailChartSeries[] | null
   markers?: DetailChartMarker[] | null
-  row_weight?: number
 }
 
 export type DetailKlinePayload = {
@@ -107,7 +105,6 @@ export type DetailKlinePayload = {
   panels?: DetailKlinePanel[]
   default_window?: number
   chart_height?: number
-  row_weights?: number[]
   watermark_name?: string
   watermark_code?: string
 }
