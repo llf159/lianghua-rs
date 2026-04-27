@@ -1030,9 +1030,11 @@ kind = "candles"
 
     #[test]
     fn default_config_compiles_and_collects_database_dependencies() {
-        let compiled =
-            compile_chart_indicator_config(&default_chart_indicator_config(), Some(&HashSet::new()))
-                .expect("default config should compile");
+        let compiled = compile_chart_indicator_config(
+            &default_chart_indicator_config(),
+            Some(&HashSet::new()),
+        )
+        .expect("default config should compile");
 
         assert!(compiled.database_indicator_columns.is_empty());
         assert_eq!(compiled.panels.len(), 1);

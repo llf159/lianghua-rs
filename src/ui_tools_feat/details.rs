@@ -10,12 +10,13 @@ use serde::Serialize;
 use crate::{
     data::{RowData, ScoreConfig},
     data::{cyq_db_path, result_db_path, score_rule_path, source_db_path},
+    download::ind_calc::{cache_ind_build, calc_inds_with_cache},
     ui_tools_feat::{
         build_area_map, build_circ_mv_map, build_concepts_map, build_industry_map,
         build_most_related_concept_map, build_name_map, build_total_mv_map,
         chart_indicator::{
-            ChartMarkerPosition, ChartMarkerShape, ChartPanelKind, ChartPanelRole,
-            ChartSeriesKind, CompiledChartIndicatorConfig, execute_chart_indicator_config,
+            ChartMarkerPosition, ChartMarkerShape, ChartPanelKind, ChartPanelRole, ChartSeriesKind,
+            CompiledChartIndicatorConfig, execute_chart_indicator_config,
             load_compiled_chart_indicator_config,
         },
         realtime::{RealtimeFetchMeta, fetch_realtime_quote_map, normalize_quote_trade_date},
@@ -1146,8 +1147,14 @@ fn rerun_realtime_chart_indicators(
 
     let db_columns = load_stock_data_columns(source_conn)?;
     let compiled = load_compiled_chart_indicator_config(source_path, Some(&db_columns))?;
-    let row_data =
+    let mut row_data =
         build_chart_indicator_row_data_from_items(items, Some(realtime_pre_close), &compiled)?;
+    let ind_cache = cache_ind_build(source_path)?;
+    if !ind_cache.is_empty() {
+        for (name, series) in calc_inds_with_cache(&ind_cache, row_data.clone())? {
+            row_data.cols.insert(name, series);
+        }
+    }
     let execution = execute_chart_indicator_config(&compiled, row_data)?;
 
     for item in items.iter_mut() {
@@ -1849,7 +1856,12 @@ mod tests {
             .find(|panel| panel.key == "price")
             .expect("missing price panel");
         assert_eq!(price_panel.role.as_deref(), Some("main"));
-        assert!(price_panel.series.as_ref().is_some_and(|series| series.is_empty()));
+        assert!(
+            price_panel
+                .series
+                .as_ref()
+                .is_some_and(|series| series.is_empty())
+        );
     }
 
     #[test]
@@ -1874,7 +1886,12 @@ mod tests {
         let panels = payload.panels.expect("panels should exist");
         assert_eq!(panels.len(), 1);
         assert_eq!(panels[0].key, "price");
-        assert!(panels[0].series.as_ref().is_some_and(|series| series.is_empty()));
+        assert!(
+            panels[0]
+                .series
+                .as_ref()
+                .is_some_and(|series| series.is_empty())
+        );
 
         fs::remove_dir_all(source_path).ok();
     }
@@ -1908,10 +1925,10 @@ mod tests {
         let panels = payload.panels.expect("panels should exist");
         assert_eq!(panels.len(), 1);
         assert_eq!(
-            panels[0]
-                .series
-                .as_ref()
-                .map(|series| series.iter().map(|row| row.key.as_str()).collect::<Vec<_>>()),
+            panels[0].series.as_ref().map(|series| series
+                .iter()
+                .map(|row| row.key.as_str())
+                .collect::<Vec<_>>()),
             Some(vec!["ma2"])
         );
 
@@ -1966,6 +1983,58 @@ mod tests {
         fs::remove_dir_all(source_path).ok();
     }
 
+    #[test]
+    fn realtime_chart_indicators_can_use_ind_toml_outputs() {
+        let conn = build_test_stock_data_conn();
+        let source_path = unique_temp_dir("details_chart_realtime_ind_toml");
+        fs::create_dir_all(&source_path).expect("temp dir should be created");
+        write_ind_j_config(&source_path);
+        write_j_chart_config(&source_path);
+
+        let payload = query_kline(
+            &conn,
+            source_path.to_str().expect("temp path should be utf8"),
+            "000001.SZ",
+            280,
+            None,
+        )
+        .expect("kline should query");
+        let quote = crate::crawler::SinaQuote {
+            date: "2024-01-03".to_string(),
+            time: "10:00:00".to_string(),
+            ts_code: "000001.SZ".to_string(),
+            name: "测试股".to_string(),
+            open: 11.0,
+            high: 13.2,
+            low: 10.8,
+            pre_close: 11.0,
+            price: 13.0,
+            vol: 150.0,
+            amount: 1500.0,
+            change_pct: Some(18.18),
+        };
+        let (mut payload, has_database_trade_date) = merge_realtime_kline(payload, &quote);
+        assert!(!has_database_trade_date);
+        let items = payload.items.as_mut().expect("items should exist");
+
+        rerun_realtime_chart_indicators(
+            &conn,
+            source_path.to_str().expect("temp path should be utf8"),
+            items,
+            quote.pre_close,
+        )
+        .expect("realtime chart indicators should rerun");
+
+        let latest = items.last().expect("latest row should exist");
+        assert_eq!(latest.trade_date, "20240103");
+        assert_eq!(
+            latest.indicators.get("j_line"),
+            Some(&serde_json::json!(12.0))
+        );
+
+        fs::remove_dir_all(source_path).ok();
+    }
+
     fn write_ma2_chart_config(source_path: &std::path::Path) {
         fs::write(
             source_path.join("chart_indicators.toml"),
@@ -1982,6 +2051,43 @@ kind = "candles"
 key = "ma2"
 label = "MA2"
 expr = "MA(C, 2)"
+kind = "line"
+"##,
+        )
+        .expect("config should be written");
+    }
+
+    fn write_ind_j_config(source_path: &std::path::Path) {
+        fs::write(
+            source_path.join("ind.toml"),
+            r#"
+version = 1
+
+[[ind]]
+name = "J"
+expr = "MA(C, 2)"
+prec = 2
+"#,
+        )
+        .expect("ind config should be written");
+    }
+
+    fn write_j_chart_config(source_path: &std::path::Path) {
+        fs::write(
+            source_path.join("chart_indicators.toml"),
+            r##"
+version = 1
+
+[[panel]]
+key = "price"
+label = "Price"
+role = "main"
+kind = "candles"
+
+[[panel.series]]
+key = "j_line"
+label = "J"
+expr = "J"
 kind = "line"
 "##,
         )

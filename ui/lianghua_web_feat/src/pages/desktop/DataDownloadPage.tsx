@@ -4,7 +4,6 @@ import {
   getDataDownloadStatus,
   listenDataDownloadProgress,
   runConceptMostRelatedRepair,
-
   runDataDownload,
   runMissingStockRepair,
   runThsConceptDownload,
@@ -155,8 +154,6 @@ function getProgressWorkflow(action: string | null | undefined) {
         'download_index_bars',
         'write_index_db',
         'index_download_done',
-        'rebuild_concept_performance',
-        'done',
       ] as ProgressWorkflowStep[]
     case 'incremental-download':
       return [
@@ -185,7 +182,6 @@ function getProgressWorkflow(action: string | null | undefined) {
             'index_download_done',
           ],
         },
-        'rebuild_concept_performance',
         'maintain_cyq_incremental',
       ] as ProgressWorkflowStep[]
     case 'repair-missing-stocks':

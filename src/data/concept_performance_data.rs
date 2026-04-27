@@ -17,6 +17,7 @@ const MR_FQFS: &str = "qfq";
 const GDNM_BX_DATES_PER_CHUNK: usize = 32;
 const PERFORMANCE_TYPE_CONCEPT: &str = "concept";
 const PERFORMANCE_TYPE_INDUSTRY: &str = "industry";
+const DATA_ISSUE_SAMPLE_LIMIT: usize = 12;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GdNmBXRow {
@@ -34,6 +35,25 @@ struct GdNmJxQr {
 
 fn round_to_3(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
+}
+
+fn push_data_issue(samples: &mut Vec<String>, total: &mut usize, issue: String) {
+    *total += 1;
+    if samples.len() < DATA_ISSUE_SAMPLE_LIMIT {
+        samples.push(issue);
+    }
+}
+
+fn ensure_no_data_issues(context: &str, samples: &[String], total: usize) -> Result<(), String> {
+    if total == 0 {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{context}，共发现 {total} 处问题，前 {} 项: {}",
+        samples.len(),
+        samples.join("；")
+    ))
 }
 
 pub fn init_concept_performance_db(db_path: &Path) -> Result<(), String> {
@@ -354,6 +374,8 @@ fn calc_gdnm_bx_rows_chunk(
         .map_err(|e| format!("查询概念表现分块基础数据失败:{e}"))?;
 
     let mut juhe_map: BTreeMap<(String, String), GdNmJxQr> = BTreeMap::new();
+    let mut issue_samples = Vec::new();
+    let mut issue_total = 0usize;
     while let Some(row) = rows
         .next()
         .map_err(|e| format!("读取概念表现分块基础数据失败:{e}"))?
@@ -363,12 +385,29 @@ fn calc_gdnm_bx_rows_chunk(
         let pct_chg: Option<f64> = row.get(2).map_err(|e| format!("读取pct_chg失败:{e}"))?;
 
         let Some(vhfu) = pct_chg.filter(|v| v.is_finite()) else {
+            push_data_issue(
+                &mut issue_samples,
+                &mut issue_total,
+                format!("{ts_code} {trade_date} 缺少或非法 pct_chg"),
+            );
             continue;
         };
         let Some(uivi) = uivi_map.get(&ts_code).copied().filter(|v| *v > 0.0) else {
+            push_data_issue(
+                &mut issue_samples,
+                &mut issue_total,
+                format!("{ts_code} {trade_date} 缺少可用总市值 total_mv"),
+            );
             continue;
         };
         let Some(gdnm_list) = gdnm_map.get(&ts_code) else {
+            if performance_type == PERFORMANCE_TYPE_INDUSTRY {
+                push_data_issue(
+                    &mut issue_samples,
+                    &mut issue_total,
+                    format!("{ts_code} {trade_date} 缺少行业映射"),
+                );
+            }
             continue;
         };
 
@@ -380,6 +419,8 @@ fn calc_gdnm_bx_rows_chunk(
             juhe.qrvs_he += uivi;
         }
     }
+
+    ensure_no_data_issues("概念/行业表现基础行情数据异常", &issue_samples, issue_total)?;
 
     let mut bx_rows = Vec::with_capacity(juhe_map.len());
     for ((trade_date, concept), juhe) in juhe_map {
@@ -438,18 +479,35 @@ fn load_concept_map(source_dir: &str) -> Result<Option<HashMap<String, Vec<Strin
 fn load_industry_map(source_dir: &str) -> Result<HashMap<String, Vec<String>>, String> {
     let rows = load_stock_list(source_dir)?;
     let mut industry_map = HashMap::with_capacity(rows.len());
-    for cols in rows {
-        let Some(ts_code) = cols.first().map(|v| v.trim()) else {
+    let mut issue_samples = Vec::new();
+    let mut issue_total = 0usize;
+    for (row_idx, cols) in rows.iter().enumerate() {
+        let csv_line = row_idx + 2;
+        let Some(ts_code) = cols.first().map(|v| v.trim()).filter(|v| !v.is_empty()) else {
+            push_data_issue(
+                &mut issue_samples,
+                &mut issue_total,
+                format!("第 {csv_line} 行缺少 ts_code"),
+            );
             continue;
         };
-        let Some(industry_raw) = cols.get(4).map(|v| v.trim()) else {
+
+        let Some(industry_raw) = cols.get(4).map(|v| v.trim()).filter(|v| !v.is_empty()) else {
+            push_data_issue(
+                &mut issue_samples,
+                &mut issue_total,
+                format!("{ts_code} 缺少行业 industry"),
+            );
             continue;
         };
-        if ts_code.is_empty() || industry_raw.is_empty() {
-            continue;
-        }
+
         let industry_list = split_gdnm_items(industry_raw);
         if industry_list.is_empty() {
+            push_data_issue(
+                &mut issue_samples,
+                &mut issue_total,
+                format!("{ts_code} 行业 industry 无可用值"),
+            );
             continue;
         }
         industry_map
@@ -460,27 +518,64 @@ fn load_industry_map(source_dir: &str) -> Result<HashMap<String, Vec<String>>, S
             })
             .or_insert(industry_list);
     }
+
+    ensure_no_data_issues("stock_list.csv 行业数据异常", &issue_samples, issue_total)?;
+    if industry_map.is_empty() {
+        return Err("stock_list.csv 未读取到可用行业数据".to_string());
+    }
+
     Ok(industry_map)
 }
 
 fn load_uivi_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
     let rows = load_stock_list(source_dir)?;
     let mut uivi_map = HashMap::with_capacity(rows.len());
-    for cols in rows {
-        let Some(ts_code) = cols.first().map(|v| v.trim()) else {
+    let mut issue_samples = Vec::new();
+    let mut issue_total = 0usize;
+    for (row_idx, cols) in rows.iter().enumerate() {
+        let csv_line = row_idx + 2;
+        let Some(ts_code) = cols.first().map(|v| v.trim()).filter(|v| !v.is_empty()) else {
+            push_data_issue(
+                &mut issue_samples,
+                &mut issue_total,
+                format!("第 {csv_line} 行缺少 ts_code"),
+            );
             continue;
         };
-        let Some(total_mv_raw) = cols.get(9).map(|v| v.trim()) else {
+
+        let Some(total_mv_raw) = cols.get(9).map(|v| v.trim()).filter(|v| !v.is_empty()) else {
+            push_data_issue(
+                &mut issue_samples,
+                &mut issue_total,
+                format!("{ts_code} 缺少总市值 total_mv"),
+            );
             continue;
         };
+
         let Ok(total_mv) = total_mv_raw.parse::<f64>() else {
+            push_data_issue(
+                &mut issue_samples,
+                &mut issue_total,
+                format!("{ts_code} 总市值 total_mv 不是数字: {total_mv_raw}"),
+            );
             continue;
         };
-        if ts_code.is_empty() || total_mv <= 0.0 || !total_mv.is_finite() {
+        if total_mv <= 0.0 || !total_mv.is_finite() {
+            push_data_issue(
+                &mut issue_samples,
+                &mut issue_total,
+                format!("{ts_code} 总市值 total_mv 非法: {total_mv_raw}"),
+            );
             continue;
         }
         uivi_map.insert(ts_code.to_string(), total_mv);
     }
+
+    ensure_no_data_issues("stock_list.csv 市值数据异常", &issue_samples, issue_total)?;
+    if uivi_map.is_empty() {
+        return Err("stock_list.csv 未读取到可用市值数据".to_string());
+    }
+
     Ok(uivi_map)
 }
 
@@ -874,7 +969,23 @@ mod tests {
 ts_code,symbol,name,area,industry,list_date,trade_date,total_share,float_share,total_mv,circ_mv,fullname,enname,cnspell,market,exchange,curr_type,list_status,delist_date,is_hs,act_name,act_ent_type
 000001.SZ,000001,平安银行,深圳,银行,19910403,20240103,0,0,100,80,平安银行,,,,,,,,,,\n\
 000002.SZ,000002,万科A,深圳,地产,19910129,20240103,0,0,300,250,万科A,,,,,,,,,,\n\
-000003.SZ,000003,测试股,深圳,软件,19910129,20240103,0,0,,50,测试股,,,,,,,,,,\n";
+000003.SZ,000003,测试股,深圳,软件,19910129,20240103,0,0,50,50,测试股,,,,,,,,,,\n";
+        fs::write(source_dir.join("stock_list.csv"), neirong).expect("write stock_list");
+    }
+
+    fn xieru_stock_list_with_issue(source_dir: &Path, missing_field: &str) {
+        let (industry_000002, total_mv_000002) = match missing_field {
+            "industry" => ("", "300"),
+            "total_mv" => ("地产", ""),
+            _ => ("地产", "300"),
+        };
+        let neirong = format!(
+            "\
+ts_code,symbol,name,area,industry,list_date,trade_date,total_share,float_share,total_mv,circ_mv,fullname,enname,cnspell,market,exchange,curr_type,list_status,delist_date,is_hs,act_name,act_ent_type
+000001.SZ,000001,平安银行,深圳,银行,19910403,20240103,0,0,100,80,平安银行,,,,,,,,,,\n\
+000002.SZ,000002,万科A,深圳,{industry_000002},19910129,20240103,0,0,{total_mv_000002},250,万科A,,,,,,,,,,\n\
+000003.SZ,000003,测试股,深圳,软件,19910129,20240103,0,0,50,50,测试股,,,,,,,,,,\n"
+        );
         fs::write(source_dir.join("stock_list.csv"), neirong).expect("write stock_list");
     }
 
@@ -959,7 +1070,7 @@ ts_code,concepts_code,concepts_name,stock_name
             "20240103",
         )
         .expect("rebuild range");
-        assert_eq!(row_count, 10);
+        assert_eq!(row_count, 11);
 
         let bx_db = concept_performance_db_path(source_dir.to_str().expect("utf8 path"));
         let conn = Connection::open(bx_db).expect("open bx db");
@@ -986,7 +1097,7 @@ ts_code,concepts_code,concepts_name,stock_name
                     trade_date: "20240102".to_string(),
                     performance_type: PERFORMANCE_TYPE_CONCEPT.to_string(),
                     concept: "AI".to_string(),
-                    performance_pct: 10.0,
+                    performance_pct: 16.667,
                 },
                 GdNmBXRow {
                     trade_date: "20240102".to_string(),
@@ -1005,6 +1116,12 @@ ts_code,concepts_code,concepts_name,stock_name
                     performance_type: PERFORMANCE_TYPE_INDUSTRY.to_string(),
                     concept: "地产".to_string(),
                     performance_pct: 20.0,
+                },
+                GdNmBXRow {
+                    trade_date: "20240102".to_string(),
+                    performance_type: PERFORMANCE_TYPE_INDUSTRY.to_string(),
+                    concept: "软件".to_string(),
+                    performance_pct: 30.0,
                 },
                 GdNmBXRow {
                     trade_date: "20240102".to_string(),
@@ -1044,6 +1161,48 @@ ts_code,concepts_code,concepts_name,stock_name
                 },
             ]
         );
+
+        let _ = remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn rebuild_concept_performance_range_errors_on_missing_industry_data() {
+        let source_dir = linshi_mulu();
+        create_dir_all(&source_dir).expect("create dir");
+        xieru_stock_list_with_issue(&source_dir, "industry");
+        xieru_gdnm_csv(&source_dir);
+        xieru_source_db(&source_dir);
+
+        let error = rebuild_concept_performance_range(
+            source_dir.to_str().expect("utf8 path"),
+            "20240102",
+            "20240103",
+        )
+        .expect_err("missing industry should fail");
+
+        assert!(error.contains("行业数据异常"));
+        assert!(error.contains("000002.SZ 缺少行业"));
+
+        let _ = remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn rebuild_concept_performance_range_errors_on_missing_market_value_data() {
+        let source_dir = linshi_mulu();
+        create_dir_all(&source_dir).expect("create dir");
+        xieru_stock_list_with_issue(&source_dir, "total_mv");
+        xieru_gdnm_csv(&source_dir);
+        xieru_source_db(&source_dir);
+
+        let error = rebuild_concept_performance_range(
+            source_dir.to_str().expect("utf8 path"),
+            "20240102",
+            "20240103",
+        )
+        .expect_err("missing total_mv should fail");
+
+        assert!(error.contains("市值数据异常"));
+        assert!(error.contains("000002.SZ 缺少总市值"));
 
         let _ = remove_dir_all(source_dir);
     }

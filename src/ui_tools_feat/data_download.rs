@@ -623,6 +623,99 @@ fn query_trade_date_range(
     })
 }
 
+fn query_stock_data_adj_type_range(
+    source_path: &str,
+    adj_type: &str,
+) -> Result<DataDownloadDbRange, String> {
+    let db_path = source_db_path(source_path);
+    if !db_path.exists() {
+        return Ok(DataDownloadDbRange {
+            file_name: "stock_data.db".to_string(),
+            table_name: "stock_data".to_string(),
+            exists: false,
+            min_trade_date: None,
+            max_trade_date: None,
+            distinct_trade_dates: 0,
+            row_count: 0,
+        });
+    }
+
+    let db_path_str = db_path
+        .to_str()
+        .ok_or_else(|| "stock_data.db 路径不是有效 UTF-8".to_string())?;
+    let conn =
+        Connection::open(db_path_str).map_err(|e| format!("打开 stock_data.db 失败: {e}"))?;
+    let table_exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'stock_data'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("检查 stock_data.db 表结构失败: {e}"))?;
+    if table_exists <= 0 {
+        return Ok(DataDownloadDbRange {
+            file_name: "stock_data.db".to_string(),
+            table_name: "stock_data".to_string(),
+            exists: true,
+            min_trade_date: None,
+            max_trade_date: None,
+            distinct_trade_dates: 0,
+            row_count: 0,
+        });
+    }
+
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT MIN(trade_date), MAX(trade_date), COUNT(DISTINCT trade_date), COUNT(*)
+            FROM stock_data
+            WHERE adj_type = ?
+            "#,
+        )
+        .map_err(|e| format!("查询 stock_data.db {adj_type} 日期范围失败: {e}"))?;
+    let mut rows = stmt
+        .query(params![adj_type])
+        .map_err(|e| format!("读取 stock_data.db {adj_type} 日期范围失败: {e}"))?;
+
+    if let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取 stock_data.db {adj_type} 日期范围行失败: {e}"))?
+    {
+        let min_trade_date: Option<String> = row
+            .get(0)
+            .map_err(|e| format!("读取 stock_data.db {adj_type} 最小日期失败: {e}"))?;
+        let max_trade_date: Option<String> = row
+            .get(1)
+            .map_err(|e| format!("读取 stock_data.db {adj_type} 最大日期失败: {e}"))?;
+        let distinct_trade_dates_i64: i64 = row
+            .get(2)
+            .map_err(|e| format!("读取 stock_data.db {adj_type} 交易日数量失败: {e}"))?;
+        let row_count_i64: i64 = row
+            .get(3)
+            .map_err(|e| format!("读取 stock_data.db {adj_type} 行数失败: {e}"))?;
+
+        return Ok(DataDownloadDbRange {
+            file_name: "stock_data.db".to_string(),
+            table_name: "stock_data".to_string(),
+            exists: true,
+            min_trade_date,
+            max_trade_date,
+            distinct_trade_dates: distinct_trade_dates_i64.max(0) as u64,
+            row_count: row_count_i64.max(0) as u64,
+        });
+    }
+
+    Ok(DataDownloadDbRange {
+        file_name: "stock_data.db".to_string(),
+        table_name: "stock_data".to_string(),
+        exists: true,
+        min_trade_date: None,
+        max_trade_date: None,
+        distinct_trade_dates: 0,
+        row_count: 0,
+    })
+}
+
 fn query_trade_calendar_status(source_path: &str) -> Result<DataDownloadFileStatus, String> {
     let file_path = trade_calendar_path(source_path);
     if !file_path.exists() {
@@ -1020,7 +1113,8 @@ pub fn prepare_concept_performance_repair_run(
     }
 
     let status = get_data_download_status(&source_path)?;
-    if !status.source_db.exists || status.source_db.row_count == 0 {
+    let source_qfq = query_stock_data_adj_type_range(&source_path, "qfq")?;
+    if !source_qfq.exists || source_qfq.row_count == 0 {
         return Err("原始库不存在或为空，请先完成 qfq 行情下载。".to_string());
     }
     if !status.stock_list.exists || status.stock_list.row_count == 0 {
@@ -1156,26 +1250,6 @@ pub fn run_prepared_data_download(
     summary.failed_count += index_summary.failed_count;
     summary.saved_rows += index_summary.saved_rows;
     summary.failed_items.extend(index_summary.failed_items);
-
-    if let Some(cb) = progress_cb {
-        cb(crate::download::runner::DownloadProgress {
-            phase: "rebuild_concept_performance".to_string(),
-            finished: 0,
-            total: 1,
-            current_label: None,
-            message: "开始维护概念/行业表现库。".to_string(),
-        });
-    }
-    let _ = rebuild_concept_performance_all(&prepared.source_path)?;
-    if let Some(cb) = progress_cb {
-        cb(crate::download::runner::DownloadProgress {
-            phase: "rebuild_concept_performance".to_string(),
-            finished: 1,
-            total: 1,
-            current_label: None,
-            message: "概念/行业表现维护完成。".to_string(),
-        });
-    }
 
     if prepared.action == "incremental-download" {
         if let Some(cb) = progress_cb {
@@ -1667,6 +1741,14 @@ pub fn save_indicator_manage_page(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs::{create_dir_all, remove_dir_all},
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use duckdb::{Connection, params};
+
     use super::*;
 
     fn progress(phase: &str, finished: usize, total: usize) -> DownloadProgress {
@@ -1677,6 +1759,36 @@ mod tests {
             current_label: None,
             message: phase.to_string(),
         }
+    }
+
+    fn temp_dir_path(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}_{nanos}"))
+    }
+
+    fn write_source_rows(source_dir: &Path, rows: &[(&str, &str, &str)]) {
+        let db_path = source_db_path(source_dir.to_str().expect("utf8 path"));
+        let conn = Connection::open(db_path).expect("open source db");
+        conn.execute(
+            r#"
+            CREATE TABLE stock_data (
+                ts_code VARCHAR,
+                trade_date VARCHAR,
+                adj_type VARCHAR
+            )
+            "#,
+            [],
+        )
+        .expect("create stock_data");
+        let mut app = conn.appender("stock_data").expect("appender stock_data");
+        for (ts_code, trade_date, adj_type) in rows {
+            app.append_row(params![ts_code, trade_date, adj_type])
+                .expect("append stock row");
+        }
+        app.flush().expect("flush stock rows");
     }
 
     #[test]
@@ -1705,5 +1817,30 @@ mod tests {
 
         assert_eq!(prepare.phase, "prepare_index_download");
         assert_eq!(write.phase, "write_index_db");
+    }
+
+    #[test]
+    fn qfq_range_ignores_newer_index_rows() {
+        let source_dir = temp_dir_path("lianghua_data_download_qfq_range");
+        create_dir_all(&source_dir).expect("create temp dir");
+        write_source_rows(
+            &source_dir,
+            &[
+                ("000001.SZ", "20240102", "qfq"),
+                ("000002.SZ", "20240102", "qfq"),
+                ("000001.SH", "20240103", "ind"),
+            ],
+        );
+
+        let source_path = source_dir.to_str().expect("utf8 path");
+        let source_qfq = query_stock_data_adj_type_range(source_path, "qfq").expect("qfq range");
+        let source_all =
+            query_trade_date_range(&source_db_path(source_path), "stock_data.db", "stock_data")
+                .expect("source all range");
+
+        assert_eq!(source_all.max_trade_date.as_deref(), Some("20240103"));
+        assert_eq!(source_qfq.max_trade_date.as_deref(), Some("20240102"));
+
+        let _ = remove_dir_all(source_dir);
     }
 }
