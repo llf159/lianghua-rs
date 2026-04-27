@@ -99,8 +99,6 @@ export type DetailKlinePanel = {
   kind?: DetailChartPanelKind
   series?: DetailChartSeries[] | null
   markers?: DetailChartMarker[] | null
-  /** @deprecated Legacy compatibility for the current renderer. Prefer `series`. */
-  series_keys?: string[]
   row_weight?: number
 }
 
@@ -112,16 +110,6 @@ export type DetailKlinePayload = {
   row_weights?: number[]
   watermark_name?: string
   watermark_code?: string
-}
-
-export function getDetailKlinePanelSeriesKeys(panel: DetailKlinePanel) {
-  if (panel.series?.length) {
-    const overlayKeys = panel.series.map((series) => series.key)
-    return panel.kind === 'candles'
-      ? ['open', 'high', 'low', 'close', ...overlayKeys]
-      : overlayKeys
-  }
-  return panel.series_keys ?? []
 }
 
 export type DetailStrategyTriggerRow = {

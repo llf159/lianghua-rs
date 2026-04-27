@@ -76,7 +76,6 @@ pub struct DetailKlinePanel {
     pub kind: Option<String>,
     pub series: Option<Vec<DetailKlineSeries>>,
     pub markers: Option<Vec<DetailKlineMarker>>,
-    pub series_keys: Option<Vec<String>>,
     pub row_weight: Option<u32>,
 }
 
@@ -741,18 +740,6 @@ fn detail_kline_panels_from_compiled(
                     text: marker.render.text.clone(),
                 })
                 .collect::<Vec<_>>();
-            let mut series_keys = if panel.kind == ChartPanelKind::Candles {
-                vec![
-                    "open".to_string(),
-                    "high".to_string(),
-                    "low".to_string(),
-                    "close".to_string(),
-                ]
-            } else {
-                Vec::new()
-            };
-            series_keys.extend(panel.series.iter().map(|series| series.key.clone()));
-
             DetailKlinePanel {
                 key: panel.key.clone(),
                 label: panel.label.clone(),
@@ -760,7 +747,6 @@ fn detail_kline_panels_from_compiled(
                 kind: Some(chart_panel_kind_name(panel.kind).to_string()),
                 series: Some(series),
                 markers: Some(markers),
-                series_keys: Some(series_keys),
                 row_weight: panel.row_weight,
             }
         })
@@ -1862,20 +1848,6 @@ mod tests {
             .iter()
             .find(|panel| panel.key == "price")
             .expect("missing price panel");
-        let price_series = price_panel
-            .series_keys
-            .as_ref()
-            .expect("price panel missing series keys");
-
-        assert_eq!(
-            price_series,
-            &vec![
-                "open".to_string(),
-                "high".to_string(),
-                "low".to_string(),
-                "close".to_string(),
-            ]
-        );
         assert_eq!(price_panel.role.as_deref(), Some("main"));
         assert!(price_panel.series.as_ref().is_some_and(|series| series.is_empty()));
     }
@@ -1902,15 +1874,7 @@ mod tests {
         let panels = payload.panels.expect("panels should exist");
         assert_eq!(panels.len(), 1);
         assert_eq!(panels[0].key, "price");
-        assert_eq!(
-            panels[0].series_keys.as_ref(),
-            Some(&vec![
-                "open".to_string(),
-                "high".to_string(),
-                "low".to_string(),
-                "close".to_string(),
-            ])
-        );
+        assert!(panels[0].series.as_ref().is_some_and(|series| series.is_empty()));
 
         fs::remove_dir_all(source_path).ok();
     }
@@ -1944,14 +1908,11 @@ mod tests {
         let panels = payload.panels.expect("panels should exist");
         assert_eq!(panels.len(), 1);
         assert_eq!(
-            panels[0].series_keys.as_ref(),
-            Some(&vec![
-                "open".to_string(),
-                "high".to_string(),
-                "low".to_string(),
-                "close".to_string(),
-                "ma2".to_string(),
-            ])
+            panels[0]
+                .series
+                .as_ref()
+                .map(|series| series.iter().map(|row| row.key.as_str()).collect::<Vec<_>>()),
+            Some(vec!["ma2"])
         );
 
         fs::remove_dir_all(source_path).ok();

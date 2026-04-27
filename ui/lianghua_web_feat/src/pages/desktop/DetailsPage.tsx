@@ -14,7 +14,6 @@ import {
 } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
-  getDetailKlinePanelSeriesKeys,
   getStockDetailCyq,
   getStockDetailRealtime,
   getStockDetailPage,
@@ -89,15 +88,13 @@ import DetailsLink from "../../shared/DetailsLink";
 import "./css/DetailsPage.css";
 
 const DEFAULT_TOP_LIMIT = "100";
-const DEFAULT_CHART_HEIGHT = 880;
-const CHART_MIN_HEIGHT_DESKTOP = DEFAULT_CHART_HEIGHT;
-const CHART_MIN_HEIGHT_MOBILE = 30;
-const CHART_MOBILE_BREAKPOINT = 980;
 const DETAIL_CHART_WINDOW_DAYS = 280;
 const DEFAULT_VISIBLE_BARS = 90;
 const MIN_VISIBLE_BARS = 20;
 const CHART_MIN_RIGHT_ALIGNED_SLOTS = 60;
 const DEFAULT_ROW_WEIGHTS = [52, 16, 16, 16];
+const DEFAULT_INDICATOR_PANEL_COUNT = 3;
+const DEFAULT_INDICATOR_ROW_WEIGHT = 16;
 const CHART_VIEWBOX_WIDTH = 1120;
 const CHART_VIEWBOX_HEIGHT = 240;
 const CHART_MARGIN = { top: 12, right: 8, bottom: 28, left: 52 };
@@ -111,7 +108,6 @@ const CHART_INTERVAL_EDGE_HIT_SLOP_PX = 12;
 const CHART_TOUCH_FOCUS_HIT_SLOP = 24;
 const CHART_CYQ_PANEL_WIDTH_RATIO = 0.22;
 const CHART_CYQ_PANEL_GAP = 12;
-const VOLUME_OVERLAY_KEYS = ["VOL_SIGMA"] as const;
 const CHART_PANEL_GAP_PX = 8;
 const STRATEGY_SPLIT_DEFAULT = 0.64;
 const STRATEGY_SPLIT_MIN = 0.24;
@@ -131,8 +127,6 @@ const CANDLE_REALTIME_DOWN_COLOR = "#2d6cdf";
 const CHART_CYQ_UP_COLOR = "#4d95c9";
 const CHART_CYQ_DOWN_COLOR = "#d9485f";
 const LINE_COLORS = ["#0057ff", "#e13a1f", "#6a00f4", "#00843d"];
-const CANDLE_BASE_SERIES_KEYS = new Set(["open", "high", "low", "close"]);
-
 function waitForNextPaint() {
   if (typeof window === "undefined") {
     return Promise.resolve();
@@ -326,12 +320,6 @@ function collectStrategyRows(detail: StockDetailPageData | null | undefined) {
   ];
 }
 
-function isVolumeOverlayKey(key: string) {
-  return VOLUME_OVERLAY_KEYS.some(
-    (overlayKey) => overlayKey.toLowerCase() === key.toLowerCase(),
-  );
-}
-
 function getFallbackSeriesLabel(key: string) {
   if (key.toLowerCase() === "vol_sigma".toLowerCase()) {
     return "异动量能";
@@ -360,37 +348,12 @@ function getFallbackSeriesLabel(key: string) {
   return key;
 }
 
-function getFallbackSeriesColor(key: string, seriesIndex: number) {
-  if (key.toLowerCase() === "vol_sigma".toLowerCase()) {
-    return "#7dd3fc";
-  }
-  if (key === "j" || key === "duokong_short") {
-    return "#111111";
-  }
-  if (key === "bupiao_long" || key === "duokong_long") {
-    return "#e74c3c";
-  }
-  if (key === "bupiao_short") {
-    return "#2ecc71";
-  }
+function getFallbackSeriesColor(seriesIndex: number) {
   return LINE_COLORS[seriesIndex % LINE_COLORS.length];
 }
 
 function getPanelSeries(panel: DetailKlinePanel): DetailChartSeries[] {
-  const fallbackSeries: DetailChartSeries[] = (panel.series_keys ?? [])
-    .filter((key) => !(panel.kind === "candles" && CANDLE_BASE_SERIES_KEYS.has(key)))
-    .map((key) => ({
-      key,
-      label: getFallbackSeriesLabel(key),
-      kind:
-        panel.kind === "brick"
-          ? "brick"
-          : panel.kind === "bar" && !isVolumeOverlayKey(key)
-            ? "bar"
-            : "line",
-      color: getFallbackSeriesColor(key, 0),
-    }));
-  const series = panel.series?.length ? panel.series : fallbackSeries;
+  const series = panel.series ?? [];
 
   return [...series].sort((left, right) => {
     const leftOrder = left.draw_order ?? 0;
@@ -408,17 +371,12 @@ function formatSeriesLabel(key: string, series?: DetailChartSeries | null) {
   return label ? label : getFallbackSeriesLabel(key);
 }
 
-function getSeriesColor(
-  key: string,
-  seriesIndex: number,
-  series?: DetailChartSeries | null,
-) {
-  return series?.color ?? getFallbackSeriesColor(key, seriesIndex);
+function getSeriesColor(seriesIndex: number, series?: DetailChartSeries | null) {
+  return series?.color ?? getFallbackSeriesColor(seriesIndex);
 }
 
 function getSeriesColorForRow(
   row: DetailKlineRow,
-  key: string,
   seriesIndex: number,
   series?: DetailChartSeries | null,
   fallbackColor?: string,
@@ -426,7 +384,7 @@ function getSeriesColorForRow(
   const matchedRule = series?.color_when?.find(
     (rule) => row[rule.when_key] === true,
   );
-  return matchedRule?.color ?? fallbackColor ?? getSeriesColor(key, seriesIndex, series);
+  return matchedRule?.color ?? fallbackColor ?? getSeriesColor(seriesIndex, series);
 }
 
 function getSeriesLineWidth(series?: DetailChartSeries | null) {
@@ -451,6 +409,16 @@ function getSeriesBaseValue(series?: DetailChartSeries | null) {
     Number.isFinite(series.base_value)
     ? series.base_value
     : 0;
+}
+
+function buildSeriesRuntimeValue(
+  row: DetailKlineRow | null,
+  series: DetailChartSeries,
+) {
+  if (!row) {
+    return "--";
+  }
+  return formatFieldValue(row[series.key]);
 }
 
 function isMainChartPanel(panel: DetailKlinePanel) {
@@ -1228,11 +1196,10 @@ function buildDetailTooltipRows(
       rows.push({ label: "排名", value: rankValue });
     }
 
-    const overlayRows = getDetailKlinePanelSeriesKeys(panel)
-      .filter((key) => !CANDLE_BASE_SERIES_KEYS.has(key))
-      .map((key) => ({
-        label: formatSeriesLabel(key, findPanelSeries(panel, key)),
-        value: formatFieldValue(item[key]),
+    const overlayRows = getPanelSeries(panel)
+      .map((series) => ({
+        label: formatSeriesLabel(series.key, series),
+        value: formatFieldValue(item[series.key]),
       }))
       .filter((row) => row.value !== "--");
 
@@ -1312,13 +1279,12 @@ function buildDetailTooltipRows(
     ];
   }
 
-  const seriesKeys = getDetailKlinePanelSeriesKeys(panel);
   return [
     {
       key: `${panel.key}-raw`,
-      rows: seriesKeys.map((key) => ({
-        label: formatSeriesLabel(key, findPanelSeries(panel, key)),
-        value: formatFieldValue(item[key]),
+      rows: getPanelSeries(panel).map((series) => ({
+        label: formatSeriesLabel(series.key, series),
+        value: formatFieldValue(item[series.key]),
       })),
     },
   ];
@@ -1407,65 +1373,75 @@ function buildDefaultPanels() {
       label: "主K",
       role: "main",
       kind: "candles",
-      series_keys: ["open", "high", "low", "close"],
+      series: [],
     },
   ] satisfies DetailKlinePanel[];
+}
+
+function resolveChartPanelWeights(
+  kline: DetailKlinePayload | null | undefined,
+  panels: DetailKlinePanel[],
+) {
+  const legacyWeights = kline?.row_weights ?? [];
+  return panels.map((panel, index) => {
+    const panelWeight = panel.row_weight;
+    if (typeof panelWeight === "number" && panelWeight > 0) {
+      return panelWeight;
+    }
+
+    const legacyWeight = legacyWeights[index];
+    if (typeof legacyWeight === "number" && legacyWeight > 0) {
+      return legacyWeight;
+    }
+
+    return (
+      DEFAULT_ROW_WEIGHTS[index] ??
+      DEFAULT_ROW_WEIGHTS[DEFAULT_ROW_WEIGHTS.length - 1] ??
+      DEFAULT_INDICATOR_ROW_WEIGHT
+    );
+  });
+}
+
+function buildChartPanelHeights(
+  kline: DetailKlinePayload | null | undefined,
+  panels: DetailKlinePanel[],
+  mainPanelHeight: number,
+  indicatorPanelBaseHeight: number,
+) {
+  if (panels.length === 0) {
+    return [mainPanelHeight];
+  }
+
+  const matchedMainPanelIndex = panels.findIndex((panel) => isMainChartPanel(panel));
+  const mainPanelIndex = matchedMainPanelIndex >= 0 ? matchedMainPanelIndex : 0;
+  const weights = resolveChartPanelWeights(kline, panels);
+
+  return panels.map((_, index) => {
+    if (index === mainPanelIndex) {
+      return mainPanelHeight;
+    }
+
+    const panelWeight = Math.max(weights[index] ?? DEFAULT_INDICATOR_ROW_WEIGHT, 0);
+    return (
+      indicatorPanelBaseHeight *
+      (panelWeight / DEFAULT_INDICATOR_ROW_WEIGHT)
+    );
+  });
 }
 
 function buildChartTemplateRows(
   kline: DetailKlinePayload | null | undefined,
   panels: DetailKlinePanel[],
   mainPanelHeight: number,
-  indicatorTotalHeight: number,
-  chartMinHeight: number,
+  indicatorPanelBaseHeight: number,
 ) {
-  if (panels.length === 0) {
-    return `${Math.max(mainPanelHeight, indicatorTotalHeight, chartMinHeight)}px`;
-  }
-
-  const matchedMainPanelIndex = panels.findIndex(
-    (panel) => isMainChartPanel(panel),
-  );
-  const mainPanelIndex = matchedMainPanelIndex >= 0 ? matchedMainPanelIndex : 0;
-  const indicatorIndices = panels
-    .map((_, index) => index)
-    .filter((index) => index !== mainPanelIndex);
-
-  if (indicatorIndices.length === 0) {
-    return `${mainPanelHeight.toFixed(2)}px`;
-  }
-
-  const resolvedWeights =
-    kline?.row_weights?.filter((weight) => weight > 0) ?? [];
-  const weights =
-    resolvedWeights.length === panels.length
-      ? resolvedWeights
-      : panels.map(
-          (_, index) =>
-            DEFAULT_ROW_WEIGHTS[index] ??
-            DEFAULT_ROW_WEIGHTS[DEFAULT_ROW_WEIGHTS.length - 1] ??
-            16,
-        );
-
-  const indicatorWeightSum = indicatorIndices.reduce(
-    (sum, index) => sum + Math.max(weights[index] ?? 0, 0),
-    0,
-  );
-
-  return panels
-    .map((_, index) => {
-      if (index === mainPanelIndex) {
-        return `${mainPanelHeight.toFixed(2)}px`;
-      }
-
-      if (indicatorWeightSum <= 0) {
-        return `${(indicatorTotalHeight / indicatorIndices.length).toFixed(2)}px`;
-      }
-
-      const panelWeight = Math.max(weights[index] ?? 0, 0);
-      const panelHeight = (indicatorTotalHeight * panelWeight) / indicatorWeightSum;
-      return `${panelHeight.toFixed(2)}px`;
-    })
+  return buildChartPanelHeights(
+    kline,
+    panels,
+    mainPanelHeight,
+    indicatorPanelBaseHeight,
+  )
+    .map((panelHeight) => `${panelHeight.toFixed(2)}px`)
     .join(" ");
 }
 
@@ -2124,7 +2100,7 @@ function renderChartPanel(
   const isMainPanel = isMainChartPanel(panel);
   const panelSeries = getPanelSeries(panel);
   const showDateAxis = index === panelCount - 1;
-  const seriesKeys = getDetailKlinePanelSeriesKeys(panel);
+  const seriesKeys = panelSeries.map((series) => series.key);
   const candleOverlaySeries = kind === "candles" ? panelSeries : [];
   const candleOverlayKeys = candleOverlaySeries.map((series) => series.key);
   const headerSeries = kind === "candles" ? candleOverlaySeries : panelSeries;
@@ -2237,6 +2213,10 @@ function renderChartPanel(
           ];
         })
       : [];
+  const headerRuntimeRow =
+    isActivePanel && activeVisibleIndex !== null
+      ? items[activeVisibleIndex] ?? null
+      : items[items.length - 1] ?? null;
 
   let domain: { min: number; max: number } | null = null;
   let zeroY: number | null = null;
@@ -2333,7 +2313,7 @@ function renderChartPanel(
                 className="details-chart-line-path details-chart-line-path-main"
                 key={`${key}-${segmentIndex}`}
                 d={buildLinePath(segment)}
-                stroke={getSeriesColor(key, seriesIndex, series)}
+                stroke={getSeriesColor(seriesIndex, series)}
                 strokeWidth={getSeriesLineWidth(series)}
                 opacity={getSeriesOpacity(series)}
               />
@@ -2445,7 +2425,7 @@ function renderChartPanel(
                 className="details-chart-line-path details-chart-line-path-indicator"
                 key={`${key}-${segmentIndex}`}
                 d={buildLinePath(segment)}
-                stroke={getSeriesColor(key, seriesIndex, series)}
+                stroke={getSeriesColor(seriesIndex, series)}
                 strokeWidth={getSeriesLineWidth(series)}
                 opacity={getSeriesOpacity(series)}
               />
@@ -2501,7 +2481,7 @@ function renderChartPanel(
                 : CANDLE_FLAT_COLOR
             : CANDLE_FLAT_COLOR;
         const protocolColor = primaryBarKey
-          ? getSeriesColorForRow(row, primaryBarKey, 0, primaryBarSeries, color)
+          ? getSeriesColorForRow(row, 0, primaryBarSeries, color)
           : color;
         const resolvedColor = getRealtimeSeriesColor(row, protocolColor);
         const x = xAt(itemIndex);
@@ -2533,7 +2513,7 @@ function renderChartPanel(
               className="details-chart-line-path details-chart-line-path-indicator"
               key={`${panel.key}-${overlaySeries.key}-${segmentIndex}`}
               d={buildLinePath(segment)}
-              stroke={getSeriesColor(overlaySeries.key, overlayIndex + 1, overlaySeries)}
+              stroke={getSeriesColor(overlayIndex + 1, overlaySeries)}
               strokeWidth={getSeriesLineWidth(overlaySeries)}
               opacity={getSeriesOpacity(overlaySeries)}
             />
@@ -2596,7 +2576,6 @@ function renderChartPanel(
         const sourceRow = items[body.item_index];
         const color = getSeriesColorForRow(
           sourceRow,
-          brickKey,
           0,
           brickSeries,
           fallbackColor,
@@ -2674,9 +2653,14 @@ function renderChartPanel(
                 <span
                   className="details-chart-panel-head-series-tag"
                   key={`${panel.key}-${series.key}`}
-                  style={{ color: getSeriesColor(series.key, seriesIndex, series) }}
+                  style={{ color: getSeriesColor(seriesIndex, series) }}
                 >
-                  {formatSeriesLabel(series.key, series)}
+                  <span className="details-chart-panel-head-series-label">
+                    {formatSeriesLabel(series.key, series)}
+                  </span>
+                  <strong className="details-chart-panel-head-series-value">
+                    {buildSeriesRuntimeValue(headerRuntimeRow, series)}
+                  </strong>
                 </span>
               ))}
             </div>
@@ -3590,7 +3574,9 @@ export default function DetailsPage({
   const autoFillTopRef = useRef(true);
   const detailRealtimeLongPressTimerRef = useRef<number | null>(null);
   const detailRealtimeLongPressHandledRef = useRef(false);
+  const detailRealtimeLoadingRef = useRef(false);
   const detailRealtimeAutoRefreshKeyRef = useRef("");
+  const detailRealtimeRequestKeyRef = useRef("");
   const detailCyqRequestKeyRef = useRef("");
   const detailsNavLongPressTimerRef = useRef<number | null>(null);
   const detailsNavLongPressHandledRef = useRef(false);
@@ -4423,20 +4409,25 @@ export default function DetailsPage({
     (selectedCyqSnapshot?.bins.length ?? 0) > 0 &&
     panels.some((panel) => isInteractivePricePanel(panel));
   const chartMainPanelHeight = chartLayoutWidth * chartMainWidthRatio;
-  const chartIndicatorTotalHeight = chartLayoutWidth * chartIndicatorWidthRatio;
-  const chartMinHeight =
-    chartLayoutWidth <= CHART_MOBILE_BREAKPOINT
-      ? CHART_MIN_HEIGHT_MOBILE
-      : CHART_MIN_HEIGHT_DESKTOP;
-  const chartPanelGapTotal = Math.max(0, panels.length - 1) * CHART_PANEL_GAP_PX;
-  const chartShellHeight = Math.max(
-    chartMainPanelHeight + chartIndicatorTotalHeight + chartPanelGapTotal,
-    chartMinHeight,
+  const chartIndicatorPanelBaseHeight =
+    (chartLayoutWidth * chartIndicatorWidthRatio) /
+    DEFAULT_INDICATOR_PANEL_COUNT;
+  const chartPanelHeights = buildChartPanelHeights(
+    kline,
+    panels,
+    chartMainPanelHeight,
+    chartIndicatorPanelBaseHeight,
   );
+  const chartPanelGapTotal = Math.max(0, panels.length - 1) * CHART_PANEL_GAP_PX;
+  const chartShellHeight =
+    chartPanelHeights.reduce((sum, panelHeight) => sum + panelHeight, 0) +
+    chartPanelGapTotal;
   const watermarkName =
     kline?.watermark_name ?? detailData?.overview?.name ?? "个股详情";
   const watermarkCode = kline?.watermark_code ?? splitTsCode(resolvedTsCode);
   const matchedTopDate = topResolvedDate || "--";
+  const chartAnchorTradeDate =
+    detailRealtimeData?.quoteTradeDate?.trim() || resolvedTradeDate;
   const defaultNavigationItems = useMemo(
     () =>
       topRows.map((row) =>
@@ -4583,7 +4574,7 @@ export default function DetailsPage({
       totalChartItems,
     );
     const referenceIndex = allChartItems.findIndex(
-      (item) => item.trade_date === resolvedTradeDate,
+      (item) => item.trade_date === chartAnchorTradeDate,
     );
     const nextVisibleStart =
       referenceIndex >= 0
@@ -4658,8 +4649,9 @@ export default function DetailsPage({
     detailData?.resolved_trade_date,
     detailData?.resolved_ts_code,
     detailLoading,
+    detailRealtimeData?.quoteTradeDate,
     pendingIntervalRestore,
-    resolvedTradeDate,
+    chartAnchorTradeDate,
     totalChartItems,
   ]);
 
@@ -4933,8 +4925,14 @@ export default function DetailsPage({
   }, [resolvedTsCode, resolvedTradeDate]);
 
   useEffect(() => {
+    detailRealtimeLoadingRef.current = detailRealtimeLoading;
+  }, [detailRealtimeLoading]);
+
+  useEffect(() => {
     setDetailRealtimeData(null);
+    setDetailRealtimeLoading(false);
     setDetailRealtimeNotice("");
+    detailRealtimeRequestKeyRef.current = "";
   }, [detailData?.resolved_trade_date, detailData?.resolved_ts_code]);
 
   useEffect(() => {
@@ -5527,6 +5525,8 @@ export default function DetailsPage({
       return;
     }
 
+    const requestKey = [sourcePathTrimmed, resolvedTsCode].join("|");
+    detailRealtimeRequestKeyRef.current = requestKey;
     setDetailRealtimeLoading(true);
     setDetailRealtimeNotice("");
     try {
@@ -5535,13 +5535,21 @@ export default function DetailsPage({
         tsCode: resolvedTsCode,
         chartWindowDays: DETAIL_CHART_WINDOW_DAYS,
       });
+      if (detailRealtimeRequestKeyRef.current !== requestKey) {
+        return;
+      }
       setDetailRealtimeData(nextRealtimeData);
     } catch (error) {
+      if (detailRealtimeRequestKeyRef.current !== requestKey) {
+        return;
+      }
       setDetailRealtimeNotice(`刷新实时失败: ${String(error)}`);
     } finally {
-      setDetailRealtimeLoading(false);
+      if (detailRealtimeRequestKeyRef.current === requestKey) {
+        setDetailRealtimeLoading(false);
+      }
     }
-  }, [activeIntervalContext, chartIntervalSelection, resolvedTsCode, sourcePathTrimmed]);
+  }, [resolvedTsCode, sourcePathTrimmed]);
 
   const onToggleCyqPanel = useCallback(async () => {
     const nextVisible = !detailCyqVisible;
@@ -5644,7 +5652,7 @@ export default function DetailsPage({
     }
 
     const intervalId = window.setInterval(() => {
-      if (!detailRealtimeLoading) {
+      if (!detailRealtimeLoadingRef.current) {
         void onRefreshRealtimeDetail();
       }
     }, DETAIL_REALTIME_AUTO_REFRESH_INTERVAL_MS);
@@ -5653,7 +5661,6 @@ export default function DetailsPage({
       window.clearInterval(intervalId);
     };
   }, [
-    detailRealtimeLoading,
     detailRealtimePinned,
     onRefreshRealtimeDetail,
     resolvedTsCode,
@@ -6082,8 +6089,7 @@ export default function DetailsPage({
               kline,
               panels,
               chartMainPanelHeight,
-              chartIndicatorTotalHeight,
-              chartMinHeight,
+              chartIndicatorPanelBaseHeight,
             ),
           }}
         >

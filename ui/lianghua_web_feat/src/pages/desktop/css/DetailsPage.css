@@ -596,6 +596,19 @@
   font-size: 11px;
   line-height: 1.2;
   white-space: nowrap;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.details-chart-panel-head-series-label {
+  opacity: 0.78;
+}
+
+.details-chart-panel-head-series-value {
+  font-size: 11px;
+  font-weight: 600;
+  color: inherit;
 }
 
 .details-chart-viewport {
