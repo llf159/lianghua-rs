@@ -17,7 +17,8 @@ use crate::{
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
     scoring::tools::{
-        inject_latest_num_fields, inject_stock_extra_fields, load_st_list, rt_max_len,
+        inject_latest_num_fields, inject_stock_extra_fields, load_st_list, load_total_share_map,
+        rt_max_len,
     },
     ui_tools_feat::{
         build_concepts_map, build_latest_vol_map, build_name_map, build_total_mv_map, filter_mv,
@@ -37,8 +38,8 @@ const INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS: [&str; 7] = [
     "REALTIME_VOL_RATIO",
     "VOL_RATIO",
 ];
-const INTRADAY_TEMPLATE_RUNTIME_ALIASES: [(&str, &str); 1] = [("TOTAL_MV_YI", "TOTAL_MV")];
-const RUNTIME_INPUT_KEYS: [&str; 10] = [
+const INTRADAY_TEMPLATE_RUNTIME_ALIASES: [(&str, &str); 0] = [];
+const RUNTIME_INPUT_KEYS: [&str; 11] = [
     "O",
     "H",
     "L",
@@ -49,6 +50,7 @@ const RUNTIME_INPUT_KEYS: [&str; 10] = [
     "CHANGE",
     "PCT_CHG",
     "TURNOVER_RATE",
+    "TOR",
 ];
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -699,14 +701,14 @@ fn build_real_intraday_template_validation_row_data(
     row_data = normalize_runtime_row_data(row_data)?;
 
     let st_list = load_st_list(source_path).unwrap_or_default();
-    let total_mv_yi = build_total_mv_map(source_path)
+    let total_share = load_total_share_map(source_path)
         .ok()
         .and_then(|items| items.get(&sample_ts_code).copied());
     inject_stock_extra_fields(
         &mut row_data,
         &sample_ts_code,
         st_list.contains(&sample_ts_code),
-        total_mv_yi,
+        total_share,
     )?;
     inject_template_validation_extra_series(&mut row_data)?;
 
@@ -793,6 +795,7 @@ fn build_quote_only_runtime_row_data(
     cols.insert("CHANGE".to_string(), vec![Some(change)]);
     cols.insert("PCT_CHG".to_string(), vec![pct_chg]);
     cols.insert("TURNOVER_RATE".to_string(), vec![None]);
+    cols.insert("TOR".to_string(), vec![None]);
 
     let out = RowData {
         trade_dates: vec![trade_date.to_string()],
@@ -843,6 +846,7 @@ fn merge_realtime_quote_into_row_data(
         ("CHANGE", Some(change)),
         ("PCT_CHG", pct_chg),
         ("TURNOVER_RATE", None),
+        ("TOR", None),
     ] {
         let series = row_data
             .cols
@@ -860,9 +864,10 @@ fn merge_realtime_quote_into_row_data(
 fn attach_runtime_extra_series(
     row_data: &mut RowData,
     row: &IntradayMonitorRow,
+    total_share: Option<f64>,
 ) -> Result<(), String> {
     let is_st = row.board.trim() == BOARD_ST;
-    inject_stock_extra_fields(row_data, &row.ts_code, is_st, row.total_mv_yi)?;
+    inject_stock_extra_fields(row_data, &row.ts_code, is_st, total_share)?;
     inject_latest_num_fields(
         row_data,
         &[
@@ -968,6 +973,7 @@ fn build_intraday_runtime_row_data(
     quote: &SinaQuote,
     need_rows: usize,
     indicator_cache: &[IndsCache],
+    total_share: Option<f64>,
 ) -> Result<RowData, String> {
     let end_date = resolve_runtime_trade_date(row, quote)?;
 
@@ -988,7 +994,7 @@ fn build_intraday_runtime_row_data(
         Err(err) => return Err(format!("读取 runtime 历史K线失败: {err}")),
     };
 
-    attach_runtime_extra_series(&mut row_data, row)?;
+    attach_runtime_extra_series(&mut row_data, row, total_share)?;
     let start_date = row_data
         .trade_dates
         .first()
@@ -1075,6 +1081,7 @@ fn apply_intraday_template_tags(
         .max()
         .unwrap_or(0);
     let indicator_cache = cache_ind_build(source_path).unwrap_or_default();
+    let total_share_map = load_total_share_map(source_path).unwrap_or_default();
     let indicator_warmup_need = if indicator_cache.is_empty() {
         0
     } else {
@@ -1136,6 +1143,7 @@ fn apply_intraday_template_tags(
                         quote,
                         need_rows,
                         &indicator_cache,
+                        total_share_map.get(&row.ts_code).copied(),
                     )?;
                     let mut rt = row_into_rt(row_data)?;
                     let value = rt
@@ -1827,9 +1835,10 @@ mod tests {
 
         let keys = collect_intraday_template_runtime_keys(&[&program]);
 
-        for required_key in ["C", "MY_RT_IND", "TOTAL_MV"] {
+        for required_key in ["C", "MY_RT_IND"] {
             assert!(keys.contains(required_key), "missing {required_key}");
         }
+        assert!(!keys.contains("TOTAL_MV"));
         for injected_key in [
             "RANK",
             "REALTIME_VOL_RATIO",

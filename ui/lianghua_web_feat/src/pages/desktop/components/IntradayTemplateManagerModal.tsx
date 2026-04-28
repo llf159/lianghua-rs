@@ -287,7 +287,7 @@ export default function IntradayTemplateManagerModal({
 
         <div className="intraday-template-tip-block">
           <div>
-            常用字段：<code>C / O / H / L / V / PCT_CHG / TOTAL_MV_YI / ZHANG</code>
+            常用字段：<code>C / O / H / L / V / PCT_CHG / TOR / TOTAL_MV_YI / ZHANG</code>
           </div>
           <div>
             指标字段：可直接引用 <code>stock_data</code> 已落库指标列，或 <code>ind.toml</code> 中定义的指标名。

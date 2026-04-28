@@ -16,7 +16,7 @@ use crate::{
     },
     scoring::tools::{
         calc_query_need_rows, calc_query_start_date, inject_stock_extra_fields, load_st_list,
-        rt_max_len,
+        load_total_share_map, rt_max_len,
     },
     utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
 };
@@ -30,7 +30,7 @@ const DEFAULT_ADJ_TYPE: &str = "qfq";
 const BOARD_ALL: &str = "全部";
 const BOARD_ST: &str = "ST";
 const EXPRESSION_STOCK_PICK_INJECTED_RUNTIME_KEYS: [&str; 3] = ["RANK", "ZHANG", "TOTAL_MV_YI"];
-const EXPRESSION_STOCK_PICK_RUNTIME_ALIASES: [(&str, &str); 1] = [("TOTAL_MV_YI", "TOTAL_MV")];
+const EXPRESSION_STOCK_PICK_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 
 #[derive(Debug, Clone, Copy)]
 enum PickScopeWay {
@@ -665,6 +665,7 @@ pub fn run_expression_stock_pick(
     let st_list = load_st_list(source_path)?;
     let name_map = build_name_map(source_path).unwrap_or_default();
     let concept_map = build_concepts_map(source_path).unwrap_or_default();
+    let total_share_map = load_total_share_map(source_path).unwrap_or_default();
     let summary_map = load_summary_map(source_path, &resolved_end_date);
     let rank_series_map = if needs_rank {
         load_rank_series_map(source_path, &query_start_date, &resolved_end_date)
@@ -693,7 +694,12 @@ pub fn run_expression_stock_pick(
                     &resolved_end_date,
                     need_rows,
                 )?;
-                inject_stock_extra_fields(&mut row_data, ts_code, st_list.contains(ts_code), None)?;
+                inject_stock_extra_fields(
+                    &mut row_data,
+                    ts_code,
+                    st_list.contains(ts_code),
+                    total_share_map.get(ts_code).copied(),
+                )?;
                 if needs_rank {
                     inject_runtime_rank_series(&mut row_data, ts_code, &rank_series_map)?;
                 }
@@ -925,9 +931,10 @@ mod tests {
 
         let keys = collect_expression_stock_pick_runtime_keys(&program);
 
-        for required_key in ["C", "MY_IND", "TOTAL_MV"] {
+        for required_key in ["C", "MY_IND"] {
             assert!(keys.contains(required_key), "missing {required_key}");
         }
+        assert!(!keys.contains("TOTAL_MV"));
         for injected_key in ["RANK", "ZHANG", "TOTAL_MV_YI"] {
             assert!(!keys.contains(injected_key), "unexpected {injected_key}");
         }

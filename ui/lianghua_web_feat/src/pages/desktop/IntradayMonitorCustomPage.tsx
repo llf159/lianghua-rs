@@ -59,6 +59,24 @@ function formatPercent(value?: number | null) {
   return `${value.toFixed(2)}%`
 }
 
+function getPercentClassName(value?: number | null) {
+  if (
+    value === null ||
+    value === undefined ||
+    !Number.isFinite(value) ||
+    value === 0
+  ) {
+    return 'intraday-custom-value-flat'
+  }
+  return value > 0 ? 'intraday-custom-value-up' : 'intraday-custom-value-down'
+}
+
+function getTagToneClassName(tone?: string | null) {
+  if (tone === 'up') return 'intraday-custom-hit-badge-up'
+  if (tone === 'down') return 'intraday-custom-hit-badge-down'
+  return 'intraday-custom-hit-badge-neutral'
+}
+
 function waitForNextPaint() {
   if (typeof window === 'undefined') {
     return Promise.resolve()
@@ -388,59 +406,97 @@ export default function IntradayMonitorCustomPage() {
 
         <div
           className={[
-            'intraday-custom-table-wrap',
+            'intraday-custom-scene-block',
             refreshingRealtime ? 'is-refreshing' : '',
           ]
             .filter(Boolean)
             .join(' ')}
           aria-busy={refreshingRealtime}
         >
-          <table className="intraday-custom-table">
-            <thead>
-              <tr>
-                <th>代码</th>
-                <th>名称</th>
-                <th>实时价</th>
-                <th>实时涨幅</th>
-                <th>实时量比</th>
-                <th>模板标记</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.length === 0 ? (
+          <div className="intraday-custom-scene-head">
+            <h4>自定义名单</h4>
+            <div className="intraday-custom-scene-head-actions">
+              <span>{rows.length} 只</span>
+              <span>{selectedTemplateId !== '' ? '模板标记开启' : '模板标记关闭'}</span>
+            </div>
+          </div>
+          <div className="intraday-custom-table-wrap">
+            <table className="intraday-custom-table">
+              <colgroup>
+                <col style={{ width: 72 }} />
+                <col style={{ width: 112 }} />
+                <col style={{ width: 110 }} />
+                <col style={{ width: 96 }} />
+                <col style={{ width: 108 }} />
+                <col style={{ width: 108 }} />
+                <col style={{ width: 160 }} />
+                <col style={{ width: 96 }} />
+                <col style={{ width: 116 }} />
+                <col style={{ width: 220 }} />
+              </colgroup>
+              <thead>
                 <tr>
-                  <td colSpan={6} className="intraday-custom-empty-cell">
-                    暂无数据
-                  </td>
+                  <th>排名</th>
+                  <th>代码</th>
+                  <th>名称</th>
+                  <th>实时价*</th>
+                  <th>实时涨幅*</th>
+                  <th>实时量比*</th>
+                  <th>模板标记</th>
+                  <th>板块</th>
+                  <th>总市值(亿)</th>
+                  <th>概念</th>
                 </tr>
-              ) : (
-                rows.map((row) => (
-                  <tr key={row.ts_code}>
-                    <td>{row.ts_code}</td>
-                    <td>
-                      <DetailsLink
-                        className="intraday-custom-stock-link"
-                        tsCode={row.ts_code}
-                        tradeDate={typeof row.trade_date === 'string' ? row.trade_date : null}
-                        sourcePath={sourcePathTrimmed || undefined}
-                        title={`查看 ${row.name || row.ts_code} 详情`}
-                      >
-                        {row.name || row.ts_code}
-                      </DetailsLink>
-                    </td>
-                    <td>{formatNumber(row.realtime_price)}</td>
-                    <td>{formatPercent(row.realtime_change_pct)}</td>
-                    <td>{formatNumber(row.realtime_vol_ratio)}</td>
-                    <td>
-                      {row.template_tag_text && row.template_tag_text.trim() !== ''
-                        ? row.template_tag_text
-                        : '--'}
+              </thead>
+              <tbody>
+                {rows.length === 0 ? (
+                  <tr>
+                    <td colSpan={10} className="intraday-custom-empty-cell">
+                      暂无数据
                     </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ) : (
+                  rows.map((row) => (
+                    <tr key={row.ts_code}>
+                      <td>{formatNumber(row.rank, 0)}</td>
+                      <td>{row.ts_code}</td>
+                      <td>
+                        <DetailsLink
+                          className="intraday-custom-stock-link"
+                          tsCode={row.ts_code}
+                          tradeDate={typeof row.trade_date === 'string' ? row.trade_date : null}
+                          sourcePath={sourcePathTrimmed || undefined}
+                          title={`查看 ${row.name || row.ts_code} 详情`}
+                        >
+                          {row.name || row.ts_code}
+                        </DetailsLink>
+                      </td>
+                      <td>{formatNumber(row.realtime_price)}</td>
+                      <td className={getPercentClassName(row.realtime_change_pct)}>
+                        {formatPercent(row.realtime_change_pct)}
+                      </td>
+                      <td>{formatNumber(row.realtime_vol_ratio)}</td>
+                      <td>
+                        <span
+                          className={[
+                            'intraday-custom-hit-badge',
+                            getTagToneClassName(row.template_tag_tone),
+                          ].join(' ')}
+                        >
+                          {row.template_tag_text && row.template_tag_text.trim() !== ''
+                            ? row.template_tag_text
+                            : '--'}
+                        </span>
+                      </td>
+                      <td>{row.board || '--'}</td>
+                      <td>{formatNumber(row.total_mv_yi)}</td>
+                      <td title={row.concept || ''}>{row.concept || '--'}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
           {refreshingRealtime ? (
             <div className="intraday-custom-refresh-overlay" role="status">
               <span className="intraday-custom-refresh-spinner" aria-hidden="true" />

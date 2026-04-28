@@ -1,5 +1,9 @@
 use rayon::prelude::*;
-use std::{collections::HashSet, sync::mpsc::sync_channel, thread, time};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::mpsc::sync_channel,
+    thread, time,
+};
 
 use crate::data::scoring_data::{
     SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage, ScoreWriteProfile,
@@ -11,13 +15,16 @@ use crate::data::{
 };
 use crate::scoring::{
     CachedRule, RuleSceneMeta, build_scene_score_series, scoring_rules_details_cache,
-    tools::{calc_query_need_rows, inject_stock_extra_fields, load_st_list, warmup_rows_estimate},
+    tools::{
+        calc_query_need_rows, inject_stock_extra_fields, load_st_list, load_total_share_map,
+        warmup_rows_estimate,
+    },
 };
 
 const SCORING_GROUP_SIZE: usize = 128;
 const SCORING_QUEUE_BOUND: usize = 8;
 const SCORING_INJECTED_RUNTIME_KEYS: [&str; 2] = ["ZHANG", "TOTAL_MV_YI"];
-const SCORING_RUNTIME_ALIASES: [(&str, &str); 1] = [("TOTAL_MV_YI", "TOTAL_MV")];
+const SCORING_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 
 #[derive(Debug, Default, Clone)]
 pub struct ScoringRunProfile {
@@ -112,10 +119,16 @@ fn scoring_stock_batch(
     rule_scene_meta: &[RuleSceneMeta],
     scenes: &[ScoreScene],
     st_list: &HashSet<String>,
+    total_share_map: &HashMap<String, f64>,
     ts_code: &str,
 ) -> Result<ScoreBatch, String> {
     let mut row = worker_reader.load_one_tail_rows(ts_code, adj_type, end_date, need_rows)?;
-    inject_stock_extra_fields(&mut row, ts_code, st_list.contains(ts_code), None)?;
+    inject_stock_extra_fields(
+        &mut row,
+        ts_code,
+        st_list.contains(ts_code),
+        total_share_map.get(ts_code).copied(),
+    )?;
     let (summary_rows, detail_rows, scene_rows) = scoring_single_core(
         row,
         ts_code,
@@ -142,6 +155,7 @@ fn scoring_stock_group_batch(
     rule_scene_meta: &[RuleSceneMeta],
     scenes: &[ScoreScene],
     st_list: &HashSet<String>,
+    total_share_map: &HashMap<String, f64>,
     ts_group: &[String],
 ) -> Result<ScoreBatch, String> {
     let mut group_batch = ScoreBatch::default();
@@ -156,6 +170,7 @@ fn scoring_stock_group_batch(
             rule_scene_meta,
             scenes,
             st_list,
+            total_share_map,
             ts_code,
         )?;
         group_batch.extend(batch);
@@ -178,6 +193,7 @@ pub fn scoring_all_to_db(
 
     let prepare_started_at = time::Instant::now();
     let st_list = load_st_list(source_dir)?;
+    let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
     let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
@@ -224,6 +240,7 @@ pub fn scoring_all_to_db(
                 &rule_scene_meta,
                 &scenes,
                 &st_list,
+                &total_share_map,
                 ts_group,
             )?;
             sender
@@ -268,6 +285,7 @@ pub fn scoring_single_period(
     end_date: &str,
 ) -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>, Vec<SceneDetails>), String> {
     let st_list = load_st_list(source_dir)?;
+    let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
     let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
@@ -275,7 +293,12 @@ pub fn scoring_single_period(
     let dr = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
 
     let mut row_data = DataReader::load_one_tail_rows(&dr, ts_code, adj_type, end_date, need_rows)?;
-    inject_stock_extra_fields(&mut row_data, ts_code, st_list.contains(ts_code), None)?;
+    inject_stock_extra_fields(
+        &mut row_data,
+        ts_code,
+        st_list.contains(ts_code),
+        total_share_map.get(ts_code).copied(),
+    )?;
     let rule_scene_meta: Vec<RuleSceneMeta> =
         ScoreRule::load_rules_with_strategy_path(source_dir, strategy_path)?
             .into_iter()
@@ -329,9 +352,10 @@ mod tests {
 
         let keys = collect_scoring_runtime_keys(&rules);
 
-        for required_key in ["C", "MY_SCORE_IND", "TOTAL_MV"] {
+        for required_key in ["C", "MY_SCORE_IND"] {
             assert!(keys.contains(required_key), "missing {required_key}");
         }
+        assert!(!keys.contains("TOTAL_MV"));
         for injected_key in ["ZHANG", "TOTAL_MV_YI"] {
             assert!(!keys.contains(injected_key), "unexpected {injected_key}");
         }

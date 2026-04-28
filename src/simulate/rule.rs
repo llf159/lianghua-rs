@@ -511,6 +511,24 @@ pub fn collect_triggered_rule_samples_from_cache(
     .unwrap_or_default()
 }
 
+pub fn collect_all_rule_samples_from_cache(
+    runtime_cache: &RuleLayerRuntimeCache,
+    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
+    layer_config: &RuleLayerConfig,
+) -> Result<Vec<RuleLayerSamplePoint>, String> {
+    Ok(compute_rule_layer_from_day_groups(
+        &runtime_cache.day_groups,
+        Some(triggered_score_map),
+        layer_config,
+        RuleLayerCollectOptions {
+            metrics: false,
+            all_samples: true,
+            triggered_samples: false,
+        },
+    )?
+    .all_samples)
+}
+
 pub fn calc_rule_layer_metrics(
     samples: &[RuleSample],
     config: &RuleLayerConfig,

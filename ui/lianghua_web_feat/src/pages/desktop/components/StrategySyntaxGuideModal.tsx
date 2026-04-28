@@ -57,7 +57,7 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
       { name: 'AMOUNT', scope: '通用', description: '成交额。', example: 'AMOUNT > MA(AMOUNT, 10)' },
       { name: 'PRE_CLOSE', scope: '通用', description: '昨收价。', example: 'C > PRE_CLOSE' },
       { name: 'CHANGE / PCT_CHG', scope: '通用', description: '涨跌额 / 涨跌幅；其中 PCT_CHG 的单位是百分比。', example: 'PCT_CHG >= 5' },
-      { name: 'TURNOVER_RATE', scope: '通用', description: '换手率。', example: 'TURNOVER_RATE > 8' },
+      { name: 'TOR / TURNOVER_RATE', scope: '通用', description: '换手率；TOR 是常用简写，两者会按数据列互通。', example: 'TOR > 8' },
     ],
   },
   {
@@ -65,7 +65,7 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     note: '这些字段由后端运行时统一注入，后续新增常量字段也会沿用这套入口。',
     fields: [
       { name: 'ZHANG', scope: '通用', description: '涨停幅比例，例如普通股约 0.095、创业板/科创板约 0.195、北交所约 0.295、ST 约 0.045。', example: 'PCT_CHG >= ZHANG * 100' },
-      { name: 'TOTAL_MV_YI', scope: '通用', description: '总市值，单位“亿”；优先由历史 TOTAL_MV 列换算得到。', example: 'TOTAL_MV_YI <= 300' },
+      { name: 'TOTAL_MV_YI', scope: '通用', description: '总市值，单位“亿”；按 stock_list.csv 的 total_share × 当日收盘价 C / 10000 逐日计算。', example: 'TOTAL_MV_YI <= 300' },
     ],
   },
   {

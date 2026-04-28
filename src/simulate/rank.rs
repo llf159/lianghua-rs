@@ -4,7 +4,7 @@ use duckdb::{Connection, params_from_iter};
 
 use super::rule::{
     RuleLayerConfig, RuleLayerSamplePoint, build_rule_layer_runtime_cache,
-    calc_rule_layer_metrics_with_samples_from_cache,
+    collect_all_rule_samples_from_cache,
 };
 use crate::data::result_db_path;
 
@@ -144,12 +144,11 @@ pub fn calc_rank_layer_metrics_from_db(
         &rule_layer_config,
     )?;
     let triggered_score_map = load_total_score_map(source_dir, &input.start_date, &input.end_date)?;
-    let all_samples = calc_rule_layer_metrics_with_samples_from_cache(
+    let all_samples = collect_all_rule_samples_from_cache(
         &runtime_cache,
         &triggered_score_map,
         &rule_layer_config,
-    )?
-    .samples;
+    )?;
 
     calc_rank_layer_metrics(&all_samples, &input.layer_config)
 }
