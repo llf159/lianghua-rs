@@ -2,12 +2,6 @@ name: windows-tauri-build
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - feature
-    paths:
-      - ui/lianghua_web_feat/**
-      - .github/workflows/windows-tauri.yml
 
 permissions:
   contents: read

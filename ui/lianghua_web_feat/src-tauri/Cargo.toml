@@ -34,7 +34,7 @@ zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 duckdb = "1.4.4"
 
-[target.'cfg(not(target_os = "linux"))'.dependencies]
+[target.'cfg(target_os = "windows")'.dependencies]
 duckdb = { version = "1.4.4", features = ["bundled"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
