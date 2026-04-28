@@ -18,7 +18,7 @@ use crate::{
 
 pub const CHART_INDICATORS_FILE_NAME: &str = "chart_indicators.toml";
 const CHART_INDICATOR_INJECTED_RUNTIME_KEYS: [&str; 3] = ["RANK", "ZHANG", "TOTAL_MV_YI"];
-const CHART_INDICATOR_RUNTIME_ALIASES: [(&str, &str); 1] = [("TOTAL_MV_YI", "TOTAL_MV")];
+const CHART_INDICATOR_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 
 static CHART_INDICATOR_COMPILE_CACHE: OnceLock<
     Mutex<HashMap<ChartIndicatorCacheKey, CompiledChartIndicatorConfig>>,
@@ -1424,7 +1424,10 @@ format = "ratio"
         let compiled = compile_chart_indicator_config(&config, Some(&HashSet::new()))
             .expect("tooltip should compile");
 
-        assert_eq!(compiled.panels[1].tooltips[0].value_key, "__tooltip_volume_vol_ratio");
+        assert_eq!(
+            compiled.panels[1].tooltips[0].value_key,
+            "__tooltip_volume_vol_ratio"
+        );
 
         let execution = execute_chart_indicator_config(
             &compiled,

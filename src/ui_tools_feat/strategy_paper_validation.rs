@@ -18,7 +18,7 @@ use crate::{
     },
     scoring::tools::{
         calc_query_need_rows, calc_query_start_date, inject_stock_extra_fields, load_st_list,
-        rt_max_len,
+        load_total_share_map, rt_max_len,
     },
     simulate::DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
     ui_tools_feat::watch_observe::normalize_ts_code,
@@ -34,8 +34,8 @@ const PRICE_EPS: f64 = 1e-12;
 const PAPER_VALIDATION_ALWAYS_RUNTIME_KEYS: [&str; 4] = ["O", "H", "C", "PRE_CLOSE"];
 const PAPER_VALIDATION_INJECTED_RUNTIME_KEYS: [&str; 6] =
     ["RANK", "ZHANG", "TIME", "RATEO", "RATEH", "TOTAL_MV_YI"];
-const PAPER_VALIDATION_RUNTIME_ALIASES: [(&str, &str); 1] = [("TOTAL_MV_YI", "TOTAL_MV")];
-const PAPER_VALIDATION_INPUT_KEYS: [&str; 10] = [
+const PAPER_VALIDATION_RUNTIME_ALIASES: [(&str, &str); 0] = [];
+const PAPER_VALIDATION_INPUT_KEYS: [&str; 11] = [
     "O",
     "H",
     "L",
@@ -46,6 +46,7 @@ const PAPER_VALIDATION_INPUT_KEYS: [&str; 10] = [
     "CHANGE",
     "PCT_CHG",
     "TURNOVER_RATE",
+    "TOR",
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -316,6 +317,7 @@ pub fn run_strategy_paper_validation(
     let reader = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
     let st_list = load_st_list(source_path)?;
     let name_map = build_name_map(source_path).unwrap_or_default();
+    let total_share_map = load_total_share_map(source_path).unwrap_or_default();
     let ts_codes = if let Some(ts_code) = normalized_test_ts_code.as_ref() {
         vec![ts_code.clone()]
     } else {
@@ -365,6 +367,7 @@ pub fn run_strategy_paper_validation(
                         ts_code,
                         name_map.get(ts_code),
                         st_list.contains(ts_code),
+                        total_share_map.get(ts_code).copied(),
                         &worker_buy_program,
                         &worker_sell_program,
                         &eligibility,
@@ -569,6 +572,7 @@ fn simulate_one_stock_trades(
     ts_code: &str,
     stock_name: Option<&String>,
     is_st: bool,
+    total_share: Option<f64>,
     buy_program: &Stmts,
     sell_program: &Stmts,
     eligibility: &PaperTradeEligibility,
@@ -595,7 +599,7 @@ fn simulate_one_stock_trades(
         return Ok(Vec::new());
     }
 
-    inject_stock_extra_fields(&mut row_data, ts_code, is_st, None)?;
+    inject_stock_extra_fields(&mut row_data, ts_code, is_st, total_share)?;
     if needs_rank {
         inject_runtime_rank_series(&mut row_data, ts_code, rank_series_map)?;
     }
@@ -1848,9 +1852,10 @@ mod tests {
 
         let keys = collect_paper_validation_runtime_keys(&buy_program, &sell_program);
 
-        for required_key in ["O", "H", "C", "PRE_CLOSE", "TOTAL_MV"] {
+        for required_key in ["O", "H", "C", "PRE_CLOSE"] {
             assert!(keys.contains(required_key), "missing {required_key}");
         }
+        assert!(!keys.contains("TOTAL_MV"));
         for injected_key in ["RANK", "TIME", "RATEH", "TOTAL_MV_YI"] {
             assert!(!keys.contains(injected_key), "unexpected {injected_key}");
         }

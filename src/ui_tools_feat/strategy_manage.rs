@@ -12,7 +12,7 @@ use crate::expr::parser::{Expr, Stmt, Stmts};
 use crate::{
     data::{DataReader, RuleStage, SceneDirection, ScoreConfig, score_rule_path},
     expr::parser::{Parser, lex_all},
-    scoring::tools::{inject_stock_extra_fields, load_st_list, rt_max_len},
+    scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map, rt_max_len},
     utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
 };
 
@@ -328,6 +328,7 @@ fn validate_rule_definition(
     sample_ts_code: Option<&str>,
     latest_trade_date: Option<&str>,
     st_list: Option<&HashSet<String>>,
+    total_share_map: Option<&HashMap<String, f64>>,
     rule: &StrategyRuleFileRule,
     scenes: &[StrategyRuleFileScene],
 ) -> Result<(), String> {
@@ -378,9 +379,19 @@ fn validate_rule_definition(
         .parse_main()
         .map_err(|e| format!("策略 {} 表达式解析错误在{}:{}", rule.name, e.idx, e.msg))?;
 
-    if let (Some(reader), Some(sample_ts_code), Some(latest_trade_date), Some(st_list)) =
-        (reader, sample_ts_code, latest_trade_date, st_list)
-    {
+    if let (
+        Some(reader),
+        Some(sample_ts_code),
+        Some(latest_trade_date),
+        Some(st_list),
+        Some(total_share_map),
+    ) = (
+        reader,
+        sample_ts_code,
+        latest_trade_date,
+        st_list,
+        total_share_map,
+    ) {
         let warmup_need = estimate_rule_warmup(&stmts, scope_way, rule.scope_windows)?;
         let need_rows = (warmup_need + rule.scope_windows).max(1);
         let mut row_data = reader.load_one_tail_rows(
@@ -393,7 +404,7 @@ fn validate_rule_definition(
             &mut row_data,
             sample_ts_code,
             st_list.contains(sample_ts_code),
-            None,
+            total_share_map.get(sample_ts_code).copied(),
         )?;
         let mut rt = row_into_rt(row_data)?;
         let value = rt
@@ -415,7 +426,16 @@ fn map_dist_points(
 
 fn load_validation_context(
     source_path: &str,
-) -> Result<(DataReader, Option<String>, Option<String>, HashSet<String>), String> {
+) -> Result<
+    (
+        DataReader,
+        Option<String>,
+        Option<String>,
+        HashSet<String>,
+        HashMap<String, f64>,
+    ),
+    String,
+> {
     let reader = DataReader::new(source_path)?;
     let latest_trade_date = reader
         .conn
@@ -437,7 +457,14 @@ fn load_validation_context(
             .ok()
     });
     let st_list = load_st_list(source_path)?;
-    Ok((reader, sample_ts_code, latest_trade_date, st_list))
+    let total_share_map = load_total_share_map(source_path).unwrap_or_default();
+    Ok((
+        reader,
+        sample_ts_code,
+        latest_trade_date,
+        st_list,
+        total_share_map,
+    ))
 }
 
 fn draft_to_rule(draft: StrategyManageRuleDraft) -> Result<StrategyRuleFileRule, String> {
@@ -608,7 +635,7 @@ pub fn check_strategy_manage_rule_draft(
     }) {
         return Err(format!("规则名称重复: {}", rule.name));
     }
-    let (reader, sample_ts_code, latest_trade_date, st_list) =
+    let (reader, sample_ts_code, latest_trade_date, st_list, total_share_map) =
         load_validation_context(source_path)?;
     validate_rule_definition(
         source_path,
@@ -616,6 +643,7 @@ pub fn check_strategy_manage_rule_draft(
         sample_ts_code.as_deref(),
         latest_trade_date.as_deref(),
         Some(&st_list),
+        Some(&total_share_map),
         &rule,
         &config.scene,
     )?;
@@ -701,7 +729,7 @@ pub fn save_strategy_manage_refactor_file(
         scene_items.push(scene_draft_to_file(checked)?);
     }
 
-    let (reader, sample_ts_code, latest_trade_date, st_list) =
+    let (reader, sample_ts_code, latest_trade_date, st_list, total_share_map) =
         load_validation_context(source_path)?;
     let mut rule_name_set: HashSet<String> = HashSet::new();
     let mut rule_items = Vec::with_capacity(draft.rules.len());
@@ -716,6 +744,7 @@ pub fn save_strategy_manage_refactor_file(
             sample_ts_code.as_deref(),
             latest_trade_date.as_deref(),
             Some(&st_list),
+            Some(&total_share_map),
             &rule,
             &scene_items,
         )?;

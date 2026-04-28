@@ -438,23 +438,31 @@ fn get_intraday_monitor_page(
 }
 
 #[tauri::command]
-fn refresh_intraday_monitor_realtime(
+async fn refresh_intraday_monitor_realtime(
     source_path: String,
     rows: Vec<IntradayMonitorRow>,
     templates: Vec<IntradayMonitorTemplate>,
     rank_mode_configs: Vec<IntradayMonitorRankModeConfig>,
 ) -> Result<IntradayMonitorPageData, String> {
-    core_refresh_intraday_monitor_realtime(&source_path, rows, templates, rank_mode_configs)
+    tauri::async_runtime::spawn_blocking(move || {
+        core_refresh_intraday_monitor_realtime(&source_path, rows, templates, rank_mode_configs)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn refresh_intraday_monitor_template_tags(
+async fn refresh_intraday_monitor_template_tags(
     source_path: String,
     rows: Vec<IntradayMonitorRow>,
     templates: Vec<IntradayMonitorTemplate>,
     rank_mode_configs: Vec<IntradayMonitorRankModeConfig>,
 ) -> Result<IntradayMonitorPageData, String> {
-    core_refresh_intraday_monitor_template_tags(&source_path, rows, templates, rank_mode_configs)
+    tauri::async_runtime::spawn_blocking(move || {
+        core_refresh_intraday_monitor_template_tags(&source_path, rows, templates, rank_mode_configs)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

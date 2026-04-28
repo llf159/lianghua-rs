@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::data::{RowData, ScopeWay, ScoreRule};
 use crate::data::{load_stock_list, load_trade_date_list};
@@ -195,32 +194,99 @@ pub fn inject_stock_extra_fields(
     row_data: &mut RowData,
     ts_code: &str,
     is_st: bool,
-    fallback_total_mv_yi: Option<f64>,
+    fallback_total_share: Option<f64>,
 ) -> Result<(), String> {
     inject_constant_num_fields(row_data, &[("ZHANG", Some(calc_zhang_pct(ts_code, is_st)))])?;
 
     let len = row_data.trade_dates.len();
-    let mut total_mv_yi_series = row_data
-        .cols
-        .get("TOTAL_MV")
-        .map(|series| {
-            series
-                .iter()
-                .map(|value| value.map(|number| number / 1e4))
-                .collect::<Vec<_>>()
+    let close_series = row_data.cols.get("C");
+    let total_share_series = row_data.cols.get("TOTAL_SHARE");
+    let total_mv_yi_series = (0..len)
+        .map(|index| {
+            let close = close_series
+                .and_then(|series| series.get(index).copied().flatten())
+                .filter(|value| value.is_finite() && *value > 0.0)?;
+            let total_share = total_share_series
+                .and_then(|series| series.get(index).copied().flatten())
+                .or(fallback_total_share)
+                .filter(|value| value.is_finite() && *value > 0.0)?;
+            Some(total_share * close / 1e4)
         })
-        .unwrap_or_else(|| vec![fallback_total_mv_yi; len]);
-
-    if let Some(fallback) = fallback_total_mv_yi {
-        for value in &mut total_mv_yi_series {
-            if value.is_none() {
-                *value = Some(fallback);
-            }
-        }
-    }
+        .collect::<Vec<_>>();
 
     row_data
         .cols
         .insert("TOTAL_MV_YI".to_string(), total_mv_yi_series);
     row_data.validate()
+}
+
+pub fn load_total_share_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
+    let rows = load_stock_list(source_dir)?;
+    let mut out = HashMap::with_capacity(rows.len());
+    for cols in rows {
+        let Some(ts_code) = cols
+            .first()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(total_share_raw) = cols
+            .get(7)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Ok(total_share) = total_share_raw.parse::<f64>() else {
+            continue;
+        };
+        if total_share > 0.0 && total_share.is_finite() {
+            out.insert(ts_code.to_string(), total_share);
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::inject_stock_extra_fields;
+    use crate::data::RowData;
+
+    #[test]
+    fn stock_extra_fields_compute_total_mv_yi_from_total_share_and_close() {
+        let mut row_data = RowData {
+            trade_dates: vec!["20240102".to_string(), "20240103".to_string()],
+            cols: HashMap::from([("C".to_string(), vec![Some(10.0), Some(12.0)])]),
+        };
+
+        inject_stock_extra_fields(&mut row_data, "000001.SZ", false, Some(20_000.0))
+            .expect("inject stock extra fields");
+
+        assert_eq!(
+            row_data.cols.get("TOTAL_MV_YI").map(Vec::as_slice),
+            Some([Some(20.0), Some(24.0)].as_slice())
+        );
+    }
+
+    #[test]
+    fn stock_extra_fields_prefers_row_total_share_when_present() {
+        let mut row_data = RowData {
+            trade_dates: vec!["20240102".to_string(), "20240103".to_string()],
+            cols: HashMap::from([
+                ("C".to_string(), vec![Some(10.0), Some(12.0)]),
+                ("TOTAL_SHARE".to_string(), vec![Some(30_000.0), None]),
+            ]),
+        };
+
+        inject_stock_extra_fields(&mut row_data, "000001.SZ", false, Some(20_000.0))
+            .expect("inject stock extra fields");
+
+        assert_eq!(
+            row_data.cols.get("TOTAL_MV_YI").map(Vec::as_slice),
+            Some([Some(30.0), Some(24.0)].as_slice())
+        );
+    }
 }

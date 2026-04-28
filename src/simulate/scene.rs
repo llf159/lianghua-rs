@@ -6,14 +6,15 @@ use rayon::prelude::*;
 use super::{
     BacktestSampleEligibility, DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, ResidualFactorSeriesRefs,
     ResidualReturnInput, build_backtest_sample_eligibility,
-    calc_stock_residual_returns_with_factor_series,
+    calc_stock_residual_returns_from_loaded_series,
 };
 use crate::data::{
     concept_performance_data::{load_concept_trend_series, load_industry_trend_series},
-    load_stock_list, load_ths_concepts_named_map, result_db_path, source_db_path,
+    load_stock_list, load_ths_concepts_named_map, result_db_path,
 };
 
 const EPS: f64 = 1e-12;
+const PCT_CHG_BATCH_SIZE: usize = 512;
 
 #[derive(Debug, Clone)]
 pub struct SceneLayerConfig {
@@ -467,39 +468,30 @@ fn build_residual_map_cache(
         input.industry_beta.abs() > EPS,
     )?;
 
-    let source_db = source_db_path(source_dir);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?
-        .to_string();
-
-    if ts_codes.len() == 1 {
-        let ts_code = ts_codes.into_iter().next().unwrap_or_default();
-        let residual_map = build_residual_map_for_ts_code(
-            source_conn,
-            source_dir,
-            &ts_code,
-            concept_map,
-            industry_map,
-            &concept_series_cache,
-            &industry_series_cache,
-            input,
-            &sample_eligibility,
-        )?;
-        let mut out = HashMap::with_capacity(1);
-        out.insert(ts_code, residual_map);
-        return Ok(out);
-    }
+    let stock_series_cache = load_pct_chg_series_cache_for_ts_codes(
+        source_conn,
+        &ts_codes,
+        input.stock_adj_type,
+        input.start_date,
+        input.end_date,
+    )?;
+    let index_series = load_pct_chg_series_cache_for_ts_codes(
+        source_conn,
+        &[input.index_ts_code.to_string()],
+        "ind",
+        input.start_date,
+        input.end_date,
+    )?
+    .remove(input.index_ts_code)
+    .unwrap_or_default();
 
     let grouped_results: Vec<Result<(String, HashMap<String, f64>), String>> = ts_codes
         .into_par_iter()
         .map(|ts_code| {
-            let conn = Connection::open(&source_db_str)
-                .map_err(|e| format!("并发打开source_db失败:{e}"))?;
             let residual_map = build_residual_map_for_ts_code(
-                &conn,
-                source_dir,
                 &ts_code,
+                &stock_series_cache,
+                &index_series,
                 concept_map,
                 industry_map,
                 &concept_series_cache,
@@ -520,9 +512,9 @@ fn build_residual_map_cache(
 }
 
 fn build_residual_map_for_ts_code(
-    conn: &Connection,
-    source_dir: &str,
     ts_code: &str,
+    stock_series_cache: &HashMap<String, HashMap<String, f64>>,
+    index_series: &HashMap<String, f64>,
     concept_map: &HashMap<String, String>,
     industry_map: &HashMap<String, String>,
     concept_series_cache: &HashMap<String, HashMap<String, f64>>,
@@ -530,6 +522,10 @@ fn build_residual_map_for_ts_code(
     input: &ResidualCacheInput<'_>,
     sample_eligibility: &BacktestSampleEligibility,
 ) -> Result<HashMap<String, f64>, String> {
+    let Some(stock_series) = stock_series_cache.get(ts_code) else {
+        return Ok(HashMap::new());
+    };
+
     let most_related_concept = concept_map.get(ts_code).cloned().unwrap_or_default();
     let industry = industry_map.get(ts_code).cloned().unwrap_or_default();
     let concept_series = if most_related_concept.trim().is_empty() {
@@ -542,9 +538,8 @@ fn build_residual_map_for_ts_code(
     } else {
         industry_series_cache.get(industry.trim())
     };
-    let residual_points = calc_stock_residual_returns_with_factor_series(
-        conn,
-        source_dir,
+
+    let residual_points = calc_stock_residual_returns_from_loaded_series(
         &ResidualReturnInput {
             ts_code: ts_code.to_string(),
             stock_adj_type: input.stock_adj_type.to_string(),
@@ -557,6 +552,8 @@ fn build_residual_map_for_ts_code(
             start_date: input.start_date.to_string(),
             end_date: input.end_date.to_string(),
         },
+        stock_series,
+        index_series,
         ResidualFactorSeriesRefs {
             concept_series,
             industry_series,
@@ -567,6 +564,62 @@ fn build_residual_map_for_ts_code(
         build_forward_backtest_residual_map(residual_points, input.backtest_period);
     residual_map.retain(|trade_date, _| sample_eligibility.allows_sample(ts_code, trade_date));
     Ok(residual_map)
+}
+
+fn load_pct_chg_series_cache_for_ts_codes(
+    conn: &Connection,
+    ts_codes: &[String],
+    adj_type: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<HashMap<String, HashMap<String, f64>>, String> {
+    if ts_codes.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut out = HashMap::<String, HashMap<String, f64>>::with_capacity(ts_codes.len());
+    for chunk in ts_codes.chunks(PCT_CHG_BATCH_SIZE) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            r#"
+            SELECT
+                ts_code,
+                trade_date,
+                TRY_CAST(pct_chg AS DOUBLE)
+            FROM stock_data
+            WHERE adj_type = ?
+              AND ts_code IN ({placeholders})
+              AND trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY ts_code ASC, trade_date ASC
+            "#
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("预编译批量涨跌幅查询失败:{e}"))?;
+        let query_params = std::iter::once(adj_type.trim())
+            .chain(chunk.iter().map(|ts_code| ts_code.trim()))
+            .chain(std::iter::once(start_date.trim()))
+            .chain(std::iter::once(end_date.trim()));
+        let mut rows = stmt
+            .query(params_from_iter(query_params))
+            .map_err(|e| format!("查询批量涨跌幅失败:{e}"))?;
+
+        while let Some(row) = rows.next().map_err(|e| format!("读取批量涨跌幅失败:{e}"))? {
+            let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
+            let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
+            let pct: Option<f64> = row.get(2).map_err(|e| format!("读取pct_chg失败:{e}"))?;
+
+            let Some(pct) = pct.filter(|value| value.is_finite()) else {
+                continue;
+            };
+            out.entry(ts_code).or_default().insert(trade_date, pct);
+        }
+    }
+
+    Ok(out)
 }
 
 fn build_concept_series_cache(
@@ -948,7 +1001,7 @@ mod tests {
             PathBuf::from(source_dir).join("stock_list.csv"),
             concat!(
                 "ts_code,symbol,name,area,industry,list_date,trade_date,total_share,float_share,total_mv,circ_mv,fullname,enname,cnspell,market,exchange,curr_type,list_status,delist_date,is_hs,act_name,act_ent_type\n",
-                "000001.SZ,,样本股,,main,20230001,,,,,,,,,,,,,,,\n"
+                "000001.SZ,,样本股,,main,20230001,,,,,,,,,,,,,,,,\n"
             ),
         )
         .expect("write stock_list.csv");

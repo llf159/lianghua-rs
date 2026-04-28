@@ -31,8 +31,11 @@ tauri-plugin-fs = "2.4.5"
 tokio = "1.0"
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 
-[target.'cfg(not(target_os = "android"))'.dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 duckdb = "1.4.4"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+duckdb = { version = "1.4.4", features = ["bundled"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 duckdb = { version = "1.4.4", features = ["bundled"] }

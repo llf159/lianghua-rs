@@ -1,0 +1,60 @@
+name: windows-tauri-build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature
+    paths:
+      - ui/lianghua_web_feat/**
+      - .github/workflows/windows-tauri.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-tauri-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: ui/lianghua_web_feat/package-lock.json
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            ui/lianghua_web_feat/src-tauri -> target
+
+      - name: Install frontend dependencies
+        working-directory: ui/lianghua_web_feat
+        run: npm ci
+
+      - name: Build Tauri app (Windows)
+        working-directory: ui/lianghua_web_feat
+        run: npm run tauri build
+
+      - name: Upload Windows bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-windows-bundles
+          path: |
+            ui/lianghua_web_feat/src-tauri/target/release/bundle/**/*.msi
+            ui/lianghua_web_feat/src-tauri/target/release/bundle/**/*.exe
+            ui/lianghua_web_feat/src-tauri/target/release/bundle/**/*.nsis.zip
+          if-no-files-found: error

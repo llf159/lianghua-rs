@@ -37,25 +37,6 @@ fn round_to_3(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
 }
 
-fn push_data_issue(samples: &mut Vec<String>, total: &mut usize, issue: String) {
-    *total += 1;
-    if samples.len() < DATA_ISSUE_SAMPLE_LIMIT {
-        samples.push(issue);
-    }
-}
-
-fn ensure_no_data_issues(context: &str, samples: &[String], total: usize) -> Result<(), String> {
-    if total == 0 {
-        return Ok(());
-    }
-
-    Err(format!(
-        "{context}，共发现 {total} 处问题，前 {} 项: {}",
-        samples.len(),
-        samples.join("；")
-    ))
-}
-
 pub fn init_concept_performance_db(db_path: &Path) -> Result<(), String> {
     let db_wj = Path::new(db_path);
     if let Some(fu_mulu) = db_wj.parent() {
@@ -157,12 +138,9 @@ pub fn rebuild_concept_performance_range(
     let industry_map = load_industry_map(source_dir)?;
 
     let uivi_map = load_uivi_map(source_dir)?;
-    if uivi_map.is_empty() {
-        return Ok(0);
-    }
 
     let mut bx_rows = Vec::new();
-    if !concept_map.is_empty() {
+    if !uivi_map.is_empty() && !concept_map.is_empty() {
         bx_rows.extend(calc_gdnm_bx_rows(
             source_dir,
             start_date,
@@ -172,7 +150,7 @@ pub fn rebuild_concept_performance_range(
             &uivi_map,
         )?);
     }
-    if !industry_map.is_empty() {
+    if !uivi_map.is_empty() && !industry_map.is_empty() {
         bx_rows.extend(calc_gdnm_bx_rows(
             source_dir,
             start_date,
@@ -373,9 +351,11 @@ fn calc_gdnm_bx_rows_chunk(
         .query(params![MR_FQFS, start_date, end_date])
         .map_err(|e| format!("查询概念表现分块基础数据失败:{e}"))?;
 
+    let mut date_has_valid_data = load_trade_dates_in_range(source_dir, start_date, end_date)?
+        .into_iter()
+        .map(|trade_date| (trade_date, false))
+        .collect::<BTreeMap<_, _>>();
     let mut juhe_map: BTreeMap<(String, String), GdNmJxQr> = BTreeMap::new();
-    let mut issue_samples = Vec::new();
-    let mut issue_total = 0usize;
     while let Some(row) = rows
         .next()
         .map_err(|e| format!("读取概念表现分块基础数据失败:{e}"))?
@@ -385,29 +365,13 @@ fn calc_gdnm_bx_rows_chunk(
         let pct_chg: Option<f64> = row.get(2).map_err(|e| format!("读取pct_chg失败:{e}"))?;
 
         let Some(vhfu) = pct_chg.filter(|v| v.is_finite()) else {
-            push_data_issue(
-                &mut issue_samples,
-                &mut issue_total,
-                format!("{ts_code} {trade_date} 缺少或非法 pct_chg"),
-            );
             continue;
         };
         let Some(uivi) = uivi_map.get(&ts_code).copied().filter(|v| *v > 0.0) else {
-            push_data_issue(
-                &mut issue_samples,
-                &mut issue_total,
-                format!("{ts_code} {trade_date} 缺少可用总市值 total_mv"),
-            );
             continue;
         };
+        date_has_valid_data.insert(trade_date.clone(), true);
         let Some(gdnm_list) = gdnm_map.get(&ts_code) else {
-            if performance_type == PERFORMANCE_TYPE_INDUSTRY {
-                push_data_issue(
-                    &mut issue_samples,
-                    &mut issue_total,
-                    format!("{ts_code} {trade_date} 缺少行业映射"),
-                );
-            }
             continue;
         };
 
@@ -420,7 +384,24 @@ fn calc_gdnm_bx_rows_chunk(
         }
     }
 
-    ensure_no_data_issues("概念/行业表现基础行情数据异常", &issue_samples, issue_total)?;
+    let empty_dates = date_has_valid_data
+        .iter()
+        .filter_map(|(trade_date, has_valid)| (!*has_valid).then_some(trade_date.as_str()))
+        .collect::<Vec<_>>();
+    if !empty_dates.is_empty() {
+        let sample = empty_dates
+            .iter()
+            .take(DATA_ISSUE_SAMPLE_LIMIT)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("；");
+        return Err(format!(
+            "概念/行业表现基础行情数据异常，{} 个交易日没有可用于计算的有效数据，前 {} 项: {}",
+            empty_dates.len(),
+            empty_dates.len().min(DATA_ISSUE_SAMPLE_LIMIT),
+            sample
+        ));
+    }
 
     let mut bx_rows = Vec::with_capacity(juhe_map.len());
     for ((trade_date, concept), juhe) in juhe_map {
@@ -479,35 +460,17 @@ fn load_concept_map(source_dir: &str) -> Result<Option<HashMap<String, Vec<Strin
 fn load_industry_map(source_dir: &str) -> Result<HashMap<String, Vec<String>>, String> {
     let rows = load_stock_list(source_dir)?;
     let mut industry_map = HashMap::with_capacity(rows.len());
-    let mut issue_samples = Vec::new();
-    let mut issue_total = 0usize;
-    for (row_idx, cols) in rows.iter().enumerate() {
-        let csv_line = row_idx + 2;
+    for cols in rows.iter() {
         let Some(ts_code) = cols.first().map(|v| v.trim()).filter(|v| !v.is_empty()) else {
-            push_data_issue(
-                &mut issue_samples,
-                &mut issue_total,
-                format!("第 {csv_line} 行缺少 ts_code"),
-            );
             continue;
         };
 
         let Some(industry_raw) = cols.get(4).map(|v| v.trim()).filter(|v| !v.is_empty()) else {
-            push_data_issue(
-                &mut issue_samples,
-                &mut issue_total,
-                format!("{ts_code} 缺少行业 industry"),
-            );
             continue;
         };
 
         let industry_list = split_gdnm_items(industry_raw);
         if industry_list.is_empty() {
-            push_data_issue(
-                &mut issue_samples,
-                &mut issue_total,
-                format!("{ts_code} 行业 industry 无可用值"),
-            );
             continue;
         }
         industry_map
@@ -519,61 +482,28 @@ fn load_industry_map(source_dir: &str) -> Result<HashMap<String, Vec<String>>, S
             .or_insert(industry_list);
     }
 
-    ensure_no_data_issues("stock_list.csv 行业数据异常", &issue_samples, issue_total)?;
-    if industry_map.is_empty() {
-        return Err("stock_list.csv 未读取到可用行业数据".to_string());
-    }
-
     Ok(industry_map)
 }
 
 fn load_uivi_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
     let rows = load_stock_list(source_dir)?;
     let mut uivi_map = HashMap::with_capacity(rows.len());
-    let mut issue_samples = Vec::new();
-    let mut issue_total = 0usize;
-    for (row_idx, cols) in rows.iter().enumerate() {
-        let csv_line = row_idx + 2;
+    for cols in rows.iter() {
         let Some(ts_code) = cols.first().map(|v| v.trim()).filter(|v| !v.is_empty()) else {
-            push_data_issue(
-                &mut issue_samples,
-                &mut issue_total,
-                format!("第 {csv_line} 行缺少 ts_code"),
-            );
             continue;
         };
 
         let Some(total_mv_raw) = cols.get(9).map(|v| v.trim()).filter(|v| !v.is_empty()) else {
-            push_data_issue(
-                &mut issue_samples,
-                &mut issue_total,
-                format!("{ts_code} 缺少总市值 total_mv"),
-            );
             continue;
         };
 
         let Ok(total_mv) = total_mv_raw.parse::<f64>() else {
-            push_data_issue(
-                &mut issue_samples,
-                &mut issue_total,
-                format!("{ts_code} 总市值 total_mv 不是数字: {total_mv_raw}"),
-            );
             continue;
         };
         if total_mv <= 0.0 || !total_mv.is_finite() {
-            push_data_issue(
-                &mut issue_samples,
-                &mut issue_total,
-                format!("{ts_code} 总市值 total_mv 非法: {total_mv_raw}"),
-            );
             continue;
         }
         uivi_map.insert(ts_code.to_string(), total_mv);
-    }
-
-    ensure_no_data_issues("stock_list.csv 市值数据异常", &issue_samples, issue_total)?;
-    if uivi_map.is_empty() {
-        return Err("stock_list.csv 未读取到可用市值数据".to_string());
     }
 
     Ok(uivi_map)
@@ -1029,6 +959,37 @@ ts_code,concepts_code,concepts_name,stock_name
         app.flush().expect("flush");
     }
 
+    fn xieru_source_db_with_sparse_invalid_pct(source_dir: &Path) {
+        let db_path = source_db_path(source_dir.to_str().expect("utf8 path"));
+        let conn = Connection::open(db_path).expect("open source db");
+        conn.execute(
+            r#"
+            CREATE TABLE stock_data (
+                ts_code VARCHAR,
+                trade_date VARCHAR,
+                adj_type VARCHAR,
+                pct_chg DOUBLE
+            )
+            "#,
+            [],
+        )
+        .expect("create stock_data");
+        let mut app = conn.appender("stock_data").expect("appender");
+        app.append_row(params!["000001.SZ", "20240102", "qfq", 10.0_f64])
+            .expect("row1");
+        app.append_row(params!["000002.SZ", "20240102", "qfq", Option::<f64>::None])
+            .expect("row2");
+        app.append_row(params!["000003.SZ", "20240102", "qfq", 30.0_f64])
+            .expect("row3");
+        app.append_row(params!["000001.SZ", "20240103", "qfq", Option::<f64>::None])
+            .expect("row4");
+        app.append_row(params!["000002.SZ", "20240103", "qfq", Option::<f64>::None])
+            .expect("row5");
+        app.append_row(params!["000003.SZ", "20240103", "qfq", Option::<f64>::None])
+            .expect("row6");
+        app.flush().expect("flush");
+    }
+
     fn xieru_source_db_many_trade_dates(source_dir: &Path, trade_dates: &[String]) {
         let db_path = source_db_path(source_dir.to_str().expect("utf8 path"));
         let conn = Connection::open(db_path).expect("open source db");
@@ -1166,43 +1127,82 @@ ts_code,concepts_code,concepts_name,stock_name
     }
 
     #[test]
-    fn rebuild_concept_performance_range_errors_on_missing_industry_data() {
+    fn rebuild_concept_performance_range_skips_sparse_missing_industry_data() {
         let source_dir = linshi_mulu();
         create_dir_all(&source_dir).expect("create dir");
         xieru_stock_list_with_issue(&source_dir, "industry");
         xieru_gdnm_csv(&source_dir);
         xieru_source_db(&source_dir);
 
-        let error = rebuild_concept_performance_range(
+        let row_count = rebuild_concept_performance_range(
             source_dir.to_str().expect("utf8 path"),
             "20240102",
             "20240103",
         )
-        .expect_err("missing industry should fail");
+        .expect("sparse missing industry should be skipped");
 
-        assert!(error.contains("行业数据异常"));
-        assert!(error.contains("000002.SZ 缺少行业"));
+        assert_eq!(row_count, 9);
 
         let _ = remove_dir_all(source_dir);
     }
 
     #[test]
-    fn rebuild_concept_performance_range_errors_on_missing_market_value_data() {
+    fn rebuild_concept_performance_range_skips_sparse_missing_market_value_data() {
         let source_dir = linshi_mulu();
         create_dir_all(&source_dir).expect("create dir");
         xieru_stock_list_with_issue(&source_dir, "total_mv");
         xieru_gdnm_csv(&source_dir);
         xieru_source_db(&source_dir);
 
-        let error = rebuild_concept_performance_range(
+        let row_count = rebuild_concept_performance_range(
             source_dir.to_str().expect("utf8 path"),
             "20240102",
             "20240103",
         )
-        .expect_err("missing total_mv should fail");
+        .expect("sparse missing total_mv should be skipped");
 
-        assert!(error.contains("市值数据异常"));
-        assert!(error.contains("000002.SZ 缺少总市值"));
+        assert_eq!(row_count, 9);
+
+        let _ = remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn rebuild_concept_performance_range_skips_sparse_invalid_daily_rows() {
+        let source_dir = linshi_mulu();
+        create_dir_all(&source_dir).expect("create dir");
+        xieru_stock_list(&source_dir);
+        xieru_gdnm_csv(&source_dir);
+        xieru_source_db_with_sparse_invalid_pct(&source_dir);
+
+        let row_count = rebuild_concept_performance_range(
+            source_dir.to_str().expect("utf8 path"),
+            "20240102",
+            "20240102",
+        )
+        .expect("sparse invalid pct rows should be skipped");
+
+        assert_eq!(row_count, 5);
+
+        let _ = remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn rebuild_concept_performance_range_errors_when_day_has_no_valid_rows() {
+        let source_dir = linshi_mulu();
+        create_dir_all(&source_dir).expect("create dir");
+        xieru_stock_list(&source_dir);
+        xieru_gdnm_csv(&source_dir);
+        xieru_source_db_with_sparse_invalid_pct(&source_dir);
+
+        let error = rebuild_concept_performance_range(
+            source_dir.to_str().expect("utf8 path"),
+            "20240103",
+            "20240103",
+        )
+        .expect_err("all invalid pct rows on a day should fail");
+
+        assert!(error.contains("没有可用于计算的有效数据"));
+        assert!(error.contains("20240103"));
 
         let _ = remove_dir_all(source_dir);
     }

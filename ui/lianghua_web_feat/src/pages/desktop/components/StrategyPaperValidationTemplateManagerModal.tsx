@@ -327,7 +327,7 @@ export default function StrategyPaperValidationTemplateManagerModal({
 
         <div className="intraday-template-tip-block">
           <div>
-            买点字段：<code>C / O / H / L / V / PCT_CHG / TOTAL_MV_YI / RANK</code>
+            买点字段：<code>C / O / H / L / V / PCT_CHG / TOR / TOTAL_MV_YI / RANK</code>
           </div>
           <div>
             卖点附加字段：<code>TIME / RATEO / RATEH</code>，分别表示持仓天数、开盘收益率和最高收益率。

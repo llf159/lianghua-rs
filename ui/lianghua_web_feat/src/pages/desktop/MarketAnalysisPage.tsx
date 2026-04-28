@@ -549,7 +549,7 @@ export default function MarketAnalysisPage() {
                                 displayName
                               )}
                             </td>
-                            <td>{formatPercent(item.value)}</td>
+                            <td className={getPercentToneClass(item.value)}>{formatPercent(item.value)}</td>
                           </tr>
                         );
                       })}

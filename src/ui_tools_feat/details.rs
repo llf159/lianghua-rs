@@ -11,7 +11,7 @@ use crate::{
     data::{RowData, ScoreConfig},
     data::{cyq_db_path, result_db_path, score_rule_path, source_db_path},
     download::ind_calc::{cache_ind_build, calc_inds_with_cache},
-    scoring::tools::{inject_stock_extra_fields, load_st_list},
+    scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map},
     ui_tools_feat::{
         build_area_map, build_circ_mv_map, build_concepts_map, build_industry_map,
         build_most_related_concept_map, build_name_map, build_total_mv_map,
@@ -921,14 +921,14 @@ fn inject_chart_indicator_extra_runtime_fields(
     ts_code: &str,
 ) -> Result<(), String> {
     let st_list = load_st_list(source_path).unwrap_or_default();
-    let fallback_total_mv_yi = build_total_mv_map(source_path)
+    let fallback_total_share = load_total_share_map(source_path)
         .ok()
         .and_then(|map| map.get(ts_code).copied());
     inject_stock_extra_fields(
         row_data,
         ts_code,
         st_list.contains(ts_code),
-        fallback_total_mv_yi,
+        fallback_total_share,
     )?;
     inject_chart_indicator_rank_series(row_data, source_path, ts_code)
 }

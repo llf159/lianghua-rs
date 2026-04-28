@@ -273,6 +273,10 @@ fn collect_expr_runtime_keys(
             }
 
             let runtime_key = name.to_ascii_uppercase();
+            if runtime_key == "TOTAL_MV_YI" {
+                keys.insert("C".to_string());
+                return;
+            }
             if let Some((_, db_key)) = options
                 .aliases
                 .iter()
@@ -409,7 +413,7 @@ impl DataReader {
             }
             let runtime_key = col.to_ascii_uppercase();
             if required_runtime_keys
-                .map(|keys| !keys.contains(&runtime_key))
+                .map(|keys| !runtime_key_required(keys, &runtime_key))
                 .unwrap_or(false)
             {
                 continue;
@@ -579,6 +583,20 @@ impl DataReader {
 
         Ok(list)
     }
+}
+
+fn runtime_key_required(required_runtime_keys: &HashSet<String>, runtime_key: &str) -> bool {
+    if required_runtime_keys.contains(runtime_key) {
+        return true;
+    }
+
+    matches!(
+        runtime_key,
+        "TOR" if required_runtime_keys.contains("TURNOVER_RATE")
+    ) || matches!(
+        runtime_key,
+        "TURNOVER_RATE" if required_runtime_keys.contains("TOR")
+    )
 }
 
 // ============================================ 策略部分 ================================================
@@ -941,7 +959,9 @@ impl IndsData {
 
 #[cfg(test)]
 mod tests {
-    use super::{RuleTag, ScoreConfig};
+    use std::collections::HashSet;
+
+    use super::{RuleTag, ScoreConfig, runtime_key_required};
 
     fn parse_score_config(text: &str) -> ScoreConfig {
         toml::from_str(text).expect("score config should parse")
@@ -976,5 +996,36 @@ explain = "test"
 
         assert_eq!(cfg.rule.len(), 1);
         assert_eq!(cfg.rule[0].tag, RuleTag::Normal);
+    }
+
+    #[test]
+    fn turnover_runtime_keys_match_tor_and_turnover_rate_aliases() {
+        let required = HashSet::from(["TOR".to_string()]);
+        assert!(runtime_key_required(&required, "TURNOVER_RATE"));
+
+        let required = HashSet::from(["TURNOVER_RATE".to_string()]);
+        assert!(runtime_key_required(&required, "TOR"));
+    }
+
+    #[test]
+    fn total_mv_yi_expression_collects_close_dependency() {
+        use super::{RuntimeKeyCollectOptions, collect_runtime_keys_from_expr_programs};
+        use crate::expr::parser::{Parser, lex_all};
+
+        let tokens = lex_all("TOTAL_MV_YI <= 300");
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_main().expect("expression should parse");
+        let keys = collect_runtime_keys_from_expr_programs(
+            &[&program],
+            RuntimeKeyCollectOptions {
+                always_keys: &[],
+                injected_keys: &["TOTAL_MV_YI"],
+                aliases: &[],
+            },
+        );
+
+        assert!(keys.contains("C"));
+        assert!(!keys.contains("TOTAL_MV"));
+        assert!(!keys.contains("TOTAL_MV_YI"));
     }
 }

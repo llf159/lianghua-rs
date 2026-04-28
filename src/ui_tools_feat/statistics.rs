@@ -17,7 +17,9 @@ use crate::{
         lexer::TokenKind,
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
-    scoring::tools::{calc_query_need_rows, inject_stock_extra_fields, load_st_list},
+    scoring::tools::{
+        calc_query_need_rows, inject_stock_extra_fields, load_st_list, load_total_share_map,
+    },
     scoring::{CachedRule, evaluate_cached_rule_scores},
     simulate::{
         DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, build_backtest_sample_eligibility,
@@ -40,7 +42,7 @@ use crate::{
 
 const TOP_RANK_THRESHOLD: i64 = 100;
 const RULE_VALIDATION_INJECTED_RUNTIME_KEYS: [&str; 2] = ["ZHANG", "TOTAL_MV_YI"];
-const RULE_VALIDATION_RUNTIME_ALIASES: [(&str, &str); 1] = [("TOTAL_MV_YI", "TOTAL_MV")];
+const RULE_VALIDATION_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 
 #[derive(Debug, Clone)]
 struct RuleMeta {
@@ -1918,10 +1920,16 @@ fn evaluate_validation_combos_for_ts_code(
     end_date: &str,
     need_rows: usize,
     st_list: &HashSet<String>,
+    total_share_map: &HashMap<String, f64>,
     combos: &[PreparedValidationCombo],
 ) -> Result<ValidationTsCodeEvaluation, String> {
     let mut row_data = reader.load_one_tail_rows(ts_code, stock_adj_type, end_date, need_rows)?;
-    inject_stock_extra_fields(&mut row_data, ts_code, st_list.contains(ts_code), None)?;
+    inject_stock_extra_fields(
+        &mut row_data,
+        ts_code,
+        st_list.contains(ts_code),
+        total_share_map.get(ts_code).copied(),
+    )?;
 
     let trade_dates = row_data.trade_dates.clone();
     if trade_dates.is_empty() {
@@ -1983,6 +1991,7 @@ fn build_validation_triggered_scores_for_combos(
     }
 
     let required_runtime_keys = collect_rule_validation_runtime_keys(combos);
+    let total_share_map = load_total_share_map(source_path).unwrap_or_default();
     let grouped_results = ts_codes
         .par_iter()
         .map_init(
@@ -1997,6 +2006,7 @@ fn build_validation_triggered_scores_for_combos(
                     end_date,
                     need_rows,
                     st_list,
+                    &total_share_map,
                     combos,
                 )
             },
@@ -3064,7 +3074,7 @@ pub fn get_market_analysis(
     let mut interval_gain_stmt = source_conn
         .prepare(
             r#"
-            SELECT ts_code, trade_date, TRY_CAST(pct_chg AS DOUBLE) AS pct
+            SELECT ts_code, trade_date, TRY_CAST(close AS DOUBLE) AS close_price
             FROM stock_data
             WHERE adj_type = 'qfq'
               AND trade_date >= ?
@@ -3076,15 +3086,15 @@ pub fn get_market_analysis(
     let mut interval_gain_rows = interval_gain_stmt
         .query(params![&interval_start, &interval_end])
         .map_err(|e| format!("执行涨幅区间榜 SQL 失败: {e}"))?;
-    let mut interval_gain_acc: HashMap<String, (f64, usize)> = HashMap::new();
+    let mut interval_gain_acc: HashMap<String, (f64, f64)> = HashMap::new();
     while let Some(row) = interval_gain_rows
         .next()
         .map_err(|e| format!("读取涨幅区间榜失败: {e}"))?
     {
         let ts_code: String = row.get(0).map_err(|e| format!("读取代码失败: {e}"))?;
         let trade_date: String = row.get(1).map_err(|e| format!("读取交易日失败: {e}"))?;
-        let value: Option<f64> = row.get(2).map_err(|e| format!("读取涨幅值失败: {e}"))?;
-        let Some(value) = value.filter(|v| v.is_finite()) else {
+        let close_price: Option<f64> = row.get(2).map_err(|e| format!("读取收盘价失败: {e}"))?;
+        let Some(close_price) = close_price.filter(|v| v.is_finite() && *v > f64::EPSILON) else {
             continue;
         };
         let ts_code = ts_code.to_ascii_uppercase();
@@ -3097,17 +3107,20 @@ pub fn get_market_analysis(
         if !match_board_filter_with_st(board_list, resolved_board.as_deref(), exclude_st_board) {
             continue;
         }
-        let entry = interval_gain_acc.entry(ts_code).or_insert((0.0, 0));
-        entry.0 += value;
-        entry.1 += 1;
+        interval_gain_acc
+            .entry(ts_code)
+            .and_modify(|entry| {
+                entry.1 = close_price;
+            })
+            .or_insert((close_price, close_price));
     }
     let mut interval_gain_top = interval_gain_acc
         .into_iter()
-        .filter_map(|(ts_code, (sum, count))| {
-            if count == 0 {
+        .filter_map(|(ts_code, (start_close, end_close))| {
+            if start_close <= f64::EPSILON {
                 return None;
             }
-            let value = sum / count as f64;
+            let value = (end_close / start_close - 1.0) * 100.0;
             if !value.is_finite() {
                 return None;
             }
@@ -4587,9 +4600,10 @@ mod tests {
 
         let keys = collect_rule_validation_runtime_keys(&[combo]);
 
-        for required_key in ["C", "MY_VALIDATION_IND", "TOTAL_MV"] {
+        for required_key in ["C", "MY_VALIDATION_IND"] {
             assert!(keys.contains(required_key), "missing {required_key}");
         }
+        assert!(!keys.contains("TOTAL_MV"));
         for injected_key in ["ZHANG", "TOTAL_MV_YI"] {
             assert!(!keys.contains(injected_key), "unexpected {injected_key}");
         }
