@@ -63,6 +63,21 @@ function inputDateToCompact(value: string) {
   return value.replaceAll('-', '').trim()
 }
 
+function calcPhaseProgressPercent(progress: DataDownloadProgress | null) {
+  if (!progress || progress.total <= 0) {
+    return null
+  }
+
+  return Math.max(0, Math.min(100, Math.round((progress.finished / progress.total) * 100)))
+}
+
+function shouldSuppressFirstDownloadProgress(progress: DataDownloadProgress) {
+  return (
+    progress.action === 'first-download' &&
+    (progress.phase === 'write_db' || progress.phase === 'write_index_db')
+  )
+}
+
 function formatElapsedMs(value: number) {
   if (!Number.isFinite(value) || value < 0) {
     return '--'
@@ -364,10 +379,13 @@ export default function DataDownloadPage() {
   const deferredProgress = useDeferredValue(progress)
   const resolvedIncrementalStartDate =
     inputDateToCompact(startDateInput) || status?.sourceDb.minTradeDate || '20240101'
-  const progressPercent = calcProgressPercent(deferredProgress, getProgressWorkflow, [
-    'done',
-    'done_ths_concepts',
-  ])
+  const progressPercent =
+    deferredProgress?.action === 'first-download'
+      ? calcPhaseProgressPercent(deferredProgress)
+      : calcProgressPercent(deferredProgress, getProgressWorkflow, [
+          'done',
+          'done_ths_concepts',
+        ])
   const shownProgressPercent = useAnimatedProgressPercent(busyAction === 'running', progressPercent)
   const phaseStep = getPhaseStep(deferredProgress?.action, deferredProgress?.phase, getProgressWorkflow)
   const phaseLabel = getProgressTaskLabel(
@@ -481,6 +499,9 @@ export default function DataDownloadPage() {
     progressUnlistenRef.current?.()
     progressUnlistenRef.current = await listenDataDownloadProgress(downloadId, (nextProgress) => {
       if (activeDownloadIdRef.current !== downloadId) {
+        return
+      }
+      if (shouldSuppressFirstDownloadProgress(nextProgress)) {
         return
       }
       setProgress((prev) => {
