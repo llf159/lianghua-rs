@@ -600,7 +600,7 @@ impl TushareClient {
             apply_adj_to_rows(&mut rows, &adj_type, &adj_map)?;
         }
 
-        recalc_change_fields(&mut rows);
+        normalize_stock_rows_like_pro_bar(&mut rows);
 
         Ok(rows)
     }
@@ -770,9 +770,13 @@ impl TushareClient {
             let basic_table = self.fetch_daily_basic_by_trade_date(trade_date)?;
             let basic_rows = parse_daily_basic_rows(&basic_table)?;
             let basic_map = build_market_basic_map(basic_rows)?;
-            build_market_basic_with_basiccol(bar_rows, &basic_map)
+            let mut rows = build_market_basic_with_basiccol(bar_rows, &basic_map)?;
+            normalize_stock_rows_like_pro_bar(&mut rows);
+            Ok(rows)
         } else {
-            Ok(build_pro_bar_rows(bar_rows))
+            let mut rows = build_pro_bar_rows(bar_rows);
+            normalize_stock_rows_like_pro_bar(&mut rows);
+            Ok(rows)
         }
     }
 }
@@ -1281,6 +1285,26 @@ pub fn apply_adj_to_rows(
     Ok(())
 }
 
+fn pro_bar_format(value: f64, scale: usize) -> f64 {
+    if !value.is_finite() {
+        return value;
+    }
+
+    format!("{value:.precision$}", precision = scale)
+        .parse::<f64>()
+        .unwrap_or(value)
+}
+
+fn normalize_stock_price_fields_like_pro_bar(rows: &mut [ProBarRow]) {
+    for row in rows {
+        row.open = pro_bar_format(row.open, 2);
+        row.high = pro_bar_format(row.high, 2);
+        row.low = pro_bar_format(row.low, 2);
+        row.close = pro_bar_format(row.close, 2);
+        row.pre_close = pro_bar_format(row.pre_close, 2);
+    }
+}
+
 fn recalc_change_fields(rows: &mut [ProBarRow]) {
     for row in rows.iter_mut() {
         row.change = row.close - row.pre_close;
@@ -1288,6 +1312,20 @@ fn recalc_change_fields(rows: &mut [ProBarRow]) {
             0.0
         } else {
             row.change / row.pre_close * 100.0
+        };
+    }
+}
+
+fn normalize_stock_rows_like_pro_bar(rows: &mut [ProBarRow]) {
+    normalize_stock_price_fields_like_pro_bar(rows);
+
+    for row in rows.iter_mut() {
+        let change = row.close - row.pre_close;
+        row.change = pro_bar_format(change, 2);
+        row.pct_chg = if row.pre_close.abs() < f64::EPSILON {
+            0.0
+        } else {
+            pro_bar_format(change / row.pre_close * 100.0, 2)
         };
     }
 }
@@ -1403,4 +1441,73 @@ pub fn build_market_basic_with_basiccol(
     }
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn probar_row(ts_code: &str, trade_date: &str, close: f64, pre_close: f64) -> ProBarRow {
+        ProBarRow {
+            ts_code: ts_code.to_string(),
+            trade_date: trade_date.to_string(),
+            open: close,
+            high: close,
+            low: close,
+            close,
+            pre_close,
+            change: close - pre_close,
+            pct_chg: 0.0,
+            vol: 0.0,
+            amount: 0.0,
+            turnover_rate: None,
+            volume_ratio: None,
+        }
+    }
+
+    #[test]
+    fn qfq_rows_match_tushare_pro_bar_price_rounding_before_change() {
+        let mut rows = vec![
+            probar_row("000739.SZ", "20180104", 6.56, 6.50),
+            probar_row("000739.SZ", "20260429", 18.47, 18.58),
+        ];
+        let adj_map = build_adj_factor_map(vec![
+            AdjFactorRow {
+                ts_code: "000739.SZ".to_string(),
+                trade_date: "20180104".to_string(),
+                adj_factor: 11.941,
+            },
+            AdjFactorRow {
+                ts_code: "000739.SZ".to_string(),
+                trade_date: "20260429".to_string(),
+                adj_factor: 13.7498,
+            },
+        ])
+        .expect("adj factor map");
+
+        apply_adj_to_rows(&mut rows, &AdjType::Qfq, &adj_map).expect("apply qfq");
+        normalize_stock_rows_like_pro_bar(&mut rows);
+
+        assert_eq!(rows[0].close, 5.70);
+        assert_eq!(rows[0].pre_close, 5.64);
+        assert_eq!(rows[0].change, 0.06);
+        assert_eq!(rows[0].pct_chg, 1.06);
+    }
+
+    #[test]
+    fn pro_bar_format_matches_python_percent_format_boundaries() {
+        assert_eq!(pro_bar_format(2.675, 2), 2.67);
+        assert_eq!(pro_bar_format(1.045, 2), 1.04);
+        assert_eq!(pro_bar_format(1.055, 2), 1.05);
+    }
+
+    #[test]
+    fn pct_chg_uses_unformatted_change_between_formatted_prices() {
+        let mut rows = vec![probar_row("000739.SZ", "20040116", 0.99, 0.96)];
+
+        normalize_stock_rows_like_pro_bar(&mut rows);
+
+        assert_eq!(rows[0].change, 0.03);
+        assert_eq!(rows[0].pct_chg, 3.13);
+    }
 }

@@ -22,8 +22,14 @@ fn quote_ident(name: &str) -> String {
 }
 
 fn round_to(value: f64, scale: i32) -> f64 {
-    let factor = 10_f64.powi(scale);
-    (value * factor).round() / factor
+    if !value.is_finite() {
+        return value;
+    }
+
+    let precision = usize::try_from(scale).unwrap_or(0);
+    format!("{value:.precision$}")
+        .parse::<f64>()
+        .unwrap_or(value)
 }
 
 fn round_opt_to(value: Option<f64>, scale: i32) -> Option<f64> {
