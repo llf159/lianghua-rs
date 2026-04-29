@@ -18,7 +18,6 @@ import {
   runConceptPerformanceCompute,
   runCyqCompute,
   runRankingScoreCalculation,
-  runRankingTiebreakFill,
   type RankComputeDbRange,
   type RankComputeResultContinuity,
   type RankingComputeStatus,
@@ -588,10 +587,9 @@ export default function RankingComputePage() {
 
     try {
       const scoreResult = await runRankingScoreCalculation(sourcePath, startDate, endDate)
-      const tiebreakResult = await runRankingTiebreakFill(sourcePath)
-      setStatus(tiebreakResult.status)
+      setStatus(scoreResult.status)
       setNotice(
-        `排名计算完成（含补排名），区间 ${formatTradeDate(scoreResult.startDate ?? null)} 至 ${formatTradeDate(scoreResult.endDate ?? null)}，耗时 ${formatElapsedMs(scoreResult.elapsedMs + tiebreakResult.elapsedMs)}。`,
+        `排名计算完成（含J值同分排序），区间 ${formatTradeDate(scoreResult.startDate ?? null)} 至 ${formatTradeDate(scoreResult.endDate ?? null)}，耗时 ${formatElapsedMs(scoreResult.elapsedMs)}。`,
       )
     } catch (actionError) {
       setNotice('')
@@ -748,8 +746,8 @@ export default function RankingComputePage() {
         <div className="ranking-compute-summary">
           <div className="ranking-compute-summary-item">
             <span>排名计算</span>
-            <strong>score_summary / rule_details / scene_details + 补排名</strong>
-            <small>按区间重算总分、规则明细、场景明细，并执行补排名。</small>
+            <strong>score_summary / rule_details / scene_details + 排名</strong>
+            <small>按区间重算总分、规则明细、场景明细，并直接生成J值同分排序排名。</small>
           </div>
         </div>
 
@@ -857,7 +855,7 @@ export default function RankingComputePage() {
           <div className="ranking-compute-summary-item">
             <span>行情数据指标列维护</span>
             <strong>ind.toml + stock_data 指标列</strong>
-            <small>这里维护指标配置，并执行清空/补算指标列。</small>
+            <small>这里维护指标配置，并执行清空/补算指标列；ind.toml 不存在时会自动创建默认 J，J 用于排名同分排序，不能删。</small>
           </div>
         </div>
 
@@ -952,6 +950,7 @@ export default function RankingComputePage() {
                 <div className="data-download-modal-meta">
                   <span>{indicatorExists ? '当前文件已存在' : '当前文件不存在，将在保存时创建'}</span>
                   <span>当前共 {indicatorItems.length} 个指标，保存前会做语法和字段校验</span>
+                  <span>J 用于排名同分排序，不能删。</span>
                 </div>
 
                 <div className="data-download-indicator-toolbar">

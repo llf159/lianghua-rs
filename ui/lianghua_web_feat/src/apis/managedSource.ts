@@ -306,12 +306,22 @@ async function copyImportFileToAppData(
       }
     })
 
-    await invoke('copy_import_file_to_appdata', { sourcePath, targetRelativePath, importId }).then(
+    const invokePromise = invoke('copy_import_file_to_appdata', { sourcePath, targetRelativePath, importId }).then(
       () => undefined,
       (error) => {
         throw new Error(String(error))
       },
     )
+    void invokePromise.catch(() => {})
+
+    const invokeSettledBeforeTerminalEvent = await Promise.race([
+      invokePromise.then(() => true),
+      completionPromise.then(() => false),
+    ])
+
+    if (!invokeSettledBeforeTerminalEvent) {
+      return
+    }
 
     if (progressState.terminalProgress?.phase === 'completed') {
       return

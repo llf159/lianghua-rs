@@ -173,6 +173,7 @@ export default function DataImportPage() {
   ) {
     updateBusyAction(nextBusyAction)
     setError('')
+    setNotice('')
 
     try {
       return await task()

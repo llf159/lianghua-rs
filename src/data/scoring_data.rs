@@ -10,9 +10,7 @@ use std::time;
 use crate::data::{RowData, ScoreRule};
 use crate::expr::eval::{Runtime, Value};
 use crate::expr::parser::{Parser, lex_all};
-use crate::scoring::{
-    CachedRule, RuleScoreSeries, SceneScoreSeries, TieBreakWay, build_tirbreak_rank_sql,
-};
+use crate::scoring::{CachedRule, RuleScoreSeries, SceneScoreSeries, TieBreakWay};
 
 #[derive(Debug, Default)]
 pub struct ScoreSummary {
@@ -70,10 +68,12 @@ pub enum ScoreWriteMessage {
 pub struct ScoreWriteProfile {
     pub total_ms: u64,
     pub drop_indexes_ms: u64,
+    pub attach_source_db_ms: Option<u64>,
     pub delete_range_ms: u64,
     pub receive_and_append_batches_ms: u64,
     pub summary_rank_ms: u64,
     pub commit_ms: u64,
+    pub detach_source_db_ms: Option<u64>,
     pub recreate_indexes_ms: u64,
     pub batch_count: usize,
 }
@@ -527,15 +527,79 @@ fn delete_score_range(
     Ok(())
 }
 
-fn append_summary_rows(app: &mut Appender<'_>, rows: &[ScoreSummary]) -> Result<(), String> {
+fn create_score_summary_stage(tx: &Transaction<'_>) -> Result<(), String> {
+    tx.execute(
+        r#"
+        CREATE TEMP TABLE score_summary_stage (
+            ts_code VARCHAR,
+            trade_date VARCHAR,
+            total_score DOUBLE
+        )
+        "#,
+        [],
+    )
+    .map_err(|e| format!("创建score_summary临时表失败:{e}"))?;
+    Ok(())
+}
+
+fn append_summary_stage_rows(app: &mut Appender<'_>, rows: &[ScoreSummary]) -> Result<(), String> {
     for row in rows {
-        app.append_row(params![
-            &row.ts_code,
-            &row.trade_date,
-            &row.total_score,
-            Option::<i64>::None
-        ])
-        .map_err(|e| format!("插入score_summary失败:{e}"))?;
+        app.append_row(params![&row.ts_code, &row.trade_date, &row.total_score])
+            .map_err(|e| format!("插入score_summary临时表失败:{e}"))?;
+    }
+    Ok(())
+}
+
+fn insert_ranked_summary_from_stage(
+    tx: &Transaction<'_>,
+    tie_break: TieBreakWay,
+    adj_type: &str,
+) -> Result<(), String> {
+    match tie_break {
+        TieBreakWay::TsCode => {
+            tx.execute(
+                r#"
+                INSERT INTO score_summary (ts_code, trade_date, total_score, rank)
+                SELECT
+                    ts_code,
+                    trade_date,
+                    total_score,
+                    CAST(
+                        ROW_NUMBER() OVER (
+                            PARTITION BY trade_date
+                            ORDER BY total_score DESC, ts_code ASC
+                        ) AS INTEGER
+                    ) AS rank
+                FROM score_summary_stage
+                "#,
+                [],
+            )
+            .map_err(|e| format!("写入总榜排名失败:{e}"))?;
+        }
+        TieBreakWay::KdjJ => {
+            tx.execute(
+                r#"
+                INSERT INTO score_summary (ts_code, trade_date, total_score, rank)
+                SELECT
+                    st.ts_code,
+                    st.trade_date,
+                    st.total_score,
+                    CAST(
+                        ROW_NUMBER() OVER (
+                            PARTITION BY st.trade_date
+                            ORDER BY st.total_score DESC, src.j ASC NULLS LAST, st.ts_code ASC
+                        ) AS INTEGER
+                    ) AS rank
+                FROM score_summary_stage AS st
+                LEFT JOIN src_db.stock_data AS src
+                  ON st.ts_code = src.ts_code
+                 AND st.trade_date = src.trade_date
+                 AND src.adj_type = ?
+                "#,
+                params![adj_type],
+            )
+            .map_err(|e| format!("写入J值同分总榜排名失败:{e}"))?;
+        }
     }
     Ok(())
 }
@@ -570,6 +634,10 @@ fn append_scene_rows(app: &mut Appender<'_>, rows: &[SceneDetails]) -> Result<()
         .map_err(|e| format!("插入scene_details失败:{e}"))?;
     }
     Ok(())
+}
+
+fn duckdb_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn scene_stage_rank_weight(stage: Option<&str>) -> i32 {
@@ -636,10 +704,20 @@ fn rank_scene_rows(rows: &mut [SceneDetails]) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        fs,
+        sync::mpsc::channel,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
-    use super::{SceneDetails, rank_scene_rows, row_into_rt};
-    use crate::{data::RowData, expr::eval::Value};
+    use duckdb::Connection;
+
+    use super::{
+        SceneDetails, ScoreBatch, ScoreSummary, ScoreWriteMessage, init_result_db, rank_scene_rows,
+        row_into_rt, write_score_batches_from_channel,
+    };
+    use crate::{data::RowData, expr::eval::Value, scoring::TieBreakWay};
 
     fn scene_row(
         ts_code: &str,
@@ -713,17 +791,144 @@ mod tests {
         };
         assert_eq!(series.as_slice(), &[Some(3.2)]);
     }
-}
 
-fn compute_summary_rankings_in_tx(tx: &Transaction<'_>) -> Result<(), String> {
-    let sql = build_tirbreak_rank_sql(TieBreakWay::TsCode, "");
-    tx.execute(&sql, [])
-        .map_err(|e| format!("批量更新总榜排名失败:{e}"))?;
-    Ok(())
+    #[test]
+    fn write_score_batches_generates_kdj_summary_rank_on_insert() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("lianghua_score_write_{unique}"));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let db_path = temp_dir.join("scoring_result.db");
+        init_result_db(&db_path).expect("init db");
+        let source_db_path = temp_dir.join("stock_data.db");
+        let source_conn = Connection::open(&source_db_path).expect("open source db");
+        source_conn
+            .execute(
+                r#"
+                CREATE TABLE stock_data (
+                    ts_code VARCHAR,
+                    trade_date VARCHAR,
+                    adj_type VARCHAR,
+                    j DOUBLE
+                )
+                "#,
+                [],
+            )
+            .expect("create source table");
+        source_conn
+            .execute(
+                r#"
+                INSERT INTO stock_data VALUES
+                    ('000001.SZ', '20240102', 'qfq', 8.0),
+                    ('000002.SZ', '20240102', 'qfq', 9.0),
+                    ('000003.SZ', '20240102', 'qfq', 1.0),
+                    ('000001.SZ', '20240103', 'qfq', 5.0),
+                    ('000002.SZ', '20240103', 'qfq', 7.0)
+                "#,
+                [],
+            )
+            .expect("insert source rows");
+        drop(source_conn);
+
+        let (tx, rx) = channel();
+        tx.send(ScoreWriteMessage::Batch(ScoreBatch {
+            summary_rows: vec![
+                ScoreSummary {
+                    ts_code: "000001.SZ".to_string(),
+                    trade_date: "20240102".to_string(),
+                    total_score: 1.0,
+                    rank: None,
+                },
+                ScoreSummary {
+                    ts_code: "000003.SZ".to_string(),
+                    trade_date: "20240102".to_string(),
+                    total_score: 3.0,
+                    rank: None,
+                },
+                ScoreSummary {
+                    ts_code: "000002.SZ".to_string(),
+                    trade_date: "20240102".to_string(),
+                    total_score: 3.0,
+                    rank: None,
+                },
+                ScoreSummary {
+                    ts_code: "000001.SZ".to_string(),
+                    trade_date: "20240103".to_string(),
+                    total_score: 2.0,
+                    rank: None,
+                },
+                ScoreSummary {
+                    ts_code: "000002.SZ".to_string(),
+                    trade_date: "20240103".to_string(),
+                    total_score: 5.0,
+                    rank: None,
+                },
+            ],
+            detail_rows: Vec::new(),
+            scene_rows: Vec::new(),
+        }))
+        .expect("send batch");
+        drop(tx);
+
+        let db_path_str = db_path.to_str().expect("db path utf8");
+        let source_db_path_str = source_db_path.to_str().expect("source db path utf8");
+        write_score_batches_from_channel(
+            db_path_str,
+            Some(source_db_path_str),
+            "qfq",
+            TieBreakWay::KdjJ,
+            "20240102",
+            "20240103",
+            rx,
+        )
+        .expect("write score batches");
+
+        let conn = Connection::open(&db_path).expect("open result db");
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT ts_code, trade_date, CAST(rank AS BIGINT) AS rank
+                FROM score_summary
+                ORDER BY trade_date ASC, rank ASC
+                "#,
+            )
+            .expect("prepare query");
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .expect("query rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect rows");
+
+        assert_eq!(
+            rows,
+            vec![
+                ("000003.SZ".to_string(), "20240102".to_string(), 1),
+                ("000002.SZ".to_string(), "20240102".to_string(), 2),
+                ("000001.SZ".to_string(), "20240102".to_string(), 3),
+                ("000002.SZ".to_string(), "20240103".to_string(), 1),
+                ("000001.SZ".to_string(), "20240103".to_string(), 2),
+            ]
+        );
+
+        drop(stmt);
+        drop(conn);
+        fs::remove_dir_all(temp_dir).expect("remove temp dir");
+    }
 }
 
 pub fn write_score_batches_from_channel(
     db_path: &str,
+    source_db_path: Option<&str>,
+    adj_type: &str,
+    tie_break: TieBreakWay,
     start_date: &str,
     end_date: &str,
     rx: Receiver<ScoreWriteMessage>,
@@ -736,6 +941,18 @@ pub fn write_score_batches_from_channel(
     drop_result_db_indexes(&conn)?;
     profile.drop_indexes_ms = drop_indexes_started_at.elapsed().as_millis() as u64;
 
+    let mut source_db_attached = false;
+    if let TieBreakWay::KdjJ = tie_break {
+        let source_db_path =
+            source_db_path.ok_or_else(|| "J值同分排名需要原始库路径".to_string())?;
+        let attach_started_at = time::Instant::now();
+        let attach_sql = format!("ATTACH {} AS src_db", duckdb_string_literal(source_db_path));
+        conn.execute(&attach_sql, [])
+            .map_err(|e| format!("附加原始库失败:{e}"))?;
+        source_db_attached = true;
+        profile.attach_source_db_ms = Some(attach_started_at.elapsed().as_millis() as u64);
+    }
+
     let write_result = (|| -> Result<(), String> {
         let tx = conn
             .transaction()
@@ -744,14 +961,15 @@ pub fn write_score_batches_from_channel(
         let delete_started_at = time::Instant::now();
         delete_score_range(&tx, start_date, end_date)?;
         profile.delete_range_ms = delete_started_at.elapsed().as_millis() as u64;
+        create_score_summary_stage(&tx)?;
 
         let receive_and_append_started_at = time::Instant::now();
         let mut batch_count = 0usize;
         let mut scene_rows = Vec::new();
         {
             let mut summary_app = tx
-                .appender("score_summary")
-                .map_err(|e| format!("score_summary appender创建失败:{e}"))?;
+                .appender("score_summary_stage")
+                .map_err(|e| format!("score_summary临时表appender创建失败:{e}"))?;
             let mut detail_app = tx
                 .appender("rule_details")
                 .map_err(|e| format!("rule_details appender创建失败:{e}"))?;
@@ -764,7 +982,7 @@ pub fn write_score_batches_from_channel(
                     }
                 };
 
-                append_summary_rows(&mut summary_app, &batch.summary_rows)?;
+                append_summary_stage_rows(&mut summary_app, &batch.summary_rows)?;
                 append_detail_rows(&mut detail_app, &batch.detail_rows)?;
                 scene_rows.extend(batch.scene_rows);
                 batch_count += 1;
@@ -801,7 +1019,7 @@ pub fn write_score_batches_from_channel(
         profile.batch_count = batch_count;
 
         let summary_rank_started_at = time::Instant::now();
-        compute_summary_rankings_in_tx(&tx)?;
+        insert_ranked_summary_from_stage(&tx, tie_break, adj_type)?;
         profile.summary_rank_ms = summary_rank_started_at.elapsed().as_millis() as u64;
 
         let commit_started_at = time::Instant::now();
@@ -811,11 +1029,23 @@ pub fn write_score_batches_from_channel(
         Ok::<(), String>(())
     })();
 
+    let detach_source_result = if source_db_attached {
+        let detach_started_at = time::Instant::now();
+        let result = conn
+            .execute("DETACH src_db", [])
+            .map(|_| ())
+            .map_err(|e| format!("卸载原始库失败:{e}"));
+        profile.detach_source_db_ms = Some(detach_started_at.elapsed().as_millis() as u64);
+        result
+    } else {
+        Ok(())
+    };
     let recreate_indexes_started_at = time::Instant::now();
     let recreate_indexes_result = ensure_result_db_indexes(&conn);
     profile.recreate_indexes_ms = recreate_indexes_started_at.elapsed().as_millis() as u64;
 
     write_result?;
+    detach_source_result?;
     recreate_indexes_result?;
     profile.total_ms = total_started_at.elapsed().as_millis() as u64;
 

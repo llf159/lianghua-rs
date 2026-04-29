@@ -124,7 +124,55 @@ fn scoring_run_timings(profile: &ScoringRunProfile) -> Vec<RankComputeTimingItem
             profile.compute_and_send_batches_ms,
             None,
         ),
-        timing_item("writer-total", "写库", profile.writer.total_ms, None),
+        timing_item(
+            "writer-total",
+            "写库",
+            profile.writer.total_ms,
+            Some("包含等待评分批次".to_string()),
+        ),
+        timing_item(
+            "writer-drop-indexes",
+            "写库-删索引",
+            profile.writer.drop_indexes_ms,
+            None,
+        ),
+        timing_item(
+            "writer-attach-source-db",
+            "写库-附加原始库",
+            profile.writer.attach_source_db_ms.unwrap_or_default(),
+            None,
+        ),
+        timing_item(
+            "writer-delete-range",
+            "写库-删旧数据",
+            profile.writer.delete_range_ms,
+            None,
+        ),
+        timing_item(
+            "writer-append-batches",
+            "写库-接收/批量写入",
+            profile.writer.receive_and_append_batches_ms,
+            Some(format!("批次 {}", profile.writer.batch_count)),
+        ),
+        timing_item(
+            "writer-summary-rank",
+            "写库-总榜排名写入",
+            profile.writer.summary_rank_ms,
+            None,
+        ),
+        timing_item("writer-commit", "写库-提交", profile.writer.commit_ms, None),
+        timing_item(
+            "writer-detach-source-db",
+            "写库-卸载原始库",
+            profile.writer.detach_source_db_ms.unwrap_or_default(),
+            None,
+        ),
+        timing_item(
+            "writer-recreate-indexes",
+            "写库-建索引",
+            profile.writer.recreate_indexes_ms,
+            None,
+        ),
     ]
 }
 

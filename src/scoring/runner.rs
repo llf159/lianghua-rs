@@ -11,10 +11,10 @@ use crate::data::scoring_data::{
 };
 use crate::data::{
     DataReader, RowData, RuntimeKeyCollectOptions, ScoreRule, ScoreScene,
-    collect_runtime_keys_from_expr_programs, result_db_path,
+    collect_runtime_keys_from_expr_programs, result_db_path, source_db_path,
 };
 use crate::scoring::{
-    CachedRule, RuleSceneMeta, build_scene_score_series, scoring_rules_details_cache,
+    CachedRule, RuleSceneMeta, TieBreakWay, build_scene_score_series, scoring_rules_details_cache,
     tools::{
         calc_query_need_rows, inject_stock_extra_fields, load_st_list, load_total_share_map,
         warmup_rows_estimate,
@@ -52,6 +52,26 @@ fn log_scoring_run_profile(profile: &ScoringRunProfile) {
         format_elapsed_ms(profile.prepare_ms),
         format_elapsed_ms(profile.compute_and_send_batches_ms),
         format_elapsed_ms(profile.writer.total_ms),
+    );
+    println!(
+        "写库明细: 删索引={}；附加原始库={}；删旧数据={}；接收+写入批次(含等待)={}；总榜排名写入={}；提交={}；卸载原始库={}；建索引={}；批次={}",
+        format_elapsed_ms(profile.writer.drop_indexes_ms),
+        profile
+            .writer
+            .attach_source_db_ms
+            .map(format_elapsed_ms)
+            .unwrap_or_else(|| "-".to_string()),
+        format_elapsed_ms(profile.writer.delete_range_ms),
+        format_elapsed_ms(profile.writer.receive_and_append_batches_ms),
+        format_elapsed_ms(profile.writer.summary_rank_ms),
+        format_elapsed_ms(profile.writer.commit_ms),
+        profile
+            .writer
+            .detach_source_db_ms
+            .map(format_elapsed_ms)
+            .unwrap_or_else(|| "-".to_string()),
+        format_elapsed_ms(profile.writer.recreate_indexes_ms),
+        profile.writer.batch_count,
     );
 }
 
@@ -214,14 +234,28 @@ pub fn scoring_all_to_db(
     let out_db_path = out_db
         .to_str()
         .ok_or_else(|| "结果数据库路径不是有效UTF-8".to_string())?;
+    let source_db = source_db_path(source_dir);
+    let source_db_path = source_db
+        .to_str()
+        .ok_or_else(|| "原始数据库路径不是有效UTF-8".to_string())?;
 
     let (tx, rx) = sync_channel(SCORING_QUEUE_BOUND);
     let abort_tx = tx.clone();
     let db_path = out_db_path.to_string();
+    let source_db_path = source_db_path.to_string();
+    let adj_type_owned = adj_type.to_string();
     let start_date_owned = start_date.to_string();
     let end_date_owned = end_date.to_string();
     let writer_handle = thread::spawn(move || {
-        write_score_batches_from_channel(&db_path, &start_date_owned, &end_date_owned, rx)
+        write_score_batches_from_channel(
+            &db_path,
+            Some(&source_db_path),
+            &adj_type_owned,
+            TieBreakWay::KdjJ,
+            &start_date_owned,
+            &end_date_owned,
+            rx,
+        )
     });
 
     let compute_started_at = time::Instant::now();

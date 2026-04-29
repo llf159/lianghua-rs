@@ -210,6 +210,11 @@ struct IndicatorManageFileItem {
     prec: usize,
 }
 
+const DEFAULT_J_INDICATOR_EXPR: &str = r#"RSV1 := RSV(C, H, L, 9);
+K1 := SMA(RSV1, 3, 1);
+D1 := SMA(K1, 3, 1);
+3 * K1 - 2 * D1;"#;
+
 #[derive(Clone)]
 pub struct PreparedDataDownloadRun {
     pub source_path: String,
@@ -1190,6 +1195,7 @@ pub fn prepare_stock_data_indicator_columns_rebuild_run(
         return Err("原始库不存在或为空，请先完成 qfq 行情下载。".to_string());
     }
 
+    ensure_default_indicator_manage_file(&source_path)?;
     let inds_cache = cache_ind_build(&source_path)?;
     if inds_cache.is_empty() {
         return Err("指标配置不存在或为空，请先维护 ind.toml。".to_string());
@@ -1501,6 +1507,7 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
     prepared: &PreparedStockDataIndicatorColumnsRebuildRun,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DataDownloadRunResult, String> {
+    ensure_default_indicator_manage_file(&prepared.source_path)?;
     let inds_cache = cache_ind_build(&prepared.source_path)?;
     if inds_cache.is_empty() {
         return Err("指标配置不存在或为空，请先维护 ind.toml。".to_string());
@@ -1651,15 +1658,8 @@ pub fn get_indicator_manage_page(source_path: &str) -> Result<IndicatorManagePag
         return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
     }
 
+    ensure_default_indicator_manage_file(trimmed)?;
     let path = ind_toml_path(trimmed);
-    if !path.exists() {
-        return Ok(IndicatorManagePageData {
-            exists: false,
-            file_path: path.display().to_string(),
-            items: Vec::new(),
-        });
-    }
-
     let content = fs::read_to_string(&path)
         .map_err(|e| format!("读取指标配置失败: path={}, err={e}", path.display()))?;
     let items = if content.trim().is_empty() {
@@ -1682,6 +1682,35 @@ pub fn get_indicator_manage_page(source_path: &str) -> Result<IndicatorManagePag
         file_path: path.display().to_string(),
         items,
     })
+}
+
+fn default_indicator_manage_items() -> Vec<IndicatorManageDraft> {
+    vec![IndicatorManageDraft {
+        name: "J".to_string(),
+        expr: DEFAULT_J_INDICATOR_EXPR.to_string(),
+        prec: 2,
+    }]
+}
+
+fn ensure_default_indicator_manage_file(source_path: &str) -> Result<(), String> {
+    let path = ind_toml_path(source_path);
+    if path.exists() {
+        let content = fs::read_to_string(&path)
+            .map_err(|e| format!("读取指标配置失败: path={}, err={e}", path.display()))?;
+        if !content.trim().is_empty() {
+            return Ok(());
+        }
+    } else if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("创建指标配置目录失败: path={}, err={e}", parent.display()))?;
+        }
+    }
+
+    let text = build_indicator_manage_toml(&default_indicator_manage_items())?;
+    fs::write(&path, text)
+        .map_err(|e| format!("写入默认指标配置失败: path={}, err={e}", path.display()))?;
+    Ok(())
 }
 
 fn build_indicator_manage_toml(items: &[IndicatorManageDraft]) -> Result<String, String> {
@@ -1840,6 +1869,40 @@ mod tests {
 
         assert_eq!(source_all.max_trade_date.as_deref(), Some("20240103"));
         assert_eq!(source_qfq.max_trade_date.as_deref(), Some("20240102"));
+
+        let _ = remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn indicator_manage_page_creates_default_j_config_when_missing() {
+        let source_dir = temp_dir_path("lianghua_indicator_default");
+        let source_path = source_dir.to_str().expect("utf8 path");
+
+        let page = get_indicator_manage_page(source_path).expect("indicator page");
+
+        assert!(ind_toml_path(source_path).exists());
+        assert!(page.exists);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].name, "J");
+        assert_eq!(page.items[0].prec, 2);
+        assert!(page.items[0].expr.contains("RSV(C, H, L, 9)"));
+
+        let _ = remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn indicator_manage_page_fills_default_j_config_when_empty() {
+        let source_dir = temp_dir_path("lianghua_indicator_empty_default");
+        create_dir_all(&source_dir).expect("create temp dir");
+        fs::write(ind_toml_path(source_dir.to_str().expect("utf8 path")), "\n")
+            .expect("write empty ind file");
+        let source_path = source_dir.to_str().expect("utf8 path");
+
+        let page = get_indicator_manage_page(source_path).expect("indicator page");
+
+        assert!(page.exists);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].name, "J");
 
         let _ = remove_dir_all(source_dir);
     }
