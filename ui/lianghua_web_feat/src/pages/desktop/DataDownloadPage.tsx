@@ -381,13 +381,16 @@ export default function DataDownloadPage() {
     (phase) =>
       getProgressTaskLabel(deferredProgress?.action, phase, getProgressWorkflow, formatPhaseLabel),
   )
-  const progressSegments = getProgressSegments(
-    deferredProgress?.action,
-    deferredProgress?.phase,
-    getProgressWorkflow,
-    ['done', 'done_ths_concepts'],
-    formatPhaseLabel,
-  )
+  const progressSegments =
+    deferredProgress?.action === 'first-download'
+      ? null
+      : getProgressSegments(
+          deferredProgress?.action,
+          deferredProgress?.phase,
+          getProgressWorkflow,
+          ['done', 'done_ths_concepts'],
+          formatPhaseLabel,
+        )
   const missingStockRepair = status?.missingStockRepair ?? null
   const showMainProgress = busyAction === 'running' && activeTaskSection === 'main'
   const showConceptProgress = busyAction === 'running' && activeTaskSection === 'concept'

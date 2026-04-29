@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{Datelike, Local, Timelike};
+use chrono::{Datelike, Local, NaiveDate, Timelike, Weekday};
 use duckdb::Connection;
 use rayon::{ThreadPool, ThreadPoolBuilder, prelude::*};
 
@@ -116,10 +116,26 @@ fn trade_calendar_needs_refresh(
     }
 
     let trade_dates = load_trade_date_list(source_dir)?;
+    let refresh_cutoff = trade_calendar_refresh_cutoff(trade_calendar_end);
     Ok(match trade_dates.last() {
-        Some(last_trade_date) => last_trade_date.as_str() < trade_calendar_end,
+        Some(last_trade_date) => last_trade_date.as_str() < refresh_cutoff.as_str(),
         None => true,
     })
+}
+
+fn trade_calendar_refresh_cutoff(trade_calendar_end: &str) -> String {
+    let Ok(mut date) = NaiveDate::parse_from_str(trade_calendar_end, "%Y%m%d") else {
+        return trade_calendar_end.to_string();
+    };
+
+    while matches!(date.weekday(), Weekday::Sat | Weekday::Sun) {
+        let Some(previous_date) = date.checked_sub_signed(chrono::Duration::days(1)) else {
+            return trade_calendar_end.to_string();
+        };
+        date = previous_date;
+    }
+
+    date.format("%Y%m%d").to_string()
 }
 
 fn stock_list_needs_refresh(source_dir: &str, effective_trade_date: &str) -> Result<bool, String> {
@@ -2079,5 +2095,85 @@ pub fn download(
     match load_latest_trade_date(source_dir, adj_type)? {
         Some(_) => download_pending_all_market(config, progress_cb),
         None => download_first_all_market(config, progress_cb),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn temp_source_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("lianghua_runner_{prefix}_{nanos}"))
+    }
+
+    fn write_trade_calendar(source_dir: &PathBuf, dates: &[&str]) {
+        fs::create_dir_all(source_dir).expect("create temp source dir");
+        let mut text = String::from("cal_date\n");
+        for date in dates {
+            text.push_str(date);
+            text.push('\n');
+        }
+        fs::write(
+            trade_calendar_path(source_dir.to_str().expect("utf8 path")),
+            text,
+        )
+        .expect("write trade_calendar.csv");
+    }
+
+    fn needs_refresh(source_dir: &PathBuf, trade_calendar_end: &str) -> bool {
+        trade_calendar_needs_refresh(source_dir.to_str().expect("utf8 path"), trade_calendar_end)
+            .expect("refresh check should succeed")
+    }
+
+    #[test]
+    fn trade_calendar_refresh_cutoff_keeps_weekday_year_end() {
+        assert_eq!(trade_calendar_refresh_cutoff("20261231"), "20261231");
+    }
+
+    #[test]
+    fn trade_calendar_refresh_cutoff_moves_weekend_year_end_to_previous_weekday() {
+        assert_eq!(trade_calendar_refresh_cutoff("20221231"), "20221230");
+        assert_eq!(trade_calendar_refresh_cutoff("20231231"), "20231229");
+    }
+
+    #[test]
+    fn trade_calendar_does_not_refresh_when_open_dates_cover_weekend_year_end() {
+        let source_dir = temp_source_dir("calendar_weekend_covered");
+        write_trade_calendar(&source_dir, &["20221229", "20221230"]);
+
+        assert!(!needs_refresh(&source_dir, "20221231"));
+
+        fs::remove_dir_all(source_dir).ok();
+    }
+
+    #[test]
+    fn trade_calendar_refreshes_when_open_dates_stop_before_year_end_cutoff() {
+        let source_dir = temp_source_dir("calendar_stale");
+        write_trade_calendar(&source_dir, &["20221229"]);
+
+        assert!(needs_refresh(&source_dir, "20221231"));
+
+        fs::remove_dir_all(source_dir).ok();
+    }
+
+    #[test]
+    fn trade_calendar_refreshes_when_file_is_missing_or_empty() {
+        let missing_source_dir = temp_source_dir("calendar_missing");
+        assert!(needs_refresh(&missing_source_dir, "20261231"));
+
+        let empty_source_dir = temp_source_dir("calendar_empty");
+        write_trade_calendar(&empty_source_dir, &[]);
+        assert!(needs_refresh(&empty_source_dir, "20261231"));
+
+        fs::remove_dir_all(empty_source_dir).ok();
     }
 }
