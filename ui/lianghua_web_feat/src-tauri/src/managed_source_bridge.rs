@@ -183,7 +183,7 @@ fn append_directory_to_zip<W: Write + Seek>(
     current_dir: &Path,
     archive_root: &str,
 ) -> Result<u64, String> {
-    let file_options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+    let file_options = zip_file_options();
     let mut file_count = 0u64;
 
     for entry in std::fs::read_dir(current_dir).map_err(|error| error.to_string())? {
@@ -220,6 +220,12 @@ fn append_directory_to_zip<W: Write + Seek>(
     }
 
     Ok(file_count)
+}
+
+fn zip_file_options() -> FileOptions {
+    FileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .large_file(true)
 }
 
 fn normalize_archive_root(source_dir: &str) -> String {
@@ -1215,7 +1221,7 @@ fn export_strategy_bundle_inner(
         .open(destination_file, open_options)
         .map_err(|error| error.to_string())?;
     let mut zip_writer = ZipWriter::new(target_file);
-    let file_options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+    let file_options = zip_file_options();
 
     let includes_active_strategy = active_file_path.exists() && active_file_path.is_file();
     if includes_active_strategy {

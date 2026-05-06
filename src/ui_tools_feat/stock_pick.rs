@@ -61,6 +61,7 @@ pub struct StockPickRow {
     pub concept: Option<String>,
     pub rank: Option<i64>,
     pub total_score: Option<f64>,
+    pub latest_trigger_trade_date: Option<String>,
     pub pick_note: String,
 }
 
@@ -456,6 +457,20 @@ fn scope_hit_note(hit: &ScopeHit, scope_way: PickScopeWay) -> String {
     }
 }
 
+fn resolve_latest_trigger_trade_date(trade_dates: &[String], keep_from: usize, bs: &[bool]) -> Option<String> {
+    if keep_from >= trade_dates.len() || trade_dates.len() != bs.len() {
+        return None;
+    }
+
+    for index in (keep_from..bs.len()).rev() {
+        if bs[index] {
+            return trade_dates.get(index).cloned();
+        }
+    }
+
+    None
+}
+
 fn load_summary_map(source_path: &str, trade_date: &str) -> HashMap<String, SummaryInfo> {
     let result_db = result_db_path(source_path);
     if !result_db.exists() {
@@ -723,6 +738,8 @@ pub fn run_expression_stock_pick(
                 if !scope_hit_matches(&hit) {
                     continue;
                 }
+                let latest_trigger_trade_date =
+                    resolve_latest_trigger_trade_date(&trade_dates, keep_from, &bool_series);
 
                 let summary = summary_map.get(ts_code);
                 group_rows.push(StockPickRow {
@@ -736,6 +753,7 @@ pub fn run_expression_stock_pick(
                     concept: concept_map.get(ts_code).cloned(),
                     rank: summary.and_then(|item| item.rank),
                     total_score: summary.and_then(|item| item.total_score),
+                    latest_trigger_trade_date,
                     pick_note: scope_hit_note(&hit, parsed_scope_way),
                 });
             }
@@ -890,6 +908,7 @@ pub fn run_concept_stock_pick(
                 concept: concept_text,
                 rank: summary.and_then(|item| item.rank),
                 total_score: summary.and_then(|item| item.total_score),
+                latest_trigger_trade_date: Some(resolved_trade_date.clone()),
                 pick_note: if exclude_concepts.is_empty() {
                     pick_note
                 } else {

@@ -433,6 +433,7 @@ export default function ConceptStockPickPage() {
       <StockPickResultTable
         rows={rows}
         tradeDate={resolvedTradeDate}
+        fallbackTradeDate={latestTradeDate}
         sourcePath={sourcePath}
       />
     </section>

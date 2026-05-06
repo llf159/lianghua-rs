@@ -18,6 +18,7 @@ export type StockPickRow = {
   concept?: string | null
   rank?: number | null
   total_score?: number | null
+  latest_trigger_trade_date?: string | null
   pick_note: string
 }
 
