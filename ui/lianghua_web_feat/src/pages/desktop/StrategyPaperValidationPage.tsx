@@ -57,6 +57,12 @@ const BOARD_OPTIONS = [
   { value: '其他', label: '其他' },
 ] as const
 
+const BUY_PRICE_BASIS_OPTIONS = [
+  { value: 'open', label: '当日开盘价' },
+  { value: 'close', label: '当日收盘价' },
+  { value: 'next_open', label: '次日开盘价' },
+] as const
+
 type TradeStatusFilter = 'all' | 'closed' | 'open'
 type TradeDetailModalStatus = Exclude<TradeStatusFilter, 'all'>
 type TradePageSize = (typeof TRADE_PAGE_SIZE_OPTIONS)[number]['value']
@@ -183,6 +189,10 @@ function formatNavValue(value?: number | null, digits = 3) {
     return '--'
   }
   return value.toFixed(digits)
+}
+
+function formatBuyPriceBasisLabel(value?: string | null) {
+  return BUY_PRICE_BASIS_OPTIONS.find((item) => item.value === value)?.label ?? '--'
 }
 
 function formatShortDateLabel(value?: string | null) {
@@ -1816,7 +1826,8 @@ export default function StrategyPaperValidationPage() {
             <h2 className="strategy-paper-validation-title">策略模拟盘验证</h2>
             <p className="strategy-paper-validation-note">
               买点先按截面扫描并入持仓，再对当前持仓扫描卖点。当前版本卖出表现按当日收盘价记账，`RATEO / RATEH`
-              作为卖点方程辅助字段一起回传。测试股票留空时按默认模式扫描全市场，填写后只验证这一只股票。
+              作为卖点方程辅助字段一起回传；选择次日开盘时，买入日、买入成本和 `TIME=0` 均对齐到次交易日。
+              测试股票留空时按默认模式扫描全市场，填写后只验证这一只股票。
             </p>
           </div>
         </div>
@@ -1903,8 +1914,11 @@ export default function StrategyPaperValidationPage() {
           <label className="strategy-paper-validation-field">
             <span>买点基准</span>
             <select value={buyPriceBasis} onChange={(event) => setBuyPriceBasis(event.target.value)}>
-              <option value="open">开盘价</option>
-              <option value="close">收盘价</option>
+              {BUY_PRICE_BASIS_OPTIONS.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
             </select>
           </label>
           <label className="strategy-paper-validation-field">
@@ -2029,7 +2043,7 @@ export default function StrategyPaperValidationPage() {
                 ? `单票验证 ${result.test_stock_name || result.test_ts_code}`
                 : '默认全市场'}
             </span>
-            <span>买点基准 {result?.buy_price_basis === 'open' ? '开盘价' : '收盘价'}</span>
+            <span>买点基准 {formatBuyPriceBasisLabel(result?.buy_price_basis)}</span>
             <span>滑点 {formatNumber(result?.slippage_pct, 2)}%</span>
             <span>对比指数 {result?.index_ts_code || '--'}</span>
             <span>板块 {result?.resolved_board || '全部板块'}</span>

@@ -644,14 +644,18 @@ fn compute_rule_layer_from_day_groups(
     let day_results = day_groups
         .par_iter()
         .map(|day_group| {
-            let need_metrics =
-                collect_options.metrics && day_group.samples.len() >= config.min_samples_per_day;
-            let mut rule_scores = if need_metrics {
+            let collect_metrics = collect_options.metrics;
+            let mut rule_scores = if collect_metrics {
                 Vec::with_capacity(day_group.samples.len())
             } else {
                 Vec::new()
             };
-            let mut residuals = if need_metrics {
+            let mut residuals = if collect_metrics {
+                Vec::with_capacity(day_group.samples.len())
+            } else {
+                Vec::new()
+            };
+            let mut triggered_residuals = if collect_metrics {
                 Vec::with_capacity(day_group.samples.len())
             } else {
                 Vec::new()
@@ -670,9 +674,24 @@ fn compute_rule_layer_from_day_groups(
                     .copied();
                 let rule_score = triggered_score.unwrap_or(0.0);
 
-                if need_metrics {
+                if collect_metrics {
                     rule_scores.push(rule_score);
                     residuals.push(sample.residual_return);
+                }
+
+                if let Some(rule_score) = triggered_score {
+                    if collect_metrics {
+                        triggered_residuals.push(sample.residual_return);
+                    }
+
+                    if collect_options.triggered_samples {
+                        triggered_samples.push(RuleLayerSamplePoint {
+                            ts_code: sample.ts_code.clone(),
+                            trade_date: day_group.trade_date.clone(),
+                            rule_score,
+                            residual_return: sample.residual_return,
+                        });
+                    }
                 }
 
                 if collect_options.all_samples {
@@ -683,22 +702,11 @@ fn compute_rule_layer_from_day_groups(
                         residual_return: sample.residual_return,
                     });
                 }
-
-                if collect_options.triggered_samples {
-                    if let Some(rule_score) = triggered_score {
-                        triggered_samples.push(RuleLayerSamplePoint {
-                            ts_code: sample.ts_code.clone(),
-                            trade_date: day_group.trade_date.clone(),
-                            rule_score,
-                            residual_return: sample.residual_return,
-                        });
-                    }
-                }
             }
 
-            let point = if need_metrics {
+            let point = if collect_metrics && rule_scores.len() >= config.min_samples_per_day {
                 let avg_rule_score = mean(&rule_scores);
-                let avg_residual_return = mean(&residuals);
+                let avg_residual_return = mean(&triggered_residuals);
                 let top_bottom_spread = calc_top_bottom_spread(&rule_scores, &residuals);
                 let ic = spearman_corr(&rule_scores, &residuals);
 
@@ -1754,7 +1762,7 @@ mod tests {
     }
 
     #[test]
-    fn calc_rule_layer_metrics_from_db_defaults_non_triggered_to_zero() {
+    fn calc_rule_layer_metrics_from_db_keeps_full_universe_for_non_triggered_metrics() {
         let source_dir = temp_source_dir();
         let source_dir_str = source_dir.to_str().expect("utf8 source dir");
         prepare_test_files(source_dir_str);
@@ -1787,7 +1795,7 @@ mod tests {
         assert_eq!(p0.trade_date, "20240102");
         assert_eq!(p0.sample_count, 2);
         assert_opt_close(p0.avg_rule_score, Some(0.0));
-        assert_opt_close(p0.avg_residual_return, Some(2.0));
+        assert_eq!(p0.avg_residual_return, None);
         assert_eq!(p0.top_bottom_spread, None);
         assert_eq!(p0.ic, None);
 
@@ -1795,9 +1803,13 @@ mod tests {
         assert_eq!(p1.trade_date, "20240103");
         assert_eq!(p1.sample_count, 2);
         assert_opt_close(p1.avg_rule_score, Some(0.0));
-        assert_opt_close(p1.avg_residual_return, Some(2.0));
+        assert_eq!(p1.avg_residual_return, None);
         assert_eq!(p1.top_bottom_spread, None);
         assert_eq!(p1.ic, None);
+
+        assert_eq!(metrics.avg_residual_mean, None);
+        assert_eq!(metrics.spread_mean, None);
+        assert_eq!(metrics.ic_mean, None);
     }
 
     #[test]
@@ -1854,7 +1866,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_cache_keeps_full_universe_metrics_and_trigger_only_samples() {
+    fn runtime_cache_uses_triggered_residual_mean_and_full_universe_layer_metrics() {
         let source_dir = temp_source_dir();
         let source_dir_str = source_dir.to_str().expect("utf8 source dir");
         prepare_test_files(source_dir_str);
@@ -1906,6 +1918,22 @@ mod tests {
             collect_triggered_rule_samples_from_cache(&runtime_cache, &triggered_score_map);
 
         assert_eq!(full_samples.metrics, triggered_samples.metrics);
+        assert_eq!(full_samples.metrics.points.len(), 2);
+        assert_eq!(full_samples.metrics.points[0].trade_date, "20240102");
+        assert_eq!(full_samples.metrics.points[0].sample_count, 2);
+        assert_opt_close(full_samples.metrics.points[0].avg_rule_score, Some(0.75));
+        assert_opt_close(full_samples.metrics.points[0].avg_residual_return, Some(3.0));
+        assert_opt_close(full_samples.metrics.points[0].top_bottom_spread, Some(2.0));
+        assert_opt_close(full_samples.metrics.points[0].ic, Some(1.0));
+        assert_eq!(full_samples.metrics.points[1].trade_date, "20240103");
+        assert_eq!(full_samples.metrics.points[1].sample_count, 2);
+        assert_opt_close(full_samples.metrics.points[1].avg_rule_score, Some(0.0));
+        assert_eq!(full_samples.metrics.points[1].avg_residual_return, None);
+        assert_eq!(full_samples.metrics.points[1].top_bottom_spread, None);
+        assert_eq!(full_samples.metrics.points[1].ic, None);
+        assert_opt_close(full_samples.metrics.avg_residual_mean, Some(3.0));
+        assert_opt_close(full_samples.metrics.spread_mean, Some(2.0));
+        assert_opt_close(full_samples.metrics.ic_mean, Some(1.0));
         assert_eq!(full_samples.samples.len(), 4);
         assert_eq!(
             full_samples

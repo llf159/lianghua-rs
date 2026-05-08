@@ -1,20 +1,20 @@
 use std::collections::HashMap;
 
 use chrono::{Days, NaiveDate};
-use duckdb::{Connection, params};
+use duckdb::{params, Connection};
 use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::{
     data::scoring_data::row_into_rt,
     data::{
-        DataReader, RowData, RuntimeKeyCollectOptions, collect_runtime_keys_from_expr_programs,
-        expr_program_uses_runtime_key, load_stock_list, load_trade_date_list, result_db_path,
-        stock_list_path,
+        collect_runtime_keys_from_expr_programs, expr_program_uses_runtime_key, load_stock_list,
+        load_trade_date_list, result_db_path, stock_list_path, DataReader, RowData,
+        RuntimeKeyCollectOptions,
     },
     expr::{
         eval::{Runtime, Value},
-        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+        parser::{lex_all, Expr, Parser, Stmt, Stmts},
     },
     scoring::tools::{
         calc_query_need_rows, calc_query_start_date, inject_stock_extra_fields, load_st_list,
@@ -139,6 +139,7 @@ pub struct StrategyPaperValidationTemplateValidationData {
 enum BuyPriceBasis {
     Open,
     Close,
+    NextOpen,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -152,6 +153,7 @@ impl BuyPriceBasis {
         match raw.trim().to_ascii_lowercase().as_str() {
             "open" => Ok(Self::Open),
             "close" => Ok(Self::Close),
+            "next_open" => Ok(Self::NextOpen),
             other => Err(format!("不支持的买点基准: {other}")),
         }
     }
@@ -160,6 +162,7 @@ impl BuyPriceBasis {
         match self {
             Self::Open => "open",
             Self::Close => "close",
+            Self::NextOpen => "next_open",
         }
     }
 }
@@ -701,17 +704,27 @@ fn simulate_trade_rows_from_runtime(
     for scan_index in keep_from..trade_dates.len() {
         let trade_date = &trade_dates[scan_index];
 
-        if open_positions.is_empty()
-            && buy_signal_series.get(scan_index).copied().unwrap_or(false)
-            && eligibility.allows_buy(ts_code, trade_date)
+        if open_positions.is_empty() && buy_signal_series.get(scan_index).copied().unwrap_or(false)
         {
+            let buy_index = match buy_price_basis {
+                BuyPriceBasis::NextOpen => scan_index + 1,
+                BuyPriceBasis::Open | BuyPriceBasis::Close => scan_index,
+            };
+            let Some(buy_date) = trade_dates.get(buy_index) else {
+                continue;
+            };
+            if !eligibility.allows_buy(ts_code, buy_date) {
+                continue;
+            }
             let basis_price = match buy_price_basis {
-                BuyPriceBasis::Open => open_series.get(scan_index).copied().flatten(),
-                BuyPriceBasis::Close => close_series.get(scan_index).copied().flatten(),
+                BuyPriceBasis::Open | BuyPriceBasis::NextOpen => {
+                    open_series.get(buy_index).copied().flatten()
+                }
+                BuyPriceBasis::Close => close_series.get(buy_index).copied().flatten(),
             };
             if let Some(basis_price) = normalize_valid_price(basis_price) {
-                let pre_close = pre_close_series.get(scan_index).copied().flatten();
-                let zhang_pct = zhang_series.get(scan_index).copied().flatten();
+                let pre_close = pre_close_series.get(buy_index).copied().flatten();
+                let zhang_pct = zhang_series.get(buy_index).copied().flatten();
                 if is_buy_basis_executable(basis_price, pre_close, zhang_pct) {
                     let buy_cost_price = basis_price * (1.0 + slippage_pct / 100.0);
                     if buy_cost_price.is_finite() && buy_cost_price > PRICE_EPS {
@@ -720,12 +733,12 @@ fn simulate_trade_rows_from_runtime(
                             trade_dates.len(),
                             open_series,
                             high_series,
-                            scan_index,
+                            buy_index,
                             buy_cost_price,
                         )?;
                         open_positions.push(OpenPosition {
-                            buy_date: trade_date.clone(),
-                            buy_index: scan_index,
+                            buy_date: buy_date.clone(),
+                            buy_index,
                             buy_rank: rank_series
                                 .and_then(|series| series.get(scan_index))
                                 .copied()
@@ -733,7 +746,7 @@ fn simulate_trade_rows_from_runtime(
                                 .map(|value| value.round() as i64),
                             buy_basis_price: basis_price,
                             buy_cost_price,
-                            last_sell_runtime_index: scan_index,
+                            last_sell_runtime_index: buy_index,
                             pending_sell: false,
                             sell_runtime,
                         });
@@ -748,6 +761,11 @@ fn simulate_trade_rows_from_runtime(
 
         let mut remaining_positions = Vec::with_capacity(open_positions.len());
         for mut position in open_positions.drain(..) {
+            if scan_index < position.buy_index {
+                remaining_positions.push(position);
+                continue;
+            }
+
             if position.last_sell_runtime_index < scan_index {
                 extend_sell_runtime_series(
                     &mut position.sell_runtime,
@@ -1471,7 +1489,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use duckdb::{Connection, params};
+    use duckdb::{params, Connection};
 
     use crate::{data::RowData, scoring::tools::calc_zhang_pct};
 
@@ -1704,6 +1722,62 @@ mod tests {
         assert!(
             (trade.daily_holding_close_returns[2].daily_return_pct - 1.6574585635359114).abs()
                 < 1e-9
+        );
+    }
+
+    #[test]
+    fn next_open_buy_aligns_buy_date_price_and_time() {
+        let trades = run_runtime_trade_simulation(
+            "000001.SZ",
+            &[
+                SampleBar {
+                    trade_date: "20240102",
+                    open: 10.0,
+                    high: 10.2,
+                    low: 9.9,
+                    close: 10.0,
+                    pre_close: 9.8,
+                },
+                SampleBar {
+                    trade_date: "20240103",
+                    open: 10.9,
+                    high: 11.4,
+                    low: 10.8,
+                    close: 11.2,
+                    pre_close: 10.0,
+                },
+                SampleBar {
+                    trade_date: "20240104",
+                    open: 11.3,
+                    high: 12.4,
+                    low: 11.4,
+                    close: 12.0,
+                    pre_close: 11.2,
+                },
+            ],
+            "C > 0",
+            "TIME == 1",
+            BuyPriceBasis::NextOpen,
+        );
+
+        assert_eq!(trades.len(), 1);
+        let trade = &trades[0];
+        assert_eq!(trade.status, "closed");
+        assert_eq!(trade.buy_date, "20240103");
+        assert_eq!(trade.sell_date.as_deref(), Some("20240104"));
+        assert_eq!(trade.hold_days, 1);
+        assert_eq!(trade.buy_price_basis, "next_open");
+        assert_eq!(trade.buy_basis_price, Some(10.9));
+        assert_eq!(trade.buy_cost_price, Some(10.9));
+        assert_eq!(trade.sell_price, Some(12.0));
+        assert!((trade.realized_return_pct.unwrap() - 10.09174311926605).abs() < 1e-9);
+        assert_eq!(
+            trade
+                .daily_holding_close_returns
+                .iter()
+                .map(|item| item.trade_date.as_str())
+                .collect::<Vec<_>>(),
+            vec!["20240103", "20240104"]
         );
     }
 
