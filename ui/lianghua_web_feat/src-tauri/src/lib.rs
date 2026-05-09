@@ -4,16 +4,16 @@ mod managed_source_bridge;
 use std::fs;
 
 use lianghua_rs::ui_tools_feat::{
-    concept_stock_pick::{
-        run_concept_stock_pick as core_run_concept_stock_pick,
-        StockPickResultData as ConceptStockPickResultData,
-    },
     chart_indicator_settings::{
         get_chart_indicator_settings as core_get_chart_indicator_settings,
         reset_chart_indicator_settings as core_reset_chart_indicator_settings,
         save_chart_indicator_settings as core_save_chart_indicator_settings,
         validate_chart_indicator_settings as core_validate_chart_indicator_settings,
         ChartIndicatorSettingsPayload, ChartIndicatorValidationResult,
+    },
+    concept_stock_pick::{
+        run_concept_stock_pick as core_run_concept_stock_pick,
+        StockPickResultData as ConceptStockPickResultData,
     },
     data_viewer::{list_stock_lookup_rows as core_list_stock_lookup_rows, StockLookupRow},
     details::{
@@ -133,6 +133,51 @@ use rustls_platform_verifier;
 use tauri::Manager;
 
 const WATCH_OBSERVE_STORAGE_FILE: &str = "watch_observe.json";
+
+#[cfg(target_os = "linux")]
+fn trim_process_heap() {
+    // SAFETY: `malloc_trim(0)` is a libc allocator maintenance call. It does
+    // not take ownership of any Rust pointer and does not dereference caller
+    // memory; it only asks glibc to release free heap pages back to the OS.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+#[cfg(target_os = "android")]
+fn trim_process_heap() {
+    use libc::{c_int, c_void};
+
+    const M_DECAY_TIME: c_int = -100;
+    const M_PURGE: c_int = -101;
+    type MalloptFn = unsafe extern "C" fn(c_int, c_int) -> c_int;
+
+    // SAFETY: Android's bionic does not expose `malloc_trim`. We resolve
+    // `mallopt` dynamically so old devices without the symbol simply skip the
+    // purge. The function pointer comes from the already-loaded libc image and
+    // is used immediately; no Rust pointer is passed to C and no pointer from C
+    // is retained, so this does not create a UAF path.
+    unsafe {
+        let symbol = libc::dlsym(libc::RTLD_DEFAULT, b"mallopt\0".as_ptr().cast());
+        if symbol.is_null() {
+            return;
+        }
+
+        let mallopt: MalloptFn =
+            std::mem::transmute::<*mut c_void, MalloptFn>(symbol.cast::<c_void>());
+        mallopt(M_DECAY_TIME, 0);
+        mallopt(M_PURGE, 0);
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn trim_process_heap() {}
+
+fn run_with_heap_trim<T>(f: impl FnOnce() -> T) -> T {
+    let result = f();
+    trim_process_heap();
+    result
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -459,7 +504,12 @@ async fn refresh_intraday_monitor_template_tags(
     rank_mode_configs: Vec<IntradayMonitorRankModeConfig>,
 ) -> Result<IntradayMonitorPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        core_refresh_intraday_monitor_template_tags(&source_path, rows, templates, rank_mode_configs)
+        core_refresh_intraday_monitor_template_tags(
+            &source_path,
+            rows,
+            templates,
+            rank_mode_configs,
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -580,21 +630,23 @@ async fn run_strategy_paper_validation(
     sell_expression: String,
 ) -> Result<StrategyPaperValidationData, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        core_run_strategy_paper_validation(
-            &source_path,
-            start_date,
-            end_date,
-            min_listed_trade_days,
-            index_ts_code,
-            test_ts_code,
-            board,
-            buy_price_basis,
-            slippage_pct,
-            max_position_count,
-            buy_selection_mode,
-            buy_expression,
-            sell_expression,
-        )
+        run_with_heap_trim(|| {
+            core_run_strategy_paper_validation(
+                &source_path,
+                start_date,
+                end_date,
+                min_listed_trade_days,
+                index_ts_code,
+                test_ts_code,
+                board,
+                buy_price_basis,
+                slippage_pct,
+                max_position_count,
+                buy_selection_mode,
+                buy_expression,
+                sell_expression,
+            )
+        })
     })
     .await
     .map_err(|error| error.to_string())?
@@ -714,19 +766,21 @@ async fn run_scene_layer_backtest(
     backtest_period: Option<usize>,
 ) -> Result<SceneLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        core_run_scene_layer_backtest(
-            source_path,
-            stock_adj_type,
-            index_ts_code,
-            index_beta,
-            concept_beta,
-            industry_beta,
-            start_date,
-            end_date,
-            min_samples_per_scene_day,
-            min_listed_trade_days,
-            backtest_period,
-        )
+        run_with_heap_trim(|| {
+            core_run_scene_layer_backtest(
+                source_path,
+                stock_adj_type,
+                index_ts_code,
+                index_beta,
+                concept_beta,
+                industry_beta,
+                start_date,
+                end_date,
+                min_samples_per_scene_day,
+                min_listed_trade_days,
+                backtest_period,
+            )
+        })
     })
     .await
     .map_err(|error| error.to_string())?
@@ -747,19 +801,21 @@ async fn run_rule_layer_backtest(
     backtest_period: Option<usize>,
 ) -> Result<RuleLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        core_run_rule_layer_backtest(
-            source_path,
-            stock_adj_type,
-            index_ts_code,
-            index_beta,
-            concept_beta,
-            industry_beta,
-            start_date,
-            end_date,
-            min_samples_per_rule_day,
-            min_listed_trade_days,
-            backtest_period,
-        )
+        run_with_heap_trim(|| {
+            core_run_rule_layer_backtest(
+                source_path,
+                stock_adj_type,
+                index_ts_code,
+                index_beta,
+                concept_beta,
+                industry_beta,
+                start_date,
+                end_date,
+                min_samples_per_rule_day,
+                min_listed_trade_days,
+                backtest_period,
+            )
+        })
     })
     .await
     .map_err(|error| error.to_string())?
@@ -782,21 +838,23 @@ async fn run_rank_layer_backtest(
     layer_method: Option<String>,
 ) -> Result<RankLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        core_run_rank_layer_backtest(
-            source_path,
-            stock_adj_type,
-            index_ts_code,
-            index_beta,
-            concept_beta,
-            industry_beta,
-            start_date,
-            end_date,
-            min_samples_per_rank_day,
-            min_listed_trade_days,
-            backtest_period,
-            layer_count,
-            layer_method,
-        )
+        run_with_heap_trim(|| {
+            core_run_rank_layer_backtest(
+                source_path,
+                stock_adj_type,
+                index_ts_code,
+                index_beta,
+                concept_beta,
+                industry_beta,
+                start_date,
+                end_date,
+                min_samples_per_rank_day,
+                min_listed_trade_days,
+                backtest_period,
+                layer_count,
+                layer_method,
+            )
+        })
     })
     .await
     .map_err(|error| error.to_string())?
@@ -824,26 +882,28 @@ async fn run_rule_expression_validation(
     sample_limit_per_group: Option<usize>,
 ) -> Result<RuleExpressionValidationData, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        core_run_rule_expression_validation(
-            source_path,
-            import_rule_name,
-            when,
-            scope_way,
-            scope_windows,
-            stock_adj_type,
-            index_ts_code,
-            index_beta,
-            concept_beta,
-            industry_beta,
-            start_date,
-            end_date,
-            min_samples_per_rule_day,
-            min_listed_trade_days,
-            backtest_period,
-            manual_strategy,
-            unknown_configs,
-            sample_limit_per_group,
-        )
+        run_with_heap_trim(|| {
+            core_run_rule_expression_validation(
+                source_path,
+                import_rule_name,
+                when,
+                scope_way,
+                scope_windows,
+                stock_adj_type,
+                index_ts_code,
+                index_beta,
+                concept_beta,
+                industry_beta,
+                start_date,
+                end_date,
+                min_samples_per_rule_day,
+                min_listed_trade_days,
+                backtest_period,
+                manual_strategy,
+                unknown_configs,
+                sample_limit_per_group,
+            )
+        })
     })
     .await
     .map_err(|error| error.to_string())?

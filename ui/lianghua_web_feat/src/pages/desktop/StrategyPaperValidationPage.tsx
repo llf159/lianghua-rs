@@ -1674,6 +1674,7 @@ export default function StrategyPaperValidationPage() {
     }
     const parsedMaxPositionCount = Math.max(0, Math.floor(Number(maxPositionCount) || 0))
 
+    setResult(null)
     setLoading(true)
     setError('')
     setNotice('')

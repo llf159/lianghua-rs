@@ -430,6 +430,7 @@ export default function SceneLayerBacktestPage() {
   const [validationRestoredComboKey, setValidationRestoredComboKey] = useState("");
   const [validationDetailModalOpen, setValidationDetailModalOpen] = useState(false);
   const [validationSamplesModalOpen, setValidationSamplesModalOpen] = useState(false);
+  const heavyTaskRunning = loading || rankLoading || ruleLoading || validationLoading;
 
   useEffect(() => {
     const returnState = locationState?.validationReturnState;
@@ -781,6 +782,7 @@ export default function SceneLayerBacktestPage() {
       return;
     }
 
+    setResult(null);
     setLoading(true);
     setError("");
     try {
@@ -836,6 +838,7 @@ export default function SceneLayerBacktestPage() {
       return;
     }
 
+    setRankResult(null);
     setRankLoading(true);
     setRankError("");
     try {
@@ -884,6 +887,8 @@ export default function SceneLayerBacktestPage() {
       return;
     }
 
+    setRuleResult(null);
+    writeTransientStrategyBacktestResult(null);
     setRuleLoading(true);
     setRuleError("");
     try {
@@ -1032,6 +1037,11 @@ export default function SceneLayerBacktestPage() {
     const manualStrategyName = resolvedRuleName || "manual_expression_strategy";
     const normalizedManualPoints = validationDirection === "negative" ? -1 : 1;
 
+    setValidationResult(null);
+    setValidationSelectedComboKey("");
+    setValidationRestoredComboKey("");
+    setValidationDetailModalOpen(false);
+    setValidationSamplesModalOpen(false);
     setValidationLoading(true);
     setValidationError("");
     try {
@@ -1262,7 +1272,7 @@ export default function SceneLayerBacktestPage() {
         </p>
 
         <div className="scene-layer-actions">
-          <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunRankBacktest()} disabled={rankLoading || initializing}>
+          <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunRankBacktest()} disabled={heavyTaskRunning || initializing}>
             {rankLoading ? "回测中..." : "执行排名整体回测"}
           </button>
         </div>
@@ -1359,7 +1369,7 @@ export default function SceneLayerBacktestPage() {
         </p>
 
         <div className="scene-layer-actions">
-          <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunBacktest()} disabled={loading || initializing}>
+          <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunBacktest()} disabled={heavyTaskRunning || initializing}>
             {loading ? "回测中..." : "执行场景整体回测"}
           </button>
         </div>
@@ -1428,7 +1438,7 @@ export default function SceneLayerBacktestPage() {
         </p>
 
         <div className="scene-layer-actions">
-          <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunRuleBacktest()} disabled={ruleLoading || initializing}>
+          <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunRuleBacktest()} disabled={heavyTaskRunning || initializing}>
             {ruleLoading ? "回测中..." : "执行策略回测"}
           </button>
         </div>
@@ -1834,7 +1844,7 @@ export default function SceneLayerBacktestPage() {
             type="button"
             className="scene-layer-primary-btn"
             onClick={() => void onRunRuleExpressionValidation()}
-            disabled={validationLoading || initializing}
+            disabled={heavyTaskRunning || initializing}
           >
             {validationLoading ? "验证中..." : "执行表达式验证"}
           </button>

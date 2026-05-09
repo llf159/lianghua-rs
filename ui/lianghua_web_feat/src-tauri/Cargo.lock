@@ -97,6 +97,7 @@ dependencies = [
  "duckdb",
  "jni",
  "lianghua-rs",
+ "libc",
  "log",
  "rustls-platform-verifier",
  "serde",

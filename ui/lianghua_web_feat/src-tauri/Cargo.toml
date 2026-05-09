@@ -33,11 +33,13 @@ zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 duckdb = "1.4.4"
+libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 duckdb = { version = "1.4.4", features = ["bundled"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 duckdb = { version = "1.4.4", features = ["bundled"] }
+libc = "0.2"
 jni = "0.21.1"
 rustls-platform-verifier = "0.6.2"
