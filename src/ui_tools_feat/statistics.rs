@@ -234,6 +234,8 @@ pub struct RuleLayerRuleSummary {
     pub point_count: usize,
     pub avg_residual_mean: Option<f64>,
     pub spread_mean: Option<f64>,
+    pub avg_contribution_score: Option<f64>,
+    pub avg_contribution_per_trigger: Option<f64>,
     pub ic_mean: Option<f64>,
     pub ic_std: Option<f64>,
     pub icir: Option<f64>,
@@ -256,6 +258,8 @@ pub struct RuleLayerBacktestData {
     pub points: Vec<RuleLayerPointPayload>,
     pub avg_residual_mean: Option<f64>,
     pub spread_mean: Option<f64>,
+    pub avg_contribution_score: Option<f64>,
+    pub avg_contribution_per_trigger: Option<f64>,
     pub ic_mean: Option<f64>,
     pub ic_std: Option<f64>,
     pub icir: Option<f64>,
@@ -2200,6 +2204,8 @@ fn build_rule_backtest_payload(
             .collect(),
         avg_residual_mean: metrics.avg_residual_mean,
         spread_mean: metrics.spread_mean,
+        avg_contribution_score: None,
+        avg_contribution_per_trigger: None,
         ic_mean: metrics.ic_mean,
         ic_std: metrics.ic_std,
         icir: metrics.icir,
@@ -3683,6 +3689,71 @@ struct RankLayerBacktestRunParams {
     backtest_period: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+struct RuleContributionAverages {
+    avg_contribution_score: Option<f64>,
+    avg_contribution_per_trigger: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RuleContributionAccumulator {
+    contribution_sum: f64,
+    contribution_days: usize,
+    trigger_count: i64,
+}
+
+fn build_rule_contribution_averages(
+    source_path: &str,
+    rule_options: &[String],
+    start_date: &str,
+    end_date: &str,
+) -> Result<HashMap<String, RuleContributionAverages>, String> {
+    let result_conn = open_result_conn(source_path)?;
+    let (_, meta_map) = load_rule_meta(source_path)?;
+    let rows = query_daily_rows(&result_conn, rule_options, &meta_map)?;
+    let mut acc_map: HashMap<String, RuleContributionAccumulator> = HashMap::new();
+
+    for row in rows {
+        if row.trade_date.as_str() < start_date || row.trade_date.as_str() > end_date {
+            continue;
+        }
+
+        let Some(contribution_score) = row.contribution_score.filter(|value| value.is_finite())
+        else {
+            continue;
+        };
+
+        let acc = acc_map.entry(row.rule_name).or_default();
+        acc.contribution_sum += contribution_score;
+        acc.contribution_days += 1;
+        acc.trigger_count += row.trigger_count.unwrap_or(0).max(0);
+    }
+
+    Ok(acc_map
+        .into_iter()
+        .map(|(rule_name, acc)| {
+            let avg_contribution_score = if acc.contribution_days > 0 {
+                Some(acc.contribution_sum / acc.contribution_days as f64)
+            } else {
+                None
+            };
+            let avg_contribution_per_trigger = if acc.trigger_count > 0 {
+                Some(acc.contribution_sum / acc.trigger_count as f64)
+            } else {
+                None
+            };
+
+            (
+                rule_name,
+                RuleContributionAverages {
+                    avg_contribution_score,
+                    avg_contribution_per_trigger,
+                },
+            )
+        })
+        .collect())
+}
+
 fn weighted_rule_summary_metric(
     summaries: &[RuleLayerRuleSummary],
     value: impl Fn(&RuleLayerRuleSummary) -> Option<f64>,
@@ -3939,6 +4010,8 @@ fn run_rule_layer_backtest_core(
                 .collect(),
             avg_residual_mean: metrics.avg_residual_mean,
             spread_mean: metrics.spread_mean,
+            avg_contribution_score: None,
+            avg_contribution_per_trigger: None,
             ic_mean: metrics.ic_mean,
             ic_std: metrics.ic_std,
             icir: metrics.icir,
@@ -3962,14 +4035,26 @@ fn run_rule_layer_backtest_core(
         &params.end_date,
         &layer_config,
     )?;
+    let contribution_averages = build_rule_contribution_averages(
+        source_path,
+        &rule_options,
+        &params.start_date,
+        &params.end_date,
+    )?;
     let mut all_rule_summaries = Vec::with_capacity(all_metrics.len());
 
     for (one_rule_name, metrics) in all_metrics {
+        let contribution_average = contribution_averages
+            .get(&one_rule_name)
+            .cloned()
+            .unwrap_or_default();
         all_rule_summaries.push(RuleLayerRuleSummary {
             rule_name: one_rule_name,
             point_count: metrics.points.len(),
             avg_residual_mean: metrics.avg_residual_mean,
             spread_mean: metrics.spread_mean,
+            avg_contribution_score: contribution_average.avg_contribution_score,
+            avg_contribution_per_trigger: contribution_average.avg_contribution_per_trigger,
             ic_mean: metrics.ic_mean,
             ic_std: metrics.ic_std,
             icir: metrics.icir,
@@ -4004,6 +4089,12 @@ fn run_rule_layer_backtest_core(
         points: Vec::new(),
         avg_residual_mean,
         spread_mean,
+        avg_contribution_score: weighted_rule_summary_metric(&all_rule_summaries, |item| {
+            item.avg_contribution_score
+        }),
+        avg_contribution_per_trigger: weighted_rule_summary_metric(&all_rule_summaries, |item| {
+            item.avg_contribution_per_trigger
+        }),
         ic_mean,
         ic_std,
         icir,

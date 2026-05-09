@@ -75,6 +75,7 @@ function ConceptFilterPanel({
   searchPlaceholder = "搜索概念",
   emptyText = "没有匹配的概念。",
   panelClassName,
+  singleSelect = false,
 }: {
   title: string;
   selectedItems: string[];
@@ -88,6 +89,7 @@ function ConceptFilterPanel({
   searchPlaceholder?: string;
   emptyText?: string;
   panelClassName?: string;
+  singleSelect?: boolean;
 }) {
   const filteredItems = useMemo(() => {
     const needle = keyword.trim().toLowerCase();
@@ -107,7 +109,7 @@ function ConceptFilterPanel({
     >
       <div className="stock-pick-concept-head">
         <strong>{title}</strong>
-        <span>已选 {selectedItems.length} 项</span>
+        <span>{singleSelect ? selectedItems[0] ?? "未选择" : `已选 ${selectedItems.length} 项`}</span>
       </div>
       <div className="stock-pick-concept-toolbar">
         <input
@@ -224,6 +226,7 @@ export function ConceptSinglePanel({
   emptyText = "没有匹配项。",
   panelClassName,
   noGrid = false,
+  singleSelect = false,
 }: {
   title: string;
   selectedItems: string[];
@@ -237,6 +240,7 @@ export function ConceptSinglePanel({
   emptyText?: string;
   panelClassName?: string;
   noGrid?: boolean;
+  singleSelect?: boolean;
 }) {
   const panel = (
     <ConceptFilterPanel
@@ -251,6 +255,7 @@ export function ConceptSinglePanel({
       searchPlaceholder={searchPlaceholder}
       emptyText={emptyText}
       panelClassName={panelClassName}
+      singleSelect={singleSelect}
     />
   );
 

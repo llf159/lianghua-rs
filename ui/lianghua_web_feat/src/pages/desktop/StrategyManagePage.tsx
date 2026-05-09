@@ -366,6 +366,7 @@ export default function StrategyManagePage() {
       buildRuleSearchText(rule).includes(normalizedSearchKeyword),
     )
   }, [normalizedSearchKeyword, selectedSceneRules])
+  const recentRules = useMemo(() => rules.slice(-4).reverse(), [rules])
   const bulkFilteredRules = useMemo(() => {
     const chosenRuleNames = new Set(refactorRules.map((item) => item.name))
     const sceneFiltered =
@@ -1162,6 +1163,74 @@ export default function StrategyManagePage() {
         )}
       </section>
 
+      <section className="strategy-manage-card">
+        <div className="strategy-manage-list-head">
+          <strong>近期新增</strong>
+          <span>策略文件末尾 {recentRules.length} 条 rule</span>
+        </div>
+        {recentRules.length === 0 ? (
+          <div className="strategy-manage-empty">当前规则文件里没有 rule。</div>
+        ) : (
+          <div className="strategy-manage-recent-rule-grid">
+            {recentRules.map((rule) => {
+              const distScoreSummary = buildDistScoreSummary(rule.dist_points)
+
+              return (
+                <article className="strategy-manage-rule-card strategy-manage-rule-card-compact strategy-manage-rule-card-recent" key={rule.name}>
+                  <div className="strategy-manage-rule-card-head">
+                    <div>
+                      <div className="strategy-manage-rule-card-name">{rule.name}</div>
+                      <div className="strategy-manage-rule-card-source">
+                        {rule.scene_name} · #{rule.index + 1}
+                      </div>
+                    </div>
+                    <div className="strategy-manage-rule-card-actions">
+                      <button className="strategy-manage-inline-btn" type="button" onClick={() => openEditEditor(rule)}>
+                        编辑
+                      </button>
+                      <button className="strategy-manage-inline-btn is-danger" type="button" onClick={() => setDeleteTarget(rule)} disabled={isBusy}>
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                  <p className="strategy-manage-note">{rule.explain}</p>
+                  <div className="strategy-manage-rule-metrics strategy-manage-rule-metrics-recent">
+                    {distScoreSummary ? (
+                      <div className="strategy-manage-summary-item strategy-manage-summary-item-dist-score">
+                        <span>得分</span>
+                        <strong>{formatNumber(distScoreSummary.pointsMin)} ~ {formatNumber(distScoreSummary.pointsMax)}</strong>
+                        <small>
+                          字典分 · {distScoreSummary.segmentCount} 段 ·
+                          区间 {formatNumber(distScoreSummary.intervalMin)} ~ {formatNumber(distScoreSummary.intervalMax)}
+                        </small>
+                      </div>
+                    ) : (
+                      <div className="strategy-manage-summary-item">
+                        <span>得分</span>
+                        <strong>{formatNumber(rule.points)}</strong>
+                      </div>
+                    )}
+                    <div className="strategy-manage-summary-item">
+                      <span>Stage</span>
+                      <strong>{rule.stage}</strong>
+                    </div>
+                    <div className="strategy-manage-summary-item">
+                      <span>Scope</span>
+                      <strong>{rule.scope_way}</strong>
+                    </div>
+                    <div className="strategy-manage-summary-item">
+                      <span>Windows</span>
+                      <strong>{rule.scope_windows}</strong>
+                    </div>
+                  </div>
+                  <pre className="strategy-manage-expression-preview">{rule.when}</pre>
+                </article>
+              )
+            })}
+          </div>
+        )}
+      </section>
+
       {deleteTarget ? (
         <div className="strategy-manage-modal-backdrop strategy-manage-modal-backdrop-confirm" role="presentation">
           <div className="strategy-manage-modal" role="dialog" aria-modal="true">
@@ -1221,7 +1290,7 @@ export default function StrategyManagePage() {
       {selectedScene ? (
         <div className="strategy-manage-modal-backdrop" role="presentation">
           <div className="strategy-manage-modal strategy-manage-editor-modal" role="dialog" aria-modal="true">
-            <div className="strategy-manage-section-head">
+            <div className="strategy-manage-section-head strategy-manage-scene-modal-head">
               <div>
                 <h3 className="strategy-manage-subtitle">{selectedScene.name}</h3>
                 <p className="strategy-manage-note">当前 scene 下共 {selectedSceneRules.length} 条规则。</p>
@@ -1285,10 +1354,10 @@ export default function StrategyManagePage() {
                           {distScoreSummary ? (
                             <div className="strategy-manage-summary-item strategy-manage-summary-item-dist-score">
                               <span>得分</span>
-                              <strong>字典分 · {distScoreSummary.segmentCount} 段</strong>
+                              <strong>{formatNumber(distScoreSummary.pointsMin)} ~ {formatNumber(distScoreSummary.pointsMax)}</strong>
                               <small>
-                                区间 {formatNumber(distScoreSummary.intervalMin)} ~ {formatNumber(distScoreSummary.intervalMax)} ·
-                                分值 {formatNumber(distScoreSummary.pointsMin)} ~ {formatNumber(distScoreSummary.pointsMax)}
+                                字典分 · {distScoreSummary.segmentCount} 段 ·
+                                区间 {formatNumber(distScoreSummary.intervalMin)} ~ {formatNumber(distScoreSummary.intervalMax)}
                               </small>
                             </div>
                           ) : (

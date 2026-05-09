@@ -1,6 +1,7 @@
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useEffect, useRef, useState } from 'react'
 import { preloadWatchObserveRows } from './apis/watchObserve'
+import GlobalStockSearch from './shared/GlobalStockSearch'
 import './Desktop.css'
 
 const menuList = [
@@ -217,6 +218,7 @@ export default function PageDesktop() {
       <main className="content" ref={contentRef}>
         <Outlet />
       </main>
+      <GlobalStockSearch />
     </div>
   )
 }

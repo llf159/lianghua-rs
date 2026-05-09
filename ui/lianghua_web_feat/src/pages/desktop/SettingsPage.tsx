@@ -28,6 +28,7 @@ import {
 import {
   BACKTEST_IC_THRESHOLD_DEFAULT,
   BACKTEST_IR_THRESHOLD_DEFAULT,
+  BACKTEST_RESIDUAL_THRESHOLD_DEFAULT,
   BACKTEST_T_THRESHOLD_DEFAULT,
   readStoredBacktestHighlightSettings,
   type BacktestHighlightSettings,
@@ -96,6 +97,9 @@ export default function SettingsPage() {
   const [backtestHighlightTThresholdInput, setBacktestHighlightTThresholdInput] = useState(
     () => String(readStoredBacktestHighlightSettings().tThreshold),
   )
+  const [backtestHighlightResidualThresholdInput, setBacktestHighlightResidualThresholdInput] = useState(
+    () => String(readStoredBacktestHighlightSettings().residualThreshold),
+  )
   const [backtestHighlightIcUseAbs, setBacktestHighlightIcUseAbs] = useState(
     () => readStoredBacktestHighlightSettings().icUseAbs,
   )
@@ -104,6 +108,9 @@ export default function SettingsPage() {
   )
   const [backtestHighlightTUseAbs, setBacktestHighlightTUseAbs] = useState(
     () => readStoredBacktestHighlightSettings().tUseAbs,
+  )
+  const [backtestHighlightResidualUseAbs, setBacktestHighlightResidualUseAbs] = useState(
+    () => readStoredBacktestHighlightSettings().residualUseAbs,
   )
   const [backtestHighlightSettingError, setBacktestHighlightSettingError] = useState('')
   const [backtestHighlightSettingNotice, setBacktestHighlightSettingNotice] = useState('')
@@ -288,9 +295,11 @@ export default function SettingsPage() {
     setBacktestHighlightIcThresholdInput(String(currentSettings.icThreshold))
     setBacktestHighlightIrThresholdInput(String(currentSettings.irThreshold))
     setBacktestHighlightTThresholdInput(String(currentSettings.tThreshold))
+    setBacktestHighlightResidualThresholdInput(String(currentSettings.residualThreshold))
     setBacktestHighlightIcUseAbs(currentSettings.icUseAbs)
     setBacktestHighlightIrUseAbs(currentSettings.irUseAbs)
     setBacktestHighlightTUseAbs(currentSettings.tUseAbs)
+    setBacktestHighlightResidualUseAbs(currentSettings.residualUseAbs)
     setBacktestHighlightSettingError('')
     setBacktestHighlightSettingNotice('')
   }
@@ -339,16 +348,23 @@ export default function SettingsPage() {
     const parsedIcThreshold = Number(backtestHighlightIcThresholdInput.trim())
     const parsedIrThreshold = Number(backtestHighlightIrThresholdInput.trim())
     const parsedTThreshold = Number(backtestHighlightTThresholdInput.trim())
+    const parsedResidualThreshold = Number(backtestHighlightResidualThresholdInput.trim())
     if (
       !Number.isFinite(parsedIcThreshold) ||
       !Number.isFinite(parsedIrThreshold) ||
-      !Number.isFinite(parsedTThreshold)
+      !Number.isFinite(parsedTThreshold) ||
+      !Number.isFinite(parsedResidualThreshold)
     ) {
       setBacktestHighlightSettingError('阈值请输入有效数字。')
       setBacktestHighlightSettingNotice('')
       return
     }
-    if (parsedIcThreshold < 0 || parsedIrThreshold < 0 || parsedTThreshold < 0) {
+    if (
+      parsedIcThreshold < 0 ||
+      parsedIrThreshold < 0 ||
+      parsedTThreshold < 0 ||
+      parsedResidualThreshold < 0
+    ) {
       setBacktestHighlightSettingError('阈值必须 >= 0。')
       setBacktestHighlightSettingNotice('')
       return
@@ -361,11 +377,14 @@ export default function SettingsPage() {
       irUseAbs: backtestHighlightIrUseAbs,
       tThreshold: parsedTThreshold,
       tUseAbs: backtestHighlightTUseAbs,
+      residualThreshold: parsedResidualThreshold,
+      residualUseAbs: backtestHighlightResidualUseAbs,
     }
     writeStoredBacktestHighlightSettings(nextSettings)
     setBacktestHighlightIcThresholdInput(String(nextSettings.icThreshold))
     setBacktestHighlightIrThresholdInput(String(nextSettings.irThreshold))
     setBacktestHighlightTThresholdInput(String(nextSettings.tThreshold))
+    setBacktestHighlightResidualThresholdInput(String(nextSettings.residualThreshold))
     setBacktestHighlightSettingError('')
     setBacktestHighlightSettingNotice('已保存。场景/策略回测页面会按新阈值高亮。')
   }
@@ -454,10 +473,10 @@ export default function SettingsPage() {
           <button className="settings-list-item" type="button" onClick={openBacktestHighlightSetting}>
             <div className="settings-list-item-main">
               <strong>回测指标高亮阈值</strong>
-              <span>配置 IC / IR / t 的阈值，以及是否按绝对值比较。</span>
+              <span>配置残差均值 / IC / IR / t 的阈值，以及是否按绝对值比较。</span>
             </div>
             <span className="settings-list-item-value">
-              IC {currentBacktestHighlightSettings.icThreshold} · IR {currentBacktestHighlightSettings.irThreshold} · t {currentBacktestHighlightSettings.tThreshold}
+              残差 {currentBacktestHighlightSettings.residualThreshold} · IC {currentBacktestHighlightSettings.icThreshold} · IR {currentBacktestHighlightSettings.irThreshold} · t {currentBacktestHighlightSettings.tThreshold}
             </span>
           </button>
         </div>
@@ -638,7 +657,7 @@ export default function SettingsPage() {
               <div>
                 <h3 className="settings-subtitle-head">回测高亮阈值</h3>
                 <p className="settings-section-note">
-                  分别设置 IC / IR / t 的高亮阈值，并可单独控制是否按绝对值判断。
+                  分别设置残差均值 / IC / IR / t 的高亮阈值，并可单独控制是否按绝对值判断。
                 </p>
               </div>
               <div className="settings-actions">
@@ -649,6 +668,27 @@ export default function SettingsPage() {
             </div>
 
             <div className="settings-backtest-highlight-grid">
+              <div className="settings-backtest-highlight-item">
+                <label className="settings-field">
+                  <span>残差均值阈值（默认 {BACKTEST_RESIDUAL_THRESHOLD_DEFAULT}）</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step="any"
+                    value={backtestHighlightResidualThresholdInput}
+                    onChange={(event) => setBacktestHighlightResidualThresholdInput(event.target.value)}
+                  />
+                </label>
+                <label className="settings-checkbox-inline">
+                  <input
+                    type="checkbox"
+                    checked={backtestHighlightResidualUseAbs}
+                    onChange={(event) => setBacktestHighlightResidualUseAbs(event.target.checked)}
+                  />
+                  <span>按绝对值比较</span>
+                </label>
+              </div>
+
               <div className="settings-backtest-highlight-item">
                 <label className="settings-field">
                   <span>IC 阈值（默认 {BACKTEST_IC_THRESHOLD_DEFAULT}）</span>

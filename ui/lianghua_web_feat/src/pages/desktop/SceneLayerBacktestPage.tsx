@@ -28,7 +28,7 @@ import {
   shouldHighlightBacktestMetric,
   type BacktestHighlightMetric,
 } from "../../shared/backtestHighlightSettings";
-import { readStoredSourcePath } from "../../shared/storage";
+import { readJsonStorage, readStoredSourcePath, writeJsonStorage } from "../../shared/storage";
 import {
   ExpressionValidationSamplesPanel,
   type SceneLayerValidationReturnState,
@@ -44,6 +44,8 @@ type RuleSummarySortKey =
   | "point_count"
   | "avg_residual_mean"
   | "spread_mean"
+  | "avg_contribution_score"
+  | "avg_contribution_per_trigger"
   | "ic_mean"
   | "icir"
   | "ic_t_value";
@@ -57,6 +59,24 @@ type ValidationUnknownConfigDraft = {
   step: string;
 };
 
+type BacktestCommonParamsDraft = {
+  stockAdjType: string;
+  indexTsCode: string;
+  indexBeta: string;
+  conceptBeta: string;
+  industryBeta: string;
+  startDateInput: string;
+  endDateInput: string;
+  minSamplesPerDay: string;
+  minListedTradeDays: string;
+  backtestPeriod: string;
+};
+
+type StoredBacktestCommonParams = BacktestCommonParamsDraft & {
+  hasStoredParams: boolean;
+};
+
+const BACKTEST_COMMON_PARAMS_STORAGE_KEY = "lh_scene_layer_backtest_common_params";
 const VALIDATION_DEFAULT_SAMPLE_LIMIT = 5;
 const VALIDATION_MAX_SAMPLE_LIMIT = 200;
 
@@ -108,6 +128,21 @@ function formatLift(value?: number | null) {
     return "--";
   }
   return `${value.toFixed(2)}x`;
+}
+
+function resolveResidualDirection(
+  contributionScore?: number | null,
+  fallbackDirection?: ValidationDirection,
+): ValidationDirection | null {
+  if (contributionScore !== null && contributionScore !== undefined && Number.isFinite(contributionScore)) {
+    if (contributionScore < 0) {
+      return "negative";
+    }
+    if (contributionScore > 0) {
+      return "positive";
+    }
+  }
+  return fallbackDirection ?? null;
 }
 
 function buildEmptyUnknownConfig(): ValidationUnknownConfigDraft {
@@ -259,6 +294,58 @@ const INDEX_OPTIONS = [
   { value: "000688.SH", label: "科创50" },
 ] as const;
 
+const DEFAULT_BACKTEST_COMMON_PARAMS: BacktestCommonParamsDraft = {
+  stockAdjType: "qfq",
+  indexTsCode: INDEX_OPTIONS[0].value,
+  indexBeta: "0.5",
+  conceptBeta: "0.1",
+  industryBeta: "0.1",
+  startDateInput: "",
+  endDateInput: "",
+  minSamplesPerDay: "5",
+  minListedTradeDays: "60",
+  backtestPeriod: "3",
+};
+
+function normalizeStoredString(value: unknown, fallback: string) {
+  return typeof value === "string" ? value : fallback;
+}
+
+function readStoredBacktestCommonParams(): StoredBacktestCommonParams {
+  const parsed = readJsonStorage<Partial<BacktestCommonParamsDraft>>(
+    typeof window === "undefined" ? null : window.localStorage,
+    BACKTEST_COMMON_PARAMS_STORAGE_KEY,
+  );
+  const indexTsCode = normalizeStoredString(parsed?.indexTsCode, DEFAULT_BACKTEST_COMMON_PARAMS.indexTsCode);
+
+  return {
+    stockAdjType: normalizeStoredString(parsed?.stockAdjType, DEFAULT_BACKTEST_COMMON_PARAMS.stockAdjType),
+    indexTsCode: INDEX_OPTIONS.some((item) => item.value === indexTsCode)
+      ? indexTsCode
+      : DEFAULT_BACKTEST_COMMON_PARAMS.indexTsCode,
+    indexBeta: normalizeStoredString(parsed?.indexBeta, DEFAULT_BACKTEST_COMMON_PARAMS.indexBeta),
+    conceptBeta: normalizeStoredString(parsed?.conceptBeta, DEFAULT_BACKTEST_COMMON_PARAMS.conceptBeta),
+    industryBeta: normalizeStoredString(parsed?.industryBeta, DEFAULT_BACKTEST_COMMON_PARAMS.industryBeta),
+    startDateInput: normalizeStoredString(parsed?.startDateInput, DEFAULT_BACKTEST_COMMON_PARAMS.startDateInput),
+    endDateInput: normalizeStoredString(parsed?.endDateInput, DEFAULT_BACKTEST_COMMON_PARAMS.endDateInput),
+    minSamplesPerDay: normalizeStoredString(parsed?.minSamplesPerDay, DEFAULT_BACKTEST_COMMON_PARAMS.minSamplesPerDay),
+    minListedTradeDays: normalizeStoredString(
+      parsed?.minListedTradeDays,
+      DEFAULT_BACKTEST_COMMON_PARAMS.minListedTradeDays,
+    ),
+    backtestPeriod: normalizeStoredString(parsed?.backtestPeriod, DEFAULT_BACKTEST_COMMON_PARAMS.backtestPeriod),
+    hasStoredParams: Boolean(parsed),
+  };
+}
+
+function writeStoredBacktestCommonParams(value: BacktestCommonParamsDraft) {
+  writeJsonStorage(
+    typeof window === "undefined" ? null : window.localStorage,
+    BACKTEST_COMMON_PARAMS_STORAGE_KEY,
+    value,
+  );
+}
+
 const VALIDATION_SCOPE_WAY_OPTIONS: Array<{ value: ValidationScopeWayOption; label: string }> = [
   { value: "ANY", label: "ANY" },
   { value: "LAST", label: "LAST" },
@@ -273,17 +360,18 @@ export default function SceneLayerBacktestPage() {
     location.state && typeof location.state === "object"
       ? (location.state as SceneLayerBacktestLocationState)
       : null;
+  const storedCommonParams = useMemo(() => readStoredBacktestCommonParams(), []);
   const [sourcePath, setSourcePath] = useState(() => readStoredSourcePath());
-  const [stockAdjType, setStockAdjType] = useState("qfq");
-  const [indexTsCode, setIndexTsCode] = useState<string>(INDEX_OPTIONS[0].value);
-  const [indexBeta, setIndexBeta] = useState("0.5");
-  const [conceptBeta, setConceptBeta] = useState("0.1");
-  const [industryBeta, setIndustryBeta] = useState("0.1");
-  const [startDateInput, setStartDateInput] = useState("");
-  const [endDateInput, setEndDateInput] = useState("");
-  const [minSamplesPerDay, setMinSamplesPerDay] = useState("5");
-  const [minListedTradeDays, setMinListedTradeDays] = useState("60");
-  const [backtestPeriod, setBacktestPeriod] = useState("3");
+  const [stockAdjType, setStockAdjType] = useState(storedCommonParams.stockAdjType);
+  const [indexTsCode, setIndexTsCode] = useState<string>(storedCommonParams.indexTsCode);
+  const [indexBeta, setIndexBeta] = useState(storedCommonParams.indexBeta);
+  const [conceptBeta, setConceptBeta] = useState(storedCommonParams.conceptBeta);
+  const [industryBeta, setIndustryBeta] = useState(storedCommonParams.industryBeta);
+  const [startDateInput, setStartDateInput] = useState(storedCommonParams.startDateInput);
+  const [endDateInput, setEndDateInput] = useState(storedCommonParams.endDateInput);
+  const [minSamplesPerDay, setMinSamplesPerDay] = useState(storedCommonParams.minSamplesPerDay);
+  const [minListedTradeDays, setMinListedTradeDays] = useState(storedCommonParams.minListedTradeDays);
+  const [backtestPeriod, setBacktestPeriod] = useState(storedCommonParams.backtestPeriod);
 
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(false);
@@ -355,6 +443,32 @@ export default function SceneLayerBacktestPage() {
   }, [locationState]);
 
   useEffect(() => {
+    writeStoredBacktestCommonParams({
+      stockAdjType,
+      indexTsCode,
+      indexBeta,
+      conceptBeta,
+      industryBeta,
+      startDateInput,
+      endDateInput,
+      minSamplesPerDay,
+      minListedTradeDays,
+      backtestPeriod,
+    });
+  }, [
+    stockAdjType,
+    indexTsCode,
+    indexBeta,
+    conceptBeta,
+    industryBeta,
+    startDateInput,
+    endDateInput,
+    minSamplesPerDay,
+    minListedTradeDays,
+    backtestPeriod,
+  ]);
+
+  useEffect(() => {
     let cancelled = false;
     const init = async () => {
       setInitializing(true);
@@ -365,16 +479,26 @@ export default function SceneLayerBacktestPage() {
         }
         setSourcePath(resolved);
 
-        let hasSceneDates = false;
+        let hasSceneDateDefaults = false;
         try {
           const sceneDefaults = await getSceneLayerBacktestDefaults(resolved);
           if (cancelled) {
             return;
           }
-          if (!locationState?.validationReturnState && sceneDefaults.start_date && sceneDefaults.end_date) {
+          hasSceneDateDefaults = Boolean(sceneDefaults.start_date && sceneDefaults.end_date);
+          if (
+            !locationState?.validationReturnState &&
+            sceneDefaults.start_date &&
+            !storedCommonParams.hasStoredParams
+          ) {
             setStartDateInput(compactDateToInput(sceneDefaults.start_date));
+          }
+          if (
+            !locationState?.validationReturnState &&
+            sceneDefaults.end_date &&
+            !storedCommonParams.hasStoredParams
+          ) {
             setEndDateInput(compactDateToInput(sceneDefaults.end_date));
-            hasSceneDates = true;
           }
         } catch (sceneInitError) {
           if (!cancelled) {
@@ -387,8 +511,20 @@ export default function SceneLayerBacktestPage() {
           if (cancelled) {
             return;
           }
-          if (!locationState?.validationReturnState && !hasSceneDates) {
+          if (
+            !locationState?.validationReturnState &&
+            !hasSceneDateDefaults &&
+            ruleDefaults.start_date &&
+            !storedCommonParams.hasStoredParams
+          ) {
             setStartDateInput(compactDateToInput(ruleDefaults.start_date));
+          }
+          if (
+            !locationState?.validationReturnState &&
+            !hasSceneDateDefaults &&
+            ruleDefaults.end_date &&
+            !storedCommonParams.hasStoredParams
+          ) {
             setEndDateInput(compactDateToInput(ruleDefaults.end_date));
           }
         } catch (ruleInitError) {
@@ -426,7 +562,7 @@ export default function SceneLayerBacktestPage() {
     return () => {
       cancelled = true;
     };
-  }, [locationState]);
+  }, [locationState, storedCommonParams]);
 
   const allSceneSummaries = result?.all_scene_summaries ?? [];
   const allRuleSummaries = ruleResult?.all_rule_summaries ?? [];
@@ -440,6 +576,33 @@ export default function SceneLayerBacktestPage() {
     return shouldHighlightBacktestMetric(metric, value, backtestHighlightSettings)
       ? "scene-layer-metric-hit"
       : undefined;
+  }
+
+  function residualMetricHighlightClass(
+    value?: number | null,
+    direction?: ValidationDirection | null,
+  ) {
+    const checkedValue = direction === "negative" && value !== null && value !== undefined
+      ? -value
+      : value;
+    return metricHighlightClass("residual", checkedValue);
+  }
+
+  function renderResidualMetric(
+    value?: number | null,
+    direction?: ValidationDirection | null,
+  ) {
+    const directionLabel = direction === "negative" ? "扣" : direction === "positive" ? "加" : null;
+    return (
+      <span className="scene-layer-residual-metric">
+        <span>{formatPercent(value)}</span>
+        {directionLabel ? (
+          <span className={`scene-layer-residual-badge scene-layer-residual-badge-${direction}`}>
+            {directionLabel}
+          </span>
+        ) : null}
+      </span>
+    );
   }
 
   const selectedValidationCombo = useMemo(() => {
@@ -535,6 +698,12 @@ export default function SceneLayerBacktestPage() {
         },
         spread_mean: {
           value: (row: RuleLayerRuleSummary) => row.spread_mean,
+        },
+        avg_contribution_score: {
+          value: (row: RuleLayerRuleSummary) => row.avg_contribution_score,
+        },
+        avg_contribution_per_trigger: {
+          value: (row: RuleLayerRuleSummary) => row.avg_contribution_per_trigger,
         },
         ic_mean: {
           value: (row: RuleLayerRuleSummary) => row.ic_mean,
@@ -899,6 +1068,10 @@ export default function SceneLayerBacktestPage() {
       return null;
     }
 
+    const displaySampleCount =
+      combo.sample_groups.positive.length +
+      combo.sample_groups.negative.length +
+      combo.sample_groups.random.length;
     const sectionClassName = useModalLayout
       ? "scene-layer-layer-summary scene-layer-validation-detail-section"
       : "scene-layer-layer-summary";
@@ -911,15 +1084,15 @@ export default function SceneLayerBacktestPage() {
         </div>
 
         <div className={sectionClassName}>
-          <h3>
-            触发样本（点击样本卡片在浮窗查看；当前每个板块的正向 / 负向 / 随机最多展示 {validationResult.sample_limit_per_group} 条）
-          </h3>
+          <h3>触发样本</h3>
           <div className="scene-layer-validation-sample-summary">
             <div className="scene-layer-validation-sample-stats">
-              <span>总样本：{combo.sample_stats.total_samples}</span>
-              <span>正样本：{combo.sample_stats.positive_count}</span>
-              <span>负样本：{combo.sample_stats.negative_count}</span>
-              <span>随机池：{combo.sample_stats.random_count}</span>
+              <span>总 {combo.sample_stats.total_samples}</span>
+              <span>展示 {displaySampleCount}</span>
+              <span>正 {combo.sample_stats.positive_count}</span>
+              <span>负 {combo.sample_stats.negative_count}</span>
+              <span>随机 {combo.sample_stats.random_count}</span>
+              <span>上限/组 {validationResult.sample_limit_per_group}</span>
             </div>
 
             <button
@@ -927,10 +1100,9 @@ export default function SceneLayerBacktestPage() {
               className="scene-layer-validation-sample-entry"
               onClick={() => openValidationSamplesModal(combo.combo_key)}
             >
-              <span className="scene-layer-validation-sample-entry-label">打开样本浮窗</span>
-              <strong>{combo.sample_stats.total_samples} 个样本</strong>
+              <strong>查看样本</strong>
               <span className="scene-layer-validation-sample-entry-meta">
-                正样本 {combo.sample_stats.positive_count} · 负样本 {combo.sample_stats.negative_count} · 随机池 {combo.sample_stats.random_count}
+                {displaySampleCount} 条展示 · 正 {combo.sample_stats.positive_count} · 负 {combo.sample_stats.negative_count} · 随机 {combo.sample_stats.random_count}
               </span>
             </button>
           </div>
@@ -1225,8 +1397,10 @@ export default function SceneLayerBacktestPage() {
                     <th>最小样本阈值</th>
                     <th>最少上市交易日</th>
                     <th>回测周期（天）</th>
-                    <th>残差均值（日度）</th>
                     <th>分层差均值（日度高分-低分）</th>
+                    <th>平均贡献度</th>
+                    <th>平均单次贡献</th>
+                    <th>残差均值（日度）</th>
                     <th>IC 均值</th>
                     <th>IC t值</th>
                     <th>ICIR</th>
@@ -1242,8 +1416,12 @@ export default function SceneLayerBacktestPage() {
                     <td>{ruleResult.min_samples_per_rule_day}</td>
                     <td>{ruleResult.min_listed_trade_days}</td>
                     <td>{ruleResult.backtest_period}</td>
-                    <td>{formatPercent(ruleResult.avg_residual_mean)}</td>
                     <td>{formatPercent(ruleResult.spread_mean)}</td>
+                    <td>{formatNumber(ruleResult.avg_contribution_score, 2)}</td>
+                    <td>{formatNumber(ruleResult.avg_contribution_per_trigger, 2)}</td>
+                    <td className={residualMetricHighlightClass(ruleResult.avg_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}>
+                      {renderResidualMetric(ruleResult.avg_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}
+                    </td>
                     <td className={metricHighlightClass("ic", ruleResult.ic_mean)}>{formatNumber(ruleResult.ic_mean)}</td>
                     <td className={metricHighlightClass("t", ruleResult.ic_t_value)}>{formatNumber(ruleResult.ic_t_value)}</td>
                     <td className={metricHighlightClass("ir", ruleResult.icir)}>{formatNumber(ruleResult.icir)}</td>
@@ -1282,15 +1460,6 @@ export default function SceneLayerBacktestPage() {
                           title="按有效交易日排序"
                         />
                       </th>
-                      <th aria-sort={getAriaSort(ruleSummarySortKey === "avg_residual_mean", ruleSummarySortDirection)}>
-                        <TableSortButton
-                          label="残差均值（日度）"
-                          isActive={ruleSummarySortKey === "avg_residual_mean" && ruleSummarySortDirection !== null}
-                          direction={ruleSummarySortDirection}
-                          onClick={() => toggleRuleSummarySort("avg_residual_mean")}
-                          title="按残差均值排序"
-                        />
-                      </th>
                       <th aria-sort={getAriaSort(ruleSummarySortKey === "spread_mean", ruleSummarySortDirection)}>
                         <TableSortButton
                           label="分层差均值"
@@ -1298,6 +1467,33 @@ export default function SceneLayerBacktestPage() {
                           direction={ruleSummarySortDirection}
                           onClick={() => toggleRuleSummarySort("spread_mean")}
                           title="按分层差均值排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "avg_contribution_score", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="平均贡献度"
+                          isActive={ruleSummarySortKey === "avg_contribution_score" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("avg_contribution_score")}
+                          title="按平均贡献度排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "avg_contribution_per_trigger", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="平均单次贡献"
+                          isActive={ruleSummarySortKey === "avg_contribution_per_trigger" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("avg_contribution_per_trigger")}
+                          title="按平均单次贡献排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "avg_residual_mean", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="残差均值"
+                          isActive={ruleSummarySortKey === "avg_residual_mean" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("avg_residual_mean")}
+                          title="按残差均值排序"
                         />
                       </th>
                       <th aria-sort={getAriaSort(ruleSummarySortKey === "ic_mean", ruleSummarySortDirection)}>
@@ -1332,10 +1528,14 @@ export default function SceneLayerBacktestPage() {
                   <tbody>
                     {sortedRuleSummaries.map((item) => (
                       <tr key={item.rule_name}>
-                        <td>{item.rule_name}</td>
+                        <td title={item.rule_name}>{item.rule_name}</td>
                         <td>{item.point_count}</td>
-                        <td>{formatPercent(item.avg_residual_mean)}</td>
                         <td>{formatPercent(item.spread_mean)}</td>
+                        <td>{formatNumber(item.avg_contribution_score, 2)}</td>
+                        <td>{formatNumber(item.avg_contribution_per_trigger, 2)}</td>
+                        <td className={residualMetricHighlightClass(item.avg_residual_mean, resolveResidualDirection(item.avg_contribution_score))}>
+                          {renderResidualMetric(item.avg_residual_mean, resolveResidualDirection(item.avg_contribution_score))}
+                        </td>
                         <td className={metricHighlightClass("ic", item.ic_mean)}>{formatNumber(item.ic_mean)}</td>
                         <td className={metricHighlightClass("t", item.ic_t_value)}>{formatNumber(item.ic_t_value)}</td>
                         <td className={metricHighlightClass("ir", item.icir)}>{formatNumber(item.icir)}</td>
@@ -1592,13 +1792,6 @@ export default function SceneLayerBacktestPage() {
         <section className="scene-layer-card">
           <div className="scene-layer-layer-summary">
             <h3>参数组合表现（按分层差 / ICIR 排序）</h3>
-            {shouldUseValidationDetailModal ? (
-              <p className="scene-layer-validation-table-hint">
-                保留基础统计表；点击“策略参数”列可在浮窗中查看样本与相似度明细。
-              </p>
-            ) : shouldUseInlineComboSelection ? (
-              <p className="scene-layer-validation-table-hint">点击任意组合行，切换下方详情内容。</p>
-            ) : null}
             <div className="scene-layer-contrib-table-wrap">
               <table className="scene-layer-contrib-table scene-layer-validation-table">
                 <thead>
@@ -1608,8 +1801,8 @@ export default function SceneLayerBacktestPage() {
                     <th>触发样本</th>
                     <th>触发交易日</th>
                     <th>平均每日触发</th>
-                    <th>残差均值（日度）</th>
                     <th>分层差均值</th>
+                    <th>残差均值（日度）</th>
                     <th>IC 均值</th>
                     <th>IC t值</th>
                     <th>ICIR</th>
@@ -1659,8 +1852,10 @@ export default function SceneLayerBacktestPage() {
                         <td>{item.trigger_samples}</td>
                         <td>{item.triggered_days}</td>
                         <td>{formatNumber(item.avg_daily_trigger, 2)}</td>
-                        <td>{formatPercent(item.backtest.avg_residual_mean)}</td>
                         <td>{formatPercent(item.backtest.spread_mean)}</td>
+                        <td className={residualMetricHighlightClass(item.backtest.avg_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}>
+                          {renderResidualMetric(item.backtest.avg_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}
+                        </td>
                         <td className={metricHighlightClass("ic", item.backtest.ic_mean)}>{formatNumber(item.backtest.ic_mean)}</td>
                         <td className={metricHighlightClass("t", item.backtest.ic_t_value)}>{formatNumber(item.backtest.ic_t_value)}</td>
                         <td className={metricHighlightClass("ir", item.backtest.icir)}>{formatNumber(item.backtest.icir)}</td>

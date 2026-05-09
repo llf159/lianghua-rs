@@ -3,8 +3,9 @@ const BACKTEST_HIGHLIGHT_SETTINGS_STORAGE_KEY = 'lh_backtest_highlight_settings_
 export const BACKTEST_IC_THRESHOLD_DEFAULT = 0.003
 export const BACKTEST_IR_THRESHOLD_DEFAULT = 0.3
 export const BACKTEST_T_THRESHOLD_DEFAULT = 2
+export const BACKTEST_RESIDUAL_THRESHOLD_DEFAULT = 0.5
 
-export type BacktestHighlightMetric = 'ic' | 'ir' | 't'
+export type BacktestHighlightMetric = 'ic' | 'ir' | 't' | 'residual'
 
 export type BacktestHighlightSettings = {
   icThreshold: number
@@ -13,6 +14,8 @@ export type BacktestHighlightSettings = {
   irUseAbs: boolean
   tThreshold: number
   tUseAbs: boolean
+  residualThreshold: number
+  residualUseAbs: boolean
 }
 
 export function defaultBacktestHighlightSettings(): BacktestHighlightSettings {
@@ -23,6 +26,8 @@ export function defaultBacktestHighlightSettings(): BacktestHighlightSettings {
     irUseAbs: false,
     tThreshold: BACKTEST_T_THRESHOLD_DEFAULT,
     tUseAbs: false,
+    residualThreshold: BACKTEST_RESIDUAL_THRESHOLD_DEFAULT,
+    residualUseAbs: false,
   }
 }
 
@@ -54,6 +59,8 @@ function normalizeSettings(raw: Partial<BacktestHighlightSettings> | null | unde
     irUseAbs: normalizeBoolean(raw.irUseAbs, defaults.irUseAbs),
     tThreshold: normalizeThreshold(raw.tThreshold, defaults.tThreshold),
     tUseAbs: normalizeBoolean(raw.tUseAbs, defaults.tUseAbs),
+    residualThreshold: normalizeThreshold(raw.residualThreshold, defaults.residualThreshold),
+    residualUseAbs: normalizeBoolean(raw.residualUseAbs, defaults.residualUseAbs),
   }
 }
 
@@ -102,6 +109,10 @@ export function shouldHighlightBacktestMetric(
   if (metric === 'ir') {
     const checked = settings.irUseAbs ? Math.abs(value) : value
     return checked >= settings.irThreshold
+  }
+  if (metric === 'residual') {
+    const checked = settings.residualUseAbs ? Math.abs(value) : value
+    return checked >= settings.residualThreshold
   }
 
   const checked = settings.tUseAbs ? Math.abs(value) : value

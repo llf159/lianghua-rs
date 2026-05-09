@@ -300,137 +300,53 @@ export function ExpressionValidationSamplesPanel({
 
   return (
     <>
-      {isModalLayout ? (
-        <section className="expression-validation-samples-card expression-validation-samples-compact-overview">
-          <div className="expression-validation-samples-compact-summary">
-            <span className="expression-validation-samples-compact-title">{data.combo.combo_label}</span>
-            <span className="expression-validation-samples-compact-chip">
-              总样本 <strong>{data.combo.sample_stats.total_samples}</strong>
-            </span>
-            <span className="expression-validation-samples-compact-chip">
-              展示 <strong>{displaySamples.length}</strong>
-            </span>
-            <span className="expression-validation-samples-compact-chip">
-              正向 <strong>{data.combo.sample_stats.positive_count}</strong>
-            </span>
-            <span className="expression-validation-samples-compact-chip">
-              负向 <strong>{data.combo.sample_stats.negative_count}</strong>
-            </span>
-            <span className="expression-validation-samples-compact-chip">
-              随机 <strong>{data.combo.sample_stats.random_count}</strong>
-            </span>
-            <span className="expression-validation-samples-compact-chip">
-              板块 <strong>{boardCount}</strong>
-            </span>
-            <span className="expression-validation-samples-compact-chip">
-              波动段 <strong>{activeVolatilityGroupCount}</strong>
-            </span>
-            <span className="expression-validation-samples-compact-chip">
-              每板块每方向 <strong>{data.sampleLimitPerGroup}</strong>
-            </span>
+      <section className="expression-validation-samples-card expression-validation-samples-compact-overview">
+        <div className="expression-validation-samples-compact-summary">
+          <span className="expression-validation-samples-compact-title">{data.combo.combo_label}</span>
+          <span className="expression-validation-samples-compact-chip">
+            总 <strong>{data.combo.sample_stats.total_samples}</strong>
+          </span>
+          <span className="expression-validation-samples-compact-chip">
+            展示 <strong>{displaySamples.length}</strong>
+          </span>
+          <span className="expression-validation-samples-compact-chip">
+            正 <strong>{data.combo.sample_stats.positive_count}</strong>
+          </span>
+          <span className="expression-validation-samples-compact-chip">
+            负 <strong>{data.combo.sample_stats.negative_count}</strong>
+          </span>
+          <span className="expression-validation-samples-compact-chip">
+            随机 <strong>{data.combo.sample_stats.random_count}</strong>
+          </span>
+          <span className="expression-validation-samples-compact-chip">
+            板块 <strong>{boardCount}</strong>
+          </span>
+          <span className="expression-validation-samples-compact-chip">
+            波动 <strong>{activeVolatilityGroupCount}</strong>
+          </span>
+          <span className="expression-validation-samples-compact-chip">
+            上限/组 <strong>{data.sampleLimitPerGroup}</strong>
+          </span>
+        </div>
+
+        <div className="expression-validation-samples-compact-meta">
+          <div className="expression-validation-samples-compact-row">
+            <span>参数</span>
+            <strong>{data.comboParamSummary}</strong>
           </div>
-
-          <div className="expression-validation-samples-compact-meta">
+          {!isModalLayout ? (
             <div className="expression-validation-samples-compact-row">
-              <span>参数</span>
-              <strong>{data.comboParamSummary}</strong>
+              <span>表达式</span>
+              <strong>{expressionSummary}</strong>
             </div>
-            <div className="expression-validation-samples-compact-row">
-              <span>导入规则</span>
-              <strong>
-                {data.importRuleName || "--"}
-                {data.importRuleExplain ? ` · ${data.importRuleExplain}` : ""}
-              </strong>
-            </div>
-          </div>
-        </section>
-      ) : (
-        <>
-          <section className="expression-validation-samples-card">
-            <div className="expression-validation-samples-summary-grid">
-              <div className="expression-validation-samples-summary-item">
-                <span>组合</span>
-                <strong>{data.combo.combo_label}</strong>
-              </div>
-              <div className="expression-validation-samples-summary-item">
-                <span>总样本</span>
-                <strong>{data.combo.sample_stats.total_samples}</strong>
-              </div>
-              <div className="expression-validation-samples-summary-item">
-                <span>展示样本</span>
-                <strong>{displaySamples.length}</strong>
-              </div>
-              <div className="expression-validation-samples-summary-item">
-                <span>正向</span>
-                <strong>{data.combo.sample_stats.positive_count}</strong>
-              </div>
-              <div className="expression-validation-samples-summary-item">
-                <span>负向</span>
-                <strong>{data.combo.sample_stats.negative_count}</strong>
-              </div>
-              <div className="expression-validation-samples-summary-item">
-                <span>随机</span>
-                <strong>{data.combo.sample_stats.random_count}</strong>
-              </div>
-              <div className="expression-validation-samples-summary-item">
-                <span>命中板块</span>
-                <strong>{boardCount}</strong>
-              </div>
-              <div className="expression-validation-samples-summary-item">
-                <span>命中波动率段</span>
-                <strong>{activeVolatilityGroupCount}</strong>
-              </div>
-              <div className="expression-validation-samples-summary-item">
-                <span>每板块每方向</span>
-                <strong>{data.sampleLimitPerGroup} 条</strong>
-              </div>
-            </div>
-          </section>
-
-          <section className="expression-validation-samples-card expression-validation-samples-context-grid">
-            <div className="expression-validation-samples-context-box">
-              <strong>组合参数</strong>
-              <p>{data.comboParamSummary}</p>
-            </div>
-
-            <div className="expression-validation-samples-context-box">
-              <strong>导入规则</strong>
-              <p>
-                {data.importRuleName || "--"}
-                {data.importRuleExplain ? ` · ${data.importRuleExplain}` : ""}
-              </p>
-            </div>
-
-            <div className="expression-validation-samples-context-box">
-              <strong>表达式摘要</strong>
-              <p>{expressionSummary}</p>
-            </div>
-
-            <div className="expression-validation-samples-context-box expression-validation-samples-context-box-wide">
-              <strong>替换后表达式</strong>
-              <p>{data.combo.formula || "--"}</p>
-            </div>
-          </section>
-        </>
-      )}
+          ) : null}
+        </div>
+      </section>
 
       <section className="expression-validation-samples-card expression-validation-samples-groups-card">
         <div className="expression-validation-samples-placeholder-head expression-validation-samples-groups-head">
           <div>
-            <strong>按波动率 / 板块 / 样本来源查看样本</strong>
-            <span>
-              同一波动率段内先按板块，再按正向 / 负向 / 随机拆表；每个板块下每个方向最多展示 {data.sampleLimitPerGroup} 条。
-            </span>
-          </div>
-          <div className="expression-validation-samples-source-legend">
-            {SAMPLE_SOURCE_META.map((meta) => (
-              <span
-                key={meta.key}
-                className={`expression-validation-samples-source-pill expression-validation-samples-source-pill-${meta.key}`}
-              >
-                {meta.label}
-              </span>
-            ))}
+            <strong>样本分组</strong>
           </div>
         </div>
 
@@ -440,14 +356,9 @@ export function ExpressionValidationSamplesPanel({
               <div className="expression-validation-samples-volatility-head">
                 <div>
                   <h3>{section.label}</h3>
-                  <p>
-                    {section.sampleCount > 0
-                      ? `${section.boards.length} 个板块 · ${section.sampleCount} 条展示样本`
-                      : "当前组合在该波动率段暂无样本。"}
-                  </p>
                 </div>
                 <span className="expression-validation-samples-volatility-badge">
-                  {section.sampleCount} 条
+                  {section.boards.length} 板块 · {section.sampleCount} 条
                 </span>
               </div>
 
@@ -522,7 +433,7 @@ export function ExpressionValidationSamplesPanel({
                 </div>
               ) : (
                 <div className="expression-validation-samples-empty-block">
-                  当前组合在 {section.label} 里还没有可展示的样本。
+                  暂无样本
                 </div>
               )}
             </section>
@@ -589,9 +500,6 @@ export default function ExpressionValidationSamplesPage() {
         <div className="expression-validation-samples-header">
           <div>
             <h2 className="expression-validation-samples-title">表达式验证样本</h2>
-            <p className="expression-validation-samples-caption">
-              当前页按波动率、板块和样本来源拆解当前组合，并支持直接跳转到带参考日的个股详情。
-            </p>
           </div>
           <button
             type="button"

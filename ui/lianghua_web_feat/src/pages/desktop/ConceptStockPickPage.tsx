@@ -45,6 +45,10 @@ type PersistedConceptStockPickResultState = {
 type PersistedConceptStockPickState = PersistedConceptStockPickFilterState &
   PersistedConceptStockPickResultState
 
+function normalizeSingleSelection(values: readonly string[]) {
+  return normalizeStringArray(values).slice(0, 1)
+}
+
 export default function ConceptStockPickPage() {
   const {
     sourcePath,
@@ -93,14 +97,14 @@ export default function ConceptStockPickPage() {
       conceptKeyword: typeof merged.conceptKeyword === 'string' ? merged.conceptKeyword : '',
       industryKeyword: typeof merged.industryKeyword === 'string' ? merged.industryKeyword : '',
       areaKeyword: typeof merged.areaKeyword === 'string' ? merged.areaKeyword : '',
-      includeAreas: normalizeStringArray(
+      includeAreas: normalizeSingleSelection(
         Array.isArray(merged.includeAreas)
           ? merged.includeAreas.filter((item): item is string => typeof item === 'string')
           : typeof merged.area === 'string' && merged.area !== '全部'
             ? [merged.area]
             : [],
       ),
-      includeIndustries: normalizeStringArray(
+      includeIndustries: normalizeSingleSelection(
         Array.isArray(merged.includeIndustries)
           ? merged.includeIndustries.filter((item): item is string => typeof item === 'string')
           : [],
@@ -189,13 +193,13 @@ export default function ConceptStockPickPage() {
 
   useEffect(() => {
     setIncludeIndustries((current) =>
-      current.filter((item) => availableIndustryOptions.includes(item)),
+      current.filter((item) => availableIndustryOptions.includes(item)).slice(0, 1),
     )
   }, [availableIndustryOptions])
 
   useEffect(() => {
     setIncludeAreas((current) =>
-      current.filter((item) => availableAreaOptions.includes(item)),
+      current.filter((item) => availableAreaOptions.includes(item)).slice(0, 1),
     )
   }, [availableAreaOptions])
 
@@ -255,11 +259,11 @@ export default function ConceptStockPickPage() {
   }
 
   function toggleIncludeIndustry(value: string) {
-    setIncludeIndustries((current) => toggleStringSelection(current, value))
+    setIncludeIndustries((current) => (current[0] === value ? [] : [value]))
   }
 
   function toggleIncludeArea(value: string) {
-    setIncludeAreas((current) => toggleStringSelection(current, value))
+    setIncludeAreas((current) => (current[0] === value ? [] : [value]))
   }
 
   async function onRun() {
@@ -290,8 +294,8 @@ export default function ConceptStockPickPage() {
         board,
         excludeStBoard: excludeStBoard || undefined,
         tradeDate,
-        includeAreas,
-        includeIndustries,
+        includeAreas: includeAreas.slice(0, 1),
+        includeIndustries: includeIndustries.slice(0, 1),
         totalMvMin,
         totalMvMax,
         includeConcepts,
@@ -389,6 +393,7 @@ export default function ConceptStockPickPage() {
           searchPlaceholder="搜索行业"
           emptyText="没有匹配的行业。"
           noGrid
+          singleSelect
         />
 
         <ConceptSinglePanel
@@ -403,6 +408,7 @@ export default function ConceptStockPickPage() {
           searchPlaceholder="搜索地区"
           emptyText="没有匹配的地区。"
           noGrid
+          singleSelect
         />
       </div>
 

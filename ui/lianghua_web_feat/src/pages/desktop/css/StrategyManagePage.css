@@ -348,6 +348,12 @@
   gap: 10px;
 }
 
+.strategy-manage-recent-rule-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .strategy-manage-bulk-rule-list {
   border: 1px solid #e2e8f0;
   border-radius: 10px;
@@ -763,6 +769,10 @@
   min-height: 220px;
 }
 
+.strategy-manage-rule-card-recent {
+  grid-template-rows: auto auto auto minmax(120px, 1fr);
+}
+
 .strategy-manage-rule-card-head {
   display: flex;
   justify-content: space-between;
@@ -774,6 +784,13 @@
   color: #1f2a37;
   font-size: 16px;
   font-weight: 700;
+  line-height: 1.4;
+}
+
+.strategy-manage-rule-card-source {
+  margin-top: 4px;
+  color: #607286;
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -824,6 +841,10 @@
 
 .strategy-manage-rule-metrics-compact {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.strategy-manage-rule-metrics-recent {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .strategy-manage-rule-metric {
@@ -958,6 +979,17 @@
   width: min(1560px, 100%);
   max-height: calc(100vh - 24px);
   overflow-y: auto;
+}
+
+.strategy-manage-scene-modal-head {
+  position: sticky;
+  top: -18px;
+  z-index: 2;
+  margin: -18px -18px 0;
+  padding: 18px;
+  border-bottom: 1px solid #e5eaf1;
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(8px);
 }
 
 .strategy-manage-guide-modal {
@@ -1109,6 +1141,10 @@
     grid-template-columns: 1fr;
   }
 
+  .strategy-manage-recent-rule-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .strategy-manage-rule-metrics-detail {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1120,7 +1156,8 @@
   }
 
   .strategy-manage-rule-metrics,
-  .strategy-manage-rule-metrics-compact {
+  .strategy-manage-rule-metrics-compact,
+  .strategy-manage-rule-metrics-recent {
     grid-template-columns: 1fr;
   }
   .strategy-manage-bulk-kpi {
@@ -1135,7 +1172,8 @@
 @media (max-width: 720px) {
   .strategy-manage-summary,
   .strategy-manage-filter-grid,
-  .strategy-manage-editor-grid {
+  .strategy-manage-editor-grid,
+  .strategy-manage-recent-rule-grid {
     grid-template-columns: 1fr;
   }
 

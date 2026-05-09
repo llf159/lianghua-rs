@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import {
   listRankTradeDates,
@@ -318,6 +318,7 @@ export default function OverviewRawPage() {
   const [loading, setLoading] = useState(false);
   const [dateOptionsLoading, setDateOptionsLoading] = useState(false);
   const [error, setError] = useState("");
+  const autoReadTriggeredRef = useRef(false);
   const boardOptions = useMemo(
     () => filterBoardItems(STOCK_PICK_BOARD_OPTIONS, excludeStBoard) as (typeof STOCK_PICK_BOARD_OPTIONS)[number][],
     [excludeStBoard],
@@ -483,7 +484,7 @@ export default function OverviewRawPage() {
     );
   }
 
-  async function onRead() {
+  const onRead = useCallback(async () => {
     if (!sourcePathTrimmed) {
       setError("请先到“数据管理”页完成数据准备");
       return;
@@ -592,7 +593,24 @@ export default function OverviewRawPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [
+    boardFilter,
+    excludeStBoard,
+    limitInput,
+    rankDateInput,
+    refDateInput,
+    sourcePathTrimmed,
+    totalMvMaxInput,
+    totalMvMinInput,
+  ]);
+
+  useEffect(() => {
+    if (autoReadTriggeredRef.current || dateOptionsLoading || !sourcePathTrimmed) {
+      return;
+    }
+    autoReadTriggeredRef.current = true;
+    void onRead();
+  }, [dateOptionsLoading, onRead, sourcePathTrimmed]);
 
   return (
     <div className="overview-page">

@@ -317,7 +317,8 @@
 }
 
 .scene-layer-contrib-table {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -343,7 +344,7 @@
 }
 
 .scene-layer-rule-detail-table {
-  min-width: 780px;
+  table-layout: auto;
 }
 
 .scene-layer-rule-detail-table thead th {
@@ -355,8 +356,13 @@
   width: 100%;
   justify-content: space-between;
   gap: 6px;
+  min-width: 0;
   padding: 1px 0;
   transition: color 0.15s ease;
+}
+
+.scene-layer-rule-detail-table thead th .table-sort-button > span:first-child {
+  white-space: nowrap;
 }
 
 .scene-layer-rule-detail-table thead th .table-sort-button:hover,
@@ -385,6 +391,7 @@
 .scene-layer-rule-detail-table tbody td:first-child {
   font-weight: 600;
   color: #1f2937;
+  white-space: nowrap;
 }
 
 .scene-layer-rule-detail-table tbody td:nth-child(n + 2) {
@@ -397,6 +404,34 @@
   background: #fff7ed;
   font-weight: 700;
   border-radius: 6px;
+}
+
+.scene-layer-residual-metric {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.scene-layer-residual-badge {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: center;
+  font-weight: 700;
+}
+
+.scene-layer-residual-badge-positive {
+  color: #166534;
+  background: #dcfce7;
+}
+
+.scene-layer-residual-badge-negative {
+  color: #991b1b;
+  background: #fee2e2;
 }
 
 .scene-layer-validation-unknown-block {
@@ -552,37 +587,46 @@
 .scene-layer-validation-sample-stats {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  font-size: 13px;
+  gap: 6px;
+  font-size: 12px;
   color: #475569;
+}
+
+.scene-layer-validation-sample-stats > span {
+  border: 1px solid #e5ebf3;
+  border-radius: 999px;
+  background: #fff;
+  padding: 3px 8px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
 }
 
 .scene-layer-validation-sample-summary {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .scene-layer-validation-sample-entry {
-  border: 1px solid var(--theme-orange-soft-border);
-  border-radius: 12px;
-  padding: 12px;
-  background: var(--theme-orange-gradient-soft);
-  display: grid;
-  gap: 4px;
+  border: 1px solid #dfe6ef;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   width: 100%;
   text-align: left;
   cursor: pointer;
-  color: #7c2d12;
+  color: #334155;
   transition:
     border-color 0.15s ease,
-    box-shadow 0.15s ease,
-    transform 0.15s ease;
+    background 0.15s ease;
 }
 
 .scene-layer-validation-sample-entry:hover {
   border-color: var(--theme-orange-400);
-  box-shadow: 0 8px 20px var(--theme-orange-shadow);
-  transform: translateY(-1px);
+  background: #fff7ed;
 }
 
 .scene-layer-validation-sample-entry:focus-visible {
@@ -596,15 +640,19 @@
 }
 
 .scene-layer-validation-sample-entry strong {
-  font-size: 16px;
+  font-size: 13px;
   line-height: 1.2;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .scene-layer-validation-sample-entry-meta {
   font-size: 12px;
-  color: #9a3412;
+  color: #64748b;
   font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .scene-layer-market-gainers-grid {

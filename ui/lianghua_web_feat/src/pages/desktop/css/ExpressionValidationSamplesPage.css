@@ -1,13 +1,13 @@
 .expression-validation-samples-page {
   display: grid;
-  gap: 12px;
+  gap: 8px;
   min-width: 0;
 }
 
 .expression-validation-samples-card {
   border: 1px solid #d8dee6;
-  border-radius: 10px;
-  padding: 12px;
+  border-radius: 8px;
+  padding: 8px 10px;
   background: #fff;
   min-width: 0;
 }
@@ -18,7 +18,7 @@
 
 .expression-validation-samples-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
@@ -26,7 +26,7 @@
 
 .expression-validation-samples-title {
   margin: 0;
-  font-size: 18px;
+  font-size: 16px;
 }
 
 .expression-validation-samples-caption {
@@ -38,11 +38,12 @@
 
 .expression-validation-samples-back-btn {
   border: 1px solid var(--theme-orange-200);
-  border-radius: 8px;
-  padding: 7px 14px;
+  border-radius: 6px;
+  padding: 5px 10px;
   background: var(--theme-orange-50);
   color: var(--theme-orange-800);
   cursor: pointer;
+  font-size: 12px;
 }
 
 .expression-validation-samples-back-btn:hover {
@@ -81,41 +82,41 @@
 
 .expression-validation-samples-compact-overview {
   display: grid;
-  gap: 10px;
+  gap: 6px;
   border-color: #dfe6ef;
-  background: linear-gradient(180deg, #ffffff 0%, #fffaf6 100%);
+  background: #fff;
 }
 
 .expression-validation-samples-compact-summary {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
   align-items: center;
 }
 
 .expression-validation-samples-compact-title {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 700;
   color: #1f2937;
-  margin-right: 4px;
+  margin-right: 2px;
 }
 
 .expression-validation-samples-compact-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  min-height: 30px;
-  padding: 0 10px;
+  gap: 4px;
+  min-height: 24px;
+  padding: 0 8px;
   border-radius: 999px;
   border: 1px solid #e3e9f1;
-  background: #fff;
+  background: #f8fafc;
   color: #526274;
   font-size: 12px;
   white-space: nowrap;
 }
 
 .expression-validation-samples-compact-chip > strong {
-  font-size: 13px;
+  font-size: 12px;
   color: #1f2937;
   font-variant-numeric: tabular-nums;
 }
@@ -123,19 +124,19 @@
 .expression-validation-samples-compact-meta {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 8px 10px;
+  gap: 6px;
   align-items: start;
 }
 
 .expression-validation-samples-compact-row {
   display: grid;
-  grid-template-columns: 72px minmax(0, 1fr);
-  gap: 8px;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 6px;
   align-items: start;
   border: 1px solid #e8edf4;
-  border-radius: 8px;
+  border-radius: 6px;
   background: #fff;
-  padding: 7px 10px;
+  padding: 5px 8px;
 }
 
 .expression-validation-samples-compact-row > span {
@@ -146,8 +147,8 @@
 
 .expression-validation-samples-compact-row > strong {
   color: #334155;
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 12px;
+  line-height: 1.35;
   font-weight: 500;
   white-space: pre-wrap;
   word-break: break-word;
@@ -184,10 +185,10 @@
 }
 
 .expression-validation-samples-groups-card {
-  border-color: var(--theme-orange-soft-border);
-  background: linear-gradient(180deg, #ffffff 0%, #fffaf6 100%);
+  border-color: #d8dee6;
+  background: #fff;
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 
 .expression-validation-samples-placeholder-head {
@@ -205,12 +206,12 @@
 
 .expression-validation-samples-groups-head > div:first-child {
   display: grid;
-  gap: 4px;
+  gap: 0;
 }
 
 .expression-validation-samples-groups-head > div:first-child > strong {
   font-size: 14px;
-  color: var(--theme-orange-800);
+  color: #334155;
 }
 
 .expression-validation-samples-placeholder-head > span,
@@ -232,11 +233,11 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 24px;
+  min-height: 20px;
   border-radius: 999px;
-  padding: 0 10px;
+  padding: 0 7px;
   border: 1px solid transparent;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   line-height: 1;
   white-space: nowrap;
@@ -262,29 +263,29 @@
 
 .expression-validation-samples-volatility-list {
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 
 .expression-validation-samples-volatility-section {
   border: 1px solid #e7edf5;
-  border-radius: 12px;
-  background: linear-gradient(180deg, #ffffff 0%, #fcfdff 100%);
-  padding: 12px;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px;
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 
 .expression-validation-samples-volatility-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
 .expression-validation-samples-volatility-head h3 {
   margin: 0;
-  font-size: 15px;
+  font-size: 13px;
   color: #1f2937;
 }
 
@@ -299,12 +300,12 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 28px;
+  min-height: 22px;
   border-radius: 999px;
-  padding: 0 12px;
-  border: 1px solid var(--theme-orange-200);
-  background: var(--theme-orange-50);
-  color: var(--theme-orange-800);
+  padding: 0 8px;
+  border: 1px solid #e3e9f1;
+  background: #f8fafc;
+  color: #475569;
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
@@ -312,12 +313,12 @@
 
 .expression-validation-samples-board-grid {
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 
 .expression-validation-samples-board-card {
   border: 1px solid #e4ebf3;
-  border-radius: 10px;
+  border-radius: 8px;
   background: #fff;
   min-width: 0;
   overflow: hidden;
@@ -325,23 +326,23 @@
 
 .expression-validation-samples-board-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  background: linear-gradient(180deg, #fffaf3 0%, #ffffff 100%);
+  gap: 8px;
+  padding: 7px 8px;
+  background: #f8fafc;
   border-bottom: 1px solid #ecf0f6;
   flex-wrap: wrap;
 }
 
 .expression-validation-samples-board-head > div {
   display: grid;
-  gap: 4px;
+  gap: 2px;
 }
 
 .expression-validation-samples-board-head strong {
   color: #1f2937;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .expression-validation-samples-board-head span {
@@ -353,10 +354,10 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 24px;
+  min-height: 20px;
   border-radius: 999px;
-  padding: 0 10px;
-  background: #f5f8fb;
+  padding: 0 8px;
+  background: #fff;
   color: #475569;
   font-size: 12px;
   font-weight: 600;
@@ -365,13 +366,13 @@
 
 .expression-validation-samples-board-source-list {
   display: grid;
-  gap: 10px;
-  padding: 10px 12px 12px;
+  gap: 8px;
+  padding: 8px;
 }
 
 .expression-validation-samples-board-source-section {
   border: 1px solid #e9eef5;
-  border-radius: 10px;
+  border-radius: 8px;
   background: #fcfdff;
   overflow: hidden;
 }
@@ -380,10 +381,10 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 8px 10px;
+  gap: 6px;
+  padding: 5px 7px;
   border-bottom: 1px solid #edf2f7;
-  background: linear-gradient(180deg, #ffffff 0%, #fafcff 100%);
+  background: #fff;
 }
 
 .expression-validation-samples-board-source-count {
@@ -398,22 +399,22 @@
 
 .expression-validation-samples-table {
   width: 100%;
-  min-width: 720px;
+  min-width: 620px;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .expression-validation-samples-table th,
 .expression-validation-samples-table td {
   border-bottom: 1px solid #e9eef5;
-  padding: 8px 10px;
+  padding: 5px 7px;
   text-align: left;
-  vertical-align: top;
+  vertical-align: middle;
 }
 
 .expression-validation-samples-table thead th {
-  background: linear-gradient(180deg, #fff8f1 0%, #ffedd5 100%);
-  color: #7c2d12;
+  background: #f8fafc;
+  color: #475569;
   font-weight: 600;
   position: sticky;
   top: 0;
@@ -421,7 +422,7 @@
 }
 
 .expression-validation-samples-table tbody tr:hover {
-  background: #fffaf4;
+  background: #fff7ed;
 }
 
 .expression-validation-samples-stock-link {
@@ -441,12 +442,12 @@
 
 .expression-validation-samples-empty-block {
   border: 1px dashed #d6dee8;
-  border-radius: 10px;
-  padding: 12px;
+  border-radius: 8px;
+  padding: 8px;
   color: #627388;
-  background: rgba(255, 255, 255, 0.76);
-  font-size: 13px;
-  line-height: 1.6;
+  background: #fff;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 @media (max-width: 960px) {
