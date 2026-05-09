@@ -23,7 +23,9 @@ use crate::{
     scoring::{CachedRule, evaluate_cached_rule_scores},
     simulate::{
         DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, build_backtest_sample_eligibility,
-        rank::{RankLayerConfig, RankLayerFromDbInput, calc_rank_layer_metrics_from_db},
+        rank::{
+            RankLayerConfig, RankLayerFromDbInput, RankLayerMethod, calc_rank_layer_metrics_from_db,
+        },
         rule::{
             RuleLayerConfig, RuleLayerFromDbInput, RuleLayerRuntimeCache,
             build_rule_layer_runtime_cache, calc_all_rule_layer_metrics_from_db,
@@ -298,6 +300,9 @@ pub struct RankLayerBacktestData {
     pub min_samples_per_rank_day: usize,
     pub min_listed_trade_days: usize,
     pub backtest_period: usize,
+    pub layer_count: usize,
+    pub layer_method: String,
+    pub layer_method_label: String,
     pub point_count: usize,
     pub sample_count: usize,
     pub spread_mean: Option<f64>,
@@ -3687,6 +3692,8 @@ struct RankLayerBacktestRunParams {
     min_samples_per_day: usize,
     min_listed_trade_days: usize,
     backtest_period: usize,
+    layer_count: usize,
+    layer_method: RankLayerMethod,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -4104,11 +4111,20 @@ fn run_rule_layer_backtest_core(
     })
 }
 
-fn rank_layer_label(layer_index: usize) -> String {
-    match layer_index {
-        1 => "第1层（低分）".to_string(),
-        5 => "第5层（高分）".to_string(),
-        other => format!("第{other}层"),
+fn rank_layer_label(layer_index: usize, layer_count: usize) -> String {
+    if layer_index == 1 {
+        "第1层（低分）".to_string()
+    } else if layer_index == layer_count {
+        format!("第{layer_index}层（高分）")
+    } else {
+        format!("第{layer_index}层")
+    }
+}
+
+fn rank_layer_method_label(layer_method: RankLayerMethod) -> &'static str {
+    match layer_method {
+        RankLayerMethod::Score => "按分数分层",
+        RankLayerMethod::SampleCount => "按样本数分层",
     }
 }
 
@@ -4121,6 +4137,8 @@ fn run_rank_layer_backtest_core(
         min_samples_per_day: params.min_samples_per_day,
         backtest_period: params.backtest_period,
         min_listed_trade_days: params.min_listed_trade_days,
+        layer_count: params.layer_count,
+        layer_method: params.layer_method,
     };
     let input = RankLayerFromDbInput {
         stock_adj_type: params.stock_adj_type.clone(),
@@ -4145,6 +4163,9 @@ fn run_rank_layer_backtest_core(
         min_samples_per_rank_day: input.layer_config.effective_min_samples_per_day(),
         min_listed_trade_days: input.layer_config.min_listed_trade_days,
         backtest_period: input.layer_config.backtest_period,
+        layer_count: input.layer_config.layer_count,
+        layer_method: input.layer_config.layer_method.as_str().to_string(),
+        layer_method_label: rank_layer_method_label(input.layer_config.layer_method).to_string(),
         point_count: metrics.point_count,
         sample_count: metrics.sample_count,
         spread_mean: metrics.spread_mean,
@@ -4157,7 +4178,7 @@ fn run_rank_layer_backtest_core(
             .into_iter()
             .map(|item| RankLayerBucketSummary {
                 layer_index: item.layer_index,
-                layer_label: rank_layer_label(item.layer_index),
+                layer_label: rank_layer_label(item.layer_index, input.layer_config.layer_count),
                 point_count: item.point_count,
                 sample_count: item.sample_count,
                 avg_score: item.avg_score,
@@ -4261,6 +4282,8 @@ pub fn run_rank_layer_backtest(
     min_samples_per_rank_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    layer_count: Option<usize>,
+    layer_method: Option<String>,
 ) -> Result<RankLayerBacktestData, String> {
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
@@ -4284,6 +4307,11 @@ pub fn run_rank_layer_backtest(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1),
+        layer_count: layer_count.unwrap_or_else(RankLayerConfig::default_layer_count),
+        layer_method: match layer_method {
+            Some(value) => RankLayerMethod::from_str(&value)?,
+            None => RankLayerMethod::SampleCount,
+        },
     };
 
     run_rank_layer_backtest_core(&source_conn, &source_path, &params)

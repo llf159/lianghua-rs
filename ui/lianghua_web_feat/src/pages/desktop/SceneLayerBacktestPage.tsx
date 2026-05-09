@@ -10,6 +10,7 @@ import {
   runRuleLayerBacktest,
   runSceneLayerBacktest,
   type RankLayerBacktestData,
+  type RankLayerMethod,
   type RuleExpressionValidationData,
   type RuleValidationComboResult,
   type RuleLayerBacktestData,
@@ -70,6 +71,8 @@ type BacktestCommonParamsDraft = {
   minSamplesPerDay: string;
   minListedTradeDays: string;
   backtestPeriod: string;
+  rankLayerCount: string;
+  rankLayerMethod: RankLayerMethod;
 };
 
 type StoredBacktestCommonParams = BacktestCommonParamsDraft & {
@@ -305,10 +308,18 @@ const DEFAULT_BACKTEST_COMMON_PARAMS: BacktestCommonParamsDraft = {
   minSamplesPerDay: "5",
   minListedTradeDays: "60",
   backtestPeriod: "3",
+  rankLayerCount: "5",
+  rankLayerMethod: "sample_count",
 };
 
 function normalizeStoredString(value: unknown, fallback: string) {
   return typeof value === "string" ? value : fallback;
+}
+
+function normalizeRankLayerMethod(value: unknown): RankLayerMethod {
+  return RANK_LAYER_METHOD_OPTIONS.some((item) => item.value === value)
+    ? (value as RankLayerMethod)
+    : DEFAULT_BACKTEST_COMMON_PARAMS.rankLayerMethod;
 }
 
 function readStoredBacktestCommonParams(): StoredBacktestCommonParams {
@@ -334,6 +345,8 @@ function readStoredBacktestCommonParams(): StoredBacktestCommonParams {
       DEFAULT_BACKTEST_COMMON_PARAMS.minListedTradeDays,
     ),
     backtestPeriod: normalizeStoredString(parsed?.backtestPeriod, DEFAULT_BACKTEST_COMMON_PARAMS.backtestPeriod),
+    rankLayerCount: normalizeStoredString(parsed?.rankLayerCount, DEFAULT_BACKTEST_COMMON_PARAMS.rankLayerCount),
+    rankLayerMethod: normalizeRankLayerMethod(parsed?.rankLayerMethod),
     hasStoredParams: Boolean(parsed),
   };
 }
@@ -354,6 +367,11 @@ const VALIDATION_SCOPE_WAY_OPTIONS: Array<{ value: ValidationScopeWayOption; lab
   { value: "CONSEC", label: "CONSEC" },
 ];
 
+const RANK_LAYER_METHOD_OPTIONS: Array<{ value: RankLayerMethod; label: string }> = [
+  { value: "sample_count", label: "按样本数分层" },
+  { value: "score", label: "按分数分层" },
+];
+
 export default function SceneLayerBacktestPage() {
   const location = useLocation();
   const locationState =
@@ -372,6 +390,10 @@ export default function SceneLayerBacktestPage() {
   const [minSamplesPerDay, setMinSamplesPerDay] = useState(storedCommonParams.minSamplesPerDay);
   const [minListedTradeDays, setMinListedTradeDays] = useState(storedCommonParams.minListedTradeDays);
   const [backtestPeriod, setBacktestPeriod] = useState(storedCommonParams.backtestPeriod);
+  const [rankLayerCount, setRankLayerCount] = useState(storedCommonParams.rankLayerCount);
+  const [rankLayerMethod, setRankLayerMethod] = useState<RankLayerMethod>(
+    storedCommonParams.rankLayerMethod,
+  );
 
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(false);
@@ -454,6 +476,8 @@ export default function SceneLayerBacktestPage() {
       minSamplesPerDay,
       minListedTradeDays,
       backtestPeriod,
+      rankLayerCount,
+      rankLayerMethod,
     });
   }, [
     stockAdjType,
@@ -466,6 +490,8 @@ export default function SceneLayerBacktestPage() {
     minSamplesPerDay,
     minListedTradeDays,
     backtestPeriod,
+    rankLayerCount,
+    rankLayerMethod,
   ]);
 
   useEffect(() => {
@@ -800,6 +826,15 @@ export default function SceneLayerBacktestPage() {
       setRankError("开始日期不能晚于结束日期。");
       return;
     }
+    const normalizedLayerCount = Number(rankLayerCount);
+    if (
+      !Number.isFinite(normalizedLayerCount) ||
+      !Number.isInteger(normalizedLayerCount) ||
+      normalizedLayerCount < 2
+    ) {
+      setRankError("分层层数必须是 >= 2 的整数。");
+      return;
+    }
 
     setRankLoading(true);
     setRankError("");
@@ -816,6 +851,8 @@ export default function SceneLayerBacktestPage() {
         minSamplesPerRankDay: Math.max(1, Number(minSamplesPerDay) || 1),
         minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        layerCount: normalizedLayerCount,
+        layerMethod: rankLayerMethod,
       });
       setRankResult(data);
     } catch (runError) {
@@ -1201,13 +1238,27 @@ export default function SceneLayerBacktestPage() {
             <span>回测周期（天）</span>
             <input type="number" min="1" value={backtestPeriod} onChange={(event) => setBacktestPeriod(event.target.value)} />
           </label>
+          <label className="scene-layer-field">
+            <span>分层层数</span>
+            <input type="number" min="2" value={rankLayerCount} onChange={(event) => setRankLayerCount(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>分层方法</span>
+            <select value={rankLayerMethod} onChange={(event) => setRankLayerMethod(event.target.value as RankLayerMethod)}>
+              {RANK_LAYER_METHOD_OPTIONS.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
       </section>
 
       <section className="scene-layer-card">
         <h2 className="scene-layer-title">排名整体回测</h2>
         <p className="scene-layer-caption">
-          使用 score_summary 中的总分做五层分层，检验总分对后续残差收益的影响，并展示分层差、IC、t、ICIR 及五层依据表。
+          使用 score_summary 中的总分做分层回测，检验总分对后续残差收益的影响，并展示分层差、IC、t、ICIR 及分层依据表。
         </p>
 
         <div className="scene-layer-actions">
@@ -1234,9 +1285,11 @@ export default function SceneLayerBacktestPage() {
                     <th>有效交易日</th>
                     <th>总样本数</th>
                     <th>最小样本阈值</th>
+                    <th>分层层数</th>
+                    <th>分层方法</th>
                     <th>最少上市交易日</th>
                     <th>回测周期（天）</th>
-                    <th>分层差均值（日度第5层-第1层）</th>
+                    <th>分层差均值（日度高分层-低分层）</th>
                     <th>IC 均值</th>
                     <th>IC t值</th>
                     <th>ICIR</th>
@@ -1251,6 +1304,8 @@ export default function SceneLayerBacktestPage() {
                     <td>{rankResult.point_count}</td>
                     <td>{rankResult.sample_count}</td>
                     <td>{rankResult.min_samples_per_rank_day}</td>
+                    <td>{rankResult.layer_count}</td>
+                    <td>{rankResult.layer_method_label}</td>
                     <td>{rankResult.min_listed_trade_days}</td>
                     <td>{rankResult.backtest_period}</td>
                     <td>{formatPercent(rankResult.spread_mean)}</td>
@@ -1264,10 +1319,10 @@ export default function SceneLayerBacktestPage() {
           </div>
 
           {rankLayerSummaries.length === 0 ? (
-            <div className="scene-layer-empty">当前没有可用于五层分层的总分样本。</div>
+            <div className="scene-layer-empty">当前没有可用于分层的总分样本。</div>
           ) : (
             <div className="scene-layer-layer-summary">
-              <h3>五层分层依据（按总分从低到高）</h3>
+              <h3>{rankResult.layer_count}层分层依据（{rankResult.layer_method_label}，按总分从低到高）</h3>
               <div className="scene-layer-contrib-table-wrap">
                 <table className="scene-layer-contrib-table">
                   <thead>

@@ -255,6 +255,9 @@ export type RankLayerBacktestData = {
   min_samples_per_rank_day: number
   min_listed_trade_days: number
   backtest_period: number
+  layer_count: number
+  layer_method: RankLayerMethod
+  layer_method_label: string
   point_count: number
   sample_count: number
   spread_mean?: number | null
@@ -264,6 +267,8 @@ export type RankLayerBacktestData = {
   ic_t_value?: number | null
   layer_summaries: RankLayerBucketSummary[]
 }
+
+export type RankLayerMethod = "score" | "sample_count"
 
 export type RuleValidationUnknownConfig = {
   name: string
@@ -413,6 +418,8 @@ export type RankLayerBacktestQuery = {
   minSamplesPerRankDay?: number
   minListedTradeDays?: number
   backtestPeriod?: number
+  layerCount?: number
+  layerMethod?: RankLayerMethod
 }
 
 export type RuleExpressionValidationQuery = {

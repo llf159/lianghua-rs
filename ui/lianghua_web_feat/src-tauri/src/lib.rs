@@ -774,6 +774,8 @@ async fn run_rank_layer_backtest(
     min_samples_per_rank_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    layer_count: Option<usize>,
+    layer_method: Option<String>,
 ) -> Result<RankLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_run_rank_layer_backtest(
@@ -788,6 +790,8 @@ async fn run_rank_layer_backtest(
             min_samples_per_rank_day,
             min_listed_trade_days,
             backtest_period,
+            layer_count,
+            layer_method,
         )
     })
     .await

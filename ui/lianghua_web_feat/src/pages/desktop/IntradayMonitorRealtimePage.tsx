@@ -77,8 +77,18 @@ const SCENE_MODE_COLUMNS = [
 type TotalModeColumn = (typeof TOTAL_MODE_COLUMNS)[number];
 type SceneModeColumn = (typeof SCENE_MODE_COLUMNS)[number];
 type VisibleColumn = TotalModeColumn | SceneModeColumn;
+type NumericVisibleColumn =
+  | "rank"
+  | "realtime_price"
+  | "realtime_change_pct"
+  | "realtime_vol_ratio"
+  | "total_score"
+  | "scene_score"
+  | "risk_score"
+  | "total_mv_yi";
 
 type RankMode = RankModeConfig["mode"];
+type RowDeltaMap = Record<string, Partial<Record<NumericVisibleColumn, number>>>;
 
 type PersistedIntradayMonitorState = {
   sourcePath: string;
@@ -140,6 +150,12 @@ const COLUMN_WIDTHS: Record<VisibleColumn, number> = {
   total_mv_yi: 116,
   concept: 260,
 };
+
+const DELTA_COLUMNS = new Set<VisibleColumn>([
+  "realtime_price",
+  "realtime_change_pct",
+  "realtime_vol_ratio",
+]);
 
 function createRankModeConfig(
   mode: RankMode,
@@ -229,6 +245,15 @@ function formatPercent(value?: number | null) {
   return `${value.toFixed(2)}%`;
 }
 
+function formatDeltaValue(key: VisibleColumn, value?: number) {
+  if (value === undefined || !Number.isFinite(value)) return null;
+  const sign = value > 0 ? "+" : "";
+  if (key === "realtime_change_pct") {
+    return `${sign}${value.toFixed(2)}pct`;
+  }
+  return `${sign}${value.toFixed(2)}`;
+}
+
 function getPercentClassName(value?: number | null) {
   if (
     value === null ||
@@ -273,6 +298,68 @@ function getRowMode(row: IntradayMonitorRow): RankMode {
   return row.rank_mode === "scene" ? "scene" : "total";
 }
 
+function getRowKey(row: IntradayMonitorRow) {
+  return `${getRowMode(row)}|${row.scene_name}|${row.ts_code}|${row.trade_date ?? ""}`;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function getNumericCellValue(row: IntradayMonitorRow, key: VisibleColumn) {
+  if (!DELTA_COLUMNS.has(key)) return null;
+  const value = row[key];
+  return isFiniteNumber(value) ? value : null;
+}
+
+function buildRowDeltaMap(
+  previousRows: IntradayMonitorRow[],
+  nextRows: IntradayMonitorRow[],
+) {
+  const previousMap = new Map(previousRows.map((row) => [getRowKey(row), row]));
+  const deltas: RowDeltaMap = {};
+
+  for (const row of nextRows) {
+    const previous = previousMap.get(getRowKey(row));
+    if (!previous) continue;
+
+    const rowDeltas: Partial<Record<NumericVisibleColumn, number>> = {};
+    for (const key of DELTA_COLUMNS) {
+      const previousValue = getNumericCellValue(previous, key);
+      const nextValue = getNumericCellValue(row, key);
+      if (previousValue === null || nextValue === null) continue;
+
+      const delta = nextValue - previousValue;
+      if (Math.abs(delta) > Number.EPSILON) {
+        rowDeltas[key as NumericVisibleColumn] = delta;
+      }
+    }
+
+    if (Object.keys(rowDeltas).length > 0) {
+      deltas[getRowKey(row)] = rowDeltas;
+    }
+  }
+
+  return deltas;
+}
+
+function mergeRowDeltaMap(
+  current: RowDeltaMap,
+  refreshedRows: IntradayMonitorRow[],
+  refreshedDeltas: RowDeltaMap,
+) {
+  const next = { ...current };
+  for (const row of refreshedRows) {
+    const key = getRowKey(row);
+    if (refreshedDeltas[key]) {
+      next[key] = refreshedDeltas[key];
+    } else {
+      delete next[key];
+    }
+  }
+  return next;
+}
+
 function waitForNextPaint() {
   if (typeof window === "undefined") {
     return Promise.resolve();
@@ -291,6 +378,10 @@ function getWarningMessage(data: {
   return (
     data.warning_message?.trim() || data.warningMessage?.trim() || ""
   );
+}
+
+function isTemplateHitTag(tag: { tone: string; text: string }) {
+  return tag.tone === "up" && tag.text.includes("命中");
 }
 
 function mergeStatusMessages(messages: Array<string | null | undefined>) {
@@ -408,6 +499,7 @@ export default function IntradayMonitorRealtimePage() {
   const [rows, setRows] = useState<IntradayMonitorRow[]>(
     () => persistedState?.rows ?? [],
   );
+  const [rowDeltas, setRowDeltas] = useState<RowDeltaMap>({});
   const [dateOptions, setDateOptions] = useState<string[]>(
     () => persistedState?.dateOptions ?? [],
   );
@@ -463,26 +555,6 @@ export default function IntradayMonitorRealtimePage() {
       direction: persistedState?.sortDirection ?? null,
     },
   );
-
-  const sortedTotalRows = useMemo(
-    () => sortedRows.filter((row) => getRowMode(row) === "total"),
-    [sortedRows],
-  );
-
-  const groupedSceneRows = useMemo<SceneRowsGroup[]>(() => {
-    const groups = new Map<string, IntradayMonitorRow[]>();
-    for (const row of sortedRows) {
-      if (getRowMode(row) !== "scene") continue;
-      const key = row.scene_name || "未命名场景";
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key)?.push(row);
-    }
-    return Array.from(groups.entries()).map(([sceneName, rowsInScene]) => ({
-      key: sceneName,
-      title: sceneName,
-      rows: rowsInScene,
-    }));
-  }, [sortedRows]);
 
   const hasTotalConfig = useMemo(
     () => rankModeConfigs.some((item) => item.mode === "total"),
@@ -669,7 +741,7 @@ export default function IntradayMonitorRealtimePage() {
     [templates],
   );
 
-  function getAppliedTemplate(row: IntradayMonitorRow) {
+  const getAppliedTemplate = useCallback((row: IntradayMonitorRow) => {
     const mode = getRowMode(row);
     if (mode === "total") {
       const totalConfig = rankModeConfigs.find(
@@ -697,9 +769,9 @@ export default function IntradayMonitorRealtimePage() {
       return templateMap.get(allScene.templateId) ?? null;
 
     return null;
-  }
+  }, [rankModeConfigs, templateMap]);
 
-  function getTemplateTag(row: IntradayMonitorRow) {
+  const getTemplateTag = useCallback((row: IntradayMonitorRow) => {
     const tpl = getAppliedTemplate(row);
     if (!tpl) return { text: "未配置", tone: "neutral" as const };
 
@@ -733,7 +805,42 @@ export default function IntradayMonitorRealtimePage() {
       text: `${tpl.name} · 待计算`,
       tone: "neutral" as const,
     };
-  }
+  }, [getAppliedTemplate]);
+
+  const prioritizeTemplateHits = useCallback((displayedRows: IntradayMonitorRow[]) => {
+    const hitRows: IntradayMonitorRow[] = [];
+    const otherRows: IntradayMonitorRow[] = [];
+    for (const row of displayedRows) {
+      if (isTemplateHitTag(getTemplateTag(row))) {
+        hitRows.push(row);
+      } else {
+        otherRows.push(row);
+      }
+    }
+    return [...hitRows, ...otherRows];
+  }, [getTemplateTag]);
+
+  const sortedTotalRows = useMemo(
+    () => prioritizeTemplateHits(
+      sortedRows.filter((row) => getRowMode(row) === "total"),
+    ),
+    [prioritizeTemplateHits, sortedRows],
+  );
+
+  const groupedSceneRows = useMemo<SceneRowsGroup[]>(() => {
+    const groups = new Map<string, IntradayMonitorRow[]>();
+    for (const row of sortedRows) {
+      if (getRowMode(row) !== "scene") continue;
+      const key = row.scene_name || "未命名场景";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)?.push(row);
+    }
+    return Array.from(groups.entries()).map(([sceneName, rowsInScene]) => ({
+      key: sceneName,
+      title: sceneName,
+      rows: prioritizeTemplateHits(rowsInScene),
+    }));
+  }, [prioritizeTemplateHits, sortedRows]);
 
   function addRankModeConfig(mode: RankMode) {
     if (mode === "total") {
@@ -870,15 +977,14 @@ export default function IntradayMonitorRealtimePage() {
         const rowMap = new Map<string, IntradayMonitorRow>();
         for (const result of successResults) {
           for (const row of result.rows ?? []) {
-            const mode = getRowMode(row);
-            const unique = `${mode}|${row.scene_name}|${row.ts_code}|${row.trade_date ?? ""}`;
-            rowMap.set(unique, row);
+            rowMap.set(getRowKey(row), row);
           }
         }
         const warningMessage = mergeStatusMessages(
           successResults.map((item) => getWarningMessage(item)),
         );
         setRows(Array.from(rowMap.values()));
+        setRowDeltas({});
         setRefreshedAt(
           successResults.find((item) => item.refreshed_at)?.refreshed_at ?? "",
         );
@@ -903,6 +1009,7 @@ export default function IntradayMonitorRealtimePage() {
             getWarningMessage(data),
           ]);
         }
+        setRowDeltas(buildRowDeltaMap(rows, refreshedRows));
         setRows(refreshedRows);
         setRefreshedAt(refreshed);
         setError(warningMessage);
@@ -910,6 +1017,7 @@ export default function IntradayMonitorRealtimePage() {
     } catch (readError) {
       setError(`读取失败: ${String(readError)}`);
       setRows([]);
+      setRowDeltas({});
       setRefreshedAt("");
     } finally {
       setLoading(false);
@@ -965,16 +1073,17 @@ export default function IntradayMonitorRealtimePage() {
       }
 
       const refreshedMap = new Map(
-        refreshedRows.map((item) => [
-          `${getRowMode(item)}|${item.scene_name}|${item.ts_code}|${item.trade_date ?? ""}`,
-          item,
-        ]),
+        refreshedRows.map((item) => [getRowKey(item), item]),
       );
+      const refreshedDeltas = buildRowDeltaMap(targetRows, refreshedRows);
       setRows((currentRows) =>
         currentRows.map((item) => {
-          const key = `${getRowMode(item)}|${item.scene_name}|${item.ts_code}|${item.trade_date ?? ""}`;
+          const key = getRowKey(item);
           return refreshedMap.get(key) ?? item;
         }),
+      );
+      setRowDeltas((current) =>
+        mergeRowDeltaMap(current, refreshedRows, refreshedDeltas),
       );
       setRefreshedAt(refreshed);
       setError(warningMessage);
@@ -1019,14 +1128,11 @@ export default function IntradayMonitorRealtimePage() {
       });
 
       const refreshedMap = new Map(
-        (data.rows ?? []).map((item) => [
-          `${getRowMode(item)}|${item.scene_name}|${item.ts_code}|${item.trade_date ?? ""}`,
-          item,
-        ]),
+        (data.rows ?? []).map((item) => [getRowKey(item), item]),
       );
       setRows((currentRows) =>
         currentRows.map((item) => {
-          const key = `${getRowMode(item)}|${item.scene_name}|${item.ts_code}|${item.trade_date ?? ""}`;
+          const key = getRowKey(item);
           return refreshedMap.get(key) ?? item;
         }),
       );
@@ -1119,6 +1225,14 @@ export default function IntradayMonitorRealtimePage() {
 
                   const displayText = formatCell(key, row, excludedConcepts);
                   const isRealtimePct = key === "realtime_change_pct";
+                  const deltaValue = DELTA_COLUMNS.has(key)
+                    ? rowDeltas[getRowKey(row)]?.[
+                        key as NumericVisibleColumn
+                      ]
+                    : undefined;
+                  const deltaText = DELTA_COLUMNS.has(key)
+                    ? formatDeltaValue(key, deltaValue)
+                    : null;
                   return (
                     <td
                       key={`${getRowMode(row)}-${row.ts_code}-${key}`}
@@ -1144,7 +1258,21 @@ export default function IntradayMonitorRealtimePage() {
                           {displayText}
                         </DetailsLink>
                       ) : (
-                        displayText
+                        <span className="intraday-monitor-cell-value">
+                          <span>{displayText}</span>
+                          {deltaText ? (
+                            <span
+                              className={[
+                                "intraday-monitor-delta",
+                                (deltaValue ?? 0) > 0
+                                  ? "intraday-monitor-delta-up"
+                                  : "intraday-monitor-delta-down",
+                              ].join(" ")}
+                            >
+                              {deltaText}
+                            </span>
+                          ) : null}
+                        </span>
                       )}
                     </td>
                   );
