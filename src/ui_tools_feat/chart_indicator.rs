@@ -17,7 +17,7 @@ use crate::{
 };
 
 pub const CHART_INDICATORS_FILE_NAME: &str = "chart_indicators.toml";
-const CHART_INDICATOR_INJECTED_RUNTIME_KEYS: [&str; 3] = ["RANK", "ZHANG", "TOTAL_MV_YI"];
+const CHART_INDICATOR_INJECTED_RUNTIME_KEYS: [&str; 4] = ["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI"];
 const CHART_INDICATOR_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 
 static CHART_INDICATOR_COMPILE_CACHE: OnceLock<
@@ -1459,6 +1459,11 @@ kind = "candles"
 [[panel.series]]
 key = "rank_line"
 expr = "RANK"
+kind = "line"
+
+[[panel.series]]
+key = "score_line"
+expr = "SCORE"
 kind = "line"
 
 [[panel.tooltip]]

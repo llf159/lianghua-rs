@@ -63,6 +63,11 @@ const BUY_PRICE_BASIS_OPTIONS = [
   { value: 'next_open', label: '次日开盘价' },
 ] as const
 
+const BUY_SELECTION_MODE_OPTIONS = [
+  { value: 'random', label: '随机' },
+  { value: 'rank_top', label: '排名靠前优先' },
+] as const
+
 type TradeStatusFilter = 'all' | 'closed' | 'open'
 type TradeDetailModalStatus = Exclude<TradeStatusFilter, 'all'>
 type TradePageSize = (typeof TRADE_PAGE_SIZE_OPTIONS)[number]['value']
@@ -193,6 +198,10 @@ function formatNavValue(value?: number | null, digits = 3) {
 
 function formatBuyPriceBasisLabel(value?: string | null) {
   return BUY_PRICE_BASIS_OPTIONS.find((item) => item.value === value)?.label ?? '--'
+}
+
+function formatBuySelectionModeLabel(value?: string | null) {
+  return BUY_SELECTION_MODE_OPTIONS.find((item) => item.value === value)?.label ?? '--'
 }
 
 function formatShortDateLabel(value?: string | null) {
@@ -1484,6 +1493,8 @@ export default function StrategyPaperValidationPage() {
   const [boardFilter, setBoardFilter] = useState('')
   const [buyPriceBasis, setBuyPriceBasis] = useState('open')
   const [slippagePct, setSlippagePct] = useState('0')
+  const [maxPositionCount, setMaxPositionCount] = useState('5')
+  const [buySelectionMode, setBuySelectionMode] = useState('random')
   const [testStockInput, setTestStockInput] = useState('')
   const [stockLookupFocused, setStockLookupFocused] = useState(false)
   const [buyExpression, setBuyExpression] = useState('RANK <= 100')
@@ -1541,6 +1552,8 @@ export default function StrategyPaperValidationPage() {
         setIndexTsCode(defaults.index_ts_code || INDEX_OPTIONS[0].value)
         setBuyPriceBasis(defaults.buy_price_basis || 'open')
         setSlippagePct(String(defaults.slippage_pct ?? 0))
+        setMaxPositionCount(String(defaults.max_position_count ?? 5))
+        setBuySelectionMode(defaults.buy_selection_mode || 'random')
       } catch (initError) {
         if (!cancelled) {
           setError(`读取默认参数失败: ${String(initError)}`)
@@ -1659,6 +1672,7 @@ export default function StrategyPaperValidationPage() {
       setError('测试股票请输入 6 位代码，或从候选中选择唯一股票。')
       return
     }
+    const parsedMaxPositionCount = Math.max(0, Math.floor(Number(maxPositionCount) || 0))
 
     setLoading(true)
     setError('')
@@ -1674,6 +1688,8 @@ export default function StrategyPaperValidationPage() {
         board: boardFilter || undefined,
         buyPriceBasis,
         slippagePct: Number(slippagePct) || 0,
+        maxPositionCount: parsedMaxPositionCount,
+        buySelectionMode,
         buyExpression,
         sellExpression,
       })
@@ -1685,6 +1701,8 @@ export default function StrategyPaperValidationPage() {
       setBoardFilter(data.resolved_board ?? '')
       setBuyPriceBasis(data.buy_price_basis)
       setSlippagePct(String(data.slippage_pct))
+      setMaxPositionCount(String(data.max_position_count))
+      setBuySelectionMode(data.buy_selection_mode || 'random')
     } catch (runError) {
       setResult(null)
       setError(`执行策略模拟盘验证失败: ${String(runError)}`)
@@ -1825,9 +1843,9 @@ export default function StrategyPaperValidationPage() {
           <div>
             <h2 className="strategy-paper-validation-title">策略模拟盘验证</h2>
             <p className="strategy-paper-validation-note">
-              买点先按截面扫描并入持仓，再对当前持仓扫描卖点。当前版本卖出表现按当日收盘价记账，`RATEO / RATEH`
+              每个交易日先处理已有持仓卖点，再从当日买点候选里按持仓上限买入。当前版本卖出表现按当日收盘价记账，`RATEO / RATEH`
               作为卖点方程辅助字段一起回传；选择次日开盘时，买入日、买入成本和 `TIME=0` 均对齐到次交易日。
-              测试股票留空时按默认模式扫描全市场，填写后只验证这一只股票。
+              测试股票留空时按组合模式扫描全市场，填写后只验证这一只股票。
             </p>
           </div>
         </div>
@@ -1924,6 +1942,26 @@ export default function StrategyPaperValidationPage() {
           <label className="strategy-paper-validation-field">
             <span>滑点系数(%)</span>
             <input type="number" step="0.01" value={slippagePct} onChange={(event) => setSlippagePct(event.target.value)} />
+          </label>
+          <label className="strategy-paper-validation-field">
+            <span>持仓股票上限</span>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={maxPositionCount}
+              onChange={(event) => setMaxPositionCount(event.target.value)}
+            />
+          </label>
+          <label className="strategy-paper-validation-field">
+            <span>买入选择模式</span>
+            <select value={buySelectionMode} onChange={(event) => setBuySelectionMode(event.target.value)}>
+              {BUY_SELECTION_MODE_OPTIONS.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
           </label>
           <div className="strategy-paper-validation-field strategy-paper-validation-template-action-field">
             <span>模板管理</span>
@@ -2045,6 +2083,10 @@ export default function StrategyPaperValidationPage() {
             </span>
             <span>买点基准 {formatBuyPriceBasisLabel(result?.buy_price_basis)}</span>
             <span>滑点 {formatNumber(result?.slippage_pct, 2)}%</span>
+            <span>
+              持仓上限 {result?.max_position_count === 0 ? '不限' : result?.max_position_count ?? '--'}
+            </span>
+            <span>买入模式 {formatBuySelectionModeLabel(result?.buy_selection_mode)}</span>
             <span>对比指数 {result?.index_ts_code || '--'}</span>
             <span>板块 {result?.resolved_board || '全部板块'}</span>
           </div>

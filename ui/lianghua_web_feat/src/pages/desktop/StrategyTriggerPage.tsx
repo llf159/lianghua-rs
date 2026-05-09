@@ -14,7 +14,6 @@ import {
   getStrategyStatisticsPage,
   type SceneStatisticsPageData,
   type SceneStageRow,
-  type StrategyChartPoint,
   type StrategyDailyRow,
   type StrategyHeatmapCell,
   type StrategyStatisticsDetailData,
@@ -143,36 +142,50 @@ type OverviewDeltaChartPointerState = {
   moved: boolean;
 };
 
-type StrategyChartGeometry = {
+type RankDistributionBucket = {
+  key: string;
+  label: string;
+  min: number | null;
+  max: number | null;
+};
+
+type RankDistributionBucketGeometry = {
+  key: string;
+  label: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  positiveWidth: number;
+  negativeWidth: number;
+  flatWidth: number;
+  count: number;
+  positiveCount: number;
+  negativeCount: number;
+  flatCount: number;
+  avgRuleScore: number | null;
+  avgTotalScore: number | null;
+};
+
+type RankDistributionGeometry = {
   width: number;
   height: number;
   viewBox: string;
-  leftTicks: Array<{ value: number; y: number }>;
-  rightTicks: Array<{ value: number; y: number }>;
-  xLabels: Array<{ value: string; x: number }>;
-  totalBars: Array<{
-    key: string;
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    item: StrategyChartPoint;
-  }>;
-  topBars: Array<{
-    key: string;
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    item: StrategyChartPoint;
-  }>;
-  linePath: string;
-  dots: Array<{
-    key: string;
-    cx: number;
-    cy: number;
-    item: StrategyChartPoint;
-  }>;
+  plotLeft: number;
+  plotRight: number;
+  plotBottom: number;
+  countTicks: Array<{ value: number; x: number }>;
+  buckets: RankDistributionBucketGeometry[];
+  rankedCount: number;
+  unrankedCount: number;
+  medianRank: number | null;
+  avgRank: number | null;
+  bestRank: number | null;
+  worstRank: number | null;
+  top10Count: number;
+  top50Count: number;
+  top300Count: number;
+  avgRuleScore: number | null;
 };
 
 type PersistedStrategyTriggerState = {
@@ -293,7 +306,10 @@ function normalizeSceneStageKey(stage: SceneStageRow["stage"]) {
   return "none";
 }
 
-function buildSceneStatisticsTableRow(sceneName: string, data: SceneStatisticsPageData): SceneStatisticsTableRow {
+function buildSceneStatisticsTableRow(
+  sceneName: string,
+  data: SceneStatisticsPageData,
+): SceneStatisticsTableRow {
   const stageCount = {
     trigger: 0,
     confirm: 0,
@@ -355,7 +371,11 @@ function buildHeatmapTitle(item: StrategyHeatmapCell | null, label: string) {
 }
 
 function getOverviewDeltaValue(item: StrategyHeatmapCell) {
-  if (item.delta_level !== null && item.delta_level !== undefined && Number.isFinite(item.delta_level)) {
+  if (
+    item.delta_level !== null &&
+    item.delta_level !== undefined &&
+    Number.isFinite(item.delta_level)
+  ) {
     return item.delta_level;
   }
   if (
@@ -449,7 +469,9 @@ function isPointerNearOverviewChartFocus(
   }
 
   const focusClientY = rect.top + (rect.height * focus.cursorYPercent) / 100;
-  return Math.abs(clientY - focusClientY) <= OVERVIEW_CHART_TOUCH_FOCUS_HIT_SLOP;
+  return (
+    Math.abs(clientY - focusClientY) <= OVERVIEW_CHART_TOUCH_FOCUS_HIT_SLOP
+  );
 }
 
 function buildOverviewDeltaCandleTitle(
@@ -490,6 +512,61 @@ function buildChartValueDomain(values: number[], includeZero = false) {
     min: min - paddingBottom,
     max: max + paddingTop,
   };
+}
+
+const RANK_DISTRIBUTION_BUCKETS: RankDistributionBucket[] = [
+  { key: "top50", label: "1-50", min: 1, max: 50 },
+  { key: "top100", label: "51-100", min: 51, max: 100 },
+  { key: "top150", label: "101-150", min: 101, max: 150 },
+  { key: "top300", label: "151-300", min: 151, max: 300 },
+  { key: "top500", label: "301-500", min: 301, max: 500 },
+  { key: "top1000", label: "501-1000", min: 501, max: 1000 },
+  { key: "top2000", label: "1001-2000", min: 1001, max: 2000 },
+  { key: "after2000", label: "2001+", min: 2001, max: null },
+  { key: "unranked", label: "无排名", min: null, max: null },
+];
+
+function toFiniteNumber(value?: number | null) {
+  return value !== null && value !== undefined && Number.isFinite(value)
+    ? value
+    : null;
+}
+
+function average(values: number[]) {
+  if (values.length === 0) {
+    return null;
+  }
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function median(values: number[]) {
+  if (values.length === 0) {
+    return null;
+  }
+  const sortedValues = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sortedValues.length / 2);
+  if (sortedValues.length % 2 === 1) {
+    return sortedValues[middle];
+  }
+  return (sortedValues[middle - 1] + sortedValues[middle]) / 2;
+}
+
+function findRankBucket(row: TriggeredStockRow) {
+  const rank = toFiniteNumber(row.rank);
+  if (rank === null || rank <= 0) {
+    return RANK_DISTRIBUTION_BUCKETS.at(-1) ?? RANK_DISTRIBUTION_BUCKETS[0];
+  }
+  return (
+    RANK_DISTRIBUTION_BUCKETS.find((bucket) => {
+      if (bucket.min === null) {
+        return false;
+      }
+      if (rank < bucket.min) {
+        return false;
+      }
+      return bucket.max === null || rank <= bucket.max;
+    }) ?? RANK_DISTRIBUTION_BUCKETS[RANK_DISTRIBUTION_BUCKETS.length - 2]
+  );
 }
 
 function buildCalendarMonths(items: StrategyHeatmapCell[]) {
@@ -617,8 +694,7 @@ function buildOverviewDeltaGeometry(
   const domainSpan = Math.max(scaledMax - scaledMin, 0.01);
   const valueToY = (value: number) =>
     marginTop + ((scaledMax - value) / domainSpan) * plotHeight;
-  const zeroY =
-    scaledMin <= 0 && scaledMax >= 0 ? valueToY(0) : null;
+  const zeroY = scaledMin <= 0 && scaledMax >= 0 ? valueToY(0) : null;
   const slotWidth = plotWidth / sortedItems.length;
   const candleWidth = Math.max(3, Math.min(18, slotWidth * 0.58));
 
@@ -719,144 +795,141 @@ function pickInitialHeatmapDate(
   return slots.at(-1)?.compactDate ?? null;
 }
 
-function buildChartGeometry(
-  items: StrategyChartPoint[],
-): StrategyChartGeometry | null {
-  if (items.length === 0) {
+function buildRankDistributionGeometry(
+  rows: TriggeredStockRow[],
+): RankDistributionGeometry | null {
+  if (rows.length === 0) {
     return null;
   }
 
-  const width = 960;
-  const height = 320;
-  const marginTop = 20;
-  const marginRight = 58;
-  const marginBottom = 48;
-  const marginLeft = 56;
+  const width = 980;
+  const height = 360;
+  const marginTop = 22;
+  const marginRight = 76;
+  const marginBottom = 44;
+  const marginLeft = 92;
   const plotWidth = width - marginLeft - marginRight;
   const plotHeight = height - marginTop - marginBottom;
+  const bucketRows = new Map<string, TriggeredStockRow[]>(
+    RANK_DISTRIBUTION_BUCKETS.map((bucket) => [bucket.key, []]),
+  );
+
+  for (const row of rows) {
+    const bucket = findRankBucket(row);
+    bucketRows.get(bucket.key)?.push(row);
+  }
+
   const countMax = Math.max(
     1,
-    ...items.map((item) =>
-      item.trigger_count && Number.isFinite(item.trigger_count)
-        ? item.trigger_count
-        : 0,
+    ...RANK_DISTRIBUTION_BUCKETS.map(
+      (bucket) => bucketRows.get(bucket.key)?.length ?? 0,
     ),
   );
-  const coverageMax = Math.max(
-    0.05,
-    Math.min(
-      1,
-      Math.max(
-        ...items.map((item) =>
-          item.coverage && Number.isFinite(item.coverage) ? item.coverage : 0,
-        ),
-      ) * 1.15,
-    ),
-  );
-  const slotWidth = plotWidth / items.length;
-  const barGap = Math.max(6, slotWidth * 0.16);
-  const barWidth = Math.max(10, slotWidth - barGap * 2);
-  const countScale = (value: number) =>
-    marginTop + plotHeight - (value / countMax) * plotHeight;
-  const coverageScale = (value: number) =>
-    marginTop +
-    plotHeight -
-    (Math.min(value, coverageMax) / coverageMax) * plotHeight;
+  const countToX = (value: number) =>
+    marginLeft + (value / countMax) * plotWidth;
+  const rowGap = 9;
+  const rowHeight =
+    (plotHeight - rowGap * (RANK_DISTRIBUTION_BUCKETS.length - 1)) /
+    RANK_DISTRIBUTION_BUCKETS.length;
+  const barHeight = Math.max(16, Math.min(24, rowHeight));
+  const rankedRanks = rows
+    .map((row) => toFiniteNumber(row.rank))
+    .filter((rank): rank is number => rank !== null && rank > 0);
+  const ruleScores = rows
+    .map((row) => toFiniteNumber(row.rule_score))
+    .filter((score): score is number => score !== null);
 
-  const totalBars = items.map((item, index) => {
-    const value =
-      item.trigger_count && Number.isFinite(item.trigger_count)
-        ? item.trigger_count
+  const buckets = RANK_DISTRIBUTION_BUCKETS.map((bucket, index) => {
+    const bucketItems = bucketRows.get(bucket.key) ?? [];
+    const positiveCount = bucketItems.filter(
+      (row) => (toFiniteNumber(row.rule_score) ?? 0) > 0,
+    ).length;
+    const negativeCount = bucketItems.filter(
+      (row) => (toFiniteNumber(row.rule_score) ?? 0) < 0,
+    ).length;
+    const flatCount = Math.max(
+      0,
+      bucketItems.length - positiveCount - negativeCount,
+    );
+    const widthValue = (bucketItems.length / countMax) * plotWidth;
+    const positiveWidth =
+      bucketItems.length > 0
+        ? (positiveCount / bucketItems.length) * widthValue
         : 0;
-    const x = marginLeft + index * slotWidth + barGap;
-    const y = countScale(value);
-    return {
-      key: `${item.trade_date}-total`,
-      x,
-      y,
-      width: barWidth,
-      height: marginTop + plotHeight - y,
-      item,
-    };
-  });
-
-  const topBars = items.map((item, index) => {
-    const value =
-      item.top100_trigger_count && Number.isFinite(item.top100_trigger_count)
-        ? Math.min(item.top100_trigger_count, item.trigger_count ?? 0)
+    const negativeWidth =
+      bucketItems.length > 0
+        ? (negativeCount / bucketItems.length) * widthValue
         : 0;
-    const overlayWidth = Math.max(6, barWidth - 4);
-    const x =
-      marginLeft + index * slotWidth + barGap + (barWidth - overlayWidth) / 2;
-    const y = countScale(value);
+    const flatWidth = Math.max(0, widthValue - positiveWidth - negativeWidth);
+    const y =
+      marginTop + index * (rowHeight + rowGap) + (rowHeight - barHeight) / 2;
+    const bucketRuleScores = bucketItems
+      .map((row) => toFiniteNumber(row.rule_score))
+      .filter((score): score is number => score !== null);
+    const bucketTotalScores = bucketItems
+      .map((row) => toFiniteNumber(row.total_score))
+      .filter((score): score is number => score !== null);
+
     return {
-      key: `${item.trade_date}-top`,
-      x,
+      key: bucket.key,
+      label: bucket.label,
+      x: marginLeft,
       y,
-      width: overlayWidth,
-      height: marginTop + plotHeight - y,
-      item,
+      width: widthValue,
+      height: barHeight,
+      positiveWidth,
+      negativeWidth,
+      flatWidth,
+      count: bucketItems.length,
+      positiveCount,
+      negativeCount,
+      flatCount,
+      avgRuleScore: average(bucketRuleScores),
+      avgTotalScore: average(bucketTotalScores),
     };
   });
 
-  const dots = items.map((item, index) => {
-    const coverage =
-      item.coverage && Number.isFinite(item.coverage) ? item.coverage : 0;
-    return {
-      key: `${item.trade_date}-coverage`,
-      cx: marginLeft + index * slotWidth + slotWidth / 2,
-      cy: coverageScale(coverage),
-      item,
-    };
-  });
-
-  const linePath = dots
-    .map(
-      (dot, index) =>
-        `${index === 0 ? "M" : "L"} ${dot.cx.toFixed(2)} ${dot.cy.toFixed(2)}`,
-    )
-    .join(" ");
-
-  const leftTicks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => ({
-    value: Math.round(countMax * ratio),
-    y: countScale(countMax * ratio),
-  }));
-  const rightTicks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => ({
-    value: coverageMax * ratio,
-    y: coverageScale(coverageMax * ratio),
-  }));
-
-  const labelStep = Math.max(1, Math.ceil(items.length / 8));
-  const xLabels = items
-    .map((item, index) => ({ item, index }))
+  const tickRatios = [0, 0.25, 0.5, 0.75, 1];
+  const countTicks = tickRatios
+    .map((ratio) => Math.round(countMax * ratio))
     .filter(
-      ({ index }) => index % labelStep === 0 || index === items.length - 1,
+      (value, index, values) => index === 0 || value !== values[index - 1],
     )
-    .map(({ item, index }) => ({
-      value: formatDateLabel(item.trade_date).slice(5),
-      x: marginLeft + index * slotWidth + slotWidth / 2,
+    .map((value) => ({
+      value,
+      x: countToX(value),
     }));
 
   return {
     width,
     height,
     viewBox: `0 0 ${width} ${height}`,
-    leftTicks,
-    rightTicks,
-    xLabels,
-    totalBars,
-    topBars,
-    linePath,
-    dots,
+    plotLeft: marginLeft,
+    plotRight: width - marginRight,
+    plotBottom: height - marginBottom,
+    countTicks,
+    buckets,
+    rankedCount: rankedRanks.length,
+    unrankedCount: rows.length - rankedRanks.length,
+    medianRank: median(rankedRanks),
+    avgRank: average(rankedRanks),
+    bestRank: rankedRanks.length > 0 ? Math.min(...rankedRanks) : null,
+    worstRank: rankedRanks.length > 0 ? Math.max(...rankedRanks) : null,
+    top10Count: rankedRanks.filter((rank) => rank <= 10).length,
+    top50Count: rankedRanks.filter((rank) => rank <= 50).length,
+    top300Count: rankedRanks.filter((rank) => rank <= 300).length,
+    avgRuleScore: average(ruleScores),
   };
 }
 
-function buildChartTitle(item: StrategyChartPoint) {
+function buildRankDistributionTitle(item: RankDistributionBucketGeometry) {
   return [
-    `日期: ${formatDateLabel(item.trade_date)}`,
-    `触发次数: ${formatInteger(item.trigger_count)}`,
-    `前100触发次数: ${formatInteger(item.top100_trigger_count)}`,
-    `覆盖率: ${formatPercent(item.coverage)}`,
+    `排名区间: ${item.label}`,
+    `触发股票: ${formatInteger(item.count)}`,
+    `正向得分: ${formatInteger(item.positiveCount)}`,
+    `负向得分: ${formatInteger(item.negativeCount)}`,
+    `平均策略得分: ${formatNumber(item.avgRuleScore)}`,
+    `平均总分: ${formatNumber(item.avgTotalScore)}`,
   ].join("\n");
 }
 
@@ -967,20 +1040,19 @@ function StrategyOverviewDeltaChart({
     const canScrollHorizontally =
       scrollContainer !== null &&
       scrollContainer.scrollWidth > scrollContainer.clientWidth + 1;
-    const mode =
-      focus?.pinned
-        ? isTouchPointer &&
-          !isPointerNearOverviewChartFocus(
-            event.currentTarget,
-            event.clientX,
-            event.clientY,
-            focus,
-          )
-          ? "dismiss"
-          : "focus"
-        : !isTouchPointer && canScrollHorizontally
-          ? "scroll"
-          : "tap";
+    const mode = focus?.pinned
+      ? isTouchPointer &&
+        !isPointerNearOverviewChartFocus(
+          event.currentTarget,
+          event.clientX,
+          event.clientY,
+          focus,
+        )
+        ? "dismiss"
+        : "focus"
+      : !isTouchPointer && canScrollHorizontally
+        ? "scroll"
+        : "tap";
 
     pointerStateRef.current = {
       mode,
@@ -1064,10 +1136,7 @@ function StrategyOverviewDeltaChart({
     releaseOverviewPointer(event);
     clearPointerState();
 
-    if (
-      !pointerState ||
-      pointerState.pointerId !== event.pointerId
-    ) {
+    if (!pointerState || pointerState.pointerId !== event.pointerId) {
       return;
     }
 
@@ -1097,10 +1166,7 @@ function StrategyOverviewDeltaChart({
 
   function onOverviewPointerLeave(event: ReactPointerEvent<HTMLDivElement>) {
     const pointerState = pointerStateRef.current;
-    if (
-      pointerState &&
-      pointerState.pointerId === event.pointerId
-    ) {
+    if (pointerState && pointerState.pointerId === event.pointerId) {
       return;
     }
 
@@ -1121,7 +1187,10 @@ function StrategyOverviewDeltaChart({
           <span>开收按累计差值延展，实体长度 = 当日差值</span>
         </div>
       </div>
-      <div className="strategy-trigger-overview-mini-chart-scroll" ref={scrollRef}>
+      <div
+        className="strategy-trigger-overview-mini-chart-scroll"
+        ref={scrollRef}
+      >
         <div
           className={[
             "strategy-trigger-overview-mini-chart-viewport",
@@ -1279,14 +1348,18 @@ function StrategyOverviewDeltaChart({
             >
               <div className="strategy-trigger-overview-mini-chart-tooltip-head">
                 <strong>{formatDateLabel(focusCandle.item.trade_date)}</strong>
-                <span>{formatSignedNumber(getOverviewDeltaValue(focusCandle.item))}</span>
+                <span>
+                  {formatSignedNumber(getOverviewDeltaValue(focusCandle.item))}
+                </span>
               </div>
               <div className="strategy-trigger-overview-mini-chart-tooltip-body">
                 <div className="strategy-trigger-overview-mini-chart-tooltip-grid">
                   <div className="strategy-trigger-overview-mini-chart-tooltip-row">
                     <span>当日差值</span>
                     <strong>
-                      {formatSignedNumber(getOverviewDeltaValue(focusCandle.item))}
+                      {formatSignedNumber(
+                        getOverviewDeltaValue(focusCandle.item),
+                      )}
                     </strong>
                   </div>
                   <div className="strategy-trigger-overview-mini-chart-tooltip-row">
@@ -1307,116 +1380,187 @@ function StrategyOverviewDeltaChart({
   );
 }
 
-function StrategyAnalysisChart({ items }: { items: StrategyChartPoint[] }) {
-  const geometry = useMemo(() => buildChartGeometry(items), [items]);
+function StrategyRankDistributionChart({
+  rows,
+}: {
+  rows: TriggeredStockRow[];
+}) {
+  const geometry = useMemo(() => buildRankDistributionGeometry(rows), [rows]);
 
   if (!geometry) {
     return (
       <div className="strategy-trigger-empty">
-        当前策略暂无可展示的日度数据。
+        当前策略暂无可展示的触发排名数据。
       </div>
     );
   }
 
+  const rankedRatio =
+    rows.length > 0 ? geometry.rankedCount / rows.length : null;
+  const top300Ratio =
+    geometry.rankedCount > 0
+      ? geometry.top300Count / geometry.rankedCount
+      : null;
+
   return (
-    <div className="strategy-trigger-chart-shell">
-      <div className="strategy-trigger-legend">
-        <span className="strategy-trigger-legend-item">
-          <i className="strategy-trigger-legend-swatch strategy-trigger-legend-swatch-trigger" />
-          总触发次数
+    <div className="strategy-trigger-rank-chart-shell">
+      <div className="strategy-trigger-rank-summary">
+        <div className="strategy-trigger-rank-summary-item">
+          <span>触发样本</span>
+          <strong>{formatInteger(rows.length)}</strong>
+        </div>
+        <div className="strategy-trigger-rank-summary-item">
+          <span>有排名</span>
+          <strong>
+            {formatInteger(geometry.rankedCount)}
+            <small>{formatPercent(rankedRatio)}</small>
+          </strong>
+        </div>
+        <div className="strategy-trigger-rank-summary-item">
+          <span>前300占比</span>
+          <strong>
+            {formatInteger(geometry.top300Count)}
+            <small>{formatPercent(top300Ratio)}</small>
+          </strong>
+        </div>
+        <div className="strategy-trigger-rank-summary-item">
+          <span>排名中位数</span>
+          <strong>{formatInteger(geometry.medianRank)}</strong>
+        </div>
+        <div className="strategy-trigger-rank-summary-item">
+          <span>平均排名</span>
+          <strong>{formatInteger(geometry.avgRank)}</strong>
+        </div>
+        <div className="strategy-trigger-rank-summary-item">
+          <span>平均策略得分</span>
+          <strong className={getSignedValueClassName(geometry.avgRuleScore)}>
+            {formatNumber(geometry.avgRuleScore)}
+          </strong>
+        </div>
+      </div>
+
+      <div className="strategy-trigger-rank-legend">
+        <span className="strategy-trigger-rank-legend-item">
+          <i className="strategy-trigger-rank-legend-swatch strategy-trigger-rank-legend-positive" />
+          正向策略得分
         </span>
-        <span className="strategy-trigger-legend-item">
-          <i className="strategy-trigger-legend-swatch strategy-trigger-legend-swatch-top" />
-          前100触发次数(重叠)
+        <span className="strategy-trigger-rank-legend-item">
+          <i className="strategy-trigger-rank-legend-swatch strategy-trigger-rank-legend-negative" />
+          负向策略得分
         </span>
-        <span className="strategy-trigger-legend-item">
-          <i className="strategy-trigger-legend-line" />
-          覆盖率
+        <span className="strategy-trigger-rank-legend-item">
+          <i className="strategy-trigger-rank-legend-swatch strategy-trigger-rank-legend-flat" />
+          其他/零分
         </span>
       </div>
       <svg
-        className="strategy-trigger-chart"
+        className="strategy-trigger-rank-chart"
         viewBox={geometry.viewBox}
         preserveAspectRatio="none"
       >
-        {geometry.leftTicks.map((tick) => (
-          <g key={`left-${tick.y.toFixed(2)}`}>
+        {geometry.countTicks.map((tick) => (
+          <g key={`count-${tick.value}`}>
             <line
-              x1={56}
-              y1={tick.y}
-              x2={902}
-              y2={tick.y}
-              className="strategy-trigger-chart-grid"
+              x1={tick.x}
+              y1={18}
+              x2={tick.x}
+              y2={geometry.plotBottom}
+              className="strategy-trigger-rank-chart-grid"
             />
             <text
-              x={48}
-              y={tick.y + 4}
-              className="strategy-trigger-chart-axis strategy-trigger-chart-axis-left"
+              x={tick.x}
+              y={geometry.plotBottom + 25}
+              textAnchor="middle"
+              className="strategy-trigger-rank-chart-axis"
             >
               {formatInteger(tick.value)}
             </text>
           </g>
         ))}
-        {geometry.rightTicks.map((tick) => (
-          <text
-            key={`right-${tick.y.toFixed(2)}`}
-            x={912}
-            y={tick.y + 4}
-            className="strategy-trigger-chart-axis strategy-trigger-chart-axis-right"
-          >
-            {formatPercent(tick.value)}
-          </text>
+        {geometry.buckets.map((bucket) => (
+          <g key={bucket.key}>
+            <text
+              x={geometry.plotLeft - 12}
+              y={bucket.y + bucket.height / 2 + 4}
+              className="strategy-trigger-rank-chart-axis strategy-trigger-rank-chart-axis-label"
+            >
+              {bucket.label}
+            </text>
+            <rect
+              x={bucket.x}
+              y={bucket.y}
+              width={Math.max(bucket.width, bucket.count > 0 ? 2 : 0)}
+              height={bucket.height}
+              rx={4}
+              className="strategy-trigger-rank-chart-bar-bg"
+            >
+              <title>{buildRankDistributionTitle(bucket)}</title>
+            </rect>
+            {bucket.positiveWidth > 0 ? (
+              <rect
+                x={bucket.x}
+                y={bucket.y}
+                width={bucket.positiveWidth}
+                height={bucket.height}
+                rx={4}
+                className="strategy-trigger-rank-chart-bar-positive"
+              >
+                <title>{buildRankDistributionTitle(bucket)}</title>
+              </rect>
+            ) : null}
+            {bucket.negativeWidth > 0 ? (
+              <rect
+                x={bucket.x + bucket.positiveWidth}
+                y={bucket.y}
+                width={bucket.negativeWidth}
+                height={bucket.height}
+                rx={4}
+                className="strategy-trigger-rank-chart-bar-negative"
+              >
+                <title>{buildRankDistributionTitle(bucket)}</title>
+              </rect>
+            ) : null}
+            {bucket.flatWidth > 0 ? (
+              <rect
+                x={bucket.x + bucket.positiveWidth + bucket.negativeWidth}
+                y={bucket.y}
+                width={bucket.flatWidth}
+                height={bucket.height}
+                rx={4}
+                className="strategy-trigger-rank-chart-bar-flat"
+              >
+                <title>{buildRankDistributionTitle(bucket)}</title>
+              </rect>
+            ) : null}
+            <text
+              x={Math.min(
+                geometry.plotRight + 8,
+                bucket.x +
+                  Math.max(bucket.width, bucket.count > 0 ? 2 : 0) +
+                  10,
+              )}
+              y={bucket.y + bucket.height / 2 + 4}
+              className="strategy-trigger-rank-chart-value"
+            >
+              {formatInteger(bucket.count)}
+            </text>
+          </g>
         ))}
-        {geometry.xLabels.map((label) => (
-          <text
-            key={`${label.value}-${label.x.toFixed(2)}`}
-            x={label.x}
-            y={292}
-            textAnchor="middle"
-            className="strategy-trigger-chart-axis strategy-trigger-chart-axis-bottom"
-          >
-            {label.value}
-          </text>
-        ))}
-        {geometry.totalBars.map((bar) => (
-          <rect
-            key={bar.key}
-            x={bar.x}
-            y={bar.y}
-            width={bar.width}
-            height={Math.max(bar.height, 1)}
-            rx={3}
-            className="strategy-trigger-chart-bar strategy-trigger-chart-bar-trigger"
-          >
-            <title>{buildChartTitle(bar.item)}</title>
-          </rect>
-        ))}
-        {geometry.topBars.map((bar) => (
-          <rect
-            key={bar.key}
-            x={bar.x}
-            y={bar.y}
-            width={bar.width}
-            height={Math.max(bar.height, 1)}
-            rx={3}
-            className="strategy-trigger-chart-bar strategy-trigger-chart-bar-top"
-          >
-            <title>{buildChartTitle(bar.item)}</title>
-          </rect>
-        ))}
-        <path d={geometry.linePath} className="strategy-trigger-chart-line" />
-        {geometry.dots.map((dot) => (
-          <circle
-            key={dot.key}
-            cx={dot.cx}
-            cy={dot.cy}
-            r={4.5}
-            className="strategy-trigger-chart-dot"
-          >
-            <title>{buildChartTitle(dot.item)}</title>
-          </circle>
-        ))}
+        <text
+          x={geometry.plotLeft}
+          y={geometry.plotBottom + 25}
+          className="strategy-trigger-rank-chart-axis strategy-trigger-rank-chart-axis-caption"
+        >
+          股票数量
+        </text>
       </svg>
+      <div className="strategy-trigger-rank-footnotes">
+        <span>最佳排名 {formatInteger(geometry.bestRank)}</span>
+        <span>最末排名 {formatInteger(geometry.worstRank)}</span>
+        <span>前10 {formatInteger(geometry.top10Count)}</span>
+        <span>前50 {formatInteger(geometry.top50Count)}</span>
+        <span>无排名 {formatInteger(geometry.unrankedCount)}</span>
+      </div>
     </div>
   );
 }
@@ -1446,7 +1590,9 @@ function StrategyDetailModal({
     `strategy-trigger-detail-modal-shell:${strategyName || "default"}`,
     [detailTradeDate, loading, error],
   );
-  const currentDateIndex = dateOptions.findIndex((item) => item === detailTradeDate);
+  const currentDateIndex = dateOptions.findIndex(
+    (item) => item === detailTradeDate,
+  );
   const previousTradeDate =
     currentDateIndex >= 0 && currentDateIndex < dateOptions.length - 1
       ? dateOptions[currentDateIndex + 1]
@@ -1464,15 +1610,10 @@ function StrategyDetailModal({
       >,
     [],
   );
-  const {
-    sortKey,
-    sortDirection,
-    sortedRows,
-    toggleSort,
-  } = useTableSort<TriggeredStockRow, TriggeredStockSortKey>(
-    detailData?.triggered_stocks ?? [],
-    stockSortDefinitions,
-  );
+  const { sortKey, sortDirection, sortedRows, toggleSort } = useTableSort<
+    TriggeredStockRow,
+    TriggeredStockSortKey
+  >(detailData?.triggered_stocks ?? [], stockSortDefinitions);
   const stocksTableWrapRef = useRouteScrollRegion<HTMLDivElement>(
     `strategy-trigger-detail-stocks:${strategyName || "default"}`,
     [detailTradeDate, sortedRows.length],
@@ -1516,7 +1657,10 @@ function StrategyDetailModal({
         <section className="strategy-trigger-card">
           <div className="strategy-trigger-section-head">
             <div>
-              <h3 className="strategy-trigger-subtitle" id="strategy-trigger-modal-title">
+              <h3
+                className="strategy-trigger-subtitle"
+                id="strategy-trigger-modal-title"
+              >
                 策略分析浮窗
               </h3>
               <p className="strategy-trigger-caption">
@@ -1530,7 +1674,9 @@ function StrategyDetailModal({
           ) : error ? (
             <div className="strategy-trigger-error">{error}</div>
           ) : !detailData ? (
-            <div className="strategy-trigger-empty">当前没有可展示的策略明细。</div>
+            <div className="strategy-trigger-empty">
+              当前没有可展示的策略明细。
+            </div>
           ) : (
             <div className="strategy-trigger-modal-content">
               <div className="strategy-trigger-summary-grid strategy-trigger-summary-grid-modal">
@@ -1548,11 +1694,17 @@ function StrategyDetailModal({
                 </div>
                 <div className="strategy-trigger-summary-item">
                   <span>触发次数</span>
-                  <strong>{formatInteger(selectedDailyRow?.trigger_count)}</strong>
+                  <strong>
+                    {formatInteger(selectedDailyRow?.trigger_count)}
+                  </strong>
                 </div>
                 <div className="strategy-trigger-summary-item">
                   <span>策略贡献度</span>
-                  <strong className={getSignedValueClassName(selectedDailyRow?.contribution_score)}>
+                  <strong
+                    className={getSignedValueClassName(
+                      selectedDailyRow?.contribution_score,
+                    )}
+                  >
                     {formatNumber(selectedDailyRow?.contribution_score)}
                   </strong>
                 </div>
@@ -1568,7 +1720,9 @@ function StrategyDetailModal({
                 </div>
                 <div className="strategy-trigger-summary-item">
                   <span>前100触发次数</span>
-                  <strong>{formatInteger(selectedDailyRow?.top100_trigger_count)}</strong>
+                  <strong>
+                    {formatInteger(selectedDailyRow?.top100_trigger_count)}
+                  </strong>
                 </div>
                 <div className="strategy-trigger-summary-item">
                   <span>覆盖率</span>
@@ -1576,7 +1730,9 @@ function StrategyDetailModal({
                 </div>
                 <div className="strategy-trigger-summary-item">
                   <span>中位触发次数</span>
-                  <strong>{formatNumber(selectedDailyRow?.median_trigger_count)}</strong>
+                  <strong>
+                    {formatNumber(selectedDailyRow?.median_trigger_count)}
+                  </strong>
                 </div>
                 <div className="strategy-trigger-summary-item">
                   <span>当日最优排名</span>
@@ -1588,21 +1744,27 @@ function StrategyDetailModal({
                 <section className="strategy-trigger-card strategy-trigger-card-analysis">
                   <div className="strategy-trigger-section-head">
                     <div>
-                      <h3 className="strategy-trigger-subtitle">策略走势</h3>
+                      <h3 className="strategy-trigger-subtitle">
+                        触发排名分布
+                      </h3>
                       <p className="strategy-trigger-caption">
                         {strategyName
-                          ? `${strategyName} · ${formatDateLabel(detailTradeDate)}`
+                          ? `${strategyName} · ${formatDateLabel(detailTradeDate)} · 按当日排名分桶`
                           : "未选择策略"}
                       </p>
                     </div>
                   </div>
-                  <StrategyAnalysisChart items={detailData.chart?.items ?? []} />
+                  <StrategyRankDistributionChart
+                    rows={detailData.triggered_stocks}
+                  />
                 </section>
 
                 <section className="strategy-trigger-card strategy-trigger-card-stocks">
                   <div className="strategy-trigger-section-head">
                     <div>
-                      <h3 className="strategy-trigger-subtitle">触发股票列表</h3>
+                      <h3 className="strategy-trigger-subtitle">
+                        触发股票列表
+                      </h3>
                       <p className="strategy-trigger-caption">
                         {strategyName
                           ? `${strategyName} · ${formatDateLabel(detailTradeDate)}`
@@ -1614,7 +1776,9 @@ function StrategyDetailModal({
                         <span>触发日期</span>
                         <select
                           value={detailTradeDate}
-                          onChange={(event) => onChangeTradeDate(event.target.value)}
+                          onChange={(event) =>
+                            onChangeTradeDate(event.target.value)
+                          }
                           disabled={loading || dateOptions.length === 0}
                         >
                           {dateOptions.map((item) => (
@@ -1641,7 +1805,9 @@ function StrategyDetailModal({
                         className="strategy-trigger-collapse-btn strategy-trigger-date-nav-btn"
                         disabled={!nextTradeDate || loading}
                         onClick={() =>
-                          nextTradeDate ? onChangeTradeDate(nextTradeDate) : undefined
+                          nextTradeDate
+                            ? onChangeTradeDate(nextTradeDate)
+                            : undefined
                         }
                       >
                         下一天
@@ -1662,7 +1828,10 @@ function StrategyDetailModal({
                         <thead>
                           <tr>
                             <th
-                              aria-sort={getAriaSort(sortKey === "rank", sortDirection)}
+                              aria-sort={getAriaSort(
+                                sortKey === "rank",
+                                sortDirection,
+                              )}
                             >
                               <TableSortButton
                                 label="当日排名"
@@ -1707,7 +1876,9 @@ function StrategyDetailModal({
                         </thead>
                         <tbody>
                           {sortedRows.map((row) => (
-                            <tr key={`${detailTradeDate}-${strategyName}-${row.ts_code}`}>
+                            <tr
+                              key={`${detailTradeDate}-${strategyName}-${row.ts_code}`}
+                            >
                               <td>{formatInteger(row.rank)}</td>
                               <td>{row.ts_code}</td>
                               <td>
@@ -1721,14 +1892,25 @@ function StrategyDetailModal({
                                   {row.name ?? row.ts_code}
                                 </DetailsLink>
                               </td>
-                              <td className={getSignedValueClassName(row.total_score)}>
+                              <td
+                                className={getSignedValueClassName(
+                                  row.total_score,
+                                )}
+                              >
                                 {formatNumber(row.total_score)}
                               </td>
-                              <td className={getSignedValueClassName(row.rule_score)}>
+                              <td
+                                className={getSignedValueClassName(
+                                  row.rule_score,
+                                )}
+                              >
                                 {formatNumber(row.rule_score)}
                               </td>
                               <td className="strategy-trigger-cell-concept">
-                                {formatConceptText(row.concept, excludedConcepts)}
+                                {formatConceptText(
+                                  row.concept,
+                                  excludedConcepts,
+                                )}
                               </td>
                             </tr>
                           ))}
@@ -1772,7 +1954,8 @@ export default function StrategyTriggerPage() {
         ? (parsed.sceneTableRows as SceneStatisticsTableRow[])
         : [],
       sceneName: typeof parsed.sceneName === "string" ? parsed.sceneName : "",
-      sceneError: typeof parsed.sceneError === "string" ? parsed.sceneError : "",
+      sceneError:
+        typeof parsed.sceneError === "string" ? parsed.sceneError : "",
       strategyName:
         typeof parsed.strategyName === "string" ? parsed.strategyName : "",
       analysisTradeDate:
@@ -1805,9 +1988,9 @@ export default function StrategyTriggerPage() {
     useState<SceneStatisticsPageData | null>(
       () => persistedState?.scenePageData ?? null,
     );
-  const [sceneTableRows, setSceneTableRows] = useState<SceneStatisticsTableRow[]>(
-    () => persistedState?.sceneTableRows ?? [],
-  );
+  const [sceneTableRows, setSceneTableRows] = useState<
+    SceneStatisticsTableRow[]
+  >(() => persistedState?.sceneTableRows ?? []);
   const [sceneName, setSceneName] = useState(
     () => persistedState?.sceneName ?? "",
   );
@@ -1953,7 +2136,9 @@ export default function StrategyTriggerPage() {
         fail_count: { value: (row) => row.fail_count },
         none_count: { value: (row) => row.none_count },
         scene_covered_count: { value: (row) => row.scene_covered_count },
-        scene_total_sample_count: { value: (row) => row.scene_total_sample_count },
+        scene_total_sample_count: {
+          value: (row) => row.scene_total_sample_count,
+        },
         scene_coverage_ratio: { value: (row) => row.scene_coverage_ratio },
         scene_rule_contribution_ratio: {
           value: (row) => row.scene_rule_contribution_ratio,
@@ -1978,7 +2163,10 @@ export default function StrategyTriggerPage() {
   );
   const sceneTableWrapRef = useRouteScrollRegion<HTMLDivElement>(
     "strategy-trigger-scene-table",
-    [sortedSceneRows.length, scenePageData?.resolved_analysis_trade_date ?? analysisTradeDate],
+    [
+      sortedSceneRows.length,
+      scenePageData?.resolved_analysis_trade_date ?? analysisTradeDate,
+    ],
   );
 
   useEffect(() => {
@@ -2087,9 +2275,7 @@ export default function StrategyTriggerPage() {
     }
   }
 
-  async function loadPage(
-    nextAnalysisTradeDate?: string,
-  ) {
+  async function loadPage(nextAnalysisTradeDate?: string) {
     setLoading(true);
     setError("");
 
@@ -2217,7 +2403,8 @@ export default function StrategyTriggerPage() {
         <h2 className="strategy-trigger-title">策略触发统计</h2>
         <div className="strategy-trigger-source-note">
           <span>
-            统计口径基于结果库 `rule_details / scene_details / score_summary` 与规则文件。
+            统计口径基于结果库 `rule_details / scene_details / score_summary`
+            与规则文件。
           </span>
         </div>
         <div className="strategy-trigger-form-grid">
@@ -2225,7 +2412,9 @@ export default function StrategyTriggerPage() {
             <span>分析日期</span>
             <select
               value={analysisTradeDate}
-              onChange={(event) => handleAnalysisTradeDateChange(event.target.value)}
+              onChange={(event) =>
+                handleAnalysisTradeDateChange(event.target.value)
+              }
               disabled={loading || analysisTradeDateOptions.length === 0}
             >
               {analysisTradeDateOptions.length === 0 ? (
@@ -2276,13 +2465,15 @@ export default function StrategyTriggerPage() {
         <div className="strategy-trigger-overview-layout">
           <div className="strategy-trigger-overview-main">
             <div className="strategy-trigger-overview-head">
-            <h3 className="strategy-trigger-subtitle">总体策略情况</h3>
-            <p className="strategy-trigger-caption">
-              小格子图每格代表一个自然日；红色表示强于平均，绿色表示弱于平均，灰色表示非交易日；右侧小K线展示日度差值。
-            </p>
+              <h3 className="strategy-trigger-subtitle">总体策略情况</h3>
+              <p className="strategy-trigger-caption">
+                小格子图每格代表一个自然日；红色表示强于平均，绿色表示弱于平均，灰色表示非交易日；右侧小K线展示日度差值。
+              </p>
             </div>
             {calendarMonths.length === 0 ? (
-              <div className="strategy-trigger-empty">暂无总体策略统计数据。</div>
+              <div className="strategy-trigger-empty">
+                暂无总体策略统计数据。
+              </div>
             ) : (
               <div
                 className="strategy-trigger-calendar"
@@ -2334,7 +2525,10 @@ export default function StrategyTriggerPage() {
                               .filter(Boolean)
                               .join(" ")}
                             title={buildHeatmapTitle(slot.cell, slot.label)}
-                            aria-label={buildHeatmapTitle(slot.cell, slot.label)}
+                            aria-label={buildHeatmapTitle(
+                              slot.cell,
+                              slot.label,
+                            )}
                             onClick={(event) => {
                               if (
                                 slot.compactDate === selectedOverviewDate &&
@@ -2397,7 +2591,9 @@ export default function StrategyTriggerPage() {
                             selectedOverviewSlot.cell.delta_level,
                           )}
                         >
-                          {formatSignedNumber(selectedOverviewSlot.cell.delta_level)}
+                          {formatSignedNumber(
+                            selectedOverviewSlot.cell.delta_level,
+                          )}
                         </strong>
                       </div>
                     ) : (
@@ -2420,7 +2616,9 @@ export default function StrategyTriggerPage() {
               </div>
               <div className="strategy-trigger-summary-item">
                 <span>历史平均水平</span>
-                <strong>{formatNumber(pageData?.overview?.average_level)}</strong>
+                <strong>
+                  {formatNumber(pageData?.overview?.average_level)}
+                </strong>
               </div>
               <div className="strategy-trigger-summary-item">
                 <span>最新当日水平</span>
@@ -2442,22 +2640,33 @@ export default function StrategyTriggerPage() {
             <h3 className="strategy-trigger-subtitle">Scene 触发统计</h3>
             <p className="strategy-trigger-caption">
               {formatDateLabel(
-                scenePageData?.resolved_analysis_trade_date ?? analysisTradeDate,
-              )} · 按 Scene 直出
+                scenePageData?.resolved_analysis_trade_date ??
+                  analysisTradeDate,
+              )}{" "}
+              · 按 Scene 直出
             </p>
           </div>
         </div>
-        {sceneError ? <div className="strategy-trigger-error">{sceneError}</div> : null}
+        {sceneError ? (
+          <div className="strategy-trigger-error">{sceneError}</div>
+        ) : null}
         {sceneLoading ? (
           <div className="strategy-trigger-empty">Scene 统计读取中...</div>
         ) : sortedSceneRows.length === 0 ? (
-          <div className="strategy-trigger-empty">该分析日期暂无 Scene 统计样本。</div>
+          <div className="strategy-trigger-empty">
+            该分析日期暂无 Scene 统计样本。
+          </div>
         ) : (
           <div className="strategy-trigger-table-wrap" ref={sceneTableWrapRef}>
             <table className="strategy-trigger-table strategy-trigger-table-scene">
               <thead>
                 <tr>
-                  <th aria-sort={getAriaSort(sceneSortKey === "scene_name", sceneSortDirection)}>
+                  <th
+                    aria-sort={getAriaSort(
+                      sceneSortKey === "scene_name",
+                      sceneSortDirection,
+                    )}
+                  >
                     <TableSortButton
                       label="Scene"
                       isActive={sceneSortKey === "scene_name"}
@@ -2466,7 +2675,12 @@ export default function StrategyTriggerPage() {
                       title="按 Scene 排序"
                     />
                   </th>
-                  <th aria-sort={getAriaSort(sceneSortKey === "confirm_count", sceneSortDirection)}>
+                  <th
+                    aria-sort={getAriaSort(
+                      sceneSortKey === "confirm_count",
+                      sceneSortDirection,
+                    )}
+                  >
                     <TableSortButton
                       label="confirm"
                       isActive={sceneSortKey === "confirm_count"}
@@ -2475,7 +2689,12 @@ export default function StrategyTriggerPage() {
                       title="按 confirm 样本数排序"
                     />
                   </th>
-                  <th aria-sort={getAriaSort(sceneSortKey === "trigger_count", sceneSortDirection)}>
+                  <th
+                    aria-sort={getAriaSort(
+                      sceneSortKey === "trigger_count",
+                      sceneSortDirection,
+                    )}
+                  >
                     <TableSortButton
                       label="trigger"
                       isActive={sceneSortKey === "trigger_count"}
@@ -2484,7 +2703,12 @@ export default function StrategyTriggerPage() {
                       title="按 trigger 样本数排序"
                     />
                   </th>
-                  <th aria-sort={getAriaSort(sceneSortKey === "observe_count", sceneSortDirection)}>
+                  <th
+                    aria-sort={getAriaSort(
+                      sceneSortKey === "observe_count",
+                      sceneSortDirection,
+                    )}
+                  >
                     <TableSortButton
                       label="observe"
                       isActive={sceneSortKey === "observe_count"}
@@ -2493,7 +2717,12 @@ export default function StrategyTriggerPage() {
                       title="按 observe 样本数排序"
                     />
                   </th>
-                  <th aria-sort={getAriaSort(sceneSortKey === "fail_count", sceneSortDirection)}>
+                  <th
+                    aria-sort={getAriaSort(
+                      sceneSortKey === "fail_count",
+                      sceneSortDirection,
+                    )}
+                  >
                     <TableSortButton
                       label="fail"
                       isActive={sceneSortKey === "fail_count"}
@@ -2502,7 +2731,12 @@ export default function StrategyTriggerPage() {
                       title="按 fail 样本数排序"
                     />
                   </th>
-                  <th aria-sort={getAriaSort(sceneSortKey === "none_count", sceneSortDirection)}>
+                  <th
+                    aria-sort={getAriaSort(
+                      sceneSortKey === "none_count",
+                      sceneSortDirection,
+                    )}
+                  >
                     <TableSortButton
                       label="none"
                       isActive={sceneSortKey === "none_count"}
@@ -2511,7 +2745,12 @@ export default function StrategyTriggerPage() {
                       title="按 none 样本数排序"
                     />
                   </th>
-                  <th aria-sort={getAriaSort(sceneSortKey === "scene_covered_count", sceneSortDirection)}>
+                  <th
+                    aria-sort={getAriaSort(
+                      sceneSortKey === "scene_covered_count",
+                      sceneSortDirection,
+                    )}
+                  >
                     <TableSortButton
                       label="已定级样本数"
                       isActive={sceneSortKey === "scene_covered_count"}
@@ -2520,16 +2759,28 @@ export default function StrategyTriggerPage() {
                       title="按已定级样本数排序"
                     />
                   </th>
-                  <th aria-sort={getAriaSort(sceneSortKey === "scene_total_sample_count", sceneSortDirection)}>
+                  <th
+                    aria-sort={getAriaSort(
+                      sceneSortKey === "scene_total_sample_count",
+                      sceneSortDirection,
+                    )}
+                  >
                     <TableSortButton
                       label="Scene样本总数"
                       isActive={sceneSortKey === "scene_total_sample_count"}
                       direction={sceneSortDirection}
-                      onClick={() => toggleSceneSort("scene_total_sample_count")}
+                      onClick={() =>
+                        toggleSceneSort("scene_total_sample_count")
+                      }
                       title="按 Scene 样本总数排序"
                     />
                   </th>
-                  <th aria-sort={getAriaSort(sceneSortKey === "scene_coverage_ratio", sceneSortDirection)}>
+                  <th
+                    aria-sort={getAriaSort(
+                      sceneSortKey === "scene_coverage_ratio",
+                      sceneSortDirection,
+                    )}
+                  >
                     <TableSortButton
                       label="Scene覆盖率"
                       isActive={sceneSortKey === "scene_coverage_ratio"}
@@ -2538,12 +2789,21 @@ export default function StrategyTriggerPage() {
                       title="按 Scene 覆盖率排序"
                     />
                   </th>
-                  <th aria-sort={getAriaSort(sceneSortKey === "scene_rule_contribution_ratio", sceneSortDirection)}>
+                  <th
+                    aria-sort={getAriaSort(
+                      sceneSortKey === "scene_rule_contribution_ratio",
+                      sceneSortDirection,
+                    )}
+                  >
                     <TableSortButton
                       label="scene贡献分占比"
-                      isActive={sceneSortKey === "scene_rule_contribution_ratio"}
+                      isActive={
+                        sceneSortKey === "scene_rule_contribution_ratio"
+                      }
                       direction={sceneSortDirection}
-                      onClick={() => toggleSceneSort("scene_rule_contribution_ratio")}
+                      onClick={() =>
+                        toggleSceneSort("scene_rule_contribution_ratio")
+                      }
                       title="按 scene贡献分占比排序"
                     />
                   </th>
@@ -2551,13 +2811,40 @@ export default function StrategyTriggerPage() {
               </thead>
               <tbody>
                 {sortedSceneRows.map((row) => (
-                  <tr key={`${scenePageData?.resolved_analysis_trade_date ?? analysisTradeDate}-${row.scene_name}`}>
+                  <tr
+                    key={`${scenePageData?.resolved_analysis_trade_date ?? analysisTradeDate}-${row.scene_name}`}
+                  >
                     <td>{row.scene_name}</td>
-                    <td>{formatStageCountWithShare(row.confirm_count, row.scene_covered_count)}</td>
-                    <td>{formatStageCountWithShare(row.trigger_count, row.scene_covered_count)}</td>
-                    <td>{formatStageCountWithShare(row.observe_count, row.scene_covered_count)}</td>
-                    <td>{formatStageCountWithShare(row.fail_count, row.scene_covered_count)}</td>
-                    <td>{formatStageCountWithShare(row.none_count, row.scene_total_sample_count)}</td>
+                    <td>
+                      {formatStageCountWithShare(
+                        row.confirm_count,
+                        row.scene_covered_count,
+                      )}
+                    </td>
+                    <td>
+                      {formatStageCountWithShare(
+                        row.trigger_count,
+                        row.scene_covered_count,
+                      )}
+                    </td>
+                    <td>
+                      {formatStageCountWithShare(
+                        row.observe_count,
+                        row.scene_covered_count,
+                      )}
+                    </td>
+                    <td>
+                      {formatStageCountWithShare(
+                        row.fail_count,
+                        row.scene_covered_count,
+                      )}
+                    </td>
+                    <td>
+                      {formatStageCountWithShare(
+                        row.none_count,
+                        row.scene_total_sample_count,
+                      )}
+                    </td>
                     <td>{formatInteger(row.scene_covered_count)}</td>
                     <td>{formatInteger(row.scene_total_sample_count)}</td>
                     <td>{formatPercent(row.scene_coverage_ratio)}</td>
@@ -2574,7 +2861,9 @@ export default function StrategyTriggerPage() {
         <div className="strategy-trigger-section-head">
           <div>
             <h3 className="strategy-trigger-subtitle">策略触发列表</h3>
-            <p className="strategy-trigger-caption">{formatDateLabel(analysisTradeDate)}</p>
+            <p className="strategy-trigger-caption">
+              {formatDateLabel(analysisTradeDate)}
+            </p>
           </div>
         </div>
         {rowsForAnalysisDate.length === 0 ? (
@@ -2728,7 +3017,10 @@ export default function StrategyTriggerPage() {
                           className="strategy-trigger-inline-btn strategy-trigger-inline-btn-name"
                           onClick={() => {
                             setStrategyName(row.rule_name);
-                            void openStrategyDetail(row.rule_name, analysisTradeDate);
+                            void openStrategyDetail(
+                              row.rule_name,
+                              analysisTradeDate,
+                            );
                           }}
                         >
                           {row.rule_name}
@@ -2736,7 +3028,11 @@ export default function StrategyTriggerPage() {
                       </td>
                       <td>{row.trigger_mode ?? "--"}</td>
                       <td>{formatInteger(row.trigger_count)}</td>
-                      <td className={getSignedValueClassName(row.contribution_score)}>
+                      <td
+                        className={getSignedValueClassName(
+                          row.contribution_score,
+                        )}
+                      >
                         {formatNumber(row.contribution_score)}
                       </td>
                       <td

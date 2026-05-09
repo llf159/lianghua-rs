@@ -41,6 +41,7 @@ const BASE_FIELDS = [
   'TOR',
   'TURNOVER_RATE',
   'RANK',
+  'SCORE',
   'ZHANG',
   'TOTAL_MV_YI',
 ]

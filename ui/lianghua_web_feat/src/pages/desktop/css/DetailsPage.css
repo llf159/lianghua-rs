@@ -616,7 +616,7 @@
   min-height: 0;
   padding: 2px 4px 6px;
   cursor: crosshair;
-  touch-action: none;
+  touch-action: pan-y;
   user-select: none;
   -webkit-user-select: none;
 }

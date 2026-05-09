@@ -940,26 +940,40 @@ fn inject_chart_indicator_rank_series(
 ) -> Result<(), String> {
     let len = row_data.trade_dates.len();
     let mut rank_series = vec![None; len];
+    let mut score_series = vec![None; len];
     if len == 0 {
         row_data.cols.insert("RANK".to_string(), rank_series);
+        row_data.cols.insert("SCORE".to_string(), score_series);
         return row_data.validate();
     }
 
     let Some(start_date) = row_data.trade_dates.first() else {
         row_data.cols.insert("RANK".to_string(), rank_series);
+        row_data.cols.insert("SCORE".to_string(), score_series);
         return row_data.validate();
     };
     let Some(end_date) = row_data.trade_dates.last() else {
         row_data.cols.insert("RANK".to_string(), rank_series);
+        row_data.cols.insert("SCORE".to_string(), score_series);
         return row_data.validate();
     };
     let rank_map = load_chart_indicator_rank_series_map(source_path, ts_code, start_date, end_date);
     for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
-        rank_series[index] = rank_map.get(trade_date).copied().flatten();
+        if let Some(values) = rank_map.get(trade_date) {
+            rank_series[index] = values.rank;
+            score_series[index] = values.score;
+        }
     }
 
     row_data.cols.insert("RANK".to_string(), rank_series);
+    row_data.cols.insert("SCORE".to_string(), score_series);
     row_data.validate()
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ChartIndicatorRankScoreValues {
+    rank: Option<f64>,
+    score: Option<f64>,
 }
 
 fn load_chart_indicator_rank_series_map(
@@ -967,7 +981,7 @@ fn load_chart_indicator_rank_series_map(
     ts_code: &str,
     start_date: &str,
     end_date: &str,
-) -> HashMap<String, Option<f64>> {
+) -> HashMap<String, ChartIndicatorRankScoreValues> {
     let result_db = result_db_path(source_path);
     if !result_db.exists() {
         return HashMap::new();
@@ -981,7 +995,7 @@ fn load_chart_indicator_rank_series_map(
     };
     let Ok(mut stmt) = conn.prepare(
         r#"
-        SELECT trade_date, rank
+        SELECT trade_date, rank, total_score
         FROM score_summary
         WHERE ts_code = ? AND trade_date >= ? AND trade_date <= ?
         "#,
@@ -1002,7 +1016,8 @@ fn load_chart_indicator_rank_series_map(
             .ok()
             .flatten()
             .map(|value| value as f64);
-        out.insert(trade_date, rank);
+        let score = row.get::<_, Option<f64>>(2).ok().flatten();
+        out.insert(trade_date, ChartIndicatorRankScoreValues { rank, score });
     }
     out
 }
@@ -1975,7 +1990,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use duckdb::Connection;
+    use duckdb::{Connection, params};
 
     use super::*;
 
@@ -2063,6 +2078,44 @@ mod tests {
                 .map(|row| row.key.as_str())
                 .collect::<Vec<_>>()),
             Some(vec!["ma2"])
+        );
+
+        fs::remove_dir_all(source_path).ok();
+    }
+
+    #[test]
+    fn query_kline_chart_indicators_can_use_rank_and_score() {
+        let conn = build_test_stock_data_conn();
+        let source_path = unique_temp_dir("details_chart_rank_score");
+        fs::create_dir_all(&source_path).expect("temp dir should be created");
+        write_rank_score_result_db(&source_path);
+        write_rank_score_chart_config(&source_path);
+
+        let payload = query_kline(
+            &conn,
+            source_path.to_str().expect("temp path should be utf8"),
+            "000001.SZ",
+            280,
+            None,
+        )
+        .expect("kline should query");
+
+        let items = payload.items.expect("items should exist");
+        assert_eq!(
+            items[0].indicators.get("rank_line"),
+            Some(&serde_json::json!(11.0))
+        );
+        assert_eq!(
+            items[0].indicators.get("score_line"),
+            Some(&serde_json::json!(88.5))
+        );
+        assert_eq!(
+            items[1].indicators.get("rank_line"),
+            Some(&serde_json::json!(7.0))
+        );
+        assert_eq!(
+            items[1].indicators.get("score_line"),
+            Some(&serde_json::json!(91.25))
         );
 
         fs::remove_dir_all(source_path).ok();
@@ -2190,6 +2243,64 @@ kind = "line"
 "##,
         )
         .expect("config should be written");
+    }
+
+    fn write_rank_score_chart_config(source_path: &std::path::Path) {
+        fs::write(
+            source_path.join("chart_indicators.toml"),
+            r##"
+version = 1
+
+[[panel]]
+key = "price"
+label = "Price"
+role = "main"
+kind = "candles"
+
+[[panel.series]]
+key = "rank_line"
+label = "Rank"
+expr = "RANK"
+kind = "line"
+
+[[panel.series]]
+key = "score_line"
+label = "Score"
+expr = "SCORE"
+kind = "line"
+"##,
+        )
+        .expect("config should be written");
+    }
+
+    fn write_rank_score_result_db(source_path: &std::path::Path) {
+        let conn = Connection::open(result_db_path(source_path.to_str().expect("utf8 path")))
+            .expect("result db should open");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE score_summary (
+                ts_code TEXT,
+                trade_date TEXT,
+                rank BIGINT,
+                total_score DOUBLE
+            );
+            "#,
+        )
+        .expect("score_summary should be created");
+        conn.execute(
+            "INSERT INTO score_summary VALUES (?, ?, ?, ?), (?, ?, ?, ?)",
+            params![
+                "000001.SZ",
+                "20240101",
+                11_i64,
+                88.5_f64,
+                "000001.SZ",
+                "20240102",
+                7_i64,
+                91.25_f64,
+            ],
+        )
+        .expect("rank score rows should be inserted");
     }
 
     fn write_ind_j_config(source_path: &std::path::Path) {

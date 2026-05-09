@@ -574,6 +574,8 @@ async fn run_strategy_paper_validation(
     board: Option<String>,
     buy_price_basis: String,
     slippage_pct: Option<f64>,
+    max_position_count: Option<usize>,
+    buy_selection_mode: Option<String>,
     buy_expression: String,
     sell_expression: String,
 ) -> Result<StrategyPaperValidationData, String> {
@@ -588,6 +590,8 @@ async fn run_strategy_paper_validation(
             board,
             buy_price_basis,
             slippage_pct,
+            max_position_count,
+            buy_selection_mode,
             buy_expression,
             sell_expression,
         )

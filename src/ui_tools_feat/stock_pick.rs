@@ -457,7 +457,11 @@ fn scope_hit_note(hit: &ScopeHit, scope_way: PickScopeWay) -> String {
     }
 }
 
-fn resolve_latest_trigger_trade_date(trade_dates: &[String], keep_from: usize, bs: &[bool]) -> Option<String> {
+fn resolve_latest_trigger_trade_date(
+    trade_dates: &[String],
+    keep_from: usize,
+    bs: &[bool],
+) -> Option<String> {
     if keep_from >= trade_dates.len() || trade_dates.len() != bs.len() {
         return None;
     }

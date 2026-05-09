@@ -102,6 +102,9 @@ const CHART_CURSOR_Y_MAX = 94;
 const CHART_TOOLTIP_LEFT_THRESHOLD = 62;
 const CHART_INTERVAL_PANEL_TOP_PERCENT = 18;
 const CHART_POINTER_DRAG_THRESHOLD = 6;
+const CHART_PINCH_MIN_DISTANCE = 12;
+const CHART_TOUCH_VERTICAL_SCROLL_RATIO = 1.2;
+const CHART_WHEEL_ZOOM_FACTOR = 0.0025;
 const CHART_INTERVAL_EDGE_HIT_SLOP_PX = 12;
 const CHART_TOUCH_FOCUS_HIT_SLOP = 24;
 const CHART_CYQ_PANEL_WIDTH_RATIO = 0.22;
@@ -174,6 +177,11 @@ type ChartPointerSnapshot = {
   visibleIndex: number;
 };
 
+type ChartAnchorSnapshot = {
+  visiblePosition: number;
+  visibleRatio: number;
+};
+
 type ChartMarkerOverlayPoint = {
   key: string;
   leftPercent: number;
@@ -204,6 +212,22 @@ type ChartDragState = {
   anchorAbsoluteIndex?: number;
   moveSelectionStartAbsoluteIndex?: number;
   moveSelectionEndAbsoluteIndex?: number;
+};
+
+type ChartTouchPointer = {
+  pointerId: number;
+  panelKey: string;
+  clientX: number;
+  clientY: number;
+};
+
+type ChartPinchState = {
+  panelKey: string;
+  pointerIds: [number, number];
+  startDistance: number;
+  startVisibleBarCount: number;
+  startAnchorAbsoluteIndex: number;
+  startAnchorRatio: number;
 };
 
 type ChartIntervalAdjustSide = "start" | "end";
@@ -1662,6 +1686,48 @@ function resolveVisibleIndexFromChartX(
   }
 
   return visibleIndex;
+}
+
+function resolveChartAnchorFromClientX(
+  viewport: HTMLDivElement,
+  clientX: number,
+  itemCount: number,
+  layoutSlotCount = itemCount,
+  reserveCyqPanelWidth = false,
+): ChartAnchorSnapshot | null {
+  if (itemCount <= 0 || layoutSlotCount <= 0) {
+    return null;
+  }
+
+  const svgRect = getChartViewportContentRect(viewport);
+  if (svgRect.width <= 0) {
+    return null;
+  }
+
+  const chartXPercent = clampNumber(
+    ((clientX - svgRect.left) / svgRect.width) * 100,
+    0,
+    99.9999,
+  );
+  const plotStartPercent = (CHART_MARGIN.left / CHART_VIEWBOX_WIDTH) * 100;
+  const plotEndPercent =
+    (getChartKlinePlotRight(reserveCyqPanelWidth) / CHART_VIEWBOX_WIDTH) * 100;
+  const plotXPercent = clampNumber(
+    (chartXPercent - plotStartPercent) / (plotEndPercent - plotStartPercent),
+    0,
+    1,
+  );
+  const leadingSlotCount = Math.max(layoutSlotCount - itemCount, 0);
+  const visiblePosition = clampNumber(
+    plotXPercent * layoutSlotCount - leadingSlotCount,
+    0,
+    Math.max(itemCount - 1, 0),
+  );
+
+  return {
+    visiblePosition,
+    visibleRatio: itemCount <= 1 ? 1 : visiblePosition / (itemCount - 1),
+  };
 }
 
 function buildChartPointerSnapshot(
@@ -3432,6 +3498,10 @@ export default function DetailsPage({
     useState<ResolvedIntervalRestore | null>(null);
   const [chartIntervalPanelOpen, setChartIntervalPanelOpen] = useState(false);
   const chartDragRef = useRef<ChartDragState | null>(null);
+  const chartTouchPointersRef = useRef<Map<number, ChartTouchPointer>>(
+    new Map(),
+  );
+  const chartPinchRef = useRef<ChartPinchState | null>(null);
   const chartCardRef = useRef<HTMLElement | null>(null);
   const overviewCardRef = useRef<HTMLElement | null>(null);
   const strategyGridRef = useRef<HTMLDivElement | null>(null);
@@ -4868,6 +4938,181 @@ export default function DetailsPage({
     );
   }
 
+  function setChartZoomAnchored(
+    nextCount: number,
+    anchorAbsoluteIndex: number,
+    anchorRatio: number,
+  ) {
+    if (totalChartItems === 0) {
+      return;
+    }
+
+    const resolvedCount = clampNumber(
+      Math.round(nextCount),
+      minVisibleBars,
+      totalChartItems,
+    );
+    const nextMaxVisibleStart = Math.max(totalChartItems - resolvedCount, 0);
+    const resolvedAnchorRatio = clampNumber(anchorRatio, 0, 1);
+    const nextVisibleStart = clampNumber(
+      Math.round(
+        anchorAbsoluteIndex - resolvedAnchorRatio * Math.max(resolvedCount - 1, 0),
+      ),
+      0,
+      nextMaxVisibleStart,
+    );
+
+    setVisibleBarCount(resolvedCount);
+    setVisibleStartIndex(nextVisibleStart);
+  }
+
+  function getChartTouchPointers(panelKey: string) {
+    return [...chartTouchPointersRef.current.values()].filter(
+      (pointer) => pointer.panelKey === panelKey,
+    );
+  }
+
+  function getChartPointerDistance(
+    firstPointer: ChartTouchPointer,
+    secondPointer: ChartTouchPointer,
+  ) {
+    return Math.hypot(
+      secondPointer.clientX - firstPointer.clientX,
+      secondPointer.clientY - firstPointer.clientY,
+    );
+  }
+
+  function startChartPinch(
+    panelKey: string,
+    viewport: HTMLDivElement,
+    pointers: ChartTouchPointer[],
+  ) {
+    if (totalChartItems === 0 || pointers.length < 2) {
+      return false;
+    }
+
+    const [firstPointer, secondPointer] = pointers;
+    const midpointX = (firstPointer.clientX + secondPointer.clientX) / 2;
+    const anchor = resolveChartAnchorFromClientX(
+      viewport,
+      midpointX,
+      chartItems.length,
+      chartLayoutSlotCount,
+      shouldReserveCyqPanelWidth,
+    );
+    if (!anchor) {
+      return false;
+    }
+
+    chartPinchRef.current = {
+      panelKey,
+      pointerIds: [firstPointer.pointerId, secondPointer.pointerId],
+      startDistance: Math.max(
+        getChartPointerDistance(firstPointer, secondPointer),
+        CHART_PINCH_MIN_DISTANCE,
+      ),
+      startVisibleBarCount: effectiveVisibleBarCount,
+      startAnchorAbsoluteIndex: effectiveVisibleStart + anchor.visiblePosition,
+      startAnchorRatio: anchor.visibleRatio,
+    };
+    chartDragRef.current = null;
+    setChartFocus(null);
+    setChartIntervalDraftSelection(null);
+    setChartIntervalPanelOpen(false);
+    return true;
+  }
+
+  function updateChartPinchZoom(event: ReactPointerEvent<HTMLDivElement>) {
+    const pinchState = chartPinchRef.current;
+    if (!pinchState || !pinchState.pointerIds.includes(event.pointerId)) {
+      return false;
+    }
+
+    const [firstPointerId, secondPointerId] = pinchState.pointerIds;
+    const firstPointer = chartTouchPointersRef.current.get(firstPointerId);
+    const secondPointer = chartTouchPointersRef.current.get(secondPointerId);
+    if (!firstPointer || !secondPointer) {
+      chartPinchRef.current = null;
+      return true;
+    }
+
+    const distance = Math.max(
+      getChartPointerDistance(firstPointer, secondPointer),
+      CHART_PINCH_MIN_DISTANCE,
+    );
+    const scale = distance / pinchState.startDistance;
+    if (!Number.isFinite(scale) || scale <= 0) {
+      return true;
+    }
+
+    setChartZoomAnchored(
+      pinchState.startVisibleBarCount / scale,
+      pinchState.startAnchorAbsoluteIndex,
+      pinchState.startAnchorRatio,
+    );
+    return true;
+  }
+
+  function zoomChartFromWheel(
+    viewport: HTMLDivElement,
+    clientX: number,
+    deltaY: number,
+  ) {
+    const anchor = resolveChartAnchorFromClientX(
+      viewport,
+      clientX,
+      chartItems.length,
+      chartLayoutSlotCount,
+      shouldReserveCyqPanelWidth,
+    );
+    if (!anchor) {
+      return false;
+    }
+
+    setChartZoomAnchored(
+      effectiveVisibleBarCount * Math.exp(deltaY * CHART_WHEEL_ZOOM_FACTOR),
+      effectiveVisibleStart + anchor.visiblePosition,
+      anchor.visibleRatio,
+    );
+    return true;
+  }
+
+  useEffect(() => {
+    const chartCard = chartCardRef.current;
+    if (!chartCard) {
+      return;
+    }
+
+    function handleNativeChartWheel(event: WheelEvent) {
+      if (!event.ctrlKey && !event.metaKey) {
+        return;
+      }
+
+      const targetElement =
+        event.target instanceof Element ? event.target : null;
+      const viewport =
+        targetElement?.closest<HTMLDivElement>(".details-chart-viewport") ??
+        null;
+      if (!viewport || !chartCard.contains(viewport)) {
+        return;
+      }
+
+      event.preventDefault();
+      if (totalChartItems === 0) {
+        return;
+      }
+
+      zoomChartFromWheel(viewport, event.clientX, event.deltaY);
+    }
+
+    chartCard.addEventListener("wheel", handleNativeChartWheel, {
+      passive: false,
+    });
+    return () => {
+      chartCard.removeEventListener("wheel", handleNativeChartWheel);
+    };
+  });
+
   function buildChartFocus(
     panelKey: string,
     viewport: HTMLDivElement,
@@ -5011,6 +5256,27 @@ export default function DetailsPage({
       return;
     }
 
+    if (event.pointerType === "touch") {
+      chartTouchPointersRef.current.set(event.pointerId, {
+        pointerId: event.pointerId,
+        panelKey,
+        clientX: event.clientX,
+        clientY: event.clientY,
+      });
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } catch {
+        // Ignore browsers that do not support pointer capture for this target.
+      }
+
+      const touchPointers = getChartTouchPointers(panelKey);
+      if (touchPointers.length >= 2) {
+        event.preventDefault();
+        startChartPinch(panelKey, event.currentTarget, touchPointers.slice(0, 2));
+        return;
+      }
+    }
+
     const isTouchPointer = event.pointerType !== "mouse";
     let anchorAbsoluteIndex: number | undefined;
     let moveSelectionStartAbsoluteIndex: number | undefined;
@@ -5150,6 +5416,22 @@ export default function DetailsPage({
     panelKey: string,
     event: ReactPointerEvent<HTMLDivElement>,
   ) {
+    if (event.pointerType === "touch") {
+      const trackedPointer = chartTouchPointersRef.current.get(event.pointerId);
+      if (trackedPointer) {
+        chartTouchPointersRef.current.set(event.pointerId, {
+          ...trackedPointer,
+          clientX: event.clientX,
+          clientY: event.clientY,
+        });
+      }
+
+      if (updateChartPinchZoom(event)) {
+        event.preventDefault();
+        return;
+      }
+    }
+
     const dragState = chartDragRef.current;
     if (!dragState) {
       if (event.pointerType !== "mouse" || !chartFocus?.pinned) {
@@ -5178,10 +5460,28 @@ export default function DetailsPage({
       return;
     }
 
-    const moveDistance = Math.hypot(
-      event.clientX - dragState.startClientX,
-      event.clientY - dragState.startClientY,
-    );
+    const moveX = event.clientX - dragState.startClientX;
+    const moveY = event.clientY - dragState.startClientY;
+    const absMoveX = Math.abs(moveX);
+    const absMoveY = Math.abs(moveY);
+    if (
+      event.pointerType === "touch" &&
+      !dragState.moved &&
+      absMoveY >= CHART_POINTER_DRAG_THRESHOLD &&
+      absMoveY > absMoveX * CHART_TOUCH_VERTICAL_SCROLL_RATIO
+    ) {
+      if (
+        dragState.mode === "interval-select" ||
+        dragState.mode === "interval-adjust-start" ||
+        dragState.mode === "interval-adjust-end"
+      ) {
+        setChartIntervalDraftSelection(null);
+      }
+      clearChartPointerState(event);
+      return;
+    }
+
+    const moveDistance = Math.hypot(moveX, moveY);
     if (!dragState.moved && moveDistance >= CHART_POINTER_DRAG_THRESHOLD) {
       dragState.moved = true;
     }
@@ -5192,7 +5492,7 @@ export default function DetailsPage({
       }
 
       const deltaBars = Math.round(
-        (event.clientX - dragState.startClientX) * dragState.barsPerPixel,
+        moveX * dragState.barsPerPixel,
       );
       const nextVisibleStart = clampNumber(
         dragState.startVisibleStart - deltaBars,
@@ -5288,16 +5588,14 @@ export default function DetailsPage({
   }
 
   function clearChartPointerState(event: ReactPointerEvent<HTMLDivElement>) {
-    const dragState = chartDragRef.current;
-    if (dragState?.pointerId === event.pointerId) {
-      try {
-        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-          event.currentTarget.releasePointerCapture(event.pointerId);
-        }
-      } catch {
-        // Ignore stale pointer capture state during cleanup.
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
       }
+    } catch {
+      // Ignore stale pointer capture state during cleanup.
     }
+    chartTouchPointersRef.current.delete(event.pointerId);
     chartDragRef.current = null;
   }
 
@@ -5305,6 +5603,14 @@ export default function DetailsPage({
     panelKey: string,
     event: ReactPointerEvent<HTMLDivElement>,
   ) {
+    const pinchState = chartPinchRef.current;
+    if (pinchState?.pointerIds.includes(event.pointerId)) {
+      event.preventDefault();
+      chartPinchRef.current = null;
+      clearChartPointerState(event);
+      return;
+    }
+
     const dragState = chartDragRef.current;
     clearChartPointerState(event);
 
@@ -5453,6 +5759,9 @@ export default function DetailsPage({
     _panelKey: string,
     event: ReactPointerEvent<HTMLDivElement>,
   ) {
+    if (chartPinchRef.current?.pointerIds.includes(event.pointerId)) {
+      chartPinchRef.current = null;
+    }
     if (
       chartDragRef.current?.mode === "interval-select" ||
       chartDragRef.current?.mode === "interval-adjust-start" ||

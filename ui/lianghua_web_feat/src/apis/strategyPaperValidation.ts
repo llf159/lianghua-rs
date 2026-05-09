@@ -8,6 +8,8 @@ export type StrategyPaperValidationDefaultsData = {
   index_ts_code: string
   buy_price_basis: string
   slippage_pct: number
+  max_position_count: number
+  buy_selection_mode: string
 }
 
 export type StrategyPaperValidationSummaryData = {
@@ -63,6 +65,8 @@ export type StrategyPaperValidationData = {
   test_stock_name?: string | null
   buy_price_basis: string
   slippage_pct: number
+  max_position_count: number
+  buy_selection_mode: string
   buy_expression: string
   sell_expression: string
   summary: StrategyPaperValidationSummaryData
@@ -89,6 +93,8 @@ export type StrategyPaperValidationQuery = {
   board?: string
   buyPriceBasis: string
   slippagePct?: number
+  maxPositionCount?: number
+  buySelectionMode?: string
   buyExpression: string
   sellExpression: string
 }

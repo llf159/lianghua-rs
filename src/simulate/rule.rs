@@ -1922,7 +1922,10 @@ mod tests {
         assert_eq!(full_samples.metrics.points[0].trade_date, "20240102");
         assert_eq!(full_samples.metrics.points[0].sample_count, 2);
         assert_opt_close(full_samples.metrics.points[0].avg_rule_score, Some(0.75));
-        assert_opt_close(full_samples.metrics.points[0].avg_residual_return, Some(3.0));
+        assert_opt_close(
+            full_samples.metrics.points[0].avg_residual_return,
+            Some(3.0),
+        );
         assert_opt_close(full_samples.metrics.points[0].top_bottom_spread, Some(2.0));
         assert_opt_close(full_samples.metrics.points[0].ic, Some(1.0));
         assert_eq!(full_samples.metrics.points[1].trade_date, "20240103");
