@@ -7,7 +7,10 @@ use std::time;
 // use std::fs::File;
 // use std::io::{BufWriter, Write};
 
-use crate::data::{RowData, ScoreRule};
+use crate::data::{
+    RowData, ScoreRule,
+    duckdb_compat::{open_with_retry, with_db_write_lock},
+};
 use crate::expr::eval::{Runtime, Value};
 use crate::expr::parser::{Parser, lex_all};
 use crate::scoring::{CachedRule, RuleScoreSeries, SceneScoreSeries, TieBreakWay};
@@ -120,7 +123,7 @@ impl ScoreSummary {
 
     pub fn write_db(db_path: &str, rows: &[ScoreSummary]) -> Result<(), String> {
         let mut conn =
-            Connection::open(db_path).map_err(|e| format!("summary数据库连接失败:{e}"))?;
+            open_with_retry(db_path).map_err(|e| format!("summary数据库连接失败:{e}"))?;
         let tx = conn
             .transaction()
             .map_err(|e| format!("创建数据库事务失败:{e}"))?;
@@ -193,7 +196,7 @@ impl ScoreDetails {
 
     pub fn write_db(db_path: &str, rows: &[ScoreDetails]) -> Result<(), String> {
         let mut conn =
-            Connection::open(db_path).map_err(|e| format!("details数据库连接失败:{e}"))?;
+            open_with_retry(db_path).map_err(|e| format!("details数据库连接失败:{e}"))?;
         let tx = conn
             .transaction()
             .map_err(|e| format!("事务创建失败:{e}"))?;
@@ -281,6 +284,10 @@ impl SceneDetails {
 }
 
 pub fn init_result_db(db_path: &Path) -> Result<(), String> {
+    with_db_write_lock(db_path, || init_result_db_inner(db_path))
+}
+
+fn init_result_db_inner(db_path: &Path) -> Result<(), String> {
     let db_file = Path::new(db_path);
     if let Some(parent_dir) = db_file.parent() {
         if !parent_dir.as_os_str().is_empty() {
@@ -288,7 +295,7 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
         }
     }
 
-    let conn = Connection::open(db_path).map_err(|e| format!("打开数据库失败:{e}"))?;
+    let conn = open_with_retry(db_path).map_err(|e| format!("打开数据库失败:{e}"))?;
 
     ensure_result_table_schema(&conn, SCORE_SUMMARY_TABLE)?;
     ensure_result_table_schema(&conn, RULE_DETAILS_TABLE)?;
@@ -959,9 +966,31 @@ pub fn write_score_batches_from_channel(
     end_date: &str,
     rx: Receiver<ScoreWriteMessage>,
 ) -> Result<ScoreWriteProfile, String> {
+    with_db_write_lock(db_path, move || {
+        write_score_batches_from_channel_inner(
+            db_path,
+            source_db_path,
+            adj_type,
+            tie_break,
+            start_date,
+            end_date,
+            rx,
+        )
+    })
+}
+
+fn write_score_batches_from_channel_inner(
+    db_path: &str,
+    source_db_path: Option<&str>,
+    adj_type: &str,
+    tie_break: TieBreakWay,
+    start_date: &str,
+    end_date: &str,
+    rx: Receiver<ScoreWriteMessage>,
+) -> Result<ScoreWriteProfile, String> {
     let total_started_at = time::Instant::now();
     let mut profile = ScoreWriteProfile::default();
-    let mut conn = Connection::open(db_path).map_err(|e| format!("结果库连接失败:{e}"))?;
+    let mut conn = open_with_retry(db_path).map_err(|e| format!("结果库连接失败:{e}"))?;
 
     let drop_indexes_started_at = time::Instant::now();
     drop_result_db_indexes(&conn)?;

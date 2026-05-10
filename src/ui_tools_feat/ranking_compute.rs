@@ -1,13 +1,12 @@
 use std::{collections::HashSet, path::Path, time::Instant};
 
-use duckdb::Connection;
 use serde::Serialize;
 
 use crate::{
     data::{
         concept_performance_data::rebuild_concept_performance_all, cyq::CyqConfig,
-        cyq_data::rebuild_cyq_all, cyq_db_path, load_trade_date_list, result_db_path,
-        source_db_path,
+        cyq_data::rebuild_cyq_all, cyq_db_path, duckdb_compat::open_read_compatible,
+        load_trade_date_list, result_db_path, source_db_path,
     },
     scoring::{
         RankTiebreakProfile, TieBreakWay, build_rank_tiebreak,
@@ -205,7 +204,8 @@ fn query_trade_date_range(
     let db_path_str = db_path
         .to_str()
         .ok_or_else(|| format!("{file_name} 路径不是有效 UTF-8"))?;
-    let conn = Connection::open(db_path_str).map_err(|e| format!("打开 {file_name} 失败: {e}"))?;
+    let conn =
+        open_read_compatible(db_path_str).map_err(|e| format!("打开 {file_name} 失败: {e}"))?;
     let table_exists = conn
         .query_row(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
@@ -285,7 +285,7 @@ fn query_next_trade_date_after(
         .to_str()
         .ok_or_else(|| "原始库路径不是有效 UTF-8".to_string())?;
     let conn =
-        Connection::open(db_path_str).map_err(|e| format!("打开 stock_data.db 失败: {e}"))?;
+        open_read_compatible(db_path_str).map_err(|e| format!("打开 stock_data.db 失败: {e}"))?;
     let table_exists = conn
         .query_row(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'stock_data'",
@@ -317,7 +317,8 @@ fn query_distinct_trade_dates(
     let db_path_str = db_path
         .to_str()
         .ok_or_else(|| format!("{file_name} 路径不是有效 UTF-8"))?;
-    let conn = Connection::open(db_path_str).map_err(|e| format!("打开 {file_name} 失败: {e}"))?;
+    let conn =
+        open_read_compatible(db_path_str).map_err(|e| format!("打开 {file_name} 失败: {e}"))?;
     let table_exists = conn
         .query_row(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
@@ -359,7 +360,8 @@ fn query_table_row_count(db_path: &Path, file_name: &str, table_name: &str) -> R
     let db_path_str = db_path
         .to_str()
         .ok_or_else(|| format!("{file_name} 路径不是有效 UTF-8"))?;
-    let conn = Connection::open(db_path_str).map_err(|e| format!("打开 {file_name} 失败: {e}"))?;
+    let conn =
+        open_read_compatible(db_path_str).map_err(|e| format!("打开 {file_name} 失败: {e}"))?;
     let table_exists = conn
         .query_row(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
@@ -386,7 +388,7 @@ fn query_cyq_factor(db_path: &Path) -> Result<Option<u64>, String> {
     let db_path_str = db_path
         .to_str()
         .ok_or_else(|| "cyq.db 路径不是有效 UTF-8".to_string())?;
-    let conn = Connection::open(db_path_str).map_err(|e| format!("打开 cyq.db 失败: {e}"))?;
+    let conn = open_read_compatible(db_path_str).map_err(|e| format!("打开 cyq.db 失败: {e}"))?;
     let table_exists = conn
         .query_row(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'cyq_snapshot'",

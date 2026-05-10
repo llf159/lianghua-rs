@@ -2,6 +2,7 @@ pub mod concept_performance_data;
 pub mod cyq;
 pub mod cyq_data;
 pub mod download_data;
+pub mod duckdb_compat;
 pub mod scoring_data;
 pub mod simulate;
 
@@ -13,6 +14,8 @@ use std::{
 
 use duckdb::{Connection, params};
 use serde::{Deserialize, Deserializer, de};
+
+use duckdb_compat::open_read_compatible;
 
 use crate::expr::parser::{Expr, Stmt, Stmts};
 
@@ -349,7 +352,8 @@ impl DataReader {
         let source_db_str = source_db
             .to_str()
             .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-        let conn = Connection::open(source_db_str).map_err(|e| format!("数据库连接错误:{e}"))?;
+        let conn =
+            open_read_compatible(source_db_str).map_err(|e| format!("数据库连接错误:{e}"))?;
 
         let mut sql_to_colsname = conn
             .prepare("DESCRIBE stock_data")
