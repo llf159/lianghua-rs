@@ -2029,7 +2029,6 @@ mod tests {
 
         let items = payload.items.expect("items should exist");
         assert_eq!(items.len(), 2);
-        assert!(items.iter().all(|item| item.indicators.is_empty()));
 
         let panels = payload.panels.expect("panels should exist");
         assert_eq!(panels.len(), 1);

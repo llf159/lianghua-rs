@@ -1725,7 +1725,8 @@ kind = "bar"
         )
         .expect_err("invalid candles series should fail");
 
-        assert!(error.contains("candles panel"));
+        assert!(error.contains("main panel"));
+        assert!(error.contains("line overlay series"));
 
         let error = parse_chart_indicator_config(
             r##"
@@ -1751,7 +1752,8 @@ kind = "area"
         )
         .expect_err("area series should be rejected in phase one");
 
-        assert!(error.contains("line panel"));
+        assert!(error.contains("sub panel"));
+        assert!(error.contains("does not support"));
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {

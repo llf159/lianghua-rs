@@ -459,6 +459,9 @@ struct ValidationSeedRule {
 pub struct MarketRankItem {
     pub name: String,
     pub value: f64,
+    pub ts_code: Option<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -467,11 +470,14 @@ pub struct MarketAnalysisSnapshot {
     pub concept_top: Vec<MarketRankItem>,
     pub industry_top: Vec<MarketRankItem>,
     pub gain_top: Vec<MarketRankItem>,
+    pub sub_interval_gain_top: Vec<MarketRankItem>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct MarketAnalysisData {
     pub lookback_period: usize,
+    pub stock_rank_limit: usize,
+    pub sub_interval_period: usize,
     pub latest_trade_date: Option<String>,
     pub resolved_reference_trade_date: Option<String>,
     pub board_options: Vec<String>,
@@ -486,6 +492,36 @@ pub struct MarketContributorItem {
     pub name: Option<String>,
     pub industry: Option<String>,
     pub contribution_pct: f64,
+}
+
+fn market_rank_item(name: String, value: f64) -> MarketRankItem {
+    MarketRankItem {
+        name,
+        value,
+        ts_code: None,
+        start_date: None,
+        end_date: None,
+    }
+}
+
+fn market_stock_rank_item(
+    stock_name_map: &HashMap<String, String>,
+    ts_code: String,
+    value: f64,
+    start_date: Option<String>,
+    end_date: Option<String>,
+) -> MarketRankItem {
+    let name = stock_name_map
+        .get(&ts_code)
+        .cloned()
+        .unwrap_or_else(|| ts_code.clone());
+    MarketRankItem {
+        name: format!("{} ({})", name, ts_code),
+        value,
+        ts_code: Some(ts_code),
+        start_date,
+        end_date,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -2981,8 +3017,16 @@ pub fn get_market_analysis(
     board: Option<String>,
     exclude_st_board: Option<bool>,
     min_listed_trade_days: Option<usize>,
+    stock_rank_limit: Option<usize>,
+    sub_interval_period: Option<usize>,
 ) -> Result<MarketAnalysisData, String> {
     let lookback_period = lookback_period.unwrap_or(20).max(1);
+    let stock_rank_limit = stock_rank_limit.unwrap_or(20).clamp(1, 200);
+    let sub_interval_period = if lookback_period >= 3 {
+        sub_interval_period.unwrap_or(3).max(3).min(lookback_period)
+    } else {
+        3
+    };
     let min_listed_trade_days =
         min_listed_trade_days.unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS);
 
@@ -3015,6 +3059,8 @@ pub fn get_market_analysis(
     let Some(ref_date) = resolved_reference_trade_date.clone() else {
         return Ok(MarketAnalysisData {
             lookback_period,
+            stock_rank_limit,
+            sub_interval_period,
             latest_trade_date,
             resolved_reference_trade_date: None,
             board_options,
@@ -3024,12 +3070,14 @@ pub fn get_market_analysis(
                 concept_top: Vec::new(),
                 industry_top: Vec::new(),
                 gain_top: Vec::new(),
+                sub_interval_gain_top: Vec::new(),
             },
             daily: MarketAnalysisSnapshot {
                 trade_date: None,
                 concept_top: Vec::new(),
                 industry_top: Vec::new(),
                 gain_top: Vec::new(),
+                sub_interval_gain_top: Vec::new(),
             },
         });
     };
@@ -3065,6 +3113,8 @@ pub fn get_market_analysis(
     if dates.is_empty() {
         return Ok(MarketAnalysisData {
             lookback_period,
+            stock_rank_limit,
+            sub_interval_period,
             latest_trade_date,
             resolved_reference_trade_date: Some(ref_date.clone()),
             board_options,
@@ -3074,12 +3124,14 @@ pub fn get_market_analysis(
                 concept_top: Vec::new(),
                 industry_top: Vec::new(),
                 gain_top: Vec::new(),
+                sub_interval_gain_top: Vec::new(),
             },
             daily: MarketAnalysisSnapshot {
                 trade_date: Some(ref_date),
                 concept_top: Vec::new(),
                 industry_top: Vec::new(),
                 gain_top: Vec::new(),
+                sub_interval_gain_top: Vec::new(),
             },
         });
     }
@@ -3118,7 +3170,7 @@ pub fn get_market_analysis(
         let name: String = row.get(0).map_err(|e| format!("读取概念名失败: {e}"))?;
         let value: Option<f64> = row.get(1).map_err(|e| format!("读取概念值失败: {e}"))?;
         if let Some(value) = value.filter(|v| v.is_finite()) {
-            interval_concept_top.push(MarketRankItem { name, value });
+            interval_concept_top.push(market_rank_item(name, value));
         }
     }
 
@@ -3167,7 +3219,7 @@ pub fn get_market_analysis(
             if !value.is_finite() {
                 return None;
             }
-            Some(MarketRankItem { name, value })
+            Some(market_rank_item(name, value))
         })
         .collect::<Vec<_>>();
     interval_board_top.sort_by(|a, b| {
@@ -3195,7 +3247,7 @@ pub fn get_market_analysis(
     let mut interval_gain_rows = interval_gain_stmt
         .query(params![&interval_start, &interval_end])
         .map_err(|e| format!("执行涨幅区间榜 SQL 失败: {e}"))?;
-    let mut interval_gain_acc: HashMap<String, (f64, f64)> = HashMap::new();
+    let mut interval_gain_acc: HashMap<String, Vec<(String, f64)>> = HashMap::new();
     while let Some(row) = interval_gain_rows
         .next()
         .map_err(|e| format!("读取涨幅区间榜失败: {e}"))?
@@ -3218,29 +3270,28 @@ pub fn get_market_analysis(
         }
         interval_gain_acc
             .entry(ts_code)
-            .and_modify(|entry| {
-                entry.1 = close_price;
-            })
-            .or_insert((close_price, close_price));
+            .or_default()
+            .push((trade_date, close_price));
     }
     let mut interval_gain_top = interval_gain_acc
-        .into_iter()
-        .filter_map(|(ts_code, (start_close, end_close))| {
-            if start_close <= f64::EPSILON {
+        .iter()
+        .filter_map(|(ts_code, rows)| {
+            let (start_date, start_close) = rows.first()?;
+            let (end_date, end_close) = rows.last()?;
+            if *start_close <= f64::EPSILON {
                 return None;
             }
-            let value = (end_close / start_close - 1.0) * 100.0;
+            let value = (*end_close / *start_close - 1.0) * 100.0;
             if !value.is_finite() {
                 return None;
             }
-            let name = stock_name_map
-                .get(&ts_code)
-                .cloned()
-                .unwrap_or(ts_code.clone());
-            Some(MarketRankItem {
-                name: format!("{} ({})", name, ts_code),
+            Some(market_stock_rank_item(
+                &stock_name_map,
+                ts_code.clone(),
                 value,
-            })
+                Some(start_date.clone()),
+                Some(end_date.clone()),
+            ))
         })
         .collect::<Vec<_>>();
     interval_gain_top.sort_by(|a, b| {
@@ -3249,7 +3300,57 @@ pub fn get_market_analysis(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.name.cmp(&b.name))
     });
-    interval_gain_top.truncate(20);
+    interval_gain_top.truncate(stock_rank_limit);
+
+    let mut sub_interval_gain_top = if dates.len() >= sub_interval_period {
+        interval_gain_acc
+            .iter()
+            .filter_map(|(ts_code, rows)| {
+                if rows.len() < sub_interval_period {
+                    return None;
+                }
+                let mut best: Option<(f64, String, String)> = None;
+                for window in rows.windows(sub_interval_period) {
+                    let Some((start_date, start_close)) = window.first() else {
+                        continue;
+                    };
+                    let Some((end_date, end_close)) = window.last() else {
+                        continue;
+                    };
+                    if *start_close <= f64::EPSILON {
+                        continue;
+                    }
+                    let value = (end_close / start_close - 1.0) * 100.0;
+                    if !value.is_finite() {
+                        continue;
+                    }
+                    let should_replace = best
+                        .as_ref()
+                        .is_none_or(|(best_value, _, _)| value > *best_value);
+                    if should_replace {
+                        best = Some((value, start_date.clone(), end_date.clone()));
+                    }
+                }
+                let (value, start_date, end_date) = best?;
+                Some(market_stock_rank_item(
+                    &stock_name_map,
+                    ts_code.clone(),
+                    value,
+                    Some(start_date),
+                    Some(end_date),
+                ))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    sub_interval_gain_top.sort_by(|a, b| {
+        b.value
+            .partial_cmp(&a.value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    sub_interval_gain_top.truncate(stock_rank_limit);
 
     let daily_concept_sql = r#"
         SELECT concept, TRY_CAST(performance_pct AS DOUBLE)
@@ -3274,7 +3375,7 @@ pub fn get_market_analysis(
         let name: String = row.get(0).map_err(|e| format!("读取概念名失败: {e}"))?;
         let value: Option<f64> = row.get(1).map_err(|e| format!("读取概念值失败: {e}"))?;
         if let Some(value) = value.filter(|v| v.is_finite()) {
-            daily_concept_top.push(MarketRankItem { name, value });
+            daily_concept_top.push(market_rank_item(name, value));
         }
     }
 
@@ -3321,7 +3422,7 @@ pub fn get_market_analysis(
             if !value.is_finite() {
                 return None;
             }
-            Some(MarketRankItem { name, value })
+            Some(market_rank_item(name, value))
         })
         .collect::<Vec<_>>();
     daily_board_top.sort_by(|a, b| {
@@ -3367,21 +3468,22 @@ pub fn get_market_analysis(
             continue;
         }
 
-        let name = stock_name_map
-            .get(&ts_code)
-            .cloned()
-            .unwrap_or(ts_code.clone());
-        daily_gain_top.push(MarketRankItem {
-            name: format!("{} ({})", name, ts_code),
+        daily_gain_top.push(market_stock_rank_item(
+            &stock_name_map,
+            ts_code,
             value,
-        });
-        if daily_gain_top.len() >= 20 {
+            Some(ref_date.clone()),
+            Some(ref_date.clone()),
+        ));
+        if daily_gain_top.len() >= stock_rank_limit {
             break;
         }
     }
 
     Ok(MarketAnalysisData {
         lookback_period,
+        stock_rank_limit,
+        sub_interval_period,
         latest_trade_date,
         resolved_reference_trade_date: Some(ref_date.clone()),
         board_options,
@@ -3391,12 +3493,14 @@ pub fn get_market_analysis(
             concept_top: interval_concept_top,
             industry_top: interval_board_top,
             gain_top: interval_gain_top,
+            sub_interval_gain_top,
         },
         daily: MarketAnalysisSnapshot {
             trade_date: Some(ref_date),
             concept_top: daily_concept_top,
             industry_top: daily_board_top,
             gain_top: daily_gain_top,
+            sub_interval_gain_top: Vec::new(),
         },
     })
 }

@@ -81,6 +81,15 @@ function extractTsCodeFromRankName(value: string) {
   return matched?.[1] ?? null;
 }
 
+function getRankItemTsCode(item: { name: string; ts_code?: string | null }) {
+  return item.ts_code?.trim() || extractTsCodeFromRankName(item.name);
+}
+
+function getRankItemDisplayName(item: { name: string; ts_code?: string | null }) {
+  const tsCode = getRankItemTsCode(item);
+  return tsCode ? item.name.replace(/\s*\(\d{6}\.[A-Z]{2}\)\s*$/, "") : item.name;
+}
+
 function isNonNull<T>(value: T | null): value is T {
   return value !== null;
 }
@@ -93,6 +102,8 @@ export default function MarketAnalysisPage() {
   const { excludedConcepts, excludeStBoard } = useConceptExclusions();
   const [sourcePath, setSourcePath] = useState(() => readStoredSourcePath());
   const [lookbackPeriod, setLookbackPeriod] = useState("20");
+  const [stockRankLimit, setStockRankLimit] = useState("20");
+  const [subIntervalPeriod, setSubIntervalPeriod] = useState("3");
   const [minListedTradeDays, setMinListedTradeDays] = useState("60");
   const [referenceDateInput, setReferenceDateInput] = useState("");
   const [selectedBoard, setSelectedBoard] = useState("");
@@ -160,6 +171,8 @@ export default function MarketAnalysisPage() {
         board: selectedBoard.trim() || undefined,
         excludeStBoard: excludeStBoard || undefined,
         minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
+        stockRankLimit: Math.max(1, Number(stockRankLimit) || 1),
+        subIntervalPeriod: Math.max(3, Number(subIntervalPeriod) || 3),
       });
       setResult(data);
       setContributionResult(null);
@@ -230,18 +243,41 @@ export default function MarketAnalysisPage() {
     const sourcePathTrimmed = sourcePath.trim() || undefined;
     return result.interval.gain_top
       .map((item) => {
-        const tsCode = extractTsCodeFromRankName(item.name);
+        const tsCode = getRankItemTsCode(item);
         if (!tsCode) {
           return null;
         }
-        const displayName = item.name.replace(/\s*\(\d{6}\.[A-Z]{2}\)\s*$/, "");
         return {
           tsCode,
           tradeDate,
-          intervalStartTradeDate,
-          intervalEndTradeDate,
+          intervalStartTradeDate: item.start_date ?? intervalStartTradeDate,
+          intervalEndTradeDate: item.end_date ?? intervalEndTradeDate,
           sourcePath: sourcePathTrimmed,
-          name: displayName,
+          name: getRankItemDisplayName(item),
+        };
+      })
+      .filter(isNonNull);
+  }, [result, sourcePath]);
+
+  const subIntervalGainNavigationItems = useMemo(() => {
+    if (!result) {
+      return [];
+    }
+    const tradeDate = result.resolved_reference_trade_date ?? undefined;
+    const sourcePathTrimmed = sourcePath.trim() || undefined;
+    return result.interval.sub_interval_gain_top
+      .map((item) => {
+        const tsCode = getRankItemTsCode(item);
+        if (!tsCode) {
+          return null;
+        }
+        return {
+          tsCode,
+          tradeDate,
+          intervalStartTradeDate: item.start_date ?? undefined,
+          intervalEndTradeDate: item.end_date ?? result.resolved_reference_trade_date ?? undefined,
+          sourcePath: sourcePathTrimmed,
+          name: getRankItemDisplayName(item),
         };
       })
       .filter(isNonNull);
@@ -255,16 +291,15 @@ export default function MarketAnalysisPage() {
     const sourcePathTrimmed = sourcePath.trim() || undefined;
     return result.daily.gain_top
       .map((item) => {
-        const tsCode = extractTsCodeFromRankName(item.name);
+        const tsCode = getRankItemTsCode(item);
         if (!tsCode) {
           return null;
         }
-        const displayName = item.name.replace(/\s*\(\d{6}\.[A-Z]{2}\)\s*$/, "");
         return {
           tsCode,
           tradeDate,
           sourcePath: sourcePathTrimmed,
-          name: displayName,
+          name: getRankItemDisplayName(item),
         };
       })
       .filter(isNonNull);
@@ -327,6 +362,25 @@ export default function MarketAnalysisPage() {
             />
           </label>
           <label className="scene-layer-field">
+            <span>个股榜数量</span>
+            <input
+              type="number"
+              min="1"
+              max="200"
+              value={stockRankLimit}
+              onChange={(event) => setStockRankLimit(event.target.value)}
+            />
+          </label>
+          <label className="scene-layer-field">
+            <span>子区间天数（&gt;=3）</span>
+            <input
+              type="number"
+              min="3"
+              value={subIntervalPeriod}
+              onChange={(event) => setSubIntervalPeriod(event.target.value)}
+            />
+          </label>
+          <label className="scene-layer-field">
             <span>板块筛选（应用到个股榜）</span>
             <select value={selectedBoard} onChange={(event) => setSelectedBoard(event.target.value)}>
               <option value="">全部板块</option>
@@ -372,6 +426,14 @@ export default function MarketAnalysisPage() {
               <div className="scene-layer-summary-item scene-layer-summary-item-kpi">
                 <span>区间</span>
                 <strong>{formatMarketDateRange(result.interval.trade_date)}</strong>
+              </div>
+              <div className="scene-layer-summary-item scene-layer-summary-item-kpi">
+                <span>个股榜数量</span>
+                <strong>{result.stock_rank_limit} 只</strong>
+              </div>
+              <div className="scene-layer-summary-item scene-layer-summary-item-kpi">
+                <span>子区间</span>
+                <strong>{result.sub_interval_period} 日</strong>
               </div>
             </div>
 
@@ -480,8 +542,8 @@ export default function MarketAnalysisPage() {
                     </thead>
                     <tbody>
                       {result.interval.gain_top.map((item, index) => {
-                        const tsCode = extractTsCodeFromRankName(item.name);
-                        const displayName = tsCode ? item.name.replace(/\s*\(\d{6}\.[A-Z]{2}\)\s*$/, "") : item.name;
+                        const tsCode = getRankItemTsCode(item);
+                        const displayName = getRankItemDisplayName(item);
                         return (
                           <tr key={`interval-gain-${item.name}`}>
                             <td>{index + 1}</td>
@@ -492,8 +554,8 @@ export default function MarketAnalysisPage() {
                                   className="scene-layer-market-stock-link"
                                   tsCode={splitTsCode(tsCode)}
                                   tradeDate={result.resolved_reference_trade_date ?? undefined}
-                                  intervalStartTradeDate={parseMarketDateRange(result.interval.trade_date).startDate}
-                                  intervalEndTradeDate={parseMarketDateRange(result.interval.trade_date).endDate ?? result.resolved_reference_trade_date ?? undefined}
+                                  intervalStartTradeDate={item.start_date ?? parseMarketDateRange(result.interval.trade_date).startDate}
+                                  intervalEndTradeDate={item.end_date ?? parseMarketDateRange(result.interval.trade_date).endDate ?? result.resolved_reference_trade_date ?? undefined}
                                   sourcePath={sourcePath.trim() || undefined}
                                   title={`查看 ${item.name} 详情`}
                                   navigationItems={intervalGainNavigationItems}
@@ -504,6 +566,55 @@ export default function MarketAnalysisPage() {
                                 displayName
                               )}
                             </td>
+                            <td className={getPercentToneClass(item.value)}>{formatPercent(item.value)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section className="scene-layer-market-panel scene-layer-market-gainers-panel">
+                <h3>子区间个股涨幅榜（{result.sub_interval_period} 日）</h3>
+                <div className="scene-layer-contrib-table-wrap">
+                  <table className="scene-layer-contrib-table market-analysis-gain-table">
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>代码</th>
+                        <th>名称</th>
+                        <th>区间</th>
+                        <th>涨幅</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {result.interval.sub_interval_gain_top.map((item, index) => {
+                        const tsCode = getRankItemTsCode(item);
+                        const displayName = getRankItemDisplayName(item);
+                        return (
+                          <tr key={`sub-interval-gain-${item.name}-${item.start_date ?? ""}-${item.end_date ?? ""}`}>
+                            <td>{index + 1}</td>
+                            <td>{tsCode ?? "--"}</td>
+                            <td>
+                              {tsCode ? (
+                                <DetailsLink
+                                  className="scene-layer-market-stock-link"
+                                  tsCode={splitTsCode(tsCode)}
+                                  tradeDate={result.resolved_reference_trade_date ?? undefined}
+                                  intervalStartTradeDate={item.start_date ?? undefined}
+                                  intervalEndTradeDate={item.end_date ?? result.resolved_reference_trade_date ?? undefined}
+                                  sourcePath={sourcePath.trim() || undefined}
+                                  title={`查看 ${item.name} 详情`}
+                                  navigationItems={subIntervalGainNavigationItems}
+                                >
+                                  {displayName}
+                                </DetailsLink>
+                              ) : (
+                                displayName
+                              )}
+                            </td>
+                            <td>{item.start_date && item.end_date ? `${formatDateLabel(item.start_date)} ~ ${formatDateLabel(item.end_date)}` : "--"}</td>
                             <td className={getPercentToneClass(item.value)}>{formatPercent(item.value)}</td>
                           </tr>
                         );
@@ -527,8 +638,8 @@ export default function MarketAnalysisPage() {
                     </thead>
                     <tbody>
                       {result.daily.gain_top.map((item, index) => {
-                        const tsCode = extractTsCodeFromRankName(item.name);
-                        const displayName = tsCode ? item.name.replace(/\s*\(\d{6}\.[A-Z]{2}\)\s*$/, "") : item.name;
+                        const tsCode = getRankItemTsCode(item);
+                        const displayName = getRankItemDisplayName(item);
                         return (
                           <tr key={`daily-gain-${item.name}`}>
                             <td>{index + 1}</td>

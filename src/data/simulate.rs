@@ -197,6 +197,14 @@ mod tests {
     use crate::expr::eval::Value;
     use std::collections::HashMap;
 
+    fn assert_close(left: Option<f64>, right: Option<f64>) {
+        match (left, right) {
+            (Some(a), Some(b)) => assert!((a - b).abs() < 1e-9, "left={a}, right={b}"),
+            (None, None) => {}
+            _ => panic!("left={left:?}, right={right:?}"),
+        }
+    }
+
     fn sample_row_data() -> crate::data::RowData {
         let mut cols = HashMap::new();
         cols.insert("O".to_string(), vec![Some(9.8), Some(10.0)]);
@@ -239,14 +247,14 @@ mod tests {
             row_data.cols["PRE_CLOSE"].last().copied().flatten(),
             Some(10.2)
         );
-        assert_eq!(row_data.cols["C"].last().copied().flatten(), Some(10.71));
-        assert_eq!(row_data.cols["V"].last().copied().flatten(), Some(180.0));
-        assert_eq!(row_data.cols["TOR"].last().copied().flatten(), Some(1.8));
-        assert_eq!(
+        assert_close(row_data.cols["C"].last().copied().flatten(), Some(10.71));
+        assert_close(row_data.cols["V"].last().copied().flatten(), Some(180.0));
+        assert_close(row_data.cols["TOR"].last().copied().flatten(), Some(1.8));
+        assert_close(
             row_data.cols["TURNOVER_RATE"].last().copied().flatten(),
             Some(1.8)
         );
-        assert_eq!(
+        assert_close(
             row_data.cols["ZHANG"].last().copied().flatten(),
             Some(0.095)
         );
@@ -277,8 +285,8 @@ mod tests {
             _ => panic!("missing volume series"),
         };
 
-        assert_eq!(close_series.last().copied().flatten(), Some(9.996));
-        assert_eq!(volume_series.last().copied().flatten(), Some(60.0));
+        assert_close(close_series.last().copied().flatten(), Some(9.996));
+        assert_close(volume_series.last().copied().flatten(), Some(60.0));
     }
 
     #[test]
@@ -295,14 +303,14 @@ mod tests {
 
         let row_data = build_simulated_row_data(sample_row_data(), &input).expect("simulate row");
 
-        assert_eq!(row_data.cols["O"].last().copied().flatten(), Some(10.404));
-        assert_eq!(row_data.cols["C"].last().copied().flatten(), Some(10.71612));
-        assert_eq!(
+        assert_close(row_data.cols["O"].last().copied().flatten(), Some(10.404));
+        assert_close(row_data.cols["C"].last().copied().flatten(), Some(10.71612));
+        assert_close(
             row_data.cols["H"].last().copied().flatten(),
             Some(10.8768618)
         );
-        assert_eq!(row_data.cols["L"].last().copied().flatten(), Some(10.19592));
-        assert_eq!(
+        assert_close(row_data.cols["L"].last().copied().flatten(), Some(10.19592));
+        assert_close(
             row_data.cols["PCT_CHG"].last().copied().flatten(),
             Some(5.060000000000006)
         );

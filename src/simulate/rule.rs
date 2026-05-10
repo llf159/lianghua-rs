@@ -1731,8 +1731,8 @@ mod tests {
             PathBuf::from(source_dir).join("stock_list.csv"),
             concat!(
                 "ts_code,symbol,name,area,industry,list_date,trade_date,total_share,float_share,total_mv,circ_mv,fullname,enname,cnspell,market,exchange,curr_type,list_status,delist_date,is_hs,act_name,act_ent_type\n",
-                "000001.SZ,,样本股A,,main,20230001,,,,,,,,,,,,,,,\n",
-                "000002.SZ,,样本股B,,main,20230001,,,,,,,,,,,,,,,\n"
+                "000001.SZ,,样本股A,,main,20230001,,,,,,,,,,,,,,,,\n",
+                "000002.SZ,,样本股B,,main,20230001,,,,,,,,,,,,,,,,\n"
             ),
         )
         .expect("write stock_list.csv");

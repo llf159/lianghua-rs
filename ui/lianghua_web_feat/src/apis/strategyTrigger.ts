@@ -341,6 +341,9 @@ export type RuleExpressionValidationData = {
 export type MarketRankItem = {
   name: string
   value: number
+  ts_code?: string | null
+  start_date?: string | null
+  end_date?: string | null
 }
 
 export type MarketAnalysisSnapshot = {
@@ -348,10 +351,13 @@ export type MarketAnalysisSnapshot = {
   concept_top: MarketRankItem[]
   industry_top: MarketRankItem[]
   gain_top: MarketRankItem[]
+  sub_interval_gain_top: MarketRankItem[]
 }
 
 export type MarketAnalysisData = {
   lookback_period: number
+  stock_rank_limit: number
+  sub_interval_period: number
   latest_trade_date?: string | null
   resolved_reference_trade_date?: string | null
   board_options: string[]
@@ -497,6 +503,8 @@ export async function getMarketAnalysis(query: {
   board?: string
   excludeStBoard?: boolean
   minListedTradeDays?: number
+  stockRankLimit?: number
+  subIntervalPeriod?: number
 }) {
   return invoke<MarketAnalysisData>('get_market_analysis', query)
 }

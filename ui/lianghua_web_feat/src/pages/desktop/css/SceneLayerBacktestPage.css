@@ -763,6 +763,11 @@
   gap: 14px;
 }
 
+.market-analysis-page .scene-layer-form-grid-market {
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  align-items: end;
+}
+
 .market-analysis-filter-card {
   border-color: #e3e8f1;
   background: linear-gradient(180deg, #ffffff 0%, #fbfcff 100%);
@@ -909,6 +914,31 @@
 .market-analysis-main-card .scene-layer-contrib-table td:last-child {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+.market-analysis-main-card .market-analysis-gain-table th:nth-child(4),
+.market-analysis-main-card .market-analysis-gain-table td:nth-child(4) {
+  width: 190px;
+  color: #475569;
+  font-size: 13px;
+}
+
+.market-analysis-main-card .market-analysis-gain-table th:last-child,
+.market-analysis-main-card .market-analysis-gain-table td:last-child {
+  width: 92px;
+}
+
+@media (max-width: 900px) {
+  .market-analysis-main-card .scene-layer-contrib-table th,
+  .market-analysis-main-card .scene-layer-contrib-table td {
+    padding: 8px;
+    font-size: 13px;
+  }
+
+  .market-analysis-main-card .market-analysis-gain-table th:nth-child(4),
+  .market-analysis-main-card .market-analysis-gain-table td:nth-child(4) {
+    width: 150px;
+  }
 }
 
 .scene-layer-modal-card .scene-layer-contrib-table-wrap {
