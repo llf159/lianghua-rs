@@ -4,9 +4,9 @@ use duckdb::{Connection, params_from_iter};
 
 use super::rule::{
     RuleLayerConfig, RuleLayerSamplePoint, build_rule_layer_runtime_cache,
-    collect_all_rule_samples_from_cache,
+    build_rule_layer_runtime_cache_from_summary_rows, collect_all_rule_samples_from_cache,
 };
-use crate::data::result_db_path;
+use crate::data::{result_db_path, scoring_data::ScoreSummary};
 
 const EPS: f64 = 1e-12;
 const DEFAULT_LAYER_COUNT: usize = 5;
@@ -184,6 +184,42 @@ pub fn calc_rank_layer_metrics_from_db(
         &rule_layer_config,
     )?;
     let triggered_score_map = load_total_score_map(source_dir, &input.start_date, &input.end_date)?;
+    let all_samples = collect_all_rule_samples_from_cache(
+        &runtime_cache,
+        &triggered_score_map,
+        &rule_layer_config,
+    )?;
+
+    calc_rank_layer_metrics(&all_samples, &input.layer_config)
+}
+
+pub fn calc_rank_layer_metrics_from_score_rows(
+    source_conn: &Connection,
+    source_dir: &str,
+    input: &RankLayerFromDbInput,
+    score_summary_rows: &[ScoreSummary],
+) -> Result<RankLayerMetrics, String> {
+    input.validate()?;
+
+    let rule_layer_config = input.layer_config.as_rule_layer_config();
+    let runtime_cache = build_rule_layer_runtime_cache_from_summary_rows(
+        source_conn,
+        source_dir,
+        score_summary_rows,
+        &input.stock_adj_type,
+        &input.index_ts_code,
+        input.index_beta,
+        input.concept_beta,
+        input.industry_beta,
+        &input.start_date,
+        &input.end_date,
+        &rule_layer_config,
+    )?;
+    let triggered_score_map = build_total_score_map_from_summary_rows(
+        score_summary_rows,
+        &input.start_date,
+        &input.end_date,
+    );
     let all_samples = collect_all_rule_samples_from_cache(
         &runtime_cache,
         &triggered_score_map,
@@ -449,6 +485,29 @@ fn load_total_score_map(
     }
 
     Ok(out)
+}
+
+fn build_total_score_map_from_summary_rows(
+    score_summary_rows: &[ScoreSummary],
+    start_date: &str,
+    end_date: &str,
+) -> HashMap<String, HashMap<String, f64>> {
+    let mut out = HashMap::<String, HashMap<String, f64>>::new();
+    for row in score_summary_rows {
+        if row.trade_date.as_str() < start_date
+            || row.trade_date.as_str() > end_date
+            || row.ts_code.trim().is_empty()
+            || row.trade_date.trim().is_empty()
+            || !row.total_score.is_finite()
+        {
+            continue;
+        }
+
+        out.entry(row.ts_code.clone())
+            .or_default()
+            .insert(row.trade_date.clone(), row.total_score);
+    }
+    out
 }
 
 fn mean(values: &[f64]) -> Option<f64> {

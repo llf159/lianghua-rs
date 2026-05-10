@@ -11,6 +11,7 @@ use super::{
 use crate::data::{
     concept_performance_data::{load_concept_trend_series, load_industry_trend_series},
     load_stock_list, load_ths_concepts_named_map, result_db_path,
+    scoring_data::SceneDetails,
 };
 
 const EPS: f64 = 1e-12;
@@ -216,6 +217,95 @@ pub fn calc_all_scene_layer_metrics_from_db(
             .entry(row.ts_code.clone())
             .or_default()
             .push(row);
+    }
+
+    let residual_map_cache = build_residual_map_cache(
+        source_conn,
+        source_dir,
+        unique_ts_codes.into_iter().collect(),
+        &concept_map,
+        &industry_map,
+        &ResidualCacheInput {
+            stock_adj_type,
+            index_ts_code,
+            index_beta,
+            concept_beta,
+            industry_beta,
+            start_date,
+            end_date,
+            backtest_period: layer_config.backtest_period,
+            min_listed_trade_days: layer_config.min_listed_trade_days,
+        },
+    )?;
+
+    let mut out = Vec::with_capacity(scene_names.len());
+    for scene_name in scene_names {
+        let rows_by_ts = rows_by_scene.remove(scene_name).unwrap_or_default();
+        let samples = collect_scene_samples(rows_by_ts, &residual_map_cache)?;
+        let metrics = calc_scene_layer_metrics(&samples, layer_config)?;
+        out.push((scene_name.clone(), metrics));
+    }
+
+    Ok(out)
+}
+
+pub fn calc_all_scene_layer_metrics_from_rows(
+    source_conn: &Connection,
+    source_dir: &str,
+    scene_names: &[String],
+    scene_detail_rows: &[SceneDetails],
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &SceneLayerConfig,
+) -> Result<Vec<(String, SceneLayerMetrics)>, String> {
+    validate_scene_common_input(
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+
+    if scene_names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let scene_name_set: HashSet<&str> = scene_names.iter().map(String::as_str).collect();
+    let concept_map = load_most_related_concept_map(source_dir)?;
+    let industry_map = load_stock_industry_map(source_dir)?;
+    let mut rows_by_scene: HashMap<String, HashMap<String, Vec<SceneDbRow>>> = HashMap::new();
+    let mut unique_ts_codes = HashSet::new();
+
+    for row in scene_detail_rows {
+        if !scene_name_set.contains(row.scene_name.as_str())
+            || row.trade_date.as_str() < start_date
+            || row.trade_date.as_str() > end_date
+            || row.ts_code.trim().is_empty()
+            || row.trade_date.trim().is_empty()
+        {
+            continue;
+        }
+        validate_direction(&row.direction)?;
+        unique_ts_codes.insert(row.ts_code.clone());
+        rows_by_scene
+            .entry(row.scene_name.clone())
+            .or_default()
+            .entry(row.ts_code.clone())
+            .or_default()
+            .push(SceneDbRow {
+                scene_name: row.scene_name.clone(),
+                ts_code: row.ts_code.clone(),
+                trade_date: row.trade_date.clone(),
+                scene_state: row.stage.clone().unwrap_or_default(),
+            });
     }
 
     let residual_map_cache = build_residual_map_cache(

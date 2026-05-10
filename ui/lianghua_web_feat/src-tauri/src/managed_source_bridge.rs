@@ -27,6 +27,7 @@ const IMPORT_PROGRESS_STEP_BYTES: u64 = 32 * 1024 * 1024;
 const STRATEGY_BACKUP_DIR_NAME: &str = "strategy_backups";
 const STRATEGY_RULE_FILE_NAME: &str = "score_rule.toml";
 const STRATEGY_META_FILE_NAME: &str = "meta.json";
+const STRATEGY_DIFF_CONTEXT_LINES: usize = 4;
 const EMPTY_STRATEGY_TEMPLATE: &str = r#"version = 1
 
 [[scene]]
@@ -125,6 +126,25 @@ pub struct ManagedStrategyBundleExportResult {
     exported_path: String,
     backup_count: usize,
     includes_active_strategy: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedStrategyBackupDiffLine {
+    kind: String,
+    backup_line: Option<usize>,
+    active_line: Option<usize>,
+    text: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedStrategyBackupDiff {
+    backup_id: String,
+    backup_label: String,
+    active_label: String,
+    changed_line_count: usize,
+    lines: Vec<ManagedStrategyBackupDiffLine>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -432,6 +452,228 @@ fn write_strategy_backup_meta(
             meta_path.display()
         )
     })
+}
+
+fn files_have_same_content(left: &Path, right: &Path) -> Result<bool, String> {
+    let left_metadata = std::fs::metadata(left).map_err(|error| {
+        format!(
+            "读取策略文件元数据失败: path={}, err={error}",
+            left.display()
+        )
+    })?;
+    let right_metadata = std::fs::metadata(right).map_err(|error| {
+        format!(
+            "读取策略备份元数据失败: path={}, err={error}",
+            right.display()
+        )
+    })?;
+    if left_metadata.len() != right_metadata.len() {
+        return Ok(false);
+    }
+
+    let mut left_file = std::fs::File::open(left)
+        .map_err(|error| format!("读取策略文件失败: path={}, err={error}", left.display()))?;
+    let mut right_file = std::fs::File::open(right).map_err(|error| {
+        format!(
+            "读取策略备份文件失败: path={}, err={error}",
+            right.display()
+        )
+    })?;
+    let mut left_buffer = [0u8; 8192];
+    let mut right_buffer = [0u8; 8192];
+
+    loop {
+        let left_len = left_file
+            .read(&mut left_buffer)
+            .map_err(|error| error.to_string())?;
+        let right_len = right_file
+            .read(&mut right_buffer)
+            .map_err(|error| error.to_string())?;
+        if left_len != right_len {
+            return Ok(false);
+        }
+        if left_len == 0 {
+            return Ok(true);
+        }
+        if left_buffer[..left_len] != right_buffer[..right_len] {
+            return Ok(false);
+        }
+    }
+}
+
+fn has_equivalent_strategy_backup(source_root: &Path, active_file_path: &Path) -> Result<bool, String> {
+    let backup_root = managed_strategy_backup_root(source_root);
+    if !backup_root.exists() {
+        return Ok(false);
+    }
+
+    for entry in std::fs::read_dir(&backup_root).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if !entry.file_type().map_err(|error| error.to_string())?.is_dir() {
+            continue;
+        }
+        let backup_file_path = entry.path().join(STRATEGY_RULE_FILE_NAME);
+        if !backup_file_path.is_file() {
+            continue;
+        }
+        match files_have_same_content(active_file_path, &backup_file_path) {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(error) => log::warn!("failed to compare strategy backup content: {error}"),
+        }
+    }
+
+    Ok(false)
+}
+
+fn lcs_value(table: &[usize], width: usize, row: usize, col: usize) -> usize {
+    table[row * width + col]
+}
+
+fn build_strategy_backup_diff_lines(
+    backup_text: &str,
+    active_text: &str,
+) -> (Vec<ManagedStrategyBackupDiffLine>, usize) {
+    let backup_lines: Vec<&str> = backup_text.lines().collect();
+    let active_lines: Vec<&str> = active_text.lines().collect();
+    let rows = backup_lines.len();
+    let cols = active_lines.len();
+    let width = cols + 1;
+    let mut lcs = vec![0usize; (rows + 1) * (cols + 1)];
+
+    for row in (0..rows).rev() {
+        for col in (0..cols).rev() {
+            lcs[row * width + col] = if backup_lines[row] == active_lines[col] {
+                1 + lcs_value(&lcs, width, row + 1, col + 1)
+            } else {
+                lcs_value(&lcs, width, row + 1, col).max(lcs_value(&lcs, width, row, col + 1))
+            };
+        }
+    }
+
+    let mut diff_lines = Vec::new();
+    let mut changed_line_count = 0usize;
+    let mut backup_index = 0usize;
+    let mut active_index = 0usize;
+
+    while backup_index < rows && active_index < cols {
+        if backup_lines[backup_index] == active_lines[active_index] {
+            diff_lines.push(ManagedStrategyBackupDiffLine {
+                kind: "context".to_string(),
+                backup_line: Some(backup_index + 1),
+                active_line: Some(active_index + 1),
+                text: backup_lines[backup_index].to_string(),
+            });
+            backup_index += 1;
+            active_index += 1;
+        } else if lcs_value(&lcs, width, backup_index + 1, active_index)
+            >= lcs_value(&lcs, width, backup_index, active_index + 1)
+        {
+            diff_lines.push(ManagedStrategyBackupDiffLine {
+                kind: "backup".to_string(),
+                backup_line: Some(backup_index + 1),
+                active_line: None,
+                text: backup_lines[backup_index].to_string(),
+            });
+            changed_line_count += 1;
+            backup_index += 1;
+        } else {
+            diff_lines.push(ManagedStrategyBackupDiffLine {
+                kind: "active".to_string(),
+                backup_line: None,
+                active_line: Some(active_index + 1),
+                text: active_lines[active_index].to_string(),
+            });
+            changed_line_count += 1;
+            active_index += 1;
+        }
+    }
+
+    while backup_index < rows {
+        diff_lines.push(ManagedStrategyBackupDiffLine {
+            kind: "backup".to_string(),
+            backup_line: Some(backup_index + 1),
+            active_line: None,
+            text: backup_lines[backup_index].to_string(),
+        });
+        changed_line_count += 1;
+        backup_index += 1;
+    }
+
+    while active_index < cols {
+        diff_lines.push(ManagedStrategyBackupDiffLine {
+            kind: "active".to_string(),
+            backup_line: None,
+            active_line: Some(active_index + 1),
+            text: active_lines[active_index].to_string(),
+        });
+        changed_line_count += 1;
+        active_index += 1;
+    }
+
+    (
+        compact_strategy_backup_diff_lines(diff_lines, STRATEGY_DIFF_CONTEXT_LINES),
+        changed_line_count,
+    )
+}
+
+fn compact_strategy_backup_diff_lines(
+    lines: Vec<ManagedStrategyBackupDiffLine>,
+    context_line_count: usize,
+) -> Vec<ManagedStrategyBackupDiffLine> {
+    if lines.is_empty() {
+        return vec![ManagedStrategyBackupDiffLine {
+            kind: "omitted".to_string(),
+            backup_line: None,
+            active_line: None,
+            text: "没有可显示的内容".to_string(),
+        }];
+    }
+
+    let changed_indexes: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| (line.kind != "context").then_some(index))
+        .collect();
+    if changed_indexes.is_empty() {
+        return vec![ManagedStrategyBackupDiffLine {
+            kind: "omitted".to_string(),
+            backup_line: None,
+            active_line: None,
+            text: "没有差异".to_string(),
+        }];
+    }
+
+    let mut keep = vec![false; lines.len()];
+    for index in changed_indexes {
+        let start = index.saturating_sub(context_line_count);
+        let end = (index + context_line_count + 1).min(lines.len());
+        keep[start..end].fill(true);
+    }
+
+    let mut compacted = Vec::new();
+    let mut index = 0usize;
+    while index < lines.len() {
+        if keep[index] {
+            compacted.push(lines[index].clone());
+            index += 1;
+            continue;
+        }
+
+        let skipped_start = index;
+        while index < lines.len() && !keep[index] {
+            index += 1;
+        }
+        let skipped_count = index - skipped_start;
+        compacted.push(ManagedStrategyBackupDiffLine {
+            kind: "omitted".to_string(),
+            backup_line: None,
+            active_line: None,
+            text: format!("省略 {skipped_count} 行未改动内容"),
+        });
+    }
+
+    compacted
 }
 
 fn build_managed_strategy_backup_item(
@@ -1011,9 +1253,11 @@ fn import_strategy_backup_inner(
     build_managed_strategy_backup_item(&source_root, &source_dir, &backup_id)
 }
 
-fn backup_active_strategy_inner(
+fn backup_active_strategy_with_meta(
     app_data_root: &Path,
     source_dir: String,
+    source_kind: &str,
+    description: &str,
 ) -> Result<ManagedStrategyBackupItem, String> {
     let source_root = resolve_source_root(app_data_root, &source_dir)?;
     let active_file_path = source_root.join(STRATEGY_RULE_FILE_NAME);
@@ -1038,13 +1282,88 @@ fn backup_active_strategy_inner(
         &StrategyBackupMeta {
             version: 1,
             created_at: Utc::now().to_rfc3339(),
-            source_kind: "backup".to_string(),
+            source_kind: source_kind.to_string(),
             source_file_name: Some(STRATEGY_RULE_FILE_NAME.to_string()),
-            description: Some("手动备份当前生效策略".to_string()),
+            description: Some(description.to_string()),
         },
     )?;
 
     build_managed_strategy_backup_item(&source_root, &source_dir, &backup_id)
+}
+
+fn backup_active_strategy_inner(
+    app_data_root: &Path,
+    source_dir: String,
+) -> Result<ManagedStrategyBackupItem, String> {
+    backup_active_strategy_with_meta(
+        app_data_root,
+        source_dir,
+        "backup",
+        "手动备份当前生效策略",
+    )
+}
+
+fn auto_backup_active_strategy_on_entry_inner(
+    app_data_root: &Path,
+    source_dir: String,
+) -> Result<Option<ManagedStrategyBackupItem>, String> {
+    let source_root = resolve_source_root(app_data_root, &source_dir)?;
+    let active_file_path = source_root.join(STRATEGY_RULE_FILE_NAME);
+    if !active_file_path.exists() || !active_file_path.is_file() {
+        return Ok(None);
+    }
+    if has_equivalent_strategy_backup(&source_root, &active_file_path)? {
+        return Ok(None);
+    }
+
+    backup_active_strategy_with_meta(
+        app_data_root,
+        source_dir,
+        "auto_entry",
+        "自动备份：进入策略管理页",
+    )
+    .map(Some)
+}
+
+fn get_strategy_backup_diff_inner(
+    app_data_root: &Path,
+    source_dir: String,
+    backup_id: String,
+) -> Result<ManagedStrategyBackupDiff, String> {
+    let source_root = resolve_source_root(app_data_root, &source_dir)?;
+    let normalized_backup_id = validate_strategy_backup_id(&backup_id)?.to_string();
+    let backup_file_path = managed_strategy_backup_file_path(&source_root, &normalized_backup_id);
+    if !backup_file_path.exists() || !backup_file_path.is_file() {
+        return Err("目标备份策略不存在".into());
+    }
+
+    let active_file_path = source_root.join(STRATEGY_RULE_FILE_NAME);
+    if !active_file_path.exists() || !active_file_path.is_file() {
+        return Err("当前没有可对比的生效策略文件".into());
+    }
+
+    let backup_text = std::fs::read_to_string(&backup_file_path).map_err(|error| {
+        format!(
+            "读取备份策略失败: path={}, err={error}",
+            backup_file_path.display()
+        )
+    })?;
+    let active_text = std::fs::read_to_string(&active_file_path).map_err(|error| {
+        format!(
+            "读取当前生效策略失败: path={}, err={error}",
+            active_file_path.display()
+        )
+    })?;
+    let (lines, changed_line_count) =
+        build_strategy_backup_diff_lines(&backup_text, &active_text);
+
+    Ok(ManagedStrategyBackupDiff {
+        backup_id: normalized_backup_id.clone(),
+        backup_label: format!("{normalized_backup_id}/{}", STRATEGY_RULE_FILE_NAME),
+        active_label: STRATEGY_RULE_FILE_NAME.to_string(),
+        changed_line_count,
+        lines,
+    })
 }
 
 fn create_empty_strategy_backup_inner(
@@ -1321,6 +1640,39 @@ pub async fn backup_managed_active_strategy(
         .map_err(|error| error.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
         backup_active_strategy_inner(&app_data_root, source_dir)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn auto_backup_managed_active_strategy_on_entry(
+    app: tauri::AppHandle,
+    source_dir: String,
+) -> Result<Option<ManagedStrategyBackupItem>, String> {
+    let app_data_root = app
+        .path()
+        .resolve("", tauri::path::BaseDirectory::AppData)
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        auto_backup_active_strategy_on_entry_inner(&app_data_root, source_dir)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn get_managed_strategy_backup_diff(
+    app: tauri::AppHandle,
+    source_dir: String,
+    backup_id: String,
+) -> Result<ManagedStrategyBackupDiff, String> {
+    let app_data_root = app
+        .path()
+        .resolve("", tauri::path::BaseDirectory::AppData)
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        get_strategy_backup_diff_inner(&app_data_root, source_dir, backup_id)
     })
     .await
     .map_err(|error| error.to_string())?

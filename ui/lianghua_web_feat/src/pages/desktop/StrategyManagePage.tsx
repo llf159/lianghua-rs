@@ -18,6 +18,7 @@ import {
   type StrategyManageSceneDraft,
   type StrategyManageSceneItem,
 } from '../../apis/strategyManage'
+import { autoBackupManagedActiveStrategyOnEntry } from '../../apis/strategyAssets'
 import StrategyAssetModal from './StrategyAssetModal'
 import './css/StrategyManagePage.css'
 
@@ -490,6 +491,16 @@ export default function StrategyManagePage() {
       setSelectedSceneName((current) =>
         data.scenes.some((item) => item.name === current) ? current : '',
       )
+      try {
+        const backup = await autoBackupManagedActiveStrategyOnEntry()
+        if (backup) {
+          setNotice(`已自动备份当前策略: ${backup.folderName}`)
+        } else {
+          setNotice('')
+        }
+      } catch (backupError) {
+        setError(`自动备份当前策略失败: ${String(backupError)}`)
+      }
     } catch (loadError) {
       setError(`读取策略管理失败: ${String(loadError)}`)
       setNotice('')

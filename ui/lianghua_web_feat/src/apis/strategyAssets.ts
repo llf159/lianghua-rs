@@ -43,6 +43,21 @@ export type ManagedStrategyBundleExportResult = {
   includesActiveStrategy: boolean
 }
 
+export type ManagedStrategyBackupDiffLine = {
+  kind: 'context' | 'backup' | 'active' | 'omitted'
+  backupLine: number | null
+  activeLine: number | null
+  text: string
+}
+
+export type ManagedStrategyBackupDiff = {
+  backupId: string
+  backupLabel: string
+  activeLabel: string
+  changedLineCount: number
+  lines: ManagedStrategyBackupDiffLine[]
+}
+
 export async function getManagedStrategyAssetsStatus() {
   await ensureManagedSourcePath(DEFAULT_MANAGED_SOURCE_DIR)
   return invoke<ManagedStrategyAssetsStatus>('get_managed_strategy_assets_status', {
@@ -76,6 +91,13 @@ export async function backupManagedActiveStrategy() {
   })
 }
 
+export async function autoBackupManagedActiveStrategyOnEntry() {
+  await ensureManagedSourcePath(DEFAULT_MANAGED_SOURCE_DIR)
+  return invoke<ManagedStrategyBackupItem | null>('auto_backup_managed_active_strategy_on_entry', {
+    sourceDir: DEFAULT_MANAGED_SOURCE_DIR,
+  })
+}
+
 export async function createManagedEmptyStrategyBackup() {
   await ensureManagedSourcePath(DEFAULT_MANAGED_SOURCE_DIR)
   return invoke<ManagedStrategyBackupItem>('create_managed_empty_strategy_backup', {
@@ -105,6 +127,14 @@ export async function updateManagedStrategyBackupDescription(backupId: string, d
     sourceDir: DEFAULT_MANAGED_SOURCE_DIR,
     backupId,
     description,
+  })
+}
+
+export async function getManagedStrategyBackupDiff(backupId: string) {
+  await ensureManagedSourcePath(DEFAULT_MANAGED_SOURCE_DIR)
+  return invoke<ManagedStrategyBackupDiff>('get_managed_strategy_backup_diff', {
+    sourceDir: DEFAULT_MANAGED_SOURCE_DIR,
+    backupId,
   })
 }
 

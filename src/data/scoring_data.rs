@@ -12,7 +12,7 @@ use crate::expr::eval::{Runtime, Value};
 use crate::expr::parser::{Parser, lex_all};
 use crate::scoring::{CachedRule, RuleScoreSeries, SceneScoreSeries, TieBreakWay};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ScoreSummary {
     pub ts_code: String,
     pub trade_date: String,
@@ -650,7 +650,33 @@ fn scene_stage_rank_weight(stage: Option<&str>) -> i32 {
     }
 }
 
-fn rank_scene_rows(rows: &mut [SceneDetails]) {
+pub(crate) fn rank_summary_rows_by_score(rows: &mut [ScoreSummary]) {
+    rows.sort_by(|left, right| {
+        left.trade_date
+            .cmp(&right.trade_date)
+            .then_with(|| {
+                right
+                    .total_score
+                    .partial_cmp(&left.total_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.ts_code.cmp(&right.ts_code))
+    });
+
+    let mut current_trade_date: Option<&str> = None;
+    let mut current_rank = 0i64;
+    for row in rows {
+        if current_trade_date != Some(row.trade_date.as_str()) {
+            current_trade_date = Some(row.trade_date.as_str());
+            current_rank = 1;
+        } else {
+            current_rank += 1;
+        }
+        row.rank = Some(current_rank);
+    }
+}
+
+pub(crate) fn rank_scene_rows(rows: &mut [SceneDetails]) {
     rows.sort_by(|left, right| {
         left.trade_date
             .cmp(&right.trade_date)

@@ -18,6 +18,7 @@ use crate::{
         lexer::TokenKind,
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
+    scoring::runner::scoring_all_to_memory,
     scoring::tools::{
         calc_query_need_rows, calc_query_start_date, inject_stock_extra_fields, load_st_list,
         load_total_share_map,
@@ -26,17 +27,18 @@ use crate::{
     simulate::{
         DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, build_backtest_sample_eligibility,
         rank::{
-            RankLayerConfig, RankLayerFromDbInput, RankLayerMethod, calc_rank_layer_metrics_from_db,
+            RankLayerConfig, RankLayerFromDbInput, RankLayerMethod,
+            calc_rank_layer_metrics_from_db, calc_rank_layer_metrics_from_score_rows,
         },
         rule::{
             RuleLayerConfig, RuleLayerFromDbInput, RuleLayerRuntimeCache,
             build_rule_layer_runtime_cache, calc_all_rule_layer_metrics_from_db,
-            calc_rule_layer_metrics_from_db,
+            calc_all_rule_layer_metrics_from_rows, calc_rule_layer_metrics_from_db,
             calc_rule_layer_metrics_with_triggered_samples_from_cache,
         },
         scene::{
             SceneLayerConfig, SceneLayerFromDbInput, calc_all_scene_layer_metrics_from_db,
-            calc_scene_layer_metrics_from_db,
+            calc_all_scene_layer_metrics_from_rows, calc_scene_layer_metrics_from_db,
         },
     },
     ui_tools_feat::{build_concepts_map, build_name_map},
@@ -3857,6 +3859,95 @@ fn build_rule_contribution_averages(
         .collect())
 }
 
+fn build_rule_contribution_averages_from_rows(
+    rule_options: &[String],
+    summary_rows: &[crate::data::scoring_data::ScoreSummary],
+    detail_rows: &[crate::data::scoring_data::ScoreDetails],
+    start_date: &str,
+    end_date: &str,
+) -> HashMap<String, RuleContributionAverages> {
+    let rule_set: HashSet<&str> = rule_options.iter().map(String::as_str).collect();
+    let mut max_rank_by_date: HashMap<&str, i64> = HashMap::new();
+    let mut rank_by_pair: HashMap<(&str, &str), i64> = HashMap::new();
+
+    for row in summary_rows {
+        if row.trade_date.as_str() < start_date || row.trade_date.as_str() > end_date {
+            continue;
+        }
+        let Some(rank) = row.rank else {
+            continue;
+        };
+        max_rank_by_date
+            .entry(row.trade_date.as_str())
+            .and_modify(|value| *value = (*value).max(rank))
+            .or_insert(rank);
+        rank_by_pair.insert((row.ts_code.as_str(), row.trade_date.as_str()), rank);
+    }
+
+    let mut daily_contribution: HashMap<(String, String), f64> = HashMap::new();
+    let mut daily_triggers: HashMap<(String, String), i64> = HashMap::new();
+    for row in detail_rows {
+        if !rule_set.contains(row.rule_name.as_str())
+            || row.trade_date.as_str() < start_date
+            || row.trade_date.as_str() > end_date
+            || !row.rule_score.is_finite()
+            || row.rule_score.abs() <= RULE_BACKTEST_EPS
+        {
+            continue;
+        }
+        let key = (row.trade_date.clone(), row.rule_name.clone());
+        *daily_triggers.entry(key.clone()).or_default() += 1;
+        let Some(rank) = rank_by_pair.get(&(row.ts_code.as_str(), row.trade_date.as_str())) else {
+            continue;
+        };
+        let Some(max_rank) = max_rank_by_date.get(row.trade_date.as_str()).copied() else {
+            continue;
+        };
+        if max_rank <= 0 {
+            continue;
+        }
+        let weight = (max_rank + 1 - *rank) as f64 / max_rank as f64;
+        *daily_contribution.entry(key).or_default() += row.rule_score * weight;
+    }
+
+    let mut acc_map: HashMap<String, RuleContributionAccumulator> = HashMap::new();
+    for ((_, rule_name), contribution_score) in daily_contribution {
+        if !contribution_score.is_finite() {
+            continue;
+        }
+        let acc = acc_map.entry(rule_name).or_default();
+        acc.contribution_sum += contribution_score;
+        acc.contribution_days += 1;
+    }
+    for ((_, rule_name), trigger_count) in daily_triggers {
+        acc_map.entry(rule_name).or_default().trigger_count += trigger_count.max(0);
+    }
+
+    acc_map
+        .into_iter()
+        .map(|(rule_name, acc)| {
+            let avg_contribution_score = if acc.contribution_days > 0 {
+                Some(acc.contribution_sum / acc.contribution_days as f64)
+            } else {
+                None
+            };
+            let avg_contribution_per_trigger = if acc.trigger_count > 0 {
+                Some(acc.contribution_sum / acc.trigger_count as f64)
+            } else {
+                None
+            };
+
+            (
+                rule_name,
+                RuleContributionAverages {
+                    avg_contribution_score,
+                    avg_contribution_per_trigger,
+                },
+            )
+        })
+        .collect()
+}
+
 fn weighted_rule_summary_metric(
     summaries: &[RuleLayerRuleSummary],
     value: impl Fn(&RuleLayerRuleSummary) -> Option<f64>,
@@ -4411,6 +4502,355 @@ pub fn run_rank_layer_backtest(
     };
 
     run_rank_layer_backtest_core(&source_conn, &source_path, &params)
+}
+
+pub fn run_transient_scene_layer_backtest(
+    source_path: String,
+    stock_adj_type: Option<String>,
+    index_ts_code: String,
+    index_beta: Option<f64>,
+    concept_beta: Option<f64>,
+    industry_beta: Option<f64>,
+    start_date: String,
+    end_date: String,
+    min_samples_per_scene_day: Option<usize>,
+    min_listed_trade_days: Option<usize>,
+    backtest_period: Option<usize>,
+) -> Result<SceneLayerBacktestData, String> {
+    let source_db = source_db_path(&source_path);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
+    let source_conn =
+        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+
+    let params = SceneLayerBacktestRunParams {
+        stock_adj_type: stock_adj_type
+            .unwrap_or_else(|| "qfq".to_string())
+            .trim()
+            .to_string(),
+        index_ts_code: index_ts_code.trim().to_string(),
+        index_beta: index_beta.unwrap_or(0.5),
+        concept_beta: concept_beta.unwrap_or(0.2),
+        industry_beta: industry_beta.unwrap_or(0.0),
+        start_date: start_date.trim().to_string(),
+        end_date: end_date.trim().to_string(),
+        min_samples_per_day: min_samples_per_scene_day.unwrap_or(5),
+        min_listed_trade_days: min_listed_trade_days
+            .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
+        backtest_period: backtest_period.unwrap_or(1),
+    };
+    let layer_config = SceneLayerConfig {
+        min_samples_per_day: params.min_samples_per_day,
+        backtest_period: params.backtest_period,
+        min_listed_trade_days: params.min_listed_trade_days,
+    };
+    let (score_batch, _) = scoring_all_to_memory(
+        &source_path,
+        None,
+        &params.stock_adj_type,
+        &params.start_date,
+        &params.end_date,
+    )?;
+    let scene_options = load_scene_options(&source_path)?;
+    let all_metrics = calc_all_scene_layer_metrics_from_rows(
+        &source_conn,
+        &source_path,
+        &scene_options,
+        &score_batch.scene_rows,
+        &params.stock_adj_type,
+        &params.index_ts_code,
+        params.index_beta,
+        params.concept_beta,
+        params.industry_beta,
+        &params.start_date,
+        &params.end_date,
+        &layer_config,
+    )?;
+    let mut all_scene_summaries = Vec::with_capacity(all_metrics.len());
+    for (one_scene_name, metrics) in all_metrics {
+        all_scene_summaries.push(SceneLayerSceneSummary {
+            scene_name: one_scene_name,
+            point_count: metrics.points.len(),
+            spread_mean: metrics.spread_mean,
+            ic_mean: metrics.ic_mean,
+            ic_std: metrics.ic_std,
+            icir: metrics.icir,
+            ic_t_value: metrics.ic_t_value,
+        });
+    }
+    all_scene_summaries.sort_by(|a, b| {
+        b.spread_mean
+            .unwrap_or(f64::NEG_INFINITY)
+            .partial_cmp(&a.spread_mean.unwrap_or(f64::NEG_INFINITY))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.point_count.cmp(&a.point_count))
+            .then_with(|| a.scene_name.cmp(&b.scene_name))
+    });
+
+    Ok(SceneLayerBacktestData {
+        scene_name: String::new(),
+        stock_adj_type: params.stock_adj_type,
+        index_ts_code: params.index_ts_code,
+        index_beta: params.index_beta,
+        concept_beta: params.concept_beta,
+        industry_beta: params.industry_beta,
+        start_date: params.start_date,
+        end_date: params.end_date,
+        min_samples_per_scene_day: params.min_samples_per_day,
+        min_listed_trade_days: params.min_listed_trade_days,
+        backtest_period: params.backtest_period,
+        points: Vec::new(),
+        spread_mean: None,
+        ic_mean: None,
+        ic_std: None,
+        icir: None,
+        ic_t_value: None,
+        is_all_scenes: true,
+        all_scene_summaries,
+    })
+}
+
+pub fn run_transient_rule_layer_backtest(
+    source_path: String,
+    stock_adj_type: Option<String>,
+    index_ts_code: String,
+    index_beta: Option<f64>,
+    concept_beta: Option<f64>,
+    industry_beta: Option<f64>,
+    start_date: String,
+    end_date: String,
+    min_samples_per_rule_day: Option<usize>,
+    min_listed_trade_days: Option<usize>,
+    backtest_period: Option<usize>,
+) -> Result<RuleLayerBacktestData, String> {
+    let source_db = source_db_path(&source_path);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
+    let source_conn =
+        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+
+    let params = RuleLayerBacktestRunParams {
+        stock_adj_type: stock_adj_type
+            .unwrap_or_else(|| "qfq".to_string())
+            .trim()
+            .to_string(),
+        index_ts_code: index_ts_code.trim().to_string(),
+        index_beta: index_beta.unwrap_or(0.5),
+        concept_beta: concept_beta.unwrap_or(0.2),
+        industry_beta: industry_beta.unwrap_or(0.0),
+        start_date: start_date.trim().to_string(),
+        end_date: end_date.trim().to_string(),
+        min_samples_per_day: min_samples_per_rule_day.unwrap_or(5),
+        min_listed_trade_days: min_listed_trade_days
+            .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
+        backtest_period: backtest_period.unwrap_or(1),
+    };
+    let layer_config = RuleLayerConfig {
+        min_samples_per_day: params.min_samples_per_day,
+        backtest_period: params.backtest_period,
+        min_listed_trade_days: params.min_listed_trade_days,
+    };
+    let (score_batch, _) = scoring_all_to_memory(
+        &source_path,
+        None,
+        &params.stock_adj_type,
+        &params.start_date,
+        &params.end_date,
+    )?;
+    let (rule_options, _) = load_rule_meta(&source_path)?;
+    let all_metrics = calc_all_rule_layer_metrics_from_rows(
+        &source_conn,
+        &source_path,
+        &rule_options,
+        &score_batch.summary_rows,
+        &score_batch.detail_rows,
+        &params.stock_adj_type,
+        &params.index_ts_code,
+        params.index_beta,
+        params.concept_beta,
+        params.industry_beta,
+        &params.start_date,
+        &params.end_date,
+        &layer_config,
+    )?;
+    let contribution_averages = build_rule_contribution_averages_from_rows(
+        &rule_options,
+        &score_batch.summary_rows,
+        &score_batch.detail_rows,
+        &params.start_date,
+        &params.end_date,
+    );
+    let mut all_rule_summaries = Vec::with_capacity(all_metrics.len());
+    for (one_rule_name, metrics) in all_metrics {
+        let contribution_average = contribution_averages
+            .get(&one_rule_name)
+            .cloned()
+            .unwrap_or_default();
+        all_rule_summaries.push(RuleLayerRuleSummary {
+            rule_name: one_rule_name,
+            point_count: metrics.points.len(),
+            avg_residual_mean: metrics.avg_residual_mean,
+            spread_mean: metrics.spread_mean,
+            avg_contribution_score: contribution_average.avg_contribution_score,
+            avg_contribution_per_trigger: contribution_average.avg_contribution_per_trigger,
+            ic_mean: metrics.ic_mean,
+            ic_std: metrics.ic_std,
+            icir: metrics.icir,
+            ic_t_value: metrics.ic_t_value,
+        });
+    }
+    all_rule_summaries.sort_by(|a, b| {
+        b.spread_mean
+            .unwrap_or(f64::NEG_INFINITY)
+            .partial_cmp(&a.spread_mean.unwrap_or(f64::NEG_INFINITY))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.point_count.cmp(&a.point_count))
+            .then_with(|| a.rule_name.cmp(&b.rule_name))
+    });
+
+    let (avg_residual_mean, spread_mean, ic_mean, ic_std, icir, ic_t_value) =
+        aggregate_all_rule_summary_metrics(&all_rule_summaries);
+
+    Ok(RuleLayerBacktestData {
+        rule_name: String::new(),
+        stock_adj_type: params.stock_adj_type,
+        index_ts_code: params.index_ts_code,
+        index_beta: params.index_beta,
+        concept_beta: params.concept_beta,
+        industry_beta: params.industry_beta,
+        start_date: params.start_date,
+        end_date: params.end_date,
+        min_samples_per_rule_day: params.min_samples_per_day,
+        min_listed_trade_days: params.min_listed_trade_days,
+        backtest_period: params.backtest_period,
+        points: Vec::new(),
+        avg_residual_mean,
+        spread_mean,
+        avg_contribution_score: weighted_rule_summary_metric(&all_rule_summaries, |item| {
+            item.avg_contribution_score
+        }),
+        avg_contribution_per_trigger: weighted_rule_summary_metric(&all_rule_summaries, |item| {
+            item.avg_contribution_per_trigger
+        }),
+        ic_mean,
+        ic_std,
+        icir,
+        ic_t_value,
+        is_all_rules: true,
+        all_rule_summaries,
+    })
+}
+
+pub fn run_transient_rank_layer_backtest(
+    source_path: String,
+    stock_adj_type: Option<String>,
+    index_ts_code: String,
+    index_beta: Option<f64>,
+    concept_beta: Option<f64>,
+    industry_beta: Option<f64>,
+    start_date: String,
+    end_date: String,
+    min_samples_per_rank_day: Option<usize>,
+    min_listed_trade_days: Option<usize>,
+    backtest_period: Option<usize>,
+    layer_count: Option<usize>,
+    layer_method: Option<String>,
+) -> Result<RankLayerBacktestData, String> {
+    let source_db = source_db_path(&source_path);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
+    let source_conn =
+        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+
+    let params = RankLayerBacktestRunParams {
+        stock_adj_type: stock_adj_type
+            .unwrap_or_else(|| "qfq".to_string())
+            .trim()
+            .to_string(),
+        index_ts_code: index_ts_code.trim().to_string(),
+        index_beta: index_beta.unwrap_or(0.5),
+        concept_beta: concept_beta.unwrap_or(0.2),
+        industry_beta: industry_beta.unwrap_or(0.0),
+        start_date: start_date.trim().to_string(),
+        end_date: end_date.trim().to_string(),
+        min_samples_per_day: min_samples_per_rank_day.unwrap_or(5),
+        min_listed_trade_days: min_listed_trade_days
+            .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
+        backtest_period: backtest_period.unwrap_or(1),
+        layer_count: layer_count.unwrap_or_else(RankLayerConfig::default_layer_count),
+        layer_method: match layer_method {
+            Some(value) => RankLayerMethod::from_str(&value)?,
+            None => RankLayerMethod::SampleCount,
+        },
+    };
+    let layer_config = RankLayerConfig {
+        min_samples_per_day: params.min_samples_per_day,
+        backtest_period: params.backtest_period,
+        min_listed_trade_days: params.min_listed_trade_days,
+        layer_count: params.layer_count,
+        layer_method: params.layer_method,
+    };
+    let input = RankLayerFromDbInput {
+        stock_adj_type: params.stock_adj_type,
+        index_ts_code: params.index_ts_code,
+        index_beta: params.index_beta,
+        concept_beta: params.concept_beta,
+        industry_beta: params.industry_beta,
+        start_date: params.start_date,
+        end_date: params.end_date,
+        layer_config,
+    };
+    let (score_batch, _) = scoring_all_to_memory(
+        &source_path,
+        None,
+        &input.stock_adj_type,
+        &input.start_date,
+        &input.end_date,
+    )?;
+    let metrics = calc_rank_layer_metrics_from_score_rows(
+        &source_conn,
+        &source_path,
+        &input,
+        &score_batch.summary_rows,
+    )?;
+
+    Ok(RankLayerBacktestData {
+        stock_adj_type: input.stock_adj_type,
+        index_ts_code: input.index_ts_code,
+        index_beta: input.index_beta,
+        concept_beta: input.concept_beta,
+        industry_beta: input.industry_beta,
+        start_date: input.start_date,
+        end_date: input.end_date,
+        min_samples_per_rank_day: input.layer_config.effective_min_samples_per_day(),
+        min_listed_trade_days: input.layer_config.min_listed_trade_days,
+        backtest_period: input.layer_config.backtest_period,
+        layer_count: input.layer_config.layer_count,
+        layer_method: input.layer_config.layer_method.as_str().to_string(),
+        layer_method_label: rank_layer_method_label(input.layer_config.layer_method).to_string(),
+        point_count: metrics.point_count,
+        sample_count: metrics.sample_count,
+        spread_mean: metrics.spread_mean,
+        ic_mean: metrics.ic_mean,
+        ic_std: metrics.ic_std,
+        icir: metrics.icir,
+        ic_t_value: metrics.ic_t_value,
+        layer_summaries: metrics
+            .layers
+            .into_iter()
+            .map(|item| RankLayerBucketSummary {
+                layer_index: item.layer_index,
+                layer_label: rank_layer_label(item.layer_index, input.layer_config.layer_count),
+                point_count: item.point_count,
+                sample_count: item.sample_count,
+                avg_score: item.avg_score,
+                avg_residual_return: item.avg_residual_return,
+            })
+            .collect(),
+    })
 }
 
 #[cfg(test)]

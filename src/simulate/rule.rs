@@ -11,6 +11,7 @@ use super::{
 use crate::data::{
     concept_performance_data::{load_concept_trend_series, load_industry_trend_series},
     load_stock_list, load_ths_concepts_named_map, result_db_path,
+    scoring_data::{ScoreDetails, ScoreSummary},
 };
 
 const EPS: f64 = 1e-12;
@@ -306,6 +307,95 @@ pub fn calc_all_rule_layer_metrics_from_db(
     Ok(out)
 }
 
+pub fn calc_all_rule_layer_metrics_from_rows(
+    source_conn: &Connection,
+    source_dir: &str,
+    rule_names: &[String],
+    score_summary_rows: &[ScoreSummary],
+    score_detail_rows: &[ScoreDetails],
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+) -> Result<Vec<(String, RuleLayerMetrics)>, String> {
+    validate_rule_common_input(
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+
+    if rule_names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let runtime_cache = build_rule_layer_runtime_cache_from_summary_rows(
+        source_conn,
+        source_dir,
+        score_summary_rows,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+    let rule_name_set: HashSet<&str> = rule_names.iter().map(String::as_str).collect();
+    let mut triggered_score_map_by_rule: HashMap<String, TriggeredScoreMap> = HashMap::new();
+
+    for row in score_detail_rows {
+        if !rule_name_set.contains(row.rule_name.as_str())
+            || row.trade_date.as_str() < start_date
+            || row.trade_date.as_str() > end_date
+            || !row.rule_score.is_finite()
+            || row.ts_code.trim().is_empty()
+            || row.trade_date.trim().is_empty()
+        {
+            continue;
+        }
+
+        triggered_score_map_by_rule
+            .entry(row.rule_name.clone())
+            .or_default()
+            .entry(row.ts_code.clone())
+            .or_default()
+            .insert(row.trade_date.clone(), row.rule_score);
+    }
+
+    let grouped_results: Vec<Result<(String, RuleLayerMetrics), String>> = rule_names
+        .par_iter()
+        .map(|rule_name| {
+            let empty_triggered_score_map = TriggeredScoreMap::new();
+            let triggered_score_map = triggered_score_map_by_rule
+                .get(rule_name)
+                .unwrap_or(&empty_triggered_score_map);
+            let metrics = calc_rule_layer_metrics_from_cache(
+                &runtime_cache,
+                triggered_score_map,
+                layer_config,
+            )?;
+            Ok((rule_name.clone(), metrics))
+        })
+        .collect();
+
+    let mut out = Vec::with_capacity(grouped_results.len());
+    for item in grouped_results {
+        out.push(item?);
+    }
+
+    Ok(out)
+}
+
 pub fn build_rule_layer_runtime_cache(
     source_conn: &Connection,
     source_dir: &str,
@@ -330,6 +420,91 @@ pub fn build_rule_layer_runtime_cache(
     )?;
 
     let universe_rows = load_rule_universe_rows(source_dir, start_date, end_date)?;
+    if universe_rows.is_empty() {
+        return Ok(RuleLayerRuntimeCache {
+            day_groups: Vec::new(),
+        });
+    }
+
+    let concept_map = load_most_related_concept_map(source_dir)?;
+    let industry_map = load_stock_industry_map(source_dir)?;
+    let mut unique_ts_codes: HashSet<&str> = HashSet::new();
+    for row in &universe_rows {
+        unique_ts_codes.insert(row.ts_code.as_str());
+    }
+
+    let residual_map_cache = build_residual_map_cache(
+        source_conn,
+        source_dir,
+        unique_ts_codes
+            .into_iter()
+            .map(|ts_code| ts_code.to_string())
+            .collect(),
+        &concept_map,
+        &industry_map,
+        &ResidualCacheInput {
+            stock_adj_type,
+            index_ts_code,
+            index_beta,
+            concept_beta,
+            industry_beta,
+            start_date,
+            end_date,
+            backtest_period: layer_config.backtest_period,
+            min_listed_trade_days: layer_config.min_listed_trade_days,
+        },
+    )?;
+    let day_groups = build_rule_day_groups(universe_rows, &residual_map_cache);
+
+    Ok(RuleLayerRuntimeCache { day_groups })
+}
+
+pub(crate) fn build_rule_layer_runtime_cache_from_summary_rows(
+    source_conn: &Connection,
+    source_dir: &str,
+    score_summary_rows: &[ScoreSummary],
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+) -> Result<RuleLayerRuntimeCache, String> {
+    validate_rule_common_input(
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+
+    let mut universe_rows = score_summary_rows
+        .iter()
+        .filter_map(|row| {
+            if row.trade_date.as_str() < start_date
+                || row.trade_date.as_str() > end_date
+                || row.ts_code.trim().is_empty()
+                || row.trade_date.trim().is_empty()
+            {
+                return None;
+            }
+            Some(RuleUniverseRow {
+                ts_code: row.ts_code.clone(),
+                trade_date: row.trade_date.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    universe_rows.sort_by(|left, right| {
+        left.trade_date
+            .cmp(&right.trade_date)
+            .then_with(|| left.ts_code.cmp(&right.ts_code))
+    });
+
     if universe_rows.is_empty() {
         return Ok(RuleLayerRuntimeCache {
             day_groups: Vec::new(),

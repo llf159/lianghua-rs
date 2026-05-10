@@ -6,6 +6,9 @@ import {
   getRuleLayerBacktestDefaults,
   runRankLayerBacktest,
   runRuleExpressionValidation,
+  runTransientRankLayerBacktest,
+  runTransientRuleLayerBacktest,
+  runTransientSceneLayerBacktest,
   getSceneLayerBacktestDefaults,
   runRuleLayerBacktest,
   runSceneLayerBacktest,
@@ -399,11 +402,14 @@ export default function SceneLayerBacktestPage() {
   const [initializing, setInitializing] = useState(false);
   const [error, setError] = useState("");
   const [rankLoading, setRankLoading] = useState(false);
+  const [rankTransientLoading, setRankTransientLoading] = useState(false);
   const [rankError, setRankError] = useState("");
   const [rankResult, setRankResult] = useState<RankLayerBacktestData | null>(null);
   const [result, setResult] = useState<SceneLayerBacktestData | null>(null);
+  const [transientLoading, setTransientLoading] = useState(false);
 
   const [ruleLoading, setRuleLoading] = useState(false);
+  const [ruleTransientLoading, setRuleTransientLoading] = useState(false);
   const [ruleError, setRuleError] = useState("");
   const [ruleResult, setRuleResult] = useState<RuleLayerBacktestData | null>(() =>
     readTransientStrategyBacktestResult(),
@@ -430,7 +436,14 @@ export default function SceneLayerBacktestPage() {
   const [validationRestoredComboKey, setValidationRestoredComboKey] = useState("");
   const [validationDetailModalOpen, setValidationDetailModalOpen] = useState(false);
   const [validationSamplesModalOpen, setValidationSamplesModalOpen] = useState(false);
-  const heavyTaskRunning = loading || rankLoading || ruleLoading || validationLoading;
+  const heavyTaskRunning =
+    loading ||
+    transientLoading ||
+    rankLoading ||
+    rankTransientLoading ||
+    ruleLoading ||
+    ruleTransientLoading ||
+    validationLoading;
 
   useEffect(() => {
     const returnState = locationState?.validationReturnState;
@@ -808,6 +821,53 @@ export default function SceneLayerBacktestPage() {
     }
   }
 
+  async function onRunTransientSceneBacktest() {
+    const normalizedStart = normalizeDateInput(startDateInput);
+    const normalizedEnd = normalizeDateInput(endDateInput);
+
+    if (!sourcePath.trim()) {
+      setError("当前数据目录为空，请先在数据管理页确认目录。");
+      return;
+    }
+    if (!indexTsCode.trim()) {
+      setError("请选择指数。");
+      return;
+    }
+    if (!normalizedStart || !normalizedEnd) {
+      setError("请填写开始和结束日期。");
+      return;
+    }
+    if (normalizedStart > normalizedEnd) {
+      setError("开始日期不能晚于结束日期。");
+      return;
+    }
+
+    setResult(null);
+    setTransientLoading(true);
+    setError("");
+    try {
+      const data = await runTransientSceneLayerBacktest({
+        sourcePath,
+        stockAdjType: stockAdjType.trim() || "qfq",
+        indexTsCode: indexTsCode.trim(),
+        indexBeta: Number(indexBeta),
+        conceptBeta: Number(conceptBeta),
+        industryBeta: Number(industryBeta),
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+        minSamplesPerSceneDay: Math.max(1, Number(minSamplesPerDay) || 1),
+        minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
+        backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+      });
+      setResult(data);
+    } catch (runError) {
+      setResult(null);
+      setError(`执行变更策略场景验证失败: ${String(runError)}`);
+    } finally {
+      setTransientLoading(false);
+    }
+  }
+
   async function onRunRankBacktest() {
     const normalizedStart = normalizeDateInput(startDateInput);
     const normalizedEnd = normalizeDateInput(endDateInput);
@@ -866,6 +926,64 @@ export default function SceneLayerBacktestPage() {
     }
   }
 
+  async function onRunTransientRankBacktest() {
+    const normalizedStart = normalizeDateInput(startDateInput);
+    const normalizedEnd = normalizeDateInput(endDateInput);
+
+    if (!sourcePath.trim()) {
+      setRankError("当前数据目录为空，请先在数据管理页确认目录。");
+      return;
+    }
+    if (!indexTsCode.trim()) {
+      setRankError("请选择指数。");
+      return;
+    }
+    if (!normalizedStart || !normalizedEnd) {
+      setRankError("请填写开始和结束日期。");
+      return;
+    }
+    if (normalizedStart > normalizedEnd) {
+      setRankError("开始日期不能晚于结束日期。");
+      return;
+    }
+    const normalizedLayerCount = Number(rankLayerCount);
+    if (
+      !Number.isFinite(normalizedLayerCount) ||
+      !Number.isInteger(normalizedLayerCount) ||
+      normalizedLayerCount < 2
+    ) {
+      setRankError("分层层数必须是 >= 2 的整数。");
+      return;
+    }
+
+    setRankResult(null);
+    setRankTransientLoading(true);
+    setRankError("");
+    try {
+      const data = await runTransientRankLayerBacktest({
+        sourcePath,
+        stockAdjType: stockAdjType.trim() || "qfq",
+        indexTsCode: indexTsCode.trim(),
+        indexBeta: Number(indexBeta),
+        conceptBeta: Number(conceptBeta),
+        industryBeta: Number(industryBeta),
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+        minSamplesPerRankDay: Math.max(1, Number(minSamplesPerDay) || 1),
+        minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
+        backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        layerCount: normalizedLayerCount,
+        layerMethod: rankLayerMethod,
+      });
+      setRankResult(data);
+    } catch (runError) {
+      setRankResult(null);
+      setRankError(`执行变更策略排名验证失败: ${String(runError)}`);
+    } finally {
+      setRankTransientLoading(false);
+    }
+  }
+
   async function onRunRuleBacktest() {
     const normalizedStart = normalizeDateInput(startDateInput);
     const normalizedEnd = normalizeDateInput(endDateInput);
@@ -913,6 +1031,56 @@ export default function SceneLayerBacktestPage() {
       setRuleError(`执行策略回测失败: ${String(runError)}`);
     } finally {
       setRuleLoading(false);
+    }
+  }
+
+  async function onRunTransientRuleBacktest() {
+    const normalizedStart = normalizeDateInput(startDateInput);
+    const normalizedEnd = normalizeDateInput(endDateInput);
+
+    if (!sourcePath.trim()) {
+      setRuleError("当前数据目录为空，请先在数据管理页确认目录。");
+      return;
+    }
+    if (!indexTsCode.trim()) {
+      setRuleError("请选择指数。");
+      return;
+    }
+    if (!normalizedStart || !normalizedEnd) {
+      setRuleError("请填写开始和结束日期。");
+      return;
+    }
+    if (normalizedStart > normalizedEnd) {
+      setRuleError("开始日期不能晚于结束日期。");
+      return;
+    }
+
+    setRuleResult(null);
+    writeTransientStrategyBacktestResult(null);
+    setRuleTransientLoading(true);
+    setRuleError("");
+    try {
+      const data = await runTransientRuleLayerBacktest({
+        sourcePath,
+        stockAdjType: stockAdjType.trim() || "qfq",
+        indexTsCode: indexTsCode.trim(),
+        indexBeta: Number(indexBeta),
+        conceptBeta: Number(conceptBeta),
+        industryBeta: Number(industryBeta),
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+        minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerDay) || 1),
+        minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
+        backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+      });
+      setRuleResult(data);
+      writeTransientStrategyBacktestResult(data);
+    } catch (runError) {
+      setRuleResult(null);
+      writeTransientStrategyBacktestResult(null);
+      setRuleError(`执行变更策略回测验证失败: ${String(runError)}`);
+    } finally {
+      setRuleTransientLoading(false);
     }
   }
 
@@ -1275,6 +1443,9 @@ export default function SceneLayerBacktestPage() {
           <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunRankBacktest()} disabled={heavyTaskRunning || initializing}>
             {rankLoading ? "回测中..." : "执行排名整体回测"}
           </button>
+          <button type="button" className="scene-layer-secondary-btn" onClick={() => void onRunTransientRankBacktest()} disabled={heavyTaskRunning || initializing}>
+            {rankTransientLoading ? "验证中..." : "变更策略验证"}
+          </button>
         </div>
 
         {rankError ? <div className="scene-layer-error">{rankError}</div> : null}
@@ -1372,6 +1543,9 @@ export default function SceneLayerBacktestPage() {
           <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunBacktest()} disabled={heavyTaskRunning || initializing}>
             {loading ? "回测中..." : "执行场景整体回测"}
           </button>
+          <button type="button" className="scene-layer-secondary-btn" onClick={() => void onRunTransientSceneBacktest()} disabled={heavyTaskRunning || initializing}>
+            {transientLoading ? "验证中..." : "变更策略验证"}
+          </button>
         </div>
 
         {error ? <div className="scene-layer-error">{error}</div> : null}
@@ -1440,6 +1614,9 @@ export default function SceneLayerBacktestPage() {
         <div className="scene-layer-actions">
           <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunRuleBacktest()} disabled={heavyTaskRunning || initializing}>
             {ruleLoading ? "回测中..." : "执行策略回测"}
+          </button>
+          <button type="button" className="scene-layer-secondary-btn" onClick={() => void onRunTransientRuleBacktest()} disabled={heavyTaskRunning || initializing}>
+            {ruleTransientLoading ? "验证中..." : "变更策略验证"}
           </button>
         </div>
 

@@ -8,9 +8,11 @@ import {
   exportManagedStrategyBackupFile,
   exportManagedStrategyBundle,
   getManagedStrategyAssetsStatus,
+  getManagedStrategyBackupDiff,
   importManagedStrategyBackup,
   updateManagedStrategyBackupDescription,
   type ManagedStrategyAssetsStatus,
+  type ManagedStrategyBackupDiff,
   type ManagedStrategyBackupItem,
 } from '../../apis/strategyAssets'
 import ConfirmDialog from '../../shared/ConfirmDialog'
@@ -27,6 +29,7 @@ type BusyAction =
   | `activating:${string}`
   | `deleting:${string}`
   | `exporting:${string}`
+  | `diffing:${string}`
   | `saving-desc:${string}`
 
 type StrategyAssetModalProps = {
@@ -34,6 +37,8 @@ type StrategyAssetModalProps = {
   onClose: () => void
   onActivated?: () => void
 }
+
+type BackupViewMode = 'managed' | 'auto'
 
 function formatTime(value: string | null | undefined) {
   if (!value) {
@@ -66,6 +71,9 @@ function describeBackupSource(item: ManagedStrategyBackupItem) {
   if (item.sourceKind === 'imported') {
     return '外部导入'
   }
+  if (item.sourceKind === 'auto_entry') {
+    return '自动备份'
+  }
   if (item.sourceKind === 'empty') {
     return '空白模板'
   }
@@ -80,12 +88,24 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
   const [error, setError] = useState('')
   const [descriptionDrafts, setDescriptionDrafts] = useState<Record<string, string>>({})
   const [pendingDeleteBackup, setPendingDeleteBackup] = useState<ManagedStrategyBackupItem | null>(null)
+  const [backupViewMode, setBackupViewMode] = useState<BackupViewMode>('managed')
+  const [diffData, setDiffData] = useState<ManagedStrategyBackupDiff | null>(null)
 
   const isBusy = busyAction !== 'idle'
-  const backupCount = status?.backups.length ?? 0
-  const latestBackup = useMemo(
-    () => (status?.backups.length ? status.backups[0] : null),
+  const autoBackups = useMemo(
+    () => status?.backups.filter((item) => item.sourceKind === 'auto_entry') ?? [],
     [status?.backups],
+  )
+  const managedBackups = useMemo(
+    () => status?.backups.filter((item) => item.sourceKind !== 'auto_entry') ?? [],
+    [status?.backups],
+  )
+  const visibleBackups = backupViewMode === 'auto' ? autoBackups : managedBackups
+  const backupCount = managedBackups.length
+  const autoBackupCount = autoBackups.length
+  const latestBackup = useMemo(
+    () => (managedBackups.length ? managedBackups[0] : null),
+    [managedBackups],
   )
 
   async function loadStatus() {
@@ -110,6 +130,8 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
   useEffect(() => {
     if (!open) {
       setPendingDeleteBackup(null)
+      setBackupViewMode('managed')
+      setDiffData(null)
       return
     }
     void loadStatus()
@@ -252,12 +274,28 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
     }
   }
 
+  async function onViewDiff(item: ManagedStrategyBackupItem) {
+    setBusyAction(`diffing:${item.backupId}`)
+    setError('')
+    setNotice('')
+    try {
+      const diff = await getManagedStrategyBackupDiff(item.backupId)
+      setDiffData(diff)
+    } catch (actionError) {
+      setDiffData(null)
+      setError(`查看 diff 失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
   async function onDeleteBackup(item: ManagedStrategyBackupItem) {
     setBusyAction(`deleting:${item.backupId}`)
     setError('')
     try {
       const nextStatus = await deleteManagedStrategyBackup(item.backupId)
       setStatus(nextStatus)
+      setDiffData((current) => (current?.backupId === item.backupId ? null : current))
       setNotice(`已删除策略备份 ${item.folderName}。`)
     } catch (actionError) {
       setNotice('')
@@ -333,7 +371,7 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
           <article className="strategy-asset-summary-card">
             <span>备份数量</span>
             <strong>{backupCount}</strong>
-            <small>{latestBackup ? `最近一份：${formatTime(latestBackup.createdAt)}` : '还没有策略备份'}</small>
+            <small>{latestBackup ? `最近一份：${formatTime(latestBackup.createdAt)}` : '还没有手动/导入备份'}</small>
           </article>
           <article className="strategy-asset-summary-card">
             <span>备份目录</span>
@@ -359,6 +397,14 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
           </button>
           <button className="strategy-asset-btn" type="button" onClick={() => void onExportBundle()} disabled={isBusy}>
             {busyAction === 'exporting-bundle' ? '打包中...' : '导出策略资产包'}
+          </button>
+          <button
+            className={backupViewMode === 'auto' ? 'strategy-asset-btn strategy-asset-btn-active' : 'strategy-asset-btn'}
+            type="button"
+            onClick={() => setBackupViewMode((current) => (current === 'auto' ? 'managed' : 'auto'))}
+            disabled={isBusy}
+          >
+            {backupViewMode === 'auto' ? '返回备份列表' : `自动备份查看 (${autoBackupCount})`}
           </button>
         </div>
 
@@ -391,21 +437,65 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
           </div>
         </section>
 
+        {diffData ? (
+          <section className="strategy-asset-diff">
+            <div className="strategy-asset-section-head">
+              <div>
+                <h4>策略 diff</h4>
+                <p>
+                  {diffData.backupLabel} 对比当前生效 {diffData.activeLabel}，共 {diffData.changedLineCount} 行差异。
+                </p>
+              </div>
+              <button className="strategy-asset-btn strategy-asset-btn-ghost" type="button" onClick={() => setDiffData(null)} disabled={isBusy}>
+                关闭 diff
+              </button>
+            </div>
+            <div className="strategy-asset-diff-head">
+              <span>备份行</span>
+              <span>当前行</span>
+              <span>内容</span>
+            </div>
+            <div className="strategy-asset-diff-body">
+              {diffData.lines.map((line, index) => (
+                <div key={`${line.kind}-${line.backupLine ?? 'n'}-${line.activeLine ?? 'n'}-${index}`} className={`strategy-asset-diff-row is-${line.kind}`}>
+                  <span>{line.backupLine ?? ''}</span>
+                  <span>{line.activeLine ?? ''}</span>
+                  <code>
+                    {line.kind === 'backup'
+                      ? '- '
+                      : line.kind === 'active'
+                        ? '+ '
+                        : line.kind === 'omitted'
+                          ? '... '
+                          : '  '}
+                    {line.text || ' '}
+                  </code>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
         <section className="strategy-asset-backups">
           <div className="strategy-asset-section-head">
             <div>
               <h4>备份策略</h4>
-              <p>导入文件与手动备份都会保存在这里，支持导出、删除和设为当前生效。</p>
+              <p>
+                {backupViewMode === 'auto'
+                  ? '进入策略管理页时生成的自动备份集中保存在这里，支持导出、删除和设为当前生效。'
+                  : '导入文件、空白模板与手动备份保存在这里，支持导出、删除和设为当前生效。'}
+              </p>
             </div>
-            <span className="strategy-asset-pill">{backupCount} 份</span>
+            <span className="strategy-asset-pill">{visibleBackups.length} 份</span>
           </div>
 
-          {status?.backups.length ? (
+          {visibleBackups.length ? (
             <div className="strategy-asset-backup-list">
-              {status.backups.map((item) => {
+              {visibleBackups.map((item) => {
                 const isActivating = busyAction === `activating:${item.backupId}`
                 const isDeleting = busyAction === `deleting:${item.backupId}`
                 const isExporting = busyAction === `exporting:${item.backupId}`
+                const isDiffing = busyAction === `diffing:${item.backupId}`
                 const isSavingDesc = busyAction === `saving-desc:${item.backupId}`
                 const descriptionDraft = descriptionDrafts[item.backupId] ?? ''
                 const descriptionDirty = descriptionDraft.trim() !== (item.description ?? '').trim()
@@ -422,10 +512,18 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
                             ? 'strategy-asset-tag is-imported'
                             : item.sourceKind === 'empty'
                               ? 'strategy-asset-tag is-empty'
+                              : item.sourceKind === 'auto_entry'
+                                ? 'strategy-asset-tag is-auto'
                               : 'strategy-asset-tag'
                         }
                       >
-                        {item.sourceKind === 'imported' ? '导入' : item.sourceKind === 'empty' ? '模板' : '备份'}
+                        {item.sourceKind === 'imported'
+                          ? '导入'
+                          : item.sourceKind === 'empty'
+                            ? '模板'
+                            : item.sourceKind === 'auto_entry'
+                              ? '自动'
+                              : '备份'}
                       </span>
                     </div>
 
@@ -476,6 +574,9 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
                       <button className="strategy-asset-btn" type="button" onClick={() => void onExportBackup(item)} disabled={isBusy}>
                         {isExporting ? '导出中...' : '导出'}
                       </button>
+                      <button className="strategy-asset-btn" type="button" onClick={() => void onViewDiff(item)} disabled={isBusy}>
+                        {isDiffing ? '对比中...' : '查看 diff'}
+                      </button>
                       <button className="strategy-asset-btn strategy-asset-btn-danger" type="button" onClick={() => setPendingDeleteBackup(item)} disabled={isBusy}>
                         {isDeleting ? '删除中...' : '删除'}
                       </button>
@@ -486,7 +587,9 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
             </div>
           ) : (
             <div className="strategy-asset-empty">
-              还没有策略备份。你可以先导入外部策略文件，或者把当前生效策略备份一份。
+              {backupViewMode === 'auto'
+                ? '还没有自动备份。进入策略管理页且当前策略内容未在备份区出现过时，会自动生成一份。'
+                : '还没有策略备份。你可以先导入外部策略文件，或者把当前生效策略备份一份。'}
             </div>
           )}
         </section>

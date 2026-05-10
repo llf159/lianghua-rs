@@ -67,9 +67,12 @@ use lianghua_rs::ui_tools_feat::{
         run_rank_layer_backtest as core_run_rank_layer_backtest,
         run_rule_expression_validation as core_run_rule_expression_validation,
         run_rule_layer_backtest as core_run_rule_layer_backtest,
-        run_scene_layer_backtest as core_run_scene_layer_backtest, MarketAnalysisData,
-        MarketContributionData, RankLayerBacktestData, RuleExpressionValidationData,
-        RuleExpressionValidationManualStrategy, RuleLayerBacktestData,
+        run_scene_layer_backtest as core_run_scene_layer_backtest,
+        run_transient_rank_layer_backtest as core_run_transient_rank_layer_backtest,
+        run_transient_rule_layer_backtest as core_run_transient_rule_layer_backtest,
+        run_transient_scene_layer_backtest as core_run_transient_scene_layer_backtest,
+        MarketAnalysisData, MarketContributionData, RankLayerBacktestData,
+        RuleExpressionValidationData, RuleExpressionValidationManualStrategy, RuleLayerBacktestData,
         RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig, SceneLayerBacktestData,
         SceneLayerBacktestDefaultsData, SceneStatisticsPageData, StrategyStatisticsDetailData,
         StrategyStatisticsPageData, TriggeredStockRow,
@@ -115,13 +118,15 @@ use data_download_bridge::{
     run_ths_concept_download, save_indicator_manage_page,
 };
 use managed_source_bridge::{
-    activate_managed_strategy_backup, allow_import_path, backup_managed_active_strategy,
+    activate_managed_strategy_backup, allow_import_path,
+    auto_backup_managed_active_strategy_on_entry, backup_managed_active_strategy,
     copy_import_file_to_appdata, create_managed_empty_strategy_backup,
     delete_managed_strategy_backup, export_managed_source_directory,
     export_managed_source_directory_mobile, export_managed_source_file,
     export_managed_strategy_backup_file, export_managed_strategy_bundle,
-    get_managed_strategy_assets_status, import_managed_source_zip, import_managed_strategy_backup,
-    preview_managed_source_dataset, preview_managed_source_stock_data,
+    get_managed_strategy_assets_status, get_managed_strategy_backup_diff,
+    import_managed_source_zip, import_managed_strategy_backup, preview_managed_source_dataset,
+    preview_managed_source_stock_data,
     update_managed_strategy_backup_description,
 };
 
@@ -861,6 +866,115 @@ async fn run_rank_layer_backtest(
 }
 
 #[tauri::command]
+async fn run_transient_scene_layer_backtest(
+    source_path: String,
+    stock_adj_type: Option<String>,
+    index_ts_code: String,
+    index_beta: Option<f64>,
+    concept_beta: Option<f64>,
+    industry_beta: Option<f64>,
+    start_date: String,
+    end_date: String,
+    min_samples_per_scene_day: Option<usize>,
+    min_listed_trade_days: Option<usize>,
+    backtest_period: Option<usize>,
+) -> Result<SceneLayerBacktestData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        run_with_heap_trim(|| {
+            core_run_transient_scene_layer_backtest(
+                source_path,
+                stock_adj_type,
+                index_ts_code,
+                index_beta,
+                concept_beta,
+                industry_beta,
+                start_date,
+                end_date,
+                min_samples_per_scene_day,
+                min_listed_trade_days,
+                backtest_period,
+            )
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn run_transient_rule_layer_backtest(
+    source_path: String,
+    stock_adj_type: Option<String>,
+    index_ts_code: String,
+    index_beta: Option<f64>,
+    concept_beta: Option<f64>,
+    industry_beta: Option<f64>,
+    start_date: String,
+    end_date: String,
+    min_samples_per_rule_day: Option<usize>,
+    min_listed_trade_days: Option<usize>,
+    backtest_period: Option<usize>,
+) -> Result<RuleLayerBacktestData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        run_with_heap_trim(|| {
+            core_run_transient_rule_layer_backtest(
+                source_path,
+                stock_adj_type,
+                index_ts_code,
+                index_beta,
+                concept_beta,
+                industry_beta,
+                start_date,
+                end_date,
+                min_samples_per_rule_day,
+                min_listed_trade_days,
+                backtest_period,
+            )
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn run_transient_rank_layer_backtest(
+    source_path: String,
+    stock_adj_type: Option<String>,
+    index_ts_code: String,
+    index_beta: Option<f64>,
+    concept_beta: Option<f64>,
+    industry_beta: Option<f64>,
+    start_date: String,
+    end_date: String,
+    min_samples_per_rank_day: Option<usize>,
+    min_listed_trade_days: Option<usize>,
+    backtest_period: Option<usize>,
+    layer_count: Option<usize>,
+    layer_method: Option<String>,
+) -> Result<RankLayerBacktestData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        run_with_heap_trim(|| {
+            core_run_transient_rank_layer_backtest(
+                source_path,
+                stock_adj_type,
+                index_ts_code,
+                index_beta,
+                concept_beta,
+                industry_beta,
+                start_date,
+                end_date,
+                min_samples_per_rank_day,
+                min_listed_trade_days,
+                backtest_period,
+                layer_count,
+                layer_method,
+            )
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn run_rule_expression_validation(
     source_path: String,
     import_rule_name: String,
@@ -1253,6 +1367,8 @@ pub fn run() {
             import_managed_source_zip,
             get_managed_strategy_assets_status,
             import_managed_strategy_backup,
+            auto_backup_managed_active_strategy_on_entry,
+            get_managed_strategy_backup_diff,
             backup_managed_active_strategy,
             create_managed_empty_strategy_backup,
             activate_managed_strategy_backup,
@@ -1299,6 +1415,9 @@ pub fn run() {
             run_rank_layer_backtest,
             run_scene_layer_backtest,
             run_rule_layer_backtest,
+            run_transient_rank_layer_backtest,
+            run_transient_scene_layer_backtest,
+            run_transient_rule_layer_backtest,
             run_rule_expression_validation,
             get_ranking_compute_status,
             run_ranking_score_calculation,

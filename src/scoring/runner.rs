@@ -7,7 +7,8 @@ use std::{
 
 use crate::data::scoring_data::{
     SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage, ScoreWriteProfile,
-    cache_rule_build, init_result_db, row_into_rt, write_score_batches_from_channel,
+    cache_rule_build, init_result_db, rank_scene_rows, rank_summary_rows_by_score, row_into_rt,
+    write_score_batches_from_channel,
 };
 use crate::data::{
     DataReader, RowData, RuntimeKeyCollectOptions, ScoreRule, ScoreScene,
@@ -308,6 +309,81 @@ pub fn scoring_all_to_db(
     };
     log_scoring_run_profile(&profile);
     Ok(profile)
+}
+
+pub fn scoring_all_to_memory(
+    source_dir: &str,
+    strategy_path: Option<&str>,
+    adj_type: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<(ScoreBatch, ScoringRunProfile), String> {
+    let total_started_at = time::Instant::now();
+    let prepare_started_at = time::Instant::now();
+    let st_list = load_st_list(source_dir)?;
+    let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
+    let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
+    let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
+    let rules_cache = cache_rule_build(source_dir, strategy_path)?;
+    let required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
+    let dr = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
+    let tc_list = DataReader::list_ts_code(&dr, adj_type, start_date, end_date)?;
+    let rule_scene_meta: Vec<RuleSceneMeta> =
+        ScoreRule::load_rules_with_strategy_path(source_dir, strategy_path)?
+            .into_iter()
+            .map(|rule| RuleSceneMeta {
+                scene_name: rule.scene_name,
+                stage: rule.stage,
+            })
+            .collect();
+    let scenes = ScoreScene::load_scenes_with_strategy_path(source_dir, strategy_path)?;
+    let prepare_ms = prepare_started_at.elapsed().as_millis() as u64;
+
+    let compute_started_at = time::Instant::now();
+    let batch_results = tc_list
+        .par_chunks(SCORING_GROUP_SIZE)
+        .map(|ts_group| -> Result<ScoreBatch, String> {
+            let worker_reader =
+                DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
+            scoring_stock_group_batch(
+                &worker_reader,
+                adj_type,
+                start_date,
+                end_date,
+                need_rows,
+                &rules_cache,
+                &rule_scene_meta,
+                &scenes,
+                &st_list,
+                &total_share_map,
+                ts_group,
+            )
+        })
+        .collect::<Vec<_>>();
+    let compute_and_send_batches_ms = compute_started_at.elapsed().as_millis() as u64;
+
+    let mut batch = ScoreBatch::default();
+    let mut batch_count = 0usize;
+    for item in batch_results {
+        batch.extend(item?);
+        batch_count += 1;
+    }
+
+    rank_summary_rows_by_score(&mut batch.summary_rows);
+    rank_scene_rows(&mut batch.scene_rows);
+
+    let profile = ScoringRunProfile {
+        total_ms: total_started_at.elapsed().as_millis() as u64,
+        init_result_db_ms: 0,
+        prepare_ms,
+        compute_and_send_batches_ms,
+        stock_count: tc_list.len(),
+        writer: ScoreWriteProfile {
+            batch_count,
+            ..ScoreWriteProfile::default()
+        },
+    };
+    Ok((batch, profile))
 }
 
 pub fn scoring_single_period(

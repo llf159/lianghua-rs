@@ -462,6 +462,10 @@ export async function runSceneLayerBacktest(query: SceneLayerBacktestQuery) {
   return invoke<SceneLayerBacktestData>('run_scene_layer_backtest', query)
 }
 
+export async function runTransientSceneLayerBacktest(query: SceneLayerBacktestQuery) {
+  return invoke<SceneLayerBacktestData>('run_transient_scene_layer_backtest', query)
+}
+
 export async function getRuleLayerBacktestDefaults(sourcePath: string) {
   return invoke<RuleLayerBacktestDefaultsData>('get_rule_layer_backtest_defaults', { sourcePath })
 }
@@ -470,8 +474,16 @@ export async function runRuleLayerBacktest(query: RuleLayerBacktestQuery) {
   return invoke<RuleLayerBacktestData>('run_rule_layer_backtest', query)
 }
 
+export async function runTransientRuleLayerBacktest(query: RuleLayerBacktestQuery) {
+  return invoke<RuleLayerBacktestData>('run_transient_rule_layer_backtest', query)
+}
+
 export async function runRankLayerBacktest(query: RankLayerBacktestQuery) {
   return invoke<RankLayerBacktestData>('run_rank_layer_backtest', query)
+}
+
+export async function runTransientRankLayerBacktest(query: RankLayerBacktestQuery) {
+  return invoke<RankLayerBacktestData>('run_transient_rank_layer_backtest', query)
 }
 
 export async function runRuleExpressionValidation(query: RuleExpressionValidationQuery) {

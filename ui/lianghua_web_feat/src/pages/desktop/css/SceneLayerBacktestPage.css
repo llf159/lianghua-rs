@@ -109,6 +109,9 @@
 
 .scene-layer-actions {
   margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .scene-layer-primary-btn {
@@ -475,6 +478,11 @@
 
 .scene-layer-secondary-btn:hover {
   background: #eef5ff;
+}
+
+.scene-layer-secondary-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .scene-layer-validation-unknown-list {

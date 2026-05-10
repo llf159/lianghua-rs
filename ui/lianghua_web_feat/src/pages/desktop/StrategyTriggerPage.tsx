@@ -163,6 +163,8 @@ type RankDistributionBucketGeometry = {
   positiveCount: number;
   negativeCount: number;
   flatCount: number;
+  bucketRatio: number | null;
+  cumulativeRatio: number | null;
   avgRuleScore: number | null;
   avgTotalScore: number | null;
 };
@@ -211,6 +213,7 @@ const MINI_CANDLE_FLAT_COLOR = "#536273";
 const OVERVIEW_CHART_TOOLTIP_LEFT_THRESHOLD = 62;
 const OVERVIEW_CHART_POINTER_DRAG_THRESHOLD = 6;
 const OVERVIEW_CHART_TOUCH_FOCUS_HIT_SLOP = 24;
+const RANK_DISTRIBUTION_SCALE_EXPONENT = 0.72;
 
 function parseCompactDate(value?: string | null) {
   if (!value || value.length !== 8) {
@@ -805,7 +808,7 @@ function buildRankDistributionGeometry(
   const width = 980;
   const height = 360;
   const marginTop = 22;
-  const marginRight = 76;
+  const marginRight = 188;
   const marginBottom = 44;
   const marginLeft = 92;
   const plotWidth = width - marginLeft - marginRight;
@@ -826,7 +829,9 @@ function buildRankDistributionGeometry(
     ),
   );
   const countToX = (value: number) =>
-    marginLeft + (value / countMax) * plotWidth;
+    marginLeft +
+    Math.pow(Math.max(value, 0) / countMax, RANK_DISTRIBUTION_SCALE_EXPONENT) *
+      plotWidth;
   const rowGap = 9;
   const rowHeight =
     (plotHeight - rowGap * (RANK_DISTRIBUTION_BUCKETS.length - 1)) /
@@ -839,8 +844,10 @@ function buildRankDistributionGeometry(
     .map((row) => toFiniteNumber(row.rule_score))
     .filter((score): score is number => score !== null);
 
+  let cumulativeCount = 0;
   const buckets = RANK_DISTRIBUTION_BUCKETS.map((bucket, index) => {
     const bucketItems = bucketRows.get(bucket.key) ?? [];
+    cumulativeCount += bucketItems.length;
     const positiveCount = bucketItems.filter(
       (row) => (toFiniteNumber(row.rule_score) ?? 0) > 0,
     ).length;
@@ -851,7 +858,11 @@ function buildRankDistributionGeometry(
       0,
       bucketItems.length - positiveCount - negativeCount,
     );
-    const widthValue = (bucketItems.length / countMax) * plotWidth;
+    const widthValue =
+      Math.pow(
+        bucketItems.length / countMax,
+        RANK_DISTRIBUTION_SCALE_EXPONENT,
+      ) * plotWidth;
     const positiveWidth =
       bucketItems.length > 0
         ? (positiveCount / bucketItems.length) * widthValue
@@ -884,6 +895,8 @@ function buildRankDistributionGeometry(
       positiveCount,
       negativeCount,
       flatCount,
+      bucketRatio: rows.length > 0 ? bucketItems.length / rows.length : null,
+      cumulativeRatio: rows.length > 0 ? cumulativeCount / rows.length : null,
       avgRuleScore: average(bucketRuleScores),
       avgTotalScore: average(bucketTotalScores),
     };
@@ -1395,50 +1408,8 @@ function StrategyRankDistributionChart({
     );
   }
 
-  const rankedRatio =
-    rows.length > 0 ? geometry.rankedCount / rows.length : null;
-  const top300Ratio =
-    geometry.rankedCount > 0
-      ? geometry.top300Count / geometry.rankedCount
-      : null;
-
   return (
     <div className="strategy-trigger-rank-chart-shell">
-      <div className="strategy-trigger-rank-summary">
-        <div className="strategy-trigger-rank-summary-item">
-          <span>触发样本</span>
-          <strong>{formatInteger(rows.length)}</strong>
-        </div>
-        <div className="strategy-trigger-rank-summary-item">
-          <span>有排名</span>
-          <strong>
-            {formatInteger(geometry.rankedCount)}
-            <small>{formatPercent(rankedRatio)}</small>
-          </strong>
-        </div>
-        <div className="strategy-trigger-rank-summary-item">
-          <span>前300占比</span>
-          <strong>
-            {formatInteger(geometry.top300Count)}
-            <small>{formatPercent(top300Ratio)}</small>
-          </strong>
-        </div>
-        <div className="strategy-trigger-rank-summary-item">
-          <span>排名中位数</span>
-          <strong>{formatInteger(geometry.medianRank)}</strong>
-        </div>
-        <div className="strategy-trigger-rank-summary-item">
-          <span>平均排名</span>
-          <strong>{formatInteger(geometry.avgRank)}</strong>
-        </div>
-        <div className="strategy-trigger-rank-summary-item">
-          <span>平均策略得分</span>
-          <strong className={getSignedValueClassName(geometry.avgRuleScore)}>
-            {formatNumber(geometry.avgRuleScore)}
-          </strong>
-        </div>
-      </div>
-
       <div className="strategy-trigger-rank-legend">
         <span className="strategy-trigger-rank-legend-item">
           <i className="strategy-trigger-rank-legend-swatch strategy-trigger-rank-legend-positive" />
@@ -1456,7 +1427,7 @@ function StrategyRankDistributionChart({
       <svg
         className="strategy-trigger-rank-chart"
         viewBox={geometry.viewBox}
-        preserveAspectRatio="none"
+        preserveAspectRatio="xMidYMid meet"
       >
         {geometry.countTicks.map((tick) => (
           <g key={`count-${tick.value}`}>
@@ -1542,25 +1513,21 @@ function StrategyRankDistributionChart({
               y={bucket.y + bucket.height / 2 + 4}
               className="strategy-trigger-rank-chart-value"
             >
-              {formatInteger(bucket.count)}
+              {formatInteger(bucket.count)} -{" "}
+              {formatPercent(bucket.bucketRatio)} -{" "}
+              {formatPercent(bucket.cumulativeRatio)}
             </text>
           </g>
         ))}
         <text
-          x={geometry.plotLeft}
-          y={geometry.plotBottom + 25}
+          x={(geometry.plotLeft + geometry.plotRight) / 2}
+          y={geometry.height - 6}
+          textAnchor="middle"
           className="strategy-trigger-rank-chart-axis strategy-trigger-rank-chart-axis-caption"
         >
-          股票数量
+          股票数量 · 0.72次幂缩放
         </text>
       </svg>
-      <div className="strategy-trigger-rank-footnotes">
-        <span>最佳排名 {formatInteger(geometry.bestRank)}</span>
-        <span>最末排名 {formatInteger(geometry.worstRank)}</span>
-        <span>前10 {formatInteger(geometry.top10Count)}</span>
-        <span>前50 {formatInteger(geometry.top50Count)}</span>
-        <span>无排名 {formatInteger(geometry.unrankedCount)}</span>
-      </div>
     </div>
   );
 }
@@ -1624,6 +1591,15 @@ function StrategyDetailModal({
     sourcePath: sourcePath.trim() || undefined,
     name: row.name ?? undefined,
   }));
+  const rankDistributionGeometry = useMemo(
+    () => buildRankDistributionGeometry(detailData?.triggered_stocks ?? []),
+    [detailData?.triggered_stocks],
+  );
+  const top300Ratio =
+    rankDistributionGeometry && rankDistributionGeometry.rankedCount > 0
+      ? rankDistributionGeometry.top300Count /
+        rankDistributionGeometry.rankedCount
+      : null;
 
   if (typeof document === "undefined") {
     return null;
@@ -1693,9 +1669,12 @@ function StrategyDetailModal({
                   <strong>{selectedDailyRow?.trigger_mode ?? "--"}</strong>
                 </div>
                 <div className="strategy-trigger-summary-item">
-                  <span>触发次数</span>
+                  <span>触发样本</span>
                   <strong>
                     {formatInteger(selectedDailyRow?.trigger_count)}
+                    <small>
+                      触发占比 {formatPercent(selectedDailyRow?.coverage)}
+                    </small>
                   </strong>
                 </div>
                 <div className="strategy-trigger-summary-item">
@@ -1706,16 +1685,20 @@ function StrategyDetailModal({
                     )}
                   >
                     {formatNumber(selectedDailyRow?.contribution_score)}
+                    <small>
+                      单次{" "}
+                      {formatNumber(selectedDailyRow?.contribution_per_trigger)}
+                    </small>
                   </strong>
                 </div>
                 <div className="strategy-trigger-summary-item">
-                  <span>单次贡献</span>
+                  <span>平均策略得分</span>
                   <strong
                     className={getSignedValueClassName(
-                      selectedDailyRow?.contribution_per_trigger,
+                      rankDistributionGeometry?.avgRuleScore,
                     )}
                   >
-                    {formatNumber(selectedDailyRow?.contribution_per_trigger)}
+                    {formatNumber(rankDistributionGeometry?.avgRuleScore)}
                   </strong>
                 </div>
                 <div className="strategy-trigger-summary-item">
@@ -1725,18 +1708,23 @@ function StrategyDetailModal({
                   </strong>
                 </div>
                 <div className="strategy-trigger-summary-item">
-                  <span>覆盖率</span>
-                  <strong>{formatPercent(selectedDailyRow?.coverage)}</strong>
-                </div>
-                <div className="strategy-trigger-summary-item">
-                  <span>中位触发次数</span>
+                  <span>前300占比</span>
                   <strong>
-                    {formatNumber(selectedDailyRow?.median_trigger_count)}
+                    {formatInteger(rankDistributionGeometry?.top300Count)}
+                    <small>{formatPercent(top300Ratio)}</small>
                   </strong>
                 </div>
                 <div className="strategy-trigger-summary-item">
-                  <span>当日最优排名</span>
-                  <strong>{formatInteger(selectedDailyRow?.best_rank)}</strong>
+                  <span>排名中位数</span>
+                  <strong>
+                    {formatInteger(rankDistributionGeometry?.medianRank)}
+                  </strong>
+                </div>
+                <div className="strategy-trigger-summary-item">
+                  <span>最佳排名</span>
+                  <strong>
+                    {formatInteger(rankDistributionGeometry?.bestRank)}
+                  </strong>
                 </div>
               </div>
 
