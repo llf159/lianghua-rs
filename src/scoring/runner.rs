@@ -16,6 +16,7 @@ use crate::data::{
 };
 use crate::scoring::{
     CachedRule, RuleSceneMeta, TieBreakWay, build_scene_score_series, scoring_rules_details_cache,
+    scoring_rules_total_cache,
     tools::{
         calc_query_need_rows, inject_stock_extra_fields, load_st_list, load_total_share_map,
         warmup_rows_estimate,
@@ -26,6 +27,14 @@ const SCORING_GROUP_SIZE: usize = 128;
 const SCORING_QUEUE_BOUND: usize = 8;
 const SCORING_INJECTED_RUNTIME_KEYS: [&str; 2] = ["ZHANG", "TOTAL_MV_YI"];
 const SCORING_RUNTIME_ALIASES: [(&str, &str); 0] = [];
+
+#[derive(Debug, Clone, Copy)]
+pub enum ScoringMemoryMode {
+    All,
+    SummaryOnly,
+    SummaryAndDetails,
+    SceneOnly,
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct ScoringRunProfile {
@@ -83,12 +92,10 @@ fn scoring_single_core(
     rules_cache: &[CachedRule],
     rule_scene_meta: &[RuleSceneMeta],
     scenes: &[ScoreScene],
+    memory_mode: ScoringMemoryMode,
 ) -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>, Vec<SceneDetails>), String> {
     let trade_dates = row_data.trade_dates.clone();
     let mut rt = row_into_rt(row_data)?;
-
-    let result = scoring_rules_details_cache(&mut rt, &rules_cache)?;
-    let (s, mut d) = (result.0, result.1);
 
     let keep_from = trade_dates
         .binary_search_by(|d| d.as_str().cmp(score_start_date))
@@ -99,17 +106,48 @@ fn scoring_single_core(
     }
 
     let kept_trade_dates = &trade_dates[keep_from..];
-    let kept_scores = &s[keep_from..];
 
-    for rule in &mut d {
+    if matches!(memory_mode, ScoringMemoryMode::SummaryOnly) {
+        let total_scores = scoring_rules_total_cache(&mut rt, rules_cache)?;
+        let kept_scores = &total_scores[keep_from..];
+        let summary = ScoreSummary::build(ts_code, kept_trade_dates, kept_scores);
+        return Ok((summary, Vec::new(), Vec::new()));
+    }
+
+    let result = scoring_rules_details_cache(&mut rt, rules_cache)?;
+    let (total_scores, mut details_series) = (result.0, result.1);
+    let kept_scores = &total_scores[keep_from..];
+
+    for rule in &mut details_series {
         rule.series = rule.series.split_off(keep_from);
         rule.triggered = rule.triggered.split_off(keep_from);
     }
 
-    let summary = ScoreSummary::build(ts_code, kept_trade_dates, kept_scores);
-    let details = ScoreDetails::build(ts_code, kept_trade_dates, &d);
-    let scene_series = build_scene_score_series(rule_scene_meta, &d, scenes);
-    let scene_details = SceneDetails::build(ts_code, kept_trade_dates, kept_scores, &scene_series);
+    let summary = if matches!(
+        memory_mode,
+        ScoringMemoryMode::All | ScoringMemoryMode::SummaryAndDetails
+    ) {
+        ScoreSummary::build(ts_code, kept_trade_dates, kept_scores)
+    } else {
+        Vec::new()
+    };
+    let details = if matches!(
+        memory_mode,
+        ScoringMemoryMode::All | ScoringMemoryMode::SummaryAndDetails
+    ) {
+        ScoreDetails::build(ts_code, kept_trade_dates, &details_series)
+    } else {
+        Vec::new()
+    };
+    let scene_details = if matches!(
+        memory_mode,
+        ScoringMemoryMode::All | ScoringMemoryMode::SceneOnly
+    ) {
+        let scene_series = build_scene_score_series(rule_scene_meta, &details_series, scenes);
+        SceneDetails::build(ts_code, kept_trade_dates, kept_scores, &scene_series)
+    } else {
+        Vec::new()
+    };
 
     Ok((summary, details, scene_details))
 }
@@ -142,6 +180,7 @@ fn scoring_stock_batch(
     st_list: &HashSet<String>,
     total_share_map: &HashMap<String, f64>,
     ts_code: &str,
+    memory_mode: ScoringMemoryMode,
 ) -> Result<ScoreBatch, String> {
     let mut row = worker_reader.load_one_tail_rows(ts_code, adj_type, end_date, need_rows)?;
     inject_stock_extra_fields(
@@ -157,6 +196,7 @@ fn scoring_stock_batch(
         rules_cache,
         rule_scene_meta,
         scenes,
+        memory_mode,
     )?;
 
     Ok(ScoreBatch {
@@ -178,6 +218,7 @@ fn scoring_stock_group_batch(
     st_list: &HashSet<String>,
     total_share_map: &HashMap<String, f64>,
     ts_group: &[String],
+    memory_mode: ScoringMemoryMode,
 ) -> Result<ScoreBatch, String> {
     let mut group_batch = ScoreBatch::default();
     for ts_code in ts_group {
@@ -193,6 +234,7 @@ fn scoring_stock_group_batch(
             st_list,
             total_share_map,
             ts_code,
+            memory_mode,
         )?;
         group_batch.extend(batch);
     }
@@ -277,6 +319,7 @@ pub fn scoring_all_to_db(
                 &st_list,
                 &total_share_map,
                 ts_group,
+                ScoringMemoryMode::All,
             )?;
             sender
                 .send(ScoreWriteMessage::Batch(batch))
@@ -318,6 +361,24 @@ pub fn scoring_all_to_memory(
     start_date: &str,
     end_date: &str,
 ) -> Result<(ScoreBatch, ScoringRunProfile), String> {
+    scoring_all_to_memory_with_mode(
+        source_dir,
+        strategy_path,
+        adj_type,
+        start_date,
+        end_date,
+        ScoringMemoryMode::All,
+    )
+}
+
+pub fn scoring_all_to_memory_with_mode(
+    source_dir: &str,
+    strategy_path: Option<&str>,
+    adj_type: &str,
+    start_date: &str,
+    end_date: &str,
+    memory_mode: ScoringMemoryMode,
+) -> Result<(ScoreBatch, ScoringRunProfile), String> {
     let total_started_at = time::Instant::now();
     let prepare_started_at = time::Instant::now();
     let st_list = load_st_list(source_dir)?;
@@ -340,7 +401,7 @@ pub fn scoring_all_to_memory(
     let prepare_ms = prepare_started_at.elapsed().as_millis() as u64;
 
     let compute_started_at = time::Instant::now();
-    let batch_results = tc_list
+    let batch = tc_list
         .par_chunks(SCORING_GROUP_SIZE)
         .map(|ts_group| -> Result<ScoreBatch, String> {
             let worker_reader =
@@ -357,20 +418,24 @@ pub fn scoring_all_to_memory(
                 &st_list,
                 &total_share_map,
                 ts_group,
+                memory_mode,
             )
         })
-        .collect::<Vec<_>>();
+        .try_reduce(ScoreBatch::default, |mut left, right| {
+            left.extend(right);
+            Ok(left)
+        })?;
     let compute_and_send_batches_ms = compute_started_at.elapsed().as_millis() as u64;
 
-    let mut batch = ScoreBatch::default();
-    let mut batch_count = 0usize;
-    for item in batch_results {
-        batch.extend(item?);
-        batch_count += 1;
-    }
+    let batch_count = (tc_list.len() + SCORING_GROUP_SIZE - 1) / SCORING_GROUP_SIZE;
 
-    rank_summary_rows_by_score(&mut batch.summary_rows);
-    rank_scene_rows(&mut batch.scene_rows);
+    let mut batch = batch;
+    if !batch.summary_rows.is_empty() {
+        rank_summary_rows_by_score(&mut batch.summary_rows);
+    }
+    if !batch.scene_rows.is_empty() {
+        rank_scene_rows(&mut batch.scene_rows);
+    }
 
     let profile = ScoringRunProfile {
         total_ms: total_started_at.elapsed().as_millis() as u64,
@@ -425,6 +490,7 @@ pub fn scoring_single_period(
         &rules_cache,
         &rule_scene_meta,
         &scenes,
+        ScoringMemoryMode::All,
     )?)
 }
 

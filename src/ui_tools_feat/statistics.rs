@@ -18,7 +18,7 @@ use crate::{
         lexer::TokenKind,
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
-    scoring::runner::scoring_all_to_memory,
+    scoring::runner::{ScoringMemoryMode, scoring_all_to_memory_with_mode},
     scoring::tools::{
         calc_query_need_rows, calc_query_start_date, inject_stock_extra_fields, load_st_list,
         load_total_share_map,
@@ -3963,95 +3963,6 @@ fn build_rule_contribution_averages(
         .collect())
 }
 
-fn build_rule_contribution_averages_from_rows(
-    rule_options: &[String],
-    summary_rows: &[crate::data::scoring_data::ScoreSummary],
-    detail_rows: &[crate::data::scoring_data::ScoreDetails],
-    start_date: &str,
-    end_date: &str,
-) -> HashMap<String, RuleContributionAverages> {
-    let rule_set: HashSet<&str> = rule_options.iter().map(String::as_str).collect();
-    let mut max_rank_by_date: HashMap<&str, i64> = HashMap::new();
-    let mut rank_by_pair: HashMap<(&str, &str), i64> = HashMap::new();
-
-    for row in summary_rows {
-        if row.trade_date.as_str() < start_date || row.trade_date.as_str() > end_date {
-            continue;
-        }
-        let Some(rank) = row.rank else {
-            continue;
-        };
-        max_rank_by_date
-            .entry(row.trade_date.as_str())
-            .and_modify(|value| *value = (*value).max(rank))
-            .or_insert(rank);
-        rank_by_pair.insert((row.ts_code.as_str(), row.trade_date.as_str()), rank);
-    }
-
-    let mut daily_contribution: HashMap<(String, String), f64> = HashMap::new();
-    let mut daily_triggers: HashMap<(String, String), i64> = HashMap::new();
-    for row in detail_rows {
-        if !rule_set.contains(row.rule_name.as_str())
-            || row.trade_date.as_str() < start_date
-            || row.trade_date.as_str() > end_date
-            || !row.rule_score.is_finite()
-            || row.rule_score.abs() <= RULE_BACKTEST_EPS
-        {
-            continue;
-        }
-        let key = (row.trade_date.clone(), row.rule_name.clone());
-        *daily_triggers.entry(key.clone()).or_default() += 1;
-        let Some(rank) = rank_by_pair.get(&(row.ts_code.as_str(), row.trade_date.as_str())) else {
-            continue;
-        };
-        let Some(max_rank) = max_rank_by_date.get(row.trade_date.as_str()).copied() else {
-            continue;
-        };
-        if max_rank <= 0 {
-            continue;
-        }
-        let weight = (max_rank + 1 - *rank) as f64 / max_rank as f64;
-        *daily_contribution.entry(key).or_default() += row.rule_score * weight;
-    }
-
-    let mut acc_map: HashMap<String, RuleContributionAccumulator> = HashMap::new();
-    for ((_, rule_name), contribution_score) in daily_contribution {
-        if !contribution_score.is_finite() {
-            continue;
-        }
-        let acc = acc_map.entry(rule_name).or_default();
-        acc.contribution_sum += contribution_score;
-        acc.contribution_days += 1;
-    }
-    for ((_, rule_name), trigger_count) in daily_triggers {
-        acc_map.entry(rule_name).or_default().trigger_count += trigger_count.max(0);
-    }
-
-    acc_map
-        .into_iter()
-        .map(|(rule_name, acc)| {
-            let avg_contribution_score = if acc.contribution_days > 0 {
-                Some(acc.contribution_sum / acc.contribution_days as f64)
-            } else {
-                None
-            };
-            let avg_contribution_per_trigger = if acc.trigger_count > 0 {
-                Some(acc.contribution_sum / acc.trigger_count as f64)
-            } else {
-                None
-            };
-
-            (
-                rule_name,
-                RuleContributionAverages {
-                    avg_contribution_score,
-                    avg_contribution_per_trigger,
-                },
-            )
-        })
-        .collect()
-}
-
 fn weighted_rule_summary_metric(
     summaries: &[RuleLayerRuleSummary],
     value: impl Fn(&RuleLayerRuleSummary) -> Option<f64>,
@@ -4649,12 +4560,13 @@ pub fn run_transient_scene_layer_backtest(
         backtest_period: params.backtest_period,
         min_listed_trade_days: params.min_listed_trade_days,
     };
-    let (score_batch, _) = scoring_all_to_memory(
+    let (score_batch, _) = scoring_all_to_memory_with_mode(
         &source_path,
         None,
         &params.stock_adj_type,
         &params.start_date,
         &params.end_date,
+        ScoringMemoryMode::SceneOnly,
     )?;
     let scene_options = load_scene_options(&source_path)?;
     let all_metrics = calc_all_scene_layer_metrics_from_rows(
@@ -4756,12 +4668,13 @@ pub fn run_transient_rule_layer_backtest(
         backtest_period: params.backtest_period,
         min_listed_trade_days: params.min_listed_trade_days,
     };
-    let (score_batch, _) = scoring_all_to_memory(
+    let (score_batch, _) = scoring_all_to_memory_with_mode(
         &source_path,
         None,
         &params.stock_adj_type,
         &params.start_date,
         &params.end_date,
+        ScoringMemoryMode::SummaryAndDetails,
     )?;
     let (rule_options, _) = load_rule_meta(&source_path)?;
     let all_metrics = calc_all_rule_layer_metrics_from_rows(
@@ -4779,26 +4692,15 @@ pub fn run_transient_rule_layer_backtest(
         &params.end_date,
         &layer_config,
     )?;
-    let contribution_averages = build_rule_contribution_averages_from_rows(
-        &rule_options,
-        &score_batch.summary_rows,
-        &score_batch.detail_rows,
-        &params.start_date,
-        &params.end_date,
-    );
     let mut all_rule_summaries = Vec::with_capacity(all_metrics.len());
     for (one_rule_name, metrics) in all_metrics {
-        let contribution_average = contribution_averages
-            .get(&one_rule_name)
-            .cloned()
-            .unwrap_or_default();
         all_rule_summaries.push(RuleLayerRuleSummary {
             rule_name: one_rule_name,
             point_count: metrics.points.len(),
             avg_residual_mean: metrics.avg_residual_mean,
             spread_mean: metrics.spread_mean,
-            avg_contribution_score: contribution_average.avg_contribution_score,
-            avg_contribution_per_trigger: contribution_average.avg_contribution_per_trigger,
+            avg_contribution_score: None,
+            avg_contribution_per_trigger: None,
             ic_mean: metrics.ic_mean,
             ic_std: metrics.ic_std,
             icir: metrics.icir,
@@ -4907,12 +4809,13 @@ pub fn run_transient_rank_layer_backtest(
         end_date: params.end_date,
         layer_config,
     };
-    let (score_batch, _) = scoring_all_to_memory(
+    let (score_batch, _) = scoring_all_to_memory_with_mode(
         &source_path,
         None,
         &input.stock_adj_type,
         &input.start_date,
         &input.end_date,
+        ScoringMemoryMode::SummaryOnly,
     )?;
     let metrics = calc_rank_layer_metrics_from_score_rows(
         &source_conn,

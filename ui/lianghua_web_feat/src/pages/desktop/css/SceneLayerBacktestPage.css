@@ -916,6 +916,15 @@
   font-variant-numeric: tabular-nums;
 }
 
+.market-analysis-main-card .market-analysis-gain-table {
+  min-width: 680px;
+}
+
+.market-analysis-main-card .market-analysis-gain-table th:nth-child(3),
+.market-analysis-main-card .market-analysis-gain-table td:nth-child(3) {
+  width: 100px;
+}
+
 .market-analysis-main-card .market-analysis-gain-table th:nth-child(4),
 .market-analysis-main-card .market-analysis-gain-table td:nth-child(4) {
   width: 190px;
@@ -938,6 +947,10 @@
   .market-analysis-main-card .market-analysis-gain-table th:nth-child(4),
   .market-analysis-main-card .market-analysis-gain-table td:nth-child(4) {
     width: 150px;
+  }
+
+  .market-analysis-main-card .market-analysis-gain-table {
+    min-width: 620px;
   }
 }
 

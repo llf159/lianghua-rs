@@ -250,6 +250,24 @@ pub fn scoring_rules_details_cache(
     Ok((total, details))
 }
 
+pub fn scoring_rules_total_cache(
+    rt: &mut Runtime,
+    rules_cache: &[CachedRule],
+) -> Result<Vec<f64>, String> {
+    let len = rt_max_len(rt);
+    let mut total = vec![50.0; len];
+
+    for rule in rules_cache {
+        let (score, _) = scoring_rule_cache(rule, rt)?;
+        let min_len = usize::min(total.len(), score.len());
+        for i in 0..min_len {
+            total[i] += score[i];
+        }
+    }
+
+    Ok(total)
+}
+
 fn resolve_scene_stage(
     scene: &ScoreScene,
     stage_score: f64,
