@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use duckdb::{Connection, params_from_iter};
+use duckdb::{params_from_iter, Connection};
 use rayon::prelude::*;
 
 use super::{
-    BacktestSampleEligibility, DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, ResidualFactorSeriesRefs,
-    ResidualReturnInput, build_backtest_sample_eligibility,
-    calc_stock_residual_returns_from_loaded_series,
+    build_backtest_sample_eligibility, calc_stock_residual_returns_from_loaded_series,
+    BacktestSampleEligibility, ResidualFactorSeriesRefs, ResidualReturnInput,
+    DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
 };
 use crate::data::{
     concept_performance_data::{load_concept_trend_series, load_industry_trend_series},
@@ -666,6 +666,44 @@ pub fn calc_rule_layer_metrics_from_cache(
         },
     )?
     .metrics)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RuleLayerSamplePointRef<'a> {
+    pub ts_code: &'a str,
+    pub trade_date: &'a str,
+    pub rule_score: f64,
+    pub residual_return: f64,
+}
+
+pub fn visit_triggered_rule_samples_from_cache<F>(
+    runtime_cache: &RuleLayerRuntimeCache,
+    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
+    mut visit: F,
+) -> Result<(), String>
+where
+    F: FnMut(RuleLayerSamplePointRef<'_>) -> Result<(), String>,
+{
+    for day_group in &runtime_cache.day_groups {
+        for sample in &day_group.samples {
+            let Some(rule_score) = triggered_score_map
+                .get(&sample.ts_code)
+                .and_then(|date_score| date_score.get(&day_group.trade_date))
+                .copied()
+            else {
+                continue;
+            };
+
+            visit(RuleLayerSamplePointRef {
+                ts_code: &sample.ts_code,
+                trade_date: &day_group.trade_date,
+                rule_score,
+                residual_return: sample.residual_return,
+            })?;
+        }
+    }
+
+    Ok(())
 }
 
 pub fn collect_triggered_rule_samples_from_cache(
@@ -1696,16 +1734,15 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use duckdb::{Connection, params};
+    use duckdb::{params, Connection};
 
     use crate::data::{result_db_path, source_db_path};
 
     use super::{
-        RuleLayerConfig, RuleLayerFromDbInput, build_rule_layer_runtime_cache,
-        calc_all_rule_layer_metrics_from_db, calc_rule_layer_metrics_from_db,
-        calc_rule_layer_metrics_with_samples_from_cache,
+        build_rule_layer_runtime_cache, calc_all_rule_layer_metrics_from_db,
+        calc_rule_layer_metrics_from_db, calc_rule_layer_metrics_with_samples_from_cache,
         calc_rule_layer_metrics_with_triggered_samples_from_cache,
-        collect_triggered_rule_samples_from_cache,
+        collect_triggered_rule_samples_from_cache, RuleLayerConfig, RuleLayerFromDbInput,
     };
 
     fn assert_opt_close(left: Option<f64>, right: Option<f64>) {

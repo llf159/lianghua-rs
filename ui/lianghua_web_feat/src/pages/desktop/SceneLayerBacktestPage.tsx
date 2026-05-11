@@ -54,6 +54,18 @@ type RuleSummarySortKey =
   | "icir"
   | "ic_t_value";
 
+type ValidationComboSortKey =
+  | "combo_label"
+  | "params"
+  | "trigger_samples"
+  | "triggered_days"
+  | "avg_daily_trigger"
+  | "spread_mean"
+  | "avg_residual_mean"
+  | "ic_mean"
+  | "ic_t_value"
+  | "icir";
+
 type ValidationScopeWayOption = "ANY" | "LAST" | "EACH" | "RECENT" | "CONSEC";
 type ValidationDirection = "positive" | "negative";
 type ValidationUnknownConfigDraft = {
@@ -85,6 +97,7 @@ type StoredBacktestCommonParams = BacktestCommonParamsDraft & {
 const BACKTEST_COMMON_PARAMS_STORAGE_KEY = "lh_scene_layer_backtest_common_params";
 const VALIDATION_DEFAULT_SAMPLE_LIMIT = 5;
 const VALIDATION_MAX_SAMPLE_LIMIT = 200;
+const EMPTY_VALIDATION_COMBO_RESULTS: RuleValidationComboResult[] = [];
 
 type SceneLayerBacktestLocationState = {
   validationReturnState?: SceneLayerValidationReturnState;
@@ -606,6 +619,7 @@ export default function SceneLayerBacktestPage() {
 
   const allSceneSummaries = result?.all_scene_summaries ?? [];
   const allRuleSummaries = ruleResult?.all_rule_summaries ?? [];
+  const validationComboRows = validationResult?.combo_results ?? EMPTY_VALIDATION_COMBO_RESULTS;
   const rankLayerSummaries = rankResult?.layer_summaries ?? [];
   const backtestHighlightSettings = readStoredBacktestHighlightSettings();
 
@@ -773,6 +787,73 @@ export default function SceneLayerBacktestPage() {
       direction: "desc",
     },
   );
+
+  const validationComboSortDefinitions = useMemo(
+    () =>
+      ({
+        combo_label: {
+          value: (row: RuleValidationComboResult) => row.combo_label,
+        },
+        params: {
+          value: (row: RuleValidationComboResult) => formatUnknownValuesForCombo(row),
+        },
+        trigger_samples: {
+          value: (row: RuleValidationComboResult) => row.trigger_samples,
+        },
+        triggered_days: {
+          value: (row: RuleValidationComboResult) => row.triggered_days,
+        },
+        avg_daily_trigger: {
+          value: (row: RuleValidationComboResult) => row.avg_daily_trigger,
+        },
+        spread_mean: {
+          value: (row: RuleValidationComboResult) => row.backtest.spread_mean,
+        },
+        avg_residual_mean: {
+          value: (row: RuleValidationComboResult) => row.backtest.avg_residual_mean,
+        },
+        ic_mean: {
+          value: (row: RuleValidationComboResult) => row.backtest.ic_mean,
+        },
+        ic_t_value: {
+          value: (row: RuleValidationComboResult) => row.backtest.ic_t_value,
+        },
+        icir: {
+          value: (row: RuleValidationComboResult) => row.backtest.icir,
+        },
+      }) satisfies Partial<
+        Record<ValidationComboSortKey, SortDefinition<RuleValidationComboResult>>
+      >,
+    [],
+  );
+
+  const {
+    sortKey: validationComboSortKey,
+    sortDirection: validationComboSortDirection,
+    sortedRows: sortedValidationComboRows,
+    toggleSort: toggleValidationComboSort,
+  } = useTableSort<RuleValidationComboResult, ValidationComboSortKey>(
+    validationComboRows,
+    validationComboSortDefinitions,
+    {
+      key: "spread_mean",
+      direction: "desc",
+    },
+  );
+
+  function renderValidationComboSortHeader(key: ValidationComboSortKey, label: string) {
+    return (
+      <th aria-sort={getAriaSort(validationComboSortKey === key, validationComboSortDirection)}>
+        <TableSortButton
+          label={label}
+          isActive={validationComboSortKey === key && validationComboSortDirection !== null}
+          direction={validationComboSortDirection}
+          onClick={() => toggleValidationComboSort(key)}
+          title={`按${label}排序`}
+        />
+      </th>
+    );
+  }
 
   async function onRunBacktest() {
     const normalizedStart = normalizeDateInput(startDateInput);
@@ -2033,25 +2114,25 @@ export default function SceneLayerBacktestPage() {
       {validationResult ? (
         <section className="scene-layer-card">
           <div className="scene-layer-layer-summary">
-            <h3>参数组合表现（按分层差 / ICIR 排序）</h3>
+            <h3>参数组合表现（点击表头排序）</h3>
             <div className="scene-layer-contrib-table-wrap">
               <table className="scene-layer-contrib-table scene-layer-validation-table">
                 <thead>
                   <tr>
-                    <th>组合</th>
-                    <th>策略参数</th>
-                    <th>触发样本</th>
-                    <th>触发交易日</th>
-                    <th>平均每日触发</th>
-                    <th>分层差均值</th>
-                    <th>残差均值（日度）</th>
-                    <th>IC 均值</th>
-                    <th>IC t值</th>
-                    <th>ICIR</th>
+                    {renderValidationComboSortHeader("combo_label", "组合")}
+                    {renderValidationComboSortHeader("params", "策略参数")}
+                    {renderValidationComboSortHeader("trigger_samples", "触发样本")}
+                    {renderValidationComboSortHeader("triggered_days", "触发交易日")}
+                    {renderValidationComboSortHeader("avg_daily_trigger", "平均每日触发")}
+                    {renderValidationComboSortHeader("spread_mean", "分层差均值")}
+                    {renderValidationComboSortHeader("avg_residual_mean", "残差均值（日度）")}
+                    {renderValidationComboSortHeader("ic_mean", "IC 均值")}
+                    {renderValidationComboSortHeader("ic_t_value", "IC t值")}
+                    {renderValidationComboSortHeader("icir", "ICIR")}
                   </tr>
                 </thead>
                 <tbody>
-                  {validationResult.combo_results.map((item) => {
+                  {sortedValidationComboRows.map((item) => {
                     const isActive = selectedValidationCombo?.combo_key === item.combo_key;
                     const rowClassName = [
                       isActive ? "scene-layer-validation-row-active" : "",

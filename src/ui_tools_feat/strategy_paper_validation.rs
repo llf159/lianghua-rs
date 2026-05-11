@@ -1,21 +1,24 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Mutex,
+};
 
 use chrono::{Days, NaiveDate};
-use duckdb::{Connection, params};
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use duckdb::{params, Connection};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::{
     data::scoring_data::row_into_rt,
     data::{
-        DataReader, RowData, RuntimeKeyCollectOptions, collect_runtime_keys_from_expr_programs,
-        expr_program_uses_runtime_key, load_stock_list, load_trade_date_list, result_db_path,
-        stock_list_path,
+        collect_runtime_keys_from_expr_programs, expr_program_uses_runtime_key, load_stock_list,
+        load_trade_date_list, result_db_path, stock_list_path, DataReader, RowData,
+        RuntimeKeyCollectOptions,
     },
     expr::{
         eval::{Runtime, Value},
-        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+        parser::{lex_all, Expr, Parser, Stmt, Stmts},
     },
     scoring::tools::{
         calc_query_need_rows, calc_query_start_date, inject_stock_extra_fields, load_st_list,
@@ -384,6 +387,7 @@ pub fn run_strategy_paper_validation(
     let warmup_need =
         estimate_expression_warmup(&buy_program)?.max(estimate_expression_warmup(&sell_program)?);
     let required_runtime_keys = collect_paper_validation_runtime_keys(&buy_program, &sell_program);
+    let sell_runtime_keys = collect_paper_validation_sell_runtime_keys(&sell_program);
     let needs_rank = matches!(parsed_buy_selection_mode, BuySelectionMode::RankTop)
         || expr_program_uses_runtime_key(&buy_program, "RANK")
         || expr_program_uses_runtime_key(&sell_program, "RANK");
@@ -432,9 +436,10 @@ pub fn run_strategy_paper_validation(
         HashMap::new()
     };
 
-    let grouped_stocks = ts_codes
+    let prepared_stocks = Mutex::new(Vec::new());
+    ts_codes
         .par_chunks(128)
-        .map(|ts_group| -> Result<Vec<PreparedPaperStock>, String> {
+        .try_for_each(|ts_group| -> Result<(), String> {
             let worker_buy_program = buy_program.clone();
             let worker_reader =
                 DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
@@ -448,6 +453,7 @@ pub fn run_strategy_paper_validation(
                     st_list.contains(ts_code),
                     total_share_map.get(ts_code).copied(),
                     &worker_buy_program,
+                    &sell_runtime_keys,
                     &rank_series_map,
                     needs_rank,
                     &resolved_start_date,
@@ -460,14 +466,19 @@ pub fn run_strategy_paper_validation(
                 }
             }
 
-            Ok(out)
-        })
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+            if !out.is_empty() {
+                prepared_stocks
+                    .lock()
+                    .map_err(|_| "写入策略回测股票缓存失败:锁已损坏".to_string())?
+                    .extend(out);
+            }
 
-    let mut prepared_stocks = grouped_stocks;
+            Ok(())
+        })?;
+
+    let mut prepared_stocks = prepared_stocks
+        .into_inner()
+        .map_err(|_| "读取策略回测股票缓存失败:锁已损坏".to_string())?;
     prepared_stocks.sort_by(|left, right| left.ts_code.cmp(&right.ts_code));
 
     let mut trades = simulate_portfolio_trade_rows(
@@ -665,6 +676,7 @@ fn prepare_paper_stock_for_portfolio(
     is_st: bool,
     total_share: Option<f64>,
     buy_program: &Stmts,
+    sell_runtime_keys: &HashSet<String>,
     rank_series_map: &HashMap<String, HashMap<String, Option<f64>>>,
     needs_rank: bool,
     start_date: &str,
@@ -699,32 +711,50 @@ fn prepare_paper_stock_for_portfolio(
         return Ok(None);
     }
 
-    let base_runtime = row_into_rt(row_data)?;
+    let mut base_runtime = row_into_rt(row_data)?;
     let mut buy_runtime = base_runtime.clone();
     let buy_signal_series = evaluate_program_as_bool_series(&mut buy_runtime, buy_program)
         .map_err(|error| format!("{ts_code} 买点方程执行失败: {error}"))?;
+    if !buy_signal_series
+        .get(keep_from..)
+        .unwrap_or_default()
+        .iter()
+        .any(|hit| *hit)
+    {
+        return Ok(None);
+    }
+
+    let open_series = runtime_num_series(&base_runtime, "O")
+        .map_err(|error| format!("{ts_code} {error}"))?
+        .to_vec();
+    let high_series = runtime_num_series(&base_runtime, "H")
+        .map_err(|error| format!("{ts_code} {error}"))?
+        .to_vec();
+    let close_series = runtime_num_series(&base_runtime, "C")
+        .map_err(|error| format!("{ts_code} {error}"))?
+        .to_vec();
+    let pre_close_series = runtime_num_series(&base_runtime, "PRE_CLOSE")
+        .map_err(|error| format!("{ts_code} {error}"))?
+        .to_vec();
+    let zhang_series = runtime_num_series(&base_runtime, "ZHANG")
+        .map_err(|error| format!("{ts_code} {error}"))?
+        .to_vec();
+    let rank_series =
+        runtime_num_series_optional(&base_runtime, "RANK").map(|series| series.to_vec());
+    base_runtime
+        .vars
+        .retain(|key, _| sell_runtime_keys.contains(key));
 
     Ok(Some(PreparedPaperStock {
         ts_code: ts_code.to_string(),
         name: stock_name.cloned(),
         trade_dates,
-        open_series: runtime_num_series(&base_runtime, "O")
-            .map_err(|error| format!("{ts_code} {error}"))?
-            .to_vec(),
-        high_series: runtime_num_series(&base_runtime, "H")
-            .map_err(|error| format!("{ts_code} {error}"))?
-            .to_vec(),
-        close_series: runtime_num_series(&base_runtime, "C")
-            .map_err(|error| format!("{ts_code} {error}"))?
-            .to_vec(),
-        pre_close_series: runtime_num_series(&base_runtime, "PRE_CLOSE")
-            .map_err(|error| format!("{ts_code} {error}"))?
-            .to_vec(),
-        zhang_series: runtime_num_series(&base_runtime, "ZHANG")
-            .map_err(|error| format!("{ts_code} {error}"))?
-            .to_vec(),
-        rank_series: runtime_num_series_optional(&base_runtime, "RANK")
-            .map(|series| series.to_vec()),
+        open_series,
+        high_series,
+        close_series,
+        pre_close_series,
+        zhang_series,
+        rank_series,
         base_runtime,
         buy_signal_series,
         keep_from,
@@ -1626,6 +1656,23 @@ fn collect_paper_validation_runtime_keys(
     )
 }
 
+fn collect_paper_validation_sell_runtime_keys(sell_program: &Stmts) -> HashSet<String> {
+    let mut keys = collect_runtime_keys_from_expr_programs(
+        &[sell_program],
+        RuntimeKeyCollectOptions {
+            always_keys: &[],
+            injected_keys: &PAPER_VALIDATION_INJECTED_RUNTIME_KEYS,
+            aliases: &PAPER_VALIDATION_RUNTIME_ALIASES,
+        },
+    );
+    keys.extend(
+        PAPER_VALIDATION_INJECTED_RUNTIME_KEYS
+            .iter()
+            .map(|key| key.to_string()),
+    );
+    keys
+}
+
 fn build_paper_trade_eligibility(
     source_path: &str,
     min_listed_trade_days: usize,
@@ -1956,7 +2003,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use duckdb::{Connection, params};
+    use duckdb::{params, Connection};
 
     use crate::{data::RowData, scoring::tools::calc_zhang_pct};
 
