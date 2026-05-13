@@ -11,15 +11,15 @@ use lianghua_rs::ui_tools_feat::{
         resolve_source_root, validate_target_relative_path,
     },
     data_viewer::{
+        ManagedSourceDatasetPreviewResult, ManagedSourceDbPreviewResult,
         preview_managed_source_dataset as core_preview_managed_source_dataset,
         preview_managed_source_stock_data as core_preview_managed_source_stock_data,
-        ManagedSourceDatasetPreviewResult, ManagedSourceDbPreviewResult,
     },
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 use tauri_plugin_fs::{FilePath, FsExt};
-use zip::{write::FileOptions, CompressionMethod, ZipArchive, ZipWriter};
+use zip::{CompressionMethod, ZipArchive, ZipWriter, write::FileOptions};
 
 const MANAGED_SOURCE_IMPORT_EVENT: &str = "managed-source-import";
 const IMPORT_BUFFER_SIZE: usize = 1024 * 1024;
@@ -27,7 +27,6 @@ const IMPORT_PROGRESS_STEP_BYTES: u64 = 32 * 1024 * 1024;
 const STRATEGY_BACKUP_DIR_NAME: &str = "strategy_backups";
 const STRATEGY_RULE_FILE_NAME: &str = "score_rule.toml";
 const STRATEGY_META_FILE_NAME: &str = "meta.json";
-const STRATEGY_DIFF_CONTEXT_LINES: usize = 4;
 const EMPTY_STRATEGY_TEMPLATE: &str = r#"version = 1
 
 [[scene]]
@@ -501,7 +500,10 @@ fn files_have_same_content(left: &Path, right: &Path) -> Result<bool, String> {
     }
 }
 
-fn has_equivalent_strategy_backup(source_root: &Path, active_file_path: &Path) -> Result<bool, String> {
+fn has_equivalent_strategy_backup(
+    source_root: &Path,
+    active_file_path: &Path,
+) -> Result<bool, String> {
     let backup_root = managed_strategy_backup_root(source_root);
     if !backup_root.exists() {
         return Ok(false);
@@ -509,7 +511,11 @@ fn has_equivalent_strategy_backup(source_root: &Path, active_file_path: &Path) -
 
     for entry in std::fs::read_dir(&backup_root).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
-        if !entry.file_type().map_err(|error| error.to_string())?.is_dir() {
+        if !entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_dir()
+        {
             continue;
         }
         let backup_file_path = entry.path().join(STRATEGY_RULE_FILE_NAME);
@@ -528,6 +534,113 @@ fn has_equivalent_strategy_backup(source_root: &Path, active_file_path: &Path) -
 
 fn lcs_value(table: &[usize], width: usize, row: usize, col: usize) -> usize {
     table[row * width + col]
+}
+
+fn is_strategy_entry_header(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed == "[[rule]]" || trimmed == "[[scene]]"
+}
+
+fn strategy_entry_range_for_line(lines: &[&str], line_number: usize) -> Option<(usize, usize)> {
+    if line_number == 0 || line_number > lines.len() {
+        return None;
+    }
+
+    let index = line_number - 1;
+    let start = (0..=index)
+        .rev()
+        .find(|&candidate| is_strategy_entry_header(lines[candidate]))
+        .unwrap_or(index);
+    let end = ((index + 1)..lines.len())
+        .find(|&candidate| is_strategy_entry_header(lines[candidate]))
+        .unwrap_or(lines.len());
+    Some((start, end))
+}
+
+fn mark_strategy_entry_range(keep: &mut [bool], lines: &[&str], line_number: usize) {
+    let Some((start, end)) = strategy_entry_range_for_line(lines, line_number) else {
+        return;
+    };
+    keep[start..end].fill(true);
+}
+
+fn compact_strategy_backup_diff_lines_by_entry(
+    lines: Vec<ManagedStrategyBackupDiffLine>,
+    backup_lines: &[&str],
+    active_lines: &[&str],
+) -> Vec<ManagedStrategyBackupDiffLine> {
+    if lines.is_empty() {
+        return vec![ManagedStrategyBackupDiffLine {
+            kind: "omitted".to_string(),
+            backup_line: None,
+            active_line: None,
+            text: "没有可显示的内容".to_string(),
+        }];
+    }
+
+    if lines.iter().all(|line| line.kind == "context") {
+        return vec![ManagedStrategyBackupDiffLine {
+            kind: "omitted".to_string(),
+            backup_line: None,
+            active_line: None,
+            text: "没有差异".to_string(),
+        }];
+    }
+
+    let mut keep_backup = vec![false; backup_lines.len()];
+    let mut keep_active = vec![false; active_lines.len()];
+    for line in &lines {
+        if line.kind == "context" {
+            continue;
+        }
+        if let Some(line_number) = line.backup_line {
+            mark_strategy_entry_range(&mut keep_backup, backup_lines, line_number);
+        }
+        if let Some(line_number) = line.active_line {
+            mark_strategy_entry_range(&mut keep_active, active_lines, line_number);
+        }
+    }
+
+    let mut compacted = Vec::new();
+    let mut omitted_count = 0usize;
+    for line in lines {
+        let keep_line = line
+            .backup_line
+            .and_then(|line_number| keep_backup.get(line_number.saturating_sub(1)))
+            .copied()
+            .unwrap_or(false)
+            || line
+                .active_line
+                .and_then(|line_number| keep_active.get(line_number.saturating_sub(1)))
+                .copied()
+                .unwrap_or(false);
+
+        if keep_line {
+            if omitted_count > 0 {
+                compacted.push(ManagedStrategyBackupDiffLine {
+                    kind: "omitted".to_string(),
+                    backup_line: None,
+                    active_line: None,
+                    text: format!("省略 {omitted_count} 行未变化策略"),
+                });
+                omitted_count = 0;
+            }
+            compacted.push(line);
+        } else {
+            omitted_count += 1;
+        }
+    }
+
+    if omitted_count > 0 {
+        compacted.push(ManagedStrategyBackupDiffLine {
+            kind: "omitted".to_string(),
+            backup_line: None,
+            active_line: None,
+            text: format!("省略 {omitted_count} 行未变化策略"),
+        });
+    }
+
+    compacted
 }
 
 fn build_strategy_backup_diff_lines(
@@ -612,68 +725,9 @@ fn build_strategy_backup_diff_lines(
     }
 
     (
-        compact_strategy_backup_diff_lines(diff_lines, STRATEGY_DIFF_CONTEXT_LINES),
+        compact_strategy_backup_diff_lines_by_entry(diff_lines, &backup_lines, &active_lines),
         changed_line_count,
     )
-}
-
-fn compact_strategy_backup_diff_lines(
-    lines: Vec<ManagedStrategyBackupDiffLine>,
-    context_line_count: usize,
-) -> Vec<ManagedStrategyBackupDiffLine> {
-    if lines.is_empty() {
-        return vec![ManagedStrategyBackupDiffLine {
-            kind: "omitted".to_string(),
-            backup_line: None,
-            active_line: None,
-            text: "没有可显示的内容".to_string(),
-        }];
-    }
-
-    let changed_indexes: Vec<usize> = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| (line.kind != "context").then_some(index))
-        .collect();
-    if changed_indexes.is_empty() {
-        return vec![ManagedStrategyBackupDiffLine {
-            kind: "omitted".to_string(),
-            backup_line: None,
-            active_line: None,
-            text: "没有差异".to_string(),
-        }];
-    }
-
-    let mut keep = vec![false; lines.len()];
-    for index in changed_indexes {
-        let start = index.saturating_sub(context_line_count);
-        let end = (index + context_line_count + 1).min(lines.len());
-        keep[start..end].fill(true);
-    }
-
-    let mut compacted = Vec::new();
-    let mut index = 0usize;
-    while index < lines.len() {
-        if keep[index] {
-            compacted.push(lines[index].clone());
-            index += 1;
-            continue;
-        }
-
-        let skipped_start = index;
-        while index < lines.len() && !keep[index] {
-            index += 1;
-        }
-        let skipped_count = index - skipped_start;
-        compacted.push(ManagedStrategyBackupDiffLine {
-            kind: "omitted".to_string(),
-            backup_line: None,
-            active_line: None,
-            text: format!("省略 {skipped_count} 行未改动内容"),
-        });
-    }
-
-    compacted
 }
 
 fn build_managed_strategy_backup_item(
@@ -713,6 +767,101 @@ fn build_managed_strategy_backup_item(
         source_file_name: meta.source_file_name,
         description: meta.description,
     })
+}
+
+fn cleanup_rank_compute_strategy_snapshots(
+    source_root: &Path,
+    keep_backup_id: &str,
+) -> Result<(), String> {
+    let backup_root = managed_strategy_backup_root(source_root);
+    if !backup_root.exists() {
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(&backup_root).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if !entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_dir()
+        {
+            continue;
+        }
+
+        let backup_id = entry.file_name().to_string_lossy().to_string();
+        if backup_id == keep_backup_id {
+            continue;
+        }
+
+        let meta = match read_strategy_backup_meta(source_root, &backup_id) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        if meta.source_kind != "rank_compute" {
+            continue;
+        }
+
+        std::fs::remove_dir_all(entry.path()).map_err(|error| {
+            format!(
+                "清理旧排名计算快照失败: path={}, err={error}",
+                entry.path().display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn snapshot_rank_compute_strategy(
+    app_data_root: &Path,
+    source_dir: &str,
+    strategy_file_path: &Path,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+) -> Result<PathBuf, String> {
+    if !strategy_file_path.exists() || !strategy_file_path.is_file() {
+        return Err(format!(
+            "用于计算的策略文件不存在: {}",
+            strategy_file_path.display()
+        ));
+    }
+
+    let source_root = resolve_source_root(app_data_root, source_dir)?;
+    let backup_id = current_strategy_backup_id();
+    let backup_dir = managed_strategy_backup_dir(&source_root, &backup_id);
+    std::fs::create_dir_all(&backup_dir).map_err(|error| error.to_string())?;
+    let backup_file_path = managed_strategy_backup_file_path(&source_root, &backup_id);
+    std::fs::copy(strategy_file_path, &backup_file_path).map_err(|error| {
+        format!(
+            "复制排名计算策略快照失败: from={}, to={}, err={error}",
+            strategy_file_path.display(),
+            backup_file_path.display()
+        )
+    })?;
+
+    let file_name = strategy_file_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(STRATEGY_RULE_FILE_NAME)
+        .to_string();
+    let range_text = match (start_date, end_date) {
+        (Some(start), Some(end)) => format!("{start} 至 {end}"),
+        _ => "未记录区间".to_string(),
+    };
+    write_strategy_backup_meta(
+        &source_root,
+        &backup_id,
+        &StrategyBackupMeta {
+            version: 1,
+            created_at: Utc::now().to_rfc3339(),
+            source_kind: "rank_compute".to_string(),
+            source_file_name: Some(file_name),
+            description: Some(format!("排名计算快照：{range_text}")),
+        },
+    )?;
+    cleanup_rank_compute_strategy_snapshots(&source_root, &backup_id)?;
+
+    Ok(backup_file_path)
 }
 
 fn build_managed_strategy_active_file(
@@ -1295,12 +1444,7 @@ fn backup_active_strategy_inner(
     app_data_root: &Path,
     source_dir: String,
 ) -> Result<ManagedStrategyBackupItem, String> {
-    backup_active_strategy_with_meta(
-        app_data_root,
-        source_dir,
-        "backup",
-        "手动备份当前生效策略",
-    )
+    backup_active_strategy_with_meta(app_data_root, source_dir, "backup", "手动备份当前生效策略")
 }
 
 fn auto_backup_active_strategy_on_entry_inner(
@@ -1354,8 +1498,7 @@ fn get_strategy_backup_diff_inner(
             active_file_path.display()
         )
     })?;
-    let (lines, changed_line_count) =
-        build_strategy_backup_diff_lines(&backup_text, &active_text);
+    let (lines, changed_line_count) = build_strategy_backup_diff_lines(&backup_text, &active_text);
 
     Ok(ManagedStrategyBackupDiff {
         backup_id: normalized_backup_id.clone(),

@@ -53,6 +53,7 @@ export type DataDownloadRequest = {
   retryTimes: number
   limitCallsPerMin: number
   includeTurnover: boolean
+  allowStaleStockList: boolean
 }
 
 export type MissingStockRepairRequest = {

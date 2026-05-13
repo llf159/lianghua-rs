@@ -22,6 +22,11 @@ import {
   type RankComputeResultContinuity,
   type RankingComputeStatus,
 } from '../../apis/rankingCompute'
+import {
+  getManagedStrategyAssetsStatus,
+  getManagedStrategyBackupDiff,
+  type ManagedStrategyBackupDiff,
+} from '../../apis/strategyAssets'
 import DataTaskProgress from '../../shared/DataTaskProgress'
 import {
   calcProgressPercent,
@@ -192,6 +197,8 @@ export default function RankingComputePage() {
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [progress, setProgress] = useState<DataDownloadProgress | null>(null)
+  const [strategyDiff, setStrategyDiff] = useState<ManagedStrategyBackupDiff | null>(null)
+  const [strategyDiffLoading, setStrategyDiffLoading] = useState(false)
 
   const [indicatorModalOpen, setIndicatorModalOpen] = useState(false)
   const [indicatorItems, setIndicatorItems] = useState<IndicatorManageItem[]>([])
@@ -584,6 +591,7 @@ export default function RankingComputePage() {
 
     setBusyAction('computing')
     setError('')
+    setStrategyDiff(null)
 
     try {
       const scoreResult = await runRankingScoreCalculation(sourcePath, startDate, endDate)
@@ -596,6 +604,28 @@ export default function RankingComputePage() {
       setError(`排名计算失败: ${String(actionError)}`)
     } finally {
       setBusyAction('idle')
+    }
+  }
+
+  async function onViewStrategyDiff() {
+    setStrategyDiffLoading(true)
+    setError('')
+    setNotice('')
+    try {
+      const assetsStatus = await getManagedStrategyAssetsStatus()
+      const latestComputeSnapshot = assetsStatus.backups.find((item) => item.sourceKind === 'rank_compute')
+      if (!latestComputeSnapshot) {
+        setStrategyDiff(null)
+        setError('当前没有排名计算快照可对比。')
+        return
+      }
+      const diff = await getManagedStrategyBackupDiff(latestComputeSnapshot.backupId)
+      setStrategyDiff(diff)
+    } catch (actionError) {
+      setStrategyDiff(null)
+      setError(`查看策略 diff 失败: ${String(actionError)}`)
+    } finally {
+      setStrategyDiffLoading(false)
     }
   }
 
@@ -766,11 +796,71 @@ export default function RankingComputePage() {
             <button className="ranking-compute-primary-btn" type="button" onClick={() => void onRunCompute()} disabled={isBusy || sourcePath === ''}>
               {busyAction === 'computing' ? '计算中...' : '计算排名'}
             </button>
+            <button
+              className="ranking-compute-secondary-btn"
+              type="button"
+              onClick={() => void onViewStrategyDiff()}
+              disabled={isBusy || strategyDiffLoading || sourcePath === ''}
+            >
+              {strategyDiffLoading ? '对比中...' : '显示计算快照 diff'}
+            </button>
             <button className="ranking-compute-danger-btn" type="button" onClick={() => setPendingConfirm({ kind: 'delete-result-db' })} disabled={isBusy || sourcePath === ''}>
               {busyAction === 'deleting-result-db' ? '删除中...' : '删除结果库'}
             </button>
           </div>
         </div>
+
+        {strategyDiff ? (
+          <section className="ranking-compute-strategy-diff">
+            <div className="ranking-compute-strategy-diff-headline">
+              <div>
+                <span>策略变化</span>
+                <strong>
+                  {strategyDiff.changedLineCount === 0
+                    ? '当前生效策略与计算快照一致'
+                    : `发现 ${strategyDiff.changedLineCount} 行变化`}
+                </strong>
+                <small>
+                  计算快照 {strategyDiff.backupLabel} 对比当前生效 {strategyDiff.activeLabel}；变化条目完整显示，未变化条目折叠
+                </small>
+              </div>
+              <button
+                className="ranking-compute-secondary-btn"
+                type="button"
+                onClick={() => setStrategyDiff(null)}
+                disabled={isBusy}
+              >
+                关闭 diff
+              </button>
+            </div>
+            <div className="ranking-compute-strategy-diff-table-head">
+              <span>快照</span>
+              <span>当前</span>
+              <span>策略内容</span>
+            </div>
+            <div className="ranking-compute-strategy-diff-body">
+              {strategyDiff.lines.map((line, index) => (
+                <div
+                  key={`${line.kind}-${line.backupLine ?? 'n'}-${line.activeLine ?? 'n'}-${index}`}
+                  className={`ranking-compute-strategy-diff-row is-${line.kind}`}
+                >
+                  <span>{line.backupLine ?? ''}</span>
+                  <span>{line.activeLine ?? ''}</span>
+                  <code>
+                    {line.kind === 'backup'
+                      ? '- '
+                      : line.kind === 'active'
+                        ? '+ '
+                        : line.kind === 'omitted'
+                          ? '... '
+                          : '  '}
+                    {line.text || ' '}
+                  </code>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
       </section>
 
       <section className="ranking-compute-card">

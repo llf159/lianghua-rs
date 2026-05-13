@@ -97,7 +97,7 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
     [status?.backups],
   )
   const managedBackups = useMemo(
-    () => status?.backups.filter((item) => item.sourceKind !== 'auto_entry') ?? [],
+    () => status?.backups.filter((item) => item.sourceKind !== 'auto_entry' && item.sourceKind !== 'rank_compute') ?? [],
     [status?.backups],
   )
   const visibleBackups = backupViewMode === 'auto' ? autoBackups : managedBackups
@@ -443,7 +443,10 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
               <div>
                 <h4>策略 diff</h4>
                 <p>
-                  {diffData.backupLabel} 对比当前生效 {diffData.activeLabel}，共 {diffData.changedLineCount} 行差异。
+                  {diffData.backupLabel} 对比当前生效 {diffData.activeLabel}，
+                  {diffData.changedLineCount === 0
+                    ? '没有差异。'
+                    : `共 ${diffData.changedLineCount} 行差异；变化条目会完整显示，未变化条目会折叠。`}
                 </p>
               </div>
               <button className="strategy-asset-btn strategy-asset-btn-ghost" type="button" onClick={() => setDiffData(null)} disabled={isBusy}>
@@ -451,9 +454,9 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
               </button>
             </div>
             <div className="strategy-asset-diff-head">
-              <span>备份行</span>
-              <span>当前行</span>
-              <span>内容</span>
+              <span>备份版本</span>
+              <span>当前生效</span>
+              <span>策略内容</span>
             </div>
             <div className="strategy-asset-diff-body">
               {diffData.lines.map((line, index) => (
@@ -514,7 +517,7 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
                               ? 'strategy-asset-tag is-empty'
                               : item.sourceKind === 'auto_entry'
                                 ? 'strategy-asset-tag is-auto'
-                              : 'strategy-asset-tag'
+                                : 'strategy-asset-tag'
                         }
                       >
                         {item.sourceKind === 'imported'

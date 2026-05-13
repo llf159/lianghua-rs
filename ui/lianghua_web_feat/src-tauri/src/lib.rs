@@ -126,18 +126,19 @@ use managed_source_bridge::{
     export_managed_strategy_backup_file, export_managed_strategy_bundle,
     get_managed_strategy_assets_status, get_managed_strategy_backup_diff,
     import_managed_source_zip, import_managed_strategy_backup, preview_managed_source_dataset,
-    preview_managed_source_stock_data,
+    preview_managed_source_stock_data, snapshot_rank_compute_strategy,
     update_managed_strategy_backup_description,
 };
 
 #[cfg(target_os = "android")]
-use jni::{objects::JObject, sys::jboolean, JNIEnv};
+use jni::{JNIEnv, objects::JObject, sys::jboolean};
 
 #[cfg(target_os = "android")]
 use rustls_platform_verifier;
 use tauri::Manager;
 
 const WATCH_OBSERVE_STORAGE_FILE: &str = "watch_observe.json";
+const DEFAULT_MANAGED_SOURCE_DIR: &str = "source";
 
 #[cfg(target_os = "linux")]
 fn trim_process_heap() {
@@ -1106,15 +1107,30 @@ fn save_strategy_manage_refactor_file(
 
 #[tauri::command]
 async fn run_ranking_score_calculation(
+    app: tauri::AppHandle,
     source_path: String,
     strategy_path: Option<String>,
     start_date: String,
     end_date: String,
 ) -> Result<RankComputeRunResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let strategy_file_path =
+            lianghua_rs::data::resolve_strategy_path(&source_path, strategy_path.as_deref());
+        let app_data_root = app
+            .path()
+            .resolve("", tauri::path::BaseDirectory::AppData)
+            .map_err(|error| error.to_string())?;
+        let snapshot_strategy_path = snapshot_rank_compute_strategy(
+            &app_data_root,
+            DEFAULT_MANAGED_SOURCE_DIR,
+            &strategy_file_path,
+            Some(&start_date),
+            Some(&end_date),
+        )?;
+        let snapshot_strategy_path = snapshot_strategy_path.display().to_string();
         core_run_ranking_score_calculation(
             &source_path,
-            strategy_path.as_deref(),
+            Some(snapshot_strategy_path.as_str()),
             &start_date,
             &end_date,
         )

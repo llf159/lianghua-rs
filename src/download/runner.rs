@@ -2,8 +2,9 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::Path,
     sync::{
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc,
     },
     thread::{self, sleep},
     time::Duration,
@@ -11,28 +12,29 @@ use std::{
 
 use chrono::{Datelike, Local, NaiveDate, Timelike, Weekday};
 use duckdb::Connection;
-use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
+use rayon::{ThreadPool, ThreadPoolBuilder, prelude::*};
 
 use crate::{
-    crawler::concept::{fetch_one_ths_concept_row, ThsConceptFetchItem, ThsConceptRow},
+    crawler::concept::{ThsConceptFetchItem, ThsConceptRow, fetch_one_ths_concept_row},
     data::{
+        DataReader,
         concept_performance_data::rebuild_concept_performance_range,
         download_data::{
             append_stage_pro_bar_rows, checkpoint_stock_data, delete_one_stock_range,
             delete_trade_date_rows, ensure_indicator_columns, flush_stock_data_stage_table,
             init_stock_data_db, load_latest_close_map_before, load_latest_trade_date,
-            reset_stock_data_stage_table, write_ths_concepts_csv,
+            reset_stock_data_stage_table, write_stock_list_csv, write_ths_concepts_csv,
         },
         load_stock_list, load_ths_concepts_list, load_trade_date_list, source_db_path,
-        stock_list_path, trade_calendar_path, DataReader,
+        stock_list_path, trade_calendar_path,
     },
     download::{
-        ind_calc::{
-            cache_ind_build, calc_increment_inds_from_history,
-            load_many_tail_rows_with_warmup_need, warmup_ind_estimate, IndsCache,
-        },
         AdjType, BarFreq, DownloadSummary, DownloadTask, PreparedDownloadBatch,
         PreparedStockDownload, ProBarRow, TushareClient,
+        ind_calc::{
+            IndsCache, cache_ind_build, calc_increment_inds_from_history,
+            load_many_tail_rows_with_warmup_need, warmup_ind_estimate,
+        },
     },
 };
 
@@ -54,6 +56,7 @@ pub type DownloadProgressCallback<'a> = dyn Fn(DownloadProgress) + Send + Sync +
 const INCREMENTAL_INDICATOR_CHUNK_SIZE: usize = 256;
 const THS_CONCEPT_RETRY_DELAY_SECS: u64 = 30;
 const THS_CONCEPT_RETRY_LIMIT: usize = 5;
+pub const STALE_STOCK_LIST_CONFIRM_REQUIRED_PREFIX: &str = "STALE_STOCK_LIST_CONFIRM_REQUIRED:";
 const INDEX_TS_CODES: [&str; 7] = [
     "000001.SH",
     "399001.SZ",
@@ -75,6 +78,7 @@ pub struct DownloadRuntimeConfig {
     pub retry_times: usize,
     pub limit_calls_per_min: usize,
     pub include_turnover: bool,
+    pub allow_stale_stock_list: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -154,6 +158,112 @@ fn stock_list_needs_refresh(source_dir: &str, effective_trade_date: &str) -> Res
         Some(trade_date) => trade_date < effective_trade_date,
         None => true,
     })
+}
+
+fn latest_stock_list_trade_date(source_dir: &str) -> Result<Option<String>, String> {
+    let rows = load_stock_list(source_dir)?;
+    Ok(rows
+        .iter()
+        .filter_map(|cols| cols.get(6))
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .max()
+        .map(str::to_string))
+}
+
+fn stock_list_market_value_snapshot_is_usable(
+    result: &crate::download::StockListFetchResult,
+) -> bool {
+    if result.basic_row_count == 0 {
+        return false;
+    }
+
+    let min_usable_rows = (result.basic_row_count / 2).max(100);
+    result.snapshot_row_count >= min_usable_rows && result.market_value_row_count >= min_usable_rows
+}
+
+fn stale_stock_list_confirm_error(
+    source_dir: &str,
+    effective_trade_date: &str,
+    result: &crate::download::StockListFetchResult,
+) -> String {
+    let current_list_date = latest_stock_list_trade_date(source_dir)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "未知".to_string());
+
+    format!(
+        "{}股票列表市值数据尚未更新。目标交易日 {} 的 daily_basic 快照返回 {} 行，其中可用市值 {} 行；当前本地 stock_list.csv 最新交易日为 {}。为避免覆盖掉现有市值数据，本次没有写入新的 stock_list.csv。是否沿用现有股票列表继续下载行情？",
+        STALE_STOCK_LIST_CONFIRM_REQUIRED_PREFIX,
+        effective_trade_date,
+        result.snapshot_row_count,
+        result.market_value_row_count,
+        current_list_date
+    )
+}
+
+fn resolve_clock_effective_trade_date(
+    trade_dates: &[String],
+    today: &str,
+    current_hhmm: u32,
+) -> Result<(String, bool), String> {
+    if let Some(pos) = trade_dates.iter().position(|d| d == today) {
+        if current_hhmm >= 1600 {
+            return Ok((trade_dates[pos].clone(), true));
+        }
+        if pos > 0 {
+            return Ok((trade_dates[pos - 1].clone(), false));
+        }
+        return Err("交易日历中没有前一个交易日".to_string());
+    }
+
+    match trade_dates.iter().rev().find(|d| d.as_str() < today) {
+        Some(date) => Ok((date.clone(), false)),
+        None => Err("交易日历中找不到小于今天的交易日".to_string()),
+    }
+}
+
+fn resolve_effective_trade_date(
+    client: &TushareClient,
+    trade_dates: &[String],
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+) -> Result<String, String> {
+    let now = Local::now();
+    let today = now.format("%Y%m%d").to_string();
+    let current_hhmm = now.hour() * 100 + now.minute();
+    let (candidate, is_today_after_close) =
+        resolve_clock_effective_trade_date(trade_dates, today.as_str(), current_hhmm)?;
+
+    if !is_today_after_close {
+        return Ok(candidate);
+    }
+
+    let today_bar_count = client.fetch_market_daily_bar_count(candidate.as_str())?;
+    if today_bar_count > 0 {
+        return Ok(candidate);
+    }
+
+    let pos = trade_dates
+        .iter()
+        .position(|d| d == &candidate)
+        .ok_or_else(|| "交易日历中找不到当前候选交易日".to_string())?;
+    if pos == 0 {
+        return Err("今日行情尚未更新，且交易日历中没有前一个交易日".to_string());
+    }
+
+    let fallback = trade_dates[pos - 1].clone();
+    emit_progress(
+        progress_cb,
+        "prepare_trade_calendar",
+        1,
+        1,
+        Some(fallback.clone()),
+        format!(
+            "{} 已过 16:00 但 Tushare daily 尚无当日行情，自动回退到上一交易日 {}。",
+            candidate, fallback
+        ),
+    );
+    Ok(fallback)
 }
 
 fn resolve_download_ts_codes(source_dir: &str) -> Result<Vec<String>, String> {
@@ -791,9 +901,7 @@ pub fn init_stock_basic_data(
     let client = TushareClient::new(config.token.clone(), config.limit_calls_per_min)?;
 
     let now = Local::now();
-    let today = now.format("%Y%m%d").to_string();
     let trade_calendar_end = format!("{:04}1231", now.year());
-    let current_hhmm = now.hour() * 100 + now.minute();
 
     // 2. 先检查是否需要刷新交易日历
     if trade_calendar_needs_refresh(source_dir, trade_calendar_end.as_str())? {
@@ -832,25 +940,8 @@ pub fn init_stock_basic_data(
     // 3. 读取交易日历
     let trade_dates = crate::data::load_trade_date_list(source_dir)?;
 
-    // 4. 在这里直接判断有效交易日
-    let effective_trade_date = if let Some(pos) = trade_dates.iter().position(|d| d == &today) {
-        if current_hhmm >= 1600 {
-            trade_dates[pos].clone()
-        } else if pos > 0 {
-            trade_dates[pos - 1].clone()
-        } else {
-            return Err("交易日历中没有前一个交易日".to_string());
-        }
-    } else {
-        match trade_dates
-            .iter()
-            .rev()
-            .find(|d| d.as_str() < today.as_str())
-        {
-            Some(date) => date.clone(),
-            None => return Err("交易日历中找不到小于今天的交易日".to_string()),
-        }
-    };
+    // 4. 16:00 后还会探测 Tushare daily 是否已经有今日行情，避免供应端延迟时误进今日增量。
+    let effective_trade_date = resolve_effective_trade_date(&client, &trade_dates, progress_cb)?;
 
     // 5. 再检查是否需要刷新股票列表
     if stock_list_needs_refresh(source_dir, effective_trade_date.as_str())? {
@@ -862,15 +953,48 @@ pub fn init_stock_basic_data(
             Some(effective_trade_date.clone()),
             format!("正在刷新股票列表，交易日 {}。", effective_trade_date),
         );
-        client.download_stock_list_csv(source_dir, effective_trade_date.as_str())?;
-        emit_progress(
-            progress_cb,
-            "prepare_stock_list",
-            1,
-            1,
-            Some(effective_trade_date.clone()),
-            format!("股票列表刷新完成，交易日 {}。", effective_trade_date),
-        );
+        let stock_list_result =
+            client.fetch_stock_list_rows_with_snapshot_stats(effective_trade_date.as_str())?;
+        if stock_list_market_value_snapshot_is_usable(&stock_list_result) {
+            let row_count = stock_list_result.rows.len();
+            write_stock_list_csv(source_dir, &stock_list_result.rows)?;
+            emit_progress(
+                progress_cb,
+                "prepare_stock_list",
+                1,
+                1,
+                Some(effective_trade_date.clone()),
+                format!(
+                    "股票列表刷新完成，交易日 {}，写入 {} 行，可用市值 {} 行。",
+                    effective_trade_date, row_count, stock_list_result.market_value_row_count
+                ),
+            );
+        } else if stock_list_path(source_dir).exists() {
+            if !config.allow_stale_stock_list {
+                return Err(stale_stock_list_confirm_error(
+                    source_dir,
+                    effective_trade_date.as_str(),
+                    &stock_list_result,
+                ));
+            }
+
+            emit_progress(
+                progress_cb,
+                "prepare_stock_list",
+                1,
+                1,
+                latest_stock_list_trade_date(source_dir)?,
+                format!(
+                    "交易日 {} 的股票列表市值数据尚未更新，已按用户确认保留现有 stock_list.csv 继续。",
+                    effective_trade_date
+                ),
+            );
+        } else {
+            return Err(format!(
+                "交易日 {} 的股票列表市值数据尚未更新，且本地没有可沿用的 stock_list.csv；请稍后重试。",
+                effective_trade_date
+            ));
+        }
     } else {
         emit_progress(
             progress_cb,
@@ -896,9 +1020,7 @@ fn init_index_basic_data(
     let client = TushareClient::new(config.token.clone(), config.limit_calls_per_min)?;
 
     let now = Local::now();
-    let today = now.format("%Y%m%d").to_string();
     let trade_calendar_end = format!("{:04}1231", now.year());
-    let current_hhmm = now.hour() * 100 + now.minute();
 
     if trade_calendar_needs_refresh(source_dir, trade_calendar_end.as_str())? {
         emit_progress(
@@ -934,24 +1056,7 @@ fn init_index_basic_data(
     }
 
     let trade_dates = crate::data::load_trade_date_list(source_dir)?;
-    let effective_trade_date = if let Some(pos) = trade_dates.iter().position(|d| d == &today) {
-        if current_hhmm >= 1600 {
-            trade_dates[pos].clone()
-        } else if pos > 0 {
-            trade_dates[pos - 1].clone()
-        } else {
-            return Err("交易日历中没有前一个交易日".to_string());
-        }
-    } else {
-        match trade_dates
-            .iter()
-            .rev()
-            .find(|d| d.as_str() < today.as_str())
-        {
-            Some(date) => date.clone(),
-            None => return Err("交易日历中找不到小于今天的交易日".to_string()),
-        }
-    };
+    let effective_trade_date = resolve_effective_trade_date(&client, &trade_dates, progress_cb)?;
 
     emit_progress(
         progress_cb,
@@ -2231,6 +2336,19 @@ mod tests {
             .expect("refresh check should succeed")
     }
 
+    fn stock_list_fetch_result(
+        basic_row_count: usize,
+        snapshot_row_count: usize,
+        market_value_row_count: usize,
+    ) -> crate::download::StockListFetchResult {
+        crate::download::StockListFetchResult {
+            rows: Vec::new(),
+            basic_row_count,
+            snapshot_row_count,
+            market_value_row_count,
+        }
+    }
+
     #[test]
     fn trade_calendar_refresh_cutoff_keeps_weekday_year_end() {
         assert_eq!(trade_calendar_refresh_cutoff("20261231"), "20261231");
@@ -2272,6 +2390,39 @@ mod tests {
         assert!(needs_refresh(&empty_source_dir, "20261231"));
 
         fs::remove_dir_all(empty_source_dir).ok();
+    }
+
+    #[test]
+    fn clock_effective_trade_date_uses_previous_trade_day_before_close() {
+        let trade_dates = vec!["20260512".to_string(), "20260513".to_string()];
+        let (effective_trade_date, needs_today_probe) =
+            resolve_clock_effective_trade_date(&trade_dates, "20260513", 1559).expect("resolve");
+
+        assert_eq!(effective_trade_date, "20260512");
+        assert!(!needs_today_probe);
+    }
+
+    #[test]
+    fn clock_effective_trade_date_marks_today_after_close_for_probe() {
+        let trade_dates = vec!["20260512".to_string(), "20260513".to_string()];
+        let (effective_trade_date, needs_today_probe) =
+            resolve_clock_effective_trade_date(&trade_dates, "20260513", 1600).expect("resolve");
+
+        assert_eq!(effective_trade_date, "20260513");
+        assert!(needs_today_probe);
+    }
+
+    #[test]
+    fn stock_list_snapshot_requires_usable_market_value_coverage() {
+        assert!(stock_list_market_value_snapshot_is_usable(
+            &stock_list_fetch_result(5000, 4200, 4100)
+        ));
+        assert!(!stock_list_market_value_snapshot_is_usable(
+            &stock_list_fetch_result(5000, 4200, 20)
+        ));
+        assert!(!stock_list_market_value_snapshot_is_usable(
+            &stock_list_fetch_result(5000, 20, 20)
+        ));
     }
 
     #[test]

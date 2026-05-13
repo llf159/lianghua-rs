@@ -23,6 +23,7 @@ import {
   type ProgressWorkflowStep,
   useAnimatedProgressPercent,
 } from '../../shared/dataTaskProgressUtils'
+import ConfirmDialog from '../../shared/ConfirmDialog'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
 import './css/DataDownloadPage.css'
 
@@ -46,6 +47,17 @@ type DataDownloadDraft = {
 }
 
 const DATA_DOWNLOAD_DRAFT_KEY = 'lh_data_download_draft_v1'
+const STALE_STOCK_LIST_CONFIRM_REQUIRED_PREFIX = 'STALE_STOCK_LIST_CONFIRM_REQUIRED:'
+
+function parseStaleStockListConfirmMessage(error: unknown) {
+  const message = String(error)
+  const markerIndex = message.indexOf(STALE_STOCK_LIST_CONFIRM_REQUIRED_PREFIX)
+  if (markerIndex < 0) {
+    return null
+  }
+
+  return message.slice(markerIndex + STALE_STOCK_LIST_CONFIRM_REQUIRED_PREFIX.length).trim()
+}
 
 function formatTradeDate(value: string | null | undefined) {
   if (!value) {
@@ -366,6 +378,7 @@ export default function DataDownloadPage() {
   const [thsConceptWorkerThreads, setThsConceptWorkerThreads] = useState(String(draft.thsConceptWorkerThreads))
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
+  const [staleStockListConfirmMessage, setStaleStockListConfirmMessage] = useState('')
   const [progress, setProgress] = useState<DataDownloadProgress | null>(null)
   const [activeTaskSection, setActiveTaskSection] = useState<TaskSection | null>(null)
   const [feedbackSection, setFeedbackSection] = useState<TaskSection>('main')
@@ -492,6 +505,7 @@ export default function DataDownloadPage() {
     setFeedbackSection(section)
     setError('')
     setNotice('')
+    setStaleStockListConfirmMessage('')
     setProgress(null)
 
     const downloadId = `download-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -549,6 +563,14 @@ export default function DataDownloadPage() {
         )
       }
     } catch (runError) {
+      const staleStockListMessage = section === 'main' ? parseStaleStockListConfirmMessage(runError) : null
+      if (staleStockListMessage) {
+        setNotice('')
+        setError('')
+        setStaleStockListConfirmMessage(staleStockListMessage)
+        return
+      }
+
       setNotice('')
       setError(`执行下载失败: ${String(runError)}`)
     } finally {
@@ -559,7 +581,7 @@ export default function DataDownloadPage() {
     }
   }
 
-  async function onRunDownload() {
+  async function onRunDownload(allowStaleStockList = false) {
     if (!sourcePath) {
       setFeedbackSection('main')
       setError('当前数据目录为空，请先到数据管理页确认目录。')
@@ -607,6 +629,7 @@ export default function DataDownloadPage() {
         retryTimes: Math.max(0, Number(retryTimes) || 0),
         limitCallsPerMin: Math.max(1, Number(limitCallsPerMin) || 1),
         includeTurnover,
+        allowStaleStockList,
       }),
     )
   }
@@ -1098,6 +1121,22 @@ export default function DataDownloadPage() {
         </section>
 
       </section>
+
+      <ConfirmDialog
+        open={Boolean(staleStockListConfirmMessage)}
+        title="沿用现有股票列表？"
+        message={staleStockListConfirmMessage}
+        confirmText="继续下载"
+        cancelText="取消"
+        busy={isBusy}
+        onConfirm={() => {
+          setStaleStockListConfirmMessage('')
+          void onRunDownload(true)
+        }}
+        onCancel={() => {
+          setStaleStockListConfirmMessage('')
+        }}
+      />
 
     </div>
   )

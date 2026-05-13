@@ -149,6 +149,14 @@ pub struct StockListRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct StockListFetchResult {
+    pub rows: Vec<StockListRow>,
+    pub basic_row_count: usize,
+    pub snapshot_row_count: usize,
+    pub market_value_row_count: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct TradeCalRow {
     // 交易日列表返回值结构
     pub exchange: String,
@@ -384,11 +392,37 @@ impl TushareClient {
     }
 
     pub fn fetch_stock_list_rows(&self, trade_date: &str) -> Result<Vec<StockListRow>, String> {
+        Ok(self
+            .fetch_stock_list_rows_with_snapshot_stats(trade_date)?
+            .rows)
+    }
+
+    pub fn fetch_stock_list_rows_with_snapshot_stats(
+        &self,
+        trade_date: &str,
+    ) -> Result<StockListFetchResult, String> {
         let basic_rows = self.fetch_all_stock_basic_rows()?;
+        let basic_row_count = basic_rows.len();
         let snap_table = self.fetch_daily_basic_snapshot_table(trade_date)?;
         let snap_rows = parse_daily_basic_snapshot_rows(&snap_table)?;
+        let snapshot_row_count = snap_rows.len();
+        let market_value_row_count = snap_rows
+            .iter()
+            .filter(|row| {
+                row.trade_date == trade_date
+                    && matches!(row.total_mv, Some(value) if value.is_finite() && value > 0.0)
+                    && matches!(row.circ_mv, Some(value) if value.is_finite() && value > 0.0)
+            })
+            .count();
         let snap_map = build_daily_basic_snapshot_map(snap_rows)?;
-        merge_stock_list_rows(basic_rows, &snap_map, trade_date)
+        let rows = merge_stock_list_rows(basic_rows, &snap_map, trade_date)?;
+
+        Ok(StockListFetchResult {
+            rows,
+            basic_row_count,
+            snapshot_row_count,
+            market_value_row_count,
+        })
     }
 
     pub fn download_stock_list_csv(
@@ -399,6 +433,11 @@ impl TushareClient {
         let rows = self.fetch_stock_list_rows(trade_date)?;
         write_stock_list_csv(source_dir, &rows)?;
         Ok(rows.len())
+    }
+
+    pub fn fetch_market_daily_bar_count(&self, trade_date: &str) -> Result<usize, String> {
+        let table = self.fetch_daily_by_trade_date(trade_date)?;
+        Ok(table.items.len())
     }
 
     pub fn fetch_trade_cal_table(

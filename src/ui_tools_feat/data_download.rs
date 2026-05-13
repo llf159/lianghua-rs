@@ -94,6 +94,7 @@ pub struct DataDownloadRunInput {
     pub retry_times: usize,
     pub limit_calls_per_min: usize,
     pub include_turnover: bool,
+    pub allow_stale_stock_list: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -225,6 +226,7 @@ pub struct PreparedDataDownloadRun {
     pub retry_times: usize,
     pub limit_calls_per_min: usize,
     pub include_turnover: bool,
+    pub allow_stale_stock_list: bool,
     pub action: String,
     pub action_label: String,
 }
@@ -1079,6 +1081,7 @@ pub fn prepare_data_download_run(
         retry_times: input.retry_times,
         limit_calls_per_min: input.limit_calls_per_min.max(1),
         include_turnover: input.include_turnover,
+        allow_stale_stock_list: input.allow_stale_stock_list,
         action: status.planned_action,
         action_label: status.planned_action_label,
     })
@@ -1222,6 +1225,7 @@ pub fn run_prepared_data_download(
         retry_times: prepared.retry_times,
         limit_calls_per_min: prepared.limit_calls_per_min,
         include_turnover: prepared.include_turnover,
+        allow_stale_stock_list: prepared.allow_stale_stock_list,
     };
 
     let stock_progress_cb = |progress: DownloadProgress| {
@@ -1242,6 +1246,7 @@ pub fn run_prepared_data_download(
         retry_times: prepared.retry_times,
         limit_calls_per_min: prepared.limit_calls_per_min,
         include_turnover: false,
+        allow_stale_stock_list: prepared.allow_stale_stock_list,
     };
     let index_progress_cb = |progress: DownloadProgress| {
         emit_nested_data_download_progress(
@@ -1315,6 +1320,7 @@ pub fn run_prepared_missing_stock_repair(
         retry_times: prepared.retry_times,
         limit_calls_per_min: prepared.limit_calls_per_min,
         include_turnover: prepared.include_turnover,
+        allow_stale_stock_list: false,
     };
 
     let summary = core_run_selected_stock_download_with_progress(
