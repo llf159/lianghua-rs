@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import { getStrategyManagePage, type StrategyManageRuleItem } from "../../apis/strategyManage";
 import {
@@ -192,6 +192,33 @@ function formatUnknownValuesForCombo(item: RuleValidationComboResult) {
         .map((unknown) => `${unknown.name}=${formatNumber(unknown.value, 4)}`)
         .join(", ")
     : "默认参数";
+}
+
+function compactRuleLayerBacktestPayload(data: RuleLayerBacktestData): RuleLayerBacktestData {
+  if (data.points.length === 0) {
+    return data;
+  }
+  return {
+    ...data,
+    points: [],
+  };
+}
+
+function compactRuleExpressionValidationData(
+  data: RuleExpressionValidationData,
+): RuleExpressionValidationData {
+  return {
+    ...data,
+    combo_results: data.combo_results.map((combo) => {
+      const backtest = compactRuleLayerBacktestPayload(combo.backtest);
+      return backtest === combo.backtest
+        ? combo
+        : {
+            ...combo,
+            backtest,
+          };
+    }),
+  };
 }
 
 const BASE_SERIES_IDENTIFIERS = new Set([
@@ -390,6 +417,7 @@ const RANK_LAYER_METHOD_OPTIONS: Array<{ value: RankLayerMethod; label: string }
 
 export default function SceneLayerBacktestPage() {
   const location = useLocation();
+  const navigate = useNavigate();
   const locationState =
     location.state && typeof location.state === "object"
       ? (location.state as SceneLayerBacktestLocationState)
@@ -459,6 +487,12 @@ export default function SceneLayerBacktestPage() {
     validationLoading;
 
   useEffect(() => {
+    return () => {
+      writeTransientStrategyBacktestResult(null);
+    };
+  }, []);
+
+  useEffect(() => {
     const returnState = locationState?.validationReturnState;
     if (!returnState) {
       return;
@@ -484,12 +518,13 @@ export default function SceneLayerBacktestPage() {
     setValidationUnknownConfigs(returnState.validationUnknownConfigs.map(toUnknownConfigDraft));
     setValidationSampleLimitText(returnState.validationSampleLimitText);
     setValidationError("");
-    setValidationResult(returnState.validationResult);
+    setValidationResult(compactRuleExpressionValidationData(returnState.validationResult));
     setValidationRestoredComboKey(returnState.validationSelectedComboKey);
     setValidationSelectedComboKey(returnState.validationSelectedComboKey);
     setValidationDetailModalOpen(false);
     setValidationSamplesModalOpen(false);
-  }, [locationState]);
+    navigate(location.pathname, { replace: true, state: null });
+  }, [location.pathname, locationState, navigate]);
 
   useEffect(() => {
     writeStoredBacktestCommonParams({
@@ -1104,8 +1139,9 @@ export default function SceneLayerBacktestPage() {
         minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
       });
-      setRuleResult(data);
-      writeTransientStrategyBacktestResult(data);
+      const compacted = compactRuleLayerBacktestPayload(data);
+      setRuleResult(compacted);
+      writeTransientStrategyBacktestResult(compacted);
     } catch (runError) {
       setRuleResult(null);
       writeTransientStrategyBacktestResult(null);
@@ -1154,8 +1190,9 @@ export default function SceneLayerBacktestPage() {
         minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
       });
-      setRuleResult(data);
-      writeTransientStrategyBacktestResult(data);
+      const compacted = compactRuleLayerBacktestPayload(data);
+      setRuleResult(compacted);
+      writeTransientStrategyBacktestResult(compacted);
     } catch (runError) {
       setRuleResult(null);
       writeTransientStrategyBacktestResult(null);
@@ -1323,8 +1360,9 @@ export default function SceneLayerBacktestPage() {
         unknownConfigs,
         sampleLimitPerGroup,
       });
-      setValidationResult(data);
-      setValidationSampleLimitText(String(data.sample_limit_per_group));
+      const compacted = compactRuleExpressionValidationData(data);
+      setValidationResult(compacted);
+      setValidationSampleLimitText(String(compacted.sample_limit_per_group));
     } catch (runError) {
       setValidationResult(null);
       setValidationError(`执行表达式验证失败: ${String(runError)}`);

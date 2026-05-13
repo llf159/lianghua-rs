@@ -2319,18 +2319,7 @@ fn build_rule_backtest_payload(
         min_samples_per_rule_day: params.min_samples_per_day,
         min_listed_trade_days: params.min_listed_trade_days,
         backtest_period: params.backtest_period,
-        points: metrics
-            .points
-            .into_iter()
-            .map(|point| RuleLayerPointPayload {
-                trade_date: point.trade_date,
-                sample_count: point.sample_count,
-                avg_rule_score: point.avg_rule_score,
-                avg_residual_return: point.avg_residual_return,
-                top_bottom_spread: point.top_bottom_spread,
-                ic: point.ic,
-            })
-            .collect(),
+        points: Vec::new(),
         avg_residual_mean: metrics.avg_residual_mean,
         spread_mean: metrics.spread_mean,
         avg_contribution_score: None,
