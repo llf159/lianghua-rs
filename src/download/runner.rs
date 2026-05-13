@@ -2,9 +2,8 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::Path,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc,
+        mpsc, Arc, Mutex,
     },
     thread::{self, sleep},
     time::Duration,
@@ -12,12 +11,11 @@ use std::{
 
 use chrono::{Datelike, Local, NaiveDate, Timelike, Weekday};
 use duckdb::Connection;
-use rayon::{ThreadPool, ThreadPoolBuilder, prelude::*};
+use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
 
 use crate::{
-    crawler::concept::{ThsConceptFetchItem, ThsConceptRow, fetch_one_ths_concept_row},
+    crawler::concept::{fetch_one_ths_concept_row, ThsConceptFetchItem, ThsConceptRow},
     data::{
-        DataReader,
         concept_performance_data::rebuild_concept_performance_range,
         download_data::{
             append_stage_pro_bar_rows, checkpoint_stock_data, delete_one_stock_range,
@@ -26,15 +24,15 @@ use crate::{
             reset_stock_data_stage_table, write_ths_concepts_csv,
         },
         load_stock_list, load_ths_concepts_list, load_trade_date_list, source_db_path,
-        stock_list_path, trade_calendar_path,
+        stock_list_path, trade_calendar_path, DataReader,
     },
     download::{
+        ind_calc::{
+            cache_ind_build, calc_increment_inds_from_history,
+            load_many_tail_rows_with_warmup_need, warmup_ind_estimate, IndsCache,
+        },
         AdjType, BarFreq, DownloadSummary, DownloadTask, PreparedDownloadBatch,
         PreparedStockDownload, ProBarRow, TushareClient,
-        ind_calc::{
-            IndsCache, cache_ind_build, calc_increment_inds_from_history,
-            load_many_tail_rows_with_warmup_need, warmup_ind_estimate,
-        },
     },
 };
 
@@ -164,6 +162,34 @@ fn resolve_download_ts_codes(source_dir: &str) -> Result<Vec<String>, String> {
         .into_iter()
         .filter_map(|row| row.first().cloned())
         .collect())
+}
+
+fn normalize_list_date(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.len() == 8 && trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        return Some(trimmed.to_string());
+    }
+
+    None
+}
+
+fn resolve_stock_list_date_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
+    let rows = load_stock_list(source_dir)?;
+    let mut out = HashMap::with_capacity(rows.len());
+
+    for row in rows {
+        let Some(ts_code) = row.first().map(|value| value.trim()) else {
+            continue;
+        };
+        let Some(list_date) = row.get(5).and_then(|value| normalize_list_date(value)) else {
+            continue;
+        };
+        if !ts_code.is_empty() {
+            out.insert(ts_code.to_string(), list_date);
+        }
+    }
+
+    Ok(out)
 }
 
 fn resolve_index_ts_codes() -> Vec<String> {
@@ -962,6 +988,57 @@ pub fn build_download_task<'a>(
     tasks
 }
 
+fn build_download_task_with_list_dates(
+    ts_codes: &[String],
+    start_date: &str,
+    end_date: &str,
+    adj_type: AdjType,
+    with_factors: bool,
+    list_dates: &HashMap<String, String>,
+) -> Vec<DownloadTask> {
+    let mut tasks = Vec::with_capacity(ts_codes.len());
+
+    for ts_code in ts_codes {
+        let adjusted_start = list_dates
+            .get(ts_code)
+            .filter(|list_date| list_date.as_str() > start_date)
+            .map_or_else(|| start_date.to_string(), Clone::clone);
+        if adjusted_start.as_str() > end_date {
+            continue;
+        }
+
+        tasks.push(DownloadTask {
+            ts_code: ts_code.clone(),
+            start_date: adjusted_start,
+            end_date: end_date.to_string(),
+            freq: BarFreq::Daily,
+            adj_type,
+            with_factors,
+        });
+    }
+
+    tasks
+}
+
+fn build_download_task_from_stock_list_dates(
+    source_dir: &str,
+    ts_codes: &[String],
+    start_date: &str,
+    end_date: &str,
+    adj_type: AdjType,
+    with_factors: bool,
+) -> Result<Vec<DownloadTask>, String> {
+    let list_dates = resolve_stock_list_date_map(source_dir)?;
+    Ok(build_download_task_with_list_dates(
+        ts_codes,
+        start_date,
+        end_date,
+        adj_type,
+        with_factors,
+        &list_dates,
+    ))
+}
+
 fn merge_summary(total: &mut DownloadSummary, batch: DownloadSummary) {
     total.success_count += batch.success_count;
     total.failed_count += batch.failed_count;
@@ -1197,13 +1274,14 @@ fn redownload_failed_stocks(
         .iter()
         .map(|(ts_code, _)| ts_code.clone())
         .collect::<Vec<_>>();
-    let tasks = build_download_task(
+    let tasks = build_download_task_from_stock_list_dates(
+        source_dir,
         &failed_ts_codes,
         start_date,
         trade_date,
         adj_type,
         with_factors,
-    );
+    )?;
     let batch = pool.install(|| client.prepare_stock_downloads(source_dir, &tasks));
     if batch.failed_items.is_empty() {
         return Ok(batch);
@@ -1362,8 +1440,27 @@ fn download_selected_stocks_with_context(
     }
 
     let mut total = DownloadSummary::default();
-    let tasks = build_download_task(ts_codes, start_date, end_date, adj_type, with_factors);
+    let tasks = build_download_task_from_stock_list_dates(
+        source_dir,
+        ts_codes,
+        start_date,
+        end_date,
+        adj_type,
+        with_factors,
+    )?;
     let total_tasks = tasks.len();
+    if tasks.is_empty() {
+        emit_progress(
+            progress_cb,
+            "done",
+            0,
+            0,
+            Some(effective_trade_date.to_string()),
+            "没有需要处理的股票。",
+        );
+        return Ok(DownloadSummary::default());
+    }
+
     let mut processed_tasks = 0usize;
     emit_progress(
         progress_cb,
@@ -2175,5 +2272,46 @@ mod tests {
         assert!(needs_refresh(&empty_source_dir, "20261231"));
 
         fs::remove_dir_all(empty_source_dir).ok();
+    }
+
+    #[test]
+    fn stock_download_tasks_are_clamped_to_list_date() {
+        let ts_codes = vec!["000001.SZ".to_string(), "301999.SZ".to_string()];
+        let list_dates = HashMap::from([
+            ("000001.SZ".to_string(), "19910403".to_string()),
+            ("301999.SZ".to_string(), "20250115".to_string()),
+        ]);
+
+        let tasks = build_download_task_with_list_dates(
+            &ts_codes,
+            "20240101",
+            "20250131",
+            AdjType::Qfq,
+            true,
+            &list_dates,
+        );
+
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].ts_code, "000001.SZ");
+        assert_eq!(tasks[0].start_date, "20240101");
+        assert_eq!(tasks[1].ts_code, "301999.SZ");
+        assert_eq!(tasks[1].start_date, "20250115");
+    }
+
+    #[test]
+    fn stock_download_tasks_skip_stocks_listed_after_end_date() {
+        let ts_codes = vec!["301999.SZ".to_string()];
+        let list_dates = HashMap::from([("301999.SZ".to_string(), "20250201".to_string())]);
+
+        let tasks = build_download_task_with_list_dates(
+            &ts_codes,
+            "20240101",
+            "20250131",
+            AdjType::Qfq,
+            false,
+            &list_dates,
+        );
+
+        assert!(tasks.is_empty());
     }
 }
