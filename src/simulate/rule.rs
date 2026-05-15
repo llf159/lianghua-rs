@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use duckdb::{params_from_iter, Connection};
+use duckdb::{Connection, params_from_iter};
 use rayon::prelude::*;
 
 use super::{
-    build_backtest_sample_eligibility, calc_stock_residual_returns_from_loaded_series,
-    BacktestSampleEligibility, ResidualFactorSeriesRefs, ResidualReturnInput,
-    DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
+    BacktestSampleEligibility, DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, ResidualFactorSeriesRefs,
+    ResidualReturnInput, build_backtest_sample_eligibility,
+    calc_stock_residual_returns_from_loaded_series,
 };
 use crate::data::{
     concept_performance_data::{load_concept_trend_series, load_industry_trend_series},
@@ -1734,15 +1734,16 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use duckdb::{params, Connection};
+    use duckdb::{Connection, params};
 
     use crate::data::{result_db_path, source_db_path};
 
     use super::{
-        build_rule_layer_runtime_cache, calc_all_rule_layer_metrics_from_db,
-        calc_rule_layer_metrics_from_db, calc_rule_layer_metrics_with_samples_from_cache,
+        RuleLayerConfig, RuleLayerFromDbInput, build_rule_layer_runtime_cache,
+        calc_all_rule_layer_metrics_from_db, calc_rule_layer_metrics_from_db,
+        calc_rule_layer_metrics_with_samples_from_cache,
         calc_rule_layer_metrics_with_triggered_samples_from_cache,
-        collect_triggered_rule_samples_from_cache, RuleLayerConfig, RuleLayerFromDbInput,
+        collect_triggered_rule_samples_from_cache,
     };
 
     fn assert_opt_close(left: Option<f64>, right: Option<f64>) {

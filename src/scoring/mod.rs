@@ -87,6 +87,36 @@ pub struct CachedRule {
     pub tag: RuleTag,
     pub when_src: String,
     pub when_ast: Stmts,
+    pub assigned_names: Vec<String>,
+}
+
+#[derive(Clone)]
+enum RuntimeSnapshotEntry {
+    Existing(String, Value),
+    Missing(String),
+}
+
+fn snapshot_runtime_values(rt: &Runtime, names: &[String]) -> Vec<RuntimeSnapshotEntry> {
+    names
+        .iter()
+        .map(|name| match rt.vars.get(name).cloned() {
+            Some(value) => RuntimeSnapshotEntry::Existing(name.clone(), value),
+            None => RuntimeSnapshotEntry::Missing(name.clone()),
+        })
+        .collect()
+}
+
+fn restore_runtime_values(rt: &mut Runtime, snapshots: &[RuntimeSnapshotEntry]) {
+    for snapshot in snapshots {
+        match snapshot {
+            RuntimeSnapshotEntry::Existing(name, value) => {
+                rt.vars.insert(name.clone(), value.clone());
+            }
+            RuntimeSnapshotEntry::Missing(name) => {
+                rt.vars.remove(name);
+            }
+        }
+    }
 }
 
 fn hit_when_cache(rule: &CachedRule, rt: &mut Runtime) -> Result<Vec<bool>, String> {
@@ -200,7 +230,10 @@ fn scoring_rule_cache(
     rule: &CachedRule,
     rt: &mut Runtime,
 ) -> Result<(Vec<f64>, Vec<bool>), String> {
-    let bs = hit_when_cache(&rule, rt)?;
+    let snapshots = snapshot_runtime_values(rt, &rule.assigned_names);
+    let bs_result = hit_when_cache(rule, rt);
+    restore_runtime_values(rt, &snapshots);
+    let bs = bs_result?;
     let mut out = Vec::with_capacity(bs.len());
     let mut triggered = Vec::with_capacity(bs.len());
 
@@ -497,4 +530,72 @@ pub fn build_rank_tiebreak(
     profile.total_ms = total_started_at.elapsed().as_millis() as u64;
     log_rank_tiebreak_profile(&profile);
     Ok(profile)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CachedRule, evaluate_cached_rule_scores};
+    use crate::{
+        data::{ScopeWay, collect_assigned_names_from_expr_program},
+        expr::{
+            eval::{Runtime, Value},
+            parser::{Parser, lex_all},
+        },
+    };
+
+    fn cached_rule(expression: &str) -> CachedRule {
+        let tokens = lex_all(expression);
+        let mut parser = Parser::new(tokens);
+        let when_ast = parser.parse_main().expect("expression should parse");
+        let assigned_names = collect_assigned_names_from_expr_program(&when_ast);
+
+        CachedRule {
+            name: expression.to_string(),
+            scope_windows: 1,
+            scope_way: ScopeWay::Last,
+            points: 1.0,
+            dist_points: None,
+            tag: crate::data::RuleTag::Normal,
+            when_src: expression.to_string(),
+            when_ast,
+            assigned_names,
+        }
+    }
+
+    fn runtime_with_close_series(close_values: &[f64]) -> Runtime {
+        let mut runtime = Runtime::default();
+        runtime.vars.insert(
+            "C".to_string(),
+            Value::NumSeries(close_values.iter().map(|value| Some(*value)).collect()),
+        );
+        runtime
+    }
+
+    #[test]
+    fn cached_rule_restores_overwritten_base_series() {
+        let mut runtime = runtime_with_close_series(&[1.0, 2.0, 3.0]);
+        let overwrite_rule = cached_rule("C := REF(C, 1); C > 0");
+        let check_rule = cached_rule("C > 2");
+
+        evaluate_cached_rule_scores(&overwrite_rule, &mut runtime)
+            .expect("overwrite rule should evaluate");
+        let (_, triggered) =
+            evaluate_cached_rule_scores(&check_rule, &mut runtime).expect("check rule evaluates");
+
+        assert_eq!(triggered, vec![false, false, true]);
+    }
+
+    #[test]
+    fn cached_rule_removes_temporary_assignments_after_eval() {
+        let mut runtime = runtime_with_close_series(&[1.0, 2.0, 3.0]);
+        let temp_rule = cached_rule("TMP := 1; TMP > 0");
+        let check_rule = cached_rule("TMP > 0");
+
+        evaluate_cached_rule_scores(&temp_rule, &mut runtime).expect("temp rule should evaluate");
+        assert!(!runtime.vars.contains_key("TMP"));
+
+        let error = evaluate_cached_rule_scores(&check_rule, &mut runtime)
+            .expect_err("TMP should not leak into next rule");
+        assert!(error.contains("变量不存在:TMP"));
+    }
 }

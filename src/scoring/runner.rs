@@ -498,7 +498,7 @@ pub fn scoring_single_period(
 mod tests {
     use super::*;
     use crate::{
-        data::{RuleTag, ScopeWay},
+        data::{RuleTag, ScopeWay, collect_assigned_names_from_expr_program},
         expr::parser::{Parser, lex_all},
     };
 
@@ -506,6 +506,7 @@ mod tests {
         let tokens = lex_all(expression);
         let mut parser = Parser::new(tokens);
         let when_ast = parser.parse_main().expect("expression should parse");
+        let assigned_names = collect_assigned_names_from_expr_program(&when_ast);
 
         CachedRule {
             name: name.to_string(),
@@ -516,6 +517,7 @@ mod tests {
             tag: RuleTag::Normal,
             when_src: expression.to_string(),
             when_ast,
+            assigned_names,
         }
     }
 

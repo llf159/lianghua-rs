@@ -252,11 +252,11 @@ mod tests {
         assert_close(row_data.cols["TOR"].last().copied().flatten(), Some(1.8));
         assert_close(
             row_data.cols["TURNOVER_RATE"].last().copied().flatten(),
-            Some(1.8)
+            Some(1.8),
         );
         assert_close(
             row_data.cols["ZHANG"].last().copied().flatten(),
-            Some(0.095)
+            Some(0.095),
         );
     }
 
@@ -307,12 +307,12 @@ mod tests {
         assert_close(row_data.cols["C"].last().copied().flatten(), Some(10.71612));
         assert_close(
             row_data.cols["H"].last().copied().flatten(),
-            Some(10.8768618)
+            Some(10.8768618),
         );
         assert_close(row_data.cols["L"].last().copied().flatten(), Some(10.19592));
         assert_close(
             row_data.cols["PCT_CHG"].last().copied().flatten(),
-            Some(5.060000000000006)
+            Some(5.060000000000006),
         );
     }
 }

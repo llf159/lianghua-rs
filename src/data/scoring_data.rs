@@ -7,7 +7,7 @@ use std::time;
 // use std::fs::File;
 // use std::io::{BufWriter, Write};
 
-use crate::data::{RowData, ScoreRule};
+use crate::data::{RowData, ScoreRule, collect_assigned_names_from_expr_program};
 use crate::expr::eval::{Runtime, Value};
 use crate::expr::parser::{Parser, lex_all};
 use crate::scoring::{CachedRule, RuleScoreSeries, SceneScoreSeries, TieBreakWay};
@@ -1112,6 +1112,7 @@ pub fn cache_rule_build(
         let stmt = parser
             .parse_main()
             .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
+        let assigned_names = collect_assigned_names_from_expr_program(&stmt);
         out.push(CachedRule {
             name: rule.name,
             scope_windows: rule.scope_windows,
@@ -1121,6 +1122,7 @@ pub fn cache_rule_build(
             tag: rule.tag,
             when_src: rule.when,
             when_ast: stmt,
+            assigned_names,
         });
     }
     Ok(out)

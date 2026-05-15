@@ -241,6 +241,19 @@ pub fn expr_program_uses_runtime_key(stmts: &Stmts, target_key: &str) -> bool {
     false
 }
 
+pub fn collect_assigned_names_from_expr_program(stmts: &Stmts) -> Vec<String> {
+    let mut assigned = HashSet::new();
+    for stmt in &stmts.item {
+        if let Stmt::Assign { name, .. } = stmt {
+            assigned.insert(name.clone());
+        }
+    }
+
+    let mut out = assigned.into_iter().collect::<Vec<_>>();
+    out.sort();
+    out
+}
+
 fn collect_stmts_runtime_keys(
     stmts: &Stmts,
     options: RuntimeKeyCollectOptions<'_>,
@@ -961,7 +974,9 @@ impl IndsData {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{RuleTag, ScoreConfig, runtime_key_required};
+    use super::{
+        RuleTag, ScoreConfig, collect_assigned_names_from_expr_program, runtime_key_required,
+    };
 
     fn parse_score_config(text: &str) -> ScoreConfig {
         toml::from_str(text).expect("score config should parse")
@@ -1027,5 +1042,19 @@ explain = "test"
         assert!(keys.contains("C"));
         assert!(!keys.contains("TOTAL_MV"));
         assert!(!keys.contains("TOTAL_MV_YI"));
+    }
+
+    #[test]
+    fn collect_assigned_names_deduplicates_and_sorts() {
+        use crate::expr::parser::{Parser, lex_all};
+
+        let tokens = lex_all("TMP := 1; C := REF(C, 1); TMP := 2; C > TMP");
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_main().expect("expression should parse");
+
+        assert_eq!(
+            collect_assigned_names_from_expr_program(&program),
+            vec!["C".to_string(), "TMP".to_string()]
+        );
     }
 }

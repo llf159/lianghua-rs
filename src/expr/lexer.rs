@@ -7,11 +7,14 @@ pub enum TokenKind {
     Slash,
     LParen,
     RParen,
+    LBracket,
+    RBracket,
     Comma,
     Semi,
     And,
     Or,
     Not,
+    In,
     Ident(String),
     Number(f64),
     Gt,
@@ -133,6 +136,7 @@ impl<'a> Lexer<'a> {
                     "AND" => TokenKind::And,
                     "OR" => TokenKind::Or,
                     "NOT" => TokenKind::Not,
+                    "IN" => TokenKind::In,
                     _ => TokenKind::Ident(ident),
                 };
                 Token {
@@ -195,6 +199,22 @@ impl<'a> Lexer<'a> {
                 self.pop_char();
                 Token {
                     kind: TokenKind::RParen,
+                    start,
+                    end: self.pos,
+                }
+            }
+            Some('[') => {
+                self.pop_char();
+                Token {
+                    kind: TokenKind::LBracket,
+                    start,
+                    end: self.pos,
+                }
+            }
+            Some(']') => {
+                self.pop_char();
+                Token {
+                    kind: TokenKind::RBracket,
                     start,
                     end: self.pos,
                 }

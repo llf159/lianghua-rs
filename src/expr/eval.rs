@@ -1494,3 +1494,44 @@ fn last_supports_bool_series() {
     let out = rt.eval_program(&stmts).expect("eval failed");
     assert_eq!(out, Value::Bool(true));
 }
+
+#[test]
+fn in_range_supports_inclusive_and_exclusive_bounds() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let expr = "A := C IN [2, 4]; B := C IN (2, 4); A AND NOT(B);";
+    let toks = lex_all(expr);
+    let mut p = Parser::new(toks);
+    let stmts = p.parse_main().expect("parse failed");
+    let mut rt = Runtime::default();
+
+    rt.vars.insert(
+        "C".to_string(),
+        Value::NumSeries(vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)]),
+    );
+
+    let out = rt.eval_program(&stmts).expect("eval failed");
+    assert_eq!(
+        out,
+        Value::BoolSeries(vec![false, true, false, true, false])
+    );
+}
+
+#[test]
+fn in_range_accepts_expression_bounds() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let expr = "C IN [MA(C, 2), HHV(C, 3)]";
+    let toks = lex_all(expr);
+    let mut p = Parser::new(toks);
+    let stmts = p.parse_main().expect("parse failed");
+    let mut rt = Runtime::default();
+
+    rt.vars.insert(
+        "C".to_string(),
+        Value::NumSeries(vec![Some(1.0), Some(2.0), Some(3.0), Some(2.0), Some(4.0)]),
+    );
+
+    let out = rt.eval_program(&stmts).expect("eval failed");
+    assert_eq!(out, Value::BoolSeries(vec![false, false, true, false, true]));
+}

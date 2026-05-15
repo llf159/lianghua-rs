@@ -83,6 +83,13 @@ fn infix_bp(kind: &TokenKind) -> Option<(u8, u8, BinaryOp)> {
     }
 }
 
+fn in_bp(kind: &TokenKind) -> Option<(u8, u8)> {
+    match kind {
+        TokenKind::In => Some((30, 31)),
+        _ => None,
+    }
+}
+
 // 储存表达式的结构体
 #[derive(Debug, Clone)]
 pub struct Parser {
@@ -139,11 +146,14 @@ impl Parser {
             TokenKind::Slash => "`/`".to_string(),
             TokenKind::LParen => "`(`".to_string(),
             TokenKind::RParen => "`)`".to_string(),
+            TokenKind::LBracket => "`[`".to_string(),
+            TokenKind::RBracket => "`]`".to_string(),
             TokenKind::Comma => "`,`".to_string(),
             TokenKind::Semi => "`;`".to_string(),
             TokenKind::And => "`AND`".to_string(),
             TokenKind::Or => "`OR`".to_string(),
             TokenKind::Not => "`NOT`".to_string(),
+            TokenKind::In => "`IN`".to_string(),
             TokenKind::Ident(name) => format!("标识符 `{name}`"),
             TokenKind::Number(num) => format!("数字 `{num}`"),
             TokenKind::Gt => "`>`".to_string(),
@@ -176,6 +186,16 @@ impl Parser {
 
         // 匹配优先级
         loop {
+            if let Some((l_bp, _r_bp)) = in_bp(self.peek_kind()) {
+                if l_bp < min_bp {
+                    break;
+                }
+
+                self.pop_token();
+                lhs = self.parse_in_range_expr(lhs)?;
+                continue;
+            }
+
             // 初始化比较表
             let Some((l_bp, r_bp, op)) = infix_bp(self.peek_kind()) else {
                 break;
@@ -197,6 +217,81 @@ impl Parser {
         }
 
         Ok(lhs)
+    }
+
+    fn parse_in_range_expr(&mut self, lhs: Expr) -> Result<Expr, ParseErr> {
+        let include_lower = match self.peek_kind() {
+            TokenKind::LBracket => {
+                self.pop_token();
+                true
+            }
+            TokenKind::LParen => {
+                self.pop_token();
+                false
+            }
+            other => {
+                return Err(self.err_here(format!(
+                    "`IN` 后需要范围，期望 `[` 或 `(`，当前位置是 {}",
+                    Self::token_brief(other)
+                )));
+            }
+        };
+
+        let lower = self.parse_expr(0)?;
+        match self.peek_kind() {
+            TokenKind::Comma => {
+                self.pop_token();
+            }
+            other => {
+                return Err(self.err_here(format!(
+                    "`IN` 范围缺少分隔符，期望 `,`，当前位置是 {}",
+                    Self::token_brief(other)
+                )));
+            }
+        }
+
+        let upper = self.parse_expr(0)?;
+        let include_upper = match self.peek_kind() {
+            TokenKind::RBracket => {
+                self.pop_token();
+                true
+            }
+            TokenKind::RParen => {
+                self.pop_token();
+                false
+            }
+            other => {
+                return Err(self.err_here(format!(
+                    "`IN` 范围没有正确闭合，期望 `]` 或 `)`，当前位置是 {}",
+                    Self::token_brief(other)
+                )));
+            }
+        };
+
+        let lower_cmp = Expr::Binary {
+            op: if include_lower {
+                BinaryOp::Ge
+            } else {
+                BinaryOp::Gt
+            },
+            lhs: Box::new(lhs.clone()),
+            rhs: Box::new(lower),
+        };
+        let upper_cmp = Expr::Binary {
+            op: if include_upper {
+                BinaryOp::Le
+            } else {
+                BinaryOp::Lt
+            },
+            lhs: Box::new(lhs),
+            rhs: Box::new(upper),
+        };
+
+        Ok(Expr::Binary {
+            op: BinaryOp::And,
+            lhs: Box::new(lower_cmp),
+            rhs: Box::new(upper_cmp),
+        })
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseErr> {
@@ -397,5 +492,55 @@ mod tests {
         assert!(msg.contains("表达式结尾不完整"));
         assert!(msg.contains("期望 `;` 或输入结束"));
         assert!(msg.contains("标识符 `b`"));
+    }
+
+    #[test]
+    fn parses_in_range_into_comparison_chain() {
+        use super::{BinaryOp, Expr, Stmt};
+
+        let mut parser = Parser::new(lex_all("C IN [MA(C, 5), HHV(C, 20))"));
+        let stmts = parser.parse_main().expect("parse should succeed");
+
+        assert_eq!(stmts.item.len(), 1);
+        match &stmts.item[0] {
+            Stmt::Expr(Expr::Binary { op, lhs, rhs }) => {
+                assert_eq!(*op, BinaryOp::And);
+
+                match &**lhs {
+                    Expr::Binary {
+                        op,
+                        lhs: cmp_lhs,
+                        rhs: lower,
+                    } => {
+                        assert_eq!(*op, BinaryOp::Ge);
+                        assert_eq!(**cmp_lhs, Expr::Ident("C".to_string()));
+                        assert!(matches!(&**lower, Expr::Call { name, .. } if name == "MA"));
+                    }
+                    other => panic!("unexpected lower comparison: {other:?}"),
+                }
+
+                match &**rhs {
+                    Expr::Binary {
+                        op,
+                        lhs: cmp_lhs,
+                        rhs: upper,
+                    } => {
+                        assert_eq!(*op, BinaryOp::Lt);
+                        assert_eq!(**cmp_lhs, Expr::Ident("C".to_string()));
+                        assert!(matches!(&**upper, Expr::Call { name, .. } if name == "HHV"));
+                    }
+                    other => panic!("unexpected upper comparison: {other:?}"),
+                }
+            }
+            other => panic!("unexpected stmt: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reports_missing_in_range_delimiter_clearly() {
+        let (idx, msg) = parse_err("C IN [1 2]");
+        assert_eq!(idx, 8);
+        assert!(msg.contains("`IN` 范围缺少分隔符"));
+        assert!(msg.contains("标识符") || msg.contains("数字 `2`"));
     }
 }

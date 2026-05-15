@@ -4,21 +4,21 @@ use std::{
 };
 
 use chrono::{Days, NaiveDate};
-use duckdb::{params, Connection};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use duckdb::{Connection, params};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::{
     data::scoring_data::row_into_rt,
     data::{
-        collect_runtime_keys_from_expr_programs, expr_program_uses_runtime_key, load_stock_list,
-        load_trade_date_list, result_db_path, stock_list_path, DataReader, RowData,
-        RuntimeKeyCollectOptions,
+        DataReader, RowData, RuntimeKeyCollectOptions, collect_runtime_keys_from_expr_programs,
+        expr_program_uses_runtime_key, load_stock_list, load_trade_date_list, result_db_path,
+        stock_list_path,
     },
     expr::{
         eval::{Runtime, Value},
-        parser::{lex_all, Expr, Parser, Stmt, Stmts},
+        parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
     scoring::tools::{
         calc_query_need_rows, calc_query_start_date, inject_stock_extra_fields, load_st_list,
@@ -2003,7 +2003,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use duckdb::{params, Connection};
+    use duckdb::{Connection, params};
 
     use crate::{data::RowData, scoring::tools::calc_zhang_pct};
 

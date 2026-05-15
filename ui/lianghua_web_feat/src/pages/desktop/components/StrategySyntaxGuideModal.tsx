@@ -160,11 +160,12 @@ C > BASE AND VOL_OK`}</pre>
           <h4>2. 表达式</h4>
           <div className="strategy-syntax-guide-chip-list">
             <span>算术：+ - * /</span>
-            <span>比较：&gt; &gt;= &lt; &lt;= == !=</span>
+            <span>比较：&gt; &gt;= &lt; &lt;= == != IN</span>
             <span>逻辑：AND OR NOT</span>
             <span>分组：(...)</span>
           </div>
           <pre className="strategy-syntax-guide-code">{`C > O AND V > MA(V, 5)
+C IN [MA(C, 5), HHV(C, 20))
 NOT(CROSS(C, MA(C, 10)))
 IF(C > O, C - O, 0)`}</pre>
         </section>
