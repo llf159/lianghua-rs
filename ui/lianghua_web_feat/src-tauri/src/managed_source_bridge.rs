@@ -25,6 +25,8 @@ const MANAGED_SOURCE_IMPORT_EVENT: &str = "managed-source-import";
 const IMPORT_BUFFER_SIZE: usize = 1024 * 1024;
 const IMPORT_PROGRESS_STEP_BYTES: u64 = 32 * 1024 * 1024;
 const STRATEGY_BACKUP_DIR_NAME: &str = "strategy_backups";
+const STRATEGY_SNAPSHOT_DIR_NAME: &str = "strategy_snapshots";
+const RANK_COMPUTE_SNAPSHOT_DIR_NAME: &str = "rank_compute";
 const STRATEGY_RULE_FILE_NAME: &str = "score_rule.toml";
 const STRATEGY_META_FILE_NAME: &str = "meta.json";
 const EMPTY_STRATEGY_TEMPLATE: &str = r#"version = 1
@@ -154,6 +156,12 @@ struct StrategyBackupMeta {
     source_kind: String,
     source_file_name: Option<String>,
     description: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StrategyAssetLocation {
+    Backup,
+    RankComputeSnapshot,
 }
 
 fn normalize_strategy_backup_description(description: &str) -> Result<Option<String>, String> {
@@ -393,16 +401,119 @@ fn managed_strategy_backup_root(source_root: &Path) -> PathBuf {
     source_root.join(STRATEGY_BACKUP_DIR_NAME)
 }
 
+fn managed_strategy_snapshot_root(source_root: &Path) -> PathBuf {
+    source_root.join(STRATEGY_SNAPSHOT_DIR_NAME)
+}
+
+fn managed_rank_compute_snapshot_root(source_root: &Path) -> PathBuf {
+    managed_strategy_snapshot_root(source_root).join(RANK_COMPUTE_SNAPSHOT_DIR_NAME)
+}
+
 fn managed_strategy_backup_dir(source_root: &Path, backup_id: &str) -> PathBuf {
     managed_strategy_backup_root(source_root).join(backup_id)
+}
+
+fn managed_rank_compute_snapshot_dir(source_root: &Path, backup_id: &str) -> PathBuf {
+    managed_rank_compute_snapshot_root(source_root).join(backup_id)
 }
 
 fn managed_strategy_backup_file_path(source_root: &Path, backup_id: &str) -> PathBuf {
     managed_strategy_backup_dir(source_root, backup_id).join(STRATEGY_RULE_FILE_NAME)
 }
 
+fn managed_rank_compute_snapshot_file_path(source_root: &Path, backup_id: &str) -> PathBuf {
+    managed_rank_compute_snapshot_dir(source_root, backup_id).join(STRATEGY_RULE_FILE_NAME)
+}
+
 fn managed_strategy_backup_meta_path(source_root: &Path, backup_id: &str) -> PathBuf {
     managed_strategy_backup_dir(source_root, backup_id).join(STRATEGY_META_FILE_NAME)
+}
+
+fn managed_rank_compute_snapshot_meta_path(source_root: &Path, backup_id: &str) -> PathBuf {
+    managed_rank_compute_snapshot_dir(source_root, backup_id).join(STRATEGY_META_FILE_NAME)
+}
+
+fn managed_strategy_asset_dir(
+    source_root: &Path,
+    location: StrategyAssetLocation,
+    backup_id: &str,
+) -> PathBuf {
+    match location {
+        StrategyAssetLocation::Backup => managed_strategy_backup_dir(source_root, backup_id),
+        StrategyAssetLocation::RankComputeSnapshot => {
+            managed_rank_compute_snapshot_dir(source_root, backup_id)
+        }
+    }
+}
+
+fn managed_strategy_asset_file_path(
+    source_root: &Path,
+    location: StrategyAssetLocation,
+    backup_id: &str,
+) -> PathBuf {
+    match location {
+        StrategyAssetLocation::Backup => managed_strategy_backup_file_path(source_root, backup_id),
+        StrategyAssetLocation::RankComputeSnapshot => {
+            managed_rank_compute_snapshot_file_path(source_root, backup_id)
+        }
+    }
+}
+
+fn managed_strategy_asset_meta_path(
+    source_root: &Path,
+    location: StrategyAssetLocation,
+    backup_id: &str,
+) -> PathBuf {
+    match location {
+        StrategyAssetLocation::Backup => managed_strategy_backup_meta_path(source_root, backup_id),
+        StrategyAssetLocation::RankComputeSnapshot => {
+            managed_rank_compute_snapshot_meta_path(source_root, backup_id)
+        }
+    }
+}
+
+fn strategy_asset_relative_path(
+    source_dir: &str,
+    location: StrategyAssetLocation,
+    backup_id: &str,
+) -> String {
+    let dir_name = match location {
+        StrategyAssetLocation::Backup => STRATEGY_BACKUP_DIR_NAME,
+        StrategyAssetLocation::RankComputeSnapshot => STRATEGY_SNAPSHOT_DIR_NAME,
+    };
+    let maybe_segment = match location {
+        StrategyAssetLocation::Backup => None,
+        StrategyAssetLocation::RankComputeSnapshot => Some(RANK_COMPUTE_SNAPSHOT_DIR_NAME),
+    };
+    let mut path = format!("{}/{}", source_dir.trim().trim_matches('/'), dir_name);
+    if let Some(segment) = maybe_segment {
+        path.push('/');
+        path.push_str(segment);
+    }
+    path.push('/');
+    path.push_str(backup_id);
+    path.push('/');
+    path.push_str(STRATEGY_RULE_FILE_NAME);
+    path.trim_start_matches('/').to_string()
+}
+
+fn locate_strategy_asset(
+    source_root: &Path,
+    backup_id: &str,
+) -> Option<(StrategyAssetLocation, PathBuf)> {
+    let normalized_backup_id = validate_strategy_backup_id(backup_id).ok()?;
+    for location in [
+        StrategyAssetLocation::Backup,
+        StrategyAssetLocation::RankComputeSnapshot,
+    ] {
+        let asset_dir = managed_strategy_asset_dir(source_root, location, normalized_backup_id);
+        let file_path = managed_strategy_asset_file_path(source_root, location, normalized_backup_id);
+        let meta_path = managed_strategy_asset_meta_path(source_root, location, normalized_backup_id);
+        if asset_dir.is_dir() && file_path.is_file() && meta_path.is_file() {
+            return Some((location, asset_dir));
+        }
+    }
+    None
 }
 
 fn validate_strategy_backup_id(backup_id: &str) -> Result<&str, String> {
@@ -420,7 +531,9 @@ fn read_strategy_backup_meta(
     source_root: &Path,
     backup_id: &str,
 ) -> Result<StrategyBackupMeta, String> {
-    let meta_path = managed_strategy_backup_meta_path(source_root, backup_id);
+    let meta_path = locate_strategy_asset(source_root, backup_id)
+        .map(|(_, asset_dir)| asset_dir.join(STRATEGY_META_FILE_NAME))
+        .unwrap_or_else(|| managed_strategy_backup_meta_path(source_root, backup_id));
     let raw = std::fs::read_to_string(&meta_path).map_err(|error| {
         format!(
             "读取策略备份元数据失败: path={}, err={error}",
@@ -440,7 +553,9 @@ fn write_strategy_backup_meta(
     backup_id: &str,
     meta: &StrategyBackupMeta,
 ) -> Result<(), String> {
-    let meta_path = managed_strategy_backup_meta_path(source_root, backup_id);
+    let meta_path = locate_strategy_asset(source_root, backup_id)
+        .map(|(_, asset_dir)| asset_dir.join(STRATEGY_META_FILE_NAME))
+        .unwrap_or_else(|| managed_strategy_backup_meta_path(source_root, backup_id));
     if let Some(parent) = meta_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
@@ -733,10 +848,11 @@ fn build_strategy_backup_diff_lines(
 fn build_managed_strategy_backup_item(
     source_root: &Path,
     source_dir: &str,
+    location: StrategyAssetLocation,
     backup_id: &str,
 ) -> Result<ManagedStrategyBackupItem, String> {
     let normalized_backup_id = validate_strategy_backup_id(backup_id)?;
-    let file_path = managed_strategy_backup_file_path(source_root, normalized_backup_id);
+    let file_path = managed_strategy_asset_file_path(source_root, location, normalized_backup_id);
     let metadata = std::fs::metadata(&file_path).map_err(|error| {
         format!(
             "读取策略备份文件失败: path={}, err={error}",
@@ -745,15 +861,7 @@ fn build_managed_strategy_backup_item(
     })?;
     let meta = read_strategy_backup_meta(source_root, normalized_backup_id)?;
     let modified_at = metadata.modified().ok().map(format_system_time);
-    let relative_path = format!(
-        "{}/{}/{}/{}",
-        source_dir.trim().trim_matches('/'),
-        STRATEGY_BACKUP_DIR_NAME,
-        normalized_backup_id,
-        STRATEGY_RULE_FILE_NAME
-    )
-    .trim_start_matches('/')
-    .to_string();
+    let relative_path = strategy_asset_relative_path(source_dir, location, normalized_backup_id);
 
     Ok(ManagedStrategyBackupItem {
         backup_id: normalized_backup_id.to_string(),
@@ -773,7 +881,7 @@ fn cleanup_rank_compute_strategy_snapshots(
     source_root: &Path,
     keep_backup_id: &str,
 ) -> Result<(), String> {
-    let backup_root = managed_strategy_backup_root(source_root);
+    let backup_root = managed_rank_compute_snapshot_root(source_root);
     if !backup_root.exists() {
         return Ok(());
     }
@@ -828,9 +936,9 @@ pub(crate) fn snapshot_rank_compute_strategy(
 
     let source_root = resolve_source_root(app_data_root, source_dir)?;
     let backup_id = current_strategy_backup_id();
-    let backup_dir = managed_strategy_backup_dir(&source_root, &backup_id);
+    let backup_dir = managed_rank_compute_snapshot_dir(&source_root, &backup_id);
     std::fs::create_dir_all(&backup_dir).map_err(|error| error.to_string())?;
-    let backup_file_path = managed_strategy_backup_file_path(&source_root, &backup_id);
+    let backup_file_path = managed_rank_compute_snapshot_file_path(&source_root, &backup_id);
     std::fs::copy(strategy_file_path, &backup_file_path).map_err(|error| {
         format!(
             "复制排名计算策略快照失败: from={}, to={}, err={error}",
@@ -848,17 +956,24 @@ pub(crate) fn snapshot_rank_compute_strategy(
         (Some(start), Some(end)) => format!("{start} 至 {end}"),
         _ => "未记录区间".to_string(),
     };
-    write_strategy_backup_meta(
-        &source_root,
-        &backup_id,
-        &StrategyBackupMeta {
-            version: 1,
-            created_at: Utc::now().to_rfc3339(),
-            source_kind: "rank_compute".to_string(),
-            source_file_name: Some(file_name),
-            description: Some(format!("排名计算快照：{range_text}")),
-        },
-    )?;
+    let meta_path = managed_rank_compute_snapshot_meta_path(&source_root, &backup_id);
+    if let Some(parent) = meta_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let payload = serde_json::to_string_pretty(&StrategyBackupMeta {
+        version: 1,
+        created_at: Utc::now().to_rfc3339(),
+        source_kind: "rank_compute".to_string(),
+        source_file_name: Some(file_name),
+        description: Some(format!("排名计算快照：{range_text}")),
+    })
+    .map_err(|error| error.to_string())?;
+    std::fs::write(&meta_path, payload).map_err(|error| {
+        format!(
+            "写入策略备份元数据失败: path={}, err={error}",
+            meta_path.display()
+        )
+    })?;
     cleanup_rank_compute_strategy_snapshots(&source_root, &backup_id)?;
 
     Ok(backup_file_path)
@@ -919,6 +1034,32 @@ fn get_managed_strategy_assets_status_inner(
             backups.push(build_managed_strategy_backup_item(
                 &source_root,
                 source_dir,
+                StrategyAssetLocation::Backup,
+                &backup_id,
+            )?);
+        }
+    }
+
+    let snapshot_root = managed_rank_compute_snapshot_root(&source_root);
+    if snapshot_root.exists() {
+        for entry in std::fs::read_dir(&snapshot_root).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let entry_type = entry.file_type().map_err(|error| error.to_string())?;
+            if !entry_type.is_dir() {
+                continue;
+            }
+
+            let backup_id = entry.file_name().to_string_lossy().to_string();
+            let file_path = managed_rank_compute_snapshot_file_path(&source_root, &backup_id);
+            let meta_path = managed_rank_compute_snapshot_meta_path(&source_root, &backup_id);
+            if !file_path.exists() || !meta_path.exists() {
+                continue;
+            }
+
+            backups.push(build_managed_strategy_backup_item(
+                &source_root,
+                source_dir,
+                StrategyAssetLocation::RankComputeSnapshot,
                 &backup_id,
             )?);
         }
@@ -1399,7 +1540,12 @@ fn import_strategy_backup_inner(
         },
     )?;
 
-    build_managed_strategy_backup_item(&source_root, &source_dir, &backup_id)
+    build_managed_strategy_backup_item(
+        &source_root,
+        &source_dir,
+        StrategyAssetLocation::Backup,
+        &backup_id,
+    )
 }
 
 fn backup_active_strategy_with_meta(
@@ -1437,7 +1583,12 @@ fn backup_active_strategy_with_meta(
         },
     )?;
 
-    build_managed_strategy_backup_item(&source_root, &source_dir, &backup_id)
+    build_managed_strategy_backup_item(
+        &source_root,
+        &source_dir,
+        StrategyAssetLocation::Backup,
+        &backup_id,
+    )
 }
 
 fn backup_active_strategy_inner(
@@ -1476,7 +1627,9 @@ fn get_strategy_backup_diff_inner(
 ) -> Result<ManagedStrategyBackupDiff, String> {
     let source_root = resolve_source_root(app_data_root, &source_dir)?;
     let normalized_backup_id = validate_strategy_backup_id(&backup_id)?.to_string();
-    let backup_file_path = managed_strategy_backup_file_path(&source_root, &normalized_backup_id);
+    let backup_file_path = locate_strategy_asset(&source_root, &normalized_backup_id)
+        .map(|(_, asset_dir)| asset_dir.join(STRATEGY_RULE_FILE_NAME))
+        .ok_or_else(|| "目标备份策略不存在".to_string())?;
     if !backup_file_path.exists() || !backup_file_path.is_file() {
         return Err("目标备份策略不存在".into());
     }
@@ -1536,7 +1689,12 @@ fn create_empty_strategy_backup_inner(
         },
     )?;
 
-    build_managed_strategy_backup_item(&source_root, &source_dir, &backup_id)
+    build_managed_strategy_backup_item(
+        &source_root,
+        &source_dir,
+        StrategyAssetLocation::Backup,
+        &backup_id,
+    )
 }
 
 fn activate_strategy_backup_inner(
@@ -1546,7 +1704,9 @@ fn activate_strategy_backup_inner(
 ) -> Result<ManagedStrategyAssetsStatus, String> {
     let source_root = resolve_source_root(app_data_root, &source_dir)?;
     let normalized_backup_id = validate_strategy_backup_id(&backup_id)?.to_string();
-    let backup_file_path = managed_strategy_backup_file_path(&source_root, &normalized_backup_id);
+    let backup_file_path = locate_strategy_asset(&source_root, &normalized_backup_id)
+        .map(|(_, asset_dir)| asset_dir.join(STRATEGY_RULE_FILE_NAME))
+        .ok_or_else(|| "目标备份策略不存在".to_string())?;
     if !backup_file_path.exists() || !backup_file_path.is_file() {
         return Err("目标备份策略不存在".into());
     }
@@ -1571,7 +1731,9 @@ fn delete_strategy_backup_inner(
 ) -> Result<ManagedStrategyAssetsStatus, String> {
     let source_root = resolve_source_root(app_data_root, &source_dir)?;
     let normalized_backup_id = validate_strategy_backup_id(&backup_id)?.to_string();
-    let backup_dir = managed_strategy_backup_dir(&source_root, &normalized_backup_id);
+    let backup_dir = locate_strategy_asset(&source_root, &normalized_backup_id)
+        .map(|(_, asset_dir)| asset_dir)
+        .unwrap_or_else(|| managed_strategy_backup_dir(&source_root, &normalized_backup_id));
     if backup_dir.exists() {
         std::fs::remove_dir_all(&backup_dir).map_err(|error| {
             format!(
@@ -1617,7 +1779,9 @@ fn export_strategy_backup_file_inner(
         .map_err(|error| error.to_string())?;
     let source_root = resolve_source_root(&app_data_root, &source_dir)?;
     let normalized_backup_id = validate_strategy_backup_id(&backup_id)?.to_string();
-    let source_path = managed_strategy_backup_file_path(&source_root, &normalized_backup_id);
+    let source_path = locate_strategy_asset(&source_root, &normalized_backup_id)
+        .map(|(_, asset_dir)| asset_dir.join(STRATEGY_RULE_FILE_NAME))
+        .ok_or_else(|| "目标备份策略不存在".to_string())?;
     if !source_path.exists() || !source_path.is_file() {
         return Err("目标备份策略不存在".into());
     }
