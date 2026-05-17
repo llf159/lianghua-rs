@@ -38,8 +38,9 @@ use crate::{
         rule::{
             RuleLayerConfig, RuleLayerFromDbInput, RuleLayerRuntimeCache,
             build_rule_layer_runtime_cache, calc_all_rule_layer_metrics_from_db,
-            calc_all_rule_layer_metrics_from_rows, calc_rule_layer_metrics_from_cache,
-            calc_rule_layer_metrics_from_db, visit_triggered_rule_samples_from_cache,
+            calc_all_rule_layer_metrics_from_rows, calc_rule_layer_metrics_from_db,
+            calc_rule_layer_metrics_with_samples_from_cache,
+            visit_triggered_rule_samples_from_cache,
         },
         scene::{
             SceneLayerConfig, SceneLayerFromDbInput, calc_all_scene_layer_metrics_from_db,
@@ -275,6 +276,10 @@ pub struct RuleLayerBacktestData {
     pub ic_std: Option<f64>,
     pub icir: Option<f64>,
     pub ic_t_value: Option<f64>,
+    pub layer_count: Option<usize>,
+    pub layer_method: Option<String>,
+    pub layer_method_label: Option<String>,
+    pub layer_summaries: Vec<RankLayerBucketSummary>,
     pub is_all_rules: bool,
     pub all_rule_summaries: Vec<RuleLayerRuleSummary>,
 }
@@ -2244,8 +2249,15 @@ fn build_validation_combo_result(
     stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
     sample_limit_per_group: usize,
 ) -> Result<RuleValidationComboResult, String> {
-    let metrics =
-        calc_rule_layer_metrics_from_cache(runtime_cache, &triggered_score_map, layer_config)?;
+    let metrics_with_samples = calc_rule_layer_metrics_with_samples_from_cache(
+        runtime_cache,
+        &triggered_score_map,
+        layer_config,
+    )?;
+    let validation_layer_details = build_validation_score_layer_details(
+        &metrics_with_samples.samples,
+        layer_config.min_samples_per_day,
+    );
     let mut sample_accumulator =
         ValidationSampleAccumulator::new(sample_limit_per_group, stock_meta_map, similarity_cache);
     visit_triggered_rule_samples_from_cache(runtime_cache, &triggered_score_map, |sample| {
@@ -2254,7 +2266,12 @@ fn build_validation_combo_result(
     })?;
     let (trigger_samples, triggered_days, sample_stats, sample_groups, overlap_hit_count) =
         sample_accumulator.into_parts();
-    let backtest = build_rule_backtest_payload(&combo.variant.combo_key, params, metrics);
+    let backtest = build_rule_backtest_payload(
+        &combo.variant.combo_key,
+        params,
+        metrics_with_samples.metrics,
+        Some(validation_layer_details),
+    );
     let similarity_rows = build_validation_similarity_rows_from_overlap(
         similarity_cache,
         trigger_samples,
@@ -2303,11 +2320,161 @@ fn normalize_validation_trigger_score(
     Some(1.0)
 }
 
+struct ValidationScoreLayerAgg {
+    score: f64,
+    point_count: usize,
+    sample_count: usize,
+    residual_sum: f64,
+}
+
+struct ValidationScoreLayerDetails {
+    spread_mean: Option<f64>,
+    layer_summaries: Vec<RankLayerBucketSummary>,
+}
+
+fn mean_f64(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    Some(values.iter().sum::<f64>() / values.len() as f64)
+}
+
+fn build_validation_score_layer_details(
+    samples: &[crate::simulate::rule::RuleLayerSamplePoint],
+    min_samples_per_day: usize,
+) -> ValidationScoreLayerDetails {
+    let mut grouped_by_day: std::collections::BTreeMap<
+        &str,
+        Vec<&crate::simulate::rule::RuleLayerSamplePoint>,
+    > = std::collections::BTreeMap::new();
+    for sample in samples {
+        let trade_date = sample.trade_date.trim();
+        if trade_date.is_empty()
+            || !sample.rule_score.is_finite()
+            || !sample.residual_return.is_finite()
+        {
+            continue;
+        }
+        grouped_by_day.entry(trade_date).or_default().push(sample);
+    }
+
+    let mut spread_values = Vec::new();
+    let mut summary_map = HashMap::<u64, ValidationScoreLayerAgg>::new();
+
+    for day_samples in grouped_by_day.into_values() {
+        if day_samples.len() < min_samples_per_day {
+            continue;
+        }
+
+        let mut ordered = day_samples
+            .into_iter()
+            .map(|sample| {
+                let score = if sample.rule_score.abs() < VALIDATION_EPS {
+                    0.0
+                } else {
+                    sample.rule_score
+                };
+                (score, sample.residual_return)
+            })
+            .collect::<Vec<_>>();
+        ordered.sort_by(|left, right| {
+            left.0
+                .partial_cmp(&right.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut day_layer_returns = Vec::new();
+        let mut index = 0usize;
+        while index < ordered.len() {
+            let score = ordered[index].0;
+            let score_bits = score.to_bits();
+            let mut residuals = Vec::new();
+            while index < ordered.len() && ordered[index].0.to_bits() == score_bits {
+                residuals.push(ordered[index].1);
+                index += 1;
+            }
+
+            let Some(avg_residual_return) = mean_f64(&residuals) else {
+                continue;
+            };
+            day_layer_returns.push(avg_residual_return);
+            let agg = summary_map
+                .entry(score_bits)
+                .or_insert_with(|| ValidationScoreLayerAgg {
+                    score,
+                    point_count: 0,
+                    sample_count: 0,
+                    residual_sum: 0.0,
+                });
+            agg.point_count += 1;
+            agg.sample_count += residuals.len();
+            agg.residual_sum += avg_residual_return;
+        }
+
+        if let (Some(low), Some(high)) = (day_layer_returns.first(), day_layer_returns.last()) {
+            if day_layer_returns.len() >= 2 {
+                spread_values.push(high - low);
+            }
+        }
+    }
+
+    let mut layer_summaries = summary_map.into_values().collect::<Vec<_>>();
+    layer_summaries.sort_by(|left, right| {
+        left.score
+            .partial_cmp(&right.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    ValidationScoreLayerDetails {
+        spread_mean: mean_f64(&spread_values),
+        layer_summaries: layer_summaries
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| RankLayerBucketSummary {
+                layer_index: index + 1,
+                layer_label: format_validation_score_layer_label(item.score),
+                point_count: item.point_count,
+                sample_count: item.sample_count,
+                avg_score: Some(item.score),
+                avg_residual_return: if item.point_count == 0 {
+                    None
+                } else {
+                    Some(item.residual_sum / item.point_count as f64)
+                },
+            })
+            .collect(),
+    }
+}
+
+fn format_validation_score_layer_label(score: f64) -> String {
+    if (score.round() - score).abs() < VALIDATION_EPS {
+        format!("得分 {}", score.round() as i64)
+    } else {
+        format!("得分 {:.4}", score)
+    }
+}
+
 fn build_rule_backtest_payload(
     combo_key: &str,
     params: &RuleLayerBacktestRunParams,
     metrics: crate::simulate::rule::RuleLayerMetrics,
+    layer_details: Option<ValidationScoreLayerDetails>,
 ) -> RuleLayerBacktestData {
+    let (spread_mean, layer_count, layer_method, layer_method_label, layer_summaries) =
+        match layer_details {
+            Some(layer_details) => {
+                let layer_count = layer_details.layer_summaries.len();
+                (
+                    layer_details.spread_mean,
+                    Some(layer_count),
+                    Some("score_value".to_string()),
+                    Some("按得分值分层".to_string()),
+                    layer_details.layer_summaries,
+                )
+            }
+            None => (None, None, None, None, Vec::new()),
+        };
+
     RuleLayerBacktestData {
         rule_name: combo_key.to_string(),
         stock_adj_type: params.stock_adj_type.clone(),
@@ -2322,13 +2489,17 @@ fn build_rule_backtest_payload(
         backtest_period: params.backtest_period,
         points: Vec::new(),
         avg_residual_mean: metrics.avg_residual_mean,
-        spread_mean: metrics.spread_mean,
+        spread_mean,
         avg_contribution_score: None,
         avg_contribution_per_trigger: None,
         ic_mean: metrics.ic_mean,
         ic_std: metrics.ic_std,
         icir: metrics.icir,
         ic_t_value: metrics.ic_t_value,
+        layer_count,
+        layer_method,
+        layer_method_label,
+        layer_summaries,
         is_all_rules: false,
         all_rule_summaries: Vec::new(),
     }
@@ -4473,18 +4644,22 @@ fn run_rule_layer_backtest_core(
                     sample_count: point.sample_count,
                     avg_rule_score: point.avg_rule_score,
                     avg_residual_return: point.avg_residual_return,
-                    top_bottom_spread: point.top_bottom_spread,
+                    top_bottom_spread: None,
                     ic: point.ic,
                 })
                 .collect(),
             avg_residual_mean: metrics.avg_residual_mean,
-            spread_mean: metrics.spread_mean,
+            spread_mean: None,
             avg_contribution_score: None,
             avg_contribution_per_trigger: None,
             ic_mean: metrics.ic_mean,
             ic_std: metrics.ic_std,
             icir: metrics.icir,
             ic_t_value: metrics.ic_t_value,
+            layer_count: None,
+            layer_method: None,
+            layer_method_label: None,
+            layer_summaries: Vec::new(),
             is_all_rules: false,
             all_rule_summaries: Vec::new(),
         });
@@ -4521,7 +4696,7 @@ fn run_rule_layer_backtest_core(
             rule_name: one_rule_name,
             point_count: metrics.points.len(),
             avg_residual_mean: metrics.avg_residual_mean,
-            spread_mean: metrics.spread_mean,
+            spread_mean: None,
             avg_contribution_score: contribution_average.avg_contribution_score,
             avg_contribution_per_trigger: contribution_average.avg_contribution_per_trigger,
             ic_mean: metrics.ic_mean,
@@ -4532,15 +4707,15 @@ fn run_rule_layer_backtest_core(
     }
 
     all_rule_summaries.sort_by(|a, b| {
-        b.spread_mean
+        b.avg_residual_mean
             .unwrap_or(f64::NEG_INFINITY)
-            .partial_cmp(&a.spread_mean.unwrap_or(f64::NEG_INFINITY))
+            .partial_cmp(&a.avg_residual_mean.unwrap_or(f64::NEG_INFINITY))
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| b.point_count.cmp(&a.point_count))
             .then_with(|| a.rule_name.cmp(&b.rule_name))
     });
 
-    let (avg_residual_mean, spread_mean, ic_mean, ic_std, icir, ic_t_value) =
+    let (avg_residual_mean, _spread_mean, ic_mean, ic_std, icir, ic_t_value) =
         aggregate_all_rule_summary_metrics(&all_rule_summaries);
 
     Ok(RuleLayerBacktestData {
@@ -4557,7 +4732,7 @@ fn run_rule_layer_backtest_core(
         backtest_period: params.backtest_period,
         points: Vec::new(),
         avg_residual_mean,
-        spread_mean,
+        spread_mean: None,
         avg_contribution_score: weighted_rule_summary_metric(&all_rule_summaries, |item| {
             item.avg_contribution_score
         }),
@@ -4568,6 +4743,10 @@ fn run_rule_layer_backtest_core(
         ic_std,
         icir,
         ic_t_value,
+        layer_count: None,
+        layer_method: None,
+        layer_method_label: None,
+        layer_summaries: Vec::new(),
         is_all_rules: true,
         all_rule_summaries,
     })
@@ -4587,6 +4766,7 @@ fn rank_layer_method_label(layer_method: RankLayerMethod) -> &'static str {
     match layer_method {
         RankLayerMethod::Score => "按分数分层",
         RankLayerMethod::SampleCount => "按样本数分层",
+        RankLayerMethod::Rank => "按排名分层",
     }
 }
 
@@ -4958,7 +5138,7 @@ pub fn run_transient_rule_layer_backtest(
             rule_name: one_rule_name,
             point_count: metrics.points.len(),
             avg_residual_mean: metrics.avg_residual_mean,
-            spread_mean: metrics.spread_mean,
+            spread_mean: None,
             avg_contribution_score: None,
             avg_contribution_per_trigger: None,
             ic_mean: metrics.ic_mean,
@@ -4968,15 +5148,15 @@ pub fn run_transient_rule_layer_backtest(
         });
     }
     all_rule_summaries.sort_by(|a, b| {
-        b.spread_mean
+        b.avg_residual_mean
             .unwrap_or(f64::NEG_INFINITY)
-            .partial_cmp(&a.spread_mean.unwrap_or(f64::NEG_INFINITY))
+            .partial_cmp(&a.avg_residual_mean.unwrap_or(f64::NEG_INFINITY))
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| b.point_count.cmp(&a.point_count))
             .then_with(|| a.rule_name.cmp(&b.rule_name))
     });
 
-    let (avg_residual_mean, spread_mean, ic_mean, ic_std, icir, ic_t_value) =
+    let (avg_residual_mean, _spread_mean, ic_mean, ic_std, icir, ic_t_value) =
         aggregate_all_rule_summary_metrics(&all_rule_summaries);
 
     Ok(RuleLayerBacktestData {
@@ -4993,7 +5173,7 @@ pub fn run_transient_rule_layer_backtest(
         backtest_period: params.backtest_period,
         points: Vec::new(),
         avg_residual_mean,
-        spread_mean,
+        spread_mean: None,
         avg_contribution_score: weighted_rule_summary_metric(&all_rule_summaries, |item| {
             item.avg_contribution_score
         }),
@@ -5004,6 +5184,10 @@ pub fn run_transient_rule_layer_backtest(
         ic_std,
         icir,
         ic_t_value,
+        layer_count: None,
+        layer_method: None,
+        layer_method_label: None,
+        layer_summaries: Vec::new(),
         is_all_rules: true,
         all_rule_summaries,
     })

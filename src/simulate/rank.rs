@@ -16,6 +16,7 @@ const MAX_LAYER_COUNT: usize = 100;
 pub enum RankLayerMethod {
     Score,
     SampleCount,
+    Rank,
 }
 
 impl RankLayerMethod {
@@ -23,6 +24,7 @@ impl RankLayerMethod {
         match self {
             Self::Score => "score",
             Self::SampleCount => "sample_count",
+            Self::Rank => "rank",
         }
     }
 
@@ -32,8 +34,9 @@ impl RankLayerMethod {
             "sample_count" | "sample" | "count" | "by_sample_count" | "quantile" => {
                 Ok(Self::SampleCount)
             }
+            "rank" | "ranking" | "by_rank" => Ok(Self::Rank),
             other => Err(format!(
-                "未知分层方法:{other}，可选值为 score 或 sample_count"
+                "未知分层方法:{other}，可选值为 score、sample_count 或 rank"
             )),
         }
     }
@@ -163,6 +166,12 @@ pub struct RankLayerMetrics {
     pub layers: Vec<RankLayerSummaryBucket>,
 }
 
+#[derive(Debug, Default, Clone)]
+struct RankLayerLookup {
+    sample_ranks: HashMap<String, HashMap<String, i64>>,
+    day_max_ranks: HashMap<String, i64>,
+}
+
 pub fn calc_rank_layer_metrics_from_db(
     source_conn: &Connection,
     source_dir: &str,
@@ -184,13 +193,14 @@ pub fn calc_rank_layer_metrics_from_db(
         &rule_layer_config,
     )?;
     let triggered_score_map = load_total_score_map(source_dir, &input.start_date, &input.end_date)?;
+    let rank_lookup = load_rank_layer_lookup(source_dir, &input.start_date, &input.end_date)?;
     let all_samples = collect_all_rule_samples_from_cache(
         &runtime_cache,
         &triggered_score_map,
         &rule_layer_config,
     )?;
 
-    calc_rank_layer_metrics(&all_samples, &input.layer_config)
+    calc_rank_layer_metrics_with_lookup(&all_samples, &input.layer_config, Some(&rank_lookup))
 }
 
 pub fn calc_rank_layer_metrics_from_score_rows(
@@ -220,18 +230,31 @@ pub fn calc_rank_layer_metrics_from_score_rows(
         &input.start_date,
         &input.end_date,
     );
+    let rank_lookup = build_rank_layer_lookup_from_summary_rows(
+        score_summary_rows,
+        &input.start_date,
+        &input.end_date,
+    );
     let all_samples = collect_all_rule_samples_from_cache(
         &runtime_cache,
         &triggered_score_map,
         &rule_layer_config,
     )?;
 
-    calc_rank_layer_metrics(&all_samples, &input.layer_config)
+    calc_rank_layer_metrics_with_lookup(&all_samples, &input.layer_config, Some(&rank_lookup))
 }
 
 pub fn calc_rank_layer_metrics(
     samples: &[RuleLayerSamplePoint],
     config: &RankLayerConfig,
+) -> Result<RankLayerMetrics, String> {
+    calc_rank_layer_metrics_with_lookup(samples, config, None)
+}
+
+fn calc_rank_layer_metrics_with_lookup(
+    samples: &[RuleLayerSamplePoint],
+    config: &RankLayerConfig,
+    rank_lookup: Option<&RankLayerLookup>,
 ) -> Result<RankLayerMetrics, String> {
     config.validate()?;
 
@@ -277,7 +300,8 @@ pub fn calc_rank_layer_metrics(
                 .then_with(|| left.0.cmp(&right.0))
         });
 
-        let layer_items_by_index = build_layer_items(&ordered, config);
+        let layer_items_by_index =
+            build_layer_items(trade_date, &day_samples, &ordered, config, rank_lookup);
         let mut layers = Vec::with_capacity(layer_count);
         let mut layer_avg_returns = vec![None; layer_count];
         let mut scores = Vec::with_capacity(day_samples.len());
@@ -372,12 +396,22 @@ pub fn calc_rank_layer_metrics(
 }
 
 fn build_layer_items(
+    trade_date: &str,
+    day_samples: &[&RuleLayerSamplePoint],
     ordered: &[(usize, (f64, f64))],
     config: &RankLayerConfig,
+    rank_lookup: Option<&RankLayerLookup>,
 ) -> Vec<Vec<(f64, f64)>> {
     match config.layer_method {
         RankLayerMethod::Score => build_score_range_layer_items(ordered, config.layer_count),
         RankLayerMethod::SampleCount => build_sample_count_layer_items(ordered, config.layer_count),
+        RankLayerMethod::Rank => build_rank_layer_items(
+            trade_date,
+            day_samples,
+            ordered,
+            config.layer_count,
+            rank_lookup,
+        ),
     }
 }
 
@@ -422,6 +456,49 @@ fn build_score_range_layer_items(
             layer_index = layer_count - 1;
         }
         layers[layer_index].push(*pair);
+    }
+
+    layers
+}
+
+fn build_rank_layer_items(
+    trade_date: &str,
+    day_samples: &[&RuleLayerSamplePoint],
+    ordered: &[(usize, (f64, f64))],
+    layer_count: usize,
+    rank_lookup: Option<&RankLayerLookup>,
+) -> Vec<Vec<(f64, f64)>> {
+    let mut layers = vec![Vec::new(); layer_count];
+    if ordered.is_empty() || layer_count == 0 {
+        return layers;
+    }
+
+    let mut fallback_ranks = HashMap::with_capacity(ordered.len());
+    for (ordered_index, (sample_index, _)) in ordered.iter().enumerate() {
+        fallback_ranks.insert(*sample_index, ordered.len() as i64 - ordered_index as i64);
+    }
+
+    let fallback_day_max_rank = ordered.len() as i64;
+    let day_max_rank = rank_lookup
+        .and_then(|lookup| lookup.day_max_ranks.get(trade_date).copied())
+        .filter(|value| *value > 0)
+        .unwrap_or(fallback_day_max_rank);
+
+    for (sample_index, sample) in day_samples.iter().enumerate() {
+        let sample_rank = rank_lookup
+            .and_then(|lookup| lookup.sample_ranks.get(&sample.ts_code))
+            .and_then(|rank_by_day| rank_by_day.get(trade_date))
+            .copied()
+            .filter(|value| *value > 0)
+            .unwrap_or_else(|| fallback_ranks.get(&sample_index).copied().unwrap_or(1));
+        let clamped_rank = sample_rank.clamp(1, day_max_rank);
+        let score_position_from_low = day_max_rank - clamped_rank + 1;
+        let mut layer_index =
+            ((score_position_from_low * layer_count as i64 - 1) / day_max_rank) as usize;
+        if layer_index >= layer_count {
+            layer_index = layer_count - 1;
+        }
+        layers[layer_index].push((sample.rule_score, sample.residual_return));
     }
 
     layers
@@ -508,6 +585,105 @@ fn build_total_score_map_from_summary_rows(
             .insert(row.trade_date.clone(), row.total_score);
     }
     out
+}
+
+fn load_rank_layer_lookup(
+    source_dir: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<RankLayerLookup, String> {
+    let result_db = result_db_path(source_dir);
+    if !result_db.exists() {
+        return Ok(RankLayerLookup::default());
+    }
+
+    let result_db_str = result_db
+        .to_str()
+        .ok_or_else(|| "result_db路径不是有效UTF-8".to_string())?;
+    let conn =
+        Connection::open(result_db_str).map_err(|e| format!("打开scoring_result.db失败:{e}"))?;
+
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                ts_code,
+                trade_date,
+                rank
+            FROM score_summary
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY trade_date ASC, ts_code ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译score_summary排名查询失败:{e}"))?;
+
+    let mut rows = stmt
+        .query(params_from_iter([start_date.trim(), end_date.trim()]))
+        .map_err(|e| format!("查询score_summary排名失败:{e}"))?;
+
+    let mut lookup = RankLayerLookup::default();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取score_summary排名失败:{e}"))?
+    {
+        let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
+        let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
+        let rank: Option<i64> = row.get(2).map_err(|e| format!("读取rank失败:{e}"))?;
+
+        let Some(rank) = rank.filter(|value| *value > 0) else {
+            continue;
+        };
+        if ts_code.trim().is_empty() || trade_date.trim().is_empty() {
+            continue;
+        }
+
+        lookup
+            .sample_ranks
+            .entry(ts_code)
+            .or_default()
+            .insert(trade_date.clone(), rank);
+        lookup
+            .day_max_ranks
+            .entry(trade_date)
+            .and_modify(|current| *current = (*current).max(rank))
+            .or_insert(rank);
+    }
+
+    Ok(lookup)
+}
+
+fn build_rank_layer_lookup_from_summary_rows(
+    score_summary_rows: &[ScoreSummary],
+    start_date: &str,
+    end_date: &str,
+) -> RankLayerLookup {
+    let mut lookup = RankLayerLookup::default();
+    for row in score_summary_rows {
+        if row.trade_date.as_str() < start_date
+            || row.trade_date.as_str() > end_date
+            || row.ts_code.trim().is_empty()
+            || row.trade_date.trim().is_empty()
+        {
+            continue;
+        }
+
+        let Some(rank) = row.rank.filter(|value| *value > 0) else {
+            continue;
+        };
+
+        lookup
+            .sample_ranks
+            .entry(row.ts_code.clone())
+            .or_default()
+            .insert(row.trade_date.clone(), rank);
+        lookup
+            .day_max_ranks
+            .entry(row.trade_date.clone())
+            .and_modify(|current| *current = (*current).max(rank))
+            .or_insert(rank);
+    }
+    lookup
 }
 
 fn mean(values: &[f64]) -> Option<f64> {
@@ -722,5 +898,54 @@ mod tests {
         assert_opt_close(metrics.layers[0].avg_score, Some(0.0));
         assert_opt_close(metrics.layers[2].avg_residual_return, Some(35.0));
         assert_opt_close(metrics.spread_mean, Some(25.0));
+    }
+
+    #[test]
+    fn rank_layer_metrics_support_rank_buckets() {
+        let samples = vec![
+            RuleLayerSamplePoint {
+                ts_code: "000001.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                rule_score: 10.0,
+                residual_return: 1.0,
+            },
+            RuleLayerSamplePoint {
+                ts_code: "000002.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                rule_score: 20.0,
+                residual_return: 2.0,
+            },
+            RuleLayerSamplePoint {
+                ts_code: "000003.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                rule_score: 30.0,
+                residual_return: 3.0,
+            },
+            RuleLayerSamplePoint {
+                ts_code: "000004.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                rule_score: 40.0,
+                residual_return: 4.0,
+            },
+        ];
+
+        let metrics = calc_rank_layer_metrics(
+            &samples,
+            &RankLayerConfig {
+                min_samples_per_day: 1,
+                backtest_period: 1,
+                min_listed_trade_days: 0,
+                layer_count: 2,
+                layer_method: RankLayerMethod::Rank,
+            },
+        )
+        .expect("rank metrics should build");
+
+        assert_eq!(metrics.layers.len(), 2);
+        assert_eq!(metrics.layers[0].sample_count, 2);
+        assert_eq!(metrics.layers[1].sample_count, 2);
+        assert_opt_close(metrics.layers[0].avg_score, Some(15.0));
+        assert_opt_close(metrics.layers[1].avg_score, Some(35.0));
+        assert_opt_close(metrics.spread_mean, Some(2.0));
     }
 }

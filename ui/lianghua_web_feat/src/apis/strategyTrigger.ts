@@ -224,6 +224,10 @@ export type RuleLayerBacktestData = {
   ic_std?: number | null
   icir?: number | null
   ic_t_value?: number | null
+  layer_count?: number | null
+  layer_method?: string | null
+  layer_method_label?: string | null
+  layer_summaries: RankLayerBucketSummary[]
   is_all_rules?: boolean
   all_rule_summaries?: RuleLayerRuleSummary[]
 }
@@ -268,7 +272,7 @@ export type RankLayerBacktestData = {
   layer_summaries: RankLayerBucketSummary[]
 }
 
-export type RankLayerMethod = "score" | "sample_count"
+export type RankLayerMethod = "score" | "sample_count" | "rank"
 
 export type RuleValidationUnknownConfig = {
   name: string

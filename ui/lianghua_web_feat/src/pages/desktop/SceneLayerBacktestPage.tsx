@@ -47,7 +47,6 @@ type RuleSummarySortKey =
   | "rule_name"
   | "point_count"
   | "avg_residual_mean"
-  | "spread_mean"
   | "avg_contribution_score"
   | "avg_contribution_per_trigger"
   | "ic_mean"
@@ -413,6 +412,7 @@ const VALIDATION_SCOPE_WAY_OPTIONS: Array<{ value: ValidationScopeWayOption; lab
 const RANK_LAYER_METHOD_OPTIONS: Array<{ value: RankLayerMethod; label: string }> = [
   { value: "sample_count", label: "按样本数分层" },
   { value: "score", label: "按分数分层" },
+  { value: "rank", label: "按排名分层" },
 ];
 
 export default function SceneLayerBacktestPage() {
@@ -709,7 +709,7 @@ export default function SceneLayerBacktestPage() {
   const hasUnknownValidationCombo =
     validationResult?.combo_results.some((item) => item.unknown_values.length > 0) ?? false;
   const shouldUseValidationDetailModal =
-    validationComboCount > 1 && hasUnknownValidationCombo;
+    validationComboCount === 1 || (validationComboCount > 1 && hasUnknownValidationCombo);
   const shouldUseInlineComboSelection =
     !shouldUseValidationDetailModal && validationComboCount > 1;
 
@@ -785,9 +785,6 @@ export default function SceneLayerBacktestPage() {
         avg_residual_mean: {
           value: (row: RuleLayerRuleSummary) => row.avg_residual_mean,
         },
-        spread_mean: {
-          value: (row: RuleLayerRuleSummary) => row.spread_mean,
-        },
         avg_contribution_score: {
           value: (row: RuleLayerRuleSummary) => row.avg_contribution_score,
         },
@@ -818,7 +815,7 @@ export default function SceneLayerBacktestPage() {
     allRuleSummaries,
     ruleSummarySortDefinitions,
     {
-      key: "spread_mean",
+      key: "avg_residual_mean",
       direction: "desc",
     },
   );
@@ -1409,6 +1406,7 @@ export default function SceneLayerBacktestPage() {
     const sectionClassName = useModalLayout
       ? "scene-layer-layer-summary scene-layer-validation-detail-section"
       : "scene-layer-layer-summary";
+    const validationLayerSummaries = combo.backtest.layer_summaries ?? [];
 
     return (
       <>
@@ -1480,6 +1478,44 @@ export default function SceneLayerBacktestPage() {
             </table>
           </div>
         </div>
+
+        {validationLayerSummaries.length > 0 ? (
+          <div className={sectionClassName}>
+            <h3>
+              分值分层回测
+              {combo.backtest.layer_method_label
+                ? `（${combo.backtest.layer_method_label}，共 ${combo.backtest.layer_count ?? validationLayerSummaries.length} 层）`
+                : ""}
+            </h3>
+            <div className="scene-layer-contrib-table-wrap">
+              <table className="scene-layer-contrib-table">
+                <thead>
+                  <tr>
+                    <th>分层</th>
+                    <th>有效交易日</th>
+                    <th>样本数</th>
+                    <th>分值</th>
+                    <th>层级收益（日度残差均值）</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {validationLayerSummaries.map((item) => (
+                    <tr key={`${combo.combo_key}-layer-${item.layer_index}`}>
+                      <td>{item.layer_label}</td>
+                      <td>{item.point_count}</td>
+                      <td>{item.sample_count}</td>
+                      <td>{formatNumber(item.avg_score, 4)}</td>
+                      <td>{formatPercent(item.avg_residual_return)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="scene-layer-caption">
+              分层差均值按每日最高分层减最低分层计算：{formatPercent(combo.backtest.spread_mean)}
+            </p>
+          </div>
+        ) : null}
       </>
     );
   }
@@ -1727,7 +1763,7 @@ export default function SceneLayerBacktestPage() {
       <section className="scene-layer-card">
         <h2 className="scene-layer-title">策略回测</h2>
         <p className="scene-layer-caption">
-          使用 rule_details 中的策略得分与残差收益，计算策略日度均值、分层差、IC / ICIR。
+          使用 rule_details 中的策略得分与残差收益，计算策略日度残差均值、贡献度、IC / ICIR。
         </p>
 
         <div className="scene-layer-actions">
@@ -1758,7 +1794,6 @@ export default function SceneLayerBacktestPage() {
                     <th>最小样本阈值</th>
                     <th>最少上市交易日</th>
                     <th>回测周期（天）</th>
-                    <th>分层差均值（日度高分-低分）</th>
                     <th>平均贡献度</th>
                     <th>平均单次贡献</th>
                     <th>残差均值（日度）</th>
@@ -1777,7 +1812,6 @@ export default function SceneLayerBacktestPage() {
                     <td>{ruleResult.min_samples_per_rule_day}</td>
                     <td>{ruleResult.min_listed_trade_days}</td>
                     <td>{ruleResult.backtest_period}</td>
-                    <td>{formatPercent(ruleResult.spread_mean)}</td>
                     <td>{formatNumber(ruleResult.avg_contribution_score, 2)}</td>
                     <td>{formatNumber(ruleResult.avg_contribution_per_trigger, 2)}</td>
                     <td className={residualMetricHighlightClass(ruleResult.avg_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}>
@@ -1819,15 +1853,6 @@ export default function SceneLayerBacktestPage() {
                           direction={ruleSummarySortDirection}
                           onClick={() => toggleRuleSummarySort("point_count")}
                           title="按有效交易日排序"
-                        />
-                      </th>
-                      <th aria-sort={getAriaSort(ruleSummarySortKey === "spread_mean", ruleSummarySortDirection)}>
-                        <TableSortButton
-                          label="分层差均值"
-                          isActive={ruleSummarySortKey === "spread_mean" && ruleSummarySortDirection !== null}
-                          direction={ruleSummarySortDirection}
-                          onClick={() => toggleRuleSummarySort("spread_mean")}
-                          title="按分层差均值排序"
                         />
                       </th>
                       <th aria-sort={getAriaSort(ruleSummarySortKey === "avg_contribution_score", ruleSummarySortDirection)}>
@@ -1891,7 +1916,6 @@ export default function SceneLayerBacktestPage() {
                       <tr key={item.rule_name}>
                         <td title={item.rule_name}>{item.rule_name}</td>
                         <td>{item.point_count}</td>
-                        <td>{formatPercent(item.spread_mean)}</td>
                         <td>{formatNumber(item.avg_contribution_score, 2)}</td>
                         <td>{formatNumber(item.avg_contribution_per_trigger, 2)}</td>
                         <td className={residualMetricHighlightClass(item.avg_residual_mean, resolveResidualDirection(item.avg_contribution_score))}>
@@ -2162,7 +2186,7 @@ export default function SceneLayerBacktestPage() {
                     {renderValidationComboSortHeader("trigger_samples", "触发样本")}
                     {renderValidationComboSortHeader("triggered_days", "触发交易日")}
                     {renderValidationComboSortHeader("avg_daily_trigger", "平均每日触发")}
-                    {renderValidationComboSortHeader("spread_mean", "分层差均值")}
+                    {renderValidationComboSortHeader("spread_mean", "分层差均值（按得分值）")}
                     {renderValidationComboSortHeader("avg_residual_mean", "残差均值（日度）")}
                     {renderValidationComboSortHeader("ic_mean", "IC 均值")}
                     {renderValidationComboSortHeader("ic_t_value", "IC t值")}

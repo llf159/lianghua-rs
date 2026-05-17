@@ -1533,5 +1533,8 @@ fn in_range_accepts_expression_bounds() {
     );
 
     let out = rt.eval_program(&stmts).expect("eval failed");
-    assert_eq!(out, Value::BoolSeries(vec![false, false, true, false, true]));
+    assert_eq!(
+        out,
+        Value::BoolSeries(vec![false, false, true, false, true])
+    );
 }
