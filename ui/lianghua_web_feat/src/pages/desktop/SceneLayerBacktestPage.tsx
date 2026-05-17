@@ -166,9 +166,9 @@ function resolveResidualDirection(
 function buildEmptyUnknownConfig(): ValidationUnknownConfigDraft {
   return {
     name: "",
-    start: "2",
-    end: "20",
-    step: "2",
+    start: "",
+    end: "",
+    step: "",
   };
 }
 
@@ -289,9 +289,9 @@ function inferUnknownConfigs(expression: string): ValidationUnknownConfigDraft[]
 
   return names.map((name) => ({
     name,
-    start: "2",
-    end: "20",
-    step: "2",
+    start: "",
+    end: "",
+    step: "",
   }));
 }
 

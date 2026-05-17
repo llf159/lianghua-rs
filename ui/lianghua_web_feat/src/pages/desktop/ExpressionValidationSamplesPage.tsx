@@ -6,6 +6,7 @@ import type {
   RuleValidationUnknownConfig,
 } from "../../apis/strategyTrigger";
 import DetailsLink from "../../shared/DetailsLink";
+import type { DetailsNavigationItem } from "../../shared/detailsLinkState";
 import { readStoredSourcePath } from "../../shared/storage";
 import "./css/ExpressionValidationSamplesPage.css";
 
@@ -55,7 +56,6 @@ type SampleSourceBucket = "positive" | "negative" | "random";
 type MergedSampleRow = RuleValidationSampleRow & {
   dedupeKey: string;
   board_label: string;
-  volatility_group_label: string;
   source_bucket: SampleSourceBucket;
   source_label: string;
   source_order: number;
@@ -68,14 +68,10 @@ type BoardSourceSection = {
   rows: MergedSampleRow[];
 };
 
-type VolatilitySection = {
+type BoardSection = {
   label: string;
   sampleCount: number;
-  boards: Array<{
-    label: string;
-    sampleCount: number;
-    sourceGroups: BoardSourceSection[];
-  }>;
+  sourceGroups: BoardSourceSection[];
 };
 
 const SAMPLE_SOURCE_META: Array<{
@@ -87,8 +83,6 @@ const SAMPLE_SOURCE_META: Array<{
   { key: "negative", label: "负向", order: 1 },
   { key: "random", label: "随机", order: 2 },
 ];
-
-const VOLATILITY_GROUP_ORDER = ["高波动", "常规波动", "其他波动"] as const;
 
 function formatDateLabel(value?: string | null) {
   if (!value || value.length !== 8) {
@@ -124,23 +118,10 @@ function normalizeBoardLabel(value?: string | null) {
   return trimmed.length > 0 ? trimmed : "未分类板块";
 }
 
-function normalizeVolatilityGroupLabel(value?: string | null) {
-  const trimmed = (value ?? "").trim();
-  if (trimmed === "高波动" || trimmed === "常规波动" || trimmed === "其他波动") {
-    return trimmed;
-  }
-  return trimmed.length > 0 ? trimmed : "其他波动";
-}
-
-function getVolatilityGroupOrder(label: string) {
-  const index = VOLATILITY_GROUP_ORDER.indexOf(label as (typeof VOLATILITY_GROUP_ORDER)[number]);
-  if (index >= 0) {
-    return index;
-  }
-  return VOLATILITY_GROUP_ORDER.length;
-}
-
 function getBoardOrder(label: string) {
+  if (label.toUpperCase().includes("ST")) {
+    return 4;
+  }
   if (label.includes("主板")) {
     return 0;
   }
@@ -150,14 +131,8 @@ function getBoardOrder(label: string) {
   if (label.includes("科创板")) {
     return 2;
   }
-  if (label.includes("北交所")) {
+  if (label.includes("北交")) {
     return 3;
-  }
-  if (label.toUpperCase().includes("ST")) {
-    return 4;
-  }
-  if (label === "未分类板块") {
-    return 6;
   }
   return 5;
 }
@@ -221,7 +196,6 @@ function buildDisplaySamples(combo: RuleValidationComboResult) {
       ...row,
       dedupeKey: `${meta.key}__${row.ts_code}__${row.trade_date}__${index}`,
       board_label: normalizeBoardLabel(row.board),
-      volatility_group_label: normalizeVolatilityGroupLabel(row.volatility_group),
       source_bucket: meta.key,
       source_label: meta.label,
       source_order: meta.order,
@@ -230,57 +204,61 @@ function buildDisplaySamples(combo: RuleValidationComboResult) {
   });
 }
 
-function buildVolatilitySections(displaySamples: MergedSampleRow[]) {
-  const grouped = new Map<string, Map<string, Map<SampleSourceBucket, MergedSampleRow[]>>>();
-
-  VOLATILITY_GROUP_ORDER.forEach((label) => {
-    grouped.set(label, new Map());
-  });
+function buildBoardSections(displaySamples: MergedSampleRow[]) {
+  const grouped = new Map<string, Map<SampleSourceBucket, MergedSampleRow[]>>();
 
   displaySamples.forEach((row) => {
-    const sectionKey = row.volatility_group_label;
     const boardKey = row.board_label;
-    const boardGroups = grouped.get(sectionKey) ?? new Map<string, Map<SampleSourceBucket, MergedSampleRow[]>>();
-    const sourceGroups = boardGroups.get(boardKey) ?? new Map<SampleSourceBucket, MergedSampleRow[]>();
+    const sourceGroups = grouped.get(boardKey) ?? new Map<SampleSourceBucket, MergedSampleRow[]>();
     const rows = sourceGroups.get(row.source_bucket) ?? [];
     rows.push(row);
     sourceGroups.set(row.source_bucket, rows);
-    boardGroups.set(boardKey, sourceGroups);
-    grouped.set(sectionKey, boardGroups);
+    grouped.set(boardKey, sourceGroups);
   });
 
-  const sectionLabels = Array.from(grouped.keys()).sort((left, right) => {
-    const orderDiff = getVolatilityGroupOrder(left) - getVolatilityGroupOrder(right);
-    if (orderDiff !== 0) {
-      return orderDiff;
-    }
-    return left.localeCompare(right, "zh-CN");
-  });
+  return Array.from(grouped.entries())
+    .sort(([leftLabel], [rightLabel]) => compareBoardLabels(leftLabel, rightLabel))
+    .map(([boardLabel, sourceGroupsMap]) => {
+      const sourceGroups = SAMPLE_SOURCE_META.map((meta) => ({
+        key: meta.key,
+        label: meta.label,
+        rows: [...(sourceGroupsMap.get(meta.key) ?? [])].sort(compareSampleRows),
+      })).filter((group) => group.rows.length > 0);
 
-  return sectionLabels.map((label) => {
-    const boardGroups = grouped.get(label) ?? new Map<string, Map<SampleSourceBucket, MergedSampleRow[]>>();
-    const boards = Array.from(boardGroups.entries())
-      .sort(([leftLabel], [rightLabel]) => compareBoardLabels(leftLabel, rightLabel))
-      .map(([boardLabel, sourceGroupsMap]) => {
-        const sourceGroups = SAMPLE_SOURCE_META.map((meta) => ({
-          key: meta.key,
-          label: meta.label,
-          rows: [...(sourceGroupsMap.get(meta.key) ?? [])].sort(compareSampleRows),
-        })).filter((group) => group.rows.length > 0);
+      return {
+        label: boardLabel,
+        sampleCount: sourceGroups.reduce((sum, group) => sum + group.rows.length, 0),
+        sourceGroups,
+      } satisfies BoardSection;
+    });
+}
 
-        return {
-          label: boardLabel,
-          sampleCount: sourceGroups.reduce((sum, group) => sum + group.rows.length, 0),
-          sourceGroups,
-        };
+function buildSampleNavigationItems(
+  boardSections: BoardSection[],
+  sourcePath?: string,
+): DetailsNavigationItem[] {
+  const seen = new Set<string>();
+  const items: DetailsNavigationItem[] = [];
+
+  boardSections.forEach((board) => {
+    board.sourceGroups.forEach((sourceGroup) => {
+      sourceGroup.rows.forEach((row) => {
+        const key = `${row.ts_code}__${row.trade_date}`;
+        if (seen.has(key)) {
+          return;
+        }
+        seen.add(key);
+        items.push({
+          tsCode: row.ts_code,
+          tradeDate: row.trade_date,
+          sourcePath,
+          name: row.name ?? undefined,
+        });
       });
-
-    return {
-      label,
-      sampleCount: boards.reduce((sum, board) => sum + board.sampleCount, 0),
-      boards,
-    } satisfies VolatilitySection;
+    });
   });
+
+  return items;
 }
 
 export function ExpressionValidationSamplesPanel({
@@ -292,10 +270,10 @@ export function ExpressionValidationSamplesPanel({
 }) {
   const expressionSummary = formatExpressionSummary(data.expression, data.combo);
   const displaySamples = buildDisplaySamples(data.combo);
-  const volatilitySections = buildVolatilitySections(displaySamples);
+  const boardSections = buildBoardSections(displaySamples);
   const boardCount = new Set(displaySamples.map((row) => row.board_label)).size;
-  const activeVolatilityGroupCount = volatilitySections.filter((section) => section.sampleCount > 0).length;
   const sourcePath = data.sourcePath?.trim() || undefined;
+  const sampleNavigationItems = buildSampleNavigationItems(boardSections, sourcePath);
   const isModalLayout = layout === "modal";
 
   return (
@@ -320,9 +298,6 @@ export function ExpressionValidationSamplesPanel({
           </span>
           <span className="expression-validation-samples-compact-chip">
             板块 <strong>{boardCount}</strong>
-          </span>
-          <span className="expression-validation-samples-compact-chip">
-            波动 <strong>{activeVolatilityGroupCount}</strong>
           </span>
           <span className="expression-validation-samples-compact-chip">
             上限/组 <strong>{data.sampleLimitPerGroup}</strong>
@@ -351,93 +326,81 @@ export function ExpressionValidationSamplesPanel({
         </div>
 
         <div className="expression-validation-samples-volatility-list">
-          {volatilitySections.map((section) => (
-            <section key={section.label} className="expression-validation-samples-volatility-section">
-              <div className="expression-validation-samples-volatility-head">
-                <div>
-                  <h3>{section.label}</h3>
-                </div>
-                <span className="expression-validation-samples-volatility-badge">
-                  {section.boards.length} 板块 · {section.sampleCount} 条
-                </span>
-              </div>
+          {boardSections.length > 0 ? (
+            <div className="expression-validation-samples-board-grid">
+              {boardSections.map((board) => (
+                <article key={board.label} className="expression-validation-samples-board-card">
+                  <div className="expression-validation-samples-board-head">
+                    <div>
+                      <strong>{board.label}</strong>
+                      <span>{buildSourceSummary(board.sourceGroups)}</span>
+                    </div>
+                    <span className="expression-validation-samples-board-count">{board.sampleCount} 条</span>
+                  </div>
 
-              {section.boards.length > 0 ? (
-                <div className="expression-validation-samples-board-grid">
-                  {section.boards.map((board) => (
-                    <article key={`${section.label}-${board.label}`} className="expression-validation-samples-board-card">
-                      <div className="expression-validation-samples-board-head">
-                        <div>
-                          <strong>{board.label}</strong>
-                          <span>{buildSourceSummary(board.sourceGroups)}</span>
-                        </div>
-                        <span className="expression-validation-samples-board-count">{board.sampleCount} 条</span>
-                      </div>
-
-                      <div className="expression-validation-samples-board-source-list">
-                        {board.sourceGroups.map((sourceGroup) => (
-                          <section
-                            key={`${section.label}-${board.label}-${sourceGroup.key}`}
-                            className="expression-validation-samples-board-source-section"
+                  <div className="expression-validation-samples-board-source-list">
+                    {board.sourceGroups.map((sourceGroup) => (
+                      <section
+                        key={`${board.label}-${sourceGroup.key}`}
+                        className="expression-validation-samples-board-source-section"
+                      >
+                        <div className="expression-validation-samples-board-source-head">
+                          <span
+                            className={`expression-validation-samples-source-pill expression-validation-samples-source-pill-${sourceGroup.key}`}
                           >
-                            <div className="expression-validation-samples-board-source-head">
-                              <span
-                                className={`expression-validation-samples-source-pill expression-validation-samples-source-pill-${sourceGroup.key}`}
-                              >
-                                {sourceGroup.label}
-                              </span>
-                              <span className="expression-validation-samples-board-source-count">
-                                {sourceGroup.rows.length} 条
-                              </span>
-                            </div>
+                            {sourceGroup.label}
+                          </span>
+                          <span className="expression-validation-samples-board-source-count">
+                            {sourceGroup.rows.length} 条
+                          </span>
+                        </div>
 
-                            <div className="expression-validation-samples-table-wrap">
-                              <table className="expression-validation-samples-table">
-                                <thead>
-                                  <tr>
-                                    <th>代码</th>
-                                    <th>名称</th>
-                                    <th>参考日</th>
-                                    <th>触发得分</th>
-                                    <th>残差收益</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {sourceGroup.rows.map((row) => (
-                                    <tr key={`${row.dedupeKey}-${row.source_bucket}`}>
-                                      <td>{row.ts_code}</td>
-                                      <td title={row.name ?? row.ts_code}>
-                                        <DetailsLink
-                                          className="expression-validation-samples-stock-link"
-                                          tsCode={row.ts_code}
-                                          tradeDate={row.trade_date}
-                                          sourcePath={sourcePath}
-                                          title={`查看 ${row.name || row.ts_code} 详情`}
-                                        >
-                                          {row.name || row.ts_code}
-                                        </DetailsLink>
-                                      </td>
-                                      <td>{formatDateLabel(row.trade_date)}</td>
-                                      <td>{formatNumber(row.rule_score)}</td>
-                                      <td>{formatPercentPoint(row.residual_return)}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          </section>
-                        ))}
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <div className="expression-validation-samples-empty-block">
-                  暂无样本
-                </div>
-              )}
-            </section>
-          ))}
+                        <div className="expression-validation-samples-table-wrap">
+                          <table className="expression-validation-samples-table">
+                            <thead>
+                              <tr>
+                                <th>代码</th>
+                                <th>名称</th>
+                                <th>参考日</th>
+                                <th>触发得分</th>
+                                <th>残差收益</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {sourceGroup.rows.map((row) => (
+                                <tr key={`${row.dedupeKey}-${row.source_bucket}`}>
+                                  <td>{row.ts_code}</td>
+                                  <td title={row.name ?? row.ts_code}>
+                                    <DetailsLink
+                                      className="expression-validation-samples-stock-link"
+                                      tsCode={row.ts_code}
+                                      tradeDate={row.trade_date}
+                                      sourcePath={sourcePath}
+                                      title={`查看 ${row.name || row.ts_code} 详情`}
+                                      navigationItems={sampleNavigationItems}
+                                    >
+                                      {row.name || row.ts_code}
+                                    </DetailsLink>
+                                  </td>
+                                  <td>{formatDateLabel(row.trade_date)}</td>
+                                  <td>{formatNumber(row.rule_score)}</td>
+                                  <td>{formatPercentPoint(row.residual_return)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </section>
+                    ))}
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="expression-validation-samples-empty-block">
+              暂无样本
+            </div>
+          )}
         </div>
       </section>
     </>

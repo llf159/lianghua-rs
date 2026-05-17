@@ -5,6 +5,7 @@ use std::{
 };
 
 use duckdb::{Connection, params};
+use rand::random;
 #[cfg(test)]
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
@@ -333,6 +334,7 @@ const VALIDATION_MAX_COMBINATIONS: usize = 256;
 const VALIDATION_COMBO_EVAL_BATCH_SIZE: usize = 16;
 const VALIDATION_DEFAULT_SAMPLE_LIMIT_PER_GROUP: usize = 30;
 const VALIDATION_MAX_SAMPLE_LIMIT_PER_GROUP: usize = 200;
+#[cfg(test)]
 const VALIDATION_RANDOM_SAMPLE_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2718,13 +2720,9 @@ struct ValidationSampleAccumulator<'a> {
     sample_limit_per_group: usize,
     stock_meta_map: &'a HashMap<String, ValidationSampleStockMeta>,
     similarity_cache: &'a ValidationSimilarityCache,
-    total_samples: usize,
-    positive_count: usize,
-    negative_count: usize,
+    total_triggers: usize,
     triggered_days: HashSet<String>,
-    positive_by_board: HashMap<String, Vec<ValidationSampleRawRow>>,
-    negative_by_board: HashMap<String, Vec<ValidationSampleRawRow>>,
-    random_by_board: HashMap<String, Vec<(u64, ValidationSampleRawRow)>>,
+    sample_by_stock: HashMap<String, ValidationSampleRawRow>,
     overlap_hit_count: HashMap<usize, usize>,
 }
 
@@ -2738,23 +2736,18 @@ impl<'a> ValidationSampleAccumulator<'a> {
             sample_limit_per_group,
             stock_meta_map,
             similarity_cache,
-            total_samples: 0,
-            positive_count: 0,
-            negative_count: 0,
+            total_triggers: 0,
             triggered_days: HashSet::new(),
-            positive_by_board: HashMap::new(),
-            negative_by_board: HashMap::new(),
-            random_by_board: HashMap::new(),
+            sample_by_stock: HashMap::new(),
             overlap_hit_count: HashMap::new(),
         }
     }
 
     fn push(&mut self, sample: crate::simulate::rule::RuleLayerSamplePointRef<'_>) {
-        self.total_samples += 1;
+        self.total_triggers += 1;
         self.triggered_days.insert(sample.trade_date.to_string());
         self.update_similarity_overlap(sample.ts_code, sample.trade_date);
 
-        let board = sample_board(sample.ts_code, self.stock_meta_map);
         let row = ValidationSampleRawRow {
             ts_code: sample.ts_code.to_string(),
             trade_date: sample.trade_date.to_string(),
@@ -2762,30 +2755,14 @@ impl<'a> ValidationSampleAccumulator<'a> {
             residual_return: sample.residual_return,
         };
 
-        if row.residual_return > 0.0 {
-            self.positive_count += 1;
-            push_limited_sample(
-                self.positive_by_board.entry(board.clone()).or_default(),
-                row.clone(),
-                self.sample_limit_per_group,
-                compare_positive_validation_sample,
-            );
-        } else if row.residual_return < 0.0 {
-            self.negative_count += 1;
-            push_limited_sample(
-                self.negative_by_board.entry(board.clone()).or_default(),
-                row.clone(),
-                self.sample_limit_per_group,
-                compare_negative_validation_sample,
-            );
-        }
-
-        push_limited_random_sample(
-            self.random_by_board.entry(board).or_default(),
-            validation_sample_hash(&row),
-            row,
-            self.sample_limit_per_group,
-        );
+        self.sample_by_stock
+            .entry(row.ts_code.clone())
+            .and_modify(|current| {
+                if should_replace_validation_stock_sample(current, &row) {
+                    *current = row.clone();
+                }
+            })
+            .or_insert(row);
     }
 
     fn update_similarity_overlap(&mut self, ts_code: &str, trade_date: &str) {
@@ -2810,21 +2787,50 @@ impl<'a> ValidationSampleAccumulator<'a> {
         RuleValidationSampleGroups,
         HashMap<usize, usize>,
     ) {
-        let mut positive = self
-            .positive_by_board
-            .into_values()
-            .flatten()
-            .collect::<Vec<_>>();
-        let mut negative = self
-            .negative_by_board
-            .into_values()
-            .flatten()
-            .collect::<Vec<_>>();
-        let mut random = self
-            .random_by_board
-            .into_values()
-            .flatten()
-            .collect::<Vec<_>>();
+        let unique_samples = self.sample_by_stock.into_values().collect::<Vec<_>>();
+        let unique_sample_count = unique_samples.len();
+        let positive_count = unique_samples
+            .iter()
+            .filter(|row| row.residual_return > 0.0)
+            .count();
+        let negative_count = unique_samples
+            .iter()
+            .filter(|row| row.residual_return < 0.0)
+            .count();
+        let mut positive_by_board: HashMap<String, Vec<ValidationSampleRawRow>> = HashMap::new();
+        let mut negative_by_board: HashMap<String, Vec<ValidationSampleRawRow>> = HashMap::new();
+        let mut random_by_board: HashMap<String, Vec<(u64, ValidationSampleRawRow)>> =
+            HashMap::new();
+
+        for row in unique_samples {
+            let board = sample_board(&row.ts_code, self.stock_meta_map);
+            if row.residual_return > 0.0 {
+                push_limited_sample(
+                    positive_by_board.entry(board.clone()).or_default(),
+                    row.clone(),
+                    self.sample_limit_per_group,
+                    compare_positive_validation_sample,
+                );
+            } else if row.residual_return < 0.0 {
+                push_limited_sample(
+                    negative_by_board.entry(board.clone()).or_default(),
+                    row.clone(),
+                    self.sample_limit_per_group,
+                    compare_negative_validation_sample,
+                );
+            }
+
+            push_limited_random_sample(
+                random_by_board.entry(board).or_default(),
+                random::<u64>(),
+                row,
+                self.sample_limit_per_group,
+            );
+        }
+
+        let mut positive = positive_by_board.into_values().flatten().collect::<Vec<_>>();
+        let mut negative = negative_by_board.into_values().flatten().collect::<Vec<_>>();
+        let mut random = random_by_board.into_values().flatten().collect::<Vec<_>>();
 
         positive.sort_by(compare_positive_validation_sample);
         negative.sort_by(compare_negative_validation_sample);
@@ -2843,14 +2849,14 @@ impl<'a> ValidationSampleAccumulator<'a> {
             ),
         };
         let stats = RuleValidationSampleStats {
-            positive_count: self.positive_count,
-            negative_count: self.negative_count,
-            random_count: self.total_samples,
-            total_samples: self.total_samples,
+            positive_count,
+            negative_count,
+            random_count: unique_sample_count,
+            total_samples: unique_sample_count,
         };
 
         (
-            self.total_samples,
+            self.total_triggers,
             self.triggered_days.len(),
             stats,
             groups,
@@ -2867,6 +2873,32 @@ fn sample_board(
         .get(ts_code)
         .map(|meta| meta.board.clone())
         .unwrap_or_else(|| "其他".to_string())
+}
+
+fn should_replace_validation_stock_sample(
+    current: &ValidationSampleRawRow,
+    candidate: &ValidationSampleRawRow,
+) -> bool {
+    let strength_order = candidate
+        .residual_return
+        .abs()
+        .partial_cmp(&current.residual_return.abs())
+        .unwrap_or(Ordering::Equal);
+    if strength_order != Ordering::Equal {
+        return strength_order == Ordering::Greater;
+    }
+
+    let date_order = candidate.trade_date.cmp(&current.trade_date);
+    if date_order != Ordering::Equal {
+        return date_order == Ordering::Greater;
+    }
+
+    candidate
+        .rule_score
+        .abs()
+        .partial_cmp(&current.rule_score.abs())
+        .unwrap_or(Ordering::Equal)
+        == Ordering::Greater
 }
 
 fn compare_positive_validation_sample(
@@ -2942,15 +2974,6 @@ fn push_limited_random_sample(
     if key < rows[worst_index].0 {
         rows[worst_index] = (key, row);
     }
-}
-
-fn validation_sample_hash(row: &ValidationSampleRawRow) -> u64 {
-    let mut hash = VALIDATION_RANDOM_SAMPLE_SEED;
-    for byte in row.ts_code.bytes().chain([0]).chain(row.trade_date.bytes()) {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100_0000_01b3);
-    }
-    hash
 }
 
 fn validation_sample_rows_to_payload(
