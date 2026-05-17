@@ -2828,8 +2828,14 @@ impl<'a> ValidationSampleAccumulator<'a> {
             );
         }
 
-        let mut positive = positive_by_board.into_values().flatten().collect::<Vec<_>>();
-        let mut negative = negative_by_board.into_values().flatten().collect::<Vec<_>>();
+        let mut positive = positive_by_board
+            .into_values()
+            .flatten()
+            .collect::<Vec<_>>();
+        let mut negative = negative_by_board
+            .into_values()
+            .flatten()
+            .collect::<Vec<_>>();
         let mut random = random_by_board.into_values().flatten().collect::<Vec<_>>();
 
         positive.sort_by(compare_positive_validation_sample);

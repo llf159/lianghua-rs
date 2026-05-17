@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use duckdb::{Connection, params};
 use serde::Serialize;
 
@@ -92,149 +94,172 @@ fn query_rank_trade_date_options_from_conn(conn: &Connection) -> Result<Vec<Stri
     Ok(out)
 }
 
-fn query_optional_rank(
+fn query_rank_map(
     conn: &Connection,
     trade_date: &str,
-    ts_code: &str,
-) -> Result<Option<i64>, String> {
+) -> Result<HashMap<String, Option<i64>>, String> {
     let mut stmt = conn
         .prepare(
             r#"
-            SELECT rank
+            SELECT ts_code, rank
             FROM score_summary
-            WHERE trade_date = ? AND ts_code = ?
-            LIMIT 1
+            WHERE trade_date = ?
             "#,
         )
         .map_err(|e| format!("预编译参考日排名失败: {e}"))?;
     let mut rows = stmt
-        .query(params![trade_date, ts_code])
+        .query(params![trade_date])
         .map_err(|e| format!("查询参考日排名失败: {e}"))?;
 
-    if let Some(row) = rows
+    let mut out = HashMap::new();
+    while let Some(row) = rows
         .next()
         .map_err(|e| format!("读取参考日排名失败: {e}"))?
     {
-        let rank: Option<i64> = row
+        let ts_code: String = row
             .get(0)
+            .map_err(|e| format!("读取参考日排名代码失败: {e}"))?;
+        let rank: Option<i64> = row
+            .get(1)
             .map_err(|e| format!("读取参考日排名字段失败: {e}"))?;
-        Ok(rank)
-    } else {
-        Ok(None)
+        out.insert(ts_code, rank);
     }
+
+    Ok(out)
 }
 
-fn query_optional_j(
+fn query_tiebreak_j_map(
     source_conn: &Connection,
     trade_date: &str,
-    ts_code: &str,
-) -> Result<Option<f64>, String> {
+) -> Result<HashMap<String, Option<f64>>, String> {
     let mut stmt = source_conn
         .prepare(
             r#"
-            SELECT TRY_CAST(j AS DOUBLE)
+            SELECT ts_code, TRY_CAST(j AS DOUBLE)
             FROM stock_data
-            WHERE ts_code = ? AND trade_date = ? AND adj_type = ?
-            LIMIT 1
+            WHERE trade_date = ? AND adj_type = ?
             "#,
         )
         .map_err(|e| format!("预编译同分排序J失败: {e}"))?;
     let mut rows = stmt
-        .query(params![ts_code, trade_date, DEFAULT_ADJ_TYPE])
+        .query(params![trade_date, DEFAULT_ADJ_TYPE])
         .map_err(|e| format!("查询同分排序J失败: {e}"))?;
 
-    if let Some(row) = rows.next().map_err(|e| format!("读取同分排序J失败: {e}"))? {
+    let mut out = HashMap::new();
+    while let Some(row) = rows.next().map_err(|e| format!("读取同分排序J失败: {e}"))? {
+        let ts_code: String = row
+            .get(0)
+            .map_err(|e| format!("读取同分排序J代码失败: {e}"))?;
         let j_value: Option<f64> = row
-            .get(0)
+            .get(1)
             .map_err(|e| format!("读取同分排序J字段失败: {e}"))?;
-        Ok(j_value)
-    } else {
-        Ok(None)
+        out.insert(ts_code, j_value);
     }
+
+    Ok(out)
 }
 
-fn query_optional_next_open(
+fn quote_sql_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn selected_ts_codes_cte(ts_codes: &[String]) -> String {
+    let values = ts_codes
+        .iter()
+        .map(|ts_code| format!("({})", quote_sql_string(ts_code)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("selected_ts_codes(ts_code) AS (VALUES {values})")
+}
+
+fn query_post_rank_return_pct_map(
     source_conn: &Connection,
     trade_date: &str,
-    ts_code: &str,
-) -> Result<Option<f64>, String> {
-    let mut stmt = source_conn
-        .prepare(
-            r#"
-            SELECT TRY_CAST(open AS DOUBLE)
-            FROM stock_data
-            WHERE ts_code = ? AND adj_type = ? AND trade_date > ?
-            ORDER BY trade_date ASC
-            LIMIT 1
-            "#,
-        )
-        .map_err(|e| format!("预编译次日开盘价失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![ts_code, DEFAULT_ADJ_TYPE, trade_date])
-        .map_err(|e| format!("查询次日开盘价失败: {e}"))?;
+    ts_codes: &[String],
+) -> Result<HashMap<String, Option<f64>>, String> {
+    if ts_codes.is_empty() {
+        return Ok(HashMap::new());
+    }
 
-    if let Some(row) = rows
+    let selected_cte = selected_ts_codes_cte(ts_codes);
+    let sql = format!(
+        r#"
+        WITH
+            {selected_cte},
+            next_rows AS (
+                SELECT ts_code, next_open
+                FROM (
+                    SELECT
+                        s.ts_code,
+                        TRY_CAST(s.open AS DOUBLE) AS next_open,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY s.ts_code
+                            ORDER BY s.trade_date ASC
+                        ) AS row_num
+                    FROM stock_data AS s
+                    INNER JOIN selected_ts_codes AS selected
+                        ON selected.ts_code = s.ts_code
+                    WHERE s.adj_type = ? AND s.trade_date > ?
+                )
+                WHERE row_num = 1
+            ),
+            latest_rows AS (
+                SELECT ts_code, latest_close
+                FROM (
+                    SELECT
+                        s.ts_code,
+                        TRY_CAST(s.close AS DOUBLE) AS latest_close,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY s.ts_code
+                            ORDER BY s.trade_date DESC
+                        ) AS row_num
+                    FROM stock_data AS s
+                    INNER JOIN selected_ts_codes AS selected
+                        ON selected.ts_code = s.ts_code
+                    WHERE s.adj_type = ?
+                )
+                WHERE row_num = 1
+            )
+        SELECT
+            selected.ts_code,
+            next_rows.next_open,
+            latest_rows.latest_close
+        FROM selected_ts_codes AS selected
+        LEFT JOIN next_rows ON next_rows.ts_code = selected.ts_code
+        LEFT JOIN latest_rows ON latest_rows.ts_code = selected.ts_code
+        "#
+    );
+
+    let mut stmt = source_conn
+        .prepare(&sql)
+        .map_err(|e| format!("预编译排名后涨幅失败: {e}"))?;
+    let mut rows = stmt
+        .query(params![DEFAULT_ADJ_TYPE, trade_date, DEFAULT_ADJ_TYPE])
+        .map_err(|e| format!("查询排名后涨幅失败: {e}"))?;
+
+    let mut out = HashMap::with_capacity(ts_codes.len());
+    while let Some(row) = rows
         .next()
-        .map_err(|e| format!("读取次日开盘价失败: {e}"))?
+        .map_err(|e| format!("读取排名后涨幅失败: {e}"))?
     {
-        let open_value: Option<f64> = row
+        let ts_code: String = row
             .get(0)
+            .map_err(|e| format!("读取排名后涨幅代码失败: {e}"))?;
+        let next_open: Option<f64> = row
+            .get(1)
             .map_err(|e| format!("读取次日开盘价字段失败: {e}"))?;
-        Ok(open_value)
-    } else {
-        Ok(None)
-    }
-}
-
-fn query_optional_latest_close(
-    source_conn: &Connection,
-    ts_code: &str,
-) -> Result<Option<f64>, String> {
-    let mut stmt = source_conn
-        .prepare(
-            r#"
-            SELECT TRY_CAST(close AS DOUBLE)
-            FROM stock_data
-            WHERE ts_code = ? AND adj_type = ?
-            ORDER BY trade_date DESC
-            LIMIT 1
-            "#,
-        )
-        .map_err(|e| format!("预编译最新收盘价失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![ts_code, DEFAULT_ADJ_TYPE])
-        .map_err(|e| format!("查询最新收盘价失败: {e}"))?;
-
-    if let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取最新收盘价失败: {e}"))?
-    {
-        let close_value: Option<f64> = row
-            .get(0)
+        let latest_close: Option<f64> = row
+            .get(2)
             .map_err(|e| format!("读取最新收盘价字段失败: {e}"))?;
-        Ok(close_value)
-    } else {
-        Ok(None)
-    }
-}
 
-fn calc_post_rank_return_pct(
-    source_conn: &Connection,
-    trade_date: &str,
-    ts_code: &str,
-) -> Result<Option<f64>, String> {
-    let Some(next_open) = query_optional_next_open(source_conn, trade_date, ts_code)? else {
-        return Ok(None);
-    };
-    if next_open <= 0.0 {
-        return Ok(None);
+        let post_rank_return_pct = match (next_open, latest_close) {
+            (Some(open), Some(close)) if open > 0.0 => Some((close / open - 1.0) * 100.0),
+            _ => None,
+        };
+        out.insert(ts_code, post_rank_return_pct);
     }
 
-    let Some(latest_close) = query_optional_latest_close(source_conn, ts_code)? else {
-        return Ok(None);
-    };
-
-    Ok(Some((latest_close / next_open - 1.0) * 100.0))
+    Ok(out)
 }
 
 pub fn get_rank_trade_date_options(source_path: String) -> Result<Vec<String>, String> {
@@ -368,12 +393,23 @@ pub fn get_rank_overview_page(
     )?;
 
     let source_conn = open_source_conn(&source_path)?;
+    let ts_codes = rows
+        .iter()
+        .map(|row| row.ts_code.clone())
+        .collect::<Vec<_>>();
+    let ref_rank_map = query_rank_map(&result_conn, &effective_ref_date)?;
+    let tiebreak_j_map = query_tiebreak_j_map(&source_conn, &effective_rank_date)?;
+    let post_rank_return_pct_map =
+        query_post_rank_return_pct_map(&source_conn, &effective_rank_date, &ts_codes)?;
+
     for row in &mut rows {
         row.ref_date = Some(effective_ref_date.clone());
-        row.ref_rank = query_optional_rank(&result_conn, &effective_ref_date, &row.ts_code)?;
-        row.tiebreak_j = query_optional_j(&source_conn, &effective_rank_date, &row.ts_code)?;
-        row.post_rank_return_pct =
-            calc_post_rank_return_pct(&source_conn, &effective_rank_date, &row.ts_code)?;
+        row.ref_rank = ref_rank_map.get(&row.ts_code).copied().flatten();
+        row.tiebreak_j = tiebreak_j_map.get(&row.ts_code).copied().flatten();
+        row.post_rank_return_pct = post_rank_return_pct_map
+            .get(&row.ts_code)
+            .copied()
+            .flatten();
     }
 
     Ok(OverviewPageData {
@@ -382,4 +418,89 @@ pub fn get_rank_overview_page(
         resolved_rank_date: Some(effective_rank_date),
         resolved_ref_date: Some(effective_ref_date),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_result_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory result db should open");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE score_summary (
+                ts_code TEXT,
+                trade_date TEXT,
+                total_score DOUBLE,
+                rank BIGINT
+            );
+            INSERT INTO score_summary VALUES
+                ('000001.SZ', '20240103', 90.0, 1),
+                ('000002.SZ', '20240103', 80.0, 2),
+                ('000001.SZ', '20240101', 70.0, 4),
+                ('000002.SZ', '20240101', 60.0, 8);
+            "#,
+        )
+        .expect("result fixture should be created");
+        conn
+    }
+
+    fn build_source_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory source db should open");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE stock_data (
+                ts_code TEXT,
+                trade_date TEXT,
+                adj_type TEXT,
+                open DOUBLE,
+                close DOUBLE,
+                j DOUBLE
+            );
+            INSERT INTO stock_data VALUES
+                ('000001.SZ', '20240103', 'qfq', 10.0, 11.0, 33.0),
+                ('000001.SZ', '20240104', 'qfq', 12.0, 18.0, 34.0),
+                ('000001.SZ', '20240105', 'qfq', 20.0, 24.0, 35.0),
+                ('000002.SZ', '20240103', 'qfq', 5.0, 6.0, 22.0),
+                ('000002.SZ', '20240104', 'qfq', 0.0, 8.0, 23.0),
+                ('000001.SZ', '20240105', 'hfq', 200.0, 240.0, 350.0);
+            "#,
+        )
+        .expect("source fixture should be created");
+        conn
+    }
+
+    #[test]
+    fn overview_page_batch_queries_return_supplement_fields() {
+        let result_conn = build_result_conn();
+        let source_conn = build_source_conn();
+
+        let rank_map = query_rank_map(&result_conn, "20240101").expect("rank map");
+        assert_eq!(rank_map.get("000001.SZ").copied().flatten(), Some(4));
+        assert_eq!(rank_map.get("000002.SZ").copied().flatten(), Some(8));
+
+        let j_map = query_tiebreak_j_map(&source_conn, "20240103").expect("j map");
+        assert_eq!(j_map.get("000001.SZ").copied().flatten(), Some(33.0));
+        assert_eq!(j_map.get("000002.SZ").copied().flatten(), Some(22.0));
+
+        let returns = query_post_rank_return_pct_map(
+            &source_conn,
+            "20240103",
+            &[
+                "000001.SZ".to_string(),
+                "000002.SZ".to_string(),
+                "000003.SZ".to_string(),
+            ],
+        )
+        .expect("return map");
+
+        let first_return = returns
+            .get("000001.SZ")
+            .copied()
+            .flatten()
+            .expect("first stock should have return");
+        assert!((first_return - 100.0).abs() < 1e-9);
+        assert_eq!(returns.get("000002.SZ").copied().flatten(), None);
+        assert_eq!(returns.get("000003.SZ").copied().flatten(), None);
+    }
 }
