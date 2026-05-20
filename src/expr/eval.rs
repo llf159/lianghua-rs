@@ -24,9 +24,9 @@ fn to_num(b: bool) -> f64 {
 impl Runtime {
     fn dynamic_limit(&mut self, arg: &Expr, fn_name: &str) -> Result<usize, EvalErr> {
         let limit = Value::as_num(&self.eval_expr(arg)?)?;
-        if !limit.is_finite() || limit <= 0.0 {
+        if !limit.is_finite() || limit <= 0.0 || limit.fract().abs() > EPS {
             return Err(EvalErr {
-                msg: format!("{fn_name}动态周期上限必须是正数"),
+                msg: format!("{fn_name}动态周期上限必须是正整数"),
             });
         }
         Ok(limit as usize)
@@ -2142,4 +2142,29 @@ fn hhvd_uses_dynamic_windows_with_runtime_cap() {
         out,
         Value::NumSeries(vec![Some(1.0), Some(5.0), Some(5.0), Some(4.0), Some(4.0)])
     );
+}
+
+#[test]
+fn dynamic_limit_rejects_fractional_upper_bound() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let expr = "HHVD(C, N, 0.5);";
+    let toks = lex_all(expr);
+    let mut p = Parser::new(toks);
+    let stmts = p.parse_main().expect("parse failed");
+    let mut rt = Runtime::default();
+
+    rt.vars.insert(
+        "C".to_string(),
+        Value::NumSeries(vec![Some(1.0), Some(5.0), Some(3.0)]),
+    );
+    rt.vars.insert(
+        "N".to_string(),
+        Value::NumSeries(vec![Some(1.0), Some(2.0), Some(3.0)]),
+    );
+
+    let err = rt
+        .eval_program(&stmts)
+        .expect_err("fractional cap should fail");
+    assert_eq!(err.msg, "HHVD动态周期上限必须是正整数");
 }

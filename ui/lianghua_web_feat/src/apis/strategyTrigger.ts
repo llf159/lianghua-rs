@@ -186,6 +186,7 @@ export type RuleLayerPoint = {
   sample_count: number
   avg_rule_score?: number | null
   avg_residual_return?: number | null
+  avg_excess_residual_return?: number | null
   top_bottom_spread?: number | null
   ic?: number | null
 }
@@ -194,6 +195,7 @@ export type RuleLayerRuleSummary = {
   rule_name: string
   point_count: number
   avg_residual_mean?: number | null
+  avg_excess_residual_mean?: number | null
   spread_mean?: number | null
   avg_contribution_score?: number | null
   avg_contribution_per_trigger?: number | null
@@ -217,6 +219,7 @@ export type RuleLayerBacktestData = {
   backtest_period: number
   points: RuleLayerPoint[]
   avg_residual_mean?: number | null
+  avg_excess_residual_mean?: number | null
   spread_mean?: number | null
   avg_contribution_score?: number | null
   avg_contribution_per_trigger?: number | null

@@ -47,6 +47,7 @@ type RuleSummarySortKey =
   | "rule_name"
   | "point_count"
   | "avg_residual_mean"
+  | "avg_excess_residual_mean"
   | "avg_contribution_score"
   | "avg_contribution_per_trigger"
   | "ic_mean"
@@ -61,6 +62,7 @@ type ValidationComboSortKey =
   | "avg_daily_trigger"
   | "spread_mean"
   | "avg_residual_mean"
+  | "avg_excess_residual_mean"
   | "ic_mean"
   | "ic_t_value"
   | "icir";
@@ -785,6 +787,9 @@ export default function SceneLayerBacktestPage() {
         avg_residual_mean: {
           value: (row: RuleLayerRuleSummary) => row.avg_residual_mean,
         },
+        avg_excess_residual_mean: {
+          value: (row: RuleLayerRuleSummary) => row.avg_excess_residual_mean,
+        },
         avg_contribution_score: {
           value: (row: RuleLayerRuleSummary) => row.avg_contribution_score,
         },
@@ -843,6 +848,9 @@ export default function SceneLayerBacktestPage() {
         },
         avg_residual_mean: {
           value: (row: RuleValidationComboResult) => row.backtest.avg_residual_mean,
+        },
+        avg_excess_residual_mean: {
+          value: (row: RuleValidationComboResult) => row.backtest.avg_excess_residual_mean,
         },
         ic_mean: {
           value: (row: RuleValidationComboResult) => row.backtest.ic_mean,
@@ -1797,6 +1805,7 @@ export default function SceneLayerBacktestPage() {
                     <th>平均贡献度</th>
                     <th>平均单次贡献</th>
                     <th>残差均值（日度）</th>
+                    <th>超额残差（日度）</th>
                     <th>IC 均值</th>
                     <th>IC t值</th>
                     <th>ICIR</th>
@@ -1816,6 +1825,9 @@ export default function SceneLayerBacktestPage() {
                     <td>{formatNumber(ruleResult.avg_contribution_per_trigger, 2)}</td>
                     <td className={residualMetricHighlightClass(ruleResult.avg_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}>
                       {renderResidualMetric(ruleResult.avg_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}
+                    </td>
+                    <td className={residualMetricHighlightClass(ruleResult.avg_excess_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}>
+                      {renderResidualMetric(ruleResult.avg_excess_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}
                     </td>
                     <td className={metricHighlightClass("ic", ruleResult.ic_mean)}>{formatNumber(ruleResult.ic_mean)}</td>
                     <td className={metricHighlightClass("t", ruleResult.ic_t_value)}>{formatNumber(ruleResult.ic_t_value)}</td>
@@ -1882,6 +1894,15 @@ export default function SceneLayerBacktestPage() {
                           title="按残差均值排序"
                         />
                       </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "avg_excess_residual_mean", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="超额残差"
+                          isActive={ruleSummarySortKey === "avg_excess_residual_mean" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("avg_excess_residual_mean")}
+                          title="按超额残差排序"
+                        />
+                      </th>
                       <th aria-sort={getAriaSort(ruleSummarySortKey === "ic_mean", ruleSummarySortDirection)}>
                         <TableSortButton
                           label="IC 均值"
@@ -1920,6 +1941,9 @@ export default function SceneLayerBacktestPage() {
                         <td>{formatNumber(item.avg_contribution_per_trigger, 2)}</td>
                         <td className={residualMetricHighlightClass(item.avg_residual_mean, resolveResidualDirection(item.avg_contribution_score))}>
                           {renderResidualMetric(item.avg_residual_mean, resolveResidualDirection(item.avg_contribution_score))}
+                        </td>
+                        <td className={residualMetricHighlightClass(item.avg_excess_residual_mean, resolveResidualDirection(item.avg_contribution_score))}>
+                          {renderResidualMetric(item.avg_excess_residual_mean, resolveResidualDirection(item.avg_contribution_score))}
                         </td>
                         <td className={metricHighlightClass("ic", item.ic_mean)}>{formatNumber(item.ic_mean)}</td>
                         <td className={metricHighlightClass("t", item.ic_t_value)}>{formatNumber(item.ic_t_value)}</td>
@@ -2188,6 +2212,7 @@ export default function SceneLayerBacktestPage() {
                     {renderValidationComboSortHeader("avg_daily_trigger", "平均每日触发")}
                     {renderValidationComboSortHeader("spread_mean", "分层差均值（按得分值）")}
                     {renderValidationComboSortHeader("avg_residual_mean", "残差均值（日度）")}
+                    {renderValidationComboSortHeader("avg_excess_residual_mean", "超额残差（日度）")}
                     {renderValidationComboSortHeader("ic_mean", "IC 均值")}
                     {renderValidationComboSortHeader("ic_t_value", "IC t值")}
                     {renderValidationComboSortHeader("icir", "ICIR")}
@@ -2240,6 +2265,9 @@ export default function SceneLayerBacktestPage() {
                         <td>{formatPercent(item.backtest.spread_mean)}</td>
                         <td className={residualMetricHighlightClass(item.backtest.avg_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}>
                           {renderResidualMetric(item.backtest.avg_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}
+                        </td>
+                        <td className={residualMetricHighlightClass(item.backtest.avg_excess_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}>
+                          {renderResidualMetric(item.backtest.avg_excess_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}
                         </td>
                         <td className={metricHighlightClass("ic", item.backtest.ic_mean)}>{formatNumber(item.backtest.ic_mean)}</td>
                         <td className={metricHighlightClass("t", item.backtest.ic_t_value)}>{formatNumber(item.backtest.ic_t_value)}</td>

@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use crate::expr::parser::{BinaryOp, Expr};
 
+const EPS: f64 = 1e-12;
+
 pub fn eval_binary_for_warmup(
     op: &BinaryOp,
     lhs: &Expr,
@@ -66,8 +68,8 @@ fn eval_dynamic_max_for_warmup(
         _ => return Err(format!("{fn_name}动态周期上限必须是常量")),
     };
 
-    if !value.is_finite() || value <= 0.0 {
-        return Err(format!("{fn_name}动态周期上限必须是正数"));
+    if !value.is_finite() || value <= 0.0 || value.fract().abs() > EPS {
+        return Err(format!("{fn_name}动态周期上限必须是正整数"));
     }
 
     Ok(value as usize)
@@ -542,5 +544,24 @@ mod tests {
 
         let expr = "GAP := REF(BARSLAST(C > 1), 1); COUNTD(REF(C > 1, 1), GAP, 10);";
         assert_eq!(estimate_program_warmup(expr), 10);
+    }
+
+    #[test]
+    fn dynamic_warmup_rejects_fractional_upper_bound() {
+        let err = impl_expr_warmup(
+            Expr::Call {
+                name: "COUNTD".to_string(),
+                args: vec![
+                    Expr::Ident("COND".to_string()),
+                    Expr::Ident("WIN".to_string()),
+                    Expr::Number(0.5),
+                ],
+            },
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect_err("fractional cap should fail");
+
+        assert_eq!(err, "COUNTD动态周期上限必须是正整数");
     }
 }

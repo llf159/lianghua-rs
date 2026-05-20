@@ -237,6 +237,7 @@ pub struct RuleLayerPointPayload {
     pub sample_count: usize,
     pub avg_rule_score: Option<f64>,
     pub avg_residual_return: Option<f64>,
+    pub avg_excess_residual_return: Option<f64>,
     pub top_bottom_spread: Option<f64>,
     pub ic: Option<f64>,
 }
@@ -246,6 +247,7 @@ pub struct RuleLayerRuleSummary {
     pub rule_name: String,
     pub point_count: usize,
     pub avg_residual_mean: Option<f64>,
+    pub avg_excess_residual_mean: Option<f64>,
     pub spread_mean: Option<f64>,
     pub avg_contribution_score: Option<f64>,
     pub avg_contribution_per_trigger: Option<f64>,
@@ -270,6 +272,7 @@ pub struct RuleLayerBacktestData {
     pub backtest_period: usize,
     pub points: Vec<RuleLayerPointPayload>,
     pub avg_residual_mean: Option<f64>,
+    pub avg_excess_residual_mean: Option<f64>,
     pub spread_mean: Option<f64>,
     pub avg_contribution_score: Option<f64>,
     pub avg_contribution_per_trigger: Option<f64>,
@@ -2491,6 +2494,7 @@ fn build_rule_backtest_payload(
         backtest_period: params.backtest_period,
         points: Vec::new(),
         avg_residual_mean: metrics.avg_residual_mean,
+        avg_excess_residual_mean: metrics.avg_excess_residual_mean,
         spread_mean,
         avg_contribution_score: None,
         avg_contribution_per_trigger: None,
@@ -4461,8 +4465,11 @@ fn aggregate_all_rule_summary_metrics(
     Option<f64>,
     Option<f64>,
     Option<f64>,
+    Option<f64>,
 ) {
     let avg_residual_mean = weighted_rule_summary_metric(summaries, |item| item.avg_residual_mean);
+    let avg_excess_residual_mean =
+        weighted_rule_summary_metric(summaries, |item| item.avg_excess_residual_mean);
     let spread_mean = weighted_rule_summary_metric(summaries, |item| item.spread_mean);
     let ic_mean = weighted_rule_summary_metric(summaries, |item| item.ic_mean);
     let ic_std = weighted_rule_summary_metric(summaries, |item| item.ic_std);
@@ -4480,6 +4487,7 @@ fn aggregate_all_rule_summary_metrics(
 
     (
         avg_residual_mean,
+        avg_excess_residual_mean,
         spread_mean,
         ic_mean,
         ic_std,
@@ -4673,11 +4681,13 @@ fn run_rule_layer_backtest_core(
                     sample_count: point.sample_count,
                     avg_rule_score: point.avg_rule_score,
                     avg_residual_return: point.avg_residual_return,
+                    avg_excess_residual_return: point.avg_excess_residual_return,
                     top_bottom_spread: None,
                     ic: point.ic,
                 })
                 .collect(),
             avg_residual_mean: metrics.avg_residual_mean,
+            avg_excess_residual_mean: metrics.avg_excess_residual_mean,
             spread_mean: None,
             avg_contribution_score: None,
             avg_contribution_per_trigger: None,
@@ -4725,6 +4735,7 @@ fn run_rule_layer_backtest_core(
             rule_name: one_rule_name,
             point_count: metrics.points.len(),
             avg_residual_mean: metrics.avg_residual_mean,
+            avg_excess_residual_mean: metrics.avg_excess_residual_mean,
             spread_mean: None,
             avg_contribution_score: contribution_average.avg_contribution_score,
             avg_contribution_per_trigger: contribution_average.avg_contribution_per_trigger,
@@ -4744,8 +4755,15 @@ fn run_rule_layer_backtest_core(
             .then_with(|| a.rule_name.cmp(&b.rule_name))
     });
 
-    let (avg_residual_mean, _spread_mean, ic_mean, ic_std, icir, ic_t_value) =
-        aggregate_all_rule_summary_metrics(&all_rule_summaries);
+    let (
+        avg_residual_mean,
+        avg_excess_residual_mean,
+        _spread_mean,
+        ic_mean,
+        ic_std,
+        icir,
+        ic_t_value,
+    ) = aggregate_all_rule_summary_metrics(&all_rule_summaries);
 
     Ok(RuleLayerBacktestData {
         rule_name: String::new(),
@@ -4761,6 +4779,7 @@ fn run_rule_layer_backtest_core(
         backtest_period: params.backtest_period,
         points: Vec::new(),
         avg_residual_mean,
+        avg_excess_residual_mean,
         spread_mean: None,
         avg_contribution_score: weighted_rule_summary_metric(&all_rule_summaries, |item| {
             item.avg_contribution_score
@@ -5167,6 +5186,7 @@ pub fn run_transient_rule_layer_backtest(
             rule_name: one_rule_name,
             point_count: metrics.points.len(),
             avg_residual_mean: metrics.avg_residual_mean,
+            avg_excess_residual_mean: metrics.avg_excess_residual_mean,
             spread_mean: None,
             avg_contribution_score: None,
             avg_contribution_per_trigger: None,
@@ -5185,8 +5205,15 @@ pub fn run_transient_rule_layer_backtest(
             .then_with(|| a.rule_name.cmp(&b.rule_name))
     });
 
-    let (avg_residual_mean, _spread_mean, ic_mean, ic_std, icir, ic_t_value) =
-        aggregate_all_rule_summary_metrics(&all_rule_summaries);
+    let (
+        avg_residual_mean,
+        avg_excess_residual_mean,
+        _spread_mean,
+        ic_mean,
+        ic_std,
+        icir,
+        ic_t_value,
+    ) = aggregate_all_rule_summary_metrics(&all_rule_summaries);
 
     Ok(RuleLayerBacktestData {
         rule_name: String::new(),
@@ -5202,6 +5229,7 @@ pub fn run_transient_rule_layer_backtest(
         backtest_period: params.backtest_period,
         points: Vec::new(),
         avg_residual_mean,
+        avg_excess_residual_mean,
         spread_mean: None,
         avg_contribution_score: weighted_rule_summary_metric(&all_rule_summaries, |item| {
             item.avg_contribution_score

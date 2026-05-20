@@ -56,10 +56,10 @@ const SYNTAX_GUIDE_FUNCTIONS: SyntaxGuideFunction[] = [
 ]
 
 const SYNTAX_GUIDE_DYNAMIC_FUNCTIONS: SyntaxGuideDynamicFunction[] = [
-  { group: '动态计数 / 引用', functions: 'COUNTD / REFD', signature: 'COUNTD(cond, win, max_win)；REFD(x, offset, max_offset)', meaning: 'win/offset 可以是数值序列，例如 GAP；第三个参数是动态值上限，也用于 warmup。' },
-  { group: '动态窗口统计', functions: 'HHVD / LLVD / MAD / SUMD / STDD', signature: '函数名(x, win, max_win)', meaning: '每根 K 线用当根 win 回看，分别计算最高、最低、均值、求和、标准差。' },
-  { group: '动态排名 / 取值', functions: 'GRANKD / LRANKD / GETD', signature: 'GRANKD(x, win, max_win)；GETD(cond, x, win, max_win)', meaning: '排名函数按动态 win 排序；GETD 在动态 win 内找最近一次条件成立对应的 x。' },
-  { group: '动态扩展指标', functions: 'RSVD / GTOPCOUNTD / LTOPCOUNTD', signature: 'RSVD(C,H,L,win,max_win)；GTOPCOUNTD(x,cond,win,topn,max_win)', meaning: 'RSVD 是动态窗口 RSV；TOPCOUNTD 在动态 win 内排序后取前 topn 统计条件次数。' },
+  { group: '动态计数 / 引用', functions: 'COUNTD / REFD', signature: 'COUNTD(cond, win, max_win)；REFD(x, offset, max_offset)', meaning: 'win/offset 可以是数值序列，例如 GAP；第三个参数是正整数上限，也用于 warmup。' },
+  { group: '动态窗口统计', functions: 'HHVD / LLVD / MAD / SUMD / STDD', signature: '函数名(x, win, max_win)', meaning: '每根 K 线用当根 win 回看，分别计算最高、最低、均值、求和、标准差；max_win 必须是正整数。' },
+  { group: '动态排名 / 取值', functions: 'GRANKD / LRANKD / GETD', signature: 'GRANKD(x, win, max_win)；GETD(cond, x, win, max_win)', meaning: '排名函数按动态 win 排序；GETD 在动态 win 内找最近一次条件成立对应的 x；max_win 必须是正整数。' },
+  { group: '动态扩展指标', functions: 'RSVD / GTOPCOUNTD / LTOPCOUNTD', signature: 'RSVD(C,H,L,win,max_win)；GTOPCOUNTD(x,cond,win,topn,max_win)', meaning: 'RSVD 是动态窗口 RSV；TOPCOUNTD 在动态 win 内排序后取前 topn 统计条件次数；max_win 必须是正整数。' },
 ]
 
 const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
@@ -229,7 +229,7 @@ IF(C > O, C - O, 0)`}</pre>
             <h5>动态窗口 D 函数</h5>
             <p>
               D 函数用于“窗口/偏移本身也是序列”的场景，例如 <code>GAP := REF(BARSLAST(RED0), 1)</code> 后按每根 K 线自己的 GAP 回看。
-              写法会比普通函数多一个上限参数，运行时会把动态窗口截到该上限，查询 warmup 也按这个上限准备历史数据。
+              写法会比普通函数多一个正整数上限参数，运行时会把动态窗口截到该上限，查询 warmup 也按这个上限准备历史数据。
             </p>
             <div className="strategy-syntax-guide-table-wrap">
               <table className="strategy-syntax-guide-table">

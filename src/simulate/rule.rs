@@ -106,6 +106,7 @@ pub struct RuleLayerPoint {
     pub sample_count: usize,
     pub avg_rule_score: Option<f64>,
     pub avg_residual_return: Option<f64>,
+    pub avg_excess_residual_return: Option<f64>,
     pub top_bottom_spread: Option<f64>,
     pub ic: Option<f64>,
 }
@@ -114,6 +115,7 @@ pub struct RuleLayerPoint {
 pub struct RuleLayerMetrics {
     pub points: Vec<RuleLayerPoint>,
     pub avg_residual_mean: Option<f64>,
+    pub avg_excess_residual_mean: Option<f64>,
     pub spread_mean: Option<f64>,
     pub ic_mean: Option<f64>,
     pub ic_std: Option<f64>,
@@ -180,7 +182,13 @@ struct RuleLayerCollectOptions {
 }
 
 struct RuleLayerDayComputation {
-    point: Option<(RuleLayerPoint, Option<f64>, Option<f64>, Option<f64>)>,
+    point: Option<(
+        RuleLayerPoint,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+    )>,
     all_samples: Vec<RuleLayerSamplePoint>,
     triggered_samples: Vec<RuleLayerSamplePoint>,
 }
@@ -779,6 +787,7 @@ pub fn calc_rule_layer_metrics(
 
             let avg_rule_score = mean(&rule_scores);
             let avg_residual_return = mean(&residuals);
+            let avg_excess_residual_return = avg_residual_return.map(|_| 0.0);
             let top_bottom_spread = calc_top_bottom_spread(&rule_scores, &residuals);
             let ic = spearman_corr(&rule_scores, &residuals);
 
@@ -788,10 +797,12 @@ pub fn calc_rule_layer_metrics(
                     sample_count: rule_scores.len(),
                     avg_rule_score,
                     avg_residual_return,
+                    avg_excess_residual_return,
                     top_bottom_spread,
                     ic,
                 },
                 avg_residual_return,
+                avg_excess_residual_return,
                 top_bottom_spread,
                 ic,
             ))
@@ -800,13 +811,17 @@ pub fn calc_rule_layer_metrics(
 
     let mut points = Vec::with_capacity(day_results.len());
     let mut avg_residual_values = Vec::new();
+    let mut avg_excess_residual_values = Vec::new();
     let mut spread_values = Vec::new();
     let mut ic_values = Vec::new();
 
     for item in day_results.into_iter().flatten() {
-        let (point, avg_residual_return, top_bottom_spread, ic) = item;
+        let (point, avg_residual_return, avg_excess_residual_return, top_bottom_spread, ic) = item;
         if let Some(value) = avg_residual_return {
             avg_residual_values.push(value);
+        }
+        if let Some(value) = avg_excess_residual_return {
+            avg_excess_residual_values.push(value);
         }
         if let Some(spread) = top_bottom_spread {
             spread_values.push(spread);
@@ -818,6 +833,7 @@ pub fn calc_rule_layer_metrics(
     }
 
     let avg_residual_mean = mean(&avg_residual_values);
+    let avg_excess_residual_mean = mean(&avg_excess_residual_values);
     let spread_mean = mean(&spread_values);
     let ic_mean = mean(&ic_values);
     let ic_std = sample_std(&ic_values);
@@ -830,6 +846,7 @@ pub fn calc_rule_layer_metrics(
     Ok(RuleLayerMetrics {
         points,
         avg_residual_mean,
+        avg_excess_residual_mean,
         spread_mean,
         ic_mean,
         ic_std,
@@ -920,6 +937,12 @@ fn compute_rule_layer_from_day_groups(
             let point = if collect_metrics && rule_scores.len() >= config.min_samples_per_day {
                 let avg_rule_score = mean(&rule_scores);
                 let avg_residual_return = mean(&triggered_residuals);
+                let market_avg_residual_return = mean(&residuals);
+                let avg_excess_residual_return =
+                    match (avg_residual_return, market_avg_residual_return) {
+                        (Some(triggered_avg), Some(market_avg)) => Some(triggered_avg - market_avg),
+                        _ => None,
+                    };
                 let top_bottom_spread = calc_top_bottom_spread(&rule_scores, &residuals);
                 let ic = spearman_corr(&rule_scores, &residuals);
 
@@ -929,10 +952,12 @@ fn compute_rule_layer_from_day_groups(
                         sample_count: rule_scores.len(),
                         avg_rule_score,
                         avg_residual_return,
+                        avg_excess_residual_return,
                         top_bottom_spread,
                         ic,
                     },
                     avg_residual_return,
+                    avg_excess_residual_return,
                     top_bottom_spread,
                     ic,
                 ))
@@ -950,6 +975,7 @@ fn compute_rule_layer_from_day_groups(
 
     let mut points = Vec::with_capacity(day_results.len());
     let mut avg_residual_values = Vec::new();
+    let mut avg_excess_residual_values = Vec::new();
     let mut spread_values = Vec::new();
     let mut ic_values = Vec::new();
     let all_sample_count = day_results.iter().map(|item| item.all_samples.len()).sum();
@@ -961,9 +987,19 @@ fn compute_rule_layer_from_day_groups(
     let mut triggered_samples = Vec::with_capacity(triggered_sample_count);
 
     for item in day_results {
-        if let Some((point, avg_residual_return, top_bottom_spread, ic)) = item.point {
+        if let Some((
+            point,
+            avg_residual_return,
+            avg_excess_residual_return,
+            top_bottom_spread,
+            ic,
+        )) = item.point
+        {
             if let Some(value) = avg_residual_return {
                 avg_residual_values.push(value);
+            }
+            if let Some(value) = avg_excess_residual_return {
+                avg_excess_residual_values.push(value);
             }
             if let Some(spread) = top_bottom_spread {
                 spread_values.push(spread);
@@ -979,6 +1015,7 @@ fn compute_rule_layer_from_day_groups(
     }
 
     let avg_residual_mean = mean(&avg_residual_values);
+    let avg_excess_residual_mean = mean(&avg_excess_residual_values);
     let spread_mean = mean(&spread_values);
     let ic_mean = mean(&ic_values);
     let ic_std = sample_std(&ic_values);
@@ -992,6 +1029,7 @@ fn compute_rule_layer_from_day_groups(
         metrics: RuleLayerMetrics {
             points,
             avg_residual_mean,
+            avg_excess_residual_mean,
             spread_mean,
             ic_mean,
             ic_std,
@@ -1049,6 +1087,7 @@ fn empty_metrics() -> RuleLayerMetrics {
     RuleLayerMetrics {
         points: Vec::new(),
         avg_residual_mean: None,
+        avg_excess_residual_mean: None,
         spread_mean: None,
         ic_mean: None,
         ic_std: None,
@@ -1956,6 +1995,7 @@ mod tests {
         assert_eq!(p0.sample_count, 2);
         assert_opt_close(p0.avg_rule_score, Some(0.0));
         assert_opt_close(p0.avg_residual_return, Some(2.0));
+        assert_opt_close(p0.avg_excess_residual_return, Some(0.0));
         assert_opt_close(p0.top_bottom_spread, Some(2.0));
         assert_opt_close(p0.ic, Some(1.0));
 
@@ -1964,10 +2004,12 @@ mod tests {
         assert_eq!(p1.sample_count, 2);
         assert_opt_close(p1.avg_rule_score, Some(0.0));
         assert_opt_close(p1.avg_residual_return, Some(2.0));
+        assert_opt_close(p1.avg_excess_residual_return, Some(0.0));
         assert_opt_close(p1.top_bottom_spread, Some(6.0));
         assert_opt_close(p1.ic, Some(1.0));
 
         assert_opt_close(metrics.avg_residual_mean, Some(2.0));
+        assert_opt_close(metrics.avg_excess_residual_mean, Some(0.0));
         assert_opt_close(metrics.spread_mean, Some(4.0));
         assert_opt_close(metrics.ic_mean, Some(1.0));
         assert_opt_close(metrics.ic_std, Some(0.0));
@@ -2009,6 +2051,7 @@ mod tests {
         assert_eq!(p0.sample_count, 2);
         assert_opt_close(p0.avg_rule_score, Some(0.0));
         assert_eq!(p0.avg_residual_return, None);
+        assert_eq!(p0.avg_excess_residual_return, None);
         assert_eq!(p0.top_bottom_spread, None);
         assert_eq!(p0.ic, None);
 
@@ -2017,10 +2060,12 @@ mod tests {
         assert_eq!(p1.sample_count, 2);
         assert_opt_close(p1.avg_rule_score, Some(0.0));
         assert_eq!(p1.avg_residual_return, None);
+        assert_eq!(p1.avg_excess_residual_return, None);
         assert_eq!(p1.top_bottom_spread, None);
         assert_eq!(p1.ic, None);
 
         assert_eq!(metrics.avg_residual_mean, None);
+        assert_eq!(metrics.avg_excess_residual_mean, None);
         assert_eq!(metrics.spread_mean, None);
         assert_eq!(metrics.ic_mean, None);
     }
@@ -2139,15 +2184,24 @@ mod tests {
             full_samples.metrics.points[0].avg_residual_return,
             Some(3.0),
         );
+        assert_opt_close(
+            full_samples.metrics.points[0].avg_excess_residual_return,
+            Some(1.0),
+        );
         assert_opt_close(full_samples.metrics.points[0].top_bottom_spread, Some(2.0));
         assert_opt_close(full_samples.metrics.points[0].ic, Some(1.0));
         assert_eq!(full_samples.metrics.points[1].trade_date, "20240103");
         assert_eq!(full_samples.metrics.points[1].sample_count, 2);
         assert_opt_close(full_samples.metrics.points[1].avg_rule_score, Some(0.0));
         assert_eq!(full_samples.metrics.points[1].avg_residual_return, None);
+        assert_eq!(
+            full_samples.metrics.points[1].avg_excess_residual_return,
+            None
+        );
         assert_eq!(full_samples.metrics.points[1].top_bottom_spread, None);
         assert_eq!(full_samples.metrics.points[1].ic, None);
         assert_opt_close(full_samples.metrics.avg_residual_mean, Some(3.0));
+        assert_opt_close(full_samples.metrics.avg_excess_residual_mean, Some(1.0));
         assert_opt_close(full_samples.metrics.spread_mean, Some(2.0));
         assert_opt_close(full_samples.metrics.ic_mean, Some(1.0));
         assert_eq!(full_samples.samples.len(), 4);
