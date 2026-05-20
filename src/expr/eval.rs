@@ -22,6 +22,239 @@ fn to_num(b: bool) -> f64 {
 }
 
 impl Runtime {
+    fn dynamic_limit(&mut self, arg: &Expr, fn_name: &str) -> Result<usize, EvalErr> {
+        let limit = Value::as_num(&self.eval_expr(arg)?)?;
+        if !limit.is_finite() || limit <= 0.0 {
+            return Err(EvalErr {
+                msg: format!("{fn_name}动态周期上限必须是正数"),
+            });
+        }
+        Ok(limit as usize)
+    }
+
+    fn dynamic_period_series(
+        &self,
+        period: Value,
+        len: usize,
+        max_period: usize,
+        min_period: usize,
+    ) -> Result<Vec<Option<usize>>, EvalErr> {
+        let period_series = Value::as_num_series(&period, len)?;
+        Ok(period_series
+            .into_iter()
+            .map(|value| {
+                let value = value?;
+                if !value.is_finite() {
+                    return None;
+                }
+
+                let period = if value as i64 <= 0 {
+                    min_period
+                } else {
+                    value as usize
+                };
+                Some(period.min(max_period))
+            })
+            .collect())
+    }
+
+    fn dynamic_num_window_args(
+        &mut self,
+        args: &[Expr],
+        fn_name: &str,
+    ) -> Result<(Vec<Option<f64>>, Vec<Option<usize>>, usize), EvalErr> {
+        if args.len() != 3 {
+            return Err(EvalErr {
+                msg: format!("{fn_name}需要三个参数"),
+            });
+        }
+
+        let value = self.eval_expr(&args[0])?;
+        let period = self.eval_expr(&args[1])?;
+        let len = Value::len_of(&value).max(Value::len_of(&period));
+        let value_series = Value::as_num_series(&value, len)?;
+        let max_period = self.dynamic_limit(&args[2], fn_name)?;
+        let period_series = self.dynamic_period_series(period, len, max_period, 1)?;
+
+        Ok((value_series, period_series, len))
+    }
+
+    fn impl_extremed(
+        &mut self,
+        args: &[Expr],
+        fn_name: &str,
+        greater: bool,
+    ) -> Result<Value, EvalErr> {
+        let (num_series, period_series, len) = self.dynamic_num_window_args(args, fn_name)?;
+        let mut out = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let Some(period) = period_series[i] else {
+                out.push(None);
+                continue;
+            };
+            if i + 1 < period {
+                out.push(None);
+                continue;
+            }
+
+            let start = i + 1 - period;
+            let mut best = match num_series[start] {
+                Some(v) => v,
+                None => {
+                    out.push(None);
+                    continue;
+                }
+            };
+
+            for value in num_series.iter().take(i + 1).skip(start) {
+                if let Some(value) = value {
+                    if (greater && *value > best) || (!greater && *value < best) {
+                        best = *value;
+                    }
+                }
+            }
+            out.push(Some(best));
+        }
+
+        Ok(Value::NumSeries(out))
+    }
+
+    fn impl_window_sumd(&mut self, args: &[Expr], average: bool) -> Result<Value, EvalErr> {
+        let (num_series, period_series, len) =
+            self.dynamic_num_window_args(args, if average { "MAD" } else { "SUMD" })?;
+        let mut out = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let Some(period) = period_series[i] else {
+                out.push(None);
+                continue;
+            };
+            if i + 1 < period {
+                out.push(None);
+                continue;
+            }
+
+            let start = i + 1 - period;
+            let mut sum = 0.0;
+            let mut has_none = false;
+            for value in num_series.iter().take(i + 1).skip(start) {
+                match value {
+                    Some(value) => sum += value,
+                    None => {
+                        has_none = true;
+                        break;
+                    }
+                }
+            }
+
+            if has_none {
+                out.push(None);
+            } else if average {
+                out.push(Some(sum / period as f64));
+            } else {
+                out.push(Some(sum));
+            }
+        }
+
+        Ok(Value::NumSeries(out))
+    }
+
+    fn impl_stdd(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
+        let (num_series, period_series, len) = self.dynamic_num_window_args(args, "STDD")?;
+        let mut out = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let Some(period) = period_series[i] else {
+                out.push(None);
+                continue;
+            };
+            if i + 1 < period {
+                out.push(None);
+                continue;
+            }
+
+            let start = i + 1 - period;
+            let mut sum = 0.0;
+            let mut has_none = false;
+            for value in num_series.iter().take(i + 1).skip(start) {
+                match value {
+                    Some(value) => sum += value,
+                    None => {
+                        has_none = true;
+                        break;
+                    }
+                }
+            }
+            if has_none {
+                out.push(None);
+                continue;
+            }
+
+            let mean = sum / period as f64;
+            let mut sum_sq = 0.0;
+            for value in num_series.iter().take(i + 1).skip(start) {
+                if let Some(value) = value {
+                    sum_sq += (value - mean).powi(2);
+                }
+            }
+            out.push(Some((sum_sq / period as f64).sqrt()));
+        }
+
+        Ok(Value::NumSeries(out))
+    }
+
+    fn impl_rankd(
+        &mut self,
+        args: &[Expr],
+        fn_name: &str,
+        greater_first: bool,
+    ) -> Result<Value, EvalErr> {
+        let (num_series, period_series, len) = self.dynamic_num_window_args(args, fn_name)?;
+        let mut out = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let Some(period) = period_series[i] else {
+                out.push(None);
+                continue;
+            };
+            if i + 1 < period {
+                out.push(None);
+                continue;
+            }
+
+            let start = i + 1 - period;
+            let curr = match num_series[i] {
+                Some(v) => v,
+                None => {
+                    out.push(None);
+                    continue;
+                }
+            };
+            let mut count = 1usize;
+            let mut bad = false;
+            for history in num_series.iter().take(i).skip(start) {
+                let Some(history) = history else {
+                    bad = true;
+                    break;
+                };
+                if (greater_first && (*history > curr + EPS || (*history - curr).abs() <= EPS))
+                    || (!greater_first && (*history < curr - EPS || (*history - curr).abs() <= EPS))
+                {
+                    count += 1;
+                }
+            }
+
+            if bad {
+                out.push(None);
+            } else {
+                out.push(Some(count as f64));
+            }
+        }
+
+        Ok(Value::NumSeries(out))
+    }
+
     fn impl_abs(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
         if args.len() != 1 {
             return Err(EvalErr {
@@ -42,6 +275,40 @@ impl Runtime {
         for x in vs.iter().take(len) {
             out.push(x.map(|x| x.abs()));
         }
+        Ok(Value::NumSeries(out))
+    }
+
+    fn impl_countd(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
+        if args.len() != 3 {
+            return Err(EvalErr {
+                msg: "COUNTD需要三个参数".to_string(),
+            });
+        }
+
+        let cond = self.eval_expr(&args[0])?;
+        let period = self.eval_expr(&args[1])?;
+        let len = Value::len_of(&cond).max(Value::len_of(&period));
+        let cond_series = Value::as_bool_series(&cond, len)?;
+        let max_period = self.dynamic_limit(&args[2], "COUNTD")?;
+        let period_series = self.dynamic_period_series(period, len, max_period, 1)?;
+
+        let mut prefix = Vec::with_capacity(len + 1);
+        prefix.push(0usize);
+        for hit in &cond_series {
+            let next = prefix.last().copied().unwrap_or(0) + usize::from(*hit);
+            prefix.push(next);
+        }
+
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            let Some(period) = period_series[i] else {
+                out.push(None);
+                continue;
+            };
+            let start = (i + 1).saturating_sub(period);
+            out.push(Some((prefix[i + 1] - prefix[start]) as f64));
+        }
+
         Ok(Value::NumSeries(out))
     }
 
@@ -67,6 +334,36 @@ impl Runtime {
         Ok(Value::NumSeries(out))
     }
 
+    fn impl_refd(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
+        if args.len() != 3 {
+            return Err(EvalErr {
+                msg: "REFD需要三个参数".to_string(),
+            });
+        }
+
+        let v = self.eval_expr(&args[0])?;
+        let period = self.eval_expr(&args[1])?;
+        let len = Value::len_of(&v).max(Value::len_of(&period));
+        let num_series = Value::as_num_series(&v, len)?;
+        let max_period = self.dynamic_limit(&args[2], "REFD")?;
+        let period_series = self.dynamic_period_series(period, len, max_period, 0)?;
+        let mut out = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let Some(period) = period_series[i] else {
+                out.push(None);
+                continue;
+            };
+            if i < period {
+                out.push(None);
+            } else {
+                out.push(num_series[i - period]);
+            }
+        }
+
+        Ok(Value::NumSeries(out))
+    }
+
     fn impl_min(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
         if args.len() != 2 {
             return Err(EvalErr {
@@ -87,6 +384,14 @@ impl Runtime {
             }
         }
         Ok(Value::NumSeries(out))
+    }
+
+    fn impl_hhvd(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
+        self.impl_extremed(args, "HHVD", true)
+    }
+
+    fn impl_llvd(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
+        self.impl_extremed(args, "LLVD", false)
     }
 
     fn impl_div(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
@@ -694,6 +999,81 @@ impl Runtime {
         Ok(Value::NumSeries(out))
     }
 
+    fn impl_rsvd(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
+        if args.len() != 5 {
+            return Err(EvalErr {
+                msg: "RSVD需要五个参数".to_string(),
+            });
+        }
+
+        let c = self.eval_expr(&args[0])?;
+        let h = self.eval_expr(&args[1])?;
+        let l = self.eval_expr(&args[2])?;
+        let period = self.eval_expr(&args[3])?;
+        let len = Value::len_of(&c)
+            .max(Value::len_of(&h))
+            .max(Value::len_of(&l))
+            .max(Value::len_of(&period));
+        let c_s = Value::as_num_series(&c, len)?;
+        let h_s = Value::as_num_series(&h, len)?;
+        let l_s = Value::as_num_series(&l, len)?;
+        let max_period = self.dynamic_limit(&args[4], "RSVD")?;
+        let period_series = self.dynamic_period_series(period, len, max_period, 1)?;
+        let mut out = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let Some(period) = period_series[i] else {
+                out.push(None);
+                continue;
+            };
+            if i + 1 < period {
+                out.push(None);
+                continue;
+            }
+            let start = i + 1 - period;
+            let c = match c_s[i] {
+                Some(v) => v,
+                None => {
+                    out.push(None);
+                    continue;
+                }
+            };
+
+            let mut llv = f64::INFINITY;
+            let mut hhv = f64::NEG_INFINITY;
+            let mut bad = false;
+            for j in start..=i {
+                match (l_s[j], h_s[j]) {
+                    (Some(l), Some(h)) => {
+                        if l < llv {
+                            llv = l;
+                        }
+                        if h > hhv {
+                            hhv = h;
+                        }
+                    }
+                    _ => {
+                        bad = true;
+                        break;
+                    }
+                }
+            }
+            if bad {
+                out.push(None);
+                continue;
+            }
+
+            let den = hhv - llv;
+            if den.abs() < EPS {
+                out.push(Some(0.0));
+            } else {
+                out.push(Some(100.0 * (c - llv) / den));
+            }
+        }
+
+        Ok(Value::NumSeries(out))
+    }
+
     fn impl_grank(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
         // 大数字排在前面
         if args.len() != 2 {
@@ -821,12 +1201,97 @@ impl Runtime {
         Ok(Value::NumSeries(out))
     }
 
+    fn impl_rank_topcountd(
+        &mut self,
+        args: &[Expr],
+        greater_first: bool,
+        fn_name: &str,
+    ) -> Result<Value, EvalErr> {
+        if args.len() != 5 {
+            return Err(EvalErr {
+                msg: format!("{fn_name}需要五个参数"),
+            });
+        }
+
+        let value = self.eval_expr(&args[0])?;
+        let cond = self.eval_expr(&args[1])?;
+        let period = self.eval_expr(&args[2])?;
+        let len = Value::len_of(&value)
+            .max(Value::len_of(&cond))
+            .max(Value::len_of(&period));
+        let value_series = Value::as_num_series(&value, len)?;
+        let cond_series = Value::as_bool_series(&cond, len)?;
+        let max_period = self.dynamic_limit(&args[4], fn_name)?;
+        let period_series = self.dynamic_period_series(period, len, max_period, 1)?;
+        let ori_topn = Value::as_num(&self.eval_expr(&args[3])?)?;
+        let std_topn = if ori_topn as i64 <= 0 {
+            1
+        } else {
+            ori_topn as usize
+        };
+
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            let Some(period) = period_series[i] else {
+                out.push(None);
+                continue;
+            };
+            if i + 1 < period {
+                out.push(None);
+                continue;
+            }
+
+            let start = i + 1 - period;
+            let mut rows: Vec<(usize, f64, bool)> = Vec::with_capacity(period);
+            let mut has_none = false;
+            for j in start..=i {
+                match value_series[j] {
+                    Some(v) => rows.push((j, v, cond_series[j])),
+                    None => {
+                        has_none = true;
+                        break;
+                    }
+                }
+            }
+            if has_none {
+                out.push(None);
+                continue;
+            }
+
+            rows.sort_by(|a, b| {
+                let primary = if greater_first {
+                    b.1.partial_cmp(&a.1)
+                } else {
+                    a.1.partial_cmp(&b.1)
+                };
+
+                primary
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.0.cmp(&a.0))
+            });
+
+            let keep_n = rows.len().min(std_topn);
+            let hit_count = rows.iter().take(keep_n).filter(|(_, _, ok)| *ok).count();
+            out.push(Some(hit_count as f64));
+        }
+
+        Ok(Value::NumSeries(out))
+    }
+
     fn impl_gtopcount(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
         self.impl_rank_topcount(args, true, "GTOPCOUNT")
     }
 
     fn impl_ltopcount(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
         self.impl_rank_topcount(args, false, "LTOPCOUNT")
+    }
+
+    fn impl_gtopcountd(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
+        self.impl_rank_topcountd(args, true, "GTOPCOUNTD")
+    }
+
+    fn impl_ltopcountd(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
+        self.impl_rank_topcountd(args, false, "LTOPCOUNTD")
     }
 
     fn impl_lrank(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
@@ -909,6 +1374,43 @@ impl Runtime {
 
         Ok(Value::NumSeries(out))
     }
+
+    fn impl_getd(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
+        if args.len() != 4 {
+            return Err(EvalErr {
+                msg: "GETD需要四个参数".to_string(),
+            });
+        }
+
+        let cond = self.eval_expr(&args[0])?;
+        let v = self.eval_expr(&args[1])?;
+        let period = self.eval_expr(&args[2])?;
+        let len = Value::len_of(&cond)
+            .max(Value::len_of(&v))
+            .max(Value::len_of(&period));
+        let cond_series = Value::as_bool_series(&cond, len)?;
+        let v_series = Value::as_num_series(&v, len)?;
+        let max_period = self.dynamic_limit(&args[3], "GETD")?;
+        let period_series = self.dynamic_period_series(period, len, max_period, 1)?;
+        let mut out = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let Some(period) = period_series[i] else {
+                out.push(None);
+                continue;
+            };
+            let start = i.saturating_sub(period);
+            let mut last = None;
+            for j in start..i {
+                if cond_series[j] {
+                    last = v_series[j];
+                }
+            }
+            out.push(last);
+        }
+
+        Ok(Value::NumSeries(out))
+    }
 }
 
 impl Runtime {
@@ -938,24 +1440,37 @@ impl Runtime {
             "MIN" => Ok(self.impl_min(args)?),
             "DIV" => Ok(self.impl_div(args)?),
             "HHV" => Ok(self.impl_hhv(args)?),
+            "HHVD" => Ok(self.impl_hhvd(args)?),
             "LLV" => Ok(self.impl_llv(args)?),
+            "LLVD" => Ok(self.impl_llvd(args)?),
             "COUNT" => Ok(self.impl_count(args)?),
+            "COUNTD" => Ok(self.impl_countd(args)?),
             "MA" => Ok(self.impl_ma(args)?),
+            "MAD" => Ok(self.impl_window_sumd(args, true)?),
             "REF" => Ok(self.impl_ref(args)?),
+            "REFD" => Ok(self.impl_refd(args)?),
             "LAST" => Ok(self.impl_last(args)?),
             "SUM" => Ok(self.impl_sum(args)?),
+            "SUMD" => Ok(self.impl_window_sumd(args, false)?),
             "STD" => Ok(self.impl_std(args)?),
+            "STDD" => Ok(self.impl_stdd(args)?),
             "IF" => Ok(self.impl_if(args)?),
             "CROSS" => Ok(self.impl_cross(args)?),
             "EMA" => Ok(self.impl_ema(args)?),
             "SMA" => Ok(self.impl_sma(args)?),
             "BARSLAST" => Ok(self.impl_barslast(args)?),
             "RSV" => Ok(self.impl_rsv(args)?),
+            "RSVD" => Ok(self.impl_rsvd(args)?),
             "GRANK" => Ok(self.impl_grank(args)?),
+            "GRANKD" => Ok(self.impl_rankd(args, "GRANKD", true)?),
             "GTOPCOUNT" => Ok(self.impl_gtopcount(args)?),
+            "GTOPCOUNTD" => Ok(self.impl_gtopcountd(args)?),
             "LTOPCOUNT" => Ok(self.impl_ltopcount(args)?),
+            "LTOPCOUNTD" => Ok(self.impl_ltopcountd(args)?),
             "LRANK" => Ok(self.impl_lrank(args)?),
+            "LRANKD" => Ok(self.impl_rankd(args, "LRANKD", false)?),
             "GET" => Ok(self.impl_get(args)?),
+            "GETD" => Ok(self.impl_getd(args)?),
 
             other => Err(EvalErr {
                 msg: format!("未定义函数:{:?}", other),
@@ -1536,5 +2051,95 @@ fn in_range_accepts_expression_bounds() {
     assert_eq!(
         out,
         Value::BoolSeries(vec![false, false, true, false, true])
+    );
+}
+
+#[test]
+fn refd_uses_per_bar_offsets_and_keeps_undefined_periods_empty() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let expr = "GAP := REF(BARSLAST(C > 3), 1); REFD(H, GAP + 1, 5);";
+    let toks = lex_all(expr);
+    let mut p = Parser::new(toks);
+    let stmts = p.parse_main().expect("parse failed");
+    let mut rt = Runtime::default();
+
+    rt.vars.insert(
+        "C".to_string(),
+        Value::NumSeries(vec![Some(1.0), Some(2.0), Some(4.0), Some(1.0), Some(1.0)]),
+    );
+    rt.vars.insert(
+        "H".to_string(),
+        Value::NumSeries(vec![
+            Some(10.0),
+            Some(20.0),
+            Some(30.0),
+            Some(40.0),
+            Some(50.0),
+        ]),
+    );
+
+    let out = rt.eval_program(&stmts).expect("eval failed");
+    assert_eq!(
+        out,
+        Value::NumSeries(vec![None, None, None, Some(30.0), Some(30.0)])
+    );
+}
+
+#[test]
+fn countd_uses_dynamic_windows_with_runtime_cap() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let expr = "COUNTD(C > 0, N, 3);";
+    let toks = lex_all(expr);
+    let mut p = Parser::new(toks);
+    let stmts = p.parse_main().expect("parse failed");
+    let mut rt = Runtime::default();
+
+    rt.vars.insert(
+        "C".to_string(),
+        Value::NumSeries(vec![Some(1.0), Some(1.0), Some(1.0), Some(1.0), Some(1.0)]),
+    );
+    rt.vars.insert(
+        "N".to_string(),
+        Value::NumSeries(vec![
+            Some(1.0),
+            Some(2.0),
+            Some(3.0),
+            Some(4.0),
+            Some(f64::NAN),
+        ]),
+    );
+
+    let out = rt.eval_program(&stmts).expect("eval failed");
+    assert_eq!(
+        out,
+        Value::NumSeries(vec![Some(1.0), Some(2.0), Some(3.0), Some(3.0), None])
+    );
+}
+
+#[test]
+fn hhvd_uses_dynamic_windows_with_runtime_cap() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let expr = "HHVD(C, N, 3);";
+    let toks = lex_all(expr);
+    let mut p = Parser::new(toks);
+    let stmts = p.parse_main().expect("parse failed");
+    let mut rt = Runtime::default();
+
+    rt.vars.insert(
+        "C".to_string(),
+        Value::NumSeries(vec![Some(1.0), Some(5.0), Some(3.0), Some(4.0), Some(2.0)]),
+    );
+    rt.vars.insert(
+        "N".to_string(),
+        Value::NumSeries(vec![Some(1.0), Some(2.0), Some(3.0), Some(2.0), Some(4.0)]),
+    );
+
+    let out = rt.eval_program(&stmts).expect("eval failed");
+    assert_eq!(
+        out,
+        Value::NumSeries(vec![Some(1.0), Some(5.0), Some(5.0), Some(4.0), Some(4.0)])
     );
 }

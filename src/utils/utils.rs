@@ -49,6 +49,30 @@ pub fn eval_binary_for_warmup(
     Ok(Some(out))
 }
 
+fn eval_dynamic_max_for_warmup(
+    fn_name: &str,
+    expr: Expr,
+    consts: &HashMap<String, usize>,
+) -> Result<usize, String> {
+    let value = match expr {
+        Expr::Number(v) => v,
+        Expr::Ident(ident) => consts
+            .get(&ident)
+            .copied()
+            .map(|v| v as f64)
+            .ok_or_else(|| format!("{fn_name}动态周期上限必须是常量"))?,
+        Expr::Binary { op, lhs, rhs } => eval_binary_for_warmup(&op, &lhs, &rhs, consts)?
+            .ok_or_else(|| format!("{fn_name}动态周期上限必须是常量"))?,
+        _ => return Err(format!("{fn_name}动态周期上限必须是常量")),
+    };
+
+    if !value.is_finite() || value <= 0.0 {
+        return Err(format!("{fn_name}动态周期上限必须是正数"));
+    }
+
+    Ok(value as usize)
+}
+
 pub fn impl_expr_warmup(
     expr: Expr,
     locals: &HashMap<String, usize>,
@@ -128,6 +152,67 @@ pub fn impl_expr_warmup(
                     };
 
                     max_need = (src_need + win_need).saturating_sub(1);
+                }
+                "REFD" => {
+                    let mut it = args.into_iter();
+                    let src = it
+                        .next()
+                        .ok_or_else(|| format!("{name}缺少第1个参数: src"))?;
+                    let win = it
+                        .next()
+                        .ok_or_else(|| format!("{name}缺少第2个参数: win"))?;
+                    let max_win = it
+                        .next()
+                        .ok_or_else(|| format!("{name}缺少第3个参数: max_win"))?;
+
+                    let src_need = impl_expr_warmup(src, locals, consts)?;
+                    let win_need = impl_expr_warmup(win, locals, consts)?;
+                    let max_win = eval_dynamic_max_for_warmup(&name, max_win, consts)?;
+
+                    max_need = win_need.max(src_need + max_win);
+                }
+                "HHVD" | "LLVD" | "MAD" | "SUMD" | "STDD" | "COUNTD" | "LRANKD" | "GRANKD" => {
+                    let mut it = args.into_iter();
+                    let src = it
+                        .next()
+                        .ok_or_else(|| format!("{name}缺少第1个参数: src"))?;
+                    let win = it
+                        .next()
+                        .ok_or_else(|| format!("{name}缺少第2个参数: win"))?;
+                    let max_win = it
+                        .next()
+                        .ok_or_else(|| format!("{name}缺少第3个参数: max_win"))?;
+
+                    let src_need = impl_expr_warmup(src, locals, consts)?;
+                    let win_need = impl_expr_warmup(win, locals, consts)?;
+                    let max_win = eval_dynamic_max_for_warmup(&name, max_win, consts)?;
+
+                    max_need = win_need.max(src_need + max_win.saturating_sub(1));
+                }
+                "GTOPCOUNTD" | "LTOPCOUNTD" => {
+                    let mut it = args.into_iter();
+                    let value = it
+                        .next()
+                        .ok_or_else(|| format!("{name}缺少第1个参数: value"))?;
+                    let cond = it
+                        .next()
+                        .ok_or_else(|| format!("{name}缺少第2个参数: cond"))?;
+                    let win = it
+                        .next()
+                        .ok_or_else(|| format!("{name}缺少第3个参数: win"))?;
+                    let _topn = it
+                        .next()
+                        .ok_or_else(|| format!("{name}缺少第4个参数: topn"))?;
+                    let max_win = it
+                        .next()
+                        .ok_or_else(|| format!("{name}缺少第5个参数: max_win"))?;
+
+                    let value_need = impl_expr_warmup(value, locals, consts)?;
+                    let cond_need = impl_expr_warmup(cond, locals, consts)?;
+                    let win_need = impl_expr_warmup(win, locals, consts)?;
+                    let max_win = eval_dynamic_max_for_warmup(&name, max_win, consts)?;
+
+                    max_need = win_need.max(value_need.max(cond_need) + max_win.saturating_sub(1));
                 }
                 "GTOPCOUNT" | "LTOPCOUNT" => {
                     let mut it = args.into_iter();
@@ -212,6 +297,28 @@ pub fn impl_expr_warmup(
                         _ => return Err("GET参数warmup解析错误".to_string()),
                     };
                     max_need = cond_need.max(value_need) + win_need;
+                }
+                "GETD" => {
+                    let mut it = args.into_iter();
+                    let cond = it
+                        .next()
+                        .ok_or_else(|| format!("{name}缺少第1个参数: cond"))?;
+                    let value = it
+                        .next()
+                        .ok_or_else(|| format!("{name}缺少第2个参数: value"))?;
+                    let win = it
+                        .next()
+                        .ok_or_else(|| format!("{name}缺少第3个参数: win"))?;
+                    let max_win = it
+                        .next()
+                        .ok_or_else(|| format!("{name}缺少第4个参数: max_win"))?;
+
+                    let cond_need = impl_expr_warmup(cond, locals, consts)?;
+                    let value_need = impl_expr_warmup(value, locals, consts)?;
+                    let win_need = impl_expr_warmup(win, locals, consts)?;
+                    let max_win = eval_dynamic_max_for_warmup(&name, max_win, consts)?;
+
+                    max_need = win_need.max(cond_need.max(value_need) + max_win);
                 }
                 "ABS" => {
                     let mut it = args.into_iter();
@@ -305,6 +412,27 @@ pub fn impl_expr_warmup(
 
                     max_need = c_need.max(h_need.max(l_need) + win_need.saturating_sub(1));
                 }
+                "RSVD" => {
+                    let mut it = args.into_iter();
+                    let c = it.next().ok_or_else(|| format!("{name}缺少第1个参数: c"))?;
+                    let h = it.next().ok_or_else(|| format!("{name}缺少第2个参数: h"))?;
+                    let l = it.next().ok_or_else(|| format!("{name}缺少第3个参数: l"))?;
+                    let win = it
+                        .next()
+                        .ok_or_else(|| format!("{name}缺少第4个参数: win"))?;
+                    let max_win = it
+                        .next()
+                        .ok_or_else(|| format!("{name}缺少第5个参数: max_win"))?;
+
+                    let c_need = impl_expr_warmup(c, locals, consts)?;
+                    let h_need = impl_expr_warmup(h, locals, consts)?;
+                    let l_need = impl_expr_warmup(l, locals, consts)?;
+                    let win_need = impl_expr_warmup(win, locals, consts)?;
+                    let max_win = eval_dynamic_max_for_warmup(&name, max_win, consts)?;
+
+                    max_need =
+                        win_need.max(c_need.max(h_need.max(l_need) + max_win.saturating_sub(1)));
+                }
 
                 _ => {}
             }
@@ -355,4 +483,64 @@ pub fn board_category(ts_code: &str, stock_name: Option<&str>) -> &'static str {
         return "主板";
     }
     "其他"
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::expr::parser::{Expr, Parser, Stmt, lex_all};
+
+    use super::{eval_binary_for_warmup, impl_expr_warmup};
+
+    fn estimate_program_warmup(expr: &str) -> usize {
+        let mut parser = Parser::new(lex_all(expr));
+        let stmts = parser.parse_main().expect("parse should succeed");
+        let mut locals = HashMap::new();
+        let mut consts: HashMap<String, usize> = HashMap::new();
+        let mut expr_need = 0usize;
+
+        for stmt in stmts.item {
+            match stmt {
+                Stmt::Assign { name, value } => match value {
+                    Expr::Number(v) => {
+                        consts.insert(name, v as usize);
+                    }
+                    Expr::Binary { op, lhs, rhs } => {
+                        if let Some(out) = eval_binary_for_warmup(&op, &lhs, &rhs, &consts)
+                            .expect("const warmup should evaluate")
+                        {
+                            consts.insert(name, out as usize);
+                        } else {
+                            let need =
+                                impl_expr_warmup(Expr::Binary { op, lhs, rhs }, &locals, &consts)
+                                    .expect("warmup should evaluate");
+                            locals.insert(name, need);
+                        }
+                    }
+                    other => {
+                        let need = impl_expr_warmup(other, &locals, &consts)
+                            .expect("warmup should evaluate");
+                        locals.insert(name, need);
+                    }
+                },
+                Stmt::Expr(expr) => {
+                    expr_need = expr_need.max(
+                        impl_expr_warmup(expr, &locals, &consts).expect("warmup should evaluate"),
+                    );
+                }
+            }
+        }
+
+        expr_need
+    }
+
+    #[test]
+    fn dynamic_functions_use_explicit_max_for_warmup() {
+        let expr = "GAP := REF(BARSLAST(C > 1), 1); REFD(H, GAP + 1, 20);";
+        assert_eq!(estimate_program_warmup(expr), 20);
+
+        let expr = "GAP := REF(BARSLAST(C > 1), 1); COUNTD(REF(C > 1, 1), GAP, 10);";
+        assert_eq!(estimate_program_warmup(expr), 10);
+    }
 }

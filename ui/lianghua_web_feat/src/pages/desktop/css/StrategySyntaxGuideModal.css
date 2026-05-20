@@ -54,6 +54,18 @@
   font-size: 15px;
 }
 
+.strategy-syntax-guide-subsection {
+  display: grid;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.strategy-syntax-guide-subsection h5 {
+  margin: 0;
+  color: #374151;
+  font-size: 13px;
+}
+
 .strategy-syntax-guide-code {
   margin: 0;
   border: 1px solid #e4eaf2;

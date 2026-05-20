@@ -22,6 +22,13 @@ type SyntaxGuideFieldSection = {
   fields: SyntaxGuideField[]
 }
 
+type SyntaxGuideDynamicFunction = {
+  group: string
+  functions: string
+  signature: string
+  meaning: string
+}
+
 const SYNTAX_GUIDE_FUNCTIONS: SyntaxGuideFunction[] = [
   { name: 'ABS', signature: 'ABS(x)', returns: '数值序列', description: '取绝对值。', example: '输入 [-2, 3] -> 输出 [2, 3]' },
   { name: 'MAX', signature: 'MAX(a, b)', returns: '数值序列', description: '逐项取较大值。', example: 'a=[1,5], b=[2,3] -> [2,5]' },
@@ -40,12 +47,19 @@ const SYNTAX_GUIDE_FUNCTIONS: SyntaxGuideFunction[] = [
   { name: 'EMA', signature: 'EMA(x, n)', returns: '数值序列', description: '指数移动平均。', example: 'x=[1,2,3], n=3 -> [1,1.5,2.25]' },
   { name: 'SMA', signature: 'SMA(x, n, m)', returns: '数值序列', description: '平滑移动平均，权重约为 m / n。', example: 'x=[1,2,3], n=3, m=1 -> [1,1.33,1.89]' },
   { name: 'BARSLAST', signature: 'BARSLAST(cond)', returns: '数值序列', description: '距离上一次 cond 成立已经过去几根；首次命中前为空。', example: 'cond=[假,真,假,假,真] -> [空,0,1,2,0]' },
-  { name: 'RSV', signature: 'RSV(C, H, L, n)', returns: '数值序列', description: '最近 n 根 RSV，常用于 KDJ。', example: 'C=[8,9,10], H=[10,11,12], L=[6,7,8], n=3 -> [空,空,66.67]' },
+  { name: 'RSV', signature: 'RSV(C, H, L, n)', returns: '数值序列', description: '最近 n 根内先取最高价 HHV(H,n) 和最低价 LLV(L,n)，再按 (C-LLV)/(HHV-LLV)*100 逐根计算；分母为 0 时返回 0。', example: 'C=[8,9,10], H=[10,11,12], L=[6,7,8], n=3 -> [空,空,66.67]' },
   { name: 'GRANK', signature: 'GRANK(x, n)', returns: '数值序列', description: '最近 n 根里，当前值按从大到小的排名；1 表示最大。', example: 'x=[1,4,2], n=3 -> [空,空,2]' },
   { name: 'LRANK', signature: 'LRANK(x, n)', returns: '数值序列', description: '最近 n 根里，当前值按从小到大的排名；1 表示最小。', example: 'x=[3,2,1], n=3 -> [空,空,1]' },
   { name: 'GTOPCOUNT', signature: 'GTOPCOUNT(x, cond, win, topn)', returns: '数值序列', description: '最近 win 根按 x 从大到小取前 topn，统计其中 cond 成立的个数。', example: 'x=[1,5,3], cond=[真,假,真], win=3, topn=2 -> [空,空,1]' },
   { name: 'LTOPCOUNT', signature: 'LTOPCOUNT(x, cond, win, topn)', returns: '数值序列', description: '最近 win 根按 x 从小到大取前 topn，统计其中 cond 成立的个数。', example: 'x=[1,5,3], cond=[真,假,真], win=3, topn=2 -> [空,空,2]' },
   { name: 'GET', signature: 'GET(cond, x, n)', returns: '数值序列', description: '向前回看最近 n 根，取最后一次 cond 成立时对应的 x；不包含当前这根。', example: '可写 GET(CROSS(C, MA(C, 5)), C, 20) 取最近一次上穿时的收盘价' },
+]
+
+const SYNTAX_GUIDE_DYNAMIC_FUNCTIONS: SyntaxGuideDynamicFunction[] = [
+  { group: '动态计数 / 引用', functions: 'COUNTD / REFD', signature: 'COUNTD(cond, win, max_win)；REFD(x, offset, max_offset)', meaning: 'win/offset 可以是数值序列，例如 GAP；第三个参数是动态值上限，也用于 warmup。' },
+  { group: '动态窗口统计', functions: 'HHVD / LLVD / MAD / SUMD / STDD', signature: '函数名(x, win, max_win)', meaning: '每根 K 线用当根 win 回看，分别计算最高、最低、均值、求和、标准差。' },
+  { group: '动态排名 / 取值', functions: 'GRANKD / LRANKD / GETD', signature: 'GRANKD(x, win, max_win)；GETD(cond, x, win, max_win)', meaning: '排名函数按动态 win 排序；GETD 在动态 win 内找最近一次条件成立对应的 x。' },
+  { group: '动态扩展指标', functions: 'RSVD / GTOPCOUNTD / LTOPCOUNTD', signature: 'RSVD(C,H,L,win,max_win)；GTOPCOUNTD(x,cond,win,topn,max_win)', meaning: 'RSVD 是动态窗口 RSV；TOPCOUNTD 在动态 win 内排序后取前 topn 统计条件次数。' },
 ]
 
 const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
@@ -210,6 +224,38 @@ IF(C > O, C - O, 0)`}</pre>
                 ))}
               </tbody>
             </table>
+          </div>
+          <div className="strategy-syntax-guide-subsection">
+            <h5>动态窗口 D 函数</h5>
+            <p>
+              D 函数用于“窗口/偏移本身也是序列”的场景，例如 <code>GAP := REF(BARSLAST(RED0), 1)</code> 后按每根 K 线自己的 GAP 回看。
+              写法会比普通函数多一个上限参数，运行时会把动态窗口截到该上限，查询 warmup 也按这个上限准备历史数据。
+            </p>
+            <div className="strategy-syntax-guide-table-wrap">
+              <table className="strategy-syntax-guide-table">
+                <thead>
+                  <tr>
+                    <th>类型</th>
+                    <th>函数</th>
+                    <th>新写法</th>
+                    <th>含义</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {SYNTAX_GUIDE_DYNAMIC_FUNCTIONS.map((item) => (
+                    <tr key={item.group}>
+                      <td>{item.group}</td>
+                      <td><code>{item.functions}</code></td>
+                      <td><code>{item.signature}</code></td>
+                      <td>{item.meaning}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <pre className="strategy-syntax-guide-code">{`GAP := REF(BARSLAST(RED0), 1);
+MID_OK := GAP > 4 AND COUNTD(REF(MID_STRONG, 1), GAP, 60) <= 1;
+PRE_H := REFD(H, GAP + 1, 60);`}</pre>
           </div>
         </section>
 
