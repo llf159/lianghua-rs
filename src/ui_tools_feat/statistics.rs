@@ -248,6 +248,7 @@ pub struct RuleLayerRuleSummary {
     pub point_count: usize,
     pub avg_residual_mean: Option<f64>,
     pub avg_excess_residual_mean: Option<f64>,
+    pub profit_loss_ratio: Option<f64>,
     pub spread_mean: Option<f64>,
     pub avg_contribution_score: Option<f64>,
     pub avg_contribution_per_trigger: Option<f64>,
@@ -273,6 +274,7 @@ pub struct RuleLayerBacktestData {
     pub points: Vec<RuleLayerPointPayload>,
     pub avg_residual_mean: Option<f64>,
     pub avg_excess_residual_mean: Option<f64>,
+    pub profit_loss_ratio: Option<f64>,
     pub spread_mean: Option<f64>,
     pub avg_contribution_score: Option<f64>,
     pub avg_contribution_per_trigger: Option<f64>,
@@ -2553,6 +2555,7 @@ fn build_rule_backtest_payload(
         points: Vec::new(),
         avg_residual_mean: metrics.avg_residual_mean,
         avg_excess_residual_mean: metrics.avg_excess_residual_mean,
+        profit_loss_ratio: metrics.profit_loss_ratio,
         spread_mean,
         avg_contribution_score: None,
         avg_contribution_per_trigger: None,
@@ -4596,10 +4599,12 @@ fn aggregate_all_rule_summary_metrics(
     Option<f64>,
     Option<f64>,
     Option<f64>,
+    Option<f64>,
 ) {
     let avg_residual_mean = weighted_rule_summary_metric(summaries, |item| item.avg_residual_mean);
     let avg_excess_residual_mean =
         weighted_rule_summary_metric(summaries, |item| item.avg_excess_residual_mean);
+    let profit_loss_ratio = weighted_rule_summary_metric(summaries, |item| item.profit_loss_ratio);
     let spread_mean = weighted_rule_summary_metric(summaries, |item| item.spread_mean);
     let ic_mean = weighted_rule_summary_metric(summaries, |item| item.ic_mean);
     let ic_std = weighted_rule_summary_metric(summaries, |item| item.ic_std);
@@ -4618,6 +4623,7 @@ fn aggregate_all_rule_summary_metrics(
     (
         avg_residual_mean,
         avg_excess_residual_mean,
+        profit_loss_ratio,
         spread_mean,
         ic_mean,
         ic_std,
@@ -4818,6 +4824,7 @@ fn run_rule_layer_backtest_core(
                 .collect(),
             avg_residual_mean: metrics.avg_residual_mean,
             avg_excess_residual_mean: metrics.avg_excess_residual_mean,
+            profit_loss_ratio: metrics.profit_loss_ratio,
             spread_mean: None,
             avg_contribution_score: None,
             avg_contribution_per_trigger: None,
@@ -4866,6 +4873,7 @@ fn run_rule_layer_backtest_core(
             point_count: metrics.points.len(),
             avg_residual_mean: metrics.avg_residual_mean,
             avg_excess_residual_mean: metrics.avg_excess_residual_mean,
+            profit_loss_ratio: metrics.profit_loss_ratio,
             spread_mean: None,
             avg_contribution_score: contribution_average.avg_contribution_score,
             avg_contribution_per_trigger: contribution_average.avg_contribution_per_trigger,
@@ -4877,9 +4885,9 @@ fn run_rule_layer_backtest_core(
     }
 
     all_rule_summaries.sort_by(|a, b| {
-        b.avg_residual_mean
+        b.profit_loss_ratio
             .unwrap_or(f64::NEG_INFINITY)
-            .partial_cmp(&a.avg_residual_mean.unwrap_or(f64::NEG_INFINITY))
+            .partial_cmp(&a.profit_loss_ratio.unwrap_or(f64::NEG_INFINITY))
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| b.point_count.cmp(&a.point_count))
             .then_with(|| a.rule_name.cmp(&b.rule_name))
@@ -4888,6 +4896,7 @@ fn run_rule_layer_backtest_core(
     let (
         avg_residual_mean,
         avg_excess_residual_mean,
+        profit_loss_ratio,
         _spread_mean,
         ic_mean,
         ic_std,
@@ -4910,6 +4919,7 @@ fn run_rule_layer_backtest_core(
         points: Vec::new(),
         avg_residual_mean,
         avg_excess_residual_mean,
+        profit_loss_ratio,
         spread_mean: None,
         avg_contribution_score: weighted_rule_summary_metric(&all_rule_summaries, |item| {
             item.avg_contribution_score
@@ -5327,6 +5337,7 @@ pub fn run_transient_rule_layer_backtest(
             point_count: metrics.points.len(),
             avg_residual_mean: metrics.avg_residual_mean,
             avg_excess_residual_mean: metrics.avg_excess_residual_mean,
+            profit_loss_ratio: metrics.profit_loss_ratio,
             spread_mean: None,
             avg_contribution_score: contribution_average.avg_contribution_score,
             avg_contribution_per_trigger: contribution_average.avg_contribution_per_trigger,
@@ -5337,9 +5348,9 @@ pub fn run_transient_rule_layer_backtest(
         });
     }
     all_rule_summaries.sort_by(|a, b| {
-        b.avg_residual_mean
+        b.profit_loss_ratio
             .unwrap_or(f64::NEG_INFINITY)
-            .partial_cmp(&a.avg_residual_mean.unwrap_or(f64::NEG_INFINITY))
+            .partial_cmp(&a.profit_loss_ratio.unwrap_or(f64::NEG_INFINITY))
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| b.point_count.cmp(&a.point_count))
             .then_with(|| a.rule_name.cmp(&b.rule_name))
@@ -5348,6 +5359,7 @@ pub fn run_transient_rule_layer_backtest(
     let (
         avg_residual_mean,
         avg_excess_residual_mean,
+        profit_loss_ratio,
         _spread_mean,
         ic_mean,
         ic_std,
@@ -5370,6 +5382,7 @@ pub fn run_transient_rule_layer_backtest(
         points: Vec::new(),
         avg_residual_mean,
         avg_excess_residual_mean,
+        profit_loss_ratio,
         spread_mean: None,
         avg_contribution_score: weighted_rule_summary_metric(&all_rule_summaries, |item| {
             item.avg_contribution_score

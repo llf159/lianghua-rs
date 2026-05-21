@@ -46,7 +46,7 @@ import "./css/SceneLayerBacktestPage.css";
 type RuleSummarySortKey =
   | "rule_name"
   | "point_count"
-  | "avg_residual_mean"
+  | "profit_loss_ratio"
   | "avg_excess_residual_mean"
   | "avg_contribution_score"
   | "avg_contribution_per_trigger"
@@ -61,7 +61,7 @@ type ValidationComboSortKey =
   | "triggered_days"
   | "avg_daily_trigger"
   | "spread_mean"
-  | "avg_residual_mean"
+  | "profit_loss_ratio"
   | "avg_excess_residual_mean"
   | "ic_mean"
   | "ic_t_value"
@@ -141,6 +141,13 @@ function formatRate(value?: number | null, digits = 1) {
     return "--";
   }
   return `${(value * 100).toFixed(digits)}%`;
+}
+
+function formatProfitLossRatio(value?: number | null, digits = 2) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "--";
+  }
+  return `${value.toFixed(digits)}:1`;
 }
 
 function formatLift(value?: number | null) {
@@ -775,8 +782,8 @@ export default function SceneLayerBacktestPage() {
         point_count: {
           value: (row: RuleLayerRuleSummary) => row.point_count,
         },
-        avg_residual_mean: {
-          value: (row: RuleLayerRuleSummary) => row.avg_residual_mean,
+        profit_loss_ratio: {
+          value: (row: RuleLayerRuleSummary) => row.profit_loss_ratio,
         },
         avg_excess_residual_mean: {
           value: (row: RuleLayerRuleSummary) => row.avg_excess_residual_mean,
@@ -811,7 +818,7 @@ export default function SceneLayerBacktestPage() {
     allRuleSummaries,
     ruleSummarySortDefinitions,
     {
-      key: "avg_residual_mean",
+      key: "profit_loss_ratio",
       direction: "desc",
     },
   );
@@ -837,8 +844,8 @@ export default function SceneLayerBacktestPage() {
         spread_mean: {
           value: (row: RuleValidationComboResult) => row.backtest.spread_mean,
         },
-        avg_residual_mean: {
-          value: (row: RuleValidationComboResult) => row.backtest.avg_residual_mean,
+        profit_loss_ratio: {
+          value: (row: RuleValidationComboResult) => row.backtest.profit_loss_ratio,
         },
         avg_excess_residual_mean: {
           value: (row: RuleValidationComboResult) => row.backtest.avg_excess_residual_mean,
@@ -1841,7 +1848,7 @@ export default function SceneLayerBacktestPage() {
                     <th>回测周期（天）</th>
                     <th>平均贡献度</th>
                     <th>平均单次贡献</th>
-                    <th>残差均值（日度）</th>
+                    <th>盈亏比</th>
                     <th>超额残差（日度）</th>
                     <th>IC 均值</th>
                     <th>IC t值</th>
@@ -1860,9 +1867,7 @@ export default function SceneLayerBacktestPage() {
                     <td>{ruleResult.backtest_period}</td>
                     <td>{formatNumber(ruleResult.avg_contribution_score, 2)}</td>
                     <td>{formatNumber(ruleResult.avg_contribution_per_trigger, 2)}</td>
-                    <td className={residualMetricHighlightClass(ruleResult.avg_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}>
-                      {renderResidualMetric(ruleResult.avg_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}
-                    </td>
+                    <td>{formatProfitLossRatio(ruleResult.profit_loss_ratio)}</td>
                     <td className={residualMetricHighlightClass(ruleResult.avg_excess_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}>
                       {renderResidualMetric(ruleResult.avg_excess_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}
                     </td>
@@ -1922,13 +1927,13 @@ export default function SceneLayerBacktestPage() {
                           title="按平均单次贡献排序"
                         />
                       </th>
-                      <th aria-sort={getAriaSort(ruleSummarySortKey === "avg_residual_mean", ruleSummarySortDirection)}>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "profit_loss_ratio", ruleSummarySortDirection)}>
                         <TableSortButton
-                          label="残差均值"
-                          isActive={ruleSummarySortKey === "avg_residual_mean" && ruleSummarySortDirection !== null}
+                          label="盈亏比"
+                          isActive={ruleSummarySortKey === "profit_loss_ratio" && ruleSummarySortDirection !== null}
                           direction={ruleSummarySortDirection}
-                          onClick={() => toggleRuleSummarySort("avg_residual_mean")}
-                          title="按残差均值排序"
+                          onClick={() => toggleRuleSummarySort("profit_loss_ratio")}
+                          title="按盈亏比排序"
                         />
                       </th>
                       <th aria-sort={getAriaSort(ruleSummarySortKey === "avg_excess_residual_mean", ruleSummarySortDirection)}>
@@ -1976,9 +1981,7 @@ export default function SceneLayerBacktestPage() {
                         <td>{item.point_count}</td>
                         <td>{formatNumber(item.avg_contribution_score, 2)}</td>
                         <td>{formatNumber(item.avg_contribution_per_trigger, 2)}</td>
-                        <td className={residualMetricHighlightClass(item.avg_residual_mean, resolveResidualDirection(item.avg_contribution_score))}>
-                          {renderResidualMetric(item.avg_residual_mean, resolveResidualDirection(item.avg_contribution_score))}
-                        </td>
+                        <td>{formatProfitLossRatio(item.profit_loss_ratio)}</td>
                         <td className={residualMetricHighlightClass(item.avg_excess_residual_mean, resolveResidualDirection(item.avg_contribution_score))}>
                           {renderResidualMetric(item.avg_excess_residual_mean, resolveResidualDirection(item.avg_contribution_score))}
                         </td>
@@ -2248,7 +2251,7 @@ export default function SceneLayerBacktestPage() {
                     {renderValidationComboSortHeader("triggered_days", "触发交易日")}
                     {renderValidationComboSortHeader("avg_daily_trigger", "平均每日触发")}
                     {renderValidationComboSortHeader("spread_mean", "分层差均值（按得分值）")}
-                    {renderValidationComboSortHeader("avg_residual_mean", "残差均值（日度）")}
+                    {renderValidationComboSortHeader("profit_loss_ratio", "盈亏比")}
                     {renderValidationComboSortHeader("avg_excess_residual_mean", "超额残差（日度）")}
                     {renderValidationComboSortHeader("ic_mean", "IC 均值")}
                     {renderValidationComboSortHeader("ic_t_value", "IC t值")}
@@ -2300,9 +2303,7 @@ export default function SceneLayerBacktestPage() {
                         <td>{item.triggered_days}</td>
                         <td>{formatNumber(item.avg_daily_trigger, 2)}</td>
                         <td>{formatPercent(item.backtest.spread_mean)}</td>
-                        <td className={residualMetricHighlightClass(item.backtest.avg_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}>
-                          {renderResidualMetric(item.backtest.avg_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}
-                        </td>
+                        <td>{formatProfitLossRatio(item.backtest.profit_loss_ratio)}</td>
                         <td className={residualMetricHighlightClass(item.backtest.avg_excess_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}>
                           {renderResidualMetric(item.backtest.avg_excess_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}
                         </td>

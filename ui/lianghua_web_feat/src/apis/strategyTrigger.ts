@@ -196,6 +196,7 @@ export type RuleLayerRuleSummary = {
   point_count: number
   avg_residual_mean?: number | null
   avg_excess_residual_mean?: number | null
+  profit_loss_ratio?: number | null
   spread_mean?: number | null
   avg_contribution_score?: number | null
   avg_contribution_per_trigger?: number | null
@@ -220,6 +221,7 @@ export type RuleLayerBacktestData = {
   points: RuleLayerPoint[]
   avg_residual_mean?: number | null
   avg_excess_residual_mean?: number | null
+  profit_loss_ratio?: number | null
   spread_mean?: number | null
   avg_contribution_score?: number | null
   avg_contribution_per_trigger?: number | null

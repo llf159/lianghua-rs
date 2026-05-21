@@ -116,6 +116,7 @@ pub struct RuleLayerMetrics {
     pub points: Vec<RuleLayerPoint>,
     pub avg_residual_mean: Option<f64>,
     pub avg_excess_residual_mean: Option<f64>,
+    pub profit_loss_ratio: Option<f64>,
     pub spread_mean: Option<f64>,
     pub ic_mean: Option<f64>,
     pub ic_std: Option<f64>,
@@ -186,6 +187,7 @@ struct RuleLayerDayComputation {
         RuleLayerPoint,
         Option<f64>,
         Option<f64>,
+        ProfitLossSums,
         Option<f64>,
         Option<f64>,
     )>,
@@ -200,6 +202,46 @@ struct RuleLayerComputation {
 }
 
 type TriggeredScoreMap = HashMap<String, HashMap<String, f64>>;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct ProfitLossSums {
+    positive_sum: f64,
+    negative_loss_sum: f64,
+}
+
+impl ProfitLossSums {
+    fn push(&mut self, value: f64) {
+        if !value.is_finite() {
+            return;
+        }
+        if value > EPS {
+            self.positive_sum += value;
+        } else if value < -EPS {
+            self.negative_loss_sum += value.abs();
+        }
+    }
+
+    fn merge(&mut self, other: ProfitLossSums) {
+        self.positive_sum += other.positive_sum;
+        self.negative_loss_sum += other.negative_loss_sum;
+    }
+
+    fn ratio(self) -> Option<f64> {
+        if self.positive_sum > EPS && self.negative_loss_sum > EPS {
+            Some(self.positive_sum / self.negative_loss_sum)
+        } else {
+            None
+        }
+    }
+}
+
+fn calc_profit_loss_sums(values: &[f64]) -> ProfitLossSums {
+    let mut sums = ProfitLossSums::default();
+    for value in values {
+        sums.push(*value);
+    }
+    sums
+}
 
 struct ResidualCacheInput<'a> {
     stock_adj_type: &'a str,
@@ -788,6 +830,7 @@ pub fn calc_rule_layer_metrics(
             let avg_rule_score = mean(&rule_scores);
             let avg_residual_return = mean(&residuals);
             let avg_excess_residual_return = avg_residual_return.map(|_| 0.0);
+            let profit_loss_sums = calc_profit_loss_sums(&residuals);
             let top_bottom_spread = calc_top_bottom_spread(&rule_scores, &residuals);
             let ic = spearman_corr(&rule_scores, &residuals);
 
@@ -803,6 +846,7 @@ pub fn calc_rule_layer_metrics(
                 },
                 avg_residual_return,
                 avg_excess_residual_return,
+                profit_loss_sums,
                 top_bottom_spread,
                 ic,
             ))
@@ -812,17 +856,26 @@ pub fn calc_rule_layer_metrics(
     let mut points = Vec::with_capacity(day_results.len());
     let mut avg_residual_values = Vec::new();
     let mut avg_excess_residual_values = Vec::new();
+    let mut profit_loss_sums = ProfitLossSums::default();
     let mut spread_values = Vec::new();
     let mut ic_values = Vec::new();
 
     for item in day_results.into_iter().flatten() {
-        let (point, avg_residual_return, avg_excess_residual_return, top_bottom_spread, ic) = item;
+        let (
+            point,
+            avg_residual_return,
+            avg_excess_residual_return,
+            day_profit_loss_sums,
+            top_bottom_spread,
+            ic,
+        ) = item;
         if let Some(value) = avg_residual_return {
             avg_residual_values.push(value);
         }
         if let Some(value) = avg_excess_residual_return {
             avg_excess_residual_values.push(value);
         }
+        profit_loss_sums.merge(day_profit_loss_sums);
         if let Some(spread) = top_bottom_spread {
             spread_values.push(spread);
         }
@@ -834,6 +887,7 @@ pub fn calc_rule_layer_metrics(
 
     let avg_residual_mean = mean(&avg_residual_values);
     let avg_excess_residual_mean = mean(&avg_excess_residual_values);
+    let profit_loss_ratio = profit_loss_sums.ratio();
     let spread_mean = mean(&spread_values);
     let ic_mean = mean(&ic_values);
     let ic_std = sample_std(&ic_values);
@@ -847,6 +901,7 @@ pub fn calc_rule_layer_metrics(
         points,
         avg_residual_mean,
         avg_excess_residual_mean,
+        profit_loss_ratio,
         spread_mean,
         ic_mean,
         ic_std,
@@ -943,6 +998,7 @@ fn compute_rule_layer_from_day_groups(
                         (Some(triggered_avg), Some(market_avg)) => Some(triggered_avg - market_avg),
                         _ => None,
                     };
+                let profit_loss_sums = calc_profit_loss_sums(&triggered_residuals);
                 let top_bottom_spread = calc_top_bottom_spread(&rule_scores, &residuals);
                 let ic = spearman_corr(&rule_scores, &residuals);
 
@@ -958,6 +1014,7 @@ fn compute_rule_layer_from_day_groups(
                     },
                     avg_residual_return,
                     avg_excess_residual_return,
+                    profit_loss_sums,
                     top_bottom_spread,
                     ic,
                 ))
@@ -976,6 +1033,7 @@ fn compute_rule_layer_from_day_groups(
     let mut points = Vec::with_capacity(day_results.len());
     let mut avg_residual_values = Vec::new();
     let mut avg_excess_residual_values = Vec::new();
+    let mut profit_loss_sums = ProfitLossSums::default();
     let mut spread_values = Vec::new();
     let mut ic_values = Vec::new();
     let all_sample_count = day_results.iter().map(|item| item.all_samples.len()).sum();
@@ -991,6 +1049,7 @@ fn compute_rule_layer_from_day_groups(
             point,
             avg_residual_return,
             avg_excess_residual_return,
+            day_profit_loss_sums,
             top_bottom_spread,
             ic,
         )) = item.point
@@ -1001,6 +1060,7 @@ fn compute_rule_layer_from_day_groups(
             if let Some(value) = avg_excess_residual_return {
                 avg_excess_residual_values.push(value);
             }
+            profit_loss_sums.merge(day_profit_loss_sums);
             if let Some(spread) = top_bottom_spread {
                 spread_values.push(spread);
             }
@@ -1016,6 +1076,7 @@ fn compute_rule_layer_from_day_groups(
 
     let avg_residual_mean = mean(&avg_residual_values);
     let avg_excess_residual_mean = mean(&avg_excess_residual_values);
+    let profit_loss_ratio = profit_loss_sums.ratio();
     let spread_mean = mean(&spread_values);
     let ic_mean = mean(&ic_values);
     let ic_std = sample_std(&ic_values);
@@ -1030,6 +1091,7 @@ fn compute_rule_layer_from_day_groups(
             points,
             avg_residual_mean,
             avg_excess_residual_mean,
+            profit_loss_ratio,
             spread_mean,
             ic_mean,
             ic_std,
@@ -1088,6 +1150,7 @@ fn empty_metrics() -> RuleLayerMetrics {
         points: Vec::new(),
         avg_residual_mean: None,
         avg_excess_residual_mean: None,
+        profit_loss_ratio: None,
         spread_mean: None,
         ic_mean: None,
         ic_std: None,
@@ -1778,9 +1841,9 @@ mod tests {
     use crate::data::{result_db_path, source_db_path};
 
     use super::{
-        RuleLayerConfig, RuleLayerFromDbInput, build_rule_layer_runtime_cache,
-        calc_all_rule_layer_metrics_from_db, calc_rule_layer_metrics_from_db,
-        calc_rule_layer_metrics_with_samples_from_cache,
+        RuleLayerConfig, RuleLayerFromDbInput, RuleSample, build_rule_layer_runtime_cache,
+        calc_all_rule_layer_metrics_from_db, calc_rule_layer_metrics,
+        calc_rule_layer_metrics_from_db, calc_rule_layer_metrics_with_samples_from_cache,
         calc_rule_layer_metrics_with_triggered_samples_from_cache,
         collect_triggered_rule_samples_from_cache,
     };
@@ -1791,6 +1854,48 @@ mod tests {
             (None, None) => {}
             _ => panic!("left={left:?}, right={right:?}"),
         }
+    }
+
+    #[test]
+    fn calc_rule_layer_metrics_reports_profit_loss_ratio() {
+        let samples = vec![
+            RuleSample {
+                ts_code: "000001.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                rule_score: 1.0,
+                residual_return: 4.0,
+            },
+            RuleSample {
+                ts_code: "000002.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                rule_score: 1.0,
+                residual_return: -2.0,
+            },
+            RuleSample {
+                ts_code: "000003.SZ".to_string(),
+                trade_date: "20240103".to_string(),
+                rule_score: 1.0,
+                residual_return: 6.0,
+            },
+            RuleSample {
+                ts_code: "000004.SZ".to_string(),
+                trade_date: "20240103".to_string(),
+                rule_score: 1.0,
+                residual_return: -3.0,
+            },
+        ];
+
+        let metrics = calc_rule_layer_metrics(
+            &samples,
+            &RuleLayerConfig {
+                min_samples_per_day: 2,
+                backtest_period: 1,
+                min_listed_trade_days: 0,
+            },
+        )
+        .expect("metrics");
+
+        assert_opt_close(metrics.profit_loss_ratio, Some(2.0));
     }
 
     fn temp_source_dir() -> PathBuf {
