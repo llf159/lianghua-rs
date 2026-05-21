@@ -557,13 +557,59 @@
   width: min(1200px, 100%);
 }
 
-.scene-layer-validation-samples-modal {
-  max-height: 88vh;
-  width: min(1320px, 100%);
-}
-
 .scene-layer-validation-detail-section {
   margin-top: 0;
+}
+
+.scene-layer-validation-fold {
+  padding: 0;
+}
+
+.scene-layer-validation-fold-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.scene-layer-validation-fold-summary::-webkit-details-marker {
+  display: none;
+}
+
+.scene-layer-validation-fold-summary::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid #64748b;
+  border-bottom: 2px solid #64748b;
+  transform: rotate(45deg);
+  transition: transform 0.15s ease;
+  flex: 0 0 auto;
+}
+
+.scene-layer-validation-fold[open] .scene-layer-validation-fold-summary::after {
+  transform: rotate(225deg);
+}
+
+.scene-layer-validation-fold-summary h3 {
+  margin: 0;
+  color: #334155;
+  font-size: 14px;
+}
+
+.scene-layer-validation-fold-summary span {
+  margin-left: auto;
+  color: #64748b;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.scene-layer-validation-fold > :not(summary) {
+  margin: 0 10px 10px;
 }
 
 .scene-layer-formula-box {
@@ -614,53 +660,109 @@
   gap: 8px;
 }
 
-.scene-layer-validation-sample-entry {
-  border: 1px solid #dfe6ef;
-  border-radius: 8px;
-  padding: 8px 10px;
-  background: #fff;
+.scene-layer-return-distribution {
+  margin-top: 12px;
+  border-top: 1px solid #e5ebf3;
+  padding-top: 10px;
+}
+
+.scene-layer-return-distribution-head {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
-  gap: 10px;
-  width: 100%;
-  text-align: left;
-  cursor: pointer;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.scene-layer-return-distribution-head h4 {
+  margin: 0;
   color: #334155;
-  transition:
-    border-color 0.15s ease,
-    background 0.15s ease;
-}
-
-.scene-layer-validation-sample-entry:hover {
-  border-color: var(--theme-orange-400);
-  background: #fff7ed;
-}
-
-.scene-layer-validation-sample-entry:focus-visible {
-  outline: 2px solid var(--theme-orange-300);
-  outline-offset: 2px;
-}
-
-.scene-layer-validation-sample-entry-label {
-  font-size: 12px;
-  color: var(--theme-orange-700);
-}
-
-.scene-layer-validation-sample-entry strong {
   font-size: 13px;
-  line-height: 1.2;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
 }
 
-.scene-layer-validation-sample-entry-meta {
-  font-size: 12px;
+.scene-layer-return-distribution-head span {
   color: #64748b;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+.scene-layer-return-distribution-chart {
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.scene-layer-return-distribution-plot {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(72px, 1fr));
+  gap: 8px;
+  min-width: 560px;
+  height: 210px;
+  align-items: end;
+}
+
+.scene-layer-return-distribution-bucket {
+  min-width: 0;
+  height: 100%;
+  display: grid;
+  grid-template-rows: 20px 1fr 18px 18px;
+  gap: 4px;
+  align-items: end;
+  text-align: center;
+}
+
+.scene-layer-return-distribution-track {
+  height: 100%;
+  min-height: 112px;
+  border-bottom: 1px solid #cbd5e1;
+  background:
+    linear-gradient(to top, transparent calc(50% - 1px), #eef2f7 calc(50% - 1px), #eef2f7 calc(50% + 1px), transparent calc(50% + 1px));
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.scene-layer-return-distribution-bar {
+  width: min(34px, 68%);
+  max-width: 34px;
+  min-height: 0;
+  border-radius: 6px 6px 0 0;
+}
+
+.scene-layer-return-distribution-bar-negative {
+  background: #2563eb;
+}
+
+.scene-layer-return-distribution-bar-neutral {
+  background: #94a3b8;
+}
+
+.scene-layer-return-distribution-bar-positive {
+  background: #dc2626;
+}
+
+.scene-layer-return-distribution-count,
+.scene-layer-return-distribution-rate,
+.scene-layer-return-distribution-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.scene-layer-return-distribution-count {
+  color: #334155;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.scene-layer-return-distribution-rate {
+  color: #475569;
+  font-size: 12px;
+}
+
+.scene-layer-return-distribution-label {
+  color: #64748b;
+  font-size: 11px;
 }
 
 .scene-layer-market-gainers-grid {

@@ -478,7 +478,6 @@ export default function SceneLayerBacktestPage() {
   const [validationSelectedComboKey, setValidationSelectedComboKey] = useState("");
   const [validationRestoredComboKey, setValidationRestoredComboKey] = useState("");
   const [validationDetailModalOpen, setValidationDetailModalOpen] = useState(false);
-  const [validationSamplesModalOpen, setValidationSamplesModalOpen] = useState(false);
   const heavyTaskRunning =
     loading ||
     transientLoading ||
@@ -524,7 +523,6 @@ export default function SceneLayerBacktestPage() {
     setValidationRestoredComboKey(returnState.validationSelectedComboKey);
     setValidationSelectedComboKey(returnState.validationSelectedComboKey);
     setValidationDetailModalOpen(false);
-    setValidationSamplesModalOpen(false);
     navigate(location.pathname, { replace: true, state: null });
   }, [location.pathname, locationState, navigate]);
 
@@ -720,7 +718,6 @@ export default function SceneLayerBacktestPage() {
       setValidationRestoredComboKey("");
       setValidationSelectedComboKey("");
       setValidationDetailModalOpen(false);
-      setValidationSamplesModalOpen(false);
       return;
     }
 
@@ -731,7 +728,6 @@ export default function SceneLayerBacktestPage() {
       setValidationSelectedComboKey(validationRestoredComboKey);
       setValidationRestoredComboKey("");
       setValidationDetailModalOpen(false);
-      setValidationSamplesModalOpen(false);
       return;
     }
 
@@ -742,21 +738,16 @@ export default function SceneLayerBacktestPage() {
     setValidationRestoredComboKey("");
     setValidationSelectedComboKey(preferred);
     setValidationDetailModalOpen(false);
-    setValidationSamplesModalOpen(false);
   }, [validationResult, validationRestoredComboKey]);
 
   useEffect(() => {
-    if (!validationDetailModalOpen && !validationSamplesModalOpen) {
+    if (!validationDetailModalOpen) {
       return;
     }
 
     const previousOverflow = document.body.style.overflow;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        if (validationSamplesModalOpen) {
-          setValidationSamplesModalOpen(false);
-          return;
-        }
         setValidationDetailModalOpen(false);
       }
     };
@@ -767,7 +758,7 @@ export default function SceneLayerBacktestPage() {
       window.removeEventListener("keydown", onKeyDown);
       document.body.style.overflow = previousOverflow;
     };
-  }, [validationDetailModalOpen, validationSamplesModalOpen]);
+  }, [validationDetailModalOpen]);
 
   useEffect(() => {
     if (!shouldUseValidationDetailModal) {
@@ -1332,7 +1323,6 @@ export default function SceneLayerBacktestPage() {
     setValidationSelectedComboKey("");
     setValidationRestoredComboKey("");
     setValidationDetailModalOpen(false);
-    setValidationSamplesModalOpen(false);
     setValidationLoading(true);
     setValidationError("");
     try {
@@ -1389,16 +1379,6 @@ export default function SceneLayerBacktestPage() {
     setValidationDetailModalOpen(false);
   }
 
-  function openValidationSamplesModal(comboKey: string) {
-    setValidationSelectedComboKey(comboKey);
-    setValidationDetailModalOpen(false);
-    setValidationSamplesModalOpen(true);
-  }
-
-  function closeValidationSamplesModal() {
-    setValidationSamplesModalOpen(false);
-  }
-
   function renderValidationComboDetailSections(
     combo: RuleValidationComboResult,
     useModalLayout = false,
@@ -1415,6 +1395,11 @@ export default function SceneLayerBacktestPage() {
       ? "scene-layer-layer-summary scene-layer-validation-detail-section"
       : "scene-layer-layer-summary";
     const validationLayerSummaries = combo.backtest.layer_summaries ?? [];
+    const returnDistribution = combo.return_distribution ?? [];
+    const maxDistributionCount = returnDistribution.reduce(
+      (maxCount, bucket) => Math.max(maxCount, bucket.sample_count),
+      0,
+    );
 
     return (
       <>
@@ -1423,8 +1408,13 @@ export default function SceneLayerBacktestPage() {
           <p>{combo.formula || "--"}</p>
         </div>
 
-        <div className={sectionClassName}>
-          <h3>触发样本</h3>
+        <details className={`${sectionClassName} scene-layer-validation-fold`}>
+          <summary className="scene-layer-validation-fold-summary">
+            <h3>触发样本</h3>
+            <span>
+              总 {combo.sample_stats.total_samples} · 展示 {displaySampleCount}
+            </span>
+          </summary>
           <div className="scene-layer-validation-sample-summary">
             <div className="scene-layer-validation-sample-stats">
               <span>总 {combo.sample_stats.total_samples}</span>
@@ -1434,22 +1424,26 @@ export default function SceneLayerBacktestPage() {
               <span>随机 {combo.sample_stats.random_count}</span>
               <span>上限/组 {validationResult.sample_limit_per_group}</span>
             </div>
-
-            <button
-              type="button"
-              className="scene-layer-validation-sample-entry"
-              onClick={() => openValidationSamplesModal(combo.combo_key)}
-            >
-              <strong>查看样本</strong>
-              <span className="scene-layer-validation-sample-entry-meta">
-                {displaySampleCount} 条展示 · 正 {combo.sample_stats.positive_count} · 负 {combo.sample_stats.negative_count} · 随机 {combo.sample_stats.random_count}
-              </span>
-            </button>
+            <ExpressionValidationSamplesPanel
+              data={{
+                importRuleName: validationResult.import_rule_name,
+                importRuleExplain: validationResult.import_rule_explain,
+                expression: validationExpression,
+                combo,
+                comboParamSummary: formatUnknownValuesForCombo(combo),
+                sampleLimitPerGroup: validationResult.sample_limit_per_group,
+                sourcePath,
+              }}
+              layout="modal"
+            />
           </div>
-        </div>
+        </details>
 
-        <div className={sectionClassName}>
-          <h3>策略相似度检查</h3>
+        <details className={`${sectionClassName} scene-layer-validation-fold`}>
+          <summary className="scene-layer-validation-fold-summary">
+            <h3>策略相似度检查</h3>
+            <span>{combo.similarity_rows.length} 条</span>
+          </summary>
           <div className="scene-layer-contrib-table-wrap">
             <table className="scene-layer-contrib-table">
               <thead>
@@ -1485,7 +1479,7 @@ export default function SceneLayerBacktestPage() {
               </tbody>
             </table>
           </div>
-        </div>
+        </details>
 
         {validationLayerSummaries.length > 0 ? (
           <div className={sectionClassName}>
@@ -1522,6 +1516,49 @@ export default function SceneLayerBacktestPage() {
             <p className="scene-layer-caption">
               分层差均值按每日最高分层减最低分层计算：{formatPercent(combo.backtest.spread_mean)}
             </p>
+            {returnDistribution.length > 0 ? (
+              <div className="scene-layer-return-distribution">
+                <div className="scene-layer-return-distribution-head">
+                  <h4>收益分布</h4>
+                  <span>{combo.trigger_samples} 个触发样本</span>
+                </div>
+                <div className="scene-layer-return-distribution-chart">
+                  <div className="scene-layer-return-distribution-plot">
+                    {returnDistribution.map((bucket, index) => {
+                      const barHeight =
+                        maxDistributionCount > 0 && bucket.sample_count > 0
+                          ? Math.max(4, (bucket.sample_count / maxDistributionCount) * 100)
+                          : 0;
+                      const tone =
+                        index < 3
+                          ? "negative"
+                          : index === 3
+                            ? "neutral"
+                            : "positive";
+                      return (
+                        <div
+                          key={`${combo.combo_key}-return-${bucket.bucket_label}`}
+                          className="scene-layer-return-distribution-bucket"
+                        >
+                          <span className="scene-layer-return-distribution-count">{bucket.sample_count}</span>
+                          <div className="scene-layer-return-distribution-track">
+                            <div
+                              className={`scene-layer-return-distribution-bar scene-layer-return-distribution-bar-${tone}`}
+                              style={{ height: `${barHeight}%` }}
+                              aria-label={`${bucket.bucket_label}: ${bucket.sample_count} 个样本`}
+                            />
+                          </div>
+                          <span className="scene-layer-return-distribution-rate">
+                            {formatRate(bucket.sample_ratio)}
+                          </span>
+                          <span className="scene-layer-return-distribution-label">{bucket.bucket_label}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : null}
       </>
@@ -2313,42 +2350,6 @@ export default function SceneLayerBacktestPage() {
             </div>
           ) : null}
 
-          {validationSamplesModalOpen && validationResult && selectedValidationCombo ? (
-            <div className="scene-layer-modal-mask" onClick={closeValidationSamplesModal}>
-              <div
-                className="scene-layer-modal-card scene-layer-validation-samples-modal"
-                role="dialog"
-                aria-modal="true"
-                aria-label={`触发样本详情：${selectedValidationCombo.combo_label}`}
-                onClick={(event) => event.stopPropagation()}
-              >
-                <div className="scene-layer-modal-header">
-                  <h3>触发样本详情：{selectedValidationCombo.combo_label}</h3>
-                  <button
-                    type="button"
-                    className="scene-layer-modal-close"
-                    onClick={closeValidationSamplesModal}
-                  >
-                    关闭
-                  </button>
-                </div>
-                <div className="scene-layer-modal-scroll-body">
-                  <ExpressionValidationSamplesPanel
-                    data={{
-                      importRuleName: validationResult.import_rule_name,
-                      importRuleExplain: validationResult.import_rule_explain,
-                      expression: validationExpression,
-                      combo: selectedValidationCombo,
-                      comboParamSummary: formatUnknownValuesForCombo(selectedValidationCombo),
-                      sampleLimitPerGroup: validationResult.sample_limit_per_group,
-                      sourcePath,
-                    }}
-                    layout="modal"
-                  />
-                </div>
-              </div>
-            </div>
-          ) : null}
         </section>
       ) : null}
     </div>

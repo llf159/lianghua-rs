@@ -321,6 +321,12 @@ export type RuleValidationSampleGroups = {
   random: RuleValidationSampleRow[]
 }
 
+export type RuleValidationReturnDistributionBucket = {
+  bucket_label: string
+  sample_count: number
+  sample_ratio?: number | null
+}
+
 export type RuleValidationComboResult = {
   combo_key: string
   combo_label: string
@@ -331,6 +337,7 @@ export type RuleValidationComboResult = {
   avg_daily_trigger: number
   sample_stats: RuleValidationSampleStats
   sample_groups: RuleValidationSampleGroups
+  return_distribution: RuleValidationReturnDistributionBucket[]
   backtest: RuleLayerBacktestData
   similarity_rows: RuleValidationSimilarityRow[]
 }

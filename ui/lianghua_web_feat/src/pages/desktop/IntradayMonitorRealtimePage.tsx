@@ -249,7 +249,7 @@ function formatDeltaValue(key: VisibleColumn, value?: number) {
   if (value === undefined || !Number.isFinite(value)) return null;
   const sign = value > 0 ? "+" : "";
   if (key === "realtime_change_pct") {
-    return `${sign}${value.toFixed(2)}pct`;
+    return `${sign}${value.toFixed(2)}%`;
   }
   return `${sign}${value.toFixed(2)}`;
 }
@@ -393,6 +393,12 @@ function mergeStatusMessages(messages: Array<string | null | undefined>) {
     ),
   );
   return normalized.join("；");
+}
+
+function getRefreshOverlayText(stage: RefreshStage) {
+  if (stage === "preparing") return "正在准备刷新…";
+  if (stage === "retagging") return "正在重算模板标记…";
+  return "正在刷新实时行情…";
 }
 
 export default function IntradayMonitorRealtimePage() {
@@ -1294,6 +1300,10 @@ export default function IntradayMonitorRealtimePage() {
     template: templateMap.get(config.templateId),
     canDelete: true,
   }));
+  const showRefreshOverlay =
+    loading && loadingAction === "刷新实时" && refreshStage !== "idle";
+  const refreshOverlayText = getRefreshOverlayText(refreshStage);
+  const isTotalBlockRefreshing = isRefreshingAll || isRefreshingTotal;
 
   return (
     <div className="intraday-monitor-page">
@@ -1582,7 +1592,7 @@ export default function IntradayMonitorRealtimePage() {
             {rankModeConfigs.some((item) => item.mode === "total") ? (
               <section
                 className={
-                  isRefreshingTotal
+                  isTotalBlockRefreshing
                     ? "intraday-monitor-result-block is-refreshing"
                     : "intraday-monitor-result-block"
                 }
@@ -1631,6 +1641,15 @@ export default function IntradayMonitorRealtimePage() {
                 ) : (
                   renderTable(sortedTotalRows, TOTAL_MODE_COLUMNS)
                 )}
+                {showRefreshOverlay && isTotalBlockRefreshing ? (
+                  <div className="intraday-monitor-refresh-overlay" role="status">
+                    <span
+                      className="intraday-monitor-refresh-spinner"
+                      aria-hidden="true"
+                    />
+                    <span>{refreshOverlayText}</span>
+                  </div>
+                ) : null}
               </section>
             ) : null}
 
@@ -1647,7 +1666,7 @@ export default function IntradayMonitorRealtimePage() {
                       <section
                         key={group.key}
                         className={
-                          isRefreshingScene(group.key)
+                          isRefreshingAll || isRefreshingScene(group.key)
                             ? "intraday-monitor-scene-block is-refreshing"
                             : "intraday-monitor-scene-block"
                         }
@@ -1692,6 +1711,19 @@ export default function IntradayMonitorRealtimePage() {
                           </div>
                         </header>
                         {renderTable(group.rows, SCENE_MODE_COLUMNS)}
+                        {showRefreshOverlay &&
+                        (isRefreshingAll || isRefreshingScene(group.key)) ? (
+                          <div
+                            className="intraday-monitor-refresh-overlay"
+                            role="status"
+                          >
+                            <span
+                              className="intraday-monitor-refresh-spinner"
+                              aria-hidden="true"
+                            />
+                            <span>{refreshOverlayText}</span>
+                          </div>
+                        ) : null}
                       </section>
                     ))}
                   </div>

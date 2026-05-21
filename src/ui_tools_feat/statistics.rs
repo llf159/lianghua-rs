@@ -12,7 +12,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    data::scoring_data::row_into_rt,
+    data::scoring_data::{ScoreDetails, ScoreSummary, row_into_rt},
     data::{
         DataReader, RuleStage, RuleTag, RuntimeKeyCollectOptions, ScopeWay, ScoreRule, ScoreScene,
         collect_assigned_names_from_expr_program, collect_runtime_keys_from_expr_programs,
@@ -391,6 +391,13 @@ pub struct RuleValidationSampleGroups {
 }
 
 #[derive(Debug, Serialize)]
+pub struct RuleValidationReturnDistributionBucket {
+    pub bucket_label: String,
+    pub sample_count: usize,
+    pub sample_ratio: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct RuleValidationComboResult {
     pub combo_key: String,
     pub combo_label: String,
@@ -401,6 +408,7 @@ pub struct RuleValidationComboResult {
     pub avg_daily_trigger: f64,
     pub sample_stats: RuleValidationSampleStats,
     pub sample_groups: RuleValidationSampleGroups,
+    pub return_distribution: Vec<RuleValidationReturnDistributionBucket>,
     pub backtest: RuleLayerBacktestData,
     pub similarity_rows: Vec<RuleValidationSimilarityRow>,
 }
@@ -2263,6 +2271,7 @@ fn build_validation_combo_result(
         &metrics_with_samples.samples,
         layer_config.min_samples_per_day,
     );
+    let return_distribution = build_validation_return_distribution(&metrics_with_samples.samples);
     let mut sample_accumulator =
         ValidationSampleAccumulator::new(sample_limit_per_group, stock_meta_map, similarity_cache);
     visit_triggered_rule_samples_from_cache(runtime_cache, &triggered_score_map, |sample| {
@@ -2299,6 +2308,7 @@ fn build_validation_combo_result(
         },
         sample_stats,
         sample_groups,
+        return_distribution,
         backtest,
         similarity_rows,
     })
@@ -2449,6 +2459,54 @@ fn build_validation_score_layer_details(
             })
             .collect(),
     }
+}
+
+fn build_validation_return_distribution(
+    samples: &[crate::simulate::rule::RuleLayerSamplePoint],
+) -> Vec<RuleValidationReturnDistributionBucket> {
+    const BUCKET_LABELS: [&str; 7] = [
+        "<= -10%", "-10%~-5%", "-5%~-2%", "-2%~2%", "2%~5%", "5%~10%", ">= 10%",
+    ];
+
+    let mut counts = [0usize; 7];
+    let mut total = 0usize;
+    for sample in samples {
+        if !sample.residual_return.is_finite() {
+            continue;
+        }
+
+        let bucket_index = if sample.residual_return <= -10.0 {
+            0
+        } else if sample.residual_return <= -5.0 {
+            1
+        } else if sample.residual_return <= -2.0 {
+            2
+        } else if sample.residual_return <= 2.0 {
+            3
+        } else if sample.residual_return <= 5.0 {
+            4
+        } else if sample.residual_return <= 10.0 {
+            5
+        } else {
+            6
+        };
+        counts[bucket_index] += 1;
+        total += 1;
+    }
+
+    BUCKET_LABELS
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| RuleValidationReturnDistributionBucket {
+            bucket_label: label.to_string(),
+            sample_count: counts[index],
+            sample_ratio: if total > 0 {
+                Some(counts[index] as f64 / total as f64)
+            } else {
+                None
+            },
+        })
+        .collect()
 }
 
 fn format_validation_score_layer_label(score: f64) -> String {
@@ -4402,7 +4460,13 @@ fn build_rule_contribution_averages(
         acc.trigger_count += row.trigger_count.unwrap_or(0).max(0);
     }
 
-    Ok(acc_map
+    Ok(finalize_rule_contribution_averages(acc_map))
+}
+
+fn finalize_rule_contribution_averages(
+    acc_map: HashMap<String, RuleContributionAccumulator>,
+) -> HashMap<String, RuleContributionAverages> {
+    acc_map
         .into_iter()
         .map(|(rule_name, acc)| {
             let avg_contribution_score = if acc.contribution_days > 0 {
@@ -4424,7 +4488,73 @@ fn build_rule_contribution_averages(
                 },
             )
         })
-        .collect())
+        .collect()
+}
+
+fn build_rule_contribution_averages_from_rows(
+    summary_rows: &[ScoreSummary],
+    detail_rows: &[ScoreDetails],
+    start_date: &str,
+    end_date: &str,
+) -> HashMap<String, RuleContributionAverages> {
+    let mut daily_max_rank: HashMap<String, i64> = HashMap::new();
+    let mut rank_by_sample: HashMap<(String, String), i64> = HashMap::new();
+
+    for row in summary_rows {
+        if row.trade_date.as_str() < start_date || row.trade_date.as_str() > end_date {
+            continue;
+        }
+        let Some(rank) = row.rank.filter(|value| *value > 0) else {
+            continue;
+        };
+
+        daily_max_rank
+            .entry(row.trade_date.clone())
+            .and_modify(|max_rank| *max_rank = (*max_rank).max(rank))
+            .or_insert(rank);
+        rank_by_sample.insert((row.ts_code.clone(), row.trade_date.clone()), rank);
+    }
+
+    let mut daily_agg_map: HashMap<(String, String), RuleDayAgg> = HashMap::new();
+    for row in detail_rows {
+        if row.trade_date.as_str() < start_date || row.trade_date.as_str() > end_date {
+            continue;
+        }
+        if !row.rule_score.is_finite() || row.rule_score.abs() <= RULE_BACKTEST_EPS {
+            continue;
+        }
+
+        let agg = daily_agg_map
+            .entry((row.trade_date.clone(), row.rule_name.clone()))
+            .or_default();
+        agg.trigger_count += 1;
+
+        let Some(rank) = rank_by_sample.get(&(row.ts_code.clone(), row.trade_date.clone())) else {
+            continue;
+        };
+        let Some(max_rank) = daily_max_rank.get(&row.trade_date) else {
+            continue;
+        };
+        if *max_rank <= 0 {
+            continue;
+        }
+
+        agg.contribution_score +=
+            row.rule_score * (*max_rank + 1 - *rank) as f64 / *max_rank as f64;
+    }
+
+    let mut acc_map: HashMap<String, RuleContributionAccumulator> = HashMap::new();
+    for ((_trade_date, rule_name), agg) in daily_agg_map {
+        if agg.trigger_count <= 0 {
+            continue;
+        }
+        let acc = acc_map.entry(rule_name).or_default();
+        acc.contribution_sum += agg.contribution_score;
+        acc.contribution_days += 1;
+        acc.trigger_count += agg.trigger_count.max(0);
+    }
+
+    finalize_rule_contribution_averages(acc_map)
 }
 
 fn weighted_rule_summary_metric(
@@ -5180,16 +5310,26 @@ pub fn run_transient_rule_layer_backtest(
         &params.end_date,
         &layer_config,
     )?;
+    let contribution_averages = build_rule_contribution_averages_from_rows(
+        &score_batch.summary_rows,
+        &score_batch.detail_rows,
+        &params.start_date,
+        &params.end_date,
+    );
     let mut all_rule_summaries = Vec::with_capacity(all_metrics.len());
     for (one_rule_name, metrics) in all_metrics {
+        let contribution_average = contribution_averages
+            .get(&one_rule_name)
+            .cloned()
+            .unwrap_or_default();
         all_rule_summaries.push(RuleLayerRuleSummary {
             rule_name: one_rule_name,
             point_count: metrics.points.len(),
             avg_residual_mean: metrics.avg_residual_mean,
             avg_excess_residual_mean: metrics.avg_excess_residual_mean,
             spread_mean: None,
-            avg_contribution_score: None,
-            avg_contribution_per_trigger: None,
+            avg_contribution_score: contribution_average.avg_contribution_score,
+            avg_contribution_per_trigger: contribution_average.avg_contribution_per_trigger,
             ic_mean: metrics.ic_mean,
             ic_std: metrics.ic_std,
             icir: metrics.icir,
@@ -5373,14 +5513,19 @@ mod tests {
     use duckdb::{Connection, params};
 
     use crate::{
-        data::{DataReader, RuleTag, result_db_path, source_db_path},
+        data::{
+            DataReader, RuleTag, result_db_path,
+            scoring_data::{ScoreDetails, ScoreSummary},
+            source_db_path,
+        },
         scoring::tools::load_st_list,
         simulate::rule::RuleLayerSamplePoint,
     };
 
     use super::{
         PreparedValidationCombo, ValidationSampleRawRow, ValidationSampleStockMeta,
-        ValidationSimilarityCache, ValidationVariant, build_validation_cached_rule,
+        ValidationSimilarityCache, ValidationVariant, build_rule_contribution_averages_from_rows,
+        build_validation_cached_rule, build_validation_return_distribution,
         build_validation_sample_groups, build_validation_similarity_rows,
         build_validation_triggered_scores, build_validation_triggered_scores_for_combos,
         collect_rule_validation_runtime_keys, collect_validation_assigned_names,
@@ -5483,6 +5628,102 @@ mod tests {
         ])
         .expect("insert stock row3");
         app.flush().expect("flush stock_data");
+    }
+
+    #[test]
+    fn transient_rule_contribution_averages_match_rank_weight_formula() {
+        let summary_rows = vec![
+            ScoreSummary {
+                ts_code: "000001.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                total_score: 10.0,
+                rank: Some(1),
+            },
+            ScoreSummary {
+                ts_code: "000002.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                total_score: 5.0,
+                rank: Some(2),
+            },
+            ScoreSummary {
+                ts_code: "000001.SZ".to_string(),
+                trade_date: "20240103".to_string(),
+                total_score: 3.0,
+                rank: Some(2),
+            },
+            ScoreSummary {
+                ts_code: "000002.SZ".to_string(),
+                trade_date: "20240103".to_string(),
+                total_score: 9.0,
+                rank: Some(1),
+            },
+        ];
+        let detail_rows = vec![
+            ScoreDetails {
+                ts_code: "000001.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                rule_name: "规则A".to_string(),
+                rule_score: 2.0,
+            },
+            ScoreDetails {
+                ts_code: "000002.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                rule_name: "规则A".to_string(),
+                rule_score: 1.0,
+            },
+            ScoreDetails {
+                ts_code: "000001.SZ".to_string(),
+                trade_date: "20240103".to_string(),
+                rule_name: "规则A".to_string(),
+                rule_score: -2.0,
+            },
+            ScoreDetails {
+                ts_code: "000002.SZ".to_string(),
+                trade_date: "20240103".to_string(),
+                rule_name: "规则B".to_string(),
+                rule_score: 3.0,
+            },
+        ];
+
+        let averages = build_rule_contribution_averages_from_rows(
+            &summary_rows,
+            &detail_rows,
+            "20240102",
+            "20240103",
+        );
+
+        let rule_a = averages.get("规则A").expect("rule A averages");
+        assert_eq!(rule_a.avg_contribution_score, Some(0.75));
+        assert_eq!(rule_a.avg_contribution_per_trigger, Some(0.5));
+
+        let rule_b = averages.get("规则B").expect("rule B averages");
+        assert_eq!(rule_b.avg_contribution_score, Some(3.0));
+        assert_eq!(rule_b.avg_contribution_per_trigger, Some(3.0));
+    }
+
+    #[test]
+    fn validation_return_distribution_uses_symmetric_percent_buckets() {
+        let samples = [-12.0, -10.0, -7.0, -3.0, -2.0, 0.0, 2.0, 3.0, 8.0, 11.0]
+            .into_iter()
+            .map(|residual_return| RuleLayerSamplePoint {
+                ts_code: "000001.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                rule_score: 1.0,
+                residual_return,
+            })
+            .collect::<Vec<_>>();
+
+        let buckets = build_validation_return_distribution(&samples);
+
+        assert_eq!(buckets.len(), 7);
+        assert_eq!(
+            buckets
+                .iter()
+                .map(|bucket| bucket.sample_count)
+                .collect::<Vec<_>>(),
+            vec![2, 1, 2, 2, 1, 1, 1]
+        );
+        assert_eq!(buckets[0].sample_ratio, Some(0.2));
     }
 
     fn prepare_validation_result_rank_rows(source_dir: &str) {

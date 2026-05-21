@@ -300,6 +300,7 @@
   color: #4f5f73;
   font-size: 13px;
   pointer-events: none;
+  border-radius: 10px;
 }
 
 .intraday-custom-refresh-spinner {

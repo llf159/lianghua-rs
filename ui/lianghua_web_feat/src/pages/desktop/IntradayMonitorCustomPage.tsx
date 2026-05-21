@@ -77,6 +77,14 @@ function getTagToneClassName(tone?: string | null) {
   return 'intraday-custom-hit-badge-neutral'
 }
 
+function isTemplateHit(row: IntradayMonitorRow) {
+  return (
+    row.template_tag_tone === 'up' &&
+    typeof row.template_tag_text === 'string' &&
+    row.template_tag_text.includes('命中')
+  )
+}
+
 function waitForNextPaint() {
   if (typeof window === 'undefined') {
     return Promise.resolve()
@@ -138,6 +146,18 @@ export default function IntradayMonitorCustomPage() {
   const refreshingRealtime = loadingAction === 'refresh-realtime'
   const refreshingTags = loadingAction === 'refresh-tags'
   const isBusy = loadingAction !== null
+  const displayedRows = useMemo(() => {
+    const hitRows: IntradayMonitorRow[] = []
+    const otherRows: IntradayMonitorRow[] = []
+    for (const row of rows) {
+      if (isTemplateHit(row)) {
+        hitRows.push(row)
+      } else {
+        otherRows.push(row)
+      }
+    }
+    return [...hitRows, ...otherRows]
+  }, [rows])
 
   useEffect(() => {
     void ensureManagedSourcePath()
@@ -421,18 +441,21 @@ export default function IntradayMonitorCustomPage() {
             </div>
           </div>
           <div className="intraday-custom-table-wrap">
-            <table className="intraday-custom-table">
+            <table
+              className="intraday-custom-table"
+              style={{ minWidth: '1238px' }}
+            >
               <colgroup>
                 <col style={{ width: 72 }} />
                 <col style={{ width: 112 }} />
                 <col style={{ width: 110 }} />
                 <col style={{ width: 96 }} />
                 <col style={{ width: 108 }} />
-                <col style={{ width: 108 }} />
                 <col style={{ width: 160 }} />
+                <col style={{ width: 108 }} />
                 <col style={{ width: 96 }} />
                 <col style={{ width: 116 }} />
-                <col style={{ width: 220 }} />
+                <col style={{ width: 260 }} />
               </colgroup>
               <thead>
                 <tr>
@@ -441,8 +464,8 @@ export default function IntradayMonitorCustomPage() {
                   <th>名称</th>
                   <th>实时价*</th>
                   <th>实时涨幅*</th>
-                  <th>实时量比*</th>
                   <th>模板标记</th>
+                  <th>实时量比*</th>
                   <th>板块</th>
                   <th>总市值(亿)</th>
                   <th>概念</th>
@@ -456,7 +479,7 @@ export default function IntradayMonitorCustomPage() {
                     </td>
                   </tr>
                 ) : (
-                  rows.map((row) => (
+                  displayedRows.map((row) => (
                     <tr key={row.ts_code}>
                       <td>{formatNumber(row.rank, 0)}</td>
                       <td>{row.ts_code}</td>
@@ -475,7 +498,6 @@ export default function IntradayMonitorCustomPage() {
                       <td className={getPercentClassName(row.realtime_change_pct)}>
                         {formatPercent(row.realtime_change_pct)}
                       </td>
-                      <td>{formatNumber(row.realtime_vol_ratio)}</td>
                       <td>
                         <span
                           className={[
@@ -488,6 +510,7 @@ export default function IntradayMonitorCustomPage() {
                             : '--'}
                         </span>
                       </td>
+                      <td>{formatNumber(row.realtime_vol_ratio)}</td>
                       <td>{row.board || '--'}</td>
                       <td>{formatNumber(row.total_mv_yi)}</td>
                       <td title={row.concept || ''}>{row.concept || '--'}</td>

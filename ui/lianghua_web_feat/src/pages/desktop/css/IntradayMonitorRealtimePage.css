@@ -204,6 +204,7 @@
   border: 1px solid #e1e7ef;
   border-radius: 10px;
   padding: 10px;
+  position: relative;
 }
 
 .intraday-monitor-result-block.is-refreshing,
@@ -222,6 +223,7 @@
   border: 1px solid #e1e7ef;
   border-radius: 10px;
   padding: 10px;
+  position: relative;
 }
 
 .intraday-monitor-scene-head {
@@ -397,6 +399,41 @@
   color: #53627a;
   background: #f3f6fa;
   border-color: #d8e0ea;
+}
+
+.intraday-monitor-refresh-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.66);
+  backdrop-filter: blur(1px);
+  color: #4f5f73;
+  font-size: 13px;
+  pointer-events: none;
+  border-radius: 10px;
+  z-index: 2;
+}
+
+.intraday-monitor-refresh-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid #d7e0ea;
+  border-top-color: var(--theme-orange-600);
+  animation: intraday-monitor-spin 0.8s linear infinite;
+}
+
+@keyframes intraday-monitor-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .intraday-monitor-modal-mask {
