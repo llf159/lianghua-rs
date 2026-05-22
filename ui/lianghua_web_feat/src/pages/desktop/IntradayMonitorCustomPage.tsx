@@ -158,6 +158,16 @@ export default function IntradayMonitorCustomPage() {
     }
     return [...hitRows, ...otherRows]
   }, [rows])
+  const navigationItems = useMemo(
+    () =>
+      displayedRows.map((row) => ({
+        tsCode: row.ts_code,
+        tradeDate: typeof row.trade_date === 'string' ? row.trade_date : null,
+        sourcePath: sourcePathTrimmed || undefined,
+        name: typeof row.name === 'string' ? row.name : undefined,
+      })),
+    [displayedRows, sourcePathTrimmed],
+  )
 
   useEffect(() => {
     void ensureManagedSourcePath()
@@ -490,6 +500,7 @@ export default function IntradayMonitorCustomPage() {
                           tradeDate={typeof row.trade_date === 'string' ? row.trade_date : null}
                           sourcePath={sourcePathTrimmed || undefined}
                           title={`查看 ${row.name || row.ts_code} 详情`}
+                          navigationItems={navigationItems}
                         >
                           {row.name || row.ts_code}
                         </DetailsLink>

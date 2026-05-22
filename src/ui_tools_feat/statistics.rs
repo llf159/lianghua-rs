@@ -4322,11 +4322,11 @@ pub fn get_scene_layer_backtest_defaults(
     {
         let min_trade_date: Option<String> =
             row.get(0).map_err(|e| format!("读取最小交易日失败: {e}"))?;
-        let max_trade_date: Option<String> =
+        let _max_trade_date: Option<String> =
             row.get(1).map_err(|e| format!("读取最大交易日失败: {e}"))?;
-        (min_trade_date, max_trade_date)
+        (min_trade_date, query_score_summary_latest_trade_date(&conn)?)
     } else {
-        (None, None)
+        (None, query_score_summary_latest_trade_date(&conn)?)
     };
 
     Ok(SceneLayerBacktestDefaultsData {
@@ -4364,11 +4364,11 @@ pub fn get_rule_layer_backtest_defaults(
     {
         let min_trade_date: Option<String> =
             row.get(0).map_err(|e| format!("读取最小交易日失败: {e}"))?;
-        let max_trade_date: Option<String> =
+        let _max_trade_date: Option<String> =
             row.get(1).map_err(|e| format!("读取最大交易日失败: {e}"))?;
-        (min_trade_date, max_trade_date)
+        (min_trade_date, query_score_summary_latest_trade_date(&conn)?)
     } else {
-        (None, None)
+        (None, query_score_summary_latest_trade_date(&conn)?)
     };
 
     Ok(RuleLayerBacktestDefaultsData {
@@ -4377,6 +4377,34 @@ pub fn get_rule_layer_backtest_defaults(
         start_date,
         end_date,
     })
+}
+
+fn query_score_summary_latest_trade_date(conn: &Connection) -> Result<Option<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT MAX(trade_date) FROM score_summary")
+        .map_err(|e| format!("预编译 score_summary 最新日期 SQL 失败: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("执行 score_summary 最新日期 SQL 失败: {e}"))?;
+
+    if let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取 score_summary 最新日期失败: {e}"))?
+    {
+        let latest_trade_date: Option<String> = row
+            .get(0)
+            .map_err(|e| format!("读取 score_summary 最新日期字段失败: {e}"))?;
+        return Ok(latest_trade_date.and_then(|value| {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }));
+    }
+
+    Ok(None)
 }
 
 #[derive(Debug, Clone)]

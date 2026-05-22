@@ -91,6 +91,8 @@ type BacktestCommonParamsDraft = {
   rankLayerMethod: RankLayerMethod;
 };
 
+type StoredBacktestCommonParamsDraft = Omit<BacktestCommonParamsDraft, "endDateInput">;
+
 type StoredBacktestCommonParams = BacktestCommonParamsDraft & {
   hasStoredParams: boolean;
 };
@@ -374,7 +376,7 @@ function normalizeRankLayerMethod(value: unknown): RankLayerMethod {
 }
 
 function readStoredBacktestCommonParams(): StoredBacktestCommonParams {
-  const parsed = readJsonStorage<Partial<BacktestCommonParamsDraft>>(
+  const parsed = readJsonStorage<Partial<StoredBacktestCommonParamsDraft>>(
     typeof window === "undefined" ? null : window.localStorage,
     BACKTEST_COMMON_PARAMS_STORAGE_KEY,
   );
@@ -389,7 +391,7 @@ function readStoredBacktestCommonParams(): StoredBacktestCommonParams {
     conceptBeta: normalizeStoredString(parsed?.conceptBeta, DEFAULT_BACKTEST_COMMON_PARAMS.conceptBeta),
     industryBeta: normalizeStoredString(parsed?.industryBeta, DEFAULT_BACKTEST_COMMON_PARAMS.industryBeta),
     startDateInput: normalizeStoredString(parsed?.startDateInput, DEFAULT_BACKTEST_COMMON_PARAMS.startDateInput),
-    endDateInput: normalizeStoredString(parsed?.endDateInput, DEFAULT_BACKTEST_COMMON_PARAMS.endDateInput),
+    endDateInput: DEFAULT_BACKTEST_COMMON_PARAMS.endDateInput,
     minSamplesPerDay: normalizeStoredString(parsed?.minSamplesPerDay, DEFAULT_BACKTEST_COMMON_PARAMS.minSamplesPerDay),
     minListedTradeDays: normalizeStoredString(
       parsed?.minListedTradeDays,
@@ -403,10 +405,23 @@ function readStoredBacktestCommonParams(): StoredBacktestCommonParams {
 }
 
 function writeStoredBacktestCommonParams(value: BacktestCommonParamsDraft) {
+  const storedValue: StoredBacktestCommonParamsDraft = {
+    stockAdjType: value.stockAdjType,
+    indexTsCode: value.indexTsCode,
+    indexBeta: value.indexBeta,
+    conceptBeta: value.conceptBeta,
+    industryBeta: value.industryBeta,
+    startDateInput: value.startDateInput,
+    minSamplesPerDay: value.minSamplesPerDay,
+    minListedTradeDays: value.minListedTradeDays,
+    backtestPeriod: value.backtestPeriod,
+    rankLayerCount: value.rankLayerCount,
+    rankLayerMethod: value.rankLayerMethod,
+  };
   writeJsonStorage(
     typeof window === "undefined" ? null : window.localStorage,
     BACKTEST_COMMON_PARAMS_STORAGE_KEY,
-    value,
+    storedValue,
   );
 }
 
@@ -590,8 +605,7 @@ export default function SceneLayerBacktestPage() {
           }
           if (
             !locationState?.validationReturnState &&
-            sceneDefaults.end_date &&
-            !storedCommonParams.hasStoredParams
+            sceneDefaults.end_date
           ) {
             setEndDateInput(compactDateToInput(sceneDefaults.end_date));
           }
@@ -617,8 +631,7 @@ export default function SceneLayerBacktestPage() {
           if (
             !locationState?.validationReturnState &&
             !hasSceneDateDefaults &&
-            ruleDefaults.end_date &&
-            !storedCommonParams.hasStoredParams
+            ruleDefaults.end_date
           ) {
             setEndDateInput(compactDateToInput(ruleDefaults.end_date));
           }

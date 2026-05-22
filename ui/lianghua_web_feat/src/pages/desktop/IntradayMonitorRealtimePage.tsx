@@ -36,6 +36,8 @@ import {
 import "./css/IntradayMonitorRealtimePage.css";
 
 const INTRADAY_MONITOR_PAGE_STATE_KEY = "lh_intraday_monitor_realtime_page_v2";
+const INTRADAY_MONITOR_PARAMS_STORAGE_KEY =
+  "lh_intraday_monitor_realtime_params_v1";
 const INTRADAY_MONITOR_TEMPLATE_STORAGE_KEY =
   "lh_intraday_monitor_realtime_templates_v1";
 const REFRESH_BATCH_SIZE = 50;
@@ -106,6 +108,19 @@ type PersistedIntradayMonitorState = {
   sortKey: string | null;
   sortDirection: SortDirection;
 };
+
+type PersistedIntradayMonitorParams = Pick<
+  PersistedIntradayMonitorState,
+  | "sourcePath"
+  | "rankDateInput"
+  | "limitInput"
+  | "boardFilter"
+  | "totalMvMinInput"
+  | "totalMvMaxInput"
+  | "rankModeConfigs"
+  | "sortKey"
+  | "sortDirection"
+>;
 
 type SceneRowsGroup = {
   key: string;
@@ -229,6 +244,49 @@ function normalizeRankModeConfig(input: unknown): RankModeConfig | null {
     sceneName: typeof item.sceneName === "string" ? item.sceneName : "全部",
     templateId: typeof item.templateId === "string" ? item.templateId : "",
   };
+}
+
+function readStoredIntradayMonitorParams(): PersistedIntradayMonitorParams {
+  const parsed = readJsonStorage<Partial<PersistedIntradayMonitorParams>>(
+    typeof window === "undefined" ? null : window.localStorage,
+    INTRADAY_MONITOR_PARAMS_STORAGE_KEY,
+  );
+  const rankModeConfigs = Array.isArray(parsed?.rankModeConfigs)
+    ? parsed.rankModeConfigs
+        .map(normalizeRankModeConfig)
+        .filter((item): item is RankModeConfig => item !== null)
+    : [];
+
+  return {
+    sourcePath: typeof parsed?.sourcePath === "string" ? parsed.sourcePath : "",
+    rankDateInput:
+      typeof parsed?.rankDateInput === "string"
+        ? parsed.rankDateInput
+        : DEFAULT_DATE_OPTION,
+    limitInput: typeof parsed?.limitInput === "string" ? parsed.limitInput : "100",
+    boardFilter:
+      parsed?.boardFilter && STOCK_PICK_BOARD_OPTIONS.includes(parsed.boardFilter)
+        ? parsed.boardFilter
+        : "全部",
+    totalMvMinInput:
+      typeof parsed?.totalMvMinInput === "string" ? parsed.totalMvMinInput : "",
+    totalMvMaxInput:
+      typeof parsed?.totalMvMaxInput === "string" ? parsed.totalMvMaxInput : "",
+    rankModeConfigs,
+    sortKey: typeof parsed?.sortKey === "string" ? parsed.sortKey : null,
+    sortDirection:
+      parsed?.sortDirection === "asc" || parsed?.sortDirection === "desc"
+        ? parsed.sortDirection
+        : null,
+  };
+}
+
+function writeStoredIntradayMonitorParams(value: PersistedIntradayMonitorParams) {
+  writeJsonStorage(
+    typeof window === "undefined" ? null : window.localStorage,
+    INTRADAY_MONITOR_PARAMS_STORAGE_KEY,
+    value,
+  );
 }
 
 function formatNumber(value?: number | null, digits = 2) {
@@ -403,6 +461,7 @@ function getRefreshOverlayText(stage: RefreshStage) {
 
 export default function IntradayMonitorRealtimePage() {
   const { excludedConcepts, excludeStBoard } = useConceptExclusions();
+  const persistedParams = useMemo(() => readStoredIntradayMonitorParams(), []);
 
   const persistedState = useMemo(() => {
     const parsed = readJsonStorage<Partial<PersistedIntradayMonitorState>>(
@@ -479,28 +538,28 @@ export default function IntradayMonitorRealtimePage() {
   }, [persistedState]);
 
   const [sourcePath, setSourcePath] = useState(
-    () => persistedState?.sourcePath ?? "",
+    () => persistedState?.sourcePath ?? persistedParams.sourcePath,
   );
   const [rankDateInput, setRankDateInput] = useState(
-    () => persistedState?.rankDateInput ?? DEFAULT_DATE_OPTION,
+    () => persistedState?.rankDateInput ?? persistedParams.rankDateInput,
   );
   const [limitInput, setLimitInput] = useState(
-    () => persistedState?.limitInput ?? "100",
+    () => persistedState?.limitInput ?? persistedParams.limitInput,
   );
   const [boardFilter, setBoardFilter] = useState<
     (typeof STOCK_PICK_BOARD_OPTIONS)[number]
-  >(() => persistedState?.boardFilter ?? "全部");
+  >(() => persistedState?.boardFilter ?? persistedParams.boardFilter);
   const [totalMvMinInput, setTotalMvMinInput] = useState(
-    () => persistedState?.totalMvMinInput ?? "",
+    () => persistedState?.totalMvMinInput ?? persistedParams.totalMvMinInput,
   );
   const [totalMvMaxInput, setTotalMvMaxInput] = useState(
-    () => persistedState?.totalMvMaxInput ?? "",
+    () => persistedState?.totalMvMaxInput ?? persistedParams.totalMvMaxInput,
   );
   const [templates, setTemplates] = useState<MarkTemplate[]>(
     () => cachedTemplates,
   );
   const [rankModeConfigs, setRankModeConfigs] = useState<RankModeConfig[]>(
-    () => persistedState?.rankModeConfigs ?? [],
+    () => persistedState?.rankModeConfigs ?? persistedParams.rankModeConfigs,
   );
   const [rows, setRows] = useState<IntradayMonitorRow[]>(
     () => persistedState?.rows ?? [],
@@ -557,8 +616,10 @@ export default function IntradayMonitorRealtimePage() {
     rows,
     sortDefinitions,
     {
-      key: (persistedState?.sortKey as VisibleColumn | null) ?? null,
-      direction: persistedState?.sortDirection ?? null,
+      key:
+        (persistedState?.sortKey as VisibleColumn | null) ??
+        (persistedParams.sortKey as VisibleColumn | null),
+      direction: persistedState?.sortDirection ?? persistedParams.sortDirection,
     },
   );
 
@@ -625,6 +686,17 @@ export default function IntradayMonitorRealtimePage() {
         sortDirection,
       } satisfies PersistedIntradayMonitorState,
     );
+    writeStoredIntradayMonitorParams({
+      sourcePath,
+      rankDateInput,
+      limitInput,
+      boardFilter,
+      totalMvMinInput,
+      totalMvMaxInput,
+      rankModeConfigs,
+      sortKey,
+      sortDirection,
+    });
   }, [
     sourcePath,
     rankDateInput,
