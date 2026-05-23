@@ -1,7 +1,7 @@
 .cyq-chen-page {
   min-height: 100%;
   display: grid;
-  grid-template-columns: minmax(360px, 520px) minmax(0, 1fr);
+  grid-template-columns: 320px minmax(0, 1fr);
   gap: 14px;
   color: #172033;
 }
@@ -85,13 +85,14 @@
 .cyq-chen-form-grid {
   margin-top: 14px;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 10px;
 }
 
 .cyq-chen-run-row {
   margin-top: 12px;
   display: flex;
+  justify-content: flex-start;
 }
 
 .cyq-chen-run-btn {
@@ -331,34 +332,6 @@
   gap: 2px;
 }
 
-.cyq-chen-chip-mode-switch {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px;
-  border: 1px solid #dbe3ef;
-  border-radius: 8px;
-  background: #f8fbff;
-}
-
-.cyq-chen-chip-mode-switch button {
-  min-width: 44px;
-  height: 28px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: #43536b;
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.cyq-chen-chip-mode-switch button.is-active {
-  background: #1f6feb;
-  color: #ffffff;
-  font-weight: 650;
-}
-
 .cyq-chen-chip-legend {
   display: flex;
   align-items: center;
@@ -501,9 +474,13 @@
   z-index: 1;
 }
 
-@media (max-width: 1180px) {
+@media (max-width: 980px) {
   .cyq-chen-page {
     grid-template-columns: 1fr;
+  }
+
+  .cyq-chen-form-grid {
+    grid-template-columns: 1fr 1fr;
   }
 
   .cyq-chen-summary-grid {

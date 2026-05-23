@@ -107,6 +107,7 @@ export default function MarketAnalysisPage() {
   const [minListedTradeDays, setMinListedTradeDays] = useState("60");
   const [referenceDateInput, setReferenceDateInput] = useState("");
   const [selectedBoard, setSelectedBoard] = useState("");
+  const [carryInterval, setCarryInterval] = useState(true);
   const [initializing, setInitializing] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -214,32 +215,32 @@ export default function MarketAnalysisPage() {
 
   const detailNavigationItems = useMemo(() => {
     const contributors = contributionResult?.contributors ?? [];
-    const tradeDate = contributionResult?.trade_date ?? result?.resolved_reference_trade_date ?? undefined;
-    const intervalStartTradeDate = contributionResult?.scope === "interval"
+    const baseTradeDate = contributionResult?.trade_date ?? result?.resolved_reference_trade_date ?? undefined;
+    const start = contributionResult?.scope === "interval"
       ? contributionResult.start_date ?? undefined
       : undefined;
-    const intervalEndTradeDate = contributionResult?.scope === "interval"
+    const end = contributionResult?.scope === "interval"
       ? contributionResult.end_date ?? result?.resolved_reference_trade_date ?? undefined
       : undefined;
     const sourcePathTrimmed = sourcePath.trim() || undefined;
     return contributors.map((item) => ({
       tsCode: item.ts_code,
-      tradeDate,
-      intervalStartTradeDate,
-      intervalEndTradeDate,
+      tradeDate: (carryInterval || contributionResult?.scope !== "interval") ? baseTradeDate : (start ?? baseTradeDate),
+      intervalStartTradeDate: carryInterval ? start : undefined,
+      intervalEndTradeDate: carryInterval ? end : undefined,
       sourcePath: sourcePathTrimmed,
       name: item.name ?? undefined,
     }));
-  }, [contributionResult, result?.resolved_reference_trade_date, sourcePath]);
+  }, [contributionResult, result?.resolved_reference_trade_date, sourcePath, carryInterval]);
 
   const intervalGainNavigationItems = useMemo(() => {
     if (!result) {
       return [];
     }
-    const tradeDate = result.resolved_reference_trade_date ?? undefined;
-    const { startDate: intervalStartTradeDate, endDate: parsedIntervalEndTradeDate } =
+    const baseTradeDate = result.resolved_reference_trade_date ?? undefined;
+    const { startDate: parsedIntervalStartTradeDate, endDate: parsedIntervalEndTradeDate } =
       parseMarketDateRange(result.interval.trade_date);
-    const intervalEndTradeDate = parsedIntervalEndTradeDate ?? result.resolved_reference_trade_date ?? undefined;
+    const fallbackEnd = parsedIntervalEndTradeDate ?? result.resolved_reference_trade_date ?? undefined;
     const sourcePathTrimmed = sourcePath.trim() || undefined;
     return result.interval.gain_top
       .map((item) => {
@@ -247,23 +248,25 @@ export default function MarketAnalysisPage() {
         if (!tsCode) {
           return null;
         }
+        const start = item.start_date ?? parsedIntervalStartTradeDate;
+        const end = item.end_date ?? fallbackEnd;
         return {
           tsCode,
-          tradeDate,
-          intervalStartTradeDate: item.start_date ?? intervalStartTradeDate,
-          intervalEndTradeDate: item.end_date ?? intervalEndTradeDate,
+          tradeDate: carryInterval ? baseTradeDate : (start ?? baseTradeDate),
+          intervalStartTradeDate: carryInterval ? start : undefined,
+          intervalEndTradeDate: carryInterval ? end : undefined,
           sourcePath: sourcePathTrimmed,
           name: getRankItemDisplayName(item),
         };
       })
       .filter(isNonNull);
-  }, [result, sourcePath]);
+  }, [result, sourcePath, carryInterval]);
 
   const subIntervalGainNavigationItems = useMemo(() => {
     if (!result) {
       return [];
     }
-    const tradeDate = result.resolved_reference_trade_date ?? undefined;
+    const baseTradeDate = result.resolved_reference_trade_date ?? undefined;
     const sourcePathTrimmed = sourcePath.trim() || undefined;
     return result.interval.sub_interval_gain_top
       .map((item) => {
@@ -271,17 +274,19 @@ export default function MarketAnalysisPage() {
         if (!tsCode) {
           return null;
         }
+        const start = item.start_date ?? undefined;
+        const end = item.end_date ?? result.resolved_reference_trade_date ?? undefined;
         return {
           tsCode,
-          tradeDate,
-          intervalStartTradeDate: item.start_date ?? undefined,
-          intervalEndTradeDate: item.end_date ?? result.resolved_reference_trade_date ?? undefined,
+          tradeDate: carryInterval ? baseTradeDate : (start ?? baseTradeDate),
+          intervalStartTradeDate: carryInterval ? start : undefined,
+          intervalEndTradeDate: carryInterval ? end : undefined,
           sourcePath: sourcePathTrimmed,
           name: getRankItemDisplayName(item),
         };
       })
       .filter(isNonNull);
-  }, [result, sourcePath]);
+  }, [result, sourcePath, carryInterval]);
 
   const dailyGainNavigationItems = useMemo(() => {
     if (!result) {
@@ -389,6 +394,16 @@ export default function MarketAnalysisPage() {
                   {board}
                 </option>
               ))}
+            </select>
+          </label>
+          <label className="scene-layer-field">
+            <span>跳转携带</span>
+            <select
+              value={carryInterval ? "interval" : "start"}
+              onChange={(event) => setCarryInterval(event.target.value === "interval")}
+            >
+              <option value="interval">带入区间</option>
+              <option value="start">带入起点</option>
             </select>
           </label>
         </div>
@@ -544,6 +559,9 @@ export default function MarketAnalysisPage() {
                       {result.interval.gain_top.map((item, index) => {
                         const tsCode = getRankItemTsCode(item);
                         const displayName = getRankItemDisplayName(item);
+                        const baseTradeDate = result.resolved_reference_trade_date ?? undefined;
+                        const start = item.start_date ?? parseMarketDateRange(result.interval.trade_date).startDate;
+                        const end = item.end_date ?? parseMarketDateRange(result.interval.trade_date).endDate ?? baseTradeDate;
                         return (
                           <tr key={`interval-gain-${item.name}`}>
                             <td>{index + 1}</td>
@@ -553,9 +571,9 @@ export default function MarketAnalysisPage() {
                                 <DetailsLink
                                   className="scene-layer-market-stock-link"
                                   tsCode={splitTsCode(tsCode)}
-                                  tradeDate={result.resolved_reference_trade_date ?? undefined}
-                                  intervalStartTradeDate={item.start_date ?? parseMarketDateRange(result.interval.trade_date).startDate}
-                                  intervalEndTradeDate={item.end_date ?? parseMarketDateRange(result.interval.trade_date).endDate ?? result.resolved_reference_trade_date ?? undefined}
+                                  tradeDate={carryInterval ? baseTradeDate : (start ?? baseTradeDate)}
+                                  intervalStartTradeDate={carryInterval ? start : undefined}
+                                  intervalEndTradeDate={carryInterval ? end : undefined}
                                   sourcePath={sourcePath.trim() || undefined}
                                   title={`查看 ${item.name} 详情`}
                                   navigationItems={intervalGainNavigationItems}
@@ -592,6 +610,9 @@ export default function MarketAnalysisPage() {
                       {result.interval.sub_interval_gain_top.map((item, index) => {
                         const tsCode = getRankItemTsCode(item);
                         const displayName = getRankItemDisplayName(item);
+                        const baseTradeDate = result.resolved_reference_trade_date ?? undefined;
+                        const start = item.start_date ?? undefined;
+                        const end = item.end_date ?? baseTradeDate;
                         return (
                           <tr key={`sub-interval-gain-${item.name}-${item.start_date ?? ""}-${item.end_date ?? ""}`}>
                             <td>{index + 1}</td>
@@ -601,9 +622,9 @@ export default function MarketAnalysisPage() {
                                 <DetailsLink
                                   className="scene-layer-market-stock-link"
                                   tsCode={splitTsCode(tsCode)}
-                                  tradeDate={result.resolved_reference_trade_date ?? undefined}
-                                  intervalStartTradeDate={item.start_date ?? undefined}
-                                  intervalEndTradeDate={item.end_date ?? result.resolved_reference_trade_date ?? undefined}
+                                  tradeDate={carryInterval ? baseTradeDate : (start ?? baseTradeDate)}
+                                  intervalStartTradeDate={carryInterval ? start : undefined}
+                                  intervalEndTradeDate={carryInterval ? end : undefined}
                                   sourcePath={sourcePath.trim() || undefined}
                                   title={`查看 ${item.name} 详情`}
                                   navigationItems={subIntervalGainNavigationItems}
@@ -718,7 +739,11 @@ export default function MarketAnalysisPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {contributionResult.contributors.map((item, index) => (
+                  {contributionResult.contributors.map((item, index) => {
+                    const baseTradeDate = contributionResult.trade_date ?? result?.resolved_reference_trade_date ?? undefined;
+                    const start = contributionResult.scope === "interval" ? contributionResult.start_date ?? undefined : undefined;
+                    const end = contributionResult.scope === "interval" ? contributionResult.end_date ?? result?.resolved_reference_trade_date ?? undefined : undefined;
+                    return (
                     <tr key={`${item.ts_code}-${index}`}>
                       <td>{index + 1}</td>
                       <td>{item.ts_code}</td>
@@ -726,17 +751,9 @@ export default function MarketAnalysisPage() {
                          <DetailsLink
                            className="scene-layer-market-stock-link"
                            tsCode={splitTsCode(item.ts_code)}
-                           tradeDate={contributionResult.trade_date ?? result?.resolved_reference_trade_date ?? undefined}
-                           intervalStartTradeDate={
-                             contributionResult.scope === "interval"
-                               ? contributionResult.start_date ?? undefined
-                               : undefined
-                           }
-                           intervalEndTradeDate={
-                             contributionResult.scope === "interval"
-                               ? contributionResult.end_date ?? result?.resolved_reference_trade_date ?? undefined
-                               : undefined
-                           }
+                           tradeDate={(carryInterval || contributionResult.scope !== "interval") ? baseTradeDate : (start ?? baseTradeDate)}
+                           intervalStartTradeDate={carryInterval ? start : undefined}
+                           intervalEndTradeDate={carryInterval ? end : undefined}
                            sourcePath={sourcePath.trim() || undefined}
                            title={`查看 ${item.name ?? item.ts_code} 详情`}
                            navigationItems={detailNavigationItems}
@@ -747,7 +764,8 @@ export default function MarketAnalysisPage() {
                       <td>{item.industry ?? "--"}</td>
                       <td className={getPercentToneClass(item.contribution_pct)}>{formatPercent(item.contribution_pct)}</td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

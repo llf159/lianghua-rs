@@ -6,10 +6,10 @@ import {
   type CyqChenKlineRow,
   type CyqChenSingleStockData,
   type CyqChenSnapshot,
-  type CyqChenStrategyPageData,
   type CyqChenStrategyDraft,
 } from '../../apis/cyqChen'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
+import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
 import './css/DetailsPage.css'
 import './css/CyqChenPage.css'
 
@@ -58,6 +58,16 @@ type CyqChenChartFocus = {
 
 type ChipPeakMode = 'total' | 'main' | 'retail'
 
+const CYQ_CHEN_DRAFT_STORAGE_KEY = 'lh_cyq_chen_test_draft_v1'
+
+type CyqChenTestDraft = {
+  tsCodeInput: string
+  startDateInput: string
+  endDateInput: string
+  warmupDaysInput: string
+  bucketPctInput: string
+}
+
 const DEFAULT_VISIBLE_BARS = 90
 const MIN_VISIBLE_BARS = 20
 const CHART_MIN_RIGHT_ALIGNED_SLOTS = 60
@@ -77,6 +87,31 @@ const CHIP_COLOR_RETAIL_TRAPPED = '#9cc8e6'
 
 function cloneDefaultStrategies() {
   return DEFAULT_STRATEGIES.map((strategy) => ({ ...strategy }))
+}
+
+function readCyqChenDraft(): CyqChenTestDraft {
+  const fallback: CyqChenTestDraft = {
+    tsCodeInput: '000001',
+    startDateInput: '',
+    endDateInput: '',
+    warmupDaysInput: '120',
+    bucketPctInput: '1',
+  }
+  const parsed = readJsonStorage<Partial<CyqChenTestDraft>>(
+    typeof window === 'undefined' ? null : window.localStorage,
+    CYQ_CHEN_DRAFT_STORAGE_KEY,
+  )
+  if (!parsed) {
+    return fallback
+  }
+
+  return {
+    tsCodeInput: typeof parsed.tsCodeInput === 'string' ? parsed.tsCodeInput : fallback.tsCodeInput,
+    startDateInput: typeof parsed.startDateInput === 'string' ? parsed.startDateInput : fallback.startDateInput,
+    endDateInput: typeof parsed.endDateInput === 'string' ? parsed.endDateInput : fallback.endDateInput,
+    warmupDaysInput: typeof parsed.warmupDaysInput === 'string' ? parsed.warmupDaysInput : fallback.warmupDaysInput,
+    bucketPctInput: typeof parsed.bucketPctInput === 'string' ? parsed.bucketPctInput : fallback.bucketPctInput,
+  }
 }
 
 function formatNumber(value: number | null | undefined, digits = 2) {
@@ -262,7 +297,7 @@ function chipModeLabel(mode: ChipPeakMode) {
   if (mode === 'retail') {
     return '散户'
   }
-  return '合计'
+  return '混合'
 }
 
 function chipProfitState(price: number, close: number | null) {
@@ -301,12 +336,14 @@ function CyqChenProjectChart({
   snapshot,
   selectedTradeDate,
   chipPeakMode,
+  onChipPeakModeChange,
   onSelectTradeDate,
 }: {
   kline: CyqChenKlineRow[]
   snapshot: CyqChenSnapshot | null
   selectedTradeDate: string
   chipPeakMode: ChipPeakMode
+  onChipPeakModeChange: (mode: ChipPeakMode) => void
   onSelectTradeDate: (tradeDate: string) => void
 }) {
   const [visibleBarCount, setVisibleBarCount] = useState(DEFAULT_VISIBLE_BARS)
@@ -428,6 +465,30 @@ function CyqChenProjectChart({
               }
             }}
           >
+            {reserveCyqPanelWidth ? (
+              <div
+                className="details-chart-cyq-holder-switch"
+                role="tablist"
+                aria-label="筹码分布显示"
+                onPointerDown={(event) => {
+                  event.stopPropagation()
+                }}
+              >
+                {(['total', 'main', 'retail'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={chipPeakMode === mode ? 'is-active' : ''}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      onChipPeakModeChange(mode)
+                    }}
+                  >
+                    {chipModeLabel(mode)}
+                  </button>
+                ))}
+              </div>
+            ) : null}
             {domain && visibleItems.length > 0 ? (() => {
               const yAt = (value: number) =>
                 CHART_MARGIN.top + (domain.max - value) / (domain.max - domain.min) * plotHeight
@@ -736,16 +797,14 @@ function snapshotLabel(snapshot: CyqChenSnapshot | null) {
 }
 
 export default function CyqChenPage() {
-  const [tsCodeInput, setTsCodeInput] = useState('000001')
-  const [startDateInput, setStartDateInput] = useState('')
-  const [endDateInput, setEndDateInput] = useState('')
-  const [warmupDaysInput, setWarmupDaysInput] = useState('120')
-  const [bucketPctInput, setBucketPctInput] = useState('1')
+  const persistedDraft = useMemo(() => readCyqChenDraft(), [])
+  const [tsCodeInput, setTsCodeInput] = useState(persistedDraft.tsCodeInput)
+  const [startDateInput, setStartDateInput] = useState(persistedDraft.startDateInput)
+  const [endDateInput, setEndDateInput] = useState(persistedDraft.endDateInput)
+  const [warmupDaysInput, setWarmupDaysInput] = useState(persistedDraft.warmupDaysInput)
+  const [bucketPctInput, setBucketPctInput] = useState(persistedDraft.bucketPctInput)
   const [strategies, setStrategies] = useState<CyqChenStrategyDraft[]>(() => cloneDefaultStrategies())
   const [sourcePath, setSourcePath] = useState('')
-  const [strategyFilePath, setStrategyFilePath] = useState('')
-  const [strategyFileExists, setStrategyFileExists] = useState(false)
-  const [strategyLoading, setStrategyLoading] = useState(false)
   const [result, setResult] = useState<CyqChenSingleStockData | null>(null)
   const [savedRuns, setSavedRuns] = useState<SavedRun[]>([])
   const [selectedTradeDate, setSelectedTradeDate] = useState('')
@@ -770,11 +829,15 @@ export default function CyqChenPage() {
     [selectedSnapshot, chipPeakMode],
   )
 
-  function applyStrategyPage(page: CyqChenStrategyPageData) {
-    setStrategies(page.strategies.map((strategy) => ({ ...strategy })))
-    setStrategyFilePath(page.filePath)
-    setStrategyFileExists(page.exists)
-  }
+  useEffect(() => {
+    writeJsonStorage(typeof window === 'undefined' ? null : window.localStorage, CYQ_CHEN_DRAFT_STORAGE_KEY, {
+      tsCodeInput,
+      startDateInput,
+      endDateInput,
+      warmupDaysInput,
+      bucketPctInput,
+    })
+  }, [bucketPctInput, endDateInput, startDateInput, tsCodeInput, warmupDaysInput])
 
   function normalizeStrategiesForSave() {
     const normalizedStrategies = strategies.map((strategy) => ({
@@ -792,28 +855,10 @@ export default function CyqChenPage() {
     return normalizedStrategies
   }
 
-  async function loadStrategyFile() {
-    setStrategyLoading(true)
-    setError('')
-    try {
-      const nextSourcePath = sourcePath || await ensureManagedSourcePath()
-      setSourcePath(nextSourcePath)
-      const page = await getCyqChenStrategyPage(nextSourcePath)
-      applyStrategyPage(page)
-      setNotice(page.exists ? '已读取 chip_change_rule.toml。' : '策略文件不存在，已载入默认测试配置。')
-    } catch (loadError) {
-      setError(`读取筹码策略失败: ${String(loadError)}`)
-      setNotice('')
-    } finally {
-      setStrategyLoading(false)
-    }
-  }
-
   useEffect(() => {
     let canceled = false
 
     async function initStrategyFile() {
-      setStrategyLoading(true)
       setError('')
       try {
         const nextSourcePath = await ensureManagedSourcePath()
@@ -823,17 +868,11 @@ export default function CyqChenPage() {
         }
         setSourcePath(nextSourcePath)
         setStrategies(page.strategies.map((strategy) => ({ ...strategy })))
-        setStrategyFilePath(page.filePath)
-        setStrategyFileExists(page.exists)
         setNotice(page.exists ? '已读取 chip_change_rule.toml。' : '策略文件不存在，已载入默认测试配置。')
       } catch (loadError) {
         if (!canceled) {
           setError(`读取筹码策略失败: ${String(loadError)}`)
           setNotice('')
-        }
-      } finally {
-        if (!canceled) {
-          setStrategyLoading(false)
         }
       }
     }
@@ -935,29 +974,8 @@ export default function CyqChenPage() {
         </div>
         <div className="cyq-chen-run-row">
           <button className="cyq-chen-primary-btn cyq-chen-run-btn" type="button" onClick={runTest} disabled={loading}>
-            {loading ? '计算中...' : '计算筹码测试'}
+            {loading ? '计算中...' : '计算'}
           </button>
-        </div>
-
-        <div className="cyq-chen-section-head">
-          <strong>策略来源</strong>
-          <div className="cyq-chen-actions">
-            <button type="button" className="cyq-chen-secondary-btn" onClick={() => void loadStrategyFile()} disabled={strategyLoading}>
-              {strategyLoading ? '读取中...' : '重新读取'}
-            </button>
-          </div>
-        </div>
-
-        <div className="cyq-chen-strategy-source">
-          <div>
-            <span>当前文件</span>
-            <strong>{strategyFileExists ? strategyFilePath : '未落盘，使用默认测试策略'}</strong>
-          </div>
-          <div>
-            <span>策略数量</span>
-            <strong>{strategies.length}</strong>
-          </div>
-          <p>筹码变动策略请到“策略管理”页面底部编辑。</p>
         </div>
 
         {error ? <div className="cyq-chen-error">{error}</div> : null}
@@ -1052,18 +1070,6 @@ export default function CyqChenPage() {
               <strong>K 线与筹码分布</strong>
               <span>{result?.kline.length ?? 0} 根</span>
             </div>
-            <div className="cyq-chen-chip-mode-switch" role="tablist" aria-label="筹码峰显示">
-              {(['total', 'main', 'retail'] as const).map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  className={chipPeakMode === mode ? 'is-active' : ''}
-                  onClick={() => setChipPeakMode(mode)}
-                >
-                  {chipModeLabel(mode)}
-                </button>
-              ))}
-            </div>
             <div className="cyq-chen-chip-legend" aria-label="筹码颜色">
               <span><i style={{ background: CHIP_COLOR_MAIN_PROFIT }} />主力盈利</span>
               <span><i style={{ background: CHIP_COLOR_MAIN_TRAPPED }} />主力套牢</span>
@@ -1076,6 +1082,7 @@ export default function CyqChenPage() {
             snapshot={selectedSnapshot}
             selectedTradeDate={selectedSnapshot?.tradeDate ?? selectedTradeDate}
             chipPeakMode={chipPeakMode}
+            onChipPeakModeChange={setChipPeakMode}
             onSelectTradeDate={setSelectedTradeDate}
           />
         </div>
