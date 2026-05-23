@@ -8,13 +8,16 @@ use std::{
 use duckdb::{Appender, Connection, params};
 use rayon::prelude::*;
 
-use crate::data::{
-    DataReader, RowData,
-    cyq_chen::{
-        ChenChipConfig, ChenChipSnapshot, CompiledChipChangeConfig,
-        compute_chen_chip_snapshots_with_compiled_config, load_compiled_chip_change_config,
+use crate::{
+    data::{
+        DataReader, RowData, RuntimeKeyCollectOptions, collect_runtime_keys_from_expr_programs,
+        cyq_chen::{
+            ChenChipConfig, ChenChipSnapshot, CompiledChipChangeConfig,
+            compute_chen_chip_snapshots_with_compiled_config, load_compiled_chip_change_config,
+        },
+        cyq_chen_db_path, load_trade_date_list, source_db_path,
     },
-    cyq_chen_db_path, load_trade_date_list, source_db_path,
+    download::runner::{DownloadProgress, DownloadProgressCallback},
 };
 
 const CYQ_CHEN_SNAPSHOT_TABLE: &str = "cyq_chen_snapshot";
@@ -23,6 +26,9 @@ const DEFAULT_ADJ_TYPE: &str = "qfq";
 const CYQ_CHEN_GROUP_SIZE: usize = 128;
 const CYQ_CHEN_QUEUE_BOUND: usize = 8;
 const CYQ_CHEN_FLUSH_BATCH_SIZE: usize = 32;
+const CYQ_CHEN_ALWAYS_RUNTIME_KEYS: [&str; 5] = ["O", "H", "L", "C", "TURNOVER_RATE"];
+const CYQ_CHEN_INJECTED_RUNTIME_KEYS: [&str; 5] =
+    ["RATEO", "RATEH", "RATEL", "RATEC", "MAIN_CHIP_RATIO"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CyqChenRebuildSummary {
@@ -337,6 +343,7 @@ fn compute_cyq_chen_stock_group_batch(
     chip_config: &CompiledChipChangeConfig,
     config: ChenChipConfig,
     ts_group: &[String],
+    on_stock_done: Option<&dyn Fn(&str)>,
 ) -> Result<CyqChenWriteBatch, String> {
     let mut batch = CyqChenWriteBatch::default();
     for ts_code in ts_group {
@@ -351,6 +358,9 @@ fn compute_cyq_chen_stock_group_batch(
         )?;
         if !stock.snapshots.is_empty() {
             batch.stocks.push(stock);
+        }
+        if let Some(on_stock_done) = on_stock_done {
+            on_stock_done(ts_code);
         }
     }
     Ok(batch)
@@ -485,6 +495,16 @@ pub fn rebuild_cyq_chen_all(
     start_date: Option<&str>,
     end_date: Option<&str>,
 ) -> Result<CyqChenRebuildSummary, String> {
+    rebuild_cyq_chen_all_with_progress(source_dir, config, start_date, end_date, None)
+}
+
+pub fn rebuild_cyq_chen_all_with_progress(
+    source_dir: &str,
+    config: ChenChipConfig,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+) -> Result<CyqChenRebuildSummary, String> {
     let cyq_chen_db = cyq_chen_db_path(source_dir);
     init_cyq_chen_db(&cyq_chen_db)?;
 
@@ -545,22 +565,67 @@ pub fn rebuild_cyq_chen_all(
     };
 
     let chip_config = load_compiled_chip_change_config(source_dir)?;
-    let reader = DataReader::new(source_dir)?;
+    let programs = chip_config
+        .strategies
+        .iter()
+        .map(|strategy| &strategy.when_ast)
+        .collect::<Vec<_>>();
+    let required_runtime_keys = collect_runtime_keys_from_expr_programs(
+        &programs,
+        RuntimeKeyCollectOptions {
+            always_keys: &CYQ_CHEN_ALWAYS_RUNTIME_KEYS,
+            injected_keys: &CYQ_CHEN_INJECTED_RUNTIME_KEYS,
+            aliases: &[],
+        },
+    );
+    let reader = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
     let ts_codes = reader.list_ts_code(DEFAULT_ADJ_TYPE, &load_start_date, &end_date)?;
     let cyq_chen_db_str = cyq_chen_db
         .to_str()
         .ok_or_else(|| "筹码库路径不是有效UTF-8".to_string())?
         .to_string();
+    if let Some(progress_cb) = progress_cb {
+        progress_cb(DownloadProgress {
+            phase: "compute_cyq_chen".to_string(),
+            finished: 0,
+            total: ts_codes.len(),
+            current_label: None,
+            message: format!(
+                "新筹码计算已开始，区间 {} 至 {}，共 {} 只股票。",
+                start_date,
+                end_date,
+                ts_codes.len()
+            ),
+        });
+    }
 
     let (tx, rx) = sync_channel(CYQ_CHEN_QUEUE_BOUND);
     let abort_tx = tx.clone();
     let writer_handle =
         thread::spawn(move || write_cyq_chen_batches_from_channel(&cyq_chen_db_str, rx, config));
 
+    let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
     let compute_result = ts_codes.par_chunks(CYQ_CHEN_GROUP_SIZE).try_for_each_with(
         tx,
         |sender, ts_group| -> Result<(), String> {
-            let worker_reader = DataReader::new(source_dir)?;
+            let worker_reader =
+                DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
+            let progress_stock_done = |ts_code: &str| {
+                if let Some(progress_cb) = progress_cb {
+                    let finished =
+                        finished_stock_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    progress_cb(DownloadProgress {
+                        phase: "compute_cyq_chen".to_string(),
+                        finished,
+                        total: ts_codes.len(),
+                        current_label: Some(ts_code.to_string()),
+                        message: format!(
+                            "新筹码计算中，已完成 {finished} / {} 只股票。",
+                            ts_codes.len()
+                        ),
+                    });
+                }
+            };
             let batch = compute_cyq_chen_stock_group_batch(
                 &worker_reader,
                 &load_start_date,
@@ -569,6 +634,7 @@ pub fn rebuild_cyq_chen_all(
                 &chip_config,
                 config,
                 ts_group,
+                Some(&progress_stock_done),
             )?;
             sender
                 .send(CyqChenWriteMessage::Batch(batch))
@@ -589,6 +655,15 @@ pub fn rebuild_cyq_chen_all(
 
     compute_result?;
     let (snapshot_rows, bin_rows) = writer_result?;
+    if let Some(progress_cb) = progress_cb {
+        progress_cb(DownloadProgress {
+            phase: "done".to_string(),
+            finished: ts_codes.len(),
+            total: ts_codes.len(),
+            current_label: None,
+            message: format!("新筹码计算完成，写入 {snapshot_rows} 条摘要和 {bin_rows} 条分桶。"),
+        });
+    }
 
     Ok(CyqChenRebuildSummary {
         snapshot_rows,

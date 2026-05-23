@@ -1,6 +1,9 @@
 const CHART_MAIN_WIDTH_RATIO_STORAGE_KEY = 'lh_chart_main_width_ratio_v1'
 const CHART_INDICATOR_WIDTH_RATIO_STORAGE_KEY = 'lh_chart_indicator_width_ratio_v1'
 const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_STORAGE_KEY = 'lh_details_nav_long_press_interval_seconds_v1'
+const DETAIL_CYQ_MODEL_STORAGE_KEY = 'lh_detail_cyq_model_v1'
+
+export type DetailCyqModel = 'legacy' | 'chen'
 
 export const CHART_MAIN_WIDTH_RATIO_DEFAULT = 0.36
 export const CHART_MAIN_WIDTH_RATIO_MIN = 0.1
@@ -11,6 +14,11 @@ export const CHART_INDICATOR_WIDTH_RATIO_MAX = 1.2
 export const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_DEFAULT = 1
 export const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MIN = 0.2
 export const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MAX = 10
+export const DETAIL_CYQ_MODEL_DEFAULT: DetailCyqModel = 'legacy'
+
+export function normalizeDetailCyqModel(value: string | null | undefined): DetailCyqModel {
+  return value === 'chen' ? 'chen' : DETAIL_CYQ_MODEL_DEFAULT
+}
 
 export function clampChartMainWidthRatio(value: number) {
   if (!Number.isFinite(value)) {
@@ -135,5 +143,26 @@ export function writeStoredDetailsNavLongPressIntervalSeconds(nextValue: number)
   window.localStorage.setItem(
     DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_STORAGE_KEY,
     normalizedValue.toString(),
+  )
+}
+
+export function readStoredDetailCyqModel() {
+  if (typeof window === 'undefined') {
+    return DETAIL_CYQ_MODEL_DEFAULT
+  }
+
+  return normalizeDetailCyqModel(
+    window.localStorage.getItem(DETAIL_CYQ_MODEL_STORAGE_KEY),
+  )
+}
+
+export function writeStoredDetailCyqModel(nextValue: DetailCyqModel) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  window.localStorage.setItem(
+    DETAIL_CYQ_MODEL_STORAGE_KEY,
+    normalizeDetailCyqModel(nextValue),
   )
 }

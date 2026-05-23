@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::{
     data::{RowData, ScoreConfig},
-    data::{cyq_db_path, result_db_path, score_rule_path, source_db_path},
+    data::{cyq_chen_db_path, cyq_db_path, result_db_path, score_rule_path, source_db_path},
     download::ind_calc::{cache_ind_build, calc_inds_with_cache},
     scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map},
     ui_tools_feat::{
@@ -209,6 +209,12 @@ pub struct DetailCyqBin {
     pub price_high: f64,
     pub chip: f64,
     pub chip_pct: f64,
+    pub main_chip: Option<f64>,
+    pub main_chip_pct: Option<f64>,
+    pub retail_chip: Option<f64>,
+    pub retail_chip_pct: Option<f64>,
+    pub total_chip: Option<f64>,
+    pub total_chip_pct: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -221,6 +227,7 @@ pub struct DetailCyqSnapshot {
 #[derive(Debug, Serialize, Clone)]
 pub struct StockDetailCyqData {
     pub resolved_ts_code: String,
+    pub model: String,
     pub factor: Option<u32>,
     pub snapshots: Vec<DetailCyqSnapshot>,
 }
@@ -330,6 +337,19 @@ fn open_cyq_conn(source_path: &str) -> Result<Option<Connection>, String> {
         .map_err(|e| format!("打开筹码库失败: {e}"))
 }
 
+fn open_cyq_chen_conn(source_path: &str) -> Result<Option<Connection>, String> {
+    let cyq_chen_db = cyq_chen_db_path(source_path);
+    if !cyq_chen_db.exists() {
+        return Ok(None);
+    }
+    let cyq_chen_db_str = cyq_chen_db
+        .to_str()
+        .ok_or_else(|| "新筹码库路径不是有效UTF-8".to_string())?;
+    Connection::open(cyq_chen_db_str)
+        .map(Some)
+        .map_err(|e| format!("打开新筹码库失败: {e}"))
+}
+
 fn cyq_table_exists(conn: &Connection, table_name: &str) -> Result<bool, String> {
     let count = conn
         .query_row(
@@ -346,6 +366,7 @@ fn query_stock_detail_cyq(source_path: &str, ts_code: &str) -> Result<StockDetai
     let Some(conn) = open_cyq_conn(source_path)? else {
         return Ok(StockDetailCyqData {
             resolved_ts_code: normalized_ts_code,
+            model: "legacy".to_string(),
             factor: None,
             snapshots: Vec::new(),
         });
@@ -353,6 +374,7 @@ fn query_stock_detail_cyq(source_path: &str, ts_code: &str) -> Result<StockDetai
     if !cyq_table_exists(&conn, "cyq_snapshot")? || !cyq_table_exists(&conn, "cyq_bin")? {
         return Ok(StockDetailCyqData {
             resolved_ts_code: normalized_ts_code,
+            model: "legacy".to_string(),
             factor: None,
             snapshots: Vec::new(),
         });
@@ -409,6 +431,7 @@ fn query_stock_detail_cyq(source_path: &str, ts_code: &str) -> Result<StockDetai
     if snapshots.is_empty() {
         return Ok(StockDetailCyqData {
             resolved_ts_code: normalized_ts_code,
+            model: "legacy".to_string(),
             factor,
             snapshots,
         });
@@ -453,12 +476,168 @@ fn query_stock_detail_cyq(source_path: &str, ts_code: &str) -> Result<StockDetai
                 .map_err(|e| format!("读取筹码价格上沿失败: {e}"))?,
             chip: row.get(4).map_err(|e| format!("读取筹码值失败: {e}"))?,
             chip_pct: row.get(5).map_err(|e| format!("读取筹码占比失败: {e}"))?,
+            main_chip: None,
+            main_chip_pct: None,
+            retail_chip: None,
+            retail_chip_pct: None,
+            total_chip: None,
+            total_chip_pct: None,
         });
     }
 
     Ok(StockDetailCyqData {
         resolved_ts_code: normalized_ts_code,
+        model: "legacy".to_string(),
         factor,
+        snapshots,
+    })
+}
+
+fn query_stock_detail_cyq_chen(
+    source_path: &str,
+    ts_code: &str,
+) -> Result<StockDetailCyqData, String> {
+    let normalized_ts_code = normalize_ts_code(ts_code);
+    let Some(conn) = open_cyq_chen_conn(source_path)? else {
+        return Ok(StockDetailCyqData {
+            resolved_ts_code: normalized_ts_code,
+            model: "chen".to_string(),
+            factor: None,
+            snapshots: Vec::new(),
+        });
+    };
+    if !cyq_table_exists(&conn, "cyq_chen_snapshot")? || !cyq_table_exists(&conn, "cyq_chen_bin")? {
+        return Ok(StockDetailCyqData {
+            resolved_ts_code: normalized_ts_code,
+            model: "chen".to_string(),
+            factor: None,
+            snapshots: Vec::new(),
+        });
+    }
+
+    let mut snapshot_stmt = conn
+        .prepare(
+            r#"
+            SELECT trade_date, close
+            FROM cyq_chen_snapshot
+            WHERE ts_code = ? AND adj_type = ?
+            ORDER BY trade_date ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译新筹码摘要查询失败: {e}"))?;
+    let mut snapshot_rows = snapshot_stmt
+        .query(params![&normalized_ts_code, DEFAULT_ADJ_TYPE])
+        .map_err(|e| format!("查询新筹码摘要失败: {e}"))?;
+
+    let mut snapshots = Vec::new();
+    while let Some(row) = snapshot_rows
+        .next()
+        .map_err(|e| format!("读取新筹码摘要失败: {e}"))?
+    {
+        let trade_date: String = row
+            .get(0)
+            .map_err(|e| format!("读取新筹码摘要日期失败: {e}"))?;
+        let close: Option<f64> = row
+            .get(1)
+            .map_err(|e| format!("读取新筹码摘要收盘价失败: {e}"))?;
+        snapshots.push(DetailCyqSnapshot {
+            trade_date,
+            close: close.unwrap_or(0.0),
+            bins: Vec::new(),
+        });
+    }
+
+    if snapshots.is_empty() {
+        return Ok(StockDetailCyqData {
+            resolved_ts_code: normalized_ts_code,
+            model: "chen".to_string(),
+            factor: None,
+            snapshots,
+        });
+    }
+
+    let mut snapshot_index_by_trade_date = HashMap::with_capacity(snapshots.len());
+    for (index, snapshot) in snapshots.iter().enumerate() {
+        snapshot_index_by_trade_date.insert(snapshot.trade_date.clone(), index);
+    }
+
+    let mut bin_stmt = conn
+        .prepare(
+            r#"
+            SELECT bin.trade_date, bin.price, bin.price_low, bin.price_high,
+                   bin.main_chip, bin.retail_chip, bin.total_chip,
+                   snap.main_total, snap.retail_total, snap.total_chips
+            FROM cyq_chen_bin bin
+            JOIN cyq_chen_snapshot snap
+              ON snap.ts_code = bin.ts_code
+             AND snap.trade_date = bin.trade_date
+             AND snap.adj_type = bin.adj_type
+            WHERE bin.ts_code = ? AND bin.adj_type = ?
+            ORDER BY bin.trade_date ASC, bin.bin_index ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译新筹码分布查询失败: {e}"))?;
+    let mut bin_rows = bin_stmt
+        .query(params![&normalized_ts_code, DEFAULT_ADJ_TYPE])
+        .map_err(|e| format!("查询新筹码分布失败: {e}"))?;
+
+    while let Some(row) = bin_rows
+        .next()
+        .map_err(|e| format!("读取新筹码分布失败: {e}"))?
+    {
+        let trade_date: String = row
+            .get(0)
+            .map_err(|e| format!("读取新筹码分布日期失败: {e}"))?;
+        let Some(snapshot_index) = snapshot_index_by_trade_date.get(&trade_date).copied() else {
+            continue;
+        };
+        let main_chip: f64 = row
+            .get(4)
+            .map_err(|e| format!("读取新筹码主力值失败: {e}"))?;
+        let retail_chip: f64 = row
+            .get(5)
+            .map_err(|e| format!("读取新筹码散户值失败: {e}"))?;
+        let total_chip: f64 = row
+            .get(6)
+            .map_err(|e| format!("读取新筹码混合值失败: {e}"))?;
+        let main_total: f64 = row
+            .get(7)
+            .map_err(|e| format!("读取新筹码主力总量失败: {e}"))?;
+        let retail_total: f64 = row
+            .get(8)
+            .map_err(|e| format!("读取新筹码散户总量失败: {e}"))?;
+        let total_chips: f64 = row.get(9).map_err(|e| format!("读取新筹码总量失败: {e}"))?;
+        let pct = |value: f64, total: f64| {
+            if total.abs() <= f64::EPSILON {
+                0.0
+            } else {
+                value / total
+            }
+        };
+
+        snapshots[snapshot_index].bins.push(DetailCyqBin {
+            price: row.get(1).map_err(|e| format!("读取新筹码价格失败: {e}"))?,
+            price_low: row
+                .get(2)
+                .map_err(|e| format!("读取新筹码价格下沿失败: {e}"))?,
+            price_high: row
+                .get(3)
+                .map_err(|e| format!("读取新筹码价格上沿失败: {e}"))?,
+            chip: total_chip,
+            chip_pct: pct(total_chip, total_chips),
+            main_chip: Some(main_chip),
+            main_chip_pct: Some(pct(main_chip, main_total)),
+            retail_chip: Some(retail_chip),
+            retail_chip_pct: Some(pct(retail_chip, retail_total)),
+            total_chip: Some(total_chip),
+            total_chip_pct: Some(pct(total_chip, total_chips)),
+        });
+    }
+
+    Ok(StockDetailCyqData {
+        resolved_ts_code: normalized_ts_code,
+        model: "chen".to_string(),
+        factor: None,
         snapshots,
     })
 }
@@ -1915,6 +2094,7 @@ pub fn get_stock_detail_strategy_snapshot(
 pub fn get_stock_detail_cyq(
     source_path: String,
     ts_code: String,
+    chip_model: Option<String>,
 ) -> Result<StockDetailCyqData, String> {
     if source_path.trim().is_empty() {
         return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
@@ -1922,7 +2102,16 @@ pub fn get_stock_detail_cyq(
     if ts_code.trim().is_empty() {
         return Err("股票代码不能为空".to_string());
     }
-    query_stock_detail_cyq(&source_path, &ts_code)
+    match chip_model
+        .as_deref()
+        .unwrap_or("legacy")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "chen" | "new" => query_stock_detail_cyq_chen(&source_path, &ts_code),
+        _ => query_stock_detail_cyq(&source_path, &ts_code),
+    }
 }
 
 pub fn get_stock_detail_realtime(

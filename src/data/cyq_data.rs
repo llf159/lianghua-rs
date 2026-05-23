@@ -8,10 +8,13 @@ use std::{
 use duckdb::{Appender, Connection, params};
 use rayon::prelude::*;
 
-use crate::data::{
-    DataReader, RowData,
-    cyq::{CyqConfig, CyqSnapshot, compute_cyq_snapshots_from_row_data},
-    cyq_db_path, load_trade_date_list, source_db_path,
+use crate::{
+    data::{
+        DataReader, RowData,
+        cyq::{CyqConfig, CyqSnapshot, compute_cyq_snapshots_from_row_data},
+        cyq_db_path, load_trade_date_list, source_db_path,
+    },
+    download::runner::{DownloadProgress, DownloadProgressCallback},
 };
 
 const CYQ_SNAPSHOT_TABLE: &str = "cyq_snapshot";
@@ -20,6 +23,7 @@ const DEFAULT_ADJ_TYPE: &str = "qfq";
 const CYQ_GROUP_SIZE: usize = 128;
 const CYQ_QUEUE_BOUND: usize = 8;
 const CYQ_FLUSH_BATCH_SIZE: usize = 32;
+const CYQ_RUNTIME_KEYS: [&str; 5] = ["O", "H", "L", "C", "TURNOVER_RATE"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CyqRebuildSummary {
@@ -391,6 +395,7 @@ fn compute_cyq_stock_group_batch(
     end_date: &str,
     config: CyqConfig,
     ts_group: &[String],
+    on_stock_done: Option<&dyn Fn(&str)>,
 ) -> Result<CyqWriteBatch, String> {
     let mut batch = CyqWriteBatch::default();
     for ts_code in ts_group {
@@ -404,6 +409,9 @@ fn compute_cyq_stock_group_batch(
         )?;
         if !stock.snapshots.is_empty() {
             batch.stocks.push(stock);
+        }
+        if let Some(on_stock_done) = on_stock_done {
+            on_stock_done(ts_code);
         }
     }
     Ok(batch)
@@ -739,6 +747,7 @@ pub fn maintain_cyq_incremental_if_db_exists(
                 &end_date,
                 config,
                 ts_group,
+                None,
             )?;
             sender
                 .send(CyqWriteMessage::Batch(batch))
@@ -775,6 +784,16 @@ pub fn rebuild_cyq_all(
     config: CyqConfig,
     start_date: Option<&str>,
     end_date: Option<&str>,
+) -> Result<CyqRebuildSummary, String> {
+    rebuild_cyq_all_with_progress(source_dir, config, start_date, end_date, None)
+}
+
+pub fn rebuild_cyq_all_with_progress(
+    source_dir: &str,
+    config: CyqConfig,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<CyqRebuildSummary, String> {
     let cyq_db = cyq_db_path(source_dir);
     init_cyq_db(&cyq_db)?;
@@ -835,22 +854,58 @@ pub fn rebuild_cyq_all(
         });
     };
 
-    let reader = DataReader::new(source_dir)?;
+    let required_runtime_keys = CYQ_RUNTIME_KEYS
+        .iter()
+        .map(|key| (*key).to_string())
+        .collect();
+    let reader = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
     let ts_codes = reader.list_ts_code(DEFAULT_ADJ_TYPE, &load_start_date, &end_date)?;
     let cyq_db_str = cyq_db
         .to_str()
         .ok_or_else(|| "筹码库路径不是有效UTF-8".to_string())?
         .to_string();
+    if let Some(progress_cb) = progress_cb {
+        progress_cb(DownloadProgress {
+            phase: "compute_cyq".to_string(),
+            finished: 0,
+            total: ts_codes.len(),
+            current_label: None,
+            message: format!(
+                "筹码计算已开始，区间 {} 至 {}，共 {} 只股票。",
+                start_date,
+                end_date,
+                ts_codes.len()
+            ),
+        });
+    }
 
     let (tx, rx) = sync_channel(CYQ_QUEUE_BOUND);
     let abort_tx = tx.clone();
     let writer_handle =
         thread::spawn(move || write_cyq_batches_from_channel(&cyq_db_str, rx, config));
 
+    let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
     let compute_result = ts_codes.par_chunks(CYQ_GROUP_SIZE).try_for_each_with(
         tx,
         |sender, ts_group| -> Result<(), String> {
-            let worker_reader = DataReader::new(source_dir)?;
+            let worker_reader =
+                DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
+            let progress_stock_done = |ts_code: &str| {
+                if let Some(progress_cb) = progress_cb {
+                    let finished =
+                        finished_stock_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    progress_cb(DownloadProgress {
+                        phase: "compute_cyq".to_string(),
+                        finished,
+                        total: ts_codes.len(),
+                        current_label: Some(ts_code.to_string()),
+                        message: format!(
+                            "筹码计算中，已完成 {finished} / {} 只股票。",
+                            ts_codes.len()
+                        ),
+                    });
+                }
+            };
             let batch = compute_cyq_stock_group_batch(
                 &worker_reader,
                 &load_start_date,
@@ -858,6 +913,7 @@ pub fn rebuild_cyq_all(
                 &end_date,
                 config,
                 ts_group,
+                Some(&progress_stock_done),
             )?;
             sender
                 .send(CyqWriteMessage::Batch(batch))
@@ -878,6 +934,15 @@ pub fn rebuild_cyq_all(
 
     compute_result?;
     let (snapshot_rows, bin_rows) = writer_result?;
+    if let Some(progress_cb) = progress_cb {
+        progress_cb(DownloadProgress {
+            phase: "done".to_string(),
+            finished: ts_codes.len(),
+            total: ts_codes.len(),
+            current_label: None,
+            message: format!("筹码计算完成，写入 {snapshot_rows} 条摘要和 {bin_rows} 条分桶。"),
+        });
+    }
 
     Ok(CyqRebuildSummary {
         snapshot_rows,

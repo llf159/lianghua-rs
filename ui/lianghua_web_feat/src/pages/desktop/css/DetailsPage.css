@@ -657,6 +657,38 @@
   flex: 0 0 auto;
 }
 
+.details-chart-cyq-holder-switch {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid rgba(67, 88, 116, 0.18);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: 0 2px 8px rgba(24, 34, 48, 0.06);
+}
+
+.details-chart-cyq-holder-switch button {
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #536273;
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 7px;
+  cursor: pointer;
+}
+
+.details-chart-cyq-holder-switch button.is-active {
+  background: rgba(24, 34, 48, 0.1);
+  color: #202b3a;
+  font-weight: 700;
+}
+
 .details-chart-watch-action {
   position: absolute;
   right: 12px;

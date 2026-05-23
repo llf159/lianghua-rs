@@ -1,0 +1,4773 @@
+commit 54a2898751882a1601377f40b48183e51e7240c2
+Author: llf159 <3552145294@qq.com>
+Date:   Fri Mar 27 12:52:21 2026 +0800
+
+    优化数据库写入效率和内存峰值过高
+
+diff --git a/src/data/mod.rs b/src/data/mod.rs
+index f68f2a7..96f5018 100644
+--- a/src/data/mod.rs
++++ b/src/data/mod.rs
+@@ -509,16 +509,9 @@ pub struct IndData {
+ }
+ 
+ impl IndsData {
+-    pub fn load_inds(source_dir: &str) -> Result<Vec<IndData>, String> {
+-        let ind_path = ind_toml_path(source_dir);
+-        let ind_toml = fs::read_to_string(&ind_path).map_err(|e| {
+-            format!(
+-                "指标文件不存在或不可读: path={}, err={e}",
+-                ind_path.display()
+-            )
+-        })?;
++    pub fn parse_from_text(ind_toml: &str) -> Result<Vec<IndData>, String> {
+         let mut cfg: IndsData =
+-            toml::from_str(&ind_toml).map_err(|e| format!("指标文件格式错误: {e}"))?;
++            toml::from_str(ind_toml).map_err(|e| format!("指标文件格式错误: {e}"))?;
+ 
+         for ind in &mut cfg.ind {
+             ind.name = ind.name.trim().to_ascii_uppercase();
+@@ -528,6 +521,17 @@ impl IndsData {
+         Ok(cfg.ind)
+     }
+ 
++    pub fn load_inds(source_dir: &str) -> Result<Vec<IndData>, String> {
++        let ind_path = ind_toml_path(source_dir);
++        let ind_toml = fs::read_to_string(&ind_path).map_err(|e| {
++            format!(
++                "指标文件不存在或不可读: path={}, err={e}",
++                ind_path.display()
++            )
++        })?;
++        Self::parse_from_text(&ind_toml)
++    }
++
+     fn validate_inds(inds: &[IndData]) -> Result<(), String> {
+         let mut seen = HashSet::new();
+ 
+diff --git a/src/data/scoring_data.rs b/src/data/scoring_data.rs
+index 4238e80..0e10ff0 100644
+--- a/src/data/scoring_data.rs
++++ b/src/data/scoring_data.rs
+@@ -1,7 +1,8 @@
+-use duckdb::{Connection, params};
++use duckdb::{Appender, Connection, Transaction, params};
+ use std::collections::HashSet;
+ use std::fs::create_dir_all;
+ use std::path::Path;
++use std::sync::mpsc::Receiver;
+ use std::time;
+ // use std::fs::File;
+ // use std::io::{BufWriter, Write};
+@@ -30,6 +31,18 @@ pub struct ScoreDetails {
+     pub rule_score: f64,
+ }
+ 
++#[derive(Debug, Default)]
++pub struct ScoreBatch {
++    pub summary_rows: Vec<ScoreSummary>,
++    pub detail_rows: Vec<ScoreDetails>,
++}
++
++#[derive(Debug)]
++pub enum ScoreWriteMessage {
++    Batch(ScoreBatch),
++    Abort(String),
++}
++
+ impl ScoreSummary {
+     pub fn build(ts_code: &str, trade_dates: &[String], total_scores: &[f64]) -> Vec<Self> {
+         let mut sum: Vec<Self> = Vec::new();
+@@ -121,13 +134,19 @@ impl ScoreDetails {
+         let mut out = Vec::new();
+         for sin_rule in rule_score_series.iter() {
+             let rule_name = sin_rule.name.clone();
+-            if trade_dates.len() == sin_rule.series.len() {
++            if trade_dates.len() == sin_rule.series.len()
++                && trade_dates.len() == sin_rule.triggered.len()
++            {
+                 for i in 0..trade_dates.len() {
++                    if !sin_rule.triggered[i] {
++                        continue;
++                    }
++                    let rule_score = sin_rule.series[i];
+                     let mut rule_details = Self::default();
+                     rule_details.ts_code = ts_code.to_string();
+                     rule_details.rule_name = rule_name.clone();
+                     rule_details.trade_date = trade_dates[i].clone();
+-                    rule_details.rule_score = sin_rule.series[i];
++                    rule_details.rule_score = rule_score;
+                     out.push(rule_details);
+                 }
+             }
+@@ -223,6 +242,104 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
+     Ok(())
+ }
+ 
++fn delete_score_range(tx: &Transaction<'_>, start_date: &str, end_date: &str) -> Result<(), String> {
++    tx.execute(
++        "DELETE FROM score_summary WHERE trade_date >= ? AND trade_date <= ?",
++        params![start_date, end_date],
++    )
++    .map_err(|e| format!("删除score_summary旧数据失败:{e}"))?;
++    tx.execute(
++        "DELETE FROM score_details WHERE trade_date >= ? AND trade_date <= ?",
++        params![start_date, end_date],
++    )
++    .map_err(|e| format!("删除score_details旧数据失败:{e}"))?;
++    Ok(())
++}
++
++fn append_summary_rows(app: &mut Appender<'_>, rows: &[ScoreSummary]) -> Result<(), String> {
++    for row in rows {
++        app.append_row(params![
++            &row.ts_code,
++            &row.trade_date,
++            &row.total_score,
++            Option::<i64>::None
++        ])
++        .map_err(|e| format!("插入score_summary失败:{e}"))?;
++    }
++    Ok(())
++}
++
++fn append_detail_rows(app: &mut Appender<'_>, rows: &[ScoreDetails]) -> Result<(), String> {
++    for row in rows {
++        app.append_row(params![
++            &row.ts_code,
++            &row.trade_date,
++            &row.rule_name,
++            row.rule_score
++        ])
++        .map_err(|e| format!("插入score_details失败:{e}"))?;
++    }
++    Ok(())
++}
++
++pub fn write_score_batches_from_channel(
++    db_path: &str,
++    start_date: &str,
++    end_date: &str,
++    rx: Receiver<ScoreWriteMessage>,
++) -> Result<(), String> {
++    let time = time::Instant::now();
++    let mut conn = Connection::open(db_path).map_err(|e| format!("结果库连接失败:{e}"))?;
++    let tx = conn
++        .transaction()
++        .map_err(|e| format!("创建数据库事务失败:{e}"))?;
++
++    delete_score_range(&tx, start_date, end_date)?;
++
++    {
++        let mut summary_app = tx
++            .appender("score_summary")
++            .map_err(|e| format!("score_summary appender创建失败:{e}"))?;
++        let mut detail_app = tx
++            .appender("score_details")
++            .map_err(|e| format!("score_details appender创建失败:{e}"))?;
++
++        let mut batch_count = 0usize;
++        for message in rx {
++            let batch = match message {
++                ScoreWriteMessage::Batch(batch) => batch,
++                ScoreWriteMessage::Abort(reason) => {
++                    return Err(format!("评分计算中断，结果库回滚:{reason}"));
++                }
++            };
++
++            append_summary_rows(&mut summary_app, &batch.summary_rows)?;
++            append_detail_rows(&mut detail_app, &batch.detail_rows)?;
++            batch_count += 1;
++
++            if batch_count % 8 == 0 {
++                summary_app
++                    .flush()
++                    .map_err(|e| format!("刷新score_summary失败:{e}"))?;
++                detail_app
++                    .flush()
++                    .map_err(|e| format!("刷新score_details失败:{e}"))?;
++            }
++        }
++
++        summary_app
++            .flush()
++            .map_err(|e| format!("刷新score_summary失败:{e}"))?;
++        detail_app
++            .flush()
++            .map_err(|e| format!("刷新score_details失败:{e}"))?;
++    }
++
++    tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
++    println!("流式写入结果库耗时:{:.3?}", time.elapsed());
++    Ok(())
++}
++
+ pub fn row_into_rt(row_data: RowData) -> Result<Runtime, String> {
+     let mut rt = Runtime::default();
+     // let trade_date = row_data.trade_dates;
+diff --git a/src/download/runner.rs b/src/download/runner.rs
+index 0192911..9846890 100644
+--- a/src/download/runner.rs
++++ b/src/download/runner.rs
+@@ -524,7 +524,6 @@ fn download_first_all_market(
+         download_config.limit_calls_per_min,
+     )?;
+     let pool = build_download_pool(download_config.threads)?;
+-    let mut total = DownloadSummary::default();
+     let db_path = source_db_path(source_dir);
+     let db_path_str = db_path
+         .to_str()
+@@ -540,7 +539,57 @@ fn download_first_all_market(
+             .collect()
+     };
+ 
+-    let tasks = build_download_task(&ts_codes, start_date, end_date, adj_type, with_factors);
++    download_selected_stocks_with_context(
++        source_dir,
++        &effective_trade_date,
++        &client,
++        &pool,
++        &conn,
++        &mut indicator_columns_ready,
++        &ts_codes,
++        start_date,
++        end_date,
++        adj_type,
++        with_factors,
++        download_config.retry_times,
++        "首次全量下载开始",
++        "首次全量下载结束",
++        progress_cb,
++    )
++}
++
++#[allow(clippy::too_many_arguments)]
++fn download_selected_stocks_with_context(
++    source_dir: &str,
++    effective_trade_date: &str,
++    client: &TushareClient,
++    pool: &ThreadPool,
++    conn: &Connection,
++    indicator_columns_ready: &mut bool,
++    ts_codes: &[String],
++    start_date: &str,
++    end_date: &str,
++    adj_type: AdjType,
++    with_factors: bool,
++    retry_times: usize,
++    start_message: &str,
++    done_message: &str,
++    progress_cb: Option<&DownloadProgressCallback>,
++) -> Result<DownloadSummary, String> {
++    if ts_codes.is_empty() {
++        emit_progress(
++            progress_cb,
++            "done",
++            0,
++            0,
++            Some(effective_trade_date.to_string()),
++            "没有需要处理的股票。",
++        );
++        return Ok(DownloadSummary::default());
++    }
++
++    let mut total = DownloadSummary::default();
++    let tasks = build_download_task(ts_codes, start_date, end_date, adj_type, with_factors);
+     let total_tasks = tasks.len();
+     let mut processed_tasks = 0usize;
+     emit_progress(
+@@ -549,16 +598,16 @@ fn download_first_all_market(
+         0,
+         total_tasks,
+         None,
+-        format!("首次全量下载开始，共 {} 只股票待处理。", total_tasks),
++        format!("{start_message}，共 {total_tasks} 只股票待处理。"),
+     );
+ 
+-    for (batch_idx, batch) in tasks.chunks(download_config.threads.max(1)).enumerate() {
++    for (batch_idx, batch) in tasks.chunks(pool.current_num_threads().max(1)).enumerate() {
+         let prepared_batch = pool.install(|| client.prepare_stock_downloads(source_dir, batch));
+         let batch_summary = prepared_batch.summary();
+-        if !indicator_columns_ready && !prepared_batch.prepared_items.is_empty() {
++        if !*indicator_columns_ready && !prepared_batch.prepared_items.is_empty() {
+             let indicator_names = collect_indicator_names(&prepared_batch.prepared_items);
+-            ensure_indicator_columns(&conn, &indicator_names)?;
+-            indicator_columns_ready = true;
++            ensure_indicator_columns(conn, &indicator_names)?;
++            *indicator_columns_ready = true;
+         }
+         emit_progress(
+             progress_cb,
+@@ -572,7 +621,7 @@ fn download_first_all_market(
+                 batch.len()
+             ),
+         );
+-        write_prepared_stock_batch(&conn, &prepared_batch.prepared_items)?;
++        write_prepared_stock_batch(conn, &prepared_batch.prepared_items)?;
+         merge_summary(&mut total, batch_summary);
+         processed_tasks += batch.len();
+         emit_progress(
+@@ -585,29 +634,29 @@ fn download_first_all_market(
+         );
+     }
+ 
+-    if !total.failed_items.is_empty() && download_config.retry_times > 0 {
++    if !total.failed_items.is_empty() && retry_times > 0 {
+         let failed_tasks = keep_failed_tasks(tasks, &total.failed_items);
+         let retry_task_count = failed_tasks.len();
+         emit_progress(
+             progress_cb,
+             "retry_failed",
+             0,
+-            download_config.retry_times.max(1),
++            retry_times.max(1),
+             Some(format!("待重试 {} 只", retry_task_count)),
+             format!("共有 {} 只股票失败，准备进入重试阶段。", retry_task_count),
+         );
+         let retry_batch = retry_failed_downloads(
+-            &client,
++            client,
+             source_dir,
+             failed_tasks,
+-            download_config.retry_times,
+-            &pool,
++            retry_times,
++            pool,
+             progress_cb,
+         );
+         let retry_summary = retry_batch.summary();
+-        if !indicator_columns_ready && !retry_batch.prepared_items.is_empty() {
++        if !*indicator_columns_ready && !retry_batch.prepared_items.is_empty() {
+             let indicator_names = collect_indicator_names(&retry_batch.prepared_items);
+-            ensure_indicator_columns(&conn, &indicator_names)?;
++            ensure_indicator_columns(conn, &indicator_names)?;
+         }
+         emit_progress(
+             progress_cb,
+@@ -620,7 +669,7 @@ fn download_first_all_market(
+                 retry_batch.prepared_items.len()
+             ),
+         );
+-        write_prepared_stock_batch(&conn, &retry_batch.prepared_items)?;
++        write_prepared_stock_batch(conn, &retry_batch.prepared_items)?;
+ 
+         total.success_count += retry_summary.success_count;
+         total.saved_rows += retry_summary.saved_rows;
+@@ -628,16 +677,16 @@ fn download_first_all_market(
+         total.failed_items = retry_summary.failed_items;
+     }
+ 
+-    checkpoint_stock_data(&conn)?;
++    checkpoint_stock_data(conn)?;
+ 
+     emit_progress(
+         progress_cb,
+         "done",
+         total_tasks,
+         total_tasks,
+-        Some(effective_trade_date),
++        Some(effective_trade_date.to_string()),
+         format!(
+-            "首次全量下载结束，成功 {} 只，失败 {} 只。",
++            "{done_message}，成功 {} 只，失败 {} 只。",
+             total.success_count, total.failed_count
+         ),
+     );
+@@ -645,6 +694,61 @@ fn download_first_all_market(
+     Ok(total)
+ }
+ 
++pub fn download_selected_stocks(
++    config: &AppConfig,
++    ts_codes: &[String],
++    progress_cb: Option<&DownloadProgressCallback>,
++) -> Result<DownloadSummary, String> {
++    let effective_trade_date = init_stock_basic_data(config, progress_cb)?;
++
++    let adj_type = match config.data.adj_type.trim().to_ascii_lowercase().as_str() {
++        "qfq" => Ok(AdjType::Qfq),
++        "hfq" => Ok(AdjType::Hfq),
++        "raw" => Ok(AdjType::Raw),
++        other => Err(format!("不支持的复权类型: {other}")),
++    }?;
++
++    let download_config = &config.download;
++    let source_dir = config.output.dir.as_str();
++    let start_date = download_config.start_date.as_str();
++    let end_date = if download_config.end_date.eq_ignore_ascii_case("today") {
++        effective_trade_date.as_str()
++    } else {
++        download_config.end_date.as_str()
++    };
++    let with_factors = download_config.include_turnover;
++    let client = TushareClient::new(
++        download_config.token.clone(),
++        download_config.limit_calls_per_min,
++    )?;
++    let pool = build_download_pool(download_config.threads)?;
++    let db_path = source_db_path(source_dir);
++    let db_path_str = db_path
++        .to_str()
++        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
++    init_stock_data_db(db_path_str)?;
++    let conn = Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
++    let mut indicator_columns_ready = false;
++
++    download_selected_stocks_with_context(
++        source_dir,
++        &effective_trade_date,
++        &client,
++        &pool,
++        &conn,
++        &mut indicator_columns_ready,
++        ts_codes,
++        start_date,
++        end_date,
++        adj_type,
++        with_factors,
++        download_config.retry_times,
++        "缺失股票补全开始",
++        "缺失股票补全结束",
++        progress_cb,
++    )
++}
++
+ // 增量部分
+ 
+ fn validate_market_daily_rows(
+diff --git a/src/scoring/mod.rs b/src/scoring/mod.rs
+index 27d9475..7c3467f 100644
+--- a/src/scoring/mod.rs
++++ b/src/scoring/mod.rs
+@@ -28,6 +28,7 @@ pub enum TieBreakWay {
+ pub struct RuleScoreSeries {
+     pub name: String,
+     pub series: Vec<f64>,
++    pub triggered: Vec<bool>,
+ }
+ 
+ #[derive(Clone)]
+@@ -144,29 +145,35 @@ fn score_at(scopeway: ScopeHit, dps: Option<&[DistPoint]>, points: f64) -> f64 {
+     }
+ }
+ 
+-fn scoring_rule_cache(rule: &CachedRule, rt: &mut Runtime) -> Result<Vec<f64>, String> {
++fn scoring_rule_cache(rule: &CachedRule, rt: &mut Runtime) -> Result<(Vec<f64>, Vec<bool>), String> {
+     let bs = hit_when_cache(&rule, rt)?;
+     let mut out = Vec::with_capacity(bs.len());
++    let mut triggered = Vec::with_capacity(bs.len());
+ 
+     for i in 0..bs.len() {
+         let hit = hit_scopeway(rule.scope_way, rule.scope_windows, &bs, i);
++        triggered.push(match hit {
++            ScopeHit::Bool(ok) => ok,
++            ScopeHit::Count(n) => n > 0,
++            ScopeHit::Recent(v) => v.is_some(),
++        });
+         let s = score_at(hit, rule.dist_points.as_deref(), rule.points);
+         out.push(s);
+     }
+ 
+-    Ok(out)
++    Ok((out, triggered))
+ }
+ 
+ pub fn scoring_rules_details_cache(
+     rt: &mut Runtime,
+-    rules_cache: &Vec<CachedRule>,
++    rules_cache: &[CachedRule],
+ ) -> Result<(Vec<f64>, Vec<RuleScoreSeries>), String> {
+     let len = rt_max_len(rt);
+     let mut total = vec![50.0; len];
+     let mut details = Vec::with_capacity(rules_cache.len());
+ 
+     for rule in rules_cache {
+-        let score = scoring_rule_cache(&rule, rt)?;
++        let (score, triggered) = scoring_rule_cache(&rule, rt)?;
+         let min_len = usize::min(total.len(), score.len());
+         for i in 0..min_len {
+             total[i] += score[i];
+@@ -175,6 +182,7 @@ pub fn scoring_rules_details_cache(
+         details.push(RuleScoreSeries {
+             name: rule.name.clone(),
+             series: score,
++            triggered,
+         });
+     }
+ 
+diff --git a/src/scoring/runner.rs b/src/scoring/runner.rs
+index 602a97f..d3f3ca0 100644
+--- a/src/scoring/runner.rs
++++ b/src/scoring/runner.rs
+@@ -1,8 +1,10 @@
+ use rayon::prelude::*;
+-use std::time;
++use std::{collections::HashSet, sync::mpsc::sync_channel, thread, time};
+ 
+ use crate::data::scoring_data::{
+-    ScoreDetails, ScoreSummary, cache_rule_build, init_result_db, row_into_rt,
++    ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage, cache_rule_build, init_result_db,
++    row_into_rt,
++    write_score_batches_from_channel,
+ };
+ use crate::data::{DataReader, RowData, result_db_path};
+ use crate::scoring::{
+@@ -10,6 +12,9 @@ use crate::scoring::{
+     tools::{calc_query_need_rows, calc_zhang_pct, load_st_list, warmup_rows_estimate},
+ };
+ 
++const SCORING_GROUP_SIZE: usize = 16;
++const SCORING_QUEUE_BOUND: usize = 4;
++
+ fn fill_scoring_extra_fields(
+     row_data: &mut RowData,
+     ts_code: &str,
+@@ -25,7 +30,7 @@ fn scoring_single_core(
+     row_data: RowData,
+     ts_code: &str,
+     score_start_date: &str,
+-    rules_cache: &Vec<CachedRule>,
++    rules_cache: &[CachedRule],
+ ) -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>), String> {
+     let trade_dates = row_data.trade_dates.clone();
+     let mut rt = row_into_rt(row_data)?;
+@@ -46,6 +51,7 @@ fn scoring_single_core(
+ 
+     for rule in &mut d {
+         rule.series = rule.series.split_off(keep_from);
++        rule.triggered = rule.triggered.split_off(keep_from);
+     }
+ 
+     let summary = ScoreSummary::build(ts_code, kept_trade_dates, kept_scores);
+@@ -54,72 +60,32 @@ fn scoring_single_core(
+     Ok((summary, details))
+ }
+ 
+-fn scoring_all_core(
++fn scoring_group_batch(
+     source_dir: &str,
+     adj_type: &str,
+-    start_date: &str,
++    score_start_date: &str,
+     end_date: &str,
+-) -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>), String> {
+-    let dr = DataReader::new(source_dir)?;
+-    let tc_list = DataReader::list_ts_code(&dr, adj_type, start_date, end_date)?;
+-    let st_list = load_st_list(source_dir)?;
+-    let mut all_summary: Vec<ScoreSummary> = Vec::with_capacity(8192);
+-    let mut all_details: Vec<ScoreDetails> = Vec::with_capacity(8192);
+-
+-    let time = time::Instant::now();
+-    let warmup_need = warmup_rows_estimate(source_dir)?;
+-    let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
+-
+-    let rules_cache = cache_rule_build(source_dir)?;
+-
+-    let result_collect = tc_list
+-        .par_chunks(256)
+-        .map(
+-            |ts_group| -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>), String> {
+-                let worker_reader = DataReader::new(source_dir)?;
+-                let mut group_summary = Vec::new();
+-                let mut group_details = Vec::new();
+-
+-                for ts_code in ts_group {
+-                    let mut row =
+-                        worker_reader.load_one_tail_rows(ts_code, adj_type, end_date, need_rows)?;
+-                    fill_scoring_extra_fields(&mut row, ts_code, st_list.contains(ts_code))?;
+-                    let (s, d) = scoring_single_core(row, ts_code, start_date, &rules_cache)?;
+-                    group_summary.extend(s);
+-                    group_details.extend(d);
+-                }
+-
+-                Ok((group_summary, group_details))
+-            },
+-        )
+-        .collect::<Vec<_>>();
+-
+-    // 单例并行
+-    // let result_collect = tc_list
+-    //     .par_iter()
+-    //     .map(|ts_code| {
+-    //         let worker_reader = DataReader::new(db_path)?;
+-    //         let row =
+-    //             worker_reader.load_one(ts_code, adj_type, std_start_date.as_str(), end_date)?;
+-    //         scoring_single_core(row, ts_code, start_date, &rules_cache)
+-    //     })
+-    //     .collect::<Vec<_>>();
+-
+-    // 原先串行方案备份
+-    // for ts_code in tc_list {
+-    //     let row = dr.load_one(&ts_code, adj_type, std_start_date.as_str(), end_date)?;
+-    //     let (s, d) = scoring_single_core(row, &ts_code, start_date, &rules_cache)?;
+-    //     all_summary.extend(s);
+-    //     all_details.extend(d);
+-    // }
+-
+-    for result in result_collect {
+-        let (a, d) = result?;
+-        all_summary.extend(a);
+-        all_details.extend(d);
++    need_rows: usize,
++    rules_cache: &[CachedRule],
++    st_list: &HashSet<String>,
++    ts_group: &[String],
++) -> Result<ScoreBatch, String> {
++    let worker_reader = DataReader::new(source_dir)?;
++    let mut group_summary = Vec::new();
++    let mut group_details = Vec::new();
++
++    for ts_code in ts_group {
++        let mut row = worker_reader.load_one_tail_rows(ts_code, adj_type, end_date, need_rows)?;
++        fill_scoring_extra_fields(&mut row, ts_code, st_list.contains(ts_code))?;
++        let (s, d) = scoring_single_core(row, ts_code, score_start_date, rules_cache)?;
++        group_summary.extend(s);
++        group_details.extend(d);
+     }
+-    println!("排名主流程结束:{:.3?}", time.elapsed());
+-    Ok((all_summary, all_details))
++
++    Ok(ScoreBatch {
++        summary_rows: group_summary,
++        detail_rows: group_details,
++    })
+ }
+ 
+ pub fn scoring_all_to_db(
+@@ -128,14 +94,62 @@ pub fn scoring_all_to_db(
+     start_date: &str,
+     end_date: &str,
+ ) -> Result<(), String> {
++    let time = time::Instant::now();
+     let out_db = result_db_path(source_dir);
+-    let (all_summary, all_details) = scoring_all_core(source_dir, adj_type, start_date, end_date)?;
+     init_result_db(&out_db)?;
++
++    let dr = DataReader::new(source_dir)?;
++    let tc_list = DataReader::list_ts_code(&dr, adj_type, start_date, end_date)?;
++    let st_list = load_st_list(source_dir)?;
++    let warmup_need = warmup_rows_estimate(source_dir)?;
++    let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
++    let rules_cache = cache_rule_build(source_dir)?;
++
+     let out_db_path = out_db
+         .to_str()
+         .ok_or_else(|| "结果数据库路径不是有效UTF-8".to_string())?;
+-    ScoreSummary::write_db(out_db_path, &all_summary)?;
+-    ScoreDetails::write_db(out_db_path, &all_details)?;
++
++    let (tx, rx) = sync_channel(SCORING_QUEUE_BOUND);
++    let abort_tx = tx.clone();
++    let db_path = out_db_path.to_string();
++    let start_date_owned = start_date.to_string();
++    let end_date_owned = end_date.to_string();
++    let writer_handle = thread::spawn(move || {
++        write_score_batches_from_channel(&db_path, &start_date_owned, &end_date_owned, rx)
++    });
++
++    let compute_result = tc_list
++        .par_chunks(SCORING_GROUP_SIZE)
++        .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
++            let batch = scoring_group_batch(
++                source_dir,
++                adj_type,
++                start_date,
++                end_date,
++                need_rows,
++                &rules_cache,
++                &st_list,
++                ts_group,
++            )?;
++            sender
++                .send(ScoreWriteMessage::Batch(batch))
++                .map_err(|e| format!("发送评分批次失败:{e}"))?;
++            Ok(())
++        });
++
++    if let Err(err) = &compute_result {
++        let _ = abort_tx.send(ScoreWriteMessage::Abort(err.clone()));
++    }
++    drop(abort_tx);
++
++    let writer_result = match writer_handle.join() {
++        Ok(result) => result,
++        Err(_) => Err("结果库写线程异常退出".to_string()),
++    };
++
++    compute_result?;
++    writer_result?;
++    println!("排名主流程结束:{:.3?}", time.elapsed());
+     Ok(())
+ }
+ 
+diff --git a/src/ui_tools/data_download.rs b/src/ui_tools/data_download.rs
+index 6fadde2..c160a29 100644
+--- a/src/ui_tools/data_download.rs
++++ b/src/ui_tools/data_download.rs
+@@ -1,4 +1,4 @@
+-use std::path::Path;
++use std::{collections::HashSet, fs, path::Path};
+ 
+ use duckdb::Connection;
+ use serde::{Deserialize, Serialize};
+@@ -6,12 +6,17 @@ use serde::{Deserialize, Serialize};
+ use crate::{
+     config::{AppConfig, DataConfig, DownloadConfig, OutputConfig},
+     data::{
+-        load_stock_list, load_trade_date_list, source_db_path, stock_list_path, trade_calendar_path,
++        IndsData, ind_toml_path, load_stock_list, load_trade_date_list, source_db_path,
++        stock_list_path, trade_calendar_path,
+     },
+     download::{
+         DownloadSummary,
+-        runner::{DownloadProgressCallback, download as core_run_download_with_progress},
++        runner::{
++            DownloadProgressCallback, download as core_run_download_with_progress,
++            download_selected_stocks as core_run_selected_stock_download_with_progress,
++        },
+     },
++    expr::parser::{Parser, lex_all},
+ };
+ 
+ use super::watch_observe::normalize_trade_date;
+@@ -45,6 +50,7 @@ pub struct DataDownloadStatus {
+     pub source_db: DataDownloadDbRange,
+     pub stock_list: DataDownloadFileStatus,
+     pub trade_calendar: DataDownloadFileStatus,
++    pub missing_stock_repair: DataDownloadMissingStockRepairStatus,
+     pub planned_action: String,
+     pub planned_action_label: String,
+     pub planned_action_detail: String,
+@@ -63,6 +69,17 @@ pub struct DataDownloadRunInput {
+     pub include_turnover: bool,
+ }
+ 
++#[derive(Clone, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct MissingStockRepairRunInput {
++    pub source_path: String,
++    pub token: String,
++    pub threads: usize,
++    pub retry_times: usize,
++    pub limit_calls_per_min: usize,
++    pub include_turnover: bool,
++}
++
+ #[derive(Clone, Serialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct DataDownloadSummary {
+@@ -82,6 +99,55 @@ pub struct DataDownloadRunResult {
+     pub status: DataDownloadStatus,
+ }
+ 
++#[derive(Clone, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct DataDownloadMissingStockRepairStatus {
++    pub ready: bool,
++    pub missing_count: u64,
++    pub missing_samples: Vec<String>,
++    pub suggested_start_date: Option<String>,
++    pub suggested_end_date: Option<String>,
++    pub detail: String,
++}
++
++#[derive(Clone, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct IndicatorManageItem {
++    pub index: usize,
++    pub name: String,
++    pub expr: String,
++    pub prec: usize,
++}
++
++#[derive(Clone, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct IndicatorManagePageData {
++    pub exists: bool,
++    pub file_path: String,
++    pub items: Vec<IndicatorManageItem>,
++}
++
++#[derive(Clone, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct IndicatorManageDraft {
++    pub name: String,
++    pub expr: String,
++    pub prec: usize,
++}
++
++#[derive(Serialize)]
++struct IndicatorManageFile {
++    version: u32,
++    ind: Vec<IndicatorManageFileItem>,
++}
++
++#[derive(Serialize)]
++struct IndicatorManageFileItem {
++    name: String,
++    expr: String,
++    prec: usize,
++}
++
+ #[derive(Clone)]
+ pub struct PreparedDataDownloadRun {
+     pub source_path: String,
+@@ -96,6 +162,21 @@ pub struct PreparedDataDownloadRun {
+     pub action_label: String,
+ }
+ 
++#[derive(Clone)]
++pub struct PreparedMissingStockRepairRun {
++    pub source_path: String,
++    pub token: String,
++    pub start_date: String,
++    pub end_date: String,
++    pub threads: usize,
++    pub retry_times: usize,
++    pub limit_calls_per_min: usize,
++    pub include_turnover: bool,
++    pub action: String,
++    pub action_label: String,
++    pub missing_ts_codes: Vec<String>,
++}
++
+ fn normalize_download_date(raw: &str, field_name: &str) -> Result<String, String> {
+     normalize_trade_date(raw)
+         .ok_or_else(|| format!("{field_name} 格式无效，应为 YYYYMMDD 或 YYYY-MM-DD"))
+@@ -284,6 +365,125 @@ fn plan_download_action(source_db: &DataDownloadDbRange) -> (String, String, Str
+     }
+ }
+ 
++fn query_existing_stock_codes(source_path: &str) -> Result<HashSet<String>, String> {
++    let db_path = source_db_path(source_path);
++    if !db_path.exists() {
++        return Ok(HashSet::new());
++    }
++
++    let db_path_str = db_path
++        .to_str()
++        .ok_or_else(|| "stock_data.db 路径不是有效 UTF-8".to_string())?;
++    let conn =
++        Connection::open(db_path_str).map_err(|e| format!("打开 stock_data.db 失败: {e}"))?;
++    let table_exists = conn
++        .query_row(
++            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
++            ["stock_data"],
++            |row| row.get::<_, i64>(0),
++        )
++        .map_err(|e| format!("检查 stock_data 表结构失败: {e}"))?;
++    if table_exists <= 0 {
++        return Ok(HashSet::new());
++    }
++
++    let mut stmt = conn
++        .prepare(
++            r#"
++            SELECT DISTINCT ts_code
++            FROM stock_data
++            WHERE adj_type = ? AND ts_code IS NOT NULL AND TRIM(ts_code) <> ''
++            "#,
++        )
++        .map_err(|e| format!("预编译现有股票代码查询失败: {e}"))?;
++    let mut rows = stmt
++        .query(["qfq"])
++        .map_err(|e| format!("查询现有股票代码失败: {e}"))?;
++
++    let mut out = HashSet::new();
++    while let Some(row) = rows.next().map_err(|e| format!("读取现有股票代码失败: {e}"))? {
++        let ts_code: String = row.get(0).map_err(|e| format!("读取 ts_code 失败: {e}"))?;
++        if !ts_code.trim().is_empty() {
++            out.insert(ts_code);
++        }
++    }
++
++    Ok(out)
++}
++
++fn scan_missing_stock_codes(
++    source_path: &str,
++    source_db: &DataDownloadDbRange,
++    stock_list: &DataDownloadFileStatus,
++    trade_calendar: &DataDownloadFileStatus,
++) -> Result<(Vec<String>, DataDownloadMissingStockRepairStatus), String> {
++    if !stock_list.exists || stock_list.row_count == 0 {
++        return Ok((
++            Vec::new(),
++            DataDownloadMissingStockRepairStatus {
++                ready: false,
++                missing_count: 0,
++                missing_samples: Vec::new(),
++                suggested_start_date: None,
++                suggested_end_date: None,
++                detail: "股票列表不存在或为空，先刷新基础状态。".to_string(),
++            },
++        ));
++    }
++
++    if !source_db.exists || source_db.row_count == 0 {
++        return Ok((
++            Vec::new(),
++            DataDownloadMissingStockRepairStatus {
++                ready: false,
++                missing_count: 0,
++                missing_samples: Vec::new(),
++                suggested_start_date: None,
++                suggested_end_date: None,
++                detail: "原始库为空，请直接执行首次全量下载。".to_string(),
++            },
++        ));
++    }
++
++    let list_codes: Vec<String> = load_stock_list(source_path)?
++        .into_iter()
++        .filter_map(|row| row.first().cloned())
++        .filter(|value| !value.trim().is_empty())
++        .collect();
++    let existing_codes = query_existing_stock_codes(source_path)?;
++
++    let mut missing_codes: Vec<String> = list_codes
++        .into_iter()
++        .filter(|ts_code| !existing_codes.contains(ts_code))
++        .collect();
++    missing_codes.sort();
++    missing_codes.dedup();
++
++    let detail = if missing_codes.is_empty() {
++        "当前 stock_list.csv 中的股票都已在原始库里出现过，无需补全。".to_string()
++    } else {
++        format!(
++            "将按当前原始库起始日期到当前有效交易日，补全 {} 只完全缺失的股票。",
++            missing_codes.len()
++        )
++    };
++
++    Ok((
++        missing_codes.clone(),
++        DataDownloadMissingStockRepairStatus {
++            ready: true,
++            missing_count: missing_codes.len() as u64,
++            missing_samples: missing_codes.into_iter().take(12).collect(),
++            suggested_start_date: source_db.min_trade_date.clone(),
++            suggested_end_date: trade_calendar
++                .max_trade_date
++                .clone()
++                .or_else(|| source_db.max_trade_date.clone()),
++            detail,
++        },
++    ))
++}
++
+ fn build_data_download_summary(summary: DownloadSummary) -> DataDownloadSummary {
+     DataDownloadSummary {
+         success_count: summary.success_count as u64,
+@@ -308,6 +508,8 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
+         query_trade_date_range(&source_db_path(trimmed), "stock_data.db", "stock_data")?;
+     let trade_calendar = query_trade_calendar_status(trimmed)?;
+     let stock_list = query_stock_list_status(trimmed)?;
++    let (_, missing_stock_repair) =
++        scan_missing_stock_codes(trimmed, &source_db, &stock_list, &trade_calendar)?;
+     let (planned_action, planned_action_label, planned_action_detail) =
+         plan_download_action(&source_db);
+ 
+@@ -316,12 +518,61 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
+         source_db,
+         stock_list,
+         trade_calendar,
++        missing_stock_repair,
+         planned_action,
+         planned_action_label,
+         planned_action_detail,
+     })
+ }
+ 
++pub fn prepare_missing_stock_repair_run(
++    input: MissingStockRepairRunInput,
++) -> Result<PreparedMissingStockRepairRun, String> {
++    let source_path = input.source_path.trim().to_string();
++    if source_path.is_empty() {
++        return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
++    }
++
++    let token = input.token.trim().to_string();
++    if token.is_empty() {
++        return Err("Token 不能为空".to_string());
++    }
++
++    let status = get_data_download_status(&source_path)?;
++    if !status.missing_stock_repair.ready {
++        return Err(status.missing_stock_repair.detail);
++    }
++    if status.missing_stock_repair.missing_count == 0 {
++        return Err("当前没有需要补全的缺失股票".to_string());
++    }
++    let start_date = status
++        .missing_stock_repair
++        .suggested_start_date
++        .clone()
++        .ok_or_else(|| "缺失股票补全缺少可用起始日期".to_string())?;
++    let end_date = "today".to_string();
++    let (missing_ts_codes, _) = scan_missing_stock_codes(
++        &source_path,
++        &status.source_db,
++        &status.stock_list,
++        &status.trade_calendar,
++    )?;
++
++    Ok(PreparedMissingStockRepairRun {
++        source_path,
++        token,
++        start_date,
++        end_date,
++        threads: input.threads.max(1),
++        retry_times: input.retry_times,
++        limit_calls_per_min: input.limit_calls_per_min.max(1),
++        include_turnover: input.include_turnover,
++        action: "repair-missing-stocks".to_string(),
++        action_label: "缺失股票补全".to_string(),
++        missing_ts_codes,
++    })
++}
++
+ pub fn prepare_data_download_run(
+     input: DataDownloadRunInput,
+ ) -> Result<PreparedDataDownloadRun, String> {
+@@ -399,3 +650,144 @@ pub fn run_prepared_data_download(
+         status,
+     })
+ }
++
++pub fn run_prepared_missing_stock_repair(
++    prepared: &PreparedMissingStockRepairRun,
++    progress_cb: Option<&DownloadProgressCallback>,
++) -> Result<DataDownloadRunResult, String> {
++    let source_db = source_db_path(&prepared.source_path);
++    let source_db_str = source_db
++        .to_str()
++        .ok_or_else(|| "原始库路径不是有效 UTF-8".to_string())?
++        .to_string();
++
++    let config = AppConfig {
++        data: DataConfig {
++            source_db: source_db_str,
++            adj_type: "qfq".to_string(),
++        },
++        output: OutputConfig {
++            dir: prepared.source_path.clone(),
++            result_db: "scoring_result.db".to_string(),
++        },
++        download: DownloadConfig {
++            token: prepared.token.clone(),
++            start_date: prepared.start_date.clone(),
++            end_date: prepared.end_date.clone(),
++            threads: prepared.threads,
++            retry_times: prepared.retry_times,
++            limit_calls_per_min: prepared.limit_calls_per_min,
++            refresh_stock_list: true,
++            include_turnover: prepared.include_turnover,
++        },
++    };
++
++    let summary = core_run_selected_stock_download_with_progress(
++        &config,
++        &prepared.missing_ts_codes,
++        progress_cb,
++    )?;
++    let status = get_data_download_status(&prepared.source_path)?;
++
++    Ok(DataDownloadRunResult {
++        action: prepared.action.clone(),
++        action_label: prepared.action_label.clone(),
++        elapsed_ms: 0,
++        summary: build_data_download_summary(summary),
++        status,
++    })
++}
++
++pub fn get_indicator_manage_page(source_path: &str) -> Result<IndicatorManagePageData, String> {
++    let trimmed = source_path.trim();
++    if trimmed.is_empty() {
++        return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
++    }
++
++    let path = ind_toml_path(trimmed);
++    if !path.exists() {
++        return Ok(IndicatorManagePageData {
++            exists: false,
++            file_path: path.display().to_string(),
++            items: Vec::new(),
++        });
++    }
++
++    let content = fs::read_to_string(&path)
++        .map_err(|e| format!("读取指标配置失败: path={}, err={e}", path.display()))?;
++    let items = if content.trim().is_empty() {
++        Vec::new()
++    } else {
++        IndsData::parse_from_text(&content)?
++            .into_iter()
++            .enumerate()
++            .map(|(index, item)| IndicatorManageItem {
++                index,
++                name: item.name,
++                expr: item.expr,
++                prec: item.prec,
++            })
++            .collect()
++    };
++
++    Ok(IndicatorManagePageData {
++        exists: true,
++        file_path: path.display().to_string(),
++        items,
++    })
++}
++
++fn build_indicator_manage_toml(items: &[IndicatorManageDraft]) -> Result<String, String> {
++    let normalized_items = items
++        .iter()
++        .map(|item| {
++            let name = item.name.trim().to_ascii_uppercase();
++            let expr = item.expr.trim().to_string();
++            if name.is_empty() {
++                return Err("指标名称不能为空".to_string());
++            }
++            if expr.is_empty() {
++                return Err(format!("指标 {name} 的表达式不能为空"));
++            }
++
++            Ok(IndicatorManageFileItem {
++                name,
++                expr,
++                prec: item.prec,
++            })
++        })
++        .collect::<Result<Vec<_>, _>>()?;
++
++    let text = toml::to_string_pretty(&IndicatorManageFile {
++        version: 1,
++        ind: normalized_items,
++    })
++    .map_err(|e| format!("序列化指标配置失败: {e}"))?;
++
++    let parsed_items = IndsData::parse_from_text(&text)?;
++    for item in parsed_items {
++        let tokens = lex_all(&item.expr);
++        let mut parser = Parser::new(tokens);
++        parser
++            .parse_main()
++            .map_err(|e| format!("指标 {} 表达式解析错误在{}:{}", item.name, e.idx, e.msg))?;
++    }
++
++    Ok(text)
++}
++
++pub fn save_indicator_manage_page(
++    source_path: &str,
++    items: Vec<IndicatorManageDraft>,
++) -> Result<IndicatorManagePageData, String> {
++    let trimmed = source_path.trim();
++    if trimmed.is_empty() {
++        return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
++    }
++
++    let path = ind_toml_path(trimmed);
++    let text = build_indicator_manage_toml(&items)?;
++    fs::write(&path, text)
++        .map_err(|e| format!("写入指标配置失败: path={}, err={e}", path.display()))?;
++    get_indicator_manage_page(trimmed)
++}
+diff --git a/src/ui_tools/details.rs b/src/ui_tools/details.rs
+index 7f1fb28..d38aad6 100644
+--- a/src/ui_tools/details.rs
++++ b/src/ui_tools/details.rs
+@@ -85,6 +85,7 @@ pub struct DetailKlinePayload {
+ pub struct DetailStrategyTriggerRow {
+     pub rule_name: String,
+     pub rule_score: Option<f64>,
++    pub is_triggered: Option<bool>,
+     pub hit_date: Option<String>,
+     pub lag: Option<i64>,
+     pub explain: Option<String>,
+@@ -127,6 +128,12 @@ struct RuleMeta {
+     when: String,
+ }
+ 
++#[derive(Debug, Clone, Copy)]
++struct CurrentRuleState {
++    rule_score: f64,
++    is_triggered: bool,
++}
++
+ fn open_result_conn(source_path: &str) -> Result<Connection, String> {
+     let result_db = result_db_path(source_path);
+     let result_db_str = result_db
+@@ -484,11 +491,11 @@ fn tag_label(tag: RuleTag) -> &'static str {
+     }
+ }
+ 
+-fn load_current_rule_score_map(
++fn load_current_rule_state_map(
+     conn: &Connection,
+     ts_code: &str,
+     effective_trade_date: &str,
+-) -> Result<HashMap<String, f64>, String> {
++) -> Result<HashMap<String, CurrentRuleState>, String> {
+     let mut stmt = conn
+         .prepare(
+             r#"
+@@ -513,7 +520,13 @@ fn load_current_rule_score_map(
+         let rule_score: Option<f64> = row
+             .get(1)
+             .map_err(|e| format!("读取 rule_score 失败: {e}"))?;
+-        out.insert(rule_name, rule_score.unwrap_or(0.0));
++        out.insert(
++            rule_name,
++            CurrentRuleState {
++                rule_score: rule_score.unwrap_or(0.0),
++                is_triggered: true,
++            },
++        );
+     }
+ 
+     Ok(out)
+@@ -529,7 +542,7 @@ fn load_latest_hit_date_map(
+             r#"
+             SELECT rule_name, MAX(trade_date) AS hit_date
+             FROM score_details
+-            WHERE ts_code = ? AND trade_date <= ? AND rule_score != 0
++            WHERE ts_code = ? AND trade_date <= ?
+             GROUP BY rule_name
+             "#,
+         )
+@@ -599,7 +612,7 @@ fn query_strategy_triggers(
+     effective_trade_date: &str,
+ ) -> Result<DetailStrategyPayload, String> {
+     let rule_meta_list = load_rule_meta_list(source_path)?;
+-    let current_score_map = load_current_rule_score_map(conn, ts_code, effective_trade_date)?;
++    let current_state_map = load_current_rule_state_map(conn, ts_code, effective_trade_date)?;
+     let latest_hit_date_map = load_latest_hit_date_map(conn, ts_code, effective_trade_date)?;
+     let trade_day_index_map = build_trade_day_index_map(conn)?;
+ 
+@@ -607,14 +620,18 @@ fn query_strategy_triggers(
+     let mut untriggered = Vec::new();
+ 
+     for meta in rule_meta_list {
+-        let current_score = current_score_map
++        let current_state = current_state_map
+             .get(&meta.rule_name)
+             .copied()
+-            .unwrap_or(0.0);
++            .unwrap_or(CurrentRuleState {
++                rule_score: 0.0,
++                is_triggered: false,
++            });
+         let hit_date = latest_hit_date_map.get(&meta.rule_name).cloned();
+         let row = DetailStrategyTriggerRow {
+             rule_name: meta.rule_name.clone(),
+-            rule_score: Some(current_score),
++            rule_score: Some(current_state.rule_score),
++            is_triggered: Some(current_state.is_triggered),
+             hit_date: hit_date.clone(),
+             lag: calc_lag(
+                 &trade_day_index_map,
+@@ -626,7 +643,7 @@ fn query_strategy_triggers(
+             when: Some(meta.when),
+         };
+ 
+-        if current_score != 0.0 {
++        if current_state.is_triggered {
+             triggered.push(row);
+         } else {
+             untriggered.push(row);
+diff --git a/src/ui_tools/market_monitor.rs b/src/ui_tools/market_monitor.rs
+index 750ae0f..bdce763 100644
+--- a/src/ui_tools/market_monitor.rs
++++ b/src/ui_tools/market_monitor.rs
+@@ -1,6 +1,7 @@
+ use serde::Serialize;
+ 
+ use crate::ui_tools::{
++    build_latest_vol_map,
+     overview::{OverviewRow, get_rank_overview},
+     realtime::{RealtimeFetchMeta, fetch_realtime_quote_map},
+ };
+@@ -15,6 +16,7 @@ pub struct MarketMonitorRow {
+     pub total_score: Option<f64>,
+     pub latest_price: Option<f64>,
+     pub latest_change_pct: Option<f64>,
++    pub volume_ratio: Option<f64>,
+     pub open: Option<f64>,
+     pub high: Option<f64>,
+     pub low: Option<f64>,
+@@ -36,11 +38,21 @@ pub struct MarketMonitorPageData {
+ pub fn build_market_monitor_rows(
+     overview_rows: Vec<OverviewRow>,
+     quote_map: &std::collections::HashMap<String, crate::crawler::SinaQuote>,
++    latest_vol_map: &std::collections::HashMap<String, f64>,
+ ) -> Vec<MarketMonitorRow> {
+     overview_rows
+         .into_iter()
+         .map(|row| {
+             let quote = quote_map.get(&row.ts_code);
++            let volume_ratio = match (
++                quote.map(|item| item.vol),
++                latest_vol_map.get(&row.ts_code).copied(),
++            ) {
++                (Some(current_vol), Some(previous_vol)) if previous_vol > 0.0 => {
++                    Some(current_vol / previous_vol)
++                }
++                _ => None,
++            };
+             MarketMonitorRow {
+                 ts_code: row.ts_code,
+                 name: row.name,
+@@ -49,6 +61,7 @@ pub fn build_market_monitor_rows(
+                 total_score: row.total_score,
+                 latest_price: quote.map(|item| item.price),
+                 latest_change_pct: quote.and_then(|item| item.change_pct),
++                volume_ratio,
+                 open: quote.map(|item| item.open),
+                 high: quote.map(|item| item.high),
+                 low: quote.map(|item| item.low),
+@@ -59,15 +72,18 @@ pub fn build_market_monitor_rows(
+ }
+ 
+ pub fn build_market_monitor_page_from_rows(
++    source_path: &str,
+     overview_rows: Vec<OverviewRow>,
+     quote_map: std::collections::HashMap<String, crate::crawler::SinaQuote>,
+     fetch_meta: RealtimeFetchMeta,
+-) -> MarketMonitorPageData {
++) -> Result<MarketMonitorPageData, String> {
+     let resolved_reference_trade_date =
+         overview_rows.first().and_then(|row| row.trade_date.clone());
+-    let rows = build_market_monitor_rows(overview_rows, &quote_map);
++    let ts_codes: Vec<String> = overview_rows.iter().map(|row| row.ts_code.clone()).collect();
++    let latest_vol_map = build_latest_vol_map(source_path, &ts_codes)?;
++    let rows = build_market_monitor_rows(overview_rows, &quote_map, &latest_vol_map);
+ 
+-    MarketMonitorPageData {
++    Ok(MarketMonitorPageData {
+         rows,
+         requested_count: fetch_meta.requested_count,
+         effective_count: fetch_meta.effective_count,
+@@ -75,7 +91,7 @@ pub fn build_market_monitor_page_from_rows(
+         truncated: fetch_meta.truncated,
+         refreshed_at: fetch_meta.refreshed_at,
+         reference_trade_date: resolved_reference_trade_date,
+-    }
++    })
+ }
+ 
+ pub fn get_market_monitor_page(
+@@ -85,7 +101,7 @@ pub fn get_market_monitor_page(
+ ) -> Result<MarketMonitorPageData, String> {
+     let limit = top_limit.unwrap_or(20).max(1);
+     let overview_rows = get_rank_overview(
+-        source_path,
++        source_path.clone(),
+         reference_trade_date,
+         Some(limit),
+         None,
+@@ -97,16 +113,5 @@ pub fn get_market_monitor_page(
+         .map(|row| row.ts_code.clone())
+         .collect();
+     let (quote_map, fetch_meta) = fetch_realtime_quote_map(&ts_codes)?;
+-    let resolved_reference_trade_date =
+-        overview_rows.first().and_then(|row| row.trade_date.clone());
+-
+-    Ok(MarketMonitorPageData {
+-        rows: build_market_monitor_rows(overview_rows, &quote_map),
+-        requested_count: fetch_meta.requested_count,
+-        effective_count: fetch_meta.effective_count,
+-        fetched_count: fetch_meta.fetched_count,
+-        truncated: fetch_meta.truncated,
+-        refreshed_at: fetch_meta.refreshed_at,
+-        reference_trade_date: resolved_reference_trade_date,
+-    })
++    build_market_monitor_page_from_rows(&source_path, overview_rows, quote_map, fetch_meta)
+ }
+diff --git a/src/ui_tools/mod.rs b/src/ui_tools/mod.rs
+index c1770e5..48c3cfb 100644
+--- a/src/ui_tools/mod.rs
++++ b/src/ui_tools/mod.rs
+@@ -13,9 +13,11 @@ pub mod watch_observe;
+ 
+ use std::collections::HashMap;
+ 
+-use duckdb::Connection;
++use duckdb::{Connection, params_from_iter};
+ 
+-use crate::data::{load_stock_list, load_ths_concepts_list};
++use crate::data::{load_stock_list, load_ths_concepts_list, source_db_path};
++
++const DEFAULT_ADJ_TYPE: &str = "qfq";
+ 
+ fn build_stock_list_text_map(
+     source_dir: &str,
+@@ -141,6 +143,63 @@ fn build_industry_map(source_dir: &str) -> Result<HashMap<String, String>, Strin
+     build_stock_list_text_map(source_dir, 4)
+ }
+ 
++fn build_latest_vol_map(
++    source_dir: &str,
++    ts_codes: &[String],
++) -> Result<HashMap<String, f64>, String> {
++    if ts_codes.is_empty() {
++        return Ok(HashMap::new());
++    }
++
++    let source_db = source_db_path(source_dir);
++    let source_db_str = source_db
++        .to_str()
++        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
++    let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
++
++    let placeholders = std::iter::repeat_n("?", ts_codes.len())
++        .collect::<Vec<_>>()
++        .join(", ");
++    let sql = format!(
++        r#"
++        SELECT ts_code, latest_vol
++        FROM (
++            SELECT
++                ts_code,
++                TRY_CAST(vol AS DOUBLE) AS latest_vol,
++                ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS row_num
++            FROM stock_data
++            WHERE adj_type = ? AND ts_code IN ({placeholders})
++        ) latest_rows
++        WHERE row_num = 1
++        "#
++    );
++
++    let mut params = Vec::with_capacity(ts_codes.len() + 1);
++    params.push(DEFAULT_ADJ_TYPE.to_string());
++    params.extend(ts_codes.iter().cloned());
++
++    let mut stmt = conn
++        .prepare(&sql)
++        .map_err(|e| format!("预编译最新成交量查询失败: {e}"))?;
++    let mut rows = stmt
++        .query(params_from_iter(params.iter()))
++        .map_err(|e| format!("查询最新成交量失败: {e}"))?;
++
++    let mut out = HashMap::with_capacity(ts_codes.len());
++    while let Some(row) = rows.next().map_err(|e| format!("读取最新成交量失败: {e}"))? {
++        let ts_code: String = row.get(0).map_err(|e| format!("读取 ts_code 失败: {e}"))?;
++        let latest_vol: Option<f64> = row
++            .get(1)
++            .map_err(|e| format!("读取最新成交量字段失败: {e}"))?;
++        if let Some(value) = latest_vol.filter(|value| value.is_finite()) {
++            out.insert(ts_code, value);
++        }
++    }
++
++    Ok(out)
++}
++
+ fn resolve_trade_date(conn: &Connection, trade_date: Option<String>) -> Result<String, String> {
+     if let Some(d) = trade_date {
+         let d = d.trim().to_string();
+diff --git a/src/ui_tools/statistics.rs b/src/ui_tools/statistics.rs
+index d1d827c..0e78e0b 100644
+--- a/src/ui_tools/statistics.rs
++++ b/src/ui_tools/statistics.rs
+@@ -137,7 +137,7 @@ fn query_overview(conn: &Connection) -> Result<StrategyOverviewPayload, String>
+             SELECT
+                 trade_date,
+                 ts_code,
+-                SUM(CASE WHEN rule_score != 0 THEN 1 ELSE 0 END) AS hit_rule_count
++                COUNT(*) AS hit_rule_count
+             FROM score_details
+             GROUP BY 1, 2
+         ),
+@@ -218,7 +218,6 @@ fn query_each_rule_medians(
+                     QUANTILE_CONT(ABS(rule_score / ?), 0.5) AS median_trigger_count
+                 FROM score_details
+                 WHERE rule_name = ?
+-                  AND rule_score != 0
+                 GROUP BY 1
+                 ORDER BY 1 ASC
+                 "#,
+@@ -262,8 +261,8 @@ fn query_daily_rows(
+             d.trade_date,
+             d.rule_name,
+             COUNT(*) AS sample_count,
+-            SUM(CASE WHEN d.rule_score != 0 THEN 1 ELSE 0 END) AS trigger_count,
+-            AVG(CASE WHEN d.rule_score != 0 THEN 1.0 ELSE 0.0 END) AS coverage,
++            COUNT(*) AS trigger_count,
++            AVG(1.0) AS coverage,
+             SUM(
+                 CASE
+                     WHEN d.rule_score > 0
+@@ -274,8 +273,8 @@ fn query_daily_rows(
+                     ELSE 0
+                 END
+             ) AS contribution_score,
+-            SUM(CASE WHEN d.rule_score != 0 AND s.rank <= ? THEN 1 ELSE 0 END) AS top100_trigger_count,
+-            MIN(CASE WHEN d.rule_score != 0 THEN s.rank END) AS best_rank
++            SUM(CASE WHEN s.rank <= ? THEN 1 ELSE 0 END) AS top100_trigger_count,
++            MIN(s.rank) AS best_rank
+         FROM score_details AS d
+         LEFT JOIN score_summary AS s
+           ON s.ts_code = d.ts_code
+@@ -395,7 +394,6 @@ fn query_triggered_stocks(
+              AND s.trade_date = d.trade_date
+             WHERE d.trade_date = ?
+               AND d.rule_name = ?
+-              AND d.rule_score != 0
+             ORDER BY s.rank ASC NULLS LAST, d.ts_code ASC
+             "#,
+         )
+diff --git a/src/ui_tools/strategy_performance.rs b/src/ui_tools/strategy_performance.rs
+index 29cd5b6..ad1da2d 100644
+--- a/src/ui_tools/strategy_performance.rs
++++ b/src/ui_tools/strategy_performance.rs
+@@ -770,10 +770,11 @@ fn collect_validation_rule_hits(
+                     if !signal_date_set.contains(trade_date) {
+                         continue;
+                     }
+-                    let rule_score = rule_series.series.get(offset).copied().unwrap_or(0.0);
+-                    if rule_score == 0.0 {
++                    let is_triggered = rule_series.triggered.get(offset).copied().unwrap_or(false);
++                    if !is_triggered {
+                         continue;
+                     }
++                    let rule_score = rule_series.series.get(offset).copied().unwrap_or(0.0);
+                     group_rows.push(ScoreDetails {
+                         ts_code: ts_code.clone(),
+                         trade_date: trade_date.clone(),
+diff --git a/src/ui_tools/watch_observe.rs b/src/ui_tools/watch_observe.rs
+index 858c8de..9c92236 100644
+--- a/src/ui_tools/watch_observe.rs
++++ b/src/ui_tools/watch_observe.rs
+@@ -5,7 +5,7 @@ use std::collections::HashMap;
+ use crate::{
+     data::{result_db_path, source_db_path},
+     ui_tools::{
+-        build_concepts_map, build_name_map,
++        build_concepts_map, build_latest_vol_map, build_name_map,
+         realtime::{RealtimeFetchMeta, fetch_realtime_quote_map},
+         resolve_trade_date,
+     },
+@@ -31,6 +31,7 @@ pub struct WatchObserveRow {
+     pub name: String,
+     pub latest_close: Option<f64>,
+     pub latest_change_pct: Option<f64>,
++    pub volume_ratio: Option<f64>,
+     pub added_date: String,
+     pub post_watch_return_pct: Option<f64>,
+     pub today_rank: Option<i64>,
+@@ -276,6 +277,7 @@ pub fn hydrate_watch_observe_rows(
+                 name: row.name.clone(),
+                 latest_close: None,
+                 latest_change_pct: None,
++                volume_ratio: None,
+                 added_date: row.added_date.clone(),
+                 post_watch_return_pct: None,
+                 today_rank: None,
+@@ -311,6 +313,7 @@ pub fn hydrate_watch_observe_rows(
+             .as_ref()
+             .and_then(|conn| query_latest_snapshot(conn, &row.ts_code).ok())
+             .unwrap_or((None, None));
++        let volume_ratio = None;
+         let today_rank = match (result_conn.as_ref(), resolved_rank_trade_date.as_deref()) {
+             (Some(conn), Some(trade_date)) => query_optional_rank(conn, trade_date, &row.ts_code)?,
+             _ => None,
+@@ -332,6 +335,7 @@ pub fn hydrate_watch_observe_rows(
+             name,
+             latest_close,
+             latest_change_pct,
++            volume_ratio,
+             added_date: row.added_date.clone(),
+             post_watch_return_pct,
+             today_rank,
+@@ -377,6 +381,10 @@ pub fn build_watch_observe_snapshot_data(
+         .unwrap_or_default();
+     let source_conn = source_path.and_then(|path| open_source_conn(path).ok());
+     let result_conn = source_path.and_then(|path| open_result_conn(path).ok());
++    let ts_codes: Vec<String> = stored_rows.iter().map(|row| row.ts_code.clone()).collect();
++    let latest_vol_map = source_path
++        .and_then(|path| build_latest_vol_map(path, &ts_codes).ok())
++        .unwrap_or_default();
+     let resolved_reference_trade_date = match (result_conn.as_ref(), reference_trade_date) {
+         (Some(conn), trade_date) => Some(resolve_trade_date(conn, trade_date)?),
+         (None, trade_date) => trade_date.and_then(|value| normalize_trade_date(&value)),
+@@ -403,6 +411,15 @@ pub fn build_watch_observe_snapshot_data(
+         let latest_change_pct = quote
+             .and_then(|item| item.change_pct)
+             .or(fallback_snapshot.1);
++        let volume_ratio = match (
++            quote.map(|item| item.vol),
++            latest_vol_map.get(&row.ts_code).copied(),
++        ) {
++            (Some(current_vol), Some(previous_vol)) if previous_vol > 0.0 => {
++                Some(current_vol / previous_vol)
++            }
++            _ => None,
++        };
+         let observe_trade_date = row
+             .trade_date
+             .as_deref()
+@@ -427,6 +444,7 @@ pub fn build_watch_observe_snapshot_data(
+             name,
+             latest_close,
+             latest_change_pct,
++            volume_ratio,
+             added_date: row.added_date.clone(),
+             post_watch_return_pct,
+             today_rank,
+diff --git a/ui/lianghua-web/src-tauri/src/lib.rs b/ui/lianghua-web/src-tauri/src/lib.rs
+index 9ab59de..5dfca89 100644
+--- a/ui/lianghua-web/src-tauri/src/lib.rs
++++ b/ui/lianghua-web/src-tauri/src/lib.rs
+@@ -16,10 +16,17 @@ use lianghua_rs::{
+         data_download::{
+             DataDownloadRunInput as CoreDataDownloadRunInput,
+             DataDownloadRunResult,
++            IndicatorManageDraft as CoreIndicatorManageDraft,
++            IndicatorManagePageData,
++            MissingStockRepairRunInput as CoreMissingStockRepairRunInput,
+             DataDownloadStatus,
+             get_data_download_status as core_get_data_download_status,
++            get_indicator_manage_page as core_get_indicator_manage_page,
+             prepare_data_download_run as core_prepare_data_download_run,
++            prepare_missing_stock_repair_run as core_prepare_missing_stock_repair_run,
+             run_prepared_data_download as core_run_prepared_data_download,
++            run_prepared_missing_stock_repair as core_run_prepared_missing_stock_repair,
++            save_indicator_manage_page as core_save_indicator_manage_page,
+         },
+         details::{
+             build_stock_detail_realtime_from_quote_map,
+@@ -181,6 +188,18 @@ struct DataDownloadRequest {
+     include_turnover: bool,
+ }
+ 
++#[derive(Clone, Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct MissingStockRepairRequest {
++    download_id: String,
++    source_path: String,
++    token: String,
++    threads: usize,
++    retry_times: usize,
++    limit_calls_per_min: usize,
++    include_turnover: bool,
++}
++
+ #[derive(Clone, Serialize)]
+ #[serde(rename_all = "camelCase")]
+ struct DataDownloadEventPayload {
+@@ -394,11 +413,12 @@ async fn load_market_monitor_page_data(
+         .map(|row| row.ts_code.clone())
+         .collect();
+     let (quote_map, fetch_meta) = fetch_realtime_quote_map_platform(ts_codes).await?;
+-    Ok(build_market_monitor_page_from_rows(
++    build_market_monitor_page_from_rows(
++        &source_path,
+         overview_rows,
+         quote_map,
+         fetch_meta,
+-    ))
++    )
+ }
+ 
+ async fn load_watch_observe_realtime_snapshot(
+@@ -829,6 +849,19 @@ fn get_data_download_status(source_path: String) -> Result<DataDownloadStatus, S
+     core_get_data_download_status(&source_path)
+ }
+ 
++#[tauri::command]
++fn get_indicator_manage_page(source_path: String) -> Result<IndicatorManagePageData, String> {
++    core_get_indicator_manage_page(&source_path)
++}
++
++#[tauri::command]
++fn save_indicator_manage_page(
++    source_path: String,
++    items: Vec<CoreIndicatorManageDraft>,
++) -> Result<IndicatorManagePageData, String> {
++    core_save_indicator_manage_page(&source_path, items)
++}
++
+ #[tauri::command]
+ async fn run_data_download(
+     app: tauri::AppHandle,
+@@ -932,6 +965,108 @@ async fn run_data_download(
+     .map_err(|error| error.to_string())?
+ }
+ 
++#[tauri::command]
++async fn run_missing_stock_repair(
++    app: tauri::AppHandle,
++    request: MissingStockRepairRequest,
++) -> Result<DataDownloadRunResult, String> {
++    let download_id = request.download_id.trim().to_string();
++    if download_id.is_empty() {
++        return Err("download_id 不能为空".to_string());
++    }
++
++    let prepared = core_prepare_missing_stock_repair_run(CoreMissingStockRepairRunInput {
++        source_path: request.source_path,
++        token: request.token,
++        threads: request.threads,
++        retry_times: request.retry_times,
++        limit_calls_per_min: request.limit_calls_per_min,
++        include_turnover: request.include_turnover,
++    })?;
++    let action = prepared.action.clone();
++    let action_label = prepared.action_label.clone();
++    emit_data_download_event(
++        &app,
++        DataDownloadEventPayload {
++            download_id: download_id.clone(),
++            phase: "started".to_string(),
++            action: action.clone(),
++            action_label: action_label.clone(),
++            elapsed_ms: 0,
++            finished: 0,
++            total: 0,
++            current_label: None,
++            message: format!("{action_label} 已启动，正在准备缺失股票补全。"),
++        },
++    );
++
++    tauri::async_runtime::spawn_blocking(move || {
++        let started_at = Instant::now();
++        let result = (|| -> Result<DataDownloadRunResult, String> {
++            let progress_app = app.clone();
++            let progress_download_id = download_id.clone();
++            let progress_action = action.clone();
++            let progress_action_label = action_label.clone();
++            let progress_started_at = started_at;
++            let progress_cb = move |progress: CoreDownloadProgress| {
++                emit_core_download_progress(
++                    &progress_app,
++                    progress_download_id.as_str(),
++                    progress_action.as_str(),
++                    progress_action_label.as_str(),
++                    progress_started_at.elapsed().as_millis() as u64,
++                    progress,
++                );
++            };
++
++            let mut run_result =
++                core_run_prepared_missing_stock_repair(&prepared, Some(&progress_cb))?;
++            run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
++            Ok(run_result)
++        })();
++
++        match &result {
++            Ok(run_result) => emit_data_download_event(
++                &app,
++                DataDownloadEventPayload {
++                    download_id: download_id.clone(),
++                    phase: "completed".to_string(),
++                    action: action.clone(),
++                    action_label: action_label.clone(),
++                    elapsed_ms: run_result.elapsed_ms,
++                    finished: run_result.summary.success_count + run_result.summary.failed_count,
++                    total: run_result.summary.success_count + run_result.summary.failed_count,
++                    current_label: None,
++                    message: format!(
++                        "{} 已完成，成功 {} 只，失败 {} 只。",
++                        action_label,
++                        run_result.summary.success_count,
++                        run_result.summary.failed_count
++                    ),
++                },
++            ),
++            Err(error) => emit_data_download_event(
++                &app,
++                DataDownloadEventPayload {
++                    download_id: download_id.clone(),
++                    phase: "failed".to_string(),
++                    action: action.clone(),
++                    action_label: action_label.clone(),
++                    elapsed_ms: started_at.elapsed().as_millis() as u64,
++                    finished: 0,
++                    total: 0,
++                    current_label: None,
++                    message: format!("{} 失败: {}", action_label, error),
++                },
++            ),
++        }
++
++        result
++    })
++    .await
++    .map_err(|error| error.to_string())?
++}
++
+ #[tauri::command]
+ async fn run_ranking_score_calculation(
+     source_path: String,
+@@ -2659,6 +2794,7 @@ pub fn run() {
+             export_managed_source_directory_mobile,
+             export_managed_source_file,
+             get_data_download_status,
++            get_indicator_manage_page,
+             get_ranking_compute_status,
+             get_rank_overview,
+             get_rank_trade_date_options,
+@@ -2689,7 +2825,9 @@ pub fn run() {
+             update_strategy_manage_rule,
+             export_strategy_rule_file,
+             run_data_download,
++            run_missing_stock_repair,
+             run_ranking_score_calculation,
++            save_indicator_manage_page,
+             run_ranking_tiebreak_fill,
+             list_watch_observe_rows,
+             refresh_watch_observe_rows,
+diff --git a/ui/lianghua-web/src/App.tsx b/ui/lianghua-web/src/App.tsx
+index 81cfc33..3a4867b 100644
+--- a/ui/lianghua-web/src/App.tsx
++++ b/ui/lianghua-web/src/App.tsx
+@@ -28,6 +28,8 @@ import BoardAnalysisPage from './pages/desktop/BoardAnalysisPage.tsx'
+ import StrategyPerformanceBacktestPage from './pages/desktop/StrategyPerformanceBacktestPage.tsx'
+ import StrategyValidationBacktestPage from './pages/desktop/StrategyValidationBacktestPage.tsx'
+ import DetailsOverlayRoute from './shared/DetailsOverlayRoute.tsx'
++import DetailsLinkedOverlayRoute from './shared/DetailsLinkedOverlayRoute.tsx'
++import DetailsLinkedPage from './pages/desktop/DetailsLinkedPage.tsx'
+ 
+ type BackgroundLocationState = {
+   backgroundLocation?: Location
+@@ -49,6 +51,7 @@ function AppRoutes() {
+           <Route path="watch-observe" element={<WatchObservePage />} />
+           <Route path="overview" element={<OverviewPage />} />
+           <Route path="details" element={<DetailsPage />} />
++          <Route path="details-linked" element={<DetailsLinkedPage />} />
+           <Route path="stock-pick" element={<StockPickPage />}>
+             <Route index element={<Navigate to="/stock-pick/expression" replace />} />
+             <Route path="expression" element={<ExpressionStockPickPage />} />
+@@ -81,6 +84,7 @@ function AppRoutes() {
+       {backgroundLocation ? (
+         <Routes>
+           <Route path="/details" element={<DetailsOverlayRoute />} />
++          <Route path="/details-linked" element={<DetailsLinkedOverlayRoute />} />
+         </Routes>
+       ) : null}
+     </>
+diff --git a/ui/lianghua-web/src/apis/dataDownload.ts b/ui/lianghua-web/src/apis/dataDownload.ts
+index 30daacf..16b5742 100644
+--- a/ui/lianghua-web/src/apis/dataDownload.ts
++++ b/ui/lianghua-web/src/apis/dataDownload.ts
+@@ -26,11 +26,21 @@ export type DataDownloadStatus = {
+   sourceDb: RankComputeDbRange
+   stockList: DataDownloadFileStatus
+   tradeCalendar: DataDownloadFileStatus
++  missingStockRepair: DataDownloadMissingStockRepairStatus
+   plannedAction: string
+   plannedActionLabel: string
+   plannedActionDetail: string
+ }
+ 
++export type DataDownloadMissingStockRepairStatus = {
++  ready: boolean
++  missingCount: number
++  missingSamples: string[]
++  suggestedStartDate: string | null
++  suggestedEndDate: string | null
++  detail: string
++}
++
+ export type DataDownloadRequest = {
+   downloadId: string
+   sourcePath: string
+@@ -43,6 +53,16 @@ export type DataDownloadRequest = {
+   includeTurnover: boolean
+ }
+ 
++export type MissingStockRepairRequest = {
++  downloadId: string
++  sourcePath: string
++  token: string
++  threads: number
++  retryTimes: number
++  limitCallsPerMin: number
++  includeTurnover: boolean
++}
++
+ export type DataDownloadSummary = {
+   successCount: number
+   failedCount: number
+@@ -70,6 +90,25 @@ export type DataDownloadProgress = {
+   message: string
+ }
+ 
++export type IndicatorManageItem = {
++  index: number
++  name: string
++  expr: string
++  prec: number
++}
++
++export type IndicatorManageDraft = {
++  name: string
++  expr: string
++  prec: number
++}
++
++export type IndicatorManagePageData = {
++  exists: boolean
++  filePath: string
++  items: IndicatorManageItem[]
++}
++
+ export async function getDataDownloadStatus(sourcePath: string) {
+   return invoke<DataDownloadStatus>('get_data_download_status', { sourcePath })
+ }
+@@ -78,6 +117,18 @@ export async function runDataDownload(request: DataDownloadRequest) {
+   return invoke<DataDownloadRunResult>('run_data_download', { request })
+ }
+ 
++export async function runMissingStockRepair(request: MissingStockRepairRequest) {
++  return invoke<DataDownloadRunResult>('run_missing_stock_repair', { request })
++}
++
++export async function getIndicatorManagePage(sourcePath: string) {
++  return invoke<IndicatorManagePageData>('get_indicator_manage_page', { sourcePath })
++}
++
++export async function saveIndicatorManagePage(sourcePath: string, items: IndicatorManageDraft[]) {
++  return invoke<IndicatorManagePageData>('save_indicator_manage_page', { sourcePath, items })
++}
++
+ export async function listenDataDownloadProgress(
+   downloadId: string,
+   onProgress: (progress: DataDownloadProgress) => void,
+diff --git a/ui/lianghua-web/src/apis/details.ts b/ui/lianghua-web/src/apis/details.ts
+index cc346d0..732cd3d 100644
+--- a/ui/lianghua-web/src/apis/details.ts
++++ b/ui/lianghua-web/src/apis/details.ts
+@@ -79,6 +79,7 @@ export type DetailStrategyTriggerRow = {
+   // 策略触发表用数据
+   rule_name: string
+   rule_score?: number | null
++  is_triggered?: boolean | null
+   hit_date?: string
+   lag?: number | null
+   explain?: string
+diff --git a/ui/lianghua-web/src/apis/marketMonitor.ts b/ui/lianghua-web/src/apis/marketMonitor.ts
+index 9fb147a..b6bde37 100644
+--- a/ui/lianghua-web/src/apis/marketMonitor.ts
++++ b/ui/lianghua-web/src/apis/marketMonitor.ts
+@@ -8,6 +8,7 @@ export type MarketMonitorRow = {
+   totalScore?: number | null
+   latestPrice?: number | null
+   latestChangePct?: number | null
++  volumeRatio?: number | null
+   open?: number | null
+   high?: number | null
+   low?: number | null
+diff --git a/ui/lianghua-web/src/apis/watchObserve.ts b/ui/lianghua-web/src/apis/watchObserve.ts
+index d3633cc..e542f11 100644
+--- a/ui/lianghua-web/src/apis/watchObserve.ts
++++ b/ui/lianghua-web/src/apis/watchObserve.ts
+@@ -14,6 +14,7 @@ export type WatchObserveRow = {
+   name: string
+   latestClose: number | null
+   latestChangePct: number | null
++  volumeRatio: number | null
+   addedDate: string
+   postWatchReturnPct: number | null
+   todayRank: number | null
+diff --git a/ui/lianghua-web/src/pages/desktop/AdvancedStockPickPage.tsx b/ui/lianghua-web/src/pages/desktop/AdvancedStockPickPage.tsx
+index eb09360..c78b25f 100644
+--- a/ui/lianghua-web/src/pages/desktop/AdvancedStockPickPage.tsx
++++ b/ui/lianghua-web/src/pages/desktop/AdvancedStockPickPage.tsx
+@@ -297,6 +297,12 @@ function AdvancedStockPickTable({
+     AdvancedStockPickRow,
+     AdvancedRowSortKey
+   >(rows, sortDefinitions);
++  const detailNavigationItems = sortedRows.map((row) => ({
++    tsCode: row.ts_code,
++    tradeDate: tradeDate || undefined,
++    sourcePath: sourcePath || undefined,
++    name: row.name ?? undefined,
++  }));
+   const tableWrapRef = useRouteScrollRegion<HTMLDivElement>(
+     "advanced-stock-pick-table",
+     [sortedRows.length, tradeDate, sourcePath],
+@@ -395,6 +401,7 @@ function AdvancedStockPickTable({
+                   tsCode={row.ts_code}
+                   tradeDate={tradeDate}
+                   sourcePath={sourcePath}
++                  navigationItems={detailNavigationItems}
+                 >
+                   {row.name ?? row.ts_code}
+                 </DetailsLink>
+diff --git a/ui/lianghua-web/src/pages/desktop/BoardAnalysisPage.tsx b/ui/lianghua-web/src/pages/desktop/BoardAnalysisPage.tsx
+index 05697c6..aed4f95 100644
+--- a/ui/lianghua-web/src/pages/desktop/BoardAnalysisPage.tsx
++++ b/ui/lianghua-web/src/pages/desktop/BoardAnalysisPage.tsx
+@@ -364,6 +364,12 @@ function ConstituentsTable({
+     `board-analysis-detail-table:${detailData.group_kind}:${detailData.metric_kind}:${detailData.group_name}`,
+     [sortedRows.length, detailData.resolved_ref_date],
+   );
++  const detailNavigationItems = sortedRows.map((row) => ({
++    tsCode: row.ts_code,
++    tradeDate: detailData.resolved_ref_date ?? undefined,
++    sourcePath: sourcePath || undefined,
++    name: row.name ?? undefined,
++  }));
+ 
+   return (
+     <div className="board-analysis-detail-table-wrap" ref={tableWrapRef}>
+@@ -423,6 +429,7 @@ function ConstituentsTable({
+                   tsCode={row.ts_code}
+                   tradeDate={detailData.resolved_ref_date ?? undefined}
+                   sourcePath={sourcePath}
++                  navigationItems={detailNavigationItems}
+                 >
+                   {row.name ?? row.ts_code}
+                 </DetailsLink>
+diff --git a/ui/lianghua-web/src/pages/desktop/DataDownloadPage.tsx b/ui/lianghua-web/src/pages/desktop/DataDownloadPage.tsx
+index c17cf9c..87882cc 100644
+--- a/ui/lianghua-web/src/pages/desktop/DataDownloadPage.tsx
++++ b/ui/lianghua-web/src/pages/desktop/DataDownloadPage.tsx
+@@ -2,16 +2,23 @@ import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
+ import { inspectManagedSourceStatus } from '../../apis/managedSource'
+ import {
+   getDataDownloadStatus,
++  getIndicatorManagePage,
+   listenDataDownloadProgress,
+   runDataDownload,
++  runMissingStockRepair,
++  saveIndicatorManagePage,
+   type DataDownloadProgress,
+   type DataDownloadRunResult,
+   type DataDownloadStatus,
++  type IndicatorManageDraft,
++  type IndicatorManageItem,
++  type IndicatorManagePageData,
+ } from '../../apis/dataDownload'
+ import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
+ import './css/DataDownloadPage.css'
+ 
+ type BusyAction = 'idle' | 'loading' | 'running'
++type IndicatorEditorMode = 'create' | 'edit'
+ 
+ type DataDownloadDraft = {
+   token: string
+@@ -26,6 +33,14 @@ type DataDownloadDraft = {
+ 
+ const DATA_DOWNLOAD_DRAFT_KEY = 'lh_data_download_draft_v1'
+ 
++function buildEmptyIndicatorDraft(): IndicatorManageDraft {
++  return {
++    name: '',
++    expr: '',
++    prec: 2,
++  }
++}
++
+ function formatTradeDate(value: string | null | undefined) {
+   if (!value) {
+     return '--'
+@@ -146,6 +161,23 @@ function formatFileRange(
+   return formatTradeDate(fileStatus.maxTradeDate ?? fileStatus.minTradeDate)
+ }
+ 
++function formatMissingStockSummary(status: DataDownloadStatus | null) {
++  const repair = status?.missingStockRepair
++  if (!repair) {
++    return '读取中...'
++  }
++
++  if (!repair.ready) {
++    return repair.detail
++  }
++
++  if (repair.missingCount <= 0) {
++    return '无缺失股票'
++  }
++
++  return `${repair.missingCount} 只待补全`
++}
++
+ function readDraft(): DataDownloadDraft {
+   const fallback: DataDownloadDraft = {
+     token: '',
+@@ -200,6 +232,17 @@ export default function DataDownloadPage() {
+   const [error, setError] = useState('')
+   const [progress, setProgress] = useState<DataDownloadProgress | null>(null)
+   const [displayProgressPercent, setDisplayProgressPercent] = useState(0)
++  const [indicatorModalOpen, setIndicatorModalOpen] = useState(false)
++  const [indicatorItems, setIndicatorItems] = useState<IndicatorManageItem[]>([])
++  const [indicatorFilePath, setIndicatorFilePath] = useState('')
++  const [indicatorExists, setIndicatorExists] = useState(false)
++  const [indicatorLoading, setIndicatorLoading] = useState(false)
++  const [indicatorSaving, setIndicatorSaving] = useState(false)
++  const [indicatorError, setIndicatorError] = useState('')
++  const [indicatorNotice, setIndicatorNotice] = useState('')
++  const [indicatorEditorMode, setIndicatorEditorMode] = useState<IndicatorEditorMode | null>(null)
++  const [indicatorDraft, setIndicatorDraft] = useState<IndicatorManageDraft | null>(null)
++  const [indicatorEditingName, setIndicatorEditingName] = useState<string | null>(null)
+   const activeDownloadIdRef = useRef('')
+   const progressUnlistenRef = useRef<null | (() => void)>(null)
+   const displayProgressPercentRef = useRef(0)
+@@ -219,6 +262,19 @@ export default function DataDownloadPage() {
+     progressPercent === null
+       ? '等待后端返回分段进度'
+       : `${deferredProgress?.finished ?? 0} / ${deferredProgress?.total ?? 0}`
++  const missingStockRepair = status?.missingStockRepair ?? null
++
++  function applyIndicatorPage(page: IndicatorManagePageData) {
++    setIndicatorItems(page.items)
++    setIndicatorFilePath(page.filePath)
++    setIndicatorExists(page.exists)
++  }
++
++  function clearIndicatorEditor() {
++    setIndicatorEditorMode(null)
++    setIndicatorDraft(null)
++    setIndicatorEditingName(null)
++  }
+ 
+   useEffect(() => {
+     displayProgressPercentRef.current = displayProgressPercent
+@@ -305,48 +361,129 @@ export default function DataDownloadPage() {
+     }
+   }
+ 
+-  useEffect(() => {
+-    void loadStatus()
+-  }, [])
++  async function openIndicatorManager() {
++    if (!sourcePath) {
++      setError('当前数据目录为空，请先到数据管理页确认目录。')
++      return
++    }
+ 
+-  useEffect(() => {
+-    return () => {
+-      progressUnlistenRef.current?.()
++    setIndicatorModalOpen(true)
++    setIndicatorLoading(true)
++    setIndicatorError('')
++    setIndicatorNotice('')
++    try {
++      const page = await getIndicatorManagePage(sourcePath)
++      applyIndicatorPage(page)
++      clearIndicatorEditor()
++    } catch (loadError) {
++      setIndicatorError(`读取指标配置失败: ${String(loadError)}`)
++      setIndicatorItems([])
++      setIndicatorFilePath('')
++      setIndicatorExists(false)
++      clearIndicatorEditor()
++    } finally {
++      setIndicatorLoading(false)
+     }
+-  }, [])
++  }
+ 
+-  async function onRunDownload() {
++  function onCreateIndicator() {
++    setIndicatorEditorMode('create')
++    setIndicatorDraft(buildEmptyIndicatorDraft())
++    setIndicatorEditingName(null)
++    setIndicatorNotice('')
++    setIndicatorError('')
++  }
++
++  function onEditIndicator(item: IndicatorManageItem) {
++    setIndicatorEditorMode('edit')
++    setIndicatorDraft({
++      name: item.name,
++      expr: item.expr,
++      prec: item.prec,
++    })
++    setIndicatorEditingName(item.name)
++    setIndicatorNotice('')
++    setIndicatorError('')
++  }
++
++  async function persistIndicatorItems(nextItems: IndicatorManageDraft[], successMessage: string) {
+     if (!sourcePath) {
+-      setError('当前数据目录为空，请先到数据管理页确认目录。')
++      setIndicatorError('当前数据目录为空，无法保存指标配置。')
+       return
+     }
+ 
+-    if (!token.trim()) {
+-      setError('请先填写 Tushare Token。')
+-      return
++    setIndicatorSaving(true)
++    setIndicatorError('')
++    setIndicatorNotice('')
++    try {
++      const page = await saveIndicatorManagePage(sourcePath, nextItems)
++      applyIndicatorPage(page)
++      clearIndicatorEditor()
++      setIndicatorNotice(successMessage)
++    } catch (saveError) {
++      setIndicatorError(`保存指标配置失败: ${String(saveError)}`)
++    } finally {
++      setIndicatorSaving(false)
+     }
++  }
+ 
+-    const startDate = isFirstDownload
+-      ? inputDateToCompact(startDateInput)
+-      : resolvedIncrementalStartDate
+-    if (!startDate) {
+-      setError(isFirstDownload ? '请先填写开始日期。' : '请先提供增量补救起点。')
++  async function onSaveIndicatorDraft() {
++    if (!indicatorDraft) {
+       return
+     }
+ 
+-    const endDate = isFirstDownload
+-      ? (useTodayEnd ? 'today' : inputDateToCompact(endDateInput))
+-      : 'today'
+-    if (isFirstDownload && !endDate) {
+-      setError('请先填写结束日期，或勾选自动到当前交易日。')
+-      return
++    const nextDraft: IndicatorManageDraft = {
++      name: indicatorDraft.name.trim(),
++      expr: indicatorDraft.expr.trim(),
++      prec: Math.max(0, Number(indicatorDraft.prec) || 0),
+     }
+ 
+-    if (endDate !== 'today' && startDate > endDate) {
+-      setError('开始日期不能晚于结束日期。')
++    const currentItems = indicatorItems.map((item) => ({
++      name: item.name,
++      expr: item.expr,
++      prec: item.prec,
++    }))
++
++    const nextItems =
++      indicatorEditorMode === 'edit' && indicatorEditingName
++        ? currentItems.map((item) =>
++            item.name === indicatorEditingName ? nextDraft : item,
++          )
++        : [...currentItems, nextDraft]
++
++    await persistIndicatorItems(
++      nextItems,
++      indicatorEditorMode === 'edit' ? `已保存指标：${nextDraft.name}` : `已新增指标：${nextDraft.name}`,
++    )
++  }
++
++  async function onDeleteIndicator(item: IndicatorManageItem) {
++    if (!window.confirm(`确认删除指标 ${item.name} 吗？`)) {
+       return
+     }
+ 
++    const nextItems = indicatorItems
++      .filter((current) => current.name !== item.name)
++      .map((current) => ({
++        name: current.name,
++        expr: current.expr,
++        prec: current.prec,
++      }))
++
++    await persistIndicatorItems(nextItems, `已删除指标：${item.name}`)
++  }
++
++  useEffect(() => {
++    void loadStatus()
++  }, [])
++
++  useEffect(() => {
++    return () => {
++      progressUnlistenRef.current?.()
++    }
++  }, [])
++
++  async function runDataTask(executor: (downloadId: string) => Promise<DataDownloadRunResult>) {
+     setBusyAction('running')
+     setError('')
+     setNotice('')
+@@ -378,18 +515,7 @@ export default function DataDownloadPage() {
+     })
+ 
+     try {
+-      const result: DataDownloadRunResult = await runDataDownload({
+-        downloadId,
+-        sourcePath,
+-        token: token.trim(),
+-        startDate,
+-        endDate,
+-        threads: Math.max(1, Number(threads) || 1),
+-        retryTimes: Math.max(0, Number(retryTimes) || 0),
+-        limitCallsPerMin: Math.max(1, Number(limitCallsPerMin) || 1),
+-        includeTurnover,
+-      })
+-
++      const result = await executor(downloadId)
+       setStatus(result.status)
+ 
+       const failedTail =
+@@ -410,6 +536,84 @@ export default function DataDownloadPage() {
+     }
+   }
+ 
++  async function onRunDownload() {
++    if (!sourcePath) {
++      setError('当前数据目录为空，请先到数据管理页确认目录。')
++      return
++    }
++
++    if (!token.trim()) {
++      setError('请先填写 Tushare Token。')
++      return
++    }
++
++    const startDate = isFirstDownload
++      ? inputDateToCompact(startDateInput)
++      : resolvedIncrementalStartDate
++    if (!startDate) {
++      setError(isFirstDownload ? '请先填写开始日期。' : '请先提供增量补救起点。')
++      return
++    }
++
++    const endDate = isFirstDownload
++      ? (useTodayEnd ? 'today' : inputDateToCompact(endDateInput))
++      : 'today'
++    if (isFirstDownload && !endDate) {
++      setError('请先填写结束日期，或勾选自动到当前交易日。')
++      return
++    }
++
++    if (endDate !== 'today' && startDate > endDate) {
++      setError('开始日期不能晚于结束日期。')
++      return
++    }
++
++    await runDataTask((downloadId) =>
++      runDataDownload({
++        downloadId,
++        sourcePath,
++        token: token.trim(),
++        startDate,
++        endDate,
++        threads: Math.max(1, Number(threads) || 1),
++        retryTimes: Math.max(0, Number(retryTimes) || 0),
++        limitCallsPerMin: Math.max(1, Number(limitCallsPerMin) || 1),
++        includeTurnover,
++      }),
++    )
++  }
++
++  async function onRunMissingStockRepair() {
++    if (!sourcePath) {
++      setError('当前数据目录为空，请先到数据管理页确认目录。')
++      return
++    }
++    if (!token.trim()) {
++      setError('请先填写 Tushare Token。')
++      return
++    }
++    if (!missingStockRepair?.ready) {
++      setError(missingStockRepair?.detail ?? '当前缺失股票补全不可执行。')
++      return
++    }
++    if ((missingStockRepair?.missingCount ?? 0) <= 0) {
++      setError('当前没有需要补全的缺失股票。')
++      return
++    }
++
++    await runDataTask((downloadId) =>
++      runMissingStockRepair({
++        downloadId,
++        sourcePath,
++        token: token.trim(),
++        threads: Math.max(1, Number(threads) || 1),
++        retryTimes: Math.max(0, Number(retryTimes) || 0),
++        limitCallsPerMin: Math.max(1, Number(limitCallsPerMin) || 1),
++        includeTurnover,
++      }),
++    )
++  }
++
+   return (
+     <div className="data-download-page">
+       <section className="data-download-card">
+@@ -421,14 +625,33 @@ export default function DataDownloadPage() {
+             </p>
+           </div>
+ 
+-          <button
+-            className="data-download-secondary-btn"
+-            type="button"
+-            onClick={() => void loadStatus()}
+-            disabled={isBusy}
+-          >
+-            {busyAction === 'loading' ? '刷新中...' : '刷新状态'}
+-          </button>
++          <div className="data-download-head-actions">
++            <button
++              className="data-download-secondary-btn"
++              type="button"
++              onClick={() => void openIndicatorManager()}
++              disabled={isBusy}
++            >
++              指标管理
++            </button>
++            <button
++              className="data-download-secondary-btn"
++              type="button"
++              onClick={() => void onRunMissingStockRepair()}
++              disabled={isBusy || !missingStockRepair?.ready || (missingStockRepair?.missingCount ?? 0) <= 0}
++              title={missingStockRepair?.detail || undefined}
++            >
++              {missingStockRepair?.missingCount ? `缺失股票补全 (${missingStockRepair.missingCount})` : '缺失股票补全'}
++            </button>
++            <button
++              className="data-download-secondary-btn"
++              type="button"
++              onClick={() => void loadStatus()}
++              disabled={isBusy}
++            >
++              {busyAction === 'loading' ? '刷新中...' : '刷新状态'}
++            </button>
++          </div>
+         </div>
+ 
+         <div className="data-download-top-grid">
+@@ -502,6 +725,15 @@ export default function DataDownloadPage() {
+                     : '读取中...'}
+                 </small>
+               </div>
++              <div className="data-download-summary-item">
++                <span>缺失股票补全</span>
++                <strong>{formatMissingStockSummary(status)}</strong>
++                <small>
++                  {status?.missingStockRepair
++                    ? status.missingStockRepair.detail
++                    : '读取中...'}
++                </small>
++              </div>
+             </div>
+           </div>
+         </div>
+@@ -712,6 +944,196 @@ export default function DataDownloadPage() {
+         {notice ? <div className="data-download-notice">{notice}</div> : null}
+         {error ? <div className="data-download-error">{error}</div> : null}
+       </section>
++
++      {indicatorModalOpen ? (
++        <div
++          className="data-download-modal-backdrop"
++          role="presentation"
++          onClick={() => {
++            if (!indicatorSaving) {
++              setIndicatorModalOpen(false)
++            }
++          }}
++        >
++          <div
++            className="data-download-modal"
++            role="dialog"
++            aria-modal="true"
++            aria-label="指标管理"
++            onClick={(event) => event.stopPropagation()}
++          >
++            <div className="data-download-modal-head">
++              <div>
++                <h3>指标管理</h3>
++                <p>{indicatorFilePath || 'ind.toml'}</p>
++              </div>
++              <button
++                className="data-download-secondary-btn"
++                type="button"
++                onClick={() => setIndicatorModalOpen(false)}
++                disabled={indicatorSaving}
++              >
++                关闭
++              </button>
++            </div>
++
++            {indicatorNotice ? <div className="data-download-notice">{indicatorNotice}</div> : null}
++            {indicatorError ? <div className="data-download-error">{indicatorError}</div> : null}
++
++            {indicatorLoading ? (
++              <div className="data-download-modal-loading">读取指标配置中...</div>
++            ) : (
++              <>
++                <div className="data-download-modal-meta">
++                  <span>{indicatorExists ? '当前文件已存在' : '当前文件不存在，将在保存时创建'}</span>
++                  <span>当前共 {indicatorItems.length} 个指标，保存前会做语法和字段校验</span>
++                </div>
++
++                <div className="data-download-indicator-toolbar">
++                  <button
++                    className="data-download-secondary-btn"
++                    type="button"
++                    onClick={onCreateIndicator}
++                    disabled={indicatorSaving}
++                  >
++                    新增指标
++                  </button>
++                  <button
++                    className="data-download-secondary-btn"
++                    type="button"
++                    onClick={() => void openIndicatorManager()}
++                    disabled={indicatorSaving}
++                  >
++                    重新读取
++                  </button>
++                </div>
++
++                {indicatorDraft ? (
++                  <section className="data-download-indicator-editor-card">
++                    <div className="data-download-indicator-editor-head">
++                      <div>
++                        <h4>{indicatorEditorMode === 'edit' ? `修改指标 · ${indicatorEditingName ?? '--'}` : '新增指标'}</h4>
++                        <p>只保留名称、表达式和精度三个字段。</p>
++                      </div>
++                      <button
++                        className="data-download-secondary-btn"
++                        type="button"
++                        onClick={clearIndicatorEditor}
++                        disabled={indicatorSaving}
++                      >
++                        取消
++                      </button>
++                    </div>
++
++                    <div className="data-download-indicator-form-grid">
++                      <label className="data-download-field">
++                        <span>指标名</span>
++                        <input
++                          type="text"
++                          value={indicatorDraft.name}
++                          onChange={(event) =>
++                            setIndicatorDraft((current) =>
++                              current ? { ...current, name: event.target.value } : current,
++                            )
++                          }
++                          placeholder="例如 MA10"
++                        />
++                      </label>
++
++                      <label className="data-download-field">
++                        <span>精度</span>
++                        <input
++                          type="number"
++                          min="0"
++                          value={indicatorDraft.prec}
++                          onChange={(event) =>
++                            setIndicatorDraft((current) =>
++                              current ? { ...current, prec: Math.max(0, Number(event.target.value) || 0) } : current,
++                            )
++                          }
++                        />
++                      </label>
++
++                      <label className="data-download-field data-download-field-span-2">
++                        <span>表达式</span>
++                        <textarea
++                          className="data-download-indicator-editor"
++                          value={indicatorDraft.expr}
++                          onChange={(event) =>
++                            setIndicatorDraft((current) =>
++                              current ? { ...current, expr: event.target.value } : current,
++                            )
++                          }
++                          spellCheck={false}
++                          placeholder={'REFV := REF(V, 1);\nDIV(V, REFV);'}
++                        />
++                      </label>
++                    </div>
++
++                    <div className="data-download-modal-actions">
++                      <button
++                        className="data-download-primary-btn"
++                        type="button"
++                        onClick={() => void onSaveIndicatorDraft()}
++                        disabled={indicatorSaving}
++                      >
++                        {indicatorSaving ? '保存中...' : indicatorEditorMode === 'edit' ? '保存指标' : '新增指标'}
++                      </button>
++                    </div>
++                  </section>
++                ) : null}
++
++                {indicatorItems.length === 0 ? (
++                  <div className="data-download-modal-loading">当前没有指标，点“新增指标”开始添加。</div>
++                ) : (
++                  <div className="data-download-indicator-list">
++                    {indicatorItems.map((item) => (
++                      <article key={item.name} className="data-download-indicator-card">
++                        <div className="data-download-indicator-card-head">
++                          <div>
++                            <div className="data-download-indicator-card-name">{item.name}</div>
++                            <div className="data-download-indicator-card-meta">精度 {item.prec}</div>
++                          </div>
++                          <div className="data-download-indicator-card-actions">
++                            <button
++                              className="data-download-secondary-btn"
++                              type="button"
++                              onClick={() => onEditIndicator(item)}
++                              disabled={indicatorSaving}
++                            >
++                              修改
++                            </button>
++                            <button
++                              className="data-download-secondary-btn data-download-danger-btn"
++                              type="button"
++                              onClick={() => void onDeleteIndicator(item)}
++                              disabled={indicatorSaving}
++                            >
++                              删除
++                            </button>
++                          </div>
++                        </div>
++
++                        <pre className="data-download-indicator-card-expr">{item.expr}</pre>
++                      </article>
++                    ))}
++                  </div>
++                )}
++
++                <div className="data-download-modal-actions">
++                  <button
++                    className="data-download-primary-btn"
++                    type="button"
++                    onClick={() => setIndicatorModalOpen(false)}
++                  >
++                    关闭
++                  </button>
++                </div>
++              </>
++            )}
++          </div>
++        </div>
++      ) : null}
+     </div>
+   )
+ }
+diff --git a/ui/lianghua-web/src/pages/desktop/DetailsLinkedPage.tsx b/ui/lianghua-web/src/pages/desktop/DetailsLinkedPage.tsx
+new file mode 100644
+index 0000000..d76aa36
+--- /dev/null
++++ b/ui/lianghua-web/src/pages/desktop/DetailsLinkedPage.tsx
+@@ -0,0 +1,18 @@
++import { useLocation } from "react-router-dom";
++import DetailsPage from "./DetailsPage";
++import type { DetailsLinkLocationState } from "../../shared/detailsLinkState";
++
++export default function DetailsLinkedPage() {
++  const location = useLocation();
++  const locationState =
++    location.state && typeof location.state === "object"
++      ? (location.state as DetailsLinkLocationState)
++      : null;
++
++  return (
++    <DetailsPage
++      variant="linked-overlay"
++      navigationItems={locationState?.navigationItems}
++    />
++  );
++}
+diff --git a/ui/lianghua-web/src/pages/desktop/DetailsPage.tsx b/ui/lianghua-web/src/pages/desktop/DetailsPage.tsx
+index e8fb7ad..4a3e9e4 100644
+--- a/ui/lianghua-web/src/pages/desktop/DetailsPage.tsx
++++ b/ui/lianghua-web/src/pages/desktop/DetailsPage.tsx
+@@ -65,6 +65,7 @@ import {
+   type WatchObserveRow,
+   upsertWatchObserveRow,
+ } from "../../apis/watchObserve";
++import type { DetailsNavigationItem } from "../../shared/detailsLinkState";
+ import "./css/DetailsPage.css";
+ 
+ const DEFAULT_TOP_LIMIT = "100";
+@@ -81,6 +82,10 @@ const CHART_CURSOR_Y_MAX = 94;
+ const CHART_TOOLTIP_LEFT_THRESHOLD = 62;
+ const CHART_POINTER_DRAG_THRESHOLD = 6;
+ const CHART_TOUCH_FOCUS_HIT_SLOP = 24;
++const STRATEGY_SPLIT_DEFAULT = 0.64;
++const STRATEGY_SPLIT_MIN = 0.24;
++const STRATEGY_SPLIT_MAX = 0.76;
++const STRATEGY_STACK_BREAKPOINT = 1180;
+ const WATERMARK_CONCEPT_LIMIT = 3;
+ const MAX_STOCK_NAME_CANDIDATES = 12;
+ const CANDLE_UP_COLOR = "#d9485f";
+@@ -144,6 +149,13 @@ type StrategyCompareSnapshot = {
+   rows: DetailStrategyTriggerRow[];
+ };
+ 
++type DetailsPageVariant = "default" | "linked-overlay";
++
++export type DetailsPageProps = {
++  variant?: DetailsPageVariant;
++  navigationItems?: DetailsNavigationItem[] | null;
++};
++
+ function formatNumber(value: unknown, digits = 2) {
+   if (typeof value !== "number" || !Number.isFinite(value)) {
+     return "--";
+@@ -178,6 +190,13 @@ function getStrategyRuleScore(row: DetailStrategyTriggerRow | null | undefined)
+     : 0;
+ }
+ 
++function isStrategyTriggered(row: DetailStrategyTriggerRow | null | undefined) {
++  if (typeof row?.is_triggered === "boolean") {
++    return row.is_triggered;
++  }
++  return getStrategyRuleScore(row) !== 0;
++}
++
+ function getComparedStrategyRuleScore(
+   ruleName: string,
+   compareRowMap: Map<string, DetailStrategyTriggerRow> | null | undefined,
+@@ -188,19 +207,29 @@ function getComparedStrategyRuleScore(
+   return getStrategyRuleScore(compareRowMap.get(ruleName));
+ }
+ 
++function getComparedStrategyTriggered(
++  ruleName: string,
++  compareRowMap: Map<string, DetailStrategyTriggerRow> | null | undefined,
++) {
++  if (!compareRowMap) {
++    return null;
++  }
++  return isStrategyTriggered(compareRowMap.get(ruleName));
++}
++
+ function isStrategyOutRow(
+   row: DetailStrategyTriggerRow | null | undefined,
+   compareRowMap: Map<string, DetailStrategyTriggerRow> | null | undefined,
+   compareTradeDate?: string | null,
+   outReferenceTradeDate?: string | null,
+ ) {
+-  if (!row || getStrategyRuleScore(row) !== 0) {
++  if (!row || isStrategyTriggered(row)) {
+     return false;
+   }
+ 
+   const normalizedCompareTradeDate = compareTradeDate?.trim() ?? "";
+   if (compareRowMap && normalizedCompareTradeDate !== "") {
+-    return getComparedStrategyRuleScore(row.rule_name, compareRowMap) !== 0;
++    return getComparedStrategyTriggered(row.rule_name, compareRowMap) === true;
+   }
+ 
+   const normalizedOutReferenceTradeDate = outReferenceTradeDate?.trim() ?? "";
+@@ -300,6 +329,54 @@ function findMatchingTopValue(rows: OverviewRow[], codeInput: string) {
+   return hit?.ts_code ?? "";
+ }
+ 
++function buildNavigationItemFromOverviewRow(
++  row: OverviewRow,
++  fallbackTradeDate: string,
++  sourcePath: string,
++): DetailsNavigationItem {
++  const tradeDate =
++    typeof row.trade_date === "string" && row.trade_date.trim() !== ""
++      ? row.trade_date.trim()
++      : fallbackTradeDate.trim() || undefined;
++  const name =
++    typeof row.name === "string" && row.name.trim() !== ""
++      ? row.name.trim()
++      : undefined;
++
++  return {
++    tsCode: row.ts_code,
++    tradeDate,
++    sourcePath: sourcePath.trim() || undefined,
++    name,
++  };
++}
++
++function findNavigationIndex(
++  items: DetailsNavigationItem[],
++  tsCode: string,
++  tradeDate: string,
++) {
++  const normalizedCode = sanitizeCodeInput(splitTsCode(tsCode));
++  const normalizedTradeDate = tradeDate.trim() === "--" ? "" : tradeDate.trim();
++
++  const exactIndex = items.findIndex((item) => {
++    const itemCode = sanitizeCodeInput(splitTsCode(item.tsCode));
++    const itemTradeDate = item.tradeDate?.trim() ?? "";
++    return itemCode === normalizedCode && itemTradeDate === normalizedTradeDate;
++  });
++  if (exactIndex >= 0) {
++    return exactIndex;
++  }
++
++  return items.findIndex(
++    (item) => sanitizeCodeInput(splitTsCode(item.tsCode)) === normalizedCode,
++  );
++}
++
++function clampStrategySplitRatio(value: number) {
++  return Math.min(STRATEGY_SPLIT_MAX, Math.max(STRATEGY_SPLIT_MIN, value));
++}
++
+ function buildOverviewRows(
+   overview: DetailOverview | null | undefined,
+   fallbackCode: string,
+@@ -876,10 +953,10 @@ function buildChartPointerSnapshot(
+ }
+ 
+ function isPointerNearChartFocus(
+-  panelKey: string,
++  _panelKey: string,
+   viewport: HTMLDivElement,
+   clientX: number,
+-  clientY: number,
++  _clientY: number,
+   focus: ChartFocus | null,
+ ) {
+   if (!focus) {
+@@ -892,16 +969,7 @@ function isPointerNearChartFocus(
+   }
+ 
+   const focusClientX = rect.left + (rect.width * focus.cursorXPercent) / 100;
+-  if (Math.abs(clientX - focusClientX) <= CHART_TOUCH_FOCUS_HIT_SLOP) {
+-    return true;
+-  }
+-
+-  if (focus.panelKey !== panelKey) {
+-    return false;
+-  }
+-
+-  const focusClientY = rect.top + (rect.height * focus.cursorYPercent) / 100;
+-  return Math.abs(clientY - focusClientY) <= CHART_TOUCH_FOCUS_HIT_SLOP;
++  return Math.abs(clientX - focusClientX) <= CHART_TOUCH_FOCUS_HIT_SLOP;
+ }
+ 
+ function buildBrickBodies(
+@@ -1555,6 +1623,7 @@ function StrategyTableSection({
+   compareTradeDate?: string | null;
+   outReferenceTradeDate?: string | null;
+ }) {
++  const showScoreColumn = sectionKind !== "untriggered";
+   const effectiveRows = useMemo(() => {
+     const nextRows = [...(rows ?? [])];
+     if (sectionKind !== "mixed" && sectionKind !== "untriggered") {
+@@ -1585,13 +1654,19 @@ function StrategyTableSection({
+   const sortDefinitions = useMemo(
+     () =>
+       ({
+-        rule_score: { value: (row) => row.rule_score },
++        ...(showScoreColumn
++          ? {
++              rule_score: {
++                value: (row: DetailStrategyTriggerRow) => row.rule_score,
++              },
++            }
++          : {}),
+         hit_date: { value: (row) => row.hit_date },
+         lag: { value: (row) => row.lag },
+       }) satisfies Partial<
+         Record<DetailStrategySortKey, SortDefinition<DetailStrategyTriggerRow>>
+       >,
+-    [],
++    [showScoreColumn],
+   );
+   const { sortKey, sortDirection, sortedRows, toggleSort } = useTableSort<
+     DetailStrategyTriggerRow,
+@@ -1608,7 +1683,7 @@ function StrategyTableSection({
+           <table className="details-table details-table-strategy">
+             <colgroup>
+               <col className="details-col-rule" />
+-              <col className="details-col-score" />
++              {showScoreColumn ? <col className="details-col-score" /> : null}
+               <col className="details-col-date" />
+               <col className="details-col-lag" />
+               <col className="details-col-tag" />
+@@ -1617,20 +1692,22 @@ function StrategyTableSection({
+             <thead>
+               <tr>
+                 <th>策略</th>
+-                <th
+-                  aria-sort={getAriaSort(
+-                    sortKey === "rule_score",
+-                    sortDirection,
+-                  )}
+-                >
+-                  <TableSortButton
+-                    label="分值"
+-                    isActive={sortKey === "rule_score"}
+-                    direction={sortDirection}
+-                    onClick={() => toggleSort("rule_score")}
+-                    title={`按${title}中的分值排序`}
+-                  />
+-                </th>
++                {showScoreColumn ? (
++                  <th
++                    aria-sort={getAriaSort(
++                      sortKey === "rule_score",
++                      sortDirection,
++                    )}
++                  >
++                    <TableSortButton
++                      label="分值"
++                      isActive={sortKey === "rule_score"}
++                      direction={sortDirection}
++                      onClick={() => toggleSort("rule_score")}
++                      title={`按${title}中的分值排序`}
++                    />
++                  </th>
++                ) : null}
+                 <th
+                   aria-sort={getAriaSort(sortKey === "hit_date", sortDirection)}
+                 >
+@@ -1667,8 +1744,12 @@ function StrategyTableSection({
+                     ? getComparedStrategyRuleScore(row.rule_name, compareRowMap)
+                     : null;
+                 const hasCompareScore = compareScore !== null;
+-                const wasTriggered = (compareScore ?? 0) !== 0;
+-                const isTriggered = currentScore !== 0;
++                const compareTriggered =
++                  compareRowMap && normalizedCompareTradeDate !== ""
++                    ? getComparedStrategyTriggered(row.rule_name, compareRowMap)
++                    : null;
++                const wasTriggered = compareTriggered === true;
++                const isTriggered = isStrategyTriggered(row);
+                 const scoreDelta = currentScore - (compareScore ?? 0);
+                 const rowIsOut = isStrategyOutRow(
+                   row,
+@@ -1714,19 +1795,21 @@ function StrategyTableSection({
+                     key={key}
+                   >
+                     <td>{formatFieldValue(row.rule_name)}</td>
+-                    <td>
+-                      <div className="details-strategy-score-cell">
+-                        <span>{formatFieldValue(row.rule_score)}</span>
+-                        {badgeText ? (
+-                          <span
+-                            className={`details-strategy-delta details-strategy-delta-${changeType}`}
+-                            title={badgeTitle}
+-                          >
+-                            {badgeText}
+-                          </span>
+-                        ) : null}
+-                      </div>
+-                    </td>
++                    {showScoreColumn ? (
++                      <td>
++                        <div className="details-strategy-score-cell">
++                          <span>{formatFieldValue(row.rule_score)}</span>
++                          {badgeText ? (
++                            <span
++                              className={`details-strategy-delta details-strategy-delta-${changeType}`}
++                              title={badgeTitle}
++                            >
++                              {badgeText}
++                            </span>
++                          ) : null}
++                        </div>
++                      </td>
++                    ) : null}
+                     <td>{formatFieldValue(row.hit_date)}</td>
+                     <td>{formatFieldValue(row.lag)}</td>
+                     <td>{formatFieldValue(row.tag)}</td>
+@@ -1744,7 +1827,10 @@ function StrategyTableSection({
+   );
+ }
+ 
+-export default function DetailsPage() {
++export default function DetailsPage({
++  variant = "default",
++  navigationItems,
++}: DetailsPageProps) {
+   const [searchParams] = useSearchParams();
+   const { excludedConcepts } = useConceptExclusions();
+   const [sourcePath, setSourcePath] = useState(() => readStoredSourcePath());
+@@ -1769,6 +1855,11 @@ export default function DetailsPage() {
+   const [visibleBarCount, setVisibleBarCount] = useState(DEFAULT_VISIBLE_BARS);
+   const [visibleStartIndex, setVisibleStartIndex] = useState(0);
+   const [chartFocus, setChartFocus] = useState<ChartFocus | null>(null);
++  const [strategySplitRatio, setStrategySplitRatio] = useState(
++    STRATEGY_SPLIT_DEFAULT,
++  );
++  const [strategySplitDragging, setStrategySplitDragging] = useState(false);
++  const [isStrategyStacked, setIsStrategyStacked] = useState(false);
+   const [watchObserveItems, setWatchObserveItems] = useState<WatchObserveRow[]>(
+     [],
+   );
+@@ -1780,12 +1871,15 @@ export default function DetailsPage() {
+   const [strategyCompareSnapshot, setStrategyCompareSnapshot] =
+     useState<StrategyCompareSnapshot | null>(null);
+   const chartDragRef = useRef<ChartDragState | null>(null);
++  const strategyGridRef = useRef<HTMLDivElement | null>(null);
++  const strategyResizePointerIdRef = useRef<number | null>(null);
+   const currentRankRowRef = useRef<HTMLTableRowElement | null>(null);
+   const rankTableWrapRef = useRef<HTMLDivElement | null>(null);
+   const pendingPageScrollRef = useRef<ScrollSnapshot | null>(null);
+   const autoFillTopRef = useRef(true);
+ 
+   const sourcePathTrimmed = sourcePath.trim();
++  const isLinkedOverlay = variant === "linked-overlay";
+   const routeTsCode = sanitizeCodeInput(searchParams.get("tsCode") ?? "");
+   const routeTradeDate = searchParams.get("tradeDate")?.trim() ?? "";
+   const routeSourcePath = searchParams.get("sourcePath")?.trim() ?? "";
+@@ -1819,6 +1913,27 @@ export default function DetailsPage() {
+     lookupFocused &&
+     lookupInput.trim() !== "" &&
+     stockNameCandidates.length > 0;
++  const linkedNavigationItems = useMemo(
++    () =>
++      (navigationItems ?? [])
++        .map((item) => {
++          const normalizedCode = sanitizeCodeInput(splitTsCode(item.tsCode));
++          if (normalizedCode === "") {
++            return null;
++          }
++
++          return {
++            tsCode: stdTsCode(normalizedCode),
++            tradeDate: item.tradeDate?.trim() || undefined,
++            sourcePath: item.sourcePath?.trim() || undefined,
++            name: item.name?.trim() || undefined,
++          } satisfies DetailsNavigationItem;
++        })
++        .filter(
++          (item): item is NonNullable<typeof item> => item !== null,
++        ),
++    [navigationItems],
++  );
+ 
+   useEffect(() => {
+     let cancelled = false;
+@@ -2064,23 +2179,57 @@ export default function DetailsPage() {
+     void readDetail(sourcePathTrimmed, tradeDateInput, readTargetCode);
+   }
+ 
++  function onAutoReadDetail(
++    nextTradeDate: string,
++    nextNormalizedCode: string,
++    nextLookupValue?: string,
++  ) {
++    if (sourcePathTrimmed === "" || nextNormalizedCode.trim() === "") {
++      return;
++    }
++
++    autoFillTopRef.current = false;
++    if (nextLookupValue !== undefined) {
++      setLookupInput(nextLookupValue);
++    }
++    setDetailError("");
++    setStrategyCompareSnapshot(null);
++    void readDetail(sourcePathTrimmed, nextTradeDate, nextNormalizedCode);
++  }
++
+   function onSelectStockCandidate(row: StockLookupRow) {
+     const nextCode = getLookupDigits(row.ts_code);
+     if (nextCode === "") {
+       return;
+     }
+ 
+-    autoFillTopRef.current = false;
+     setLookupFocused(false);
+-    setLookupInput(row.name || nextCode);
+-    setDetailError("");
++    onAutoReadDetail(
++      tradeDateInput,
++      stdTsCode(nextCode),
++      row.name || nextCode,
++    );
+   }
+ 
+   function onSelectTopRow(value: string) {
+-    autoFillTopRef.current = false;
+     const matchedRow = topRows.find((row) => row.ts_code === value) ?? null;
+-    setLookupInput(
+-      matchedRow?.name?.trim() || sanitizeCodeInput(splitTsCode(value)),
++    const nextCode = sanitizeCodeInput(
++      splitTsCode(matchedRow?.ts_code ?? value),
++    );
++    if (nextCode === "") {
++      return;
++    }
++
++    const nextTradeDate =
++      typeof matchedRow?.trade_date === "string" &&
++      matchedRow.trade_date.trim() !== ""
++        ? matchedRow.trade_date.trim()
++        : tradeDateInput;
++
++    onAutoReadDetail(
++      nextTradeDate,
++      stdTsCode(nextCode),
++      matchedRow?.name?.trim() || nextCode,
+     );
+   }
+ 
+@@ -2263,20 +2412,45 @@ export default function DetailsPage() {
+     kline?.watermark_name ?? detailData?.overview?.name ?? "个股详情";
+   const watermarkCode = kline?.watermark_code ?? splitTsCode(resolvedTsCode);
+   const matchedTopDate = topResolvedDate || "--";
+-  const currentTopRowIndex = topRows.findIndex(
+-    (row) => row.ts_code === resolvedTsCode,
++  const defaultNavigationItems = useMemo(
++    () =>
++      topRows.map((row) =>
++        buildNavigationItemFromOverviewRow(row, tradeDateInput, sourcePathTrimmed),
++      ),
++    [sourcePathTrimmed, topRows, tradeDateInput],
+   );
+-  const prevTopRow =
+-    currentTopRowIndex > 0 ? topRows[currentTopRowIndex - 1] : null;
+-  const nextTopRow =
+-    currentTopRowIndex >= 0 && currentTopRowIndex < topRows.length - 1
+-      ? topRows[currentTopRowIndex + 1]
++  const activeNavigationItems =
++    linkedNavigationItems.length > 0
++      ? linkedNavigationItems
++      : defaultNavigationItems;
++  const currentNavigationIndex = findNavigationIndex(
++    activeNavigationItems,
++    resolvedTsCode,
++    resolvedTradeDate,
++  );
++  const prevNavigationItem =
++    currentNavigationIndex > 0
++      ? activeNavigationItems[currentNavigationIndex - 1]
++      : null;
++  const nextNavigationItem =
++    currentNavigationIndex >= 0 &&
++    currentNavigationIndex < activeNavigationItems.length - 1
++      ? activeNavigationItems[currentNavigationIndex + 1]
+       : null;
+   const rankLookup = buildRankLookup(detailData?.overview, prevRanks);
+   const chartRangeText =
+     chartItems.length > 0
+       ? `${chartItems[0].trade_date} -> ${chartItems[chartItems.length - 1].trade_date}`
+       : "--";
++  const strategyGridStyle = useMemo(
++    () =>
++      isStrategyStacked
++        ? undefined
++        : {
++            gridTemplateColumns: `minmax(0, ${strategySplitRatio}fr) 14px minmax(0, ${1 - strategySplitRatio}fr)`,
++          },
++    [isStrategyStacked, strategySplitRatio],
++  );
+ 
+   useEffect(() => {
+     if (totalChartItems === 0) {
+@@ -2315,6 +2489,103 @@ export default function DetailsPage() {
+     totalChartItems,
+   ]);
+ 
++  useEffect(() => {
++    if (typeof window === "undefined") {
++      return;
++    }
++
++    const updateStrategyLayoutMode = () => {
++      const grid = strategyGridRef.current;
++      const gridWidth = grid?.getBoundingClientRect().width ?? window.innerWidth;
++      const isPortraitViewport = window.innerHeight > window.innerWidth;
++      setIsStrategyStacked(
++        gridWidth <= STRATEGY_STACK_BREAKPOINT ||
++          (isPortraitViewport && gridWidth <= 1360),
++      );
++    };
++
++    updateStrategyLayoutMode();
++    window.addEventListener("resize", updateStrategyLayoutMode);
++
++    const grid = strategyGridRef.current;
++    const observer =
++      typeof ResizeObserver === "undefined" || !grid
++        ? null
++        : new ResizeObserver(() => {
++            updateStrategyLayoutMode();
++          });
++    if (observer && grid) {
++      observer.observe(grid);
++    }
++
++    return () => {
++      window.removeEventListener("resize", updateStrategyLayoutMode);
++      observer?.disconnect();
++    };
++  }, []);
++
++  useEffect(() => {
++    if (!isStrategyStacked || !strategySplitDragging) {
++      return;
++    }
++
++    strategyResizePointerIdRef.current = null;
++    setStrategySplitDragging(false);
++  }, [isStrategyStacked, strategySplitDragging]);
++
++  useEffect(() => {
++    if (!strategySplitDragging) {
++      return;
++    }
++
++    const onPointerMove = (event: PointerEvent) => {
++      if (
++        strategyResizePointerIdRef.current !== null &&
++        event.pointerId !== strategyResizePointerIdRef.current
++      ) {
++        return;
++      }
++
++      const grid = strategyGridRef.current;
++      if (!grid) {
++        return;
++      }
++
++      const rect = grid.getBoundingClientRect();
++      if (rect.width <= 0) {
++        return;
++      }
++
++      const nextRatio = clampStrategySplitRatio(
++        (event.clientX - rect.left) / rect.width,
++      );
++      setStrategySplitRatio(nextRatio);
++    };
++
++    const stopDragging = (event?: PointerEvent) => {
++      if (
++        event &&
++        strategyResizePointerIdRef.current !== null &&
++        event.pointerId !== strategyResizePointerIdRef.current
++      ) {
++        return;
++      }
++
++      strategyResizePointerIdRef.current = null;
++      setStrategySplitDragging(false);
++    };
++
++    window.addEventListener("pointermove", onPointerMove);
++    window.addEventListener("pointerup", stopDragging);
++    window.addEventListener("pointercancel", stopDragging);
++
++    return () => {
++      window.removeEventListener("pointermove", onPointerMove);
++      window.removeEventListener("pointerup", stopDragging);
++      window.removeEventListener("pointercancel", stopDragging);
++    };
++  }, [strategySplitDragging]);
++
+   useEffect(() => {
+     const row = currentRankRowRef.current;
+     const container = rankTableWrapRef.current;
+@@ -2790,17 +3061,15 @@ export default function DetailsPage() {
+     })();
+   }
+ 
+-  function onJumpTopRow(targetRow: OverviewRow | null) {
+-    if (!targetRow || sourcePathTrimmed === "") {
++  function onJumpNavigationTarget(target: DetailsNavigationItem | null) {
++    const nextSourcePath = target?.sourcePath?.trim() || sourcePathTrimmed;
++    if (!target || nextSourcePath === "") {
+       return;
+     }
+ 
+-    const nextCode = sanitizeCodeInput(splitTsCode(targetRow.ts_code));
++    const nextCode = sanitizeCodeInput(splitTsCode(target.tsCode));
+     const nextTradeDate =
+-      typeof targetRow.trade_date === "string" &&
+-      targetRow.trade_date.trim() !== ""
+-        ? targetRow.trade_date.trim()
+-        : tradeDateInput.trim();
++      target.tradeDate?.trim() || tradeDateInput.trim();
+ 
+     if (nextCode === "") {
+       return;
+@@ -2811,140 +3080,179 @@ export default function DetailsPage() {
+       ? { left: contentElement.scrollLeft, top: contentElement.scrollTop }
+       : { left: window.scrollX, top: window.scrollY };
+     autoFillTopRef.current = false;
+-    setLookupInput(targetRow.name?.trim() || nextCode);
++    setSourcePath(nextSourcePath);
++    setLookupInput(target.name?.trim() || nextCode);
+     if (nextTradeDate !== "") {
+       setTradeDateInput(nextTradeDate);
+     }
+     setDetailError("");
+     setStrategyCompareSnapshot(null);
+-    void readDetail(sourcePathTrimmed, nextTradeDate, stdTsCode(nextCode));
++    void readDetail(nextSourcePath, nextTradeDate, stdTsCode(nextCode));
+   }
+ 
+-  return (
+-    <div className="details-page">
+-      <section className="details-card">
+-        <h2 className="details-title">个股详情</h2>
+-        <div className="details-source-note">
+-          数据目录由“数据管理”页统一管理，当前路径：
+-          {sourcePathTrimmed || "读取中..."}
+-        </div>
++  function onStrategyResizePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
++    if (event.pointerType === "mouse" && event.button !== 0) {
++      return;
++    }
+ 
+-        <div className="details-form-grid">
+-          <label className="details-field">
+-            <span>参考日</span>
+-            <select
+-              value={tradeDateInput}
+-              onChange={(event) => setTradeDateInput(event.target.value)}
+-              disabled={dateOptionsLoading || dateOptions.length === 0}
+-            >
+-              {dateOptions.length === 0 ? (
+-                <option value="">
+-                  {dateOptionsLoading ? "读取日期中..." : "暂无可选日期"}
+-                </option>
+-              ) : null}
+-              {dateOptions.map((option) => (
+-                <option key={option} value={option}>
+-                  {option}
+-                </option>
+-              ))}
+-            </select>
+-          </label>
++    event.preventDefault();
++    strategyResizePointerIdRef.current = event.pointerId;
++    setStrategySplitDragging(true);
++  }
+ 
+-          <label className="details-field">
+-            <span>前列数量</span>
+-            <input
+-              type="number"
+-              min={1}
+-              step={1}
+-              value={topLimitInput}
+-              onChange={(event) => setTopLimitInput(event.target.value)}
+-              placeholder={DEFAULT_TOP_LIMIT}
+-            />
+-          </label>
++  return (
++    <div
++      className={
++        isLinkedOverlay
++          ? "details-page details-page-linked-overlay"
++          : "details-page"
++      }
++    >
++      {isLinkedOverlay ? null : (
++        <section className="details-card details-query-card">
++          <h2 className="details-title">个股详情</h2>
++          <div className="details-source-note">
++            数据目录由“数据管理”页统一管理，当前路径：
++            {sourcePathTrimmed || "读取中..."}
++          </div>
+ 
+-          <label className="details-field details-field-span-2">
+-            <span>代码/名称输入，预览代码：{readTargetCode || "--"}</span>
+-            <div className="details-autocomplete">
+-              <input
+-                type="text"
+-                value={lookupInput}
+-                onChange={(event) => onLookupInputChange(event.target.value)}
+-                onFocus={() => setLookupFocused(true)}
+-                onBlur={() => setLookupFocused(false)}
+-                onKeyDown={(event) => {
+-                  if (event.key === "Enter" && stockNameCandidates.length > 0) {
+-                    event.preventDefault();
+-                    onSelectStockCandidate(stockNameCandidates[0]);
++          <div className="details-form-grid">
++            <label className="details-field">
++              <span>参考日</span>
++              <select
++                value={tradeDateInput}
++                onChange={(event) => {
++                  const nextTradeDate = event.target.value;
++                  setTradeDateInput(nextTradeDate);
++
++                  const nextTargetCode =
++                    readTargetCode ||
++                    (resolvedTsCode !== "--" ? resolvedTsCode : "");
++                  if (nextTargetCode !== "") {
++                    onAutoReadDetail(
++                      nextTradeDate,
++                      nextTargetCode,
++                      lookupInput,
++                    );
+                   }
+                 }}
+-                placeholder="输入股票名称、代码或拼音首字母，支持候选补全"
+-              />
+-              {showStockNameCandidates ? (
+-                <div
+-                  className="details-autocomplete-menu"
+-                  onWheel={onCandidateWheel}
+-                >
+-                  {stockNameCandidates.map((row) => {
+-                    const code = getLookupDigits(row.ts_code);
+-                    return (
+-                      <button
+-                        className="details-autocomplete-option"
+-                        key={row.ts_code}
+-                        type="button"
+-                        onMouseDown={(event) => {
+-                          event.preventDefault();
+-                          onSelectStockCandidate(row);
+-                        }}
+-                      >
+-                        <strong>{row.name}</strong>
+-                        <span>{code || row.ts_code}</span>
+-                      </button>
+-                    );
+-                  })}
+-                </div>
+-              ) : null}
+-            </div>
+-          </label>
+-
+-          <label className="details-field details-field-span-2">
+-            <span>从排名前列选择</span>
+-            <div className="details-inline-row">
+-              <select
+-                value={selectedTopValue}
+-                onChange={(event) => onSelectTopRow(event.target.value)}
++                disabled={dateOptionsLoading || dateOptions.length === 0}
+               >
+-                <option value="">请选择</option>
+-                {topRows.map((row) => (
+-                  <option key={row.ts_code} value={row.ts_code}>
+-                    {buildTopOptionLabel(row)}
++                {dateOptions.length === 0 ? (
++                  <option value="">
++                    {dateOptionsLoading ? "读取日期中..." : "暂无可选日期"}
++                  </option>
++                ) : null}
++                {dateOptions.map((option) => (
++                  <option key={option} value={option}>
++                    {option}
+                   </option>
+                 ))}
+               </select>
+-              <button
+-                className="details-primary-btn details-primary-btn-alt"
+-                type="button"
+-                disabled={
+-                  detailLoading ||
+-                  sourcePathTrimmed === "" ||
+-                  readTargetCode === ""
+-                }
+-                onClick={onReadDetail}
+-              >
+-                {detailLoading ? "读取详情中..." : "读取详情"}
+-              </button>
+-            </div>
+-            <small>
+-              候选来源日期: {matchedTopDate}
+-              {topLoading ? "（更新中...）" : ""}
+-            </small>
+-          </label>
+-        </div>
++            </label>
+ 
+-        {topError ? <div className="details-error">{topError}</div> : null}
+-        {detailError ? (
+-          <div className="details-error">{detailError}</div>
+-        ) : null}
+-      </section>
++            <label className="details-field">
++              <span>前列数量</span>
++              <input
++                type="number"
++                min={1}
++                step={1}
++                value={topLimitInput}
++                onChange={(event) => setTopLimitInput(event.target.value)}
++                placeholder={DEFAULT_TOP_LIMIT}
++              />
++            </label>
++
++            <label className="details-field details-field-span-2">
++              <span>代码/名称输入，预览代码：{readTargetCode || "--"}</span>
++              <div className="details-autocomplete">
++                <input
++                  type="text"
++                  value={lookupInput}
++                  onChange={(event) => onLookupInputChange(event.target.value)}
++                  onFocus={() => setLookupFocused(true)}
++                  onBlur={() => setLookupFocused(false)}
++                  onKeyDown={(event) => {
++                    if (event.key === "Enter" && stockNameCandidates.length > 0) {
++                      event.preventDefault();
++                      onSelectStockCandidate(stockNameCandidates[0]);
++                    }
++                  }}
++                  placeholder="输入股票名称、代码或拼音首字母，支持候选补全"
++                />
++                {showStockNameCandidates ? (
++                  <div
++                    className="details-autocomplete-menu"
++                    onWheel={onCandidateWheel}
++                  >
++                    {stockNameCandidates.map((row) => {
++                      const code = getLookupDigits(row.ts_code);
++                      return (
++                        <button
++                          className="details-autocomplete-option"
++                          key={row.ts_code}
++                          type="button"
++                          onMouseDown={(event) => {
++                            event.preventDefault();
++                            onSelectStockCandidate(row);
++                          }}
++                        >
++                          <strong>{row.name}</strong>
++                          <span>{code || row.ts_code}</span>
++                        </button>
++                      );
++                    })}
++                  </div>
++                ) : null}
++              </div>
++            </label>
++
++            <label className="details-field details-field-span-2">
++              <span>从排名前列选择</span>
++              <div className="details-inline-row">
++                <select
++                  value={selectedTopValue}
++                  onChange={(event) => onSelectTopRow(event.target.value)}
++                >
++                  <option value="">请选择</option>
++                  {topRows.map((row) => (
++                    <option key={row.ts_code} value={row.ts_code}>
++                      {buildTopOptionLabel(row)}
++                    </option>
++                  ))}
++                </select>
++                <button
++                  className="details-primary-btn details-primary-btn-alt"
++                  type="button"
++                  disabled={
++                    detailLoading ||
++                    sourcePathTrimmed === "" ||
++                    readTargetCode === ""
++                  }
++                  onClick={onReadDetail}
++                >
++                  {detailLoading ? "读取详情中..." : "读取详情"}
++                </button>
++              </div>
++              <small>
++                候选来源日期: {matchedTopDate}
++                {topLoading ? "（更新中...）" : ""}
++              </small>
++            </label>
++          </div>
++          {topError ? <div className="details-error">{topError}</div> : null}
++          {detailError ? (
++            <div className="details-error">{detailError}</div>
++          ) : null}
++        </section>
++      )}
++
++      {isLinkedOverlay && topError ? (
++        <div className="details-error">{topError}</div>
++      ) : null}
++      {isLinkedOverlay && detailError ? (
++        <div className="details-error">{detailError}</div>
++      ) : null}
+ 
+       <div className="details-overview-grid">
+         <section className="details-card details-overview-card">
+@@ -3049,7 +3357,7 @@ export default function DetailsPage() {
+         </section>
+       </div>
+ 
+-      <section className="details-card">
++      <section className="details-card details-chart-card">
+         <h3 className="details-subtitle">K线图</h3>
+ 
+         <div className="details-chart-toolbar">
+@@ -3185,7 +3493,7 @@ export default function DetailsPage() {
+         </div>
+       </section>
+ 
+-      <section className="details-card">
++      <section className="details-card details-strategy-card">
+         <div className="details-section-head details-section-head-strategy">
+           <h3 className="details-subtitle">策略触发</h3>
+           <div className="details-strategy-toolbar">
+@@ -3218,24 +3526,46 @@ export default function DetailsPage() {
+           </div>
+         </div>
+ 
+-        <div className="details-strategy-grid">
+-          <StrategyTableSection
+-            title="已触发"
+-            rows={strategyActiveRows}
+-            emptyText="暂无已触发"
+-            sectionKind="mixed"
+-            compareRowMap={strategyCompareRowMap}
+-            compareTradeDate={strategySnapshotTradeDate}
+-            outReferenceTradeDate={previousStrategyTradeDate}
+-          />
+-          <StrategyTableSection
+-            title="未触发"
+-            rows={strategyIdleRows}
+-            emptyText="暂无未触发"
+-            sectionKind="untriggered"
+-            compareRowMap={strategyCompareRowMap}
+-            compareTradeDate={strategySnapshotTradeDate}
+-          />
++        <div
++          className={[
++            "details-strategy-grid",
++            isStrategyStacked ? "is-stacked" : "",
++            strategySplitDragging ? "is-dragging" : "",
++          ]
++            .filter(Boolean)
++            .join(" ")}
++          ref={strategyGridRef}
++          style={strategyGridStyle}
++        >
++          <div className="details-strategy-panel">
++            <StrategyTableSection
++              title="已触发"
++              rows={strategyActiveRows}
++              emptyText="暂无已触发"
++              sectionKind="mixed"
++              compareRowMap={strategyCompareRowMap}
++              compareTradeDate={strategySnapshotTradeDate}
++              outReferenceTradeDate={previousStrategyTradeDate}
++            />
++          </div>
++          {isStrategyStacked ? null : (
++            <div
++              className="details-strategy-resize"
++              onPointerDown={onStrategyResizePointerDown}
++            >
++              <span className="details-strategy-resize-line" />
++            </div>
++          )}
++          <div className="details-strategy-panel">
++            <StrategyTableSection
++              title="未触发"
++              rows={strategyIdleRows}
++              emptyText="暂无未触发"
++              sectionKind="untriggered"
++              compareRowMap={strategyCompareRowMap}
++              compareTradeDate={strategySnapshotTradeDate}
++            />
++          </div>
+         </div>
+       </section>
+ 
+@@ -3243,16 +3573,16 @@ export default function DetailsPage() {
+         <button
+           className="details-float-nav-btn"
+           type="button"
+-          disabled={!prevTopRow || detailLoading}
+-          onClick={() => onJumpTopRow(prevTopRow)}
++          disabled={!prevNavigationItem || detailLoading}
++          onClick={() => onJumpNavigationTarget(prevNavigationItem)}
+         >
+           上一条
+         </button>
+         <button
+           className="details-float-nav-btn"
+           type="button"
+-          disabled={!nextTopRow || detailLoading}
+-          onClick={() => onJumpTopRow(nextTopRow)}
++          disabled={!nextNavigationItem || detailLoading}
++          onClick={() => onJumpNavigationTarget(nextNavigationItem)}
+         >
+           下一条
+         </button>
+diff --git a/ui/lianghua-web/src/pages/desktop/MarketMonitorPage.tsx b/ui/lianghua-web/src/pages/desktop/MarketMonitorPage.tsx
+index 7872888..fcf8ff7 100644
+--- a/ui/lianghua-web/src/pages/desktop/MarketMonitorPage.tsx
++++ b/ui/lianghua-web/src/pages/desktop/MarketMonitorPage.tsx
+@@ -37,6 +37,7 @@ type MarketMonitorSortKey =
+   | "totalScore"
+   | "latestPrice"
+   | "latestChangePct"
++  | "volumeRatio"
+   | "open";
+ 
+ type PersistedMarketMonitorState = {
+@@ -61,6 +62,13 @@ function formatPercent(value: number | null | undefined) {
+   return `${value.toFixed(2)}%`;
+ }
+ 
++function formatRatio(value: number | null | undefined) {
++  if (typeof value !== "number" || !Number.isFinite(value)) {
++    return "--";
++  }
++  return value.toFixed(2);
++}
++
+ function getPercentClassName(value: number | null | undefined) {
+   if (typeof value !== "number" || !Number.isFinite(value) || value === 0) {
+     return "market-monitor-value-flat";
+@@ -230,6 +238,7 @@ export default function MarketMonitorPage() {
+         totalScore: { value: (row) => row.totalScore },
+         latestPrice: { value: (row) => row.latestPrice },
+         latestChangePct: { value: (row) => row.latestChangePct },
++        volumeRatio: { value: (row) => row.volumeRatio },
+         open: { value: (row) => row.open },
+       }) satisfies Partial<
+         Record<MarketMonitorSortKey, SortDefinition<(typeof rows)[number]>>
+@@ -240,6 +249,12 @@ export default function MarketMonitorPage() {
+     (typeof rows)[number],
+     MarketMonitorSortKey
+   >(rows, sortDefinitions);
++  const detailNavigationItems = sortedRows.map((row) => ({
++    tsCode: row.tsCode,
++    tradeDate: pageData?.referenceTradeDate ?? referenceTradeDate,
++    sourcePath: sourcePathTrimmed || undefined,
++    name: row.name || undefined,
++  }));
+   const tableWrapRef = useRouteScrollRegion<HTMLDivElement>(
+     "market-monitor-table",
+     [sortedRows.length],
+@@ -329,6 +344,7 @@ export default function MarketMonitorPage() {
+                 <col style={{ width: "96px" }} />
+                 <col style={{ width: "96px" }} />
+                 <col style={{ width: "96px" }} />
++                <col style={{ width: "88px" }} />
+                 <col style={{ width: "96px" }} />
+                 <col />
+               </colgroup>
+@@ -392,6 +408,20 @@ export default function MarketMonitorPage() {
+                       title="按实时涨幅排序"
+                     />
+                   </th>
++                  <th
++                    aria-sort={getAriaSort(
++                      sortKey === "volumeRatio",
++                      sortDirection,
++                    )}
++                  >
++                    <TableSortButton
++                      label="量比"
++                      isActive={sortKey === "volumeRatio"}
++                      direction={sortDirection}
++                      onClick={() => toggleSort("volumeRatio")}
++                      title="按量比排序"
++                    />
++                  </th>
+                   <th
+                     aria-sort={getAriaSort(sortKey === "open", sortDirection)}
+                   >
+@@ -424,6 +454,7 @@ export default function MarketMonitorPage() {
+                             pageData?.referenceTradeDate ?? referenceTradeDate
+                           }
+                           sourcePath={sourcePathTrimmed}
++                          navigationItems={detailNavigationItems}
+                         >
+                           {row.name || "--"}
+                         </DetailsLink>
+@@ -437,6 +468,9 @@ export default function MarketMonitorPage() {
+                       >
+                         {formatPercent(row.latestChangePct)}
+                       </td>
++                      <td title={formatRatio(row.volumeRatio)}>
++                        {formatRatio(row.volumeRatio)}
++                      </td>
+                       <td>{formatNumber(row.open)}</td>
+                       <td
+                         title={`${formatNumber(row.low)} - ${formatNumber(row.high)}`}
+diff --git a/ui/lianghua-web/src/pages/desktop/OverviewPage.tsx b/ui/lianghua-web/src/pages/desktop/OverviewPage.tsx
+index 0f1afb2..dc44ab3 100644
+--- a/ui/lianghua-web/src/pages/desktop/OverviewPage.tsx
++++ b/ui/lianghua-web/src/pages/desktop/OverviewPage.tsx
+@@ -315,6 +315,12 @@ export default function OverviewPage() {
+     [visibleColumns],
+   );
+   const sourcePathTrimmed = sourcePath.trim();
++  const detailNavigationItems = sortedRows.map((row) => ({
++    tsCode: row.ts_code,
++    tradeDate: getRowDetailsTradeDate(row),
++    sourcePath: sourcePathTrimmed || undefined,
++    name: typeof row.name === "string" ? row.name : undefined,
++  }));
+   const tableWrapRef = useRouteScrollRegion<HTMLDivElement>(
+     "overview-table",
+     [rows.length, tableMinWidth],
+@@ -760,7 +766,9 @@ export default function OverviewPage() {
+                               className="overview-stock-link"
+                               tsCode={row.ts_code}
+                               tradeDate={getRowDetailsTradeDate(row)}
++                              sourcePath={sourcePathTrimmed}
+                               title={`查看 ${cellValue} 详情`}
++                              navigationItems={detailNavigationItems}
+                             >
+                               {cellValue}
+                             </DetailsLink>
+diff --git a/ui/lianghua-web/src/pages/desktop/ReturnBacktestPage.tsx b/ui/lianghua-web/src/pages/desktop/ReturnBacktestPage.tsx
+index b62e5b1..97ce525 100644
+--- a/ui/lianghua-web/src/pages/desktop/ReturnBacktestPage.tsx
++++ b/ui/lianghua-web/src/pages/desktop/ReturnBacktestPage.tsx
+@@ -339,6 +339,12 @@ function ReturnTable({
+     scrollRegionKey,
+     [sortedRows.length, rows.length],
+   );
++  const detailNavigationItems = sortedRows.map((row) => ({
++    tsCode: row.ts_code,
++    tradeDate: tradeDate || undefined,
++    sourcePath: sourcePath || undefined,
++    name: row.name ?? undefined,
++  }));
+ 
+   return (
+     <section className="return-backtest-panel-card">
+@@ -417,6 +423,7 @@ function ReturnTable({
+                     tsCode={row.ts_code}
+                     tradeDate={tradeDate || undefined}
+                     sourcePath={sourcePath}
++                    navigationItems={detailNavigationItems}
+                   >
+                     {row.name ?? row.ts_code}
+                   </DetailsLink>
+diff --git a/ui/lianghua-web/src/pages/desktop/StrategyManagePage.tsx b/ui/lianghua-web/src/pages/desktop/StrategyManagePage.tsx
+index 5c79dd3..9e05345 100644
+--- a/ui/lianghua-web/src/pages/desktop/StrategyManagePage.tsx
++++ b/ui/lianghua-web/src/pages/desktop/StrategyManagePage.tsx
+@@ -225,6 +225,20 @@ function buildScopeWayValue(mode: ScopeMode, consecThreshold: number) {
+   return mode
+ }
+ 
++function normalizePositiveIntegerInput(raw: string, fallback: number) {
++  const trimmed = raw.trim()
++  if (!trimmed) {
++    return Math.max(1, Math.floor(fallback || 1))
++  }
++
++  const parsed = Number(trimmed)
++  if (!Number.isFinite(parsed)) {
++    return Math.max(1, Math.floor(fallback || 1))
++  }
++
++  return Math.max(1, Math.floor(parsed))
++}
++
+ function getScopeFilterValue(scopeWay: string) {
+   const normalized = scopeWay.trim().toUpperCase()
+   return normalized.startsWith('CONSEC>=') ? 'CONSEC' : normalized
+@@ -251,6 +265,8 @@ export default function StrategyManagePage() {
+   const [draft, setDraft] = useState<StrategyManageRuleDraft | null>(null)
+   const [distPointsText, setDistPointsText] = useState('')
+   const [fixedPointsText, setFixedPointsText] = useState('')
++  const [scopeWindowsInput, setScopeWindowsInput] = useState('1')
++  const [consecThresholdInput, setConsecThresholdInput] = useState('2')
+   const [scoreMode, setScoreMode] = useState<ScoreMode>('fixed')
+   const [deleteTarget, setDeleteTarget] = useState<StrategyManageRuleItem | null>(null)
+   const [loading, setLoading] = useState(true)
+@@ -399,6 +415,8 @@ export default function StrategyManagePage() {
+     setDraft(null)
+     setDistPointsText('')
+     setFixedPointsText('')
++    setScopeWindowsInput('1')
++    setConsecThresholdInput('2')
+     setScoreMode('fixed')
+     setCheckNotice('')
+   }
+@@ -409,6 +427,8 @@ export default function StrategyManagePage() {
+     setDraft(buildEmptyDraft())
+     setDistPointsText('')
+     setFixedPointsText('')
++    setScopeWindowsInput('1')
++    setConsecThresholdInput('2')
+     setScoreMode('fixed')
+     setCheckNotice('')
+     setNotice('')
+@@ -421,6 +441,8 @@ export default function StrategyManagePage() {
+     setDraft(buildDraftFromRule(rule))
+     setDistPointsText(distPointsToText(rule.dist_points))
+     setFixedPointsText(String(rule.points))
++    setScopeWindowsInput(String(rule.scope_windows))
++    setConsecThresholdInput(String(parseScopeWayDraft(rule.scope_way).consecThreshold))
+     setScoreMode(hasDistPoints(rule.dist_points) ? 'dist' : 'fixed')
+     setCheckNotice('')
+     setNotice('')
+@@ -882,17 +904,42 @@ export default function StrategyManagePage() {
+                     type="number"
+                     min={1}
+                     step={1}
+-                    value={draftScopeState.consecThreshold}
++                    value={consecThresholdInput}
+                     onChange={(event) =>
++                      {
++                        const raw = event.target.value
++                        setConsecThresholdInput(raw)
++                        if (!raw.trim()) {
++                          return
++                        }
++                        setDraft((current) =>
++                          current
++                            ? {
++                                ...current,
++                                scope_way: buildScopeWayValue(
++                                  'CONSEC',
++                                  normalizePositiveIntegerInput(raw, draftScopeState.consecThreshold),
++                                ),
++                              }
++                            : current,
++                        )
++                      }
++                    }
++                    onBlur={() => {
++                      const normalized = normalizePositiveIntegerInput(
++                        consecThresholdInput,
++                        draftScopeState.consecThreshold,
++                      )
++                      setConsecThresholdInput(String(normalized))
+                       setDraft((current) =>
+                         current
+                           ? {
+                               ...current,
+-                              scope_way: buildScopeWayValue('CONSEC', Number(event.target.value) || 1),
++                              scope_way: buildScopeWayValue('CONSEC', normalized),
+                             }
+                           : current,
+                       )
+-                    }
++                    }}
+                   />
+                 </label>
+               ) : null}
+@@ -903,12 +950,32 @@ export default function StrategyManagePage() {
+                   type="number"
+                   min={1}
+                   step={1}
+-                  value={draft.scope_windows}
+-                  onChange={(event) =>
++                  value={scopeWindowsInput}
++                  onChange={(event) => {
++                    const raw = event.target.value
++                    setScopeWindowsInput(raw)
++                    if (!raw.trim()) {
++                      return
++                    }
++                    setDraft((current) =>
++                      current
++                        ? {
++                            ...current,
++                            scope_windows: normalizePositiveIntegerInput(raw, current.scope_windows),
++                          }
++                        : current,
++                    )
++                  }}
++                  onBlur={() => {
++                    if (!draft) {
++                      return
++                    }
++                    const normalized = normalizePositiveIntegerInput(scopeWindowsInput, draft.scope_windows)
++                    setScopeWindowsInput(String(normalized))
+                     setDraft((current) =>
+-                      current ? { ...current, scope_windows: Number(event.target.value) || 1 } : current,
++                      current ? { ...current, scope_windows: normalized } : current,
+                     )
+-                  }
++                  }}
+                 />
+               </label>
+ 
+diff --git a/ui/lianghua-web/src/pages/desktop/StrategyTriggerPage.tsx b/ui/lianghua-web/src/pages/desktop/StrategyTriggerPage.tsx
+index 32f9dbd..4e0a58b 100644
+--- a/ui/lianghua-web/src/pages/desktop/StrategyTriggerPage.tsx
++++ b/ui/lianghua-web/src/pages/desktop/StrategyTriggerPage.tsx
+@@ -1384,6 +1384,12 @@ function StrategyDetailModal({
+     `strategy-trigger-detail-stocks:${strategyName || "default"}`,
+     [detailTradeDate, sortedRows.length],
+   );
++  const detailNavigationItems = sortedRows.map((row) => ({
++    tsCode: row.ts_code,
++    tradeDate: detailTradeDate || undefined,
++    sourcePath: sourcePath.trim() || undefined,
++    name: row.name ?? undefined,
++  }));
+ 
+   if (typeof document === "undefined") {
+     return null;
+@@ -1617,6 +1623,7 @@ function StrategyDetailModal({
+                                   tsCode={row.ts_code}
+                                   tradeDate={detailTradeDate || undefined}
+                                   sourcePath={sourcePath.trim()}
++                                  navigationItems={detailNavigationItems}
+                                 >
+                                   {row.name ?? row.ts_code}
+                                 </DetailsLink>
+diff --git a/ui/lianghua-web/src/pages/desktop/WatchObservePage.tsx b/ui/lianghua-web/src/pages/desktop/WatchObservePage.tsx
+index 3e2bdfb..106ea91 100644
+--- a/ui/lianghua-web/src/pages/desktop/WatchObservePage.tsx
++++ b/ui/lianghua-web/src/pages/desktop/WatchObservePage.tsx
+@@ -37,6 +37,7 @@ type ViewMode = "db" | "realtime";
+ type WatchObserveSortKey =
+   | "latestClose"
+   | "latestChangePct"
++  | "volumeRatio"
+   | "addedDate"
+   | "postWatchReturnPct"
+   | "todayRank";
+@@ -67,6 +68,13 @@ function formatPercent(value: number | null) {
+   return `${value.toFixed(2)}%`;
+ }
+ 
++function formatRatio(value: number | null) {
++  if (value === null || !Number.isFinite(value)) {
++    return "--";
++  }
++  return value.toFixed(2);
++}
++
+ function getPercentClassName(value: number | null) {
+   if (value === null || !Number.isFinite(value) || value === 0) {
+     return "watch-observe-value-flat";
+@@ -154,6 +162,7 @@ export default function WatchObservePage() {
+       ({
+         latestClose: { value: (row) => row.latestClose },
+         latestChangePct: { value: (row) => row.latestChangePct },
++        volumeRatio: { value: (row) => row.volumeRatio },
+         addedDate: { value: (row) => row.addedDate },
+         postWatchReturnPct: { value: (row) => row.postWatchReturnPct },
+         todayRank: { value: (row) => row.todayRank },
+@@ -166,6 +175,12 @@ export default function WatchObservePage() {
+     WatchObserveRow,
+     WatchObserveSortKey
+   >(rows, sortDefinitions);
++  const detailNavigationItems = sortedRows.map((row) => ({
++    tsCode: row.tsCode,
++    tradeDate: resolvedReferenceTradeDate ?? row.tradeDate,
++    sourcePath: sourcePathTrimmed || undefined,
++    name: row.name || undefined,
++  }));
+   const tableWrapRef = useRouteScrollRegion<HTMLDivElement>(
+     "watch-observe-table",
+     [sortedRows.length, isDeleteMode, viewMode],
+@@ -532,7 +547,7 @@ export default function WatchObservePage() {
+             <div className="watch-observe-table-wrap" ref={tableWrapRef}>
+               <table
+                 className="watch-observe-table"
+-                style={{ minWidth: isDeleteMode ? "1128px" : "1080px" }}
++                style={{ minWidth: isDeleteMode ? "1216px" : "1168px" }}
+               >
+                 <colgroup>
+                   {isDeleteMode ? <col style={{ width: "48px" }} /> : null}
+@@ -540,6 +555,7 @@ export default function WatchObservePage() {
+                   <col style={{ width: "88px" }} />
+                   <col style={{ width: "104px" }} />
+                   <col style={{ width: "96px" }} />
++                  <col style={{ width: "88px" }} />
+                   <col style={{ width: "92px" }} />
+                   <col style={{ width: "118px" }} />
+                   <col style={{ width: "120px" }} />
+@@ -581,6 +597,20 @@ export default function WatchObservePage() {
+                         title={`按${latestChangeHeader}排序`}
+                       />
+                     </th>
++                    <th
++                      aria-sort={getAriaSort(
++                        sortKey === "volumeRatio",
++                        sortDirection,
++                      )}
++                    >
++                      <TableSortButton
++                        label="量比"
++                        isActive={sortKey === "volumeRatio"}
++                        direction={sortDirection}
++                        onClick={() => toggleSort("volumeRatio")}
++                        title="按量比排序"
++                      />
++                    </th>
+                     <th
+                       aria-sort={getAriaSort(
+                         sortKey === "addedDate",
+@@ -676,6 +706,7 @@ export default function WatchObservePage() {
+                               tradeDate={resolvedReferenceTradeDate ?? row.tradeDate}
+                               sourcePath={sourcePathTrimmed}
+                               title={`查看 ${row.name} 详情`}
++                              navigationItems={detailNavigationItems}
+                             >
+                               {row.name}
+                             </DetailsLink>
+@@ -692,6 +723,9 @@ export default function WatchObservePage() {
+                         >
+                           {formatPercent(row.latestChangePct)}
+                         </td>
++                        <td title={formatRatio(row.volumeRatio)}>
++                          {formatRatio(row.volumeRatio)}
++                        </td>
+                         <td title={row.addedDate || "--"}>
+                           {row.addedDate || "--"}
+                         </td>
+diff --git a/ui/lianghua-web/src/pages/desktop/css/DataDownloadPage.css b/ui/lianghua-web/src/pages/desktop/css/DataDownloadPage.css
+index 1fb8b5c..fa78775 100644
+--- a/ui/lianghua-web/src/pages/desktop/css/DataDownloadPage.css
++++ b/ui/lianghua-web/src/pages/desktop/css/DataDownloadPage.css
+@@ -25,6 +25,13 @@
+   flex-wrap: wrap;
+ }
+ 
++.data-download-head-actions {
++  display: flex;
++  gap: 10px;
++  flex-wrap: wrap;
++  align-items: center;
++}
++
+ .data-download-head h2 {
+   margin: 0;
+   font-size: 22px;
+@@ -304,6 +311,12 @@
+   box-shadow: none;
+ }
+ 
++.data-download-danger-btn {
++  border-color: #f0c4c9;
++  color: #9b1c31;
++  background: #fff8f8;
++}
++
+ .data-download-progress {
+   display: grid;
+   gap: 12px;
+@@ -452,6 +465,182 @@
+   border: 1px solid #ffc7d0;
+ }
+ 
++.data-download-modal-backdrop {
++  position: fixed;
++  inset: 0;
++  z-index: 2000;
++  display: grid;
++  place-items: center;
++  padding: 20px;
++  background: rgba(35, 45, 58, 0.28);
++  backdrop-filter: blur(6px);
++}
++
++.data-download-modal {
++  width: min(920px, 100%);
++  max-height: min(86vh, 920px);
++  overflow: auto;
++  display: grid;
++  gap: 12px;
++  border-radius: 18px;
++  border: 1px solid rgba(214, 106, 13, 0.18);
++  background:
++    radial-gradient(circle at top right, rgba(255, 212, 166, 0.35), transparent 32%),
++    #fffdf9;
++  box-shadow: 0 24px 56px rgba(38, 35, 30, 0.24);
++  padding: 18px;
++}
++
++.data-download-modal-head {
++  display: flex;
++  justify-content: space-between;
++  gap: 12px;
++  align-items: flex-start;
++  flex-wrap: wrap;
++}
++
++.data-download-modal-head h3 {
++  margin: 0;
++  font-size: 18px;
++}
++
++.data-download-modal-head p {
++  margin: 6px 0 0;
++  color: #5f6978;
++  font-size: 12px;
++  overflow-wrap: anywhere;
++}
++
++.data-download-modal-loading,
++.data-download-modal-meta {
++  border: 1px solid #e2e8f0;
++  border-radius: 12px;
++  padding: 12px;
++  background: rgba(255, 255, 255, 0.86);
++}
++
++.data-download-modal-meta {
++  display: flex;
++  justify-content: space-between;
++  gap: 10px;
++  flex-wrap: wrap;
++  color: #5f6978;
++  font-size: 13px;
++}
++
++.data-download-indicator-toolbar {
++  display: flex;
++  gap: 10px;
++  flex-wrap: wrap;
++}
++
++.data-download-indicator-list {
++  display: grid;
++  gap: 12px;
++}
++
++.data-download-indicator-card,
++.data-download-indicator-editor-card {
++  display: grid;
++  gap: 12px;
++  border: 1px solid #e2e8f0;
++  border-radius: 14px;
++  padding: 14px;
++  background: rgba(255, 255, 255, 0.92);
++}
++
++.data-download-indicator-card {
++  background:
++    radial-gradient(circle at top right, rgba(255, 233, 208, 0.36), transparent 30%),
++    rgba(255, 255, 255, 0.94);
++}
++
++.data-download-indicator-card-head,
++.data-download-indicator-editor-head {
++  display: flex;
++  justify-content: space-between;
++  gap: 12px;
++  align-items: flex-start;
++  flex-wrap: wrap;
++}
++
++.data-download-indicator-editor-head h4,
++.data-download-indicator-card-name {
++  margin: 0;
++  font-size: 16px;
++  color: #233140;
++}
++
++.data-download-indicator-editor-head p,
++.data-download-indicator-card-meta {
++  margin: 6px 0 0;
++  color: #5f6978;
++  font-size: 12px;
++}
++
++.data-download-indicator-card-actions {
++  display: flex;
++  gap: 8px;
++  flex-wrap: wrap;
++}
++
++.data-download-indicator-form-grid {
++  display: grid;
++  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
++  gap: 10px 12px;
++}
++
++.data-download-indicator-editor {
++  box-sizing: border-box;
++  width: 100%;
++  min-height: 220px;
++  resize: vertical;
++  border: 1px solid #c7d1dc;
++  border-radius: 14px;
++  padding: 14px;
++  background: #fff;
++  color: #233140;
++  font-size: 13px;
++  line-height: 1.6;
++  font-family:
++    "JetBrains Mono",
++    "SFMono-Regular",
++    Consolas,
++    "Liberation Mono",
++    monospace;
++}
++
++.data-download-indicator-card-expr {
++  margin: 0;
++  white-space: pre-wrap;
++  overflow-wrap: anywhere;
++  border-radius: 12px;
++  border: 1px solid rgba(226, 232, 240, 0.95);
++  background: #fffdfa;
++  padding: 12px;
++  color: #233140;
++  font-size: 13px;
++  line-height: 1.6;
++  font-family:
++    "JetBrains Mono",
++    "SFMono-Regular",
++    Consolas,
++    "Liberation Mono",
++    monospace;
++}
++
++.data-download-indicator-editor:focus {
++  outline: 2px solid rgba(237, 137, 54, 0.35);
++  outline-offset: 1px;
++}
++
++.data-download-modal-actions {
++  display: flex;
++  justify-content: flex-end;
++  gap: 10px;
++  flex-wrap: wrap;
++}
++
+ @keyframes data-download-progress-sheen {
+   0% {
+     transform: translateX(-140%);
+@@ -490,6 +679,7 @@
+     font-size: 20px;
+   }
+ 
++  .data-download-head-actions,
+   .data-download-action-head,
+   .data-download-runbar,
+   .data-download-progress-head {
+@@ -514,6 +704,23 @@
+     display: grid;
+   }
+ 
++  .data-download-modal {
++    padding: 14px;
++    border-radius: 14px;
++  }
++
++  .data-download-indicator-editor {
++    min-height: 320px;
++  }
++
++  .data-download-modal-actions,
++  .data-download-head-actions,
++  .data-download-indicator-toolbar,
++  .data-download-indicator-card-actions {
++    display: grid;
++    width: 100%;
++  }
++
+   .data-download-runbar-copy strong,
+   .data-download-summary-item strong,
+   .data-download-action-head strong {
+diff --git a/ui/lianghua-web/src/pages/desktop/css/DetailsPage.css b/ui/lianghua-web/src/pages/desktop/css/DetailsPage.css
+index be5653e..a770697 100644
+--- a/ui/lianghua-web/src/pages/desktop/css/DetailsPage.css
++++ b/ui/lianghua-web/src/pages/desktop/css/DetailsPage.css
+@@ -4,6 +4,22 @@
+   min-width: 0;
+ }
+ 
++.details-page-linked-overlay > .details-chart-card {
++  order: 2;
++}
++
++.details-page-linked-overlay > .details-overview-grid {
++  order: 3;
++}
++
++.details-page-linked-overlay > .details-strategy-card {
++  order: 4;
++}
++
++.details-page-linked-overlay > .details-query-card {
++  padding-bottom: 10px;
++}
++
+ .details-card {
+   border: 1px solid #d8dee6;
+   border-radius: 10px;
+@@ -738,7 +754,7 @@
+   justify-items: center;
+   gap: 3px;
+   max-width: min(72%, 520px);
+-  color: rgba(62, 76, 94, 0.14);
++  color: rgba(62, 76, 94, 0.25);
+   pointer-events: none;
+   text-align: center;
+ }
+@@ -765,10 +781,57 @@
+ .details-strategy-grid {
+   margin-top: 12px;
+   display: grid;
+-  grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr);
++  grid-template-columns: minmax(0, 0.64fr) 14px minmax(0, 0.36fr);
++  gap: 10px;
++  align-items: stretch;
++}
++
++.details-strategy-grid.is-dragging {
++  user-select: none;
++  cursor: col-resize;
++}
++
++.details-strategy-grid.is-stacked {
++  grid-template-columns: 1fr;
+   gap: 12px;
+ }
+ 
++.details-strategy-panel {
++  min-width: 0;
++}
++
++.details-strategy-panel > .details-subcard {
++  height: 100%;
++}
++
++.details-strategy-resize {
++  position: relative;
++  display: flex;
++  align-items: stretch;
++  justify-content: center;
++  cursor: col-resize;
++  touch-action: none;
++  outline: none;
++}
++
++.details-strategy-grid.is-stacked .details-strategy-resize {
++  display: none;
++}
++
++.details-strategy-resize-line {
++  width: 2px;
++  border-radius: 999px;
++  background: linear-gradient(180deg, #d5dde8, #aebdce, #d5dde8);
++  box-shadow: 0 0 0 4px rgba(223, 231, 240, 0.55);
++}
++
++.details-strategy-resize:hover .details-strategy-resize-line,
++.details-strategy-resize:focus-visible .details-strategy-resize-line,
++.details-strategy-grid.is-dragging .details-strategy-resize-line {
++  background: linear-gradient(180deg, #f29f50, #dc6b17, #f29f50);
++  box-shadow: 0 0 0 4px rgba(249, 115, 22, 0.18);
++}
++
+ .details-strategy-toolbar {
+   display: flex;
+   flex-wrap: wrap;
+@@ -987,6 +1050,14 @@
+     grid-template-columns: 1fr;
+   }
+ 
++  .details-strategy-grid {
++    gap: 12px;
++  }
++
++  .details-strategy-resize {
++    display: none;
++  }
++
+   .details-overview-card-body,
+   .details-rank-card-body {
+     min-height: auto;
+diff --git a/ui/lianghua-web/src/pages/desktop/stockPickShared.tsx b/ui/lianghua-web/src/pages/desktop/stockPickShared.tsx
+index 2d2daf7..0a2382e 100644
+--- a/ui/lianghua-web/src/pages/desktop/stockPickShared.tsx
++++ b/ui/lianghua-web/src/pages/desktop/stockPickShared.tsx
+@@ -67,6 +67,15 @@ export function StockPickResultTable({
+     () => sortRows(rows, sortKey, sortDirection, sortDefinitions),
+     [rows, sortDefinitions, sortDirection, sortKey],
+   );
++  const detailNavigationItems = useMemo(
++    () =>
++      sortedRows.map((row) => ({
++        tsCode: row.ts_code,
++        tradeDate: tradeDate || undefined,
++        name: row.name ?? undefined,
++      })),
++    [sortedRows, tradeDate],
++  );
+   const tableWrapRef = useRouteScrollRegion<HTMLDivElement>(
+     "stock-pick-result-table",
+     [sortedRows.length, tradeDate],
+@@ -137,6 +146,7 @@ export function StockPickResultTable({
+                     className="stock-pick-link-btn"
+                     tsCode={row.ts_code}
+                     tradeDate={tradeDate}
++                    navigationItems={detailNavigationItems}
+                   >
+                     {row.name ?? row.ts_code}
+                   </DetailsLink>
+diff --git a/ui/lianghua-web/src/shared/DetailsLink.tsx b/ui/lianghua-web/src/shared/DetailsLink.tsx
+index 348e463..b5e2c69 100644
+--- a/ui/lianghua-web/src/shared/DetailsLink.tsx
++++ b/ui/lianghua-web/src/shared/DetailsLink.tsx
+@@ -1,11 +1,13 @@
+ import { type ReactNode } from "react";
+ import { Link, useLocation } from "react-router-dom";
+-import { buildDetailsPath, type DetailsRouteInput } from "./detailsRoute";
++import { buildLinkedDetailsPath, type DetailsRouteInput } from "./detailsRoute";
++import type { DetailsNavigationItem, DetailsLinkLocationState } from "./detailsLinkState";
+ 
+ type DetailsLinkProps = DetailsRouteInput & {
+   children: ReactNode;
+   className?: string;
+   title?: string;
++  navigationItems?: DetailsNavigationItem[];
+ };
+ 
+ export default function DetailsLink({
+@@ -15,6 +17,7 @@ export default function DetailsLink({
+   children,
+   className,
+   title,
++  navigationItems,
+ }: DetailsLinkProps) {
+   const location = useLocation();
+   const backgroundLocation =
+@@ -30,8 +33,13 @@ export default function DetailsLink({
+       className={className}
+       preventScrollReset
+       title={title}
+-      to={buildDetailsPath({ tsCode, tradeDate, sourcePath })}
+-      state={{ backgroundLocation }}
++      to={buildLinkedDetailsPath({ tsCode, tradeDate, sourcePath })}
++      state={
++        {
++          backgroundLocation,
++          navigationItems,
++        } satisfies DetailsLinkLocationState
++      }
+     >
+       {children}
+     </Link>
+diff --git a/ui/lianghua-web/src/shared/DetailsLinkedOverlayRoute.tsx b/ui/lianghua-web/src/shared/DetailsLinkedOverlayRoute.tsx
+new file mode 100644
+index 0000000..63fffa6
+--- /dev/null
++++ b/ui/lianghua-web/src/shared/DetailsLinkedOverlayRoute.tsx
+@@ -0,0 +1,75 @@
++import { useEffect, useState } from "react";
++import { createPortal } from "react-dom";
++import { useNavigate } from "react-router-dom";
++import DetailsLinkedPage from "../pages/desktop/DetailsLinkedPage";
++import "./detailsOverlay.css";
++
++export default function DetailsLinkedOverlayRoute() {
++  const navigate = useNavigate();
++  const [contentReady, setContentReady] = useState(false);
++
++  useEffect(() => {
++    const onKeyDown = (event: KeyboardEvent) => {
++      if (event.key === "Escape") {
++        navigate(-1);
++      }
++    };
++
++    window.addEventListener("keydown", onKeyDown);
++    return () => {
++      window.removeEventListener("keydown", onKeyDown);
++    };
++  }, [navigate]);
++
++  useEffect(() => {
++    let cancelled = false;
++    const frameId = window.requestAnimationFrame(() => {
++      if (!cancelled) {
++        setContentReady(true);
++      }
++    });
++
++    return () => {
++      cancelled = true;
++      window.cancelAnimationFrame(frameId);
++    };
++  }, []);
++
++  if (typeof document === "undefined") {
++    return null;
++  }
++
++  return createPortal(
++    <div
++      className="details-overlay-backdrop"
++      onClick={() => navigate(-1)}
++      role="presentation"
++    >
++      <div
++        className="details-overlay-shell"
++        onClick={(event) => event.stopPropagation()}
++        role="dialog"
++        aria-modal="true"
++        aria-label="个股详情"
++      >
++        <div className="details-overlay-toolbar">
++          <button
++            className="details-overlay-close"
++            type="button"
++            onClick={() => navigate(-1)}
++          >
++            返回原页
++          </button>
++        </div>
++        <div className="details-overlay-body" data-details-scroll-root="true">
++          {contentReady ? (
++            <DetailsLinkedPage />
++          ) : (
++            <div className="details-overlay-loading">详情加载中...</div>
++          )}
++        </div>
++      </div>
++    </div>,
++    document.body,
++  );
++}
+diff --git a/ui/lianghua-web/src/shared/detailsLinkState.ts b/ui/lianghua-web/src/shared/detailsLinkState.ts
+new file mode 100644
+index 0000000..e81526b
+--- /dev/null
++++ b/ui/lianghua-web/src/shared/detailsLinkState.ts
+@@ -0,0 +1,13 @@
++import type { Location } from "react-router-dom";
++
++export type DetailsNavigationItem = {
++  tsCode: string;
++  tradeDate?: string | null;
++  sourcePath?: string | null;
++  name?: string | null;
++};
++
++export type DetailsLinkLocationState = {
++  backgroundLocation?: Location;
++  navigationItems?: DetailsNavigationItem[];
++};
+diff --git a/ui/lianghua-web/src/shared/detailsOverlay.css b/ui/lianghua-web/src/shared/detailsOverlay.css
+index c188816..1758d0c 100644
+--- a/ui/lianghua-web/src/shared/detailsOverlay.css
++++ b/ui/lianghua-web/src/shared/detailsOverlay.css
+@@ -56,6 +56,18 @@
+   padding: 0 14px 14px;
+ }
+ 
++.details-overlay-loading {
++  display: grid;
++  place-items: center;
++  min-height: 240px;
++  border: 1px solid rgba(215, 224, 234, 0.9);
++  border-radius: 18px;
++  background:
++    linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(247, 244, 238, 0.92));
++  color: #526273;
++  font-size: 14px;
++}
++
+ @media (max-width: 960px) {
+   .details-overlay-backdrop {
+     padding: 0;
+diff --git a/ui/lianghua-web/src/shared/detailsRoute.ts b/ui/lianghua-web/src/shared/detailsRoute.ts
+index 0b50421..f43396a 100644
+--- a/ui/lianghua-web/src/shared/detailsRoute.ts
++++ b/ui/lianghua-web/src/shared/detailsRoute.ts
+@@ -25,3 +25,23 @@ export function buildDetailsPath({ tsCode, tradeDate, sourcePath }: DetailsRoute
+ 
+   return `/details?${params.toString()}`
+ }
++
++export function buildLinkedDetailsPath({ tsCode, tradeDate, sourcePath }: DetailsRouteInput) {
++  const code = sanitizeCodeInput(splitTsCode(tsCode))
++  if (code === '') {
++    return '/details-linked'
++  }
++
++  const params = new URLSearchParams()
++  params.set('tsCode', code)
++
++  if (tradeDate?.trim()) {
++    params.set('tradeDate', tradeDate.trim())
++  }
++
++  if (sourcePath?.trim()) {
++    params.set('sourcePath', sourcePath.trim())
++  }
++
++  return `/details-linked?${params.toString()}`
++}
+diff --git a/ui/lianghua-web/src/shared/watchObserve.ts b/ui/lianghua-web/src/shared/watchObserve.ts
+index 4013bb8..d652093 100644
+--- a/ui/lianghua-web/src/shared/watchObserve.ts
++++ b/ui/lianghua-web/src/shared/watchObserve.ts
+@@ -20,6 +20,7 @@ export type WatchObserveRow = {
+   name: string
+   latestClose: number | null
+   latestChangePct: number | null
++  volumeRatio: number | null
+   addedDate: string
+   postWatchReturnPct: number | null
+   todayRank: number | null
+@@ -73,6 +74,7 @@ function mergeWatchObserveRow(primary: WatchObserveRow, secondary: WatchObserveR
+     name: primary.name || secondary.name,
+     latestClose: primary.latestClose ?? secondary.latestClose,
+     latestChangePct: primary.latestChangePct ?? secondary.latestChangePct,
++    volumeRatio: primary.volumeRatio ?? secondary.volumeRatio,
+     addedDate: primary.addedDate || secondary.addedDate,
+     postWatchReturnPct: primary.postWatchReturnPct ?? secondary.postWatchReturnPct,
+     todayRank: primary.todayRank ?? secondary.todayRank,
+@@ -103,6 +105,10 @@ function normalizeRowInput(
+       typeof input.latestChangePct === 'number' && Number.isFinite(input.latestChangePct)
+         ? input.latestChangePct
+         : null,
++    volumeRatio:
++      typeof input.volumeRatio === 'number' && Number.isFinite(input.volumeRatio)
++        ? input.volumeRatio
++        : null,
+     addedDate: normalizeDateValue(input.addedDate ?? ''),
+     postWatchReturnPct:
+       typeof input.postWatchReturnPct === 'number' && Number.isFinite(input.postWatchReturnPct)
+@@ -155,6 +161,7 @@ function buildWatchRowFromRecord(record: Record<string, unknown>) {
+       'changePct',
+       'chgPct',
+     ]),
++    volumeRatio: extractNumberValue(record, ['volume_ratio', 'volumeRatio', 'vol_ratio', 'volRatio']),
+     addedDate: normalizeDateValue(
+       extractTextValue(record, [
+         'watch_date',
+@@ -201,6 +208,7 @@ function buildWatchRowFromUnknown(value: unknown): WatchObserveRow | null {
+       name: '',
+       latestClose: null,
+       latestChangePct: null,
++      volumeRatio: null,
+       addedDate: '',
+       postWatchReturnPct: null,
+       todayRank: null,
+@@ -215,17 +223,37 @@ function buildWatchRowFromUnknown(value: unknown): WatchObserveRow | null {
+     if (!tsCode) {
+       return null
+     }
++    const hasVolumeRatioField = value.length >= 11
+     return {
+       tsCode,
+       name: typeof value[1] === 'string' ? value[1].trim() : '',
+       latestClose: typeof value[2] === 'number' && Number.isFinite(value[2]) ? value[2] : null,
+       latestChangePct: typeof value[3] === 'number' && Number.isFinite(value[3]) ? value[3] : null,
+-      addedDate: normalizeDateValue(value[4]),
+-      postWatchReturnPct: typeof value[5] === 'number' && Number.isFinite(value[5]) ? value[5] : null,
+-      todayRank: typeof value[6] === 'number' && Number.isFinite(value[6]) ? value[6] : null,
+-      tag: typeof value[7] === 'string' ? value[7].trim() : '',
+-      concept: typeof value[8] === 'string' ? value[8].trim() : '',
+-      tradeDate: value[9] ? normalizeDateValue(value[9]) : null,
++      volumeRatio:
++        hasVolumeRatioField &&
++        typeof value[4] === 'number' &&
++        Number.isFinite(value[4])
++          ? value[4]
++          : null,
++      addedDate: normalizeDateValue(hasVolumeRatioField ? value[5] : value[4]),
++      postWatchReturnPct:
++        typeof value[hasVolumeRatioField ? 6 : 5] === 'number' &&
++        Number.isFinite(value[hasVolumeRatioField ? 6 : 5])
++          ? value[hasVolumeRatioField ? 6 : 5]
++          : null,
++      todayRank:
++        typeof value[hasVolumeRatioField ? 7 : 6] === 'number' &&
++        Number.isFinite(value[hasVolumeRatioField ? 7 : 6])
++          ? value[hasVolumeRatioField ? 7 : 6]
++          : null,
++      tag: typeof value[hasVolumeRatioField ? 8 : 7] === 'string' ? value[hasVolumeRatioField ? 8 : 7].trim() : '',
++      concept:
++        typeof value[hasVolumeRatioField ? 9 : 8] === 'string'
++          ? value[hasVolumeRatioField ? 9 : 8].trim()
++          : '',
++      tradeDate: value[hasVolumeRatioField ? 10 : 9]
++        ? normalizeDateValue(value[hasVolumeRatioField ? 10 : 9])
++        : null,
+     }
+   }
+ 
+@@ -364,6 +392,7 @@ export function writeWatchObserveRowsToCache(rows: WatchObserveRow[]) {
+     name: row.name || undefined,
+     latest_close: row.latestClose,
+     latest_change_pct: row.latestChangePct,
++    volume_ratio: row.volumeRatio,
+     watch_date: row.addedDate || undefined,
+     post_watch_return_pct: row.postWatchReturnPct,
+     today_rank: row.todayRank,

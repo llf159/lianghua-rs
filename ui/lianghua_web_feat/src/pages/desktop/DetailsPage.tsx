@@ -19,6 +19,7 @@ import {
   getStockDetailPage,
   getStockDetailStrategySnapshot,
   type DetailChartMarker,
+  type DetailCyqBin,
   type DetailCyqSnapshot,
   type DetailKlinePanel,
   type DetailKlineRow,
@@ -73,6 +74,8 @@ import {
   readStoredDetailsNavLongPressIntervalSeconds,
   readStoredChartIndicatorWidthRatio,
   readStoredChartMainWidthRatio,
+  readStoredDetailCyqModel,
+  type DetailCyqModel,
 } from "../../shared/chartSettings";
 import {
   findWatchObserveRow,
@@ -127,6 +130,23 @@ const CANDLE_REALTIME_UP_COLOR = "#eb7a34";
 const CANDLE_REALTIME_DOWN_COLOR = "#2d6cdf";
 const CHART_CYQ_UP_COLOR = "#4d95c9";
 const CHART_CYQ_DOWN_COLOR = "#d9485f";
+const CHART_CYQ_MAIN_COLOR = "#7c3aed";
+const CHART_CYQ_RETAIL_COLOR = "#0f9f8f";
+const CHART_CYQ_PROFIT_MAIN_COLOR = "#d9485f";
+const CHART_CYQ_PROFIT_RETAIL_COLOR = "#f18a9b";
+const CHART_CYQ_LOSS_MAIN_COLOR = "#4d95c9";
+const CHART_CYQ_LOSS_RETAIL_COLOR = "#9cc8e6";
+
+type DetailCyqHolderView = "mixed" | "main" | "retail";
+
+const DETAIL_CYQ_HOLDER_OPTIONS: Array<{
+  value: DetailCyqHolderView;
+  label: string;
+}> = [
+  { value: "mixed", label: "混合" },
+  { value: "main", label: "主力" },
+  { value: "retail", label: "散户" },
+];
 const LINE_COLORS = ["#0057ff", "#e13a1f", "#6a00f4", "#00843d"];
 function waitForNextPaint() {
   if (typeof window === "undefined") {
@@ -925,6 +945,83 @@ function findCyqSnapshotForTradeDate(
     break;
   }
   return latestBeforeOrEqual ?? snapshots[snapshots.length - 1] ?? null;
+}
+
+function getCyqBinChipPct(bin: DetailCyqBin, holderView: DetailCyqHolderView) {
+  if (holderView === "main") {
+    return typeof bin.main_chip_pct === "number" && Number.isFinite(bin.main_chip_pct)
+      ? bin.main_chip_pct
+      : 0;
+  }
+  if (holderView === "retail") {
+    return typeof bin.retail_chip_pct === "number" && Number.isFinite(bin.retail_chip_pct)
+      ? bin.retail_chip_pct
+      : 0;
+  }
+  if (typeof bin.total_chip_pct === "number" && Number.isFinite(bin.total_chip_pct)) {
+    return bin.total_chip_pct;
+  }
+  return Number.isFinite(bin.chip_pct) ? bin.chip_pct : 0;
+}
+
+function getCyqBinMainRetailTotal(bin: DetailCyqBin) {
+  const main =
+    typeof bin.main_chip === "number" && Number.isFinite(bin.main_chip)
+      ? Math.max(bin.main_chip, 0)
+      : null;
+  const retail =
+    typeof bin.retail_chip === "number" && Number.isFinite(bin.retail_chip)
+      ? Math.max(bin.retail_chip, 0)
+      : null;
+  if (main === null || retail === null) {
+    return null;
+  }
+
+  const total = main + retail;
+  if (total <= Number.EPSILON) {
+    return null;
+  }
+
+  return { main, retail, total };
+}
+
+function formatCyqRatio(value: number) {
+  if (!Number.isFinite(value)) {
+    return "--";
+  }
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function getCyqHolderColor(
+  holderView: DetailCyqHolderView,
+  representativePrice: number,
+  selectedClose: number,
+) {
+  if (holderView === "main") {
+    return CHART_CYQ_MAIN_COLOR;
+  }
+  if (holderView === "retail") {
+    return CHART_CYQ_RETAIL_COLOR;
+  }
+  return representativePrice > selectedClose
+    ? CHART_CYQ_UP_COLOR
+    : CHART_CYQ_DOWN_COLOR;
+}
+
+function getMixedCyqHolderColors(
+  representativePrice: number,
+  selectedClose: number,
+) {
+  const isLoss = representativePrice > selectedClose;
+  return isLoss
+    ? {
+        main: CHART_CYQ_LOSS_MAIN_COLOR,
+        retail: CHART_CYQ_LOSS_RETAIL_COLOR,
+      }
+    : {
+        main: CHART_CYQ_PROFIT_MAIN_COLOR,
+        retail: CHART_CYQ_PROFIT_RETAIL_COLOR,
+      };
 }
 
 function buildSceneRowKey(row: DetailSceneTriggerRow) {
@@ -2055,6 +2152,7 @@ function renderChartPanel(
   selectedCyqSnapshot: DetailCyqSnapshot | null,
   selectedCyqTradeDate: string | null,
   reserveCyqPanelWidthForAllPanels: boolean,
+  cyqHolderView: DetailCyqHolderView,
   chipToggleButton: ReactNode,
   watchObserveButton: ReactNode,
   chartIntervalSelection: ResolvedIntervalRestore | null,
@@ -2280,9 +2378,10 @@ function renderChartPanel(
           const binHigh = Math.max(bin.price_low, bin.price_high);
           return !(binHigh < currentDomain.min || binLow > currentDomain.max);
         });
-        const maxChipPct = visibleCyqBins.reduce((acc, bin) => {
-          return Number.isFinite(bin.chip_pct) ? Math.max(acc, bin.chip_pct) : acc;
-        }, 0);
+        const maxChipPct = visibleCyqBins.reduce(
+          (acc, bin) => Math.max(acc, getCyqBinChipPct(bin, cyqHolderView)),
+          0,
+        );
 
         if (visibleCyqBins.length > 0 && maxChipPct > 0) {
           cyqSvgContent = (
@@ -2310,14 +2409,63 @@ function renderChartPanel(
                 const yTop = yAt(clampedHigh);
                 const yBottom = yAt(clampedLow);
                 const barHeight = Math.max(yBottom - yTop, 1);
-                const chipPct = Number.isFinite(bin.chip_pct) ? bin.chip_pct : 0;
+                const chipPct = getCyqBinChipPct(bin, cyqHolderView);
                 const maxBarWidth = Math.max(chipPanelRight - chipPanelLeft - 4, 0);
                 const barWidth = (chipPct / maxChipPct) * maxBarWidth;
                 const representativePrice = (bin.price_low + bin.price_high) / 2;
-                const fill =
-                  representativePrice > selectedClose
-                    ? CHART_CYQ_UP_COLOR
-                    : CHART_CYQ_DOWN_COLOR;
+                const fill = getCyqHolderColor(
+                  cyqHolderView,
+                  representativePrice,
+                  selectedClose,
+                );
+                const mainRetailTotal =
+                  cyqHolderView === "mixed"
+                    ? getCyqBinMainRetailTotal(bin)
+                    : null;
+
+                if (mainRetailTotal) {
+                  const mainRatio = mainRetailTotal.main / mainRetailTotal.total;
+                  const retailRatio = mainRetailTotal.retail / mainRetailTotal.total;
+                  const safeBarWidth = Math.max(barWidth, 1);
+                  const mainWidth = safeBarWidth * mainRatio;
+                  const retailWidth = safeBarWidth - mainWidth;
+                  const barX = chipPanelRight - safeBarWidth;
+                  const holderColors = getMixedCyqHolderColors(
+                    representativePrice,
+                    selectedClose,
+                  );
+                  const titleText = `混合 ${formatCyqRatio(chipPct)}；主力 ${formatCyqRatio(mainRatio)}，散户 ${formatCyqRatio(retailRatio)}`;
+
+                  return (
+                    <g key={`${selectedCyqSnapshot.trade_date}-${binIndex}`}>
+                      <title>{titleText}</title>
+                      {retailWidth > 0 ? (
+                        <rect
+                          className="details-chart-cyq-bar"
+                          x={barX}
+                          y={yTop}
+                          width={retailWidth}
+                          height={barHeight}
+                          fill={holderColors.retail}
+                          opacity={0.78}
+                          rx={1}
+                        />
+                      ) : null}
+                      {mainWidth > 0 ? (
+                        <rect
+                          className="details-chart-cyq-bar"
+                          x={barX + retailWidth}
+                          y={yTop}
+                          width={mainWidth}
+                          height={barHeight}
+                          fill={holderColors.main}
+                          opacity={0.92}
+                          rx={1}
+                        />
+                      ) : null}
+                    </g>
+                  );
+                }
 
                 return (
                   <rect
@@ -3460,6 +3608,11 @@ export default function DetailsPage({
   const [detailCyqData, setDetailCyqData] = useState<StockDetailCyqData | null>(
     null,
   );
+  const [detailCyqModel, setDetailCyqModel] = useState<DetailCyqModel>(() =>
+    readStoredDetailCyqModel(),
+  );
+  const [detailCyqHolderView, setDetailCyqHolderView] =
+    useState<DetailCyqHolderView>("mixed");
   const [detailCyqVisible, setDetailCyqVisible] = useState(false);
   const [detailCyqLoading, setDetailCyqLoading] = useState(false);
   const [detailCyqError, setDetailCyqError] = useState("");
@@ -3612,6 +3765,25 @@ export default function DetailsPage({
     };
   }, []);
 
+  useEffect(() => {
+    function refreshDetailCyqModel() {
+      setDetailCyqModel(readStoredDetailCyqModel());
+    }
+
+    window.addEventListener("focus", refreshDetailCyqModel);
+    window.addEventListener("storage", refreshDetailCyqModel);
+    return () => {
+      window.removeEventListener("focus", refreshDetailCyqModel);
+      window.removeEventListener("storage", refreshDetailCyqModel);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (detailCyqModel === "legacy") {
+      setDetailCyqHolderView("mixed");
+    }
+  }, [detailCyqModel]);
+
   const readDetail = useCallback(
     async (
       nextSourcePath: string,
@@ -3659,7 +3831,11 @@ export default function DetailsPage({
   );
 
   const loadDetailCyq = useCallback(
-    async (nextSourcePath: string, nextTsCode: string) => {
+    async (
+      nextSourcePath: string,
+      nextTsCode: string,
+      nextModel: DetailCyqModel,
+    ) => {
       const normalizedSourcePath = nextSourcePath.trim();
       const normalizedTsCode = nextTsCode.trim();
       if (normalizedSourcePath === "" || normalizedTsCode === "") {
@@ -3668,7 +3844,7 @@ export default function DetailsPage({
         return null;
       }
 
-      const requestKey = `${normalizedSourcePath}|${normalizedTsCode}`;
+      const requestKey = `${normalizedSourcePath}|${normalizedTsCode}|${nextModel}`;
       if (detailCyqRequestKeyRef.current === requestKey) {
         return null;
       }
@@ -3681,6 +3857,7 @@ export default function DetailsPage({
         const cyq = await getStockDetailCyq({
           sourcePath: normalizedSourcePath,
           tsCode: normalizedTsCode,
+          chipModel: nextModel,
         });
         if (detailCyqRequestKeyRef.current !== requestKey) {
           return null;
@@ -4054,19 +4231,24 @@ export default function DetailsPage({
     setDetailCyqData(null);
     setDetailCyqError("");
     detailCyqRequestKeyRef.current = "";
-  }, [resolvedTsCode, sourcePathTrimmed]);
+  }, [detailCyqModel, resolvedTsCode, sourcePathTrimmed]);
 
   useEffect(() => {
     if (!detailCyqVisible || resolvedTsCode === "--" || sourcePathTrimmed === "") {
       return;
     }
-    if (detailCyqData?.resolved_ts_code === resolvedTsCode) {
+    if (
+      detailCyqData?.resolved_ts_code === resolvedTsCode &&
+      detailCyqData.model === detailCyqModel
+    ) {
       return;
     }
-    void loadDetailCyq(sourcePathTrimmed, resolvedTsCode);
+    void loadDetailCyq(sourcePathTrimmed, resolvedTsCode, detailCyqModel);
   }, [
+    detailCyqData?.model,
     detailCyqData?.resolved_ts_code,
     detailCyqVisible,
+    detailCyqModel,
     loadDetailCyq,
     resolvedTsCode,
     sourcePathTrimmed,
@@ -4404,8 +4586,8 @@ export default function DetailsPage({
     : detailCyqError
       ? detailCyqError
       : detailCyqVisible
-        ? `隐藏筹码分布${selectedCyqTradeDate ? `（${selectedCyqTradeDate}）` : ""}`
-        : "显示筹码分布";
+        ? `隐藏${detailCyqModel === "chen" ? "新" : "旧"}筹码分布${selectedCyqTradeDate ? `（${selectedCyqTradeDate}）` : ""}`
+        : `显示${detailCyqModel === "chen" ? "新" : "旧"}筹码分布`;
   const strategyGridStyle = useMemo(
     () =>
       isStrategyStacked
@@ -5863,13 +6045,18 @@ export default function DetailsPage({
     if (!nextVisible || resolvedTsCode === "--" || sourcePathTrimmed === "") {
       return;
     }
-    if (detailCyqData?.resolved_ts_code === resolvedTsCode) {
+    if (
+      detailCyqData?.resolved_ts_code === resolvedTsCode &&
+      detailCyqData.model === detailCyqModel
+    ) {
       return;
     }
-    await loadDetailCyq(sourcePathTrimmed, resolvedTsCode);
+    await loadDetailCyq(sourcePathTrimmed, resolvedTsCode, detailCyqModel);
   }, [
+    detailCyqData?.model,
     detailCyqData?.resolved_ts_code,
     detailCyqVisible,
+    detailCyqModel,
     loadDetailCyq,
     resolvedTsCode,
     sourcePathTrimmed,
@@ -6421,7 +6608,33 @@ export default function DetailsPage({
               selectedCyqSnapshot,
               selectedCyqTradeDate,
               shouldReserveCyqPanelWidth,
-              null,
+              detailCyqHolderView,
+              detailCyqModel === "chen" &&
+                detailCyqVisible &&
+                shouldReserveCyqPanelWidth ? (
+                <div
+                  className="details-chart-cyq-holder-switch"
+                  onPointerDown={(event) => {
+                    event.stopPropagation();
+                  }}
+                >
+                  {DETAIL_CYQ_HOLDER_OPTIONS.map((option) => (
+                    <button
+                      className={
+                        detailCyqHolderView === option.value ? "is-active" : ""
+                      }
+                      key={option.value}
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setDetailCyqHolderView(option.value);
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              ) : null,
               <div className="details-chart-watch-action">
                 <div className="details-chart-watch-row">
                   <button

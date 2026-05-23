@@ -111,12 +111,14 @@ export async function runCyqCompute(
   factor: number,
   startDate?: string,
   endDate?: string,
+  downloadId?: string,
 ) {
   return invoke<CyqComputeResult>('run_cyq_compute', {
     sourcePath,
     factor,
     startDate,
     endDate,
+    downloadId,
   })
 }
 
@@ -126,6 +128,7 @@ export async function runCyqChenCompute(
   bucketPct: number,
   startDate?: string,
   endDate?: string,
+  downloadId?: string,
 ) {
   return invoke<CyqChenComputeResult>('run_cyq_chen_compute', {
     sourcePath,
@@ -133,6 +136,7 @@ export async function runCyqChenCompute(
     bucketPct,
     startDate,
     endDate,
+    downloadId,
   })
 }
 

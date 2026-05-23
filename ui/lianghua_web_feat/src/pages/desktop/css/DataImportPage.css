@@ -71,6 +71,10 @@
   max-width: 720px;
 }
 
+.settings-actions-left {
+  justify-content: flex-start;
+}
+
 .settings-summary-grid {
   margin-top: 14px;
   display: grid;

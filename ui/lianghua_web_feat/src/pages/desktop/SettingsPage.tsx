@@ -20,10 +20,13 @@ import {
   clampDetailsNavLongPressIntervalSeconds,
   readStoredChartIndicatorWidthRatio,
   readStoredChartMainWidthRatio,
+  readStoredDetailCyqModel,
   readStoredDetailsNavLongPressIntervalSeconds,
   writeStoredChartIndicatorWidthRatio,
   writeStoredChartMainWidthRatio,
+  writeStoredDetailCyqModel,
   writeStoredDetailsNavLongPressIntervalSeconds,
+  type DetailCyqModel,
 } from '../../shared/chartSettings'
 import {
   BACKTEST_IC_THRESHOLD_DEFAULT,
@@ -56,9 +59,14 @@ type SettingsModalType =
   | 'st'
   | 'chart-layout'
   | 'chart-indicator'
+  | 'detail-cyq-model'
   | 'details-nav-long-press'
   | 'backtest-highlight'
   | null
+
+function getDetailCyqModelLabel(value: DetailCyqModel) {
+  return value === 'chen' ? '新筹码' : '旧筹码'
+}
 
 export default function SettingsPage() {
   const {
@@ -86,6 +94,7 @@ export default function SettingsPage() {
   const [detailsNavLongPressIntervalInput, setDetailsNavLongPressIntervalInput] = useState(
     () => String(readStoredDetailsNavLongPressIntervalSeconds()),
   )
+  const [detailCyqModel, setDetailCyqModel] = useState(() => readStoredDetailCyqModel())
   const [detailsNavLongPressSettingError, setDetailsNavLongPressSettingError] = useState('')
   const [detailsNavLongPressSettingNotice, setDetailsNavLongPressSettingNotice] = useState('')
   const [backtestHighlightIcThresholdInput, setBacktestHighlightIcThresholdInput] = useState(
@@ -121,6 +130,7 @@ export default function SettingsPage() {
   const isStSettingOpen = activeModal === 'st'
   const isChartLayoutSettingOpen = activeModal === 'chart-layout'
   const isChartIndicatorSettingOpen = activeModal === 'chart-indicator'
+  const isDetailCyqModelSettingOpen = activeModal === 'detail-cyq-model'
   const isDetailsNavLongPressSettingOpen = activeModal === 'details-nav-long-press'
   const isBacktestHighlightSettingOpen = activeModal === 'backtest-highlight'
 
@@ -277,6 +287,11 @@ export default function SettingsPage() {
     setActiveModal('chart-indicator')
   }
 
+  function openDetailCyqModelSetting() {
+    setDetailCyqModel(readStoredDetailCyqModel())
+    setActiveModal('detail-cyq-model')
+  }
+
   const onChartIndicatorSettingsLoaded = useCallback((nextPayload: ChartIndicatorSettingsPayload) => {
     setChartIndicatorSettingsPayload(nextPayload)
     setChartIndicatorSettingsStatus(getChartIndicatorSettingsStatus(nextPayload))
@@ -342,6 +357,11 @@ export default function SettingsPage() {
     setDetailsNavLongPressIntervalInput(String(normalizedValue))
     setDetailsNavLongPressSettingError('')
     setDetailsNavLongPressSettingNotice('已保存。详情页长按上一条/下一条会按该间隔自动切换。')
+  }
+
+  function onSelectDetailCyqModel(nextModel: DetailCyqModel) {
+    writeStoredDetailCyqModel(nextModel)
+    setDetailCyqModel(nextModel)
   }
 
   function onSaveBacktestHighlightSettings() {
@@ -460,6 +480,14 @@ export default function SettingsPage() {
             <span className="settings-list-item-value">
               {chartIndicatorSettingsPayload ? getChartIndicatorSettingsStatus(chartIndicatorSettingsPayload) : chartIndicatorSettingsStatus}
             </span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openDetailCyqModelSetting}>
+            <div className="settings-list-item-main">
+              <strong>详情筹码模型</strong>
+              <span>控制个股详情页筹码分布使用旧筹码库还是新筹码库。</span>
+            </div>
+            <span className="settings-list-item-value">{getDetailCyqModelLabel(detailCyqModel)}</span>
           </button>
 
           <button className="settings-list-item" type="button" onClick={openDetailsNavLongPressSetting}>
@@ -589,6 +617,51 @@ export default function SettingsPage() {
         onClose={closeActiveModal}
         onLoaded={onChartIndicatorSettingsLoaded}
       />
+
+      {isDetailCyqModelSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="详情筹码模型设置">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">详情筹码模型</h3>
+                <p className="settings-section-note">
+                  旧筹码读取 cyq.db；新筹码读取 cyq_chen.db，并在详情页支持混合 / 主力 / 散户展示。
+                </p>
+              </div>
+              <div className="settings-actions">
+                <button className="settings-primary-btn" type="button" onClick={closeActiveModal}>
+                  完成
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-actions settings-actions-left">
+              <button
+                className={detailCyqModel === 'legacy' ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
+                type="button"
+                onClick={() => onSelectDetailCyqModel('legacy')}
+              >
+                旧筹码
+              </button>
+              <button
+                className={detailCyqModel === 'chen' ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
+                type="button"
+                onClick={() => onSelectDetailCyqModel('chen')}
+              >
+                新筹码
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {isDetailsNavLongPressSettingOpen ? (
         <div

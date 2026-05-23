@@ -166,8 +166,12 @@ function formatPhaseLabel(phase: string | null | undefined) {
       return '清空指标列'
     case 'rebuild_stock_data_indicator_columns':
       return '补算指标列'
+    case 'compute_cyq':
+      return '筹码计算'
+    case 'compute_cyq_chen':
+      return '新筹码计算'
     case 'done':
-      return '下载完成'
+      return '任务完成'
     case 'started':
       return '已启动'
     case 'failed':
@@ -183,6 +187,10 @@ function getProgressWorkflow(action: string | null | undefined) {
       return ['delete_stock_data_indicator_columns'] as string[]
     case 'rebuild-stock-data-indicator-columns':
       return ['rebuild_stock_data_indicator_columns'] as string[]
+    case 'cyq':
+      return ['compute_cyq'] as string[]
+    case 'cyq-chen':
+      return ['compute_cyq_chen'] as string[]
     default:
       return null
   }
@@ -225,9 +233,13 @@ export default function RankingComputePage() {
   const sourcePath = status?.sourcePath?.trim() ?? ''
   const isBusy = busyAction !== 'idle'
   const showIndicatorProgress = busyAction === 'indicator-running'
+  const showComputeProgress =
+    busyAction === 'indicator-running' ||
+    busyAction === 'cyq-computing' ||
+    busyAction === 'cyq-chen-computing'
   const deferredProgress = useDeferredValue(progress)
   const progressPercent = calcProgressPercent(deferredProgress, getProgressWorkflow, ['done'])
-  const shownProgressPercent = useAnimatedProgressPercent(busyAction === 'indicator-running', progressPercent)
+  const shownProgressPercent = useAnimatedProgressPercent(showComputeProgress, progressPercent)
   const phaseStep = getPhaseStep(deferredProgress?.action, deferredProgress?.phase, getProgressWorkflow)
   const progressCounterText = getProgressCounterText(deferredProgress, formatPhaseLabel)
 
@@ -241,6 +253,38 @@ export default function RankingComputePage() {
     setIndicatorEditorMode(null)
     setIndicatorDraft(null)
     setIndicatorEditingName(null)
+  }
+
+  async function startProgressListener(prefix: string) {
+    const downloadId = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    activeDownloadIdRef.current = downloadId
+    progressUnlistenRef.current?.()
+    progressUnlistenRef.current = await listenDataDownloadProgress(downloadId, (nextProgress) => {
+      if (activeDownloadIdRef.current !== downloadId) {
+        return
+      }
+      setProgress((prev) => {
+        if (
+          prev &&
+          prev.phase === nextProgress.phase &&
+          prev.elapsedMs === nextProgress.elapsedMs &&
+          prev.finished === nextProgress.finished &&
+          prev.total === nextProgress.total &&
+          prev.currentLabel === nextProgress.currentLabel &&
+          prev.message === nextProgress.message
+        ) {
+          return prev
+        }
+        return nextProgress
+      })
+    })
+    return downloadId
+  }
+
+  function stopProgressListener() {
+    progressUnlistenRef.current?.()
+    progressUnlistenRef.current = null
+    activeDownloadIdRef.current = ''
   }
 
   function updateIndicatorDraftPrec(rawValue: string) {
@@ -415,6 +459,24 @@ export default function RankingComputePage() {
     )
   }
 
+  function renderProgressCard(fallbackMessage: string) {
+    return (
+      <DataTaskProgress
+        phaseLabel={formatPhaseLabel(deferredProgress?.phase)}
+        phaseStepPillText={phaseStep ? ` · ${phaseStep.current}/${phaseStep.total}` : ''}
+        phaseStepStatText={phaseStep ? ` ${phaseStep.current}/${phaseStep.total}` : ''}
+        actionLabel={deferredProgress?.actionLabel ?? '数据任务'}
+        progressPercent={progressPercent}
+        elapsedText={formatElapsedMs(deferredProgress?.elapsedMs ?? 0)}
+        shownProgressPercent={shownProgressPercent}
+        progressCounterText={progressCounterText}
+        currentObjectText={getCurrentObjectText(deferredProgress)}
+        message={deferredProgress?.message}
+        fallbackMessage={fallbackMessage}
+      />
+    )
+  }
+
   async function loadStatus(options?: { preserveNotice?: boolean }) {
     const preserveNotice = options?.preserveNotice === true
     setBusyAction('loading')
@@ -490,28 +552,7 @@ export default function RankingComputePage() {
     setNotice('')
     setProgress(null)
 
-    const downloadId = `download-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    activeDownloadIdRef.current = downloadId
-    progressUnlistenRef.current?.()
-    progressUnlistenRef.current = await listenDataDownloadProgress(downloadId, (nextProgress) => {
-      if (activeDownloadIdRef.current !== downloadId) {
-        return
-      }
-      setProgress((prev) => {
-        if (
-          prev &&
-          prev.phase === nextProgress.phase &&
-          prev.elapsedMs === nextProgress.elapsedMs &&
-          prev.finished === nextProgress.finished &&
-          prev.total === nextProgress.total &&
-          prev.currentLabel === nextProgress.currentLabel &&
-          prev.message === nextProgress.message
-        ) {
-          return prev
-        }
-        return nextProgress
-      })
-    })
+    const downloadId = await startProgressListener('download')
 
     try {
       const result = await executor(downloadId)
@@ -531,9 +572,7 @@ export default function RankingComputePage() {
       setNotice('')
       setError(`执行指标列维护失败: ${String(runError)}`)
     } finally {
-      progressUnlistenRef.current?.()
-      progressUnlistenRef.current = null
-      activeDownloadIdRef.current = ''
+      stopProgressListener()
       setBusyAction('idle')
     }
   }
@@ -674,13 +713,17 @@ export default function RankingComputePage() {
     setCyqFactorInput(String(factor))
     setBusyAction('cyq-computing')
     setError('')
+    setNotice('')
+    setProgress(null)
 
     try {
+      const downloadId = await startProgressListener('cyq')
       const result = await runCyqCompute(
         sourcePath,
         factor,
         startDate || undefined,
         endDate || undefined,
+        downloadId,
       )
       const nextStatus = await getRankingComputeStatus(sourcePath)
       setStatus(nextStatus)
@@ -695,6 +738,7 @@ export default function RankingComputePage() {
       setNotice('')
       setError(`筹码计算失败: ${String(actionError)}`)
     } finally {
+      stopProgressListener()
       setBusyAction('idle')
     }
   }
@@ -718,14 +762,18 @@ export default function RankingComputePage() {
     setCyqChenBucketPctInput(String(bucketPct))
     setBusyAction('cyq-chen-computing')
     setError('')
+    setNotice('')
+    setProgress(null)
 
     try {
+      const downloadId = await startProgressListener('cyq-chen')
       const result = await runCyqChenCompute(
         sourcePath,
         warmupDays,
         bucketPct,
         startDate || undefined,
         endDate || undefined,
+        downloadId,
       )
       const nextStatus = await getRankingComputeStatus(sourcePath)
       setStatus(nextStatus)
@@ -740,6 +788,7 @@ export default function RankingComputePage() {
       setNotice('')
       setError(`新筹码计算失败: ${String(actionError)}`)
     } finally {
+      stopProgressListener()
       setBusyAction('idle')
     }
   }
@@ -1005,6 +1054,10 @@ export default function RankingComputePage() {
             </button>
           </div>
         </div>
+
+        {busyAction === 'cyq-computing'
+          ? renderProgressCard('筹码计算已经启动，正在等待后端返回当前股票进度。')
+          : null}
       </section>
 
       <section className="ranking-compute-card">
@@ -1077,6 +1130,10 @@ export default function RankingComputePage() {
             </button>
           </div>
         </div>
+
+        {busyAction === 'cyq-chen-computing'
+          ? renderProgressCard('新筹码计算已经启动，正在等待后端返回当前股票进度。')
+          : null}
       </section>
 
       <section className="ranking-compute-card">
@@ -1117,21 +1174,9 @@ export default function RankingComputePage() {
           </button>
         </div>
 
-        {showIndicatorProgress ? (
-          <DataTaskProgress
-            phaseLabel={formatPhaseLabel(deferredProgress?.phase)}
-            phaseStepPillText={phaseStep ? ` · ${phaseStep.current}/${phaseStep.total}` : ''}
-            phaseStepStatText={phaseStep ? ` ${phaseStep.current}/${phaseStep.total}` : ''}
-            actionLabel={deferredProgress?.actionLabel ?? '行情数据指标列维护'}
-            progressPercent={progressPercent}
-            elapsedText={formatElapsedMs(deferredProgress?.elapsedMs ?? 0)}
-            shownProgressPercent={shownProgressPercent}
-            progressCounterText={progressCounterText}
-            currentObjectText={getCurrentObjectText(deferredProgress)}
-            message={deferredProgress?.message}
-            fallbackMessage="任务已经启动，正在等待后端返回当前状态。"
-          />
-        ) : null}
+        {showIndicatorProgress
+          ? renderProgressCard('任务已经启动，正在等待后端返回当前状态。')
+          : null}
       </section>
 
       {notice ? <div className="ranking-compute-notice">{notice}</div> : null}

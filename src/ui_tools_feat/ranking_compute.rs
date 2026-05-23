@@ -6,10 +6,11 @@ use serde::Serialize;
 use crate::{
     data::{
         concept_performance_data::rebuild_concept_performance_all, cyq::CyqConfig,
-        cyq_chen::ChenChipConfig, cyq_chen_data::rebuild_cyq_chen_all, cyq_chen_db_path,
-        cyq_data::rebuild_cyq_all, cyq_db_path, load_trade_date_list, result_db_path,
-        source_db_path,
+        cyq_chen::ChenChipConfig, cyq_chen_data::rebuild_cyq_chen_all_with_progress,
+        cyq_chen_db_path, cyq_data::rebuild_cyq_all_with_progress, cyq_db_path,
+        load_trade_date_list, result_db_path, source_db_path,
     },
+    download::runner::DownloadProgressCallback,
     scoring::{
         RankTiebreakProfile, TieBreakWay, build_rank_tiebreak,
         runner::{ScoringRunProfile, scoring_all_to_db},
@@ -669,6 +670,16 @@ pub fn run_cyq_compute_with_range(
     start_date: Option<&str>,
     end_date: Option<&str>,
 ) -> Result<CyqComputeResult, String> {
+    run_cyq_compute_with_range_and_progress(source_path, factor, start_date, end_date, None)
+}
+
+pub fn run_cyq_compute_with_range_and_progress(
+    source_path: &str,
+    factor: usize,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+) -> Result<CyqComputeResult, String> {
     let source_path = source_path.trim().to_string();
     if source_path.is_empty() {
         return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
@@ -694,7 +705,7 @@ pub fn run_cyq_compute_with_range(
     }
 
     let started_at = Instant::now();
-    let summary = rebuild_cyq_all(
+    let summary = rebuild_cyq_all_with_progress(
         &source_path,
         CyqConfig {
             factor,
@@ -702,6 +713,7 @@ pub fn run_cyq_compute_with_range(
         },
         start_date.as_deref(),
         end_date.as_deref(),
+        progress_cb,
     )?;
     Ok(CyqComputeResult {
         action: "cyq".to_string(),
@@ -721,6 +733,24 @@ pub fn run_cyq_chen_compute_with_range(
     bucket_pct: f64,
     start_date: Option<&str>,
     end_date: Option<&str>,
+) -> Result<CyqChenComputeResult, String> {
+    run_cyq_chen_compute_with_range_and_progress(
+        source_path,
+        warmup_days,
+        bucket_pct,
+        start_date,
+        end_date,
+        None,
+    )
+}
+
+pub fn run_cyq_chen_compute_with_range_and_progress(
+    source_path: &str,
+    warmup_days: usize,
+    bucket_pct: f64,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<CyqChenComputeResult, String> {
     let source_path = source_path.trim().to_string();
     if source_path.is_empty() {
@@ -751,11 +781,12 @@ pub fn run_cyq_chen_compute_with_range(
         bucket_pct,
     };
     let started_at = Instant::now();
-    let summary = rebuild_cyq_chen_all(
+    let summary = rebuild_cyq_chen_all_with_progress(
         &source_path,
         config,
         start_date.as_deref(),
         end_date.as_deref(),
+        progress_cb,
     )?;
     Ok(CyqChenComputeResult {
         action: "cyq-chen".to_string(),

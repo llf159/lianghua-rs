@@ -70,10 +70,10 @@ const CHART_CYQ_PANEL_GAP = 12
 const CANDLE_UP_COLOR = '#d9485f'
 const CANDLE_DOWN_COLOR = '#178f68'
 const CANDLE_FLAT_COLOR = '#536273'
-const CHIP_COLOR_MAIN_PROFIT = '#2563eb'
-const CHIP_COLOR_MAIN_TRAPPED = '#7c3aed'
-const CHIP_COLOR_RETAIL_PROFIT = '#f59e0b'
-const CHIP_COLOR_RETAIL_TRAPPED = '#dc2626'
+const CHIP_COLOR_MAIN_PROFIT = '#d9485f'
+const CHIP_COLOR_MAIN_TRAPPED = '#4d95c9'
+const CHIP_COLOR_RETAIL_PROFIT = '#f18a9b'
+const CHIP_COLOR_RETAIL_TRAPPED = '#9cc8e6'
 
 function cloneDefaultStrategies() {
   return DEFAULT_STRATEGIES.map((strategy) => ({ ...strategy }))

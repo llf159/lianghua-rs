@@ -1,7 +1,7 @@
 mod data_download_bridge;
 mod managed_source_bridge;
 
-use std::fs;
+use std::{fs, time::Instant};
 
 use lianghua_rs::ui_tools_feat::{
     chart_indicator_settings::{
@@ -65,8 +65,8 @@ use lianghua_rs::ui_tools_feat::{
     ranking_compute::{
         get_ranking_compute_status as core_get_ranking_compute_status,
         run_concept_performance_compute as core_run_concept_performance_compute,
-        run_cyq_chen_compute_with_range as core_run_cyq_chen_compute,
-        run_cyq_compute_with_range as core_run_cyq_compute,
+        run_cyq_chen_compute_with_range_and_progress as core_run_cyq_chen_compute,
+        run_cyq_compute_with_range_and_progress as core_run_cyq_compute,
         run_ranking_score_calculation as core_run_ranking_score_calculation,
         run_ranking_tiebreak_fill as core_run_ranking_tiebreak_fill,
         ConceptPerformanceComputeResult, CyqChenComputeResult, CyqComputeResult,
@@ -127,6 +127,7 @@ use lianghua_rs::ui_tools_feat::{
     },
 };
 use serde::{Deserialize, Serialize};
+use tauri::Emitter;
 
 use data_download_bridge::{
     get_data_download_status, get_indicator_manage_page, run_concept_most_related_repair,
@@ -156,6 +157,30 @@ use tauri::Manager;
 
 const WATCH_OBSERVE_STORAGE_FILE: &str = "watch_observe.json";
 const DEFAULT_MANAGED_SOURCE_DIR: &str = "source";
+const RANKING_COMPUTE_PROGRESS_EVENT: &str = "data-download-status";
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RankingComputeProgressEventPayload {
+    download_id: String,
+    phase: String,
+    action: String,
+    action_label: String,
+    elapsed_ms: u64,
+    finished: u64,
+    total: u64,
+    current_label: Option<String>,
+    message: String,
+}
+
+fn emit_ranking_compute_progress_event(
+    app: &tauri::AppHandle,
+    payload: RankingComputeProgressEventPayload,
+) {
+    if let Err(emit_error) = app.emit(RANKING_COMPUTE_PROGRESS_EVENT, payload) {
+        log::warn!("failed to emit ranking compute progress event: {}", emit_error);
+    }
+}
 
 #[cfg(target_os = "linux")]
 fn trim_process_heap() {
@@ -581,8 +606,9 @@ fn get_stock_detail_strategy_snapshot(
 fn get_stock_detail_cyq(
     source_path: String,
     ts_code: String,
+    chip_model: Option<String>,
 ) -> Result<StockDetailCyqData, String> {
-    core_get_stock_detail_cyq(source_path, ts_code)
+    core_get_stock_detail_cyq(source_path, ts_code, chip_model)
 }
 
 #[tauri::command]
@@ -1167,18 +1193,100 @@ async fn run_concept_performance_compute(
 
 #[tauri::command]
 async fn run_cyq_compute(
+    app: tauri::AppHandle,
     source_path: String,
     factor: usize,
     start_date: Option<String>,
     end_date: Option<String>,
+    download_id: Option<String>,
 ) -> Result<CyqComputeResult, String> {
+    let download_id = download_id.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
     tauri::async_runtime::spawn_blocking(move || {
-        core_run_cyq_compute(
+        let started_at = Instant::now();
+        let action = "cyq".to_string();
+        let action_label = "筹码计算".to_string();
+        if let Some(download_id) = download_id.as_deref() {
+            emit_ranking_compute_progress_event(
+                &app,
+                RankingComputeProgressEventPayload {
+                    download_id: download_id.to_string(),
+                    phase: "started".to_string(),
+                    action: action.clone(),
+                    action_label: action_label.clone(),
+                    elapsed_ms: 0,
+                    finished: 0,
+                    total: 0,
+                    current_label: None,
+                    message: "筹码计算已启动，正在准备数据。".to_string(),
+                },
+            );
+        }
+
+        let progress_app = app.clone();
+        let progress_download_id = download_id.clone();
+        let progress_action = action.clone();
+        let progress_action_label = action_label.clone();
+        let progress_cb = move |progress: lianghua_rs::download::runner::DownloadProgress| {
+            if let Some(download_id) = progress_download_id.as_deref() {
+                emit_ranking_compute_progress_event(
+                    &progress_app,
+                    RankingComputeProgressEventPayload {
+                        download_id: download_id.to_string(),
+                        phase: progress.phase,
+                        action: progress_action.clone(),
+                        action_label: progress_action_label.clone(),
+                        elapsed_ms: started_at.elapsed().as_millis() as u64,
+                        finished: progress.finished as u64,
+                        total: progress.total as u64,
+                        current_label: progress.current_label,
+                        message: progress.message,
+                    },
+                );
+            }
+        };
+
+        let result = core_run_cyq_compute(
             &source_path,
             factor,
             start_date.as_deref(),
             end_date.as_deref(),
-        )
+            download_id.as_ref().map(|_| &progress_cb as &lianghua_rs::download::runner::DownloadProgressCallback<'_>),
+        );
+        match (&result, download_id.as_deref()) {
+            (Ok(run_result), Some(download_id)) => emit_ranking_compute_progress_event(
+                &app,
+                RankingComputeProgressEventPayload {
+                    download_id: download_id.to_string(),
+                    phase: "completed".to_string(),
+                    action,
+                    action_label,
+                    elapsed_ms: run_result.elapsed_ms,
+                    finished: 1,
+                    total: 1,
+                    current_label: None,
+                    message: format!(
+                        "筹码计算完成，写入 {} 条摘要和 {} 条分桶。",
+                        run_result.snapshot_rows, run_result.bin_rows
+                    ),
+                },
+            ),
+            (Err(error), Some(download_id)) => emit_ranking_compute_progress_event(
+                &app,
+                RankingComputeProgressEventPayload {
+                    download_id: download_id.to_string(),
+                    phase: "failed".to_string(),
+                    action,
+                    action_label,
+                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    finished: 0,
+                    total: 0,
+                    current_label: None,
+                    message: format!("筹码计算失败: {error}"),
+                },
+            ),
+            _ => {}
+        }
+        result
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1186,20 +1294,102 @@ async fn run_cyq_compute(
 
 #[tauri::command]
 async fn run_cyq_chen_compute(
+    app: tauri::AppHandle,
     source_path: String,
     warmup_days: usize,
     bucket_pct: f64,
     start_date: Option<String>,
     end_date: Option<String>,
+    download_id: Option<String>,
 ) -> Result<CyqChenComputeResult, String> {
+    let download_id = download_id.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
     tauri::async_runtime::spawn_blocking(move || {
-        core_run_cyq_chen_compute(
+        let started_at = Instant::now();
+        let action = "cyq-chen".to_string();
+        let action_label = "新筹码计算".to_string();
+        if let Some(download_id) = download_id.as_deref() {
+            emit_ranking_compute_progress_event(
+                &app,
+                RankingComputeProgressEventPayload {
+                    download_id: download_id.to_string(),
+                    phase: "started".to_string(),
+                    action: action.clone(),
+                    action_label: action_label.clone(),
+                    elapsed_ms: 0,
+                    finished: 0,
+                    total: 0,
+                    current_label: None,
+                    message: "新筹码计算已启动，正在准备数据。".to_string(),
+                },
+            );
+        }
+
+        let progress_app = app.clone();
+        let progress_download_id = download_id.clone();
+        let progress_action = action.clone();
+        let progress_action_label = action_label.clone();
+        let progress_cb = move |progress: lianghua_rs::download::runner::DownloadProgress| {
+            if let Some(download_id) = progress_download_id.as_deref() {
+                emit_ranking_compute_progress_event(
+                    &progress_app,
+                    RankingComputeProgressEventPayload {
+                        download_id: download_id.to_string(),
+                        phase: progress.phase,
+                        action: progress_action.clone(),
+                        action_label: progress_action_label.clone(),
+                        elapsed_ms: started_at.elapsed().as_millis() as u64,
+                        finished: progress.finished as u64,
+                        total: progress.total as u64,
+                        current_label: progress.current_label,
+                        message: progress.message,
+                    },
+                );
+            }
+        };
+
+        let result = core_run_cyq_chen_compute(
             &source_path,
             warmup_days,
             bucket_pct,
             start_date.as_deref(),
             end_date.as_deref(),
-        )
+            download_id.as_ref().map(|_| &progress_cb as &lianghua_rs::download::runner::DownloadProgressCallback<'_>),
+        );
+        match (&result, download_id.as_deref()) {
+            (Ok(run_result), Some(download_id)) => emit_ranking_compute_progress_event(
+                &app,
+                RankingComputeProgressEventPayload {
+                    download_id: download_id.to_string(),
+                    phase: "completed".to_string(),
+                    action,
+                    action_label,
+                    elapsed_ms: run_result.elapsed_ms,
+                    finished: 1,
+                    total: 1,
+                    current_label: None,
+                    message: format!(
+                        "新筹码计算完成，写入 {} 条摘要和 {} 条分桶。",
+                        run_result.snapshot_rows, run_result.bin_rows
+                    ),
+                },
+            ),
+            (Err(error), Some(download_id)) => emit_ranking_compute_progress_event(
+                &app,
+                RankingComputeProgressEventPayload {
+                    download_id: download_id.to_string(),
+                    phase: "failed".to_string(),
+                    action,
+                    action_label,
+                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    finished: 0,
+                    total: 0,
+                    current_label: None,
+                    message: format!("新筹码计算失败: {error}"),
+                },
+            ),
+            _ => {}
+        }
+        result
     })
     .await
     .map_err(|error| error.to_string())?

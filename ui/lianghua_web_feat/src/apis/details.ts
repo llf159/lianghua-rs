@@ -224,6 +224,12 @@ export type DetailCyqBin = {
   price_high: number
   chip: number
   chip_pct: number
+  main_chip?: number | null
+  main_chip_pct?: number | null
+  retail_chip?: number | null
+  retail_chip_pct?: number | null
+  total_chip?: number | null
+  total_chip_pct?: number | null
 }
 
 export type DetailCyqSnapshot = {
@@ -234,6 +240,7 @@ export type DetailCyqSnapshot = {
 
 export type StockDetailCyqData = {
   resolved_ts_code: string
+  model?: 'legacy' | 'chen' | string
   factor?: number | null
   snapshots: DetailCyqSnapshot[]
 }
@@ -261,6 +268,7 @@ export async function getStockDetailRealtime(query: {
 export async function getStockDetailCyq(query: {
   sourcePath: string
   tsCode: string
+  chipModel?: 'legacy' | 'chen'
 }) {
   return invoke<StockDetailCyqData>('get_stock_detail_cyq', query)
 }
