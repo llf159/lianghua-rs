@@ -1,5 +1,7 @@
 pub mod concept_performance_data;
 pub mod cyq;
+pub mod cyq_chen;
+pub mod cyq_chen_data;
 pub mod cyq_data;
 pub mod download_data;
 pub mod scoring_data;
@@ -30,6 +32,14 @@ pub fn concept_performance_db_path(source_dir: &str) -> PathBuf {
 
 pub fn cyq_db_path(source_dir: &str) -> PathBuf {
     Path::new(source_dir).join("cyq.db")
+}
+
+pub fn chip_change_rule_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("chip_change_rule.toml")
+}
+
+pub fn cyq_chen_db_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("cyq_chen.db")
 }
 
 pub fn ths_concepts_path(source_dir: &str) -> PathBuf {
