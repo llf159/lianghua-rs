@@ -32,6 +32,10 @@ export type RankingComputeStatus = {
   cyqDb: RankComputeDbRange
   cyqBinRowCount: number
   cyqFactor: number | null
+  cyqChenDb: RankComputeDbRange
+  cyqChenBinRowCount: number
+  cyqChenWarmupDays: number | null
+  cyqChenBucketPct: number | null
   suggestedStartDate: string | null
   suggestedEndDate: string | null
 }
@@ -73,6 +77,17 @@ export type CyqComputeResult = {
   range: number
 }
 
+export type CyqChenComputeResult = {
+  action: string
+  startDate?: string | null
+  endDate?: string | null
+  elapsedMs: number
+  snapshotRows: number
+  binRows: number
+  warmupDays: number
+  bucketPct: number
+}
+
 export async function runRankingScoreCalculation(
   sourcePath: string,
   startDate: string,
@@ -100,6 +115,22 @@ export async function runCyqCompute(
   return invoke<CyqComputeResult>('run_cyq_compute', {
     sourcePath,
     factor,
+    startDate,
+    endDate,
+  })
+}
+
+export async function runCyqChenCompute(
+  sourcePath: string,
+  warmupDays: number,
+  bucketPct: number,
+  startDate?: string,
+  endDate?: string,
+) {
+  return invoke<CyqChenComputeResult>('run_cyq_chen_compute', {
+    sourcePath,
+    warmupDays,
+    bucketPct,
     startDate,
     endDate,
   })

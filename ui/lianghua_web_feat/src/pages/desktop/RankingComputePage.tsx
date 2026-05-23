@@ -16,6 +16,7 @@ import {
 import {
   getRankingComputeStatus,
   runConceptPerformanceCompute,
+  runCyqChenCompute,
   runCyqCompute,
   runRankingScoreCalculation,
   type RankComputeDbRange,
@@ -45,6 +46,7 @@ type BusyAction =
   | 'loading'
   | 'computing'
   | 'cyq-computing'
+  | 'cyq-chen-computing'
   | 'deleting-result-db'
   | 'indicator-running'
 type IndicatorEditorMode = 'create' | 'edit'
@@ -194,6 +196,10 @@ export default function RankingComputePage() {
   const [cyqFactorInput, setCyqFactorInput] = useState('50')
   const [cyqStartDateInput, setCyqStartDateInput] = useState('')
   const [cyqEndDateInput, setCyqEndDateInput] = useState('')
+  const [cyqChenWarmupDaysInput, setCyqChenWarmupDaysInput] = useState('120')
+  const [cyqChenBucketPctInput, setCyqChenBucketPctInput] = useState('1')
+  const [cyqChenStartDateInput, setCyqChenStartDateInput] = useState('')
+  const [cyqChenEndDateInput, setCyqChenEndDateInput] = useState('')
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [progress, setProgress] = useState<DataDownloadProgress | null>(null)
@@ -428,6 +434,13 @@ export default function RankingComputePage() {
         current.trim() !== '' ? current : String(nextStatus.cyqFactor ?? 50),
       )
       setCyqEndDateInput((current) => current || compactDateToInput(nextStatus.sourceDb.maxTradeDate))
+      setCyqChenWarmupDaysInput((current) =>
+        current.trim() !== '' ? current : String(nextStatus.cyqChenWarmupDays ?? 120),
+      )
+      setCyqChenBucketPctInput((current) =>
+        current.trim() !== '' ? current : String(nextStatus.cyqChenBucketPct ?? 1),
+      )
+      setCyqChenEndDateInput((current) => current || compactDateToInput(nextStatus.sourceDb.maxTradeDate))
     } catch (loadError) {
       setNotice('')
       setError(`读取数据计算状态失败: ${String(loadError)}`)
@@ -686,6 +699,51 @@ export default function RankingComputePage() {
     }
   }
 
+  async function onRunCyqChenCompute() {
+    if (!sourcePath) {
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    const warmupDays = normalizeIndicatorPrecInput(cyqChenWarmupDaysInput, 120)
+    const bucketPct = Number(cyqChenBucketPctInput.trim() || '1')
+    const startDate = cyqChenStartDateInput.trim()
+    const endDate = cyqChenEndDateInput.trim()
+    if (!Number.isFinite(bucketPct) || bucketPct <= 0) {
+      setError('新筹码分桶百分比必须是正数。')
+      return
+    }
+
+    setCyqChenWarmupDaysInput(String(warmupDays))
+    setCyqChenBucketPctInput(String(bucketPct))
+    setBusyAction('cyq-chen-computing')
+    setError('')
+
+    try {
+      const result = await runCyqChenCompute(
+        sourcePath,
+        warmupDays,
+        bucketPct,
+        startDate || undefined,
+        endDate || undefined,
+      )
+      const nextStatus = await getRankingComputeStatus(sourcePath)
+      setStatus(nextStatus)
+      const rangeText =
+        result.startDate && result.endDate
+          ? `，区间 ${formatTradeDate(result.startDate)} 至 ${formatTradeDate(result.endDate)}`
+          : ''
+      setNotice(
+        `新筹码计算完成，预热 ${result.warmupDays} 天，分桶 ${result.bucketPct}%${rangeText}，写入 ${result.snapshotRows} 条摘要和 ${result.binRows} 条分桶，用时 ${formatElapsedMs(result.elapsedMs)}。`,
+      )
+    } catch (actionError) {
+      setNotice('')
+      setError(`新筹码计算失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
   async function onConfirmPendingAction() {
     const current = pendingConfirm
     if (!current) {
@@ -766,6 +824,15 @@ export default function RankingComputePage() {
             <small>
               {status?.cyqDb
                 ? `${status.cyqDb.distinctTradeDates} 个交易日，${status.cyqDb.rowCount} 条摘要，${status.cyqBinRowCount} 条分桶；当前分桶 ${status.cyqFactor ?? '--'}。`
+                : '读取中...'}
+            </small>
+          </div>
+          <div className="ranking-compute-summary-item">
+            <span>新筹码库日期范围</span>
+            <strong>{describeDbRange(status?.cyqChenDb)}</strong>
+            <small>
+              {status?.cyqChenDb
+                ? `${status.cyqChenDb.distinctTradeDates} 个交易日，${status.cyqChenDb.rowCount} 条摘要，${status.cyqChenBinRowCount} 条分桶；预热 ${status.cyqChenWarmupDays ?? '--'} 天，分桶 ${status.cyqChenBucketPct ?? '--'}%。`
                 : '读取中...'}
             </small>
           </div>
@@ -935,6 +1002,78 @@ export default function RankingComputePage() {
               disabled={isBusy || sourcePath === ''}
             >
               {busyAction === 'cyq-computing' ? '计算中...' : '开始筹码计算'}
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="ranking-compute-card">
+        <div className="ranking-compute-summary">
+          <div className="ranking-compute-summary-item">
+            <span>新筹码计算</span>
+            <strong>cyq_chen.db / cyq_chen_snapshot / cyq_chen_bin</strong>
+            <small>使用 chip_change_rule.toml 重建筹码摘要和分桶明细；起始日留空时按原始库可用范围计算。</small>
+          </div>
+        </div>
+
+        <div className="ranking-compute-form ranking-compute-cyq-form">
+          <label className="ranking-compute-field">
+            <span>开始日期</span>
+            <input
+              type="date"
+              value={cyqChenStartDateInput}
+              onChange={(event) => setCyqChenStartDateInput(event.target.value)}
+              placeholder={compactDateToInput(status?.sourceDb?.minTradeDate)}
+            />
+          </label>
+
+          <label className="ranking-compute-field">
+            <span>结束日期</span>
+            <input
+              type="date"
+              value={cyqChenEndDateInput}
+              onChange={(event) => setCyqChenEndDateInput(event.target.value)}
+              placeholder={compactDateToInput(status?.sourceDb?.maxTradeDate)}
+            />
+          </label>
+
+          <label className="ranking-compute-field">
+            <span>预热天数</span>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={cyqChenWarmupDaysInput}
+              onChange={(event) => setCyqChenWarmupDaysInput(event.target.value)}
+            />
+          </label>
+
+          <label className="ranking-compute-field">
+            <span>分桶百分比</span>
+            <input
+              type="number"
+              min="0.01"
+              step="0.1"
+              value={cyqChenBucketPctInput}
+              onChange={(event) => setCyqChenBucketPctInput(event.target.value)}
+            />
+          </label>
+
+          <small className="ranking-compute-cyq-range">
+            依赖文件：chip_change_rule.toml；当前库：
+            {status?.cyqChenDb
+              ? ` ${describeDbRange(status.cyqChenDb)}`
+              : ' 读取中...'}
+          </small>
+
+          <div className="ranking-compute-actions ranking-compute-cyq-actions">
+            <button
+              className="ranking-compute-secondary-btn"
+              type="button"
+              onClick={() => void onRunCyqChenCompute()}
+              disabled={isBusy || sourcePath === ''}
+            >
+              {busyAction === 'cyq-chen-computing' ? '计算中...' : '开始新筹码计算'}
             </button>
           </div>
         </div>

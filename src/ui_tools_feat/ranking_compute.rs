@@ -6,6 +6,7 @@ use serde::Serialize;
 use crate::{
     data::{
         concept_performance_data::rebuild_concept_performance_all, cyq::CyqConfig,
+        cyq_chen::ChenChipConfig, cyq_chen_data::rebuild_cyq_chen_all, cyq_chen_db_path,
         cyq_data::rebuild_cyq_all, cyq_db_path, load_trade_date_list, result_db_path,
         source_db_path,
     },
@@ -34,6 +35,19 @@ pub struct CyqComputeResult {
     pub bin_rows: usize,
     pub factor: usize,
     pub range: usize,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CyqChenComputeResult {
+    pub action: String,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub elapsed_ms: u64,
+    pub snapshot_rows: usize,
+    pub bin_rows: usize,
+    pub warmup_days: usize,
+    pub bucket_pct: f64,
 }
 
 use super::normalize_trade_date;
@@ -76,6 +90,10 @@ pub struct RankComputeStatus {
     pub cyq_db: RankComputeDbRange,
     pub cyq_bin_row_count: u64,
     pub cyq_factor: Option<u64>,
+    pub cyq_chen_db: RankComputeDbRange,
+    pub cyq_chen_bin_row_count: u64,
+    pub cyq_chen_warmup_days: Option<u64>,
+    pub cyq_chen_bucket_pct: Option<f64>,
     pub suggested_start_date: Option<String>,
     pub suggested_end_date: Option<String>,
 }
@@ -405,6 +423,38 @@ fn query_cyq_factor(db_path: &Path) -> Result<Option<u64>, String> {
     .map_err(|e| format!("读取 cyq.db 分桶数失败: {e}"))
 }
 
+fn query_cyq_chen_config(db_path: &Path) -> Result<(Option<u64>, Option<f64>), String> {
+    if !db_path.exists() {
+        return Ok((None, None));
+    }
+
+    let db_path_str = db_path
+        .to_str()
+        .ok_or_else(|| "cyq_chen.db 路径不是有效 UTF-8".to_string())?;
+    let conn = Connection::open(db_path_str).map_err(|e| format!("打开 cyq_chen.db 失败: {e}"))?;
+    let table_exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'cyq_chen_snapshot'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("检查 cyq_chen.db 表结构失败: {e}"))?;
+    if table_exists <= 0 {
+        return Ok((None, None));
+    }
+
+    conn.query_row(
+        "SELECT MAX(warmup_days), MAX(bucket_pct) FROM cyq_chen_snapshot",
+        [],
+        |row| {
+            let warmup_days = row.get::<_, Option<i64>>(0)?;
+            let bucket_pct = row.get::<_, Option<f64>>(1)?;
+            Ok((warmup_days.map(|value| value.max(0) as u64), bucket_pct))
+        },
+    )
+    .map_err(|e| format!("读取 cyq_chen.db 参数失败: {e}"))
+}
+
 fn sample_trade_dates(values: &[String], limit: usize) -> Vec<String> {
     values.iter().take(limit).cloned().collect()
 }
@@ -505,12 +555,18 @@ fn get_rank_compute_status_inner(
     let source_db = source_db_path(source_path);
     let result_db = result_db_path(source_path);
     let cyq_db = cyq_db_path(source_path);
+    let cyq_chen_db = cyq_chen_db_path(source_path);
     let source_db_range = query_trade_date_range(&source_db, "stock_data.db", "stock_data")?;
     let result_db_range = query_trade_date_range(&result_db, "scoring_result.db", "score_summary")?;
     let result_db_continuity = check_result_db_continuity(source_path, &result_db_range)?;
     let cyq_db_range = query_trade_date_range(&cyq_db, "cyq.db", "cyq_snapshot")?;
     let cyq_bin_row_count = query_table_row_count(&cyq_db, "cyq.db", "cyq_bin")?;
     let cyq_factor = query_cyq_factor(&cyq_db)?;
+    let cyq_chen_db_range =
+        query_trade_date_range(&cyq_chen_db, "cyq_chen.db", "cyq_chen_snapshot")?;
+    let cyq_chen_bin_row_count =
+        query_table_row_count(&cyq_chen_db, "cyq_chen.db", "cyq_chen_bin")?;
+    let (cyq_chen_warmup_days, cyq_chen_bucket_pct) = query_cyq_chen_config(&cyq_chen_db)?;
 
     let suggested_end_date = source_db_range.max_trade_date.clone();
     let suggested_start_date = match (
@@ -536,6 +592,10 @@ fn get_rank_compute_status_inner(
         cyq_db: cyq_db_range,
         cyq_bin_row_count,
         cyq_factor,
+        cyq_chen_db: cyq_chen_db_range,
+        cyq_chen_bin_row_count,
+        cyq_chen_warmup_days,
+        cyq_chen_bucket_pct,
         suggested_start_date,
         suggested_end_date,
     })
@@ -652,6 +712,60 @@ pub fn run_cyq_compute_with_range(
         bin_rows: summary.bin_rows,
         factor: summary.factor,
         range: summary.range,
+    })
+}
+
+pub fn run_cyq_chen_compute_with_range(
+    source_path: &str,
+    warmup_days: usize,
+    bucket_pct: f64,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+) -> Result<CyqChenComputeResult, String> {
+    let source_path = source_path.trim().to_string();
+    if source_path.is_empty() {
+        return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
+    }
+    if !bucket_pct.is_finite() || bucket_pct <= 0.0 {
+        return Err("分桶百分比必须是正数".to_string());
+    }
+
+    let start_date = start_date
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| normalize_rank_compute_date(value, "开始日期"))
+        .transpose()?;
+    let end_date = end_date
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| normalize_rank_compute_date(value, "结束日期"))
+        .transpose()?;
+    if let (Some(start_date), Some(end_date)) = (start_date.as_deref(), end_date.as_deref()) {
+        if start_date > end_date {
+            return Err("开始日期不能晚于结束日期".to_string());
+        }
+    }
+
+    let config = ChenChipConfig {
+        warmup_days,
+        bucket_pct,
+    };
+    let started_at = Instant::now();
+    let summary = rebuild_cyq_chen_all(
+        &source_path,
+        config,
+        start_date.as_deref(),
+        end_date.as_deref(),
+    )?;
+    Ok(CyqChenComputeResult {
+        action: "cyq-chen".to_string(),
+        start_date: summary.start_date,
+        end_date: summary.end_date,
+        elapsed_ms: started_at.elapsed().as_millis() as u64,
+        snapshot_rows: summary.snapshot_rows,
+        bin_rows: summary.bin_rows,
+        warmup_days: summary.warmup_days,
+        bucket_pct: summary.bucket_pct,
     })
 }
 

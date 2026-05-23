@@ -20,6 +20,7 @@ import SettingsPage from './pages/desktop/SettingsPage'
 import StockPickPage from './pages/desktop/StockPickPage'
 import ExpressionStockPickPage from './pages/desktop/ExpressionStockPickPage'
 import ConceptStockPickPage from './pages/desktop/ConceptStockPickPage'
+import CyqChenPage from './pages/desktop/CyqChenPage'
 import StrategyManagePage from './pages/desktop/StrategyManagePage'
 import WatchObservePage from './pages/desktop/WatchObservePage'
 import IntradayMonitorRealtimePage from './pages/desktop/IntradayMonitorRealtimePage'
@@ -69,6 +70,7 @@ function AppRoutes() {
             <Route path="expression" element={<ExpressionStockPickPage />} />
             <Route path="concept" element={<ConceptStockPickPage />} />
           </Route>
+          <Route path="cyq-chen" element={<CyqChenPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="raw-data">
             <Route index element={<Navigate to="/raw-data/data-import" replace />} />

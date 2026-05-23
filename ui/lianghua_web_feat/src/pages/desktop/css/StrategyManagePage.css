@@ -354,6 +354,46 @@
   gap: 12px;
 }
 
+.strategy-manage-chip-card {
+  border-color: #cfd9e6;
+}
+
+.strategy-manage-chip-list-head {
+  margin-top: 16px;
+}
+
+.strategy-manage-chip-rule-grid {
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.strategy-manage-chip-backup-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.strategy-manage-chip-backup-btn {
+  border: 1px solid #d7dfe8;
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px 12px;
+  display: grid;
+  gap: 5px;
+  text-align: left;
+  color: #1f2a37;
+  cursor: pointer;
+}
+
+.strategy-manage-chip-backup-btn:hover {
+  border-color: var(--theme-orange-400);
+  background: var(--theme-orange-50);
+}
+
+.strategy-manage-chip-backup-btn span {
+  color: #607286;
+  font-size: 12px;
+}
+
 .strategy-manage-bulk-rule-list {
   border: 1px solid #e2e8f0;
   border-radius: 10px;

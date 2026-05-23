@@ -41,6 +41,8 @@ pub fn managed_source_file_name(file_id: &str) -> Option<&'static str> {
         "result-db" => Some("scoring_result.db"),
         "concept-performance-db" => Some("concept_performance.db"),
         "cyq-db" => Some("cyq.db"),
+        "cyq-chen-db" => Some("cyq_chen.db"),
+        "chip-change-rule" => Some("chip_change_rule.toml"),
         "score-rule" => Some("score_rule.toml"),
         "indicator-config" => Some("ind.toml"),
         "chart-indicator-config" => Some("chart_indicators.toml"),

@@ -1,4 +1,17 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  activateCyqChenStrategyBackup,
+  backupCyqChenStrategyFile,
+  deleteCyqChenStrategyBackup,
+  exportCyqChenActiveStrategyFile,
+  exportCyqChenStrategyBackupFile,
+  getCyqChenStrategyBackupDiff,
+  getCyqChenStrategyPage,
+  importCyqChenStrategyBackup,
+  type CyqChenStrategyBackupDiff,
+  type CyqChenStrategyBackupItem,
+  type CyqChenStrategyPageData,
+} from '../../apis/cyqChen'
 import {
   activateManagedStrategyBackup,
   backupManagedActiveStrategy,
@@ -31,14 +44,24 @@ type BusyAction =
   | `exporting:${string}`
   | `diffing:${string}`
   | `saving-desc:${string}`
+  | 'backing-up-chip'
+  | 'importing-chip'
+  | 'exporting-chip-active'
+  | `activating-chip:${string}`
+  | `deleting-chip:${string}`
+  | `diffing-chip:${string}`
+  | `exporting-chip:${string}`
 
 type StrategyAssetModalProps = {
   open: boolean
+  sourcePath?: string
   onClose: () => void
   onActivated?: () => void
 }
 
 type BackupViewMode = 'managed' | 'auto'
+type AssetKind = 'rank' | 'chip'
+type StrategyBackupDiffData = ManagedStrategyBackupDiff | CyqChenStrategyBackupDiff
 
 function formatTime(value: string | null | undefined) {
   if (!value) {
@@ -80,16 +103,27 @@ function describeBackupSource(item: ManagedStrategyBackupItem) {
   return '手动备份'
 }
 
+function formatChipStrategyKind(item: CyqChenStrategyBackupItem) {
+  if (item.fileName.includes('chip_change_rule')) {
+    return '筹码策略'
+  }
+  return '备份文件'
+}
+
 export default function StrategyAssetModal(props: StrategyAssetModalProps) {
-  const { open, onClose, onActivated } = props
+  const { open, sourcePath = '', onClose, onActivated } = props
   const [status, setStatus] = useState<ManagedStrategyAssetsStatus | null>(null)
+  const [chipStatus, setChipStatus] = useState<CyqChenStrategyPageData | null>(null)
   const [busyAction, setBusyAction] = useState<BusyAction>('idle')
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
+  const [chipError, setChipError] = useState('')
   const [descriptionDrafts, setDescriptionDrafts] = useState<Record<string, string>>({})
   const [pendingDeleteBackup, setPendingDeleteBackup] = useState<ManagedStrategyBackupItem | null>(null)
+  const [pendingDeleteChipBackup, setPendingDeleteChipBackup] = useState<CyqChenStrategyBackupItem | null>(null)
   const [backupViewMode, setBackupViewMode] = useState<BackupViewMode>('managed')
-  const [diffData, setDiffData] = useState<ManagedStrategyBackupDiff | null>(null)
+  const [activeAssetKind, setActiveAssetKind] = useState<AssetKind>('rank')
+  const [diffData, setDiffData] = useState<StrategyBackupDiffData | null>(null)
 
   const isBusy = busyAction !== 'idle'
   const autoBackups = useMemo(
@@ -107,10 +141,15 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
     () => (managedBackups.length ? managedBackups[0] : null),
     [managedBackups],
   )
+  const latestChipBackup = useMemo(
+    () => (chipStatus?.backups.length ? chipStatus.backups[0] : null),
+    [chipStatus?.backups],
+  )
 
-  async function loadStatus() {
+  const loadStatus = useCallback(async () => {
     setBusyAction('loading')
     setError('')
+    setChipError('')
     try {
       const nextStatus = await getManagedStrategyAssetsStatus()
       setStatus(nextStatus)
@@ -120,22 +159,38 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
           return accumulator
         }, {}),
       )
+      const nextSourcePath = sourcePath.trim() || nextStatus.sourcePath
+      if (nextSourcePath.trim()) {
+        try {
+          const nextChipStatus = await getCyqChenStrategyPage(nextSourcePath)
+          setChipStatus(nextChipStatus)
+        } catch (loadChipError) {
+          setChipStatus(null)
+          setChipError(`读取筹码策略资产失败: ${String(loadChipError)}`)
+        }
+      } else {
+        setChipStatus(null)
+      }
     } catch (loadError) {
       setError(`读取策略资产失败: ${String(loadError)}`)
     } finally {
       setBusyAction('idle')
     }
-  }
+  }, [sourcePath])
 
   useEffect(() => {
     if (!open) {
       setPendingDeleteBackup(null)
+      setPendingDeleteChipBackup(null)
       setBackupViewMode('managed')
+      setActiveAssetKind('rank')
       setDiffData(null)
+      setChipStatus(null)
+      setChipError('')
       return
     }
     void loadStatus()
-  }, [open])
+  }, [open, loadStatus])
 
   useEffect(() => {
     if (!open) {
@@ -332,6 +387,206 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
     }
   }
 
+  async function onBackupChipStrategy() {
+    const nextSourcePath = sourcePath.trim() || status?.sourcePath.trim() || ''
+    if (!nextSourcePath) {
+      setChipError('当前数据目录为空，请先确认数据源。')
+      return
+    }
+    setBusyAction('backing-up-chip')
+    setChipError('')
+    setNotice('')
+    try {
+      const page = await backupCyqChenStrategyFile(nextSourcePath)
+      setChipStatus(page)
+      setNotice('当前筹码策略已备份。')
+    } catch (actionError) {
+      setChipError(`备份筹码策略失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  async function onImportChipStrategy() {
+    const nextSourcePath = sourcePath.trim() || status?.sourcePath.trim() || ''
+    if (!nextSourcePath) {
+      setChipError('当前数据目录为空，请先确认数据源。')
+      return
+    }
+    setBusyAction('importing-chip')
+    setChipError('')
+    setNotice('')
+    try {
+      const page = await importCyqChenStrategyBackup(nextSourcePath)
+      if (!page) {
+        setBusyAction('idle')
+        return
+      }
+      setChipStatus(page)
+      setNotice('筹码策略已导入到备份区。')
+    } catch (actionError) {
+      setChipError(`导入筹码策略失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  async function onExportChipActive() {
+    const nextSourcePath = sourcePath.trim() || status?.sourcePath.trim() || ''
+    if (!nextSourcePath) {
+      setChipError('当前数据目录为空，请先确认数据源。')
+      return
+    }
+    setBusyAction('exporting-chip-active')
+    setChipError('')
+    setNotice('')
+    try {
+      const result = await exportCyqChenActiveStrategyFile(nextSourcePath)
+      if (!result) {
+        setBusyAction('idle')
+        return
+      }
+      setNotice(`当前筹码策略已导出到 ${result.exportedPath}。`)
+    } catch (actionError) {
+      setChipError(`导出当前筹码策略失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  async function onActivateChipBackup(item: CyqChenStrategyBackupItem) {
+    const nextSourcePath = sourcePath.trim() || status?.sourcePath.trim() || ''
+    if (!nextSourcePath) {
+      setChipError('当前数据目录为空，请先确认数据源。')
+      return
+    }
+    setBusyAction(`activating-chip:${item.backupId}`)
+    setChipError('')
+    setNotice('')
+    try {
+      const page = await activateCyqChenStrategyBackup(nextSourcePath, item.backupId)
+      setChipStatus(page)
+      setNotice(`已恢复筹码策略备份 ${item.fileName}。`)
+      onActivated?.()
+    } catch (actionError) {
+      setChipError(`恢复筹码策略备份失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  async function onExportChipBackup(item: CyqChenStrategyBackupItem) {
+    const nextSourcePath = sourcePath.trim() || status?.sourcePath.trim() || ''
+    if (!nextSourcePath) {
+      setChipError('当前数据目录为空，请先确认数据源。')
+      return
+    }
+    setBusyAction(`exporting-chip:${item.backupId}`)
+    setChipError('')
+    setNotice('')
+    try {
+      const result = await exportCyqChenStrategyBackupFile(nextSourcePath, item.backupId)
+      if (!result) {
+        setBusyAction('idle')
+        return
+      }
+      setNotice(`${item.fileName} 已导出到 ${result.exportedPath}。`)
+    } catch (actionError) {
+      setChipError(`导出筹码策略备份失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  async function onViewChipDiff(item: CyqChenStrategyBackupItem) {
+    const nextSourcePath = sourcePath.trim() || status?.sourcePath.trim() || ''
+    if (!nextSourcePath) {
+      setChipError('当前数据目录为空，请先确认数据源。')
+      return
+    }
+    setBusyAction(`diffing-chip:${item.backupId}`)
+    setChipError('')
+    setNotice('')
+    try {
+      const diff = await getCyqChenStrategyBackupDiff(nextSourcePath, item.backupId)
+      setDiffData(diff)
+    } catch (actionError) {
+      setDiffData(null)
+      setChipError(`查看筹码策略 diff 失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  async function onDeleteChipBackup(item: CyqChenStrategyBackupItem) {
+    const nextSourcePath = sourcePath.trim() || status?.sourcePath.trim() || ''
+    if (!nextSourcePath) {
+      setChipError('当前数据目录为空，请先确认数据源。')
+      return
+    }
+    setBusyAction(`deleting-chip:${item.backupId}`)
+    setChipError('')
+    setNotice('')
+    try {
+      const page = await deleteCyqChenStrategyBackup(nextSourcePath, item.backupId)
+      setChipStatus(page)
+      setDiffData((current) => (current?.backupId === item.backupId ? null : current))
+      setNotice(`已删除筹码策略备份 ${item.fileName}。`)
+    } catch (actionError) {
+      setChipError(`删除筹码策略备份失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  function renderDiffPanel() {
+    if (!diffData) {
+      return null
+    }
+
+    return (
+      <section className="strategy-asset-diff">
+        <div className="strategy-asset-section-head strategy-asset-diff-title">
+          <div>
+            <h4>策略 diff</h4>
+            <p>
+              {diffData.backupLabel} 对比当前生效 {diffData.activeLabel}，
+              {diffData.changedLineCount === 0
+                ? '没有差异。'
+                : `共 ${diffData.changedLineCount} 行差异。`}
+            </p>
+          </div>
+          <button className="strategy-asset-btn strategy-asset-btn-ghost" type="button" onClick={() => setDiffData(null)} disabled={isBusy}>
+            关闭 diff
+          </button>
+        </div>
+        <div className="strategy-asset-diff-head">
+          <span>备份</span>
+          <span>当前</span>
+          <span>内容</span>
+        </div>
+        <div className="strategy-asset-diff-body">
+          {diffData.lines.map((line, index) => (
+            <div key={`${line.kind}-${line.backupLine ?? 'n'}-${line.activeLine ?? 'n'}-${index}`} className={`strategy-asset-diff-row is-${line.kind}`}>
+              <span>{line.backupLine ?? ''}</span>
+              <span>{line.activeLine ?? ''}</span>
+              <code>
+                {line.kind === 'backup'
+                  ? '- '
+                  : line.kind === 'active'
+                    ? '+ '
+                    : line.kind === 'omitted'
+                      ? '... '
+                      : '  '}
+                {line.text || ' '}
+              </code>
+            </div>
+          ))}
+        </div>
+      </section>
+    )
+  }
+
   if (!open) {
     return null
   }
@@ -350,7 +605,7 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
         <div className="strategy-asset-head">
           <div>
             <h3>策略资产中心</h3>
-            <p>把当前生效策略和历史备份放在一起管理。导入文件会自动收纳到时间戳目录，避免互相覆盖。</p>
+            <p>排名策略和筹码策略分区管理，当前文件、备份和恢复动作集中在这里。</p>
           </div>
           <div className="strategy-asset-actions">
             <button className="strategy-asset-btn" type="button" onClick={() => void loadStatus()} disabled={isBusy}>
@@ -362,240 +617,362 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
           </div>
         </div>
 
-        <div className="strategy-asset-summary">
-          <article className="strategy-asset-summary-card">
-            <span>当前生效</span>
-            <strong>{status?.active.exists ? '已配置' : '缺少策略文件'}</strong>
-            <small>{status?.active.modifiedAt ? `更新于 ${formatTime(status.active.modifiedAt)}` : '尚未导入当前生效策略'}</small>
-          </article>
-          <article className="strategy-asset-summary-card">
-            <span>备份数量</span>
+        <div className="strategy-asset-switcher" role="tablist" aria-label="策略资产类型">
+          <button
+            className={activeAssetKind === 'rank' ? 'strategy-asset-tab is-active' : 'strategy-asset-tab'}
+            type="button"
+            role="tab"
+            aria-selected={activeAssetKind === 'rank'}
+            onClick={() => setActiveAssetKind('rank')}
+          >
+            <span>排名策略</span>
             <strong>{backupCount}</strong>
-            <small>{latestBackup ? `最近一份：${formatTime(latestBackup.createdAt)}` : '还没有手动/导入备份'}</small>
-          </article>
-          <article className="strategy-asset-summary-card">
-            <span>备份目录</span>
-            <strong title={status?.backupRootPath ?? ''}>
-              {status?.backupRootPath ?? '读取中...'}
-            </strong>
-            <small>每次导入与手动备份都会生成独立时间目录</small>
-          </article>
-        </div>
-
-        <div className="strategy-asset-command-bar">
-          <button className="strategy-asset-btn strategy-asset-btn-primary" type="button" onClick={() => void onImport()} disabled={isBusy}>
-            {busyAction === 'importing' ? '导入中...' : '导入策略到备份区'}
-          </button>
-          <button className="strategy-asset-btn" type="button" onClick={() => void onCreateEmptyStrategy()} disabled={isBusy}>
-            {busyAction === 'creating-empty' ? '创建中...' : '新增空白策略'}
-          </button>
-          <button className="strategy-asset-btn" type="button" onClick={() => void onBackupActive()} disabled={isBusy || !status?.active.exists}>
-            {busyAction === 'backing-up' ? '备份中...' : '备份当前生效策略'}
-          </button>
-          <button className="strategy-asset-btn" type="button" onClick={() => void onExportActive()} disabled={isBusy || !status?.active.exists}>
-            {busyAction === 'exporting-active' ? '导出中...' : '导出当前生效策略'}
-          </button>
-          <button className="strategy-asset-btn" type="button" onClick={() => void onExportBundle()} disabled={isBusy}>
-            {busyAction === 'exporting-bundle' ? '打包中...' : '导出策略资产包'}
           </button>
           <button
-            className={backupViewMode === 'auto' ? 'strategy-asset-btn strategy-asset-btn-active' : 'strategy-asset-btn'}
+            className={activeAssetKind === 'chip' ? 'strategy-asset-tab is-active' : 'strategy-asset-tab'}
             type="button"
-            onClick={() => setBackupViewMode((current) => (current === 'auto' ? 'managed' : 'auto'))}
-            disabled={isBusy}
+            role="tab"
+            aria-selected={activeAssetKind === 'chip'}
+            onClick={() => setActiveAssetKind('chip')}
           >
-            {backupViewMode === 'auto' ? '返回备份列表' : `自动备份查看 (${autoBackupCount})`}
+            <span>筹码策略</span>
+            <strong>{chipStatus?.backups.length ?? 0}</strong>
           </button>
+        </div>
+
+        <div className="strategy-asset-summary">
+          <article className="strategy-asset-summary-card">
+            <span>排名策略</span>
+            <strong>{status?.active.exists ? '已配置' : '缺少文件'}</strong>
+            <small>{latestBackup ? `最近备份 ${formatTime(latestBackup.createdAt)}` : '暂无手动/导入备份'}</small>
+          </article>
+          <article className="strategy-asset-summary-card">
+            <span>筹码策略</span>
+            <strong>{chipStatus?.exists ? '已配置' : '草稿/缺少文件'}</strong>
+            <small>{latestChipBackup ? `最近备份 ${formatTime(latestChipBackup.modifiedAt)}` : `${chipStatus?.strategies.length ?? 0} 条策略`}</small>
+          </article>
+          <article className="strategy-asset-summary-card">
+            <span>资产目录</span>
+            <strong title={status?.sourcePath ?? sourcePath}>
+              {(status?.sourcePath ?? sourcePath) || '读取中...'}
+            </strong>
+            <small>{status?.backupRootPath ? `排名备份：${status.backupRootPath}` : '等待读取目录'}</small>
+          </article>
         </div>
 
         {notice ? <div className="strategy-asset-notice">{notice}</div> : null}
         {error ? <div className="strategy-asset-error">{error}</div> : null}
 
-        <section className="strategy-asset-current">
-          <div className="strategy-asset-section-head">
-            <div>
-              <h4>当前生效策略</h4>
-              <p>策略编辑页和现有详情页都会直接读取这份活动文件。</p>
-            </div>
-            <span className={status?.active.exists ? 'strategy-asset-pill is-live' : 'strategy-asset-pill'}>
-              {status?.active.exists ? 'LIVE' : 'MISSING'}
-            </span>
-          </div>
-          <div className="strategy-asset-current-grid">
-            <div className="strategy-asset-meta">
-              <span>活动文件</span>
-              <strong title={status?.active.absolutePath ?? ''}>{status?.active.absolutePath ?? '--'}</strong>
-            </div>
-            <div className="strategy-asset-meta">
-              <span>大小</span>
-              <strong>{formatBytes(status?.active.sizeBytes)}</strong>
-            </div>
-            <div className="strategy-asset-meta">
-              <span>最后修改</span>
-              <strong>{formatTime(status?.active.modifiedAt)}</strong>
-            </div>
-          </div>
-        </section>
-
-        {diffData ? (
-          <section className="strategy-asset-diff">
-            <div className="strategy-asset-section-head">
-              <div>
-                <h4>策略 diff</h4>
-                <p>
-                  {diffData.backupLabel} 对比当前生效 {diffData.activeLabel}，
-                  {diffData.changedLineCount === 0
-                    ? '没有差异。'
-                    : `共 ${diffData.changedLineCount} 行差异；变化条目会完整显示，未变化条目会折叠。`}
-                </p>
-              </div>
-              <button className="strategy-asset-btn strategy-asset-btn-ghost" type="button" onClick={() => setDiffData(null)} disabled={isBusy}>
-                关闭 diff
+        {activeAssetKind === 'rank' ? (
+          <div className="strategy-asset-workspace">
+            <div className="strategy-asset-command-bar">
+              <button className="strategy-asset-btn strategy-asset-btn-primary" type="button" onClick={() => void onImport()} disabled={isBusy}>
+                {busyAction === 'importing' ? '导入中...' : '导入排名策略'}
+              </button>
+              <button className="strategy-asset-btn" type="button" onClick={() => void onCreateEmptyStrategy()} disabled={isBusy}>
+                {busyAction === 'creating-empty' ? '创建中...' : '新增空白排名策略'}
+              </button>
+              <button className="strategy-asset-btn" type="button" onClick={() => void onBackupActive()} disabled={isBusy || !status?.active.exists}>
+                {busyAction === 'backing-up' ? '备份中...' : '备份当前排名策略'}
+              </button>
+              <button className="strategy-asset-btn" type="button" onClick={() => void onExportActive()} disabled={isBusy || !status?.active.exists}>
+                {busyAction === 'exporting-active' ? '导出中...' : '导出当前排名策略'}
+              </button>
+              <button className="strategy-asset-btn" type="button" onClick={() => void onExportBundle()} disabled={isBusy}>
+                {busyAction === 'exporting-bundle' ? '打包中...' : '导出资产包'}
+              </button>
+              <button
+                className={backupViewMode === 'auto' ? 'strategy-asset-btn strategy-asset-btn-active' : 'strategy-asset-btn'}
+                type="button"
+                onClick={() => setBackupViewMode((current) => (current === 'auto' ? 'managed' : 'auto'))}
+                disabled={isBusy}
+              >
+                {backupViewMode === 'auto' ? '手动/导入备份' : `自动备份 (${autoBackupCount})`}
               </button>
             </div>
-            <div className="strategy-asset-diff-head">
-              <span>备份版本</span>
-              <span>当前生效</span>
-              <span>策略内容</span>
-            </div>
-            <div className="strategy-asset-diff-body">
-              {diffData.lines.map((line, index) => (
-                <div key={`${line.kind}-${line.backupLine ?? 'n'}-${line.activeLine ?? 'n'}-${index}`} className={`strategy-asset-diff-row is-${line.kind}`}>
-                  <span>{line.backupLine ?? ''}</span>
-                  <span>{line.activeLine ?? ''}</span>
-                  <code>
-                    {line.kind === 'backup'
-                      ? '- '
-                      : line.kind === 'active'
-                        ? '+ '
-                        : line.kind === 'omitted'
-                          ? '... '
-                          : '  '}
-                    {line.text || ' '}
-                  </code>
+
+            <section className="strategy-asset-current">
+              <div className="strategy-asset-section-head">
+                <div>
+                  <h4>当前排名策略</h4>
+                  <p>score_rule.toml</p>
                 </div>
-              ))}
-            </div>
-          </section>
-        ) : null}
+                <span className={status?.active.exists ? 'strategy-asset-pill is-live' : 'strategy-asset-pill'}>
+                  {status?.active.exists ? '生效中' : '缺少'}
+                </span>
+              </div>
+              <div className="strategy-asset-current-grid">
+                <div className="strategy-asset-meta strategy-asset-meta-wide">
+                  <span>活动文件</span>
+                  <strong title={status?.active.absolutePath ?? ''}>{status?.active.absolutePath ?? '--'}</strong>
+                </div>
+                <div className="strategy-asset-meta">
+                  <span>大小</span>
+                  <strong>{formatBytes(status?.active.sizeBytes)}</strong>
+                </div>
+                <div className="strategy-asset-meta">
+                  <span>最后修改</span>
+                  <strong>{formatTime(status?.active.modifiedAt)}</strong>
+                </div>
+              </div>
+            </section>
 
-        <section className="strategy-asset-backups">
-          <div className="strategy-asset-section-head">
-            <div>
-              <h4>备份策略</h4>
-              <p>
-                {backupViewMode === 'auto'
-                  ? '进入策略管理页时生成的自动备份集中保存在这里，支持导出、删除和设为当前生效。'
-                  : '导入文件、空白模板与手动备份保存在这里，支持导出、删除和设为当前生效。'}
-              </p>
-            </div>
-            <span className="strategy-asset-pill">{visibleBackups.length} 份</span>
+            <section className="strategy-asset-backups">
+              <div className="strategy-asset-section-head">
+                <div>
+                  <h4>{backupViewMode === 'auto' ? '自动备份' : '排名策略备份'}</h4>
+                  <p>{backupViewMode === 'auto' ? '进入策略管理页时生成。' : '导入、空白模板和手动备份。'}</p>
+                </div>
+                <span className="strategy-asset-pill">{visibleBackups.length} 份</span>
+              </div>
+
+              {visibleBackups.length ? (
+                <div className="strategy-asset-backup-list">
+                  {visibleBackups.map((item) => {
+                    const isActivating = busyAction === `activating:${item.backupId}`
+                    const isDeleting = busyAction === `deleting:${item.backupId}`
+                    const isExporting = busyAction === `exporting:${item.backupId}`
+                    const isDiffing = busyAction === `diffing:${item.backupId}`
+                    const isSavingDesc = busyAction === `saving-desc:${item.backupId}`
+                    const descriptionDraft = descriptionDrafts[item.backupId] ?? ''
+                    const descriptionDirty = descriptionDraft.trim() !== (item.description ?? '').trim()
+                    return (
+                      <article key={item.backupId} className="strategy-asset-backup-card">
+                        <div className="strategy-asset-backup-head">
+                          <div>
+                            <strong>{item.folderName}</strong>
+                            <p>{describeBackupSource(item)}</p>
+                          </div>
+                          <span
+                            className={
+                              item.sourceKind === 'imported'
+                                ? 'strategy-asset-tag is-imported'
+                                : item.sourceKind === 'empty'
+                                  ? 'strategy-asset-tag is-empty'
+                                  : item.sourceKind === 'auto_entry'
+                                    ? 'strategy-asset-tag is-auto'
+                                    : 'strategy-asset-tag'
+                            }
+                          >
+                            {item.sourceKind === 'imported'
+                              ? '导入'
+                              : item.sourceKind === 'empty'
+                                ? '模板'
+                                : item.sourceKind === 'auto_entry'
+                                  ? '自动'
+                                  : '备份'}
+                          </span>
+                        </div>
+
+                        <div className="strategy-asset-backup-meta-grid">
+                          <div className="strategy-asset-meta">
+                            <span>创建时间</span>
+                            <strong>{formatTime(item.createdAt)}</strong>
+                          </div>
+                          <div className="strategy-asset-meta">
+                            <span>文件大小</span>
+                            <strong>{formatBytes(item.sizeBytes)}</strong>
+                          </div>
+                          <div className="strategy-asset-meta strategy-asset-meta-desc">
+                            <span>说明</span>
+                            <div className="strategy-asset-desc-editor">
+                              <input
+                                className="strategy-asset-desc-input"
+                                type="text"
+                                placeholder="备注"
+                                maxLength={120}
+                                value={descriptionDraft}
+                                onChange={(event) => {
+                                  const nextValue = event.target.value
+                                  setDescriptionDrafts((prev) => ({ ...prev, [item.backupId]: nextValue }))
+                                }}
+                                disabled={isBusy}
+                              />
+                              <button
+                                className="strategy-asset-btn"
+                                type="button"
+                                onClick={() => void onSaveDescription(item)}
+                                disabled={(isBusy && !isSavingDesc) || isSavingDesc || !descriptionDirty}
+                              >
+                                {isSavingDesc ? '保存中...' : '保存'}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="strategy-asset-backup-path" title={item.absolutePath}>
+                          {item.absolutePath}
+                        </div>
+
+                        <div className="strategy-asset-backup-actions">
+                          <button className="strategy-asset-btn strategy-asset-btn-primary" type="button" onClick={() => void onActivate(item)} disabled={isBusy}>
+                            {isActivating ? '生效中...' : '设为生效'}
+                          </button>
+                          <button className="strategy-asset-btn" type="button" onClick={() => void onExportBackup(item)} disabled={isBusy}>
+                            {isExporting ? '导出中...' : '导出'}
+                          </button>
+                          <button className="strategy-asset-btn" type="button" onClick={() => void onViewDiff(item)} disabled={isBusy}>
+                            {isDiffing ? '对比中...' : diffData?.backupId === item.backupId ? '刷新 diff' : '查看 diff'}
+                          </button>
+                          <button className="strategy-asset-btn strategy-asset-btn-danger" type="button" onClick={() => setPendingDeleteBackup(item)} disabled={isBusy}>
+                            {isDeleting ? '删除中...' : '删除'}
+                          </button>
+                        </div>
+
+                        {diffData?.backupId === item.backupId ? renderDiffPanel() : null}
+                      </article>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="strategy-asset-empty">
+                  {backupViewMode === 'auto'
+                    ? '还没有自动备份。'
+                    : '还没有排名策略备份。'}
+                </div>
+              )}
+            </section>
           </div>
+        ) : (
+          <div className="strategy-asset-workspace">
+            {chipError ? <div className="strategy-asset-error">{chipError}</div> : null}
+            <div className="strategy-asset-command-bar">
+              <button
+                className="strategy-asset-btn strategy-asset-btn-primary"
+                type="button"
+                onClick={() => void onImportChipStrategy()}
+                disabled={isBusy}
+              >
+                {busyAction === 'importing-chip' ? '导入中...' : '导入筹码策略'}
+              </button>
+              <button
+                className="strategy-asset-btn"
+                type="button"
+                onClick={() => void onBackupChipStrategy()}
+                disabled={isBusy || !chipStatus?.exists}
+              >
+                {busyAction === 'backing-up-chip' ? '备份中...' : '备份当前筹码策略'}
+              </button>
+              <button
+                className="strategy-asset-btn"
+                type="button"
+                onClick={() => void onExportChipActive()}
+                disabled={isBusy || !chipStatus?.exists}
+              >
+                {busyAction === 'exporting-chip-active' ? '导出中...' : '导出当前筹码策略'}
+              </button>
+            </div>
 
-          {visibleBackups.length ? (
-            <div className="strategy-asset-backup-list">
-              {visibleBackups.map((item) => {
-                const isActivating = busyAction === `activating:${item.backupId}`
-                const isDeleting = busyAction === `deleting:${item.backupId}`
-                const isExporting = busyAction === `exporting:${item.backupId}`
-                const isDiffing = busyAction === `diffing:${item.backupId}`
-                const isSavingDesc = busyAction === `saving-desc:${item.backupId}`
-                const descriptionDraft = descriptionDrafts[item.backupId] ?? ''
-                const descriptionDirty = descriptionDraft.trim() !== (item.description ?? '').trim()
-                return (
-                  <article key={item.backupId} className="strategy-asset-backup-card">
-                    <div className="strategy-asset-backup-head">
-                      <div>
-                        <strong>{item.folderName}</strong>
-                        <p>{describeBackupSource(item)}</p>
-                      </div>
-                      <span
-                        className={
-                          item.sourceKind === 'imported'
-                            ? 'strategy-asset-tag is-imported'
-                            : item.sourceKind === 'empty'
-                              ? 'strategy-asset-tag is-empty'
-                              : item.sourceKind === 'auto_entry'
-                                ? 'strategy-asset-tag is-auto'
-                                : 'strategy-asset-tag'
-                        }
-                      >
-                        {item.sourceKind === 'imported'
-                          ? '导入'
-                          : item.sourceKind === 'empty'
-                            ? '模板'
-                            : item.sourceKind === 'auto_entry'
-                              ? '自动'
-                              : '备份'}
-                      </span>
-                    </div>
+            <section className="strategy-asset-current">
+              <div className="strategy-asset-section-head">
+                <div>
+                  <h4>当前筹码策略</h4>
+                  <p>chip_change_rule.toml</p>
+                </div>
+                <span className={chipStatus?.exists ? 'strategy-asset-pill is-live' : 'strategy-asset-pill'}>
+                  {chipStatus?.exists ? '生效中' : '未落盘'}
+                </span>
+              </div>
+              <div className="strategy-asset-current-grid">
+                <div className="strategy-asset-meta strategy-asset-meta-wide">
+                  <span>活动文件</span>
+                  <strong title={chipStatus?.filePath ?? ''}>{chipStatus?.filePath ?? '--'}</strong>
+                </div>
+                <div className="strategy-asset-meta">
+                  <span>策略数量</span>
+                  <strong>{chipStatus?.strategies.length ?? 0}</strong>
+                </div>
+                <div className="strategy-asset-meta">
+                  <span>备份数量</span>
+                  <strong>{chipStatus?.backups.length ?? 0}</strong>
+                </div>
+              </div>
+            </section>
 
-                    <div className="strategy-asset-backup-meta-grid">
-                      <div className="strategy-asset-meta">
-                        <span>创建时间</span>
-                        <strong>{formatTime(item.createdAt)}</strong>
-                      </div>
-                      <div className="strategy-asset-meta">
-                        <span>文件大小</span>
-                        <strong>{formatBytes(item.sizeBytes)}</strong>
-                      </div>
-                      <div className="strategy-asset-meta">
-                        <span>说明</span>
-                        <div className="strategy-asset-desc-editor">
-                          <input
-                            className="strategy-asset-desc-input"
-                            type="text"
-                            placeholder="例如：回测基线版本 / 导入后待清洗"
-                            maxLength={120}
-                            value={descriptionDraft}
-                            onChange={(event) => {
-                              const nextValue = event.target.value
-                              setDescriptionDrafts((prev) => ({ ...prev, [item.backupId]: nextValue }))
-                            }}
+            <section className="strategy-asset-backups">
+              <div className="strategy-asset-section-head">
+                <div>
+                  <h4>筹码策略备份</h4>
+                  <p>按文件时间倒序排列。</p>
+                </div>
+                <span className="strategy-asset-pill">{chipStatus?.backups.length ?? 0} 份</span>
+              </div>
+
+              {chipStatus?.backups.length ? (
+                <div className="strategy-asset-backup-list strategy-asset-chip-backup-list">
+                  {chipStatus.backups.map((item) => {
+                    const isActivatingChip = busyAction === `activating-chip:${item.backupId}`
+                    const isDeletingChip = busyAction === `deleting-chip:${item.backupId}`
+                    const isDiffingChip = busyAction === `diffing-chip:${item.backupId}`
+                    const isExportingChip = busyAction === `exporting-chip:${item.backupId}`
+                    return (
+                      <article key={item.backupId} className="strategy-asset-backup-card">
+                        <div className="strategy-asset-backup-head">
+                          <div>
+                            <strong>{item.fileName}</strong>
+                            <p>{formatChipStrategyKind(item)}</p>
+                          </div>
+                          <span className="strategy-asset-tag is-chip">筹码</span>
+                        </div>
+                        <div className="strategy-asset-backup-meta-grid strategy-asset-chip-meta-grid">
+                          <div className="strategy-asset-meta">
+                            <span>修改时间</span>
+                            <strong>{formatTime(item.modifiedAt)}</strong>
+                          </div>
+                          <div className="strategy-asset-meta">
+                            <span>文件大小</span>
+                            <strong>{formatBytes(item.sizeBytes)}</strong>
+                          </div>
+                        </div>
+                        <div className="strategy-asset-backup-path" title={item.filePath}>
+                          {item.filePath}
+                        </div>
+                        <div className="strategy-asset-backup-actions">
+                          <button
+                            className="strategy-asset-btn strategy-asset-btn-primary"
+                            type="button"
+                            onClick={() => void onActivateChipBackup(item)}
                             disabled={isBusy}
-                          />
+                          >
+                            {isActivatingChip ? '恢复中...' : '恢复为当前'}
+                          </button>
                           <button
                             className="strategy-asset-btn"
                             type="button"
-                            onClick={() => void onSaveDescription(item)}
-                            disabled={(isBusy && !isSavingDesc) || isSavingDesc || !descriptionDirty}
+                            onClick={() => void onExportChipBackup(item)}
+                            disabled={isBusy}
                           >
-                            {isSavingDesc ? '保存中...' : '保存说明'}
+                            {isExportingChip ? '导出中...' : '导出'}
+                          </button>
+                          <button
+                            className="strategy-asset-btn"
+                            type="button"
+                            onClick={() => void onViewChipDiff(item)}
+                            disabled={isBusy || !chipStatus.exists}
+                          >
+                            {isDiffingChip ? '对比中...' : diffData?.backupId === item.backupId ? '刷新 diff' : '查看 diff'}
+                          </button>
+                          <button
+                            className="strategy-asset-btn strategy-asset-btn-danger"
+                            type="button"
+                            onClick={() => setPendingDeleteChipBackup(item)}
+                            disabled={isBusy}
+                          >
+                            {isDeletingChip ? '删除中...' : '删除'}
                           </button>
                         </div>
-                      </div>
-                    </div>
 
-                    <div className="strategy-asset-backup-path" title={item.absolutePath}>
-                      {item.absolutePath}
-                    </div>
-
-                    <div className="strategy-asset-backup-actions">
-                      <button className="strategy-asset-btn strategy-asset-btn-primary" type="button" onClick={() => void onActivate(item)} disabled={isBusy}>
-                        {isActivating ? '生效中...' : '设为当前生效'}
-                      </button>
-                      <button className="strategy-asset-btn" type="button" onClick={() => void onExportBackup(item)} disabled={isBusy}>
-                        {isExporting ? '导出中...' : '导出'}
-                      </button>
-                      <button className="strategy-asset-btn" type="button" onClick={() => void onViewDiff(item)} disabled={isBusy}>
-                        {isDiffing ? '对比中...' : '查看 diff'}
-                      </button>
-                      <button className="strategy-asset-btn strategy-asset-btn-danger" type="button" onClick={() => setPendingDeleteBackup(item)} disabled={isBusy}>
-                        {isDeleting ? '删除中...' : '删除'}
-                      </button>
-                    </div>
-                  </article>
-                )
-              })}
-            </div>
-          ) : (
-            <div className="strategy-asset-empty">
-              {backupViewMode === 'auto'
-                ? '还没有自动备份。进入策略管理页且当前策略内容未在备份区出现过时，会自动生成一份。'
-                : '还没有策略备份。你可以先导入外部策略文件，或者把当前生效策略备份一份。'}
-            </div>
-          )}
-        </section>
+                        {diffData?.backupId === item.backupId ? renderDiffPanel() : null}
+                      </article>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="strategy-asset-empty">暂无筹码策略备份。</div>
+              )}
+            </section>
+          </div>
+        )}
       </div>
 
       <ConfirmDialog
@@ -614,6 +991,24 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
           const target = pendingDeleteBackup
           setPendingDeleteBackup(null)
           void onDeleteBackup(target)
+        }}
+      />
+      <ConfirmDialog
+        open={pendingDeleteChipBackup !== null}
+        title="确认删除筹码策略备份"
+        message={pendingDeleteChipBackup ? `确认删除筹码策略备份 ${pendingDeleteChipBackup.fileName} 吗？` : ''}
+        confirmText="确认删除"
+        cancelText="取消"
+        danger
+        busy={isBusy}
+        onCancel={() => setPendingDeleteChipBackup(null)}
+        onConfirm={() => {
+          if (!pendingDeleteChipBackup) {
+            return
+          }
+          const target = pendingDeleteChipBackup
+          setPendingDeleteChipBackup(null)
+          void onDeleteChipBackup(target)
         }}
       />
     </div>

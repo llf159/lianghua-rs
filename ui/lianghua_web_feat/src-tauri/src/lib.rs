@@ -15,6 +15,21 @@ use lianghua_rs::ui_tools_feat::{
         run_concept_stock_pick as core_run_concept_stock_pick,
         StockPickResultData as ConceptStockPickResultData,
     },
+    cyq_chen::{
+        activate_cyq_chen_strategy_backup as core_activate_cyq_chen_strategy_backup,
+        backup_cyq_chen_strategy_file as core_backup_cyq_chen_strategy_file,
+        check_cyq_chen_strategy_file_draft as core_check_cyq_chen_strategy_file_draft,
+        delete_cyq_chen_strategy_backup as core_delete_cyq_chen_strategy_backup,
+        export_cyq_chen_active_strategy_file as core_export_cyq_chen_active_strategy_file,
+        export_cyq_chen_strategy_backup_file as core_export_cyq_chen_strategy_backup_file,
+        get_cyq_chen_strategy_backup_diff as core_get_cyq_chen_strategy_backup_diff,
+        get_cyq_chen_strategy_page as core_get_cyq_chen_strategy_page,
+        import_cyq_chen_strategy_backup as core_import_cyq_chen_strategy_backup,
+        run_cyq_chen_single_stock_test as core_run_cyq_chen_single_stock_test,
+        save_cyq_chen_strategy_file as core_save_cyq_chen_strategy_file,
+        CyqChenSingleStockData, CyqChenSingleStockRequest, CyqChenStrategyBackupDiff,
+        CyqChenStrategyFileDraft, CyqChenStrategyFileExportResult, CyqChenStrategyPageData,
+    },
     data_viewer::{list_stock_lookup_rows as core_list_stock_lookup_rows, StockLookupRow},
     details::{
         get_stock_detail_cyq as core_get_stock_detail_cyq,
@@ -50,10 +65,12 @@ use lianghua_rs::ui_tools_feat::{
     ranking_compute::{
         get_ranking_compute_status as core_get_ranking_compute_status,
         run_concept_performance_compute as core_run_concept_performance_compute,
+        run_cyq_chen_compute_with_range as core_run_cyq_chen_compute,
         run_cyq_compute_with_range as core_run_cyq_compute,
         run_ranking_score_calculation as core_run_ranking_score_calculation,
         run_ranking_tiebreak_fill as core_run_ranking_tiebreak_fill,
-        ConceptPerformanceComputeResult, CyqComputeResult, RankComputeRunResult, RankComputeStatus,
+        ConceptPerformanceComputeResult, CyqChenComputeResult, CyqComputeResult,
+        RankComputeRunResult, RankComputeStatus,
     },
     statistics::{
         get_market_analysis as core_get_market_analysis,
@@ -1168,6 +1185,110 @@ async fn run_cyq_compute(
 }
 
 #[tauri::command]
+async fn run_cyq_chen_compute(
+    source_path: String,
+    warmup_days: usize,
+    bucket_pct: f64,
+    start_date: Option<String>,
+    end_date: Option<String>,
+) -> Result<CyqChenComputeResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_run_cyq_chen_compute(
+            &source_path,
+            warmup_days,
+            bucket_pct,
+            start_date.as_deref(),
+            end_date.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn run_cyq_chen_single_stock_test(
+    request: CyqChenSingleStockRequest,
+) -> Result<CyqChenSingleStockData, String> {
+    tauri::async_runtime::spawn_blocking(move || core_run_cyq_chen_single_stock_test(request))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn get_cyq_chen_strategy_page(source_path: String) -> Result<CyqChenStrategyPageData, String> {
+    core_get_cyq_chen_strategy_page(&source_path)
+}
+
+#[tauri::command]
+fn save_cyq_chen_strategy_file(
+    source_path: String,
+    draft: CyqChenStrategyFileDraft,
+) -> Result<CyqChenStrategyPageData, String> {
+    core_save_cyq_chen_strategy_file(&source_path, draft)
+}
+
+#[tauri::command]
+fn check_cyq_chen_strategy_file_draft(
+    draft: CyqChenStrategyFileDraft,
+) -> Result<String, String> {
+    core_check_cyq_chen_strategy_file_draft(draft)
+}
+
+#[tauri::command]
+fn backup_cyq_chen_strategy_file(source_path: String) -> Result<CyqChenStrategyPageData, String> {
+    core_backup_cyq_chen_strategy_file(&source_path)
+}
+
+#[tauri::command]
+fn import_cyq_chen_strategy_backup(
+    source_path: String,
+    source_file: String,
+) -> Result<CyqChenStrategyPageData, String> {
+    core_import_cyq_chen_strategy_backup(&source_path, &source_file)
+}
+
+#[tauri::command]
+fn delete_cyq_chen_strategy_backup(
+    source_path: String,
+    backup_id: String,
+) -> Result<CyqChenStrategyPageData, String> {
+    core_delete_cyq_chen_strategy_backup(&source_path, &backup_id)
+}
+
+#[tauri::command]
+fn export_cyq_chen_active_strategy_file(
+    source_path: String,
+    destination_file: String,
+) -> Result<CyqChenStrategyFileExportResult, String> {
+    core_export_cyq_chen_active_strategy_file(&source_path, &destination_file)
+}
+
+#[tauri::command]
+fn export_cyq_chen_strategy_backup_file(
+    source_path: String,
+    backup_id: String,
+    destination_file: String,
+) -> Result<CyqChenStrategyFileExportResult, String> {
+    core_export_cyq_chen_strategy_backup_file(&source_path, &backup_id, &destination_file)
+}
+
+#[tauri::command]
+fn get_cyq_chen_strategy_backup_diff(
+    source_path: String,
+    backup_id: String,
+) -> Result<CyqChenStrategyBackupDiff, String> {
+    core_get_cyq_chen_strategy_backup_diff(&source_path, &backup_id)
+}
+
+#[tauri::command]
+fn activate_cyq_chen_strategy_backup(
+    source_path: String,
+    backup_id: String,
+) -> Result<CyqChenStrategyPageData, String> {
+    core_activate_cyq_chen_strategy_backup(&source_path, &backup_id)
+}
+
+#[tauri::command]
 async fn run_ranking_tiebreak_fill(
     source_path: String,
     strategy_path: Option<String>,
@@ -1443,6 +1564,18 @@ pub fn run() {
             run_ranking_score_calculation,
             run_concept_performance_compute,
             run_cyq_compute,
+            run_cyq_chen_compute,
+            run_cyq_chen_single_stock_test,
+            get_cyq_chen_strategy_page,
+            save_cyq_chen_strategy_file,
+            check_cyq_chen_strategy_file_draft,
+            backup_cyq_chen_strategy_file,
+            import_cyq_chen_strategy_backup,
+            delete_cyq_chen_strategy_backup,
+            export_cyq_chen_active_strategy_file,
+            export_cyq_chen_strategy_backup_file,
+            get_cyq_chen_strategy_backup_diff,
+            activate_cyq_chen_strategy_backup,
             run_ranking_tiebreak_fill,
             get_strategy_manage_page,
             check_strategy_manage_scene_draft,

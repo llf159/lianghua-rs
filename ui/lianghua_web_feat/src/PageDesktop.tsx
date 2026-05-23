@@ -20,6 +20,7 @@ const intradayMonitorSubRoutes = [
 ]
 
 const settingsMenuItem = { path: '/settings', label: '设置' }
+const cyqChenMenuItem = { path: '/cyq-chen', label: '筹码测试' }
 
 const backtestSubRoutes = [
   { path: '/backtest/strategy-trigger', label: '策略触发统计' },
@@ -205,6 +206,13 @@ export default function PageDesktop() {
               </div>
             ) : null}
           </div>
+
+          <NavLink
+            to={cyqChenMenuItem.path}
+            className={({ isActive }) => (isActive ? 'menu-item active' : 'menu-item')}
+          >
+            {cyqChenMenuItem.label}
+          </NavLink>
 
           <NavLink
             to={settingsMenuItem.path}

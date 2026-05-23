@@ -4324,7 +4324,10 @@ pub fn get_scene_layer_backtest_defaults(
             row.get(0).map_err(|e| format!("读取最小交易日失败: {e}"))?;
         let _max_trade_date: Option<String> =
             row.get(1).map_err(|e| format!("读取最大交易日失败: {e}"))?;
-        (min_trade_date, query_score_summary_latest_trade_date(&conn)?)
+        (
+            min_trade_date,
+            query_score_summary_latest_trade_date(&conn)?,
+        )
     } else {
         (None, query_score_summary_latest_trade_date(&conn)?)
     };
@@ -4366,7 +4369,10 @@ pub fn get_rule_layer_backtest_defaults(
             row.get(0).map_err(|e| format!("读取最小交易日失败: {e}"))?;
         let _max_trade_date: Option<String> =
             row.get(1).map_err(|e| format!("读取最大交易日失败: {e}"))?;
-        (min_trade_date, query_score_summary_latest_trade_date(&conn)?)
+        (
+            min_trade_date,
+            query_score_summary_latest_trade_date(&conn)?,
+        )
     } else {
         (None, query_score_summary_latest_trade_date(&conn)?)
     };

@@ -54,11 +54,11 @@ enum CyqChenWriteMessage {
 pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
     if let Some(parent_dir) = db_path.parent() {
         if !parent_dir.as_os_str().is_empty() {
-            create_dir_all(parent_dir).map_err(|e| format!("创建陈版筹码库目录失败:{e}"))?;
+            create_dir_all(parent_dir).map_err(|e| format!("创建筹码库目录失败:{e}"))?;
         }
     }
 
-    let conn = Connection::open(db_path).map_err(|e| format!("打开陈版筹码库失败:{e}"))?;
+    let conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
     conn.execute(
         r#"
         CREATE TABLE IF NOT EXISTS cyq_chen_snapshot (
@@ -115,16 +115,15 @@ pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
 fn clear_cyq_chen_tables(db_path: &Path) -> Result<(), String> {
     init_cyq_chen_db(db_path)?;
 
-    let mut conn = Connection::open(db_path).map_err(|e| format!("打开陈版筹码库失败:{e}"))?;
+    let mut conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
     let tx = conn
         .transaction()
-        .map_err(|e| format!("创建陈版筹码库事务失败:{e}"))?;
+        .map_err(|e| format!("创建筹码库事务失败:{e}"))?;
     tx.execute("DELETE FROM cyq_chen_bin", [])
         .map_err(|e| format!("清空cyq_chen_bin失败:{e}"))?;
     tx.execute("DELETE FROM cyq_chen_snapshot", [])
         .map_err(|e| format!("清空cyq_chen_snapshot失败:{e}"))?;
-    tx.commit()
-        .map_err(|e| format!("提交陈版筹码库事务失败:{e}"))?;
+    tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
     Ok(())
 }
 
@@ -142,13 +141,13 @@ fn source_stock_data_exists(conn: &Connection) -> Result<bool, String> {
 fn query_source_trade_date_range(conn: &Connection) -> Result<Option<(String, String)>, String> {
     let mut stmt = conn
         .prepare("SELECT MIN(trade_date), MAX(trade_date) FROM stock_data WHERE adj_type = ?")
-        .map_err(|e| format!("预编译陈版筹码计算日期范围失败:{e}"))?;
+        .map_err(|e| format!("预编译筹码计算日期范围失败:{e}"))?;
     let mut rows = stmt
         .query(params![DEFAULT_ADJ_TYPE])
-        .map_err(|e| format!("查询陈版筹码计算日期范围失败:{e}"))?;
+        .map_err(|e| format!("查询筹码计算日期范围失败:{e}"))?;
     let Some(row) = rows
         .next()
-        .map_err(|e| format!("读取陈版筹码计算日期范围失败:{e}"))?
+        .map_err(|e| format!("读取筹码计算日期范围失败:{e}"))?
     else {
         return Ok(None);
     };
@@ -194,7 +193,7 @@ fn resolve_cyq_chen_rebuild_trade_date_range(
         );
         let source_range = format!("{source_min_trade_date} 至 {source_max_trade_date}");
         return Err(format!(
-            "所选陈版筹码计算区间 {requested_range} 与原始库可用区间 {source_range} 没有交集"
+            "所选筹码计算区间 {requested_range} 与原始库可用区间 {source_range} 没有交集"
         ));
     }
 
@@ -424,10 +423,10 @@ fn write_cyq_chen_batches_from_channel(
     rx: Receiver<CyqChenWriteMessage>,
     config: ChenChipConfig,
 ) -> Result<(usize, usize), String> {
-    let mut conn = Connection::open(db_path).map_err(|e| format!("打开陈版筹码库失败:{e}"))?;
+    let mut conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
     let tx = conn
         .transaction()
-        .map_err(|e| format!("创建陈版筹码库事务失败:{e}"))?;
+        .map_err(|e| format!("创建筹码库事务失败:{e}"))?;
     tx.execute("DELETE FROM cyq_chen_bin", [])
         .map_err(|e| format!("清空cyq_chen_bin失败:{e}"))?;
     tx.execute("DELETE FROM cyq_chen_snapshot", [])
@@ -448,7 +447,7 @@ fn write_cyq_chen_batches_from_channel(
             let batch = match message {
                 CyqChenWriteMessage::Batch(batch) => batch,
                 CyqChenWriteMessage::Abort(reason) => {
-                    return Err(format!("陈版筹码计算中断，结果库回滚:{reason}"));
+                    return Err(format!("筹码计算中断，结果库回滚:{reason}"));
                 }
             };
 
@@ -476,8 +475,7 @@ fn write_cyq_chen_batches_from_channel(
             .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
     }
 
-    tx.commit()
-        .map_err(|e| format!("提交陈版筹码库事务失败:{e}"))?;
+    tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
     Ok((snapshot_rows, bin_rows))
 }
 
@@ -551,7 +549,7 @@ pub fn rebuild_cyq_chen_all(
     let ts_codes = reader.list_ts_code(DEFAULT_ADJ_TYPE, &load_start_date, &end_date)?;
     let cyq_chen_db_str = cyq_chen_db
         .to_str()
-        .ok_or_else(|| "陈版筹码库路径不是有效UTF-8".to_string())?
+        .ok_or_else(|| "筹码库路径不是有效UTF-8".to_string())?
         .to_string();
 
     let (tx, rx) = sync_channel(CYQ_CHEN_QUEUE_BOUND);
@@ -574,7 +572,7 @@ pub fn rebuild_cyq_chen_all(
             )?;
             sender
                 .send(CyqChenWriteMessage::Batch(batch))
-                .map_err(|e| format!("发送陈版筹码批次失败:{e}"))?;
+                .map_err(|e| format!("发送筹码批次失败:{e}"))?;
             Ok(())
         },
     );
@@ -586,7 +584,7 @@ pub fn rebuild_cyq_chen_all(
 
     let writer_result = match writer_handle.join() {
         Ok(result) => result,
-        Err(_) => Err("陈版筹码库写线程异常退出".to_string()),
+        Err(_) => Err("筹码库写线程异常退出".to_string()),
     };
 
     compute_result?;

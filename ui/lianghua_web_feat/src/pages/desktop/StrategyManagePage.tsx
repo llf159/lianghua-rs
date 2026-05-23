@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import {
+  checkCyqChenStrategyFileDraft,
+  getCyqChenStrategyPage,
+  saveCyqChenStrategyFile,
+  type CyqChenStrategyDraft,
+  type CyqChenStrategyPageData,
+} from '../../apis/cyqChen'
+import {
   checkStrategyManageSceneDraft,
   checkStrategyManageRuleDraft,
   createStrategyManageScene,
@@ -25,6 +32,8 @@ import './css/StrategyManagePage.css'
 const SCOPE_OPTIONS = ['LAST', 'ANY', 'EACH', 'RECENT', 'CONSEC>=2'] as const
 const STAGE_OPTIONS = ['base', 'trigger', 'confirm', 'risk', 'fail'] as const
 const SCENE_DIRECTION_OPTIONS = ['long', 'short'] as const
+const CHIP_HOLDER_OPTIONS = ['main', 'retail'] as const
+const CHIP_DIRECTION_OPTIONS = ['buy', 'sell'] as const
 const STRATEGY_RULE_FILE_NAME = 'score_rule.toml'
 const BULK_BOARD_GAP = 14
 const BULK_POOL_SIDE_MIN_WIDTH = 360
@@ -40,6 +49,7 @@ type BusyAction = 'idle' | 'loading' | 'saving' | 'deleting'
 type EditorMode = 'create' | 'edit'
 type SceneEditorMode = 'create' | 'edit'
 type DeleteSceneTarget = Pick<StrategyManageSceneItem, 'name' | 'rule_count'>
+type ChipStrategyDeleteTarget = { index: number; name: string }
 type RefactorSceneDraft = StrategyManageSceneDraft & { id: string }
 type RefactorRuleDraft = StrategyManageRuleDraft
 
@@ -285,6 +295,20 @@ function buildSceneSearchText(scene: StrategyManageSceneItem) {
   return `${scene.name} ${scene.direction}`.toLowerCase()
 }
 
+function buildEmptyChipStrategyDraft(nextIndex = 1): CyqChenStrategyDraft {
+  return {
+    name: `筹码策略 ${nextIndex}`,
+    holder: 'main',
+    direction: 'buy',
+    when: 'C > O',
+    bias: 1,
+  }
+}
+
+function buildChipStrategySearchText(strategy: CyqChenStrategyDraft) {
+  return `${strategy.name} ${strategy.holder} ${strategy.direction} ${strategy.bias} ${strategy.when}`.toLowerCase()
+}
+
 export default function StrategyManagePage() {
   const bulkModalRef = useRef<HTMLDivElement | null>(null)
   const bulkBoardRef = useRef<HTMLDivElement | null>(null)
@@ -309,6 +333,17 @@ export default function StrategyManagePage() {
   const [sceneDraft, setSceneDraft] = useState<StrategyManageSceneDraft | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<StrategyManageRuleItem | null>(null)
   const [deleteSceneTarget, setDeleteSceneTarget] = useState<DeleteSceneTarget | null>(null)
+  const [chipStrategies, setChipStrategies] = useState<CyqChenStrategyDraft[]>([])
+  const [chipStrategyFilePath, setChipStrategyFilePath] = useState('')
+  const [chipStrategyFileExists, setChipStrategyFileExists] = useState(false)
+  const [chipStrategySearchKeyword, setChipStrategySearchKeyword] = useState('')
+  const [chipStrategyDraft, setChipStrategyDraft] = useState<CyqChenStrategyDraft | null>(null)
+  const [chipStrategyEditorMode, setChipStrategyEditorMode] = useState<EditorMode>('create')
+  const [chipStrategyEditingIndex, setChipStrategyEditingIndex] = useState<number | null>(null)
+  const [chipStrategyDeleteTarget, setChipStrategyDeleteTarget] = useState<ChipStrategyDeleteTarget | null>(null)
+  const [chipStrategySaving, setChipStrategySaving] = useState(false)
+  const [chipStrategyError, setChipStrategyError] = useState('')
+  const [chipStrategyNotice, setChipStrategyNotice] = useState('')
   const [scoreMode, setScoreMode] = useState<'fixed' | 'dist'>('fixed')
   const [scopeWindowsText, setScopeWindowsText] = useState('1')
   const [fixedPointsText, setFixedPointsText] = useState('0')
@@ -368,6 +403,17 @@ export default function StrategyManagePage() {
     )
   }, [normalizedSearchKeyword, selectedSceneRules])
   const recentRules = useMemo(() => rules.slice(-4).reverse(), [rules])
+  const normalizedChipStrategySearchKeyword = chipStrategySearchKeyword.trim().toLowerCase()
+  const filteredChipStrategies = useMemo(() => {
+    if (!normalizedChipStrategySearchKeyword) {
+      return chipStrategies.map((strategy, index) => ({ strategy, index }))
+    }
+    return chipStrategies
+      .map((strategy, index) => ({ strategy, index }))
+      .filter(({ strategy }) =>
+        buildChipStrategySearchText(strategy).includes(normalizedChipStrategySearchKeyword),
+      )
+  }, [chipStrategies, normalizedChipStrategySearchKeyword])
   const bulkFilteredRules = useMemo(() => {
     const chosenRuleNames = new Set(refactorRules.map((item) => item.name))
     const sceneFiltered =
@@ -478,6 +524,11 @@ export default function StrategyManagePage() {
     return grouped
   }, [refactorRules, refactorSceneNames])
 
+  function applyChipStrategyPage(page: CyqChenStrategyPageData) {
+    setChipStrategies(page.strategies ?? [])
+    setChipStrategyFilePath(page.filePath)
+    setChipStrategyFileExists(page.exists)
+  }
 
   async function loadPage() {
     setBusyAction('loading')
@@ -491,6 +542,16 @@ export default function StrategyManagePage() {
       setSelectedSceneName((current) =>
         data.scenes.some((item) => item.name === current) ? current : '',
       )
+      try {
+        const chipPage = await getCyqChenStrategyPage(resolvedSourcePath)
+        applyChipStrategyPage(chipPage)
+        setChipStrategyError('')
+        setChipStrategyNotice(chipPage.exists ? '' : 'chip_change_rule.toml 不存在，已载入默认筹码策略草稿。')
+      } catch (chipLoadError) {
+        setChipStrategies([])
+        setChipStrategyError(`读取筹码变动策略失败: ${String(chipLoadError)}`)
+        setChipStrategyNotice('')
+      }
       try {
         const backup = await autoBackupManagedActiveStrategyOnEntry()
         if (backup) {
@@ -511,6 +572,8 @@ export default function StrategyManagePage() {
 
   useEffect(() => {
     void loadPage()
+    // loadPage intentionally runs only on first mount; later refreshes call it directly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   function applyPageData(data: StrategyManagePageData, preferSceneName?: string) {
@@ -692,6 +755,114 @@ export default function StrategyManagePage() {
     setCheckNotice('')
     setError('')
     setNotice('')
+  }
+
+  function openCreateChipStrategyEditor() {
+    setChipStrategyEditorMode('create')
+    setChipStrategyEditingIndex(null)
+    setChipStrategyDraft(buildEmptyChipStrategyDraft(chipStrategies.length + 1))
+    setChipStrategyError('')
+    setChipStrategyNotice('')
+  }
+
+  function openEditChipStrategy(index: number) {
+    const strategy = chipStrategies[index]
+    if (!strategy) {
+      return
+    }
+    setChipStrategyEditorMode('edit')
+    setChipStrategyEditingIndex(index)
+    setChipStrategyDraft({ ...strategy })
+    setChipStrategyError('')
+    setChipStrategyNotice('')
+  }
+
+  function buildPreparedChipStrategyDraft() {
+    if (!chipStrategyDraft) {
+      throw new Error('没有可保存的筹码策略草稿')
+    }
+    const prepared: CyqChenStrategyDraft = {
+      ...chipStrategyDraft,
+      name: chipStrategyDraft.name.trim(),
+      when: chipStrategyDraft.when.trim(),
+      bias: Number(chipStrategyDraft.bias),
+    }
+    if (!prepared.name) {
+      throw new Error('策略名称不能为空')
+    }
+    if (!prepared.when) {
+      throw new Error('表达式不能为空')
+    }
+    if (!Number.isFinite(prepared.bias)) {
+      throw new Error('bias 必须是合法数字')
+    }
+    return prepared
+  }
+
+  function buildNextChipStrategies(preparedDraft: CyqChenStrategyDraft) {
+    if (chipStrategyEditorMode === 'edit' && chipStrategyEditingIndex !== null) {
+      return chipStrategies.map((item, index) =>
+        index === chipStrategyEditingIndex ? preparedDraft : item,
+      )
+    }
+    return [...chipStrategies, preparedDraft]
+  }
+
+  async function onCheckChipStrategyDraft() {
+    try {
+      const preparedDraft = buildPreparedChipStrategyDraft()
+      const message = await checkCyqChenStrategyFileDraft(buildNextChipStrategies(preparedDraft))
+      setChipStrategyNotice(message)
+      setChipStrategyError('')
+    } catch (checkError) {
+      setChipStrategyError(`检查筹码策略失败: ${String(checkError)}`)
+      setChipStrategyNotice('')
+    }
+  }
+
+  async function saveChipStrategies(nextStrategies: CyqChenStrategyDraft[], message: string) {
+    if (!sourcePath.trim()) {
+      setChipStrategyError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+    setChipStrategySaving(true)
+    setChipStrategyError('')
+    try {
+      const page = await saveCyqChenStrategyFile(sourcePath, nextStrategies)
+      applyChipStrategyPage(page)
+      setChipStrategyDraft(null)
+      setChipStrategyEditingIndex(null)
+      setChipStrategyNotice(message)
+    } catch (saveError) {
+      setChipStrategyError(`保存筹码变动策略失败: ${String(saveError)}`)
+      setChipStrategyNotice('')
+    } finally {
+      setChipStrategySaving(false)
+    }
+  }
+
+  async function onSaveChipStrategyDraft() {
+    try {
+      const preparedDraft = buildPreparedChipStrategyDraft()
+      const nextStrategies = buildNextChipStrategies(preparedDraft)
+      await checkCyqChenStrategyFileDraft(nextStrategies)
+      await saveChipStrategies(
+        nextStrategies,
+        chipStrategyEditorMode === 'create' ? '筹码策略已新增。' : '筹码策略已更新。',
+      )
+    } catch (saveError) {
+      setChipStrategyError(`筹码策略校验失败: ${String(saveError)}`)
+      setChipStrategyNotice('')
+    }
+  }
+
+  async function onConfirmDeleteChipStrategy() {
+    if (!chipStrategyDeleteTarget) {
+      return
+    }
+    const nextStrategies = chipStrategies.filter((_, index) => index !== chipStrategyDeleteTarget.index)
+    setChipStrategyDeleteTarget(null)
+    await saveChipStrategies(nextStrategies, `已删除筹码策略: ${chipStrategyDeleteTarget.name}`)
   }
 
   async function onSaveDraft() {
@@ -1241,6 +1412,258 @@ export default function StrategyManagePage() {
           </div>
         )}
       </section>
+
+      <section className="strategy-manage-card strategy-manage-chip-card">
+        <div className="strategy-manage-section-head">
+          <div>
+            <h3 className="strategy-manage-subtitle">筹码变动策略</h3>
+            <p className="strategy-manage-note">
+              编辑 chip_change_rule.toml；新筹码计算和筹码测试共用这里的策略。
+            </p>
+          </div>
+          <span className="strategy-manage-tip">
+            {chipStrategyFileExists ? chipStrategyFilePath : 'chip_change_rule.toml 未落盘'}
+          </span>
+        </div>
+
+        <div className="strategy-manage-toolbar">
+          <div className="strategy-manage-toolbar-left">
+            <button
+              className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary"
+              type="button"
+              onClick={openCreateChipStrategyEditor}
+              disabled={chipStrategySaving}
+            >
+              新建筹码策略
+            </button>
+          </div>
+        </div>
+
+        <div className="strategy-manage-summary">
+          <div className="strategy-manage-summary-item">
+            <span>策略数量</span>
+            <strong>{chipStrategies.length}</strong>
+          </div>
+        </div>
+
+        <div className="strategy-manage-filter-grid">
+          <label className="strategy-manage-field strategy-manage-field-span-full">
+            <span>筹码策略搜索</span>
+            <input
+              value={chipStrategySearchKeyword}
+              onChange={(event) => setChipStrategySearchKeyword(event.target.value)}
+              placeholder="搜索筹码策略名称 / 表达式 / 主力 / 散户 / 买卖方向"
+            />
+          </label>
+        </div>
+
+        {chipStrategyNotice ? <div className="strategy-manage-message strategy-manage-message-notice">{chipStrategyNotice}</div> : null}
+        {chipStrategyError ? <div className="strategy-manage-message strategy-manage-message-error">{chipStrategyError}</div> : null}
+
+        <div className="strategy-manage-list-head strategy-manage-chip-list-head">
+          <strong>策略列表</strong>
+          <span>
+            {normalizedChipStrategySearchKeyword
+              ? `命中 ${filteredChipStrategies.length} / ${chipStrategies.length} 条`
+              : `${chipStrategies.length} 条`}
+          </span>
+        </div>
+        {filteredChipStrategies.length === 0 ? (
+          <div className="strategy-manage-empty">没有匹配当前搜索条件的筹码策略。</div>
+        ) : (
+          <div className="strategy-manage-recent-rule-grid strategy-manage-chip-rule-grid">
+            {filteredChipStrategies.map(({ strategy, index }) => (
+              <article className="strategy-manage-rule-card strategy-manage-rule-card-compact" key={`${index}-${strategy.name}`}>
+                <div className="strategy-manage-rule-card-head">
+                  <div>
+                    <div className="strategy-manage-rule-card-name">{strategy.name}</div>
+                    <div className="strategy-manage-rule-card-source">
+                      #{index + 1} · {strategy.holder} · {strategy.direction}
+                    </div>
+                  </div>
+                  <div className="strategy-manage-rule-card-actions">
+                    <button className="strategy-manage-inline-btn" type="button" onClick={() => openEditChipStrategy(index)}>
+                      编辑
+                    </button>
+                    <button
+                      className="strategy-manage-inline-btn is-danger"
+                      type="button"
+                      onClick={() => setChipStrategyDeleteTarget({ index, name: strategy.name })}
+                      disabled={chipStrategySaving}
+                    >
+                      删除
+                    </button>
+                  </div>
+                </div>
+                <div className="strategy-manage-rule-metrics strategy-manage-rule-metrics-recent">
+                  <div className="strategy-manage-summary-item">
+                    <span>持有人</span>
+                    <strong>{strategy.holder === 'main' ? '主力' : '散户'}</strong>
+                  </div>
+                  <div className="strategy-manage-summary-item">
+                    <span>方向</span>
+                    <strong>{strategy.direction === 'buy' ? '买入' : '卖出'}</strong>
+                  </div>
+                  <div className="strategy-manage-summary-item">
+                    <span>Bias</span>
+                    <strong>{formatNumber(Number(strategy.bias))}</strong>
+                  </div>
+                </div>
+                <pre className="strategy-manage-expression-preview">{strategy.when}</pre>
+              </article>
+            ))}
+          </div>
+        )}
+
+      </section>
+
+      {chipStrategyDeleteTarget ? (
+        <div className="strategy-manage-modal-backdrop strategy-manage-modal-backdrop-confirm" role="presentation">
+          <div className="strategy-manage-modal" role="dialog" aria-modal="true">
+            <h3>删除筹码策略</h3>
+            <p>
+              即将删除筹码策略：<strong>{chipStrategyDeleteTarget.name}</strong>
+            </p>
+            <div className="strategy-manage-modal-actions">
+              <button
+                className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-danger"
+                type="button"
+                onClick={() => void onConfirmDeleteChipStrategy()}
+                disabled={chipStrategySaving}
+              >
+                {chipStrategySaving ? '删除中...' : '确认删除'}
+              </button>
+              <button
+                className="strategy-manage-toolbar-btn"
+                type="button"
+                onClick={() => setChipStrategyDeleteTarget(null)}
+                disabled={chipStrategySaving}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {chipStrategyDraft ? (
+        <div className="strategy-manage-modal-backdrop strategy-manage-modal-backdrop-top" role="presentation">
+          <div className="strategy-manage-modal strategy-manage-editor-modal" role="dialog" aria-modal="true">
+            <div className="strategy-manage-list-head">
+              <strong>
+                {chipStrategyEditorMode === 'create'
+                  ? '新建筹码策略'
+                  : `编辑筹码策略 · ${chipStrategyDraft.name}`}
+              </strong>
+              <span>{chipStrategyDraft.holder} · {chipStrategyDraft.direction}</span>
+            </div>
+            {chipStrategyError ? <div className="strategy-manage-message strategy-manage-message-error">{chipStrategyError}</div> : null}
+            {chipStrategyNotice ? <div className="strategy-manage-message strategy-manage-message-notice">{chipStrategyNotice}</div> : null}
+            <div className="strategy-manage-editor-grid">
+              <label className="strategy-manage-field">
+                <span>名称</span>
+                <input
+                  value={chipStrategyDraft.name}
+                  onChange={(event) =>
+                    setChipStrategyDraft((current) =>
+                      current ? { ...current, name: event.target.value } : current,
+                    )
+                  }
+                />
+              </label>
+              <label className="strategy-manage-field">
+                <span>持有人</span>
+                <select
+                  value={chipStrategyDraft.holder}
+                  onChange={(event) =>
+                    setChipStrategyDraft((current) =>
+                      current ? { ...current, holder: event.target.value as CyqChenStrategyDraft['holder'] } : current,
+                    )
+                  }
+                >
+                  {CHIP_HOLDER_OPTIONS.map((item) => (
+                    <option key={item} value={item}>
+                      {item === 'main' ? '主力' : '散户'}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="strategy-manage-field">
+                <span>方向</span>
+                <select
+                  value={chipStrategyDraft.direction}
+                  onChange={(event) =>
+                    setChipStrategyDraft((current) =>
+                      current ? { ...current, direction: event.target.value as CyqChenStrategyDraft['direction'] } : current,
+                    )
+                  }
+                >
+                  {CHIP_DIRECTION_OPTIONS.map((item) => (
+                    <option key={item} value={item}>
+                      {item === 'buy' ? '买入' : '卖出'}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="strategy-manage-field">
+                <span>Bias</span>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={chipStrategyDraft.bias}
+                  onChange={(event) =>
+                    setChipStrategyDraft((current) =>
+                      current ? { ...current, bias: Number(event.target.value) } : current,
+                    )
+                  }
+                />
+              </label>
+              <label className="strategy-manage-field strategy-manage-field-span-full">
+                <span>表达式</span>
+                <textarea
+                  rows={8}
+                  value={chipStrategyDraft.when}
+                  onChange={(event) =>
+                    setChipStrategyDraft((current) =>
+                      current ? { ...current, when: event.target.value } : current,
+                    )
+                  }
+                />
+              </label>
+            </div>
+            <div className="strategy-manage-editor-actions">
+              <button
+                className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary"
+                type="button"
+                onClick={() => void onCheckChipStrategyDraft()}
+                disabled={chipStrategySaving}
+              >
+                检查草稿
+              </button>
+              <button
+                className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary"
+                type="button"
+                onClick={() => void onSaveChipStrategyDraft()}
+                disabled={chipStrategySaving}
+              >
+                {chipStrategySaving ? '保存中...' : '保存'}
+              </button>
+              <button
+                className="strategy-manage-toolbar-btn"
+                type="button"
+                onClick={() => {
+                  setChipStrategyDraft(null)
+                  setChipStrategyEditingIndex(null)
+                  setChipStrategyError('')
+                }}
+                disabled={chipStrategySaving}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {deleteTarget ? (
         <div className="strategy-manage-modal-backdrop strategy-manage-modal-backdrop-confirm" role="presentation">
@@ -1821,6 +2244,7 @@ export default function StrategyManagePage() {
 
       <StrategyAssetModal
         open={isAssetModalOpen}
+        sourcePath={sourcePath}
         onClose={() => setIsAssetModalOpen(false)}
         onActivated={() => {
           void loadPage()
