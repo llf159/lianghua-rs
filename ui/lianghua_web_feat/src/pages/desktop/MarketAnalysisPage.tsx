@@ -9,7 +9,7 @@ import {
 import DetailsLink from "../../shared/DetailsLink";
 import { splitTsCode } from "../../shared/stockCode";
 import { filterBoardItems, isStBoard, useConceptExclusions } from "../../shared/conceptExclusions";
-import { readStoredSourcePath } from "../../shared/storage";
+import { readJsonStorage, readStoredSourcePath, writeJsonStorage } from "../../shared/storage";
 import { STOCK_PICK_BOARD_OPTIONS } from "../../shared/stockPickShared";
 import "./css/SceneLayerBacktestPage.css";
 
@@ -98,16 +98,55 @@ const MARKET_BOARD_FILTER_OPTIONS = STOCK_PICK_BOARD_OPTIONS.filter(
   (item) => item !== "全部",
 );
 
+const MARKET_ANALYSIS_PARAMS_STORAGE_KEY = "lh_market_analysis_params_v1";
+
+type MarketAnalysisParamsDraft = {
+  lookbackPeriod: string;
+  stockRankLimit: string;
+  subIntervalPeriod: string;
+  minListedTradeDays: string;
+  selectedBoard: string;
+  carryInterval: boolean;
+};
+
+function readMarketAnalysisParamsDraft(): MarketAnalysisParamsDraft {
+  const fallback: MarketAnalysisParamsDraft = {
+    lookbackPeriod: "20",
+    stockRankLimit: "20",
+    subIntervalPeriod: "3",
+    minListedTradeDays: "60",
+    selectedBoard: "",
+    carryInterval: true,
+  };
+  const parsed = readJsonStorage<Partial<MarketAnalysisParamsDraft>>(
+    typeof window === "undefined" ? null : window.localStorage,
+    MARKET_ANALYSIS_PARAMS_STORAGE_KEY,
+  );
+  if (!parsed) {
+    return fallback;
+  }
+
+  return {
+    lookbackPeriod: typeof parsed.lookbackPeriod === "string" ? parsed.lookbackPeriod : fallback.lookbackPeriod,
+    stockRankLimit: typeof parsed.stockRankLimit === "string" ? parsed.stockRankLimit : fallback.stockRankLimit,
+    subIntervalPeriod: typeof parsed.subIntervalPeriod === "string" ? parsed.subIntervalPeriod : fallback.subIntervalPeriod,
+    minListedTradeDays: typeof parsed.minListedTradeDays === "string" ? parsed.minListedTradeDays : fallback.minListedTradeDays,
+    selectedBoard: typeof parsed.selectedBoard === "string" ? parsed.selectedBoard : fallback.selectedBoard,
+    carryInterval: typeof parsed.carryInterval === "boolean" ? parsed.carryInterval : fallback.carryInterval,
+  };
+}
+
 export default function MarketAnalysisPage() {
   const { excludedConcepts, excludeStBoard } = useConceptExclusions();
+  const persistedParams = useMemo(() => readMarketAnalysisParamsDraft(), []);
   const [sourcePath, setSourcePath] = useState(() => readStoredSourcePath());
-  const [lookbackPeriod, setLookbackPeriod] = useState("20");
-  const [stockRankLimit, setStockRankLimit] = useState("20");
-  const [subIntervalPeriod, setSubIntervalPeriod] = useState("3");
-  const [minListedTradeDays, setMinListedTradeDays] = useState("60");
+  const [lookbackPeriod, setLookbackPeriod] = useState(persistedParams.lookbackPeriod);
+  const [stockRankLimit, setStockRankLimit] = useState(persistedParams.stockRankLimit);
+  const [subIntervalPeriod, setSubIntervalPeriod] = useState(persistedParams.subIntervalPeriod);
+  const [minListedTradeDays, setMinListedTradeDays] = useState(persistedParams.minListedTradeDays);
   const [referenceDateInput, setReferenceDateInput] = useState("");
-  const [selectedBoard, setSelectedBoard] = useState("");
-  const [carryInterval, setCarryInterval] = useState(true);
+  const [selectedBoard, setSelectedBoard] = useState(persistedParams.selectedBoard);
+  const [carryInterval, setCarryInterval] = useState(persistedParams.carryInterval);
   const [initializing, setInitializing] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -153,6 +192,24 @@ export default function MarketAnalysisPage() {
       setSelectedBoard("");
     }
   }, [excludeStBoard, selectedBoard]);
+
+  useEffect(() => {
+    writeJsonStorage(typeof window === "undefined" ? null : window.localStorage, MARKET_ANALYSIS_PARAMS_STORAGE_KEY, {
+      lookbackPeriod,
+      stockRankLimit,
+      subIntervalPeriod,
+      minListedTradeDays,
+      selectedBoard,
+      carryInterval,
+    });
+  }, [
+    carryInterval,
+    lookbackPeriod,
+    minListedTradeDays,
+    selectedBoard,
+    stockRankLimit,
+    subIntervalPeriod,
+  ]);
 
   async function onRunMarketAnalysis() {
     const normalizedRefDate = normalizeDateInput(referenceDateInput);

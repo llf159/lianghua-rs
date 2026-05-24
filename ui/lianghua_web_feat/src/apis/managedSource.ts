@@ -239,6 +239,8 @@ export type ManagedSourceDatasetId =
   | 'concept-performance'
   | 'cyq-snapshot'
   | 'cyq-bins'
+  | 'cyq-chen-snapshot'
+  | 'cyq-chen-bins'
   | 'stock-list-csv'
   | 'trade-calendar-csv'
   | 'stock-concepts-csv'

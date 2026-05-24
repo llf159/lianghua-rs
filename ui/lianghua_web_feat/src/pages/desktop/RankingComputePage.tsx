@@ -1135,7 +1135,7 @@ export default function RankingComputePage() {
           </div>
         </div>
 
-        <div className="ranking-compute-form ranking-compute-cyq-form">
+        <div className="ranking-compute-form ranking-compute-cyq-form ranking-compute-cyq-chen-form">
           <label className="ranking-compute-field">
             <span>开始日期</span>
             <input
@@ -1185,7 +1185,7 @@ export default function RankingComputePage() {
               : ' 读取中...'}
           </small>
 
-          <div className="ranking-compute-actions ranking-compute-cyq-actions">
+          <div className="ranking-compute-actions ranking-compute-cyq-actions ranking-compute-cyq-chen-actions">
             <button
               className="ranking-compute-secondary-btn"
               type="button"

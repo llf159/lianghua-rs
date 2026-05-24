@@ -124,6 +124,11 @@
   align-self: end;
 }
 
+.ranking-compute-cyq-chen-actions {
+  grid-column: 1 / -1;
+  flex-wrap: nowrap;
+}
+
 .ranking-compute-strategy-diff-headline span {
   color: #5a6677;
   font-size: 12px;
@@ -322,6 +327,10 @@
 
   .ranking-compute-cyq-range {
     grid-column: span 1;
+  }
+
+  .ranking-compute-cyq-chen-actions {
+    flex-wrap: wrap;
   }
 
   .ranking-compute-strategy-diff-headline {

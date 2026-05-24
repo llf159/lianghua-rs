@@ -84,6 +84,22 @@ const DATASET_OPTIONS: DatasetOption[] = [
     supportsTsCode: true,
   },
   {
+    id: 'cyq-chen-snapshot',
+    label: '新筹码摘要库',
+    description: '查看 cyq_chen.db 的 cyq_chen_snapshot。',
+    requiredFileId: 'cyq-chen-db',
+    supportsTradeDate: true,
+    supportsTsCode: true,
+  },
+  {
+    id: 'cyq-chen-bins',
+    label: '新筹码分桶库',
+    description: '查看 cyq_chen.db 的 cyq_chen_bin。',
+    requiredFileId: 'cyq-chen-db',
+    supportsTradeDate: true,
+    supportsTsCode: true,
+  },
+  {
     id: 'stock-list-csv',
     label: '股票列表 CSV',
     description: '查看 stock_list.csv，包含名称、市值、拼音首字母等基础信息。',

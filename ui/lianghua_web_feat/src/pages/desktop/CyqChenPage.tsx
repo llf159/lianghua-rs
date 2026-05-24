@@ -697,7 +697,7 @@ function CyqChenProjectChart({
 
       const targetElement = event.target instanceof Element ? event.target : null
       const viewport = targetElement?.closest<HTMLDivElement>('.details-chart-viewport') ?? null
-      if (!viewport || !chartShell.contains(viewport)) {
+      if (!viewport || !chartShell?.contains(viewport)) {
         return
       }
 
