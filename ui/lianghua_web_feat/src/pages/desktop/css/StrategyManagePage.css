@@ -362,8 +362,52 @@
   margin-top: 16px;
 }
 
+.strategy-manage-chip-group-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.strategy-manage-chip-group {
+  border: 1px solid #d7dfe8;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.strategy-manage-chip-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.strategy-manage-chip-group-head strong {
+  color: #1f2a37;
+  font-size: 14px;
+}
+
+.strategy-manage-chip-group-head span,
+.strategy-manage-chip-group-empty {
+  color: #607286;
+  font-size: 12px;
+}
+
+.strategy-manage-chip-group-empty {
+  border: 1px dashed #cfd9e6;
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
+  text-align: center;
+}
+
 .strategy-manage-chip-rule-grid {
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
 }
 
 .strategy-manage-chip-backup-grid {
@@ -1200,6 +1244,11 @@
   .strategy-manage-rule-metrics-recent {
     grid-template-columns: 1fr;
   }
+
+  .strategy-manage-chip-group-grid {
+    grid-template-columns: 1fr;
+  }
+
   .strategy-manage-bulk-kpi {
     grid-template-columns: 1fr;
   }

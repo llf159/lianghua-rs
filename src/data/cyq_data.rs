@@ -779,6 +779,22 @@ pub fn maintain_cyq_incremental_if_db_exists(
     }))
 }
 
+pub fn rebuild_cyq_all_if_db_exists(
+    source_dir: &str,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+) -> Result<Option<CyqRebuildSummary>, String> {
+    let cyq_db = cyq_db_path(source_dir);
+    if !cyq_db.exists() {
+        return Ok(None);
+    }
+
+    init_cyq_db(&cyq_db)?;
+    let config = query_latest_cyq_metadata(&cyq_db)?
+        .map(|(_, config)| config)
+        .unwrap_or_default();
+    rebuild_cyq_all_with_progress(source_dir, config, None, None, progress_cb).map(Some)
+}
+
 pub fn rebuild_cyq_all(
     source_dir: &str,
     config: CyqConfig,

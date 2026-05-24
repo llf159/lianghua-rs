@@ -1,16 +1,32 @@
+use std::collections::{HashMap, HashSet};
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    data::{RowData, chip_change_rule_path, scoring_data::row_into_rt},
+    data::{
+        RowData, RuntimeKeyCollectOptions, chip_change_rule_path,
+        collect_runtime_keys_from_expr_programs, scoring_data::row_into_rt,
+    },
     expr::{
         eval::{Runtime, Value},
-        parser::{Parser, Stmts, lex_all},
+        parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
+    utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
 };
 
 const DEFAULT_WARMUP_DAYS: usize = 120;
 const DEFAULT_BUCKET_PCT: f64 = 1.0;
 const EPS: f64 = 1e-10;
+const CHEN_CHIP_ALWAYS_RUNTIME_KEYS: [&str; 5] = ["O", "H", "L", "C", "TURNOVER_RATE"];
+const CHEN_CHIP_INJECTED_RUNTIME_KEYS: [&str; 7] = [
+    "RATEO",
+    "RATEH",
+    "RATEL",
+    "RATEC",
+    "MAIN_CHIP_RATIO",
+    "ZHANG",
+    "TOTAL_MV_YI",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChipChangeConfig {
@@ -209,6 +225,67 @@ pub fn load_compiled_chip_change_config(
     ChipChangeConfig::load(source_dir)?.compile()
 }
 
+pub fn collect_chen_chip_runtime_keys(chip_config: &CompiledChipChangeConfig) -> HashSet<String> {
+    let programs = chip_config
+        .strategies
+        .iter()
+        .map(|strategy| &strategy.when_ast)
+        .collect::<Vec<_>>();
+
+    collect_runtime_keys_from_expr_programs(
+        &programs,
+        RuntimeKeyCollectOptions {
+            always_keys: &CHEN_CHIP_ALWAYS_RUNTIME_KEYS,
+            injected_keys: &CHEN_CHIP_INJECTED_RUNTIME_KEYS,
+            aliases: &[],
+        },
+    )
+}
+
+pub fn estimate_chen_chip_expression_warmup(
+    chip_config: &CompiledChipChangeConfig,
+) -> Result<usize, String> {
+    let mut max_warmup = 0usize;
+
+    for strategy in &chip_config.strategies {
+        let mut locals = HashMap::new();
+        let mut consts: HashMap<String, usize> = HashMap::new();
+        let mut expr_need = 0usize;
+
+        for stmt in strategy.when_ast.item.clone() {
+            match stmt {
+                Stmt::Assign { name, value } => match value {
+                    Expr::Number(value) => {
+                        if value.is_finite() && value >= 0.0 {
+                            consts.insert(name, value as usize);
+                        }
+                    }
+                    Expr::Binary { op, lhs, rhs } => {
+                        if let Some(out) = eval_binary_for_warmup(&op, &lhs, &rhs, &consts)? {
+                            consts.insert(name, out as usize);
+                        } else {
+                            let value_need =
+                                impl_expr_warmup(Expr::Binary { op, lhs, rhs }, &locals, &consts)?;
+                            locals.insert(name, value_need);
+                        }
+                    }
+                    other => {
+                        let value_need = impl_expr_warmup(other, &locals, &consts)?;
+                        locals.insert(name, value_need);
+                    }
+                },
+                Stmt::Expr(expr) => {
+                    expr_need = expr_need.max(impl_expr_warmup(expr, &locals, &consts)?);
+                }
+            }
+        }
+
+        max_warmup = max_warmup.max(expr_need);
+    }
+
+    Ok(max_warmup)
+}
+
 pub fn compute_chen_chip_snapshots_from_row_data(
     row_data: &RowData,
     output_start_date: &str,
@@ -312,6 +389,96 @@ pub fn compute_chen_chip_snapshots_with_compiled_config(
         if day_index >= output_start_index {
             snapshots.push(build_snapshot(bar, &buckets)?);
         }
+    }
+
+    Ok(snapshots)
+}
+
+pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
+    row_data: &RowData,
+    output_start_date: &str,
+    initial_bins: &[ChenChipBin],
+    initial_main_ratio_history: &[Vec<Option<f64>>],
+    chip_config: &CompiledChipChangeConfig,
+    config: ChenChipConfig,
+) -> Result<Vec<ChenChipSnapshot>, String> {
+    validate_compute_config(config)?;
+    if chip_config.version != 1 {
+        return Err(format!(
+            "筹码变化策略文件 version 只支持 1，当前为 {}",
+            chip_config.version
+        ));
+    }
+
+    let output_start_date = output_start_date.trim();
+    if output_start_date.is_empty() {
+        return Err("output_start_date不能为空".to_string());
+    }
+    if initial_bins.is_empty() {
+        return Err("初始筹码分桶为空，无法续算".to_string());
+    }
+
+    validate_row_shape(row_data)?;
+    let Some(output_start_index) = row_data
+        .trade_dates
+        .iter()
+        .position(|trade_date| trade_date == output_start_date)
+    else {
+        return Err(format!(
+            "output_start_date 不在 RowData.trade_dates 中: {output_start_date}"
+        ));
+    };
+
+    let bars = build_validated_bars(row_data, output_start_index)?;
+    let step = bucket_step(config.bucket_pct);
+    let mut buckets = build_buckets_from_snapshot_bins(initial_bins)?;
+    let len = row_data.trade_dates.len();
+    let mut main_ratio_history =
+        build_initial_main_ratio_history(initial_main_ratio_history, initial_bins.len(), len)?;
+    let base_runtime = row_into_rt(row_data.clone())?;
+    let mut snapshots = Vec::with_capacity(len.saturating_sub(output_start_index));
+
+    for day_index in output_start_index..len {
+        let Some(bar) = bars[day_index].as_ref() else {
+            return Err(format!(
+                "{} 缺少有效K线数据",
+                row_data.trade_dates[day_index]
+            ));
+        };
+
+        expand_buckets_for_bar(
+            &mut buckets,
+            &mut main_ratio_history,
+            len,
+            bar.low,
+            bar.high,
+            step,
+        )?;
+        write_main_ratio_for_day(&buckets, &mut main_ratio_history, day_index);
+
+        apply_sell_for_day(
+            &mut buckets,
+            &bars,
+            &base_runtime,
+            chip_config,
+            &main_ratio_history,
+            day_index,
+            bar.turnover_rate,
+        )?;
+        sanitize_buckets(&mut buckets)?;
+
+        apply_buy_for_day(
+            &mut buckets,
+            &bars,
+            &base_runtime,
+            chip_config,
+            &main_ratio_history,
+            day_index,
+            bar.turnover_rate,
+        )?;
+        normalize_buckets(&mut buckets)?;
+
+        snapshots.push(build_snapshot(bar, &buckets)?);
     }
 
     Ok(snapshots)
@@ -527,6 +694,59 @@ fn build_initial_buckets(
     }
 
     Ok(buckets)
+}
+
+fn build_buckets_from_snapshot_bins(bins: &[ChenChipBin]) -> Result<Vec<ChipBucket>, String> {
+    let mut buckets = Vec::with_capacity(bins.len());
+    for bin in bins {
+        if !bin.price_low.is_finite()
+            || !bin.price_high.is_finite()
+            || !bin.main_chip.is_finite()
+            || !bin.retail_chip.is_finite()
+            || bin.price_low <= 0.0
+            || bin.price_high <= bin.price_low + EPS
+        {
+            return Err("初始筹码分桶非法，无法续算".to_string());
+        }
+        buckets.push(ChipBucket {
+            price_low: bin.price_low,
+            price_high: bin.price_high,
+            main_chip: bin.main_chip,
+            retail_chip: bin.retail_chip,
+        });
+    }
+
+    for window in buckets.windows(2) {
+        if window[0].price_high > window[1].price_low + EPS {
+            return Err("初始筹码分桶价格区间重叠，无法续算".to_string());
+        }
+    }
+
+    normalize_buckets(&mut buckets)?;
+    Ok(buckets)
+}
+
+fn build_initial_main_ratio_history(
+    initial_history: &[Vec<Option<f64>>],
+    bucket_count: usize,
+    series_len: usize,
+) -> Result<Vec<Vec<Option<f64>>>, String> {
+    if initial_history.is_empty() {
+        return Ok(vec![vec![None; series_len]; bucket_count]);
+    }
+    if initial_history.len() != bucket_count {
+        return Err("初始MAIN_CHIP_RATIO历史分桶数不匹配".to_string());
+    }
+
+    let mut out = Vec::with_capacity(bucket_count);
+    for history in initial_history {
+        if history.len() != series_len {
+            return Err("初始MAIN_CHIP_RATIO历史长度不匹配".to_string());
+        }
+        out.push(history.clone());
+    }
+
+    Ok(out)
 }
 
 fn expand_buckets_for_bar(
@@ -1046,12 +1266,12 @@ fn build_snapshot(bar: &ChenChipBar, buckets: &[ChipBucket]) -> Result<ChenChipS
         let total_chip = bucket.total_chip();
         bins.push(ChenChipBin {
             index,
-            price: finite_round(bucket.price())?,
-            price_low: finite_round(bucket.price_low)?,
-            price_high: finite_round(bucket.price_high)?,
-            main_chip: finite_round(bucket.main_chip)?,
-            retail_chip: finite_round(bucket.retail_chip)?,
-            total_chip: finite_round(total_chip)?,
+            price: finite_value(bucket.price())?,
+            price_low: finite_value(bucket.price_low)?,
+            price_high: finite_value(bucket.price_high)?,
+            main_chip: finite_value(bucket.main_chip)?,
+            retail_chip: finite_value(bucket.retail_chip)?,
+            total_chip: finite_value(total_chip)?,
         });
     }
 
@@ -1069,24 +1289,24 @@ fn build_snapshot(bar: &ChenChipBar, buckets: &[ChipBucket]) -> Result<ChenChipS
 
     Ok(ChenChipSnapshot {
         trade_date: Some(bar.trade_date.clone()),
-        close: finite_round(bar.close)?,
-        min_price: finite_round(min_price)?,
-        max_price: finite_round(max_price)?,
-        main_total: finite_round(main_total)?,
-        retail_total: finite_round(retail_total)?,
-        total_chips: finite_round(total_chips)?,
+        close: finite_value(bar.close)?,
+        min_price: finite_value(min_price)?,
+        max_price: finite_value(max_price)?,
+        main_total: finite_value(main_total)?,
+        retail_total: finite_value(retail_total)?,
+        total_chips: finite_value(total_chips)?,
         bins,
     })
 }
 
-fn finite_round(value: f64) -> Result<f64, String> {
+fn finite_value(value: f64) -> Result<f64, String> {
     if !value.is_finite() {
         return Err("输出快照出现非有限数值".to_string());
     }
     if value.abs() <= EPS {
         Ok(0.0)
     } else {
-        Ok((value * 1_000_000_000.0).round() / 1_000_000_000.0)
+        Ok(value)
     }
 }
 

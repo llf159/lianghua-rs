@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import {
   getCyqChenStrategyPage,
   runCyqChenSingleStockTest,
@@ -9,6 +9,7 @@ import {
   type CyqChenStrategyDraft,
 } from '../../apis/cyqChen'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
+import { readStoredChartMainWidthRatio } from '../../shared/chartSettings'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
 import './css/DetailsPage.css'
 import './css/CyqChenPage.css'
@@ -51,9 +52,46 @@ type SavedRun = {
 }
 
 type CyqChenChartFocus = {
-  visibleIndex: number
+  absoluteIndex: number
+  cursorXPercent: number
   cursorYPercent: number
   pinned: boolean
+}
+
+type CyqChenChartPointerSnapshot = {
+  cursorXPercent: number
+  cursorYPercent: number
+  visibleIndex: number
+}
+
+type CyqChenChartAnchorSnapshot = {
+  visiblePosition: number
+  visibleRatio: number
+}
+
+type CyqChenChartDragState = {
+  pointerId: number
+  mode: 'pan' | 'focus' | 'tap' | 'dismiss'
+  startClientX: number
+  startClientY: number
+  startVisibleStart: number
+  barsPerPixel: number
+  maxVisibleStart: number
+  moved: boolean
+}
+
+type CyqChenChartTouchPointer = {
+  pointerId: number
+  clientX: number
+  clientY: number
+}
+
+type CyqChenChartPinchState = {
+  pointerIds: [number, number]
+  startDistance: number
+  startVisibleBarCount: number
+  startAnchorAbsoluteIndex: number
+  startAnchorRatio: number
 }
 
 type ChipPeakMode = 'total' | 'main' | 'retail'
@@ -75,6 +113,14 @@ const CHART_VIEWBOX_WIDTH = 1120
 const CHART_VIEWBOX_HEIGHT = 240
 const CHART_MARGIN = { top: 12, right: 8, bottom: 28, left: 52 }
 const CHART_DATE_TICK_COUNT = 6
+const CHART_CURSOR_Y_MIN = 6
+const CHART_CURSOR_Y_MAX = 94
+const CHART_TOOLTIP_LEFT_THRESHOLD = 62
+const CHART_POINTER_DRAG_THRESHOLD = 6
+const CHART_PINCH_MIN_DISTANCE = 12
+const CHART_TOUCH_VERTICAL_SCROLL_RATIO = 1.2
+const CHART_WHEEL_ZOOM_FACTOR = 0.0025
+const CHART_TOUCH_FOCUS_HIT_SLOP = 24
 const CHART_CYQ_PANEL_WIDTH_RATIO = 0.22
 const CHART_CYQ_PANEL_GAP = 12
 const CANDLE_UP_COLOR = '#d9485f'
@@ -84,6 +130,10 @@ const CHIP_COLOR_MAIN_PROFIT = '#d9485f'
 const CHIP_COLOR_MAIN_TRAPPED = '#4d95c9'
 const CHIP_COLOR_RETAIL_PROFIT = '#f18a9b'
 const CHIP_COLOR_RETAIL_TRAPPED = '#9cc8e6'
+
+function readInitialChartLayoutWidth() {
+  return typeof window === 'undefined' ? CHART_VIEWBOX_WIDTH : window.innerWidth
+}
 
 function cloneDefaultStrategies() {
   return DEFAULT_STRATEGIES.map((strategy) => ({ ...strategy }))
@@ -273,6 +323,105 @@ function resolveVisibleIndexFromChartX(
   return visibleIndex
 }
 
+function getChartViewportContentRect(viewport: HTMLDivElement) {
+  const svg = viewport.querySelector<SVGSVGElement>('.details-chart-svg')
+  return svg && svg.clientWidth > 0 && svg.clientHeight > 0
+    ? svg.getBoundingClientRect()
+    : viewport.getBoundingClientRect()
+}
+
+function resolveChartAnchorFromClientX(
+  viewport: HTMLDivElement,
+  clientX: number,
+  itemCount: number,
+  layoutSlotCount: number,
+  reserveCyqPanelWidth: boolean,
+): CyqChenChartAnchorSnapshot | null {
+  if (itemCount <= 0 || layoutSlotCount <= 0) {
+    return null
+  }
+
+  const svgRect = getChartViewportContentRect(viewport)
+  if (svgRect.width <= 0) {
+    return null
+  }
+
+  const chartXPercent = clampNumber((clientX - svgRect.left) / svgRect.width * 100, 0, 99.9999)
+  const plotStartPercent = CHART_MARGIN.left / CHART_VIEWBOX_WIDTH * 100
+  const plotEndPercent = getChartKlinePlotRight(reserveCyqPanelWidth) / CHART_VIEWBOX_WIDTH * 100
+  const plotXPercent = clampNumber((chartXPercent - plotStartPercent) / (plotEndPercent - plotStartPercent), 0, 1)
+  const leadingSlotCount = Math.max(layoutSlotCount - itemCount, 0)
+  const visiblePosition = clampNumber(
+    plotXPercent * layoutSlotCount - leadingSlotCount,
+    0,
+    Math.max(itemCount - 1, 0),
+  )
+
+  return {
+    visiblePosition,
+    visibleRatio: itemCount <= 1 ? 1 : visiblePosition / (itemCount - 1),
+  }
+}
+
+function buildChartPointerSnapshot(
+  viewport: HTMLDivElement,
+  clientX: number,
+  clientY: number,
+  itemCount: number,
+  layoutSlotCount: number,
+  reserveCyqPanelWidth: boolean,
+): CyqChenChartPointerSnapshot | null {
+  if (itemCount <= 0 || layoutSlotCount <= 0) {
+    return null
+  }
+
+  const viewportRect = viewport.getBoundingClientRect()
+  if (viewportRect.width <= 0 || viewportRect.height <= 0) {
+    return null
+  }
+
+  const svgRect = getChartViewportContentRect(viewport)
+  const chartXPercent = clampNumber((clientX - svgRect.left) / svgRect.width * 100, 0, 99.9999)
+  const chartYPercent = clampNumber(
+    (clientY - svgRect.top) / svgRect.height * 100,
+    CHART_CURSOR_Y_MIN,
+    CHART_CURSOR_Y_MAX,
+  )
+  const visibleIndex = resolveVisibleIndexFromChartX(
+    chartXPercent,
+    itemCount,
+    layoutSlotCount,
+    reserveCyqPanelWidth,
+  )
+  if (visibleIndex === null) {
+    return null
+  }
+
+  return {
+    cursorXPercent: getChartItemX(visibleIndex, itemCount, layoutSlotCount, reserveCyqPanelWidth) / CHART_VIEWBOX_WIDTH * 100,
+    cursorYPercent: chartYPercent,
+    visibleIndex,
+  }
+}
+
+function isPointerNearChartFocus(
+  viewport: HTMLDivElement,
+  clientX: number,
+  focus: CyqChenChartFocus | null,
+) {
+  if (!focus) {
+    return false
+  }
+
+  const rect = getChartViewportContentRect(viewport)
+  if (rect.width <= 0 || rect.height <= 0) {
+    return false
+  }
+
+  const focusClientX = rect.left + rect.width * focus.cursorXPercent / 100
+  return Math.abs(clientX - focusClientX) <= CHART_TOUCH_FOCUS_HIT_SLOP
+}
+
 function formatTooltipPercent(value: number | null | undefined) {
   if (!isFiniteNumber(value)) {
     return '--'
@@ -346,9 +495,15 @@ function CyqChenProjectChart({
   onChipPeakModeChange: (mode: ChipPeakMode) => void
   onSelectTradeDate: (tradeDate: string) => void
 }) {
+  const chartShellRef = useRef<HTMLDivElement | null>(null)
+  const chartDragRef = useRef<CyqChenChartDragState | null>(null)
+  const chartTouchPointersRef = useRef<Map<number, CyqChenChartTouchPointer>>(new Map())
+  const chartPinchRef = useRef<CyqChenChartPinchState | null>(null)
   const [visibleBarCount, setVisibleBarCount] = useState(DEFAULT_VISIBLE_BARS)
   const [visibleStartIndex, setVisibleStartIndex] = useState(0)
   const [focus, setFocus] = useState<CyqChenChartFocus | null>(null)
+  const [chartLayoutWidth, setChartLayoutWidth] = useState(readInitialChartLayoutWidth)
+  const [chartMainWidthRatio, setChartMainWidthRatio] = useState(() => readStoredChartMainWidthRatio())
 
   const totalItems = kline.length
   const minVisibleBars = totalItems === 0 ? 1 : Math.min(MIN_VISIBLE_BARS, totalItems)
@@ -374,36 +529,429 @@ function CyqChenProjectChart({
   const selectedVisibleIndex = selectedTradeDate
     ? visibleItems.findIndex((item) => item.tradeDate === selectedTradeDate)
     : -1
-  const focusedRow = focus ? visibleItems[focus.visibleIndex] : null
-  const focusXPercent = focus ? xAt(focus.visibleIndex) / CHART_VIEWBOX_WIDTH * 100 : null
-  const tooltipHorizontalClass = (focusXPercent ?? 0) > 62 ? 'details-chart-tooltip-left' : 'details-chart-tooltip-right'
+  const focusVisibleIndex = focus ? focus.absoluteIndex - effectiveVisibleStart : null
+  const focusedRow = focusVisibleIndex !== null && focusVisibleIndex >= 0 && focusVisibleIndex < visibleItems.length
+    ? visibleItems[focusVisibleIndex]
+    : null
+  const focusXPercent = focusedRow && focus ? focus.cursorXPercent : null
+  const tooltipHorizontalClass = (focusXPercent ?? 0) > CHART_TOOLTIP_LEFT_THRESHOLD
+    ? 'details-chart-tooltip-left'
+    : 'details-chart-tooltip-right'
   const chartRangeText = visibleItems.length > 0
     ? `${visibleItems[0]?.tradeDate ?? '--'} ~ ${visibleItems[visibleItems.length - 1]?.tradeDate ?? '--'}`
     : '--'
+  const chartMainPanelHeight = chartLayoutWidth * chartMainWidthRatio
 
-  function updateFocusFromPointer(event: ReactPointerEvent<HTMLDivElement>) {
-    if (visibleItems.length === 0) {
-      return
-    }
-    const rect = event.currentTarget.getBoundingClientRect()
-    if (rect.width <= 0 || rect.height <= 0) {
+  function setChartZoomAnchored(nextCount: number, anchorAbsoluteIndex: number, anchorRatio: number) {
+    if (totalItems === 0) {
       return
     }
 
-    const chartXPercent = clampNumber((event.clientX - rect.left) / rect.width * 100, 0, 99.9999)
-    const chartYPercent = clampNumber((event.clientY - rect.top) / rect.height * 100, 6, 94)
-    const visibleIndex = resolveVisibleIndexFromChartX(
-      chartXPercent,
+    const resolvedCount = clampNumber(Math.round(nextCount), minVisibleBars, totalItems)
+    const nextMaxVisibleStart = Math.max(totalItems - resolvedCount, 0)
+    const nextVisibleStart = clampNumber(
+      Math.round(anchorAbsoluteIndex - clampNumber(anchorRatio, 0, 1) * Math.max(resolvedCount - 1, 0)),
+      0,
+      nextMaxVisibleStart,
+    )
+
+    setVisibleBarCount(resolvedCount)
+    setVisibleStartIndex(nextVisibleStart)
+  }
+
+  function getChartTouchPointers() {
+    return [...chartTouchPointersRef.current.values()]
+  }
+
+  function getChartPointerDistance(
+    firstPointer: CyqChenChartTouchPointer,
+    secondPointer: CyqChenChartTouchPointer,
+  ) {
+    return Math.hypot(
+      secondPointer.clientX - firstPointer.clientX,
+      secondPointer.clientY - firstPointer.clientY,
+    )
+  }
+
+  function startChartPinch(viewport: HTMLDivElement, pointers: CyqChenChartTouchPointer[]) {
+    if (totalItems === 0 || pointers.length < 2) {
+      return false
+    }
+
+    const [firstPointer, secondPointer] = pointers
+    const midpointX = (firstPointer.clientX + secondPointer.clientX) / 2
+    const anchor = resolveChartAnchorFromClientX(
+      viewport,
+      midpointX,
       visibleItems.length,
       layoutSlotCount,
       reserveCyqPanelWidth,
     )
-    if (visibleIndex === null) {
+    if (!anchor) {
+      return false
+    }
+
+    chartPinchRef.current = {
+      pointerIds: [firstPointer.pointerId, secondPointer.pointerId],
+      startDistance: Math.max(getChartPointerDistance(firstPointer, secondPointer), CHART_PINCH_MIN_DISTANCE),
+      startVisibleBarCount: effectiveVisibleBarCount,
+      startAnchorAbsoluteIndex: effectiveVisibleStart + anchor.visiblePosition,
+      startAnchorRatio: anchor.visibleRatio,
+    }
+    chartDragRef.current = null
+    setFocus(null)
+    return true
+  }
+
+  function updateChartPinchZoom(event: ReactPointerEvent<HTMLDivElement>) {
+    const pinchState = chartPinchRef.current
+    if (!pinchState || !pinchState.pointerIds.includes(event.pointerId)) {
+      return false
+    }
+
+    const [firstPointerId, secondPointerId] = pinchState.pointerIds
+    const firstPointer = chartTouchPointersRef.current.get(firstPointerId)
+    const secondPointer = chartTouchPointersRef.current.get(secondPointerId)
+    if (!firstPointer || !secondPointer) {
+      chartPinchRef.current = null
+      return true
+    }
+
+    const distance = Math.max(getChartPointerDistance(firstPointer, secondPointer), CHART_PINCH_MIN_DISTANCE)
+    const scale = distance / pinchState.startDistance
+    if (!Number.isFinite(scale) || scale <= 0) {
+      return true
+    }
+
+    setChartZoomAnchored(
+      pinchState.startVisibleBarCount / scale,
+      pinchState.startAnchorAbsoluteIndex,
+      pinchState.startAnchorRatio,
+    )
+    return true
+  }
+
+  function zoomChartFromWheel(viewport: HTMLDivElement, clientX: number, deltaY: number) {
+    const anchor = resolveChartAnchorFromClientX(
+      viewport,
+      clientX,
+      visibleItems.length,
+      layoutSlotCount,
+      reserveCyqPanelWidth,
+    )
+    if (!anchor) {
+      return false
+    }
+
+    setChartZoomAnchored(
+      effectiveVisibleBarCount * Math.exp(deltaY * CHART_WHEEL_ZOOM_FACTOR),
+      effectiveVisibleStart + anchor.visiblePosition,
+      anchor.visibleRatio,
+    )
+    return true
+  }
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
       return
     }
 
-    setFocus({ visibleIndex, cursorYPercent: chartYPercent, pinned: true })
-    onSelectTradeDate(visibleItems[visibleIndex]?.tradeDate ?? '')
+    const updateChartLayoutWidth = () => {
+      const shellWidth = chartShellRef.current?.getBoundingClientRect().width
+      const nextWidth = typeof shellWidth === 'number' && shellWidth > 0
+        ? shellWidth
+        : window.innerWidth
+      setChartLayoutWidth(nextWidth)
+      setChartMainWidthRatio(readStoredChartMainWidthRatio())
+    }
+
+    updateChartLayoutWidth()
+    window.addEventListener('resize', updateChartLayoutWidth)
+
+    const shell = chartShellRef.current
+    const observer = typeof ResizeObserver === 'undefined' || !shell
+      ? null
+      : new ResizeObserver(() => {
+        updateChartLayoutWidth()
+      })
+    if (observer && shell) {
+      observer.observe(shell)
+    }
+
+    return () => {
+      window.removeEventListener('resize', updateChartLayoutWidth)
+      observer?.disconnect()
+    }
+  }, [])
+
+  useEffect(() => {
+    const chartShell = chartShellRef.current
+    if (!chartShell) {
+      return
+    }
+
+    function handleNativeChartWheel(event: WheelEvent) {
+      if (!event.ctrlKey && !event.metaKey) {
+        return
+      }
+
+      const targetElement = event.target instanceof Element ? event.target : null
+      const viewport = targetElement?.closest<HTMLDivElement>('.details-chart-viewport') ?? null
+      if (!viewport || !chartShell.contains(viewport)) {
+        return
+      }
+
+      event.preventDefault()
+      if (totalItems === 0) {
+        return
+      }
+
+      zoomChartFromWheel(viewport, event.clientX, event.deltaY)
+    }
+
+    chartShell.addEventListener('wheel', handleNativeChartWheel, { passive: false })
+    return () => {
+      chartShell.removeEventListener('wheel', handleNativeChartWheel)
+    }
+  })
+
+  function buildChartFocus(
+    viewport: HTMLDivElement,
+    clientX: number,
+    clientY: number,
+    pinned: boolean,
+  ) {
+    const pointer = buildChartPointerSnapshot(
+      viewport,
+      clientX,
+      clientY,
+      visibleItems.length,
+      layoutSlotCount,
+      reserveCyqPanelWidth,
+    )
+    if (!pointer) {
+      return null
+    }
+
+    return {
+      absoluteIndex: effectiveVisibleStart + pointer.visibleIndex,
+      cursorXPercent: pointer.cursorXPercent,
+      cursorYPercent: pointer.cursorYPercent,
+      pinned,
+    }
+  }
+
+  function applyChartFocus(nextFocus: CyqChenChartFocus | null) {
+    setFocus(nextFocus)
+    if (nextFocus) {
+      onSelectTradeDate(kline[nextFocus.absoluteIndex]?.tradeDate ?? '')
+    }
+  }
+
+  function clearChartPointerState(event: ReactPointerEvent<HTMLDivElement>) {
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId)
+      }
+    } catch {
+      // Ignore stale pointer capture state during cleanup.
+    }
+    chartTouchPointersRef.current.delete(event.pointerId)
+    chartDragRef.current = null
+  }
+
+  function onChartPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.pointerType === 'mouse' && event.button !== 0) {
+      return
+    }
+
+    const rect = event.currentTarget.getBoundingClientRect()
+    if (rect.width <= 0) {
+      return
+    }
+
+    if (event.pointerType === 'touch') {
+      chartTouchPointersRef.current.set(event.pointerId, {
+        pointerId: event.pointerId,
+        clientX: event.clientX,
+        clientY: event.clientY,
+      })
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId)
+      } catch {
+        // Ignore browsers that do not support pointer capture for this target.
+      }
+
+      const touchPointers = getChartTouchPointers()
+      if (touchPointers.length >= 2) {
+        event.preventDefault()
+        startChartPinch(event.currentTarget, touchPointers.slice(0, 2))
+        return
+      }
+    }
+
+    const isTouchPointer = event.pointerType !== 'mouse'
+    const mode = focus?.pinned
+      ? isTouchPointer && !isPointerNearChartFocus(event.currentTarget, event.clientX, focus)
+        ? 'dismiss'
+        : 'focus'
+      : maxVisibleStart > 0
+        ? 'pan'
+        : 'tap'
+
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    } catch {
+      // Ignore browsers that do not support pointer capture for this target.
+    }
+
+    chartDragRef.current = {
+      pointerId: event.pointerId,
+      mode,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startVisibleStart: effectiveVisibleStart,
+      barsPerPixel: effectiveVisibleBarCount / rect.width,
+      maxVisibleStart,
+      moved: false,
+    }
+  }
+
+  function onChartPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.pointerType === 'touch') {
+      const trackedPointer = chartTouchPointersRef.current.get(event.pointerId)
+      if (trackedPointer) {
+        chartTouchPointersRef.current.set(event.pointerId, {
+          ...trackedPointer,
+          clientX: event.clientX,
+          clientY: event.clientY,
+        })
+      }
+
+      if (updateChartPinchZoom(event)) {
+        event.preventDefault()
+        return
+      }
+    }
+
+    const dragState = chartDragRef.current
+    if (!dragState) {
+      if (event.pointerType !== 'mouse' || !focus?.pinned) {
+        return
+      }
+
+      const nextFocus = buildChartFocus(event.currentTarget, event.clientX, event.clientY, true)
+      if (nextFocus) {
+        applyChartFocus(nextFocus)
+      }
+      return
+    }
+
+    if (dragState.pointerId !== event.pointerId) {
+      return
+    }
+
+    const moveX = event.clientX - dragState.startClientX
+    const moveY = event.clientY - dragState.startClientY
+    const absMoveX = Math.abs(moveX)
+    const absMoveY = Math.abs(moveY)
+    if (
+      event.pointerType === 'touch' &&
+      !dragState.moved &&
+      absMoveY >= CHART_POINTER_DRAG_THRESHOLD &&
+      absMoveY > absMoveX * CHART_TOUCH_VERTICAL_SCROLL_RATIO
+    ) {
+      clearChartPointerState(event)
+      return
+    }
+
+    const moveDistance = Math.hypot(moveX, moveY)
+    if (!dragState.moved && moveDistance >= CHART_POINTER_DRAG_THRESHOLD) {
+      dragState.moved = true
+    }
+
+    if (dragState.mode === 'pan') {
+      if (!dragState.moved) {
+        return
+      }
+
+      const deltaBars = Math.round(moveX * dragState.barsPerPixel)
+      setVisibleStartIndex(clampNumber(dragState.startVisibleStart - deltaBars, 0, dragState.maxVisibleStart))
+      return
+    }
+
+    if (dragState.mode === 'dismiss') {
+      return
+    }
+
+    if (dragState.mode !== 'focus' || !dragState.moved) {
+      return
+    }
+
+    const nextFocus = buildChartFocus(event.currentTarget, event.clientX, event.clientY, true)
+    if (nextFocus) {
+      applyChartFocus(nextFocus)
+    }
+  }
+
+  function onChartPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    const pinchState = chartPinchRef.current
+    if (pinchState?.pointerIds.includes(event.pointerId)) {
+      event.preventDefault()
+      chartPinchRef.current = null
+      clearChartPointerState(event)
+      return
+    }
+
+    const dragState = chartDragRef.current
+    clearChartPointerState(event)
+    if (!dragState || dragState.pointerId !== event.pointerId) {
+      return
+    }
+
+    if (dragState.mode === 'dismiss') {
+      if (!dragState.moved) {
+        applyChartFocus(null)
+      }
+      return
+    }
+
+    if (dragState.moved) {
+      return
+    }
+
+    const nextFocus = buildChartFocus(event.currentTarget, event.clientX, event.clientY, true)
+    if (!nextFocus) {
+      if (focus?.pinned) {
+        applyChartFocus(null)
+      }
+      return
+    }
+
+    if (focus?.pinned && focus.absoluteIndex === nextFocus.absoluteIndex) {
+      applyChartFocus(null)
+      return
+    }
+
+    applyChartFocus(nextFocus)
+  }
+
+  function onChartPointerLeave(event: ReactPointerEvent<HTMLDivElement>) {
+    const dragState = chartDragRef.current
+    if (dragState?.pointerId === event.pointerId) {
+      return
+    }
+
+    if (!focus?.pinned) {
+      applyChartFocus(null)
+    }
+  }
+
+  function onChartPointerCancel(event: ReactPointerEvent<HTMLDivElement>) {
+    if (chartPinchRef.current?.pointerIds.includes(event.pointerId)) {
+      chartPinchRef.current = null
+    }
+    clearChartPointerState(event)
   }
 
   return (
@@ -437,7 +985,14 @@ function CyqChenProjectChart({
         </label>
       </div>
 
-      <div className="details-chart-shell cyq-chen-project-chart-shell">
+      <div
+        className="details-chart-shell cyq-chen-project-chart-shell"
+        ref={chartShellRef}
+        style={{
+          height: `${chartMainPanelHeight}px`,
+          gridTemplateRows: `${chartMainPanelHeight.toFixed(2)}px`,
+        }}
+      >
         <section className="details-chart-panel">
           <header className="details-chart-panel-head">
             <div className="details-chart-panel-head-main">
@@ -449,21 +1004,11 @@ function CyqChenProjectChart({
 
           <div
             className="details-chart-viewport"
-            onPointerDown={(event) => {
-              event.currentTarget.setPointerCapture(event.pointerId)
-              updateFocusFromPointer(event)
-            }}
-            onPointerMove={(event) => {
-              if (event.buttons !== 1) {
-                return
-              }
-              updateFocusFromPointer(event)
-            }}
-            onPointerUp={(event) => {
-              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                event.currentTarget.releasePointerCapture(event.pointerId)
-              }
-            }}
+            onPointerDown={onChartPointerDown}
+            onPointerMove={onChartPointerMove}
+            onPointerUp={onChartPointerUp}
+            onPointerLeave={onChartPointerLeave}
+            onPointerCancel={onChartPointerCancel}
           >
             {reserveCyqPanelWidth ? (
               <div
@@ -709,50 +1254,48 @@ function CyqChenProjectChart({
                     {focusXPercent !== null ? (
                       <div className="details-chart-crosshair-vertical" style={{ left: `${focusXPercent}%` }} />
                     ) : null}
-                    {focus ? (
+                    {focus && focusedRow ? (
                       <>
                         <div className="details-chart-crosshair-horizontal" style={{ top: `${focus.cursorYPercent}%` }} />
-                        {focusedRow ? (
-                          <div
-                            className={[
-                              'details-chart-tooltip',
-                              tooltipHorizontalClass,
-                              focus.pinned ? 'details-chart-tooltip-pinned' : '',
-                            ].filter(Boolean).join(' ')}
-                            style={{
-                              left: `${focusXPercent ?? 0}%`,
-                              top: `${focus.cursorYPercent}%`,
-                            }}
-                          >
-                            <div className="details-chart-tooltip-head">
-                              <strong>{focusedRow.tradeDate}</strong>
-                            </div>
-                            <div className="details-chart-tooltip-body">
-                              <div className="details-chart-tooltip-grid details-chart-tooltip-grid-ohlc">
-                                <div className="details-chart-tooltip-row">
-                                  <span>C</span>
-                                  <strong>{formatNumber(focusedRow.close)}</strong>
-                                </div>
-                                <div className="details-chart-tooltip-row">
-                                  <span>O</span>
-                                  <strong>{formatNumber(focusedRow.open)}</strong>
-                                </div>
-                                <div className="details-chart-tooltip-row">
-                                  <span>H</span>
-                                  <strong>{formatNumber(focusedRow.high)}</strong>
-                                </div>
-                                <div className="details-chart-tooltip-row">
-                                  <span>L</span>
-                                  <strong>{formatNumber(focusedRow.low)}</strong>
-                                </div>
-                                <div className="details-chart-tooltip-row">
-                                  <span>换手</span>
-                                  <strong>{formatTooltipPercent(focusedRow.turnoverRate)}</strong>
-                                </div>
+                        <div
+                          className={[
+                            'details-chart-tooltip',
+                            tooltipHorizontalClass,
+                            focus.pinned ? 'details-chart-tooltip-pinned' : '',
+                          ].filter(Boolean).join(' ')}
+                          style={{
+                            left: `${focusXPercent ?? 0}%`,
+                            top: `${focus.cursorYPercent}%`,
+                          }}
+                        >
+                          <div className="details-chart-tooltip-head">
+                            <strong>{focusedRow.tradeDate}</strong>
+                          </div>
+                          <div className="details-chart-tooltip-body">
+                            <div className="details-chart-tooltip-grid details-chart-tooltip-grid-ohlc">
+                              <div className="details-chart-tooltip-row">
+                                <span>C</span>
+                                <strong>{formatNumber(focusedRow.close)}</strong>
+                              </div>
+                              <div className="details-chart-tooltip-row">
+                                <span>O</span>
+                                <strong>{formatNumber(focusedRow.open)}</strong>
+                              </div>
+                              <div className="details-chart-tooltip-row">
+                                <span>H</span>
+                                <strong>{formatNumber(focusedRow.high)}</strong>
+                              </div>
+                              <div className="details-chart-tooltip-row">
+                                <span>L</span>
+                                <strong>{formatNumber(focusedRow.low)}</strong>
+                              </div>
+                              <div className="details-chart-tooltip-row">
+                                <span>换手</span>
+                                <strong>{formatTooltipPercent(focusedRow.turnoverRate)}</strong>
                               </div>
                             </div>
                           </div>
-                        ) : null}
+                        </div>
                       </>
                     ) : null}
                   </div>

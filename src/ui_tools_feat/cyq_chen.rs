@@ -12,10 +12,11 @@ use crate::{
         DataReader, RowData, chip_change_rule_path,
         cyq_chen::{
             ChenChipConfig, ChenChipSnapshot, ChipChangeConfig, ChipChangeStrategy,
-            compute_chen_chip_snapshots_from_row_data,
+            collect_chen_chip_runtime_keys, compute_chen_chip_snapshots_with_compiled_config,
         },
         load_trade_date_list, source_db_path,
     },
+    scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map},
     ui_tools_feat::watch_observe::normalize_ts_code,
 };
 
@@ -711,6 +712,7 @@ pub fn run_cyq_chen_single_stock_test(
         version: 1,
         strategy: request.strategies,
     };
+    let compiled_chip_config = chip_config.compile()?;
 
     let (start_date, end_date) =
         resolve_requested_range(source_path, request.start_date, request.end_date)?;
@@ -718,7 +720,8 @@ pub fn run_cyq_chen_single_stock_test(
         resolve_load_start_date(source_path, &start_date, &end_date, config.warmup_days)?
             .unwrap_or_else(|| start_date.clone());
 
-    let reader = DataReader::new(source_path)?;
+    let required_runtime_keys = collect_chen_chip_runtime_keys(&compiled_chip_config);
+    let reader = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
     let mut row_data = reader.load_one(&ts_code, DEFAULT_ADJ_TYPE, &load_start_date, &end_date)?;
     if row_data.trade_dates.is_empty() {
         return Ok(CyqChenSingleStockData {
@@ -743,14 +746,23 @@ pub fn run_cyq_chen_single_stock_test(
         }
     }
 
+    let st_list = load_st_list(source_path).unwrap_or_default();
+    let total_share_map = load_total_share_map(source_path).unwrap_or_default();
+    inject_stock_extra_fields(
+        &mut row_data,
+        &ts_code,
+        st_list.contains(&ts_code),
+        total_share_map.get(&ts_code).copied(),
+    )?;
+
     let kline = build_kline_rows(&row_data, &start_date, &end_date)?;
     let output_start_date =
         resolve_output_start_date(&row_data, &start_date, &end_date, config.warmup_days);
     let snapshots = if let Some(output_start_date) = output_start_date.as_deref() {
-        compute_chen_chip_snapshots_from_row_data(
+        compute_chen_chip_snapshots_with_compiled_config(
             &row_data,
             output_start_date,
-            &chip_config,
+            &compiled_chip_config,
             config,
         )?
         .into_iter()
@@ -953,7 +965,7 @@ mod tests {
     use super::{CyqChenSingleStockRequest, run_cyq_chen_single_stock_test};
     use crate::data::{
         cyq_chen::{ChipChangeStrategy, ChipDirection, ChipHolder},
-        source_db_path, trade_calendar_path,
+        source_db_path, stock_list_path, trade_calendar_path,
     };
 
     fn unique_temp_source_dir() -> PathBuf {
@@ -971,6 +983,11 @@ mod tests {
             "cal_date\n20260401\n20260402\n20260403\n20260407\n",
         )
         .expect("write trade calendar");
+        fs::write(
+            stock_list_path(source_dir.to_str().expect("utf8 path")),
+            "ts_code,symbol,name,area,industry,list_date,market,total_share\n000001.SZ,000001,平安银行,深圳,银行,19910403,主板,20000\n",
+        )
+        .expect("write stock list");
 
         let source_db = source_db_path(source_dir.to_str().expect("utf8 path"));
         let conn = Connection::open(&source_db).expect("open source db");
@@ -1035,7 +1052,7 @@ mod tests {
                 name: "主力买入".to_string(),
                 holder: ChipHolder::Main,
                 direction: ChipDirection::Buy,
-                when: "C > O".to_string(),
+                when: "C > O AND ZHANG > 0 AND TOTAL_MV_YI > 0".to_string(),
                 bias: 1.0,
             }],
         })

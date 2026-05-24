@@ -11,15 +11,15 @@ use lianghua_rs::ui_tools_feat::{
         resolve_source_root, validate_target_relative_path,
     },
     data_viewer::{
-        ManagedSourceDatasetPreviewResult, ManagedSourceDbPreviewResult,
         preview_managed_source_dataset as core_preview_managed_source_dataset,
         preview_managed_source_stock_data as core_preview_managed_source_stock_data,
+        ManagedSourceDatasetPreviewResult, ManagedSourceDbPreviewResult,
     },
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 use tauri_plugin_fs::{FilePath, FsExt};
-use zip::{CompressionMethod, ZipArchive, ZipWriter, write::FileOptions};
+use zip::{write::FileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 const MANAGED_SOURCE_IMPORT_EVENT: &str = "managed-source-import";
 const IMPORT_BUFFER_SIZE: usize = 1024 * 1024;
@@ -507,8 +507,10 @@ fn locate_strategy_asset(
         StrategyAssetLocation::RankComputeSnapshot,
     ] {
         let asset_dir = managed_strategy_asset_dir(source_root, location, normalized_backup_id);
-        let file_path = managed_strategy_asset_file_path(source_root, location, normalized_backup_id);
-        let meta_path = managed_strategy_asset_meta_path(source_root, location, normalized_backup_id);
+        let file_path =
+            managed_strategy_asset_file_path(source_root, location, normalized_backup_id);
+        let meta_path =
+            managed_strategy_asset_meta_path(source_root, location, normalized_backup_id);
         if asset_dir.is_dir() && file_path.is_file() && meta_path.is_file() {
             return Some((location, asset_dir));
         }

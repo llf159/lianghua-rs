@@ -169,6 +169,7 @@ type SceneOverviewSortKey =
   | "contribution_pct";
 const EMPTY_PREV_RANK_ROWS: DetailPrevRankRow[] = [];
 const EMPTY_KLINE_ROWS: DetailKlineRow[] = [];
+const EMPTY_CYQ_SNAPSHOTS: DetailCyqSnapshot[] = [];
 const EMPTY_STRATEGY_ROWS: DetailStrategyTriggerRow[] = [];
 const EMPTY_SCENE_ROWS: DetailSceneTriggerRow[] = [];
 
@@ -4489,7 +4490,7 @@ export default function DetailsPage({
   );
   const kline = detailRealtimeData?.kline ?? detailData?.kline;
   const allChartItems = kline?.items ?? EMPTY_KLINE_ROWS;
-  const detailCyqSnapshots = detailCyqData?.snapshots ?? [];
+  const detailCyqSnapshots = detailCyqData?.snapshots ?? EMPTY_CYQ_SNAPSHOTS;
   const totalChartItems = allChartItems.length;
   const minVisibleBars =
     totalChartItems === 0 ? 0 : Math.min(MIN_VISIBLE_BARS, totalChartItems);
@@ -6205,51 +6206,54 @@ export default function DetailsPage({
     })();
   }
 
-  function onJumpNavigationTarget(target: DetailsNavigationItem | null) {
-    const nextSourcePath = target?.sourcePath?.trim() || sourcePathTrimmed;
-    if (!target || nextSourcePath === "") {
-      return;
-    }
+  const onJumpNavigationTarget = useCallback(
+    (target: DetailsNavigationItem | null) => {
+      const nextSourcePath = target?.sourcePath?.trim() || sourcePathTrimmed;
+      if (!target || nextSourcePath === "") {
+        return;
+      }
 
-    const nextCode = sanitizeCodeInput(splitTsCode(target.tsCode));
-    const nextTradeDate =
-      target.tradeDate?.trim() || tradeDateInput.trim();
-    const explicitIntervalRestore = normalizeIntervalRestoreRequest(
-      target.intervalStartTradeDate ?? "",
-      target.intervalEndTradeDate ?? "",
-    );
-    const nextIntervalRestore = explicitIntervalRestore ?? activeIntervalContext;
+      const nextCode = sanitizeCodeInput(splitTsCode(target.tsCode));
+      const nextTradeDate =
+        target.tradeDate?.trim() || tradeDateInput.trim();
+      const explicitIntervalRestore = normalizeIntervalRestoreRequest(
+        target.intervalStartTradeDate ?? "",
+        target.intervalEndTradeDate ?? "",
+      );
+      const nextIntervalRestore = explicitIntervalRestore ?? activeIntervalContext;
 
-    if (nextCode === "") {
-      return;
-    }
+      if (nextCode === "") {
+        return;
+      }
 
-    const contentElement = getContentScrollElement();
-    pendingPageScrollRef.current = contentElement
-      ? { left: contentElement.scrollLeft, top: contentElement.scrollTop }
-      : { left: window.scrollX, top: window.scrollY };
-    autoFillTopRef.current = false;
-    setSourcePath(nextSourcePath);
-    setLookupInput(target.name?.trim() || nextCode);
-    setActiveIntervalContext(nextIntervalRestore);
-    setPendingIntervalRestore(nextIntervalRestore);
-    setChartIntervalMode(Boolean(nextIntervalRestore));
-    setChartIntervalSelection(null);
-    setChartIntervalDraftSelection(null);
-    setChartIntervalPanelOpen(false);
-    setChartIntervalNotice("");
-    if (nextTradeDate !== "") {
-      setTradeDateInput(nextTradeDate);
-    }
-    setDetailError("");
-    setStrategyCompareSnapshot(null);
-    void readDetail(
-      nextSourcePath,
-      nextTradeDate,
-      stdTsCode(nextCode),
-      nextIntervalRestore,
-    );
-  }
+      const contentElement = getContentScrollElement();
+      pendingPageScrollRef.current = contentElement
+        ? { left: contentElement.scrollLeft, top: contentElement.scrollTop }
+        : { left: window.scrollX, top: window.scrollY };
+      autoFillTopRef.current = false;
+      setSourcePath(nextSourcePath);
+      setLookupInput(target.name?.trim() || nextCode);
+      setActiveIntervalContext(nextIntervalRestore);
+      setPendingIntervalRestore(nextIntervalRestore);
+      setChartIntervalMode(Boolean(nextIntervalRestore));
+      setChartIntervalSelection(null);
+      setChartIntervalDraftSelection(null);
+      setChartIntervalPanelOpen(false);
+      setChartIntervalNotice("");
+      if (nextTradeDate !== "") {
+        setTradeDateInput(nextTradeDate);
+      }
+      setDetailError("");
+      setStrategyCompareSnapshot(null);
+      void readDetail(
+        nextSourcePath,
+        nextTradeDate,
+        stdTsCode(nextCode),
+        nextIntervalRestore,
+      );
+    },
+    [activeIntervalContext, readDetail, sourcePathTrimmed, tradeDateInput],
+  );
 
   const clearDetailsNavLongPressTimer = useCallback(() => {
     if (detailsNavLongPressTimerRef.current !== null) {

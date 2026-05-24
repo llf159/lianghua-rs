@@ -26,9 +26,9 @@ use lianghua_rs::ui_tools_feat::{
         get_cyq_chen_strategy_page as core_get_cyq_chen_strategy_page,
         import_cyq_chen_strategy_backup as core_import_cyq_chen_strategy_backup,
         run_cyq_chen_single_stock_test as core_run_cyq_chen_single_stock_test,
-        save_cyq_chen_strategy_file as core_save_cyq_chen_strategy_file,
-        CyqChenSingleStockData, CyqChenSingleStockRequest, CyqChenStrategyBackupDiff,
-        CyqChenStrategyFileDraft, CyqChenStrategyFileExportResult, CyqChenStrategyPageData,
+        save_cyq_chen_strategy_file as core_save_cyq_chen_strategy_file, CyqChenSingleStockData,
+        CyqChenSingleStockRequest, CyqChenStrategyBackupDiff, CyqChenStrategyFileDraft,
+        CyqChenStrategyFileExportResult, CyqChenStrategyPageData,
     },
     data_viewer::{list_stock_lookup_rows as core_list_stock_lookup_rows, StockLookupRow},
     details::{
@@ -89,10 +89,10 @@ use lianghua_rs::ui_tools_feat::{
         run_transient_rule_layer_backtest as core_run_transient_rule_layer_backtest,
         run_transient_scene_layer_backtest as core_run_transient_scene_layer_backtest,
         MarketAnalysisData, MarketContributionData, RankLayerBacktestData,
-        RuleExpressionValidationData, RuleExpressionValidationManualStrategy, RuleLayerBacktestData,
-        RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig, SceneLayerBacktestData,
-        SceneLayerBacktestDefaultsData, SceneStatisticsPageData, StrategyStatisticsDetailData,
-        StrategyStatisticsPageData, TriggeredStockRow,
+        RuleExpressionValidationData, RuleExpressionValidationManualStrategy,
+        RuleLayerBacktestData, RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig,
+        SceneLayerBacktestData, SceneLayerBacktestDefaultsData, SceneStatisticsPageData,
+        StrategyStatisticsDetailData, StrategyStatisticsPageData, TriggeredStockRow,
     },
     stock_pick::{get_stock_pick_options as core_get_stock_pick_options, StockPickOptionsData},
     stock_similarity::{
@@ -149,7 +149,7 @@ use managed_source_bridge::{
 };
 
 #[cfg(target_os = "android")]
-use jni::{JNIEnv, objects::JObject, sys::jboolean};
+use jni::{objects::JObject, sys::jboolean, JNIEnv};
 
 #[cfg(target_os = "android")]
 use rustls_platform_verifier;
@@ -178,7 +178,10 @@ fn emit_ranking_compute_progress_event(
     payload: RankingComputeProgressEventPayload,
 ) {
     if let Err(emit_error) = app.emit(RANKING_COMPUTE_PROGRESS_EVENT, payload) {
-        log::warn!("failed to emit ranking compute progress event: {}", emit_error);
+        log::warn!(
+            "failed to emit ranking compute progress event: {}",
+            emit_error
+        );
     }
 }
 
@@ -1200,7 +1203,9 @@ async fn run_cyq_compute(
     end_date: Option<String>,
     download_id: Option<String>,
 ) -> Result<CyqComputeResult, String> {
-    let download_id = download_id.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+    let download_id = download_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     tauri::async_runtime::spawn_blocking(move || {
         let started_at = Instant::now();
         let action = "cyq".to_string();
@@ -1250,7 +1255,9 @@ async fn run_cyq_compute(
             factor,
             start_date.as_deref(),
             end_date.as_deref(),
-            download_id.as_ref().map(|_| &progress_cb as &lianghua_rs::download::runner::DownloadProgressCallback<'_>),
+            download_id.as_ref().map(|_| {
+                &progress_cb as &lianghua_rs::download::runner::DownloadProgressCallback<'_>
+            }),
         );
         match (&result, download_id.as_deref()) {
             (Ok(run_result), Some(download_id)) => emit_ranking_compute_progress_event(
@@ -1302,7 +1309,9 @@ async fn run_cyq_chen_compute(
     end_date: Option<String>,
     download_id: Option<String>,
 ) -> Result<CyqChenComputeResult, String> {
-    let download_id = download_id.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+    let download_id = download_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     tauri::async_runtime::spawn_blocking(move || {
         let started_at = Instant::now();
         let action = "cyq-chen".to_string();
@@ -1347,13 +1356,18 @@ async fn run_cyq_chen_compute(
             }
         };
 
+        core_backup_cyq_chen_strategy_file(&source_path)
+            .map_err(|error| format!("创建新筹码计算策略快照失败: {error}"))?;
+
         let result = core_run_cyq_chen_compute(
             &source_path,
             warmup_days,
             bucket_pct,
             start_date.as_deref(),
             end_date.as_deref(),
-            download_id.as_ref().map(|_| &progress_cb as &lianghua_rs::download::runner::DownloadProgressCallback<'_>),
+            download_id.as_ref().map(|_| {
+                &progress_cb as &lianghua_rs::download::runner::DownloadProgressCallback<'_>
+            }),
         );
         match (&result, download_id.as_deref()) {
             (Ok(run_result), Some(download_id)) => emit_ranking_compute_progress_event(
@@ -1418,9 +1432,7 @@ fn save_cyq_chen_strategy_file(
 }
 
 #[tauri::command]
-fn check_cyq_chen_strategy_file_draft(
-    draft: CyqChenStrategyFileDraft,
-) -> Result<String, String> {
+fn check_cyq_chen_strategy_file_draft(draft: CyqChenStrategyFileDraft) -> Result<String, String> {
     core_check_cyq_chen_strategy_file_draft(draft)
 }
 

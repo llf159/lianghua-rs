@@ -24,6 +24,11 @@ import {
   type RankingComputeStatus,
 } from '../../apis/rankingCompute'
 import {
+  getCyqChenStrategyBackupDiff,
+  getCyqChenStrategyPage,
+  type CyqChenStrategyBackupDiff,
+} from '../../apis/cyqChen'
+import {
   getManagedStrategyAssetsStatus,
   getManagedStrategyBackupDiff,
   type ManagedStrategyBackupDiff,
@@ -48,12 +53,14 @@ type BusyAction =
   | 'cyq-computing'
   | 'cyq-chen-computing'
   | 'deleting-result-db'
+  | 'deleting-cyq-chen-db'
   | 'indicator-running'
 type IndicatorEditorMode = 'create' | 'edit'
 type PendingConfirmState =
   | { kind: 'delete-indicator'; item: IndicatorManageItem }
   | { kind: 'delete-stock-indicator-columns' }
   | { kind: 'delete-result-db' }
+  | { kind: 'delete-cyq-chen-db' }
   | null
 
 function compactDateToInput(value: string | null | undefined) {
@@ -213,6 +220,8 @@ export default function RankingComputePage() {
   const [progress, setProgress] = useState<DataDownloadProgress | null>(null)
   const [strategyDiff, setStrategyDiff] = useState<ManagedStrategyBackupDiff | null>(null)
   const [strategyDiffLoading, setStrategyDiffLoading] = useState(false)
+  const [cyqChenStrategyDiff, setCyqChenStrategyDiff] = useState<CyqChenStrategyBackupDiff | null>(null)
+  const [cyqChenStrategyDiffLoading, setCyqChenStrategyDiffLoading] = useState(false)
 
   const [indicatorModalOpen, setIndicatorModalOpen] = useState(false)
   const [indicatorItems, setIndicatorItems] = useState<IndicatorManageItem[]>([])
@@ -628,6 +637,30 @@ export default function RankingComputePage() {
     }
   }
 
+  async function onDeleteCyqChenDb() {
+    if (!sourcePath) {
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    setBusyAction('deleting-cyq-chen-db')
+    setError('')
+
+    try {
+      await removeManagedSourceFile('cyq-chen-db')
+      const managedStatus = await inspectManagedSourceStatus()
+      const nextStatus = await getRankingComputeStatus(managedStatus.sourcePath)
+      setStatus(nextStatus)
+      setCyqChenStrategyDiff(null)
+      setNotice('新筹码库已删除。下次新筹码计算会重新生成 cyq_chen_snapshot / cyq_chen_bin。')
+    } catch (actionError) {
+      setNotice('')
+      setError(`删除新筹码库失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
   async function onRunCompute() {
     if (!sourcePath) {
       setError('当前数据目录为空，请先到数据管理页确认目录。')
@@ -678,6 +711,33 @@ export default function RankingComputePage() {
       setError(`查看策略 diff 失败: ${String(actionError)}`)
     } finally {
       setStrategyDiffLoading(false)
+    }
+  }
+
+  async function onViewCyqChenStrategyDiff() {
+    if (!sourcePath) {
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    setCyqChenStrategyDiffLoading(true)
+    setError('')
+    setNotice('')
+    try {
+      const page = await getCyqChenStrategyPage(sourcePath)
+      const latestBackup = page.backups[0]
+      if (!latestBackup) {
+        setCyqChenStrategyDiff(null)
+        setError('当前没有筹码策略备份可对比。')
+        return
+      }
+      const diff = await getCyqChenStrategyBackupDiff(sourcePath, latestBackup.backupId)
+      setCyqChenStrategyDiff(diff)
+    } catch (actionError) {
+      setCyqChenStrategyDiff(null)
+      setError(`查看筹码策略 diff 失败: ${String(actionError)}`)
+    } finally {
+      setCyqChenStrategyDiffLoading(false)
     }
   }
 
@@ -763,6 +823,7 @@ export default function RankingComputePage() {
     setBusyAction('cyq-chen-computing')
     setError('')
     setNotice('')
+    setCyqChenStrategyDiff(null)
     setProgress(null)
 
     try {
@@ -807,6 +868,11 @@ export default function RankingComputePage() {
 
     if (current.kind === 'delete-stock-indicator-columns') {
       await onRunStockDataIndicatorColumnsDelete()
+      return
+    }
+
+    if (current.kind === 'delete-cyq-chen-db') {
+      await onDeleteCyqChenDb()
       return
     }
 
@@ -1128,12 +1194,80 @@ export default function RankingComputePage() {
             >
               {busyAction === 'cyq-chen-computing' ? '计算中...' : '开始新筹码计算'}
             </button>
+            <button
+              className="ranking-compute-secondary-btn"
+              type="button"
+              onClick={() => void onViewCyqChenStrategyDiff()}
+              disabled={isBusy || cyqChenStrategyDiffLoading || sourcePath === ''}
+            >
+              {cyqChenStrategyDiffLoading ? '对比中...' : '显示筹码策略 diff'}
+            </button>
+            <button
+              className="ranking-compute-danger-btn"
+              type="button"
+              onClick={() => setPendingConfirm({ kind: 'delete-cyq-chen-db' })}
+              disabled={isBusy || sourcePath === ''}
+            >
+              {busyAction === 'deleting-cyq-chen-db' ? '删除中...' : '删除新筹码库'}
+            </button>
           </div>
         </div>
 
         {busyAction === 'cyq-chen-computing'
           ? renderProgressCard('新筹码计算已经启动，正在等待后端返回当前股票进度。')
           : null}
+
+        {cyqChenStrategyDiff ? (
+          <section className="ranking-compute-strategy-diff">
+            <div className="ranking-compute-strategy-diff-headline">
+              <div>
+                <span>筹码策略变化</span>
+                <strong>
+                  {cyqChenStrategyDiff.changedLineCount === 0
+                    ? '当前筹码策略与备份一致'
+                    : `发现 ${cyqChenStrategyDiff.changedLineCount} 行变化`}
+                </strong>
+                <small>
+                  备份 {cyqChenStrategyDiff.backupLabel} 对比当前生效 {cyqChenStrategyDiff.activeLabel}；变化策略完整显示，未变化策略折叠
+                </small>
+              </div>
+              <button
+                className="ranking-compute-secondary-btn"
+                type="button"
+                onClick={() => setCyqChenStrategyDiff(null)}
+                disabled={isBusy}
+              >
+                关闭 diff
+              </button>
+            </div>
+            <div className="ranking-compute-strategy-diff-table-head">
+              <span>备份</span>
+              <span>当前</span>
+              <span>策略内容</span>
+            </div>
+            <div className="ranking-compute-strategy-diff-body">
+              {cyqChenStrategyDiff.lines.map((line, index) => (
+                <div
+                  key={`${line.kind}-${line.backupLine ?? 'n'}-${line.activeLine ?? 'n'}-${index}`}
+                  className={`ranking-compute-strategy-diff-row is-${line.kind}`}
+                >
+                  <span>{line.backupLine ?? ''}</span>
+                  <span>{line.activeLine ?? ''}</span>
+                  <code>
+                    {line.kind === 'backup'
+                      ? '- '
+                      : line.kind === 'active'
+                        ? '+ '
+                        : line.kind === 'omitted'
+                          ? '... '
+                          : '  '}
+                    {line.text || ' '}
+                  </code>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
       </section>
 
       <section className="ranking-compute-card">
@@ -1318,14 +1452,18 @@ export default function RankingComputePage() {
             ? '确认删除指标'
             : pendingConfirm?.kind === 'delete-stock-indicator-columns'
               ? '确认清空指标列'
-              : '确认删除结果库'
+              : pendingConfirm?.kind === 'delete-cyq-chen-db'
+                ? '确认删除新筹码库'
+                : '确认删除结果库'
         }
         message={
           pendingConfirm?.kind === 'delete-indicator'
             ? `确认删除指标 ${pendingConfirm.item.name} 吗？`
             : pendingConfirm?.kind === 'delete-stock-indicator-columns'
               ? '确认清空 stock_data 中的所有非基础指标列吗？\n\n该操作会重建 stock_data 表，只保留基础行情列和已有基础行情数据；数据量较大时耗时会更久。'
-              : '确认删除当前结果库 scoring_result.db 吗？将同时清空 score_summary / rule_details / scene_details，删除后需要重新计算排名。'
+              : pendingConfirm?.kind === 'delete-cyq-chen-db'
+                ? '确认删除当前新筹码库 cyq_chen.db 吗？将清空 cyq_chen_snapshot / cyq_chen_bin，删除后需要重新计算新筹码。'
+                : '确认删除当前结果库 scoring_result.db 吗？将同时清空 score_summary / rule_details / scene_details，删除后需要重新计算排名。'
         }
         confirmText="确认"
         cancelText="取消"

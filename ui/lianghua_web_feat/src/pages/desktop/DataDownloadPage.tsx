@@ -24,6 +24,7 @@ import {
   useAnimatedProgressPercent,
 } from '../../shared/dataTaskProgressUtils'
 import ConfirmDialog from '../../shared/ConfirmDialog'
+import { readStoredDetailCyqModel } from '../../shared/chartSettings'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
 import './css/DataDownloadPage.css'
 
@@ -630,6 +631,7 @@ export default function DataDownloadPage() {
         limitCallsPerMin: Math.max(1, Number(limitCallsPerMin) || 1),
         includeTurnover,
         allowStaleStockList,
+        chipModel: readStoredDetailCyqModel(),
       }),
     )
   }

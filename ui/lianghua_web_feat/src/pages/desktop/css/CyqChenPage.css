@@ -361,8 +361,6 @@
 }
 
 .cyq-chen-project-chart-shell {
-  height: 430px;
-  min-height: 430px;
   grid-template-rows: minmax(0, 1fr);
 }
 

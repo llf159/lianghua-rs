@@ -17,7 +17,10 @@ use crate::{
             rebuild_concept_performance_all, rebuild_most_related_concept_csv,
         },
         concept_performance_db_path,
-        cyq_data::maintain_cyq_incremental_if_db_exists,
+        cyq_chen_data::{
+            maintain_cyq_chen_incremental_if_db_exists, rebuild_cyq_chen_all_if_db_exists,
+        },
+        cyq_data::{maintain_cyq_incremental_if_db_exists, rebuild_cyq_all_if_db_exists},
         download_data::{
             append_stock_data_indicator_stage_rows_with_appender,
             create_stock_data_indicator_stage_appender_for_columns, drop_stock_data_columns,
@@ -32,10 +35,10 @@ use crate::{
         ind_calc::{cache_ind_build, calc_inds_for_rows_with_cache},
         runner::{
             DownloadProgress, DownloadProgressCallback, DownloadRuntimeConfig,
-            ThsConceptDownloadConfig, download as core_run_download_with_progress,
-            download_indices as core_run_index_download_with_progress,
+            ThsConceptDownloadConfig, download_after_basic_data as core_run_download_with_progress,
+            download_indices_after_basic_data as core_run_index_download_with_progress,
             download_selected_stocks as core_run_selected_stock_download_with_progress,
-            download_ths_concepts as core_download_ths_concepts,
+            download_ths_concepts as core_download_ths_concepts, init_stock_basic_data,
         },
     },
     expr::parser::{Parser, lex_all},
@@ -95,6 +98,7 @@ pub struct DataDownloadRunInput {
     pub limit_calls_per_min: usize,
     pub include_turnover: bool,
     pub allow_stale_stock_list: bool,
+    pub chip_model: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -227,6 +231,7 @@ pub struct PreparedDataDownloadRun {
     pub limit_calls_per_min: usize,
     pub include_turnover: bool,
     pub allow_stale_stock_list: bool,
+    pub chip_model: String,
     pub action: String,
     pub action_label: String,
 }
@@ -374,6 +379,83 @@ fn emit_nested_data_download_progress(
 ) {
     if let Some(cb) = progress_cb {
         cb(normalize_nested_data_download_progress(scope, progress));
+    }
+}
+
+fn normalize_chip_model(raw: Option<&str>) -> String {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("chen") | Some("new") => "chen".to_string(),
+        _ => "legacy".to_string(),
+    }
+}
+
+fn emit_chip_maintenance_progress(
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+    mut progress: DownloadProgress,
+) {
+    if let Some(cb) = progress_cb {
+        progress.phase = "maintain_cyq_incremental".to_string();
+        cb(progress);
+    }
+}
+
+fn maintain_chip_after_incremental_download(
+    source_path: &str,
+    chip_model: &str,
+    force_full_rebuild: bool,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+) -> Result<Option<String>, String> {
+    let chip_progress_cb = |progress: DownloadProgress| {
+        emit_chip_maintenance_progress(progress_cb, progress);
+    };
+
+    match chip_model {
+        "chen" => {
+            let summary = if force_full_rebuild {
+                rebuild_cyq_chen_all_if_db_exists(source_path, Some(&chip_progress_cb))?
+            } else {
+                maintain_cyq_chen_incremental_if_db_exists(source_path, Some(&chip_progress_cb))?
+            };
+            Ok(Some(match summary {
+                Some(summary) if summary.snapshot_rows > 0 || summary.bin_rows > 0 => format!(
+                    "新筹码{}维护完成，区间 {} 至 {}，写入 {} 条摘要和 {} 条分桶。",
+                    if force_full_rebuild {
+                        "全量"
+                    } else {
+                        "增量"
+                    },
+                    summary.start_date.as_deref().unwrap_or("--"),
+                    summary.end_date.as_deref().unwrap_or("--"),
+                    summary.snapshot_rows,
+                    summary.bin_rows
+                ),
+                Some(_) => "新筹码库已存在，但当前没有需要补算的筹码数据。".to_string(),
+                None => "未发现新筹码库 cyq_chen.db，已跳过筹码数据维护。".to_string(),
+            }))
+        }
+        _ => {
+            let summary = if force_full_rebuild {
+                rebuild_cyq_all_if_db_exists(source_path, Some(&chip_progress_cb))?
+            } else {
+                maintain_cyq_incremental_if_db_exists(source_path)?
+            };
+            Ok(Some(match summary {
+                Some(summary) if summary.snapshot_rows > 0 || summary.bin_rows > 0 => format!(
+                    "筹码{}维护完成，区间 {} 至 {}，写入 {} 条摘要和 {} 条分桶。",
+                    if force_full_rebuild {
+                        "全量"
+                    } else {
+                        "增量"
+                    },
+                    summary.start_date.as_deref().unwrap_or("--"),
+                    summary.end_date.as_deref().unwrap_or("--"),
+                    summary.snapshot_rows,
+                    summary.bin_rows
+                ),
+                Some(_) => "筹码库已存在，但当前没有需要补算的筹码数据。".to_string(),
+                None => "未发现筹码库 cyq.db，已跳过筹码数据维护。".to_string(),
+            }))
+        }
     }
 }
 
@@ -1082,6 +1164,7 @@ pub fn prepare_data_download_run(
         limit_calls_per_min: input.limit_calls_per_min.max(1),
         include_turnover: input.include_turnover,
         allow_stale_stock_list: input.allow_stale_stock_list,
+        chip_model: normalize_chip_model(input.chip_model.as_deref()),
         action: status.planned_action,
         action_label: status.planned_action_label,
     })
@@ -1235,7 +1318,13 @@ pub fn run_prepared_data_download(
             progress,
         );
     };
-    let mut summary = core_run_download_with_progress(&stock_config, Some(&stock_progress_cb))?;
+    let effective_trade_date = init_stock_basic_data(&stock_config, Some(&stock_progress_cb))?;
+    let mut summary = core_run_download_with_progress(
+        &stock_config,
+        effective_trade_date.as_str(),
+        Some(&stock_progress_cb),
+    )?;
+    let stock_recovered_stock_count = summary.recovered_stock_count;
     let index_config = DownloadRuntimeConfig {
         source_dir: prepared.source_path.clone(),
         adj_type: AdjType::Ind,
@@ -1255,42 +1344,47 @@ pub fn run_prepared_data_download(
             progress,
         );
     };
-    let index_summary =
-        core_run_index_download_with_progress(&index_config, Some(&index_progress_cb))?;
+    let index_summary = core_run_index_download_with_progress(
+        &index_config,
+        effective_trade_date.as_str(),
+        Some(&index_progress_cb),
+    )?;
     summary.success_count += index_summary.success_count;
     summary.failed_count += index_summary.failed_count;
     summary.saved_rows += index_summary.saved_rows;
     summary.failed_items.extend(index_summary.failed_items);
 
     if prepared.action == "incremental-download" {
+        let force_full_rebuild = stock_recovered_stock_count > 0;
         if let Some(cb) = progress_cb {
             cb(crate::download::runner::DownloadProgress {
                 phase: "maintain_cyq_incremental".to_string(),
                 finished: 0,
                 total: 1,
                 current_label: None,
-                message: "开始检查筹码库并维护增量筹码数据。".to_string(),
+                message: if force_full_rebuild {
+                    format!(
+                        "本轮有 {} 只股票发生整段补救重下，开始按设置重头维护筹码数据。",
+                        stock_recovered_stock_count
+                    )
+                } else {
+                    "开始按设置检查筹码库并维护增量筹码数据。".to_string()
+                },
             });
         }
-        let cyq_summary = maintain_cyq_incremental_if_db_exists(&prepared.source_path)?;
+        let chip_message = maintain_chip_after_incremental_download(
+            &prepared.source_path,
+            prepared.chip_model.as_str(),
+            force_full_rebuild,
+            progress_cb,
+        )?;
         if let Some(cb) = progress_cb {
-            let message = match cyq_summary {
-                Some(summary) if summary.snapshot_rows > 0 || summary.bin_rows > 0 => format!(
-                    "筹码增量维护完成，区间 {} 至 {}，写入 {} 条摘要和 {} 条分桶。",
-                    summary.start_date.as_deref().unwrap_or("--"),
-                    summary.end_date.as_deref().unwrap_or("--"),
-                    summary.snapshot_rows,
-                    summary.bin_rows
-                ),
-                Some(_) => "筹码库已存在，但当前没有需要补算的增量筹码数据。".to_string(),
-                None => "未发现筹码库 cyq.db，已跳过筹码数据维护。".to_string(),
-            };
             cb(crate::download::runner::DownloadProgress {
                 phase: "maintain_cyq_incremental".to_string(),
                 finished: 1,
                 total: 1,
                 current_label: None,
-                message,
+                message: chip_message.unwrap_or_else(|| "筹码数据维护完成。".to_string()),
             });
         }
     }

@@ -54,6 +54,7 @@ export type DataDownloadRequest = {
   limitCallsPerMin: number
   includeTurnover: boolean
   allowStaleStockList: boolean
+  chipModel?: 'legacy' | 'chen'
 }
 
 export type MissingStockRepairRequest = {

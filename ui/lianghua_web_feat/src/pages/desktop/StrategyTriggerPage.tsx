@@ -39,6 +39,9 @@ import {
 import { useRouteScrollRegion } from "../../shared/routeScroll";
 import "./css/StrategyTriggerPage.css";
 
+const EMPTY_STRATEGY_HEATMAP_CELLS: StrategyHeatmapCell[] = [];
+const EMPTY_STRATEGY_DAILY_ROWS: StrategyDailyRow[] = [];
+
 type StrategyDailySortKey =
   | "rule_name"
   | "trigger_mode"
@@ -2053,8 +2056,8 @@ export default function StrategyTriggerPage() {
 
   const strategyOptions = pageData?.strategy_options ?? [];
   const analysisTradeDateOptions = pageData?.analysis_trade_date_options ?? [];
-  const overviewItems = pageData?.overview?.items ?? [];
-  const detailRows = pageData?.detail_rows ?? [];
+  const overviewItems = pageData?.overview?.items ?? EMPTY_STRATEGY_HEATMAP_CELLS;
+  const detailRows = pageData?.detail_rows ?? EMPTY_STRATEGY_DAILY_ROWS;
 
   const calendarMonths = useMemo(
     () => buildCalendarMonths(overviewItems),

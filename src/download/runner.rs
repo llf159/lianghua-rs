@@ -1148,6 +1148,7 @@ fn merge_summary(total: &mut DownloadSummary, batch: DownloadSummary) {
     total.success_count += batch.success_count;
     total.failed_count += batch.failed_count;
     total.saved_rows += batch.saved_rows;
+    total.recovered_stock_count += batch.recovered_stock_count;
     total.failed_items.extend(batch.failed_items);
 }
 
@@ -1370,6 +1371,7 @@ fn redownload_failed_stocks(
     adj_type: AdjType,
     with_factors: bool,
     pool: &ThreadPool,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<PreparedDownloadBatch, String> {
     if failed_items.is_empty() {
         return Ok(PreparedDownloadBatch::default());
@@ -1387,7 +1389,42 @@ fn redownload_failed_stocks(
         adj_type,
         with_factors,
     )?;
-    let batch = pool.install(|| client.prepare_stock_downloads(source_dir, &tasks));
+    let total_tasks = tasks.len();
+    let mut batch = PreparedDownloadBatch::default();
+
+    for (task_idx, task) in tasks.iter().enumerate() {
+        emit_progress(
+            progress_cb,
+            "recover_failed_stocks",
+            task_idx,
+            total_tasks,
+            Some(task.ts_code.clone()),
+            format!(
+                "正在整段补救重下 {}，进度 {}/{}。",
+                task.ts_code, task_idx, total_tasks
+            ),
+        );
+        let mut one_batch =
+            pool.install(|| client.prepare_stock_downloads(source_dir, std::slice::from_ref(task)));
+        let one_summary = one_batch.summary();
+        batch.prepared_items.append(&mut one_batch.prepared_items);
+        batch.failed_items.append(&mut one_batch.failed_items);
+        emit_progress(
+            progress_cb,
+            "recover_failed_stocks",
+            task_idx + 1,
+            total_tasks,
+            Some(task.ts_code.clone()),
+            format!(
+                "整段补救重下 {} 完成，成功 {}，失败 {}，进度 {}/{}。",
+                task.ts_code,
+                one_summary.success_count,
+                one_summary.failed_count,
+                task_idx + 1,
+                total_tasks
+            ),
+        );
+    }
     if batch.failed_items.is_empty() {
         return Ok(batch);
     }
@@ -1468,16 +1505,16 @@ fn retry_failed_downloads(
     merged_batch
 }
 
-fn download_first_all_market(
+fn download_first_all_market_after_basic_data(
     config: &DownloadRuntimeConfig,
+    effective_trade_date: &str,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DownloadSummary, String> {
-    let effective_trade_date = init_stock_basic_data(config, progress_cb)?;
     let adj_type = config.adj_type;
     let source_dir = config.source_dir.as_str();
     let start_date = config.start_date.as_str();
     let end_date = if config.end_date.eq_ignore_ascii_case("today") {
-        effective_trade_date.as_str()
+        effective_trade_date
     } else {
         config.end_date.as_str()
     };
@@ -1813,15 +1850,34 @@ pub fn download_indices(
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DownloadSummary, String> {
     let effective_trade_date = init_index_basic_data(config, progress_cb)?;
+    download_indices_after_basic_data(config, effective_trade_date.as_str(), progress_cb)
+}
+
+pub fn download_indices_after_basic_data(
+    config: &DownloadRuntimeConfig,
+    effective_trade_date: &str,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+) -> Result<DownloadSummary, String> {
     let source_dir = config.source_dir.as_str();
+    emit_progress(
+        progress_cb,
+        "prepare_index_list",
+        1,
+        1,
+        Some(effective_trade_date.to_string()),
+        format!(
+            "指数下载复用开头基础数据检查结果，交易日 {}。",
+            effective_trade_date
+        ),
+    );
 
     match load_latest_trade_date(source_dir, AdjType::Ind)? {
-        Some(last_saved_trade_date) if last_saved_trade_date < effective_trade_date => {
+        Some(last_saved_trade_date) if last_saved_trade_date.as_str() < effective_trade_date => {
             let trade_dates = load_trade_date_list(source_dir)?;
             let pending_trade_dates: Vec<String> = trade_dates
                 .iter()
                 .filter(|d| d.as_str() > last_saved_trade_date.as_str())
-                .filter(|d| d.as_str() <= effective_trade_date.as_str())
+                .filter(|d| d.as_str() <= effective_trade_date)
                 .cloned()
                 .collect();
             if pending_trade_dates.is_empty() {
@@ -1830,7 +1886,7 @@ pub fn download_indices(
             download_indices_with_context(
                 config,
                 pending_trade_dates[0].as_str(),
-                effective_trade_date.as_str(),
+                effective_trade_date,
                 progress_cb,
             )
         }
@@ -1838,7 +1894,7 @@ pub fn download_indices(
         None => download_indices_with_context(
             config,
             config.start_date.as_str(),
-            effective_trade_date.as_str(),
+            effective_trade_date,
             progress_cb,
         ),
     }
@@ -1930,6 +1986,14 @@ pub fn download_pending_all_market(
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DownloadSummary, String> {
     let effective_trade_date = init_stock_basic_data(config, progress_cb)?;
+    download_pending_all_market_after_basic_data(config, effective_trade_date.as_str(), progress_cb)
+}
+
+fn download_pending_all_market_after_basic_data(
+    config: &DownloadRuntimeConfig,
+    effective_trade_date: &str,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+) -> Result<DownloadSummary, String> {
     let source_dir = config.source_dir.as_str();
     let start_date = config.start_date.as_str();
     let with_factors = config.include_turnover;
@@ -1941,7 +2005,7 @@ pub fn download_pending_all_market(
     let last_saved_trade_date = load_latest_trade_date(source_dir, adj_type)?
         .ok_or_else(|| "数据库里还没有可用于增量的历史数据，请先做首次下载".to_string())?;
 
-    if last_saved_trade_date >= effective_trade_date {
+    if last_saved_trade_date.as_str() >= effective_trade_date {
         return Ok(DownloadSummary::default());
     }
 
@@ -1949,7 +2013,7 @@ pub fn download_pending_all_market(
     let pending_trade_dates: Vec<String> = trade_dates
         .iter()
         .filter(|d| d.as_str() > last_saved_trade_date.as_str())
-        .filter(|d| d.as_str() <= effective_trade_date.as_str())
+        .filter(|d| d.as_str() <= effective_trade_date)
         .cloned()
         .collect();
 
@@ -2154,10 +2218,11 @@ pub fn download_pending_all_market(
             source_dir,
             &failed_items,
             start_date,
-            effective_trade_date.as_str(),
+            effective_trade_date,
             adj_type,
             with_factors,
             &pool,
+            progress_cb,
         )?;
         emit_progress(
             progress_cb,
@@ -2175,6 +2240,7 @@ pub fn download_pending_all_market(
 
     let passed_write_batches = build_trade_date_write_batches(&passed_prepared_items)?;
     let recovered_items = recovered_batch.prepared_items;
+    total.recovered_stock_count = recovered_items.len();
 
     if passed_write_batches.is_empty() && recovered_items.is_empty() {
         return Ok(total);
@@ -2261,7 +2327,7 @@ pub fn download_pending_all_market(
     sync_gaini_bx_range(
         source_dir,
         pending_trade_dates[0].as_str(),
-        effective_trade_date.as_str(),
+        effective_trade_date,
         progress_cb,
     )?;
 
@@ -2270,7 +2336,7 @@ pub fn download_pending_all_market(
         "done",
         total_trade_dates,
         total_trade_dates,
-        Some(effective_trade_date),
+        Some(effective_trade_date.to_string()),
         format!(
             "增量更新完成，共处理 {} 个交易日，写入 {} 行，整段补救 {} 只股票。",
             total_trade_dates,
@@ -2286,17 +2352,34 @@ pub fn download(
     config: &DownloadRuntimeConfig,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DownloadSummary, String> {
+    let effective_trade_date = init_stock_basic_data(config, progress_cb)?;
+    download_after_basic_data(config, effective_trade_date.as_str(), progress_cb)
+}
+
+pub fn download_after_basic_data(
+    config: &DownloadRuntimeConfig,
+    effective_trade_date: &str,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+) -> Result<DownloadSummary, String> {
     let adj_type = config.adj_type;
     let source_dir = config.source_dir.as_str();
     let db_path = source_db_path(source_dir);
 
     if !Path::new(&db_path).exists() {
-        return download_first_all_market(config, progress_cb);
+        return download_first_all_market_after_basic_data(
+            config,
+            effective_trade_date,
+            progress_cb,
+        );
     }
 
     match load_latest_trade_date(source_dir, adj_type)? {
-        Some(_) => download_pending_all_market(config, progress_cb),
-        None => download_first_all_market(config, progress_cb),
+        Some(_) => {
+            download_pending_all_market_after_basic_data(config, effective_trade_date, progress_cb)
+        }
+        None => {
+            download_first_all_market_after_basic_data(config, effective_trade_date, progress_cb)
+        }
     }
 }
 
