@@ -8,6 +8,7 @@ import {
   type CyqChenSnapshot,
   type CyqChenStrategyDraft,
 } from '../../apis/cyqChen'
+import type { DetailChartSeries, DetailChartTooltip, DetailKlinePanel, DetailKlineRow } from '../../apis/details'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import { readStoredChartMainWidthRatio } from '../../shared/chartSettings'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
@@ -53,6 +54,7 @@ type SavedRun = {
 
 type CyqChenChartFocus = {
   absoluteIndex: number
+  panelKey: string
   cursorXPercent: number
   cursorYPercent: number
   pinned: boolean
@@ -95,6 +97,21 @@ type CyqChenChartPinchState = {
 }
 
 type ChipPeakMode = 'total' | 'main' | 'retail'
+
+type CyqChenChartRow = CyqChenKlineRow & {
+  tradeDate: string
+}
+
+type FieldRow = {
+  label: string
+  value: string
+}
+
+type TooltipSection = {
+  key: string
+  rows: FieldRow[]
+  variant?: 'default' | 'ohlc'
+}
 
 const CYQ_CHEN_DRAFT_STORAGE_KEY = 'lh_cyq_chen_test_draft_v1'
 
@@ -179,6 +196,194 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
 }
 
+function normalizeDetailKlineRow(item: DetailKlineRow): CyqChenChartRow {
+  return {
+    ...item,
+    tradeDate: item.trade_date,
+    turnoverRate: item.tor,
+  }
+}
+
+function buildChartRows(data: CyqChenSingleStockData | null): CyqChenChartRow[] {
+  const detailItems = data?.klinePayload?.items
+  if (detailItems?.length) {
+    return detailItems.map(normalizeDetailKlineRow)
+  }
+  return (data?.kline ?? []) as CyqChenChartRow[]
+}
+
+function getChartRowNumber(row: CyqChenChartRow | null | undefined, key: string) {
+  if (!row) {
+    return null
+  }
+  const value = row[key]
+  return isFiniteNumber(value) ? value : null
+}
+
+function getSeriesColor(seriesIndex: number, series?: DetailChartSeries | null) {
+  if (series?.color) {
+    return series.color
+  }
+  const palette = ['#2563eb', '#f59e0b', '#7c3aed', '#0891b2', '#db2777', '#64748b']
+  return palette[seriesIndex % palette.length]
+}
+
+function getSeriesColorForRow(
+  row: CyqChenChartRow,
+  seriesIndex: number,
+  series?: DetailChartSeries | null,
+  fallbackColor?: string,
+) {
+  const matchedRule = series?.color_when?.find((rule) => row[rule.when_key] === true)
+  return matchedRule?.color ?? fallbackColor ?? getSeriesColor(seriesIndex, series)
+}
+
+function getPanelSeries(panel: DetailKlinePanel) {
+  return panel.series ?? []
+}
+
+function getPanelTooltips(panel: DetailKlinePanel): DetailChartTooltip[] {
+  return panel.tooltips ?? []
+}
+
+function getFallbackSeriesLabel(key: string) {
+  if (key === 'vol') {
+    return '量'
+  }
+  if (key === 'brick') {
+    return '砖'
+  }
+  return key
+}
+
+function formatSeriesLabel(key: string, series?: DetailChartSeries | null) {
+  const label = series?.label?.trim()
+  return label ? label : getFallbackSeriesLabel(key)
+}
+
+function formatTooltipLabel(tooltip: DetailChartTooltip) {
+  const label = tooltip.label?.trim()
+  return label ? label : getFallbackSeriesLabel(tooltip.key)
+}
+
+function formatFieldValue(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return formatNumber(value)
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    return value
+  }
+  if (typeof value === 'boolean') {
+    return value ? '是' : '否'
+  }
+  return '--'
+}
+
+function formatTooltipValue(row: CyqChenChartRow, tooltip: DetailChartTooltip) {
+  const value = row[tooltip.value_key]
+  if (tooltip.format === 'percent') {
+    return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(2)}%` : '--'
+  }
+  if (tooltip.format === 'ratio') {
+    return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '--'
+  }
+  return formatFieldValue(value)
+}
+
+function isMainChartPanel(panel: DetailKlinePanel) {
+  return panel.role === 'main' || panel.key === 'price' || panel.kind === 'candles'
+}
+
+function resolveChartPanelRenderKind(panel: DetailKlinePanel) {
+  if (isMainChartPanel(panel)) {
+    return 'candles'
+  }
+  const series = getPanelSeries(panel)
+  if (panel.kind === 'brick' || series.some((item) => item.kind === 'brick')) {
+    return 'brick'
+  }
+  if (panel.kind === 'bar' || series.some((item) => item.kind === 'bar')) {
+    return 'bar'
+  }
+  return 'line'
+}
+
+function buildLineSegments(
+  items: CyqChenChartRow[],
+  key: string,
+  xAt: (index: number) => number,
+  yAt: (value: number) => number,
+) {
+  const segments: Array<Array<{ x: number; y: number }>> = []
+  let current: Array<{ x: number; y: number }> = []
+
+  items.forEach((row, index) => {
+    const value = getChartRowNumber(row, key)
+    if (value === null) {
+      if (current.length > 0) {
+        segments.push(current)
+        current = []
+      }
+      return
+    }
+    current.push({ x: xAt(index), y: yAt(value) })
+  })
+
+  if (current.length > 0) {
+    segments.push(current)
+  }
+
+  return segments
+}
+
+function buildLinePath(points: Array<{ x: number; y: number }>) {
+  return points
+    .map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
+    .join(' ')
+}
+
+function buildBrickBodies(
+  items: CyqChenChartRow[],
+  key: string,
+  initialPrevious: number | null = null,
+) {
+  const bodies: Array<{
+    tradeDate: string
+    itemIndex: number
+    open: number
+    close: number
+    high: number
+    low: number
+  }> = []
+  let previous: number | null = initialPrevious
+
+  items.forEach((row, itemIndex) => {
+    const current = getChartRowNumber(row, key)
+    if (current === null) {
+      previous = null
+      return
+    }
+    if (previous === null) {
+      previous = current
+      return
+    }
+
+    const open = previous
+    const close = current
+    bodies.push({
+      tradeDate: row.tradeDate,
+      itemIndex,
+      open,
+      close,
+      high: Math.max(open, close),
+      low: Math.min(open, close),
+    })
+    previous = current
+  })
+
+  return bodies
+}
+
 function clampNumber(value: number, min: number, max: number) {
   if (max < min) {
     return min
@@ -246,6 +451,63 @@ function buildCenteredPercentGrid(min: number, max: number) {
   return [...values]
     .filter((value) => value >= min - epsilon && value <= max + epsilon)
     .sort((left, right) => right - left)
+}
+
+function buildNiceAxisGrid(min: number, max: number, targetTickCount = 7) {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) {
+    return []
+  }
+
+  const span = max - min
+  const rawStep = span / Math.max(targetTickCount - 1, 1)
+  const magnitude = 10 ** Math.floor(Math.log10(Math.max(rawStep, 1e-6)))
+  const candidateSteps = Array.from(
+    new Set(
+      [1, 2, 2.5, 5, 10]
+        .flatMap((factor) => [factor * magnitude, factor * magnitude * 0.1])
+        .filter((step) => Number.isFinite(step) && step > 0),
+    ),
+  ).sort((left, right) => left - right)
+
+  let bestValues: number[] = []
+  let bestScore = Number.POSITIVE_INFINITY
+  for (const step of candidateSteps) {
+    const epsilon = step * 1e-6
+    const start = Math.ceil((min - epsilon) / step) * step
+    const end = Math.floor((max + epsilon) / step) * step
+    if (end < start) {
+      continue
+    }
+
+    const values: number[] = []
+    for (let value = end; value >= start - epsilon; value -= step) {
+      values.push(Number(value.toFixed(8)))
+    }
+    const score = Math.abs(values.length - targetTickCount) + (values.length < 4 ? 2 : 0) + step / Math.max(span, 1)
+    if (values.length > 0 && score < bestScore) {
+      bestScore = score
+      bestValues = values
+    }
+  }
+
+  return bestValues
+}
+
+function buildAxisLabelValues(values: number[], kind: string) {
+  void kind
+  if (values.length <= 5) {
+    return values
+  }
+
+  const keep = new Set<number>()
+  const midpointIndex = Math.floor(values.length / 2)
+  const step = Math.max(Math.ceil(values.length / 5), 2)
+  values.forEach((value, index) => {
+    if (index === 0 || index === values.length - 1 || index === midpointIndex || index % step === 0) {
+      keep.add(value)
+    }
+  })
+  return values.filter((value) => keep.has(value))
 }
 
 function buildDateTickIndices(count: number, maxTicks = CHART_DATE_TICK_COUNT) {
@@ -436,6 +698,55 @@ function formatRatioPercent(value: number | null | undefined) {
   return `${(value * 100).toFixed(2)}%`
 }
 
+function buildPanelDrawingTooltipRows(panel: DetailKlinePanel, item: CyqChenChartRow): FieldRow[] {
+  const rows: FieldRow[] = []
+  if (isMainChartPanel(panel)) {
+    rows.push(
+      { label: 'C', value: formatFieldValue(item.close) },
+      { label: 'O', value: formatFieldValue(item.open) },
+      { label: 'H', value: formatFieldValue(item.high) },
+      { label: 'L', value: formatFieldValue(item.low) },
+      { label: '换手', value: formatTooltipPercent(item.turnoverRate) },
+    )
+  }
+
+  for (const series of getPanelSeries(panel)) {
+    rows.push({
+      label: formatSeriesLabel(series.key, series),
+      value: formatFieldValue(item[series.key]),
+    })
+  }
+
+  return rows.filter((row) => row.value !== '--')
+}
+
+function buildDetailTooltipRows(panel: DetailKlinePanel, item: CyqChenChartRow | null): TooltipSection[] {
+  if (!item) {
+    return []
+  }
+
+  const tooltipRows = getPanelTooltips(panel)
+    .map((tooltip) => ({
+      label: formatTooltipLabel(tooltip),
+      value: formatTooltipValue(item, tooltip),
+    }))
+    .filter((row) => row.value !== '--')
+  const shownLabels = new Set(tooltipRows.map((row) => row.label))
+  const drawingRows = buildPanelDrawingTooltipRows(panel, item).filter((row) => !shownLabels.has(row.label))
+  const sections: TooltipSection[] = []
+  if (tooltipRows.length > 0) {
+    sections.push({ key: `${panel.key}-tooltip`, rows: tooltipRows })
+  }
+  if (drawingRows.length > 0) {
+    sections.push({
+      key: `${panel.key}-drawing`,
+      variant: isMainChartPanel(panel) ? 'ohlc' : 'default',
+      rows: drawingRows,
+    })
+  }
+  return sections
+}
+
 function chipValueByMode(bin: CyqChenBin, mode: ChipPeakMode) {
   if (mode === 'main') {
     return bin.mainChip
@@ -489,13 +800,15 @@ function findChipPeak(snapshot: CyqChenSnapshot | null, mode: ChipPeakMode) {
 
 function CyqChenProjectChart({
   kline,
+  panels,
   snapshot,
   selectedTradeDate,
   chipPeakMode,
   onChipPeakModeChange,
   onSelectTradeDate,
 }: {
-  kline: CyqChenKlineRow[]
+  kline: CyqChenChartRow[]
+  panels: DetailKlinePanel[]
   snapshot: CyqChenSnapshot | null
   selectedTradeDate: string
   chipPeakMode: ChipPeakMode
@@ -511,6 +824,15 @@ function CyqChenProjectChart({
   const [focus, setFocus] = useState<CyqChenChartFocus | null>(null)
   const [chartLayoutWidth, setChartLayoutWidth] = useState(readInitialChartLayoutWidth)
   const [chartMainWidthRatio, setChartMainWidthRatio] = useState(() => readStoredChartMainWidthRatio())
+  const indicatorPanels = panels.filter((panel) => !isMainChartPanel(panel))
+  const pricePanel = panels.find(isMainChartPanel) ?? {
+    key: 'price',
+    label: '主K',
+    role: 'main',
+    kind: 'candles',
+    series: [],
+    tooltips: [],
+  } satisfies DetailKlinePanel
 
   const totalItems = kline.length
   const minVisibleBars = totalItems === 0 ? 1 : Math.min(MIN_VISIBLE_BARS, totalItems)
@@ -548,6 +870,8 @@ function CyqChenProjectChart({
     ? `${visibleItems[0]?.tradeDate ?? '--'} ~ ${visibleItems[visibleItems.length - 1]?.tradeDate ?? '--'}`
     : '--'
   const chartMainPanelHeight = chartLayoutWidth * chartMainWidthRatio
+  const chartIndicatorPanelHeight = Math.max(Math.min(chartLayoutWidth * 0.22, 180), 118)
+  const chartShellHeight = chartMainPanelHeight + indicatorPanels.length * chartIndicatorPanelHeight
 
   function setChartZoomAnchored(nextCount: number, anchorAbsoluteIndex: number, anchorRatio: number) {
     if (totalItems === 0) {
@@ -723,6 +1047,7 @@ function CyqChenProjectChart({
   })
 
   function buildChartFocus(
+    panelKey: string,
     viewport: HTMLDivElement,
     clientX: number,
     clientY: number,
@@ -742,6 +1067,7 @@ function CyqChenProjectChart({
 
     return {
       absoluteIndex: effectiveVisibleStart + pointer.visibleIndex,
+      panelKey,
       cursorXPercent: pointer.cursorXPercent,
       cursorYPercent: pointer.cursorYPercent,
       pinned,
@@ -767,7 +1093,7 @@ function CyqChenProjectChart({
     chartDragRef.current = null
   }
 
-  function onChartPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+  function onChartPointerDown(panelKey: string, event: ReactPointerEvent<HTMLDivElement>) {
     if (event.pointerType === 'mouse' && event.button !== 0) {
       return
     }
@@ -798,7 +1124,7 @@ function CyqChenProjectChart({
     }
 
     const isTouchPointer = event.pointerType !== 'mouse'
-    const mode = focus?.pinned
+    const mode = focus?.pinned && focus.panelKey === panelKey
       ? isTouchPointer && !isPointerNearChartFocus(event.currentTarget, event.clientX, focus)
         ? 'dismiss'
         : 'focus'
@@ -824,7 +1150,7 @@ function CyqChenProjectChart({
     }
   }
 
-  function onChartPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+  function onChartPointerMove(panelKey: string, event: ReactPointerEvent<HTMLDivElement>) {
     if (event.pointerType === 'touch') {
       const trackedPointer = chartTouchPointersRef.current.get(event.pointerId)
       if (trackedPointer) {
@@ -843,11 +1169,11 @@ function CyqChenProjectChart({
 
     const dragState = chartDragRef.current
     if (!dragState) {
-      if (event.pointerType !== 'mouse' || !focus?.pinned) {
+      if (event.pointerType !== 'mouse' || !focus?.pinned || focus.panelKey !== panelKey) {
         return
       }
 
-      const nextFocus = buildChartFocus(event.currentTarget, event.clientX, event.clientY, true)
+      const nextFocus = buildChartFocus(panelKey, event.currentTarget, event.clientX, event.clientY, true)
       if (nextFocus) {
         applyChartFocus(nextFocus)
       }
@@ -895,13 +1221,13 @@ function CyqChenProjectChart({
       return
     }
 
-    const nextFocus = buildChartFocus(event.currentTarget, event.clientX, event.clientY, true)
+    const nextFocus = buildChartFocus(panelKey, event.currentTarget, event.clientX, event.clientY, true)
     if (nextFocus) {
       applyChartFocus(nextFocus)
     }
   }
 
-  function onChartPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+  function onChartPointerUp(panelKey: string, event: ReactPointerEvent<HTMLDivElement>) {
     const pinchState = chartPinchRef.current
     if (pinchState?.pointerIds.includes(event.pointerId)) {
       event.preventDefault()
@@ -927,7 +1253,7 @@ function CyqChenProjectChart({
       return
     }
 
-    const nextFocus = buildChartFocus(event.currentTarget, event.clientX, event.clientY, true)
+    const nextFocus = buildChartFocus(panelKey, event.currentTarget, event.clientX, event.clientY, true)
     if (!nextFocus) {
       if (focus?.pinned) {
         applyChartFocus(null)
@@ -935,7 +1261,7 @@ function CyqChenProjectChart({
       return
     }
 
-    if (focus?.pinned && focus.absoluteIndex === nextFocus.absoluteIndex) {
+    if (focus?.pinned && focus.panelKey === panelKey && focus.absoluteIndex === nextFocus.absoluteIndex) {
       applyChartFocus(null)
       return
     }
@@ -943,13 +1269,13 @@ function CyqChenProjectChart({
     applyChartFocus(nextFocus)
   }
 
-  function onChartPointerLeave(event: ReactPointerEvent<HTMLDivElement>) {
+  function onChartPointerLeave(panelKey: string, event: ReactPointerEvent<HTMLDivElement>) {
     const dragState = chartDragRef.current
     if (dragState?.pointerId === event.pointerId) {
       return
     }
 
-    if (!focus?.pinned) {
+    if (!focus?.pinned || focus.panelKey === panelKey) {
       applyChartFocus(null)
     }
   }
@@ -959,6 +1285,286 @@ function CyqChenProjectChart({
       chartPinchRef.current = null
     }
     clearChartPointerState(event)
+  }
+
+  function renderIndicatorPanel(panel: DetailKlinePanel) {
+    const seriesList = getPanelSeries(panel)
+    const renderKind = resolveChartPanelRenderKind(panel)
+    const values = visibleItems.flatMap((item) =>
+      seriesList
+        .map((series) => getChartRowNumber(item, series.key))
+        .filter(isFiniteNumber),
+    )
+    const brickSeries = seriesList.find((series) => series.kind === 'brick') ?? null
+    const brickKey = brickSeries?.key ?? seriesList[0]?.key ?? 'brick'
+    const previousRow = effectiveVisibleStart > 0 ? kline[effectiveVisibleStart - 1] ?? null : null
+    const previousBrick = previousRow ? getChartRowNumber(previousRow, brickKey) : null
+    const brickBodies = renderKind === 'brick' ? buildBrickBodies(visibleItems, brickKey, previousBrick) : []
+    const panelDomain = buildDomain(
+      renderKind === 'brick'
+        ? [
+            ...values,
+            ...(previousBrick === null ? [] : [previousBrick]),
+            ...brickBodies.flatMap((body) => [body.low, body.high]),
+          ]
+        : values,
+    )
+    const dateTickIndices = buildDateTickIndices(visibleItems.length)
+    const activeVisibleIndex = focus?.panelKey === panel.key &&
+      focus.absoluteIndex >= effectiveVisibleStart &&
+      focus.absoluteIndex < effectiveVisibleStart + visibleItems.length
+      ? focus.absoluteIndex - effectiveVisibleStart
+      : null
+    const activeRow = activeVisibleIndex !== null ? visibleItems[activeVisibleIndex] ?? null : null
+    const activeFocusXPercent = activeVisibleIndex !== null
+      ? xAt(activeVisibleIndex) / CHART_VIEWBOX_WIDTH * 100
+      : null
+    const activeTooltipSections = buildDetailTooltipRows(panel, activeRow)
+    const activeTooltipHorizontalClass = (activeFocusXPercent ?? 0) > CHART_TOOLTIP_LEFT_THRESHOLD
+      ? 'details-chart-tooltip-left'
+      : 'details-chart-tooltip-right'
+
+    return (
+      <section className="details-chart-panel" key={panel.key}>
+        <header className="details-chart-panel-head">
+          <div className="details-chart-panel-head-main">
+            <strong>{panel.label || panel.key}</strong>
+            <small>{snapshotLabel(snapshot)}</small>
+          </div>
+          <span>{renderKind}</span>
+        </header>
+        <div
+          className="details-chart-viewport"
+          onPointerDown={(event) => onChartPointerDown(panel.key, event)}
+          onPointerMove={(event) => onChartPointerMove(panel.key, event)}
+          onPointerUp={(event) => onChartPointerUp(panel.key, event)}
+          onPointerLeave={(event) => onChartPointerLeave(panel.key, event)}
+          onPointerCancel={onChartPointerCancel}
+        >
+          {panelDomain && visibleItems.length > 0 ? (() => {
+            const yAt = (value: number) =>
+              CHART_MARGIN.top + (panelDomain.max - value) / (panelDomain.max - panelDomain.min) * plotHeight
+            const tickValues = renderKind === 'brick'
+              ? buildNiceAxisGrid(panelDomain.min, panelDomain.max)
+              : buildCenteredPercentGrid(panelDomain.min, panelDomain.max)
+            const labelValues = buildAxisLabelValues(tickValues, renderKind)
+            const gridValues = renderKind === 'candles' ? tickValues : labelValues
+            const yAxisLabels = labelValues.map((value) => ({
+              key: `${panel.key}-y-${value}`,
+              value: formatAxisValue(value),
+              topPercent: (CHART_MARGIN.top + (panelDomain.max - value) / (panelDomain.max - panelDomain.min) * plotHeight) / CHART_VIEWBOX_HEIGHT * 100,
+            }))
+            const xAxisLabels = dateTickIndices.map((itemIndex) => ({
+              key: `${panel.key}-x-${visibleItems[itemIndex]?.tradeDate ?? itemIndex}`,
+              value: formatTradeDateLabel(visibleItems[itemIndex]?.tradeDate ?? ''),
+              leftPercent: xAt(itemIndex) / CHART_VIEWBOX_WIDTH * 100,
+            }))
+            const barWidth = Math.max(Math.min(step * 0.58, 18), 3)
+
+            return (
+              <>
+                <svg
+                  className="details-chart-svg"
+                  viewBox={`0 0 ${CHART_VIEWBOX_WIDTH} ${CHART_VIEWBOX_HEIGHT}`}
+                  preserveAspectRatio="none"
+                >
+                  {gridValues.map((value) => {
+                    const y = yAt(value)
+                    return (
+                      <line
+                        className="details-chart-grid-line"
+                        key={`grid-${panel.key}-${value}`}
+                        x1={CHART_MARGIN.left}
+                        y1={y}
+                        x2={klinePlotRight}
+                        y2={y}
+                      />
+                    )
+                  })}
+                  {dateTickIndices.map((itemIndex) => (
+                    <line
+                      className="details-chart-vertical-line"
+                      key={`guide-${panel.key}-${visibleItems[itemIndex]?.tradeDate ?? itemIndex}`}
+                      x1={xAt(itemIndex)}
+                      y1={CHART_MARGIN.top}
+                      x2={xAt(itemIndex)}
+                      y2={CHART_VIEWBOX_HEIGHT - CHART_MARGIN.bottom}
+                    />
+                  ))}
+                  {renderKind === 'brick' ? brickBodies.map((body) => {
+                    const x = xAt(body.itemIndex)
+                    const openY = yAt(body.open)
+                    const closeY = yAt(body.close)
+                    const highY = yAt(body.high)
+                    const lowY = yAt(body.low)
+                    const bodyTop = Math.min(openY, closeY)
+                    const bodyHeight = Math.max(Math.abs(openY - closeY), 1.6)
+                    const direction = body.close > body.open ? 'up' : body.close < body.open ? 'down' : 'flat'
+                    const fallbackColor = direction === 'up'
+                      ? CANDLE_UP_COLOR
+                      : direction === 'down'
+                        ? CANDLE_DOWN_COLOR
+                        : CANDLE_FLAT_COLOR
+                    const sourceRow = visibleItems[body.itemIndex]
+                    const color = sourceRow
+                      ? getSeriesColorForRow(sourceRow, 0, brickSeries, fallbackColor)
+                      : fallbackColor
+                    const bodyWidth = Math.max(Math.min(step * 0.72, 22), 4)
+
+                    return (
+                      <g key={`${panel.key}-${body.tradeDate}`}>
+                        <line
+                          className="details-chart-candle-wick"
+                          x1={x}
+                          y1={highY}
+                          x2={x}
+                          y2={lowY}
+                          stroke={color}
+                        />
+                        <rect
+                          className="details-chart-brick-body"
+                          x={x - bodyWidth / 2}
+                          y={bodyTop}
+                          width={bodyWidth}
+                          height={bodyHeight}
+                          fill={color}
+                          stroke={color}
+                          rx={1.2}
+                        />
+                      </g>
+                    )
+                  }) : seriesList.map((series, seriesIndex) => {
+                    const color = getSeriesColor(seriesIndex, series)
+                    const kind = renderKind === 'bar' ? series.kind ?? 'bar' : series.kind ?? 'line'
+                    if (kind === 'bar' || kind === 'histogram') {
+                      const baseValue = isFiniteNumber(series.base_value) ? series.base_value : 0
+                      const baseY = yAt(clampNumber(baseValue, panelDomain.min, panelDomain.max))
+                      return (
+                        <g key={series.key}>
+                          {visibleItems.map((item, itemIndex) => {
+                            const value = getChartRowNumber(item, series.key)
+                            if (!isFiniteNumber(value)) {
+                              return null
+                            }
+                            const y = yAt(value)
+                            const close = getChartRowNumber(item, 'close')
+                            const prevClose = effectiveVisibleStart + itemIndex > 0
+                              ? getChartRowNumber(kline[effectiveVisibleStart + itemIndex - 1], 'close')
+                              : null
+                            const fallbackColor = close !== null && prevClose !== null
+                              ? close > prevClose
+                                ? CANDLE_UP_COLOR
+                                : close < prevClose
+                                  ? CANDLE_DOWN_COLOR
+                                  : CANDLE_FLAT_COLOR
+                              : color
+                            const fill = getSeriesColorForRow(item, seriesIndex, series, fallbackColor)
+                            return (
+                              <rect
+                                className="details-chart-volume-bar"
+                                key={`${series.key}-${item.tradeDate}`}
+                                x={xAt(itemIndex) - barWidth / 2}
+                                y={Math.min(y, baseY)}
+                                width={barWidth}
+                                height={Math.max(Math.abs(baseY - y), 1)}
+                                fill={fill}
+                                opacity={series.opacity ?? 0.72}
+                                rx={1}
+                              />
+                            )
+                          })}
+                        </g>
+                      )
+                    }
+
+                    const segments = buildLineSegments(visibleItems, series.key, xAt, yAt)
+                    if (segments.length === 0) {
+                      return null
+                    }
+                    return (
+                      <g key={series.key}>
+                        {segments.map((segment, segmentIndex) => (
+                          <path
+                            className="details-chart-line-path details-chart-line-path-indicator"
+                            key={`${series.key}-${segmentIndex}`}
+                            d={buildLinePath(segment)}
+                            fill="none"
+                            stroke={color}
+                            strokeWidth={series.line_width ?? 1.6}
+                            opacity={series.opacity ?? 0.95}
+                          />
+                        ))}
+                      </g>
+                    )
+                  })}
+                </svg>
+                <div className="details-chart-overlay-layer" aria-hidden="true">
+                  <div className="details-chart-axis-layer details-chart-axis-layer-y">
+                    {yAxisLabels.map((label) => (
+                      <span className="details-chart-y-label" key={label.key} style={{ top: `${label.topPercent}%` }}>
+                        {label.value}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="details-chart-axis-layer details-chart-axis-layer-x">
+                    {xAxisLabels.map((label) => (
+                      <span className="details-chart-x-label" key={label.key} style={{ left: `${label.leftPercent}%` }}>
+                        {label.value}
+                      </span>
+                    ))}
+                  </div>
+                  {focusXPercent !== null ? (
+                    <div className="details-chart-crosshair-vertical" style={{ left: `${focusXPercent}%` }} />
+                  ) : null}
+                  {focus?.panelKey === panel.key && activeRow && activeFocusXPercent !== null ? (
+                    <>
+                      <div className="details-chart-crosshair-horizontal" style={{ top: `${focus.cursorYPercent}%` }} />
+                      {activeTooltipSections.length > 0 ? (
+                        <div
+                          className={[
+                            'details-chart-tooltip',
+                            activeTooltipHorizontalClass,
+                            focus.pinned ? 'details-chart-tooltip-pinned' : '',
+                          ].filter(Boolean).join(' ')}
+                          style={{
+                            left: `${activeFocusXPercent}%`,
+                            top: `${focus.cursorYPercent}%`,
+                          }}
+                        >
+                          <div className="details-chart-tooltip-head">
+                            <strong>{activeRow.tradeDate}</strong>
+                          </div>
+                          <div className="details-chart-tooltip-body">
+                            {activeTooltipSections.map((section) => (
+                              <div
+                                className={[
+                                  'details-chart-tooltip-grid',
+                                  section.variant === 'ohlc' ? 'details-chart-tooltip-grid-ohlc' : '',
+                                ].filter(Boolean).join(' ')}
+                                key={section.key}
+                              >
+                                {section.rows.map((row) => (
+                                  <div className="details-chart-tooltip-row" key={`${section.key}-${row.label}`}>
+                                    <span>{row.label}</span>
+                                    <strong>{row.value}</strong>
+                                  </div>
+                                ))}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                    </>
+                  ) : null}
+                </div>
+              </>
+            )
+          })() : (
+            <div className="details-chart-empty">暂无指标数据</div>
+          )}
+        </div>
+      </section>
+    )
   }
 
   return (
@@ -996,8 +1602,11 @@ function CyqChenProjectChart({
         className="details-chart-shell cyq-chen-project-chart-shell"
         ref={chartShellRef}
         style={{
-          height: `${chartMainPanelHeight}px`,
-          gridTemplateRows: `${chartMainPanelHeight.toFixed(2)}px`,
+          height: `${chartShellHeight}px`,
+          gridTemplateRows: [
+            `${chartMainPanelHeight.toFixed(2)}px`,
+            ...indicatorPanels.map(() => `${chartIndicatorPanelHeight.toFixed(2)}px`),
+          ].join(' '),
         }}
       >
         <section className="details-chart-panel">
@@ -1009,14 +1618,14 @@ function CyqChenProjectChart({
             <span>candles</span>
           </header>
 
-          <div
-            className="details-chart-viewport"
-            onPointerDown={onChartPointerDown}
-            onPointerMove={onChartPointerMove}
-            onPointerUp={onChartPointerUp}
-            onPointerLeave={onChartPointerLeave}
-            onPointerCancel={onChartPointerCancel}
-          >
+        <div
+          className="details-chart-viewport"
+          onPointerDown={(event) => onChartPointerDown(pricePanel.key, event)}
+          onPointerMove={(event) => onChartPointerMove(pricePanel.key, event)}
+          onPointerUp={(event) => onChartPointerUp(pricePanel.key, event)}
+          onPointerLeave={(event) => onChartPointerLeave(pricePanel.key, event)}
+          onPointerCancel={onChartPointerCancel}
+        >
             {reserveCyqPanelWidth ? (
               <div
                 className="details-chart-cyq-holder-switch"
@@ -1046,8 +1655,10 @@ function CyqChenProjectChart({
                 CHART_MARGIN.top + (domain.max - value) / (domain.max - domain.min) * plotHeight
               const bodyWidth = Math.max(Math.min(step * 0.58, 18), 3)
               const dateTickIndices = buildDateTickIndices(visibleItems.length)
-              const gridValues = buildCenteredPercentGrid(domain.min, domain.max)
-              const yAxisLabels = gridValues.map((value) => ({
+              const tickValues = buildCenteredPercentGrid(domain.min, domain.max)
+              const labelValues = buildAxisLabelValues(tickValues, 'candles')
+              const gridValues = tickValues
+              const yAxisLabels = labelValues.map((value) => ({
                 key: `price-y-${value}`,
                 value: formatAxisValue(value),
                 topPercent: (CHART_MARGIN.top + (domain.max - value) / (domain.max - domain.min) * plotHeight) / CHART_VIEWBOX_HEIGHT * 100,
@@ -1261,7 +1872,7 @@ function CyqChenProjectChart({
                     {focusXPercent !== null ? (
                       <div className="details-chart-crosshair-vertical" style={{ left: `${focusXPercent}%` }} />
                     ) : null}
-                    {focus && focusedRow ? (
+                    {focus?.panelKey === pricePanel.key && focusedRow ? (
                       <>
                         <div className="details-chart-crosshair-horizontal" style={{ top: `${focus.cursorYPercent}%` }} />
                         <div
@@ -1313,6 +1924,7 @@ function CyqChenProjectChart({
             )}
           </div>
         </section>
+        {indicatorPanels.map(renderIndicatorPanel)}
       </div>
     </>
   )
@@ -1371,6 +1983,8 @@ export default function CyqChenPage() {
     return selectedSnapshotByDate(result.snapshots, tradeDate)
   }, [result, selectedTradeDate])
 
+  const chartRows = useMemo(() => buildChartRows(result), [result])
+  const chartPanels = result?.klinePayload?.panels ?? []
   const snapshotOptions = result?.snapshots ?? []
   const mainPeakBin = useMemo(() => findChipPeak(selectedSnapshot, 'main'), [selectedSnapshot])
   const retailPeakBin = useMemo(() => findChipPeak(selectedSnapshot, 'retail'), [selectedSnapshot])
@@ -1648,7 +2262,7 @@ export default function CyqChenPage() {
           <div className="cyq-chen-chart-title">
             <div>
               <strong>K 线与筹码分布</strong>
-              <span>{result?.kline.length ?? 0} 根</span>
+              <span>{chartRows.length} 根</span>
             </div>
             <div className="cyq-chen-chip-legend" aria-label="筹码颜色">
               <span><i style={{ background: CHIP_COLOR_MAIN_PROFIT }} />主力盈利</span>
@@ -1658,7 +2272,8 @@ export default function CyqChenPage() {
             </div>
           </div>
           <CyqChenProjectChart
-            kline={result?.kline ?? []}
+            kline={chartRows}
+            panels={chartPanels}
             snapshot={selectedSnapshot}
             selectedTradeDate={selectedSnapshot?.tradeDate ?? selectedTradeDate}
             chipPeakMode={chipPeakMode}

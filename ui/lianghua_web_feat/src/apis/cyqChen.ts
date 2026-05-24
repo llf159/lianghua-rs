@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open, save } from '@tauri-apps/plugin-dialog'
+import type { DetailKlinePayload } from './details'
 
 export type CyqChenHolder = 'main' | 'retail'
 
@@ -20,6 +21,7 @@ export type CyqChenKlineRow = {
   low?: number | null
   close?: number | null
   turnoverRate?: number | null
+  [key: string]: string | number | boolean | null | undefined
 }
 
 export type CyqChenBin = {
@@ -61,6 +63,7 @@ export type CyqChenSingleStockData = {
   endDate: string
   outputStartDate?: string | null
   kline: CyqChenKlineRow[]
+  klinePayload?: DetailKlinePayload | null
   snapshots: CyqChenSnapshot[]
 }
 

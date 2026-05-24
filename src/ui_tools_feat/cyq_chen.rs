@@ -17,10 +17,11 @@ use crate::{
         load_trade_date_list, source_db_path,
     },
     scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map},
-    ui_tools_feat::watch_observe::normalize_ts_code,
+    ui_tools_feat::{details::DetailKlinePayload, watch_observe::normalize_ts_code},
 };
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
+const DEFAULT_VISIBLE_KLINE_WINDOW_DAYS: usize = 90;
 const CHIP_CHANGE_BACKUP_DIR_NAME: &str = "chip_change_rule_backups";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -46,7 +47,7 @@ pub struct CyqChenKlineRow {
     pub turnover_rate: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CyqChenSingleStockData {
     pub resolved_ts_code: String,
@@ -54,6 +55,7 @@ pub struct CyqChenSingleStockData {
     pub end_date: String,
     pub output_start_date: Option<String>,
     pub kline: Vec<CyqChenKlineRow>,
+    pub kline_payload: Option<DetailKlinePayload>,
     pub snapshots: Vec<ChenChipSnapshot>,
 }
 
@@ -730,6 +732,7 @@ pub fn run_cyq_chen_single_stock_test(
             end_date,
             output_start_date: None,
             kline: Vec::new(),
+            kline_payload: None,
             snapshots: Vec::new(),
         }),
         Err(err) => return Err(err),
@@ -742,6 +745,7 @@ pub fn run_cyq_chen_single_stock_test(
             end_date,
             output_start_date: None,
             kline: Vec::new(),
+            kline_payload: None,
             snapshots: Vec::new(),
         });
     }
@@ -768,6 +772,7 @@ pub fn run_cyq_chen_single_stock_test(
     )?;
 
     let kline = build_kline_rows(&row_data, &start_date, &end_date)?;
+    let kline_payload = build_detail_kline_payload(source_path, &ts_code, &start_date, &end_date)?;
     let output_start_date =
         resolve_output_start_date(&row_data, &start_date, &end_date, config.warmup_days);
     let snapshots = if let Some(output_start_date) = output_start_date.as_deref() {
@@ -798,8 +803,37 @@ pub fn run_cyq_chen_single_stock_test(
         end_date,
         output_start_date,
         kline,
+        kline_payload,
         snapshots,
     })
+}
+
+fn build_detail_kline_payload(
+    source_path: &str,
+    ts_code: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<Option<DetailKlinePayload>, String> {
+    let source_db = source_db_path(source_path);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
+    let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
+    let mut payload = crate::ui_tools_feat::details::query_kline(
+        &conn,
+        source_path,
+        ts_code,
+        DEFAULT_VISIBLE_KLINE_WINDOW_DAYS,
+        None,
+    )?;
+
+    if let Some(items) = payload.items.as_mut() {
+        items.retain(|item| {
+            item.trade_date.as_str() >= start_date && item.trade_date.as_str() <= end_date
+        });
+    }
+
+    Ok(Some(payload))
 }
 
 fn resolve_requested_range(

@@ -1201,7 +1201,7 @@ fn load_chart_indicator_rank_series_map(
     out
 }
 
-fn query_kline(
+pub(crate) fn query_kline(
     source_conn: &Connection,
     source_path: &str,
     ts_code: &str,
