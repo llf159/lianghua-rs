@@ -1,11 +1,34 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::data::{RowData, ScopeWay, ScoreRule};
-use crate::data::{load_stock_list, load_trade_date_list};
+use duckdb::{Connection, params};
+
+use crate::data::{
+    RowData, ScopeWay, ScoreRule, cyq_chen_db_path, load_stock_list, load_trade_date_list,
+};
 use crate::expr::eval::{Runtime, Value};
-use crate::expr::parser::{Expr, Parser, Stmt, lex_all};
+use crate::expr::parser::{Expr, Parser, Stmt, Stmts, lex_all};
 use crate::utils::utils::eval_binary_for_warmup;
 use crate::utils::utils::impl_expr_warmup;
+
+pub const CYQ_CHEN_RUNTIME_FIELDS: [(&str, &str); 14] = [
+    ("CYQ_MIN", "min_price"),
+    ("CYQ_MAX", "max_price"),
+    ("CYQ_MT", "main_total"),
+    ("CYQ_RT", "retail_total"),
+    ("CYQ_TC", "total_chips"),
+    ("CYQ_TPR", "total_profit_ratio"),
+    ("CYQ_TTR", "total_trapped_ratio"),
+    ("CYQ_PEAK", "chip_peak_price"),
+    ("CYQ_P70L", "percent_70_price_low"),
+    ("CYQ_P70H", "percent_70_price_high"),
+    ("CYQ_P70C", "percent_70_concentration"),
+    ("CYQ_P90L", "percent_90_price_low"),
+    ("CYQ_P90H", "percent_90_price_high"),
+    ("CYQ_P90C", "percent_90_concentration"),
+];
+
+const CYQ_CHEN_SNAPSHOT_TABLE: &str = "cyq_chen_snapshot";
+const DEFAULT_CYQ_CHEN_ADJ_TYPE: &str = "qfq";
 
 pub fn load_st_list(source_dir: &str) -> Result<HashSet<String>, String> {
     let rows = load_stock_list(source_dir)?;
@@ -149,6 +172,345 @@ pub fn rt_max_len(rt: &Runtime) -> usize {
     max_len
 }
 
+pub fn cyq_chen_runtime_key_names() -> Vec<&'static str> {
+    CYQ_CHEN_RUNTIME_FIELDS
+        .iter()
+        .map(|(runtime_key, _)| *runtime_key)
+        .collect()
+}
+
+pub fn collect_used_cyq_chen_runtime_keys(programs: &[&Stmts]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for (runtime_key, _) in CYQ_CHEN_RUNTIME_FIELDS {
+        if programs
+            .iter()
+            .any(|program| crate::data::expr_program_uses_runtime_key(program, runtime_key))
+        {
+            out.insert(runtime_key.to_string());
+        }
+    }
+    out
+}
+
+fn used_cyq_chen_fields(used_keys: &HashSet<String>) -> Vec<(&'static str, &'static str)> {
+    CYQ_CHEN_RUNTIME_FIELDS
+        .iter()
+        .copied()
+        .filter(|(runtime_key, _)| used_keys.contains(*runtime_key))
+        .collect()
+}
+
+fn insert_empty_cyq_chen_fields(row_data: &mut RowData, fields: &[(&str, &str)]) {
+    let len = row_data.trade_dates.len();
+    for (runtime_key, _) in fields {
+        row_data
+            .cols
+            .entry((*runtime_key).to_string())
+            .or_insert_with(|| vec![None; len]);
+    }
+}
+
+pub fn inject_empty_optional_cyq_chen_fields(
+    row_data: &mut RowData,
+    used_keys: &HashSet<String>,
+) -> Result<(), String> {
+    let fields = used_cyq_chen_fields(used_keys);
+    insert_empty_cyq_chen_fields(row_data, &fields);
+    row_data.validate()
+}
+
+fn cyq_chen_table_exists(conn: &Connection) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+        [CYQ_CHEN_SNAPSHOT_TABLE],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count > 0)
+    .map_err(|e| format!("检查 cyq_chen_snapshot 表失败: {e}"))
+}
+
+fn cyq_chen_existing_columns(conn: &Connection) -> Result<HashSet<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT column_name FROM information_schema.columns WHERE table_name = ?")
+        .map_err(|e| format!("预编译 cyq_chen_snapshot 字段查询失败: {e}"))?;
+    let mut rows = stmt
+        .query([CYQ_CHEN_SNAPSHOT_TABLE])
+        .map_err(|e| format!("查询 cyq_chen_snapshot 字段失败: {e}"))?;
+    let mut out = HashSet::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取 cyq_chen_snapshot 字段失败: {e}"))?
+    {
+        let name: String = row
+            .get(0)
+            .map_err(|e| format!("读取 cyq_chen_snapshot 字段名失败: {e}"))?;
+        out.insert(name.to_ascii_lowercase());
+    }
+    Ok(out)
+}
+
+fn format_cyq_chen_used_keys(used_keys: &HashSet<String>) -> String {
+    let mut keys = used_keys.iter().cloned().collect::<Vec<_>>();
+    keys.sort();
+    keys.join(", ")
+}
+
+pub fn preview_optional_cyq_chen_injection_warnings(
+    source_dir: &str,
+    start_date: &str,
+    end_date: &str,
+    warmup_need: usize,
+    used_keys: &HashSet<String>,
+) -> Vec<String> {
+    let fields = used_cyq_chen_fields(used_keys);
+    if fields.is_empty() {
+        return Vec::new();
+    }
+
+    let used_keys_text = format_cyq_chen_used_keys(used_keys);
+    let cyq_db = cyq_chen_db_path(source_dir);
+    if !cyq_db.exists() {
+        return vec![format!(
+            "策略使用新筹码字段 {used_keys_text}，但 cyq_chen.db 不存在；本次会按空值注入这些字段。"
+        )];
+    }
+
+    let mut warnings = Vec::new();
+    let conn = match Connection::open(&cyq_db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            return vec![format!(
+                "策略使用新筹码字段 {used_keys_text}，但打开 cyq_chen.db 失败: {error}；本次会按空值注入这些字段。"
+            )];
+        }
+    };
+
+    match cyq_chen_table_exists(&conn) {
+        Ok(true) => {}
+        Ok(false) => {
+            return vec![format!(
+                "策略使用新筹码字段 {used_keys_text}，但 cyq_chen_snapshot 表不存在；本次会按空值注入这些字段。"
+            )];
+        }
+        Err(error) => {
+            return vec![format!(
+                "策略使用新筹码字段 {used_keys_text}，但检查 cyq_chen_snapshot 失败: {error}；本次会按空值注入这些字段。"
+            )];
+        }
+    }
+
+    match cyq_chen_existing_columns(&conn) {
+        Ok(columns) => {
+            let missing = fields
+                .iter()
+                .filter(|(_, db_col)| !columns.contains(&db_col.to_ascii_lowercase()))
+                .map(|(runtime_key, _)| *runtime_key)
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                warnings.push(format!(
+                    "cyq_chen_snapshot 缺少字段 {}；对应运行时字段本次会按空值注入。",
+                    missing.join(", ")
+                ));
+            }
+        }
+        Err(error) => warnings.push(format!(
+            "检查 cyq_chen_snapshot 字段失败: {error}；新筹码运行时字段可能按空值注入。"
+        )),
+    }
+
+    let load_start_date = load_trade_date_list(source_dir)
+        .ok()
+        .and_then(|trade_dates| {
+            let anchor = trade_dates
+                .binary_search_by(|date| date.as_str().cmp(start_date))
+                .unwrap_or_else(|index| index);
+            if anchor >= trade_dates.len() {
+                return None;
+            }
+            Some((
+                trade_dates[anchor.saturating_sub(warmup_need)].clone(),
+                trade_dates
+                    .iter()
+                    .filter(|date| {
+                        let date = date.as_str();
+                        date >= trade_dates[anchor.saturating_sub(warmup_need)].as_str()
+                            && date <= end_date
+                    })
+                    .count(),
+            ))
+        });
+    let (load_start_date, expected_trade_dates) =
+        load_start_date.unwrap_or_else(|| (start_date.to_string(), 0));
+
+    let range_info = conn.query_row(
+        &format!(
+            "SELECT MIN(trade_date), MAX(trade_date), COUNT(DISTINCT trade_date) FROM {CYQ_CHEN_SNAPSHOT_TABLE} WHERE adj_type = ? AND trade_date >= ? AND trade_date <= ?"
+        ),
+        params![DEFAULT_CYQ_CHEN_ADJ_TYPE, load_start_date.as_str(), end_date],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        },
+    );
+    match range_info {
+        Ok((Some(min_date), Some(max_date), actual_dates)) => {
+            if min_date.as_str() > load_start_date.as_str() {
+                warnings.push(format!(
+                    "新筹码库最早可用日期为 {min_date}，晚于表达式预热加载起点 {load_start_date}；更早预热段的新筹码字段会为空。"
+                ));
+            }
+            if max_date.as_str() < end_date {
+                warnings.push(format!(
+                    "新筹码库最新可用日期为 {max_date}，早于本次结束日期 {end_date}；之后的新筹码字段会为空。"
+                ));
+            }
+            if expected_trade_dates > 0 && (actual_dates.max(0) as usize) < expected_trade_dates {
+                warnings.push(format!(
+                    "新筹码库在预热/计算区间 {load_start_date} 至 {end_date} 只有 {} 个交易日，交易日历有 {expected_trade_dates} 个；缺口会按空值处理。",
+                    actual_dates.max(0)
+                ));
+            }
+        }
+        Ok((_, _, _)) => warnings.push(format!(
+            "新筹码库在预热/计算区间 {load_start_date} 至 {end_date} 没有数据；相关字段会按空值注入。"
+        )),
+        Err(error) => warnings.push(format!(
+            "读取新筹码库日期范围失败: {error}；相关字段会尽量按空值注入。"
+        )),
+    }
+
+    warnings
+}
+
+pub fn inject_optional_cyq_chen_fields(
+    row_data: &mut RowData,
+    source_dir: &str,
+    ts_code: &str,
+    used_keys: &HashSet<String>,
+) -> Vec<String> {
+    let fields = used_cyq_chen_fields(used_keys);
+    if fields.is_empty() {
+        return Vec::new();
+    }
+    insert_empty_cyq_chen_fields(row_data, &fields);
+    if row_data.trade_dates.is_empty() {
+        return vec!["RowData 为空，新筹码字段已按空值注入。".to_string()];
+    }
+
+    let cyq_db = cyq_chen_db_path(source_dir);
+    if !cyq_db.exists() {
+        return vec!["cyq_chen.db 不存在，新筹码字段已按空值注入。".to_string()];
+    }
+    let conn = match Connection::open(&cyq_db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            return vec![format!(
+                "打开 cyq_chen.db 失败: {error}；新筹码字段已按空值注入。"
+            )];
+        }
+    };
+    match cyq_chen_table_exists(&conn) {
+        Ok(true) => {}
+        Ok(false) => {
+            return vec!["cyq_chen_snapshot 表不存在，新筹码字段已按空值注入。".to_string()];
+        }
+        Err(error) => {
+            return vec![format!("{error}；新筹码字段已按空值注入。")];
+        }
+    }
+    let existing_columns = match cyq_chen_existing_columns(&conn) {
+        Ok(columns) => columns,
+        Err(error) => {
+            return vec![format!("{error}；新筹码字段已按空值注入。")];
+        }
+    };
+    let available_fields = fields
+        .iter()
+        .copied()
+        .filter(|(_, db_col)| existing_columns.contains(&db_col.to_ascii_lowercase()))
+        .collect::<Vec<_>>();
+    if available_fields.is_empty() {
+        return vec!["cyq_chen_snapshot 缺少请求的新筹码字段，已按空值注入。".to_string()];
+    }
+
+    let mut select_cols = vec!["trade_date".to_string()];
+    for (_, db_col) in &available_fields {
+        select_cols.push(format!("TRY_CAST(\"{db_col}\" AS DOUBLE) AS \"{db_col}\""));
+    }
+    let sql = format!(
+        r#"
+        SELECT {}
+        FROM {CYQ_CHEN_SNAPSHOT_TABLE}
+        WHERE ts_code = ?
+          AND adj_type = ?
+          AND trade_date >= ?
+          AND trade_date <= ?
+        ORDER BY trade_date ASC
+        "#,
+        select_cols.join(", ")
+    );
+    let first_date = row_data.trade_dates.first().cloned().unwrap_or_default();
+    let last_date = row_data.trade_dates.last().cloned().unwrap_or_default();
+    let date_index = row_data
+        .trade_dates
+        .iter()
+        .enumerate()
+        .map(|(index, trade_date)| (trade_date.as_str(), index))
+        .collect::<HashMap<_, _>>();
+
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(stmt) => stmt,
+        Err(error) => {
+            return vec![format!(
+                "预编译新筹码字段查询失败: {error}；新筹码字段已按空值注入。"
+            )];
+        }
+    };
+    let mut rows = match stmt.query(params![
+        ts_code,
+        DEFAULT_CYQ_CHEN_ADJ_TYPE,
+        first_date.as_str(),
+        last_date.as_str()
+    ]) {
+        Ok(rows) => rows,
+        Err(error) => {
+            return vec![format!(
+                "查询新筹码字段失败: {error}；新筹码字段已按空值注入。"
+            )];
+        }
+    };
+
+    let mut row_count = 0usize;
+    while let Ok(Some(row)) = rows.next() {
+        let Ok(trade_date) = row.get::<_, String>(0) else {
+            continue;
+        };
+        let Some(row_index) = date_index.get(trade_date.as_str()).copied() else {
+            continue;
+        };
+        row_count += 1;
+        for (field_index, (runtime_key, _)) in available_fields.iter().enumerate() {
+            let value = row.get::<_, Option<f64>>(field_index + 1).ok().flatten();
+            if let Some(series) = row_data.cols.get_mut(*runtime_key) {
+                if let Some(slot) = series.get_mut(row_index) {
+                    *slot = value;
+                }
+            }
+        }
+    }
+
+    if row_count == 0 {
+        vec![format!(
+            "{ts_code} 在新筹码库区间 {first_date} 至 {last_date} 没有匹配数据，新筹码字段已按空值注入。"
+        )]
+    } else {
+        Vec::new()
+    }
+}
+
 pub fn calc_zhang_pct(ts_code: &str, is_st: bool) -> f64 {
     let ts = ts_code.trim().to_ascii_uppercase();
     let (core, suffix) = ts.split_once('.').unwrap_or((ts.as_str(), ""));
@@ -250,9 +612,9 @@ pub fn load_total_share_map(source_dir: &str) -> Result<HashMap<String, f64>, St
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
-    use super::inject_stock_extra_fields;
+    use super::{inject_optional_cyq_chen_fields, inject_stock_extra_fields};
     use crate::data::RowData;
 
     #[test]
@@ -288,5 +650,30 @@ mod tests {
             row_data.cols.get("TOTAL_MV_YI").map(Vec::as_slice),
             Some([Some(30.0), Some(24.0)].as_slice())
         );
+    }
+
+    #[test]
+    fn optional_cyq_chen_fields_inject_empty_series_when_db_is_missing() {
+        let mut row_data = RowData {
+            trade_dates: vec!["20240102".to_string(), "20240103".to_string()],
+            cols: HashMap::from([("C".to_string(), vec![Some(10.0), Some(12.0)])]),
+        };
+        let used_keys = HashSet::from(["CYQ_TPR".to_string()]);
+        let missing_source_dir =
+            std::env::temp_dir().join(format!("lianghua-missing-cyq-chen-{}", std::process::id()));
+
+        let warnings = inject_optional_cyq_chen_fields(
+            &mut row_data,
+            missing_source_dir.to_str().expect("utf8 temp path"),
+            "000001.SZ",
+            &used_keys,
+        );
+
+        assert!(!warnings.is_empty());
+        assert_eq!(
+            row_data.cols.get("CYQ_TPR").map(Vec::as_slice),
+            Some([None, None].as_slice())
+        );
+        row_data.validate().expect("row shape remains valid");
     }
 }

@@ -429,6 +429,13 @@ function formatTooltipPercent(value: number | null | undefined) {
   return `${value.toFixed(2)}%`
 }
 
+function formatRatioPercent(value: number | null | undefined) {
+  if (!isFiniteNumber(value)) {
+    return '--'
+  }
+  return `${(value * 100).toFixed(2)}%`
+}
+
 function chipValueByMode(bin: CyqChenBin, mode: ChipPeakMode) {
   if (mode === 'main') {
     return bin.mainChip
@@ -1336,7 +1343,7 @@ function snapshotLabel(snapshot: CyqChenSnapshot | null) {
   if (!snapshot) {
     return '无快照'
   }
-  return `${snapshot.tradeDate ?? '--'} · 主 ${formatNumber(snapshot.mainTotal)} / 散 ${formatNumber(snapshot.retailTotal)}`
+  return `${snapshot.tradeDate ?? '--'} · 获利 ${formatRatioPercent(snapshot.totalProfitRatio)} · 主 ${formatNumber(snapshot.mainTotal)} / 散 ${formatNumber(snapshot.retailTotal)}`
 }
 
 export default function CyqChenPage() {
@@ -1591,6 +1598,18 @@ export default function CyqChenPage() {
             <strong>{formatNumber(selectedSnapshot?.close)}</strong>
           </div>
           <div>
+            <span>获利比例</span>
+            <strong>{formatRatioPercent(selectedSnapshot?.totalProfitRatio)}</strong>
+          </div>
+          <div>
+            <span>套牢比例</span>
+            <strong>{formatRatioPercent(selectedSnapshot?.totalTrappedRatio)}</strong>
+          </div>
+          <div>
+            <span>总筹码峰</span>
+            <strong>{formatNumber(selectedSnapshot?.chipPeakPrice)}</strong>
+          </div>
+          <div>
             <span>主力筹码峰</span>
             <strong>{mainPeakBin ? formatNumber(mainPeakBin.price) : '--'}</strong>
             <small>{mainPeakBin ? formatNumber(mainPeakBin.mainChip, 4) : '--'}</small>
@@ -1604,6 +1623,24 @@ export default function CyqChenPage() {
             <span>{chipModeLabel(chipPeakMode)}显示峰</span>
             <strong>{selectedPeakBin ? formatNumber(selectedPeakBin.price) : '--'}</strong>
             <small>{selectedPeakBin ? formatNumber(chipValueByMode(selectedPeakBin, chipPeakMode), 4) : '--'}</small>
+          </div>
+          <div>
+            <span>70%区间</span>
+            <strong>
+              {selectedSnapshot
+                ? `${formatNumber(selectedSnapshot.percent70.priceLow)} - ${formatNumber(selectedSnapshot.percent70.priceHigh)}`
+                : '--'}
+            </strong>
+            <small>集中度 {formatRatioPercent(selectedSnapshot?.percent70.concentration)}</small>
+          </div>
+          <div>
+            <span>90%区间</span>
+            <strong>
+              {selectedSnapshot
+                ? `${formatNumber(selectedSnapshot.percent90.priceLow)} - ${formatNumber(selectedSnapshot.percent90.priceHigh)}`
+                : '--'}
+            </strong>
+            <small>集中度 {formatRatioPercent(selectedSnapshot?.percent90.concentration)}</small>
           </div>
         </div>
 

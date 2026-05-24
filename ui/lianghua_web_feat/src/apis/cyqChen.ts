@@ -32,6 +32,13 @@ export type CyqChenBin = {
   totalChip: number
 }
 
+export type CyqChenPercentRange = {
+  percent: number
+  priceLow: number
+  priceHigh: number
+  concentration: number
+}
+
 export type CyqChenSnapshot = {
   tradeDate?: string | null
   close: number
@@ -40,6 +47,11 @@ export type CyqChenSnapshot = {
   mainTotal: number
   retailTotal: number
   totalChips: number
+  totalProfitRatio: number
+  totalTrappedRatio: number
+  chipPeakPrice: number
+  percent70: CyqChenPercentRange
+  percent90: CyqChenPercentRange
   bins: CyqChenBin[]
 }
 

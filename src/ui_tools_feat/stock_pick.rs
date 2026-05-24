@@ -15,8 +15,9 @@ use crate::{
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
     scoring::tools::{
-        calc_query_need_rows, calc_query_start_date, inject_stock_extra_fields, load_st_list,
-        load_total_share_map, rt_max_len,
+        calc_query_need_rows, calc_query_start_date, collect_used_cyq_chen_runtime_keys,
+        cyq_chen_runtime_key_names, inject_optional_cyq_chen_fields, inject_stock_extra_fields,
+        load_st_list, load_total_share_map, rt_max_len,
     },
     utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
 };
@@ -388,11 +389,18 @@ fn estimate_custom_warmup(stmts: &Stmts, scope_way: PickScopeWay) -> Result<usiz
 }
 
 fn collect_expression_stock_pick_runtime_keys(stmts: &Stmts) -> HashSet<String> {
+    let cyq_chen_keys = cyq_chen_runtime_key_names();
+    let injected_keys = EXPRESSION_STOCK_PICK_INJECTED_RUNTIME_KEYS
+        .iter()
+        .copied()
+        .chain(cyq_chen_keys)
+        .collect::<Vec<_>>();
+
     collect_runtime_keys_from_expr_programs(
         &[stmts],
         RuntimeKeyCollectOptions {
             always_keys: &[],
-            injected_keys: &EXPRESSION_STOCK_PICK_INJECTED_RUNTIME_KEYS,
+            injected_keys: &injected_keys,
             aliases: &EXPRESSION_STOCK_PICK_RUNTIME_ALIASES,
         },
     )
@@ -660,6 +668,7 @@ pub fn run_expression_stock_pick(
 
     let warmup_need = estimate_custom_warmup(&stmts, parsed_scope_way)?;
     let required_runtime_keys = collect_expression_stock_pick_runtime_keys(&stmts);
+    let used_cyq_chen_keys = collect_used_cyq_chen_runtime_keys(&[&stmts]);
     let needs_rank = expr_program_uses_runtime_key(&stmts, "RANK");
     let query_start_date = calc_query_start_date(source_path, warmup_need, &resolved_start_date)?;
     let need_rows = calc_query_need_rows(
@@ -713,6 +722,12 @@ pub fn run_expression_stock_pick(
                     &resolved_end_date,
                     need_rows,
                 )?;
+                let _ = inject_optional_cyq_chen_fields(
+                    &mut row_data,
+                    source_path,
+                    ts_code,
+                    &used_cyq_chen_keys,
+                );
                 inject_stock_extra_fields(
                     &mut row_data,
                     ts_code,
@@ -949,7 +964,7 @@ mod tests {
     #[test]
     fn expression_stock_pick_runtime_key_collection_skips_injected_fields() {
         let program = parse_program(
-            "M := MA(C, 5); M > MY_IND AND RANK <= 100 AND ZHANG > 0 AND TOTAL_MV_YI <= 300",
+            "M := MA(C, 5); M > MY_IND AND RANK <= 100 AND ZHANG > 0 AND TOTAL_MV_YI <= 300 AND CYQ_TPR > 0.6",
         );
 
         let keys = collect_expression_stock_pick_runtime_keys(&program);
@@ -958,7 +973,7 @@ mod tests {
             assert!(keys.contains(required_key), "missing {required_key}");
         }
         assert!(!keys.contains("TOTAL_MV"));
-        for injected_key in ["RANK", "ZHANG", "TOTAL_MV_YI"] {
+        for injected_key in ["RANK", "ZHANG", "TOTAL_MV_YI", "CYQ_TPR"] {
             assert!(!keys.contains(injected_key), "unexpected {injected_key}");
         }
         assert!(!keys.contains("O"));

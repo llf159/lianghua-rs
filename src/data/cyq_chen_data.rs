@@ -11,7 +11,7 @@ use rayon::prelude::*;
 
 use crate::{
     data::{
-        DataReader, RowData,
+        DataReader, RowData, chip_change_rule_path,
         cyq_chen::{
             ChenChipBin, ChenChipConfig, ChenChipSnapshot, CompiledChipChangeConfig,
             collect_chen_chip_runtime_keys,
@@ -19,7 +19,7 @@ use crate::{
             compute_chen_chip_snapshots_with_compiled_config, estimate_chen_chip_expression_warmup,
             load_compiled_chip_change_config,
         },
-        chip_change_rule_path, cyq_chen_db_path, load_trade_date_list, source_db_path,
+        cyq_chen_db_path, load_trade_date_list, source_db_path,
     },
     download::runner::{DownloadProgress, DownloadProgressCallback},
     scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map},
@@ -88,6 +88,15 @@ pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
             main_total DOUBLE,
             retail_total DOUBLE,
             total_chips DOUBLE,
+            total_profit_ratio DOUBLE,
+            total_trapped_ratio DOUBLE,
+            chip_peak_price DOUBLE,
+            percent_70_price_low DOUBLE,
+            percent_70_price_high DOUBLE,
+            percent_70_concentration DOUBLE,
+            percent_90_price_low DOUBLE,
+            percent_90_price_high DOUBLE,
+            percent_90_concentration DOUBLE,
             PRIMARY KEY (ts_code, trade_date, adj_type)
         )
         "#,
@@ -133,6 +142,45 @@ pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
         [],
     )
     .map_err(|e| format!("创建cyq_chen_meta失败:{e}"))?;
+
+    ensure_cyq_chen_snapshot_columns(&conn)?;
+
+    Ok(())
+}
+
+fn ensure_cyq_chen_snapshot_columns(conn: &Connection) -> Result<(), String> {
+    for (column_name, column_type) in [
+        ("total_profit_ratio", "DOUBLE"),
+        ("total_trapped_ratio", "DOUBLE"),
+        ("chip_peak_price", "DOUBLE"),
+        ("percent_70_price_low", "DOUBLE"),
+        ("percent_70_price_high", "DOUBLE"),
+        ("percent_70_concentration", "DOUBLE"),
+        ("percent_90_price_low", "DOUBLE"),
+        ("percent_90_price_high", "DOUBLE"),
+        ("percent_90_concentration", "DOUBLE"),
+    ] {
+        let exists = conn
+            .query_row(
+                r#"
+                SELECT COUNT(*)
+                FROM information_schema.columns
+                WHERE table_name = ? AND column_name = ?
+                "#,
+                params![CYQ_CHEN_SNAPSHOT_TABLE, column_name],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| format!("检查cyq_chen_snapshot字段失败:{e}"))?;
+        if exists <= 0 {
+            conn.execute(
+                &format!(
+                    "ALTER TABLE {CYQ_CHEN_SNAPSHOT_TABLE} ADD COLUMN {column_name} {column_type}"
+                ),
+                [],
+            )
+            .map_err(|e| format!("补充cyq_chen_snapshot字段 {column_name} 失败:{e}"))?;
+        }
+    }
 
     Ok(())
 }
@@ -305,7 +353,11 @@ fn load_cyq_chen_initial_state(
         )
         .map_err(|e| format!("预编译新筹码状态分桶查询失败, ts_code={ts_code}: {e}"))?;
     let mut rows = stmt
-        .query(params![ts_code, DEFAULT_ADJ_TYPE, state_trade_date.as_str()])
+        .query(params![
+            ts_code,
+            DEFAULT_ADJ_TYPE,
+            state_trade_date.as_str()
+        ])
         .map_err(|e| format!("查询新筹码状态分桶失败, ts_code={ts_code}: {e}"))?;
     let mut bins = Vec::new();
     while let Some(row) = rows
@@ -746,7 +798,16 @@ fn append_cyq_chen_batch_rows(
                     snapshot.max_price,
                     snapshot.main_total,
                     snapshot.retail_total,
-                    snapshot.total_chips
+                    snapshot.total_chips,
+                    snapshot.total_profit_ratio,
+                    snapshot.total_trapped_ratio,
+                    snapshot.chip_peak_price,
+                    snapshot.percent_70.price_low,
+                    snapshot.percent_70.price_high,
+                    snapshot.percent_70.concentration,
+                    snapshot.percent_90.price_low,
+                    snapshot.percent_90.price_high,
+                    snapshot.percent_90.concentration
                 ])
                 .map_err(|e| {
                     format!(
@@ -1465,16 +1526,7 @@ bias = 1.0
     fn insert_paused_stock_resume_row(source_dir: &Path) {
         let source_db = source_db_path(source_dir.to_str().expect("utf8 path"));
         let conn = Connection::open(&source_db).expect("open source db");
-        insert_stock_row(
-            &conn,
-            "000002.SZ",
-            "20260408",
-            20.3,
-            21.0,
-            20.2,
-            20.8,
-            4.0,
-        );
+        insert_stock_row(&conn, "000002.SZ", "20260408", 20.3, 21.0, 20.2, 20.8, 4.0);
     }
 
     fn snapshot_rows_for_compare(source_path: &str) -> Vec<(String, String, f64, f64, f64)> {
@@ -1586,9 +1638,45 @@ bias = 1.0
                 "SELECT main_total FROM cyq_chen_snapshot WHERE ts_code = '000001.SZ' AND trade_date = '20260403'",
                 [],
                 |row| row.get::<_, f64>(0),
-            )
-            .expect("read main total");
+        )
+        .expect("read main total");
         assert!(main_total > 50.0);
+
+        let (
+            total_profit_ratio,
+            total_trapped_ratio,
+            chip_peak_price,
+            percent_70_price_low,
+            percent_70_price_high,
+            percent_90_price_low,
+            percent_90_price_high,
+        ) = conn
+            .query_row(
+                r#"
+                SELECT total_profit_ratio, total_trapped_ratio, chip_peak_price,
+                       percent_70_price_low, percent_70_price_high,
+                       percent_90_price_low, percent_90_price_high
+                FROM cyq_chen_snapshot
+                WHERE ts_code = '000001.SZ' AND trade_date = '20260403'
+                "#,
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, f64>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, f64>(2)?,
+                        row.get::<_, f64>(3)?,
+                        row.get::<_, f64>(4)?,
+                        row.get::<_, f64>(5)?,
+                        row.get::<_, f64>(6)?,
+                    ))
+                },
+            )
+            .expect("read chen snapshot metrics");
+        assert!((total_profit_ratio + total_trapped_ratio - 1.0).abs() < 1e-9);
+        assert!(chip_peak_price > 0.0);
+        assert!(percent_70_price_low <= percent_70_price_high);
+        assert!(percent_90_price_low <= percent_90_price_high);
 
         fs::remove_dir_all(source_dir).expect("cleanup temp dir");
     }
@@ -1636,13 +1724,8 @@ bias = 1.0
             bucket_pct: 5.0,
         };
 
-        rebuild_cyq_chen_all(
-            incremental_path,
-            config,
-            Some("20260401"),
-            Some("20260403"),
-        )
-        .expect("seed incremental cyq chen");
+        rebuild_cyq_chen_all(incremental_path, config, Some("20260401"), Some("20260403"))
+            .expect("seed incremental cyq chen");
         insert_paused_stock_resume_row(&incremental_dir);
 
         let summary = maintain_cyq_chen_incremental_if_db_exists(incremental_path, None)
@@ -1680,13 +1763,8 @@ bias = 1.0
             bucket_pct: 5.0,
         };
 
-        rebuild_cyq_chen_all(
-            source_path,
-            config,
-            Some("20260401"),
-            Some("20260403"),
-        )
-        .expect("seed cyq chen");
+        rebuild_cyq_chen_all(source_path, config, Some("20260401"), Some("20260403"))
+            .expect("seed cyq chen");
 
         fs::write(
             chip_change_rule_path(source_path),

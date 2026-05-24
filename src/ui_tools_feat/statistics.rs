@@ -26,8 +26,9 @@ use crate::{
     },
     scoring::runner::{ScoringMemoryMode, scoring_all_to_memory_with_mode},
     scoring::tools::{
-        calc_query_need_rows, calc_query_start_date, inject_stock_extra_fields, load_st_list,
-        load_total_share_map,
+        calc_query_need_rows, calc_query_start_date, collect_used_cyq_chen_runtime_keys,
+        cyq_chen_runtime_key_names, inject_optional_cyq_chen_fields, inject_stock_extra_fields,
+        load_st_list, load_total_share_map,
     },
     scoring::{CachedRule, evaluate_cached_rule_scores},
     simulate::{
@@ -1882,15 +1883,31 @@ fn collect_rule_validation_runtime_keys(combos: &[PreparedValidationCombo]) -> H
         .iter()
         .map(|combo| &combo.cached_rule.when_ast)
         .collect::<Vec<_>>();
+    let cyq_chen_keys = cyq_chen_runtime_key_names();
+    let injected_keys = RULE_VALIDATION_INJECTED_RUNTIME_KEYS
+        .iter()
+        .copied()
+        .chain(cyq_chen_keys)
+        .collect::<Vec<_>>();
 
     collect_runtime_keys_from_expr_programs(
         &programs,
         RuntimeKeyCollectOptions {
             always_keys: &[],
-            injected_keys: &RULE_VALIDATION_INJECTED_RUNTIME_KEYS,
+            injected_keys: &injected_keys,
             aliases: &RULE_VALIDATION_RUNTIME_ALIASES,
         },
     )
+}
+
+fn collect_rule_validation_cyq_chen_runtime_keys(
+    combos: &[PreparedValidationCombo],
+) -> HashSet<String> {
+    let programs = combos
+        .iter()
+        .map(|combo| &combo.cached_rule.when_ast)
+        .collect::<Vec<_>>();
+    collect_used_cyq_chen_runtime_keys(&programs)
 }
 
 fn prepare_validation_combo(
@@ -2069,6 +2086,7 @@ fn inject_validation_rank_series(
 
 fn evaluate_validation_combos_for_ts_code(
     reader: &mut DataReader,
+    source_path: &str,
     ts_code: &str,
     stock_adj_type: &str,
     start_date: &str,
@@ -2078,9 +2096,12 @@ fn evaluate_validation_combos_for_ts_code(
     total_share_map: &HashMap<String, f64>,
     rank_series_map: &HashMap<String, HashMap<String, Option<f64>>>,
     needs_rank: bool,
+    used_cyq_chen_keys: &HashSet<String>,
     combos: &[PreparedValidationCombo],
 ) -> Result<ValidationTsCodeEvaluation, String> {
     let mut row_data = reader.load_one_tail_rows(ts_code, stock_adj_type, end_date, need_rows)?;
+    let _ =
+        inject_optional_cyq_chen_fields(&mut row_data, source_path, ts_code, used_cyq_chen_keys);
     inject_stock_extra_fields(
         &mut row_data,
         ts_code,
@@ -2152,6 +2173,7 @@ fn build_validation_triggered_scores_for_combos(
     }
 
     let required_runtime_keys = collect_rule_validation_runtime_keys(combos);
+    let used_cyq_chen_keys = collect_rule_validation_cyq_chen_runtime_keys(combos);
     let total_share_map = load_total_share_map(source_path).unwrap_or_default();
     let needs_rank = validation_combos_use_rank(combos);
     let rank_series_map = if needs_rank {
@@ -2175,6 +2197,7 @@ fn build_validation_triggered_scores_for_combos(
                     combo_hits,
                 } = evaluate_validation_combos_for_ts_code(
                     reader,
+                    source_path,
                     ts_code,
                     stock_adj_type,
                     start_date,
@@ -2184,6 +2207,7 @@ fn build_validation_triggered_scores_for_combos(
                     &total_share_map,
                     &rank_series_map,
                     needs_rank,
+                    &used_cyq_chen_keys,
                     combos,
                 )?;
 
@@ -6105,7 +6129,7 @@ mod tests {
             1.0,
             None,
             RuleTag::Normal,
-            "M := MA(C, 5); M > MY_VALIDATION_IND AND RANK <= 100 AND ZHANG > 0 AND TOTAL_MV_YI <= 300",
+            "M := MA(C, 5); M > MY_VALIDATION_IND AND RANK <= 100 AND ZHANG > 0 AND TOTAL_MV_YI <= 300 AND CYQ_TPR > 0.6",
         )
         .expect("build cached rule");
         let combo = PreparedValidationCombo {
@@ -6125,7 +6149,7 @@ mod tests {
             assert!(keys.contains(required_key), "missing {required_key}");
         }
         assert!(!keys.contains("TOTAL_MV"));
-        for injected_key in ["RANK", "ZHANG", "TOTAL_MV_YI"] {
+        for injected_key in ["RANK", "ZHANG", "TOTAL_MV_YI", "CYQ_TPR"] {
             assert!(!keys.contains(injected_key), "unexpected {injected_key}");
         }
         assert!(!keys.contains("O"));

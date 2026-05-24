@@ -17,8 +17,10 @@ use crate::{
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
     scoring::tools::{
-        inject_latest_num_fields, inject_stock_extra_fields, load_st_list, load_total_share_map,
-        rt_max_len,
+        collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names,
+        inject_empty_optional_cyq_chen_fields, inject_latest_num_fields,
+        inject_optional_cyq_chen_fields, inject_stock_extra_fields, load_st_list,
+        load_total_share_map, rt_max_len,
     },
     ui_tools_feat::{
         build_concepts_map, build_latest_vol_map, build_name_map, build_total_mv_map, filter_mv,
@@ -29,10 +31,13 @@ use crate::{
 
 const BOARD_ST: &str = "ST";
 const DEFAULT_ADJ_TYPE: &str = "qfq";
-const INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS: [&str; 7] = [
+const INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS: [&str; 10] = [
     "RANK",
     "ZHANG",
     "TOTAL_MV_YI",
+    "RT_OP",
+    "RT_FH",
+    "RT_VR",
     "REALTIME_CHANGE_OPEN_PCT",
     "REALTIME_FALL_FROM_HIGH_PCT",
     "REALTIME_VOL_RATIO",
@@ -477,14 +482,25 @@ fn estimate_intraday_template_warmup(stmts: &Stmts) -> Result<usize, String> {
 }
 
 fn collect_intraday_template_runtime_keys(programs: &[&Stmts]) -> HashSet<String> {
+    let cyq_chen_keys = cyq_chen_runtime_key_names();
+    let injected_keys = INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS
+        .iter()
+        .copied()
+        .chain(cyq_chen_keys)
+        .collect::<Vec<_>>();
+
     collect_runtime_keys_from_expr_programs(
         programs,
         RuntimeKeyCollectOptions {
             always_keys: &[],
-            injected_keys: &INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS,
+            injected_keys: &injected_keys,
             aliases: &INTRADAY_TEMPLATE_RUNTIME_ALIASES,
         },
     )
+}
+
+fn collect_intraday_template_cyq_chen_keys(programs: &[&Stmts]) -> HashSet<String> {
+    collect_used_cyq_chen_runtime_keys(programs)
 }
 
 fn add_indicator_input_runtime_keys(keys: &mut HashSet<String>) {
@@ -564,10 +580,12 @@ pub fn validate_intraday_monitor_template_expression(
         .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
     let warmup_need = estimate_intraday_template_warmup(&ast)?;
     let required_runtime_keys = collect_intraday_template_runtime_keys(&[&ast]);
+    let cyq_chen_runtime_keys = collect_intraday_template_cyq_chen_keys(&[&ast]);
     let row_data = build_intraday_template_validation_row_data(
         source_path,
         warmup_need,
         &required_runtime_keys,
+        &cyq_chen_runtime_keys,
     )?;
     let mut rt = row_into_rt(row_data)?;
     let value = rt
@@ -635,6 +653,9 @@ fn inject_template_validation_extra_series(row_data: &mut RowData) -> Result<(),
     let len = row_data.trade_dates.len();
 
     for key in [
+        "RT_OP",
+        "RT_FH",
+        "RT_VR",
         "REALTIME_CHANGE_OPEN_PCT",
         "REALTIME_FALL_FROM_HIGH_PCT",
         "REALTIME_VOL_RATIO",
@@ -661,6 +682,7 @@ fn build_real_intraday_template_validation_row_data(
     source_path: &str,
     warmup_need: usize,
     required_runtime_keys: &HashSet<String>,
+    cyq_chen_runtime_keys: &HashSet<String>,
 ) -> Result<RowData, String> {
     let indicator_cache = cache_ind_build(source_path)?;
     let mut reader_runtime_keys = required_runtime_keys.clone();
@@ -711,6 +733,12 @@ fn build_real_intraday_template_validation_row_data(
         total_share,
     )?;
     inject_template_validation_extra_series(&mut row_data)?;
+    inject_optional_cyq_chen_fields(
+        &mut row_data,
+        source_path,
+        &sample_ts_code,
+        cyq_chen_runtime_keys,
+    );
 
     if !indicator_cache.is_empty() {
         for (name, series) in calc_inds_with_cache_lossy(&indicator_cache, row_data.clone()) {
@@ -726,12 +754,14 @@ fn build_intraday_template_validation_row_data(
     source_path: Option<&str>,
     warmup_need: usize,
     required_runtime_keys: &HashSet<String>,
+    cyq_chen_runtime_keys: &HashSet<String>,
 ) -> Result<RowData, String> {
     if let Some(source_path) = source_path.map(str::trim).filter(|value| !value.is_empty()) {
         return build_real_intraday_template_validation_row_data(
             source_path,
             warmup_need,
             required_runtime_keys,
+            cyq_chen_runtime_keys,
         );
     }
 
@@ -749,6 +779,9 @@ fn build_intraday_template_validation_row_data(
     }
 
     for key in [
+        "RT_OP",
+        "RT_FH",
+        "RT_VR",
         "REALTIME_CHANGE_OPEN_PCT",
         "REALTIME_FALL_FROM_HIGH_PCT",
         "REALTIME_VOL_RATIO",
@@ -766,6 +799,7 @@ fn build_intraday_template_validation_row_data(
 
     let mut out = RowData { trade_dates, cols };
     inject_template_validation_extra_series(&mut out)?;
+    inject_empty_optional_cyq_chen_fields(&mut out, cyq_chen_runtime_keys)?;
     out.validate()?;
     Ok(out)
 }
@@ -871,6 +905,9 @@ fn attach_runtime_extra_series(
     inject_latest_num_fields(
         row_data,
         &[
+            ("RT_OP", row.realtime_change_open_pct),
+            ("RT_FH", row.realtime_fall_from_high_pct),
+            ("RT_VR", row.realtime_vol_ratio),
             ("REALTIME_CHANGE_OPEN_PCT", row.realtime_change_open_pct),
             (
                 "REALTIME_FALL_FROM_HIGH_PCT",
@@ -969,11 +1006,13 @@ fn inject_runtime_rank_series(
 fn build_intraday_runtime_row_data(
     reader: &DataReader,
     result_conn: &Connection,
+    source_path: &str,
     row: &IntradayMonitorRow,
     quote: &SinaQuote,
     need_rows: usize,
     indicator_cache: &[IndsCache],
     total_share: Option<f64>,
+    cyq_chen_runtime_keys: &HashSet<String>,
 ) -> Result<RowData, String> {
     let end_date = resolve_runtime_trade_date(row, quote)?;
 
@@ -995,6 +1034,12 @@ fn build_intraday_runtime_row_data(
     };
 
     attach_runtime_extra_series(&mut row_data, row, total_share)?;
+    inject_optional_cyq_chen_fields(
+        &mut row_data,
+        source_path,
+        &row.ts_code,
+        cyq_chen_runtime_keys,
+    );
     let start_date = row_data
         .trade_dates
         .first()
@@ -1072,6 +1117,7 @@ fn apply_intraday_template_tags(
         })
         .collect::<Vec<_>>();
     let mut required_runtime_keys = collect_intraday_template_runtime_keys(&ready_programs);
+    let cyq_chen_runtime_keys = collect_intraday_template_cyq_chen_keys(&ready_programs);
     let template_warmup_need = compiled_templates
         .values()
         .filter_map(|item| match item {
@@ -1139,11 +1185,13 @@ fn apply_intraday_template_tags(
                     let row_data = build_intraday_runtime_row_data(
                         &reader,
                         &result_conn,
+                        source_path,
                         row,
                         quote,
                         need_rows,
                         &indicator_cache,
                         total_share_map.get(&row.ts_code).copied(),
+                        &cyq_chen_runtime_keys,
                     )?;
                     let mut rt = row_into_rt(row_data)?;
                     let value = rt
@@ -1816,7 +1864,7 @@ mod tests {
     fn template_validation_only_injects_uppercase_rank() {
         validate_intraday_monitor_template_expression(
             None,
-            "RANK <= 100 AND REALTIME_CHANGE_OPEN_PCT >= 1".to_string(),
+            "RANK <= 100 AND RT_OP >= 1 AND CYQ_TPR >= 0".to_string(),
         )
         .expect("uppercase RANK should validate");
 
@@ -1828,7 +1876,7 @@ mod tests {
     #[test]
     fn intraday_template_runtime_key_collection_skips_injected_fields() {
         let tokens = lex_all(
-            "M := MA(C, 5); M > MY_RT_IND AND RANK <= 50 AND REALTIME_VOL_RATIO > 1 AND TOTAL_MV_YI > 10",
+            "M := MA(C, 5); M > MY_RT_IND AND RANK <= 50 AND RT_VR > 1 AND TOTAL_MV_YI > 10 AND CYQ_TPR > 0.6",
         );
         let mut parser = Parser::new(tokens);
         let program = parser.parse_main().expect("expression should parse");
@@ -1839,13 +1887,7 @@ mod tests {
             assert!(keys.contains(required_key), "missing {required_key}");
         }
         assert!(!keys.contains("TOTAL_MV"));
-        for injected_key in [
-            "RANK",
-            "REALTIME_VOL_RATIO",
-            "TOTAL_MV_YI",
-            "VOL_RATIO",
-            "ZHANG",
-        ] {
+        for injected_key in ["RANK", "RT_VR", "TOTAL_MV_YI", "ZHANG", "CYQ_TPR"] {
             assert!(!keys.contains(injected_key), "unexpected {injected_key}");
         }
         assert!(!keys.contains("O"));

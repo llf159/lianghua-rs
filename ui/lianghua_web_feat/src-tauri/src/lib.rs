@@ -64,6 +64,7 @@ use lianghua_rs::ui_tools_feat::{
     },
     ranking_compute::{
         get_ranking_compute_status as core_get_ranking_compute_status,
+        preview_ranking_score_calculation_warnings as core_preview_ranking_score_calculation_warnings,
         run_concept_performance_compute as core_run_concept_performance_compute,
         run_cyq_chen_compute_with_range_and_progress as core_run_cyq_chen_compute,
         run_cyq_compute_with_range_and_progress as core_run_cyq_compute,
@@ -431,6 +432,21 @@ fn get_ranking_compute_status(
     strategy_path: Option<String>,
 ) -> Result<RankComputeStatus, String> {
     core_get_ranking_compute_status(&source_path, strategy_path.as_deref())
+}
+
+#[tauri::command]
+fn preview_ranking_score_calculation_warnings(
+    source_path: String,
+    strategy_path: Option<String>,
+    start_date: String,
+    end_date: String,
+) -> Result<Vec<String>, String> {
+    core_preview_ranking_score_calculation_warnings(
+        &source_path,
+        strategy_path.as_deref(),
+        &start_date,
+        &end_date,
+    )
 }
 
 #[tauri::command]
@@ -1763,6 +1779,7 @@ pub fn run() {
             run_transient_rule_layer_backtest,
             run_rule_expression_validation,
             get_ranking_compute_status,
+            preview_ranking_score_calculation_warnings,
             run_ranking_score_calculation,
             run_concept_performance_compute,
             run_cyq_compute,

@@ -297,6 +297,7 @@
   color: var(--theme-orange-800);
   background: var(--theme-orange-50);
   border: 1px solid var(--theme-orange-200);
+  white-space: pre-line;
 }
 
 .ranking-compute-error {

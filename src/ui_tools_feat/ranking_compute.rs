@@ -13,7 +13,7 @@ use crate::{
     download::runner::DownloadProgressCallback,
     scoring::{
         RankTiebreakProfile, TieBreakWay, build_rank_tiebreak,
-        runner::{ScoringRunProfile, scoring_all_to_db},
+        runner::{ScoringRunProfile, preview_scoring_runtime_warnings, scoring_all_to_db},
     },
 };
 
@@ -107,6 +107,7 @@ pub struct RankComputeRunResult {
     pub end_date: Option<String>,
     pub elapsed_ms: u64,
     pub timings: Vec<RankComputeTimingItem>,
+    pub warnings: Vec<String>,
     pub status: RankComputeStatus,
 }
 
@@ -639,8 +640,29 @@ pub fn run_ranking_score_calculation(
         end_date: Some(end_date),
         elapsed_ms: started_at.elapsed().as_millis() as u64,
         timings: scoring_run_timings(&profile),
+        warnings: profile.warnings,
         status,
     })
+}
+
+pub fn preview_ranking_score_calculation_warnings(
+    source_path: &str,
+    strategy_path: Option<&str>,
+    start_date: &str,
+    end_date: &str,
+) -> Result<Vec<String>, String> {
+    let source_path = source_path.trim().to_string();
+    if source_path.is_empty() {
+        return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
+    }
+
+    let start_date = normalize_rank_compute_date(start_date, "开始日期")?;
+    let end_date = normalize_rank_compute_date(end_date, "结束日期")?;
+    if start_date > end_date {
+        return Err("开始日期不能晚于结束日期".to_string());
+    }
+
+    preview_scoring_runtime_warnings(&source_path, strategy_path, &start_date, &end_date)
 }
 
 pub fn run_concept_performance_compute(
@@ -827,6 +849,7 @@ pub fn run_ranking_tiebreak_fill(
         end_date: None,
         elapsed_ms: started_at.elapsed().as_millis() as u64,
         timings: tiebreak_timings(&profile),
+        warnings: Vec::new(),
         status,
     })
 }

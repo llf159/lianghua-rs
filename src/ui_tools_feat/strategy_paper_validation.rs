@@ -21,8 +21,9 @@ use crate::{
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
     scoring::tools::{
-        calc_query_need_rows, calc_query_start_date, inject_stock_extra_fields, load_st_list,
-        load_total_share_map, rt_max_len,
+        calc_query_need_rows, calc_query_start_date, collect_used_cyq_chen_runtime_keys,
+        cyq_chen_runtime_key_names, inject_optional_cyq_chen_fields, inject_stock_extra_fields,
+        load_st_list, load_total_share_map, rt_max_len,
     },
     simulate::DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
     ui_tools_feat::watch_observe::normalize_ts_code,
@@ -387,6 +388,8 @@ pub fn run_strategy_paper_validation(
     let warmup_need =
         estimate_expression_warmup(&buy_program)?.max(estimate_expression_warmup(&sell_program)?);
     let required_runtime_keys = collect_paper_validation_runtime_keys(&buy_program, &sell_program);
+    let used_cyq_chen_keys =
+        collect_paper_validation_cyq_chen_runtime_keys(&buy_program, &sell_program);
     let sell_runtime_keys = collect_paper_validation_sell_runtime_keys(&sell_program);
     let needs_rank = matches!(parsed_buy_selection_mode, BuySelectionMode::RankTop)
         || expr_program_uses_runtime_key(&buy_program, "RANK")
@@ -448,6 +451,7 @@ pub fn run_strategy_paper_validation(
             for ts_code in ts_group {
                 if let Some(stock) = prepare_paper_stock_for_portfolio(
                     &worker_reader,
+                    source_path,
                     ts_code,
                     name_map.get(ts_code),
                     st_list.contains(ts_code),
@@ -456,6 +460,7 @@ pub fn run_strategy_paper_validation(
                     &sell_runtime_keys,
                     &rank_series_map,
                     needs_rank,
+                    &used_cyq_chen_keys,
                     &resolved_start_date,
                     &resolved_end_date,
                     &query_start_date,
@@ -589,6 +594,9 @@ fn build_template_validation_runtime(warmup_need: usize, include_sell_fields: bo
         "TOTAL_MV_YI".to_string(),
         Value::NumSeries(vec![Some(100.0); len]),
     );
+    for key in cyq_chen_runtime_key_names() {
+        vars.insert(key.to_string(), Value::NumSeries(vec![Some(1.0); len]));
+    }
 
     if include_sell_fields {
         let time_series = (0..len).map(|index| Some(index as f64)).collect::<Vec<_>>();
@@ -671,6 +679,7 @@ fn build_trade_summary(
 #[allow(clippy::too_many_arguments)]
 fn prepare_paper_stock_for_portfolio(
     reader: &DataReader,
+    source_path: &str,
     ts_code: &str,
     stock_name: Option<&String>,
     is_st: bool,
@@ -679,6 +688,7 @@ fn prepare_paper_stock_for_portfolio(
     sell_runtime_keys: &HashSet<String>,
     rank_series_map: &HashMap<String, HashMap<String, Option<f64>>>,
     needs_rank: bool,
+    used_cyq_chen_keys: &HashSet<String>,
     start_date: &str,
     end_date: &str,
     query_start_date: &str,
@@ -699,6 +709,8 @@ fn prepare_paper_stock_for_portfolio(
     }
 
     inject_stock_extra_fields(&mut row_data, ts_code, is_st, total_share)?;
+    let _ =
+        inject_optional_cyq_chen_fields(&mut row_data, source_path, ts_code, used_cyq_chen_keys);
     if needs_rank {
         inject_runtime_rank_series(&mut row_data, ts_code, rank_series_map)?;
     }
@@ -1646,22 +1658,42 @@ fn collect_paper_validation_runtime_keys(
     buy_program: &Stmts,
     sell_program: &Stmts,
 ) -> std::collections::HashSet<String> {
+    let cyq_chen_keys = cyq_chen_runtime_key_names();
+    let injected_keys = PAPER_VALIDATION_INJECTED_RUNTIME_KEYS
+        .iter()
+        .copied()
+        .chain(cyq_chen_keys)
+        .collect::<Vec<_>>();
+
     collect_runtime_keys_from_expr_programs(
         &[buy_program, sell_program],
         RuntimeKeyCollectOptions {
             always_keys: &PAPER_VALIDATION_ALWAYS_RUNTIME_KEYS,
-            injected_keys: &PAPER_VALIDATION_INJECTED_RUNTIME_KEYS,
+            injected_keys: &injected_keys,
             aliases: &PAPER_VALIDATION_RUNTIME_ALIASES,
         },
     )
 }
 
+fn collect_paper_validation_cyq_chen_runtime_keys(
+    buy_program: &Stmts,
+    sell_program: &Stmts,
+) -> HashSet<String> {
+    collect_used_cyq_chen_runtime_keys(&[buy_program, sell_program])
+}
+
 fn collect_paper_validation_sell_runtime_keys(sell_program: &Stmts) -> HashSet<String> {
+    let cyq_chen_keys = cyq_chen_runtime_key_names();
+    let injected_keys = PAPER_VALIDATION_INJECTED_RUNTIME_KEYS
+        .iter()
+        .copied()
+        .chain(cyq_chen_keys.clone())
+        .collect::<Vec<_>>();
     let mut keys = collect_runtime_keys_from_expr_programs(
         &[sell_program],
         RuntimeKeyCollectOptions {
             always_keys: &[],
-            injected_keys: &PAPER_VALIDATION_INJECTED_RUNTIME_KEYS,
+            injected_keys: &injected_keys,
             aliases: &PAPER_VALIDATION_RUNTIME_ALIASES,
         },
     );
@@ -1670,6 +1702,7 @@ fn collect_paper_validation_sell_runtime_keys(sell_program: &Stmts) -> HashSet<S
             .iter()
             .map(|key| key.to_string()),
     );
+    keys.extend(cyq_chen_keys.into_iter().map(|key| key.to_string()));
     keys
 }
 
@@ -2498,7 +2531,7 @@ mod tests {
     #[test]
     fn template_validation_only_injects_uppercase_rank() {
         validate_strategy_paper_validation_template_expressions(
-            "RANK <= 100".to_string(),
+            "RANK <= 100 AND CYQ_TPR >= 0".to_string(),
             "TIME >= 1".to_string(),
         )
         .expect("uppercase RANK should validate");
@@ -2514,7 +2547,7 @@ mod tests {
     #[test]
     fn runtime_key_collection_skips_injected_validation_fields() {
         let buy_program = parse_expression_program(
-            "M := MA(C, 5); M > REF(C, 1) AND RANK <= 100 AND TOTAL_MV_YI > 20",
+            "M := MA(C, 5); M > REF(C, 1) AND RANK <= 100 AND TOTAL_MV_YI > 20 AND CYQ_TPR > 0.6",
             "买点方程",
         )
         .expect("buy expression should parse");
@@ -2527,7 +2560,7 @@ mod tests {
             assert!(keys.contains(required_key), "missing {required_key}");
         }
         assert!(!keys.contains("TOTAL_MV"));
-        for injected_key in ["RANK", "TIME", "RATEH", "TOTAL_MV_YI"] {
+        for injected_key in ["RANK", "TIME", "RATEH", "TOTAL_MV_YI", "CYQ_TPR"] {
             assert!(!keys.contains(injected_key), "unexpected {injected_key}");
         }
         assert!(!keys.contains("V"));

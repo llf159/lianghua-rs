@@ -83,25 +83,36 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     ],
   },
   {
-    title: '7. 指标列自动注入',
+    title: '7. 新筹码库字段',
+    note: '这些字段来自 cyq_chen.db 的 cyq_chen_snapshot，会按股票代码和交易日对齐注入；排名计算、表达式选股、统计验证、模拟盘和实时监控都可使用。库、表、列或日期缺失时按空值处理。',
+    fields: [
+      { name: 'CYQ_TPR / CYQ_TTR', scope: '通用', description: '新筹码整体获利 / 套牢筹码比例。', example: 'CYQ_TPR > 0.6 AND CYQ_TTR < 0.35' },
+      { name: 'CYQ_PEAK', scope: '通用', description: '新筹码总筹码峰值价格。', example: 'C > CYQ_PEAK' },
+      { name: 'CYQ_MT / CYQ_RT / CYQ_TC', scope: '通用', description: '主力 / 散户 / 总筹码量。', example: 'CYQ_MT > CYQ_RT' },
+      { name: 'CYQ_MIN / CYQ_MAX', scope: '通用', description: '新筹码分布的最低 / 最高价格边界。', example: 'C >= CYQ_MIN AND C <= CYQ_MAX' },
+      { name: 'CYQ_P70L / CYQ_P70H / CYQ_P70C', scope: '通用', description: '70% 筹码集中区下沿 / 上沿 / 集中度。', example: 'CYQ_P70C > 0.4' },
+      { name: 'CYQ_P90L / CYQ_P90H / CYQ_P90C', scope: '通用', description: '90% 筹码集中区下沿 / 上沿 / 集中度。', example: 'C > CYQ_P90H' },
+    ],
+  },
+  {
+    title: '8. 指标列自动注入',
     note: 'DataReader 会把 stock_data 里实际存在的数值列自动转成大写变量；这通常是行情基础列之外的指标列，不等于 stock_list.csv 里的市值字段都会天然出现在这里。',
     fields: [
       { name: '已落库指标列 / 自定义数值列', scope: '按数据源实际情况', description: '只有已经写进 stock_data 的数值列才可直接引用，变量名会自动转成大写。', example: 'MY_IND > MA(MY_IND, 5)' },
     ],
   },
   {
-    title: '8. 实时监控模板附加字段',
+    title: '9. 实时监控模板附加字段',
     note: '下面这些字段只在“实时监控”页面的模板表达式中可用，策略打分、选股或统计表达式里不要直接写。',
     fields: [
-      { name: 'REALTIME_CHANGE_OPEN_PCT', scope: '实时监控', description: '当前价相对今开涨跌幅，单位是百分比。', example: 'REALTIME_CHANGE_OPEN_PCT >= 2' },
-      { name: 'REALTIME_FALL_FROM_HIGH_PCT', scope: '实时监控', description: '当前价相对于今日高点的回落幅度，单位是百分比；返回值恒为非负数，0 表示当前价等于今日高点，不会返回负数；计算口径为 max((今日高点 - 当前价) / 今日高点, 0) × 100%。', example: 'REALTIME_FALL_FROM_HIGH_PCT <= 1.5' },
-      { name: 'REALTIME_VOL_RATIO', scope: '实时监控', description: '当前实时累计成交量 ÷ stock_data 中最新历史日的 vol，通常可理解为“相对上一交易日日成交量”的倍数。', example: 'REALTIME_VOL_RATIO >= 2' },
-      { name: 'VOL_RATIO', scope: '实时监控', description: 'REALTIME_VOL_RATIO 的别名，基准相同。', example: 'VOL_RATIO >= 2' },
-      { name: 'RANK', scope: '实时监控', description: '按当前榜单模式注入的历史排名序列；总榜读取 score_summary.rank，场景榜读取 scene_details.scene_rank；runtime 最新一根固定留空。', example: 'RANK <= 100 AND REALTIME_CHANGE_OPEN_PCT >= 2' },
+      { name: 'RT_OP', scope: '实时监控', description: '当前价相对今开涨跌幅，单位是百分比。', example: 'RT_OP >= 2' },
+      { name: 'RT_FH', scope: '实时监控', description: '当前价相对于今日高点的回落幅度，单位是百分比；返回值恒为非负数。', example: 'RT_FH <= 1.5' },
+      { name: 'RT_VR', scope: '实时监控', description: '当前实时累计成交量 ÷ stock_data 中最新历史日的 vol。', example: 'RT_VR >= 2' },
+      { name: 'RANK', scope: '实时监控', description: '按当前榜单模式注入的历史排名序列；总榜读取 score_summary.rank，场景榜读取 scene_details.scene_rank；runtime 最新一根固定留空。', example: 'RANK <= 100 AND RT_OP >= 2' },
     ],
   },
   {
-    title: '9. 表达式选股 / 模拟盘附加字段',
+    title: '10. 表达式选股 / 模拟盘附加字段',
     note: 'RANK 在表达式选股与模拟盘买点方程中按交易日对齐；模拟盘卖点方程额外注入持仓相关字段。',
     fields: [
       { name: 'RANK', scope: '表达式选股 / 模拟盘买点', description: '个股在 score_summary 中按交易日对齐后的排名序列；1 表示当日排名第一。', example: 'RANK <= 100 AND C > MA(C, 20)' },

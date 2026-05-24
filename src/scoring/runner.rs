@@ -18,8 +18,9 @@ use crate::scoring::{
     CachedRule, RuleSceneMeta, TieBreakWay, build_scene_score_series, scoring_rules_details_cache,
     scoring_rules_total_cache,
     tools::{
-        calc_query_need_rows, inject_stock_extra_fields, load_st_list, load_total_share_map,
-        warmup_rows_estimate,
+        calc_query_need_rows, collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names,
+        inject_optional_cyq_chen_fields, inject_stock_extra_fields, load_st_list,
+        load_total_share_map, preview_optional_cyq_chen_injection_warnings, warmup_rows_estimate,
     },
 };
 
@@ -44,6 +45,7 @@ pub struct ScoringRunProfile {
     pub compute_and_send_batches_ms: u64,
     pub stock_count: usize,
     pub writer: ScoreWriteProfile,
+    pub warnings: Vec<String>,
 }
 
 fn format_elapsed_ms(elapsed_ms: u64) -> String {
@@ -157,19 +159,52 @@ fn collect_scoring_runtime_keys(rules_cache: &[CachedRule]) -> HashSet<String> {
         .iter()
         .map(|rule| &rule.when_ast)
         .collect::<Vec<_>>();
+    let cyq_chen_keys = cyq_chen_runtime_key_names();
+    let injected_keys = SCORING_INJECTED_RUNTIME_KEYS
+        .iter()
+        .copied()
+        .chain(cyq_chen_keys)
+        .collect::<Vec<_>>();
 
     collect_runtime_keys_from_expr_programs(
         &programs,
         RuntimeKeyCollectOptions {
             always_keys: &[],
-            injected_keys: &SCORING_INJECTED_RUNTIME_KEYS,
+            injected_keys: &injected_keys,
             aliases: &SCORING_RUNTIME_ALIASES,
         },
     )
 }
 
+fn collect_scoring_used_cyq_chen_runtime_keys(rules_cache: &[CachedRule]) -> HashSet<String> {
+    let programs = rules_cache
+        .iter()
+        .map(|rule| &rule.when_ast)
+        .collect::<Vec<_>>();
+    collect_used_cyq_chen_runtime_keys(&programs)
+}
+
+pub fn preview_scoring_runtime_warnings(
+    source_dir: &str,
+    strategy_path: Option<&str>,
+    start_date: &str,
+    end_date: &str,
+) -> Result<Vec<String>, String> {
+    let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
+    let rules_cache = cache_rule_build(source_dir, strategy_path)?;
+    let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
+    Ok(preview_optional_cyq_chen_injection_warnings(
+        source_dir,
+        start_date,
+        end_date,
+        warmup_need,
+        &used_cyq_chen_keys,
+    ))
+}
+
 fn scoring_stock_batch(
     worker_reader: &DataReader,
+    source_dir: &str,
     adj_type: &str,
     score_start_date: &str,
     end_date: &str,
@@ -179,10 +214,12 @@ fn scoring_stock_batch(
     scenes: &[ScoreScene],
     st_list: &HashSet<String>,
     total_share_map: &HashMap<String, f64>,
+    used_cyq_chen_keys: &HashSet<String>,
     ts_code: &str,
     memory_mode: ScoringMemoryMode,
 ) -> Result<ScoreBatch, String> {
     let mut row = worker_reader.load_one_tail_rows(ts_code, adj_type, end_date, need_rows)?;
+    let _ = inject_optional_cyq_chen_fields(&mut row, source_dir, ts_code, used_cyq_chen_keys);
     inject_stock_extra_fields(
         &mut row,
         ts_code,
@@ -208,6 +245,7 @@ fn scoring_stock_batch(
 
 fn scoring_stock_group_batch(
     worker_reader: &DataReader,
+    source_dir: &str,
     adj_type: &str,
     score_start_date: &str,
     end_date: &str,
@@ -217,6 +255,7 @@ fn scoring_stock_group_batch(
     scenes: &[ScoreScene],
     st_list: &HashSet<String>,
     total_share_map: &HashMap<String, f64>,
+    used_cyq_chen_keys: &HashSet<String>,
     ts_group: &[String],
     memory_mode: ScoringMemoryMode,
 ) -> Result<ScoreBatch, String> {
@@ -224,6 +263,7 @@ fn scoring_stock_group_batch(
     for ts_code in ts_group {
         let batch = scoring_stock_batch(
             worker_reader,
+            source_dir,
             adj_type,
             score_start_date,
             end_date,
@@ -233,6 +273,7 @@ fn scoring_stock_group_batch(
             scenes,
             st_list,
             total_share_map,
+            used_cyq_chen_keys,
             ts_code,
             memory_mode,
         )?;
@@ -260,6 +301,14 @@ pub fn scoring_all_to_db(
     let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
+    let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
+    let warnings = preview_optional_cyq_chen_injection_warnings(
+        source_dir,
+        start_date,
+        end_date,
+        warmup_need,
+        &used_cyq_chen_keys,
+    );
     let required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
     let dr = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
     let tc_list = DataReader::list_ts_code(&dr, adj_type, start_date, end_date)?;
@@ -309,6 +358,7 @@ pub fn scoring_all_to_db(
                 DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
             let batch = scoring_stock_group_batch(
                 &worker_reader,
+                source_dir,
                 adj_type,
                 start_date,
                 end_date,
@@ -318,6 +368,7 @@ pub fn scoring_all_to_db(
                 &scenes,
                 &st_list,
                 &total_share_map,
+                &used_cyq_chen_keys,
                 ts_group,
                 ScoringMemoryMode::All,
             )?;
@@ -349,6 +400,7 @@ pub fn scoring_all_to_db(
         compute_and_send_batches_ms,
         stock_count: tc_list.len(),
         writer,
+        warnings,
     };
     log_scoring_run_profile(&profile);
     Ok(profile)
@@ -386,6 +438,14 @@ pub fn scoring_all_to_memory_with_mode(
     let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
+    let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
+    let warnings = preview_optional_cyq_chen_injection_warnings(
+        source_dir,
+        start_date,
+        end_date,
+        warmup_need,
+        &used_cyq_chen_keys,
+    );
     let required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
     let dr = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
     let tc_list = DataReader::list_ts_code(&dr, adj_type, start_date, end_date)?;
@@ -408,6 +468,7 @@ pub fn scoring_all_to_memory_with_mode(
                 DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
             scoring_stock_group_batch(
                 &worker_reader,
+                source_dir,
                 adj_type,
                 start_date,
                 end_date,
@@ -417,6 +478,7 @@ pub fn scoring_all_to_memory_with_mode(
                 &scenes,
                 &st_list,
                 &total_share_map,
+                &used_cyq_chen_keys,
                 ts_group,
                 memory_mode,
             )
@@ -447,6 +509,7 @@ pub fn scoring_all_to_memory_with_mode(
             batch_count,
             ..ScoreWriteProfile::default()
         },
+        warnings,
     };
     Ok((batch, profile))
 }
@@ -464,10 +527,13 @@ pub fn scoring_single_period(
     let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
+    let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
     let required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
     let dr = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
 
     let mut row_data = DataReader::load_one_tail_rows(&dr, ts_code, adj_type, end_date, need_rows)?;
+    let _ =
+        inject_optional_cyq_chen_fields(&mut row_data, source_dir, ts_code, &used_cyq_chen_keys);
     inject_stock_extra_fields(
         &mut row_data,
         ts_code,
@@ -525,7 +591,7 @@ mod tests {
     fn scoring_runtime_key_collection_skips_injected_fields() {
         let rules = vec![cached_rule(
             "rule_a",
-            "M := MA(C, 5); M > MY_SCORE_IND AND ZHANG > 0 AND TOTAL_MV_YI <= 300",
+            "M := MA(C, 5); M > MY_SCORE_IND AND ZHANG > 0 AND TOTAL_MV_YI <= 300 AND CYQ_TPR > 0.6",
         )];
 
         let keys = collect_scoring_runtime_keys(&rules);
@@ -534,7 +600,7 @@ mod tests {
             assert!(keys.contains(required_key), "missing {required_key}");
         }
         assert!(!keys.contains("TOTAL_MV"));
-        for injected_key in ["ZHANG", "TOTAL_MV_YI"] {
+        for injected_key in ["ZHANG", "TOTAL_MV_YI", "CYQ_TPR"] {
             assert!(!keys.contains(injected_key), "unexpected {injected_key}");
         }
         assert!(!keys.contains("O"));

@@ -15,6 +15,7 @@ import {
 } from '../../apis/dataDownload'
 import {
   getRankingComputeStatus,
+  previewRankingScoreCalculationWarnings,
   runConceptPerformanceCompute,
   runCyqChenCompute,
   runCyqCompute,
@@ -676,13 +677,21 @@ export default function RankingComputePage() {
 
     setBusyAction('computing')
     setError('')
+    setNotice('')
     setStrategyDiff(null)
 
     try {
+      const previewWarnings = await previewRankingScoreCalculationWarnings(sourcePath, startDate, endDate)
+      if (previewWarnings.length > 0) {
+        setNotice(`提示：${previewWarnings.join('\n')}`)
+      }
       const scoreResult = await runRankingScoreCalculation(sourcePath, startDate, endDate)
       setStatus(scoreResult.status)
+      const warningText = scoreResult.warnings?.length
+        ? `\n\n提示：${scoreResult.warnings.join('\n')}`
+        : ''
       setNotice(
-        `排名计算完成（含J值同分排序），区间 ${formatTradeDate(scoreResult.startDate ?? null)} 至 ${formatTradeDate(scoreResult.endDate ?? null)}，耗时 ${formatElapsedMs(scoreResult.elapsedMs)}。`,
+        `排名计算完成（含J值同分排序），区间 ${formatTradeDate(scoreResult.startDate ?? null)} 至 ${formatTradeDate(scoreResult.endDate ?? null)}，耗时 ${formatElapsedMs(scoreResult.elapsedMs)}。${warningText}`,
       )
     } catch (actionError) {
       setNotice('')

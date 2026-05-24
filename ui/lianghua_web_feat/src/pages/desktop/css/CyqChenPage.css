@@ -308,6 +308,8 @@
 
 .cyq-chen-summary-grid strong {
   font-size: 18px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
 }
 
 .cyq-chen-summary-grid small {

@@ -53,11 +53,26 @@ export type RankingComputeRunResult = {
   endDate?: string | null
   elapsedMs: number
   timings: RankComputeTimingItem[]
+  warnings: string[]
   status: RankingComputeStatus
 }
 
 export async function getRankingComputeStatus(sourcePath: string, strategyPath?: string) {
   return invoke<RankingComputeStatus>('get_ranking_compute_status', { sourcePath, strategyPath })
+}
+
+export async function previewRankingScoreCalculationWarnings(
+  sourcePath: string,
+  startDate: string,
+  endDate: string,
+  strategyPath?: string,
+) {
+  return invoke<string[]>('preview_ranking_score_calculation_warnings', {
+    sourcePath,
+    strategyPath,
+    startDate,
+    endDate,
+  })
 }
 
 export type ConceptPerformanceComputeResult = {

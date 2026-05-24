@@ -103,6 +103,15 @@ pub struct ChenChipBin {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ChenChipPercentRange {
+    pub percent: f64,
+    pub price_low: f64,
+    pub price_high: f64,
+    pub concentration: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChenChipSnapshot {
     pub trade_date: Option<String>,
     pub close: f64,
@@ -111,6 +120,11 @@ pub struct ChenChipSnapshot {
     pub main_total: f64,
     pub retail_total: f64,
     pub total_chips: f64,
+    pub total_profit_ratio: f64,
+    pub total_trapped_ratio: f64,
+    pub chip_peak_price: f64,
+    pub percent_70: ChenChipPercentRange,
+    pub percent_90: ChenChipPercentRange,
     pub bins: Vec<ChenChipBin>,
 }
 
@@ -217,6 +231,10 @@ impl ChipChangeConfig {
 
         Ok(())
     }
+}
+
+fn round_ratio(value: f64) -> f64 {
+    (value * 1_000_000_000.0).round() / 1_000_000_000.0
 }
 
 pub fn load_compiled_chip_change_config(
@@ -1260,6 +1278,48 @@ fn normalize_buckets(buckets: &mut [ChipBucket]) -> Result<(), String> {
     Ok(())
 }
 
+fn cost_by_chip(buckets: &[ChipBucket], chip_target: f64) -> f64 {
+    let mut sum = 0.0;
+    for bucket in buckets {
+        let chip = bucket.total_chip();
+        if sum + chip > chip_target {
+            return bucket.price();
+        }
+        sum += chip;
+    }
+
+    buckets.last().map(ChipBucket::price).unwrap_or(0.0)
+}
+
+fn build_percent_range(
+    percent: f64,
+    buckets: &[ChipBucket],
+    total_chips: f64,
+) -> ChenChipPercentRange {
+    let low = if total_chips <= EPS {
+        0.0
+    } else {
+        cost_by_chip(buckets, total_chips * (1.0 - percent) / 2.0)
+    };
+    let high = if total_chips <= EPS {
+        0.0
+    } else {
+        cost_by_chip(buckets, total_chips * (1.0 + percent) / 2.0)
+    };
+    let concentration = if (low + high).abs() < EPS {
+        0.0
+    } else {
+        (high - low) / (low + high)
+    };
+
+    ChenChipPercentRange {
+        percent,
+        price_low: low,
+        price_high: high,
+        concentration: round_ratio(concentration),
+    }
+}
+
 fn build_snapshot(bar: &ChenChipBar, buckets: &[ChipBucket]) -> Result<ChenChipSnapshot, String> {
     let mut bins = Vec::with_capacity(buckets.len());
     for (index, bucket) in buckets.iter().enumerate() {
@@ -1278,6 +1338,39 @@ fn build_snapshot(bar: &ChenChipBar, buckets: &[ChipBucket]) -> Result<ChenChipS
     let main_total = buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
     let retail_total = buckets.iter().map(|bucket| bucket.retail_chip).sum::<f64>();
     let total_chips = main_total + retail_total;
+    let profit_chips = buckets
+        .iter()
+        .filter(|bucket| bucket.price() <= bar.close + EPS)
+        .map(ChipBucket::total_chip)
+        .sum::<f64>();
+    let total_profit_ratio = if total_chips <= EPS {
+        0.0
+    } else {
+        profit_chips / total_chips
+    };
+    let total_trapped_ratio = if total_chips <= EPS {
+        0.0
+    } else {
+        1.0 - total_profit_ratio
+    };
+    let chip_peak_price = buckets
+        .iter()
+        .fold(None::<&ChipBucket>, |best, bucket| match best {
+            Some(best) => {
+                let bucket_chip = bucket.total_chip();
+                let best_chip = best.total_chip();
+                if bucket_chip > best_chip + EPS
+                    || ((bucket_chip - best_chip).abs() <= EPS && bucket.price() < best.price())
+                {
+                    Some(bucket)
+                } else {
+                    Some(best)
+                }
+            }
+            None => Some(bucket),
+        })
+        .map(ChipBucket::price)
+        .unwrap_or(0.0);
     let min_price = buckets
         .first()
         .map(|bucket| bucket.price_low)
@@ -1295,6 +1388,11 @@ fn build_snapshot(bar: &ChenChipBar, buckets: &[ChipBucket]) -> Result<ChenChipS
         main_total: finite_value(main_total)?,
         retail_total: finite_value(retail_total)?,
         total_chips: finite_value(total_chips)?,
+        total_profit_ratio: finite_value(round_ratio(total_profit_ratio))?,
+        total_trapped_ratio: finite_value(round_ratio(total_trapped_ratio))?,
+        chip_peak_price: finite_value(chip_peak_price)?,
+        percent_70: build_percent_range(0.7, buckets, total_chips),
+        percent_90: build_percent_range(0.9, buckets, total_chips),
         bins,
     })
 }
@@ -1339,7 +1437,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        ChenChipConfig, ChipChangeConfig, ChipDirection, ChipHolder,
+        ChenChipConfig, ChipChangeConfig, ChipDirection, ChipHolder, EPS,
         compute_chen_chip_snapshots_from_row_data,
     };
     use crate::data::RowData;
@@ -1525,6 +1623,24 @@ bias = 1.0
         assert!(snapshots[1].max_price >= 11.6);
         assert!(snapshots[1].bins.iter().all(|bin| bin.main_chip >= 0.0));
         assert!(snapshots[1].bins.iter().all(|bin| bin.retail_chip >= 0.0));
+        assert_close(
+            snapshots[1].total_profit_ratio + snapshots[1].total_trapped_ratio,
+            1.0,
+        );
+        assert!(snapshots[1].chip_peak_price >= snapshots[1].min_price);
+        assert!(snapshots[1].chip_peak_price <= snapshots[1].max_price);
+        assert!(snapshots[1].percent_70.price_low <= snapshots[1].percent_70.price_high);
+        assert!(snapshots[1].percent_90.price_low <= snapshots[1].percent_90.price_high);
+        assert!(
+            snapshots[1].percent_90.price_low <= snapshots[1].percent_70.price_low
+                || (snapshots[1].percent_90.price_low - snapshots[1].percent_70.price_low).abs()
+                    <= EPS
+        );
+        assert!(
+            snapshots[1].percent_90.price_high >= snapshots[1].percent_70.price_high
+                || (snapshots[1].percent_90.price_high - snapshots[1].percent_70.price_high).abs()
+                    <= EPS
+        );
         assert!(
             snapshots[1]
                 .bins
