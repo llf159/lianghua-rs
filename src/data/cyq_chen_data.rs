@@ -306,7 +306,6 @@ fn query_latest_cyq_chen_metadata(
     let config = ChenChipConfig {
         warmup_days: warmup_days
             .and_then(|value| usize::try_from(value).ok())
-            .filter(|value| *value > 0)
             .unwrap_or(default_config.warmup_days),
         bucket_pct: bucket_pct
             .filter(|value| value.is_finite() && *value > 0.0)
@@ -1797,6 +1796,41 @@ bias = 2.0
             })
             .expect("read min trade date");
         assert_eq!(min_trade_date.as_deref(), Some("20260402"));
+
+        fs::remove_dir_all(source_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn maintain_cyq_chen_incremental_preserves_zero_warmup_config() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+        let source_path = source_dir.to_str().expect("utf8 path");
+        let config = ChenChipConfig {
+            warmup_days: 0,
+            bucket_pct: 5.0,
+        };
+
+        rebuild_cyq_chen_all(source_path, config, Some("20260401"), Some("20260403"))
+            .expect("seed cyq chen with zero warmup");
+
+        let summary = maintain_cyq_chen_incremental_if_db_exists(source_path, None)
+            .expect("maintain cyq chen incremental")
+            .expect("cyq chen db exists");
+
+        assert_eq!(summary.start_date.as_deref(), Some("20260407"));
+        assert_eq!(summary.end_date.as_deref(), Some("20260408"));
+        assert_eq!(summary.warmup_days, 0);
+
+        let cyq_chen_db = cyq_chen_db_path(source_path);
+        let conn = Connection::open(&cyq_chen_db).expect("open cyq chen db");
+        let max_incremental_warmup = conn
+            .query_row(
+                "SELECT MAX(warmup_days) FROM cyq_chen_snapshot WHERE trade_date >= '20260407'",
+                [],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .expect("read incremental warmup days");
+        assert_eq!(max_incremental_warmup, Some(0));
 
         fs::remove_dir_all(source_dir).expect("cleanup temp dir");
     }

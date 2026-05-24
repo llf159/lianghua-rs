@@ -722,7 +722,19 @@ pub fn run_cyq_chen_single_stock_test(
 
     let required_runtime_keys = collect_chen_chip_runtime_keys(&compiled_chip_config);
     let reader = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
-    let mut row_data = reader.load_one(&ts_code, DEFAULT_ADJ_TYPE, &load_start_date, &end_date)?;
+    let mut row_data = match reader.load_one(&ts_code, DEFAULT_ADJ_TYPE, &load_start_date, &end_date) {
+        Ok(data) => data,
+        Err(err) if err.contains("trade_dates为空") => return Ok(CyqChenSingleStockData {
+            resolved_ts_code: ts_code,
+            start_date,
+            end_date,
+            output_start_date: None,
+            kline: Vec::new(),
+            snapshots: Vec::new(),
+        }),
+        Err(err) => return Err(err),
+    };
+
     if row_data.trade_dates.is_empty() {
         return Ok(CyqChenSingleStockData {
             resolved_ts_code: ts_code,
@@ -1062,6 +1074,36 @@ mod tests {
         assert_eq!(data.kline.len(), 4);
         assert_eq!(data.output_start_date.as_deref(), Some("20260403"));
         assert_eq!(data.snapshots.len(), 2);
+
+        fs::remove_dir_all(source_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn single_stock_test_returns_empty_result_for_unknown_stock() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+
+        let data = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
+            source_path: source_dir.to_str().expect("utf8 path").to_string(),
+            ts_code: "000999".to_string(),
+            start_date: Some("20260401".to_string()),
+            end_date: Some("20260407".to_string()),
+            warmup_days: 2,
+            bucket_pct: 5.0,
+            strategies: vec![ChipChangeStrategy {
+                name: "主力买入".to_string(),
+                holder: ChipHolder::Main,
+                direction: ChipDirection::Buy,
+                when: "C > O AND ZHANG > 0 AND TOTAL_MV_YI > 0".to_string(),
+                bias: 1.0,
+            }],
+        })
+        .expect("unknown stock should return an empty single-stock test result");
+
+        assert_eq!(data.resolved_ts_code, "000999.SZ");
+        assert_eq!(data.output_start_date, None);
+        assert!(data.kline.is_empty());
+        assert!(data.snapshots.is_empty());
 
         fs::remove_dir_all(source_dir).expect("cleanup temp dir");
     }
