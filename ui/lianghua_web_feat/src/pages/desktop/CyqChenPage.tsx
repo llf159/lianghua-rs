@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import {
   getCyqChenStrategyPage,
   runCyqChenSingleStockTest,
@@ -8,7 +8,7 @@ import {
   type CyqChenSnapshot,
   type CyqChenStrategyDraft,
 } from '../../apis/cyqChen'
-import type { DetailChartSeries, DetailChartTooltip, DetailKlinePanel, DetailKlineRow } from '../../apis/details'
+import type { DetailChartMarker, DetailChartSeries, DetailChartTooltip, DetailKlinePanel, DetailKlineRow } from '../../apis/details'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import { readStoredChartMainWidthRatio } from '../../shared/chartSettings'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
@@ -111,6 +111,15 @@ type TooltipSection = {
   key: string
   rows: FieldRow[]
   variant?: 'default' | 'ohlc'
+}
+
+type ChartMarkerOverlayPoint = {
+  key: string
+  leftPercent: number
+  topPercent: number
+  shape: DetailChartMarker['shape']
+  color: string
+  text?: string | null
 }
 
 const CYQ_CHEN_DRAFT_STORAGE_KEY = 'lh_cyq_chen_test_draft_v1'
@@ -288,6 +297,13 @@ function formatTooltipValue(row: CyqChenChartRow, tooltip: DetailChartTooltip) {
     return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '--'
   }
   return formatFieldValue(value)
+}
+
+function buildSeriesRuntimeValue(row: CyqChenChartRow | null, series: DetailChartSeries) {
+  if (!row) {
+    return '--'
+  }
+  return formatFieldValue(row[series.key])
 }
 
 function isMainChartPanel(panel: DetailKlinePanel) {
@@ -747,6 +763,91 @@ function buildDetailTooltipRows(panel: DetailKlinePanel, item: CyqChenChartRow |
   return sections
 }
 
+function getMarkerYValue(row: CyqChenChartRow, marker: DetailChartMarker) {
+  const key = marker.y_key?.trim()
+  if (!key) {
+    return getChartRowNumber(row, 'close')
+  }
+
+  const normalizedKey = key.toLowerCase()
+  const mappedKey =
+    normalizedKey === 'o' || normalizedKey === 'open'
+      ? 'open'
+      : normalizedKey === 'h' || normalizedKey === 'high'
+        ? 'high'
+        : normalizedKey === 'l' || normalizedKey === 'low'
+          ? 'low'
+          : normalizedKey === 'c' || normalizedKey === 'close'
+            ? 'close'
+            : normalizedKey === 'v' || normalizedKey === 'vol'
+              ? 'vol'
+              : key
+  return getChartRowNumber(row, mappedKey)
+}
+
+function buildChartMarkerOverlayPoints(
+  panel: DetailKlinePanel,
+  items: CyqChenChartRow[],
+  xAt: (itemIndex: number) => number,
+  yAt: (value: number) => number,
+): ChartMarkerOverlayPoint[] {
+  const markers = panel.markers ?? []
+  if (markers.length === 0) {
+    return []
+  }
+
+  return markers.flatMap((marker) =>
+    items.flatMap((row, itemIndex) => {
+      if (row[marker.when_key] !== true) {
+        return []
+      }
+      const value = getMarkerYValue(row, marker)
+      if (value === null) {
+        return []
+      }
+
+      const x = xAt(itemIndex)
+      const baseY = yAt(value)
+      const position = marker.position ?? 'value'
+      const y = position === 'above'
+        ? CHART_MARGIN.top + 10
+        : position === 'below'
+          ? CHART_VIEWBOX_HEIGHT - CHART_MARGIN.bottom - 10
+          : baseY
+
+      return [{
+        key: `${panel.key}-${marker.key}-${row.tradeDate}`,
+        leftPercent: (x / CHART_VIEWBOX_WIDTH) * 100,
+        topPercent: (y / CHART_VIEWBOX_HEIGHT) * 100,
+        shape: marker.shape,
+        color: marker.color ?? CANDLE_UP_COLOR,
+        text: marker.text,
+      }]
+    }),
+  )
+}
+
+function renderChartMarkerOverlayPoint(point: ChartMarkerOverlayPoint) {
+  const shape = point.shape ?? 'dot'
+  return (
+    <span
+      className={[
+        'details-chart-marker',
+        `details-chart-marker-${shape}`,
+        point.text ? 'details-chart-marker-with-text' : '',
+      ].filter(Boolean).join(' ')}
+      key={point.key}
+      style={{
+        left: `${point.leftPercent}%`,
+        top: `${point.topPercent}%`,
+        '--details-chart-marker-color': point.color,
+      } as CSSProperties}
+    >
+      {point.text ? <span>{point.text}</span> : null}
+    </span>
+  )
+}
+
 function chipValueByMode(bin: CyqChenBin, mode: ChipPeakMode) {
   if (mode === 'main') {
     return bin.mainChip
@@ -852,7 +953,13 @@ function CyqChenProjectChart({
   const step = layoutSlotCount > 0 ? klinePlotWidth / layoutSlotCount : klinePlotWidth
   const xAt = (itemIndex: number) => getChartItemX(itemIndex, visibleItems.length, layoutSlotCount, reserveCyqPanelWidth)
   const priceValues = visibleItems.flatMap((item) =>
-    [item.open, item.high, item.low, item.close].filter(isFiniteNumber),
+    [
+      item.open,
+      item.high,
+      item.low,
+      item.close,
+      ...getPanelSeries(pricePanel).map((series) => getChartRowNumber(item, series.key)),
+    ].filter(isFiniteNumber),
   )
   const domain = buildDomain(priceValues)
   const selectedVisibleIndex = selectedTradeDate
@@ -872,6 +979,7 @@ function CyqChenProjectChart({
   const chartMainPanelHeight = chartLayoutWidth * chartMainWidthRatio
   const chartIndicatorPanelHeight = Math.max(Math.min(chartLayoutWidth * 0.22, 180), 118)
   const chartShellHeight = chartMainPanelHeight + indicatorPanels.length * chartIndicatorPanelHeight
+  const priceHeaderRuntimeRow = focusedRow ?? visibleItems[visibleItems.length - 1] ?? null
 
   function setChartZoomAnchored(nextCount: number, anchorAbsoluteIndex: number, anchorRatio: number) {
     if (totalItems === 0) {
@@ -1323,13 +1431,33 @@ function CyqChenProjectChart({
     const activeTooltipHorizontalClass = (activeFocusXPercent ?? 0) > CHART_TOOLTIP_LEFT_THRESHOLD
       ? 'details-chart-tooltip-left'
       : 'details-chart-tooltip-right'
+    const headerRuntimeRow = activeRow ?? visibleItems[visibleItems.length - 1] ?? null
 
     return (
       <section className="details-chart-panel" key={panel.key}>
         <header className="details-chart-panel-head">
           <div className="details-chart-panel-head-main">
             <strong>{panel.label || panel.key}</strong>
-            <small>{snapshotLabel(snapshot)}</small>
+            {seriesList.length > 0 ? (
+              <div className="details-chart-panel-head-series">
+                {seriesList.map((series, seriesIndex) => (
+                  <span
+                    className="details-chart-panel-head-series-tag"
+                    key={`${panel.key}-${series.key}`}
+                    style={{ color: getSeriesColor(seriesIndex, series) }}
+                  >
+                    <span className="details-chart-panel-head-series-label">
+                      {formatSeriesLabel(series.key, series)}
+                    </span>
+                    <strong className="details-chart-panel-head-series-value">
+                      {buildSeriesRuntimeValue(headerRuntimeRow, series)}
+                    </strong>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <small>{snapshotLabel(snapshot)}</small>
+            )}
           </div>
           <span>{renderKind}</span>
         </header>
@@ -1360,6 +1488,7 @@ function CyqChenProjectChart({
               leftPercent: xAt(itemIndex) / CHART_VIEWBOX_WIDTH * 100,
             }))
             const barWidth = Math.max(Math.min(step * 0.58, 18), 3)
+            const markerOverlayPoints = buildChartMarkerOverlayPoints(panel, visibleItems, xAt, yAt)
 
             return (
               <>
@@ -1513,6 +1642,11 @@ function CyqChenProjectChart({
                       </span>
                     ))}
                   </div>
+                  {markerOverlayPoints.length > 0 ? (
+                    <div className="details-chart-marker-layer">
+                      {markerOverlayPoints.map(renderChartMarkerOverlayPoint)}
+                    </div>
+                  ) : null}
                   {focusXPercent !== null ? (
                     <div className="details-chart-crosshair-vertical" style={{ left: `${focusXPercent}%` }} />
                   ) : null}
@@ -1612,8 +1746,27 @@ function CyqChenProjectChart({
         <section className="details-chart-panel">
           <header className="details-chart-panel-head">
             <div className="details-chart-panel-head-main">
-              <strong>主K</strong>
-              <small>{snapshotLabel(snapshot)}</small>
+              <strong>{pricePanel.label || '主K'}</strong>
+              {getPanelSeries(pricePanel).length > 0 ? (
+                <div className="details-chart-panel-head-series">
+                  {getPanelSeries(pricePanel).map((series, seriesIndex) => (
+                    <span
+                      className="details-chart-panel-head-series-tag"
+                      key={`price-${series.key}`}
+                      style={{ color: getSeriesColor(seriesIndex, series) }}
+                    >
+                      <span className="details-chart-panel-head-series-label">
+                        {formatSeriesLabel(series.key, series)}
+                      </span>
+                      <strong className="details-chart-panel-head-series-value">
+                        {buildSeriesRuntimeValue(priceHeaderRuntimeRow, series)}
+                      </strong>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <small>{snapshotLabel(snapshot)}</small>
+              )}
             </div>
             <span>candles</span>
           </header>
@@ -1683,6 +1836,9 @@ function CyqChenProjectChart({
                 return isFiniteNumber(value) ? Math.max(acc, value) : acc
               }, 0)
               const peakBin = findChipPeak(snapshot, chipPeakMode)
+              const priceOverlaySeries = getPanelSeries(pricePanel)
+              const markerOverlayPoints = buildChartMarkerOverlayPoints(pricePanel, visibleItems, xAt, yAt)
+              const priceTooltipSections = buildDetailTooltipRows(pricePanel, focusedRow)
 
               return (
                 <>
@@ -1757,6 +1913,28 @@ function CyqChenProjectChart({
                             stroke={color}
                             rx={1.2}
                           />
+                        </g>
+                      )
+                    })}
+
+                    {priceOverlaySeries.map((series, seriesIndex) => {
+                      const segments = buildLineSegments(visibleItems, series.key, xAt, yAt)
+                      if (segments.length === 0) {
+                        return null
+                      }
+                      return (
+                        <g key={`price-overlay-${series.key}`}>
+                          {segments.map((segment, segmentIndex) => (
+                            <path
+                              className="details-chart-line-path details-chart-line-path-main"
+                              key={`${series.key}-${segmentIndex}`}
+                              d={buildLinePath(segment)}
+                              fill="none"
+                              stroke={getSeriesColor(seriesIndex, series)}
+                              strokeWidth={series.line_width ?? 1.6}
+                              opacity={series.opacity ?? 0.95}
+                            />
+                          ))}
                         </g>
                       )
                     })}
@@ -1869,51 +2047,52 @@ function CyqChenProjectChart({
                         </span>
                       ))}
                     </div>
+                    {markerOverlayPoints.length > 0 ? (
+                      <div className="details-chart-marker-layer">
+                        {markerOverlayPoints.map(renderChartMarkerOverlayPoint)}
+                      </div>
+                    ) : null}
                     {focusXPercent !== null ? (
                       <div className="details-chart-crosshair-vertical" style={{ left: `${focusXPercent}%` }} />
                     ) : null}
                     {focus?.panelKey === pricePanel.key && focusedRow ? (
                       <>
                         <div className="details-chart-crosshair-horizontal" style={{ top: `${focus.cursorYPercent}%` }} />
-                        <div
-                          className={[
-                            'details-chart-tooltip',
-                            tooltipHorizontalClass,
-                            focus.pinned ? 'details-chart-tooltip-pinned' : '',
-                          ].filter(Boolean).join(' ')}
-                          style={{
-                            left: `${focusXPercent ?? 0}%`,
-                            top: `${focus.cursorYPercent}%`,
-                          }}
-                        >
-                          <div className="details-chart-tooltip-head">
-                            <strong>{focusedRow.tradeDate}</strong>
-                          </div>
-                          <div className="details-chart-tooltip-body">
-                            <div className="details-chart-tooltip-grid details-chart-tooltip-grid-ohlc">
-                              <div className="details-chart-tooltip-row">
-                                <span>C</span>
-                                <strong>{formatNumber(focusedRow.close)}</strong>
-                              </div>
-                              <div className="details-chart-tooltip-row">
-                                <span>O</span>
-                                <strong>{formatNumber(focusedRow.open)}</strong>
-                              </div>
-                              <div className="details-chart-tooltip-row">
-                                <span>H</span>
-                                <strong>{formatNumber(focusedRow.high)}</strong>
-                              </div>
-                              <div className="details-chart-tooltip-row">
-                                <span>L</span>
-                                <strong>{formatNumber(focusedRow.low)}</strong>
-                              </div>
-                              <div className="details-chart-tooltip-row">
-                                <span>换手</span>
-                                <strong>{formatTooltipPercent(focusedRow.turnoverRate)}</strong>
-                              </div>
+                        {priceTooltipSections.length > 0 ? (
+                          <div
+                            className={[
+                              'details-chart-tooltip',
+                              tooltipHorizontalClass,
+                              focus.pinned ? 'details-chart-tooltip-pinned' : '',
+                            ].filter(Boolean).join(' ')}
+                            style={{
+                              left: `${focusXPercent ?? 0}%`,
+                              top: `${focus.cursorYPercent}%`,
+                            }}
+                          >
+                            <div className="details-chart-tooltip-head">
+                              <strong>{focusedRow.tradeDate}</strong>
+                            </div>
+                            <div className="details-chart-tooltip-body">
+                              {priceTooltipSections.map((section) => (
+                                <div
+                                  className={[
+                                    'details-chart-tooltip-grid',
+                                    section.variant === 'ohlc' ? 'details-chart-tooltip-grid-ohlc' : '',
+                                  ].filter(Boolean).join(' ')}
+                                  key={section.key}
+                                >
+                                  {section.rows.map((row) => (
+                                    <div className="details-chart-tooltip-row" key={`${section.key}-${row.label}`}>
+                                      <span>{row.label}</span>
+                                      <strong>{row.value}</strong>
+                                    </div>
+                                  ))}
+                                </div>
+                              ))}
                             </div>
                           </div>
-                        </div>
+                        ) : null}
                       </>
                     ) : null}
                   </div>

@@ -70,7 +70,14 @@ function AppRoutes() {
             <Route path="expression" element={<ExpressionStockPickPage />} />
             <Route path="concept" element={<ConceptStockPickPage />} />
           </Route>
-          <Route path="cyq-chen" element={<CyqChenPage />} />
+          <Route path="cyq-chen" element={<Navigate to="/strategy/cyq-chen" replace />} />
+          <Route path="strategy">
+            <Route index element={<Navigate to="/strategy/rules" replace />} />
+            <Route path="manage" element={<Navigate to="/strategy/rules" replace />} />
+            <Route path="rules" element={<StrategyManagePage view="rules" />} />
+            <Route path="chip-change" element={<StrategyManagePage view="chip" />} />
+            <Route path="cyq-chen" element={<CyqChenPage />} />
+          </Route>
           <Route path="settings" element={<SettingsPage />} />
           <Route path="raw-data">
             <Route index element={<Navigate to="/raw-data/data-import" replace />} />
@@ -78,7 +85,7 @@ function AppRoutes() {
             <Route path="data-viewer" element={<DataViewerPage />} />
             <Route path="data-download" element={<DataDownloadPage />} />
             <Route path="ranking-compute" element={<RankingComputePage />} />
-            <Route path="strategy-manage" element={<StrategyManagePage />} />
+            <Route path="strategy-manage" element={<Navigate to="/strategy/rules" replace />} />
           </Route>
           <Route path="intraday-monitor">
             <Route index element={<Navigate to="/intraday-monitor/realtime-ranking" replace />} />

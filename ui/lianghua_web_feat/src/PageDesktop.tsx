@@ -20,7 +20,12 @@ const intradayMonitorSubRoutes = [
 ]
 
 const settingsMenuItem = { path: '/settings', label: '设置' }
-const cyqChenMenuItem = { path: '/cyq-chen', label: '筹码测试' }
+
+const strategySubRoutes = [
+  { path: '/strategy/rules', label: '打分策略' },
+  { path: '/strategy/chip-change', label: '筹码策略' },
+  { path: '/strategy/cyq-chen', label: '筹码测试' },
+]
 
 const backtestSubRoutes = [
   { path: '/backtest/strategy-trigger', label: '策略触发统计' },
@@ -39,7 +44,6 @@ const rawDataSubRoutes = [
   { path: '/raw-data/data-viewer', label: '查看' },
   { path: '/raw-data/data-download', label: '下载' },
   { path: '/raw-data/ranking-compute', label: '计算' },
-  { path: '/raw-data/strategy-manage', label: '策略管理' },
 ]
 
 export default function PageDesktop() {
@@ -48,12 +52,14 @@ export default function PageDesktop() {
   const [isOverviewOpen, setIsOverviewOpen] = useState(true)
   const [isStockPickOpen, setIsStockPickOpen] = useState(true)
   const [isRawDataOpen, setIsRawDataOpen] = useState(true)
+  const [isStrategyOpen, setIsStrategyOpen] = useState(true)
   const [isIntradayMonitorOpen, setIsIntradayMonitorOpen] = useState(true)
   const [isBacktestOpen, setIsBacktestOpen] = useState(true)
   const contentRef = useRef<HTMLElement | null>(null)
   const isOverviewActive = location.pathname.startsWith('/overview')
   const isStockPickActive = location.pathname.startsWith('/stock-pick')
   const isRawDataActive = location.pathname.startsWith('/raw-data')
+  const isStrategyActive = location.pathname.startsWith('/strategy') || location.pathname === '/cyq-chen'
   const isIntradayMonitorActive = location.pathname.startsWith('/intraday-monitor')
   const isBacktestActive = location.pathname.startsWith('/backtest')
 
@@ -159,6 +165,31 @@ export default function PageDesktop() {
 
           <div className="menu-group">
             <button
+              className={isStrategyActive ? 'menu-item menu-group-toggle active' : 'menu-item menu-group-toggle'}
+              type="button"
+              onClick={() => setIsStrategyOpen((value) => !value)}
+            >
+              <span>策略管理</span>
+              <span>{isStrategyOpen ? '▾' : '▸'}</span>
+            </button>
+
+            {isStrategyOpen ? (
+              <div className="submenu-wrap">
+                {strategySubRoutes.map((menuItem) => (
+                  <NavLink
+                    key={menuItem.path}
+                    to={menuItem.path}
+                    className={({ isActive }) => (isActive ? 'submenu-item active' : 'submenu-item')}
+                  >
+                    {menuItem.label}
+                  </NavLink>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="menu-group">
+            <button
               className={isRawDataActive ? 'menu-item menu-group-toggle active' : 'menu-item menu-group-toggle'}
               type="button"
               onClick={() => setIsRawDataOpen((value) => !value)}
@@ -206,13 +237,6 @@ export default function PageDesktop() {
               </div>
             ) : null}
           </div>
-
-          <NavLink
-            to={cyqChenMenuItem.path}
-            className={({ isActive }) => (isActive ? 'menu-item active' : 'menu-item')}
-          >
-            {cyqChenMenuItem.label}
-          </NavLink>
 
           <NavLink
             to={settingsMenuItem.path}

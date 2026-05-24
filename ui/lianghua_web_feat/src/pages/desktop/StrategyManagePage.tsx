@@ -59,6 +59,7 @@ type ChipStrategyDeleteTarget = { index: number; name: string }
 type ChipStrategyEditorDraft = Omit<CyqChenStrategyDraft, 'bias'> & { bias: string }
 type RefactorSceneDraft = StrategyManageSceneDraft & { id: string }
 type RefactorRuleDraft = StrategyManageRuleDraft
+type StrategyManageView = 'rules' | 'chip'
 
 function formatNumber(value: number, digits = 2) {
   if (!Number.isFinite(value)) {
@@ -331,7 +332,7 @@ function formatChipDirection(direction: CyqChenStrategyDraft['direction']) {
   return direction === 'buy' ? '买入' : '卖出'
 }
 
-export default function StrategyManagePage() {
+export default function StrategyManagePage({ view = 'rules' }: { view?: StrategyManageView }) {
   const bulkModalRef = useRef<HTMLDivElement | null>(null)
   const bulkBoardRef = useRef<HTMLDivElement | null>(null)
   const bulkSceneStripRef = useRef<HTMLDivElement | null>(null)
@@ -1141,6 +1142,7 @@ export default function StrategyManagePage() {
 
   const isBusy = busyAction !== 'idle'
   const isEditing = draft !== null
+  const isChipView = view === 'chip'
   const isDeleteSceneBlocked = Boolean(deleteSceneTarget && deleteSceneTarget.rule_count > 0)
   const bulkTotalRuleCount = rules.length
   const bulkBucketRuleCount = refactorRules.length
@@ -1243,12 +1245,18 @@ export default function StrategyManagePage() {
       <section className="strategy-manage-card">
         <div className="strategy-manage-section-head">
           <div>
-            <h2 className="strategy-manage-title">策略管理</h2>
+            <h2 className="strategy-manage-title">{isChipView ? '筹码变动策略' : '打分策略管理'}</h2>
             <p className="strategy-manage-note">
-              编辑当前生效的策略文件；历史导入和备份都收纳在顶部的策略资产中心里。
+              {isChipView
+                ? '编辑 chip_change_rule.toml；新筹码计算和筹码测试共用这里的策略。'
+                : '编辑当前生效的 score_rule.toml；历史导入和备份都收纳在顶部的策略资产中心里。'}
             </p>
           </div>
-          <span className="strategy-manage-tip">当前共 {rules.length} 条 rule</span>
+          <span className="strategy-manage-tip">
+            {isChipView
+              ? (chipStrategyFileExists ? chipStrategyFilePath : 'chip_change_rule.toml 未落盘')
+              : `当前共 ${rules.length} 条 rule`}
+          </span>
         </div>
 
         <div className="strategy-manage-toolbar">
@@ -1260,50 +1268,94 @@ export default function StrategyManagePage() {
             >
               策略资产中心
             </button>
-            <button
-              className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary"
-              type="button"
-              onClick={openCreateSceneEditor}
-            >
-              新建 Scene
-            </button>
-            <button
-              className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary"
-              type="button"
-              onClick={openBulkEditor}
-            >
-              策略整体编辑
-            </button>
-            {isEditing ? <span className="strategy-manage-tip">当前有未提交草稿</span> : null}
+            {isChipView ? (
+              <button
+                className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary"
+                type="button"
+                onClick={openCreateChipStrategyEditor}
+                disabled={chipStrategySaving}
+              >
+                新建筹码策略
+              </button>
+            ) : (
+              <>
+                <button
+                  className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary"
+                  type="button"
+                  onClick={openCreateSceneEditor}
+                >
+                  新建 Scene
+                </button>
+                <button
+                  className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary"
+                  type="button"
+                  onClick={openBulkEditor}
+                >
+                  策略整体编辑
+                </button>
+              </>
+            )}
+            {isEditing || chipStrategyDraft ? <span className="strategy-manage-tip">当前有未提交草稿</span> : null}
           </div>
         </div>
 
         <div className="strategy-manage-summary">
-          <div className="strategy-manage-summary-item">
-            <span>Scene 数量</span>
-            <strong>{scenes.length}</strong>
-          </div>
-          <div className="strategy-manage-summary-item">
-            <span>Rule 数量</span>
-            <strong>{rules.length}</strong>
-          </div>
+          {isChipView ? (
+            <>
+              <div className="strategy-manage-summary-item">
+                <span>筹码策略</span>
+                <strong>{chipStrategies.length}</strong>
+              </div>
+              <div className="strategy-manage-summary-item">
+                <span>主力策略</span>
+                <strong>{chipStrategies.filter((item) => item.holder === 'main').length}</strong>
+              </div>
+              <div className="strategy-manage-summary-item">
+                <span>散户策略</span>
+                <strong>{chipStrategies.filter((item) => item.holder === 'retail').length}</strong>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="strategy-manage-summary-item">
+                <span>Scene 数量</span>
+                <strong>{scenes.length}</strong>
+              </div>
+              <div className="strategy-manage-summary-item">
+                <span>Rule 数量</span>
+                <strong>{rules.length}</strong>
+              </div>
+            </>
+          )}
         </div>
 
         <div className="strategy-manage-filter-grid">
           <label className="strategy-manage-field strategy-manage-field-span-full">
-            <span>策略搜索</span>
+            <span>{isChipView ? '筹码策略搜索' : '策略搜索'}</span>
             <input
-              value={searchKeyword}
-              onChange={(event) => setSearchKeyword(event.target.value)}
-              placeholder="搜索 scene / rule 名称 / 表达式 / 说明 / stage / scope"
+              value={isChipView ? chipStrategySearchKeyword : searchKeyword}
+              onChange={(event) =>
+                isChipView
+                  ? setChipStrategySearchKeyword(event.target.value)
+                  : setSearchKeyword(event.target.value)
+              }
+              placeholder={
+                isChipView
+                  ? '搜索筹码策略名称 / 表达式 / 主力 / 散户 / 买卖方向'
+                  : '搜索 scene / rule 名称 / 表达式 / 说明 / stage / scope'
+              }
             />
           </label>
         </div>
 
         {notice ? <div className="strategy-manage-message strategy-manage-message-notice">{notice}</div> : null}
         {error ? <div className="strategy-manage-message strategy-manage-message-error">{error}</div> : null}
+        {isChipView && chipStrategyNotice ? <div className="strategy-manage-message strategy-manage-message-notice">{chipStrategyNotice}</div> : null}
+        {isChipView && chipStrategyError ? <div className="strategy-manage-message strategy-manage-message-error">{chipStrategyError}</div> : null}
       </section>
 
+      {view === 'rules' ? (
+        <>
       <section className="strategy-manage-card">
         <div className="strategy-manage-list-head">
           <strong>Scene 总览</strong>
@@ -1446,53 +1498,24 @@ export default function StrategyManagePage() {
           </div>
         )}
       </section>
+        </>
+      ) : null}
 
+      {view === 'chip' ? (
       <section className="strategy-manage-card strategy-manage-chip-card">
         <div className="strategy-manage-section-head">
           <div>
-            <h3 className="strategy-manage-subtitle">筹码变动策略</h3>
+            <h3 className="strategy-manage-subtitle">四象限策略列表</h3>
             <p className="strategy-manage-note">
-              编辑 chip_change_rule.toml；新筹码计算和筹码测试共用这里的策略。
+              按持有人和买卖方向分组；每个区块独立滚动，单个方向策略较多时不会拉伸其它区块。
             </p>
           </div>
           <span className="strategy-manage-tip">
-            {chipStrategyFileExists ? chipStrategyFilePath : 'chip_change_rule.toml 未落盘'}
+            {normalizedChipStrategySearchKeyword
+              ? `命中 ${filteredChipStrategies.length} / ${chipStrategies.length} 条`
+              : `${chipStrategies.length} 条`}
           </span>
         </div>
-
-        <div className="strategy-manage-toolbar">
-          <div className="strategy-manage-toolbar-left">
-            <button
-              className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary"
-              type="button"
-              onClick={openCreateChipStrategyEditor}
-              disabled={chipStrategySaving}
-            >
-              新建筹码策略
-            </button>
-          </div>
-        </div>
-
-        <div className="strategy-manage-summary">
-          <div className="strategy-manage-summary-item">
-            <span>策略数量</span>
-            <strong>{chipStrategies.length}</strong>
-          </div>
-        </div>
-
-        <div className="strategy-manage-filter-grid">
-          <label className="strategy-manage-field strategy-manage-field-span-full">
-            <span>筹码策略搜索</span>
-            <input
-              value={chipStrategySearchKeyword}
-              onChange={(event) => setChipStrategySearchKeyword(event.target.value)}
-              placeholder="搜索筹码策略名称 / 表达式 / 主力 / 散户 / 买卖方向"
-            />
-          </label>
-        </div>
-
-        {chipStrategyNotice ? <div className="strategy-manage-message strategy-manage-message-notice">{chipStrategyNotice}</div> : null}
-        {chipStrategyError ? <div className="strategy-manage-message strategy-manage-message-error">{chipStrategyError}</div> : null}
 
         <div className="strategy-manage-list-head strategy-manage-chip-list-head">
           <strong>策略列表</strong>
@@ -1564,6 +1587,7 @@ export default function StrategyManagePage() {
         )}
 
       </section>
+      ) : null}
 
       {chipStrategyDeleteTarget ? (
         <div className="strategy-manage-modal-backdrop strategy-manage-modal-backdrop-confirm" role="presentation">
