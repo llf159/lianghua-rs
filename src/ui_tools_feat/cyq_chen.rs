@@ -819,12 +819,14 @@ fn build_detail_kline_payload(
         .to_str()
         .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
     let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
+    let name_map = crate::ui_tools_feat::build_name_map(source_path).unwrap_or_default();
+    let watermark_name = name_map.get(ts_code).cloned();
     let mut payload = crate::ui_tools_feat::details::query_kline(
         &conn,
         source_path,
         ts_code,
         DEFAULT_VISIBLE_KLINE_WINDOW_DAYS,
-        None,
+        watermark_name,
     )?;
 
     if let Some(items) = payload.items.as_mut() {

@@ -88,7 +88,7 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     fields: [
       { name: 'CYQ_TPR / CYQ_TTR', scope: '通用', description: '新筹码整体获利 / 套牢筹码比例。', example: 'CYQ_TPR > 0.6 AND CYQ_TTR < 0.35' },
       { name: 'CYQ_PEAK', scope: '通用', description: '新筹码总筹码峰值价格。', example: 'C > CYQ_PEAK' },
-      { name: 'CYQ_MT / CYQ_RT / CYQ_TC', scope: '通用', description: '主力 / 散户 / 总筹码量。', example: 'CYQ_MT > CYQ_RT' },
+      { name: 'CYQ_MT / CYQ_RT / CYQ_TC', scope: '通用', description: '主力 / 散户 / 总筹码的归一化持仓量，CYQ_MT + CYQ_RT 约等于 CYQ_TC；CYQ_TC 通常约为 100，不是成交量或真实股本数量。', example: 'CYQ_MT > CYQ_RT' },
       { name: 'CYQ_MIN / CYQ_MAX', scope: '通用', description: '新筹码分布的最低 / 最高价格边界。', example: 'C >= CYQ_MIN AND C <= CYQ_MAX' },
       { name: 'CYQ_P70L / CYQ_P70H / CYQ_P70C', scope: '通用', description: '70% 筹码集中区下沿 / 上沿 / 集中度。', example: 'CYQ_P70C > 0.4' },
       { name: 'CYQ_P90L / CYQ_P90H / CYQ_P90C', scope: '通用', description: '90% 筹码集中区下沿 / 上沿 / 集中度。', example: 'C > CYQ_P90H' },
@@ -103,6 +103,7 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
       { name: 'RATEL', scope: '筹码变动策略', description: '当日最低价相对当前价格分桶成本价的涨跌幅，单位是百分比。', example: 'RATEL < -8' },
       { name: 'RATEC', scope: '筹码变动策略', description: '当日收盘价相对当前价格分桶成本价的涨跌幅，单位是百分比。', example: 'RATEC > 10' },
       { name: 'MAIN_CHIP_RATIO', scope: '筹码变动策略', description: '当前价格分桶里主力筹码占该分桶总筹码的比例，取值通常在 0 到 1。', example: 'MAIN_CHIP_RATIO > 0.6' },
+      { name: 'MAIN_CHIP_TOTAL / RETAIL_CHIP_TOTAL', scope: '筹码变动策略', description: '当前全分布主力 / 散户筹码量，按比例归一化后两者相加约等于 100。', example: 'MAIN_CHIP_TOTAL > RETAIL_CHIP_TOTAL' },
     ],
   },
   {

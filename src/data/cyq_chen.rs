@@ -4,12 +4,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     data::{
-        RowData, RuntimeKeyCollectOptions, chip_change_rule_path,
-        collect_runtime_keys_from_expr_programs, scoring_data::row_into_rt,
+        chip_change_rule_path, collect_runtime_keys_from_expr_programs, scoring_data::row_into_rt,
+        RowData, RuntimeKeyCollectOptions,
     },
     expr::{
         eval::{Runtime, Value},
-        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+        parser::{lex_all, Expr, Parser, Stmt, Stmts},
     },
     utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
 };
@@ -18,12 +18,14 @@ const DEFAULT_WARMUP_DAYS: usize = 120;
 const DEFAULT_BUCKET_PCT: f64 = 1.0;
 const EPS: f64 = 1e-10;
 const CHEN_CHIP_ALWAYS_RUNTIME_KEYS: [&str; 5] = ["O", "H", "L", "C", "TURNOVER_RATE"];
-const CHEN_CHIP_INJECTED_RUNTIME_KEYS: [&str; 7] = [
+const CHEN_CHIP_INJECTED_RUNTIME_KEYS: [&str; 9] = [
     "RATEO",
     "RATEH",
     "RATEL",
     "RATEC",
     "MAIN_CHIP_RATIO",
+    "MAIN_CHIP_TOTAL",
+    "RETAIL_CHIP_TOTAL",
     "ZHANG",
     "TOTAL_MV_YI",
 ];
@@ -222,10 +224,6 @@ impl ChipChangeConfig {
             if !strategy.bias.is_finite() {
                 return Err(format!("第{n}个strategy的bias必须是有限数值"));
             }
-            if strategy.direction == ChipDirection::Buy && strategy.bias <= 0.0 {
-                return Err(format!("第{n}个买入strategy的bias必须是正数"));
-            }
-
             parse_strategy_expression(strategy.when.trim(), n, strategy.name.trim())?;
         }
 
@@ -846,6 +844,7 @@ fn apply_sell_for_day(
     let mut entries = Vec::new();
     let mut has_main_bias = false;
     let mut has_retail_bias = false;
+    let (main_chip_total, retail_chip_total) = holder_chip_totals(buckets);
 
     for bucket_index in 0..buckets.len() {
         let bucket_runtime = build_bucket_runtime(
@@ -853,6 +852,8 @@ fn apply_sell_for_day(
             bars,
             &buckets[bucket_index],
             &main_ratio_history[bucket_index],
+            main_chip_total,
+            retail_chip_total,
         )?;
         let (main_bias, retail_bias) = strategy_biases_at(
             &bucket_runtime,
@@ -888,6 +889,16 @@ fn apply_sell_for_day(
     } else {
         apply_weighted_sell(buckets, entries, turnover_rate)?
     };
+
+    if remaining <= EPS {
+        return Ok(());
+    }
+
+    let bar = bars[day_index]
+        .as_ref()
+        .ok_or_else(|| format!("第{day_index}根K线缺少有效数据"))?;
+    let retail_trapped_entries = retail_trapped_chip_entries(buckets, bar.close);
+    remaining = apply_weighted_sell(buckets, retail_trapped_entries, remaining)?;
 
     if remaining <= EPS {
         return Ok(());
@@ -933,6 +944,7 @@ fn apply_buy_for_day(
     if total_weight <= EPS {
         return Ok(());
     }
+    let (main_chip_total, retail_chip_total) = holder_chip_totals(buckets);
 
     for bucket_index in 0..buckets.len() {
         let weight = weights[bucket_index];
@@ -945,6 +957,8 @@ fn apply_buy_for_day(
             bars,
             &buckets[bucket_index],
             &main_ratio_history[bucket_index],
+            main_chip_total,
+            retail_chip_total,
         )?;
         let (main_bias, retail_bias) = strategy_biases_at(
             &bucket_runtime,
@@ -968,10 +982,15 @@ fn build_bucket_runtime(
     bars: &[Option<ChenChipBar>],
     bucket: &ChipBucket,
     main_ratio_history: &[Option<f64>],
+    main_chip_total: f64,
+    retail_chip_total: f64,
 ) -> Result<Runtime, String> {
     let cost_price = bucket.price();
     if !cost_price.is_finite() || cost_price <= 0.0 {
         return Err("价格分桶中点价非法".to_string());
+    }
+    if !main_chip_total.is_finite() || !retail_chip_total.is_finite() {
+        return Err("主力/散户总筹码出现非有限数值".to_string());
     }
     if main_ratio_history.len() != bars.len() {
         return Err("MAIN_CHIP_RATIO序列长度与交易日长度不一致".to_string());
@@ -1006,8 +1025,17 @@ fn build_bucket_runtime(
         "MAIN_CHIP_RATIO",
         main_ratio_history.to_vec(),
     );
+    insert_num_with_lowercase_alias(&mut runtime, "MAIN_CHIP_TOTAL", main_chip_total);
+    insert_num_with_lowercase_alias(&mut runtime, "RETAIL_CHIP_TOTAL", retail_chip_total);
 
     Ok(runtime)
+}
+
+fn insert_num_with_lowercase_alias(runtime: &mut Runtime, key: &str, value: f64) {
+    runtime.vars.insert(key.to_string(), Value::Num(value));
+    runtime
+        .vars
+        .insert(key.to_ascii_lowercase(), Value::Num(value));
 }
 
 fn insert_num_series_with_lowercase_alias(
@@ -1071,6 +1099,17 @@ fn buy_holder_shares(main_bias: f64, retail_bias: f64) -> (f64, f64) {
     }
 }
 
+fn holder_chip_totals(buckets: &[ChipBucket]) -> (f64, f64) {
+    let main_chip_total = buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
+    let retail_chip_total = buckets.iter().map(|bucket| bucket.retail_chip).sum::<f64>();
+    let total = main_chip_total + retail_chip_total;
+    if total <= EPS || !total.is_finite() {
+        return (0.0, 0.0);
+    }
+    let scale = 100.0 / total;
+    (main_chip_total * scale, retail_chip_total * scale)
+}
+
 fn holder_chip_entries(buckets: &[ChipBucket], holder: ChipHolder) -> Vec<SellEntry> {
     buckets
         .iter()
@@ -1082,6 +1121,24 @@ fn holder_chip_entries(buckets: &[ChipBucket], holder: ChipHolder) -> Vec<SellEn
                     bucket_index,
                     holder,
                     weight: chip,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn retail_trapped_chip_entries(buckets: &[ChipBucket], close: f64) -> Vec<SellEntry> {
+    buckets
+        .iter()
+        .enumerate()
+        .filter_map(|(bucket_index, bucket)| {
+            if bucket.price() > close + EPS && bucket.retail_chip > EPS {
+                Some(SellEntry {
+                    bucket_index,
+                    holder: ChipHolder::Retail,
+                    weight: 1.0,
                 })
             } else {
                 None
@@ -1437,8 +1494,9 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        ChenChipConfig, ChipChangeConfig, ChipDirection, ChipHolder, EPS,
-        compute_chen_chip_snapshots_from_row_data,
+        apply_buy_for_day, apply_sell_for_day, buy_holder_shares,
+        compute_chen_chip_snapshots_from_row_data, row_into_rt, ChenChipBar, ChenChipConfig,
+        ChipBucket, ChipChangeConfig, ChipDirection, ChipHolder, EPS,
     };
     use crate::data::RowData;
 
@@ -1523,7 +1581,7 @@ bias = 1.5
     }
 
     #[test]
-    fn chip_change_config_rejects_bad_version_and_buy_bias() {
+    fn chip_change_config_rejects_bad_version() {
         let version_error = ChipChangeConfig::from_toml_str(
             r#"
 version = 2
@@ -1532,8 +1590,11 @@ strategy = []
         )
         .expect_err("version should fail");
         assert!(version_error.contains("version"));
+    }
 
-        let bias_error = ChipChangeConfig::from_toml_str(
+    #[test]
+    fn chip_change_config_allows_negative_buy_bias() {
+        let config = ChipChangeConfig::from_toml_str(
             r#"
 version = 1
 
@@ -1542,11 +1603,177 @@ name = "bad"
 holder = "main"
 direction = "buy"
 when = "C > O"
-bias = 0.0
+bias = -0.5
 "#,
         )
-        .expect_err("buy bias should fail");
-        assert!(bias_error.contains("bias"));
+        .expect("negative buy bias should parse");
+
+        assert_eq!(config.strategy[0].bias, -0.5);
+    }
+
+    #[test]
+    fn buy_holder_shares_use_positive_net_bias_only() {
+        let (main_share, retail_share) = buy_holder_shares(1.0, 2.0);
+        assert_close(main_share, 1.0 / 3.0);
+        assert_close(retail_share, 2.0 / 3.0);
+
+        let (main_share, retail_share) = buy_holder_shares(0.4, -0.6);
+        assert_close(main_share, 1.0);
+        assert_close(retail_share, 0.0);
+
+        let (main_share, retail_share) = buy_holder_shares(-0.6, 1.2);
+        assert_close(main_share, 0.0);
+        assert_close(retail_share, 1.0);
+
+        let (main_share, retail_share) = buy_holder_shares(-0.6, -0.2);
+        assert_close(main_share, 0.0);
+        assert_close(retail_share, 1.0);
+    }
+
+    #[test]
+    fn chip_change_strategy_can_use_holder_total_chip_fields() {
+        let chip_config = ChipChangeConfig::from_toml_str(
+            r#"
+version = 1
+
+[[strategy]]
+name = "main keeps adding"
+holder = "main"
+direction = "buy"
+when = "MAIN_CHIP_TOTAL > RETAIL_CHIP_TOTAL AND MAIN_CHIP_TOTAL + RETAIL_CHIP_TOTAL == 100"
+bias = 1.0
+
+[[strategy]]
+name = "retail adds when stronger"
+holder = "retail"
+direction = "buy"
+when = "RETAIL_CHIP_TOTAL > MAIN_CHIP_TOTAL"
+bias = 1.0
+"#,
+        )
+        .expect("config should parse")
+        .compile()
+        .expect("config should compile");
+        let row_data = RowData {
+            trade_dates: vec!["20240102".to_string()],
+            cols: HashMap::from([
+                ("O".to_string(), vec![Some(10.0)]),
+                ("H".to_string(), vec![Some(10.2)]),
+                ("L".to_string(), vec![Some(9.8)]),
+                ("C".to_string(), vec![Some(10.1)]),
+                ("TOR".to_string(), vec![Some(10.0)]),
+            ]),
+        };
+        let bars = vec![Some(ChenChipBar {
+            trade_date: "20240102".to_string(),
+            open: 10.0,
+            high: 10.2,
+            low: 9.8,
+            close: 10.1,
+            turnover_rate: 10.0,
+        })];
+        let base_runtime = row_into_rt(row_data).expect("runtime should build");
+        let main_ratio_history = vec![vec![Some(0.6)], vec![Some(0.6)]];
+        let mut buckets = vec![
+            ChipBucket {
+                price_low: 9.0,
+                price_high: 10.0,
+                main_chip: 30.0,
+                retail_chip: 20.0,
+            },
+            ChipBucket {
+                price_low: 10.0,
+                price_high: 11.0,
+                main_chip: 30.0,
+                retail_chip: 20.0,
+            },
+        ];
+
+        apply_buy_for_day(
+            &mut buckets,
+            &bars,
+            &base_runtime,
+            &chip_config,
+            &main_ratio_history,
+            0,
+            10.0,
+        )
+        .expect("buy should apply");
+
+        let main_total = buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
+        let retail_total = buckets.iter().map(|bucket| bucket.retail_chip).sum::<f64>();
+
+        assert_close(main_total, 70.0);
+        assert_close(retail_total, 40.0);
+    }
+
+    #[test]
+    fn sell_shortfall_uses_retail_trapped_chips_before_other_fallbacks() {
+        let chip_config = ChipChangeConfig::from_toml_str(
+            r#"
+version = 1
+
+[[strategy]]
+name = "main sell"
+holder = "main"
+direction = "sell"
+when = "C > 0"
+bias = 1.0
+"#,
+        )
+        .expect("config should parse")
+        .compile()
+        .expect("config should compile");
+        let row_data = RowData {
+            trade_dates: vec!["20240102".to_string()],
+            cols: HashMap::from([
+                ("O".to_string(), vec![Some(10.0)]),
+                ("H".to_string(), vec![Some(10.2)]),
+                ("L".to_string(), vec![Some(9.8)]),
+                ("C".to_string(), vec![Some(10.0)]),
+                ("TOR".to_string(), vec![Some(1.0)]),
+            ]),
+        };
+        let bars = vec![Some(ChenChipBar {
+            trade_date: "20240102".to_string(),
+            open: 10.0,
+            high: 10.2,
+            low: 9.8,
+            close: 10.0,
+            turnover_rate: 1.0,
+        })];
+        let base_runtime = row_into_rt(row_data).expect("runtime should build");
+        let main_ratio_history = vec![vec![Some(0.0)], vec![Some(0.0)]];
+        let mut buckets = vec![
+            ChipBucket {
+                price_low: 9.0,
+                price_high: 10.0,
+                main_chip: 0.1,
+                retail_chip: 10.0,
+            },
+            ChipBucket {
+                price_low: 10.0,
+                price_high: 11.0,
+                main_chip: 0.1,
+                retail_chip: 10.0,
+            },
+        ];
+
+        apply_sell_for_day(
+            &mut buckets,
+            &bars,
+            &base_runtime,
+            &chip_config,
+            &main_ratio_history,
+            0,
+            1.0,
+        )
+        .expect("sell should apply");
+
+        assert_close(buckets[0].main_chip, 0.0);
+        assert_close(buckets[1].main_chip, 0.0);
+        assert_close(buckets[0].retail_chip, 10.0);
+        assert_close(buckets[1].retail_chip, 9.2);
     }
 
     #[test]
@@ -1641,12 +1868,10 @@ bias = 1.0
                 || (snapshots[1].percent_90.price_high - snapshots[1].percent_70.price_high).abs()
                     <= EPS
         );
-        assert!(
-            snapshots[1]
-                .bins
-                .iter()
-                .any(|bin| bin.price_high > 11.0 && bin.total_chip > 0.0)
-        );
+        assert!(snapshots[1]
+            .bins
+            .iter()
+            .any(|bin| bin.price_high > 11.0 && bin.total_chip > 0.0));
     }
 
     #[test]

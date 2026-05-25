@@ -130,6 +130,19 @@
   padding: 0 9px;
 }
 
+.cyq-chen-stock-lookup input {
+  height: auto;
+  border-color: #c6d0da;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+}
+
+.cyq-chen-stock-lookup input:focus {
+  outline: 2px solid var(--theme-orange-300);
+  outline-offset: 1px;
+}
+
 .cyq-chen-section-head {
   margin-top: 16px;
 }

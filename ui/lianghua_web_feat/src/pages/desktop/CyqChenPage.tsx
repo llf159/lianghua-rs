@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
+import {
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+  type WheelEvent as ReactWheelEvent,
+} from 'react'
 import {
   getCyqChenStrategyPage,
   runCyqChenSingleStockTest,
@@ -10,7 +19,10 @@ import {
 } from '../../apis/cyqChen'
 import type { DetailChartMarker, DetailChartSeries, DetailChartTooltip, DetailKlinePanel, DetailKlineRow } from '../../apis/details'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
+import { listStockLookupRows, type StockLookupRow } from '../../apis/reader'
 import { readStoredChartMainWidthRatio } from '../../shared/chartSettings'
+import { sanitizeCodeInput, stdTsCode } from '../../shared/stockCode'
+import { buildStockLookupCandidates, findExactStockLookupMatch, getLookupDigits } from '../../shared/stockLookup'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
 import './css/DetailsPage.css'
 import './css/CyqChenPage.css'
@@ -126,6 +138,7 @@ type ChartMarkerOverlayPoint = {
 }
 
 const CYQ_CHEN_DRAFT_STORAGE_KEY = 'lh_cyq_chen_test_draft_v1'
+const MAX_STOCK_NAME_CANDIDATES = 12
 
 type CyqChenTestDraft = {
   tsCodeInput: string
@@ -904,12 +917,22 @@ function findChipPeak(snapshot: CyqChenSnapshot | null, mode: ChipPeakMode) {
   }, null)
 }
 
+function buildWatermarkCode(tsCode: string | null | undefined) {
+  const code = tsCode?.trim() ?? ''
+  if (!code) {
+    return '--'
+  }
+  return code.split('.')[0] || code
+}
+
 function CyqChenProjectChart({
   kline,
   panels,
   snapshot,
   selectedTradeDate,
   chipPeakMode,
+  watermarkName,
+  watermarkCode,
   onChipPeakModeChange,
   onSelectTradeDate,
 }: {
@@ -918,6 +941,8 @@ function CyqChenProjectChart({
   snapshot: CyqChenSnapshot | null
   selectedTradeDate: string
   chipPeakMode: ChipPeakMode
+  watermarkName: string
+  watermarkCode: string
   onChipPeakModeChange: (mode: ChipPeakMode) => void
   onSelectTradeDate: (tradeDate: string) => void
 }) {
@@ -1797,31 +1822,40 @@ function CyqChenProjectChart({
           onPointerLeave={(event) => onChartPointerLeave(pricePanel.key, event)}
           onPointerCancel={(event) => onChartPointerCancel(pricePanel.key, event)}
         >
-            {reserveCyqPanelWidth ? (
-              <div
-                className="details-chart-cyq-holder-switch"
-                role="tablist"
-                aria-label="筹码分布显示"
-                onPointerDown={(event) => {
-                  event.stopPropagation()
-                }}
-              >
-                {(['total', 'main', 'retail'] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    className={chipPeakMode === mode ? 'is-active' : ''}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      onChipPeakModeChange(mode)
-                    }}
-                  >
-                    {chipModeLabel(mode)}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-            {domain && visibleItems.length > 0 ? (() => {
+          <div
+            className="details-chart-watermark"
+            style={{
+              left: `${(CHART_MARGIN.left + klinePlotWidth / 2) / CHART_VIEWBOX_WIDTH * 100}%`,
+            }}
+          >
+            <strong>{watermarkName}</strong>
+            <span>{watermarkCode}</span>
+          </div>
+          {reserveCyqPanelWidth ? (
+            <div
+              className="details-chart-cyq-holder-switch"
+              role="tablist"
+              aria-label="筹码分布显示"
+              onPointerDown={(event) => {
+                event.stopPropagation()
+              }}
+            >
+              {(['total', 'main', 'retail'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={chipPeakMode === mode ? 'is-active' : ''}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onChipPeakModeChange(mode)
+                  }}
+                >
+                  {chipModeLabel(mode)}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {domain && visibleItems.length > 0 ? (() => {
               const yAt = (value: number) =>
                 CHART_MARGIN.top + (domain.max - value) / (domain.max - domain.min) * plotHeight
               const bodyWidth = Math.max(Math.min(step * 0.58, 18), 3)
@@ -1849,10 +1883,17 @@ function CyqChenProjectChart({
                 const binHigh = Math.max(bin.priceLow, bin.priceHigh)
                 return !(binHigh < domain.min || binLow > domain.max)
               })
-              const maxChip = visibleCyqBins.reduce((acc, bin) => {
+              const totalScaleMaxChip = visibleCyqBins.reduce((acc, bin) => {
+                const value = bin.totalChip
+                return isFiniteNumber(value) ? Math.max(acc, value) : acc
+              }, 0)
+              const selectedScaleMaxChip = visibleCyqBins.reduce((acc, bin) => {
                 const value = chipValueByMode(bin, chipPeakMode)
                 return isFiniteNumber(value) ? Math.max(acc, value) : acc
               }, 0)
+              const maxChip = chipPeakMode === 'total'
+                ? totalScaleMaxChip
+                : totalScaleMaxChip || selectedScaleMaxChip
               const peakBin = findChipPeak(snapshot, chipPeakMode)
               const priceOverlaySeries = getPanelSeries(pricePanel)
               const markerOverlayPoints = buildChartMarkerOverlayPoints(pricePanel, visibleItems, xAt, yAt)
@@ -1990,12 +2031,21 @@ function CyqChenProjectChart({
                           const mainRatio = totalChip > 0 && isFiniteNumber(bin.mainChip)
                             ? clampNumber(bin.mainChip / totalChip, 0, 1)
                             : 0
+                          const retailRatio = totalChip > 0 && isFiniteNumber(bin.retailChip)
+                            ? clampNumber(bin.retailChip / totalChip, 0, 1)
+                            : 0
+                          const selectedHolderRatio = totalChip > 0 && isFiniteNumber(chipValue)
+                            ? clampNumber(chipValue / totalChip, 0, 1)
+                            : 0
                           const mainWidth = chipPeakMode === 'total' ? resolvedBarWidth * mainRatio : 0
                           const retailWidth = chipPeakMode === 'total' ? resolvedBarWidth - mainWidth : 0
                           const barX = chipPanelRight - resolvedBarWidth
 
                           return chipPeakMode === 'total' ? (
                             <g key={`${bin.index}-${bin.priceLow}`}>
+                              <title>
+                                {`混合 ${formatNumber(bin.totalChip, 4)}；主力 ${formatRatioPercent(mainRatio)}，散户 ${formatRatioPercent(retailRatio)}`}
+                              </title>
                               {retailWidth > 0 ? (
                                 <rect
                                   className="details-chart-cyq-bar"
@@ -2043,7 +2093,11 @@ function CyqChenProjectChart({
                               fill={fill}
                               opacity={isPeak ? 0.96 : 0.82}
                               rx={1}
-                            />
+                            >
+                              <title>
+                                {`${chipModeLabel(chipPeakMode)} ${formatNumber(chipValue, 4)}；占该价位 ${formatRatioPercent(selectedHolderRatio)}`}
+                              </title>
+                            </rect>
                           )
                         })}
                       </g>
@@ -2164,6 +2218,8 @@ export default function CyqChenPage() {
   const [bucketPctInput, setBucketPctInput] = useState(persistedDraft.bucketPctInput)
   const [strategies, setStrategies] = useState<CyqChenStrategyDraft[]>(() => cloneDefaultStrategies())
   const [sourcePath, setSourcePath] = useState('')
+  const [stockLookupRows, setStockLookupRows] = useState<StockLookupRow[]>([])
+  const [stockLookupFocused, setStockLookupFocused] = useState(false)
   const [result, setResult] = useState<CyqChenSingleStockData | null>(null)
   const [savedRuns, setSavedRuns] = useState<SavedRun[]>([])
   const [selectedTradeDate, setSelectedTradeDate] = useState('')
@@ -2183,12 +2239,41 @@ export default function CyqChenPage() {
   const chartRows = useMemo(() => buildChartRows(result), [result])
   const chartPanels = result?.klinePayload?.panels ?? []
   const snapshotOptions = result?.snapshots ?? []
+  const inputCodeDigits = sanitizeCodeInput(tsCodeInput)
+  const normalizedInputTsCode = inputCodeDigits.length === 6 ? stdTsCode(inputCodeDigits) : ''
+  const deferredTsCodeInput = useDeferredValue(tsCodeInput)
+  const stockNameCandidates = useMemo(
+    () => buildStockLookupCandidates(stockLookupRows, deferredTsCodeInput, MAX_STOCK_NAME_CANDIDATES),
+    [deferredTsCodeInput, stockLookupRows],
+  )
+  const exactStockLookupMatch = useMemo(
+    () => findExactStockLookupMatch(stockLookupRows, tsCodeInput),
+    [stockLookupRows, tsCodeInput],
+  )
+  const resolvedTestTsCode = normalizedInputTsCode ||
+    (exactStockLookupMatch ? stdTsCode(getLookupDigits(exactStockLookupMatch.ts_code)) : '')
+  const showStockNameCandidates =
+    stockLookupFocused &&
+    tsCodeInput.trim() !== '' &&
+    stockNameCandidates.length > 0
   const mainPeakBin = useMemo(() => findChipPeak(selectedSnapshot, 'main'), [selectedSnapshot])
   const retailPeakBin = useMemo(() => findChipPeak(selectedSnapshot, 'retail'), [selectedSnapshot])
   const selectedPeakBin = useMemo(
     () => findChipPeak(selectedSnapshot, chipPeakMode),
     [selectedSnapshot, chipPeakMode],
   )
+  const resultStockLookupMatch = useMemo(() => {
+    if (!result) {
+      return null
+    }
+    return stockLookupRows.find((row) => row.ts_code === result.resolvedTsCode) ?? null
+  }, [result, stockLookupRows])
+  const watermarkName = result
+    ? result.klinePayload?.watermark_name?.trim() || resultStockLookupMatch?.name || '筹码测试'
+    : '筹码测试'
+  const watermarkCode = result
+    ? result.klinePayload?.watermark_code?.trim() || buildWatermarkCode(result.resolvedTsCode)
+    : '--'
 
   useEffect(() => {
     writeJsonStorage(typeof window === 'undefined' ? null : window.localStorage, CYQ_CHEN_DRAFT_STORAGE_KEY, {
@@ -2244,7 +2329,66 @@ export default function CyqChenPage() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!sourcePath.trim()) {
+      setStockLookupRows([])
+      return
+    }
+
+    let canceled = false
+    async function loadStockLookupRows() {
+      try {
+        const rows = await listStockLookupRows(sourcePath.trim())
+        if (!canceled) {
+          setStockLookupRows(rows)
+        }
+      } catch {
+        if (!canceled) {
+          setStockLookupRows([])
+        }
+      }
+    }
+
+    void loadStockLookupRows()
+    return () => {
+      canceled = true
+    }
+  }, [sourcePath])
+
+  function onSelectStockCandidate(row: StockLookupRow) {
+    const nextCode = getLookupDigits(row.ts_code)
+    if (nextCode === '') {
+      return
+    }
+
+    setStockLookupFocused(false)
+    setTsCodeInput(row.name || stdTsCode(nextCode))
+  }
+
+  function onCandidateWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    const element = event.currentTarget
+    const scrollTop = element.scrollTop
+    const maxScrollTop = Math.max(element.scrollHeight - element.clientHeight, 0)
+    const isAtTop = scrollTop <= 0
+    const isAtBottom = scrollTop >= maxScrollTop - 1
+
+    event.stopPropagation()
+    if ((event.deltaY < 0 && isAtTop) || (event.deltaY > 0 && isAtBottom)) {
+      event.preventDefault()
+    }
+  }
+
   async function runTest() {
+    if (resolvedTestTsCode === '') {
+      setError(
+        tsCodeInput.trim() !== ''
+          ? '请从候选中选择股票名称，或输入 6 位代码。'
+          : '股票代码不能为空。',
+      )
+      setNotice('')
+      return
+    }
+
     const warmupDays = Number(warmupDaysInput.trim())
     const bucketPct = Number(bucketPctInput.trim())
     if (!Number.isInteger(warmupDays) || warmupDays < 0) {
@@ -2274,7 +2418,7 @@ export default function CyqChenPage() {
       setSourcePath(nextSourcePath)
       const nextResult = await runCyqChenSingleStockTest({
         sourcePath: nextSourcePath,
-        tsCode: tsCodeInput,
+        tsCode: resolvedTestTsCode,
         startDate: normalizeDateInput(startDateInput) || null,
         endDate: normalizeDateInput(endDateInput) || null,
         warmupDays,
@@ -2312,9 +2456,48 @@ export default function CyqChenPage() {
         </div>
 
         <div className="cyq-chen-form-grid">
-          <label>
-            <span>股票代码</span>
-            <input value={tsCodeInput} onChange={(event) => setTsCodeInput(event.target.value)} placeholder="000001 或 000001.SZ" />
+          <label className="details-field cyq-chen-stock-lookup">
+            <span>代码/名称输入，预览代码：{resolvedTestTsCode || '--'}</span>
+            <div className="details-autocomplete">
+              <input
+                type="text"
+                value={tsCodeInput}
+                onChange={(event) => {
+                  setStockLookupFocused(true)
+                  setTsCodeInput(event.target.value)
+                }}
+                onFocus={() => setStockLookupFocused(true)}
+                onBlur={() => setStockLookupFocused(false)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && stockNameCandidates.length > 0) {
+                    event.preventDefault()
+                    onSelectStockCandidate(stockNameCandidates[0])
+                  }
+                }}
+                placeholder="输入股票名称、代码或拼音首字母，支持候选补全"
+              />
+              {showStockNameCandidates ? (
+                <div className="details-autocomplete-menu" onWheel={onCandidateWheel}>
+                  {stockNameCandidates.map((row) => {
+                    const code = getLookupDigits(row.ts_code)
+                    return (
+                      <button
+                        className="details-autocomplete-option"
+                        key={row.ts_code}
+                        type="button"
+                        onMouseDown={(event) => {
+                          event.preventDefault()
+                          onSelectStockCandidate(row)
+                        }}
+                      >
+                        <strong>{row.name}</strong>
+                        <span>{code || row.ts_code}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : null}
+            </div>
           </label>
           <label>
             <span>开始日期</span>
@@ -2474,6 +2657,8 @@ export default function CyqChenPage() {
             snapshot={selectedSnapshot}
             selectedTradeDate={selectedSnapshot?.tradeDate ?? selectedTradeDate}
             chipPeakMode={chipPeakMode}
+            watermarkName={watermarkName}
+            watermarkCode={watermarkCode}
             onChipPeakModeChange={setChipPeakMode}
             onSelectTradeDate={setSelectedTradeDate}
           />
@@ -2491,7 +2676,7 @@ export default function CyqChenPage() {
               </tr>
             </thead>
             <tbody>
-              {(selectedSnapshot?.bins ?? []).slice(0, 80).map((bin: CyqChenBin) => (
+              {(selectedSnapshot?.bins ?? []).map((bin: CyqChenBin) => (
                 <tr key={bin.index}>
                   <td>{formatNumber(bin.price)}</td>
                   <td>

@@ -1680,8 +1680,8 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
               <label className="strategy-manage-field">
                 <span>Bias</span>
                 <input
-                  type="number"
-                  step="0.1"
+                  type="text"
+                  inputMode="decimal"
                   value={chipStrategyDraft.bias}
                   onChange={(event) =>
                     setChipStrategyDraft((current) =>
