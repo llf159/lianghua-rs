@@ -984,10 +984,10 @@ fn build_bucket_runtime(
 
     for bar in bars {
         if let Some(bar) = bar {
-            rateo.push(Some((bar.open - cost_price) / cost_price));
-            rateh.push(Some((bar.high - cost_price) / cost_price));
-            ratel.push(Some((bar.low - cost_price) / cost_price));
-            ratec.push(Some((bar.close - cost_price) / cost_price));
+            rateo.push(Some((bar.open - cost_price) / cost_price * 100.0));
+            rateh.push(Some((bar.high - cost_price) / cost_price * 100.0));
+            ratel.push(Some((bar.low - cost_price) / cost_price * 100.0));
+            ratec.push(Some((bar.close - cost_price) / cost_price * 100.0));
         } else {
             rateo.push(None);
             rateh.push(None);
@@ -1510,7 +1510,7 @@ version = 1
 name = "主力低位承接"
 holder = "main"
 direction = "buy"
-when = "RATEL < -0.08 AND C > O"
+when = "RATEL < -8 AND C > O"
 bias = 1.5
 "#,
         )

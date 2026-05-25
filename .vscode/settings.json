@@ -5,5 +5,21 @@
   ],
   "rust-analyzer.procMacro.enable": true,
   "rust-analyzer.cargo.buildScripts.enable": true,
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/.opencode/node_modules/**": true,
+    "**/.vite/**": true,
+    "**/dist/**": true,
+    "**/node_modules/**": true,
+    "**/target/**": true
+  },
+  "search.exclude": {
+    "**/.opencode/node_modules": true,
+    "**/.vite": true,
+    "**/dist": true,
+    "**/node_modules": true,
+    "**/target": true
+  },
   // "rust-analyzer.checkOnSave.command": "check"
 }

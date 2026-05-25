@@ -1437,7 +1437,7 @@ bias = 1.0
 name = "散户卖出"
 holder = "retail"
 direction = "sell"
-when = "RATEC > 0.01"
+when = "RATEC > 1"
 bias = 1.0
 "#,
         )

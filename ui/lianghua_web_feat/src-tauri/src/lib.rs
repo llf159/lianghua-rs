@@ -1,7 +1,13 @@
 mod data_download_bridge;
 mod managed_source_bridge;
 
-use std::{fs, time::Instant};
+use std::{
+    fs,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    str::FromStr,
+    time::Instant,
+};
 
 use lianghua_rs::ui_tools_feat::{
     chart_indicator_settings::{
@@ -20,8 +26,6 @@ use lianghua_rs::ui_tools_feat::{
         backup_cyq_chen_strategy_file as core_backup_cyq_chen_strategy_file,
         check_cyq_chen_strategy_file_draft as core_check_cyq_chen_strategy_file_draft,
         delete_cyq_chen_strategy_backup as core_delete_cyq_chen_strategy_backup,
-        export_cyq_chen_active_strategy_file as core_export_cyq_chen_active_strategy_file,
-        export_cyq_chen_strategy_backup_file as core_export_cyq_chen_strategy_backup_file,
         get_cyq_chen_strategy_backup_diff as core_get_cyq_chen_strategy_backup_diff,
         get_cyq_chen_strategy_page as core_get_cyq_chen_strategy_page,
         import_cyq_chen_strategy_backup as core_import_cyq_chen_strategy_backup,
@@ -129,6 +133,7 @@ use lianghua_rs::ui_tools_feat::{
 };
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
+use tauri_plugin_fs::{FilePath, FsExt};
 
 use data_download_bridge::{
     get_data_download_status, get_indicator_manage_page, run_concept_most_related_repair,
@@ -159,6 +164,8 @@ use tauri::Manager;
 const WATCH_OBSERVE_STORAGE_FILE: &str = "watch_observe.json";
 const DEFAULT_MANAGED_SOURCE_DIR: &str = "source";
 const RANKING_COMPUTE_PROGRESS_EVENT: &str = "data-download-status";
+const CHIP_CHANGE_BACKUP_DIR_NAME: &str = "chip_change_rule_backups";
+const CHIP_CHANGE_RULE_FILE_NAME: &str = "chip_change_rule.toml";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1434,6 +1441,74 @@ async fn run_cyq_chen_single_stock_test(
         .map_err(|error| error.to_string())?
 }
 
+fn cyq_chen_active_strategy_path(source_path: &str) -> PathBuf {
+    Path::new(source_path).join(CHIP_CHANGE_RULE_FILE_NAME)
+}
+
+fn cyq_chen_backup_strategy_path(source_path: &str, backup_id: &str) -> Result<PathBuf, String> {
+    let backup_id = backup_id.trim();
+    if backup_id.is_empty()
+        || backup_id.contains('/')
+        || backup_id.contains('\\')
+        || backup_id.contains("..")
+        || !backup_id.ends_with(".toml")
+    {
+        return Err("备份文件名不合法".to_string());
+    }
+    Ok(Path::new(source_path)
+        .join(CHIP_CHANGE_BACKUP_DIR_NAME)
+        .join(backup_id))
+}
+
+fn export_cyq_chen_strategy_file_to_destination(
+    app: tauri::AppHandle,
+    source_file: PathBuf,
+    destination_file: String,
+) -> Result<CyqChenStrategyFileExportResult, String> {
+    let destination_file = destination_file.trim();
+    if destination_file.is_empty() {
+        return Err("导出目标文件为空".to_string());
+    }
+    if !source_file.exists() || !source_file.is_file() {
+        return Err(format!(
+            "待导出的筹码策略文件不存在: {}",
+            source_file.display()
+        ));
+    }
+
+    let mut source = fs::File::open(&source_file).map_err(|error| {
+        format!(
+            "打开待导出的筹码策略文件失败: path={}, err={error}",
+            source_file.display()
+        )
+    })?;
+    let mut open_options = tauri_plugin_fs::OpenOptions::new();
+    open_options.write(true).truncate(true).create(true);
+    let destination_path =
+        FilePath::from_str(destination_file).map_err(|error| error.to_string())?;
+    let destination_label = destination_path.to_string();
+    let mut target = app
+        .fs()
+        .open(destination_path, open_options)
+        .map_err(|error| error.to_string())?;
+
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read_bytes = source.read(&mut buffer).map_err(|error| error.to_string())?;
+        if read_bytes == 0 {
+            break;
+        }
+        target
+            .write_all(&buffer[..read_bytes])
+            .map_err(|error| error.to_string())?;
+    }
+    target.flush().map_err(|error| error.to_string())?;
+
+    Ok(CyqChenStrategyFileExportResult {
+        exported_path: destination_label,
+    })
+}
+
 #[tauri::command]
 fn get_cyq_chen_strategy_page(source_path: String) -> Result<CyqChenStrategyPageData, String> {
     core_get_cyq_chen_strategy_page(&source_path)
@@ -1474,20 +1549,43 @@ fn delete_cyq_chen_strategy_backup(
 }
 
 #[tauri::command]
-fn export_cyq_chen_active_strategy_file(
+async fn export_cyq_chen_active_strategy_file(
+    app: tauri::AppHandle,
     source_path: String,
     destination_file: String,
 ) -> Result<CyqChenStrategyFileExportResult, String> {
-    core_export_cyq_chen_active_strategy_file(&source_path, &destination_file)
+    tauri::async_runtime::spawn_blocking(move || {
+        let source_path = source_path.trim();
+        if source_path.is_empty() {
+            return Err("数据目录为空，请先确认当前数据源".to_string());
+        }
+        export_cyq_chen_strategy_file_to_destination(
+            app,
+            cyq_chen_active_strategy_path(source_path),
+            destination_file,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn export_cyq_chen_strategy_backup_file(
+async fn export_cyq_chen_strategy_backup_file(
+    app: tauri::AppHandle,
     source_path: String,
     backup_id: String,
     destination_file: String,
 ) -> Result<CyqChenStrategyFileExportResult, String> {
-    core_export_cyq_chen_strategy_backup_file(&source_path, &backup_id, &destination_file)
+    tauri::async_runtime::spawn_blocking(move || {
+        let source_path = source_path.trim();
+        if source_path.is_empty() {
+            return Err("数据目录为空，请先确认当前数据源".to_string());
+        }
+        let source_file = cyq_chen_backup_strategy_path(source_path, &backup_id)?;
+        export_cyq_chen_strategy_file_to_destination(app, source_file, destination_file)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

@@ -20,28 +20,28 @@ const DEFAULT_STRATEGIES: CyqChenStrategyDraft[] = [
     name: '主力低位承接',
     holder: 'main',
     direction: 'buy',
-    when: 'RATEL < -0.08 AND C > O',
+    when: 'RATEL < -8 AND C > O',
     bias: 1.5,
   },
   {
     name: '散户追高买入',
     holder: 'retail',
     direction: 'buy',
-    when: 'RATEC > 0.05 AND C >= H * 0.98',
+    when: 'RATEC > 5 AND C >= H * 0.98',
     bias: 1.2,
   },
   {
     name: '散户获利卖出',
     holder: 'retail',
     direction: 'sell',
-    when: 'RATEH > 0.12',
+    when: 'RATEH > 12',
     bias: 1.0,
   },
   {
     name: '主力高位派发',
     holder: 'main',
     direction: 'sell',
-    when: 'RATEC > 0.2 AND C < O',
+    when: 'RATEC > 20 AND C < O',
     bias: -0.6,
   },
 ]
@@ -73,6 +73,7 @@ type CyqChenChartAnchorSnapshot = {
 
 type CyqChenChartDragState = {
   pointerId: number
+  panelKey: string
   mode: 'pan' | 'focus' | 'tap' | 'dismiss'
   startClientX: number
   startClientY: number
@@ -84,11 +85,13 @@ type CyqChenChartDragState = {
 
 type CyqChenChartTouchPointer = {
   pointerId: number
+  panelKey: string
   clientX: number
   clientY: number
 }
 
 type CyqChenChartPinchState = {
+  panelKey: string
   pointerIds: [number, number]
   startDistance: number
   startVisibleBarCount: number
@@ -683,8 +686,10 @@ function buildChartPointerSnapshot(
 }
 
 function isPointerNearChartFocus(
+  _panelKey: string,
   viewport: HTMLDivElement,
   clientX: number,
+  _clientY: number,
   focus: CyqChenChartFocus | null,
 ) {
   if (!focus) {
@@ -998,8 +1003,10 @@ function CyqChenProjectChart({
     setVisibleStartIndex(nextVisibleStart)
   }
 
-  function getChartTouchPointers() {
-    return [...chartTouchPointersRef.current.values()]
+  function getChartTouchPointers(panelKey: string) {
+    return [...chartTouchPointersRef.current.values()].filter(
+      (pointer) => pointer.panelKey === panelKey,
+    )
   }
 
   function getChartPointerDistance(
@@ -1012,7 +1019,11 @@ function CyqChenProjectChart({
     )
   }
 
-  function startChartPinch(viewport: HTMLDivElement, pointers: CyqChenChartTouchPointer[]) {
+  function startChartPinch(
+    panelKey: string,
+    viewport: HTMLDivElement,
+    pointers: CyqChenChartTouchPointer[],
+  ) {
     if (totalItems === 0 || pointers.length < 2) {
       return false
     }
@@ -1031,6 +1042,7 @@ function CyqChenProjectChart({
     }
 
     chartPinchRef.current = {
+      panelKey,
       pointerIds: [firstPointer.pointerId, secondPointer.pointerId],
       startDistance: Math.max(getChartPointerDistance(firstPointer, secondPointer), CHART_PINCH_MIN_DISTANCE),
       startVisibleBarCount: effectiveVisibleBarCount,
@@ -1214,6 +1226,7 @@ function CyqChenProjectChart({
     if (event.pointerType === 'touch') {
       chartTouchPointersRef.current.set(event.pointerId, {
         pointerId: event.pointerId,
+        panelKey,
         clientX: event.clientX,
         clientY: event.clientY,
       })
@@ -1223,17 +1236,17 @@ function CyqChenProjectChart({
         // Ignore browsers that do not support pointer capture for this target.
       }
 
-      const touchPointers = getChartTouchPointers()
+      const touchPointers = getChartTouchPointers(panelKey)
       if (touchPointers.length >= 2) {
         event.preventDefault()
-        startChartPinch(event.currentTarget, touchPointers.slice(0, 2))
+        startChartPinch(panelKey, event.currentTarget, touchPointers.slice(0, 2))
         return
       }
     }
 
     const isTouchPointer = event.pointerType !== 'mouse'
-    const mode = focus?.pinned && focus.panelKey === panelKey
-      ? isTouchPointer && !isPointerNearChartFocus(event.currentTarget, event.clientX, focus)
+    const mode = focus?.pinned
+      ? isTouchPointer && !isPointerNearChartFocus(panelKey, event.currentTarget, event.clientX, event.clientY, focus)
         ? 'dismiss'
         : 'focus'
       : maxVisibleStart > 0
@@ -1248,6 +1261,7 @@ function CyqChenProjectChart({
 
     chartDragRef.current = {
       pointerId: event.pointerId,
+      panelKey,
       mode,
       startClientX: event.clientX,
       startClientY: event.clientY,
@@ -1277,7 +1291,7 @@ function CyqChenProjectChart({
 
     const dragState = chartDragRef.current
     if (!dragState) {
-      if (event.pointerType !== 'mouse' || !focus?.pinned || focus.panelKey !== panelKey) {
+      if (event.pointerType !== 'mouse' || !focus?.pinned) {
         return
       }
 
@@ -1288,7 +1302,7 @@ function CyqChenProjectChart({
       return
     }
 
-    if (dragState.pointerId !== event.pointerId) {
+    if (dragState.pointerId !== event.pointerId || dragState.panelKey !== panelKey) {
       return
     }
 
@@ -1346,7 +1360,7 @@ function CyqChenProjectChart({
 
     const dragState = chartDragRef.current
     clearChartPointerState(event)
-    if (!dragState || dragState.pointerId !== event.pointerId) {
+    if (!dragState || dragState.pointerId !== event.pointerId || dragState.panelKey !== panelKey) {
       return
     }
 
@@ -1369,7 +1383,11 @@ function CyqChenProjectChart({
       return
     }
 
-    if (focus?.pinned && focus.panelKey === panelKey && focus.absoluteIndex === nextFocus.absoluteIndex) {
+    if (
+      focus?.pinned &&
+      focus.panelKey === nextFocus.panelKey &&
+      focus.absoluteIndex === nextFocus.absoluteIndex
+    ) {
       applyChartFocus(null)
       return
     }
@@ -1379,16 +1397,16 @@ function CyqChenProjectChart({
 
   function onChartPointerLeave(panelKey: string, event: ReactPointerEvent<HTMLDivElement>) {
     const dragState = chartDragRef.current
-    if (dragState?.pointerId === event.pointerId) {
+    if (dragState?.pointerId === event.pointerId && dragState.panelKey === panelKey) {
       return
     }
 
-    if (!focus?.pinned || focus.panelKey === panelKey) {
+    if (!focus?.pinned) {
       applyChartFocus(null)
     }
   }
 
-  function onChartPointerCancel(event: ReactPointerEvent<HTMLDivElement>) {
+  function onChartPointerCancel(_panelKey: string, event: ReactPointerEvent<HTMLDivElement>) {
     if (chartPinchRef.current?.pointerIds.includes(event.pointerId)) {
       chartPinchRef.current = null
     }
@@ -1467,7 +1485,7 @@ function CyqChenProjectChart({
           onPointerMove={(event) => onChartPointerMove(panel.key, event)}
           onPointerUp={(event) => onChartPointerUp(panel.key, event)}
           onPointerLeave={(event) => onChartPointerLeave(panel.key, event)}
-          onPointerCancel={onChartPointerCancel}
+          onPointerCancel={(event) => onChartPointerCancel(panel.key, event)}
         >
           {panelDomain && visibleItems.length > 0 ? (() => {
             const yAt = (value: number) =>
@@ -1597,7 +1615,7 @@ function CyqChenProjectChart({
                                 width={barWidth}
                                 height={Math.max(Math.abs(baseY - y), 1)}
                                 fill={fill}
-                                opacity={series.opacity ?? 0.72}
+                                opacity={series.opacity ?? 1}
                                 rx={1}
                               />
                             )
@@ -1777,7 +1795,7 @@ function CyqChenProjectChart({
           onPointerMove={(event) => onChartPointerMove(pricePanel.key, event)}
           onPointerUp={(event) => onChartPointerUp(pricePanel.key, event)}
           onPointerLeave={(event) => onChartPointerLeave(pricePanel.key, event)}
-          onPointerCancel={onChartPointerCancel}
+          onPointerCancel={(event) => onChartPointerCancel(pricePanel.key, event)}
         >
             {reserveCyqPanelWidth ? (
               <div

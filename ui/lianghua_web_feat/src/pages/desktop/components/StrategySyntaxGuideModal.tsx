@@ -95,14 +95,25 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     ],
   },
   {
-    title: '8. 指标列自动注入',
+    title: '8. 筹码变动策略附加字段',
+    note: '这些字段只在 chip_change_rule.toml 的筹码变动策略中可用。RATE 系列按每个价格分桶的成本价动态计算，单位是百分比，30 表示 30%。',
+    fields: [
+      { name: 'RATEO', scope: '筹码变动策略', description: '当日开盘价相对当前价格分桶成本价的涨跌幅，单位是百分比。', example: 'RATEO > 30' },
+      { name: 'RATEH', scope: '筹码变动策略', description: '当日最高价相对当前价格分桶成本价的涨跌幅，单位是百分比。', example: 'RATEH > 30' },
+      { name: 'RATEL', scope: '筹码变动策略', description: '当日最低价相对当前价格分桶成本价的涨跌幅，单位是百分比。', example: 'RATEL < -8' },
+      { name: 'RATEC', scope: '筹码变动策略', description: '当日收盘价相对当前价格分桶成本价的涨跌幅，单位是百分比。', example: 'RATEC > 10' },
+      { name: 'MAIN_CHIP_RATIO', scope: '筹码变动策略', description: '当前价格分桶里主力筹码占该分桶总筹码的比例，取值通常在 0 到 1。', example: 'MAIN_CHIP_RATIO > 0.6' },
+    ],
+  },
+  {
+    title: '9. 指标列自动注入',
     note: 'DataReader 会把 stock_data 里实际存在的数值列自动转成大写变量；这通常是行情基础列之外的指标列，不等于 stock_list.csv 里的市值字段都会天然出现在这里。',
     fields: [
       { name: '已落库指标列 / 自定义数值列', scope: '按数据源实际情况', description: '只有已经写进 stock_data 的数值列才可直接引用，变量名会自动转成大写。', example: 'MY_IND > MA(MY_IND, 5)' },
     ],
   },
   {
-    title: '9. 实时监控模板附加字段',
+    title: '10. 实时监控模板附加字段',
     note: '下面这些字段只在“实时监控”页面的模板表达式中可用，策略打分、选股或统计表达式里不要直接写。',
     fields: [
       { name: 'RT_OP', scope: '实时监控', description: '当前价相对今开涨跌幅，单位是百分比。', example: 'RT_OP >= 2' },
@@ -112,7 +123,7 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     ],
   },
   {
-    title: '10. 表达式选股 / 模拟盘附加字段',
+    title: '11. 表达式选股 / 模拟盘附加字段',
     note: 'RANK 在表达式选股与模拟盘买点方程中按交易日对齐；模拟盘卖点方程额外注入持仓相关字段。',
     fields: [
       { name: 'RANK', scope: '表达式选股 / 模拟盘买点', description: '个股在 score_summary 中按交易日对齐后的排名序列；1 表示当日排名第一。', example: 'RANK <= 100 AND C > MA(C, 20)' },

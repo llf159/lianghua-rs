@@ -118,28 +118,28 @@ version = 1
 name = "主力低位承接"
 holder = "main"
 direction = "buy"
-when = "RATEL < -0.08 AND C > O"
+when = "RATEL < -8 AND C > O"
 bias = 1.5
 
 [[strategy]]
 name = "散户追高买入"
 holder = "retail"
 direction = "buy"
-when = "RATEC > 0.05 AND C >= H * 0.98"
+when = "RATEC > 5 AND C >= H * 0.98"
 bias = 1.2
 
 [[strategy]]
 name = "散户获利卖出"
 holder = "retail"
 direction = "sell"
-when = "RATEH > 0.12"
+when = "RATEH > 12"
 bias = 1.0
 
 [[strategy]]
 name = "主力高位派发"
 holder = "main"
 direction = "sell"
-when = "RATEC > 0.2 AND C < O"
+when = "RATEC > 20 AND C < O"
 bias = -0.6
 "#,
     )
