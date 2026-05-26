@@ -122,6 +122,9 @@ jobs:
             . -> target
             ui/lianghua_web_feat/src-tauri -> target
 
+      - name: Install Cargo Tauri CLI
+        run: cargo install tauri-cli --locked --version 2.10.1
+
       - name: Cache Gradle
         uses: gradle/actions/setup-gradle@v4
 
