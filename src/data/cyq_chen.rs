@@ -1104,12 +1104,13 @@ fn insert_num_series_with_lowercase_alias(
     key: &str,
     series: Vec<Option<f64>>,
 ) {
+    let series = Arc::new(series);
     runtime
         .vars
-        .insert(key.to_string(), Value::NumSeries(series.clone()));
+        .insert(key.to_string(), Value::SharedNumSeries(Arc::clone(&series)));
     runtime
         .vars
-        .insert(key.to_ascii_lowercase(), Value::NumSeries(series));
+        .insert(key.to_ascii_lowercase(), Value::SharedNumSeries(series));
 }
 
 fn strategy_biases_at(
@@ -1127,14 +1128,24 @@ fn strategy_biases_at(
         .iter()
         .filter(|strategy| strategy.direction == direction)
     {
-        let mut runtime = bucket_runtime.clone();
-        let value = runtime
-            .eval_program(&strategy.when_ast)
-            .map_err(|error| format!("策略 {} 表达式计算错误: {}", strategy.name, error.msg))?;
-        let triggers = Value::as_bool_series(&value, len)
-            .map_err(|error| format!("策略 {} 表达式返回值非布尔: {}", strategy.name, error.msg))?;
+        let triggered = match bucket_runtime
+            .eval_program_bool_at(&strategy.when_ast, day_index)
+            .map_err(|error| format!("策略 {} 表达式计算错误: {}", strategy.name, error.msg))?
+        {
+            Some(triggered) => triggered,
+            None => {
+                let mut runtime = bucket_runtime.clone();
+                let value = runtime.eval_program(&strategy.when_ast).map_err(|error| {
+                    format!("策略 {} 表达式计算错误: {}", strategy.name, error.msg)
+                })?;
+                let triggers = Value::as_bool_series(&value, len).map_err(|error| {
+                    format!("策略 {} 表达式返回值非布尔: {}", strategy.name, error.msg)
+                })?;
+                triggers.get(day_index).copied().unwrap_or(false)
+            }
+        };
 
-        if triggers.get(day_index).copied().unwrap_or(false) {
+        if triggered {
             match strategy.holder {
                 ChipHolder::Main => main_bias += strategy.bias,
                 ChipHolder::Retail => retail_bias += strategy.bias,

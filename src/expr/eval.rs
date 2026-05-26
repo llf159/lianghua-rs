@@ -22,6 +22,27 @@ fn to_num(b: bool) -> f64 {
     if b { 1.0 } else { 0.0 }
 }
 
+#[derive(Clone, Copy)]
+enum DayValue {
+    Num(Option<f64>),
+    Bool(bool),
+}
+
+fn day_value_as_num(value: DayValue) -> Option<f64> {
+    match value {
+        DayValue::Num(value) => value,
+        DayValue::Bool(value) => Some(to_num(value)),
+    }
+}
+
+fn day_value_as_bool(value: DayValue) -> bool {
+    match value {
+        DayValue::Num(Some(value)) => to_bool(value),
+        DayValue::Num(None) => false,
+        DayValue::Bool(value) => value,
+    }
+}
+
 impl Runtime {
     fn dynamic_limit(&mut self, arg: &Expr, fn_name: &str) -> Result<usize, EvalErr> {
         let limit = Value::as_num(&self.eval_expr(arg)?)?;
@@ -1713,6 +1734,151 @@ impl Runtime {
         }
     }
 
+    fn day_value(&self, name: &str, day_index: usize) -> Result<DayValue, EvalErr> {
+        let value = self.vars.get(name).ok_or_else(|| EvalErr {
+            msg: format!("变量不存在:{name}"),
+        })?;
+        match value {
+            Value::Num(value) => Ok(DayValue::Num(Some(*value))),
+            Value::Bool(value) => Ok(DayValue::Bool(*value)),
+            Value::NumSeries(series) => Ok(DayValue::Num(series.get(day_index).copied().flatten())),
+            Value::SharedNumSeries(series) => {
+                Ok(DayValue::Num(series.get(day_index).copied().flatten()))
+            }
+            Value::BoolSeries(series) => Ok(DayValue::Bool(
+                series.get(day_index).copied().unwrap_or(false),
+            )),
+        }
+    }
+
+    fn eval_expr_bool_at(
+        &self,
+        expr: &Expr,
+        locals: &HashMap<String, DayValue>,
+        day_index: usize,
+    ) -> Result<Option<DayValue>, EvalErr> {
+        match expr {
+            Expr::Number(value) => Ok(Some(DayValue::Num(Some(*value)))),
+            Expr::Ident(name) => {
+                if let Some(value) = locals.get(name).copied() {
+                    Ok(Some(value))
+                } else {
+                    self.day_value(name, day_index).map(Some)
+                }
+            }
+            Expr::Call { .. } => Ok(None),
+            Expr::Unary { op, rhs } => {
+                let Some(rhs) = self.eval_expr_bool_at(rhs, locals, day_index)? else {
+                    return Ok(None);
+                };
+                Ok(Some(match op {
+                    UnaryOp::Neg => DayValue::Num(day_value_as_num(rhs).map(|value| -value)),
+                    UnaryOp::Not => DayValue::Bool(!day_value_as_bool(rhs)),
+                }))
+            }
+            Expr::Binary { op, lhs, rhs } => {
+                let Some(lhs) = self.eval_expr_bool_at(lhs, locals, day_index)? else {
+                    return Ok(None);
+                };
+                let Some(rhs) = self.eval_expr_bool_at(rhs, locals, day_index)? else {
+                    return Ok(None);
+                };
+                let lhs_num = day_value_as_num(lhs);
+                let rhs_num = day_value_as_num(rhs);
+                let value = match op {
+                    BinaryOp::Add => {
+                        DayValue::Num(lhs_num.zip(rhs_num).map(|(lhs, rhs)| lhs + rhs))
+                    }
+                    BinaryOp::Sub => {
+                        DayValue::Num(lhs_num.zip(rhs_num).map(|(lhs, rhs)| lhs - rhs))
+                    }
+                    BinaryOp::Mul => {
+                        DayValue::Num(lhs_num.zip(rhs_num).map(|(lhs, rhs)| lhs * rhs))
+                    }
+                    BinaryOp::Div => DayValue::Num(
+                        lhs_num.zip(rhs_num).map(
+                            |(lhs, rhs)| {
+                                if rhs.abs() < EPS { 0.0 } else { lhs / rhs }
+                            },
+                        ),
+                    ),
+                    BinaryOp::Ge => DayValue::Bool(
+                        lhs_num
+                            .zip(rhs_num)
+                            .map(|(lhs, rhs)| lhs > rhs + EPS || (lhs - rhs).abs() <= EPS)
+                            .unwrap_or(false),
+                    ),
+                    BinaryOp::Gt => DayValue::Bool(
+                        lhs_num
+                            .zip(rhs_num)
+                            .map(|(lhs, rhs)| lhs > rhs + EPS)
+                            .unwrap_or(false),
+                    ),
+                    BinaryOp::Le => DayValue::Bool(
+                        lhs_num
+                            .zip(rhs_num)
+                            .map(|(lhs, rhs)| lhs < rhs - EPS || (lhs - rhs).abs() <= EPS)
+                            .unwrap_or(false),
+                    ),
+                    BinaryOp::Lt => DayValue::Bool(
+                        lhs_num
+                            .zip(rhs_num)
+                            .map(|(lhs, rhs)| lhs < rhs - EPS)
+                            .unwrap_or(false),
+                    ),
+                    BinaryOp::Eq => DayValue::Bool(
+                        lhs_num
+                            .zip(rhs_num)
+                            .map(|(lhs, rhs)| (lhs - rhs).abs() <= EPS)
+                            .unwrap_or(false),
+                    ),
+                    BinaryOp::Ne => DayValue::Bool(
+                        lhs_num
+                            .zip(rhs_num)
+                            .map(|(lhs, rhs)| (lhs - rhs).abs() > EPS)
+                            .unwrap_or(false),
+                    ),
+                    BinaryOp::And => {
+                        DayValue::Bool(day_value_as_bool(lhs) && day_value_as_bool(rhs))
+                    }
+                    BinaryOp::Or => {
+                        DayValue::Bool(day_value_as_bool(lhs) || day_value_as_bool(rhs))
+                    }
+                };
+                Ok(Some(value))
+            }
+        }
+    }
+
+    pub fn eval_program_bool_at(
+        &self,
+        stmts: &Stmts,
+        day_index: usize,
+    ) -> Result<Option<bool>, EvalErr> {
+        let mut locals = HashMap::new();
+        let mut last = DayValue::Num(Some(0.0));
+
+        for stmt in &stmts.item {
+            match stmt {
+                Stmt::Assign { name, value } => {
+                    let Some(value) = self.eval_expr_bool_at(value, &locals, day_index)? else {
+                        return Ok(None);
+                    };
+                    locals.insert(name.clone(), value);
+                    last = value;
+                }
+                Stmt::Expr(expr) => {
+                    let Some(value) = self.eval_expr_bool_at(expr, &locals, day_index)? else {
+                        return Ok(None);
+                    };
+                    last = value;
+                }
+            }
+        }
+
+        Ok(Some(day_value_as_bool(last)))
+    }
+
     pub fn eval_program(&mut self, stmts: &Stmts) -> Result<Value, EvalErr> {
         let mut last = Value::Num(0.0);
         for stmt in &stmts.item {
@@ -1899,6 +2065,62 @@ fn scalar_binary_keeps_scalar() {
         }
         other => panic!("unexpected result: {other:?}"),
     }
+}
+
+#[test]
+fn eval_program_bool_at_matches_full_series_for_call_free_program() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let expr = "spread := C - O; RATEC > 1 AND spread > 0 AND MAIN_CHIP_RATIO >= 0.5";
+    let toks = lex_all(expr);
+    let mut p = Parser::new(toks);
+    let stmts = p.parse_main().expect("parse failed");
+
+    let mut rt = Runtime::default();
+    rt.vars.insert(
+        "C".to_string(),
+        Value::NumSeries(vec![Some(10.0), Some(11.0), Some(12.0), Some(13.0)]),
+    );
+    rt.vars.insert(
+        "O".to_string(),
+        Value::NumSeries(vec![Some(10.1), Some(10.0), Some(11.0), Some(12.0)]),
+    );
+    rt.vars.insert(
+        "RATEC".to_string(),
+        Value::NumSeries(vec![Some(0.5), Some(1.5), None, Some(2.0)]),
+    );
+    rt.vars.insert(
+        "MAIN_CHIP_RATIO".to_string(),
+        Value::NumSeries(vec![Some(0.4), Some(0.6), Some(0.8), Some(0.3)]),
+    );
+
+    for day_index in 0..4 {
+        let fast = rt
+            .eval_program_bool_at(&stmts, day_index)
+            .expect("fast eval")
+            .expect("call-free expression should use fast path");
+        let mut full_rt = rt.clone();
+        let full_value = full_rt.eval_program(&stmts).expect("full eval");
+        let full = Value::as_bool_series(&full_value, 4).expect("bool series")[day_index];
+        assert_eq!(fast, full, "day_index={day_index}");
+    }
+}
+
+#[test]
+fn eval_program_bool_at_defers_programs_with_calls() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let toks = lex_all("C > MA(C, 3)");
+    let mut p = Parser::new(toks);
+    let stmts = p.parse_main().expect("parse failed");
+
+    let mut rt = Runtime::default();
+    rt.vars.insert(
+        "C".to_string(),
+        Value::NumSeries(vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)]),
+    );
+
+    assert_eq!(rt.eval_program_bool_at(&stmts, 3).expect("fast eval"), None);
 }
 
 #[test]
