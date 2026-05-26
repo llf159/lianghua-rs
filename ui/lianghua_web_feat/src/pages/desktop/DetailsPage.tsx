@@ -130,8 +130,6 @@ const CANDLE_REALTIME_UP_COLOR = "#eb7a34";
 const CANDLE_REALTIME_DOWN_COLOR = "#2d6cdf";
 const CHART_CYQ_UP_COLOR = "#4d95c9";
 const CHART_CYQ_DOWN_COLOR = "#d9485f";
-const CHART_CYQ_MAIN_COLOR = "#7c3aed";
-const CHART_CYQ_RETAIL_COLOR = "#0f9f8f";
 const CHART_CYQ_PROFIT_MAIN_COLOR = "#d9485f";
 const CHART_CYQ_PROFIT_RETAIL_COLOR = "#f18a9b";
 const CHART_CYQ_LOSS_MAIN_COLOR = "#4d95c9";
@@ -210,6 +208,14 @@ type ChartMarkerOverlayPoint = {
   shape: DetailChartMarker["shape"];
   color: string;
   text?: string | null;
+};
+
+type CyqSummaryItem = {
+  key: string;
+  label: string;
+  value: string;
+  subValue?: string;
+  priority: "primary" | "secondary";
 };
 
 type ChartDragState = {
@@ -965,6 +971,263 @@ function getCyqBinChipPct(bin: DetailCyqBin, holderView: DetailCyqHolderView) {
   return Number.isFinite(bin.chip_pct) ? bin.chip_pct : 0;
 }
 
+function getCyqBinChipValue(bin: DetailCyqBin, holderView: DetailCyqHolderView) {
+  if (holderView === "main") {
+    return typeof bin.main_chip === "number" && Number.isFinite(bin.main_chip)
+      ? bin.main_chip
+      : getCyqBinChipPct(bin, holderView);
+  }
+  if (holderView === "retail") {
+    return typeof bin.retail_chip === "number" && Number.isFinite(bin.retail_chip)
+      ? bin.retail_chip
+      : getCyqBinChipPct(bin, holderView);
+  }
+  if (typeof bin.total_chip === "number" && Number.isFinite(bin.total_chip)) {
+    return bin.total_chip;
+  }
+  return Number.isFinite(bin.chip) ? bin.chip : getCyqBinChipPct(bin, holderView);
+}
+
+function findCyqPeakBin(
+  bins: DetailCyqBin[],
+  holderView: DetailCyqHolderView,
+) {
+  return bins.reduce<DetailCyqBin | null>((peak, bin) => {
+    const value = getCyqBinChipValue(bin, holderView);
+    if (!Number.isFinite(value)) {
+      return peak;
+    }
+    if (!peak || value > getCyqBinChipValue(peak, holderView)) {
+      return bin;
+    }
+    return peak;
+  }, null);
+}
+
+function getDetailCyqMainTotal(snapshot: DetailCyqSnapshot | null) {
+  if (!snapshot) {
+    return null;
+  }
+  if (
+    typeof snapshot.main_total === "number" &&
+    Number.isFinite(snapshot.main_total)
+  ) {
+    return snapshot.main_total;
+  }
+  const values = snapshot.bins.map((bin) => bin.main_chip);
+  return values.some((value) => typeof value === "number" && Number.isFinite(value))
+    ? values.reduce(
+        (sum, value) =>
+          sum + (typeof value === "number" && Number.isFinite(value) ? value : 0),
+        0,
+      )
+    : null;
+}
+
+function getDetailCyqTotalChips(snapshot: DetailCyqSnapshot | null) {
+  if (!snapshot) {
+    return null;
+  }
+  if (
+    typeof snapshot.total_chips === "number" &&
+    Number.isFinite(snapshot.total_chips)
+  ) {
+    return snapshot.total_chips;
+  }
+  const total = snapshot.bins.reduce(
+    (sum, bin) => sum + Math.max(getCyqBinChipValue(bin, "mixed"), 0),
+    0,
+  );
+  return total > 0 ? total : null;
+}
+
+function getDetailCyqProfitRatio(snapshot: DetailCyqSnapshot | null) {
+  if (!snapshot) {
+    return null;
+  }
+  if (
+    typeof snapshot.total_profit_ratio === "number" &&
+    Number.isFinite(snapshot.total_profit_ratio)
+  ) {
+    return snapshot.total_profit_ratio;
+  }
+
+  const totalChips = getDetailCyqTotalChips(snapshot);
+  if (!totalChips || totalChips <= Number.EPSILON) {
+    return null;
+  }
+  const profitChips = snapshot.bins
+    .filter((bin) => bin.price <= snapshot.close)
+    .reduce((sum, bin) => sum + Math.max(getCyqBinChipValue(bin, "mixed"), 0), 0);
+  return profitChips / totalChips;
+}
+
+function interpolateCyqCostByChip(bins: DetailCyqBin[], targetChip: number) {
+  if (bins.length === 0) {
+    return null;
+  }
+
+  let accumulated = 0;
+  for (const bin of bins) {
+    const chip = Math.max(getCyqBinChipValue(bin, "mixed"), 0);
+    if (chip <= Number.EPSILON) {
+      continue;
+    }
+    const nextAccumulated = accumulated + chip;
+    if (targetChip <= nextAccumulated) {
+      const ratio = clampNumber((targetChip - accumulated) / chip, 0, 1);
+      const low = Math.min(bin.price_low, bin.price_high);
+      const high = Math.max(bin.price_low, bin.price_high);
+      return low + (high - low) * ratio;
+    }
+    accumulated = nextAccumulated;
+  }
+
+  const lastBin = bins[bins.length - 1];
+  return lastBin ? Math.max(lastBin.price_low, lastBin.price_high) : null;
+}
+
+function buildFallbackCyqPercentRange(
+  snapshot: DetailCyqSnapshot,
+  percent: 0.7 | 0.9,
+) {
+  const totalChips = getDetailCyqTotalChips(snapshot);
+  if (!totalChips || totalChips <= Number.EPSILON) {
+    return null;
+  }
+  const sortedBins = [...snapshot.bins].sort(
+    (left, right) => left.price - right.price,
+  );
+  const low = interpolateCyqCostByChip(sortedBins, totalChips * (1 - percent) / 2);
+  const high = interpolateCyqCostByChip(sortedBins, totalChips * (1 + percent) / 2);
+  if (low === null || high === null) {
+    return null;
+  }
+  const concentration = Math.abs(low + high) <= Number.EPSILON
+    ? 0
+    : (high - low) / (low + high);
+  return { low, high, concentration };
+}
+
+function getDetailCyqPercentRange(
+  snapshot: DetailCyqSnapshot | null,
+  percent: 70 | 90,
+) {
+  if (!snapshot) {
+    return null;
+  }
+  const low = snapshot[`percent_${percent}_price_low`];
+  const high = snapshot[`percent_${percent}_price_high`];
+  const concentration = snapshot[`percent_${percent}_concentration`];
+  if (
+    typeof low === "number" &&
+    Number.isFinite(low) &&
+    typeof high === "number" &&
+    Number.isFinite(high)
+  ) {
+    return {
+      low,
+      high,
+      concentration:
+        typeof concentration === "number" && Number.isFinite(concentration)
+          ? concentration
+          : null,
+    };
+  }
+  return buildFallbackCyqPercentRange(snapshot, percent === 70 ? 0.7 : 0.9);
+}
+
+function buildDetailCyqSummaryItems(
+  snapshot: DetailCyqSnapshot | null,
+): CyqSummaryItem[] {
+  if (!snapshot) {
+    return [];
+  }
+
+  const mixedPeakBin = findCyqPeakBin(snapshot.bins, "mixed");
+  const mixedPeakPrice =
+    typeof snapshot.chip_peak_price === "number" &&
+    Number.isFinite(snapshot.chip_peak_price)
+      ? snapshot.chip_peak_price
+      : mixedPeakBin?.price;
+  const percent70 = getDetailCyqPercentRange(snapshot, 70);
+  const percent90 = getDetailCyqPercentRange(snapshot, 90);
+
+  return [
+    {
+      key: "main",
+      label: "主力筹码",
+      value: formatNumber(getDetailCyqMainTotal(snapshot)),
+      priority: "primary",
+    },
+    {
+      key: "profit",
+      label: "获利比例",
+      value: formatCyqRatio(getDetailCyqProfitRatio(snapshot) ?? Number.NaN),
+      priority: "primary",
+    },
+    {
+      key: "peak",
+      label: "混合筹码峰",
+      value: formatNumber(mixedPeakPrice),
+      subValue: mixedPeakBin ? formatNumber(getCyqBinChipValue(mixedPeakBin, "mixed"), 4) : undefined,
+      priority: "primary",
+    },
+    {
+      key: "p70",
+      label: "70%区间",
+      value: percent70 ? `${formatNumber(percent70.low)} - ${formatNumber(percent70.high)}` : "--",
+      subValue: `集中度 ${formatCyqRatio(percent70?.concentration ?? Number.NaN)}`,
+      priority: "secondary",
+    },
+    {
+      key: "p90",
+      label: "90%区间",
+      value: percent90 ? `${formatNumber(percent90.low)} - ${formatNumber(percent90.high)}` : "--",
+      subValue: `集中度 ${formatCyqRatio(percent90?.concentration ?? Number.NaN)}`,
+      priority: "secondary",
+    },
+  ];
+}
+
+function renderCyqSummaryPanel(
+  snapshot: DetailCyqSnapshot | null,
+  variant: "overlay" | "standalone",
+) {
+  const items = buildDetailCyqSummaryItems(snapshot);
+  if (items.length === 0) {
+    return null;
+  }
+
+  return (
+    <div
+      className={[
+        "details-chart-cyq-summary",
+        variant === "overlay" ? "is-overlay" : "is-standalone",
+        items.length <= 2 ? "is-sparse" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
+      {items.map((item) => (
+        <div
+          className={[
+            "details-chart-cyq-summary-item",
+            item.priority === "secondary" ? "is-secondary" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+          key={item.key}
+        >
+          <span>{item.label}</span>
+          <strong>{item.value}</strong>
+          {item.subValue ? <small>{item.subValue}</small> : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function getCyqBinMainRetailTotal(bin: DetailCyqBin) {
   const main =
     typeof bin.main_chip === "number" && Number.isFinite(bin.main_chip)
@@ -998,11 +1261,14 @@ function getCyqHolderColor(
   representativePrice: number,
   selectedClose: number,
 ) {
+  const isProfit = representativePrice <= selectedClose;
   if (holderView === "main") {
-    return CHART_CYQ_MAIN_COLOR;
+    return isProfit ? CHART_CYQ_PROFIT_MAIN_COLOR : CHART_CYQ_LOSS_MAIN_COLOR;
   }
   if (holderView === "retail") {
-    return CHART_CYQ_RETAIL_COLOR;
+    return isProfit
+      ? CHART_CYQ_PROFIT_RETAIL_COLOR
+      : CHART_CYQ_LOSS_RETAIL_COLOR;
   }
   return representativePrice > selectedClose
     ? CHART_CYQ_UP_COLOR
@@ -2170,7 +2436,8 @@ function renderChartPanel(
   const candleOverlaySeries = kind === "candles" ? panelSeries : [];
   const candleOverlayKeys = candleOverlaySeries.map((series) => series.key);
   const headerSeries = kind === "candles" ? candleOverlaySeries : panelSeries;
-  const reserveCyqPanelWidth = reserveCyqPanelWidthForAllPanels;
+  const reserveCyqPanelWidth =
+    isInteractivePricePanel(panel) && reserveCyqPanelWidthForAllPanels;
   const showCyqPanel =
     isInteractivePricePanel(panel) &&
     isCyqPanelVisible &&
@@ -2379,12 +2646,21 @@ function renderChartPanel(
           const binHigh = Math.max(bin.price_low, bin.price_high);
           return !(binHigh < currentDomain.min || binLow > currentDomain.max);
         });
-        const maxChipPct = visibleCyqBins.reduce(
-          (acc, bin) => Math.max(acc, getCyqBinChipPct(bin, cyqHolderView)),
+        const totalScaleMaxChip = visibleCyqBins.reduce(
+          (acc, bin) => Math.max(acc, getCyqBinChipValue(bin, "mixed")),
           0,
         );
+        const selectedScaleMaxChip = visibleCyqBins.reduce(
+          (acc, bin) => Math.max(acc, getCyqBinChipValue(bin, cyqHolderView)),
+          0,
+        );
+        const maxChip =
+          cyqHolderView === "mixed"
+            ? totalScaleMaxChip
+            : totalScaleMaxChip || selectedScaleMaxChip;
+        const peakBin = findCyqPeakBin(visibleCyqBins, cyqHolderView);
 
-        if (visibleCyqBins.length > 0 && maxChipPct > 0) {
+        if (visibleCyqBins.length > 0 && maxChip > 0) {
           cyqSvgContent = (
             <g key={`${panel.key}-cyq-${selectedCyqTradeDate ?? selectedCyqSnapshot.trade_date}`}>
               <line
@@ -2411,14 +2687,17 @@ function renderChartPanel(
                 const yBottom = yAt(clampedLow);
                 const barHeight = Math.max(yBottom - yTop, 1);
                 const chipPct = getCyqBinChipPct(bin, cyqHolderView);
+                const chipValue = getCyqBinChipValue(bin, cyqHolderView);
                 const maxBarWidth = Math.max(chipPanelRight - chipPanelLeft - 4, 0);
-                const barWidth = (chipPct / maxChipPct) * maxBarWidth;
+                const barWidth = (chipValue / maxChip) * maxBarWidth;
+                const safeBarWidth = Math.max(barWidth, 1);
                 const representativePrice = (bin.price_low + bin.price_high) / 2;
                 const fill = getCyqHolderColor(
                   cyqHolderView,
                   representativePrice,
                   selectedClose,
                 );
+                const isPeak = peakBin === bin;
                 const mainRetailTotal =
                   cyqHolderView === "mixed"
                     ? getCyqBinMainRetailTotal(bin)
@@ -2427,7 +2706,6 @@ function renderChartPanel(
                 if (mainRetailTotal) {
                   const mainRatio = mainRetailTotal.main / mainRetailTotal.total;
                   const retailRatio = mainRetailTotal.retail / mainRetailTotal.total;
-                  const safeBarWidth = Math.max(barWidth, 1);
                   const mainWidth = safeBarWidth * mainRatio;
                   const retailWidth = safeBarWidth - mainWidth;
                   const barX = chipPanelRight - safeBarWidth;
@@ -2455,12 +2733,23 @@ function renderChartPanel(
                       {mainWidth > 0 ? (
                         <rect
                           className="details-chart-cyq-bar"
-                          x={barX + retailWidth}
+                          x={chipPanelRight - Math.max(mainWidth, 0.8)}
                           y={yTop}
-                          width={mainWidth}
+                          width={Math.max(mainWidth, 0.8)}
                           height={barHeight}
                           fill={holderColors.main}
-                          opacity={0.92}
+                          opacity={0.84}
+                          rx={1}
+                        />
+                      ) : null}
+                      {isPeak ? (
+                        <rect
+                          className="cyq-chen-chip-peak-bar"
+                          x={barX}
+                          y={yTop}
+                          width={safeBarWidth}
+                          height={barHeight}
+                          fill="none"
                           rx={1}
                         />
                       ) : null}
@@ -2470,16 +2759,24 @@ function renderChartPanel(
 
                 return (
                   <rect
-                    className="details-chart-cyq-bar"
+                    className={
+                      isPeak
+                        ? "details-chart-cyq-bar cyq-chen-chip-peak-bar"
+                        : "details-chart-cyq-bar"
+                    }
                     key={`${selectedCyqSnapshot.trade_date}-${binIndex}`}
-                    x={chipPanelRight - Math.max(barWidth, 1)}
+                    x={chipPanelRight - safeBarWidth}
                     y={yTop}
-                    width={Math.max(barWidth, 1)}
+                    width={safeBarWidth}
                     height={barHeight}
                     fill={fill}
-                    opacity={0.86}
+                    opacity={isPeak ? 0.96 : 0.82}
                     rx={1}
-                  />
+                  >
+                    <title>
+                      {`${DETAIL_CYQ_HOLDER_OPTIONS.find((option) => option.value === cyqHolderView)?.label ?? "筹码"} ${formatCyqRatio(chipPct)}`}
+                    </title>
+                  </rect>
                 );
               })}
             </g>
@@ -2734,7 +3031,6 @@ function renderChartPanel(
           leftPercent: (xAt(itemIndex) / CHART_VIEWBOX_WIDTH) * 100,
         }))
       : [];
-
   return (
     <section className="details-chart-panel" key={panel.key}>
       <header className="details-chart-panel-head">
@@ -3031,6 +3327,25 @@ function renderChartPanel(
             </div>
           </div>
         ) : null}
+      </div>
+    </section>
+  );
+}
+
+function renderCyqSummaryStandalonePanel(snapshot: DetailCyqSnapshot | null) {
+  return (
+    <section className="details-chart-panel details-chart-cyq-summary-panel" key="cyq-summary">
+      <header className="details-chart-panel-head">
+        <div className="details-chart-panel-head-main">
+          <strong>筹码数据</strong>
+          <small>{snapshot?.trade_date ?? "--"}</small>
+        </div>
+        <span>cyq</span>
+      </header>
+      <div className="details-chart-viewport details-chart-cyq-summary-viewport">
+        {renderCyqSummaryPanel(snapshot, "standalone") ?? (
+          <div className="details-chart-empty">暂无筹码数据</div>
+        )}
       </div>
     </section>
   );
@@ -4525,10 +4840,15 @@ export default function DetailsPage({
     totalChartItems,
   );
   const panels = kline?.panels?.length ? kline.panels : buildDefaultPanels();
+  const indicatorPanelCount = panels.filter((panel) => !isMainChartPanel(panel)).length;
   const shouldReserveCyqPanelWidth =
     detailCyqVisible &&
     (selectedCyqSnapshot?.bins.length ?? 0) > 0 &&
     panels.some((panel) => isInteractivePricePanel(panel));
+  const shouldShowCyqSummary =
+    detailCyqVisible && shouldReserveCyqPanelWidth && selectedCyqSnapshot !== null;
+  const shouldShowStandaloneCyqSummary =
+    shouldShowCyqSummary && indicatorPanelCount === 0;
   const chartMainPanelHeight = chartLayoutWidth * chartMainWidthRatio;
   const chartIndicatorPanelBaseHeight =
     (chartLayoutWidth * chartIndicatorWidthRatio) /
@@ -4539,10 +4859,28 @@ export default function DetailsPage({
     chartMainPanelHeight,
     chartIndicatorPanelBaseHeight,
   );
-  const chartPanelGapTotal = Math.max(0, panels.length - 1) * CHART_PANEL_GAP_PX;
+  const chartGridRowCount = panels.length + (shouldShowStandaloneCyqSummary ? 1 : 0);
+  const chartPanelGapTotal = Math.max(0, chartGridRowCount - 1) * CHART_PANEL_GAP_PX;
   const chartShellHeight =
     chartPanelHeights.reduce((sum, panelHeight) => sum + panelHeight, 0) +
+    (shouldShowStandaloneCyqSummary ? chartIndicatorPanelBaseHeight : 0) +
     chartPanelGapTotal;
+  const chartGridTemplateRows = [
+    buildChartTemplateRows(
+      kline,
+      panels,
+      chartMainPanelHeight,
+      chartIndicatorPanelBaseHeight,
+    ),
+    shouldShowStandaloneCyqSummary
+      ? `${chartIndicatorPanelBaseHeight.toFixed(2)}px`
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const cyqSummaryOverlayStyle = {
+    "--details-cyq-summary-top": `${chartMainPanelHeight + CHART_PANEL_GAP_PX}px`,
+  } as CSSProperties;
   const watermarkName =
     kline?.watermark_name ?? detailData?.overview?.name ?? "个股详情";
   const watermarkCode = kline?.watermark_code ?? splitTsCode(resolvedTsCode);
@@ -6582,12 +6920,7 @@ export default function DetailsPage({
           className="details-chart-shell"
           style={{
             height: `${chartShellHeight}px`,
-            gridTemplateRows: buildChartTemplateRows(
-              kline,
-              panels,
-              chartMainPanelHeight,
-              chartIndicatorPanelBaseHeight,
-            ),
+            gridTemplateRows: chartGridTemplateRows,
           }}
         >
           {panels.map((panel, index) =>
@@ -6796,6 +7129,22 @@ export default function DetailsPage({
               closeChartIntervalPanel,
             ),
           )}
+          {shouldShowStandaloneCyqSummary
+            ? renderCyqSummaryStandalonePanel(selectedCyqSnapshot)
+            : null}
+          {shouldShowCyqSummary && indicatorPanelCount > 0 ? (
+            <div
+              className="details-chart-cyq-summary-overlay"
+              style={cyqSummaryOverlayStyle}
+              onPointerDown={stopEventPropagation}
+              onPointerMove={stopEventPropagation}
+              onPointerUp={stopEventPropagation}
+              onPointerCancel={stopEventPropagation}
+              onClick={stopEventPropagation}
+            >
+              {renderCyqSummaryPanel(selectedCyqSnapshot, "overlay")}
+            </div>
+          ) : null}
         </div>
       </section>
 

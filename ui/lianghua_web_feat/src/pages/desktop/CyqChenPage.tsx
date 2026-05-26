@@ -27,37 +27,6 @@ import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
 import './css/DetailsPage.css'
 import './css/CyqChenPage.css'
 
-const DEFAULT_STRATEGIES: CyqChenStrategyDraft[] = [
-  {
-    name: '主力低位承接',
-    holder: 'main',
-    direction: 'buy',
-    when: 'RATEL < -8 AND C > O',
-    bias: 1.5,
-  },
-  {
-    name: '散户追高买入',
-    holder: 'retail',
-    direction: 'buy',
-    when: 'RATEC > 5 AND C >= H * 0.98',
-    bias: 1.2,
-  },
-  {
-    name: '散户获利卖出',
-    holder: 'retail',
-    direction: 'sell',
-    when: 'RATEH > 12',
-    bias: 1.0,
-  },
-  {
-    name: '主力高位派发',
-    holder: 'main',
-    direction: 'sell',
-    when: 'RATEC > 20 AND C < O',
-    bias: -0.6,
-  },
-]
-
 type SavedRun = {
   id: string
   label: string
@@ -175,10 +144,6 @@ const CHIP_COLOR_RETAIL_TRAPPED = '#9cc8e6'
 
 function readInitialChartLayoutWidth() {
   return typeof window === 'undefined' ? CHART_VIEWBOX_WIDTH : window.innerWidth
-}
-
-function cloneDefaultStrategies() {
-  return DEFAULT_STRATEGIES.map((strategy) => ({ ...strategy }))
 }
 
 function readCyqChenDraft(): CyqChenTestDraft {
@@ -2216,7 +2181,7 @@ export default function CyqChenPage() {
   const [endDateInput, setEndDateInput] = useState(persistedDraft.endDateInput)
   const [warmupDaysInput, setWarmupDaysInput] = useState(persistedDraft.warmupDaysInput)
   const [bucketPctInput, setBucketPctInput] = useState(persistedDraft.bucketPctInput)
-  const [strategies, setStrategies] = useState<CyqChenStrategyDraft[]>(() => cloneDefaultStrategies())
+  const [strategies, setStrategies] = useState<CyqChenStrategyDraft[]>([])
   const [sourcePath, setSourcePath] = useState('')
   const [stockLookupRows, setStockLookupRows] = useState<StockLookupRow[]>([])
   const [stockLookupFocused, setStockLookupFocused] = useState(false)

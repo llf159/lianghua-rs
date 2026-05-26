@@ -6,22 +6,23 @@ use std::{
 };
 
 use crate::data::scoring_data::{
-    SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage, ScoreWriteProfile,
     cache_rule_build, init_result_db, rank_scene_rows, rank_summary_rows_by_score, row_into_rt,
-    write_score_batches_from_channel,
+    write_score_batches_from_channel, SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary,
+    ScoreWriteMessage, ScoreWriteProfile,
 };
 use crate::data::{
-    DataReader, RowData, RuntimeKeyCollectOptions, ScoreRule, ScoreScene,
-    collect_runtime_keys_from_expr_programs, result_db_path, source_db_path,
+    collect_runtime_keys_from_expr_programs, result_db_path, source_db_path, DataReader, RowData,
+    RuntimeKeyCollectOptions, ScoreRule, ScoreScene,
 };
 use crate::scoring::{
-    CachedRule, RuleSceneMeta, TieBreakWay, build_scene_score_series, scoring_rules_details_cache,
-    scoring_rules_total_cache,
+    build_scene_score_series, scoring_rules_details_cache, scoring_rules_total_cache,
     tools::{
         calc_query_need_rows, collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names,
         inject_optional_cyq_chen_fields, inject_stock_extra_fields, load_st_list,
         load_total_share_map, preview_optional_cyq_chen_injection_warnings, warmup_rows_estimate,
+        CyqChenFieldInjector,
     },
+    CachedRule, RuleSceneMeta, TieBreakWay,
 };
 
 const SCORING_GROUP_SIZE: usize = 128;
@@ -204,7 +205,6 @@ pub fn preview_scoring_runtime_warnings(
 
 fn scoring_stock_batch(
     worker_reader: &DataReader,
-    source_dir: &str,
     adj_type: &str,
     score_start_date: &str,
     end_date: &str,
@@ -214,12 +214,12 @@ fn scoring_stock_batch(
     scenes: &[ScoreScene],
     st_list: &HashSet<String>,
     total_share_map: &HashMap<String, f64>,
-    used_cyq_chen_keys: &HashSet<String>,
+    cyq_chen_injector: &CyqChenFieldInjector,
     ts_code: &str,
     memory_mode: ScoringMemoryMode,
 ) -> Result<ScoreBatch, String> {
     let mut row = worker_reader.load_one_tail_rows(ts_code, adj_type, end_date, need_rows)?;
-    let _ = inject_optional_cyq_chen_fields(&mut row, source_dir, ts_code, used_cyq_chen_keys);
+    let _ = cyq_chen_injector.inject(&mut row, ts_code);
     inject_stock_extra_fields(
         &mut row,
         ts_code,
@@ -260,10 +260,10 @@ fn scoring_stock_group_batch(
     memory_mode: ScoringMemoryMode,
 ) -> Result<ScoreBatch, String> {
     let mut group_batch = ScoreBatch::default();
+    let cyq_chen_injector = CyqChenFieldInjector::new(source_dir, used_cyq_chen_keys);
     for ts_code in ts_group {
         let batch = scoring_stock_batch(
             worker_reader,
-            source_dir,
             adj_type,
             score_start_date,
             end_date,
@@ -273,7 +273,7 @@ fn scoring_stock_group_batch(
             scenes,
             st_list,
             total_share_map,
-            used_cyq_chen_keys,
+            &cyq_chen_injector,
             ts_code,
             memory_mode,
         )?;
@@ -564,8 +564,8 @@ pub fn scoring_single_period(
 mod tests {
     use super::*;
     use crate::{
-        data::{RuleTag, ScopeWay, collect_assigned_names_from_expr_program},
-        expr::parser::{Parser, lex_all},
+        data::{collect_assigned_names_from_expr_program, RuleTag, ScopeWay},
+        expr::parser::{lex_all, Parser},
     };
 
     fn cached_rule(name: &str, expression: &str) -> CachedRule {

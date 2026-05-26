@@ -221,6 +221,20 @@ pub struct DetailCyqBin {
 pub struct DetailCyqSnapshot {
     pub trade_date: String,
     pub close: f64,
+    pub min_price: Option<f64>,
+    pub max_price: Option<f64>,
+    pub main_total: Option<f64>,
+    pub retail_total: Option<f64>,
+    pub total_chips: Option<f64>,
+    pub total_profit_ratio: Option<f64>,
+    pub total_trapped_ratio: Option<f64>,
+    pub chip_peak_price: Option<f64>,
+    pub percent_70_price_low: Option<f64>,
+    pub percent_70_price_high: Option<f64>,
+    pub percent_70_concentration: Option<f64>,
+    pub percent_90_price_low: Option<f64>,
+    pub percent_90_price_high: Option<f64>,
+    pub percent_90_concentration: Option<f64>,
     pub bins: Vec<DetailCyqBin>,
 }
 
@@ -399,7 +413,9 @@ fn query_stock_detail_cyq(source_path: &str, ts_code: &str) -> Result<StockDetai
     let mut snapshot_stmt = conn
         .prepare(
             r#"
-            SELECT trade_date, close
+            SELECT trade_date, close, min_price, max_price, total_chips, benefit_part,
+                   percent_70_price_low, percent_70_price_high, percent_70_concentration,
+                   percent_90_price_low, percent_90_price_high, percent_90_concentration
             FROM cyq_snapshot
             WHERE ts_code = ? AND adj_type = ?
             ORDER BY trade_date ASC
@@ -424,6 +440,32 @@ fn query_stock_detail_cyq(source_path: &str, ts_code: &str) -> Result<StockDetai
         snapshots.push(DetailCyqSnapshot {
             trade_date,
             close: close.unwrap_or(0.0),
+            min_price: row.get(2).map_err(|e| format!("读取筹码最低价失败: {e}"))?,
+            max_price: row.get(3).map_err(|e| format!("读取筹码最高价失败: {e}"))?,
+            main_total: None,
+            retail_total: None,
+            total_chips: row.get(4).map_err(|e| format!("读取筹码总量失败: {e}"))?,
+            total_profit_ratio: row.get(5).map_err(|e| format!("读取筹码获利比例失败: {e}"))?,
+            total_trapped_ratio: None,
+            chip_peak_price: None,
+            percent_70_price_low: row
+                .get(6)
+                .map_err(|e| format!("读取70%筹码下沿失败: {e}"))?,
+            percent_70_price_high: row
+                .get(7)
+                .map_err(|e| format!("读取70%筹码上沿失败: {e}"))?,
+            percent_70_concentration: row
+                .get(8)
+                .map_err(|e| format!("读取70%筹码集中度失败: {e}"))?,
+            percent_90_price_low: row
+                .get(9)
+                .map_err(|e| format!("读取90%筹码下沿失败: {e}"))?,
+            percent_90_price_high: row
+                .get(10)
+                .map_err(|e| format!("读取90%筹码上沿失败: {e}"))?,
+            percent_90_concentration: row
+                .get(11)
+                .map_err(|e| format!("读取90%筹码集中度失败: {e}"))?,
             bins: Vec::new(),
         });
     }
@@ -518,7 +560,10 @@ fn query_stock_detail_cyq_chen(
     let mut snapshot_stmt = conn
         .prepare(
             r#"
-            SELECT trade_date, close
+            SELECT trade_date, close, min_price, max_price, main_total, retail_total,
+                   total_chips, total_profit_ratio, total_trapped_ratio, chip_peak_price,
+                   percent_70_price_low, percent_70_price_high, percent_70_concentration,
+                   percent_90_price_low, percent_90_price_high, percent_90_concentration
             FROM cyq_chen_snapshot
             WHERE ts_code = ? AND adj_type = ?
             ORDER BY trade_date ASC
@@ -543,6 +588,38 @@ fn query_stock_detail_cyq_chen(
         snapshots.push(DetailCyqSnapshot {
             trade_date,
             close: close.unwrap_or(0.0),
+            min_price: row.get(2).map_err(|e| format!("读取新筹码最低价失败: {e}"))?,
+            max_price: row.get(3).map_err(|e| format!("读取新筹码最高价失败: {e}"))?,
+            main_total: row.get(4).map_err(|e| format!("读取新筹码主力总量失败: {e}"))?,
+            retail_total: row.get(5).map_err(|e| format!("读取新筹码散户总量失败: {e}"))?,
+            total_chips: row.get(6).map_err(|e| format!("读取新筹码总量失败: {e}"))?,
+            total_profit_ratio: row
+                .get(7)
+                .map_err(|e| format!("读取新筹码获利比例失败: {e}"))?,
+            total_trapped_ratio: row
+                .get(8)
+                .map_err(|e| format!("读取新筹码套牢比例失败: {e}"))?,
+            chip_peak_price: row
+                .get(9)
+                .map_err(|e| format!("读取新筹码峰值价格失败: {e}"))?,
+            percent_70_price_low: row
+                .get(10)
+                .map_err(|e| format!("读取新筹码70%下沿失败: {e}"))?,
+            percent_70_price_high: row
+                .get(11)
+                .map_err(|e| format!("读取新筹码70%上沿失败: {e}"))?,
+            percent_70_concentration: row
+                .get(12)
+                .map_err(|e| format!("读取新筹码70%集中度失败: {e}"))?,
+            percent_90_price_low: row
+                .get(13)
+                .map_err(|e| format!("读取新筹码90%下沿失败: {e}"))?,
+            percent_90_price_high: row
+                .get(14)
+                .map_err(|e| format!("读取新筹码90%上沿失败: {e}"))?,
+            percent_90_concentration: row
+                .get(15)
+                .map_err(|e| format!("读取新筹码90%集中度失败: {e}"))?,
             bins: Vec::new(),
         });
     }

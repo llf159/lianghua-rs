@@ -1,23 +1,23 @@
 use std::collections::{HashMap, HashSet};
 
-use duckdb::{Connection, params};
+use duckdb::{params, Connection};
 use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::{
     data::scoring_data::row_into_rt,
     data::{
-        DataReader, RuntimeKeyCollectOptions, ScoreRule, collect_runtime_keys_from_expr_programs,
-        expr_program_uses_runtime_key, load_ths_concepts_list, result_db_path,
+        collect_runtime_keys_from_expr_programs, expr_program_uses_runtime_key,
+        load_ths_concepts_list, result_db_path, DataReader, RuntimeKeyCollectOptions, ScoreRule,
     },
     expr::{
         eval::Value,
-        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+        parser::{lex_all, Expr, Parser, Stmt, Stmts},
     },
     scoring::tools::{
         calc_query_need_rows, calc_query_start_date, collect_used_cyq_chen_runtime_keys,
-        cyq_chen_runtime_key_names, inject_optional_cyq_chen_fields, inject_stock_extra_fields,
-        load_st_list, load_total_share_map, rt_max_len,
+        cyq_chen_runtime_key_names, inject_stock_extra_fields, load_st_list, load_total_share_map,
+        rt_max_len, CyqChenFieldInjector,
     },
     utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
 };
@@ -713,6 +713,7 @@ pub fn run_expression_stock_pick(
         .map(|ts_group| -> Result<Vec<StockPickRow>, String> {
             let worker_reader =
                 DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
+            let cyq_chen_injector = CyqChenFieldInjector::new(source_path, &used_cyq_chen_keys);
             let mut group_rows = Vec::new();
 
             for ts_code in ts_group {
@@ -722,12 +723,7 @@ pub fn run_expression_stock_pick(
                     &resolved_end_date,
                     need_rows,
                 )?;
-                let _ = inject_optional_cyq_chen_fields(
-                    &mut row_data,
-                    source_path,
-                    ts_code,
-                    &used_cyq_chen_keys,
-                );
+                let _ = cyq_chen_injector.inject(&mut row_data, ts_code);
                 inject_stock_extra_fields(
                     &mut row_data,
                     ts_code,

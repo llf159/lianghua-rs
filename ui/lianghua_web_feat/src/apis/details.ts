@@ -235,6 +235,20 @@ export type DetailCyqBin = {
 export type DetailCyqSnapshot = {
   trade_date: string
   close: number
+  min_price?: number | null
+  max_price?: number | null
+  main_total?: number | null
+  retail_total?: number | null
+  total_chips?: number | null
+  total_profit_ratio?: number | null
+  total_trapped_ratio?: number | null
+  chip_peak_price?: number | null
+  percent_70_price_low?: number | null
+  percent_70_price_high?: number | null
+  percent_70_concentration?: number | null
+  percent_90_price_low?: number | null
+  percent_90_price_high?: number | null
+  percent_90_concentration?: number | null
   bins: DetailCyqBin[]
 }
 
