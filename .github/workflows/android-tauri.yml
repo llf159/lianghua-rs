@@ -58,8 +58,16 @@ jobs:
       - name: Install Android SDK packages
         shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null
-          yes | sdkmanager --install \
+          run_sdkmanager_with_yes() {
+            set +e
+            yes | sdkmanager "$@"
+            local sdkmanager_status=${PIPESTATUS[1]}
+            set -e
+            return "${sdkmanager_status}"
+          }
+
+          run_sdkmanager_with_yes --licenses >/dev/null
+          run_sdkmanager_with_yes --install \
             "platforms;android-36" \
             "build-tools;36.0.0" \
             "ndk;${ANDROID_NDK_VERSION}"
