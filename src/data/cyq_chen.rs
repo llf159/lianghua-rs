@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -355,7 +358,9 @@ pub fn compute_chen_chip_snapshots_with_compiled_config(
     }
     let len = row_data.trade_dates.len();
     let mut main_ratio_history = vec![vec![None; len]; buckets.len()];
-    let base_runtime = row_into_rt(row_data.clone())?;
+    let mut base_runtime = row_into_rt(row_data.clone())?;
+    share_runtime_num_series(&mut base_runtime);
+    let buy_runtime = build_new_participant_buy_runtime(&base_runtime, &bars)?;
     let process_start_index = output_start_index.saturating_sub(config.warmup_days);
     let mut snapshots = Vec::with_capacity(len.saturating_sub(output_start_index));
 
@@ -393,10 +398,10 @@ pub fn compute_chen_chip_snapshots_with_compiled_config(
 
         apply_buy_for_day(
             &mut buckets,
-            &bars,
-            &base_runtime,
+            bar,
+            &buy_runtime,
             chip_config,
-            &main_ratio_history,
+            len,
             day_index,
             bar.turnover_rate,
         )?;
@@ -451,7 +456,9 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
     let len = row_data.trade_dates.len();
     let mut main_ratio_history =
         build_initial_main_ratio_history(initial_main_ratio_history, initial_bins.len(), len)?;
-    let base_runtime = row_into_rt(row_data.clone())?;
+    let mut base_runtime = row_into_rt(row_data.clone())?;
+    share_runtime_num_series(&mut base_runtime);
+    let buy_runtime = build_new_participant_buy_runtime(&base_runtime, &bars)?;
     let mut snapshots = Vec::with_capacity(len.saturating_sub(output_start_index));
 
     for day_index in output_start_index..len {
@@ -485,10 +492,10 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
 
         apply_buy_for_day(
             &mut buckets,
-            &bars,
-            &base_runtime,
+            bar,
+            &buy_runtime,
             chip_config,
-            &main_ratio_history,
+            len,
             day_index,
             bar.turnover_rate,
         )?;
@@ -847,6 +854,10 @@ fn apply_sell_for_day(
     let (main_chip_total, retail_chip_total) = holder_chip_totals(buckets);
 
     for bucket_index in 0..buckets.len() {
+        if buckets[bucket_index].main_chip <= EPS && buckets[bucket_index].retail_chip <= EPS {
+            continue;
+        }
+
         let bucket_runtime = build_bucket_runtime(
             base_runtime,
             bars,
@@ -925,10 +936,10 @@ fn apply_sell_for_day(
 
 fn apply_buy_for_day(
     buckets: &mut [ChipBucket],
-    bars: &[Option<ChenChipBar>],
-    base_runtime: &Runtime,
+    bar: &ChenChipBar,
+    buy_runtime: &Runtime,
     chip_config: &CompiledChipChangeConfig,
-    main_ratio_history: &[Vec<Option<f64>>],
+    runtime_len: usize,
     day_index: usize,
     turnover_rate: f64,
 ) -> Result<(), String> {
@@ -936,45 +947,95 @@ fn apply_buy_for_day(
         return Ok(());
     }
 
-    let bar = bars[day_index]
-        .as_ref()
-        .ok_or_else(|| format!("第{day_index}根K线缺少有效数据"))?;
-    let weights = trade_distribution_weights(buckets, bar)?;
-    let total_weight = weights.iter().sum::<f64>();
+    let weights = trade_distribution_weight_entries(buckets, bar)?;
+    let total_weight = weights.iter().map(|(_, weight)| *weight).sum::<f64>();
     if total_weight <= EPS {
         return Ok(());
     }
     let (main_chip_total, retail_chip_total) = holder_chip_totals(buckets);
+    let mut runtime = buy_runtime.clone();
+    insert_dynamic_holder_fields(&mut runtime, main_chip_total, retail_chip_total);
+    let (main_bias, retail_bias) = strategy_biases_at(
+        &runtime,
+        chip_config,
+        ChipDirection::Buy,
+        runtime_len,
+        day_index,
+    )?;
+    let (main_share, retail_share) = buy_holder_shares(main_bias, retail_bias);
 
-    for bucket_index in 0..buckets.len() {
-        let weight = weights[bucket_index];
-        if weight <= EPS {
-            continue;
-        }
-
-        let bucket_runtime = build_bucket_runtime(
-            base_runtime,
-            bars,
-            &buckets[bucket_index],
-            &main_ratio_history[bucket_index],
-            main_chip_total,
-            retail_chip_total,
-        )?;
-        let (main_bias, retail_bias) = strategy_biases_at(
-            &bucket_runtime,
-            chip_config,
-            ChipDirection::Buy,
-            bars.len(),
-            day_index,
-        )?;
+    for (bucket_index, weight) in weights {
         let bucket_buy_amount = turnover_rate * weight / total_weight;
-        let (main_share, retail_share) = buy_holder_shares(main_bias, retail_bias);
 
         buckets[bucket_index].main_chip += bucket_buy_amount * main_share;
         buckets[bucket_index].retail_chip += bucket_buy_amount * retail_share;
     }
 
     Ok(())
+}
+
+fn insert_dynamic_holder_fields(
+    runtime: &mut Runtime,
+    main_chip_total: f64,
+    retail_chip_total: f64,
+) {
+    let total = main_chip_total + retail_chip_total;
+    let main_ratio = if total > EPS {
+        main_chip_total / total
+    } else {
+        0.5
+    };
+    insert_num_with_lowercase_alias(runtime, "MAIN_CHIP_RATIO", main_ratio);
+    insert_num_with_lowercase_alias(runtime, "MAIN_CHIP_TOTAL", main_chip_total);
+    insert_num_with_lowercase_alias(runtime, "RETAIL_CHIP_TOTAL", retail_chip_total);
+}
+
+fn build_new_participant_buy_runtime(
+    base_runtime: &Runtime,
+    bars: &[Option<ChenChipBar>],
+) -> Result<Runtime, String> {
+    let mut rateo = Vec::with_capacity(bars.len());
+    let mut rateh = Vec::with_capacity(bars.len());
+    let mut ratel = Vec::with_capacity(bars.len());
+    let mut ratec = Vec::with_capacity(bars.len());
+    let mut last_close: Option<f64> = None;
+
+    for bar in bars {
+        let Some(bar) = bar else {
+            rateo.push(None);
+            rateh.push(None);
+            ratel.push(None);
+            ratec.push(None);
+            continue;
+        };
+        let reference_price = last_close.unwrap_or(bar.open);
+        if !reference_price.is_finite() || reference_price <= 0.0 {
+            return Err("新进买方参考价非法".to_string());
+        }
+
+        rateo.push(Some((bar.open - reference_price) / reference_price * 100.0));
+        rateh.push(Some((bar.high - reference_price) / reference_price * 100.0));
+        ratel.push(Some((bar.low - reference_price) / reference_price * 100.0));
+        ratec.push(Some(
+            (bar.close - reference_price) / reference_price * 100.0,
+        ));
+        last_close = Some(bar.close);
+    }
+
+    let mut runtime = base_runtime.clone();
+    insert_num_series_with_lowercase_alias(&mut runtime, "RATEO", rateo);
+    insert_num_series_with_lowercase_alias(&mut runtime, "RATEH", rateh);
+    insert_num_series_with_lowercase_alias(&mut runtime, "RATEL", ratel);
+    insert_num_series_with_lowercase_alias(&mut runtime, "RATEC", ratec);
+    Ok(runtime)
+}
+
+fn share_runtime_num_series(runtime: &mut Runtime) {
+    for value in runtime.vars.values_mut() {
+        if let Value::NumSeries(series) = value {
+            *value = Value::SharedNumSeries(Arc::new(std::mem::take(series)));
+        }
+    }
 }
 
 fn build_bucket_runtime(
@@ -1209,27 +1270,30 @@ fn apply_weighted_sell(
     Ok(remaining)
 }
 
-fn trade_distribution_weights(
+fn trade_distribution_weight_entries(
     buckets: &[ChipBucket],
     bar: &ChenChipBar,
-) -> Result<Vec<f64>, String> {
-    let mut weights = vec![0.0; buckets.len()];
+) -> Result<Vec<(usize, f64)>, String> {
     if buckets.is_empty() {
-        return Ok(weights);
+        return Ok(Vec::new());
     }
 
     if (bar.high - bar.low).abs() <= EPS {
         let index = find_bucket_containing_price(buckets, bar.close)
             .or_else(|| find_bucket_containing_price(buckets, bar.low))
             .unwrap_or_else(|| nearest_bucket_index(buckets, bar.close));
-        weights[index] = 1.0;
-        return Ok(weights);
+        return Ok(vec![(index, 1.0)]);
     }
 
     let center = (bar.open + bar.high + bar.low + bar.close) / 4.0;
     let center = center.clamp(bar.low, bar.high);
+    let start_index = buckets.partition_point(|bucket| bucket.price_high <= bar.low + EPS);
+    let mut weights = Vec::new();
 
-    for (index, bucket) in buckets.iter().enumerate() {
+    for (index, bucket) in buckets.iter().enumerate().skip(start_index) {
+        if bucket.price_low >= bar.high - EPS {
+            break;
+        }
         let overlap_low = bucket.price_low.max(bar.low);
         let overlap_high = bucket.price_high.min(bar.high);
         if overlap_high <= overlap_low + EPS {
@@ -1238,17 +1302,20 @@ fn trade_distribution_weights(
         let midpoint = (overlap_low + overlap_high) / 2.0;
         let height = triangle_height(midpoint, bar.low, center, bar.high);
         let width = overlap_high - overlap_low;
-        weights[index] = (height * width).max(0.0);
+        let weight = (height * width).max(0.0);
+        if weight > EPS {
+            weights.push((index, weight));
+        }
     }
 
-    let total_weight = weights.iter().sum::<f64>();
+    let total_weight = weights.iter().map(|(_, weight)| *weight).sum::<f64>();
     if !total_weight.is_finite() {
         return Err("成交价格分布权重出现非有限数值".to_string());
     }
     if total_weight <= EPS {
         let index = find_bucket_containing_price(buckets, center)
             .unwrap_or_else(|| nearest_bucket_index(buckets, center));
-        weights[index] = 1.0;
+        weights.push((index, 1.0));
     }
 
     Ok(weights)
@@ -1494,9 +1561,9 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        apply_buy_for_day, apply_sell_for_day, buy_holder_shares,
-        compute_chen_chip_snapshots_from_row_data, row_into_rt, ChenChipBar, ChenChipConfig,
-        ChipBucket, ChipChangeConfig, ChipDirection, ChipHolder, EPS,
+        apply_buy_for_day, apply_sell_for_day, build_new_participant_buy_runtime,
+        buy_holder_shares, compute_chen_chip_snapshots_from_row_data, row_into_rt, ChenChipBar,
+        ChenChipConfig, ChipBucket, ChipChangeConfig, ChipDirection, ChipHolder, EPS,
     };
     use crate::data::RowData;
 
@@ -1631,7 +1698,7 @@ bias = -0.5
     }
 
     #[test]
-    fn chip_change_strategy_can_use_holder_total_chip_fields() {
+    fn buy_strategy_uses_dynamic_global_holder_fields_without_bucket_scan() {
         let chip_config = ChipChangeConfig::from_toml_str(
             r#"
 version = 1
@@ -1673,7 +1740,8 @@ bias = 1.0
             turnover_rate: 10.0,
         })];
         let base_runtime = row_into_rt(row_data).expect("runtime should build");
-        let main_ratio_history = vec![vec![Some(0.6)], vec![Some(0.6)]];
+        let buy_runtime =
+            build_new_participant_buy_runtime(&base_runtime, &bars).expect("buy runtime");
         let mut buckets = vec![
             ChipBucket {
                 price_low: 9.0,
@@ -1691,10 +1759,10 @@ bias = 1.0
 
         apply_buy_for_day(
             &mut buckets,
-            &bars,
-            &base_runtime,
+            bars[0].as_ref().expect("bar"),
+            &buy_runtime,
             &chip_config,
-            &main_ratio_history,
+            bars.len(),
             0,
             10.0,
         )

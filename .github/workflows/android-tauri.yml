@@ -1,0 +1,125 @@
+name: android-tauri-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_variant:
+        description: "Android build variant"
+        required: true
+        default: debug
+        type: choice
+        options:
+          - debug
+          - release
+      android_targets:
+        description: "Rust Android targets"
+        required: true
+        default: aarch64
+        type: choice
+        options:
+          - aarch64
+          - all
+      package_kind:
+        description: "Android package kind"
+        required: true
+        default: apk
+        type: choice
+        options:
+          - apk
+          - apk-aab
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-tauri-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ANDROID_NDK_VERSION: 28.2.13676358
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          yes | sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;${ANDROID_NDK_VERSION}"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: ui/lianghua_web_feat/package-lock.json
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            ui/lianghua_web_feat/src-tauri -> target
+
+      - name: Cache Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install frontend dependencies
+        working-directory: ui/lianghua_web_feat
+        run: npm ci
+
+      - name: Build Tauri app (Android)
+        working-directory: ui/lianghua_web_feat
+        shell: bash
+        run: |
+          export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
+          export NDK_HOME="${ANDROID_NDK_HOME}"
+
+          args=(android build --ci)
+
+          if [ "${{ inputs.package_kind }}" = "apk-aab" ]; then
+            args+=(--apk --aab)
+          else
+            args+=(--apk)
+          fi
+
+          if [ "${{ inputs.build_variant }}" = "debug" ]; then
+            args+=(--debug)
+          fi
+
+          if [ "${{ inputs.android_targets }}" = "aarch64" ]; then
+            args+=(--target aarch64)
+          fi
+
+          npm run tauri -- "${args[@]}"
+
+      - name: Upload Android bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-android-${{ inputs.build_variant }}-${{ inputs.android_targets }}
+          path: |
+            ui/lianghua_web_feat/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+            ui/lianghua_web_feat/src-tauri/gen/android/app/build/outputs/bundle/**/*.aab
+          if-no-files-found: error

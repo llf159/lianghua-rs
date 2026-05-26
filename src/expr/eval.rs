@@ -1,5 +1,6 @@
 use crate::expr::parser::{BinaryOp, Expr, Stmt, Stmts, UnaryOp};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 const EPS: f64 = 1e-12;
 
@@ -18,7 +19,11 @@ fn to_bool(v: f64) -> bool {
 }
 
 fn to_num(b: bool) -> f64 {
-    if b { 1.0 } else { 0.0 }
+    if b {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 impl Runtime {
@@ -447,7 +452,13 @@ impl Runtime {
         let cond = self.eval_expr(&args[0])?;
         let len = Value::len_of(&cond);
         let ori_n = Value::as_num(&self.eval_expr(&args[1])?)?;
-        let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
+        let std_n = {
+            if ori_n as i64 <= 0 {
+                1
+            } else {
+                ori_n as usize
+            }
+        };
         let cond_series = Value::as_bool_series(&cond, len)?;
         let mut out = Vec::with_capacity(len);
         let mut cnt: usize = 0;
@@ -479,7 +490,13 @@ impl Runtime {
         let len = Value::len_of(&values);
 
         let ori_n = Value::as_num(&self.eval_expr(&args[1])?)?;
-        let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
+        let std_n = {
+            if ori_n as i64 <= 0 {
+                1
+            } else {
+                ori_n as usize
+            }
+        };
         let num_series = Value::as_num_series(&values, len)?;
         let mut out = Vec::with_capacity(len);
         for i in 0..len {
@@ -523,7 +540,13 @@ impl Runtime {
         let num_series = Value::as_num_series(&v, len)?;
         let mut out = Vec::with_capacity(len);
         let ori_n = Value::as_num(&self.eval_expr(&args[1])?)?;
-        let std_n = { if ori_n as i64 <= 0 { 0 } else { ori_n as usize } };
+        let std_n = {
+            if ori_n as i64 <= 0 {
+                0
+            } else {
+                ori_n as usize
+            }
+        };
 
         for i in 0..len {
             if i < std_n {
@@ -564,6 +587,12 @@ impl Runtime {
                     msg: "LAST命中的值为空".to_string(),
                 }),
             },
+            Value::SharedNumSeries(ns) => match ns[idx] {
+                Some(n) => Ok(Value::Num(n)),
+                None => Err(EvalErr {
+                    msg: "LAST命中的值为空".to_string(),
+                }),
+            },
             Value::BoolSeries(bs) => Ok(Value::Bool(bs[idx])),
         }
     }
@@ -580,7 +609,13 @@ impl Runtime {
         let num_series = Value::as_num_series(&v, len)?;
         let mut out = Vec::with_capacity(len);
         let ori_n = Value::as_num(&self.eval_expr(&args[1])?)?;
-        let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
+        let std_n = {
+            if ori_n as i64 <= 0 {
+                1
+            } else {
+                ori_n as usize
+            }
+        };
 
         for i in 0..len {
             if i + 1 < std_n {
@@ -624,7 +659,13 @@ impl Runtime {
         let num_series = Value::as_num_series(&v, len)?;
         let mut out = Vec::with_capacity(len);
         let ori_n = Value::as_num(&self.eval_expr(&args[1])?)?;
-        let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
+        let std_n = {
+            if ori_n as i64 <= 0 {
+                1
+            } else {
+                ori_n as usize
+            }
+        };
 
         for i in 0..len {
             if i + 1 < std_n {
@@ -668,7 +709,13 @@ impl Runtime {
         let num_series = Value::as_num_series(&v, len)?;
         let mut out = Vec::with_capacity(len);
         let ori_n = Value::as_num(&self.eval_expr(&args[1])?)?;
-        let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
+        let std_n = {
+            if ori_n as i64 <= 0 {
+                1
+            } else {
+                ori_n as usize
+            }
+        };
 
         for i in 0..len {
             if i + 1 < std_n {
@@ -710,7 +757,13 @@ impl Runtime {
         let num_series = Value::as_num_series(&v, len)?;
         let mut out = Vec::with_capacity(len);
         let ori_n = Value::as_num(&self.eval_expr(&args[1])?)?;
-        let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
+        let std_n = {
+            if ori_n as i64 <= 0 {
+                1
+            } else {
+                ori_n as usize
+            }
+        };
 
         for i in 0..len {
             if i + 1 < std_n {
@@ -824,7 +877,13 @@ impl Runtime {
         let len = Value::len_of(&v);
         let n_series = Value::as_num_series(&v, len)?;
         let ori_n = Value::as_num(&self.eval_expr(&args[1])?)?;
-        let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
+        let std_n = {
+            if ori_n as i64 <= 0 {
+                1
+            } else {
+                ori_n as usize
+            }
+        };
         let alpha = 2.0 / (std_n as f64 + 1.0);
         let mut out = Vec::with_capacity(len);
         let mut prev: Option<f64> = None;
@@ -860,7 +919,13 @@ impl Runtime {
         let n_series = Value::as_num_series(&v, len)?;
         let ori_n = Value::as_num(&self.eval_expr(&args[1])?)?;
         let ori_m = Value::as_num(&self.eval_expr(&args[2])?)?;
-        let std_n = { if ori_n as i64 <= 0 { 1.0 } else { ori_n } };
+        let std_n = {
+            if ori_n as i64 <= 0 {
+                1.0
+            } else {
+                ori_n
+            }
+        };
         let std_m = if ori_m < 0.0 { 0.0 } else { ori_m };
         let alpha = (std_m / std_n).clamp(0.0, 1.0);
         let mut out = Vec::with_capacity(len);
@@ -938,7 +1003,13 @@ impl Runtime {
         let h = self.eval_expr(&args[1])?;
         let l = self.eval_expr(&args[2])?;
         let ori_n = Value::as_num(&self.eval_expr(&args[3])?)?;
-        let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
+        let std_n = {
+            if ori_n as i64 <= 0 {
+                1
+            } else {
+                ori_n as usize
+            }
+        };
 
         let len = Value::len_of(&c)
             .max(Value::len_of(&h))
@@ -1086,7 +1157,13 @@ impl Runtime {
         let len = Value::len_of(&v);
         let n_series = Value::as_num_series(&v, len)?;
         let ori_n = Value::as_num(&self.eval_expr(&args[1])?)?;
-        let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
+        let std_n = {
+            if ori_n as i64 <= 0 {
+                1
+            } else {
+                ori_n as usize
+            }
+        };
         let mut out = Vec::with_capacity(len);
 
         for i in 0..len {
@@ -1306,7 +1383,13 @@ impl Runtime {
         let len = Value::len_of(&v);
         let n_series = Value::as_num_series(&v, len)?;
         let ori_n = Value::as_num(&self.eval_expr(&args[1])?)?;
-        let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
+        let std_n = {
+            if ori_n as i64 <= 0 {
+                1
+            } else {
+                ori_n as usize
+            }
+        };
         let mut out = Vec::with_capacity(len);
 
         for i in 0..len {
@@ -1358,7 +1441,13 @@ impl Runtime {
         let cond_series = Value::as_bool_series(&cond, len)?;
         let v_series = Value::as_num_series(&v, len)?;
         let ori_n = Value::as_num(&self.eval_expr(&args[2])?)?;
-        let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
+        let std_n = {
+            if ori_n as i64 <= 0 {
+                1
+            } else {
+                ori_n as usize
+            }
+        };
         let mut out = Vec::with_capacity(len);
 
         for i in 0..len {
@@ -1486,6 +1575,9 @@ impl Runtime {
             (UnaryOp::Neg, Value::NumSeries(ns)) => Ok(Value::NumSeries(
                 ns.into_iter().map(|x| x.map(|n| -n)).collect(),
             )),
+            (UnaryOp::Neg, Value::SharedNumSeries(ns)) => {
+                Ok(Value::NumSeries(ns.iter().map(|x| x.map(|n| -n)).collect()))
+            }
             (UnaryOp::Neg, Value::BoolSeries(bs)) => Ok(Value::NumSeries(
                 bs.into_iter().map(|b| Some(-to_num(b))).collect(),
             )),
@@ -1493,6 +1585,9 @@ impl Runtime {
             (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
             (UnaryOp::Not, Value::NumSeries(ns)) => Ok(Value::BoolSeries(
                 ns.into_iter().map(|x| !to_bool(x.unwrap_or(0.0))).collect(),
+            )),
+            (UnaryOp::Not, Value::SharedNumSeries(ns)) => Ok(Value::BoolSeries(
+                ns.iter().map(|x| !to_bool(x.unwrap_or(0.0))).collect(),
             )),
             (UnaryOp::Not, Value::BoolSeries(bs)) => {
                 Ok(Value::BoolSeries(bs.into_iter().map(|b| !b).collect()))
@@ -1713,6 +1808,7 @@ impl Runtime {
 pub enum Value {
     Num(f64),
     NumSeries(Vec<Option<f64>>),
+    SharedNumSeries(Arc<Vec<Option<f64>>>),
     Bool(bool),
     BoolSeries(Vec<bool>),
 }
@@ -1723,6 +1819,7 @@ impl Value {
             Value::Num(_) => 1,
             Value::Bool(_) => 1,
             Value::NumSeries(n) => n.len(),
+            Value::SharedNumSeries(n) => n.len(),
             Value::BoolSeries(b) => b.len(),
         }
     }
@@ -1731,7 +1828,7 @@ impl Value {
         match v {
             Value::Num(n) => Ok(*n),
             Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
-            Value::NumSeries(_) => Err(EvalErr {
+            Value::NumSeries(_) | Value::SharedNumSeries(_) => Err(EvalErr {
                 msg: "需要标量数字，但拿到数值序列，可用LAST函数转换".to_string(),
             }),
             Value::BoolSeries(_) => Err(EvalErr {
@@ -1744,7 +1841,7 @@ impl Value {
         match v {
             Value::Num(n) => Ok(*n != 0.0),
             Value::Bool(b) => Ok(*b),
-            Value::NumSeries(_) => Err(EvalErr {
+            Value::NumSeries(_) | Value::SharedNumSeries(_) => Err(EvalErr {
                 msg: "需要布尔，但拿到数值序列".to_string(),
             }),
             Value::BoolSeries(_) => Err(EvalErr {
@@ -1760,6 +1857,15 @@ impl Value {
             Value::NumSeries(ns) => {
                 if ns.len() == len {
                     Ok(ns.clone())
+                } else {
+                    Err(EvalErr {
+                        msg: "数值序列长度不对".to_string(),
+                    })
+                }
+            }
+            Value::SharedNumSeries(ns) => {
+                if ns.len() == len {
+                    Ok(ns.as_ref().clone())
                 } else {
                     Err(EvalErr {
                         msg: "数值序列长度不对".to_string(),
@@ -1800,6 +1906,21 @@ impl Value {
                     })
                 }
             }
+            Value::SharedNumSeries(ns) => {
+                if ns.len() == len {
+                    Ok(ns
+                        .iter()
+                        .map(|n| match n {
+                            Some(n) => *n != 0.0,
+                            None => false,
+                        })
+                        .collect())
+                } else {
+                    Err(EvalErr {
+                        msg: "数值序列长度不对".to_string(),
+                    })
+                }
+            }
             Value::BoolSeries(bs) => {
                 if bs.len() == len {
                     Ok(bs.clone())
@@ -1815,7 +1936,7 @@ impl Value {
 
 #[test]
 fn call_test() {
-    use crate::expr::parser::{Parser, lex_all};
+    use crate::expr::parser::{lex_all, Parser};
 
     // let expr = "C > MA(C, 3);";
     // let expr = "C > HHV(REF(C, 1), 3);";
@@ -1837,7 +1958,7 @@ fn call_test() {
 
 #[test]
 fn scalar_binary_keeps_scalar() {
-    use crate::expr::parser::{Parser, lex_all};
+    use crate::expr::parser::{lex_all, Parser};
 
     let expr = "WINDOW := 10 + 10; REF(C, WINDOW);";
     let toks = lex_all(expr);
@@ -1864,7 +1985,7 @@ fn scalar_binary_keeps_scalar() {
 
 #[test]
 fn gtopcount_anchors_to_current_window() {
-    use crate::expr::parser::{Parser, lex_all};
+    use crate::expr::parser::{lex_all, Parser};
 
     let expr = "GTOPCOUNT(V, C > REF(C, 1), 5, 3);";
     let toks = lex_all(expr);
@@ -1896,7 +2017,7 @@ fn gtopcount_anchors_to_current_window() {
 
 #[test]
 fn ltopcount_anchors_to_current_window() {
-    use crate::expr::parser::{Parser, lex_all};
+    use crate::expr::parser::{lex_all, Parser};
 
     let expr = "LTOPCOUNT(V, C > REF(C, 1), 5, 3);";
     let toks = lex_all(expr);
@@ -1928,7 +2049,7 @@ fn ltopcount_anchors_to_current_window() {
 
 #[test]
 fn repeated_ref_comparisons_keep_the_same_reference_low_per_bar() {
-    use crate::expr::parser::{Parser, lex_all};
+    use crate::expr::parser::{lex_all, Parser};
 
     let expr = "C >= REF(L, 4) AND REF(C, 1) >= REF(L, 4) AND REF(C, 2) >= REF(L, 4);";
     let toks = lex_all(expr);
@@ -1974,7 +2095,7 @@ fn repeated_ref_comparisons_keep_the_same_reference_low_per_bar() {
 
 #[test]
 fn last_returns_latest_or_offset_value_as_scalar() {
-    use crate::expr::parser::{Parser, lex_all};
+    use crate::expr::parser::{lex_all, Parser};
 
     let expr = "A := LAST(C, 0); B := LAST(C, 2); A - B;";
     let toks = lex_all(expr);
@@ -1993,7 +2114,7 @@ fn last_returns_latest_or_offset_value_as_scalar() {
 
 #[test]
 fn last_supports_bool_series() {
-    use crate::expr::parser::{Parser, lex_all};
+    use crate::expr::parser::{lex_all, Parser};
 
     let expr = "LAST(C > 2, 1);";
     let toks = lex_all(expr);
@@ -2012,7 +2133,7 @@ fn last_supports_bool_series() {
 
 #[test]
 fn in_range_supports_inclusive_and_exclusive_bounds() {
-    use crate::expr::parser::{Parser, lex_all};
+    use crate::expr::parser::{lex_all, Parser};
 
     let expr = "A := C IN [2, 4]; B := C IN (2, 4); A AND NOT(B);";
     let toks = lex_all(expr);
@@ -2034,7 +2155,7 @@ fn in_range_supports_inclusive_and_exclusive_bounds() {
 
 #[test]
 fn in_range_accepts_expression_bounds() {
-    use crate::expr::parser::{Parser, lex_all};
+    use crate::expr::parser::{lex_all, Parser};
 
     let expr = "C IN [MA(C, 2), HHV(C, 3)]";
     let toks = lex_all(expr);
@@ -2056,7 +2177,7 @@ fn in_range_accepts_expression_bounds() {
 
 #[test]
 fn refd_uses_per_bar_offsets_and_keeps_undefined_periods_empty() {
-    use crate::expr::parser::{Parser, lex_all};
+    use crate::expr::parser::{lex_all, Parser};
 
     let expr = "GAP := REF(BARSLAST(C > 3), 1); REFD(H, GAP + 1, 5);";
     let toks = lex_all(expr);
@@ -2088,7 +2209,7 @@ fn refd_uses_per_bar_offsets_and_keeps_undefined_periods_empty() {
 
 #[test]
 fn countd_uses_dynamic_windows_with_runtime_cap() {
-    use crate::expr::parser::{Parser, lex_all};
+    use crate::expr::parser::{lex_all, Parser};
 
     let expr = "COUNTD(C > 0, N, 3);";
     let toks = lex_all(expr);
@@ -2120,7 +2241,7 @@ fn countd_uses_dynamic_windows_with_runtime_cap() {
 
 #[test]
 fn hhvd_uses_dynamic_windows_with_runtime_cap() {
-    use crate::expr::parser::{Parser, lex_all};
+    use crate::expr::parser::{lex_all, Parser};
 
     let expr = "HHVD(C, N, 3);";
     let toks = lex_all(expr);
@@ -2146,7 +2267,7 @@ fn hhvd_uses_dynamic_windows_with_runtime_cap() {
 
 #[test]
 fn dynamic_limit_rejects_fractional_upper_bound() {
-    use crate::expr::parser::{Parser, lex_all};
+    use crate::expr::parser::{lex_all, Parser};
 
     let expr = "HHVD(C, N, 0.5);";
     let toks = lex_all(expr);

@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use duckdb::{Connection, params};
+use duckdb::{params, Connection};
 
 use crate::data::{
-    RowData, ScopeWay, ScoreRule, cyq_chen_db_path, load_stock_list, load_trade_date_list,
+    cyq_chen_db_path, load_stock_list, load_trade_date_list, RowData, ScopeWay, ScoreRule,
 };
 use crate::expr::eval::{Runtime, Value};
-use crate::expr::parser::{Expr, Parser, Stmt, Stmts, lex_all};
+use crate::expr::parser::{lex_all, Expr, Parser, Stmt, Stmts};
 use crate::utils::utils::eval_binary_for_warmup;
 use crate::utils::utils::impl_expr_warmup;
 
@@ -163,6 +163,7 @@ pub fn rt_max_len(rt: &Runtime) -> usize {
         let len = match v {
             Value::Num(_) | Value::Bool(_) => 1,
             Value::NumSeries(ns) => ns.len(),
+            Value::SharedNumSeries(ns) => ns.len(),
             Value::BoolSeries(bs) => bs.len(),
         };
         if len > max_len {
