@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use duckdb::{params, Connection};
+use duckdb::{Connection, params};
 
 use crate::data::{
-    cyq_chen_db_path, load_stock_list, load_trade_date_list, RowData, ScopeWay, ScoreRule,
+    RowData, ScopeWay, ScoreRule, cyq_chen_db_path, load_stock_list, load_trade_date_list,
 };
 use crate::expr::eval::{Runtime, Value};
-use crate::expr::parser::{lex_all, Expr, Parser, Stmt, Stmts};
+use crate::expr::parser::{Expr, Parser, Stmt, Stmts, lex_all};
 use crate::utils::utils::eval_binary_for_warmup;
 use crate::utils::utils::impl_expr_warmup;
 

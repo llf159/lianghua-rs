@@ -253,6 +253,11 @@ function formatDbRange(range: DataDownloadStatus['sourceDb'] | DataDownloadStatu
   return `${formatTradeDate(range.minTradeDate)} 至 ${formatTradeDate(range.maxTradeDate)}`
 }
 
+function formatCompletionDetailTail(details: string[] | null | undefined) {
+  const normalized = (details ?? []).map((item) => item.trim()).filter(Boolean)
+  return normalized.length > 0 ? `；${normalized.join('；')}` : ''
+}
+
 function formatFileRange(
   fileStatus:
     | DataDownloadStatus['tradeCalendar']
@@ -544,23 +549,24 @@ export default function DataDownloadPage() {
         result.action === 'repair-concept-most-related'
       ) {
         setNotice(
-          `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；写入 ${result.summary.savedRows} 行。`,
+          `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；写入 ${result.summary.savedRows} 行${formatCompletionDetailTail(result.completionDetails)}。`,
         )
       } else if (result.action === 'delete-stock-data-indicator-columns') {
         setNotice(
-          `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；清空 ${result.summary.successCount} 列，基础行情列已保留。`,
+          `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；清空 ${result.summary.successCount} 列，基础行情列已保留${formatCompletionDetailTail(result.completionDetails)}。`,
         )
       } else if (result.action === 'rebuild-stock-data-indicator-columns') {
         setNotice(
-          `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；补算 ${result.summary.successCount} 组，回写 ${result.summary.savedRows} 行。`,
+          `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；补算 ${result.summary.successCount} 组，回写 ${result.summary.savedRows} 行${formatCompletionDetailTail(result.completionDetails)}。`,
         )
       } else {
-        const failedTail =
+        const failedDetail =
           result.summary.failedCount > 0
-            ? ` 失败 ${result.summary.failedCount} 只，前几项: ${result.summary.failedItems.slice(0, 3).join('；')}`
+            ? `失败 ${result.summary.failedCount} 只，前几项: ${result.summary.failedItems.slice(0, 3).join('；')}`
             : ''
+        const detailTail = formatCompletionDetailTail([...result.completionDetails, failedDetail].filter(Boolean))
         setNotice(
-          `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；成功 ${result.summary.successCount} 只，写入 ${result.summary.savedRows} 行。${failedTail}`.trim(),
+          `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；成功 ${result.summary.successCount} 只，写入 ${result.summary.savedRows} 行${detailTail}。`,
         )
       }
     } catch (runError) {

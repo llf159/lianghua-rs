@@ -251,6 +251,7 @@ pub struct DownloadSummary {
     pub success_count: usize,
     pub failed_count: usize,
     pub saved_rows: usize,
+    pub concept_performance_rows: usize,
     pub failed_items: Vec<(String, String)>,
     pub recovered_stock_count: usize,
 }
@@ -277,6 +278,7 @@ impl PreparedDownloadBatch {
             success_count: self.prepared_items.len(),
             failed_count: self.failed_items.len(),
             saved_rows: self.prepared_items.iter().map(|item| item.rows.len()).sum(),
+            concept_performance_rows: 0,
             failed_items: self.failed_items.clone(),
             recovered_stock_count: 0,
         }

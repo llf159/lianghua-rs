@@ -812,22 +812,22 @@
 .details-chart-cyq-summary-overlay {
   position: absolute;
   top: var(--details-cyq-summary-top);
-  right: 14px;
-  bottom: 10px;
+  right: var(--details-cyq-summary-right);
+  bottom: 0;
+  left: var(--details-cyq-summary-left);
   z-index: 6;
-  width: min(260px, 28%);
-  min-width: 188px;
-  max-width: 320px;
   pointer-events: auto;
 }
 
 .details-chart-cyq-summary {
   width: 100%;
   max-height: 100%;
+  min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 5px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   overscroll-behavior: contain;
   padding: 8px;
   border: 1px solid rgba(96, 112, 132, 0.18);
@@ -838,15 +838,10 @@
   backdrop-filter: blur(6px);
 }
 
-.details-chart-cyq-summary.is-standalone {
+.details-chart-cyq-summary.is-overlay {
   height: 100%;
+  box-sizing: border-box;
   align-content: start;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  backdrop-filter: none;
-  padding: 10px 12px;
 }
 
 .details-chart-cyq-summary.is-sparse {
@@ -902,16 +897,10 @@
   white-space: nowrap;
 }
 
-.details-chart-cyq-summary-panel .details-chart-cyq-summary-viewport {
-  cursor: default;
-  touch-action: pan-y;
-}
-
 @media (max-width: 1040px) {
   .details-chart-cyq-summary-overlay {
-    right: 10px;
-    width: min(230px, 34%);
-    min-width: 168px;
+    right: var(--details-cyq-summary-right);
+    left: var(--details-cyq-summary-left);
   }
 
   .details-chart-cyq-summary {

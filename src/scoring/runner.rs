@@ -6,23 +6,23 @@ use std::{
 };
 
 use crate::data::scoring_data::{
+    SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage, ScoreWriteProfile,
     cache_rule_build, init_result_db, rank_scene_rows, rank_summary_rows_by_score, row_into_rt,
-    write_score_batches_from_channel, SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary,
-    ScoreWriteMessage, ScoreWriteProfile,
+    write_score_batches_from_channel,
 };
 use crate::data::{
-    collect_runtime_keys_from_expr_programs, result_db_path, source_db_path, DataReader, RowData,
-    RuntimeKeyCollectOptions, ScoreRule, ScoreScene,
+    DataReader, RowData, RuntimeKeyCollectOptions, ScoreRule, ScoreScene,
+    collect_runtime_keys_from_expr_programs, result_db_path, source_db_path,
 };
 use crate::scoring::{
-    build_scene_score_series, scoring_rules_details_cache, scoring_rules_total_cache,
+    CachedRule, RuleSceneMeta, TieBreakWay, build_scene_score_series, scoring_rules_details_cache,
+    scoring_rules_total_cache,
     tools::{
-        calc_query_need_rows, collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names,
-        inject_optional_cyq_chen_fields, inject_stock_extra_fields, load_st_list,
-        load_total_share_map, preview_optional_cyq_chen_injection_warnings, warmup_rows_estimate,
-        CyqChenFieldInjector,
+        CyqChenFieldInjector, calc_query_need_rows, collect_used_cyq_chen_runtime_keys,
+        cyq_chen_runtime_key_names, inject_optional_cyq_chen_fields, inject_stock_extra_fields,
+        load_st_list, load_total_share_map, preview_optional_cyq_chen_injection_warnings,
+        warmup_rows_estimate,
     },
-    CachedRule, RuleSceneMeta, TieBreakWay,
 };
 
 const SCORING_GROUP_SIZE: usize = 128;
@@ -564,8 +564,8 @@ pub fn scoring_single_period(
 mod tests {
     use super::*;
     use crate::{
-        data::{collect_assigned_names_from_expr_program, RuleTag, ScopeWay},
-        expr::parser::{lex_all, Parser},
+        data::{RuleTag, ScopeWay, collect_assigned_names_from_expr_program},
+        expr::parser::{Parser, lex_all},
     };
 
     fn cached_rule(name: &str, expression: &str) -> CachedRule {

@@ -724,19 +724,22 @@ pub fn run_cyq_chen_single_stock_test(
 
     let required_runtime_keys = collect_chen_chip_runtime_keys(&compiled_chip_config);
     let reader = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
-    let mut row_data = match reader.load_one(&ts_code, DEFAULT_ADJ_TYPE, &load_start_date, &end_date) {
-        Ok(data) => data,
-        Err(err) if err.contains("trade_dates为空") => return Ok(CyqChenSingleStockData {
-            resolved_ts_code: ts_code,
-            start_date,
-            end_date,
-            output_start_date: None,
-            kline: Vec::new(),
-            kline_payload: None,
-            snapshots: Vec::new(),
-        }),
-        Err(err) => return Err(err),
-    };
+    let mut row_data =
+        match reader.load_one(&ts_code, DEFAULT_ADJ_TYPE, &load_start_date, &end_date) {
+            Ok(data) => data,
+            Err(err) if err.contains("trade_dates为空") => {
+                return Ok(CyqChenSingleStockData {
+                    resolved_ts_code: ts_code,
+                    start_date,
+                    end_date,
+                    output_start_date: None,
+                    kline: Vec::new(),
+                    kline_payload: None,
+                    snapshots: Vec::new(),
+                });
+            }
+            Err(err) => return Err(err),
+        };
 
     if row_data.trade_dates.is_empty() {
         return Ok(CyqChenSingleStockData {

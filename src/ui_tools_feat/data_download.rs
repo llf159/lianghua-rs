@@ -153,6 +153,7 @@ pub struct DataDownloadSummary {
     pub success_count: u64,
     pub failed_count: u64,
     pub saved_rows: u64,
+    pub concept_performance_rows: u64,
     pub failed_items: Vec<String>,
 }
 
@@ -163,6 +164,7 @@ pub struct DataDownloadRunResult {
     pub action_label: String,
     pub elapsed_ms: u64,
     pub summary: DataDownloadSummary,
+    pub completion_details: Vec<String>,
     pub status: DataDownloadStatus,
 }
 
@@ -1037,12 +1039,31 @@ fn build_data_download_summary(summary: DownloadSummary) -> DataDownloadSummary 
         success_count: summary.success_count as u64,
         failed_count: summary.failed_count as u64,
         saved_rows: summary.saved_rows as u64,
+        concept_performance_rows: summary.concept_performance_rows as u64,
         failed_items: summary
             .failed_items
             .into_iter()
             .take(12)
             .map(|(ts_code, error)| format!("{ts_code}: {error}"))
             .collect(),
+    }
+}
+
+fn normalize_completion_detail(message: impl Into<String>) -> Option<String> {
+    let message = message.into();
+    let message = message.trim().trim_end_matches('。').trim();
+    if message.is_empty() {
+        None
+    } else {
+        Some(message.to_string())
+    }
+}
+
+fn concept_performance_completion_detail(rows: usize) -> Option<String> {
+    if rows > 0 {
+        Some(format!("概念表现写入 {rows} 行"))
+    } else {
+        None
     }
 }
 
@@ -1352,8 +1373,10 @@ pub fn run_prepared_data_download(
     summary.success_count += index_summary.success_count;
     summary.failed_count += index_summary.failed_count;
     summary.saved_rows += index_summary.saved_rows;
+    summary.concept_performance_rows += index_summary.concept_performance_rows;
     summary.failed_items.extend(index_summary.failed_items);
 
+    let mut completion_details = Vec::new();
     if prepared.action == "incremental-download" {
         let force_full_rebuild = stock_recovered_stock_count > 0;
         if let Some(cb) = progress_cb {
@@ -1378,6 +1401,12 @@ pub fn run_prepared_data_download(
             force_full_rebuild,
             progress_cb,
         )?;
+        if let Some(detail) = chip_message
+            .as_ref()
+            .and_then(|message| normalize_completion_detail(message.clone()))
+        {
+            completion_details.push(detail);
+        }
         if let Some(cb) = progress_cb {
             cb(crate::download::runner::DownloadProgress {
                 phase: "maintain_cyq_incremental".to_string(),
@@ -1389,6 +1418,14 @@ pub fn run_prepared_data_download(
         }
     }
 
+    if summary.concept_performance_rows > 0 {
+        if let Some(detail) =
+            concept_performance_completion_detail(summary.concept_performance_rows)
+        {
+            completion_details.insert(0, detail);
+        }
+    }
+
     let status = get_data_download_status(&prepared.source_path)?;
 
     Ok(DataDownloadRunResult {
@@ -1396,6 +1433,7 @@ pub fn run_prepared_data_download(
         action_label: prepared.action_label.clone(),
         elapsed_ms: 0,
         summary: build_data_download_summary(summary),
+        completion_details,
         status,
     })
 }
@@ -1422,6 +1460,10 @@ pub fn run_prepared_missing_stock_repair(
         &prepared.missing_ts_codes,
         progress_cb,
     )?;
+    let completion_details =
+        concept_performance_completion_detail(summary.concept_performance_rows)
+            .into_iter()
+            .collect();
     let status = get_data_download_status(&prepared.source_path)?;
 
     Ok(DataDownloadRunResult {
@@ -1429,6 +1471,7 @@ pub fn run_prepared_missing_stock_repair(
         action_label: prepared.action_label.clone(),
         elapsed_ms: 0,
         summary: build_data_download_summary(summary),
+        completion_details,
         status,
     })
 }
@@ -1458,8 +1501,10 @@ pub fn run_prepared_ths_concept_download(
             success_count: summary.saved_rows as u64,
             failed_count: 0,
             saved_rows: summary.saved_rows as u64,
+            concept_performance_rows: 0,
             failed_items: Vec::new(),
         },
+        completion_details: Vec::new(),
         status,
     })
 }
@@ -1500,8 +1545,10 @@ pub fn run_prepared_concept_performance_repair(
             success_count: 1,
             failed_count: 0,
             saved_rows: saved_rows as u64,
+            concept_performance_rows: 0,
             failed_items: Vec::new(),
         },
+        completion_details: Vec::new(),
         status,
     })
 }
@@ -1542,8 +1589,10 @@ pub fn run_prepared_concept_most_related_repair(
             success_count: updated_rows as u64,
             failed_count: 0,
             saved_rows: updated_rows as u64,
+            concept_performance_rows: 0,
             failed_items: Vec::new(),
         },
+        completion_details: Vec::new(),
         status,
     })
 }
@@ -1597,8 +1646,10 @@ pub fn run_prepared_stock_data_indicator_columns_delete(
             success_count: indicator_columns.len() as u64,
             failed_count: 0,
             saved_rows: 0,
+            concept_performance_rows: 0,
             failed_items: Vec::new(),
         },
+        completion_details: Vec::new(),
         status,
     })
 }
@@ -1746,8 +1797,10 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
             success_count: work_items.len() as u64,
             failed_count: 0,
             saved_rows: updated_rows,
+            concept_performance_rows: 0,
             failed_items: Vec::new(),
         },
+        completion_details: Vec::new(),
         status,
     })
 }

@@ -1024,6 +1024,26 @@ function getDetailCyqMainTotal(snapshot: DetailCyqSnapshot | null) {
     : null;
 }
 
+function getDetailCyqRetailTotal(snapshot: DetailCyqSnapshot | null) {
+  if (!snapshot) {
+    return null;
+  }
+  if (
+    typeof snapshot.retail_total === "number" &&
+    Number.isFinite(snapshot.retail_total)
+  ) {
+    return snapshot.retail_total;
+  }
+  const values = snapshot.bins.map((bin) => bin.retail_chip);
+  return values.some((value) => typeof value === "number" && Number.isFinite(value))
+    ? values.reduce(
+        (sum, value) =>
+          sum + (typeof value === "number" && Number.isFinite(value) ? value : 0),
+        0,
+      )
+    : null;
+}
+
 function getDetailCyqTotalChips(snapshot: DetailCyqSnapshot | null) {
   if (!snapshot) {
     return null;
@@ -1060,6 +1080,23 @@ function getDetailCyqProfitRatio(snapshot: DetailCyqSnapshot | null) {
     .filter((bin) => bin.price <= snapshot.close)
     .reduce((sum, bin) => sum + Math.max(getCyqBinChipValue(bin, "mixed"), 0), 0);
   return profitChips / totalChips;
+}
+
+function getDetailCyqTrappedRatio(snapshot: DetailCyqSnapshot | null) {
+  if (!snapshot) {
+    return null;
+  }
+  if (
+    typeof snapshot.total_trapped_ratio === "number" &&
+    Number.isFinite(snapshot.total_trapped_ratio)
+  ) {
+    return snapshot.total_trapped_ratio;
+  }
+
+  const profitRatio = getDetailCyqProfitRatio(snapshot);
+  return typeof profitRatio === "number" && Number.isFinite(profitRatio)
+    ? clampNumber(1 - profitRatio, 0, 1)
+    : null;
 }
 
 function interpolateCyqCostByChip(bins: DetailCyqBin[], targetChip: number) {
@@ -1139,17 +1176,23 @@ function getDetailCyqPercentRange(
 
 function buildDetailCyqSummaryItems(
   snapshot: DetailCyqSnapshot | null,
+  holderView: DetailCyqHolderView,
 ): CyqSummaryItem[] {
   if (!snapshot) {
     return [];
   }
 
   const mixedPeakBin = findCyqPeakBin(snapshot.bins, "mixed");
+  const mainPeakBin = findCyqPeakBin(snapshot.bins, "main");
+  const retailPeakBin = findCyqPeakBin(snapshot.bins, "retail");
+  const selectedPeakBin = findCyqPeakBin(snapshot.bins, holderView);
   const mixedPeakPrice =
     typeof snapshot.chip_peak_price === "number" &&
     Number.isFinite(snapshot.chip_peak_price)
       ? snapshot.chip_peak_price
       : mixedPeakBin?.price;
+  const holderLabel =
+    DETAIL_CYQ_HOLDER_OPTIONS.find((option) => option.value === holderView)?.label ?? "筹码";
   const percent70 = getDetailCyqPercentRange(snapshot, 70);
   const percent90 = getDetailCyqPercentRange(snapshot, 90);
 
@@ -1161,17 +1204,62 @@ function buildDetailCyqSummaryItems(
       priority: "primary",
     },
     {
+      key: "retail",
+      label: "散户筹码",
+      value: formatNumber(getDetailCyqRetailTotal(snapshot)),
+      priority: "primary",
+    },
+    {
+      key: "total",
+      label: "总筹码",
+      value: formatNumber(getDetailCyqTotalChips(snapshot)),
+      priority: "primary",
+    },
+    {
+      key: "close",
+      label: "收盘价",
+      value: formatNumber(snapshot.close),
+      priority: "primary",
+    },
+    {
       key: "profit",
       label: "获利比例",
       value: formatCyqRatio(getDetailCyqProfitRatio(snapshot) ?? Number.NaN),
       priority: "primary",
     },
     {
+      key: "trapped",
+      label: "套牢比例",
+      value: formatCyqRatio(getDetailCyqTrappedRatio(snapshot) ?? Number.NaN),
+      priority: "primary",
+    },
+    {
       key: "peak",
-      label: "混合筹码峰",
+      label: "总筹码峰",
       value: formatNumber(mixedPeakPrice),
       subValue: mixedPeakBin ? formatNumber(getCyqBinChipValue(mixedPeakBin, "mixed"), 4) : undefined,
       priority: "primary",
+    },
+    {
+      key: "main-peak",
+      label: "主力筹码峰",
+      value: mainPeakBin ? formatNumber(mainPeakBin.price) : "--",
+      subValue: mainPeakBin ? formatNumber(getCyqBinChipValue(mainPeakBin, "main"), 4) : undefined,
+      priority: "secondary",
+    },
+    {
+      key: "retail-peak",
+      label: "散户筹码峰",
+      value: retailPeakBin ? formatNumber(retailPeakBin.price) : "--",
+      subValue: retailPeakBin ? formatNumber(getCyqBinChipValue(retailPeakBin, "retail"), 4) : undefined,
+      priority: "secondary",
+    },
+    {
+      key: "selected-peak",
+      label: `${holderLabel}显示峰`,
+      value: selectedPeakBin ? formatNumber(selectedPeakBin.price) : "--",
+      subValue: selectedPeakBin ? formatNumber(getCyqBinChipValue(selectedPeakBin, holderView), 4) : undefined,
+      priority: "secondary",
     },
     {
       key: "p70",
@@ -1192,9 +1280,9 @@ function buildDetailCyqSummaryItems(
 
 function renderCyqSummaryPanel(
   snapshot: DetailCyqSnapshot | null,
-  variant: "overlay" | "standalone",
+  holderView: DetailCyqHolderView,
 ) {
-  const items = buildDetailCyqSummaryItems(snapshot);
+  const items = buildDetailCyqSummaryItems(snapshot, holderView);
   if (items.length === 0) {
     return null;
   }
@@ -1203,7 +1291,7 @@ function renderCyqSummaryPanel(
     <div
       className={[
         "details-chart-cyq-summary",
-        variant === "overlay" ? "is-overlay" : "is-standalone",
+        "is-overlay",
         items.length <= 2 ? "is-sparse" : "",
       ]
         .filter(Boolean)
@@ -2436,8 +2524,7 @@ function renderChartPanel(
   const candleOverlaySeries = kind === "candles" ? panelSeries : [];
   const candleOverlayKeys = candleOverlaySeries.map((series) => series.key);
   const headerSeries = kind === "candles" ? candleOverlaySeries : panelSeries;
-  const reserveCyqPanelWidth =
-    isInteractivePricePanel(panel) && reserveCyqPanelWidthForAllPanels;
+  const reserveCyqPanelWidth = reserveCyqPanelWidthForAllPanels;
   const showCyqPanel =
     isInteractivePricePanel(panel) &&
     isCyqPanelVisible &&
@@ -3327,25 +3414,6 @@ function renderChartPanel(
             </div>
           </div>
         ) : null}
-      </div>
-    </section>
-  );
-}
-
-function renderCyqSummaryStandalonePanel(snapshot: DetailCyqSnapshot | null) {
-  return (
-    <section className="details-chart-panel details-chart-cyq-summary-panel" key="cyq-summary">
-      <header className="details-chart-panel-head">
-        <div className="details-chart-panel-head-main">
-          <strong>筹码数据</strong>
-          <small>{snapshot?.trade_date ?? "--"}</small>
-        </div>
-        <span>cyq</span>
-      </header>
-      <div className="details-chart-viewport details-chart-cyq-summary-viewport">
-        {renderCyqSummaryPanel(snapshot, "standalone") ?? (
-          <div className="details-chart-empty">暂无筹码数据</div>
-        )}
       </div>
     </section>
   );
@@ -4847,7 +4915,7 @@ export default function DetailsPage({
     panels.some((panel) => isInteractivePricePanel(panel));
   const shouldShowCyqSummary =
     detailCyqVisible && shouldReserveCyqPanelWidth && selectedCyqSnapshot !== null;
-  const shouldShowStandaloneCyqSummary =
+  const shouldUseCyqSummaryIndicatorSlot =
     shouldShowCyqSummary && indicatorPanelCount === 0;
   const chartMainPanelHeight = chartLayoutWidth * chartMainWidthRatio;
   const chartIndicatorPanelBaseHeight =
@@ -4859,27 +4927,39 @@ export default function DetailsPage({
     chartMainPanelHeight,
     chartIndicatorPanelBaseHeight,
   );
-  const chartGridRowCount = panels.length + (shouldShowStandaloneCyqSummary ? 1 : 0);
-  const chartPanelGapTotal = Math.max(0, chartGridRowCount - 1) * CHART_PANEL_GAP_PX;
+  const cyqSummaryIndicatorSlotHeight = shouldUseCyqSummaryIndicatorSlot
+    ? chartIndicatorPanelBaseHeight
+    : 0;
+  const chartPanelGapTotal =
+    Math.max(0, panels.length - 1 + (shouldUseCyqSummaryIndicatorSlot ? 1 : 0)) *
+    CHART_PANEL_GAP_PX;
   const chartShellHeight =
     chartPanelHeights.reduce((sum, panelHeight) => sum + panelHeight, 0) +
-    (shouldShowStandaloneCyqSummary ? chartIndicatorPanelBaseHeight : 0) +
+    cyqSummaryIndicatorSlotHeight +
     chartPanelGapTotal;
-  const chartGridTemplateRows = [
+  const chartTemplateRows = [
     buildChartTemplateRows(
       kline,
       panels,
       chartMainPanelHeight,
       chartIndicatorPanelBaseHeight,
     ),
-    shouldShowStandaloneCyqSummary
-      ? `${chartIndicatorPanelBaseHeight.toFixed(2)}px`
+    shouldUseCyqSummaryIndicatorSlot
+      ? `${cyqSummaryIndicatorSlotHeight.toFixed(2)}px`
       : "",
   ]
     .filter(Boolean)
     .join(" ");
+  const cyqSummaryPlotWidth =
+    CHART_VIEWBOX_WIDTH - CHART_MARGIN.left - CHART_MARGIN.right;
+  const cyqSummaryPanelWidth =
+    cyqSummaryPlotWidth * CHART_CYQ_PANEL_WIDTH_RATIO;
+  const cyqSummaryPanelLeft =
+    CHART_VIEWBOX_WIDTH - CHART_MARGIN.right - cyqSummaryPanelWidth;
   const cyqSummaryOverlayStyle = {
     "--details-cyq-summary-top": `${chartMainPanelHeight + CHART_PANEL_GAP_PX}px`,
+    "--details-cyq-summary-left": `${(cyqSummaryPanelLeft / CHART_VIEWBOX_WIDTH) * 100}%`,
+    "--details-cyq-summary-right": `${(CHART_MARGIN.right / CHART_VIEWBOX_WIDTH) * 100}%`,
   } as CSSProperties;
   const watermarkName =
     kline?.watermark_name ?? detailData?.overview?.name ?? "个股详情";
@@ -6920,7 +7000,7 @@ export default function DetailsPage({
           className="details-chart-shell"
           style={{
             height: `${chartShellHeight}px`,
-            gridTemplateRows: chartGridTemplateRows,
+            gridTemplateRows: chartTemplateRows,
           }}
         >
           {panels.map((panel, index) =>
@@ -7129,10 +7209,7 @@ export default function DetailsPage({
               closeChartIntervalPanel,
             ),
           )}
-          {shouldShowStandaloneCyqSummary
-            ? renderCyqSummaryStandalonePanel(selectedCyqSnapshot)
-            : null}
-          {shouldShowCyqSummary && indicatorPanelCount > 0 ? (
+          {shouldShowCyqSummary ? (
             <div
               className="details-chart-cyq-summary-overlay"
               style={cyqSummaryOverlayStyle}
@@ -7142,7 +7219,7 @@ export default function DetailsPage({
               onPointerCancel={stopEventPropagation}
               onClick={stopEventPropagation}
             >
-              {renderCyqSummaryPanel(selectedCyqSnapshot, "overlay")}
+              {renderCyqSummaryPanel(selectedCyqSnapshot, detailCyqHolderView)}
             </div>
           ) : null}
         </div>

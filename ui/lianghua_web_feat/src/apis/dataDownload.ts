@@ -101,6 +101,7 @@ export type DataDownloadSummary = {
   successCount: number
   failedCount: number
   savedRows: number
+  conceptPerformanceRows: number
   failedItems: string[]
 }
 
@@ -109,6 +110,7 @@ export type DataDownloadRunResult = {
   actionLabel: string
   elapsedMs: number
   summary: DataDownloadSummary
+  completionDetails: string[]
   status: DataDownloadStatus
 }
 

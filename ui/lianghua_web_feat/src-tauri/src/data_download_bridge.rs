@@ -147,6 +147,19 @@ fn emit_core_download_progress(
     );
 }
 
+fn format_completion_detail_tail(details: &[String]) -> String {
+    let details = details
+        .iter()
+        .map(|detail| detail.trim().trim_end_matches('。').trim())
+        .filter(|detail| !detail.is_empty())
+        .collect::<Vec<_>>();
+    if details.is_empty() {
+        String::new()
+    } else {
+        format!("；{}", details.join("；"))
+    }
+}
+
 #[tauri::command]
 pub fn get_data_download_status(source_path: String) -> Result<DataDownloadStatus, String> {
     core_get_data_download_status(&source_path)
@@ -441,10 +454,11 @@ pub async fn run_data_download(
                     total: run_result.summary.success_count + run_result.summary.failed_count,
                     current_label: None,
                     message: format!(
-                        "{} 已完成，成功 {} 只，失败 {} 只。",
+                        "{} 已完成，成功 {} 只，失败 {} 只{}。",
                         action_label,
                         run_result.summary.success_count,
-                        run_result.summary.failed_count
+                        run_result.summary.failed_count,
+                        format_completion_detail_tail(&run_result.completion_details)
                     ),
                 },
             ),

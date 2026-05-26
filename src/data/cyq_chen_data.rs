@@ -3,33 +3,34 @@ use std::{
     fs::{create_dir_all, read_to_string},
     path::Path,
     sync::{
-        mpsc::{sync_channel, Receiver},
         Arc,
+        mpsc::{Receiver, sync_channel},
     },
     thread,
 };
 
 use duckdb::{
+    Appender, Connection,
     arrow::{
         array::{ArrayRef, Float64Array, Int32Array, StringArray},
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     },
-    params, Appender, Connection,
+    params,
 };
 use rayon::prelude::*;
 
 use crate::{
     data::{
-        chip_change_rule_path,
+        DataReader, RowData, chip_change_rule_path,
         cyq_chen::{
+            ChenChipBin, ChenChipConfig, ChenChipSnapshot, CompiledChipChangeConfig,
             collect_chen_chip_runtime_keys,
             compute_chen_chip_snapshots_from_initial_bins_with_compiled_config,
             compute_chen_chip_snapshots_with_compiled_config, estimate_chen_chip_expression_warmup,
-            load_compiled_chip_change_config, ChenChipBin, ChenChipConfig, ChenChipSnapshot,
-            CompiledChipChangeConfig,
+            load_compiled_chip_change_config,
         },
-        cyq_chen_db_path, load_trade_date_list, source_db_path, DataReader, RowData,
+        cyq_chen_db_path, load_trade_date_list, source_db_path,
     },
     download::runner::{DownloadProgress, DownloadProgressCallback},
     scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map},
@@ -138,10 +139,20 @@ pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
     )
     .map_err(|e| format!("创建cyq_chen_snapshot索引失败:{e}"))?;
     conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cyq_chen_snapshot_stock_date ON cyq_chen_snapshot(ts_code, adj_type, trade_date)",
+        [],
+    )
+    .map_err(|e| format!("创建cyq_chen_snapshot股票日期索引失败:{e}"))?;
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_cyq_chen_bin_trade_date ON cyq_chen_bin(trade_date, ts_code, bin_index)",
         [],
     )
     .map_err(|e| format!("创建cyq_chen_bin索引失败:{e}"))?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cyq_chen_bin_stock_date ON cyq_chen_bin(ts_code, adj_type, trade_date, bin_index)",
+        [],
+    )
+    .map_err(|e| format!("创建cyq_chen_bin股票日期索引失败:{e}"))?;
     conn.execute(
         r#"
         CREATE TABLE IF NOT EXISTS cyq_chen_meta (
@@ -161,8 +172,12 @@ pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
 fn drop_cyq_chen_db_indexes(conn: &Connection) -> Result<(), String> {
     conn.execute("DROP INDEX IF EXISTS idx_cyq_chen_snapshot_trade_date", [])
         .map_err(|e| format!("删除cyq_chen_snapshot索引失败:{e}"))?;
+    conn.execute("DROP INDEX IF EXISTS idx_cyq_chen_snapshot_stock_date", [])
+        .map_err(|e| format!("删除cyq_chen_snapshot股票日期索引失败:{e}"))?;
     conn.execute("DROP INDEX IF EXISTS idx_cyq_chen_bin_trade_date", [])
         .map_err(|e| format!("删除cyq_chen_bin索引失败:{e}"))?;
+    conn.execute("DROP INDEX IF EXISTS idx_cyq_chen_bin_stock_date", [])
+        .map_err(|e| format!("删除cyq_chen_bin股票日期索引失败:{e}"))?;
     Ok(())
 }
 
@@ -173,10 +188,20 @@ fn ensure_cyq_chen_db_indexes(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| format!("创建cyq_chen_snapshot索引失败:{e}"))?;
     conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cyq_chen_snapshot_stock_date ON cyq_chen_snapshot(ts_code, adj_type, trade_date)",
+        [],
+    )
+    .map_err(|e| format!("创建cyq_chen_snapshot股票日期索引失败:{e}"))?;
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_cyq_chen_bin_trade_date ON cyq_chen_bin(trade_date, ts_code, bin_index)",
         [],
     )
     .map_err(|e| format!("创建cyq_chen_bin索引失败:{e}"))?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cyq_chen_bin_stock_date ON cyq_chen_bin(ts_code, adj_type, trade_date, bin_index)",
+        [],
+    )
+    .map_err(|e| format!("创建cyq_chen_bin股票日期索引失败:{e}"))?;
     Ok(())
 }
 
@@ -1143,7 +1168,7 @@ fn write_cyq_chen_incremental_batches_from_channel(
     strategy_hash: String,
 ) -> Result<(usize, usize), String> {
     let mut conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
-    drop_cyq_chen_db_indexes(&conn)?;
+    ensure_cyq_chen_db_indexes(&conn)?;
 
     let write_result = (|| -> Result<(usize, usize), String> {
         let tx = conn
@@ -1639,11 +1664,11 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use duckdb::{params, Connection};
+    use duckdb::{Connection, params};
 
     use super::{
-        maintain_cyq_chen_incremental_if_db_exists, rebuild_cyq_chen_all, CYQ_CHEN_BIN_TABLE,
-        CYQ_CHEN_SNAPSHOT_TABLE,
+        CYQ_CHEN_BIN_TABLE, CYQ_CHEN_SNAPSHOT_TABLE, maintain_cyq_chen_incremental_if_db_exists,
+        rebuild_cyq_chen_all,
     };
     use crate::data::{
         chip_change_rule_path, cyq_chen::ChenChipConfig, cyq_chen_db_path, source_db_path,

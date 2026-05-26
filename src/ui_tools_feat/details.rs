@@ -445,7 +445,9 @@ fn query_stock_detail_cyq(source_path: &str, ts_code: &str) -> Result<StockDetai
             main_total: None,
             retail_total: None,
             total_chips: row.get(4).map_err(|e| format!("读取筹码总量失败: {e}"))?,
-            total_profit_ratio: row.get(5).map_err(|e| format!("读取筹码获利比例失败: {e}"))?,
+            total_profit_ratio: row
+                .get(5)
+                .map_err(|e| format!("读取筹码获利比例失败: {e}"))?,
             total_trapped_ratio: None,
             chip_peak_price: None,
             percent_70_price_low: row
@@ -588,10 +590,18 @@ fn query_stock_detail_cyq_chen(
         snapshots.push(DetailCyqSnapshot {
             trade_date,
             close: close.unwrap_or(0.0),
-            min_price: row.get(2).map_err(|e| format!("读取新筹码最低价失败: {e}"))?,
-            max_price: row.get(3).map_err(|e| format!("读取新筹码最高价失败: {e}"))?,
-            main_total: row.get(4).map_err(|e| format!("读取新筹码主力总量失败: {e}"))?,
-            retail_total: row.get(5).map_err(|e| format!("读取新筹码散户总量失败: {e}"))?,
+            min_price: row
+                .get(2)
+                .map_err(|e| format!("读取新筹码最低价失败: {e}"))?,
+            max_price: row
+                .get(3)
+                .map_err(|e| format!("读取新筹码最高价失败: {e}"))?,
+            main_total: row
+                .get(4)
+                .map_err(|e| format!("读取新筹码主力总量失败: {e}"))?,
+            retail_total: row
+                .get(5)
+                .map_err(|e| format!("读取新筹码散户总量失败: {e}"))?,
             total_chips: row.get(6).map_err(|e| format!("读取新筹码总量失败: {e}"))?,
             total_profit_ratio: row
                 .get(7)

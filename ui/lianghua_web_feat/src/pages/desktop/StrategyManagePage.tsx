@@ -310,13 +310,13 @@ function buildChipStrategyEditorDraft(strategy: CyqChenStrategyDraft): ChipStrat
   }
 }
 
-function buildEmptyChipStrategyDraft(nextIndex = 1): ChipStrategyEditorDraft {
+function buildEmptyChipStrategyDraft(): ChipStrategyEditorDraft {
   return {
-    name: `筹码策略 ${nextIndex}`,
+    name: '',
     holder: 'main',
     direction: 'buy',
-    when: 'C > O',
-    bias: '1',
+    when: '',
+    bias: '',
   }
 }
 
@@ -794,7 +794,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
   function openCreateChipStrategyEditor() {
     setChipStrategyEditorMode('create')
     setChipStrategyEditingIndex(null)
-    setChipStrategyDraft(buildEmptyChipStrategyDraft(chipStrategies.length + 1))
+    setChipStrategyDraft(buildEmptyChipStrategyDraft())
     setChipStrategyError('')
     setChipStrategyNotice('')
   }

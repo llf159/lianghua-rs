@@ -1148,6 +1148,7 @@ fn merge_summary(total: &mut DownloadSummary, batch: DownloadSummary) {
     total.success_count += batch.success_count;
     total.failed_count += batch.failed_count;
     total.saved_rows += batch.saved_rows;
+    total.concept_performance_rows += batch.concept_performance_rows;
     total.recovered_stock_count += batch.recovered_stock_count;
     total.failed_items.extend(batch.failed_items);
 }
@@ -1691,7 +1692,8 @@ fn download_selected_stocks_with_context(
 
     checkpoint_stock_data(conn)?;
     if adj_type == AdjType::Qfq {
-        sync_gaini_bx_range(source_dir, start_date, end_date, progress_cb)?;
+        total.concept_performance_rows +=
+            sync_gaini_bx_range(source_dir, start_date, end_date, progress_cb)?;
     }
 
     emit_progress(
@@ -2324,7 +2326,7 @@ fn download_pending_all_market_after_basic_data(
         flush_stock_data_stage_table(tx)
     })?;
     checkpoint_stock_data(&conn)?;
-    sync_gaini_bx_range(
+    total.concept_performance_rows += sync_gaini_bx_range(
         source_dir,
         pending_trade_dates[0].as_str(),
         effective_trade_date,

@@ -7,12 +7,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     data::{
-        chip_change_rule_path, collect_runtime_keys_from_expr_programs, scoring_data::row_into_rt,
-        RowData, RuntimeKeyCollectOptions,
+        RowData, RuntimeKeyCollectOptions, chip_change_rule_path,
+        collect_runtime_keys_from_expr_programs, scoring_data::row_into_rt,
     },
     expr::{
         eval::{Runtime, Value},
-        parser::{lex_all, Expr, Parser, Stmt, Stmts},
+        parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
     utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
 };
@@ -1561,9 +1561,9 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
+        ChenChipBar, ChenChipConfig, ChipBucket, ChipChangeConfig, ChipDirection, ChipHolder, EPS,
         apply_buy_for_day, apply_sell_for_day, build_new_participant_buy_runtime,
-        buy_holder_shares, compute_chen_chip_snapshots_from_row_data, row_into_rt, ChenChipBar,
-        ChenChipConfig, ChipBucket, ChipChangeConfig, ChipDirection, ChipHolder, EPS,
+        buy_holder_shares, compute_chen_chip_snapshots_from_row_data, row_into_rt,
     };
     use crate::data::RowData;
 
@@ -1936,10 +1936,12 @@ bias = 1.0
                 || (snapshots[1].percent_90.price_high - snapshots[1].percent_70.price_high).abs()
                     <= EPS
         );
-        assert!(snapshots[1]
-            .bins
-            .iter()
-            .any(|bin| bin.price_high > 11.0 && bin.total_chip > 0.0));
+        assert!(
+            snapshots[1]
+                .bins
+                .iter()
+                .any(|bin| bin.price_high > 11.0 && bin.total_chip > 0.0)
+        );
     }
 
     #[test]

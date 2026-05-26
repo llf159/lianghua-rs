@@ -1,23 +1,23 @@
 use std::collections::{HashMap, HashSet};
 
-use duckdb::{params, Connection};
+use duckdb::{Connection, params};
 use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::{
     data::scoring_data::row_into_rt,
     data::{
-        collect_runtime_keys_from_expr_programs, expr_program_uses_runtime_key,
-        load_ths_concepts_list, result_db_path, DataReader, RuntimeKeyCollectOptions, ScoreRule,
+        DataReader, RuntimeKeyCollectOptions, ScoreRule, collect_runtime_keys_from_expr_programs,
+        expr_program_uses_runtime_key, load_ths_concepts_list, result_db_path,
     },
     expr::{
         eval::Value,
-        parser::{lex_all, Expr, Parser, Stmt, Stmts},
+        parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
     scoring::tools::{
-        calc_query_need_rows, calc_query_start_date, collect_used_cyq_chen_runtime_keys,
-        cyq_chen_runtime_key_names, inject_stock_extra_fields, load_st_list, load_total_share_map,
-        rt_max_len, CyqChenFieldInjector,
+        CyqChenFieldInjector, calc_query_need_rows, calc_query_start_date,
+        collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names, inject_stock_extra_fields,
+        load_st_list, load_total_share_map, rt_max_len,
     },
     utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
 };
