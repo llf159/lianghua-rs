@@ -210,6 +210,15 @@ type ChartMarkerOverlayPoint = {
   text?: string | null;
 };
 
+type ChartExtremaOverlayPoint = {
+  key: string;
+  kind: "high" | "low";
+  leftPercent: number;
+  topPercent: number;
+  side: "left" | "right";
+  valueText: string;
+};
+
 type CyqSummaryItem = {
   key: string;
   label: string;
@@ -1281,6 +1290,7 @@ function buildDetailCyqSummaryItems(
 function renderCyqSummaryPanel(
   snapshot: DetailCyqSnapshot | null,
   holderView: DetailCyqHolderView,
+  isIndicatorSlot = false,
 ) {
   const items = buildDetailCyqSummaryItems(snapshot, holderView);
   if (items.length === 0) {
@@ -1292,6 +1302,7 @@ function renderCyqSummaryPanel(
       className={[
         "details-chart-cyq-summary",
         "is-overlay",
+        isIndicatorSlot ? "is-indicator-slot" : "",
         items.length <= 2 ? "is-sparse" : "",
       ]
         .filter(Boolean)
@@ -2471,6 +2482,79 @@ function renderChartMarkerOverlayPoint(point: ChartMarkerOverlayPoint) {
   );
 }
 
+function buildChartExtremaOverlayPoints(
+  items: DetailKlineRow[],
+  xAt: (itemIndex: number) => number,
+  yAt: (value: number) => number,
+): ChartExtremaOverlayPoint[] {
+  let highPoint: { itemIndex: number; value: number; tradeDate: string } | null =
+    null;
+  let lowPoint: { itemIndex: number; value: number; tradeDate: string } | null =
+    null;
+
+  items.forEach((row, itemIndex) => {
+    const high = getNumericField(row, "high");
+    const low = getNumericField(row, "low");
+
+    if (high !== null && (highPoint === null || high > highPoint.value)) {
+      highPoint = {
+        itemIndex,
+        value: high,
+        tradeDate: row.trade_date,
+      };
+    }
+
+    if (low !== null && (lowPoint === null || low < lowPoint.value)) {
+      lowPoint = {
+        itemIndex,
+        value: low,
+        tradeDate: row.trade_date,
+      };
+    }
+  });
+
+  return [
+    highPoint ? { kind: "high" as const, point: highPoint } : null,
+    lowPoint ? { kind: "low" as const, point: lowPoint } : null,
+  ].flatMap((item) => {
+    if (!item) {
+      return [];
+    }
+
+    const x = xAt(item.point.itemIndex);
+    const y = yAt(item.point.value);
+    return [
+      {
+        key: `${item.kind}-${item.point.tradeDate}`,
+        kind: item.kind,
+        leftPercent: (x / CHART_VIEWBOX_WIDTH) * 100,
+        topPercent: (y / CHART_VIEWBOX_HEIGHT) * 100,
+        side: x < CHART_VIEWBOX_WIDTH / 2 ? "right" : "left",
+        valueText: formatNumber(item.point.value),
+      },
+    ];
+  });
+}
+
+function renderChartExtremaOverlayPoint(point: ChartExtremaOverlayPoint) {
+  return (
+    <span
+      className={[
+        "details-chart-extrema",
+        `details-chart-extrema-${point.kind}`,
+        `details-chart-extrema-${point.side}`,
+      ].join(" ")}
+      key={point.key}
+      style={{
+        left: `${point.leftPercent}%`,
+        top: `${point.topPercent}%`,
+      }}
+    >
+      <span>{point.valueText}</span>
+    </span>
+  );
+}
+
 function renderChartPanel(
   panel: DetailKlinePanel,
   items: DetailKlineRow[],
@@ -2619,6 +2703,7 @@ function renderChartPanel(
   let svgContent: ReactNode = null;
   let cyqSvgContent: ReactNode = null;
   let markerOverlayPoints: ChartMarkerOverlayPoint[] = [];
+  let extremaOverlayPoints: ChartExtremaOverlayPoint[] = [];
 
   if (kind === "candles") {
     const values = items.flatMap((row) => {
@@ -2872,6 +2957,9 @@ function renderChartPanel(
       }
 
       markerOverlayPoints = buildChartMarkerOverlayPoints(panel, items, xAt, yAt);
+      extremaOverlayPoints = isInteractivePricePanel(panel)
+        ? buildChartExtremaOverlayPoints(items, xAt, yAt)
+        : [];
       svgContent = [...candleNodes, ...overlayNodes, cyqSvgContent];
     }
   } else if (kind === "line") {
@@ -3261,6 +3349,12 @@ function renderChartPanel(
           {markerOverlayPoints.length > 0 ? (
             <div className="details-chart-marker-layer">
               {markerOverlayPoints.map(renderChartMarkerOverlayPoint)}
+            </div>
+          ) : null}
+
+          {extremaOverlayPoints.length > 0 ? (
+            <div className="details-chart-extrema-layer">
+              {extremaOverlayPoints.map(renderChartExtremaOverlayPoint)}
             </div>
           ) : null}
 
@@ -4958,8 +5052,13 @@ export default function DetailsPage({
     CHART_VIEWBOX_WIDTH - CHART_MARGIN.right - cyqSummaryPanelWidth;
   const cyqSummaryOverlayStyle = {
     "--details-cyq-summary-top": `${chartMainPanelHeight + CHART_PANEL_GAP_PX}px`,
-    "--details-cyq-summary-left": `${(cyqSummaryPanelLeft / CHART_VIEWBOX_WIDTH) * 100}%`,
-    "--details-cyq-summary-right": `${(CHART_MARGIN.right / CHART_VIEWBOX_WIDTH) * 100}%`,
+    "--details-cyq-summary-left": shouldUseCyqSummaryIndicatorSlot
+      ? "0px"
+      : `${(cyqSummaryPanelLeft / CHART_VIEWBOX_WIDTH) * 100}%`,
+    "--details-cyq-summary-right": shouldUseCyqSummaryIndicatorSlot
+      ? "0px"
+      : `${(CHART_MARGIN.right / CHART_VIEWBOX_WIDTH) * 100}%`,
+    "--details-cyq-summary-height": `${cyqSummaryIndicatorSlotHeight.toFixed(2)}px`,
   } as CSSProperties;
   const watermarkName =
     kline?.watermark_name ?? detailData?.overview?.name ?? "个股详情";
@@ -7211,7 +7310,12 @@ export default function DetailsPage({
           )}
           {shouldShowCyqSummary ? (
             <div
-              className="details-chart-cyq-summary-overlay"
+              className={[
+                "details-chart-cyq-summary-overlay",
+                shouldUseCyqSummaryIndicatorSlot ? "is-indicator-slot" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
               style={cyqSummaryOverlayStyle}
               onPointerDown={stopEventPropagation}
               onPointerMove={stopEventPropagation}
@@ -7219,7 +7323,11 @@ export default function DetailsPage({
               onPointerCancel={stopEventPropagation}
               onClick={stopEventPropagation}
             >
-              {renderCyqSummaryPanel(selectedCyqSnapshot, detailCyqHolderView)}
+              {renderCyqSummaryPanel(
+                selectedCyqSnapshot,
+                detailCyqHolderView,
+                shouldUseCyqSummaryIndicatorSlot,
+              )}
             </div>
           ) : null}
         </div>

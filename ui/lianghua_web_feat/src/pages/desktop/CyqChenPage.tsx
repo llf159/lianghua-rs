@@ -21,6 +21,7 @@ import type { DetailChartMarker, DetailChartSeries, DetailChartTooltip, DetailKl
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import { listStockLookupRows, type StockLookupRow } from '../../apis/reader'
 import { readStoredChartMainWidthRatio } from '../../shared/chartSettings'
+import DetailsLink from '../../shared/DetailsLink'
 import { sanitizeCodeInput, stdTsCode } from '../../shared/stockCode'
 import { buildStockLookupCandidates, findExactStockLookupMatch, getLookupDigits } from '../../shared/stockLookup'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
@@ -137,6 +138,14 @@ type ChartMarkerOverlayPoint = {
   text?: string | null
 }
 
+type CyqChenSummaryItem = {
+  key: string
+  label: string
+  value: string
+  subValue?: string
+  priority: 'primary' | 'secondary'
+}
+
 const CYQ_CHEN_DRAFT_STORAGE_KEY = 'lh_cyq_chen_test_draft_v1'
 const MAX_STOCK_NAME_CANDIDATES = 12
 
@@ -165,6 +174,7 @@ const CHART_WHEEL_ZOOM_FACTOR = 0.0025
 const CHART_TOUCH_FOCUS_HIT_SLOP = 24
 const CHART_CYQ_PANEL_WIDTH_RATIO = 0.22
 const CHART_CYQ_PANEL_GAP = 12
+const CHART_PANEL_GAP_PX = 8
 const CANDLE_UP_COLOR = '#d9485f'
 const CANDLE_DOWN_COLOR = '#178f68'
 const CANDLE_FLAT_COLOR = '#536273'
@@ -1008,8 +1018,28 @@ function CyqChenProjectChart({
     : '--'
   const chartMainPanelHeight = chartLayoutWidth * chartMainWidthRatio
   const chartIndicatorPanelHeight = Math.max(Math.min(chartLayoutWidth * 0.22, 180), 118)
-  const chartShellHeight = chartMainPanelHeight + indicatorPanels.length * chartIndicatorPanelHeight
+  const shouldShowCyqSummary = reserveCyqPanelWidth && snapshot !== null
+  const shouldUseCyqSummaryIndicatorSlot = shouldShowCyqSummary && indicatorPanels.length === 0
+  const cyqSummaryIndicatorSlotHeight = shouldUseCyqSummaryIndicatorSlot ? chartIndicatorPanelHeight : 0
+  const chartPanelGapTotal =
+    Math.max(0, indicatorPanels.length + (shouldUseCyqSummaryIndicatorSlot ? 1 : 0)) *
+    CHART_PANEL_GAP_PX
+  const chartShellHeight =
+    chartMainPanelHeight +
+    indicatorPanels.length * chartIndicatorPanelHeight +
+    cyqSummaryIndicatorSlotHeight +
+    chartPanelGapTotal
   const priceHeaderRuntimeRow = focusedRow ?? visibleItems[visibleItems.length - 1] ?? null
+  const cyqSummaryOverlayStyle = {
+    '--details-cyq-summary-top': `${chartMainPanelHeight + CHART_PANEL_GAP_PX}px`,
+    '--details-cyq-summary-left': shouldUseCyqSummaryIndicatorSlot
+      ? '0px'
+      : `${chipPanelLeft / CHART_VIEWBOX_WIDTH * 100}%`,
+    '--details-cyq-summary-right': shouldUseCyqSummaryIndicatorSlot
+      ? '0px'
+      : `${CHART_MARGIN.right / CHART_VIEWBOX_WIDTH * 100}%`,
+    '--details-cyq-summary-height': `${cyqSummaryIndicatorSlotHeight.toFixed(2)}px`,
+  } as CSSProperties
 
   function setChartZoomAnchored(nextCount: number, anchorAbsoluteIndex: number, anchorRatio: number) {
     if (totalItems === 0) {
@@ -1783,7 +1813,8 @@ function CyqChenProjectChart({
           gridTemplateRows: [
             `${chartMainPanelHeight.toFixed(2)}px`,
             ...indicatorPanels.map(() => `${chartIndicatorPanelHeight.toFixed(2)}px`),
-          ].join(' '),
+            shouldUseCyqSummaryIndicatorSlot ? `${cyqSummaryIndicatorSlotHeight.toFixed(2)}px` : '',
+          ].filter(Boolean).join(' '),
         }}
       >
         <section className="details-chart-panel">
@@ -2176,6 +2207,22 @@ function CyqChenProjectChart({
           </div>
         </section>
         {indicatorPanels.map(renderIndicatorPanel)}
+        {shouldShowCyqSummary ? (
+          <div
+            className={[
+              'details-chart-cyq-summary-overlay',
+              shouldUseCyqSummaryIndicatorSlot ? 'is-indicator-slot' : '',
+            ].filter(Boolean).join(' ')}
+            style={cyqSummaryOverlayStyle}
+            onPointerDown={(event) => event.stopPropagation()}
+            onPointerMove={(event) => event.stopPropagation()}
+            onPointerUp={(event) => event.stopPropagation()}
+            onPointerCancel={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+          >
+            {renderCyqChenSummaryPanel(snapshot, chipPeakMode, shouldUseCyqSummaryIndicatorSlot)}
+          </div>
+        ) : null}
       </div>
     </>
   )
@@ -2207,6 +2254,134 @@ function snapshotLabel(snapshot: CyqChenSnapshot | null) {
     return '无快照'
   }
   return `${snapshot.tradeDate ?? '--'} · 获利 ${formatRatioPercent(snapshot.totalProfitRatio)} · 主 ${formatNumber(snapshot.mainTotal)} / 散 ${formatNumber(snapshot.retailTotal)}`
+}
+
+function buildCyqChenSummaryItems(
+  snapshot: CyqChenSnapshot | null,
+  chipPeakMode: ChipPeakMode,
+): CyqChenSummaryItem[] {
+  if (!snapshot) {
+    return []
+  }
+
+  const mainPeakBin = findChipPeak(snapshot, 'main')
+  const retailPeakBin = findChipPeak(snapshot, 'retail')
+  const totalPeakBin = findChipPeak(snapshot, 'total')
+  const selectedPeakBin = findChipPeak(snapshot, chipPeakMode)
+
+  return [
+    {
+      key: 'main',
+      label: '主力筹码',
+      value: formatNumber(snapshot.mainTotal),
+      priority: 'primary',
+    },
+    {
+      key: 'retail',
+      label: '散户筹码',
+      value: formatNumber(snapshot.retailTotal),
+      priority: 'primary',
+    },
+    {
+      key: 'total',
+      label: '总筹码',
+      value: formatNumber(snapshot.totalChips),
+      priority: 'primary',
+    },
+    {
+      key: 'close',
+      label: '收盘价',
+      value: formatNumber(snapshot.close),
+      priority: 'primary',
+    },
+    {
+      key: 'profit',
+      label: '获利比例',
+      value: formatRatioPercent(snapshot.totalProfitRatio),
+      priority: 'primary',
+    },
+    {
+      key: 'trapped',
+      label: '套牢比例',
+      value: formatRatioPercent(snapshot.totalTrappedRatio),
+      priority: 'primary',
+    },
+    {
+      key: 'peak',
+      label: '总筹码峰',
+      value: formatNumber(snapshot.chipPeakPrice),
+      subValue: totalPeakBin ? formatNumber(chipValueByMode(totalPeakBin, 'total'), 4) : undefined,
+      priority: 'primary',
+    },
+    {
+      key: 'main-peak',
+      label: '主力筹码峰',
+      value: mainPeakBin ? formatNumber(mainPeakBin.price) : '--',
+      subValue: mainPeakBin ? formatNumber(mainPeakBin.mainChip, 4) : undefined,
+      priority: 'secondary',
+    },
+    {
+      key: 'retail-peak',
+      label: '散户筹码峰',
+      value: retailPeakBin ? formatNumber(retailPeakBin.price) : '--',
+      subValue: retailPeakBin ? formatNumber(retailPeakBin.retailChip, 4) : undefined,
+      priority: 'secondary',
+    },
+    {
+      key: 'selected-peak',
+      label: `${chipModeLabel(chipPeakMode)}显示峰`,
+      value: selectedPeakBin ? formatNumber(selectedPeakBin.price) : '--',
+      subValue: selectedPeakBin ? formatNumber(chipValueByMode(selectedPeakBin, chipPeakMode), 4) : undefined,
+      priority: 'secondary',
+    },
+    {
+      key: 'p70',
+      label: '70%区间',
+      value: `${formatNumber(snapshot.percent70.priceLow)} - ${formatNumber(snapshot.percent70.priceHigh)}`,
+      subValue: `集中度 ${formatRatioPercent(snapshot.percent70.concentration)}`,
+      priority: 'secondary',
+    },
+    {
+      key: 'p90',
+      label: '90%区间',
+      value: `${formatNumber(snapshot.percent90.priceLow)} - ${formatNumber(snapshot.percent90.priceHigh)}`,
+      subValue: `集中度 ${formatRatioPercent(snapshot.percent90.concentration)}`,
+      priority: 'secondary',
+    },
+  ]
+}
+
+function renderCyqChenSummaryPanel(
+  snapshot: CyqChenSnapshot | null,
+  chipPeakMode: ChipPeakMode,
+  isIndicatorSlot = false,
+) {
+  const items = buildCyqChenSummaryItems(snapshot, chipPeakMode)
+  if (items.length === 0) {
+    return null
+  }
+
+  return (
+    <div
+      className={[
+        'details-chart-cyq-summary',
+        'is-overlay',
+        isIndicatorSlot ? 'is-indicator-slot' : '',
+        items.length <= 2 ? 'is-sparse' : '',
+      ].filter(Boolean).join(' ')}
+    >
+      {items.map((item) => (
+        <div
+          className={['details-chart-cyq-summary-item', item.priority === 'secondary' ? 'is-secondary' : ''].filter(Boolean).join(' ')}
+          key={item.key}
+        >
+          <span>{item.label}</span>
+          <strong>{item.value}</strong>
+          {item.subValue ? <small>{item.subValue}</small> : null}
+        </div>
+      ))}
+    </div>
+  )
 }
 
 export default function CyqChenPage() {
@@ -2256,12 +2431,6 @@ export default function CyqChenPage() {
     stockLookupFocused &&
     tsCodeInput.trim() !== '' &&
     stockNameCandidates.length > 0
-  const mainPeakBin = useMemo(() => findChipPeak(selectedSnapshot, 'main'), [selectedSnapshot])
-  const retailPeakBin = useMemo(() => findChipPeak(selectedSnapshot, 'retail'), [selectedSnapshot])
-  const selectedPeakBin = useMemo(
-    () => findChipPeak(selectedSnapshot, chipPeakMode),
-    [selectedSnapshot, chipPeakMode],
-  )
   const resultStockLookupMatch = useMemo(() => {
     if (!result) {
       return null
@@ -2550,7 +2719,20 @@ export default function CyqChenPage() {
       <section className="cyq-chen-panel cyq-chen-chart-panel">
         <div className="cyq-chen-result-head">
           <div>
-            <h3>{result ? result.resolvedTsCode : '未计算'}</h3>
+            <div className="cyq-chen-result-title-row">
+              <h3>{result ? result.resolvedTsCode : '未计算'}</h3>
+              {result ? (
+                <DetailsLink
+                  className="cyq-chen-details-link"
+                  tsCode={result.resolvedTsCode}
+                  tradeDate={(selectedSnapshot?.tradeDate ?? selectedTradeDate) || result.endDate}
+                  sourcePath={sourcePath.trim() || undefined}
+                  title={`查看 ${watermarkName || result.resolvedTsCode} 详情`}
+                >
+                  查看详情
+                </DetailsLink>
+              ) : null}
+            </div>
             <p>
               {result
                 ? `${result.startDate} 至 ${result.endDate} · 输出起点 ${result.outputStartDate ?? '--'}`
@@ -2572,70 +2754,6 @@ export default function CyqChenPage() {
               ))}
             </select>
           </label>
-        </div>
-
-        <div className="cyq-chen-summary-grid">
-          <div>
-            <span>主力筹码</span>
-            <strong>{formatNumber(selectedSnapshot?.mainTotal)}</strong>
-          </div>
-          <div>
-            <span>散户筹码</span>
-            <strong>{formatNumber(selectedSnapshot?.retailTotal)}</strong>
-          </div>
-          <div>
-            <span>总筹码</span>
-            <strong>{formatNumber(selectedSnapshot?.totalChips)}</strong>
-          </div>
-          <div>
-            <span>收盘价</span>
-            <strong>{formatNumber(selectedSnapshot?.close)}</strong>
-          </div>
-          <div>
-            <span>获利比例</span>
-            <strong>{formatRatioPercent(selectedSnapshot?.totalProfitRatio)}</strong>
-          </div>
-          <div>
-            <span>套牢比例</span>
-            <strong>{formatRatioPercent(selectedSnapshot?.totalTrappedRatio)}</strong>
-          </div>
-          <div>
-            <span>总筹码峰</span>
-            <strong>{formatNumber(selectedSnapshot?.chipPeakPrice)}</strong>
-          </div>
-          <div>
-            <span>主力筹码峰</span>
-            <strong>{mainPeakBin ? formatNumber(mainPeakBin.price) : '--'}</strong>
-            <small>{mainPeakBin ? formatNumber(mainPeakBin.mainChip, 4) : '--'}</small>
-          </div>
-          <div>
-            <span>散户筹码峰</span>
-            <strong>{retailPeakBin ? formatNumber(retailPeakBin.price) : '--'}</strong>
-            <small>{retailPeakBin ? formatNumber(retailPeakBin.retailChip, 4) : '--'}</small>
-          </div>
-          <div>
-            <span>{chipModeLabel(chipPeakMode)}显示峰</span>
-            <strong>{selectedPeakBin ? formatNumber(selectedPeakBin.price) : '--'}</strong>
-            <small>{selectedPeakBin ? formatNumber(chipValueByMode(selectedPeakBin, chipPeakMode), 4) : '--'}</small>
-          </div>
-          <div>
-            <span>70%区间</span>
-            <strong>
-              {selectedSnapshot
-                ? `${formatNumber(selectedSnapshot.percent70.priceLow)} - ${formatNumber(selectedSnapshot.percent70.priceHigh)}`
-                : '--'}
-            </strong>
-            <small>集中度 {formatRatioPercent(selectedSnapshot?.percent70.concentration)}</small>
-          </div>
-          <div>
-            <span>90%区间</span>
-            <strong>
-              {selectedSnapshot
-                ? `${formatNumber(selectedSnapshot.percent90.priceLow)} - ${formatNumber(selectedSnapshot.percent90.priceHigh)}`
-                : '--'}
-            </strong>
-            <small>集中度 {formatRatioPercent(selectedSnapshot?.percent90.concentration)}</small>
-          </div>
         </div>
 
         <div className="cyq-chen-project-chart">

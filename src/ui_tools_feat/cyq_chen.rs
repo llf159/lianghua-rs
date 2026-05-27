@@ -13,6 +13,7 @@ use crate::{
         cyq_chen::{
             ChenChipConfig, ChenChipSnapshot, ChipChangeConfig, ChipChangeStrategy,
             collect_chen_chip_runtime_keys, compute_chen_chip_snapshots_with_compiled_config,
+            round_chen_chip_snapshot,
         },
         load_trade_date_list, source_db_path,
     },
@@ -778,27 +779,31 @@ pub fn run_cyq_chen_single_stock_test(
     let kline_payload = build_detail_kline_payload(source_path, &ts_code, &start_date, &end_date)?;
     let output_start_date =
         resolve_output_start_date(&row_data, &start_date, &end_date, config.warmup_days);
-    let snapshots = if let Some(output_start_date) = output_start_date.as_deref() {
-        compute_chen_chip_snapshots_with_compiled_config(
-            &row_data,
-            output_start_date,
-            &compiled_chip_config,
-            config,
-        )?
-        .into_iter()
-        .filter(|snapshot| {
-            snapshot
-                .trade_date
-                .as_deref()
-                .map(|trade_date| {
-                    trade_date >= start_date.as_str() && trade_date <= end_date.as_str()
-                })
-                .unwrap_or(false)
-        })
-        .collect()
-    } else {
-        Vec::new()
-    };
+    let mut snapshots: Vec<ChenChipSnapshot> =
+        if let Some(output_start_date) = output_start_date.as_deref() {
+            compute_chen_chip_snapshots_with_compiled_config(
+                &row_data,
+                output_start_date,
+                &compiled_chip_config,
+                config,
+            )?
+            .into_iter()
+            .filter(|snapshot| {
+                snapshot
+                    .trade_date
+                    .as_deref()
+                    .map(|trade_date| {
+                        trade_date >= start_date.as_str() && trade_date <= end_date.as_str()
+                    })
+                    .unwrap_or(false)
+            })
+            .collect()
+        } else {
+            Vec::new()
+        };
+    for snapshot in &mut snapshots {
+        round_chen_chip_snapshot(snapshot);
+    }
 
     Ok(CyqChenSingleStockData {
         resolved_ts_code: ts_code,

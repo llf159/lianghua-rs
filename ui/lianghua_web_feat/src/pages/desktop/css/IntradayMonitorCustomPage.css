@@ -258,6 +258,27 @@
   color: #2a3550 !important;
 }
 
+.intraday-custom-cell-value {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.intraday-custom-delta {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.intraday-custom-delta-up {
+  color: #d94343;
+}
+
+.intraday-custom-delta-down {
+  color: #1b8f5a;
+}
+
 .intraday-custom-hit-badge {
   display: inline-block;
   max-width: 100%;

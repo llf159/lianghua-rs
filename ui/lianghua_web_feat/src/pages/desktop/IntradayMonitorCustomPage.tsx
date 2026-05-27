@@ -25,6 +25,18 @@ type PersistedCustomMonitorState = {
   refreshedAt: string
 }
 
+type DeltaColumn =
+  | 'realtime_price'
+  | 'realtime_change_pct'
+  | 'realtime_vol_ratio'
+type RowDeltaMap = Record<string, Partial<Record<DeltaColumn, number>>>
+
+const DELTA_COLUMNS = new Set<DeltaColumn>([
+  'realtime_price',
+  'realtime_change_pct',
+  'realtime_vol_ratio',
+])
+
 function normalizeTemplate(input: unknown): IntradayMonitorTemplate | null {
   if (!input || typeof input !== 'object') return null
   const item = input as Record<string, unknown>
@@ -59,6 +71,15 @@ function formatPercent(value?: number | null) {
   return `${value.toFixed(2)}%`
 }
 
+function formatDeltaValue(key: DeltaColumn, value?: number) {
+  if (value === undefined || !Number.isFinite(value)) return null
+  const sign = value > 0 ? '+' : ''
+  if (key === 'realtime_change_pct') {
+    return `${sign}${value.toFixed(2)}%`
+  }
+  return `${sign}${value.toFixed(2)}`
+}
+
 function getPercentClassName(value?: number | null) {
   if (
     value === null ||
@@ -83,6 +104,50 @@ function isTemplateHit(row: IntradayMonitorRow) {
     typeof row.template_tag_text === 'string' &&
     row.template_tag_text.includes('命中')
   )
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function getRowKey(row: IntradayMonitorRow) {
+  return row.ts_code
+}
+
+function getNumericCellValue(row: IntradayMonitorRow, key: DeltaColumn) {
+  const value = row[key]
+  return isFiniteNumber(value) ? value : null
+}
+
+function buildRowDeltaMap(
+  previousRows: IntradayMonitorRow[],
+  nextRows: IntradayMonitorRow[],
+) {
+  const previousMap = new Map(previousRows.map((row) => [getRowKey(row), row]))
+  const deltas: RowDeltaMap = {}
+
+  for (const row of nextRows) {
+    const previous = previousMap.get(getRowKey(row))
+    if (!previous) continue
+
+    const rowDeltas: Partial<Record<DeltaColumn, number>> = {}
+    for (const key of DELTA_COLUMNS) {
+      const previousValue = getNumericCellValue(previous, key)
+      const nextValue = getNumericCellValue(row, key)
+      if (previousValue === null || nextValue === null) continue
+
+      const delta = nextValue - previousValue
+      if (Math.abs(delta) > Number.EPSILON) {
+        rowDeltas[key] = delta
+      }
+    }
+
+    if (Object.keys(rowDeltas).length > 0) {
+      deltas[getRowKey(row)] = rowDeltas
+    }
+  }
+
+  return deltas
 }
 
 function waitForNextPaint() {
@@ -130,6 +195,7 @@ export default function IntradayMonitorCustomPage() {
   const [sourcePath, setSourcePath] = useState('')
   const [codeInput, setCodeInput] = useState(() => persisted?.codeInput ?? '')
   const [rows, setRows] = useState<IntradayMonitorRow[]>(() => persisted?.rows ?? [])
+  const [rowDeltas, setRowDeltas] = useState<RowDeltaMap>({})
   const [refreshedAt, setRefreshedAt] = useState(() => persisted?.refreshedAt ?? '')
   const [selectedTemplateId, setSelectedTemplateId] = useState(
     () => persisted?.selectedTemplateId ?? '',
@@ -225,6 +291,7 @@ export default function IntradayMonitorCustomPage() {
     const parts = splitCodes(codeInput)
     if (parts.length === 0) {
       setRows([])
+      setRowDeltas({})
       setNotice('名单为空，已清空当前监控列表。')
       setError('')
       return
@@ -268,6 +335,7 @@ export default function IntradayMonitorCustomPage() {
     } satisfies IntradayMonitorRow))
 
     setRows(nextRows)
+    setRowDeltas({})
     setRefreshedAt('')
     setError('')
     if (invalidInputs.length > 0) {
@@ -305,7 +373,9 @@ export default function IntradayMonitorCustomPage() {
         templates,
         rankModeConfigs,
       })
-      setRows(result.rows ?? [])
+      const nextRows = result.rows ?? []
+      setRowDeltas(buildRowDeltaMap(rows, nextRows))
+      setRows(nextRows)
       setRefreshedAt(result.refreshed_at ?? '')
       setError(result.warning_message ?? result.warningMessage ?? '')
       setNotice(`刷新完成，共 ${result.rows?.length ?? 0} 只。`)
@@ -489,44 +559,110 @@ export default function IntradayMonitorCustomPage() {
                     </td>
                   </tr>
                 ) : (
-                  displayedRows.map((row) => (
-                    <tr key={row.ts_code}>
-                      <td>{formatNumber(row.rank, 0)}</td>
-                      <td>{row.ts_code}</td>
-                      <td>
-                        <DetailsLink
-                          className="intraday-custom-stock-link"
-                          tsCode={row.ts_code}
-                          tradeDate={typeof row.trade_date === 'string' ? row.trade_date : null}
-                          sourcePath={sourcePathTrimmed || undefined}
-                          title={`查看 ${row.name || row.ts_code} 详情`}
-                          navigationItems={navigationItems}
-                        >
-                          {row.name || row.ts_code}
-                        </DetailsLink>
-                      </td>
-                      <td>{formatNumber(row.realtime_price)}</td>
-                      <td className={getPercentClassName(row.realtime_change_pct)}>
-                        {formatPercent(row.realtime_change_pct)}
-                      </td>
-                      <td>
-                        <span
-                          className={[
-                            'intraday-custom-hit-badge',
-                            getTagToneClassName(row.template_tag_tone),
-                          ].join(' ')}
-                        >
-                          {row.template_tag_text && row.template_tag_text.trim() !== ''
-                            ? row.template_tag_text
-                            : '--'}
-                        </span>
-                      </td>
-                      <td>{formatNumber(row.realtime_vol_ratio)}</td>
-                      <td>{row.board || '--'}</td>
-                      <td>{formatNumber(row.total_mv_yi)}</td>
-                      <td title={row.concept || ''}>{row.concept || '--'}</td>
-                    </tr>
-                  ))
+                  displayedRows.map((row) => {
+                    const priceDelta = rowDeltas[getRowKey(row)]?.realtime_price
+                    const priceDeltaText = formatDeltaValue(
+                      'realtime_price',
+                      priceDelta,
+                    )
+                    const pctDelta =
+                      rowDeltas[getRowKey(row)]?.realtime_change_pct
+                    const pctDeltaText = formatDeltaValue(
+                      'realtime_change_pct',
+                      pctDelta,
+                    )
+                    const volRatioDelta =
+                      rowDeltas[getRowKey(row)]?.realtime_vol_ratio
+                    const volRatioDeltaText = formatDeltaValue(
+                      'realtime_vol_ratio',
+                      volRatioDelta,
+                    )
+
+                    return (
+                      <tr key={row.ts_code}>
+                        <td>{formatNumber(row.rank, 0)}</td>
+                        <td>{row.ts_code}</td>
+                        <td>
+                          <DetailsLink
+                            className="intraday-custom-stock-link"
+                            tsCode={row.ts_code}
+                            tradeDate={typeof row.trade_date === 'string' ? row.trade_date : null}
+                            sourcePath={sourcePathTrimmed || undefined}
+                            title={`查看 ${row.name || row.ts_code} 详情`}
+                            navigationItems={navigationItems}
+                          >
+                            {row.name || row.ts_code}
+                          </DetailsLink>
+                        </td>
+                        <td>
+                          <span className="intraday-custom-cell-value">
+                            <span>{formatNumber(row.realtime_price)}</span>
+                            {priceDeltaText ? (
+                              <span
+                                className={[
+                                  'intraday-custom-delta',
+                                  (priceDelta ?? 0) > 0
+                                    ? 'intraday-custom-delta-up'
+                                    : 'intraday-custom-delta-down',
+                                ].join(' ')}
+                              >
+                                {priceDeltaText}
+                              </span>
+                            ) : null}
+                          </span>
+                        </td>
+                        <td className={getPercentClassName(row.realtime_change_pct)}>
+                          <span className="intraday-custom-cell-value">
+                            <span>{formatPercent(row.realtime_change_pct)}</span>
+                            {pctDeltaText ? (
+                              <span
+                                className={[
+                                  'intraday-custom-delta',
+                                  (pctDelta ?? 0) > 0
+                                    ? 'intraday-custom-delta-up'
+                                    : 'intraday-custom-delta-down',
+                                ].join(' ')}
+                              >
+                                {pctDeltaText}
+                              </span>
+                            ) : null}
+                          </span>
+                        </td>
+                        <td>
+                          <span
+                            className={[
+                              'intraday-custom-hit-badge',
+                              getTagToneClassName(row.template_tag_tone),
+                            ].join(' ')}
+                          >
+                            {row.template_tag_text && row.template_tag_text.trim() !== ''
+                              ? row.template_tag_text
+                              : '--'}
+                          </span>
+                        </td>
+                        <td>
+                          <span className="intraday-custom-cell-value">
+                            <span>{formatNumber(row.realtime_vol_ratio)}</span>
+                            {volRatioDeltaText ? (
+                              <span
+                                className={[
+                                  'intraday-custom-delta',
+                                  (volRatioDelta ?? 0) > 0
+                                    ? 'intraday-custom-delta-up'
+                                    : 'intraday-custom-delta-down',
+                                ].join(' ')}
+                              >
+                                {volRatioDeltaText}
+                              </span>
+                            ) : null}
+                          </span>
+                        </td>
+                        <td>{row.board || '--'}</td>
+                        <td>{formatNumber(row.total_mv_yi)}</td>
+                        <td title={row.concept || ''}>{row.concept || '--'}</td>
+                      </tr>
+                    )
+                  })
                 )}
               </tbody>
             </table>

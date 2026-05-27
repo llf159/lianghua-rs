@@ -44,6 +44,32 @@
   font-size: 13px;
 }
 
+.cyq-chen-result-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.cyq-chen-details-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  border: 1px solid #c9d4e5;
+  border-radius: 7px;
+  padding: 5px 9px;
+  background: #ffffff;
+  color: #24344d;
+  font-size: 13px;
+  line-height: 1;
+  text-decoration: none;
+}
+
+.cyq-chen-details-link:hover {
+  border-color: #7da2d6;
+  background: #f5f8fc;
+}
+
 .cyq-chen-primary-btn,
 .cyq-chen-secondary-btn,
 .cyq-chen-history-btn,

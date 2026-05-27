@@ -133,6 +133,53 @@ pub struct ChenChipSnapshot {
     pub bins: Vec<ChenChipBin>,
 }
 
+pub fn round_chen_chip_value(value: f64) -> f64 {
+    if !value.is_finite() {
+        return value;
+    }
+
+    let rounded = format!("{value:.4}").parse::<f64>().unwrap_or(value);
+    if rounded == 0.0 { 0.0 } else { rounded }
+}
+
+pub fn round_chen_chip_snapshot(snapshot: &mut ChenChipSnapshot) {
+    snapshot.close = round_chen_chip_value(snapshot.close);
+    snapshot.min_price = round_chen_chip_value(snapshot.min_price);
+    snapshot.max_price = round_chen_chip_value(snapshot.max_price);
+    snapshot.main_total = round_chen_chip_value(snapshot.main_total);
+    snapshot.retail_total = round_chen_chip_value(snapshot.retail_total);
+    snapshot.total_chips = round_chen_chip_value(snapshot.total_chips);
+    let original_ratio_sum = snapshot.total_profit_ratio + snapshot.total_trapped_ratio;
+    snapshot.total_profit_ratio = round_chen_chip_value(snapshot.total_profit_ratio);
+    snapshot.total_trapped_ratio = if (original_ratio_sum - 1.0).abs() <= 1e-9 {
+        round_chen_chip_value(1.0 - snapshot.total_profit_ratio)
+    } else {
+        round_chen_chip_value(snapshot.total_trapped_ratio)
+    };
+    snapshot.chip_peak_price = round_chen_chip_value(snapshot.chip_peak_price);
+    round_chen_chip_percent_range(&mut snapshot.percent_70);
+    round_chen_chip_percent_range(&mut snapshot.percent_90);
+    for bin in &mut snapshot.bins {
+        round_chen_chip_bin(bin);
+    }
+}
+
+fn round_chen_chip_percent_range(range: &mut ChenChipPercentRange) {
+    range.percent = round_chen_chip_value(range.percent);
+    range.price_low = round_chen_chip_value(range.price_low);
+    range.price_high = round_chen_chip_value(range.price_high);
+    range.concentration = round_chen_chip_value(range.concentration);
+}
+
+fn round_chen_chip_bin(bin: &mut ChenChipBin) {
+    bin.price = round_chen_chip_value(bin.price);
+    bin.price_low = round_chen_chip_value(bin.price_low);
+    bin.price_high = round_chen_chip_value(bin.price_high);
+    bin.main_chip = round_chen_chip_value(bin.main_chip);
+    bin.retail_chip = round_chen_chip_value(bin.retail_chip);
+    bin.total_chip = round_chen_chip_value(bin.total_chip);
+}
+
 #[derive(Debug, Clone)]
 struct ChenChipBar {
     trade_date: String,

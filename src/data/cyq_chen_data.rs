@@ -28,7 +28,7 @@ use crate::{
             collect_chen_chip_runtime_keys,
             compute_chen_chip_snapshots_from_initial_bins_with_compiled_config,
             compute_chen_chip_snapshots_with_compiled_config, estimate_chen_chip_expression_warmup,
-            load_compiled_chip_change_config,
+            load_compiled_chip_change_config, round_chen_chip_snapshot, round_chen_chip_value,
         },
         cyq_chen_db_path, load_trade_date_list, source_db_path,
     },
@@ -304,7 +304,10 @@ fn write_cyq_chen_meta(
     for (key, value) in [
         ("schema_version", "1".to_string()),
         ("warmup_days", config.warmup_days.to_string()),
-        ("bucket_pct", config.bucket_pct.to_string()),
+        (
+            "bucket_pct",
+            round_chen_chip_value(config.bucket_pct).to_string(),
+        ),
         ("strategy_hash", strategy_hash.to_string()),
     ] {
         tx.execute(
@@ -870,12 +873,13 @@ fn append_cyq_chen_batch_rows(
 
     for stock in batch.stocks {
         let ts_code = stock.ts_code;
-        for (trade_date, snapshot) in stock.snapshots {
+        for (trade_date, mut snapshot) in stock.snapshots {
+            round_chen_chip_snapshot(&mut snapshot);
             snapshot_ts_code.push(ts_code.clone());
             snapshot_trade_date.push(trade_date.clone());
             snapshot_adj_type.push(DEFAULT_ADJ_TYPE.to_string());
             snapshot_warmup_days.push(config.warmup_days as i32);
-            snapshot_bucket_pct.push(config.bucket_pct);
+            snapshot_bucket_pct.push(round_chen_chip_value(config.bucket_pct));
             snapshot_close.push(snapshot.close);
             snapshot_min_price.push(snapshot.min_price);
             snapshot_max_price.push(snapshot.max_price);
