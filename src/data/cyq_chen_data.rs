@@ -54,6 +54,14 @@ pub struct CyqChenRebuildSummary {
     pub end_date: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CyqChenStrategyMaintenanceStatus {
+    pub db_exists: bool,
+    pub has_data: bool,
+    pub strategy_changed: bool,
+    pub detail: String,
+}
+
 #[derive(Debug)]
 struct ComputedCyqChenStock {
     ts_code: String,
@@ -373,6 +381,56 @@ fn query_latest_cyq_chen_metadata(
     };
 
     Ok(Some((trade_date, config)))
+}
+
+pub fn query_cyq_chen_strategy_maintenance_status(
+    source_dir: &str,
+) -> Result<CyqChenStrategyMaintenanceStatus, String> {
+    let cyq_chen_db = cyq_chen_db_path(source_dir);
+    if !cyq_chen_db.exists() {
+        return Ok(CyqChenStrategyMaintenanceStatus {
+            db_exists: false,
+            has_data: false,
+            strategy_changed: false,
+            detail: "未发现新筹码库 cyq_chen.db，下载后会跳过新筹码维护。".to_string(),
+        });
+    }
+
+    let latest_metadata = query_latest_cyq_chen_metadata(&cyq_chen_db)?;
+    if latest_metadata.is_none() {
+        return Ok(CyqChenStrategyMaintenanceStatus {
+            db_exists: true,
+            has_data: false,
+            strategy_changed: false,
+            detail: "新筹码库已存在，但还没有可维护的筹码数据。".to_string(),
+        });
+    }
+
+    let stored_hash = query_cyq_chen_meta_value(&cyq_chen_db, "strategy_hash")?;
+    let current_hash = match current_chip_change_strategy_hash(source_dir) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(CyqChenStrategyMaintenanceStatus {
+                db_exists: true,
+                has_data: true,
+                strategy_changed: false,
+                detail: format!("无法检查筹码策略变化: {error}"),
+            });
+        }
+    };
+    let strategy_changed = stored_hash.as_deref() != Some(current_hash.as_str());
+
+    Ok(CyqChenStrategyMaintenanceStatus {
+        db_exists: true,
+        has_data: true,
+        strategy_changed,
+        detail: if strategy_changed {
+            "检测到 chip_change_rule.toml 与新筹码库记录的策略快照不一致，增量维护会触发全量重建。"
+                .to_string()
+        } else {
+            "新筹码策略与当前库记录一致，下载后可按增量维护。".to_string()
+        },
+    })
 }
 
 fn bucket_history_key(price_low: f64, price_high: f64) -> String {
@@ -1247,6 +1305,7 @@ fn write_cyq_chen_incremental_batches_from_channel(
 
 pub fn maintain_cyq_chen_incremental_if_db_exists(
     source_dir: &str,
+    allow_strategy_rebuild: bool,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<Option<CyqChenRebuildSummary>, String> {
     let cyq_chen_db = cyq_chen_db_path(source_dir);
@@ -1307,6 +1366,16 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
         && query_cyq_chen_meta_value(&cyq_chen_db, "strategy_hash")?.as_deref()
             != Some(strategy_hash.as_str())
     {
+        if !allow_strategy_rebuild {
+            return Ok(Some(CyqChenRebuildSummary {
+                snapshot_rows: 0,
+                bin_rows: 0,
+                warmup_days: config.warmup_days,
+                bucket_pct: config.bucket_pct,
+                start_date: None,
+                end_date: None,
+            }));
+        }
         return rebuild_cyq_chen_all_with_progress(source_dir, config, None, None, progress_cb)
             .map(Some);
     }
@@ -1672,7 +1741,7 @@ mod tests {
 
     use super::{
         CYQ_CHEN_BIN_TABLE, CYQ_CHEN_SNAPSHOT_TABLE, maintain_cyq_chen_incremental_if_db_exists,
-        rebuild_cyq_chen_all,
+        query_cyq_chen_strategy_maintenance_status, rebuild_cyq_chen_all,
     };
     use crate::data::{
         chip_change_rule_path, cyq_chen::ChenChipConfig, cyq_chen_db_path, source_db_path,
@@ -1994,7 +2063,7 @@ bias = 1.0
             .expect("seed incremental cyq chen");
         insert_paused_stock_resume_row(&incremental_dir);
 
-        let summary = maintain_cyq_chen_incremental_if_db_exists(incremental_path, None)
+        let summary = maintain_cyq_chen_incremental_if_db_exists(incremental_path, false, None)
             .expect("maintain cyq chen incremental")
             .expect("cyq chen db exists");
         assert_eq!(summary.start_date.as_deref(), Some("20260407"));
@@ -2047,7 +2116,7 @@ bias = 2.0
         )
         .expect("rewrite strategy");
 
-        let summary = maintain_cyq_chen_incremental_if_db_exists(source_path, None)
+        let summary = maintain_cyq_chen_incremental_if_db_exists(source_path, true, None)
             .expect("maintain cyq chen incremental")
             .expect("cyq chen db exists");
 
@@ -2068,6 +2137,53 @@ bias = 2.0
     }
 
     #[test]
+    fn maintain_cyq_chen_incremental_skips_strategy_rebuild_without_confirmation() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+        let source_path = source_dir.to_str().expect("utf8 path");
+        let config = ChenChipConfig {
+            warmup_days: 1,
+            bucket_pct: 5.0,
+        };
+
+        rebuild_cyq_chen_all(source_path, config, Some("20260401"), Some("20260403"))
+            .expect("seed cyq chen");
+        let snapshot_rows_before = snapshot_rows_for_compare(source_path);
+        let bin_rows_before = bin_rows_for_compare(source_path);
+
+        fs::write(
+            chip_change_rule_path(source_path),
+            r#"
+version = 1
+
+[[strategy]]
+name = "未确认的主力买入改动"
+holder = "main"
+direction = "buy"
+when = "C >= O AND TOTAL_MV_YI > 0"
+bias = 2.0
+"#,
+        )
+        .expect("rewrite strategy");
+
+        let status = query_cyq_chen_strategy_maintenance_status(source_path)
+            .expect("query cyq chen maintenance status");
+        assert!(status.strategy_changed);
+
+        let summary = maintain_cyq_chen_incremental_if_db_exists(source_path, false, None)
+            .expect("maintain cyq chen incremental")
+            .expect("cyq chen db exists");
+
+        assert_eq!(summary.snapshot_rows, 0);
+        assert_eq!(summary.bin_rows, 0);
+        assert_eq!(summary.start_date, None);
+        assert_eq!(snapshot_rows_for_compare(source_path), snapshot_rows_before);
+        assert_eq!(bin_rows_for_compare(source_path), bin_rows_before);
+
+        fs::remove_dir_all(source_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
     fn maintain_cyq_chen_incremental_preserves_zero_warmup_config() {
         let source_dir = unique_temp_source_dir();
         prepare_source_db(&source_dir);
@@ -2080,7 +2196,7 @@ bias = 2.0
         rebuild_cyq_chen_all(source_path, config, Some("20260401"), Some("20260403"))
             .expect("seed cyq chen with zero warmup");
 
-        let summary = maintain_cyq_chen_incremental_if_db_exists(source_path, None)
+        let summary = maintain_cyq_chen_incremental_if_db_exists(source_path, false, None)
             .expect("maintain cyq chen incremental")
             .expect("cyq chen db exists");
 

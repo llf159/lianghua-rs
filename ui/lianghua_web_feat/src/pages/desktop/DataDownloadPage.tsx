@@ -302,6 +302,23 @@ function formatMissingStockSummary(status: DataDownloadStatus | null) {
   return `${repair.missingCount} 只待补全`
 }
 
+function formatCyqChenMaintenanceSummary(status: DataDownloadStatus | null) {
+  const maintenance = status?.cyqChenMaintenance
+  if (!maintenance) {
+    return '读取中...'
+  }
+
+  if (!maintenance.dbExists) {
+    return '未发现新筹码库'
+  }
+
+  if (!maintenance.hasData) {
+    return '新筹码库暂无数据'
+  }
+
+  return maintenance.strategyChanged ? '策略已变化' : '策略一致'
+}
+
 function readDraft(): DataDownloadDraft {
   const fallback: DataDownloadDraft = {
     token: '',
@@ -385,6 +402,10 @@ export default function DataDownloadPage() {
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [staleStockListConfirmMessage, setStaleStockListConfirmMessage] = useState('')
+  const [cyqChenStrategyConfirm, setCyqChenStrategyConfirm] = useState<{
+    allowStaleStockList: boolean
+    message: string
+  } | null>(null)
   const [progress, setProgress] = useState<DataDownloadProgress | null>(null)
   const [activeTaskSection, setActiveTaskSection] = useState<TaskSection | null>(null)
   const [feedbackSection, setFeedbackSection] = useState<TaskSection>('main')
@@ -512,6 +533,7 @@ export default function DataDownloadPage() {
     setError('')
     setNotice('')
     setStaleStockListConfirmMessage('')
+    setCyqChenStrategyConfirm(null)
     setProgress(null)
 
     const downloadId = `download-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -588,7 +610,10 @@ export default function DataDownloadPage() {
     }
   }
 
-  async function onRunDownload(allowStaleStockList = false) {
+  async function onRunDownload(
+    allowStaleStockList = false,
+    allowCyqChenStrategyRebuild?: boolean,
+  ) {
     if (!sourcePath) {
       setFeedbackSection('main')
       setError('当前数据目录为空，请先到数据管理页确认目录。')
@@ -625,6 +650,25 @@ export default function DataDownloadPage() {
       return
     }
 
+    const chipModel = readStoredDetailCyqModel()
+    if (
+      status?.plannedAction === 'incremental-download' &&
+      chipModel === 'chen' &&
+      status.cyqChenMaintenance.strategyChanged &&
+      allowCyqChenStrategyRebuild === undefined
+    ) {
+      setFeedbackSection('main')
+      setError('')
+      setNotice('')
+      setCyqChenStrategyConfirm({
+        allowStaleStockList,
+        message:
+          `${status.cyqChenMaintenance.detail}\n\n` +
+          '继续后会在本轮下载完成前重建整个新筹码库；选择跳过则本轮只下载行情，不维护新筹码库。',
+      })
+      return
+    }
+
     await runDataTask('main', (downloadId) =>
       runDataDownload({
         downloadId,
@@ -637,7 +681,8 @@ export default function DataDownloadPage() {
         limitCallsPerMin: Math.max(1, Number(limitCallsPerMin) || 1),
         includeTurnover,
         allowStaleStockList,
-        chipModel: readStoredDetailCyqModel(),
+        allowCyqChenStrategyRebuild: allowCyqChenStrategyRebuild ?? false,
+        chipModel,
       }),
     )
   }
@@ -856,6 +901,15 @@ export default function DataDownloadPage() {
                 <small>
                   {status?.missingStockRepair
                     ? status.missingStockRepair.detail
+                    : '读取中...'}
+                </small>
+              </div>
+              <div className="data-download-summary-item">
+                <span>新筹码维护</span>
+                <strong>{formatCyqChenMaintenanceSummary(status)}</strong>
+                <small>
+                  {status?.cyqChenMaintenance
+                    ? status.cyqChenMaintenance.detail
                     : '读取中...'}
                 </small>
               </div>
@@ -1143,6 +1197,29 @@ export default function DataDownloadPage() {
         }}
         onCancel={() => {
           setStaleStockListConfirmMessage('')
+        }}
+      />
+
+      <ConfirmDialog
+        open={cyqChenStrategyConfirm !== null}
+        title="筹码策略已变化"
+        message={cyqChenStrategyConfirm?.message}
+        confirmText="继续并重建"
+        cancelText="跳过筹码维护"
+        busy={isBusy}
+        onConfirm={() => {
+          const pending = cyqChenStrategyConfirm
+          setCyqChenStrategyConfirm(null)
+          if (pending) {
+            void onRunDownload(pending.allowStaleStockList, true)
+          }
+        }}
+        onCancel={() => {
+          const pending = cyqChenStrategyConfirm
+          setCyqChenStrategyConfirm(null)
+          if (pending) {
+            void onRunDownload(pending.allowStaleStockList, false)
+          }
         }}
       />
 

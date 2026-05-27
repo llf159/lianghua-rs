@@ -48,6 +48,8 @@ pub struct DataDownloadRequest {
     limit_calls_per_min: usize,
     include_turnover: bool,
     allow_stale_stock_list: bool,
+    #[serde(default)]
+    allow_cyq_chen_strategy_rebuild: bool,
     chip_model: Option<String>,
 }
 
@@ -398,6 +400,7 @@ pub async fn run_data_download(
         limit_calls_per_min: request.limit_calls_per_min,
         include_turnover: request.include_turnover,
         allow_stale_stock_list: request.allow_stale_stock_list,
+        allow_cyq_chen_strategy_rebuild: request.allow_cyq_chen_strategy_rebuild,
         chip_model: request.chip_model,
     })?;
     let action = prepared.action.clone();

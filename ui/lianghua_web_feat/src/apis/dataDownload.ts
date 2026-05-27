@@ -29,6 +29,7 @@ export type DataDownloadStatus = {
   tradeCalendar: DataDownloadFileStatus
   thsConcepts: DataDownloadFileStatus
   missingStockRepair: DataDownloadMissingStockRepairStatus
+  cyqChenMaintenance: DataDownloadCyqChenMaintenanceStatus
   plannedAction: string
   plannedActionLabel: string
   plannedActionDetail: string
@@ -43,6 +44,13 @@ export type DataDownloadMissingStockRepairStatus = {
   detail: string
 }
 
+export type DataDownloadCyqChenMaintenanceStatus = {
+  dbExists: boolean
+  hasData: boolean
+  strategyChanged: boolean
+  detail: string
+}
+
 export type DataDownloadRequest = {
   downloadId: string
   sourcePath: string
@@ -54,6 +62,7 @@ export type DataDownloadRequest = {
   limitCallsPerMin: number
   includeTurnover: boolean
   allowStaleStockList: boolean
+  allowCyqChenStrategyRebuild: boolean
   chipModel?: 'legacy' | 'chen'
 }
 

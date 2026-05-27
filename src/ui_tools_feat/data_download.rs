@@ -18,7 +18,8 @@ use crate::{
         },
         concept_performance_db_path,
         cyq_chen_data::{
-            maintain_cyq_chen_incremental_if_db_exists, rebuild_cyq_chen_all_if_db_exists,
+            maintain_cyq_chen_incremental_if_db_exists, query_cyq_chen_strategy_maintenance_status,
+            rebuild_cyq_chen_all_if_db_exists,
         },
         cyq_data::{maintain_cyq_incremental_if_db_exists, rebuild_cyq_all_if_db_exists},
         download_data::{
@@ -81,6 +82,7 @@ pub struct DataDownloadStatus {
     pub trade_calendar: DataDownloadFileStatus,
     pub ths_concepts: DataDownloadFileStatus,
     pub missing_stock_repair: DataDownloadMissingStockRepairStatus,
+    pub cyq_chen_maintenance: DataDownloadCyqChenMaintenanceStatus,
     pub planned_action: String,
     pub planned_action_label: String,
     pub planned_action_detail: String,
@@ -98,6 +100,7 @@ pub struct DataDownloadRunInput {
     pub limit_calls_per_min: usize,
     pub include_turnover: bool,
     pub allow_stale_stock_list: bool,
+    pub allow_cyq_chen_strategy_rebuild: bool,
     pub chip_model: Option<String>,
 }
 
@@ -181,6 +184,15 @@ pub struct DataDownloadMissingStockRepairStatus {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DataDownloadCyqChenMaintenanceStatus {
+    pub db_exists: bool,
+    pub has_data: bool,
+    pub strategy_changed: bool,
+    pub detail: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IndicatorManageItem {
     pub index: usize,
     pub name: String,
@@ -233,6 +245,7 @@ pub struct PreparedDataDownloadRun {
     pub limit_calls_per_min: usize,
     pub include_turnover: bool,
     pub allow_stale_stock_list: bool,
+    pub allow_cyq_chen_strategy_rebuild: bool,
     pub chip_model: String,
     pub action: String,
     pub action_label: String,
@@ -405,6 +418,7 @@ fn maintain_chip_after_incremental_download(
     source_path: &str,
     chip_model: &str,
     force_full_rebuild: bool,
+    allow_cyq_chen_strategy_rebuild: bool,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<Option<String>, String> {
     let chip_progress_cb = |progress: DownloadProgress| {
@@ -413,10 +427,20 @@ fn maintain_chip_after_incremental_download(
 
     match chip_model {
         "chen" => {
+            let maintenance_status = query_cyq_chen_strategy_maintenance_status(source_path)?;
+            if maintenance_status.strategy_changed && !allow_cyq_chen_strategy_rebuild {
+                return Ok(Some(
+                    "检测到筹码策略已变化，已按确认选择跳过新筹码全量维护。".to_string(),
+                ));
+            }
             let summary = if force_full_rebuild {
                 rebuild_cyq_chen_all_if_db_exists(source_path, Some(&chip_progress_cb))?
             } else {
-                maintain_cyq_chen_incremental_if_db_exists(source_path, Some(&chip_progress_cb))?
+                maintain_cyq_chen_incremental_if_db_exists(
+                    source_path,
+                    allow_cyq_chen_strategy_rebuild,
+                    Some(&chip_progress_cb),
+                )?
             };
             Ok(Some(match summary {
                 Some(summary) if summary.snapshot_rows > 0 || summary.bin_rows > 0 => format!(
@@ -1085,6 +1109,15 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
     let ths_concepts = query_ths_concepts_status(trimmed)?;
     let (_, missing_stock_repair) =
         scan_missing_stock_codes(trimmed, &source_db, &stock_list, &trade_calendar)?;
+    let cyq_chen_maintenance =
+        query_cyq_chen_strategy_maintenance_status(trimmed).map(|status| {
+            DataDownloadCyqChenMaintenanceStatus {
+                db_exists: status.db_exists,
+                has_data: status.has_data,
+                strategy_changed: status.strategy_changed,
+                detail: status.detail,
+            }
+        })?;
     let (planned_action, planned_action_label, planned_action_detail) =
         plan_download_action(&source_db);
 
@@ -1096,6 +1129,7 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
         trade_calendar,
         ths_concepts,
         missing_stock_repair,
+        cyq_chen_maintenance,
         planned_action,
         planned_action_label,
         planned_action_detail,
@@ -1185,6 +1219,7 @@ pub fn prepare_data_download_run(
         limit_calls_per_min: input.limit_calls_per_min.max(1),
         include_turnover: input.include_turnover,
         allow_stale_stock_list: input.allow_stale_stock_list,
+        allow_cyq_chen_strategy_rebuild: input.allow_cyq_chen_strategy_rebuild,
         chip_model: normalize_chip_model(input.chip_model.as_deref()),
         action: status.planned_action,
         action_label: status.planned_action_label,
@@ -1399,6 +1434,7 @@ pub fn run_prepared_data_download(
             &prepared.source_path,
             prepared.chip_model.as_str(),
             force_full_rebuild,
+            prepared.allow_cyq_chen_strategy_rebuild,
             progress_cb,
         )?;
         if let Some(detail) = chip_message
