@@ -1519,9 +1519,8 @@ fn export_cyq_chen_strategy_file_to_destination(
     let mut open_options = tauri_plugin_fs::OpenOptions::new();
     open_options.write(true).truncate(true).create(true);
     let destination_path =
-        FilePath::from_str(decode_percent_encoded_path(destination_file).as_str())
-            .map_err(|error| error.to_string())?;
-    let destination_label = destination_path.to_string();
+        FilePath::from_str(destination_file).map_err(|error| error.to_string())?;
+    let destination_label = decode_percent_encoded_path(&destination_path.to_string());
     let mut target = app
         .fs()
         .open(destination_path, open_options)
@@ -1529,7 +1528,9 @@ fn export_cyq_chen_strategy_file_to_destination(
 
     let mut buffer = vec![0u8; 1024 * 1024];
     loop {
-        let read_bytes = source.read(&mut buffer).map_err(|error| error.to_string())?;
+        let read_bytes = source
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
         if read_bytes == 0 {
             break;
         }
