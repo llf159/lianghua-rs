@@ -83,16 +83,6 @@ export const MANAGED_SOURCE_FILES = [
     scanPathHints: ['cyq', 'chen', 'chip'],
   },
   {
-    id: 'chip-change-rule',
-    label: '筹码策略文件',
-    description: '新筹码计算使用的主力/散户变化策略。',
-    fileName: 'chip_change_rule.toml',
-    expectedSourcePath: 'source/chip_change_rule.toml',
-    targetRelativePathSuffix: 'chip_change_rule.toml',
-    extensions: ['toml'],
-    scanPathHints: ['chip', 'change', 'rule'],
-  },
-  {
     id: 'score-rule',
     label: '规则文件',
     description: '个股详情里的规则说明和表达式来源。',

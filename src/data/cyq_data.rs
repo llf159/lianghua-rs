@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs::create_dir_all,
     path::Path,
     sync::mpsc::{Receiver, sync_channel},
@@ -334,28 +335,17 @@ fn resolve_cyq_tail_rows_fallback_need(
 }
 
 fn compute_cyq_stock(
-    reader: &DataReader,
+    row_data: RowData,
     ts_code: &str,
-    load_start_date: &str,
     start_date: &str,
     end_date: &str,
     config: CyqConfig,
 ) -> Result<ComputedCyqStock, String> {
-    let mut row_data = reader.load_one(ts_code, DEFAULT_ADJ_TYPE, load_start_date, end_date)?;
     if row_data.trade_dates.is_empty() {
         return Ok(ComputedCyqStock {
             ts_code: ts_code.to_string(),
             snapshots: Vec::new(),
         });
-    }
-    if let Some(need_rows) =
-        resolve_cyq_tail_rows_fallback_need(&row_data, start_date, end_date, config.range)
-    {
-        let tail_row_data =
-            reader.load_one_tail_rows(ts_code, DEFAULT_ADJ_TYPE, end_date, need_rows)?;
-        if !tail_row_data.trade_dates.is_empty() {
-            row_data = tail_row_data;
-        }
     }
     if config.range > 0 && row_data.trade_dates.len() < config.range {
         return Ok(ComputedCyqStock {
@@ -397,16 +387,41 @@ fn compute_cyq_stock_group_batch(
     ts_group: &[String],
     on_stock_done: Option<&dyn Fn(&str)>,
 ) -> Result<CyqWriteBatch, String> {
+    let mut rows_map =
+        worker_reader.load_batch(ts_group, DEFAULT_ADJ_TYPE, load_start_date, end_date)?;
     let mut batch = CyqWriteBatch::default();
     for ts_code in ts_group {
-        let stock = compute_cyq_stock(
-            worker_reader,
-            ts_code,
-            load_start_date,
-            start_date,
-            end_date,
-            config,
-        )?;
+        let mut row_data = match rows_map.remove(ts_code.as_str()) {
+            Some(r) => r,
+            None => {
+                let tail = worker_reader.load_one_tail_rows(
+                    ts_code,
+                    DEFAULT_ADJ_TYPE,
+                    end_date,
+                    config.range.max(1) * 2,
+                )?;
+                if tail.trade_dates.is_empty() {
+                    RowData {
+                        trade_dates: Vec::new(),
+                        cols: HashMap::new(),
+                    }
+                } else {
+                    tail
+                }
+            }
+        };
+
+        if let Some(need_rows) =
+            resolve_cyq_tail_rows_fallback_need(&row_data, start_date, end_date, config.range)
+        {
+            let tail =
+                worker_reader.load_one_tail_rows(ts_code, DEFAULT_ADJ_TYPE, end_date, need_rows)?;
+            if !tail.trade_dates.is_empty() {
+                row_data = tail;
+            }
+        }
+
+        let stock = compute_cyq_stock(row_data, ts_code, start_date, end_date, config)?;
         if !stock.snapshots.is_empty() {
             batch.stocks.push(stock);
         }

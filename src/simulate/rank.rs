@@ -192,8 +192,8 @@ pub fn calc_rank_layer_metrics_from_db(
         &input.end_date,
         &rule_layer_config,
     )?;
-    let triggered_score_map = load_total_score_map(source_dir, &input.start_date, &input.end_date)?;
-    let rank_lookup = load_rank_layer_lookup(source_dir, &input.start_date, &input.end_date)?;
+    let (triggered_score_map, rank_lookup) =
+        load_score_summary_data(source_dir, &input.start_date, &input.end_date)?;
     let all_samples = collect_all_rule_samples_from_cache(
         &runtime_cache,
         &triggered_score_map,
@@ -225,12 +225,7 @@ pub fn calc_rank_layer_metrics_from_score_rows(
         &input.end_date,
         &rule_layer_config,
     )?;
-    let triggered_score_map = build_total_score_map_from_summary_rows(
-        score_summary_rows,
-        &input.start_date,
-        &input.end_date,
-    );
-    let rank_lookup = build_rank_layer_lookup_from_summary_rows(
+    let (triggered_score_map, rank_lookup) = build_score_summary_data_from_rows(
         score_summary_rows,
         &input.start_date,
         &input.end_date,
@@ -504,14 +499,14 @@ fn build_rank_layer_items(
     layers
 }
 
-fn load_total_score_map(
+fn load_score_summary_data(
     source_dir: &str,
     start_date: &str,
     end_date: &str,
-) -> Result<HashMap<String, HashMap<String, f64>>, String> {
+) -> Result<(HashMap<String, HashMap<String, f64>>, RankLayerLookup), String> {
     let result_db = result_db_path(source_dir);
     if !result_db.exists() {
-        return Ok(HashMap::new());
+        return Ok((HashMap::new(), RankLayerLookup::default()));
     }
 
     let result_db_str = result_db
@@ -526,89 +521,7 @@ fn load_total_score_map(
             SELECT
                 ts_code,
                 trade_date,
-                TRY_CAST(total_score AS DOUBLE) AS total_score
-            FROM score_summary
-            WHERE trade_date >= ?
-              AND trade_date <= ?
-            ORDER BY trade_date ASC, ts_code ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译score_summary总分查询失败:{e}"))?;
-
-    let mut rows = stmt
-        .query(params_from_iter([start_date.trim(), end_date.trim()]))
-        .map_err(|e| format!("查询score_summary总分失败:{e}"))?;
-
-    let mut out = HashMap::<String, HashMap<String, f64>>::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取score_summary总分失败:{e}"))?
-    {
-        let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
-        let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
-        let total_score: Option<f64> =
-            row.get(2).map_err(|e| format!("读取total_score失败:{e}"))?;
-
-        let Some(total_score) = total_score.filter(|value| value.is_finite()) else {
-            continue;
-        };
-        if ts_code.trim().is_empty() || trade_date.trim().is_empty() {
-            continue;
-        }
-
-        out.entry(ts_code)
-            .or_default()
-            .insert(trade_date, total_score);
-    }
-
-    Ok(out)
-}
-
-fn build_total_score_map_from_summary_rows(
-    score_summary_rows: &[ScoreSummary],
-    start_date: &str,
-    end_date: &str,
-) -> HashMap<String, HashMap<String, f64>> {
-    let mut out = HashMap::<String, HashMap<String, f64>>::new();
-    for row in score_summary_rows {
-        if row.trade_date.as_str() < start_date
-            || row.trade_date.as_str() > end_date
-            || row.ts_code.trim().is_empty()
-            || row.trade_date.trim().is_empty()
-            || !row.total_score.is_finite()
-        {
-            continue;
-        }
-
-        out.entry(row.ts_code.clone())
-            .or_default()
-            .insert(row.trade_date.clone(), row.total_score);
-    }
-    out
-}
-
-fn load_rank_layer_lookup(
-    source_dir: &str,
-    start_date: &str,
-    end_date: &str,
-) -> Result<RankLayerLookup, String> {
-    let result_db = result_db_path(source_dir);
-    if !result_db.exists() {
-        return Ok(RankLayerLookup::default());
-    }
-
-    let result_db_str = result_db
-        .to_str()
-        .ok_or_else(|| "result_db路径不是有效UTF-8".to_string())?;
-    let conn =
-        Connection::open(result_db_str).map_err(|e| format!("打开scoring_result.db失败:{e}"))?;
-
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT
-                ts_code,
-                trade_date,
+                TRY_CAST(total_score AS DOUBLE) AS total_score,
                 rank
             FROM score_summary
             WHERE trade_date >= ?
@@ -616,48 +529,57 @@ fn load_rank_layer_lookup(
             ORDER BY trade_date ASC, ts_code ASC
             "#,
         )
-        .map_err(|e| format!("预编译score_summary排名查询失败:{e}"))?;
+        .map_err(|e| format!("预编译score_summary查询失败:{e}"))?;
 
     let mut rows = stmt
         .query(params_from_iter([start_date.trim(), end_date.trim()]))
-        .map_err(|e| format!("查询score_summary排名失败:{e}"))?;
+        .map_err(|e| format!("查询score_summary失败:{e}"))?;
 
+    let mut out = HashMap::<String, HashMap<String, f64>>::new();
     let mut lookup = RankLayerLookup::default();
     while let Some(row) = rows
         .next()
-        .map_err(|e| format!("读取score_summary排名失败:{e}"))?
+        .map_err(|e| format!("读取score_summary失败:{e}"))?
     {
         let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
         let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
-        let rank: Option<i64> = row.get(2).map_err(|e| format!("读取rank失败:{e}"))?;
+        let total_score: Option<f64> =
+            row.get(2).map_err(|e| format!("读取total_score失败:{e}"))?;
+        let rank: Option<i64> = row.get(3).map_err(|e| format!("读取rank失败:{e}"))?;
 
-        let Some(rank) = rank.filter(|value| *value > 0) else {
-            continue;
-        };
         if ts_code.trim().is_empty() || trade_date.trim().is_empty() {
             continue;
         }
 
-        lookup
-            .sample_ranks
-            .entry(ts_code)
-            .or_default()
-            .insert(trade_date.clone(), rank);
-        lookup
-            .day_max_ranks
-            .entry(trade_date)
-            .and_modify(|current| *current = (*current).max(rank))
-            .or_insert(rank);
+        if let Some(total_score) = total_score.filter(|value| value.is_finite()) {
+            out.entry(ts_code.clone())
+                .or_default()
+                .insert(trade_date.clone(), total_score);
+        }
+
+        if let Some(rank) = rank.filter(|value| *value > 0) {
+            lookup
+                .sample_ranks
+                .entry(ts_code)
+                .or_default()
+                .insert(trade_date.clone(), rank);
+            lookup
+                .day_max_ranks
+                .entry(trade_date)
+                .and_modify(|current| *current = (*current).max(rank))
+                .or_insert(rank);
+        }
     }
 
-    Ok(lookup)
+    Ok((out, lookup))
 }
 
-fn build_rank_layer_lookup_from_summary_rows(
+fn build_score_summary_data_from_rows(
     score_summary_rows: &[ScoreSummary],
     start_date: &str,
     end_date: &str,
-) -> RankLayerLookup {
+) -> (HashMap<String, HashMap<String, f64>>, RankLayerLookup) {
+    let mut out = HashMap::<String, HashMap<String, f64>>::new();
     let mut lookup = RankLayerLookup::default();
     for row in score_summary_rows {
         if row.trade_date.as_str() < start_date
@@ -668,22 +590,26 @@ fn build_rank_layer_lookup_from_summary_rows(
             continue;
         }
 
-        let Some(rank) = row.rank.filter(|value| *value > 0) else {
-            continue;
-        };
+        if row.total_score.is_finite() {
+            out.entry(row.ts_code.clone())
+                .or_default()
+                .insert(row.trade_date.clone(), row.total_score);
+        }
 
-        lookup
-            .sample_ranks
-            .entry(row.ts_code.clone())
-            .or_default()
-            .insert(row.trade_date.clone(), rank);
-        lookup
-            .day_max_ranks
-            .entry(row.trade_date.clone())
-            .and_modify(|current| *current = (*current).max(rank))
-            .or_insert(rank);
+        if let Some(rank) = row.rank.filter(|value| *value > 0) {
+            lookup
+                .sample_ranks
+                .entry(row.ts_code.clone())
+                .or_default()
+                .insert(row.trade_date.clone(), rank);
+            lookup
+                .day_max_ranks
+                .entry(row.trade_date.clone())
+                .and_modify(|current| *current = (*current).max(rank))
+                .or_insert(rank);
+        }
     }
-    lookup
+    (out, lookup)
 }
 
 fn mean(values: &[f64]) -> Option<f64> {

@@ -575,6 +575,89 @@ impl DataReader {
         Ok(out)
     }
 
+    pub fn load_batch(
+        &self,
+        ts_codes: &[String],
+        adj_type: &str,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<HashMap<String, RowData>, String> {
+        if ts_codes.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut select_cols = vec!["ts_code".to_string(), "trade_date".to_string()];
+        for (db_col, _) in &self.cols_table {
+            select_cols.push(format!(
+                "TRY_CAST(\"{}\" AS DOUBLE) AS \"{}\"",
+                db_col, db_col
+            ));
+        }
+
+        let escaped: Vec<String> = ts_codes
+            .iter()
+            .map(|c| format!("'{}'", c.replace('\'', "''")))
+            .collect();
+
+        let sql = format!(
+            r#"
+            SELECT
+                {}
+            FROM stock_data
+            WHERE ts_code IN ({})
+              AND adj_type = ?
+              AND trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY ts_code, trade_date ASC
+            "#,
+            select_cols.join(",\n"),
+            escaped.join(", ")
+        );
+
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| format!("预编译批量查询SQL失败:{e}"))?;
+        let mut rows = stmt
+            .query(params![adj_type, start_date, end_date])
+            .map_err(|e| format!("执行批量查询失败:{e}"))?;
+
+        let mut result: HashMap<String, RowData> = HashMap::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取批量数据行失败:{e}"))?
+        {
+            let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
+            let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
+
+            let entry = result.entry(ts_code).or_insert_with(|| {
+                let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
+                for (_, key) in &self.cols_table {
+                    cols.insert(key.clone(), Vec::new());
+                }
+                RowData {
+                    trade_dates: Vec::new(),
+                    cols,
+                }
+            });
+
+            entry.trade_dates.push(trade_date);
+
+            for (i, (_, key)) in self.cols_table.iter().enumerate() {
+                let value: Option<f64> =
+                    row.get(i + 2)
+                        .map_err(|e| format!("读取{}失败:{e}", key))?;
+                if let Some(series) = entry.cols.get_mut(key) {
+                    series.push(value);
+                }
+            }
+        }
+
+        result.retain(|_, row_data| !row_data.trade_dates.is_empty());
+
+        Ok(result)
+    }
+
     pub fn list_ts_code(
         &self,
         adj_type: &str,

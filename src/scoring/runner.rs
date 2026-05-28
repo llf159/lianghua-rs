@@ -18,10 +18,10 @@ use crate::scoring::{
     CachedRule, RuleSceneMeta, TieBreakWay, build_scene_score_series, scoring_rules_details_cache,
     scoring_rules_total_cache,
     tools::{
-        CyqChenFieldInjector, calc_query_need_rows, collect_used_cyq_chen_runtime_keys,
-        cyq_chen_runtime_key_names, inject_optional_cyq_chen_fields, inject_stock_extra_fields,
-        load_st_list, load_total_share_map, preview_optional_cyq_chen_injection_warnings,
-        warmup_rows_estimate,
+        CyqChenFieldInjector, calc_query_need_rows, calc_query_start_date,
+        collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names,
+        inject_optional_cyq_chen_fields, inject_stock_extra_fields, load_st_list,
+        load_total_share_map, preview_optional_cyq_chen_injection_warnings, warmup_rows_estimate,
     },
 };
 
@@ -204,21 +204,17 @@ pub fn preview_scoring_runtime_warnings(
 }
 
 fn scoring_stock_batch(
-    worker_reader: &DataReader,
-    adj_type: &str,
+    mut row: RowData,
     score_start_date: &str,
-    end_date: &str,
-    need_rows: usize,
     rules_cache: &[CachedRule],
     rule_scene_meta: &[RuleSceneMeta],
     scenes: &[ScoreScene],
-    st_list: &HashSet<String>,
-    total_share_map: &HashMap<String, f64>,
     cyq_chen_injector: &CyqChenFieldInjector,
     ts_code: &str,
+    st_list: &HashSet<String>,
+    total_share_map: &HashMap<String, f64>,
     memory_mode: ScoringMemoryMode,
 ) -> Result<ScoreBatch, String> {
-    let mut row = worker_reader.load_one_tail_rows(ts_code, adj_type, end_date, need_rows)?;
     let _ = cyq_chen_injector.inject(&mut row, ts_code);
     inject_stock_extra_fields(
         &mut row,
@@ -249,6 +245,7 @@ fn scoring_stock_group_batch(
     adj_type: &str,
     score_start_date: &str,
     end_date: &str,
+    query_start_date: &str,
     need_rows: usize,
     rules_cache: &[CachedRule],
     rule_scene_meta: &[RuleSceneMeta],
@@ -259,22 +256,46 @@ fn scoring_stock_group_batch(
     ts_group: &[String],
     memory_mode: ScoringMemoryMode,
 ) -> Result<ScoreBatch, String> {
-    let mut group_batch = ScoreBatch::default();
+    let mut rows_map = worker_reader.load_batch(ts_group, adj_type, query_start_date, end_date)?;
     let cyq_chen_injector = CyqChenFieldInjector::new(source_dir, used_cyq_chen_keys);
+    let mut group_batch = ScoreBatch::default();
+
     for ts_code in ts_group {
+        let mut row = match rows_map.remove(ts_code.as_str()) {
+            Some(r) => r,
+            None => {
+                let tail =
+                    worker_reader.load_one_tail_rows(ts_code, adj_type, end_date, need_rows)?;
+                if tail.trade_dates.is_empty() {
+                    RowData {
+                        trade_dates: Vec::new(),
+                        cols: HashMap::new(),
+                    }
+                } else {
+                    tail
+                }
+            }
+        };
+        if row.trade_dates.len() < need_rows {
+            let tail = worker_reader.load_one_tail_rows(ts_code, adj_type, end_date, need_rows)?;
+            if !tail.trade_dates.is_empty() {
+                row = tail;
+            }
+        }
+        if row.trade_dates.is_empty() {
+            continue;
+        }
+
         let batch = scoring_stock_batch(
-            worker_reader,
-            adj_type,
+            row,
             score_start_date,
-            end_date,
-            need_rows,
             rules_cache,
             rule_scene_meta,
             scenes,
-            st_list,
-            total_share_map,
             &cyq_chen_injector,
             ts_code,
+            st_list,
+            total_share_map,
             memory_mode,
         )?;
         group_batch.extend(batch);
@@ -299,6 +320,7 @@ pub fn scoring_all_to_db(
     let st_list = load_st_list(source_dir)?;
     let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
     let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
+    let query_start_date = calc_query_start_date(source_dir, warmup_need, start_date)?;
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
@@ -362,6 +384,7 @@ pub fn scoring_all_to_db(
                 adj_type,
                 start_date,
                 end_date,
+                &query_start_date,
                 need_rows,
                 &rules_cache,
                 &rule_scene_meta,
@@ -436,6 +459,7 @@ pub fn scoring_all_to_memory_with_mode(
     let st_list = load_st_list(source_dir)?;
     let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
     let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
+    let query_start_date = calc_query_start_date(source_dir, warmup_need, start_date)?;
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
@@ -472,6 +496,7 @@ pub fn scoring_all_to_memory_with_mode(
                 adj_type,
                 start_date,
                 end_date,
+                &query_start_date,
                 need_rows,
                 &rules_cache,
                 &rule_scene_meta,
@@ -525,13 +550,20 @@ pub fn scoring_single_period(
     let st_list = load_st_list(source_dir)?;
     let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
     let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
+    let query_start_date = calc_query_start_date(source_dir, warmup_need, start_date)?;
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
     let required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
     let dr = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
 
-    let mut row_data = DataReader::load_one_tail_rows(&dr, ts_code, adj_type, end_date, need_rows)?;
+    let mut row_data = DataReader::load_one(&dr, ts_code, adj_type, &query_start_date, end_date)?;
+    if row_data.trade_dates.len() < need_rows {
+        let tail = DataReader::load_one_tail_rows(&dr, ts_code, adj_type, end_date, need_rows)?;
+        if !tail.trade_dates.is_empty() {
+            row_data = tail;
+        }
+    }
     let _ =
         inject_optional_cyq_chen_fields(&mut row_data, source_dir, ts_code, &used_cyq_chen_keys);
     inject_stock_extra_fields(

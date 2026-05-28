@@ -18,6 +18,40 @@ use lianghua_rs::ui_tools_feat::{
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
+
+fn decode_percent_encoded_path(raw: &str) -> String {
+    if !raw.contains('%') {
+        return raw.to_string();
+    }
+
+    let input = raw.as_bytes();
+    let mut bytes = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        if input[i] == b'%' && i + 2 < input.len() {
+            let hi = hex_val(input[i + 1]);
+            let lo = hex_val(input[i + 2]);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                bytes.push(hi << 4 | lo);
+                i += 3;
+                continue;
+            }
+        }
+        bytes.push(input[i]);
+        i += 1;
+    }
+
+    String::from_utf8(bytes).unwrap_or_else(|_| raw.to_string())
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        _ => None,
+    }
+}
 use tauri_plugin_fs::{FilePath, FsExt};
 use zip::{write::FileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
@@ -1206,8 +1240,8 @@ fn export_managed_source_file_inner(
     let mut source = std::fs::File::open(&source_path).map_err(|error| error.to_string())?;
     let mut open_options = tauri_plugin_fs::OpenOptions::new();
     open_options.write(true).truncate(true).create(true);
-    let destination_file =
-        FilePath::from_str(destination_file).map_err(|error| error.to_string())?;
+    let destination_file = FilePath::from_str(decode_percent_encoded_path(destination_file).as_str())
+        .map_err(|error| error.to_string())?;
     let destination_label = destination_file.to_string();
     let mut target = app
         .fs()
@@ -1438,7 +1472,8 @@ pub fn export_managed_source_directory_mobile(
     let mut open_options = tauri_plugin_fs::OpenOptions::new();
     open_options.write(true).truncate(true).create(true);
     let destination_file =
-        FilePath::from_str(destination_file).map_err(|error| error.to_string())?;
+        FilePath::from_str(decode_percent_encoded_path(destination_file).as_str())
+            .map_err(|error| error.to_string())?;
     let destination_label = destination_file.to_string();
     let target_file = app
         .fs()
@@ -1792,7 +1827,8 @@ fn export_strategy_backup_file_inner(
     let mut open_options = tauri_plugin_fs::OpenOptions::new();
     open_options.write(true).truncate(true).create(true);
     let destination_file =
-        FilePath::from_str(destination_file).map_err(|error| error.to_string())?;
+        FilePath::from_str(decode_percent_encoded_path(destination_file).as_str())
+            .map_err(|error| error.to_string())?;
     let destination_label = destination_file.to_string();
     let mut target = app
         .fs()
@@ -1842,7 +1878,8 @@ fn export_strategy_bundle_inner(
     let mut open_options = tauri_plugin_fs::OpenOptions::new();
     open_options.write(true).truncate(true).create(true);
     let destination_file =
-        FilePath::from_str(destination_file).map_err(|error| error.to_string())?;
+        FilePath::from_str(decode_percent_encoded_path(destination_file).as_str())
+            .map_err(|error| error.to_string())?;
     let destination_label = destination_file.to_string();
     let target_file = app
         .fs()

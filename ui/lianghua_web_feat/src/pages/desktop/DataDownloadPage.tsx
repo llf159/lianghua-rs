@@ -325,7 +325,7 @@ function readDraft(): DataDownloadDraft {
     startDate: '2024-01-01',
     endDate: '',
     useTodayEnd: true,
-    threads: 4,
+    threads: 16,
     retryTimes: 3,
     limitCallsPerMin: 190,
     includeTurnover: true,

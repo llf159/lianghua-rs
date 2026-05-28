@@ -71,7 +71,7 @@ struct ComputedCyqChenStock {
 struct CyqChenInitialState {
     state_trade_date: String,
     bins: Vec<ChenChipBin>,
-    main_ratio_history: Vec<Vec<Option<f64>>>,
+    main_ratio_history: Vec<Arc<Vec<Option<f64>>>>,
 }
 
 #[derive(Debug, Default)]
@@ -515,7 +515,9 @@ fn load_cyq_chen_initial_state(
         bin_index_by_key.insert(bucket_history_key(bin.price_low, bin.price_high), index);
     }
 
-    let mut main_ratio_history = vec![vec![None; row_trade_dates.len()]; bins.len()];
+    let mut main_ratio_history: Vec<Arc<Vec<Option<f64>>>> = (0..bins.len())
+        .map(|_| Arc::new(vec![None; row_trade_dates.len()]))
+        .collect();
     if output_start_index > 0 {
         let history_start_date = row_trade_dates
             .first()
@@ -578,7 +580,7 @@ fn load_cyq_chen_initial_state(
                 continue;
             };
             let total = main_chip + retail_chip;
-            main_ratio_history[bucket_index][row_index] = if total > 1e-10 {
+            Arc::make_mut(&mut main_ratio_history[bucket_index])[row_index] = if total > 1e-10 {
                 Some(main_chip / total)
             } else {
                 Some(0.0)
@@ -726,10 +728,9 @@ fn resolve_first_computable_output_date(
 }
 
 fn compute_cyq_chen_stock(
-    reader: &DataReader,
+    mut row_data: RowData,
     state_conn: Option<&Connection>,
     ts_code: &str,
-    load_start_date: &str,
     start_date: &str,
     end_date: &str,
     chip_config: &CompiledChipChangeConfig,
@@ -737,33 +738,11 @@ fn compute_cyq_chen_stock(
     st_list: &HashSet<String>,
     total_share_map: &HashMap<String, f64>,
 ) -> Result<ComputedCyqChenStock, String> {
-    let mut row_data = reader.load_one(ts_code, DEFAULT_ADJ_TYPE, load_start_date, end_date)?;
     if row_data.trade_dates.is_empty() {
         return Ok(ComputedCyqChenStock {
             ts_code: ts_code.to_string(),
             snapshots: Vec::new(),
         });
-    }
-
-    if resolve_first_computable_output_date(&row_data, start_date, end_date, config.warmup_days)
-        .is_none()
-    {
-        let output_rows = count_output_rows(&row_data, start_date, end_date);
-        if output_rows == 0 {
-            return Ok(ComputedCyqChenStock {
-                ts_code: ts_code.to_string(),
-                snapshots: Vec::new(),
-            });
-        }
-
-        let need_rows = config.warmup_days.saturating_add(output_rows);
-        if need_rows > 0 {
-            let tail_row_data =
-                reader.load_one_tail_rows(ts_code, DEFAULT_ADJ_TYPE, end_date, need_rows)?;
-            if !tail_row_data.trade_dates.is_empty() {
-                row_data = tail_row_data;
-            }
-        }
     }
 
     inject_stock_extra_fields(
@@ -867,13 +846,75 @@ fn compute_cyq_chen_stock_group_batch(
     ts_group: &[String],
     on_stock_done: Option<&dyn Fn(&str)>,
 ) -> Result<CyqChenWriteBatch, String> {
+    let mut rows_map =
+        worker_reader.load_batch(ts_group, DEFAULT_ADJ_TYPE, load_start_date, end_date)?;
     let mut batch = CyqChenWriteBatch::default();
     for ts_code in ts_group {
+        let mut row_data = match rows_map.remove(ts_code.as_str()) {
+            Some(r) => r,
+            None => {
+                let tail = worker_reader.load_one_tail_rows(
+                    ts_code,
+                    DEFAULT_ADJ_TYPE,
+                    end_date,
+                    config.warmup_days.max(1) * 2,
+                )?;
+                if tail.trade_dates.is_empty() {
+                    RowData {
+                        trade_dates: Vec::new(),
+                        cols: HashMap::new(),
+                    }
+                } else {
+                    tail
+                }
+            }
+        };
+
+        if !row_data.trade_dates.is_empty()
+            && resolve_first_computable_output_date(
+                &row_data,
+                start_date,
+                end_date,
+                config.warmup_days,
+            )
+            .is_none()
+        {
+            let output_rows = count_output_rows(&row_data, start_date, end_date);
+            if output_rows > 0 {
+                let need_rows = config.warmup_days.saturating_add(output_rows);
+                if need_rows > 0 {
+                    let tail = worker_reader.load_one_tail_rows(
+                        ts_code,
+                        DEFAULT_ADJ_TYPE,
+                        end_date,
+                        need_rows,
+                    )?;
+                    if !tail.trade_dates.is_empty() {
+                        row_data = tail;
+                    }
+                }
+            }
+        }
+
+        if row_data.trade_dates.is_empty() {
+            let need_rows = config.warmup_days.max(60) * 2;
+            if need_rows > 0 {
+                let tail = worker_reader.load_one_tail_rows(
+                    ts_code,
+                    DEFAULT_ADJ_TYPE,
+                    end_date,
+                    need_rows,
+                )?;
+                if !tail.trade_dates.is_empty() {
+                    row_data = tail;
+                }
+            }
+        }
+
         let stock = compute_cyq_chen_stock(
-            worker_reader,
+            row_data,
             state_conn,
             ts_code,
-            load_start_date,
             start_date,
             end_date,
             chip_config,
