@@ -26,8 +26,8 @@ use crate::{
     },
     scoring::runner::{ScoringMemoryMode, scoring_all_to_memory_with_mode},
     scoring::tools::{
-        calc_query_need_rows, calc_query_start_date, collect_used_cyq_chen_runtime_keys,
-        cyq_chen_runtime_key_names, inject_optional_cyq_chen_fields, inject_stock_extra_fields,
+        CyqChenFieldInjector, calc_query_need_rows, calc_query_start_date,
+        collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names, inject_stock_extra_fields,
         load_st_list, load_total_share_map,
     },
     scoring::{CachedRule, evaluate_cached_rule_scores},
@@ -505,6 +505,7 @@ pub struct MarketAnalysisData {
     pub lookback_period: usize,
     pub stock_rank_limit: usize,
     pub sub_interval_period: usize,
+    pub min_board_stock_count: usize,
     pub latest_trade_date: Option<String>,
     pub resolved_reference_trade_date: Option<String>,
     pub board_options: Vec<String>,
@@ -2086,7 +2087,7 @@ fn inject_validation_rank_series(
 
 fn evaluate_validation_combos_for_ts_code(
     reader: &mut DataReader,
-    source_path: &str,
+    cyq_chen_injector: &CyqChenFieldInjector,
     ts_code: &str,
     stock_adj_type: &str,
     start_date: &str,
@@ -2096,12 +2097,10 @@ fn evaluate_validation_combos_for_ts_code(
     total_share_map: &HashMap<String, f64>,
     rank_series_map: &HashMap<String, HashMap<String, Option<f64>>>,
     needs_rank: bool,
-    used_cyq_chen_keys: &HashSet<String>,
     combos: &[PreparedValidationCombo],
 ) -> Result<ValidationTsCodeEvaluation, String> {
     let mut row_data = reader.load_one_tail_rows(ts_code, stock_adj_type, end_date, need_rows)?;
-    let _ =
-        inject_optional_cyq_chen_fields(&mut row_data, source_path, ts_code, used_cyq_chen_keys);
+    let _ = cyq_chen_injector.inject(&mut row_data, ts_code);
     inject_stock_extra_fields(
         &mut row_data,
         ts_code,
@@ -2189,15 +2188,24 @@ fn build_validation_triggered_scores_for_combos(
     let results = ts_codes
         .par_iter()
         .map_init(
-            || DataReader::new_with_runtime_keys(source_path, &required_runtime_keys),
-            |reader_res, ts_code| {
-                let reader = reader_res.as_mut().map_err(|err| err.clone())?;
+            || {
+                DataReader::new_with_runtime_keys(source_path, &required_runtime_keys).map(
+                    |reader| {
+                        (
+                            reader,
+                            CyqChenFieldInjector::new(source_path, &used_cyq_chen_keys),
+                        )
+                    },
+                )
+            },
+            |worker_res, ts_code| {
+                let (reader, cyq_chen_injector) = worker_res.as_mut().map_err(|err| err.clone())?;
                 let ValidationTsCodeEvaluation {
                     ts_code,
                     combo_hits,
                 } = evaluate_validation_combos_for_ts_code(
                     reader,
-                    source_path,
+                    cyq_chen_injector,
                     ts_code,
                     stock_adj_type,
                     start_date,
@@ -2207,7 +2215,6 @@ fn build_validation_triggered_scores_for_combos(
                     &total_share_map,
                     &rank_series_map,
                     needs_rank,
-                    &used_cyq_chen_keys,
                     combos,
                 )?;
 
@@ -3559,6 +3566,66 @@ fn match_board_filter_with_st(
     match_board_filter(board_list, selected_board)
 }
 
+fn load_concept_stock_count_map(source_path: &str) -> Result<HashMap<String, usize>, String> {
+    let rows = match load_ths_concepts_list(source_path) {
+        Ok(rows) => rows,
+        Err(error) if error.contains("打开stock_concepts.csv失败") => return Ok(HashMap::new()),
+        Err(error) => return Err(error),
+    };
+    let mut concept_stocks: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for cols in rows {
+        let Some(ts_code) = cols.first().map(|value| value.trim()) else {
+            continue;
+        };
+        let Some(concept_raw) = cols.get(2).map(|value| value.trim()) else {
+            continue;
+        };
+        if ts_code.is_empty() || concept_raw.is_empty() {
+            continue;
+        }
+        let ts_code = ts_code.to_ascii_uppercase();
+        for concept in split_board_tags(concept_raw) {
+            concept_stocks
+                .entry(concept)
+                .or_default()
+                .insert(ts_code.clone());
+        }
+    }
+
+    Ok(concept_stocks
+        .into_iter()
+        .map(|(concept, stocks)| (concept, stocks.len()))
+        .collect())
+}
+
+fn build_board_stock_count_map(
+    ts_board_map: &HashMap<String, Vec<String>>,
+) -> HashMap<String, usize> {
+    let mut board_stocks: HashMap<String, HashSet<String>> = HashMap::new();
+    for (ts_code, board_list) in ts_board_map {
+        for board in board_list {
+            board_stocks
+                .entry(board.clone())
+                .or_default()
+                .insert(ts_code.clone());
+        }
+    }
+
+    board_stocks
+        .into_iter()
+        .map(|(board, stocks)| (board, stocks.len()))
+        .collect()
+}
+
+fn has_min_stock_count(
+    stock_counts: &HashMap<String, usize>,
+    name: &str,
+    min_stock_count: usize,
+) -> bool {
+    min_stock_count <= 1 || stock_counts.get(name).copied().unwrap_or(0) >= min_stock_count
+}
+
 pub fn get_market_analysis(
     source_path: String,
     lookback_period: Option<usize>,
@@ -3568,6 +3635,7 @@ pub fn get_market_analysis(
     min_listed_trade_days: Option<usize>,
     stock_rank_limit: Option<usize>,
     sub_interval_period: Option<usize>,
+    min_board_stock_count: Option<usize>,
 ) -> Result<MarketAnalysisData, String> {
     let lookback_period = lookback_period.unwrap_or(20).max(1);
     let stock_rank_limit = stock_rank_limit.unwrap_or(20).clamp(1, 200);
@@ -3578,6 +3646,7 @@ pub fn get_market_analysis(
     };
     let min_listed_trade_days =
         min_listed_trade_days.unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS);
+    let min_board_stock_count = min_board_stock_count.unwrap_or(1).max(1);
 
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
@@ -3600,6 +3669,8 @@ pub fn get_market_analysis(
         .or_else(|| latest_trade_date.clone());
 
     let (board_options, ts_board_map) = build_board_maps(&source_path)?;
+    let concept_stock_counts = load_concept_stock_count_map(&source_path)?;
+    let board_stock_counts = build_board_stock_count_map(&ts_board_map);
     let resolved_board = resolve_board_filter(board, &board_options);
     let exclude_st_board = exclude_st_board.unwrap_or(false);
     let sample_eligibility =
@@ -3610,6 +3681,7 @@ pub fn get_market_analysis(
             lookback_period,
             stock_rank_limit,
             sub_interval_period,
+            min_board_stock_count,
             latest_trade_date,
             resolved_reference_trade_date: None,
             board_options,
@@ -3664,6 +3736,7 @@ pub fn get_market_analysis(
             lookback_period,
             stock_rank_limit,
             sub_interval_period,
+            min_board_stock_count,
             latest_trade_date,
             resolved_reference_trade_date: Some(ref_date.clone()),
             board_options,
@@ -3702,14 +3775,13 @@ pub fn get_market_analysis(
           AND trade_date <= ?
         GROUP BY 1
         ORDER BY avg_pct DESC NULLS LAST, concept ASC
-        LIMIT ?
         "#;
 
     let mut concept_interval_stmt = concept_conn
         .prepare(concept_interval_sql)
         .map_err(|e| format!("预编译概念区间榜 SQL 失败: {e}"))?;
     let mut concept_interval_rows = concept_interval_stmt
-        .query(params![&interval_start, &interval_end, 20_i64])
+        .query(params![&interval_start, &interval_end])
         .map_err(|e| format!("执行概念区间榜 SQL 失败: {e}"))?;
     let mut interval_concept_top = Vec::new();
     while let Some(row) = concept_interval_rows
@@ -3717,11 +3789,15 @@ pub fn get_market_analysis(
         .map_err(|e| format!("读取概念区间榜失败: {e}"))?
     {
         let name: String = row.get(0).map_err(|e| format!("读取概念名失败: {e}"))?;
+        if !has_min_stock_count(&concept_stock_counts, &name, min_board_stock_count) {
+            continue;
+        }
         let value: Option<f64> = row.get(1).map_err(|e| format!("读取概念值失败: {e}"))?;
         if let Some(value) = value.filter(|v| v.is_finite()) {
             interval_concept_top.push(market_rank_item(name, value));
         }
     }
+    interval_concept_top.truncate(20);
 
     let mut interval_board_stmt = source_conn
         .prepare(
@@ -3762,6 +3838,9 @@ pub fn get_market_analysis(
         .into_iter()
         .filter_map(|(name, (sum, cnt))| {
             if cnt == 0 {
+                return None;
+            }
+            if !has_min_stock_count(&board_stock_counts, &name, min_board_stock_count) {
                 return None;
             }
             let value = sum / cnt as f64;
@@ -3907,14 +3986,13 @@ pub fn get_market_analysis(
         WHERE performance_type = 'concept'
           AND trade_date = ?
         ORDER BY TRY_CAST(performance_pct AS DOUBLE) DESC NULLS LAST, concept ASC
-        LIMIT ?
         "#;
 
     let mut daily_concept_stmt = concept_conn
         .prepare(daily_concept_sql)
         .map_err(|e| format!("预编译概念当日榜 SQL 失败: {e}"))?;
     let mut daily_concept_rows = daily_concept_stmt
-        .query(params![&ref_date, 20_i64])
+        .query(params![&ref_date])
         .map_err(|e| format!("执行概念当日榜 SQL 失败: {e}"))?;
     let mut daily_concept_top = Vec::new();
     while let Some(row) = daily_concept_rows
@@ -3922,11 +4000,15 @@ pub fn get_market_analysis(
         .map_err(|e| format!("读取概念当日榜失败: {e}"))?
     {
         let name: String = row.get(0).map_err(|e| format!("读取概念名失败: {e}"))?;
+        if !has_min_stock_count(&concept_stock_counts, &name, min_board_stock_count) {
+            continue;
+        }
         let value: Option<f64> = row.get(1).map_err(|e| format!("读取概念值失败: {e}"))?;
         if let Some(value) = value.filter(|v| v.is_finite()) {
             daily_concept_top.push(market_rank_item(name, value));
         }
     }
+    daily_concept_top.truncate(20);
 
     let mut daily_board_stmt = source_conn
         .prepare(
@@ -3965,6 +4047,9 @@ pub fn get_market_analysis(
         .into_iter()
         .filter_map(|(name, (sum, cnt))| {
             if cnt == 0 {
+                return None;
+            }
+            if !has_min_stock_count(&board_stock_counts, &name, min_board_stock_count) {
                 return None;
             }
             let value = sum / cnt as f64;
@@ -4033,6 +4118,7 @@ pub fn get_market_analysis(
         lookback_period,
         stock_rank_limit,
         sub_interval_period,
+        min_board_stock_count,
         latest_trade_date,
         resolved_reference_trade_date: Some(ref_date.clone()),
         board_options,

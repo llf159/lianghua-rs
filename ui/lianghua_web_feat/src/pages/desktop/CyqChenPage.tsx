@@ -886,6 +886,20 @@ function chipValueByMode(bin: CyqChenBin, mode: ChipPeakMode) {
   return bin.totalChip
 }
 
+function chipBarRatioByMode(bin: CyqChenBin, snapshot: CyqChenSnapshot, mode: ChipPeakMode) {
+  const value = chipValueByMode(bin, mode)
+  const total = mode === 'main'
+    ? snapshot.mainTotal
+    : mode === 'retail'
+      ? snapshot.retailTotal
+      : snapshot.totalChips
+
+  if (!isFiniteNumber(value) || !isFiniteNumber(total) || total <= Number.EPSILON) {
+    return 0
+  }
+  return clampNumber(value / total, 0, 1)
+}
+
 function chipModeLabel(mode: ChipPeakMode) {
   if (mode === 'main') {
     return '主力'
@@ -1914,17 +1928,9 @@ function CyqChenProjectChart({
                 const binHigh = Math.max(bin.priceLow, bin.priceHigh)
                 return !(binHigh < domain.min || binLow > domain.max)
               })
-              const totalScaleMaxChip = visibleCyqBins.reduce((acc, bin) => {
-                const value = bin.totalChip
-                return isFiniteNumber(value) ? Math.max(acc, value) : acc
-              }, 0)
-              const selectedScaleMaxChip = visibleCyqBins.reduce((acc, bin) => {
-                const value = chipValueByMode(bin, chipPeakMode)
-                return isFiniteNumber(value) ? Math.max(acc, value) : acc
-              }, 0)
-              const maxChip = chipPeakMode === 'total'
-                ? totalScaleMaxChip
-                : totalScaleMaxChip || selectedScaleMaxChip
+              const hasVisibleChip = snapshot
+                ? visibleCyqBins.some((bin) => chipBarRatioByMode(bin, snapshot, chipPeakMode) > 0)
+                : false
               const peakBin = findChipPeak(snapshot, chipPeakMode)
               const priceOverlaySeries = getPanelSeries(pricePanel)
               const markerOverlayPoints = buildChartMarkerOverlayPoints(pricePanel, visibleItems, xAt, yAt)
@@ -2029,7 +2035,7 @@ function CyqChenProjectChart({
                       )
                     })}
 
-                    {reserveCyqPanelWidth && maxChip > 0 ? (
+                    {reserveCyqPanelWidth && snapshot && hasVisibleChip ? (
                       <g key={`cyq-${snapshot?.tradeDate ?? 'none'}`}>
                         <line
                           className="details-chart-cyq-divider"
@@ -2050,7 +2056,7 @@ function CyqChenProjectChart({
                           const barHeight = Math.max(yBottom - yTop, 1)
                           const maxBarWidth = Math.max(chipPanelRight - chipPanelLeft - 4, 0)
                           const chipValue = chipValueByMode(bin, chipPeakMode)
-                          const barWidth = isFiniteNumber(chipValue) ? chipValue / maxChip * maxBarWidth : 0
+                          const barWidth = chipBarRatioByMode(bin, snapshot, chipPeakMode) * maxBarWidth
                           const resolvedBarWidth = Math.max(barWidth, 1)
                           const representativePrice = (bin.priceLow + bin.priceHigh) / 2
                           const state = chipProfitState(representativePrice, selectedClose)

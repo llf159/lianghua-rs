@@ -225,11 +225,8 @@ pub fn calc_rank_layer_metrics_from_score_rows(
         &input.end_date,
         &rule_layer_config,
     )?;
-    let (triggered_score_map, rank_lookup) = build_score_summary_data_from_rows(
-        score_summary_rows,
-        &input.start_date,
-        &input.end_date,
-    );
+    let (triggered_score_map, rank_lookup) =
+        build_score_summary_data_from_rows(score_summary_rows, &input.start_date, &input.end_date);
     let all_samples = collect_all_rule_samples_from_cache(
         &runtime_cache,
         &triggered_score_map,

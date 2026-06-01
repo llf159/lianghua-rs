@@ -105,6 +105,7 @@ type MarketAnalysisParamsDraft = {
   stockRankLimit: string;
   subIntervalPeriod: string;
   minListedTradeDays: string;
+  minBoardStockCount: string;
   selectedBoard: string;
   carryInterval: boolean;
 };
@@ -115,6 +116,7 @@ function readMarketAnalysisParamsDraft(): MarketAnalysisParamsDraft {
     stockRankLimit: "20",
     subIntervalPeriod: "3",
     minListedTradeDays: "60",
+    minBoardStockCount: "1",
     selectedBoard: "",
     carryInterval: true,
   };
@@ -131,6 +133,7 @@ function readMarketAnalysisParamsDraft(): MarketAnalysisParamsDraft {
     stockRankLimit: typeof parsed.stockRankLimit === "string" ? parsed.stockRankLimit : fallback.stockRankLimit,
     subIntervalPeriod: typeof parsed.subIntervalPeriod === "string" ? parsed.subIntervalPeriod : fallback.subIntervalPeriod,
     minListedTradeDays: typeof parsed.minListedTradeDays === "string" ? parsed.minListedTradeDays : fallback.minListedTradeDays,
+    minBoardStockCount: typeof parsed.minBoardStockCount === "string" ? parsed.minBoardStockCount : fallback.minBoardStockCount,
     selectedBoard: typeof parsed.selectedBoard === "string" ? parsed.selectedBoard : fallback.selectedBoard,
     carryInterval: typeof parsed.carryInterval === "boolean" ? parsed.carryInterval : fallback.carryInterval,
   };
@@ -144,6 +147,7 @@ export default function MarketAnalysisPage() {
   const [stockRankLimit, setStockRankLimit] = useState(persistedParams.stockRankLimit);
   const [subIntervalPeriod, setSubIntervalPeriod] = useState(persistedParams.subIntervalPeriod);
   const [minListedTradeDays, setMinListedTradeDays] = useState(persistedParams.minListedTradeDays);
+  const [minBoardStockCount, setMinBoardStockCount] = useState(persistedParams.minBoardStockCount);
   const [referenceDateInput, setReferenceDateInput] = useState("");
   const [selectedBoard, setSelectedBoard] = useState(persistedParams.selectedBoard);
   const [carryInterval, setCarryInterval] = useState(persistedParams.carryInterval);
@@ -199,12 +203,14 @@ export default function MarketAnalysisPage() {
       stockRankLimit,
       subIntervalPeriod,
       minListedTradeDays,
+      minBoardStockCount,
       selectedBoard,
       carryInterval,
     });
   }, [
     carryInterval,
     lookbackPeriod,
+    minBoardStockCount,
     minListedTradeDays,
     selectedBoard,
     stockRankLimit,
@@ -229,6 +235,7 @@ export default function MarketAnalysisPage() {
         board: selectedBoard.trim() || undefined,
         excludeStBoard: excludeStBoard || undefined,
         minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
+        minBoardStockCount: Math.max(1, Number(minBoardStockCount) || 1),
         stockRankLimit: Math.max(1, Number(stockRankLimit) || 1),
         subIntervalPeriod: Math.max(3, Number(subIntervalPeriod) || 3),
       });
@@ -424,6 +431,15 @@ export default function MarketAnalysisPage() {
             />
           </label>
           <label className="scene-layer-field">
+            <span>最低板块内个股数</span>
+            <input
+              type="number"
+              min="1"
+              value={minBoardStockCount}
+              onChange={(event) => setMinBoardStockCount(event.target.value)}
+            />
+          </label>
+          <label className="scene-layer-field">
             <span>个股榜数量</span>
             <input
               type="number"
@@ -502,6 +518,10 @@ export default function MarketAnalysisPage() {
               <div className="scene-layer-summary-item scene-layer-summary-item-kpi">
                 <span>个股榜数量</span>
                 <strong>{result.stock_rank_limit} 只</strong>
+              </div>
+              <div className="scene-layer-summary-item scene-layer-summary-item-kpi">
+                <span>主题最少个股</span>
+                <strong>{result.min_board_stock_count} 只</strong>
               </div>
               <div className="scene-layer-summary-item scene-layer-summary-item-kpi">
                 <span>子区间</span>

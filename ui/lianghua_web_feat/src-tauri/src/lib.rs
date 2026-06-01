@@ -824,6 +824,7 @@ async fn get_market_analysis(
     min_listed_trade_days: Option<usize>,
     stock_rank_limit: Option<usize>,
     sub_interval_period: Option<usize>,
+    min_board_stock_count: Option<usize>,
 ) -> Result<MarketAnalysisData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_get_market_analysis(
@@ -835,6 +836,7 @@ async fn get_market_analysis(
             min_listed_trade_days,
             stock_rank_limit,
             sub_interval_period,
+            min_board_stock_count,
         )
     })
     .await

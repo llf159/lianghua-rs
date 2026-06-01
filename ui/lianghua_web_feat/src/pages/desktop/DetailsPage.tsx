@@ -980,6 +980,10 @@ function getCyqBinChipPct(bin: DetailCyqBin, holderView: DetailCyqHolderView) {
   return Number.isFinite(bin.chip_pct) ? bin.chip_pct : 0;
 }
 
+function getCyqBinBarRatio(bin: DetailCyqBin, holderView: DetailCyqHolderView) {
+  return clampNumber(getCyqBinChipPct(bin, holderView), 0, 1);
+}
+
 function getCyqBinChipValue(bin: DetailCyqBin, holderView: DetailCyqHolderView) {
   if (holderView === "main") {
     return typeof bin.main_chip === "number" && Number.isFinite(bin.main_chip)
@@ -2818,21 +2822,12 @@ function renderChartPanel(
           const binHigh = Math.max(bin.price_low, bin.price_high);
           return !(binHigh < currentDomain.min || binLow > currentDomain.max);
         });
-        const totalScaleMaxChip = visibleCyqBins.reduce(
-          (acc, bin) => Math.max(acc, getCyqBinChipValue(bin, "mixed")),
-          0,
+        const hasVisibleChip = visibleCyqBins.some(
+          (bin) => getCyqBinBarRatio(bin, cyqHolderView) > 0,
         );
-        const selectedScaleMaxChip = visibleCyqBins.reduce(
-          (acc, bin) => Math.max(acc, getCyqBinChipValue(bin, cyqHolderView)),
-          0,
-        );
-        const maxChip =
-          cyqHolderView === "mixed"
-            ? totalScaleMaxChip
-            : totalScaleMaxChip || selectedScaleMaxChip;
         const peakBin = findCyqPeakBin(visibleCyqBins, cyqHolderView);
 
-        if (visibleCyqBins.length > 0 && maxChip > 0) {
+        if (visibleCyqBins.length > 0 && hasVisibleChip) {
           cyqSvgContent = (
             <g key={`${panel.key}-cyq-${selectedCyqTradeDate ?? selectedCyqSnapshot.trade_date}`}>
               <line
@@ -2859,9 +2854,9 @@ function renderChartPanel(
                 const yBottom = yAt(clampedLow);
                 const barHeight = Math.max(yBottom - yTop, 1);
                 const chipPct = getCyqBinChipPct(bin, cyqHolderView);
-                const chipValue = getCyqBinChipValue(bin, cyqHolderView);
+                const barRatio = getCyqBinBarRatio(bin, cyqHolderView);
                 const maxBarWidth = Math.max(chipPanelRight - chipPanelLeft - 4, 0);
-                const barWidth = (chipValue / maxChip) * maxBarWidth;
+                const barWidth = barRatio * maxBarWidth;
                 const safeBarWidth = Math.max(barWidth, 1);
                 const representativePrice = (bin.price_low + bin.price_high) / 2;
                 const fill = getCyqHolderColor(

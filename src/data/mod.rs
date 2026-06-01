@@ -623,10 +623,7 @@ impl DataReader {
             .map_err(|e| format!("执行批量查询失败:{e}"))?;
 
         let mut result: HashMap<String, RowData> = HashMap::new();
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| format!("读取批量数据行失败:{e}"))?
-        {
+        while let Some(row) = rows.next().map_err(|e| format!("读取批量数据行失败:{e}"))? {
             let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
             let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
 
@@ -645,8 +642,7 @@ impl DataReader {
 
             for (i, (_, key)) in self.cols_table.iter().enumerate() {
                 let value: Option<f64> =
-                    row.get(i + 2)
-                        .map_err(|e| format!("读取{}失败:{e}", key))?;
+                    row.get(i + 2).map_err(|e| format!("读取{}失败:{e}", key))?;
                 if let Some(series) = entry.cols.get_mut(key) {
                     series.push(value);
                 }

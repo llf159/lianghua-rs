@@ -19,9 +19,9 @@ use crate::{
         concept_performance_db_path,
         cyq_chen_data::{
             maintain_cyq_chen_incremental_if_db_exists, query_cyq_chen_strategy_maintenance_status,
-            rebuild_cyq_chen_all_if_db_exists,
+            repair_cyq_chen_stocks_if_db_exists,
         },
-        cyq_data::{maintain_cyq_incremental_if_db_exists, rebuild_cyq_all_if_db_exists},
+        cyq_data::{maintain_cyq_incremental_if_db_exists, repair_cyq_stocks_if_db_exists},
         download_data::{
             append_stock_data_indicator_stage_rows_with_appender,
             create_stock_data_indicator_stage_appender_for_columns, drop_stock_data_columns,
@@ -417,7 +417,7 @@ fn emit_chip_maintenance_progress(
 fn maintain_chip_after_incremental_download(
     source_path: &str,
     chip_model: &str,
-    force_full_rebuild: bool,
+    recovered_stock_codes: &[String],
     allow_cyq_chen_strategy_rebuild: bool,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<Option<String>, String> {
@@ -433,8 +433,21 @@ fn maintain_chip_after_incremental_download(
                     "检测到筹码策略已变化，已按确认选择跳过新筹码全量维护。".to_string(),
                 ));
             }
-            let summary = if force_full_rebuild {
-                rebuild_cyq_chen_all_if_db_exists(source_path, Some(&chip_progress_cb))?
+            let repair_summary = if recovered_stock_codes.is_empty() {
+                None
+            } else {
+                repair_cyq_chen_stocks_if_db_exists(
+                    source_path,
+                    recovered_stock_codes,
+                    allow_cyq_chen_strategy_rebuild,
+                    Some(&chip_progress_cb),
+                )?
+            };
+            let incremental_summary = if maintenance_status.strategy_changed
+                && allow_cyq_chen_strategy_rebuild
+                && repair_summary.is_some()
+            {
+                None
             } else {
                 maintain_cyq_chen_incremental_if_db_exists(
                     source_path,
@@ -442,45 +455,125 @@ fn maintain_chip_after_incremental_download(
                     Some(&chip_progress_cb),
                 )?
             };
-            Ok(Some(match summary {
-                Some(summary) if summary.snapshot_rows > 0 || summary.bin_rows > 0 => format!(
-                    "新筹码{}维护完成，区间 {} 至 {}，写入 {} 条摘要和 {} 条分桶。",
-                    if force_full_rebuild {
+            let snapshot_rows = repair_summary
+                .as_ref()
+                .map(|summary| summary.snapshot_rows)
+                .unwrap_or(0)
+                + incremental_summary
+                    .as_ref()
+                    .map(|summary| summary.snapshot_rows)
+                    .unwrap_or(0);
+            let bin_rows = repair_summary
+                .as_ref()
+                .map(|summary| summary.bin_rows)
+                .unwrap_or(0)
+                + incremental_summary
+                    .as_ref()
+                    .map(|summary| summary.bin_rows)
+                    .unwrap_or(0);
+            let start_date = repair_summary
+                .as_ref()
+                .and_then(|summary| summary.start_date.as_deref())
+                .or_else(|| {
+                    incremental_summary
+                        .as_ref()
+                        .and_then(|summary| summary.start_date.as_deref())
+                });
+            let end_date = incremental_summary
+                .as_ref()
+                .and_then(|summary| summary.end_date.as_deref())
+                .or_else(|| {
+                    repair_summary
+                        .as_ref()
+                        .and_then(|summary| summary.end_date.as_deref())
+                });
+            Ok(Some(
+                if repair_summary.is_none() && incremental_summary.is_none() {
+                    "未发现新筹码库 cyq_chen.db，已跳过筹码数据维护。".to_string()
+                } else if snapshot_rows > 0 || bin_rows > 0 {
+                    let mode = if recovered_stock_codes.is_empty() {
+                        "增量"
+                    } else if maintenance_status.strategy_changed {
                         "全量"
                     } else {
-                        "增量"
-                    },
-                    summary.start_date.as_deref().unwrap_or("--"),
-                    summary.end_date.as_deref().unwrap_or("--"),
-                    summary.snapshot_rows,
-                    summary.bin_rows
-                ),
-                Some(_) => "新筹码库已存在，但当前没有需要补算的筹码数据。".to_string(),
-                None => "未发现新筹码库 cyq_chen.db，已跳过筹码数据维护。".to_string(),
-            }))
+                        "局部+增量"
+                    };
+                    format!(
+                        "新筹码{}维护完成，区间 {} 至 {}，写入 {} 条摘要和 {} 条分桶。",
+                        mode,
+                        start_date.unwrap_or("--"),
+                        end_date.unwrap_or("--"),
+                        snapshot_rows,
+                        bin_rows
+                    )
+                } else {
+                    "新筹码库已存在，但当前没有需要补算的筹码数据。".to_string()
+                },
+            ))
         }
         _ => {
-            let summary = if force_full_rebuild {
-                rebuild_cyq_all_if_db_exists(source_path, Some(&chip_progress_cb))?
+            let repair_summary = if recovered_stock_codes.is_empty() {
+                None
             } else {
-                maintain_cyq_incremental_if_db_exists(source_path)?
+                repair_cyq_stocks_if_db_exists(
+                    source_path,
+                    recovered_stock_codes,
+                    Some(&chip_progress_cb),
+                )?
             };
-            Ok(Some(match summary {
-                Some(summary) if summary.snapshot_rows > 0 || summary.bin_rows > 0 => format!(
-                    "筹码{}维护完成，区间 {} 至 {}，写入 {} 条摘要和 {} 条分桶。",
-                    if force_full_rebuild {
-                        "全量"
-                    } else {
-                        "增量"
-                    },
-                    summary.start_date.as_deref().unwrap_or("--"),
-                    summary.end_date.as_deref().unwrap_or("--"),
-                    summary.snapshot_rows,
-                    summary.bin_rows
-                ),
-                Some(_) => "筹码库已存在，但当前没有需要补算的筹码数据。".to_string(),
-                None => "未发现筹码库 cyq.db，已跳过筹码数据维护。".to_string(),
-            }))
+            let incremental_summary = maintain_cyq_incremental_if_db_exists(source_path)?;
+            let snapshot_rows = repair_summary
+                .as_ref()
+                .map(|summary| summary.snapshot_rows)
+                .unwrap_or(0)
+                + incremental_summary
+                    .as_ref()
+                    .map(|summary| summary.snapshot_rows)
+                    .unwrap_or(0);
+            let bin_rows = repair_summary
+                .as_ref()
+                .map(|summary| summary.bin_rows)
+                .unwrap_or(0)
+                + incremental_summary
+                    .as_ref()
+                    .map(|summary| summary.bin_rows)
+                    .unwrap_or(0);
+            let start_date = repair_summary
+                .as_ref()
+                .and_then(|summary| summary.start_date.as_deref())
+                .or_else(|| {
+                    incremental_summary
+                        .as_ref()
+                        .and_then(|summary| summary.start_date.as_deref())
+                });
+            let end_date = incremental_summary
+                .as_ref()
+                .and_then(|summary| summary.end_date.as_deref())
+                .or_else(|| {
+                    repair_summary
+                        .as_ref()
+                        .and_then(|summary| summary.end_date.as_deref())
+                });
+            Ok(Some(
+                if repair_summary.is_none() && incremental_summary.is_none() {
+                    "未发现筹码库 cyq.db，已跳过筹码数据维护。".to_string()
+                } else if snapshot_rows > 0 || bin_rows > 0 {
+                    format!(
+                        "筹码{}维护完成，区间 {} 至 {}，写入 {} 条摘要和 {} 条分桶。",
+                        if recovered_stock_codes.is_empty() {
+                            "增量"
+                        } else {
+                            "局部+增量"
+                        },
+                        start_date.unwrap_or("--"),
+                        end_date.unwrap_or("--"),
+                        snapshot_rows,
+                        bin_rows
+                    )
+                } else {
+                    "筹码库已存在，但当前没有需要补算的筹码数据。".to_string()
+                },
+            ))
         }
     }
 }
@@ -1413,16 +1506,17 @@ pub fn run_prepared_data_download(
 
     let mut completion_details = Vec::new();
     if prepared.action == "incremental-download" {
-        let force_full_rebuild = stock_recovered_stock_count > 0;
+        let recovered_stock_codes = summary.recovered_stock_codes.clone();
+        let has_recovered_stocks = !recovered_stock_codes.is_empty();
         if let Some(cb) = progress_cb {
             cb(crate::download::runner::DownloadProgress {
                 phase: "maintain_cyq_incremental".to_string(),
                 finished: 0,
                 total: 1,
                 current_label: None,
-                message: if force_full_rebuild {
+                message: if has_recovered_stocks {
                     format!(
-                        "本轮有 {} 只股票发生整段补救重下，开始按设置重头维护筹码数据。",
+                        "本轮有 {} 只股票发生整段补救重下，开始局部修复对应筹码并维护增量数据。",
                         stock_recovered_stock_count
                     )
                 } else {
@@ -1433,7 +1527,7 @@ pub fn run_prepared_data_download(
         let chip_message = maintain_chip_after_incremental_download(
             &prepared.source_path,
             prepared.chip_model.as_str(),
-            force_full_rebuild,
+            &recovered_stock_codes,
             prepared.allow_cyq_chen_strategy_rebuild,
             progress_cb,
         )?;

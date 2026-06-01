@@ -1150,6 +1150,9 @@ fn merge_summary(total: &mut DownloadSummary, batch: DownloadSummary) {
     total.saved_rows += batch.saved_rows;
     total.concept_performance_rows += batch.concept_performance_rows;
     total.recovered_stock_count += batch.recovered_stock_count;
+    total
+        .recovered_stock_codes
+        .extend(batch.recovered_stock_codes);
     total.failed_items.extend(batch.failed_items);
 }
 
@@ -2243,6 +2246,10 @@ fn download_pending_all_market_after_basic_data(
     let passed_write_batches = build_trade_date_write_batches(&passed_prepared_items)?;
     let recovered_items = recovered_batch.prepared_items;
     total.recovered_stock_count = recovered_items.len();
+    total.recovered_stock_codes = recovered_items
+        .iter()
+        .map(|item| item.ts_code.clone())
+        .collect();
 
     if passed_write_batches.is_empty() && recovered_items.is_empty() {
         return Ok(total);

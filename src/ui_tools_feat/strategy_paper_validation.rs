@@ -21,8 +21,8 @@ use crate::{
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
     scoring::tools::{
-        calc_query_need_rows, calc_query_start_date, collect_used_cyq_chen_runtime_keys,
-        cyq_chen_runtime_key_names, inject_optional_cyq_chen_fields, inject_stock_extra_fields,
+        CyqChenFieldInjector, calc_query_need_rows, calc_query_start_date,
+        collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names, inject_stock_extra_fields,
         load_st_list, load_total_share_map, rt_max_len,
     },
     simulate::DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
@@ -446,12 +446,12 @@ pub fn run_strategy_paper_validation(
             let worker_buy_program = buy_program.clone();
             let worker_reader =
                 DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
+            let cyq_chen_injector = CyqChenFieldInjector::new(source_path, &used_cyq_chen_keys);
             let mut out = Vec::new();
 
             for ts_code in ts_group {
                 if let Some(stock) = prepare_paper_stock_for_portfolio(
                     &worker_reader,
-                    source_path,
                     ts_code,
                     name_map.get(ts_code),
                     st_list.contains(ts_code),
@@ -460,7 +460,7 @@ pub fn run_strategy_paper_validation(
                     &sell_runtime_keys,
                     &rank_series_map,
                     needs_rank,
-                    &used_cyq_chen_keys,
+                    &cyq_chen_injector,
                     &resolved_start_date,
                     &resolved_end_date,
                     &query_start_date,
@@ -679,7 +679,6 @@ fn build_trade_summary(
 #[allow(clippy::too_many_arguments)]
 fn prepare_paper_stock_for_portfolio(
     reader: &DataReader,
-    source_path: &str,
     ts_code: &str,
     stock_name: Option<&String>,
     is_st: bool,
@@ -688,7 +687,7 @@ fn prepare_paper_stock_for_portfolio(
     sell_runtime_keys: &HashSet<String>,
     rank_series_map: &HashMap<String, HashMap<String, Option<f64>>>,
     needs_rank: bool,
-    used_cyq_chen_keys: &HashSet<String>,
+    cyq_chen_injector: &CyqChenFieldInjector,
     start_date: &str,
     end_date: &str,
     query_start_date: &str,
@@ -709,8 +708,7 @@ fn prepare_paper_stock_for_portfolio(
     }
 
     inject_stock_extra_fields(&mut row_data, ts_code, is_st, total_share)?;
-    let _ =
-        inject_optional_cyq_chen_fields(&mut row_data, source_path, ts_code, used_cyq_chen_keys);
+    let _ = cyq_chen_injector.inject(&mut row_data, ts_code);
     if needs_rank {
         inject_runtime_rank_series(&mut row_data, ts_code, rank_series_map)?;
     }

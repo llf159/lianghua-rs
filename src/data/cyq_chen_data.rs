@@ -383,6 +383,54 @@ fn query_latest_cyq_chen_metadata(
     Ok(Some((trade_date, config)))
 }
 
+fn query_existing_cyq_chen_trade_date_range(
+    db_path: &Path,
+) -> Result<Option<(String, String)>, String> {
+    init_cyq_chen_db(db_path)?;
+    let conn = Connection::open(db_path).map_err(|e| format!("打开新筹码库失败:{e}"))?;
+    let table_exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+            [CYQ_CHEN_SNAPSHOT_TABLE],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("检查新筹码库表结构失败:{e}"))?;
+    if table_exists <= 0 {
+        return Ok(None);
+    }
+
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT MIN(trade_date), MAX(trade_date)
+            FROM cyq_chen_snapshot
+            WHERE adj_type = ?
+            "#,
+        )
+        .map_err(|e| format!("预编译新筹码库日期范围查询失败:{e}"))?;
+    let mut rows = stmt
+        .query(params![DEFAULT_ADJ_TYPE])
+        .map_err(|e| format!("查询新筹码库日期范围失败:{e}"))?;
+    let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取新筹码库日期范围失败:{e}"))?
+    else {
+        return Ok(None);
+    };
+
+    let min_trade_date: Option<String> = row
+        .get(0)
+        .map_err(|e| format!("读取新筹码库最早日期失败:{e}"))?;
+    let max_trade_date: Option<String> = row
+        .get(1)
+        .map_err(|e| format!("读取新筹码库最晚日期失败:{e}"))?;
+
+    Ok(match (min_trade_date, max_trade_date) {
+        (Some(min_trade_date), Some(max_trade_date)) => Some((min_trade_date, max_trade_date)),
+        _ => None,
+    })
+}
+
 pub fn query_cyq_chen_strategy_maintenance_status(
     source_dir: &str,
 ) -> Result<CyqChenStrategyMaintenanceStatus, String> {
@@ -1344,6 +1392,92 @@ fn write_cyq_chen_incremental_batches_from_channel(
     }
 }
 
+fn write_cyq_chen_stock_repair_batches_from_channel(
+    db_path: &str,
+    rx: Receiver<CyqChenWriteMessage>,
+    config: ChenChipConfig,
+    ts_codes: &[String],
+    start_date: &str,
+    end_date: &str,
+    strategy_hash: String,
+) -> Result<(usize, usize), String> {
+    let mut conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
+    ensure_cyq_chen_db_indexes(&conn)?;
+
+    let write_result = (|| -> Result<(usize, usize), String> {
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("创建筹码库事务失败:{e}"))?;
+
+        for ts_code in ts_codes {
+            tx.execute(
+                "DELETE FROM cyq_chen_bin WHERE ts_code = ? AND adj_type = ? AND trade_date >= ? AND trade_date <= ?",
+                params![ts_code, DEFAULT_ADJ_TYPE, start_date, end_date],
+            )
+            .map_err(|e| format!("清理股票新筹码分桶失败, ts_code={ts_code}: {e}"))?;
+            tx.execute(
+                "DELETE FROM cyq_chen_snapshot WHERE ts_code = ? AND adj_type = ? AND trade_date >= ? AND trade_date <= ?",
+                params![ts_code, DEFAULT_ADJ_TYPE, start_date, end_date],
+            )
+            .map_err(|e| format!("清理股票新筹码摘要失败, ts_code={ts_code}: {e}"))?;
+        }
+
+        let mut snapshot_rows = 0usize;
+        let mut bin_rows = 0usize;
+        let mut batch_count = 0usize;
+        {
+            let mut snapshot_app = tx
+                .appender(CYQ_CHEN_SNAPSHOT_TABLE)
+                .map_err(|e| format!("创建cyq_chen_snapshot写入器失败:{e}"))?;
+            let mut bin_app = tx
+                .appender(CYQ_CHEN_BIN_TABLE)
+                .map_err(|e| format!("创建cyq_chen_bin写入器失败:{e}"))?;
+
+            for message in rx {
+                let batch = match message {
+                    CyqChenWriteMessage::Batch(batch) => batch,
+                    CyqChenWriteMessage::Abort(reason) => {
+                        return Err(format!("新筹码局部修复中断，结果库回滚:{reason}"));
+                    }
+                };
+
+                let (added_snapshot_rows, added_bin_rows) =
+                    append_cyq_chen_batch_rows(&mut snapshot_app, &mut bin_app, batch, config)?;
+                snapshot_rows += added_snapshot_rows;
+                bin_rows += added_bin_rows;
+                batch_count += 1;
+
+                if batch_count % CYQ_CHEN_FLUSH_BATCH_SIZE == 0 {
+                    snapshot_app
+                        .flush()
+                        .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
+                    bin_app
+                        .flush()
+                        .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
+                }
+            }
+
+            snapshot_app
+                .flush()
+                .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
+            bin_app
+                .flush()
+                .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
+        }
+
+        write_cyq_chen_meta(&tx, config, &strategy_hash)?;
+        tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
+        Ok((snapshot_rows, bin_rows))
+    })();
+
+    let recreate_result = ensure_cyq_chen_db_indexes(&conn);
+    match (write_result, recreate_result) {
+        (Ok(rows), Ok(())) => Ok(rows),
+        (Err(write_error), _) => Err(write_error),
+        (Ok(_), Err(index_error)) => Err(index_error),
+    }
+}
+
 pub fn maintain_cyq_chen_incremental_if_db_exists(
     source_dir: &str,
     allow_strategy_rebuild: bool,
@@ -1585,6 +1719,243 @@ pub fn rebuild_cyq_chen_all_if_db_exists(
         .map(|(_, config)| config)
         .unwrap_or_default();
     rebuild_cyq_chen_all_with_progress(source_dir, config, None, None, progress_cb).map(Some)
+}
+
+pub fn repair_cyq_chen_stocks_if_db_exists(
+    source_dir: &str,
+    ts_codes: &[String],
+    allow_strategy_rebuild: bool,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+) -> Result<Option<CyqChenRebuildSummary>, String> {
+    let cyq_chen_db = cyq_chen_db_path(source_dir);
+    if !cyq_chen_db.exists() {
+        return Ok(None);
+    }
+
+    let mut ts_codes = ts_codes
+        .iter()
+        .map(|ts_code| ts_code.trim())
+        .filter(|ts_code| !ts_code.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut seen = HashSet::new();
+    ts_codes.retain(|ts_code| seen.insert(ts_code.clone()));
+    ts_codes.sort();
+    if ts_codes.is_empty() {
+        return Ok(Some(CyqChenRebuildSummary {
+            snapshot_rows: 0,
+            bin_rows: 0,
+            warmup_days: ChenChipConfig::default().warmup_days,
+            bucket_pct: ChenChipConfig::default().bucket_pct,
+            start_date: None,
+            end_date: None,
+        }));
+    }
+
+    init_cyq_chen_db(&cyq_chen_db)?;
+    let Some((_, config)) = query_latest_cyq_chen_metadata(&cyq_chen_db)? else {
+        return Ok(Some(CyqChenRebuildSummary {
+            snapshot_rows: 0,
+            bin_rows: 0,
+            warmup_days: ChenChipConfig::default().warmup_days,
+            bucket_pct: ChenChipConfig::default().bucket_pct,
+            start_date: None,
+            end_date: None,
+        }));
+    };
+
+    let chip_config = load_compiled_chip_change_config(source_dir)?;
+    let strategy_hash = current_chip_change_strategy_hash(source_dir)?;
+    if query_cyq_chen_meta_value(&cyq_chen_db, "strategy_hash")?.as_deref()
+        != Some(strategy_hash.as_str())
+    {
+        if !allow_strategy_rebuild {
+            return Ok(Some(CyqChenRebuildSummary {
+                snapshot_rows: 0,
+                bin_rows: 0,
+                warmup_days: config.warmup_days,
+                bucket_pct: config.bucket_pct,
+                start_date: None,
+                end_date: None,
+            }));
+        }
+        return rebuild_cyq_chen_all_with_progress(source_dir, config, None, None, progress_cb)
+            .map(Some);
+    }
+
+    let Some((existing_start_date, existing_end_date)) =
+        query_existing_cyq_chen_trade_date_range(&cyq_chen_db)?
+    else {
+        return Ok(Some(CyqChenRebuildSummary {
+            snapshot_rows: 0,
+            bin_rows: 0,
+            warmup_days: config.warmup_days,
+            bucket_pct: config.bucket_pct,
+            start_date: None,
+            end_date: None,
+        }));
+    };
+
+    let source_db = source_db_path(source_dir);
+    if !source_db.exists() {
+        return Ok(Some(CyqChenRebuildSummary {
+            snapshot_rows: 0,
+            bin_rows: 0,
+            warmup_days: config.warmup_days,
+            bucket_pct: config.bucket_pct,
+            start_date: None,
+            end_date: None,
+        }));
+    }
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
+    let source_conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
+    let Some((start_date, end_date)) = resolve_cyq_chen_rebuild_trade_date_range(
+        &source_conn,
+        Some(&existing_start_date),
+        Some(&existing_end_date),
+    )?
+    else {
+        return Ok(Some(CyqChenRebuildSummary {
+            snapshot_rows: 0,
+            bin_rows: 0,
+            warmup_days: config.warmup_days,
+            bucket_pct: config.bucket_pct,
+            start_date: None,
+            end_date: None,
+        }));
+    };
+
+    let expression_warmup_need = estimate_chen_chip_expression_warmup(&chip_config)?;
+    let load_warmup_need = config.warmup_days.max(expression_warmup_need);
+    let Some(load_start_date) =
+        resolve_cyq_chen_load_start_date(source_dir, &start_date, &end_date, load_warmup_need)?
+    else {
+        return Ok(Some(CyqChenRebuildSummary {
+            snapshot_rows: 0,
+            bin_rows: 0,
+            warmup_days: config.warmup_days,
+            bucket_pct: config.bucket_pct,
+            start_date: Some(start_date),
+            end_date: Some(end_date),
+        }));
+    };
+
+    let required_runtime_keys = collect_chen_chip_runtime_keys(&chip_config);
+    let st_list = load_st_list(source_dir).unwrap_or_default();
+    let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
+    let cyq_chen_db_str = cyq_chen_db
+        .to_str()
+        .ok_or_else(|| "筹码库路径不是有效UTF-8".to_string())?
+        .to_string();
+    if let Some(progress_cb) = progress_cb {
+        progress_cb(DownloadProgress {
+            phase: "compute_cyq_chen".to_string(),
+            finished: 0,
+            total: ts_codes.len(),
+            current_label: None,
+            message: format!(
+                "新筹码局部修复已开始，区间 {} 至 {}，共 {} 只股票。",
+                start_date,
+                end_date,
+                ts_codes.len()
+            ),
+        });
+    }
+
+    let (tx, rx) = sync_channel(CYQ_CHEN_QUEUE_BOUND);
+    let abort_tx = tx.clone();
+    let writer_ts_codes = ts_codes.clone();
+    let write_start_date = start_date.clone();
+    let write_end_date = end_date.clone();
+    let writer_strategy_hash = strategy_hash.clone();
+    let writer_handle = thread::spawn(move || {
+        write_cyq_chen_stock_repair_batches_from_channel(
+            &cyq_chen_db_str,
+            rx,
+            config,
+            &writer_ts_codes,
+            &write_start_date,
+            &write_end_date,
+            writer_strategy_hash,
+        )
+    });
+
+    let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
+    let compute_result = ts_codes.par_chunks(CYQ_CHEN_GROUP_SIZE).try_for_each_with(
+        tx,
+        |sender, ts_group| -> Result<(), String> {
+            let worker_reader =
+                DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
+            let progress_stock_done = |ts_code: &str| {
+                if let Some(progress_cb) = progress_cb {
+                    let finished =
+                        finished_stock_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    progress_cb(DownloadProgress {
+                        phase: "compute_cyq_chen".to_string(),
+                        finished,
+                        total: ts_codes.len(),
+                        current_label: Some(ts_code.to_string()),
+                        message: format!(
+                            "新筹码局部修复中，已完成 {finished} / {} 只股票。",
+                            ts_codes.len()
+                        ),
+                    });
+                }
+            };
+            let batch = compute_cyq_chen_stock_group_batch(
+                &worker_reader,
+                None,
+                &load_start_date,
+                &start_date,
+                &end_date,
+                &chip_config,
+                config,
+                &st_list,
+                &total_share_map,
+                ts_group,
+                Some(&progress_stock_done),
+            )?;
+            sender
+                .send(CyqChenWriteMessage::Batch(batch))
+                .map_err(|e| format!("发送新筹码局部修复批次失败:{e}"))?;
+            Ok(())
+        },
+    );
+
+    if let Err(err) = &compute_result {
+        let _ = abort_tx.send(CyqChenWriteMessage::Abort(err.clone()));
+    }
+    drop(abort_tx);
+
+    let writer_result = match writer_handle.join() {
+        Ok(result) => result,
+        Err(_) => Err("筹码库写线程异常退出".to_string()),
+    };
+
+    compute_result?;
+    let (snapshot_rows, bin_rows) = writer_result?;
+    if let Some(progress_cb) = progress_cb {
+        progress_cb(DownloadProgress {
+            phase: "done".to_string(),
+            finished: ts_codes.len(),
+            total: ts_codes.len(),
+            current_label: None,
+            message: format!(
+                "新筹码局部修复完成，写入 {snapshot_rows} 条摘要和 {bin_rows} 条分桶。"
+            ),
+        });
+    }
+
+    Ok(Some(CyqChenRebuildSummary {
+        snapshot_rows,
+        bin_rows,
+        warmup_days: config.warmup_days,
+        bucket_pct: config.bucket_pct,
+        start_date: Some(start_date),
+        end_date: Some(end_date),
+    }))
 }
 
 pub fn rebuild_cyq_chen_all(

@@ -254,6 +254,7 @@ pub struct DownloadSummary {
     pub concept_performance_rows: usize,
     pub failed_items: Vec<(String, String)>,
     pub recovered_stock_count: usize,
+    pub recovered_stock_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -281,6 +282,7 @@ impl PreparedDownloadBatch {
             concept_performance_rows: 0,
             failed_items: self.failed_items.clone(),
             recovered_stock_count: 0,
+            recovered_stock_codes: Vec::new(),
         }
     }
 }

@@ -816,10 +816,7 @@ fn compute_bucket_rate_series(
     )
 }
 
-fn ensure_bucket_rate_series(
-    buckets: &mut [ChipBucket],
-    bars: &[Option<ChenChipBar>],
-) {
+fn ensure_bucket_rate_series(buckets: &mut [ChipBucket], bars: &[Option<ChenChipBar>]) {
     for bucket in buckets {
         if bucket.rateo.is_some() {
             continue;
@@ -976,7 +973,8 @@ fn expand_buckets_for_bar(
         let mut new_histories = Vec::with_capacity(high_expand_count);
         for _ in 0..high_expand_count {
             let new_high = boundary * step;
-            let (rateo, rateh, ratel, ratec) = compute_bucket_rate_series(bars, (boundary + new_high) / 2.0);
+            let (rateo, rateh, ratel, ratec) =
+                compute_bucket_rate_series(bars, (boundary + new_high) / 2.0);
             new_buckets.push(ChipBucket {
                 price_low: boundary,
                 price_high: new_high,
@@ -1250,11 +1248,7 @@ fn build_bucket_runtime(
         }
     }
 
-    insert_num_series_arc_with_lowercase_alias(
-        &mut runtime,
-        "MAIN_CHIP_RATIO",
-        main_ratio_history,
-    );
+    insert_num_series_arc_with_lowercase_alias(&mut runtime, "MAIN_CHIP_RATIO", main_ratio_history);
     insert_num_with_lowercase_alias(&mut runtime, "MAIN_CHIP_TOTAL", main_chip_total);
     insert_num_with_lowercase_alias(&mut runtime, "RETAIL_CHIP_TOTAL", retail_chip_total);
 
@@ -2012,10 +2006,7 @@ bias = 1.0
             turnover_rate: 1.0,
         })];
         let base_runtime = row_into_rt(row_data).expect("runtime should build");
-        let main_ratio_history = vec![
-            Arc::new(vec![Some(0.0)]),
-            Arc::new(vec![Some(0.0)]),
-        ];
+        let main_ratio_history = vec![Arc::new(vec![Some(0.0)]), Arc::new(vec![Some(0.0)])];
         let mut buckets = vec![
             ChipBucket {
                 price_low: 9.0,

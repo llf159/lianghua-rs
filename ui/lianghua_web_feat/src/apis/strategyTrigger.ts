@@ -374,6 +374,7 @@ export type MarketAnalysisData = {
   lookback_period: number
   stock_rank_limit: number
   sub_interval_period: number
+  min_board_stock_count: number
   latest_trade_date?: string | null
   resolved_reference_trade_date?: string | null
   board_options: string[]
@@ -521,6 +522,7 @@ export async function getMarketAnalysis(query: {
   minListedTradeDays?: number
   stockRankLimit?: number
   subIntervalPeriod?: number
+  minBoardStockCount?: number
 }) {
   return invoke<MarketAnalysisData>('get_market_analysis', query)
 }
