@@ -92,6 +92,7 @@ import "./css/DetailsPage.css";
 
 const DEFAULT_TOP_LIMIT = "100";
 const DETAIL_CHART_WINDOW_DAYS = 280;
+const DETAIL_CYQ_SCALE_WINDOW_DAYS = 60;
 const DEFAULT_VISIBLE_BARS = 90;
 const MIN_VISIBLE_BARS = 20;
 const CHART_MIN_RIGHT_ALIGNED_SLOTS = 60;
@@ -963,6 +964,33 @@ function findCyqSnapshotForTradeDate(
   return latestBeforeOrEqual ?? snapshots[snapshots.length - 1] ?? null;
 }
 
+function findCyqSnapshotIndexForTradeDate(
+  snapshots: DetailCyqSnapshot[],
+  tradeDate: string | null,
+) {
+  if (snapshots.length === 0) {
+    return -1;
+  }
+  if (!tradeDate) {
+    return snapshots.length - 1;
+  }
+
+  let latestBeforeOrEqual = -1;
+  for (let index = 0; index < snapshots.length; index += 1) {
+    const snapshot = snapshots[index];
+    if (snapshot.trade_date === tradeDate) {
+      return index;
+    }
+    if (snapshot.trade_date <= tradeDate) {
+      latestBeforeOrEqual = index;
+      continue;
+    }
+    break;
+  }
+
+  return latestBeforeOrEqual >= 0 ? latestBeforeOrEqual : snapshots.length - 1;
+}
+
 function getCyqBinChipPct(bin: DetailCyqBin, holderView: DetailCyqHolderView) {
   if (holderView === "main") {
     return typeof bin.main_chip_pct === "number" && Number.isFinite(bin.main_chip_pct)
@@ -995,6 +1023,45 @@ function getCyqBinChipValue(bin: DetailCyqBin, holderView: DetailCyqHolderView) 
     return bin.total_chip;
   }
   return Number.isFinite(bin.chip) ? bin.chip : getCyqBinChipPct(bin, holderView);
+}
+
+function getCyqSnapshotMaxChip(
+  snapshot: DetailCyqSnapshot,
+  holderView: DetailCyqHolderView,
+) {
+  return snapshot.bins.reduce(
+    (acc, bin) => Math.max(acc, getCyqBinChipValue(bin, holderView)),
+    0,
+  );
+}
+
+function getCyqScaleMaxChipInWindow(
+  snapshots: DetailCyqSnapshot[],
+  tradeDate: string | null,
+  holderView: DetailCyqHolderView,
+) {
+  const selectedIndex = findCyqSnapshotIndexForTradeDate(snapshots, tradeDate);
+  if (selectedIndex < 0) {
+    return 0;
+  }
+
+  const startIndex = Math.max(
+    0,
+    selectedIndex - DETAIL_CYQ_SCALE_WINDOW_DAYS + 1,
+  );
+  const windowSnapshots = snapshots.slice(startIndex, selectedIndex + 1);
+  const mixedMaxChip = windowSnapshots.reduce(
+    (acc, snapshot) => Math.max(acc, getCyqSnapshotMaxChip(snapshot, "mixed")),
+    0,
+  );
+  if (holderView === "mixed" || mixedMaxChip > 0) {
+    return mixedMaxChip;
+  }
+
+  return windowSnapshots.reduce(
+    (acc, snapshot) => Math.max(acc, getCyqSnapshotMaxChip(snapshot, holderView)),
+    0,
+  );
 }
 
 function findCyqPeakBin(
@@ -2590,6 +2657,7 @@ function renderChartPanel(
   isCyqPanelVisible: boolean,
   selectedCyqSnapshot: DetailCyqSnapshot | null,
   selectedCyqTradeDate: string | null,
+  cyqScaleMaxChip: number,
   reserveCyqPanelWidthForAllPanels: boolean,
   cyqHolderView: DetailCyqHolderView,
   chipToggleButton: ReactNode,
@@ -2827,9 +2895,11 @@ function renderChartPanel(
           0,
         );
         const maxChip =
-          cyqHolderView === "mixed"
-            ? totalScaleMaxChip
-            : totalScaleMaxChip || selectedScaleMaxChip;
+          cyqScaleMaxChip > 0
+            ? cyqScaleMaxChip
+            : cyqHolderView === "mixed"
+              ? totalScaleMaxChip
+              : totalScaleMaxChip || selectedScaleMaxChip;
         const peakBin = findCyqPeakBin(visibleCyqBins, cyqHolderView);
 
         if (visibleCyqBins.length > 0 && maxChip > 0) {
@@ -4997,6 +5067,15 @@ export default function DetailsPage({
     () => findCyqSnapshotForTradeDate(detailCyqSnapshots, selectedCyqTradeDate),
     [detailCyqSnapshots, selectedCyqTradeDate],
   );
+  const cyqScaleMaxChip = useMemo(
+    () =>
+      getCyqScaleMaxChipInWindow(
+        detailCyqSnapshots,
+        selectedCyqTradeDate,
+        detailCyqHolderView,
+      ),
+    [detailCyqHolderView, detailCyqSnapshots, selectedCyqTradeDate],
+  );
   const chartLayoutSlotCount = getChartLayoutSlotCount(
     chartItems.length,
     totalChartItems,
@@ -7123,6 +7202,7 @@ export default function DetailsPage({
               detailCyqVisible,
               selectedCyqSnapshot,
               selectedCyqTradeDate,
+              cyqScaleMaxChip,
               shouldReserveCyqPanelWidth,
               detailCyqHolderView,
               detailCyqModel === "chen" &&
