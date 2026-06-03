@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use duckdb::{Connection, params};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -57,6 +58,7 @@ const RUNTIME_INPUT_KEYS: [&str; 11] = [
     "TURNOVER_RATE",
     "TOR",
 ];
+const INTRADAY_TEMPLATE_PAR_CHUNK_SIZE: usize = 64;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct IntradayMonitorRow {
@@ -1092,6 +1094,90 @@ fn build_template_warning_message(rows: &[IntradayMonitorRow]) -> Option<String>
     }
 }
 
+struct IntradayTemplateWorkerContext {
+    reader: DataReader,
+    result_conn: Connection,
+}
+
+struct IntradayTemplateRuntimeContext<'a> {
+    source_path: &'a str,
+    quote_map: &'a HashMap<String, SinaQuote>,
+    compiled_templates: &'a HashMap<String, CompiledIntradayMonitorTemplate>,
+    rank_mode_configs: &'a [IntradayMonitorRankModeConfig],
+    need_rows: usize,
+    indicator_cache: &'a [IndsCache],
+    total_share_map: &'a HashMap<String, f64>,
+    cyq_chen_runtime_keys: &'a HashSet<String>,
+}
+
+fn apply_intraday_template_tag_for_row(
+    row: &mut IntradayMonitorRow,
+    runtime_context: &IntradayTemplateRuntimeContext<'_>,
+    worker_context: Option<&IntradayTemplateWorkerContext>,
+) {
+    let Some(template_id) = resolve_template_id_for_row(row, runtime_context.rank_mode_configs)
+    else {
+        return;
+    };
+    let Some(compiled_template) = runtime_context.compiled_templates.get(template_id) else {
+        set_template_tag(row, "模板缺失", "down");
+        return;
+    };
+    let Some(quote) = runtime_context.quote_map.get(&row.ts_code) else {
+        let template_name = match compiled_template {
+            CompiledIntradayMonitorTemplate::Ready(template) => template.name.as_str(),
+            CompiledIntradayMonitorTemplate::Invalid { name, .. } => name.as_str(),
+        };
+        set_template_tag(row, format!("{template_name} · 无实时"), "neutral");
+        return;
+    };
+
+    match compiled_template {
+        CompiledIntradayMonitorTemplate::Invalid { name, message } => {
+            set_template_tag(row, format!("{name} · {message}"), "down");
+        }
+        CompiledIntradayMonitorTemplate::Ready(template) => {
+            let Some(worker_context) = worker_context else {
+                set_template_tag(
+                    row,
+                    format!("{} · runtime 初始化失败", template.name),
+                    "down",
+                );
+                return;
+            };
+            let result = (|| -> Result<bool, String> {
+                let row_data = build_intraday_runtime_row_data(
+                    &worker_context.reader,
+                    &worker_context.result_conn,
+                    runtime_context.source_path,
+                    row,
+                    quote,
+                    runtime_context.need_rows,
+                    runtime_context.indicator_cache,
+                    runtime_context.total_share_map.get(&row.ts_code).copied(),
+                    runtime_context.cyq_chen_runtime_keys,
+                )?;
+                let mut rt = row_into_rt(row_data)?;
+                let value = rt
+                    .eval_program(&template.ast)
+                    .map_err(|e| format!("表达式计算错误:{}", e.msg))?;
+                let len = rt_max_len(&rt);
+                let series = Value::as_bool_series(&value, len)
+                    .map_err(|e| format!("表达式返回值非布尔:{}", e.msg))?;
+                Ok(series.last().copied().unwrap_or(false))
+            })();
+
+            match result {
+                Ok(true) => set_template_tag(row, format!("{} · 命中", template.name), "up"),
+                Ok(false) => {
+                    set_template_tag(row, format!("{} · 未命中", template.name), "neutral")
+                }
+                Err(err) => set_template_tag(row, format!("{} · {}", template.name, err), "down"),
+            }
+        }
+    }
+}
+
 fn apply_intraday_template_tags(
     source_path: &str,
     rows: &mut [IntradayMonitorRow],
@@ -1136,9 +1222,11 @@ fn apply_intraday_template_tags(
     };
     let need_rows = template_warmup_need.max(indicator_warmup_need).max(1);
 
-    let reader = match DataReader::new_with_runtime_keys(source_path, &required_runtime_keys) {
-        Ok(reader) => reader,
-        Err(err) => {
+    let has_ready_template = compiled_templates
+        .values()
+        .any(|item| matches!(item, CompiledIntradayMonitorTemplate::Ready(_)));
+    if has_ready_template {
+        if let Err(err) = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys) {
             for row in rows.iter_mut() {
                 if resolve_template_id_for_row(row, rank_mode_configs).is_some() {
                     set_template_tag(row, format!("runtime 初始化失败: {err}"), "down");
@@ -1146,10 +1234,7 @@ fn apply_intraday_template_tags(
             }
             return build_template_warning_message(rows);
         }
-    };
-    let result_conn = match open_result_conn(source_path) {
-        Ok(conn) => conn,
-        Err(err) => {
+        if let Err(err) = open_result_conn(source_path) {
             for row in rows.iter_mut() {
                 if resolve_template_id_for_row(row, rank_mode_configs).is_some() {
                     set_template_tag(row, format!("runtime 初始化失败: {err}"), "down");
@@ -1157,62 +1242,51 @@ fn apply_intraday_template_tags(
             }
             return build_template_warning_message(rows);
         }
+    }
+
+    let runtime_context = IntradayTemplateRuntimeContext {
+        source_path,
+        quote_map,
+        compiled_templates: &compiled_templates,
+        rank_mode_configs,
+        need_rows,
+        indicator_cache: &indicator_cache,
+        total_share_map: &total_share_map,
+        cyq_chen_runtime_keys: &cyq_chen_runtime_keys,
     };
 
-    for row in rows.iter_mut() {
-        let Some(template_id) = resolve_template_id_for_row(row, rank_mode_configs) else {
-            continue;
-        };
-        let Some(compiled_template) = compiled_templates.get(template_id) else {
-            set_template_tag(row, "模板缺失", "down");
-            continue;
-        };
-        let Some(quote) = quote_map.get(&row.ts_code) else {
-            let template_name = match compiled_template {
-                CompiledIntradayMonitorTemplate::Ready(template) => template.name.as_str(),
-                CompiledIntradayMonitorTemplate::Invalid { name, .. } => name.as_str(),
-            };
-            set_template_tag(row, format!("{template_name} · 无实时"), "neutral");
-            continue;
-        };
+    if has_ready_template {
+        rows.par_chunks_mut(INTRADAY_TEMPLATE_PAR_CHUNK_SIZE)
+            .for_each(|chunk| {
+                let worker_context = match (
+                    DataReader::new_with_runtime_keys(source_path, &required_runtime_keys),
+                    open_result_conn(source_path),
+                ) {
+                    (Ok(reader), Ok(result_conn)) => Some(IntradayTemplateWorkerContext {
+                        reader,
+                        result_conn,
+                    }),
+                    (Err(err), _) | (_, Err(err)) => {
+                        for row in chunk {
+                            if resolve_template_id_for_row(row, rank_mode_configs).is_some() {
+                                set_template_tag(row, format!("runtime 初始化失败: {err}"), "down");
+                            }
+                        }
+                        return;
+                    }
+                };
 
-        match compiled_template {
-            CompiledIntradayMonitorTemplate::Invalid { name, message } => {
-                set_template_tag(row, format!("{name} · {message}"), "down");
-            }
-            CompiledIntradayMonitorTemplate::Ready(template) => {
-                let result = (|| -> Result<bool, String> {
-                    let row_data = build_intraday_runtime_row_data(
-                        &reader,
-                        &result_conn,
-                        source_path,
+                for row in chunk {
+                    apply_intraday_template_tag_for_row(
                         row,
-                        quote,
-                        need_rows,
-                        &indicator_cache,
-                        total_share_map.get(&row.ts_code).copied(),
-                        &cyq_chen_runtime_keys,
-                    )?;
-                    let mut rt = row_into_rt(row_data)?;
-                    let value = rt
-                        .eval_program(&template.ast)
-                        .map_err(|e| format!("表达式计算错误:{}", e.msg))?;
-                    let len = rt_max_len(&rt);
-                    let series = Value::as_bool_series(&value, len)
-                        .map_err(|e| format!("表达式返回值非布尔:{}", e.msg))?;
-                    Ok(series.last().copied().unwrap_or(false))
-                })();
-
-                match result {
-                    Ok(true) => set_template_tag(row, format!("{} · 命中", template.name), "up"),
-                    Ok(false) => {
-                        set_template_tag(row, format!("{} · 未命中", template.name), "neutral")
-                    }
-                    Err(err) => {
-                        set_template_tag(row, format!("{} · {}", template.name, err), "down")
-                    }
+                        &runtime_context,
+                        worker_context.as_ref(),
+                    );
                 }
-            }
+            });
+    } else {
+        for row in rows.iter_mut() {
+            apply_intraday_template_tag_for_row(row, &runtime_context, None);
         }
     }
 

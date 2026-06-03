@@ -1,6 +1,7 @@
 pub mod concept;
 
 use encoding_rs::GBK;
+use rayon::prelude::*;
 use serde::Serialize;
 
 const SINA_REALTIME_URL: &str = "http://hq.sinajs.cn/";
@@ -81,13 +82,19 @@ fn sina_list_build(ts_codes: &[String], batch_size: usize) -> Result<Vec<String>
     Ok(batches)
 }
 
+fn sina_realtime_url(list: &str) -> String {
+    format!("{SINA_REALTIME_URL}?list={list}")
+}
+
 fn fetch_sina_real_time_data(
     http: &reqwest::blocking::Client,
     list: &str,
 ) -> Result<String, String> {
     let response = http
-        .get(SINA_REALTIME_URL)
-        .query(&[("list", list)])
+        .get(sina_realtime_url(list))
+        .header("Accept", "*/*")
+        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+        .header("Connection", "keep-alive")
         .header("Referer", "https://finance.sina.com.cn")
         .header("User-Agent", "Mozilla/5.0")
         .send()
@@ -111,8 +118,10 @@ async fn fetch_sina_real_time_data_async(
     list: &str,
 ) -> Result<String, String> {
     let response = http
-        .get(SINA_REALTIME_URL)
-        .query(&[("list", list)])
+        .get(sina_realtime_url(list))
+        .header("Accept", "*/*")
+        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+        .header("Connection", "keep-alive")
         .header("Referer", "https://finance.sina.com.cn")
         .header("User-Agent", "Mozilla/5.0")
         .send()
@@ -225,6 +234,23 @@ pub fn fetch_sina_quotes(
     Ok(all_quotes)
 }
 
+pub fn fetch_sina_quotes_parallel(
+    http: &reqwest::blocking::Client,
+    ts_codes: &[String],
+    batch_size: usize,
+) -> Result<Vec<SinaQuote>, String> {
+    let batches = sina_list_build(ts_codes, batch_size)?;
+    let grouped_quotes = batches
+        .par_iter()
+        .map(|batch| {
+            let raw = fetch_sina_real_time_data(http, batch)?;
+            parse_sina_quote_text(&raw)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    Ok(grouped_quotes.into_iter().flatten().collect())
+}
+
 pub async fn fetch_sina_quotes_async(
     http: &reqwest::Client,
     ts_codes: &[String],
@@ -240,4 +266,16 @@ pub async fn fetch_sina_quotes_async(
     }
 
     Ok(all_quotes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn realtime_url_keeps_comma_separated_symbol_list_unescaped() {
+        let url = sina_realtime_url("sh600000,sz000001");
+        assert_eq!(url, "http://hq.sinajs.cn/?list=sh600000,sz000001");
+        assert!(!url.contains("%2C"));
+    }
 }

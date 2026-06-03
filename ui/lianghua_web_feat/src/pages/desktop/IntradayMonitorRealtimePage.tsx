@@ -40,7 +40,7 @@ const INTRADAY_MONITOR_PARAMS_STORAGE_KEY =
   "lh_intraday_monitor_realtime_params_v1";
 const INTRADAY_MONITOR_TEMPLATE_STORAGE_KEY =
   "lh_intraday_monitor_realtime_templates_v1";
-const REFRESH_BATCH_SIZE = 50;
+const REFRESH_BATCH_SIZE = 500;
 const REFRESH_SCOPE_ALL = "__all__";
 const REFRESH_SCOPE_TOTAL = "__total__";
 
