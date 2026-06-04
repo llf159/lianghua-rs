@@ -44,6 +44,10 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 use lianghua_rs::ui_tools_feat::{
+    all_market_monitor::{
+        get_all_market_monitor_snapshot as core_get_all_market_monitor_snapshot,
+        AllMarketMonitorSnapshotData,
+    },
     chart_indicator_settings::{
         get_chart_indicator_settings as core_get_chart_indicator_settings,
         reset_chart_indicator_settings as core_reset_chart_indicator_settings,
@@ -629,6 +633,17 @@ fn validate_intraday_monitor_template_expression(
     expression: String,
 ) -> Result<IntradayMonitorTemplateValidationData, String> {
     core_validate_intraday_monitor_template_expression(source_path.as_deref(), expression)
+}
+
+#[tauri::command]
+async fn get_all_market_monitor_snapshot(
+    source_path: String,
+) -> Result<AllMarketMonitorSnapshotData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_all_market_monitor_snapshot(&source_path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1891,6 +1906,7 @@ pub fn run() {
             refresh_intraday_monitor_realtime,
             refresh_intraday_monitor_template_tags,
             validate_intraday_monitor_template_expression,
+            get_all_market_monitor_snapshot,
             get_stock_detail_page,
             get_stock_detail_strategy_snapshot,
             get_stock_detail_cyq,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import {
   intradayMonitorPage,
@@ -43,6 +43,9 @@ const INTRADAY_MONITOR_TEMPLATE_STORAGE_KEY =
 const REFRESH_BATCH_SIZE = 500;
 const REFRESH_SCOPE_ALL = "__all__";
 const REFRESH_SCOPE_TOTAL = "__total__";
+const CONTINUOUS_MONITOR_INTERVAL_MS = 1000;
+const SPEED_HISTORY_KEEP_MS = 90_000;
+const SPEED_PERIOD_OPTIONS = [10, 30, 60] as const;
 
 const TOTAL_MODE_COLUMNS = [
   "rank",
@@ -50,6 +53,7 @@ const TOTAL_MODE_COLUMNS = [
   "name",
   "realtime_price",
   "realtime_change_pct",
+  "speed_pct",
   "template_tag",
   "realtime_vol_ratio",
   "total_score",
@@ -65,6 +69,7 @@ const SCENE_MODE_COLUMNS = [
   "name",
   "realtime_price",
   "realtime_change_pct",
+  "speed_pct",
   "template_tag",
   "realtime_vol_ratio",
   "scene_score",
@@ -83,6 +88,7 @@ type NumericVisibleColumn =
   | "rank"
   | "realtime_price"
   | "realtime_change_pct"
+  | "speed_pct"
   | "realtime_vol_ratio"
   | "total_score"
   | "scene_score"
@@ -91,6 +97,11 @@ type NumericVisibleColumn =
 
 type RankMode = RankModeConfig["mode"];
 type RowDeltaMap = Record<string, Partial<Record<NumericVisibleColumn, number>>>;
+type SpeedPeriod = (typeof SPEED_PERIOD_OPTIONS)[number];
+type PriceSnapshot = {
+  capturedAt: number;
+  prices: Record<string, number>;
+};
 
 type PersistedIntradayMonitorState = {
   sourcePath: string;
@@ -137,6 +148,7 @@ const COLUMN_LABELS: Record<VisibleColumn, string> = {
   name: "名称",
   realtime_price: "实时价*",
   realtime_change_pct: "实时涨幅*",
+  speed_pct: "涨速*",
   template_tag: "模板标记",
   realtime_vol_ratio: "实时量比*",
   total_score: "总分",
@@ -155,6 +167,7 @@ const COLUMN_WIDTHS: Record<VisibleColumn, number> = {
   name: 110,
   realtime_price: 96,
   realtime_change_pct: 108,
+  speed_pct: 92,
   template_tag: 160,
   realtime_vol_ratio: 108,
   total_score: 96,
@@ -303,6 +316,24 @@ function formatPercent(value?: number | null) {
   return `${value.toFixed(2)}%`;
 }
 
+function formatClock(value: Date) {
+  return value.toLocaleTimeString("zh-CN", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function formatRefreshTime(raw: string) {
+  const value = raw.trim();
+  if (!value) return "--";
+  const withSeconds = value.match(/(\d{2}:\d{2}:\d{2})/);
+  if (withSeconds) return withSeconds[1];
+  const withMinutes = value.match(/(\d{2}:\d{2})/);
+  return withMinutes ? withMinutes[1] : value;
+}
+
 function formatDeltaValue(key: VisibleColumn, value?: number) {
   if (value === undefined || !Number.isFinite(value)) return null;
   const sign = value > 0 ? "+" : "";
@@ -418,6 +449,67 @@ function mergeRowDeltaMap(
   return next;
 }
 
+function buildPriceSnapshot(rows: IntradayMonitorRow[], capturedAt: number) {
+  const prices: Record<string, number> = {};
+  for (const row of rows) {
+    if (
+      typeof row.realtime_price === "number" &&
+      Number.isFinite(row.realtime_price) &&
+      row.realtime_price > 0
+    ) {
+      prices[getRowKey(row)] = row.realtime_price;
+    }
+  }
+  return { capturedAt, prices };
+}
+
+function appendPriceSnapshot(
+  history: PriceSnapshot[],
+  rows: IntradayMonitorRow[],
+  capturedAt: number,
+) {
+  const cutoff = capturedAt - SPEED_HISTORY_KEEP_MS;
+  return [
+    ...history.filter((item) => item.capturedAt >= cutoff),
+    buildPriceSnapshot(rows, capturedAt),
+  ];
+}
+
+function buildSpeedMap(
+  rows: IntradayMonitorRow[],
+  history: PriceSnapshot[],
+  periodSec: SpeedPeriod,
+  now: number,
+) {
+  const target = now - periodSec * 1000;
+  let baseline: PriceSnapshot | null = null;
+  for (const snapshot of history) {
+    if (snapshot.capturedAt <= target) {
+      baseline = snapshot;
+    } else {
+      break;
+    }
+  }
+  if (!baseline) return new Map<string, number>();
+
+  const out = new Map<string, number>();
+  for (const row of rows) {
+    const currentPrice = row.realtime_price;
+    const previousPrice = baseline.prices[getRowKey(row)];
+    if (
+      typeof currentPrice === "number" &&
+      Number.isFinite(currentPrice) &&
+      currentPrice > 0 &&
+      typeof previousPrice === "number" &&
+      Number.isFinite(previousPrice) &&
+      previousPrice > 0
+    ) {
+      out.set(getRowKey(row), (currentPrice / previousPrice - 1) * 100);
+    }
+  }
+  return out;
+}
+
 function waitForNextPaint() {
   if (typeof window === "undefined") {
     return Promise.resolve();
@@ -451,12 +543,6 @@ function mergeStatusMessages(messages: Array<string | null | undefined>) {
     ),
   );
   return normalized.join("；");
-}
-
-function getRefreshOverlayText(stage: RefreshStage) {
-  if (stage === "preparing") return "正在准备刷新…";
-  if (stage === "retagging") return "正在重算模板标记…";
-  return "正在刷新实时行情…";
 }
 
 export default function IntradayMonitorRealtimePage() {
@@ -583,8 +669,16 @@ export default function IntradayMonitorRealtimePage() {
   const [refreshingScope, setRefreshingScope] = useState<string | null>(null);
   const [dateOptionsLoading, setDateOptionsLoading] = useState(false);
   const [error, setError] = useState("");
+  const [currentTime, setCurrentTime] = useState(() => new Date());
 
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
+  const [continuousMonitorEnabled, setContinuousMonitorEnabled] =
+    useState(false);
+  const [speedPeriod, setSpeedPeriod] = useState<SpeedPeriod>(10);
+  const rowsRef = useRef<IntradayMonitorRow[]>([]);
+  const autoRefreshRef = useRef<() => Promise<void>>(async () => {});
+  const priceHistoryRef = useRef<PriceSnapshot[]>([]);
+  const refreshRunIdRef = useRef(0);
   const boardOptions = useMemo(
     () => buildBoardFilterOptions(STOCK_PICK_BOARD_OPTIONS, excludeStBoard),
     [excludeStBoard],
@@ -597,6 +691,11 @@ export default function IntradayMonitorRealtimePage() {
     [rows],
   );
 
+  const speedMap = useMemo(
+    () => buildSpeedMap(rows, priceHistoryRef.current, speedPeriod, Date.now()),
+    [rows, speedPeriod],
+  );
+
   const sortDefinitions = useMemo(
     () =>
       Object.fromEntries(
@@ -605,11 +704,12 @@ export default function IntradayMonitorRealtimePage() {
           .map((key) => [
             key,
             {
-              value: (row: IntradayMonitorRow) => row[key],
+              value: (row: IntradayMonitorRow) =>
+                key === "speed_pct" ? speedMap.get(getRowKey(row)) : row[key],
             } satisfies SortDefinition<IntradayMonitorRow>,
           ]),
       ) as Partial<Record<VisibleColumn, SortDefinition<IntradayMonitorRow>>>,
-    [],
+    [speedMap],
   );
 
   const { sortKey, sortDirection, sortedRows, toggleSort } = useTableSort(
@@ -645,9 +745,22 @@ export default function IntradayMonitorRealtimePage() {
   }
 
   useEffect(() => {
+    rowsRef.current = rows;
+  }, [rows]);
+
+  useEffect(() => {
     void ensureManagedSourcePath()
       .then(setSourcePath)
       .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
   }, []);
 
   useEffect(() => {
@@ -974,10 +1087,13 @@ export default function IntradayMonitorRealtimePage() {
       return;
     }
 
+    const runId = ++refreshRunIdRef.current;
+    const isRealtimeRefresh = actionLabel === "刷新实时";
+
     setLoading(true);
     setLoadingAction(actionLabel);
-    setRefreshingScope(actionLabel === "刷新实时" ? REFRESH_SCOPE_ALL : null);
-    setRefreshStage(actionLabel === "刷新实时" ? "preparing" : "idle");
+    setRefreshingScope(isRealtimeRefresh ? REFRESH_SCOPE_ALL : null);
+    setRefreshStage(isRealtimeRefresh ? "preparing" : "idle");
     setError("");
 
     const requestRankDate =
@@ -1058,6 +1174,8 @@ export default function IntradayMonitorRealtimePage() {
             rowMap.set(getRowKey(row), row);
           }
         }
+        if (runId !== refreshRunIdRef.current) return;
+
         const warningMessage = mergeStatusMessages(
           successResults.map((item) => getWarningMessage(item)),
         );
@@ -1073,13 +1191,19 @@ export default function IntradayMonitorRealtimePage() {
         const refreshedRows: IntradayMonitorRow[] = [];
         let refreshed = "";
         let warningMessage = "";
-        for (let start = 0; start < rows.length; start += REFRESH_BATCH_SIZE) {
+        const rowsToRefresh = rowsRef.current;
+        for (
+          let start = 0;
+          start < rowsToRefresh.length;
+          start += REFRESH_BATCH_SIZE
+        ) {
           const data = await refreshIntradayMonitorRealtime({
             sourcePath: sourcePathTrimmed,
-            rows: rows.slice(start, start + REFRESH_BATCH_SIZE),
+            rows: rowsToRefresh.slice(start, start + REFRESH_BATCH_SIZE),
             templates,
             rankModeConfigs,
           });
+          if (runId !== refreshRunIdRef.current) return;
           refreshedRows.push(...(data.rows ?? []));
           if (!refreshed && data.refreshed_at) refreshed = data.refreshed_at;
           warningMessage = mergeStatusMessages([
@@ -1087,23 +1211,66 @@ export default function IntradayMonitorRealtimePage() {
             getWarningMessage(data),
           ]);
         }
-        setRowDeltas(buildRowDeltaMap(rows, refreshedRows));
+        if (runId !== refreshRunIdRef.current) return;
+
+        setRowDeltas(buildRowDeltaMap(rowsToRefresh, refreshedRows));
         setRows(refreshedRows);
-        setRefreshedAt(refreshed);
+        priceHistoryRef.current = appendPriceSnapshot(
+          priceHistoryRef.current,
+          refreshedRows,
+          Date.now(),
+        );
+        setRefreshedAt(refreshed || formatClock(new Date()));
         setError(warningMessage);
       }
     } catch (readError) {
-      setError(`读取失败: ${String(readError)}`);
-      setRows([]);
-      setRowDeltas({});
-      setRefreshedAt("");
+      if (runId !== refreshRunIdRef.current) return;
+      setError(
+        `${isRealtimeRefresh ? "刷新" : "读取"}失败: ${String(readError)}`,
+      );
+      if (!isRealtimeRefresh) {
+        setRows([]);
+        setRowDeltas({});
+        setRefreshedAt("");
+      }
     } finally {
-      setLoading(false);
-      setLoadingAction(null);
-      setRefreshStage("idle");
-      setRefreshingScope(null);
+      if (runId === refreshRunIdRef.current) {
+        setLoading(false);
+        setLoadingAction(null);
+        setRefreshStage("idle");
+        setRefreshingScope(null);
+      }
     }
   }
+
+  autoRefreshRef.current = () => {
+    return onRead("刷新实时");
+  };
+
+  useEffect(() => {
+    if (!continuousMonitorEnabled) return undefined;
+    let cancelled = false;
+    let timerId: number | null = null;
+
+    const runLoop = async () => {
+      if (cancelled) return;
+      if (rowsRef.current.length > 0 && sourcePathTrimmed !== "") {
+        await autoRefreshRef.current();
+      }
+      if (!cancelled) {
+        timerId = window.setTimeout(runLoop, CONTINUOUS_MONITOR_INTERVAL_MS);
+      }
+    };
+
+    timerId = window.setTimeout(runLoop, 0);
+
+    return () => {
+      cancelled = true;
+      if (timerId !== null) {
+        window.clearTimeout(timerId);
+      }
+    };
+  }, [continuousMonitorEnabled, sourcePathTrimmed]);
 
   async function refreshRowsByGroup(groupKey: string) {
     if (!sourcePathTrimmed) return;
@@ -1154,16 +1321,22 @@ export default function IntradayMonitorRealtimePage() {
         refreshedRows.map((item) => [getRowKey(item), item]),
       );
       const refreshedDeltas = buildRowDeltaMap(targetRows, refreshedRows);
-      setRows((currentRows) =>
-        currentRows.map((item) => {
+      setRows((currentRows) => {
+        const nextRows = currentRows.map((item) => {
           const key = getRowKey(item);
           return refreshedMap.get(key) ?? item;
-        }),
-      );
+        });
+        priceHistoryRef.current = appendPriceSnapshot(
+          priceHistoryRef.current,
+          nextRows,
+          Date.now(),
+        );
+        return nextRows;
+      });
       setRowDeltas((current) =>
         mergeRowDeltaMap(current, refreshedRows, refreshedDeltas),
       );
-      setRefreshedAt(refreshed);
+      setRefreshedAt(refreshed || formatClock(new Date()));
       setError(warningMessage);
     } catch (refreshError) {
       setError(`刷新失败: ${String(refreshError)}`);
@@ -1301,8 +1474,16 @@ export default function IntradayMonitorRealtimePage() {
                     );
                   }
 
-                  const displayText = formatCell(key, row, excludedConcepts);
-                  const isRealtimePct = key === "realtime_change_pct";
+                  const speedValue =
+                    key === "speed_pct"
+                      ? speedMap.get(getRowKey(row))
+                      : undefined;
+                  const displayText =
+                    key === "speed_pct"
+                      ? formatPercent(speedValue)
+                      : formatCell(key, row, excludedConcepts);
+                  const isRealtimePct =
+                    key === "realtime_change_pct" || key === "speed_pct";
                   const deltaValue = DELTA_COLUMNS.has(key)
                     ? rowDeltas[getRowKey(row)]?.[
                         key as NumericVisibleColumn
@@ -1316,7 +1497,11 @@ export default function IntradayMonitorRealtimePage() {
                       key={`${getRowMode(row)}-${row.ts_code}-${key}`}
                       className={
                         isRealtimePct
-                          ? getPercentClassName(row.realtime_change_pct)
+                          ? getPercentClassName(
+                              key === "speed_pct"
+                                ? speedValue
+                                : row.realtime_change_pct,
+                            )
                           : undefined
                       }
                     >
@@ -1372,11 +1557,6 @@ export default function IntradayMonitorRealtimePage() {
     template: templateMap.get(config.templateId),
     canDelete: true,
   }));
-  const showRefreshOverlay =
-    loading && loadingAction === "刷新实时" && refreshStage !== "idle";
-  const refreshOverlayText = getRefreshOverlayText(refreshStage);
-  const isTotalBlockRefreshing = isRefreshingAll || isRefreshingTotal;
-
   return (
     <div className="intraday-monitor-page">
       <section className="intraday-monitor-card">
@@ -1496,7 +1676,6 @@ export default function IntradayMonitorRealtimePage() {
             type="button"
             onClick={() => void onRead("刷新实时")}
             disabled={
-              loading ||
               dateOptionsLoading ||
               sourcePathTrimmed === "" ||
               rows.length === 0
@@ -1508,6 +1687,35 @@ export default function IntradayMonitorRealtimePage() {
                 : "刷新中..."
               : "全部刷新实时"}
           </button>
+          <button
+            className={
+              continuousMonitorEnabled
+                ? "intraday-monitor-auto-toggle is-active"
+                : "intraday-monitor-auto-toggle"
+            }
+            type="button"
+            role="switch"
+            aria-checked={continuousMonitorEnabled}
+            onClick={() => setContinuousMonitorEnabled((value) => !value)}
+            disabled={dateOptionsLoading || sourcePathTrimmed === ""}
+          >
+            {continuousMonitorEnabled ? "持续监控中" : "持续监控"}
+          </button>
+          <label className="intraday-monitor-inline-field">
+            <span>涨速</span>
+            <select
+              value={speedPeriod}
+              onChange={(event) =>
+                setSpeedPeriod(Number(event.target.value) as SpeedPeriod)
+              }
+            >
+              {SPEED_PERIOD_OPTIONS.map((value) => (
+                <option key={value} value={value}>
+                  {value}秒
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
 
         <div className="intraday-monitor-config-list">
@@ -1646,29 +1854,24 @@ export default function IntradayMonitorRealtimePage() {
       <section className="intraday-monitor-card">
         <div className="intraday-monitor-table-head">
           <h3 className="intraday-monitor-subtitle">结果表格</h3>
-          <span className="intraday-monitor-table-tip">
-            * 模板表达式在 runtime 中使用实时行情字段与临时计算指标执行
-          </span>
-        </div>
-
-        {refreshedAt ? (
-          <div className="intraday-monitor-refreshed">
-            最近刷新：{refreshedAt}
+          <div className="intraday-monitor-time-strip" aria-live="polite">
+            <span className="intraday-monitor-time-pill">
+              <small>刷新</small>
+              <strong>{formatRefreshTime(refreshedAt)}</strong>
+            </span>
+            <span className="intraday-monitor-time-pill is-current">
+              <small>当前</small>
+              <strong>{formatClock(currentTime)}</strong>
+            </span>
           </div>
-        ) : null}
+        </div>
 
         {rows.length === 0 ? (
           <div className="intraday-monitor-empty">暂无数据</div>
         ) : (
           <div className="intraday-monitor-result-sections">
             {rankModeConfigs.some((item) => item.mode === "total") ? (
-              <section
-                className={
-                  isTotalBlockRefreshing
-                    ? "intraday-monitor-result-block is-refreshing"
-                    : "intraday-monitor-result-block"
-                }
-              >
+              <section className="intraday-monitor-result-block">
                 <header className="intraday-monitor-scene-head">
                   <h4>总榜</h4>
                   <div className="intraday-monitor-scene-head-actions">
@@ -1677,7 +1880,6 @@ export default function IntradayMonitorRealtimePage() {
                       type="button"
                       onClick={() => void refreshRowsByGroup("total")}
                       disabled={
-                        loading ||
                         dateOptionsLoading ||
                         sourcePathTrimmed === "" ||
                         totalModeRows.length === 0
@@ -1713,15 +1915,6 @@ export default function IntradayMonitorRealtimePage() {
                 ) : (
                   renderTable(sortedTotalRows, TOTAL_MODE_COLUMNS)
                 )}
-                {showRefreshOverlay && isTotalBlockRefreshing ? (
-                  <div className="intraday-monitor-refresh-overlay" role="status">
-                    <span
-                      className="intraday-monitor-refresh-spinner"
-                      aria-hidden="true"
-                    />
-                    <span>{refreshOverlayText}</span>
-                  </div>
-                ) : null}
               </section>
             ) : null}
 
@@ -1737,11 +1930,7 @@ export default function IntradayMonitorRealtimePage() {
                     {groupedSceneRows.map((group) => (
                       <section
                         key={group.key}
-                        className={
-                          isRefreshingAll || isRefreshingScene(group.key)
-                            ? "intraday-monitor-scene-block is-refreshing"
-                            : "intraday-monitor-scene-block"
-                        }
+                        className="intraday-monitor-scene-block"
                       >
                         <header className="intraday-monitor-scene-head">
                           <h4>{group.title}</h4>
@@ -1783,19 +1972,6 @@ export default function IntradayMonitorRealtimePage() {
                           </div>
                         </header>
                         {renderTable(group.rows, SCENE_MODE_COLUMNS)}
-                        {showRefreshOverlay &&
-                        (isRefreshingAll || isRefreshingScene(group.key)) ? (
-                          <div
-                            className="intraday-monitor-refresh-overlay"
-                            role="status"
-                          >
-                            <span
-                              className="intraday-monitor-refresh-spinner"
-                              aria-hidden="true"
-                            />
-                            <span>{refreshOverlayText}</span>
-                          </div>
-                        ) : null}
                       </section>
                     ))}
                   </div>

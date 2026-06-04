@@ -16,6 +16,7 @@ const overviewSubRoutes = [
 
 const intradayMonitorSubRoutes = [
   { path: '/intraday-monitor/realtime-ranking', label: '排名实时' },
+  { path: '/intraday-monitor/all-market', label: '全市场监控' },
   { path: '/intraday-monitor/custom-monitor', label: '自定义监控' },
 ]
 

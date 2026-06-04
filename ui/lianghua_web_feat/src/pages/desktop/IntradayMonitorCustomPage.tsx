@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import {
   refreshIntradayMonitorRealtime,
@@ -15,8 +15,12 @@ import './css/IntradayMonitorCustomPage.css'
 
 const TEMPLATE_STORAGE_KEY = 'lh_intraday_monitor_realtime_templates_v1'
 const CUSTOM_MONITOR_STATE_KEY = 'lh_intraday_custom_monitor_state_v1'
+const CONTINUOUS_MONITOR_INTERVAL_MS = 1000
+const SPEED_HISTORY_KEEP_MS = 90_000
+const SPEED_PERIOD_OPTIONS = [10, 30, 60] as const
 
 type LoadingAction = 'refresh-realtime' | 'refresh-tags' | null
+type SpeedPeriod = (typeof SPEED_PERIOD_OPTIONS)[number]
 
 type PersistedCustomMonitorState = {
   codeInput: string
@@ -30,6 +34,10 @@ type DeltaColumn =
   | 'realtime_change_pct'
   | 'realtime_vol_ratio'
 type RowDeltaMap = Record<string, Partial<Record<DeltaColumn, number>>>
+type PriceSnapshot = {
+  capturedAt: number
+  prices: Record<string, number>
+}
 
 const DELTA_COLUMNS = new Set<DeltaColumn>([
   'realtime_price',
@@ -69,6 +77,24 @@ function formatPercent(value?: number | null) {
     return '--'
   }
   return `${value.toFixed(2)}%`
+}
+
+function formatClock(value: Date) {
+  return value.toLocaleTimeString('zh-CN', {
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+}
+
+function formatRefreshTime(raw: string) {
+  const value = raw.trim()
+  if (!value) return '--'
+  const withSeconds = value.match(/(\d{2}:\d{2}:\d{2})/)
+  if (withSeconds) return withSeconds[1]
+  const withMinutes = value.match(/(\d{2}:\d{2})/)
+  return withMinutes ? withMinutes[1] : value
 }
 
 function formatDeltaValue(key: DeltaColumn, value?: number) {
@@ -150,6 +176,61 @@ function buildRowDeltaMap(
   return deltas
 }
 
+function buildPriceSnapshot(rows: IntradayMonitorRow[], capturedAt: number) {
+  const prices: Record<string, number> = {}
+  for (const row of rows) {
+    if (isFiniteNumber(row.realtime_price) && row.realtime_price > 0) {
+      prices[getRowKey(row)] = row.realtime_price
+    }
+  }
+  return { capturedAt, prices }
+}
+
+function appendPriceSnapshot(
+  history: PriceSnapshot[],
+  rows: IntradayMonitorRow[],
+  capturedAt: number,
+) {
+  const cutoff = capturedAt - SPEED_HISTORY_KEEP_MS
+  return [
+    ...history.filter((item) => item.capturedAt >= cutoff),
+    buildPriceSnapshot(rows, capturedAt),
+  ]
+}
+
+function buildSpeedMap(
+  rows: IntradayMonitorRow[],
+  history: PriceSnapshot[],
+  periodSec: SpeedPeriod,
+  now: number,
+) {
+  const target = now - periodSec * 1000
+  let baseline: PriceSnapshot | null = null
+  for (const snapshot of history) {
+    if (snapshot.capturedAt <= target) {
+      baseline = snapshot
+    } else {
+      break
+    }
+  }
+  if (!baseline) return new Map<string, number>()
+
+  const out = new Map<string, number>()
+  for (const row of rows) {
+    const currentPrice = row.realtime_price
+    const previousPrice = baseline.prices[getRowKey(row)]
+    if (
+      isFiniteNumber(currentPrice) &&
+      currentPrice > 0 &&
+      isFiniteNumber(previousPrice) &&
+      previousPrice > 0
+    ) {
+      out.set(getRowKey(row), (currentPrice / previousPrice - 1) * 100)
+    }
+  }
+  return out
+}
+
 function waitForNextPaint() {
   if (typeof window === 'undefined') {
     return Promise.resolve()
@@ -207,11 +288,22 @@ export default function IntradayMonitorCustomPage() {
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [templateModalOpen, setTemplateModalOpen] = useState(false)
+  const [continuousMonitorEnabled, setContinuousMonitorEnabled] = useState(false)
+  const [speedPeriod, setSpeedPeriod] = useState<SpeedPeriod>(10)
+  const [currentTime, setCurrentTime] = useState(() => new Date())
+  const loadingRef = useRef(false)
+  const rowsRef = useRef<IntradayMonitorRow[]>([])
+  const refreshRealtimeRef = useRef<() => void>(() => {})
+  const priceHistoryRef = useRef<PriceSnapshot[]>([])
 
   const sourcePathTrimmed = sourcePath.trim()
   const refreshingRealtime = loadingAction === 'refresh-realtime'
   const refreshingTags = loadingAction === 'refresh-tags'
   const isBusy = loadingAction !== null
+  const speedMap = useMemo(
+    () => buildSpeedMap(rows, priceHistoryRef.current, speedPeriod, Date.now()),
+    [rows, speedPeriod],
+  )
   const displayedRows = useMemo(() => {
     const hitRows: IntradayMonitorRow[] = []
     const otherRows: IntradayMonitorRow[] = []
@@ -242,6 +334,23 @@ export default function IntradayMonitorCustomPage() {
       })
       .catch(() => {})
   }, [])
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setCurrentTime(new Date())
+    }, 1000)
+    return () => {
+      window.clearInterval(intervalId)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadingRef.current = isBusy
+  }, [isBusy])
+
+  useEffect(() => {
+    rowsRef.current = rows
+  }, [rows])
 
   const updateTemplates = useCallback((nextTemplates: IntradayMonitorTemplate[]) => {
     setTemplates(nextTemplates)
@@ -280,12 +389,11 @@ export default function IntradayMonitorCustomPage() {
 
     return [
       `当前共 ${rows.length} 只`,
-      refreshedAt ? `最新刷新 ${refreshedAt}` : '待刷新实时',
       selectedTemplateId !== '' ? '已启用模板标记' : '未启用模板标记',
     ]
       .filter(Boolean)
       .join(' | ')
-  }, [refreshedAt, refreshingRealtime, rows.length, selectedTemplateId])
+  }, [refreshingRealtime, rows.length, selectedTemplateId])
 
   function onApplyCodeList() {
     const parts = splitCodes(codeInput)
@@ -336,6 +444,7 @@ export default function IntradayMonitorCustomPage() {
 
     setRows(nextRows)
     setRowDeltas({})
+    priceHistoryRef.current = []
     setRefreshedAt('')
     setError('')
     if (invalidInputs.length > 0) {
@@ -376,7 +485,12 @@ export default function IntradayMonitorCustomPage() {
       const nextRows = result.rows ?? []
       setRowDeltas(buildRowDeltaMap(rows, nextRows))
       setRows(nextRows)
-      setRefreshedAt(result.refreshed_at ?? '')
+      priceHistoryRef.current = appendPriceSnapshot(
+        priceHistoryRef.current,
+        nextRows,
+        Date.now(),
+      )
+      setRefreshedAt(result.refreshed_at || formatClock(new Date()))
       setError(result.warning_message ?? result.warningMessage ?? '')
       setNotice(`刷新完成，共 ${result.rows?.length ?? 0} 只。`)
     } catch (runError) {
@@ -385,6 +499,27 @@ export default function IntradayMonitorCustomPage() {
       setLoadingAction(null)
     }
   }
+
+  refreshRealtimeRef.current = () => {
+    void onRefreshRealtime()
+  }
+
+  useEffect(() => {
+    if (!continuousMonitorEnabled) return undefined
+    const intervalId = window.setInterval(() => {
+      if (
+        rowsRef.current.length > 0 &&
+        !loadingRef.current &&
+        sourcePathTrimmed !== ''
+      ) {
+        refreshRealtimeRef.current()
+      }
+    }, CONTINUOUS_MONITOR_INTERVAL_MS)
+
+    return () => {
+      window.clearInterval(intervalId)
+    }
+  }, [continuousMonitorEnabled, sourcePathTrimmed])
 
   async function onRefreshTemplateTagsOnly() {
     if (sourcePathTrimmed === '') {
@@ -499,6 +634,36 @@ export default function IntradayMonitorCustomPage() {
           >
             {refreshingTags ? '重算中...' : '仅刷新标记'}
           </button>
+          <button
+            type="button"
+            className={[
+              'intraday-custom-auto-toggle',
+              continuousMonitorEnabled ? 'is-active' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+            role="switch"
+            aria-checked={continuousMonitorEnabled}
+            onClick={() => setContinuousMonitorEnabled((value) => !value)}
+            disabled={sourcePathTrimmed === ''}
+          >
+            {continuousMonitorEnabled ? '持续监控中' : '持续监控'}
+          </button>
+          <label className="intraday-custom-inline-field">
+            <span>涨速</span>
+            <select
+              value={speedPeriod}
+              onChange={(event) =>
+                setSpeedPeriod(Number(event.target.value) as SpeedPeriod)
+              }
+            >
+              {SPEED_PERIOD_OPTIONS.map((value) => (
+                <option key={value} value={value}>
+                  {value}秒
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
 
         {notice ? <div className="intraday-custom-notice">{notice}</div> : null}
@@ -518,12 +683,22 @@ export default function IntradayMonitorCustomPage() {
             <div className="intraday-custom-scene-head-actions">
               <span>{rows.length} 只</span>
               <span>{selectedTemplateId !== '' ? '模板标记开启' : '模板标记关闭'}</span>
+              <div className="intraday-custom-time-strip" aria-live="polite">
+                <span className="intraday-custom-time-pill">
+                  <small>刷新</small>
+                  <strong>{formatRefreshTime(refreshedAt)}</strong>
+                </span>
+                <span className="intraday-custom-time-pill is-current">
+                  <small>当前</small>
+                  <strong>{formatClock(currentTime)}</strong>
+                </span>
+              </div>
             </div>
           </div>
           <div className="intraday-custom-table-wrap">
             <table
               className="intraday-custom-table"
-              style={{ minWidth: '1238px' }}
+              style={{ minWidth: '1330px' }}
             >
               <colgroup>
                 <col style={{ width: 72 }} />
@@ -531,6 +706,7 @@ export default function IntradayMonitorCustomPage() {
                 <col style={{ width: 110 }} />
                 <col style={{ width: 96 }} />
                 <col style={{ width: 108 }} />
+                <col style={{ width: 92 }} />
                 <col style={{ width: 160 }} />
                 <col style={{ width: 108 }} />
                 <col style={{ width: 96 }} />
@@ -544,6 +720,7 @@ export default function IntradayMonitorCustomPage() {
                   <th>名称</th>
                   <th>实时价*</th>
                   <th>实时涨幅*</th>
+                  <th>涨速*</th>
                   <th>模板标记</th>
                   <th>实时量比*</th>
                   <th>板块</th>
@@ -554,7 +731,7 @@ export default function IntradayMonitorCustomPage() {
               <tbody>
                 {rows.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="intraday-custom-empty-cell">
+                    <td colSpan={11} className="intraday-custom-empty-cell">
                       暂无数据
                     </td>
                   </tr>
@@ -577,6 +754,7 @@ export default function IntradayMonitorCustomPage() {
                       'realtime_vol_ratio',
                       volRatioDelta,
                     )
+                    const speedPct = speedMap.get(getRowKey(row))
 
                     return (
                       <tr key={row.ts_code}>
@@ -627,6 +805,9 @@ export default function IntradayMonitorCustomPage() {
                               </span>
                             ) : null}
                           </span>
+                        </td>
+                        <td className={getPercentClassName(speedPct)}>
+                          {formatPercent(speedPct)}
                         </td>
                         <td>
                           <span

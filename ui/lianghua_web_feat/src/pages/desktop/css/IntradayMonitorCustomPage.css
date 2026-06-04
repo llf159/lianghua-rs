@@ -106,6 +106,34 @@
   cursor: pointer;
 }
 
+.intraday-custom-auto-toggle {
+  font-weight: 600;
+}
+
+.intraday-custom-auto-toggle.is-active {
+  border-color: var(--theme-orange-600) !important;
+  background: #fff7ed !important;
+  color: #c2410c !important;
+}
+
+.intraday-custom-inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #56607a;
+  font-size: 13px;
+}
+
+.intraday-custom-inline-field select {
+  border: 1px solid #c6d0da;
+  border-radius: 8px;
+  min-height: 34px;
+  padding: 6px 28px 6px 10px;
+  color: #1f2a44;
+  background: #fff;
+  font-size: 14px;
+}
+
 .intraday-custom-toolbar-btn.is-loading {
   position: relative;
   padding-left: 30px;
@@ -187,6 +215,47 @@
   flex-wrap: wrap;
   color: #5a6780;
   font-size: 12px;
+}
+
+.intraday-custom-time-strip {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.intraday-custom-time-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 6px 9px;
+  color: #334155;
+}
+
+.intraday-custom-time-pill small {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.intraday-custom-time-pill strong {
+  color: #1f2a44;
+  font-size: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.intraday-custom-time-pill.is-current {
+  border-color: #fed7aa;
+  background: #fff7ed;
+}
+
+.intraday-custom-time-pill.is-current strong {
+  color: #c2410c;
 }
 
 .intraday-custom-table-wrap {

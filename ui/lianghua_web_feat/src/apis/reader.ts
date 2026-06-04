@@ -149,6 +149,35 @@ export type IntradayMonitorPageData = {
   warningMessage?: string;
 };
 
+export type AllMarketMonitorRow = {
+  ts_code: string;
+  name: string;
+  board: string;
+  rank?: number | null;
+  best_rank_3d?: number | null;
+  total_score?: number | null;
+  realtime_trade_date?: string | null;
+  realtime_price?: number | null;
+  realtime_open?: number | null;
+  realtime_high?: number | null;
+  realtime_low?: number | null;
+  realtime_pre_close?: number | null;
+  realtime_change_pct?: number | null;
+  realtime_change_open_pct?: number | null;
+  realtime_vol?: number | null;
+  realtime_amount?: number | null;
+  total_mv_yi?: number | null;
+  refreshed_at?: string | null;
+};
+
+export type AllMarketMonitorSnapshotData = {
+  rows: AllMarketMonitorRow[];
+  refreshed_at?: string | null;
+  rank_date?: string | null;
+  requested_count: number;
+  fetched_count: number;
+};
+
 export type IntradayRealtimeRefreshQuery = {
   sourcePath: string;
   rows: IntradayMonitorRow[];
@@ -217,6 +246,13 @@ export async function validateIntradayMonitorTemplateExpression(
   return invoke<IntradayMonitorTemplateValidationData>(
     "validate_intraday_monitor_template_expression",
     { sourcePath, expression },
+  );
+}
+
+export async function getAllMarketMonitorSnapshot(sourcePath: string) {
+  return invoke<AllMarketMonitorSnapshotData>(
+    "get_all_market_monitor_snapshot",
+    { sourcePath },
   );
 }
 

@@ -147,6 +147,12 @@ pub fn fetch_all_market_realtime_quote_map(
     source_path: &str,
 ) -> Result<(HashMap<String, SinaQuote>, RealtimeFetchMeta), String> {
     let ts_codes = load_all_market_ts_codes(source_path)?;
+    fetch_all_market_realtime_quote_map_for_codes(&ts_codes)
+}
+
+pub fn fetch_all_market_realtime_quote_map_for_codes(
+    ts_codes: &[String],
+) -> Result<(HashMap<String, SinaQuote>, RealtimeFetchMeta), String> {
     let requested_count = ts_codes.len();
     let effective_count = requested_count;
     let truncated = false;
@@ -172,8 +178,8 @@ pub fn fetch_all_market_realtime_quote_map(
         .timeout(Duration::from_secs(REALTIME_REQUEST_TIMEOUT_SECS))
         .build()
         .map_err(|e| format!("创建全市场实时行情客户端失败: {e}"))?;
-    let quotes = fetch_sina_quotes_parallel(&http, &ts_codes, REALTIME_BATCH_CAP)?;
-    let (mut quote_map, missing_codes) = build_realtime_quote_map_result(&ts_codes, quotes);
+    let quotes = fetch_sina_quotes_parallel(&http, ts_codes, REALTIME_BATCH_CAP)?;
+    let (mut quote_map, missing_codes) = build_realtime_quote_map_result(ts_codes, quotes);
 
     for ts_code in &missing_codes {
         let retry_quotes = fetch_sina_quotes(&http, std::slice::from_ref(ts_code), 1)?;

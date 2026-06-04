@@ -32,17 +32,6 @@
   flex-wrap: wrap;
 }
 
-.intraday-monitor-table-tip {
-  font-size: 12px;
-  color: #7b869a;
-}
-
-.intraday-monitor-refreshed {
-  margin-bottom: 8px;
-  font-size: 12px;
-  color: #5a6780;
-}
-
 .intraday-monitor-form-grid {
   margin-top: 12px;
   display: grid;
@@ -82,7 +71,8 @@
 }
 
 .intraday-monitor-read-btn,
-.intraday-monitor-refresh-btn {
+.intraday-monitor-refresh-btn,
+.intraday-monitor-auto-toggle {
   border-radius: 8px;
   padding: 8px 14px;
   font-size: 14px;
@@ -101,11 +91,43 @@
   color: #425367;
 }
 
+.intraday-monitor-auto-toggle {
+  border: 1px solid #c6d0da;
+  background: #fff;
+  color: #425367;
+  font-weight: 600;
+}
+
+.intraday-monitor-auto-toggle.is-active {
+  border-color: var(--theme-orange-600);
+  background: #fff7ed;
+  color: #c2410c;
+}
+
 .intraday-monitor-read-btn:disabled,
 .intraday-monitor-refresh-btn:disabled,
+.intraday-monitor-auto-toggle:disabled,
 .intraday-monitor-delete-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.intraday-monitor-inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #56607a;
+  font-size: 13px;
+}
+
+.intraday-monitor-inline-field select {
+  border: 1px solid #c6d0da;
+  border-radius: 8px;
+  min-height: 34px;
+  padding: 6px 28px 6px 10px;
+  color: #1f2a44;
+  background: #fff;
+  font-size: 14px;
 }
 
 .intraday-monitor-config-list {
@@ -207,12 +229,6 @@
   position: relative;
 }
 
-.intraday-monitor-result-block.is-refreshing,
-.intraday-monitor-scene-block.is-refreshing {
-  opacity: 0.72;
-  transition: opacity 160ms ease;
-}
-
 .intraday-monitor-scene-groups {
   display: flex;
   flex-direction: column;
@@ -266,6 +282,47 @@
   overflow: auto;
   border: 1px solid #e8edf4;
   border-radius: 10px;
+}
+
+.intraday-monitor-time-strip {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.intraday-monitor-time-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 6px 9px;
+  color: #334155;
+}
+
+.intraday-monitor-time-pill small {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.intraday-monitor-time-pill strong {
+  color: #1f2a44;
+  font-size: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.intraday-monitor-time-pill.is-current {
+  border-color: #fed7aa;
+  background: #fff7ed;
+}
+
+.intraday-monitor-time-pill.is-current strong {
+  color: #c2410c;
 }
 
 .intraday-monitor-table {
@@ -399,41 +456,6 @@
   color: #53627a;
   background: #f3f6fa;
   border-color: #d8e0ea;
-}
-
-.intraday-monitor-refresh-overlay {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  background: rgba(255, 255, 255, 0.66);
-  backdrop-filter: blur(1px);
-  color: #4f5f73;
-  font-size: 13px;
-  pointer-events: none;
-  border-radius: 10px;
-  z-index: 2;
-}
-
-.intraday-monitor-refresh-spinner {
-  width: 14px;
-  height: 14px;
-  border-radius: 999px;
-  border: 2px solid #d7e0ea;
-  border-top-color: var(--theme-orange-600);
-  animation: intraday-monitor-spin 0.8s linear infinite;
-}
-
-@keyframes intraday-monitor-spin {
-  from {
-    transform: rotate(0deg);
-  }
-
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 .intraday-monitor-modal-mask {

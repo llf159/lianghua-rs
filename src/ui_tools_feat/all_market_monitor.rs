@@ -1,0 +1,403 @@
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+};
+
+use duckdb::{Connection, params};
+use serde::Serialize;
+
+use crate::{
+    crawler::SinaQuote,
+    data::{load_stock_list, result_db_path},
+    ui_tools_feat::realtime::{RealtimeFetchMeta, fetch_all_market_realtime_quote_map_for_codes},
+    utils::utils::board_category,
+};
+
+#[derive(Debug, Clone)]
+struct StockMeta {
+    ts_code: String,
+    name: String,
+    board: String,
+    total_mv_yi: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct SourceMetaCacheEntry {
+    stocks: Vec<StockMeta>,
+}
+
+#[derive(Debug, Clone)]
+struct RankContext {
+    rank: Option<i64>,
+    best_rank_3d: Option<i64>,
+    total_score: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct RankCacheEntry {
+    rank_date: String,
+    ranks: HashMap<String, RankContext>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AllMarketMonitorRow {
+    pub ts_code: String,
+    pub name: String,
+    pub board: String,
+    pub rank: Option<i64>,
+    pub best_rank_3d: Option<i64>,
+    pub total_score: Option<f64>,
+    pub realtime_trade_date: Option<String>,
+    pub realtime_price: Option<f64>,
+    pub realtime_open: Option<f64>,
+    pub realtime_high: Option<f64>,
+    pub realtime_low: Option<f64>,
+    pub realtime_pre_close: Option<f64>,
+    pub realtime_change_pct: Option<f64>,
+    pub realtime_change_open_pct: Option<f64>,
+    pub realtime_vol: Option<f64>,
+    pub realtime_amount: Option<f64>,
+    pub total_mv_yi: Option<f64>,
+    pub refreshed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AllMarketMonitorSnapshotData {
+    pub rows: Vec<AllMarketMonitorRow>,
+    pub refreshed_at: Option<String>,
+    pub rank_date: Option<String>,
+    pub requested_count: usize,
+    pub fetched_count: usize,
+}
+
+static SOURCE_META_CACHE: OnceLock<Mutex<HashMap<String, SourceMetaCacheEntry>>> = OnceLock::new();
+static RANK_CONTEXT_CACHE: OnceLock<Mutex<HashMap<String, RankCacheEntry>>> = OnceLock::new();
+
+fn source_meta_cache() -> &'static Mutex<HashMap<String, SourceMetaCacheEntry>> {
+    SOURCE_META_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn rank_context_cache() -> &'static Mutex<HashMap<String, RankCacheEntry>> {
+    RANK_CONTEXT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn parse_total_mv_yi(raw: Option<&String>) -> Option<f64> {
+    raw?.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .map(|value| value / 1e4)
+}
+
+fn load_source_meta(source_path: &str) -> Result<SourceMetaCacheEntry, String> {
+    let mut stocks = Vec::new();
+    for cols in load_stock_list(source_path)? {
+        let Some(ts_code) = cols.first().map(|value| value.trim()) else {
+            continue;
+        };
+        if ts_code.is_empty() {
+            continue;
+        }
+        let name = cols.get(2).map(|value| value.trim()).unwrap_or_default();
+        stocks.push(StockMeta {
+            ts_code: ts_code.to_string(),
+            name: name.to_string(),
+            board: board_category(ts_code, Some(name)).to_string(),
+            total_mv_yi: parse_total_mv_yi(cols.get(9)),
+        });
+    }
+    Ok(SourceMetaCacheEntry { stocks })
+}
+
+fn cached_source_meta(source_path: &str) -> Result<SourceMetaCacheEntry, String> {
+    if let Some(entry) = source_meta_cache()
+        .lock()
+        .map_err(|_| "股票基础信息缓存锁已损坏".to_string())?
+        .get(source_path)
+        .cloned()
+    {
+        return Ok(entry);
+    }
+
+    let entry = load_source_meta(source_path)?;
+    source_meta_cache()
+        .lock()
+        .map_err(|_| "股票基础信息缓存锁已损坏".to_string())?
+        .insert(source_path.to_string(), entry.clone());
+    Ok(entry)
+}
+
+fn open_result_conn(source_path: &str) -> Result<Connection, String> {
+    let result_db = result_db_path(source_path);
+    let result_db_str = result_db
+        .to_str()
+        .ok_or_else(|| "结果库路径不是有效UTF-8".to_string())?;
+    Connection::open(result_db_str).map_err(|e| format!("打开结果库失败: {e}"))
+}
+
+fn query_latest_rank_date(conn: &Connection) -> Result<String, String> {
+    let mut stmt = conn
+        .prepare("SELECT MAX(trade_date) FROM score_summary")
+        .map_err(|e| format!("预编译最新总榜日期失败: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("查询最新总榜日期失败: {e}"))?;
+
+    if let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取最新总榜日期失败: {e}"))?
+    {
+        let trade_date: Option<String> = row
+            .get(0)
+            .map_err(|e| format!("读取最新总榜日期字段失败: {e}"))?;
+        if let Some(value) = trade_date.filter(|value| !value.trim().is_empty()) {
+            return Ok(value);
+        }
+    }
+
+    Err("score_summary 没有可用交易日".to_string())
+}
+
+fn load_rank_context(
+    conn: &Connection,
+    rank_date: &str,
+) -> Result<HashMap<String, RankContext>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            WITH recent_dates AS (
+                SELECT trade_date
+                FROM score_summary
+                GROUP BY trade_date
+                ORDER BY trade_date DESC
+                LIMIT 3
+            )
+            SELECT
+                ts_code,
+                MAX(CASE WHEN trade_date = ? THEN rank ELSE NULL END) AS current_rank,
+                MIN(CASE WHEN rank IS NOT NULL THEN rank ELSE NULL END) AS best_rank_3d,
+                MAX(CASE WHEN trade_date = ? THEN total_score ELSE NULL END) AS current_total_score
+            FROM score_summary
+            WHERE trade_date IN (SELECT trade_date FROM recent_dates)
+            GROUP BY ts_code
+            "#,
+        )
+        .map_err(|e| format!("预编译全市场总榜排名失败: {e}"))?;
+    let mut rows = stmt
+        .query(params![rank_date, rank_date])
+        .map_err(|e| format!("查询全市场总榜排名失败: {e}"))?;
+    let mut out = HashMap::new();
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取全市场总榜排名失败: {e}"))?
+    {
+        let ts_code: String = row.get(0).map_err(|e| format!("读取排名代码失败: {e}"))?;
+        if ts_code.trim().is_empty() {
+            continue;
+        }
+        out.insert(
+            ts_code,
+            RankContext {
+                rank: row.get(1).map_err(|e| format!("读取排名失败: {e}"))?,
+                best_rank_3d: row
+                    .get(2)
+                    .map_err(|e| format!("读取三日最优排名失败: {e}"))?,
+                total_score: row.get(3).map_err(|e| format!("读取总分失败: {e}"))?,
+            },
+        );
+    }
+
+    Ok(out)
+}
+
+fn cached_rank_context(
+    source_path: &str,
+    conn: &Connection,
+    rank_date: &str,
+) -> Result<HashMap<String, RankContext>, String> {
+    if let Some(entry) = rank_context_cache()
+        .lock()
+        .map_err(|_| "排名缓存锁已损坏".to_string())?
+        .get(source_path)
+        .filter(|entry| entry.rank_date == rank_date)
+        .cloned()
+    {
+        return Ok(entry.ranks);
+    }
+
+    let ranks = load_rank_context(conn, rank_date)?;
+    rank_context_cache()
+        .lock()
+        .map_err(|_| "排名缓存锁已损坏".to_string())?
+        .insert(
+            source_path.to_string(),
+            RankCacheEntry {
+                rank_date: rank_date.to_string(),
+                ranks: ranks.clone(),
+            },
+        );
+    Ok(ranks)
+}
+
+fn normalize_quote_trade_date(raw: &str) -> Option<String> {
+    let digits: String = raw.chars().filter(|ch| ch.is_ascii_digit()).collect();
+    if digits.len() == 8 {
+        Some(digits)
+    } else {
+        None
+    }
+}
+
+fn quote_change_open_pct(quote: &SinaQuote) -> Option<f64> {
+    if quote.open > 0.0 {
+        Some((quote.price / quote.open - 1.0) * 100.0)
+    } else {
+        None
+    }
+}
+
+fn build_rows(
+    meta: &SourceMetaCacheEntry,
+    ranks: &HashMap<String, RankContext>,
+    quotes: &HashMap<String, SinaQuote>,
+    fetch_meta: &RealtimeFetchMeta,
+) -> Vec<AllMarketMonitorRow> {
+    meta.stocks
+        .iter()
+        .map(|stock| {
+            let quote = quotes.get(&stock.ts_code);
+            let rank = ranks.get(&stock.ts_code);
+            AllMarketMonitorRow {
+                ts_code: stock.ts_code.clone(),
+                name: quote
+                    .map(|item| item.name.trim())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(stock.name.as_str())
+                    .to_string(),
+                board: stock.board.clone(),
+                rank: rank.and_then(|item| item.rank),
+                best_rank_3d: rank.and_then(|item| item.best_rank_3d),
+                total_score: rank.and_then(|item| item.total_score),
+                realtime_trade_date: quote.and_then(|item| normalize_quote_trade_date(&item.date)),
+                realtime_price: quote.map(|item| item.price),
+                realtime_open: quote.map(|item| item.open),
+                realtime_high: quote.map(|item| item.high),
+                realtime_low: quote.map(|item| item.low),
+                realtime_pre_close: quote.map(|item| item.pre_close),
+                realtime_change_pct: quote.and_then(|item| item.change_pct),
+                realtime_change_open_pct: quote.and_then(quote_change_open_pct),
+                realtime_vol: quote.map(|item| item.vol),
+                realtime_amount: quote.map(|item| item.amount),
+                total_mv_yi: stock.total_mv_yi,
+                refreshed_at: fetch_meta.refreshed_at.clone(),
+            }
+        })
+        .collect()
+}
+
+pub fn get_all_market_monitor_snapshot(
+    source_path: &str,
+) -> Result<AllMarketMonitorSnapshotData, String> {
+    let meta = cached_source_meta(source_path)?;
+    let ts_codes = meta
+        .stocks
+        .iter()
+        .map(|item| item.ts_code.clone())
+        .collect::<Vec<_>>();
+    let (quotes, fetch_meta) = fetch_all_market_realtime_quote_map_for_codes(&ts_codes)?;
+
+    let conn = open_result_conn(source_path)?;
+    let rank_date = query_latest_rank_date(&conn)?;
+    let ranks = cached_rank_context(source_path, &conn, &rank_date)?;
+    let rows = build_rows(&meta, &ranks, &quotes, &fetch_meta);
+
+    Ok(AllMarketMonitorSnapshotData {
+        rows,
+        refreshed_at: fetch_meta.refreshed_at,
+        rank_date: Some(rank_date),
+        requested_count: fetch_meta.requested_count,
+        fetched_count: fetch_meta.fetched_count,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_meta() -> SourceMetaCacheEntry {
+        SourceMetaCacheEntry {
+            stocks: vec![
+                StockMeta {
+                    ts_code: "000001.SZ".to_string(),
+                    name: "平安银行".to_string(),
+                    board: "主板".to_string(),
+                    total_mv_yi: Some(100.0),
+                },
+                StockMeta {
+                    ts_code: "300001.SZ".to_string(),
+                    name: "特锐德".to_string(),
+                    board: "创业/科创".to_string(),
+                    total_mv_yi: None,
+                },
+            ],
+        }
+    }
+
+    fn sample_fetch_meta() -> RealtimeFetchMeta {
+        RealtimeFetchMeta {
+            requested_count: 2,
+            effective_count: 2,
+            fetched_count: 1,
+            truncated: false,
+            refreshed_at: Some("20240603 09:31:00".to_string()),
+            quote_trade_date: Some("20240603".to_string()),
+            quote_time: Some("09:31:00".to_string()),
+        }
+    }
+
+    #[test]
+    fn build_rows_keeps_unranked_and_unquoted_stocks() {
+        let mut ranks = HashMap::new();
+        ranks.insert(
+            "000001.SZ".to_string(),
+            RankContext {
+                rank: Some(12),
+                best_rank_3d: Some(5),
+                total_score: Some(88.5),
+            },
+        );
+        let mut quotes = HashMap::new();
+        quotes.insert(
+            "000001.SZ".to_string(),
+            SinaQuote {
+                date: "2024-06-03".to_string(),
+                time: "09:31:00".to_string(),
+                ts_code: "000001.SZ".to_string(),
+                name: "平安银行".to_string(),
+                open: 10.0,
+                high: 10.2,
+                low: 9.9,
+                pre_close: 9.8,
+                price: 10.1,
+                vol: 1000.0,
+                amount: 10_000.0,
+                change_pct: Some(1.02),
+            },
+        );
+
+        let rows = build_rows(&sample_meta(), &ranks, &quotes, &sample_fetch_meta());
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].rank, Some(12));
+        assert_eq!(rows[0].best_rank_3d, Some(5));
+        assert_eq!(rows[0].total_score, Some(88.5));
+        assert_eq!(rows[0].realtime_trade_date.as_deref(), Some("20240603"));
+        let change_open_pct = rows[0]
+            .realtime_change_open_pct
+            .expect("open change should exist");
+        assert!((change_open_pct - 1.0).abs() < 1e-9);
+        assert_eq!(rows[1].rank, None);
+        assert_eq!(rows[1].realtime_price, None);
+    }
+}
