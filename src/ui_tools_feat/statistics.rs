@@ -39,7 +39,7 @@ use crate::{
         },
         rule::{
             RuleLayerConfig, RuleLayerFromDbInput, RuleLayerRuntimeCache,
-            build_rule_layer_runtime_cache, calc_all_rule_layer_metrics_from_db,
+            build_rule_layer_runtime_cache_from_stock_data, calc_all_rule_layer_metrics_from_db,
             calc_all_rule_layer_metrics_from_rows, calc_rule_layer_metrics_from_db,
             calc_rule_layer_metrics_with_samples_from_cache,
             visit_triggered_rule_samples_from_cache,
@@ -2688,6 +2688,32 @@ fn load_validation_similarity_cache(
     })
 }
 
+fn empty_validation_similarity_cache() -> ValidationSimilarityCache {
+    ValidationSimilarityCache {
+        total_samples: 0.0,
+        rule_names: Vec::new(),
+        rule_hit_counts: Vec::new(),
+        pair_to_rule_indices: HashMap::new(),
+    }
+}
+
+fn load_validation_similarity_cache_optional(
+    source_path: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<ValidationSimilarityCache, String> {
+    let result_db = result_db_path(source_path);
+    if !result_db.exists() {
+        return Ok(empty_validation_similarity_cache());
+    }
+
+    let result_conn = open_result_conn(source_path)?;
+    match load_validation_similarity_cache(&result_conn, start_date, end_date) {
+        Ok(cache) => Ok(cache),
+        Err(_) => Ok(empty_validation_similarity_cache()),
+    }
+}
+
 #[cfg(test)]
 fn build_validation_similarity_rows(
     similarity_cache: &ValidationSimilarityCache,
@@ -3285,7 +3311,7 @@ pub fn run_rule_expression_validation(
         backtest_period: params.backtest_period,
         min_listed_trade_days: params.min_listed_trade_days,
     };
-    let runtime_cache = build_rule_layer_runtime_cache(
+    let runtime_cache = build_rule_layer_runtime_cache_from_stock_data(
         &source_conn,
         &source_path,
         &params.stock_adj_type,
@@ -3312,9 +3338,11 @@ pub fn run_rule_expression_validation(
         .map(|rule| (rule.name.clone(), rule.explain.clone()))
         .collect::<HashMap<_, _>>();
     let stock_meta_map = load_validation_sample_stock_meta_map(&source_path)?;
-    let result_conn = open_result_conn(&source_path)?;
-    let similarity_cache =
-        load_validation_similarity_cache(&result_conn, &params.start_date, &params.end_date)?;
+    let similarity_cache = load_validation_similarity_cache_optional(
+        &source_path,
+        &params.start_date,
+        &params.end_date,
+    )?;
     let mut combo_results = Vec::with_capacity(execution_plan.combos.len());
     for combo_chunk in execution_plan
         .combos

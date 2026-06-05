@@ -509,6 +509,46 @@ pub fn build_rule_layer_runtime_cache(
     Ok(RuleLayerRuntimeCache { day_groups })
 }
 
+pub fn build_rule_layer_runtime_cache_from_stock_data(
+    source_conn: &Connection,
+    source_dir: &str,
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+) -> Result<RuleLayerRuntimeCache, String> {
+    validate_rule_common_input(
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+
+    let universe_rows =
+        load_stock_data_universe_rows(source_conn, stock_adj_type, start_date, end_date)?;
+    build_rule_layer_runtime_cache_from_universe_rows(
+        source_conn,
+        source_dir,
+        universe_rows,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )
+}
+
 pub(crate) fn build_rule_layer_runtime_cache_from_summary_rows(
     source_conn: &Connection,
     source_dir: &str,
@@ -555,6 +595,40 @@ pub(crate) fn build_rule_layer_runtime_cache_from_summary_rows(
             .then_with(|| left.ts_code.cmp(&right.ts_code))
     });
 
+    if universe_rows.is_empty() {
+        return Ok(RuleLayerRuntimeCache {
+            day_groups: Vec::new(),
+        });
+    }
+
+    build_rule_layer_runtime_cache_from_universe_rows(
+        source_conn,
+        source_dir,
+        universe_rows,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )
+}
+
+fn build_rule_layer_runtime_cache_from_universe_rows(
+    source_conn: &Connection,
+    source_dir: &str,
+    universe_rows: Vec<RuleUniverseRow>,
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+) -> Result<RuleLayerRuntimeCache, String> {
     if universe_rows.is_empty() {
         return Ok(RuleLayerRuntimeCache {
             day_groups: Vec::new(),
@@ -1268,6 +1342,56 @@ fn load_rule_universe_rows(
     Ok(out)
 }
 
+fn load_stock_data_universe_rows(
+    source_conn: &Connection,
+    stock_adj_type: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<Vec<RuleUniverseRow>, String> {
+    let mut stmt = source_conn
+        .prepare(
+            r#"
+            SELECT DISTINCT
+                ts_code,
+                trade_date
+            FROM stock_data
+            WHERE adj_type = ?
+              AND trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY trade_date ASC, ts_code ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译stock_data样本范围查询失败:{e}"))?;
+
+    let mut rows = stmt
+        .query(params_from_iter([
+            stock_adj_type.trim(),
+            start_date.trim(),
+            end_date.trim(),
+        ]))
+        .map_err(|e| format!("查询stock_data样本范围失败:{e}"))?;
+
+    let mut out = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取stock_data样本范围失败:{e}"))?
+    {
+        let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
+        let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
+
+        if ts_code.trim().is_empty() || trade_date.trim().is_empty() {
+            continue;
+        }
+
+        out.push(RuleUniverseRow {
+            ts_code,
+            trade_date,
+        });
+    }
+
+    Ok(out)
+}
+
 fn build_residual_map_cache(
     source_conn: &Connection,
     source_dir: &str,
@@ -1842,8 +1966,9 @@ mod tests {
 
     use super::{
         RuleLayerConfig, RuleLayerFromDbInput, RuleSample, build_rule_layer_runtime_cache,
-        calc_all_rule_layer_metrics_from_db, calc_rule_layer_metrics,
-        calc_rule_layer_metrics_from_db, calc_rule_layer_metrics_with_samples_from_cache,
+        build_rule_layer_runtime_cache_from_stock_data, calc_all_rule_layer_metrics_from_db,
+        calc_rule_layer_metrics, calc_rule_layer_metrics_from_db,
+        calc_rule_layer_metrics_with_samples_from_cache,
         calc_rule_layer_metrics_with_triggered_samples_from_cache,
         collect_triggered_rule_samples_from_cache,
     };
@@ -2327,5 +2452,102 @@ mod tests {
             "20240102"
         );
         assert!((triggered_samples.triggered_samples[0].rule_score - 1.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn stock_data_runtime_cache_is_not_limited_by_score_summary_dates() {
+        let source_dir = temp_source_dir();
+        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
+        prepare_test_files(source_dir_str);
+
+        let result_conn = Connection::open(result_db_path(source_dir_str)).expect("open result db");
+        result_conn
+            .execute(
+                "DELETE FROM score_summary WHERE trade_date = '20240103'",
+                [],
+            )
+            .expect("delete score summary date");
+
+        let source_conn = Connection::open(source_db_path(source_dir_str)).expect("open source db");
+        let layer_config = RuleLayerConfig {
+            min_samples_per_day: 1,
+            backtest_period: 1,
+            min_listed_trade_days: 0,
+        };
+        let triggered_score_map = HashMap::from([
+            (
+                "000001.SZ".to_string(),
+                HashMap::from([
+                    ("20240102".to_string(), 1.0_f64),
+                    ("20240103".to_string(), 1.0_f64),
+                ]),
+            ),
+            (
+                "000002.SZ".to_string(),
+                HashMap::from([
+                    ("20240102".to_string(), 1.0_f64),
+                    ("20240103".to_string(), 1.0_f64),
+                ]),
+            ),
+        ]);
+
+        let result_limited_cache = build_rule_layer_runtime_cache(
+            &source_conn,
+            source_dir_str,
+            "qfq",
+            "000300.SH",
+            0.0,
+            0.0,
+            0.0,
+            "20240102",
+            "20240104",
+            &layer_config,
+        )
+        .expect("build result limited runtime cache");
+        let stock_data_cache = build_rule_layer_runtime_cache_from_stock_data(
+            &source_conn,
+            source_dir_str,
+            "qfq",
+            "000300.SH",
+            0.0,
+            0.0,
+            0.0,
+            "20240102",
+            "20240104",
+            &layer_config,
+        )
+        .expect("build stock data runtime cache");
+
+        let result_limited_metrics = calc_rule_layer_metrics_with_samples_from_cache(
+            &result_limited_cache,
+            &triggered_score_map,
+            &layer_config,
+        )
+        .expect("compute result limited metrics");
+        let stock_data_metrics = calc_rule_layer_metrics_with_samples_from_cache(
+            &stock_data_cache,
+            &triggered_score_map,
+            &layer_config,
+        )
+        .expect("compute stock data metrics");
+
+        assert_eq!(
+            result_limited_metrics
+                .metrics
+                .points
+                .iter()
+                .map(|point| point.trade_date.as_str())
+                .collect::<Vec<_>>(),
+            vec!["20240102"]
+        );
+        assert_eq!(
+            stock_data_metrics
+                .metrics
+                .points
+                .iter()
+                .map(|point| point.trade_date.as_str())
+                .collect::<Vec<_>>(),
+            vec!["20240102", "20240103"]
+        );
     }
 }
