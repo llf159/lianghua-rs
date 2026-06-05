@@ -21,7 +21,10 @@ use crate::{
             load_compiled_chart_indicator_config,
         },
         realtime::{RealtimeFetchMeta, fetch_realtime_quote_map, normalize_quote_trade_date},
-        stock_similarity::{StockSimilarityPageData, get_stock_similarity_page_with_conn},
+        stock_similarity::{
+            StockSimilarityMaps, StockSimilarityPageData,
+            get_stock_similarity_page_with_conn_and_maps,
+        },
     },
     utils::utils::board_category,
 };
@@ -289,6 +292,40 @@ struct DetailTriggerSnapshot {
     current_scene_state_map: HashMap<String, CurrentSceneState>,
     latest_scene_hit_date_map: HashMap<String, String>,
     trade_day_index_map: HashMap<String, usize>,
+}
+
+#[derive(Debug, Default)]
+struct DetailSourceMeta {
+    name_map: HashMap<String, String>,
+    area_map: HashMap<String, String>,
+    industry_map: HashMap<String, String>,
+    total_mv_map: HashMap<String, f64>,
+    circ_mv_map: HashMap<String, f64>,
+    concept_map: HashMap<String, String>,
+    most_related_concept_map: HashMap<String, String>,
+}
+
+impl DetailSourceMeta {
+    fn load(source_path: &str) -> Self {
+        Self {
+            name_map: build_name_map(source_path).unwrap_or_default(),
+            area_map: build_area_map(source_path).unwrap_or_default(),
+            industry_map: build_industry_map(source_path).unwrap_or_default(),
+            total_mv_map: build_total_mv_map(source_path).unwrap_or_default(),
+            circ_mv_map: build_circ_mv_map(source_path).unwrap_or_default(),
+            concept_map: build_concepts_map(source_path).unwrap_or_default(),
+            most_related_concept_map: build_most_related_concept_map(source_path)
+                .unwrap_or_default(),
+        }
+    }
+
+    fn similarity_maps(&self) -> StockSimilarityMaps<'_> {
+        StockSimilarityMaps {
+            name_map: &self.name_map,
+            concept_map: &self.concept_map,
+            industry_map: &self.industry_map,
+        }
+    }
 }
 
 fn resolve_trade_date(conn: &Connection, trade_date: Option<String>) -> Result<String, String> {
@@ -748,42 +785,25 @@ fn split_ts_code(ts_code: &str) -> String {
     ts_code.split('.').next().unwrap_or(ts_code).to_string()
 }
 
-fn query_total_for_trade_date(conn: &Connection, trade_date: &str) -> Result<Option<i64>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT COUNT(*)
-            FROM score_summary
-            WHERE trade_date = ?
-            "#,
-        )
-        .map_err(|e| format!("预编译总样本数失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![trade_date])
-        .map_err(|e| format!("查询总样本数失败: {e}"))?;
-
-    if let Some(row) = rows.next().map_err(|e| format!("读取总样本数失败: {e}"))? {
-        let total: Option<i64> = row
-            .get(0)
-            .map_err(|e| format!("读取总样本数字段失败: {e}"))?;
-        Ok(total)
-    } else {
-        Ok(None)
-    }
-}
-
 fn query_detail_overview(
     conn: &Connection,
-    source_path: &str,
+    source_meta: &DetailSourceMeta,
     effective_trade_date: &str,
     ts_code: &str,
 ) -> Result<DetailOverview, String> {
     let mut stmt = conn
         .prepare(
             r#"
-            SELECT total_score, rank
-            FROM score_summary
-            WHERE trade_date = ? AND ts_code = ?
+            SELECT
+                s.total_score,
+                s.rank,
+                (
+                    SELECT COUNT(*)
+                    FROM score_summary AS totals
+                    WHERE totals.trade_date = s.trade_date
+                ) AS total
+            FROM score_summary AS s
+            WHERE s.trade_date = ? AND s.ts_code = ?
             LIMIT 1
             "#,
         )
@@ -799,33 +819,33 @@ fn query_detail_overview(
         ));
     };
 
-    let total = query_total_for_trade_date(conn, effective_trade_date)?;
-    let name_map = build_name_map(source_path)?;
-    let area_map = build_area_map(source_path)?;
-    let industry_map = build_industry_map(source_path)?;
-    let total_mv_map = build_total_mv_map(source_path)?;
-    let circ_mv_map = build_circ_mv_map(source_path)?;
-    let concept_map = build_concepts_map(source_path)?;
-    let most_related_concept_map = build_most_related_concept_map(source_path)?;
-
     Ok(DetailOverview {
         ts_code: ts_code.to_string(),
-        name: name_map.get(ts_code).cloned(),
+        name: source_meta.name_map.get(ts_code).cloned(),
         board: Some(
-            board_category(ts_code, name_map.get(ts_code).map(|value| value.as_str())).to_string(),
+            board_category(
+                ts_code,
+                source_meta
+                    .name_map
+                    .get(ts_code)
+                    .map(|value| value.as_str()),
+            )
+            .to_string(),
         ),
-        area: area_map.get(ts_code).cloned(),
-        industry: industry_map.get(ts_code).cloned(),
+        area: source_meta.area_map.get(ts_code).cloned(),
+        industry: source_meta.industry_map.get(ts_code).cloned(),
         trade_date: Some(effective_trade_date.to_string()),
         total_score: row
             .get(0)
             .map_err(|e| format!("读取详情 total_score 失败: {e}"))?,
         rank: row.get(1).map_err(|e| format!("读取详情 rank 失败: {e}"))?,
-        total,
-        total_mv_yi: total_mv_map.get(ts_code).copied(),
-        circ_mv_yi: circ_mv_map.get(ts_code).copied(),
-        most_related_concept: most_related_concept_map.get(ts_code).cloned(),
-        concept: concept_map.get(ts_code).cloned(),
+        total: row
+            .get(2)
+            .map_err(|e| format!("读取详情 total 失败: {e}"))?,
+        total_mv_yi: source_meta.total_mv_map.get(ts_code).copied(),
+        circ_mv_yi: source_meta.circ_mv_map.get(ts_code).copied(),
+        most_related_concept: source_meta.most_related_concept_map.get(ts_code).cloned(),
+        concept: source_meta.concept_map.get(ts_code).cloned(),
     })
 }
 
@@ -834,28 +854,38 @@ fn query_rank_history(
     ts_code: &str,
     limit: Option<usize>,
 ) -> Result<Vec<DetailPrevRankRow>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT
-                s.trade_date,
-                s.rank,
-                totals.total
-            FROM score_summary AS s
-            LEFT JOIN (
-                SELECT trade_date, COUNT(*) AS total
-                FROM score_summary
-                GROUP BY trade_date
-            ) AS totals
-              ON totals.trade_date = s.trade_date
-            WHERE s.ts_code = ?
-            ORDER BY s.trade_date DESC
-            "#,
+    let limit_clause = if limit.is_some() { "LIMIT ?" } else { "" };
+    let sql = format!(
+        r#"
+        WITH target_rows AS (
+            SELECT trade_date, rank
+            FROM score_summary
+            WHERE ts_code = ?
+            ORDER BY trade_date DESC
+            {limit_clause}
         )
+        SELECT
+            t.trade_date,
+            t.rank,
+            (
+                SELECT COUNT(*)
+                FROM score_summary AS totals
+                WHERE totals.trade_date = t.trade_date
+            ) AS total
+        FROM target_rows AS t
+        ORDER BY t.trade_date DESC
+        "#
+    );
+    let mut stmt = conn
+        .prepare(&sql)
         .map_err(|e| format!("预编译排名历史失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![ts_code])
-        .map_err(|e| format!("查询排名历史失败: {e}"))?;
+    let mut rows = if let Some(limit) = limit {
+        stmt.query(params![ts_code, limit as i64])
+            .map_err(|e| format!("查询排名历史失败: {e}"))?
+    } else {
+        stmt.query(params![ts_code])
+            .map_err(|e| format!("查询排名历史失败: {e}"))?
+    };
 
     let mut out = Vec::new();
     while let Some(row) = rows.next().map_err(|e| format!("读取排名历史失败: {e}"))? {
@@ -868,12 +898,6 @@ fn query_rank_history(
                 .get(2)
                 .map_err(|e| format!("读取排名历史总数失败: {e}"))?,
         });
-    }
-
-    if let Some(limit) = limit {
-        if out.len() > limit {
-            out.truncate(limit);
-        }
     }
 
     Ok(out)
@@ -914,34 +938,33 @@ fn query_latest_kline_trade_date(
 }
 
 fn build_basic_detail_overview(
-    source_path: &str,
+    source_meta: &DetailSourceMeta,
     effective_trade_date: &str,
     ts_code: &str,
 ) -> DetailOverview {
-    let name_map = build_name_map(source_path).unwrap_or_default();
-    let area_map = build_area_map(source_path).unwrap_or_default();
-    let industry_map = build_industry_map(source_path).unwrap_or_default();
-    let total_mv_map = build_total_mv_map(source_path).unwrap_or_default();
-    let circ_mv_map = build_circ_mv_map(source_path).unwrap_or_default();
-    let concept_map = build_concepts_map(source_path).unwrap_or_default();
-    let most_related_concept_map = build_most_related_concept_map(source_path).unwrap_or_default();
-
     DetailOverview {
         ts_code: ts_code.to_string(),
-        name: name_map.get(ts_code).cloned(),
+        name: source_meta.name_map.get(ts_code).cloned(),
         board: Some(
-            board_category(ts_code, name_map.get(ts_code).map(|value| value.as_str())).to_string(),
+            board_category(
+                ts_code,
+                source_meta
+                    .name_map
+                    .get(ts_code)
+                    .map(|value| value.as_str()),
+            )
+            .to_string(),
         ),
-        area: area_map.get(ts_code).cloned(),
-        industry: industry_map.get(ts_code).cloned(),
+        area: source_meta.area_map.get(ts_code).cloned(),
+        industry: source_meta.industry_map.get(ts_code).cloned(),
         trade_date: Some(effective_trade_date.to_string()),
         total_score: None,
         rank: None,
         total: None,
-        total_mv_yi: total_mv_map.get(ts_code).copied(),
-        circ_mv_yi: circ_mv_map.get(ts_code).copied(),
-        most_related_concept: most_related_concept_map.get(ts_code).cloned(),
-        concept: concept_map.get(ts_code).cloned(),
+        total_mv_yi: source_meta.total_mv_map.get(ts_code).copied(),
+        circ_mv_yi: source_meta.circ_mv_map.get(ts_code).copied(),
+        most_related_concept: source_meta.most_related_concept_map.get(ts_code).cloned(),
+        concept: source_meta.concept_map.get(ts_code).cloned(),
     }
 }
 
@@ -2087,19 +2110,20 @@ pub fn get_stock_detail_page(
     } else {
         query_latest_kline_trade_date(&source_conn, &normalized_ts_code)?
     };
+    let source_meta = DetailSourceMeta::load(&source_path);
 
     let overview = match result_conn.as_ref() {
         Some(conn) => query_detail_overview(
             conn,
-            &source_path,
+            &source_meta,
             &effective_trade_date,
             &normalized_ts_code,
         )
         .unwrap_or_else(|_| {
-            build_basic_detail_overview(&source_path, &effective_trade_date, &normalized_ts_code)
+            build_basic_detail_overview(&source_meta, &effective_trade_date, &normalized_ts_code)
         }),
         None => {
-            build_basic_detail_overview(&source_path, &effective_trade_date, &normalized_ts_code)
+            build_basic_detail_overview(&source_meta, &effective_trade_date, &normalized_ts_code)
         }
     };
 
@@ -2115,12 +2139,12 @@ pub fn get_stock_detail_page(
         None => Vec::new(),
     };
     let (stock_similarity, stock_similarity_error) = match result_conn.as_ref() {
-        Some(conn) => match get_stock_similarity_page_with_conn(
+        Some(conn) => match get_stock_similarity_page_with_conn_and_maps(
             conn,
-            &source_path,
             &effective_trade_date,
             &normalized_ts_code,
             Some(12),
+            source_meta.similarity_maps(),
         ) {
             Ok(data) => (Some(data), None),
             Err(error) => (None, Some(error)),
