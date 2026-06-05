@@ -20,7 +20,7 @@ const HISTORY_KEEP_MS = 90_000;
 const SPEED_PERIOD_OPTIONS = [10, 30, 60] as const;
 const TOP_LIMIT_OPTIONS = [20, 50, 100, 200] as const;
 
-type ViewMode = "change" | "speed";
+type PrimarySortKey = "realtime_change_pct" | "speed_pct";
 type SpeedPeriod = (typeof SPEED_PERIOD_OPTIONS)[number];
 type BoardFilter = (typeof STOCK_PICK_BOARD_OPTIONS)[number];
 type TopLimit = (typeof TOP_LIMIT_OPTIONS)[number];
@@ -140,7 +140,8 @@ export default function AllMarketMonitorPage() {
   const [sourcePath, setSourcePath] = useState("");
   const [enabled, setEnabled] = useState(false);
   const [rows, setRows] = useState<AllMarketMonitorRow[]>([]);
-  const [viewMode, setViewMode] = useState<ViewMode>("change");
+  const [primarySortKey, setPrimarySortKey] =
+    useState<PrimarySortKey>("realtime_change_pct");
   const [speedPeriod, setSpeedPeriod] = useState<SpeedPeriod>(10);
   const [boardFilter, setBoardFilter] = useState<BoardFilter>("全部");
   const [topLimit, setTopLimit] = useState<TopLimit>(50);
@@ -252,9 +253,7 @@ export default function AllMarketMonitorPage() {
         speed_pct: speedMap.get(row.ts_code) ?? null,
       }));
 
-    const defaultSortKey: SortKey =
-      viewMode === "speed" ? "speed_pct" : "realtime_change_pct";
-    const effectiveSortKey = sortKey ?? defaultSortKey;
+    const effectiveSortKey = sortKey ?? primarySortKey;
     const effectiveSortDirection = sortDirection ?? "desc";
     const sortDefinitions = {
       rank: { value: (row: DisplayRow) => row.rank },
@@ -276,7 +275,7 @@ export default function AllMarketMonitorPage() {
       effectiveSortDirection,
       sortDefinitions,
     ).slice(0, topLimit);
-  }, [boardFilter, rows, sortDirection, sortKey, speedMap, topLimit, viewMode]);
+  }, [boardFilter, primarySortKey, rows, sortDirection, sortKey, speedMap, topLimit]);
 
   const navigationItems = useMemo(
     () =>
@@ -318,6 +317,12 @@ export default function AllMarketMonitorPage() {
     );
   }
 
+  function setPrimarySort(nextKey: PrimarySortKey) {
+    setPrimarySortKey(nextKey);
+    setSortKey(null);
+    setSortDirection(null);
+  }
+
   const statusText = enabled
     ? loading
       ? "抓取中"
@@ -356,63 +361,68 @@ export default function AllMarketMonitorPage() {
         </div>
 
         <div className="all-market-toolbar">
-          <div className="all-market-segment" role="group" aria-label="榜单类型">
-            <button
-              type="button"
-              className={viewMode === "change" ? "is-active" : ""}
-              onClick={() => {
-                setViewMode("change");
-                setSortKey(null);
-                setSortDirection(null);
-              }}
+          <div className="all-market-sort-control">
+            <span className="all-market-control-label">排序</span>
+            <div
+              className="all-market-sort-switch"
+              role="group"
+              aria-label="排序方式"
             >
-              涨幅榜
-            </button>
-            <button
-              type="button"
-              className={viewMode === "speed" ? "is-active" : ""}
-              onClick={() => {
-                setViewMode("speed");
-                setSortKey(null);
-                setSortDirection(null);
-              }}
-            >
-              涨速榜
-            </button>
+              <button
+                type="button"
+                className={
+                  primarySortKey === "realtime_change_pct" ? "is-active" : ""
+                }
+                onClick={() => setPrimarySort("realtime_change_pct")}
+              >
+                <span>涨幅</span>
+                <strong>从高到低</strong>
+              </button>
+              <button
+                type="button"
+                className={primarySortKey === "speed_pct" ? "is-active" : ""}
+                onClick={() => setPrimarySort("speed_pct")}
+              >
+                <span>涨速</span>
+                <strong>从高到低</strong>
+              </button>
+            </div>
           </div>
 
-          <label className="all-market-field">
-            <span>涨速周期</span>
-            <select
-              value={speedPeriod}
-              onChange={(event) =>
-                setSpeedPeriod(Number(event.target.value) as SpeedPeriod)
-              }
-            >
-              {SPEED_PERIOD_OPTIONS.map((value) => (
-                <option key={value} value={value}>
-                  {value}秒
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="all-market-config-controls">
+            <span className="all-market-control-label">参数</span>
+            <label className="all-market-field">
+              <span>涨速周期</span>
+              <select
+                value={speedPeriod}
+                onChange={(event) =>
+                  setSpeedPeriod(Number(event.target.value) as SpeedPeriod)
+                }
+              >
+                {SPEED_PERIOD_OPTIONS.map((value) => (
+                  <option key={value} value={value}>
+                    {value}秒
+                  </option>
+                ))}
+              </select>
+            </label>
 
-          <label className="all-market-field">
-            <span>Top N</span>
-            <select
-              value={topLimit}
-              onChange={(event) =>
-                setTopLimit(Number(event.target.value) as TopLimit)
-              }
-            >
-              {TOP_LIMIT_OPTIONS.map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </select>
-          </label>
-
+            <label className="all-market-field">
+              <span>Top N</span>
+              <select
+                value={topLimit}
+                onChange={(event) =>
+                  setTopLimit(Number(event.target.value) as TopLimit)
+                }
+              >
+                {TOP_LIMIT_OPTIONS.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
         </div>
 
         <div className="all-market-board-tabs" role="group" aria-label="板块">
@@ -433,7 +443,7 @@ export default function AllMarketMonitorPage() {
 
       <section className="all-market-card all-market-table-card">
         <div className="all-market-table-head">
-          <h3>{viewMode === "speed" ? "涨速榜" : "涨幅榜"}</h3>
+          <h3>全市场行情</h3>
           <div className="all-market-time-strip" aria-live="polite">
             <span className="all-market-time-pill">
               <small>刷新</small>

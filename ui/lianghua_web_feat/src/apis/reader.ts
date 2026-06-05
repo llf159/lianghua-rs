@@ -141,11 +141,10 @@ export type IntradayMonitorPageQuery = {
 
 export type IntradayMonitorPageData = {
   rows: IntradayMonitorRow[];
-  rank_date_options?: string[];
-  resolved_rank_date?: string;
-  scene_options?: string[];
-  refreshed_at?: string;
-  warning_message?: string;
+  rankDateOptions?: string[];
+  resolvedRankDate?: string;
+  sceneOptions?: string[];
+  refreshedAt?: string;
   warningMessage?: string;
 };
 

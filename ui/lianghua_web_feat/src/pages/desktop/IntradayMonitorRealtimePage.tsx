@@ -521,13 +521,8 @@ function waitForNextPaint() {
   });
 }
 
-function getWarningMessage(data: {
-  warning_message?: string | null;
-  warningMessage?: string | null;
-}) {
-  return (
-    data.warning_message?.trim() || data.warningMessage?.trim() || ""
-  );
+function getWarningMessage(data: { warningMessage?: string | null }) {
+  return data.warningMessage?.trim() || "";
 }
 
 function isTemplateHitTag(tag: { tone: string; text: string }) {
@@ -876,8 +871,8 @@ export default function IntradayMonitorRealtimePage() {
         }
 
         const mergedDateOptions = normalizeTradeDates([
-          ...(totalData?.rank_date_options ?? []),
-          ...(sceneData?.rank_date_options ?? []),
+          ...(totalData?.rankDateOptions ?? []),
+          ...(sceneData?.rankDateOptions ?? []),
         ]);
         setDateOptions(mergedDateOptions);
         setRankDateInput((current) =>
@@ -893,7 +888,10 @@ export default function IntradayMonitorRealtimePage() {
 
         const nextSceneOptions = Array.from(
           new Set(
-            [...(sceneData?.scene_options ?? []), ...strategySceneOptions]
+            [
+              ...(sceneData?.sceneOptions ?? []),
+              ...strategySceneOptions,
+            ]
               .map((item) => item.trim())
               .filter((item) => item !== ""),
           ),
@@ -1146,11 +1144,11 @@ export default function IntradayMonitorRealtimePage() {
             : "";
 
         const mergedDateOptions = normalizeTradeDates(
-          successResults.flatMap((item) => item.rank_date_options ?? []),
+          successResults.flatMap((item) => item.rankDateOptions ?? []),
         );
         const resolvedDate =
-          successResults.find((item) => item.resolved_rank_date)
-            ?.resolved_rank_date ?? rankDateInput;
+          successResults.map((item) => item.resolvedRankDate ?? "").find(Boolean) ??
+          rankDateInput;
         if (mergedDateOptions.length > 0) {
           setDateOptions(mergedDateOptions);
           setRankDateInput(pickDateValue(resolvedDate, mergedDateOptions));
@@ -1159,7 +1157,7 @@ export default function IntradayMonitorRealtimePage() {
         const mergedSceneOptions = Array.from(
           new Set(
             successResults
-              .flatMap((item) => item.scene_options ?? [])
+              .flatMap((item) => item.sceneOptions ?? [])
               .map((item) => item.trim())
               .filter((item) => item !== ""),
           ),
@@ -1182,7 +1180,8 @@ export default function IntradayMonitorRealtimePage() {
         setRows(Array.from(rowMap.values()));
         setRowDeltas({});
         setRefreshedAt(
-          successResults.find((item) => item.refreshed_at)?.refreshed_at ?? "",
+          successResults.map((item) => item.refreshedAt ?? "").find(Boolean) ??
+            "",
         );
         setError(mergeStatusMessages([partialFailureMessage, warningMessage]));
       } else {
@@ -1205,7 +1204,7 @@ export default function IntradayMonitorRealtimePage() {
           });
           if (runId !== refreshRunIdRef.current) return;
           refreshedRows.push(...(data.rows ?? []));
-          if (!refreshed && data.refreshed_at) refreshed = data.refreshed_at;
+          if (!refreshed) refreshed = data.refreshedAt ?? "";
           warningMessage = mergeStatusMessages([
             warningMessage,
             getWarningMessage(data),
@@ -1310,7 +1309,7 @@ export default function IntradayMonitorRealtimePage() {
           rankModeConfigs,
         });
         refreshedRows.push(...(data.rows ?? []));
-        if (!refreshed && data.refreshed_at) refreshed = data.refreshed_at;
+        if (!refreshed) refreshed = data.refreshedAt ?? "";
         warningMessage = mergeStatusMessages([
           warningMessage,
           getWarningMessage(data),

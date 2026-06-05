@@ -490,8 +490,8 @@ export default function IntradayMonitorCustomPage() {
         nextRows,
         Date.now(),
       )
-      setRefreshedAt(result.refreshed_at || formatClock(new Date()))
-      setError(result.warning_message ?? result.warningMessage ?? '')
+      setRefreshedAt(result.refreshedAt || formatClock(new Date()))
+      setError(result.warningMessage ?? '')
       setNotice(`刷新完成，共 ${result.rows?.length ?? 0} 只。`)
     } catch (runError) {
       setError(`刷新失败: ${String(runError)}`)
@@ -550,7 +550,7 @@ export default function IntradayMonitorCustomPage() {
         rankModeConfigs,
       })
       setRows(result.rows ?? [])
-      setError(result.warning_message ?? result.warningMessage ?? '')
+      setError(result.warningMessage ?? '')
       setNotice(`仅刷新标记完成，共 ${result.rows?.length ?? 0} 只。`)
     } catch (runError) {
       setError(`仅刷新标记失败: ${String(runError)}`)
