@@ -185,6 +185,22 @@
   color: #334155;
 }
 
+.scene-layer-summary-section {
+  display: grid;
+  gap: 6px;
+}
+
+.scene-layer-summary-section + .scene-layer-summary-section {
+  margin-top: 10px;
+}
+
+.scene-layer-summary-section > h4 {
+  margin: 0;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .scene-layer-layer-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));

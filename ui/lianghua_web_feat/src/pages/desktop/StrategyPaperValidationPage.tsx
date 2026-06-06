@@ -1,4 +1,12 @@
-import { memo, useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
+import {
+  memo,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import { listStockLookupRows, type StockLookupRow } from '../../apis/reader'
 import {
@@ -100,6 +108,8 @@ type StrategyPaperValidationRelativeNavChartState = {
   points: StrategyPaperValidationRelativeNavPoint[]
   eligibleTradeCount: number
   activeTradeDates: number
+  maxDrawdownPct?: number | null
+  annualizedSharpe?: number | null
   latestPoint: StrategyPaperValidationRelativeNavPoint | null
   emptyReason: string | null
 }
@@ -118,6 +128,12 @@ type StrategyPaperValidationRelativeNavChartGeometry = {
     anchor: 'start' | 'middle' | 'end'
   }>
   linePaths: Record<StrategyPaperValidationNavSeriesKey, string>
+  pointPositions: Array<{
+    x: number
+    strategyY: number
+    indexY: number
+    item: StrategyPaperValidationRelativeNavPoint
+  }>
   lastPoints: Record<
     StrategyPaperValidationNavSeriesKey,
     { x: number; y: number; item: StrategyPaperValidationRelativeNavPoint } | null
@@ -126,6 +142,12 @@ type StrategyPaperValidationRelativeNavChartGeometry = {
 }
 
 type StrategyPaperValidationNavSeriesKey = 'strategyNav' | 'indexNav'
+type StrategyPaperValidationChartFocus = {
+  index: number
+  cursorXPercent: number
+  cursorYPercent: number
+  pinned: boolean
+}
 
 type TradeSortKey =
   | 'status'
@@ -388,6 +410,44 @@ function normalizeMarkedNav(closeReturnPct?: number | null) {
   return markedNav
 }
 
+function calculateMaxDrawdownPct(points: StrategyPaperValidationRelativeNavPoint[]) {
+  if (points.length === 0) {
+    return null
+  }
+
+  let peakNav = points[0].strategyNav
+  let maxDrawdown = 0
+  for (const point of points) {
+    if (!Number.isFinite(point.strategyNav) || point.strategyNav <= 0) {
+      return null
+    }
+    peakNav = Math.max(peakNav, point.strategyNav)
+    if (peakNav <= 0) {
+      continue
+    }
+    maxDrawdown = Math.max(maxDrawdown, (peakNav - point.strategyNav) / peakNav)
+  }
+  return maxDrawdown * 100
+}
+
+function calculateAnnualizedSharpe(points: StrategyPaperValidationRelativeNavPoint[]) {
+  const returns = points
+    .map((point) => point.strategyDailyReturn)
+    .filter((value) => Number.isFinite(value))
+  if (returns.length < 2) {
+    return null
+  }
+
+  const mean = returns.reduce((sum, value) => sum + value, 0) / returns.length
+  const variance =
+    returns.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (returns.length - 1)
+  const standardDeviation = Math.sqrt(variance)
+  if (!Number.isFinite(standardDeviation) || standardDeviation <= 0) {
+    return null
+  }
+  return (mean / standardDeviation) * Math.sqrt(252)
+}
+
 function buildRelativeNavChartBackbone(
   indexDailyReturns: StrategyPaperValidationIndexDailyReturn[],
 ) {
@@ -576,6 +636,8 @@ function buildDailyHoldingRelativeNavChartState(
     points,
     eligibleTradeCount,
     activeTradeDates,
+    maxDrawdownPct: calculateMaxDrawdownPct(points),
+    annualizedSharpe: calculateAnnualizedSharpe(points),
     latestPoint: points[points.length - 1] ?? null,
     emptyReason: null,
   }
@@ -630,6 +692,12 @@ function buildRelativeNavChartGeometry(
 
   const strategyPlottedPoints = buildPlottedPoints('strategyNav')
   const indexPlottedPoints = buildPlottedPoints('indexNav')
+  const pointPositions = points.map((item, index) => ({
+    x: toX(index),
+    strategyY: toY(item.strategyNav),
+    indexY: toY(item.indexNav),
+    item,
+  }))
   const linePaths = {
     strategyNav: buildLinePath(strategyPlottedPoints),
     indexNav: buildLinePath(indexPlottedPoints),
@@ -697,61 +765,124 @@ function buildRelativeNavChartGeometry(
     yTicks,
     xLabels,
     linePaths,
+    pointPositions,
     lastPoints,
     baselineY: yMin <= 1 && yMax >= 1 ? toY(1) : null,
   } satisfies StrategyPaperValidationRelativeNavChartGeometry
 }
 
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value))
+}
+
+function buildRelativeNavChartFocus(
+  element: HTMLElement,
+  geometry: StrategyPaperValidationRelativeNavChartGeometry,
+  clientX: number,
+  clientY: number,
+  pinned: boolean,
+): StrategyPaperValidationChartFocus | null {
+  if (geometry.pointPositions.length === 0) {
+    return null
+  }
+
+  const rect = element.getBoundingClientRect()
+  if (rect.width <= 0 || rect.height <= 0) {
+    return null
+  }
+
+  const rawX = ((clientX - rect.left) / rect.width) * geometry.width
+  const nearestIndex = geometry.pointPositions.reduce((bestIndex, point, index) => {
+    const bestPoint = geometry.pointPositions[bestIndex]
+    return Math.abs(point.x - rawX) < Math.abs(bestPoint.x - rawX) ? index : bestIndex
+  }, 0)
+  const nearestPoint = geometry.pointPositions[nearestIndex]
+  const cursorY = clampNumber(((clientY - rect.top) / rect.height) * geometry.height, 0, geometry.height)
+
+  return {
+    index: nearestIndex,
+    cursorXPercent: (nearestPoint.x / geometry.width) * 100,
+    cursorYPercent: (cursorY / geometry.height) * 100,
+    pinned,
+  }
+}
+
 const StrategyPaperValidationRelativeNavChart = memo(
   function StrategyPaperValidationRelativeNavChart({
-    trades,
-    indexDailyReturns,
+    chartState,
   }: {
-    trades: StrategyPaperValidationChartTradeRow[]
-    indexDailyReturns: StrategyPaperValidationIndexDailyReturn[]
+    chartState: StrategyPaperValidationRelativeNavChartState
   }) {
     const [chartViewportRef, chartWidth] = useMeasuredElementWidth<HTMLDivElement>()
-    const chartState = useMemo(
-      () => buildDailyHoldingRelativeNavChartState(trades, indexDailyReturns),
-      [indexDailyReturns, trades],
-    )
     const geometry = useMemo(
       () => buildRelativeNavChartGeometry(chartState.points, chartWidth),
       [chartState.points, chartWidth],
     )
-    const latestPoint = chartState.latestPoint
+    const [focus, setFocus] = useState<StrategyPaperValidationChartFocus | null>(null)
+    const focusPosition =
+      geometry && focus !== null ? (geometry.pointPositions[focus.index] ?? null) : null
+    const focusItem = focusPosition?.item ?? null
+    const tooltipHorizontalClass =
+      (focus?.cursorXPercent ?? 0) > 68
+        ? 'strategy-paper-validation-relative-chart-tooltip-left'
+        : 'strategy-paper-validation-relative-chart-tooltip-right'
+
+    function buildFocusFromEvent(
+      event: ReactPointerEvent<HTMLDivElement>,
+      pinned: boolean,
+    ) {
+      if (!geometry) {
+        return null
+      }
+      return buildRelativeNavChartFocus(
+        event.currentTarget,
+        geometry,
+        event.clientX,
+        event.clientY,
+        pinned,
+      )
+    }
+
+    function onChartPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+      if (focus?.pinned) {
+        return
+      }
+
+      const nextFocus = buildFocusFromEvent(event, false)
+      if (nextFocus) {
+        setFocus(nextFocus)
+      }
+    }
+
+    function onChartPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+      if (event.pointerType === 'mouse' && event.button !== 0) {
+        return
+      }
+
+      const nextFocus = buildFocusFromEvent(event, true)
+      if (!nextFocus) {
+        return
+      }
+
+      if (focus?.pinned && focus.index === nextFocus.index) {
+        setFocus(null)
+      } else {
+        setFocus(nextFocus)
+      }
+    }
+
+    function onChartPointerLeave() {
+      if (!focus?.pinned) {
+        setFocus(null)
+      }
+    }
 
     return (
       <section className="strategy-paper-validation-relative-chart">
         <div className="strategy-paper-validation-relative-chart-head">
           <div className="strategy-paper-validation-relative-chart-title">
             <strong>净值对比</strong>
-            <span>按当前筛选结果统计逐日持仓收盘收益，按当日持仓等权盯市，对比策略净值和指数净值。</span>
-          </div>
-          <div className="strategy-paper-validation-relative-chart-head-side">
-            <div className="strategy-paper-validation-relative-chart-latest">
-              <span>最新日期</span>
-              <strong>{formatDateLabel(latestPoint?.tradeDate)}</strong>
-            </div>
-          </div>
-        </div>
-
-        <div className="strategy-paper-validation-relative-chart-metrics">
-          <div className="strategy-paper-validation-relative-chart-metric">
-            <span>策略净值</span>
-            <strong>{formatNavValue(latestPoint?.strategyNav)}</strong>
-          </div>
-          <div className="strategy-paper-validation-relative-chart-metric">
-            <span>指数净值</span>
-            <strong>{formatNavValue(latestPoint?.indexNav)}</strong>
-          </div>
-          <div className="strategy-paper-validation-relative-chart-metric">
-            <span>纳入持仓笔数</span>
-            <strong>{chartState.eligibleTradeCount}</strong>
-          </div>
-          <div className="strategy-paper-validation-relative-chart-metric">
-            <span>有持仓交易日</span>
-            <strong>{chartState.activeTradeDates}</strong>
+            <span>按本次验证结果统计逐日持仓收盘收益，按当日持仓等权盯市；最大回撤和夏普率按策略日收益序列计算。</span>
           </div>
         </div>
 
@@ -774,6 +905,16 @@ const StrategyPaperValidationRelativeNavChart = memo(
           <div
             className="strategy-paper-validation-relative-chart-viewport"
             ref={chartViewportRef}
+            onPointerMove={onChartPointerMove}
+            onPointerDown={onChartPointerDown}
+            onPointerLeave={onChartPointerLeave}
+            onPointerCancel={onChartPointerLeave}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                setFocus(null)
+              }
+            }}
+            tabIndex={0}
           >
             <svg
               className="strategy-paper-validation-relative-chart-svg"
@@ -869,7 +1010,80 @@ const StrategyPaperValidationRelativeNavChart = memo(
                   </title>
                 </circle>
               ) : null}
+
+              {focusPosition ? (
+                <>
+                  <circle
+                    cx={focusPosition.x}
+                    cy={focusPosition.strategyY}
+                    r={4.2}
+                    className="strategy-paper-validation-relative-chart-focus-dot strategy-paper-validation-relative-chart-focus-dot-strategy"
+                  />
+                  <circle
+                    cx={focusPosition.x}
+                    cy={focusPosition.indexY}
+                    r={4.2}
+                    className="strategy-paper-validation-relative-chart-focus-dot strategy-paper-validation-relative-chart-focus-dot-index"
+                  />
+                </>
+              ) : null}
             </svg>
+
+            {focusPosition && focus ? (
+              <>
+                <div
+                  className="strategy-paper-validation-relative-chart-crosshair-vertical"
+                  style={{ left: `${focus.cursorXPercent}%` }}
+                />
+                <div
+                  className="strategy-paper-validation-relative-chart-crosshair-horizontal"
+                  style={{ top: `${focus.cursorYPercent}%` }}
+                />
+              </>
+            ) : null}
+
+            {focusItem && focus ? (
+              <div
+                className={[
+                  'strategy-paper-validation-relative-chart-tooltip',
+                  tooltipHorizontalClass,
+                  focus.pinned ? 'strategy-paper-validation-relative-chart-tooltip-pinned' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+                style={{
+                  left: `${focus.cursorXPercent}%`,
+                  top: `${focus.cursorYPercent}%`,
+                }}
+              >
+                <div className="strategy-paper-validation-relative-chart-tooltip-head">
+                  <strong>{formatDateLabel(focusItem.tradeDate)}</strong>
+                  <span>{focus.pinned ? '已固定' : '点击固定'}</span>
+                </div>
+                <div className="strategy-paper-validation-relative-chart-tooltip-grid">
+                  <div className="strategy-paper-validation-relative-chart-tooltip-row">
+                    <span>策略净值</span>
+                    <strong>{formatNavValue(focusItem.strategyNav)}</strong>
+                  </div>
+                  <div className="strategy-paper-validation-relative-chart-tooltip-row">
+                    <span>指数净值</span>
+                    <strong>{formatNavValue(focusItem.indexNav)}</strong>
+                  </div>
+                  <div className="strategy-paper-validation-relative-chart-tooltip-row">
+                    <span>策略日收益</span>
+                    <strong>{formatPercent(focusItem.strategyDailyReturn * 100)}</strong>
+                  </div>
+                  <div className="strategy-paper-validation-relative-chart-tooltip-row">
+                    <span>指数日收益</span>
+                    <strong>{formatPercent(focusItem.indexDailyReturn * 100)}</strong>
+                  </div>
+                  <div className="strategy-paper-validation-relative-chart-tooltip-row">
+                    <span>当日持仓</span>
+                    <strong>{focusItem.activeTradeCount}</strong>
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </div>
         )}
       </section>
@@ -879,15 +1093,19 @@ const StrategyPaperValidationRelativeNavChart = memo(
 
 type StrategyPaperValidationTradesTableProps = {
   trades: StrategyPaperValidationChartTradeRow[]
-  indexDailyReturns: StrategyPaperValidationIndexDailyReturn[]
   sourcePath: string
+  closedTradeCount: number
+  openTradeCount: number
+  onOpenTradeDetail: (status: TradeDetailModalStatus) => void
 }
 
 const StrategyPaperValidationTradesTable = memo(
   function StrategyPaperValidationTradesTable({
     trades,
-    indexDailyReturns,
     sourcePath,
+    closedTradeCount,
+    openTradeCount,
+    onOpenTradeDetail,
   }: StrategyPaperValidationTradesTableProps) {
     const [stockFilter, setStockFilter] = useState('')
     const [boardFilter, setBoardFilter] = useState('')
@@ -1050,6 +1268,27 @@ const StrategyPaperValidationTradesTable = memo(
           </span>
         </div>
 
+        <div className="strategy-paper-validation-table-trade-actions" aria-label="交易状态明细">
+          <button
+            type="button"
+            className="strategy-paper-validation-summary-mini-btn"
+            onClick={() => onOpenTradeDetail('closed')}
+            disabled={closedTradeCount === 0}
+          >
+            <span>已平仓</span>
+            <strong>{closedTradeCount}</strong>
+          </button>
+          <button
+            type="button"
+            className="strategy-paper-validation-summary-mini-btn"
+            onClick={() => onOpenTradeDetail('open')}
+            disabled={openTradeCount === 0}
+          >
+            <span>未平仓</span>
+            <strong>{openTradeCount}</strong>
+          </button>
+        </div>
+
         <div className="strategy-paper-validation-table-filters">
           <label className="strategy-paper-validation-field">
             <span>股票</span>
@@ -1168,11 +1407,6 @@ const StrategyPaperValidationTradesTable = memo(
             </select>
           </label>
         </div>
-
-        <StrategyPaperValidationRelativeNavChart
-          trades={filteredTrades}
-          indexDailyReturns={indexDailyReturns}
-        />
 
         <div className="strategy-paper-validation-table-wrap">
           <table className="strategy-paper-validation-table">
@@ -1718,6 +1952,11 @@ export default function StrategyPaperValidationPage() {
     () => getStrategyPaperValidationIndexDailyReturns(result),
     [result],
   )
+  const relativeNavChartState = useMemo(
+    () => buildDailyHoldingRelativeNavChartState(trades, indexDailyReturns),
+    [indexDailyReturns, trades],
+  )
+  const latestRelativeNavPoint = relativeNavChartState.latestPoint
   const closedTrades = useMemo(
     () => trades.filter((row) => row.status === 'closed'),
     [trades],
@@ -1844,9 +2083,7 @@ export default function StrategyPaperValidationPage() {
           <div>
             <h2 className="strategy-paper-validation-title">策略模拟盘验证</h2>
             <p className="strategy-paper-validation-note">
-              每个交易日先处理已有持仓卖点，再从当日买点候选里按持仓上限买入。当前版本卖出表现按当日收盘价记账，`RATEO / RATEH`
-              作为卖点方程辅助字段一起回传；选择次日开盘时，买入日、买入成本和 `TIME=0` 均对齐到次交易日。
-              测试股票留空时按组合模式扫描全市场，填写后只验证这一只股票。
+              用买点、卖点方程回放历史交易，验证策略在指定区间内的持仓、收益和回撤表现；留空测试股票时扫描全市场，填写后仅验证单票。
             </p>
           </div>
         </div>
@@ -2013,83 +2250,104 @@ export default function StrategyPaperValidationPage() {
 
       {summary ? (
         <section className="strategy-paper-validation-card">
-          <div className="strategy-paper-validation-summary-grid">
-            <div className="strategy-paper-validation-summary-item">
-              <span>买入信号数</span>
-              <strong>{summary.buy_signal_count}</strong>
-            </div>
-            <div className="strategy-paper-validation-summary-item strategy-paper-validation-summary-trade-actions">
-              <span>交易状态明细</span>
-              <div className="strategy-paper-validation-summary-action-row">
+          <div className="strategy-paper-validation-summary-layout">
+            <div className="strategy-paper-validation-summary-panel">
+              <div className="strategy-paper-validation-table-head">
+                <h3>回测表现</h3>
+              </div>
+
+              <div className="strategy-paper-validation-summary-grid">
+                <div className="strategy-paper-validation-summary-item">
+                  <span>买入信号数</span>
+                  <strong>{summary.buy_signal_count}</strong>
+                </div>
+                <div className="strategy-paper-validation-summary-item">
+                  <span>总交易数</span>
+                  <strong>{summary.total_trade_count}</strong>
+                </div>
+                <div className="strategy-paper-validation-summary-item">
+                  <span>净值最新日期</span>
+                  <strong>{formatDateLabel(latestRelativeNavPoint?.tradeDate)}</strong>
+                </div>
+                <div className="strategy-paper-validation-summary-item">
+                  <span>策略净值</span>
+                  <strong>{formatNavValue(latestRelativeNavPoint?.strategyNav)}</strong>
+                </div>
+                <div className="strategy-paper-validation-summary-item">
+                  <span>指数净值</span>
+                  <strong>{formatNavValue(latestRelativeNavPoint?.indexNav)}</strong>
+                </div>
+                <div className="strategy-paper-validation-summary-item">
+                  <span>纳入持仓笔数</span>
+                  <strong>{relativeNavChartState.eligibleTradeCount}</strong>
+                </div>
+                <div className="strategy-paper-validation-summary-item">
+                  <span>有持仓交易日</span>
+                  <strong>{relativeNavChartState.activeTradeDates}</strong>
+                </div>
+                <div className="strategy-paper-validation-summary-item">
+                  <span>最大回撤</span>
+                  <strong>{formatPercent(relativeNavChartState.maxDrawdownPct)}</strong>
+                </div>
+                <div className="strategy-paper-validation-summary-item">
+                  <span>年化夏普率</span>
+                  <strong>{formatNumber(relativeNavChartState.annualizedSharpe, 2)}</strong>
+                </div>
+                <div className="strategy-paper-validation-summary-item">
+                  <span>胜率</span>
+                  <strong>
+                    {formatPercent(
+                      summary.win_rate === null || summary.win_rate === undefined
+                        ? null
+                        : summary.win_rate * 100,
+                    )}
+                  </strong>
+                </div>
+                <div className="strategy-paper-validation-summary-item">
+                  <span>平均收益</span>
+                  <strong>{formatPercent(summary.avg_return_pct)}</strong>
+                </div>
+                <div className="strategy-paper-validation-summary-item">
+                  <span>平均持仓天数</span>
+                  <strong>{formatNumber(summary.avg_hold_days, 1)}</strong>
+                </div>
                 <button
                   type="button"
-                  className="strategy-paper-validation-summary-mini-btn"
-                  onClick={() => setTradeDetailModalStatus('closed')}
-                  disabled={summary.closed_trade_count === 0}
+                  className="strategy-paper-validation-summary-item strategy-paper-validation-summary-button"
+                  onClick={() => setExtremeModalOpen(true)}
+                  disabled={!hasExtremeTrades}
                 >
-                  <span>已平仓</span>
-                  <strong>{summary.closed_trade_count}</strong>
-                </button>
-                <button
-                  type="button"
-                  className="strategy-paper-validation-summary-mini-btn"
-                  onClick={() => setTradeDetailModalStatus('open')}
-                  disabled={summary.open_trade_count === 0}
-                >
-                  <span>未平仓</span>
-                  <strong>{summary.open_trade_count}</strong>
+                  <span>最好 / 最差</span>
+                  <strong>
+                    {formatPercent(summary.best_return_pct)} / {formatPercent(summary.worst_return_pct)}
+                  </strong>
                 </button>
               </div>
-            </div>
-            <div className="strategy-paper-validation-summary-item">
-              <span>胜率</span>
-              <strong>
-                {formatPercent(
-                  summary.win_rate === null || summary.win_rate === undefined
-                    ? null
-                    : summary.win_rate * 100,
-                )}
-              </strong>
-            </div>
-            <div className="strategy-paper-validation-summary-item">
-              <span>平均收益</span>
-              <strong>{formatPercent(summary.avg_return_pct)}</strong>
-            </div>
-            <div className="strategy-paper-validation-summary-item">
-              <span>平均持仓天数</span>
-              <strong>{formatNumber(summary.avg_hold_days, 1)}</strong>
-            </div>
-            <button
-              type="button"
-              className="strategy-paper-validation-summary-item strategy-paper-validation-summary-button"
-              onClick={() => setExtremeModalOpen(true)}
-              disabled={!hasExtremeTrades}
-            >
-              <span>最好 / 最差</span>
-              <strong>
-                {formatPercent(summary.best_return_pct)} / {formatPercent(summary.worst_return_pct)}
-              </strong>
-            </button>
-          </div>
 
-          <div className="strategy-paper-validation-run-meta">
-            <span>
-              区间 {formatDateLabel(result?.start_date)} ~ {formatDateLabel(result?.end_date)}
-            </span>
-            <span>
-              模式{' '}
-              {result?.test_ts_code
-                ? `单票验证 ${result.test_stock_name || result.test_ts_code}`
-                : '默认全市场'}
-            </span>
-            <span>买点基准 {formatBuyPriceBasisLabel(result?.buy_price_basis)}</span>
-            <span>滑点 {formatNumber(result?.slippage_pct, 2)}%</span>
-            <span>
-              持仓上限 {result?.max_position_count === 0 ? '不限' : result?.max_position_count ?? '--'}
-            </span>
-            <span>买入模式 {formatBuySelectionModeLabel(result?.buy_selection_mode)}</span>
-            <span>对比指数 {result?.index_ts_code || '--'}</span>
-            <span>板块 {result?.resolved_board || '全部板块'}</span>
+              <div className="strategy-paper-validation-run-meta">
+                <span>
+                  区间 {formatDateLabel(result?.start_date)} ~ {formatDateLabel(result?.end_date)}
+                </span>
+                <span>
+                  模式{' '}
+                  {result?.test_ts_code
+                    ? `单票验证 ${result.test_stock_name || result.test_ts_code}`
+                    : '默认全市场'}
+                </span>
+                <span>买点基准 {formatBuyPriceBasisLabel(result?.buy_price_basis)}</span>
+                <span>滑点 {formatNumber(result?.slippage_pct, 2)}%</span>
+                <span>
+                  持仓上限 {result?.max_position_count === 0 ? '不限' : result?.max_position_count ?? '--'}
+                </span>
+                <span>买入模式 {formatBuySelectionModeLabel(result?.buy_selection_mode)}</span>
+                <span>对比指数 {result?.index_ts_code || '--'}</span>
+                <span>板块 {result?.resolved_board || '全部板块'}</span>
+              </div>
+            </div>
+
+            <StrategyPaperValidationRelativeNavChart
+              chartState={relativeNavChartState}
+            />
           </div>
         </section>
       ) : null}
@@ -2097,8 +2355,10 @@ export default function StrategyPaperValidationPage() {
       {result ? (
         <StrategyPaperValidationTradesTable
           trades={trades}
-          indexDailyReturns={indexDailyReturns}
           sourcePath={sourcePath}
+          closedTradeCount={summary?.closed_trade_count ?? 0}
+          openTradeCount={summary?.open_trade_count ?? 0}
+          onOpenTradeDetail={setTradeDetailModalStatus}
         />
       ) : null}
 

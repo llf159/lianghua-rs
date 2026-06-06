@@ -1675,47 +1675,65 @@ export default function SceneLayerBacktestPage() {
         <section className="scene-layer-card">
           <div className="scene-layer-layer-summary">
             <h3>排名整体回测汇总</h3>
-            <div className="scene-layer-contrib-table-wrap">
-              <table className="scene-layer-contrib-table">
-                <thead>
-                  <tr>
-                    <th>对象</th>
-                    <th>区间</th>
-                    <th>指数</th>
-                    <th>Beta（指/概/行）</th>
-                    <th>有效交易日</th>
-                    <th>总样本数</th>
-                    <th>最小样本阈值</th>
-                    <th>分层层数</th>
-                    <th>分层方法</th>
-                    <th>最少上市交易日</th>
-                    <th>回测周期（天）</th>
-                    <th>分层差均值（日度高分层-低分层）</th>
-                    <th>IC 均值</th>
-                    <th>IC t值</th>
-                    <th>ICIR</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td>总分</td>
-                    <td>{formatDateLabel(rankResult.start_date)} ~ {formatDateLabel(rankResult.end_date)}</td>
-                    <td>{rankResult.index_ts_code}</td>
-                    <td>{formatNumber(rankResult.index_beta, 2)} / {formatNumber(rankResult.concept_beta, 2)} / {formatNumber(rankResult.industry_beta, 2)}</td>
-                    <td>{rankResult.point_count}</td>
-                    <td>{rankResult.sample_count}</td>
-                    <td>{rankResult.min_samples_per_rank_day}</td>
-                    <td>{rankResult.layer_count}</td>
-                    <td>{rankResult.layer_method_label}</td>
-                    <td>{rankResult.min_listed_trade_days}</td>
-                    <td>{rankResult.backtest_period}</td>
-                    <td>{formatPercent(rankResult.spread_mean)}</td>
-                    <td className={metricHighlightClass("ic", rankResult.ic_mean)}>{formatNumber(rankResult.ic_mean)}</td>
-                    <td className={metricHighlightClass("t", rankResult.ic_t_value)}>{formatNumber(rankResult.ic_t_value)}</td>
-                    <td className={metricHighlightClass("ir", rankResult.icir)}>{formatNumber(rankResult.icir)}</td>
-                  </tr>
-                </tbody>
-              </table>
+            <div className="scene-layer-summary-section">
+              <h4>基础信息</h4>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table">
+                  <thead>
+                    <tr>
+                      <th>对象</th>
+                      <th>区间</th>
+                      <th>指数</th>
+                      <th>Beta（指/概/行）</th>
+                      <th>有效交易日</th>
+                      <th>总样本数</th>
+                      <th>最小样本阈值</th>
+                      <th>分层层数</th>
+                      <th>分层方法</th>
+                      <th>最少上市交易日</th>
+                      <th>回测周期（天）</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>总分</td>
+                      <td>{formatDateLabel(rankResult.start_date)} ~ {formatDateLabel(rankResult.end_date)}</td>
+                      <td>{rankResult.index_ts_code}</td>
+                      <td>{formatNumber(rankResult.index_beta, 2)} / {formatNumber(rankResult.concept_beta, 2)} / {formatNumber(rankResult.industry_beta, 2)}</td>
+                      <td>{rankResult.point_count}</td>
+                      <td>{rankResult.sample_count}</td>
+                      <td>{rankResult.min_samples_per_rank_day}</td>
+                      <td>{rankResult.layer_count}</td>
+                      <td>{rankResult.layer_method_label}</td>
+                      <td>{rankResult.min_listed_trade_days}</td>
+                      <td>{rankResult.backtest_period}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div className="scene-layer-summary-section">
+              <h4>回测表现</h4>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table">
+                  <thead>
+                    <tr>
+                      <th>分层差均值（日度高分层-低分层）</th>
+                      <th>IC 均值</th>
+                      <th>IC t值</th>
+                      <th>ICIR</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>{formatPercent(rankResult.spread_mean)}</td>
+                      <td className={metricHighlightClass("ic", rankResult.ic_mean)}>{formatNumber(rankResult.ic_mean)}</td>
+                      <td className={metricHighlightClass("t", rankResult.ic_t_value)}>{formatNumber(rankResult.ic_t_value)}</td>
+                      <td className={metricHighlightClass("ir", rankResult.icir)}>{formatNumber(rankResult.icir)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
 

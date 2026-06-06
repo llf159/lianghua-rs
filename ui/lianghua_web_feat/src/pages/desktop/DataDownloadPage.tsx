@@ -764,7 +764,7 @@ export default function DataDownloadPage() {
           <div>
             <h2>数据下载</h2>
             <p>
-              在当前应用数据目录里直接执行原始行情下载。Token 和下载参数会缓存在当前浏览器，页面会根据当前原始库状态自动切换为首次下载或增量更新表单。
+              下载或增量更新行情数据，并按当前数据状态选择合适的参数表单。
             </p>
           </div>
 
@@ -981,7 +981,7 @@ export default function DataDownloadPage() {
             <section className="data-download-panel">
               <div className="data-download-panel-head">
                 <h3>首次下载参数</h3>
-                <p>首次下载需要明确历史区间。结束日期可以固定，也可以跟随当前有效交易日。</p>
+                <p>设置历史区间，结束日期可固定或跟随当前有效交易日。</p>
               </div>
 
               <div className="data-download-form-grid">

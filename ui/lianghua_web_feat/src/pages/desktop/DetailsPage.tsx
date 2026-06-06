@@ -7523,7 +7523,7 @@ export default function DetailsPage({
           <div className="details-section-head details-section-head-strategy details-scene-overview-head">
             <div>
               <h3 className="details-subtitle">Scene 状态总览</h3>
-              <p className="details-note">点击场景可打开明细浮窗；基础信息已收入口径浮窗。</p>
+              <p className="details-note">点击场景查看状态、得分和策略变化。</p>
             </div>
             <div className="details-strategy-nav">
               <button
@@ -7716,7 +7716,7 @@ export default function DetailsPage({
             <div className="details-section-head details-section-head-strategy">
               <div>
                 <h3 className="details-subtitle">策略变化明细（{formatFieldValue(sceneDetailTarget?.scene_name)}）</h3>
-                <p className="details-note">基础信息已收入口径浮窗，便于快速切换场景。</p>
+                <p className="details-note">查看该场景的策略变化，并可快速切换其他场景。</p>
               </div>
               <div className="details-strategy-toolbar">
                 <div className="details-strategy-params">

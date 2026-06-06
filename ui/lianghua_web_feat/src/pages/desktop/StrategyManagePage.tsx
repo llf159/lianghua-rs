@@ -1248,8 +1248,8 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
             <h2 className="strategy-manage-title">{isChipView ? '筹码变动策略' : '打分策略管理'}</h2>
             <p className="strategy-manage-note">
               {isChipView
-                ? '编辑 chip_change_rule.toml；新筹码计算和筹码测试共用这里的策略。'
-                : '编辑当前生效的 score_rule.toml；历史导入和备份都收纳在顶部的策略资产中心里。'}
+                ? '管理筹码变动策略，供筹码计算和筹码测试使用。'
+                : '管理当前生效的打分策略，导入和备份可在策略资产中心处理。'}
             </p>
           </div>
           <span className="strategy-manage-tip">

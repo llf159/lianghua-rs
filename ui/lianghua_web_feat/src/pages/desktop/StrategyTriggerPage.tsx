@@ -2393,10 +2393,7 @@ export default function StrategyTriggerPage() {
       <section className="strategy-trigger-card">
         <h2 className="strategy-trigger-title">策略触发统计</h2>
         <div className="strategy-trigger-source-note">
-          <span>
-            统计口径基于结果库 `rule_details / scene_details / score_summary`
-            与规则文件。
-          </span>
+          <span>按分析日期汇总规则、场景和总分触发情况。</span>
         </div>
         <div className="strategy-trigger-form-grid">
           <label className="strategy-trigger-field">
@@ -2634,7 +2631,7 @@ export default function StrategyTriggerPage() {
                 scenePageData?.resolved_analysis_trade_date ??
                   analysisTradeDate,
               )}{" "}
-              · 按 Scene 直出
+              · 按场景汇总
             </p>
           </div>
         </div>

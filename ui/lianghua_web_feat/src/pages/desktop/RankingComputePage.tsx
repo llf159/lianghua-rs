@@ -968,7 +968,7 @@ export default function RankingComputePage() {
           <div className="ranking-compute-summary-item">
             <span>排名计算</span>
             <strong>score_summary / rule_details / scene_details + 排名</strong>
-            <small>按区间重算总分、规则明细、场景明细，并直接生成J值同分排序排名。</small>
+            <small>按区间重算总分、明细和排名。</small>
           </div>
         </div>
 
@@ -1075,7 +1075,7 @@ export default function RankingComputePage() {
           <div className="ranking-compute-summary-item">
             <span>筹码计算</span>
             <strong>cyq.db / cyq_snapshot / cyq_bin</strong>
-            <small>支持按日期范围重建 CYQ 摘要和分桶明细；起始日留空时走默认范围，结束日默认数据库最新日期。</small>
+            <small>按日期范围重建筹码摘要和分桶明细。</small>
           </div>
         </div>
 
@@ -1140,7 +1140,7 @@ export default function RankingComputePage() {
           <div className="ranking-compute-summary-item">
             <span>新筹码计算</span>
             <strong>cyq_chen.db / cyq_chen_snapshot / cyq_chen_bin</strong>
-            <small>使用 chip_change_rule.toml 重建筹码摘要和分桶明细；起始日留空时按原始库可用范围计算。</small>
+            <small>重建新筹码摘要、分桶明细和策略结果。</small>
           </div>
         </div>
 
@@ -1284,7 +1284,7 @@ export default function RankingComputePage() {
           <div className="ranking-compute-summary-item">
             <span>行情数据指标列维护</span>
             <strong>ind.toml + stock_data 指标列</strong>
-            <small>这里维护指标配置，并执行清空/补算指标列；ind.toml 不存在时会自动创建默认 J，J 用于排名同分排序，不能删。</small>
+            <small>管理指标配置，并清空或补算行情指标列。</small>
           </div>
         </div>
 
