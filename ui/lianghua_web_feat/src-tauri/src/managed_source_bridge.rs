@@ -2,6 +2,7 @@ use std::{
     io::{Read, Seek, Write},
     path::{Component, Path, PathBuf},
     str::FromStr,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use chrono::{DateTime, Utc};
@@ -63,6 +64,8 @@ const STRATEGY_SNAPSHOT_DIR_NAME: &str = "strategy_snapshots";
 const RANK_COMPUTE_SNAPSHOT_DIR_NAME: &str = "rank_compute";
 const STRATEGY_RULE_FILE_NAME: &str = "score_rule.toml";
 const STRATEGY_META_FILE_NAME: &str = "meta.json";
+const STRATEGY_META_READ_RETRY_COUNT: usize = 3;
+const STRATEGY_META_READ_RETRY_DELAY: Duration = Duration::from_millis(25);
 const EMPTY_STRATEGY_TEMPLATE: &str = r#"version = 1
 
 [[scene]]
@@ -570,18 +573,60 @@ fn read_strategy_backup_meta(
     let meta_path = locate_strategy_asset(source_root, backup_id)
         .map(|(_, asset_dir)| asset_dir.join(STRATEGY_META_FILE_NAME))
         .unwrap_or_else(|| managed_strategy_backup_meta_path(source_root, backup_id));
-    let raw = std::fs::read_to_string(&meta_path).map_err(|error| {
-        format!(
-            "读取策略备份元数据失败: path={}, err={error}",
-            meta_path.display()
-        )
-    })?;
-    serde_json::from_str(&raw).map_err(|error| {
-        format!(
-            "解析策略备份元数据失败: path={}, err={error}",
-            meta_path.display()
-        )
-    })
+    for attempt in 0..=STRATEGY_META_READ_RETRY_COUNT {
+        let raw = std::fs::read_to_string(&meta_path).map_err(|error| {
+            format!(
+                "读取策略备份元数据失败: path={}, err={error}",
+                meta_path.display()
+            )
+        })?;
+        match serde_json::from_str(&raw) {
+            Ok(meta) => return Ok(meta),
+            Err(error) if error.is_eof() && attempt < STRATEGY_META_READ_RETRY_COUNT => {
+                std::thread::sleep(STRATEGY_META_READ_RETRY_DELAY);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "解析策略备份元数据失败: path={}, err={error}",
+                    meta_path.display()
+                ));
+            }
+        }
+    }
+    unreachable!("strategy meta read retry loop always returns")
+}
+
+fn write_strategy_backup_meta_atomically(meta_path: &Path, payload: &str) -> Result<(), String> {
+    if let Some(parent) = meta_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    let unique_suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let temp_path = meta_path.with_file_name(format!(
+        ".{}.{}.tmp",
+        STRATEGY_META_FILE_NAME, unique_suffix
+    ));
+    let write_result = (|| {
+        let mut temp_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(|error| error.to_string())?;
+        temp_file
+            .write_all(payload.as_bytes())
+            .map_err(|error| error.to_string())?;
+        temp_file.sync_all().map_err(|error| error.to_string())?;
+        drop(temp_file);
+        std::fs::rename(&temp_path, meta_path).map_err(|error| error.to_string())
+    })();
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    write_result
 }
 
 fn write_strategy_backup_meta(
@@ -592,11 +637,8 @@ fn write_strategy_backup_meta(
     let meta_path = locate_strategy_asset(source_root, backup_id)
         .map(|(_, asset_dir)| asset_dir.join(STRATEGY_META_FILE_NAME))
         .unwrap_or_else(|| managed_strategy_backup_meta_path(source_root, backup_id));
-    if let Some(parent) = meta_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
     let payload = serde_json::to_string_pretty(meta).map_err(|error| error.to_string())?;
-    std::fs::write(&meta_path, payload).map_err(|error| {
+    write_strategy_backup_meta_atomically(&meta_path, &payload).map_err(|error| {
         format!(
             "写入策略备份元数据失败: path={}, err={error}",
             meta_path.display()
@@ -992,10 +1034,6 @@ pub(crate) fn snapshot_rank_compute_strategy(
         (Some(start), Some(end)) => format!("{start} 至 {end}"),
         _ => "未记录区间".to_string(),
     };
-    let meta_path = managed_rank_compute_snapshot_meta_path(&source_root, &backup_id);
-    if let Some(parent) = meta_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
     let payload = serde_json::to_string_pretty(&StrategyBackupMeta {
         version: 1,
         created_at: Utc::now().to_rfc3339(),
@@ -1004,7 +1042,8 @@ pub(crate) fn snapshot_rank_compute_strategy(
         description: Some(format!("排名计算快照：{range_text}")),
     })
     .map_err(|error| error.to_string())?;
-    std::fs::write(&meta_path, payload).map_err(|error| {
+    let meta_path = managed_rank_compute_snapshot_meta_path(&source_root, &backup_id);
+    write_strategy_backup_meta_atomically(&meta_path, &payload).map_err(|error| {
         format!(
             "写入策略备份元数据失败: path={}, err={error}",
             meta_path.display()
@@ -1938,8 +1977,14 @@ pub async fn import_managed_strategy_backup(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_archive_root, strip_archive_root};
-    use std::path::Path;
+    use super::{
+        normalize_archive_root, strip_archive_root, write_strategy_backup_meta_atomically,
+        StrategyBackupMeta,
+    };
+    use std::{
+        path::Path,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn strip_archive_root_removes_exported_source_prefix() {
@@ -1969,6 +2014,41 @@ mod tests {
         assert_eq!(normalize_archive_root(""), "source");
         assert_eq!(normalize_archive_root("source"), "source");
         assert_eq!(normalize_archive_root("/nested/source/"), "nested/source");
+    }
+
+    #[test]
+    fn write_strategy_backup_meta_atomically_replaces_empty_meta() {
+        let unique_suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "lianghua-strategy-meta-test-{}-{unique_suffix}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let meta_path = temp_dir.join("meta.json");
+        std::fs::write(&meta_path, "").unwrap();
+
+        let payload = r#"{
+  "version": 1,
+  "createdAt": "2026-06-06T01:14:16Z",
+  "sourceKind": "auto_entry",
+  "sourceFileName": "score_rule.toml",
+  "description": "自动备份：进入策略管理页"
+}"#;
+        write_strategy_backup_meta_atomically(&meta_path, payload).unwrap();
+
+        let raw = std::fs::read_to_string(&meta_path).unwrap();
+        let meta: StrategyBackupMeta = serde_json::from_str(&raw).unwrap();
+        assert_eq!(meta.source_kind, "auto_entry");
+        assert!(std::fs::read_dir(&temp_dir).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")));
+
+        std::fs::remove_dir_all(temp_dir).unwrap();
     }
 }
 

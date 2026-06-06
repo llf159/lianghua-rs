@@ -1505,10 +1505,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
       <section className="strategy-manage-card strategy-manage-chip-card">
         <div className="strategy-manage-section-head">
           <div>
-            <h3 className="strategy-manage-subtitle">四象限策略列表</h3>
-            <p className="strategy-manage-note">
-              按持有人和买卖方向分组；每个区块独立滚动，单个方向策略较多时不会拉伸其它区块。
-            </p>
+            <h3 className="strategy-manage-subtitle">策略列表</h3>
           </div>
           <span className="strategy-manage-tip">
             {normalizedChipStrategySearchKeyword
@@ -1517,14 +1514,6 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
           </span>
         </div>
 
-        <div className="strategy-manage-list-head strategy-manage-chip-list-head">
-          <strong>策略列表</strong>
-          <span>
-            {normalizedChipStrategySearchKeyword
-              ? `命中 ${filteredChipStrategies.length} / ${chipStrategies.length} 条`
-              : `${chipStrategies.length} 条`}
-          </span>
-        </div>
         {filteredChipStrategies.length === 0 ? (
           <div className="strategy-manage-empty">没有匹配当前搜索条件的筹码策略。</div>
         ) : (

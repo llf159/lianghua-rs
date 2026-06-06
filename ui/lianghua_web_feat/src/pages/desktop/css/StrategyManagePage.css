@@ -358,10 +358,6 @@
   border-color: #cfd9e6;
 }
 
-.strategy-manage-chip-list-head {
-  margin-top: 16px;
-}
-
 .strategy-manage-chip-group-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
