@@ -54,6 +54,7 @@ const FUNCTIONS = [
   'HHV',
   'LLV',
   'COUNT',
+  'EXIST',
   'MA',
   'REF',
   'LAST',

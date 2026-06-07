@@ -127,6 +127,8 @@ pub struct ChenChipSnapshot {
     pub total_chips: f64,
     pub total_profit_ratio: f64,
     pub total_trapped_ratio: f64,
+    pub main_profit_ratio: f64,
+    pub main_trapped_ratio: f64,
     pub chip_peak_price: f64,
     pub percent_70: ChenChipPercentRange,
     pub percent_90: ChenChipPercentRange,
@@ -155,6 +157,13 @@ pub fn round_chen_chip_snapshot(snapshot: &mut ChenChipSnapshot) {
         round_chen_chip_value(1.0 - snapshot.total_profit_ratio)
     } else {
         round_chen_chip_value(snapshot.total_trapped_ratio)
+    };
+    let original_main_ratio_sum = snapshot.main_profit_ratio + snapshot.main_trapped_ratio;
+    snapshot.main_profit_ratio = round_chen_chip_value(snapshot.main_profit_ratio);
+    snapshot.main_trapped_ratio = if (original_main_ratio_sum - 1.0).abs() <= 1e-9 {
+        round_chen_chip_value(1.0 - snapshot.main_profit_ratio)
+    } else {
+        round_chen_chip_value(snapshot.main_trapped_ratio)
     };
     snapshot.chip_peak_price = round_chen_chip_value(snapshot.chip_peak_price);
     round_chen_chip_percent_range(&mut snapshot.percent_70);
@@ -1654,6 +1663,11 @@ fn build_snapshot(bar: &ChenChipBar, buckets: &[ChipBucket]) -> Result<ChenChipS
         .filter(|bucket| bucket.price() <= bar.close + EPS)
         .map(ChipBucket::total_chip)
         .sum::<f64>();
+    let main_profit_chips = buckets
+        .iter()
+        .filter(|bucket| bucket.price() <= bar.close + EPS)
+        .map(|bucket| bucket.main_chip)
+        .sum::<f64>();
     let total_profit_ratio = if total_chips <= EPS {
         0.0
     } else {
@@ -1663,6 +1677,16 @@ fn build_snapshot(bar: &ChenChipBar, buckets: &[ChipBucket]) -> Result<ChenChipS
         0.0
     } else {
         1.0 - total_profit_ratio
+    };
+    let main_profit_ratio = if main_total <= EPS {
+        0.0
+    } else {
+        main_profit_chips / main_total
+    };
+    let main_trapped_ratio = if main_total <= EPS {
+        0.0
+    } else {
+        1.0 - main_profit_ratio
     };
     let chip_peak_price = buckets
         .iter()
@@ -1701,6 +1725,8 @@ fn build_snapshot(bar: &ChenChipBar, buckets: &[ChipBucket]) -> Result<ChenChipS
         total_chips: finite_value(total_chips)?,
         total_profit_ratio: finite_value(round_ratio(total_profit_ratio))?,
         total_trapped_ratio: finite_value(round_ratio(total_trapped_ratio))?,
+        main_profit_ratio: finite_value(round_ratio(main_profit_ratio))?,
+        main_trapped_ratio: finite_value(round_ratio(main_trapped_ratio))?,
         chip_peak_price: finite_value(chip_peak_price)?,
         percent_70: build_percent_range(0.7, buckets, total_chips),
         percent_90: build_percent_range(0.9, buckets, total_chips),
@@ -2125,6 +2151,12 @@ bias = 1.0
             snapshots[1].total_profit_ratio + snapshots[1].total_trapped_ratio,
             1.0,
         );
+        assert_close(
+            snapshots[1].main_profit_ratio + snapshots[1].main_trapped_ratio,
+            1.0,
+        );
+        assert!(snapshots[1].main_profit_ratio >= 0.0);
+        assert!(snapshots[1].main_profit_ratio <= 1.0);
         assert!(snapshots[1].chip_peak_price >= snapshots[1].min_price);
         assert!(snapshots[1].chip_peak_price <= snapshots[1].max_price);
         assert!(snapshots[1].percent_70.price_low <= snapshots[1].percent_70.price_high);

@@ -55,7 +55,7 @@ use crate::{
 };
 
 const TOP_RANK_THRESHOLD: i64 = 100;
-const RULE_VALIDATION_INJECTED_RUNTIME_KEYS: [&str; 3] = ["RANK", "ZHANG", "TOTAL_MV_YI"];
+const RULE_VALIDATION_INJECTED_RUNTIME_KEYS: [&str; 4] = ["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI"];
 const RULE_VALIDATION_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 
 #[derive(Debug, Clone)]
@@ -2013,17 +2013,24 @@ fn build_validation_date_score_map(
     }
 }
 
-fn validation_combos_use_rank(combos: &[PreparedValidationCombo]) -> bool {
-    combos
-        .iter()
-        .any(|combo| expr_program_uses_runtime_key(&combo.cached_rule.when_ast, "RANK"))
+fn validation_combos_use_rank_score(combos: &[PreparedValidationCombo]) -> bool {
+    combos.iter().any(|combo| {
+        expr_program_uses_runtime_key(&combo.cached_rule.when_ast, "RANK")
+            || expr_program_uses_runtime_key(&combo.cached_rule.when_ast, "SCORE")
+    })
 }
 
-fn load_validation_rank_series_map(
+#[derive(Debug, Clone, Copy, Default)]
+struct ValidationRankScoreInfo {
+    rank: Option<f64>,
+    score: Option<f64>,
+}
+
+fn load_validation_rank_score_series_map(
     source_path: &str,
     start_date: &str,
     end_date: &str,
-) -> HashMap<String, HashMap<String, Option<f64>>> {
+) -> HashMap<String, HashMap<String, ValidationRankScoreInfo>> {
     let result_db = result_db_path(source_path);
     if !result_db.exists() {
         return HashMap::new();
@@ -2037,7 +2044,7 @@ fn load_validation_rank_series_map(
     };
     let Ok(mut stmt) = conn.prepare(
         r#"
-        SELECT ts_code, trade_date, rank
+        SELECT ts_code, trade_date, rank, total_score
         FROM score_summary
         WHERE trade_date >= ? AND trade_date <= ?
         "#,
@@ -2048,7 +2055,7 @@ fn load_validation_rank_series_map(
         return HashMap::new();
     };
 
-    let mut out: HashMap<String, HashMap<String, Option<f64>>> = HashMap::new();
+    let mut out: HashMap<String, HashMap<String, ValidationRankScoreInfo>> = HashMap::new();
     while let Ok(Some(row)) = rows.next() {
         let Ok(ts_code) = row.get::<_, String>(0) else {
             continue;
@@ -2061,27 +2068,35 @@ fn load_validation_rank_series_map(
             .ok()
             .flatten()
             .map(|value| value as f64);
-        out.entry(ts_code).or_default().insert(trade_date, rank);
+        let score = row.get::<_, Option<f64>>(3).ok().flatten();
+        out.entry(ts_code)
+            .or_default()
+            .insert(trade_date, ValidationRankScoreInfo { rank, score });
     }
 
     out
 }
 
-fn inject_validation_rank_series(
+fn inject_validation_rank_score_series(
     row_data: &mut crate::data::RowData,
     ts_code: &str,
-    rank_series_map: &HashMap<String, HashMap<String, Option<f64>>>,
+    rank_score_series_map: &HashMap<String, HashMap<String, ValidationRankScoreInfo>>,
 ) -> Result<(), String> {
     let len = row_data.trade_dates.len();
     let mut rank_series = vec![None; len];
+    let mut score_series = vec![None; len];
 
-    if let Some(date_to_rank) = rank_series_map.get(ts_code) {
+    if let Some(date_to_values) = rank_score_series_map.get(ts_code) {
         for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
-            rank_series[index] = date_to_rank.get(trade_date).copied().flatten();
+            if let Some(values) = date_to_values.get(trade_date).copied() {
+                rank_series[index] = values.rank;
+                score_series[index] = values.score;
+            }
         }
     }
 
     row_data.cols.insert("RANK".to_string(), rank_series);
+    row_data.cols.insert("SCORE".to_string(), score_series);
     row_data.validate()
 }
 
@@ -2095,8 +2110,8 @@ fn evaluate_validation_combos_for_ts_code(
     need_rows: usize,
     st_list: &HashSet<String>,
     total_share_map: &HashMap<String, f64>,
-    rank_series_map: &HashMap<String, HashMap<String, Option<f64>>>,
-    needs_rank: bool,
+    rank_score_series_map: &HashMap<String, HashMap<String, ValidationRankScoreInfo>>,
+    needs_rank_score: bool,
     combos: &[PreparedValidationCombo],
 ) -> Result<ValidationTsCodeEvaluation, String> {
     let mut row_data = reader.load_one_tail_rows(ts_code, stock_adj_type, end_date, need_rows)?;
@@ -2107,8 +2122,8 @@ fn evaluate_validation_combos_for_ts_code(
         st_list.contains(ts_code),
         total_share_map.get(ts_code).copied(),
     )?;
-    if needs_rank {
-        inject_validation_rank_series(&mut row_data, ts_code, rank_series_map)?;
+    if needs_rank_score {
+        inject_validation_rank_score_series(&mut row_data, ts_code, rank_score_series_map)?;
     }
 
     let trade_dates = row_data.trade_dates.clone();
@@ -2174,9 +2189,9 @@ fn build_validation_triggered_scores_for_combos(
     let required_runtime_keys = collect_rule_validation_runtime_keys(combos);
     let used_cyq_chen_keys = collect_rule_validation_cyq_chen_runtime_keys(combos);
     let total_share_map = load_total_share_map(source_path).unwrap_or_default();
-    let needs_rank = validation_combos_use_rank(combos);
-    let rank_series_map = if needs_rank {
-        load_validation_rank_series_map(source_path, query_start_date, end_date)
+    let needs_rank_score = validation_combos_use_rank_score(combos);
+    let rank_score_series_map = if needs_rank_score {
+        load_validation_rank_score_series_map(source_path, query_start_date, end_date)
     } else {
         HashMap::new()
     };
@@ -2213,8 +2228,8 @@ fn build_validation_triggered_scores_for_combos(
                     need_rows,
                     st_list,
                     &total_share_map,
-                    &rank_series_map,
-                    needs_rank,
+                    &rank_score_series_map,
+                    needs_rank_score,
                     combos,
                 )?;
 
@@ -5919,6 +5934,7 @@ mod tests {
                 CREATE TABLE score_summary (
                     ts_code VARCHAR,
                     trade_date VARCHAR,
+                    total_score DOUBLE,
                     rank BIGINT
                 )
                 "#,
@@ -5927,16 +5943,19 @@ mod tests {
             .expect("create score_summary");
         result_conn
             .execute(
-                "INSERT INTO score_summary VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)",
+                "INSERT INTO score_summary VALUES (?, ?, ?, ?), (?, ?, ?, ?), (?, ?, ?, ?)",
                 params![
                     "000001.SZ",
                     "20240102",
+                    80.0_f64,
                     3_i64,
                     "000001.SZ",
                     "20240103",
+                    90.0_f64,
                     2_i64,
                     "000001.SZ",
                     "20240104",
+                    100.0_f64,
                     1_i64,
                 ],
             )
@@ -6243,7 +6262,7 @@ mod tests {
             1.0,
             None,
             RuleTag::Normal,
-            "M := MA(C, 5); M > MY_VALIDATION_IND AND RANK <= 100 AND ZHANG > 0 AND TOTAL_MV_YI <= 300 AND CYQ_TPR > 0.6",
+            "M := MA(C, 5); M > MY_VALIDATION_IND AND RANK <= 100 AND SCORE > 0 AND ZHANG > 0 AND TOTAL_MV_YI <= 300 AND CYQ_TPR > 0.6",
         )
         .expect("build cached rule");
         let combo = PreparedValidationCombo {
@@ -6263,7 +6282,7 @@ mod tests {
             assert!(keys.contains(required_key), "missing {required_key}");
         }
         assert!(!keys.contains("TOTAL_MV"));
-        for injected_key in ["RANK", "ZHANG", "TOTAL_MV_YI", "CYQ_TPR"] {
+        for injected_key in ["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI", "CYQ_TPR"] {
             assert!(!keys.contains(injected_key), "unexpected {injected_key}");
         }
         assert!(!keys.contains("O"));

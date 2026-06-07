@@ -9,7 +9,10 @@ use serde::Serialize;
 
 use crate::{
     data::{RowData, ScoreConfig},
-    data::{cyq_chen_db_path, cyq_db_path, result_db_path, score_rule_path, source_db_path},
+    data::{
+        cyq_chen_data::init_cyq_chen_db, cyq_chen_db_path, cyq_db_path, result_db_path,
+        score_rule_path, source_db_path,
+    },
     download::ind_calc::{cache_ind_build, calc_inds_with_cache},
     scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map},
     ui_tools_feat::{
@@ -231,6 +234,8 @@ pub struct DetailCyqSnapshot {
     pub total_chips: Option<f64>,
     pub total_profit_ratio: Option<f64>,
     pub total_trapped_ratio: Option<f64>,
+    pub main_profit_ratio: Option<f64>,
+    pub main_trapped_ratio: Option<f64>,
     pub chip_peak_price: Option<f64>,
     pub percent_70_price_low: Option<f64>,
     pub percent_70_price_high: Option<f64>,
@@ -393,6 +398,7 @@ fn open_cyq_chen_conn(source_path: &str) -> Result<Option<Connection>, String> {
     if !cyq_chen_db.exists() {
         return Ok(None);
     }
+    init_cyq_chen_db(&cyq_chen_db)?;
     let cyq_chen_db_str = cyq_chen_db
         .to_str()
         .ok_or_else(|| "新筹码库路径不是有效UTF-8".to_string())?;
@@ -486,6 +492,8 @@ fn query_stock_detail_cyq(source_path: &str, ts_code: &str) -> Result<StockDetai
                 .get(5)
                 .map_err(|e| format!("读取筹码获利比例失败: {e}"))?,
             total_trapped_ratio: None,
+            main_profit_ratio: None,
+            main_trapped_ratio: None,
             chip_peak_price: None,
             percent_70_price_low: row
                 .get(6)
@@ -602,7 +610,8 @@ fn query_stock_detail_cyq_chen(
             SELECT trade_date, close, min_price, max_price, main_total, retail_total,
                    total_chips, total_profit_ratio, total_trapped_ratio, chip_peak_price,
                    percent_70_price_low, percent_70_price_high, percent_70_concentration,
-                   percent_90_price_low, percent_90_price_high, percent_90_concentration
+                   percent_90_price_low, percent_90_price_high, percent_90_concentration,
+                   main_profit_ratio, main_trapped_ratio
             FROM cyq_chen_snapshot
             WHERE ts_code = ? AND adj_type = ?
             ORDER BY trade_date ASC
@@ -646,6 +655,12 @@ fn query_stock_detail_cyq_chen(
             total_trapped_ratio: row
                 .get(8)
                 .map_err(|e| format!("读取新筹码套牢比例失败: {e}"))?,
+            main_profit_ratio: row
+                .get(16)
+                .map_err(|e| format!("读取新筹码主力获利比例失败: {e}"))?,
+            main_trapped_ratio: row
+                .get(17)
+                .map_err(|e| format!("读取新筹码主力套牢比例失败: {e}"))?,
             chip_peak_price: row
                 .get(9)
                 .map_err(|e| format!("读取新筹码峰值价格失败: {e}"))?,

@@ -35,6 +35,7 @@ const SYNTAX_GUIDE_FUNCTIONS: SyntaxGuideFunction[] = [
   { name: 'MIN', signature: 'MIN(a, b)', returns: '数值序列', description: '逐项取较小值。', example: 'a=[1,5], b=[2,3] -> [1,3]' },
   { name: 'DIV', signature: 'DIV(a, b)', returns: '数值序列', description: '安全除法，除数为 0 时返回 0。', example: 'a=[6,5], b=[2,0] -> [3,0]' },
   { name: 'COUNT', signature: 'COUNT(cond, n)', returns: '数值序列', description: '统计最近 n 根里条件成立的次数。', example: 'cond=[真,假,真,真], n=3 -> [1,1,2,2]' },
+  { name: 'EXIST', signature: 'EXIST(cond, n)', returns: '布尔序列', description: '判断最近 n 根里条件是否至少成立过一次。', example: 'cond=[假,真,假,假], n=3 -> [假,真,真,真]' },
   { name: 'MA', signature: 'MA(x, n)', returns: '数值序列', description: '简单移动平均。', example: 'x=[1,2,3,4], n=3 -> [空,空,2,3]' },
   { name: 'REF', signature: 'REF(x, n)', returns: '数值序列', description: '取 n 根之前的值。', example: 'x=[10,11,12,13], n=2 -> [空,空,10,11]' },
   { name: 'LAST', signature: 'LAST(x, n)', returns: '标量(数字或布尔)', description: '取倒数第 n+1 根的值；n=0 表示最新值。', example: 'x=[10,11,12,13], n=0 -> 13；x=[假,真,真], n=1 -> 真' },
@@ -87,8 +88,9 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     note: '这些字段来自 cyq_chen.db 的 cyq_chen_snapshot，会按股票代码和交易日对齐注入；排名计算、表达式选股、统计验证、模拟盘和实时监控都可使用。库、表、列或日期缺失时按空值处理。',
     fields: [
       { name: 'CYQ_TPR / CYQ_TTR', scope: '通用', description: '新筹码整体获利 / 套牢筹码比例。', example: 'CYQ_TPR > 0.6 AND CYQ_TTR < 0.35' },
+      { name: 'CYQ_MPR / CYQ_MTR', scope: '通用', description: '新筹码主力获利 / 套牢筹码比例。', example: 'CYQ_MPR > 0.6 AND CYQ_MTR < 0.35' },
       { name: 'CYQ_PEAK', scope: '通用', description: '新筹码总筹码峰值价格。', example: 'C > CYQ_PEAK' },
-      { name: 'CYQ_MT / CYQ_RT / CYQ_TC', scope: '通用', description: '主力 / 散户 / 总筹码的归一化持仓量，CYQ_MT + CYQ_RT 约等于 CYQ_TC；CYQ_TC 通常约为 100，不是成交量或真实股本数量。', example: 'CYQ_MT > CYQ_RT' },
+      { name: 'CYQ_MT / CYQ_RT', scope: '通用', description: '主力 / 散户归一化持仓量。', example: 'CYQ_MT > CYQ_RT' },
       { name: 'CYQ_MIN / CYQ_MAX', scope: '通用', description: '新筹码分布的最低 / 最高价格边界。', example: 'C >= CYQ_MIN AND C <= CYQ_MAX' },
       { name: 'CYQ_P70L / CYQ_P70H / CYQ_P70C', scope: '通用', description: '70% 筹码集中区下沿 / 上沿 / 集中度。', example: 'CYQ_P70C > 0.4' },
       { name: 'CYQ_P90L / CYQ_P90H / CYQ_P90C', scope: '通用', description: '90% 筹码集中区下沿 / 上沿 / 集中度。', example: 'C > CYQ_P90H' },

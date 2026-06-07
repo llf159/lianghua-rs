@@ -30,7 +30,8 @@ use super::{
 const DEFAULT_ADJ_TYPE: &str = "qfq";
 const BOARD_ALL: &str = "全部";
 const BOARD_ST: &str = "ST";
-const EXPRESSION_STOCK_PICK_INJECTED_RUNTIME_KEYS: [&str; 3] = ["RANK", "ZHANG", "TOTAL_MV_YI"];
+const EXPRESSION_STOCK_PICK_INJECTED_RUNTIME_KEYS: [&str; 4] =
+    ["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI"];
 const EXPRESSION_STOCK_PICK_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 
 #[derive(Debug, Clone, Copy)]
@@ -84,6 +85,12 @@ enum ScopeHit {
 struct SummaryInfo {
     rank: Option<i64>,
     total_score: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RankScoreInfo {
+    rank: Option<f64>,
+    score: Option<f64>,
 }
 
 fn parse_scope_way(
@@ -520,11 +527,11 @@ fn load_summary_map(source_path: &str, trade_date: &str) -> HashMap<String, Summ
     out
 }
 
-fn load_rank_series_map(
+fn load_rank_score_series_map(
     source_path: &str,
     start_date: &str,
     end_date: &str,
-) -> HashMap<String, HashMap<String, Option<f64>>> {
+) -> HashMap<String, HashMap<String, RankScoreInfo>> {
     let result_db = result_db_path(source_path);
     if !result_db.exists() {
         return HashMap::new();
@@ -538,7 +545,7 @@ fn load_rank_series_map(
     };
     let Ok(mut stmt) = conn.prepare(
         r#"
-        SELECT ts_code, trade_date, rank
+        SELECT ts_code, trade_date, rank, total_score
         FROM score_summary
         WHERE trade_date >= ? AND trade_date <= ?
         "#,
@@ -549,7 +556,7 @@ fn load_rank_series_map(
         return HashMap::new();
     };
 
-    let mut out: HashMap<String, HashMap<String, Option<f64>>> = HashMap::new();
+    let mut out: HashMap<String, HashMap<String, RankScoreInfo>> = HashMap::new();
     while let Ok(Some(row)) = rows.next() {
         let Ok(ts_code) = row.get::<_, String>(0) else {
             continue;
@@ -562,27 +569,35 @@ fn load_rank_series_map(
             .ok()
             .flatten()
             .map(|value| value as f64);
-        out.entry(ts_code).or_default().insert(trade_date, rank);
+        let score = row.get::<_, Option<f64>>(3).ok().flatten();
+        out.entry(ts_code)
+            .or_default()
+            .insert(trade_date, RankScoreInfo { rank, score });
     }
 
     out
 }
 
-fn inject_runtime_rank_series(
+fn inject_runtime_rank_score_series(
     row_data: &mut crate::data::RowData,
     ts_code: &str,
-    rank_series_map: &HashMap<String, HashMap<String, Option<f64>>>,
+    rank_score_series_map: &HashMap<String, HashMap<String, RankScoreInfo>>,
 ) -> Result<(), String> {
     let len = row_data.trade_dates.len();
     let mut rank_series = vec![None; len];
+    let mut score_series = vec![None; len];
 
-    if let Some(date_to_rank) = rank_series_map.get(ts_code) {
+    if let Some(date_to_values) = rank_score_series_map.get(ts_code) {
         for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
-            rank_series[index] = date_to_rank.get(trade_date).copied().flatten();
+            if let Some(values) = date_to_values.get(trade_date).copied() {
+                rank_series[index] = values.rank;
+                score_series[index] = values.score;
+            }
         }
     }
 
     row_data.cols.insert("RANK".to_string(), rank_series);
+    row_data.cols.insert("SCORE".to_string(), score_series);
     row_data.validate()
 }
 
@@ -669,7 +684,8 @@ pub fn run_expression_stock_pick(
     let warmup_need = estimate_custom_warmup(&stmts, parsed_scope_way)?;
     let required_runtime_keys = collect_expression_stock_pick_runtime_keys(&stmts);
     let used_cyq_chen_keys = collect_used_cyq_chen_runtime_keys(&[&stmts]);
-    let needs_rank = expr_program_uses_runtime_key(&stmts, "RANK");
+    let needs_rank_score = expr_program_uses_runtime_key(&stmts, "RANK")
+        || expr_program_uses_runtime_key(&stmts, "SCORE");
     let query_start_date = calc_query_start_date(source_path, warmup_need, &resolved_start_date)?;
     let need_rows = calc_query_need_rows(
         source_path,
@@ -695,8 +711,8 @@ pub fn run_expression_stock_pick(
     let concept_map = build_concepts_map(source_path).unwrap_or_default();
     let total_share_map = load_total_share_map(source_path).unwrap_or_default();
     let summary_map = load_summary_map(source_path, &resolved_end_date);
-    let rank_series_map = if needs_rank {
-        load_rank_series_map(source_path, &query_start_date, &resolved_end_date)
+    let rank_score_series_map = if needs_rank_score {
+        load_rank_score_series_map(source_path, &query_start_date, &resolved_end_date)
     } else {
         HashMap::new()
     };
@@ -730,8 +746,12 @@ pub fn run_expression_stock_pick(
                     st_list.contains(ts_code),
                     total_share_map.get(ts_code).copied(),
                 )?;
-                if needs_rank {
-                    inject_runtime_rank_series(&mut row_data, ts_code, &rank_series_map)?;
+                if needs_rank_score {
+                    inject_runtime_rank_score_series(
+                        &mut row_data,
+                        ts_code,
+                        &rank_score_series_map,
+                    )?;
                 }
                 let trade_dates = row_data.trade_dates.clone();
                 let keep_from = trade_dates
@@ -960,7 +980,7 @@ mod tests {
     #[test]
     fn expression_stock_pick_runtime_key_collection_skips_injected_fields() {
         let program = parse_program(
-            "M := MA(C, 5); M > MY_IND AND RANK <= 100 AND ZHANG > 0 AND TOTAL_MV_YI <= 300 AND CYQ_TPR > 0.6",
+            "M := MA(C, 5); M > MY_IND AND RANK <= 100 AND SCORE > 0 AND ZHANG > 0 AND TOTAL_MV_YI <= 300 AND CYQ_TPR > 0.6",
         );
 
         let keys = collect_expression_stock_pick_runtime_keys(&program);
@@ -969,7 +989,7 @@ mod tests {
             assert!(keys.contains(required_key), "missing {required_key}");
         }
         assert!(!keys.contains("TOTAL_MV"));
-        for injected_key in ["RANK", "ZHANG", "TOTAL_MV_YI", "CYQ_TPR"] {
+        for injected_key in ["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI", "CYQ_TPR"] {
             assert!(!keys.contains(injected_key), "unexpected {injected_key}");
         }
         assert!(!keys.contains("O"));

@@ -1061,6 +1061,7 @@ fn is_expression_function(name: &str) -> bool {
             | "LLVD"
             | "COUNT"
             | "COUNTD"
+            | "EXIST"
             | "MA"
             | "MAD"
             | "REF"

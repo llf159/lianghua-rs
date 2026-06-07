@@ -159,6 +159,7 @@ type CyqChenTestDraft = {
 
 const DEFAULT_VISIBLE_BARS = 90
 const MIN_VISIBLE_BARS = 20
+const CYQ_SCALE_WINDOW_DAYS = 60
 const CHART_MIN_RIGHT_ALIGNED_SLOTS = 60
 const CHART_VIEWBOX_WIDTH = 1120
 const CHART_VIEWBOX_HEIGHT = 240
@@ -886,18 +887,76 @@ function chipValueByMode(bin: CyqChenBin, mode: ChipPeakMode) {
   return bin.totalChip
 }
 
-function chipBarRatioByMode(bin: CyqChenBin, snapshot: CyqChenSnapshot, mode: ChipPeakMode) {
-  const value = chipValueByMode(bin, mode)
-  const total = mode === 'main'
+function chipTotalByMode(snapshot: CyqChenSnapshot, mode: ChipPeakMode) {
+  return mode === 'main'
     ? snapshot.mainTotal
     : mode === 'retail'
       ? snapshot.retailTotal
       : snapshot.totalChips
+}
+
+function chipPctByMode(bin: CyqChenBin, snapshot: CyqChenSnapshot, mode: ChipPeakMode) {
+  const value = chipValueByMode(bin, mode)
+  const total = chipTotalByMode(snapshot, mode)
 
   if (!isFiniteNumber(value) || !isFiniteNumber(total) || total <= Number.EPSILON) {
     return 0
   }
   return clampNumber(value / total, 0, 1)
+}
+
+function getCyqChenSnapshotMaxChip(snapshot: CyqChenSnapshot, mode: ChipPeakMode) {
+  return snapshot.bins.reduce((maxChip, bin) => Math.max(maxChip, chipValueByMode(bin, mode)), 0)
+}
+
+function findCyqChenSnapshotIndexForTradeDate(snapshots: CyqChenSnapshot[], tradeDate: string) {
+  if (snapshots.length === 0) {
+    return -1
+  }
+  if (!tradeDate) {
+    return snapshots.length - 1
+  }
+
+  let latestBeforeOrEqual = -1
+  for (let index = 0; index < snapshots.length; index += 1) {
+    const snapshotTradeDate = snapshots[index]?.tradeDate ?? ''
+    if (snapshotTradeDate === tradeDate) {
+      return index
+    }
+    if (snapshotTradeDate <= tradeDate) {
+      latestBeforeOrEqual = index
+      continue
+    }
+    break
+  }
+
+  return latestBeforeOrEqual >= 0 ? latestBeforeOrEqual : snapshots.length - 1
+}
+
+function getCyqChenScaleMaxChipInWindow(
+  snapshots: CyqChenSnapshot[],
+  tradeDate: string,
+  mode: ChipPeakMode,
+) {
+  const selectedIndex = findCyqChenSnapshotIndexForTradeDate(snapshots, tradeDate)
+  if (selectedIndex < 0) {
+    return 0
+  }
+
+  const startIndex = Math.max(0, selectedIndex - CYQ_SCALE_WINDOW_DAYS + 1)
+  const windowSnapshots = snapshots.slice(startIndex, selectedIndex + 1)
+  const mixedMaxChip = windowSnapshots.reduce(
+    (maxChip, snapshot) => Math.max(maxChip, getCyqChenSnapshotMaxChip(snapshot, 'total')),
+    0,
+  )
+  if (mode === 'total' || mixedMaxChip > 0) {
+    return mixedMaxChip
+  }
+
+  return windowSnapshots.reduce(
+    (maxChip, snapshot) => Math.max(maxChip, getCyqChenSnapshotMaxChip(snapshot, mode)),
+    0,
+  )
 }
 
 function chipModeLabel(mode: ChipPeakMode) {
@@ -924,12 +983,8 @@ function chipColor(holder: 'main' | 'retail', state: 'profit' | 'trapped') {
   return state === 'profit' ? CHIP_COLOR_RETAIL_PROFIT : CHIP_COLOR_RETAIL_TRAPPED
 }
 
-function findChipPeak(snapshot: CyqChenSnapshot | null, mode: ChipPeakMode) {
-  if (!snapshot || snapshot.bins.length === 0) {
-    return null
-  }
-
-  return snapshot.bins.reduce<CyqChenBin | null>((peak, bin) => {
+function findChipPeakBin(bins: CyqChenBin[], mode: ChipPeakMode) {
+  return bins.reduce<CyqChenBin | null>((peak, bin) => {
     const value = chipValueByMode(bin, mode)
     if (!isFiniteNumber(value)) {
       return peak
@@ -939,6 +994,14 @@ function findChipPeak(snapshot: CyqChenSnapshot | null, mode: ChipPeakMode) {
     }
     return peak
   }, null)
+}
+
+function findChipPeak(snapshot: CyqChenSnapshot | null, mode: ChipPeakMode) {
+  if (!snapshot || snapshot.bins.length === 0) {
+    return null
+  }
+
+  return findChipPeakBin(snapshot.bins, mode)
 }
 
 function buildWatermarkCode(tsCode: string | null | undefined) {
@@ -952,6 +1015,7 @@ function buildWatermarkCode(tsCode: string | null | undefined) {
 function CyqChenProjectChart({
   kline,
   panels,
+  snapshots,
   snapshot,
   selectedTradeDate,
   chipPeakMode,
@@ -962,6 +1026,7 @@ function CyqChenProjectChart({
 }: {
   kline: CyqChenChartRow[]
   panels: DetailKlinePanel[]
+  snapshots: CyqChenSnapshot[]
   snapshot: CyqChenSnapshot | null
   selectedTradeDate: string
   chipPeakMode: ChipPeakMode
@@ -1030,6 +1095,7 @@ function CyqChenProjectChart({
   const chartRangeText = visibleItems.length > 0
     ? `${visibleItems[0]?.tradeDate ?? '--'} ~ ${visibleItems[visibleItems.length - 1]?.tradeDate ?? '--'}`
     : '--'
+  const cyqScaleMaxChip = getCyqChenScaleMaxChipInWindow(snapshots, selectedTradeDate, chipPeakMode)
   const chartMainPanelHeight = chartLayoutWidth * chartMainWidthRatio
   const chartIndicatorPanelHeight = Math.max(Math.min(chartLayoutWidth * 0.22, 180), 118)
   const shouldShowCyqSummary = reserveCyqPanelWidth && snapshot !== null
@@ -1928,10 +1994,23 @@ function CyqChenProjectChart({
                 const binHigh = Math.max(bin.priceLow, bin.priceHigh)
                 return !(binHigh < domain.min || binLow > domain.max)
               })
+              const totalScaleMaxChip = visibleCyqBins.reduce(
+                (maxChip, bin) => Math.max(maxChip, chipValueByMode(bin, 'total')),
+                0,
+              )
+              const selectedScaleMaxChip = visibleCyqBins.reduce(
+                (maxChip, bin) => Math.max(maxChip, chipValueByMode(bin, chipPeakMode)),
+                0,
+              )
+              const maxChip = cyqScaleMaxChip > 0
+                ? cyqScaleMaxChip
+                : chipPeakMode === 'total'
+                  ? totalScaleMaxChip
+                  : totalScaleMaxChip || selectedScaleMaxChip
               const hasVisibleChip = snapshot
-                ? visibleCyqBins.some((bin) => chipBarRatioByMode(bin, snapshot, chipPeakMode) > 0)
+                ? visibleCyqBins.some((bin) => chipValueByMode(bin, chipPeakMode) > 0)
                 : false
-              const peakBin = findChipPeak(snapshot, chipPeakMode)
+              const peakBin = findChipPeakBin(visibleCyqBins, chipPeakMode)
               const priceOverlaySeries = getPanelSeries(pricePanel)
               const markerOverlayPoints = buildChartMarkerOverlayPoints(pricePanel, visibleItems, xAt, yAt)
               const priceTooltipSections = buildDetailTooltipRows(pricePanel, focusedRow)
@@ -2035,7 +2114,7 @@ function CyqChenProjectChart({
                       )
                     })}
 
-                    {reserveCyqPanelWidth && snapshot && hasVisibleChip ? (
+                    {reserveCyqPanelWidth && snapshot && hasVisibleChip && maxChip > 0 ? (
                       <g key={`cyq-${snapshot?.tradeDate ?? 'none'}`}>
                         <line
                           className="details-chart-cyq-divider"
@@ -2056,7 +2135,8 @@ function CyqChenProjectChart({
                           const barHeight = Math.max(yBottom - yTop, 1)
                           const maxBarWidth = Math.max(chipPanelRight - chipPanelLeft - 4, 0)
                           const chipValue = chipValueByMode(bin, chipPeakMode)
-                          const barWidth = chipBarRatioByMode(bin, snapshot, chipPeakMode) * maxBarWidth
+                          const chipPct = chipPctByMode(bin, snapshot, chipPeakMode)
+                          const barWidth = (chipValue / maxChip) * maxBarWidth
                           const resolvedBarWidth = Math.max(barWidth, 1)
                           const representativePrice = (bin.priceLow + bin.priceHigh) / 2
                           const state = chipProfitState(representativePrice, selectedClose)
@@ -2081,7 +2161,7 @@ function CyqChenProjectChart({
                           return chipPeakMode === 'total' ? (
                             <g key={`${bin.index}-${bin.priceLow}`}>
                               <title>
-                                {`混合 ${formatNumber(bin.totalChip, 4)}；主力 ${formatRatioPercent(mainRatio)}，散户 ${formatRatioPercent(retailRatio)}`}
+                                {`混合 ${formatRatioPercent(chipPct)}；主力 ${formatRatioPercent(mainRatio)}，散户 ${formatRatioPercent(retailRatio)}`}
                               </title>
                               {retailWidth > 0 ? (
                                 <rect
@@ -2259,7 +2339,7 @@ function snapshotLabel(snapshot: CyqChenSnapshot | null) {
   if (!snapshot) {
     return '无快照'
   }
-  return `${snapshot.tradeDate ?? '--'} · 获利 ${formatRatioPercent(snapshot.totalProfitRatio)} · 主 ${formatNumber(snapshot.mainTotal)} / 散 ${formatNumber(snapshot.retailTotal)}`
+  return `${snapshot.tradeDate ?? '--'} · 获利 ${formatRatioPercent(snapshot.totalProfitRatio)} · 主获 ${formatRatioPercent(snapshot.mainProfitRatio)} · 主 ${formatNumber(snapshot.mainTotal)} / 散 ${formatNumber(snapshot.retailTotal)}`
 }
 
 function buildCyqChenSummaryItems(
@@ -2310,6 +2390,18 @@ function buildCyqChenSummaryItems(
       key: 'trapped',
       label: '套牢比例',
       value: formatRatioPercent(snapshot.totalTrappedRatio),
+      priority: 'primary',
+    },
+    {
+      key: 'main-profit',
+      label: '主力获利',
+      value: formatRatioPercent(snapshot.mainProfitRatio),
+      priority: 'primary',
+    },
+    {
+      key: 'main-trapped',
+      label: '主力套牢',
+      value: formatRatioPercent(snapshot.mainTrappedRatio),
       priority: 'primary',
     },
     {
@@ -2778,6 +2870,7 @@ export default function CyqChenPage() {
           <CyqChenProjectChart
             kline={chartRows}
             panels={chartPanels}
+            snapshots={snapshotOptions}
             snapshot={selectedSnapshot}
             selectedTradeDate={selectedSnapshot?.tradeDate ?? selectedTradeDate}
             chipPeakMode={chipPeakMode}

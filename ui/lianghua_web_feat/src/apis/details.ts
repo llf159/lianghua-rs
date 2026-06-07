@@ -242,6 +242,8 @@ export type DetailCyqSnapshot = {
   total_chips?: number | null
   total_profit_ratio?: number | null
   total_trapped_ratio?: number | null
+  main_profit_ratio?: number | null
+  main_trapped_ratio?: number | null
   chip_peak_price?: number | null
   percent_70_price_low?: number | null
   percent_70_price_high?: number | null

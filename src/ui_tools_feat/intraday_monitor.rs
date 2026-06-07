@@ -32,8 +32,9 @@ use crate::{
 
 const BOARD_ST: &str = "ST";
 const DEFAULT_ADJ_TYPE: &str = "qfq";
-const INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS: [&str; 10] = [
+const INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS: [&str; 11] = [
     "RANK",
+    "SCORE",
     "ZHANG",
     "TOTAL_MV_YI",
     "RT_OP",
@@ -673,10 +674,17 @@ fn inject_template_validation_extra_series(row_data: &mut RowData) -> Result<(),
     let mut rank_series = (0..len)
         .map(|index| Some((index + 1) as f64))
         .collect::<Vec<_>>();
+    let mut score_series = (0..len)
+        .map(|index| Some(100.0 - index as f64))
+        .collect::<Vec<_>>();
     if let Some(last) = rank_series.last_mut() {
         *last = None;
     }
+    if let Some(last) = score_series.last_mut() {
+        *last = None;
+    }
     row_data.cols.insert("RANK".to_string(), rank_series);
+    row_data.cols.insert("SCORE".to_string(), score_series);
     row_data.validate()
 }
 
@@ -921,17 +929,23 @@ fn attach_runtime_extra_series(
     )
 }
 
-fn load_runtime_rank_series_map(
+#[derive(Debug, Clone, Copy, Default)]
+struct IntradayRankScoreInfo {
+    rank: Option<f64>,
+    score: Option<f64>,
+}
+
+fn load_runtime_rank_score_series_map(
     conn: &Connection,
     row: &IntradayMonitorRow,
     start_date: &str,
     end_date: &str,
-) -> Result<HashMap<String, Option<f64>>, String> {
+) -> Result<HashMap<String, IntradayRankScoreInfo>, String> {
     let rank_mode = IntradayRankMode::parse(Some(&row.rank_mode))?;
     let (sql, params): (&str, Vec<String>) = match rank_mode {
         IntradayRankMode::Total => (
             r#"
-            SELECT trade_date, rank
+            SELECT trade_date, rank, total_score
             FROM score_summary
             WHERE ts_code = ?
               AND trade_date >= ?
@@ -945,12 +959,15 @@ fn load_runtime_rank_series_map(
         ),
         IntradayRankMode::Scene => (
             r#"
-            SELECT trade_date, scene_rank
-            FROM scene_details
-            WHERE ts_code = ?
-              AND scene_name = ?
-              AND trade_date >= ?
-              AND trade_date <= ?
+            SELECT d.trade_date, d.scene_rank, s.total_score
+            FROM scene_details AS d
+            LEFT JOIN score_summary AS s
+              ON d.ts_code = s.ts_code
+             AND d.trade_date = s.trade_date
+            WHERE d.ts_code = ?
+              AND d.scene_name = ?
+              AND d.trade_date >= ?
+              AND d.trade_date <= ?
             "#,
             vec![
                 row.ts_code.clone(),
@@ -980,28 +997,39 @@ fn load_runtime_rank_series_map(
             .get::<_, Option<i64>>(1)
             .map_err(|e| format!("读取 rank 值失败: {e}"))?
             .map(|value| value as f64);
-        out.insert(trade_date, rank);
+        let score = db_row
+            .get::<_, Option<f64>>(2)
+            .map_err(|e| format!("读取 score 值失败: {e}"))?;
+        out.insert(trade_date, IntradayRankScoreInfo { rank, score });
     }
 
     Ok(out)
 }
 
-fn inject_runtime_rank_series(
+fn inject_runtime_rank_score_series(
     row_data: &mut RowData,
-    rank_series_map: &HashMap<String, Option<f64>>,
+    rank_score_series_map: &HashMap<String, IntradayRankScoreInfo>,
 ) -> Result<(), String> {
     let len = row_data.trade_dates.len();
     let mut rank_series = vec![None; len];
+    let mut score_series = vec![None; len];
 
     for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
-        rank_series[index] = rank_series_map.get(trade_date).copied().flatten();
+        if let Some(values) = rank_score_series_map.get(trade_date).copied() {
+            rank_series[index] = values.rank;
+            score_series[index] = values.score;
+        }
     }
 
     if let Some(last) = rank_series.last_mut() {
         *last = None;
     }
+    if let Some(last) = score_series.last_mut() {
+        *last = None;
+    }
 
     row_data.cols.insert("RANK".to_string(), rank_series);
+    row_data.cols.insert("SCORE".to_string(), score_series);
     row_data.validate()
 }
 
@@ -1052,8 +1080,9 @@ fn build_intraday_runtime_row_data(
         .last()
         .cloned()
         .ok_or_else(|| "runtime trade_dates 为空".to_string())?;
-    let rank_series_map = load_runtime_rank_series_map(result_conn, row, &start_date, &end_date)?;
-    inject_runtime_rank_series(&mut row_data, &rank_series_map)?;
+    let rank_score_series_map =
+        load_runtime_rank_score_series_map(result_conn, row, &start_date, &end_date)?;
+    inject_runtime_rank_score_series(&mut row_data, &rank_score_series_map)?;
 
     if !indicator_cache.is_empty() {
         for (name, series) in calc_inds_with_cache_lossy(indicator_cache, row_data.clone()) {
@@ -1950,7 +1979,7 @@ mod tests {
     #[test]
     fn intraday_template_runtime_key_collection_skips_injected_fields() {
         let tokens = lex_all(
-            "M := MA(C, 5); M > MY_RT_IND AND RANK <= 50 AND RT_VR > 1 AND TOTAL_MV_YI > 10 AND CYQ_TPR > 0.6",
+            "M := MA(C, 5); M > MY_RT_IND AND RANK <= 50 AND SCORE > 0 AND RT_VR > 1 AND TOTAL_MV_YI > 10 AND CYQ_TPR > 0.6",
         );
         let mut parser = Parser::new(tokens);
         let program = parser.parse_main().expect("expression should parse");
@@ -1961,7 +1990,7 @@ mod tests {
             assert!(keys.contains(required_key), "missing {required_key}");
         }
         assert!(!keys.contains("TOTAL_MV"));
-        for injected_key in ["RANK", "RT_VR", "TOTAL_MV_YI", "ZHANG", "CYQ_TPR"] {
+        for injected_key in ["RANK", "SCORE", "RT_VR", "TOTAL_MV_YI", "ZHANG", "CYQ_TPR"] {
             assert!(!keys.contains(injected_key), "unexpected {injected_key}");
         }
         assert!(!keys.contains("O"));

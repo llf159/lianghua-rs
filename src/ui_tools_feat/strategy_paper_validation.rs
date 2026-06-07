@@ -40,8 +40,15 @@ const DEFAULT_BUY_SELECTION_MODE: &str = "random";
 const PAPER_VALIDATION_RANDOM_SEED: u64 = 0x4c48_5056_2026_0509;
 const PRICE_EPS: f64 = 1e-12;
 const PAPER_VALIDATION_ALWAYS_RUNTIME_KEYS: [&str; 4] = ["O", "H", "C", "PRE_CLOSE"];
-const PAPER_VALIDATION_INJECTED_RUNTIME_KEYS: [&str; 6] =
-    ["RANK", "ZHANG", "TIME", "RATEO", "RATEH", "TOTAL_MV_YI"];
+const PAPER_VALIDATION_INJECTED_RUNTIME_KEYS: [&str; 7] = [
+    "RANK",
+    "SCORE",
+    "ZHANG",
+    "TIME",
+    "RATEO",
+    "RATEH",
+    "TOTAL_MV_YI",
+];
 const PAPER_VALIDATION_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 const PAPER_VALIDATION_INPUT_KEYS: [&str; 11] = [
     "O",
@@ -391,9 +398,11 @@ pub fn run_strategy_paper_validation(
     let used_cyq_chen_keys =
         collect_paper_validation_cyq_chen_runtime_keys(&buy_program, &sell_program);
     let sell_runtime_keys = collect_paper_validation_sell_runtime_keys(&sell_program);
-    let needs_rank = matches!(parsed_buy_selection_mode, BuySelectionMode::RankTop)
+    let needs_rank_score = matches!(parsed_buy_selection_mode, BuySelectionMode::RankTop)
         || expr_program_uses_runtime_key(&buy_program, "RANK")
-        || expr_program_uses_runtime_key(&sell_program, "RANK");
+        || expr_program_uses_runtime_key(&sell_program, "RANK")
+        || expr_program_uses_runtime_key(&buy_program, "SCORE")
+        || expr_program_uses_runtime_key(&sell_program, "SCORE");
     let query_start_date = calc_query_start_date(source_path, warmup_need, &resolved_start_date)?;
     let need_rows = calc_query_need_rows(
         source_path,
@@ -433,8 +442,8 @@ pub fn run_strategy_paper_validation(
         source_path,
         min_listed_trade_days.unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
     )?;
-    let rank_series_map = if needs_rank {
-        load_rank_series_map(source_path, &query_start_date, &resolved_end_date)
+    let rank_score_series_map = if needs_rank_score {
+        load_rank_score_series_map(source_path, &query_start_date, &resolved_end_date)
     } else {
         HashMap::new()
     };
@@ -458,8 +467,8 @@ pub fn run_strategy_paper_validation(
                     total_share_map.get(ts_code).copied(),
                     &worker_buy_program,
                     &sell_runtime_keys,
-                    &rank_series_map,
-                    needs_rank,
+                    &rank_score_series_map,
+                    needs_rank_score,
                     &cyq_chen_injector,
                     &resolved_start_date,
                     &resolved_end_date,
@@ -586,6 +595,10 @@ fn build_template_validation_runtime(warmup_need: usize, include_sell_fields: bo
         .map(|index| Some((index + 1) as f64))
         .collect::<Vec<_>>();
     vars.insert("RANK".to_string(), Value::NumSeries(rank_series));
+    let score_series = (0..len)
+        .map(|index| Some(100.0 - index as f64))
+        .collect::<Vec<_>>();
+    vars.insert("SCORE".to_string(), Value::NumSeries(score_series));
     vars.insert(
         "ZHANG".to_string(),
         Value::NumSeries(vec![Some(0.095); len]),
@@ -685,8 +698,8 @@ fn prepare_paper_stock_for_portfolio(
     total_share: Option<f64>,
     buy_program: &Stmts,
     sell_runtime_keys: &HashSet<String>,
-    rank_series_map: &HashMap<String, HashMap<String, Option<f64>>>,
-    needs_rank: bool,
+    rank_score_series_map: &HashMap<String, HashMap<String, RankScoreInfo>>,
+    needs_rank_score: bool,
     cyq_chen_injector: &CyqChenFieldInjector,
     start_date: &str,
     end_date: &str,
@@ -709,8 +722,8 @@ fn prepare_paper_stock_for_portfolio(
 
     inject_stock_extra_fields(&mut row_data, ts_code, is_st, total_share)?;
     let _ = cyq_chen_injector.inject(&mut row_data, ts_code);
-    if needs_rank {
-        inject_runtime_rank_series(&mut row_data, ts_code, rank_series_map)?;
+    if needs_rank_score {
+        inject_runtime_rank_score_series(&mut row_data, ts_code, rank_score_series_map)?;
     }
 
     let trade_dates = std::mem::take(&mut row_data.trade_dates);
@@ -1924,11 +1937,17 @@ fn resolve_one_year_earlier_trade_date(
     trade_date_options.get(index).cloned()
 }
 
-fn load_rank_series_map(
+#[derive(Debug, Clone, Copy, Default)]
+struct RankScoreInfo {
+    rank: Option<f64>,
+    score: Option<f64>,
+}
+
+fn load_rank_score_series_map(
     source_path: &str,
     start_date: &str,
     end_date: &str,
-) -> HashMap<String, HashMap<String, Option<f64>>> {
+) -> HashMap<String, HashMap<String, RankScoreInfo>> {
     let result_db = result_db_path(source_path);
     if !result_db.exists() {
         return HashMap::new();
@@ -1942,7 +1961,7 @@ fn load_rank_series_map(
     };
     let Ok(mut stmt) = conn.prepare(
         r#"
-        SELECT ts_code, trade_date, rank
+        SELECT ts_code, trade_date, rank, total_score
         FROM score_summary
         WHERE trade_date >= ? AND trade_date <= ?
         "#,
@@ -1953,7 +1972,7 @@ fn load_rank_series_map(
         return HashMap::new();
     };
 
-    let mut out: HashMap<String, HashMap<String, Option<f64>>> = HashMap::new();
+    let mut out: HashMap<String, HashMap<String, RankScoreInfo>> = HashMap::new();
     while let Ok(Some(row)) = rows.next() {
         let Ok(ts_code) = row.get::<_, String>(0) else {
             continue;
@@ -1966,27 +1985,35 @@ fn load_rank_series_map(
             .ok()
             .flatten()
             .map(|value| value as f64);
-        out.entry(ts_code).or_default().insert(trade_date, rank);
+        let score = row.get::<_, Option<f64>>(3).ok().flatten();
+        out.entry(ts_code)
+            .or_default()
+            .insert(trade_date, RankScoreInfo { rank, score });
     }
 
     out
 }
 
-fn inject_runtime_rank_series(
+fn inject_runtime_rank_score_series(
     row_data: &mut crate::data::RowData,
     ts_code: &str,
-    rank_series_map: &HashMap<String, HashMap<String, Option<f64>>>,
+    rank_score_series_map: &HashMap<String, HashMap<String, RankScoreInfo>>,
 ) -> Result<(), String> {
     let len = row_data.trade_dates.len();
     let mut rank_series = vec![None; len];
+    let mut score_series = vec![None; len];
 
-    if let Some(date_to_rank) = rank_series_map.get(ts_code) {
+    if let Some(date_to_values) = rank_score_series_map.get(ts_code) {
         for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
-            rank_series[index] = date_to_rank.get(trade_date).copied().flatten();
+            if let Some(values) = date_to_values.get(trade_date).copied() {
+                rank_series[index] = values.rank;
+                score_series[index] = values.score;
+            }
         }
     }
 
     row_data.cols.insert("RANK".to_string(), rank_series);
+    row_data.cols.insert("SCORE".to_string(), score_series);
     row_data.validate()
 }
 
@@ -2545,7 +2572,7 @@ mod tests {
     #[test]
     fn runtime_key_collection_skips_injected_validation_fields() {
         let buy_program = parse_expression_program(
-            "M := MA(C, 5); M > REF(C, 1) AND RANK <= 100 AND TOTAL_MV_YI > 20 AND CYQ_TPR > 0.6",
+            "M := MA(C, 5); M > REF(C, 1) AND RANK <= 100 AND SCORE > 0 AND TOTAL_MV_YI > 20 AND CYQ_TPR > 0.6",
             "买点方程",
         )
         .expect("buy expression should parse");
@@ -2558,7 +2585,7 @@ mod tests {
             assert!(keys.contains(required_key), "missing {required_key}");
         }
         assert!(!keys.contains("TOTAL_MV"));
-        for injected_key in ["RANK", "TIME", "RATEH", "TOTAL_MV_YI", "CYQ_TPR"] {
+        for injected_key in ["RANK", "SCORE", "TIME", "RATEH", "TOTAL_MV_YI", "CYQ_TPR"] {
             assert!(!keys.contains(injected_key), "unexpected {injected_key}");
         }
         assert!(!keys.contains("V"));

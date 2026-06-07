@@ -125,7 +125,7 @@ pub fn impl_expr_warmup(
 
                     max_need = src_need + win_need;
                 }
-                "HHV" | "LLV" | "MA" | "SUM" | "STD" | "COUNT" | "LRANK" | "GRANK" => {
+                "HHV" | "LLV" | "MA" | "SUM" | "STD" | "COUNT" | "EXIST" | "LRANK" | "GRANK" => {
                     let mut it = args.into_iter();
                     let src = it
                         .next()
@@ -544,6 +544,12 @@ mod tests {
 
         let expr = "GAP := REF(BARSLAST(C > 1), 1); COUNTD(REF(C > 1, 1), GAP, 10);";
         assert_eq!(estimate_program_warmup(expr), 10);
+    }
+
+    #[test]
+    fn exist_uses_count_like_window_for_warmup() {
+        assert_eq!(estimate_program_warmup("EXIST(C > 1, 5);"), 4);
+        assert_eq!(estimate_program_warmup("EXIST(REF(C > 1, 2), 5);"), 6);
     }
 
     #[test]

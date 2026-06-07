@@ -490,6 +490,37 @@ impl Runtime {
         Ok(Value::NumSeries(out))
     }
 
+    fn impl_exist(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
+        if args.len() != 2 {
+            return Err(EvalErr {
+                msg: "EXIST需要两个参数".to_string(),
+            });
+        }
+
+        let cond = self.eval_expr(&args[0])?;
+        let len = Value::len_of(&cond);
+        let ori_n = Value::as_num(&self.eval_expr(&args[1])?)?;
+        let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
+        let cond_series = Value::as_bool_series(&cond, len)?;
+        let mut out = Vec::with_capacity(len);
+        let mut cnt: usize = 0;
+
+        for i in 0..len {
+            if cond_series[i] {
+                cnt += 1;
+            }
+            if i + 1 > std_n {
+                let left = i + 1 - std_n;
+                if cond_series[left - 1] {
+                    cnt -= 1;
+                }
+            }
+
+            out.push(cnt > 0);
+        }
+        Ok(Value::BoolSeries(out))
+    }
+
     fn impl_ma(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
         if args.len() != 2 {
             return Err(EvalErr {
@@ -1473,6 +1504,7 @@ impl Runtime {
             "LLVD" => Ok(self.impl_llvd(args)?),
             "COUNT" => Ok(self.impl_count(args)?),
             "COUNTD" => Ok(self.impl_countd(args)?),
+            "EXIST" => Ok(self.impl_exist(args)?),
             "MA" => Ok(self.impl_ma(args)?),
             "MAD" => Ok(self.impl_window_sumd(args, true)?),
             "REF" => Ok(self.impl_ref(args)?),
@@ -2312,6 +2344,35 @@ fn in_range_accepts_expression_bounds() {
     assert_eq!(
         out,
         Value::BoolSeries(vec![false, false, true, false, true])
+    );
+}
+
+#[test]
+fn exist_returns_true_when_condition_hit_within_window() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let expr = "EXIST(C > 2, 3);";
+    let toks = lex_all(expr);
+    let mut p = Parser::new(toks);
+    let stmts = p.parse_main().expect("parse failed");
+    let mut rt = Runtime::default();
+
+    rt.vars.insert(
+        "C".to_string(),
+        Value::NumSeries(vec![
+            Some(1.0),
+            Some(3.0),
+            Some(1.0),
+            Some(1.0),
+            Some(4.0),
+            Some(1.0),
+        ]),
+    );
+
+    let out = rt.eval_program(&stmts).expect("eval failed");
+    assert_eq!(
+        out,
+        Value::BoolSeries(vec![false, true, true, true, true, true])
     );
 }
 

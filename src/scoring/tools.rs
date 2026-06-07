@@ -3,21 +3,23 @@ use std::collections::{HashMap, HashSet};
 use duckdb::{Connection, params};
 
 use crate::data::{
-    RowData, ScopeWay, ScoreRule, cyq_chen_db_path, load_stock_list, load_trade_date_list,
+    RowData, ScopeWay, ScoreRule, cyq_chen_data::init_cyq_chen_db, cyq_chen_db_path,
+    load_stock_list, load_trade_date_list,
 };
 use crate::expr::eval::{Runtime, Value};
 use crate::expr::parser::{Expr, Parser, Stmt, Stmts, lex_all};
 use crate::utils::utils::eval_binary_for_warmup;
 use crate::utils::utils::impl_expr_warmup;
 
-pub const CYQ_CHEN_RUNTIME_FIELDS: [(&str, &str); 14] = [
+pub const CYQ_CHEN_RUNTIME_FIELDS: [(&str, &str); 15] = [
     ("CYQ_MIN", "min_price"),
     ("CYQ_MAX", "max_price"),
     ("CYQ_MT", "main_total"),
     ("CYQ_RT", "retail_total"),
-    ("CYQ_TC", "total_chips"),
     ("CYQ_TPR", "total_profit_ratio"),
     ("CYQ_TTR", "total_trapped_ratio"),
+    ("CYQ_MPR", "main_profit_ratio"),
+    ("CYQ_MTR", "main_trapped_ratio"),
     ("CYQ_PEAK", "chip_peak_price"),
     ("CYQ_P70L", "percent_70_price_low"),
     ("CYQ_P70H", "percent_70_price_high"),
@@ -236,6 +238,12 @@ impl CyqChenFieldInjector {
         if !cyq_db.exists() {
             return Self::unavailable(fields, "cyq_chen.db 不存在，新筹码字段已按空值注入。");
         }
+        if let Err(error) = init_cyq_chen_db(&cyq_db) {
+            return Self::unavailable(
+                fields,
+                format!("初始化 cyq_chen.db 失败: {error}；新筹码字段已按空值注入。"),
+            );
+        }
 
         let conn = match Connection::open(&cyq_db) {
             Ok(conn) => conn,
@@ -377,23 +385,54 @@ impl CyqChenFieldInjector {
 }
 
 fn build_cyq_chen_select_sql(available_fields: &[(&'static str, &'static str)]) -> String {
-    let mut select_cols = vec!["trade_date".to_string()];
-    for (_, db_col) in available_fields {
-        select_cols.push(format!("TRY_CAST(\"{db_col}\" AS DOUBLE) AS \"{db_col}\""));
+    let mut select_cols = vec!["snap.trade_date AS trade_date".to_string()];
+    for (runtime_key, db_col) in available_fields {
+        select_cols.push(cyq_chen_select_expr(runtime_key, db_col));
     }
 
     format!(
         r#"
         SELECT {}
-        FROM {CYQ_CHEN_SNAPSHOT_TABLE}
-        WHERE ts_code = ?
-          AND adj_type = ?
-          AND trade_date >= ?
-          AND trade_date <= ?
-        ORDER BY trade_date ASC
+        FROM {CYQ_CHEN_SNAPSHOT_TABLE} AS snap
+        WHERE snap.ts_code = ?
+          AND snap.adj_type = ?
+          AND snap.trade_date >= ?
+          AND snap.trade_date <= ?
+        ORDER BY snap.trade_date ASC
         "#,
         select_cols.join(", ")
     )
+}
+
+fn cyq_chen_main_profit_ratio_expr() -> &'static str {
+    r#"
+    CASE
+      WHEN snap.main_total > 1e-10 THEN
+        COALESCE((
+          SELECT SUM(bin.main_chip)
+          FROM cyq_chen_bin AS bin
+          WHERE bin.ts_code = snap.ts_code
+            AND bin.trade_date = snap.trade_date
+            AND bin.adj_type = snap.adj_type
+            AND bin.price <= snap.close + 1e-10
+        ), 0.0) / snap.main_total
+      ELSE 0.0
+    END
+    "#
+}
+
+fn cyq_chen_select_expr(runtime_key: &str, db_col: &str) -> String {
+    match runtime_key {
+        "CYQ_MPR" => format!(
+            "COALESCE(TRY_CAST(snap.\"{db_col}\" AS DOUBLE), {}) AS \"{db_col}\"",
+            cyq_chen_main_profit_ratio_expr()
+        ),
+        "CYQ_MTR" => format!(
+            "COALESCE(TRY_CAST(snap.\"{db_col}\" AS DOUBLE), CASE WHEN snap.main_total > 1e-10 THEN 1.0 - ({}) ELSE 0.0 END) AS \"{db_col}\"",
+            cyq_chen_main_profit_ratio_expr()
+        ),
+        _ => format!("TRY_CAST(snap.\"{db_col}\" AS DOUBLE) AS \"{db_col}\""),
+    }
 }
 
 pub fn inject_empty_optional_cyq_chen_fields(
@@ -489,7 +528,10 @@ pub fn preview_optional_cyq_chen_injection_warnings(
         Ok(columns) => {
             let missing = fields
                 .iter()
-                .filter(|(_, db_col)| !columns.contains(&db_col.to_ascii_lowercase()))
+                .filter(|(runtime_key, db_col)| {
+                    !matches!(*runtime_key, "CYQ_MPR" | "CYQ_MTR")
+                        && !columns.contains(&db_col.to_ascii_lowercase())
+                })
                 .map(|(runtime_key, _)| *runtime_key)
                 .collect::<Vec<_>>();
             if !missing.is_empty() {

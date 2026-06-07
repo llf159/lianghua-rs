@@ -1175,6 +1175,44 @@ function getDetailCyqTrappedRatio(snapshot: DetailCyqSnapshot | null) {
     : null;
 }
 
+function getDetailCyqMainProfitRatio(snapshot: DetailCyqSnapshot | null) {
+  if (!snapshot) {
+    return null;
+  }
+  if (
+    typeof snapshot.main_profit_ratio === "number" &&
+    Number.isFinite(snapshot.main_profit_ratio)
+  ) {
+    return snapshot.main_profit_ratio;
+  }
+
+  const mainTotal = getDetailCyqMainTotal(snapshot);
+  if (!mainTotal || mainTotal <= Number.EPSILON) {
+    return null;
+  }
+  const profitChips = snapshot.bins
+    .filter((bin) => bin.price <= snapshot.close)
+    .reduce((sum, bin) => sum + Math.max(getCyqBinChipValue(bin, "main"), 0), 0);
+  return profitChips / mainTotal;
+}
+
+function getDetailCyqMainTrappedRatio(snapshot: DetailCyqSnapshot | null) {
+  if (!snapshot) {
+    return null;
+  }
+  if (
+    typeof snapshot.main_trapped_ratio === "number" &&
+    Number.isFinite(snapshot.main_trapped_ratio)
+  ) {
+    return snapshot.main_trapped_ratio;
+  }
+
+  const profitRatio = getDetailCyqMainProfitRatio(snapshot);
+  return typeof profitRatio === "number" && Number.isFinite(profitRatio)
+    ? clampNumber(1 - profitRatio, 0, 1)
+    : null;
+}
+
 function interpolateCyqCostByChip(bins: DetailCyqBin[], targetChip: number) {
   if (bins.length === 0) {
     return null;
@@ -1307,6 +1345,18 @@ function buildDetailCyqSummaryItems(
       key: "trapped",
       label: "套牢比例",
       value: formatCyqRatio(getDetailCyqTrappedRatio(snapshot) ?? Number.NaN),
+      priority: "primary",
+    },
+    {
+      key: "main-profit",
+      label: "主力获利",
+      value: formatCyqRatio(getDetailCyqMainProfitRatio(snapshot) ?? Number.NaN),
+      priority: "primary",
+    },
+    {
+      key: "main-trapped",
+      label: "主力套牢",
+      value: formatCyqRatio(getDetailCyqMainTrappedRatio(snapshot) ?? Number.NaN),
       priority: "primary",
     },
     {

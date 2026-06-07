@@ -116,6 +116,8 @@ pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
             percent_90_price_low DOUBLE,
             percent_90_price_high DOUBLE,
             percent_90_concentration DOUBLE,
+            main_profit_ratio DOUBLE,
+            main_trapped_ratio DOUBLE,
             PRIMARY KEY (ts_code, trade_date, adj_type)
         )
         "#,
@@ -224,6 +226,8 @@ fn ensure_cyq_chen_snapshot_columns(conn: &Connection) -> Result<(), String> {
         ("percent_90_price_low", "DOUBLE"),
         ("percent_90_price_high", "DOUBLE"),
         ("percent_90_concentration", "DOUBLE"),
+        ("main_profit_ratio", "DOUBLE"),
+        ("main_trapped_ratio", "DOUBLE"),
     ] {
         let exists = conn
             .query_row(
@@ -1006,6 +1010,8 @@ fn append_cyq_chen_batch_rows(
     let mut snapshot_percent_90_price_low = Vec::new();
     let mut snapshot_percent_90_price_high = Vec::new();
     let mut snapshot_percent_90_concentration = Vec::new();
+    let mut snapshot_main_profit_ratio = Vec::new();
+    let mut snapshot_main_trapped_ratio = Vec::new();
 
     let mut bin_ts_code = Vec::new();
     let mut bin_trade_date = Vec::new();
@@ -1042,6 +1048,8 @@ fn append_cyq_chen_batch_rows(
             snapshot_percent_90_price_low.push(snapshot.percent_90.price_low);
             snapshot_percent_90_price_high.push(snapshot.percent_90.price_high);
             snapshot_percent_90_concentration.push(snapshot.percent_90.concentration);
+            snapshot_main_profit_ratio.push(snapshot.main_profit_ratio);
+            snapshot_main_trapped_ratio.push(snapshot.main_trapped_ratio);
 
             for bin in snapshot.bins {
                 bin_ts_code.push(ts_code.clone());
@@ -1084,6 +1092,8 @@ fn append_cyq_chen_batch_rows(
                 snapshot_percent_90_price_low,
                 snapshot_percent_90_price_high,
                 snapshot_percent_90_concentration,
+                snapshot_main_profit_ratio,
+                snapshot_main_trapped_ratio,
             )?)
             .map_err(|e| format!("批量写入cyq_chen_snapshot失败:{e}"))?;
     }
@@ -1142,6 +1152,8 @@ fn build_cyq_chen_snapshot_record_batch(
     percent_90_price_low: Vec<f64>,
     percent_90_price_high: Vec<f64>,
     percent_90_concentration: Vec<f64>,
+    main_profit_ratio: Vec<f64>,
+    main_trapped_ratio: Vec<f64>,
 ) -> Result<RecordBatch, String> {
     let schema = Schema::new(vec![
         Field::new("ts_code", DataType::Utf8, false),
@@ -1164,6 +1176,8 @@ fn build_cyq_chen_snapshot_record_batch(
         Field::new("percent_90_price_low", DataType::Float64, false),
         Field::new("percent_90_price_high", DataType::Float64, false),
         Field::new("percent_90_concentration", DataType::Float64, false),
+        Field::new("main_profit_ratio", DataType::Float64, false),
+        Field::new("main_trapped_ratio", DataType::Float64, false),
     ]);
     RecordBatch::try_new(
         Arc::new(schema),
@@ -1188,6 +1202,8 @@ fn build_cyq_chen_snapshot_record_batch(
             float64_array(percent_90_price_low),
             float64_array(percent_90_price_high),
             float64_array(percent_90_concentration),
+            float64_array(main_profit_ratio),
+            float64_array(main_trapped_ratio),
         ],
     )
     .map_err(|e| format!("创建cyq_chen_snapshot批次失败:{e}"))
@@ -2392,6 +2408,8 @@ bias = 1.0
         let (
             total_profit_ratio,
             total_trapped_ratio,
+            main_profit_ratio,
+            main_trapped_ratio,
             chip_peak_price,
             percent_70_price_low,
             percent_70_price_high,
@@ -2400,7 +2418,9 @@ bias = 1.0
         ) = conn
             .query_row(
                 r#"
-                SELECT total_profit_ratio, total_trapped_ratio, chip_peak_price,
+                SELECT total_profit_ratio, total_trapped_ratio,
+                       main_profit_ratio, main_trapped_ratio,
+                       chip_peak_price,
                        percent_70_price_low, percent_70_price_high,
                        percent_90_price_low, percent_90_price_high
                 FROM cyq_chen_snapshot
@@ -2416,11 +2436,15 @@ bias = 1.0
                         row.get::<_, f64>(4)?,
                         row.get::<_, f64>(5)?,
                         row.get::<_, f64>(6)?,
+                        row.get::<_, f64>(7)?,
+                        row.get::<_, f64>(8)?,
                     ))
                 },
             )
             .expect("read chen snapshot metrics");
         assert!((total_profit_ratio + total_trapped_ratio - 1.0).abs() < 1e-9);
+        assert!((main_profit_ratio + main_trapped_ratio - 1.0).abs() < 1e-9);
+        assert!((0.0..=1.0).contains(&main_profit_ratio));
         assert!(chip_peak_price > 0.0);
         assert!(percent_70_price_low <= percent_70_price_high);
         assert!(percent_90_price_low <= percent_90_price_high);

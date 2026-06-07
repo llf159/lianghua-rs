@@ -51,6 +51,8 @@ export type CyqChenSnapshot = {
   totalChips: number
   totalProfitRatio: number
   totalTrappedRatio: number
+  mainProfitRatio: number
+  mainTrappedRatio: number
   chipPeakPrice: number
   percent70: CyqChenPercentRange
   percent90: CyqChenPercentRange
