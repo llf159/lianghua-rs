@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use chrono::Local;
@@ -24,6 +25,8 @@ use crate::{
 const DEFAULT_ADJ_TYPE: &str = "qfq";
 const DEFAULT_VISIBLE_KLINE_WINDOW_DAYS: usize = 90;
 const CHIP_CHANGE_BACKUP_DIR_NAME: &str = "chip_change_rule_backups";
+const CHIP_CHANGE_META_SUFFIX: &str = ".meta.json";
+const EMPTY_CHIP_CHANGE_TEMPLATE: &str = "version = 1\n";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,8 +78,12 @@ pub struct CyqChenStrategyBackupItem {
     pub backup_id: String,
     pub file_name: String,
     pub file_path: String,
+    pub created_at: Option<String>,
     pub modified_at: Option<String>,
     pub size_bytes: u64,
+    pub source_kind: String,
+    pub source_file_name: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -108,6 +115,16 @@ pub struct CyqChenStrategyBackupDiff {
 #[serde(rename_all = "camelCase")]
 pub struct CyqChenStrategyFileDraft {
     pub strategies: Vec<ChipChangeStrategy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CyqChenStrategyBackupMeta {
+    version: u32,
+    created_at: String,
+    source_kind: String,
+    source_file_name: Option<String>,
+    description: Option<String>,
 }
 
 fn default_chip_change_strategies() -> Vec<ChipChangeStrategy> {
@@ -164,7 +181,7 @@ fn validate_chip_change_draft(draft: CyqChenStrategyFileDraft) -> Result<ChipCha
 fn backup_file_name() -> String {
     format!(
         "chip_change_rule_{}.toml",
-        Local::now().format("%Y%m%d_%H%M%S")
+        Local::now().format("%Y%m%d_%H%M%S_%3f")
     )
 }
 
@@ -184,6 +201,118 @@ fn validate_chip_change_backup_id(backup_id: &str) -> Result<&str, String> {
 fn chip_change_backup_path(source_path: &str, backup_id: &str) -> Result<PathBuf, String> {
     let backup_id = validate_chip_change_backup_id(backup_id)?;
     Ok(chip_change_backup_dir(source_path).join(backup_id))
+}
+
+fn chip_change_backup_meta_path(source_path: &str, backup_id: &str) -> Result<PathBuf, String> {
+    let backup_id = validate_chip_change_backup_id(backup_id)?;
+    Ok(chip_change_backup_dir(source_path).join(format!("{backup_id}{CHIP_CHANGE_META_SUFFIX}")))
+}
+
+fn now_millis_suffix() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+
+fn write_chip_change_backup_meta(
+    source_path: &str,
+    backup_id: &str,
+    meta: &CyqChenStrategyBackupMeta,
+) -> Result<(), String> {
+    let meta_path = chip_change_backup_meta_path(source_path, backup_id)?;
+    if let Some(parent) = meta_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建筹码策略元数据目录失败: {e}"))?;
+    }
+    let payload =
+        serde_json::to_string_pretty(meta).map_err(|e| format!("序列化筹码策略元数据失败: {e}"))?;
+    let temp_path = meta_path.with_file_name(format!(
+        ".{}.{}.tmp",
+        meta_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("chip_change_rule.meta.json"),
+        now_millis_suffix()
+    ));
+    fs::write(&temp_path, payload).map_err(|e| {
+        format!(
+            "写入筹码策略元数据临时文件失败: path={}, err={e}",
+            temp_path.display()
+        )
+    })?;
+    fs::rename(&temp_path, &meta_path).map_err(|e| {
+        let _ = fs::remove_file(&temp_path);
+        format!(
+            "写入筹码策略元数据失败: path={}, err={e}",
+            meta_path.display()
+        )
+    })
+}
+
+fn read_chip_change_backup_meta(
+    source_path: &str,
+    backup_id: &str,
+) -> Option<CyqChenStrategyBackupMeta> {
+    let meta_path = chip_change_backup_meta_path(source_path, backup_id).ok()?;
+    let raw = fs::read_to_string(meta_path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn files_have_same_content(left: &Path, right: &Path) -> Result<bool, String> {
+    let left_metadata = fs::metadata(left).map_err(|e| {
+        format!(
+            "读取筹码策略文件元数据失败: path={}, err={e}",
+            left.display()
+        )
+    })?;
+    let right_metadata = fs::metadata(right).map_err(|e| {
+        format!(
+            "读取筹码策略备份元数据失败: path={}, err={e}",
+            right.display()
+        )
+    })?;
+    if left_metadata.len() != right_metadata.len() {
+        return Ok(false);
+    }
+    let left_bytes = fs::read(left)
+        .map_err(|e| format!("读取筹码策略文件失败: path={}, err={e}", left.display()))?;
+    let right_bytes = fs::read(right)
+        .map_err(|e| format!("读取筹码策略备份失败: path={}, err={e}", right.display()))?;
+    Ok(left_bytes == right_bytes)
+}
+
+fn has_equivalent_chip_change_backup(
+    source_path: &str,
+    active_path: &Path,
+) -> Result<bool, String> {
+    let backup_dir = chip_change_backup_dir(source_path);
+    if !backup_dir.exists() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(&backup_dir).map_err(|e| {
+        format!(
+            "读取筹码策略备份目录失败: path={}, err={e}",
+            backup_dir.display()
+        )
+    })? {
+        let entry = entry.map_err(|e| format!("读取筹码策略备份项失败: {e}"))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !file_name.ends_with(".toml") {
+            continue;
+        }
+        match files_have_same_content(active_path, &path) {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(_) => {}
+        }
+    }
+    Ok(false)
 }
 
 fn copy_file_to_destination(
@@ -255,12 +384,20 @@ fn list_chip_change_backups(source_path: &str) -> Result<Vec<CyqChenStrategyBack
                 .format("%Y-%m-%d %H:%M:%S")
                 .to_string()
         });
+        let meta = read_chip_change_backup_meta(source_path, file_name);
         backups.push(CyqChenStrategyBackupItem {
             backup_id: file_name.to_string(),
             file_name: file_name.to_string(),
             file_path: path.display().to_string(),
+            created_at: meta.as_ref().map(|item| item.created_at.clone()),
             modified_at,
             size_bytes: metadata.len(),
+            source_kind: meta
+                .as_ref()
+                .map(|item| item.source_kind.clone())
+                .unwrap_or_else(|| "backup".to_string()),
+            source_file_name: meta.as_ref().and_then(|item| item.source_file_name.clone()),
+            description: meta.and_then(|item| item.description),
         });
     }
 
@@ -519,7 +656,11 @@ pub fn check_cyq_chen_strategy_file_draft(
     Ok("筹码策略草稿检查通过".to_string())
 }
 
-pub fn backup_cyq_chen_strategy_file(source_path: &str) -> Result<CyqChenStrategyPageData, String> {
+pub fn backup_cyq_chen_strategy_file_with_meta(
+    source_path: &str,
+    source_kind: &str,
+    description: &str,
+) -> Result<CyqChenStrategyPageData, String> {
     let source_path = source_path.trim();
     if source_path.is_empty() {
         return Err("数据目录为空，请先确认当前数据源".to_string());
@@ -543,6 +684,83 @@ pub fn backup_cyq_chen_strategy_file(source_path: &str) -> Result<CyqChenStrateg
             backup_path.display()
         )
     })?;
+    let backup_id = backup_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "无法识别筹码策略备份文件名".to_string())?;
+    write_chip_change_backup_meta(
+        source_path,
+        backup_id,
+        &CyqChenStrategyBackupMeta {
+            version: 1,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            source_kind: source_kind.to_string(),
+            source_file_name: Some("chip_change_rule.toml".to_string()),
+            description: Some(description.to_string()),
+        },
+    )?;
+    build_strategy_page_data(source_path)
+}
+
+pub fn backup_cyq_chen_strategy_file(source_path: &str) -> Result<CyqChenStrategyPageData, String> {
+    backup_cyq_chen_strategy_file_with_meta(source_path, "backup", "手动备份当前筹码策略")
+}
+
+pub fn auto_backup_cyq_chen_strategy_file_on_entry(
+    source_path: &str,
+) -> Result<Option<CyqChenStrategyPageData>, String> {
+    let source_path = source_path.trim();
+    if source_path.is_empty() {
+        return Err("数据目录为空，请先确认当前数据源".to_string());
+    }
+    let active_path = chip_change_rule_path(source_path);
+    if !active_path.exists() || !active_path.is_file() {
+        return Ok(None);
+    }
+    if has_equivalent_chip_change_backup(source_path, &active_path)? {
+        return Ok(None);
+    }
+    backup_cyq_chen_strategy_file_with_meta(source_path, "auto_entry", "自动备份：进入筹码策略页")
+        .map(Some)
+}
+
+pub fn create_empty_cyq_chen_strategy_backup(
+    source_path: &str,
+) -> Result<CyqChenStrategyPageData, String> {
+    let source_path = source_path.trim();
+    if source_path.is_empty() {
+        return Err("数据目录为空，请先确认当前数据源".to_string());
+    }
+    ChipChangeConfig::from_toml_str(EMPTY_CHIP_CHANGE_TEMPLATE)?;
+    let backup_dir = chip_change_backup_dir(source_path);
+    fs::create_dir_all(&backup_dir).map_err(|e| {
+        format!(
+            "创建筹码策略备份目录失败: path={}, err={e}",
+            backup_dir.display()
+        )
+    })?;
+    let backup_path = backup_dir.join(backup_file_name());
+    fs::write(&backup_path, EMPTY_CHIP_CHANGE_TEMPLATE).map_err(|e| {
+        format!(
+            "写入空白筹码策略失败: path={}, err={e}",
+            backup_path.display()
+        )
+    })?;
+    let backup_id = backup_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "无法识别筹码策略备份文件名".to_string())?;
+    write_chip_change_backup_meta(
+        source_path,
+        backup_id,
+        &CyqChenStrategyBackupMeta {
+            version: 1,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            source_kind: "empty".to_string(),
+            source_file_name: Some("chip_change_rule.toml".to_string()),
+            description: Some("空白筹码策略模板".to_string()),
+        },
+    )?;
     build_strategy_page_data(source_path)
 }
 
@@ -580,6 +798,25 @@ pub fn import_cyq_chen_strategy_backup(
             backup_path.display()
         )
     })?;
+    let backup_id = backup_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "无法识别筹码策略备份文件名".to_string())?;
+    let source_file_name = source_file_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::to_string);
+    write_chip_change_backup_meta(
+        source_path,
+        backup_id,
+        &CyqChenStrategyBackupMeta {
+            version: 1,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            source_kind: "imported".to_string(),
+            source_file_name,
+            description: Some("外部导入筹码策略".to_string()),
+        },
+    )?;
     build_strategy_page_data(source_path)
 }
 
@@ -601,6 +838,16 @@ pub fn delete_cyq_chen_strategy_backup(
             backup_path.display()
         )
     })?;
+    if let Ok(meta_path) = chip_change_backup_meta_path(source_path, backup_id) {
+        if meta_path.exists() {
+            fs::remove_file(&meta_path).map_err(|e| {
+                format!(
+                    "删除筹码策略备份元数据失败: path={}, err={e}",
+                    meta_path.display()
+                )
+            })?;
+        }
+    }
     build_strategy_page_data(source_path)
 }
 

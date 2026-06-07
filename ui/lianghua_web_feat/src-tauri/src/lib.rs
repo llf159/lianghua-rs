@@ -3,7 +3,7 @@ mod managed_source_bridge;
 
 use std::{
     fs,
-    io::{Read, Write},
+    io::{Read, Seek, Write},
     path::{Path, PathBuf},
     str::FromStr,
     time::Instant,
@@ -61,8 +61,11 @@ use lianghua_rs::ui_tools_feat::{
     },
     cyq_chen::{
         activate_cyq_chen_strategy_backup as core_activate_cyq_chen_strategy_backup,
+        auto_backup_cyq_chen_strategy_file_on_entry as core_auto_backup_cyq_chen_strategy_file_on_entry,
         backup_cyq_chen_strategy_file as core_backup_cyq_chen_strategy_file,
+        backup_cyq_chen_strategy_file_with_meta as core_backup_cyq_chen_strategy_file_with_meta,
         check_cyq_chen_strategy_file_draft as core_check_cyq_chen_strategy_file_draft,
+        create_empty_cyq_chen_strategy_backup as core_create_empty_cyq_chen_strategy_backup,
         delete_cyq_chen_strategy_backup as core_delete_cyq_chen_strategy_backup,
         get_cyq_chen_strategy_backup_diff as core_get_cyq_chen_strategy_backup_diff,
         get_cyq_chen_strategy_page as core_get_cyq_chen_strategy_page,
@@ -172,6 +175,7 @@ use lianghua_rs::ui_tools_feat::{
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 use tauri_plugin_fs::{FilePath, FsExt};
+use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 
 use data_download_bridge::{
     get_data_download_status, get_indicator_manage_page, run_concept_most_related_repair,
@@ -204,6 +208,14 @@ const DEFAULT_MANAGED_SOURCE_DIR: &str = "source";
 const RANKING_COMPUTE_PROGRESS_EVENT: &str = "data-download-status";
 const CHIP_CHANGE_BACKUP_DIR_NAME: &str = "chip_change_rule_backups";
 const CHIP_CHANGE_RULE_FILE_NAME: &str = "chip_change_rule.toml";
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CyqChenStrategyBundleExportResult {
+    exported_path: String,
+    backup_count: usize,
+    includes_active_strategy: bool,
+}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1430,7 +1442,11 @@ async fn run_cyq_chen_compute(
             }
         };
 
-        core_backup_cyq_chen_strategy_file(&source_path)
+        core_backup_cyq_chen_strategy_file_with_meta(
+            &source_path,
+            "auto_entry",
+            "自动备份：运行新筹码计算",
+        )
             .map_err(|error| format!("创建新筹码计算策略快照失败: {error}"))?;
 
         let result = core_run_cyq_chen_compute(
@@ -1562,6 +1578,115 @@ fn export_cyq_chen_strategy_file_to_destination(
     })
 }
 
+fn cyq_chen_zip_file_options() -> FileOptions {
+    FileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .large_file(true)
+}
+
+fn append_cyq_chen_directory_to_zip<W: Write + Seek>(
+    zip_writer: &mut ZipWriter<W>,
+    source_root: &Path,
+    current_dir: &Path,
+    archive_root: &str,
+) -> Result<usize, String> {
+    let file_options = cyq_chen_zip_file_options();
+    let mut backup_count = 0usize;
+
+    for entry in fs::read_dir(current_dir).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let entry_path = entry.path();
+        let entry_type = entry.file_type().map_err(|error| error.to_string())?;
+        let relative_path = entry_path
+            .strip_prefix(source_root)
+            .map_err(|error| error.to_string())?;
+        let archive_path = Path::new(archive_root).join(relative_path);
+        let mut archive_name = archive_path.to_string_lossy().replace('\\', "/");
+
+        if entry_type.is_dir() {
+            if !archive_name.ends_with('/') {
+                archive_name.push('/');
+            }
+            zip_writer
+                .add_directory(archive_name, file_options)
+                .map_err(|error| error.to_string())?;
+            backup_count +=
+                append_cyq_chen_directory_to_zip(zip_writer, source_root, &entry_path, archive_root)?;
+            continue;
+        }
+
+        if entry_type.is_file() {
+            zip_writer
+                .start_file(archive_name, file_options)
+                .map_err(|error| error.to_string())?;
+            let mut source_file = fs::File::open(&entry_path).map_err(|error| error.to_string())?;
+            std::io::copy(&mut source_file, zip_writer).map_err(|error| error.to_string())?;
+            if entry_path
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.eq_ignore_ascii_case("toml"))
+                .unwrap_or(false)
+            {
+                backup_count += 1;
+            }
+        }
+    }
+
+    Ok(backup_count)
+}
+
+fn export_cyq_chen_strategy_bundle_inner(
+    app: tauri::AppHandle,
+    source_path: String,
+    destination_file: String,
+) -> Result<CyqChenStrategyBundleExportResult, String> {
+    let source_path = source_path.trim();
+    if source_path.is_empty() {
+        return Err("数据目录为空，请先确认当前数据源".to_string());
+    }
+    let destination_file = destination_file.trim();
+    if destination_file.is_empty() {
+        return Err("导出目标文件为空".to_string());
+    }
+
+    let source_root = Path::new(source_path);
+    let active_file_path = cyq_chen_active_strategy_path(source_path);
+    let backup_root = source_root.join(CHIP_CHANGE_BACKUP_DIR_NAME);
+    let mut open_options = tauri_plugin_fs::OpenOptions::new();
+    open_options.write(true).truncate(true).create(true);
+    let destination_file =
+        FilePath::from_str(destination_file).map_err(|error| error.to_string())?;
+    let destination_label = decode_percent_encoded_path(&destination_file.to_string());
+    let target_file = app
+        .fs()
+        .open(destination_file, open_options)
+        .map_err(|error| error.to_string())?;
+    let mut zip_writer = ZipWriter::new(target_file);
+    let file_options = cyq_chen_zip_file_options();
+
+    let includes_active_strategy = active_file_path.exists() && active_file_path.is_file();
+    if includes_active_strategy {
+        zip_writer
+            .start_file(format!("active/{CHIP_CHANGE_RULE_FILE_NAME}"), file_options)
+            .map_err(|error| error.to_string())?;
+        let mut source_file = fs::File::open(&active_file_path).map_err(|error| error.to_string())?;
+        std::io::copy(&mut source_file, &mut zip_writer).map_err(|error| error.to_string())?;
+    }
+
+    let backup_count = if backup_root.exists() && backup_root.is_dir() {
+        append_cyq_chen_directory_to_zip(&mut zip_writer, &backup_root, &backup_root, "backups")?
+    } else {
+        0
+    };
+    zip_writer.finish().map_err(|error| error.to_string())?;
+
+    Ok(CyqChenStrategyBundleExportResult {
+        exported_path: destination_label,
+        backup_count,
+        includes_active_strategy,
+    })
+}
+
 #[tauri::command]
 fn get_cyq_chen_strategy_page(source_path: String) -> Result<CyqChenStrategyPageData, String> {
     core_get_cyq_chen_strategy_page(&source_path)
@@ -1583,6 +1708,20 @@ fn check_cyq_chen_strategy_file_draft(draft: CyqChenStrategyFileDraft) -> Result
 #[tauri::command]
 fn backup_cyq_chen_strategy_file(source_path: String) -> Result<CyqChenStrategyPageData, String> {
     core_backup_cyq_chen_strategy_file(&source_path)
+}
+
+#[tauri::command]
+fn auto_backup_cyq_chen_strategy_file_on_entry(
+    source_path: String,
+) -> Result<Option<CyqChenStrategyPageData>, String> {
+    core_auto_backup_cyq_chen_strategy_file_on_entry(&source_path)
+}
+
+#[tauri::command]
+fn create_empty_cyq_chen_strategy_backup(
+    source_path: String,
+) -> Result<CyqChenStrategyPageData, String> {
+    core_create_empty_cyq_chen_strategy_backup(&source_path)
 }
 
 #[tauri::command]
@@ -1636,6 +1775,19 @@ async fn export_cyq_chen_strategy_backup_file(
         }
         let source_file = cyq_chen_backup_strategy_path(source_path, &backup_id)?;
         export_cyq_chen_strategy_file_to_destination(app, source_file, destination_file)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn export_cyq_chen_strategy_bundle(
+    app: tauri::AppHandle,
+    source_path: String,
+    destination_file: String,
+) -> Result<CyqChenStrategyBundleExportResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        export_cyq_chen_strategy_bundle_inner(app, source_path, destination_file)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1941,10 +2093,13 @@ pub fn run() {
             save_cyq_chen_strategy_file,
             check_cyq_chen_strategy_file_draft,
             backup_cyq_chen_strategy_file,
+            auto_backup_cyq_chen_strategy_file_on_entry,
+            create_empty_cyq_chen_strategy_backup,
             import_cyq_chen_strategy_backup,
             delete_cyq_chen_strategy_backup,
             export_cyq_chen_active_strategy_file,
             export_cyq_chen_strategy_backup_file,
+            export_cyq_chen_strategy_bundle,
             get_cyq_chen_strategy_backup_diff,
             activate_cyq_chen_strategy_backup,
             run_ranking_tiebreak_fill,

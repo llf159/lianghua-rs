@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import {
+  autoBackupCyqChenStrategyFileOnEntry,
   checkCyqChenStrategyFileDraft,
   getCyqChenStrategyPage,
   saveCyqChenStrategyFile,
@@ -587,11 +588,21 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
         setChipStrategyNotice('')
       }
       try {
-        const backup = await autoBackupManagedActiveStrategyOnEntry()
-        if (backup) {
-          setNotice(`已自动备份当前策略: ${backup.folderName}`)
+        if (view === 'chip') {
+          const backupPage = await autoBackupCyqChenStrategyFileOnEntry(resolvedSourcePath)
+          if (backupPage) {
+            applyChipStrategyPage(backupPage)
+            setNotice('已自动备份当前筹码策略')
+          } else {
+            setNotice('')
+          }
         } else {
-          setNotice('')
+          const backup = await autoBackupManagedActiveStrategyOnEntry()
+          if (backup) {
+            setNotice(`已自动备份当前策略: ${backup.folderName}`)
+          } else {
+            setNotice('')
+          }
         }
       } catch (backupError) {
         setError(`自动备份当前策略失败: ${String(backupError)}`)
@@ -2306,6 +2317,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
       <StrategyAssetModal
         open={isAssetModalOpen}
         sourcePath={sourcePath}
+        initialAssetKind={isChipView ? 'chip' : 'rank'}
         onClose={() => setIsAssetModalOpen(false)}
         onActivated={() => {
           void loadPage()

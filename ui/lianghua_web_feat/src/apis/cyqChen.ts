@@ -83,8 +83,12 @@ export type CyqChenStrategyBackupItem = {
   backupId: string
   fileName: string
   filePath: string
+  createdAt?: string | null
   modifiedAt?: string | null
   sizeBytes: number
+  sourceKind: string
+  sourceFileName?: string | null
+  description?: string | null
 }
 
 export type CyqChenStrategyPageData = {
@@ -96,6 +100,12 @@ export type CyqChenStrategyPageData = {
 
 export type CyqChenStrategyFileExportResult = {
   exportedPath: string
+}
+
+export type CyqChenStrategyBundleExportResult = {
+  exportedPath: string
+  backupCount: number
+  includesActiveStrategy: boolean
 }
 
 export type CyqChenStrategyBackupDiffLine = {
@@ -139,6 +149,16 @@ export async function checkCyqChenStrategyFileDraft(strategies: CyqChenStrategyD
 
 export async function backupCyqChenStrategyFile(sourcePath: string) {
   return invoke<CyqChenStrategyPageData>('backup_cyq_chen_strategy_file', { sourcePath })
+}
+
+export async function autoBackupCyqChenStrategyFileOnEntry(sourcePath: string) {
+  return invoke<CyqChenStrategyPageData | null>('auto_backup_cyq_chen_strategy_file_on_entry', {
+    sourcePath,
+  })
+}
+
+export async function createEmptyCyqChenStrategyBackup(sourcePath: string) {
+  return invoke<CyqChenStrategyPageData>('create_empty_cyq_chen_strategy_backup', { sourcePath })
 }
 
 export async function importCyqChenStrategyBackup(sourcePath: string) {
@@ -204,6 +224,22 @@ export async function exportCyqChenStrategyBackupFile(
   return invoke<CyqChenStrategyFileExportResult>('export_cyq_chen_strategy_backup_file', {
     sourcePath,
     backupId,
+    destinationFile: targetPath,
+  })
+}
+
+export async function exportCyqChenStrategyBundle(sourcePath: string) {
+  const targetPath = await save({
+    filters: [{ name: 'ZIP', extensions: ['zip'] }],
+    defaultPath: 'chip-strategy-assets.zip',
+  })
+
+  if (!targetPath) {
+    return null
+  }
+
+  return invoke<CyqChenStrategyBundleExportResult>('export_cyq_chen_strategy_bundle', {
+    sourcePath,
     destinationFile: targetPath,
   })
 }
