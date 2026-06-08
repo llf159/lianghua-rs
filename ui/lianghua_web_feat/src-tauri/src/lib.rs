@@ -85,6 +85,8 @@ use lianghua_rs::ui_tools_feat::{
         StockDetailStrategySnapshotData,
     },
     expression_stock_pick::{
+        validate_expression_stock_pick_template_expression as core_validate_expression_stock_pick_template_expression,
+        ExpressionStockPickTemplateValidationData,
         run_expression_stock_pick as core_run_expression_stock_pick,
         StockPickResultData as ExpressionStockPickResultData,
     },
@@ -1822,6 +1824,23 @@ async fn run_ranking_tiebreak_fill(
 }
 
 #[tauri::command]
+async fn validate_expression_stock_pick_template_expression(
+    source_path: String,
+    expression: String,
+) -> Result<ExpressionStockPickTemplateValidationData, String> {
+    let source_path = source_path.trim().to_string();
+    if source_path.is_empty() {
+        return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        core_validate_expression_stock_pick_template_expression(&source_path, expression)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn run_expression_stock_pick(
     source_path: String,
     board: Option<String>,
@@ -2118,6 +2137,7 @@ pub fn run() {
             validate_chart_indicator_settings,
             save_chart_indicator_settings,
             reset_chart_indicator_settings,
+            validate_expression_stock_pick_template_expression,
             run_expression_stock_pick,
             run_concept_stock_pick,
             list_watch_observe_rows,

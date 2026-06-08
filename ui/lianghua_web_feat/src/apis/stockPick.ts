@@ -28,6 +28,12 @@ export type StockPickResultData = {
   resolved_end_date?: string | null
 }
 
+export type ExpressionStockPickTemplateValidationData = {
+  normalized_expression: string
+  warmup_need: number
+  message: string
+}
+
 export type AdvancedStockPickRow = {
   ts_code: string
   name?: string | null
@@ -120,6 +126,16 @@ export async function getStockPickOptions(sourcePath: string) {
 
 export async function runExpressionStockPick(query: ExpressionStockPickQuery) {
   return invoke<StockPickResultData>('run_expression_stock_pick', query)
+}
+
+export async function validateExpressionStockPickTemplateExpression(
+  sourcePath: string,
+  expression: string,
+) {
+  return invoke<ExpressionStockPickTemplateValidationData>(
+    'validate_expression_stock_pick_template_expression',
+    { sourcePath, expression },
+  )
 }
 
 export async function runConceptStockPick(query: ConceptStockPickQuery) {

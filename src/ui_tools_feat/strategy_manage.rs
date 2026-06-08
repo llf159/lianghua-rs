@@ -353,7 +353,14 @@ fn validate_rule_definition(
     if !rule.points.is_finite() {
         return Err(format!("策略 {} 的 points 非法", rule.name));
     }
+    let scope_way = parse_scope_way(&rule.scope_way)?;
     if let Some(dist_points) = &rule.dist_points {
+        if !dist_points.is_empty() && !strategy_scope_way_supports_dist_points(scope_way) {
+            return Err(format!(
+                "策略 {} 的 scope_way 不支持 dist_points，仅 EACH/RECENT 支持区间字典分",
+                rule.name
+            ));
+        }
         for (index, item) in dist_points.iter().enumerate() {
             if item.min > item.max {
                 return Err(format!(
@@ -370,9 +377,20 @@ fn validate_rule_definition(
                 ));
             }
         }
+        let mut sorted = dist_points.iter().collect::<Vec<_>>();
+        sorted.sort_by_key(|item| item.min);
+        for index in 1..sorted.len() {
+            let prev = sorted[index - 1];
+            let curr = sorted[index];
+            if prev.max >= curr.min {
+                return Err(format!(
+                    "策略 {} 的 dist_points 区间重叠: [{}-{}] 和 [{}-{}]",
+                    rule.name, prev.min, prev.max, curr.min, curr.max
+                ));
+            }
+        }
     }
 
-    let scope_way = parse_scope_way(&rule.scope_way)?;
     let tokens = lex_all(&rule.when);
     let mut parser = Parser::new(tokens);
     let stmts = parser
@@ -416,6 +434,10 @@ fn validate_rule_definition(
     }
 
     Ok(())
+}
+
+fn strategy_scope_way_supports_dist_points(scope_way: StrategyScopeWay) -> bool {
+    matches!(scope_way, StrategyScopeWay::Each | StrategyScopeWay::Recent)
 }
 
 fn map_dist_points(

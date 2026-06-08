@@ -115,6 +115,11 @@ function hasDistPoints(items?: StrategyManageDistPoint[] | null) {
   return Boolean(items && items.length > 0)
 }
 
+function scopeWaySupportsDistPoints(scopeWay: string) {
+  const normalized = scopeWay.trim().toUpperCase()
+  return normalized === 'EACH' || normalized === 'RECENT'
+}
+
 function buildEmptyDraft(sceneName = ''): StrategyManageRuleDraft {
   return {
     name: '',
@@ -237,7 +242,7 @@ function parseDistPointsText(raw: string) {
     return null
   }
 
-  return trimmed.split('\n').map((line, index) => {
+  const items = trimmed.split('\n').map((line, index) => {
     const parts = line
       .split(',')
       .map((item) => item.trim())
@@ -252,8 +257,20 @@ function parseDistPointsText(raw: string) {
     if (!Number.isInteger(min) || !Number.isInteger(max) || !Number.isFinite(points)) {
       throw new Error(`字典得分第 ${index + 1} 行存在非法数值`)
     }
+    if (min > max) {
+      throw new Error(`字典得分第 ${index + 1} 行 min 不能大于 max`)
+    }
     return { min, max, points }
   })
+  const sorted = [...items].sort((left, right) => left.min - right.min)
+  for (let index = 1; index < sorted.length; index += 1) {
+    const prev = sorted[index - 1]!
+    const current = sorted[index]!
+    if (prev.max >= current.min) {
+      throw new Error(`字典得分区间重叠: ${prev.min}-${prev.max} 与 ${current.min}-${current.max}`)
+    }
+  }
+  return items
 }
 
 function buildPreparedDraft(
@@ -273,7 +290,14 @@ function buildPreparedDraft(
   }
 
   if (scoreMode === 'dist') {
-    nextDraft.dist_points = parseDistPointsText(distPointsText)
+    if (!scopeWaySupportsDistPoints(nextDraft.scope_way)) {
+      throw new Error('当前 scope_way 不支持区间字典，仅 EACH/RECENT 支持')
+    }
+    const parsedDistPoints = parseDistPointsText(distPointsText)
+    if (!parsedDistPoints || parsedDistPoints.length === 0) {
+      throw new Error('区间字典不能为空')
+    }
+    nextDraft.dist_points = parsedDistPoints
   } else {
     const parsed = Number(fixedPointsText.trim())
     if (!Number.isFinite(parsed)) {
@@ -558,6 +582,9 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
     })
     return grouped
   }, [refactorRules, refactorSceneNames])
+  const draftScopeSupportsDistPoints = draft
+    ? scopeWaySupportsDistPoints(draft.scope_way)
+    : false
 
   function applyChipStrategyPage(page: CyqChenStrategyPageData) {
     setChipStrategies(page.strategies ?? [])
@@ -645,6 +672,16 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
     setCheckNotice('')
     setError('')
     setNotice('')
+  }
+
+  function updateDraftScopeWay(scopeWay: string) {
+    if (!draft) {
+      return
+    }
+    setDraft({ ...draft, scope_way: scopeWay })
+    if (!scopeWaySupportsDistPoints(scopeWay)) {
+      setScoreMode('fixed')
+    }
   }
 
   function openCreateSceneEditor() {
@@ -1932,7 +1969,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
               </label>
               <label className="strategy-manage-field">
                 <span>Scope</span>
-                <select value={draft.scope_way} onChange={(event) => setDraft({ ...draft, scope_way: event.target.value })}>
+                <select value={draft.scope_way} onChange={(event) => updateDraftScopeWay(event.target.value)}>
                   {SCOPE_OPTIONS.map((item) => (
                     <option key={item} value={item}>
                       {item}
@@ -1972,6 +2009,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                     type="button"
                     className={scoreMode === 'dist' ? 'strategy-manage-score-mode-btn is-active' : 'strategy-manage-score-mode-btn'}
                     onClick={() => setScoreMode('dist')}
+                    disabled={!draftScopeSupportsDistPoints}
                   >
                     区间字典
                   </button>

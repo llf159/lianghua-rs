@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { validateExpressionStockPickTemplateExpression } from '../../../apis/stockPick'
 import '../css/IntradayTemplateManagerModal.css'
 
 export type ExpressionStockPickTemplate = {
@@ -11,6 +12,7 @@ type TemplateEditorMode = 'create' | 'edit'
 
 type ExpressionStockPickTemplateManagerModalProps = {
   open: boolean
+  sourcePath: string
   templates: ExpressionStockPickTemplate[]
   initialExpression: string
   onChangeTemplates: (nextTemplates: ExpressionStockPickTemplate[]) => void
@@ -41,6 +43,7 @@ function summarizeExpression(expression: string, maxLength = 96) {
 
 export default function ExpressionStockPickTemplateManagerModal({
   open,
+  sourcePath,
   templates,
   initialExpression,
   onChangeTemplates,
@@ -54,6 +57,9 @@ export default function ExpressionStockPickTemplateManagerModal({
     useState<ExpressionStockPickTemplate>(createTemplate('', initialExpression))
   const [templateEditorNotice, setTemplateEditorNotice] = useState('')
   const [templateEditorError, setTemplateEditorError] = useState('')
+  const [templateValidating, setTemplateValidating] = useState(false)
+
+  const sourcePathTrimmed = sourcePath.trim()
 
   function resetTemplateEditor() {
     setTemplateEditorMode('create')
@@ -71,13 +77,30 @@ export default function ExpressionStockPickTemplateManagerModal({
     setTemplateEditorError('')
   }
 
-  function onSaveTemplate() {
+  async function onSaveTemplate() {
     const name = templateEditorDraft.name.trim()
     const expression = templateEditorDraft.expression.trim()
     if (!name || !expression) {
       setTemplateEditorError('模板名称和表达式都不能为空')
       setTemplateEditorNotice('')
       return
+    }
+    if (!sourcePathTrimmed) {
+      setTemplateEditorError('请先完成数据目录加载')
+      setTemplateEditorNotice('')
+      return
+    }
+
+    setTemplateValidating(true)
+    setTemplateEditorError('')
+    setTemplateEditorNotice('')
+    try {
+      await validateExpressionStockPickTemplateExpression(sourcePathTrimmed, expression)
+    } catch (validationError) {
+      setTemplateEditorError(`表达式校验失败: ${String(validationError)}`)
+      return
+    } finally {
+      setTemplateValidating(false)
     }
 
     if (templateEditorMode === 'create') {
@@ -186,8 +209,16 @@ export default function ExpressionStockPickTemplateManagerModal({
                 {templateEditorMode === 'create' ? '新增模板' : '编辑模板'}
               </h5>
               <div className="intraday-template-editor-actions">
-                <button type="button" onClick={onSaveTemplate}>
-                  {templateEditorMode === 'create' ? '保存新增' : '保存更新'}
+                <button
+                  type="button"
+                  onClick={() => void onSaveTemplate()}
+                  disabled={templateValidating}
+                >
+                  {templateValidating
+                    ? '校验中...'
+                    : templateEditorMode === 'create'
+                      ? '保存新增'
+                      : '保存更新'}
                 </button>
               </div>
             </div>

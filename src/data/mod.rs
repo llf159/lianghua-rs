@@ -923,6 +923,11 @@ impl ScoreConfig {
                 let Some(dist) = &r.dist_points else {
                     return Err(format!("第{:?}个表达式dist_points字段错误", n));
                 };
+                if !dist.is_empty() && !scope_way_supports_dist_points(r.scope_way) {
+                    return Err(format!(
+                        "第{n}条规则 scope_way 不支持 dist_points，仅 EACH/RECENT 支持区间字典分"
+                    ));
+                }
                 for (j, v) in dist.iter().enumerate() {
                     if v.min > v.max {
                         return Err(format!("第{n}条规则 dist_points 第{}段 min > max", j + 1));
@@ -951,6 +956,10 @@ impl ScoreConfig {
         }
         Ok(())
     }
+}
+
+fn scope_way_supports_dist_points(scope_way: ScopeWay) -> bool {
+    matches!(scope_way, ScopeWay::Each | ScopeWay::Recent)
 }
 
 impl ScoreScene {

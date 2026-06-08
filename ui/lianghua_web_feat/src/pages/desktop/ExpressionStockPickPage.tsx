@@ -565,6 +565,7 @@ export default function ExpressionStockPickPage() {
       {templateModalOpen ? (
         <ExpressionStockPickTemplateManagerModal
           open={templateModalOpen}
+          sourcePath={sourcePath}
           templates={templates}
           initialExpression={expression}
           onChangeTemplates={setTemplates}

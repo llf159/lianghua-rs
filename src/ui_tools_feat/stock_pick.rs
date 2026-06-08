@@ -74,6 +74,13 @@ pub struct StockPickResultData {
     pub resolved_end_date: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ExpressionStockPickTemplateValidationData {
+    pub normalized_expression: String,
+    pub warmup_need: usize,
+    pub message: String,
+}
+
 #[derive(Debug)]
 enum ScopeHit {
     Bool(bool),
@@ -411,6 +418,87 @@ fn collect_expression_stock_pick_runtime_keys(stmts: &Stmts) -> HashSet<String> 
             aliases: &EXPRESSION_STOCK_PICK_RUNTIME_ALIASES,
         },
     )
+}
+
+pub fn validate_expression_stock_pick_template_expression(
+    source_path: &str,
+    expression: String,
+) -> Result<ExpressionStockPickTemplateValidationData, String> {
+    let normalized_expression = expression.trim().to_string();
+    if normalized_expression.is_empty() {
+        return Err("表达式不能为空".to_string());
+    }
+
+    let tokens = lex_all(&normalized_expression);
+    let mut parser = Parser::new(tokens);
+    let stmts = parser
+        .parse_main()
+        .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
+    let warmup_need = estimate_custom_warmup(&stmts, PickScopeWay::Last)?;
+    let required_runtime_keys = collect_expression_stock_pick_runtime_keys(&stmts);
+    let used_cyq_chen_keys = collect_used_cyq_chen_runtime_keys(&[&stmts]);
+    let needs_rank_score = expr_program_uses_runtime_key(&stmts, "RANK")
+        || expr_program_uses_runtime_key(&stmts, "SCORE");
+
+    let reader = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
+    let latest_trade_date = reader
+        .conn
+        .query_row(
+            "SELECT MAX(trade_date) FROM stock_data WHERE adj_type = ?",
+            [DEFAULT_ADJ_TYPE],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(|e| format!("读取表达式模板校验交易日失败: {e}"))?
+        .ok_or_else(|| "stock_data 缺少可用于表达式模板校验的交易日".to_string())?;
+    let sample_ts_code = reader
+        .conn
+        .query_row(
+            "SELECT ts_code FROM stock_data WHERE adj_type = ? AND trade_date = ? ORDER BY ts_code LIMIT 1",
+            [DEFAULT_ADJ_TYPE, latest_trade_date.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| format!("读取表达式模板校验样本股票失败: {e}"))?;
+
+    let need_rows = (warmup_need + 2).max(8);
+    let mut row_data = reader.load_one_tail_rows(
+        &sample_ts_code,
+        DEFAULT_ADJ_TYPE,
+        &latest_trade_date,
+        need_rows,
+    )?;
+    let cyq_chen_injector = CyqChenFieldInjector::new(source_path, &used_cyq_chen_keys);
+    let _ = cyq_chen_injector.inject(&mut row_data, &sample_ts_code);
+    let st_list = load_st_list(source_path)?;
+    let total_share_map = load_total_share_map(source_path).unwrap_or_default();
+    inject_stock_extra_fields(
+        &mut row_data,
+        &sample_ts_code,
+        st_list.contains(&sample_ts_code),
+        total_share_map.get(&sample_ts_code).copied(),
+    )?;
+    if needs_rank_score {
+        let first_trade_date = row_data
+            .trade_dates
+            .first()
+            .cloned()
+            .unwrap_or_else(|| latest_trade_date.clone());
+        let rank_score_series_map =
+            load_rank_score_series_map(source_path, &first_trade_date, &latest_trade_date);
+        inject_runtime_rank_score_series(&mut row_data, &sample_ts_code, &rank_score_series_map)?;
+    }
+
+    let mut runtime = row_into_rt(row_data)?;
+    let value = runtime
+        .eval_program(&stmts)
+        .map_err(|e| format!("表达式运行错误:{}", e.msg))?;
+    let len = rt_max_len(&runtime);
+    Value::as_bool_series(&value, len).map_err(|e| format!("表达式返回值非布尔:{}", e.msg))?;
+
+    Ok(ExpressionStockPickTemplateValidationData {
+        normalized_expression,
+        warmup_need,
+        message: "表达式可用于表达式选股模板".to_string(),
+    })
 }
 
 fn hit_scope_period(scope_way: PickScopeWay, bs: &[bool]) -> ScopeHit {
