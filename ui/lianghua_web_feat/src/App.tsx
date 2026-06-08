@@ -29,6 +29,7 @@ import AllMarketMonitorPage from './pages/desktop/AllMarketMonitorPage'
 import BacktestPage from './pages/desktop/BacktestPage'
 import StrategyPaperValidationPage from './pages/desktop/StrategyPaperValidationPage'
 import StrategyTriggerPage from './pages/desktop/StrategyTriggerPage'
+import StrategyTriggerSimilarityPage from './pages/desktop/StrategyTriggerSimilarityPage'
 import SceneLayerBacktestPage from './pages/desktop/SceneLayerBacktestPage'
 import ExpressionValidationSamplesPage, {
   EXPRESSION_VALIDATION_SAMPLES_ROUTE_PATH,
@@ -79,6 +80,7 @@ function AppRoutes() {
             <Route path="chip-change" element={<StrategyManagePage view="chip" />} />
             <Route path="cyq-chen" element={<CyqChenPage />} />
           </Route>
+          <Route path="strategy-trigger-similarity" element={<StrategyTriggerSimilarityPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="raw-data">
             <Route index element={<Navigate to="/raw-data/data-import" replace />} />

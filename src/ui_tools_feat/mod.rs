@@ -26,6 +26,7 @@ pub mod stock_pick;
 pub mod stock_similarity;
 pub mod strategy_manage;
 pub mod strategy_paper_validation;
+pub mod strategy_trigger_similarity;
 pub mod watch_observe;
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";

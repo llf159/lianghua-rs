@@ -146,6 +146,10 @@ use lianghua_rs::ui_tools_feat::{
     stock_similarity::{
         get_stock_similarity_page as core_get_stock_similarity_page, StockSimilarityPageData,
     },
+    strategy_trigger_similarity::{
+        get_strategy_trigger_similarity_page as core_get_strategy_trigger_similarity_page,
+        StrategyTriggerSimilarityPageData,
+    },
     strategy_manage::{
         check_strategy_manage_rule_draft as core_check_strategy_manage_rule_draft,
         check_strategy_manage_scene_draft as core_check_strategy_manage_scene_draft,
@@ -718,6 +722,29 @@ async fn get_stock_similarity_page(
 ) -> Result<StockSimilarityPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_get_stock_similarity_page(source_path, trade_date, ts_code, limit)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_strategy_trigger_similarity_page(
+    source_path: String,
+    trade_date: Option<String>,
+    ts_code: String,
+    window_trade_days: Option<u32>,
+    max_gap_trade_days: Option<u32>,
+    limit: Option<u32>,
+) -> Result<StrategyTriggerSimilarityPageData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_strategy_trigger_similarity_page(
+            source_path,
+            trade_date,
+            ts_code,
+            window_trade_days,
+            max_gap_trade_days,
+            limit,
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2083,6 +2110,7 @@ pub fn run() {
             get_stock_detail_cyq,
             get_stock_detail_realtime,
             get_stock_similarity_page,
+            get_strategy_trigger_similarity_page,
             get_strategy_statistics_page,
             get_strategy_paper_validation_defaults,
             validate_strategy_paper_validation_template_expressions,

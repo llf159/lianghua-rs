@@ -20,6 +20,7 @@ const intradayMonitorSubRoutes = [
   { path: '/intraday-monitor/custom-monitor', label: '自定义监控' },
 ]
 
+const strategyTriggerSimilarityMenuItem = { path: '/strategy-trigger-similarity', label: '策略触发相似' }
 const settingsMenuItem = { path: '/settings', label: '设置' }
 
 const strategySubRoutes = [
@@ -238,6 +239,13 @@ export default function PageDesktop() {
               </div>
             ) : null}
           </div>
+
+          <NavLink
+            to={strategyTriggerSimilarityMenuItem.path}
+            className={({ isActive }) => (isActive ? 'menu-item active' : 'menu-item')}
+          >
+            {strategyTriggerSimilarityMenuItem.label}
+          </NavLink>
 
           <NavLink
             to={settingsMenuItem.path}
