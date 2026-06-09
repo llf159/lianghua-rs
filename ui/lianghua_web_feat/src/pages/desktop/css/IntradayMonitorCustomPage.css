@@ -348,6 +348,10 @@
   color: #1b8f5a;
 }
 
+.intraday-custom-cell-concept {
+  max-width: 260px;
+}
+
 .intraday-custom-hit-badge {
   display: inline-block;
   max-width: 100%;

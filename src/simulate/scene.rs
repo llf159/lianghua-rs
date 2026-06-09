@@ -142,9 +142,19 @@ pub fn calc_scene_layer_metrics_from_db(
     source_dir: &str,
     input: &SceneLayerFromDbInput,
 ) -> Result<SceneLayerMetrics, String> {
+    calc_scene_layer_metrics_from_db_with_ts_filter(source_conn, source_dir, input, None)
+}
+
+pub fn calc_scene_layer_metrics_from_db_with_ts_filter(
+    source_conn: &Connection,
+    source_dir: &str,
+    input: &SceneLayerFromDbInput,
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Result<SceneLayerMetrics, String> {
     input.validate()?;
 
-    let scene_rows = load_scene_rows(source_dir, input)?;
+    let scene_rows =
+        filter_scene_rows_by_ts_codes(load_scene_rows(source_dir, input)?, allowed_ts_codes);
     let concept_map = load_most_related_concept_map(source_dir)?;
     let industry_map = load_stock_industry_map(source_dir)?;
     if scene_rows.is_empty() {
@@ -188,6 +198,36 @@ pub fn calc_all_scene_layer_metrics_from_db(
     end_date: &str,
     layer_config: &SceneLayerConfig,
 ) -> Result<Vec<(String, SceneLayerMetrics)>, String> {
+    calc_all_scene_layer_metrics_from_db_with_ts_filter(
+        source_conn,
+        source_dir,
+        scene_names,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+        None,
+    )
+}
+
+pub fn calc_all_scene_layer_metrics_from_db_with_ts_filter(
+    source_conn: &Connection,
+    source_dir: &str,
+    scene_names: &[String],
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &SceneLayerConfig,
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Result<Vec<(String, SceneLayerMetrics)>, String> {
     validate_scene_common_input(
         stock_adj_type,
         index_ts_code,
@@ -203,7 +243,10 @@ pub fn calc_all_scene_layer_metrics_from_db(
         return Ok(Vec::new());
     }
 
-    let scene_rows = load_scene_rows_for_names(source_dir, scene_names, start_date, end_date)?;
+    let scene_rows = filter_scene_rows_by_ts_codes(
+        load_scene_rows_for_names(source_dir, scene_names, start_date, end_date)?,
+        allowed_ts_codes,
+    );
     let concept_map = load_most_related_concept_map(source_dir)?;
     let industry_map = load_stock_industry_map(source_dir)?;
     let mut rows_by_scene: HashMap<String, HashMap<String, Vec<SceneDbRow>>> = HashMap::new();
@@ -493,6 +536,27 @@ fn group_rows_by_ts(scene_rows: Vec<SceneDbRow>) -> HashMap<String, Vec<SceneDbR
         rows_by_ts.entry(row.ts_code.clone()).or_default().push(row);
     }
     rows_by_ts
+}
+
+fn scene_ts_code_allowed(allowed_ts_codes: Option<&HashSet<String>>, ts_code: &str) -> bool {
+    let Some(allowed_ts_codes) = allowed_ts_codes else {
+        return true;
+    };
+    let trimmed = ts_code.trim();
+    allowed_ts_codes.contains(trimmed)
+        || allowed_ts_codes.contains(trimmed.to_ascii_uppercase().as_str())
+}
+
+fn filter_scene_rows_by_ts_codes(
+    rows: Vec<SceneDbRow>,
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Vec<SceneDbRow> {
+    if allowed_ts_codes.is_none() {
+        return rows;
+    }
+    rows.into_iter()
+        .filter(|row| scene_ts_code_allowed(allowed_ts_codes, &row.ts_code))
+        .collect()
 }
 
 fn collect_scene_samples(

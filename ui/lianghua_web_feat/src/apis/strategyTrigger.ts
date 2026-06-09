@@ -161,6 +161,8 @@ export type SceneLayerBacktestData = {
   industry_beta: number
   start_date: string
   end_date: string
+  resolved_board?: string | null
+  exclude_st_board?: boolean
   min_samples_per_scene_day: number
   min_listed_trade_days: number
   backtest_period: number
@@ -215,6 +217,8 @@ export type RuleLayerBacktestData = {
   industry_beta: number
   start_date: string
   end_date: string
+  resolved_board?: string | null
+  exclude_st_board?: boolean
   min_samples_per_rule_day: number
   min_listed_trade_days: number
   backtest_period: number
@@ -261,6 +265,8 @@ export type RankLayerBacktestData = {
   industry_beta: number
   start_date: string
   end_date: string
+  resolved_board?: string | null
+  exclude_st_board?: boolean
   min_samples_per_rank_day: number
   min_listed_trade_days: number
   backtest_period: number
@@ -413,6 +419,8 @@ export type SceneLayerBacktestQuery = {
   minSamplesPerSceneDay?: number
   minListedTradeDays?: number
   backtestPeriod?: number
+  board?: string
+  excludeStBoard?: boolean
 }
 
 export type RuleLayerBacktestQuery = {
@@ -427,6 +435,8 @@ export type RuleLayerBacktestQuery = {
   minSamplesPerRuleDay?: number
   minListedTradeDays?: number
   backtestPeriod?: number
+  board?: string
+  excludeStBoard?: boolean
 }
 
 export type RankLayerBacktestQuery = {
@@ -443,6 +453,8 @@ export type RankLayerBacktestQuery = {
   backtestPeriod?: number
   layerCount?: number
   layerMethod?: RankLayerMethod
+  board?: string
+  excludeStBoard?: boolean
 }
 
 export type RuleExpressionValidationQuery = {

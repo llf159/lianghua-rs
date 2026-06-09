@@ -33,6 +33,11 @@ import {
   type BacktestHighlightMetric,
 } from "../../shared/backtestHighlightSettings";
 import { readJsonStorage, readStoredSourcePath, writeJsonStorage } from "../../shared/storage";
+import { useConceptExclusions } from "../../shared/conceptExclusions";
+import {
+  STOCK_PICK_BOARD_OPTIONS,
+  buildBoardFilterOptions,
+} from "../../shared/stockPickShared";
 import {
   ExpressionValidationSamplesPanel,
   type SceneLayerValidationReturnState,
@@ -89,6 +94,7 @@ type BacktestCommonParamsDraft = {
   backtestPeriod: string;
   rankLayerCount: string;
   rankLayerMethod: RankLayerMethod;
+  backtestBoardFilter: (typeof STOCK_PICK_BOARD_OPTIONS)[number];
 };
 
 type StoredBacktestCommonParamsDraft = Omit<BacktestCommonParamsDraft, "endDateInput">;
@@ -136,6 +142,15 @@ function formatPercent(value?: number | null, digits = 2) {
     return "--";
   }
   return `${value.toFixed(digits)}%`;
+}
+
+function formatBacktestBoardLabel(value?: {
+  resolved_board?: string | null;
+  exclude_st_board?: boolean | null;
+}) {
+  return [value?.resolved_board ?? "不限", value?.exclude_st_board ? "排除ST" : ""]
+    .filter(Boolean)
+    .join(" / ");
 }
 
 function formatRate(value?: number | null, digits = 1) {
@@ -363,6 +378,7 @@ const DEFAULT_BACKTEST_COMMON_PARAMS: BacktestCommonParamsDraft = {
   backtestPeriod: "3",
   rankLayerCount: "5",
   rankLayerMethod: "sample_count",
+  backtestBoardFilter: "全部",
 };
 
 function normalizeStoredString(value: unknown, fallback: string) {
@@ -376,11 +392,21 @@ function normalizeRankLayerMethod(value: unknown): RankLayerMethod {
 }
 
 function readStoredBacktestCommonParams(): StoredBacktestCommonParams {
-  const parsed = readJsonStorage<Partial<StoredBacktestCommonParamsDraft>>(
+  const parsed = readJsonStorage<
+    Partial<StoredBacktestCommonParamsDraft> & {
+      ruleBoardFilter?: (typeof STOCK_PICK_BOARD_OPTIONS)[number];
+    }
+  >(
     typeof window === "undefined" ? null : window.localStorage,
     BACKTEST_COMMON_PARAMS_STORAGE_KEY,
   );
   const indexTsCode = normalizeStoredString(parsed?.indexTsCode, DEFAULT_BACKTEST_COMMON_PARAMS.indexTsCode);
+  const parsedBoardFilter =
+    parsed?.backtestBoardFilter && STOCK_PICK_BOARD_OPTIONS.includes(parsed.backtestBoardFilter)
+      ? parsed.backtestBoardFilter
+      : parsed?.ruleBoardFilter && STOCK_PICK_BOARD_OPTIONS.includes(parsed.ruleBoardFilter)
+        ? parsed.ruleBoardFilter
+        : DEFAULT_BACKTEST_COMMON_PARAMS.backtestBoardFilter;
 
   return {
     stockAdjType: normalizeStoredString(parsed?.stockAdjType, DEFAULT_BACKTEST_COMMON_PARAMS.stockAdjType),
@@ -400,6 +426,7 @@ function readStoredBacktestCommonParams(): StoredBacktestCommonParams {
     backtestPeriod: normalizeStoredString(parsed?.backtestPeriod, DEFAULT_BACKTEST_COMMON_PARAMS.backtestPeriod),
     rankLayerCount: normalizeStoredString(parsed?.rankLayerCount, DEFAULT_BACKTEST_COMMON_PARAMS.rankLayerCount),
     rankLayerMethod: normalizeRankLayerMethod(parsed?.rankLayerMethod),
+    backtestBoardFilter: parsedBoardFilter,
     hasStoredParams: Boolean(parsed),
   };
 }
@@ -417,6 +444,7 @@ function writeStoredBacktestCommonParams(value: BacktestCommonParamsDraft) {
     backtestPeriod: value.backtestPeriod,
     rankLayerCount: value.rankLayerCount,
     rankLayerMethod: value.rankLayerMethod,
+    backtestBoardFilter: value.backtestBoardFilter,
   };
   writeJsonStorage(
     typeof window === "undefined" ? null : window.localStorage,
@@ -440,6 +468,7 @@ const RANK_LAYER_METHOD_OPTIONS: Array<{ value: RankLayerMethod; label: string }
 ];
 
 export default function SceneLayerBacktestPage() {
+  const { excludeStBoard } = useConceptExclusions();
   const location = useLocation();
   const navigate = useNavigate();
   const locationState =
@@ -462,6 +491,9 @@ export default function SceneLayerBacktestPage() {
   const [rankLayerMethod, setRankLayerMethod] = useState<RankLayerMethod>(
     storedCommonParams.rankLayerMethod,
   );
+  const [backtestBoardFilter, setBacktestBoardFilter] = useState<
+    (typeof STOCK_PICK_BOARD_OPTIONS)[number]
+  >(storedCommonParams.backtestBoardFilter);
 
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(false);
@@ -508,6 +540,10 @@ export default function SceneLayerBacktestPage() {
     ruleLoading ||
     ruleTransientLoading ||
     validationLoading;
+  const backtestBoardOptions = useMemo(
+    () => buildBoardFilterOptions(STOCK_PICK_BOARD_OPTIONS, excludeStBoard),
+    [excludeStBoard],
+  );
 
   useEffect(() => {
     return () => {
@@ -562,6 +598,7 @@ export default function SceneLayerBacktestPage() {
       backtestPeriod,
       rankLayerCount,
       rankLayerMethod,
+      backtestBoardFilter,
     });
   }, [
     stockAdjType,
@@ -576,7 +613,14 @@ export default function SceneLayerBacktestPage() {
     backtestPeriod,
     rankLayerCount,
     rankLayerMethod,
+    backtestBoardFilter,
   ]);
+
+  useEffect(() => {
+    if (!backtestBoardOptions.includes(backtestBoardFilter)) {
+      setBacktestBoardFilter("全部");
+    }
+  }, [backtestBoardFilter, backtestBoardOptions]);
 
   useEffect(() => {
     let cancelled = false;
@@ -943,6 +987,8 @@ export default function SceneLayerBacktestPage() {
         minSamplesPerSceneDay: Math.max(1, Number(minSamplesPerDay) || 1),
         minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
+        excludeStBoard: excludeStBoard || undefined,
       });
       setResult(data);
     } catch (runError) {
@@ -990,6 +1036,8 @@ export default function SceneLayerBacktestPage() {
         minSamplesPerSceneDay: Math.max(1, Number(minSamplesPerDay) || 1),
         minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
+        excludeStBoard: excludeStBoard || undefined,
       });
       setResult(data);
     } catch (runError) {
@@ -1048,6 +1096,8 @@ export default function SceneLayerBacktestPage() {
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
         layerCount: normalizedLayerCount,
         layerMethod: rankLayerMethod,
+        board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
+        excludeStBoard: excludeStBoard || undefined,
       });
       setRankResult(data);
     } catch (runError) {
@@ -1106,6 +1156,8 @@ export default function SceneLayerBacktestPage() {
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
         layerCount: normalizedLayerCount,
         layerMethod: rankLayerMethod,
+        board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
+        excludeStBoard: excludeStBoard || undefined,
       });
       setRankResult(data);
     } catch (runError) {
@@ -1154,6 +1206,8 @@ export default function SceneLayerBacktestPage() {
         minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerDay) || 1),
         minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
+        excludeStBoard: excludeStBoard || undefined,
       });
       const compacted = compactRuleLayerBacktestPayload(data);
       setRuleResult(compacted);
@@ -1205,6 +1259,8 @@ export default function SceneLayerBacktestPage() {
         minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerDay) || 1),
         minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
+        excludeStBoard: excludeStBoard || undefined,
       });
       const compacted = compactRuleLayerBacktestPayload(data);
       setRuleResult(compacted);
@@ -1637,6 +1693,23 @@ export default function SceneLayerBacktestPage() {
             <input type="number" min="1" value={backtestPeriod} onChange={(event) => setBacktestPeriod(event.target.value)} />
           </label>
           <label className="scene-layer-field">
+            <span>限定板块</span>
+            <select
+              value={backtestBoardFilter}
+              onChange={(event) =>
+                setBacktestBoardFilter(
+                  event.target.value as (typeof STOCK_PICK_BOARD_OPTIONS)[number],
+                )
+              }
+            >
+              {backtestBoardOptions.map((board) => (
+                <option key={board} value={board}>
+                  {board}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="scene-layer-field">
             <span>分层层数</span>
             <input type="number" min="2" value={rankLayerCount} onChange={(event) => setRankLayerCount(event.target.value)} />
           </label>
@@ -1685,6 +1758,7 @@ export default function SceneLayerBacktestPage() {
                       <th>区间</th>
                       <th>指数</th>
                       <th>Beta（指/概/行）</th>
+                      <th>限定板块</th>
                       <th>有效交易日</th>
                       <th>总样本数</th>
                       <th>最小样本阈值</th>
@@ -1700,6 +1774,7 @@ export default function SceneLayerBacktestPage() {
                       <td>{formatDateLabel(rankResult.start_date)} ~ {formatDateLabel(rankResult.end_date)}</td>
                       <td>{rankResult.index_ts_code}</td>
                       <td>{formatNumber(rankResult.index_beta, 2)} / {formatNumber(rankResult.concept_beta, 2)} / {formatNumber(rankResult.industry_beta, 2)}</td>
+                      <td>{formatBacktestBoardLabel(rankResult)}</td>
                       <td>{rankResult.point_count}</td>
                       <td>{rankResult.sample_count}</td>
                       <td>{rankResult.min_samples_per_rank_day}</td>
@@ -1806,6 +1881,10 @@ export default function SceneLayerBacktestPage() {
               <strong>{allSceneSummaries.length}</strong>
             </div>
             <div className="scene-layer-summary-item">
+              <span>限定板块</span>
+              <strong>{formatBacktestBoardLabel(result)}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
               <span>最小样本阈值</span>
               <strong>{result.min_samples_per_scene_day}</strong>
             </div>
@@ -1873,6 +1952,7 @@ export default function SceneLayerBacktestPage() {
                     <th>区间</th>
                     <th>指数</th>
                     <th>Beta（指/概/行）</th>
+                    <th>限定板块</th>
                     <th>策略数</th>
                     <th>最小样本阈值</th>
                     <th>最少上市交易日</th>
@@ -1892,6 +1972,7 @@ export default function SceneLayerBacktestPage() {
                     <td>{formatDateLabel(ruleResult.start_date)} ~ {formatDateLabel(ruleResult.end_date)}</td>
                     <td>{ruleResult.index_ts_code}</td>
                     <td>{formatNumber(ruleResult.index_beta, 2)} / {formatNumber(ruleResult.concept_beta, 2)} / {formatNumber(ruleResult.industry_beta, 2)}</td>
+                    <td>{formatBacktestBoardLabel(ruleResult)}</td>
                     <td>{allRuleSummaries.length}</td>
                     <td>{ruleResult.min_samples_per_rule_day}</td>
                     <td>{ruleResult.min_listed_trade_days}</td>

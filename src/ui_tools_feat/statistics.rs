@@ -12,7 +12,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    data::scoring_data::{ScoreDetails, ScoreSummary, row_into_rt},
+    data::scoring_data::{SceneDetails, ScoreDetails, ScoreSummary, row_into_rt},
     data::{
         DataReader, RuleStage, RuleTag, RuntimeKeyCollectOptions, ScopeWay, ScoreRule, ScoreScene,
         collect_assigned_names_from_expr_program, collect_runtime_keys_from_expr_programs,
@@ -39,14 +39,17 @@ use crate::{
         },
         rule::{
             RuleLayerConfig, RuleLayerFromDbInput, RuleLayerRuntimeCache,
-            build_rule_layer_runtime_cache_from_stock_data, calc_all_rule_layer_metrics_from_db,
-            calc_all_rule_layer_metrics_from_rows, calc_rule_layer_metrics_from_db,
+            build_rule_layer_runtime_cache_from_stock_data,
+            calc_all_rule_layer_metrics_from_db_with_ts_filter,
+            calc_all_rule_layer_metrics_from_rows, calc_rule_layer_metrics_from_db_with_ts_filter,
             calc_rule_layer_metrics_with_samples_from_cache,
             visit_triggered_rule_samples_from_cache,
         },
         scene::{
-            SceneLayerConfig, SceneLayerFromDbInput, calc_all_scene_layer_metrics_from_db,
-            calc_all_scene_layer_metrics_from_rows, calc_scene_layer_metrics_from_db,
+            SceneLayerConfig, SceneLayerFromDbInput,
+            calc_all_scene_layer_metrics_from_db_with_ts_filter,
+            calc_all_scene_layer_metrics_from_rows,
+            calc_scene_layer_metrics_from_db_with_ts_filter,
         },
     },
     ui_tools_feat::{build_concepts_map, build_name_map},
@@ -211,6 +214,8 @@ pub struct SceneLayerBacktestData {
     pub industry_beta: f64,
     pub start_date: String,
     pub end_date: String,
+    pub resolved_board: Option<String>,
+    pub exclude_st_board: bool,
     pub min_samples_per_scene_day: usize,
     pub min_listed_trade_days: usize,
     pub backtest_period: usize,
@@ -269,6 +274,8 @@ pub struct RuleLayerBacktestData {
     pub industry_beta: f64,
     pub start_date: String,
     pub end_date: String,
+    pub resolved_board: Option<String>,
+    pub exclude_st_board: bool,
     pub min_samples_per_rule_day: usize,
     pub min_listed_trade_days: usize,
     pub backtest_period: usize,
@@ -318,6 +325,8 @@ pub struct RankLayerBacktestData {
     pub industry_beta: f64,
     pub start_date: String,
     pub end_date: String,
+    pub resolved_board: Option<String>,
+    pub exclude_st_board: bool,
     pub min_samples_per_rank_day: usize,
     pub min_listed_trade_days: usize,
     pub backtest_period: usize,
@@ -2595,6 +2604,8 @@ fn build_rule_backtest_payload(
         industry_beta: params.industry_beta,
         start_date: params.start_date.clone(),
         end_date: params.end_date.clone(),
+        resolved_board: params.resolved_board.clone(),
+        exclude_st_board: params.exclude_st_board,
         min_samples_per_rule_day: params.min_samples_per_day,
         min_listed_trade_days: params.min_listed_trade_days,
         backtest_period: params.backtest_period,
@@ -3301,6 +3312,9 @@ pub fn run_rule_expression_validation(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1).max(1),
+        resolved_board: None,
+        exclude_st_board: false,
+        allowed_ts_codes: None,
     };
 
     let variants =
@@ -3607,6 +3621,37 @@ fn match_board_filter_with_st(
         return false;
     }
     match_board_filter(board_list, selected_board)
+}
+
+fn build_backtest_board_filter(
+    source_path: &str,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
+) -> Result<(Option<String>, bool, Option<HashSet<String>>), String> {
+    let exclude_st_board = exclude_st_board.unwrap_or(false);
+    let requested_board = board
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && value != "全部");
+
+    if requested_board.is_none() && !exclude_st_board {
+        return Ok((None, false, None));
+    }
+
+    let (board_options, ts_board_map) = build_board_maps(source_path)?;
+    let resolved_board = resolve_board_filter(requested_board, &board_options);
+    let allowed_ts_codes = ts_board_map
+        .into_iter()
+        .filter_map(|(ts_code, board_list)| {
+            if match_board_filter_with_st(&board_list, resolved_board.as_deref(), exclude_st_board)
+            {
+                Some(ts_code)
+            } else {
+                None
+            }
+        })
+        .collect::<HashSet<_>>();
+
+    Ok((resolved_board, exclude_st_board, Some(allowed_ts_codes)))
 }
 
 fn load_concept_stock_count_map(source_path: &str) -> Result<HashMap<String, usize>, String> {
@@ -4578,6 +4623,9 @@ struct SceneLayerBacktestRunParams {
     min_samples_per_day: usize,
     min_listed_trade_days: usize,
     backtest_period: usize,
+    resolved_board: Option<String>,
+    exclude_st_board: bool,
+    allowed_ts_codes: Option<HashSet<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -4592,6 +4640,9 @@ struct RuleLayerBacktestRunParams {
     min_samples_per_day: usize,
     min_listed_trade_days: usize,
     backtest_period: usize,
+    resolved_board: Option<String>,
+    exclude_st_board: bool,
+    allowed_ts_codes: Option<HashSet<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -4608,6 +4659,9 @@ struct RankLayerBacktestRunParams {
     backtest_period: usize,
     layer_count: usize,
     layer_method: RankLayerMethod,
+    resolved_board: Option<String>,
+    exclude_st_board: bool,
+    allowed_ts_codes: Option<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -4679,6 +4733,140 @@ fn finalize_rule_contribution_averages(
             )
         })
         .collect()
+}
+
+fn ts_code_allowed_by_filter(allowed_ts_codes: Option<&HashSet<String>>, ts_code: &str) -> bool {
+    let Some(allowed_ts_codes) = allowed_ts_codes else {
+        return true;
+    };
+    allowed_ts_codes.contains(ts_code.trim())
+        || allowed_ts_codes.contains(ts_code.trim().to_ascii_uppercase().as_str())
+}
+
+fn filter_score_summary_rows_by_ts_codes(
+    rows: &[ScoreSummary],
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Vec<ScoreSummary> {
+    if allowed_ts_codes.is_none() {
+        return rows.to_vec();
+    }
+    rows.iter()
+        .filter(|row| ts_code_allowed_by_filter(allowed_ts_codes, &row.ts_code))
+        .cloned()
+        .collect()
+}
+
+fn filter_score_detail_rows_by_ts_codes(
+    rows: &[ScoreDetails],
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Vec<ScoreDetails> {
+    if allowed_ts_codes.is_none() {
+        return rows.to_vec();
+    }
+    rows.iter()
+        .filter(|row| ts_code_allowed_by_filter(allowed_ts_codes, &row.ts_code))
+        .cloned()
+        .collect()
+}
+
+fn filter_scene_detail_rows_by_ts_codes(
+    rows: &[SceneDetails],
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Vec<SceneDetails> {
+    if allowed_ts_codes.is_none() {
+        return rows.to_vec();
+    }
+    rows.iter()
+        .filter(|row| ts_code_allowed_by_filter(allowed_ts_codes, &row.ts_code))
+        .cloned()
+        .collect()
+}
+
+fn load_score_summary_rows_from_db(
+    source_path: &str,
+    start_date: &str,
+    end_date: &str,
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Result<Vec<ScoreSummary>, String> {
+    let result_conn = open_result_conn(source_path)?;
+
+    let mut summary_stmt = result_conn
+        .prepare(
+            r#"
+            SELECT ts_code, trade_date, total_score, rank
+            FROM score_summary
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY trade_date ASC, ts_code ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译策略回测总榜原始行失败: {e}"))?;
+    let mut summary_rows = summary_stmt
+        .query(params![start_date, end_date])
+        .map_err(|e| format!("查询策略回测总榜原始行失败: {e}"))?;
+    let mut summaries = Vec::new();
+    while let Some(row) = summary_rows
+        .next()
+        .map_err(|e| format!("读取策略回测总榜原始行失败: {e}"))?
+    {
+        let item = ScoreSummary {
+            ts_code: row.get(0).map_err(|e| format!("读取总榜代码失败: {e}"))?,
+            trade_date: row.get(1).map_err(|e| format!("读取总榜日期失败: {e}"))?,
+            total_score: row.get(2).map_err(|e| format!("读取总榜分数失败: {e}"))?,
+            rank: row.get(3).map_err(|e| format!("读取总榜排名失败: {e}"))?,
+        };
+        if ts_code_allowed_by_filter(allowed_ts_codes, &item.ts_code) {
+            summaries.push(item);
+        }
+    }
+
+    Ok(summaries)
+}
+
+fn load_rule_backtest_score_rows_from_db(
+    source_path: &str,
+    start_date: &str,
+    end_date: &str,
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>), String> {
+    let result_conn = open_result_conn(source_path)?;
+    let summaries =
+        load_score_summary_rows_from_db(source_path, start_date, end_date, allowed_ts_codes)?;
+
+    let mut detail_stmt = result_conn
+        .prepare(
+            r#"
+            SELECT ts_code, trade_date, rule_name, TRY_CAST(rule_score AS DOUBLE)
+            FROM rule_details
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
+              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > ?
+            ORDER BY trade_date ASC, rule_name ASC, ts_code ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译策略回测规则原始行失败: {e}"))?;
+    let mut detail_rows = detail_stmt
+        .query(params![start_date, end_date, RULE_BACKTEST_EPS])
+        .map_err(|e| format!("查询策略回测规则原始行失败: {e}"))?;
+    let mut details = Vec::new();
+    while let Some(row) = detail_rows
+        .next()
+        .map_err(|e| format!("读取策略回测规则原始行失败: {e}"))?
+    {
+        let rule_score: f64 = row.get(3).map_err(|e| format!("读取规则分数失败: {e}"))?;
+        let item = ScoreDetails {
+            ts_code: row.get(0).map_err(|e| format!("读取规则代码失败: {e}"))?,
+            trade_date: row.get(1).map_err(|e| format!("读取规则日期失败: {e}"))?,
+            rule_name: row.get(2).map_err(|e| format!("读取规则名称失败: {e}"))?,
+            rule_score,
+        };
+        if rule_score.is_finite() && ts_code_allowed_by_filter(allowed_ts_codes, &item.ts_code) {
+            details.push(item);
+        }
+    }
+
+    Ok((summaries, details))
 }
 
 fn build_rule_contribution_averages_from_rows(
@@ -4849,7 +5037,12 @@ fn run_scene_layer_backtest_core(
             layer_config,
         };
 
-        let metrics = calc_scene_layer_metrics_from_db(source_conn, source_path, &input)?;
+        let metrics = calc_scene_layer_metrics_from_db_with_ts_filter(
+            source_conn,
+            source_path,
+            &input,
+            params.allowed_ts_codes.as_ref(),
+        )?;
 
         return Ok(SceneLayerBacktestData {
             scene_name: input.scene_name,
@@ -4860,6 +5053,8 @@ fn run_scene_layer_backtest_core(
             industry_beta: input.industry_beta,
             start_date: input.start_date,
             end_date: input.end_date,
+            resolved_board: params.resolved_board.clone(),
+            exclude_st_board: params.exclude_st_board,
             min_samples_per_scene_day: input.layer_config.min_samples_per_day,
             min_listed_trade_days: input.layer_config.min_listed_trade_days,
             backtest_period: input.layer_config.backtest_period,
@@ -4893,7 +5088,7 @@ fn run_scene_layer_backtest_core(
     }
 
     let scene_options = load_scene_options(source_path)?;
-    let all_metrics = calc_all_scene_layer_metrics_from_db(
+    let all_metrics = calc_all_scene_layer_metrics_from_db_with_ts_filter(
         source_conn,
         source_path,
         &scene_options,
@@ -4905,6 +5100,7 @@ fn run_scene_layer_backtest_core(
         &params.start_date,
         &params.end_date,
         &layer_config,
+        params.allowed_ts_codes.as_ref(),
     )?;
     let mut all_scene_summaries = Vec::with_capacity(all_metrics.len());
 
@@ -4938,6 +5134,8 @@ fn run_scene_layer_backtest_core(
         industry_beta: params.industry_beta,
         start_date: params.start_date.clone(),
         end_date: params.end_date.clone(),
+        resolved_board: params.resolved_board.clone(),
+        exclude_st_board: params.exclude_st_board,
         min_samples_per_scene_day: params.min_samples_per_day,
         min_listed_trade_days: params.min_listed_trade_days,
         backtest_period: params.backtest_period,
@@ -4982,7 +5180,12 @@ fn run_rule_layer_backtest_core(
             layer_config,
         };
 
-        let metrics = calc_rule_layer_metrics_from_db(source_conn, source_path, &input)?;
+        let metrics = calc_rule_layer_metrics_from_db_with_ts_filter(
+            source_conn,
+            source_path,
+            &input,
+            params.allowed_ts_codes.as_ref(),
+        )?;
 
         return Ok(RuleLayerBacktestData {
             rule_name: input.rule_name,
@@ -4993,6 +5196,8 @@ fn run_rule_layer_backtest_core(
             industry_beta: input.industry_beta,
             start_date: input.start_date,
             end_date: input.end_date,
+            resolved_board: params.resolved_board.clone(),
+            exclude_st_board: params.exclude_st_board,
             min_samples_per_rule_day: input.layer_config.min_samples_per_day,
             min_listed_trade_days: input.layer_config.min_listed_trade_days,
             backtest_period: input.layer_config.backtest_period,
@@ -5029,7 +5234,7 @@ fn run_rule_layer_backtest_core(
     }
 
     let (rule_options, _) = load_rule_meta(source_path)?;
-    let all_metrics = calc_all_rule_layer_metrics_from_db(
+    let all_metrics = calc_all_rule_layer_metrics_from_db_with_ts_filter(
         source_conn,
         source_path,
         &rule_options,
@@ -5041,13 +5246,29 @@ fn run_rule_layer_backtest_core(
         &params.start_date,
         &params.end_date,
         &layer_config,
+        params.allowed_ts_codes.as_ref(),
     )?;
-    let contribution_averages = build_rule_contribution_averages(
-        source_path,
-        &rule_options,
-        &params.start_date,
-        &params.end_date,
-    )?;
+    let contribution_averages = if params.allowed_ts_codes.is_some() {
+        let (summary_rows, detail_rows) = load_rule_backtest_score_rows_from_db(
+            source_path,
+            &params.start_date,
+            &params.end_date,
+            params.allowed_ts_codes.as_ref(),
+        )?;
+        build_rule_contribution_averages_from_rows(
+            &summary_rows,
+            &detail_rows,
+            &params.start_date,
+            &params.end_date,
+        )
+    } else {
+        build_rule_contribution_averages(
+            source_path,
+            &rule_options,
+            &params.start_date,
+            &params.end_date,
+        )?
+    };
     let mut all_rule_summaries = Vec::with_capacity(all_metrics.len());
 
     for (one_rule_name, metrics) in all_metrics {
@@ -5100,6 +5321,8 @@ fn run_rule_layer_backtest_core(
         industry_beta: params.industry_beta,
         start_date: params.start_date.clone(),
         end_date: params.end_date.clone(),
+        resolved_board: params.resolved_board.clone(),
+        exclude_st_board: params.exclude_st_board,
         min_samples_per_rule_day: params.min_samples_per_day,
         min_listed_trade_days: params.min_listed_trade_days,
         backtest_period: params.backtest_period,
@@ -5167,7 +5390,17 @@ fn run_rank_layer_backtest_core(
         end_date: params.end_date.clone(),
         layer_config,
     };
-    let metrics = calc_rank_layer_metrics_from_db(source_conn, source_path, &input)?;
+    let metrics = if params.allowed_ts_codes.is_some() {
+        let summary_rows = load_score_summary_rows_from_db(
+            source_path,
+            &params.start_date,
+            &params.end_date,
+            params.allowed_ts_codes.as_ref(),
+        )?;
+        calc_rank_layer_metrics_from_score_rows(source_conn, source_path, &input, &summary_rows)?
+    } else {
+        calc_rank_layer_metrics_from_db(source_conn, source_path, &input)?
+    };
 
     Ok(RankLayerBacktestData {
         stock_adj_type: input.stock_adj_type,
@@ -5177,6 +5410,8 @@ fn run_rank_layer_backtest_core(
         industry_beta: input.industry_beta,
         start_date: input.start_date,
         end_date: input.end_date,
+        resolved_board: params.resolved_board.clone(),
+        exclude_st_board: params.exclude_st_board,
         min_samples_per_rank_day: input.layer_config.effective_min_samples_per_day(),
         min_listed_trade_days: input.layer_config.min_listed_trade_days,
         backtest_period: input.layer_config.backtest_period,
@@ -5217,6 +5452,8 @@ pub fn run_scene_layer_backtest(
     min_samples_per_scene_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
 ) -> Result<SceneLayerBacktestData, String> {
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
@@ -5224,6 +5461,8 @@ pub fn run_scene_layer_backtest(
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
     let source_conn =
         Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+    let (resolved_board, exclude_st_board, allowed_ts_codes) =
+        build_backtest_board_filter(&source_path, board, exclude_st_board)?;
 
     let params = SceneLayerBacktestRunParams {
         stock_adj_type: stock_adj_type
@@ -5240,6 +5479,9 @@ pub fn run_scene_layer_backtest(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1),
+        resolved_board,
+        exclude_st_board,
+        allowed_ts_codes,
     };
 
     // 当前入口固定全量；后续如需恢复单场景，仅需传入 Some(scene_name)。
@@ -5258,6 +5500,8 @@ pub fn run_rule_layer_backtest(
     min_samples_per_rule_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
 ) -> Result<RuleLayerBacktestData, String> {
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
@@ -5265,6 +5509,8 @@ pub fn run_rule_layer_backtest(
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
     let source_conn =
         Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+    let (resolved_board, exclude_st_board, allowed_ts_codes) =
+        build_backtest_board_filter(&source_path, board, exclude_st_board)?;
 
     let params = RuleLayerBacktestRunParams {
         stock_adj_type: stock_adj_type
@@ -5281,6 +5527,9 @@ pub fn run_rule_layer_backtest(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1),
+        resolved_board,
+        exclude_st_board,
+        allowed_ts_codes,
     };
 
     // 当前入口固定全量；后续如需恢复单策略，仅需传入 Some(rule_name)。
@@ -5301,6 +5550,8 @@ pub fn run_rank_layer_backtest(
     backtest_period: Option<usize>,
     layer_count: Option<usize>,
     layer_method: Option<String>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
 ) -> Result<RankLayerBacktestData, String> {
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
@@ -5308,6 +5559,8 @@ pub fn run_rank_layer_backtest(
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
     let source_conn =
         Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+    let (resolved_board, exclude_st_board, allowed_ts_codes) =
+        build_backtest_board_filter(&source_path, board, exclude_st_board)?;
 
     let params = RankLayerBacktestRunParams {
         stock_adj_type: stock_adj_type
@@ -5329,6 +5582,9 @@ pub fn run_rank_layer_backtest(
             Some(value) => RankLayerMethod::from_str(&value)?,
             None => RankLayerMethod::SampleCount,
         },
+        resolved_board,
+        exclude_st_board,
+        allowed_ts_codes,
     };
 
     run_rank_layer_backtest_core(&source_conn, &source_path, &params)
@@ -5346,6 +5602,8 @@ pub fn run_transient_scene_layer_backtest(
     min_samples_per_scene_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
 ) -> Result<SceneLayerBacktestData, String> {
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
@@ -5353,6 +5611,8 @@ pub fn run_transient_scene_layer_backtest(
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
     let source_conn =
         Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+    let (resolved_board, exclude_st_board, allowed_ts_codes) =
+        build_backtest_board_filter(&source_path, board, exclude_st_board)?;
 
     let params = SceneLayerBacktestRunParams {
         stock_adj_type: stock_adj_type
@@ -5369,6 +5629,9 @@ pub fn run_transient_scene_layer_backtest(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1),
+        resolved_board,
+        exclude_st_board,
+        allowed_ts_codes,
     };
     let layer_config = SceneLayerConfig {
         min_samples_per_day: params.min_samples_per_day,
@@ -5383,12 +5646,16 @@ pub fn run_transient_scene_layer_backtest(
         &params.end_date,
         ScoringMemoryMode::SceneOnly,
     )?;
+    let scene_rows = filter_scene_detail_rows_by_ts_codes(
+        &score_batch.scene_rows,
+        params.allowed_ts_codes.as_ref(),
+    );
     let scene_options = load_scene_options(&source_path)?;
     let all_metrics = calc_all_scene_layer_metrics_from_rows(
         &source_conn,
         &source_path,
         &scene_options,
-        &score_batch.scene_rows,
+        &scene_rows,
         &params.stock_adj_type,
         &params.index_ts_code,
         params.index_beta,
@@ -5428,6 +5695,8 @@ pub fn run_transient_scene_layer_backtest(
         industry_beta: params.industry_beta,
         start_date: params.start_date,
         end_date: params.end_date,
+        resolved_board: params.resolved_board,
+        exclude_st_board: params.exclude_st_board,
         min_samples_per_scene_day: params.min_samples_per_day,
         min_listed_trade_days: params.min_listed_trade_days,
         backtest_period: params.backtest_period,
@@ -5454,6 +5723,8 @@ pub fn run_transient_rule_layer_backtest(
     min_samples_per_rule_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
 ) -> Result<RuleLayerBacktestData, String> {
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
@@ -5461,6 +5732,8 @@ pub fn run_transient_rule_layer_backtest(
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
     let source_conn =
         Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+    let (resolved_board, exclude_st_board, allowed_ts_codes) =
+        build_backtest_board_filter(&source_path, board, exclude_st_board)?;
 
     let params = RuleLayerBacktestRunParams {
         stock_adj_type: stock_adj_type
@@ -5477,6 +5750,9 @@ pub fn run_transient_rule_layer_backtest(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1),
+        resolved_board,
+        exclude_st_board,
+        allowed_ts_codes,
     };
     let layer_config = RuleLayerConfig {
         min_samples_per_day: params.min_samples_per_day,
@@ -5491,13 +5767,21 @@ pub fn run_transient_rule_layer_backtest(
         &params.end_date,
         ScoringMemoryMode::SummaryAndDetails,
     )?;
+    let summary_rows = filter_score_summary_rows_by_ts_codes(
+        &score_batch.summary_rows,
+        params.allowed_ts_codes.as_ref(),
+    );
+    let detail_rows = filter_score_detail_rows_by_ts_codes(
+        &score_batch.detail_rows,
+        params.allowed_ts_codes.as_ref(),
+    );
     let (rule_options, _) = load_rule_meta(&source_path)?;
     let all_metrics = calc_all_rule_layer_metrics_from_rows(
         &source_conn,
         &source_path,
         &rule_options,
-        &score_batch.summary_rows,
-        &score_batch.detail_rows,
+        &summary_rows,
+        &detail_rows,
         &params.stock_adj_type,
         &params.index_ts_code,
         params.index_beta,
@@ -5508,8 +5792,8 @@ pub fn run_transient_rule_layer_backtest(
         &layer_config,
     )?;
     let contribution_averages = build_rule_contribution_averages_from_rows(
-        &score_batch.summary_rows,
-        &score_batch.detail_rows,
+        &summary_rows,
+        &detail_rows,
         &params.start_date,
         &params.end_date,
     );
@@ -5563,6 +5847,8 @@ pub fn run_transient_rule_layer_backtest(
         industry_beta: params.industry_beta,
         start_date: params.start_date,
         end_date: params.end_date,
+        resolved_board: params.resolved_board,
+        exclude_st_board: params.exclude_st_board,
         min_samples_per_rule_day: params.min_samples_per_day,
         min_listed_trade_days: params.min_listed_trade_days,
         backtest_period: params.backtest_period,
@@ -5604,6 +5890,8 @@ pub fn run_transient_rank_layer_backtest(
     backtest_period: Option<usize>,
     layer_count: Option<usize>,
     layer_method: Option<String>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
 ) -> Result<RankLayerBacktestData, String> {
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
@@ -5611,6 +5899,8 @@ pub fn run_transient_rank_layer_backtest(
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
     let source_conn =
         Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+    let (resolved_board, exclude_st_board, allowed_ts_codes) =
+        build_backtest_board_filter(&source_path, board, exclude_st_board)?;
 
     let params = RankLayerBacktestRunParams {
         stock_adj_type: stock_adj_type
@@ -5632,6 +5922,9 @@ pub fn run_transient_rank_layer_backtest(
             Some(value) => RankLayerMethod::from_str(&value)?,
             None => RankLayerMethod::SampleCount,
         },
+        resolved_board,
+        exclude_st_board,
+        allowed_ts_codes,
     };
     let layer_config = RankLayerConfig {
         min_samples_per_day: params.min_samples_per_day,
@@ -5658,12 +5951,12 @@ pub fn run_transient_rank_layer_backtest(
         &input.end_date,
         ScoringMemoryMode::SummaryOnly,
     )?;
-    let metrics = calc_rank_layer_metrics_from_score_rows(
-        &source_conn,
-        &source_path,
-        &input,
+    let summary_rows = filter_score_summary_rows_by_ts_codes(
         &score_batch.summary_rows,
-    )?;
+        params.allowed_ts_codes.as_ref(),
+    );
+    let metrics =
+        calc_rank_layer_metrics_from_score_rows(&source_conn, &source_path, &input, &summary_rows)?;
 
     Ok(RankLayerBacktestData {
         stock_adj_type: input.stock_adj_type,
@@ -5673,6 +5966,8 @@ pub fn run_transient_rank_layer_backtest(
         industry_beta: input.industry_beta,
         start_date: input.start_date,
         end_date: input.end_date,
+        resolved_board: params.resolved_board,
+        exclude_st_board: params.exclude_st_board,
         min_samples_per_rank_day: input.layer_config.effective_min_samples_per_day(),
         min_listed_trade_days: input.layer_config.min_listed_trade_days,
         backtest_period: input.layer_config.backtest_period,

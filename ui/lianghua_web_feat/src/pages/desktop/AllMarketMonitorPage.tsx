@@ -5,6 +5,10 @@ import {
   type AllMarketMonitorRow,
 } from "../../apis/reader";
 import DetailsLink from "../../shared/DetailsLink";
+import {
+  formatConceptText,
+  useConceptExclusions,
+} from "../../shared/conceptExclusions";
 import { STOCK_PICK_BOARD_OPTIONS } from "../../shared/stockPickShared";
 import {
   TableSortButton,
@@ -25,8 +29,8 @@ type SpeedPeriod = (typeof SPEED_PERIOD_OPTIONS)[number];
 type BoardFilter = (typeof STOCK_PICK_BOARD_OPTIONS)[number];
 type TopLimit = (typeof TOP_LIMIT_OPTIONS)[number];
 type SortKey =
-  | "rank"
   | "best_rank_3d"
+  | "best_rank_5d"
   | "realtime_change_pct"
   | "speed_pct"
   | "realtime_change_open_pct"
@@ -137,6 +141,7 @@ function buildSpeedMap(
 }
 
 export default function AllMarketMonitorPage() {
+  const { excludedConcepts } = useConceptExclusions();
   const [sourcePath, setSourcePath] = useState("");
   const [enabled, setEnabled] = useState(false);
   const [rows, setRows] = useState<AllMarketMonitorRow[]>([]);
@@ -256,8 +261,8 @@ export default function AllMarketMonitorPage() {
     const effectiveSortKey = sortKey ?? primarySortKey;
     const effectiveSortDirection = sortDirection ?? "desc";
     const sortDefinitions = {
-      rank: { value: (row: DisplayRow) => row.rank },
       best_rank_3d: { value: (row: DisplayRow) => row.best_rank_3d },
+      best_rank_5d: { value: (row: DisplayRow) => row.best_rank_5d },
       realtime_change_pct: {
         value: (row: DisplayRow) => row.realtime_change_pct,
       },
@@ -462,9 +467,6 @@ export default function AllMarketMonitorPage() {
               <tr>
                 <th aria-sort="none">代码</th>
                 <th aria-sort="none">名称</th>
-                <th aria-sort={getAriaSort(sortKey === "rank", sortDirection)}>
-                  {renderSortHeader("排名", "rank")}
-                </th>
                 <th
                   aria-sort={getAriaSort(
                     sortKey === "best_rank_3d",
@@ -472,6 +474,14 @@ export default function AllMarketMonitorPage() {
                   )}
                 >
                   {renderSortHeader("3日优", "best_rank_3d")}
+                </th>
+                <th
+                  aria-sort={getAriaSort(
+                    sortKey === "best_rank_5d",
+                    sortDirection,
+                  )}
+                >
+                  {renderSortHeader("5日优", "best_rank_5d")}
                 </th>
                 <th
                   aria-sort={getAriaSort(
@@ -502,7 +512,7 @@ export default function AllMarketMonitorPage() {
                 >
                   {renderSortHeader("开盘涨幅", "realtime_change_open_pct")}
                 </th>
-                <th aria-sort="none">板块</th>
+                <th aria-sort="none">概念</th>
                 <th
                   aria-sort={getAriaSort(
                     sortKey === "total_mv_yi",
@@ -515,49 +525,58 @@ export default function AllMarketMonitorPage() {
             </thead>
             <tbody>
               {displayRows.length > 0 ? (
-                displayRows.map((row) => (
-                  <tr key={row.ts_code}>
-                    <td>{row.ts_code}</td>
-                    <td>
-                      <DetailsLink
-                        tsCode={row.ts_code}
-                        tradeDate={
-                          rankDate || row.realtime_trade_date || undefined
-                        }
-                        sourcePath={sourcePathTrimmed || undefined}
-                        className="all-market-stock-link"
-                        title={`查看 ${row.name || row.ts_code} 详情`}
-                        navigationItems={navigationItems}
+                displayRows.map((row) => {
+                  const conceptText = formatConceptText(
+                    row.concept ?? "",
+                    excludedConcepts,
+                  );
+
+                  return (
+                    <tr key={row.ts_code}>
+                      <td>{row.ts_code}</td>
+                      <td>
+                        <DetailsLink
+                          tsCode={row.ts_code}
+                          tradeDate={
+                            rankDate || row.realtime_trade_date || undefined
+                          }
+                          sourcePath={sourcePathTrimmed || undefined}
+                          className="all-market-stock-link"
+                          title={`查看 ${row.name || row.ts_code} 详情`}
+                          navigationItems={navigationItems}
+                        >
+                          {row.name || "--"}
+                        </DetailsLink>
+                      </td>
+                      <td className="all-market-rank-cell">
+                        {formatNumber(row.best_rank_3d, 0)}
+                      </td>
+                      <td className="all-market-rank-cell">
+                        {formatNumber(row.best_rank_5d, 0)}
+                      </td>
+                      <td
+                        className={getPercentClassName(row.realtime_change_pct)}
                       >
-                        {row.name || "--"}
-                      </DetailsLink>
-                    </td>
-                    <td className="all-market-rank-cell">
-                      {formatNumber(row.rank, 0)}
-                    </td>
-                    <td className="all-market-rank-cell">
-                      {formatNumber(row.best_rank_3d, 0)}
-                    </td>
-                    <td
-                      className={getPercentClassName(row.realtime_change_pct)}
-                    >
-                      {formatPercent(row.realtime_change_pct)}
-                    </td>
-                    <td className={getPercentClassName(row.speed_pct)}>
-                      {formatPercent(row.speed_pct)}
-                    </td>
-                    <td>{formatNumber(row.realtime_price)}</td>
-                    <td
-                      className={getPercentClassName(
-                        row.realtime_change_open_pct,
-                      )}
-                    >
-                      {formatPercent(row.realtime_change_open_pct)}
-                    </td>
-                    <td>{row.board || "--"}</td>
-                    <td>{formatNumber(row.total_mv_yi)}</td>
-                  </tr>
-                ))
+                        {formatPercent(row.realtime_change_pct)}
+                      </td>
+                      <td className={getPercentClassName(row.speed_pct)}>
+                        {formatPercent(row.speed_pct)}
+                      </td>
+                      <td>{formatNumber(row.realtime_price)}</td>
+                      <td
+                        className={getPercentClassName(
+                          row.realtime_change_open_pct,
+                        )}
+                      >
+                        {formatPercent(row.realtime_change_open_pct)}
+                      </td>
+                      <td className="all-market-concept-cell" title={conceptText}>
+                        {conceptText}
+                      </td>
+                      <td>{formatNumber(row.total_mv_yi)}</td>
+                    </tr>
+                  );
+                })
               ) : (
                 <tr>
                   <td colSpan={10} className="all-market-empty">

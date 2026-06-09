@@ -9,7 +9,10 @@ use serde::Serialize;
 use crate::{
     crawler::SinaQuote,
     data::{load_stock_list, result_db_path},
-    ui_tools_feat::realtime::{RealtimeFetchMeta, fetch_all_market_realtime_quote_map_for_codes},
+    ui_tools_feat::{
+        build_concepts_map,
+        realtime::{RealtimeFetchMeta, fetch_all_market_realtime_quote_map_for_codes},
+    },
     utils::utils::board_category,
 };
 
@@ -19,6 +22,7 @@ struct StockMeta {
     name: String,
     board: String,
     total_mv_yi: Option<f64>,
+    concept: String,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +34,7 @@ struct SourceMetaCacheEntry {
 struct RankContext {
     rank: Option<i64>,
     best_rank_3d: Option<i64>,
+    best_rank_5d: Option<i64>,
     total_score: Option<f64>,
 }
 
@@ -44,8 +49,10 @@ pub struct AllMarketMonitorRow {
     pub ts_code: String,
     pub name: String,
     pub board: String,
+    pub concept: String,
     pub rank: Option<i64>,
     pub best_rank_3d: Option<i64>,
+    pub best_rank_5d: Option<i64>,
     pub total_score: Option<f64>,
     pub realtime_trade_date: Option<String>,
     pub realtime_price: Option<f64>,
@@ -91,6 +98,7 @@ fn parse_total_mv_yi(raw: Option<&String>) -> Option<f64> {
 
 fn load_source_meta(source_path: &str) -> Result<SourceMetaCacheEntry, String> {
     let mut stocks = Vec::new();
+    let concepts_map = build_concepts_map(source_path).unwrap_or_default();
     for cols in load_stock_list(source_path)? {
         let Some(ts_code) = cols.first().map(|value| value.trim()) else {
             continue;
@@ -104,6 +112,7 @@ fn load_source_meta(source_path: &str) -> Result<SourceMetaCacheEntry, String> {
             name: name.to_string(),
             board: board_category(ts_code, Some(name)).to_string(),
             total_mv_yi: parse_total_mv_yi(cols.get(9)),
+            concept: concepts_map.get(ts_code).cloned().unwrap_or_default(),
         });
     }
     Ok(SourceMetaCacheEntry { stocks })
@@ -166,20 +175,26 @@ fn load_rank_context(
         .prepare(
             r#"
             WITH recent_dates AS (
-                SELECT trade_date
-                FROM score_summary
-                GROUP BY trade_date
-                ORDER BY trade_date DESC
-                LIMIT 3
+                SELECT
+                    trade_date,
+                    ROW_NUMBER() OVER (ORDER BY trade_date DESC) AS date_rank
+                FROM (
+                    SELECT trade_date
+                    FROM score_summary
+                    GROUP BY trade_date
+                    ORDER BY trade_date DESC
+                    LIMIT 5
+                ) dates
             )
             SELECT
-                ts_code,
-                MAX(CASE WHEN trade_date = ? THEN rank ELSE NULL END) AS current_rank,
-                MIN(CASE WHEN rank IS NOT NULL THEN rank ELSE NULL END) AS best_rank_3d,
-                MAX(CASE WHEN trade_date = ? THEN total_score ELSE NULL END) AS current_total_score
-            FROM score_summary
-            WHERE trade_date IN (SELECT trade_date FROM recent_dates)
-            GROUP BY ts_code
+                s.ts_code,
+                MAX(CASE WHEN s.trade_date = ? THEN s.rank ELSE NULL END) AS current_rank,
+                MIN(CASE WHEN d.date_rank <= 3 AND s.rank IS NOT NULL THEN s.rank ELSE NULL END) AS best_rank_3d,
+                MIN(CASE WHEN d.date_rank <= 5 AND s.rank IS NOT NULL THEN s.rank ELSE NULL END) AS best_rank_5d,
+                MAX(CASE WHEN s.trade_date = ? THEN s.total_score ELSE NULL END) AS current_total_score
+            FROM score_summary s
+            INNER JOIN recent_dates d ON s.trade_date = d.trade_date
+            GROUP BY s.ts_code
             "#,
         )
         .map_err(|e| format!("预编译全市场总榜排名失败: {e}"))?;
@@ -203,7 +218,10 @@ fn load_rank_context(
                 best_rank_3d: row
                     .get(2)
                     .map_err(|e| format!("读取三日最优排名失败: {e}"))?,
-                total_score: row.get(3).map_err(|e| format!("读取总分失败: {e}"))?,
+                best_rank_5d: row
+                    .get(3)
+                    .map_err(|e| format!("读取五日最优排名失败: {e}"))?,
+                total_score: row.get(4).map_err(|e| format!("读取总分失败: {e}"))?,
             },
         );
     }
@@ -276,8 +294,10 @@ fn build_rows(
                     .unwrap_or(stock.name.as_str())
                     .to_string(),
                 board: stock.board.clone(),
+                concept: stock.concept.clone(),
                 rank: rank.and_then(|item| item.rank),
                 best_rank_3d: rank.and_then(|item| item.best_rank_3d),
+                best_rank_5d: rank.and_then(|item| item.best_rank_5d),
                 total_score: rank.and_then(|item| item.total_score),
                 realtime_trade_date: quote.and_then(|item| normalize_quote_trade_date(&item.date)),
                 realtime_price: quote.map(|item| item.price),
@@ -333,12 +353,14 @@ mod tests {
                     name: "平安银行".to_string(),
                     board: "主板".to_string(),
                     total_mv_yi: Some(100.0),
+                    concept: "银行;互联金融".to_string(),
                 },
                 StockMeta {
                     ts_code: "300001.SZ".to_string(),
                     name: "特锐德".to_string(),
                     board: "创业/科创".to_string(),
                     total_mv_yi: None,
+                    concept: String::new(),
                 },
             ],
         }
@@ -364,6 +386,7 @@ mod tests {
             RankContext {
                 rank: Some(12),
                 best_rank_3d: Some(5),
+                best_rank_5d: Some(3),
                 total_score: Some(88.5),
             },
         );
@@ -391,7 +414,9 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].rank, Some(12));
         assert_eq!(rows[0].best_rank_3d, Some(5));
+        assert_eq!(rows[0].best_rank_5d, Some(3));
         assert_eq!(rows[0].total_score, Some(88.5));
+        assert_eq!(rows[0].concept, "银行;互联金融");
         assert_eq!(rows[0].realtime_trade_date.as_deref(), Some("20240603"));
         let change_open_pct = rows[0]
             .realtime_change_open_pct

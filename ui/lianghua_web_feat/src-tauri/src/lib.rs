@@ -935,6 +935,8 @@ async fn run_scene_layer_backtest(
     min_samples_per_scene_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
 ) -> Result<SceneLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_with_heap_trim(|| {
@@ -950,6 +952,8 @@ async fn run_scene_layer_backtest(
                 min_samples_per_scene_day,
                 min_listed_trade_days,
                 backtest_period,
+                board,
+                exclude_st_board,
             )
         })
     })
@@ -970,6 +974,8 @@ async fn run_rule_layer_backtest(
     min_samples_per_rule_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
 ) -> Result<RuleLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_with_heap_trim(|| {
@@ -985,6 +991,8 @@ async fn run_rule_layer_backtest(
                 min_samples_per_rule_day,
                 min_listed_trade_days,
                 backtest_period,
+                board,
+                exclude_st_board,
             )
         })
     })
@@ -1007,6 +1015,8 @@ async fn run_rank_layer_backtest(
     backtest_period: Option<usize>,
     layer_count: Option<usize>,
     layer_method: Option<String>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
 ) -> Result<RankLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_with_heap_trim(|| {
@@ -1024,6 +1034,8 @@ async fn run_rank_layer_backtest(
                 backtest_period,
                 layer_count,
                 layer_method,
+                board,
+                exclude_st_board,
             )
         })
     })
@@ -1044,6 +1056,8 @@ async fn run_transient_scene_layer_backtest(
     min_samples_per_scene_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
 ) -> Result<SceneLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_with_heap_trim(|| {
@@ -1059,6 +1073,8 @@ async fn run_transient_scene_layer_backtest(
                 min_samples_per_scene_day,
                 min_listed_trade_days,
                 backtest_period,
+                board,
+                exclude_st_board,
             )
         })
     })
@@ -1079,6 +1095,8 @@ async fn run_transient_rule_layer_backtest(
     min_samples_per_rule_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
 ) -> Result<RuleLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_with_heap_trim(|| {
@@ -1094,6 +1112,8 @@ async fn run_transient_rule_layer_backtest(
                 min_samples_per_rule_day,
                 min_listed_trade_days,
                 backtest_period,
+                board,
+                exclude_st_board,
             )
         })
     })
@@ -1116,6 +1136,8 @@ async fn run_transient_rank_layer_backtest(
     backtest_period: Option<usize>,
     layer_count: Option<usize>,
     layer_method: Option<String>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
 ) -> Result<RankLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_with_heap_trim(|| {
@@ -1133,6 +1155,8 @@ async fn run_transient_rank_layer_backtest(
                 backtest_period,
                 layer_count,
                 layer_method,
+                board,
+                exclude_st_board,
             )
         })
     })

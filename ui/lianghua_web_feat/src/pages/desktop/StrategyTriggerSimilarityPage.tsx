@@ -12,6 +12,10 @@ import {
 } from '../../shared/stockLookup'
 import DetailsLink from '../../shared/DetailsLink'
 import type { DetailsNavigationItem } from '../../shared/detailsLinkState'
+import {
+  formatConceptText,
+  useConceptExclusions,
+} from '../../shared/conceptExclusions'
 import { sanitizeCodeInput, splitTsCode, stdTsCode } from '../../shared/stockCode'
 import { normalizeTradeDates, pickDateValue } from '../../shared/tradeDate'
 import './css/StrategyTriggerSimilarityPage.css'
@@ -48,6 +52,7 @@ function displayText(value: string | null | undefined) {
 }
 
 export default function StrategyTriggerSimilarityPage() {
+  const { excludedConcepts } = useConceptExclusions()
   const [sourcePath, setSourcePath] = useState('')
   const [tradeDateOptions, setTradeDateOptions] = useState<string[]>([])
   const [tradeDateInput, setTradeDateInput] = useState('')
@@ -328,40 +333,43 @@ export default function StrategyTriggerSimilarityPage() {
                 </tr>
               </thead>
               <tbody>
-              {data.items.map((row) => (
-                  <tr key={`${row.tsCode}-${row.candidateStartTradeDate}-${row.candidateEndTradeDate}`}>
-                    <td>
-                      <DetailsLink
-                        className="trigger-sim-stock-link"
-                        tsCode={row.tsCode}
-                        tradeDate={row.candidateEndTradeDate}
-                        intervalStartTradeDate={row.candidateStartTradeDate}
-                        intervalEndTradeDate={row.candidateEndTradeDate}
-                        sourcePath={sourcePath}
-                        navigationItems={detailNavigationItems}
-                        title={`查看 ${displayStockName(row)} 详情`}
-                      >
-                        <strong>{displayStockName(row)}</strong>
-                        <span>{row.tsCode}</span>
-                      </DetailsLink>
-                    </td>
-                    <td>
-                      {row.candidateStartTradeDate}
-                      <span className="trigger-sim-date-separator">至</span>
-                      {row.candidateEndTradeDate}
-                    </td>
-                    <td>{displayText(row.industry)}</td>
-                    <td className="trigger-sim-concept-cell" title={displayText(row.concept)}>
-                      {displayText(row.concept)}
-                    </td>
-                    <td>{formatNumber(row.similarityScore, 1)}</td>
-                    <td>{row.matchedEventCount}</td>
-                    <td>{formatNumber(row.avgDateGapTradeDays, 2)}</td>
-                    <td>{row.candidateTriggerCount}</td>
-                    <td>{formatNumber(row.totalScore, 1)}</td>
-                    <td>{row.rank === null || row.rank === undefined ? '--' : `#${row.rank}`}</td>
-                  </tr>
-                ))}
+                {data.items.map((row) => {
+                  const conceptText = formatConceptText(row.concept, excludedConcepts)
+                  return (
+                    <tr key={`${row.tsCode}-${row.candidateStartTradeDate}-${row.candidateEndTradeDate}`}>
+                      <td>
+                        <DetailsLink
+                          className="trigger-sim-stock-link"
+                          tsCode={row.tsCode}
+                          tradeDate={row.candidateEndTradeDate}
+                          intervalStartTradeDate={row.candidateStartTradeDate}
+                          intervalEndTradeDate={row.candidateEndTradeDate}
+                          sourcePath={sourcePath}
+                          navigationItems={detailNavigationItems}
+                          title={`查看 ${displayStockName(row)} 详情`}
+                        >
+                          <strong>{displayStockName(row)}</strong>
+                          <span>{row.tsCode}</span>
+                        </DetailsLink>
+                      </td>
+                      <td>
+                        {row.candidateStartTradeDate}
+                        <span className="trigger-sim-date-separator">至</span>
+                        {row.candidateEndTradeDate}
+                      </td>
+                      <td>{displayText(row.industry)}</td>
+                      <td className="trigger-sim-concept-cell" title={conceptText}>
+                        {conceptText}
+                      </td>
+                      <td>{formatNumber(row.similarityScore, 1)}</td>
+                      <td>{row.matchedEventCount}</td>
+                      <td>{formatNumber(row.avgDateGapTradeDays, 2)}</td>
+                      <td>{row.candidateTriggerCount}</td>
+                      <td>{formatNumber(row.totalScore, 1)}</td>
+                      <td>{row.rank === null || row.rank === undefined ? '--' : `#${row.rank}`}</td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>

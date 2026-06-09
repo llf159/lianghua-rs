@@ -1491,18 +1491,23 @@ export default function IntradayMonitorRealtimePage() {
                   const deltaText = DELTA_COLUMNS.has(key)
                     ? formatDeltaValue(key, deltaValue)
                     : null;
+                  const cellClassName = [
+                    isRealtimePct
+                      ? getPercentClassName(
+                          key === "speed_pct"
+                            ? speedValue
+                            : row.realtime_change_pct,
+                        )
+                      : "",
+                    key === "concept" ? "intraday-monitor-cell-concept" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ");
                   return (
                     <td
                       key={`${getRowMode(row)}-${row.ts_code}-${key}`}
-                      className={
-                        isRealtimePct
-                          ? getPercentClassName(
-                              key === "speed_pct"
-                                ? speedValue
-                                : row.realtime_change_pct,
-                            )
-                          : undefined
-                      }
+                      className={cellClassName || undefined}
+                      title={key === "concept" ? displayText : undefined}
                     >
                       {key === "name" && displayText !== "--" ? (
                         <DetailsLink

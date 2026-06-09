@@ -260,9 +260,18 @@ pub fn calc_rule_layer_metrics_from_db(
     source_dir: &str,
     input: &RuleLayerFromDbInput,
 ) -> Result<RuleLayerMetrics, String> {
+    calc_rule_layer_metrics_from_db_with_ts_filter(source_conn, source_dir, input, None)
+}
+
+pub fn calc_rule_layer_metrics_from_db_with_ts_filter(
+    source_conn: &Connection,
+    source_dir: &str,
+    input: &RuleLayerFromDbInput,
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Result<RuleLayerMetrics, String> {
     input.validate()?;
 
-    let runtime_cache = build_rule_layer_runtime_cache(
+    let runtime_cache = build_rule_layer_runtime_cache_with_ts_filter(
         source_conn,
         source_dir,
         &input.stock_adj_type,
@@ -273,8 +282,9 @@ pub fn calc_rule_layer_metrics_from_db(
         &input.start_date,
         &input.end_date,
         &input.layer_config,
+        allowed_ts_codes,
     )?;
-    let rule_rows = load_rule_rows(source_dir, input)?;
+    let rule_rows = load_rule_rows_filtered(source_dir, input, allowed_ts_codes)?;
     let triggered_score_map = build_triggered_score_map(rule_rows);
 
     calc_rule_layer_metrics_from_cache(&runtime_cache, &triggered_score_map, &input.layer_config)
@@ -293,6 +303,36 @@ pub fn calc_all_rule_layer_metrics_from_db(
     end_date: &str,
     layer_config: &RuleLayerConfig,
 ) -> Result<Vec<(String, RuleLayerMetrics)>, String> {
+    calc_all_rule_layer_metrics_from_db_with_ts_filter(
+        source_conn,
+        source_dir,
+        rule_names,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+        None,
+    )
+}
+
+pub fn calc_all_rule_layer_metrics_from_db_with_ts_filter(
+    source_conn: &Connection,
+    source_dir: &str,
+    rule_names: &[String],
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Result<Vec<(String, RuleLayerMetrics)>, String> {
     validate_rule_common_input(
         stock_adj_type,
         index_ts_code,
@@ -308,7 +348,7 @@ pub fn calc_all_rule_layer_metrics_from_db(
         return Ok(Vec::new());
     }
 
-    let runtime_cache = build_rule_layer_runtime_cache(
+    let runtime_cache = build_rule_layer_runtime_cache_with_ts_filter(
         source_conn,
         source_dir,
         stock_adj_type,
@@ -319,8 +359,15 @@ pub fn calc_all_rule_layer_metrics_from_db(
         start_date,
         end_date,
         layer_config,
+        allowed_ts_codes,
     )?;
-    let rule_rows = load_rule_rows_for_names(source_dir, rule_names, start_date, end_date)?;
+    let rule_rows = load_rule_rows_for_names_filtered(
+        source_dir,
+        rule_names,
+        start_date,
+        end_date,
+        allowed_ts_codes,
+    )?;
     let mut triggered_score_map_by_rule: HashMap<String, TriggeredScoreMap> = HashMap::new();
 
     for row in rule_rows {
@@ -458,6 +505,34 @@ pub fn build_rule_layer_runtime_cache(
     end_date: &str,
     layer_config: &RuleLayerConfig,
 ) -> Result<RuleLayerRuntimeCache, String> {
+    build_rule_layer_runtime_cache_with_ts_filter(
+        source_conn,
+        source_dir,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+        None,
+    )
+}
+
+pub fn build_rule_layer_runtime_cache_with_ts_filter(
+    source_conn: &Connection,
+    source_dir: &str,
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Result<RuleLayerRuntimeCache, String> {
     validate_rule_common_input(
         stock_adj_type,
         index_ts_code,
@@ -469,7 +544,10 @@ pub fn build_rule_layer_runtime_cache(
         layer_config,
     )?;
 
-    let universe_rows = load_rule_universe_rows(source_dir, start_date, end_date)?;
+    let universe_rows = filter_universe_rows_by_ts_codes(
+        load_rule_universe_rows(source_dir, start_date, end_date)?,
+        allowed_ts_codes,
+    );
     if universe_rows.is_empty() {
         return Ok(RuleLayerRuntimeCache {
             day_groups: Vec::new(),
@@ -562,6 +640,36 @@ pub(crate) fn build_rule_layer_runtime_cache_from_summary_rows(
     end_date: &str,
     layer_config: &RuleLayerConfig,
 ) -> Result<RuleLayerRuntimeCache, String> {
+    build_rule_layer_runtime_cache_from_summary_rows_with_ts_filter(
+        source_conn,
+        source_dir,
+        score_summary_rows,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+        None,
+    )
+}
+
+pub(crate) fn build_rule_layer_runtime_cache_from_summary_rows_with_ts_filter(
+    source_conn: &Connection,
+    source_dir: &str,
+    score_summary_rows: &[ScoreSummary],
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Result<RuleLayerRuntimeCache, String> {
     validate_rule_common_input(
         stock_adj_type,
         index_ts_code,
@@ -580,6 +688,7 @@ pub(crate) fn build_rule_layer_runtime_cache_from_summary_rows(
                 || row.trade_date.as_str() > end_date
                 || row.ts_code.trim().is_empty()
                 || row.trade_date.trim().is_empty()
+                || !ts_code_allowed(allowed_ts_codes, &row.ts_code)
             {
                 return None;
             }
@@ -1287,6 +1396,27 @@ fn build_triggered_score_map(rule_rows: Vec<RuleDbRow>) -> TriggeredScoreMap {
     rows_by_ts
 }
 
+fn ts_code_allowed(allowed_ts_codes: Option<&HashSet<String>>, ts_code: &str) -> bool {
+    let Some(allowed_ts_codes) = allowed_ts_codes else {
+        return true;
+    };
+    let normalized = ts_code.trim().to_ascii_uppercase();
+    allowed_ts_codes.contains(normalized.as_str())
+}
+
+fn filter_universe_rows_by_ts_codes(
+    universe_rows: Vec<RuleUniverseRow>,
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Vec<RuleUniverseRow> {
+    if allowed_ts_codes.is_none() {
+        return universe_rows;
+    }
+    universe_rows
+        .into_iter()
+        .filter(|row| ts_code_allowed(allowed_ts_codes, &row.ts_code))
+        .collect()
+}
+
 fn load_rule_universe_rows(
     source_dir: &str,
     start_date: &str,
@@ -1698,9 +1828,10 @@ fn build_forward_backtest_residual_map(
     out
 }
 
-fn load_rule_rows(
+fn load_rule_rows_filtered(
     source_dir: &str,
     input: &RuleLayerFromDbInput,
+    allowed_ts_codes: Option<&HashSet<String>>,
 ) -> Result<Vec<RuleDbRow>, String> {
     load_rule_rows_for_names(
         source_dir,
@@ -1708,9 +1839,41 @@ fn load_rule_rows(
         &input.start_date,
         &input.end_date,
     )
+    .map(|rows| {
+        if allowed_ts_codes.is_none() {
+            return rows;
+        }
+        rows.into_iter()
+            .filter(|row| ts_code_allowed(allowed_ts_codes, &row.ts_code))
+            .collect()
+    })
 }
 
 fn load_rule_rows_for_names(
+    source_dir: &str,
+    rule_names: &[String],
+    start_date: &str,
+    end_date: &str,
+) -> Result<Vec<RuleDbRow>, String> {
+    load_rule_rows_for_names_filtered(source_dir, rule_names, start_date, end_date, None)
+}
+
+fn load_rule_rows_for_names_filtered(
+    source_dir: &str,
+    rule_names: &[String],
+    start_date: &str,
+    end_date: &str,
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Result<Vec<RuleDbRow>, String> {
+    let mut rows =
+        load_rule_rows_for_names_unfiltered(source_dir, rule_names, start_date, end_date)?;
+    if allowed_ts_codes.is_some() {
+        rows.retain(|row| ts_code_allowed(allowed_ts_codes, &row.ts_code));
+    }
+    Ok(rows)
+}
+
+fn load_rule_rows_for_names_unfiltered(
     source_dir: &str,
     rule_names: &[String],
     start_date: &str,
@@ -1736,25 +1899,27 @@ fn load_rule_rows_for_names(
         .join(", ");
     let sql = format!(
         r#"
-            SELECT
-                rule_name,
-                ts_code,
-                trade_date,
-                TRY_CAST(rule_score AS DOUBLE) AS rule_score
-            FROM rule_details
-            WHERE rule_name IN ({placeholders})
-              AND trade_date >= ?
-              AND trade_date <= ?
-            ORDER BY rule_name ASC, trade_date ASC, ts_code ASC
-            "#
+        SELECT
+            rule_name,
+            ts_code,
+            trade_date,
+            TRY_CAST(rule_score AS DOUBLE)
+        FROM rule_details
+        WHERE rule_name IN ({placeholders})
+          AND trade_date >= ?
+          AND trade_date <= ?
+          AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
+          AND ABS(TRY_CAST(rule_score AS DOUBLE)) > 1e-12
+        ORDER BY rule_name ASC, trade_date ASC, ts_code ASC
+        "#
     );
+
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| format!("预编译rule_details查询失败:{e}"))?;
-
     let query_params = rule_names
         .iter()
-        .map(|value| value.trim())
+        .map(|name| name.trim())
         .chain(std::iter::once(start_date.trim()))
         .chain(std::iter::once(end_date.trim()));
     let mut rows = stmt
@@ -1769,11 +1934,15 @@ fn load_rule_rows_for_names(
         let rule_name: String = row.get(0).map_err(|e| format!("读取rule_name失败:{e}"))?;
         let ts_code: String = row.get(1).map_err(|e| format!("读取ts_code失败:{e}"))?;
         let trade_date: String = row.get(2).map_err(|e| format!("读取trade_date失败:{e}"))?;
-        let rule_score: Option<f64> = row.get(3).map_err(|e| format!("读取rule_score失败:{e}"))?;
+        let rule_score: f64 = row.get(3).map_err(|e| format!("读取rule_score失败:{e}"))?;
 
-        let Some(rule_score) = rule_score.filter(|value| value.is_finite()) else {
+        if rule_name.trim().is_empty()
+            || ts_code.trim().is_empty()
+            || trade_date.trim().is_empty()
+            || !rule_score.is_finite()
+        {
             continue;
-        };
+        }
 
         out.push(RuleDbRow {
             rule_name,

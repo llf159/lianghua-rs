@@ -114,6 +114,35 @@
   gap: 8px;
 }
 
+.scene-layer-inline-controls {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.scene-layer-inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #5a6677;
+  font-size: 13px;
+}
+
+.scene-layer-inline-field select {
+  min-width: 140px;
+  border: 1px solid #c6d0da;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 14px;
+  background: #fff;
+}
+
+.scene-layer-inline-field select:focus {
+  outline: 2px solid var(--theme-orange-300);
+  outline-offset: 1px;
+}
+
 .scene-layer-primary-btn {
   border: 1px solid var(--theme-orange-600);
   background: var(--theme-orange-600);

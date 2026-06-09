@@ -325,7 +325,7 @@
 
 .all-market-table {
   width: 100%;
-  min-width: 920px;
+  min-width: 1110px;
   border-collapse: collapse;
   table-layout: fixed;
   font-size: 13px;
@@ -361,10 +361,7 @@
 }
 
 .all-market-table th:nth-child(3),
-.all-market-table td:nth-child(3) {
-  width: 64px;
-}
-
+.all-market-table td:nth-child(3),
 .all-market-table th:nth-child(4),
 .all-market-table td:nth-child(4) {
   width: 64px;
@@ -388,7 +385,11 @@
 
 .all-market-table th:nth-child(9),
 .all-market-table td:nth-child(9) {
-  width: 92px;
+  width: 260px;
+}
+
+.all-market-concept-cell {
+  color: #2a3550;
 }
 
 .all-market-table tbody tr:nth-child(even) {

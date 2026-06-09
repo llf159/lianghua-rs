@@ -428,6 +428,10 @@
   color: #1b8f5a;
 }
 
+.intraday-monitor-cell-concept {
+  max-width: 260px;
+}
+
 .intraday-monitor-hit-badge {
   display: inline-block;
   max-width: 100%;

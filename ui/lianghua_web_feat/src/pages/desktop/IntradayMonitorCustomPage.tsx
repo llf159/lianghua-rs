@@ -9,6 +9,10 @@ import {
 } from '../../apis/reader'
 import IntradayTemplateManagerModal from './components/IntradayTemplateManagerModal'
 import DetailsLink from '../../shared/DetailsLink'
+import {
+  formatConceptText,
+  useConceptExclusions,
+} from '../../shared/conceptExclusions'
 import { normalizeTsCode } from '../../shared/stockCode'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
 import './css/IntradayMonitorCustomPage.css'
@@ -243,6 +247,7 @@ function waitForNextPaint() {
 }
 
 export default function IntradayMonitorCustomPage() {
+  const { excludedConcepts } = useConceptExclusions()
   const persisted = useMemo(() => {
     const parsed = readJsonStorage<Partial<PersistedCustomMonitorState>>(
       typeof window === 'undefined' ? null : window.sessionStorage,
@@ -755,6 +760,10 @@ export default function IntradayMonitorCustomPage() {
                       volRatioDelta,
                     )
                     const speedPct = speedMap.get(getRowKey(row))
+                    const conceptText = formatConceptText(
+                      row.concept ?? '',
+                      excludedConcepts,
+                    )
 
                     return (
                       <tr key={row.ts_code}>
@@ -840,7 +849,12 @@ export default function IntradayMonitorCustomPage() {
                         </td>
                         <td>{row.board || '--'}</td>
                         <td>{formatNumber(row.total_mv_yi)}</td>
-                        <td title={row.concept || ''}>{row.concept || '--'}</td>
+                        <td
+                          className="intraday-custom-cell-concept"
+                          title={conceptText}
+                        >
+                          {conceptText}
+                        </td>
                       </tr>
                     )
                   })
