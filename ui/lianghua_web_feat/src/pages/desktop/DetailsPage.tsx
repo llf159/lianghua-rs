@@ -249,6 +249,7 @@ type ChartDragState = {
   anchorAbsoluteIndex?: number;
   moveSelectionStartAbsoluteIndex?: number;
   moveSelectionEndAbsoluteIndex?: number;
+  intervalStartedOutsideSelection?: boolean;
 };
 
 type ChartTouchPointer = {
@@ -2704,6 +2705,10 @@ function renderChartPanel(
     panelKey: string,
     event: ReactPointerEvent<HTMLDivElement>,
   ) => void,
+  onChartDoubleClick: (
+    panelKey: string,
+    event: ReactMouseEvent<HTMLDivElement>,
+  ) => void,
   isCyqPanelVisible: boolean,
   selectedCyqSnapshot: DetailCyqSnapshot | null,
   selectedCyqTradeDate: string | null,
@@ -3364,6 +3369,7 @@ function renderChartPanel(
         onPointerUp={(event) => onChartPointerUp(panel.key, event)}
         onPointerLeave={(event) => onChartPointerLeave(panel.key, event)}
         onPointerCancel={(event) => onChartPointerCancel(panel.key, event)}
+        onDoubleClick={(event) => onChartDoubleClick(panel.key, event)}
       >
         {index === 0 ? (
           <div className="details-chart-watermark">
@@ -5265,6 +5271,24 @@ export default function DetailsPage({
     setChartIntervalNotice("");
   }, []);
 
+  const openChartIntervalMode = useCallback(() => {
+    if (totalChartItems === 0) {
+      return;
+    }
+
+    setChartIntervalMode(true);
+    setChartFocus(null);
+    setChartIntervalDraftSelection(null);
+    setChartIntervalNotice("");
+    if (chartIntervalSelection) {
+      setChartIntervalPanelOpen(true);
+      return;
+    }
+
+    setChartIntervalPanelOpen(false);
+    setChartIntervalNotice("请在主K图上拖拽选择区间");
+  }, [chartIntervalSelection, totalChartItems]);
+
   const toggleChartIntervalMode = useCallback(() => {
     if (chartIntervalMode || chartIntervalSelection || chartIntervalDraftSelection) {
       closeChartIntervalPanel();
@@ -6110,6 +6134,7 @@ export default function DetailsPage({
     let anchorAbsoluteIndex: number | undefined;
     let moveSelectionStartAbsoluteIndex: number | undefined;
     let moveSelectionEndAbsoluteIndex: number | undefined;
+    let intervalStartedOutsideSelection = false;
     const mode =
       panelKey === "price" && chartIntervalMode
         ? (() => {
@@ -6176,7 +6201,8 @@ export default function DetailsPage({
               anchorAbsoluteIndex,
               anchorAbsoluteIndex,
             );
-            if (intervalSelection) {
+            intervalStartedOutsideSelection = chartIntervalSelection !== null;
+            if (intervalSelection && !intervalStartedOutsideSelection) {
               setChartIntervalDraftSelection(intervalSelection);
               setChartIntervalPanelOpen(false);
               setChartFocus(null);
@@ -6238,6 +6264,7 @@ export default function DetailsPage({
       anchorAbsoluteIndex,
       moveSelectionStartAbsoluteIndex,
       moveSelectionEndAbsoluteIndex,
+      intervalStartedOutsideSelection,
     };
   }
 
@@ -6334,6 +6361,10 @@ export default function DetailsPage({
     }
 
     if (dragState.mode === "interval-select") {
+      if (dragState.intervalStartedOutsideSelection && !dragState.moved) {
+        return;
+      }
+
       const nextIntervalSelection = buildChartIntervalSelection(
         event.currentTarget,
         event.clientX,
@@ -6344,6 +6375,10 @@ export default function DetailsPage({
         return;
       }
 
+      if (dragState.intervalStartedOutsideSelection) {
+        setChartIntervalPanelOpen(false);
+        setChartFocus(null);
+      }
       setChartIntervalDraftSelection(nextIntervalSelection);
       return;
     }
@@ -6459,6 +6494,11 @@ export default function DetailsPage({
     }
 
     if (dragState.mode === "interval-select") {
+      if (dragState.intervalStartedOutsideSelection && !dragState.moved) {
+        closeChartIntervalPanel();
+        return;
+      }
+
       const nextIntervalSelection = buildChartIntervalSelection(
         event.currentTarget,
         event.clientX,
@@ -6599,6 +6639,23 @@ export default function DetailsPage({
       setChartIntervalDraftSelection(null);
     }
     clearChartPointerState(event);
+  }
+
+  function onChartDoubleClick(
+    _panelKey: string,
+    event: ReactMouseEvent<HTMLDivElement>,
+  ) {
+    const targetElement = event.target instanceof Element ? event.target : null;
+    if (
+      targetElement?.closest(
+        "button,input,select,textarea,a,[role='button']",
+      )
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    openChartIntervalMode();
   }
 
   async function onAddWatchObserve() {
@@ -7249,6 +7306,7 @@ export default function DetailsPage({
               onChartPointerUp,
               onChartPointerLeave,
               onChartPointerCancel,
+              onChartDoubleClick,
               detailCyqVisible,
               selectedCyqSnapshot,
               selectedCyqTradeDate,

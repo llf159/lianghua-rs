@@ -598,4 +598,20 @@ mod tests {
             .expect_err("TMP should not leak into next rule");
         assert!(error.contains("变量不存在:TMP"));
     }
+
+    #[test]
+    fn dynamic_window_over_cap_does_not_trigger_rule() {
+        let mut runtime = runtime_with_close_series(&[1.0, 5.0, 3.0, 4.0, 2.0]);
+        runtime.vars.insert(
+            "N".to_string(),
+            Value::NumSeries(vec![Some(1.0), Some(2.0), Some(3.0), Some(2.0), Some(4.0)]),
+        );
+        let rule = cached_rule("V := HHVD(C, N, 3); V > 0");
+
+        let (scores, triggered) =
+            evaluate_cached_rule_scores(&rule, &mut runtime).expect("rule evaluates");
+
+        assert_eq!(triggered, vec![true, true, true, true, false]);
+        assert_eq!(scores, vec![1.0, 1.0, 1.0, 1.0, 0.0]);
+    }
 }

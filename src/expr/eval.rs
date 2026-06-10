@@ -70,12 +70,16 @@ impl Runtime {
                     return None;
                 }
 
+                if value > max_period as f64 {
+                    return None;
+                }
+
                 let period = if value as i64 <= 0 {
                     min_period
                 } else {
                     value as usize
                 };
-                Some(period.min(max_period))
+                Some(period)
             })
             .collect())
     }
@@ -2409,7 +2413,7 @@ fn refd_uses_per_bar_offsets_and_keeps_undefined_periods_empty() {
 }
 
 #[test]
-fn countd_uses_dynamic_windows_with_runtime_cap() {
+fn countd_returns_none_when_dynamic_window_exceeds_runtime_cap() {
     use crate::expr::parser::{Parser, lex_all};
 
     let expr = "COUNTD(C > 0, N, 3);";
@@ -2436,12 +2440,12 @@ fn countd_uses_dynamic_windows_with_runtime_cap() {
     let out = rt.eval_program(&stmts).expect("eval failed");
     assert_eq!(
         out,
-        Value::NumSeries(vec![Some(1.0), Some(2.0), Some(3.0), Some(3.0), None])
+        Value::NumSeries(vec![Some(1.0), Some(2.0), Some(3.0), None, None])
     );
 }
 
 #[test]
-fn hhvd_uses_dynamic_windows_with_runtime_cap() {
+fn hhvd_returns_none_when_dynamic_window_exceeds_runtime_cap() {
     use crate::expr::parser::{Parser, lex_all};
 
     let expr = "HHVD(C, N, 3);";
@@ -2462,8 +2466,31 @@ fn hhvd_uses_dynamic_windows_with_runtime_cap() {
     let out = rt.eval_program(&stmts).expect("eval failed");
     assert_eq!(
         out,
-        Value::NumSeries(vec![Some(1.0), Some(5.0), Some(5.0), Some(4.0), Some(4.0)])
+        Value::NumSeries(vec![Some(1.0), Some(5.0), Some(5.0), Some(4.0), None])
     );
+}
+
+#[test]
+fn dynamic_window_exceeding_cap_does_not_match_comparisons() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let expr = "V := HHVD(C, N, 3); (V > 0) OR (V < 0);";
+    let toks = lex_all(expr);
+    let mut p = Parser::new(toks);
+    let stmts = p.parse_main().expect("parse failed");
+    let mut rt = Runtime::default();
+
+    rt.vars.insert(
+        "C".to_string(),
+        Value::NumSeries(vec![Some(1.0), Some(5.0), Some(3.0), Some(4.0), Some(2.0)]),
+    );
+    rt.vars.insert(
+        "N".to_string(),
+        Value::NumSeries(vec![Some(1.0), Some(2.0), Some(3.0), Some(2.0), Some(4.0)]),
+    );
+
+    let out = rt.eval_program(&stmts).expect("eval failed");
+    assert_eq!(out, Value::BoolSeries(vec![true, true, true, true, false]));
 }
 
 #[test]
