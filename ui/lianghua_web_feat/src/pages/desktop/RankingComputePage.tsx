@@ -57,12 +57,25 @@ type BusyAction =
   | 'deleting-cyq-chen-db'
   | 'indicator-running'
 type IndicatorEditorMode = 'create' | 'edit'
+type FeedbackSlot = 'status' | 'rank' | 'otherData' | 'cyq' | 'cyqChen' | 'indicatorTask'
+type CardFeedback = Record<FeedbackSlot, { notice: string; error: string }>
 type PendingConfirmState =
   | { kind: 'delete-indicator'; item: IndicatorManageItem }
   | { kind: 'delete-stock-indicator-columns' }
   | { kind: 'delete-result-db' }
   | { kind: 'delete-cyq-chen-db' }
   | null
+
+function createEmptyCardFeedback(): CardFeedback {
+  return {
+    status: { notice: '', error: '' },
+    rank: { notice: '', error: '' },
+    otherData: { notice: '', error: '' },
+    cyq: { notice: '', error: '' },
+    cyqChen: { notice: '', error: '' },
+    indicatorTask: { notice: '', error: '' },
+  }
+}
 
 function compactDateToInput(value: string | null | undefined) {
   if (!value || !/^\d{8}$/.test(value)) {
@@ -216,8 +229,7 @@ export default function RankingComputePage() {
   const [cyqChenBucketPctInput, setCyqChenBucketPctInput] = useState('1')
   const [cyqChenStartDateInput, setCyqChenStartDateInput] = useState('')
   const [cyqChenEndDateInput, setCyqChenEndDateInput] = useState('')
-  const [notice, setNotice] = useState('')
-  const [error, setError] = useState('')
+  const [cardFeedback, setCardFeedback] = useState<CardFeedback>(() => createEmptyCardFeedback())
   const [progress, setProgress] = useState<DataDownloadProgress | null>(null)
   const [strategyDiff, setStrategyDiff] = useState<ManagedStrategyBackupDiff | null>(null)
   const [strategyDiffLoading, setStrategyDiffLoading] = useState(false)
@@ -252,6 +264,41 @@ export default function RankingComputePage() {
   const shownProgressPercent = useAnimatedProgressPercent(showComputeProgress, progressPercent)
   const phaseStep = getPhaseStep(deferredProgress?.action, deferredProgress?.phase, getProgressWorkflow)
   const progressCounterText = getProgressCounterText(deferredProgress, formatPhaseLabel)
+
+  function setFeedbackNotice(slot: FeedbackSlot, message: string) {
+    setCardFeedback((current) => ({
+      ...current,
+      [slot]: { notice: message, error: '' },
+    }))
+  }
+
+  function setFeedbackError(slot: FeedbackSlot, message: string) {
+    setCardFeedback((current) => ({
+      ...current,
+      [slot]: { notice: '', error: message },
+    }))
+  }
+
+  function clearFeedback(slot: FeedbackSlot) {
+    setCardFeedback((current) => ({
+      ...current,
+      [slot]: { notice: '', error: '' },
+    }))
+  }
+
+  function clearAllFeedback() {
+    setCardFeedback(createEmptyCardFeedback())
+  }
+
+  function renderCardFeedback(slot: FeedbackSlot) {
+    const feedback = cardFeedback[slot]
+    return (
+      <>
+        {feedback.notice ? <div className="ranking-compute-notice">{feedback.notice}</div> : null}
+        {feedback.error ? <div className="ranking-compute-error">{feedback.error}</div> : null}
+      </>
+    )
+  }
 
   function applyIndicatorPage(page: IndicatorManagePageData) {
     setIndicatorItems(page.items)
@@ -490,14 +537,14 @@ export default function RankingComputePage() {
   async function loadStatus(options?: { preserveNotice?: boolean }) {
     const preserveNotice = options?.preserveNotice === true
     setBusyAction('loading')
-    setError('')
+    clearFeedback('status')
 
     try {
       const managedStatus = await inspectManagedSourceStatus()
       const nextStatus = await getRankingComputeStatus(managedStatus.sourcePath)
       setStatus(nextStatus)
       if (!preserveNotice) {
-        setNotice('')
+        clearAllFeedback()
       }
 
       setStartDateInput((current) => current || compactDateToInput(nextStatus.suggestedStartDate))
@@ -514,8 +561,7 @@ export default function RankingComputePage() {
       )
       setCyqChenEndDateInput((current) => current || compactDateToInput(nextStatus.sourceDb.maxTradeDate))
     } catch (loadError) {
-      setNotice('')
-      setError(`读取数据计算状态失败: ${String(loadError)}`)
+      setFeedbackError('status', `读取数据计算状态失败: ${String(loadError)}`)
     } finally {
       setBusyAction('idle')
     }
@@ -533,7 +579,7 @@ export default function RankingComputePage() {
 
   async function openIndicatorManager() {
     if (!sourcePath) {
-      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      setFeedbackError('indicatorTask', '当前数据目录为空，请先到数据管理页确认目录。')
       return
     }
 
@@ -558,8 +604,7 @@ export default function RankingComputePage() {
 
   async function runIndicatorTask(executor: (downloadId: string) => Promise<DataDownloadRunResult>) {
     setBusyAction('indicator-running')
-    setError('')
-    setNotice('')
+    clearFeedback('indicatorTask')
     setProgress(null)
 
     const downloadId = await startProgressListener('download')
@@ -567,20 +612,21 @@ export default function RankingComputePage() {
     try {
       const result = await executor(downloadId)
       if (result.action === 'delete-stock-data-indicator-columns') {
-        setNotice(
+        setFeedbackNotice(
+          'indicatorTask',
           `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；清空 ${result.summary.successCount} 列，基础行情列已保留。`,
         )
       } else if (result.action === 'rebuild-stock-data-indicator-columns') {
-        setNotice(
+        setFeedbackNotice(
+          'indicatorTask',
           `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；补算 ${result.summary.successCount} 组，回写 ${result.summary.savedRows} 行。`,
         )
       } else {
-        setNotice(`${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}。`)
+        setFeedbackNotice('indicatorTask', `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}。`)
       }
       await loadStatus({ preserveNotice: true })
     } catch (runError) {
-      setNotice('')
-      setError(`执行指标列维护失败: ${String(runError)}`)
+      setFeedbackError('indicatorTask', `执行指标列维护失败: ${String(runError)}`)
     } finally {
       stopProgressListener()
       setBusyAction('idle')
@@ -589,7 +635,7 @@ export default function RankingComputePage() {
 
   async function onRunStockDataIndicatorColumnsDelete() {
     if (!sourcePath) {
-      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      setFeedbackError('indicatorTask', '当前数据目录为空，请先到数据管理页确认目录。')
       return
     }
 
@@ -603,7 +649,7 @@ export default function RankingComputePage() {
 
   async function onRunStockDataIndicatorColumnsRebuild() {
     if (!sourcePath) {
-      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      setFeedbackError('indicatorTask', '当前数据目录为空，请先到数据管理页确认目录。')
       return
     }
 
@@ -617,22 +663,21 @@ export default function RankingComputePage() {
 
   async function onDeleteResultDb() {
     if (!sourcePath) {
-      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      setFeedbackError('rank', '当前数据目录为空，请先到数据管理页确认目录。')
       return
     }
 
     setBusyAction('deleting-result-db')
-    setError('')
+    clearFeedback('rank')
 
     try {
       await removeManagedSourceFile('result-db')
       const managedStatus = await inspectManagedSourceStatus()
       const nextStatus = await getRankingComputeStatus(managedStatus.sourcePath)
       setStatus(nextStatus)
-      setNotice('结果库已删除。下次计算排名会重新生成 score_summary / rule_details / scene_details。')
+      setFeedbackNotice('rank', '结果库已删除。下次计算排名会重新生成 score_summary / rule_details / scene_details。')
     } catch (actionError) {
-      setNotice('')
-      setError(`删除结果库失败: ${String(actionError)}`)
+      setFeedbackError('rank', `删除结果库失败: ${String(actionError)}`)
     } finally {
       setBusyAction('idle')
     }
@@ -640,12 +685,12 @@ export default function RankingComputePage() {
 
   async function onDeleteCyqChenDb() {
     if (!sourcePath) {
-      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      setFeedbackError('cyqChen', '当前数据目录为空，请先到数据管理页确认目录。')
       return
     }
 
     setBusyAction('deleting-cyq-chen-db')
-    setError('')
+    clearFeedback('cyqChen')
 
     try {
       await removeManagedSourceFile('cyq-chen-db')
@@ -653,10 +698,9 @@ export default function RankingComputePage() {
       const nextStatus = await getRankingComputeStatus(managedStatus.sourcePath)
       setStatus(nextStatus)
       setCyqChenStrategyDiff(null)
-      setNotice('新筹码库已删除。下次新筹码计算会重新生成 cyq_chen_snapshot / cyq_chen_bin。')
+      setFeedbackNotice('cyqChen', '新筹码库已删除。下次新筹码计算会重新生成 cyq_chen_snapshot / cyq_chen_bin。')
     } catch (actionError) {
-      setNotice('')
-      setError(`删除新筹码库失败: ${String(actionError)}`)
+      setFeedbackError('cyqChen', `删除新筹码库失败: ${String(actionError)}`)
     } finally {
       setBusyAction('idle')
     }
@@ -664,38 +708,37 @@ export default function RankingComputePage() {
 
   async function onRunCompute() {
     if (!sourcePath) {
-      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      setFeedbackError('rank', '当前数据目录为空，请先到数据管理页确认目录。')
       return
     }
 
     const startDate = inputDateToCompact(startDateInput)
     const endDate = inputDateToCompact(endDateInput)
     if (!startDate || !endDate) {
-      setError('请先输入开始日期和结束日期。')
+      setFeedbackError('rank', '请先输入开始日期和结束日期。')
       return
     }
 
     setBusyAction('computing')
-    setError('')
-    setNotice('')
+    clearFeedback('rank')
     setStrategyDiff(null)
 
     try {
       const previewWarnings = await previewRankingScoreCalculationWarnings(sourcePath, startDate, endDate)
       if (previewWarnings.length > 0) {
-        setNotice(`提示：${previewWarnings.join('\n')}`)
+        setFeedbackNotice('rank', `提示：${previewWarnings.join('\n')}`)
       }
       const scoreResult = await runRankingScoreCalculation(sourcePath, startDate, endDate)
       setStatus(scoreResult.status)
       const warningText = scoreResult.warnings?.length
         ? `\n\n提示：${scoreResult.warnings.join('\n')}`
         : ''
-      setNotice(
+      setFeedbackNotice(
+        'rank',
         `排名计算完成（含J值同分排序），区间 ${formatTradeDate(scoreResult.startDate ?? null)} 至 ${formatTradeDate(scoreResult.endDate ?? null)}，耗时 ${formatElapsedMs(scoreResult.elapsedMs)}。${warningText}`,
       )
     } catch (actionError) {
-      setNotice('')
-      setError(`排名计算失败: ${String(actionError)}`)
+      setFeedbackError('rank', `排名计算失败: ${String(actionError)}`)
     } finally {
       setBusyAction('idle')
     }
@@ -703,21 +746,20 @@ export default function RankingComputePage() {
 
   async function onViewStrategyDiff() {
     setStrategyDiffLoading(true)
-    setError('')
-    setNotice('')
+    clearFeedback('rank')
     try {
       const assetsStatus = await getManagedStrategyAssetsStatus()
       const latestComputeSnapshot = assetsStatus.backups.find((item) => item.sourceKind === 'rank_compute')
       if (!latestComputeSnapshot) {
         setStrategyDiff(null)
-        setError('当前没有排名计算快照可对比。')
+        setFeedbackError('rank', '当前没有排名计算快照可对比。')
         return
       }
       const diff = await getManagedStrategyBackupDiff(latestComputeSnapshot.backupId)
       setStrategyDiff(diff)
     } catch (actionError) {
       setStrategyDiff(null)
-      setError(`查看策略 diff 失败: ${String(actionError)}`)
+      setFeedbackError('rank', `查看策略 diff 失败: ${String(actionError)}`)
     } finally {
       setStrategyDiffLoading(false)
     }
@@ -725,26 +767,25 @@ export default function RankingComputePage() {
 
   async function onViewCyqChenStrategyDiff() {
     if (!sourcePath) {
-      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      setFeedbackError('cyqChen', '当前数据目录为空，请先到数据管理页确认目录。')
       return
     }
 
     setCyqChenStrategyDiffLoading(true)
-    setError('')
-    setNotice('')
+    clearFeedback('cyqChen')
     try {
       const page = await getCyqChenStrategyPage(sourcePath)
       const latestBackup = page.backups[0]
       if (!latestBackup) {
         setCyqChenStrategyDiff(null)
-        setError('当前没有筹码策略备份可对比。')
+        setFeedbackError('cyqChen', '当前没有筹码策略备份可对比。')
         return
       }
       const diff = await getCyqChenStrategyBackupDiff(sourcePath, latestBackup.backupId)
       setCyqChenStrategyDiff(diff)
     } catch (actionError) {
       setCyqChenStrategyDiff(null)
-      setError(`查看筹码策略 diff 失败: ${String(actionError)}`)
+      setFeedbackError('cyqChen', `查看筹码策略 diff 失败: ${String(actionError)}`)
     } finally {
       setCyqChenStrategyDiffLoading(false)
     }
@@ -752,19 +793,18 @@ export default function RankingComputePage() {
 
   async function onRunOtherDataCompute() {
     if (!sourcePath) {
-      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      setFeedbackError('otherData', '当前数据目录为空，请先到数据管理页确认目录。')
       return
     }
 
     setBusyAction('computing')
-    setError('')
+    clearFeedback('otherData')
 
     try {
       const result = await runConceptPerformanceCompute(sourcePath)
-      setNotice(`概念/行业表现计算完成，写入 ${result.savedRows} 行，耗时 ${formatElapsedMs(result.elapsedMs)}。`)
+      setFeedbackNotice('otherData', `概念/行业表现计算完成，写入 ${result.savedRows} 行，耗时 ${formatElapsedMs(result.elapsedMs)}。`)
     } catch (actionError) {
-      setNotice('')
-      setError(`其他数据计算失败: ${String(actionError)}`)
+      setFeedbackError('otherData', `其他数据计算失败: ${String(actionError)}`)
     } finally {
       setBusyAction('idle')
     }
@@ -772,7 +812,7 @@ export default function RankingComputePage() {
 
   async function onRunCyqCompute() {
     if (!sourcePath) {
-      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      setFeedbackError('cyq', '当前数据目录为空，请先到数据管理页确认目录。')
       return
     }
 
@@ -781,8 +821,7 @@ export default function RankingComputePage() {
     const endDate = cyqEndDateInput.trim()
     setCyqFactorInput(String(factor))
     setBusyAction('cyq-computing')
-    setError('')
-    setNotice('')
+    clearFeedback('cyq')
     setProgress(null)
 
     try {
@@ -800,12 +839,12 @@ export default function RankingComputePage() {
         result.startDate && result.endDate
           ? `，区间 ${formatTradeDate(result.startDate)} 至 ${formatTradeDate(result.endDate)}`
           : ''
-      setNotice(
+      setFeedbackNotice(
+        'cyq',
         `筹码计算完成，分桶 ${result.factor}${rangeText}，写入 ${result.snapshotRows} 条摘要和 ${result.binRows} 条分桶，用时 ${formatElapsedMs(result.elapsedMs)}。`,
       )
     } catch (actionError) {
-      setNotice('')
-      setError(`筹码计算失败: ${String(actionError)}`)
+      setFeedbackError('cyq', `筹码计算失败: ${String(actionError)}`)
     } finally {
       stopProgressListener()
       setBusyAction('idle')
@@ -814,7 +853,7 @@ export default function RankingComputePage() {
 
   async function onRunCyqChenCompute() {
     if (!sourcePath) {
-      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      setFeedbackError('cyqChen', '当前数据目录为空，请先到数据管理页确认目录。')
       return
     }
 
@@ -823,15 +862,14 @@ export default function RankingComputePage() {
     const startDate = cyqChenStartDateInput.trim()
     const endDate = cyqChenEndDateInput.trim()
     if (!Number.isFinite(bucketPct) || bucketPct <= 0) {
-      setError('新筹码分桶百分比必须是正数。')
+      setFeedbackError('cyqChen', '新筹码分桶百分比必须是正数。')
       return
     }
 
     setCyqChenWarmupDaysInput(String(warmupDays))
     setCyqChenBucketPctInput(String(bucketPct))
     setBusyAction('cyq-chen-computing')
-    setError('')
-    setNotice('')
+    clearFeedback('cyqChen')
     setCyqChenStrategyDiff(null)
     setProgress(null)
 
@@ -851,12 +889,12 @@ export default function RankingComputePage() {
         result.startDate && result.endDate
           ? `，区间 ${formatTradeDate(result.startDate)} 至 ${formatTradeDate(result.endDate)}`
           : ''
-      setNotice(
+      setFeedbackNotice(
+        'cyqChen',
         `新筹码计算完成，预热 ${result.warmupDays} 天，分桶 ${result.bucketPct}%${rangeText}，写入 ${result.snapshotRows} 条摘要和 ${result.binRows} 条分桶，用时 ${formatElapsedMs(result.elapsedMs)}。`,
       )
     } catch (actionError) {
-      setNotice('')
-      setError(`新筹码计算失败: ${String(actionError)}`)
+      setFeedbackError('cyqChen', `新筹码计算失败: ${String(actionError)}`)
     } finally {
       stopProgressListener()
       setBusyAction('idle')
@@ -961,6 +999,8 @@ export default function RankingComputePage() {
             </small>
           </div>
         </div>
+
+        {renderCardFeedback('status')}
       </section>
 
       <section className="ranking-compute-card">
@@ -1052,6 +1092,8 @@ export default function RankingComputePage() {
             </div>
           </section>
         ) : null}
+
+        {renderCardFeedback('rank')}
       </section>
 
       <section className="ranking-compute-card">
@@ -1068,6 +1110,8 @@ export default function RankingComputePage() {
             {busyAction === 'computing' ? '计算中...' : '开始其他数据计算'}
           </button>
         </div>
+
+        {renderCardFeedback('otherData')}
       </section>
 
       <section className="ranking-compute-card">
@@ -1133,6 +1177,8 @@ export default function RankingComputePage() {
         {busyAction === 'cyq-computing'
           ? renderProgressCard('筹码计算已经启动，正在等待后端返回当前股票进度。')
           : null}
+
+        {renderCardFeedback('cyq')}
       </section>
 
       <section className="ranking-compute-card">
@@ -1277,6 +1323,8 @@ export default function RankingComputePage() {
             </div>
           </section>
         ) : null}
+
+        {renderCardFeedback('cyqChen')}
       </section>
 
       <section className="ranking-compute-card">
@@ -1320,10 +1368,9 @@ export default function RankingComputePage() {
         {showIndicatorProgress
           ? renderProgressCard('任务已经启动，正在等待后端返回当前状态。')
           : null}
-      </section>
 
-      {notice ? <div className="ranking-compute-notice">{notice}</div> : null}
-      {error ? <div className="ranking-compute-error">{error}</div> : null}
+        {renderCardFeedback('indicatorTask')}
+      </section>
 
       {indicatorModalOpen ? (
         <div

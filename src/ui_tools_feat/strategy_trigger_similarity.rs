@@ -998,51 +998,6 @@ fn build_top_rows(
     rows_from_top_heap(heap)
 }
 
-fn build_top_rows_for_candidate_code_chunk(
-    source_path: &str,
-    target_events: &[TargetEvent],
-    all_trade_dates: &[String],
-    trade_date_to_index: &HashMap<&str, usize>,
-    candidate_code_chunk: &[Arc<str>],
-    window_trade_days: usize,
-    target_ts_code: &str,
-    max_gap_trade_days: usize,
-    name_map: &HashMap<String, String>,
-    industry_map: &HashMap<String, String>,
-    concept_map: &HashMap<String, String>,
-    limit: usize,
-) -> Result<Vec<StrategyTriggerSimilarityRow>, String> {
-    let accumulators = load_candidate_matches(
-        source_path,
-        target_events,
-        all_trade_dates,
-        trade_date_to_index,
-        candidate_code_chunk,
-        window_trade_days,
-        target_ts_code,
-        max_gap_trade_days,
-    )?;
-    if accumulators.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let conn = open_result_conn(source_path)?;
-    let candidate_trigger_counter =
-        load_candidate_trigger_counter(&conn, accumulators.keys(), trade_date_to_index)?;
-    Ok(build_top_rows(
-        accumulators,
-        target_events,
-        all_trade_dates,
-        window_trade_days,
-        target_events.len(),
-        &candidate_trigger_counter,
-        name_map,
-        industry_map,
-        concept_map,
-        limit,
-    ))
-}
-
 fn rows_from_top_heap(
     heap: BinaryHeap<WorstFirstSimilarityRow>,
 ) -> Vec<StrategyTriggerSimilarityRow> {
@@ -1167,40 +1122,40 @@ pub fn get_strategy_trigger_similarity_page(
     }
 
     let candidate_codes = load_candidate_codes(&conn, &resolved_ts_code)?;
-    let top_heap = candidate_codes
-        .par_chunks(CANDIDATE_CODE_CHUNK_SIZE)
-        .try_fold(
-            BinaryHeap::<WorstFirstSimilarityRow>::new,
-            |mut top_heap, candidate_code_chunk| {
-                let rows = build_top_rows_for_candidate_code_chunk(
-                    &source_path,
-                    &target_events,
-                    &all_trade_dates,
-                    &trade_date_to_index,
-                    candidate_code_chunk,
-                    target_window_trade_days,
-                    &resolved_ts_code,
-                    max_gap_trade_days,
-                    &name_map,
-                    &industry_map,
-                    &concept_map,
-                    limit,
-                )?;
-                for row in rows {
-                    push_top_row(&mut top_heap, row, limit);
-                }
-                Ok::<BinaryHeap<WorstFirstSimilarityRow>, String>(top_heap)
-            },
-        )
-        .try_reduce(
-            BinaryHeap::<WorstFirstSimilarityRow>::new,
-            |mut left, right| {
-                for row in right.into_vec() {
-                    push_top_row(&mut left, row.0, limit);
-                }
-                Ok::<BinaryHeap<WorstFirstSimilarityRow>, String>(left)
-            },
+    let mut top_heap = BinaryHeap::<WorstFirstSimilarityRow>::new();
+    for candidate_code_chunk in candidate_codes.chunks(CANDIDATE_CODE_CHUNK_SIZE) {
+        let accumulators = load_candidate_matches(
+            &source_path,
+            &target_events,
+            &all_trade_dates,
+            &trade_date_to_index,
+            candidate_code_chunk,
+            target_window_trade_days,
+            &resolved_ts_code,
+            max_gap_trade_days,
         )?;
+        if accumulators.is_empty() {
+            continue;
+        }
+
+        let candidate_trigger_counter =
+            load_candidate_trigger_counter(&conn, accumulators.keys(), &trade_date_to_index)?;
+        let rows = build_top_rows(
+            accumulators,
+            &target_events,
+            &all_trade_dates,
+            target_window_trade_days,
+            target_events.len(),
+            &candidate_trigger_counter,
+            &name_map,
+            &industry_map,
+            &concept_map,
+            limit,
+        );
+        for row in rows {
+            push_top_row(&mut top_heap, row, limit);
+        }
+    }
     let mut items = rows_from_top_heap(top_heap);
     let summary_rows = load_row_summary_rows(&conn, &items)?;
     for item in &mut items {
