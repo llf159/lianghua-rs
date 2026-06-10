@@ -240,10 +240,14 @@
 }
 
 .trigger-sim-concept-cell {
-  min-width: 220px;
+  width: 260px;
+  min-width: 260px;
   max-width: 260px;
   color: #2a3550;
   line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 1280px) {

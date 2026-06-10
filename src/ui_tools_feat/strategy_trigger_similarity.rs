@@ -18,6 +18,7 @@ const DEFAULT_MAX_GAP_TRADE_DAYS: usize = 5;
 const DEFAULT_LIMIT: usize = 30;
 const MAX_MATCHED_EVENTS_PER_ROW: usize = 20;
 const MATCH_WORK_UNIT_TRADE_DAYS: usize = 60;
+const CANDIDATE_CODE_CHUNK_SIZE: usize = 512;
 const SCORE_EPS: f64 = 1e-12;
 
 #[derive(Debug, Clone, Serialize)]
@@ -91,15 +92,15 @@ struct CandidateKey {
 
 #[derive(Debug, Clone)]
 struct CandidateMatch {
-    target_event_index: usize,
-    candidate_trade_index: usize,
-    date_gap: usize,
+    target_event_index: u32,
+    candidate_trade_index: u32,
+    date_gap: u32,
     event_score: f64,
 }
 
 #[derive(Debug, Default)]
 struct CandidateAccumulator {
-    best_by_target_event: HashMap<usize, CandidateMatch>,
+    best_by_target_event: Vec<CandidateMatch>,
 }
 
 #[derive(Debug, Clone)]
@@ -309,11 +310,68 @@ fn build_target_rule_names(target_events: &[TargetEvent]) -> Vec<String> {
     out
 }
 
+fn load_candidate_codes(conn: &Connection, target_ts_code: &str) -> Result<Vec<Arc<str>>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            r#"
+            SELECT DISTINCT ts_code
+            FROM rule_details
+            WHERE ts_code <> ?
+              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
+              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > {SCORE_EPS}
+            ORDER BY ts_code ASC
+            "#
+        ))
+        .map_err(|e| format!("预编译策略触发相似候选代码查询失败: {e}"))?;
+    let mut rows = stmt
+        .query(params![target_ts_code])
+        .map_err(|e| format!("查询策略触发相似候选代码失败: {e}"))?;
+
+    let mut out = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取策略触发相似候选代码失败: {e}"))?
+    {
+        let ts_code: String = row.get(0).map_err(|e| format!("读取代码失败: {e}"))?;
+        out.push(Arc::<str>::from(ts_code));
+    }
+
+    Ok(out)
+}
+
 fn linear_event_score(date_gap: usize, max_gap_trade_days: usize) -> f64 {
     if date_gap > max_gap_trade_days {
         return 0.0;
     }
     (max_gap_trade_days + 1 - date_gap) as f64 / (max_gap_trade_days + 1) as f64
+}
+
+fn insert_best_match_into_accumulator(
+    entry: &mut CandidateAccumulator,
+    candidate_match: CandidateMatch,
+) {
+    let existing = entry
+        .best_by_target_event
+        .iter_mut()
+        .find(|existing| existing.target_event_index == candidate_match.target_event_index);
+
+    match existing {
+        Some(existing) => {
+            let replace = candidate_match
+                .event_score
+                .total_cmp(&existing.event_score)
+                .is_gt()
+                || (candidate_match.event_score == existing.event_score
+                    && candidate_match.date_gap < existing.date_gap)
+                || (candidate_match.event_score == existing.event_score
+                    && candidate_match.date_gap == existing.date_gap
+                    && candidate_match.candidate_trade_index < existing.candidate_trade_index);
+            if replace {
+                *existing = candidate_match;
+            }
+        }
+        None => entry.best_by_target_event.push(candidate_match),
+    }
 }
 
 fn insert_best_match(
@@ -322,29 +380,7 @@ fn insert_best_match(
     candidate_match: CandidateMatch,
 ) {
     let entry = accumulators.entry(candidate_key).or_default();
-    let replace = match entry
-        .best_by_target_event
-        .get(&candidate_match.target_event_index)
-    {
-        Some(existing) => {
-            candidate_match
-                .event_score
-                .total_cmp(&existing.event_score)
-                .is_gt()
-                || (candidate_match.event_score == existing.event_score
-                    && candidate_match.date_gap < existing.date_gap)
-                || (candidate_match.event_score == existing.event_score
-                    && candidate_match.date_gap == existing.date_gap
-                    && candidate_match.candidate_trade_index < existing.candidate_trade_index)
-        }
-        None => true,
-    };
-
-    if replace {
-        entry
-            .best_by_target_event
-            .insert(candidate_match.target_event_index, candidate_match);
-    }
+    insert_best_match_into_accumulator(entry, candidate_match);
 }
 
 fn build_match_work_units(
@@ -389,11 +425,16 @@ fn load_candidate_matches(
     target_events: &[TargetEvent],
     all_trade_dates: &[String],
     trade_date_to_index: &HashMap<&str, usize>,
+    candidate_codes: &[Arc<str>],
     window_trade_days: usize,
     target_ts_code: &str,
     max_gap_trade_days: usize,
 ) -> Result<HashMap<CandidateKey, CandidateAccumulator>, String> {
-    if target_events.is_empty() || all_trade_dates.is_empty() || window_trade_days == 0 {
+    if target_events.is_empty()
+        || all_trade_dates.is_empty()
+        || candidate_codes.is_empty()
+        || window_trade_days == 0
+    {
         return Ok(HashMap::new());
     }
     if all_trade_dates.len() < window_trade_days {
@@ -416,18 +457,24 @@ fn load_candidate_matches(
 
     work_units
         .par_iter()
-        .map(|work_unit| {
-            load_candidate_matches_for_work_unit(
-                source_path,
-                work_unit,
-                target_events,
-                all_trade_dates.len(),
-                trade_date_to_index,
-                window_trade_days,
-                target_ts_code,
-                max_gap_trade_days,
-            )
-        })
+        .try_fold(
+            HashMap::<CandidateKey, CandidateAccumulator>::new,
+            |mut out, work_unit| {
+                load_candidate_matches_for_work_unit_into(
+                    &mut out,
+                    source_path,
+                    work_unit,
+                    target_events,
+                    all_trade_dates.len(),
+                    trade_date_to_index,
+                    candidate_codes,
+                    window_trade_days,
+                    target_ts_code,
+                    max_gap_trade_days,
+                )?;
+                Ok(out)
+            },
+        )
         .try_reduce(
             HashMap::<CandidateKey, CandidateAccumulator>::new,
             |mut left, right| {
@@ -437,49 +484,62 @@ fn load_candidate_matches(
         )
 }
 
-fn load_candidate_matches_for_work_unit(
+fn load_candidate_matches_for_work_unit_into(
+    out: &mut HashMap<CandidateKey, CandidateAccumulator>,
     source_path: &str,
     work_unit: &MatchWorkUnit,
     target_events: &[TargetEvent],
     trade_date_count: usize,
     trade_date_to_index: &HashMap<&str, usize>,
+    candidate_codes: &[Arc<str>],
     window_trade_days: usize,
     target_ts_code: &str,
     max_gap_trade_days: usize,
-) -> Result<HashMap<CandidateKey, CandidateAccumulator>, String> {
+) -> Result<(), String> {
     let conn = open_result_conn(source_path)?;
     let last_window_start = trade_date_count - window_trade_days;
+    let code_placeholders = std::iter::repeat_n("?", candidate_codes.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        r#"
+        SELECT ts_code, trade_date
+        FROM rule_details
+        WHERE rule_name = ?
+          AND ts_code <> ?
+          AND trade_date >= ?
+          AND trade_date <= ?
+          AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
+          AND ABS(TRY_CAST(rule_score AS DOUBLE)) > {SCORE_EPS}
+          AND ts_code IN ({code_placeholders})
+        "#
+    );
     let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT ts_code, trade_date
-            FROM rule_details
-            WHERE rule_name = ?
-              AND ts_code <> ?
-              AND trade_date >= ?
-              AND trade_date <= ?
-              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
-              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > ?
-            "#,
-        )
+        .prepare(&sql)
         .map_err(|e| format!("预编译策略触发相似候选查询失败: {e}"))?;
+    let mut query_params = Vec::with_capacity(candidate_codes.len() + 4);
+    query_params.push(work_unit.rule_name.as_ref());
+    query_params.push(target_ts_code);
+    query_params.push(work_unit.start_trade_date.as_str());
+    query_params.push(work_unit.end_trade_date.as_str());
+    query_params.extend(candidate_codes.iter().map(|code| code.as_ref()));
     let mut rows = stmt
-        .query(params![
-            work_unit.rule_name.as_ref(),
-            target_ts_code,
-            work_unit.start_trade_date,
-            work_unit.end_trade_date,
-            SCORE_EPS
-        ])
+        .query(params_from_iter(query_params.iter()))
         .map_err(|e| format!("查询策略触发相似候选失败: {e}"))?;
 
-    let mut out = HashMap::<CandidateKey, CandidateAccumulator>::new();
     while let Some(row) = rows
         .next()
         .map_err(|e| format!("读取策略触发相似候选失败: {e}"))?
     {
         let candidate_ts_code: String = row.get(0).map_err(|e| format!("读取代码失败: {e}"))?;
-        let candidate_ts_code = Arc::<str>::from(candidate_ts_code);
+        let Some(candidate_ts_code) = candidate_codes
+            .binary_search_by(|code| code.as_ref().cmp(candidate_ts_code.as_str()))
+            .ok()
+            .and_then(|index| candidate_codes.get(index))
+            .map(Arc::clone)
+        else {
+            continue;
+        };
         let candidate_trade_date: String =
             row.get(1).map_err(|e| format!("读取候选交易日失败: {e}"))?;
         let Some(candidate_trade_index) = trade_date_to_index
@@ -516,15 +576,15 @@ fn load_candidate_matches_for_work_unit(
                 }
 
                 insert_best_match(
-                    &mut out,
+                    out,
                     CandidateKey {
                         ts_code: Arc::clone(&candidate_ts_code),
                         window_start_index,
                     },
                     CandidateMatch {
-                        target_event_index,
-                        candidate_trade_index,
-                        date_gap,
+                        target_event_index: target_event_index as u32,
+                        candidate_trade_index: candidate_trade_index as u32,
+                        date_gap: date_gap as u32,
                         event_score,
                     },
                 );
@@ -532,7 +592,7 @@ fn load_candidate_matches_for_work_unit(
         }
     }
 
-    Ok(out)
+    Ok(())
 }
 
 fn merge_candidate_accumulators(
@@ -540,8 +600,9 @@ fn merge_candidate_accumulators(
     partial: HashMap<CandidateKey, CandidateAccumulator>,
 ) {
     for (candidate_key, accumulator) in partial {
-        for candidate_match in accumulator.best_by_target_event.into_values() {
-            insert_best_match(out, candidate_key.clone(), candidate_match);
+        let entry = out.entry(candidate_key).or_default();
+        for candidate_match in accumulator.best_by_target_event {
+            insert_best_match_into_accumulator(entry, candidate_match);
         }
     }
 }
@@ -769,33 +830,30 @@ fn build_row_from_accumulator(
     let candidate_end_trade_date = all_trade_dates
         .get(window_start_index + window_trade_days - 1)?
         .clone();
-    let mut matches = accumulator
-        .best_by_target_event
-        .into_values()
-        .collect::<Vec<_>>();
+    let mut matches = accumulator.best_by_target_event;
     if matches.is_empty() {
         return None;
     }
 
     matches.sort_by(|left, right| {
         target_events
-            .get(left.target_event_index)
+            .get(left.target_event_index as usize)
             .map(|event| event.trade_date.as_str())
             .unwrap_or("")
             .cmp(
                 &target_events
-                    .get(right.target_event_index)
+                    .get(right.target_event_index as usize)
                     .map(|event| event.trade_date.as_str())
                     .unwrap_or(""),
             )
             .then_with(|| {
                 target_events
-                    .get(left.target_event_index)
+                    .get(left.target_event_index as usize)
                     .map(|event| event.rule_name.as_str())
                     .unwrap_or("")
                     .cmp(
                         &target_events
-                            .get(right.target_event_index)
+                            .get(right.target_event_index as usize)
                             .map(|event| event.rule_name.as_str())
                             .unwrap_or(""),
                     )
@@ -815,14 +873,17 @@ fn build_row_from_accumulator(
         None
     } else {
         Some(
-            matches.iter().map(|item| item.date_gap).sum::<usize>() as f64
+            matches
+                .iter()
+                .map(|item| item.date_gap as usize)
+                .sum::<usize>() as f64
                 / matched_event_count as f64,
         )
     };
     let mut matched_rule_names = Vec::new();
     let mut seen_rule_names = HashSet::new();
     for item in &matches {
-        let Some(target_event) = target_events.get(item.target_event_index) else {
+        let Some(target_event) = target_events.get(item.target_event_index as usize) else {
             continue;
         };
         if seen_rule_names.insert(target_event.rule_name.clone()) {
@@ -834,13 +895,13 @@ fn build_row_from_accumulator(
         .iter()
         .take(MAX_MATCHED_EVENTS_PER_ROW)
         .filter_map(|item| {
-            let target_event = target_events.get(item.target_event_index)?;
-            let candidate_trade_date = all_trade_dates.get(item.candidate_trade_index)?;
+            let target_event = target_events.get(item.target_event_index as usize)?;
+            let candidate_trade_date = all_trade_dates.get(item.candidate_trade_index as usize)?;
             Some(StrategyTriggerSimilarityMatchedEvent {
                 rule_name: target_event.rule_name.clone(),
                 target_trade_date: target_event.trade_date.clone(),
                 candidate_trade_date: candidate_trade_date.clone(),
-                date_gap_trade_days: item.date_gap,
+                date_gap_trade_days: item.date_gap as usize,
                 event_score: item.event_score,
             })
         })
@@ -934,6 +995,57 @@ fn build_top_rows(
             },
         );
 
+    rows_from_top_heap(heap)
+}
+
+fn build_top_rows_for_candidate_code_chunk(
+    source_path: &str,
+    target_events: &[TargetEvent],
+    all_trade_dates: &[String],
+    trade_date_to_index: &HashMap<&str, usize>,
+    candidate_code_chunk: &[Arc<str>],
+    window_trade_days: usize,
+    target_ts_code: &str,
+    max_gap_trade_days: usize,
+    name_map: &HashMap<String, String>,
+    industry_map: &HashMap<String, String>,
+    concept_map: &HashMap<String, String>,
+    limit: usize,
+) -> Result<Vec<StrategyTriggerSimilarityRow>, String> {
+    let accumulators = load_candidate_matches(
+        source_path,
+        target_events,
+        all_trade_dates,
+        trade_date_to_index,
+        candidate_code_chunk,
+        window_trade_days,
+        target_ts_code,
+        max_gap_trade_days,
+    )?;
+    if accumulators.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let conn = open_result_conn(source_path)?;
+    let candidate_trigger_counter =
+        load_candidate_trigger_counter(&conn, accumulators.keys(), trade_date_to_index)?;
+    Ok(build_top_rows(
+        accumulators,
+        target_events,
+        all_trade_dates,
+        window_trade_days,
+        target_events.len(),
+        &candidate_trigger_counter,
+        name_map,
+        industry_map,
+        concept_map,
+        limit,
+    ))
+}
+
+fn rows_from_top_heap(
+    heap: BinaryHeap<WorstFirstSimilarityRow>,
+) -> Vec<StrategyTriggerSimilarityRow> {
     let mut rows = heap
         .into_vec()
         .into_iter()
@@ -1054,29 +1166,42 @@ pub fn get_strategy_trigger_similarity_page(
         });
     }
 
-    let accumulators = load_candidate_matches(
-        &source_path,
-        &target_events,
-        &all_trade_dates,
-        &trade_date_to_index,
-        target_window_trade_days,
-        &resolved_ts_code,
-        max_gap_trade_days,
-    )?;
-    let candidate_trigger_counter =
-        load_candidate_trigger_counter(&conn, accumulators.keys(), &trade_date_to_index)?;
-    let mut items = build_top_rows(
-        accumulators,
-        &target_events,
-        &all_trade_dates,
-        target_window_trade_days,
-        target_events.len(),
-        &candidate_trigger_counter,
-        &name_map,
-        &industry_map,
-        &concept_map,
-        limit,
-    );
+    let candidate_codes = load_candidate_codes(&conn, &resolved_ts_code)?;
+    let top_heap = candidate_codes
+        .par_chunks(CANDIDATE_CODE_CHUNK_SIZE)
+        .try_fold(
+            BinaryHeap::<WorstFirstSimilarityRow>::new,
+            |mut top_heap, candidate_code_chunk| {
+                let rows = build_top_rows_for_candidate_code_chunk(
+                    &source_path,
+                    &target_events,
+                    &all_trade_dates,
+                    &trade_date_to_index,
+                    candidate_code_chunk,
+                    target_window_trade_days,
+                    &resolved_ts_code,
+                    max_gap_trade_days,
+                    &name_map,
+                    &industry_map,
+                    &concept_map,
+                    limit,
+                )?;
+                for row in rows {
+                    push_top_row(&mut top_heap, row, limit);
+                }
+                Ok::<BinaryHeap<WorstFirstSimilarityRow>, String>(top_heap)
+            },
+        )
+        .try_reduce(
+            BinaryHeap::<WorstFirstSimilarityRow>::new,
+            |mut left, right| {
+                for row in right.into_vec() {
+                    push_top_row(&mut left, row.0, limit);
+                }
+                Ok::<BinaryHeap<WorstFirstSimilarityRow>, String>(left)
+            },
+        )?;
+    let mut items = rows_from_top_heap(top_heap);
     let summary_rows = load_row_summary_rows(&conn, &items)?;
     for item in &mut items {
         if let Some(summary) =
@@ -1125,24 +1250,18 @@ mod tests {
     #[test]
     fn build_rows_uses_bidirectional_f1_similarity() {
         let mut accumulator = CandidateAccumulator::default();
-        accumulator.best_by_target_event.insert(
-            0,
-            CandidateMatch {
-                target_event_index: 0,
-                candidate_trade_index: 0,
-                date_gap: 0,
-                event_score: 1.0,
-            },
-        );
-        accumulator.best_by_target_event.insert(
-            1,
-            CandidateMatch {
-                target_event_index: 1,
-                candidate_trade_index: 2,
-                date_gap: 1,
-                event_score: 0.5,
-            },
-        );
+        accumulator.best_by_target_event.push(CandidateMatch {
+            target_event_index: 0,
+            candidate_trade_index: 0,
+            date_gap: 0,
+            event_score: 1.0,
+        });
+        accumulator.best_by_target_event.push(CandidateMatch {
+            target_event_index: 1,
+            candidate_trade_index: 2,
+            date_gap: 1,
+            event_score: 0.5,
+        });
 
         let candidate_key = CandidateKey {
             ts_code: Arc::from("000002.SZ"),
