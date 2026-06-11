@@ -460,7 +460,10 @@ fn st_board_category(stock_name: Option<&str>) -> Option<&'static str> {
                 .replace('＊', "*")
         })?;
 
-    if normalized.starts_with("*ST") || normalized.starts_with("ST") {
+    if normalized.starts_with("*ST")
+        || normalized.starts_with("ST")
+        || normalized.starts_with("退市")
+    {
         Some("ST")
     } else {
         None
@@ -493,7 +496,7 @@ mod tests {
 
     use crate::expr::parser::{Expr, Parser, Stmt, lex_all};
 
-    use super::{eval_binary_for_warmup, impl_expr_warmup};
+    use super::{board_category, eval_binary_for_warmup, impl_expr_warmup};
 
     fn estimate_program_warmup(expr: &str) -> usize {
         let mut parser = Parser::new(lex_all(expr));
@@ -535,6 +538,12 @@ mod tests {
         }
 
         expr_need
+    }
+
+    #[test]
+    fn board_category_treats_delisting_names_as_st() {
+        assert_eq!(board_category("000001.SZ", Some("退市海创")), "ST");
+        assert_eq!(board_category("600001.SH", Some(" 退市整理 ")), "ST");
     }
 
     #[test]

@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+};
 
 use duckdb::{Connection, params_from_iter};
 
@@ -30,6 +33,61 @@ pub mod strategy_trigger_similarity;
 pub mod watch_observe;
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
+
+static STOCK_TEXT_MAP_CACHE: OnceLock<Mutex<HashMap<String, HashMap<String, String>>>> =
+    OnceLock::new();
+static STOCK_NUM_MAP_CACHE: OnceLock<Mutex<HashMap<String, HashMap<String, f64>>>> =
+    OnceLock::new();
+
+fn stock_text_map_cache() -> &'static Mutex<HashMap<String, HashMap<String, String>>> {
+    STOCK_TEXT_MAP_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn stock_num_map_cache() -> &'static Mutex<HashMap<String, HashMap<String, f64>>> {
+    STOCK_NUM_MAP_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_string_map(
+    cache_key: String,
+    build: impl FnOnce() -> Result<HashMap<String, String>, String>,
+) -> Result<HashMap<String, String>, String> {
+    if let Some(value) = stock_text_map_cache()
+        .lock()
+        .map_err(|_| "基础文本缓存锁已损坏".to_string())?
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(value);
+    }
+
+    let value = build()?;
+    stock_text_map_cache()
+        .lock()
+        .map_err(|_| "基础文本缓存锁已损坏".to_string())?
+        .insert(cache_key, value.clone());
+    Ok(value)
+}
+
+fn cached_number_map(
+    cache_key: String,
+    build: impl FnOnce() -> Result<HashMap<String, f64>, String>,
+) -> Result<HashMap<String, f64>, String> {
+    if let Some(value) = stock_num_map_cache()
+        .lock()
+        .map_err(|_| "基础数值缓存锁已损坏".to_string())?
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(value);
+    }
+
+    let value = build()?;
+    stock_num_map_cache()
+        .lock()
+        .map_err(|_| "基础数值缓存锁已损坏".to_string())?
+        .insert(cache_key, value.clone());
+    Ok(value)
+}
 
 pub fn normalize_trade_date(raw: &str) -> Option<String> {
     let digits: String = raw
@@ -102,7 +160,7 @@ fn build_stock_list_text_map(
     Ok(out)
 }
 
-pub fn build_total_mv_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
+fn load_total_mv_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
     let stock_list = load_stock_list(source_dir)?;
     let mut out = HashMap::with_capacity(stock_list.len());
     for cols in stock_list {
@@ -120,7 +178,13 @@ pub fn build_total_mv_map(source_dir: &str) -> Result<HashMap<String, f64>, Stri
     Ok(out)
 }
 
-pub fn build_circ_mv_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
+pub fn build_total_mv_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
+    cached_number_map(format!("{source_dir}\0total_mv"), || {
+        load_total_mv_map(source_dir)
+    })
+}
+
+fn load_circ_mv_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
     let stock_list = load_stock_list(source_dir)?;
     let mut out = HashMap::with_capacity(stock_list.len());
     for cols in stock_list {
@@ -136,6 +200,12 @@ pub fn build_circ_mv_map(source_dir: &str) -> Result<HashMap<String, f64>, Strin
         out.insert(ts_code.trim().to_string(), circ_mv / 1e4);
     }
     Ok(out)
+}
+
+pub fn build_circ_mv_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
+    cached_number_map(format!("{source_dir}\0circ_mv"), || {
+        load_circ_mv_map(source_dir)
+    })
 }
 
 pub fn filter_mv(
@@ -166,7 +236,7 @@ pub fn filter_mv(
     true
 }
 
-pub fn build_concepts_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
+fn load_concepts_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
     let concepts_list = load_ths_concepts_list(source_dir)?;
     let mut out = HashMap::new();
     for cols in concepts_list {
@@ -181,20 +251,34 @@ pub fn build_concepts_map(source_dir: &str) -> Result<HashMap<String, String>, S
     Ok(out)
 }
 
+pub fn build_concepts_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
+    cached_string_map(format!("{source_dir}\0concepts"), || {
+        load_concepts_map(source_dir)
+    })
+}
+
 pub fn build_most_related_concept_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
-    load_ths_concepts_named_map(source_dir, &["most_related_concept"])
+    cached_string_map(format!("{source_dir}\0most_related_concept"), || {
+        load_ths_concepts_named_map(source_dir, &["most_related_concept"])
+    })
 }
 
 pub fn build_name_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
-    build_stock_list_text_map(source_dir, 2)
+    cached_string_map(format!("{source_dir}\0name"), || {
+        build_stock_list_text_map(source_dir, 2)
+    })
 }
 
 pub fn build_area_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
-    build_stock_list_text_map(source_dir, 3)
+    cached_string_map(format!("{source_dir}\0area"), || {
+        build_stock_list_text_map(source_dir, 3)
+    })
 }
 
 pub fn build_industry_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
-    build_stock_list_text_map(source_dir, 4)
+    cached_string_map(format!("{source_dir}\0industry"), || {
+        build_stock_list_text_map(source_dir, 4)
+    })
 }
 
 pub fn build_latest_vol_map(

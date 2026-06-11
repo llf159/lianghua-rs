@@ -304,8 +304,13 @@ function renderReturnValue(value?: number | null) {
 }
 
 function resolveTradeBoard(tsCode: string, stockName?: string | null) {
-  const normalizedName = stockName?.trim().toUpperCase() ?? ''
-  if (normalizedName.startsWith('*ST') || normalizedName.startsWith('ST')) {
+  const normalizedName =
+    stockName?.trim().toUpperCase().replace(/\s+/g, '').replaceAll('＊', '*') ?? ''
+  if (
+    normalizedName.startsWith('*ST') ||
+    normalizedName.startsWith('ST') ||
+    normalizedName.startsWith('退市')
+  ) {
     return 'ST'
   }
 

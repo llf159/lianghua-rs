@@ -53,6 +53,7 @@ const TOTAL_MODE_COLUMNS = [
   "name",
   "realtime_price",
   "realtime_change_pct",
+  "return_5d_pct",
   "speed_pct",
   "template_tag",
   "realtime_vol_ratio",
@@ -69,6 +70,7 @@ const SCENE_MODE_COLUMNS = [
   "name",
   "realtime_price",
   "realtime_change_pct",
+  "return_5d_pct",
   "speed_pct",
   "template_tag",
   "realtime_vol_ratio",
@@ -88,6 +90,7 @@ type NumericVisibleColumn =
   | "rank"
   | "realtime_price"
   | "realtime_change_pct"
+  | "return_5d_pct"
   | "speed_pct"
   | "realtime_vol_ratio"
   | "total_score"
@@ -148,6 +151,7 @@ const COLUMN_LABELS: Record<VisibleColumn, string> = {
   name: "名称",
   realtime_price: "实时价*",
   realtime_change_pct: "实时涨幅*",
+  return_5d_pct: "五日涨幅",
   speed_pct: "涨速*",
   template_tag: "模板标记",
   realtime_vol_ratio: "实时量比*",
@@ -167,6 +171,7 @@ const COLUMN_WIDTHS: Record<VisibleColumn, number> = {
   name: 110,
   realtime_price: 96,
   realtime_change_pct: 108,
+  return_5d_pct: 100,
   speed_pct: 92,
   template_tag: 160,
   realtime_vol_ratio: 108,
@@ -182,6 +187,7 @@ const COLUMN_WIDTHS: Record<VisibleColumn, number> = {
 const DELTA_COLUMNS = new Set<VisibleColumn>([
   "realtime_price",
   "realtime_change_pct",
+  "return_5d_pct",
   "realtime_vol_ratio",
 ]);
 
@@ -337,7 +343,7 @@ function formatRefreshTime(raw: string) {
 function formatDeltaValue(key: VisibleColumn, value?: number) {
   if (value === undefined || !Number.isFinite(value)) return null;
   const sign = value > 0 ? "+" : "";
-  if (key === "realtime_change_pct") {
+  if (key === "realtime_change_pct" || key === "return_5d_pct") {
     return `${sign}${value.toFixed(2)}%`;
   }
   return `${sign}${value.toFixed(2)}`;
@@ -376,6 +382,7 @@ function formatCell(
   if (key === "realtime_price") return formatNumber(row.realtime_price);
   if (key === "realtime_change_pct")
     return formatPercent(row.realtime_change_pct);
+  if (key === "return_5d_pct") return formatPercent(row.return_5d_pct);
   if (key === "realtime_vol_ratio") return formatNumber(row.realtime_vol_ratio);
 
   const value = row[key];
@@ -1482,7 +1489,9 @@ export default function IntradayMonitorRealtimePage() {
                       ? formatPercent(speedValue)
                       : formatCell(key, row, excludedConcepts);
                   const isRealtimePct =
-                    key === "realtime_change_pct" || key === "speed_pct";
+                    key === "realtime_change_pct" ||
+                    key === "return_5d_pct" ||
+                    key === "speed_pct";
                   const deltaValue = DELTA_COLUMNS.has(key)
                     ? rowDeltas[getRowKey(row)]?.[
                         key as NumericVisibleColumn
@@ -1496,6 +1505,8 @@ export default function IntradayMonitorRealtimePage() {
                       ? getPercentClassName(
                           key === "speed_pct"
                             ? speedValue
+                            : key === "return_5d_pct"
+                              ? row.return_5d_pct
                             : row.realtime_change_pct,
                         )
                       : "",

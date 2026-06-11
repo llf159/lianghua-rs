@@ -36,6 +36,7 @@ type PersistedCustomMonitorState = {
 type DeltaColumn =
   | 'realtime_price'
   | 'realtime_change_pct'
+  | 'return_5d_pct'
   | 'realtime_vol_ratio'
 type RowDeltaMap = Record<string, Partial<Record<DeltaColumn, number>>>
 type PriceSnapshot = {
@@ -46,6 +47,7 @@ type PriceSnapshot = {
 const DELTA_COLUMNS = new Set<DeltaColumn>([
   'realtime_price',
   'realtime_change_pct',
+  'return_5d_pct',
   'realtime_vol_ratio',
 ])
 
@@ -104,7 +106,7 @@ function formatRefreshTime(raw: string) {
 function formatDeltaValue(key: DeltaColumn, value?: number) {
   if (value === undefined || !Number.isFinite(value)) return null
   const sign = value > 0 ? '+' : ''
-  if (key === 'realtime_change_pct') {
+  if (key === 'realtime_change_pct' || key === 'return_5d_pct') {
     return `${sign}${value.toFixed(2)}%`
   }
   return `${sign}${value.toFixed(2)}`
@@ -703,7 +705,7 @@ export default function IntradayMonitorCustomPage() {
           <div className="intraday-custom-table-wrap">
             <table
               className="intraday-custom-table"
-              style={{ minWidth: '1330px' }}
+              style={{ minWidth: '1430px' }}
             >
               <colgroup>
                 <col style={{ width: 72 }} />
@@ -711,6 +713,7 @@ export default function IntradayMonitorCustomPage() {
                 <col style={{ width: 110 }} />
                 <col style={{ width: 96 }} />
                 <col style={{ width: 108 }} />
+                <col style={{ width: 100 }} />
                 <col style={{ width: 92 }} />
                 <col style={{ width: 160 }} />
                 <col style={{ width: 108 }} />
@@ -725,6 +728,7 @@ export default function IntradayMonitorCustomPage() {
                   <th>名称</th>
                   <th>实时价*</th>
                   <th>实时涨幅*</th>
+                  <th>五日涨幅</th>
                   <th>涨速*</th>
                   <th>模板标记</th>
                   <th>实时量比*</th>
@@ -736,7 +740,7 @@ export default function IntradayMonitorCustomPage() {
               <tbody>
                 {rows.length === 0 ? (
                   <tr>
-                    <td colSpan={11} className="intraday-custom-empty-cell">
+                    <td colSpan={12} className="intraday-custom-empty-cell">
                       暂无数据
                     </td>
                   </tr>
@@ -752,6 +756,12 @@ export default function IntradayMonitorCustomPage() {
                     const pctDeltaText = formatDeltaValue(
                       'realtime_change_pct',
                       pctDelta,
+                    )
+                    const return5dDelta =
+                      rowDeltas[getRowKey(row)]?.return_5d_pct
+                    const return5dDeltaText = formatDeltaValue(
+                      'return_5d_pct',
+                      return5dDelta,
                     )
                     const volRatioDelta =
                       rowDeltas[getRowKey(row)]?.realtime_vol_ratio
@@ -811,6 +821,23 @@ export default function IntradayMonitorCustomPage() {
                                 ].join(' ')}
                               >
                                 {pctDeltaText}
+                              </span>
+                            ) : null}
+                          </span>
+                        </td>
+                        <td className={getPercentClassName(row.return_5d_pct)}>
+                          <span className="intraday-custom-cell-value">
+                            <span>{formatPercent(row.return_5d_pct)}</span>
+                            {return5dDeltaText ? (
+                              <span
+                                className={[
+                                  'intraday-custom-delta',
+                                  (return5dDelta ?? 0) > 0
+                                    ? 'intraday-custom-delta-up'
+                                    : 'intraday-custom-delta-down',
+                                ].join(' ')}
+                              >
+                                {return5dDeltaText}
                               </span>
                             ) : null}
                           </span>

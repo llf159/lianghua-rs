@@ -32,9 +32,9 @@ type SortKey =
   | "best_rank_3d"
   | "best_rank_5d"
   | "realtime_change_pct"
+  | "return_5d_pct"
   | "speed_pct"
   | "realtime_change_open_pct"
-  | "realtime_price"
   | "total_mv_yi";
 
 type PriceSnapshot = {
@@ -45,6 +45,13 @@ type PriceSnapshot = {
 type DisplayRow = AllMarketMonitorRow & {
   speed_pct?: number | null;
 };
+
+type SpeedHitRecord = DisplayRow & {
+  hit_at: number;
+  hit_speed_pct?: number | null;
+};
+
+type SpeedHitRecordsByPeriod = Record<SpeedPeriod, SpeedHitRecord[]>;
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
@@ -67,6 +74,11 @@ function formatClock(value: Date) {
     minute: "2-digit",
     second: "2-digit",
   });
+}
+
+function formatClockFromMs(value: number) {
+  if (!Number.isFinite(value)) return "--";
+  return formatClock(new Date(value));
 }
 
 function formatRefreshTime(raw: string) {
@@ -140,6 +152,14 @@ function buildSpeedMap(
   return out;
 }
 
+function createEmptyHitRecordsByPeriod(): SpeedHitRecordsByPeriod {
+  return {
+    10: [],
+    30: [],
+    60: [],
+  };
+}
+
 export default function AllMarketMonitorPage() {
   const { excludedConcepts } = useConceptExclusions();
   const [sourcePath, setSourcePath] = useState("");
@@ -148,6 +168,7 @@ export default function AllMarketMonitorPage() {
   const [primarySortKey, setPrimarySortKey] =
     useState<PrimarySortKey>("realtime_change_pct");
   const [speedPeriod, setSpeedPeriod] = useState<SpeedPeriod>(10);
+  const [speedThresholdText, setSpeedThresholdText] = useState("1.00");
   const [boardFilter, setBoardFilter] = useState<BoardFilter>("全部");
   const [topLimit, setTopLimit] = useState<TopLimit>(50);
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
@@ -159,6 +180,9 @@ export default function AllMarketMonitorPage() {
   const [requestedCount, setRequestedCount] = useState(0);
   const [fetchedCount, setFetchedCount] = useState(0);
   const [currentTime, setCurrentTime] = useState(() => new Date());
+  const [hitRecordsByPeriod, setHitRecordsByPeriod] =
+    useState<SpeedHitRecordsByPeriod>(() => createEmptyHitRecordsByPeriod());
+  const [openHitTsCode, setOpenHitTsCode] = useState<string | null>(null);
 
   const inFlightRef = useRef(false);
   const enabledRef = useRef(false);
@@ -245,10 +269,81 @@ export default function AllMarketMonitorPage() {
     };
   }, [enabled, refreshSnapshot, sourcePathTrimmed]);
 
+  const speedMapsByPeriod = useMemo(() => {
+    const now = Date.now();
+    const maps = new Map<SpeedPeriod, Map<string, number>>();
+    for (const period of SPEED_PERIOD_OPTIONS) {
+      maps.set(period, buildSpeedMap(rows, historyRef.current, period, now));
+    }
+    return maps;
+  }, [rows]);
+
   const speedMap = useMemo(
-    () => buildSpeedMap(rows, historyRef.current, speedPeriod, Date.now()),
-    [rows, speedPeriod],
+    () => speedMapsByPeriod.get(speedPeriod) ?? new Map<string, number>(),
+    [speedMapsByPeriod, speedPeriod],
   );
+
+  const speedThresholdPct = useMemo(() => {
+    const value = Number(speedThresholdText);
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }, [speedThresholdText]);
+
+  useEffect(() => {
+    setHitRecordsByPeriod(() => createEmptyHitRecordsByPeriod());
+    setOpenHitTsCode(null);
+  }, [sourcePathTrimmed, speedThresholdPct]);
+
+  useEffect(() => {
+    if (!isFiniteNumber(speedThresholdPct)) return;
+
+    const capturedAt = Date.now();
+
+    setHitRecordsByPeriod((prevByPeriod) => {
+      const nextByPeriod = createEmptyHitRecordsByPeriod();
+
+      for (const period of SPEED_PERIOD_OPTIONS) {
+        const periodSpeedMap =
+          speedMapsByPeriod.get(period) ?? new Map<string, number>();
+        const nextRowsByCode = new Map(
+          rows.map((row) => [
+            row.ts_code,
+            {
+              ...row,
+              speed_pct: periodSpeedMap.get(row.ts_code) ?? null,
+            } satisfies DisplayRow,
+          ]),
+        );
+        const nextRecords = new Map<string, SpeedHitRecord>();
+
+        for (const record of prevByPeriod[period]) {
+          const latestRow = nextRowsByCode.get(record.ts_code);
+          if (!latestRow) continue;
+          nextRecords.set(record.ts_code, {
+            ...latestRow,
+            hit_at: record.hit_at,
+            hit_speed_pct: record.hit_speed_pct,
+          });
+        }
+
+        for (const row of nextRowsByCode.values()) {
+          const speedPct = row.speed_pct;
+          if (isFiniteNumber(speedPct) && speedPct >= speedThresholdPct) {
+            nextRecords.set(row.ts_code, {
+              ...row,
+              hit_at: capturedAt,
+              hit_speed_pct: speedPct,
+            });
+          }
+        }
+
+        nextByPeriod[period] = Array.from(nextRecords.values())
+          .sort((left, right) => right.hit_at - left.hit_at)
+          .slice(0, 200);
+      }
+
+      return nextByPeriod;
+    });
+  }, [rows, speedMapsByPeriod, speedThresholdPct]);
 
   const displayRows = useMemo<DisplayRow[]>(() => {
     const filteredRows = rows
@@ -266,11 +361,11 @@ export default function AllMarketMonitorPage() {
       realtime_change_pct: {
         value: (row: DisplayRow) => row.realtime_change_pct,
       },
+      return_5d_pct: { value: (row: DisplayRow) => row.return_5d_pct },
       speed_pct: { value: (row: DisplayRow) => row.speed_pct },
       realtime_change_open_pct: {
         value: (row: DisplayRow) => row.realtime_change_open_pct,
       },
-      realtime_price: { value: (row: DisplayRow) => row.realtime_price },
       total_mv_yi: { value: (row: DisplayRow) => row.total_mv_yi },
     } satisfies Partial<Record<SortKey, SortDefinition<DisplayRow>>>;
 
@@ -291,6 +386,27 @@ export default function AllMarketMonitorPage() {
         name: row.name || undefined,
       })),
     [displayRows, rankDate, sourcePathTrimmed],
+  );
+
+  const hitRecords = hitRecordsByPeriod[speedPeriod];
+
+  const hitNavigationItems = useMemo(
+    () =>
+      hitRecords.map((record) => ({
+        tsCode: record.ts_code,
+        tradeDate: rankDate || record.realtime_trade_date || null,
+        sourcePath: sourcePathTrimmed || undefined,
+        name: record.name || undefined,
+      })),
+    [hitRecords, rankDate, sourcePathTrimmed],
+  );
+
+  const openHitRecord = useMemo(
+    () =>
+      openHitTsCode
+        ? hitRecords.find((record) => record.ts_code === openHitTsCode) ?? null
+        : null,
+    [hitRecords, openHitTsCode],
   );
 
   function toggleSort(nextKey: SortKey) {
@@ -413,6 +529,17 @@ export default function AllMarketMonitorPage() {
             </label>
 
             <label className="all-market-field">
+              <span>命中阈值%</span>
+              <input
+                type="number"
+                min="0.01"
+                step="0.01"
+                value={speedThresholdText}
+                onChange={(event) => setSpeedThresholdText(event.target.value)}
+              />
+            </label>
+
+            <label className="all-market-field">
               <span>Top N</span>
               <select
                 value={topLimit}
@@ -446,148 +573,317 @@ export default function AllMarketMonitorPage() {
         {error ? <div className="all-market-error">{error}</div> : null}
       </section>
 
-      <section className="all-market-card all-market-table-card">
-        <div className="all-market-table-head">
-          <h3>全市场行情</h3>
-          <div className="all-market-time-strip" aria-live="polite">
-            <span className="all-market-time-pill">
-              <small>刷新</small>
-              <strong>{formatRefreshTime(refreshedAt)}</strong>
-            </span>
-            <span className="all-market-time-pill is-current">
-              <small>当前</small>
-              <strong>{formatClock(currentTime)}</strong>
-            </span>
+      <div className="all-market-monitor-grid">
+        <section className="all-market-card all-market-table-card">
+          <div className="all-market-table-head">
+            <h3>全市场行情</h3>
+            <div className="all-market-time-strip" aria-live="polite">
+              <span className="all-market-time-pill">
+                <small>刷新</small>
+                <strong>{formatRefreshTime(refreshedAt)}</strong>
+              </span>
+              <span className="all-market-time-pill is-current">
+                <small>当前</small>
+                <strong>{formatClock(currentTime)}</strong>
+              </span>
+            </div>
           </div>
-        </div>
 
-        <div className="all-market-table-wrap">
-          <table className="all-market-table">
-            <thead>
-              <tr>
-                <th aria-sort="none">代码</th>
-                <th aria-sort="none">名称</th>
-                <th
-                  aria-sort={getAriaSort(
-                    sortKey === "best_rank_3d",
-                    sortDirection,
-                  )}
-                >
-                  {renderSortHeader("3日优", "best_rank_3d")}
-                </th>
-                <th
-                  aria-sort={getAriaSort(
-                    sortKey === "best_rank_5d",
-                    sortDirection,
-                  )}
-                >
-                  {renderSortHeader("5日优", "best_rank_5d")}
-                </th>
-                <th
-                  aria-sort={getAriaSort(
-                    sortKey === "realtime_change_pct",
-                    sortDirection,
-                  )}
-                >
-                  {renderSortHeader("涨幅", "realtime_change_pct")}
-                </th>
-                <th
-                  aria-sort={getAriaSort(sortKey === "speed_pct", sortDirection)}
-                >
-                  {renderSortHeader("涨速", "speed_pct")}
-                </th>
-                <th
-                  aria-sort={getAriaSort(
-                    sortKey === "realtime_price",
-                    sortDirection,
-                  )}
-                >
-                  {renderSortHeader("现价", "realtime_price")}
-                </th>
-                <th
-                  aria-sort={getAriaSort(
-                    sortKey === "realtime_change_open_pct",
-                    sortDirection,
-                  )}
-                >
-                  {renderSortHeader("开盘涨幅", "realtime_change_open_pct")}
-                </th>
-                <th aria-sort="none">概念</th>
-                <th
-                  aria-sort={getAriaSort(
-                    sortKey === "total_mv_yi",
-                    sortDirection,
-                  )}
-                >
-                  {renderSortHeader("总市值", "total_mv_yi")}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {displayRows.length > 0 ? (
-                displayRows.map((row) => {
-                  const conceptText = formatConceptText(
-                    row.concept ?? "",
-                    excludedConcepts,
-                  );
-
-                  return (
-                    <tr key={row.ts_code}>
-                      <td>{row.ts_code}</td>
-                      <td>
-                        <DetailsLink
-                          tsCode={row.ts_code}
-                          tradeDate={
-                            rankDate || row.realtime_trade_date || undefined
-                          }
-                          sourcePath={sourcePathTrimmed || undefined}
-                          className="all-market-stock-link"
-                          title={`查看 ${row.name || row.ts_code} 详情`}
-                          navigationItems={navigationItems}
-                        >
-                          {row.name || "--"}
-                        </DetailsLink>
-                      </td>
-                      <td className="all-market-rank-cell">
-                        {formatNumber(row.best_rank_3d, 0)}
-                      </td>
-                      <td className="all-market-rank-cell">
-                        {formatNumber(row.best_rank_5d, 0)}
-                      </td>
-                      <td
-                        className={getPercentClassName(row.realtime_change_pct)}
-                      >
-                        {formatPercent(row.realtime_change_pct)}
-                      </td>
-                      <td className={getPercentClassName(row.speed_pct)}>
-                        {formatPercent(row.speed_pct)}
-                      </td>
-                      <td>{formatNumber(row.realtime_price)}</td>
-                      <td
-                        className={getPercentClassName(
-                          row.realtime_change_open_pct,
-                        )}
-                      >
-                        {formatPercent(row.realtime_change_open_pct)}
-                      </td>
-                      <td className="all-market-concept-cell" title={conceptText}>
-                        {conceptText}
-                      </td>
-                      <td>{formatNumber(row.total_mv_yi)}</td>
-                    </tr>
-                  );
-                })
-              ) : (
+          <div className="all-market-table-wrap">
+            <table className="all-market-table">
+              <thead>
                 <tr>
-                  <td colSpan={10} className="all-market-empty">
-                    {enabled ? "等待全市场行情返回。" : "开启爬虫后开始刷新。"}
-                  </td>
+                  <th aria-sort="none">名称</th>
+                  <th
+                    aria-sort={getAriaSort(
+                      sortKey === "best_rank_3d",
+                      sortDirection,
+                    )}
+                  >
+                    {renderSortHeader("3日优", "best_rank_3d")}
+                  </th>
+                  <th
+                    aria-sort={getAriaSort(
+                      sortKey === "best_rank_5d",
+                      sortDirection,
+                    )}
+                  >
+                    {renderSortHeader("5日优", "best_rank_5d")}
+                  </th>
+                  <th
+                    aria-sort={getAriaSort(
+                      sortKey === "realtime_change_pct",
+                      sortDirection,
+                    )}
+                  >
+                    {renderSortHeader("涨幅", "realtime_change_pct")}
+                  </th>
+                  <th
+                    aria-sort={getAriaSort(
+                      sortKey === "return_5d_pct",
+                      sortDirection,
+                    )}
+                  >
+                    {renderSortHeader("五日涨幅", "return_5d_pct")}
+                  </th>
+                  <th
+                    aria-sort={getAriaSort(sortKey === "speed_pct", sortDirection)}
+                  >
+                    {renderSortHeader("涨速", "speed_pct")}
+                  </th>
+                  <th
+                    aria-sort={getAriaSort(
+                      sortKey === "realtime_change_open_pct",
+                      sortDirection,
+                    )}
+                  >
+                    {renderSortHeader("开盘涨幅", "realtime_change_open_pct")}
+                  </th>
+                  <th aria-sort="none">概念</th>
+                  <th
+                    aria-sort={getAriaSort(
+                      sortKey === "total_mv_yi",
+                      sortDirection,
+                    )}
+                  >
+                    {renderSortHeader("总市值", "total_mv_yi")}
+                  </th>
                 </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
+              </thead>
+              <tbody>
+                {displayRows.length > 0 ? (
+                  displayRows.map((row) => {
+                    const conceptText = formatConceptText(
+                      row.concept ?? "",
+                      excludedConcepts,
+                    );
+
+                    return (
+                      <tr key={row.ts_code}>
+                        <td className="all-market-name-cell">
+                          <DetailsLink
+                            tsCode={row.ts_code}
+                            tradeDate={
+                              rankDate || row.realtime_trade_date || undefined
+                            }
+                            sourcePath={sourcePathTrimmed || undefined}
+                            className="all-market-stock-link"
+                            title={`查看 ${row.name || row.ts_code} 详情`}
+                            navigationItems={navigationItems}
+                          >
+                            {row.name || "--"}
+                          </DetailsLink>
+                          <span className="all-market-stock-code">
+                            {row.ts_code}
+                          </span>
+                        </td>
+                        <td className="all-market-rank-cell">
+                          {formatNumber(row.best_rank_3d, 0)}
+                        </td>
+                        <td className="all-market-rank-cell">
+                          {formatNumber(row.best_rank_5d, 0)}
+                        </td>
+                        <td
+                          className={getPercentClassName(row.realtime_change_pct)}
+                        >
+                          {formatPercent(row.realtime_change_pct)}
+                        </td>
+                        <td className={getPercentClassName(row.return_5d_pct)}>
+                          {formatPercent(row.return_5d_pct)}
+                        </td>
+                        <td className={getPercentClassName(row.speed_pct)}>
+                          {formatPercent(row.speed_pct)}
+                        </td>
+                        <td
+                          className={getPercentClassName(
+                            row.realtime_change_open_pct,
+                          )}
+                        >
+                          {formatPercent(row.realtime_change_open_pct)}
+                        </td>
+                        <td className="all-market-concept-cell" title={conceptText}>
+                          {conceptText}
+                        </td>
+                        <td>{formatNumber(row.total_mv_yi)}</td>
+                      </tr>
+                    );
+                  })
+                ) : (
+                  <tr>
+                    <td colSpan={9} className="all-market-empty">
+                      {enabled ? "等待全市场行情返回。" : "开启爬虫后开始刷新。"}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="all-market-card all-market-hit-card">
+          <div className="all-market-hit-head">
+            <div>
+              <h3>涨速命中</h3>
+              <span>
+                {isFiniteNumber(speedThresholdPct)
+                  ? `${speedPeriod}秒 >= ${speedThresholdPct.toFixed(2)}%`
+                  : "阈值无效"}
+              </span>
+            </div>
+            <strong>{hitRecords.length}</strong>
+          </div>
+
+          <div className="all-market-hit-list">
+            {hitRecords.length > 0 ? (
+              hitRecords.map((record) => {
+                const isOpen = openHitTsCode === record.ts_code;
+                const toggleHitPopover = () => {
+                  setOpenHitTsCode((value) =>
+                    value === record.ts_code ? null : record.ts_code,
+                  );
+                };
+                return (
+                  <div
+                    key={record.ts_code}
+                    role="button"
+                    tabIndex={0}
+                    className={isOpen ? "all-market-hit-row is-open" : "all-market-hit-row"}
+                    onClick={toggleHitPopover}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" && event.key !== " ") return;
+                      event.preventDefault();
+                      toggleHitPopover();
+                    }}
+                  >
+                    <span
+                      className="all-market-hit-name"
+                      onClickCapture={(event) => event.stopPropagation()}
+                    >
+                      <DetailsLink
+                        tsCode={record.ts_code}
+                        tradeDate={rankDate || record.realtime_trade_date || undefined}
+                        sourcePath={sourcePathTrimmed || undefined}
+                        className="all-market-hit-name-link"
+                        title={`查看 ${record.name || record.ts_code} 详情`}
+                        navigationItems={hitNavigationItems}
+                      >
+                        <strong>{record.name || "--"}</strong>
+                        <small>{record.ts_code}</small>
+                      </DetailsLink>
+                    </span>
+                    <span
+                      className={`all-market-hit-change ${getPercentClassName(
+                        record.realtime_change_pct,
+                      )}`}
+                    >
+                      {formatPercent(record.realtime_change_pct)}
+                    </span>
+                    <span className="all-market-hit-time">
+                      {formatClockFromMs(record.hit_at)}
+                    </span>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="all-market-hit-empty">
+                {isFiniteNumber(speedThresholdPct)
+                  ? "暂无涨速命中。"
+                  : "设置有效涨速阈值后开始记录。"}
+              </div>
+            )}
+          </div>
+
+          {openHitRecord ? (
+            <div className="all-market-hit-popover" role="dialog">
+              <div className="all-market-hit-popover-head">
+                <DetailsLink
+                  tsCode={openHitRecord.ts_code}
+                  tradeDate={
+                    rankDate || openHitRecord.realtime_trade_date || undefined
+                  }
+                  sourcePath={sourcePathTrimmed || undefined}
+                  className="all-market-stock-link"
+                  title={`查看 ${openHitRecord.name || openHitRecord.ts_code} 详情`}
+                  navigationItems={navigationItems}
+                >
+                  {openHitRecord.name || "--"}
+                </DetailsLink>
+                <button
+                  type="button"
+                  aria-label="关闭"
+                  onClick={() => setOpenHitTsCode(null)}
+                >
+                  ×
+                </button>
+              </div>
+              <div className="all-market-hit-popover-code">
+                {openHitRecord.ts_code}
+              </div>
+              <dl className="all-market-hit-detail-grid">
+                <div>
+                  <dt>3日优</dt>
+                  <dd>{formatNumber(openHitRecord.best_rank_3d, 0)}</dd>
+                </div>
+                <div>
+                  <dt>5日优</dt>
+                  <dd>{formatNumber(openHitRecord.best_rank_5d, 0)}</dd>
+                </div>
+                <div>
+                  <dt>涨幅</dt>
+                  <dd className={getPercentClassName(openHitRecord.realtime_change_pct)}>
+                    {formatPercent(openHitRecord.realtime_change_pct)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>涨速</dt>
+                  <dd className={getPercentClassName(openHitRecord.speed_pct)}>
+                    {formatPercent(openHitRecord.speed_pct)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>五日涨幅</dt>
+                  <dd className={getPercentClassName(openHitRecord.return_5d_pct)}>
+                    {formatPercent(openHitRecord.return_5d_pct)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>命中涨速</dt>
+                  <dd className={getPercentClassName(openHitRecord.hit_speed_pct)}>
+                    {formatPercent(openHitRecord.hit_speed_pct)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>命中时间</dt>
+                  <dd>{formatClockFromMs(openHitRecord.hit_at)}</dd>
+                </div>
+                <div>
+                  <dt>开盘涨幅</dt>
+                  <dd
+                    className={getPercentClassName(
+                      openHitRecord.realtime_change_open_pct,
+                    )}
+                  >
+                    {formatPercent(openHitRecord.realtime_change_open_pct)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>总市值</dt>
+                  <dd>{formatNumber(openHitRecord.total_mv_yi)}</dd>
+                </div>
+              </dl>
+              <div
+                className="all-market-hit-concept"
+                title={formatConceptText(
+                  openHitRecord.concept ?? "",
+                  excludedConcepts,
+                )}
+              >
+                {formatConceptText(openHitRecord.concept ?? "", excludedConcepts)}
+              </div>
+            </div>
+          ) : null}
+        </section>
+      </div>
     </div>
   );
 }

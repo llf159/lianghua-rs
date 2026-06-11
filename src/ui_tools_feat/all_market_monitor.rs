@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::{
     crawler::SinaQuote,
-    data::{load_stock_list, result_db_path},
+    data::{load_stock_list, result_db_path, source_db_path},
     ui_tools_feat::{
         build_concepts_map,
         realtime::{RealtimeFetchMeta, fetch_all_market_realtime_quote_map_for_codes},
@@ -44,6 +44,13 @@ struct RankCacheEntry {
     ranks: HashMap<String, RankContext>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Return5dContext {
+    latest_close: Option<f64>,
+    realtime_base_close: Option<f64>,
+    daily_base_close: Option<f64>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct AllMarketMonitorRow {
     pub ts_code: String,
@@ -64,6 +71,7 @@ pub struct AllMarketMonitorRow {
     pub realtime_change_open_pct: Option<f64>,
     pub realtime_vol: Option<f64>,
     pub realtime_amount: Option<f64>,
+    pub return_5d_pct: Option<f64>,
     pub total_mv_yi: Option<f64>,
     pub refreshed_at: Option<String>,
 }
@@ -79,6 +87,8 @@ pub struct AllMarketMonitorSnapshotData {
 
 static SOURCE_META_CACHE: OnceLock<Mutex<HashMap<String, SourceMetaCacheEntry>>> = OnceLock::new();
 static RANK_CONTEXT_CACHE: OnceLock<Mutex<HashMap<String, RankCacheEntry>>> = OnceLock::new();
+static RETURN_5D_CONTEXT_CACHE: OnceLock<Mutex<HashMap<String, HashMap<String, Return5dContext>>>> =
+    OnceLock::new();
 
 fn source_meta_cache() -> &'static Mutex<HashMap<String, SourceMetaCacheEntry>> {
     SOURCE_META_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -86,6 +96,10 @@ fn source_meta_cache() -> &'static Mutex<HashMap<String, SourceMetaCacheEntry>> 
 
 fn rank_context_cache() -> &'static Mutex<HashMap<String, RankCacheEntry>> {
     RANK_CONTEXT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn return_5d_context_cache() -> &'static Mutex<HashMap<String, HashMap<String, Return5dContext>>> {
+    RETURN_5D_CONTEXT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn parse_total_mv_yi(raw: Option<&String>) -> Option<f64> {
@@ -142,6 +156,14 @@ fn open_result_conn(source_path: &str) -> Result<Connection, String> {
         .to_str()
         .ok_or_else(|| "结果库路径不是有效UTF-8".to_string())?;
     Connection::open(result_db_str).map_err(|e| format!("打开结果库失败: {e}"))
+}
+
+fn open_source_conn(source_path: &str) -> Result<Connection, String> {
+    let source_db = source_db_path(source_path);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
+    Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))
 }
 
 fn query_latest_rank_date(conn: &Connection) -> Result<String, String> {
@@ -258,6 +280,103 @@ fn cached_rank_context(
     Ok(ranks)
 }
 
+fn load_return_5d_context_map(
+    conn: &Connection,
+    ts_codes: &[String],
+) -> Result<HashMap<String, Return5dContext>, String> {
+    if ts_codes.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let placeholders = std::iter::repeat_n("?", ts_codes.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        r#"
+        SELECT
+            ts_code,
+            MAX(CASE WHEN row_num = 1 THEN close_value ELSE NULL END) AS latest_close,
+            MAX(CASE WHEN row_num = 5 THEN close_value ELSE NULL END) AS realtime_base_close,
+            MAX(CASE WHEN row_num = 6 THEN close_value ELSE NULL END) AS daily_base_close
+        FROM (
+            SELECT
+                ts_code,
+                TRY_CAST(close AS DOUBLE) AS close_value,
+                ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS row_num
+            FROM stock_data
+            WHERE adj_type = ? AND ts_code IN ({placeholders})
+        ) ranked
+        WHERE row_num IN (1, 5, 6)
+        GROUP BY ts_code
+        "#
+    );
+
+    let mut params = Vec::with_capacity(ts_codes.len() + 1);
+    params.push("qfq".to_string());
+    params.extend(ts_codes.iter().cloned());
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("预编译五日涨幅查询失败: {e}"))?;
+    let mut rows = stmt
+        .query(duckdb::params_from_iter(params.iter()))
+        .map_err(|e| format!("查询五日涨幅失败: {e}"))?;
+    let mut out = HashMap::new();
+
+    while let Some(row) = rows.next().map_err(|e| format!("读取五日涨幅失败: {e}"))? {
+        let ts_code: String = row
+            .get(0)
+            .map_err(|e| format!("读取五日涨幅代码失败: {e}"))?;
+        out.insert(
+            ts_code,
+            Return5dContext {
+                latest_close: row
+                    .get(1)
+                    .map_err(|e| format!("读取五日涨幅最新收盘失败: {e}"))?,
+                realtime_base_close: row
+                    .get(2)
+                    .map_err(|e| format!("读取五日涨幅实时基准失败: {e}"))?,
+                daily_base_close: row
+                    .get(3)
+                    .map_err(|e| format!("读取五日涨幅日线基准失败: {e}"))?,
+            },
+        );
+    }
+
+    Ok(out)
+}
+
+fn cached_return_5d_context_map(
+    source_path: &str,
+    conn: &Connection,
+    ts_codes: &[String],
+) -> Result<HashMap<String, Return5dContext>, String> {
+    if let Some(entry) = return_5d_context_cache()
+        .lock()
+        .map_err(|_| "五日涨幅缓存锁已损坏".to_string())?
+        .get(source_path)
+        .cloned()
+    {
+        return Ok(entry);
+    }
+
+    let entry = load_return_5d_context_map(conn, ts_codes)?;
+    return_5d_context_cache()
+        .lock()
+        .map_err(|_| "五日涨幅缓存锁已损坏".to_string())?
+        .insert(source_path.to_string(), entry.clone());
+    Ok(entry)
+}
+
+fn calc_return_pct(price: Option<f64>, base: Option<f64>) -> Option<f64> {
+    match (price, base) {
+        (Some(price), Some(base)) if price.is_finite() && base.is_finite() && base > 0.0 => {
+            Some((price / base - 1.0) * 100.0)
+        }
+        _ => None,
+    }
+}
+
 fn normalize_quote_trade_date(raw: &str) -> Option<String> {
     let digits: String = raw.chars().filter(|ch| ch.is_ascii_digit()).collect();
     if digits.len() == 8 {
@@ -279,6 +398,7 @@ fn build_rows(
     meta: &SourceMetaCacheEntry,
     ranks: &HashMap<String, RankContext>,
     quotes: &HashMap<String, SinaQuote>,
+    return_5d_map: &HashMap<String, Return5dContext>,
     fetch_meta: &RealtimeFetchMeta,
 ) -> Vec<AllMarketMonitorRow> {
     meta.stocks
@@ -286,6 +406,18 @@ fn build_rows(
         .map(|stock| {
             let quote = quotes.get(&stock.ts_code);
             let rank = ranks.get(&stock.ts_code);
+            let return_5d = return_5d_map.get(&stock.ts_code);
+            let return_5d_pct = if let Some(quote) = quote {
+                calc_return_pct(
+                    Some(quote.price),
+                    return_5d.and_then(|item| item.realtime_base_close),
+                )
+            } else {
+                calc_return_pct(
+                    return_5d.and_then(|item| item.latest_close),
+                    return_5d.and_then(|item| item.daily_base_close),
+                )
+            };
             AllMarketMonitorRow {
                 ts_code: stock.ts_code.clone(),
                 name: quote
@@ -309,6 +441,7 @@ fn build_rows(
                 realtime_change_open_pct: quote.and_then(quote_change_open_pct),
                 realtime_vol: quote.map(|item| item.vol),
                 realtime_amount: quote.map(|item| item.amount),
+                return_5d_pct,
                 total_mv_yi: stock.total_mv_yi,
                 refreshed_at: fetch_meta.refreshed_at.clone(),
             }
@@ -330,7 +463,10 @@ pub fn get_all_market_monitor_snapshot(
     let conn = open_result_conn(source_path)?;
     let rank_date = query_latest_rank_date(&conn)?;
     let ranks = cached_rank_context(source_path, &conn, &rank_date)?;
-    let rows = build_rows(&meta, &ranks, &quotes, &fetch_meta);
+    let return_5d_map = open_source_conn(source_path)
+        .and_then(|conn| cached_return_5d_context_map(source_path, &conn, &ts_codes))
+        .unwrap_or_default();
+    let rows = build_rows(&meta, &ranks, &quotes, &return_5d_map, &fetch_meta);
 
     Ok(AllMarketMonitorSnapshotData {
         rows,
@@ -409,7 +545,13 @@ mod tests {
             },
         );
 
-        let rows = build_rows(&sample_meta(), &ranks, &quotes, &sample_fetch_meta());
+        let rows = build_rows(
+            &sample_meta(),
+            &ranks,
+            &quotes,
+            &HashMap::new(),
+            &sample_fetch_meta(),
+        );
 
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].rank, Some(12));

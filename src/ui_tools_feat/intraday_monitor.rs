@@ -8,7 +8,7 @@ use crate::{
     crawler::SinaQuote,
     data::{
         DataReader, RowData, RuntimeKeyCollectOptions, collect_runtime_keys_from_expr_programs,
-        result_db_path, scoring_data::row_into_rt,
+        result_db_path, scoring_data::row_into_rt, source_db_path,
     },
     download::ind_calc::{
         IndsCache, cache_ind_build, calc_inds_with_cache_lossy, warmup_ind_estimate,
@@ -91,6 +91,8 @@ pub struct IntradayMonitorRow {
     pub realtime_change_open_pct: Option<f64>,
     pub realtime_fall_from_high_pct: Option<f64>,
     pub realtime_vol_ratio: Option<f64>,
+    pub return_5d_pct: Option<f64>,
+    pub return_5d_base_close: Option<f64>,
     pub template_tag_text: Option<String>,
     pub template_tag_tone: Option<String>,
 }
@@ -153,6 +155,13 @@ struct LatestTotalRankContext {
     trade_date: String,
     rank: Option<i64>,
     total_score: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Return5dContext {
+    latest_close: Option<f64>,
+    realtime_base_close: Option<f64>,
+    daily_base_close: Option<f64>,
 }
 
 impl IntradayRankMode {
@@ -375,6 +384,89 @@ fn load_latest_total_rank_context_map(
     Ok(out)
 }
 
+fn open_source_conn(source_path: &str) -> Result<Connection, String> {
+    let source_db = source_db_path(source_path);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
+    Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))
+}
+
+fn load_return_5d_context_map(
+    conn: &Connection,
+    ts_codes: &[String],
+) -> Result<HashMap<String, Return5dContext>, String> {
+    if ts_codes.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let placeholders = std::iter::repeat_n("?", ts_codes.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        r#"
+        SELECT
+            ts_code,
+            MAX(CASE WHEN row_num = 1 THEN close_value ELSE NULL END) AS latest_close,
+            MAX(CASE WHEN row_num = 5 THEN close_value ELSE NULL END) AS realtime_base_close,
+            MAX(CASE WHEN row_num = 6 THEN close_value ELSE NULL END) AS daily_base_close
+        FROM (
+            SELECT
+                ts_code,
+                TRY_CAST(close AS DOUBLE) AS close_value,
+                ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS row_num
+            FROM stock_data
+            WHERE adj_type = ? AND ts_code IN ({placeholders})
+        ) ranked
+        WHERE row_num IN (1, 5, 6)
+        GROUP BY ts_code
+        "#
+    );
+
+    let mut params = Vec::with_capacity(ts_codes.len() + 1);
+    params.push(DEFAULT_ADJ_TYPE.to_string());
+    params.extend(ts_codes.iter().cloned());
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("预编译五日涨幅查询失败: {e}"))?;
+    let mut rows = stmt
+        .query(duckdb::params_from_iter(params.iter()))
+        .map_err(|e| format!("查询五日涨幅失败: {e}"))?;
+    let mut out = HashMap::new();
+
+    while let Some(row) = rows.next().map_err(|e| format!("读取五日涨幅失败: {e}"))? {
+        let ts_code: String = row
+            .get(0)
+            .map_err(|e| format!("读取五日涨幅代码失败: {e}"))?;
+        out.insert(
+            ts_code,
+            Return5dContext {
+                latest_close: row
+                    .get(1)
+                    .map_err(|e| format!("读取五日涨幅最新收盘失败: {e}"))?,
+                realtime_base_close: row
+                    .get(2)
+                    .map_err(|e| format!("读取五日涨幅实时基准失败: {e}"))?,
+                daily_base_close: row
+                    .get(3)
+                    .map_err(|e| format!("读取五日涨幅日线基准失败: {e}"))?,
+            },
+        );
+    }
+
+    Ok(out)
+}
+
+fn calc_return_pct(price: Option<f64>, base: Option<f64>) -> Option<f64> {
+    match (price, base) {
+        (Some(price), Some(base)) if price.is_finite() && base.is_finite() && base > 0.0 => {
+            Some((price / base - 1.0) * 100.0)
+        }
+        _ => None,
+    }
+}
+
 fn hydrate_intraday_monitor_rows_from_shared_context(
     source_path: &str,
     rows: &mut [IntradayMonitorRow],
@@ -392,6 +484,9 @@ fn hydrate_intraday_monitor_rows_from_shared_context(
     let total_mv_map = build_total_mv_map(source_path).unwrap_or_default();
     let latest_total_rank_map = open_result_conn(source_path)
         .and_then(|conn| load_latest_total_rank_context_map(&conn, &ts_codes))
+        .unwrap_or_default();
+    let return_5d_map = open_source_conn(source_path)
+        .and_then(|conn| load_return_5d_context_map(&conn, &ts_codes))
         .unwrap_or_default();
 
     for row in rows {
@@ -434,6 +529,15 @@ fn hydrate_intraday_monitor_rows_from_shared_context(
             if row.total_score.is_none() {
                 row.total_score = context.total_score;
             }
+        }
+
+        if let Some(context) = return_5d_map.get(&row.ts_code) {
+            row.return_5d_base_close = context.realtime_base_close;
+            row.return_5d_pct = if row.realtime_price.is_some() {
+                calc_return_pct(row.realtime_price, context.realtime_base_close)
+            } else {
+                calc_return_pct(context.latest_close, context.daily_base_close)
+            };
         }
     }
 }
@@ -1425,6 +1529,7 @@ pub fn refresh_intraday_monitor_realtime(
                 .copied()
                 .filter(|value| *value > 0.0)
                 .map(|value| quote.vol / value);
+            row.return_5d_pct = calc_return_pct(Some(quote.price), row.return_5d_base_close);
         } else {
             row.realtime_trade_date = None;
             row.realtime_price = None;
@@ -1632,6 +1737,8 @@ pub fn get_intraday_monitor_page(
                     realtime_change_open_pct: None,
                     realtime_fall_from_high_pct: None,
                     realtime_vol_ratio: None,
+                    return_5d_pct: None,
+                    return_5d_base_close: None,
                     template_tag_text: None,
                     template_tag_tone: None,
                 });
@@ -1786,6 +1893,8 @@ pub fn get_intraday_monitor_page(
                     realtime_change_open_pct: None,
                     realtime_fall_from_high_pct: None,
                     realtime_vol_ratio: None,
+                    return_5d_pct: None,
+                    return_5d_base_close: None,
                     template_tag_text: None,
                     template_tag_tone: None,
                 });
@@ -1912,6 +2021,8 @@ mod tests {
             realtime_change_open_pct: Some(2.0),
             realtime_fall_from_high_pct: Some(1.0),
             realtime_vol_ratio: Some(1.5),
+            return_5d_pct: None,
+            return_5d_base_close: None,
             template_tag_text: None,
             template_tag_tone: None,
         };
@@ -1954,6 +2065,8 @@ mod tests {
             realtime_change_open_pct: Some(2.0),
             realtime_fall_from_high_pct: Some(1.0),
             realtime_vol_ratio: Some(1.5),
+            return_5d_pct: None,
+            return_5d_base_close: None,
             template_tag_text: None,
             template_tag_tone: None,
         };

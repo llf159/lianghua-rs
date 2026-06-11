@@ -110,6 +110,8 @@ export type IntradayMonitorRow = {
   realtime_change_open_pct?: number | null;
   realtime_fall_from_high_pct?: number | null;
   realtime_vol_ratio?: number | null;
+  return_5d_pct?: number | null;
+  return_5d_base_close?: number | null;
   template_tag_text?: string | null;
   template_tag_tone?: string | null;
   [key: string]: string | number | null | undefined;
@@ -167,6 +169,7 @@ export type AllMarketMonitorRow = {
   realtime_change_open_pct?: number | null;
   realtime_vol?: number | null;
   realtime_amount?: number | null;
+  return_5d_pct?: number | null;
   total_mv_yi?: number | null;
   refreshed_at?: string | null;
 };
