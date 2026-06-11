@@ -7,14 +7,13 @@ import {
 } from 'react-router-dom'
 import type { Location } from 'react-router-dom'
 import PageDesktop from './PageDesktop.tsx'
-import DataDownloadPage from './pages/desktop/DataDownloadPage'
+import DownloadComputePage from './pages/desktop/DownloadComputePage'
 import DataImportPage from './pages/desktop/DataImportPage'
 import DataViewerPage from './pages/desktop/DataViewerPage'
 import DetailsLinkedPage from './pages/desktop/DetailsLinkedPage'
 import OverviewScenePage from './pages/desktop/OverviewScenePage'
 import OverviewRawPage from './pages/desktop/OverviewRawPage'
 import RankingOverviewPage from './pages/desktop/RankingOverviewPage'
-import RankingComputePage from './pages/desktop/RankingComputePage'
 import SettingsPage from './pages/desktop/SettingsPage'
 import StockPickPage from './pages/desktop/StockPickPage'
 import ExpressionStockPickPage from './pages/desktop/ExpressionStockPickPage'
@@ -69,7 +68,7 @@ function AppRoutes() {
           <Route path="details-linked" element={<DetailsLinkedPage />} />
           <Route path="data-import" element={<Navigate to="/raw-data/data-import" replace />} />
           <Route path="data-viewer" element={<Navigate to="/raw-data/data-viewer" replace />} />
-          <Route path="data-download" element={<Navigate to="/raw-data/data-download" replace />} />
+          <Route path="data-download" element={<Navigate to="/raw-data/download-compute" replace />} />
           <Route path="stock-pick" element={<StockPickPage />}>
             <Route index element={<Navigate to="/stock-pick/expression" replace />} />
             <Route path="expression" element={<ExpressionStockPickPage />} />
@@ -89,8 +88,9 @@ function AppRoutes() {
             <Route index element={<Navigate to="/raw-data/data-import" replace />} />
             <Route path="data-import" element={<DataImportPage />} />
             <Route path="data-viewer" element={<DataViewerPage />} />
-            <Route path="data-download" element={<DataDownloadPage />} />
-            <Route path="ranking-compute" element={<RankingComputePage />} />
+            <Route path="download-compute" element={<DownloadComputePage />} />
+            <Route path="data-download" element={<Navigate to="/raw-data/download-compute" replace />} />
+            <Route path="ranking-compute" element={<Navigate to="/raw-data/download-compute" replace />} />
             <Route path="strategy-manage" element={<Navigate to="/strategy/rules" replace />} />
           </Route>
           <Route path="intraday-monitor">

@@ -44,6 +44,10 @@
   gap: 10px;
 }
 
+.ranking-compute-page.is-merged-mode .ranking-compute-summary {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+}
+
 .ranking-compute-summary-item {
   border: 1px solid #e1e7ef;
   border-radius: 10px;
@@ -68,6 +72,11 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ranking-compute-page.is-merged-mode .ranking-compute-summary-item strong {
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .ranking-compute-form {

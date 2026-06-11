@@ -43,8 +43,7 @@ const stockPickSubRoutes = [
 const rawDataSubRoutes = [
   { path: '/raw-data/data-import', label: '管理' },
   { path: '/raw-data/data-viewer', label: '查看' },
-  { path: '/raw-data/data-download', label: '下载' },
-  { path: '/raw-data/ranking-compute', label: '计算' },
+  { path: '/raw-data/download-compute', label: '下载/计算' },
 ]
 
 export default function PageDesktop() {

@@ -1,0 +1,10 @@
+.download-compute-page {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.download-compute-page > .ranking-compute-page,
+.download-compute-page > .data-download-page {
+  min-width: 0;
+}

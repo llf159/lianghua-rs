@@ -2,6 +2,7 @@ import { useDeferredValue, useEffect, useRef, useState } from 'react'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import { inspectManagedSourceStatus, removeManagedSourceFile } from '../../apis/managedSource'
 import {
+  getDataDownloadStatus,
   getIndicatorManagePage,
   listenDataDownloadProgress,
   runStockDataIndicatorColumnsDelete,
@@ -9,6 +10,7 @@ import {
   saveIndicatorManagePage,
   type DataDownloadProgress,
   type DataDownloadRunResult,
+  type DataDownloadStatus,
   type IndicatorManageDraft,
   type IndicatorManageItem,
   type IndicatorManagePageData,
@@ -129,6 +131,67 @@ function describeDbRange(range: RankComputeDbRange | null | undefined) {
   return `${formatTradeDate(range.minTradeDate)} 至 ${formatTradeDate(range.maxTradeDate)}`
 }
 
+function describeDownloadFileRange(
+  fileStatus:
+    | DataDownloadStatus['tradeCalendar']
+    | DataDownloadStatus['stockList']
+    | DataDownloadStatus['thsConcepts']
+    | null
+    | undefined,
+) {
+  if (!fileStatus) {
+    return '读取中...'
+  }
+
+  if (!fileStatus.exists) {
+    return `${fileStatus.fileName} 不存在`
+  }
+
+  if (!fileStatus.minTradeDate && !fileStatus.maxTradeDate) {
+    return `${fileStatus.fileName} 已存在`
+  }
+
+  if (fileStatus.minTradeDate && fileStatus.maxTradeDate) {
+    return `${formatTradeDate(fileStatus.minTradeDate)} 至 ${formatTradeDate(fileStatus.maxTradeDate)}`
+  }
+
+  return formatTradeDate(fileStatus.maxTradeDate ?? fileStatus.minTradeDate)
+}
+
+function describeMissingStockSummary(status: DataDownloadStatus | null) {
+  const repair = status?.missingStockRepair
+  if (!repair) {
+    return '读取中...'
+  }
+
+  if (!repair.ready) {
+    return repair.detail
+  }
+
+  if (repair.missingCount <= 0) {
+    return '无缺失股票'
+  }
+
+  return `${repair.missingCount} 只待补全`
+}
+
+function describeCyqChenMaintenanceSummary(status: DataDownloadStatus | null) {
+  const maintenance = status?.cyqChenMaintenance
+  if (!maintenance) {
+    return '读取中...'
+  }
+
+  if (!maintenance.dbExists) {
+    return '未发现新筹码库'
+  }
+
+  if (!maintenance.hasData) {
+    return '新筹码库暂无数据'
+  }
+
+  return maintenance.strategyChanged ? '策略已变化' : '策略一致'
+}
+
 function describeResultDbContinuity(check: RankComputeResultContinuity | null | undefined) {
   if (!check) {
     return '读取中...'
@@ -217,8 +280,13 @@ function getProgressWorkflow(action: string | null | undefined) {
   }
 }
 
-export default function RankingComputePage() {
+type RankingComputePageProps = {
+  mergedMode?: boolean
+}
+
+export default function RankingComputePage({ mergedMode = false }: RankingComputePageProps) {
   const [status, setStatus] = useState<RankingComputeStatus | null>(null)
+  const [downloadStatus, setDownloadStatus] = useState<DataDownloadStatus | null>(null)
   const [busyAction, setBusyAction] = useState<BusyAction>('loading')
   const [startDateInput, setStartDateInput] = useState('')
   const [endDateInput, setEndDateInput] = useState('')
@@ -542,9 +610,24 @@ export default function RankingComputePage() {
     try {
       const managedStatus = await inspectManagedSourceStatus()
       const nextStatus = await getRankingComputeStatus(managedStatus.sourcePath)
+      let nextDownloadStatus: DataDownloadStatus | null = null
+      let downloadStatusError = ''
+
+      if (mergedMode) {
+        try {
+          nextDownloadStatus = await getDataDownloadStatus(managedStatus.sourcePath)
+        } catch (loadError) {
+          downloadStatusError = `读取下载检查失败: ${String(loadError)}`
+        }
+      }
+
       setStatus(nextStatus)
+      setDownloadStatus(nextDownloadStatus)
       if (!preserveNotice) {
         clearAllFeedback()
+      }
+      if (downloadStatusError) {
+        setFeedbackError('status', downloadStatusError)
       }
 
       setStartDateInput((current) => current || compactDateToInput(nextStatus.suggestedStartDate))
@@ -927,7 +1010,7 @@ export default function RankingComputePage() {
   }
 
   return (
-    <div className="ranking-compute-page">
+    <div className={mergedMode ? 'ranking-compute-page is-merged-mode' : 'ranking-compute-page'}>
       <section className="ranking-compute-card">
         <div className="ranking-compute-head">
           <div>
@@ -936,7 +1019,7 @@ export default function RankingComputePage() {
 
           <div className="ranking-compute-actions">
             <button className="ranking-compute-secondary-btn" type="button" onClick={() => void loadStatus()} disabled={isBusy}>
-              {busyAction === 'loading' ? '刷新中...' : '刷新日期信息'}
+              {busyAction === 'loading' ? '刷新中...' : mergedMode ? '刷新状态' : '刷新日期信息'}
             </button>
           </div>
         </div>
@@ -995,9 +1078,67 @@ export default function RankingComputePage() {
             <small>
               {status?.cyqChenDb
                 ? `${status.cyqChenDb.distinctTradeDates} 个交易日，${status.cyqChenDb.rowCount} 条摘要，${status.cyqChenBinRowCount} 条分桶；预热 ${status.cyqChenWarmupDays ?? '--'} 天，分桶 ${status.cyqChenBucketPct ?? '--'}%。`
-                : '读取中...'}
+              : '读取中...'}
             </small>
           </div>
+          {mergedMode ? (
+            <>
+              <div className="ranking-compute-summary-item">
+                <span>概念表现库</span>
+                <strong>{describeDbRange(downloadStatus?.conceptPerformanceDb)}</strong>
+                <small>
+                  {downloadStatus?.conceptPerformanceDb
+                    ? `${downloadStatus.conceptPerformanceDb.distinctTradeDates} 个交易日，${downloadStatus.conceptPerformanceDb.rowCount} 行`
+                    : '读取中...'}
+                </small>
+              </div>
+              <div className="ranking-compute-summary-item">
+                <span>交易日历</span>
+                <strong>{describeDownloadFileRange(downloadStatus?.tradeCalendar)}</strong>
+                <small>
+                  {downloadStatus?.tradeCalendar
+                    ? `${downloadStatus.tradeCalendar.rowCount} 行`
+                    : '读取中...'}
+                </small>
+              </div>
+              <div className="ranking-compute-summary-item">
+                <span>股票列表</span>
+                <strong>{describeDownloadFileRange(downloadStatus?.stockList)}</strong>
+                <small>
+                  {downloadStatus?.stockList
+                    ? `${downloadStatus.stockList.rowCount} 行`
+                    : '读取中...'}
+                </small>
+              </div>
+              <div className="ranking-compute-summary-item">
+                <span>概念文件</span>
+                <strong>{describeDownloadFileRange(downloadStatus?.thsConcepts)}</strong>
+                <small>
+                  {downloadStatus?.thsConcepts
+                    ? `${downloadStatus.thsConcepts.rowCount} 行`
+                    : '读取中...'}
+                </small>
+              </div>
+              <div className="ranking-compute-summary-item">
+                <span>缺失股票补全</span>
+                <strong>{describeMissingStockSummary(downloadStatus)}</strong>
+                <small>
+                  {downloadStatus?.missingStockRepair
+                    ? downloadStatus.missingStockRepair.detail
+                    : '读取中...'}
+                </small>
+              </div>
+              <div className="ranking-compute-summary-item">
+                <span>新筹码维护</span>
+                <strong>{describeCyqChenMaintenanceSummary(downloadStatus)}</strong>
+                <small>
+                  {downloadStatus?.cyqChenMaintenance
+                    ? downloadStatus.cyqChenMaintenance.detail
+                    : '读取中...'}
+                </small>
+              </div>
+            </>
+          ) : null}
         </div>
 
         {renderCardFeedback('status')}

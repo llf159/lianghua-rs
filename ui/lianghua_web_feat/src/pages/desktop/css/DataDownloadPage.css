@@ -17,6 +17,26 @@
   min-width: 0;
 }
 
+.data-download-page.is-merged-mode .data-download-card {
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: none;
+  padding: 14px;
+  gap: 10px;
+}
+
+.data-download-page.is-merged-mode .data-download-head {
+  align-items: center;
+}
+
+.data-download-page.is-merged-mode .data-download-head p {
+  display: none;
+}
+
+.data-download-page.is-merged-mode .data-download-top-grid {
+  display: block;
+}
+
 .data-download-head {
   display: flex;
   justify-content: space-between;
@@ -117,6 +137,28 @@
     #fffdf9;
 }
 
+.data-download-page.is-merged-mode .data-download-action-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: #fff;
+  padding: 10px 12px;
+}
+
+.data-download-page.is-merged-mode .data-download-action-card p {
+  margin: 0;
+  text-align: right;
+}
+
+.data-download-page.is-merged-mode .data-download-action-card-hero {
+  min-height: 0;
+}
+
+.data-download-page.is-merged-mode .data-download-action-head {
+  flex: 0 0 auto;
+}
+
 .data-download-action-card-hero {
   min-height: 100%;
   align-content: start;
@@ -207,11 +249,27 @@
   gap: 10px 12px;
 }
 
+.data-download-page.is-merged-mode .data-download-form-grid {
+  grid-template-columns: 1fr;
+  gap: 8px 12px;
+  align-items: end;
+}
+
 .data-download-inline-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
   gap: 10px 12px;
   align-items: end;
+}
+
+.data-download-page.is-merged-mode .data-download-inline-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
+  gap: 8px 12px;
+}
+
+.data-download-page.is-merged-mode .data-download-field-span-2,
+.data-download-page.is-merged-mode .data-download-check-span-2 {
+  grid-column: auto;
 }
 
 .data-download-field {
@@ -241,6 +299,11 @@
   background: #fff;
 }
 
+.data-download-page.is-merged-mode .data-download-field input {
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
 .data-download-field input:focus {
   outline: 2px solid rgba(237, 137, 54, 0.35);
   outline-offset: 1px;
@@ -258,6 +321,14 @@
   gap: 10px;
   flex-wrap: wrap;
   background: #fbfcfe;
+}
+
+.data-download-page.is-merged-mode .data-download-check {
+  border: 0;
+  border-radius: 8px;
+  padding: 0;
+  background: transparent;
+  min-height: 36px;
 }
 
 .data-download-check-compact {
@@ -284,6 +355,18 @@
   display: grid;
   gap: 12px;
   background: rgba(255, 255, 255, 0.92);
+}
+
+.data-download-page.is-merged-mode .data-download-panel {
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.data-download-page.is-merged-mode .data-download-panel-grid {
+  grid-template-columns: 1fr;
+  gap: 10px;
 }
 
 .data-download-panel-actions {
@@ -331,6 +414,11 @@
     linear-gradient(90deg, rgba(255, 255, 255, 0.96), rgba(255, 247, 237, 0.96));
 }
 
+.data-download-page.is-merged-mode .data-download-runbar {
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
 .data-download-runbar-copy {
   display: grid;
   gap: 4px;
@@ -346,6 +434,12 @@
   padding: 8px 15px;
   cursor: pointer;
   max-width: 100%;
+}
+
+.data-download-page.is-merged-mode .data-download-primary-btn,
+.data-download-page.is-merged-mode .data-download-secondary-btn {
+  border-radius: 8px;
+  padding: 8px 14px;
 }
 
 .data-download-primary-btn {
@@ -758,6 +852,10 @@
   .data-download-check-span-2 {
     grid-column: span 1;
   }
+
+  .data-download-page.is-merged-mode .data-download-inline-grid {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
+  }
 }
 
 @media (max-width: 720px) {
@@ -794,6 +892,18 @@
 
   .data-download-runbar {
     display: grid;
+  }
+
+  .data-download-page.is-merged-mode .data-download-action-card {
+    display: grid;
+  }
+
+  .data-download-page.is-merged-mode .data-download-action-card p {
+    text-align: left;
+  }
+
+  .data-download-page.is-merged-mode .data-download-inline-grid {
+    grid-template-columns: 1fr;
   }
 
   .data-download-modal {
