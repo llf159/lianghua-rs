@@ -11,7 +11,10 @@ use crate::{
     data::{load_stock_list, result_db_path, source_db_path},
     ui_tools_feat::{
         build_concepts_map,
-        realtime::{RealtimeFetchMeta, fetch_all_market_realtime_quote_map_for_codes},
+        realtime::{
+            RealtimeFetchMeta, fetch_all_market_realtime_quote_map_for_codes,
+            fetch_all_market_tencent_realtime_quote_map_for_codes,
+        },
     },
     utils::utils::board_category,
 };
@@ -71,6 +74,7 @@ pub struct AllMarketMonitorRow {
     pub realtime_change_open_pct: Option<f64>,
     pub realtime_vol: Option<f64>,
     pub realtime_amount: Option<f64>,
+    pub realtime_vol_ratio: Option<f64>,
     pub return_5d_pct: Option<f64>,
     pub total_mv_yi: Option<f64>,
     pub refreshed_at: Option<String>,
@@ -89,6 +93,25 @@ static SOURCE_META_CACHE: OnceLock<Mutex<HashMap<String, SourceMetaCacheEntry>>>
 static RANK_CONTEXT_CACHE: OnceLock<Mutex<HashMap<String, RankCacheEntry>>> = OnceLock::new();
 static RETURN_5D_CONTEXT_CACHE: OnceLock<Mutex<HashMap<String, HashMap<String, Return5dContext>>>> =
     OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RealtimeQuoteProvider {
+    Sina,
+    Tencent,
+}
+
+impl RealtimeQuoteProvider {
+    fn parse(raw: Option<&str>) -> Result<Self, String> {
+        let normalized = raw
+            .map(|value| value.trim().to_ascii_lowercase())
+            .unwrap_or_else(|| "sina".to_string());
+        match normalized.as_str() {
+            "" | "sina" | "sinajs" => Ok(Self::Sina),
+            "tencent" | "qq" | "gtimg" => Ok(Self::Tencent),
+            _ => Err("实时行情源仅支持 sina 或 tencent".to_string()),
+        }
+    }
+}
 
 fn source_meta_cache() -> &'static Mutex<HashMap<String, SourceMetaCacheEntry>> {
     SOURCE_META_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -398,6 +421,7 @@ fn build_rows(
     meta: &SourceMetaCacheEntry,
     ranks: &HashMap<String, RankContext>,
     quotes: &HashMap<String, SinaQuote>,
+    volume_ratio_map: &HashMap<String, f64>,
     return_5d_map: &HashMap<String, Return5dContext>,
     fetch_meta: &RealtimeFetchMeta,
 ) -> Vec<AllMarketMonitorRow> {
@@ -441,6 +465,7 @@ fn build_rows(
                 realtime_change_open_pct: quote.and_then(quote_change_open_pct),
                 realtime_vol: quote.map(|item| item.vol),
                 realtime_amount: quote.map(|item| item.amount),
+                realtime_vol_ratio: volume_ratio_map.get(&stock.ts_code).copied(),
                 return_5d_pct,
                 total_mv_yi: stock.total_mv_yi,
                 refreshed_at: fetch_meta.refreshed_at.clone(),
@@ -451,6 +476,7 @@ fn build_rows(
 
 pub fn get_all_market_monitor_snapshot(
     source_path: &str,
+    realtime_provider: Option<String>,
 ) -> Result<AllMarketMonitorSnapshotData, String> {
     let meta = cached_source_meta(source_path)?;
     let ts_codes = meta
@@ -458,7 +484,28 @@ pub fn get_all_market_monitor_snapshot(
         .iter()
         .map(|item| item.ts_code.clone())
         .collect::<Vec<_>>();
-    let (quotes, fetch_meta) = fetch_all_market_realtime_quote_map_for_codes(&ts_codes)?;
+    let provider = RealtimeQuoteProvider::parse(realtime_provider.as_deref())?;
+    let (quotes, volume_ratio_map, fetch_meta) = match provider {
+        RealtimeQuoteProvider::Sina => {
+            let (quotes, fetch_meta) = fetch_all_market_realtime_quote_map_for_codes(&ts_codes)?;
+            (quotes, HashMap::new(), fetch_meta)
+        }
+        RealtimeQuoteProvider::Tencent => {
+            let (tencent_quotes, fetch_meta) =
+                fetch_all_market_tencent_realtime_quote_map_for_codes(&ts_codes)?;
+            let volume_ratio_map = tencent_quotes
+                .iter()
+                .filter_map(|(ts_code, quote)| {
+                    quote.volume_ratio.map(|value| (ts_code.clone(), value))
+                })
+                .collect::<HashMap<_, _>>();
+            let quotes = tencent_quotes
+                .into_iter()
+                .map(|(ts_code, quote)| (ts_code, quote.into_sina_quote()))
+                .collect::<HashMap<_, _>>();
+            (quotes, volume_ratio_map, fetch_meta)
+        }
+    };
 
     let conn = open_result_conn(source_path)?;
     let rank_date = query_latest_rank_date(&conn)?;
@@ -466,7 +513,14 @@ pub fn get_all_market_monitor_snapshot(
     let return_5d_map = open_source_conn(source_path)
         .and_then(|conn| cached_return_5d_context_map(source_path, &conn, &ts_codes))
         .unwrap_or_default();
-    let rows = build_rows(&meta, &ranks, &quotes, &return_5d_map, &fetch_meta);
+    let rows = build_rows(
+        &meta,
+        &ranks,
+        &quotes,
+        &volume_ratio_map,
+        &return_5d_map,
+        &fetch_meta,
+    );
 
     Ok(AllMarketMonitorSnapshotData {
         rows,
@@ -549,6 +603,7 @@ mod tests {
             &sample_meta(),
             &ranks,
             &quotes,
+            &HashMap::new(),
             &HashMap::new(),
             &sample_fetch_meta(),
         );

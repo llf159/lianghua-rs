@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    crawler::SinaQuote,
+    crawler::{SinaQuote, TencentQuote},
     data::{
         DataReader, RowData, RuntimeKeyCollectOptions, collect_runtime_keys_from_expr_programs,
         result_db_path, scoring_data::row_into_rt, source_db_path,
@@ -24,15 +24,17 @@ use crate::{
         load_total_share_map, rt_max_len,
     },
     ui_tools_feat::{
-        build_concepts_map, build_latest_vol_map, build_name_map, build_total_mv_map, filter_mv,
-        realtime::{fetch_realtime_quote_map, normalize_quote_trade_date},
+        build_concepts_map, build_name_map, build_total_mv_map, filter_mv,
+        realtime::{
+            fetch_realtime_quote_map, fetch_tencent_realtime_quote_map, normalize_quote_trade_date,
+        },
     },
     utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
 };
 
 const BOARD_ST: &str = "ST";
 const DEFAULT_ADJ_TYPE: &str = "qfq";
-const INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS: [&str; 11] = [
+const INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS: [&str; 10] = [
     "RANK",
     "SCORE",
     "ZHANG",
@@ -40,10 +42,9 @@ const INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS: [&str; 11] = [
     "RT_OP",
     "RT_FH",
     "RT_VR",
+    "RT_AVG",
     "REALTIME_CHANGE_OPEN_PCT",
     "REALTIME_FALL_FROM_HIGH_PCT",
-    "REALTIME_VOL_RATIO",
-    "VOL_RATIO",
 ];
 const INTRADAY_TEMPLATE_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 const RUNTIME_INPUT_KEYS: [&str; 11] = [
@@ -85,6 +86,7 @@ pub struct IntradayMonitorRow {
     pub realtime_high: Option<f64>,
     pub realtime_low: Option<f64>,
     pub realtime_pre_close: Option<f64>,
+    pub realtime_avg_price: Option<f64>,
     pub realtime_vol: Option<f64>,
     pub realtime_amount: Option<f64>,
     pub realtime_change_pct: Option<f64>,
@@ -138,6 +140,12 @@ enum IntradayRankMode {
     Scene,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealtimeQuoteProvider {
+    Sina,
+    Tencent,
+}
+
 #[derive(Debug, Clone)]
 struct ReadyIntradayMonitorTemplate {
     name: String,
@@ -187,6 +195,19 @@ impl IntradayRankMode {
         match self {
             Self::Total => "score_summary",
             Self::Scene => "scene_details",
+        }
+    }
+}
+
+impl RealtimeQuoteProvider {
+    pub fn parse(raw: Option<&str>) -> Result<Self, String> {
+        let normalized = raw
+            .map(|value| value.trim().to_ascii_lowercase())
+            .unwrap_or_else(|| "sina".to_string());
+        match normalized.as_str() {
+            "" | "sina" | "sinajs" => Ok(Self::Sina),
+            "tencent" | "qq" | "gtimg" => Ok(Self::Tencent),
+            _ => Err("实时行情源仅支持 sina 或 tencent".to_string()),
         }
     }
 }
@@ -763,10 +784,9 @@ fn inject_template_validation_extra_series(row_data: &mut RowData) -> Result<(),
         "RT_OP",
         "RT_FH",
         "RT_VR",
+        "RT_AVG",
         "REALTIME_CHANGE_OPEN_PCT",
         "REALTIME_FALL_FROM_HIGH_PCT",
-        "REALTIME_VOL_RATIO",
-        "VOL_RATIO",
     ] {
         let mut series = vec![None; len];
         if let Some(last) = series.last_mut() {
@@ -896,10 +916,9 @@ fn build_intraday_template_validation_row_data(
         "RT_OP",
         "RT_FH",
         "RT_VR",
+        "RT_AVG",
         "REALTIME_CHANGE_OPEN_PCT",
         "REALTIME_FALL_FROM_HIGH_PCT",
-        "REALTIME_VOL_RATIO",
-        "VOL_RATIO",
     ] {
         let mut series = vec![None; len];
         if let Some(last) = series.last_mut() {
@@ -1022,13 +1041,12 @@ fn attach_runtime_extra_series(
             ("RT_OP", row.realtime_change_open_pct),
             ("RT_FH", row.realtime_fall_from_high_pct),
             ("RT_VR", row.realtime_vol_ratio),
+            ("RT_AVG", row.realtime_avg_price),
             ("REALTIME_CHANGE_OPEN_PCT", row.realtime_change_open_pct),
             (
                 "REALTIME_FALL_FROM_HIGH_PCT",
                 row.realtime_fall_from_high_pct,
             ),
-            ("REALTIME_VOL_RATIO", row.realtime_vol_ratio),
-            ("VOL_RATIO", row.realtime_vol_ratio),
         ],
     )
 }
@@ -1477,11 +1495,78 @@ fn build_quote_from_row(row: &IntradayMonitorRow) -> Result<Option<SinaQuote>, S
     }))
 }
 
+fn apply_sina_quote_to_intraday_row(row: &mut IntradayMonitorRow, quote: &SinaQuote) {
+    row.realtime_trade_date = normalize_quote_trade_date(&quote.date);
+    row.realtime_price = Some(quote.price);
+    row.realtime_open = Some(quote.open);
+    row.realtime_high = Some(quote.high);
+    row.realtime_low = Some(quote.low);
+    row.realtime_pre_close = Some(quote.pre_close);
+    row.realtime_avg_price = None;
+    row.realtime_vol = Some(quote.vol);
+    row.realtime_amount = Some(quote.amount);
+    row.realtime_change_pct = quote.change_pct;
+    row.realtime_change_open_pct = if quote.open > 0.0 {
+        Some((quote.price / quote.open - 1.0) * 100.0)
+    } else {
+        None
+    };
+    row.realtime_fall_from_high_pct = if quote.high > 0.0 {
+        Some(((quote.high - quote.price) / quote.high).max(0.0) * 100.0)
+    } else {
+        None
+    };
+    row.realtime_vol_ratio = None;
+    row.return_5d_pct = calc_return_pct(Some(quote.price), row.return_5d_base_close);
+}
+
+fn apply_tencent_quote_to_intraday_row(row: &mut IntradayMonitorRow, quote: &TencentQuote) {
+    row.realtime_trade_date = normalize_quote_trade_date(&quote.date);
+    row.realtime_price = Some(quote.price);
+    row.realtime_open = Some(quote.open);
+    row.realtime_high = Some(quote.high);
+    row.realtime_low = Some(quote.low);
+    row.realtime_pre_close = Some(quote.pre_close);
+    row.realtime_avg_price = quote.avg_price;
+    row.realtime_vol = Some(quote.vol);
+    row.realtime_amount = Some(quote.amount);
+    row.realtime_change_pct = quote.change_pct;
+    row.realtime_change_open_pct = if quote.open > 0.0 {
+        Some((quote.price / quote.open - 1.0) * 100.0)
+    } else {
+        None
+    };
+    row.realtime_fall_from_high_pct = if quote.high > 0.0 {
+        Some(((quote.high - quote.price) / quote.high).max(0.0) * 100.0)
+    } else {
+        None
+    };
+    row.realtime_vol_ratio = quote.volume_ratio;
+    row.return_5d_pct = calc_return_pct(Some(quote.price), row.return_5d_base_close);
+}
+
+fn clear_realtime_intraday_row(row: &mut IntradayMonitorRow) {
+    row.realtime_trade_date = None;
+    row.realtime_price = None;
+    row.realtime_open = None;
+    row.realtime_high = None;
+    row.realtime_low = None;
+    row.realtime_pre_close = None;
+    row.realtime_avg_price = None;
+    row.realtime_vol = None;
+    row.realtime_amount = None;
+    row.realtime_change_pct = None;
+    row.realtime_change_open_pct = None;
+    row.realtime_fall_from_high_pct = None;
+    row.realtime_vol_ratio = None;
+}
+
 pub fn refresh_intraday_monitor_realtime(
     source_path: &str,
     rows: Vec<IntradayMonitorRow>,
     templates: Vec<IntradayMonitorTemplate>,
     rank_mode_configs: Vec<IntradayMonitorRankModeConfig>,
+    realtime_provider: Option<String>,
 ) -> Result<IntradayMonitorPageData, String> {
     if rows.is_empty() {
         return Ok(IntradayMonitorPageData {
@@ -1500,51 +1585,35 @@ pub fn refresh_intraday_monitor_realtime(
         .iter()
         .map(|item| item.ts_code.clone())
         .collect::<Vec<_>>();
-    let latest_vol_map = build_latest_vol_map(source_path, &ts_codes).unwrap_or_default();
-    let (quote_map, fetch_meta) = fetch_realtime_quote_map(&ts_codes)?;
-
-    for row in &mut next_rows {
-        if let Some(quote) = quote_map.get(&row.ts_code) {
-            row.realtime_trade_date = normalize_quote_trade_date(&quote.date);
-            row.realtime_price = Some(quote.price);
-            row.realtime_open = Some(quote.open);
-            row.realtime_high = Some(quote.high);
-            row.realtime_low = Some(quote.low);
-            row.realtime_pre_close = Some(quote.pre_close);
-            row.realtime_vol = Some(quote.vol);
-            row.realtime_amount = Some(quote.amount);
-            row.realtime_change_pct = quote.change_pct;
-            row.realtime_change_open_pct = if quote.open > 0.0 {
-                Some((quote.price / quote.open - 1.0) * 100.0)
-            } else {
-                None
-            };
-            row.realtime_fall_from_high_pct = if quote.high > 0.0 {
-                Some(((quote.high - quote.price) / quote.high).max(0.0) * 100.0)
-            } else {
-                None
-            };
-            row.realtime_vol_ratio = latest_vol_map
-                .get(&row.ts_code)
-                .copied()
-                .filter(|value| *value > 0.0)
-                .map(|value| quote.vol / value);
-            row.return_5d_pct = calc_return_pct(Some(quote.price), row.return_5d_base_close);
-        } else {
-            row.realtime_trade_date = None;
-            row.realtime_price = None;
-            row.realtime_open = None;
-            row.realtime_high = None;
-            row.realtime_low = None;
-            row.realtime_pre_close = None;
-            row.realtime_vol = None;
-            row.realtime_amount = None;
-            row.realtime_change_pct = None;
-            row.realtime_change_open_pct = None;
-            row.realtime_fall_from_high_pct = None;
-            row.realtime_vol_ratio = None;
+    let provider = RealtimeQuoteProvider::parse(realtime_provider.as_deref())?;
+    let (quote_map, fetch_meta) = match provider {
+        RealtimeQuoteProvider::Sina => {
+            let (quote_map, fetch_meta) = fetch_realtime_quote_map(&ts_codes)?;
+            for row in &mut next_rows {
+                if let Some(quote) = quote_map.get(&row.ts_code) {
+                    apply_sina_quote_to_intraday_row(row, quote);
+                } else {
+                    clear_realtime_intraday_row(row);
+                }
+            }
+            (quote_map, fetch_meta)
         }
-    }
+        RealtimeQuoteProvider::Tencent => {
+            let (tencent_quote_map, fetch_meta) = fetch_tencent_realtime_quote_map(&ts_codes)?;
+            for row in &mut next_rows {
+                if let Some(quote) = tencent_quote_map.get(&row.ts_code) {
+                    apply_tencent_quote_to_intraday_row(row, quote);
+                } else {
+                    clear_realtime_intraday_row(row);
+                }
+            }
+            let quote_map = tencent_quote_map
+                .into_iter()
+                .map(|(ts_code, quote)| (ts_code, quote.into_sina_quote()))
+                .collect::<HashMap<_, _>>();
+            (quote_map, fetch_meta)
+        }
+    };
 
     let warning_message = apply_intraday_template_tags(
         source_path,
@@ -1731,6 +1800,7 @@ pub fn get_intraday_monitor_page(
                     realtime_high: None,
                     realtime_low: None,
                     realtime_pre_close: None,
+                    realtime_avg_price: None,
                     realtime_vol: None,
                     realtime_amount: None,
                     realtime_change_pct: None,
@@ -1887,6 +1957,7 @@ pub fn get_intraday_monitor_page(
                     realtime_high: None,
                     realtime_low: None,
                     realtime_pre_close: None,
+                    realtime_avg_price: None,
                     realtime_vol: None,
                     realtime_amount: None,
                     realtime_change_pct: None,
@@ -2015,6 +2086,7 @@ mod tests {
             realtime_high: Some(10.5),
             realtime_low: Some(9.8),
             realtime_pre_close: Some(9.9),
+            realtime_avg_price: Some(10.1),
             realtime_vol: Some(1234.0),
             realtime_amount: Some(5678.0),
             realtime_change_pct: Some(3.03),
@@ -2059,6 +2131,7 @@ mod tests {
             realtime_high: Some(10.5),
             realtime_low: Some(9.8),
             realtime_pre_close: Some(9.9),
+            realtime_avg_price: Some(10.1),
             realtime_vol: Some(1234.0),
             realtime_amount: Some(5678.0),
             realtime_change_pct: Some(3.03),

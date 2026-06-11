@@ -37,6 +37,12 @@ import {
   type BacktestHighlightSettings,
   writeStoredBacktestHighlightSettings,
 } from '../../shared/backtestHighlightSettings'
+import {
+  getRealtimeQuoteProviderLabel,
+  readStoredRealtimeQuoteProvider,
+  writeStoredRealtimeQuoteProvider,
+  type RealtimeQuoteProvider,
+} from '../../shared/realtimeSettings'
 import './css/DataImportPage.css'
 import './css/StockPickPage.css'
 import './css/DetailsPage.css'
@@ -62,6 +68,7 @@ type SettingsModalType =
   | 'detail-cyq-model'
   | 'details-nav-long-press'
   | 'backtest-highlight'
+  | 'realtime-provider'
   | null
 
 function getDetailCyqModelLabel(value: DetailCyqModel) {
@@ -95,6 +102,7 @@ export default function SettingsPage() {
     () => String(readStoredDetailsNavLongPressIntervalSeconds()),
   )
   const [detailCyqModel, setDetailCyqModel] = useState(() => readStoredDetailCyqModel())
+  const [realtimeQuoteProvider, setRealtimeQuoteProvider] = useState(() => readStoredRealtimeQuoteProvider())
   const [detailsNavLongPressSettingError, setDetailsNavLongPressSettingError] = useState('')
   const [detailsNavLongPressSettingNotice, setDetailsNavLongPressSettingNotice] = useState('')
   const [backtestHighlightIcThresholdInput, setBacktestHighlightIcThresholdInput] = useState(
@@ -133,6 +141,7 @@ export default function SettingsPage() {
   const isDetailCyqModelSettingOpen = activeModal === 'detail-cyq-model'
   const isDetailsNavLongPressSettingOpen = activeModal === 'details-nav-long-press'
   const isBacktestHighlightSettingOpen = activeModal === 'backtest-highlight'
+  const isRealtimeProviderSettingOpen = activeModal === 'realtime-provider'
 
   useEffect(() => {
     let cancelled = false
@@ -292,6 +301,11 @@ export default function SettingsPage() {
     setActiveModal('detail-cyq-model')
   }
 
+  function openRealtimeProviderSetting() {
+    setRealtimeQuoteProvider(readStoredRealtimeQuoteProvider())
+    setActiveModal('realtime-provider')
+  }
+
   const onChartIndicatorSettingsLoaded = useCallback((nextPayload: ChartIndicatorSettingsPayload) => {
     setChartIndicatorSettingsPayload(nextPayload)
     setChartIndicatorSettingsStatus(getChartIndicatorSettingsStatus(nextPayload))
@@ -362,6 +376,11 @@ export default function SettingsPage() {
   function onSelectDetailCyqModel(nextModel: DetailCyqModel) {
     writeStoredDetailCyqModel(nextModel)
     setDetailCyqModel(nextModel)
+  }
+
+  function onSelectRealtimeQuoteProvider(nextProvider: RealtimeQuoteProvider) {
+    const normalizedProvider = writeStoredRealtimeQuoteProvider(nextProvider)
+    setRealtimeQuoteProvider(normalizedProvider)
   }
 
   function onSaveBacktestHighlightSettings() {
@@ -488,6 +507,14 @@ export default function SettingsPage() {
               <span>控制个股详情页筹码分布使用旧筹码库还是新筹码库。</span>
             </div>
             <span className="settings-list-item-value">{getDetailCyqModelLabel(detailCyqModel)}</span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openRealtimeProviderSetting}>
+            <div className="settings-list-item-main">
+              <strong>实时行情源</strong>
+              <span>控制实时监控刷新使用新浪还是腾讯行情。</span>
+            </div>
+            <span className="settings-list-item-value">{getRealtimeQuoteProviderLabel(realtimeQuoteProvider)}</span>
           </button>
 
           <button className="settings-list-item" type="button" onClick={openDetailsNavLongPressSetting}>
@@ -709,6 +736,51 @@ export default function SettingsPage() {
             <div className="settings-actions">
               <button className="settings-primary-btn" type="button" onClick={onSaveDetailsNavLongPressInterval}>
                 保存
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isRealtimeProviderSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="实时行情源设置">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">实时行情源</h3>
+                <p className="settings-section-note">
+                  腾讯行情会返回均价和盘中量比；新浪没有对应字段时实时监控留空。
+                </p>
+              </div>
+              <div className="settings-actions">
+                <button className="settings-primary-btn" type="button" onClick={closeActiveModal}>
+                  完成
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-actions settings-actions-left">
+              <button
+                className={realtimeQuoteProvider === 'sina' ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
+                type="button"
+                onClick={() => onSelectRealtimeQuoteProvider('sina')}
+              >
+                新浪
+              </button>
+              <button
+                className={realtimeQuoteProvider === 'tencent' ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
+                type="button"
+                onClick={() => onSelectRealtimeQuoteProvider('tencent')}
+              >
+                腾讯
               </button>
             </div>
           </section>

@@ -104,6 +104,7 @@ export type IntradayMonitorRow = {
   realtime_high?: number | null;
   realtime_low?: number | null;
   realtime_pre_close?: number | null;
+  realtime_avg_price?: number | null;
   realtime_vol?: number | null;
   realtime_amount?: number | null;
   realtime_change_pct?: number | null;
@@ -169,6 +170,7 @@ export type AllMarketMonitorRow = {
   realtime_change_open_pct?: number | null;
   realtime_vol?: number | null;
   realtime_amount?: number | null;
+  realtime_vol_ratio?: number | null;
   return_5d_pct?: number | null;
   total_mv_yi?: number | null;
   refreshed_at?: string | null;
@@ -187,6 +189,7 @@ export type IntradayRealtimeRefreshQuery = {
   rows: IntradayMonitorRow[];
   templates: IntradayMonitorTemplate[];
   rankModeConfigs: IntradayMonitorRankModeConfig[];
+  realtimeProvider?: "sina" | "tencent";
 };
 
 export type IntradayMonitorTemplateValidationData = {
@@ -253,10 +256,13 @@ export async function validateIntradayMonitorTemplateExpression(
   );
 }
 
-export async function getAllMarketMonitorSnapshot(sourcePath: string) {
+export async function getAllMarketMonitorSnapshot(
+  sourcePath: string,
+  realtimeProvider?: "sina" | "tencent",
+) {
   return invoke<AllMarketMonitorSnapshotData>(
     "get_all_market_monitor_snapshot",
-    { sourcePath },
+    { sourcePath, realtimeProvider },
   );
 }
 

@@ -33,6 +33,7 @@ import {
   normalizeTradeDates,
   pickDateValue,
 } from "../../shared/tradeDate";
+import { readStoredRealtimeQuoteProvider } from "../../shared/realtimeSettings";
 import "./css/IntradayMonitorRealtimePage.css";
 
 const INTRADAY_MONITOR_PAGE_STATE_KEY = "lh_intraday_monitor_realtime_page_v2";
@@ -52,6 +53,7 @@ const TOTAL_MODE_COLUMNS = [
   "ts_code",
   "name",
   "realtime_price",
+  "realtime_avg_price",
   "realtime_change_pct",
   "return_5d_pct",
   "speed_pct",
@@ -69,6 +71,7 @@ const SCENE_MODE_COLUMNS = [
   "ts_code",
   "name",
   "realtime_price",
+  "realtime_avg_price",
   "realtime_change_pct",
   "return_5d_pct",
   "speed_pct",
@@ -89,6 +92,7 @@ type VisibleColumn = TotalModeColumn | SceneModeColumn;
 type NumericVisibleColumn =
   | "rank"
   | "realtime_price"
+  | "realtime_avg_price"
   | "realtime_change_pct"
   | "return_5d_pct"
   | "speed_pct"
@@ -150,11 +154,12 @@ const COLUMN_LABELS: Record<VisibleColumn, string> = {
   ts_code: "代码",
   name: "名称",
   realtime_price: "实时价*",
+  realtime_avg_price: "均价*",
   realtime_change_pct: "实时涨幅*",
   return_5d_pct: "五日涨幅",
   speed_pct: "涨速*",
   template_tag: "模板标记",
-  realtime_vol_ratio: "实时量比*",
+  realtime_vol_ratio: "盘中量比*",
   total_score: "总分",
   scene_score: "场景分",
   risk_score: "风险分",
@@ -170,6 +175,7 @@ const COLUMN_WIDTHS: Record<VisibleColumn, number> = {
   ts_code: 112,
   name: 110,
   realtime_price: 96,
+  realtime_avg_price: 96,
   realtime_change_pct: 108,
   return_5d_pct: 100,
   speed_pct: 92,
@@ -186,6 +192,7 @@ const COLUMN_WIDTHS: Record<VisibleColumn, number> = {
 
 const DELTA_COLUMNS = new Set<VisibleColumn>([
   "realtime_price",
+  "realtime_avg_price",
   "realtime_change_pct",
   "return_5d_pct",
   "realtime_vol_ratio",
@@ -380,6 +387,8 @@ function formatCell(
   if (key === "total_score") return formatNumber(row.total_score);
   if (key === "total_mv_yi") return formatNumber(row.total_mv_yi);
   if (key === "realtime_price") return formatNumber(row.realtime_price);
+  if (key === "realtime_avg_price")
+    return formatNumber(row.realtime_avg_price);
   if (key === "realtime_change_pct")
     return formatPercent(row.realtime_change_pct);
   if (key === "return_5d_pct") return formatPercent(row.return_5d_pct);
@@ -1094,6 +1103,7 @@ export default function IntradayMonitorRealtimePage() {
 
     const runId = ++refreshRunIdRef.current;
     const isRealtimeRefresh = actionLabel === "刷新实时";
+    const realtimeProvider = readStoredRealtimeQuoteProvider();
 
     setLoading(true);
     setLoadingAction(actionLabel);
@@ -1208,6 +1218,7 @@ export default function IntradayMonitorRealtimePage() {
             rows: rowsToRefresh.slice(start, start + REFRESH_BATCH_SIZE),
             templates,
             rankModeConfigs,
+            realtimeProvider,
           });
           if (runId !== refreshRunIdRef.current) return;
           refreshedRows.push(...(data.rows ?? []));
@@ -1304,6 +1315,7 @@ export default function IntradayMonitorRealtimePage() {
       const refreshedRows: IntradayMonitorRow[] = [];
       let refreshed = "";
       let warningMessage = "";
+      const realtimeProvider = readStoredRealtimeQuoteProvider();
       for (
         let start = 0;
         start < targetRows.length;
@@ -1314,6 +1326,7 @@ export default function IntradayMonitorRealtimePage() {
           rows: targetRows.slice(start, start + REFRESH_BATCH_SIZE),
           templates,
           rankModeConfigs,
+          realtimeProvider,
         });
         refreshedRows.push(...(data.rows ?? []));
         if (!refreshed) refreshed = data.refreshedAt ?? "";

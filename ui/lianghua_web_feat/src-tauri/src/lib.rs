@@ -618,9 +618,16 @@ async fn refresh_intraday_monitor_realtime(
     rows: Vec<IntradayMonitorRow>,
     templates: Vec<IntradayMonitorTemplate>,
     rank_mode_configs: Vec<IntradayMonitorRankModeConfig>,
+    realtime_provider: Option<String>,
 ) -> Result<IntradayMonitorPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        core_refresh_intraday_monitor_realtime(&source_path, rows, templates, rank_mode_configs)
+        core_refresh_intraday_monitor_realtime(
+            &source_path,
+            rows,
+            templates,
+            rank_mode_configs,
+            realtime_provider,
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -656,9 +663,10 @@ fn validate_intraday_monitor_template_expression(
 #[tauri::command]
 async fn get_all_market_monitor_snapshot(
     source_path: String,
+    realtime_provider: Option<String>,
 ) -> Result<AllMarketMonitorSnapshotData, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        core_get_all_market_monitor_snapshot(&source_path)
+        core_get_all_market_monitor_snapshot(&source_path, realtime_provider)
     })
     .await
     .map_err(|error| error.to_string())?

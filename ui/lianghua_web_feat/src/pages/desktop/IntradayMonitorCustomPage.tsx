@@ -13,6 +13,7 @@ import {
   formatConceptText,
   useConceptExclusions,
 } from '../../shared/conceptExclusions'
+import { readStoredRealtimeQuoteProvider } from '../../shared/realtimeSettings'
 import { normalizeTsCode } from '../../shared/stockCode'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
 import './css/IntradayMonitorCustomPage.css'
@@ -35,6 +36,7 @@ type PersistedCustomMonitorState = {
 
 type DeltaColumn =
   | 'realtime_price'
+  | 'realtime_avg_price'
   | 'realtime_change_pct'
   | 'return_5d_pct'
   | 'realtime_vol_ratio'
@@ -46,6 +48,7 @@ type PriceSnapshot = {
 
 const DELTA_COLUMNS = new Set<DeltaColumn>([
   'realtime_price',
+  'realtime_avg_price',
   'realtime_change_pct',
   'return_5d_pct',
   'realtime_vol_ratio',
@@ -442,6 +445,7 @@ export default function IntradayMonitorCustomPage() {
       rank: null,
       total_mv_yi: null,
       realtime_price: null,
+      realtime_avg_price: null,
       realtime_change_pct: null,
       realtime_change_open_pct: null,
       realtime_vol_ratio: null,
@@ -488,6 +492,7 @@ export default function IntradayMonitorCustomPage() {
         rows,
         templates,
         rankModeConfigs,
+        realtimeProvider: readStoredRealtimeQuoteProvider(),
       })
       const nextRows = result.rows ?? []
       setRowDeltas(buildRowDeltaMap(rows, nextRows))
@@ -705,12 +710,13 @@ export default function IntradayMonitorCustomPage() {
           <div className="intraday-custom-table-wrap">
             <table
               className="intraday-custom-table"
-              style={{ minWidth: '1430px' }}
+              style={{ minWidth: '1526px' }}
             >
               <colgroup>
                 <col style={{ width: 72 }} />
                 <col style={{ width: 112 }} />
                 <col style={{ width: 110 }} />
+                <col style={{ width: 96 }} />
                 <col style={{ width: 96 }} />
                 <col style={{ width: 108 }} />
                 <col style={{ width: 100 }} />
@@ -727,11 +733,12 @@ export default function IntradayMonitorCustomPage() {
                   <th>代码</th>
                   <th>名称</th>
                   <th>实时价*</th>
+                  <th>均价*</th>
                   <th>实时涨幅*</th>
                   <th>五日涨幅</th>
                   <th>涨速*</th>
                   <th>模板标记</th>
-                  <th>实时量比*</th>
+                  <th>盘中量比*</th>
                   <th>板块</th>
                   <th>总市值(亿)</th>
                   <th>概念</th>
@@ -740,7 +747,7 @@ export default function IntradayMonitorCustomPage() {
               <tbody>
                 {rows.length === 0 ? (
                   <tr>
-                    <td colSpan={12} className="intraday-custom-empty-cell">
+                    <td colSpan={13} className="intraday-custom-empty-cell">
                       暂无数据
                     </td>
                   </tr>
@@ -750,6 +757,12 @@ export default function IntradayMonitorCustomPage() {
                     const priceDeltaText = formatDeltaValue(
                       'realtime_price',
                       priceDelta,
+                    )
+                    const avgPriceDelta =
+                      rowDeltas[getRowKey(row)]?.realtime_avg_price
+                    const avgPriceDeltaText = formatDeltaValue(
+                      'realtime_avg_price',
+                      avgPriceDelta,
                     )
                     const pctDelta =
                       rowDeltas[getRowKey(row)]?.realtime_change_pct
@@ -804,6 +817,23 @@ export default function IntradayMonitorCustomPage() {
                                 ].join(' ')}
                               >
                                 {priceDeltaText}
+                              </span>
+                            ) : null}
+                          </span>
+                        </td>
+                        <td>
+                          <span className="intraday-custom-cell-value">
+                            <span>{formatNumber(row.realtime_avg_price)}</span>
+                            {avgPriceDeltaText ? (
+                              <span
+                                className={[
+                                  'intraday-custom-delta',
+                                  (avgPriceDelta ?? 0) > 0
+                                    ? 'intraday-custom-delta-up'
+                                    : 'intraday-custom-delta-down',
+                                ].join(' ')}
+                              >
+                                {avgPriceDeltaText}
                               </span>
                             ) : null}
                           </span>

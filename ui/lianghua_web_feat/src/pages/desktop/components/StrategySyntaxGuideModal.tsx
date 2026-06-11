@@ -121,7 +121,8 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     fields: [
       { name: 'RT_OP', scope: '实时监控', description: '当前价相对今开涨跌幅，单位是百分比。', example: 'RT_OP >= 2' },
       { name: 'RT_FH', scope: '实时监控', description: '当前价相对于今日高点的回落幅度，单位是百分比；返回值恒为非负数。', example: 'RT_FH <= 1.5' },
-      { name: 'RT_VR', scope: '实时监控', description: '当前实时累计成交量 ÷ stock_data 中最新历史日的 vol。', example: 'RT_VR >= 2' },
+      { name: 'RT_VR', scope: '实时监控', description: '行情源返回的盘中量比；新浪源没有该字段时为空。', example: 'RT_VR >= 2' },
+      { name: 'RT_AVG', scope: '实时监控', description: '行情源返回的均价；新浪源没有该字段时为空。', example: 'C > RT_AVG' },
       { name: 'RANK', scope: '实时监控', description: '按当前榜单模式注入的历史排名序列；总榜读取 score_summary.rank，场景榜读取 scene_details.scene_rank；runtime 最新一根固定留空。', example: 'RANK <= 100 AND RT_OP >= 2' },
     ],
   },

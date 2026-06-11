@@ -9,6 +9,7 @@ import {
   formatConceptText,
   useConceptExclusions,
 } from "../../shared/conceptExclusions";
+import { readStoredRealtimeQuoteProvider } from "../../shared/realtimeSettings";
 import { STOCK_PICK_BOARD_OPTIONS } from "../../shared/stockPickShared";
 import {
   TableSortButton,
@@ -34,6 +35,7 @@ type SortKey =
   | "realtime_change_pct"
   | "return_5d_pct"
   | "speed_pct"
+  | "realtime_vol_ratio"
   | "realtime_change_open_pct"
   | "total_mv_yi";
 
@@ -220,7 +222,10 @@ export default function AllMarketMonitorPage() {
     inFlightRef.current = true;
     setLoading(true);
     try {
-      const result = await getAllMarketMonitorSnapshot(sourcePathTrimmed);
+      const result = await getAllMarketMonitorSnapshot(
+        sourcePathTrimmed,
+        readStoredRealtimeQuoteProvider(),
+      );
       if (!enabledRef.current) return;
 
       const capturedAt = Date.now();
@@ -363,6 +368,9 @@ export default function AllMarketMonitorPage() {
       },
       return_5d_pct: { value: (row: DisplayRow) => row.return_5d_pct },
       speed_pct: { value: (row: DisplayRow) => row.speed_pct },
+      realtime_vol_ratio: {
+        value: (row: DisplayRow) => row.realtime_vol_ratio,
+      },
       realtime_change_open_pct: {
         value: (row: DisplayRow) => row.realtime_change_open_pct,
       },
@@ -633,6 +641,14 @@ export default function AllMarketMonitorPage() {
                   </th>
                   <th
                     aria-sort={getAriaSort(
+                      sortKey === "realtime_vol_ratio",
+                      sortDirection,
+                    )}
+                  >
+                    {renderSortHeader("盘中量比", "realtime_vol_ratio")}
+                  </th>
+                  <th
+                    aria-sort={getAriaSort(
                       sortKey === "realtime_change_open_pct",
                       sortDirection,
                     )}
@@ -694,6 +710,7 @@ export default function AllMarketMonitorPage() {
                         <td className={getPercentClassName(row.speed_pct)}>
                           {formatPercent(row.speed_pct)}
                         </td>
+                        <td>{formatNumber(row.realtime_vol_ratio)}</td>
                         <td
                           className={getPercentClassName(
                             row.realtime_change_open_pct,
@@ -710,7 +727,7 @@ export default function AllMarketMonitorPage() {
                   })
                 ) : (
                   <tr>
-                    <td colSpan={9} className="all-market-empty">
+                    <td colSpan={10} className="all-market-empty">
                       {enabled ? "等待全市场行情返回。" : "开启爬虫后开始刷新。"}
                     </td>
                   </tr>
@@ -839,6 +856,10 @@ export default function AllMarketMonitorPage() {
                   <dd className={getPercentClassName(openHitRecord.speed_pct)}>
                     {formatPercent(openHitRecord.speed_pct)}
                   </dd>
+                </div>
+                <div>
+                  <dt>盘中量比</dt>
+                  <dd>{formatNumber(openHitRecord.realtime_vol_ratio)}</dd>
                 </div>
                 <div>
                   <dt>五日涨幅</dt>
