@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import {
   getAllMarketMonitorSnapshot,
+  type AllMarketIndexRow,
   type AllMarketMonitorRow,
 } from "../../apis/reader";
 import DetailsLink from "../../shared/DetailsLink";
@@ -167,6 +168,7 @@ export default function AllMarketMonitorPage() {
   const [sourcePath, setSourcePath] = useState("");
   const [enabled, setEnabled] = useState(false);
   const [rows, setRows] = useState<AllMarketMonitorRow[]>([]);
+  const [indexRows, setIndexRows] = useState<AllMarketIndexRow[]>([]);
   const [primarySortKey, setPrimarySortKey] =
     useState<PrimarySortKey>("realtime_change_pct");
   const [speedPeriod, setSpeedPeriod] = useState<SpeedPeriod>(10);
@@ -230,12 +232,14 @@ export default function AllMarketMonitorPage() {
 
       const capturedAt = Date.now();
       const nextRows = result.rows ?? [];
+      const nextIndexRows = result.index_rows ?? [];
       historyRef.current = appendPriceSnapshot(
         historyRef.current,
         nextRows,
         capturedAt,
       );
       setRows(nextRows);
+      setIndexRows(nextIndexRows);
       setRefreshedAt(result.refreshed_at ?? "");
       setRankDate(result.rank_date ?? "");
       setRequestedCount(result.requested_count ?? 0);
@@ -515,6 +519,29 @@ export default function AllMarketMonitorPage() {
                 <span>涨速</span>
                 <strong>从高到低</strong>
               </button>
+            </div>
+          </div>
+
+          <div className="all-market-index-strip" aria-label="指数表现">
+            <span className="all-market-control-label">指数表现</span>
+            <div className="all-market-index-list">
+              {indexRows.length > 0 ? (
+                indexRows.map((indexRow) => (
+                  <div key={indexRow.ts_code} className="all-market-index-item">
+                    <span>{indexRow.name || indexRow.ts_code}</span>
+                    <strong
+                      className={getPercentClassName(
+                        indexRow.realtime_change_pct,
+                      )}
+                    >
+                      {formatPercent(indexRow.realtime_change_pct)}
+                    </strong>
+                    <small>{formatNumber(indexRow.realtime_price)}</small>
+                  </div>
+                ))
+              ) : (
+                <div className="all-market-index-empty">等待指数行情</div>
+              )}
             </div>
           </div>
 

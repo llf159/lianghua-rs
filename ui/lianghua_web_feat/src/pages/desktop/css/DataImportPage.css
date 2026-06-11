@@ -506,6 +506,15 @@
   flex-wrap: wrap;
 }
 
+.settings-modal-head > :first-child {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.settings-modal-head > .settings-actions {
+  flex: 0 0 auto;
+}
+
 @media (max-width: 1120px) {
   .settings-summary-grid,
   .settings-path-layout,

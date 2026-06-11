@@ -7,7 +7,7 @@ use duckdb::{Connection, params};
 use serde::Serialize;
 
 use crate::{
-    crawler::SinaQuote,
+    crawler::{SinaQuote, default_realtime_index_ts_codes},
     data::{load_stock_list, result_db_path, source_db_path},
     ui_tools_feat::{
         build_concepts_map,
@@ -81,8 +81,18 @@ pub struct AllMarketMonitorRow {
 }
 
 #[derive(Debug, Serialize)]
+pub struct AllMarketIndexRow {
+    pub ts_code: String,
+    pub name: String,
+    pub realtime_trade_date: Option<String>,
+    pub realtime_price: Option<f64>,
+    pub realtime_change_pct: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct AllMarketMonitorSnapshotData {
     pub rows: Vec<AllMarketMonitorRow>,
+    pub index_rows: Vec<AllMarketIndexRow>,
     pub refreshed_at: Option<String>,
     pub rank_date: Option<String>,
     pub requested_count: usize,
@@ -109,6 +119,13 @@ impl RealtimeQuoteProvider {
             "" | "sina" | "sinajs" => Ok(Self::Sina),
             "tencent" | "qq" | "gtimg" => Ok(Self::Tencent),
             _ => Err("实时行情源仅支持 sina 或 tencent".to_string()),
+        }
+    }
+
+    fn opposite(self) -> Self {
+        match self {
+            Self::Sina => Self::Tencent,
+            Self::Tencent => Self::Sina,
         }
     }
 }
@@ -474,6 +491,48 @@ fn build_rows(
         .collect()
 }
 
+fn build_index_rows(quotes: &HashMap<String, SinaQuote>) -> Vec<AllMarketIndexRow> {
+    default_realtime_index_ts_codes()
+        .into_iter()
+        .map(|ts_code| {
+            let quote = quotes.get(&ts_code);
+            AllMarketIndexRow {
+                ts_code: ts_code.clone(),
+                name: quote
+                    .map(|item| item.name.trim())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(ts_code.as_str())
+                    .to_string(),
+                realtime_trade_date: quote.and_then(|item| normalize_quote_trade_date(&item.date)),
+                realtime_price: quote.map(|item| item.price),
+                realtime_change_pct: quote.and_then(|item| item.change_pct),
+            }
+        })
+        .collect()
+}
+
+fn fetch_index_rows(provider: RealtimeQuoteProvider) -> Vec<AllMarketIndexRow> {
+    let index_ts_codes = default_realtime_index_ts_codes();
+    let quote_result = match provider {
+        RealtimeQuoteProvider::Sina => {
+            fetch_all_market_realtime_quote_map_for_codes(&index_ts_codes).map(|(quotes, _)| quotes)
+        }
+        RealtimeQuoteProvider::Tencent => fetch_all_market_tencent_realtime_quote_map_for_codes(
+            &index_ts_codes,
+        )
+        .map(|(quotes, _)| {
+            quotes
+                .into_iter()
+                .map(|(ts_code, quote)| (ts_code, quote.into_sina_quote()))
+                .collect::<HashMap<_, _>>()
+        }),
+    };
+
+    quote_result
+        .map(|quotes| build_index_rows(&quotes))
+        .unwrap_or_else(|_| Vec::new())
+}
+
 pub fn get_all_market_monitor_snapshot(
     source_path: &str,
     realtime_provider: Option<String>,
@@ -521,9 +580,11 @@ pub fn get_all_market_monitor_snapshot(
         &return_5d_map,
         &fetch_meta,
     );
+    let index_rows = fetch_index_rows(provider.opposite());
 
     Ok(AllMarketMonitorSnapshotData {
         rows,
+        index_rows,
         refreshed_at: fetch_meta.refreshed_at,
         rank_date: Some(rank_date),
         requested_count: fetch_meta.requested_count,

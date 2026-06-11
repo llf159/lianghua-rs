@@ -112,7 +112,8 @@
 }
 
 .all-market-sort-control,
-.all-market-config-controls {
+.all-market-config-controls,
+.all-market-index-strip {
   display: flex;
   align-items: flex-end;
   gap: 10px;
@@ -120,6 +121,72 @@
 
 .all-market-sort-control {
   flex: 1 1 330px;
+}
+
+.all-market-index-strip {
+  flex: 2 1 520px;
+  min-width: 280px;
+  align-items: center;
+  justify-content: flex-start;
+  padding-left: 18px;
+  border-left: 1px solid #dbe4ef;
+}
+
+.all-market-index-list {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 118px;
+  justify-content: flex-start;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
+}
+
+.all-market-index-item {
+  min-width: 0;
+  border: 1px solid #d4deea;
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: #f8fafc;
+  display: grid;
+  gap: 3px;
+}
+
+.all-market-index-item span,
+.all-market-index-item small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.all-market-index-item span {
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.all-market-index-item strong {
+  font-size: 15px;
+  line-height: 1.1;
+}
+
+.all-market-index-item small,
+.all-market-index-empty {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.all-market-index-empty {
+  min-height: 46px;
+  border: 1px dashed #d4deea;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f8fafc;
 }
 
 .all-market-config-controls {

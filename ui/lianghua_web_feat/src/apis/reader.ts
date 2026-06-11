@@ -176,8 +176,17 @@ export type AllMarketMonitorRow = {
   refreshed_at?: string | null;
 };
 
+export type AllMarketIndexRow = {
+  ts_code: string;
+  name: string;
+  realtime_trade_date?: string | null;
+  realtime_price?: number | null;
+  realtime_change_pct?: number | null;
+};
+
 export type AllMarketMonitorSnapshotData = {
   rows: AllMarketMonitorRow[];
+  index_rows?: AllMarketIndexRow[];
   refreshed_at?: string | null;
   rank_date?: string | null;
   requested_count: number;
