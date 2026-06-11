@@ -6,7 +6,6 @@ import './Desktop.css'
 
 const menuList = [
   { path: '/watch-observe', label: '自选观察' },
-  { path: '/details', label: '个股详情' },
 ]
 
 const overviewSubRoutes = [

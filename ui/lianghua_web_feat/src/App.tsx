@@ -11,7 +11,6 @@ import DataDownloadPage from './pages/desktop/DataDownloadPage'
 import DataImportPage from './pages/desktop/DataImportPage'
 import DataViewerPage from './pages/desktop/DataViewerPage'
 import DetailsLinkedPage from './pages/desktop/DetailsLinkedPage'
-import DetailsPage from './pages/desktop/DetailsPage'
 import OverviewScenePage from './pages/desktop/OverviewScenePage'
 import OverviewRawPage from './pages/desktop/OverviewRawPage'
 import RankingOverviewPage from './pages/desktop/RankingOverviewPage'
@@ -36,11 +35,15 @@ import ExpressionValidationSamplesPage, {
 } from './pages/desktop/ExpressionValidationSamplesPage'
 import MarketAnalysisPage from './pages/desktop/MarketAnalysisPage'
 import DetailsLinkedOverlayRoute from './shared/DetailsLinkedOverlayRoute'
-import DetailsOverlayRoute from './shared/DetailsOverlayRoute'
 import './App.css'
 
 type BackgroundLocationState = {
   backgroundLocation?: Location
+}
+
+function LegacyDetailsRedirect() {
+  const location = useLocation()
+  return <Navigate to={`/details-linked${location.search}`} replace state={location.state} />
 }
 
 function AppRoutes() {
@@ -62,7 +65,7 @@ function AppRoutes() {
             <Route path="raw" element={<OverviewRawPage />} />
             <Route path="scene" element={<OverviewScenePage />} />
           </Route>
-          <Route path="details" element={<DetailsPage />} />
+          <Route path="details" element={<LegacyDetailsRedirect />} />
           <Route path="details-linked" element={<DetailsLinkedPage />} />
           <Route path="data-import" element={<Navigate to="/raw-data/data-import" replace />} />
           <Route path="data-viewer" element={<Navigate to="/raw-data/data-viewer" replace />} />
@@ -112,7 +115,7 @@ function AppRoutes() {
 
       {backgroundLocation ? (
         <Routes>
-          <Route path="/details" element={<DetailsOverlayRoute />} />
+          <Route path="/details" element={<LegacyDetailsRedirect />} />
           <Route path="/details-linked" element={<DetailsLinkedOverlayRoute />} />
         </Routes>
       ) : null}
