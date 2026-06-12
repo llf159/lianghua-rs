@@ -8,13 +8,15 @@ use super::{
     ResidualReturnInput, build_backtest_sample_eligibility,
     calc_stock_residual_returns_from_loaded_series,
 };
-use crate::data::{
-    concept_performance_data::{load_concept_trend_series, load_industry_trend_series},
-    load_stock_list, load_ths_concepts_named_map, result_db_path,
-    scoring_data::SceneDetails,
+use crate::{
+    data::{
+        concept_performance_data::{load_concept_trend_series, load_industry_trend_series},
+        load_stock_list, load_ths_concepts_named_map, result_db_path,
+        scoring_data::SceneDetails,
+    },
+    simulate::fp_utils::{calc_t_value, mean, sample_std, spearman_corr, EPS},
 };
 
-const EPS: f64 = 1e-12;
 const PCT_CHG_BATCH_SIZE: usize = 512;
 
 #[derive(Debug, Clone)]
@@ -1031,96 +1033,6 @@ fn load_stock_industry_map(source_dir: &str) -> Result<HashMap<String, String>, 
     }
 
     Ok(map)
-}
-
-fn mean(values: &[f64]) -> Option<f64> {
-    if values.is_empty() {
-        return None;
-    }
-    Some(values.iter().sum::<f64>() / values.len() as f64)
-}
-
-fn sample_std(values: &[f64]) -> Option<f64> {
-    if values.len() < 2 {
-        return None;
-    }
-    let avg = mean(values)?;
-    let var = values
-        .iter()
-        .map(|v| {
-            let d = *v - avg;
-            d * d
-        })
-        .sum::<f64>()
-        / (values.len() as f64 - 1.0);
-    Some(var.sqrt())
-}
-
-fn calc_t_value(mean: Option<f64>, std: Option<f64>, sample_count: usize) -> Option<f64> {
-    match (mean, std) {
-        (Some(m), Some(s)) if sample_count > 1 && s.abs() >= EPS => {
-            Some(m * (sample_count as f64).sqrt() / s)
-        }
-        _ => None,
-    }
-}
-
-fn spearman_corr(x: &[f64], y: &[f64]) -> Option<f64> {
-    if x.len() != y.len() || x.len() < 2 {
-        return None;
-    }
-    let xr = average_ranks(x);
-    let yr = average_ranks(y);
-    pearson_corr(&xr, &yr)
-}
-
-fn average_ranks(values: &[f64]) -> Vec<f64> {
-    let mut indexed: Vec<(usize, f64)> = values.iter().copied().enumerate().collect();
-    indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut ranks = vec![0.0_f64; values.len()];
-    let mut i = 0usize;
-    while i < indexed.len() {
-        let mut j = i + 1;
-        while j < indexed.len() && (indexed[j].1 - indexed[i].1).abs() < EPS {
-            j += 1;
-        }
-
-        let avg_rank = (i + 1 + j) as f64 / 2.0;
-        for k in i..j {
-            ranks[indexed[k].0] = avg_rank;
-        }
-        i = j;
-    }
-
-    ranks
-}
-
-fn pearson_corr(x: &[f64], y: &[f64]) -> Option<f64> {
-    if x.len() != y.len() || x.len() < 2 {
-        return None;
-    }
-
-    let mean_x = mean(x)?;
-    let mean_y = mean(y)?;
-
-    let mut cov = 0.0_f64;
-    let mut var_x = 0.0_f64;
-    let mut var_y = 0.0_f64;
-
-    for (vx, vy) in x.iter().zip(y.iter()) {
-        let dx = *vx - mean_x;
-        let dy = *vy - mean_y;
-        cov += dx * dy;
-        var_x += dx * dx;
-        var_y += dy * dy;
-    }
-
-    if var_x <= EPS || var_y <= EPS {
-        return None;
-    }
-
-    Some(cov / (var_x.sqrt() * var_y.sqrt()))
 }
 
 #[cfg(test)]

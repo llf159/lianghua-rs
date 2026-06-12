@@ -3562,7 +3562,7 @@ fn build_board_maps(
         };
         let ts_code = ts_code_raw.to_ascii_uppercase();
         let stock_name = cols
-            .get(1)
+            .get(2)
             .map(|value| value.trim())
             .filter(|value| !value.is_empty());
 
@@ -3571,7 +3571,7 @@ fn build_board_maps(
         board_set.insert(category_board.clone());
         board_list.push(category_board);
 
-        if let Some(board_raw) = cols.get(4).map(|value| value.trim()) {
+        if let Some(board_raw) = cols.get(14).map(|value| value.trim()) {
             if !board_raw.is_empty() {
                 let detail_boards = split_board_tags(board_raw);
                 for board in detail_boards {
@@ -4841,13 +4841,12 @@ fn load_rule_backtest_score_rows_from_db(
             WHERE trade_date >= ?
               AND trade_date <= ?
               AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
-              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > ?
             ORDER BY trade_date ASC, rule_name ASC, ts_code ASC
             "#,
         )
         .map_err(|e| format!("预编译策略回测规则原始行失败: {e}"))?;
     let mut detail_rows = detail_stmt
-        .query(params![start_date, end_date, RULE_BACKTEST_EPS])
+        .query(params![start_date, end_date])
         .map_err(|e| format!("查询策略回测规则原始行失败: {e}"))?;
     let mut details = Vec::new();
     while let Some(row) = detail_rows

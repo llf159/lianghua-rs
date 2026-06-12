@@ -1,3 +1,4 @@
+pub(crate) mod fp_utils;
 pub mod rank;
 pub mod rule;
 pub mod scene;

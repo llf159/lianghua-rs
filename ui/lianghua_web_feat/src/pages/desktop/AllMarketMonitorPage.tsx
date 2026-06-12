@@ -592,19 +592,6 @@ export default function AllMarketMonitorPage() {
           </div>
         </div>
 
-        <div className="all-market-board-tabs" role="group" aria-label="板块">
-          {STOCK_PICK_BOARD_OPTIONS.map((board) => (
-            <button
-              key={board}
-              type="button"
-              className={boardFilter === board ? "is-active" : ""}
-              onClick={() => setBoardFilter(board)}
-            >
-              {board}
-            </button>
-          ))}
-        </div>
-
         {error ? <div className="all-market-error">{error}</div> : null}
       </section>
 
@@ -612,6 +599,18 @@ export default function AllMarketMonitorPage() {
         <section className="all-market-card all-market-table-card">
           <div className="all-market-table-head">
             <h3>全市场行情</h3>
+            <div className="all-market-board-tabs" role="group" aria-label="板块">
+              {STOCK_PICK_BOARD_OPTIONS.map((board) => (
+                <button
+                  key={board}
+                  type="button"
+                  className={boardFilter === board ? "is-active" : ""}
+                  onClick={() => setBoardFilter(board)}
+                >
+                  {board}
+                </button>
+              ))}
+            </div>
             <div className="all-market-time-strip" aria-live="polite">
               <span className="all-market-time-pill">
                 <small>刷新</small>

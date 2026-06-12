@@ -319,10 +319,6 @@
   background: #fff;
 }
 
-.all-market-board-tabs {
-  margin-top: 12px;
-}
-
 .all-market-error {
   margin-top: 12px;
   border-radius: 8px;
@@ -335,7 +331,7 @@
 
 .all-market-monitor-grid {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
   gap: 16px;
   align-items: start;
 }
@@ -361,7 +357,9 @@
 }
 
 .all-market-table-wrap {
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   max-height: calc(100vh - 300px);
   min-height: 280px;
   border: 1px solid #e1e7ef;
@@ -411,7 +409,7 @@
 
 .all-market-table {
   width: 100%;
-  min-width: 954px;
+  min-width: 1040px;
   border-collapse: collapse;
   table-layout: fixed;
   font-size: 13px;
@@ -455,17 +453,19 @@
 .all-market-table th:nth-child(6),
 .all-market-table td:nth-child(6),
 .all-market-table th:nth-child(7),
-.all-market-table td:nth-child(7) {
-  width: 94px;
-}
-
+.all-market-table td:nth-child(7),
 .all-market-table th:nth-child(8),
 .all-market-table td:nth-child(8) {
-  width: 220px;
+  width: 94px;
 }
 
 .all-market-table th:nth-child(9),
 .all-market-table td:nth-child(9) {
+  width: 220px;
+}
+
+.all-market-table th:nth-child(10),
+.all-market-table td:nth-child(10) {
   width: 88px;
 }
 
@@ -767,36 +767,54 @@
   }
 
   .all-market-toolbar {
+    flex-direction: column;
     align-items: stretch;
+    gap: 10px;
   }
 
-  .all-market-sort-control,
-  .all-market-config-controls,
-  .all-market-field {
-    flex: 1 1 160px;
+  .all-market-sort-control {
+    flex: 1 1 auto;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
   }
 
-  .all-market-sort-control,
+  .all-market-index-strip {
+    flex: 1 1 auto;
+    min-width: 0;
+    align-items: center;
+    flex-wrap: wrap;
+    padding-left: 0;
+    border-left: 0;
+    padding-top: 10px;
+    border-top: 1px solid #dbe4ef;
+  }
+
   .all-market-config-controls {
-    align-items: stretch;
-  }
-
-  .all-market-config-controls {
+    flex: 1 1 auto;
     justify-content: flex-start;
-    padding-top: 12px;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 8px;
+    padding-top: 10px;
     padding-left: 0;
     border-top: 1px solid #dbe4ef;
     border-left: 0;
   }
 
+  .all-market-field {
+    flex: 0 1 auto;
+    min-width: 110px;
+  }
+
   .all-market-control-label {
-    align-self: flex-start;
-    padding-top: 8px;
+    align-self: center;
+    padding-top: 0;
   }
 
   .all-market-sort-switch {
-    flex: 1 1 220px;
-    min-width: 220px;
+    flex: 1 1 200px;
+    min-width: 200px;
   }
 
   .all-market-table-wrap {

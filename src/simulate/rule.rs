@@ -14,7 +14,10 @@ use crate::data::{
     scoring_data::{ScoreDetails, ScoreSummary},
 };
 
-const EPS: f64 = 1e-12;
+use crate::simulate::fp_utils::{
+    calc_profit_loss_sums, calc_t_value, calc_top_bottom_spread, mean, sample_std, spearman_corr,
+    ProfitLossSums, EPS,
+};
 const PCT_CHG_BATCH_SIZE: usize = 512;
 
 #[derive(Debug, Clone)]
@@ -202,46 +205,6 @@ struct RuleLayerComputation {
 }
 
 type TriggeredScoreMap = HashMap<String, HashMap<String, f64>>;
-
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct ProfitLossSums {
-    positive_sum: f64,
-    negative_loss_sum: f64,
-}
-
-impl ProfitLossSums {
-    fn push(&mut self, value: f64) {
-        if !value.is_finite() {
-            return;
-        }
-        if value > EPS {
-            self.positive_sum += value;
-        } else if value < -EPS {
-            self.negative_loss_sum += value.abs();
-        }
-    }
-
-    fn merge(&mut self, other: ProfitLossSums) {
-        self.positive_sum += other.positive_sum;
-        self.negative_loss_sum += other.negative_loss_sum;
-    }
-
-    fn ratio(self) -> Option<f64> {
-        if self.positive_sum > EPS && self.negative_loss_sum > EPS {
-            Some(self.positive_sum / self.negative_loss_sum)
-        } else {
-            None
-        }
-    }
-}
-
-fn calc_profit_loss_sums(values: &[f64]) -> ProfitLossSums {
-    let mut sums = ProfitLossSums::default();
-    for value in values {
-        sums.push(*value);
-    }
-    sums
-}
 
 struct ResidualCacheInput<'a> {
     stock_adj_type: &'a str,
@@ -1909,7 +1872,6 @@ fn load_rule_rows_for_names_unfiltered(
           AND trade_date >= ?
           AND trade_date <= ?
           AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
-          AND ABS(TRY_CAST(rule_score AS DOUBLE)) > 1e-12
         ORDER BY rule_name ASC, trade_date ASC, ts_code ASC
         "#
     );
@@ -1982,142 +1944,6 @@ fn load_stock_industry_map(source_dir: &str) -> Result<HashMap<String, String>, 
     }
 
     Ok(map)
-}
-
-fn calc_top_bottom_spread(rule_scores: &[f64], residuals: &[f64]) -> Option<f64> {
-    if rule_scores.len() != residuals.len() || rule_scores.len() < 2 {
-        return None;
-    }
-
-    let mut min_score = f64::INFINITY;
-    let mut max_score = f64::NEG_INFINITY;
-    for score in rule_scores {
-        min_score = min_score.min(*score);
-        max_score = max_score.max(*score);
-    }
-    if (max_score - min_score).abs() < EPS {
-        return None;
-    }
-
-    let mut ordered = rule_scores
-        .iter()
-        .copied()
-        .enumerate()
-        .collect::<Vec<(usize, f64)>>();
-    ordered.sort_by(|a, b| {
-        a.1.partial_cmp(&b.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.0.cmp(&b.0))
-    });
-
-    let half = ordered.len() / 2;
-    if half == 0 {
-        return None;
-    }
-
-    let low_sum: f64 = ordered
-        .iter()
-        .take(half)
-        .map(|(idx, _)| residuals[*idx])
-        .sum();
-    let high_sum: f64 = ordered
-        .iter()
-        .rev()
-        .take(half)
-        .map(|(idx, _)| residuals[*idx])
-        .sum();
-
-    Some(high_sum / half as f64 - low_sum / half as f64)
-}
-
-fn mean(values: &[f64]) -> Option<f64> {
-    if values.is_empty() {
-        return None;
-    }
-    Some(values.iter().sum::<f64>() / values.len() as f64)
-}
-
-fn sample_std(values: &[f64]) -> Option<f64> {
-    if values.len() < 2 {
-        return None;
-    }
-    let avg = mean(values)?;
-    let var = values
-        .iter()
-        .map(|v| {
-            let d = *v - avg;
-            d * d
-        })
-        .sum::<f64>()
-        / (values.len() as f64 - 1.0);
-    Some(var.sqrt())
-}
-
-fn calc_t_value(mean: Option<f64>, std: Option<f64>, sample_count: usize) -> Option<f64> {
-    match (mean, std) {
-        (Some(m), Some(s)) if sample_count > 1 && s.abs() >= EPS => {
-            Some(m * (sample_count as f64).sqrt() / s)
-        }
-        _ => None,
-    }
-}
-
-fn spearman_corr(x: &[f64], y: &[f64]) -> Option<f64> {
-    if x.len() != y.len() || x.len() < 2 {
-        return None;
-    }
-    let xr = average_ranks(x);
-    let yr = average_ranks(y);
-    pearson_corr(&xr, &yr)
-}
-
-fn average_ranks(values: &[f64]) -> Vec<f64> {
-    let mut indexed: Vec<(usize, f64)> = values.iter().copied().enumerate().collect();
-    indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut ranks = vec![0.0_f64; values.len()];
-    let mut i = 0usize;
-    while i < indexed.len() {
-        let mut j = i + 1;
-        while j < indexed.len() && (indexed[j].1 - indexed[i].1).abs() < EPS {
-            j += 1;
-        }
-
-        let avg_rank = (i + 1 + j) as f64 / 2.0;
-        for k in i..j {
-            ranks[indexed[k].0] = avg_rank;
-        }
-        i = j;
-    }
-
-    ranks
-}
-
-fn pearson_corr(x: &[f64], y: &[f64]) -> Option<f64> {
-    if x.len() != y.len() || x.len() < 2 {
-        return None;
-    }
-
-    let mean_x = mean(x)?;
-    let mean_y = mean(y)?;
-
-    let mut cov = 0.0_f64;
-    let mut var_x = 0.0_f64;
-    let mut var_y = 0.0_f64;
-
-    for (vx, vy) in x.iter().zip(y.iter()) {
-        let dx = *vx - mean_x;
-        let dy = *vy - mean_y;
-        cov += dx * dy;
-        var_x += dx * dx;
-        var_y += dy * dy;
-    }
-
-    if var_x <= EPS || var_y <= EPS {
-        return None;
-    }
-
-    Some(cov / (var_x.sqrt() * var_y.sqrt()))
 }
 
 #[cfg(test)]
@@ -2356,6 +2182,9 @@ mod tests {
         result_app
             .append_row(params!["规则B", "000002.SZ", "20240103", 0.1_f64])
             .expect("rule b row4");
+        result_app
+            .append_row(params!["规则Zero", "000001.SZ", "20240102", 0.0_f64])
+            .expect("rule zero row");
         result_app.flush().expect("flush rule_details");
     }
 
@@ -2413,6 +2242,47 @@ mod tests {
         assert_opt_close(metrics.ic_mean, Some(1.0));
         assert_opt_close(metrics.ic_std, Some(0.0));
         assert_eq!(metrics.icir, None);
+    }
+
+    #[test]
+    fn calc_rule_layer_metrics_from_db_keeps_zero_score_rows_as_triggered_samples() {
+        let source_dir = temp_source_dir();
+        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
+        prepare_test_files(source_dir_str);
+
+        let source_conn = Connection::open(source_db_path(source_dir_str)).expect("open source db");
+        let metrics = calc_rule_layer_metrics_from_db(
+            &source_conn,
+            source_dir_str,
+            &RuleLayerFromDbInput {
+                rule_name: "规则Zero".to_string(),
+                stock_adj_type: "qfq".to_string(),
+                index_ts_code: "000300.SH".to_string(),
+                index_beta: 0.0,
+                concept_beta: 0.0,
+                industry_beta: 0.0,
+                start_date: "20240102".to_string(),
+                end_date: "20240104".to_string(),
+                layer_config: RuleLayerConfig {
+                    min_samples_per_day: 2,
+                    backtest_period: 1,
+                    min_listed_trade_days: 0,
+                },
+            },
+        )
+        .expect("rule metrics");
+
+        assert_eq!(metrics.points.len(), 2);
+        let p0 = &metrics.points[0];
+        assert_eq!(p0.trade_date, "20240102");
+        assert_eq!(p0.sample_count, 2);
+        assert_opt_close(p0.avg_rule_score, Some(0.0));
+        assert_opt_close(p0.avg_residual_return, Some(3.0));
+        assert_opt_close(p0.avg_excess_residual_return, Some(1.0));
+
+        let p1 = &metrics.points[1];
+        assert_eq!(p1.trade_date, "20240103");
+        assert_eq!(p1.avg_residual_return, None);
     }
 
     #[test]
