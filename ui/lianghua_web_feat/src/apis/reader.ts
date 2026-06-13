@@ -178,6 +178,7 @@ export type AllMarketMonitorRow = {
   realtime_amount?: number | null;
   realtime_vol_ratio?: number | null;
   return_5d_pct?: number | null;
+  other_sort_value?: number | null;
   scene_marker?: string | null;
   template_hits?: AllMarketTemplateHit[] | null;
   total_mv_yi?: number | null;
@@ -280,6 +281,9 @@ export async function getAllMarketMonitorSnapshot(
   sceneStageThreshold?: "observe" | "trigger" | "confirm",
   templateEnabled?: boolean,
   templates?: IntradayMonitorTemplate[],
+  tsCodes?: string[],
+  otherSortExpression?: string,
+  otherSortUseRealtime?: boolean,
 ) {
   return invoke<AllMarketMonitorSnapshotData>(
     "get_all_market_monitor_snapshot",
@@ -289,6 +293,9 @@ export async function getAllMarketMonitorSnapshot(
       sceneStageThreshold,
       templateEnabled,
       templates,
+      tsCodes,
+      otherSortExpression,
+      otherSortUseRealtime,
     },
   );
 }

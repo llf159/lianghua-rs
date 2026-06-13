@@ -21,8 +21,6 @@ import ConceptStockPickPage from './pages/desktop/ConceptStockPickPage'
 import CyqChenPage from './pages/desktop/CyqChenPage'
 import StrategyManagePage from './pages/desktop/StrategyManagePage'
 import WatchObservePage from './pages/desktop/WatchObservePage'
-import IntradayMonitorRealtimePage from './pages/desktop/IntradayMonitorRealtimePage'
-import IntradayMonitorCustomPage from './pages/desktop/IntradayMonitorCustomPage'
 import AllMarketMonitorPage from './pages/desktop/AllMarketMonitorPage'
 import BacktestPage from './pages/desktop/BacktestPage'
 import StrategyPaperValidationPage from './pages/desktop/StrategyPaperValidationPage'
@@ -93,12 +91,7 @@ function AppRoutes() {
             <Route path="ranking-compute" element={<Navigate to="/raw-data/download-compute" replace />} />
             <Route path="strategy-manage" element={<Navigate to="/strategy/rules" replace />} />
           </Route>
-          <Route path="intraday-monitor">
-            <Route index element={<Navigate to="/intraday-monitor/realtime-ranking" replace />} />
-            <Route path="realtime-ranking" element={<IntradayMonitorRealtimePage />} />
-            <Route path="all-market" element={<AllMarketMonitorPage />} />
-            <Route path="custom-monitor" element={<IntradayMonitorCustomPage />} />
-          </Route>
+          <Route path="intraday-monitor" element={<AllMarketMonitorPage />} />
           <Route path="backtest" element={<BacktestPage />}>
             <Route index element={<Navigate to="/backtest/strategy-trigger" replace />} />
             <Route path="strategy-trigger" element={<StrategyTriggerPage />} />

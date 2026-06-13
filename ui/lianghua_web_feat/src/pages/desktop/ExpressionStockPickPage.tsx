@@ -11,6 +11,10 @@ import {
 import { isStBoard, useConceptExclusions } from '../../shared/conceptExclusions'
 import { useStockPickOutletContext } from './StockPickPage'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
+import {
+  writeStoredIntradayMonitorWatchlist,
+  writeStoredIntradayMonitorWatchlistEnabled,
+} from '../../shared/intradayMonitorWatchlist'
 import ExpressionStockPickTemplateManagerModal, {
   type ExpressionStockPickTemplate,
 } from './components/ExpressionStockPickTemplateManagerModal'
@@ -20,7 +24,6 @@ const EXPRESSION_STOCK_PICK_STATE_KEY = 'expression-stock-pick-state'
 const EXPRESSION_STOCK_PICK_FILTER_STATE_KEY = 'expression-stock-pick-filter-state-v2'
 const EXPRESSION_STOCK_PICK_RESULT_STATE_KEY = 'expression-stock-pick-result-state-v2'
 const EXPRESSION_STOCK_PICK_TEMPLATE_STORAGE_KEY = 'lh_expression_stock_pick_templates_v1'
-const CUSTOM_MONITOR_STATE_KEY = 'lh_intraday_custom_monitor_state_v1'
 const COPY_SEPARATOR_OPTIONS = [
   { label: '逗号 (,)', value: ',' },
   { label: '分号 (;)', value: ';' },
@@ -53,13 +56,6 @@ type LegacyPersistedExpressionStockPickState = Partial<PersistedExpressionStockP
   startDate?: string
   endDate?: string
   resolvedEndDate?: string
-}
-
-type CustomMonitorState = {
-  codeInput?: string
-  selectedTemplateId?: string
-  rows?: unknown[]
-  refreshedAt?: string
 }
 
 function parsePositiveInt(value: string, fallback: number) {
@@ -194,8 +190,6 @@ export default function ExpressionStockPickPage() {
     () => buildBoardFilterOptions(STOCK_PICK_BOARD_OPTIONS, excludeStBoard),
     [excludeStBoard],
   )
-  const selectedTemplate = templates.find((item) => item.id === selectedTemplateId)
-
   useEffect(() => {
     if (!latestTradeDate) {
       return
@@ -294,16 +288,22 @@ export default function ExpressionStockPickPage() {
     }
   }
 
-  function onApplyTemplate() {
-    if (!selectedTemplate) {
-      setError('请先选择一个表达式模板。')
+  function onSelectTemplate(templateId: string) {
+    setSelectedTemplateId(templateId)
+    if (templateId === '') {
       setTemplateNotice('')
       return
     }
 
-    setExpression(selectedTemplate.expression)
+    const template = templates.find((item) => item.id === templateId)
+    if (!template) {
+      setTemplateNotice('')
+      return
+    }
+
+    setExpression(template.expression)
     setError('')
-    setTemplateNotice(`已套用模板：${selectedTemplate.name}`)
+    setTemplateNotice(`已套用模板：${template.name}`)
   }
 
   function onTemplateRemoved(templateId: string) {
@@ -345,7 +345,7 @@ export default function ExpressionStockPickPage() {
     }
   }
 
-  function onImportToCustomMonitor() {
+  function onImportToIntradayMonitor() {
     const text = buildStockCodeText(rows, copyWithSuffix, copySeparator)
     if (text.length === 0) {
       setCopySucceeded(false)
@@ -353,24 +353,11 @@ export default function ExpressionStockPickPage() {
       return
     }
 
-    const existingState = readJsonStorage<CustomMonitorState>(
-      typeof window === 'undefined' ? null : window.sessionStorage,
-      CUSTOM_MONITOR_STATE_KEY,
+    writeStoredIntradayMonitorWatchlist(
+      buildStockCodeText(rows, true, ' ').split(/\s+/),
     )
-    writeJsonStorage(
-      typeof window === 'undefined' ? null : window.sessionStorage,
-      CUSTOM_MONITOR_STATE_KEY,
-      {
-        codeInput: text,
-        selectedTemplateId:
-          typeof existingState?.selectedTemplateId === 'string'
-            ? existingState.selectedTemplateId
-            : '',
-        rows: [],
-        refreshedAt: '',
-      } satisfies CustomMonitorState,
-    )
-    navigate('/intraday-monitor/custom-monitor')
+    writeStoredIntradayMonitorWatchlistEnabled(true)
+    navigate('/intraday-monitor')
   }
 
   return (
@@ -463,7 +450,7 @@ export default function ExpressionStockPickPage() {
           <span>表达式模板</span>
           <select
             value={selectedTemplateId}
-            onChange={(event) => setSelectedTemplateId(event.target.value)}
+            onChange={(event) => onSelectTemplate(event.target.value)}
             disabled={loading || optionsLoading || templates.length === 0}
           >
             <option value="">未选择</option>
@@ -474,14 +461,6 @@ export default function ExpressionStockPickPage() {
             ))}
           </select>
         </label>
-        <button
-          type="button"
-          className="stock-pick-secondary-btn"
-          onClick={onApplyTemplate}
-          disabled={loading || optionsLoading || !selectedTemplate}
-        >
-          套用模板
-        </button>
         <button type="button" className="stock-pick-primary-btn" onClick={() => void onRun()} disabled={loading || optionsLoading}>
           {loading ? '选股中...' : '执行选股'}
         </button>
@@ -539,10 +518,10 @@ export default function ExpressionStockPickPage() {
             <button
               type="button"
               className="stock-pick-chip-btn"
-              onClick={onImportToCustomMonitor}
+              onClick={onImportToIntradayMonitor}
               disabled={rows.length === 0}
             >
-              导入自定义监控
+              导入实时监控名单
             </button>
             <button
               type="button"

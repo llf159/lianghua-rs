@@ -512,7 +512,7 @@ export default function SettingsPage() {
           <button className="settings-list-item" type="button" onClick={openRealtimeProviderSetting}>
             <div className="settings-list-item-main">
               <strong>实时行情源</strong>
-              <span>控制实时监控股票行情源；全市场指数表现会自动使用另一个行情源。</span>
+              <span>控制实时监控股票行情源；指数表现会自动使用另一个行情源。</span>
             </div>
             <span className="settings-list-item-value">{getRealtimeQuoteProviderLabel(realtimeQuoteProvider)}</span>
           </button>
@@ -757,7 +757,7 @@ export default function SettingsPage() {
               <div>
                 <h3 className="settings-subtitle-head">实时行情源</h3>
                 <p className="settings-section-note">
-                  腾讯行情会返回均价和盘中量比；新浪没有对应字段时实时监控留空。全市场监控的指数表现会与股票行情源交叉使用，股票用腾讯时指数走新浪，股票用新浪时指数走腾讯，减少同一平台请求集中。
+                  腾讯行情会返回均价和盘中量比；新浪没有对应字段时实时监控留空。指数表现会与股票行情源交叉使用，股票用腾讯时指数走新浪，股票用新浪时指数走腾讯，减少同一平台请求集中。
                 </p>
               </div>
               <div className="settings-actions">

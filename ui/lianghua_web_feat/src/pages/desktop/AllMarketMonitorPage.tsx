@@ -7,12 +7,19 @@ import {
   type IntradayMonitorTemplate,
 } from "../../apis/reader";
 import IntradayTemplateManagerModal from "./components/IntradayTemplateManagerModal";
+import WatchlistModal from "./components/WatchlistModal";
 import DetailsLink from "../../shared/DetailsLink";
 import {
   formatConceptText,
   useConceptExclusions,
 } from "../../shared/conceptExclusions";
 import { readStoredRealtimeQuoteProvider } from "../../shared/realtimeSettings";
+import {
+  readStoredIntradayMonitorWatchlistEnabled,
+  readStoredIntradayMonitorWatchlist,
+  writeStoredIntradayMonitorWatchlistEnabled,
+  writeStoredIntradayMonitorWatchlist,
+} from "../../shared/intradayMonitorWatchlist";
 import { STOCK_PICK_BOARD_OPTIONS } from "../../shared/stockPickShared";
 import {
   TableSortButton,
@@ -28,8 +35,12 @@ import "./css/DataImportPage.css";
 const POLL_INTERVAL_MS = 1000;
 const HISTORY_KEEP_MS = 90_000;
 const RECORD_HIGH_CONFIRM_MS = 5_000;
+const DEFAULT_SPEED_PERIOD = 10;
+const DEFAULT_SPEED_THRESHOLD = 2;
+const DEFAULT_VOLUME_RATIO_THRESHOLD = 10;
+const DEFAULT_RANK_HIGHLIGHT_THRESHOLD = 300;
+const DEFAULT_TOP_LIMIT = 50;
 const SPEED_PERIOD_OPTIONS = [10, 30, 60] as const;
-const TOP_LIMIT_OPTIONS = [20, 50, 100, 200] as const;
 const SCENE_STAGE_THRESHOLD_OPTIONS = [
   { value: "observe", label: "观察" },
   { value: "trigger", label: "触发" },
@@ -42,6 +53,9 @@ const LS_KEY_VOLUME_RATIO_THRESHOLD = "am_volume_ratio_threshold";
 const LS_KEY_RANK_HIGHLIGHT_THRESHOLD = "am_rank_highlight_threshold";
 const LS_KEY_SCENE_STAGE_THRESHOLD = "am_scene_stage_threshold";
 const LS_KEY_TOP_LIMIT = "am_top_limit";
+const LS_KEY_OTHER_SORT_EXPRESSION = "am_other_sort_expression";
+const LS_KEY_OTHER_SORT_DIRECTION = "am_other_sort_direction";
+const LS_KEY_OTHER_SORT_USE_REALTIME = "am_other_sort_use_realtime";
 const INTRADAY_MONITOR_TEMPLATE_STORAGE_KEY =
   "lh_intraday_monitor_realtime_templates_v1";
 
@@ -124,15 +138,16 @@ function readLocalStorageSceneStageThreshold(): SceneStageThreshold {
 }
 
 type PrimarySortKey =
+  | "other_sort_value"
   | "realtime_change_pct"
   | "speed_pct"
   | "realtime_vol_ratio";
 type SpeedPeriod = (typeof SPEED_PERIOD_OPTIONS)[number];
 type BoardFilter = (typeof STOCK_PICK_BOARD_OPTIONS)[number];
-type TopLimit = (typeof TOP_LIMIT_OPTIONS)[number];
 type SortKey =
   | "best_rank_3d"
   | "best_rank_5d"
+  | "other_sort_value"
   | "realtime_change_pct"
   | "return_5d_pct"
   | "speed_pct"
@@ -164,6 +179,54 @@ type RecordHighCandidate = {
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function parseNonNegativeIntegerInput(value: string, fallback: number) {
+  const trimmed = value.trim();
+  if (!trimmed) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.trunc(parsed));
+}
+
+function withDefaultText(value: string, fallback: number) {
+  return value.trim() ? value : String(fallback);
+}
+
+function normalizeNonNegativeIntegerText(value: string, fallback: number) {
+  return String(parseNonNegativeIntegerInput(value, fallback));
+}
+
+function readLocalStorageText(key: string, fallback = "") {
+  try {
+    return localStorage.getItem(key) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function readLocalStorageSortDirection(
+  key: string,
+  fallback: Exclude<SortDirection, null>,
+): Exclude<SortDirection, null> {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === "asc" || raw === "desc") return raw;
+  } catch {
+    // localStorage unavailable
+  }
+  return fallback;
+}
+
+function readLocalStorageBoolean(key: string, fallback: boolean) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === "true") return true;
+    if (raw === "false") return false;
+  } catch {
+    // localStorage unavailable
+  }
+  return fallback;
 }
 
 function formatNumber(value?: number | null, digits = 2) {
@@ -206,6 +269,24 @@ function getPercentClassName(value?: number | null) {
   return value > 0 ? "all-market-value-up" : "all-market-value-down";
 }
 
+function getRealtimeChangeCellClassName(value?: number | null) {
+  const classNames = [
+    getPercentClassName(value),
+    "all-market-realtime-group-start",
+  ];
+  if (!isFiniteNumber(value)) return classNames.join(" ");
+  if (value > 7) {
+    classNames.push("all-market-change-highlight-red");
+  } else if (value >= 4) {
+    classNames.push("all-market-change-highlight-yellow");
+  } else if (value < -5) {
+    classNames.push("all-market-change-highlight-green");
+  } else if (value <= -2) {
+    classNames.push("all-market-change-highlight-light-green");
+  }
+  return classNames.join(" ");
+}
+
 function isAboveAvgPrice(row: AllMarketMonitorRow) {
   return (
     isFiniteNumber(row.realtime_price) &&
@@ -237,12 +318,12 @@ function formatTemplateHitText(row: AllMarketMonitorRow) {
   return `${hits.length}个模板`;
 }
 
-function isRankHighlight(row: AllMarketMonitorRow, threshold: number | null) {
+function isRankHighlight(
+  rank: number | null | undefined,
+  threshold: number | null,
+) {
   if (!isFiniteNumber(threshold)) return false;
-  return (
-    (isFiniteNumber(row.best_rank_3d) && row.best_rank_3d <= threshold) ||
-    (isFiniteNumber(row.best_rank_5d) && row.best_rank_5d <= threshold)
-  );
+  return isFiniteNumber(rank) && rank <= threshold;
 }
 
 function buildPriceSnapshot(rows: AllMarketMonitorRow[], capturedAt: number) {
@@ -374,22 +455,44 @@ export default function AllMarketMonitorPage() {
     "realtime_change_pct",
   );
   const [speedPeriod, setSpeedPeriod] = useState<SpeedPeriod>(() =>
-    readLocalStorageNumber(LS_KEY_SPEED_PERIOD, 10),
+    readLocalStorageNumber(LS_KEY_SPEED_PERIOD, DEFAULT_SPEED_PERIOD),
   );
   const [speedThresholdText, setSpeedThresholdText] = useState(() =>
-    String(readLocalStorageNumber(LS_KEY_SPEED_THRESHOLD, 1)),
+    String(
+      readLocalStorageNumber(LS_KEY_SPEED_THRESHOLD, DEFAULT_SPEED_THRESHOLD),
+    ),
   );
   const [volumeRatioThresholdText, setVolumeRatioThresholdText] = useState(() =>
-    String(readLocalStorageNumber(LS_KEY_VOLUME_RATIO_THRESHOLD, 2)),
+    String(
+      readLocalStorageNumber(
+        LS_KEY_VOLUME_RATIO_THRESHOLD,
+        DEFAULT_VOLUME_RATIO_THRESHOLD,
+      ),
+    ),
   );
   const [rankHighlightThresholdText, setRankHighlightThresholdText] = useState(
-    () => String(readLocalStorageNumber(LS_KEY_RANK_HIGHLIGHT_THRESHOLD, 100)),
+    () =>
+      String(
+        readLocalStorageNumber(
+          LS_KEY_RANK_HIGHLIGHT_THRESHOLD,
+          DEFAULT_RANK_HIGHLIGHT_THRESHOLD,
+        ),
+      ),
   );
   const [sceneStageThreshold, setSceneStageThreshold] =
     useState<SceneStageThreshold>(() => readLocalStorageSceneStageThreshold());
   const [boardFilter, setBoardFilter] = useState<BoardFilter>("全部");
-  const [topLimit, setTopLimit] = useState<TopLimit>(() =>
-    readLocalStorageNumber(LS_KEY_TOP_LIMIT, 50),
+  const [topLimitText, setTopLimitText] = useState(() =>
+    String(readLocalStorageNumber(LS_KEY_TOP_LIMIT, DEFAULT_TOP_LIMIT)),
+  );
+  const [otherSortExpression, setOtherSortExpression] = useState(() =>
+    readLocalStorageText(LS_KEY_OTHER_SORT_EXPRESSION),
+  );
+  const [otherSortDirection, setOtherSortDirection] = useState<
+    Exclude<SortDirection, null>
+  >(() => readLocalStorageSortDirection(LS_KEY_OTHER_SORT_DIRECTION, "asc"));
+  const [otherSortUseRealtime, setOtherSortUseRealtime] = useState(() =>
+    readLocalStorageBoolean(LS_KEY_OTHER_SORT_USE_REALTIME, true),
   );
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDirection, setSortDirection] = useState<SortDirection>(null);
@@ -415,6 +518,13 @@ export default function AllMarketMonitorPage() {
   );
   const [showParams, setShowParams] = useState(false);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
+  const [watchlistEnabled, setWatchlistEnabled] = useState(() =>
+    readStoredIntradayMonitorWatchlistEnabled(),
+  );
+  const [watchlistCodes, setWatchlistCodes] = useState<string[]>(() =>
+    readStoredIntradayMonitorWatchlist(),
+  );
+  const [watchlistModalOpen, setWatchlistModalOpen] = useState(false);
 
   const inFlightRef = useRef(false);
   const enabledRef = useRef(false);
@@ -424,12 +534,17 @@ export default function AllMarketMonitorPage() {
     Map<string, RecordHighCandidate>
   >(new Map());
   const changePctRecordHighsRef = useRef<Map<string, number>>(new Map());
-  const changePctRecordCandidatesRef = useRef<
-    Map<string, RecordHighCandidate>
-  >(new Map());
+  const changePctRecordCandidatesRef = useRef<Map<string, RecordHighCandidate>>(
+    new Map(),
+  );
 
   const sourcePathTrimmed = sourcePath.trim();
   const isVolumeRatioBoard = primarySortKey === "realtime_vol_ratio";
+  const showOtherSortColumn = primarySortKey === "other_sort_value";
+  const topLimit = useMemo(
+    () => parseNonNegativeIntegerInput(topLimitText, DEFAULT_TOP_LIMIT),
+    [topLimitText],
+  );
 
   useEffect(() => {
     void ensureManagedSourcePath()
@@ -449,17 +564,45 @@ export default function AllMarketMonitorPage() {
     [],
   );
 
+  const updateWatchlist = useCallback((nextCodes: string[]) => {
+    setWatchlistCodes(writeStoredIntradayMonitorWatchlist(nextCodes));
+  }, []);
+
+  const normalizeParamTexts = useCallback(() => {
+    setSpeedThresholdText((value) =>
+      withDefaultText(value, DEFAULT_SPEED_THRESHOLD),
+    );
+    setVolumeRatioThresholdText((value) =>
+      withDefaultText(value, DEFAULT_VOLUME_RATIO_THRESHOLD),
+    );
+    setRankHighlightThresholdText((value) =>
+      withDefaultText(value, DEFAULT_RANK_HIGHLIGHT_THRESHOLD),
+    );
+    setTopLimitText((value) =>
+      normalizeNonNegativeIntegerText(value, DEFAULT_TOP_LIMIT),
+    );
+  }, []);
+
+  const closeParams = useCallback(() => {
+    normalizeParamTexts();
+    setShowParams(false);
+  }, [normalizeParamTexts]);
+
   // 浏览器缓存参数配置
   useEffect(() => {
     try {
       localStorage.setItem(LS_KEY_SPEED_PERIOD, String(speedPeriod));
-    } catch {}
+    } catch {
+      // localStorage unavailable
+    }
   }, [speedPeriod]);
 
   useEffect(() => {
     try {
       localStorage.setItem(LS_KEY_SPEED_THRESHOLD, String(speedThresholdText));
-    } catch {}
+    } catch {
+      // localStorage unavailable
+    }
   }, [speedThresholdText]);
 
   useEffect(() => {
@@ -468,7 +611,9 @@ export default function AllMarketMonitorPage() {
         LS_KEY_VOLUME_RATIO_THRESHOLD,
         String(volumeRatioThresholdText),
       );
-    } catch {}
+    } catch {
+      // localStorage unavailable
+    }
   }, [volumeRatioThresholdText]);
 
   useEffect(() => {
@@ -477,20 +622,57 @@ export default function AllMarketMonitorPage() {
         LS_KEY_RANK_HIGHLIGHT_THRESHOLD,
         String(rankHighlightThresholdText),
       );
-    } catch {}
+    } catch {
+      // localStorage unavailable
+    }
   }, [rankHighlightThresholdText]);
 
   useEffect(() => {
     try {
       localStorage.setItem(LS_KEY_SCENE_STAGE_THRESHOLD, sceneStageThreshold);
-    } catch {}
+    } catch {
+      // localStorage unavailable
+    }
   }, [sceneStageThreshold]);
 
   useEffect(() => {
     try {
       localStorage.setItem(LS_KEY_TOP_LIMIT, String(topLimit));
-    } catch {}
+    } catch {
+      // localStorage unavailable
+    }
   }, [topLimit]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_KEY_OTHER_SORT_EXPRESSION, otherSortExpression);
+    } catch {
+      // localStorage unavailable
+    }
+  }, [otherSortExpression]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_KEY_OTHER_SORT_DIRECTION, otherSortDirection);
+    } catch {
+      // localStorage unavailable
+    }
+  }, [otherSortDirection]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        LS_KEY_OTHER_SORT_USE_REALTIME,
+        String(otherSortUseRealtime),
+      );
+    } catch {
+      // localStorage unavailable
+    }
+  }, [otherSortUseRealtime]);
+
+  useEffect(() => {
+    writeStoredIntradayMonitorWatchlistEnabled(watchlistEnabled);
+  }, [watchlistEnabled]);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -506,13 +688,35 @@ export default function AllMarketMonitorPage() {
 
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        setShowParams(false);
+        closeParams();
       }
     }
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [showParams]);
+  }, [closeParams, showParams]);
+
+  // 点击浮窗外部区域时关闭浮窗（模板触发浮窗 / 涨速命中浮窗）
+  useEffect(() => {
+    if (openTemplateTsCode === null && openHitTsCode === null) return;
+
+    function handleMouseDown(event: MouseEvent) {
+      const target = event.target as HTMLElement;
+      if (
+        target.closest(".all-market-template-popover") ||
+        target.closest(".all-market-hit-popover") ||
+        target.closest(".all-market-template-trigger-btn") ||
+        target.closest(".all-market-hit-row")
+      ) {
+        return;
+      }
+      setOpenTemplateTsCode(null);
+      setOpenHitTsCode(null);
+    }
+
+    document.addEventListener("mousedown", handleMouseDown);
+    return () => document.removeEventListener("mousedown", handleMouseDown);
+  }, [openTemplateTsCode, openHitTsCode]);
 
   useEffect(() => {
     enabledRef.current = enabled;
@@ -535,6 +739,9 @@ export default function AllMarketMonitorPage() {
         sceneStageThreshold,
         templateEnabled,
         templateEnabled ? templates : undefined,
+        watchlistEnabled ? watchlistCodes : undefined,
+        otherSortExpression.trim() || undefined,
+        otherSortUseRealtime,
       );
       if (!enabledRef.current) return;
 
@@ -574,7 +781,7 @@ export default function AllMarketMonitorPage() {
       setTemplateWarning(result.template_warning_message ?? "");
     } catch (runError) {
       if (enabledRef.current) {
-        setError(`全市场刷新失败: ${String(runError)}`);
+        setError(`实时刷新失败: ${String(runError)}`);
       }
     } finally {
       inFlightRef.current = false;
@@ -582,7 +789,16 @@ export default function AllMarketMonitorPage() {
         setLoading(false);
       }
     }
-  }, [sceneStageThreshold, sourcePathTrimmed, templateEnabled, templates]);
+  }, [
+    sceneStageThreshold,
+    otherSortExpression,
+    otherSortUseRealtime,
+    sourcePathTrimmed,
+    templateEnabled,
+    templates,
+    watchlistEnabled,
+    watchlistCodes,
+  ]);
 
   useEffect(() => {
     if (!enabled) return undefined;
@@ -655,6 +871,11 @@ export default function AllMarketMonitorPage() {
   }, [templateEnabled, templates]);
 
   useEffect(() => {
+    setHitRecordsByPeriod(() => createEmptyHitRecordsByPeriod());
+    setOpenHitTsCode(null);
+  }, [watchlistEnabled, watchlistCodes]);
+
+  useEffect(() => {
     if (!isFiniteNumber(speedThresholdPct)) return;
 
     const capturedAt = Date.now();
@@ -714,11 +935,10 @@ export default function AllMarketMonitorPage() {
         speed_pct: speedMap.get(row.ts_code) ?? null,
       }));
 
-    const effectiveSortKey = sortKey ?? primarySortKey;
-    const effectiveSortDirection = sortDirection ?? "desc";
     const sortDefinitions = {
       best_rank_3d: { value: (row: DisplayRow) => row.best_rank_3d },
       best_rank_5d: { value: (row: DisplayRow) => row.best_rank_5d },
+      other_sort_value: { value: (row: DisplayRow) => row.other_sort_value },
       realtime_change_pct: {
         value: (row: DisplayRow) => row.realtime_change_pct,
       },
@@ -741,14 +961,24 @@ export default function AllMarketMonitorPage() {
       total_mv_yi: { value: (row: DisplayRow) => row.total_mv_yi },
     } satisfies Partial<Record<SortKey, SortDefinition<DisplayRow>>>;
 
-    return sortRows(
+    const primarySortDirection: SortDirection =
+      primarySortKey === "other_sort_value" ? otherSortDirection : "desc";
+
+    const primaryTopRows = sortRows(
       filteredRows,
-      effectiveSortKey,
-      effectiveSortDirection,
+      primarySortKey,
+      primarySortDirection,
       sortDefinitions,
     ).slice(0, topLimit);
+
+    if (!sortKey || !sortDirection) {
+      return primaryTopRows;
+    }
+
+    return sortRows(primaryTopRows, sortKey, sortDirection, sortDefinitions);
   }, [
     boardFilter,
+    otherSortDirection,
     primarySortKey,
     rows,
     sortDirection,
@@ -838,7 +1068,7 @@ export default function AllMarketMonitorPage() {
       <section className="all-market-card">
         <div className="all-market-head">
           <div>
-            <h2 className="all-market-title">全市场监控</h2>
+            <h2 className="all-market-title">实时监控</h2>
             <div className="all-market-status">
               <span>{statusText}</span>
               <span>
@@ -846,6 +1076,9 @@ export default function AllMarketMonitorPage() {
               </span>
               {rankDate ? <span>排名 {rankDate}</span> : null}
               {templateEnabled ? <span>模板 {templates.length}</span> : null}
+              {watchlistEnabled ? (
+                <span>名单模式 {watchlistCodes.length}只</span>
+              ) : null}
             </div>
           </div>
 
@@ -885,6 +1118,25 @@ export default function AllMarketMonitorPage() {
                 {templateEnabled ? "模板判断中" : "模板已关闭"}
               </span>
             </button>
+
+            <button
+              type="button"
+              className={
+                watchlistEnabled
+                  ? "all-market-toggle is-active"
+                  : "all-market-toggle"
+              }
+              role="switch"
+              aria-checked={watchlistEnabled}
+              onClick={() => setWatchlistEnabled((value) => !value)}
+            >
+              <span className="all-market-toggle-track" aria-hidden="true">
+                <span className="all-market-toggle-thumb" />
+              </span>
+              <span className="all-market-toggle-text">
+                {watchlistEnabled ? "名单模式" : "未限名单"}
+              </span>
+            </button>
           </div>
         </div>
 
@@ -921,6 +1173,15 @@ export default function AllMarketMonitorPage() {
               >
                 量比
               </button>
+              <button
+                type="button"
+                className={
+                  primarySortKey === "other_sort_value" ? "is-active" : ""
+                }
+                onClick={() => setPrimarySort("other_sort_value")}
+              >
+                其他
+              </button>
             </div>
           </div>
 
@@ -951,6 +1212,13 @@ export default function AllMarketMonitorPage() {
             <button
               type="button"
               className="all-market-params-btn"
+              onClick={() => setWatchlistModalOpen(true)}
+            >
+              名单管理
+            </button>
+            <button
+              type="button"
+              className="all-market-params-btn"
               onClick={() => setTemplateModalOpen(true)}
             >
               模板管理
@@ -974,7 +1242,7 @@ export default function AllMarketMonitorPage() {
       <div className="all-market-monitor-grid">
         <section className="all-market-card all-market-table-card">
           <div className="all-market-table-head">
-            <h3>{isVolumeRatioBoard ? "量比榜" : "全市场行情"}</h3>
+            <h3>{isVolumeRatioBoard ? "量比榜" : "实时行情"}</h3>
             <div
               className="all-market-board-tabs"
               role="group"
@@ -1033,6 +1301,17 @@ export default function AllMarketMonitorPage() {
                     >
                       {renderSortHeader("五日涨幅", "return_5d_pct")}
                     </th>
+                    {showOtherSortColumn ? (
+                      <th
+                        className="all-market-other-sort-col"
+                        aria-sort={getAriaSort(
+                          sortKey === "other_sort_value",
+                          sortDirection,
+                        )}
+                      >
+                        {renderSortHeader("其他", "other_sort_value")}
+                      </th>
+                    ) : null}
                     <th
                       className="all-market-realtime-group-start"
                       aria-sort={getAriaSort(
@@ -1075,13 +1354,16 @@ export default function AllMarketMonitorPage() {
                       {renderSortHeader("开盘涨幅", "realtime_change_open_pct")}
                     </th>
                     <th
-                      className="all-market-info-group-start"
+                      className="all-market-info-group-start all-market-scene-col"
                       aria-sort="none"
                     >
                       场景标记
                     </th>
-                    <th aria-sort="none">模板触发</th>
+                    <th className="all-market-template-col" aria-sort="none">
+                      模板触发
+                    </th>
                     <th
+                      className="all-market-mv-col"
                       aria-sort={getAriaSort(
                         sortKey === "total_mv_yi",
                         sortDirection,
@@ -1089,7 +1371,7 @@ export default function AllMarketMonitorPage() {
                     >
                       {renderSortHeader("总市值", "total_mv_yi")}
                     </th>
-                    <th aria-sort="none">
+                    <th className="all-market-concept-col" aria-sort="none">
                       概念
                     </th>
                   </tr>
@@ -1100,8 +1382,12 @@ export default function AllMarketMonitorPage() {
                       row.concept ?? "",
                       excludedConcepts,
                     );
-                    const rankHighlighted = isRankHighlight(
-                      row,
+                    const rank3dHighlighted = isRankHighlight(
+                      row.best_rank_3d,
+                      rankHighlightThreshold,
+                    );
+                    const rank5dHighlighted = isRankHighlight(
+                      row.best_rank_5d,
                       rankHighlightThreshold,
                     );
 
@@ -1126,7 +1412,7 @@ export default function AllMarketMonitorPage() {
                         </td>
                         <td
                           className={
-                            rankHighlighted
+                            rank3dHighlighted
                               ? "all-market-rank-cell is-highlight"
                               : "all-market-rank-cell"
                           }
@@ -1135,7 +1421,7 @@ export default function AllMarketMonitorPage() {
                         </td>
                         <td
                           className={
-                            rankHighlighted
+                            rank5dHighlighted
                               ? "all-market-rank-cell is-highlight"
                               : "all-market-rank-cell"
                           }
@@ -1145,10 +1431,15 @@ export default function AllMarketMonitorPage() {
                         <td className={getPercentClassName(row.return_5d_pct)}>
                           {formatPercent(row.return_5d_pct)}
                         </td>
+                        {showOtherSortColumn ? (
+                          <td className="all-market-other-sort-col">
+                            {formatNumber(row.other_sort_value)}
+                          </td>
+                        ) : null}
                         <td
-                          className={`${getPercentClassName(
+                          className={getRealtimeChangeCellClassName(
                             row.realtime_change_pct,
-                          )} all-market-realtime-group-start`}
+                          )}
                         >
                           <span>{formatPercent(row.realtime_change_pct)}</span>
                           {changePctNewHighCodes.has(row.ts_code) ? (
@@ -1204,12 +1495,12 @@ export default function AllMarketMonitorPage() {
                           {formatPercent(row.realtime_change_open_pct)}
                         </td>
                         <td
-                          className="all-market-scene-marker-cell all-market-info-group-start"
+                          className="all-market-scene-marker-cell all-market-info-group-start all-market-scene-col"
                           title={row.scene_marker ?? "--"}
                         >
                           {row.scene_marker ?? "--"}
                         </td>
-                        <td className="all-market-template-cell">
+                        <td className="all-market-template-cell all-market-template-col">
                           {getTemplateHits(row).length > 0 ? (
                             <>
                               <button
@@ -1237,7 +1528,9 @@ export default function AllMarketMonitorPage() {
                                     <button
                                       type="button"
                                       aria-label="关闭"
-                                      onClick={() => setOpenTemplateTsCode(null)}
+                                      onClick={() =>
+                                        setOpenTemplateTsCode(null)
+                                      }
                                     >
                                       ×
                                     </button>
@@ -1256,11 +1549,11 @@ export default function AllMarketMonitorPage() {
                             "--"
                           )}
                         </td>
-                        <td>
+                        <td className="all-market-mv-col">
                           {formatNumber(row.total_mv_yi)}
                         </td>
                         <td
-                          className="all-market-concept-cell"
+                          className="all-market-concept-cell all-market-concept-col"
                           title={conceptText}
                         >
                           {conceptText}
@@ -1272,7 +1565,7 @@ export default function AllMarketMonitorPage() {
               </table>
             ) : (
               <div className="all-market-empty-state">
-                {enabled ? "等待全市场行情返回。" : "开启爬虫后开始刷新。"}
+                {enabled ? "等待行情返回。" : "开启爬虫后开始刷新。"}
               </div>
             )}
           </div>
@@ -1358,7 +1651,11 @@ export default function AllMarketMonitorPage() {
           </div>
 
           {openHitRecord ? (
-            <div className="all-market-hit-popover" role="dialog">
+            <div
+              className="all-market-hit-popover"
+              role="dialog"
+              onClick={(event) => event.stopPropagation()}
+            >
               <div className="all-market-hit-popover-head">
                 <DetailsLink
                   tsCode={openHitRecord.ts_code}
@@ -1470,7 +1767,7 @@ export default function AllMarketMonitorPage() {
           role="presentation"
           onClick={(event) => {
             if (event.target === event.currentTarget) {
-              setShowParams(false);
+              closeParams();
             }
           }}
         >
@@ -1478,20 +1775,20 @@ export default function AllMarketMonitorPage() {
             className="settings-modal settings-modal-narrow"
             role="dialog"
             aria-modal="true"
-            aria-label="全市场监控参数"
+            aria-label="实时监控参数"
           >
             <div className="settings-modal-head">
               <div>
                 <h3 className="settings-subtitle-head">监控参数</h3>
                 <p className="settings-section-note">
-                  调整全市场监控的涨速计算与展示参数。
+                  调整实时监控的涨速计算与展示参数。
                 </p>
               </div>
               <div className="settings-actions">
                 <button
                   className="settings-primary-btn"
                   type="button"
-                  onClick={() => setShowParams(false)}
+                  onClick={closeParams}
                 >
                   完成
                 </button>
@@ -1574,18 +1871,54 @@ export default function AllMarketMonitorPage() {
 
               <label className="settings-field">
                 <span>Top N</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  inputMode="numeric"
+                  value={topLimitText}
+                  onChange={(event) => setTopLimitText(event.target.value)}
+                />
+              </label>
+
+              <label className="settings-field">
+                <span>其他排序方向</span>
                 <select
-                  value={topLimit}
+                  value={otherSortDirection}
                   onChange={(event) =>
-                    setTopLimit(Number(event.target.value) as TopLimit)
+                    setOtherSortDirection(
+                      event.target.value === "asc" ? "asc" : "desc",
+                    )
                   }
                 >
-                  {TOP_LIMIT_OPTIONS.map((value) => (
-                    <option key={value} value={value}>
-                      {value}
-                    </option>
-                  ))}
+                  <option value="asc">小数/否在前</option>
+                  <option value="desc">大数/是在前</option>
                 </select>
+              </label>
+
+              <label className="settings-field">
+                <span>其他排序数据</span>
+                <select
+                  value={otherSortUseRealtime ? "realtime" : "daily"}
+                  onChange={(event) =>
+                    setOtherSortUseRealtime(event.target.value === "realtime")
+                  }
+                >
+                  <option value="realtime">使用实时数据</option>
+                  <option value="daily">不使用实时数据</option>
+                </select>
+              </label>
+
+              <label className="settings-field all-market-param-expression">
+                <span>其他排序表达式</span>
+                <textarea
+                  className="settings-textarea all-market-param-expression-textarea"
+                  value={otherSortExpression}
+                  onChange={(event) =>
+                    setOtherSortExpression(event.target.value)
+                  }
+                  placeholder="示例：RT_OP；C > RT_AVG；TOTAL_MV_YI"
+                />
               </label>
             </div>
           </section>
@@ -1598,6 +1931,14 @@ export default function AllMarketMonitorPage() {
         templates={templates}
         onChangeTemplates={updateTemplates}
         onClose={() => setTemplateModalOpen(false)}
+      />
+
+      <WatchlistModal
+        open={watchlistModalOpen}
+        sourcePath={sourcePathTrimmed}
+        currentCodes={watchlistCodes}
+        onChangeCodes={updateWatchlist}
+        onClose={() => setWatchlistModalOpen(false)}
       />
     </div>
   );

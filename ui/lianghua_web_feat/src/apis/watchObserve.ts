@@ -7,8 +7,6 @@ import {
   writeWatchObserveRowsToCache,
 } from '../shared/watchObserve'
 
-const WATCH_OBSERVE_MIGRATION_KEY = 'lh_watch_observe_browser_cache_migrated_v2'
-
 export type WatchObserveRow = {
   tsCode: string
   name: string
@@ -43,7 +41,6 @@ export type WatchObserveInput = {
   tradeDate?: string | null
 }
 
-let watchObserveMigrationPromise: Promise<void> | null = null
 let watchObservePreloadPromise: Promise<WatchObserveRow[]> | null = null
 let watchObservePreloadKey = ''
 
@@ -139,36 +136,6 @@ function removeCachedWatchObserveRows(tsCodes: string[]) {
   return nextRows
 }
 
-async function ensureWatchObserveCacheMigration(sourcePath?: string | null) {
-  if (typeof window === 'undefined') {
-    return
-  }
-
-  if (window.localStorage.getItem(WATCH_OBSERVE_MIGRATION_KEY) === '1') {
-    return
-  }
-
-  if (!watchObserveMigrationPromise) {
-    watchObserveMigrationPromise = (async () => {
-      const cachedRows = readWatchObserveRowsFromCache()
-      if (cachedRows.length > 0) {
-        writeWatchObserveRowsToCache(cachedRows)
-      } else {
-        const backendRows = await invoke<WatchObserveRow[]>('list_watch_observe_rows', {
-          sourcePath: resolveSourcePath(sourcePath),
-        })
-        writeWatchObserveRowsToCache(backendRows)
-      }
-
-      window.localStorage.setItem(WATCH_OBSERVE_MIGRATION_KEY, '1')
-    })().finally(() => {
-      watchObserveMigrationPromise = null
-    })
-  }
-
-  await watchObserveMigrationPromise
-}
-
 export function findWatchObserveRow(rows: WatchObserveRow[], tsCode: string) {
   const normalizedTsCode = normalizeTsCode(tsCode)
   if (!normalizedTsCode) {
@@ -182,7 +149,6 @@ export async function listWatchObserveRows(
   sourcePath?: string | null,
   referenceTradeDate?: string | null,
 ) {
-  await ensureWatchObserveCacheMigration(sourcePath)
   return listHydratedWatchObserveRows(sourcePath, referenceTradeDate)
 }
 
@@ -190,12 +156,10 @@ export async function refreshWatchObserveRows(
   referenceTradeDate?: string | null,
   sourcePath?: string | null,
 ) {
-  await ensureWatchObserveCacheMigration(sourcePath)
   return refreshHydratedWatchObserveRows(sourcePath, referenceTradeDate)
 }
 
 export async function upsertWatchObserveRow(input: WatchObserveInput, sourcePath?: string | null) {
-  await ensureWatchObserveCacheMigration(sourcePath)
   upsertCachedWatchObserveRow({
     tsCode: input.tsCode,
     name: input.name,
@@ -208,13 +172,11 @@ export async function upsertWatchObserveRow(input: WatchObserveInput, sourcePath
 }
 
 export async function updateWatchObserveTag(tsCode: string, tag: string, sourcePath?: string | null) {
-  await ensureWatchObserveCacheMigration(sourcePath)
   updateCachedWatchObserveTag(tsCode, tag)
   return listHydratedWatchObserveRows(sourcePath)
 }
 
 export async function removeWatchObserveRows(tsCodes: string[], sourcePath?: string | null) {
-  await ensureWatchObserveCacheMigration(sourcePath)
   removeCachedWatchObserveRows(tsCodes)
   return listHydratedWatchObserveRows(sourcePath)
 }
@@ -228,10 +190,7 @@ export function preloadWatchObserveRows(
     return watchObservePreloadPromise
   }
 
-  const preloadPromise = (async () => {
-    await ensureWatchObserveCacheMigration(sourcePath)
-    return listHydratedWatchObserveRows(sourcePath, referenceTradeDate)
-  })()
+  const preloadPromise = listHydratedWatchObserveRows(sourcePath, referenceTradeDate)
 
   watchObservePreloadPromise = preloadPromise
   watchObservePreloadKey = preloadKey

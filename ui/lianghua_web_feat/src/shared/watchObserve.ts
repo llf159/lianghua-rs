@@ -2,22 +2,6 @@ import { normalizeTsCode } from './stockCode'
 import { normalizeDateValue } from './tradeDate'
 
 const WATCH_CACHE_WRITE_KEY = 'lh_watch_observe_list'
-const WATCH_CACHE_PRIMARY_KEYS = [
-  'lh_watch_observe_list',
-  'lh_watch_observe_rows',
-  'lh_watch_observe',
-  'lh_watch_list',
-  'lh_watchlist',
-  'watch_observe_list',
-  'watch_list',
-  'watchlist',
-] as const
-const WATCH_CACHE_DISCOVERY_TOKENS = ['watch', 'observe', 'favorite', '自选'] as const
-const WATCH_CACHE_NESTED_KEYS = ['items', 'list', 'rows', 'data', 'values', 'watchlist'] as const
-const WATCH_CACHE_RESERVED_KEYS = new Set([
-  'lh_watch_observe_browser_cache_migrated_v2',
-  'lh_watch_observe_page_state_v1',
-])
 
 export type WatchObserveRow = {
   tsCode: string
@@ -35,41 +19,6 @@ export type WatchObserveRow = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
-function extractTextValue(record: Record<string, unknown>, keys: readonly string[]) {
-  for (const key of keys) {
-    const value = record[key]
-    if (typeof value === 'string' || typeof value === 'number') {
-      const text = String(value).trim()
-      if (text !== '') {
-        return text
-      }
-    }
-  }
-
-  return ''
-}
-
-function extractNumberValue(record: Record<string, unknown>, keys: readonly string[]) {
-  for (const key of keys) {
-    const value = record[key]
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      return value
-    }
-    if (typeof value === 'string') {
-      const normalized = value.replace(/,/g, '').trim()
-      if (normalized === '') {
-        continue
-      }
-      const parsed = Number(normalized)
-      if (Number.isFinite(parsed)) {
-        return parsed
-      }
-    }
-  }
-
-  return null
 }
 
 function mergeWatchObserveRow(primary: WatchObserveRow, secondary: WatchObserveRow): WatchObserveRow {
@@ -129,180 +78,35 @@ function normalizeRowInput(
   }
 }
 
-function buildWatchRowFromRecord(record: Record<string, unknown>) {
-  const tsCode = normalizeTsCode(
-    extractTextValue(record, ['ts_code', 'tsCode', 'code', 'stock_code', 'stockCode']),
-  )
+function normalizeNumberValue(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function normalizeTextValue(value: unknown) {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function buildWatchRowFromCacheRecord(record: Record<string, unknown>) {
+  const tsCode = normalizeTsCode(record.ts_code)
   if (!tsCode) {
     return null
   }
 
-  const tradeDateRaw = extractTextValue(record, [
-    'trade_date',
-    'tradeDate',
-    'rank_date',
-    'rankDate',
-    'latest_trade_date',
-    'latestTradeDate',
-  ])
+  const tradeDate = normalizeDateValue(normalizeTextValue(record.trade_date))
 
   return {
     tsCode,
-    name: extractTextValue(record, ['name', 'stock_name', 'stockName']),
-    latestClose: extractNumberValue(record, [
-      'latest_close',
-      'latestClose',
-      'latest_close_price',
-      'latestClosePrice',
-      'close',
-    ]),
-    latestChangePct: extractNumberValue(record, [
-      'latest_change_pct',
-      'latestChangePct',
-      'pct_chg',
-      'pctChg',
-      'change_pct',
-      'changePct',
-      'chgPct',
-    ]),
-    volumeRatio: extractNumberValue(record, ['volume_ratio', 'volumeRatio', 'vol_ratio', 'volRatio']),
-    addedDate: normalizeDateValue(
-      extractTextValue(record, [
-        'watch_date',
-        'watchDate',
-        'observe_date',
-        'observeDate',
-        'added_date',
-        'addedDate',
-        'join_date',
-        'joinDate',
-        'created_at',
-        'createdAt',
-        'trade_date',
-        'tradeDate',
-        'date',
-      ]),
-    ),
-    postWatchReturnPct: extractNumberValue(record, [
-      'post_watch_return_pct',
-      'postWatchReturnPct',
-      'observe_return_pct',
-      'observeReturnPct',
-      'watch_return_pct',
-      'watchReturnPct',
-      'return_pct',
-      'returnPct',
-      'post_rank_return_pct',
-    ]),
-    todayRank: extractNumberValue(record, ['today_rank', 'todayRank', 'rank']),
-    tag: extractTextValue(record, ['tag', 'label', 'memo', 'note']),
-    concept: extractTextValue(record, ['concept', 'concepts']),
-    tradeDate: tradeDateRaw ? normalizeDateValue(tradeDateRaw) : null,
+    name: normalizeTextValue(record.name),
+    latestClose: normalizeNumberValue(record.latest_close),
+    latestChangePct: normalizeNumberValue(record.latest_change_pct),
+    volumeRatio: normalizeNumberValue(record.volume_ratio),
+    addedDate: normalizeDateValue(normalizeTextValue(record.watch_date)),
+    postWatchReturnPct: normalizeNumberValue(record.post_watch_return_pct),
+    todayRank: normalizeNumberValue(record.today_rank),
+    tag: normalizeTextValue(record.tag),
+    concept: normalizeTextValue(record.concept),
+    tradeDate: tradeDate === '' ? null : tradeDate,
   } satisfies WatchObserveRow
-}
-
-function buildWatchRowFromUnknown(value: unknown): WatchObserveRow | null {
-  if (typeof value === 'string' || typeof value === 'number') {
-    const tsCode = normalizeTsCode(value)
-    if (!tsCode) {
-      return null
-    }
-    return {
-      tsCode,
-      name: '',
-      latestClose: null,
-      latestChangePct: null,
-      volumeRatio: null,
-      addedDate: '',
-      postWatchReturnPct: null,
-      todayRank: null,
-      tag: '',
-      concept: '',
-      tradeDate: null,
-    }
-  }
-
-  if (Array.isArray(value)) {
-    const tsCode = normalizeTsCode(value[0])
-    if (!tsCode) {
-      return null
-    }
-    const hasVolumeRatioField = value.length >= 11
-    return {
-      tsCode,
-      name: typeof value[1] === 'string' ? value[1].trim() : '',
-      latestClose: typeof value[2] === 'number' && Number.isFinite(value[2]) ? value[2] : null,
-      latestChangePct: typeof value[3] === 'number' && Number.isFinite(value[3]) ? value[3] : null,
-      volumeRatio:
-        hasVolumeRatioField &&
-        typeof value[4] === 'number' &&
-        Number.isFinite(value[4])
-          ? value[4]
-          : null,
-      addedDate: normalizeDateValue(hasVolumeRatioField ? value[5] : value[4]),
-      postWatchReturnPct:
-        typeof value[hasVolumeRatioField ? 6 : 5] === 'number' &&
-        Number.isFinite(value[hasVolumeRatioField ? 6 : 5])
-          ? value[hasVolumeRatioField ? 6 : 5]
-          : null,
-      todayRank:
-        typeof value[hasVolumeRatioField ? 7 : 6] === 'number' &&
-        Number.isFinite(value[hasVolumeRatioField ? 7 : 6])
-          ? value[hasVolumeRatioField ? 7 : 6]
-          : null,
-      tag: typeof value[hasVolumeRatioField ? 8 : 7] === 'string' ? value[hasVolumeRatioField ? 8 : 7].trim() : '',
-      concept:
-        typeof value[hasVolumeRatioField ? 9 : 8] === 'string'
-          ? value[hasVolumeRatioField ? 9 : 8].trim()
-          : '',
-      tradeDate: value[hasVolumeRatioField ? 10 : 9]
-        ? normalizeDateValue(value[hasVolumeRatioField ? 10 : 9])
-        : null,
-    }
-  }
-
-  if (isRecord(value)) {
-    return buildWatchRowFromRecord(value)
-  }
-
-  return null
-}
-
-function extractWatchRows(payload: unknown): WatchObserveRow[] {
-  if (Array.isArray(payload)) {
-    return payload.flatMap((item) => {
-      const direct = buildWatchRowFromUnknown(item)
-      if (direct) {
-        return [direct]
-      }
-      return extractWatchRows(item)
-    })
-  }
-
-  if (!isRecord(payload)) {
-    return []
-  }
-
-  for (const key of WATCH_CACHE_NESTED_KEYS) {
-    const nested = payload[key]
-    const rows = extractWatchRows(nested)
-    if (rows.length > 0) {
-      return rows
-    }
-  }
-
-  const direct = buildWatchRowFromRecord(payload)
-  if (direct) {
-    return [direct]
-  }
-
-  return Object.entries(payload).flatMap(([tsCodeKey, item]) => {
-    if (!isRecord(item)) {
-      return []
-    }
-    const row = buildWatchRowFromRecord({ ...item, ts_code: item.ts_code ?? item.tsCode ?? tsCodeKey })
-    return row ? [row] : []
-  })
 }
 
 function parseWatchRows(raw: string) {
@@ -312,51 +116,16 @@ function parseWatchRows(raw: string) {
   }
 
   try {
-    return extractWatchRows(JSON.parse(trimmed))
-  } catch {
-    return trimmed
-      .split(/[\n,]+/)
-      .map((item) => buildWatchRowFromUnknown(item.trim()))
+    const parsed = JSON.parse(trimmed)
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+    return parsed
+      .map((item) => (isRecord(item) ? buildWatchRowFromCacheRecord(item) : null))
       .filter((item): item is WatchObserveRow => item !== null)
+  } catch {
+    return []
   }
-}
-
-function collectCandidateKeys(storage: Storage) {
-  const keys: string[] = []
-  const existing = new Set<string>()
-
-  for (let index = 0; index < storage.length; index += 1) {
-    const key = storage.key(index)
-    if (
-      typeof key === 'string' &&
-      key.trim() !== '' &&
-      !WATCH_CACHE_RESERVED_KEYS.has(key)
-    ) {
-      existing.add(key)
-    }
-  }
-
-  WATCH_CACHE_PRIMARY_KEYS.forEach((key) => {
-    if (existing.has(key)) {
-      keys.push(key)
-    }
-  })
-
-  existing.forEach((key) => {
-    const lowerKey = key.toLowerCase()
-    if (WATCH_CACHE_DISCOVERY_TOKENS.some((token) => lowerKey.includes(token)) && !keys.includes(key)) {
-      keys.push(key)
-    }
-  })
-
-  return keys
-}
-
-function clearWatchObserveCacheEntries(storage: Storage) {
-  const keys = collectCandidateKeys(storage)
-  keys.forEach((key) => {
-    storage.removeItem(key)
-  })
 }
 
 export function readWatchObserveRowsFromCache() {
@@ -364,30 +133,12 @@ export function readWatchObserveRowsFromCache() {
     return []
   }
 
-  const merged = new Map<string, WatchObserveRow>()
-  const storages = [window.localStorage, window.sessionStorage]
-
-  for (const storage of storages) {
-    const keys = collectCandidateKeys(storage)
-    for (const key of keys) {
-      const raw = storage.getItem(key)
-      if (!raw) {
-        continue
-      }
-
-      const rows = parseWatchRows(raw)
-      rows.forEach((row) => {
-        const existing = merged.get(row.tsCode)
-        if (!existing) {
-          merged.set(row.tsCode, row)
-          return
-        }
-        merged.set(row.tsCode, mergeWatchObserveRow(existing, row))
-      })
-    }
+  const raw = window.localStorage.getItem(WATCH_CACHE_WRITE_KEY)
+  if (!raw) {
+    return []
   }
 
-  return [...merged.values()]
+  return parseWatchRows(raw)
 }
 
 export function writeWatchObserveRowsToCache(rows: WatchObserveRow[]) {
@@ -409,8 +160,6 @@ export function writeWatchObserveRowsToCache(rows: WatchObserveRow[]) {
     trade_date: row.tradeDate || undefined,
   }))
 
-  clearWatchObserveCacheEntries(window.localStorage)
-  clearWatchObserveCacheEntries(window.sessionStorage)
   window.localStorage.setItem(WATCH_CACHE_WRITE_KEY, JSON.stringify(payload))
 }
 

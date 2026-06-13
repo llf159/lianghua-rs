@@ -116,6 +116,7 @@ pub struct AllMarketMonitorRow {
     pub realtime_amount: Option<f64>,
     pub realtime_vol_ratio: Option<f64>,
     pub return_5d_pct: Option<f64>,
+    pub other_sort_value: Option<f64>,
     pub scene_marker: Option<String>,
     pub template_hits: Option<Vec<AllMarketTemplateHit>>,
     pub total_mv_yi: Option<f64>,
@@ -150,6 +151,9 @@ static RETURN_5D_CONTEXT_CACHE: OnceLock<Mutex<HashMap<String, HashMap<String, R
     OnceLock::new();
 static TEMPLATE_RUNTIME_CACHE: OnceLock<
     Mutex<HashMap<String, Arc<AllMarketTemplateRuntimeCacheEntry>>>,
+> = OnceLock::new();
+static OTHER_SORT_DAILY_VALUE_CACHE: OnceLock<
+    Mutex<HashMap<String, Arc<HashMap<String, Option<f64>>>>>,
 > = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -213,6 +217,11 @@ fn return_5d_context_cache() -> &'static Mutex<HashMap<String, HashMap<String, R
 fn template_runtime_cache()
 -> &'static Mutex<HashMap<String, Arc<AllMarketTemplateRuntimeCacheEntry>>> {
     TEMPLATE_RUNTIME_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn other_sort_daily_value_cache()
+-> &'static Mutex<HashMap<String, Arc<HashMap<String, Option<f64>>>>> {
+    OTHER_SORT_DAILY_VALUE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn parse_total_mv_yi(raw: Option<&String>) -> Option<f64> {
@@ -976,9 +985,6 @@ fn cached_template_runtime(
     let mut cache = template_runtime_cache()
         .lock()
         .map_err(|_| "模板预热缓存锁已损坏".to_string())?;
-    if cache.len() >= 4 {
-        cache.clear();
-    }
     cache.insert(lookup_key, entry.clone());
     Ok(entry)
 }
@@ -1040,6 +1046,225 @@ fn build_template_runtime_row_data(
 
     row_data.validate()?;
     Ok(row_data)
+}
+
+fn value_latest_as_sort_number(value: &Value, len: usize) -> Result<Option<f64>, String> {
+    match value {
+        Value::Num(value) => Ok(value.is_finite().then_some(*value)),
+        Value::Bool(value) => Ok(Some(if *value { 1.0 } else { 0.0 })),
+        Value::NumSeries(_) | Value::SharedNumSeries(_) => {
+            let series = Value::as_num_series(value, len)
+                .map_err(|error| format!("表达式返回值非数值:{}", error.msg))?;
+            Ok(series
+                .last()
+                .copied()
+                .flatten()
+                .filter(|value| value.is_finite()))
+        }
+        Value::BoolSeries(_) => {
+            let series = Value::as_bool_series(value, len)
+                .map_err(|error| format!("表达式返回值非布尔:{}", error.msg))?;
+            Ok(series.last().map(|value| if *value { 1.0 } else { 0.0 }))
+        }
+    }
+}
+
+fn eval_other_sort_value(
+    runtime: &Runtime,
+    ast: &crate::expr::parser::Stmts,
+) -> Result<Option<f64>, String> {
+    let mut rt = runtime.clone();
+    let value = rt
+        .eval_program(ast)
+        .map_err(|error| format!("表达式计算错误:{}", error.msg))?;
+    let len = rt_max_len(&rt);
+    value_latest_as_sort_number(&value, len)
+}
+
+fn build_other_sort_template(expression: &str) -> IntradayMonitorTemplate {
+    IntradayMonitorTemplate {
+        id: "__all_market_other_sort__".to_string(),
+        name: "其他排序".to_string(),
+        expression: expression.trim().to_string(),
+    }
+}
+
+fn build_other_sort_warning(messages: Vec<String>) -> Option<String> {
+    let normalized = messages
+        .into_iter()
+        .map(|message| message.trim().to_string())
+        .filter(|message| !message.is_empty())
+        .collect::<Vec<_>>();
+
+    match normalized.as_slice() {
+        [] => None,
+        [first] => Some(format!("其他排序异常: {first}")),
+        [first, ..] => Some(format!(
+            "其他排序异常共 {} 条，首条: {}",
+            normalized.len(),
+            first
+        )),
+    }
+}
+
+fn cached_daily_other_sort_values(
+    source_path: &str,
+    stocks: &[StockMeta],
+    expression: &str,
+) -> Result<(Arc<HashMap<String, Option<f64>>>, Option<String>), String> {
+    let template = build_other_sort_template(expression);
+    let templates = vec![template.clone()];
+    let lookup_key = format!(
+        "{}|other-sort-daily:{}|stocks:{}",
+        source_path,
+        hash_to_hex(&template.expression),
+        fingerprint_strings(
+            &stocks
+                .iter()
+                .map(|item| item.ts_code.clone())
+                .collect::<Vec<_>>()
+        ),
+    );
+
+    let entry = cached_template_runtime(source_path, stocks, &templates)?;
+    if let Some(values) = other_sort_daily_value_cache()
+        .lock()
+        .map_err(|_| "其他排序日K缓存锁已损坏".to_string())?
+        .get(&lookup_key)
+        .cloned()
+    {
+        return Ok((
+            values,
+            build_other_sort_warning(entry.warning_messages.clone()),
+        ));
+    }
+
+    let Some(CompiledIntradayMonitorTemplate::Ready(compiled)) =
+        entry.compiled_templates.get(&template.id)
+    else {
+        return Ok((
+            Arc::new(HashMap::new()),
+            build_other_sort_warning(entry.warning_messages.clone()),
+        ));
+    };
+
+    let eval_results = stocks
+        .par_iter()
+        .filter_map(|stock| {
+            let base_row = entry.base_rows.get(&stock.ts_code)?;
+            let mut row_data = base_row.clone();
+            if !entry.indicator_cache.is_empty() {
+                for (name, series) in calc_inds_with_cache_lossy(&entry.indicator_cache, &row_data)
+                {
+                    row_data.cols.insert(name, series);
+                }
+            }
+            let mut runtime = match row_data.validate().and_then(|_| row_into_rt(row_data)) {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    return Some(Err(format!(
+                        "{}: runtime 构建失败: {}",
+                        stock.ts_code, error
+                    )));
+                }
+            };
+            freeze_runtime_series(&mut runtime);
+            Some(
+                eval_other_sort_value(&runtime, &compiled.ast)
+                    .map(|value| (stock.ts_code.clone(), value))
+                    .map_err(|error| format!("{}: {}", stock.ts_code, error)),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut values = HashMap::new();
+    let mut warnings = entry.warning_messages.clone();
+    for result in eval_results {
+        match result {
+            Ok((ts_code, value)) => {
+                values.insert(ts_code, value);
+            }
+            Err(error) => warnings.push(error),
+        }
+    }
+
+    let values = Arc::new(values);
+    other_sort_daily_value_cache()
+        .lock()
+        .map_err(|_| "其他排序日K缓存锁已损坏".to_string())?
+        .insert(lookup_key, values.clone());
+    Ok((values, build_other_sort_warning(warnings)))
+}
+
+fn apply_other_sort_values(
+    source_path: &str,
+    stocks: &[StockMeta],
+    rows: &mut [AllMarketMonitorRow],
+    quotes: &HashMap<String, SinaQuote>,
+    expression: Option<&str>,
+    use_realtime: bool,
+) -> Option<String> {
+    let expression = expression
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if !use_realtime {
+        return match cached_daily_other_sort_values(source_path, stocks, expression) {
+            Ok((values, warning)) => {
+                for row in rows.iter_mut() {
+                    row.other_sort_value = values.get(&row.ts_code).copied().flatten();
+                }
+                warning
+            }
+            Err(error) => Some(format!("其他排序异常: {error}")),
+        };
+    }
+
+    let template = build_other_sort_template(expression);
+    let templates = vec![template.clone()];
+    let entry = match cached_template_runtime(source_path, stocks, &templates) {
+        Ok(entry) => entry,
+        Err(error) => return Some(format!("其他排序异常: runtime 初始化失败: {error}")),
+    };
+
+    let Some(CompiledIntradayMonitorTemplate::Ready(compiled)) =
+        entry.compiled_templates.get(&template.id)
+    else {
+        return build_other_sort_warning(entry.warning_messages.clone());
+    };
+
+    let build_results = rows
+        .par_iter()
+        .enumerate()
+        .filter_map(|(row_index, row)| {
+            let quote = quotes.get(&row.ts_code)?;
+            let row_data = match build_template_runtime_row_data(&entry, row, quote) {
+                Ok(row_data) => row_data,
+                Err(error) => return Some(Err(format!("{}: {}", row.ts_code, error))),
+            };
+            let mut runtime = match row_into_rt(row_data) {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    return Some(Err(format!("{}: runtime 构建失败: {}", row.ts_code, error)));
+                }
+            };
+            freeze_runtime_series(&mut runtime);
+            Some(
+                eval_other_sort_value(&runtime, &compiled.ast)
+                    .map(|value| (row_index, value))
+                    .map_err(|error| format!("{}: {}", row.ts_code, error)),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut warnings = entry.warning_messages.clone();
+    for result in build_results {
+        match result {
+            Ok((row_index, value)) => rows[row_index].other_sort_value = value,
+            Err(error) => warnings.push(error),
+        }
+    }
+
+    build_other_sort_warning(warnings)
 }
 
 fn apply_all_market_template_hits(
@@ -1113,53 +1338,49 @@ fn apply_all_market_template_hits(
         let tpl_order = &entry.template_order;
         let compiled = &entry.compiled_templates;
 
-        let eval_results: Vec<Option<Result<(usize, AllMarketTemplateHit), String>>> =
-            (0..total)
-                .into_par_iter()
-                .map(|idx| {
-                    let row_idx = idx / tpl_count;
-                    let tpl_idx = idx % tpl_count;
-                    let ctx = &valid[row_idx];
-                    let tpl_id = &tpl_order[tpl_idx];
+        let eval_results: Vec<Option<Result<(usize, AllMarketTemplateHit), String>>> = (0..total)
+            .into_par_iter()
+            .map(|idx| {
+                let row_idx = idx / tpl_count;
+                let tpl_idx = idx % tpl_count;
+                let ctx = &valid[row_idx];
+                let tpl_id = &tpl_order[tpl_idx];
 
-                    let tpl = match compiled.get(tpl_id) {
-                        Some(CompiledIntradayMonitorTemplate::Ready(t)) => t,
-                        _ => return None,
-                    };
+                let tpl = match compiled.get(tpl_id) {
+                    Some(CompiledIntradayMonitorTemplate::Ready(t)) => t,
+                    _ => return None,
+                };
 
-                    let mut rt = ctx.runtime.clone();
-                    let hit = match (|| -> Result<bool, String> {
-                        let value = rt
-                            .eval_program(&tpl.ast)
-                            .map_err(|e| format!("表达式计算错误:{}", e.msg))?;
-                        let len = rt_max_len(&rt);
-                        let series = Value::as_bool_series(&value, len)
-                            .map_err(|e| format!("表达式返回值非布尔:{}", e.msg))?;
-                        Ok(series.last().copied().unwrap_or(false))
-                    })() {
-                        Ok(true) => true,
-                        Ok(false) => false,
-                        Err(err) => {
-                            return Some(Err(format!(
-                                "{}: {} · {}",
-                                ctx.ts_code, tpl.name, err
-                            )));
-                        }
-                    };
-
-                    if hit {
-                        Some(Ok((
-                            ctx.row_index,
-                            AllMarketTemplateHit {
-                                template_id: tpl_id.clone(),
-                                template_name: tpl.name.clone(),
-                            },
-                        )))
-                    } else {
-                        None
+                let mut rt = ctx.runtime.clone();
+                let hit = match (|| -> Result<bool, String> {
+                    let value = rt
+                        .eval_program(&tpl.ast)
+                        .map_err(|e| format!("表达式计算错误:{}", e.msg))?;
+                    let len = rt_max_len(&rt);
+                    let series = Value::as_bool_series(&value, len)
+                        .map_err(|e| format!("表达式返回值非布尔:{}", e.msg))?;
+                    Ok(series.last().copied().unwrap_or(false))
+                })() {
+                    Ok(true) => true,
+                    Ok(false) => false,
+                    Err(err) => {
+                        return Some(Err(format!("{}: {} · {}", ctx.ts_code, tpl.name, err)));
                     }
-                })
-                .collect();
+                };
+
+                if hit {
+                    Some(Ok((
+                        ctx.row_index,
+                        AllMarketTemplateHit {
+                            template_id: tpl_id.clone(),
+                            template_name: tpl.name.clone(),
+                        },
+                    )))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         for result in eval_results.into_iter().flatten() {
             match result {
@@ -1230,6 +1451,7 @@ fn build_rows(
                 realtime_amount: quote.map(|item| item.amount),
                 realtime_vol_ratio: volume_ratio_map.get(&stock.ts_code).copied(),
                 return_5d_pct,
+                other_sort_value: None,
                 scene_marker: scene_marker_map.get(&stock.ts_code).cloned(),
                 template_hits: None,
                 total_mv_yi: stock.total_mv_yi,
@@ -1287,8 +1509,16 @@ pub fn get_all_market_monitor_snapshot(
     scene_stage_threshold: Option<String>,
     template_enabled: Option<bool>,
     templates: Option<Vec<IntradayMonitorTemplate>>,
+    ts_codes: Option<Vec<String>>,
+    other_sort_expression: Option<String>,
+    other_sort_use_realtime: Option<bool>,
 ) -> Result<AllMarketMonitorSnapshotData, String> {
-    let meta = cached_source_meta(source_path)?;
+    let mut meta = cached_source_meta(source_path)?;
+    if let Some(ref codes) = ts_codes {
+        let code_set: HashSet<&str> = codes.iter().map(|s| s.as_str()).collect();
+        meta.stocks
+            .retain(|s| code_set.contains(s.ts_code.as_str()));
+    }
     let ts_codes = meta
         .stocks
         .iter()
@@ -1355,6 +1585,19 @@ pub fn get_all_market_monitor_snapshot(
         )
     } else {
         None
+    };
+    let other_sort_warning_message = apply_other_sort_values(
+        source_path,
+        &meta.stocks,
+        &mut rows,
+        &quotes,
+        other_sort_expression.as_deref(),
+        other_sort_use_realtime.unwrap_or(true),
+    );
+    let template_warning_message = match (template_warning_message, other_sort_warning_message) {
+        (Some(left), Some(right)) => Some(format!("{left}；{right}")),
+        (Some(message), None) | (None, Some(message)) => Some(message),
+        (None, None) => None,
     };
     let index_rows = fetch_index_rows(provider.opposite());
 

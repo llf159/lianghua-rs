@@ -1,0 +1,365 @@
+.watchlist-modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 16px;
+}
+
+.watchlist-modal {
+  width: min(920px, 100%);
+  max-height: 86vh;
+  overflow: auto;
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #dde4ee;
+  padding: 16px;
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.2);
+}
+
+.watchlist-modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.watchlist-modal-head h4 {
+  margin: 0;
+  font-size: 16px;
+  color: #1f2a44;
+}
+
+.watchlist-modal-head p {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.watchlist-modal-close {
+  border: 1px solid #cfd8e3;
+  border-radius: 8px;
+  background: #fff;
+  color: #425367;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.watchlist-modal-close:hover {
+  background: #f1f5f9;
+}
+
+.watchlist-modal-section {
+  margin-bottom: 12px;
+}
+
+.watchlist-modal-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.watchlist-modal-summary > div {
+  border: 1px solid #e1e7ef;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #f8fafc;
+}
+
+.watchlist-modal-summary strong,
+.watchlist-modal-summary span {
+  display: block;
+}
+
+.watchlist-modal-summary strong {
+  color: #1f2a44;
+  font-size: 18px;
+  line-height: 1.1;
+}
+
+.watchlist-modal-summary span {
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.watchlist-modal-panel {
+  border: 1px solid #e3eaf2;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fcfdff;
+}
+
+.watchlist-modal-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.watchlist-modal-panel-head > span {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: right;
+}
+
+.watchlist-modal-label {
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+  margin: 0;
+}
+
+.watchlist-source-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+
+.watchlist-source-grid .watchlist-market-presets {
+  align-self: end;
+  grid-column: 1 / -1;
+}
+
+.watchlist-source-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  justify-content: flex-end;
+}
+
+.watchlist-source-actions .watchlist-modal-import-btn {
+  align-self: end;
+}
+
+.watchlist-modal-field {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.watchlist-modal-field input {
+  min-height: 34px;
+  border: 1px solid #cfd8e5;
+  border-radius: 6px;
+  padding: 5px 8px;
+  color: #1e293b;
+  font-size: 13px;
+  background: #fff;
+}
+
+.watchlist-modal-textarea {
+  margin-top: 10px;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #cfd8e5;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-family: "SF Mono", "Cascadia Code", "Consolas", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  resize: vertical;
+  color: #1e293b;
+  background: #fafbfc;
+}
+
+.watchlist-modal-textarea:focus {
+  outline: none;
+  border-color: var(--theme-orange-300, #fb923c);
+  box-shadow: 0 0 0 2px rgba(251, 146, 60, 0.15);
+}
+
+.watchlist-modal-parse-feedback {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.watchlist-parse-ok {
+  color: #16a34a;
+}
+
+.watchlist-parse-err {
+  color: #dc2626;
+  display: block;
+}
+
+.watchlist-modal-num-input {
+  width: 100%;
+  text-align: center;
+  border: 1px solid #cfd8e5;
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 13px;
+}
+
+.watchlist-modal-select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #cfd8e5;
+  border-radius: 6px;
+  min-height: 34px;
+  padding: 5px 8px;
+  font-size: 13px;
+  color: #1e293b;
+  background: #fff;
+}
+
+.watchlist-market-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  border: 1px solid #e3eaf2;
+  border-radius: 8px;
+  padding: 8px;
+  background: #f8fafc;
+}
+
+.watchlist-market-presets button {
+  border: 1px solid #cfd8e5;
+  border-radius: 6px;
+  min-height: 32px;
+  padding: 5px 9px;
+  background: #fff;
+  color: #425367;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.watchlist-market-presets button:hover {
+  background: #f8fafc;
+}
+
+.watchlist-market-presets button.is-active {
+  border-color: var(--theme-orange-600);
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.watchlist-source-message,
+.watchlist-source-error {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.watchlist-source-message {
+  color: #16a34a;
+}
+
+.watchlist-source-error {
+  color: #dc2626;
+}
+
+.watchlist-modal-btn {
+  border: 1px solid #cfd8e5;
+  border-radius: 6px;
+  min-height: 34px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  background: #fff;
+  color: #334155;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.watchlist-modal-btn:hover:not(:disabled) {
+  background: #f1f5f9;
+}
+
+.watchlist-modal-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.watchlist-modal-btn-primary {
+  background: #f97316;
+  color: #fff;
+  border-color: #f97316;
+}
+
+.watchlist-modal-btn-primary:hover {
+  background: #ea580c;
+}
+
+.watchlist-modal-btn-secondary {
+  background: #fff;
+  color: #64748b;
+}
+
+.watchlist-modal-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #e5eaf1;
+  flex-wrap: wrap;
+}
+
+.watchlist-modal-action-group {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.watchlist-import-hint {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-top: 6px;
+}
+
+@media (max-width: 640px) {
+  .watchlist-modal {
+    max-height: 90vh;
+    padding: 12px;
+  }
+
+  .watchlist-modal-summary,
+  .watchlist-source-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .watchlist-modal-panel-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .watchlist-modal-panel-head > span {
+    text-align: left;
+  }
+
+  .watchlist-modal-actions,
+  .watchlist-modal-action-group {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .watchlist-modal-btn {
+    width: 100%;
+  }
+
+  .watchlist-source-actions {
+    justify-content: stretch;
+  }
+}

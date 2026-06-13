@@ -13,12 +13,6 @@ const overviewSubRoutes = [
   { path: '/overview/scene', label: '场景排名' },
 ]
 
-const intradayMonitorSubRoutes = [
-  { path: '/intraday-monitor/realtime-ranking', label: '排名实时' },
-  { path: '/intraday-monitor/all-market', label: '全市场监控' },
-  { path: '/intraday-monitor/custom-monitor', label: '自定义监控' },
-]
-
 const strategyTriggerSimilarityMenuItem = { path: '/strategy-trigger-similarity', label: '策略触发相似' }
 const settingsMenuItem = { path: '/settings', label: '设置' }
 
@@ -53,14 +47,12 @@ export default function PageDesktop() {
   const [isStockPickOpen, setIsStockPickOpen] = useState(true)
   const [isRawDataOpen, setIsRawDataOpen] = useState(true)
   const [isStrategyOpen, setIsStrategyOpen] = useState(true)
-  const [isIntradayMonitorOpen, setIsIntradayMonitorOpen] = useState(true)
   const [isBacktestOpen, setIsBacktestOpen] = useState(true)
   const contentRef = useRef<HTMLElement | null>(null)
   const isOverviewActive = location.pathname.startsWith('/overview')
   const isStockPickActive = location.pathname.startsWith('/stock-pick')
   const isRawDataActive = location.pathname.startsWith('/raw-data')
   const isStrategyActive = location.pathname.startsWith('/strategy') || location.pathname === '/cyq-chen'
-  const isIntradayMonitorActive = location.pathname.startsWith('/intraday-monitor')
   const isBacktestActive = location.pathname.startsWith('/backtest')
 
   useEffect(() => {
@@ -111,32 +103,12 @@ export default function PageDesktop() {
             ) : null}
           </div>
 
-          <div className="menu-group">
-            <button
-              className={
-                isIntradayMonitorActive ? 'menu-item menu-group-toggle active' : 'menu-item menu-group-toggle'
-              }
-              type="button"
-              onClick={() => setIsIntradayMonitorOpen((value) => !value)}
-            >
-              <span>实时监控</span>
-              <span>{isIntradayMonitorOpen ? '▾' : '▸'}</span>
-            </button>
-
-            {isIntradayMonitorOpen ? (
-              <div className="submenu-wrap">
-                {intradayMonitorSubRoutes.map((menuItem) => (
-                  <NavLink
-                    key={menuItem.path}
-                    to={menuItem.path}
-                    className={({ isActive }) => (isActive ? 'submenu-item active' : 'submenu-item')}
-                  >
-                    {menuItem.label}
-                  </NavLink>
-                ))}
-              </div>
-            ) : null}
-          </div>
+          <NavLink
+            to="/intraday-monitor"
+            className={({ isActive }) => (isActive ? 'menu-item active' : 'menu-item')}
+          >
+            实时监控
+          </NavLink>
 
           <div className="menu-group">
             <button
