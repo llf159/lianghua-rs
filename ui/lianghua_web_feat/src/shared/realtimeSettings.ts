@@ -1,9 +1,10 @@
 export type RealtimeQuoteProvider = 'sina' | 'tencent'
 
 const REALTIME_QUOTE_PROVIDER_STORAGE_KEY = 'lh_realtime_quote_provider_v1'
+const DEFAULT_REALTIME_QUOTE_PROVIDER: RealtimeQuoteProvider = 'tencent'
 
 export function normalizeRealtimeQuoteProvider(value: unknown): RealtimeQuoteProvider {
-  return value === 'tencent' ? 'tencent' : 'sina'
+  return value === 'sina' ? 'sina' : DEFAULT_REALTIME_QUOTE_PROVIDER
 }
 
 export function getRealtimeQuoteProviderLabel(value: RealtimeQuoteProvider) {
@@ -12,7 +13,7 @@ export function getRealtimeQuoteProviderLabel(value: RealtimeQuoteProvider) {
 
 export function readStoredRealtimeQuoteProvider(): RealtimeQuoteProvider {
   if (typeof window === 'undefined') {
-    return 'sina'
+    return DEFAULT_REALTIME_QUOTE_PROVIDER
   }
 
   return normalizeRealtimeQuoteProvider(
