@@ -4,7 +4,9 @@ import {
   getAllMarketMonitorSnapshot,
   type AllMarketIndexRow,
   type AllMarketMonitorRow,
+  type IntradayMonitorTemplate,
 } from "../../apis/reader";
+import IntradayTemplateManagerModal from "./components/IntradayTemplateManagerModal";
 import DetailsLink from "../../shared/DetailsLink";
 import {
   formatConceptText,
@@ -19,6 +21,7 @@ import {
   type SortDirection,
   sortRows,
 } from "../../shared/tableSort";
+import { readJsonStorage, writeJsonStorage } from "../../shared/storage";
 import "./css/AllMarketMonitorPage.css";
 import "./css/DataImportPage.css";
 
@@ -39,6 +42,8 @@ const LS_KEY_VOLUME_RATIO_THRESHOLD = "am_volume_ratio_threshold";
 const LS_KEY_RANK_HIGHLIGHT_THRESHOLD = "am_rank_highlight_threshold";
 const LS_KEY_SCENE_STAGE_THRESHOLD = "am_scene_stage_threshold";
 const LS_KEY_TOP_LIMIT = "am_top_limit";
+const INTRADAY_MONITOR_TEMPLATE_STORAGE_KEY =
+  "lh_intraday_monitor_realtime_templates_v1";
 
 function readLocalStorageNumber<T extends number>(key: string, fallback: T): T {
   try {
@@ -51,6 +56,56 @@ function readLocalStorageNumber<T extends number>(key: string, fallback: T): T {
     // localStorage unavailable
   }
   return fallback;
+}
+
+function buildLegacyTemplateExpression(
+  direction: "up" | "down",
+  thresholdPct: number,
+  base: "preclose" | "open",
+) {
+  const threshold = Math.abs(thresholdPct);
+  const field = base === "open" ? "REALTIME_CHANGE_OPEN_PCT" : "PCT_CHG";
+  return direction === "down"
+    ? `${field} <= -${threshold}`
+    : `${field} >= ${threshold}`;
+}
+
+function normalizeTemplate(input: unknown): IntradayMonitorTemplate | null {
+  if (!input || typeof input !== "object") return null;
+  const item = input as Record<string, unknown>;
+  if (typeof item.id !== "string") return null;
+
+  const directExpression =
+    typeof item.expression === "string" ? item.expression.trim() : "";
+  if (directExpression) {
+    return {
+      id: item.id,
+      name: typeof item.name === "string" ? item.name : "",
+      expression: directExpression,
+    };
+  }
+
+  const threshold = Number(item.thresholdPct);
+  return {
+    id: item.id,
+    name: typeof item.name === "string" ? item.name : "",
+    expression: buildLegacyTemplateExpression(
+      item.direction === "down" ? "down" : "up",
+      Number.isFinite(threshold) ? threshold : 0,
+      item.base === "open" ? "open" : "preclose",
+    ),
+  };
+}
+
+function readStoredTemplates() {
+  const parsed = readJsonStorage<unknown>(
+    typeof window === "undefined" ? null : window.localStorage,
+    INTRADAY_MONITOR_TEMPLATE_STORAGE_KEY,
+  );
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .map(normalizeTemplate)
+    .filter((item): item is IntradayMonitorTemplate => item !== null);
 }
 
 type SceneStageThreshold =
@@ -169,6 +224,17 @@ function formatAboveAvgPrice(row: AllMarketMonitorRow) {
     return "--";
   }
   return row.realtime_price > row.realtime_avg_price ? "是" : "否";
+}
+
+function getTemplateHits(row: AllMarketMonitorRow) {
+  return Array.isArray(row.template_hits) ? row.template_hits : [];
+}
+
+function formatTemplateHitText(row: AllMarketMonitorRow) {
+  const hits = getTemplateHits(row);
+  if (hits.length === 0) return "--";
+  if (hits.length === 1) return hits[0]?.template_name || "未命名模板";
+  return `${hits.length}个模板`;
 }
 
 function isRankHighlight(row: AllMarketMonitorRow, threshold: number | null) {
@@ -298,6 +364,10 @@ export default function AllMarketMonitorPage() {
   const { excludedConcepts } = useConceptExclusions();
   const [sourcePath, setSourcePath] = useState("");
   const [enabled, setEnabled] = useState(false);
+  const [templateEnabled, setTemplateEnabled] = useState(false);
+  const [templates, setTemplates] = useState<IntradayMonitorTemplate[]>(() =>
+    readStoredTemplates(),
+  );
   const [rows, setRows] = useState<AllMarketMonitorRow[]>([]);
   const [indexRows, setIndexRows] = useState<AllMarketIndexRow[]>([]);
   const [primarySortKey, setPrimarySortKey] = useState<PrimarySortKey>(
@@ -325,6 +395,7 @@ export default function AllMarketMonitorPage() {
   const [sortDirection, setSortDirection] = useState<SortDirection>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [templateWarning, setTemplateWarning] = useState("");
   const [refreshedAt, setRefreshedAt] = useState("");
   const [rankDate, setRankDate] = useState("");
   const [requestedCount, setRequestedCount] = useState(0);
@@ -339,7 +410,11 @@ export default function AllMarketMonitorPage() {
     Set<string>
   >(() => new Set());
   const [openHitTsCode, setOpenHitTsCode] = useState<string | null>(null);
+  const [openTemplateTsCode, setOpenTemplateTsCode] = useState<string | null>(
+    null,
+  );
   const [showParams, setShowParams] = useState(false);
+  const [templateModalOpen, setTemplateModalOpen] = useState(false);
 
   const inFlightRef = useRef(false);
   const enabledRef = useRef(false);
@@ -361,6 +436,18 @@ export default function AllMarketMonitorPage() {
       .then(setSourcePath)
       .catch(() => {});
   }, []);
+
+  const updateTemplates = useCallback(
+    (nextTemplates: IntradayMonitorTemplate[]) => {
+      setTemplates(nextTemplates);
+      writeJsonStorage(
+        typeof window === "undefined" ? null : window.localStorage,
+        INTRADAY_MONITOR_TEMPLATE_STORAGE_KEY,
+        nextTemplates,
+      );
+    },
+    [],
+  );
 
   // 浏览器缓存参数配置
   useEffect(() => {
@@ -446,6 +533,8 @@ export default function AllMarketMonitorPage() {
         sourcePathTrimmed,
         readStoredRealtimeQuoteProvider(),
         sceneStageThreshold,
+        templateEnabled,
+        templateEnabled ? templates : undefined,
       );
       if (!enabledRef.current) return;
 
@@ -482,6 +571,7 @@ export default function AllMarketMonitorPage() {
       setRequestedCount(result.requested_count ?? 0);
       setFetchedCount(result.fetched_count ?? 0);
       setError("");
+      setTemplateWarning(result.template_warning_message ?? "");
     } catch (runError) {
       if (enabledRef.current) {
         setError(`全市场刷新失败: ${String(runError)}`);
@@ -492,7 +582,7 @@ export default function AllMarketMonitorPage() {
         setLoading(false);
       }
     }
-  }, [sceneStageThreshold, sourcePathTrimmed]);
+  }, [sceneStageThreshold, sourcePathTrimmed, templateEnabled, templates]);
 
   useEffect(() => {
     if (!enabled) return undefined;
@@ -551,12 +641,18 @@ export default function AllMarketMonitorPage() {
     changePctRecordCandidatesRef.current.clear();
     setVolumeRatioNewHighCodes(new Set());
     setChangePctNewHighCodes(new Set());
+    setTemplateWarning("");
   }, [sourcePathTrimmed]);
 
   useEffect(() => {
     setHitRecordsByPeriod(() => createEmptyHitRecordsByPeriod());
     setOpenHitTsCode(null);
+    setOpenTemplateTsCode(null);
   }, [sourcePathTrimmed, speedThresholdPct]);
+
+  useEffect(() => {
+    setOpenTemplateTsCode(null);
+  }, [templateEnabled, templates]);
 
   useEffect(() => {
     if (!isFiniteNumber(speedThresholdPct)) return;
@@ -749,25 +845,47 @@ export default function AllMarketMonitorPage() {
                 行情 {fetchedCount}/{requestedCount}
               </span>
               {rankDate ? <span>排名 {rankDate}</span> : null}
+              {templateEnabled ? <span>模板 {templates.length}</span> : null}
             </div>
           </div>
 
-          <button
-            type="button"
-            className={
-              enabled ? "all-market-toggle is-active" : "all-market-toggle"
-            }
-            role="switch"
-            aria-checked={enabled}
-            onClick={() => setEnabled((value) => !value)}
-          >
-            <span className="all-market-toggle-track" aria-hidden="true">
-              <span className="all-market-toggle-thumb" />
-            </span>
-            <span className="all-market-toggle-text">
-              {enabled ? "爬虫运行中" : "爬虫已暂停"}
-            </span>
-          </button>
+          <div className="all-market-head-actions">
+            <button
+              type="button"
+              className={
+                enabled ? "all-market-toggle is-active" : "all-market-toggle"
+              }
+              role="switch"
+              aria-checked={enabled}
+              onClick={() => setEnabled((value) => !value)}
+            >
+              <span className="all-market-toggle-track" aria-hidden="true">
+                <span className="all-market-toggle-thumb" />
+              </span>
+              <span className="all-market-toggle-text">
+                {enabled ? "爬虫运行中" : "爬虫已暂停"}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              className={
+                templateEnabled
+                  ? "all-market-toggle is-active"
+                  : "all-market-toggle"
+              }
+              role="switch"
+              aria-checked={templateEnabled}
+              onClick={() => setTemplateEnabled((value) => !value)}
+            >
+              <span className="all-market-toggle-track" aria-hidden="true">
+                <span className="all-market-toggle-thumb" />
+              </span>
+              <span className="all-market-toggle-text">
+                {templateEnabled ? "模板判断中" : "模板已关闭"}
+              </span>
+            </button>
+          </div>
         </div>
 
         <div className="all-market-toolbar">
@@ -833,6 +951,13 @@ export default function AllMarketMonitorPage() {
             <button
               type="button"
               className="all-market-params-btn"
+              onClick={() => setTemplateModalOpen(true)}
+            >
+              模板管理
+            </button>
+            <button
+              type="button"
+              className="all-market-params-btn"
               onClick={() => setShowParams(true)}
             >
               ⚙ 参数
@@ -841,6 +966,9 @@ export default function AllMarketMonitorPage() {
         </div>
 
         {error ? <div className="all-market-error">{error}</div> : null}
+        {templateWarning ? (
+          <div className="all-market-warning">{templateWarning}</div>
+        ) : null}
       </section>
 
       <div className="all-market-monitor-grid">
@@ -952,6 +1080,7 @@ export default function AllMarketMonitorPage() {
                     >
                       场景标记
                     </th>
+                    <th aria-sort="none">模板触发</th>
                     <th
                       aria-sort={getAriaSort(
                         sortKey === "total_mv_yi",
@@ -1079,6 +1208,53 @@ export default function AllMarketMonitorPage() {
                           title={row.scene_marker ?? "--"}
                         >
                           {row.scene_marker ?? "--"}
+                        </td>
+                        <td className="all-market-template-cell">
+                          {getTemplateHits(row).length > 0 ? (
+                            <>
+                              <button
+                                type="button"
+                                className="all-market-template-trigger-btn"
+                                title={getTemplateHits(row)
+                                  .map((hit) => hit.template_name)
+                                  .join("、")}
+                                onClick={() =>
+                                  setOpenTemplateTsCode((value) =>
+                                    value === row.ts_code ? null : row.ts_code,
+                                  )
+                                }
+                              >
+                                {formatTemplateHitText(row)}
+                              </button>
+                              {openTemplateTsCode === row.ts_code ? (
+                                <div
+                                  className="all-market-template-popover"
+                                  role="dialog"
+                                  onClick={(event) => event.stopPropagation()}
+                                >
+                                  <div className="all-market-template-popover-head">
+                                    <strong>{row.name || row.ts_code}</strong>
+                                    <button
+                                      type="button"
+                                      aria-label="关闭"
+                                      onClick={() => setOpenTemplateTsCode(null)}
+                                    >
+                                      ×
+                                    </button>
+                                  </div>
+                                  <ul>
+                                    {getTemplateHits(row).map((hit) => (
+                                      <li key={hit.template_id}>
+                                        {hit.template_name || "未命名模板"}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              ) : null}
+                            </>
+                          ) : (
+                            "--"
+                          )}
                         </td>
                         <td>
                           {formatNumber(row.total_mv_yi)}
@@ -1415,6 +1591,14 @@ export default function AllMarketMonitorPage() {
           </section>
         </div>
       ) : null}
+
+      <IntradayTemplateManagerModal
+        open={templateModalOpen}
+        sourcePath={sourcePathTrimmed}
+        templates={templates}
+        onChangeTemplates={updateTemplates}
+        onClose={() => setTemplateModalOpen(false)}
+      />
     </div>
   );
 }

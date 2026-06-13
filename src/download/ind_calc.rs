@@ -524,10 +524,10 @@ pub fn calc_inds_with_cache(
 
 pub fn calc_inds_with_cache_lossy(
     inds_cache: &[IndsCache],
-    row_data: RowData,
+    row_data: &RowData,
 ) -> HashMap<String, Vec<Option<f64>>> {
     let series_len = row_data.trade_dates.len();
-    let Ok(mut rt) = row_into_rt(row_data) else {
+    let Ok(mut rt) = row_into_rt(row_data.clone()) else {
         return HashMap::new();
     };
     let mut out = HashMap::with_capacity(inds_cache.len());

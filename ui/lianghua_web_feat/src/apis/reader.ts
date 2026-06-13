@@ -124,6 +124,11 @@ export type IntradayMonitorTemplate = {
   expression: string;
 };
 
+export type AllMarketTemplateHit = {
+  template_id: string;
+  template_name: string;
+};
+
 export type IntradayMonitorRankModeConfig = {
   mode: "total" | "scene";
   sceneName: string;
@@ -174,6 +179,7 @@ export type AllMarketMonitorRow = {
   realtime_vol_ratio?: number | null;
   return_5d_pct?: number | null;
   scene_marker?: string | null;
+  template_hits?: AllMarketTemplateHit[] | null;
   total_mv_yi?: number | null;
   refreshed_at?: string | null;
 };
@@ -193,6 +199,7 @@ export type AllMarketMonitorSnapshotData = {
   rank_date?: string | null;
   requested_count: number;
   fetched_count: number;
+  template_warning_message?: string | null;
 };
 
 export type IntradayRealtimeRefreshQuery = {
@@ -271,10 +278,18 @@ export async function getAllMarketMonitorSnapshot(
   sourcePath: string,
   realtimeProvider?: "sina" | "tencent",
   sceneStageThreshold?: "observe" | "trigger" | "confirm",
+  templateEnabled?: boolean,
+  templates?: IntradayMonitorTemplate[],
 ) {
   return invoke<AllMarketMonitorSnapshotData>(
     "get_all_market_monitor_snapshot",
-    { sourcePath, realtimeProvider, sceneStageThreshold },
+    {
+      sourcePath,
+      realtimeProvider,
+      sceneStageThreshold,
+      templateEnabled,
+      templates,
+    },
   );
 }
 

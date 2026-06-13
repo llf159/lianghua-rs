@@ -19,6 +19,14 @@
   flex-wrap: wrap;
 }
 
+.all-market-head-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .all-market-title {
   margin: 0;
   font-size: 20px;
@@ -368,6 +376,16 @@
   font-size: 13px;
 }
 
+.all-market-warning {
+  margin-top: 12px;
+  border-radius: 8px;
+  border: 1px solid #fde68a;
+  background: #fffbeb;
+  color: #92400e;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
 .all-market-monitor-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
@@ -507,11 +525,16 @@
 
 .all-market-table th:nth-child(11),
 .all-market-table td:nth-child(11) {
-  width: 88px;
+  width: 120px;
 }
 
 .all-market-table th:nth-child(12),
 .all-market-table td:nth-child(12) {
+  width: 88px;
+}
+
+.all-market-table th:nth-child(13),
+.all-market-table td:nth-child(13) {
   width: 220px;
 }
 
@@ -542,6 +565,90 @@
 .all-market-scene-marker-cell {
   color: #1f5f99;
   font-weight: 600;
+}
+
+.all-market-template-cell {
+  position: relative;
+  color: #64748b;
+  font-weight: 600;
+  overflow: visible !important;
+}
+
+.all-market-template-trigger-btn {
+  max-width: 100%;
+  border: 1px solid #fdba74;
+  border-radius: 6px;
+  padding: 3px 7px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.all-market-template-trigger-btn:hover {
+  background: #ffedd5;
+}
+
+.all-market-template-trigger-btn:focus-visible {
+  outline: 2px solid var(--theme-orange-300);
+  outline-offset: 2px;
+}
+
+.all-market-template-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 6;
+  width: 220px;
+  border: 1px solid #cfd8e5;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 14px 28px rgba(31, 42, 68, 0.18);
+  padding: 10px;
+  white-space: normal;
+}
+
+.all-market-template-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #1f2a44;
+}
+
+.all-market-template-popover-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.all-market-template-popover-head button {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #d4deea;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #425367;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.all-market-template-popover ul {
+  margin: 8px 0 0;
+  padding-left: 16px;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .all-market-volume-ratio-cell.is-alert {

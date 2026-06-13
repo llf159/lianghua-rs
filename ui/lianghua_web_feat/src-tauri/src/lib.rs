@@ -665,9 +665,17 @@ async fn get_all_market_monitor_snapshot(
     source_path: String,
     realtime_provider: Option<String>,
     scene_stage_threshold: Option<String>,
+    template_enabled: Option<bool>,
+    templates: Option<Vec<IntradayMonitorTemplate>>,
 ) -> Result<AllMarketMonitorSnapshotData, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        core_get_all_market_monitor_snapshot(&source_path, realtime_provider, scene_stage_threshold)
+        core_get_all_market_monitor_snapshot(
+            &source_path,
+            realtime_provider,
+            scene_stage_threshold,
+            template_enabled,
+            templates,
+        )
     })
     .await
     .map_err(|error| error.to_string())?

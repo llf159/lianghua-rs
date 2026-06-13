@@ -33,7 +33,7 @@ use crate::{
 };
 
 const BOARD_ST: &str = "ST";
-const DEFAULT_ADJ_TYPE: &str = "qfq";
+pub(crate) const DEFAULT_ADJ_TYPE: &str = "qfq";
 const INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS: [&str; 10] = [
     "RANK",
     "SCORE",
@@ -147,14 +147,14 @@ pub enum RealtimeQuoteProvider {
 }
 
 #[derive(Debug, Clone)]
-struct ReadyIntradayMonitorTemplate {
-    name: String,
-    ast: Stmts,
-    warmup_need: usize,
+pub(crate) struct ReadyIntradayMonitorTemplate {
+    pub(crate) name: String,
+    pub(crate) ast: Stmts,
+    pub(crate) warmup_need: usize,
 }
 
 #[derive(Debug, Clone)]
-enum CompiledIntradayMonitorTemplate {
+pub(crate) enum CompiledIntradayMonitorTemplate {
     Ready(ReadyIntradayMonitorTemplate),
     Invalid { name: String, message: String },
 }
@@ -609,7 +609,7 @@ fn estimate_intraday_template_warmup(stmts: &Stmts) -> Result<usize, String> {
     Ok(expr_need)
 }
 
-fn collect_intraday_template_runtime_keys(programs: &[&Stmts]) -> HashSet<String> {
+pub(crate) fn collect_intraday_template_runtime_keys(programs: &[&Stmts]) -> HashSet<String> {
     let cyq_chen_keys = cyq_chen_runtime_key_names();
     let injected_keys = INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS
         .iter()
@@ -627,15 +627,15 @@ fn collect_intraday_template_runtime_keys(programs: &[&Stmts]) -> HashSet<String
     )
 }
 
-fn collect_intraday_template_cyq_chen_keys(programs: &[&Stmts]) -> HashSet<String> {
+pub(crate) fn collect_intraday_template_cyq_chen_keys(programs: &[&Stmts]) -> HashSet<String> {
     collect_used_cyq_chen_runtime_keys(programs)
 }
 
-fn add_indicator_input_runtime_keys(keys: &mut HashSet<String>) {
+pub(crate) fn add_indicator_input_runtime_keys(keys: &mut HashSet<String>) {
     keys.extend(RUNTIME_INPUT_KEYS.iter().map(|key| (*key).to_string()));
 }
 
-fn compile_intraday_templates(
+pub(crate) fn compile_intraday_templates(
     templates: &[IntradayMonitorTemplate],
 ) -> HashMap<String, CompiledIntradayMonitorTemplate> {
     let mut out = HashMap::with_capacity(templates.len());
@@ -760,7 +760,7 @@ fn resolve_template_id_for_row<'a>(
         .map(|item| item.template_id.trim())
 }
 
-fn normalize_runtime_row_data(row_data: RowData) -> Result<RowData, String> {
+pub(crate) fn normalize_runtime_row_data(row_data: RowData) -> Result<RowData, String> {
     let len = row_data.trade_dates.len();
     let mut cols = row_data.cols;
 
@@ -875,7 +875,7 @@ fn build_real_intraday_template_validation_row_data(
     );
 
     if !indicator_cache.is_empty() {
-        for (name, series) in calc_inds_with_cache_lossy(&indicator_cache, row_data.clone()) {
+        for (name, series) in calc_inds_with_cache_lossy(&indicator_cache, &row_data) {
             row_data.cols.insert(name, series);
         }
     }
@@ -937,7 +937,7 @@ fn build_intraday_template_validation_row_data(
     Ok(out)
 }
 
-fn build_quote_only_runtime_row_data(
+pub(crate) fn build_quote_only_runtime_row_data(
     quote: &SinaQuote,
     trade_date: &str,
 ) -> Result<RowData, String> {
@@ -972,7 +972,7 @@ fn build_quote_only_runtime_row_data(
     Ok(out)
 }
 
-fn merge_realtime_quote_into_row_data(
+pub(crate) fn merge_realtime_quote_into_row_data(
     row_data: &mut RowData,
     quote: &SinaQuote,
     trade_date: &str,
@@ -1207,7 +1207,7 @@ fn build_intraday_runtime_row_data(
     inject_runtime_rank_score_series(&mut row_data, &rank_score_series_map)?;
 
     if !indicator_cache.is_empty() {
-        for (name, series) in calc_inds_with_cache_lossy(indicator_cache, row_data.clone()) {
+        for (name, series) in calc_inds_with_cache_lossy(indicator_cache, &row_data) {
             row_data.cols.insert(name, series);
         }
     }
