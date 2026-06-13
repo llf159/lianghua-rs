@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
-use duckdb::{Connection, params_from_iter};
+use duckdb::{params_from_iter, Connection};
 use rayon::prelude::*;
 
 use super::{
-    BacktestSampleEligibility, DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, ResidualFactorSeriesRefs,
-    ResidualReturnInput, build_backtest_sample_eligibility,
-    calc_stock_residual_returns_from_loaded_series,
+    build_backtest_sample_eligibility, calc_stock_residual_returns_from_loaded_series,
+    BacktestSampleEligibility, ResidualFactorSeriesRefs, ResidualReturnInput,
+    DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
 };
 use crate::data::{
     concept_performance_data::{load_concept_trend_series, load_industry_trend_series},
@@ -168,13 +169,13 @@ struct RuleUniverseRow {
 
 #[derive(Debug, Clone)]
 struct RuleDayBaseSample {
-    ts_code: String,
+    ts_code: Arc<str>,
     residual_return: f64,
 }
 
 #[derive(Debug, Clone)]
 struct RuleDayGroup {
-    trade_date: String,
+    trade_date: Arc<str>,
     samples: Vec<RuleDayBaseSample>,
 }
 
@@ -183,19 +184,6 @@ struct RuleLayerCollectOptions {
     metrics: bool,
     all_samples: bool,
     triggered_samples: bool,
-}
-
-struct RuleLayerDayComputation {
-    point: Option<(
-        RuleLayerPoint,
-        Option<f64>,
-        Option<f64>,
-        ProfitLossSums,
-        Option<f64>,
-        Option<f64>,
-    )>,
-    all_samples: Vec<RuleLayerSamplePoint>,
-    triggered_samples: Vec<RuleLayerSamplePoint>,
 }
 
 struct RuleLayerComputation {
@@ -324,25 +312,14 @@ pub fn calc_all_rule_layer_metrics_from_db_with_ts_filter(
         layer_config,
         allowed_ts_codes,
     )?;
-    let rule_rows = load_rule_rows_for_names_filtered(
+    let triggered_score_map_by_rule = load_triggered_score_maps_for_names_filtered(
         source_dir,
         rule_names,
         start_date,
         end_date,
         allowed_ts_codes,
     )?;
-    let mut triggered_score_map_by_rule: HashMap<String, TriggeredScoreMap> = HashMap::new();
 
-    for row in rule_rows {
-        triggered_score_map_by_rule
-            .entry(row.rule_name)
-            .or_default()
-            .entry(row.ts_code)
-            .or_default()
-            .insert(row.trade_date, row.rule_score);
-    }
-
-    // Runtime cache is already shared; parallelize per-rule metric calculation.
     let grouped_results: Vec<Result<(String, RuleLayerMetrics), String>> = rule_names
         .par_iter()
         .map(|rule_name| {
@@ -356,6 +333,116 @@ pub fn calc_all_rule_layer_metrics_from_db_with_ts_filter(
                 layer_config,
             )?;
             Ok((rule_name.clone(), metrics))
+        })
+        .collect();
+
+    let mut out = Vec::with_capacity(grouped_results.len());
+    for item in grouped_results {
+        out.push(item?);
+    }
+
+    Ok(out)
+}
+
+pub fn calc_all_rule_layer_metrics_with_samples_from_db_with_ts_filter(
+    source_conn: &Connection,
+    source_dir: &str,
+    rule_names: &[String],
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Result<Vec<(String, RuleLayerMetricsWithSamples)>, String> {
+    calc_all_rule_layer_metrics_with_samples_from_db_map_with_ts_filter(
+        source_conn,
+        source_dir,
+        rule_names,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+        allowed_ts_codes,
+        |rule_name, metrics| Ok((rule_name.to_string(), metrics)),
+    )
+}
+
+pub fn calc_all_rule_layer_metrics_with_samples_from_db_map_with_ts_filter<T, F>(
+    source_conn: &Connection,
+    source_dir: &str,
+    rule_names: &[String],
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+    allowed_ts_codes: Option<&HashSet<String>>,
+    map_result: F,
+) -> Result<Vec<T>, String>
+where
+    T: Send,
+    F: Fn(&str, RuleLayerMetricsWithSamples) -> Result<T, String> + Sync,
+{
+    validate_rule_common_input(
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+
+    if rule_names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let runtime_cache = build_rule_layer_runtime_cache_with_ts_filter(
+        source_conn,
+        source_dir,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+        allowed_ts_codes,
+    )?;
+    let triggered_score_map_by_rule = load_triggered_score_maps_for_names_filtered(
+        source_dir,
+        rule_names,
+        start_date,
+        end_date,
+        allowed_ts_codes,
+    )?;
+
+    let grouped_results: Vec<Result<T, String>> = rule_names
+        .par_iter()
+        .map(|rule_name| {
+            let empty_triggered_score_map = TriggeredScoreMap::new();
+            let triggered_score_map = triggered_score_map_by_rule
+                .get(rule_name)
+                .unwrap_or(&empty_triggered_score_map);
+            let metrics = calc_rule_layer_metrics_with_samples_from_cache(
+                &runtime_cache,
+                triggered_score_map,
+                layer_config,
+            )?;
+            map_result(rule_name, metrics)
         })
         .collect();
 
@@ -410,27 +497,12 @@ pub fn calc_all_rule_layer_metrics_from_rows(
         end_date,
         layer_config,
     )?;
-    let rule_name_set: HashSet<&str> = rule_names.iter().map(String::as_str).collect();
-    let mut triggered_score_map_by_rule: HashMap<String, TriggeredScoreMap> = HashMap::new();
-
-    for row in score_detail_rows {
-        if !rule_name_set.contains(row.rule_name.as_str())
-            || row.trade_date.as_str() < start_date
-            || row.trade_date.as_str() > end_date
-            || !row.rule_score.is_finite()
-            || row.ts_code.trim().is_empty()
-            || row.trade_date.trim().is_empty()
-        {
-            continue;
-        }
-
-        triggered_score_map_by_rule
-            .entry(row.rule_name.clone())
-            .or_default()
-            .entry(row.ts_code.clone())
-            .or_default()
-            .insert(row.trade_date.clone(), row.rule_score);
-    }
+    let triggered_score_map_by_rule = build_triggered_score_maps_from_detail_rows(
+        rule_names,
+        score_detail_rows,
+        start_date,
+        end_date,
+    );
 
     let grouped_results: Vec<Result<(String, RuleLayerMetrics), String>> = rule_names
         .par_iter()
@@ -445,6 +517,118 @@ pub fn calc_all_rule_layer_metrics_from_rows(
                 layer_config,
             )?;
             Ok((rule_name.clone(), metrics))
+        })
+        .collect();
+
+    let mut out = Vec::with_capacity(grouped_results.len());
+    for item in grouped_results {
+        out.push(item?);
+    }
+
+    Ok(out)
+}
+
+pub fn calc_all_rule_layer_metrics_with_samples_from_rows(
+    source_conn: &Connection,
+    source_dir: &str,
+    rule_names: &[String],
+    score_summary_rows: &[ScoreSummary],
+    score_detail_rows: &[ScoreDetails],
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+) -> Result<Vec<(String, RuleLayerMetricsWithSamples)>, String> {
+    calc_all_rule_layer_metrics_with_samples_from_rows_map(
+        source_conn,
+        source_dir,
+        rule_names,
+        score_summary_rows,
+        score_detail_rows,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+        |rule_name, metrics| Ok((rule_name.to_string(), metrics)),
+    )
+}
+
+pub fn calc_all_rule_layer_metrics_with_samples_from_rows_map<T, F>(
+    source_conn: &Connection,
+    source_dir: &str,
+    rule_names: &[String],
+    score_summary_rows: &[ScoreSummary],
+    score_detail_rows: &[ScoreDetails],
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+    map_result: F,
+) -> Result<Vec<T>, String>
+where
+    T: Send,
+    F: Fn(&str, RuleLayerMetricsWithSamples) -> Result<T, String> + Sync,
+{
+    validate_rule_common_input(
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+
+    if rule_names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let runtime_cache = build_rule_layer_runtime_cache_from_summary_rows(
+        source_conn,
+        source_dir,
+        score_summary_rows,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+    let triggered_score_map_by_rule = build_triggered_score_maps_from_detail_rows(
+        rule_names,
+        score_detail_rows,
+        start_date,
+        end_date,
+    );
+
+    let grouped_results: Vec<Result<T, String>> = rule_names
+        .par_iter()
+        .map(|rule_name| {
+            let empty_triggered_score_map = TriggeredScoreMap::new();
+            let triggered_score_map = triggered_score_map_by_rule
+                .get(rule_name)
+                .unwrap_or(&empty_triggered_score_map);
+            let metrics = calc_rule_layer_metrics_with_samples_from_cache(
+                &runtime_cache,
+                triggered_score_map,
+                layer_config,
+            )?;
+            map_result(rule_name, metrics)
         })
         .collect();
 
@@ -562,6 +746,34 @@ pub fn build_rule_layer_runtime_cache_from_stock_data(
     end_date: &str,
     layer_config: &RuleLayerConfig,
 ) -> Result<RuleLayerRuntimeCache, String> {
+    build_rule_layer_runtime_cache_from_stock_data_with_ts_filter(
+        source_conn,
+        source_dir,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+        None,
+    )
+}
+
+pub fn build_rule_layer_runtime_cache_from_stock_data_with_ts_filter(
+    source_conn: &Connection,
+    source_dir: &str,
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Result<RuleLayerRuntimeCache, String> {
     validate_rule_common_input(
         stock_adj_type,
         index_ts_code,
@@ -573,8 +785,10 @@ pub fn build_rule_layer_runtime_cache_from_stock_data(
         layer_config,
     )?;
 
-    let universe_rows =
-        load_stock_data_universe_rows(source_conn, stock_adj_type, start_date, end_date)?;
+    let universe_rows = filter_universe_rows_by_ts_codes(
+        load_stock_data_universe_rows(source_conn, stock_adj_type, start_date, end_date)?,
+        allowed_ts_codes,
+    );
     build_rule_layer_runtime_cache_from_universe_rows(
         source_conn,
         source_dir,
@@ -883,16 +1097,16 @@ where
     for day_group in &runtime_cache.day_groups {
         for sample in &day_group.samples {
             let Some(rule_score) = triggered_score_map
-                .get(&sample.ts_code)
-                .and_then(|date_score| date_score.get(&day_group.trade_date))
+                .get(sample.ts_code.as_ref())
+                .and_then(|date_score| date_score.get(day_group.trade_date.as_ref()))
                 .copied()
             else {
                 continue;
             };
 
             visit(RuleLayerSamplePointRef {
-                ts_code: &sample.ts_code,
-                trade_date: &day_group.trade_date,
+                ts_code: &*sample.ts_code,
+                trade_date: &*day_group.trade_date,
                 rule_score,
                 residual_return: sample.residual_return,
             })?;
@@ -1072,169 +1286,35 @@ fn compute_rule_layer_from_day_groups(
         });
     }
 
-    let day_results = day_groups
+    // 使用 fold+reduce 消除中间 day_results Vec，避免全部交易日的
+    // all_samples / triggered_samples 同时占据内存。
+    let identity = || DayGroupsFoldAccum::default();
+    let accum = day_groups
         .par_iter()
-        .map(|day_group| {
-            let collect_metrics = collect_options.metrics;
-            let mut rule_scores = if collect_metrics {
-                Vec::with_capacity(day_group.samples.len())
-            } else {
-                Vec::new()
-            };
-            let mut residuals = if collect_metrics {
-                Vec::with_capacity(day_group.samples.len())
-            } else {
-                Vec::new()
-            };
-            let mut triggered_residuals = if collect_metrics {
-                Vec::with_capacity(day_group.samples.len())
-            } else {
-                Vec::new()
-            };
-            let mut all_samples = if collect_options.all_samples {
-                Vec::with_capacity(day_group.samples.len())
-            } else {
-                Vec::new()
-            };
-            let mut triggered_samples = Vec::new();
-
-            for sample in &day_group.samples {
-                let triggered_score = triggered_score_map
-                    .and_then(|score_map| score_map.get(&sample.ts_code))
-                    .and_then(|date_score| date_score.get(&day_group.trade_date))
-                    .copied();
-                let rule_score = triggered_score.unwrap_or(0.0);
-
-                if collect_metrics {
-                    rule_scores.push(rule_score);
-                    residuals.push(sample.residual_return);
-                }
-
-                if let Some(rule_score) = triggered_score {
-                    if collect_metrics {
-                        triggered_residuals.push(sample.residual_return);
-                    }
-
-                    if collect_options.triggered_samples {
-                        triggered_samples.push(RuleLayerSamplePoint {
-                            ts_code: sample.ts_code.clone(),
-                            trade_date: day_group.trade_date.clone(),
-                            rule_score,
-                            residual_return: sample.residual_return,
-                        });
-                    }
-                }
-
-                if collect_options.all_samples {
-                    all_samples.push(RuleLayerSamplePoint {
-                        ts_code: sample.ts_code.clone(),
-                        trade_date: day_group.trade_date.clone(),
-                        rule_score,
-                        residual_return: sample.residual_return,
-                    });
-                }
-            }
-
-            let point = if collect_metrics && rule_scores.len() >= config.min_samples_per_day {
-                let avg_rule_score = mean(&rule_scores);
-                let avg_residual_return = mean(&triggered_residuals);
-                let market_avg_residual_return = mean(&residuals);
-                let avg_excess_residual_return =
-                    match (avg_residual_return, market_avg_residual_return) {
-                        (Some(triggered_avg), Some(market_avg)) => Some(triggered_avg - market_avg),
-                        _ => None,
-                    };
-                let profit_loss_sums = calc_profit_loss_sums(&triggered_residuals);
-                let top_bottom_spread = calc_top_bottom_spread(&rule_scores, &residuals);
-                let ic = spearman_corr(&rule_scores, &residuals);
-
-                Some((
-                    RuleLayerPoint {
-                        trade_date: day_group.trade_date.clone(),
-                        sample_count: rule_scores.len(),
-                        avg_rule_score,
-                        avg_residual_return,
-                        avg_excess_residual_return,
-                        top_bottom_spread,
-                        ic,
-                    },
-                    avg_residual_return,
-                    avg_excess_residual_return,
-                    profit_loss_sums,
-                    top_bottom_spread,
-                    ic,
-                ))
-            } else {
-                None
-            };
-
-            RuleLayerDayComputation {
-                point,
-                all_samples,
-                triggered_samples,
-            }
+        .fold(identity, |mut acc, day_group| {
+            acc.process_day_group(day_group, triggered_score_map, config, collect_options);
+            acc
         })
-        .collect::<Vec<_>>();
+        .reduce(identity, |mut a, b| {
+            a.merge(b);
+            a
+        });
 
-    let mut points = Vec::with_capacity(day_results.len());
-    let mut avg_residual_values = Vec::new();
-    let mut avg_excess_residual_values = Vec::new();
-    let mut profit_loss_sums = ProfitLossSums::default();
-    let mut spread_values = Vec::new();
-    let mut ic_values = Vec::new();
-    let all_sample_count = day_results.iter().map(|item| item.all_samples.len()).sum();
-    let triggered_sample_count = day_results
-        .iter()
-        .map(|item| item.triggered_samples.len())
-        .sum();
-    let mut all_samples = Vec::with_capacity(all_sample_count);
-    let mut triggered_samples = Vec::with_capacity(triggered_sample_count);
-
-    for item in day_results {
-        if let Some((
-            point,
-            avg_residual_return,
-            avg_excess_residual_return,
-            day_profit_loss_sums,
-            top_bottom_spread,
-            ic,
-        )) = item.point
-        {
-            if let Some(value) = avg_residual_return {
-                avg_residual_values.push(value);
-            }
-            if let Some(value) = avg_excess_residual_return {
-                avg_excess_residual_values.push(value);
-            }
-            profit_loss_sums.merge(day_profit_loss_sums);
-            if let Some(spread) = top_bottom_spread {
-                spread_values.push(spread);
-            }
-            if let Some(value) = ic {
-                ic_values.push(value);
-            }
-            points.push(point);
-        }
-
-        all_samples.extend(item.all_samples);
-        triggered_samples.extend(item.triggered_samples);
-    }
-
-    let avg_residual_mean = mean(&avg_residual_values);
-    let avg_excess_residual_mean = mean(&avg_excess_residual_values);
-    let profit_loss_ratio = profit_loss_sums.ratio();
-    let spread_mean = mean(&spread_values);
-    let ic_mean = mean(&ic_values);
-    let ic_std = sample_std(&ic_values);
+    let avg_residual_mean = mean(&accum.avg_residual_values);
+    let avg_excess_residual_mean = mean(&accum.avg_excess_residual_values);
+    let profit_loss_ratio = accum.profit_loss_sums.ratio();
+    let spread_mean = mean(&accum.spread_values);
+    let ic_mean = mean(&accum.ic_values);
+    let ic_std = sample_std(&accum.ic_values);
     let icir = match (ic_mean, ic_std) {
         (Some(m), Some(s)) if s.abs() >= EPS => Some(m / s),
         _ => None,
     };
-    let ic_t_value = calc_t_value(ic_mean, ic_std, ic_values.len());
+    let ic_t_value = calc_t_value(ic_mean, ic_std, accum.ic_values.len());
 
     Ok(RuleLayerComputation {
         metrics: RuleLayerMetrics {
-            points,
+            points: accum.points,
             avg_residual_mean,
             avg_excess_residual_mean,
             profit_loss_ratio,
@@ -1244,18 +1324,145 @@ fn compute_rule_layer_from_day_groups(
             icir,
             ic_t_value,
         },
-        all_samples,
-        triggered_samples,
+        all_samples: accum.all_samples,
+        triggered_samples: accum.triggered_samples,
     })
+}
+
+/// 线程本地累加器，用于 fold+reduce 模式逐个交易日处理而不物化中间 Vec。
+#[derive(Debug, Default)]
+struct DayGroupsFoldAccum {
+    points: Vec<RuleLayerPoint>,
+    avg_residual_values: Vec<f64>,
+    avg_excess_residual_values: Vec<f64>,
+    profit_loss_sums: ProfitLossSums,
+    spread_values: Vec<f64>,
+    ic_values: Vec<f64>,
+    all_samples: Vec<RuleLayerSamplePoint>,
+    triggered_samples: Vec<RuleLayerSamplePoint>,
+}
+
+impl DayGroupsFoldAccum {
+    fn process_day_group(
+        &mut self,
+        day_group: &RuleDayGroup,
+        triggered_score_map: Option<&TriggeredScoreMap>,
+        config: &RuleLayerConfig,
+        collect_options: RuleLayerCollectOptions,
+    ) {
+        let collect_metrics = collect_options.metrics;
+        let cap = day_group.samples.len();
+        let mut rule_scores: Vec<f64> = if collect_metrics {
+            Vec::with_capacity(cap)
+        } else {
+            Vec::new()
+        };
+        let mut residuals: Vec<f64> = if collect_metrics {
+            Vec::with_capacity(cap)
+        } else {
+            Vec::new()
+        };
+        let mut triggered_residuals: Vec<f64> = if collect_metrics {
+            Vec::with_capacity(cap)
+        } else {
+            Vec::new()
+        };
+
+        for sample in &day_group.samples {
+            let triggered_score = triggered_score_map
+                .and_then(|score_map| score_map.get(sample.ts_code.as_ref()))
+                .and_then(|date_score| date_score.get(day_group.trade_date.as_ref()))
+                .copied();
+            let rule_score = triggered_score.unwrap_or(0.0);
+
+            if collect_metrics {
+                rule_scores.push(rule_score);
+                residuals.push(sample.residual_return);
+            }
+
+            if let Some(rule_score) = triggered_score {
+                if collect_metrics {
+                    triggered_residuals.push(sample.residual_return);
+                }
+
+                if collect_options.triggered_samples {
+                    self.triggered_samples.push(RuleLayerSamplePoint {
+                        ts_code: String::from(&*sample.ts_code),
+                        trade_date: String::from(&*day_group.trade_date),
+                        rule_score,
+                        residual_return: sample.residual_return,
+                    });
+                }
+            }
+
+            if collect_options.all_samples {
+                self.all_samples.push(RuleLayerSamplePoint {
+                    ts_code: String::from(&*sample.ts_code),
+                    trade_date: String::from(&*day_group.trade_date),
+                    rule_score,
+                    residual_return: sample.residual_return,
+                });
+            }
+        }
+
+        if collect_metrics && rule_scores.len() >= config.min_samples_per_day {
+            let avg_rule_score = mean(&rule_scores);
+            let avg_residual_return = mean(&triggered_residuals);
+            let market_avg_residual_return = mean(&residuals);
+            let avg_excess_residual_return = match (avg_residual_return, market_avg_residual_return)
+            {
+                (Some(triggered_avg), Some(market_avg)) => Some(triggered_avg - market_avg),
+                _ => None,
+            };
+            let day_profit_loss_sums = calc_profit_loss_sums(&triggered_residuals);
+            let top_bottom_spread = calc_top_bottom_spread(&rule_scores, &residuals);
+            let ic = spearman_corr(&rule_scores, &residuals);
+
+            if let Some(value) = avg_residual_return {
+                self.avg_residual_values.push(value);
+            }
+            if let Some(value) = avg_excess_residual_return {
+                self.avg_excess_residual_values.push(value);
+            }
+            self.profit_loss_sums.merge(day_profit_loss_sums);
+            if let Some(spread) = top_bottom_spread {
+                self.spread_values.push(spread);
+            }
+            if let Some(value) = ic {
+                self.ic_values.push(value);
+            }
+            self.points.push(RuleLayerPoint {
+                trade_date: String::from(&*day_group.trade_date),
+                sample_count: rule_scores.len(),
+                avg_rule_score,
+                avg_residual_return,
+                avg_excess_residual_return,
+                top_bottom_spread,
+                ic,
+            });
+        }
+    }
+
+    fn merge(&mut self, other: DayGroupsFoldAccum) {
+        self.points.extend(other.points);
+        self.avg_residual_values.extend(other.avg_residual_values);
+        self.avg_excess_residual_values
+            .extend(other.avg_excess_residual_values);
+        self.profit_loss_sums.merge(other.profit_loss_sums);
+        self.spread_values.extend(other.spread_values);
+        self.ic_values.extend(other.ic_values);
+        self.all_samples.extend(other.all_samples);
+        self.triggered_samples.extend(other.triggered_samples);
+    }
 }
 
 fn build_rule_day_groups(
     universe_rows: Vec<RuleUniverseRow>,
     residual_map_cache: &HashMap<String, HashMap<String, f64>>,
 ) -> Vec<RuleDayGroup> {
-    let mut day_groups = Vec::new();
-    let mut current_trade_date = String::new();
-    let mut current_samples = Vec::<RuleDayBaseSample>::new();
+    let mut day_groups: Vec<RuleDayGroup> = Vec::new();
+    let mut current_trade_date: Arc<str> = Arc::from("");
+    let mut current_samples: Vec<RuleDayBaseSample> = Vec::new();
 
     for row in universe_rows {
         let Some(residual_map) = residual_map_cache.get(&row.ts_code) else {
@@ -1265,29 +1472,32 @@ fn build_rule_day_groups(
             continue;
         };
 
-        if current_trade_date != row.trade_date {
-            if !current_trade_date.is_empty() {
+        if current_trade_date.as_ref() != row.trade_date.as_str() {
+            if !current_trade_date.as_ref().is_empty() {
+                current_samples.shrink_to_fit();
                 day_groups.push(RuleDayGroup {
-                    trade_date: std::mem::take(&mut current_trade_date),
+                    trade_date: current_trade_date,
                     samples: std::mem::take(&mut current_samples),
                 });
             }
-            current_trade_date = row.trade_date.clone();
+            current_trade_date = Arc::from(row.trade_date.as_str());
         }
 
         current_samples.push(RuleDayBaseSample {
-            ts_code: row.ts_code,
+            ts_code: Arc::from(row.ts_code.as_str()),
             residual_return,
         });
     }
 
-    if !current_trade_date.is_empty() {
+    if !current_trade_date.as_ref().is_empty() {
+        current_samples.shrink_to_fit();
         day_groups.push(RuleDayGroup {
             trade_date: current_trade_date,
             samples: current_samples,
         });
     }
 
+    day_groups.shrink_to_fit();
     day_groups
 }
 
@@ -1357,6 +1567,65 @@ fn build_triggered_score_map(rule_rows: Vec<RuleDbRow>) -> TriggeredScoreMap {
             .insert(trade_date, rule_score);
     }
     rows_by_ts
+}
+
+fn load_triggered_score_maps_for_names_filtered(
+    source_dir: &str,
+    rule_names: &[String],
+    start_date: &str,
+    end_date: &str,
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Result<HashMap<String, TriggeredScoreMap>, String> {
+    let rule_rows = load_rule_rows_for_names_filtered(
+        source_dir,
+        rule_names,
+        start_date,
+        end_date,
+        allowed_ts_codes,
+    )?;
+    let mut rows_by_rule: HashMap<String, TriggeredScoreMap> = HashMap::new();
+
+    for row in rule_rows {
+        rows_by_rule
+            .entry(row.rule_name)
+            .or_default()
+            .entry(row.ts_code)
+            .or_default()
+            .insert(row.trade_date, row.rule_score);
+    }
+
+    Ok(rows_by_rule)
+}
+
+fn build_triggered_score_maps_from_detail_rows(
+    rule_names: &[String],
+    score_detail_rows: &[ScoreDetails],
+    start_date: &str,
+    end_date: &str,
+) -> HashMap<String, TriggeredScoreMap> {
+    let rule_name_set: HashSet<&str> = rule_names.iter().map(String::as_str).collect();
+    let mut rows_by_rule: HashMap<String, TriggeredScoreMap> = HashMap::new();
+
+    for row in score_detail_rows {
+        if !rule_name_set.contains(row.rule_name.as_str())
+            || row.trade_date.as_str() < start_date
+            || row.trade_date.as_str() > end_date
+            || !row.rule_score.is_finite()
+            || row.ts_code.trim().is_empty()
+            || row.trade_date.trim().is_empty()
+        {
+            continue;
+        }
+
+        rows_by_rule
+            .entry(row.rule_name.clone())
+            .or_default()
+            .entry(row.ts_code.clone())
+            .or_default()
+            .insert(row.trade_date.clone(), row.rule_score);
+    }
+
+    rows_by_rule
 }
 
 fn ts_code_allowed(allowed_ts_codes: Option<&HashSet<String>>, ts_code: &str) -> bool {
@@ -1499,7 +1768,7 @@ fn build_residual_map_cache(
     let sample_eligibility =
         build_backtest_sample_eligibility(source_dir, input.min_listed_trade_days)?;
 
-    let concept_series_cache = build_concept_series_cache(
+    let mut concept_series_cache = build_concept_series_cache(
         source_dir,
         &ts_codes,
         concept_map,
@@ -1507,7 +1776,8 @@ fn build_residual_map_cache(
         input.end_date,
         input.concept_beta.abs() > EPS,
     )?;
-    let industry_series_cache = build_industry_series_cache(
+    concept_series_cache.shrink_to_fit();
+    let mut industry_series_cache = build_industry_series_cache(
         source_dir,
         &ts_codes,
         industry_map,
@@ -1515,13 +1785,15 @@ fn build_residual_map_cache(
         input.end_date,
         input.industry_beta.abs() > EPS,
     )?;
-    let stock_series_cache = load_pct_chg_series_cache_for_ts_codes(
+    industry_series_cache.shrink_to_fit();
+    let mut stock_series_cache = load_pct_chg_series_cache_for_ts_codes(
         source_conn,
         &ts_codes,
         input.stock_adj_type,
         input.start_date,
         input.end_date,
     )?;
+    shrink_stock_series_cache(&mut stock_series_cache);
     let index_series = load_pct_chg_series_cache_for_ts_codes(
         source_conn,
         &[input.index_ts_code.to_string()],
@@ -1550,11 +1822,18 @@ fn build_residual_map_cache(
         })
         .collect();
 
+    // 中间缓存数据已完成使命，显式释放以降低内存峰值
+    drop(stock_series_cache);
+    drop(concept_series_cache);
+    drop(industry_series_cache);
+    drop(index_series);
+
     let mut out = HashMap::with_capacity(grouped_results.len());
     for item in grouped_results {
         let (ts_code, residual_map) = item?;
         out.insert(ts_code, residual_map);
     }
+    out.shrink_to_fit();
     Ok(out)
 }
 
@@ -1610,7 +1889,15 @@ fn build_residual_map_for_ts_code(
     let mut residual_map =
         build_forward_backtest_residual_map(residual_points, input.backtest_period);
     residual_map.retain(|trade_date, _| sample_eligibility.allows_sample(ts_code, trade_date));
+    residual_map.shrink_to_fit();
     Ok(residual_map)
+}
+
+fn shrink_stock_series_cache(cache: &mut HashMap<String, HashMap<String, f64>>) {
+    for series in cache.values_mut() {
+        series.shrink_to_fit();
+    }
+    cache.shrink_to_fit();
 }
 
 fn load_pct_chg_series_cache_for_ts_codes(
@@ -1955,17 +2242,17 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use duckdb::{Connection, params};
+    use duckdb::{params, Connection};
 
     use crate::data::{result_db_path, source_db_path};
 
     use super::{
-        RuleLayerConfig, RuleLayerFromDbInput, RuleSample, build_rule_layer_runtime_cache,
-        build_rule_layer_runtime_cache_from_stock_data, calc_all_rule_layer_metrics_from_db,
-        calc_rule_layer_metrics, calc_rule_layer_metrics_from_db,
-        calc_rule_layer_metrics_with_samples_from_cache,
+        build_rule_layer_runtime_cache, build_rule_layer_runtime_cache_from_stock_data,
+        calc_all_rule_layer_metrics_from_db, calc_rule_layer_metrics,
+        calc_rule_layer_metrics_from_db, calc_rule_layer_metrics_with_samples_from_cache,
         calc_rule_layer_metrics_with_triggered_samples_from_cache,
-        collect_triggered_rule_samples_from_cache,
+        collect_triggered_rule_samples_from_cache, RuleLayerConfig, RuleLayerFromDbInput,
+        RuleSample,
     };
 
     fn assert_opt_close(left: Option<f64>, right: Option<f64>) {

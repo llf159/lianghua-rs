@@ -607,7 +607,7 @@ fn build_residual_map_cache(
     let sample_eligibility =
         build_backtest_sample_eligibility(source_dir, input.min_listed_trade_days)?;
 
-    let concept_series_cache = build_concept_series_cache(
+    let mut concept_series_cache = build_concept_series_cache(
         source_dir,
         &ts_codes,
         concept_map,
@@ -615,7 +615,8 @@ fn build_residual_map_cache(
         input.end_date,
         input.concept_beta.abs() > EPS,
     )?;
-    let industry_series_cache = build_industry_series_cache(
+    concept_series_cache.shrink_to_fit();
+    let mut industry_series_cache = build_industry_series_cache(
         source_dir,
         &ts_codes,
         industry_map,
@@ -623,14 +624,16 @@ fn build_residual_map_cache(
         input.end_date,
         input.industry_beta.abs() > EPS,
     )?;
+    industry_series_cache.shrink_to_fit();
 
-    let stock_series_cache = load_pct_chg_series_cache_for_ts_codes(
+    let mut stock_series_cache = load_pct_chg_series_cache_for_ts_codes(
         source_conn,
         &ts_codes,
         input.stock_adj_type,
         input.start_date,
         input.end_date,
     )?;
+    shrink_stock_series_cache(&mut stock_series_cache);
     let index_series = load_pct_chg_series_cache_for_ts_codes(
         source_conn,
         &[input.index_ts_code.to_string()],
@@ -659,11 +662,18 @@ fn build_residual_map_cache(
         })
         .collect();
 
+    // 中间缓存数据已完成使命，显式释放以降低内存峰值
+    drop(stock_series_cache);
+    drop(concept_series_cache);
+    drop(industry_series_cache);
+    drop(index_series);
+
     let mut out = HashMap::with_capacity(grouped_results.len());
     for item in grouped_results {
         let (ts_code, residual_map) = item?;
         out.insert(ts_code, residual_map);
     }
+    out.shrink_to_fit();
     Ok(out)
 }
 
@@ -719,7 +729,15 @@ fn build_residual_map_for_ts_code(
     let mut residual_map =
         build_forward_backtest_residual_map(residual_points, input.backtest_period);
     residual_map.retain(|trade_date, _| sample_eligibility.allows_sample(ts_code, trade_date));
+    residual_map.shrink_to_fit();
     Ok(residual_map)
+}
+
+fn shrink_stock_series_cache(cache: &mut HashMap<String, HashMap<String, f64>>) {
+    for series in cache.values_mut() {
+        series.shrink_to_fit();
+    }
+    cache.shrink_to_fit();
 }
 
 fn load_pct_chg_series_cache_for_ts_codes(

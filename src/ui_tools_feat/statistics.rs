@@ -4,53 +4,55 @@ use std::{
     sync::Mutex,
 };
 
-use duckdb::{Connection, params};
+use duckdb::{params, Connection};
 use rand::random;
 #[cfg(test)]
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    data::scoring_data::{SceneDetails, ScoreDetails, ScoreSummary, row_into_rt},
+    data::scoring_data::{row_into_rt, SceneDetails, ScoreDetails, ScoreSummary},
     data::{
-        DataReader, RuleStage, RuleTag, RuntimeKeyCollectOptions, ScopeWay, ScoreRule, ScoreScene,
         collect_assigned_names_from_expr_program, collect_runtime_keys_from_expr_programs,
         concept_performance_db_path, expr_program_uses_runtime_key, load_stock_list,
-        load_ths_concepts_list, result_db_path, source_db_path,
+        load_ths_concepts_list, result_db_path, source_db_path, DataReader, RuleStage, RuleTag,
+        RuntimeKeyCollectOptions, ScopeWay, ScoreRule, ScoreScene,
     },
     expr::{
         eval::{Runtime, Value},
         lexer::TokenKind,
-        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+        parser::{lex_all, Expr, Parser, Stmt, Stmts},
     },
-    scoring::runner::{ScoringMemoryMode, scoring_all_to_memory_with_mode},
+    scoring::runner::{scoring_all_to_memory_with_mode, ScoringMemoryMode},
     scoring::tools::{
-        CyqChenFieldInjector, calc_query_need_rows, calc_query_start_date,
-        collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names, inject_stock_extra_fields,
-        load_st_list, load_total_share_map,
+        calc_query_need_rows, calc_query_start_date, collect_used_cyq_chen_runtime_keys,
+        cyq_chen_runtime_key_names, inject_stock_extra_fields, load_st_list, load_total_share_map,
+        CyqChenFieldInjector,
     },
-    scoring::{CachedRule, evaluate_cached_rule_scores},
+    scoring::{evaluate_cached_rule_scores, CachedRule},
     simulate::{
-        DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, build_backtest_sample_eligibility,
+        build_backtest_sample_eligibility,
         rank::{
-            RankLayerConfig, RankLayerFromDbInput, RankLayerMethod,
             calc_rank_layer_metrics_from_db, calc_rank_layer_metrics_from_score_rows,
+            RankLayerConfig, RankLayerFromDbInput, RankLayerMethod,
         },
         rule::{
-            RuleLayerConfig, RuleLayerFromDbInput, RuleLayerRuntimeCache,
-            build_rule_layer_runtime_cache_from_stock_data,
-            calc_all_rule_layer_metrics_from_db_with_ts_filter,
-            calc_all_rule_layer_metrics_from_rows, calc_rule_layer_metrics_from_db_with_ts_filter,
+            build_rule_layer_runtime_cache_from_stock_data_with_ts_filter,
+            calc_all_rule_layer_metrics_with_samples_from_db_map_with_ts_filter,
+            calc_all_rule_layer_metrics_with_samples_from_rows_map,
+            calc_rule_layer_metrics_from_db_with_ts_filter,
             calc_rule_layer_metrics_with_samples_from_cache,
-            visit_triggered_rule_samples_from_cache,
+            visit_triggered_rule_samples_from_cache, RuleLayerConfig, RuleLayerFromDbInput,
+            RuleLayerMetricsWithSamples, RuleLayerRuntimeCache, RuleLayerSamplePointRef,
         },
         scene::{
-            SceneLayerConfig, SceneLayerFromDbInput,
             calc_all_scene_layer_metrics_from_db_with_ts_filter,
             calc_all_scene_layer_metrics_from_rows,
-            calc_scene_layer_metrics_from_db_with_ts_filter,
+            calc_scene_layer_metrics_from_db_with_ts_filter, SceneLayerConfig,
+            SceneLayerFromDbInput,
         },
+        DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
     },
     ui_tools_feat::{build_concepts_map, build_name_map},
     utils::utils::board_category,
@@ -63,6 +65,8 @@ const RULE_VALIDATION_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 
 #[derive(Debug, Clone)]
 struct RuleMeta {
+    when: String,
+    explain: String,
     trigger_mode: String,
     is_each: bool,
     points: f64,
@@ -296,6 +300,7 @@ pub struct RuleLayerBacktestData {
     pub layer_summaries: Vec<RankLayerBucketSummary>,
     pub is_all_rules: bool,
     pub all_rule_summaries: Vec<RuleLayerRuleSummary>,
+    pub rule_validation_details: Vec<RuleValidationComboResult>,
 }
 
 #[derive(Debug, Serialize)]
@@ -349,6 +354,7 @@ const VALIDATION_MAX_COMBINATIONS: usize = 256;
 const VALIDATION_COMBO_EVAL_BATCH_SIZE: usize = 16;
 const VALIDATION_DEFAULT_SAMPLE_LIMIT_PER_GROUP: usize = 30;
 const VALIDATION_MAX_SAMPLE_LIMIT_PER_GROUP: usize = 200;
+const RULE_BACKTEST_DETAIL_SAMPLE_LIMIT_PER_GROUP: usize = 5;
 #[cfg(test)]
 const VALIDATION_RANDOM_SAMPLE_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
@@ -817,6 +823,8 @@ fn load_rule_meta(source_path: &str) -> Result<(Vec<String>, HashMap<String, Rul
         meta_map.insert(
             rule.name,
             RuleMeta {
+                when: rule.when,
+                explain: rule.explain,
                 trigger_mode: scope_way_label(rule.scope_way),
                 is_each: matches!(rule.scope_way, ScopeWay::Each),
                 points: rule.points,
@@ -2626,6 +2634,75 @@ fn build_rule_backtest_payload(
         layer_summaries,
         is_all_rules: false,
         all_rule_summaries: Vec::new(),
+        rule_validation_details: Vec::new(),
+    }
+}
+
+fn build_strategy_rule_validation_detail(
+    params: &RuleLayerBacktestRunParams,
+    rule_name: &str,
+    rule_meta: &RuleMeta,
+    metrics_with_samples: RuleLayerMetricsWithSamples,
+    layer_config: &RuleLayerConfig,
+    similarity_cache: &ValidationSimilarityCache,
+    explain_map: &HashMap<String, String>,
+    stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
+) -> RuleValidationComboResult {
+    let validation_layer_details = build_validation_score_layer_details(
+        &metrics_with_samples.samples,
+        layer_config.min_samples_per_day,
+    );
+    let return_distribution = build_validation_return_distribution(&metrics_with_samples.samples);
+    let mut sample_accumulator = ValidationSampleAccumulator::new(
+        RULE_BACKTEST_DETAIL_SAMPLE_LIMIT_PER_GROUP,
+        stock_meta_map,
+        similarity_cache,
+    );
+    for sample in &metrics_with_samples.samples {
+        if sample.rule_score.abs() <= RULE_BACKTEST_EPS {
+            continue;
+        }
+        sample_accumulator.push(RuleLayerSamplePointRef {
+            ts_code: &sample.ts_code,
+            trade_date: &sample.trade_date,
+            rule_score: sample.rule_score,
+            residual_return: sample.residual_return,
+        });
+    }
+
+    let (trigger_samples, triggered_days, sample_stats, sample_groups, overlap_hit_count) =
+        sample_accumulator.into_parts();
+    let backtest = build_rule_backtest_payload(
+        rule_name,
+        params,
+        metrics_with_samples.metrics,
+        Some(validation_layer_details),
+    );
+    let similarity_rows = build_validation_similarity_rows_from_overlap(
+        similarity_cache,
+        trigger_samples,
+        overlap_hit_count,
+        Some(rule_name),
+        explain_map,
+    );
+
+    RuleValidationComboResult {
+        combo_key: rule_name.to_string(),
+        combo_label: rule_name.to_string(),
+        formula: rule_meta.when.clone(),
+        unknown_values: Vec::new(),
+        trigger_samples,
+        triggered_days,
+        avg_daily_trigger: if triggered_days > 0 {
+            trigger_samples as f64 / triggered_days as f64
+        } else {
+            0.0
+        },
+        sample_stats,
+        sample_groups,
+        return_distribution,
+        backtest,
+        similarity_rows,
     }
 }
 
@@ -3280,6 +3357,8 @@ pub fn run_rule_expression_validation(
     manual_strategy: Option<RuleExpressionValidationManualStrategy>,
     unknown_configs: Option<Vec<RuleValidationUnknownConfig>>,
     sample_limit_per_group: Option<usize>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
 ) -> Result<RuleExpressionValidationData, String> {
     let source_path = source_path.trim().to_string();
     if source_path.is_empty() {
@@ -3297,6 +3376,9 @@ pub fn run_rule_expression_validation(
         &all_rules,
     )?;
 
+    let (resolved_board, exclude_st_board, allowed_ts_codes) =
+        build_backtest_board_filter(&source_path, board, exclude_st_board)?;
+
     let params = RuleLayerBacktestRunParams {
         stock_adj_type: stock_adj_type
             .unwrap_or_else(|| "qfq".to_string())
@@ -3312,9 +3394,9 @@ pub fn run_rule_expression_validation(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1).max(1),
-        resolved_board: None,
-        exclude_st_board: false,
-        allowed_ts_codes: None,
+        resolved_board,
+        exclude_st_board,
+        allowed_ts_codes,
     };
 
     let variants =
@@ -3340,7 +3422,7 @@ pub fn run_rule_expression_validation(
         backtest_period: params.backtest_period,
         min_listed_trade_days: params.min_listed_trade_days,
     };
-    let runtime_cache = build_rule_layer_runtime_cache_from_stock_data(
+    let runtime_cache = build_rule_layer_runtime_cache_from_stock_data_with_ts_filter(
         &source_conn,
         &source_path,
         &params.stock_adj_type,
@@ -3351,16 +3433,21 @@ pub fn run_rule_expression_validation(
         &params.start_date,
         &params.end_date,
         &layer_config,
+        params.allowed_ts_codes.as_ref(),
     )?;
     let validation_required_runtime_keys =
         collect_rule_validation_runtime_keys(&execution_plan.combos);
     let validation_reader =
         DataReader::new_with_runtime_keys(&source_path, &validation_required_runtime_keys)?;
-    let validation_ts_codes = validation_reader.list_ts_code(
+    let mut validation_ts_codes = validation_reader.list_ts_code(
         &params.stock_adj_type,
         &params.start_date,
         &params.end_date,
     )?;
+    if let Some(allowed_ts_codes) = params.allowed_ts_codes.as_ref() {
+        validation_ts_codes
+            .retain(|ts_code| ts_code_allowed_by_filter(Some(allowed_ts_codes), ts_code));
+    }
     let st_list = load_st_list(&source_path)?;
     let explain_map = all_rules
         .iter()
@@ -3549,6 +3636,35 @@ fn split_board_tags(board_raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// 缓存 `build_board_maps` 的解析结果，避免每次回测都读取并解析 stock_list.csv。
+static BOARD_MAPS_CACHE: Mutex<Option<(String, Vec<String>, HashMap<String, Vec<String>>)>> =
+    Mutex::new(None);
+
+fn get_or_build_board_maps(
+    source_path: &str,
+) -> Result<(Vec<String>, HashMap<String, Vec<String>>), String> {
+    {
+        let cache = BOARD_MAPS_CACHE
+            .lock()
+            .map_err(|e| format!("读取板块映射缓存失败: {e}"))?;
+        if let Some((cached_path, board_options, ts_board_map)) = cache.as_ref() {
+            if cached_path == source_path {
+                return Ok((board_options.clone(), ts_board_map.clone()));
+            }
+        }
+    }
+    let (board_options, ts_board_map) = build_board_maps(source_path)?;
+    let mut cache = BOARD_MAPS_CACHE
+        .lock()
+        .map_err(|e| format!("写入板块映射缓存失败: {e}"))?;
+    *cache = Some((
+        source_path.to_string(),
+        board_options.clone(),
+        ts_board_map.clone(),
+    ));
+    Ok((board_options, ts_board_map))
+}
+
 fn build_board_maps(
     source_path: &str,
 ) -> Result<(Vec<String>, HashMap<String, Vec<String>>), String> {
@@ -3637,7 +3753,7 @@ fn build_backtest_board_filter(
         return Ok((None, false, None));
     }
 
-    let (board_options, ts_board_map) = build_board_maps(source_path)?;
+    let (board_options, ts_board_map) = get_or_build_board_maps(source_path)?;
     let resolved_board = resolve_board_filter(requested_board, &board_options);
     let allowed_ts_codes = ts_board_map
         .into_iter()
@@ -3756,7 +3872,7 @@ pub fn get_market_analysis(
         .filter(|value| !value.is_empty())
         .or_else(|| latest_trade_date.clone());
 
-    let (board_options, ts_board_map) = build_board_maps(&source_path)?;
+    let (board_options, ts_board_map) = get_or_build_board_maps(&source_path)?;
     let concept_stock_counts = load_concept_stock_count_map(&source_path)?;
     let board_stock_counts = build_board_stock_count_map(&ts_board_map);
     let resolved_board = resolve_board_filter(board, &board_options);
@@ -5229,24 +5345,32 @@ fn run_rule_layer_backtest_core(
             layer_summaries: Vec::new(),
             is_all_rules: false,
             all_rule_summaries: Vec::new(),
+            rule_validation_details: Vec::new(),
         });
     }
 
-    let (rule_options, _) = load_rule_meta(source_path)?;
-    let all_metrics = calc_all_rule_layer_metrics_from_db_with_ts_filter(
-        source_conn,
-        source_path,
-        &rule_options,
-        &params.stock_adj_type,
-        &params.index_ts_code,
-        params.index_beta,
-        params.concept_beta,
-        params.industry_beta,
-        &params.start_date,
-        &params.end_date,
-        &layer_config,
-        params.allowed_ts_codes.as_ref(),
-    )?;
+    let (rule_options, rule_meta_map) = load_rule_meta(source_path)?;
+    let explain_map = rule_meta_map
+        .iter()
+        .map(|(rule_name, meta)| (rule_name.clone(), meta.explain.clone()))
+        .collect::<HashMap<_, _>>();
+    let has_rule_meta_match = rule_options
+        .iter()
+        .any(|rule_name| rule_meta_map.contains_key(rule_name));
+    let stock_meta_map = if has_rule_meta_match {
+        load_validation_sample_stock_meta_map(source_path)?
+    } else {
+        HashMap::new()
+    };
+    let similarity_cache = if has_rule_meta_match {
+        load_validation_similarity_cache_optional(
+            source_path,
+            &params.start_date,
+            &params.end_date,
+        )?
+    } else {
+        empty_validation_similarity_cache()
+    };
     let contribution_averages = if params.allowed_ts_codes.is_some() {
         let (summary_rows, detail_rows) = load_rule_backtest_score_rows_from_db(
             source_path,
@@ -5268,37 +5392,35 @@ fn run_rule_layer_backtest_core(
             &params.end_date,
         )?
     };
-    let mut all_rule_summaries = Vec::with_capacity(all_metrics.len());
-
-    for (one_rule_name, metrics) in all_metrics {
-        let contribution_average = contribution_averages
-            .get(&one_rule_name)
-            .cloned()
-            .unwrap_or_default();
-        all_rule_summaries.push(RuleLayerRuleSummary {
-            rule_name: one_rule_name,
-            point_count: metrics.points.len(),
-            avg_residual_mean: metrics.avg_residual_mean,
-            avg_excess_residual_mean: metrics.avg_excess_residual_mean,
-            profit_loss_ratio: metrics.profit_loss_ratio,
-            spread_mean: None,
-            avg_contribution_score: contribution_average.avg_contribution_score,
-            avg_contribution_per_trigger: contribution_average.avg_contribution_per_trigger,
-            ic_mean: metrics.ic_mean,
-            ic_std: metrics.ic_std,
-            icir: metrics.icir,
-            ic_t_value: metrics.ic_t_value,
-        });
-    }
-
-    all_rule_summaries.sort_by(|a, b| {
-        b.profit_loss_ratio
-            .unwrap_or(f64::NEG_INFINITY)
-            .partial_cmp(&a.profit_loss_ratio.unwrap_or(f64::NEG_INFINITY))
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.point_count.cmp(&a.point_count))
-            .then_with(|| a.rule_name.cmp(&b.rule_name))
-    });
+    let summary_detail_items = calc_all_rule_layer_metrics_with_samples_from_db_map_with_ts_filter(
+        source_conn,
+        source_path,
+        &rule_options,
+        &params.stock_adj_type,
+        &params.index_ts_code,
+        params.index_beta,
+        params.concept_beta,
+        params.industry_beta,
+        &params.start_date,
+        &params.end_date,
+        &layer_config,
+        params.allowed_ts_codes.as_ref(),
+        |one_rule_name, metrics_with_samples| {
+            Ok(build_one_rule_backtest_summary_and_detail(
+                one_rule_name,
+                metrics_with_samples,
+                &rule_meta_map,
+                &contribution_averages,
+                &explain_map,
+                params,
+                &layer_config,
+                &similarity_cache,
+                &stock_meta_map,
+            ))
+        },
+    );
+    let (all_rule_summaries, rule_validation_details) =
+        split_and_sort_rule_backtest_summaries_and_details(summary_detail_items?);
 
     let (
         avg_residual_mean,
@@ -5346,7 +5468,79 @@ fn run_rule_layer_backtest_core(
         layer_summaries: Vec::new(),
         is_all_rules: true,
         all_rule_summaries,
+        rule_validation_details,
     })
+}
+
+fn build_one_rule_backtest_summary_and_detail(
+    one_rule_name: &str,
+    metrics_with_samples: RuleLayerMetricsWithSamples,
+    rule_meta_map: &HashMap<String, RuleMeta>,
+    contribution_averages: &HashMap<String, RuleContributionAverages>,
+    explain_map: &HashMap<String, String>,
+    params: &RuleLayerBacktestRunParams,
+    layer_config: &RuleLayerConfig,
+    similarity_cache: &ValidationSimilarityCache,
+    stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
+) -> (RuleLayerRuleSummary, Option<RuleValidationComboResult>) {
+    let metrics = metrics_with_samples.metrics.clone();
+    let contribution_average = contribution_averages
+        .get(one_rule_name)
+        .cloned()
+        .unwrap_or_default();
+    let summary = RuleLayerRuleSummary {
+        rule_name: one_rule_name.to_string(),
+        point_count: metrics.points.len(),
+        avg_residual_mean: metrics.avg_residual_mean,
+        avg_excess_residual_mean: metrics.avg_excess_residual_mean,
+        profit_loss_ratio: metrics.profit_loss_ratio,
+        spread_mean: None,
+        avg_contribution_score: contribution_average.avg_contribution_score,
+        avg_contribution_per_trigger: contribution_average.avg_contribution_per_trigger,
+        ic_mean: metrics.ic_mean,
+        ic_std: metrics.ic_std,
+        icir: metrics.icir,
+        ic_t_value: metrics.ic_t_value,
+    };
+    let detail = rule_meta_map.get(one_rule_name).map(|rule_meta| {
+        build_strategy_rule_validation_detail(
+            params,
+            one_rule_name,
+            rule_meta,
+            metrics_with_samples,
+            layer_config,
+            similarity_cache,
+            explain_map,
+            stock_meta_map,
+        )
+    });
+
+    (summary, detail)
+}
+
+fn split_and_sort_rule_backtest_summaries_and_details(
+    items: Vec<(RuleLayerRuleSummary, Option<RuleValidationComboResult>)>,
+) -> (Vec<RuleLayerRuleSummary>, Vec<RuleValidationComboResult>) {
+    let mut all_rule_summaries = Vec::with_capacity(items.len());
+    let mut rule_validation_details = Vec::new();
+
+    for (summary, detail) in items {
+        all_rule_summaries.push(summary);
+        if let Some(detail) = detail {
+            rule_validation_details.push(detail);
+        }
+    }
+
+    all_rule_summaries.sort_by(|a, b| {
+        b.profit_loss_ratio
+            .unwrap_or(f64::NEG_INFINITY)
+            .partial_cmp(&a.profit_loss_ratio.unwrap_or(f64::NEG_INFINITY))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.point_count.cmp(&a.point_count))
+            .then_with(|| a.rule_name.cmp(&b.rule_name))
+    });
+
+    (all_rule_summaries, rule_validation_details)
 }
 
 fn rank_layer_label(layer_index: usize, layer_count: usize) -> String {
@@ -5774,8 +5968,35 @@ pub fn run_transient_rule_layer_backtest(
         &score_batch.detail_rows,
         params.allowed_ts_codes.as_ref(),
     );
-    let (rule_options, _) = load_rule_meta(&source_path)?;
-    let all_metrics = calc_all_rule_layer_metrics_from_rows(
+    let (rule_options, rule_meta_map) = load_rule_meta(&source_path)?;
+    let explain_map = rule_meta_map
+        .iter()
+        .map(|(rule_name, meta)| (rule_name.clone(), meta.explain.clone()))
+        .collect::<HashMap<_, _>>();
+    let has_rule_meta_match = rule_options
+        .iter()
+        .any(|rule_name| rule_meta_map.contains_key(rule_name));
+    let stock_meta_map = if has_rule_meta_match {
+        load_validation_sample_stock_meta_map(&source_path)?
+    } else {
+        HashMap::new()
+    };
+    let similarity_cache = if has_rule_meta_match {
+        load_validation_similarity_cache_optional(
+            &source_path,
+            &params.start_date,
+            &params.end_date,
+        )?
+    } else {
+        empty_validation_similarity_cache()
+    };
+    let contribution_averages = build_rule_contribution_averages_from_rows(
+        &summary_rows,
+        &detail_rows,
+        &params.start_date,
+        &params.end_date,
+    );
+    let summary_detail_items = calc_all_rule_layer_metrics_with_samples_from_rows_map(
         &source_conn,
         &source_path,
         &rule_options,
@@ -5789,42 +6010,22 @@ pub fn run_transient_rule_layer_backtest(
         &params.start_date,
         &params.end_date,
         &layer_config,
-    )?;
-    let contribution_averages = build_rule_contribution_averages_from_rows(
-        &summary_rows,
-        &detail_rows,
-        &params.start_date,
-        &params.end_date,
+        |one_rule_name, metrics_with_samples| {
+            Ok(build_one_rule_backtest_summary_and_detail(
+                one_rule_name,
+                metrics_with_samples,
+                &rule_meta_map,
+                &contribution_averages,
+                &explain_map,
+                &params,
+                &layer_config,
+                &similarity_cache,
+                &stock_meta_map,
+            ))
+        },
     );
-    let mut all_rule_summaries = Vec::with_capacity(all_metrics.len());
-    for (one_rule_name, metrics) in all_metrics {
-        let contribution_average = contribution_averages
-            .get(&one_rule_name)
-            .cloned()
-            .unwrap_or_default();
-        all_rule_summaries.push(RuleLayerRuleSummary {
-            rule_name: one_rule_name,
-            point_count: metrics.points.len(),
-            avg_residual_mean: metrics.avg_residual_mean,
-            avg_excess_residual_mean: metrics.avg_excess_residual_mean,
-            profit_loss_ratio: metrics.profit_loss_ratio,
-            spread_mean: None,
-            avg_contribution_score: contribution_average.avg_contribution_score,
-            avg_contribution_per_trigger: contribution_average.avg_contribution_per_trigger,
-            ic_mean: metrics.ic_mean,
-            ic_std: metrics.ic_std,
-            icir: metrics.icir,
-            ic_t_value: metrics.ic_t_value,
-        });
-    }
-    all_rule_summaries.sort_by(|a, b| {
-        b.profit_loss_ratio
-            .unwrap_or(f64::NEG_INFINITY)
-            .partial_cmp(&a.profit_loss_ratio.unwrap_or(f64::NEG_INFINITY))
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.point_count.cmp(&a.point_count))
-            .then_with(|| a.rule_name.cmp(&b.rule_name))
-    });
+    let (all_rule_summaries, rule_validation_details) =
+        split_and_sort_rule_backtest_summaries_and_details(summary_detail_items?);
 
     let (
         avg_residual_mean,
@@ -5872,6 +6073,7 @@ pub fn run_transient_rule_layer_backtest(
         layer_summaries: Vec::new(),
         is_all_rules: true,
         all_rule_summaries,
+        rule_validation_details,
     })
 }
 
@@ -6004,26 +6206,26 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use duckdb::{Connection, params};
+    use duckdb::{params, Connection};
 
     use crate::{
         data::{
-            DataReader, RuleTag, result_db_path,
+            result_db_path,
             scoring_data::{ScoreDetails, ScoreSummary},
-            source_db_path,
+            source_db_path, DataReader, RuleTag,
         },
         scoring::tools::load_st_list,
         simulate::rule::RuleLayerSamplePoint,
     };
 
     use super::{
-        PreparedValidationCombo, ValidationSampleRawRow, ValidationSampleStockMeta,
-        ValidationSimilarityCache, ValidationVariant, build_rule_contribution_averages_from_rows,
-        build_validation_cached_rule, build_validation_return_distribution,
-        build_validation_sample_groups, build_validation_similarity_rows,
-        build_validation_triggered_scores, build_validation_triggered_scores_for_combos,
-        collect_rule_validation_runtime_keys, collect_validation_assigned_names,
-        derive_validation_volatility_group, resolve_validation_sample_board_label,
+        build_rule_contribution_averages_from_rows, build_validation_cached_rule,
+        build_validation_return_distribution, build_validation_sample_groups,
+        build_validation_similarity_rows, build_validation_triggered_scores,
+        build_validation_triggered_scores_for_combos, collect_rule_validation_runtime_keys,
+        collect_validation_assigned_names, derive_validation_volatility_group,
+        resolve_validation_sample_board_label, PreparedValidationCombo, ValidationSampleRawRow,
+        ValidationSampleStockMeta, ValidationSimilarityCache, ValidationVariant,
     };
     use crate::data::ScopeWay;
 

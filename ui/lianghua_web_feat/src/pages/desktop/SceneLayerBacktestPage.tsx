@@ -532,6 +532,7 @@ export default function SceneLayerBacktestPage() {
   const [validationSelectedComboKey, setValidationSelectedComboKey] = useState("");
   const [validationRestoredComboKey, setValidationRestoredComboKey] = useState("");
   const [validationDetailModalOpen, setValidationDetailModalOpen] = useState(false);
+  const [shouldAutoOpenDetail, setShouldAutoOpenDetail] = useState(false);
   const heavyTaskRunning =
     loading ||
     transientLoading ||
@@ -718,6 +719,10 @@ export default function SceneLayerBacktestPage() {
 
   const allSceneSummaries = result?.all_scene_summaries ?? [];
   const allRuleSummaries = ruleResult?.all_rule_summaries ?? [];
+  const ruleValidationDetailByName = useMemo(() => {
+    const details = ruleResult?.rule_validation_details ?? [];
+    return new Map(details.map((item) => [item.combo_key, item]));
+  }, [ruleResult]);
   const validationComboRows = validationResult?.combo_results ?? EMPTY_VALIDATION_COMBO_RESULTS;
   const rankLayerSummaries = rankResult?.layer_summaries ?? [];
   const backtestHighlightSettings = readStoredBacktestHighlightSettings();
@@ -801,7 +806,12 @@ export default function SceneLayerBacktestPage() {
       "";
     setValidationRestoredComboKey("");
     setValidationSelectedComboKey(preferred);
-    setValidationDetailModalOpen(false);
+    setValidationDetailModalOpen(
+      shouldAutoOpenDetail &&
+      (validationResult.combo_results.length === 1 ||
+        validationResult.combo_results.some((item) => item.unknown_values.length > 0))
+    );
+    setShouldAutoOpenDetail(false);
   }, [validationResult, validationRestoredComboKey]);
 
   useEffect(() => {
@@ -1300,6 +1310,48 @@ export default function SceneLayerBacktestPage() {
     setValidationError("");
   }
 
+  function openStoredRuleValidationDetail(ruleName: string) {
+    const combo = ruleValidationDetailByName.get(ruleName);
+    const matched = strategyRuleOptions.find((item) => item.name === ruleName);
+
+    if (!combo) {
+      setRuleError(`策略 ${ruleName} 没有可用的详细统计，请重新执行策略回测。`);
+      return;
+    }
+
+    const parsedScopeWay = resolveValidationScopeWay(matched?.scope_way);
+    const scopeWindows = Math.max(1, matched?.scope_windows ?? 1);
+    const direction =
+      Number.isFinite(matched?.points) && Number(matched?.points) < 0 ? "negative" : "positive";
+
+    setValidationImportRuleName(ruleName);
+    setValidationExpression(combo.formula);
+    setValidationDirection(direction);
+    setValidationScopeWay(parsedScopeWay.scopeWay);
+    setValidationConsecThresholdText(String(parsedScopeWay.consecThreshold));
+    setValidationScopeWindowsText(String(scopeWindows));
+    setValidationEnableUnknown(false);
+    setValidationUnknownConfigs([]);
+    setValidationSampleLimitText(String(VALIDATION_DEFAULT_SAMPLE_LIMIT));
+    setValidationResult(null);
+    setValidationSelectedComboKey("");
+    setValidationRestoredComboKey("");
+    setValidationDetailModalOpen(false);
+    setValidationError("");
+    setRuleError("");
+    setShouldAutoOpenDetail(true);
+    setValidationResult({
+      import_rule_name: ruleName,
+      import_rule_explain: matched?.explain?.trim() || `策略详细统计：${ruleName}`,
+      scope_way: matched?.scope_way || parsedScopeWay.scopeWay,
+      scope_windows: scopeWindows,
+      sample_limit_per_group: VALIDATION_DEFAULT_SAMPLE_LIMIT,
+      combo_results: [combo],
+      best_combo_key: combo.combo_key,
+    });
+    setValidationSampleLimitText(String(VALIDATION_DEFAULT_SAMPLE_LIMIT));
+  }
+
   async function onRunRuleExpressionValidation() {
     const normalizedStart = normalizeDateInput(startDateInput);
     const normalizedEnd = normalizeDateInput(endDateInput);
@@ -1399,6 +1451,7 @@ export default function SceneLayerBacktestPage() {
     setValidationSelectedComboKey("");
     setValidationRestoredComboKey("");
     setValidationDetailModalOpen(false);
+    setShouldAutoOpenDetail(false);
     setValidationLoading(true);
     setValidationError("");
     try {
@@ -1430,6 +1483,8 @@ export default function SceneLayerBacktestPage() {
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
         unknownConfigs,
         sampleLimitPerGroup,
+        board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
+        excludeStBoard: excludeStBoard || undefined,
       });
       const compacted = compactRuleExpressionValidationData(data);
       setValidationResult(compacted);
@@ -2089,7 +2144,15 @@ export default function SceneLayerBacktestPage() {
                   <tbody>
                     {sortedRuleSummaries.map((item) => (
                       <tr key={item.rule_name}>
-                        <td title={item.rule_name}>{item.rule_name}</td>
+                        <td title={item.rule_name}>
+                          <button
+                            type="button"
+                            className="scene-layer-validation-detail-link"
+                            onClick={() => openStoredRuleValidationDetail(item.rule_name)}
+                          >
+                            {item.rule_name}
+                          </button>
+                        </td>
                         <td>{item.point_count}</td>
                         <td>{formatNumber(item.avg_contribution_score, 2)}</td>
                         <td>{formatNumber(item.avg_contribution_per_trigger, 2)}</td>
@@ -2350,7 +2413,7 @@ export default function SceneLayerBacktestPage() {
       </section>
 
       {validationResult ? (
-        <section className="scene-layer-card">
+        <section id="scene-layer-expression-validation-results" className="scene-layer-card">
           <div className="scene-layer-layer-summary">
             <h3>参数组合表现（点击表头排序）</h3>
             <div className="scene-layer-contrib-table-wrap">

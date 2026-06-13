@@ -22,6 +22,7 @@ const CYQ_SNAPSHOT_TABLE: &str = "cyq_snapshot";
 const CYQ_BIN_TABLE: &str = "cyq_bin";
 const DEFAULT_ADJ_TYPE: &str = "qfq";
 const CYQ_GROUP_SIZE: usize = 128;
+const CYQ_GROUP_SIZE_INCREMENTAL: usize = 8;
 const CYQ_QUEUE_BOUND: usize = 8;
 const CYQ_FLUSH_BATCH_SIZE: usize = 32;
 const CYQ_RUNTIME_KEYS: [&str; 5] = ["O", "H", "L", "C", "TURNOVER_RATE"];
@@ -862,7 +863,7 @@ pub fn maintain_cyq_incremental_if_db_exists(
         )
     });
 
-    let compute_result = ts_codes.par_chunks(CYQ_GROUP_SIZE).try_for_each_with(
+    let compute_result = ts_codes.par_chunks(CYQ_GROUP_SIZE_INCREMENTAL).try_for_each_with(
         tx,
         |sender, ts_group| -> Result<(), String> {
             let worker_reader = DataReader::new(source_dir)?;
@@ -1058,7 +1059,7 @@ pub fn repair_cyq_stocks_if_db_exists(
     });
 
     let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
-    let compute_result = ts_codes.par_chunks(CYQ_GROUP_SIZE).try_for_each_with(
+    let compute_result = ts_codes.par_chunks(CYQ_GROUP_SIZE_INCREMENTAL).try_for_each_with(
         tx,
         |sender, ts_group| -> Result<(), String> {
             let worker_reader =

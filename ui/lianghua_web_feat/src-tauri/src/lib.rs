@@ -1192,6 +1192,8 @@ async fn run_rule_expression_validation(
     manual_strategy: Option<RuleExpressionValidationManualStrategy>,
     unknown_configs: Option<Vec<RuleValidationUnknownConfig>>,
     sample_limit_per_group: Option<usize>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
 ) -> Result<RuleExpressionValidationData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_with_heap_trim(|| {
@@ -1214,6 +1216,8 @@ async fn run_rule_expression_validation(
                 manual_strategy,
                 unknown_configs,
                 sample_limit_per_group,
+                board,
+                exclude_st_board,
             )
         })
     })

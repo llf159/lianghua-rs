@@ -239,6 +239,7 @@ export type RuleLayerBacktestData = {
   layer_summaries: RankLayerBucketSummary[]
   is_all_rules?: boolean
   all_rule_summaries?: RuleLayerRuleSummary[]
+  rule_validation_details?: RuleValidationComboResult[]
 }
 
 export type RuleLayerBacktestDefaultsData = {
@@ -487,6 +488,8 @@ export type RuleExpressionValidationQuery = {
   backtestPeriod?: number
   unknownConfigs?: RuleValidationUnknownConfig[]
   sampleLimitPerGroup?: number
+  board?: string
+  excludeStBoard?: boolean
 }
 
 export async function getSceneLayerBacktestDefaults(sourcePath: string) {
