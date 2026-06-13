@@ -47,6 +47,19 @@ struct RankCacheEntry {
     ranks: HashMap<String, RankContext>,
 }
 
+#[derive(Debug, Clone)]
+struct SceneMarkerCandidate {
+    scene_name: String,
+    scene_rank: Option<i64>,
+    stage_level: i32,
+}
+
+#[derive(Debug, Clone)]
+struct SceneMarkerCacheEntry {
+    rank_date: String,
+    candidates: HashMap<String, Vec<SceneMarkerCandidate>>,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Return5dContext {
     latest_close: Option<f64>,
@@ -77,6 +90,7 @@ pub struct AllMarketMonitorRow {
     pub realtime_amount: Option<f64>,
     pub realtime_vol_ratio: Option<f64>,
     pub return_5d_pct: Option<f64>,
+    pub scene_marker: Option<String>,
     pub total_mv_yi: Option<f64>,
     pub refreshed_at: Option<String>,
 }
@@ -102,6 +116,8 @@ pub struct AllMarketMonitorSnapshotData {
 
 static SOURCE_META_CACHE: OnceLock<Mutex<HashMap<String, SourceMetaCacheEntry>>> = OnceLock::new();
 static RANK_CONTEXT_CACHE: OnceLock<Mutex<HashMap<String, RankCacheEntry>>> = OnceLock::new();
+static SCENE_MARKER_CACHE: OnceLock<Mutex<HashMap<String, SceneMarkerCacheEntry>>> =
+    OnceLock::new();
 static RETURN_5D_CONTEXT_CACHE: OnceLock<Mutex<HashMap<String, HashMap<String, Return5dContext>>>> =
     OnceLock::new();
 
@@ -137,6 +153,10 @@ fn source_meta_cache() -> &'static Mutex<HashMap<String, SourceMetaCacheEntry>> 
 
 fn rank_context_cache() -> &'static Mutex<HashMap<String, RankCacheEntry>> {
     RANK_CONTEXT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn scene_marker_cache() -> &'static Mutex<HashMap<String, SceneMarkerCacheEntry>> {
+    SCENE_MARKER_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn return_5d_context_cache() -> &'static Mutex<HashMap<String, HashMap<String, Return5dContext>>> {
@@ -321,6 +341,138 @@ fn cached_rank_context(
     Ok(ranks)
 }
 
+fn scene_stage_level(raw: Option<&str>) -> i32 {
+    match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+        Some("confirm") => 3,
+        Some("trigger") => 2,
+        Some("observe") => 1,
+        Some("fail") => 0,
+        _ => -1,
+    }
+}
+
+fn parse_scene_stage_threshold(raw: Option<&str>) -> i32 {
+    match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+        Some("confirm") => 3,
+        Some("observe") => 1,
+        Some("fail") => 0,
+        Some("trigger") | Some("") | None => 2,
+        _ => 2,
+    }
+}
+
+fn load_scene_marker_candidates(
+    conn: &Connection,
+    rank_date: &str,
+) -> Result<HashMap<String, Vec<SceneMarkerCandidate>>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                ts_code,
+                scene_name,
+                stage,
+                scene_rank
+            FROM scene_details
+            WHERE trade_date = ?
+              AND scene_name IS NOT NULL
+              AND TRIM(scene_name) <> ''
+            ORDER BY
+                ts_code ASC,
+                COALESCE(scene_rank, 999999) ASC,
+                scene_name ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译全市场场景标记失败: {e}"))?;
+    let mut rows = stmt
+        .query(params![rank_date])
+        .map_err(|e| format!("查询全市场场景标记失败: {e}"))?;
+    let mut out = HashMap::<String, Vec<SceneMarkerCandidate>>::new();
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取全市场场景标记失败: {e}"))?
+    {
+        let ts_code: String = row
+            .get(0)
+            .map_err(|e| format!("读取场景标记代码失败: {e}"))?;
+        let scene_name: String = row
+            .get(1)
+            .map_err(|e| format!("读取场景标记名称失败: {e}"))?;
+        let stage: Option<String> = row
+            .get(2)
+            .map_err(|e| format!("读取场景标记等级失败: {e}"))?;
+        let scene_rank: Option<i64> = row
+            .get(3)
+            .map_err(|e| format!("读取场景标记排名失败: {e}"))?;
+        if ts_code.trim().is_empty() || scene_name.trim().is_empty() {
+            continue;
+        }
+        out.entry(ts_code).or_default().push(SceneMarkerCandidate {
+            scene_name: scene_name.trim().to_string(),
+            scene_rank,
+            stage_level: scene_stage_level(stage.as_deref()),
+        });
+    }
+
+    Ok(out)
+}
+
+fn cached_scene_marker_candidates(
+    source_path: &str,
+    conn: &Connection,
+    rank_date: &str,
+) -> Result<HashMap<String, Vec<SceneMarkerCandidate>>, String> {
+    if let Some(entry) = scene_marker_cache()
+        .lock()
+        .map_err(|_| "场景标记缓存锁已损坏".to_string())?
+        .get(source_path)
+        .filter(|entry| entry.rank_date == rank_date)
+        .cloned()
+    {
+        return Ok(entry.candidates);
+    }
+
+    let candidates = load_scene_marker_candidates(conn, rank_date)?;
+    scene_marker_cache()
+        .lock()
+        .map_err(|_| "场景标记缓存锁已损坏".to_string())?
+        .insert(
+            source_path.to_string(),
+            SceneMarkerCacheEntry {
+                rank_date: rank_date.to_string(),
+                candidates: candidates.clone(),
+            },
+        );
+    Ok(candidates)
+}
+
+fn build_scene_marker_map(
+    candidates: &HashMap<String, Vec<SceneMarkerCandidate>>,
+    threshold_level: i32,
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for (ts_code, items) in candidates {
+        let best = items
+            .iter()
+            .filter(|item| item.stage_level >= threshold_level)
+            .min_by(|left, right| {
+                left.scene_rank
+                    .unwrap_or(i64::MAX)
+                    .cmp(&right.scene_rank.unwrap_or(i64::MAX))
+                    .then_with(|| left.scene_name.cmp(&right.scene_name))
+            });
+        if let Some(item) = best {
+            let marker = match item.scene_rank {
+                Some(rank) => format!("{} #{}", item.scene_name, rank),
+                None => item.scene_name.clone(),
+            };
+            out.insert(ts_code.clone(), marker);
+        }
+    }
+    out
+}
+
 fn load_return_5d_context_map(
     conn: &Connection,
     ts_codes: &[String],
@@ -442,6 +594,7 @@ fn build_rows(
     volume_ratio_map: &HashMap<String, f64>,
     avg_price_map: &HashMap<String, f64>,
     return_5d_map: &HashMap<String, Return5dContext>,
+    scene_marker_map: &HashMap<String, String>,
     fetch_meta: &RealtimeFetchMeta,
 ) -> Vec<AllMarketMonitorRow> {
     meta.stocks
@@ -487,6 +640,7 @@ fn build_rows(
                 realtime_amount: quote.map(|item| item.amount),
                 realtime_vol_ratio: volume_ratio_map.get(&stock.ts_code).copied(),
                 return_5d_pct,
+                scene_marker: scene_marker_map.get(&stock.ts_code).cloned(),
                 total_mv_yi: stock.total_mv_yi,
                 refreshed_at: fetch_meta.refreshed_at.clone(),
             }
@@ -539,6 +693,7 @@ fn fetch_index_rows(provider: RealtimeQuoteProvider) -> Vec<AllMarketIndexRow> {
 pub fn get_all_market_monitor_snapshot(
     source_path: &str,
     realtime_provider: Option<String>,
+    scene_stage_threshold: Option<String>,
 ) -> Result<AllMarketMonitorSnapshotData, String> {
     let meta = cached_source_meta(source_path)?;
     let ts_codes = meta
@@ -578,6 +733,12 @@ pub fn get_all_market_monitor_snapshot(
     let conn = open_result_conn(source_path)?;
     let rank_date = query_latest_rank_date(&conn)?;
     let ranks = cached_rank_context(source_path, &conn, &rank_date)?;
+    let scene_marker_candidates =
+        cached_scene_marker_candidates(source_path, &conn, &rank_date).unwrap_or_default();
+    let scene_marker_map = build_scene_marker_map(
+        &scene_marker_candidates,
+        parse_scene_stage_threshold(scene_stage_threshold.as_deref()),
+    );
     let return_5d_map = open_source_conn(source_path)
         .and_then(|conn| cached_return_5d_context_map(source_path, &conn, &ts_codes))
         .unwrap_or_default();
@@ -588,6 +749,7 @@ pub fn get_all_market_monitor_snapshot(
         &volume_ratio_map,
         &avg_price_map,
         &return_5d_map,
+        &scene_marker_map,
         &fetch_meta,
     );
     let index_rows = fetch_index_rows(provider.opposite());
@@ -674,6 +836,7 @@ mod tests {
             &sample_meta(),
             &ranks,
             &quotes,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),

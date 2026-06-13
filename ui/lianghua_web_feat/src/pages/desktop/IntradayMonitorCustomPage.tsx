@@ -23,6 +23,8 @@ const CUSTOM_MONITOR_STATE_KEY = 'lh_intraday_custom_monitor_state_v1'
 const CONTINUOUS_MONITOR_INTERVAL_MS = 1000
 const SPEED_HISTORY_KEEP_MS = 90_000
 const SPEED_PERIOD_OPTIONS = [10, 30, 60] as const
+const VOLUME_RATIO_THRESHOLD_STORAGE_KEY =
+  'lh_intraday_custom_volume_ratio_threshold_v1'
 
 type LoadingAction = 'refresh-realtime' | 'refresh-tags' | null
 type SpeedPeriod = (typeof SPEED_PERIOD_OPTIONS)[number]
@@ -125,6 +127,39 @@ function getPercentClassName(value?: number | null) {
     return 'intraday-custom-value-flat'
   }
   return value > 0 ? 'intraday-custom-value-up' : 'intraday-custom-value-down'
+}
+
+function readLocalStorageNumber(key: string, fallback: number) {
+  try {
+    const raw = window.localStorage.getItem(key)
+    if (raw != null) {
+      const value = Number(raw)
+      if (Number.isFinite(value)) return value
+    }
+  } catch {
+    // localStorage unavailable
+  }
+  return fallback
+}
+
+function isAboveAvgPrice(row: IntradayMonitorRow) {
+  return (
+    isFiniteNumber(row.realtime_price) &&
+    isFiniteNumber(row.realtime_avg_price) &&
+    row.realtime_avg_price > 0 &&
+    row.realtime_price > row.realtime_avg_price
+  )
+}
+
+function formatAboveAvgPrice(row: IntradayMonitorRow) {
+  if (
+    !isFiniteNumber(row.realtime_price) ||
+    !isFiniteNumber(row.realtime_avg_price) ||
+    row.realtime_avg_price <= 0
+  ) {
+    return '--'
+  }
+  return row.realtime_price > row.realtime_avg_price ? '是' : '否'
 }
 
 function getTagToneClassName(tone?: string | null) {
@@ -300,6 +335,9 @@ export default function IntradayMonitorCustomPage() {
   const [templateModalOpen, setTemplateModalOpen] = useState(false)
   const [continuousMonitorEnabled, setContinuousMonitorEnabled] = useState(false)
   const [speedPeriod, setSpeedPeriod] = useState<SpeedPeriod>(10)
+  const [volumeRatioThresholdText, setVolumeRatioThresholdText] = useState(() =>
+    String(readLocalStorageNumber(VOLUME_RATIO_THRESHOLD_STORAGE_KEY, 2)),
+  )
   const [currentTime, setCurrentTime] = useState(() => new Date())
   const loadingRef = useRef(false)
   const rowsRef = useRef<IntradayMonitorRow[]>([])
@@ -314,6 +352,10 @@ export default function IntradayMonitorCustomPage() {
     () => buildSpeedMap(rows, priceHistoryRef.current, speedPeriod, Date.now()),
     [rows, speedPeriod],
   )
+  const volumeRatioThreshold = useMemo(() => {
+    const value = Number(volumeRatioThresholdText)
+    return Number.isFinite(value) && value > 0 ? value : null
+  }, [volumeRatioThresholdText])
   const displayedRows = useMemo(() => {
     const hitRows: IntradayMonitorRow[] = []
     const otherRows: IntradayMonitorRow[] = []
@@ -361,6 +403,15 @@ export default function IntradayMonitorCustomPage() {
   useEffect(() => {
     rowsRef.current = rows
   }, [rows])
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        VOLUME_RATIO_THRESHOLD_STORAGE_KEY,
+        volumeRatioThresholdText,
+      )
+    } catch {}
+  }, [volumeRatioThresholdText])
 
   const updateTemplates = useCallback((nextTemplates: IntradayMonitorTemplate[]) => {
     setTemplates(nextTemplates)
@@ -676,6 +727,16 @@ export default function IntradayMonitorCustomPage() {
               ))}
             </select>
           </label>
+          <label className="intraday-custom-inline-field">
+            <span>量比阈值</span>
+            <input
+              type="number"
+              min="0.01"
+              step="0.01"
+              value={volumeRatioThresholdText}
+              onChange={(event) => setVolumeRatioThresholdText(event.target.value)}
+            />
+          </label>
         </div>
 
         {notice ? <div className="intraday-custom-notice">{notice}</div> : null}
@@ -710,20 +771,20 @@ export default function IntradayMonitorCustomPage() {
           <div className="intraday-custom-table-wrap">
             <table
               className="intraday-custom-table"
-              style={{ minWidth: '1526px' }}
+              style={{ minWidth: '1524px' }}
             >
               <colgroup>
                 <col style={{ width: 72 }} />
                 <col style={{ width: 112 }} />
                 <col style={{ width: 110 }} />
+                <col style={{ width: 100 }} />
                 <col style={{ width: 96 }} />
                 <col style={{ width: 96 }} />
                 <col style={{ width: 108 }} />
-                <col style={{ width: 100 }} />
                 <col style={{ width: 92 }} />
                 <col style={{ width: 160 }} />
                 <col style={{ width: 108 }} />
-                <col style={{ width: 96 }} />
+                <col style={{ width: 94 }} />
                 <col style={{ width: 116 }} />
                 <col style={{ width: 260 }} />
               </colgroup>
@@ -732,15 +793,15 @@ export default function IntradayMonitorCustomPage() {
                   <th>排名</th>
                   <th>代码</th>
                   <th>名称</th>
-                  <th>实时价*</th>
+                  <th>五日涨幅</th>
+                  <th className="intraday-custom-realtime-group-start">实时价*</th>
                   <th>均价*</th>
                   <th>实时涨幅*</th>
-                  <th>五日涨幅</th>
                   <th>涨速*</th>
                   <th>模板标记</th>
                   <th>盘中量比*</th>
-                  <th>板块</th>
-                  <th>总市值(亿)</th>
+                  <th>高于均线</th>
+                  <th className="intraday-custom-info-group-start">总市值(亿)</th>
                   <th>概念</th>
                 </tr>
               </thead>
@@ -804,7 +865,24 @@ export default function IntradayMonitorCustomPage() {
                             {row.name || row.ts_code}
                           </DetailsLink>
                         </td>
-                        <td>
+                        <td className={getPercentClassName(row.return_5d_pct)}>
+                          <span className="intraday-custom-cell-value">
+                            <span>{formatPercent(row.return_5d_pct)}</span>
+                            {return5dDeltaText ? (
+                              <span
+                                className={[
+                                  'intraday-custom-delta',
+                                  (return5dDelta ?? 0) > 0
+                                    ? 'intraday-custom-delta-up'
+                                    : 'intraday-custom-delta-down',
+                                ].join(' ')}
+                              >
+                                {return5dDeltaText}
+                              </span>
+                            ) : null}
+                          </span>
+                        </td>
+                        <td className="intraday-custom-realtime-group-start">
                           <span className="intraday-custom-cell-value">
                             <span>{formatNumber(row.realtime_price)}</span>
                             {priceDeltaText ? (
@@ -855,23 +933,6 @@ export default function IntradayMonitorCustomPage() {
                             ) : null}
                           </span>
                         </td>
-                        <td className={getPercentClassName(row.return_5d_pct)}>
-                          <span className="intraday-custom-cell-value">
-                            <span>{formatPercent(row.return_5d_pct)}</span>
-                            {return5dDeltaText ? (
-                              <span
-                                className={[
-                                  'intraday-custom-delta',
-                                  (return5dDelta ?? 0) > 0
-                                    ? 'intraday-custom-delta-up'
-                                    : 'intraday-custom-delta-down',
-                                ].join(' ')}
-                              >
-                                {return5dDeltaText}
-                              </span>
-                            ) : null}
-                          </span>
-                        </td>
                         <td className={getPercentClassName(speedPct)}>
                           {formatPercent(speedPct)}
                         </td>
@@ -887,7 +948,15 @@ export default function IntradayMonitorCustomPage() {
                               : '--'}
                           </span>
                         </td>
-                        <td>
+                        <td
+                          className={
+                            isFiniteNumber(volumeRatioThreshold) &&
+                            isFiniteNumber(row.realtime_vol_ratio) &&
+                            row.realtime_vol_ratio > volumeRatioThreshold
+                              ? 'intraday-custom-volume-ratio-cell is-alert'
+                              : 'intraday-custom-volume-ratio-cell'
+                          }
+                        >
                           <span className="intraday-custom-cell-value">
                             <span>{formatNumber(row.realtime_vol_ratio)}</span>
                             {volRatioDeltaText ? (
@@ -904,8 +973,23 @@ export default function IntradayMonitorCustomPage() {
                             ) : null}
                           </span>
                         </td>
-                        <td>{row.board || '--'}</td>
-                        <td>{formatNumber(row.total_mv_yi)}</td>
+                        <td
+                          className={
+                            isAboveAvgPrice(row)
+                              ? 'intraday-custom-above-avg-cell is-yes'
+                              : 'intraday-custom-above-avg-cell'
+                          }
+                          title={
+                            isFiniteNumber(row.realtime_avg_price)
+                              ? `日内均价 ${formatNumber(row.realtime_avg_price)}`
+                              : '日内均价 --'
+                          }
+                        >
+                          {formatAboveAvgPrice(row)}
+                        </td>
+                        <td className="intraday-custom-info-group-start">
+                          {formatNumber(row.total_mv_yi)}
+                        </td>
                         <td
                           className="intraday-custom-cell-concept"
                           title={conceptText}

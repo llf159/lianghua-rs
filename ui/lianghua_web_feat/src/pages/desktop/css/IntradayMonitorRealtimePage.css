@@ -120,7 +120,8 @@
   font-size: 13px;
 }
 
-.intraday-monitor-inline-field select {
+.intraday-monitor-inline-field select,
+.intraday-monitor-inline-field input {
   border: 1px solid #c6d0da;
   border-radius: 8px;
   min-height: 34px;
@@ -128,6 +129,11 @@
   color: #1f2a44;
   background: #fff;
   font-size: 14px;
+}
+
+.intraday-monitor-inline-field input {
+  width: 86px;
+  padding-right: 10px;
 }
 
 .intraday-monitor-config-list {
@@ -352,6 +358,13 @@
   white-space: nowrap;
 }
 
+.intraday-monitor-table th.intraday-monitor-realtime-group-start,
+.intraday-monitor-table td.intraday-monitor-realtime-group-start,
+.intraday-monitor-table th.intraday-monitor-info-group-start,
+.intraday-monitor-table td.intraday-monitor-info-group-start {
+  border-left: 2px solid #cfd8e5;
+}
+
 .intraday-monitor-table tbody tr:nth-child(even) {
   background: #fcfdff;
 }
@@ -405,6 +418,22 @@
 
 .intraday-monitor-value-flat {
   color: #2a3550 !important;
+}
+
+.intraday-monitor-volume-ratio-cell.is-alert {
+  background: #fff7ed;
+  color: #c2410c;
+  font-weight: 700;
+}
+
+.intraday-monitor-above-avg-cell {
+  color: #64748b !important;
+  font-weight: 600;
+}
+
+.intraday-monitor-above-avg-cell.is-yes {
+  color: #c2410c !important;
+  font-weight: 700;
 }
 
 .intraday-monitor-cell-value {

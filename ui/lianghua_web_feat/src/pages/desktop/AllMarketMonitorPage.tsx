@@ -24,12 +24,20 @@ import "./css/DataImportPage.css";
 
 const POLL_INTERVAL_MS = 1000;
 const HISTORY_KEEP_MS = 90_000;
+const RECORD_HIGH_CONFIRM_MS = 5_000;
 const SPEED_PERIOD_OPTIONS = [10, 30, 60] as const;
 const TOP_LIMIT_OPTIONS = [20, 50, 100, 200] as const;
+const SCENE_STAGE_THRESHOLD_OPTIONS = [
+  { value: "observe", label: "观察" },
+  { value: "trigger", label: "触发" },
+  { value: "confirm", label: "确认" },
+] as const;
 
 const LS_KEY_SPEED_PERIOD = "am_speed_period";
 const LS_KEY_SPEED_THRESHOLD = "am_speed_threshold";
 const LS_KEY_VOLUME_RATIO_THRESHOLD = "am_volume_ratio_threshold";
+const LS_KEY_RANK_HIGHLIGHT_THRESHOLD = "am_rank_highlight_threshold";
+const LS_KEY_SCENE_STAGE_THRESHOLD = "am_scene_stage_threshold";
 const LS_KEY_TOP_LIMIT = "am_top_limit";
 
 function readLocalStorageNumber<T extends number>(key: string, fallback: T): T {
@@ -43,6 +51,21 @@ function readLocalStorageNumber<T extends number>(key: string, fallback: T): T {
     // localStorage unavailable
   }
   return fallback;
+}
+
+type SceneStageThreshold =
+  (typeof SCENE_STAGE_THRESHOLD_OPTIONS)[number]["value"];
+
+function readLocalStorageSceneStageThreshold(): SceneStageThreshold {
+  try {
+    const raw = localStorage.getItem(LS_KEY_SCENE_STAGE_THRESHOLD);
+    if (raw === "observe" || raw === "trigger" || raw === "confirm") {
+      return raw;
+    }
+  } catch {
+    // localStorage unavailable
+  }
+  return "trigger";
 }
 
 type PrimarySortKey =
@@ -78,6 +101,11 @@ type SpeedHitRecord = DisplayRow & {
 };
 
 type SpeedHitRecordsByPeriod = Record<SpeedPeriod, SpeedHitRecord[]>;
+
+type RecordHighCandidate = {
+  startedAt: number;
+  minValue: number;
+};
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
@@ -143,6 +171,14 @@ function formatAboveAvgPrice(row: AllMarketMonitorRow) {
   return row.realtime_price > row.realtime_avg_price ? "是" : "否";
 }
 
+function isRankHighlight(row: AllMarketMonitorRow, threshold: number | null) {
+  if (!isFiniteNumber(threshold)) return false;
+  return (
+    (isFiniteNumber(row.best_rank_3d) && row.best_rank_3d <= threshold) ||
+    (isFiniteNumber(row.best_rank_5d) && row.best_rank_5d <= threshold)
+  );
+}
+
 function buildPriceSnapshot(rows: AllMarketMonitorRow[], capturedAt: number) {
   const prices: Record<string, number> = {};
   for (const row of rows) {
@@ -206,6 +242,58 @@ function createEmptyHitRecordsByPeriod(): SpeedHitRecordsByPeriod {
   };
 }
 
+function updateRecordHighs(
+  recordHighs: Map<string, number>,
+  candidates: Map<string, RecordHighCandidate>,
+  rows: AllMarketMonitorRow[],
+  capturedAt: number,
+  getValue: (row: AllMarketMonitorRow) => number | null | undefined,
+) {
+  const newHighCodes = new Set<string>();
+
+  for (const row of rows) {
+    const value = getValue(row);
+    if (!isFiniteNumber(value)) {
+      candidates.delete(row.ts_code);
+      continue;
+    }
+
+    const previous = recordHighs.get(row.ts_code);
+    if (!isFiniteNumber(previous)) {
+      recordHighs.set(row.ts_code, value);
+      candidates.delete(row.ts_code);
+      continue;
+    }
+
+    if (value <= previous) {
+      candidates.delete(row.ts_code);
+      continue;
+    }
+
+    newHighCodes.add(row.ts_code);
+
+    const candidate = candidates.get(row.ts_code);
+    if (!candidate) {
+      candidates.set(row.ts_code, {
+        startedAt: capturedAt,
+        minValue: value,
+      });
+      continue;
+    }
+
+    candidate.minValue = Math.min(candidate.minValue, value);
+    if (
+      capturedAt - candidate.startedAt >= RECORD_HIGH_CONFIRM_MS &&
+      candidate.minValue > previous
+    ) {
+      recordHighs.set(row.ts_code, candidate.minValue);
+      candidates.delete(row.ts_code);
+    }
+  }
+
+  return newHighCodes;
+}
+
 export default function AllMarketMonitorPage() {
   const { excludedConcepts } = useConceptExclusions();
   const [sourcePath, setSourcePath] = useState("");
@@ -224,6 +312,11 @@ export default function AllMarketMonitorPage() {
   const [volumeRatioThresholdText, setVolumeRatioThresholdText] = useState(() =>
     String(readLocalStorageNumber(LS_KEY_VOLUME_RATIO_THRESHOLD, 2)),
   );
+  const [rankHighlightThresholdText, setRankHighlightThresholdText] = useState(
+    () => String(readLocalStorageNumber(LS_KEY_RANK_HIGHLIGHT_THRESHOLD, 100)),
+  );
+  const [sceneStageThreshold, setSceneStageThreshold] =
+    useState<SceneStageThreshold>(() => readLocalStorageSceneStageThreshold());
   const [boardFilter, setBoardFilter] = useState<BoardFilter>("全部");
   const [topLimit, setTopLimit] = useState<TopLimit>(() =>
     readLocalStorageNumber(LS_KEY_TOP_LIMIT, 50),
@@ -239,12 +332,26 @@ export default function AllMarketMonitorPage() {
   const [currentTime, setCurrentTime] = useState(() => new Date());
   const [hitRecordsByPeriod, setHitRecordsByPeriod] =
     useState<SpeedHitRecordsByPeriod>(() => createEmptyHitRecordsByPeriod());
+  const [volumeRatioNewHighCodes, setVolumeRatioNewHighCodes] = useState<
+    Set<string>
+  >(() => new Set());
+  const [changePctNewHighCodes, setChangePctNewHighCodes] = useState<
+    Set<string>
+  >(() => new Set());
   const [openHitTsCode, setOpenHitTsCode] = useState<string | null>(null);
   const [showParams, setShowParams] = useState(false);
 
   const inFlightRef = useRef(false);
   const enabledRef = useRef(false);
   const historyRef = useRef<PriceSnapshot[]>([]);
+  const volumeRatioRecordHighsRef = useRef<Map<string, number>>(new Map());
+  const volumeRatioRecordCandidatesRef = useRef<
+    Map<string, RecordHighCandidate>
+  >(new Map());
+  const changePctRecordHighsRef = useRef<Map<string, number>>(new Map());
+  const changePctRecordCandidatesRef = useRef<
+    Map<string, RecordHighCandidate>
+  >(new Map());
 
   const sourcePathTrimmed = sourcePath.trim();
   const isVolumeRatioBoard = primarySortKey === "realtime_vol_ratio";
@@ -276,6 +383,21 @@ export default function AllMarketMonitorPage() {
       );
     } catch {}
   }, [volumeRatioThresholdText]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        LS_KEY_RANK_HIGHLIGHT_THRESHOLD,
+        String(rankHighlightThresholdText),
+      );
+    } catch {}
+  }, [rankHighlightThresholdText]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_KEY_SCENE_STAGE_THRESHOLD, sceneStageThreshold);
+    } catch {}
+  }, [sceneStageThreshold]);
 
   useEffect(() => {
     try {
@@ -323,12 +445,31 @@ export default function AllMarketMonitorPage() {
       const result = await getAllMarketMonitorSnapshot(
         sourcePathTrimmed,
         readStoredRealtimeQuoteProvider(),
+        sceneStageThreshold,
       );
       if (!enabledRef.current) return;
 
       const capturedAt = Date.now();
       const nextRows = result.rows ?? [];
       const nextIndexRows = result.index_rows ?? [];
+      setVolumeRatioNewHighCodes(
+        updateRecordHighs(
+          volumeRatioRecordHighsRef.current,
+          volumeRatioRecordCandidatesRef.current,
+          nextRows,
+          capturedAt,
+          (row) => row.realtime_vol_ratio,
+        ),
+      );
+      setChangePctNewHighCodes(
+        updateRecordHighs(
+          changePctRecordHighsRef.current,
+          changePctRecordCandidatesRef.current,
+          nextRows,
+          capturedAt,
+          (row) => row.realtime_change_pct,
+        ),
+      );
       historyRef.current = appendPriceSnapshot(
         historyRef.current,
         nextRows,
@@ -351,7 +492,7 @@ export default function AllMarketMonitorPage() {
         setLoading(false);
       }
     }
-  }, [sourcePathTrimmed]);
+  }, [sceneStageThreshold, sourcePathTrimmed]);
 
   useEffect(() => {
     if (!enabled) return undefined;
@@ -397,6 +538,20 @@ export default function AllMarketMonitorPage() {
     const value = Number(volumeRatioThresholdText);
     return Number.isFinite(value) && value > 0 ? value : null;
   }, [volumeRatioThresholdText]);
+
+  const rankHighlightThreshold = useMemo(() => {
+    const value = Number(rankHighlightThresholdText);
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }, [rankHighlightThresholdText]);
+
+  useEffect(() => {
+    volumeRatioRecordHighsRef.current.clear();
+    volumeRatioRecordCandidatesRef.current.clear();
+    changePctRecordHighsRef.current.clear();
+    changePctRecordCandidatesRef.current.clear();
+    setVolumeRatioNewHighCodes(new Set());
+    setChangePctNewHighCodes(new Set());
+  }, [sourcePathTrimmed]);
 
   useEffect(() => {
     setHitRecordsByPeriod(() => createEmptyHitRecordsByPeriod());
@@ -744,19 +899,20 @@ export default function AllMarketMonitorPage() {
                     </th>
                     <th
                       aria-sort={getAriaSort(
-                        sortKey === "realtime_change_pct",
-                        sortDirection,
-                      )}
-                    >
-                      {renderSortHeader("涨幅", "realtime_change_pct")}
-                    </th>
-                    <th
-                      aria-sort={getAriaSort(
                         sortKey === "return_5d_pct",
                         sortDirection,
                       )}
                     >
                       {renderSortHeader("五日涨幅", "return_5d_pct")}
+                    </th>
+                    <th
+                      className="all-market-realtime-group-start"
+                      aria-sort={getAriaSort(
+                        sortKey === "realtime_change_pct",
+                        sortDirection,
+                      )}
+                    >
+                      {renderSortHeader("涨幅", "realtime_change_pct")}
                     </th>
                     <th
                       aria-sort={getAriaSort(
@@ -790,7 +946,12 @@ export default function AllMarketMonitorPage() {
                     >
                       {renderSortHeader("开盘涨幅", "realtime_change_open_pct")}
                     </th>
-                    <th aria-sort="none">概念</th>
+                    <th
+                      className="all-market-info-group-start"
+                      aria-sort="none"
+                    >
+                      场景标记
+                    </th>
                     <th
                       aria-sort={getAriaSort(
                         sortKey === "total_mv_yi",
@@ -799,6 +960,9 @@ export default function AllMarketMonitorPage() {
                     >
                       {renderSortHeader("总市值", "total_mv_yi")}
                     </th>
+                    <th aria-sort="none">
+                      概念
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -806,6 +970,10 @@ export default function AllMarketMonitorPage() {
                     const conceptText = formatConceptText(
                       row.concept ?? "",
                       excludedConcepts,
+                    );
+                    const rankHighlighted = isRankHighlight(
+                      row,
+                      rankHighlightThreshold,
                     );
 
                     return (
@@ -827,21 +995,41 @@ export default function AllMarketMonitorPage() {
                             {row.ts_code}
                           </span>
                         </td>
-                        <td className="all-market-rank-cell">
+                        <td
+                          className={
+                            rankHighlighted
+                              ? "all-market-rank-cell is-highlight"
+                              : "all-market-rank-cell"
+                          }
+                        >
                           {formatNumber(row.best_rank_3d, 0)}
                         </td>
-                        <td className="all-market-rank-cell">
-                          {formatNumber(row.best_rank_5d, 0)}
-                        </td>
                         <td
-                          className={getPercentClassName(
-                            row.realtime_change_pct,
-                          )}
+                          className={
+                            rankHighlighted
+                              ? "all-market-rank-cell is-highlight"
+                              : "all-market-rank-cell"
+                          }
                         >
-                          {formatPercent(row.realtime_change_pct)}
+                          {formatNumber(row.best_rank_5d, 0)}
                         </td>
                         <td className={getPercentClassName(row.return_5d_pct)}>
                           {formatPercent(row.return_5d_pct)}
+                        </td>
+                        <td
+                          className={`${getPercentClassName(
+                            row.realtime_change_pct,
+                          )} all-market-realtime-group-start`}
+                        >
+                          <span>{formatPercent(row.realtime_change_pct)}</span>
+                          {changePctNewHighCodes.has(row.ts_code) ? (
+                            <span
+                              className="all-market-record-high-badge"
+                              title="当前涨幅高于监控记录；记录连续约5秒确认后刷新"
+                            >
+                              新高
+                            </span>
+                          ) : null}
                         </td>
                         <td className={getPercentClassName(row.speed_pct)}>
                           {formatPercent(row.speed_pct)}
@@ -855,7 +1043,15 @@ export default function AllMarketMonitorPage() {
                               : "all-market-volume-ratio-cell"
                           }
                         >
-                          {formatNumber(row.realtime_vol_ratio)}
+                          <span>{formatNumber(row.realtime_vol_ratio)}</span>
+                          {volumeRatioNewHighCodes.has(row.ts_code) ? (
+                            <span
+                              className="all-market-record-high-badge"
+                              title="当前量比高于监控记录；记录连续约5秒确认后刷新"
+                            >
+                              新高
+                            </span>
+                          ) : null}
                         </td>
                         <td
                           className={
@@ -879,12 +1075,20 @@ export default function AllMarketMonitorPage() {
                           {formatPercent(row.realtime_change_open_pct)}
                         </td>
                         <td
+                          className="all-market-scene-marker-cell all-market-info-group-start"
+                          title={row.scene_marker ?? "--"}
+                        >
+                          {row.scene_marker ?? "--"}
+                        </td>
+                        <td>
+                          {formatNumber(row.total_mv_yi)}
+                        </td>
+                        <td
                           className="all-market-concept-cell"
                           title={conceptText}
                         >
                           {conceptText}
                         </td>
-                        <td>{formatNumber(row.total_mv_yi)}</td>
                       </tr>
                     );
                   })}
@@ -1136,7 +1340,7 @@ export default function AllMarketMonitorPage() {
               </label>
 
               <label className="settings-field">
-                <span>命中阈值 %</span>
+                <span>涨速命中阈值 %</span>
                 <input
                   type="number"
                   min="0.01"
@@ -1159,6 +1363,37 @@ export default function AllMarketMonitorPage() {
                     setVolumeRatioThresholdText(event.target.value)
                   }
                 />
+              </label>
+
+              <label className="settings-field">
+                <span>排名高亮阈值</span>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={rankHighlightThresholdText}
+                  onChange={(event) =>
+                    setRankHighlightThresholdText(event.target.value)
+                  }
+                />
+              </label>
+
+              <label className="settings-field">
+                <span>场景等级阈值</span>
+                <select
+                  value={sceneStageThreshold}
+                  onChange={(event) =>
+                    setSceneStageThreshold(
+                      event.target.value as SceneStageThreshold,
+                    )
+                  }
+                >
+                  {SCENE_STAGE_THRESHOLD_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
               </label>
 
               <label className="settings-field">

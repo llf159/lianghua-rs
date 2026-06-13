@@ -448,7 +448,7 @@
 
 .all-market-table {
   width: 100%;
-  min-width: 1120px;
+  min-width: 1260px;
   border-collapse: collapse;
   table-layout: fixed;
   font-size: 13px;
@@ -502,12 +502,24 @@
 
 .all-market-table th:nth-child(10),
 .all-market-table td:nth-child(10) {
-  width: 220px;
+  width: 140px;
 }
 
 .all-market-table th:nth-child(11),
 .all-market-table td:nth-child(11) {
   width: 88px;
+}
+
+.all-market-table th:nth-child(12),
+.all-market-table td:nth-child(12) {
+  width: 220px;
+}
+
+.all-market-table th.all-market-realtime-group-start,
+.all-market-table td.all-market-realtime-group-start,
+.all-market-table th.all-market-info-group-start,
+.all-market-table td.all-market-info-group-start {
+  border-left: 2px solid #cfd8e5;
 }
 
 .all-market-name-cell {
@@ -527,10 +539,31 @@
   color: #2a3550;
 }
 
+.all-market-scene-marker-cell {
+  color: #1f5f99;
+  font-weight: 600;
+}
+
 .all-market-volume-ratio-cell.is-alert {
   background: #fff7ed;
   color: #c2410c;
   font-weight: 700;
+}
+
+.all-market-record-high-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 5px;
+  border: 1px solid #fdba74;
+  border-radius: 4px;
+  padding: 1px 4px;
+  background: #ffedd5;
+  color: #9a3412;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  vertical-align: 1px;
 }
 
 .all-market-above-avg-cell {
@@ -570,6 +603,11 @@
 .all-market-rank-cell {
   color: #1f2a44;
   font-weight: 700;
+}
+
+.all-market-rank-cell.is-highlight {
+  background: #fff7ed;
+  color: #c2410c;
 }
 
 .all-market-value-up {

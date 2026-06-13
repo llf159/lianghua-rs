@@ -124,7 +124,8 @@
   font-size: 13px;
 }
 
-.intraday-custom-inline-field select {
+.intraday-custom-inline-field select,
+.intraday-custom-inline-field input {
   border: 1px solid #c6d0da;
   border-radius: 8px;
   min-height: 34px;
@@ -132,6 +133,11 @@
   color: #1f2a44;
   background: #fff;
   font-size: 14px;
+}
+
+.intraday-custom-inline-field input {
+  width: 86px;
+  padding-right: 10px;
 }
 
 .intraday-custom-toolbar-btn.is-loading {
@@ -291,6 +297,13 @@
   white-space: nowrap;
 }
 
+.intraday-custom-table th.intraday-custom-realtime-group-start,
+.intraday-custom-table td.intraday-custom-realtime-group-start,
+.intraday-custom-table th.intraday-custom-info-group-start,
+.intraday-custom-table td.intraday-custom-info-group-start {
+  border-left: 2px solid #cfd8e5;
+}
+
 .intraday-custom-table tbody tr:nth-child(even) {
   background: #fcfdff;
 }
@@ -350,6 +363,22 @@
 
 .intraday-custom-cell-concept {
   max-width: 260px;
+}
+
+.intraday-custom-volume-ratio-cell.is-alert {
+  background: #fff7ed;
+  color: #c2410c;
+  font-weight: 700;
+}
+
+.intraday-custom-above-avg-cell {
+  color: #64748b !important;
+  font-weight: 600;
+}
+
+.intraday-custom-above-avg-cell.is-yes {
+  color: #c2410c !important;
+  font-weight: 700;
 }
 
 .intraday-custom-hit-badge {

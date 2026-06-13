@@ -173,6 +173,7 @@ export type AllMarketMonitorRow = {
   realtime_amount?: number | null;
   realtime_vol_ratio?: number | null;
   return_5d_pct?: number | null;
+  scene_marker?: string | null;
   total_mv_yi?: number | null;
   refreshed_at?: string | null;
 };
@@ -269,10 +270,11 @@ export async function validateIntradayMonitorTemplateExpression(
 export async function getAllMarketMonitorSnapshot(
   sourcePath: string,
   realtimeProvider?: "sina" | "tencent",
+  sceneStageThreshold?: "observe" | "trigger" | "confirm",
 ) {
   return invoke<AllMarketMonitorSnapshotData>(
     "get_all_market_monitor_snapshot",
-    { sourcePath, realtimeProvider },
+    { sourcePath, realtimeProvider, sceneStageThreshold },
   );
 }
 

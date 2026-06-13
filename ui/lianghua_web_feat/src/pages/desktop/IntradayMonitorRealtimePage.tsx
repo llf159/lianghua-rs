@@ -47,20 +47,21 @@ const REFRESH_SCOPE_TOTAL = "__total__";
 const CONTINUOUS_MONITOR_INTERVAL_MS = 1000;
 const SPEED_HISTORY_KEEP_MS = 90_000;
 const SPEED_PERIOD_OPTIONS = [10, 30, 60] as const;
+const VOLUME_RATIO_THRESHOLD_STORAGE_KEY =
+  "lh_intraday_monitor_volume_ratio_threshold_v1";
 
 const TOTAL_MODE_COLUMNS = [
   "rank",
   "ts_code",
   "name",
+  "return_5d_pct",
   "realtime_price",
   "realtime_avg_price",
   "realtime_change_pct",
-  "return_5d_pct",
   "speed_pct",
   "template_tag",
   "realtime_vol_ratio",
-  "total_score",
-  "board",
+  "above_avg_price",
   "total_mv_yi",
   "concept",
 ] as const;
@@ -70,18 +71,17 @@ const SCENE_MODE_COLUMNS = [
   "rank",
   "ts_code",
   "name",
+  "return_5d_pct",
   "realtime_price",
   "realtime_avg_price",
   "realtime_change_pct",
-  "return_5d_pct",
   "speed_pct",
   "template_tag",
   "realtime_vol_ratio",
+  "above_avg_price",
   "scene_score",
   "risk_score",
-  "total_score",
   "scene_status",
-  "board",
   "total_mv_yi",
   "concept",
 ] as const;
@@ -97,7 +97,7 @@ type NumericVisibleColumn =
   | "return_5d_pct"
   | "speed_pct"
   | "realtime_vol_ratio"
-  | "total_score"
+  | "above_avg_price"
   | "scene_score"
   | "risk_score"
   | "total_mv_yi";
@@ -160,11 +160,10 @@ const COLUMN_LABELS: Record<VisibleColumn, string> = {
   speed_pct: "涨速*",
   template_tag: "模板标记",
   realtime_vol_ratio: "盘中量比*",
-  total_score: "总分",
+  above_avg_price: "高于均线",
   scene_score: "场景分",
   risk_score: "风险分",
   scene_status: "场景状态",
-  board: "板块",
   total_mv_yi: "总市值(亿)",
   concept: "概念",
 };
@@ -181,11 +180,10 @@ const COLUMN_WIDTHS: Record<VisibleColumn, number> = {
   speed_pct: 92,
   template_tag: 160,
   realtime_vol_ratio: 108,
-  total_score: 96,
+  above_avg_price: 94,
   scene_score: 98,
   risk_score: 98,
   scene_status: 104,
-  board: 96,
   total_mv_yi: 116,
   concept: 260,
 };
@@ -197,6 +195,12 @@ const DELTA_COLUMNS = new Set<VisibleColumn>([
   "return_5d_pct",
   "realtime_vol_ratio",
 ]);
+
+function getColumnGroupClassName(key: VisibleColumn) {
+  if (key === "realtime_price") return "intraday-monitor-realtime-group-start";
+  if (key === "total_mv_yi") return "intraday-monitor-info-group-start";
+  return "";
+}
 
 function createRankModeConfig(
   mode: RankMode,
@@ -370,6 +374,39 @@ function getPercentClassName(value?: number | null) {
     : "intraday-monitor-value-down";
 }
 
+function readLocalStorageNumber(key: string, fallback: number) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw != null) {
+      const value = Number(raw);
+      if (Number.isFinite(value)) return value;
+    }
+  } catch {
+    // localStorage unavailable
+  }
+  return fallback;
+}
+
+function isAboveAvgPrice(row: IntradayMonitorRow) {
+  return (
+    isFiniteNumber(row.realtime_price) &&
+    isFiniteNumber(row.realtime_avg_price) &&
+    row.realtime_avg_price > 0 &&
+    row.realtime_price > row.realtime_avg_price
+  );
+}
+
+function formatAboveAvgPrice(row: IntradayMonitorRow) {
+  if (
+    !isFiniteNumber(row.realtime_price) ||
+    !isFiniteNumber(row.realtime_avg_price) ||
+    row.realtime_avg_price <= 0
+  ) {
+    return "--";
+  }
+  return row.realtime_price > row.realtime_avg_price ? "是" : "否";
+}
+
 function isSortableColumn(key: VisibleColumn) {
   return !["ts_code", "name", "concept", "template_tag"].includes(key);
 }
@@ -384,7 +421,6 @@ function formatCell(
   if (key === "rank") return formatNumber(row.rank, 0);
   if (key === "scene_score") return formatNumber(row.scene_score);
   if (key === "risk_score") return formatNumber(row.risk_score);
-  if (key === "total_score") return formatNumber(row.total_score);
   if (key === "total_mv_yi") return formatNumber(row.total_mv_yi);
   if (key === "realtime_price") return formatNumber(row.realtime_price);
   if (key === "realtime_avg_price")
@@ -393,6 +429,7 @@ function formatCell(
     return formatPercent(row.realtime_change_pct);
   if (key === "return_5d_pct") return formatPercent(row.return_5d_pct);
   if (key === "realtime_vol_ratio") return formatNumber(row.realtime_vol_ratio);
+  if (key === "above_avg_price") return formatAboveAvgPrice(row);
 
   const value = row[key];
   if (value === null || value === undefined || value === "") return "--";
@@ -686,6 +723,9 @@ export default function IntradayMonitorRealtimePage() {
   const [continuousMonitorEnabled, setContinuousMonitorEnabled] =
     useState(false);
   const [speedPeriod, setSpeedPeriod] = useState<SpeedPeriod>(10);
+  const [volumeRatioThresholdText, setVolumeRatioThresholdText] = useState(() =>
+    String(readLocalStorageNumber(VOLUME_RATIO_THRESHOLD_STORAGE_KEY, 2)),
+  );
   const rowsRef = useRef<IntradayMonitorRow[]>([]);
   const autoRefreshRef = useRef<() => Promise<void>>(async () => {});
   const priceHistoryRef = useRef<PriceSnapshot[]>([]);
@@ -706,6 +746,10 @@ export default function IntradayMonitorRealtimePage() {
     () => buildSpeedMap(rows, priceHistoryRef.current, speedPeriod, Date.now()),
     [rows, speedPeriod],
   );
+  const volumeRatioThreshold = useMemo(() => {
+    const value = Number(volumeRatioThresholdText);
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }, [volumeRatioThresholdText]);
 
   const sortDefinitions = useMemo(
     () =>
@@ -716,7 +760,15 @@ export default function IntradayMonitorRealtimePage() {
             key,
             {
               value: (row: IntradayMonitorRow) =>
-                key === "speed_pct" ? speedMap.get(getRowKey(row)) : row[key],
+                key === "speed_pct"
+                  ? speedMap.get(getRowKey(row))
+                  : key === "above_avg_price"
+                    ? isFiniteNumber(row.realtime_price) &&
+                      isFiniteNumber(row.realtime_avg_price) &&
+                      row.realtime_avg_price > 0
+                      ? isAboveAvgPrice(row)
+                      : null
+                    : row[key],
             } satisfies SortDefinition<IntradayMonitorRow>,
           ]),
       ) as Partial<Record<VisibleColumn, SortDefinition<IntradayMonitorRow>>>,
@@ -758,6 +810,15 @@ export default function IntradayMonitorRealtimePage() {
   useEffect(() => {
     rowsRef.current = rows;
   }, [rows]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        VOLUME_RATIO_THRESHOLD_STORAGE_KEY,
+        volumeRatioThresholdText,
+      );
+    } catch {}
+  }, [volumeRatioThresholdText]);
 
   useEffect(() => {
     void ensureManagedSourcePath()
@@ -1454,12 +1515,21 @@ export default function IntradayMonitorRealtimePage() {
           <thead>
             <tr>
               {columns.map((key) => {
+                const groupClassName = getColumnGroupClassName(key);
                 if (!isSortableColumn(key))
-                  return <th key={key}>{COLUMN_LABELS[key]}</th>;
+                  return (
+                    <th
+                      key={key}
+                      className={groupClassName || undefined}
+                    >
+                      {COLUMN_LABELS[key]}
+                    </th>
+                  );
                 const isActive = sortKey === key && sortDirection !== null;
                 return (
                   <th
                     key={key}
+                    className={groupClassName || undefined}
                     aria-sort={getAriaSort(isActive, sortDirection)}
                   >
                     <TableSortButton
@@ -1483,7 +1553,12 @@ export default function IntradayMonitorRealtimePage() {
                   if (key === "template_tag") {
                     const tag = getTemplateTag(row);
                     return (
-                      <td key={`${getRowMode(row)}-${row.ts_code}-${key}`}>
+                      <td
+                        key={`${getRowMode(row)}-${row.ts_code}-${key}`}
+                        className={
+                          getColumnGroupClassName(key) || undefined
+                        }
+                      >
                         <span
                           className={`intraday-monitor-hit-badge intraday-monitor-hit-badge-${tag.tone}`}
                         >
@@ -1514,6 +1589,18 @@ export default function IntradayMonitorRealtimePage() {
                     ? formatDeltaValue(key, deltaValue)
                     : null;
                   const cellClassName = [
+                    getColumnGroupClassName(key),
+                    key === "realtime_vol_ratio" &&
+                    isFiniteNumber(volumeRatioThreshold) &&
+                    isFiniteNumber(row.realtime_vol_ratio) &&
+                    row.realtime_vol_ratio > volumeRatioThreshold
+                      ? "intraday-monitor-volume-ratio-cell is-alert"
+                      : "",
+                    key === "above_avg_price"
+                      ? isAboveAvgPrice(row)
+                        ? "intraday-monitor-above-avg-cell is-yes"
+                        : "intraday-monitor-above-avg-cell"
+                      : "",
                     isRealtimePct
                       ? getPercentClassName(
                           key === "speed_pct"
@@ -1531,7 +1618,15 @@ export default function IntradayMonitorRealtimePage() {
                     <td
                       key={`${getRowMode(row)}-${row.ts_code}-${key}`}
                       className={cellClassName || undefined}
-                      title={key === "concept" ? displayText : undefined}
+                      title={
+                        key === "concept"
+                          ? displayText
+                          : key === "above_avg_price"
+                            ? isFiniteNumber(row.realtime_avg_price)
+                              ? `日内均价 ${formatNumber(row.realtime_avg_price)}`
+                              : "日内均价 --"
+                            : undefined
+                      }
                     >
                       {key === "name" && displayText !== "--" ? (
                         <DetailsLink
@@ -1743,6 +1838,18 @@ export default function IntradayMonitorRealtimePage() {
                 </option>
               ))}
             </select>
+          </label>
+          <label className="intraday-monitor-inline-field">
+            <span>量比阈值</span>
+            <input
+              type="number"
+              min="0.01"
+              step="0.01"
+              value={volumeRatioThresholdText}
+              onChange={(event) =>
+                setVolumeRatioThresholdText(event.target.value)
+              }
+            />
           </label>
         </div>
 
