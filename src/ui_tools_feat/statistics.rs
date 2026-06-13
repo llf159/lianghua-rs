@@ -4,55 +4,55 @@ use std::{
     sync::Mutex,
 };
 
-use duckdb::{params, Connection};
+use duckdb::{Connection, params};
 use rand::random;
 #[cfg(test)]
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    data::scoring_data::{row_into_rt, SceneDetails, ScoreDetails, ScoreSummary},
+    data::scoring_data::{SceneDetails, ScoreDetails, ScoreSummary, row_into_rt},
     data::{
+        DataReader, RuleStage, RuleTag, RuntimeKeyCollectOptions, ScopeWay, ScoreRule, ScoreScene,
         collect_assigned_names_from_expr_program, collect_runtime_keys_from_expr_programs,
         concept_performance_db_path, expr_program_uses_runtime_key, load_stock_list,
-        load_ths_concepts_list, result_db_path, source_db_path, DataReader, RuleStage, RuleTag,
-        RuntimeKeyCollectOptions, ScopeWay, ScoreRule, ScoreScene,
+        load_ths_concepts_list, result_db_path, source_db_path,
     },
     expr::{
         eval::{Runtime, Value},
         lexer::TokenKind,
-        parser::{lex_all, Expr, Parser, Stmt, Stmts},
+        parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
-    scoring::runner::{scoring_all_to_memory_with_mode, ScoringMemoryMode},
+    scoring::runner::{ScoringMemoryMode, scoring_all_to_memory_with_mode},
     scoring::tools::{
-        calc_query_need_rows, calc_query_start_date, collect_used_cyq_chen_runtime_keys,
-        cyq_chen_runtime_key_names, inject_stock_extra_fields, load_st_list, load_total_share_map,
-        CyqChenFieldInjector,
+        CyqChenFieldInjector, calc_query_need_rows, calc_query_start_date,
+        collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names, inject_stock_extra_fields,
+        load_st_list, load_total_share_map,
     },
-    scoring::{evaluate_cached_rule_scores, CachedRule},
+    scoring::{CachedRule, evaluate_cached_rule_scores},
     simulate::{
-        build_backtest_sample_eligibility,
+        DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, build_backtest_sample_eligibility,
         rank::{
-            calc_rank_layer_metrics_from_db, calc_rank_layer_metrics_from_score_rows,
             RankLayerConfig, RankLayerFromDbInput, RankLayerMethod,
+            calc_rank_layer_metrics_from_db, calc_rank_layer_metrics_from_score_rows,
         },
         rule::{
+            RuleLayerConfig, RuleLayerFromDbInput, RuleLayerMetricsWithSamples,
+            RuleLayerRuntimeCache, RuleLayerSamplePointRef,
             build_rule_layer_runtime_cache_from_stock_data_with_ts_filter,
             calc_all_rule_layer_metrics_with_samples_from_db_map_with_ts_filter,
             calc_all_rule_layer_metrics_with_samples_from_rows_map,
             calc_rule_layer_metrics_from_db_with_ts_filter,
             calc_rule_layer_metrics_with_samples_from_cache,
-            visit_triggered_rule_samples_from_cache, RuleLayerConfig, RuleLayerFromDbInput,
-            RuleLayerMetricsWithSamples, RuleLayerRuntimeCache, RuleLayerSamplePointRef,
+            visit_triggered_rule_samples_from_cache,
         },
         scene::{
+            SceneLayerConfig, SceneLayerFromDbInput,
             calc_all_scene_layer_metrics_from_db_with_ts_filter,
             calc_all_scene_layer_metrics_from_rows,
-            calc_scene_layer_metrics_from_db_with_ts_filter, SceneLayerConfig,
-            SceneLayerFromDbInput,
+            calc_scene_layer_metrics_from_db_with_ts_filter,
         },
-        DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
     },
     ui_tools_feat::{build_concepts_map, build_name_map},
     utils::utils::board_category,
@@ -6206,26 +6206,26 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use duckdb::{params, Connection};
+    use duckdb::{Connection, params};
 
     use crate::{
         data::{
-            result_db_path,
+            DataReader, RuleTag, result_db_path,
             scoring_data::{ScoreDetails, ScoreSummary},
-            source_db_path, DataReader, RuleTag,
+            source_db_path,
         },
         scoring::tools::load_st_list,
         simulate::rule::RuleLayerSamplePoint,
     };
 
     use super::{
-        build_rule_contribution_averages_from_rows, build_validation_cached_rule,
-        build_validation_return_distribution, build_validation_sample_groups,
-        build_validation_similarity_rows, build_validation_triggered_scores,
-        build_validation_triggered_scores_for_combos, collect_rule_validation_runtime_keys,
-        collect_validation_assigned_names, derive_validation_volatility_group,
-        resolve_validation_sample_board_label, PreparedValidationCombo, ValidationSampleRawRow,
-        ValidationSampleStockMeta, ValidationSimilarityCache, ValidationVariant,
+        PreparedValidationCombo, ValidationSampleRawRow, ValidationSampleStockMeta,
+        ValidationSimilarityCache, ValidationVariant, build_rule_contribution_averages_from_rows,
+        build_validation_cached_rule, build_validation_return_distribution,
+        build_validation_sample_groups, build_validation_similarity_rows,
+        build_validation_triggered_scores, build_validation_triggered_scores_for_combos,
+        collect_rule_validation_runtime_keys, collect_validation_assigned_names,
+        derive_validation_volatility_group, resolve_validation_sample_board_label,
     };
     use crate::data::ScopeWay;
 

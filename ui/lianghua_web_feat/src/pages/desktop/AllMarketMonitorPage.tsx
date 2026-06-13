@@ -29,6 +29,7 @@ const TOP_LIMIT_OPTIONS = [20, 50, 100, 200] as const;
 
 const LS_KEY_SPEED_PERIOD = "am_speed_period";
 const LS_KEY_SPEED_THRESHOLD = "am_speed_threshold";
+const LS_KEY_VOLUME_RATIO_THRESHOLD = "am_volume_ratio_threshold";
 const LS_KEY_TOP_LIMIT = "am_top_limit";
 
 function readLocalStorageNumber<T extends number>(key: string, fallback: T): T {
@@ -58,6 +59,7 @@ type SortKey =
   | "return_5d_pct"
   | "speed_pct"
   | "realtime_vol_ratio"
+  | "above_avg_price"
   | "realtime_change_open_pct"
   | "total_mv_yi";
 
@@ -119,6 +121,26 @@ function getPercentClassName(value?: number | null) {
     return "all-market-value-flat";
   }
   return value > 0 ? "all-market-value-up" : "all-market-value-down";
+}
+
+function isAboveAvgPrice(row: AllMarketMonitorRow) {
+  return (
+    isFiniteNumber(row.realtime_price) &&
+    isFiniteNumber(row.realtime_avg_price) &&
+    row.realtime_avg_price > 0 &&
+    row.realtime_price > row.realtime_avg_price
+  );
+}
+
+function formatAboveAvgPrice(row: AllMarketMonitorRow) {
+  if (
+    !isFiniteNumber(row.realtime_price) ||
+    !isFiniteNumber(row.realtime_avg_price) ||
+    row.realtime_avg_price <= 0
+  ) {
+    return "--";
+  }
+  return row.realtime_price > row.realtime_avg_price ? "是" : "否";
 }
 
 function buildPriceSnapshot(rows: AllMarketMonitorRow[], capturedAt: number) {
@@ -199,6 +221,9 @@ export default function AllMarketMonitorPage() {
   const [speedThresholdText, setSpeedThresholdText] = useState(() =>
     String(readLocalStorageNumber(LS_KEY_SPEED_THRESHOLD, 1)),
   );
+  const [volumeRatioThresholdText, setVolumeRatioThresholdText] = useState(() =>
+    String(readLocalStorageNumber(LS_KEY_VOLUME_RATIO_THRESHOLD, 2)),
+  );
   const [boardFilter, setBoardFilter] = useState<BoardFilter>("全部");
   const [topLimit, setTopLimit] = useState<TopLimit>(() =>
     readLocalStorageNumber(LS_KEY_TOP_LIMIT, 50),
@@ -242,6 +267,15 @@ export default function AllMarketMonitorPage() {
       localStorage.setItem(LS_KEY_SPEED_THRESHOLD, String(speedThresholdText));
     } catch {}
   }, [speedThresholdText]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        LS_KEY_VOLUME_RATIO_THRESHOLD,
+        String(volumeRatioThresholdText),
+      );
+    } catch {}
+  }, [volumeRatioThresholdText]);
 
   useEffect(() => {
     try {
@@ -359,6 +393,11 @@ export default function AllMarketMonitorPage() {
     return Number.isFinite(value) && value > 0 ? value : null;
   }, [speedThresholdText]);
 
+  const volumeRatioThreshold = useMemo(() => {
+    const value = Number(volumeRatioThresholdText);
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }, [volumeRatioThresholdText]);
+
   useEffect(() => {
     setHitRecordsByPeriod(() => createEmptyHitRecordsByPeriod());
     setOpenHitTsCode(null);
@@ -436,6 +475,14 @@ export default function AllMarketMonitorPage() {
       speed_pct: { value: (row: DisplayRow) => row.speed_pct },
       realtime_vol_ratio: {
         value: (row: DisplayRow) => row.realtime_vol_ratio,
+      },
+      above_avg_price: {
+        value: (row: DisplayRow) =>
+          isFiniteNumber(row.realtime_price) &&
+          isFiniteNumber(row.realtime_avg_price) &&
+          row.realtime_avg_price > 0
+            ? isAboveAvgPrice(row)
+            : null,
       },
       realtime_change_open_pct: {
         value: (row: DisplayRow) => row.realtime_change_open_pct,
@@ -729,6 +776,14 @@ export default function AllMarketMonitorPage() {
                     </th>
                     <th
                       aria-sort={getAriaSort(
+                        sortKey === "above_avg_price",
+                        sortDirection,
+                      )}
+                    >
+                      {renderSortHeader("高于均线", "above_avg_price")}
+                    </th>
+                    <th
+                      aria-sort={getAriaSort(
                         sortKey === "realtime_change_open_pct",
                         sortDirection,
                       )}
@@ -791,7 +846,31 @@ export default function AllMarketMonitorPage() {
                         <td className={getPercentClassName(row.speed_pct)}>
                           {formatPercent(row.speed_pct)}
                         </td>
-                        <td>{formatNumber(row.realtime_vol_ratio)}</td>
+                        <td
+                          className={
+                            isFiniteNumber(volumeRatioThreshold) &&
+                            isFiniteNumber(row.realtime_vol_ratio) &&
+                            row.realtime_vol_ratio > volumeRatioThreshold
+                              ? "all-market-volume-ratio-cell is-alert"
+                              : "all-market-volume-ratio-cell"
+                          }
+                        >
+                          {formatNumber(row.realtime_vol_ratio)}
+                        </td>
+                        <td
+                          className={
+                            isAboveAvgPrice(row)
+                              ? "all-market-above-avg-cell is-yes"
+                              : "all-market-above-avg-cell"
+                          }
+                          title={
+                            isFiniteNumber(row.realtime_avg_price)
+                              ? `日内均价 ${formatNumber(row.realtime_avg_price)}`
+                              : "日内均价 --"
+                          }
+                        >
+                          {formatAboveAvgPrice(row)}
+                        </td>
                         <td
                           className={getPercentClassName(
                             row.realtime_change_open_pct,
@@ -1065,6 +1144,19 @@ export default function AllMarketMonitorPage() {
                   value={speedThresholdText}
                   onChange={(event) =>
                     setSpeedThresholdText(event.target.value)
+                  }
+                />
+              </label>
+
+              <label className="settings-field">
+                <span>量比阈值</span>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={volumeRatioThresholdText}
+                  onChange={(event) =>
+                    setVolumeRatioThresholdText(event.target.value)
                   }
                 />
               </label>

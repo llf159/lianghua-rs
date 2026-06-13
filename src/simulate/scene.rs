@@ -14,7 +14,7 @@ use crate::{
         load_stock_list, load_ths_concepts_named_map, result_db_path,
         scoring_data::SceneDetails,
     },
-    simulate::fp_utils::{calc_t_value, mean, sample_std, spearman_corr, EPS},
+    simulate::fp_utils::{EPS, calc_t_value, mean, sample_std, spearman_corr},
 };
 
 const PCT_CHG_BATCH_SIZE: usize = 512;

@@ -111,7 +111,11 @@ pub(crate) fn sample_std(values: &[f64]) -> Option<f64> {
     Some(var.sqrt())
 }
 
-pub(crate) fn calc_t_value(mean: Option<f64>, std: Option<f64>, sample_count: usize) -> Option<f64> {
+pub(crate) fn calc_t_value(
+    mean: Option<f64>,
+    std: Option<f64>,
+    sample_count: usize,
+) -> Option<f64> {
     match (mean, std) {
         (Some(m), Some(s)) if sample_count > 1 && s.abs() >= EPS => {
             Some(m * (sample_count as f64).sqrt() / s)

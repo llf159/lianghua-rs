@@ -448,7 +448,7 @@
 
 .all-market-table {
   width: 100%;
-  min-width: 1040px;
+  min-width: 1120px;
   border-collapse: collapse;
   table-layout: fixed;
   font-size: 13px;
@@ -494,17 +494,19 @@
 .all-market-table th:nth-child(7),
 .all-market-table td:nth-child(7),
 .all-market-table th:nth-child(8),
-.all-market-table td:nth-child(8) {
-  width: 94px;
-}
-
+.all-market-table td:nth-child(8),
 .all-market-table th:nth-child(9),
 .all-market-table td:nth-child(9) {
-  width: 220px;
+  width: 94px;
 }
 
 .all-market-table th:nth-child(10),
 .all-market-table td:nth-child(10) {
+  width: 220px;
+}
+
+.all-market-table th:nth-child(11),
+.all-market-table td:nth-child(11) {
   width: 88px;
 }
 
@@ -523,6 +525,22 @@
 
 .all-market-concept-cell {
   color: #2a3550;
+}
+
+.all-market-volume-ratio-cell.is-alert {
+  background: #fff7ed;
+  color: #c2410c;
+  font-weight: 700;
+}
+
+.all-market-above-avg-cell {
+  color: #64748b;
+  font-weight: 600;
+}
+
+.all-market-above-avg-cell.is-yes {
+  color: #c2410c;
+  font-weight: 700;
 }
 
 .all-market-table tbody tr:nth-child(even) {

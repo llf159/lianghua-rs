@@ -70,6 +70,7 @@ pub struct AllMarketMonitorRow {
     pub realtime_high: Option<f64>,
     pub realtime_low: Option<f64>,
     pub realtime_pre_close: Option<f64>,
+    pub realtime_avg_price: Option<f64>,
     pub realtime_change_pct: Option<f64>,
     pub realtime_change_open_pct: Option<f64>,
     pub realtime_vol: Option<f64>,
@@ -439,6 +440,7 @@ fn build_rows(
     ranks: &HashMap<String, RankContext>,
     quotes: &HashMap<String, SinaQuote>,
     volume_ratio_map: &HashMap<String, f64>,
+    avg_price_map: &HashMap<String, f64>,
     return_5d_map: &HashMap<String, Return5dContext>,
     fetch_meta: &RealtimeFetchMeta,
 ) -> Vec<AllMarketMonitorRow> {
@@ -478,6 +480,7 @@ fn build_rows(
                 realtime_high: quote.map(|item| item.high),
                 realtime_low: quote.map(|item| item.low),
                 realtime_pre_close: quote.map(|item| item.pre_close),
+                realtime_avg_price: avg_price_map.get(&stock.ts_code).copied(),
                 realtime_change_pct: quote.and_then(|item| item.change_pct),
                 realtime_change_open_pct: quote.and_then(quote_change_open_pct),
                 realtime_vol: quote.map(|item| item.vol),
@@ -544,10 +547,10 @@ pub fn get_all_market_monitor_snapshot(
         .map(|item| item.ts_code.clone())
         .collect::<Vec<_>>();
     let provider = RealtimeQuoteProvider::parse(realtime_provider.as_deref())?;
-    let (quotes, volume_ratio_map, fetch_meta) = match provider {
+    let (quotes, volume_ratio_map, avg_price_map, fetch_meta) = match provider {
         RealtimeQuoteProvider::Sina => {
             let (quotes, fetch_meta) = fetch_all_market_realtime_quote_map_for_codes(&ts_codes)?;
-            (quotes, HashMap::new(), fetch_meta)
+            (quotes, HashMap::new(), HashMap::new(), fetch_meta)
         }
         RealtimeQuoteProvider::Tencent => {
             let (tencent_quotes, fetch_meta) =
@@ -558,11 +561,17 @@ pub fn get_all_market_monitor_snapshot(
                     quote.volume_ratio.map(|value| (ts_code.clone(), value))
                 })
                 .collect::<HashMap<_, _>>();
+            let avg_price_map = tencent_quotes
+                .iter()
+                .filter_map(|(ts_code, quote)| {
+                    quote.avg_price.map(|value| (ts_code.clone(), value))
+                })
+                .collect::<HashMap<_, _>>();
             let quotes = tencent_quotes
                 .into_iter()
                 .map(|(ts_code, quote)| (ts_code, quote.into_sina_quote()))
                 .collect::<HashMap<_, _>>();
-            (quotes, volume_ratio_map, fetch_meta)
+            (quotes, volume_ratio_map, avg_price_map, fetch_meta)
         }
     };
 
@@ -577,6 +586,7 @@ pub fn get_all_market_monitor_snapshot(
         &ranks,
         &quotes,
         &volume_ratio_map,
+        &avg_price_map,
         &return_5d_map,
         &fetch_meta,
     );
@@ -664,6 +674,7 @@ mod tests {
             &sample_meta(),
             &ranks,
             &quotes,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &sample_fetch_meta(),

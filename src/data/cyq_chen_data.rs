@@ -1657,9 +1657,9 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
     });
 
     let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
-    let compute_result = ts_codes.par_chunks(CYQ_CHEN_GROUP_SIZE_INCREMENTAL).try_for_each_with(
-        tx,
-        |sender, ts_group| -> Result<(), String> {
+    let compute_result = ts_codes
+        .par_chunks(CYQ_CHEN_GROUP_SIZE_INCREMENTAL)
+        .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
             let worker_reader =
                 DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
             let state_conn =
@@ -1697,8 +1697,7 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
                 .send(CyqChenWriteMessage::Batch(batch))
                 .map_err(|e| format!("发送新筹码增量批次失败:{e}"))?;
             Ok(())
-        },
-    );
+        });
 
     if let Err(err) = &compute_result {
         let _ = abort_tx.send(CyqChenWriteMessage::Abort(err.clone()));
@@ -1900,9 +1899,9 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
     });
 
     let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
-    let compute_result = ts_codes.par_chunks(CYQ_CHEN_GROUP_SIZE_INCREMENTAL).try_for_each_with(
-        tx,
-        |sender, ts_group| -> Result<(), String> {
+    let compute_result = ts_codes
+        .par_chunks(CYQ_CHEN_GROUP_SIZE_INCREMENTAL)
+        .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
             let worker_reader =
                 DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
             let progress_stock_done = |ts_code: &str| {
@@ -1938,8 +1937,7 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
                 .send(CyqChenWriteMessage::Batch(batch))
                 .map_err(|e| format!("发送新筹码局部修复批次失败:{e}"))?;
             Ok(())
-        },
-    );
+        });
 
     if let Err(err) = &compute_result {
         let _ = abort_tx.send(CyqChenWriteMessage::Abort(err.clone()));

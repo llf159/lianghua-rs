@@ -166,6 +166,7 @@ export type AllMarketMonitorRow = {
   realtime_high?: number | null;
   realtime_low?: number | null;
   realtime_pre_close?: number | null;
+  realtime_avg_price?: number | null;
   realtime_change_pct?: number | null;
   realtime_change_open_pct?: number | null;
   realtime_vol?: number | null;
