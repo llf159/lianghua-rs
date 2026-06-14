@@ -79,10 +79,11 @@ use lianghua_rs::ui_tools_feat::{
     details::{
         get_stock_detail_cyq as core_get_stock_detail_cyq,
         get_stock_detail_page as core_get_stock_detail_page,
+        get_stock_detail_prev_ranks as core_get_stock_detail_prev_ranks,
         get_stock_detail_realtime as core_get_stock_detail_realtime,
         get_stock_detail_strategy_snapshot as core_get_stock_detail_strategy_snapshot,
-        StockDetailCyqData, StockDetailPageData, StockDetailRealtimeData,
-        StockDetailStrategySnapshotData,
+        StockDetailCyqData, StockDetailPageData, StockDetailPrevRanksData,
+        StockDetailRealtimeData, StockDetailStrategySnapshotData,
     },
     expression_stock_pick::{
         validate_expression_stock_pick_template_expression as core_validate_expression_stock_pick_template_expression,
@@ -716,6 +717,16 @@ fn get_stock_detail_strategy_snapshot(
     ts_code: String,
 ) -> Result<StockDetailStrategySnapshotData, String> {
     core_get_stock_detail_strategy_snapshot(source_path, trade_date, ts_code)
+}
+
+#[tauri::command]
+fn get_stock_detail_prev_ranks(
+    source_path: String,
+    trade_date: Option<String>,
+    ts_code: String,
+    prev_rank_days: Option<u32>,
+) -> Result<StockDetailPrevRanksData, String> {
+    core_get_stock_detail_prev_ranks(source_path, trade_date, ts_code, prev_rank_days)
 }
 
 #[tauri::command]
@@ -2178,6 +2189,7 @@ pub fn run() {
             get_all_market_monitor_snapshot,
             get_stock_detail_page,
             get_stock_detail_strategy_snapshot,
+            get_stock_detail_prev_ranks,
             get_stock_detail_cyq,
             get_stock_detail_realtime,
             get_stock_similarity_page,

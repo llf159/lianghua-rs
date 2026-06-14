@@ -24,10 +24,7 @@ use crate::{
             load_compiled_chart_indicator_config,
         },
         realtime::{RealtimeFetchMeta, fetch_realtime_quote_map, normalize_quote_trade_date},
-        stock_similarity::{
-            StockSimilarityMaps, StockSimilarityPageData,
-            get_stock_similarity_page_with_conn_and_maps,
-        },
+        stock_similarity::StockSimilarityPageData,
     },
     utils::utils::board_category,
 };
@@ -195,6 +192,14 @@ pub struct StockDetailStrategySnapshotData {
     pub resolved_trade_date: Option<String>,
     pub resolved_ts_code: Option<String>,
     pub strategy_triggers: Option<DetailStrategyPayload>,
+    pub strategy_scenes: Option<DetailScenePayload>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StockDetailPrevRanksData {
+    pub resolved_trade_date: Option<String>,
+    pub resolved_ts_code: Option<String>,
+    pub prev_ranks: Option<Vec<DetailPrevRankRow>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -321,14 +326,6 @@ impl DetailSourceMeta {
             concept_map: build_concepts_map(source_path).unwrap_or_default(),
             most_related_concept_map: build_most_related_concept_map(source_path)
                 .unwrap_or_default(),
-        }
-    }
-
-    fn similarity_maps(&self) -> StockSimilarityMaps<'_> {
-        StockSimilarityMaps {
-            name_map: &self.name_map,
-            concept_map: &self.concept_map,
-            industry_map: &self.industry_map,
         }
     }
 }
@@ -2103,7 +2100,7 @@ pub fn get_stock_detail_page(
     trade_date: Option<String>,
     ts_code: String,
     chart_window_days: Option<u32>,
-    prev_rank_days: Option<u32>,
+    _prev_rank_days: Option<u32>,
 ) -> Result<StockDetailPageData, String> {
     let normalized_ts_code = normalize_ts_code(&ts_code);
     let source_conn = open_source_conn(&source_path)?;
@@ -2142,30 +2139,6 @@ pub fn get_stock_detail_page(
         }
     };
 
-    let prev_ranks = match result_conn.as_ref() {
-        Some(conn) => query_rank_history(
-            conn,
-            &normalized_ts_code,
-            prev_rank_days
-                .map(|value| value as usize)
-                .filter(|value| *value > 0),
-        )
-        .unwrap_or_default(),
-        None => Vec::new(),
-    };
-    let (stock_similarity, stock_similarity_error) = match result_conn.as_ref() {
-        Some(conn) => match get_stock_similarity_page_with_conn_and_maps(
-            conn,
-            &effective_trade_date,
-            &normalized_ts_code,
-            Some(12),
-            source_meta.similarity_maps(),
-        ) {
-            Ok(data) => (Some(data), None),
-            Err(error) => (None, Some(error)),
-        },
-        None => (None, None),
-    };
     let kline = query_kline(
         &source_conn,
         &source_path,
@@ -2173,27 +2146,17 @@ pub fn get_stock_detail_page(
         chart_window_days.unwrap_or(280) as usize,
         overview.name.clone(),
     )?;
-    let trigger_snapshot = result_conn
-        .as_ref()
-        .and_then(|conn| {
-            load_detail_trigger_snapshot(conn, &normalized_ts_code, &effective_trade_date).ok()
-        })
-        .unwrap_or_default();
-    let strategy_triggers =
-        build_strategy_triggers(&source_path, &effective_trade_date, &trigger_snapshot)?;
-    let strategy_scenes =
-        build_scene_triggers(&source_path, &effective_trade_date, &trigger_snapshot)?;
 
     Ok(StockDetailPageData {
         resolved_trade_date: Some(effective_trade_date),
         resolved_ts_code: Some(normalized_ts_code),
         overview: Some(overview),
-        prev_ranks: Some(prev_ranks),
-        stock_similarity,
-        stock_similarity_error,
+        prev_ranks: None,
+        stock_similarity: None,
+        stock_similarity_error: None,
         kline: Some(kline),
-        strategy_triggers: Some(strategy_triggers),
-        strategy_scenes: Some(strategy_scenes),
+        strategy_triggers: None,
+        strategy_scenes: None,
     })
 }
 
@@ -2209,11 +2172,38 @@ pub fn get_stock_detail_strategy_snapshot(
         load_detail_trigger_snapshot(&result_conn, &normalized_ts_code, &effective_trade_date)?;
     let strategy_triggers =
         build_strategy_triggers(&source_path, &effective_trade_date, &trigger_snapshot)?;
+    let strategy_scenes =
+        build_scene_triggers(&source_path, &effective_trade_date, &trigger_snapshot)?;
 
     Ok(StockDetailStrategySnapshotData {
         resolved_trade_date: Some(effective_trade_date),
         resolved_ts_code: Some(normalized_ts_code),
         strategy_triggers: Some(strategy_triggers),
+        strategy_scenes: Some(strategy_scenes),
+    })
+}
+
+pub fn get_stock_detail_prev_ranks(
+    source_path: String,
+    trade_date: Option<String>,
+    ts_code: String,
+    prev_rank_days: Option<u32>,
+) -> Result<StockDetailPrevRanksData, String> {
+    let normalized_ts_code = normalize_ts_code(&ts_code);
+    let result_conn = open_result_conn(&source_path)?;
+    let effective_trade_date = resolve_trade_date(&result_conn, trade_date)?;
+    let prev_ranks = query_rank_history(
+        &result_conn,
+        &normalized_ts_code,
+        prev_rank_days
+            .map(|value| value as usize)
+            .filter(|value| *value > 0),
+    )?;
+
+    Ok(StockDetailPrevRanksData {
+        resolved_trade_date: Some(effective_trade_date),
+        resolved_ts_code: Some(normalized_ts_code),
+        prev_ranks: Some(prev_ranks),
     })
 }
 
