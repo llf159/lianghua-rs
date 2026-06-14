@@ -12,7 +12,10 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    data::scoring_data::{SceneDetails, ScoreDetails, ScoreSummary, row_into_rt},
+    data::scoring_data::{
+        SceneDetails, ScoreDetails, ScoreSummary, cache_rule_build as build_scoring_rule_cache,
+        row_into_rt,
+    },
     data::{
         DataReader, RuleStage, RuleTag, RuntimeKeyCollectOptions, ScopeWay, ScoreRule, ScoreScene,
         collect_assigned_names_from_expr_program, collect_runtime_keys_from_expr_programs,
@@ -62,6 +65,8 @@ use crate::{
 const TOP_RANK_THRESHOLD: i64 = 100;
 const RULE_VALIDATION_INJECTED_RUNTIME_KEYS: [&str; 4] = ["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI"];
 const RULE_VALIDATION_RUNTIME_ALIASES: [(&str, &str); 0] = [];
+const BACKTEST_INJECTED_RUNTIME_KEYS: [&str; 2] = ["ZHANG", "TOTAL_MV_YI"];
+const BACKTEST_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 
 #[derive(Debug, Clone)]
 struct RuleMeta {
@@ -326,6 +331,19 @@ pub struct RankLayerBucketSummary {
 }
 
 #[derive(Debug, Serialize)]
+pub struct RankLayerSampleGroup {
+    pub layer_index: usize,
+    pub layer_label: String,
+    pub total_samples: usize,
+    pub positive_count: usize,
+    pub negative_count: usize,
+    pub random_count: usize,
+    pub positive: Vec<RuleValidationSampleRow>,
+    pub negative: Vec<RuleValidationSampleRow>,
+    pub random: Vec<RuleValidationSampleRow>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct RankLayerBacktestData {
     pub stock_adj_type: String,
     pub index_ts_code: String,
@@ -351,6 +369,7 @@ pub struct RankLayerBacktestData {
     pub icir: Option<f64>,
     pub ic_t_value: Option<f64>,
     pub layer_summaries: Vec<RankLayerBucketSummary>,
+    pub layer_sample_groups: Vec<RankLayerSampleGroup>,
     pub market_value_summaries: Vec<RankLayerMarketValueSummary>,
 }
 
@@ -374,6 +393,7 @@ const VALIDATION_COMBO_EVAL_BATCH_SIZE: usize = 16;
 const VALIDATION_DEFAULT_SAMPLE_LIMIT_PER_GROUP: usize = 30;
 const VALIDATION_MAX_SAMPLE_LIMIT_PER_GROUP: usize = 200;
 const RULE_BACKTEST_DETAIL_SAMPLE_LIMIT_PER_GROUP: usize = 5;
+const RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP: usize = 5;
 #[cfg(test)]
 const VALIDATION_RANDOM_SAMPLE_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
@@ -3398,6 +3418,17 @@ pub fn run_rule_expression_validation(
         scope_windows,
         &all_rules,
     )?;
+    let start_date = start_date.trim().to_string();
+    let end_date = end_date.trim().to_string();
+    let variants =
+        build_validation_variants(&seed_rule.formula, &unknown_configs.unwrap_or_default())?;
+    let execution_plan = build_validation_execution_plan(
+        &source_path,
+        &start_date,
+        &end_date,
+        &seed_rule,
+        variants,
+    )?;
 
     let (resolved_board, exclude_st_board, total_mv_min, total_mv_max, allowed_ts_codes) =
         build_backtest_stock_filter(
@@ -3417,8 +3448,8 @@ pub fn run_rule_expression_validation(
         index_beta: index_beta.unwrap_or(0.5),
         concept_beta: concept_beta.unwrap_or(0.2),
         industry_beta: industry_beta.unwrap_or(0.0),
-        start_date: start_date.trim().to_string(),
-        end_date: end_date.trim().to_string(),
+        start_date,
+        end_date,
         min_samples_per_day: min_samples_per_rule_day.unwrap_or(5).max(1),
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
@@ -3430,15 +3461,6 @@ pub fn run_rule_expression_validation(
         allowed_ts_codes,
     };
 
-    let variants =
-        build_validation_variants(&seed_rule.formula, &unknown_configs.unwrap_or_default())?;
-    let execution_plan = build_validation_execution_plan(
-        &source_path,
-        &params.start_date,
-        &params.end_date,
-        &seed_rule,
-        variants,
-    )?;
     let sample_limit_per_group = sample_limit_per_group
         .unwrap_or(VALIDATION_DEFAULT_SAMPLE_LIMIT_PER_GROUP)
         .clamp(1, VALIDATION_MAX_SAMPLE_LIMIT_PER_GROUP);
@@ -5749,6 +5771,12 @@ fn run_rank_layer_backtest_core(
         calc_rank_layer_metrics_from_score_rows(source_conn, source_path, &input, &summary_rows)?;
     let market_value_summaries =
         build_rank_market_value_summaries(source_conn, source_path, &input, &summary_rows)?;
+    let stock_meta_map = load_validation_sample_stock_meta_map(source_path)?;
+    let layer_sample_groups = build_rank_layer_sample_groups(
+        &metrics.layer_samples,
+        input.layer_config.layer_count,
+        &stock_meta_map,
+    );
 
     Ok(RankLayerBacktestData {
         stock_adj_type: input.stock_adj_type,
@@ -5786,8 +5814,125 @@ fn run_rank_layer_backtest_core(
                 avg_residual_return: item.avg_residual_return,
             })
             .collect(),
+        layer_sample_groups,
         market_value_summaries,
     })
+}
+
+#[derive(Default)]
+struct RankLayerSampleGroupAccumulator {
+    total_samples: usize,
+    positive_count: usize,
+    negative_count: usize,
+    random_count: usize,
+    positive: Vec<ValidationSampleRawRow>,
+    negative: Vec<ValidationSampleRawRow>,
+    random: Vec<(u64, ValidationSampleRawRow)>,
+}
+
+fn build_rank_layer_sample_groups(
+    samples: &[crate::simulate::rank::RankLayerSamplePoint],
+    layer_count: usize,
+    stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
+) -> Vec<RankLayerSampleGroup> {
+    let mut groups = (0..layer_count)
+        .map(|_| RankLayerSampleGroupAccumulator::default())
+        .collect::<Vec<_>>();
+
+    for sample in samples {
+        if sample.layer_index == 0 || sample.layer_index > layer_count {
+            continue;
+        }
+        let group = &mut groups[sample.layer_index - 1];
+        let row = ValidationSampleRawRow {
+            ts_code: sample.ts_code.clone(),
+            trade_date: sample.trade_date.clone(),
+            rule_score: sample.score,
+            residual_return: sample.residual_return,
+        };
+
+        group.total_samples += 1;
+        group.random_count += 1;
+        if row.residual_return > 0.0 {
+            group.positive_count += 1;
+            push_limited_sample(
+                &mut group.positive,
+                row.clone(),
+                RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
+                compare_positive_validation_sample,
+            );
+        } else if row.residual_return < 0.0 {
+            group.negative_count += 1;
+            push_limited_sample(
+                &mut group.negative,
+                row.clone(),
+                RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
+                compare_negative_validation_sample,
+            );
+        }
+
+        push_limited_random_sample(
+            &mut group.random,
+            random::<u64>(),
+            row,
+            RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
+        );
+    }
+
+    groups
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut group)| {
+            group.positive.sort_by(compare_positive_validation_sample);
+            group.negative.sort_by(compare_negative_validation_sample);
+            group.random.sort_by(|left, right| {
+                left.0
+                    .cmp(&right.0)
+                    .then_with(|| compare_random_validation_sample(&left.1, &right.1))
+            });
+
+            RankLayerSampleGroup {
+                layer_index: index + 1,
+                layer_label: rank_layer_label(index + 1, layer_count),
+                total_samples: group.total_samples,
+                positive_count: group.positive_count,
+                negative_count: group.negative_count,
+                random_count: group.random_count,
+                positive: validation_sample_rows_to_payload(group.positive, stock_meta_map),
+                negative: validation_sample_rows_to_payload(group.negative, stock_meta_map),
+                random: validation_sample_rows_to_payload(
+                    group.random.into_iter().map(|(_, row)| row),
+                    stock_meta_map,
+                ),
+            }
+        })
+        .collect()
+}
+
+fn validate_backtest_strategy_expressions(source_path: &str) -> Result<(), String> {
+    let rules_cache = build_scoring_rule_cache(source_path, None)?;
+    let programs = rules_cache
+        .iter()
+        .map(|rule| &rule.when_ast)
+        .collect::<Vec<_>>();
+    let cyq_chen_keys = cyq_chen_runtime_key_names();
+    let injected_keys = BACKTEST_INJECTED_RUNTIME_KEYS
+        .iter()
+        .copied()
+        .chain(cyq_chen_keys)
+        .collect::<Vec<_>>();
+    let required_runtime_keys = collect_runtime_keys_from_expr_programs(
+        &programs,
+        RuntimeKeyCollectOptions {
+            always_keys: &[],
+            injected_keys: &injected_keys,
+            aliases: &BACKTEST_RUNTIME_ALIASES,
+        },
+    );
+
+    DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)
+        .map(|_| ())
+        .map_err(|error| format!("策略表达式预检失败: {error}"))
 }
 
 pub fn run_scene_layer_backtest(
@@ -5807,6 +5952,7 @@ pub fn run_scene_layer_backtest(
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<SceneLayerBacktestData, String> {
+    validate_backtest_strategy_expressions(&source_path)?;
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
         .to_str()
@@ -5865,6 +6011,7 @@ pub fn run_rule_layer_backtest(
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<RuleLayerBacktestData, String> {
+    validate_backtest_strategy_expressions(&source_path)?;
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
         .to_str()
@@ -5923,6 +6070,7 @@ pub fn run_rank_layer_backtest(
     board: Option<String>,
     exclude_st_board: Option<bool>,
 ) -> Result<RankLayerBacktestData, String> {
+    validate_backtest_strategy_expressions(&source_path)?;
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
         .to_str()
@@ -5977,6 +6125,7 @@ pub fn run_transient_scene_layer_backtest(
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<SceneLayerBacktestData, String> {
+    validate_backtest_strategy_expressions(&source_path)?;
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
         .to_str()
@@ -6110,6 +6259,7 @@ pub fn run_transient_rule_layer_backtest(
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<RuleLayerBacktestData, String> {
+    validate_backtest_strategy_expressions(&source_path)?;
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
         .to_str()
@@ -6295,6 +6445,7 @@ pub fn run_transient_rank_layer_backtest(
     board: Option<String>,
     exclude_st_board: Option<bool>,
 ) -> Result<RankLayerBacktestData, String> {
+    validate_backtest_strategy_expressions(&source_path)?;
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
         .to_str()
@@ -6361,6 +6512,12 @@ pub fn run_transient_rank_layer_backtest(
         calc_rank_layer_metrics_from_score_rows(&source_conn, &source_path, &input, &summary_rows)?;
     let market_value_summaries =
         build_rank_market_value_summaries(&source_conn, &source_path, &input, &summary_rows)?;
+    let stock_meta_map = load_validation_sample_stock_meta_map(&source_path)?;
+    let layer_sample_groups = build_rank_layer_sample_groups(
+        &metrics.layer_samples,
+        input.layer_config.layer_count,
+        &stock_meta_map,
+    );
 
     Ok(RankLayerBacktestData {
         stock_adj_type: input.stock_adj_type,
@@ -6398,6 +6555,7 @@ pub fn run_transient_rank_layer_backtest(
                 avg_residual_return: item.avg_residual_return,
             })
             .collect(),
+        layer_sample_groups,
         market_value_summaries,
     })
 }
@@ -6529,6 +6687,67 @@ mod tests {
         ])
         .expect("insert stock row3");
         app.flush().expect("flush stock_data");
+    }
+
+    #[test]
+    fn rule_expression_validation_reports_bad_expression_before_stock_filter() {
+        let source_dir = temp_source_dir();
+        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
+        create_dir_all(source_dir_str).expect("create source dir");
+        write(
+            PathBuf::from(source_dir_str).join("score_rule.toml"),
+            r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "有效策略"
+scene = "趋势启动"
+stage = "base"
+scope_windows = 1
+scope_way = "LAST"
+when = "C > O"
+points = 1.0
+explain = "test"
+"#,
+        )
+        .expect("write score_rule.toml");
+
+        let error = super::run_rule_expression_validation(
+            source_dir_str.to_string(),
+            String::new(),
+            Some("MA(C,".to_string()),
+            Some("LAST".to_string()),
+            Some(1),
+            Some("qfq".to_string()),
+            "000001.SH".to_string(),
+            Some(0.5),
+            Some(0.2),
+            Some(0.0),
+            "20240102".to_string(),
+            "20240104".to_string(),
+            Some(1),
+            Some(0),
+            Some(1),
+            None,
+            None,
+            Some(1),
+            Some("主板".to_string()),
+            Some(false),
+            None,
+            None,
+        )
+        .expect_err("bad expression should fail before stock filtering");
+
+        assert!(error.contains("表达式解析错误"), "{error}");
+        assert!(!error.contains("stock_list.csv"), "{error}");
     }
 
     #[test]

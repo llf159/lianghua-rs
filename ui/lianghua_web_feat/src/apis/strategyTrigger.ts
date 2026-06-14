@@ -262,6 +262,18 @@ export type RankLayerBucketSummary = {
   avg_residual_return?: number | null
 }
 
+export type RankLayerSampleGroup = {
+  layer_index: number
+  layer_label: string
+  total_samples: number
+  positive_count: number
+  negative_count: number
+  random_count: number
+  positive: RuleValidationSampleRow[]
+  negative: RuleValidationSampleRow[]
+  random: RuleValidationSampleRow[]
+}
+
 export type RankLayerBacktestData = {
   stock_adj_type: string
   index_ts_code: string
@@ -287,6 +299,7 @@ export type RankLayerBacktestData = {
   icir?: number | null
   ic_t_value?: number | null
   layer_summaries: RankLayerBucketSummary[]
+  layer_sample_groups?: RankLayerSampleGroup[]
   market_value_summaries?: RankLayerMarketValueSummary[]
 }
 

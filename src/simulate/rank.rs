@@ -154,6 +154,15 @@ pub struct RankLayerSummaryBucket {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct RankLayerSamplePoint {
+    pub layer_index: usize,
+    pub ts_code: String,
+    pub trade_date: String,
+    pub score: f64,
+    pub residual_return: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RankLayerMetrics {
     pub points: Vec<RankLayerPoint>,
     pub point_count: usize,
@@ -164,6 +173,7 @@ pub struct RankLayerMetrics {
     pub icir: Option<f64>,
     pub ic_t_value: Option<f64>,
     pub layers: Vec<RankLayerSummaryBucket>,
+    pub layer_samples: Vec<RankLayerSamplePoint>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -273,6 +283,7 @@ fn calc_rank_layer_metrics_with_lookup(
     let mut layer_day_return_sums = vec![0.0_f64; layer_count];
     let mut layer_day_return_counts = vec![0usize; layer_count];
     let mut layer_sample_counts = vec![0usize; layer_count];
+    let mut layer_samples = Vec::new();
 
     for (trade_date, day_samples) in grouped_by_day {
         if day_samples.len() < min_samples_per_day {
@@ -292,8 +303,8 @@ fn calc_rank_layer_metrics_with_lookup(
                 .then_with(|| left.0.cmp(&right.0))
         });
 
-        let layer_items_by_index =
-            build_layer_items(trade_date, &day_samples, &ordered, config, rank_lookup);
+        let layer_sample_indices_by_index =
+            build_layer_sample_indices(trade_date, &day_samples, &ordered, config, rank_lookup);
         let mut layers = Vec::with_capacity(layer_count);
         let mut layer_avg_returns = vec![None; layer_count];
         let mut scores = Vec::with_capacity(day_samples.len());
@@ -304,9 +315,17 @@ fn calc_rank_layer_metrics_with_lookup(
             residuals.push(sample.residual_return);
         }
 
-        for (layer_index, layer_items) in layer_items_by_index.into_iter().enumerate() {
-            let layer_scores = layer_items.iter().map(|item| item.0).collect::<Vec<_>>();
-            let layer_residuals = layer_items.iter().map(|item| item.1).collect::<Vec<_>>();
+        for (layer_index, layer_sample_indices) in
+            layer_sample_indices_by_index.into_iter().enumerate()
+        {
+            let layer_scores = layer_sample_indices
+                .iter()
+                .map(|sample_index| day_samples[*sample_index].rule_score)
+                .collect::<Vec<_>>();
+            let layer_residuals = layer_sample_indices
+                .iter()
+                .map(|sample_index| day_samples[*sample_index].residual_return)
+                .collect::<Vec<_>>();
             let avg_score = mean(&layer_scores);
             let avg_residual_return = mean(&layer_residuals);
 
@@ -319,11 +338,22 @@ fn calc_rank_layer_metrics_with_lookup(
                 layer_day_return_counts[layer_index] += 1;
                 layer_avg_returns[layer_index] = Some(value);
             }
-            layer_sample_counts[layer_index] += layer_items.len();
+            layer_sample_counts[layer_index] += layer_sample_indices.len();
+
+            for sample_index in &layer_sample_indices {
+                let sample = day_samples[*sample_index];
+                layer_samples.push(RankLayerSamplePoint {
+                    layer_index: layer_index + 1,
+                    ts_code: sample.ts_code.clone(),
+                    trade_date: trade_date.to_string(),
+                    score: sample.rule_score,
+                    residual_return: sample.residual_return,
+                });
+            }
 
             layers.push(RankLayerBucketPoint {
                 layer_index: layer_index + 1,
-                sample_count: layer_items.len(),
+                sample_count: layer_sample_indices.len(),
                 avg_score,
                 avg_residual_return,
             });
@@ -384,20 +414,25 @@ fn calc_rank_layer_metrics_with_lookup(
                 },
             })
             .collect(),
+        layer_samples,
     })
 }
 
-fn build_layer_items(
+fn build_layer_sample_indices(
     trade_date: &str,
     day_samples: &[&RuleLayerSamplePoint],
     ordered: &[(usize, (f64, f64))],
     config: &RankLayerConfig,
     rank_lookup: Option<&RankLayerLookup>,
-) -> Vec<Vec<(f64, f64)>> {
+) -> Vec<Vec<usize>> {
     match config.layer_method {
-        RankLayerMethod::Score => build_score_range_layer_items(ordered, config.layer_count),
-        RankLayerMethod::SampleCount => build_sample_count_layer_items(ordered, config.layer_count),
-        RankLayerMethod::Rank => build_rank_layer_items(
+        RankLayerMethod::Score => {
+            build_score_range_layer_sample_indices(ordered, config.layer_count)
+        }
+        RankLayerMethod::SampleCount => {
+            build_sample_count_layer_sample_indices(ordered, config.layer_count)
+        }
+        RankLayerMethod::Rank => build_rank_layer_sample_indices(
             trade_date,
             day_samples,
             ordered,
@@ -407,27 +442,27 @@ fn build_layer_items(
     }
 }
 
-fn build_sample_count_layer_items(
+fn build_sample_count_layer_sample_indices(
     ordered: &[(usize, (f64, f64))],
     layer_count: usize,
-) -> Vec<Vec<(f64, f64)>> {
+) -> Vec<Vec<usize>> {
     let mut layers = vec![Vec::new(); layer_count];
     if ordered.is_empty() || layer_count == 0 {
         return layers;
     }
 
-    for (ordered_index, (_, pair)) in ordered.iter().enumerate() {
+    for (ordered_index, (sample_index, _)) in ordered.iter().enumerate() {
         let layer_index = ordered_index * layer_count / ordered.len();
-        layers[layer_index].push(*pair);
+        layers[layer_index].push(*sample_index);
     }
 
     layers
 }
 
-fn build_score_range_layer_items(
+fn build_score_range_layer_sample_indices(
     ordered: &[(usize, (f64, f64))],
     layer_count: usize,
-) -> Vec<Vec<(f64, f64)>> {
+) -> Vec<Vec<usize>> {
     let mut layers = vec![Vec::new(); layer_count];
     if ordered.is_empty() || layer_count == 0 {
         return layers;
@@ -437,29 +472,29 @@ fn build_score_range_layer_items(
     let max_score = ordered.last().map(|(_, pair)| pair.0).unwrap_or(min_score);
     let score_span = max_score - min_score;
     if score_span.abs() < EPS {
-        layers[0].extend(ordered.iter().map(|(_, pair)| *pair));
+        layers[0].extend(ordered.iter().map(|(sample_index, _)| *sample_index));
         return layers;
     }
 
-    for (_, pair) in ordered {
+    for (sample_index, pair) in ordered {
         let ratio = ((pair.0 - min_score) / score_span).clamp(0.0, 1.0);
         let mut layer_index = (ratio * layer_count as f64).floor() as usize;
         if layer_index >= layer_count {
             layer_index = layer_count - 1;
         }
-        layers[layer_index].push(*pair);
+        layers[layer_index].push(*sample_index);
     }
 
     layers
 }
 
-fn build_rank_layer_items(
+fn build_rank_layer_sample_indices(
     trade_date: &str,
     day_samples: &[&RuleLayerSamplePoint],
     ordered: &[(usize, (f64, f64))],
     layer_count: usize,
     rank_lookup: Option<&RankLayerLookup>,
-) -> Vec<Vec<(f64, f64)>> {
+) -> Vec<Vec<usize>> {
     let mut layers = vec![Vec::new(); layer_count];
     if ordered.is_empty() || layer_count == 0 {
         return layers;
@@ -490,7 +525,7 @@ fn build_rank_layer_items(
         if layer_index >= layer_count {
             layer_index = layer_count - 1;
         }
-        layers[layer_index].push((sample.rule_score, sample.residual_return));
+        layers[layer_index].push(sample_index);
     }
 
     layers

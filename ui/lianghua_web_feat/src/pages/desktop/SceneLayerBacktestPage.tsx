@@ -14,6 +14,7 @@ import {
   runSceneLayerBacktest,
   type RankLayerBacktestData,
   type RankLayerMethod,
+  type RankLayerSampleGroup,
   type RuleExpressionValidationData,
   type RuleValidationComboResult,
   type RuleLayerBacktestData,
@@ -108,6 +109,7 @@ type StoredBacktestCommonParams = BacktestCommonParamsDraft & {
 const BACKTEST_COMMON_PARAMS_STORAGE_KEY = "lh_scene_layer_backtest_common_params";
 const VALIDATION_DEFAULT_SAMPLE_LIMIT = 5;
 const VALIDATION_MAX_SAMPLE_LIMIT = 200;
+const RANK_LAYER_SAMPLE_LIMIT_PER_GROUP = 5;
 const EMPTY_VALIDATION_COMBO_RESULTS: RuleValidationComboResult[] = [];
 
 type SceneLayerBacktestLocationState = {
@@ -542,6 +544,7 @@ export default function SceneLayerBacktestPage() {
   const [rankTransientLoading, setRankTransientLoading] = useState(false);
   const [rankError, setRankError] = useState("");
   const [rankResult, setRankResult] = useState<RankLayerBacktestData | null>(null);
+  const [rankLayerSampleModal, setRankLayerSampleModal] = useState<RankLayerSampleGroup | null>(null);
   const [result, setResult] = useState<SceneLayerBacktestData | null>(null);
   const [transientLoading, setTransientLoading] = useState(false);
 
@@ -769,6 +772,10 @@ export default function SceneLayerBacktestPage() {
   }, [ruleResult]);
   const validationComboRows = validationResult?.combo_results ?? EMPTY_VALIDATION_COMBO_RESULTS;
   const rankLayerSummaries = rankResult?.layer_summaries ?? [];
+  const rankLayerSampleGroupByIndex = useMemo(() => {
+    const groups = rankResult?.layer_sample_groups ?? [];
+    return new Map(groups.map((item) => [item.layer_index, item]));
+  }, [rankResult]);
   const backtestHighlightSettings = readStoredBacktestHighlightSettings();
 
   function metricHighlightClass(
@@ -877,6 +884,26 @@ export default function SceneLayerBacktestPage() {
       document.body.style.overflow = previousOverflow;
     };
   }, [validationDetailModalOpen]);
+
+  useEffect(() => {
+    if (!rankLayerSampleModal) {
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setRankLayerSampleModal(null);
+      }
+    };
+
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [rankLayerSampleModal]);
 
   useEffect(() => {
     if (!shouldUseValidationDetailModal) {
@@ -1166,6 +1193,7 @@ export default function SceneLayerBacktestPage() {
     }
 
     setRankResult(null);
+    setRankLayerSampleModal(null);
     setRankLoading(true);
     setRankError("");
     try {
@@ -1226,6 +1254,7 @@ export default function SceneLayerBacktestPage() {
     }
 
     setRankResult(null);
+    setRankLayerSampleModal(null);
     setRankTransientLoading(true);
     setRankError("");
     try {
@@ -1600,6 +1629,85 @@ export default function SceneLayerBacktestPage() {
 
   function closeValidationDetailModal() {
     setValidationDetailModalOpen(false);
+  }
+
+  function openRankLayerSamples(layerIndex: number) {
+    const group = rankLayerSampleGroupByIndex.get(layerIndex);
+    if (!group || group.total_samples === 0) {
+      setRankError("当前分层没有可展示的样本。");
+      return;
+    }
+    setRankError("");
+    setRankLayerSampleModal(group);
+  }
+
+  function closeRankLayerSampleModal() {
+    setRankLayerSampleModal(null);
+  }
+
+  function buildRankLayerSampleCombo(
+    group: RankLayerSampleGroup,
+    rankBacktest: RankLayerBacktestData,
+  ): RuleValidationComboResult {
+    const displayRows = [...group.positive, ...group.negative, ...group.random];
+    const triggeredDays = new Set(displayRows.map((row) => row.trade_date)).size;
+    return {
+      combo_key: `rank_layer_${group.layer_index}`,
+      combo_label: group.layer_label,
+      formula: "TOTAL_SCORE",
+      unknown_values: [],
+      trigger_samples: group.total_samples,
+      triggered_days: triggeredDays,
+      avg_daily_trigger: triggeredDays > 0 ? group.total_samples / triggeredDays : 0,
+      sample_stats: {
+        positive_count: group.positive_count,
+        negative_count: group.negative_count,
+        random_count: group.random_count,
+        total_samples: group.total_samples,
+      },
+      sample_groups: {
+        positive: group.positive,
+        negative: group.negative,
+        random: group.random,
+      },
+      return_distribution: [],
+      backtest: {
+        rule_name: group.layer_label,
+        stock_adj_type: rankBacktest.stock_adj_type,
+        index_ts_code: rankBacktest.index_ts_code,
+        index_beta: rankBacktest.index_beta,
+        concept_beta: rankBacktest.concept_beta,
+        industry_beta: rankBacktest.industry_beta,
+        start_date: rankBacktest.start_date,
+        end_date: rankBacktest.end_date,
+        resolved_board: rankBacktest.resolved_board,
+        exclude_st_board: rankBacktest.exclude_st_board,
+        min_samples_per_rule_day: rankBacktest.min_samples_per_rank_day,
+        min_listed_trade_days: rankBacktest.min_listed_trade_days,
+        backtest_period: rankBacktest.backtest_period,
+        points: [],
+        avg_residual_mean: rankBacktest.layer_summaries.find(
+          (item) => item.layer_index === group.layer_index,
+        )?.avg_residual_return,
+        avg_excess_residual_mean: null,
+        profit_loss_ratio: null,
+        spread_mean: rankBacktest.spread_mean,
+        avg_contribution_score: null,
+        avg_contribution_per_trigger: null,
+        ic_mean: rankBacktest.ic_mean,
+        ic_std: rankBacktest.ic_std,
+        icir: rankBacktest.icir,
+        ic_t_value: rankBacktest.ic_t_value,
+        layer_count: rankBacktest.layer_count,
+        layer_method: rankBacktest.layer_method,
+        layer_method_label: rankBacktest.layer_method_label,
+        layer_summaries: rankBacktest.layer_summaries,
+        is_all_rules: false,
+        all_rule_summaries: [],
+        rule_validation_details: [],
+      },
+      similarity_rows: [],
+    };
   }
 
   function renderValidationComboDetailSections(
@@ -1986,15 +2094,32 @@ export default function SceneLayerBacktestPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {rankLayerSummaries.map((item) => (
-                      <tr key={item.layer_index}>
-                        <td>{item.layer_label}</td>
-                        <td>{item.point_count}</td>
-                        <td>{item.sample_count}</td>
-                        <td>{formatNumber(item.avg_score, 4)}</td>
-                        <td>{formatPercent(item.avg_residual_return)}</td>
-                      </tr>
-                    ))}
+                    {rankLayerSummaries.map((item) => {
+                      const sampleGroup = rankLayerSampleGroupByIndex.get(item.layer_index);
+                      const canOpenSamples = Boolean(sampleGroup && sampleGroup.total_samples > 0);
+                      return (
+                        <tr key={item.layer_index}>
+                          <td>
+                            {canOpenSamples ? (
+                              <button
+                                type="button"
+                                className="scene-layer-validation-detail-link"
+                                onClick={() => openRankLayerSamples(item.layer_index)}
+                                title={`查看${item.layer_label}样本`}
+                              >
+                                {item.layer_label}
+                              </button>
+                            ) : (
+                              item.layer_label
+                            )}
+                          </td>
+                          <td>{item.point_count}</td>
+                          <td>{item.sample_count}</td>
+                          <td>{formatNumber(item.avg_score, 4)}</td>
+                          <td>{formatPercent(item.avg_residual_return)}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -2031,6 +2156,39 @@ export default function SceneLayerBacktestPage() {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            </div>
+          ) : null}
+
+          {rankLayerSampleModal && rankResult ? (
+            <div className="scene-layer-modal-mask" onClick={closeRankLayerSampleModal}>
+              <div
+                className="scene-layer-modal-card scene-layer-validation-detail-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-label={`排名分层样本：${rankLayerSampleModal.layer_label}`}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="scene-layer-modal-header">
+                  <h3>排名分层样本：{rankLayerSampleModal.layer_label}</h3>
+                  <button type="button" className="scene-layer-modal-close" onClick={closeRankLayerSampleModal}>
+                    关闭
+                  </button>
+                </div>
+                <div className="scene-layer-modal-scroll-body">
+                  <ExpressionValidationSamplesPanel
+                    data={{
+                      importRuleName: "排名整体回测",
+                      importRuleExplain: `排名整体回测：${rankLayerSampleModal.layer_label}`,
+                      expression: "TOTAL_SCORE",
+                      combo: buildRankLayerSampleCombo(rankLayerSampleModal, rankResult),
+                      comboParamSummary: `${rankResult.layer_method_label} · ${rankLayerSampleModal.layer_label}`,
+                      sampleLimitPerGroup: RANK_LAYER_SAMPLE_LIMIT_PER_GROUP,
+                      sourcePath,
+                    }}
+                    layout="modal"
+                  />
+                </div>
               </div>
             </div>
           ) : null}

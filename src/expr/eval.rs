@@ -1510,6 +1510,50 @@ impl Runtime {
     }
 }
 
+pub fn is_supported_expression_function(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_uppercase().as_str(),
+        "ABS"
+            | "MAX"
+            | "MIN"
+            | "DIV"
+            | "HHV"
+            | "HHVD"
+            | "LLV"
+            | "LLVD"
+            | "COUNT"
+            | "COUNTD"
+            | "EXIST"
+            | "EXISTD"
+            | "MA"
+            | "MAD"
+            | "REF"
+            | "REFD"
+            | "LAST"
+            | "SUM"
+            | "SUMD"
+            | "STD"
+            | "STDD"
+            | "IF"
+            | "CROSS"
+            | "EMA"
+            | "SMA"
+            | "BARSLAST"
+            | "RSV"
+            | "RSVD"
+            | "GRANK"
+            | "GRANKD"
+            | "GTOPCOUNT"
+            | "GTOPCOUNTD"
+            | "LTOPCOUNT"
+            | "LTOPCOUNTD"
+            | "LRANK"
+            | "LRANKD"
+            | "GET"
+            | "GETD"
+    )
+}
+
 impl Runtime {
     fn eval_expr(&mut self, expr: &Expr) -> Result<Value, EvalErr> {
         match expr {

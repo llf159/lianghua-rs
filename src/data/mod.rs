@@ -16,7 +16,10 @@ use std::{
 use duckdb::{Connection, params};
 use serde::{Deserialize, Deserializer, de};
 
-use crate::expr::parser::{Expr, Stmt, Stmts};
+use crate::expr::{
+    eval::is_supported_expression_function,
+    parser::{Expr, Parser, Stmt, Stmts, lex_all},
+};
 
 pub fn source_db_path(source_dir: &str) -> PathBuf {
     Path::new(source_dir).join("stock_data.db")
@@ -442,6 +445,26 @@ impl DataReader {
                 continue;
             }
             db_cols_table.push((col.clone(), col.to_ascii_uppercase()));
+        }
+
+        if let Some(required_runtime_keys) = required_runtime_keys {
+            let selected_runtime_keys = db_cols_table
+                .iter()
+                .map(|(_, runtime_key)| runtime_key.clone())
+                .collect::<HashSet<_>>();
+            let mut missing_runtime_keys = required_runtime_keys
+                .iter()
+                .filter(|runtime_key| !runtime_key_required(&selected_runtime_keys, runtime_key))
+                .cloned()
+                .collect::<Vec<_>>();
+            missing_runtime_keys.sort();
+
+            if !missing_runtime_keys.is_empty() {
+                return Err(format!(
+                    "数据库缺少表达式所需列: {}",
+                    missing_runtime_keys.join(", ")
+                ));
+            }
         }
 
         let mut select_cols = vec!["trade_date".to_string()];
@@ -905,6 +928,7 @@ impl ScoreConfig {
             if r.when.trim().is_empty() {
                 return Err(format!("第{:?}个表达式when字段为空", n));
             };
+            let _ = parse_and_validate_score_rule_expression(r.when.trim(), n, r.name.trim())?;
             if r.explain.trim().is_empty() {
                 return Err(format!("第{n}条规则 explain 字段为空"));
             }
@@ -955,6 +979,65 @@ impl ScoreConfig {
             };
         }
         Ok(())
+    }
+}
+
+fn parse_and_validate_score_rule_expression(
+    expression: &str,
+    rule_index: usize,
+    rule_name: &str,
+) -> Result<Stmts, String> {
+    let tokens = lex_all(expression);
+    let mut parser = Parser::new(tokens);
+    let stmts = parser.parse_main().map_err(|error| {
+        format!(
+            "第{rule_index}条规则({rule_name})表达式解析错误在{}:{}",
+            error.idx, error.msg
+        )
+    })?;
+    validate_score_rule_expression_functions(&stmts, rule_index, rule_name)?;
+    Ok(stmts)
+}
+
+fn validate_score_rule_expression_functions(
+    stmts: &Stmts,
+    rule_index: usize,
+    rule_name: &str,
+) -> Result<(), String> {
+    for stmt in &stmts.item {
+        match stmt {
+            Stmt::Assign { value, .. } => {
+                validate_score_rule_expr_functions(value, rule_index, rule_name)?
+            }
+            Stmt::Expr(expr) => validate_score_rule_expr_functions(expr, rule_index, rule_name)?,
+        }
+    }
+    Ok(())
+}
+
+fn validate_score_rule_expr_functions(
+    expr: &Expr,
+    rule_index: usize,
+    rule_name: &str,
+) -> Result<(), String> {
+    match expr {
+        Expr::Number(_) | Expr::Ident(_) => Ok(()),
+        Expr::Call { name, args } => {
+            if !is_supported_expression_function(name) {
+                return Err(format!(
+                    "第{rule_index}条规则({rule_name})表达式引用未知函数: {name}"
+                ));
+            }
+            for arg in args {
+                validate_score_rule_expr_functions(arg, rule_index, rule_name)?;
+            }
+            Ok(())
+        }
+        Expr::Unary { rhs, .. } => validate_score_rule_expr_functions(rhs, rule_index, rule_name),
+        Expr::Binary { lhs, rhs, .. } => {
+            validate_score_rule_expr_functions(lhs, rule_index, rule_name)?;
+            validate_score_rule_expr_functions(rhs, rule_index, rule_name)
+        }
     }
 }
 
@@ -1109,6 +1192,66 @@ explain = "test"
 
         assert_eq!(cfg.rule.len(), 1);
         assert_eq!(cfg.rule[0].tag, RuleTag::Normal);
+    }
+
+    #[test]
+    fn score_config_validate_rejects_bad_rule_expression() {
+        let cfg = parse_score_config(
+            r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "坏表达式"
+scene = "趋势启动"
+stage = "base"
+scope_windows = 1
+scope_way = "LAST"
+when = "MA(C,"
+points = 2.0
+explain = "test"
+"#,
+        );
+
+        let error = ScoreConfig::validate(&cfg).expect_err("bad expression should fail");
+        assert!(error.contains("第1条规则(坏表达式)表达式解析错误"));
+    }
+
+    #[test]
+    fn score_config_validate_rejects_unknown_rule_function() {
+        let cfg = parse_score_config(
+            r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "未知函数"
+scene = "趋势启动"
+stage = "base"
+scope_windows = 1
+scope_way = "LAST"
+when = "NOT_A_FUNCTION(C) > 0"
+points = 2.0
+explain = "test"
+"#,
+        );
+
+        let error = ScoreConfig::validate(&cfg).expect_err("unknown function should fail");
+        assert!(error.contains("第1条规则(未知函数)表达式引用未知函数"));
     }
 
     #[test]
