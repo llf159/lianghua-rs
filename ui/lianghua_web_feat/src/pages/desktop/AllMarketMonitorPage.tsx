@@ -34,7 +34,6 @@ import "./css/DataImportPage.css";
 
 const POLL_INTERVAL_MS = 1000;
 const HISTORY_KEEP_MS = 90_000;
-const RECORD_HIGH_CONFIRM_MS = 5_000;
 const DEFAULT_SPEED_PERIOD = 10;
 const DEFAULT_SPEED_THRESHOLD = 2;
 const DEFAULT_VOLUME_RATIO_THRESHOLD = 10;
@@ -56,6 +55,7 @@ const LS_KEY_TOP_LIMIT = "am_top_limit";
 const LS_KEY_OTHER_SORT_EXPRESSION = "am_other_sort_expression";
 const LS_KEY_OTHER_SORT_DIRECTION = "am_other_sort_direction";
 const LS_KEY_OTHER_SORT_USE_REALTIME = "am_other_sort_use_realtime";
+const LS_KEY_COMPACT_MODE = "am_compact_mode";
 const INTRADAY_MONITOR_TEMPLATE_STORAGE_KEY =
   "lh_intraday_monitor_realtime_templates_v1";
 
@@ -172,9 +172,8 @@ type SpeedHitRecord = DisplayRow & {
 
 type SpeedHitRecordsByPeriod = Record<SpeedPeriod, SpeedHitRecord[]>;
 
-type RecordHighCandidate = {
-  startedAt: number;
-  minValue: number;
+type RecordHighDisplayRow = DisplayRow & {
+  record_high_at: number;
 };
 
 function isFiniteNumber(value: unknown): value is number {
@@ -391,54 +390,33 @@ function createEmptyHitRecordsByPeriod(): SpeedHitRecordsByPeriod {
 
 function updateRecordHighs(
   recordHighs: Map<string, number>,
-  candidates: Map<string, RecordHighCandidate>,
   rows: AllMarketMonitorRow[],
   capturedAt: number,
   getValue: (row: AllMarketMonitorRow) => number | null | undefined,
 ) {
-  const newHighCodes = new Set<string>();
+  const newHighTimes = new Map<string, number>();
 
   for (const row of rows) {
     const value = getValue(row);
     if (!isFiniteNumber(value)) {
-      candidates.delete(row.ts_code);
       continue;
     }
 
     const previous = recordHighs.get(row.ts_code);
     if (!isFiniteNumber(previous)) {
       recordHighs.set(row.ts_code, value);
-      candidates.delete(row.ts_code);
       continue;
     }
 
     if (value <= previous) {
-      candidates.delete(row.ts_code);
       continue;
     }
 
-    newHighCodes.add(row.ts_code);
-
-    const candidate = candidates.get(row.ts_code);
-    if (!candidate) {
-      candidates.set(row.ts_code, {
-        startedAt: capturedAt,
-        minValue: value,
-      });
-      continue;
-    }
-
-    candidate.minValue = Math.min(candidate.minValue, value);
-    if (
-      capturedAt - candidate.startedAt >= RECORD_HIGH_CONFIRM_MS &&
-      candidate.minValue > previous
-    ) {
-      recordHighs.set(row.ts_code, candidate.minValue);
-      candidates.delete(row.ts_code);
-    }
+    recordHighs.set(row.ts_code, value);
+    newHighTimes.set(row.ts_code, capturedAt);
   }
 
-  return newHighCodes;
+  return newHighTimes;
 }
 
 export default function AllMarketMonitorPage() {
@@ -494,6 +472,9 @@ export default function AllMarketMonitorPage() {
   const [otherSortUseRealtime, setOtherSortUseRealtime] = useState(() =>
     readLocalStorageBoolean(LS_KEY_OTHER_SORT_USE_REALTIME, true),
   );
+  const [compactMode, setCompactMode] = useState(() =>
+    readLocalStorageBoolean(LS_KEY_COMPACT_MODE, false),
+  );
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDirection, setSortDirection] = useState<SortDirection>(null);
   const [loading, setLoading] = useState(false);
@@ -506,12 +487,16 @@ export default function AllMarketMonitorPage() {
   const [currentTime, setCurrentTime] = useState(() => new Date());
   const [hitRecordsByPeriod, setHitRecordsByPeriod] =
     useState<SpeedHitRecordsByPeriod>(() => createEmptyHitRecordsByPeriod());
-  const [volumeRatioNewHighCodes, setVolumeRatioNewHighCodes] = useState<
-    Set<string>
-  >(() => new Set());
-  const [changePctNewHighCodes, setChangePctNewHighCodes] = useState<
-    Set<string>
-  >(() => new Set());
+  const [volumeRatioNewHighTimes, setVolumeRatioNewHighTimes] = useState<
+    Map<string, number>
+  >(() => new Map());
+  const [changePctNewHighTimes, setChangePctNewHighTimes] = useState<
+    Map<string, number>
+  >(() => new Map());
+  const [volumeRatioRecordHighEventTimes, setVolumeRatioRecordHighEventTimes] =
+    useState<Map<string, number>>(() => new Map());
+  const [changePctRecordHighEventTimes, setChangePctRecordHighEventTimes] =
+    useState<Map<string, number>>(() => new Map());
   const [openHitTsCode, setOpenHitTsCode] = useState<string | null>(null);
   const [openTemplateTsCode, setOpenTemplateTsCode] = useState<string | null>(
     null,
@@ -530,17 +515,16 @@ export default function AllMarketMonitorPage() {
   const enabledRef = useRef(false);
   const historyRef = useRef<PriceSnapshot[]>([]);
   const volumeRatioRecordHighsRef = useRef<Map<string, number>>(new Map());
-  const volumeRatioRecordCandidatesRef = useRef<
-    Map<string, RecordHighCandidate>
-  >(new Map());
   const changePctRecordHighsRef = useRef<Map<string, number>>(new Map());
-  const changePctRecordCandidatesRef = useRef<Map<string, RecordHighCandidate>>(
-    new Map(),
-  );
 
   const sourcePathTrimmed = sourcePath.trim();
   const isVolumeRatioBoard = primarySortKey === "realtime_vol_ratio";
   const showOtherSortColumn = primarySortKey === "other_sort_value";
+  const hitPanelMode =
+    primarySortKey === "realtime_change_pct" ||
+    primarySortKey === "realtime_vol_ratio"
+      ? primarySortKey
+      : "speed_pct";
   const topLimit = useMemo(
     () => parseNonNegativeIntegerInput(topLimitText, DEFAULT_TOP_LIMIT),
     [topLimitText],
@@ -671,6 +655,14 @@ export default function AllMarketMonitorPage() {
   }, [otherSortUseRealtime]);
 
   useEffect(() => {
+    try {
+      localStorage.setItem(LS_KEY_COMPACT_MODE, String(compactMode));
+    } catch {
+      // localStorage unavailable
+    }
+  }, [compactMode]);
+
+  useEffect(() => {
     writeStoredIntradayMonitorWatchlistEnabled(watchlistEnabled);
   }, [watchlistEnabled]);
 
@@ -748,24 +740,38 @@ export default function AllMarketMonitorPage() {
       const capturedAt = Date.now();
       const nextRows = result.rows ?? [];
       const nextIndexRows = result.index_rows ?? [];
-      setVolumeRatioNewHighCodes(
-        updateRecordHighs(
-          volumeRatioRecordHighsRef.current,
-          volumeRatioRecordCandidatesRef.current,
-          nextRows,
-          capturedAt,
-          (row) => row.realtime_vol_ratio,
-        ),
+      const nextVolumeRatioNewHighTimes = updateRecordHighs(
+        volumeRatioRecordHighsRef.current,
+        nextRows,
+        capturedAt,
+        (row) => row.realtime_vol_ratio,
       );
-      setChangePctNewHighCodes(
-        updateRecordHighs(
-          changePctRecordHighsRef.current,
-          changePctRecordCandidatesRef.current,
-          nextRows,
-          capturedAt,
-          (row) => row.realtime_change_pct,
-        ),
+      const nextChangePctNewHighTimes = updateRecordHighs(
+        changePctRecordHighsRef.current,
+        nextRows,
+        capturedAt,
+        (row) => row.realtime_change_pct,
       );
+      setVolumeRatioNewHighTimes(nextVolumeRatioNewHighTimes);
+      setChangePctNewHighTimes(nextChangePctNewHighTimes);
+      if (nextVolumeRatioNewHighTimes.size > 0) {
+        setVolumeRatioRecordHighEventTimes((prev) => {
+          const next = new Map(prev);
+          nextVolumeRatioNewHighTimes.forEach((time, tsCode) => {
+            next.set(tsCode, time);
+          });
+          return next;
+        });
+      }
+      if (nextChangePctNewHighTimes.size > 0) {
+        setChangePctRecordHighEventTimes((prev) => {
+          const next = new Map(prev);
+          nextChangePctNewHighTimes.forEach((time, tsCode) => {
+            next.set(tsCode, time);
+          });
+          return next;
+        });
+      }
       historyRef.current = appendPriceSnapshot(
         historyRef.current,
         nextRows,
@@ -852,11 +858,11 @@ export default function AllMarketMonitorPage() {
 
   useEffect(() => {
     volumeRatioRecordHighsRef.current.clear();
-    volumeRatioRecordCandidatesRef.current.clear();
     changePctRecordHighsRef.current.clear();
-    changePctRecordCandidatesRef.current.clear();
-    setVolumeRatioNewHighCodes(new Set());
-    setChangePctNewHighCodes(new Set());
+    setVolumeRatioNewHighTimes(new Map());
+    setChangePctNewHighTimes(new Map());
+    setVolumeRatioRecordHighEventTimes(new Map());
+    setChangePctRecordHighEventTimes(new Map());
     setTemplateWarning("");
   }, [sourcePathTrimmed]);
 
@@ -999,6 +1005,56 @@ export default function AllMarketMonitorPage() {
   );
 
   const hitRecords = hitRecordsByPeriod[speedPeriod];
+  const recordHighRows = useMemo<RecordHighDisplayRow[]>(() => {
+    const eventTimes =
+      hitPanelMode === "realtime_change_pct"
+        ? changePctRecordHighEventTimes
+        : hitPanelMode === "realtime_vol_ratio"
+          ? volumeRatioRecordHighEventTimes
+          : null;
+    if (!eventTimes) {
+      return [];
+    }
+
+    return rows
+      .filter((row) => boardFilter === "全部" || row.board === boardFilter)
+      .map((row): RecordHighDisplayRow | null => {
+        const recordHighAt = eventTimes.get(row.ts_code);
+        return isFiniteNumber(recordHighAt)
+          ? {
+              ...row,
+              speed_pct: speedMap.get(row.ts_code) ?? null,
+              record_high_at: recordHighAt,
+            }
+          : null;
+      })
+      .filter((row): row is RecordHighDisplayRow => row !== null)
+      .sort((left, right) => right.record_high_at - left.record_high_at)
+      .slice(0, 200);
+  }, [
+    boardFilter,
+    changePctRecordHighEventTimes,
+    hitPanelMode,
+    rows,
+    speedMap,
+    volumeRatioRecordHighEventTimes,
+  ]);
+  const hitPanelTitle =
+    hitPanelMode === "realtime_change_pct"
+      ? "涨幅新高"
+      : hitPanelMode === "realtime_vol_ratio"
+        ? "量比新高"
+        : "涨速命中";
+  const hitPanelCount =
+    hitPanelMode === "speed_pct" ? hitRecords.length : recordHighRows.length;
+  const hitPanelSubtitle =
+    hitPanelMode === "realtime_change_pct"
+      ? "最新在前"
+      : hitPanelMode === "realtime_vol_ratio"
+        ? "最新在前"
+        : isFiniteNumber(speedThresholdPct)
+          ? `${speedPeriod}秒 >= ${speedThresholdPct.toFixed(2)}%`
+          : "阈值无效";
 
   const hitNavigationItems = useMemo(
     () =>
@@ -1086,23 +1142,6 @@ export default function AllMarketMonitorPage() {
             <button
               type="button"
               className={
-                enabled ? "all-market-toggle is-active" : "all-market-toggle"
-              }
-              role="switch"
-              aria-checked={enabled}
-              onClick={() => setEnabled((value) => !value)}
-            >
-              <span className="all-market-toggle-track" aria-hidden="true">
-                <span className="all-market-toggle-thumb" />
-              </span>
-              <span className="all-market-toggle-text">
-                {enabled ? "爬虫运行中" : "爬虫已暂停"}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              className={
                 templateEnabled
                   ? "all-market-toggle is-active"
                   : "all-market-toggle"
@@ -1135,6 +1174,23 @@ export default function AllMarketMonitorPage() {
               </span>
               <span className="all-market-toggle-text">
                 {watchlistEnabled ? "名单模式" : "未限名单"}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              className={
+                enabled ? "all-market-toggle is-active" : "all-market-toggle"
+              }
+              role="switch"
+              aria-checked={enabled}
+              onClick={() => setEnabled((value) => !value)}
+            >
+              <span className="all-market-toggle-track" aria-hidden="true">
+                <span className="all-market-toggle-thumb" />
+              </span>
+              <span className="all-market-toggle-text">
+                {enabled ? "爬虫运行中" : "爬虫已暂停"}
               </span>
             </button>
           </div>
@@ -1240,7 +1296,13 @@ export default function AllMarketMonitorPage() {
       </section>
 
       <div className="all-market-monitor-grid">
-        <section className="all-market-card all-market-table-card">
+        <section
+          className={
+            compactMode
+              ? "all-market-card all-market-table-card is-compact"
+              : "all-market-card all-market-table-card"
+          }
+        >
           <div className="all-market-table-head">
             <h3>{isVolumeRatioBoard ? "量比榜" : "实时行情"}</h3>
             <div
@@ -1276,8 +1338,11 @@ export default function AllMarketMonitorPage() {
               <table className="all-market-table">
                 <thead>
                   <tr>
-                    <th aria-sort="none">名称</th>
+                    <th className="all-market-name-col" aria-sort="none">
+                      名称
+                    </th>
                     <th
+                      className="all-market-basic-col"
                       aria-sort={getAriaSort(
                         sortKey === "best_rank_3d",
                         sortDirection,
@@ -1286,6 +1351,7 @@ export default function AllMarketMonitorPage() {
                       {renderSortHeader("3日优", "best_rank_3d")}
                     </th>
                     <th
+                      className="all-market-basic-col"
                       aria-sort={getAriaSort(
                         sortKey === "best_rank_5d",
                         sortDirection,
@@ -1294,6 +1360,7 @@ export default function AllMarketMonitorPage() {
                       {renderSortHeader("5日优", "best_rank_5d")}
                     </th>
                     <th
+                      className="all-market-basic-col"
                       aria-sort={getAriaSort(
                         sortKey === "return_5d_pct",
                         sortDirection,
@@ -1303,7 +1370,7 @@ export default function AllMarketMonitorPage() {
                     </th>
                     {showOtherSortColumn ? (
                       <th
-                        className="all-market-other-sort-col"
+                        className="all-market-other-sort-col all-market-basic-col"
                         aria-sort={getAriaSort(
                           sortKey === "other_sort_value",
                           sortDirection,
@@ -1313,7 +1380,7 @@ export default function AllMarketMonitorPage() {
                       </th>
                     ) : null}
                     <th
-                      className="all-market-realtime-group-start"
+                      className="all-market-realtime-group-start all-market-realtime-change-col"
                       aria-sort={getAriaSort(
                         sortKey === "realtime_change_pct",
                         sortDirection,
@@ -1322,6 +1389,7 @@ export default function AllMarketMonitorPage() {
                       {renderSortHeader("涨幅", "realtime_change_pct")}
                     </th>
                     <th
+                      className="all-market-speed-col"
                       aria-sort={getAriaSort(
                         sortKey === "speed_pct",
                         sortDirection,
@@ -1330,6 +1398,7 @@ export default function AllMarketMonitorPage() {
                       {renderSortHeader("涨速", "speed_pct")}
                     </th>
                     <th
+                      className="all-market-volume-col"
                       aria-sort={getAriaSort(
                         sortKey === "realtime_vol_ratio",
                         sortDirection,
@@ -1338,6 +1407,7 @@ export default function AllMarketMonitorPage() {
                       {renderSortHeader("量比", "realtime_vol_ratio")}
                     </th>
                     <th
+                      className="all-market-basic-col"
                       aria-sort={getAriaSort(
                         sortKey === "above_avg_price",
                         sortDirection,
@@ -1346,6 +1416,7 @@ export default function AllMarketMonitorPage() {
                       {renderSortHeader("高于均线", "above_avg_price")}
                     </th>
                     <th
+                      className="all-market-basic-col"
                       aria-sort={getAriaSort(
                         sortKey === "realtime_change_open_pct",
                         sortDirection,
@@ -1354,16 +1425,19 @@ export default function AllMarketMonitorPage() {
                       {renderSortHeader("开盘涨幅", "realtime_change_open_pct")}
                     </th>
                     <th
-                      className="all-market-info-group-start all-market-scene-col"
+                      className="all-market-info-group-start all-market-scene-col all-market-basic-col"
                       aria-sort="none"
                     >
                       场景标记
                     </th>
-                    <th className="all-market-template-col" aria-sort="none">
+                    <th
+                      className="all-market-template-col all-market-basic-col"
+                      aria-sort="none"
+                    >
                       模板触发
                     </th>
                     <th
-                      className="all-market-mv-col"
+                      className="all-market-mv-col all-market-basic-col"
                       aria-sort={getAriaSort(
                         sortKey === "total_mv_yi",
                         sortDirection,
@@ -1371,7 +1445,10 @@ export default function AllMarketMonitorPage() {
                     >
                       {renderSortHeader("总市值", "total_mv_yi")}
                     </th>
-                    <th className="all-market-concept-col" aria-sort="none">
+                    <th
+                      className="all-market-concept-col all-market-basic-col"
+                      aria-sort="none"
+                    >
                       概念
                     </th>
                   </tr>
@@ -1390,31 +1467,120 @@ export default function AllMarketMonitorPage() {
                       row.best_rank_5d,
                       rankHighlightThreshold,
                     );
+                    const volumeRatioAlert =
+                      isFiniteNumber(volumeRatioThreshold) &&
+                      isFiniteNumber(row.realtime_vol_ratio) &&
+                      row.realtime_vol_ratio > volumeRatioThreshold;
 
                     return (
                       <tr key={row.ts_code}>
                         <td className="all-market-name-cell">
-                          <DetailsLink
-                            tsCode={row.ts_code}
-                            tradeDate={
-                              rankDate || row.realtime_trade_date || undefined
-                            }
-                            sourcePath={sourcePathTrimmed || undefined}
-                            className="all-market-stock-link"
-                            title={`查看 ${row.name || row.ts_code} 详情`}
-                            navigationItems={navigationItems}
-                          >
-                            {row.name || "--"}
-                          </DetailsLink>
-                          <span className="all-market-stock-code">
-                            {row.ts_code}
-                          </span>
+                          <div className="all-market-stock-id">
+                            <DetailsLink
+                              tsCode={row.ts_code}
+                              tradeDate={
+                                rankDate ||
+                                row.realtime_trade_date ||
+                                undefined
+                              }
+                              sourcePath={sourcePathTrimmed || undefined}
+                              className="all-market-stock-link"
+                              title={`查看 ${row.name || row.ts_code} 详情`}
+                              navigationItems={navigationItems}
+                            >
+                              {row.name || "--"}
+                            </DetailsLink>
+                            <span className="all-market-stock-code">
+                              {row.ts_code}
+                            </span>
+                          </div>
+                          <div className="all-market-compact-primary-list">
+                            <span
+                              className={
+                                rank3dHighlighted
+                                  ? "all-market-compact-item is-highlight"
+                                  : "all-market-compact-item"
+                              }
+                            >
+                              3日 {formatNumber(row.best_rank_3d, 0)}
+                            </span>
+                            <span
+                              className={
+                                rank5dHighlighted
+                                  ? "all-market-compact-item is-highlight"
+                                  : "all-market-compact-item"
+                              }
+                            >
+                              5日 {formatNumber(row.best_rank_5d, 0)}
+                            </span>
+                            <span
+                              className={`all-market-compact-item ${getPercentClassName(
+                                row.return_5d_pct,
+                              )}`}
+                            >
+                              五日 {formatPercent(row.return_5d_pct)}
+                            </span>
+                            {showOtherSortColumn ? (
+                              <span className="all-market-compact-item">
+                                其他 {formatNumber(row.other_sort_value)}
+                              </span>
+                            ) : null}
+                            <span
+                              className={`all-market-compact-item all-market-compact-realtime-start ${getRealtimeChangeCellClassName(
+                                row.realtime_change_pct,
+                              )}`}
+                            >
+                              涨幅 {formatPercent(row.realtime_change_pct)}
+                              {changePctNewHighTimes.has(row.ts_code) ? (
+                                <span className="all-market-record-high-badge">
+                                  新高
+                                </span>
+                              ) : null}
+                            </span>
+                            <span
+                              className={`all-market-compact-item ${getPercentClassName(
+                                row.speed_pct,
+                              )}`}
+                            >
+                              涨速 {formatPercent(row.speed_pct)}
+                            </span>
+                            <span
+                              className={
+                                volumeRatioAlert
+                                  ? "all-market-compact-item is-volume-alert"
+                                  : "all-market-compact-item"
+                              }
+                            >
+                              量比 {formatNumber(row.realtime_vol_ratio)}
+                              {volumeRatioNewHighTimes.has(row.ts_code) ? (
+                                <span className="all-market-record-high-badge">
+                                  新高
+                                </span>
+                              ) : null}
+                            </span>
+                            <span
+                              className={
+                                isAboveAvgPrice(row)
+                                  ? "all-market-compact-item is-yes"
+                                  : "all-market-compact-item"
+                              }
+                            >
+                              均线 {formatAboveAvgPrice(row)}
+                            </span>
+                            <span
+                              className={`all-market-compact-item ${getPercentClassName(
+                                row.realtime_change_open_pct,
+                              )}`}
+                            >
+                              开盘 {formatPercent(row.realtime_change_open_pct)}
+                            </span>
+                          </div>
                         </td>
                         <td
                           className={
                             rank3dHighlighted
-                              ? "all-market-rank-cell is-highlight"
-                              : "all-market-rank-cell"
+                              ? "all-market-rank-cell all-market-basic-col is-highlight"
+                              : "all-market-rank-cell all-market-basic-col"
                           }
                         >
                           {formatNumber(row.best_rank_3d, 0)}
@@ -1422,52 +1588,58 @@ export default function AllMarketMonitorPage() {
                         <td
                           className={
                             rank5dHighlighted
-                              ? "all-market-rank-cell is-highlight"
-                              : "all-market-rank-cell"
+                              ? "all-market-rank-cell all-market-basic-col is-highlight"
+                              : "all-market-rank-cell all-market-basic-col"
                           }
                         >
                           {formatNumber(row.best_rank_5d, 0)}
                         </td>
-                        <td className={getPercentClassName(row.return_5d_pct)}>
+                        <td
+                          className={`all-market-basic-col ${getPercentClassName(
+                            row.return_5d_pct,
+                          )}`}
+                        >
                           {formatPercent(row.return_5d_pct)}
                         </td>
                         {showOtherSortColumn ? (
-                          <td className="all-market-other-sort-col">
+                          <td className="all-market-other-sort-col all-market-basic-col">
                             {formatNumber(row.other_sort_value)}
                           </td>
                         ) : null}
                         <td
-                          className={getRealtimeChangeCellClassName(
+                          className={`all-market-realtime-change-col ${getRealtimeChangeCellClassName(
                             row.realtime_change_pct,
-                          )}
+                          )}`}
                         >
                           <span>{formatPercent(row.realtime_change_pct)}</span>
-                          {changePctNewHighCodes.has(row.ts_code) ? (
+                          {changePctNewHighTimes.has(row.ts_code) ? (
                             <span
                               className="all-market-record-high-badge"
-                              title="当前涨幅高于监控记录；记录连续约5秒确认后刷新"
+                              title="当前涨幅高于监控记录"
                             >
                               新高
                             </span>
                           ) : null}
                         </td>
-                        <td className={getPercentClassName(row.speed_pct)}>
+                        <td
+                          className={`all-market-speed-col ${getPercentClassName(
+                            row.speed_pct,
+                          )}`}
+                        >
                           {formatPercent(row.speed_pct)}
                         </td>
                         <td
                           className={
-                            isFiniteNumber(volumeRatioThreshold) &&
-                            isFiniteNumber(row.realtime_vol_ratio) &&
-                            row.realtime_vol_ratio > volumeRatioThreshold
-                              ? "all-market-volume-ratio-cell is-alert"
-                              : "all-market-volume-ratio-cell"
+                            volumeRatioAlert
+                              ? "all-market-volume-col all-market-volume-ratio-cell is-alert"
+                              : "all-market-volume-col all-market-volume-ratio-cell"
                           }
                         >
                           <span>{formatNumber(row.realtime_vol_ratio)}</span>
-                          {volumeRatioNewHighCodes.has(row.ts_code) ? (
+                          {volumeRatioNewHighTimes.has(row.ts_code) ? (
                             <span
                               className="all-market-record-high-badge"
-                              title="当前量比高于监控记录；记录连续约5秒确认后刷新"
+                              title="当前量比高于监控记录"
                             >
                               新高
                             </span>
@@ -1476,8 +1648,8 @@ export default function AllMarketMonitorPage() {
                         <td
                           className={
                             isAboveAvgPrice(row)
-                              ? "all-market-above-avg-cell is-yes"
-                              : "all-market-above-avg-cell"
+                              ? "all-market-above-avg-cell all-market-basic-col is-yes"
+                              : "all-market-above-avg-cell all-market-basic-col"
                           }
                           title={
                             isFiniteNumber(row.realtime_avg_price)
@@ -1488,19 +1660,19 @@ export default function AllMarketMonitorPage() {
                           {formatAboveAvgPrice(row)}
                         </td>
                         <td
-                          className={getPercentClassName(
+                          className={`all-market-basic-col ${getPercentClassName(
                             row.realtime_change_open_pct,
-                          )}
+                          )}`}
                         >
                           {formatPercent(row.realtime_change_open_pct)}
                         </td>
                         <td
-                          className="all-market-scene-marker-cell all-market-info-group-start all-market-scene-col"
+                          className="all-market-scene-marker-cell all-market-info-group-start all-market-scene-col all-market-basic-col"
                           title={row.scene_marker ?? "--"}
                         >
                           {row.scene_marker ?? "--"}
                         </td>
-                        <td className="all-market-template-cell all-market-template-col">
+                        <td className="all-market-template-cell all-market-template-col all-market-basic-col">
                           {getTemplateHits(row).length > 0 ? (
                             <>
                               <button
@@ -1549,14 +1721,56 @@ export default function AllMarketMonitorPage() {
                             "--"
                           )}
                         </td>
-                        <td className="all-market-mv-col">
+                        <td className="all-market-mv-col all-market-basic-col">
                           {formatNumber(row.total_mv_yi)}
                         </td>
                         <td
-                          className="all-market-concept-cell all-market-concept-col"
+                          className="all-market-concept-cell all-market-concept-col all-market-basic-col"
                           title={conceptText}
                         >
                           {conceptText}
+                        </td>
+                        <td className="all-market-compact-basic-cell">
+                          <div className="all-market-compact-basic-list">
+                            <span
+                              className="all-market-compact-item all-market-compact-group-start"
+                              title={row.scene_marker ?? "--"}
+                            >
+                              场景 {row.scene_marker ?? "--"}
+                            </span>
+                            <span
+                              className="all-market-compact-item all-market-compact-template-hits"
+                              title={
+                                getTemplateHits(row).length > 0
+                                  ? getTemplateHits(row)
+                                      .map(
+                                        (hit) =>
+                                          hit.template_name || "未命名模板",
+                                      )
+                                      .join("、")
+                                  : "--"
+                              }
+                            >
+                              模板{" "}
+                              {getTemplateHits(row).length > 0
+                                ? getTemplateHits(row)
+                                    .map(
+                                      (hit) =>
+                                        hit.template_name || "未命名模板",
+                                    )
+                                    .join("、")
+                                : "--"}
+                            </span>
+                            <span className="all-market-compact-item">
+                              市值 {formatNumber(row.total_mv_yi)}
+                            </span>
+                            <span
+                              className="all-market-compact-item all-market-compact-concept"
+                              title={conceptText}
+                            >
+                              概念 {conceptText || "--"}
+                            </span>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -1574,18 +1788,82 @@ export default function AllMarketMonitorPage() {
         <section className="all-market-card all-market-hit-card">
           <div className="all-market-hit-head">
             <div>
-              <h3>涨速命中</h3>
-              <span>
-                {isFiniteNumber(speedThresholdPct)
-                  ? `${speedPeriod}秒 >= ${speedThresholdPct.toFixed(2)}%`
-                  : "阈值无效"}
-              </span>
+              <h3>{hitPanelTitle}</h3>
+              <span>{hitPanelSubtitle}</span>
             </div>
-            <strong>{hitRecords.length}</strong>
+            <strong>{hitPanelCount}</strong>
           </div>
 
           <div className="all-market-hit-list">
-            {hitRecords.length > 0 ? (
+            {hitPanelMode === "realtime_change_pct" ? (
+              recordHighRows.length > 0 ? (
+                recordHighRows.map((record) => (
+                  <div key={record.ts_code} className="all-market-hit-row">
+                    <span className="all-market-hit-name">
+                      <DetailsLink
+                        tsCode={record.ts_code}
+                        tradeDate={
+                          rankDate || record.realtime_trade_date || undefined
+                        }
+                        sourcePath={sourcePathTrimmed || undefined}
+                        className="all-market-hit-name-link"
+                        title={`查看 ${record.name || record.ts_code} 详情`}
+                        navigationItems={navigationItems}
+                      >
+                        <strong>{record.name || "--"}</strong>
+                        <small>{record.ts_code}</small>
+                      </DetailsLink>
+                    </span>
+                    <span
+                      className={`all-market-hit-change ${getPercentClassName(
+                        record.realtime_change_pct,
+                      )}`}
+                    >
+                      {formatPercent(record.realtime_change_pct)}
+                    </span>
+                    <span className="all-market-hit-time">
+                      {formatClockFromMs(record.record_high_at)}
+                    </span>
+                  </div>
+                ))
+              ) : (
+                <div className="all-market-hit-empty">
+                  暂无涨幅新高。
+                </div>
+              )
+            ) : hitPanelMode === "realtime_vol_ratio" ? (
+              recordHighRows.length > 0 ? (
+                recordHighRows.map((record) => (
+                  <div key={record.ts_code} className="all-market-hit-row">
+                    <span className="all-market-hit-name">
+                      <DetailsLink
+                        tsCode={record.ts_code}
+                        tradeDate={
+                          rankDate || record.realtime_trade_date || undefined
+                        }
+                        sourcePath={sourcePathTrimmed || undefined}
+                        className="all-market-hit-name-link"
+                        title={`查看 ${record.name || record.ts_code} 详情`}
+                        navigationItems={navigationItems}
+                      >
+                        <strong>{record.name || "--"}</strong>
+                        <small>{record.ts_code}</small>
+                      </DetailsLink>
+                    </span>
+                    <span className="all-market-hit-change">
+                      {formatNumber(record.realtime_vol_ratio)}
+                    </span>
+                    <span className="all-market-hit-time">
+                      {formatClockFromMs(record.record_high_at)}
+                    </span>
+                  </div>
+                ))
+              ) : (
+                <div className="all-market-hit-empty">
+                  暂无量比新高。
+                </div>
+              )
+            ) : hitRecords.length > 0 ? (
               hitRecords.map((record) => {
                 const isOpen = openHitTsCode === record.ts_code;
                 const toggleHitPopover = () => {
@@ -1650,7 +1928,7 @@ export default function AllMarketMonitorPage() {
             )}
           </div>
 
-          {openHitRecord ? (
+          {hitPanelMode === "speed_pct" && openHitRecord ? (
             <div
               className="all-market-hit-popover"
               role="dialog"
@@ -1907,6 +2185,15 @@ export default function AllMarketMonitorPage() {
                   <option value="realtime">使用实时数据</option>
                   <option value="daily">不使用实时数据</option>
                 </select>
+              </label>
+
+              <label className="settings-checkbox-inline all-market-param-compact">
+                <input
+                  type="checkbox"
+                  checked={compactMode}
+                  onChange={(event) => setCompactMode(event.target.checked)}
+                />
+                <span>开启紧凑模式</span>
               </label>
 
               <label className="settings-field all-market-param-expression">
