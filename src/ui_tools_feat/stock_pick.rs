@@ -443,21 +443,23 @@ pub fn validate_expression_stock_pick_template_expression(
     let reader = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
     let latest_trade_date = reader
         .conn
-        .query_row(
-            "SELECT MAX(trade_date) FROM stock_data WHERE adj_type = ?",
-            [DEFAULT_ADJ_TYPE],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .map_err(|e| format!("读取表达式模板校验交易日失败: {e}"))?
+        .with(|conn| {
+            conn.query_row(
+                "SELECT MAX(trade_date) FROM stock_data WHERE adj_type = ?",
+                [DEFAULT_ADJ_TYPE],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(|e| format!("读取表达式模板校验交易日失败: {e}"))
+        })?
         .ok_or_else(|| "stock_data 缺少可用于表达式模板校验的交易日".to_string())?;
-    let sample_ts_code = reader
-        .conn
-        .query_row(
+    let sample_ts_code = reader.conn.with(|conn| {
+        conn.query_row(
             "SELECT ts_code FROM stock_data WHERE adj_type = ? AND trade_date = ? ORDER BY ts_code LIMIT 1",
             [DEFAULT_ADJ_TYPE, latest_trade_date.as_str()],
             |row| row.get::<_, String>(0),
         )
-        .map_err(|e| format!("读取表达式模板校验样本股票失败: {e}"))?;
+        .map_err(|e| format!("读取表达式模板校验样本股票失败: {e}"))
+    })?;
 
     let need_rows = (warmup_need + 2).max(8);
     let mut row_data = reader.load_one_tail_rows(

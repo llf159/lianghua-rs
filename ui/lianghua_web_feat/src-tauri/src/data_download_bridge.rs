@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use lianghua_rs::{
+    data::invalidate_source_db_memory_cache,
     download::runner::DownloadProgress as CoreDownloadProgress,
     ui_tools_feat::data_download::{
         get_data_download_status as core_get_data_download_status,
@@ -190,6 +191,7 @@ pub async fn run_stock_data_indicator_columns_delete(
         return Err("download_id 不能为空".to_string());
     }
 
+    let source_path = request.source_path.clone();
     let prepared = core_prepare_stock_data_indicator_columns_delete_run(
         CoreStockDataIndicatorColumnsDeleteRunInput {
             source_path: request.source_path,
@@ -238,6 +240,7 @@ pub async fn run_stock_data_indicator_columns_delete(
             run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
             Ok(run_result)
         })();
+        invalidate_source_db_memory_cache(&source_path);
 
         match &result {
             Ok(run_result) => emit_data_download_event(
@@ -289,6 +292,7 @@ pub async fn run_stock_data_indicator_columns_rebuild(
         return Err("download_id 不能为空".to_string());
     }
 
+    let source_path = request.source_path.clone();
     let prepared = core_prepare_stock_data_indicator_columns_rebuild_run(
         CoreStockDataIndicatorColumnsRebuildRunInput {
             source_path: request.source_path,
@@ -337,6 +341,7 @@ pub async fn run_stock_data_indicator_columns_rebuild(
             run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
             Ok(run_result)
         })();
+        invalidate_source_db_memory_cache(&source_path);
 
         match &result {
             Ok(run_result) => emit_data_download_event(
@@ -390,6 +395,7 @@ pub async fn run_data_download(
         return Err("download_id 不能为空".to_string());
     }
 
+    let source_path = request.source_path.clone();
     let prepared = core_prepare_data_download_run(CoreDataDownloadRunInput {
         source_path: request.source_path,
         token: request.token,
@@ -443,6 +449,7 @@ pub async fn run_data_download(
             run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
             Ok(run_result)
         })();
+        invalidate_source_db_memory_cache(&source_path);
 
         match &result {
             Ok(run_result) => emit_data_download_event(
@@ -593,6 +600,7 @@ pub async fn run_missing_stock_repair(
         return Err("download_id 不能为空".to_string());
     }
 
+    let source_path = request.source_path.clone();
     let prepared = core_prepare_missing_stock_repair_run(CoreMissingStockRepairRunInput {
         source_path: request.source_path,
         token: request.token,
@@ -642,6 +650,7 @@ pub async fn run_missing_stock_repair(
             run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
             Ok(run_result)
         })();
+        invalidate_source_db_memory_cache(&source_path);
 
         match &result {
             Ok(run_result) => emit_data_download_event(

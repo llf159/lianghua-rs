@@ -323,55 +323,56 @@ pub fn load_many_tail_rows_with_warmup_need(
     }
     params.push(adj_type.to_string());
 
-    let mut stmt = dr
-        .conn
-        .prepare(&sql)
-        .map_err(|e| format!("预编译批量warmup历史查询失败: {e}"))?;
-    let mut rows = stmt
-        .query(params_from_iter(params.iter()))
-        .map_err(|e| format!("执行批量warmup历史查询失败: {e}"))?;
+    dr.conn.with(|conn| {
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("预编译批量warmup历史查询失败: {e}"))?;
+        let mut rows = stmt
+            .query(params_from_iter(params.iter()))
+            .map_err(|e| format!("执行批量warmup历史查询失败: {e}"))?;
 
-    let mut trade_dates_by_stock = HashMap::<String, Vec<String>>::new();
-    let mut cols_by_stock = HashMap::<String, HashMap<String, Vec<Option<f64>>>>::new();
+        let mut trade_dates_by_stock = HashMap::<String, Vec<String>>::new();
+        let mut cols_by_stock = HashMap::<String, HashMap<String, Vec<Option<f64>>>>::new();
 
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取批量warmup历史查询结果失败: {e}"))?
-    {
-        let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败: {e}"))?;
-        let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败: {e}"))?;
-        trade_dates_by_stock
-            .entry(ts_code.clone())
-            .or_default()
-            .push(trade_date);
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取批量warmup历史查询结果失败: {e}"))?
+        {
+            let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败: {e}"))?;
+            let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败: {e}"))?;
+            trade_dates_by_stock
+                .entry(ts_code.clone())
+                .or_default()
+                .push(trade_date);
 
-        let cols = cols_by_stock.entry(ts_code).or_insert_with(|| {
-            IND_INPUT_KEYS
-                .iter()
-                .map(|key| (key.to_string(), Vec::new()))
-                .collect::<HashMap<_, _>>()
-        });
-        for (idx, key) in IND_INPUT_KEYS.iter().enumerate() {
-            let value: Option<f64> = row
-                .get(idx + 2)
-                .map_err(|e| format!("读取{key}失败: {e}"))?;
-            cols.get_mut(*key)
-                .expect("indicator input key should exist")
-                .push(value);
+            let cols = cols_by_stock.entry(ts_code).or_insert_with(|| {
+                IND_INPUT_KEYS
+                    .iter()
+                    .map(|key| (key.to_string(), Vec::new()))
+                    .collect::<HashMap<_, _>>()
+            });
+            for (idx, key) in IND_INPUT_KEYS.iter().enumerate() {
+                let value: Option<f64> = row
+                    .get(idx + 2)
+                    .map_err(|e| format!("读取{key}失败: {e}"))?;
+                cols.get_mut(*key)
+                    .expect("indicator input key should exist")
+                    .push(value);
+            }
         }
-    }
 
-    let mut out = HashMap::with_capacity(trade_dates_by_stock.len());
-    for (ts_code, trade_dates) in trade_dates_by_stock {
-        let cols = cols_by_stock
-            .remove(&ts_code)
-            .ok_or_else(|| format!("批量warmup缺少列数据: {ts_code}"))?;
-        let row_data = RowData { trade_dates, cols };
-        row_data.validate()?;
-        out.insert(ts_code, row_data);
-    }
+        let mut out = HashMap::with_capacity(trade_dates_by_stock.len());
+        for (ts_code, trade_dates) in trade_dates_by_stock {
+            let cols = cols_by_stock
+                .remove(&ts_code)
+                .ok_or_else(|| format!("批量warmup缺少列数据: {ts_code}"))?;
+            let row_data = RowData { trade_dates, cols };
+            row_data.validate()?;
+            out.insert(ts_code, row_data);
+        }
 
-    Ok(out)
+        Ok(out)
+    })
 }
 
 fn pro_bar_rows_to_row_data(rows: &[ProBarRow]) -> Result<RowData, String> {

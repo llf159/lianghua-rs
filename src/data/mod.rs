@@ -11,6 +11,11 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::SystemTime,
 };
 
 use duckdb::{Connection, params};
@@ -20,6 +25,316 @@ use crate::expr::parser::{Expr, Stmt, Stmts};
 
 pub fn source_db_path(source_dir: &str) -> PathBuf {
     Path::new(source_dir).join("stock_data.db")
+}
+
+static SOURCE_DB_MEMORY_CACHE_ENABLED: AtomicBool = AtomicBool::new(false);
+static SOURCE_DB_MEMORY_CACHE: OnceLock<Mutex<HashMap<String, SourceDbMemoryCacheEntry>>> =
+    OnceLock::new();
+static SCORE_SUMMARY_MEMORY_CACHE: OnceLock<Mutex<HashMap<String, SourceDbMemoryCacheEntry>>> =
+    OnceLock::new();
+const SOURCE_DB_MEMORY_CACHE_MAX_CONNECTIONS: usize = 4;
+
+struct SourceDbMemoryCacheEntry {
+    db_path: PathBuf,
+    connections: Vec<Arc<Mutex<Connection>>>,
+    max_connections: usize,
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+pub enum SourceDbConnection {
+    Owned(Connection),
+    Cached(Arc<Mutex<Connection>>),
+}
+
+impl SourceDbConnection {
+    pub fn with<T>(&self, f: impl FnOnce(&Connection) -> Result<T, String>) -> Result<T, String> {
+        match self {
+            Self::Owned(conn) => f(conn),
+            Self::Cached(conn) => {
+                let guard = conn
+                    .lock()
+                    .map_err(|_| "原始库内存缓存锁已损坏".to_string())?;
+                f(&guard)
+            }
+        }
+    }
+}
+
+pub enum ScoreSummaryDbConnection {
+    Owned(Connection),
+    Cached(Arc<Mutex<Connection>>),
+}
+
+impl ScoreSummaryDbConnection {
+    pub fn with<T>(&self, f: impl FnOnce(&Connection) -> Result<T, String>) -> Result<T, String> {
+        match self {
+            Self::Owned(conn) => f(conn),
+            Self::Cached(conn) => {
+                let guard = conn
+                    .lock()
+                    .map_err(|_| "score_summary内存缓存锁已损坏".to_string())?;
+                f(&guard)
+            }
+        }
+    }
+}
+
+fn source_db_memory_cache() -> &'static Mutex<HashMap<String, SourceDbMemoryCacheEntry>> {
+    SOURCE_DB_MEMORY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn score_summary_memory_cache() -> &'static Mutex<HashMap<String, SourceDbMemoryCacheEntry>> {
+    SCORE_SUMMARY_MEMORY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn normalize_source_db_cache_key(db_path: &Path) -> String {
+    fs::canonicalize(db_path)
+        .unwrap_or_else(|_| db_path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
+
+fn source_db_file_stamp(db_path: &Path) -> Result<(u64, Option<SystemTime>), String> {
+    let metadata = fs::metadata(db_path)
+        .map_err(|e| format!("读取原始库文件信息失败:{}，错误:{e}", db_path.display()))?;
+    Ok((metadata.len(), metadata.modified().ok()))
+}
+
+fn quote_sql_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn build_source_db_memory_connection(db_path: &Path) -> Result<Connection, String> {
+    let db_path_str = db_path
+        .to_str()
+        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
+    let conn = Connection::open_in_memory().map_err(|e| format!("创建原始库内存缓存失败:{e}"))?;
+    conn.execute_batch(&format!(
+        "ATTACH {} AS source_disk_db (READ_ONLY)",
+        quote_sql_string(db_path_str)
+    ))
+    .map_err(|e| format!("挂载原始库文件失败:{e}"))?;
+    conn.execute_batch(
+        r#"
+        CREATE TABLE stock_data AS SELECT * FROM source_disk_db.stock_data;
+        CREATE INDEX IF NOT EXISTS idx_stock_data_ts_adj_date
+            ON stock_data(ts_code, adj_type, trade_date);
+        DETACH source_disk_db;
+        "#,
+    )
+    .map_err(|e| format!("加载原始行情库到内存失败:{e}"))?;
+    Ok(conn)
+}
+
+fn build_score_summary_memory_connection(db_path: &Path) -> Result<Connection, String> {
+    let db_path_str = db_path
+        .to_str()
+        .ok_or_else(|| "结果库路径不是有效UTF-8".to_string())?;
+    let conn =
+        Connection::open_in_memory().map_err(|e| format!("创建score_summary内存缓存失败:{e}"))?;
+    conn.execute_batch(&format!(
+        "ATTACH {} AS result_disk_db (READ_ONLY)",
+        quote_sql_string(db_path_str)
+    ))
+    .map_err(|e| format!("挂载结果库文件失败:{e}"))?;
+    conn.execute_batch(
+        r#"
+        CREATE TABLE score_summary AS SELECT * FROM result_disk_db.score_summary;
+        CREATE INDEX IF NOT EXISTS idx_score_summary_cache_ts_date
+            ON score_summary(ts_code, trade_date);
+        CREATE INDEX IF NOT EXISTS idx_score_summary_cache_trade_date_rank_ts
+            ON score_summary(trade_date, rank, ts_code);
+        DETACH result_disk_db;
+        "#,
+    )
+    .map_err(|e| format!("加载score_summary到内存失败:{e}"))?;
+    Ok(conn)
+}
+
+pub fn set_source_db_memory_cache_enabled(enabled: bool) {
+    SOURCE_DB_MEMORY_CACHE_ENABLED.store(enabled, Ordering::Relaxed);
+    if !enabled {
+        clear_source_db_memory_cache();
+        clear_score_summary_memory_cache();
+    }
+}
+
+pub fn source_db_memory_cache_enabled() -> bool {
+    SOURCE_DB_MEMORY_CACHE_ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn clear_source_db_memory_cache() {
+    if let Some(cache) = SOURCE_DB_MEMORY_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            guard.clear();
+        }
+    }
+}
+
+pub fn clear_score_summary_memory_cache() {
+    if let Some(cache) = SCORE_SUMMARY_MEMORY_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            guard.clear();
+        }
+    }
+}
+
+pub fn invalidate_source_db_memory_cache(source_dir: &str) {
+    let db_path = source_db_path(source_dir);
+    let cache_key = normalize_source_db_cache_key(&db_path);
+    if let Some(cache) = SOURCE_DB_MEMORY_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            guard.remove(&cache_key);
+        }
+    }
+}
+
+pub fn invalidate_score_summary_memory_cache(source_dir: &str) {
+    let db_path = result_db_path(source_dir);
+    let cache_key = normalize_source_db_cache_key(&db_path);
+    if let Some(cache) = SCORE_SUMMARY_MEMORY_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            guard.remove(&cache_key);
+        }
+    }
+}
+
+pub fn preload_source_db_memory_cache(source_dir: &str) -> Result<(), String> {
+    let _ = get_cached_source_db_connection(source_dir)?;
+    Ok(())
+}
+
+pub fn preload_score_summary_memory_cache(source_dir: &str) -> Result<(), String> {
+    if !result_db_path(source_dir).exists() {
+        return Ok(());
+    }
+    let _ = get_cached_score_summary_connection(source_dir)?;
+    Ok(())
+}
+
+fn source_db_memory_cache_pool_size() -> usize {
+    rayon::current_num_threads()
+        .max(1)
+        .min(SOURCE_DB_MEMORY_CACHE_MAX_CONNECTIONS)
+}
+
+fn source_db_memory_cache_pool_index(max_connections: usize) -> usize {
+    rayon::current_thread_index()
+        .map(|index| index % max_connections.max(1))
+        .unwrap_or(0)
+}
+
+fn get_cached_source_db_connection(source_dir: &str) -> Result<Arc<Mutex<Connection>>, String> {
+    let db_path = source_db_path(source_dir);
+    let cache_key = normalize_source_db_cache_key(&db_path);
+    let (len, modified) = source_db_file_stamp(&db_path)?;
+    let max_connections = source_db_memory_cache_pool_size();
+
+    let mut cache = source_db_memory_cache()
+        .lock()
+        .map_err(|_| "原始库内存缓存锁已损坏".to_string())?;
+    let entry_is_stale = cache
+        .get(&cache_key)
+        .map(|entry| entry.len != len || entry.modified != modified)
+        .unwrap_or(false);
+    if entry_is_stale {
+        cache.remove(&cache_key);
+    }
+
+    let entry = cache
+        .entry(cache_key)
+        .or_insert_with(|| SourceDbMemoryCacheEntry {
+            db_path: db_path.clone(),
+            connections: Vec::new(),
+            max_connections,
+            len,
+            modified,
+        });
+    entry.max_connections = entry.max_connections.max(max_connections);
+
+    let conn_index = source_db_memory_cache_pool_index(entry.max_connections);
+    while entry.connections.len() <= conn_index {
+        let conn = Arc::new(Mutex::new(build_source_db_memory_connection(
+            &entry.db_path,
+        )?));
+        entry.connections.push(conn);
+    }
+
+    let conn = entry.connections[conn_index].clone();
+    Ok(conn)
+}
+
+fn get_cached_score_summary_connection(source_dir: &str) -> Result<Arc<Mutex<Connection>>, String> {
+    let db_path = result_db_path(source_dir);
+    let cache_key = normalize_source_db_cache_key(&db_path);
+    let (len, modified) = source_db_file_stamp(&db_path)?;
+    let max_connections = source_db_memory_cache_pool_size();
+
+    let mut cache = score_summary_memory_cache()
+        .lock()
+        .map_err(|_| "score_summary内存缓存锁已损坏".to_string())?;
+    let entry_is_stale = cache
+        .get(&cache_key)
+        .map(|entry| entry.len != len || entry.modified != modified)
+        .unwrap_or(false);
+    if entry_is_stale {
+        cache.remove(&cache_key);
+    }
+
+    let entry = cache
+        .entry(cache_key)
+        .or_insert_with(|| SourceDbMemoryCacheEntry {
+            db_path: db_path.clone(),
+            connections: Vec::new(),
+            max_connections,
+            len,
+            modified,
+        });
+    entry.max_connections = entry.max_connections.max(max_connections);
+
+    let conn_index = source_db_memory_cache_pool_index(entry.max_connections);
+    while entry.connections.len() <= conn_index {
+        let conn = Arc::new(Mutex::new(build_score_summary_memory_connection(
+            &entry.db_path,
+        )?));
+        entry.connections.push(conn);
+    }
+
+    let conn = entry.connections[conn_index].clone();
+    Ok(conn)
+}
+
+pub fn open_source_db_connection(source_dir: &str) -> Result<SourceDbConnection, String> {
+    if source_db_memory_cache_enabled() {
+        return Ok(SourceDbConnection::Cached(get_cached_source_db_connection(
+            source_dir,
+        )?));
+    }
+
+    let source_db = source_db_path(source_dir);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
+    let conn = Connection::open(source_db_str).map_err(|e| format!("数据库连接错误:{e}"))?;
+    Ok(SourceDbConnection::Owned(conn))
+}
+
+pub fn open_score_summary_db_connection(
+    source_dir: &str,
+) -> Result<ScoreSummaryDbConnection, String> {
+    if source_db_memory_cache_enabled() {
+        return Ok(ScoreSummaryDbConnection::Cached(
+            get_cached_score_summary_connection(source_dir)?,
+        ));
+    }
+
+    let result_db = result_db_path(source_dir);
+    let result_db_str = result_db
+        .to_str()
+        .ok_or_else(|| "结果库路径不是有效UTF-8".to_string())?;
+    let conn = Connection::open(result_db_str).map_err(|e| format!("结果库连接错误:{e}"))?;
+    Ok(ScoreSummaryDbConnection::Owned(conn))
 }
 
 pub fn result_db_path(source_dir: &str) -> PathBuf {
@@ -346,7 +661,7 @@ fn expr_uses_runtime_key(expr: &Expr, locals: &HashSet<String>, target_key: &str
 }
 
 pub struct DataReader {
-    pub conn: Connection,
+    pub conn: SourceDbConnection,
     pub query_sql: String,
     pub query_tail_rows_sql: String,
     pub cols_table: Vec<(String, String)>, // 数据库列名, runtime规范列名
@@ -368,24 +683,24 @@ impl DataReader {
         source_dir: &str,
         required_runtime_keys: Option<&HashSet<String>>,
     ) -> Result<Self, String> {
-        let source_db = source_db_path(source_dir);
-        let source_db_str = source_db
-            .to_str()
-            .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-        let conn = Connection::open(source_db_str).map_err(|e| format!("数据库连接错误:{e}"))?;
+        let conn = open_source_db_connection(source_dir)?;
 
-        let mut sql_to_colsname = conn
-            .prepare("DESCRIBE stock_data")
-            .map_err(|e| format!("预编译SQL失败:{e}"))?;
-        let mut all_cols = sql_to_colsname
-            .query([])
-            .map_err(|e| format!("执行查询失败:{e}"))?;
+        let all_cols_name = conn.with(|conn| {
+            let mut sql_to_colsname = conn
+                .prepare("DESCRIBE stock_data")
+                .map_err(|e| format!("预编译SQL失败:{e}"))?;
+            let mut all_cols = sql_to_colsname
+                .query([])
+                .map_err(|e| format!("执行查询失败:{e}"))?;
 
-        let mut all_cols_name: Vec<String> = Vec::with_capacity(128);
-        while let Some(col) = all_cols.next().map_err(|e| format!("读取表名失败:{e}"))? {
-            let name: String = col.get(0).map_err(|e| format!("读取列名失败:{e}"))?;
-            all_cols_name.push(name);
-        }
+            let mut all_cols_name: Vec<String> = Vec::with_capacity(128);
+            while let Some(col) = all_cols.next().map_err(|e| format!("读取表名失败:{e}"))? {
+                let name: String = col.get(0).map_err(|e| format!("读取列名失败:{e}"))?;
+                all_cols_name.push(name);
+            }
+
+            Ok(all_cols_name)
+        })?;
 
         let base_pairs = [
             ("open", "O"),
@@ -495,36 +810,38 @@ impl DataReader {
         start_date: &str,
         end_date: &str,
     ) -> Result<RowData, String> {
-        let mut stmt = self
-            .conn
-            .prepare_cached(&self.query_sql)
-            .map_err(|e| format!("预编译SQL失败:{e}"))?;
-        let mut rows = stmt
-            .query(params![ts_code, adj_type, start_date, end_date])
-            .map_err(|e| format!("执行查询失败:{e}"))?;
+        self.conn.with(|conn| {
+            let mut stmt = conn
+                .prepare_cached(&self.query_sql)
+                .map_err(|e| format!("预编译SQL失败:{e}"))?;
+            let mut rows = stmt
+                .query(params![ts_code, adj_type, start_date, end_date])
+                .map_err(|e| format!("执行查询失败:{e}"))?;
 
-        let mut trade_dates = Vec::new();
-        let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
-        for (_, key) in &self.cols_table {
-            cols.entry(key.clone()).or_default();
-        }
+            let mut trade_dates = Vec::new();
+            let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
+            for (_, key) in &self.cols_table {
+                cols.entry(key.clone()).or_default();
+            }
 
-        while let Some(row) = rows.next().map_err(|e| format!("读取数据行失败:{e}"))? {
-            let trade_date: String = row.get(0).map_err(|e| format!("读取trade_date失败:{e}"))?;
-            trade_dates.push(trade_date);
+            while let Some(row) = rows.next().map_err(|e| format!("读取数据行失败:{e}"))? {
+                let trade_date: String =
+                    row.get(0).map_err(|e| format!("读取trade_date失败:{e}"))?;
+                trade_dates.push(trade_date);
 
-            for (i, (_, key)) in self.cols_table.iter().enumerate() {
-                let value: Option<f64> =
-                    row.get(i + 1).map_err(|e| format!("读取{}失败:{e}", key))?;
-                if let Some(series) = cols.get_mut(key) {
-                    series.push(value);
+                for (i, (_, key)) in self.cols_table.iter().enumerate() {
+                    let value: Option<f64> =
+                        row.get(i + 1).map_err(|e| format!("读取{}失败:{e}", key))?;
+                    if let Some(series) = cols.get_mut(key) {
+                        series.push(value);
+                    }
                 }
             }
-        }
 
-        let out = RowData { trade_dates, cols };
-        out.validate()?;
-        Ok(out)
+            let out = RowData { trade_dates, cols };
+            out.validate()?;
+            Ok(out)
+        })
     }
 
     pub fn load_one_tail_rows(
@@ -538,41 +855,43 @@ impl DataReader {
             return Err("need_rows不能为0".to_string());
         }
 
-        let mut stmt = self
-            .conn
-            .prepare_cached(&self.query_tail_rows_sql)
-            .map_err(|e| format!("预编译SQL失败:{e}"))?;
-        let mut rows = stmt
-            .query(params![ts_code, adj_type, end_date, need_rows as i64])
-            .map_err(|e| format!("执行查询失败:{e}"))?;
+        self.conn.with(|conn| {
+            let mut stmt = conn
+                .prepare_cached(&self.query_tail_rows_sql)
+                .map_err(|e| format!("预编译SQL失败:{e}"))?;
+            let mut rows = stmt
+                .query(params![ts_code, adj_type, end_date, need_rows as i64])
+                .map_err(|e| format!("执行查询失败:{e}"))?;
 
-        let mut trade_dates = Vec::new();
-        let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
-        for (_, key) in &self.cols_table {
-            cols.entry(key.clone()).or_default();
-        }
+            let mut trade_dates = Vec::new();
+            let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
+            for (_, key) in &self.cols_table {
+                cols.entry(key.clone()).or_default();
+            }
 
-        while let Some(row) = rows.next().map_err(|e| format!("读取数据行失败:{e}"))? {
-            let trade_date: String = row.get(0).map_err(|e| format!("读取trade_date失败:{e}"))?;
-            trade_dates.push(trade_date);
+            while let Some(row) = rows.next().map_err(|e| format!("读取数据行失败:{e}"))? {
+                let trade_date: String =
+                    row.get(0).map_err(|e| format!("读取trade_date失败:{e}"))?;
+                trade_dates.push(trade_date);
 
-            for (i, (_, key)) in self.cols_table.iter().enumerate() {
-                let value: Option<f64> =
-                    row.get(i + 1).map_err(|e| format!("读取{}失败:{e}", key))?;
-                if let Some(series) = cols.get_mut(key) {
-                    series.push(value);
+                for (i, (_, key)) in self.cols_table.iter().enumerate() {
+                    let value: Option<f64> =
+                        row.get(i + 1).map_err(|e| format!("读取{}失败:{e}", key))?;
+                    if let Some(series) = cols.get_mut(key) {
+                        series.push(value);
+                    }
                 }
             }
-        }
 
-        trade_dates.reverse();
-        for series in cols.values_mut() {
-            series.reverse();
-        }
+            trade_dates.reverse();
+            for series in cols.values_mut() {
+                series.reverse();
+            }
 
-        let out = RowData { trade_dates, cols };
-        out.validate()?;
-        Ok(out)
+            let out = RowData { trade_dates, cols };
+            out.validate()?;
+            Ok(out)
+        })
     }
 
     pub fn load_batch(
@@ -614,44 +933,47 @@ impl DataReader {
             escaped.join(", ")
         );
 
-        let mut stmt = self
-            .conn
-            .prepare(&sql)
-            .map_err(|e| format!("预编译批量查询SQL失败:{e}"))?;
-        let mut rows = stmt
-            .query(params![adj_type, start_date, end_date])
-            .map_err(|e| format!("执行批量查询失败:{e}"))?;
+        self.conn.with(|conn| {
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| format!("预编译批量查询SQL失败:{e}"))?;
+            let mut rows = stmt
+                .query(params![adj_type, start_date, end_date])
+                .map_err(|e| format!("执行批量查询失败:{e}"))?;
 
-        let mut result: HashMap<String, RowData> = HashMap::new();
-        while let Some(row) = rows.next().map_err(|e| format!("读取批量数据行失败:{e}"))? {
-            let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
-            let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
+            let mut result: HashMap<String, RowData> = HashMap::new();
+            while let Some(row) = rows.next().map_err(|e| format!("读取批量数据行失败:{e}"))?
+            {
+                let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
+                let trade_date: String =
+                    row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
 
-            let entry = result.entry(ts_code).or_insert_with(|| {
-                let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
-                for (_, key) in &self.cols_table {
-                    cols.insert(key.clone(), Vec::new());
-                }
-                RowData {
-                    trade_dates: Vec::new(),
-                    cols,
-                }
-            });
+                let entry = result.entry(ts_code).or_insert_with(|| {
+                    let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
+                    for (_, key) in &self.cols_table {
+                        cols.insert(key.clone(), Vec::new());
+                    }
+                    RowData {
+                        trade_dates: Vec::new(),
+                        cols,
+                    }
+                });
 
-            entry.trade_dates.push(trade_date);
+                entry.trade_dates.push(trade_date);
 
-            for (i, (_, key)) in self.cols_table.iter().enumerate() {
-                let value: Option<f64> =
-                    row.get(i + 2).map_err(|e| format!("读取{}失败:{e}", key))?;
-                if let Some(series) = entry.cols.get_mut(key) {
-                    series.push(value);
+                for (i, (_, key)) in self.cols_table.iter().enumerate() {
+                    let value: Option<f64> =
+                        row.get(i + 2).map_err(|e| format!("读取{}失败:{e}", key))?;
+                    if let Some(series) = entry.cols.get_mut(key) {
+                        series.push(value);
+                    }
                 }
             }
-        }
 
-        result.retain(|_, row_data| !row_data.trade_dates.is_empty());
+            result.retain(|_, row_data| !row_data.trade_dates.is_empty());
 
-        Ok(result)
+            Ok(result)
+        })
     }
 
     pub fn list_ts_code(
@@ -669,21 +991,22 @@ impl DataReader {
             ORDER BY ts_code ASC
         "#;
 
-        let mut list = Vec::with_capacity(512);
-        let mut stmt = self
-            .conn
-            .prepare(sql)
-            .map_err(|e| format!("sql预编译失败:{e}"))?;
-        let mut rows = stmt
-            .query(params![adj_type, start_date, end_date])
-            .map_err(|e| format!("数据库查询失败:{e}"))?;
+        self.conn.with(|conn| {
+            let mut list = Vec::with_capacity(512);
+            let mut stmt = conn
+                .prepare(sql)
+                .map_err(|e| format!("sql预编译失败:{e}"))?;
+            let mut rows = stmt
+                .query(params![adj_type, start_date, end_date])
+                .map_err(|e| format!("数据库查询失败:{e}"))?;
 
-        while let Some(row) = rows.next().map_err(|e| format!("{e}"))? {
-            let ts_code: String = row.get(0).map_err(|e| format!("{e}"))?;
-            list.push(ts_code);
-        }
+            while let Some(row) = rows.next().map_err(|e| format!("{e}"))? {
+                let ts_code: String = row.get(0).map_err(|e| format!("{e}"))?;
+                list.push(ts_code);
+            }
 
-        Ok(list)
+            Ok(list)
+        })
     }
 }
 

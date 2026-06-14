@@ -6,15 +6,18 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use lianghua_rs::ui_tools_feat::{
-    data_import::{
-        copy_directory_recursive, managed_source_file_name, resolve_managed_source_file_path,
-        resolve_source_root, validate_target_relative_path,
-    },
-    data_viewer::{
-        preview_managed_source_dataset as core_preview_managed_source_dataset,
-        preview_managed_source_stock_data as core_preview_managed_source_stock_data,
-        ManagedSourceDatasetPreviewResult, ManagedSourceDbPreviewResult,
+use lianghua_rs::{
+    data::invalidate_source_db_memory_cache,
+    ui_tools_feat::{
+        data_import::{
+            copy_directory_recursive, managed_source_file_name, resolve_managed_source_file_path,
+            resolve_source_root, validate_target_relative_path,
+        },
+        data_viewer::{
+            preview_managed_source_dataset as core_preview_managed_source_dataset,
+            preview_managed_source_stock_data as core_preview_managed_source_stock_data,
+            ManagedSourceDatasetPreviewResult, ManagedSourceDbPreviewResult,
+        },
     },
 };
 use serde::{Deserialize, Serialize};
@@ -335,6 +338,32 @@ fn strip_archive_root(entry_path: &Path, archive_root: &str) -> PathBuf {
     entry_path.to_path_buf()
 }
 
+fn invalidate_stock_data_cache_for_source_path(source_root: &Path) {
+    if let Some(source_root_str) = source_root.to_str() {
+        invalidate_source_db_memory_cache(source_root_str);
+    }
+}
+
+fn invalidate_stock_data_cache_for_import_target(app: &tauri::AppHandle, target_relative_path: &str) {
+    let target_path = Path::new(target_relative_path);
+    let Some(file_name) = target_path.file_name().and_then(|value| value.to_str()) else {
+        return;
+    };
+    if !file_name.eq_ignore_ascii_case("stock_data.db") {
+        return;
+    }
+
+    let Ok(abs_target_path) = app
+        .path()
+        .resolve(target_relative_path, tauri::path::BaseDirectory::AppData)
+    else {
+        return;
+    };
+    if let Some(source_root) = abs_target_path.parent() {
+        invalidate_stock_data_cache_for_source_path(source_root);
+    }
+}
+
 fn import_managed_source_zip_inner(
     app: tauri::AppHandle,
     source_dir: String,
@@ -418,6 +447,7 @@ fn import_managed_source_zip_inner(
         target.flush().map_err(|error| error.to_string())?;
         extracted_file_count += 1;
     }
+    invalidate_stock_data_cache_for_source_path(&source_root);
 
     Ok(ManagedSourceZipImportResult {
         source_path: source_root.display().to_string(),
@@ -1371,6 +1401,7 @@ pub async fn copy_import_file_to_appdata(
         );
     } else {
         log::info!("finished import copy to {}", target_for_log);
+        invalidate_stock_data_cache_for_import_target(&app, &target_for_log);
     }
 
     result

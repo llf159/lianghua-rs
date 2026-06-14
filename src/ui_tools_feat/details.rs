@@ -8,10 +8,13 @@ use duckdb::{Connection, params};
 use serde::Serialize;
 
 use crate::{
-    data::{RowData, ScoreConfig},
+    data::{
+        RowData, ScoreConfig, ScoreSummaryDbConnection, SourceDbConnection,
+        open_score_summary_db_connection, open_source_db_connection,
+    },
     data::{
         cyq_chen_data::init_cyq_chen_db, cyq_chen_db_path, cyq_db_path, result_db_path,
-        score_rule_path, source_db_path,
+        score_rule_path,
     },
     download::ind_calc::{cache_ind_build, calc_inds_with_cache},
     scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map},
@@ -24,10 +27,7 @@ use crate::{
             load_compiled_chart_indicator_config,
         },
         realtime::{RealtimeFetchMeta, fetch_realtime_quote_map, normalize_quote_trade_date},
-        stock_similarity::{
-            StockSimilarityMaps, StockSimilarityPageData,
-            get_stock_similarity_page_with_conn_and_maps,
-        },
+        stock_similarity::StockSimilarityPageData,
     },
     utils::utils::board_category,
 };
@@ -195,6 +195,7 @@ pub struct StockDetailStrategySnapshotData {
     pub resolved_trade_date: Option<String>,
     pub resolved_ts_code: Option<String>,
     pub strategy_triggers: Option<DetailStrategyPayload>,
+    pub strategy_scenes: Option<DetailScenePayload>,
 }
 
 #[derive(Debug, Serialize)]
@@ -323,14 +324,6 @@ impl DetailSourceMeta {
                 .unwrap_or_default(),
         }
     }
-
-    fn similarity_maps(&self) -> StockSimilarityMaps<'_> {
-        StockSimilarityMaps {
-            name_map: &self.name_map,
-            concept_map: &self.concept_map,
-            industry_map: &self.industry_map,
-        }
-    }
 }
 
 fn resolve_trade_date(conn: &Connection, trade_date: Option<String>) -> Result<String, String> {
@@ -372,12 +365,13 @@ fn open_result_conn(source_path: &str) -> Result<Connection, String> {
     Connection::open(result_db_str).map_err(|e| format!("打开结果库失败: {e}"))
 }
 
-fn open_source_conn(source_path: &str) -> Result<Connection, String> {
-    let source_db = source_db_path(source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
-    Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))
+fn open_score_summary_conn(source_path: &str) -> Result<ScoreSummaryDbConnection, String> {
+    open_score_summary_db_connection(source_path)
+        .map_err(|e| format!("打开score_summary缓存失败: {e}"))
+}
+
+fn open_source_conn(source_path: &str) -> Result<SourceDbConnection, String> {
+    open_source_db_connection(source_path).map_err(|e| format!("打开原始库失败: {e}"))
 }
 
 fn open_cyq_conn(source_path: &str) -> Result<Option<Connection>, String> {
@@ -919,37 +913,39 @@ fn query_rank_history(
 }
 
 fn query_latest_kline_trade_date(
-    source_conn: &Connection,
+    source_conn: &SourceDbConnection,
     ts_code: &str,
 ) -> Result<String, String> {
-    let mut stmt = source_conn
-        .prepare(
-            r#"
-            SELECT MAX(trade_date)
-            FROM stock_data
-            WHERE ts_code = ? AND adj_type = ?
-            "#,
-        )
-        .map_err(|e| format!("预编译最新K线日期失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![ts_code, DEFAULT_ADJ_TYPE])
-        .map_err(|e| format!("查询最新K线日期失败: {e}"))?;
+    source_conn.with(|conn| {
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT MAX(trade_date)
+                FROM stock_data
+                WHERE ts_code = ? AND adj_type = ?
+                "#,
+            )
+            .map_err(|e| format!("预编译最新K线日期失败: {e}"))?;
+        let mut rows = stmt
+            .query(params![ts_code, DEFAULT_ADJ_TYPE])
+            .map_err(|e| format!("查询最新K线日期失败: {e}"))?;
 
-    if let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取最新K线日期失败: {e}"))?
-    {
-        let trade_date: Option<String> = row
-            .get(0)
-            .map_err(|e| format!("读取最新K线日期字段失败: {e}"))?;
-        if let Some(value) = trade_date {
-            if !value.trim().is_empty() {
-                return Ok(value);
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取最新K线日期失败: {e}"))?
+        {
+            let trade_date: Option<String> = row
+                .get(0)
+                .map_err(|e| format!("读取最新K线日期字段失败: {e}"))?;
+            if let Some(value) = trade_date {
+                if !value.trim().is_empty() {
+                    return Ok(value);
+                }
             }
         }
-    }
 
-    Err(format!("{ts_code} 没有可用K线日期"))
+        Err(format!("{ts_code} 没有可用K线日期"))
+    })
 }
 
 fn build_basic_detail_overview(
@@ -1286,44 +1282,46 @@ fn load_chart_indicator_rank_series_map(
     start_date: &str,
     end_date: &str,
 ) -> HashMap<String, ChartIndicatorRankScoreValues> {
-    let result_db = result_db_path(source_path);
-    if !result_db.exists() {
+    if !result_db_path(source_path).exists() {
         return HashMap::new();
     }
 
-    let Some(result_db_str) = result_db.to_str() else {
+    let Ok(conn) = open_score_summary_conn(source_path) else {
         return HashMap::new();
     };
-    let Ok(conn) = Connection::open(result_db_str) else {
-        return HashMap::new();
-    };
-    let Ok(mut stmt) = conn.prepare(
-        r#"
-        SELECT trade_date, rank, total_score
-        FROM score_summary
-        WHERE ts_code = ? AND trade_date >= ? AND trade_date <= ?
-        "#,
-    ) else {
-        return HashMap::new();
-    };
-    let Ok(mut rows) = stmt.query(params![ts_code, start_date, end_date]) else {
-        return HashMap::new();
-    };
+    conn.with(|conn| {
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT trade_date, rank, total_score
+                FROM score_summary
+                WHERE ts_code = ? AND trade_date >= ? AND trade_date <= ?
+                "#,
+            )
+            .map_err(|_| "预编译图表排名序列失败".to_string())?;
+        let mut rows = stmt
+            .query(params![ts_code, start_date, end_date])
+            .map_err(|_| "查询图表排名序列失败".to_string())?;
 
-    let mut out = HashMap::new();
-    while let Ok(Some(row)) = rows.next() {
-        let Ok(trade_date) = row.get::<_, String>(0) else {
-            continue;
-        };
-        let rank = row
-            .get::<_, Option<i64>>(1)
-            .ok()
-            .flatten()
-            .map(|value| value as f64);
-        let score = row.get::<_, Option<f64>>(2).ok().flatten();
-        out.insert(trade_date, ChartIndicatorRankScoreValues { rank, score });
-    }
-    out
+        let mut out = HashMap::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|_| "读取图表排名序列失败".to_string())?
+        {
+            let trade_date = row
+                .get::<_, String>(0)
+                .map_err(|_| "读取图表排名日期失败".to_string())?;
+            let rank = row
+                .get::<_, Option<i64>>(1)
+                .ok()
+                .flatten()
+                .map(|value| value as f64);
+            let score = row.get::<_, Option<f64>>(2).ok().flatten();
+            out.insert(trade_date, ChartIndicatorRankScoreValues { rank, score });
+        }
+        Ok(out)
+    })
+    .unwrap_or_default()
 }
 
 pub(crate) fn query_kline(
@@ -1467,6 +1465,24 @@ pub(crate) fn query_kline(
         chart_height: Some(820),
         watermark_name,
         watermark_code: Some(split_ts_code(ts_code)),
+    })
+}
+
+fn query_kline_from_source_conn(
+    source_conn: &SourceDbConnection,
+    source_path: &str,
+    ts_code: &str,
+    default_window_days: usize,
+    watermark_name: Option<String>,
+) -> Result<DetailKlinePayload, String> {
+    source_conn.with(|conn| {
+        query_kline(
+            conn,
+            source_path,
+            ts_code,
+            default_window_days,
+            watermark_name,
+        )
     })
 }
 
@@ -2107,8 +2123,8 @@ pub fn get_stock_detail_page(
 ) -> Result<StockDetailPageData, String> {
     let normalized_ts_code = normalize_ts_code(&ts_code);
     let source_conn = open_source_conn(&source_path)?;
-    let result_conn = if result_db_path(&source_path).exists() {
-        open_result_conn(&source_path).ok()
+    let score_summary_conn = if result_db_path(&source_path).exists() {
+        open_score_summary_conn(&source_path).ok()
     } else {
         None
     };
@@ -2119,81 +2135,68 @@ pub fn get_stock_detail_page(
         .map(str::to_string);
     let effective_trade_date = if let Some(value) = requested_trade_date {
         value
-    } else if let Some(conn) = result_conn.as_ref() {
-        resolve_trade_date(conn, None)
+    } else if let Some(conn) = score_summary_conn.as_ref() {
+        conn.with(|conn| resolve_trade_date(conn, None))
             .or_else(|_| query_latest_kline_trade_date(&source_conn, &normalized_ts_code))?
     } else {
         query_latest_kline_trade_date(&source_conn, &normalized_ts_code)?
     };
     let source_meta = DetailSourceMeta::load(&source_path);
 
-    let overview = match result_conn.as_ref() {
-        Some(conn) => query_detail_overview(
-            conn,
-            &source_meta,
-            &effective_trade_date,
-            &normalized_ts_code,
-        )
-        .unwrap_or_else(|_| {
-            build_basic_detail_overview(&source_meta, &effective_trade_date, &normalized_ts_code)
-        }),
+    let overview = match score_summary_conn.as_ref() {
+        Some(conn) => conn
+            .with(|conn| {
+                query_detail_overview(
+                    conn,
+                    &source_meta,
+                    &effective_trade_date,
+                    &normalized_ts_code,
+                )
+            })
+            .unwrap_or_else(|_| {
+                build_basic_detail_overview(
+                    &source_meta,
+                    &effective_trade_date,
+                    &normalized_ts_code,
+                )
+            }),
         None => {
             build_basic_detail_overview(&source_meta, &effective_trade_date, &normalized_ts_code)
         }
     };
 
-    let prev_ranks = match result_conn.as_ref() {
-        Some(conn) => query_rank_history(
-            conn,
-            &normalized_ts_code,
-            prev_rank_days
-                .map(|value| value as usize)
-                .filter(|value| *value > 0),
-        )
-        .unwrap_or_default(),
+    let prev_ranks = match score_summary_conn.as_ref() {
+        Some(conn) => conn
+            .with(|conn| {
+                query_rank_history(
+                    conn,
+                    &normalized_ts_code,
+                    prev_rank_days
+                        .map(|value| value as usize)
+                        .filter(|value| *value > 0),
+                )
+            })
+            .unwrap_or_default(),
         None => Vec::new(),
     };
-    let (stock_similarity, stock_similarity_error) = match result_conn.as_ref() {
-        Some(conn) => match get_stock_similarity_page_with_conn_and_maps(
-            conn,
-            &effective_trade_date,
-            &normalized_ts_code,
-            Some(12),
-            source_meta.similarity_maps(),
-        ) {
-            Ok(data) => (Some(data), None),
-            Err(error) => (None, Some(error)),
-        },
-        None => (None, None),
-    };
-    let kline = query_kline(
+    let kline = query_kline_from_source_conn(
         &source_conn,
         &source_path,
         &normalized_ts_code,
         chart_window_days.unwrap_or(280) as usize,
         overview.name.clone(),
     )?;
-    let trigger_snapshot = result_conn
-        .as_ref()
-        .and_then(|conn| {
-            load_detail_trigger_snapshot(conn, &normalized_ts_code, &effective_trade_date).ok()
-        })
-        .unwrap_or_default();
-    let strategy_triggers =
-        build_strategy_triggers(&source_path, &effective_trade_date, &trigger_snapshot)?;
-    let strategy_scenes =
-        build_scene_triggers(&source_path, &effective_trade_date, &trigger_snapshot)?;
 
     Ok(StockDetailPageData {
         resolved_trade_date: Some(effective_trade_date),
         resolved_ts_code: Some(normalized_ts_code),
         overview: Some(overview),
         prev_ranks: Some(prev_ranks),
-        stock_similarity,
-        stock_similarity_error,
+        stock_similarity: None,
+        stock_similarity_error: None,
         kline: Some(kline),
-        strategy_triggers: Some(strategy_triggers),
-        strategy_scenes: Some(strategy_scenes),
+        strategy_triggers: None,
+        strategy_scenes: None,
     })
 }
 
@@ -2209,11 +2212,14 @@ pub fn get_stock_detail_strategy_snapshot(
         load_detail_trigger_snapshot(&result_conn, &normalized_ts_code, &effective_trade_date)?;
     let strategy_triggers =
         build_strategy_triggers(&source_path, &effective_trade_date, &trigger_snapshot)?;
+    let strategy_scenes =
+        build_scene_triggers(&source_path, &effective_trade_date, &trigger_snapshot)?;
 
     Ok(StockDetailStrategySnapshotData {
         resolved_trade_date: Some(effective_trade_date),
         resolved_ts_code: Some(normalized_ts_code),
         strategy_triggers: Some(strategy_triggers),
+        strategy_scenes: Some(strategy_scenes),
     })
 }
 
@@ -2267,7 +2273,7 @@ pub fn build_stock_detail_realtime_from_quote_map(
     let source_conn = open_source_conn(&source_path)?;
     let name_map = build_name_map(&source_path).unwrap_or_default();
     let watermark_name = name_map.get(&normalized_ts_code).cloned();
-    let kline = query_kline(
+    let kline = query_kline_from_source_conn(
         &source_conn,
         &source_path,
         &normalized_ts_code,
@@ -2279,13 +2285,15 @@ pub fn build_stock_detail_realtime_from_quote_map(
         .ok_or_else(|| format!("未获取到 {} 的实时行情", normalized_ts_code))?;
     let (mut kline, has_database_trade_date) = merge_realtime_kline(kline, quote);
     if let Some(items) = kline.items.as_mut() {
-        rerun_realtime_chart_indicators(
-            &source_conn,
-            &source_path,
-            &normalized_ts_code,
-            items,
-            quote.pre_close,
-        )?;
+        source_conn.with(|conn| {
+            rerun_realtime_chart_indicators(
+                conn,
+                &source_path,
+                &normalized_ts_code,
+                items,
+                quote.pre_close,
+            )
+        })?;
     }
 
     Ok(StockDetailRealtimeData {
