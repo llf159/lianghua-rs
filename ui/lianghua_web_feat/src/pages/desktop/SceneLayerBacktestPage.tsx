@@ -92,6 +92,8 @@ type BacktestCommonParamsDraft = {
   minSamplesPerDay: string;
   minListedTradeDays: string;
   backtestPeriod: string;
+  totalMvMin: string;
+  totalMvMax: string;
   rankLayerCount: string;
   rankLayerMethod: RankLayerMethod;
   backtestBoardFilter: (typeof STOCK_PICK_BOARD_OPTIONS)[number];
@@ -151,6 +153,36 @@ function formatBacktestBoardLabel(value?: {
   return [value?.resolved_board ?? "不限", value?.exclude_st_board ? "排除ST" : ""]
     .filter(Boolean)
     .join(" / ");
+}
+
+function formatMarketValueRange(value?: {
+  total_mv_min?: number | null;
+  total_mv_max?: number | null;
+}) {
+  const minValue = value?.total_mv_min;
+  const maxValue = value?.total_mv_max;
+  if (
+    (minValue === null || minValue === undefined || !Number.isFinite(minValue)) &&
+    (maxValue === null || maxValue === undefined || !Number.isFinite(maxValue))
+  ) {
+    return "不限";
+  }
+  const minText = minValue !== null && minValue !== undefined && Number.isFinite(minValue)
+    ? `${formatNumber(minValue, 0)}亿`
+    : "-∞";
+  const maxText = maxValue !== null && maxValue !== undefined && Number.isFinite(maxValue)
+    ? `${formatNumber(maxValue, 0)}亿`
+    : "+∞";
+  return `${minText} ~ ${maxText}`;
+}
+
+function parseOptionalNumberInput(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function formatRate(value?: number | null, digits = 1) {
@@ -376,6 +408,8 @@ const DEFAULT_BACKTEST_COMMON_PARAMS: BacktestCommonParamsDraft = {
   minSamplesPerDay: "5",
   minListedTradeDays: "60",
   backtestPeriod: "3",
+  totalMvMin: "",
+  totalMvMax: "",
   rankLayerCount: "5",
   rankLayerMethod: "sample_count",
   backtestBoardFilter: "全部",
@@ -424,6 +458,8 @@ function readStoredBacktestCommonParams(): StoredBacktestCommonParams {
       DEFAULT_BACKTEST_COMMON_PARAMS.minListedTradeDays,
     ),
     backtestPeriod: normalizeStoredString(parsed?.backtestPeriod, DEFAULT_BACKTEST_COMMON_PARAMS.backtestPeriod),
+    totalMvMin: normalizeStoredString(parsed?.totalMvMin, DEFAULT_BACKTEST_COMMON_PARAMS.totalMvMin),
+    totalMvMax: normalizeStoredString(parsed?.totalMvMax, DEFAULT_BACKTEST_COMMON_PARAMS.totalMvMax),
     rankLayerCount: normalizeStoredString(parsed?.rankLayerCount, DEFAULT_BACKTEST_COMMON_PARAMS.rankLayerCount),
     rankLayerMethod: normalizeRankLayerMethod(parsed?.rankLayerMethod),
     backtestBoardFilter: parsedBoardFilter,
@@ -442,6 +478,8 @@ function writeStoredBacktestCommonParams(value: BacktestCommonParamsDraft) {
     minSamplesPerDay: value.minSamplesPerDay,
     minListedTradeDays: value.minListedTradeDays,
     backtestPeriod: value.backtestPeriod,
+    totalMvMin: value.totalMvMin,
+    totalMvMax: value.totalMvMax,
     rankLayerCount: value.rankLayerCount,
     rankLayerMethod: value.rankLayerMethod,
     backtestBoardFilter: value.backtestBoardFilter,
@@ -487,6 +525,8 @@ export default function SceneLayerBacktestPage() {
   const [minSamplesPerDay, setMinSamplesPerDay] = useState(storedCommonParams.minSamplesPerDay);
   const [minListedTradeDays, setMinListedTradeDays] = useState(storedCommonParams.minListedTradeDays);
   const [backtestPeriod, setBacktestPeriod] = useState(storedCommonParams.backtestPeriod);
+  const [totalMvMin, setTotalMvMin] = useState(storedCommonParams.totalMvMin);
+  const [totalMvMax, setTotalMvMax] = useState(storedCommonParams.totalMvMax);
   const [rankLayerCount, setRankLayerCount] = useState(storedCommonParams.rankLayerCount);
   const [rankLayerMethod, setRankLayerMethod] = useState<RankLayerMethod>(
     storedCommonParams.rankLayerMethod,
@@ -597,6 +637,8 @@ export default function SceneLayerBacktestPage() {
       minSamplesPerDay,
       minListedTradeDays,
       backtestPeriod,
+      totalMvMin,
+      totalMvMax,
       rankLayerCount,
       rankLayerMethod,
       backtestBoardFilter,
@@ -612,6 +654,8 @@ export default function SceneLayerBacktestPage() {
     minSamplesPerDay,
     minListedTradeDays,
     backtestPeriod,
+    totalMvMin,
+    totalMvMax,
     rankLayerCount,
     rankLayerMethod,
     backtestBoardFilter,
@@ -960,6 +1004,29 @@ export default function SceneLayerBacktestPage() {
     );
   }
 
+  function readManualMarketValueFilter(setMessage: (message: string) => void) {
+    const minText = totalMvMin.trim();
+    const maxText = totalMvMax.trim();
+    const parsedMin = parseOptionalNumberInput(minText);
+    const parsedMax = parseOptionalNumberInput(maxText);
+    if (minText && parsedMin === undefined) {
+      setMessage("总市值最小值必须是数字。");
+      return null;
+    }
+    if (maxText && parsedMax === undefined) {
+      setMessage("总市值最大值必须是数字。");
+      return null;
+    }
+    if (parsedMin !== undefined && parsedMax !== undefined && parsedMin > parsedMax) {
+      setMessage("总市值最小值不能大于最大值。");
+      return null;
+    }
+    return {
+      totalMvMin: parsedMin,
+      totalMvMax: parsedMax,
+    };
+  }
+
   async function onRunBacktest() {
     const normalizedStart = normalizeDateInput(startDateInput);
     const normalizedEnd = normalizeDateInput(endDateInput);
@@ -978,6 +1045,10 @@ export default function SceneLayerBacktestPage() {
     }
     if (normalizedStart > normalizedEnd) {
       setError("开始日期不能晚于结束日期。");
+      return;
+    }
+    const marketValueFilter = readManualMarketValueFilter(setError);
+    if (!marketValueFilter) {
       return;
     }
 
@@ -999,6 +1070,7 @@ export default function SceneLayerBacktestPage() {
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
         board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
         excludeStBoard: excludeStBoard || undefined,
+        ...marketValueFilter,
       });
       setResult(data);
     } catch (runError) {
@@ -1029,6 +1101,10 @@ export default function SceneLayerBacktestPage() {
       setError("开始日期不能晚于结束日期。");
       return;
     }
+    const marketValueFilter = readManualMarketValueFilter(setError);
+    if (!marketValueFilter) {
+      return;
+    }
 
     setResult(null);
     setTransientLoading(true);
@@ -1048,6 +1124,7 @@ export default function SceneLayerBacktestPage() {
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
         board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
         excludeStBoard: excludeStBoard || undefined,
+        ...marketValueFilter,
       });
       setResult(data);
     } catch (runError) {
@@ -1198,6 +1275,10 @@ export default function SceneLayerBacktestPage() {
       setRuleError("开始日期不能晚于结束日期。");
       return;
     }
+    const marketValueFilter = readManualMarketValueFilter(setRuleError);
+    if (!marketValueFilter) {
+      return;
+    }
 
     setRuleResult(null);
     writeTransientStrategyBacktestResult(null);
@@ -1218,6 +1299,7 @@ export default function SceneLayerBacktestPage() {
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
         board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
         excludeStBoard: excludeStBoard || undefined,
+        ...marketValueFilter,
       });
       const compacted = compactRuleLayerBacktestPayload(data);
       setRuleResult(compacted);
@@ -1251,6 +1333,10 @@ export default function SceneLayerBacktestPage() {
       setRuleError("开始日期不能晚于结束日期。");
       return;
     }
+    const marketValueFilter = readManualMarketValueFilter(setRuleError);
+    if (!marketValueFilter) {
+      return;
+    }
 
     setRuleResult(null);
     writeTransientStrategyBacktestResult(null);
@@ -1271,6 +1357,7 @@ export default function SceneLayerBacktestPage() {
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
         board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
         excludeStBoard: excludeStBoard || undefined,
+        ...marketValueFilter,
       });
       const compacted = compactRuleLayerBacktestPayload(data);
       setRuleResult(compacted);
@@ -1370,6 +1457,10 @@ export default function SceneLayerBacktestPage() {
     }
     if (normalizedStart > normalizedEnd) {
       setValidationError("开始日期不能晚于结束日期。");
+      return;
+    }
+    const marketValueFilter = readManualMarketValueFilter(setValidationError);
+    if (!marketValueFilter) {
       return;
     }
     if (!validationExpression.trim()) {
@@ -1485,6 +1576,7 @@ export default function SceneLayerBacktestPage() {
         sampleLimitPerGroup,
         board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
         excludeStBoard: excludeStBoard || undefined,
+        ...marketValueFilter,
       });
       const compacted = compactRuleExpressionValidationData(data);
       setValidationResult(compacted);
@@ -1748,6 +1840,14 @@ export default function SceneLayerBacktestPage() {
             <input type="number" min="1" value={backtestPeriod} onChange={(event) => setBacktestPeriod(event.target.value)} />
           </label>
           <label className="scene-layer-field">
+            <span>总市值最小(亿)</span>
+            <input type="number" min="0" step="1" value={totalMvMin} onChange={(event) => setTotalMvMin(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>总市值最大(亿)</span>
+            <input type="number" min="0" step="1" value={totalMvMax} onChange={(event) => setTotalMvMax(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
             <span>限定板块</span>
             <select
               value={backtestBoardFilter}
@@ -1814,6 +1914,7 @@ export default function SceneLayerBacktestPage() {
                       <th>指数</th>
                       <th>Beta（指/概/行）</th>
                       <th>限定板块</th>
+                      <th>市值区分</th>
                       <th>有效交易日</th>
                       <th>总样本数</th>
                       <th>最小样本阈值</th>
@@ -1830,6 +1931,7 @@ export default function SceneLayerBacktestPage() {
                       <td>{rankResult.index_ts_code}</td>
                       <td>{formatNumber(rankResult.index_beta, 2)} / {formatNumber(rankResult.concept_beta, 2)} / {formatNumber(rankResult.industry_beta, 2)}</td>
                       <td>{formatBacktestBoardLabel(rankResult)}</td>
+                      <td>{rankResult.market_value_grouping ? "默认分组聚合" : "不区分"}</td>
                       <td>{rankResult.point_count}</td>
                       <td>{rankResult.sample_count}</td>
                       <td>{rankResult.min_samples_per_rank_day}</td>
@@ -1898,6 +2000,40 @@ export default function SceneLayerBacktestPage() {
               </div>
             </div>
           )}
+
+          {rankResult.market_value_summaries && rankResult.market_value_summaries.length > 0 ? (
+            <div className="scene-layer-layer-summary">
+              <h3>市值分组回测表现</h3>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table">
+                  <thead>
+                    <tr>
+                      <th>市值分组</th>
+                      <th>有效交易日</th>
+                      <th>总样本数</th>
+                      <th>分层差均值</th>
+                      <th>IC 均值</th>
+                      <th>IC t值</th>
+                      <th>ICIR</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rankResult.market_value_summaries.map((item) => (
+                      <tr key={item.group_label}>
+                        <td>{item.group_label}</td>
+                        <td>{item.point_count}</td>
+                        <td>{item.sample_count}</td>
+                        <td>{formatPercent(item.spread_mean)}</td>
+                        <td className={metricHighlightClass("ic", item.ic_mean)}>{formatNumber(item.ic_mean)}</td>
+                        <td className={metricHighlightClass("t", item.ic_t_value)}>{formatNumber(item.ic_t_value)}</td>
+                        <td className={metricHighlightClass("ir", item.icir)}>{formatNumber(item.icir)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
         </section>
       ) : null}
 
@@ -1938,6 +2074,10 @@ export default function SceneLayerBacktestPage() {
             <div className="scene-layer-summary-item">
               <span>限定板块</span>
               <strong>{formatBacktestBoardLabel(result)}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>总市值范围</span>
+              <strong>{formatMarketValueRange(result)}</strong>
             </div>
             <div className="scene-layer-summary-item">
               <span>最小样本阈值</span>
@@ -2008,6 +2148,7 @@ export default function SceneLayerBacktestPage() {
                     <th>指数</th>
                     <th>Beta（指/概/行）</th>
                     <th>限定板块</th>
+                    <th>总市值范围</th>
                     <th>策略数</th>
                     <th>最小样本阈值</th>
                     <th>最少上市交易日</th>
@@ -2028,6 +2169,7 @@ export default function SceneLayerBacktestPage() {
                     <td>{ruleResult.index_ts_code}</td>
                     <td>{formatNumber(ruleResult.index_beta, 2)} / {formatNumber(ruleResult.concept_beta, 2)} / {formatNumber(ruleResult.industry_beta, 2)}</td>
                     <td>{formatBacktestBoardLabel(ruleResult)}</td>
+                    <td>{formatMarketValueRange(ruleResult)}</td>
                     <td>{allRuleSummaries.length}</td>
                     <td>{ruleResult.min_samples_per_rule_day}</td>
                     <td>{ruleResult.min_listed_trade_days}</td>

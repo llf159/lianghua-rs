@@ -163,6 +163,8 @@ export type SceneLayerBacktestData = {
   end_date: string
   resolved_board?: string | null
   exclude_st_board?: boolean
+  total_mv_min?: number | null
+  total_mv_max?: number | null
   min_samples_per_scene_day: number
   min_listed_trade_days: number
   backtest_period: number
@@ -219,6 +221,8 @@ export type RuleLayerBacktestData = {
   end_date: string
   resolved_board?: string | null
   exclude_st_board?: boolean
+  total_mv_min?: number | null
+  total_mv_max?: number | null
   min_samples_per_rule_day: number
   min_listed_trade_days: number
   backtest_period: number
@@ -268,6 +272,7 @@ export type RankLayerBacktestData = {
   end_date: string
   resolved_board?: string | null
   exclude_st_board?: boolean
+  market_value_grouping?: boolean
   min_samples_per_rank_day: number
   min_listed_trade_days: number
   backtest_period: number
@@ -282,6 +287,19 @@ export type RankLayerBacktestData = {
   icir?: number | null
   ic_t_value?: number | null
   layer_summaries: RankLayerBucketSummary[]
+  market_value_summaries?: RankLayerMarketValueSummary[]
+}
+
+export type RankLayerMarketValueSummary = {
+  group_label: string
+  total_mv_min?: number | null
+  total_mv_max?: number | null
+  point_count: number
+  sample_count: number
+  spread_mean?: number | null
+  ic_mean?: number | null
+  ic_t_value?: number | null
+  icir?: number | null
 }
 
 export type RankLayerMethod = "score" | "sample_count" | "rank"
@@ -422,6 +440,8 @@ export type SceneLayerBacktestQuery = {
   backtestPeriod?: number
   board?: string
   excludeStBoard?: boolean
+  totalMvMin?: number
+  totalMvMax?: number
 }
 
 export type RuleLayerBacktestQuery = {
@@ -438,6 +458,8 @@ export type RuleLayerBacktestQuery = {
   backtestPeriod?: number
   board?: string
   excludeStBoard?: boolean
+  totalMvMin?: number
+  totalMvMax?: number
 }
 
 export type RankLayerBacktestQuery = {
@@ -490,6 +512,8 @@ export type RuleExpressionValidationQuery = {
   sampleLimitPerGroup?: number
   board?: string
   excludeStBoard?: boolean
+  totalMvMin?: number
+  totalMvMax?: number
 }
 
 export async function getSceneLayerBacktestDefaults(sourcePath: string) {

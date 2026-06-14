@@ -173,7 +173,8 @@ pub fn impl_expr_warmup(
 
                     max_need = win_need.max(src_need + max_win);
                 }
-                "HHVD" | "LLVD" | "MAD" | "SUMD" | "STDD" | "COUNTD" | "LRANKD" | "GRANKD" => {
+                "HHVD" | "LLVD" | "MAD" | "SUMD" | "STDD" | "COUNTD" | "EXISTD" | "LRANKD"
+                | "GRANKD" => {
                     let mut it = args.into_iter();
                     let src = it
                         .next()
@@ -552,6 +553,9 @@ mod tests {
         assert_eq!(estimate_program_warmup(expr), 20);
 
         let expr = "GAP := REF(BARSLAST(C > 1), 1); COUNTD(REF(C > 1, 1), GAP, 10);";
+        assert_eq!(estimate_program_warmup(expr), 10);
+
+        let expr = "GAP := REF(BARSLAST(C > 1), 1); EXISTD(REF(C > 1, 1), GAP, 10);";
         assert_eq!(estimate_program_warmup(expr), 10);
     }
 

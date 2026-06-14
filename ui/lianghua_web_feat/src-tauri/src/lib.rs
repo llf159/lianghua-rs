@@ -960,6 +960,8 @@ async fn run_scene_layer_backtest(
     backtest_period: Option<usize>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
+    total_mv_min: Option<f64>,
+    total_mv_max: Option<f64>,
 ) -> Result<SceneLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_with_heap_trim(|| {
@@ -977,6 +979,8 @@ async fn run_scene_layer_backtest(
                 backtest_period,
                 board,
                 exclude_st_board,
+                total_mv_min,
+                total_mv_max,
             )
         })
     })
@@ -999,6 +1003,8 @@ async fn run_rule_layer_backtest(
     backtest_period: Option<usize>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
+    total_mv_min: Option<f64>,
+    total_mv_max: Option<f64>,
 ) -> Result<RuleLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_with_heap_trim(|| {
@@ -1016,6 +1022,8 @@ async fn run_rule_layer_backtest(
                 backtest_period,
                 board,
                 exclude_st_board,
+                total_mv_min,
+                total_mv_max,
             )
         })
     })
@@ -1081,6 +1089,8 @@ async fn run_transient_scene_layer_backtest(
     backtest_period: Option<usize>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
+    total_mv_min: Option<f64>,
+    total_mv_max: Option<f64>,
 ) -> Result<SceneLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_with_heap_trim(|| {
@@ -1098,6 +1108,8 @@ async fn run_transient_scene_layer_backtest(
                 backtest_period,
                 board,
                 exclude_st_board,
+                total_mv_min,
+                total_mv_max,
             )
         })
     })
@@ -1120,6 +1132,8 @@ async fn run_transient_rule_layer_backtest(
     backtest_period: Option<usize>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
+    total_mv_min: Option<f64>,
+    total_mv_max: Option<f64>,
 ) -> Result<RuleLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_with_heap_trim(|| {
@@ -1137,6 +1151,8 @@ async fn run_transient_rule_layer_backtest(
                 backtest_period,
                 board,
                 exclude_st_board,
+                total_mv_min,
+                total_mv_max,
             )
         })
     })
@@ -1209,6 +1225,8 @@ async fn run_rule_expression_validation(
     sample_limit_per_group: Option<usize>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
+    total_mv_min: Option<f64>,
+    total_mv_max: Option<f64>,
 ) -> Result<RuleExpressionValidationData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_with_heap_trim(|| {
@@ -1233,6 +1251,8 @@ async fn run_rule_expression_validation(
                 sample_limit_per_group,
                 board,
                 exclude_st_board,
+                total_mv_min,
+                total_mv_max,
             )
         })
     })

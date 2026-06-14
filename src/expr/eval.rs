@@ -338,6 +338,40 @@ impl Runtime {
         Ok(Value::NumSeries(out))
     }
 
+    fn impl_existd(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
+        if args.len() != 3 {
+            return Err(EvalErr {
+                msg: "EXISTD需要三个参数".to_string(),
+            });
+        }
+
+        let cond = self.eval_expr(&args[0])?;
+        let period = self.eval_expr(&args[1])?;
+        let len = Value::len_of(&cond).max(Value::len_of(&period));
+        let cond_series = Value::as_bool_series(&cond, len)?;
+        let max_period = self.dynamic_limit(&args[2], "EXISTD")?;
+        let period_series = self.dynamic_period_series(period, len, max_period, 1)?;
+
+        let mut prefix = Vec::with_capacity(len + 1);
+        prefix.push(0usize);
+        for hit in &cond_series {
+            let next = prefix.last().copied().unwrap_or(0) + usize::from(*hit);
+            prefix.push(next);
+        }
+
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            let Some(period) = period_series[i] else {
+                out.push(false);
+                continue;
+            };
+            let start = (i + 1).saturating_sub(period);
+            out.push(prefix[i + 1] > prefix[start]);
+        }
+
+        Ok(Value::BoolSeries(out))
+    }
+
     fn impl_max(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
         if args.len() != 2 {
             return Err(EvalErr {
@@ -1509,6 +1543,7 @@ impl Runtime {
             "COUNT" => Ok(self.impl_count(args)?),
             "COUNTD" => Ok(self.impl_countd(args)?),
             "EXIST" => Ok(self.impl_exist(args)?),
+            "EXISTD" => Ok(self.impl_existd(args)?),
             "MA" => Ok(self.impl_ma(args)?),
             "MAD" => Ok(self.impl_window_sumd(args, true)?),
             "REF" => Ok(self.impl_ref(args)?),
@@ -2441,6 +2476,46 @@ fn countd_returns_none_when_dynamic_window_exceeds_runtime_cap() {
     assert_eq!(
         out,
         Value::NumSeries(vec![Some(1.0), Some(2.0), Some(3.0), None, None])
+    );
+}
+
+#[test]
+fn existd_uses_dynamic_window_and_false_when_window_is_invalid() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let expr = "EXISTD(C > 2, N, 3);";
+    let toks = lex_all(expr);
+    let mut p = Parser::new(toks);
+    let stmts = p.parse_main().expect("parse failed");
+    let mut rt = Runtime::default();
+
+    rt.vars.insert(
+        "C".to_string(),
+        Value::NumSeries(vec![
+            Some(1.0),
+            Some(3.0),
+            Some(1.0),
+            Some(1.0),
+            Some(4.0),
+            Some(1.0),
+        ]),
+    );
+    rt.vars.insert(
+        "N".to_string(),
+        Value::NumSeries(vec![
+            Some(1.0),
+            Some(1.0),
+            Some(2.0),
+            Some(3.0),
+            Some(4.0),
+            Some(f64::NAN),
+        ]),
+    );
+
+    let out = rt.eval_program(&stmts).expect("eval failed");
+    assert_eq!(
+        out,
+        Value::BoolSeries(vec![false, true, true, true, false, false])
     );
 }
 

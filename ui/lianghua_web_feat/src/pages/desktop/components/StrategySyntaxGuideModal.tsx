@@ -36,6 +36,7 @@ const SYNTAX_GUIDE_FUNCTIONS: SyntaxGuideFunction[] = [
   { name: 'DIV', signature: 'DIV(a, b)', returns: '数值序列', description: '安全除法，除数为 0 时返回 0。', example: 'a=[6,5], b=[2,0] -> [3,0]' },
   { name: 'COUNT', signature: 'COUNT(cond, n)', returns: '数值序列', description: '统计最近 n 根里条件成立的次数。', example: 'cond=[真,假,真,真], n=3 -> [1,1,2,2]' },
   { name: 'EXIST', signature: 'EXIST(cond, n)', returns: '布尔序列', description: '判断最近 n 根里条件是否至少成立过一次。', example: 'cond=[假,真,假,假], n=3 -> [假,真,真,真]' },
+  { name: 'EXISTD', signature: 'EXISTD(cond, win, max_win)', returns: '布尔序列', description: '动态窗口版 EXIST，每根使用当根 win 判断最近 win 根是否命中过。', example: 'cond=[假,真,假,假], win=[1,1,2,3] -> [假,真,真,真]' },
   { name: 'MA', signature: 'MA(x, n)', returns: '数值序列', description: '简单移动平均。', example: 'x=[1,2,3,4], n=3 -> [空,空,2,3]' },
   { name: 'REF', signature: 'REF(x, n)', returns: '数值序列', description: '取 n 根之前的值。', example: 'x=[10,11,12,13], n=2 -> [空,空,10,11]' },
   { name: 'LAST', signature: 'LAST(x, n)', returns: '标量(数字或布尔)', description: '取倒数第 n+1 根的值；n=0 表示最新值。', example: 'x=[10,11,12,13], n=0 -> 13；x=[假,真,真], n=1 -> 真' },
@@ -57,7 +58,7 @@ const SYNTAX_GUIDE_FUNCTIONS: SyntaxGuideFunction[] = [
 ]
 
 const SYNTAX_GUIDE_DYNAMIC_FUNCTIONS: SyntaxGuideDynamicFunction[] = [
-  { group: '动态计数 / 引用', functions: 'COUNTD / REFD', signature: 'COUNTD(cond, win, max_win)；REFD(x, offset, max_offset)', meaning: 'win/offset 可以是数值序列，例如 GAP；第三个参数是正整数上限，也用于 warmup。' },
+  { group: '动态计数 / 引用', functions: 'COUNTD / EXISTD / REFD', signature: 'COUNTD(cond, win, max_win)；EXISTD(cond, win, max_win)；REFD(x, offset, max_offset)', meaning: 'win/offset 可以是数值序列，例如 GAP；第三个参数是正整数上限，也用于 warmup。' },
   { group: '动态窗口统计', functions: 'HHVD / LLVD / MAD / SUMD / STDD', signature: '函数名(x, win, max_win)', meaning: '每根 K 线用当根 win 回看，分别计算最高、最低、均值、求和、标准差；max_win 必须是正整数。' },
   { group: '动态排名 / 取值', functions: 'GRANKD / LRANKD / GETD', signature: 'GRANKD(x, win, max_win)；GETD(cond, x, win, max_win)', meaning: '排名函数按动态 win 排序；GETD 在动态 win 内找最近一次条件成立对应的 x；max_win 必须是正整数。' },
   { group: '动态扩展指标', functions: 'RSVD / GTOPCOUNTD / LTOPCOUNTD', signature: 'RSVD(C,H,L,win,max_win)；GTOPCOUNTD(x,cond,win,topn,max_win)', meaning: 'RSVD 是动态窗口 RSV；TOPCOUNTD 在动态 win 内排序后取前 topn 统计条件次数；max_win 必须是正整数。' },
