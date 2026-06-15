@@ -75,7 +75,7 @@ export default function DataTaskProgress({
             {phaseStepStatText}
           </strong>
         </div>
-        <div className="data-download-progress-stat">
+        <div className="data-download-progress-stat data-download-progress-stat-mid">
           <span>进度</span>
           <strong>{progressCounterText}</strong>
         </div>

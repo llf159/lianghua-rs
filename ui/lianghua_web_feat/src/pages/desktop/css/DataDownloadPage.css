@@ -623,6 +623,10 @@
   overflow-wrap: anywhere;
 }
 
+.data-download-progress-stat-mid {
+  min-width: 260px;
+}
+
 .data-download-progress-stat-wide {
   grid-column: span 2;
 }
@@ -882,6 +886,10 @@
 
   .data-download-progress-stat-wide {
     grid-column: span 1;
+  }
+
+  .data-download-progress-stat-mid {
+    min-width: 0;
   }
 
   .data-download-primary-btn,

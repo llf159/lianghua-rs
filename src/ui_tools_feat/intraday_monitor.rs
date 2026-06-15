@@ -1506,11 +1506,12 @@ fn apply_sina_quote_to_intraday_row(row: &mut IntradayMonitorRow, quote: &SinaQu
     row.realtime_vol = Some(quote.vol);
     row.realtime_amount = Some(quote.amount);
     row.realtime_change_pct = quote.change_pct;
-    row.realtime_change_open_pct = if quote.open > 0.0 {
-        Some((quote.price / quote.open - 1.0) * 100.0)
-    } else {
-        None
-    };
+    row.realtime_change_open_pct =
+        if quote.pre_close > 0.0 && quote.open.is_finite() && quote.price.is_finite() {
+            Some((quote.price - quote.open) / quote.pre_close * 100.0)
+        } else {
+            None
+        };
     row.realtime_fall_from_high_pct = if quote.high > 0.0 {
         Some(((quote.high - quote.price) / quote.high).max(0.0) * 100.0)
     } else {
@@ -1531,11 +1532,12 @@ fn apply_tencent_quote_to_intraday_row(row: &mut IntradayMonitorRow, quote: &Ten
     row.realtime_vol = Some(quote.vol);
     row.realtime_amount = Some(quote.amount);
     row.realtime_change_pct = quote.change_pct;
-    row.realtime_change_open_pct = if quote.open > 0.0 {
-        Some((quote.price / quote.open - 1.0) * 100.0)
-    } else {
-        None
-    };
+    row.realtime_change_open_pct =
+        if quote.pre_close > 0.0 && quote.open.is_finite() && quote.price.is_finite() {
+            Some((quote.price - quote.open) / quote.pre_close * 100.0)
+        } else {
+            None
+        };
     row.realtime_fall_from_high_pct = if quote.high > 0.0 {
         Some(((quote.high - quote.price) / quote.high).max(0.0) * 100.0)
     } else {
@@ -2029,6 +2031,56 @@ mod tests {
             trade_dates: vec!["20240401".to_string()],
             cols,
         }
+    }
+
+    fn sample_intraday_row() -> IntradayMonitorRow {
+        IntradayMonitorRow {
+            rank_mode: "total".to_string(),
+            ts_code: "000001.SZ".to_string(),
+            trade_date: Some("20240329".to_string()),
+            realtime_trade_date: None,
+            scene_name: "总榜".to_string(),
+            direction: None,
+            total_score: Some(1.0),
+            scene_score: None,
+            risk_score: None,
+            confirm_strength: None,
+            risk_intensity: None,
+            scene_status: None,
+            rank: Some(1),
+            name: "平安银行".to_string(),
+            board: "主板".to_string(),
+            total_mv_yi: Some(100.0),
+            concept: String::new(),
+            realtime_price: None,
+            realtime_open: None,
+            realtime_high: None,
+            realtime_low: None,
+            realtime_pre_close: None,
+            realtime_avg_price: None,
+            realtime_vol: None,
+            realtime_amount: None,
+            realtime_change_pct: None,
+            realtime_change_open_pct: None,
+            realtime_fall_from_high_pct: None,
+            realtime_vol_ratio: None,
+            return_5d_pct: None,
+            return_5d_base_close: None,
+            template_tag_text: None,
+            template_tag_tone: None,
+        }
+    }
+
+    #[test]
+    fn apply_sina_quote_calculates_body_change_pct() {
+        let mut row = sample_intraday_row();
+
+        apply_sina_quote_to_intraday_row(&mut row, &sample_quote());
+
+        let body_change_pct = row
+            .realtime_change_open_pct
+            .expect("body change pct should exist");
+        assert!((body_change_pct - 2.0202020202020203).abs() < 1e-9);
     }
 
     #[test]

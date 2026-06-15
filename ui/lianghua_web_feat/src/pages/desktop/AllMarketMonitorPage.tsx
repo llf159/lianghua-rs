@@ -1005,6 +1005,13 @@ export default function AllMarketMonitorPage() {
   );
 
   const hitRecords = hitRecordsByPeriod[speedPeriod];
+  const filteredHitRecords = useMemo(
+    () =>
+      hitRecords.filter(
+        (record) => boardFilter === "全部" || record.board === boardFilter,
+      ),
+    [boardFilter, hitRecords],
+  );
   const recordHighRows = useMemo<RecordHighDisplayRow[]>(() => {
     const eventTimes =
       hitPanelMode === "realtime_change_pct"
@@ -1046,7 +1053,9 @@ export default function AllMarketMonitorPage() {
         ? "量比新高"
         : "涨速命中";
   const hitPanelCount =
-    hitPanelMode === "speed_pct" ? hitRecords.length : recordHighRows.length;
+    hitPanelMode === "speed_pct"
+      ? filteredHitRecords.length
+      : recordHighRows.length;
   const hitPanelSubtitle =
     hitPanelMode === "realtime_change_pct"
       ? "最新在前"
@@ -1058,23 +1067,30 @@ export default function AllMarketMonitorPage() {
 
   const hitNavigationItems = useMemo(
     () =>
-      hitRecords.map((record) => ({
+      filteredHitRecords.map((record) => ({
         tsCode: record.ts_code,
         tradeDate: rankDate || record.realtime_trade_date || null,
         sourcePath: sourcePathTrimmed || undefined,
         name: record.name || undefined,
       })),
-    [hitRecords, rankDate, sourcePathTrimmed],
+    [filteredHitRecords, rankDate, sourcePathTrimmed],
   );
 
   const openHitRecord = useMemo(
     () =>
       openHitTsCode
-        ? (hitRecords.find((record) => record.ts_code === openHitTsCode) ??
-          null)
+        ? (filteredHitRecords.find(
+            (record) => record.ts_code === openHitTsCode,
+          ) ?? null)
         : null,
-    [hitRecords, openHitTsCode],
+    [filteredHitRecords, openHitTsCode],
   );
+
+  useEffect(() => {
+    if (openHitTsCode && !openHitRecord) {
+      setOpenHitTsCode(null);
+    }
+  }, [openHitRecord, openHitTsCode]);
 
   function toggleSort(nextKey: SortKey) {
     if (sortKey !== nextKey) {
@@ -1422,7 +1438,7 @@ export default function AllMarketMonitorPage() {
                         sortDirection,
                       )}
                     >
-                      {renderSortHeader("开盘涨幅", "realtime_change_open_pct")}
+                      {renderSortHeader("实体涨幅", "realtime_change_open_pct")}
                     </th>
                     <th
                       className="all-market-info-group-start all-market-scene-col all-market-basic-col"
@@ -1572,7 +1588,7 @@ export default function AllMarketMonitorPage() {
                                 row.realtime_change_open_pct,
                               )}`}
                             >
-                              开盘 {formatPercent(row.realtime_change_open_pct)}
+                              实体 {formatPercent(row.realtime_change_open_pct)}
                             </span>
                           </div>
                         </td>
@@ -1863,8 +1879,8 @@ export default function AllMarketMonitorPage() {
                   暂无量比新高。
                 </div>
               )
-            ) : hitRecords.length > 0 ? (
-              hitRecords.map((record) => {
+            ) : filteredHitRecords.length > 0 ? (
+              filteredHitRecords.map((record) => {
                 const isOpen = openHitTsCode === record.ts_code;
                 const toggleHitPopover = () => {
                   setOpenHitTsCode((value) =>
@@ -2008,7 +2024,7 @@ export default function AllMarketMonitorPage() {
                   <dd>{formatClockFromMs(openHitRecord.hit_at)}</dd>
                 </div>
                 <div>
-                  <dt>开盘涨幅</dt>
+                  <dt>实体涨幅</dt>
                   <dd
                     className={getPercentClassName(
                       openHitRecord.realtime_change_open_pct,

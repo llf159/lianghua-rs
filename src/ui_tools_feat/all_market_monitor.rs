@@ -646,9 +646,9 @@ fn normalize_quote_trade_date(raw: &str) -> Option<String> {
     }
 }
 
-fn quote_change_open_pct(quote: &SinaQuote) -> Option<f64> {
-    if quote.open > 0.0 {
-        Some((quote.price / quote.open - 1.0) * 100.0)
+fn quote_body_change_pct(quote: &SinaQuote) -> Option<f64> {
+    if quote.pre_close > 0.0 && quote.open.is_finite() && quote.price.is_finite() {
+        Some((quote.price - quote.open) / quote.pre_close * 100.0)
     } else {
         None
     }
@@ -1446,7 +1446,7 @@ fn build_rows(
                 realtime_pre_close: quote.map(|item| item.pre_close),
                 realtime_avg_price: avg_price_map.get(&stock.ts_code).copied(),
                 realtime_change_pct: quote.and_then(|item| item.change_pct),
-                realtime_change_open_pct: quote.and_then(quote_change_open_pct),
+                realtime_change_open_pct: quote.and_then(quote_body_change_pct),
                 realtime_vol: quote.map(|item| item.vol),
                 realtime_amount: quote.map(|item| item.amount),
                 realtime_vol_ratio: volume_ratio_map.get(&stock.ts_code).copied(),
@@ -1701,7 +1701,7 @@ mod tests {
         let change_open_pct = rows[0]
             .realtime_change_open_pct
             .expect("open change should exist");
-        assert!((change_open_pct - 1.0).abs() < 1e-9);
+        assert!((change_open_pct - 1.0204081632653061).abs() < 1e-9);
         assert_eq!(rows[1].rank, None);
         assert_eq!(rows[1].realtime_price, None);
     }

@@ -120,7 +120,7 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     title: '10. 实时监控模板附加字段',
     note: '下面这些字段只在“实时监控”页面的模板表达式中可用，策略打分、选股或统计表达式里不要直接写。',
     fields: [
-      { name: 'RT_OP', scope: '实时监控', description: '当前价相对今开涨跌幅，单位是百分比。', example: 'RT_OP >= 2' },
+      { name: 'RT_OP', scope: '实时监控', description: '实体涨幅，计算口径为 (当前价 - 今开) / 昨收 × 100%，单位是百分比。', example: 'RT_OP >= 2' },
       { name: 'RT_FH', scope: '实时监控', description: '当前价相对于今日高点的回落幅度，单位是百分比；返回值恒为非负数。', example: 'RT_FH <= 1.5' },
       { name: 'RT_VR', scope: '实时监控', description: '行情源返回的盘中量比；新浪源没有该字段时为空。', example: 'RT_VR >= 2' },
       { name: 'RT_AVG', scope: '实时监控', description: '行情源返回的均价；新浪源没有该字段时为空。', example: 'C > RT_AVG' },

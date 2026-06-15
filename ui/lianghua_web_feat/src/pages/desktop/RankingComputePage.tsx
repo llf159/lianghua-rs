@@ -53,9 +53,9 @@ type BusyAction =
   | 'idle'
   | 'loading'
   | 'computing'
+  | 'recomputing-result-db'
   | 'cyq-computing'
   | 'cyq-chen-computing'
-  | 'deleting-result-db'
   | 'deleting-cyq-chen-db'
   | 'indicator-running'
 type IndicatorEditorMode = 'create' | 'edit'
@@ -64,7 +64,7 @@ type CardFeedback = Record<FeedbackSlot, { notice: string; error: string }>
 type PendingConfirmState =
   | { kind: 'delete-indicator'; item: IndicatorManageItem }
   | { kind: 'delete-stock-indicator-columns' }
-  | { kind: 'delete-result-db' }
+  | { kind: 'recompute-result-db' }
   | { kind: 'delete-cyq-chen-db' }
   | null
 
@@ -282,9 +282,10 @@ function getProgressWorkflow(action: string | null | undefined) {
 
 type RankingComputePageProps = {
   mergedMode?: boolean
+  statusRefreshSignal?: number
 }
 
-export default function RankingComputePage({ mergedMode = false }: RankingComputePageProps) {
+export default function RankingComputePage({ mergedMode = false, statusRefreshSignal = 0 }: RankingComputePageProps) {
   const [status, setStatus] = useState<RankingComputeStatus | null>(null)
   const [downloadStatus, setDownloadStatus] = useState<DataDownloadStatus | null>(null)
   const [busyAction, setBusyAction] = useState<BusyAction>('loading')
@@ -319,6 +320,9 @@ export default function RankingComputePage({ mergedMode = false }: RankingComput
 
   const activeDownloadIdRef = useRef('')
   const progressUnlistenRef = useRef<UnlistenFn | null>(null)
+  const pendingStatusRefreshRef = useRef(false)
+  const busyActionRef = useRef(busyAction)
+  busyActionRef.current = busyAction
 
   const sourcePath = status?.sourcePath?.trim() ?? ''
   const isBusy = busyAction !== 'idle'
@@ -602,8 +606,9 @@ export default function RankingComputePage({ mergedMode = false }: RankingComput
     )
   }
 
-  async function loadStatus(options?: { preserveNotice?: boolean }) {
+  async function loadStatus(options?: { preserveNotice?: boolean; syncSuggestedInputs?: boolean }) {
     const preserveNotice = options?.preserveNotice === true
+    const syncSuggestedInputs = options?.syncSuggestedInputs === true
     setBusyAction('loading')
     clearFeedback('status')
 
@@ -630,19 +635,35 @@ export default function RankingComputePage({ mergedMode = false }: RankingComput
         setFeedbackError('status', downloadStatusError)
       }
 
-      setStartDateInput((current) => current || compactDateToInput(nextStatus.suggestedStartDate))
-      setEndDateInput((current) => current || compactDateToInput(nextStatus.suggestedEndDate))
+      setStartDateInput((current) =>
+        syncSuggestedInputs
+          ? compactDateToInput(nextStatus.suggestedStartDate)
+          : current || compactDateToInput(nextStatus.suggestedStartDate),
+      )
+      setEndDateInput((current) =>
+        syncSuggestedInputs
+          ? compactDateToInput(nextStatus.suggestedEndDate)
+          : current || compactDateToInput(nextStatus.suggestedEndDate),
+      )
       setCyqFactorInput((current) =>
         current.trim() !== '' ? current : String(nextStatus.cyqFactor ?? 50),
       )
-      setCyqEndDateInput((current) => current || compactDateToInput(nextStatus.sourceDb.maxTradeDate))
+      setCyqEndDateInput((current) =>
+        syncSuggestedInputs
+          ? compactDateToInput(nextStatus.sourceDb.maxTradeDate)
+          : current || compactDateToInput(nextStatus.sourceDb.maxTradeDate),
+      )
       setCyqChenWarmupDaysInput((current) =>
         current.trim() !== '' ? current : String(nextStatus.cyqChenWarmupDays ?? 120),
       )
       setCyqChenBucketPctInput((current) =>
         current.trim() !== '' ? current : String(nextStatus.cyqChenBucketPct ?? 1),
       )
-      setCyqChenEndDateInput((current) => current || compactDateToInput(nextStatus.sourceDb.maxTradeDate))
+      setCyqChenEndDateInput((current) =>
+        syncSuggestedInputs
+          ? compactDateToInput(nextStatus.sourceDb.maxTradeDate)
+          : current || compactDateToInput(nextStatus.sourceDb.maxTradeDate),
+      )
     } catch (loadError) {
       setFeedbackError('status', `读取数据计算状态失败: ${String(loadError)}`)
     } finally {
@@ -650,9 +671,35 @@ export default function RankingComputePage({ mergedMode = false }: RankingComput
     }
   }
 
+  const loadStatusRef = useRef(loadStatus)
+  loadStatusRef.current = loadStatus
+
   useEffect(() => {
-    void loadStatus()
+    void loadStatusRef.current()
   }, [])
+
+  useEffect(() => {
+    if (statusRefreshSignal <= 0) {
+      return
+    }
+
+    if (busyActionRef.current !== 'idle') {
+      pendingStatusRefreshRef.current = true
+      return
+    }
+
+    pendingStatusRefreshRef.current = false
+    void loadStatusRef.current({ syncSuggestedInputs: true })
+  }, [statusRefreshSignal])
+
+  useEffect(() => {
+    if (busyAction !== 'idle' || !pendingStatusRefreshRef.current) {
+      return
+    }
+
+    pendingStatusRefreshRef.current = false
+    void loadStatusRef.current({ syncSuggestedInputs: true })
+  }, [busyAction])
 
   useEffect(() => {
     return () => {
@@ -744,23 +791,50 @@ export default function RankingComputePage({ mergedMode = false }: RankingComput
     )
   }
 
-  async function onDeleteResultDb() {
+  async function runRankingComputeForRange(startDate: string, endDate: string, successPrefix = '排名计算完成') {
+    const previewWarnings = await previewRankingScoreCalculationWarnings(sourcePath, startDate, endDate)
+    if (previewWarnings.length > 0) {
+      setFeedbackNotice('rank', `提示：${previewWarnings.join('\n')}`)
+    }
+    const scoreResult = await runRankingScoreCalculation(sourcePath, startDate, endDate)
+    setStatus(scoreResult.status)
+    const warningText = scoreResult.warnings?.length
+      ? `\n\n提示：${scoreResult.warnings.join('\n')}`
+      : ''
+    setFeedbackNotice(
+      'rank',
+      `${successPrefix}（含J值同分排序），区间 ${formatTradeDate(scoreResult.startDate ?? null)} 至 ${formatTradeDate(scoreResult.endDate ?? null)}，耗时 ${formatElapsedMs(scoreResult.elapsedMs)}。${warningText}`,
+    )
+  }
+
+  async function onRecomputeResultDb() {
     if (!sourcePath) {
       setFeedbackError('rank', '当前数据目录为空，请先到数据管理页确认目录。')
       return
     }
 
-    setBusyAction('deleting-result-db')
+    const startDate = status?.resultDb.minTradeDate ?? ''
+    const endDate = status?.resultDb.maxTradeDate ?? ''
+    if (!startDate || !endDate) {
+      setFeedbackError('rank', '当前结果库没有可用日期范围，无法一键重算。')
+      return
+    }
+
+    setBusyAction('recomputing-result-db')
     clearFeedback('rank')
+    setStrategyDiff(null)
 
     try {
       await removeManagedSourceFile('result-db')
-      const managedStatus = await inspectManagedSourceStatus()
-      const nextStatus = await getRankingComputeStatus(managedStatus.sourcePath)
-      setStatus(nextStatus)
-      setFeedbackNotice('rank', '结果库已删除。下次计算排名会重新生成 score_summary / rule_details / scene_details。')
+      await runRankingComputeForRange(startDate, endDate, '结果库已重置并重算完成')
     } catch (actionError) {
-      setFeedbackError('rank', `删除结果库失败: ${String(actionError)}`)
+      try {
+        const nextStatus = await getRankingComputeStatus(sourcePath)
+        setStatus(nextStatus)
+      } catch {
+        // Keep the original error visible; a follow-up manual refresh can recover status.
+      }
+      setFeedbackError('rank', `一键重算结果库失败: ${String(actionError)}`)
     } finally {
       setBusyAction('idle')
     }
@@ -807,19 +881,7 @@ export default function RankingComputePage({ mergedMode = false }: RankingComput
     setStrategyDiff(null)
 
     try {
-      const previewWarnings = await previewRankingScoreCalculationWarnings(sourcePath, startDate, endDate)
-      if (previewWarnings.length > 0) {
-        setFeedbackNotice('rank', `提示：${previewWarnings.join('\n')}`)
-      }
-      const scoreResult = await runRankingScoreCalculation(sourcePath, startDate, endDate)
-      setStatus(scoreResult.status)
-      const warningText = scoreResult.warnings?.length
-        ? `\n\n提示：${scoreResult.warnings.join('\n')}`
-        : ''
-      setFeedbackNotice(
-        'rank',
-        `排名计算完成（含J值同分排序），区间 ${formatTradeDate(scoreResult.startDate ?? null)} 至 ${formatTradeDate(scoreResult.endDate ?? null)}，耗时 ${formatElapsedMs(scoreResult.elapsedMs)}。${warningText}`,
-      )
+      await runRankingComputeForRange(startDate, endDate)
     } catch (actionError) {
       setFeedbackError('rank', `排名计算失败: ${String(actionError)}`)
     } finally {
@@ -1006,7 +1068,7 @@ export default function RankingComputePage({ mergedMode = false }: RankingComput
       return
     }
 
-    await onDeleteResultDb()
+    await onRecomputeResultDb()
   }
 
   return (
@@ -1176,8 +1238,23 @@ export default function RankingComputePage({ mergedMode = false }: RankingComput
             >
               {strategyDiffLoading ? '对比中...' : '显示计算快照 diff'}
             </button>
-            <button className="ranking-compute-danger-btn" type="button" onClick={() => setPendingConfirm({ kind: 'delete-result-db' })} disabled={isBusy || sourcePath === ''}>
-              {busyAction === 'deleting-result-db' ? '删除中...' : '删除结果库'}
+            <button
+              className="ranking-compute-danger-btn"
+              type="button"
+              onClick={() => setPendingConfirm({ kind: 'recompute-result-db' })}
+              disabled={
+                isBusy ||
+                sourcePath === '' ||
+                !status?.resultDb.minTradeDate ||
+                !status.resultDb.maxTradeDate
+              }
+              title={
+                status?.resultDb.minTradeDate && status.resultDb.maxTradeDate
+                  ? `按原结果库区间 ${formatTradeDate(status.resultDb.minTradeDate)} 至 ${formatTradeDate(status.resultDb.maxTradeDate)} 重算`
+                  : '当前结果库没有可用日期范围'
+              }
+            >
+              {busyAction === 'recomputing-result-db' ? '重算中...' : '一键重算'}
             </button>
           </div>
         </div>
@@ -1651,7 +1728,7 @@ export default function RankingComputePage({ mergedMode = false }: RankingComput
               ? '确认清空指标列'
               : pendingConfirm?.kind === 'delete-cyq-chen-db'
                 ? '确认删除新筹码库'
-                : '确认删除结果库'
+                : '确认一键重算结果库'
         }
         message={
           pendingConfirm?.kind === 'delete-indicator'
@@ -1660,7 +1737,7 @@ export default function RankingComputePage({ mergedMode = false }: RankingComput
               ? '确认清空 stock_data 中的所有非基础指标列吗？\n\n该操作会重建 stock_data 表，只保留基础行情列和已有基础行情数据；数据量较大时耗时会更久。'
               : pendingConfirm?.kind === 'delete-cyq-chen-db'
                 ? '确认删除当前新筹码库 cyq_chen.db 吗？将清空 cyq_chen_snapshot / cyq_chen_bin，删除后需要重新计算新筹码。'
-                : '确认删除当前结果库 scoring_result.db 吗？将同时清空 score_summary / rule_details / scene_details，删除后需要重新计算排名。'
+                : `确认先删除当前结果库 scoring_result.db，再按原结果库日期范围 ${formatTradeDate(status?.resultDb.minTradeDate)} 至 ${formatTradeDate(status?.resultDb.maxTradeDate)} 重算排名吗？`
         }
         confirmText="确认"
         cancelText="取消"
