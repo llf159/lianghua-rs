@@ -17,7 +17,10 @@ use crate::{
     download::ind_calc::{
         IndsCache, cache_ind_build, calc_inds_with_cache_lossy, warmup_ind_estimate,
     },
-    expr::eval::{Runtime, Value},
+    expr::{
+        eval::{Runtime, Value},
+        parser::{Expr, Stmt, Stmts},
+    },
     scoring::tools::{
         CyqChenFieldInjector, inject_empty_optional_cyq_chen_fields, inject_latest_num_fields,
         inject_stock_extra_fields, load_total_share_map, rt_max_len,
@@ -170,6 +173,12 @@ struct AllMarketTemplateRuntimeCacheEntry {
     total_share_map: HashMap<String, f64>,
     cyq_chen_runtime_keys: HashSet<String>,
     warning_messages: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemplateRuntimeDataMode {
+    QuoteOnly,
+    History,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -716,6 +725,38 @@ fn collect_template_order(templates: &[IntradayMonitorTemplate]) -> Vec<String> 
     out
 }
 
+fn expr_uses_ident(expr: &Expr, targets: &HashSet<&str>) -> bool {
+    match expr {
+        Expr::Ident(name) => targets.contains(name.to_ascii_uppercase().as_str()),
+        Expr::Call { args, .. } => args.iter().any(|arg| expr_uses_ident(arg, targets)),
+        Expr::Unary { rhs, .. } => expr_uses_ident(rhs, targets),
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_uses_ident(lhs, targets) || expr_uses_ident(rhs, targets)
+        }
+        Expr::Number(_) => false,
+    }
+}
+
+fn program_uses_ident(program: &Stmts, targets: &HashSet<&str>) -> bool {
+    program.item.iter().any(|stmt| match stmt {
+        Stmt::Expr(expr) => expr_uses_ident(expr, targets),
+        Stmt::Assign { value, .. } => expr_uses_ident(value, targets),
+    })
+}
+
+fn filter_used_indicator_cache(
+    indicator_cache: Vec<IndsCache>,
+    required_runtime_keys: &HashSet<String>,
+) -> Vec<IndsCache> {
+    if required_runtime_keys.is_empty() {
+        return Vec::new();
+    }
+    indicator_cache
+        .into_iter()
+        .filter(|item| required_runtime_keys.contains(item.name.trim()))
+        .collect()
+}
+
 fn query_template_history_window(
     conn: &Connection,
     need_rows: usize,
@@ -833,6 +874,20 @@ fn inject_template_rank_score_series(
     row_data.validate()
 }
 
+fn clear_latest_template_rank_score(row_data: &mut RowData) {
+    if row_data.trade_dates.is_empty() {
+        return;
+    }
+    let latest_index = row_data.trade_dates.len() - 1;
+    for key in ["RANK", "SCORE"] {
+        if let Some(series) = row_data.cols.get_mut(key) {
+            if let Some(value) = series.get_mut(latest_index) {
+                *value = None;
+            }
+        }
+    }
+}
+
 fn build_template_warning_message(messages: Vec<String>) -> Option<String> {
     let normalized = messages
         .into_iter()
@@ -855,6 +910,7 @@ fn cached_template_runtime(
     source_path: &str,
     stocks: &[StockMeta],
     templates: &[IntradayMonitorTemplate],
+    data_mode: TemplateRuntimeDataMode,
 ) -> Result<Arc<AllMarketTemplateRuntimeCacheEntry>, String> {
     let compiled_templates = compile_intraday_templates(templates);
     let template_order = collect_template_order(templates);
@@ -867,6 +923,10 @@ fn cached_template_runtime(
         .collect::<Vec<_>>();
     let mut required_runtime_keys = collect_intraday_template_runtime_keys(&ready_programs);
     let cyq_chen_runtime_keys = collect_intraday_template_cyq_chen_keys(&ready_programs);
+    let rank_score_keys = HashSet::from(["RANK", "SCORE"]);
+    let uses_rank_score = ready_programs
+        .iter()
+        .any(|program| program_uses_ident(program, &rank_score_keys));
     let template_warmup_need = compiled_templates
         .values()
         .filter_map(|item| match item {
@@ -875,12 +935,25 @@ fn cached_template_runtime(
         })
         .max()
         .unwrap_or(0);
-    let indicator_cache = cache_ind_build(source_path).unwrap_or_default();
+    let indicator_cache = filter_used_indicator_cache(
+        cache_ind_build(source_path).unwrap_or_default(),
+        &required_runtime_keys,
+    );
     let indicator_warmup_need = if indicator_cache.is_empty() {
         0
     } else {
         add_indicator_input_runtime_keys(&mut required_runtime_keys);
         warmup_ind_estimate(source_path).unwrap_or(0)
+    };
+    let needs_history = data_mode == TemplateRuntimeDataMode::History
+        || template_warmup_need > 0
+        || indicator_warmup_need > 0
+        || uses_rank_score
+        || !cyq_chen_runtime_keys.is_empty();
+    let resolved_data_mode = if needs_history {
+        TemplateRuntimeDataMode::History
+    } else {
+        TemplateRuntimeDataMode::QuoteOnly
     };
     let need_rows = template_warmup_need.max(indicator_warmup_need).max(1);
     let ts_codes = stocks
@@ -889,9 +962,10 @@ fn cached_template_runtime(
         .collect::<Vec<_>>();
 
     let lookup_key = format!(
-        "{}|tpl:{}|keys:{}|rows:{}|stocks:{}",
+        "{}|tpl:{}|mode:{:?}|keys:{}|rows:{}|stocks:{}",
         source_path,
         fingerprint_templates(templates),
+        resolved_data_mode,
         fingerprint_runtime_keys(&required_runtime_keys),
         need_rows,
         fingerprint_strings(&ts_codes),
@@ -906,6 +980,7 @@ fn cached_template_runtime(
         return Ok(entry);
     }
 
+    let total_share_map = load_total_share_map(source_path).unwrap_or_default();
     let warning_messages = template_order
         .iter()
         .filter_map(|template_id| match compiled_templates.get(template_id) {
@@ -925,7 +1000,24 @@ fn cached_template_runtime(
             compiled_templates,
             base_rows: HashMap::new(),
             indicator_cache,
-            total_share_map: HashMap::new(),
+            total_share_map,
+            cyq_chen_runtime_keys,
+            warning_messages,
+        });
+        template_runtime_cache()
+            .lock()
+            .map_err(|_| "模板预热缓存锁已损坏".to_string())?
+            .insert(lookup_key, entry.clone());
+        return Ok(entry);
+    }
+
+    if !needs_history {
+        let entry = Arc::new(AllMarketTemplateRuntimeCacheEntry {
+            template_order,
+            compiled_templates,
+            base_rows: HashMap::new(),
+            indicator_cache,
+            total_share_map,
             cyq_chen_runtime_keys,
             warning_messages,
         });
@@ -939,14 +1031,13 @@ fn cached_template_runtime(
     let reader = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)
         .map_err(|e| format!("模板预热初始化日K读取器失败: {e}"))?;
     let (start_date, end_date) = query_template_history_window(&reader.conn, need_rows)?;
-    let rank_score_map = load_template_rank_score_series_map(
-        &open_result_conn(source_path)?,
-        &start_date,
-        &end_date,
-    )
-    .unwrap_or_default();
+    let rank_score_map = if uses_rank_score {
+        load_template_rank_score_series_map(&open_result_conn(source_path)?, &start_date, &end_date)
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
     let raw_rows = reader.load_batch(&ts_codes, DEFAULT_ADJ_TYPE, &start_date, &end_date)?;
-    let total_share_map = load_total_share_map(source_path).unwrap_or_default();
     let stock_board_map = stocks
         .iter()
         .map(|item| (item.ts_code.as_str(), item.board.as_str()))
@@ -1009,6 +1100,7 @@ fn build_template_runtime_row_data(
     let mut row_data = if let Some(base_row) = entry.base_rows.get(&row.ts_code) {
         let mut row_data = base_row.clone();
         merge_realtime_quote_into_row_data(&mut row_data, quote, &trade_date)?;
+        clear_latest_template_rank_score(&mut row_data);
         row_data
     } else {
         let mut row_data = build_quote_only_runtime_row_data(quote, &trade_date)?;
@@ -1126,7 +1218,12 @@ fn cached_daily_other_sort_values(
         ),
     );
 
-    let entry = cached_template_runtime(source_path, stocks, &templates)?;
+    let entry = cached_template_runtime(
+        source_path,
+        stocks,
+        &templates,
+        TemplateRuntimeDataMode::History,
+    )?;
     if let Some(values) = other_sort_daily_value_cache()
         .lock()
         .map_err(|_| "其他排序日K缓存锁已损坏".to_string())?
@@ -1221,7 +1318,12 @@ fn apply_other_sort_values(
 
     let template = build_other_sort_template(expression);
     let templates = vec![template.clone()];
-    let entry = match cached_template_runtime(source_path, stocks, &templates) {
+    let entry = match cached_template_runtime(
+        source_path,
+        stocks,
+        &templates,
+        TemplateRuntimeDataMode::QuoteOnly,
+    ) {
         Ok(entry) => entry,
         Err(error) => return Some(format!("其他排序异常: runtime 初始化失败: {error}")),
     };
@@ -1282,7 +1384,12 @@ fn apply_all_market_template_hits(
         return None;
     }
 
-    let entry = match cached_template_runtime(source_path, stocks, templates) {
+    let entry = match cached_template_runtime(
+        source_path,
+        stocks,
+        templates,
+        TemplateRuntimeDataMode::QuoteOnly,
+    ) {
         Ok(entry) => entry,
         Err(err) => {
             return Some(format!("模板计算异常: runtime 初始化失败: {err}"));
@@ -1615,6 +1722,10 @@ pub fn get_all_market_monitor_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        expr::parser::{Parser, lex_all},
+        ui_tools_feat::intraday_monitor::compile_intraday_templates,
+    };
 
     fn sample_meta() -> SourceMetaCacheEntry {
         SourceMetaCacheEntry {
@@ -1647,6 +1758,46 @@ mod tests {
             quote_trade_date: Some("20240603".to_string()),
             quote_time: Some("09:31:00".to_string()),
         }
+    }
+
+    fn parse_program(expr: &str) -> Stmts {
+        let mut parser = Parser::new(lex_all(expr));
+        parser.parse_main().expect("expression should parse")
+    }
+
+    #[test]
+    fn history_dependency_detection_catches_rank_case_insensitively() {
+        let program = parse_program("rank <= 100 AND RT_OP > 1");
+        let rank_score_keys = HashSet::from(["RANK", "SCORE"]);
+        assert!(program_uses_ident(&program, &rank_score_keys));
+    }
+
+    #[test]
+    fn compiled_intraday_template_reports_ref_warmup() {
+        let templates = vec![IntradayMonitorTemplate {
+            id: "sort".to_string(),
+            name: "其他排序".to_string(),
+            expression: "REF(C, 1)".to_string(),
+        }];
+        let compiled = compile_intraday_templates(&templates);
+        let Some(CompiledIntradayMonitorTemplate::Ready(template)) = compiled.get("sort") else {
+            panic!("template should compile");
+        };
+        assert_eq!(template.warmup_need, 1);
+    }
+
+    #[test]
+    fn clear_latest_template_rank_score_keeps_realtime_tail_empty() {
+        let mut row_data = RowData {
+            trade_dates: vec!["20240603".to_string(), "20240604".to_string()],
+            cols: HashMap::from([
+                ("RANK".to_string(), vec![Some(12.0), Some(8.0)]),
+                ("SCORE".to_string(), vec![Some(88.0), Some(91.0)]),
+            ]),
+        };
+        clear_latest_template_rank_score(&mut row_data);
+        assert_eq!(row_data.cols["RANK"], vec![Some(12.0), None]);
+        assert_eq!(row_data.cols["SCORE"], vec![Some(88.0), None]);
     }
 
     #[test]

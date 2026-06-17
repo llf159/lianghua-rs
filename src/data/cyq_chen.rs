@@ -129,6 +129,7 @@ pub struct ChenChipSnapshot {
     pub total_trapped_ratio: f64,
     pub main_profit_ratio: f64,
     pub main_trapped_ratio: f64,
+    pub main_avg_cost: f64,
     pub chip_peak_price: f64,
     pub percent_70: ChenChipPercentRange,
     pub percent_90: ChenChipPercentRange,
@@ -165,6 +166,7 @@ pub fn round_chen_chip_snapshot(snapshot: &mut ChenChipSnapshot) {
     } else {
         round_chen_chip_value(snapshot.main_trapped_ratio)
     };
+    snapshot.main_avg_cost = round_chen_chip_value(snapshot.main_avg_cost);
     snapshot.chip_peak_price = round_chen_chip_value(snapshot.chip_peak_price);
     round_chen_chip_percent_range(&mut snapshot.percent_70);
     round_chen_chip_percent_range(&mut snapshot.percent_90);
@@ -1688,6 +1690,15 @@ fn build_snapshot(bar: &ChenChipBar, buckets: &[ChipBucket]) -> Result<ChenChipS
     } else {
         1.0 - main_profit_ratio
     };
+    let main_avg_cost = if main_total <= EPS {
+        0.0
+    } else {
+        buckets
+            .iter()
+            .map(|bucket| bucket.price() * bucket.main_chip)
+            .sum::<f64>()
+            / main_total
+    };
     let chip_peak_price = buckets
         .iter()
         .fold(None::<&ChipBucket>, |best, bucket| match best {
@@ -1727,6 +1738,7 @@ fn build_snapshot(bar: &ChenChipBar, buckets: &[ChipBucket]) -> Result<ChenChipS
         total_trapped_ratio: finite_value(round_ratio(total_trapped_ratio))?,
         main_profit_ratio: finite_value(round_ratio(main_profit_ratio))?,
         main_trapped_ratio: finite_value(round_ratio(main_trapped_ratio))?,
+        main_avg_cost: finite_value(main_avg_cost)?,
         chip_peak_price: finite_value(chip_peak_price)?,
         percent_70: build_percent_range(0.7, buckets, total_chips),
         percent_90: build_percent_range(0.9, buckets, total_chips),
@@ -2157,6 +2169,8 @@ bias = 1.0
         );
         assert!(snapshots[1].main_profit_ratio >= 0.0);
         assert!(snapshots[1].main_profit_ratio <= 1.0);
+        assert!(snapshots[1].main_avg_cost >= snapshots[1].min_price);
+        assert!(snapshots[1].main_avg_cost <= snapshots[1].max_price);
         assert!(snapshots[1].chip_peak_price >= snapshots[1].min_price);
         assert!(snapshots[1].chip_peak_price <= snapshots[1].max_price);
         assert!(snapshots[1].percent_70.price_low <= snapshots[1].percent_70.price_high);

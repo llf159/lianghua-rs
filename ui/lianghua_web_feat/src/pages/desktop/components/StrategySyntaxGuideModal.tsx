@@ -90,6 +90,7 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     fields: [
       { name: 'CYQ_TPR / CYQ_TTR', scope: '通用', description: '新筹码整体获利 / 套牢筹码比例。', example: 'CYQ_TPR > 0.6 AND CYQ_TTR < 0.35' },
       { name: 'CYQ_MPR / CYQ_MTR', scope: '通用', description: '新筹码主力获利 / 套牢筹码比例。', example: 'CYQ_MPR > 0.6 AND CYQ_MTR < 0.35' },
+      { name: 'CYQ_MAC', scope: '通用', description: '新筹码主力平均成本，按价格分桶的主力筹码加权计算。', example: 'C > CYQ_MAC' },
       { name: 'CYQ_PEAK', scope: '通用', description: '新筹码总筹码峰值价格。', example: 'C > CYQ_PEAK' },
       { name: 'CYQ_MT / CYQ_RT', scope: '通用', description: '主力 / 散户归一化持仓量。', example: 'CYQ_MT > CYQ_RT' },
       { name: 'CYQ_MIN / CYQ_MAX', scope: '通用', description: '新筹码分布的最低 / 最高价格边界。', example: 'C >= CYQ_MIN AND C <= CYQ_MAX' },

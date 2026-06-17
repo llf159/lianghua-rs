@@ -110,6 +110,7 @@ pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
             total_chips DOUBLE,
             total_profit_ratio DOUBLE,
             total_trapped_ratio DOUBLE,
+            main_avg_cost DOUBLE,
             chip_peak_price DOUBLE,
             percent_70_price_low DOUBLE,
             percent_70_price_high DOUBLE,
@@ -220,6 +221,7 @@ fn ensure_cyq_chen_snapshot_columns(conn: &Connection) -> Result<(), String> {
     for (column_name, column_type) in [
         ("total_profit_ratio", "DOUBLE"),
         ("total_trapped_ratio", "DOUBLE"),
+        ("main_avg_cost", "DOUBLE"),
         ("chip_peak_price", "DOUBLE"),
         ("percent_70_price_low", "DOUBLE"),
         ("percent_70_price_high", "DOUBLE"),
@@ -1004,6 +1006,7 @@ fn append_cyq_chen_batch_rows(
     let mut snapshot_total_chips = Vec::new();
     let mut snapshot_total_profit_ratio = Vec::new();
     let mut snapshot_total_trapped_ratio = Vec::new();
+    let mut snapshot_main_avg_cost = Vec::new();
     let mut snapshot_chip_peak_price = Vec::new();
     let mut snapshot_percent_70_price_low = Vec::new();
     let mut snapshot_percent_70_price_high = Vec::new();
@@ -1042,6 +1045,7 @@ fn append_cyq_chen_batch_rows(
             snapshot_total_chips.push(snapshot.total_chips);
             snapshot_total_profit_ratio.push(snapshot.total_profit_ratio);
             snapshot_total_trapped_ratio.push(snapshot.total_trapped_ratio);
+            snapshot_main_avg_cost.push(snapshot.main_avg_cost);
             snapshot_chip_peak_price.push(snapshot.chip_peak_price);
             snapshot_percent_70_price_low.push(snapshot.percent_70.price_low);
             snapshot_percent_70_price_high.push(snapshot.percent_70.price_high);
@@ -1086,6 +1090,7 @@ fn append_cyq_chen_batch_rows(
                 snapshot_total_chips,
                 snapshot_total_profit_ratio,
                 snapshot_total_trapped_ratio,
+                snapshot_main_avg_cost,
                 snapshot_chip_peak_price,
                 snapshot_percent_70_price_low,
                 snapshot_percent_70_price_high,
@@ -1146,6 +1151,7 @@ fn build_cyq_chen_snapshot_record_batch(
     total_chips: Vec<f64>,
     total_profit_ratio: Vec<f64>,
     total_trapped_ratio: Vec<f64>,
+    main_avg_cost: Vec<f64>,
     chip_peak_price: Vec<f64>,
     percent_70_price_low: Vec<f64>,
     percent_70_price_high: Vec<f64>,
@@ -1170,6 +1176,7 @@ fn build_cyq_chen_snapshot_record_batch(
         Field::new("total_chips", DataType::Float64, false),
         Field::new("total_profit_ratio", DataType::Float64, false),
         Field::new("total_trapped_ratio", DataType::Float64, false),
+        Field::new("main_avg_cost", DataType::Float64, false),
         Field::new("chip_peak_price", DataType::Float64, false),
         Field::new("percent_70_price_low", DataType::Float64, false),
         Field::new("percent_70_price_high", DataType::Float64, false),
@@ -1196,6 +1203,7 @@ fn build_cyq_chen_snapshot_record_batch(
             float64_array(total_chips),
             float64_array(total_profit_ratio),
             float64_array(total_trapped_ratio),
+            float64_array(main_avg_cost),
             float64_array(chip_peak_price),
             float64_array(percent_70_price_low),
             float64_array(percent_70_price_high),
@@ -2409,6 +2417,7 @@ bias = 1.0
             total_trapped_ratio,
             main_profit_ratio,
             main_trapped_ratio,
+            main_avg_cost,
             chip_peak_price,
             percent_70_price_low,
             percent_70_price_high,
@@ -2419,6 +2428,7 @@ bias = 1.0
                 r#"
                 SELECT total_profit_ratio, total_trapped_ratio,
                        main_profit_ratio, main_trapped_ratio,
+                       main_avg_cost,
                        chip_peak_price,
                        percent_70_price_low, percent_70_price_high,
                        percent_90_price_low, percent_90_price_high
@@ -2437,6 +2447,7 @@ bias = 1.0
                         row.get::<_, f64>(6)?,
                         row.get::<_, f64>(7)?,
                         row.get::<_, f64>(8)?,
+                        row.get::<_, f64>(9)?,
                     ))
                 },
             )
@@ -2444,6 +2455,7 @@ bias = 1.0
         assert!((total_profit_ratio + total_trapped_ratio - 1.0).abs() < 1e-9);
         assert!((main_profit_ratio + main_trapped_ratio - 1.0).abs() < 1e-9);
         assert!((0.0..=1.0).contains(&main_profit_ratio));
+        assert!(main_avg_cost > 0.0);
         assert!(chip_peak_price > 0.0);
         assert!(percent_70_price_low <= percent_70_price_high);
         assert!(percent_90_price_low <= percent_90_price_high);

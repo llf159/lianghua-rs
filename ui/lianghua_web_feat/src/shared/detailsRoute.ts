@@ -6,6 +6,7 @@ export type DetailsRouteInput = {
   intervalStartTradeDate?: string | null
   intervalEndTradeDate?: string | null
   sourcePath?: string | null
+  autoRealtime?: boolean | null
 }
 
 export function buildLinkedDetailsPath({
@@ -14,6 +15,7 @@ export function buildLinkedDetailsPath({
   intervalStartTradeDate,
   intervalEndTradeDate,
   sourcePath,
+  autoRealtime,
 }: DetailsRouteInput) {
   const code = sanitizeCodeInput(splitTsCode(tsCode))
   if (code === '') {
@@ -37,6 +39,10 @@ export function buildLinkedDetailsPath({
 
   if (sourcePath?.trim()) {
     params.set('sourcePath', sourcePath.trim())
+  }
+
+  if (autoRealtime) {
+    params.set('autoRealtime', '1')
   }
 
   return `/details-linked?${params.toString()}`

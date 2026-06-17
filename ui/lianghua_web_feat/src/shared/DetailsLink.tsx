@@ -21,6 +21,7 @@ export default function DetailsLink({
   intervalStartTradeDate,
   intervalEndTradeDate,
   sourcePath,
+  autoRealtime,
   children,
   className,
   title,
@@ -47,6 +48,7 @@ export default function DetailsLink({
         intervalStartTradeDate,
         intervalEndTradeDate,
         sourcePath,
+        autoRealtime,
       })}
       state={
         {

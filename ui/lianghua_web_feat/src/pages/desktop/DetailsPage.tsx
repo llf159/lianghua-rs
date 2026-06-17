@@ -1363,6 +1363,12 @@ function buildDetailCyqSummaryItems(
       priority: "primary",
     },
     {
+      key: "main-avg-cost",
+      label: "主力成本",
+      value: formatNumber(snapshot.main_avg_cost),
+      priority: "primary",
+    },
+    {
       key: "peak",
       label: "总筹码峰",
       value: formatNumber(mixedPeakPrice),
@@ -4309,6 +4315,7 @@ export default function DetailsPage({
   const routeIntervalEndTradeDate =
     searchParams.get("intervalEndTradeDate")?.trim() ?? "";
   const routeSourcePath = searchParams.get("sourcePath")?.trim() ?? "";
+  const routeAutoRealtime = searchParams.get("autoRealtime") === "1";
   const routeIntervalRestore = useMemo(
     () =>
       normalizeIntervalRestoreRequest(
@@ -5032,7 +5039,6 @@ export default function DetailsPage({
           sourcePath: sourcePathTrimmed,
           tradeDate: nextTradeDate,
           tsCode: nextTsCode,
-          prevRankDays: 60,
         });
         if (cancelled || prevRanksRequestKeyRef.current !== requestKey) {
           return;
@@ -7050,7 +7056,7 @@ export default function DetailsPage({
   );
 
   useEffect(() => {
-    if (!detailRealtimePinned) {
+    if (!detailRealtimePinned && !routeAutoRealtime) {
       detailRealtimeAutoRefreshKeyRef.current = "";
       return;
     }
@@ -7078,6 +7084,7 @@ export default function DetailsPage({
     detailData?.resolved_trade_date,
     detailData?.resolved_ts_code,
     onRefreshRealtimeDetail,
+    routeAutoRealtime,
     sourcePathTrimmed,
   ]);
 

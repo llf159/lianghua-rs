@@ -262,6 +262,12 @@
   min-height: 92px;
 }
 
+.all-market-param-expression-hint {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .all-market-control-label {
   position: absolute;
   top: 0;

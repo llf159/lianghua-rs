@@ -54,7 +54,6 @@ const LS_KEY_SCENE_STAGE_THRESHOLD = "am_scene_stage_threshold";
 const LS_KEY_TOP_LIMIT = "am_top_limit";
 const LS_KEY_OTHER_SORT_EXPRESSION = "am_other_sort_expression";
 const LS_KEY_OTHER_SORT_DIRECTION = "am_other_sort_direction";
-const LS_KEY_OTHER_SORT_USE_REALTIME = "am_other_sort_use_realtime";
 const LS_KEY_COMPACT_MODE = "am_compact_mode";
 const INTRADAY_MONITOR_TEMPLATE_STORAGE_KEY =
   "lh_intraday_monitor_realtime_templates_v1";
@@ -354,27 +353,40 @@ function buildSpeedMap(
   now: number,
 ) {
   const target = now - periodSec * 1000;
-  let baseline: PriceSnapshot | null = null;
+  let boundarySnapshot: PriceSnapshot | null = null;
+  const windowSnapshots: PriceSnapshot[] = [];
   for (const snapshot of history) {
     if (snapshot.capturedAt <= target) {
-      baseline = snapshot;
-    } else {
-      break;
+      boundarySnapshot = snapshot;
+      continue;
     }
+    windowSnapshots.push(snapshot);
   }
-  if (!baseline) return new Map<string, number>();
+  if (boundarySnapshot) {
+    windowSnapshots.unshift(boundarySnapshot);
+  }
 
   const out = new Map<string, number>();
   for (const row of rows) {
     const currentPrice = row.realtime_price;
-    const previousPrice = baseline.prices[row.ts_code];
-    if (
-      isFiniteNumber(currentPrice) &&
-      currentPrice > 0 &&
-      isFiniteNumber(previousPrice) &&
-      previousPrice > 0
-    ) {
-      out.set(row.ts_code, (currentPrice / previousPrice - 1) * 100);
+    if (!isFiniteNumber(currentPrice) || currentPrice <= 0) {
+      continue;
+    }
+
+    let lowPrice = currentPrice;
+    for (const snapshot of windowSnapshots) {
+      const snapshotPrice = snapshot.prices[row.ts_code];
+      if (
+        isFiniteNumber(snapshotPrice) &&
+        snapshotPrice > 0 &&
+        snapshotPrice < lowPrice
+      ) {
+        lowPrice = snapshotPrice;
+      }
+    }
+
+    if (lowPrice > 0) {
+      out.set(row.ts_code, (currentPrice / lowPrice - 1) * 100);
     }
   }
   return out;
@@ -469,9 +481,6 @@ export default function AllMarketMonitorPage() {
   const [otherSortDirection, setOtherSortDirection] = useState<
     Exclude<SortDirection, null>
   >(() => readLocalStorageSortDirection(LS_KEY_OTHER_SORT_DIRECTION, "asc"));
-  const [otherSortUseRealtime, setOtherSortUseRealtime] = useState(() =>
-    readLocalStorageBoolean(LS_KEY_OTHER_SORT_USE_REALTIME, true),
-  );
   const [compactMode, setCompactMode] = useState(() =>
     readLocalStorageBoolean(LS_KEY_COMPACT_MODE, false),
   );
@@ -645,17 +654,6 @@ export default function AllMarketMonitorPage() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(
-        LS_KEY_OTHER_SORT_USE_REALTIME,
-        String(otherSortUseRealtime),
-      );
-    } catch {
-      // localStorage unavailable
-    }
-  }, [otherSortUseRealtime]);
-
-  useEffect(() => {
-    try {
       localStorage.setItem(LS_KEY_COMPACT_MODE, String(compactMode));
     } catch {
       // localStorage unavailable
@@ -733,7 +731,7 @@ export default function AllMarketMonitorPage() {
         templateEnabled ? templates : undefined,
         watchlistEnabled ? watchlistCodes : undefined,
         otherSortExpression.trim() || undefined,
-        otherSortUseRealtime,
+        true,
       );
       if (!enabledRef.current) return;
 
@@ -798,7 +796,6 @@ export default function AllMarketMonitorPage() {
   }, [
     sceneStageThreshold,
     otherSortExpression,
-    otherSortUseRealtime,
     sourcePathTrimmed,
     templateEnabled,
     templates,
@@ -936,6 +933,16 @@ export default function AllMarketMonitorPage() {
   const displayRows = useMemo<DisplayRow[]>(() => {
     const filteredRows = rows
       .filter((row) => boardFilter === "全部" || row.board === boardFilter)
+      .filter((row) => {
+        if (primarySortKey !== "realtime_vol_ratio") {
+          return true;
+        }
+        return (
+          isFiniteNumber(volumeRatioThreshold) &&
+          isFiniteNumber(row.realtime_vol_ratio) &&
+          row.realtime_vol_ratio > volumeRatioThreshold
+        );
+      })
       .map((row) => ({
         ...row,
         speed_pct: speedMap.get(row.ts_code) ?? null,
@@ -991,6 +998,7 @@ export default function AllMarketMonitorPage() {
     sortKey,
     speedMap,
     topLimit,
+    volumeRatioThreshold,
   ]);
 
   const navigationItems = useMemo(
@@ -1025,6 +1033,16 @@ export default function AllMarketMonitorPage() {
 
     return rows
       .filter((row) => boardFilter === "全部" || row.board === boardFilter)
+      .filter((row) => {
+        if (hitPanelMode !== "realtime_vol_ratio") {
+          return true;
+        }
+        return (
+          isFiniteNumber(volumeRatioThreshold) &&
+          isFiniteNumber(row.realtime_vol_ratio) &&
+          row.realtime_vol_ratio > volumeRatioThreshold
+        );
+      })
       .map((row): RecordHighDisplayRow | null => {
         const recordHighAt = eventTimes.get(row.ts_code);
         return isFiniteNumber(recordHighAt)
@@ -1044,6 +1062,7 @@ export default function AllMarketMonitorPage() {
     hitPanelMode,
     rows,
     speedMap,
+    volumeRatioThreshold,
     volumeRatioRecordHighEventTimes,
   ]);
   const hitPanelTitle =
@@ -1500,6 +1519,7 @@ export default function AllMarketMonitorPage() {
                                 undefined
                               }
                               sourcePath={sourcePathTrimmed || undefined}
+                              autoRealtime
                               className="all-market-stock-link"
                               title={`查看 ${row.name || row.ts_code} 详情`}
                               navigationItems={navigationItems}
@@ -1822,6 +1842,7 @@ export default function AllMarketMonitorPage() {
                           rankDate || record.realtime_trade_date || undefined
                         }
                         sourcePath={sourcePathTrimmed || undefined}
+                        autoRealtime
                         className="all-market-hit-name-link"
                         title={`查看 ${record.name || record.ts_code} 详情`}
                         navigationItems={navigationItems}
@@ -1858,6 +1879,7 @@ export default function AllMarketMonitorPage() {
                           rankDate || record.realtime_trade_date || undefined
                         }
                         sourcePath={sourcePathTrimmed || undefined}
+                        autoRealtime
                         className="all-market-hit-name-link"
                         title={`查看 ${record.name || record.ts_code} 详情`}
                         navigationItems={navigationItems}
@@ -1914,6 +1936,7 @@ export default function AllMarketMonitorPage() {
                           rankDate || record.realtime_trade_date || undefined
                         }
                         sourcePath={sourcePathTrimmed || undefined}
+                        autoRealtime
                         className="all-market-hit-name-link"
                         title={`查看 ${record.name || record.ts_code} 详情`}
                         navigationItems={hitNavigationItems}
@@ -1957,6 +1980,7 @@ export default function AllMarketMonitorPage() {
                     rankDate || openHitRecord.realtime_trade_date || undefined
                   }
                   sourcePath={sourcePathTrimmed || undefined}
+                  autoRealtime
                   className="all-market-stock-link"
                   title={`查看 ${openHitRecord.name || openHitRecord.ts_code} 详情`}
                   navigationItems={navigationItems}
@@ -2190,19 +2214,6 @@ export default function AllMarketMonitorPage() {
                 </select>
               </label>
 
-              <label className="settings-field">
-                <span>其他排序数据</span>
-                <select
-                  value={otherSortUseRealtime ? "realtime" : "daily"}
-                  onChange={(event) =>
-                    setOtherSortUseRealtime(event.target.value === "realtime")
-                  }
-                >
-                  <option value="realtime">使用实时数据</option>
-                  <option value="daily">不使用实时数据</option>
-                </select>
-              </label>
-
               <label className="settings-checkbox-inline all-market-param-compact">
                 <input
                   type="checkbox"
@@ -2222,6 +2233,11 @@ export default function AllMarketMonitorPage() {
                   }
                   placeholder="示例：RT_OP；C > RT_AVG；TOTAL_MV_YI"
                 />
+                <small className="all-market-param-expression-hint">
+                  默认使用实时最新一根；表达式需要 REF、MA、RANK
+                  或指标预热时会自动补历史。RANK/SCORE 最新实时一根为空，上一交易日排名用
+                  REF(RANK,1)。提示:可用IF语句二次排序
+                </small>
               </label>
             </div>
           </section>
