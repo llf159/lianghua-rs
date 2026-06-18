@@ -146,6 +146,14 @@ function compareBoardLabels(left: string, right: string) {
 }
 
 function compareSampleRows(left: MergedSampleRow, right: MergedSampleRow) {
+  const residualDiff =
+    left.source_bucket === "negative"
+      ? left.residual_return - right.residual_return
+      : right.residual_return - left.residual_return;
+  if (residualDiff !== 0) {
+    return residualDiff;
+  }
+
   const dateDiff = right.trade_date.localeCompare(left.trade_date);
   if (dateDiff !== 0) {
     return dateDiff;
@@ -154,11 +162,6 @@ function compareSampleRows(left: MergedSampleRow, right: MergedSampleRow) {
   const scoreDiff = right.rule_score - left.rule_score;
   if (scoreDiff !== 0) {
     return scoreDiff;
-  }
-
-  const residualDiff = right.residual_return - left.residual_return;
-  if (residualDiff !== 0) {
-    return residualDiff;
   }
 
   const tsCodeDiff = left.ts_code.localeCompare(right.ts_code, "zh-CN");

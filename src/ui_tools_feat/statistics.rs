@@ -3895,23 +3895,52 @@ fn load_concept_stock_count_map(source_path: &str) -> Result<HashMap<String, usi
         .collect())
 }
 
-fn build_board_stock_count_map(
-    ts_board_map: &HashMap<String, Vec<String>>,
-) -> HashMap<String, usize> {
-    let mut board_stocks: HashMap<String, HashSet<String>> = HashMap::new();
-    for (ts_code, board_list) in ts_board_map {
-        for board in board_list {
-            board_stocks
-                .entry(board.clone())
+fn build_industry_maps(
+    source_path: &str,
+) -> Result<(HashMap<String, Vec<String>>, HashMap<String, usize>), String> {
+    let stock_rows = load_stock_list(source_path)?;
+    Ok(build_industry_maps_from_rows(stock_rows))
+}
+
+fn build_industry_maps_from_rows(
+    stock_rows: Vec<Vec<String>>,
+) -> (HashMap<String, Vec<String>>, HashMap<String, usize>) {
+    let mut ts_industry_map: HashMap<String, Vec<String>> =
+        HashMap::with_capacity(stock_rows.len());
+    let mut industry_stocks: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for cols in stock_rows {
+        let Some(ts_code) = cols
+            .first()
+            .map(|value| value.trim().to_ascii_uppercase())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(industry_raw) = cols.get(4).map(|value| value.trim()) else {
+            continue;
+        };
+        if industry_raw.is_empty() {
+            continue;
+        }
+
+        let industries = split_board_tags(industry_raw);
+        for industry in &industries {
+            industry_stocks
+                .entry(industry.clone())
                 .or_default()
                 .insert(ts_code.clone());
         }
+        if !industries.is_empty() {
+            ts_industry_map.insert(ts_code, industries);
+        }
     }
 
-    board_stocks
+    let industry_stock_counts = industry_stocks
         .into_iter()
-        .map(|(board, stocks)| (board, stocks.len()))
-        .collect()
+        .map(|(industry, stocks)| (industry, stocks.len()))
+        .collect();
+    (ts_industry_map, industry_stock_counts)
 }
 
 fn has_min_stock_count(
@@ -3966,7 +3995,7 @@ pub fn get_market_analysis(
 
     let (board_options, ts_board_map) = get_or_build_board_maps(&source_path)?;
     let concept_stock_counts = load_concept_stock_count_map(&source_path)?;
-    let board_stock_counts = build_board_stock_count_map(&ts_board_map);
+    let (ts_industry_map, industry_stock_counts) = build_industry_maps(&source_path)?;
     let resolved_board = resolve_board_filter(board, &board_options);
     let exclude_st_board = exclude_st_board.unwrap_or(false);
     let sample_eligibility =
@@ -4095,7 +4124,7 @@ pub fn get_market_analysis(
     }
     interval_concept_top.truncate(20);
 
-    let mut interval_board_stmt = source_conn
+    let mut interval_industry_stmt = source_conn
         .prepare(
             r#"
             SELECT ts_code, AVG(TRY_CAST(pct_chg AS DOUBLE)) AS avg_pct
@@ -4106,37 +4135,39 @@ pub fn get_market_analysis(
             GROUP BY 1
             "#,
         )
-        .map_err(|e| format!("预编译板块区间榜 SQL 失败: {e}"))?;
-    let mut interval_board_rows = interval_board_stmt
+        .map_err(|e| format!("预编译行业区间榜 SQL 失败: {e}"))?;
+    let mut interval_industry_rows = interval_industry_stmt
         .query(params![&interval_start, &interval_end])
-        .map_err(|e| format!("执行板块区间榜 SQL 失败: {e}"))?;
-    let mut interval_board_acc: HashMap<String, (f64, usize)> = HashMap::new();
-    while let Some(row) = interval_board_rows
+        .map_err(|e| format!("执行行业区间榜 SQL 失败: {e}"))?;
+    let mut interval_industry_acc: HashMap<String, (f64, usize)> = HashMap::new();
+    while let Some(row) = interval_industry_rows
         .next()
-        .map_err(|e| format!("读取板块区间榜失败: {e}"))?
+        .map_err(|e| format!("读取行业区间榜失败: {e}"))?
     {
         let ts_code: String = row.get(0).map_err(|e| format!("读取代码失败: {e}"))?;
-        let avg_pct: Option<f64> = row.get(1).map_err(|e| format!("读取板块值失败: {e}"))?;
+        let avg_pct: Option<f64> = row.get(1).map_err(|e| format!("读取行业值失败: {e}"))?;
         let Some(avg_pct) = avg_pct.filter(|v| v.is_finite()) else {
             continue;
         };
         let ts_code = ts_code.to_ascii_uppercase();
-        let Some(board_list) = ts_board_map.get(&ts_code) else {
+        let Some(industry_list) = ts_industry_map.get(&ts_code) else {
             continue;
         };
-        for board in board_list {
-            let entry = interval_board_acc.entry(board.clone()).or_insert((0.0, 0));
+        for industry in industry_list {
+            let entry = interval_industry_acc
+                .entry(industry.clone())
+                .or_insert((0.0, 0));
             entry.0 += avg_pct;
             entry.1 += 1;
         }
     }
-    let mut interval_board_top = interval_board_acc
+    let mut interval_industry_top = interval_industry_acc
         .into_iter()
         .filter_map(|(name, (sum, cnt))| {
             if cnt == 0 {
                 return None;
             }
-            if !has_min_stock_count(&board_stock_counts, &name, min_board_stock_count) {
+            if !has_min_stock_count(&industry_stock_counts, &name, min_board_stock_count) {
                 return None;
             }
             let value = sum / cnt as f64;
@@ -4146,13 +4177,13 @@ pub fn get_market_analysis(
             Some(market_rank_item(name, value))
         })
         .collect::<Vec<_>>();
-    interval_board_top.sort_by(|a, b| {
+    interval_industry_top.sort_by(|a, b| {
         b.value
             .partial_cmp(&a.value)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.name.cmp(&b.name))
     });
-    interval_board_top.truncate(20);
+    interval_industry_top.truncate(20);
 
     let stock_name_map = load_stock_name_map(&source_path)?;
 
@@ -4306,7 +4337,7 @@ pub fn get_market_analysis(
     }
     daily_concept_top.truncate(20);
 
-    let mut daily_board_stmt = source_conn
+    let mut daily_industry_stmt = source_conn
         .prepare(
             r#"
             SELECT ts_code, TRY_CAST(pct_chg AS DOUBLE) AS pct
@@ -4315,37 +4346,39 @@ pub fn get_market_analysis(
               AND trade_date = ?
             "#,
         )
-        .map_err(|e| format!("预编译板块当日榜 SQL 失败: {e}"))?;
-    let mut daily_board_rows = daily_board_stmt
+        .map_err(|e| format!("预编译行业当日榜 SQL 失败: {e}"))?;
+    let mut daily_industry_rows = daily_industry_stmt
         .query(params![&ref_date])
-        .map_err(|e| format!("执行板块当日榜 SQL 失败: {e}"))?;
-    let mut daily_board_acc: HashMap<String, (f64, usize)> = HashMap::new();
-    while let Some(row) = daily_board_rows
+        .map_err(|e| format!("执行行业当日榜 SQL 失败: {e}"))?;
+    let mut daily_industry_acc: HashMap<String, (f64, usize)> = HashMap::new();
+    while let Some(row) = daily_industry_rows
         .next()
-        .map_err(|e| format!("读取板块当日榜失败: {e}"))?
+        .map_err(|e| format!("读取行业当日榜失败: {e}"))?
     {
         let ts_code: String = row.get(0).map_err(|e| format!("读取代码失败: {e}"))?;
-        let pct: Option<f64> = row.get(1).map_err(|e| format!("读取板块值失败: {e}"))?;
+        let pct: Option<f64> = row.get(1).map_err(|e| format!("读取行业值失败: {e}"))?;
         let Some(pct) = pct.filter(|v| v.is_finite()) else {
             continue;
         };
         let ts_code = ts_code.to_ascii_uppercase();
-        let Some(board_list) = ts_board_map.get(&ts_code) else {
+        let Some(industry_list) = ts_industry_map.get(&ts_code) else {
             continue;
         };
-        for board in board_list {
-            let entry = daily_board_acc.entry(board.clone()).or_insert((0.0, 0));
+        for industry in industry_list {
+            let entry = daily_industry_acc
+                .entry(industry.clone())
+                .or_insert((0.0, 0));
             entry.0 += pct;
             entry.1 += 1;
         }
     }
-    let mut daily_board_top = daily_board_acc
+    let mut daily_industry_top = daily_industry_acc
         .into_iter()
         .filter_map(|(name, (sum, cnt))| {
             if cnt == 0 {
                 return None;
             }
-            if !has_min_stock_count(&board_stock_counts, &name, min_board_stock_count) {
+            if !has_min_stock_count(&industry_stock_counts, &name, min_board_stock_count) {
                 return None;
             }
             let value = sum / cnt as f64;
@@ -4355,13 +4388,13 @@ pub fn get_market_analysis(
             Some(market_rank_item(name, value))
         })
         .collect::<Vec<_>>();
-    daily_board_top.sort_by(|a, b| {
+    daily_industry_top.sort_by(|a, b| {
         b.value
             .partial_cmp(&a.value)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.name.cmp(&b.name))
     });
-    daily_board_top.truncate(20);
+    daily_industry_top.truncate(20);
 
     let mut daily_gain_stmt = source_conn
         .prepare(
@@ -4422,14 +4455,14 @@ pub fn get_market_analysis(
         interval: MarketAnalysisSnapshot {
             trade_date: Some(format!("{}~{}", interval_start, interval_end)),
             concept_top: interval_concept_top,
-            industry_top: interval_board_top,
+            industry_top: interval_industry_top,
             gain_top: interval_gain_top,
             sub_interval_gain_top,
         },
         daily: MarketAnalysisSnapshot {
             trade_date: Some(ref_date),
             concept_top: daily_concept_top,
-            industry_top: daily_board_top,
+            industry_top: daily_industry_top,
             gain_top: daily_gain_top,
             sub_interval_gain_top: Vec::new(),
         },
@@ -4526,7 +4559,7 @@ pub fn get_market_contribution(
 
     let stock_rows = load_stock_list(&source_path)?;
     let mut ts_name_map: HashMap<String, String> = HashMap::with_capacity(stock_rows.len());
-    let mut ts_board_map: HashMap<String, String> = HashMap::with_capacity(stock_rows.len());
+    let mut ts_industry_map: HashMap<String, String> = HashMap::with_capacity(stock_rows.len());
     let mut target_codes: HashSet<String> = HashSet::new();
 
     for cols in stock_rows {
@@ -4545,16 +4578,16 @@ pub fn get_market_contribution(
             ts_name_map.insert(ts_code.to_string(), stock_name);
         }
 
-        let board_name = cols
+        let industry_name = cols
             .get(4)
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        if let Some(board_name) = board_name.clone() {
-            ts_board_map.insert(ts_code.to_string(), board_name.clone());
+        if let Some(industry_name) = industry_name.clone() {
+            ts_industry_map.insert(ts_code.to_string(), industry_name.clone());
         }
 
         if kind == "industry" {
-            let is_match = board_name
+            let is_match = industry_name
                 .as_deref()
                 .map(|value| {
                     value
@@ -4637,7 +4670,7 @@ pub fn get_market_contribution(
             contributors.push(MarketContributorItem {
                 ts_code: ts_code.clone(),
                 name: ts_name_map.get(&ts_code).cloned(),
-                industry: ts_board_map.get(&ts_code).cloned(),
+                industry: ts_industry_map.get(&ts_code).cloned(),
                 contribution_pct,
             });
         }
@@ -4675,7 +4708,7 @@ pub fn get_market_contribution(
             contributors.push(MarketContributorItem {
                 ts_code: ts_code.clone(),
                 name: ts_name_map.get(&ts_code).cloned(),
-                industry: ts_board_map.get(&ts_code).cloned(),
+                industry: ts_industry_map.get(&ts_code).cloned(),
                 contribution_pct,
             });
         }
@@ -5660,8 +5693,8 @@ fn rank_layer_label(layer_index: usize, layer_count: usize) -> String {
 fn rank_layer_method_label(layer_method: RankLayerMethod) -> &'static str {
     match layer_method {
         RankLayerMethod::Score => "按分数分层",
-        RankLayerMethod::SampleCount => "按样本数分层",
-        RankLayerMethod::Rank => "按排名分层",
+        RankLayerMethod::SampleCount => "按样本数分层（同分不拆）",
+        RankLayerMethod::Rank => "按排名分层（筛选后重排）",
     }
 }
 
@@ -5821,13 +5854,7 @@ fn run_rank_layer_backtest_core(
 
 #[derive(Default)]
 struct RankLayerSampleGroupAccumulator {
-    total_samples: usize,
-    positive_count: usize,
-    negative_count: usize,
-    random_count: usize,
-    positive: Vec<ValidationSampleRawRow>,
-    negative: Vec<ValidationSampleRawRow>,
-    random: Vec<(u64, ValidationSampleRawRow)>,
+    sample_by_stock: HashMap<String, ValidationSampleRawRow>,
 }
 
 fn build_rank_layer_sample_groups(
@@ -5851,41 +5878,75 @@ fn build_rank_layer_sample_groups(
             residual_return: sample.residual_return,
         };
 
-        group.total_samples += 1;
-        group.random_count += 1;
-        if row.residual_return > 0.0 {
-            group.positive_count += 1;
-            push_limited_sample(
-                &mut group.positive,
-                row.clone(),
-                RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
-                compare_positive_validation_sample,
-            );
-        } else if row.residual_return < 0.0 {
-            group.negative_count += 1;
-            push_limited_sample(
-                &mut group.negative,
-                row.clone(),
-                RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
-                compare_negative_validation_sample,
-            );
-        }
-
-        push_limited_random_sample(
-            &mut group.random,
-            random::<u64>(),
-            row,
-            RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
-        );
+        group
+            .sample_by_stock
+            .entry(row.ts_code.clone())
+            .and_modify(|current| {
+                if should_replace_validation_stock_sample(current, &row) {
+                    *current = row.clone();
+                }
+            })
+            .or_insert(row);
     }
 
     groups
         .into_iter()
         .enumerate()
-        .map(|(index, mut group)| {
-            group.positive.sort_by(compare_positive_validation_sample);
-            group.negative.sort_by(compare_negative_validation_sample);
-            group.random.sort_by(|left, right| {
+        .map(|(index, group)| {
+            let unique_samples = group.sample_by_stock.into_values().collect::<Vec<_>>();
+            let total_samples = unique_samples.len();
+            let positive_count = unique_samples
+                .iter()
+                .filter(|row| row.residual_return > 0.0)
+                .count();
+            let negative_count = unique_samples
+                .iter()
+                .filter(|row| row.residual_return < 0.0)
+                .count();
+            let mut positive_by_board: HashMap<String, Vec<ValidationSampleRawRow>> =
+                HashMap::new();
+            let mut negative_by_board: HashMap<String, Vec<ValidationSampleRawRow>> =
+                HashMap::new();
+            let mut random_by_board: HashMap<String, Vec<(u64, ValidationSampleRawRow)>> =
+                HashMap::new();
+
+            for row in unique_samples {
+                let board = sample_board(&row.ts_code, stock_meta_map);
+                if row.residual_return > 0.0 {
+                    push_limited_sample(
+                        positive_by_board.entry(board.clone()).or_default(),
+                        row.clone(),
+                        RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
+                        compare_positive_validation_sample,
+                    );
+                } else if row.residual_return < 0.0 {
+                    push_limited_sample(
+                        negative_by_board.entry(board.clone()).or_default(),
+                        row.clone(),
+                        RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
+                        compare_negative_validation_sample,
+                    );
+                }
+                push_limited_random_sample(
+                    random_by_board.entry(board).or_default(),
+                    random::<u64>(),
+                    row,
+                    RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
+                );
+            }
+
+            let mut positive = positive_by_board
+                .into_values()
+                .flatten()
+                .collect::<Vec<_>>();
+            let mut negative = negative_by_board
+                .into_values()
+                .flatten()
+                .collect::<Vec<_>>();
+            let mut random = random_by_board.into_values().flatten().collect::<Vec<_>>();
+            positive.sort_by(compare_positive_validation_sample);
+            negative.sort_by(compare_negative_validation_sample);
+            random.sort_by(|left, right| {
                 left.0
                     .cmp(&right.0)
                     .then_with(|| compare_random_validation_sample(&left.1, &right.1))
@@ -5894,14 +5955,14 @@ fn build_rank_layer_sample_groups(
             RankLayerSampleGroup {
                 layer_index: index + 1,
                 layer_label: rank_layer_label(index + 1, layer_count),
-                total_samples: group.total_samples,
-                positive_count: group.positive_count,
-                negative_count: group.negative_count,
-                random_count: group.random_count,
-                positive: validation_sample_rows_to_payload(group.positive, stock_meta_map),
-                negative: validation_sample_rows_to_payload(group.negative, stock_meta_map),
+                total_samples,
+                positive_count,
+                negative_count,
+                random_count: total_samples,
+                positive: validation_sample_rows_to_payload(positive, stock_meta_map),
+                negative: validation_sample_rows_to_payload(negative, stock_meta_map),
                 random: validation_sample_rows_to_payload(
-                    group.random.into_iter().map(|(_, row)| row),
+                    random.into_iter().map(|(_, row)| row),
                     stock_meta_map,
                 ),
             }
@@ -6578,12 +6639,14 @@ mod tests {
             source_db_path,
         },
         scoring::tools::load_st_list,
+        simulate::rank::RankLayerSamplePoint,
         simulate::rule::RuleLayerSamplePoint,
     };
 
     use super::{
         PreparedValidationCombo, ValidationSampleRawRow, ValidationSampleStockMeta,
-        ValidationSimilarityCache, ValidationVariant, build_rule_contribution_averages_from_rows,
+        ValidationSimilarityCache, ValidationVariant, build_industry_maps_from_rows,
+        build_rank_layer_sample_groups, build_rule_contribution_averages_from_rows,
         build_validation_cached_rule, build_validation_return_distribution,
         build_validation_sample_groups, build_validation_similarity_rows,
         build_validation_triggered_scores, build_validation_triggered_scores_for_combos,
@@ -6591,6 +6654,62 @@ mod tests {
         derive_validation_volatility_group, resolve_validation_sample_board_label,
     };
     use crate::data::ScopeWay;
+
+    #[test]
+    fn market_analysis_industry_map_uses_industry_instead_of_market_board() {
+        let rows = vec![
+            vec![
+                "000001.SZ",
+                "000001",
+                "平安银行",
+                "深圳",
+                "银行",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "主板",
+            ],
+            vec![
+                "300001.SZ",
+                "300001",
+                "特锐德",
+                "青岛",
+                "专用设备",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "创业板",
+            ],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(str::to_string).collect())
+        .collect();
+
+        let (industry_map, industry_counts) = build_industry_maps_from_rows(rows);
+
+        assert_eq!(
+            industry_map.get("000001.SZ"),
+            Some(&vec!["银行".to_string()])
+        );
+        assert_eq!(
+            industry_map.get("300001.SZ"),
+            Some(&vec!["专用设备".to_string()])
+        );
+        assert!(!industry_counts.contains_key("主板"));
+        assert!(!industry_counts.contains_key("创业板"));
+    }
 
     fn temp_source_dir() -> PathBuf {
         let unique = SystemTime::now()
@@ -7081,6 +7200,53 @@ explain = "test"
         assert_eq!(groups.random.len(), 2);
         assert_eq!(random_boards.get("北交所"), Some(&1));
         assert_eq!(random_boards.get("主板"), Some(&1));
+    }
+
+    #[test]
+    fn rank_layer_samples_match_expression_dedup_and_per_board_limit() {
+        let mut samples = Vec::new();
+        let mut stock_meta_map = HashMap::new();
+        for (board_prefix, board) in [("MB", "主板"), ("CY", "创业板")] {
+            for index in 0..6 {
+                let ts_code = format!("{board_prefix}{index:04}.SZ");
+                stock_meta_map.insert(
+                    ts_code.clone(),
+                    ValidationSampleStockMeta {
+                        name: None,
+                        board: board.to_string(),
+                        volatility_group: "常规波动".to_string(),
+                    },
+                );
+                samples.push(RankLayerSamplePoint {
+                    layer_index: 1,
+                    ts_code: ts_code.clone(),
+                    trade_date: "20240102".to_string(),
+                    score: 10.0,
+                    residual_return: index as f64 + 1.0,
+                });
+                samples.push(RankLayerSamplePoint {
+                    layer_index: 1,
+                    ts_code,
+                    trade_date: "20240103".to_string(),
+                    score: 10.0,
+                    residual_return: index as f64 + 11.0,
+                });
+            }
+        }
+
+        let groups = build_rank_layer_sample_groups(&samples, 1, &stock_meta_map);
+        let group = &groups[0];
+
+        assert_eq!(group.total_samples, 12);
+        assert_eq!(group.positive_count, 12);
+        assert_eq!(group.positive.len(), 10);
+        assert_eq!(group.positive[0].residual_return, 16.0);
+        assert!(
+            group
+                .positive
+                .iter()
+                .all(|row| row.trade_date == "20240103")
+        );
     }
 
     #[test]

@@ -135,17 +135,10 @@ pub(crate) fn spearman_corr(x: &[f64], y: &[f64]) -> Option<f64> {
 
 /// 计算平均排名。
 ///
-/// 先将值 snap 到 EPS 精度以消除亚精度噪声，然后稳定排序（等值按原索引），
-/// 等值组分配平均排名。
+/// 稳定排序（等值按原索引），差值小于 EPS 的值分配平均排名。
 pub(crate) fn average_ranks(values: &[f64]) -> Vec<f64> {
-    let mut indexed: Vec<(usize, f64)> = values
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(i, v)| (i, snap_to_eps(v)))
-        .collect();
+    let mut indexed: Vec<(usize, f64)> = values.iter().copied().enumerate().collect();
 
-    // 稳定排序：按 snap 后的值排，等值按原索引 tie-break
     indexed.sort_by(|a, b| {
         a.1.partial_cmp(&b.1)
             .unwrap_or(Ordering::Equal)
@@ -200,16 +193,6 @@ pub(crate) fn pearson_corr(x: &[f64], y: &[f64]) -> Option<f64> {
     Some((cov / (var_x.sqrt() * var_y.sqrt())).clamp(-1.0, 1.0))
 }
 
-/// 将值 snap（四舍五入）到最近 EPS 精度，消除亚精度浮点噪声。
-#[inline]
-fn snap_to_eps(value: f64) -> f64 {
-    if value.is_finite() {
-        (value / EPS).round() * EPS
-    } else {
-        value
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,11 +225,9 @@ mod tests {
     }
 
     #[test]
-    fn average_ranks_snaps_sub_eps_noise() {
-        // 亚精度噪声不应改变排名
-        let values = vec![1.0 + 1e-13, 1.0 - 1e-13, 2.0];
+    fn average_ranks_treats_sub_eps_values_across_rounding_boundary_as_ties() {
+        let values = vec![0.49 * EPS, 0.51 * EPS, 2.0];
         let ranks = average_ranks(&values);
-        // 前两个应被 snap 到相同值，共享排名 1.5
         assert!((ranks[0] - 1.5).abs() < 1e-9, "rank0={}", ranks[0]);
         assert!((ranks[1] - 1.5).abs() < 1e-9, "rank1={}", ranks[1]);
         assert!((ranks[2] - 3.0).abs() < 1e-9, "rank2={}", ranks[2]);
