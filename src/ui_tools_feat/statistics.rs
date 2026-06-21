@@ -38,7 +38,7 @@ use crate::{
         DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, build_backtest_sample_eligibility,
         rank::{
             RankLayerConfig, RankLayerFromDbInput, RankLayerMethod,
-            calc_rank_layer_metrics_from_score_rows,
+            calc_rank_layer_metrics_from_rank_samples, calc_rank_layer_metrics_from_score_rows,
         },
         rule::{
             DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE, RuleLayerConfig, RuleLayerFromDbInput,
@@ -5905,10 +5905,10 @@ fn rank_row_in_market_value_group(
 }
 
 fn build_rank_market_value_summaries(
-    source_conn: &Connection,
     source_path: &str,
     input: &RankLayerFromDbInput,
     summary_rows: &[ScoreSummary],
+    samples: &[crate::simulate::rank::RankLayerSamplePoint],
 ) -> Result<Vec<RankLayerMarketValueSummary>, String> {
     let total_mv_map = build_total_mv_map(source_path)?;
     let mut out = Vec::new();
@@ -5921,8 +5921,21 @@ fn build_rank_market_value_summaries(
             })
             .cloned()
             .collect::<Vec<_>>();
-        let metrics =
-            calc_rank_layer_metrics_from_score_rows(source_conn, source_path, input, &group_rows)?;
+        let group_samples = samples
+            .iter()
+            .filter(|sample| {
+                stock_total_mv(&total_mv_map, &sample.ts_code).is_some_and(|total_mv| {
+                    total_mv_min.is_none_or(|min_value| total_mv >= min_value)
+                        && total_mv_max.is_none_or(|max_value| total_mv < max_value)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let metrics = calc_rank_layer_metrics_from_rank_samples(
+            &group_samples,
+            &input.layer_config,
+            &group_rows,
+        )?;
         out.push(RankLayerMarketValueSummary {
             group_label: group_label.to_string(),
             total_mv_min,
@@ -5969,8 +5982,12 @@ fn run_rank_layer_backtest_core(
     )?;
     let metrics =
         calc_rank_layer_metrics_from_score_rows(source_conn, source_path, &input, &summary_rows)?;
-    let market_value_summaries =
-        build_rank_market_value_summaries(source_conn, source_path, &input, &summary_rows)?;
+    let market_value_summaries = build_rank_market_value_summaries(
+        source_path,
+        &input,
+        &summary_rows,
+        &metrics.layer_samples,
+    )?;
     let stock_meta_map = load_validation_sample_stock_meta_map(source_path)?;
     let layer_sample_groups = build_rank_layer_sample_groups(
         &metrics.layer_samples,
@@ -6737,8 +6754,12 @@ pub fn run_transient_rank_layer_backtest(
     );
     let metrics =
         calc_rank_layer_metrics_from_score_rows(&source_conn, &source_path, &input, &summary_rows)?;
-    let market_value_summaries =
-        build_rank_market_value_summaries(&source_conn, &source_path, &input, &summary_rows)?;
+    let market_value_summaries = build_rank_market_value_summaries(
+        &source_path,
+        &input,
+        &summary_rows,
+        &metrics.layer_samples,
+    )?;
     let stock_meta_map = load_validation_sample_stock_meta_map(&source_path)?;
     let layer_sample_groups = build_rank_layer_sample_groups(
         &metrics.layer_samples,

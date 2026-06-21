@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use duckdb::{Connection, params_from_iter};
+use rayon::prelude::*;
 
 use super::rule::{
     RuleLayerConfig, RuleLayerSamplePoint, build_rule_layer_runtime_cache,
@@ -253,6 +254,36 @@ pub fn calc_rank_layer_metrics(
     calc_rank_layer_metrics_with_lookup(samples, config, None)
 }
 
+pub fn calc_rank_layer_metrics_from_rank_samples(
+    samples: &[RankLayerSamplePoint],
+    config: &RankLayerConfig,
+    score_summary_rows: &[ScoreSummary],
+) -> Result<RankLayerMetrics, String> {
+    let samples = samples
+        .iter()
+        .map(|sample| RuleLayerSamplePoint {
+            ts_code: sample.ts_code.clone(),
+            trade_date: sample.trade_date.clone(),
+            rule_score: sample.score,
+            residual_return: sample.residual_return,
+        })
+        .collect::<Vec<_>>();
+    let (_, rank_lookup) = build_score_summary_data_from_rows(
+        score_summary_rows,
+        score_summary_rows
+            .iter()
+            .map(|row| row.trade_date.as_str())
+            .min()
+            .unwrap_or(""),
+        score_summary_rows
+            .iter()
+            .map(|row| row.trade_date.as_str())
+            .max()
+            .unwrap_or(""),
+    );
+    calc_rank_layer_metrics_with_lookup(&samples, config, Some(&rank_lookup))
+}
+
 fn calc_rank_layer_metrics_with_lookup(
     samples: &[RuleLayerSamplePoint],
     config: &RankLayerConfig,
@@ -273,6 +304,21 @@ fn calc_rank_layer_metrics_with_lookup(
     }
 
     let min_samples_per_day = config.effective_min_samples_per_day();
+    let day_results = grouped_by_day
+        .into_iter()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|(trade_date, day_samples)| {
+            calc_rank_layer_day(
+                trade_date,
+                day_samples,
+                config,
+                rank_lookup,
+                min_samples_per_day,
+            )
+        })
+        .collect::<Vec<_>>();
+
     let mut points = Vec::new();
     let mut spread_values = Vec::new();
     let mut ic_values = Vec::new();
@@ -285,100 +331,27 @@ fn calc_rank_layer_metrics_with_lookup(
     let mut layer_sample_counts = vec![0usize; layer_count];
     let mut layer_samples = Vec::new();
 
-    for (trade_date, day_samples) in grouped_by_day {
-        if day_samples.len() < min_samples_per_day {
-            continue;
-        }
-
-        let mut ordered = day_samples
-            .iter()
-            .map(|sample| (sample.rule_score, sample.residual_return))
-            .enumerate()
-            .collect::<Vec<_>>();
-        ordered.sort_by(|left, right| {
-            left.1
-                .0
-                .partial_cmp(&right.1.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.0.cmp(&right.0))
-        });
-
-        let layer_sample_indices_by_index =
-            build_layer_sample_indices(trade_date, &day_samples, &ordered, config, rank_lookup);
-        let mut layers = Vec::with_capacity(layer_count);
-        let mut layer_avg_returns = vec![None; layer_count];
-        let mut scores = Vec::with_capacity(day_samples.len());
-        let mut residuals = Vec::with_capacity(day_samples.len());
-
-        for sample in &day_samples {
-            scores.push(sample.rule_score);
-            residuals.push(sample.residual_return);
-        }
-
-        for (layer_index, layer_sample_indices) in
-            layer_sample_indices_by_index.into_iter().enumerate()
-        {
-            let layer_scores = layer_sample_indices
-                .iter()
-                .map(|sample_index| day_samples[*sample_index].rule_score)
-                .collect::<Vec<_>>();
-            let layer_residuals = layer_sample_indices
-                .iter()
-                .map(|sample_index| day_samples[*sample_index].residual_return)
-                .collect::<Vec<_>>();
-            let avg_score = mean(&layer_scores);
-            let avg_residual_return = mean(&layer_residuals);
-
-            if let Some(value) = avg_score {
-                layer_day_score_sums[layer_index] += value;
-                layer_day_score_counts[layer_index] += 1;
-            }
-            if let Some(value) = avg_residual_return {
-                layer_day_return_sums[layer_index] += value;
-                layer_day_return_counts[layer_index] += 1;
-                layer_avg_returns[layer_index] = Some(value);
-            }
-            layer_sample_counts[layer_index] += layer_sample_indices.len();
-
-            for sample_index in &layer_sample_indices {
-                let sample = day_samples[*sample_index];
-                layer_samples.push(RankLayerSamplePoint {
-                    layer_index: layer_index + 1,
-                    ts_code: sample.ts_code.clone(),
-                    trade_date: trade_date.to_string(),
-                    score: sample.rule_score,
-                    residual_return: sample.residual_return,
-                });
-            }
-
-            layers.push(RankLayerBucketPoint {
-                layer_index: layer_index + 1,
-                sample_count: layer_sample_indices.len(),
-                avg_score,
-                avg_residual_return,
-            });
-        }
-
-        let top_bottom_spread = match (layer_avg_returns[0], layer_avg_returns[layer_count - 1]) {
-            (Some(low), Some(high)) => Some(high - low),
-            _ => None,
-        };
-        let ic = spearman_corr(&scores, &residuals);
-
-        if let Some(value) = top_bottom_spread {
+    for day_result in day_results.into_iter().flatten() {
+        if let Some(value) = day_result.point.top_bottom_spread {
             spread_values.push(value);
         }
-        if let Some(value) = ic {
+        if let Some(value) = day_result.point.ic {
             ic_values.push(value);
         }
-        total_sample_count += day_samples.len();
-        points.push(RankLayerPoint {
-            trade_date: trade_date.to_string(),
-            sample_count: day_samples.len(),
-            top_bottom_spread,
-            ic,
-            layers,
-        });
+        total_sample_count += day_result.point.sample_count;
+        for index in 0..layer_count {
+            if let Some(value) = day_result.layer_avg_scores[index] {
+                layer_day_score_sums[index] += value;
+                layer_day_score_counts[index] += 1;
+            }
+            if let Some(value) = day_result.layer_avg_returns[index] {
+                layer_day_return_sums[index] += value;
+                layer_day_return_counts[index] += 1;
+            }
+            layer_sample_counts[index] += day_result.layer_sample_counts[index];
+        }
+        layer_samples.extend(day_result.layer_samples);
+        points.push(day_result.point);
     }
 
     let ic_mean = mean(&ic_values);
@@ -414,6 +387,106 @@ fn calc_rank_layer_metrics_with_lookup(
                 },
             })
             .collect(),
+        layer_samples,
+    })
+}
+
+struct RankLayerDayResult {
+    point: RankLayerPoint,
+    layer_avg_scores: Vec<Option<f64>>,
+    layer_avg_returns: Vec<Option<f64>>,
+    layer_sample_counts: Vec<usize>,
+    layer_samples: Vec<RankLayerSamplePoint>,
+}
+
+fn calc_rank_layer_day(
+    trade_date: &str,
+    day_samples: Vec<&RuleLayerSamplePoint>,
+    config: &RankLayerConfig,
+    rank_lookup: Option<&RankLayerLookup>,
+    min_samples_per_day: usize,
+) -> Option<RankLayerDayResult> {
+    if day_samples.len() < min_samples_per_day {
+        return None;
+    }
+
+    let mut ordered = day_samples
+        .iter()
+        .map(|sample| (sample.rule_score, sample.residual_return))
+        .enumerate()
+        .collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        left.1
+            .0
+            .partial_cmp(&right.1.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    let layer_count = config.layer_count;
+    let layer_sample_indices_by_index =
+        build_layer_sample_indices(trade_date, &day_samples, &ordered, config, rank_lookup);
+    let mut layers = Vec::with_capacity(layer_count);
+    let mut layer_avg_scores = vec![None; layer_count];
+    let mut layer_avg_returns = vec![None; layer_count];
+    let mut layer_sample_counts = vec![0; layer_count];
+    let mut layer_samples = Vec::with_capacity(day_samples.len());
+    let mut scores = Vec::with_capacity(day_samples.len());
+    let mut residuals = Vec::with_capacity(day_samples.len());
+
+    for sample in &day_samples {
+        scores.push(sample.rule_score);
+        residuals.push(sample.residual_return);
+    }
+
+    for (layer_index, layer_sample_indices) in layer_sample_indices_by_index.into_iter().enumerate()
+    {
+        let mut score_sum = 0.0;
+        let mut residual_sum = 0.0;
+        for sample_index in &layer_sample_indices {
+            let sample = day_samples[*sample_index];
+            score_sum += sample.rule_score;
+            residual_sum += sample.residual_return;
+            layer_samples.push(RankLayerSamplePoint {
+                layer_index: layer_index + 1,
+                ts_code: sample.ts_code.clone(),
+                trade_date: trade_date.to_string(),
+                score: sample.rule_score,
+                residual_return: sample.residual_return,
+            });
+        }
+
+        let sample_count = layer_sample_indices.len();
+        let avg_score = (sample_count > 0).then_some(score_sum / sample_count as f64);
+        let avg_residual_return = (sample_count > 0).then_some(residual_sum / sample_count as f64);
+        layer_avg_scores[layer_index] = avg_score;
+        layer_avg_returns[layer_index] = avg_residual_return;
+        layer_sample_counts[layer_index] = sample_count;
+        layers.push(RankLayerBucketPoint {
+            layer_index: layer_index + 1,
+            sample_count,
+            avg_score,
+            avg_residual_return,
+        });
+    }
+
+    let top_bottom_spread = match (layer_avg_returns[0], layer_avg_returns[layer_count - 1]) {
+        (Some(low), Some(high)) => Some(high - low),
+        _ => None,
+    };
+    let ic = spearman_corr(&scores, &residuals);
+
+    Some(RankLayerDayResult {
+        point: RankLayerPoint {
+            trade_date: trade_date.to_string(),
+            sample_count: day_samples.len(),
+            top_bottom_spread,
+            ic,
+            layers,
+        },
+        layer_avg_scores,
+        layer_avg_returns,
+        layer_sample_counts,
         layer_samples,
     })
 }
