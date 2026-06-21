@@ -346,12 +346,17 @@ export type RuleValidationSampleStats = {
   total_samples: number
 }
 
+export type RuleValidationTriggerCountStats = RuleValidationSampleStats & {
+  trigger_count: number
+}
+
 export type RuleValidationSampleRow = {
   ts_code: string
   name?: string | null
   board: string
   volatility_group: string
   trade_date: string
+  trigger_count: number
   rule_score: number
   residual_return: number
 }
@@ -377,6 +382,7 @@ export type RuleValidationComboResult = {
   triggered_days: number
   avg_daily_trigger: number
   sample_stats: RuleValidationSampleStats
+  trigger_count_stats: RuleValidationTriggerCountStats[]
   sample_groups: RuleValidationSampleGroups
   return_distribution: RuleValidationReturnDistributionBucket[]
   backtest: RuleLayerBacktestData
@@ -470,6 +476,7 @@ export type RuleLayerBacktestQuery = {
   minSamplesPerRuleDay?: number
   minListedTradeDays?: number
   backtestPeriod?: number
+  parallelBatchSize?: number
   board?: string
   excludeStBoard?: boolean
   totalMvMin?: number

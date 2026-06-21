@@ -4,7 +4,7 @@ use std::{
     sync::Mutex,
 };
 
-use duckdb::{Connection, params};
+use duckdb::{Connection, params, params_from_iter};
 use rand::random;
 #[cfg(test)]
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -41,8 +41,8 @@ use crate::{
             calc_rank_layer_metrics_from_score_rows,
         },
         rule::{
-            RuleLayerConfig, RuleLayerFromDbInput, RuleLayerMetricsWithSamples,
-            RuleLayerRuntimeCache, RuleLayerSamplePointRef,
+            DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE, RuleLayerConfig, RuleLayerFromDbInput,
+            RuleLayerMetricsWithSamples, RuleLayerRuntimeCache, RuleLayerSamplePointRef,
             build_rule_layer_runtime_cache_from_stock_data_with_ts_filter,
             calc_all_rule_layer_metrics_with_samples_from_db_map_with_ts_filter,
             calc_all_rule_layer_metrics_with_samples_from_rows_map,
@@ -430,6 +430,15 @@ pub struct RuleValidationSampleStats {
     pub total_samples: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleValidationTriggerCountStats {
+    pub trigger_count: usize,
+    pub positive_count: usize,
+    pub negative_count: usize,
+    pub random_count: usize,
+    pub total_samples: usize,
+}
+
 #[derive(Debug, Serialize)]
 pub struct RuleValidationSampleRow {
     pub ts_code: String,
@@ -437,6 +446,7 @@ pub struct RuleValidationSampleRow {
     pub board: String,
     pub volatility_group: String,
     pub trade_date: String,
+    pub trigger_count: usize,
     pub rule_score: f64,
     pub residual_return: f64,
 }
@@ -465,6 +475,7 @@ pub struct RuleValidationComboResult {
     pub triggered_days: usize,
     pub avg_daily_trigger: f64,
     pub sample_stats: RuleValidationSampleStats,
+    pub trigger_count_stats: Vec<RuleValidationTriggerCountStats>,
     pub sample_groups: RuleValidationSampleGroups,
     pub return_distribution: Vec<RuleValidationReturnDistributionBucket>,
     pub backtest: RuleLayerBacktestData,
@@ -2377,14 +2388,26 @@ fn build_validation_combo_result(
         layer_config.min_samples_per_day,
     );
     let return_distribution = build_validation_return_distribution(&metrics_with_samples.samples);
-    let mut sample_accumulator =
-        ValidationSampleAccumulator::new(sample_limit_per_group, stock_meta_map, similarity_cache);
+    let mut sample_accumulator = ValidationSampleAccumulator::new(
+        sample_limit_per_group,
+        stock_meta_map,
+        similarity_cache,
+        matches!(seed_rule.scope_way, ScopeWay::Each),
+        seed_rule.points,
+        seed_rule.dist_points.is_some(),
+    );
     visit_triggered_rule_samples_from_cache(runtime_cache, &triggered_score_map, |sample| {
         sample_accumulator.push(sample);
         Ok(())
     })?;
-    let (trigger_samples, triggered_days, sample_stats, sample_groups, overlap_hit_count) =
-        sample_accumulator.into_parts();
+    let (
+        trigger_samples,
+        triggered_days,
+        sample_stats,
+        trigger_count_stats,
+        sample_groups,
+        overlap_hit_count,
+    ) = sample_accumulator.into_parts();
     let backtest = build_rule_backtest_payload(
         &combo.variant.combo_key,
         params,
@@ -2412,6 +2435,7 @@ fn build_validation_combo_result(
             0.0
         },
         sample_stats,
+        trigger_count_stats,
         sample_groups,
         return_distribution,
         backtest,
@@ -2699,6 +2723,9 @@ fn build_strategy_rule_validation_detail(
         RULE_BACKTEST_DETAIL_SAMPLE_LIMIT_PER_GROUP,
         stock_meta_map,
         similarity_cache,
+        rule_meta.is_each,
+        rule_meta.points,
+        false,
     );
     for sample in &metrics_with_samples.samples {
         if sample.rule_score.abs() <= RULE_BACKTEST_EPS {
@@ -2712,8 +2739,14 @@ fn build_strategy_rule_validation_detail(
         });
     }
 
-    let (trigger_samples, triggered_days, sample_stats, sample_groups, overlap_hit_count) =
-        sample_accumulator.into_parts();
+    let (
+        trigger_samples,
+        triggered_days,
+        sample_stats,
+        trigger_count_stats,
+        sample_groups,
+        overlap_hit_count,
+    ) = sample_accumulator.into_parts();
     let backtest = build_rule_backtest_payload(
         rule_name,
         params,
@@ -2741,6 +2774,7 @@ fn build_strategy_rule_validation_detail(
             0.0
         },
         sample_stats,
+        trigger_count_stats,
         sample_groups,
         return_distribution,
         backtest,
@@ -2972,6 +3006,7 @@ fn compare_option_f64_desc(left: Option<f64>, right: Option<f64>) -> std::cmp::O
 struct ValidationSampleRawRow {
     ts_code: String,
     trade_date: String,
+    trigger_count: usize,
     rule_score: f64,
     residual_return: f64,
 }
@@ -2987,6 +3022,9 @@ struct ValidationSampleAccumulator<'a> {
     sample_limit_per_group: usize,
     stock_meta_map: &'a HashMap<String, ValidationSampleStockMeta>,
     similarity_cache: &'a ValidationSimilarityCache,
+    is_each: bool,
+    trigger_unit_points: f64,
+    has_dist_points: bool,
     total_triggers: usize,
     triggered_days: HashSet<String>,
     sample_by_stock: HashMap<String, ValidationSampleRawRow>,
@@ -2998,11 +3036,17 @@ impl<'a> ValidationSampleAccumulator<'a> {
         sample_limit_per_group: usize,
         stock_meta_map: &'a HashMap<String, ValidationSampleStockMeta>,
         similarity_cache: &'a ValidationSimilarityCache,
+        is_each: bool,
+        trigger_unit_points: f64,
+        has_dist_points: bool,
     ) -> Self {
         Self {
             sample_limit_per_group,
             stock_meta_map,
             similarity_cache,
+            is_each,
+            trigger_unit_points,
+            has_dist_points,
             total_triggers: 0,
             triggered_days: HashSet::new(),
             sample_by_stock: HashMap::new(),
@@ -3018,12 +3062,19 @@ impl<'a> ValidationSampleAccumulator<'a> {
         let row = ValidationSampleRawRow {
             ts_code: sample.ts_code.to_string(),
             trade_date: sample.trade_date.to_string(),
+            trigger_count: resolve_validation_trigger_count(
+                sample.rule_score,
+                self.is_each,
+                self.trigger_unit_points,
+                self.has_dist_points,
+            ),
             rule_score: sample.rule_score,
             residual_return: sample.residual_return,
         };
 
+        let sample_key = format!("{}__{}", row.trigger_count, row.ts_code);
         self.sample_by_stock
-            .entry(row.ts_code.clone())
+            .entry(sample_key)
             .and_modify(|current| {
                 if should_replace_validation_stock_sample(current, &row) {
                     *current = row.clone();
@@ -3051,6 +3102,7 @@ impl<'a> ValidationSampleAccumulator<'a> {
         usize,
         usize,
         RuleValidationSampleStats,
+        Vec<RuleValidationTriggerCountStats>,
         RuleValidationSampleGroups,
         HashMap<usize, usize>,
     ) {
@@ -3064,23 +3116,48 @@ impl<'a> ValidationSampleAccumulator<'a> {
             .iter()
             .filter(|row| row.residual_return < 0.0)
             .count();
-        let mut positive_by_board: HashMap<String, Vec<ValidationSampleRawRow>> = HashMap::new();
-        let mut negative_by_board: HashMap<String, Vec<ValidationSampleRawRow>> = HashMap::new();
-        let mut random_by_board: HashMap<String, Vec<(u64, ValidationSampleRawRow)>> =
+        let mut trigger_count_stats_map = HashMap::<usize, RuleValidationTriggerCountStats>::new();
+        for row in &unique_samples {
+            let stats = trigger_count_stats_map
+                .entry(row.trigger_count)
+                .or_insert_with(|| RuleValidationTriggerCountStats {
+                    trigger_count: row.trigger_count,
+                    positive_count: 0,
+                    negative_count: 0,
+                    random_count: 0,
+                    total_samples: 0,
+                });
+            stats.total_samples += 1;
+            stats.random_count += 1;
+            if row.residual_return > 0.0 {
+                stats.positive_count += 1;
+            } else if row.residual_return < 0.0 {
+                stats.negative_count += 1;
+            }
+        }
+        let mut trigger_count_stats = trigger_count_stats_map.into_values().collect::<Vec<_>>();
+        trigger_count_stats.sort_by_key(|item| item.trigger_count);
+
+        let mut positive_by_board: HashMap<(usize, String), Vec<ValidationSampleRawRow>> =
+            HashMap::new();
+        let mut negative_by_board: HashMap<(usize, String), Vec<ValidationSampleRawRow>> =
+            HashMap::new();
+        let mut random_by_board: HashMap<(usize, String), Vec<(u64, ValidationSampleRawRow)>> =
             HashMap::new();
 
         for row in unique_samples {
             let board = sample_board(&row.ts_code, self.stock_meta_map);
+            let bucket_key = (row.trigger_count, board);
             if row.residual_return > 0.0 {
                 push_limited_sample(
-                    positive_by_board.entry(board.clone()).or_default(),
+                    positive_by_board.entry(bucket_key.clone()).or_default(),
                     row.clone(),
                     self.sample_limit_per_group,
                     compare_positive_validation_sample,
                 );
             } else if row.residual_return < 0.0 {
                 push_limited_sample(
-                    negative_by_board.entry(board.clone()).or_default(),
+                    negative_by_board.entry(bucket_key.clone()).or_default(),
                     row.clone(),
                     self.sample_limit_per_group,
                     compare_negative_validation_sample,
@@ -3088,7 +3165,7 @@ impl<'a> ValidationSampleAccumulator<'a> {
             }
 
             push_limited_random_sample(
-                random_by_board.entry(board).or_default(),
+                random_by_board.entry(bucket_key).or_default(),
                 random::<u64>(),
                 row,
                 self.sample_limit_per_group,
@@ -3132,9 +3209,28 @@ impl<'a> ValidationSampleAccumulator<'a> {
             self.total_triggers,
             self.triggered_days.len(),
             stats,
+            trigger_count_stats,
             groups,
             self.overlap_hit_count,
         )
+    }
+}
+
+fn resolve_validation_trigger_count(
+    rule_score: f64,
+    is_each: bool,
+    trigger_unit_points: f64,
+    has_dist_points: bool,
+) -> usize {
+    if !is_each || has_dist_points || trigger_unit_points.abs() <= VALIDATION_EPS {
+        return 1;
+    }
+
+    let count = (rule_score / trigger_unit_points).abs().round();
+    if count.is_finite() && count >= 1.0 {
+        count as usize
+    } else {
+        1
     }
 }
 
@@ -3268,6 +3364,7 @@ fn validation_sample_rows_to_payload(
                 .unwrap_or_else(|| "其他波动".to_string()),
             ts_code: row.ts_code,
             trade_date: row.trade_date,
+            trigger_count: row.trigger_count,
             rule_score: row.rule_score,
             residual_return: row.residual_return,
         })
@@ -3358,6 +3455,7 @@ fn build_validation_sample_groups(
                     .unwrap_or_else(|| "其他波动".to_string()),
                 ts_code: row.ts_code,
                 trade_date: row.trade_date,
+                trigger_count: row.trigger_count,
                 rule_score: row.rule_score,
                 residual_return: row.residual_return,
             })
@@ -3455,6 +3553,7 @@ pub fn run_rule_expression_validation(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1).max(1),
+        parallel_batch_size: DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE,
         resolved_board,
         exclude_st_board,
         total_mv_min,
@@ -4884,6 +4983,7 @@ struct RuleLayerBacktestRunParams {
     min_samples_per_day: usize,
     min_listed_trade_days: usize,
     backtest_period: usize,
+    parallel_batch_size: usize,
     resolved_board: Option<String>,
     exclude_st_board: bool,
     total_mv_min: Option<f64>,
@@ -4929,28 +5029,93 @@ fn build_rule_contribution_averages(
     start_date: &str,
     end_date: &str,
 ) -> Result<HashMap<String, RuleContributionAverages>, String> {
-    let result_conn = open_result_conn(source_path)?;
-    let (_, meta_map) = load_rule_meta(source_path)?;
-    let rows = query_daily_rows(&result_conn, rule_options, &meta_map)?;
-    let mut acc_map: HashMap<String, RuleContributionAccumulator> = HashMap::new();
-
-    for row in rows {
-        if row.trade_date.as_str() < start_date || row.trade_date.as_str() > end_date {
-            continue;
-        }
-
-        let Some(contribution_score) = row.contribution_score.filter(|value| value.is_finite())
-        else {
-            continue;
-        };
-
-        let acc = acc_map.entry(row.rule_name).or_default();
-        acc.contribution_sum += contribution_score;
-        acc.contribution_days += 1;
-        acc.trigger_count += row.trigger_count.unwrap_or(0).max(0);
+    if rule_options.is_empty() {
+        return Ok(HashMap::new());
     }
 
-    Ok(finalize_rule_contribution_averages(acc_map))
+    let result_conn = open_result_conn(source_path)?;
+    let placeholders = std::iter::repeat_n("?", rule_options.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        r#"
+        WITH daily_rank_bounds AS (
+            SELECT trade_date, MAX(rank) AS max_rank
+            FROM score_summary
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+            GROUP BY trade_date
+        ),
+        triggered_rule_rows AS (
+            SELECT
+                rule_name,
+                ts_code,
+                trade_date,
+                TRY_CAST(rule_score AS DOUBLE) AS rule_score
+            FROM rule_details
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+              AND rule_name IN ({placeholders})
+              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
+              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > 1e-12
+        )
+        SELECT
+            d.rule_name,
+            SUM(
+                CASE
+                    WHEN s.rank IS NOT NULL
+                      AND b.max_rank IS NOT NULL
+                      AND b.max_rank > 0
+                    THEN d.rule_score * CAST((b.max_rank + 1 - s.rank) AS DOUBLE)
+                         / CAST(b.max_rank AS DOUBLE)
+                    ELSE 0
+                END
+            ) AS contribution_sum,
+            COUNT(DISTINCT d.trade_date) AS contribution_days,
+            COUNT(*) AS trigger_count
+        FROM triggered_rule_rows AS d
+        LEFT JOIN score_summary AS s
+          ON s.ts_code = d.ts_code
+         AND s.trade_date = d.trade_date
+        LEFT JOIN daily_rank_bounds AS b
+          ON b.trade_date = d.trade_date
+        GROUP BY d.rule_name
+        "#
+    );
+    let mut stmt = result_conn
+        .prepare(&sql)
+        .map_err(|e| format!("预编译策略回测贡献度查询失败: {e}"))?;
+    let query_params = [start_date, end_date, start_date, end_date]
+        .into_iter()
+        .chain(rule_options.iter().map(String::as_str));
+    let mut rows = stmt
+        .query(params_from_iter(query_params))
+        .map_err(|e| format!("查询策略回测贡献度失败: {e}"))?;
+    let mut out = HashMap::with_capacity(rule_options.len());
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取策略回测贡献度失败: {e}"))?
+    {
+        let rule_name: String = row.get(0).map_err(|e| format!("读取策略名失败: {e}"))?;
+        let contribution_sum = row
+            .get::<usize, Option<f64>>(1)
+            .map_err(|e| format!("读取策略贡献度失败: {e}"))?
+            .unwrap_or(0.0);
+        let contribution_days: i64 = row.get(2).map_err(|e| format!("读取贡献天数失败: {e}"))?;
+        let trigger_count: i64 = row.get(3).map_err(|e| format!("读取触发次数失败: {e}"))?;
+        out.insert(
+            rule_name,
+            RuleContributionAverages {
+                avg_contribution_score: (contribution_days > 0)
+                    .then_some(contribution_sum / contribution_days as f64),
+                avg_contribution_per_trigger: (trigger_count > 0)
+                    .then_some(contribution_sum / trigger_count as f64),
+            },
+        );
+    }
+
+    Ok(out)
 }
 
 fn finalize_rule_contribution_averages(
@@ -5541,6 +5706,7 @@ fn run_rule_layer_backtest_core(
         &params.end_date,
         &layer_config,
         params.allowed_ts_codes.as_ref(),
+        params.parallel_batch_size,
         |one_rule_name, metrics_with_samples| {
             Ok(build_one_rule_backtest_summary_and_detail(
                 one_rule_name,
@@ -5621,7 +5787,7 @@ fn build_one_rule_backtest_summary_and_detail(
     similarity_cache: &ValidationSimilarityCache,
     stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
 ) -> (RuleLayerRuleSummary, Option<RuleValidationComboResult>) {
-    let metrics = metrics_with_samples.metrics.clone();
+    let RuleLayerMetricsWithSamples { metrics, samples } = metrics_with_samples;
     let contribution_average = contribution_averages
         .get(one_rule_name)
         .cloned()
@@ -5645,7 +5811,7 @@ fn build_one_rule_backtest_summary_and_detail(
             params,
             one_rule_name,
             rule_meta,
-            metrics_with_samples,
+            RuleLayerMetricsWithSamples { metrics, samples },
             layer_config,
             similarity_cache,
             explain_map,
@@ -5881,6 +6047,7 @@ fn build_rank_layer_sample_groups(
         let row = ValidationSampleRawRow {
             ts_code: sample.ts_code.clone(),
             trade_date: sample.trade_date.clone(),
+            trigger_count: 1,
             rule_score: sample.score,
             residual_return: sample.residual_return,
         };
@@ -6057,6 +6224,7 @@ pub fn run_rule_layer_backtest(
     min_samples_per_rule_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    parallel_batch_size: Option<usize>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
@@ -6093,6 +6261,9 @@ pub fn run_rule_layer_backtest(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1),
+        parallel_batch_size: parallel_batch_size
+            .unwrap_or(DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE)
+            .max(1),
         resolved_board,
         exclude_st_board,
         total_mv_min,
@@ -6305,6 +6476,7 @@ pub fn run_transient_rule_layer_backtest(
     min_samples_per_rule_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    parallel_batch_size: Option<usize>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
@@ -6341,6 +6513,9 @@ pub fn run_transient_rule_layer_backtest(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1),
+        parallel_batch_size: parallel_batch_size
+            .unwrap_or(DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE)
+            .max(1),
         resolved_board,
         exclude_st_board,
         total_mv_min,
@@ -6410,6 +6585,7 @@ pub fn run_transient_rule_layer_backtest(
         &params.start_date,
         &params.end_date,
         &layer_config,
+        params.parallel_batch_size,
         |one_rule_name, metrics_with_samples| {
             Ok(build_one_rule_backtest_summary_and_detail(
                 one_rule_name,
@@ -6642,6 +6818,7 @@ mod tests {
         build_validation_triggered_scores, build_validation_triggered_scores_for_combos,
         collect_rule_validation_runtime_keys, collect_validation_assigned_names,
         derive_validation_volatility_group, resolve_validation_sample_board_label,
+        resolve_validation_trigger_count,
     };
     use crate::data::ScopeWay;
 
@@ -7090,53 +7267,70 @@ explain = "test"
     }
 
     #[test]
+    fn validation_trigger_count_uses_each_score_multiple() {
+        assert_eq!(resolve_validation_trigger_count(3.0, true, 1.0, false), 3);
+        assert_eq!(resolve_validation_trigger_count(-4.0, true, -1.0, false), 4);
+        assert_eq!(resolve_validation_trigger_count(6.0, true, 2.0, false), 3);
+        assert_eq!(resolve_validation_trigger_count(3.0, false, 1.0, false), 1);
+        assert_eq!(resolve_validation_trigger_count(3.0, true, 1.0, true), 1);
+    }
+
+    #[test]
     fn validation_sample_limit_applies_per_board_and_direction() {
         let samples = vec![
             ValidationSampleRawRow {
                 ts_code: "BJ0001.BJ".to_string(),
                 trade_date: "20240102".to_string(),
+                trigger_count: 1,
                 rule_score: 1.0,
                 residual_return: 9.0,
             },
             ValidationSampleRawRow {
                 ts_code: "BJ0001.BJ".to_string(),
                 trade_date: "20240103".to_string(),
+                trigger_count: 1,
                 rule_score: 1.0,
                 residual_return: 8.0,
             },
             ValidationSampleRawRow {
                 ts_code: "MB0001.SZ".to_string(),
                 trade_date: "20240102".to_string(),
+                trigger_count: 1,
                 rule_score: 1.0,
                 residual_return: 7.0,
             },
             ValidationSampleRawRow {
                 ts_code: "MB0001.SZ".to_string(),
                 trade_date: "20240103".to_string(),
+                trigger_count: 1,
                 rule_score: 1.0,
                 residual_return: 6.0,
             },
             ValidationSampleRawRow {
                 ts_code: "BJ0001.BJ".to_string(),
                 trade_date: "20240104".to_string(),
+                trigger_count: 1,
                 rule_score: 1.0,
                 residual_return: -7.0,
             },
             ValidationSampleRawRow {
                 ts_code: "BJ0001.BJ".to_string(),
                 trade_date: "20240105".to_string(),
+                trigger_count: 1,
                 rule_score: 1.0,
                 residual_return: -8.0,
             },
             ValidationSampleRawRow {
                 ts_code: "MB0001.SZ".to_string(),
                 trade_date: "20240104".to_string(),
+                trigger_count: 1,
                 rule_score: 1.0,
                 residual_return: -5.0,
             },
             ValidationSampleRawRow {
                 ts_code: "MB0001.SZ".to_string(),
                 trade_date: "20240105".to_string(),
+                trigger_count: 1,
                 rule_score: 1.0,
                 residual_return: -6.0,
             },

@@ -6,11 +6,11 @@ use rayon::prelude::*;
 
 use super::{
     BacktestSampleEligibility, DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, ResidualFactorSeriesRefs,
-    ResidualReturnInput, build_backtest_sample_eligibility,
+    ResidualReturnInput, build_backtest_sample_eligibility, build_forward_backtest_residual_map,
     calc_stock_residual_returns_from_loaded_series,
 };
 use crate::data::{
-    concept_performance_data::{load_concept_trend_series, load_industry_trend_series},
+    concept_performance_data::{load_concept_trend_series_map, load_industry_trend_series_map},
     load_stock_list, load_ths_concepts_named_map, result_db_path,
     scoring_data::{ScoreDetails, ScoreSummary},
 };
@@ -20,6 +20,7 @@ use crate::simulate::fp_utils::{
     sample_std, spearman_corr,
 };
 const PCT_CHG_BATCH_SIZE: usize = 512;
+pub(crate) const DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct RuleLayerConfig {
@@ -371,6 +372,7 @@ pub fn calc_all_rule_layer_metrics_with_samples_from_db_with_ts_filter(
         end_date,
         layer_config,
         allowed_ts_codes,
+        DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE,
         |rule_name, metrics| Ok((rule_name.to_string(), metrics)),
     )
 }
@@ -388,6 +390,7 @@ pub fn calc_all_rule_layer_metrics_with_samples_from_db_map_with_ts_filter<T, F>
     end_date: &str,
     layer_config: &RuleLayerConfig,
     allowed_ts_codes: Option<&HashSet<String>>,
+    parallel_batch_size: usize,
     map_result: F,
 ) -> Result<Vec<T>, String>
 where
@@ -430,21 +433,27 @@ where
         allowed_ts_codes,
     )?;
 
-    let grouped_results: Vec<Result<T, String>> = rule_names
-        .par_iter()
-        .map(|rule_name| {
-            let empty_triggered_score_map = TriggeredScoreMap::new();
-            let triggered_score_map = triggered_score_map_by_rule
-                .get(rule_name)
-                .unwrap_or(&empty_triggered_score_map);
-            let metrics = calc_rule_layer_metrics_with_samples_from_cache(
-                &runtime_cache,
-                triggered_score_map,
-                layer_config,
-            )?;
-            map_result(rule_name, metrics)
-        })
-        .collect();
+    // 每条规则都会物化一份全市场样本。按小批次并行，在恢复规则级吞吐的同时，
+    // 将同时存活的大 Vec 数量限制在固定值，避免峰值随 Rayon 线程数放大。
+    let mut grouped_results = Vec::with_capacity(rule_names.len());
+    for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
+        let mut batch_results: Vec<Result<T, String>> = rule_batch
+            .par_iter()
+            .map(|rule_name| {
+                let empty_triggered_score_map = TriggeredScoreMap::new();
+                let triggered_score_map = triggered_score_map_by_rule
+                    .get(rule_name)
+                    .unwrap_or(&empty_triggered_score_map);
+                let metrics = calc_rule_layer_metrics_with_samples_from_cache(
+                    &runtime_cache,
+                    triggered_score_map,
+                    layer_config,
+                )?;
+                map_result(rule_name, metrics)
+            })
+            .collect();
+        grouped_results.append(&mut batch_results);
+    }
 
     let mut out = Vec::with_capacity(grouped_results.len());
     for item in grouped_results {
@@ -557,6 +566,7 @@ pub fn calc_all_rule_layer_metrics_with_samples_from_rows(
         start_date,
         end_date,
         layer_config,
+        DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE,
         |rule_name, metrics| Ok((rule_name.to_string(), metrics)),
     )
 }
@@ -575,6 +585,7 @@ pub fn calc_all_rule_layer_metrics_with_samples_from_rows_map<T, F>(
     start_date: &str,
     end_date: &str,
     layer_config: &RuleLayerConfig,
+    parallel_batch_size: usize,
     map_result: F,
 ) -> Result<Vec<T>, String>
 where
@@ -616,21 +627,26 @@ where
         end_date,
     );
 
-    let grouped_results: Vec<Result<T, String>> = rule_names
-        .par_iter()
-        .map(|rule_name| {
-            let empty_triggered_score_map = TriggeredScoreMap::new();
-            let triggered_score_map = triggered_score_map_by_rule
-                .get(rule_name)
-                .unwrap_or(&empty_triggered_score_map);
-            let metrics = calc_rule_layer_metrics_with_samples_from_cache(
-                &runtime_cache,
-                triggered_score_map,
-                layer_config,
-            )?;
-            map_result(rule_name, metrics)
-        })
-        .collect();
+    // 与数据库路径一致：固定小批次并行，限制同时存活的全市场样本 Vec 数量。
+    let mut grouped_results = Vec::with_capacity(rule_names.len());
+    for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
+        let mut batch_results: Vec<Result<T, String>> = rule_batch
+            .par_iter()
+            .map(|rule_name| {
+                let empty_triggered_score_map = TriggeredScoreMap::new();
+                let triggered_score_map = triggered_score_map_by_rule
+                    .get(rule_name)
+                    .unwrap_or(&empty_triggered_score_map);
+                let metrics = calc_rule_layer_metrics_with_samples_from_cache(
+                    &runtime_cache,
+                    triggered_score_map,
+                    layer_config,
+                )?;
+                map_result(rule_name, metrics)
+            })
+            .collect();
+        grouped_results.append(&mut batch_results);
+    }
 
     let mut out = Vec::with_capacity(grouped_results.len());
     for item in grouped_results {
@@ -1461,6 +1477,8 @@ fn build_rule_day_groups(
     residual_map_cache: &HashMap<String, HashMap<String, f64>>,
 ) -> Vec<RuleDayGroup> {
     let mut day_groups: Vec<RuleDayGroup> = Vec::new();
+    let mut ts_code_cache: HashMap<String, Arc<str>> =
+        HashMap::with_capacity(residual_map_cache.len());
     let mut current_trade_date: Arc<str> = Arc::from("");
     let mut current_samples: Vec<RuleDayBaseSample> = Vec::new();
 
@@ -1483,8 +1501,12 @@ fn build_rule_day_groups(
             current_trade_date = Arc::from(row.trade_date.as_str());
         }
 
+        let ts_code = ts_code_cache
+            .entry(row.ts_code)
+            .or_insert_with_key(|value| Arc::from(value.as_str()))
+            .clone();
         current_samples.push(RuleDayBaseSample {
-            ts_code: Arc::from(row.ts_code.as_str()),
+            ts_code,
             residual_return,
         });
     }
@@ -1979,24 +2001,8 @@ fn build_concept_series_cache(
         }
     }
 
-    let mut out = HashMap::with_capacity(names.len());
-    for name in names {
-        let series = load_concept_trend_series(
-            source_dir,
-            &name,
-            Some(start_date.trim()),
-            Some(end_date.trim()),
-        )?;
-        out.insert(
-            name,
-            series
-                .points
-                .into_iter()
-                .map(|point| (point.trade_date, point.performance_pct))
-                .collect(),
-        );
-    }
-    Ok(out)
+    let names = names.into_iter().collect::<Vec<_>>();
+    load_concept_trend_series_map(source_dir, &names, start_date.trim(), end_date.trim())
 }
 
 fn build_industry_series_cache(
@@ -2022,60 +2028,8 @@ fn build_industry_series_cache(
         }
     }
 
-    let mut out = HashMap::with_capacity(names.len());
-    for name in names {
-        let series = load_industry_trend_series(
-            source_dir,
-            &name,
-            Some(start_date.trim()),
-            Some(end_date.trim()),
-        )?;
-        out.insert(
-            name,
-            series
-                .points
-                .into_iter()
-                .map(|point| (point.trade_date, point.performance_pct))
-                .collect(),
-        );
-    }
-    Ok(out)
-}
-
-fn build_forward_backtest_residual_map(
-    mut residual_points: Vec<super::ResidualReturnPoint>,
-    backtest_period: usize,
-) -> HashMap<String, f64> {
-    if backtest_period == 0 || residual_points.len() < backtest_period + 1 {
-        return HashMap::new();
-    }
-
-    residual_points.sort_by(|a, b| a.trade_date.cmp(&b.trade_date));
-
-    let mut out = HashMap::with_capacity(residual_points.len() - backtest_period);
-    for i in 0..residual_points.len() {
-        let end = i + backtest_period;
-        if end >= residual_points.len() {
-            break;
-        }
-
-        let mut sum = 0.0_f64;
-        let mut valid = true;
-        for point in residual_points.iter().take(end + 1).skip(i + 1) {
-            let v = point.residual_pct;
-            if !v.is_finite() {
-                valid = false;
-                break;
-            }
-            sum += v;
-        }
-
-        if valid {
-            out.insert(residual_points[i].trade_date.clone(), sum);
-        }
-    }
-
-    out
+    let names = names.into_iter().collect::<Vec<_>>();
+    load_industry_trend_series_map(source_dir, &names, start_date.trim(), end_date.trim())
 }
 
 fn load_rule_rows_filtered(

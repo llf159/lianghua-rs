@@ -93,6 +93,7 @@ type BacktestCommonParamsDraft = {
   minSamplesPerDay: string;
   minListedTradeDays: string;
   backtestPeriod: string;
+  parallelBatchSize: string;
   totalMvMin: string;
   totalMvMax: string;
   rankLayerCount: string;
@@ -121,6 +122,49 @@ function formatDateLabel(value?: string | null) {
     return "--";
   }
   return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+}
+
+function normalizedSampleTriggerCount(value?: number | null) {
+  return Number.isInteger(value) && Number(value) >= 1 ? Number(value) : 1;
+}
+
+function filterValidationComboByTriggerCount(
+  combo: RuleValidationComboResult,
+  triggerCount: number,
+): RuleValidationComboResult {
+  const filterRows = (rows: RuleValidationComboResult["sample_groups"]["positive"]) =>
+    rows.filter((row) => normalizedSampleTriggerCount(row.trigger_count) === triggerCount);
+  const sampleGroups = {
+    positive: filterRows(combo.sample_groups.positive),
+    negative: filterRows(combo.sample_groups.negative),
+    random: filterRows(combo.sample_groups.random),
+  };
+  const stats = (combo.trigger_count_stats ?? []).find(
+    (item) => item.trigger_count === triggerCount,
+  ) ?? {
+    trigger_count: triggerCount,
+    positive_count: sampleGroups.positive.length,
+    negative_count: sampleGroups.negative.length,
+    random_count: sampleGroups.random.length,
+    total_samples: new Set(
+      [...sampleGroups.positive, ...sampleGroups.negative, ...sampleGroups.random].map(
+        (row) => `${row.ts_code}__${row.trade_date}`,
+      ),
+    ).size,
+  };
+
+  return {
+    ...combo,
+    combo_label: `${combo.combo_label} · ${triggerCount}次触发`,
+    trigger_samples: stats.total_samples,
+    sample_stats: {
+      positive_count: stats.positive_count,
+      negative_count: stats.negative_count,
+      random_count: stats.random_count,
+      total_samples: stats.total_samples,
+    },
+    sample_groups: sampleGroups,
+  };
 }
 
 function formatNumber(value?: number | null, digits = 4) {
@@ -410,6 +454,7 @@ const DEFAULT_BACKTEST_COMMON_PARAMS: BacktestCommonParamsDraft = {
   minSamplesPerDay: "5",
   minListedTradeDays: "60",
   backtestPeriod: "3",
+  parallelBatchSize: "4",
   totalMvMin: "",
   totalMvMax: "",
   rankLayerCount: "5",
@@ -460,6 +505,10 @@ function readStoredBacktestCommonParams(): StoredBacktestCommonParams {
       DEFAULT_BACKTEST_COMMON_PARAMS.minListedTradeDays,
     ),
     backtestPeriod: normalizeStoredString(parsed?.backtestPeriod, DEFAULT_BACKTEST_COMMON_PARAMS.backtestPeriod),
+    parallelBatchSize: normalizeStoredString(
+      parsed?.parallelBatchSize,
+      DEFAULT_BACKTEST_COMMON_PARAMS.parallelBatchSize,
+    ),
     totalMvMin: normalizeStoredString(parsed?.totalMvMin, DEFAULT_BACKTEST_COMMON_PARAMS.totalMvMin),
     totalMvMax: normalizeStoredString(parsed?.totalMvMax, DEFAULT_BACKTEST_COMMON_PARAMS.totalMvMax),
     rankLayerCount: normalizeStoredString(parsed?.rankLayerCount, DEFAULT_BACKTEST_COMMON_PARAMS.rankLayerCount),
@@ -480,6 +529,7 @@ function writeStoredBacktestCommonParams(value: BacktestCommonParamsDraft) {
     minSamplesPerDay: value.minSamplesPerDay,
     minListedTradeDays: value.minListedTradeDays,
     backtestPeriod: value.backtestPeriod,
+    parallelBatchSize: value.parallelBatchSize,
     totalMvMin: value.totalMvMin,
     totalMvMax: value.totalMvMax,
     rankLayerCount: value.rankLayerCount,
@@ -527,6 +577,7 @@ export default function SceneLayerBacktestPage() {
   const [minSamplesPerDay, setMinSamplesPerDay] = useState(storedCommonParams.minSamplesPerDay);
   const [minListedTradeDays, setMinListedTradeDays] = useState(storedCommonParams.minListedTradeDays);
   const [backtestPeriod, setBacktestPeriod] = useState(storedCommonParams.backtestPeriod);
+  const [parallelBatchSize, setParallelBatchSize] = useState(storedCommonParams.parallelBatchSize);
   const [totalMvMin, setTotalMvMin] = useState(storedCommonParams.totalMvMin);
   const [totalMvMax, setTotalMvMax] = useState(storedCommonParams.totalMvMax);
   const [rankLayerCount, setRankLayerCount] = useState(storedCommonParams.rankLayerCount);
@@ -575,6 +626,9 @@ export default function SceneLayerBacktestPage() {
   const [validationSelectedComboKey, setValidationSelectedComboKey] = useState("");
   const [validationRestoredComboKey, setValidationRestoredComboKey] = useState("");
   const [validationDetailModalOpen, setValidationDetailModalOpen] = useState(false);
+  const [validationSelectedTriggerCount, setValidationSelectedTriggerCount] = useState<
+    number | null
+  >(null);
   const [shouldAutoOpenDetail, setShouldAutoOpenDetail] = useState(false);
   const heavyTaskRunning =
     loading ||
@@ -640,6 +694,7 @@ export default function SceneLayerBacktestPage() {
       minSamplesPerDay,
       minListedTradeDays,
       backtestPeriod,
+      parallelBatchSize,
       totalMvMin,
       totalMvMax,
       rankLayerCount,
@@ -657,6 +712,7 @@ export default function SceneLayerBacktestPage() {
     minSamplesPerDay,
     minListedTradeDays,
     backtestPeriod,
+    parallelBatchSize,
     totalMvMin,
     totalMvMax,
     rankLayerCount,
@@ -1326,6 +1382,7 @@ export default function SceneLayerBacktestPage() {
         minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerDay) || 1),
         minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        parallelBatchSize: Math.max(1, Number(parallelBatchSize) || 4),
         board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
         excludeStBoard: excludeStBoard || undefined,
         ...marketValueFilter,
@@ -1384,6 +1441,7 @@ export default function SceneLayerBacktestPage() {
         minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerDay) || 1),
         minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        parallelBatchSize: Math.max(1, Number(parallelBatchSize) || 4),
         board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
         excludeStBoard: excludeStBoard || undefined,
         ...marketValueFilter,
@@ -1624,10 +1682,12 @@ export default function SceneLayerBacktestPage() {
       return;
     }
     setValidationSelectedComboKey(comboKey);
+    setValidationSelectedTriggerCount(null);
     setValidationDetailModalOpen(true);
   }
 
   function closeValidationDetailModal() {
+    setValidationSelectedTriggerCount(null);
     setValidationDetailModalOpen(false);
   }
 
@@ -1664,6 +1724,15 @@ export default function SceneLayerBacktestPage() {
         random_count: group.random_count,
         total_samples: group.total_samples,
       },
+      trigger_count_stats: [
+        {
+          trigger_count: 1,
+          positive_count: group.positive_count,
+          negative_count: group.negative_count,
+          random_count: group.random_count,
+          total_samples: group.total_samples,
+        },
+      ],
       sample_groups: {
         positive: group.positive,
         negative: group.negative,
@@ -1717,15 +1786,23 @@ export default function SceneLayerBacktestPage() {
       return null;
     }
 
-    const displaySampleCount =
-      combo.sample_groups.positive.length +
-      combo.sample_groups.negative.length +
-      combo.sample_groups.random.length;
     const sectionClassName = useModalLayout
       ? "scene-layer-layer-summary scene-layer-validation-detail-section"
       : "scene-layer-layer-summary";
     const validationLayerSummaries = combo.backtest.layer_summaries ?? [];
     const returnDistribution = combo.return_distribution ?? [];
+    const triggerCountStats =
+      (combo.trigger_count_stats ?? []).length > 0
+        ? combo.trigger_count_stats
+        : [{ trigger_count: 1, ...combo.sample_stats }];
+    const shouldSkipTriggerCountSelection =
+      triggerCountStats.length === 1 && triggerCountStats[0]?.trigger_count === 1;
+    const selectedTriggerCombo =
+      shouldSkipTriggerCountSelection
+        ? filterValidationComboByTriggerCount(combo, 1)
+        : validationSelectedTriggerCount === null
+        ? null
+        : filterValidationComboByTriggerCount(combo, validationSelectedTriggerCount);
     const maxDistributionCount = returnDistribution.reduce(
       (maxCount, bucket) => Math.max(maxCount, bucket.sample_count),
       0,
@@ -1738,36 +1815,55 @@ export default function SceneLayerBacktestPage() {
           <p>{combo.formula || "--"}</p>
         </div>
 
-        <details className={`${sectionClassName} scene-layer-validation-fold`}>
-          <summary className="scene-layer-validation-fold-summary">
-            <h3>触发样本</h3>
-            <span>
-              总 {combo.sample_stats.total_samples} · 展示 {displaySampleCount}
-            </span>
-          </summary>
-          <div className="scene-layer-validation-sample-summary">
-            <div className="scene-layer-validation-sample-stats">
-              <span>总 {combo.sample_stats.total_samples}</span>
-              <span>展示 {displaySampleCount}</span>
-              <span>正 {combo.sample_stats.positive_count}</span>
-              <span>负 {combo.sample_stats.negative_count}</span>
-              <span>随机 {combo.sample_stats.random_count}</span>
-              <span>上限/组 {validationResult.sample_limit_per_group}</span>
+        <div className={`${sectionClassName} scene-layer-validation-trigger-count-section`}>
+          {!shouldSkipTriggerCountSelection ? (
+            <>
+              <div className="scene-layer-validation-trigger-count-head">
+                <h3>触发次数</h3>
+                <span>选择次数后查看对应样本</span>
+              </div>
+              <div className="scene-layer-validation-trigger-count-options">
+                {triggerCountStats.map((item) => (
+                  <button
+                    key={`${combo.combo_key}-trigger-count-${item.trigger_count}`}
+                    type="button"
+                    className={
+                      validationSelectedTriggerCount === item.trigger_count
+                        ? "scene-layer-validation-trigger-count-btn scene-layer-validation-trigger-count-btn-active"
+                        : "scene-layer-validation-trigger-count-btn"
+                    }
+                    onClick={() =>
+                      setValidationSelectedTriggerCount((current) =>
+                        current === item.trigger_count ? null : item.trigger_count,
+                      )
+                    }
+                  >
+                    <strong>{item.trigger_count} 次</strong>
+                    <span>{item.total_samples} 个样本</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : null}
+          {selectedTriggerCombo ? (
+            <div className="scene-layer-validation-sample-summary">
+              <ExpressionValidationSamplesPanel
+                data={{
+                  importRuleName: validationResult.import_rule_name,
+                  importRuleExplain: validationResult.import_rule_explain,
+                  expression: validationExpression,
+                  combo: selectedTriggerCombo,
+                  comboParamSummary: formatUnknownValuesForCombo(combo),
+                  sampleLimitPerGroup: validationResult.sample_limit_per_group,
+                  sourcePath,
+                }}
+                layout="modal"
+              />
             </div>
-            <ExpressionValidationSamplesPanel
-              data={{
-                importRuleName: validationResult.import_rule_name,
-                importRuleExplain: validationResult.import_rule_explain,
-                expression: validationExpression,
-                combo,
-                comboParamSummary: formatUnknownValuesForCombo(combo),
-                sampleLimitPerGroup: validationResult.sample_limit_per_group,
-                sourcePath,
-              }}
-              layout="modal"
-            />
-          </div>
-        </details>
+          ) : (
+            <div className="scene-layer-empty">请选择一个触发次数。</div>
+          )}
+        </div>
 
         <details className={`${sectionClassName} scene-layer-validation-fold`}>
           <summary className="scene-layer-validation-fold-summary">
@@ -1945,6 +2041,10 @@ export default function SceneLayerBacktestPage() {
           <label className="scene-layer-field">
             <span>回测周期（天）</span>
             <input type="number" min="1" value={backtestPeriod} onChange={(event) => setBacktestPeriod(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>策略并发数</span>
+            <input type="number" min="1" value={parallelBatchSize} onChange={(event) => setParallelBatchSize(event.target.value)} />
           </label>
           <label className="scene-layer-field">
             <span>总市值最小(亿)</span>
