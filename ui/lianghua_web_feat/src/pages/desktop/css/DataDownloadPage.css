@@ -628,7 +628,16 @@
 }
 
 .data-download-progress-stat-wide {
-  grid-column: span 2;
+  min-width: 0;
+  grid-column: span 1;
+}
+
+.data-download-progress-stat-wide strong {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .data-download-notice,

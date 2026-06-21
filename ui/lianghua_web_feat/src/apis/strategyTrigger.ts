@@ -266,6 +266,7 @@ export type RankLayerSampleGroup = {
   layer_index: number
   layer_label: string
   total_samples: number
+  triggered_days: number
   positive_count: number
   negative_count: number
   random_count: number

@@ -81,7 +81,7 @@ export default function DataTaskProgress({
         </div>
         <div className="data-download-progress-stat data-download-progress-stat-wide">
           <span>当前对象</span>
-          <strong>{currentObjectText}</strong>
+          <strong title={currentObjectText}>{currentObjectText}</strong>
         </div>
       </div>
       <div className="data-download-progress-text">{message ?? fallbackMessage}</div>

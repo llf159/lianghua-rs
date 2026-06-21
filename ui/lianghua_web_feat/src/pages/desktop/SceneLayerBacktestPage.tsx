@@ -362,7 +362,7 @@ function resolveValidationScopeWay(rawValue?: string | null): {
   const normalized = (rawValue ?? "").trim().toUpperCase();
   if (!normalized) {
     return {
-      scopeWay: "ANY",
+      scopeWay: "LAST",
       consecThreshold: 2,
     };
   }
@@ -384,7 +384,7 @@ function resolveValidationScopeWay(rawValue?: string | null): {
     };
   }
   return {
-    scopeWay: "ANY",
+    scopeWay: "LAST",
     consecThreshold: 2,
   };
 }
@@ -559,7 +559,7 @@ export default function SceneLayerBacktestPage() {
   const [validationImportRuleName, setValidationImportRuleName] = useState("");
   const [validationExpression, setValidationExpression] = useState("");
   const [validationDirection, setValidationDirection] = useState<ValidationDirection>("positive");
-  const [validationScopeWay, setValidationScopeWay] = useState<ValidationScopeWayOption>("ANY");
+  const [validationScopeWay, setValidationScopeWay] = useState<ValidationScopeWayOption>("LAST");
   const [validationConsecThresholdText, setValidationConsecThresholdText] = useState("2");
   const [validationScopeWindowsText, setValidationScopeWindowsText] = useState("1");
   const [validationEnableUnknown, setValidationEnableUnknown] = useState(false);
@@ -1649,8 +1649,7 @@ export default function SceneLayerBacktestPage() {
     group: RankLayerSampleGroup,
     rankBacktest: RankLayerBacktestData,
   ): RuleValidationComboResult {
-    const displayRows = [...group.positive, ...group.negative, ...group.random];
-    const triggeredDays = new Set(displayRows.map((row) => row.trade_date)).size;
+    const triggeredDays = group.triggered_days;
     return {
       combo_key: `rank_layer_${group.layer_index}`,
       combo_label: group.layer_label,

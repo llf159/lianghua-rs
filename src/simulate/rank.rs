@@ -429,9 +429,13 @@ fn build_layer_sample_indices(
         RankLayerMethod::Score => {
             build_score_range_layer_sample_indices(ordered, config.layer_count)
         }
-        RankLayerMethod::SampleCount => {
-            build_sample_count_layer_sample_indices(ordered, config.layer_count)
-        }
+        RankLayerMethod::SampleCount => build_sample_count_layer_sample_indices(
+            trade_date,
+            day_samples,
+            ordered,
+            config.layer_count,
+            rank_lookup,
+        ),
         RankLayerMethod::Rank => build_rank_layer_sample_indices(
             trade_date,
             day_samples,
@@ -443,38 +447,37 @@ fn build_layer_sample_indices(
 }
 
 fn build_sample_count_layer_sample_indices(
+    trade_date: &str,
+    day_samples: &[&RuleLayerSamplePoint],
     ordered: &[(usize, (f64, f64))],
     layer_count: usize,
+    rank_lookup: Option<&RankLayerLookup>,
 ) -> Vec<Vec<usize>> {
     let mut layers = vec![Vec::new(); layer_count];
     if ordered.is_empty() || layer_count == 0 {
         return layers;
     }
 
-    let mut group_start = 0usize;
-    while group_start < ordered.len() {
-        let score = ordered[group_start].1.0;
-        let mut group_end = group_start + 1;
-        while group_end < ordered.len() && (ordered[group_end].1.0 - score).abs() < EPS {
-            group_end += 1;
-        }
+    let mut ranked = ordered.to_vec();
+    ranked.sort_by(|left, right| {
+        left.1
+            .0
+            .partial_cmp(&right.1.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                // 数据库 rank=1 表示最高排名。总分从低到高分层时，同分股票按
+                // 数据库排名从低到高排列，因此较大的 rank 先进入低层。
+                let left_rank = sample_database_rank(trade_date, day_samples[left.0], rank_lookup);
+                let right_rank =
+                    sample_database_rank(trade_date, day_samples[right.0], rank_lookup);
+                right_rank.cmp(&left_rank)
+            })
+            .then_with(|| left.0.cmp(&right.0))
+    });
 
-        // 分位数边界不能拆开同分股票，否则股票代码/输入顺序会成为隐含因子。
-        // 首尾分数组固定放入最低/最高层，确保存在多个分数档位时仍可计算多空层差。
-        let layer_index = if group_start == 0 {
-            0
-        } else if group_end == ordered.len() {
-            layer_count - 1
-        } else {
-            let group_midpoint_twice = group_start + group_end;
-            (group_midpoint_twice * layer_count / (2 * ordered.len())).min(layer_count - 1)
-        };
-        layers[layer_index].extend(
-            ordered[group_start..group_end]
-                .iter()
-                .map(|(sample_index, _)| *sample_index),
-        );
-        group_start = group_end;
+    for (ordered_index, (sample_index, _)) in ranked.iter().enumerate() {
+        let layer_index = ordered_index * layer_count / ranked.len();
+        layers[layer_index].push(*sample_index);
     }
 
     layers
@@ -510,25 +513,47 @@ fn build_score_range_layer_sample_indices(
 }
 
 fn build_rank_layer_sample_indices(
-    _trade_date: &str,
-    _day_samples: &[&RuleLayerSamplePoint],
+    trade_date: &str,
+    day_samples: &[&RuleLayerSamplePoint],
     ordered: &[(usize, (f64, f64))],
     layer_count: usize,
-    _rank_lookup: Option<&RankLayerLookup>,
+    rank_lookup: Option<&RankLayerLookup>,
 ) -> Vec<Vec<usize>> {
     let mut layers = vec![Vec::new(); layer_count];
     if ordered.is_empty() || layer_count == 0 {
         return layers;
     }
 
-    // score_summary.rank 是全市场落库排名。板块/ST/市值筛选后继续使用旧排名会产生
-    // 大量断档和空层，因此这里始终在“当日当前有效样本”内重新生成严格顺序排名。
+    let fallback_day_max_rank = ordered.len() as i64;
+    let day_max_rank = rank_lookup
+        .and_then(|lookup| lookup.day_max_ranks.get(trade_date).copied())
+        .filter(|value| *value > 0)
+        .unwrap_or(fallback_day_max_rank);
+
     for (ordered_index, (sample_index, _)) in ordered.iter().enumerate() {
-        let layer_index = ordered_index * layer_count / ordered.len();
+        let fallback_rank = ordered.len() as i64 - ordered_index as i64;
+        let sample_rank = sample_database_rank(trade_date, day_samples[*sample_index], rank_lookup)
+            .unwrap_or(fallback_rank)
+            .clamp(1, day_max_rank);
+        let position_from_low = day_max_rank - sample_rank + 1;
+        let layer_index = ((position_from_low * layer_count as i64 - 1) / day_max_rank) as usize;
         layers[layer_index].push(*sample_index);
     }
 
     layers
+}
+
+fn sample_database_rank(
+    trade_date: &str,
+    sample: &RuleLayerSamplePoint,
+    rank_lookup: Option<&RankLayerLookup>,
+) -> Option<i64> {
+    rank_lookup?
+        .sample_ranks
+        .get(&sample.ts_code)?
+        .get(trade_date)
+        .copied()
+        .filter(|rank| *rank > 0)
 }
 
 fn load_score_summary_data(
@@ -913,42 +938,58 @@ mod tests {
     }
 
     #[test]
-    fn sample_count_layers_never_split_equal_scores() {
-        let samples = (0..10)
+    fn sample_count_layers_use_database_rank_to_split_equal_scores() {
+        let samples = (0..4)
             .map(|index| RuleLayerSamplePoint {
                 ts_code: format!("{index:06}.SZ"),
                 trade_date: "20240102".to_string(),
-                rule_score: if index < 8 { 0.0 } else { 10.0 },
-                residual_return: if index < 8 { -1.0 } else { 5.0 },
+                rule_score: 10.0,
+                residual_return: index as f64,
             })
             .collect::<Vec<_>>();
+        let rank_lookup = RankLayerLookup {
+            sample_ranks: HashMap::from([
+                (
+                    "000000.SZ".to_string(),
+                    HashMap::from([("20240102".to_string(), 1)]),
+                ),
+                (
+                    "000001.SZ".to_string(),
+                    HashMap::from([("20240102".to_string(), 4)]),
+                ),
+                (
+                    "000002.SZ".to_string(),
+                    HashMap::from([("20240102".to_string(), 2)]),
+                ),
+                (
+                    "000003.SZ".to_string(),
+                    HashMap::from([("20240102".to_string(), 3)]),
+                ),
+            ]),
+            day_max_ranks: HashMap::from([("20240102".to_string(), 4)]),
+        };
 
-        let metrics = calc_rank_layer_metrics(
+        let metrics = calc_rank_layer_metrics_with_lookup(
             &samples,
             &RankLayerConfig {
                 min_samples_per_day: 1,
                 backtest_period: 1,
                 min_listed_trade_days: 0,
-                layer_count: 5,
+                layer_count: 2,
                 layer_method: RankLayerMethod::SampleCount,
             },
+            Some(&rank_lookup),
         )
         .expect("rank metrics should build");
 
-        assert_eq!(metrics.layers[0].sample_count, 8);
-        assert_eq!(metrics.layers[4].sample_count, 2);
-        assert!(
-            metrics.layers[1..4]
-                .iter()
-                .all(|layer| layer.sample_count == 0)
-        );
-        assert_opt_close(metrics.layers[0].avg_score, Some(0.0));
-        assert_opt_close(metrics.layers[4].avg_score, Some(10.0));
-        assert_opt_close(metrics.spread_mean, Some(6.0));
+        assert_eq!(metrics.layers[0].sample_count, 2);
+        assert_eq!(metrics.layers[1].sample_count, 2);
+        assert_opt_close(metrics.layers[0].avg_residual_return, Some(2.0));
+        assert_opt_close(metrics.layers[1].avg_residual_return, Some(1.0));
     }
 
     #[test]
-    fn rank_layers_rerank_after_universe_filtering() {
+    fn rank_layers_use_database_rank() {
         let samples = vec![
             RuleLayerSamplePoint {
                 ts_code: "000001.SZ".to_string(),
@@ -1010,9 +1051,9 @@ mod tests {
         )
         .expect("rank metrics should build");
 
-        assert_eq!(metrics.layers[0].sample_count, 2);
-        assert_eq!(metrics.layers[1].sample_count, 2);
-        assert_opt_close(metrics.layers[0].avg_score, Some(15.0));
-        assert_opt_close(metrics.layers[1].avg_score, Some(35.0));
+        assert_eq!(metrics.layers[0].sample_count, 1);
+        assert_eq!(metrics.layers[1].sample_count, 3);
+        assert_opt_close(metrics.layers[0].avg_score, Some(40.0));
+        assert_opt_close(metrics.layers[1].avg_score, Some(20.0));
     }
 }

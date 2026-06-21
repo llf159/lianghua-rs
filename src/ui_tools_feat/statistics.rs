@@ -335,6 +335,7 @@ pub struct RankLayerSampleGroup {
     pub layer_index: usize,
     pub layer_label: String,
     pub total_samples: usize,
+    pub triggered_days: usize,
     pub positive_count: usize,
     pub negative_count: usize,
     pub random_count: usize,
@@ -5693,8 +5694,8 @@ fn rank_layer_label(layer_index: usize, layer_count: usize) -> String {
 fn rank_layer_method_label(layer_method: RankLayerMethod) -> &'static str {
     match layer_method {
         RankLayerMethod::Score => "按分数分层",
-        RankLayerMethod::SampleCount => "按样本数分层（同分不拆）",
-        RankLayerMethod::Rank => "按排名分层（筛选后重排）",
+        RankLayerMethod::SampleCount => "按样本数分层（同分按数据库排名）",
+        RankLayerMethod::Rank => "按数据库排名分层",
     }
 }
 
@@ -5854,7 +5855,13 @@ fn run_rank_layer_backtest_core(
 
 #[derive(Default)]
 struct RankLayerSampleGroupAccumulator {
-    sample_by_stock: HashMap<String, ValidationSampleRawRow>,
+    total_samples: usize,
+    positive_count: usize,
+    negative_count: usize,
+    trade_dates: HashSet<String>,
+    positive_by_board: HashMap<String, Vec<ValidationSampleRawRow>>,
+    negative_by_board: HashMap<String, Vec<ValidationSampleRawRow>>,
+    random_by_board: HashMap<String, Vec<(u64, ValidationSampleRawRow)>>,
 }
 
 fn build_rank_layer_sample_groups(
@@ -5878,72 +5885,54 @@ fn build_rank_layer_sample_groups(
             residual_return: sample.residual_return,
         };
 
-        group
-            .sample_by_stock
-            .entry(row.ts_code.clone())
-            .and_modify(|current| {
-                if should_replace_validation_stock_sample(current, &row) {
-                    *current = row.clone();
-                }
-            })
-            .or_insert(row);
+        group.total_samples += 1;
+        group.trade_dates.insert(row.trade_date.clone());
+        let board = sample_board(&row.ts_code, stock_meta_map);
+        if row.residual_return > 0.0 {
+            group.positive_count += 1;
+            push_limited_sample(
+                group.positive_by_board.entry(board.clone()).or_default(),
+                row.clone(),
+                RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
+                compare_positive_validation_sample,
+            );
+        } else if row.residual_return < 0.0 {
+            group.negative_count += 1;
+            push_limited_sample(
+                group.negative_by_board.entry(board.clone()).or_default(),
+                row.clone(),
+                RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
+                compare_negative_validation_sample,
+            );
+        }
+        push_limited_random_sample(
+            group.random_by_board.entry(board).or_default(),
+            random::<u64>(),
+            row,
+            RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
+        );
     }
 
     groups
         .into_iter()
         .enumerate()
         .map(|(index, group)| {
-            let unique_samples = group.sample_by_stock.into_values().collect::<Vec<_>>();
-            let total_samples = unique_samples.len();
-            let positive_count = unique_samples
-                .iter()
-                .filter(|row| row.residual_return > 0.0)
-                .count();
-            let negative_count = unique_samples
-                .iter()
-                .filter(|row| row.residual_return < 0.0)
-                .count();
-            let mut positive_by_board: HashMap<String, Vec<ValidationSampleRawRow>> =
-                HashMap::new();
-            let mut negative_by_board: HashMap<String, Vec<ValidationSampleRawRow>> =
-                HashMap::new();
-            let mut random_by_board: HashMap<String, Vec<(u64, ValidationSampleRawRow)>> =
-                HashMap::new();
-
-            for row in unique_samples {
-                let board = sample_board(&row.ts_code, stock_meta_map);
-                if row.residual_return > 0.0 {
-                    push_limited_sample(
-                        positive_by_board.entry(board.clone()).or_default(),
-                        row.clone(),
-                        RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
-                        compare_positive_validation_sample,
-                    );
-                } else if row.residual_return < 0.0 {
-                    push_limited_sample(
-                        negative_by_board.entry(board.clone()).or_default(),
-                        row.clone(),
-                        RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
-                        compare_negative_validation_sample,
-                    );
-                }
-                push_limited_random_sample(
-                    random_by_board.entry(board).or_default(),
-                    random::<u64>(),
-                    row,
-                    RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
-                );
-            }
-
-            let mut positive = positive_by_board
+            let triggered_days = group.trade_dates.len();
+            let mut positive = group
+                .positive_by_board
                 .into_values()
                 .flatten()
                 .collect::<Vec<_>>();
-            let mut negative = negative_by_board
+            let mut negative = group
+                .negative_by_board
                 .into_values()
                 .flatten()
                 .collect::<Vec<_>>();
-            let mut random = random_by_board.into_values().flatten().collect::<Vec<_>>();
+            let mut random = group
+                .random_by_board
+                .into_values()
+                .flatten()
+                .collect::<Vec<_>>();
             positive.sort_by(compare_positive_validation_sample);
             negative.sort_by(compare_negative_validation_sample);
             random.sort_by(|left, right| {
@@ -5955,10 +5944,11 @@ fn build_rank_layer_sample_groups(
             RankLayerSampleGroup {
                 layer_index: index + 1,
                 layer_label: rank_layer_label(index + 1, layer_count),
-                total_samples,
-                positive_count,
-                negative_count,
-                random_count: total_samples,
+                total_samples: group.total_samples,
+                triggered_days,
+                positive_count: group.positive_count,
+                negative_count: group.negative_count,
+                random_count: group.total_samples,
                 positive: validation_sample_rows_to_payload(positive, stock_meta_map),
                 negative: validation_sample_rows_to_payload(negative, stock_meta_map),
                 random: validation_sample_rows_to_payload(
@@ -7203,7 +7193,7 @@ explain = "test"
     }
 
     #[test]
-    fn rank_layer_samples_match_expression_dedup_and_per_board_limit() {
+    fn rank_layer_samples_keep_full_observation_counts_and_per_board_limit() {
         let mut samples = Vec::new();
         let mut stock_meta_map = HashMap::new();
         for (board_prefix, board) in [("MB", "主板"), ("CY", "创业板")] {
@@ -7237,8 +7227,9 @@ explain = "test"
         let groups = build_rank_layer_sample_groups(&samples, 1, &stock_meta_map);
         let group = &groups[0];
 
-        assert_eq!(group.total_samples, 12);
-        assert_eq!(group.positive_count, 12);
+        assert_eq!(group.total_samples, 24);
+        assert_eq!(group.triggered_days, 2);
+        assert_eq!(group.positive_count, 24);
         assert_eq!(group.positive.len(), 10);
         assert_eq!(group.positive[0].residual_return, 16.0);
         assert!(
