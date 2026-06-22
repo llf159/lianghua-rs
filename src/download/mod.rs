@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::download_data::{write_stock_list_csv, write_trade_calendar_csv};
 use crate::download::ind_calc::calc_one_stock_inds;
+use crate::utils::utils::round_f64_to_scale;
 
 pub struct DownloadConfig {
     pub start_date: String,
@@ -1331,13 +1332,7 @@ pub fn apply_adj_to_rows(
 }
 
 fn pro_bar_format(value: f64, scale: usize) -> f64 {
-    if !value.is_finite() {
-        return value;
-    }
-
-    format!("{value:.precision$}", precision = scale)
-        .parse::<f64>()
-        .unwrap_or(value)
+    round_f64_to_scale(value, scale as u32)
 }
 
 fn normalize_stock_price_fields_like_pro_bar(rows: &mut [ProBarRow]) {

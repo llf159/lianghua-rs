@@ -6,6 +6,7 @@ use crate::{
     crawler::concept::ThsConceptRow,
     data::{source_db_path, stock_list_path, ths_concepts_path, trade_calendar_path},
     download::{AdjType, ProBarRow, StockListRow, TradeCalRow},
+    utils::utils::round_f64_to_scale,
 };
 
 fn adj_type_name(adj_type: AdjType) -> &'static str {
@@ -22,14 +23,7 @@ fn quote_ident(name: &str) -> String {
 }
 
 fn round_to(value: f64, scale: i32) -> f64 {
-    if !value.is_finite() {
-        return value;
-    }
-
-    let precision = usize::try_from(scale).unwrap_or(0);
-    format!("{value:.precision$}")
-        .parse::<f64>()
-        .unwrap_or(value)
+    round_f64_to_scale(value, scale.max(0) as u32)
 }
 
 fn round_opt_to(value: Option<f64>, scale: i32) -> Option<f64> {

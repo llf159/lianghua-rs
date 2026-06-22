@@ -15,16 +15,12 @@ use crate::{
         eval::{Runtime, Value},
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
-    utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
+    utils::utils::{eval_binary_for_warmup, impl_expr_warmup, round_f64_to_scale},
 };
 
 const DEFAULT_WARMUP_DAYS: usize = 120;
 const DEFAULT_BUCKET_PCT: f64 = 1.0;
 const EPS: f64 = 1e-10;
-const CHEN_CHIP_ROUND_SCALE: u128 = 10_000;
-// At 2^39 the f64 spacing is already wider than 0.0001, so four-decimal
-// formatting parses back to the original value.
-const CHEN_CHIP_ROUND_IDENTITY_THRESHOLD: f64 = 549_755_813_888.0;
 const CHEN_CHIP_ALWAYS_RUNTIME_KEYS: [&str; 5] = ["O", "H", "L", "C", "TURNOVER_RATE"];
 const CHEN_CHIP_INJECTED_RUNTIME_KEYS: [&str; 9] = [
     "RATEO",
@@ -163,48 +159,7 @@ pub struct ChenChipSnapshot {
 }
 
 pub fn round_chen_chip_value(value: f64) -> f64 {
-    if !value.is_finite() {
-        return value;
-    }
-    if value == 0.0 {
-        return 0.0;
-    }
-    if value.abs() >= CHEN_CHIP_ROUND_IDENTITY_THRESHOLD {
-        return value;
-    }
-
-    let bits = value.to_bits();
-    let negative = bits >> 63 != 0;
-    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
-    let fraction = bits & ((1_u64 << 52) - 1);
-    let (mantissa, exponent) = if exponent_bits == 0 {
-        (fraction, -1074)
-    } else {
-        ((1_u64 << 52) | fraction, exponent_bits - 1023 - 52)
-    };
-
-    if exponent >= 0 {
-        return value;
-    }
-
-    // Round the exact binary fraction after decimal scaling. This preserves
-    // Rust's four-decimal formatting semantics without allocating a String.
-    let numerator = u128::from(mantissa) * CHEN_CHIP_ROUND_SCALE;
-    let shift = (-exponent) as u32;
-    let rounded_scaled = if shift >= u128::BITS {
-        0
-    } else {
-        let quotient = numerator >> shift;
-        let denominator = 1_u128 << shift;
-        let remainder = numerator & (denominator - 1);
-        match (remainder * 2).cmp(&denominator) {
-            std::cmp::Ordering::Greater => quotient + 1,
-            std::cmp::Ordering::Equal if quotient & 1 == 1 => quotient + 1,
-            _ => quotient,
-        }
-    };
-    let rounded = rounded_scaled as f64 / CHEN_CHIP_ROUND_SCALE as f64;
-    let rounded = if negative { -rounded } else { rounded };
+    let rounded = round_f64_to_scale(value, 4);
     if rounded == 0.0 { 0.0 } else { rounded }
 }
 

@@ -4,6 +4,81 @@ use crate::expr::parser::{BinaryOp, Expr};
 
 const EPS: f64 = 1e-12;
 
+/// Round an f64 to a fixed decimal scale with Rust formatting semantics.
+///
+/// Scales 0–8 use allocation-free exact binary arithmetic. Larger scales
+/// safely fall back to formatting, which avoids integer overflow and preserves
+/// the requested precision. Signed zero is preserved for generic callers.
+pub fn round_f64_to_scale(value: f64, scale: u32) -> f64 {
+    if !value.is_finite() || value == 0.0 {
+        return value;
+    }
+    // Every finite f64 has a terminating decimal representation within 1074
+    // fractional digits, so rounding beyond this point is always a no-op.
+    if scale >= 1074 {
+        return value;
+    }
+    if scale > 8 {
+        let Ok(precision) = usize::try_from(scale) else {
+            return value;
+        };
+        return format!("{value:.precision$}")
+            .parse::<f64>()
+            .unwrap_or(value);
+    }
+
+    if value.abs() >= round_identity_threshold(scale) {
+        return value;
+    }
+
+    let scale_factor = 10_u128.pow(scale);
+    let bits = value.to_bits();
+    let negative = bits >> 63 != 0;
+    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1_u64 << 52) - 1);
+    let (mantissa, exponent) = if exponent_bits == 0 {
+        (fraction, -1074)
+    } else {
+        ((1_u64 << 52) | fraction, exponent_bits - 1023 - 52)
+    };
+
+    if exponent >= 0 {
+        return value;
+    }
+
+    let numerator = u128::from(mantissa) * scale_factor;
+    let shift = (-exponent) as u32;
+    let rounded_scaled = if shift >= u128::BITS {
+        0
+    } else {
+        let quotient = numerator >> shift;
+        let denominator = 1_u128 << shift;
+        let remainder = numerator & (denominator - 1);
+        match (remainder * 2).cmp(&denominator) {
+            std::cmp::Ordering::Greater => quotient + 1,
+            std::cmp::Ordering::Equal if quotient & 1 == 1 => quotient + 1,
+            _ => quotient,
+        }
+    };
+    let rounded = rounded_scaled as f64 / scale_factor as f64;
+    if negative { -rounded } else { rounded }
+}
+
+const fn round_identity_threshold(scale: u32) -> f64 {
+    match scale {
+        0 => 4_503_599_627_370_496.0,
+        1 => 562_949_953_421_312.0,
+        2 => 70_368_744_177_664.0,
+        3 => 8_796_093_022_208.0,
+        4 => 549_755_813_888.0,
+        5 => 68_719_476_736.0,
+        6 => 8_589_934_592.0,
+        7 => 536_870_912.0,
+        8 => 67_108_864.0,
+        _ => unreachable!(),
+    }
+}
+
 pub fn eval_binary_for_warmup(
     op: &BinaryOp,
     lhs: &Expr,
@@ -497,7 +572,7 @@ mod tests {
 
     use crate::expr::parser::{Expr, Parser, Stmt, lex_all};
 
-    use super::{board_category, eval_binary_for_warmup, impl_expr_warmup};
+    use super::{board_category, eval_binary_for_warmup, impl_expr_warmup, round_f64_to_scale};
 
     fn estimate_program_warmup(expr: &str) -> usize {
         let mut parser = Parser::new(lex_all(expr));
@@ -545,6 +620,79 @@ mod tests {
     fn board_category_treats_delisting_names_as_st() {
         assert_eq!(board_category("000001.SZ", Some("退市海创")), "ST");
         assert_eq!(board_category("600001.SH", Some(" 退市整理 ")), "ST");
+    }
+
+    #[test]
+    fn round_f64_to_scale_matches_format_and_preserves_signed_zero() {
+        for value in [
+            2.675,
+            1.045,
+            1.055,
+            -2.675,
+            -1.045,
+            0.005,
+            -0.005,
+            99.995,
+            100.005,
+            0.015625,
+            0.046875,
+            70_368_744_177_664.0,
+        ] {
+            let expected = format!("{value:.2}")
+                .parse::<f64>()
+                .expect("formatted value should parse");
+            assert_eq!(
+                round_f64_to_scale(value, 2).to_bits(),
+                expected.to_bits(),
+                "value={value:.17}"
+            );
+        }
+
+        assert_eq!(round_f64_to_scale(-0.0, 2).to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(round_f64_to_scale(-0.5, 0).to_bits(), (-0.0_f64).to_bits());
+        assert!(round_f64_to_scale(f64::NAN, 2).is_nan());
+        assert_eq!(round_f64_to_scale(f64::INFINITY, 2), f64::INFINITY);
+
+        let mut state = 0x9876_5432_10fe_dcba_u64;
+        for _ in 0..20_000 {
+            state = state
+                .wrapping_mul(2_862_933_555_777_941_757)
+                .wrapping_add(3_037_000_493);
+            let fraction_and_sign = state & !(0x7ff_u64 << 52);
+            let exponent = ((state >> 1) % 2047) << 52;
+            let value = f64::from_bits(fraction_and_sign | exponent);
+            if !value.is_finite() {
+                continue;
+            }
+            let expected = format!("{value:.2}")
+                .parse::<f64>()
+                .expect("formatted value should parse");
+            assert_eq!(
+                round_f64_to_scale(value, 2).to_bits(),
+                expected.to_bits(),
+                "value={value:.17e}"
+            );
+        }
+    }
+
+    #[test]
+    fn round_f64_to_scale_falls_back_safely_for_large_scales() {
+        for scale in [9_u32, 12, 23, 39] {
+            let value = 123.456_789_012_345_67;
+            let precision = scale as usize;
+            let expected = format!("{value:.precision$}")
+                .parse::<f64>()
+                .expect("formatted value should parse");
+            assert_eq!(
+                round_f64_to_scale(value, scale).to_bits(),
+                expected.to_bits(),
+                "scale={scale}"
+            );
+        }
+        assert_eq!(
+            round_f64_to_scale(f64::from_bits(1), 1074).to_bits(),
+            f64::from_bits(1).to_bits()
+        );
     }
 
     #[test]
