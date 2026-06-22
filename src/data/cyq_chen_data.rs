@@ -12,7 +12,7 @@ use std::{
 use duckdb::{
     Appender, Connection,
     arrow::{
-        array::{ArrayRef, Float64Array, Int32Array, StringArray},
+        array::{ArrayRef, Float64Array, Int32Array, StringArray, builder::StringBuilder},
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     },
@@ -66,7 +66,7 @@ pub struct CyqChenStrategyMaintenanceStatus {
 #[derive(Debug)]
 struct ComputedCyqChenStock {
     ts_code: String,
-    snapshots: Vec<(String, ChenChipSnapshot)>,
+    snapshots: Vec<ChenChipSnapshot>,
 }
 
 struct CyqChenInitialState {
@@ -873,12 +873,11 @@ fn compute_cyq_chen_stock(
     };
     let snapshots = snapshots
         .into_iter()
-        .filter_map(|snapshot| {
-            let trade_date = snapshot.trade_date.clone().unwrap_or_default();
-            if trade_date.as_str() < start_date || trade_date.as_str() > end_date {
-                return None;
-            }
-            Some((trade_date, snapshot))
+        .filter(|snapshot| {
+            snapshot
+                .trade_date
+                .as_deref()
+                .is_some_and(|trade_date| trade_date >= start_date && trade_date <= end_date)
         })
         .collect();
 
@@ -993,50 +992,73 @@ fn append_cyq_chen_batch_rows(
     batch: CyqChenWriteBatch,
     config: ChenChipConfig,
 ) -> Result<(usize, usize), String> {
-    let mut snapshot_ts_code = Vec::new();
-    let mut snapshot_trade_date = Vec::new();
-    let mut snapshot_adj_type = Vec::new();
-    let mut snapshot_warmup_days = Vec::new();
-    let mut snapshot_bucket_pct = Vec::new();
-    let mut snapshot_close = Vec::new();
-    let mut snapshot_min_price = Vec::new();
-    let mut snapshot_max_price = Vec::new();
-    let mut snapshot_main_total = Vec::new();
-    let mut snapshot_retail_total = Vec::new();
-    let mut snapshot_total_chips = Vec::new();
-    let mut snapshot_total_profit_ratio = Vec::new();
-    let mut snapshot_total_trapped_ratio = Vec::new();
-    let mut snapshot_main_avg_cost = Vec::new();
-    let mut snapshot_chip_peak_price = Vec::new();
-    let mut snapshot_percent_70_price_low = Vec::new();
-    let mut snapshot_percent_70_price_high = Vec::new();
-    let mut snapshot_percent_70_concentration = Vec::new();
-    let mut snapshot_percent_90_price_low = Vec::new();
-    let mut snapshot_percent_90_price_high = Vec::new();
-    let mut snapshot_percent_90_concentration = Vec::new();
-    let mut snapshot_main_profit_ratio = Vec::new();
-    let mut snapshot_main_trapped_ratio = Vec::new();
+    let snapshot_rows = batch
+        .stocks
+        .iter()
+        .map(|stock| stock.snapshots.len())
+        .sum::<usize>();
+    let bin_rows = batch
+        .stocks
+        .iter()
+        .flat_map(|stock| &stock.snapshots)
+        .map(|snapshot| snapshot.bins.len())
+        .sum::<usize>();
+    let rounded_bucket_pct = round_chen_chip_value(config.bucket_pct);
 
-    let mut bin_ts_code = Vec::new();
-    let mut bin_trade_date = Vec::new();
-    let mut bin_adj_type = Vec::new();
-    let mut bin_index = Vec::new();
-    let mut bin_price = Vec::new();
-    let mut bin_price_low = Vec::new();
-    let mut bin_price_high = Vec::new();
-    let mut bin_main_chip = Vec::new();
-    let mut bin_retail_chip = Vec::new();
-    let mut bin_total_chip = Vec::new();
+    let mut snapshot_ts_code =
+        StringBuilder::with_capacity(snapshot_rows, snapshot_rows.saturating_mul(12));
+    let mut snapshot_trade_date =
+        StringBuilder::with_capacity(snapshot_rows, snapshot_rows.saturating_mul(8));
+    let mut snapshot_adj_type = StringBuilder::with_capacity(
+        snapshot_rows,
+        snapshot_rows.saturating_mul(DEFAULT_ADJ_TYPE.len()),
+    );
+    let mut snapshot_warmup_days = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_bucket_pct = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_close = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_min_price = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_max_price = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_main_total = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_retail_total = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_total_chips = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_total_profit_ratio = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_total_trapped_ratio = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_main_avg_cost = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_chip_peak_price = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_percent_70_price_low = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_percent_70_price_high = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_percent_70_concentration = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_percent_90_price_low = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_percent_90_price_high = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_percent_90_concentration = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_main_profit_ratio = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_main_trapped_ratio = Vec::with_capacity(snapshot_rows);
+
+    let mut bin_ts_code = StringBuilder::with_capacity(bin_rows, bin_rows.saturating_mul(12));
+    let mut bin_trade_date = StringBuilder::with_capacity(bin_rows, bin_rows.saturating_mul(8));
+    let mut bin_adj_type =
+        StringBuilder::with_capacity(bin_rows, bin_rows.saturating_mul(DEFAULT_ADJ_TYPE.len()));
+    let mut bin_index = Vec::with_capacity(bin_rows);
+    let mut bin_price = Vec::with_capacity(bin_rows);
+    let mut bin_price_low = Vec::with_capacity(bin_rows);
+    let mut bin_price_high = Vec::with_capacity(bin_rows);
+    let mut bin_main_chip = Vec::with_capacity(bin_rows);
+    let mut bin_retail_chip = Vec::with_capacity(bin_rows);
+    let mut bin_total_chip = Vec::with_capacity(bin_rows);
 
     for stock in batch.stocks {
         let ts_code = stock.ts_code;
-        for (trade_date, mut snapshot) in stock.snapshots {
+        for mut snapshot in stock.snapshots {
+            let trade_date = snapshot
+                .trade_date
+                .take()
+                .ok_or_else(|| format!("{ts_code} 的新筹码快照缺少交易日期"))?;
             round_chen_chip_snapshot(&mut snapshot);
-            snapshot_ts_code.push(ts_code.clone());
-            snapshot_trade_date.push(trade_date.clone());
-            snapshot_adj_type.push(DEFAULT_ADJ_TYPE.to_string());
+            snapshot_ts_code.append_value(&ts_code);
+            snapshot_trade_date.append_value(&trade_date);
+            snapshot_adj_type.append_value(DEFAULT_ADJ_TYPE);
             snapshot_warmup_days.push(config.warmup_days as i32);
-            snapshot_bucket_pct.push(round_chen_chip_value(config.bucket_pct));
+            snapshot_bucket_pct.push(rounded_bucket_pct);
             snapshot_close.push(snapshot.close);
             snapshot_min_price.push(snapshot.min_price);
             snapshot_max_price.push(snapshot.max_price);
@@ -1057,9 +1079,9 @@ fn append_cyq_chen_batch_rows(
             snapshot_main_trapped_ratio.push(snapshot.main_trapped_ratio);
 
             for bin in snapshot.bins {
-                bin_ts_code.push(ts_code.clone());
-                bin_trade_date.push(trade_date.clone());
-                bin_adj_type.push(DEFAULT_ADJ_TYPE.to_string());
+                bin_ts_code.append_value(&ts_code);
+                bin_trade_date.append_value(&trade_date);
+                bin_adj_type.append_value(DEFAULT_ADJ_TYPE);
                 bin_index.push(bin.index as i32);
                 bin_price.push(bin.price);
                 bin_price_low.push(bin.price_low);
@@ -1071,15 +1093,12 @@ fn append_cyq_chen_batch_rows(
         }
     }
 
-    let snapshot_rows = snapshot_ts_code.len();
-    let bin_rows = bin_ts_code.len();
-
     if snapshot_rows > 0 {
         snapshot_app
             .append_record_batch(build_cyq_chen_snapshot_record_batch(
-                snapshot_ts_code,
-                snapshot_trade_date,
-                snapshot_adj_type,
+                snapshot_ts_code.finish(),
+                snapshot_trade_date.finish(),
+                snapshot_adj_type.finish(),
                 snapshot_warmup_days,
                 snapshot_bucket_pct,
                 snapshot_close,
@@ -1107,9 +1126,9 @@ fn append_cyq_chen_batch_rows(
     if bin_rows > 0 {
         bin_app
             .append_record_batch(build_cyq_chen_bin_record_batch(
-                bin_ts_code,
-                bin_trade_date,
-                bin_adj_type,
+                bin_ts_code.finish(),
+                bin_trade_date.finish(),
+                bin_adj_type.finish(),
                 bin_index,
                 bin_price,
                 bin_price_low,
@@ -1124,8 +1143,8 @@ fn append_cyq_chen_batch_rows(
     Ok((snapshot_rows, bin_rows))
 }
 
-fn string_array(values: Vec<String>) -> ArrayRef {
-    Arc::new(StringArray::from(values))
+fn string_array(values: StringArray) -> ArrayRef {
+    Arc::new(values)
 }
 
 fn int32_array(values: Vec<i32>) -> ArrayRef {
@@ -1138,9 +1157,9 @@ fn float64_array(values: Vec<f64>) -> ArrayRef {
 
 #[allow(clippy::too_many_arguments)]
 fn build_cyq_chen_snapshot_record_batch(
-    ts_code: Vec<String>,
-    trade_date: Vec<String>,
-    adj_type: Vec<String>,
+    ts_code: StringArray,
+    trade_date: StringArray,
+    adj_type: StringArray,
     warmup_days: Vec<i32>,
     bucket_pct: Vec<f64>,
     close: Vec<f64>,
@@ -1220,9 +1239,9 @@ fn build_cyq_chen_snapshot_record_batch(
 
 #[allow(clippy::too_many_arguments)]
 fn build_cyq_chen_bin_record_batch(
-    ts_code: Vec<String>,
-    trade_date: Vec<String>,
-    adj_type: Vec<String>,
+    ts_code: StringArray,
+    trade_date: StringArray,
+    adj_type: StringArray,
     bin_index: Vec<i32>,
     price: Vec<f64>,
     price_low: Vec<f64>,
