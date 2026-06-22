@@ -281,6 +281,26 @@ pub fn delete_one_stock_range(
     Ok(())
 }
 
+pub fn delete_one_stock_all_rows(
+    conn: &Connection,
+    ts_code: &str,
+    adj_type: AdjType,
+) -> Result<(), String> {
+    let adj_type = adj_type_name(adj_type);
+
+    conn.execute(
+        r#"
+        DELETE FROM stock_data
+        WHERE ts_code = ?
+          AND adj_type = ?
+        "#,
+        params![ts_code, adj_type],
+    )
+    .map_err(|e| format!("删除股票全部旧行情失败, ts_code={ts_code}: {e}"))?;
+
+    Ok(())
+}
+
 pub fn insert_pro_bar_rows(
     conn: &Connection,
     adj_type: AdjType,

@@ -20,10 +20,11 @@ use crate::{
         DataReader,
         concept_performance_data::rebuild_concept_performance_range,
         download_data::{
-            append_stage_pro_bar_rows, checkpoint_stock_data, delete_one_stock_range,
-            delete_trade_date_rows, ensure_indicator_columns, flush_stock_data_stage_table,
-            init_stock_data_db, load_latest_close_map_before, load_latest_trade_date,
-            reset_stock_data_stage_table, write_stock_list_csv, write_ths_concepts_csv,
+            append_stage_pro_bar_rows, checkpoint_stock_data, delete_one_stock_all_rows,
+            delete_one_stock_range, delete_trade_date_rows, ensure_indicator_columns,
+            flush_stock_data_stage_table, init_stock_data_db, load_latest_close_map_before,
+            load_latest_trade_date, reset_stock_data_stage_table, write_stock_list_csv,
+            write_ths_concepts_csv,
         },
         load_stock_list, load_ths_concepts_list, load_trade_date_list, source_db_path,
         stock_list_path, trade_calendar_path,
@@ -1359,6 +1360,51 @@ where
     }
 }
 
+fn delete_stocks_all_rows(
+    conn: &Connection,
+    ts_codes: &HashSet<String>,
+    adj_type: AdjType,
+) -> Result<(), String> {
+    if ts_codes.is_empty() {
+        return Ok(());
+    }
+
+    with_transaction(conn, |tx| {
+        for ts_code in ts_codes {
+            delete_one_stock_all_rows(tx, ts_code, adj_type)?;
+        }
+        Ok(())
+    })
+}
+
+fn write_incremental_trade_date_batches<F>(
+    conn: &Connection,
+    batches: &[PendingTradeDateBatch],
+    adj_type: AdjType,
+    indicator_names: &[String],
+    mut on_batch_written: F,
+) -> Result<(), String>
+where
+    F: FnMut(&PendingTradeDateBatch),
+{
+    if batches.is_empty() {
+        return Ok(());
+    }
+
+    with_transaction(conn, |tx| {
+        ensure_indicator_columns(tx, indicator_names)?;
+        reset_stock_data_stage_table(tx)?;
+
+        for batch in batches {
+            delete_trade_date_rows(tx, adj_type, batch.trade_date.as_str())?;
+            append_stage_pro_bar_rows(tx, adj_type, &batch.rows, &batch.indicators)?;
+            on_batch_written(batch);
+        }
+
+        flush_stock_data_stage_table(tx)
+    })
+}
+
 fn keep_failed_tasks(
     pending_tasks: Vec<DownloadTask>,
     failed_items: &[(String, String)],
@@ -1374,7 +1420,7 @@ fn keep_failed_tasks(
         .collect()
 }
 
-fn redownload_failed_stocks(
+fn recover_failed_stocks_with_independent_writes(
     client: &TushareClient,
     source_dir: &str,
     failed_items: &[(String, String)],
@@ -1383,10 +1429,11 @@ fn redownload_failed_stocks(
     adj_type: AdjType,
     with_factors: bool,
     pool: &ThreadPool,
+    conn: &Connection,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
-) -> Result<PreparedDownloadBatch, String> {
+) -> Result<DownloadSummary, String> {
     if failed_items.is_empty() {
-        return Ok(PreparedDownloadBatch::default());
+        return Ok(DownloadSummary::default());
     }
 
     let failed_ts_codes = failed_items
@@ -1402,7 +1449,7 @@ fn redownload_failed_stocks(
         with_factors,
     )?;
     let total_tasks = tasks.len();
-    let mut batch = PreparedDownloadBatch::default();
+    let mut total = DownloadSummary::default();
 
     for (task_idx, task) in tasks.iter().enumerate() {
         emit_progress(
@@ -1416,11 +1463,22 @@ fn redownload_failed_stocks(
                 task.ts_code, task_idx, total_tasks
             ),
         );
-        let mut one_batch =
+        let one_batch =
             pool.install(|| client.prepare_stock_downloads(source_dir, std::slice::from_ref(task)));
         let one_summary = one_batch.summary();
-        batch.prepared_items.append(&mut one_batch.prepared_items);
-        batch.failed_items.append(&mut one_batch.failed_items);
+        let one_success_count = one_summary.success_count;
+        let one_failed_count = one_summary.failed_count;
+        if !one_batch.prepared_items.is_empty() {
+            write_prepared_stock_batch(conn, &one_batch.prepared_items)?;
+            total.recovered_stock_count += one_batch.prepared_items.len();
+            total.recovered_stock_codes.extend(
+                one_batch
+                    .prepared_items
+                    .iter()
+                    .map(|item| item.ts_code.clone()),
+            );
+        }
+        merge_summary(&mut total, one_summary);
         emit_progress(
             progress_cb,
             "recover_failed_stocks",
@@ -1430,29 +1488,15 @@ fn redownload_failed_stocks(
             format!(
                 "整段补救重下 {} 完成，成功 {}，失败 {}，进度 {}/{}。",
                 task.ts_code,
-                one_summary.success_count,
-                one_summary.failed_count,
+                one_success_count,
+                one_failed_count,
                 task_idx + 1,
                 total_tasks
             ),
         );
     }
-    if batch.failed_items.is_empty() {
-        return Ok(batch);
-    }
 
-    let failed_preview = batch
-        .failed_items
-        .iter()
-        .take(3)
-        .map(|(ts_code, error)| format!("{ts_code}: {error}"))
-        .collect::<Vec<_>>()
-        .join("；");
-    Err(format!(
-        "单股补救重下仍有 {} 只股票失败: {}",
-        batch.failed_items.len(),
-        failed_preview
-    ))
+    Ok(total)
 }
 
 fn retry_failed_downloads(
@@ -2192,66 +2236,16 @@ fn download_pending_all_market_after_basic_data(
         );
     }
 
-    let recovered_batch = if failed_items.is_empty() {
-        PreparedDownloadBatch::default()
-    } else {
-        emit_progress(
-            progress_cb,
-            "recover_failed_stocks",
-            0,
-            failed_items.len(),
-            None,
-            format!(
-                "共有 {} 只股票在缺失区间内出现 pre_close 断点，开始整段补救重下。",
-                failed_items.len()
-            ),
-        );
-        let recovered = redownload_failed_stocks(
-            &client,
-            source_dir,
-            &failed_items,
-            start_date,
-            effective_trade_date,
-            adj_type,
-            with_factors,
-            &pool,
-            progress_cb,
-        )?;
-        emit_progress(
-            progress_cb,
-            "recover_failed_stocks",
-            recovered.prepared_items.len(),
-            failed_items.len(),
-            None,
-            format!(
-                "整段补救重下完成，成功准备 {} 只股票的数据。",
-                recovered.prepared_items.len()
-            ),
-        );
-        recovered
-    };
-
     let passed_write_batches = build_trade_date_write_batches(&passed_prepared_items)?;
-    let recovered_items = recovered_batch.prepared_items;
-    total.recovered_stock_count = recovered_items.len();
-    total.recovered_stock_codes = recovered_items
-        .iter()
-        .map(|item| item.ts_code.clone())
-        .collect();
-
-    if passed_write_batches.is_empty() && recovered_items.is_empty() {
+    if passed_write_batches.is_empty() && failed_items.is_empty() {
         return Ok(total);
     }
 
-    total.saved_rows = passed_write_batches
+    let passed_saved_rows = passed_write_batches
         .iter()
         .map(|batch| batch.rows.len())
-        .sum::<usize>()
-        + recovered_items
-            .iter()
-            .map(|item| item.rows.len())
-            .sum::<usize>();
-    let write_total = passed_write_batches.len() + recovered_items.len();
+        .sum::<usize>();
+    let write_total = passed_write_batches.len() + failed_items.len();
 
     let db_path = source_db_path(source_dir);
     let db_path_str = db_path
@@ -2265,61 +2259,94 @@ fn download_pending_all_market_after_basic_data(
         write_total,
         None,
         format!(
-            "增量校验与补救完成，准备写入 {} 个交易日批次和 {} 只补救股票。",
+            "增量校验完成，准备写入 {} 个交易日批次，并逐只补救 {} 只断点股票。",
             passed_write_batches.len(),
-            recovered_items.len()
+            failed_items.len()
         ),
     );
 
     let mut written_steps = 0usize;
-    with_transaction(&conn, |tx| {
-        ensure_indicator_columns(tx, &indicator_names)?;
-        reset_stock_data_stage_table(tx)?;
+    if !failed_ts_codes.is_empty() {
+        delete_stocks_all_rows(&conn, &failed_ts_codes, adj_type)?;
+        emit_progress(
+            progress_cb,
+            "write_db",
+            written_steps,
+            write_total,
+            Some(format!("清理 {} 只断点股票", failed_ts_codes.len())),
+            format!(
+                "已在独立事务中删除 {} 只断点股票的全部历史行情，后续将逐只补救。",
+                failed_ts_codes.len()
+            ),
+        );
+    }
 
-        for batch in &passed_write_batches {
-            delete_trade_date_rows(tx, adj_type, batch.trade_date.as_str())?;
-            append_stage_pro_bar_rows(tx, adj_type, &batch.rows, &batch.indicators)?;
+    if !passed_write_batches.is_empty() {
+        write_incremental_trade_date_batches(
+            &conn,
+            &passed_write_batches,
+            adj_type,
+            &indicator_names,
+            |batch| {
+                written_steps += 1;
+                emit_progress(
+                    progress_cb,
+                    "write_db",
+                    written_steps,
+                    write_total,
+                    Some(batch.trade_date.clone()),
+                    format!(
+                        "已写入 {}/{} 个批次，当前交易日 {}。",
+                        written_steps, write_total, batch.trade_date
+                    ),
+                );
+            },
+        )?;
+        total.saved_rows += passed_saved_rows;
+    }
 
-            written_steps += 1;
-            emit_progress(
-                progress_cb,
-                "write_db",
-                written_steps,
-                write_total,
-                Some(batch.trade_date.clone()),
-                format!(
-                    "已写入 {}/{} 个批次，当前交易日 {}。",
-                    written_steps, write_total, batch.trade_date
-                ),
-            );
-        }
+    if !failed_items.is_empty() {
+        emit_progress(
+            progress_cb,
+            "recover_failed_stocks",
+            0,
+            failed_items.len(),
+            None,
+            format!(
+                "按日增量数据已提交；开始逐只整段补救 {} 只断点股票，每只股票独立提交。",
+                failed_items.len()
+            ),
+        );
+        let recovered = recover_failed_stocks_with_independent_writes(
+            &client,
+            source_dir,
+            &failed_items,
+            start_date,
+            effective_trade_date,
+            adj_type,
+            with_factors,
+            &pool,
+            &conn,
+            progress_cb,
+        )?;
+        total.saved_rows += recovered.saved_rows;
+        total.failed_count += recovered.failed_count;
+        total.failed_items.extend(recovered.failed_items);
+        total.recovered_stock_count = recovered.recovered_stock_count;
+        total.recovered_stock_codes = recovered.recovered_stock_codes;
+        emit_progress(
+            progress_cb,
+            "recover_failed_stocks",
+            total.recovered_stock_count,
+            failed_items.len(),
+            None,
+            format!(
+                "逐只补救完成，成功 {} 只，失败 {} 只；成功股票均已独立提交。",
+                total.recovered_stock_count, total.failed_count
+            ),
+        );
+    }
 
-        for item in &recovered_items {
-            delete_one_stock_range(
-                tx,
-                item.ts_code.as_str(),
-                adj_type,
-                item.start_date.as_str(),
-                item.end_date.as_str(),
-            )?;
-            append_stage_pro_bar_rows(tx, adj_type, &item.rows, &item.indicators)?;
-
-            written_steps += 1;
-            emit_progress(
-                progress_cb,
-                "write_db",
-                written_steps,
-                write_total,
-                Some(item.ts_code.clone()),
-                format!(
-                    "已写入 {}/{} 个批次，当前补救股票 {}。",
-                    written_steps, write_total, item.ts_code
-                ),
-            );
-        }
-
-        flush_stock_data_stage_table(tx)
-    })?;
     checkpoint_stock_data(&conn)?;
     total.concept_performance_rows += sync_gaini_bx_range(
         source_dir,
@@ -2544,6 +2571,118 @@ mod tests {
         );
 
         assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn incremental_daily_commit_survives_later_stock_repair_failure() {
+        let source_dir = temp_source_dir("incremental_repair_transaction_boundaries");
+        fs::create_dir_all(&source_dir).expect("create temp source dir");
+        let db_path = source_dir.join("stock_data.db");
+        init_stock_data_db(db_path.to_str().expect("utf8 db path")).expect("init stock db");
+        let conn = Connection::open(&db_path).expect("open stock db");
+        conn.execute_batch(
+            r#"
+            INSERT INTO stock_data (
+                ts_code, trade_date, adj_type, open, high, low, close, pre_close,
+                change, pct_chg, vol, amount, tor
+            ) VALUES
+                ('000001.SZ', '20260102', 'qfq', 10, 11, 9, 10.5, 10, 0.5, 5, 1000, 10000, 1.2),
+                ('000001.SZ', '20260105', 'qfq', 11, 12, 10, 11.5, 10.5, 1, 9.5, 1100, 11000, 1.3),
+                ('000001.SZ', '20260102', 'hfq', 20, 21, 19, 20.5, 20, 0.5, 2.5, 1000, 10000, 1.2),
+                ('000002.SZ', '20260105', 'qfq', 30, 31, 29, 30.5, 30, 0.5, 1.7, 1200, 12000, 1.4);
+            "#,
+        )
+        .expect("seed stock rows");
+
+        delete_stocks_all_rows(
+            &conn,
+            &HashSet::from(["000001.SZ".to_string()]),
+            AdjType::Qfq,
+        )
+        .expect("delete broken stock history");
+
+        let broken_qfq_rows = conn
+            .query_row(
+                "SELECT COUNT(*) FROM stock_data WHERE ts_code = '000001.SZ' AND adj_type = 'qfq'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count broken qfq rows");
+        let preserved_hfq_rows = conn
+            .query_row(
+                "SELECT COUNT(*) FROM stock_data WHERE ts_code = '000001.SZ' AND adj_type = 'hfq'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count preserved hfq rows");
+        assert_eq!(broken_qfq_rows, 0);
+        assert_eq!(preserved_hfq_rows, 1);
+
+        let daily_batch = PendingTradeDateBatch {
+            trade_date: "20260106".to_string(),
+            rows: vec![ProBarRow {
+                ts_code: "000002.SZ".to_string(),
+                trade_date: "20260106".to_string(),
+                open: 30.5,
+                high: 32.0,
+                low: 30.0,
+                close: 31.5,
+                pre_close: 30.5,
+                change: 1.0,
+                pct_chg: 3.28,
+                vol: 1300.0,
+                amount: 13000.0,
+                turnover_rate: Some(1.5),
+                volume_ratio: None,
+            }],
+            indicators: HashMap::new(),
+        };
+        write_incremental_trade_date_batches(&conn, &[daily_batch], AdjType::Qfq, &[], |_| {})
+            .expect("commit daily increment");
+
+        let invalid_repair = PreparedStockDownload {
+            ts_code: "000001.SZ".to_string(),
+            start_date: "20260102".to_string(),
+            end_date: "20260106".to_string(),
+            adj_type: AdjType::Qfq,
+            rows: vec![ProBarRow {
+                ts_code: "000001.SZ".to_string(),
+                trade_date: "20260102".to_string(),
+                open: 10.0,
+                high: 11.0,
+                low: 9.0,
+                close: 10.5,
+                pre_close: 10.0,
+                change: 0.5,
+                pct_chg: 5.0,
+                vol: 1000.0,
+                amount: 10000.0,
+                turnover_rate: Some(1.2),
+                volume_ratio: None,
+            }],
+            indicators: HashMap::from([("MA5".to_string(), Vec::new())]),
+        };
+        write_prepared_stock_batch(&conn, &[invalid_repair])
+            .expect_err("repair write should fail independently");
+
+        let committed_daily_rows = conn
+            .query_row(
+                "SELECT COUNT(*) FROM stock_data WHERE ts_code = '000002.SZ' AND trade_date = '20260106' AND adj_type = 'qfq'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count committed daily rows");
+        let broken_stock_rows = conn
+            .query_row(
+                "SELECT COUNT(*) FROM stock_data WHERE ts_code = '000001.SZ' AND adj_type = 'qfq'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count failed repair rows");
+        assert_eq!(committed_daily_rows, 1);
+        assert_eq!(broken_stock_rows, 0);
+
+        fs::remove_dir_all(source_dir).ok();
     }
 
     #[test]

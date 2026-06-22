@@ -1331,8 +1331,8 @@ fn write_cyq_chen_batches_from_channel(
     }
 
     write_cyq_chen_meta(&tx, config, &strategy_hash)?;
-    ensure_cyq_chen_db_indexes(&tx)?;
     tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
+    ensure_cyq_chen_db_indexes(&conn)?;
     Ok((snapshot_rows, bin_rows))
 }
 
