@@ -1222,6 +1222,8 @@ fn write_prepared_stock_batch(
     }
 
     with_transaction(conn, |tx| {
+        let indicator_names = collect_indicator_names(prepared_items);
+        ensure_indicator_columns(tx, &indicator_names)?;
         reset_stock_data_stage_table(tx)?;
 
         for item in prepared_items {
@@ -1339,15 +1341,21 @@ where
         .map_err(|e| format!("开启事务失败: {e}"))?;
 
     match action(conn) {
-        Ok(value) => {
-            conn.execute_batch("COMMIT")
-                .map_err(|e| format!("提交事务失败: {e}"))?;
-            Ok(value)
-        }
-        Err(err) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(err)
-        }
+        Ok(value) => match conn.execute_batch("COMMIT") {
+            Ok(()) => Ok(value),
+            Err(commit_error) => match conn.execute_batch("ROLLBACK") {
+                Ok(()) => Err(format!("提交事务失败，已回滚: {commit_error}")),
+                Err(rollback_error) => Err(format!(
+                    "提交事务失败且回滚失败: commit={commit_error}; rollback={rollback_error}"
+                )),
+            },
+        },
+        Err(action_error) => match conn.execute_batch("ROLLBACK") {
+            Ok(()) => Err(format!("{action_error}；本步骤数据库事务已回滚")),
+            Err(rollback_error) => Err(format!(
+                "{action_error}；本步骤数据库事务回滚失败: {rollback_error}"
+            )),
+        },
     }
 }
 
@@ -1532,7 +1540,6 @@ fn download_first_all_market_after_basic_data(
         .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
     init_stock_data_db(db_path_str)?;
     let conn = Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
-    let mut indicator_columns_ready = false;
 
     let ts_codes = resolve_download_ts_codes(source_dir)?;
 
@@ -1542,7 +1549,6 @@ fn download_first_all_market_after_basic_data(
         &client,
         &pool,
         &conn,
-        &mut indicator_columns_ready,
         &ts_codes,
         start_date,
         end_date,
@@ -1562,7 +1568,6 @@ fn download_selected_stocks_with_context(
     client: &TushareClient,
     pool: &ThreadPool,
     conn: &Connection,
-    indicator_columns_ready: &mut bool,
     ts_codes: &[String],
     start_date: &str,
     end_date: &str,
@@ -1620,11 +1625,6 @@ fn download_selected_stocks_with_context(
     for (batch_idx, batch) in tasks.chunks(pool.current_num_threads().max(1)).enumerate() {
         let prepared_batch = pool.install(|| client.prepare_stock_downloads(source_dir, batch));
         let batch_summary = prepared_batch.summary();
-        if !*indicator_columns_ready && !prepared_batch.prepared_items.is_empty() {
-            let indicator_names = collect_indicator_names(&prepared_batch.prepared_items);
-            ensure_indicator_columns(conn, &indicator_names)?;
-            *indicator_columns_ready = true;
-        }
         emit_progress(
             progress_cb,
             "write_db",
@@ -1670,10 +1670,6 @@ fn download_selected_stocks_with_context(
             progress_cb,
         );
         let retry_summary = retry_batch.summary();
-        if !*indicator_columns_ready && !retry_batch.prepared_items.is_empty() {
-            let indicator_names = collect_indicator_names(&retry_batch.prepared_items);
-            ensure_indicator_columns(conn, &indicator_names)?;
-        }
         emit_progress(
             progress_cb,
             "write_db",
@@ -1737,7 +1733,6 @@ pub fn download_selected_stocks(
         .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
     init_stock_data_db(db_path_str)?;
     let conn = Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
-    let mut indicator_columns_ready = false;
 
     download_selected_stocks_with_context(
         source_dir,
@@ -1745,7 +1740,6 @@ pub fn download_selected_stocks(
         &client,
         &pool,
         &conn,
-        &mut indicator_columns_ready,
         ts_codes,
         start_date,
         end_date,
@@ -1774,7 +1768,6 @@ fn download_indices_with_context(
         .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
     init_stock_data_db(db_path_str)?;
     let conn = Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
-    let mut indicator_columns_ready = false;
     let ts_codes = resolve_index_ts_codes();
 
     if ts_codes.is_empty() {
@@ -1804,11 +1797,6 @@ fn download_indices_with_context(
             prepared_batch.prepared_items.as_mut_slice(),
         )?;
         let batch_summary = prepared_batch.summary();
-        if !indicator_columns_ready && !prepared_batch.prepared_items.is_empty() {
-            let indicator_names = collect_indicator_names(&prepared_batch.prepared_items);
-            ensure_indicator_columns(&conn, &indicator_names)?;
-            indicator_columns_ready = true;
-        }
         emit_progress(
             progress_cb,
             "write_db",
@@ -2556,5 +2544,74 @@ mod tests {
         );
 
         assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn stock_batch_failure_rolls_back_rows_and_indicator_columns() {
+        let source_dir = temp_source_dir("stock_batch_rollback");
+        fs::create_dir_all(&source_dir).expect("create temp source dir");
+        let db_path = source_dir.join("stock_data.db");
+        init_stock_data_db(db_path.to_str().expect("utf8 db path")).expect("init stock db");
+        let conn = Connection::open(&db_path).expect("open stock db");
+        conn.execute(
+            r#"
+            INSERT INTO stock_data (
+                ts_code, trade_date, adj_type, open, high, low, close, pre_close,
+                change, pct_chg, vol, amount, tor
+            ) VALUES (
+                '000001.SZ', '20260105', 'qfq', 10, 11, 9, 10.5, 10,
+                0.5, 5, 1000, 10000, 1.2
+            )
+            "#,
+            [],
+        )
+        .expect("seed stock row");
+
+        let prepared = PreparedStockDownload {
+            ts_code: "000001.SZ".to_string(),
+            start_date: "20260105".to_string(),
+            end_date: "20260105".to_string(),
+            adj_type: AdjType::Qfq,
+            rows: vec![ProBarRow {
+                ts_code: "000001.SZ".to_string(),
+                trade_date: "20260105".to_string(),
+                open: 20.0,
+                high: 21.0,
+                low: 19.0,
+                close: 20.5,
+                pre_close: 20.0,
+                change: 0.5,
+                pct_chg: 2.5,
+                vol: 2000.0,
+                amount: 20000.0,
+                turnover_rate: Some(2.0),
+                volume_ratio: None,
+            }],
+            indicators: HashMap::from([("MA5".to_string(), Vec::new())]),
+        };
+
+        let error = write_prepared_stock_batch(&conn, &[prepared])
+            .expect_err("invalid indicator length should fail");
+        assert!(error.contains("数据库事务已回滚"));
+
+        let close = conn
+            .query_row(
+                "SELECT CAST(close AS DOUBLE) FROM stock_data WHERE ts_code = '000001.SZ' AND trade_date = '20260105' AND adj_type = 'qfq'",
+                [],
+                |row| row.get::<_, f64>(0),
+            )
+            .expect("read preserved close");
+        assert_eq!(close, 10.5);
+
+        let ma5_columns = conn
+            .query_row(
+                "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'stock_data' AND column_name = 'MA5'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count MA5 columns");
+        assert_eq!(ma5_columns, 0);
+
+        fs::remove_dir_all(source_dir).ok();
     }
 }

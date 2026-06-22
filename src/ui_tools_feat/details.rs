@@ -4,15 +4,12 @@ use std::{
     path::Path,
 };
 
-use duckdb::{Connection, params};
+use duckdb::{AccessMode, Config, Connection, params};
 use serde::Serialize;
 
 use crate::{
     data::{RowData, ScoreConfig},
-    data::{
-        cyq_chen_data::init_cyq_chen_db, cyq_chen_db_path, cyq_db_path, result_db_path,
-        score_rule_path, source_db_path,
-    },
+    data::{cyq_chen_db_path, cyq_db_path, result_db_path, score_rule_path, source_db_path},
     download::ind_calc::{cache_ind_build, calc_inds_with_cache},
     scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map},
     ui_tools_feat::{
@@ -396,11 +393,13 @@ fn open_cyq_chen_conn(source_path: &str) -> Result<Option<Connection>, String> {
     if !cyq_chen_db.exists() {
         return Ok(None);
     }
-    init_cyq_chen_db(&cyq_chen_db)?;
     let cyq_chen_db_str = cyq_chen_db
         .to_str()
         .ok_or_else(|| "新筹码库路径不是有效UTF-8".to_string())?;
-    Connection::open(cyq_chen_db_str)
+    let config = Config::default()
+        .access_mode(AccessMode::ReadOnly)
+        .map_err(|e| format!("配置新筹码库只读模式失败: {e}"))?;
+    Connection::open_with_flags(cyq_chen_db_str, config)
         .map(Some)
         .map_err(|e| format!("打开新筹码库失败: {e}"))
 }

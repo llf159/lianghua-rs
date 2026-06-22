@@ -586,15 +586,21 @@ where
         .map_err(|e| format!("开启事务失败: {e}"))?;
 
     match action(conn) {
-        Ok(value) => {
-            conn.execute_batch("COMMIT")
-                .map_err(|e| format!("提交事务失败: {e}"))?;
-            Ok(value)
-        }
-        Err(err) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(err)
-        }
+        Ok(value) => match conn.execute_batch("COMMIT") {
+            Ok(()) => Ok(value),
+            Err(commit_error) => match conn.execute_batch("ROLLBACK") {
+                Ok(()) => Err(format!("提交事务失败，已回滚: {commit_error}")),
+                Err(rollback_error) => Err(format!(
+                    "提交事务失败且回滚失败: commit={commit_error}; rollback={rollback_error}"
+                )),
+            },
+        },
+        Err(action_error) => match conn.execute_batch("ROLLBACK") {
+            Ok(()) => Err(format!("{action_error}；本步骤数据库事务已回滚")),
+            Err(rollback_error) => Err(format!(
+                "{action_error}；本步骤数据库事务回滚失败: {rollback_error}"
+            )),
+        },
     }
 }
 

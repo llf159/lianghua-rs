@@ -1268,52 +1268,53 @@ fn write_cyq_chen_batches_from_channel(
     strategy_hash: String,
 ) -> Result<(usize, usize), String> {
     let mut conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
-    drop_cyq_chen_db_indexes(&conn)?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("创建筹码库事务失败:{e}"))?;
+    drop_cyq_chen_db_indexes(&tx)?;
+    tx.execute("DELETE FROM cyq_chen_bin", [])
+        .map_err(|e| format!("清空cyq_chen_bin失败:{e}"))?;
+    tx.execute("DELETE FROM cyq_chen_snapshot", [])
+        .map_err(|e| format!("清空cyq_chen_snapshot失败:{e}"))?;
 
-    let write_result = (|| -> Result<(usize, usize), String> {
-        let tx = conn
-            .transaction()
-            .map_err(|e| format!("创建筹码库事务失败:{e}"))?;
-        tx.execute("DELETE FROM cyq_chen_bin", [])
-            .map_err(|e| format!("清空cyq_chen_bin失败:{e}"))?;
-        tx.execute("DELETE FROM cyq_chen_snapshot", [])
-            .map_err(|e| format!("清空cyq_chen_snapshot失败:{e}"))?;
+    let mut snapshot_rows = 0usize;
+    let mut bin_rows = 0usize;
+    let mut batch_count = 0usize;
+    let mut abort_reason = None;
+    {
+        let mut snapshot_app = tx
+            .appender(CYQ_CHEN_SNAPSHOT_TABLE)
+            .map_err(|e| format!("创建cyq_chen_snapshot写入器失败:{e}"))?;
+        let mut bin_app = tx
+            .appender(CYQ_CHEN_BIN_TABLE)
+            .map_err(|e| format!("创建cyq_chen_bin写入器失败:{e}"))?;
 
-        let mut snapshot_rows = 0usize;
-        let mut bin_rows = 0usize;
-        let mut batch_count = 0usize;
-        {
-            let mut snapshot_app = tx
-                .appender(CYQ_CHEN_SNAPSHOT_TABLE)
-                .map_err(|e| format!("创建cyq_chen_snapshot写入器失败:{e}"))?;
-            let mut bin_app = tx
-                .appender(CYQ_CHEN_BIN_TABLE)
-                .map_err(|e| format!("创建cyq_chen_bin写入器失败:{e}"))?;
-
-            for message in rx {
-                let batch = match message {
-                    CyqChenWriteMessage::Batch(batch) => batch,
-                    CyqChenWriteMessage::Abort(reason) => {
-                        return Err(format!("筹码计算中断，结果库回滚:{reason}"));
-                    }
-                };
-
-                let (added_snapshot_rows, added_bin_rows) =
-                    append_cyq_chen_batch_rows(&mut snapshot_app, &mut bin_app, batch, config)?;
-                snapshot_rows += added_snapshot_rows;
-                bin_rows += added_bin_rows;
-                batch_count += 1;
-
-                if batch_count % CYQ_CHEN_FLUSH_BATCH_SIZE == 0 {
-                    snapshot_app
-                        .flush()
-                        .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
-                    bin_app
-                        .flush()
-                        .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
+        for message in rx {
+            let batch = match message {
+                CyqChenWriteMessage::Batch(batch) => batch,
+                CyqChenWriteMessage::Abort(reason) => {
+                    abort_reason = Some(reason);
+                    break;
                 }
-            }
+            };
 
+            let (added_snapshot_rows, added_bin_rows) =
+                append_cyq_chen_batch_rows(&mut snapshot_app, &mut bin_app, batch, config)?;
+            snapshot_rows += added_snapshot_rows;
+            bin_rows += added_bin_rows;
+            batch_count += 1;
+
+            if batch_count % CYQ_CHEN_FLUSH_BATCH_SIZE == 0 {
+                snapshot_app
+                    .flush()
+                    .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
+                bin_app
+                    .flush()
+                    .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
+            }
+        }
+
+        if abort_reason.is_none() {
             snapshot_app
                 .flush()
                 .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
@@ -1321,18 +1322,18 @@ fn write_cyq_chen_batches_from_channel(
                 .flush()
                 .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
         }
-
-        write_cyq_chen_meta(&tx, config, &strategy_hash)?;
-        tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
-        Ok((snapshot_rows, bin_rows))
-    })();
-
-    let recreate_result = ensure_cyq_chen_db_indexes(&conn);
-    match (write_result, recreate_result) {
-        (Ok(rows), Ok(())) => Ok(rows),
-        (Err(write_error), _) => Err(write_error),
-        (Ok(_), Err(index_error)) => Err(index_error),
     }
+
+    if let Some(reason) = abort_reason {
+        tx.rollback()
+            .map_err(|e| format!("筹码计算中断且结果库回滚失败:{reason}; {e}"))?;
+        return Err(format!("筹码计算中断，结果库已回滚:{reason}"));
+    }
+
+    write_cyq_chen_meta(&tx, config, &strategy_hash)?;
+    ensure_cyq_chen_db_indexes(&tx)?;
+    tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
+    Ok((snapshot_rows, bin_rows))
 }
 
 fn write_cyq_chen_incremental_batches_from_channel(
@@ -1349,7 +1350,7 @@ fn write_cyq_chen_incremental_batches_from_channel(
     let write_result = (|| -> Result<(usize, usize), String> {
         let tx = conn
             .transaction()
-            .map_err(|e| format!("创建筹码库事务失败:{e}"))?;
+            .map_err(|e| format!("创建新筹码增量事务失败:{e}"))?;
         tx.execute(
             "DELETE FROM cyq_chen_bin WHERE adj_type = ? AND trade_date >= ? AND trade_date <= ?",
             params![DEFAULT_ADJ_TYPE, start_date, end_date],
@@ -1364,6 +1365,7 @@ fn write_cyq_chen_incremental_batches_from_channel(
         let mut snapshot_rows = 0usize;
         let mut bin_rows = 0usize;
         let mut batch_count = 0usize;
+        let mut abort_reason = None;
         {
             let mut snapshot_app = tx
                 .appender(CYQ_CHEN_SNAPSHOT_TABLE)
@@ -1376,7 +1378,8 @@ fn write_cyq_chen_incremental_batches_from_channel(
                 let batch = match message {
                     CyqChenWriteMessage::Batch(batch) => batch,
                     CyqChenWriteMessage::Abort(reason) => {
-                        return Err(format!("新筹码增量计算中断，结果库回滚:{reason}"));
+                        abort_reason = Some(reason);
+                        break;
                     }
                 };
 
@@ -1396,24 +1399,33 @@ fn write_cyq_chen_incremental_batches_from_channel(
                 }
             }
 
-            snapshot_app
-                .flush()
-                .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
-            bin_app
-                .flush()
-                .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
+            if abort_reason.is_none() {
+                snapshot_app
+                    .flush()
+                    .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
+                bin_app
+                    .flush()
+                    .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
+            }
+        }
+
+        if let Some(reason) = abort_reason {
+            tx.rollback()
+                .map_err(|e| format!("新筹码增量计算中断且结果库回滚失败:{reason}; {e}"))?;
+            return Err(format!("新筹码增量计算中断，结果库已回滚:{reason}"));
         }
 
         write_cyq_chen_meta(&tx, config, &strategy_hash)?;
-        tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
+        tx.commit()
+            .map_err(|e| format!("提交新筹码增量事务失败:{e}"))?;
         Ok((snapshot_rows, bin_rows))
     })();
 
-    let recreate_result = ensure_cyq_chen_db_indexes(&conn);
-    match (write_result, recreate_result) {
+    let index_result = ensure_cyq_chen_db_indexes(&conn);
+    match (write_result, index_result) {
         (Ok(rows), Ok(())) => Ok(rows),
-        (Err(write_error), _) => Err(write_error),
-        (Ok(_), Err(index_error)) => Err(index_error),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
     }
 }
 
@@ -1450,6 +1462,7 @@ fn write_cyq_chen_stock_repair_batches_from_channel(
         let mut snapshot_rows = 0usize;
         let mut bin_rows = 0usize;
         let mut batch_count = 0usize;
+        let mut abort_reason = None;
         {
             let mut snapshot_app = tx
                 .appender(CYQ_CHEN_SNAPSHOT_TABLE)
@@ -1462,7 +1475,8 @@ fn write_cyq_chen_stock_repair_batches_from_channel(
                 let batch = match message {
                     CyqChenWriteMessage::Batch(batch) => batch,
                     CyqChenWriteMessage::Abort(reason) => {
-                        return Err(format!("新筹码局部修复中断，结果库回滚:{reason}"));
+                        abort_reason = Some(reason);
+                        break;
                     }
                 };
 
@@ -1482,12 +1496,20 @@ fn write_cyq_chen_stock_repair_batches_from_channel(
                 }
             }
 
-            snapshot_app
-                .flush()
-                .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
-            bin_app
-                .flush()
-                .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
+            if abort_reason.is_none() {
+                snapshot_app
+                    .flush()
+                    .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
+                bin_app
+                    .flush()
+                    .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
+            }
+        }
+
+        if let Some(reason) = abort_reason {
+            tx.rollback()
+                .map_err(|e| format!("新筹码局部修复中断且结果库回滚失败:{reason}; {e}"))?;
+            return Err(format!("新筹码局部修复中断，结果库已回滚:{reason}"));
         }
 
         write_cyq_chen_meta(&tx, config, &strategy_hash)?;
@@ -2169,14 +2191,17 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
+        sync::mpsc::sync_channel,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use duckdb::{Connection, params};
 
     use super::{
-        CYQ_CHEN_BIN_TABLE, CYQ_CHEN_SNAPSHOT_TABLE, maintain_cyq_chen_incremental_if_db_exists,
-        query_cyq_chen_strategy_maintenance_status, rebuild_cyq_chen_all,
+        CYQ_CHEN_BIN_TABLE, CYQ_CHEN_SNAPSHOT_TABLE, CyqChenWriteMessage,
+        maintain_cyq_chen_incremental_if_db_exists, query_cyq_chen_strategy_maintenance_status,
+        rebuild_cyq_chen_all, write_cyq_chen_batches_from_channel,
+        write_cyq_chen_incremental_batches_from_channel,
     };
     use crate::data::{
         chip_change_rule_path, cyq_chen::ChenChipConfig, cyq_chen_db_path, source_db_path,
@@ -2349,6 +2374,39 @@ bias = 1.0
                 row.get(5).expect("main_chip"),
                 row.get(6).expect("retail_chip"),
             ));
+        }
+        out
+    }
+
+    fn meta_rows_for_compare(source_path: &str) -> Vec<(String, String)> {
+        let cyq_chen_db = cyq_chen_db_path(source_path);
+        let conn = Connection::open(&cyq_chen_db).expect("open cyq chen db");
+        let mut stmt = conn
+            .prepare("SELECT key, value FROM cyq_chen_meta ORDER BY key")
+            .expect("prepare meta compare");
+        let mut rows = stmt.query([]).expect("query meta compare");
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().expect("read meta compare") {
+            out.push((
+                row.get(0).expect("meta key"),
+                row.get(1).expect("meta value"),
+            ));
+        }
+        out
+    }
+
+    fn index_names_for_compare(source_path: &str) -> Vec<String> {
+        let cyq_chen_db = cyq_chen_db_path(source_path);
+        let conn = Connection::open(&cyq_chen_db).expect("open cyq chen db");
+        let mut stmt = conn
+            .prepare(
+                "SELECT index_name FROM duckdb_indexes() WHERE table_name IN ('cyq_chen_snapshot', 'cyq_chen_bin') ORDER BY index_name",
+            )
+            .expect("prepare index compare");
+        let mut rows = stmt.query([]).expect("query index compare");
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().expect("read index compare") {
+            out.push(row.get(0).expect("index name"));
         }
         out
     }
@@ -2533,6 +2591,86 @@ bias = 1.0
 
         fs::remove_dir_all(incremental_dir).expect("cleanup incremental temp dir");
         fs::remove_dir_all(full_dir).expect("cleanup full temp dir");
+    }
+
+    #[test]
+    fn interrupted_incremental_write_keeps_official_db_unchanged() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+        let source_path = source_dir.to_str().expect("utf8 path");
+        let config = ChenChipConfig {
+            warmup_days: 1,
+            bucket_pct: 5.0,
+        };
+        rebuild_cyq_chen_all(source_path, config, Some("20260401"), Some("20260403"))
+            .expect("seed cyq chen");
+
+        let snapshots_before = snapshot_rows_for_compare(source_path);
+        let bins_before = bin_rows_for_compare(source_path);
+        let meta_before = meta_rows_for_compare(source_path);
+        let cyq_chen_db = cyq_chen_db_path(source_path);
+        let (tx, rx) = sync_channel(1);
+        tx.send(CyqChenWriteMessage::Abort("test interrupt".to_string()))
+            .expect("send abort");
+        drop(tx);
+
+        let error = write_cyq_chen_incremental_batches_from_channel(
+            cyq_chen_db.to_str().expect("utf8 db path"),
+            rx,
+            config,
+            "20260407",
+            "20260408",
+            "changed-strategy-hash".to_string(),
+        )
+        .expect_err("incremental write should abort");
+
+        assert!(error.contains("结果库已回滚"));
+        assert_eq!(snapshot_rows_for_compare(source_path), snapshots_before);
+        assert_eq!(bin_rows_for_compare(source_path), bins_before);
+        assert_eq!(meta_rows_for_compare(source_path), meta_before);
+
+        fs::remove_dir_all(source_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn interrupted_full_rebuild_rolls_back_data_meta_and_indexes() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+        let source_path = source_dir.to_str().expect("utf8 path");
+        let config = ChenChipConfig {
+            warmup_days: 1,
+            bucket_pct: 5.0,
+        };
+        rebuild_cyq_chen_all(source_path, config, Some("20260401"), Some("20260403"))
+            .expect("seed cyq chen");
+
+        let snapshots_before = snapshot_rows_for_compare(source_path);
+        let bins_before = bin_rows_for_compare(source_path);
+        let meta_before = meta_rows_for_compare(source_path);
+        let indexes_before = index_names_for_compare(source_path);
+        assert_eq!(indexes_before.len(), 4);
+
+        let cyq_chen_db = cyq_chen_db_path(source_path);
+        let (tx, rx) = sync_channel(1);
+        tx.send(CyqChenWriteMessage::Abort("test interrupt".to_string()))
+            .expect("send abort");
+        drop(tx);
+
+        let error = write_cyq_chen_batches_from_channel(
+            cyq_chen_db.to_str().expect("utf8 db path"),
+            rx,
+            config,
+            "changed-strategy-hash".to_string(),
+        )
+        .expect_err("full rebuild should abort");
+
+        assert!(error.contains("结果库已回滚"));
+        assert_eq!(snapshot_rows_for_compare(source_path), snapshots_before);
+        assert_eq!(bin_rows_for_compare(source_path), bins_before);
+        assert_eq!(meta_rows_for_compare(source_path), meta_before);
+        assert_eq!(index_names_for_compare(source_path), indexes_before);
+
+        fs::remove_dir_all(source_dir).expect("cleanup temp dir");
     }
 
     #[test]

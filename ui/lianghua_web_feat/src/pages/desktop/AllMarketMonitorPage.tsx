@@ -933,16 +933,6 @@ export default function AllMarketMonitorPage() {
   const displayRows = useMemo<DisplayRow[]>(() => {
     const filteredRows = rows
       .filter((row) => boardFilter === "全部" || row.board === boardFilter)
-      .filter((row) => {
-        if (primarySortKey !== "realtime_vol_ratio") {
-          return true;
-        }
-        return (
-          isFiniteNumber(volumeRatioThreshold) &&
-          isFiniteNumber(row.realtime_vol_ratio) &&
-          row.realtime_vol_ratio > volumeRatioThreshold
-        );
-      })
       .map((row) => ({
         ...row,
         speed_pct: speedMap.get(row.ts_code) ?? null,
@@ -998,7 +988,6 @@ export default function AllMarketMonitorPage() {
     sortKey,
     speedMap,
     topLimit,
-    volumeRatioThreshold,
   ]);
 
   const navigationItems = useMemo(

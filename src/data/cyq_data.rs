@@ -557,6 +557,7 @@ fn write_cyq_batches_from_channel(
     let mut snapshot_rows = 0usize;
     let mut bin_rows = 0usize;
     let mut batch_count = 0usize;
+    let mut abort_reason = None;
     {
         let mut snapshot_app = tx
             .appender(CYQ_SNAPSHOT_TABLE)
@@ -569,7 +570,8 @@ fn write_cyq_batches_from_channel(
             let batch = match message {
                 CyqWriteMessage::Batch(batch) => batch,
                 CyqWriteMessage::Abort(reason) => {
-                    return Err(format!("筹码计算中断，结果库回滚:{reason}"));
+                    abort_reason = Some(reason);
+                    break;
                 }
             };
 
@@ -589,12 +591,20 @@ fn write_cyq_batches_from_channel(
             }
         }
 
-        snapshot_app
-            .flush()
-            .map_err(|e| format!("刷新cyq_snapshot写入器失败:{e}"))?;
-        bin_app
-            .flush()
-            .map_err(|e| format!("刷新cyq_bin写入器失败:{e}"))?;
+        if abort_reason.is_none() {
+            snapshot_app
+                .flush()
+                .map_err(|e| format!("刷新cyq_snapshot写入器失败:{e}"))?;
+            bin_app
+                .flush()
+                .map_err(|e| format!("刷新cyq_bin写入器失败:{e}"))?;
+        }
+    }
+
+    if let Some(reason) = abort_reason {
+        tx.rollback()
+            .map_err(|e| format!("筹码计算中断且结果库回滚失败:{reason}; {e}"))?;
+        return Err(format!("筹码计算中断，结果库已回滚:{reason}"));
     }
 
     tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
@@ -626,6 +636,7 @@ fn write_cyq_incremental_batches_from_channel(
     let mut snapshot_rows = 0usize;
     let mut bin_rows = 0usize;
     let mut batch_count = 0usize;
+    let mut abort_reason = None;
     {
         let mut snapshot_app = tx
             .appender(CYQ_SNAPSHOT_TABLE)
@@ -638,7 +649,8 @@ fn write_cyq_incremental_batches_from_channel(
             let batch = match message {
                 CyqWriteMessage::Batch(batch) => batch,
                 CyqWriteMessage::Abort(reason) => {
-                    return Err(format!("筹码增量计算中断，结果库回滚:{reason}"));
+                    abort_reason = Some(reason);
+                    break;
                 }
             };
 
@@ -658,12 +670,20 @@ fn write_cyq_incremental_batches_from_channel(
             }
         }
 
-        snapshot_app
-            .flush()
-            .map_err(|e| format!("刷新cyq_snapshot写入器失败:{e}"))?;
-        bin_app
-            .flush()
-            .map_err(|e| format!("刷新cyq_bin写入器失败:{e}"))?;
+        if abort_reason.is_none() {
+            snapshot_app
+                .flush()
+                .map_err(|e| format!("刷新cyq_snapshot写入器失败:{e}"))?;
+            bin_app
+                .flush()
+                .map_err(|e| format!("刷新cyq_bin写入器失败:{e}"))?;
+        }
+    }
+
+    if let Some(reason) = abort_reason {
+        tx.rollback()
+            .map_err(|e| format!("筹码增量计算中断且结果库回滚失败:{reason}; {e}"))?;
+        return Err(format!("筹码增量计算中断，结果库已回滚:{reason}"));
     }
 
     tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
@@ -699,6 +719,7 @@ fn write_cyq_stock_repair_batches_from_channel(
     let mut snapshot_rows = 0usize;
     let mut bin_rows = 0usize;
     let mut batch_count = 0usize;
+    let mut abort_reason = None;
     {
         let mut snapshot_app = tx
             .appender(CYQ_SNAPSHOT_TABLE)
@@ -711,7 +732,8 @@ fn write_cyq_stock_repair_batches_from_channel(
             let batch = match message {
                 CyqWriteMessage::Batch(batch) => batch,
                 CyqWriteMessage::Abort(reason) => {
-                    return Err(format!("筹码局部修复中断，结果库回滚:{reason}"));
+                    abort_reason = Some(reason);
+                    break;
                 }
             };
 
@@ -731,12 +753,20 @@ fn write_cyq_stock_repair_batches_from_channel(
             }
         }
 
-        snapshot_app
-            .flush()
-            .map_err(|e| format!("刷新cyq_snapshot写入器失败:{e}"))?;
-        bin_app
-            .flush()
-            .map_err(|e| format!("刷新cyq_bin写入器失败:{e}"))?;
+        if abort_reason.is_none() {
+            snapshot_app
+                .flush()
+                .map_err(|e| format!("刷新cyq_snapshot写入器失败:{e}"))?;
+            bin_app
+                .flush()
+                .map_err(|e| format!("刷新cyq_bin写入器失败:{e}"))?;
+        }
+    }
+
+    if let Some(reason) = abort_reason {
+        tx.rollback()
+            .map_err(|e| format!("筹码局部修复中断且结果库回滚失败:{reason}; {e}"))?;
+        return Err(format!("筹码局部修复中断，结果库已回滚:{reason}"));
     }
 
     tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
