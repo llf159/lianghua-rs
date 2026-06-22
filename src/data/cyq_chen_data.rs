@@ -488,8 +488,11 @@ pub fn query_cyq_chen_strategy_maintenance_status(
     })
 }
 
-fn bucket_history_key(price_low: f64, price_high: f64) -> String {
-    format!("{price_low:.9}:{price_high:.9}")
+fn bucket_history_key(price_low: f64, price_high: f64) -> (u64, u64) {
+    (
+        round_chen_chip_value(price_low).to_bits(),
+        round_chen_chip_value(price_high).to_bits(),
+    )
 }
 
 fn load_cyq_chen_initial_state(

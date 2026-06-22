@@ -2086,6 +2086,43 @@ impl Value {
         }
     }
 
+    pub fn into_num_series(self, len: usize) -> Result<Vec<Option<f64>>, EvalErr> {
+        match self {
+            Value::Num(n) => Ok(vec![Some(n); len]),
+            Value::Bool(b) => Ok(vec![Some(if b { 1.0 } else { 0.0 }); len]),
+            Value::NumSeries(ns) => {
+                if ns.len() == len {
+                    Ok(ns)
+                } else {
+                    Err(EvalErr {
+                        msg: "数值序列长度不对".to_string(),
+                    })
+                }
+            }
+            Value::SharedNumSeries(ns) => {
+                if ns.len() == len {
+                    Ok(Arc::try_unwrap(ns).unwrap_or_else(|ns| ns.as_ref().clone()))
+                } else {
+                    Err(EvalErr {
+                        msg: "数值序列长度不对".to_string(),
+                    })
+                }
+            }
+            Value::BoolSeries(bs) => {
+                if bs.len() == len {
+                    Ok(bs
+                        .into_iter()
+                        .map(|b| Some(if b { 1.0 } else { 0.0 }))
+                        .collect())
+                } else {
+                    Err(EvalErr {
+                        msg: "布尔序列长度不对".to_string(),
+                    })
+                }
+            }
+        }
+    }
+
     pub fn as_bool_series(v: &Value, len: usize) -> Result<Vec<bool>, EvalErr> {
         match v {
             Value::Num(n) => Ok(vec![*n != 0.0; len]),
