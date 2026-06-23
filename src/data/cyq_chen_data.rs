@@ -1,12 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs::{create_dir_all, read_to_string},
+    fs::{self, create_dir_all, read_to_string},
     path::Path,
     sync::{
         Arc,
         mpsc::{Receiver, sync_channel},
     },
     thread,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use duckdb::{
@@ -44,6 +45,7 @@ const CYQ_CHEN_GROUP_SIZE: usize = 128;
 const CYQ_CHEN_GROUP_SIZE_INCREMENTAL: usize = 8;
 const CYQ_CHEN_QUEUE_BOUND: usize = 8;
 const CYQ_CHEN_FLUSH_BATCH_SIZE: usize = 32;
+const CYQ_CHEN_SCHEMA_VERSION: &str = "2";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CyqChenRebuildSummary {
@@ -119,8 +121,7 @@ pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
             percent_90_price_high DOUBLE,
             percent_90_concentration DOUBLE,
             main_profit_ratio DOUBLE,
-            main_trapped_ratio DOUBLE,
-            PRIMARY KEY (ts_code, trade_date, adj_type)
+            main_trapped_ratio DOUBLE
         )
         "#,
         [],
@@ -138,33 +139,12 @@ pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
             price_high DOUBLE,
             main_chip DOUBLE,
             retail_chip DOUBLE,
-            total_chip DOUBLE,
-            PRIMARY KEY (ts_code, trade_date, adj_type, bin_index)
+            total_chip DOUBLE
         )
         "#,
         [],
     )
     .map_err(|e| format!("创建cyq_chen_bin失败:{e}"))?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_cyq_chen_snapshot_trade_date ON cyq_chen_snapshot(trade_date, ts_code)",
-        [],
-    )
-    .map_err(|e| format!("创建cyq_chen_snapshot索引失败:{e}"))?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_cyq_chen_snapshot_stock_date ON cyq_chen_snapshot(ts_code, adj_type, trade_date)",
-        [],
-    )
-    .map_err(|e| format!("创建cyq_chen_snapshot股票日期索引失败:{e}"))?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_cyq_chen_bin_trade_date ON cyq_chen_bin(trade_date, ts_code, bin_index)",
-        [],
-    )
-    .map_err(|e| format!("创建cyq_chen_bin索引失败:{e}"))?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_cyq_chen_bin_stock_date ON cyq_chen_bin(ts_code, adj_type, trade_date, bin_index)",
-        [],
-    )
-    .map_err(|e| format!("创建cyq_chen_bin股票日期索引失败:{e}"))?;
     conn.execute(
         r#"
         CREATE TABLE IF NOT EXISTS cyq_chen_meta (
@@ -177,44 +157,119 @@ pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
     .map_err(|e| format!("创建cyq_chen_meta失败:{e}"))?;
 
     ensure_cyq_chen_snapshot_columns(&conn)?;
+    ensure_cyq_chen_snapshot_index(&conn)?;
 
     Ok(())
 }
 
 fn drop_cyq_chen_db_indexes(conn: &Connection) -> Result<(), String> {
-    conn.execute("DROP INDEX IF EXISTS idx_cyq_chen_snapshot_trade_date", [])
-        .map_err(|e| format!("删除cyq_chen_snapshot索引失败:{e}"))?;
     conn.execute("DROP INDEX IF EXISTS idx_cyq_chen_snapshot_stock_date", [])
         .map_err(|e| format!("删除cyq_chen_snapshot股票日期索引失败:{e}"))?;
-    conn.execute("DROP INDEX IF EXISTS idx_cyq_chen_bin_trade_date", [])
-        .map_err(|e| format!("删除cyq_chen_bin索引失败:{e}"))?;
-    conn.execute("DROP INDEX IF EXISTS idx_cyq_chen_bin_stock_date", [])
-        .map_err(|e| format!("删除cyq_chen_bin股票日期索引失败:{e}"))?;
     Ok(())
 }
 
 fn ensure_cyq_chen_db_indexes(conn: &Connection) -> Result<(), String> {
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_cyq_chen_snapshot_trade_date ON cyq_chen_snapshot(trade_date, ts_code)",
-        [],
-    )
-    .map_err(|e| format!("创建cyq_chen_snapshot索引失败:{e}"))?;
+    ensure_cyq_chen_snapshot_index(conn)
+}
+
+fn ensure_cyq_chen_snapshot_index(conn: &Connection) -> Result<(), String> {
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_cyq_chen_snapshot_stock_date ON cyq_chen_snapshot(ts_code, adj_type, trade_date)",
         [],
     )
     .map_err(|e| format!("创建cyq_chen_snapshot股票日期索引失败:{e}"))?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_cyq_chen_bin_trade_date ON cyq_chen_bin(trade_date, ts_code, bin_index)",
-        [],
-    )
-    .map_err(|e| format!("创建cyq_chen_bin索引失败:{e}"))?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_cyq_chen_bin_stock_date ON cyq_chen_bin(ts_code, adj_type, trade_date, bin_index)",
-        [],
-    )
-    .map_err(|e| format!("创建cyq_chen_bin股票日期索引失败:{e}"))?;
     Ok(())
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    value.into()
+}
+
+fn remove_cyq_chen_db_artifacts(db_path: &Path) {
+    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(path_with_suffix(db_path, ".wal"));
+    let _ = fs::remove_dir_all(path_with_suffix(db_path, ".tmp"));
+}
+
+fn cyq_chen_rebuild_temp_path(db_path: &Path) -> Result<std::path::PathBuf, String> {
+    let parent = db_path
+        .parent()
+        .ok_or_else(|| format!("新筹码库路径缺少父目录: {}", db_path.display()))?;
+    let file_name = db_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("新筹码库文件名不是有效UTF-8: {}", db_path.display()))?;
+    let unique_suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    Ok(parent.join(format!(
+        ".{file_name}.rebuild-{}-{unique_suffix}.tmp",
+        std::process::id()
+    )))
+}
+
+fn checkpoint_cyq_chen_db_if_exists(db_path: &Path) -> Result<(), String> {
+    if !db_path.exists() {
+        return Ok(());
+    }
+    let conn = Connection::open(db_path)
+        .map_err(|e| format!("替换前打开旧新筹码库失败, path={}: {e}", db_path.display()))?;
+    conn.execute_batch("CHECKPOINT").map_err(|e| {
+        format!(
+            "替换前检查点旧新筹码库失败, path={}: {e}",
+            db_path.display()
+        )
+    })
+}
+
+#[cfg(unix)]
+fn replace_cyq_chen_db(temp_path: &Path, db_path: &Path) -> Result<(), String> {
+    checkpoint_cyq_chen_db_if_exists(db_path)?;
+    let _ = fs::remove_file(path_with_suffix(db_path, ".wal"));
+    fs::rename(temp_path, db_path).map_err(|e| {
+        format!(
+            "替换新筹码库失败, temp={}, target={}: {e}",
+            temp_path.display(),
+            db_path.display()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn replace_cyq_chen_db(temp_path: &Path, db_path: &Path) -> Result<(), String> {
+    checkpoint_cyq_chen_db_if_exists(db_path)?;
+    let backup_path = path_with_suffix(db_path, ".replace-backup");
+    remove_cyq_chen_db_artifacts(&backup_path);
+
+    if db_path.exists() {
+        fs::rename(db_path, &backup_path).map_err(|e| {
+            format!(
+                "备份旧新筹码库失败, source={}, backup={}: {e}",
+                db_path.display(),
+                backup_path.display()
+            )
+        })?;
+    }
+
+    match fs::rename(temp_path, db_path) {
+        Ok(()) => {
+            remove_cyq_chen_db_artifacts(&backup_path);
+            Ok(())
+        }
+        Err(error) => {
+            if backup_path.exists() {
+                let _ = fs::rename(&backup_path, db_path);
+            }
+            Err(format!(
+                "替换新筹码库失败, temp={}, target={}: {error}",
+                temp_path.display(),
+                db_path.display()
+            ))
+        }
+    }
 }
 
 fn ensure_cyq_chen_snapshot_columns(conn: &Connection) -> Result<(), String> {
@@ -317,7 +372,7 @@ fn write_cyq_chen_meta(
     tx.execute(&format!("DELETE FROM {CYQ_CHEN_META_TABLE}"), [])
         .map_err(|e| format!("清空cyq_chen_meta失败:{e}"))?;
     for (key, value) in [
-        ("schema_version", "1".to_string()),
+        ("schema_version", CYQ_CHEN_SCHEMA_VERSION.to_string()),
         ("warmup_days", config.warmup_days.to_string()),
         (
             "bucket_pct",
@@ -1355,6 +1410,8 @@ fn write_cyq_chen_batches_from_channel(
     write_cyq_chen_meta(&tx, config, &strategy_hash)?;
     tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
     ensure_cyq_chen_db_indexes(&conn)?;
+    conn.execute_batch("CHECKPOINT")
+        .map_err(|e| format!("检查点新筹码库失败:{e}"))?;
     Ok((snapshot_rows, bin_rows))
 }
 
@@ -1606,10 +1663,9 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
         .unwrap_or_default();
     let chip_config = load_compiled_chip_change_config(source_dir)?;
     let strategy_hash = current_chip_change_strategy_hash(source_dir)?;
-    if latest_metadata.is_some()
-        && query_cyq_chen_meta_value(&cyq_chen_db, "strategy_hash")?.as_deref()
-            != Some(strategy_hash.as_str())
-    {
+    let strategy_changed = query_cyq_chen_meta_value(&cyq_chen_db, "strategy_hash")?.as_deref()
+        != Some(strategy_hash.as_str());
+    if latest_metadata.is_some() && strategy_changed {
         if !allow_strategy_rebuild {
             return Ok(Some(CyqChenRebuildSummary {
                 snapshot_rows: 0,
@@ -2109,10 +2165,18 @@ pub fn rebuild_cyq_chen_all_with_progress(
     let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
     let reader = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
     let ts_codes = reader.list_ts_code(DEFAULT_ADJ_TYPE, &load_start_date, &end_date)?;
-    let cyq_chen_db_str = cyq_chen_db
-        .to_str()
-        .ok_or_else(|| "筹码库路径不是有效UTF-8".to_string())?
-        .to_string();
+    let rebuild_db = cyq_chen_rebuild_temp_path(&cyq_chen_db)?;
+    remove_cyq_chen_db_artifacts(&rebuild_db);
+    init_cyq_chen_db(&rebuild_db).inspect_err(|_| {
+        remove_cyq_chen_db_artifacts(&rebuild_db);
+    })?;
+    let rebuild_db_str = match rebuild_db.to_str() {
+        Some(path) => path.to_string(),
+        None => {
+            remove_cyq_chen_db_artifacts(&rebuild_db);
+            return Err("新筹码临时库路径不是有效UTF-8".to_string());
+        }
+    };
     if let Some(progress_cb) = progress_cb {
         progress_cb(DownloadProgress {
             phase: "compute_cyq_chen".to_string(),
@@ -2131,7 +2195,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
     let (tx, rx) = sync_channel(CYQ_CHEN_QUEUE_BOUND);
     let abort_tx = tx.clone();
     let writer_handle = thread::spawn(move || {
-        write_cyq_chen_batches_from_channel(&cyq_chen_db_str, rx, config, strategy_hash)
+        write_cyq_chen_batches_from_channel(&rebuild_db_str, rx, config, strategy_hash)
     });
 
     let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
@@ -2186,8 +2250,21 @@ pub fn rebuild_cyq_chen_all_with_progress(
         Err(_) => Err("筹码库写线程异常退出".to_string()),
     };
 
-    compute_result?;
-    let (snapshot_rows, bin_rows) = writer_result?;
+    let write_rows = match (compute_result, writer_result) {
+        (Ok(()), Ok(rows)) => Ok(rows),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    };
+    let (snapshot_rows, bin_rows) = match write_rows {
+        Ok(rows) => rows,
+        Err(error) => {
+            remove_cyq_chen_db_artifacts(&rebuild_db);
+            return Err(error);
+        }
+    };
+    if let Err(error) = replace_cyq_chen_db(&rebuild_db, &cyq_chen_db) {
+        remove_cyq_chen_db_artifacts(&rebuild_db);
+        return Err(error);
+    }
     if let Some(progress_cb) = progress_cb {
         progress_cb(DownloadProgress {
             phase: "done".to_string(),
@@ -2220,7 +2297,7 @@ mod tests {
     use duckdb::{Connection, params};
 
     use super::{
-        CYQ_CHEN_BIN_TABLE, CYQ_CHEN_SNAPSHOT_TABLE, CyqChenWriteMessage,
+        CYQ_CHEN_BIN_TABLE, CYQ_CHEN_SCHEMA_VERSION, CYQ_CHEN_SNAPSHOT_TABLE, CyqChenWriteMessage,
         maintain_cyq_chen_incremental_if_db_exists, query_cyq_chen_strategy_maintenance_status,
         rebuild_cyq_chen_all, write_cyq_chen_batches_from_channel,
         write_cyq_chen_incremental_batches_from_channel,
@@ -2433,6 +2510,35 @@ bias = 1.0
         out
     }
 
+    fn data_table_primary_key_count(source_path: &str) -> i64 {
+        let cyq_chen_db = cyq_chen_db_path(source_path);
+        let conn = Connection::open(&cyq_chen_db).expect("open cyq chen db");
+        conn.query_row(
+            r#"
+            SELECT COUNT(*)
+            FROM duckdb_constraints()
+            WHERE table_name IN ('cyq_chen_snapshot', 'cyq_chen_bin')
+              AND constraint_type = 'PRIMARY KEY'
+            "#,
+            [],
+            |row| row.get(0),
+        )
+        .expect("count data table primary keys")
+    }
+
+    fn rebuild_temp_file_count(source_dir: &Path) -> usize {
+        fs::read_dir(source_dir)
+            .expect("read source dir")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".cyq_chen.db.rebuild-")
+            })
+            .count()
+    }
+
     #[test]
     fn rebuild_cyq_chen_all_writes_snapshot_and_bin_rows() {
         let source_dir = unique_temp_source_dir();
@@ -2473,6 +2579,19 @@ bias = 1.0
             .expect("count bin rows");
         assert_eq!(snapshot_rows, 3);
         assert_eq!(bin_rows as usize, summary.bin_rows);
+        assert_eq!(
+            index_names_for_compare(source_path),
+            vec!["idx_cyq_chen_snapshot_stock_date".to_string()]
+        );
+        assert_eq!(data_table_primary_key_count(source_path), 0);
+        assert_eq!(
+            meta_rows_for_compare(source_path)
+                .into_iter()
+                .find(|(key, _)| key == "schema_version")
+                .map(|(_, value)| value),
+            Some(CYQ_CHEN_SCHEMA_VERSION.to_string())
+        );
+        assert_eq!(rebuild_temp_file_count(&source_dir), 0);
 
         let first_trade_date = conn
             .query_row(
@@ -2670,7 +2789,10 @@ bias = 1.0
         let bins_before = bin_rows_for_compare(source_path);
         let meta_before = meta_rows_for_compare(source_path);
         let indexes_before = index_names_for_compare(source_path);
-        assert_eq!(indexes_before.len(), 4);
+        assert_eq!(
+            indexes_before,
+            vec!["idx_cyq_chen_snapshot_stock_date".to_string()]
+        );
 
         let cyq_chen_db = cyq_chen_db_path(source_path);
         let (tx, rx) = sync_channel(1);
