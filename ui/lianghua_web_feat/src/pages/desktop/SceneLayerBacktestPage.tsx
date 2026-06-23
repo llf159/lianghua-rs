@@ -54,6 +54,7 @@ type RuleSummarySortKey =
   | "point_count"
   | "profit_loss_ratio"
   | "avg_excess_residual_mean"
+  | "avg_er_change"
   | "avg_contribution_score"
   | "avg_contribution_per_trigger"
   | "ic_mean"
@@ -69,6 +70,7 @@ type ValidationComboSortKey =
   | "spread_mean"
   | "profit_loss_ratio"
   | "avg_excess_residual_mean"
+  | "avg_er_change"
   | "ic_mean"
   | "ic_t_value"
   | "icir";
@@ -982,6 +984,9 @@ export default function SceneLayerBacktestPage() {
         avg_excess_residual_mean: {
           value: (row: RuleLayerRuleSummary) => row.avg_excess_residual_mean,
         },
+        avg_er_change: {
+          value: (row: RuleLayerRuleSummary) => row.avg_er_change,
+        },
         avg_contribution_score: {
           value: (row: RuleLayerRuleSummary) => row.avg_contribution_score,
         },
@@ -1043,6 +1048,9 @@ export default function SceneLayerBacktestPage() {
         },
         avg_excess_residual_mean: {
           value: (row: RuleValidationComboResult) => row.backtest.avg_excess_residual_mean,
+        },
+        avg_er_change: {
+          value: (row: RuleValidationComboResult) => row.backtest.avg_er_change,
         },
         ic_mean: {
           value: (row: RuleValidationComboResult) => row.backtest.ic_mean,
@@ -1758,6 +1766,7 @@ export default function SceneLayerBacktestPage() {
           (item) => item.layer_index === group.layer_index,
         )?.avg_residual_return,
         avg_excess_residual_mean: null,
+        avg_er_change: null,
         profit_loss_ratio: null,
         spread_mean: rankBacktest.spread_mean,
         avg_contribution_score: null,
@@ -2158,6 +2167,7 @@ export default function SceneLayerBacktestPage() {
                   <thead>
                     <tr>
                       <th>分层差均值（日度高分层-低分层）</th>
+                      <th title="收益统计区间最后一天 ER(20) 减触发日 ER(20)">ΔER(20)</th>
                       <th>IC 均值</th>
                       <th>IC t值</th>
                       <th>ICIR</th>
@@ -2166,6 +2176,7 @@ export default function SceneLayerBacktestPage() {
                   <tbody>
                     <tr>
                       <td>{formatPercent(rankResult.spread_mean)}</td>
+                      <td>{formatNumber(rankResult.avg_er_change, 4)}</td>
                       <td className={metricHighlightClass("ic", rankResult.ic_mean)}>{formatNumber(rankResult.ic_mean)}</td>
                       <td className={metricHighlightClass("t", rankResult.ic_t_value)}>{formatNumber(rankResult.ic_t_value)}</td>
                       <td className={metricHighlightClass("ir", rankResult.icir)}>{formatNumber(rankResult.icir)}</td>
@@ -2190,6 +2201,7 @@ export default function SceneLayerBacktestPage() {
                       <th>分层样本数</th>
                       <th>分层均分</th>
                       <th>层级收益（日度残差均值）</th>
+                      <th title="收益统计区间最后一天 ER(20) 减触发日 ER(20)">ΔER(20)</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2216,6 +2228,7 @@ export default function SceneLayerBacktestPage() {
                           <td>{item.sample_count}</td>
                           <td>{formatNumber(item.avg_score, 4)}</td>
                           <td>{formatPercent(item.avg_residual_return)}</td>
+                          <td>{formatNumber(item.avg_er_change, 4)}</td>
                         </tr>
                       );
                     })}
@@ -2235,6 +2248,7 @@ export default function SceneLayerBacktestPage() {
                       <th>市值分组</th>
                       <th>有效交易日</th>
                       <th>总样本数</th>
+                      <th title="收益统计区间最后一天 ER(20) 减触发日 ER(20)">ΔER(20)</th>
                       <th>分层差均值</th>
                       <th>IC 均值</th>
                       <th>IC t值</th>
@@ -2247,6 +2261,7 @@ export default function SceneLayerBacktestPage() {
                         <td>{item.group_label}</td>
                         <td>{item.point_count}</td>
                         <td>{item.sample_count}</td>
+                        <td>{formatNumber(item.avg_er_change, 4)}</td>
                         <td>{formatPercent(item.spread_mean)}</td>
                         <td className={metricHighlightClass("ic", item.ic_mean)}>{formatNumber(item.ic_mean)}</td>
                         <td className={metricHighlightClass("t", item.ic_t_value)}>{formatNumber(item.ic_t_value)}</td>
@@ -2414,6 +2429,7 @@ export default function SceneLayerBacktestPage() {
                     <th>平均单次贡献</th>
                     <th>盈亏比</th>
                     <th>超额残差（日度）</th>
+                    <th title="收益统计区间最后一天 ER(20) 减触发日 ER(20)">ΔER(20)</th>
                     <th>IC 均值</th>
                     <th>IC t值</th>
                     <th>ICIR</th>
@@ -2437,6 +2453,7 @@ export default function SceneLayerBacktestPage() {
                     <td className={residualMetricHighlightClass(ruleResult.avg_excess_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}>
                       {renderResidualMetric(ruleResult.avg_excess_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}
                     </td>
+                    <td>{formatNumber(ruleResult.avg_er_change, 4)}</td>
                     <td className={metricHighlightClass("ic", ruleResult.ic_mean)}>{formatNumber(ruleResult.ic_mean)}</td>
                     <td className={metricHighlightClass("t", ruleResult.ic_t_value)}>{formatNumber(ruleResult.ic_t_value)}</td>
                     <td className={metricHighlightClass("ir", ruleResult.icir)}>{formatNumber(ruleResult.icir)}</td>
@@ -2511,6 +2528,15 @@ export default function SceneLayerBacktestPage() {
                           title="按超额残差排序"
                         />
                       </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "avg_er_change", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="ΔER(20)"
+                          isActive={ruleSummarySortKey === "avg_er_change" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("avg_er_change")}
+                          title="按 ER(20) 区间变动均值排序"
+                        />
+                      </th>
                       <th aria-sort={getAriaSort(ruleSummarySortKey === "ic_mean", ruleSummarySortDirection)}>
                         <TableSortButton
                           label="IC 均值"
@@ -2559,6 +2585,7 @@ export default function SceneLayerBacktestPage() {
                         <td className={residualMetricHighlightClass(item.avg_excess_residual_mean, resolveResidualDirection(item.avg_contribution_score))}>
                           {renderResidualMetric(item.avg_excess_residual_mean, resolveResidualDirection(item.avg_contribution_score))}
                         </td>
+                        <td>{formatNumber(item.avg_er_change, 4)}</td>
                         <td className={metricHighlightClass("ic", item.ic_mean)}>{formatNumber(item.ic_mean)}</td>
                         <td className={metricHighlightClass("t", item.ic_t_value)}>{formatNumber(item.ic_t_value)}</td>
                         <td className={metricHighlightClass("ir", item.icir)}>{formatNumber(item.icir)}</td>
@@ -2827,6 +2854,7 @@ export default function SceneLayerBacktestPage() {
                     {renderValidationComboSortHeader("spread_mean", "分层差均值（按得分值）")}
                     {renderValidationComboSortHeader("profit_loss_ratio", "盈亏比")}
                     {renderValidationComboSortHeader("avg_excess_residual_mean", "超额残差（日度）")}
+                    {renderValidationComboSortHeader("avg_er_change", "ΔER(20)")}
                     {renderValidationComboSortHeader("ic_mean", "IC 均值")}
                     {renderValidationComboSortHeader("ic_t_value", "IC t值")}
                     {renderValidationComboSortHeader("icir", "ICIR")}
@@ -2881,6 +2909,7 @@ export default function SceneLayerBacktestPage() {
                         <td className={residualMetricHighlightClass(item.backtest.avg_excess_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}>
                           {renderResidualMetric(item.backtest.avg_excess_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}
                         </td>
+                        <td>{formatNumber(item.backtest.avg_er_change, 4)}</td>
                         <td className={metricHighlightClass("ic", item.backtest.ic_mean)}>{formatNumber(item.backtest.ic_mean)}</td>
                         <td className={metricHighlightClass("t", item.backtest.ic_t_value)}>{formatNumber(item.backtest.ic_t_value)}</td>
                         <td className={metricHighlightClass("ir", item.backtest.icir)}>{formatNumber(item.backtest.icir)}</td>

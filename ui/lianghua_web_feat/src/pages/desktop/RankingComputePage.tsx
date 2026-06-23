@@ -1633,6 +1633,7 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
                   <span>{indicatorExists ? '当前文件已存在' : '当前文件不存在，将在保存时创建'}</span>
                   <span>当前共 {indicatorItems.length} 个指标，保存前会做语法和字段校验</span>
                   <span>J 用于排名同分排序，不能删。</span>
+                  <span>ER 默认用于回测区间变动统计，可按需删除。</span>
                 </div>
 
                 <div className="data-download-indicator-toolbar">

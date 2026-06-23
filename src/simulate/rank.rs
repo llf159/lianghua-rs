@@ -152,6 +152,7 @@ pub struct RankLayerSummaryBucket {
     pub sample_count: usize,
     pub avg_score: Option<f64>,
     pub avg_residual_return: Option<f64>,
+    pub avg_er_change: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -161,6 +162,7 @@ pub struct RankLayerSamplePoint {
     pub trade_date: String,
     pub score: f64,
     pub residual_return: f64,
+    pub er_change: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -168,6 +170,7 @@ pub struct RankLayerMetrics {
     pub points: Vec<RankLayerPoint>,
     pub point_count: usize,
     pub sample_count: usize,
+    pub avg_er_change: Option<f64>,
     pub spread_mean: Option<f64>,
     pub ic_mean: Option<f64>,
     pub ic_std: Option<f64>,
@@ -266,6 +269,7 @@ pub fn calc_rank_layer_metrics_from_rank_samples(
             trade_date: sample.trade_date.clone(),
             rule_score: sample.score,
             residual_return: sample.residual_return,
+            er_change: sample.er_change,
         })
         .collect::<Vec<_>>();
     let (_, rank_lookup) = build_score_summary_data_from_rows(
@@ -361,9 +365,28 @@ fn calc_rank_layer_metrics_with_lookup(
         _ => None,
     };
 
+    let mut er_change_sum = 0.0;
+    let mut er_change_count = 0usize;
+    let mut layer_er_change_sums = vec![0.0_f64; layer_count];
+    let mut layer_er_change_counts = vec![0usize; layer_count];
+    for sample in &layer_samples {
+        let er_change = sample.er_change;
+        if !er_change.is_finite() {
+            continue;
+        }
+        er_change_sum += er_change;
+        er_change_count += 1;
+        let layer_index = sample.layer_index.saturating_sub(1);
+        if layer_index < layer_count {
+            layer_er_change_sums[layer_index] += er_change;
+            layer_er_change_counts[layer_index] += 1;
+        }
+    }
+
     Ok(RankLayerMetrics {
         point_count: points.len(),
         sample_count: total_sample_count,
+        avg_er_change: (er_change_count > 0).then_some(er_change_sum / er_change_count as f64),
         spread_mean: mean(&spread_values),
         ic_mean,
         ic_std,
@@ -384,6 +407,11 @@ fn calc_rank_layer_metrics_with_lookup(
                     None
                 } else {
                     Some(layer_day_return_sums[index] / layer_day_return_counts[index] as f64)
+                },
+                avg_er_change: if layer_er_change_counts[index] == 0 {
+                    None
+                } else {
+                    Some(layer_er_change_sums[index] / layer_er_change_counts[index] as f64)
                 },
             })
             .collect(),
@@ -453,6 +481,7 @@ fn calc_rank_layer_day(
                 trade_date: trade_date.to_string(),
                 score: sample.rule_score,
                 residual_return: sample.residual_return,
+                er_change: sample.er_change,
             });
         }
 
@@ -861,30 +890,35 @@ mod tests {
                 trade_date: "20240102".to_string(),
                 rule_score: 1.0,
                 residual_return: 10.0,
+                er_change: 0.1,
             },
             RuleLayerSamplePoint {
                 ts_code: "000002.SZ".to_string(),
                 trade_date: "20240102".to_string(),
                 rule_score: 2.0,
                 residual_return: 20.0,
+                er_change: 0.2,
             },
             RuleLayerSamplePoint {
                 ts_code: "000003.SZ".to_string(),
                 trade_date: "20240102".to_string(),
                 rule_score: 3.0,
                 residual_return: 30.0,
+                er_change: 0.3,
             },
             RuleLayerSamplePoint {
                 ts_code: "000004.SZ".to_string(),
                 trade_date: "20240102".to_string(),
                 rule_score: 4.0,
                 residual_return: 40.0,
+                er_change: 0.4,
             },
             RuleLayerSamplePoint {
                 ts_code: "000005.SZ".to_string(),
                 trade_date: "20240102".to_string(),
                 rule_score: 5.0,
                 residual_return: 50.0,
+                er_change: 0.5,
             },
         ];
 
@@ -902,13 +936,16 @@ mod tests {
 
         assert_eq!(metrics.point_count, 1);
         assert_eq!(metrics.sample_count, 5);
+        assert_opt_close(metrics.avg_er_change, Some(0.3));
         assert_opt_close(metrics.spread_mean, Some(40.0));
         assert_opt_close(metrics.ic_mean, Some(1.0));
         assert_eq!(metrics.layers.len(), 5);
         assert_eq!(metrics.layers[0].sample_count, 1);
         assert_opt_close(metrics.layers[0].avg_residual_return, Some(10.0));
+        assert_opt_close(metrics.layers[0].avg_er_change, Some(0.1));
         assert_eq!(metrics.layers[4].sample_count, 1);
         assert_opt_close(metrics.layers[4].avg_residual_return, Some(50.0));
+        assert_opt_close(metrics.layers[4].avg_er_change, Some(0.5));
     }
 
     #[test]
@@ -919,24 +956,28 @@ mod tests {
                 trade_date: "20240102".to_string(),
                 rule_score: 0.0,
                 residual_return: 10.0,
+                er_change: f64::INFINITY,
             },
             RuleLayerSamplePoint {
                 ts_code: "000002.SZ".to_string(),
                 trade_date: "20240102".to_string(),
                 rule_score: 10.0,
                 residual_return: 20.0,
+                er_change: f64::INFINITY,
             },
             RuleLayerSamplePoint {
                 ts_code: "000003.SZ".to_string(),
                 trade_date: "20240102".to_string(),
                 rule_score: 20.0,
                 residual_return: 30.0,
+                er_change: f64::INFINITY,
             },
             RuleLayerSamplePoint {
                 ts_code: "000004.SZ".to_string(),
                 trade_date: "20240102".to_string(),
                 rule_score: 30.0,
                 residual_return: 40.0,
+                er_change: f64::INFINITY,
             },
         ];
 
@@ -969,24 +1010,28 @@ mod tests {
                 trade_date: "20240102".to_string(),
                 rule_score: 10.0,
                 residual_return: 1.0,
+                er_change: f64::INFINITY,
             },
             RuleLayerSamplePoint {
                 ts_code: "000002.SZ".to_string(),
                 trade_date: "20240102".to_string(),
                 rule_score: 20.0,
                 residual_return: 2.0,
+                er_change: f64::INFINITY,
             },
             RuleLayerSamplePoint {
                 ts_code: "000003.SZ".to_string(),
                 trade_date: "20240102".to_string(),
                 rule_score: 30.0,
                 residual_return: 3.0,
+                er_change: f64::INFINITY,
             },
             RuleLayerSamplePoint {
                 ts_code: "000004.SZ".to_string(),
                 trade_date: "20240102".to_string(),
                 rule_score: 40.0,
                 residual_return: 4.0,
+                er_change: f64::INFINITY,
             },
         ];
 
@@ -1018,6 +1063,7 @@ mod tests {
                 trade_date: "20240102".to_string(),
                 rule_score: 10.0,
                 residual_return: index as f64,
+                er_change: f64::INFINITY,
             })
             .collect::<Vec<_>>();
         let rank_lookup = RankLayerLookup {
@@ -1069,24 +1115,28 @@ mod tests {
                 trade_date: "20240102".to_string(),
                 rule_score: 10.0,
                 residual_return: 1.0,
+                er_change: f64::INFINITY,
             },
             RuleLayerSamplePoint {
                 ts_code: "000002.SZ".to_string(),
                 trade_date: "20240102".to_string(),
                 rule_score: 20.0,
                 residual_return: 2.0,
+                er_change: f64::INFINITY,
             },
             RuleLayerSamplePoint {
                 ts_code: "000003.SZ".to_string(),
                 trade_date: "20240102".to_string(),
                 rule_score: 30.0,
                 residual_return: 3.0,
+                er_change: f64::INFINITY,
             },
             RuleLayerSamplePoint {
                 ts_code: "000004.SZ".to_string(),
                 trade_date: "20240102".to_string(),
                 rule_score: 40.0,
                 residual_return: 4.0,
+                er_change: f64::INFINITY,
             },
         ];
         let stale_lookup = RankLayerLookup {

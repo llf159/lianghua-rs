@@ -265,6 +265,9 @@ pub struct RuleLayerRuleSummary {
     pub point_count: usize,
     pub avg_residual_mean: Option<f64>,
     pub avg_excess_residual_mean: Option<f64>,
+    pub avg_er_change: Option<f64>,
+    #[serde(skip)]
+    pub er_change_sample_count: usize,
     pub profit_loss_ratio: Option<f64>,
     pub spread_mean: Option<f64>,
     pub avg_contribution_score: Option<f64>,
@@ -295,6 +298,7 @@ pub struct RuleLayerBacktestData {
     pub points: Vec<RuleLayerPointPayload>,
     pub avg_residual_mean: Option<f64>,
     pub avg_excess_residual_mean: Option<f64>,
+    pub avg_er_change: Option<f64>,
     pub profit_loss_ratio: Option<f64>,
     pub spread_mean: Option<f64>,
     pub avg_contribution_score: Option<f64>,
@@ -328,6 +332,7 @@ pub struct RankLayerBucketSummary {
     pub sample_count: usize,
     pub avg_score: Option<f64>,
     pub avg_residual_return: Option<f64>,
+    pub avg_er_change: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -364,6 +369,7 @@ pub struct RankLayerBacktestData {
     pub layer_method_label: String,
     pub point_count: usize,
     pub sample_count: usize,
+    pub avg_er_change: Option<f64>,
     pub spread_mean: Option<f64>,
     pub ic_mean: Option<f64>,
     pub ic_std: Option<f64>,
@@ -381,6 +387,7 @@ pub struct RankLayerMarketValueSummary {
     pub total_mv_max: Option<f64>,
     pub point_count: usize,
     pub sample_count: usize,
+    pub avg_er_change: Option<f64>,
     pub spread_mean: Option<f64>,
     pub ic_mean: Option<f64>,
     pub ic_t_value: Option<f64>,
@@ -2585,6 +2592,7 @@ fn build_validation_score_layer_details(
                 } else {
                     Some(item.residual_sum / item.point_count as f64)
                 },
+                avg_er_change: None,
             })
             .collect(),
     }
@@ -2686,6 +2694,7 @@ fn build_rule_backtest_payload(
         points: Vec::new(),
         avg_residual_mean: metrics.avg_residual_mean,
         avg_excess_residual_mean: metrics.avg_excess_residual_mean,
+        avg_er_change: metrics.avg_er_change,
         profit_loss_ratio: metrics.profit_loss_ratio,
         spread_mean,
         avg_contribution_score: None,
@@ -5374,9 +5383,32 @@ fn weighted_rule_summary_metric(
     }
 }
 
+fn aggregate_rule_er_change(summaries: &[RuleLayerRuleSummary]) -> Option<f64> {
+    let mut weighted_sum = 0.0;
+    let mut total_weight = 0usize;
+
+    for summary in summaries {
+        let Some(avg_er_change) = summary.avg_er_change.filter(|value| value.is_finite()) else {
+            continue;
+        };
+        if summary.er_change_sample_count == 0 {
+            continue;
+        }
+        weighted_sum += avg_er_change * summary.er_change_sample_count as f64;
+        total_weight += summary.er_change_sample_count;
+    }
+
+    if total_weight == 0 {
+        None
+    } else {
+        Some(weighted_sum / total_weight as f64)
+    }
+}
+
 fn aggregate_all_rule_summary_metrics(
     summaries: &[RuleLayerRuleSummary],
 ) -> (
+    Option<f64>,
     Option<f64>,
     Option<f64>,
     Option<f64>,
@@ -5389,6 +5421,7 @@ fn aggregate_all_rule_summary_metrics(
     let avg_residual_mean = weighted_rule_summary_metric(summaries, |item| item.avg_residual_mean);
     let avg_excess_residual_mean =
         weighted_rule_summary_metric(summaries, |item| item.avg_excess_residual_mean);
+    let avg_er_change = aggregate_rule_er_change(summaries);
     let profit_loss_ratio = weighted_rule_summary_metric(summaries, |item| item.profit_loss_ratio);
     let spread_mean = weighted_rule_summary_metric(summaries, |item| item.spread_mean);
     let ic_mean = weighted_rule_summary_metric(summaries, |item| item.ic_mean);
@@ -5408,6 +5441,7 @@ fn aggregate_all_rule_summary_metrics(
     (
         avg_residual_mean,
         avg_excess_residual_mean,
+        avg_er_change,
         profit_loss_ratio,
         spread_mean,
         ic_mean,
@@ -5632,6 +5666,7 @@ fn run_rule_layer_backtest_core(
                 .collect(),
             avg_residual_mean: metrics.avg_residual_mean,
             avg_excess_residual_mean: metrics.avg_excess_residual_mean,
+            avg_er_change: metrics.avg_er_change,
             profit_loss_ratio: metrics.profit_loss_ratio,
             spread_mean: None,
             avg_contribution_score: None,
@@ -5727,6 +5762,7 @@ fn run_rule_layer_backtest_core(
     let (
         avg_residual_mean,
         avg_excess_residual_mean,
+        avg_er_change,
         profit_loss_ratio,
         _spread_mean,
         ic_mean,
@@ -5754,6 +5790,7 @@ fn run_rule_layer_backtest_core(
         points: Vec::new(),
         avg_residual_mean,
         avg_excess_residual_mean,
+        avg_er_change,
         profit_loss_ratio,
         spread_mean: None,
         avg_contribution_score: weighted_rule_summary_metric(&all_rule_summaries, |item| {
@@ -5797,6 +5834,8 @@ fn build_one_rule_backtest_summary_and_detail(
         point_count: metrics.points.len(),
         avg_residual_mean: metrics.avg_residual_mean,
         avg_excess_residual_mean: metrics.avg_excess_residual_mean,
+        avg_er_change: metrics.avg_er_change,
+        er_change_sample_count: metrics.er_change_sample_count,
         profit_loss_ratio: metrics.profit_loss_ratio,
         spread_mean: None,
         avg_contribution_score: contribution_average.avg_contribution_score,
@@ -5942,6 +5981,7 @@ fn build_rank_market_value_summaries(
             total_mv_max,
             point_count: metrics.point_count,
             sample_count: metrics.sample_count,
+            avg_er_change: metrics.avg_er_change,
             spread_mean: metrics.spread_mean,
             ic_mean: metrics.ic_mean,
             ic_t_value: metrics.ic_t_value,
@@ -6014,6 +6054,7 @@ fn run_rank_layer_backtest_core(
         layer_method_label: rank_layer_method_label(input.layer_config.layer_method).to_string(),
         point_count: metrics.point_count,
         sample_count: metrics.sample_count,
+        avg_er_change: metrics.avg_er_change,
         spread_mean: metrics.spread_mean,
         ic_mean: metrics.ic_mean,
         ic_std: metrics.ic_std,
@@ -6029,6 +6070,7 @@ fn run_rank_layer_backtest_core(
                 sample_count: item.sample_count,
                 avg_score: item.avg_score,
                 avg_residual_return: item.avg_residual_return,
+                avg_er_change: item.avg_er_change,
             })
             .collect(),
         layer_sample_groups,
@@ -6623,6 +6665,7 @@ pub fn run_transient_rule_layer_backtest(
     let (
         avg_residual_mean,
         avg_excess_residual_mean,
+        avg_er_change,
         profit_loss_ratio,
         _spread_mean,
         ic_mean,
@@ -6650,6 +6693,7 @@ pub fn run_transient_rule_layer_backtest(
         points: Vec::new(),
         avg_residual_mean,
         avg_excess_residual_mean,
+        avg_er_change,
         profit_loss_ratio,
         spread_mean: None,
         avg_contribution_score: weighted_rule_summary_metric(&all_rule_summaries, |item| {
@@ -6786,6 +6830,7 @@ pub fn run_transient_rank_layer_backtest(
         layer_method_label: rank_layer_method_label(input.layer_config.layer_method).to_string(),
         point_count: metrics.point_count,
         sample_count: metrics.sample_count,
+        avg_er_change: metrics.avg_er_change,
         spread_mean: metrics.spread_mean,
         ic_mean: metrics.ic_mean,
         ic_std: metrics.ic_std,
@@ -6801,6 +6846,7 @@ pub fn run_transient_rank_layer_backtest(
                 sample_count: item.sample_count,
                 avg_score: item.avg_score,
                 avg_residual_return: item.avg_residual_return,
+                avg_er_change: item.avg_er_change,
             })
             .collect(),
         layer_sample_groups,
@@ -7137,6 +7183,7 @@ explain = "test"
                 trade_date: "20240102".to_string(),
                 rule_score: 1.0,
                 residual_return,
+                er_change: f64::INFINITY,
             })
             .collect::<Vec<_>>();
 
@@ -7428,6 +7475,7 @@ explain = "test"
                     trade_date: "20240102".to_string(),
                     score: 10.0,
                     residual_return: index as f64 + 1.0,
+                    er_change: f64::INFINITY,
                 });
                 samples.push(RankLayerSamplePoint {
                     layer_index: 1,
@@ -7435,6 +7483,7 @@ explain = "test"
                     trade_date: "20240103".to_string(),
                     score: 10.0,
                     residual_return: index as f64 + 11.0,
+                    er_change: f64::INFINITY,
                 });
             }
         }
@@ -7603,12 +7652,14 @@ explain = "test"
                 trade_date: "20240102".to_string(),
                 rule_score: 1.0,
                 residual_return: 0.5,
+                er_change: f64::INFINITY,
             },
             RuleLayerSamplePoint {
                 ts_code: "000002.SZ".to_string(),
                 trade_date: "20240103".to_string(),
                 rule_score: 1.0,
                 residual_return: 0.3,
+                er_change: f64::INFINITY,
             },
         ];
         let explain_map = HashMap::from([("规则A".to_string(), "说明A".to_string())]);

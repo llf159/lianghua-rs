@@ -200,6 +200,7 @@ export type RuleLayerRuleSummary = {
   point_count: number
   avg_residual_mean?: number | null
   avg_excess_residual_mean?: number | null
+  avg_er_change?: number | null
   profit_loss_ratio?: number | null
   spread_mean?: number | null
   avg_contribution_score?: number | null
@@ -229,6 +230,7 @@ export type RuleLayerBacktestData = {
   points: RuleLayerPoint[]
   avg_residual_mean?: number | null
   avg_excess_residual_mean?: number | null
+  avg_er_change?: number | null
   profit_loss_ratio?: number | null
   spread_mean?: number | null
   avg_contribution_score?: number | null
@@ -260,6 +262,7 @@ export type RankLayerBucketSummary = {
   sample_count: number
   avg_score?: number | null
   avg_residual_return?: number | null
+  avg_er_change?: number | null
 }
 
 export type RankLayerSampleGroup = {
@@ -294,6 +297,7 @@ export type RankLayerBacktestData = {
   layer_method_label: string
   point_count: number
   sample_count: number
+  avg_er_change?: number | null
   spread_mean?: number | null
   ic_mean?: number | null
   ic_std?: number | null
@@ -310,6 +314,7 @@ export type RankLayerMarketValueSummary = {
   total_mv_max?: number | null
   point_count: number
   sample_count: number
+  avg_er_change?: number | null
   spread_mean?: number | null
   ic_mean?: number | null
   ic_t_value?: number | null
