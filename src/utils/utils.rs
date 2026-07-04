@@ -539,6 +539,7 @@ fn st_board_category(stock_name: Option<&str>) -> Option<&'static str> {
     if normalized.starts_with("*ST")
         || normalized.starts_with("ST")
         || normalized.starts_with("退市")
+        || normalized.ends_with('退')
     {
         Some("ST")
     } else {
@@ -620,6 +621,8 @@ mod tests {
     fn board_category_treats_delisting_names_as_st() {
         assert_eq!(board_category("000001.SZ", Some("退市海创")), "ST");
         assert_eq!(board_category("600001.SH", Some(" 退市整理 ")), "ST");
+        assert_eq!(board_category("300001.SZ", Some("海创退")), "ST");
+        assert_eq!(board_category("688001.SH", Some(" 海创退 ")), "ST");
     }
 
     #[test]

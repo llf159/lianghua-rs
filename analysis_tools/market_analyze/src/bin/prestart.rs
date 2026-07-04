@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 
-use duckdb::{params, Connection};
+use duckdb::{Connection, params};
 
 const SOURCE: &str = "/home/lmingyuanl/.local/share/com.mingyuan.lianghua/source";
 const LOOKBACK: usize = 20;
@@ -99,18 +99,17 @@ struct FlagAgg {
 }
 
 fn board_category(ts_code: &str, stock_name: &str) -> &'static str {
-    let normalized = stock_name
-        .trim()
-        .to_ascii_uppercase()
-        .replace('＊', "*");
-    if normalized.starts_with("*ST") || normalized.starts_with("ST") {
+    let normalized = stock_name.trim().to_ascii_uppercase().replace('＊', "*");
+    if normalized.starts_with("*ST") || normalized.starts_with("ST") || normalized.ends_with('退')
+    {
         return "ST";
     }
     let ts = ts_code.trim().to_ascii_uppercase();
     if ts.ends_with(".BJ") {
         return "北交所";
     }
-    if (ts.ends_with(".SZ") && ts.starts_with("30")) || (ts.ends_with(".SH") && ts.starts_with("688"))
+    if (ts.ends_with(".SZ") && ts.starts_with("30"))
+        || (ts.ends_with(".SH") && ts.starts_with("688"))
     {
         return "创业/科创";
     }
@@ -273,7 +272,10 @@ fn build_strong_windows(
                 ref_date: ref_date.clone(),
                 start_date: start_date.clone(),
                 end_date: end_date.clone(),
-                name: meta.get(&ts_code).map(|v| v.name.clone()).unwrap_or_default(),
+                name: meta
+                    .get(&ts_code)
+                    .map(|v| v.name.clone())
+                    .unwrap_or_default(),
                 ts_code,
                 ret20,
             });
@@ -365,7 +367,10 @@ fn make_snapshot(
     add("max_pct5", max_opt(&pct5));
     add("up_days5", Some(count_where(&pct5, |v| v > 0.0)));
     add("big_up_days5", Some(count_where(&pct5, |v| v > 6.0)));
-    add("big_abs_days10", Some(count_where(&pct10, |v| v.abs() > 4.0)));
+    add(
+        "big_abs_days10",
+        Some(count_where(&pct10, |v| v.abs() > 4.0)),
+    );
     add("t1_tor", b1.tor);
     add("sum_tor5", sum_opt(&tor5));
     add("sum_tor10", sum_opt(&tor10));
@@ -389,33 +394,83 @@ fn make_snapshot(
 
     let f = &s.features;
     let get = |k: &str| f.get(k).copied();
-    s.flags.insert("C>MA10".to_string(), get("dist_ma10").is_some_and(|v| v > 0.0));
-    s.flags.insert("C>MA20".to_string(), get("dist_ma20").is_some_and(|v| v > 0.0));
-    s.flags.insert("MA20内12%".to_string(), get("dist_ma20").is_some_and(|v| v > -3.0 && v < 12.0));
-    s.flags.insert("多空短>长".to_string(), get("dk_spread").is_some_and(|v| v > 0.0));
-    s.flags.insert("多空温和强".to_string(), get("dk_spread").is_some_and(|v| v > 0.0 && v < 12.0));
-    s.flags.insert("BRICK>=70".to_string(), get("t1_brick").is_some_and(|v| v >= 70.0));
-    s.flags.insert("BRICK>=80".to_string(), get("t1_brick").is_some_and(|v| v >= 80.0));
-    s.flags.insert("RSI55-80".to_string(), get("t1_rsi6").is_some_and(|v| (55.0..=80.0).contains(&v)));
-    s.flags.insert("RSV30>=60".to_string(), get("t1_rsv30").is_some_and(|v| v >= 60.0));
-    s.flags.insert("RSV90>=50".to_string(), get("t1_rsv90").is_some_and(|v| v >= 50.0));
-    s.flags.insert("T1换手3-16".to_string(), get("t1_tor").is_some_and(|v| (3.0..=16.0).contains(&v)));
-    s.flags.insert("T1换手>=10".to_string(), get("t1_tor").is_some_and(|v| v >= 10.0));
-    s.flags.insert("5日换手15-75".to_string(), get("sum_tor5").is_some_and(|v| (15.0..=75.0).contains(&v)));
-    s.flags.insert("5日换手>=25".to_string(), get("sum_tor5").is_some_and(|v| v >= 25.0));
+    s.flags.insert(
+        "C>MA10".to_string(),
+        get("dist_ma10").is_some_and(|v| v > 0.0),
+    );
+    s.flags.insert(
+        "C>MA20".to_string(),
+        get("dist_ma20").is_some_and(|v| v > 0.0),
+    );
+    s.flags.insert(
+        "MA20内12%".to_string(),
+        get("dist_ma20").is_some_and(|v| v > -3.0 && v < 12.0),
+    );
+    s.flags.insert(
+        "多空短>长".to_string(),
+        get("dk_spread").is_some_and(|v| v > 0.0),
+    );
+    s.flags.insert(
+        "多空温和强".to_string(),
+        get("dk_spread").is_some_and(|v| v > 0.0 && v < 12.0),
+    );
+    s.flags.insert(
+        "BRICK>=70".to_string(),
+        get("t1_brick").is_some_and(|v| v >= 70.0),
+    );
+    s.flags.insert(
+        "BRICK>=80".to_string(),
+        get("t1_brick").is_some_and(|v| v >= 80.0),
+    );
+    s.flags.insert(
+        "RSI55-80".to_string(),
+        get("t1_rsi6").is_some_and(|v| (55.0..=80.0).contains(&v)),
+    );
+    s.flags.insert(
+        "RSV30>=60".to_string(),
+        get("t1_rsv30").is_some_and(|v| v >= 60.0),
+    );
+    s.flags.insert(
+        "RSV90>=50".to_string(),
+        get("t1_rsv90").is_some_and(|v| v >= 50.0),
+    );
+    s.flags.insert(
+        "T1换手3-16".to_string(),
+        get("t1_tor").is_some_and(|v| (3.0..=16.0).contains(&v)),
+    );
+    s.flags.insert(
+        "T1换手>=10".to_string(),
+        get("t1_tor").is_some_and(|v| v >= 10.0),
+    );
+    s.flags.insert(
+        "5日换手15-75".to_string(),
+        get("sum_tor5").is_some_and(|v| (15.0..=75.0).contains(&v)),
+    );
+    s.flags.insert(
+        "5日换手>=25".to_string(),
+        get("sum_tor5").is_some_and(|v| v >= 25.0),
+    );
     s.flags.insert(
         "5日不过热".to_string(),
-        get("big_up_days5").is_some_and(|v| v <= 1.0)
-            && get("sum_pct5").is_some_and(|v| v <= 12.0),
+        get("big_up_days5").is_some_and(|v| v <= 1.0) && get("sum_pct5").is_some_and(|v| v <= 12.0),
     );
-    s.flags.insert("5日温和上涨".to_string(), get("sum_pct5").is_some_and(|v| (0.0..=15.0).contains(&v)));
+    s.flags.insert(
+        "5日温和上涨".to_string(),
+        get("sum_pct5").is_some_and(|v| (0.0..=15.0).contains(&v)),
+    );
     s.flags.insert(
         "T1缩量回踩".to_string(),
         get("t1_pct").is_some_and(|v| (-4.0..=1.5).contains(&v))
             && get("t1_vr").is_some_and(|v| v < 0.9),
     );
-    s.flags.insert("近5有放量".to_string(), get("max_vr5").is_some_and(|v| v >= 1.5));
-    s.flags.insert("近5振幅收敛".to_string(), get("avg_amp5").is_some_and(|v| v <= 7.0));
+    s.flags.insert(
+        "近5有放量".to_string(),
+        get("max_vr5").is_some_and(|v| v >= 1.5),
+    );
+    s.flags.insert(
+        "近5振幅收敛".to_string(),
+        get("avg_amp5").is_some_and(|v| v <= 7.0),
+    );
 
     let trend_active = s.flags.get("C>MA20").copied().unwrap_or(false)
         && s.flags.get("多空短>长").copied().unwrap_or(false)
@@ -444,7 +499,9 @@ fn aggregate_nums(samples: &[Snapshot]) -> BTreeMap<String, NumAgg> {
     let mut out = BTreeMap::new();
     for s in samples {
         for (k, v) in &s.features {
-            out.entry(k.clone()).or_insert_with(NumAgg::default).add(Some(*v));
+            out.entry(k.clone())
+                .or_insert_with(NumAgg::default)
+                .add(Some(*v));
         }
     }
     out
@@ -490,7 +547,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|(i, d)| (d.clone(), i))
         .collect::<HashMap<_, _>>();
     let latest = dates.last().cloned().ok_or("no dates")?;
-    let load_start_idx = dates.len().saturating_sub(REF_DAYS + LOOKBACK + PRE_DAYS + 5);
+    let load_start_idx = dates
+        .len()
+        .saturating_sub(REF_DAYS + LOOKBACK + PRE_DAYS + 5);
     let bars = load_bars(&conn, &dates[load_start_idx], &latest)?;
     let strong_windows = build_strong_windows(&dates, &date_index, &bars, &meta);
 
@@ -550,8 +609,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let Some(o_mean) = ordinary_nums.get(&k).and_then(|v| v.mean()) else {
             continue;
         };
-        let s_med = strong_nums.get_mut(&k).and_then(|v| v.median()).unwrap_or(s_mean);
-        let o_med = ordinary_nums.get_mut(&k).and_then(|v| v.median()).unwrap_or(o_mean);
+        let s_med = strong_nums
+            .get_mut(&k)
+            .and_then(|v| v.median())
+            .unwrap_or(s_mean);
+        let o_med = ordinary_nums
+            .get_mut(&k)
+            .and_then(|v| v.median())
+            .unwrap_or(o_mean);
         num_rows.push((k, s_mean, o_mean, s_med, o_med, s_mean - o_mean));
     }
     num_rows.sort_by(|a, b| {
@@ -607,7 +672,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let count = |samples: &[Snapshot]| {
                     samples
                         .iter()
-                        .filter(|s| combo.iter().all(|c| s.flags.get(*c).copied().unwrap_or(false)))
+                        .filter(|s| {
+                            combo
+                                .iter()
+                                .all(|c| s.flags.get(*c).copied().unwrap_or(false))
+                        })
                         .count()
                 };
                 let sc = count(&strong_samples);
@@ -662,7 +731,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     report.push_str("\n## 数值特征均值差异\n\n");
-    report.push_str("|特征|强势均值|普通均值|强势中位|普通中位|均值差|\n|---|---:|---:|---:|---:|---:|\n");
+    report.push_str(
+        "|特征|强势均值|普通均值|强势中位|普通中位|均值差|\n|---|---:|---:|---:|---:|---:|\n",
+    );
     for (name, sm, om, smed, omed, diff) in num_rows.iter().take(24) {
         report.push_str(&format!(
             "|{}|{:.2}|{:.2}|{:.2}|{:.2}|{:.2}|\n",
