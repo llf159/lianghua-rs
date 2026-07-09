@@ -207,7 +207,6 @@ export type StockDetailStrategySnapshotData = {
   resolved_trade_date?: string
   resolved_ts_code?: string
   strategy_triggers?: DetailStrategyPayload | null
-  strategy_scenes?: DetailScenePayload | null
 }
 
 export type StockDetailRealtimeData = {
@@ -272,15 +271,6 @@ export async function getStockDetailStrategySnapshot(query: {
   tsCode: string
 }) {
   return invoke<StockDetailStrategySnapshotData>('get_stock_detail_strategy_snapshot', query)
-}
-
-export async function getStockSimilarityPage(query: {
-  sourcePath: string
-  tradeDate?: string
-  tsCode: string
-  limit?: number
-}) {
-  return invoke<StockSimilarityPageData>('get_stock_similarity_page', query)
 }
 
 export async function getStockDetailRealtime(query: {

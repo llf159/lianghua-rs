@@ -18,7 +18,6 @@ import {
   getStockDetailRealtime,
   getStockDetailPage,
   getStockDetailStrategySnapshot,
-  getStockSimilarityPage,
   type DetailChartMarker,
   type DetailCyqBin,
   type DetailCyqSnapshot,
@@ -4092,16 +4091,12 @@ function OverviewSummarySection({
 
 function SimilaritySection({
   data,
-  loading,
-  error,
   tradeDate,
   sourcePath,
   intervalRestore,
   navigationItems,
 }: {
   data: StockSimilarityPageData | null | undefined;
-  loading: boolean;
-  error: string;
   tradeDate: string | null;
   sourcePath: string | null;
   intervalRestore: IntervalRestoreRequest | null;
@@ -4117,15 +4112,7 @@ function SimilaritySection({
         </div>
       </div>
       <div className="details-rank-card-body details-similarity-card-body">
-        {loading ? (
-          <div className="details-empty details-empty-soft">
-            相似股票加载中...
-          </div>
-        ) : error ? (
-          <div className="details-empty details-empty-soft">
-            {error}
-          </div>
-        ) : items.length === 0 ? (
+        {items.length === 0 ? (
           <div className="details-empty details-empty-soft">
             暂无相似股票
           </div>
@@ -4235,10 +4222,6 @@ export default function DetailsPage({
   const [detailCyqError, setDetailCyqError] = useState("");
   const [detailRealtimeLoading, setDetailRealtimeLoading] = useState(false);
   const [detailRealtimeNotice, setDetailRealtimeNotice] = useState("");
-  const [stockSimilarityLoading, setStockSimilarityLoading] = useState(false);
-  const [stockSimilarityError, setStockSimilarityError] = useState("");
-  const [detailStrategyLoading, setDetailStrategyLoading] = useState(false);
-  const [detailStrategyError, setDetailStrategyError] = useState("");
   const [detailRealtimePinned, setDetailRealtimePinned] = useState(false);
   const [detailsNavAutoDirection, setDetailsNavAutoDirection] =
     useState<DetailsAutoNavDirection | null>(null);
@@ -4290,8 +4273,6 @@ export default function DetailsPage({
   const detailRealtimeAutoRefreshKeyRef = useRef("");
   const detailRealtimeRequestKeyRef = useRef("");
   const detailCyqRequestKeyRef = useRef("");
-  const stockSimilarityRequestKeyRef = useRef("");
-  const detailStrategyRequestKeyRef = useRef("");
   const detailsNavLongPressTimerRef = useRef<number | null>(null);
   const detailsNavLongPressHandledRef = useRef(false);
   const strategyCompareRequestKeyRef = useRef("");
@@ -4426,8 +4407,6 @@ export default function DetailsPage({
 
       setDetailLoading(true);
       setDetailError("");
-      setStockSimilarityError("");
-      setDetailStrategyError("");
       try {
         const detail = await getStockDetailPage({
           sourcePath: nextSourcePath,
@@ -4852,151 +4831,6 @@ export default function DetailsPage({
       stockSimilarity,
     ],
   );
-
-  useEffect(() => {
-    const nextTsCode = detailData?.resolved_ts_code?.trim() ?? "";
-    const nextTradeDate = detailData?.resolved_trade_date?.trim() ?? "";
-    if (
-      sourcePathTrimmed === "" ||
-      nextTsCode === "" ||
-      nextTradeDate === "" ||
-      detailData?.stock_similarity
-    ) {
-      stockSimilarityRequestKeyRef.current = "";
-      setStockSimilarityLoading(false);
-      return;
-    }
-
-    const requestKey = [sourcePathTrimmed, nextTsCode, nextTradeDate].join("|");
-    if (stockSimilarityRequestKeyRef.current === requestKey) {
-      return;
-    }
-
-    stockSimilarityRequestKeyRef.current = requestKey;
-    let cancelled = false;
-    setStockSimilarityLoading(true);
-    setStockSimilarityError("");
-
-    const loadStockSimilarity = async () => {
-      try {
-        const data = await getStockSimilarityPage({
-          sourcePath: sourcePathTrimmed,
-          tradeDate: nextTradeDate,
-          tsCode: nextTsCode,
-          limit: 12,
-        });
-        if (cancelled || stockSimilarityRequestKeyRef.current !== requestKey) {
-          return;
-        }
-
-        setDetailData((current) => {
-          if (
-            current?.resolved_ts_code?.trim() !== nextTsCode ||
-            current?.resolved_trade_date?.trim() !== nextTradeDate
-          ) {
-            return current;
-          }
-          return {
-            ...current,
-            stock_similarity: data,
-            stock_similarity_error: null,
-          };
-        });
-      } catch (error) {
-        if (!cancelled && stockSimilarityRequestKeyRef.current === requestKey) {
-          setStockSimilarityError(`读取相似股票失败: ${String(error)}`);
-        }
-      } finally {
-        if (stockSimilarityRequestKeyRef.current === requestKey) {
-          stockSimilarityRequestKeyRef.current = "";
-          setStockSimilarityLoading(false);
-        }
-      }
-    };
-
-    void loadStockSimilarity();
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    detailData?.resolved_trade_date,
-    detailData?.resolved_ts_code,
-    detailData?.stock_similarity,
-    sourcePathTrimmed,
-  ]);
-
-  useEffect(() => {
-    const nextTsCode = detailData?.resolved_ts_code?.trim() ?? "";
-    const nextTradeDate = detailData?.resolved_trade_date?.trim() ?? "";
-    if (
-      sourcePathTrimmed === "" ||
-      nextTsCode === "" ||
-      nextTradeDate === "" ||
-      (detailData?.strategy_triggers && detailData?.strategy_scenes)
-    ) {
-      detailStrategyRequestKeyRef.current = "";
-      setDetailStrategyLoading(false);
-      return;
-    }
-
-    const requestKey = [sourcePathTrimmed, nextTsCode, nextTradeDate].join("|");
-    if (detailStrategyRequestKeyRef.current === requestKey) {
-      return;
-    }
-
-    detailStrategyRequestKeyRef.current = requestKey;
-    let cancelled = false;
-    setDetailStrategyLoading(true);
-    setDetailStrategyError("");
-
-    const loadDetailStrategySnapshot = async () => {
-      try {
-        const data = await getStockDetailStrategySnapshot({
-          sourcePath: sourcePathTrimmed,
-          tradeDate: nextTradeDate,
-          tsCode: nextTsCode,
-        });
-        if (cancelled || detailStrategyRequestKeyRef.current !== requestKey) {
-          return;
-        }
-
-        setDetailData((current) => {
-          if (
-            current?.resolved_ts_code?.trim() !== nextTsCode ||
-            current?.resolved_trade_date?.trim() !== nextTradeDate
-          ) {
-            return current;
-          }
-          return {
-            ...current,
-            strategy_triggers: data.strategy_triggers ?? null,
-            strategy_scenes: data.strategy_scenes ?? null,
-          };
-        });
-      } catch (error) {
-        if (!cancelled && detailStrategyRequestKeyRef.current === requestKey) {
-          setDetailStrategyError(`读取策略状态失败: ${String(error)}`);
-        }
-      } finally {
-        if (detailStrategyRequestKeyRef.current === requestKey) {
-          detailStrategyRequestKeyRef.current = "";
-          setDetailStrategyLoading(false);
-        }
-      }
-    };
-
-    void loadDetailStrategySnapshot();
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    detailData?.resolved_trade_date,
-    detailData?.resolved_ts_code,
-    detailData?.strategy_scenes,
-    detailData?.strategy_triggers,
-    sourcePathTrimmed,
-  ]);
-
   useEffect(() => {
     setDetailCyqData(null);
     setDetailCyqError("");
@@ -7786,8 +7620,6 @@ export default function DetailsPage({
 
           <SimilaritySection
             data={stockSimilarity}
-            loading={stockSimilarityLoading}
-            error={stockSimilarityError || detailData?.stock_similarity_error || ""}
             tradeDate={similarityTradeDate}
             sourcePath={sourcePathTrimmed || null}
             intervalRestore={similarityIntervalRestore}
@@ -7805,7 +7637,7 @@ export default function DetailsPage({
               <button
                 className="details-primary-btn details-primary-btn-alt details-strategy-nav-btn"
                 type="button"
-                disabled={!previousStrategyTradeDate || detailLoading || detailStrategyLoading}
+                disabled={!previousStrategyTradeDate || detailLoading}
                 onClick={() => onJumpStrategyTradeDate(previousStrategyTradeDate)}
                 title={previousStrategyTradeDate ? `切换到 ${previousStrategyTradeDate}` : "没有更早的参考日"}
               >
@@ -7814,7 +7646,7 @@ export default function DetailsPage({
               <button
                 className="details-primary-btn details-primary-btn-alt details-strategy-nav-btn"
                 type="button"
-                disabled={!nextStrategyTradeDate || detailLoading || detailStrategyLoading}
+                disabled={!nextStrategyTradeDate || detailLoading}
                 onClick={() => onJumpStrategyTradeDate(nextStrategyTradeDate)}
                 title={nextStrategyTradeDate ? `切换到 ${nextStrategyTradeDate}` : "没有更新的参考日"}
               >
@@ -7823,11 +7655,7 @@ export default function DetailsPage({
             </div>
           </div>
           <div className="details-rank-card-body details-scene-overview-card-body">
-            {detailStrategyLoading ? (
-              <div className="details-empty details-empty-soft">策略状态加载中...</div>
-            ) : detailStrategyError ? (
-              <div className="details-empty details-empty-soft">{detailStrategyError}</div>
-            ) : sceneTotalCount === 0 ? (
+            {sceneTotalCount === 0 ? (
               <div className="details-empty details-empty-soft">暂无 scene 状态数据</div>
             ) : (
               <>
@@ -8012,7 +7840,7 @@ export default function DetailsPage({
                   <button
                     className="details-primary-btn details-primary-btn-alt details-strategy-nav-btn"
                     type="button"
-                    disabled={!previousStrategyTradeDate || detailLoading || detailStrategyLoading}
+                    disabled={!previousStrategyTradeDate || detailLoading}
                     onClick={() => onJumpStrategyTradeDate(previousStrategyTradeDate)}
                     title={previousStrategyTradeDate ? `切换到 ${previousStrategyTradeDate}` : "没有更早的参考日"}
                   >
@@ -8021,7 +7849,7 @@ export default function DetailsPage({
                   <button
                     className="details-primary-btn details-primary-btn-alt details-strategy-nav-btn"
                     type="button"
-                    disabled={!nextStrategyTradeDate || detailLoading || detailStrategyLoading}
+                    disabled={!nextStrategyTradeDate || detailLoading}
                     onClick={() => onJumpStrategyTradeDate(nextStrategyTradeDate)}
                     title={nextStrategyTradeDate ? `切换到 ${nextStrategyTradeDate}` : "没有更新的参考日"}
                   >

@@ -459,26 +459,23 @@ fn load_validation_context(
     String,
 > {
     let reader = DataReader::new(source_path)?;
-    let latest_trade_date = reader.conn.with(|conn| {
-        conn.query_row(
+    let latest_trade_date = reader
+        .conn
+        .query_row(
             "SELECT MAX(trade_date) FROM stock_data WHERE adj_type = ?",
             [DEFAULT_ADJ_TYPE],
             |row| row.get::<_, Option<String>>(0),
         )
-        .map_err(|e| format!("读取最新交易日失败: {e}"))
-    })?;
+        .map_err(|e| format!("读取最新交易日失败: {e}"))?;
 
     let sample_ts_code = latest_trade_date.as_deref().and_then(|trade_date| {
         reader
             .conn
-            .with(|conn| {
-                conn.query_row(
+            .query_row(
                 "SELECT ts_code FROM stock_data WHERE adj_type = ? AND trade_date = ? ORDER BY ts_code LIMIT 1",
                 [DEFAULT_ADJ_TYPE, trade_date],
                 |row| row.get::<_, String>(0),
             )
-                .map_err(|e| e.to_string())
-            })
             .ok()
     });
     let st_list = load_st_list(source_path)?;

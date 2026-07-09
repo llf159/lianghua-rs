@@ -3,10 +3,6 @@ import {
   getChartIndicatorSettings,
   type ChartIndicatorSettingsPayload,
 } from '../../apis/chartIndicatorSettings'
-import {
-  getMarketDataCacheSettings,
-  saveMarketDataCacheSettings,
-} from '../../apis/appSettings'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import { getStockPickOptions } from '../../apis/stockPick'
 import { filterConceptItems, useConceptExclusions } from '../../shared/conceptExclusions'
@@ -73,7 +69,6 @@ type SettingsModalType =
   | 'details-nav-long-press'
   | 'backtest-highlight'
   | 'realtime-provider'
-  | 'market-data-cache'
   | null
 
 function getDetailCyqModelLabel(value: DetailCyqModel) {
@@ -108,10 +103,6 @@ export default function SettingsPage() {
   )
   const [detailCyqModel, setDetailCyqModel] = useState(() => readStoredDetailCyqModel())
   const [realtimeQuoteProvider, setRealtimeQuoteProvider] = useState(() => readStoredRealtimeQuoteProvider())
-  const [marketDataCacheEnabled, setMarketDataCacheEnabled] = useState(false)
-  const [marketDataCacheSaving, setMarketDataCacheSaving] = useState(false)
-  const [marketDataCacheError, setMarketDataCacheError] = useState('')
-  const [marketDataCacheNotice, setMarketDataCacheNotice] = useState('')
   const [detailsNavLongPressSettingError, setDetailsNavLongPressSettingError] = useState('')
   const [detailsNavLongPressSettingNotice, setDetailsNavLongPressSettingNotice] = useState('')
   const [backtestHighlightIcThresholdInput, setBacktestHighlightIcThresholdInput] = useState(
@@ -151,7 +142,6 @@ export default function SettingsPage() {
   const isDetailsNavLongPressSettingOpen = activeModal === 'details-nav-long-press'
   const isBacktestHighlightSettingOpen = activeModal === 'backtest-highlight'
   const isRealtimeProviderSettingOpen = activeModal === 'realtime-provider'
-  const isMarketDataCacheSettingOpen = activeModal === 'market-data-cache'
 
   useEffect(() => {
     let cancelled = false
@@ -161,7 +151,7 @@ export default function SettingsPage() {
       setError('')
       try {
         const resolvedSourcePath = await ensureManagedSourcePath()
-        const [options, chartIndicatorPayload, marketDataCacheSettings] = await Promise.all([
+        const [options, chartIndicatorPayload] = await Promise.all([
           getStockPickOptions(resolvedSourcePath),
           getChartIndicatorSettings(resolvedSourcePath).catch((chartError) => {
             if (!cancelled) {
@@ -169,10 +159,6 @@ export default function SettingsPage() {
               setChartIndicatorSettingsStatus('需修复')
             }
             console.error('读取图表指标配置失败', chartError)
-            return null
-          }),
-          getMarketDataCacheSettings().catch((settingsError) => {
-            console.error('读取行情库缓存优化配置失败', settingsError)
             return null
           }),
         ])
@@ -185,9 +171,6 @@ export default function SettingsPage() {
         setChartIndicatorSettingsStatus(
           chartIndicatorPayload ? getChartIndicatorSettingsStatus(chartIndicatorPayload) : '需修复',
         )
-        if (marketDataCacheSettings) {
-          setMarketDataCacheEnabled(marketDataCacheSettings.enabled)
-        }
       } catch (loadError) {
         if (cancelled) {
           return
@@ -323,12 +306,6 @@ export default function SettingsPage() {
     setActiveModal('realtime-provider')
   }
 
-  function openMarketDataCacheSetting() {
-    setMarketDataCacheError('')
-    setMarketDataCacheNotice('')
-    setActiveModal('market-data-cache')
-  }
-
   const onChartIndicatorSettingsLoaded = useCallback((nextPayload: ChartIndicatorSettingsPayload) => {
     setChartIndicatorSettingsPayload(nextPayload)
     setChartIndicatorSettingsStatus(getChartIndicatorSettingsStatus(nextPayload))
@@ -404,25 +381,6 @@ export default function SettingsPage() {
   function onSelectRealtimeQuoteProvider(nextProvider: RealtimeQuoteProvider) {
     const normalizedProvider = writeStoredRealtimeQuoteProvider(nextProvider)
     setRealtimeQuoteProvider(normalizedProvider)
-  }
-
-  async function onToggleMarketDataCache(nextEnabled: boolean) {
-    setMarketDataCacheSaving(true)
-    setMarketDataCacheError('')
-    setMarketDataCacheNotice('')
-    try {
-      const nextSettings = await saveMarketDataCacheSettings(nextEnabled)
-      setMarketDataCacheEnabled(nextSettings.enabled)
-      setMarketDataCacheNotice(
-        nextSettings.enabled
-          ? '已开启。当前原始行情库已尝试预热到内存，后续读取会使用缓存。'
-          : '已关闭。内存中的原始行情库缓存已清空。',
-      )
-    } catch (saveError) {
-      setMarketDataCacheError(`保存失败: ${String(saveError)}`)
-    } finally {
-      setMarketDataCacheSaving(false)
-    }
   }
 
   function onSaveBacktestHighlightSettings() {
@@ -557,14 +515,6 @@ export default function SettingsPage() {
               <span>控制实时监控股票行情源；指数表现会自动使用另一个行情源。</span>
             </div>
             <span className="settings-list-item-value">{getRealtimeQuoteProviderLabel(realtimeQuoteProvider)}</span>
-          </button>
-
-          <button className="settings-list-item" type="button" onClick={openMarketDataCacheSetting}>
-            <div className="settings-list-item-main">
-              <strong>行情库缓存优化</strong>
-              <span>启动时将原始行情库读入内存，下载或指标维护后自动刷新。</span>
-            </div>
-            <span className="settings-list-item-value">{marketDataCacheEnabled ? '已开启' : '未开启'}</span>
           </button>
 
           <button className="settings-list-item" type="button" onClick={openDetailsNavLongPressSetting}>
@@ -736,57 +686,6 @@ export default function SettingsPage() {
                 新筹码
               </button>
             </div>
-          </section>
-        </div>
-      ) : null}
-
-      {isMarketDataCacheSettingOpen ? (
-        <div
-          className="settings-modal-backdrop"
-          role="presentation"
-          onClick={(event) => {
-            if (event.target === event.currentTarget) {
-              closeActiveModal()
-            }
-          }}
-        >
-          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="行情库缓存优化设置">
-            <div className="settings-modal-head">
-              <div>
-                <h3 className="settings-subtitle-head">行情库缓存优化</h3>
-                <p className="settings-section-note">
-                  开启后，软件启动时会把 stock_data.db 的 stock_data 表复制到内存。下载、缺失补全、指标列删除或补算完成后会丢弃旧缓存，下次读取会重新加载。
-                </p>
-              </div>
-              <div className="settings-actions">
-                <button className="settings-primary-btn" type="button" onClick={closeActiveModal}>
-                  完成
-                </button>
-              </div>
-            </div>
-
-            <div className="settings-actions settings-actions-left">
-              <button
-                className={marketDataCacheEnabled ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
-                type="button"
-                onClick={() => void onToggleMarketDataCache(true)}
-                disabled={marketDataCacheSaving || marketDataCacheEnabled}
-              >
-                开启
-              </button>
-              <button
-                className={!marketDataCacheEnabled ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
-                type="button"
-                onClick={() => void onToggleMarketDataCache(false)}
-                disabled={marketDataCacheSaving || !marketDataCacheEnabled}
-              >
-                关闭
-              </button>
-            </div>
-
-            {marketDataCacheSaving ? <div className="settings-notice">正在保存并处理缓存...</div> : null}
-            {marketDataCacheError ? <div className="settings-error">{marketDataCacheError}</div> : null}
-            {marketDataCacheNotice ? <div className="settings-notice">{marketDataCacheNotice}</div> : null}
           </section>
         </div>
       ) : null}

@@ -938,9 +938,7 @@ fn cached_template_runtime(
 
     let reader = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)
         .map_err(|e| format!("模板预热初始化日K读取器失败: {e}"))?;
-    let (start_date, end_date) = reader
-        .conn
-        .with(|conn| query_template_history_window(conn, need_rows))?;
+    let (start_date, end_date) = query_template_history_window(&reader.conn, need_rows)?;
     let rank_score_map = load_template_rank_score_series_map(
         &open_result_conn(source_path)?,
         &start_date,

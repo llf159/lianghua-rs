@@ -210,24 +210,10 @@ use rustls_platform_verifier;
 use tauri::Manager;
 
 const WATCH_OBSERVE_STORAGE_FILE: &str = "watch_observe.json";
-const APP_SETTINGS_FILE: &str = "settings.json";
 const DEFAULT_MANAGED_SOURCE_DIR: &str = "source";
 const RANKING_COMPUTE_PROGRESS_EVENT: &str = "data-download-status";
 const CHIP_CHANGE_BACKUP_DIR_NAME: &str = "chip_change_rule_backups";
 const CHIP_CHANGE_RULE_FILE_NAME: &str = "chip_change_rule.toml";
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AppSettingsFile {
-    #[serde(default)]
-    market_data_cache_optimization_enabled: bool,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MarketDataCacheSettingsPayload {
-    enabled: bool,
-}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -306,94 +292,6 @@ fn run_with_heap_trim<T>(f: impl FnOnce() -> T) -> T {
     let result = f();
     trim_process_heap();
     result
-}
-
-fn resolve_app_settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .resolve(APP_SETTINGS_FILE, tauri::path::BaseDirectory::AppData)
-        .map_err(|error| error.to_string())
-}
-
-fn read_app_settings(app: &tauri::AppHandle) -> Result<AppSettingsFile, String> {
-    let path = resolve_app_settings_path(app)?;
-    if !path.exists() {
-        return Ok(AppSettingsFile::default());
-    }
-
-    let raw = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    if raw.trim().is_empty() {
-        return Ok(AppSettingsFile::default());
-    }
-
-    serde_json::from_str(&raw).map_err(|error| format!("解析设置文件失败: {error}"))
-}
-
-fn write_app_settings(app: &tauri::AppHandle, settings: &AppSettingsFile) -> Result<(), String> {
-    let path = resolve_app_settings_path(app)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-
-    let payload =
-        serde_json::to_string_pretty(settings).map_err(|error| format!("序列化设置失败: {error}"))?;
-    fs::write(path, payload).map_err(|error| error.to_string())
-}
-
-fn resolve_default_managed_source_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .resolve(
-            DEFAULT_MANAGED_SOURCE_DIR,
-            tauri::path::BaseDirectory::AppData,
-        )
-        .map_err(|error| error.to_string())
-}
-
-fn apply_market_data_cache_setting(app: &tauri::AppHandle, enabled: bool) {
-    lianghua_rs::data::set_source_db_memory_cache_enabled(enabled);
-    if !enabled {
-        return;
-    }
-
-    let Ok(source_path) = resolve_default_managed_source_path(app) else {
-        return;
-    };
-    let Some(source_path_str) = source_path.to_str() else {
-        return;
-    };
-    if let Err(error) = lianghua_rs::data::preload_source_db_memory_cache(source_path_str) {
-        log::warn!("preload source db memory cache failed: {}", error);
-    }
-    if let Err(error) = lianghua_rs::data::preload_score_summary_memory_cache(source_path_str) {
-        log::warn!("preload score summary memory cache failed: {}", error);
-    }
-}
-
-#[tauri::command]
-fn get_market_data_cache_settings(
-    app: tauri::AppHandle,
-) -> Result<MarketDataCacheSettingsPayload, String> {
-    let settings = read_app_settings(&app)?;
-    lianghua_rs::data::set_source_db_memory_cache_enabled(
-        settings.market_data_cache_optimization_enabled,
-    );
-    if settings.market_data_cache_optimization_enabled {
-        apply_market_data_cache_setting(&app, true);
-    }
-    Ok(MarketDataCacheSettingsPayload {
-        enabled: settings.market_data_cache_optimization_enabled,
-    })
-}
-
-#[tauri::command]
-fn save_market_data_cache_settings(
-    app: tauri::AppHandle,
-    enabled: bool,
-) -> Result<MarketDataCacheSettingsPayload, String> {
-    let mut settings = read_app_settings(&app)?;
-    settings.market_data_cache_optimization_enabled = enabled;
-    write_app_settings(&app, &settings)?;
-    apply_market_data_cache_setting(&app, enabled);
-    Ok(MarketDataCacheSettingsPayload { enabled })
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1448,7 +1346,6 @@ async fn run_ranking_score_calculation(
     end_date: String,
 ) -> Result<RankComputeRunResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let source_path_for_cache = source_path.clone();
         let strategy_file_path =
             lianghua_rs::data::resolve_strategy_path(&source_path, strategy_path.as_deref());
         let app_data_root = app
@@ -1463,16 +1360,12 @@ async fn run_ranking_score_calculation(
             Some(&end_date),
         )?;
         let snapshot_strategy_path = snapshot_strategy_path.display().to_string();
-        let result = core_run_ranking_score_calculation(
+        core_run_ranking_score_calculation(
             &source_path,
             Some(snapshot_strategy_path.as_str()),
             &start_date,
             &end_date,
-        );
-        if result.is_ok() {
-            lianghua_rs::data::invalidate_score_summary_memory_cache(&source_path_for_cache);
-        }
-        result
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2022,11 +1915,7 @@ async fn run_ranking_tiebreak_fill(
     strategy_path: Option<String>,
 ) -> Result<RankComputeRunResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let result = core_run_ranking_tiebreak_fill(&source_path, strategy_path.as_deref());
-        if result.is_ok() {
-            lianghua_rs::data::invalidate_score_summary_memory_cache(&source_path);
-        }
-        result
+        core_run_ranking_tiebreak_fill(&source_path, strategy_path.as_deref())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2238,12 +2127,6 @@ pub fn run() {
                     .build(),
             )?;
         }
-        if let Ok(settings) = read_app_settings(app.handle()) {
-            apply_market_data_cache_setting(
-                app.handle(),
-                settings.market_data_cache_optimization_enabled,
-            );
-        }
         Ok(())
     });
 
@@ -2254,8 +2137,6 @@ pub fn run() {
     builder
         .invoke_handler(tauri::generate_handler![
             allow_import_path,
-            get_market_data_cache_settings,
-            save_market_data_cache_settings,
             copy_import_file_to_appdata,
             preview_managed_source_stock_data,
             preview_managed_source_dataset,

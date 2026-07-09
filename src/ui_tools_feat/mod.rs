@@ -6,7 +6,7 @@ use std::{
 use duckdb::{Connection, params_from_iter};
 
 use crate::data::{
-    load_stock_list, load_ths_concepts_list, load_ths_concepts_named_map, open_source_db_connection,
+    load_stock_list, load_ths_concepts_list, load_ths_concepts_named_map, source_db_path,
 };
 
 pub mod all_market_monitor;
@@ -289,7 +289,11 @@ pub fn build_latest_vol_map(
         return Ok(HashMap::new());
     }
 
-    let conn = open_source_db_connection(source_dir)?;
+    let source_db = source_db_path(source_dir);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
+    let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
 
     let placeholders = std::iter::repeat_n("?", ts_codes.len())
         .collect::<Vec<_>>()
@@ -313,30 +317,28 @@ pub fn build_latest_vol_map(
     params.push(DEFAULT_ADJ_TYPE.to_string());
     params.extend(ts_codes.iter().cloned());
 
-    conn.with(|conn| {
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| format!("预编译最新成交量查询失败: {e}"))?;
-        let mut rows = stmt
-            .query(params_from_iter(params.iter()))
-            .map_err(|e| format!("查询最新成交量失败: {e}"))?;
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("预编译最新成交量查询失败: {e}"))?;
+    let mut rows = stmt
+        .query(params_from_iter(params.iter()))
+        .map_err(|e| format!("查询最新成交量失败: {e}"))?;
 
-        let mut out = HashMap::with_capacity(ts_codes.len());
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| format!("读取最新成交量失败: {e}"))?
-        {
-            let ts_code: String = row
-                .get(0)
-                .map_err(|e| format!("读取最新成交量代码失败: {e}"))?;
-            let latest_vol: Option<f64> = row
-                .get(1)
-                .map_err(|e| format!("读取最新成交量数值失败: {e}"))?;
-            if let Some(value) = latest_vol {
-                out.insert(ts_code, value);
-            }
+    let mut out = HashMap::with_capacity(ts_codes.len());
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取最新成交量失败: {e}"))?
+    {
+        let ts_code: String = row
+            .get(0)
+            .map_err(|e| format!("读取最新成交量代码失败: {e}"))?;
+        let latest_vol: Option<f64> = row
+            .get(1)
+            .map_err(|e| format!("读取最新成交量数值失败: {e}"))?;
+        if let Some(value) = latest_vol {
+            out.insert(ts_code, value);
         }
+    }
 
-        Ok(out)
-    })
+    Ok(out)
 }
