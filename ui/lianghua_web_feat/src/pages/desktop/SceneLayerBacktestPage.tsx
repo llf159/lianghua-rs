@@ -14,6 +14,7 @@ import {
   runSceneLayerBacktest,
   type RankLayerBacktestData,
   type RankLayerMethod,
+  type RankLayerSampleGroup,
   type RuleExpressionValidationData,
   type RuleValidationComboResult,
   type RuleLayerBacktestData,
@@ -53,6 +54,7 @@ type RuleSummarySortKey =
   | "point_count"
   | "profit_loss_ratio"
   | "avg_excess_residual_mean"
+  | "avg_er_change"
   | "avg_contribution_score"
   | "avg_contribution_per_trigger"
   | "ic_mean"
@@ -68,6 +70,7 @@ type ValidationComboSortKey =
   | "spread_mean"
   | "profit_loss_ratio"
   | "avg_excess_residual_mean"
+  | "avg_er_change"
   | "ic_mean"
   | "ic_t_value"
   | "icir";
@@ -92,6 +95,7 @@ type BacktestCommonParamsDraft = {
   minSamplesPerDay: string;
   minListedTradeDays: string;
   backtestPeriod: string;
+  parallelBatchSize: string;
   totalMvMin: string;
   totalMvMax: string;
   rankLayerCount: string;
@@ -108,6 +112,7 @@ type StoredBacktestCommonParams = BacktestCommonParamsDraft & {
 const BACKTEST_COMMON_PARAMS_STORAGE_KEY = "lh_scene_layer_backtest_common_params";
 const VALIDATION_DEFAULT_SAMPLE_LIMIT = 5;
 const VALIDATION_MAX_SAMPLE_LIMIT = 200;
+const RANK_LAYER_SAMPLE_LIMIT_PER_GROUP = 5;
 const EMPTY_VALIDATION_COMBO_RESULTS: RuleValidationComboResult[] = [];
 
 type SceneLayerBacktestLocationState = {
@@ -119,6 +124,49 @@ function formatDateLabel(value?: string | null) {
     return "--";
   }
   return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+}
+
+function normalizedSampleTriggerCount(value?: number | null) {
+  return Number.isInteger(value) && Number(value) >= 1 ? Number(value) : 1;
+}
+
+function filterValidationComboByTriggerCount(
+  combo: RuleValidationComboResult,
+  triggerCount: number,
+): RuleValidationComboResult {
+  const filterRows = (rows: RuleValidationComboResult["sample_groups"]["positive"]) =>
+    rows.filter((row) => normalizedSampleTriggerCount(row.trigger_count) === triggerCount);
+  const sampleGroups = {
+    positive: filterRows(combo.sample_groups.positive),
+    negative: filterRows(combo.sample_groups.negative),
+    random: filterRows(combo.sample_groups.random),
+  };
+  const stats = (combo.trigger_count_stats ?? []).find(
+    (item) => item.trigger_count === triggerCount,
+  ) ?? {
+    trigger_count: triggerCount,
+    positive_count: sampleGroups.positive.length,
+    negative_count: sampleGroups.negative.length,
+    random_count: sampleGroups.random.length,
+    total_samples: new Set(
+      [...sampleGroups.positive, ...sampleGroups.negative, ...sampleGroups.random].map(
+        (row) => `${row.ts_code}__${row.trade_date}`,
+      ),
+    ).size,
+  };
+
+  return {
+    ...combo,
+    combo_label: `${combo.combo_label} · ${triggerCount}次触发`,
+    trigger_samples: stats.total_samples,
+    sample_stats: {
+      positive_count: stats.positive_count,
+      negative_count: stats.negative_count,
+      random_count: stats.random_count,
+      total_samples: stats.total_samples,
+    },
+    sample_groups: sampleGroups,
+  };
 }
 
 function formatNumber(value?: number | null, digits = 4) {
@@ -360,7 +408,7 @@ function resolveValidationScopeWay(rawValue?: string | null): {
   const normalized = (rawValue ?? "").trim().toUpperCase();
   if (!normalized) {
     return {
-      scopeWay: "ANY",
+      scopeWay: "LAST",
       consecThreshold: 2,
     };
   }
@@ -382,7 +430,7 @@ function resolveValidationScopeWay(rawValue?: string | null): {
     };
   }
   return {
-    scopeWay: "ANY",
+    scopeWay: "LAST",
     consecThreshold: 2,
   };
 }
@@ -408,6 +456,7 @@ const DEFAULT_BACKTEST_COMMON_PARAMS: BacktestCommonParamsDraft = {
   minSamplesPerDay: "5",
   minListedTradeDays: "60",
   backtestPeriod: "3",
+  parallelBatchSize: "4",
   totalMvMin: "",
   totalMvMax: "",
   rankLayerCount: "5",
@@ -458,6 +507,10 @@ function readStoredBacktestCommonParams(): StoredBacktestCommonParams {
       DEFAULT_BACKTEST_COMMON_PARAMS.minListedTradeDays,
     ),
     backtestPeriod: normalizeStoredString(parsed?.backtestPeriod, DEFAULT_BACKTEST_COMMON_PARAMS.backtestPeriod),
+    parallelBatchSize: normalizeStoredString(
+      parsed?.parallelBatchSize,
+      DEFAULT_BACKTEST_COMMON_PARAMS.parallelBatchSize,
+    ),
     totalMvMin: normalizeStoredString(parsed?.totalMvMin, DEFAULT_BACKTEST_COMMON_PARAMS.totalMvMin),
     totalMvMax: normalizeStoredString(parsed?.totalMvMax, DEFAULT_BACKTEST_COMMON_PARAMS.totalMvMax),
     rankLayerCount: normalizeStoredString(parsed?.rankLayerCount, DEFAULT_BACKTEST_COMMON_PARAMS.rankLayerCount),
@@ -478,6 +531,7 @@ function writeStoredBacktestCommonParams(value: BacktestCommonParamsDraft) {
     minSamplesPerDay: value.minSamplesPerDay,
     minListedTradeDays: value.minListedTradeDays,
     backtestPeriod: value.backtestPeriod,
+    parallelBatchSize: value.parallelBatchSize,
     totalMvMin: value.totalMvMin,
     totalMvMax: value.totalMvMax,
     rankLayerCount: value.rankLayerCount,
@@ -525,6 +579,7 @@ export default function SceneLayerBacktestPage() {
   const [minSamplesPerDay, setMinSamplesPerDay] = useState(storedCommonParams.minSamplesPerDay);
   const [minListedTradeDays, setMinListedTradeDays] = useState(storedCommonParams.minListedTradeDays);
   const [backtestPeriod, setBacktestPeriod] = useState(storedCommonParams.backtestPeriod);
+  const [parallelBatchSize, setParallelBatchSize] = useState(storedCommonParams.parallelBatchSize);
   const [totalMvMin, setTotalMvMin] = useState(storedCommonParams.totalMvMin);
   const [totalMvMax, setTotalMvMax] = useState(storedCommonParams.totalMvMax);
   const [rankLayerCount, setRankLayerCount] = useState(storedCommonParams.rankLayerCount);
@@ -542,6 +597,7 @@ export default function SceneLayerBacktestPage() {
   const [rankTransientLoading, setRankTransientLoading] = useState(false);
   const [rankError, setRankError] = useState("");
   const [rankResult, setRankResult] = useState<RankLayerBacktestData | null>(null);
+  const [rankLayerSampleModal, setRankLayerSampleModal] = useState<RankLayerSampleGroup | null>(null);
   const [result, setResult] = useState<SceneLayerBacktestData | null>(null);
   const [transientLoading, setTransientLoading] = useState(false);
 
@@ -556,7 +612,7 @@ export default function SceneLayerBacktestPage() {
   const [validationImportRuleName, setValidationImportRuleName] = useState("");
   const [validationExpression, setValidationExpression] = useState("");
   const [validationDirection, setValidationDirection] = useState<ValidationDirection>("positive");
-  const [validationScopeWay, setValidationScopeWay] = useState<ValidationScopeWayOption>("ANY");
+  const [validationScopeWay, setValidationScopeWay] = useState<ValidationScopeWayOption>("LAST");
   const [validationConsecThresholdText, setValidationConsecThresholdText] = useState("2");
   const [validationScopeWindowsText, setValidationScopeWindowsText] = useState("1");
   const [validationEnableUnknown, setValidationEnableUnknown] = useState(false);
@@ -572,6 +628,9 @@ export default function SceneLayerBacktestPage() {
   const [validationSelectedComboKey, setValidationSelectedComboKey] = useState("");
   const [validationRestoredComboKey, setValidationRestoredComboKey] = useState("");
   const [validationDetailModalOpen, setValidationDetailModalOpen] = useState(false);
+  const [validationSelectedTriggerCount, setValidationSelectedTriggerCount] = useState<
+    number | null
+  >(null);
   const [shouldAutoOpenDetail, setShouldAutoOpenDetail] = useState(false);
   const heavyTaskRunning =
     loading ||
@@ -637,6 +696,7 @@ export default function SceneLayerBacktestPage() {
       minSamplesPerDay,
       minListedTradeDays,
       backtestPeriod,
+      parallelBatchSize,
       totalMvMin,
       totalMvMax,
       rankLayerCount,
@@ -654,6 +714,7 @@ export default function SceneLayerBacktestPage() {
     minSamplesPerDay,
     minListedTradeDays,
     backtestPeriod,
+    parallelBatchSize,
     totalMvMin,
     totalMvMax,
     rankLayerCount,
@@ -769,6 +830,10 @@ export default function SceneLayerBacktestPage() {
   }, [ruleResult]);
   const validationComboRows = validationResult?.combo_results ?? EMPTY_VALIDATION_COMBO_RESULTS;
   const rankLayerSummaries = rankResult?.layer_summaries ?? [];
+  const rankLayerSampleGroupByIndex = useMemo(() => {
+    const groups = rankResult?.layer_sample_groups ?? [];
+    return new Map(groups.map((item) => [item.layer_index, item]));
+  }, [rankResult]);
   const backtestHighlightSettings = readStoredBacktestHighlightSettings();
 
   function metricHighlightClass(
@@ -879,6 +944,26 @@ export default function SceneLayerBacktestPage() {
   }, [validationDetailModalOpen]);
 
   useEffect(() => {
+    if (!rankLayerSampleModal) {
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setRankLayerSampleModal(null);
+      }
+    };
+
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [rankLayerSampleModal]);
+
+  useEffect(() => {
     if (!shouldUseValidationDetailModal) {
       setValidationDetailModalOpen(false);
     }
@@ -898,6 +983,9 @@ export default function SceneLayerBacktestPage() {
         },
         avg_excess_residual_mean: {
           value: (row: RuleLayerRuleSummary) => row.avg_excess_residual_mean,
+        },
+        avg_er_change: {
+          value: (row: RuleLayerRuleSummary) => row.avg_er_change,
         },
         avg_contribution_score: {
           value: (row: RuleLayerRuleSummary) => row.avg_contribution_score,
@@ -960,6 +1048,9 @@ export default function SceneLayerBacktestPage() {
         },
         avg_excess_residual_mean: {
           value: (row: RuleValidationComboResult) => row.backtest.avg_excess_residual_mean,
+        },
+        avg_er_change: {
+          value: (row: RuleValidationComboResult) => row.backtest.avg_er_change,
         },
         ic_mean: {
           value: (row: RuleValidationComboResult) => row.backtest.ic_mean,
@@ -1166,6 +1257,7 @@ export default function SceneLayerBacktestPage() {
     }
 
     setRankResult(null);
+    setRankLayerSampleModal(null);
     setRankLoading(true);
     setRankError("");
     try {
@@ -1226,6 +1318,7 @@ export default function SceneLayerBacktestPage() {
     }
 
     setRankResult(null);
+    setRankLayerSampleModal(null);
     setRankTransientLoading(true);
     setRankError("");
     try {
@@ -1297,6 +1390,7 @@ export default function SceneLayerBacktestPage() {
         minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerDay) || 1),
         minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        parallelBatchSize: Math.max(1, Number(parallelBatchSize) || 4),
         board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
         excludeStBoard: excludeStBoard || undefined,
         ...marketValueFilter,
@@ -1355,6 +1449,7 @@ export default function SceneLayerBacktestPage() {
         minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerDay) || 1),
         minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
         backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        parallelBatchSize: Math.max(1, Number(parallelBatchSize) || 4),
         board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
         excludeStBoard: excludeStBoard || undefined,
         ...marketValueFilter,
@@ -1595,11 +1690,101 @@ export default function SceneLayerBacktestPage() {
       return;
     }
     setValidationSelectedComboKey(comboKey);
+    setValidationSelectedTriggerCount(null);
     setValidationDetailModalOpen(true);
   }
 
   function closeValidationDetailModal() {
+    setValidationSelectedTriggerCount(null);
     setValidationDetailModalOpen(false);
+  }
+
+  function openRankLayerSamples(layerIndex: number) {
+    const group = rankLayerSampleGroupByIndex.get(layerIndex);
+    if (!group || group.total_samples === 0) {
+      setRankError("当前分层没有可展示的样本。");
+      return;
+    }
+    setRankError("");
+    setRankLayerSampleModal(group);
+  }
+
+  function closeRankLayerSampleModal() {
+    setRankLayerSampleModal(null);
+  }
+
+  function buildRankLayerSampleCombo(
+    group: RankLayerSampleGroup,
+    rankBacktest: RankLayerBacktestData,
+  ): RuleValidationComboResult {
+    const triggeredDays = group.triggered_days;
+    return {
+      combo_key: `rank_layer_${group.layer_index}`,
+      combo_label: group.layer_label,
+      formula: "TOTAL_SCORE",
+      unknown_values: [],
+      trigger_samples: group.total_samples,
+      triggered_days: triggeredDays,
+      avg_daily_trigger: triggeredDays > 0 ? group.total_samples / triggeredDays : 0,
+      sample_stats: {
+        positive_count: group.positive_count,
+        negative_count: group.negative_count,
+        random_count: group.random_count,
+        total_samples: group.total_samples,
+      },
+      trigger_count_stats: [
+        {
+          trigger_count: 1,
+          positive_count: group.positive_count,
+          negative_count: group.negative_count,
+          random_count: group.random_count,
+          total_samples: group.total_samples,
+        },
+      ],
+      sample_groups: {
+        positive: group.positive,
+        negative: group.negative,
+        random: group.random,
+      },
+      return_distribution: [],
+      backtest: {
+        rule_name: group.layer_label,
+        stock_adj_type: rankBacktest.stock_adj_type,
+        index_ts_code: rankBacktest.index_ts_code,
+        index_beta: rankBacktest.index_beta,
+        concept_beta: rankBacktest.concept_beta,
+        industry_beta: rankBacktest.industry_beta,
+        start_date: rankBacktest.start_date,
+        end_date: rankBacktest.end_date,
+        resolved_board: rankBacktest.resolved_board,
+        exclude_st_board: rankBacktest.exclude_st_board,
+        min_samples_per_rule_day: rankBacktest.min_samples_per_rank_day,
+        min_listed_trade_days: rankBacktest.min_listed_trade_days,
+        backtest_period: rankBacktest.backtest_period,
+        points: [],
+        avg_residual_mean: rankBacktest.layer_summaries.find(
+          (item) => item.layer_index === group.layer_index,
+        )?.avg_residual_return,
+        avg_excess_residual_mean: null,
+        avg_er_change: null,
+        profit_loss_ratio: null,
+        spread_mean: rankBacktest.spread_mean,
+        avg_contribution_score: null,
+        avg_contribution_per_trigger: null,
+        ic_mean: rankBacktest.ic_mean,
+        ic_std: rankBacktest.ic_std,
+        icir: rankBacktest.icir,
+        ic_t_value: rankBacktest.ic_t_value,
+        layer_count: rankBacktest.layer_count,
+        layer_method: rankBacktest.layer_method,
+        layer_method_label: rankBacktest.layer_method_label,
+        layer_summaries: rankBacktest.layer_summaries,
+        is_all_rules: false,
+        all_rule_summaries: [],
+        rule_validation_details: [],
+      },
+      similarity_rows: [],
+    };
   }
 
   function renderValidationComboDetailSections(
@@ -1610,15 +1795,23 @@ export default function SceneLayerBacktestPage() {
       return null;
     }
 
-    const displaySampleCount =
-      combo.sample_groups.positive.length +
-      combo.sample_groups.negative.length +
-      combo.sample_groups.random.length;
     const sectionClassName = useModalLayout
       ? "scene-layer-layer-summary scene-layer-validation-detail-section"
       : "scene-layer-layer-summary";
     const validationLayerSummaries = combo.backtest.layer_summaries ?? [];
     const returnDistribution = combo.return_distribution ?? [];
+    const triggerCountStats =
+      (combo.trigger_count_stats ?? []).length > 0
+        ? combo.trigger_count_stats
+        : [{ trigger_count: 1, ...combo.sample_stats }];
+    const shouldSkipTriggerCountSelection =
+      triggerCountStats.length === 1 && triggerCountStats[0]?.trigger_count === 1;
+    const selectedTriggerCombo =
+      shouldSkipTriggerCountSelection
+        ? filterValidationComboByTriggerCount(combo, 1)
+        : validationSelectedTriggerCount === null
+        ? null
+        : filterValidationComboByTriggerCount(combo, validationSelectedTriggerCount);
     const maxDistributionCount = returnDistribution.reduce(
       (maxCount, bucket) => Math.max(maxCount, bucket.sample_count),
       0,
@@ -1631,36 +1824,55 @@ export default function SceneLayerBacktestPage() {
           <p>{combo.formula || "--"}</p>
         </div>
 
-        <details className={`${sectionClassName} scene-layer-validation-fold`}>
-          <summary className="scene-layer-validation-fold-summary">
-            <h3>触发样本</h3>
-            <span>
-              总 {combo.sample_stats.total_samples} · 展示 {displaySampleCount}
-            </span>
-          </summary>
-          <div className="scene-layer-validation-sample-summary">
-            <div className="scene-layer-validation-sample-stats">
-              <span>总 {combo.sample_stats.total_samples}</span>
-              <span>展示 {displaySampleCount}</span>
-              <span>正 {combo.sample_stats.positive_count}</span>
-              <span>负 {combo.sample_stats.negative_count}</span>
-              <span>随机 {combo.sample_stats.random_count}</span>
-              <span>上限/组 {validationResult.sample_limit_per_group}</span>
+        <div className={`${sectionClassName} scene-layer-validation-trigger-count-section`}>
+          {!shouldSkipTriggerCountSelection ? (
+            <>
+              <div className="scene-layer-validation-trigger-count-head">
+                <h3>触发次数</h3>
+                <span>选择次数后查看对应样本</span>
+              </div>
+              <div className="scene-layer-validation-trigger-count-options">
+                {triggerCountStats.map((item) => (
+                  <button
+                    key={`${combo.combo_key}-trigger-count-${item.trigger_count}`}
+                    type="button"
+                    className={
+                      validationSelectedTriggerCount === item.trigger_count
+                        ? "scene-layer-validation-trigger-count-btn scene-layer-validation-trigger-count-btn-active"
+                        : "scene-layer-validation-trigger-count-btn"
+                    }
+                    onClick={() =>
+                      setValidationSelectedTriggerCount((current) =>
+                        current === item.trigger_count ? null : item.trigger_count,
+                      )
+                    }
+                  >
+                    <strong>{item.trigger_count} 次</strong>
+                    <span>{item.total_samples} 个样本</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : null}
+          {selectedTriggerCombo ? (
+            <div className="scene-layer-validation-sample-summary">
+              <ExpressionValidationSamplesPanel
+                data={{
+                  importRuleName: validationResult.import_rule_name,
+                  importRuleExplain: validationResult.import_rule_explain,
+                  expression: validationExpression,
+                  combo: selectedTriggerCombo,
+                  comboParamSummary: formatUnknownValuesForCombo(combo),
+                  sampleLimitPerGroup: validationResult.sample_limit_per_group,
+                  sourcePath,
+                }}
+                layout="modal"
+              />
             </div>
-            <ExpressionValidationSamplesPanel
-              data={{
-                importRuleName: validationResult.import_rule_name,
-                importRuleExplain: validationResult.import_rule_explain,
-                expression: validationExpression,
-                combo,
-                comboParamSummary: formatUnknownValuesForCombo(combo),
-                sampleLimitPerGroup: validationResult.sample_limit_per_group,
-                sourcePath,
-              }}
-              layout="modal"
-            />
-          </div>
-        </details>
+          ) : (
+            <div className="scene-layer-empty">请选择一个触发次数。</div>
+          )}
+        </div>
 
         <details className={`${sectionClassName} scene-layer-validation-fold`}>
           <summary className="scene-layer-validation-fold-summary">
@@ -1840,6 +2052,10 @@ export default function SceneLayerBacktestPage() {
             <input type="number" min="1" value={backtestPeriod} onChange={(event) => setBacktestPeriod(event.target.value)} />
           </label>
           <label className="scene-layer-field">
+            <span>策略并发数</span>
+            <input type="number" min="1" value={parallelBatchSize} onChange={(event) => setParallelBatchSize(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
             <span>总市值最小(亿)</span>
             <input type="number" min="0" step="1" value={totalMvMin} onChange={(event) => setTotalMvMin(event.target.value)} />
           </label>
@@ -1951,6 +2167,7 @@ export default function SceneLayerBacktestPage() {
                   <thead>
                     <tr>
                       <th>分层差均值（日度高分层-低分层）</th>
+                      <th title="收益统计区间最后一天 ER(20) 减触发日 ER(20)">ΔER(20)</th>
                       <th>IC 均值</th>
                       <th>IC t值</th>
                       <th>ICIR</th>
@@ -1959,6 +2176,7 @@ export default function SceneLayerBacktestPage() {
                   <tbody>
                     <tr>
                       <td>{formatPercent(rankResult.spread_mean)}</td>
+                      <td>{formatNumber(rankResult.avg_er_change, 4)}</td>
                       <td className={metricHighlightClass("ic", rankResult.ic_mean)}>{formatNumber(rankResult.ic_mean)}</td>
                       <td className={metricHighlightClass("t", rankResult.ic_t_value)}>{formatNumber(rankResult.ic_t_value)}</td>
                       <td className={metricHighlightClass("ir", rankResult.icir)}>{formatNumber(rankResult.icir)}</td>
@@ -1983,18 +2201,37 @@ export default function SceneLayerBacktestPage() {
                       <th>分层样本数</th>
                       <th>分层均分</th>
                       <th>层级收益（日度残差均值）</th>
+                      <th title="收益统计区间最后一天 ER(20) 减触发日 ER(20)">ΔER(20)</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {rankLayerSummaries.map((item) => (
-                      <tr key={item.layer_index}>
-                        <td>{item.layer_label}</td>
-                        <td>{item.point_count}</td>
-                        <td>{item.sample_count}</td>
-                        <td>{formatNumber(item.avg_score, 4)}</td>
-                        <td>{formatPercent(item.avg_residual_return)}</td>
-                      </tr>
-                    ))}
+                    {rankLayerSummaries.map((item) => {
+                      const sampleGroup = rankLayerSampleGroupByIndex.get(item.layer_index);
+                      const canOpenSamples = Boolean(sampleGroup && sampleGroup.total_samples > 0);
+                      return (
+                        <tr key={item.layer_index}>
+                          <td>
+                            {canOpenSamples ? (
+                              <button
+                                type="button"
+                                className="scene-layer-validation-detail-link"
+                                onClick={() => openRankLayerSamples(item.layer_index)}
+                                title={`查看${item.layer_label}样本`}
+                              >
+                                {item.layer_label}
+                              </button>
+                            ) : (
+                              item.layer_label
+                            )}
+                          </td>
+                          <td>{item.point_count}</td>
+                          <td>{item.sample_count}</td>
+                          <td>{formatNumber(item.avg_score, 4)}</td>
+                          <td>{formatPercent(item.avg_residual_return)}</td>
+                          <td>{formatNumber(item.avg_er_change, 4)}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -2011,6 +2248,7 @@ export default function SceneLayerBacktestPage() {
                       <th>市值分组</th>
                       <th>有效交易日</th>
                       <th>总样本数</th>
+                      <th title="收益统计区间最后一天 ER(20) 减触发日 ER(20)">ΔER(20)</th>
                       <th>分层差均值</th>
                       <th>IC 均值</th>
                       <th>IC t值</th>
@@ -2023,6 +2261,7 @@ export default function SceneLayerBacktestPage() {
                         <td>{item.group_label}</td>
                         <td>{item.point_count}</td>
                         <td>{item.sample_count}</td>
+                        <td>{formatNumber(item.avg_er_change, 4)}</td>
                         <td>{formatPercent(item.spread_mean)}</td>
                         <td className={metricHighlightClass("ic", item.ic_mean)}>{formatNumber(item.ic_mean)}</td>
                         <td className={metricHighlightClass("t", item.ic_t_value)}>{formatNumber(item.ic_t_value)}</td>
@@ -2031,6 +2270,39 @@ export default function SceneLayerBacktestPage() {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            </div>
+          ) : null}
+
+          {rankLayerSampleModal && rankResult ? (
+            <div className="scene-layer-modal-mask" onClick={closeRankLayerSampleModal}>
+              <div
+                className="scene-layer-modal-card scene-layer-validation-detail-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-label={`排名分层样本：${rankLayerSampleModal.layer_label}`}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="scene-layer-modal-header">
+                  <h3>排名分层样本：{rankLayerSampleModal.layer_label}</h3>
+                  <button type="button" className="scene-layer-modal-close" onClick={closeRankLayerSampleModal}>
+                    关闭
+                  </button>
+                </div>
+                <div className="scene-layer-modal-scroll-body">
+                  <ExpressionValidationSamplesPanel
+                    data={{
+                      importRuleName: "排名整体回测",
+                      importRuleExplain: `排名整体回测：${rankLayerSampleModal.layer_label}`,
+                      expression: "TOTAL_SCORE",
+                      combo: buildRankLayerSampleCombo(rankLayerSampleModal, rankResult),
+                      comboParamSummary: `${rankResult.layer_method_label} · ${rankLayerSampleModal.layer_label}`,
+                      sampleLimitPerGroup: RANK_LAYER_SAMPLE_LIMIT_PER_GROUP,
+                      sourcePath,
+                    }}
+                    layout="modal"
+                  />
+                </div>
               </div>
             </div>
           ) : null}
@@ -2157,6 +2429,7 @@ export default function SceneLayerBacktestPage() {
                     <th>平均单次贡献</th>
                     <th>盈亏比</th>
                     <th>超额残差（日度）</th>
+                    <th title="收益统计区间最后一天 ER(20) 减触发日 ER(20)">ΔER(20)</th>
                     <th>IC 均值</th>
                     <th>IC t值</th>
                     <th>ICIR</th>
@@ -2180,6 +2453,7 @@ export default function SceneLayerBacktestPage() {
                     <td className={residualMetricHighlightClass(ruleResult.avg_excess_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}>
                       {renderResidualMetric(ruleResult.avg_excess_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}
                     </td>
+                    <td>{formatNumber(ruleResult.avg_er_change, 4)}</td>
                     <td className={metricHighlightClass("ic", ruleResult.ic_mean)}>{formatNumber(ruleResult.ic_mean)}</td>
                     <td className={metricHighlightClass("t", ruleResult.ic_t_value)}>{formatNumber(ruleResult.ic_t_value)}</td>
                     <td className={metricHighlightClass("ir", ruleResult.icir)}>{formatNumber(ruleResult.icir)}</td>
@@ -2254,6 +2528,15 @@ export default function SceneLayerBacktestPage() {
                           title="按超额残差排序"
                         />
                       </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "avg_er_change", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="ΔER(20)"
+                          isActive={ruleSummarySortKey === "avg_er_change" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("avg_er_change")}
+                          title="按 ER(20) 区间变动均值排序"
+                        />
+                      </th>
                       <th aria-sort={getAriaSort(ruleSummarySortKey === "ic_mean", ruleSummarySortDirection)}>
                         <TableSortButton
                           label="IC 均值"
@@ -2302,6 +2585,7 @@ export default function SceneLayerBacktestPage() {
                         <td className={residualMetricHighlightClass(item.avg_excess_residual_mean, resolveResidualDirection(item.avg_contribution_score))}>
                           {renderResidualMetric(item.avg_excess_residual_mean, resolveResidualDirection(item.avg_contribution_score))}
                         </td>
+                        <td>{formatNumber(item.avg_er_change, 4)}</td>
                         <td className={metricHighlightClass("ic", item.ic_mean)}>{formatNumber(item.ic_mean)}</td>
                         <td className={metricHighlightClass("t", item.ic_t_value)}>{formatNumber(item.ic_t_value)}</td>
                         <td className={metricHighlightClass("ir", item.icir)}>{formatNumber(item.icir)}</td>
@@ -2570,6 +2854,7 @@ export default function SceneLayerBacktestPage() {
                     {renderValidationComboSortHeader("spread_mean", "分层差均值（按得分值）")}
                     {renderValidationComboSortHeader("profit_loss_ratio", "盈亏比")}
                     {renderValidationComboSortHeader("avg_excess_residual_mean", "超额残差（日度）")}
+                    {renderValidationComboSortHeader("avg_er_change", "ΔER(20)")}
                     {renderValidationComboSortHeader("ic_mean", "IC 均值")}
                     {renderValidationComboSortHeader("ic_t_value", "IC t值")}
                     {renderValidationComboSortHeader("icir", "ICIR")}
@@ -2624,6 +2909,7 @@ export default function SceneLayerBacktestPage() {
                         <td className={residualMetricHighlightClass(item.backtest.avg_excess_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}>
                           {renderResidualMetric(item.backtest.avg_excess_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}
                         </td>
+                        <td>{formatNumber(item.backtest.avg_er_change, 4)}</td>
                         <td className={metricHighlightClass("ic", item.backtest.ic_mean)}>{formatNumber(item.backtest.ic_mean)}</td>
                         <td className={metricHighlightClass("t", item.backtest.ic_t_value)}>{formatNumber(item.backtest.ic_t_value)}</td>
                         <td className={metricHighlightClass("ir", item.backtest.icir)}>{formatNumber(item.backtest.icir)}</td>

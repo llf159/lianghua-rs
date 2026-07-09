@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use duckdb::{Connection, params};
+use duckdb::{Connection, params, params_from_iter};
 use rayon::prelude::*;
 
 use crate::data::{
@@ -17,6 +17,7 @@ const MR_FQFS: &str = "qfq";
 const GDNM_BX_DATES_PER_CHUNK: usize = 32;
 const PERFORMANCE_TYPE_CONCEPT: &str = "concept";
 const PERFORMANCE_TYPE_INDUSTRY: &str = "industry";
+const PERFORMANCE_SERIES_BATCH_SIZE: usize = 512;
 const DATA_ISSUE_SAMPLE_LIMIT: usize = 12;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -671,6 +672,109 @@ pub fn load_industry_trend_series(
     )
 }
 
+fn load_performance_trend_series_map(
+    source_dir: &str,
+    performance_type: &str,
+    names: &[String],
+    start_date: &str,
+    end_date: &str,
+) -> Result<HashMap<String, HashMap<String, f64>>, String> {
+    if names.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let concept_db = concept_performance_db_path(source_dir);
+    let mut out = HashMap::with_capacity(names.len());
+    for name in names {
+        out.entry(name.clone()).or_insert_with(HashMap::new);
+    }
+    if !concept_db.exists() {
+        return Ok(out);
+    }
+
+    let concept_db_str = concept_db
+        .to_str()
+        .ok_or_else(|| "concept_performance_db路径不是有效UTF-8".to_string())?;
+    let conn = Connection::open(concept_db_str)
+        .map_err(|e| format!("打开 concept_performance.db 失败: {e}"))?;
+
+    for chunk in names.chunks(PERFORMANCE_SERIES_BATCH_SIZE) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            r#"
+            SELECT concept, trade_date, TRY_CAST(performance_pct AS DOUBLE)
+            FROM concept_performance
+            WHERE performance_type = ?
+              AND concept IN ({placeholders})
+              AND trade_date >= ?
+              AND trade_date <= ?
+              AND trade_date IS NOT NULL
+            ORDER BY concept ASC, trade_date ASC
+            "#
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("预编译批量表现走势查询失败: {e}"))?;
+        let query_params = std::iter::once(performance_type)
+            .chain(chunk.iter().map(String::as_str))
+            .chain([start_date, end_date]);
+        let mut rows = stmt
+            .query(params_from_iter(query_params))
+            .map_err(|e| format!("查询批量表现走势失败: {e}"))?;
+
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取批量表现走势失败: {e}"))?
+        {
+            let name: String = row.get(0).map_err(|e| format!("读取表现名称失败: {e}"))?;
+            let trade_date: String = row
+                .get(1)
+                .map_err(|e| format!("读取表现走势日期失败: {e}"))?;
+            let pct: Option<f64> = row
+                .get(2)
+                .map_err(|e| format!("读取表现走势涨跌幅失败: {e}"))?;
+            let Some(pct) = pct.filter(|value| value.is_finite()) else {
+                continue;
+            };
+            out.entry(name).or_default().insert(trade_date, pct);
+        }
+    }
+
+    Ok(out)
+}
+
+pub fn load_concept_trend_series_map(
+    source_dir: &str,
+    names: &[String],
+    start_date: &str,
+    end_date: &str,
+) -> Result<HashMap<String, HashMap<String, f64>>, String> {
+    load_performance_trend_series_map(
+        source_dir,
+        PERFORMANCE_TYPE_CONCEPT,
+        names,
+        start_date,
+        end_date,
+    )
+}
+
+pub fn load_industry_trend_series_map(
+    source_dir: &str,
+    names: &[String],
+    start_date: &str,
+    end_date: &str,
+) -> Result<HashMap<String, HashMap<String, f64>>, String> {
+    load_performance_trend_series_map(
+        source_dir,
+        PERFORMANCE_TYPE_INDUSTRY,
+        names,
+        start_date,
+        end_date,
+    )
+}
+
 pub fn rebuild_most_related_concept_csv(source_dir: &str) -> Result<usize, String> {
     let source_db = source_db_path(source_dir);
     let source_db_str = source_db
@@ -1301,6 +1405,27 @@ ts_code,concepts_code,concepts_name,stock_name
         assert_eq!(last_ai, 40.0);
         assert_eq!(last_suanli, 70.0);
         assert_eq!(last_bank, 40.0);
+
+        let concept_map = load_concept_trend_series_map(
+            source_dir.to_str().expect("utf8 path"),
+            &["AI".to_string(), "算力".to_string(), "不存在".to_string()],
+            trade_dates.first().expect("first trade date"),
+            trade_dates.last().expect("last trade date"),
+        )
+        .expect("load concept maps");
+        assert_eq!(concept_map["AI"].len(), 40);
+        assert_eq!(concept_map["算力"].len(), 40);
+        assert!(concept_map["不存在"].is_empty());
+
+        let industry_map = load_industry_trend_series_map(
+            source_dir.to_str().expect("utf8 path"),
+            &["银行".to_string(), "地产".to_string()],
+            trade_dates.first().expect("first trade date"),
+            trade_dates.last().expect("last trade date"),
+        )
+        .expect("load industry maps");
+        assert_eq!(industry_map["银行"].len(), 40);
+        assert_eq!(industry_map["地产"].len(), 40);
 
         let _ = remove_dir_all(source_dir);
     }

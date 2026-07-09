@@ -233,6 +233,8 @@ const DEFAULT_J_INDICATOR_EXPR: &str = r#"RSV1 := RSV(C, H, L, 9);
 K1 := SMA(RSV1, 3, 1);
 D1 := SMA(K1, 3, 1);
 3 * K1 - 2 * D1;"#;
+const DEFAULT_ER_INDICATOR_EXPR: &str = r#"N := 20;
+(C - REF(C, N)) / SUM(ABS(C - REF(C, 1)), N);"#;
 
 #[derive(Clone)]
 pub struct PreparedDataDownloadRun {
@@ -586,15 +588,21 @@ where
         .map_err(|e| format!("开启事务失败: {e}"))?;
 
     match action(conn) {
-        Ok(value) => {
-            conn.execute_batch("COMMIT")
-                .map_err(|e| format!("提交事务失败: {e}"))?;
-            Ok(value)
-        }
-        Err(err) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(err)
-        }
+        Ok(value) => match conn.execute_batch("COMMIT") {
+            Ok(()) => Ok(value),
+            Err(commit_error) => match conn.execute_batch("ROLLBACK") {
+                Ok(()) => Err(format!("提交事务失败，已回滚: {commit_error}")),
+                Err(rollback_error) => Err(format!(
+                    "提交事务失败且回滚失败: commit={commit_error}; rollback={rollback_error}"
+                )),
+            },
+        },
+        Err(action_error) => match conn.execute_batch("ROLLBACK") {
+            Ok(()) => Err(format!("{action_error}；本步骤数据库事务已回滚")),
+            Err(rollback_error) => Err(format!(
+                "{action_error}；本步骤数据库事务回滚失败: {rollback_error}"
+            )),
+        },
     }
 }
 
@@ -1968,11 +1976,18 @@ pub fn get_indicator_manage_page(source_path: &str) -> Result<IndicatorManagePag
 }
 
 fn default_indicator_manage_items() -> Vec<IndicatorManageDraft> {
-    vec![IndicatorManageDraft {
-        name: "J".to_string(),
-        expr: DEFAULT_J_INDICATOR_EXPR.to_string(),
-        prec: 2,
-    }]
+    vec![
+        IndicatorManageDraft {
+            name: "J".to_string(),
+            expr: DEFAULT_J_INDICATOR_EXPR.to_string(),
+            prec: 2,
+        },
+        IndicatorManageDraft {
+            name: "ER".to_string(),
+            expr: DEFAULT_ER_INDICATOR_EXPR.to_string(),
+            prec: 6,
+        },
+    ]
 }
 
 fn ensure_default_indicator_manage_file(source_path: &str) -> Result<(), String> {
@@ -2157,7 +2172,7 @@ mod tests {
     }
 
     #[test]
-    fn indicator_manage_page_creates_default_j_config_when_missing() {
+    fn indicator_manage_page_creates_default_indicator_config_when_missing() {
         let source_dir = temp_dir_path("lianghua_indicator_default");
         let source_path = source_dir.to_str().expect("utf8 path");
 
@@ -2165,16 +2180,19 @@ mod tests {
 
         assert!(ind_toml_path(source_path).exists());
         assert!(page.exists);
-        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items.len(), 2);
         assert_eq!(page.items[0].name, "J");
         assert_eq!(page.items[0].prec, 2);
         assert!(page.items[0].expr.contains("RSV(C, H, L, 9)"));
+        assert_eq!(page.items[1].name, "ER");
+        assert_eq!(page.items[1].prec, 6);
+        assert!(page.items[1].expr.contains("REF(C, N)"));
 
         let _ = remove_dir_all(source_dir);
     }
 
     #[test]
-    fn indicator_manage_page_fills_default_j_config_when_empty() {
+    fn indicator_manage_page_fills_default_indicator_config_when_empty() {
         let source_dir = temp_dir_path("lianghua_indicator_empty_default");
         create_dir_all(&source_dir).expect("create temp dir");
         fs::write(ind_toml_path(source_dir.to_str().expect("utf8 path")), "\n")
@@ -2184,8 +2202,9 @@ mod tests {
         let page = get_indicator_manage_page(source_path).expect("indicator page");
 
         assert!(page.exists);
-        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items.len(), 2);
         assert_eq!(page.items[0].name, "J");
+        assert_eq!(page.items[1].name, "ER");
 
         let _ = remove_dir_all(source_dir);
     }

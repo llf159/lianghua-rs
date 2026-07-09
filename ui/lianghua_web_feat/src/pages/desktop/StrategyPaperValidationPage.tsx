@@ -309,7 +309,8 @@ function resolveTradeBoard(tsCode: string, stockName?: string | null) {
   if (
     normalizedName.startsWith('*ST') ||
     normalizedName.startsWith('ST') ||
-    normalizedName.startsWith('退市')
+    normalizedName.startsWith('退市') ||
+    normalizedName.endsWith('退')
   ) {
     return 'ST'
   }

@@ -5,12 +5,12 @@ use rayon::prelude::*;
 
 use super::{
     BacktestSampleEligibility, DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, ResidualFactorSeriesRefs,
-    ResidualReturnInput, build_backtest_sample_eligibility,
+    ResidualReturnInput, build_backtest_sample_eligibility, build_forward_backtest_residual_map,
     calc_stock_residual_returns_from_loaded_series,
 };
 use crate::{
     data::{
-        concept_performance_data::{load_concept_trend_series, load_industry_trend_series},
+        concept_performance_data::{load_concept_trend_series_map, load_industry_trend_series_map},
         load_stock_list, load_ths_concepts_named_map, result_db_path,
         scoring_data::SceneDetails,
     },
@@ -819,24 +819,8 @@ fn build_concept_series_cache(
         }
     }
 
-    let mut out = HashMap::with_capacity(names.len());
-    for name in names {
-        let series = load_concept_trend_series(
-            source_dir,
-            &name,
-            Some(start_date.trim()),
-            Some(end_date.trim()),
-        )?;
-        out.insert(
-            name,
-            series
-                .points
-                .into_iter()
-                .map(|point| (point.trade_date, point.performance_pct))
-                .collect(),
-        );
-    }
-    Ok(out)
+    let names = names.into_iter().collect::<Vec<_>>();
+    load_concept_trend_series_map(source_dir, &names, start_date.trim(), end_date.trim())
 }
 
 fn build_industry_series_cache(
@@ -862,60 +846,8 @@ fn build_industry_series_cache(
         }
     }
 
-    let mut out = HashMap::with_capacity(names.len());
-    for name in names {
-        let series = load_industry_trend_series(
-            source_dir,
-            &name,
-            Some(start_date.trim()),
-            Some(end_date.trim()),
-        )?;
-        out.insert(
-            name,
-            series
-                .points
-                .into_iter()
-                .map(|point| (point.trade_date, point.performance_pct))
-                .collect(),
-        );
-    }
-    Ok(out)
-}
-
-fn build_forward_backtest_residual_map(
-    mut residual_points: Vec<super::ResidualReturnPoint>,
-    backtest_period: usize,
-) -> HashMap<String, f64> {
-    if backtest_period == 0 || residual_points.len() < backtest_period + 1 {
-        return HashMap::new();
-    }
-
-    residual_points.sort_by(|a, b| a.trade_date.cmp(&b.trade_date));
-
-    let mut out = HashMap::new();
-    for i in 0..residual_points.len() {
-        let end = i + backtest_period;
-        if end >= residual_points.len() {
-            break;
-        }
-
-        let mut sum = 0.0_f64;
-        let mut valid = true;
-        for j in (i + 1)..=end {
-            let v = residual_points[j].residual_pct;
-            if !v.is_finite() {
-                valid = false;
-                break;
-            }
-            sum += v;
-        }
-
-        if valid {
-            out.insert(residual_points[i].trade_date.clone(), sum);
-        }
-    }
-
-    out
+    let names = names.into_iter().collect::<Vec<_>>();
+    load_industry_trend_series_map(source_dir, &names, start_date.trim(), end_date.trim())
 }
 
 fn normalize_state(state: &str) -> String {

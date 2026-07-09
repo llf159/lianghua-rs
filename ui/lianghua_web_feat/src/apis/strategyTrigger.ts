@@ -200,6 +200,7 @@ export type RuleLayerRuleSummary = {
   point_count: number
   avg_residual_mean?: number | null
   avg_excess_residual_mean?: number | null
+  avg_er_change?: number | null
   profit_loss_ratio?: number | null
   spread_mean?: number | null
   avg_contribution_score?: number | null
@@ -229,6 +230,7 @@ export type RuleLayerBacktestData = {
   points: RuleLayerPoint[]
   avg_residual_mean?: number | null
   avg_excess_residual_mean?: number | null
+  avg_er_change?: number | null
   profit_loss_ratio?: number | null
   spread_mean?: number | null
   avg_contribution_score?: number | null
@@ -260,6 +262,20 @@ export type RankLayerBucketSummary = {
   sample_count: number
   avg_score?: number | null
   avg_residual_return?: number | null
+  avg_er_change?: number | null
+}
+
+export type RankLayerSampleGroup = {
+  layer_index: number
+  layer_label: string
+  total_samples: number
+  triggered_days: number
+  positive_count: number
+  negative_count: number
+  random_count: number
+  positive: RuleValidationSampleRow[]
+  negative: RuleValidationSampleRow[]
+  random: RuleValidationSampleRow[]
 }
 
 export type RankLayerBacktestData = {
@@ -281,12 +297,14 @@ export type RankLayerBacktestData = {
   layer_method_label: string
   point_count: number
   sample_count: number
+  avg_er_change?: number | null
   spread_mean?: number | null
   ic_mean?: number | null
   ic_std?: number | null
   icir?: number | null
   ic_t_value?: number | null
   layer_summaries: RankLayerBucketSummary[]
+  layer_sample_groups?: RankLayerSampleGroup[]
   market_value_summaries?: RankLayerMarketValueSummary[]
 }
 
@@ -296,6 +314,7 @@ export type RankLayerMarketValueSummary = {
   total_mv_max?: number | null
   point_count: number
   sample_count: number
+  avg_er_change?: number | null
   spread_mean?: number | null
   ic_mean?: number | null
   ic_t_value?: number | null
@@ -332,12 +351,17 @@ export type RuleValidationSampleStats = {
   total_samples: number
 }
 
+export type RuleValidationTriggerCountStats = RuleValidationSampleStats & {
+  trigger_count: number
+}
+
 export type RuleValidationSampleRow = {
   ts_code: string
   name?: string | null
   board: string
   volatility_group: string
   trade_date: string
+  trigger_count: number
   rule_score: number
   residual_return: number
 }
@@ -363,6 +387,7 @@ export type RuleValidationComboResult = {
   triggered_days: number
   avg_daily_trigger: number
   sample_stats: RuleValidationSampleStats
+  trigger_count_stats: RuleValidationTriggerCountStats[]
   sample_groups: RuleValidationSampleGroups
   return_distribution: RuleValidationReturnDistributionBucket[]
   backtest: RuleLayerBacktestData
@@ -456,6 +481,7 @@ export type RuleLayerBacktestQuery = {
   minSamplesPerRuleDay?: number
   minListedTradeDays?: number
   backtestPeriod?: number
+  parallelBatchSize?: number
   board?: string
   excludeStBoard?: boolean
   totalMvMin?: number

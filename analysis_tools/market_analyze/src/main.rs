@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 
-use duckdb::{params, Connection};
+use duckdb::{Connection, params};
 
 const SOURCE: &str = "/home/lmingyuanl/.local/share/com.mingyuan.lianghua/source";
 const LOOKBACK: usize = 20;
@@ -106,18 +106,17 @@ impl NumStats {
 }
 
 fn board_category(ts_code: &str, stock_name: &str) -> &'static str {
-    let normalized = stock_name
-        .trim()
-        .to_ascii_uppercase()
-        .replace('＊', "*");
-    if normalized.starts_with("*ST") || normalized.starts_with("ST") {
+    let normalized = stock_name.trim().to_ascii_uppercase().replace('＊', "*");
+    if normalized.starts_with("*ST") || normalized.starts_with("ST") || normalized.ends_with('退')
+    {
         return "ST";
     }
     let ts = ts_code.trim().to_ascii_uppercase();
     if ts.ends_with(".BJ") {
         return "北交所";
     }
-    if (ts.ends_with(".SZ") && ts.starts_with("30")) || (ts.ends_with(".SH") && ts.starts_with("688"))
+    if (ts.ends_with(".SZ") && ts.starts_with("30"))
+        || (ts.ends_with(".SH") && ts.starts_with("688"))
     {
         return "创业/科创";
     }
@@ -420,7 +419,13 @@ fn top_sub_interval(
             }
         }
         if let Some((value, start_date, end_date)) = best {
-            rows.push((ts.clone(), meta[&ts].name.clone(), value, start_date, end_date));
+            rows.push((
+                ts.clone(),
+                meta[&ts].name.clone(),
+                value,
+                start_date,
+                end_date,
+            ));
         }
     }
     rows.sort_by(|a, b| desc(a.2, b.2).then_with(|| a.0.cmp(&b.0)));
@@ -511,7 +516,11 @@ fn load_scores(
     Ok(out)
 }
 
-fn date_range_indices(date_index: &HashMap<String, usize>, start: &str, end: &str) -> Option<(usize, usize)> {
+fn date_range_indices(
+    date_index: &HashMap<String, usize>,
+    start: &str,
+    end: &str,
+) -> Option<(usize, usize)> {
     Some((*date_index.get(start)?, *date_index.get(end)?))
 }
 
@@ -548,17 +557,22 @@ fn agg_rules(
         let dates = match mode {
             "same" => vec![w.ref_date.clone()],
             "prev3" => {
-                let Some(&i) = date_index.get(&w.ref_date) else { continue; };
+                let Some(&i) = date_index.get(&w.ref_date) else {
+                    continue;
+                };
                 let s = i.saturating_sub(3);
                 all_dates[s..i].to_vec()
             }
             "pre_start5" => {
-                let Some(&i) = date_index.get(&w.start_date) else { continue; };
+                let Some(&i) = date_index.get(&w.start_date) else {
+                    continue;
+                };
                 let s = i.saturating_sub(5);
                 all_dates[s..i].to_vec()
             }
             "early5" => {
-                let Some((s, e)) = date_range_indices(date_index, &w.start_date, &w.end_date) else {
+                let Some((s, e)) = date_range_indices(date_index, &w.start_date, &w.end_date)
+                else {
                     continue;
                 };
                 let end = e.min(s + 4);
@@ -605,7 +619,9 @@ fn rank_capture(
                 .and_then(|i| all_dates.get(i).cloned()),
             _ => None,
         };
-        let Some(date) = date else { continue; };
+        let Some(date) = date else {
+            continue;
+        };
         n += 1;
         if let Some(info) = scores.get(&(w.ts_code.clone(), date)) {
             if info.rank.is_some_and(|r| r <= rank_limit) {
@@ -640,24 +656,48 @@ fn feature_snapshot(
         add_feature(&mut out, "VR>=2.0", bar.vr.is_some_and(|v| v >= 2.0));
         add_feature(&mut out, "VR<0.7", bar.vr.is_some_and(|v| v < 0.7));
         add_feature(&mut out, "RSI6>=70", bar.rsi6.is_some_and(|v| v >= 70.0));
-        add_feature(&mut out, "RSV_C30>=80", bar.rsv_c30.is_some_and(|v| v >= 80.0));
-        add_feature(&mut out, "RSV_C90>=80", bar.rsv_c90.is_some_and(|v| v >= 80.0));
-        add_feature(&mut out, "收盘>MA10", match (bar.close, bar.ma10) {
-            (Some(c), Some(m)) => c > m,
-            _ => false,
-        });
-        add_feature(&mut out, "收盘>MA20", match (bar.close, bar.ma20) {
-            (Some(c), Some(m)) => c > m,
-            _ => false,
-        });
-        add_feature(&mut out, "多空短>长", match (bar.duokong_short, bar.duokong_long) {
-            (Some(s), Some(l)) => s > l,
-            _ => false,
-        });
-        add_feature(&mut out, "靠近长期成本3%", match (bar.close, bar.duokong_long) {
-            (Some(c), Some(l)) if l.abs() > f64::EPSILON => ((c - l).abs() / l) <= 0.03,
-            _ => false,
-        });
+        add_feature(
+            &mut out,
+            "RSV_C30>=80",
+            bar.rsv_c30.is_some_and(|v| v >= 80.0),
+        );
+        add_feature(
+            &mut out,
+            "RSV_C90>=80",
+            bar.rsv_c90.is_some_and(|v| v >= 80.0),
+        );
+        add_feature(
+            &mut out,
+            "收盘>MA10",
+            match (bar.close, bar.ma10) {
+                (Some(c), Some(m)) => c > m,
+                _ => false,
+            },
+        );
+        add_feature(
+            &mut out,
+            "收盘>MA20",
+            match (bar.close, bar.ma20) {
+                (Some(c), Some(m)) => c > m,
+                _ => false,
+            },
+        );
+        add_feature(
+            &mut out,
+            "多空短>长",
+            match (bar.duokong_short, bar.duokong_long) {
+                (Some(s), Some(l)) => s > l,
+                _ => false,
+            },
+        );
+        add_feature(
+            &mut out,
+            "靠近长期成本3%",
+            match (bar.close, bar.duokong_long) {
+                (Some(c), Some(l)) if l.abs() > f64::EPSILON => ((c - l).abs() / l) <= 0.03,
+                _ => false,
+            },
+        );
         add_feature(
             &mut out,
             "总榜<=100",
@@ -729,7 +769,9 @@ fn write_rule_table(
             fmt_pct(covered as f64 / samples as f64)
         }
     ));
-    out.push_str("|规则|命中样本|覆盖率|平均样本涨幅|场景/阶段|分值|\n|---|---:|---:|---:|---|---:|\n");
+    out.push_str(
+        "|规则|命中样本|覆盖率|平均样本涨幅|场景/阶段|分值|\n|---|---:|---:|---:|---|---:|\n",
+    );
     let mut rows = agg.iter().collect::<Vec<_>>();
     rows.sort_by(|a, b| b.1.count.cmp(&a.1.count).then_with(|| a.0.cmp(b.0)));
     for (rule, a) in rows.into_iter().take(limit) {
@@ -813,8 +855,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let daily_prev_rank100 = rank_capture(&daily, &all_dates, &date_index, &scores, "prev1", 100);
     let interval_start_rank100 =
         rank_capture(&interval, &all_dates, &date_index, &scores, "start", 100);
-    let interval_pre_rank100 =
-        rank_capture(&interval, &all_dates, &date_index, &scores, "pre_start1", 100);
+    let interval_pre_rank100 = rank_capture(
+        &interval,
+        &all_dates,
+        &date_index,
+        &scores,
+        "pre_start1",
+        100,
+    );
 
     let mut latest_daily = daily
         .iter()

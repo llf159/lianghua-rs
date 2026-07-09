@@ -8,13 +8,14 @@ use serde::{Deserialize, Serialize};
 use crate::{
     data::{
         RowData, RuntimeKeyCollectOptions, chip_change_rule_path,
-        collect_runtime_keys_from_expr_programs, scoring_data::row_into_rt,
+        collect_assigned_names_from_expr_program, collect_runtime_keys_from_expr_programs,
+        scoring_data::row_into_rt,
     },
     expr::{
         eval::{Runtime, Value},
         parser::{Expr, Parser, Stmt, Stmts, lex_all},
     },
-    utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
+    utils::utils::{eval_binary_for_warmup, impl_expr_warmup, round_f64_to_scale},
 };
 
 const DEFAULT_WARMUP_DAYS: usize = 120;
@@ -32,6 +33,18 @@ const CHEN_CHIP_INJECTED_RUNTIME_KEYS: [&str; 9] = [
     "ZHANG",
     "TOTAL_MV_YI",
 ];
+const CHEN_CHIP_SELL_DYNAMIC_RUNTIME_KEYS: [&str; 7] = [
+    "RATEO",
+    "RATEH",
+    "RATEL",
+    "RATEC",
+    "MAIN_CHIP_RATIO",
+    "MAIN_CHIP_TOTAL",
+    "RETAIL_CHIP_TOTAL",
+];
+const CHEN_CHIP_BUY_DYNAMIC_RUNTIME_KEYS: [&str; 3] =
+    ["MAIN_CHIP_RATIO", "MAIN_CHIP_TOTAL", "RETAIL_CHIP_TOTAL"];
+const CHEN_CHIP_BUCKET_RATE_KEYS: [&str; 4] = ["RATEO", "RATEH", "RATEL", "RATEC"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChipChangeConfig {
@@ -66,6 +79,7 @@ pub enum ChipDirection {
 pub struct CompiledChipChangeConfig {
     pub version: u32,
     pub strategies: Vec<CompiledChipChangeStrategy>,
+    sell_uses_bucket_rate_series: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +90,16 @@ pub struct CompiledChipChangeStrategy {
     pub when: String,
     pub bias: f64,
     pub when_ast: Stmts,
+    optimized_when_ast: Stmts,
+    cached_exprs: Vec<CompiledChipCachedExpr>,
+    assigned_names: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CompiledChipCachedExpr {
+    key: String,
+    program: Stmts,
+    assigned_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -129,6 +153,7 @@ pub struct ChenChipSnapshot {
     pub total_trapped_ratio: f64,
     pub main_profit_ratio: f64,
     pub main_trapped_ratio: f64,
+    pub main_avg_cost: f64,
     pub chip_peak_price: f64,
     pub percent_70: ChenChipPercentRange,
     pub percent_90: ChenChipPercentRange,
@@ -136,11 +161,7 @@ pub struct ChenChipSnapshot {
 }
 
 pub fn round_chen_chip_value(value: f64) -> f64 {
-    if !value.is_finite() {
-        return value;
-    }
-
-    let rounded = format!("{value:.4}").parse::<f64>().unwrap_or(value);
+    let rounded = round_f64_to_scale(value, 4);
     if rounded == 0.0 { 0.0 } else { rounded }
 }
 
@@ -165,6 +186,7 @@ pub fn round_chen_chip_snapshot(snapshot: &mut ChenChipSnapshot) {
     } else {
         round_chen_chip_value(snapshot.main_trapped_ratio)
     };
+    snapshot.main_avg_cost = round_chen_chip_value(snapshot.main_avg_cost);
     snapshot.chip_peak_price = round_chen_chip_value(snapshot.chip_peak_price);
     round_chen_chip_percent_range(&mut snapshot.percent_70);
     round_chen_chip_percent_range(&mut snapshot.percent_90);
@@ -244,19 +266,32 @@ impl ChipChangeConfig {
         for (index, strategy) in self.strategy.iter().enumerate() {
             let n = index + 1;
             let when_ast = parse_strategy_expression(&strategy.when, n, &strategy.name)?;
+            let direction = strategy.direction;
+            let (optimized_when_ast, cached_exprs) =
+                optimize_strategy_program(&when_ast, direction, index);
+            let assigned_names = collect_assigned_names_from_expr_program(&optimized_when_ast);
             strategies.push(CompiledChipChangeStrategy {
                 name: strategy.name.trim().to_string(),
                 holder: strategy.holder,
-                direction: strategy.direction,
+                direction,
                 when: strategy.when.trim().to_string(),
                 bias: strategy.bias,
                 when_ast,
+                optimized_when_ast,
+                cached_exprs,
+                assigned_names,
             });
         }
+
+        let sell_uses_bucket_rate_series = strategies.iter().any(|strategy| {
+            strategy.direction == ChipDirection::Sell
+                && program_depends_on_runtime_keys(&strategy.when_ast, &CHEN_CHIP_BUCKET_RATE_KEYS)
+        });
 
         Ok(CompiledChipChangeConfig {
             version: self.version,
             strategies,
+            sell_uses_bucket_rate_series,
         })
     }
 
@@ -416,14 +451,18 @@ pub fn compute_chen_chip_snapshots_with_compiled_config(
     if buckets.is_empty() {
         return Ok(Vec::new());
     }
-    ensure_bucket_rate_series(&mut buckets, &bars);
+    if chip_config.sell_uses_bucket_rate_series {
+        ensure_bucket_rate_series(&mut buckets, &bars);
+    }
     let len = row_data.trade_dates.len();
     let mut main_ratio_history: Vec<Arc<Vec<Option<f64>>>> = (0..buckets.len())
         .map(|_| Arc::new(vec![None; len]))
         .collect();
     let mut base_runtime = row_into_rt(row_data.clone())?;
     share_runtime_num_series(&mut base_runtime);
-    let buy_runtime = build_new_participant_buy_runtime(&base_runtime, &bars)?;
+    let mut buy_runtime = build_new_participant_buy_runtime(&base_runtime, &bars)?;
+    inject_strategy_expression_caches(&mut base_runtime, chip_config, ChipDirection::Sell)?;
+    inject_strategy_expression_caches(&mut buy_runtime, chip_config, ChipDirection::Buy)?;
     let process_start_index = output_start_index.saturating_sub(config.warmup_days);
     let mut snapshots = Vec::with_capacity(len.saturating_sub(output_start_index));
 
@@ -446,13 +485,14 @@ pub fn compute_chen_chip_snapshots_with_compiled_config(
             bar.high,
             step,
             &bars,
+            chip_config.sell_uses_bucket_rate_series,
         )?;
         write_main_ratio_for_day(&buckets, &mut main_ratio_history, day_index);
 
         apply_sell_for_day(
             &mut buckets,
             &bars,
-            &base_runtime,
+            &mut base_runtime,
             chip_config,
             &main_ratio_history,
             day_index,
@@ -463,7 +503,7 @@ pub fn compute_chen_chip_snapshots_with_compiled_config(
         apply_buy_for_day(
             &mut buckets,
             bar,
-            &buy_runtime,
+            &mut buy_runtime,
             chip_config,
             len,
             day_index,
@@ -517,13 +557,17 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
     let bars = build_validated_bars(row_data, output_start_index)?;
     let step = bucket_step(config.bucket_pct);
     let mut buckets = build_buckets_from_snapshot_bins(initial_bins)?;
-    ensure_bucket_rate_series(&mut buckets, &bars);
+    if chip_config.sell_uses_bucket_rate_series {
+        ensure_bucket_rate_series(&mut buckets, &bars);
+    }
     let len = row_data.trade_dates.len();
     let mut main_ratio_history =
         build_initial_main_ratio_history(initial_main_ratio_history, initial_bins.len(), len)?;
     let mut base_runtime = row_into_rt(row_data.clone())?;
     share_runtime_num_series(&mut base_runtime);
-    let buy_runtime = build_new_participant_buy_runtime(&base_runtime, &bars)?;
+    let mut buy_runtime = build_new_participant_buy_runtime(&base_runtime, &bars)?;
+    inject_strategy_expression_caches(&mut base_runtime, chip_config, ChipDirection::Sell)?;
+    inject_strategy_expression_caches(&mut buy_runtime, chip_config, ChipDirection::Buy)?;
     let mut snapshots = Vec::with_capacity(len.saturating_sub(output_start_index));
 
     for day_index in output_start_index..len {
@@ -542,13 +586,14 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
             bar.high,
             step,
             &bars,
+            chip_config.sell_uses_bucket_rate_series,
         )?;
         write_main_ratio_for_day(&buckets, &mut main_ratio_history, day_index);
 
         apply_sell_for_day(
             &mut buckets,
             &bars,
-            &base_runtime,
+            &mut base_runtime,
             chip_config,
             &main_ratio_history,
             day_index,
@@ -559,7 +604,7 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
         apply_buy_for_day(
             &mut buckets,
             bar,
-            &buy_runtime,
+            &mut buy_runtime,
             chip_config,
             len,
             day_index,
@@ -586,6 +631,196 @@ fn parse_strategy_expression(
             error.idx, error.msg
         )
     })
+}
+
+fn optimize_strategy_program(
+    program: &Stmts,
+    direction: ChipDirection,
+    strategy_index: usize,
+) -> (Stmts, Vec<CompiledChipCachedExpr>) {
+    let dynamic_runtime_keys = match direction {
+        ChipDirection::Buy => CHEN_CHIP_BUY_DYNAMIC_RUNTIME_KEYS.as_slice(),
+        ChipDirection::Sell => CHEN_CHIP_SELL_DYNAMIC_RUNTIME_KEYS.as_slice(),
+    };
+    let mut local_dynamic = HashMap::<String, bool>::new();
+    let mut static_prefix = Vec::<Stmt>::new();
+    let mut cached_exprs = Vec::<CompiledChipCachedExpr>::new();
+    let mut optimized_items = Vec::with_capacity(program.item.len());
+
+    for stmt in &program.item {
+        match stmt {
+            Stmt::Assign { name, value } => {
+                let is_dynamic =
+                    expr_depends_on_dynamic(value, &local_dynamic, dynamic_runtime_keys);
+                let optimized_value = optimize_strategy_expr(
+                    value,
+                    &local_dynamic,
+                    dynamic_runtime_keys,
+                    &static_prefix,
+                    strategy_index,
+                    &mut cached_exprs,
+                );
+                optimized_items.push(Stmt::Assign {
+                    name: name.clone(),
+                    value: optimized_value,
+                });
+                local_dynamic.insert(name.clone(), is_dynamic);
+                if !is_dynamic {
+                    static_prefix.push(stmt.clone());
+                }
+            }
+            Stmt::Expr(expr) => {
+                optimized_items.push(Stmt::Expr(optimize_strategy_expr(
+                    expr,
+                    &local_dynamic,
+                    dynamic_runtime_keys,
+                    &static_prefix,
+                    strategy_index,
+                    &mut cached_exprs,
+                )));
+            }
+        }
+    }
+
+    (
+        Stmts {
+            item: optimized_items,
+        },
+        cached_exprs,
+    )
+}
+
+fn optimize_strategy_expr(
+    expr: &Expr,
+    local_dynamic: &HashMap<String, bool>,
+    dynamic_runtime_keys: &[&str],
+    static_prefix: &[Stmt],
+    strategy_index: usize,
+    cached_exprs: &mut Vec<CompiledChipCachedExpr>,
+) -> Expr {
+    if expr_contains_call(expr)
+        && !expr_depends_on_dynamic(expr, local_dynamic, dynamic_runtime_keys)
+    {
+        let cache_index = cached_exprs.len();
+        let key = format!("__CYQ_CHEN_CACHE_{strategy_index}_{cache_index}");
+        let mut items = Vec::with_capacity(static_prefix.len() + 1);
+        items.extend_from_slice(static_prefix);
+        items.push(Stmt::Expr(expr.clone()));
+        let program = Stmts { item: items };
+        let assigned_names = collect_assigned_names_from_expr_program(&program);
+        cached_exprs.push(CompiledChipCachedExpr {
+            key: key.clone(),
+            program,
+            assigned_names,
+        });
+        return Expr::Ident(key);
+    }
+
+    match expr {
+        Expr::Number(_) | Expr::Ident(_) => expr.clone(),
+        Expr::Call { name, args } => Expr::Call {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|arg| {
+                    optimize_strategy_expr(
+                        arg,
+                        local_dynamic,
+                        dynamic_runtime_keys,
+                        static_prefix,
+                        strategy_index,
+                        cached_exprs,
+                    )
+                })
+                .collect(),
+        },
+        Expr::Unary { op, rhs } => Expr::Unary {
+            op: op.clone(),
+            rhs: Box::new(optimize_strategy_expr(
+                rhs,
+                local_dynamic,
+                dynamic_runtime_keys,
+                static_prefix,
+                strategy_index,
+                cached_exprs,
+            )),
+        },
+        Expr::Binary { op, lhs, rhs } => Expr::Binary {
+            op: op.clone(),
+            lhs: Box::new(optimize_strategy_expr(
+                lhs,
+                local_dynamic,
+                dynamic_runtime_keys,
+                static_prefix,
+                strategy_index,
+                cached_exprs,
+            )),
+            rhs: Box::new(optimize_strategy_expr(
+                rhs,
+                local_dynamic,
+                dynamic_runtime_keys,
+                static_prefix,
+                strategy_index,
+                cached_exprs,
+            )),
+        },
+    }
+}
+
+fn expr_contains_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call { .. } => true,
+        Expr::Unary { rhs, .. } => expr_contains_call(rhs),
+        Expr::Binary { lhs, rhs, .. } => expr_contains_call(lhs) || expr_contains_call(rhs),
+        Expr::Number(_) | Expr::Ident(_) => false,
+    }
+}
+
+fn expr_depends_on_dynamic(
+    expr: &Expr,
+    local_dynamic: &HashMap<String, bool>,
+    dynamic_runtime_keys: &[&str],
+) -> bool {
+    match expr {
+        Expr::Number(_) => false,
+        Expr::Ident(name) => local_dynamic.get(name).copied().unwrap_or_else(|| {
+            let runtime_key = name.to_ascii_uppercase();
+            dynamic_runtime_keys.contains(&runtime_key.as_str())
+        }),
+        Expr::Call { args, .. } => args
+            .iter()
+            .any(|arg| expr_depends_on_dynamic(arg, local_dynamic, dynamic_runtime_keys)),
+        Expr::Unary { rhs, .. } => {
+            expr_depends_on_dynamic(rhs, local_dynamic, dynamic_runtime_keys)
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_depends_on_dynamic(lhs, local_dynamic, dynamic_runtime_keys)
+                || expr_depends_on_dynamic(rhs, local_dynamic, dynamic_runtime_keys)
+        }
+    }
+}
+
+fn program_depends_on_runtime_keys(program: &Stmts, runtime_keys: &[&str]) -> bool {
+    let mut local_dynamic = HashMap::<String, bool>::new();
+
+    for stmt in &program.item {
+        match stmt {
+            Stmt::Assign { name, value } => {
+                let is_dynamic = expr_depends_on_dynamic(value, &local_dynamic, runtime_keys);
+                if is_dynamic {
+                    return true;
+                }
+                local_dynamic.insert(name.clone(), false);
+            }
+            Stmt::Expr(expr) => {
+                if expr_depends_on_dynamic(expr, &local_dynamic, runtime_keys) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 fn validate_compute_config(config: ChenChipConfig) -> Result<(), String> {
@@ -903,6 +1138,7 @@ fn expand_buckets_for_bar(
     high: f64,
     step: f64,
     bars: &[Option<ChenChipBar>],
+    needs_bucket_rate_series: bool,
 ) -> Result<(), String> {
     if buckets.is_empty() {
         return Err("价格分桶为空，无法计算筹码快照".to_string());
@@ -957,16 +1193,17 @@ fn expand_buckets_for_bar(
         let mut new_histories = Vec::with_capacity(low_expand_count);
         for w in new_boundaries.windows(2) {
             let (pl, ph) = (w[0], w[1]);
-            let (rateo, rateh, ratel, ratec) = compute_bucket_rate_series(bars, (pl + ph) / 2.0);
+            let rate_series =
+                needs_bucket_rate_series.then(|| compute_bucket_rate_series(bars, (pl + ph) / 2.0));
             new_buckets.push(ChipBucket {
                 price_low: pl,
                 price_high: ph,
                 main_chip: 0.0,
                 retail_chip: 0.0,
-                rateo: Some(rateo),
-                rateh: Some(rateh),
-                ratel: Some(ratel),
-                ratec: Some(ratec),
+                rateo: rate_series.as_ref().map(|series| Arc::clone(&series.0)),
+                rateh: rate_series.as_ref().map(|series| Arc::clone(&series.1)),
+                ratel: rate_series.as_ref().map(|series| Arc::clone(&series.2)),
+                ratec: rate_series.map(|series| series.3),
             });
             new_histories.push(Arc::new(vec![None; series_len]));
         }
@@ -982,17 +1219,17 @@ fn expand_buckets_for_bar(
         let mut new_histories = Vec::with_capacity(high_expand_count);
         for _ in 0..high_expand_count {
             let new_high = boundary * step;
-            let (rateo, rateh, ratel, ratec) =
-                compute_bucket_rate_series(bars, (boundary + new_high) / 2.0);
+            let rate_series = needs_bucket_rate_series
+                .then(|| compute_bucket_rate_series(bars, (boundary + new_high) / 2.0));
             new_buckets.push(ChipBucket {
                 price_low: boundary,
                 price_high: new_high,
                 main_chip: 0.0,
                 retail_chip: 0.0,
-                rateo: Some(rateo),
-                rateh: Some(rateh),
-                ratel: Some(ratel),
-                ratec: Some(ratec),
+                rateo: rate_series.as_ref().map(|series| Arc::clone(&series.0)),
+                rateh: rate_series.as_ref().map(|series| Arc::clone(&series.1)),
+                ratel: rate_series.as_ref().map(|series| Arc::clone(&series.2)),
+                ratec: rate_series.map(|series| series.3),
             });
             new_histories.push(Arc::new(vec![None; series_len]));
             boundary = new_high;
@@ -1023,7 +1260,7 @@ fn write_main_ratio_for_day(
 fn apply_sell_for_day(
     buckets: &mut [ChipBucket],
     bars: &[Option<ChenChipBar>],
-    base_runtime: &Runtime,
+    bucket_runtime: &mut Runtime,
     chip_config: &CompiledChipChangeConfig,
     main_ratio_history: &[Arc<Vec<Option<f64>>>],
     day_index: usize,
@@ -1043,16 +1280,17 @@ fn apply_sell_for_day(
             continue;
         }
 
-        let bucket_runtime = build_bucket_runtime(
-            base_runtime,
+        configure_bucket_runtime(
+            bucket_runtime,
             &buckets[bucket_index],
             Arc::clone(&main_ratio_history[bucket_index]),
             main_chip_total,
             retail_chip_total,
             bars,
+            chip_config.sell_uses_bucket_rate_series,
         )?;
         let (main_bias, retail_bias) = strategy_biases_at(
-            &bucket_runtime,
+            bucket_runtime,
             chip_config,
             ChipDirection::Sell,
             bars.len(),
@@ -1122,7 +1360,7 @@ fn apply_sell_for_day(
 fn apply_buy_for_day(
     buckets: &mut [ChipBucket],
     bar: &ChenChipBar,
-    buy_runtime: &Runtime,
+    buy_runtime: &mut Runtime,
     chip_config: &CompiledChipChangeConfig,
     runtime_len: usize,
     day_index: usize,
@@ -1138,10 +1376,9 @@ fn apply_buy_for_day(
         return Ok(());
     }
     let (main_chip_total, retail_chip_total) = holder_chip_totals(buckets);
-    let mut runtime = buy_runtime.clone();
-    insert_dynamic_holder_fields(&mut runtime, main_chip_total, retail_chip_total);
+    set_dynamic_holder_fields(buy_runtime, main_chip_total, retail_chip_total);
     let (main_bias, retail_bias) = strategy_biases_at(
-        &runtime,
+        buy_runtime,
         chip_config,
         ChipDirection::Buy,
         runtime_len,
@@ -1159,20 +1396,26 @@ fn apply_buy_for_day(
     Ok(())
 }
 
-fn insert_dynamic_holder_fields(
-    runtime: &mut Runtime,
-    main_chip_total: f64,
-    retail_chip_total: f64,
-) {
+fn set_dynamic_holder_fields(runtime: &mut Runtime, main_chip_total: f64, retail_chip_total: f64) {
     let total = main_chip_total + retail_chip_total;
     let main_ratio = if total > EPS {
         main_chip_total / total
     } else {
         0.5
     };
-    insert_num_with_lowercase_alias(runtime, "MAIN_CHIP_RATIO", main_ratio);
-    insert_num_with_lowercase_alias(runtime, "MAIN_CHIP_TOTAL", main_chip_total);
-    insert_num_with_lowercase_alias(runtime, "RETAIL_CHIP_TOTAL", retail_chip_total);
+    set_num_with_alias(runtime, "MAIN_CHIP_RATIO", "main_chip_ratio", main_ratio);
+    set_num_with_alias(
+        runtime,
+        "MAIN_CHIP_TOTAL",
+        "main_chip_total",
+        main_chip_total,
+    );
+    set_num_with_alias(
+        runtime,
+        "RETAIL_CHIP_TOTAL",
+        "retail_chip_total",
+        retail_chip_total,
+    );
 }
 
 fn build_new_participant_buy_runtime(
@@ -1208,10 +1451,10 @@ fn build_new_participant_buy_runtime(
     }
 
     let mut runtime = base_runtime.clone();
-    insert_num_series_with_lowercase_alias(&mut runtime, "RATEO", rateo);
-    insert_num_series_with_lowercase_alias(&mut runtime, "RATEH", rateh);
-    insert_num_series_with_lowercase_alias(&mut runtime, "RATEL", ratel);
-    insert_num_series_with_lowercase_alias(&mut runtime, "RATEC", ratec);
+    set_num_series_with_alias(&mut runtime, "RATEO", "rateo", rateo);
+    set_num_series_with_alias(&mut runtime, "RATEH", "rateh", rateh);
+    set_num_series_with_alias(&mut runtime, "RATEL", "ratel", ratel);
+    set_num_series_with_alias(&mut runtime, "RATEC", "ratec", ratec);
     Ok(runtime)
 }
 
@@ -1223,14 +1466,79 @@ fn share_runtime_num_series(runtime: &mut Runtime) {
     }
 }
 
-fn build_bucket_runtime(
-    base_runtime: &Runtime,
+fn inject_strategy_expression_caches(
+    runtime: &mut Runtime,
+    chip_config: &CompiledChipChangeConfig,
+    direction: ChipDirection,
+) -> Result<(), String> {
+    for strategy in chip_config
+        .strategies
+        .iter()
+        .filter(|strategy| strategy.direction == direction)
+    {
+        for cached_expr in &strategy.cached_exprs {
+            let value =
+                eval_program_scoped(runtime, &cached_expr.program, &cached_expr.assigned_names)
+                    .map_err(|error| {
+                        format!("策略 {} 公共表达式预计算错误: {}", strategy.name, error.msg)
+                    })?;
+            runtime
+                .vars
+                .insert(cached_expr.key.clone(), share_cached_value(value));
+        }
+    }
+    Ok(())
+}
+
+fn eval_program_scoped(
+    runtime: &mut Runtime,
+    program: &Stmts,
+    assigned_names: &[String],
+) -> Result<Value, crate::expr::eval::EvalErr> {
+    let snapshots = assigned_names
+        .iter()
+        .map(|name| runtime.vars.get(name).cloned())
+        .collect::<Vec<_>>();
+    let result = runtime.eval_program(program);
+    for (name, snapshot) in assigned_names.iter().zip(snapshots) {
+        match snapshot {
+            Some(value) => {
+                if let Some(current) = runtime.vars.get_mut(name) {
+                    *current = value;
+                } else {
+                    runtime.vars.insert(name.clone(), value);
+                }
+            }
+            None => {
+                runtime.vars.remove(name);
+            }
+        }
+    }
+    result
+}
+
+fn share_cached_value(value: Value) -> Value {
+    match value {
+        Value::NumSeries(series) => Value::SharedNumSeries(Arc::new(series)),
+        Value::BoolSeries(series) => Value::SharedNumSeries(Arc::new(
+            series
+                .into_iter()
+                .map(|value| Some(if value { 1.0 } else { 0.0 }))
+                .collect(),
+        )),
+        other => other,
+    }
+}
+
+fn configure_bucket_runtime(
+    runtime: &mut Runtime,
     bucket: &ChipBucket,
     main_ratio_history: Arc<Vec<Option<f64>>>,
     main_chip_total: f64,
     retail_chip_total: f64,
     bars: &[Option<ChenChipBar>],
-) -> Result<Runtime, String> {
+    needs_bucket_rate_series: bool,
+) -> Result<(), String> {
     if !bucket.price().is_finite() || bucket.price() <= 0.0 {
         return Err("价格分桶中点价非法".to_string());
     }
@@ -1238,68 +1546,82 @@ fn build_bucket_runtime(
         return Err("主力/散户总筹码出现非有限数值".to_string());
     }
 
-    let mut runtime = base_runtime.clone();
-
-    match (&bucket.rateo, &bucket.rateh, &bucket.ratel, &bucket.ratec) {
-        (Some(rateo), Some(rateh), Some(ratel), Some(ratec)) => {
-            insert_num_series_arc_with_lowercase_alias(&mut runtime, "RATEO", Arc::clone(rateo));
-            insert_num_series_arc_with_lowercase_alias(&mut runtime, "RATEH", Arc::clone(rateh));
-            insert_num_series_arc_with_lowercase_alias(&mut runtime, "RATEL", Arc::clone(ratel));
-            insert_num_series_arc_with_lowercase_alias(&mut runtime, "RATEC", Arc::clone(ratec));
-        }
-        _ => {
-            let cost_price = bucket.price();
-            let (rateo, rateh, ratel, ratec) = compute_bucket_rate_series(bars, cost_price);
-            insert_num_series_arc_with_lowercase_alias(&mut runtime, "RATEO", rateo);
-            insert_num_series_arc_with_lowercase_alias(&mut runtime, "RATEH", rateh);
-            insert_num_series_arc_with_lowercase_alias(&mut runtime, "RATEL", ratel);
-            insert_num_series_arc_with_lowercase_alias(&mut runtime, "RATEC", ratec);
+    if needs_bucket_rate_series {
+        match (&bucket.rateo, &bucket.rateh, &bucket.ratel, &bucket.ratec) {
+            (Some(rateo), Some(rateh), Some(ratel), Some(ratec)) => {
+                set_num_series_arc_with_alias(runtime, "RATEO", "rateo", Arc::clone(rateo));
+                set_num_series_arc_with_alias(runtime, "RATEH", "rateh", Arc::clone(rateh));
+                set_num_series_arc_with_alias(runtime, "RATEL", "ratel", Arc::clone(ratel));
+                set_num_series_arc_with_alias(runtime, "RATEC", "ratec", Arc::clone(ratec));
+            }
+            _ => {
+                let cost_price = bucket.price();
+                let (rateo, rateh, ratel, ratec) = compute_bucket_rate_series(bars, cost_price);
+                set_num_series_arc_with_alias(runtime, "RATEO", "rateo", rateo);
+                set_num_series_arc_with_alias(runtime, "RATEH", "rateh", rateh);
+                set_num_series_arc_with_alias(runtime, "RATEL", "ratel", ratel);
+                set_num_series_arc_with_alias(runtime, "RATEC", "ratec", ratec);
+            }
         }
     }
 
-    insert_num_series_arc_with_lowercase_alias(&mut runtime, "MAIN_CHIP_RATIO", main_ratio_history);
-    insert_num_with_lowercase_alias(&mut runtime, "MAIN_CHIP_TOTAL", main_chip_total);
-    insert_num_with_lowercase_alias(&mut runtime, "RETAIL_CHIP_TOTAL", retail_chip_total);
+    set_num_series_arc_with_alias(
+        runtime,
+        "MAIN_CHIP_RATIO",
+        "main_chip_ratio",
+        main_ratio_history,
+    );
+    set_num_with_alias(
+        runtime,
+        "MAIN_CHIP_TOTAL",
+        "main_chip_total",
+        main_chip_total,
+    );
+    set_num_with_alias(
+        runtime,
+        "RETAIL_CHIP_TOTAL",
+        "retail_chip_total",
+        retail_chip_total,
+    );
 
-    Ok(runtime)
+    Ok(())
 }
 
-fn insert_num_with_lowercase_alias(runtime: &mut Runtime, key: &str, value: f64) {
-    runtime.vars.insert(key.to_string(), Value::Num(value));
-    runtime
-        .vars
-        .insert(key.to_ascii_lowercase(), Value::Num(value));
+fn set_runtime_value(runtime: &mut Runtime, key: &str, value: Value) {
+    if let Some(current) = runtime.vars.get_mut(key) {
+        *current = value;
+    } else {
+        runtime.vars.insert(key.to_string(), value);
+    }
 }
 
-fn insert_num_series_arc_with_lowercase_alias(
+fn set_num_with_alias(runtime: &mut Runtime, key: &str, alias: &str, value: f64) {
+    set_runtime_value(runtime, key, Value::Num(value));
+    set_runtime_value(runtime, alias, Value::Num(value));
+}
+
+fn set_num_series_arc_with_alias(
     runtime: &mut Runtime,
     key: &str,
+    alias: &str,
     series: Arc<Vec<Option<f64>>>,
 ) {
-    runtime
-        .vars
-        .insert(key.to_string(), Value::SharedNumSeries(Arc::clone(&series)));
-    runtime
-        .vars
-        .insert(key.to_ascii_lowercase(), Value::SharedNumSeries(series));
+    set_runtime_value(runtime, key, Value::SharedNumSeries(Arc::clone(&series)));
+    set_runtime_value(runtime, alias, Value::SharedNumSeries(series));
 }
 
-fn insert_num_series_with_lowercase_alias(
+fn set_num_series_with_alias(
     runtime: &mut Runtime,
     key: &str,
+    alias: &str,
     series: Vec<Option<f64>>,
 ) {
     let series = Arc::new(series);
-    runtime
-        .vars
-        .insert(key.to_string(), Value::SharedNumSeries(Arc::clone(&series)));
-    runtime
-        .vars
-        .insert(key.to_ascii_lowercase(), Value::SharedNumSeries(series));
+    set_num_series_arc_with_alias(runtime, key, alias, series);
 }
 
 fn strategy_biases_at(
-    bucket_runtime: &Runtime,
+    bucket_runtime: &mut Runtime,
     chip_config: &CompiledChipChangeConfig,
     direction: ChipDirection,
     len: usize,
@@ -1314,15 +1636,17 @@ fn strategy_biases_at(
         .filter(|strategy| strategy.direction == direction)
     {
         let triggered = match bucket_runtime
-            .eval_program_bool_at(&strategy.when_ast, day_index)
+            .eval_program_bool_at(&strategy.optimized_when_ast, day_index)
             .map_err(|error| format!("策略 {} 表达式计算错误: {}", strategy.name, error.msg))?
         {
             Some(triggered) => triggered,
             None => {
-                let mut runtime = bucket_runtime.clone();
-                let value = runtime.eval_program(&strategy.when_ast).map_err(|error| {
-                    format!("策略 {} 表达式计算错误: {}", strategy.name, error.msg)
-                })?;
+                let value = eval_program_scoped(
+                    bucket_runtime,
+                    &strategy.optimized_when_ast,
+                    &strategy.assigned_names,
+                )
+                .map_err(|error| format!("策略 {} 表达式计算错误: {}", strategy.name, error.msg))?;
                 let triggers = Value::as_bool_series(&value, len).map_err(|error| {
                     format!("策略 {} 表达式返回值非布尔: {}", strategy.name, error.msg)
                 })?;
@@ -1688,6 +2012,15 @@ fn build_snapshot(bar: &ChenChipBar, buckets: &[ChipBucket]) -> Result<ChenChipS
     } else {
         1.0 - main_profit_ratio
     };
+    let main_avg_cost = if main_total <= EPS {
+        0.0
+    } else {
+        buckets
+            .iter()
+            .map(|bucket| bucket.price() * bucket.main_chip)
+            .sum::<f64>()
+            / main_total
+    };
     let chip_peak_price = buckets
         .iter()
         .fold(None::<&ChipBucket>, |best, bucket| match best {
@@ -1727,6 +2060,7 @@ fn build_snapshot(bar: &ChenChipBar, buckets: &[ChipBucket]) -> Result<ChenChipS
         total_trapped_ratio: finite_value(round_ratio(total_trapped_ratio))?,
         main_profit_ratio: finite_value(round_ratio(main_profit_ratio))?,
         main_trapped_ratio: finite_value(round_ratio(main_trapped_ratio))?,
+        main_avg_cost: finite_value(main_avg_cost)?,
         chip_peak_price: finite_value(chip_peak_price)?,
         percent_70: build_percent_range(0.7, buckets, total_chips),
         percent_90: build_percent_range(0.9, buckets, total_chips),
@@ -1776,7 +2110,8 @@ mod tests {
     use super::{
         ChenChipBar, ChenChipConfig, ChipBucket, ChipChangeConfig, ChipDirection, ChipHolder, EPS,
         apply_buy_for_day, apply_sell_for_day, build_new_participant_buy_runtime,
-        buy_holder_shares, compute_chen_chip_snapshots_from_row_data, row_into_rt,
+        buy_holder_shares, compute_chen_chip_snapshots_from_row_data, expand_buckets_for_bar,
+        round_chen_chip_value, row_into_rt,
     };
     use crate::data::RowData;
 
@@ -1836,6 +2171,271 @@ bias = 1.0
             (actual - expected).abs() < 1e-6,
             "actual={actual}, expected={expected}"
         );
+    }
+
+    fn program_contains_call(program: &crate::expr::parser::Stmts) -> bool {
+        program.item.iter().any(|stmt| match stmt {
+            crate::expr::parser::Stmt::Assign { value, .. } => super::expr_contains_call(value),
+            crate::expr::parser::Stmt::Expr(expr) => super::expr_contains_call(expr),
+        })
+    }
+
+    #[test]
+    fn chip_strategy_caches_static_history_subexpressions_but_not_rate_history() {
+        let config = ChipChangeConfig::from_toml_str(
+            r#"
+version = 1
+
+[[strategy]]
+name = "mixed static history"
+holder = "main"
+direction = "sell"
+when = "M := 2; RATEH > 20 AND HHV(H, M) > REF(C, 1)"
+bias = 1.0
+
+[[strategy]]
+name = "bucket history"
+holder = "main"
+direction = "sell"
+when = "HHV(RATEO, 10) > 30 AND REF(C, 1) > 0"
+bias = 1.0
+"#,
+        )
+        .expect("config should parse")
+        .compile()
+        .expect("config should compile");
+
+        let mixed = &config.strategies[0];
+        assert_eq!(mixed.cached_exprs.len(), 1);
+        assert!(!program_contains_call(&mixed.optimized_when_ast));
+
+        let bucket_history = &config.strategies[1];
+        assert_eq!(bucket_history.cached_exprs.len(), 1);
+        assert!(program_contains_call(&bucket_history.optimized_when_ast));
+    }
+
+    #[test]
+    fn sell_bucket_rate_series_are_enabled_only_when_strategy_uses_rate_fields() {
+        let no_rate = ChipChangeConfig::from_toml_str(
+            r#"
+version = 1
+
+[[strategy]]
+name = "plain sell"
+holder = "main"
+direction = "sell"
+when = "C > O"
+bias = 1.0
+
+[[strategy]]
+name = "rate buy"
+holder = "main"
+direction = "buy"
+when = "rateh > 1"
+bias = 1.0
+"#,
+        )
+        .expect("config should parse")
+        .compile()
+        .expect("config should compile");
+        assert!(!no_rate.sell_uses_bucket_rate_series);
+
+        let with_rate = ChipChangeConfig::from_toml_str(
+            r#"
+version = 1
+
+[[strategy]]
+name = "rate sell"
+holder = "main"
+direction = "sell"
+when = "HHV(rateo, 2) > 1"
+bias = 1.0
+"#,
+        )
+        .expect("config should parse")
+        .compile()
+        .expect("config should compile");
+        assert!(with_rate.sell_uses_bucket_rate_series);
+
+        let shadowed_rate = ChipChangeConfig::from_toml_str(
+            r#"
+version = 1
+
+[[strategy]]
+name = "local rate name"
+holder = "main"
+direction = "sell"
+when = "RATEH := C; RATEH > O"
+bias = 1.0
+"#,
+        )
+        .expect("config should parse")
+        .compile()
+        .expect("config should compile");
+        assert!(!shadowed_rate.sell_uses_bucket_rate_series);
+    }
+
+    #[test]
+    fn incremental_bucket_expansion_skips_rate_history_when_unused() {
+        let bars = vec![
+            Some(ChenChipBar {
+                trade_date: "20240102".to_string(),
+                open: 10.0,
+                high: 10.2,
+                low: 9.8,
+                close: 10.1,
+                turnover_rate: 1.0,
+            }),
+            Some(ChenChipBar {
+                trade_date: "20240103".to_string(),
+                open: 12.0,
+                high: 12.2,
+                low: 11.8,
+                close: 12.1,
+                turnover_rate: 1.0,
+            }),
+        ];
+        let mut buckets = vec![ChipBucket {
+            price_low: 9.0,
+            price_high: 11.0,
+            main_chip: 50.0,
+            retail_chip: 50.0,
+            rateo: None,
+            rateh: None,
+            ratel: None,
+            ratec: None,
+        }];
+        let mut main_ratio_history = vec![Arc::new(vec![None; bars.len()])];
+
+        expand_buckets_for_bar(
+            &mut buckets,
+            &mut main_ratio_history,
+            bars.len(),
+            11.8,
+            12.2,
+            1.1,
+            &bars,
+            false,
+        )
+        .expect("expand buckets");
+
+        assert!(buckets.len() > 1);
+        assert!(buckets.iter().all(|bucket| {
+            bucket.rateo.is_none()
+                && bucket.rateh.is_none()
+                && bucket.ratel.is_none()
+                && bucket.ratec.is_none()
+        }));
+    }
+
+    #[test]
+    fn cached_static_subexpressions_preserve_chip_results() {
+        let config = ChipChangeConfig::from_toml_str(
+            r#"
+version = 1
+
+[[strategy]]
+name = "mixed sell"
+holder = "retail"
+direction = "sell"
+when = "M := 2; RATEH > 5 AND HHV(H, M) > REF(C, 1)"
+bias = 1.0
+
+[[strategy]]
+name = "history buy"
+holder = "main"
+direction = "buy"
+when = "COUNT(C > O, 2) > 0"
+bias = 1.0
+"#,
+        )
+        .expect("config should parse")
+        .compile()
+        .expect("config should compile");
+        let mut uncached_config = config.clone();
+        for strategy in &mut uncached_config.strategies {
+            strategy.optimized_when_ast = strategy.when_ast.clone();
+            strategy.cached_exprs.clear();
+        }
+        let row_data = sample_row_data();
+        let compute_config = ChenChipConfig {
+            warmup_days: 2,
+            bucket_pct: 5.0,
+        };
+
+        let cached = super::compute_chen_chip_snapshots_with_compiled_config(
+            &row_data,
+            "20240104",
+            &config,
+            compute_config,
+        )
+        .expect("cached compute should succeed");
+        let uncached = super::compute_chen_chip_snapshots_with_compiled_config(
+            &row_data,
+            "20240104",
+            &uncached_config,
+            compute_config,
+        )
+        .expect("uncached compute should succeed");
+
+        assert_eq!(
+            serde_json::to_string(&cached).expect("serialize cached"),
+            serde_json::to_string(&uncached).expect("serialize uncached")
+        );
+    }
+
+    #[test]
+    fn chen_chip_rounding_matches_four_decimal_format_semantics() {
+        for value in [
+            1.23445,
+            1.23455,
+            1.23425,
+            -1.23445,
+            -1.23455,
+            0.00005,
+            -0.00005,
+            99.99995,
+            100.00005,
+            0.03125,
+            0.09375,
+            549_755_813_888.0,
+        ] {
+            let expected = format!("{value:.4}")
+                .parse::<f64>()
+                .expect("formatted value should parse");
+            let expected = if expected == 0.0 { 0.0 } else { expected };
+            assert_eq!(
+                round_chen_chip_value(value).to_bits(),
+                expected.to_bits(),
+                "value={value:.17}"
+            );
+        }
+
+        assert_eq!(round_chen_chip_value(-0.0).to_bits(), 0.0_f64.to_bits());
+        assert!(round_chen_chip_value(f64::NAN).is_nan());
+        assert_eq!(round_chen_chip_value(f64::INFINITY), f64::INFINITY);
+
+        let mut state = 0x9876_5432_10fe_dcba_u64;
+        for _ in 0..20_000 {
+            state = state
+                .wrapping_mul(2_862_933_555_777_941_757)
+                .wrapping_add(3_037_000_493);
+            let fraction_and_sign = state & !(0x7ff_u64 << 52);
+            let exponent = ((state >> 1) % 2047) << 52;
+            let value = f64::from_bits(fraction_and_sign | exponent);
+            if !value.is_finite() {
+                continue;
+            }
+            let expected = format!("{value:.4}")
+                .parse::<f64>()
+                .expect("formatted value should parse");
+            let expected = if expected == 0.0 { 0.0 } else { expected };
+            assert_eq!(
+                round_chen_chip_value(value).to_bits(),
+                expected.to_bits(),
+                "value={value:.17e}"
+            );
+        }
     }
 
     #[test]
@@ -1953,7 +2553,7 @@ bias = 1.0
             turnover_rate: 10.0,
         })];
         let base_runtime = row_into_rt(row_data).expect("runtime should build");
-        let buy_runtime =
+        let mut buy_runtime =
             build_new_participant_buy_runtime(&base_runtime, &bars).expect("buy runtime");
         let mut buckets = vec![
             ChipBucket {
@@ -1981,7 +2581,7 @@ bias = 1.0
         apply_buy_for_day(
             &mut buckets,
             bars[0].as_ref().expect("bar"),
-            &buy_runtime,
+            &mut buy_runtime,
             &chip_config,
             bars.len(),
             0,
@@ -2031,7 +2631,7 @@ bias = 1.0
             close: 10.0,
             turnover_rate: 1.0,
         })];
-        let base_runtime = row_into_rt(row_data).expect("runtime should build");
+        let mut base_runtime = row_into_rt(row_data).expect("runtime should build");
         let main_ratio_history = vec![Arc::new(vec![Some(0.0)]), Arc::new(vec![Some(0.0)])];
         let mut buckets = vec![
             ChipBucket {
@@ -2059,7 +2659,7 @@ bias = 1.0
         apply_sell_for_day(
             &mut buckets,
             &bars,
-            &base_runtime,
+            &mut base_runtime,
             &chip_config,
             &main_ratio_history,
             0,
@@ -2157,6 +2757,8 @@ bias = 1.0
         );
         assert!(snapshots[1].main_profit_ratio >= 0.0);
         assert!(snapshots[1].main_profit_ratio <= 1.0);
+        assert!(snapshots[1].main_avg_cost >= snapshots[1].min_price);
+        assert!(snapshots[1].main_avg_cost <= snapshots[1].max_price);
         assert!(snapshots[1].chip_peak_price >= snapshots[1].min_price);
         assert!(snapshots[1].chip_peak_price <= snapshots[1].max_price);
         assert!(snapshots[1].percent_70.price_low <= snapshots[1].percent_70.price_high);

@@ -4,15 +4,12 @@ use std::{
     path::Path,
 };
 
-use duckdb::{Connection, params};
+use duckdb::{AccessMode, Config, Connection, params};
 use serde::Serialize;
 
 use crate::{
     data::{RowData, ScoreConfig},
-    data::{
-        cyq_chen_data::init_cyq_chen_db, cyq_chen_db_path, cyq_db_path, result_db_path,
-        score_rule_path, source_db_path,
-    },
+    data::{cyq_chen_db_path, cyq_db_path, result_db_path, score_rule_path, source_db_path},
     download::ind_calc::{cache_ind_build, calc_inds_with_cache},
     scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map},
     ui_tools_feat::{
@@ -24,10 +21,7 @@ use crate::{
             load_compiled_chart_indicator_config,
         },
         realtime::{RealtimeFetchMeta, fetch_realtime_quote_map, normalize_quote_trade_date},
-        stock_similarity::{
-            StockSimilarityMaps, StockSimilarityPageData,
-            get_stock_similarity_page_with_conn_and_maps,
-        },
+        stock_similarity::StockSimilarityPageData,
     },
     utils::utils::board_category,
 };
@@ -195,6 +189,14 @@ pub struct StockDetailStrategySnapshotData {
     pub resolved_trade_date: Option<String>,
     pub resolved_ts_code: Option<String>,
     pub strategy_triggers: Option<DetailStrategyPayload>,
+    pub strategy_scenes: Option<DetailScenePayload>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StockDetailPrevRanksData {
+    pub resolved_trade_date: Option<String>,
+    pub resolved_ts_code: Option<String>,
+    pub prev_ranks: Option<Vec<DetailPrevRankRow>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -236,6 +238,7 @@ pub struct DetailCyqSnapshot {
     pub total_trapped_ratio: Option<f64>,
     pub main_profit_ratio: Option<f64>,
     pub main_trapped_ratio: Option<f64>,
+    pub main_avg_cost: Option<f64>,
     pub chip_peak_price: Option<f64>,
     pub percent_70_price_low: Option<f64>,
     pub percent_70_price_high: Option<f64>,
@@ -323,14 +326,6 @@ impl DetailSourceMeta {
                 .unwrap_or_default(),
         }
     }
-
-    fn similarity_maps(&self) -> StockSimilarityMaps<'_> {
-        StockSimilarityMaps {
-            name_map: &self.name_map,
-            concept_map: &self.concept_map,
-            industry_map: &self.industry_map,
-        }
-    }
 }
 
 fn resolve_trade_date(conn: &Connection, trade_date: Option<String>) -> Result<String, String> {
@@ -398,11 +393,13 @@ fn open_cyq_chen_conn(source_path: &str) -> Result<Option<Connection>, String> {
     if !cyq_chen_db.exists() {
         return Ok(None);
     }
-    init_cyq_chen_db(&cyq_chen_db)?;
     let cyq_chen_db_str = cyq_chen_db
         .to_str()
         .ok_or_else(|| "新筹码库路径不是有效UTF-8".to_string())?;
-    Connection::open(cyq_chen_db_str)
+    let config = Config::default()
+        .access_mode(AccessMode::ReadOnly)
+        .map_err(|e| format!("配置新筹码库只读模式失败: {e}"))?;
+    Connection::open_with_flags(cyq_chen_db_str, config)
         .map(Some)
         .map_err(|e| format!("打开新筹码库失败: {e}"))
 }
@@ -494,6 +491,7 @@ fn query_stock_detail_cyq(source_path: &str, ts_code: &str) -> Result<StockDetai
             total_trapped_ratio: None,
             main_profit_ratio: None,
             main_trapped_ratio: None,
+            main_avg_cost: None,
             chip_peak_price: None,
             percent_70_price_low: row
                 .get(6)
@@ -608,7 +606,8 @@ fn query_stock_detail_cyq_chen(
         .prepare(
             r#"
             SELECT trade_date, close, min_price, max_price, main_total, retail_total,
-                   total_chips, total_profit_ratio, total_trapped_ratio, chip_peak_price,
+                   total_chips, total_profit_ratio, total_trapped_ratio, main_avg_cost,
+                   chip_peak_price,
                    percent_70_price_low, percent_70_price_high, percent_70_concentration,
                    percent_90_price_low, percent_90_price_high, percent_90_concentration,
                    main_profit_ratio, main_trapped_ratio
@@ -656,31 +655,34 @@ fn query_stock_detail_cyq_chen(
                 .get(8)
                 .map_err(|e| format!("读取新筹码套牢比例失败: {e}"))?,
             main_profit_ratio: row
-                .get(16)
+                .get(17)
                 .map_err(|e| format!("读取新筹码主力获利比例失败: {e}"))?,
             main_trapped_ratio: row
-                .get(17)
+                .get(18)
                 .map_err(|e| format!("读取新筹码主力套牢比例失败: {e}"))?,
-            chip_peak_price: row
+            main_avg_cost: row
                 .get(9)
+                .map_err(|e| format!("读取新筹码主力平均成本失败: {e}"))?,
+            chip_peak_price: row
+                .get(10)
                 .map_err(|e| format!("读取新筹码峰值价格失败: {e}"))?,
             percent_70_price_low: row
-                .get(10)
+                .get(11)
                 .map_err(|e| format!("读取新筹码70%下沿失败: {e}"))?,
             percent_70_price_high: row
-                .get(11)
+                .get(12)
                 .map_err(|e| format!("读取新筹码70%上沿失败: {e}"))?,
             percent_70_concentration: row
-                .get(12)
+                .get(13)
                 .map_err(|e| format!("读取新筹码70%集中度失败: {e}"))?,
             percent_90_price_low: row
-                .get(13)
+                .get(14)
                 .map_err(|e| format!("读取新筹码90%下沿失败: {e}"))?,
             percent_90_price_high: row
-                .get(14)
+                .get(15)
                 .map_err(|e| format!("读取新筹码90%上沿失败: {e}"))?,
             percent_90_concentration: row
-                .get(15)
+                .get(16)
                 .map_err(|e| format!("读取新筹码90%集中度失败: {e}"))?,
             bins: Vec::new(),
         });
@@ -2103,7 +2105,7 @@ pub fn get_stock_detail_page(
     trade_date: Option<String>,
     ts_code: String,
     chart_window_days: Option<u32>,
-    prev_rank_days: Option<u32>,
+    _prev_rank_days: Option<u32>,
 ) -> Result<StockDetailPageData, String> {
     let normalized_ts_code = normalize_ts_code(&ts_code);
     let source_conn = open_source_conn(&source_path)?;
@@ -2142,30 +2144,6 @@ pub fn get_stock_detail_page(
         }
     };
 
-    let prev_ranks = match result_conn.as_ref() {
-        Some(conn) => query_rank_history(
-            conn,
-            &normalized_ts_code,
-            prev_rank_days
-                .map(|value| value as usize)
-                .filter(|value| *value > 0),
-        )
-        .unwrap_or_default(),
-        None => Vec::new(),
-    };
-    let (stock_similarity, stock_similarity_error) = match result_conn.as_ref() {
-        Some(conn) => match get_stock_similarity_page_with_conn_and_maps(
-            conn,
-            &effective_trade_date,
-            &normalized_ts_code,
-            Some(12),
-            source_meta.similarity_maps(),
-        ) {
-            Ok(data) => (Some(data), None),
-            Err(error) => (None, Some(error)),
-        },
-        None => (None, None),
-    };
     let kline = query_kline(
         &source_conn,
         &source_path,
@@ -2173,27 +2151,17 @@ pub fn get_stock_detail_page(
         chart_window_days.unwrap_or(280) as usize,
         overview.name.clone(),
     )?;
-    let trigger_snapshot = result_conn
-        .as_ref()
-        .and_then(|conn| {
-            load_detail_trigger_snapshot(conn, &normalized_ts_code, &effective_trade_date).ok()
-        })
-        .unwrap_or_default();
-    let strategy_triggers =
-        build_strategy_triggers(&source_path, &effective_trade_date, &trigger_snapshot)?;
-    let strategy_scenes =
-        build_scene_triggers(&source_path, &effective_trade_date, &trigger_snapshot)?;
 
     Ok(StockDetailPageData {
         resolved_trade_date: Some(effective_trade_date),
         resolved_ts_code: Some(normalized_ts_code),
         overview: Some(overview),
-        prev_ranks: Some(prev_ranks),
-        stock_similarity,
-        stock_similarity_error,
+        prev_ranks: None,
+        stock_similarity: None,
+        stock_similarity_error: None,
         kline: Some(kline),
-        strategy_triggers: Some(strategy_triggers),
-        strategy_scenes: Some(strategy_scenes),
+        strategy_triggers: None,
+        strategy_scenes: None,
     })
 }
 
@@ -2209,11 +2177,38 @@ pub fn get_stock_detail_strategy_snapshot(
         load_detail_trigger_snapshot(&result_conn, &normalized_ts_code, &effective_trade_date)?;
     let strategy_triggers =
         build_strategy_triggers(&source_path, &effective_trade_date, &trigger_snapshot)?;
+    let strategy_scenes =
+        build_scene_triggers(&source_path, &effective_trade_date, &trigger_snapshot)?;
 
     Ok(StockDetailStrategySnapshotData {
         resolved_trade_date: Some(effective_trade_date),
         resolved_ts_code: Some(normalized_ts_code),
         strategy_triggers: Some(strategy_triggers),
+        strategy_scenes: Some(strategy_scenes),
+    })
+}
+
+pub fn get_stock_detail_prev_ranks(
+    source_path: String,
+    trade_date: Option<String>,
+    ts_code: String,
+    prev_rank_days: Option<u32>,
+) -> Result<StockDetailPrevRanksData, String> {
+    let normalized_ts_code = normalize_ts_code(&ts_code);
+    let result_conn = open_result_conn(&source_path)?;
+    let effective_trade_date = resolve_trade_date(&result_conn, trade_date)?;
+    let prev_ranks = query_rank_history(
+        &result_conn,
+        &normalized_ts_code,
+        prev_rank_days
+            .map(|value| value as usize)
+            .filter(|value| *value > 0),
+    )?;
+
+    Ok(StockDetailPrevRanksData {
+        resolved_trade_date: Some(effective_trade_date),
+        resolved_ts_code: Some(normalized_ts_code),
+        prev_ranks: Some(prev_ranks),
     })
 }
 

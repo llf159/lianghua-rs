@@ -3,6 +3,7 @@ import { intradayMonitorPage } from "../../../apis/reader";
 import { DEFAULT_DATE_OPTION } from "../../../shared/tradeDate";
 import { STOCK_PICK_BOARD_OPTIONS } from "../../../shared/stockPickShared";
 import { normalizeTsCode } from "../../../shared/stockCode";
+import { readWatchObserveRowsFromCache } from "../../../shared/watchObserve";
 import "../css/WatchlistModal.css";
 
 type WatchlistModalProps = {
@@ -235,6 +236,20 @@ export default function WatchlistModal({
     saveCodes([]);
   }
 
+  function handleImportWatchObserve() {
+    const nextCodes = Array.from(
+      new Set(
+        readWatchObserveRowsFromCache()
+          .map((row) => row.tsCode)
+          .filter((code) => code !== ""),
+      ),
+    );
+
+    saveCodes(nextCodes);
+    setSourceError("");
+    setSourceMessage(`已从自选导入 ${nextCodes.length} 只。`);
+  }
+
   function handleSave() {
     saveCodes();
     onClose();
@@ -436,13 +451,22 @@ export default function WatchlistModal({
         </div>
 
         <div className="watchlist-modal-actions">
-          <button
-            type="button"
-            className="watchlist-modal-btn watchlist-modal-btn-secondary"
-            onClick={handleClear}
-          >
-            清空名单
-          </button>
+          <div className="watchlist-modal-action-group">
+            <button
+              type="button"
+              className="watchlist-modal-btn watchlist-modal-btn-secondary"
+              onClick={handleClear}
+            >
+              清空名单
+            </button>
+            <button
+              type="button"
+              className="watchlist-modal-btn watchlist-modal-btn-secondary"
+              onClick={handleImportWatchObserve}
+            >
+              从自选导入
+            </button>
+          </div>
           <div className="watchlist-modal-action-group">
             <button
               type="button"

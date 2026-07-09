@@ -4,7 +4,7 @@ use std::{
     sync::Mutex,
 };
 
-use duckdb::{Connection, params};
+use duckdb::{Connection, params, params_from_iter};
 use rand::random;
 #[cfg(test)]
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -12,7 +12,10 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    data::scoring_data::{SceneDetails, ScoreDetails, ScoreSummary, row_into_rt},
+    data::scoring_data::{
+        SceneDetails, ScoreDetails, ScoreSummary, cache_rule_build as build_scoring_rule_cache,
+        row_into_rt,
+    },
     data::{
         DataReader, RuleStage, RuleTag, RuntimeKeyCollectOptions, ScopeWay, ScoreRule, ScoreScene,
         collect_assigned_names_from_expr_program, collect_runtime_keys_from_expr_programs,
@@ -35,11 +38,11 @@ use crate::{
         DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, build_backtest_sample_eligibility,
         rank::{
             RankLayerConfig, RankLayerFromDbInput, RankLayerMethod,
-            calc_rank_layer_metrics_from_score_rows,
+            calc_rank_layer_metrics_from_rank_samples, calc_rank_layer_metrics_from_score_rows,
         },
         rule::{
-            RuleLayerConfig, RuleLayerFromDbInput, RuleLayerMetricsWithSamples,
-            RuleLayerRuntimeCache, RuleLayerSamplePointRef,
+            DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE, RuleLayerConfig, RuleLayerFromDbInput,
+            RuleLayerMetricsWithSamples, RuleLayerRuntimeCache, RuleLayerSamplePointRef,
             build_rule_layer_runtime_cache_from_stock_data_with_ts_filter,
             calc_all_rule_layer_metrics_with_samples_from_db_map_with_ts_filter,
             calc_all_rule_layer_metrics_with_samples_from_rows_map,
@@ -62,6 +65,8 @@ use crate::{
 const TOP_RANK_THRESHOLD: i64 = 100;
 const RULE_VALIDATION_INJECTED_RUNTIME_KEYS: [&str; 4] = ["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI"];
 const RULE_VALIDATION_RUNTIME_ALIASES: [(&str, &str); 0] = [];
+const BACKTEST_INJECTED_RUNTIME_KEYS: [&str; 2] = ["ZHANG", "TOTAL_MV_YI"];
+const BACKTEST_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 
 #[derive(Debug, Clone)]
 struct RuleMeta {
@@ -260,6 +265,9 @@ pub struct RuleLayerRuleSummary {
     pub point_count: usize,
     pub avg_residual_mean: Option<f64>,
     pub avg_excess_residual_mean: Option<f64>,
+    pub avg_er_change: Option<f64>,
+    #[serde(skip)]
+    pub er_change_sample_count: usize,
     pub profit_loss_ratio: Option<f64>,
     pub spread_mean: Option<f64>,
     pub avg_contribution_score: Option<f64>,
@@ -290,6 +298,7 @@ pub struct RuleLayerBacktestData {
     pub points: Vec<RuleLayerPointPayload>,
     pub avg_residual_mean: Option<f64>,
     pub avg_excess_residual_mean: Option<f64>,
+    pub avg_er_change: Option<f64>,
     pub profit_loss_ratio: Option<f64>,
     pub spread_mean: Option<f64>,
     pub avg_contribution_score: Option<f64>,
@@ -323,6 +332,21 @@ pub struct RankLayerBucketSummary {
     pub sample_count: usize,
     pub avg_score: Option<f64>,
     pub avg_residual_return: Option<f64>,
+    pub avg_er_change: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RankLayerSampleGroup {
+    pub layer_index: usize,
+    pub layer_label: String,
+    pub total_samples: usize,
+    pub triggered_days: usize,
+    pub positive_count: usize,
+    pub negative_count: usize,
+    pub random_count: usize,
+    pub positive: Vec<RuleValidationSampleRow>,
+    pub negative: Vec<RuleValidationSampleRow>,
+    pub random: Vec<RuleValidationSampleRow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -345,12 +369,14 @@ pub struct RankLayerBacktestData {
     pub layer_method_label: String,
     pub point_count: usize,
     pub sample_count: usize,
+    pub avg_er_change: Option<f64>,
     pub spread_mean: Option<f64>,
     pub ic_mean: Option<f64>,
     pub ic_std: Option<f64>,
     pub icir: Option<f64>,
     pub ic_t_value: Option<f64>,
     pub layer_summaries: Vec<RankLayerBucketSummary>,
+    pub layer_sample_groups: Vec<RankLayerSampleGroup>,
     pub market_value_summaries: Vec<RankLayerMarketValueSummary>,
 }
 
@@ -361,6 +387,7 @@ pub struct RankLayerMarketValueSummary {
     pub total_mv_max: Option<f64>,
     pub point_count: usize,
     pub sample_count: usize,
+    pub avg_er_change: Option<f64>,
     pub spread_mean: Option<f64>,
     pub ic_mean: Option<f64>,
     pub ic_t_value: Option<f64>,
@@ -374,6 +401,7 @@ const VALIDATION_COMBO_EVAL_BATCH_SIZE: usize = 16;
 const VALIDATION_DEFAULT_SAMPLE_LIMIT_PER_GROUP: usize = 30;
 const VALIDATION_MAX_SAMPLE_LIMIT_PER_GROUP: usize = 200;
 const RULE_BACKTEST_DETAIL_SAMPLE_LIMIT_PER_GROUP: usize = 5;
+const RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP: usize = 5;
 #[cfg(test)]
 const VALIDATION_RANDOM_SAMPLE_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
@@ -409,6 +437,15 @@ pub struct RuleValidationSampleStats {
     pub total_samples: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleValidationTriggerCountStats {
+    pub trigger_count: usize,
+    pub positive_count: usize,
+    pub negative_count: usize,
+    pub random_count: usize,
+    pub total_samples: usize,
+}
+
 #[derive(Debug, Serialize)]
 pub struct RuleValidationSampleRow {
     pub ts_code: String,
@@ -416,6 +453,7 @@ pub struct RuleValidationSampleRow {
     pub board: String,
     pub volatility_group: String,
     pub trade_date: String,
+    pub trigger_count: usize,
     pub rule_score: f64,
     pub residual_return: f64,
 }
@@ -444,6 +482,7 @@ pub struct RuleValidationComboResult {
     pub triggered_days: usize,
     pub avg_daily_trigger: f64,
     pub sample_stats: RuleValidationSampleStats,
+    pub trigger_count_stats: Vec<RuleValidationTriggerCountStats>,
     pub sample_groups: RuleValidationSampleGroups,
     pub return_distribution: Vec<RuleValidationReturnDistributionBucket>,
     pub backtest: RuleLayerBacktestData,
@@ -2356,14 +2395,26 @@ fn build_validation_combo_result(
         layer_config.min_samples_per_day,
     );
     let return_distribution = build_validation_return_distribution(&metrics_with_samples.samples);
-    let mut sample_accumulator =
-        ValidationSampleAccumulator::new(sample_limit_per_group, stock_meta_map, similarity_cache);
+    let mut sample_accumulator = ValidationSampleAccumulator::new(
+        sample_limit_per_group,
+        stock_meta_map,
+        similarity_cache,
+        matches!(seed_rule.scope_way, ScopeWay::Each),
+        seed_rule.points,
+        seed_rule.dist_points.is_some(),
+    );
     visit_triggered_rule_samples_from_cache(runtime_cache, &triggered_score_map, |sample| {
         sample_accumulator.push(sample);
         Ok(())
     })?;
-    let (trigger_samples, triggered_days, sample_stats, sample_groups, overlap_hit_count) =
-        sample_accumulator.into_parts();
+    let (
+        trigger_samples,
+        triggered_days,
+        sample_stats,
+        trigger_count_stats,
+        sample_groups,
+        overlap_hit_count,
+    ) = sample_accumulator.into_parts();
     let backtest = build_rule_backtest_payload(
         &combo.variant.combo_key,
         params,
@@ -2391,6 +2442,7 @@ fn build_validation_combo_result(
             0.0
         },
         sample_stats,
+        trigger_count_stats,
         sample_groups,
         return_distribution,
         backtest,
@@ -2540,6 +2592,7 @@ fn build_validation_score_layer_details(
                 } else {
                     Some(item.residual_sum / item.point_count as f64)
                 },
+                avg_er_change: None,
             })
             .collect(),
     }
@@ -2641,6 +2694,7 @@ fn build_rule_backtest_payload(
         points: Vec::new(),
         avg_residual_mean: metrics.avg_residual_mean,
         avg_excess_residual_mean: metrics.avg_excess_residual_mean,
+        avg_er_change: metrics.avg_er_change,
         profit_loss_ratio: metrics.profit_loss_ratio,
         spread_mean,
         avg_contribution_score: None,
@@ -2678,6 +2732,9 @@ fn build_strategy_rule_validation_detail(
         RULE_BACKTEST_DETAIL_SAMPLE_LIMIT_PER_GROUP,
         stock_meta_map,
         similarity_cache,
+        rule_meta.is_each,
+        rule_meta.points,
+        false,
     );
     for sample in &metrics_with_samples.samples {
         if sample.rule_score.abs() <= RULE_BACKTEST_EPS {
@@ -2691,8 +2748,14 @@ fn build_strategy_rule_validation_detail(
         });
     }
 
-    let (trigger_samples, triggered_days, sample_stats, sample_groups, overlap_hit_count) =
-        sample_accumulator.into_parts();
+    let (
+        trigger_samples,
+        triggered_days,
+        sample_stats,
+        trigger_count_stats,
+        sample_groups,
+        overlap_hit_count,
+    ) = sample_accumulator.into_parts();
     let backtest = build_rule_backtest_payload(
         rule_name,
         params,
@@ -2720,6 +2783,7 @@ fn build_strategy_rule_validation_detail(
             0.0
         },
         sample_stats,
+        trigger_count_stats,
         sample_groups,
         return_distribution,
         backtest,
@@ -2951,6 +3015,7 @@ fn compare_option_f64_desc(left: Option<f64>, right: Option<f64>) -> std::cmp::O
 struct ValidationSampleRawRow {
     ts_code: String,
     trade_date: String,
+    trigger_count: usize,
     rule_score: f64,
     residual_return: f64,
 }
@@ -2966,6 +3031,9 @@ struct ValidationSampleAccumulator<'a> {
     sample_limit_per_group: usize,
     stock_meta_map: &'a HashMap<String, ValidationSampleStockMeta>,
     similarity_cache: &'a ValidationSimilarityCache,
+    is_each: bool,
+    trigger_unit_points: f64,
+    has_dist_points: bool,
     total_triggers: usize,
     triggered_days: HashSet<String>,
     sample_by_stock: HashMap<String, ValidationSampleRawRow>,
@@ -2977,11 +3045,17 @@ impl<'a> ValidationSampleAccumulator<'a> {
         sample_limit_per_group: usize,
         stock_meta_map: &'a HashMap<String, ValidationSampleStockMeta>,
         similarity_cache: &'a ValidationSimilarityCache,
+        is_each: bool,
+        trigger_unit_points: f64,
+        has_dist_points: bool,
     ) -> Self {
         Self {
             sample_limit_per_group,
             stock_meta_map,
             similarity_cache,
+            is_each,
+            trigger_unit_points,
+            has_dist_points,
             total_triggers: 0,
             triggered_days: HashSet::new(),
             sample_by_stock: HashMap::new(),
@@ -2997,12 +3071,19 @@ impl<'a> ValidationSampleAccumulator<'a> {
         let row = ValidationSampleRawRow {
             ts_code: sample.ts_code.to_string(),
             trade_date: sample.trade_date.to_string(),
+            trigger_count: resolve_validation_trigger_count(
+                sample.rule_score,
+                self.is_each,
+                self.trigger_unit_points,
+                self.has_dist_points,
+            ),
             rule_score: sample.rule_score,
             residual_return: sample.residual_return,
         };
 
+        let sample_key = format!("{}__{}", row.trigger_count, row.ts_code);
         self.sample_by_stock
-            .entry(row.ts_code.clone())
+            .entry(sample_key)
             .and_modify(|current| {
                 if should_replace_validation_stock_sample(current, &row) {
                     *current = row.clone();
@@ -3030,6 +3111,7 @@ impl<'a> ValidationSampleAccumulator<'a> {
         usize,
         usize,
         RuleValidationSampleStats,
+        Vec<RuleValidationTriggerCountStats>,
         RuleValidationSampleGroups,
         HashMap<usize, usize>,
     ) {
@@ -3043,23 +3125,48 @@ impl<'a> ValidationSampleAccumulator<'a> {
             .iter()
             .filter(|row| row.residual_return < 0.0)
             .count();
-        let mut positive_by_board: HashMap<String, Vec<ValidationSampleRawRow>> = HashMap::new();
-        let mut negative_by_board: HashMap<String, Vec<ValidationSampleRawRow>> = HashMap::new();
-        let mut random_by_board: HashMap<String, Vec<(u64, ValidationSampleRawRow)>> =
+        let mut trigger_count_stats_map = HashMap::<usize, RuleValidationTriggerCountStats>::new();
+        for row in &unique_samples {
+            let stats = trigger_count_stats_map
+                .entry(row.trigger_count)
+                .or_insert_with(|| RuleValidationTriggerCountStats {
+                    trigger_count: row.trigger_count,
+                    positive_count: 0,
+                    negative_count: 0,
+                    random_count: 0,
+                    total_samples: 0,
+                });
+            stats.total_samples += 1;
+            stats.random_count += 1;
+            if row.residual_return > 0.0 {
+                stats.positive_count += 1;
+            } else if row.residual_return < 0.0 {
+                stats.negative_count += 1;
+            }
+        }
+        let mut trigger_count_stats = trigger_count_stats_map.into_values().collect::<Vec<_>>();
+        trigger_count_stats.sort_by_key(|item| item.trigger_count);
+
+        let mut positive_by_board: HashMap<(usize, String), Vec<ValidationSampleRawRow>> =
+            HashMap::new();
+        let mut negative_by_board: HashMap<(usize, String), Vec<ValidationSampleRawRow>> =
+            HashMap::new();
+        let mut random_by_board: HashMap<(usize, String), Vec<(u64, ValidationSampleRawRow)>> =
             HashMap::new();
 
         for row in unique_samples {
             let board = sample_board(&row.ts_code, self.stock_meta_map);
+            let bucket_key = (row.trigger_count, board);
             if row.residual_return > 0.0 {
                 push_limited_sample(
-                    positive_by_board.entry(board.clone()).or_default(),
+                    positive_by_board.entry(bucket_key.clone()).or_default(),
                     row.clone(),
                     self.sample_limit_per_group,
                     compare_positive_validation_sample,
                 );
             } else if row.residual_return < 0.0 {
                 push_limited_sample(
-                    negative_by_board.entry(board.clone()).or_default(),
+                    negative_by_board.entry(bucket_key.clone()).or_default(),
                     row.clone(),
                     self.sample_limit_per_group,
                     compare_negative_validation_sample,
@@ -3067,7 +3174,7 @@ impl<'a> ValidationSampleAccumulator<'a> {
             }
 
             push_limited_random_sample(
-                random_by_board.entry(board).or_default(),
+                random_by_board.entry(bucket_key).or_default(),
                 random::<u64>(),
                 row,
                 self.sample_limit_per_group,
@@ -3111,9 +3218,28 @@ impl<'a> ValidationSampleAccumulator<'a> {
             self.total_triggers,
             self.triggered_days.len(),
             stats,
+            trigger_count_stats,
             groups,
             self.overlap_hit_count,
         )
+    }
+}
+
+fn resolve_validation_trigger_count(
+    rule_score: f64,
+    is_each: bool,
+    trigger_unit_points: f64,
+    has_dist_points: bool,
+) -> usize {
+    if !is_each || has_dist_points || trigger_unit_points.abs() <= VALIDATION_EPS {
+        return 1;
+    }
+
+    let count = (rule_score / trigger_unit_points).abs().round();
+    if count.is_finite() && count >= 1.0 {
+        count as usize
+    } else {
+        1
     }
 }
 
@@ -3247,6 +3373,7 @@ fn validation_sample_rows_to_payload(
                 .unwrap_or_else(|| "其他波动".to_string()),
             ts_code: row.ts_code,
             trade_date: row.trade_date,
+            trigger_count: row.trigger_count,
             rule_score: row.rule_score,
             residual_return: row.residual_return,
         })
@@ -3337,6 +3464,7 @@ fn build_validation_sample_groups(
                     .unwrap_or_else(|| "其他波动".to_string()),
                 ts_code: row.ts_code,
                 trade_date: row.trade_date,
+                trigger_count: row.trigger_count,
                 rule_score: row.rule_score,
                 residual_return: row.residual_return,
             })
@@ -3398,6 +3526,17 @@ pub fn run_rule_expression_validation(
         scope_windows,
         &all_rules,
     )?;
+    let start_date = start_date.trim().to_string();
+    let end_date = end_date.trim().to_string();
+    let variants =
+        build_validation_variants(&seed_rule.formula, &unknown_configs.unwrap_or_default())?;
+    let execution_plan = build_validation_execution_plan(
+        &source_path,
+        &start_date,
+        &end_date,
+        &seed_rule,
+        variants,
+    )?;
 
     let (resolved_board, exclude_st_board, total_mv_min, total_mv_max, allowed_ts_codes) =
         build_backtest_stock_filter(
@@ -3417,12 +3556,13 @@ pub fn run_rule_expression_validation(
         index_beta: index_beta.unwrap_or(0.5),
         concept_beta: concept_beta.unwrap_or(0.2),
         industry_beta: industry_beta.unwrap_or(0.0),
-        start_date: start_date.trim().to_string(),
-        end_date: end_date.trim().to_string(),
+        start_date,
+        end_date,
         min_samples_per_day: min_samples_per_rule_day.unwrap_or(5).max(1),
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1).max(1),
+        parallel_batch_size: DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE,
         resolved_board,
         exclude_st_board,
         total_mv_min,
@@ -3430,15 +3570,6 @@ pub fn run_rule_expression_validation(
         allowed_ts_codes,
     };
 
-    let variants =
-        build_validation_variants(&seed_rule.formula, &unknown_configs.unwrap_or_default())?;
-    let execution_plan = build_validation_execution_plan(
-        &source_path,
-        &params.start_date,
-        &params.end_date,
-        &seed_rule,
-        variants,
-    )?;
     let sample_limit_per_group = sample_limit_per_group
         .unwrap_or(VALIDATION_DEFAULT_SAMPLE_LIMIT_PER_GROUP)
         .clamp(1, VALIDATION_MAX_SAMPLE_LIMIT_PER_GROUP);
@@ -3873,23 +4004,52 @@ fn load_concept_stock_count_map(source_path: &str) -> Result<HashMap<String, usi
         .collect())
 }
 
-fn build_board_stock_count_map(
-    ts_board_map: &HashMap<String, Vec<String>>,
-) -> HashMap<String, usize> {
-    let mut board_stocks: HashMap<String, HashSet<String>> = HashMap::new();
-    for (ts_code, board_list) in ts_board_map {
-        for board in board_list {
-            board_stocks
-                .entry(board.clone())
+fn build_industry_maps(
+    source_path: &str,
+) -> Result<(HashMap<String, Vec<String>>, HashMap<String, usize>), String> {
+    let stock_rows = load_stock_list(source_path)?;
+    Ok(build_industry_maps_from_rows(stock_rows))
+}
+
+fn build_industry_maps_from_rows(
+    stock_rows: Vec<Vec<String>>,
+) -> (HashMap<String, Vec<String>>, HashMap<String, usize>) {
+    let mut ts_industry_map: HashMap<String, Vec<String>> =
+        HashMap::with_capacity(stock_rows.len());
+    let mut industry_stocks: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for cols in stock_rows {
+        let Some(ts_code) = cols
+            .first()
+            .map(|value| value.trim().to_ascii_uppercase())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(industry_raw) = cols.get(4).map(|value| value.trim()) else {
+            continue;
+        };
+        if industry_raw.is_empty() {
+            continue;
+        }
+
+        let industries = split_board_tags(industry_raw);
+        for industry in &industries {
+            industry_stocks
+                .entry(industry.clone())
                 .or_default()
                 .insert(ts_code.clone());
         }
+        if !industries.is_empty() {
+            ts_industry_map.insert(ts_code, industries);
+        }
     }
 
-    board_stocks
+    let industry_stock_counts = industry_stocks
         .into_iter()
-        .map(|(board, stocks)| (board, stocks.len()))
-        .collect()
+        .map(|(industry, stocks)| (industry, stocks.len()))
+        .collect();
+    (ts_industry_map, industry_stock_counts)
 }
 
 fn has_min_stock_count(
@@ -3944,7 +4104,7 @@ pub fn get_market_analysis(
 
     let (board_options, ts_board_map) = get_or_build_board_maps(&source_path)?;
     let concept_stock_counts = load_concept_stock_count_map(&source_path)?;
-    let board_stock_counts = build_board_stock_count_map(&ts_board_map);
+    let (ts_industry_map, industry_stock_counts) = build_industry_maps(&source_path)?;
     let resolved_board = resolve_board_filter(board, &board_options);
     let exclude_st_board = exclude_st_board.unwrap_or(false);
     let sample_eligibility =
@@ -4073,7 +4233,7 @@ pub fn get_market_analysis(
     }
     interval_concept_top.truncate(20);
 
-    let mut interval_board_stmt = source_conn
+    let mut interval_industry_stmt = source_conn
         .prepare(
             r#"
             SELECT ts_code, AVG(TRY_CAST(pct_chg AS DOUBLE)) AS avg_pct
@@ -4084,37 +4244,39 @@ pub fn get_market_analysis(
             GROUP BY 1
             "#,
         )
-        .map_err(|e| format!("预编译板块区间榜 SQL 失败: {e}"))?;
-    let mut interval_board_rows = interval_board_stmt
+        .map_err(|e| format!("预编译行业区间榜 SQL 失败: {e}"))?;
+    let mut interval_industry_rows = interval_industry_stmt
         .query(params![&interval_start, &interval_end])
-        .map_err(|e| format!("执行板块区间榜 SQL 失败: {e}"))?;
-    let mut interval_board_acc: HashMap<String, (f64, usize)> = HashMap::new();
-    while let Some(row) = interval_board_rows
+        .map_err(|e| format!("执行行业区间榜 SQL 失败: {e}"))?;
+    let mut interval_industry_acc: HashMap<String, (f64, usize)> = HashMap::new();
+    while let Some(row) = interval_industry_rows
         .next()
-        .map_err(|e| format!("读取板块区间榜失败: {e}"))?
+        .map_err(|e| format!("读取行业区间榜失败: {e}"))?
     {
         let ts_code: String = row.get(0).map_err(|e| format!("读取代码失败: {e}"))?;
-        let avg_pct: Option<f64> = row.get(1).map_err(|e| format!("读取板块值失败: {e}"))?;
+        let avg_pct: Option<f64> = row.get(1).map_err(|e| format!("读取行业值失败: {e}"))?;
         let Some(avg_pct) = avg_pct.filter(|v| v.is_finite()) else {
             continue;
         };
         let ts_code = ts_code.to_ascii_uppercase();
-        let Some(board_list) = ts_board_map.get(&ts_code) else {
+        let Some(industry_list) = ts_industry_map.get(&ts_code) else {
             continue;
         };
-        for board in board_list {
-            let entry = interval_board_acc.entry(board.clone()).or_insert((0.0, 0));
+        for industry in industry_list {
+            let entry = interval_industry_acc
+                .entry(industry.clone())
+                .or_insert((0.0, 0));
             entry.0 += avg_pct;
             entry.1 += 1;
         }
     }
-    let mut interval_board_top = interval_board_acc
+    let mut interval_industry_top = interval_industry_acc
         .into_iter()
         .filter_map(|(name, (sum, cnt))| {
             if cnt == 0 {
                 return None;
             }
-            if !has_min_stock_count(&board_stock_counts, &name, min_board_stock_count) {
+            if !has_min_stock_count(&industry_stock_counts, &name, min_board_stock_count) {
                 return None;
             }
             let value = sum / cnt as f64;
@@ -4124,13 +4286,13 @@ pub fn get_market_analysis(
             Some(market_rank_item(name, value))
         })
         .collect::<Vec<_>>();
-    interval_board_top.sort_by(|a, b| {
+    interval_industry_top.sort_by(|a, b| {
         b.value
             .partial_cmp(&a.value)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.name.cmp(&b.name))
     });
-    interval_board_top.truncate(20);
+    interval_industry_top.truncate(20);
 
     let stock_name_map = load_stock_name_map(&source_path)?;
 
@@ -4284,7 +4446,7 @@ pub fn get_market_analysis(
     }
     daily_concept_top.truncate(20);
 
-    let mut daily_board_stmt = source_conn
+    let mut daily_industry_stmt = source_conn
         .prepare(
             r#"
             SELECT ts_code, TRY_CAST(pct_chg AS DOUBLE) AS pct
@@ -4293,37 +4455,39 @@ pub fn get_market_analysis(
               AND trade_date = ?
             "#,
         )
-        .map_err(|e| format!("预编译板块当日榜 SQL 失败: {e}"))?;
-    let mut daily_board_rows = daily_board_stmt
+        .map_err(|e| format!("预编译行业当日榜 SQL 失败: {e}"))?;
+    let mut daily_industry_rows = daily_industry_stmt
         .query(params![&ref_date])
-        .map_err(|e| format!("执行板块当日榜 SQL 失败: {e}"))?;
-    let mut daily_board_acc: HashMap<String, (f64, usize)> = HashMap::new();
-    while let Some(row) = daily_board_rows
+        .map_err(|e| format!("执行行业当日榜 SQL 失败: {e}"))?;
+    let mut daily_industry_acc: HashMap<String, (f64, usize)> = HashMap::new();
+    while let Some(row) = daily_industry_rows
         .next()
-        .map_err(|e| format!("读取板块当日榜失败: {e}"))?
+        .map_err(|e| format!("读取行业当日榜失败: {e}"))?
     {
         let ts_code: String = row.get(0).map_err(|e| format!("读取代码失败: {e}"))?;
-        let pct: Option<f64> = row.get(1).map_err(|e| format!("读取板块值失败: {e}"))?;
+        let pct: Option<f64> = row.get(1).map_err(|e| format!("读取行业值失败: {e}"))?;
         let Some(pct) = pct.filter(|v| v.is_finite()) else {
             continue;
         };
         let ts_code = ts_code.to_ascii_uppercase();
-        let Some(board_list) = ts_board_map.get(&ts_code) else {
+        let Some(industry_list) = ts_industry_map.get(&ts_code) else {
             continue;
         };
-        for board in board_list {
-            let entry = daily_board_acc.entry(board.clone()).or_insert((0.0, 0));
+        for industry in industry_list {
+            let entry = daily_industry_acc
+                .entry(industry.clone())
+                .or_insert((0.0, 0));
             entry.0 += pct;
             entry.1 += 1;
         }
     }
-    let mut daily_board_top = daily_board_acc
+    let mut daily_industry_top = daily_industry_acc
         .into_iter()
         .filter_map(|(name, (sum, cnt))| {
             if cnt == 0 {
                 return None;
             }
-            if !has_min_stock_count(&board_stock_counts, &name, min_board_stock_count) {
+            if !has_min_stock_count(&industry_stock_counts, &name, min_board_stock_count) {
                 return None;
             }
             let value = sum / cnt as f64;
@@ -4333,13 +4497,13 @@ pub fn get_market_analysis(
             Some(market_rank_item(name, value))
         })
         .collect::<Vec<_>>();
-    daily_board_top.sort_by(|a, b| {
+    daily_industry_top.sort_by(|a, b| {
         b.value
             .partial_cmp(&a.value)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.name.cmp(&b.name))
     });
-    daily_board_top.truncate(20);
+    daily_industry_top.truncate(20);
 
     let mut daily_gain_stmt = source_conn
         .prepare(
@@ -4400,14 +4564,14 @@ pub fn get_market_analysis(
         interval: MarketAnalysisSnapshot {
             trade_date: Some(format!("{}~{}", interval_start, interval_end)),
             concept_top: interval_concept_top,
-            industry_top: interval_board_top,
+            industry_top: interval_industry_top,
             gain_top: interval_gain_top,
             sub_interval_gain_top,
         },
         daily: MarketAnalysisSnapshot {
             trade_date: Some(ref_date),
             concept_top: daily_concept_top,
-            industry_top: daily_board_top,
+            industry_top: daily_industry_top,
             gain_top: daily_gain_top,
             sub_interval_gain_top: Vec::new(),
         },
@@ -4504,7 +4668,7 @@ pub fn get_market_contribution(
 
     let stock_rows = load_stock_list(&source_path)?;
     let mut ts_name_map: HashMap<String, String> = HashMap::with_capacity(stock_rows.len());
-    let mut ts_board_map: HashMap<String, String> = HashMap::with_capacity(stock_rows.len());
+    let mut ts_industry_map: HashMap<String, String> = HashMap::with_capacity(stock_rows.len());
     let mut target_codes: HashSet<String> = HashSet::new();
 
     for cols in stock_rows {
@@ -4523,16 +4687,16 @@ pub fn get_market_contribution(
             ts_name_map.insert(ts_code.to_string(), stock_name);
         }
 
-        let board_name = cols
+        let industry_name = cols
             .get(4)
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        if let Some(board_name) = board_name.clone() {
-            ts_board_map.insert(ts_code.to_string(), board_name.clone());
+        if let Some(industry_name) = industry_name.clone() {
+            ts_industry_map.insert(ts_code.to_string(), industry_name.clone());
         }
 
         if kind == "industry" {
-            let is_match = board_name
+            let is_match = industry_name
                 .as_deref()
                 .map(|value| {
                     value
@@ -4615,7 +4779,7 @@ pub fn get_market_contribution(
             contributors.push(MarketContributorItem {
                 ts_code: ts_code.clone(),
                 name: ts_name_map.get(&ts_code).cloned(),
-                industry: ts_board_map.get(&ts_code).cloned(),
+                industry: ts_industry_map.get(&ts_code).cloned(),
                 contribution_pct,
             });
         }
@@ -4653,7 +4817,7 @@ pub fn get_market_contribution(
             contributors.push(MarketContributorItem {
                 ts_code: ts_code.clone(),
                 name: ts_name_map.get(&ts_code).cloned(),
-                industry: ts_board_map.get(&ts_code).cloned(),
+                industry: ts_industry_map.get(&ts_code).cloned(),
                 contribution_pct,
             });
         }
@@ -4828,6 +4992,7 @@ struct RuleLayerBacktestRunParams {
     min_samples_per_day: usize,
     min_listed_trade_days: usize,
     backtest_period: usize,
+    parallel_batch_size: usize,
     resolved_board: Option<String>,
     exclude_st_board: bool,
     total_mv_min: Option<f64>,
@@ -4873,28 +5038,93 @@ fn build_rule_contribution_averages(
     start_date: &str,
     end_date: &str,
 ) -> Result<HashMap<String, RuleContributionAverages>, String> {
-    let result_conn = open_result_conn(source_path)?;
-    let (_, meta_map) = load_rule_meta(source_path)?;
-    let rows = query_daily_rows(&result_conn, rule_options, &meta_map)?;
-    let mut acc_map: HashMap<String, RuleContributionAccumulator> = HashMap::new();
-
-    for row in rows {
-        if row.trade_date.as_str() < start_date || row.trade_date.as_str() > end_date {
-            continue;
-        }
-
-        let Some(contribution_score) = row.contribution_score.filter(|value| value.is_finite())
-        else {
-            continue;
-        };
-
-        let acc = acc_map.entry(row.rule_name).or_default();
-        acc.contribution_sum += contribution_score;
-        acc.contribution_days += 1;
-        acc.trigger_count += row.trigger_count.unwrap_or(0).max(0);
+    if rule_options.is_empty() {
+        return Ok(HashMap::new());
     }
 
-    Ok(finalize_rule_contribution_averages(acc_map))
+    let result_conn = open_result_conn(source_path)?;
+    let placeholders = std::iter::repeat_n("?", rule_options.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        r#"
+        WITH daily_rank_bounds AS (
+            SELECT trade_date, MAX(rank) AS max_rank
+            FROM score_summary
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+            GROUP BY trade_date
+        ),
+        triggered_rule_rows AS (
+            SELECT
+                rule_name,
+                ts_code,
+                trade_date,
+                TRY_CAST(rule_score AS DOUBLE) AS rule_score
+            FROM rule_details
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+              AND rule_name IN ({placeholders})
+              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
+              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > 1e-12
+        )
+        SELECT
+            d.rule_name,
+            SUM(
+                CASE
+                    WHEN s.rank IS NOT NULL
+                      AND b.max_rank IS NOT NULL
+                      AND b.max_rank > 0
+                    THEN d.rule_score * CAST((b.max_rank + 1 - s.rank) AS DOUBLE)
+                         / CAST(b.max_rank AS DOUBLE)
+                    ELSE 0
+                END
+            ) AS contribution_sum,
+            COUNT(DISTINCT d.trade_date) AS contribution_days,
+            COUNT(*) AS trigger_count
+        FROM triggered_rule_rows AS d
+        LEFT JOIN score_summary AS s
+          ON s.ts_code = d.ts_code
+         AND s.trade_date = d.trade_date
+        LEFT JOIN daily_rank_bounds AS b
+          ON b.trade_date = d.trade_date
+        GROUP BY d.rule_name
+        "#
+    );
+    let mut stmt = result_conn
+        .prepare(&sql)
+        .map_err(|e| format!("预编译策略回测贡献度查询失败: {e}"))?;
+    let query_params = [start_date, end_date, start_date, end_date]
+        .into_iter()
+        .chain(rule_options.iter().map(String::as_str));
+    let mut rows = stmt
+        .query(params_from_iter(query_params))
+        .map_err(|e| format!("查询策略回测贡献度失败: {e}"))?;
+    let mut out = HashMap::with_capacity(rule_options.len());
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取策略回测贡献度失败: {e}"))?
+    {
+        let rule_name: String = row.get(0).map_err(|e| format!("读取策略名失败: {e}"))?;
+        let contribution_sum = row
+            .get::<usize, Option<f64>>(1)
+            .map_err(|e| format!("读取策略贡献度失败: {e}"))?
+            .unwrap_or(0.0);
+        let contribution_days: i64 = row.get(2).map_err(|e| format!("读取贡献天数失败: {e}"))?;
+        let trigger_count: i64 = row.get(3).map_err(|e| format!("读取触发次数失败: {e}"))?;
+        out.insert(
+            rule_name,
+            RuleContributionAverages {
+                avg_contribution_score: (contribution_days > 0)
+                    .then_some(contribution_sum / contribution_days as f64),
+                avg_contribution_per_trigger: (trigger_count > 0)
+                    .then_some(contribution_sum / trigger_count as f64),
+            },
+        );
+    }
+
+    Ok(out)
 }
 
 fn finalize_rule_contribution_averages(
@@ -5153,9 +5383,32 @@ fn weighted_rule_summary_metric(
     }
 }
 
+fn aggregate_rule_er_change(summaries: &[RuleLayerRuleSummary]) -> Option<f64> {
+    let mut weighted_sum = 0.0;
+    let mut total_weight = 0usize;
+
+    for summary in summaries {
+        let Some(avg_er_change) = summary.avg_er_change.filter(|value| value.is_finite()) else {
+            continue;
+        };
+        if summary.er_change_sample_count == 0 {
+            continue;
+        }
+        weighted_sum += avg_er_change * summary.er_change_sample_count as f64;
+        total_weight += summary.er_change_sample_count;
+    }
+
+    if total_weight == 0 {
+        None
+    } else {
+        Some(weighted_sum / total_weight as f64)
+    }
+}
+
 fn aggregate_all_rule_summary_metrics(
     summaries: &[RuleLayerRuleSummary],
 ) -> (
+    Option<f64>,
     Option<f64>,
     Option<f64>,
     Option<f64>,
@@ -5168,6 +5421,7 @@ fn aggregate_all_rule_summary_metrics(
     let avg_residual_mean = weighted_rule_summary_metric(summaries, |item| item.avg_residual_mean);
     let avg_excess_residual_mean =
         weighted_rule_summary_metric(summaries, |item| item.avg_excess_residual_mean);
+    let avg_er_change = aggregate_rule_er_change(summaries);
     let profit_loss_ratio = weighted_rule_summary_metric(summaries, |item| item.profit_loss_ratio);
     let spread_mean = weighted_rule_summary_metric(summaries, |item| item.spread_mean);
     let ic_mean = weighted_rule_summary_metric(summaries, |item| item.ic_mean);
@@ -5187,6 +5441,7 @@ fn aggregate_all_rule_summary_metrics(
     (
         avg_residual_mean,
         avg_excess_residual_mean,
+        avg_er_change,
         profit_loss_ratio,
         spread_mean,
         ic_mean,
@@ -5411,6 +5666,7 @@ fn run_rule_layer_backtest_core(
                 .collect(),
             avg_residual_mean: metrics.avg_residual_mean,
             avg_excess_residual_mean: metrics.avg_excess_residual_mean,
+            avg_er_change: metrics.avg_er_change,
             profit_loss_ratio: metrics.profit_loss_ratio,
             spread_mean: None,
             avg_contribution_score: None,
@@ -5485,6 +5741,7 @@ fn run_rule_layer_backtest_core(
         &params.end_date,
         &layer_config,
         params.allowed_ts_codes.as_ref(),
+        params.parallel_batch_size,
         |one_rule_name, metrics_with_samples| {
             Ok(build_one_rule_backtest_summary_and_detail(
                 one_rule_name,
@@ -5505,6 +5762,7 @@ fn run_rule_layer_backtest_core(
     let (
         avg_residual_mean,
         avg_excess_residual_mean,
+        avg_er_change,
         profit_loss_ratio,
         _spread_mean,
         ic_mean,
@@ -5532,6 +5790,7 @@ fn run_rule_layer_backtest_core(
         points: Vec::new(),
         avg_residual_mean,
         avg_excess_residual_mean,
+        avg_er_change,
         profit_loss_ratio,
         spread_mean: None,
         avg_contribution_score: weighted_rule_summary_metric(&all_rule_summaries, |item| {
@@ -5565,7 +5824,7 @@ fn build_one_rule_backtest_summary_and_detail(
     similarity_cache: &ValidationSimilarityCache,
     stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
 ) -> (RuleLayerRuleSummary, Option<RuleValidationComboResult>) {
-    let metrics = metrics_with_samples.metrics.clone();
+    let RuleLayerMetricsWithSamples { metrics, samples } = metrics_with_samples;
     let contribution_average = contribution_averages
         .get(one_rule_name)
         .cloned()
@@ -5575,6 +5834,8 @@ fn build_one_rule_backtest_summary_and_detail(
         point_count: metrics.points.len(),
         avg_residual_mean: metrics.avg_residual_mean,
         avg_excess_residual_mean: metrics.avg_excess_residual_mean,
+        avg_er_change: metrics.avg_er_change,
+        er_change_sample_count: metrics.er_change_sample_count,
         profit_loss_ratio: metrics.profit_loss_ratio,
         spread_mean: None,
         avg_contribution_score: contribution_average.avg_contribution_score,
@@ -5589,7 +5850,7 @@ fn build_one_rule_backtest_summary_and_detail(
             params,
             one_rule_name,
             rule_meta,
-            metrics_with_samples,
+            RuleLayerMetricsWithSamples { metrics, samples },
             layer_config,
             similarity_cache,
             explain_map,
@@ -5638,8 +5899,8 @@ fn rank_layer_label(layer_index: usize, layer_count: usize) -> String {
 fn rank_layer_method_label(layer_method: RankLayerMethod) -> &'static str {
     match layer_method {
         RankLayerMethod::Score => "按分数分层",
-        RankLayerMethod::SampleCount => "按样本数分层",
-        RankLayerMethod::Rank => "按排名分层",
+        RankLayerMethod::SampleCount => "按样本数分层（同分按数据库排名）",
+        RankLayerMethod::Rank => "按数据库排名分层",
     }
 }
 
@@ -5683,10 +5944,10 @@ fn rank_row_in_market_value_group(
 }
 
 fn build_rank_market_value_summaries(
-    source_conn: &Connection,
     source_path: &str,
     input: &RankLayerFromDbInput,
     summary_rows: &[ScoreSummary],
+    samples: &[crate::simulate::rank::RankLayerSamplePoint],
 ) -> Result<Vec<RankLayerMarketValueSummary>, String> {
     let total_mv_map = build_total_mv_map(source_path)?;
     let mut out = Vec::new();
@@ -5699,14 +5960,28 @@ fn build_rank_market_value_summaries(
             })
             .cloned()
             .collect::<Vec<_>>();
-        let metrics =
-            calc_rank_layer_metrics_from_score_rows(source_conn, source_path, input, &group_rows)?;
+        let group_samples = samples
+            .iter()
+            .filter(|sample| {
+                stock_total_mv(&total_mv_map, &sample.ts_code).is_some_and(|total_mv| {
+                    total_mv_min.is_none_or(|min_value| total_mv >= min_value)
+                        && total_mv_max.is_none_or(|max_value| total_mv < max_value)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let metrics = calc_rank_layer_metrics_from_rank_samples(
+            &group_samples,
+            &input.layer_config,
+            &group_rows,
+        )?;
         out.push(RankLayerMarketValueSummary {
             group_label: group_label.to_string(),
             total_mv_min,
             total_mv_max,
             point_count: metrics.point_count,
             sample_count: metrics.sample_count,
+            avg_er_change: metrics.avg_er_change,
             spread_mean: metrics.spread_mean,
             ic_mean: metrics.ic_mean,
             ic_t_value: metrics.ic_t_value,
@@ -5747,8 +6022,18 @@ fn run_rank_layer_backtest_core(
     )?;
     let metrics =
         calc_rank_layer_metrics_from_score_rows(source_conn, source_path, &input, &summary_rows)?;
-    let market_value_summaries =
-        build_rank_market_value_summaries(source_conn, source_path, &input, &summary_rows)?;
+    let market_value_summaries = build_rank_market_value_summaries(
+        source_path,
+        &input,
+        &summary_rows,
+        &metrics.layer_samples,
+    )?;
+    let stock_meta_map = load_validation_sample_stock_meta_map(source_path)?;
+    let layer_sample_groups = build_rank_layer_sample_groups(
+        &metrics.layer_samples,
+        input.layer_config.layer_count,
+        &stock_meta_map,
+    );
 
     Ok(RankLayerBacktestData {
         stock_adj_type: input.stock_adj_type,
@@ -5769,6 +6054,7 @@ fn run_rank_layer_backtest_core(
         layer_method_label: rank_layer_method_label(input.layer_config.layer_method).to_string(),
         point_count: metrics.point_count,
         sample_count: metrics.sample_count,
+        avg_er_change: metrics.avg_er_change,
         spread_mean: metrics.spread_mean,
         ic_mean: metrics.ic_mean,
         ic_std: metrics.ic_std,
@@ -5784,10 +6070,146 @@ fn run_rank_layer_backtest_core(
                 sample_count: item.sample_count,
                 avg_score: item.avg_score,
                 avg_residual_return: item.avg_residual_return,
+                avg_er_change: item.avg_er_change,
             })
             .collect(),
+        layer_sample_groups,
         market_value_summaries,
     })
+}
+
+#[derive(Default)]
+struct RankLayerSampleGroupAccumulator {
+    total_samples: usize,
+    positive_count: usize,
+    negative_count: usize,
+    trade_dates: HashSet<String>,
+    positive_by_board: HashMap<String, Vec<ValidationSampleRawRow>>,
+    negative_by_board: HashMap<String, Vec<ValidationSampleRawRow>>,
+    random_by_board: HashMap<String, Vec<(u64, ValidationSampleRawRow)>>,
+}
+
+fn build_rank_layer_sample_groups(
+    samples: &[crate::simulate::rank::RankLayerSamplePoint],
+    layer_count: usize,
+    stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
+) -> Vec<RankLayerSampleGroup> {
+    let mut groups = (0..layer_count)
+        .map(|_| RankLayerSampleGroupAccumulator::default())
+        .collect::<Vec<_>>();
+
+    for sample in samples {
+        if sample.layer_index == 0 || sample.layer_index > layer_count {
+            continue;
+        }
+        let group = &mut groups[sample.layer_index - 1];
+        let row = ValidationSampleRawRow {
+            ts_code: sample.ts_code.clone(),
+            trade_date: sample.trade_date.clone(),
+            trigger_count: 1,
+            rule_score: sample.score,
+            residual_return: sample.residual_return,
+        };
+
+        group.total_samples += 1;
+        group.trade_dates.insert(row.trade_date.clone());
+        let board = sample_board(&row.ts_code, stock_meta_map);
+        if row.residual_return > 0.0 {
+            group.positive_count += 1;
+            push_limited_sample(
+                group.positive_by_board.entry(board.clone()).or_default(),
+                row.clone(),
+                RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
+                compare_positive_validation_sample,
+            );
+        } else if row.residual_return < 0.0 {
+            group.negative_count += 1;
+            push_limited_sample(
+                group.negative_by_board.entry(board.clone()).or_default(),
+                row.clone(),
+                RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
+                compare_negative_validation_sample,
+            );
+        }
+        push_limited_random_sample(
+            group.random_by_board.entry(board).or_default(),
+            random::<u64>(),
+            row,
+            RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
+        );
+    }
+
+    groups
+        .into_iter()
+        .enumerate()
+        .map(|(index, group)| {
+            let triggered_days = group.trade_dates.len();
+            let mut positive = group
+                .positive_by_board
+                .into_values()
+                .flatten()
+                .collect::<Vec<_>>();
+            let mut negative = group
+                .negative_by_board
+                .into_values()
+                .flatten()
+                .collect::<Vec<_>>();
+            let mut random = group
+                .random_by_board
+                .into_values()
+                .flatten()
+                .collect::<Vec<_>>();
+            positive.sort_by(compare_positive_validation_sample);
+            negative.sort_by(compare_negative_validation_sample);
+            random.sort_by(|left, right| {
+                left.0
+                    .cmp(&right.0)
+                    .then_with(|| compare_random_validation_sample(&left.1, &right.1))
+            });
+
+            RankLayerSampleGroup {
+                layer_index: index + 1,
+                layer_label: rank_layer_label(index + 1, layer_count),
+                total_samples: group.total_samples,
+                triggered_days,
+                positive_count: group.positive_count,
+                negative_count: group.negative_count,
+                random_count: group.total_samples,
+                positive: validation_sample_rows_to_payload(positive, stock_meta_map),
+                negative: validation_sample_rows_to_payload(negative, stock_meta_map),
+                random: validation_sample_rows_to_payload(
+                    random.into_iter().map(|(_, row)| row),
+                    stock_meta_map,
+                ),
+            }
+        })
+        .collect()
+}
+
+fn validate_backtest_strategy_expressions(source_path: &str) -> Result<(), String> {
+    let rules_cache = build_scoring_rule_cache(source_path, None)?;
+    let programs = rules_cache
+        .iter()
+        .map(|rule| &rule.when_ast)
+        .collect::<Vec<_>>();
+    let cyq_chen_keys = cyq_chen_runtime_key_names();
+    let injected_keys = BACKTEST_INJECTED_RUNTIME_KEYS
+        .iter()
+        .copied()
+        .chain(cyq_chen_keys)
+        .collect::<Vec<_>>();
+    let required_runtime_keys = collect_runtime_keys_from_expr_programs(
+        &programs,
+        RuntimeKeyCollectOptions {
+            always_keys: &[],
+            injected_keys: &injected_keys,
+            aliases: &BACKTEST_RUNTIME_ALIASES,
+        },
+    );
+
+    DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)
+        .map(|_| ())
+        .map_err(|error| format!("策略表达式预检失败: {error}"))
 }
 
 pub fn run_scene_layer_backtest(
@@ -5807,6 +6229,7 @@ pub fn run_scene_layer_backtest(
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<SceneLayerBacktestData, String> {
+    validate_backtest_strategy_expressions(&source_path)?;
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
         .to_str()
@@ -5860,11 +6283,13 @@ pub fn run_rule_layer_backtest(
     min_samples_per_rule_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    parallel_batch_size: Option<usize>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<RuleLayerBacktestData, String> {
+    validate_backtest_strategy_expressions(&source_path)?;
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
         .to_str()
@@ -5895,6 +6320,9 @@ pub fn run_rule_layer_backtest(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1),
+        parallel_batch_size: parallel_batch_size
+            .unwrap_or(DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE)
+            .max(1),
         resolved_board,
         exclude_st_board,
         total_mv_min,
@@ -5923,6 +6351,7 @@ pub fn run_rank_layer_backtest(
     board: Option<String>,
     exclude_st_board: Option<bool>,
 ) -> Result<RankLayerBacktestData, String> {
+    validate_backtest_strategy_expressions(&source_path)?;
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
         .to_str()
@@ -5977,6 +6406,7 @@ pub fn run_transient_scene_layer_backtest(
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<SceneLayerBacktestData, String> {
+    validate_backtest_strategy_expressions(&source_path)?;
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
         .to_str()
@@ -6105,11 +6535,13 @@ pub fn run_transient_rule_layer_backtest(
     min_samples_per_rule_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    parallel_batch_size: Option<usize>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<RuleLayerBacktestData, String> {
+    validate_backtest_strategy_expressions(&source_path)?;
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
         .to_str()
@@ -6140,6 +6572,9 @@ pub fn run_transient_rule_layer_backtest(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1),
+        parallel_batch_size: parallel_batch_size
+            .unwrap_or(DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE)
+            .max(1),
         resolved_board,
         exclude_st_board,
         total_mv_min,
@@ -6209,6 +6644,7 @@ pub fn run_transient_rule_layer_backtest(
         &params.start_date,
         &params.end_date,
         &layer_config,
+        params.parallel_batch_size,
         |one_rule_name, metrics_with_samples| {
             Ok(build_one_rule_backtest_summary_and_detail(
                 one_rule_name,
@@ -6229,6 +6665,7 @@ pub fn run_transient_rule_layer_backtest(
     let (
         avg_residual_mean,
         avg_excess_residual_mean,
+        avg_er_change,
         profit_loss_ratio,
         _spread_mean,
         ic_mean,
@@ -6256,6 +6693,7 @@ pub fn run_transient_rule_layer_backtest(
         points: Vec::new(),
         avg_residual_mean,
         avg_excess_residual_mean,
+        avg_er_change,
         profit_loss_ratio,
         spread_mean: None,
         avg_contribution_score: weighted_rule_summary_metric(&all_rule_summaries, |item| {
@@ -6295,6 +6733,7 @@ pub fn run_transient_rank_layer_backtest(
     board: Option<String>,
     exclude_st_board: Option<bool>,
 ) -> Result<RankLayerBacktestData, String> {
+    validate_backtest_strategy_expressions(&source_path)?;
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
         .to_str()
@@ -6359,8 +6798,18 @@ pub fn run_transient_rank_layer_backtest(
     );
     let metrics =
         calc_rank_layer_metrics_from_score_rows(&source_conn, &source_path, &input, &summary_rows)?;
-    let market_value_summaries =
-        build_rank_market_value_summaries(&source_conn, &source_path, &input, &summary_rows)?;
+    let market_value_summaries = build_rank_market_value_summaries(
+        &source_path,
+        &input,
+        &summary_rows,
+        &metrics.layer_samples,
+    )?;
+    let stock_meta_map = load_validation_sample_stock_meta_map(&source_path)?;
+    let layer_sample_groups = build_rank_layer_sample_groups(
+        &metrics.layer_samples,
+        input.layer_config.layer_count,
+        &stock_meta_map,
+    );
 
     Ok(RankLayerBacktestData {
         stock_adj_type: input.stock_adj_type,
@@ -6381,6 +6830,7 @@ pub fn run_transient_rank_layer_backtest(
         layer_method_label: rank_layer_method_label(input.layer_config.layer_method).to_string(),
         point_count: metrics.point_count,
         sample_count: metrics.sample_count,
+        avg_er_change: metrics.avg_er_change,
         spread_mean: metrics.spread_mean,
         ic_mean: metrics.ic_mean,
         ic_std: metrics.ic_std,
@@ -6396,8 +6846,10 @@ pub fn run_transient_rank_layer_backtest(
                 sample_count: item.sample_count,
                 avg_score: item.avg_score,
                 avg_residual_return: item.avg_residual_return,
+                avg_er_change: item.avg_er_change,
             })
             .collect(),
+        layer_sample_groups,
         market_value_summaries,
     })
 }
@@ -6420,19 +6872,78 @@ mod tests {
             source_db_path,
         },
         scoring::tools::load_st_list,
+        simulate::rank::RankLayerSamplePoint,
         simulate::rule::RuleLayerSamplePoint,
     };
 
     use super::{
         PreparedValidationCombo, ValidationSampleRawRow, ValidationSampleStockMeta,
-        ValidationSimilarityCache, ValidationVariant, build_rule_contribution_averages_from_rows,
+        ValidationSimilarityCache, ValidationVariant, build_industry_maps_from_rows,
+        build_rank_layer_sample_groups, build_rule_contribution_averages_from_rows,
         build_validation_cached_rule, build_validation_return_distribution,
         build_validation_sample_groups, build_validation_similarity_rows,
         build_validation_triggered_scores, build_validation_triggered_scores_for_combos,
         collect_rule_validation_runtime_keys, collect_validation_assigned_names,
         derive_validation_volatility_group, resolve_validation_sample_board_label,
+        resolve_validation_trigger_count,
     };
     use crate::data::ScopeWay;
+
+    #[test]
+    fn market_analysis_industry_map_uses_industry_instead_of_market_board() {
+        let rows = vec![
+            vec![
+                "000001.SZ",
+                "000001",
+                "平安银行",
+                "深圳",
+                "银行",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "主板",
+            ],
+            vec![
+                "300001.SZ",
+                "300001",
+                "特锐德",
+                "青岛",
+                "专用设备",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "创业板",
+            ],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(str::to_string).collect())
+        .collect();
+
+        let (industry_map, industry_counts) = build_industry_maps_from_rows(rows);
+
+        assert_eq!(
+            industry_map.get("000001.SZ"),
+            Some(&vec!["银行".to_string()])
+        );
+        assert_eq!(
+            industry_map.get("300001.SZ"),
+            Some(&vec!["专用设备".to_string()])
+        );
+        assert!(!industry_counts.contains_key("主板"));
+        assert!(!industry_counts.contains_key("创业板"));
+    }
 
     fn temp_source_dir() -> PathBuf {
         let unique = SystemTime::now()
@@ -6532,6 +7043,67 @@ mod tests {
     }
 
     #[test]
+    fn rule_expression_validation_reports_bad_expression_before_stock_filter() {
+        let source_dir = temp_source_dir();
+        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
+        create_dir_all(source_dir_str).expect("create source dir");
+        write(
+            PathBuf::from(source_dir_str).join("score_rule.toml"),
+            r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "有效策略"
+scene = "趋势启动"
+stage = "base"
+scope_windows = 1
+scope_way = "LAST"
+when = "C > O"
+points = 1.0
+explain = "test"
+"#,
+        )
+        .expect("write score_rule.toml");
+
+        let error = super::run_rule_expression_validation(
+            source_dir_str.to_string(),
+            String::new(),
+            Some("MA(C,".to_string()),
+            Some("LAST".to_string()),
+            Some(1),
+            Some("qfq".to_string()),
+            "000001.SH".to_string(),
+            Some(0.5),
+            Some(0.2),
+            Some(0.0),
+            "20240102".to_string(),
+            "20240104".to_string(),
+            Some(1),
+            Some(0),
+            Some(1),
+            None,
+            None,
+            Some(1),
+            Some("主板".to_string()),
+            Some(false),
+            None,
+            None,
+        )
+        .expect_err("bad expression should fail before stock filtering");
+
+        assert!(error.contains("表达式解析错误"), "{error}");
+        assert!(!error.contains("stock_list.csv"), "{error}");
+    }
+
+    #[test]
     fn transient_rule_contribution_averages_match_rank_weight_formula() {
         let summary_rows = vec![
             ScoreSummary {
@@ -6611,6 +7183,7 @@ mod tests {
                 trade_date: "20240102".to_string(),
                 rule_score: 1.0,
                 residual_return,
+                er_change: f64::INFINITY,
             })
             .collect::<Vec<_>>();
 
@@ -6762,53 +7335,70 @@ mod tests {
     }
 
     #[test]
+    fn validation_trigger_count_uses_each_score_multiple() {
+        assert_eq!(resolve_validation_trigger_count(3.0, true, 1.0, false), 3);
+        assert_eq!(resolve_validation_trigger_count(-4.0, true, -1.0, false), 4);
+        assert_eq!(resolve_validation_trigger_count(6.0, true, 2.0, false), 3);
+        assert_eq!(resolve_validation_trigger_count(3.0, false, 1.0, false), 1);
+        assert_eq!(resolve_validation_trigger_count(3.0, true, 1.0, true), 1);
+    }
+
+    #[test]
     fn validation_sample_limit_applies_per_board_and_direction() {
         let samples = vec![
             ValidationSampleRawRow {
                 ts_code: "BJ0001.BJ".to_string(),
                 trade_date: "20240102".to_string(),
+                trigger_count: 1,
                 rule_score: 1.0,
                 residual_return: 9.0,
             },
             ValidationSampleRawRow {
                 ts_code: "BJ0001.BJ".to_string(),
                 trade_date: "20240103".to_string(),
+                trigger_count: 1,
                 rule_score: 1.0,
                 residual_return: 8.0,
             },
             ValidationSampleRawRow {
                 ts_code: "MB0001.SZ".to_string(),
                 trade_date: "20240102".to_string(),
+                trigger_count: 1,
                 rule_score: 1.0,
                 residual_return: 7.0,
             },
             ValidationSampleRawRow {
                 ts_code: "MB0001.SZ".to_string(),
                 trade_date: "20240103".to_string(),
+                trigger_count: 1,
                 rule_score: 1.0,
                 residual_return: 6.0,
             },
             ValidationSampleRawRow {
                 ts_code: "BJ0001.BJ".to_string(),
                 trade_date: "20240104".to_string(),
+                trigger_count: 1,
                 rule_score: 1.0,
                 residual_return: -7.0,
             },
             ValidationSampleRawRow {
                 ts_code: "BJ0001.BJ".to_string(),
                 trade_date: "20240105".to_string(),
+                trigger_count: 1,
                 rule_score: 1.0,
                 residual_return: -8.0,
             },
             ValidationSampleRawRow {
                 ts_code: "MB0001.SZ".to_string(),
                 trade_date: "20240104".to_string(),
+                trigger_count: 1,
                 rule_score: 1.0,
                 residual_return: -5.0,
             },
             ValidationSampleRawRow {
                 ts_code: "MB0001.SZ".to_string(),
                 trade_date: "20240105".to_string(),
+                trigger_count: 1,
                 rule_score: 1.0,
                 residual_return: -6.0,
             },
@@ -6862,6 +7452,56 @@ mod tests {
         assert_eq!(groups.random.len(), 2);
         assert_eq!(random_boards.get("北交所"), Some(&1));
         assert_eq!(random_boards.get("主板"), Some(&1));
+    }
+
+    #[test]
+    fn rank_layer_samples_keep_full_observation_counts_and_per_board_limit() {
+        let mut samples = Vec::new();
+        let mut stock_meta_map = HashMap::new();
+        for (board_prefix, board) in [("MB", "主板"), ("CY", "创业板")] {
+            for index in 0..6 {
+                let ts_code = format!("{board_prefix}{index:04}.SZ");
+                stock_meta_map.insert(
+                    ts_code.clone(),
+                    ValidationSampleStockMeta {
+                        name: None,
+                        board: board.to_string(),
+                        volatility_group: "常规波动".to_string(),
+                    },
+                );
+                samples.push(RankLayerSamplePoint {
+                    layer_index: 1,
+                    ts_code: ts_code.clone(),
+                    trade_date: "20240102".to_string(),
+                    score: 10.0,
+                    residual_return: index as f64 + 1.0,
+                    er_change: f64::INFINITY,
+                });
+                samples.push(RankLayerSamplePoint {
+                    layer_index: 1,
+                    ts_code,
+                    trade_date: "20240103".to_string(),
+                    score: 10.0,
+                    residual_return: index as f64 + 11.0,
+                    er_change: f64::INFINITY,
+                });
+            }
+        }
+
+        let groups = build_rank_layer_sample_groups(&samples, 1, &stock_meta_map);
+        let group = &groups[0];
+
+        assert_eq!(group.total_samples, 24);
+        assert_eq!(group.triggered_days, 2);
+        assert_eq!(group.positive_count, 24);
+        assert_eq!(group.positive.len(), 10);
+        assert_eq!(group.positive[0].residual_return, 16.0);
+        assert!(
+            group
+                .positive
+                .iter()
+                .all(|row| row.trade_date == "20240103")
+        );
     }
 
     #[test]
@@ -7012,12 +7652,14 @@ mod tests {
                 trade_date: "20240102".to_string(),
                 rule_score: 1.0,
                 residual_return: 0.5,
+                er_change: f64::INFINITY,
             },
             RuleLayerSamplePoint {
                 ts_code: "000002.SZ".to_string(),
                 trade_date: "20240103".to_string(),
                 rule_score: 1.0,
                 residual_return: 0.3,
+                er_change: f64::INFINITY,
             },
         ];
         let explain_map = HashMap::from([("规则A".to_string(), "说明A".to_string())]);

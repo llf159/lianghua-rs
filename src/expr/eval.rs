@@ -1510,6 +1510,50 @@ impl Runtime {
     }
 }
 
+pub fn is_supported_expression_function(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_uppercase().as_str(),
+        "ABS"
+            | "MAX"
+            | "MIN"
+            | "DIV"
+            | "HHV"
+            | "HHVD"
+            | "LLV"
+            | "LLVD"
+            | "COUNT"
+            | "COUNTD"
+            | "EXIST"
+            | "EXISTD"
+            | "MA"
+            | "MAD"
+            | "REF"
+            | "REFD"
+            | "LAST"
+            | "SUM"
+            | "SUMD"
+            | "STD"
+            | "STDD"
+            | "IF"
+            | "CROSS"
+            | "EMA"
+            | "SMA"
+            | "BARSLAST"
+            | "RSV"
+            | "RSVD"
+            | "GRANK"
+            | "GRANKD"
+            | "GTOPCOUNT"
+            | "GTOPCOUNTD"
+            | "LTOPCOUNT"
+            | "LTOPCOUNTD"
+            | "LRANK"
+            | "LRANKD"
+            | "GET"
+            | "GETD"
+    )
+}
+
 impl Runtime {
     fn eval_expr(&mut self, expr: &Expr) -> Result<Value, EvalErr> {
         match expr {
@@ -2032,6 +2076,43 @@ impl Value {
                     Ok(bs
                         .iter()
                         .map(|b| Some(if *b { 1.0 } else { 0.0 }))
+                        .collect())
+                } else {
+                    Err(EvalErr {
+                        msg: "布尔序列长度不对".to_string(),
+                    })
+                }
+            }
+        }
+    }
+
+    pub fn into_num_series(self, len: usize) -> Result<Vec<Option<f64>>, EvalErr> {
+        match self {
+            Value::Num(n) => Ok(vec![Some(n); len]),
+            Value::Bool(b) => Ok(vec![Some(if b { 1.0 } else { 0.0 }); len]),
+            Value::NumSeries(ns) => {
+                if ns.len() == len {
+                    Ok(ns)
+                } else {
+                    Err(EvalErr {
+                        msg: "数值序列长度不对".to_string(),
+                    })
+                }
+            }
+            Value::SharedNumSeries(ns) => {
+                if ns.len() == len {
+                    Ok(Arc::try_unwrap(ns).unwrap_or_else(|ns| ns.as_ref().clone()))
+                } else {
+                    Err(EvalErr {
+                        msg: "数值序列长度不对".to_string(),
+                    })
+                }
+            }
+            Value::BoolSeries(bs) => {
+                if bs.len() == len {
+                    Ok(bs
+                        .into_iter()
+                        .map(|b| Some(if b { 1.0 } else { 0.0 }))
                         .collect())
                 } else {
                     Err(EvalErr {

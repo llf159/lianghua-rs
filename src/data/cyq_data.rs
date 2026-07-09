@@ -2,11 +2,22 @@ use std::{
     collections::{HashMap, HashSet},
     fs::create_dir_all,
     path::Path,
-    sync::mpsc::{Receiver, sync_channel},
+    sync::{
+        Arc,
+        mpsc::{Receiver, sync_channel},
+    },
     thread,
 };
 
-use duckdb::{Appender, Connection, params};
+use duckdb::{
+    Appender, Connection,
+    arrow::{
+        array::{ArrayRef, Float64Array, Int32Array, StringArray, builder::StringBuilder},
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+    },
+    params,
+};
 use rayon::prelude::*;
 
 use crate::{
@@ -477,67 +488,256 @@ fn append_cyq_batch_rows(
     batch: CyqWriteBatch,
     config: CyqConfig,
 ) -> Result<(usize, usize), String> {
-    let mut snapshot_rows = 0usize;
-    let mut bin_rows = 0usize;
+    let snapshot_rows = batch
+        .stocks
+        .iter()
+        .map(|stock| stock.snapshots.len())
+        .sum::<usize>();
+    let bin_rows = batch
+        .stocks
+        .iter()
+        .flat_map(|stock| &stock.snapshots)
+        .map(|(_, snapshot)| snapshot.bins.len())
+        .sum::<usize>();
+
+    let mut snapshot_ts_code =
+        StringBuilder::with_capacity(snapshot_rows, snapshot_rows.saturating_mul(12));
+    let mut snapshot_trade_date =
+        StringBuilder::with_capacity(snapshot_rows, snapshot_rows.saturating_mul(8));
+    let mut snapshot_adj_type = StringBuilder::with_capacity(
+        snapshot_rows,
+        snapshot_rows.saturating_mul(DEFAULT_ADJ_TYPE.len()),
+    );
+    let mut snapshot_range = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_factor = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_min_accuracy = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_close = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_min_price = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_max_price = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_accuracy = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_total_chips = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_benefit_part = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_avg_cost = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_percent_70_price_low = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_percent_70_price_high = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_percent_70_concentration = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_percent_90_price_low = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_percent_90_price_high = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_percent_90_concentration = Vec::with_capacity(snapshot_rows);
+
+    let mut bin_ts_code = StringBuilder::with_capacity(bin_rows, bin_rows.saturating_mul(12));
+    let mut bin_trade_date = StringBuilder::with_capacity(bin_rows, bin_rows.saturating_mul(8));
+    let mut bin_adj_type =
+        StringBuilder::with_capacity(bin_rows, bin_rows.saturating_mul(DEFAULT_ADJ_TYPE.len()));
+    let mut bin_index = Vec::with_capacity(bin_rows);
+    let mut bin_price = Vec::with_capacity(bin_rows);
+    let mut bin_price_low = Vec::with_capacity(bin_rows);
+    let mut bin_price_high = Vec::with_capacity(bin_rows);
+    let mut bin_chip = Vec::with_capacity(bin_rows);
+    let mut bin_chip_pct = Vec::with_capacity(bin_rows);
 
     for stock in batch.stocks {
         let ts_code = stock.ts_code;
         for (trade_date, snapshot) in stock.snapshots {
-            snapshot_app
-                .append_row(params![
-                    &ts_code,
-                    &trade_date,
-                    DEFAULT_ADJ_TYPE,
-                    config.range as i32,
-                    config.factor as i32,
-                    config.min_accuracy,
-                    snapshot.close,
-                    snapshot.min_price,
-                    snapshot.max_price,
-                    snapshot.accuracy,
-                    snapshot.total_chips,
-                    snapshot.benefit_part,
-                    snapshot.avg_cost,
-                    snapshot.percent_70.price_low,
-                    snapshot.percent_70.price_high,
-                    snapshot.percent_70.concentration,
-                    snapshot.percent_90.price_low,
-                    snapshot.percent_90.price_high,
-                    snapshot.percent_90.concentration
-                ])
-                .map_err(|e| {
-                    format!(
-                        "写入cyq_snapshot失败, ts_code={}, trade_date={}: {e}",
-                        ts_code, trade_date
-                    )
-                })?;
-            snapshot_rows += 1;
+            snapshot_ts_code.append_value(&ts_code);
+            snapshot_trade_date.append_value(&trade_date);
+            snapshot_adj_type.append_value(DEFAULT_ADJ_TYPE);
+            snapshot_range.push(config.range as i32);
+            snapshot_factor.push(config.factor as i32);
+            snapshot_min_accuracy.push(config.min_accuracy);
+            snapshot_close.push(snapshot.close);
+            snapshot_min_price.push(snapshot.min_price);
+            snapshot_max_price.push(snapshot.max_price);
+            snapshot_accuracy.push(snapshot.accuracy);
+            snapshot_total_chips.push(snapshot.total_chips);
+            snapshot_benefit_part.push(snapshot.benefit_part);
+            snapshot_avg_cost.push(snapshot.avg_cost);
+            snapshot_percent_70_price_low.push(snapshot.percent_70.price_low);
+            snapshot_percent_70_price_high.push(snapshot.percent_70.price_high);
+            snapshot_percent_70_concentration.push(snapshot.percent_70.concentration);
+            snapshot_percent_90_price_low.push(snapshot.percent_90.price_low);
+            snapshot_percent_90_price_high.push(snapshot.percent_90.price_high);
+            snapshot_percent_90_concentration.push(snapshot.percent_90.concentration);
 
             for bin in snapshot.bins {
-                bin_app
-                    .append_row(params![
-                        &ts_code,
-                        &trade_date,
-                        DEFAULT_ADJ_TYPE,
-                        bin.index as i32,
-                        bin.price,
-                        bin.price_low,
-                        bin.price_high,
-                        bin.chip,
-                        bin.chip_pct
-                    ])
-                    .map_err(|e| {
-                        format!(
-                            "写入cyq_bin失败, ts_code={}, trade_date={}, bin_index={}: {e}",
-                            ts_code, trade_date, bin.index
-                        )
-                    })?;
-                bin_rows += 1;
+                bin_ts_code.append_value(&ts_code);
+                bin_trade_date.append_value(&trade_date);
+                bin_adj_type.append_value(DEFAULT_ADJ_TYPE);
+                bin_index.push(bin.index as i32);
+                bin_price.push(bin.price);
+                bin_price_low.push(bin.price_low);
+                bin_price_high.push(bin.price_high);
+                bin_chip.push(bin.chip);
+                bin_chip_pct.push(bin.chip_pct);
             }
         }
     }
 
+    if snapshot_rows > 0 {
+        snapshot_app
+            .append_record_batch(build_cyq_snapshot_record_batch(
+                snapshot_ts_code.finish(),
+                snapshot_trade_date.finish(),
+                snapshot_adj_type.finish(),
+                snapshot_range,
+                snapshot_factor,
+                snapshot_min_accuracy,
+                snapshot_close,
+                snapshot_min_price,
+                snapshot_max_price,
+                snapshot_accuracy,
+                snapshot_total_chips,
+                snapshot_benefit_part,
+                snapshot_avg_cost,
+                snapshot_percent_70_price_low,
+                snapshot_percent_70_price_high,
+                snapshot_percent_70_concentration,
+                snapshot_percent_90_price_low,
+                snapshot_percent_90_price_high,
+                snapshot_percent_90_concentration,
+            )?)
+            .map_err(|e| format!("批量写入cyq_snapshot失败:{e}"))?;
+    }
+
+    if bin_rows > 0 {
+        bin_app
+            .append_record_batch(build_cyq_bin_record_batch(
+                bin_ts_code.finish(),
+                bin_trade_date.finish(),
+                bin_adj_type.finish(),
+                bin_index,
+                bin_price,
+                bin_price_low,
+                bin_price_high,
+                bin_chip,
+                bin_chip_pct,
+            )?)
+            .map_err(|e| format!("批量写入cyq_bin失败:{e}"))?;
+    }
+
     Ok((snapshot_rows, bin_rows))
+}
+
+fn cyq_string_array(values: StringArray) -> ArrayRef {
+    Arc::new(values)
+}
+
+fn cyq_int32_array(values: Vec<i32>) -> ArrayRef {
+    Arc::new(Int32Array::from(values))
+}
+
+fn cyq_float64_array(values: Vec<f64>) -> ArrayRef {
+    Arc::new(Float64Array::from(values))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_cyq_snapshot_record_batch(
+    ts_code: StringArray,
+    trade_date: StringArray,
+    adj_type: StringArray,
+    range: Vec<i32>,
+    factor: Vec<i32>,
+    min_accuracy: Vec<f64>,
+    close: Vec<f64>,
+    min_price: Vec<f64>,
+    max_price: Vec<f64>,
+    accuracy: Vec<f64>,
+    total_chips: Vec<f64>,
+    benefit_part: Vec<f64>,
+    avg_cost: Vec<f64>,
+    percent_70_price_low: Vec<f64>,
+    percent_70_price_high: Vec<f64>,
+    percent_70_concentration: Vec<f64>,
+    percent_90_price_low: Vec<f64>,
+    percent_90_price_high: Vec<f64>,
+    percent_90_concentration: Vec<f64>,
+) -> Result<RecordBatch, String> {
+    let schema = Schema::new(vec![
+        Field::new("ts_code", DataType::Utf8, false),
+        Field::new("trade_date", DataType::Utf8, false),
+        Field::new("adj_type", DataType::Utf8, false),
+        Field::new("range", DataType::Int32, false),
+        Field::new("factor", DataType::Int32, false),
+        Field::new("min_accuracy", DataType::Float64, false),
+        Field::new("close", DataType::Float64, false),
+        Field::new("min_price", DataType::Float64, false),
+        Field::new("max_price", DataType::Float64, false),
+        Field::new("accuracy", DataType::Float64, false),
+        Field::new("total_chips", DataType::Float64, false),
+        Field::new("benefit_part", DataType::Float64, false),
+        Field::new("avg_cost", DataType::Float64, false),
+        Field::new("percent_70_price_low", DataType::Float64, false),
+        Field::new("percent_70_price_high", DataType::Float64, false),
+        Field::new("percent_70_concentration", DataType::Float64, false),
+        Field::new("percent_90_price_low", DataType::Float64, false),
+        Field::new("percent_90_price_high", DataType::Float64, false),
+        Field::new("percent_90_concentration", DataType::Float64, false),
+    ]);
+    RecordBatch::try_new(
+        Arc::new(schema),
+        vec![
+            cyq_string_array(ts_code),
+            cyq_string_array(trade_date),
+            cyq_string_array(adj_type),
+            cyq_int32_array(range),
+            cyq_int32_array(factor),
+            cyq_float64_array(min_accuracy),
+            cyq_float64_array(close),
+            cyq_float64_array(min_price),
+            cyq_float64_array(max_price),
+            cyq_float64_array(accuracy),
+            cyq_float64_array(total_chips),
+            cyq_float64_array(benefit_part),
+            cyq_float64_array(avg_cost),
+            cyq_float64_array(percent_70_price_low),
+            cyq_float64_array(percent_70_price_high),
+            cyq_float64_array(percent_70_concentration),
+            cyq_float64_array(percent_90_price_low),
+            cyq_float64_array(percent_90_price_high),
+            cyq_float64_array(percent_90_concentration),
+        ],
+    )
+    .map_err(|e| format!("创建cyq_snapshot批次失败:{e}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_cyq_bin_record_batch(
+    ts_code: StringArray,
+    trade_date: StringArray,
+    adj_type: StringArray,
+    bin_index: Vec<i32>,
+    price: Vec<f64>,
+    price_low: Vec<f64>,
+    price_high: Vec<f64>,
+    chip: Vec<f64>,
+    chip_pct: Vec<f64>,
+) -> Result<RecordBatch, String> {
+    let schema = Schema::new(vec![
+        Field::new("ts_code", DataType::Utf8, false),
+        Field::new("trade_date", DataType::Utf8, false),
+        Field::new("adj_type", DataType::Utf8, false),
+        Field::new("bin_index", DataType::Int32, false),
+        Field::new("price", DataType::Float64, false),
+        Field::new("price_low", DataType::Float64, false),
+        Field::new("price_high", DataType::Float64, false),
+        Field::new("chip", DataType::Float64, false),
+        Field::new("chip_pct", DataType::Float64, false),
+    ]);
+    RecordBatch::try_new(
+        Arc::new(schema),
+        vec![
+            cyq_string_array(ts_code),
+            cyq_string_array(trade_date),
+            cyq_string_array(adj_type),
+            cyq_int32_array(bin_index),
+            cyq_float64_array(price),
+            cyq_float64_array(price_low),
+            cyq_float64_array(price_high),
+            cyq_float64_array(chip),
+            cyq_float64_array(chip_pct),
+        ],
+    )
+    .map_err(|e| format!("创建cyq_bin批次失败:{e}"))
 }
 
 fn write_cyq_batches_from_channel(
@@ -557,6 +757,7 @@ fn write_cyq_batches_from_channel(
     let mut snapshot_rows = 0usize;
     let mut bin_rows = 0usize;
     let mut batch_count = 0usize;
+    let mut abort_reason = None;
     {
         let mut snapshot_app = tx
             .appender(CYQ_SNAPSHOT_TABLE)
@@ -569,7 +770,8 @@ fn write_cyq_batches_from_channel(
             let batch = match message {
                 CyqWriteMessage::Batch(batch) => batch,
                 CyqWriteMessage::Abort(reason) => {
-                    return Err(format!("筹码计算中断，结果库回滚:{reason}"));
+                    abort_reason = Some(reason);
+                    break;
                 }
             };
 
@@ -589,12 +791,20 @@ fn write_cyq_batches_from_channel(
             }
         }
 
-        snapshot_app
-            .flush()
-            .map_err(|e| format!("刷新cyq_snapshot写入器失败:{e}"))?;
-        bin_app
-            .flush()
-            .map_err(|e| format!("刷新cyq_bin写入器失败:{e}"))?;
+        if abort_reason.is_none() {
+            snapshot_app
+                .flush()
+                .map_err(|e| format!("刷新cyq_snapshot写入器失败:{e}"))?;
+            bin_app
+                .flush()
+                .map_err(|e| format!("刷新cyq_bin写入器失败:{e}"))?;
+        }
+    }
+
+    if let Some(reason) = abort_reason {
+        tx.rollback()
+            .map_err(|e| format!("筹码计算中断且结果库回滚失败:{reason}; {e}"))?;
+        return Err(format!("筹码计算中断，结果库已回滚:{reason}"));
     }
 
     tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
@@ -626,6 +836,7 @@ fn write_cyq_incremental_batches_from_channel(
     let mut snapshot_rows = 0usize;
     let mut bin_rows = 0usize;
     let mut batch_count = 0usize;
+    let mut abort_reason = None;
     {
         let mut snapshot_app = tx
             .appender(CYQ_SNAPSHOT_TABLE)
@@ -638,7 +849,8 @@ fn write_cyq_incremental_batches_from_channel(
             let batch = match message {
                 CyqWriteMessage::Batch(batch) => batch,
                 CyqWriteMessage::Abort(reason) => {
-                    return Err(format!("筹码增量计算中断，结果库回滚:{reason}"));
+                    abort_reason = Some(reason);
+                    break;
                 }
             };
 
@@ -658,12 +870,20 @@ fn write_cyq_incremental_batches_from_channel(
             }
         }
 
-        snapshot_app
-            .flush()
-            .map_err(|e| format!("刷新cyq_snapshot写入器失败:{e}"))?;
-        bin_app
-            .flush()
-            .map_err(|e| format!("刷新cyq_bin写入器失败:{e}"))?;
+        if abort_reason.is_none() {
+            snapshot_app
+                .flush()
+                .map_err(|e| format!("刷新cyq_snapshot写入器失败:{e}"))?;
+            bin_app
+                .flush()
+                .map_err(|e| format!("刷新cyq_bin写入器失败:{e}"))?;
+        }
+    }
+
+    if let Some(reason) = abort_reason {
+        tx.rollback()
+            .map_err(|e| format!("筹码增量计算中断且结果库回滚失败:{reason}; {e}"))?;
+        return Err(format!("筹码增量计算中断，结果库已回滚:{reason}"));
     }
 
     tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
@@ -699,6 +919,7 @@ fn write_cyq_stock_repair_batches_from_channel(
     let mut snapshot_rows = 0usize;
     let mut bin_rows = 0usize;
     let mut batch_count = 0usize;
+    let mut abort_reason = None;
     {
         let mut snapshot_app = tx
             .appender(CYQ_SNAPSHOT_TABLE)
@@ -711,7 +932,8 @@ fn write_cyq_stock_repair_batches_from_channel(
             let batch = match message {
                 CyqWriteMessage::Batch(batch) => batch,
                 CyqWriteMessage::Abort(reason) => {
-                    return Err(format!("筹码局部修复中断，结果库回滚:{reason}"));
+                    abort_reason = Some(reason);
+                    break;
                 }
             };
 
@@ -731,12 +953,20 @@ fn write_cyq_stock_repair_batches_from_channel(
             }
         }
 
-        snapshot_app
-            .flush()
-            .map_err(|e| format!("刷新cyq_snapshot写入器失败:{e}"))?;
-        bin_app
-            .flush()
-            .map_err(|e| format!("刷新cyq_bin写入器失败:{e}"))?;
+        if abort_reason.is_none() {
+            snapshot_app
+                .flush()
+                .map_err(|e| format!("刷新cyq_snapshot写入器失败:{e}"))?;
+            bin_app
+                .flush()
+                .map_err(|e| format!("刷新cyq_bin写入器失败:{e}"))?;
+        }
+    }
+
+    if let Some(reason) = abort_reason {
+        tx.rollback()
+            .map_err(|e| format!("筹码局部修复中断且结果库回滚失败:{reason}; {e}"))?;
+        return Err(format!("筹码局部修复中断，结果库已回滚:{reason}"));
     }
 
     tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;

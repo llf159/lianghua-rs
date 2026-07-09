@@ -2405,6 +2405,12 @@ function buildCyqChenSummaryItems(
       priority: 'primary',
     },
     {
+      key: 'main-avg-cost',
+      label: '主力成本',
+      value: formatNumber(snapshot.mainAvgCost),
+      priority: 'primary',
+    },
+    {
       key: 'peak',
       label: '总筹码峰',
       value: formatNumber(snapshot.chipPeakPrice),

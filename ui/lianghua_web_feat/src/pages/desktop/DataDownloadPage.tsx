@@ -384,9 +384,10 @@ function readDraft(): DataDownloadDraft {
 
 type DataDownloadPageProps = {
   mergedMode?: boolean
+  onMainTaskComplete?: () => void
 }
 
-export default function DataDownloadPage({ mergedMode = false }: DataDownloadPageProps) {
+export default function DataDownloadPage({ mergedMode = false, onMainTaskComplete }: DataDownloadPageProps) {
   const draft = useMemo(() => readDraft(), [])
   const [status, setStatus] = useState<DataDownloadStatus | null>(null)
   const [busyAction, setBusyAction] = useState<BusyAction>('loading')
@@ -569,6 +570,9 @@ export default function DataDownloadPage({ mergedMode = false }: DataDownloadPag
     try {
       const result = await executor(downloadId)
       setStatus(result.status)
+      if (section === 'main') {
+        onMainTaskComplete?.()
+      }
 
       if (
         result.action === 'rebuild-concept-performance' ||

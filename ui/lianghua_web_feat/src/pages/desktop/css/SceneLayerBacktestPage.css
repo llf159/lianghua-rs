@@ -705,6 +705,67 @@
   gap: 8px;
 }
 
+.scene-layer-validation-trigger-count-section {
+  display: grid;
+  gap: 10px;
+}
+
+.scene-layer-validation-trigger-count-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.scene-layer-validation-trigger-count-head h3 {
+  margin: 0;
+  color: #334155;
+  font-size: 14px;
+}
+
+.scene-layer-validation-trigger-count-head span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.scene-layer-validation-trigger-count-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.scene-layer-validation-trigger-count-btn {
+  display: grid;
+  gap: 3px;
+  border: 1px solid #dbe3ed;
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: #fff;
+  color: #334155;
+  text-align: left;
+  cursor: pointer;
+}
+
+.scene-layer-validation-trigger-count-btn:hover {
+  border-color: var(--theme-orange-300);
+  background: var(--theme-orange-50);
+}
+
+.scene-layer-validation-trigger-count-btn-active {
+  border-color: var(--theme-orange-400);
+  background: var(--theme-orange-50);
+  box-shadow: 0 0 0 1px var(--theme-orange-200);
+}
+
+.scene-layer-validation-trigger-count-btn strong {
+  font-size: 14px;
+}
+
+.scene-layer-validation-trigger-count-btn span {
+  color: #64748b;
+  font-size: 12px;
+}
+
 .scene-layer-return-distribution {
   margin-top: 12px;
   border-top: 1px solid #e5ebf3;

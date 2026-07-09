@@ -77,11 +77,13 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     ],
   },
   {
-    title: '6. 额外常数字段',
-    note: '这些字段由后端运行时统一注入，后续新增常量字段也会沿用这套入口。',
+    title: '6. 额外运行时字段',
+    note: '这些字段由后端运行时统一注入，后续新增基础字段也会沿用这套入口。',
     fields: [
       { name: 'ZHANG', scope: '通用', description: '涨停幅比例，例如普通股约 0.095、创业板/科创板约 0.195、北交所约 0.295、ST 约 0.045。', example: 'PCT_CHG >= ZHANG * 100' },
       { name: 'TOTAL_MV_YI', scope: '通用', description: '总市值，单位“亿”；按 stock_list.csv 的 total_share × 当日收盘价 C / 10000 逐日计算。', example: 'TOTAL_MV_YI <= 300' },
+      { name: 'I / ISZ / I300', scope: '通用', description: '上证指数 / 深证成指 / 沪深300 的日涨幅，单位是百分比。', example: 'PCT_CHG > I300 + 2' },
+      { name: 'I500 / ICY / I50 / I1000', scope: '通用', description: '中证500 / 创业板指 / 上证50 / 中证1000 的日涨幅，单位是百分比。', example: 'I1000 > I50' },
     ],
   },
   {
@@ -90,6 +92,7 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     fields: [
       { name: 'CYQ_TPR / CYQ_TTR', scope: '通用', description: '新筹码整体获利 / 套牢筹码比例。', example: 'CYQ_TPR > 0.6 AND CYQ_TTR < 0.35' },
       { name: 'CYQ_MPR / CYQ_MTR', scope: '通用', description: '新筹码主力获利 / 套牢筹码比例。', example: 'CYQ_MPR > 0.6 AND CYQ_MTR < 0.35' },
+      { name: 'CYQ_MAC', scope: '通用', description: '新筹码主力平均成本，按价格分桶的主力筹码加权计算。', example: 'C > CYQ_MAC' },
       { name: 'CYQ_PEAK', scope: '通用', description: '新筹码总筹码峰值价格。', example: 'C > CYQ_PEAK' },
       { name: 'CYQ_MT / CYQ_RT', scope: '通用', description: '主力 / 散户归一化持仓量。', example: 'CYQ_MT > CYQ_RT' },
       { name: 'CYQ_MIN / CYQ_MAX', scope: '通用', description: '新筹码分布的最低 / 最高价格边界。', example: 'C >= CYQ_MIN AND C <= CYQ_MAX' },
@@ -120,7 +123,7 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     title: '10. 实时监控模板附加字段',
     note: '下面这些字段只在“实时监控”页面的模板表达式中可用，策略打分、选股或统计表达式里不要直接写。',
     fields: [
-      { name: 'RT_OP', scope: '实时监控', description: '当前价相对今开涨跌幅，单位是百分比。', example: 'RT_OP >= 2' },
+      { name: 'RT_OP', scope: '实时监控', description: '实体涨幅，计算口径为 (当前价 - 今开) / 昨收 × 100%，单位是百分比。', example: 'RT_OP >= 2' },
       { name: 'RT_FH', scope: '实时监控', description: '当前价相对于今日高点的回落幅度，单位是百分比；返回值恒为非负数。', example: 'RT_FH <= 1.5' },
       { name: 'RT_VR', scope: '实时监控', description: '行情源返回的盘中量比；新浪源没有该字段时为空。', example: 'RT_VR >= 2' },
       { name: 'RT_AVG', scope: '实时监控', description: '行情源返回的均价；新浪源没有该字段时为空。', example: 'C > RT_AVG' },

@@ -203,10 +203,17 @@ export type StockDetailPageData = {
   strategy_scenes?: DetailScenePayload | null
 }
 
+export type StockDetailPrevRanksData = {
+  resolved_trade_date?: string
+  resolved_ts_code?: string
+  prev_ranks?: DetailPrevRankRow[]
+}
+
 export type StockDetailStrategySnapshotData = {
   resolved_trade_date?: string
   resolved_ts_code?: string
   strategy_triggers?: DetailStrategyPayload | null
+  strategy_scenes?: DetailScenePayload | null
 }
 
 export type StockDetailRealtimeData = {
@@ -244,6 +251,7 @@ export type DetailCyqSnapshot = {
   total_trapped_ratio?: number | null
   main_profit_ratio?: number | null
   main_trapped_ratio?: number | null
+  main_avg_cost?: number | null
   chip_peak_price?: number | null
   percent_70_price_low?: number | null
   percent_70_price_high?: number | null
@@ -271,6 +279,24 @@ export async function getStockDetailStrategySnapshot(query: {
   tsCode: string
 }) {
   return invoke<StockDetailStrategySnapshotData>('get_stock_detail_strategy_snapshot', query)
+}
+
+export async function getStockDetailPrevRanks(query: {
+  sourcePath: string
+  tradeDate?: string
+  tsCode: string
+  prevRankDays?: number
+}) {
+  return invoke<StockDetailPrevRanksData>('get_stock_detail_prev_ranks', query)
+}
+
+export async function getStockSimilarityPage(query: {
+  sourcePath: string
+  tradeDate?: string
+  tsCode: string
+  limit?: number
+}) {
+  return invoke<StockSimilarityPageData>('get_stock_similarity_page', query)
 }
 
 export async function getStockDetailRealtime(query: {

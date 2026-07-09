@@ -11,7 +11,7 @@ use crate::expr::parser::{Expr, Parser, Stmt, Stmts, lex_all};
 use crate::utils::utils::eval_binary_for_warmup;
 use crate::utils::utils::impl_expr_warmup;
 
-pub const CYQ_CHEN_RUNTIME_FIELDS: [(&str, &str); 15] = [
+pub const CYQ_CHEN_RUNTIME_FIELDS: [(&str, &str); 16] = [
     ("CYQ_MIN", "min_price"),
     ("CYQ_MAX", "max_price"),
     ("CYQ_MT", "main_total"),
@@ -20,6 +20,7 @@ pub const CYQ_CHEN_RUNTIME_FIELDS: [(&str, &str); 15] = [
     ("CYQ_TTR", "total_trapped_ratio"),
     ("CYQ_MPR", "main_profit_ratio"),
     ("CYQ_MTR", "main_trapped_ratio"),
+    ("CYQ_MAC", "main_avg_cost"),
     ("CYQ_PEAK", "chip_peak_price"),
     ("CYQ_P70L", "percent_70_price_low"),
     ("CYQ_P70H", "percent_70_price_high"),

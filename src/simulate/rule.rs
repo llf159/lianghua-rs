@@ -10,7 +10,7 @@ use super::{
     calc_stock_residual_returns_from_loaded_series,
 };
 use crate::data::{
-    concept_performance_data::{load_concept_trend_series, load_industry_trend_series},
+    concept_performance_data::{load_concept_trend_series_map, load_industry_trend_series_map},
     load_stock_list, load_ths_concepts_named_map, result_db_path,
     scoring_data::{ScoreDetails, ScoreSummary},
 };
@@ -20,6 +20,9 @@ use crate::simulate::fp_utils::{
     sample_std, spearman_corr,
 };
 const PCT_CHG_BATCH_SIZE: usize = 512;
+const EFFICIENCY_RATIO_PERIOD: usize = 20;
+const EFFICIENCY_RATIO_STOCK_BATCH_SIZE: usize = 128;
+pub(crate) const DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct RuleLayerConfig {
@@ -120,6 +123,8 @@ pub struct RuleLayerMetrics {
     pub points: Vec<RuleLayerPoint>,
     pub avg_residual_mean: Option<f64>,
     pub avg_excess_residual_mean: Option<f64>,
+    pub avg_er_change: Option<f64>,
+    pub er_change_sample_count: usize,
     pub profit_loss_ratio: Option<f64>,
     pub spread_mean: Option<f64>,
     pub ic_mean: Option<f64>,
@@ -134,6 +139,7 @@ pub struct RuleLayerSamplePoint {
     pub trade_date: String,
     pub rule_score: f64,
     pub residual_return: f64,
+    pub er_change: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -171,6 +177,7 @@ struct RuleUniverseRow {
 struct RuleDayBaseSample {
     ts_code: Arc<str>,
     residual_return: f64,
+    er_change: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +211,12 @@ struct ResidualCacheInput<'a> {
     end_date: &'a str,
     backtest_period: usize,
     min_listed_trade_days: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuleBacktestOutcome {
+    residual_return: f64,
+    er_change: f64,
 }
 
 pub fn calc_rule_layer_metrics_from_db(
@@ -371,6 +384,7 @@ pub fn calc_all_rule_layer_metrics_with_samples_from_db_with_ts_filter(
         end_date,
         layer_config,
         allowed_ts_codes,
+        DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE,
         |rule_name, metrics| Ok((rule_name.to_string(), metrics)),
     )
 }
@@ -388,6 +402,7 @@ pub fn calc_all_rule_layer_metrics_with_samples_from_db_map_with_ts_filter<T, F>
     end_date: &str,
     layer_config: &RuleLayerConfig,
     allowed_ts_codes: Option<&HashSet<String>>,
+    parallel_batch_size: usize,
     map_result: F,
 ) -> Result<Vec<T>, String>
 where
@@ -430,21 +445,27 @@ where
         allowed_ts_codes,
     )?;
 
-    let grouped_results: Vec<Result<T, String>> = rule_names
-        .par_iter()
-        .map(|rule_name| {
-            let empty_triggered_score_map = TriggeredScoreMap::new();
-            let triggered_score_map = triggered_score_map_by_rule
-                .get(rule_name)
-                .unwrap_or(&empty_triggered_score_map);
-            let metrics = calc_rule_layer_metrics_with_samples_from_cache(
-                &runtime_cache,
-                triggered_score_map,
-                layer_config,
-            )?;
-            map_result(rule_name, metrics)
-        })
-        .collect();
+    // 每条规则都会物化一份全市场样本。按小批次并行，在恢复规则级吞吐的同时，
+    // 将同时存活的大 Vec 数量限制在固定值，避免峰值随 Rayon 线程数放大。
+    let mut grouped_results = Vec::with_capacity(rule_names.len());
+    for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
+        let mut batch_results: Vec<Result<T, String>> = rule_batch
+            .par_iter()
+            .map(|rule_name| {
+                let empty_triggered_score_map = TriggeredScoreMap::new();
+                let triggered_score_map = triggered_score_map_by_rule
+                    .get(rule_name)
+                    .unwrap_or(&empty_triggered_score_map);
+                let metrics = calc_rule_layer_metrics_with_samples_from_cache(
+                    &runtime_cache,
+                    triggered_score_map,
+                    layer_config,
+                )?;
+                map_result(rule_name, metrics)
+            })
+            .collect();
+        grouped_results.append(&mut batch_results);
+    }
 
     let mut out = Vec::with_capacity(grouped_results.len());
     for item in grouped_results {
@@ -557,6 +578,7 @@ pub fn calc_all_rule_layer_metrics_with_samples_from_rows(
         start_date,
         end_date,
         layer_config,
+        DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE,
         |rule_name, metrics| Ok((rule_name.to_string(), metrics)),
     )
 }
@@ -575,6 +597,7 @@ pub fn calc_all_rule_layer_metrics_with_samples_from_rows_map<T, F>(
     start_date: &str,
     end_date: &str,
     layer_config: &RuleLayerConfig,
+    parallel_batch_size: usize,
     map_result: F,
 ) -> Result<Vec<T>, String>
 where
@@ -616,21 +639,26 @@ where
         end_date,
     );
 
-    let grouped_results: Vec<Result<T, String>> = rule_names
-        .par_iter()
-        .map(|rule_name| {
-            let empty_triggered_score_map = TriggeredScoreMap::new();
-            let triggered_score_map = triggered_score_map_by_rule
-                .get(rule_name)
-                .unwrap_or(&empty_triggered_score_map);
-            let metrics = calc_rule_layer_metrics_with_samples_from_cache(
-                &runtime_cache,
-                triggered_score_map,
-                layer_config,
-            )?;
-            map_result(rule_name, metrics)
-        })
-        .collect();
+    // 与数据库路径一致：固定小批次并行，限制同时存活的全市场样本 Vec 数量。
+    let mut grouped_results = Vec::with_capacity(rule_names.len());
+    for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
+        let mut batch_results: Vec<Result<T, String>> = rule_batch
+            .par_iter()
+            .map(|rule_name| {
+                let empty_triggered_score_map = TriggeredScoreMap::new();
+                let triggered_score_map = triggered_score_map_by_rule
+                    .get(rule_name)
+                    .unwrap_or(&empty_triggered_score_map);
+                let metrics = calc_rule_layer_metrics_with_samples_from_cache(
+                    &runtime_cache,
+                    triggered_score_map,
+                    layer_config,
+                )?;
+                map_result(rule_name, metrics)
+            })
+            .collect();
+        grouped_results.append(&mut batch_results);
+    }
 
     let mut out = Vec::with_capacity(grouped_results.len());
     for item in grouped_results {
@@ -1261,6 +1289,8 @@ pub fn calc_rule_layer_metrics(
         points,
         avg_residual_mean,
         avg_excess_residual_mean,
+        avg_er_change: None,
+        er_change_sample_count: 0,
         profit_loss_ratio,
         spread_mean,
         ic_mean,
@@ -1302,6 +1332,8 @@ fn compute_rule_layer_from_day_groups(
 
     let avg_residual_mean = mean(&accum.avg_residual_values);
     let avg_excess_residual_mean = mean(&accum.avg_excess_residual_values);
+    let avg_er_change = mean(&accum.er_change_values);
+    let er_change_sample_count = accum.er_change_values.len();
     let profit_loss_ratio = accum.profit_loss_sums.ratio();
     let spread_mean = mean(&accum.spread_values);
     let ic_mean = mean(&accum.ic_values);
@@ -1317,6 +1349,8 @@ fn compute_rule_layer_from_day_groups(
             points: accum.points,
             avg_residual_mean,
             avg_excess_residual_mean,
+            avg_er_change,
+            er_change_sample_count,
             profit_loss_ratio,
             spread_mean,
             ic_mean,
@@ -1335,6 +1369,7 @@ struct DayGroupsFoldAccum {
     points: Vec<RuleLayerPoint>,
     avg_residual_values: Vec<f64>,
     avg_excess_residual_values: Vec<f64>,
+    er_change_values: Vec<f64>,
     profit_loss_sums: ProfitLossSums,
     spread_values: Vec<f64>,
     ic_values: Vec<f64>,
@@ -1367,6 +1402,11 @@ impl DayGroupsFoldAccum {
         } else {
             Vec::new()
         };
+        let mut triggered_er_changes: Vec<f64> = if collect_metrics {
+            Vec::with_capacity(cap)
+        } else {
+            Vec::new()
+        };
 
         for sample in &day_group.samples {
             let triggered_score = triggered_score_map
@@ -1383,6 +1423,9 @@ impl DayGroupsFoldAccum {
             if let Some(rule_score) = triggered_score {
                 if collect_metrics {
                     triggered_residuals.push(sample.residual_return);
+                    if sample.er_change.is_finite() {
+                        triggered_er_changes.push(sample.er_change);
+                    }
                 }
 
                 if collect_options.triggered_samples {
@@ -1391,6 +1434,7 @@ impl DayGroupsFoldAccum {
                         trade_date: String::from(&*day_group.trade_date),
                         rule_score,
                         residual_return: sample.residual_return,
+                        er_change: sample.er_change,
                     });
                 }
             }
@@ -1401,6 +1445,7 @@ impl DayGroupsFoldAccum {
                     trade_date: String::from(&*day_group.trade_date),
                     rule_score,
                     residual_return: sample.residual_return,
+                    er_change: sample.er_change,
                 });
             }
         }
@@ -1424,6 +1469,7 @@ impl DayGroupsFoldAccum {
             if let Some(value) = avg_excess_residual_return {
                 self.avg_excess_residual_values.push(value);
             }
+            self.er_change_values.extend(triggered_er_changes);
             self.profit_loss_sums.merge(day_profit_loss_sums);
             if let Some(spread) = top_bottom_spread {
                 self.spread_values.push(spread);
@@ -1448,6 +1494,7 @@ impl DayGroupsFoldAccum {
         self.avg_residual_values.extend(other.avg_residual_values);
         self.avg_excess_residual_values
             .extend(other.avg_excess_residual_values);
+        self.er_change_values.extend(other.er_change_values);
         self.profit_loss_sums.merge(other.profit_loss_sums);
         self.spread_values.extend(other.spread_values);
         self.ic_values.extend(other.ic_values);
@@ -1458,9 +1505,11 @@ impl DayGroupsFoldAccum {
 
 fn build_rule_day_groups(
     universe_rows: Vec<RuleUniverseRow>,
-    residual_map_cache: &HashMap<String, HashMap<String, f64>>,
+    residual_map_cache: &HashMap<String, HashMap<String, RuleBacktestOutcome>>,
 ) -> Vec<RuleDayGroup> {
     let mut day_groups: Vec<RuleDayGroup> = Vec::new();
+    let mut ts_code_cache: HashMap<String, Arc<str>> =
+        HashMap::with_capacity(residual_map_cache.len());
     let mut current_trade_date: Arc<str> = Arc::from("");
     let mut current_samples: Vec<RuleDayBaseSample> = Vec::new();
 
@@ -1468,7 +1517,7 @@ fn build_rule_day_groups(
         let Some(residual_map) = residual_map_cache.get(&row.ts_code) else {
             continue;
         };
-        let Some(residual_return) = residual_map.get(&row.trade_date).copied() else {
+        let Some(outcome) = residual_map.get(&row.trade_date).copied() else {
             continue;
         };
 
@@ -1483,9 +1532,14 @@ fn build_rule_day_groups(
             current_trade_date = Arc::from(row.trade_date.as_str());
         }
 
+        let ts_code = ts_code_cache
+            .entry(row.ts_code)
+            .or_insert_with_key(|value| Arc::from(value.as_str()))
+            .clone();
         current_samples.push(RuleDayBaseSample {
-            ts_code: Arc::from(row.ts_code.as_str()),
-            residual_return,
+            ts_code,
+            residual_return: outcome.residual_return,
+            er_change: outcome.er_change,
         });
     }
 
@@ -1506,6 +1560,8 @@ fn empty_metrics() -> RuleLayerMetrics {
         points: Vec::new(),
         avg_residual_mean: None,
         avg_excess_residual_mean: None,
+        avg_er_change: None,
+        er_change_sample_count: 0,
         profit_loss_ratio: None,
         spread_mean: None,
         ic_mean: None,
@@ -1761,7 +1817,7 @@ fn build_residual_map_cache(
     concept_map: &HashMap<String, String>,
     industry_map: &HashMap<String, String>,
     input: &ResidualCacheInput<'_>,
-) -> Result<HashMap<String, HashMap<String, f64>>, String> {
+) -> Result<HashMap<String, HashMap<String, RuleBacktestOutcome>>, String> {
     if ts_codes.is_empty() {
         return Ok(HashMap::new());
     }
@@ -1803,36 +1859,78 @@ fn build_residual_map_cache(
     )?
     .remove(input.index_ts_code)
     .unwrap_or_default();
+    let er_column = find_stock_data_column(source_conn, "ER")?;
 
-    let grouped_results: Vec<Result<(String, HashMap<String, f64>), String>> = ts_codes
-        .into_par_iter()
-        .map(|ts_code| {
-            let residual_map = build_residual_map_for_ts_code(
-                &ts_code,
-                &stock_series_cache,
-                &index_series,
-                concept_map,
-                industry_map,
-                &concept_series_cache,
-                &industry_series_cache,
-                input,
-                &sample_eligibility,
+    let mut out = HashMap::with_capacity(ts_codes.len());
+    for ts_code_batch in ts_codes.chunks(EFFICIENCY_RATIO_STOCK_BATCH_SIZE) {
+        let mut er_series_cache = match er_column.as_deref() {
+            Some(column) => load_indicator_series_cache_for_ts_codes(
+                source_conn,
+                ts_code_batch,
+                input.stock_adj_type,
+                input.start_date,
+                input.end_date,
+                column,
+            )?,
+            None => HashMap::new(),
+        };
+        let fallback_ts_codes = ts_code_batch
+            .iter()
+            .filter(|ts_code| !er_series_cache.contains_key(ts_code.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !fallback_ts_codes.is_empty() {
+            let close_series_cache = load_close_series_cache_for_ts_codes(
+                source_conn,
+                &fallback_ts_codes,
+                input.stock_adj_type,
+                input.start_date,
+                input.end_date,
             )?;
-            Ok((ts_code, residual_map))
-        })
-        .collect();
+            for (ts_code, close_series) in close_series_cache {
+                er_series_cache.insert(
+                    ts_code,
+                    calc_efficiency_ratio_map(&close_series, EFFICIENCY_RATIO_PERIOD),
+                );
+            }
+        }
+        for series in er_series_cache.values_mut() {
+            series.shrink_to_fit();
+        }
+        er_series_cache.shrink_to_fit();
 
-    // 中间缓存数据已完成使命，显式释放以降低内存峰值
+        let batch_results: Vec<Result<(String, HashMap<String, RuleBacktestOutcome>), String>> =
+            ts_code_batch
+                .par_iter()
+                .map(|ts_code| {
+                    let residual_map = build_residual_map_for_ts_code(
+                        ts_code,
+                        &stock_series_cache,
+                        &er_series_cache,
+                        &index_series,
+                        concept_map,
+                        industry_map,
+                        &concept_series_cache,
+                        &industry_series_cache,
+                        input,
+                        &sample_eligibility,
+                    )?;
+                    Ok((ts_code.clone(), residual_map))
+                })
+                .collect();
+
+        drop(er_series_cache);
+        for item in batch_results {
+            let (ts_code, residual_map) = item?;
+            out.insert(ts_code, residual_map);
+        }
+    }
+
     drop(stock_series_cache);
     drop(concept_series_cache);
     drop(industry_series_cache);
     drop(index_series);
 
-    let mut out = HashMap::with_capacity(grouped_results.len());
-    for item in grouped_results {
-        let (ts_code, residual_map) = item?;
-        out.insert(ts_code, residual_map);
-    }
     out.shrink_to_fit();
     Ok(out)
 }
@@ -1840,6 +1938,7 @@ fn build_residual_map_cache(
 fn build_residual_map_for_ts_code(
     ts_code: &str,
     stock_series_cache: &HashMap<String, HashMap<String, f64>>,
+    er_series_cache: &HashMap<String, HashMap<String, f64>>,
     index_series: &HashMap<String, f64>,
     concept_map: &HashMap<String, String>,
     industry_map: &HashMap<String, String>,
@@ -1847,7 +1946,7 @@ fn build_residual_map_for_ts_code(
     industry_series_cache: &HashMap<String, HashMap<String, f64>>,
     input: &ResidualCacheInput<'_>,
     sample_eligibility: &BacktestSampleEligibility,
-) -> Result<HashMap<String, f64>, String> {
+) -> Result<HashMap<String, RuleBacktestOutcome>, String> {
     let Some(stock_series) = stock_series_cache.get(ts_code) else {
         return Ok(HashMap::new());
     };
@@ -1886,11 +1985,113 @@ fn build_residual_map_for_ts_code(
         },
     )?;
 
+    let empty_er_by_date = HashMap::new();
+    let er_by_date = er_series_cache.get(ts_code).unwrap_or(&empty_er_by_date);
     let mut residual_map =
-        build_forward_backtest_residual_map(residual_points, input.backtest_period);
+        build_forward_backtest_outcome_map(residual_points, input.backtest_period, er_by_date);
     residual_map.retain(|trade_date, _| sample_eligibility.allows_sample(ts_code, trade_date));
     residual_map.shrink_to_fit();
     Ok(residual_map)
+}
+
+fn build_forward_backtest_outcome_map(
+    mut residual_points: Vec<crate::simulate::ResidualReturnPoint>,
+    backtest_period: usize,
+    er_by_date: &HashMap<String, f64>,
+) -> HashMap<String, RuleBacktestOutcome> {
+    if backtest_period == 0 || residual_points.len() < backtest_period + 1 {
+        return HashMap::new();
+    }
+
+    residual_points.sort_by(|left, right| left.trade_date.cmp(&right.trade_date));
+
+    let mut residual_sum = 0.0;
+    let mut invalid_count = 0usize;
+    for point in &residual_points[1..=backtest_period] {
+        if point.residual_pct.is_finite() {
+            residual_sum += point.residual_pct;
+        } else {
+            invalid_count += 1;
+        }
+    }
+
+    let mut out = HashMap::with_capacity(residual_points.len() - backtest_period);
+    for index in 0..(residual_points.len() - backtest_period) {
+        if invalid_count == 0 {
+            let end_trade_date = &residual_points[index + backtest_period].trade_date;
+            let er_change = er_by_date
+                .get(end_trade_date)
+                .zip(er_by_date.get(&residual_points[index].trade_date))
+                .map(|(end_er, start_er)| end_er - start_er)
+                .filter(|value| value.is_finite())
+                .unwrap_or(f64::INFINITY);
+            out.insert(
+                residual_points[index].trade_date.clone(),
+                RuleBacktestOutcome {
+                    residual_return: residual_sum,
+                    er_change,
+                },
+            );
+        }
+
+        let remove_index = index + 1;
+        let add_index = index + backtest_period + 1;
+        if add_index >= residual_points.len() {
+            break;
+        }
+
+        let removed = residual_points[remove_index].residual_pct;
+        if removed.is_finite() {
+            residual_sum -= removed;
+        } else {
+            invalid_count -= 1;
+        }
+
+        let added = residual_points[add_index].residual_pct;
+        if added.is_finite() {
+            residual_sum += added;
+        } else {
+            invalid_count += 1;
+        }
+    }
+
+    out
+}
+
+fn calc_efficiency_ratio_map(
+    close_series: &[(String, f64)],
+    period: usize,
+) -> HashMap<String, f64> {
+    if period == 0 || close_series.len() < period + 1 {
+        return HashMap::new();
+    }
+
+    let mut denominator = close_series[..=period]
+        .windows(2)
+        .map(|window| (window[1].1 - window[0].1).abs())
+        .sum::<f64>();
+
+    let mut out = HashMap::with_capacity(close_series.len() - period);
+    for end_index in period..close_series.len() {
+        let numerator = close_series[end_index].1 - close_series[end_index - period].1;
+        if numerator.is_finite() && denominator.is_finite() && denominator.abs() > EPS {
+            let er = numerator / denominator;
+            if er.is_finite() {
+                out.insert(close_series[end_index].0.clone(), er);
+            }
+        }
+
+        let add_index = end_index + 1;
+        if add_index >= close_series.len() {
+            break;
+        }
+        let remove_change_index = end_index + 1 - period;
+        denominator -=
+            (close_series[remove_change_index].1 - close_series[remove_change_index - 1].1).abs();
+        denominator += (close_series[add_index].1 - close_series[add_index - 1].1).abs();
+    }
+
+    out
 }
 
 fn shrink_stock_series_cache(cache: &mut HashMap<String, HashMap<String, f64>>) {
@@ -1956,6 +2157,165 @@ fn load_pct_chg_series_cache_for_ts_codes(
     Ok(out)
 }
 
+fn find_stock_data_column(conn: &Connection, requested: &str) -> Result<Option<String>, String> {
+    let mut stmt = conn
+        .prepare("DESCRIBE stock_data")
+        .map_err(|e| format!("预编译 stock_data 列查询失败:{e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("查询 stock_data 列失败:{e}"))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取 stock_data 列失败:{e}"))?
+    {
+        let name: String = row
+            .get(0)
+            .map_err(|e| format!("读取 stock_data 列名失败:{e}"))?;
+        if name.eq_ignore_ascii_case(requested) {
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn load_indicator_series_cache_for_ts_codes(
+    conn: &Connection,
+    ts_codes: &[String],
+    adj_type: &str,
+    start_date: &str,
+    end_date: &str,
+    indicator_column: &str,
+) -> Result<HashMap<String, HashMap<String, f64>>, String> {
+    if ts_codes.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut out = HashMap::<String, HashMap<String, f64>>::with_capacity(ts_codes.len());
+    let quoted_column = quote_identifier(indicator_column);
+    for chunk in ts_codes.chunks(PCT_CHG_BATCH_SIZE) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            r#"
+            SELECT
+                ts_code,
+                trade_date,
+                TRY_CAST({quoted_column} AS DOUBLE)
+            FROM stock_data
+            WHERE adj_type = ?
+              AND ts_code IN ({placeholders})
+              AND trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY ts_code ASC, trade_date ASC
+            "#
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("预编译批量 {indicator_column} 查询失败:{e}"))?;
+        let query_params = std::iter::once(adj_type.trim())
+            .chain(chunk.iter().map(|ts_code| ts_code.trim()))
+            .chain(std::iter::once(start_date.trim()))
+            .chain(std::iter::once(end_date.trim()));
+        let mut rows = stmt
+            .query(params_from_iter(query_params))
+            .map_err(|e| format!("查询批量 {indicator_column} 失败:{e}"))?;
+
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取批量 {indicator_column} 失败:{e}"))?
+        {
+            let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
+            let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
+            let value: Option<f64> = row
+                .get(2)
+                .map_err(|e| format!("读取{indicator_column}失败:{e}"))?;
+
+            let Some(value) = value.filter(|value| value.is_finite()) else {
+                continue;
+            };
+            out.entry(ts_code).or_default().insert(trade_date, value);
+        }
+    }
+
+    Ok(out)
+}
+
+fn load_close_series_cache_for_ts_codes(
+    conn: &Connection,
+    ts_codes: &[String],
+    adj_type: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<HashMap<String, Vec<(String, f64)>>, String> {
+    if ts_codes.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut out = HashMap::<String, Vec<(String, f64)>>::with_capacity(ts_codes.len());
+    for chunk in ts_codes.chunks(PCT_CHG_BATCH_SIZE) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            r#"
+            WITH ranked AS (
+                SELECT
+                    ts_code,
+                    trade_date,
+                    TRY_CAST(close AS DOUBLE) AS close_price,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY
+                            ts_code,
+                            CASE WHEN trade_date < ? THEN 0 ELSE 1 END
+                        ORDER BY trade_date DESC
+                    ) AS history_rank
+                FROM stock_data
+                WHERE adj_type = ?
+                  AND ts_code IN ({placeholders})
+                  AND trade_date <= ?
+            )
+            SELECT
+                ts_code,
+                trade_date,
+                close_price
+            FROM ranked
+            WHERE trade_date >= ?
+               OR history_rank <= {EFFICIENCY_RATIO_PERIOD}
+            ORDER BY ts_code ASC, trade_date ASC
+            "#
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("预编译批量收盘价查询失败:{e}"))?;
+        let query_params = std::iter::once(start_date.trim())
+            .chain(std::iter::once(adj_type.trim()))
+            .chain(chunk.iter().map(|ts_code| ts_code.trim()))
+            .chain(std::iter::once(end_date.trim()))
+            .chain(std::iter::once(start_date.trim()));
+        let mut rows = stmt
+            .query(params_from_iter(query_params))
+            .map_err(|e| format!("查询批量收盘价失败:{e}"))?;
+
+        while let Some(row) = rows.next().map_err(|e| format!("读取批量收盘价失败:{e}"))? {
+            let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
+            let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
+            let close: Option<f64> = row.get(2).map_err(|e| format!("读取close失败:{e}"))?;
+
+            let Some(close) = close.filter(|value| value.is_finite()) else {
+                continue;
+            };
+            out.entry(ts_code).or_default().push((trade_date, close));
+        }
+    }
+
+    Ok(out)
+}
+
 fn build_concept_series_cache(
     source_dir: &str,
     ts_codes: &[String],
@@ -1979,24 +2339,8 @@ fn build_concept_series_cache(
         }
     }
 
-    let mut out = HashMap::with_capacity(names.len());
-    for name in names {
-        let series = load_concept_trend_series(
-            source_dir,
-            &name,
-            Some(start_date.trim()),
-            Some(end_date.trim()),
-        )?;
-        out.insert(
-            name,
-            series
-                .points
-                .into_iter()
-                .map(|point| (point.trade_date, point.performance_pct))
-                .collect(),
-        );
-    }
-    Ok(out)
+    let names = names.into_iter().collect::<Vec<_>>();
+    load_concept_trend_series_map(source_dir, &names, start_date.trim(), end_date.trim())
 }
 
 fn build_industry_series_cache(
@@ -2022,60 +2366,8 @@ fn build_industry_series_cache(
         }
     }
 
-    let mut out = HashMap::with_capacity(names.len());
-    for name in names {
-        let series = load_industry_trend_series(
-            source_dir,
-            &name,
-            Some(start_date.trim()),
-            Some(end_date.trim()),
-        )?;
-        out.insert(
-            name,
-            series
-                .points
-                .into_iter()
-                .map(|point| (point.trade_date, point.performance_pct))
-                .collect(),
-        );
-    }
-    Ok(out)
-}
-
-fn build_forward_backtest_residual_map(
-    mut residual_points: Vec<super::ResidualReturnPoint>,
-    backtest_period: usize,
-) -> HashMap<String, f64> {
-    if backtest_period == 0 || residual_points.len() < backtest_period + 1 {
-        return HashMap::new();
-    }
-
-    residual_points.sort_by(|a, b| a.trade_date.cmp(&b.trade_date));
-
-    let mut out = HashMap::with_capacity(residual_points.len() - backtest_period);
-    for i in 0..residual_points.len() {
-        let end = i + backtest_period;
-        if end >= residual_points.len() {
-            break;
-        }
-
-        let mut sum = 0.0_f64;
-        let mut valid = true;
-        for point in residual_points.iter().take(end + 1).skip(i + 1) {
-            let v = point.residual_pct;
-            if !v.is_finite() {
-                valid = false;
-                break;
-            }
-            sum += v;
-        }
-
-        if valid {
-            out.insert(residual_points[i].trade_date.clone(), sum);
-        }
-    }
-
-    out
+    let names = names.into_iter().collect::<Vec<_>>();
+    load_industry_trend_series_map(source_dir, &names, start_date.trim(), end_date.trim())
 }
 
 fn load_rule_rows_filtered(
@@ -2239,17 +2531,23 @@ mod tests {
         collections::HashMap,
         fs::{create_dir_all, write},
         path::PathBuf,
+        sync::Arc,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use duckdb::{Connection, params};
 
-    use crate::data::{result_db_path, source_db_path};
+    use crate::{
+        data::{result_db_path, source_db_path},
+        simulate::ResidualReturnPoint,
+    };
 
     use super::{
-        RuleLayerConfig, RuleLayerFromDbInput, RuleSample, build_rule_layer_runtime_cache,
-        build_rule_layer_runtime_cache_from_stock_data, calc_all_rule_layer_metrics_from_db,
-        calc_rule_layer_metrics, calc_rule_layer_metrics_from_db,
+        RuleDayBaseSample, RuleDayGroup, RuleLayerConfig, RuleLayerFromDbInput,
+        RuleLayerRuntimeCache, RuleSample, build_forward_backtest_outcome_map,
+        build_rule_layer_runtime_cache, build_rule_layer_runtime_cache_from_stock_data,
+        calc_all_rule_layer_metrics_from_db, calc_efficiency_ratio_map, calc_rule_layer_metrics,
+        calc_rule_layer_metrics_from_cache, calc_rule_layer_metrics_from_db,
         calc_rule_layer_metrics_with_samples_from_cache,
         calc_rule_layer_metrics_with_triggered_samples_from_cache,
         collect_triggered_rule_samples_from_cache,
@@ -2261,6 +2559,104 @@ mod tests {
             (None, None) => {}
             _ => panic!("left={left:?}, right={right:?}"),
         }
+    }
+
+    #[test]
+    fn efficiency_ratio_uses_signed_twenty_period_formula() {
+        let rising = (0..=21)
+            .map(|index| (format!("d{index:02}"), 100.0 + index as f64))
+            .collect::<Vec<_>>();
+        let falling = (0..=20)
+            .map(|index| (format!("d{index:02}"), 100.0 - index as f64))
+            .collect::<Vec<_>>();
+        let flat = (0..=20)
+            .map(|index| (format!("d{index:02}"), 100.0))
+            .collect::<Vec<_>>();
+
+        let rising_er = calc_efficiency_ratio_map(&rising, 20);
+        let falling_er = calc_efficiency_ratio_map(&falling, 20);
+        let flat_er = calc_efficiency_ratio_map(&flat, 20);
+
+        assert_opt_close(rising_er.get("d20").copied(), Some(1.0));
+        assert_opt_close(rising_er.get("d21").copied(), Some(1.0));
+        assert_opt_close(falling_er.get("d20").copied(), Some(-1.0));
+        assert_eq!(flat_er.get("d20"), None);
+    }
+
+    #[test]
+    fn forward_outcome_uses_er_change_across_return_range() {
+        let residual_points = [0.0, 1.0, 2.0]
+            .into_iter()
+            .enumerate()
+            .map(|(index, residual_pct)| ResidualReturnPoint {
+                trade_date: format!("d{index}"),
+                stock_pct: residual_pct,
+                index_pct: 0.0,
+                concept_pct: 0.0,
+                industry_pct: 0.0,
+                expected_pct: 0.0,
+                residual_pct,
+            })
+            .collect::<Vec<_>>();
+        let er_by_date = HashMap::from([("d0".to_string(), -0.10), ("d2".to_string(), 0.25)]);
+
+        let outcomes = build_forward_backtest_outcome_map(residual_points, 2, &er_by_date);
+        let outcome = outcomes.get("d0").expect("d0 outcome");
+
+        assert!((outcome.residual_return - 3.0).abs() < 1e-12);
+        assert!((outcome.er_change - 0.35).abs() < 1e-12);
+    }
+
+    #[test]
+    fn average_er_change_is_weighted_by_triggered_samples() {
+        let runtime_cache = RuleLayerRuntimeCache {
+            day_groups: vec![
+                RuleDayGroup {
+                    trade_date: Arc::from("d0"),
+                    samples: vec![RuleDayBaseSample {
+                        ts_code: Arc::from("a"),
+                        residual_return: 1.0,
+                        er_change: 1.0,
+                    }],
+                },
+                RuleDayGroup {
+                    trade_date: Arc::from("d1"),
+                    samples: vec![
+                        RuleDayBaseSample {
+                            ts_code: Arc::from("a"),
+                            residual_return: 1.0,
+                            er_change: 0.0,
+                        },
+                        RuleDayBaseSample {
+                            ts_code: Arc::from("b"),
+                            residual_return: 1.0,
+                            er_change: 0.0,
+                        },
+                    ],
+                },
+            ],
+        };
+        let triggered_score_map = HashMap::from([
+            (
+                "a".to_string(),
+                HashMap::from([("d0".to_string(), 1.0), ("d1".to_string(), 1.0)]),
+            ),
+            ("b".to_string(), HashMap::from([("d1".to_string(), 1.0)])),
+        ]);
+
+        let metrics = calc_rule_layer_metrics_from_cache(
+            &runtime_cache,
+            &triggered_score_map,
+            &RuleLayerConfig {
+                min_samples_per_day: 1,
+                backtest_period: 1,
+                min_listed_trade_days: 0,
+            },
+        )
+        .expect("metrics");
+
+        assert_opt_close(metrics.avg_er_change, Some(1.0 / 3.0));
+        assert_eq!(metrics.er_change_sample_count, 3);
     }
 
     #[test]
@@ -2353,7 +2749,8 @@ mod tests {
                     ts_code VARCHAR,
                     trade_date VARCHAR,
                     adj_type VARCHAR,
-                    pct_chg DOUBLE
+                    pct_chg DOUBLE,
+                    close DOUBLE
                 )
                 "#,
                 [],
@@ -2365,33 +2762,39 @@ mod tests {
             .expect("stock_data appender");
 
         source_app
-            .append_row(params!["000001.SZ", "20240102", "qfq", 0.0_f64])
+            .append_row(params!["000001.SZ", "20240102", "qfq", 0.0_f64, 10.0_f64])
             .expect("stock a row1");
         source_app
-            .append_row(params!["000001.SZ", "20240103", "qfq", 3.0_f64])
+            .append_row(params!["000001.SZ", "20240103", "qfq", 3.0_f64, 10.3_f64])
             .expect("stock a row2");
         source_app
-            .append_row(params!["000001.SZ", "20240104", "qfq", 5.0_f64])
+            .append_row(params!["000001.SZ", "20240104", "qfq", 5.0_f64, 10.815_f64])
             .expect("stock a row3");
 
         source_app
-            .append_row(params!["000002.SZ", "20240102", "qfq", 0.0_f64])
+            .append_row(params!["000002.SZ", "20240102", "qfq", 0.0_f64, 20.0_f64])
             .expect("stock b row1");
         source_app
-            .append_row(params!["000002.SZ", "20240103", "qfq", 1.0_f64])
+            .append_row(params!["000002.SZ", "20240103", "qfq", 1.0_f64, 20.2_f64])
             .expect("stock b row2");
         source_app
-            .append_row(params!["000002.SZ", "20240104", "qfq", -1.0_f64])
+            .append_row(params![
+                "000002.SZ",
+                "20240104",
+                "qfq",
+                -1.0_f64,
+                19.998_f64
+            ])
             .expect("stock b row3");
 
         source_app
-            .append_row(params!["000300.SH", "20240102", "ind", 0.0_f64])
+            .append_row(params!["000300.SH", "20240102", "ind", 0.0_f64, 100.0_f64])
             .expect("index row1");
         source_app
-            .append_row(params!["000300.SH", "20240103", "ind", 0.0_f64])
+            .append_row(params!["000300.SH", "20240103", "ind", 0.0_f64, 100.0_f64])
             .expect("index row2");
         source_app
-            .append_row(params!["000300.SH", "20240104", "ind", 0.0_f64])
+            .append_row(params!["000300.SH", "20240104", "ind", 0.0_f64, 100.0_f64])
             .expect("index row3");
         source_app.flush().expect("flush stock_data");
 
@@ -2529,6 +2932,62 @@ mod tests {
         assert_opt_close(metrics.ic_mean, Some(1.0));
         assert_opt_close(metrics.ic_std, Some(0.0));
         assert_eq!(metrics.icir, None);
+    }
+
+    #[test]
+    fn runtime_cache_prefers_stored_er_indicator_column() {
+        let source_dir = temp_source_dir();
+        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
+        prepare_test_files(source_dir_str);
+
+        let source_conn = Connection::open(source_db_path(source_dir_str)).expect("open source db");
+        source_conn
+            .execute("ALTER TABLE stock_data ADD COLUMN ER DOUBLE", [])
+            .expect("add ER");
+        source_conn
+            .execute(
+                r#"
+                UPDATE stock_data
+                SET ER = CASE trade_date
+                    WHEN '20240102' THEN 0.10
+                    WHEN '20240103' THEN 0.20
+                    WHEN '20240104' THEN 0.35
+                    ELSE NULL
+                END
+                WHERE ts_code = '000001.SZ' AND adj_type = 'qfq'
+                "#,
+                [],
+            )
+            .expect("update ER");
+
+        let layer_config = RuleLayerConfig {
+            min_samples_per_day: 1,
+            backtest_period: 1,
+            min_listed_trade_days: 0,
+        };
+        let runtime_cache = build_rule_layer_runtime_cache(
+            &source_conn,
+            source_dir_str,
+            "qfq",
+            "000300.SH",
+            0.0,
+            0.0,
+            0.0,
+            "20240102",
+            "20240104",
+            &layer_config,
+        )
+        .expect("runtime cache");
+        let triggered_score_map = HashMap::from([(
+            "000001.SZ".to_string(),
+            HashMap::from([("20240102".to_string(), 1.0), ("20240103".to_string(), 1.0)]),
+        )]);
+        let metrics =
+            calc_rule_layer_metrics_from_cache(&runtime_cache, &triggered_score_map, &layer_config)
+                .expect("metrics");
+
+        assert_opt_close(metrics.avg_er_change, Some(0.125));
+        assert_eq!(metrics.er_change_sample_count, 2);
     }
 
     #[test]

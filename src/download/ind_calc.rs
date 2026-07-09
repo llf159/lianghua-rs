@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     path::Path,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::SystemTime,
 };
 
@@ -56,10 +56,24 @@ fn round_to(value: f64, scale: usize) -> f64 {
     (value * factor).round() / factor
 }
 
-fn round_series(series: Vec<Option<f64>>, scale: usize) -> Vec<Option<f64>> {
+fn round_series(mut series: Vec<Option<f64>>, scale: usize) -> Vec<Option<f64>> {
+    for value in &mut series {
+        if let Some(number) = value {
+            *number = round_to(*number, scale);
+        }
+    }
     series
+}
+
+fn collect_calculated_indicators(
+    indicators: HashMap<String, Arc<Vec<Option<f64>>>>,
+) -> HashMap<String, Vec<Option<f64>>> {
+    indicators
         .into_iter()
-        .map(|value| value.map(|number| round_to(number, scale)))
+        .map(|(name, series)| {
+            let series = Arc::try_unwrap(series).unwrap_or_else(|series| series.as_ref().clone());
+            (name, series)
+        })
         .collect()
 }
 
@@ -504,22 +518,27 @@ pub fn calc_inds_with_cache(
 ) -> Result<HashMap<String, Vec<Option<f64>>>, String> {
     let series_len = row_data.trade_dates.len();
     let mut rt = row_into_rt(row_data)?;
-    let mut out = HashMap::with_capacity(inds_cache.len());
+    let mut calculated = HashMap::with_capacity(inds_cache.len());
 
     for ind in inds_cache {
         let value = rt
             .eval_program(&ind.expr)
             .map_err(|e| format!("指标{}计算失败: {}", ind.name, e.msg))?;
-        let series = Value::as_num_series(&value, series_len)
+        let series = value
+            .into_num_series(series_len)
             .map_err(|e| format!("指标{}结果转序列失败: {}", ind.name, e.msg))?;
         let rounded_series = round_series(series, ind.perc);
 
-        rt.vars
-            .insert(ind.name.clone(), Value::NumSeries(rounded_series.clone()));
-        out.insert(ind.name.clone(), rounded_series);
+        let rounded_series = Arc::new(rounded_series);
+        rt.vars.insert(
+            ind.name.clone(),
+            Value::SharedNumSeries(Arc::clone(&rounded_series)),
+        );
+        calculated.insert(ind.name.clone(), rounded_series);
     }
 
-    Ok(out)
+    drop(rt);
+    Ok(collect_calculated_indicators(calculated))
 }
 
 pub fn calc_inds_with_cache_lossy(
@@ -530,23 +549,27 @@ pub fn calc_inds_with_cache_lossy(
     let Ok(mut rt) = row_into_rt(row_data.clone()) else {
         return HashMap::new();
     };
-    let mut out = HashMap::with_capacity(inds_cache.len());
+    let mut calculated = HashMap::with_capacity(inds_cache.len());
 
     for ind in inds_cache {
         let Ok(value) = rt.eval_program(&ind.expr) else {
             continue;
         };
-        let Ok(series) = Value::as_num_series(&value, series_len) else {
+        let Ok(series) = value.into_num_series(series_len) else {
             continue;
         };
         let rounded_series = round_series(series, ind.perc);
 
-        rt.vars
-            .insert(ind.name.clone(), Value::NumSeries(rounded_series.clone()));
-        out.insert(ind.name.clone(), rounded_series);
+        let rounded_series = Arc::new(rounded_series);
+        rt.vars.insert(
+            ind.name.clone(),
+            Value::SharedNumSeries(Arc::clone(&rounded_series)),
+        );
+        calculated.insert(ind.name.clone(), rounded_series);
     }
 
-    out
+    drop(rt);
+    collect_calculated_indicators(calculated)
 }
 
 pub fn calc_increment_one_stock_inds(
@@ -591,4 +614,48 @@ pub fn calc_one_stock_inds(
         return Ok(HashMap::new());
     }
     calc_inds_with_cache(&inds_cache, pro_bar_rows_to_row_data(rows)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{calc_inds_with_cache, compile_indicator_defs};
+    use crate::data::{IndsData, RowData};
+
+    #[test]
+    fn calculated_indicator_remains_available_to_later_indicators() {
+        let definitions = IndsData::parse_from_text(
+            r#"
+            version = 1
+
+            [[ind]]
+            name = "A"
+            expr = "C + 0.01"
+            prec = 2
+
+            [[ind]]
+            name = "B"
+            expr = "A * 2"
+            prec = 2
+
+            [[ind]]
+            name = "D"
+            expr = "A := 99; B"
+            prec = 2
+            "#,
+        )
+        .expect("parse indicators");
+        let cache = compile_indicator_defs(definitions).expect("compile indicators");
+        let row_data = RowData {
+            trade_dates: vec!["20260101".to_string(), "20260102".to_string()],
+            cols: HashMap::from([("C".to_string(), vec![Some(1.23), Some(2.34)])]),
+        };
+
+        let result = calc_inds_with_cache(&cache, row_data).expect("calculate indicators");
+
+        assert_eq!(result.get("A"), Some(&vec![Some(1.24), Some(2.35)]));
+        assert_eq!(result.get("B"), Some(&vec![Some(2.48), Some(4.7)]));
+        assert_eq!(result.get("D"), Some(&vec![Some(2.48), Some(4.7)]));
+    }
 }

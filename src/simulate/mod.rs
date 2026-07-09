@@ -14,6 +14,56 @@ use crate::data::{load_trade_date_list, stock_list_path};
 
 pub(crate) const DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS: usize = 60;
 
+pub(super) fn build_forward_backtest_residual_map(
+    mut residual_points: Vec<ResidualReturnPoint>,
+    backtest_period: usize,
+) -> HashMap<String, f64> {
+    if backtest_period == 0 || residual_points.len() < backtest_period + 1 {
+        return HashMap::new();
+    }
+
+    residual_points.sort_by(|a, b| a.trade_date.cmp(&b.trade_date));
+
+    let mut sum = 0.0;
+    let mut invalid_count = 0usize;
+    for point in &residual_points[1..=backtest_period] {
+        if point.residual_pct.is_finite() {
+            sum += point.residual_pct;
+        } else {
+            invalid_count += 1;
+        }
+    }
+
+    let mut out = HashMap::with_capacity(residual_points.len() - backtest_period);
+    for index in 0..(residual_points.len() - backtest_period) {
+        if invalid_count == 0 {
+            out.insert(residual_points[index].trade_date.clone(), sum);
+        }
+
+        let remove_index = index + 1;
+        let add_index = index + backtest_period + 1;
+        if add_index >= residual_points.len() {
+            break;
+        }
+
+        let removed = residual_points[remove_index].residual_pct;
+        if removed.is_finite() {
+            sum -= removed;
+        } else {
+            invalid_count -= 1;
+        }
+
+        let added = residual_points[add_index].residual_pct;
+        if added.is_finite() {
+            sum += added;
+        } else {
+            invalid_count += 1;
+        }
+    }
+
+    out
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct BacktestSampleEligibility {
     trade_date_to_index: HashMap<String, usize>,
@@ -472,7 +522,8 @@ mod tests {
     use crate::{
         data::{concept_performance_db_path, source_db_path},
         simulate::{
-            ResidualReturnInput, build_backtest_sample_eligibility, calc_stock_residual_returns,
+            ResidualReturnInput, ResidualReturnPoint, build_backtest_sample_eligibility,
+            build_forward_backtest_residual_map, calc_stock_residual_returns,
         },
     };
 
@@ -656,5 +707,28 @@ mod tests {
         assert_eq!(p1.industry_pct, 0.5);
         assert_eq!(p1.expected_pct, 0.5);
         assert_eq!(p1.residual_pct, 0.5);
+    }
+
+    #[test]
+    fn forward_backtest_residual_map_uses_rolling_window() {
+        let points = [1.0, 2.0, f64::NAN, 4.0, 5.0]
+            .into_iter()
+            .enumerate()
+            .map(|(index, residual_pct)| ResidualReturnPoint {
+                trade_date: format!("2024010{}", index + 1),
+                stock_pct: 0.0,
+                index_pct: 0.0,
+                concept_pct: 0.0,
+                industry_pct: 0.0,
+                expected_pct: 0.0,
+                residual_pct,
+            })
+            .collect();
+
+        let result = build_forward_backtest_residual_map(points, 2);
+
+        assert_eq!(result.get("20240103"), Some(&9.0));
+        assert!(!result.contains_key("20240101"));
+        assert!(!result.contains_key("20240102"));
     }
 }

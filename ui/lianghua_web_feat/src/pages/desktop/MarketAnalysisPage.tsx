@@ -811,7 +811,7 @@ export default function MarketAnalysisPage() {
                     <th>#</th>
                     <th>代码</th>
                     <th>名称</th>
-                    <th>板块</th>
+                    <th>行业</th>
                     <th>贡献涨幅</th>
                   </tr>
                 </thead>

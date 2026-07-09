@@ -79,10 +79,11 @@ use lianghua_rs::ui_tools_feat::{
     details::{
         get_stock_detail_cyq as core_get_stock_detail_cyq,
         get_stock_detail_page as core_get_stock_detail_page,
+        get_stock_detail_prev_ranks as core_get_stock_detail_prev_ranks,
         get_stock_detail_realtime as core_get_stock_detail_realtime,
         get_stock_detail_strategy_snapshot as core_get_stock_detail_strategy_snapshot,
-        StockDetailCyqData, StockDetailPageData, StockDetailRealtimeData,
-        StockDetailStrategySnapshotData,
+        StockDetailCyqData, StockDetailPageData, StockDetailPrevRanksData,
+        StockDetailRealtimeData, StockDetailStrategySnapshotData,
     },
     expression_stock_pick::{
         validate_expression_stock_pick_template_expression as core_validate_expression_stock_pick_template_expression,
@@ -719,6 +720,16 @@ fn get_stock_detail_strategy_snapshot(
 }
 
 #[tauri::command]
+fn get_stock_detail_prev_ranks(
+    source_path: String,
+    trade_date: Option<String>,
+    ts_code: String,
+    prev_rank_days: Option<u32>,
+) -> Result<StockDetailPrevRanksData, String> {
+    core_get_stock_detail_prev_ranks(source_path, trade_date, ts_code, prev_rank_days)
+}
+
+#[tauri::command]
 fn get_stock_detail_cyq(
     source_path: String,
     ts_code: String,
@@ -1001,6 +1012,7 @@ async fn run_rule_layer_backtest(
     min_samples_per_rule_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    parallel_batch_size: Option<usize>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
@@ -1020,6 +1032,7 @@ async fn run_rule_layer_backtest(
                 min_samples_per_rule_day,
                 min_listed_trade_days,
                 backtest_period,
+                parallel_batch_size,
                 board,
                 exclude_st_board,
                 total_mv_min,
@@ -1130,6 +1143,7 @@ async fn run_transient_rule_layer_backtest(
     min_samples_per_rule_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    parallel_batch_size: Option<usize>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
@@ -1149,6 +1163,7 @@ async fn run_transient_rule_layer_backtest(
                 min_samples_per_rule_day,
                 min_listed_trade_days,
                 backtest_period,
+                parallel_batch_size,
                 board,
                 exclude_st_board,
                 total_mv_min,
@@ -2178,6 +2193,7 @@ pub fn run() {
             get_all_market_monitor_snapshot,
             get_stock_detail_page,
             get_stock_detail_strategy_snapshot,
+            get_stock_detail_prev_ranks,
             get_stock_detail_cyq,
             get_stock_detail_realtime,
             get_stock_similarity_page,
