@@ -1430,6 +1430,7 @@ fn write_cyq_chen_incremental_batches_from_channel(
         let tx = conn
             .transaction()
             .map_err(|e| format!("创建新筹码增量事务失败:{e}"))?;
+        drop_cyq_chen_db_indexes(&tx)?;
         tx.execute(
             "DELETE FROM cyq_chen_bin WHERE adj_type = ? AND trade_date >= ? AND trade_date <= ?",
             params![DEFAULT_ADJ_TYPE, start_date, end_date],
@@ -1524,6 +1525,7 @@ fn write_cyq_chen_stock_repair_batches_from_channel(
         let tx = conn
             .transaction()
             .map_err(|e| format!("创建筹码库事务失败:{e}"))?;
+        drop_cyq_chen_db_indexes(&tx)?;
 
         for ts_code in ts_codes {
             tx.execute(
@@ -2299,8 +2301,8 @@ mod tests {
     use super::{
         CYQ_CHEN_BIN_TABLE, CYQ_CHEN_SCHEMA_VERSION, CYQ_CHEN_SNAPSHOT_TABLE, CyqChenWriteMessage,
         maintain_cyq_chen_incremental_if_db_exists, query_cyq_chen_strategy_maintenance_status,
-        rebuild_cyq_chen_all, write_cyq_chen_batches_from_channel,
-        write_cyq_chen_incremental_batches_from_channel,
+        rebuild_cyq_chen_all, repair_cyq_chen_stocks_if_db_exists,
+        write_cyq_chen_batches_from_channel, write_cyq_chen_incremental_batches_from_channel,
     };
     use crate::data::{
         chip_change_rule_path, cyq_chen::ChenChipConfig, cyq_chen_db_path, source_db_path,
@@ -2732,6 +2734,45 @@ bias = 1.0
 
         fs::remove_dir_all(incremental_dir).expect("cleanup incremental temp dir");
         fs::remove_dir_all(full_dir).expect("cleanup full temp dir");
+    }
+
+    #[test]
+    fn repair_cyq_chen_single_stock_replaces_existing_indexed_rows() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+        let source_path = source_dir.to_str().expect("utf8 path");
+        let config = ChenChipConfig {
+            warmup_days: 1,
+            bucket_pct: 5.0,
+        };
+        rebuild_cyq_chen_all(source_path, config, None, None).expect("seed cyq chen");
+        assert_eq!(
+            index_names_for_compare(source_path),
+            vec!["idx_cyq_chen_snapshot_stock_date".to_string()]
+        );
+
+        let snapshots_before = snapshot_rows_for_compare(source_path);
+        let bins_before = bin_rows_for_compare(source_path);
+
+        let summary = repair_cyq_chen_stocks_if_db_exists(
+            source_path,
+            &["000001.SZ".to_string()],
+            false,
+            None,
+        )
+        .expect("repair cyq chen stock")
+        .expect("cyq chen db exists");
+
+        assert_eq!(summary.start_date.as_deref(), Some("20260402"));
+        assert_eq!(summary.end_date.as_deref(), Some("20260408"));
+        assert_eq!(snapshot_rows_for_compare(source_path), snapshots_before);
+        assert_eq!(bin_rows_for_compare(source_path), bins_before);
+        assert_eq!(
+            index_names_for_compare(source_path),
+            vec!["idx_cyq_chen_snapshot_stock_date".to_string()]
+        );
+
+        fs::remove_dir_all(source_dir).expect("cleanup temp dir");
     }
 
     #[test]

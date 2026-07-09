@@ -1097,14 +1097,28 @@ export default function AllMarketMonitorPage() {
         ? sortRows(primaryRows, sortKey, sortDirection, sortDefinitions)
         : primaryRows;
 
-    if (!templateEnabled) {
-      return sortedRows.slice(0, topLimit);
-    }
-
     const templateHitRows: DisplayRow[] = [];
     const normalRows: DisplayRow[] = [];
     for (const row of sortedRows) {
-      if (getTemplateHits(row).length > 0) {
+      const templateHit = templateEnabled && getTemplateHits(row).length > 0;
+      const speedEffectiveThreshold = getEffectiveSpeedThresholdPct(
+        row,
+        speedThresholdPct,
+        speedMinTicks,
+      );
+      const shouldPinTemplateHit =
+        templateHit &&
+        (primarySortKey === "realtime_change_pct" ||
+          (primarySortKey === "realtime_vol_ratio" &&
+            isFiniteNumber(volumeRatioThreshold) &&
+            isFiniteNumber(row.realtime_vol_ratio) &&
+            row.realtime_vol_ratio > volumeRatioThreshold) ||
+          (primarySortKey === "speed_pct" &&
+            isFiniteNumber(row.speed_pct) &&
+            isFiniteNumber(speedEffectiveThreshold) &&
+            row.speed_pct >= speedEffectiveThreshold));
+
+      if (shouldPinTemplateHit) {
         templateHitRows.push(row);
       } else {
         normalRows.push(row);
@@ -1120,8 +1134,11 @@ export default function AllMarketMonitorPage() {
     sortDirection,
     sortKey,
     speedMap,
+    speedMinTicks,
+    speedThresholdPct,
     templateEnabled,
     topLimit,
+    volumeRatioThreshold,
   ]);
 
   const navigationItems = useMemo(
