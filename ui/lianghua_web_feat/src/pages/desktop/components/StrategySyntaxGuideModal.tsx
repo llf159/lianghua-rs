@@ -77,11 +77,13 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     ],
   },
   {
-    title: '6. 额外常数字段',
-    note: '这些字段由后端运行时统一注入，后续新增常量字段也会沿用这套入口。',
+    title: '6. 额外运行时字段',
+    note: '这些字段由后端运行时统一注入，后续新增基础字段也会沿用这套入口。',
     fields: [
       { name: 'ZHANG', scope: '通用', description: '涨停幅比例，例如普通股约 0.095、创业板/科创板约 0.195、北交所约 0.295、ST 约 0.045。', example: 'PCT_CHG >= ZHANG * 100' },
       { name: 'TOTAL_MV_YI', scope: '通用', description: '总市值，单位“亿”；按 stock_list.csv 的 total_share × 当日收盘价 C / 10000 逐日计算。', example: 'TOTAL_MV_YI <= 300' },
+      { name: 'I / ISZ / I300', scope: '通用', description: '上证指数 / 深证成指 / 沪深300 的日涨幅，单位是百分比。', example: 'PCT_CHG > I300 + 2' },
+      { name: 'I500 / ICY / I50 / I1000', scope: '通用', description: '中证500 / 创业板指 / 上证50 / 中证1000 的日涨幅，单位是百分比。', example: 'I1000 > I50' },
     ],
   },
   {
