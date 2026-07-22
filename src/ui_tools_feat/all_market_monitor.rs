@@ -139,6 +139,8 @@ pub struct AllMarketIndexRow {
 pub struct AllMarketMonitorSnapshotData {
     pub rows: Vec<AllMarketMonitorRow>,
     pub index_rows: Vec<AllMarketIndexRow>,
+    pub data_version: Option<String>,
+    pub has_new_data: bool,
     pub refreshed_at: Option<String>,
     pub rank_date: Option<String>,
     pub requested_count: usize,
@@ -1610,6 +1612,21 @@ fn fetch_index_rows(provider: RealtimeQuoteProvider) -> Vec<AllMarketIndexRow> {
         .unwrap_or_else(|_| Vec::new())
 }
 
+fn has_new_realtime_data(last_data_version: Option<&str>, data_version: Option<&str>) -> bool {
+    let last_data_version = last_data_version
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let data_version = data_version
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    match (last_data_version, data_version) {
+        (_, None) => false,
+        (None, Some(_)) => true,
+        (Some(last), Some(current)) => current > last,
+    }
+}
+
 pub fn get_all_market_monitor_snapshot(
     source_path: &str,
     realtime_provider: Option<String>,
@@ -1619,6 +1636,7 @@ pub fn get_all_market_monitor_snapshot(
     ts_codes: Option<Vec<String>>,
     other_sort_expression: Option<String>,
     other_sort_use_realtime: Option<bool>,
+    last_data_version: Option<String>,
 ) -> Result<AllMarketMonitorSnapshotData, String> {
     let mut meta = cached_source_meta(source_path)?;
     if let Some(ref codes) = ts_codes {
@@ -1659,6 +1677,21 @@ pub fn get_all_market_monitor_snapshot(
             (quotes, volume_ratio_map, avg_price_map, fetch_meta)
         }
     };
+
+    let data_version = fetch_meta.refreshed_at.clone();
+    if !has_new_realtime_data(last_data_version.as_deref(), data_version.as_deref()) {
+        return Ok(AllMarketMonitorSnapshotData {
+            rows: Vec::new(),
+            index_rows: Vec::new(),
+            data_version,
+            has_new_data: false,
+            refreshed_at: fetch_meta.refreshed_at,
+            rank_date: None,
+            requested_count: fetch_meta.requested_count,
+            fetched_count: fetch_meta.fetched_count,
+            template_warning_message: None,
+        });
+    }
 
     let conn = open_result_conn(source_path)?;
     let rank_date = query_latest_rank_date(&conn)?;
@@ -1711,6 +1744,8 @@ pub fn get_all_market_monitor_snapshot(
     Ok(AllMarketMonitorSnapshotData {
         rows,
         index_rows,
+        data_version,
+        has_new_data: true,
         refreshed_at: fetch_meta.refreshed_at,
         rank_date: Some(rank_date),
         requested_count: fetch_meta.requested_count,
@@ -1798,6 +1833,24 @@ mod tests {
         clear_latest_template_rank_score(&mut row_data);
         assert_eq!(row_data.cols["RANK"], vec![Some(12.0), None]);
         assert_eq!(row_data.cols["SCORE"], vec![Some(88.0), None]);
+    }
+
+    #[test]
+    fn realtime_data_only_refreshes_when_version_changes() {
+        assert!(!has_new_realtime_data(
+            Some("20240603 09:31:00"),
+            Some("20240603 09:31:00"),
+        ));
+        assert!(!has_new_realtime_data(
+            Some("20240603 09:31:00"),
+            Some("20240603 09:30:59"),
+        ));
+        assert!(has_new_realtime_data(
+            Some("20240603 09:31:00"),
+            Some("20240603 09:31:01"),
+        ));
+        assert!(has_new_realtime_data(None, Some("20240603 09:31:00"),));
+        assert!(!has_new_realtime_data(Some("20240603 09:31:00"), None));
     }
 
     #[test]

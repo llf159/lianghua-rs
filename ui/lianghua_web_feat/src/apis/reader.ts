@@ -196,6 +196,8 @@ export type AllMarketIndexRow = {
 export type AllMarketMonitorSnapshotData = {
   rows: AllMarketMonitorRow[];
   index_rows?: AllMarketIndexRow[];
+  data_version?: string | null;
+  has_new_data?: boolean;
   refreshed_at?: string | null;
   rank_date?: string | null;
   requested_count: number;
@@ -284,6 +286,7 @@ export async function getAllMarketMonitorSnapshot(
   tsCodes?: string[],
   otherSortExpression?: string,
   otherSortUseRealtime?: boolean,
+  lastDataVersion?: string,
 ) {
   return invoke<AllMarketMonitorSnapshotData>(
     "get_all_market_monitor_snapshot",
@@ -296,6 +299,7 @@ export async function getAllMarketMonitorSnapshot(
       tsCodes,
       otherSortExpression,
       otherSortUseRealtime,
+      lastDataVersion,
     },
   );
 }

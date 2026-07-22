@@ -671,6 +671,7 @@ async fn get_all_market_monitor_snapshot(
     ts_codes: Option<Vec<String>>,
     other_sort_expression: Option<String>,
     other_sort_use_realtime: Option<bool>,
+    last_data_version: Option<String>,
 ) -> Result<AllMarketMonitorSnapshotData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_get_all_market_monitor_snapshot(
@@ -682,6 +683,7 @@ async fn get_all_market_monitor_snapshot(
             ts_codes,
             other_sort_expression,
             other_sort_use_realtime,
+            last_data_version,
         )
     })
     .await

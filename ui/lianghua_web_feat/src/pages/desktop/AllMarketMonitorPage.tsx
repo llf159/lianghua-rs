@@ -167,6 +167,15 @@ type PriceSnapshot = {
   prices: Record<string, number>;
 };
 
+type MonitorRefreshConfig = {
+  sceneStageThreshold: SceneStageThreshold;
+  templateEnabled: boolean;
+  templates: IntradayMonitorTemplate[];
+  watchlistEnabled: boolean;
+  watchlistCodes: string[];
+  otherSortExpression: string;
+};
+
 type DisplayRow = AllMarketMonitorRow & {
   speed_pct?: number | null;
 };
@@ -185,6 +194,23 @@ type RecordHighDisplayRow = DisplayRow & {
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function fingerprintMonitorRefreshConfig(
+  config: MonitorRefreshConfig,
+  realtimeProvider: "sina" | "tencent",
+) {
+  return JSON.stringify({
+    realtimeProvider,
+    sceneStageThreshold: config.sceneStageThreshold,
+    templateEnabled: config.templateEnabled,
+    templates: config.templateEnabled ? config.templates : [],
+    watchlistEnabled: config.watchlistEnabled,
+    watchlistCodes: config.watchlistEnabled
+      ? [...config.watchlistCodes].sort()
+      : [],
+    otherSortExpression: config.otherSortExpression.trim(),
+  });
 }
 
 function parseNonNegativeIntegerInput(value: string, fallback: number) {
@@ -597,10 +623,30 @@ export default function AllMarketMonitorPage() {
 
   const inFlightRef = useRef(false);
   const enabledRef = useRef(false);
+  const lastProcessedDataVersionRef = useRef<string | null>(null);
+  const lastProcessedConfigFingerprintRef = useRef<string | null>(null);
+  const forceProcessLatestRef = useRef(false);
+  const refreshConfigRef = useRef<MonitorRefreshConfig>({
+    sceneStageThreshold,
+    templateEnabled,
+    templates,
+    watchlistEnabled,
+    watchlistCodes,
+    otherSortExpression,
+  });
   const historyRef = useRef<PriceSnapshot[]>([]);
   const volumeRatioRecordHighsRef = useRef<Map<string, number>>(new Map());
   const changePctRecordHighsRef = useRef<Map<string, number>>(new Map());
   const debugSideListTimestampRef = useRef(Date.now());
+
+  refreshConfigRef.current = {
+    sceneStageThreshold,
+    templateEnabled,
+    templates,
+    watchlistEnabled,
+    watchlistCodes,
+    otherSortExpression,
+  };
 
   const sourcePathTrimmed = sourcePath.trim();
   const isVolumeRatioBoard = primarySortKey === "realtime_vol_ratio";
@@ -805,7 +851,23 @@ export default function AllMarketMonitorPage() {
   }, [openTemplateTsCode, openHitTsCode]);
 
   useEffect(() => {
+    lastProcessedDataVersionRef.current = null;
+    lastProcessedConfigFingerprintRef.current = null;
+    forceProcessLatestRef.current = true;
+  }, [sourcePathTrimmed]);
+
+  useEffect(() => {
+    const wasEnabled = enabledRef.current;
     enabledRef.current = enabled;
+    if (enabled && !wasEnabled) {
+      const config = refreshConfigRef.current;
+      const fingerprint = fingerprintMonitorRefreshConfig(
+        config,
+        readStoredRealtimeQuoteProvider(),
+      );
+      forceProcessLatestRef.current =
+        lastProcessedConfigFingerprintRef.current !== fingerprint;
+    }
     if (!enabled) {
       setLoading(false);
     }
@@ -819,17 +881,33 @@ export default function AllMarketMonitorPage() {
     inFlightRef.current = true;
     setLoading(true);
     try {
+      const config = refreshConfigRef.current;
+      const realtimeProvider = readStoredRealtimeQuoteProvider();
+      const configFingerprint = fingerprintMonitorRefreshConfig(
+        config,
+        realtimeProvider,
+      );
+      const lastDataVersion = forceProcessLatestRef.current
+        ? undefined
+        : (lastProcessedDataVersionRef.current ?? undefined);
       const result = await getAllMarketMonitorSnapshot(
         sourcePathTrimmed,
-        readStoredRealtimeQuoteProvider(),
-        sceneStageThreshold,
-        templateEnabled,
-        templateEnabled ? templates : undefined,
-        watchlistEnabled ? watchlistCodes : undefined,
-        otherSortExpression.trim() || undefined,
+        realtimeProvider,
+        config.sceneStageThreshold,
+        config.templateEnabled,
+        config.templateEnabled ? config.templates : undefined,
+        config.watchlistEnabled ? config.watchlistCodes : undefined,
+        config.otherSortExpression.trim() || undefined,
         true,
+        lastDataVersion,
       );
       if (!enabledRef.current) return;
+      if (result.has_new_data === false) return;
+
+      lastProcessedDataVersionRef.current =
+        result.data_version ?? result.refreshed_at ?? null;
+      lastProcessedConfigFingerprintRef.current = configFingerprint;
+      forceProcessLatestRef.current = false;
 
       const capturedAt = Date.now();
       const nextRows = result.rows ?? [];
@@ -889,15 +967,7 @@ export default function AllMarketMonitorPage() {
         setLoading(false);
       }
     }
-  }, [
-    sceneStageThreshold,
-    otherSortExpression,
-    sourcePathTrimmed,
-    templateEnabled,
-    templates,
-    watchlistEnabled,
-    watchlistCodes,
-  ]);
+  }, [sourcePathTrimmed]);
 
   useEffect(() => {
     if (!enabled) return undefined;
