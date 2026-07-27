@@ -85,6 +85,12 @@ use lianghua_rs::ui_tools_feat::{
         StockDetailCyqData, StockDetailPageData, StockDetailPrevRanksData,
         StockDetailRealtimeData, StockDetailStrategySnapshotData,
     },
+    dragon_tiger::{
+        get_dragon_tiger_market_data as core_get_dragon_tiger_market_data,
+        get_dragon_tiger_seat_statistics as core_get_dragon_tiger_seat_statistics,
+        get_dragon_tiger_stock_detail as core_get_dragon_tiger_stock_detail,
+        DragonTigerMarketData, DragonTigerSeatStatisticsData, DragonTigerStockDetailData,
+    },
     expression_stock_pick::{
         validate_expression_stock_pick_template_expression as core_validate_expression_stock_pick_template_expression,
         ExpressionStockPickTemplateValidationData,
@@ -186,7 +192,8 @@ use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 
 use data_download_bridge::{
     get_data_download_status, get_indicator_manage_page, run_concept_most_related_repair,
-    run_concept_performance_repair, run_data_download, run_missing_stock_repair,
+    run_concept_performance_repair, run_data_download, run_dragon_tiger_download,
+    run_missing_stock_repair,
     run_stock_data_indicator_columns_delete, run_stock_data_indicator_columns_rebuild,
     run_ths_concept_download, save_indicator_manage_page,
 };
@@ -930,6 +937,43 @@ async fn get_market_analysis(
             sub_interval_period,
             min_board_stock_count,
         )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_dragon_tiger_market_data(
+    source_path: String,
+    reference_trade_date: Option<String>,
+) -> Result<DragonTigerMarketData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_dragon_tiger_market_data(source_path, reference_trade_date)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_dragon_tiger_stock_detail(
+    source_path: String,
+    ts_code: String,
+    trade_date: String,
+) -> Result<DragonTigerStockDetailData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_dragon_tiger_stock_detail(source_path, ts_code, trade_date)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_dragon_tiger_seat_statistics(
+    source_path: String,
+    exalter: String,
+) -> Result<DragonTigerSeatStatisticsData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_dragon_tiger_seat_statistics(source_path, exalter)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2178,6 +2222,7 @@ pub fn run() {
             run_stock_data_indicator_columns_delete,
             run_stock_data_indicator_columns_rebuild,
             run_data_download,
+            run_dragon_tiger_download,
             run_missing_stock_repair,
             run_ths_concept_download,
             run_concept_performance_repair,
@@ -2210,6 +2255,9 @@ pub fn run() {
             get_scene_layer_backtest_defaults,
             get_rule_layer_backtest_defaults,
             get_market_analysis,
+            get_dragon_tiger_market_data,
+            get_dragon_tiger_stock_detail,
+            get_dragon_tiger_seat_statistics,
             get_market_contribution,
             run_rank_layer_backtest,
             run_scene_layer_backtest,

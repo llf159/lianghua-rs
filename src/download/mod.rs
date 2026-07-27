@@ -1,3 +1,4 @@
+pub mod dragon_tiger;
 pub mod ind_calc;
 pub mod runner;
 
@@ -47,6 +48,16 @@ struct DailyBasicTradeDateParams<'a> {
     trade_date: &'a str,
 }
 
+#[derive(Serialize)]
+struct MoneyflowTradeDateParams<'a> {
+    trade_date: &'a str,
+}
+
+const MONEYFLOW_FIELDS: &str = "ts_code,trade_date,buy_sm_vol,sell_sm_vol,buy_md_vol,sell_md_vol,buy_lg_vol,sell_lg_vol,buy_elg_vol,sell_elg_vol,net_mf_vol";
+const TOP_LIST_FIELDS: &str = "trade_date,ts_code,name,close,pct_change,turnover_rate,amount,l_sell,l_buy,l_amount,net_amount,net_rate,amount_rate,float_values,reason";
+const TOP_INST_FIELDS: &str =
+    "trade_date,ts_code,exalter,buy,buy_rate,sell,sell_rate,net_buy,side,reason";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdjType {
     Qfq,
@@ -90,6 +101,54 @@ pub struct DailyBasicRow {
     pub trade_date: String,
     pub turnover_rate: Option<f64>,
     pub volume_ratio: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MoneyflowRow {
+    pub ts_code: String,
+    pub trade_date: String,
+    pub buy_sm_vol: Option<f64>,
+    pub sell_sm_vol: Option<f64>,
+    pub buy_md_vol: Option<f64>,
+    pub sell_md_vol: Option<f64>,
+    pub buy_lg_vol: Option<f64>,
+    pub sell_lg_vol: Option<f64>,
+    pub buy_elg_vol: Option<f64>,
+    pub sell_elg_vol: Option<f64>,
+    pub net_mf_vol: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TopListRow {
+    pub trade_date: String,
+    pub ts_code: String,
+    pub name: String,
+    pub close: Option<f64>,
+    pub pct_change: Option<f64>,
+    pub turnover_rate: Option<f64>,
+    pub amount: Option<f64>,
+    pub l_sell: Option<f64>,
+    pub l_buy: Option<f64>,
+    pub l_amount: Option<f64>,
+    pub net_amount: Option<f64>,
+    pub net_rate: Option<f64>,
+    pub amount_rate: Option<f64>,
+    pub float_values: Option<f64>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TopInstRow {
+    pub trade_date: String,
+    pub ts_code: String,
+    pub exalter: String,
+    pub buy: Option<f64>,
+    pub buy_rate: Option<f64>,
+    pub sell: Option<f64>,
+    pub sell_rate: Option<f64>,
+    pub net_buy: Option<f64>,
+    pub side: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -202,6 +261,10 @@ impl RateLimiter {
     }
 
     pub fn wait(&self, api_name: &str) -> Result<(), String> {
+        self.wait_with_interval(api_name, self.min_interval)
+    }
+
+    fn wait_with_interval(&self, api_name: &str, min_interval: Duration) -> Result<(), String> {
         let now = Instant::now();
         let sleep_for = {
             let mut next_allowed_at = self
@@ -214,7 +277,7 @@ impl RateLimiter {
                 _ => now,
             };
 
-            next_allowed_at.insert(api_name.to_string(), reserved_at + self.min_interval);
+            next_allowed_at.insert(api_name.to_string(), reserved_at + min_interval);
             reserved_at.saturating_duration_since(now)
         };
 
@@ -304,7 +367,7 @@ impl TushareClient {
             .build()
             .map_err(|e| format!("创建HTTP客户端失败: {e}"))?;
         Ok(Self {
-            base_url: "http://api.tushare.pro".to_string(),
+            base_url: "https://api.tushare.pro".to_string(),
             token,
             http,
             limiter: RateLimiter::new(calls_per_min)?,
@@ -563,6 +626,21 @@ impl TushareClient {
         )
     }
 
+    fn fetch_single_moneyflow_all(
+        &self,
+        ts_code: &str,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<TushareTable, String> {
+        let params = DailyParams {
+            ts_code,
+            start_date,
+            end_date,
+        };
+
+        self.post_table("moneyflow", &params, MONEYFLOW_FIELDS)
+    }
+
     fn fetch_single_weekly_all(
         &self,
         ts_code: &str,
@@ -644,6 +722,13 @@ impl TushareClient {
             let adj_rows = parse_adj_factor_rows(&adj_table)?;
             let adj_map = build_adj_factor_map(adj_rows)?;
             apply_adj_to_rows(&mut rows, &adj_type, &adj_map)?;
+        }
+
+        if freq == BarFreq::Daily {
+            let moneyflow_table = self.fetch_single_moneyflow_all(ts_code, start_date, end_date)?;
+            let moneyflow_rows = parse_moneyflow_rows(&moneyflow_table)?;
+            let moneyflow_map = build_single_moneyflow_map(moneyflow_rows)?;
+            attach_single_moneyflow(&mut rows, &moneyflow_map)?;
         }
 
         normalize_stock_rows_like_pro_bar(&mut rows);
@@ -812,18 +897,47 @@ impl TushareClient {
         let bar_table = self.fetch_daily_by_trade_date(trade_date)?;
         let bar_rows = parse_bar_rows(&bar_table)?;
 
-        if with_factors {
+        let mut rows = if with_factors {
             let basic_table = self.fetch_daily_basic_by_trade_date(trade_date)?;
             let basic_rows = parse_daily_basic_rows(&basic_table)?;
             let basic_map = build_market_basic_map(basic_rows)?;
-            let mut rows = build_market_basic_with_basiccol(bar_rows, &basic_map)?;
-            normalize_stock_rows_like_pro_bar(&mut rows);
-            Ok(rows)
+            build_market_basic_with_basiccol(bar_rows, &basic_map)?
         } else {
-            let mut rows = build_pro_bar_rows(bar_rows);
-            normalize_stock_rows_like_pro_bar(&mut rows);
-            Ok(rows)
-        }
+            build_pro_bar_rows(bar_rows)
+        };
+
+        let moneyflow_rows = self.fetch_moneyflow_by_trade_date(trade_date)?;
+        let moneyflow_map = build_market_moneyflow_map(moneyflow_rows)?;
+        attach_market_moneyflow(&mut rows, &moneyflow_map)?;
+        normalize_stock_rows_like_pro_bar(&mut rows);
+        Ok(rows)
+    }
+
+    pub fn fetch_moneyflow_by_trade_date(
+        &self,
+        trade_date: &str,
+    ) -> Result<Vec<MoneyflowRow>, String> {
+        let params = MoneyflowTradeDateParams { trade_date };
+        let table = self.post_table("moneyflow", &params, MONEYFLOW_FIELDS)?;
+        parse_moneyflow_rows(&table)
+    }
+
+    pub fn fetch_top_list_by_trade_date(
+        &self,
+        trade_date: &str,
+    ) -> Result<Vec<TopListRow>, String> {
+        let params = TradeDateParams { trade_date };
+        let table = self.post_table("top_list", &params, TOP_LIST_FIELDS)?;
+        parse_top_list_rows(&table)
+    }
+
+    pub fn fetch_top_inst_by_trade_date(
+        &self,
+        trade_date: &str,
+    ) -> Result<Vec<TopInstRow>, String> {
+        let params = TradeDateParams { trade_date };
+        let table = self.post_table("top_inst", &params, TOP_INST_FIELDS)?;
+        parse_top_inst_rows(&table)
     }
 }
 
@@ -925,6 +1039,146 @@ pub fn parse_adj_factor_rows(table: &TushareTable) -> Result<Vec<AdjFactorRow>, 
             ts_code: TushareTable::value_as_string(&item[ts_code_idx], "ts_code")?,
             trade_date: TushareTable::value_as_string(&item[trade_date_idx], "trade_date")?,
             adj_factor: TushareTable::value_as_f64(&item[adj_factor_idx], "adj_factor")?,
+        });
+    }
+
+    Ok(rows)
+}
+
+pub fn parse_moneyflow_rows(table: &TushareTable) -> Result<Vec<MoneyflowRow>, String> {
+    let ts_code_idx = table.field_index("ts_code")?;
+    let trade_date_idx = table.field_index("trade_date")?;
+    let numeric_fields = [
+        "buy_sm_vol",
+        "sell_sm_vol",
+        "buy_md_vol",
+        "sell_md_vol",
+        "buy_lg_vol",
+        "sell_lg_vol",
+        "buy_elg_vol",
+        "sell_elg_vol",
+        "net_mf_vol",
+    ];
+    let numeric_indexes = numeric_fields
+        .iter()
+        .map(|field| table.field_index(field))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut rows = Vec::with_capacity(table.items.len());
+
+    for item in &table.items {
+        if item.len() < table.fields.len() {
+            return Err(format!(
+                "moneyflow 返回行列数不足: {} < {}",
+                item.len(),
+                table.fields.len()
+            ));
+        }
+        let mut values = numeric_indexes
+            .iter()
+            .zip(numeric_fields)
+            .map(|(idx, field)| TushareTable::value_as_opt_f64(&item[*idx], field));
+
+        rows.push(MoneyflowRow {
+            ts_code: TushareTable::value_as_string(&item[ts_code_idx], "ts_code")?,
+            trade_date: TushareTable::value_as_string(&item[trade_date_idx], "trade_date")?,
+            buy_sm_vol: values.next().transpose()?.flatten(),
+            sell_sm_vol: values.next().transpose()?.flatten(),
+            buy_md_vol: values.next().transpose()?.flatten(),
+            sell_md_vol: values.next().transpose()?.flatten(),
+            buy_lg_vol: values.next().transpose()?.flatten(),
+            sell_lg_vol: values.next().transpose()?.flatten(),
+            buy_elg_vol: values.next().transpose()?.flatten(),
+            sell_elg_vol: values.next().transpose()?.flatten(),
+            net_mf_vol: values.next().transpose()?.flatten(),
+        });
+    }
+
+    Ok(rows)
+}
+
+pub fn parse_top_list_rows(table: &TushareTable) -> Result<Vec<TopListRow>, String> {
+    let trade_date_idx = table.field_index("trade_date")?;
+    let ts_code_idx = table.field_index("ts_code")?;
+    let name_idx = table.field_index("name")?;
+    let close_idx = table.field_index("close")?;
+    let pct_change_idx = table.field_index("pct_change")?;
+    let turnover_rate_idx = table.field_index("turnover_rate")?;
+    let amount_idx = table.field_index("amount")?;
+    let l_sell_idx = table.field_index("l_sell")?;
+    let l_buy_idx = table.field_index("l_buy")?;
+    let l_amount_idx = table.field_index("l_amount")?;
+    let net_amount_idx = table.field_index("net_amount")?;
+    let net_rate_idx = table.field_index("net_rate")?;
+    let amount_rate_idx = table.field_index("amount_rate")?;
+    let float_values_idx = table.field_index("float_values")?;
+    let reason_idx = table.field_index("reason")?;
+    let mut rows = Vec::with_capacity(table.items.len());
+
+    for item in &table.items {
+        if item.len() < table.fields.len() {
+            return Err(format!(
+                "top_list 返回行列数不足: {} < {}",
+                item.len(),
+                table.fields.len()
+            ));
+        }
+        rows.push(TopListRow {
+            trade_date: TushareTable::value_as_string(&item[trade_date_idx], "trade_date")?,
+            ts_code: TushareTable::value_as_string(&item[ts_code_idx], "ts_code")?,
+            name: TushareTable::value_as_string(&item[name_idx], "name")?,
+            close: TushareTable::value_as_opt_f64(&item[close_idx], "close")?,
+            pct_change: TushareTable::value_as_opt_f64(&item[pct_change_idx], "pct_change")?,
+            turnover_rate: TushareTable::value_as_opt_f64(
+                &item[turnover_rate_idx],
+                "turnover_rate",
+            )?,
+            amount: TushareTable::value_as_opt_f64(&item[amount_idx], "amount")?,
+            l_sell: TushareTable::value_as_opt_f64(&item[l_sell_idx], "l_sell")?,
+            l_buy: TushareTable::value_as_opt_f64(&item[l_buy_idx], "l_buy")?,
+            l_amount: TushareTable::value_as_opt_f64(&item[l_amount_idx], "l_amount")?,
+            net_amount: TushareTable::value_as_opt_f64(&item[net_amount_idx], "net_amount")?,
+            net_rate: TushareTable::value_as_opt_f64(&item[net_rate_idx], "net_rate")?,
+            amount_rate: TushareTable::value_as_opt_f64(&item[amount_rate_idx], "amount_rate")?,
+            float_values: TushareTable::value_as_opt_f64(&item[float_values_idx], "float_values")?,
+            reason: TushareTable::value_as_string(&item[reason_idx], "reason")?,
+        });
+    }
+
+    Ok(rows)
+}
+
+pub fn parse_top_inst_rows(table: &TushareTable) -> Result<Vec<TopInstRow>, String> {
+    let trade_date_idx = table.field_index("trade_date")?;
+    let ts_code_idx = table.field_index("ts_code")?;
+    let exalter_idx = table.field_index("exalter")?;
+    let buy_idx = table.field_index("buy")?;
+    let buy_rate_idx = table.field_index("buy_rate")?;
+    let sell_idx = table.field_index("sell")?;
+    let sell_rate_idx = table.field_index("sell_rate")?;
+    let net_buy_idx = table.field_index("net_buy")?;
+    let side_idx = table.field_index("side")?;
+    let reason_idx = table.field_index("reason")?;
+    let mut rows = Vec::with_capacity(table.items.len());
+
+    for item in &table.items {
+        if item.len() < table.fields.len() {
+            return Err(format!(
+                "top_inst 返回行列数不足: {} < {}",
+                item.len(),
+                table.fields.len()
+            ));
+        }
+        rows.push(TopInstRow {
+            trade_date: TushareTable::value_as_string(&item[trade_date_idx], "trade_date")?,
+            ts_code: TushareTable::value_as_string(&item[ts_code_idx], "ts_code")?,
+            exalter: TushareTable::value_as_string(&item[exalter_idx], "exalter")?,
+            buy: TushareTable::value_as_opt_f64(&item[buy_idx], "buy")?,
+            buy_rate: TushareTable::value_as_opt_f64(&item[buy_rate_idx], "buy_rate")?,
+            sell: TushareTable::value_as_opt_f64(&item[sell_idx], "sell")?,
+            sell_rate: TushareTable::value_as_opt_f64(&item[sell_rate_idx], "sell_rate")?,
+            net_buy: TushareTable::value_as_opt_f64(&item[net_buy_idx], "net_buy")?,
+            side: TushareTable::value_as_string(&item[side_idx], "side")?,
+            reason: TushareTable::value_as_string(&item[reason_idx], "reason")?,
         });
     }
 
@@ -1128,6 +1382,75 @@ pub struct ProBarRow {
     pub amount: f64,
     pub turnover_rate: Option<f64>,
     pub volume_ratio: Option<f64>,
+    pub moneyflow: Option<MoneyflowRow>,
+}
+
+pub fn build_single_moneyflow_map(
+    rows: Vec<MoneyflowRow>,
+) -> Result<HashMap<String, MoneyflowRow>, String> {
+    let mut map = HashMap::with_capacity(rows.len());
+
+    for row in rows {
+        let trade_date = row.trade_date.clone();
+        if map.insert(trade_date.clone(), row).is_some() {
+            return Err(format!("moneyflow 出现重复 trade_date: {trade_date}"));
+        }
+    }
+
+    Ok(map)
+}
+
+pub fn attach_single_moneyflow(
+    rows: &mut [ProBarRow],
+    moneyflow_map: &HashMap<String, MoneyflowRow>,
+) -> Result<(), String> {
+    for row in rows {
+        if let Some(moneyflow) = moneyflow_map.get(&row.trade_date) {
+            if moneyflow.ts_code != row.ts_code {
+                return Err(format!(
+                    "trade_date={} 的 moneyflow ts_code 不匹配: {} != {}",
+                    row.trade_date, moneyflow.ts_code, row.ts_code
+                ));
+            }
+            row.moneyflow = Some(moneyflow.clone());
+        }
+    }
+
+    Ok(())
+}
+
+pub fn build_market_moneyflow_map(
+    rows: Vec<MoneyflowRow>,
+) -> Result<HashMap<String, MoneyflowRow>, String> {
+    let mut map = HashMap::with_capacity(rows.len());
+
+    for row in rows {
+        let ts_code = row.ts_code.clone();
+        if map.insert(ts_code.clone(), row).is_some() {
+            return Err(format!("moneyflow 出现重复 ts_code: {ts_code}"));
+        }
+    }
+
+    Ok(map)
+}
+
+pub fn attach_market_moneyflow(
+    rows: &mut [ProBarRow],
+    moneyflow_map: &HashMap<String, MoneyflowRow>,
+) -> Result<(), String> {
+    for row in rows {
+        if let Some(moneyflow) = moneyflow_map.get(&row.ts_code) {
+            if moneyflow.trade_date != row.trade_date {
+                return Err(format!(
+                    "ts_code={} 的 moneyflow trade_date 不匹配: {} != {}",
+                    row.ts_code, moneyflow.trade_date, row.trade_date
+                ));
+            }
+            row.moneyflow = Some(moneyflow.clone());
+        }
+    }
+
+    Ok(())
 }
 
 pub fn build_single_basic_map(
@@ -1183,6 +1506,7 @@ pub fn build_single_basic_with_basiccol(
             amount: bar.amount,
             turnover_rate,
             volume_ratio,
+            moneyflow: None,
         });
     }
 
@@ -1270,6 +1594,7 @@ pub fn build_pro_bar_rows(bar_rows: Vec<BarRow>) -> Vec<ProBarRow> {
             amount: bar.amount,
             turnover_rate: None,
             volume_ratio: None,
+            moneyflow: None,
         });
     }
 
@@ -1420,6 +1745,7 @@ pub fn build_daily_basic_with_basiccol(
             amount: bar.amount,
             turnover_rate,
             volume_ratio,
+            moneyflow: None,
         });
     }
 
@@ -1477,6 +1803,7 @@ pub fn build_market_basic_with_basiccol(
             amount: bar.amount,
             turnover_rate,
             volume_ratio,
+            moneyflow: None,
         });
     }
 
@@ -1486,6 +1813,7 @@ pub fn build_market_basic_with_basiccol(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     fn probar_row(ts_code: &str, trade_date: &str, close: f64, pre_close: f64) -> ProBarRow {
         ProBarRow {
@@ -1502,7 +1830,45 @@ mod tests {
             amount: 0.0,
             turnover_rate: None,
             volume_ratio: None,
+            moneyflow: None,
         }
+    }
+
+    fn moneyflow_row(ts_code: &str, trade_date: &str, net_mf_vol: f64) -> MoneyflowRow {
+        MoneyflowRow {
+            ts_code: ts_code.to_string(),
+            trade_date: trade_date.to_string(),
+            buy_sm_vol: Some(1.0),
+            sell_sm_vol: Some(3.0),
+            buy_md_vol: Some(5.0),
+            sell_md_vol: Some(7.0),
+            buy_lg_vol: Some(9.0),
+            sell_lg_vol: Some(11.0),
+            buy_elg_vol: Some(13.0),
+            sell_elg_vol: Some(15.0),
+            net_mf_vol: Some(net_mf_vol),
+        }
+    }
+
+    #[test]
+    fn single_stock_rows_attach_moneyflow_by_trade_date() {
+        let mut rows = vec![
+            probar_row("000001.SZ", "20240102", 10.0, 9.8),
+            probar_row("000001.SZ", "20240103", 10.2, 10.0),
+        ];
+        let map = build_single_moneyflow_map(vec![moneyflow_row("000001.SZ", "20240103", 123.45)])
+            .expect("build moneyflow map");
+
+        attach_single_moneyflow(&mut rows, &map).expect("attach moneyflow");
+
+        assert!(rows[0].moneyflow.is_none());
+        assert_eq!(
+            rows[1]
+                .moneyflow
+                .as_ref()
+                .and_then(|moneyflow| moneyflow.net_mf_vol),
+            Some(123.45)
+        );
     }
 
     #[test]
@@ -1549,5 +1915,104 @@ mod tests {
 
         assert_eq!(rows[0].change, 0.03);
         assert_eq!(rows[0].pct_chg, 3.13);
+    }
+
+    #[test]
+    fn parses_moneyflow_rows_with_nullable_numbers() {
+        let fields = [
+            "ts_code",
+            "trade_date",
+            "buy_sm_vol",
+            "sell_sm_vol",
+            "buy_md_vol",
+            "sell_md_vol",
+            "buy_lg_vol",
+            "sell_lg_vol",
+            "buy_elg_vol",
+            "sell_elg_vol",
+            "net_mf_vol",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let table = TushareTable {
+            fields,
+            items: vec![vec![
+                serde_json::json!("000001.SZ"),
+                serde_json::json!("20260724"),
+                serde_json::json!(1),
+                serde_json::Value::Null,
+                serde_json::json!(5),
+                serde_json::json!(7),
+                serde_json::json!(9),
+                serde_json::json!(11),
+                serde_json::json!(13),
+                serde_json::json!(15),
+                serde_json::json!(17),
+            ]],
+        };
+
+        let rows = parse_moneyflow_rows(&table).expect("parse moneyflow");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ts_code, "000001.SZ");
+        assert_eq!(rows[0].sell_sm_vol, None);
+        assert_eq!(rows[0].net_mf_vol, Some(17.0));
+    }
+
+    #[test]
+    fn rate_limiter_spaces_calls_to_the_same_api() {
+        let limiter = RateLimiter::new(1200).expect("rate limiter");
+        limiter.wait("moneyflow").expect("first reservation");
+        let started = Instant::now();
+        limiter.wait("moneyflow").expect("second reservation");
+
+        assert!(started.elapsed() >= Duration::from_millis(40));
+    }
+
+    #[test]
+    fn rate_limiter_does_not_cross_throttle_different_apis() {
+        let limiter = RateLimiter::new(60).expect("rate limiter");
+        limiter.wait("moneyflow").expect("moneyflow reservation");
+        let started = Instant::now();
+        limiter.wait("daily").expect("daily reservation");
+
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    #[ignore = "requires TUSHARE_TOKEN and network access"]
+    fn live_moneyflow_requests_obey_configured_rate_limit() {
+        let token = std::env::var("TUSHARE_TOKEN").expect("TUSHARE_TOKEN is required");
+        let client = TushareClient::new(token, 120).expect("client");
+        let started = Instant::now();
+        client
+            .fetch_moneyflow_by_trade_date("20240102")
+            .expect("first moneyflow request");
+        client
+            .fetch_moneyflow_by_trade_date("20240102")
+            .expect("second moneyflow request");
+
+        assert!(started.elapsed() >= Duration::from_millis(450));
+    }
+
+    #[test]
+    #[ignore = "requires TUSHARE_TOKEN and network access"]
+    fn live_single_pro_bar_includes_moneyflow() {
+        let token = std::env::var("TUSHARE_TOKEN").expect("TUSHARE_TOKEN is required");
+        let client = TushareClient::new(token, 120).expect("client");
+        let rows = client
+            .fetch_single_pro_bar(
+                "000001.SZ",
+                "20240102",
+                "20240102",
+                BarFreq::Daily,
+                AdjType::Qfq,
+                true,
+            )
+            .expect("fetch merged pro bar");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].trade_date, "20240102");
+        assert!(rows[0].moneyflow.is_some());
     }
 }

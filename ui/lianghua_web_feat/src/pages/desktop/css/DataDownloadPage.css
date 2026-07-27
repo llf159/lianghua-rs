@@ -25,6 +25,56 @@
   gap: 10px;
 }
 
+.data-download-shared-params {
+  grid-template-columns: minmax(240px, 0.8fr) minmax(320px, 1.2fr);
+  align-items: end;
+  border-color: #efbd7d;
+  background:
+    linear-gradient(100deg, rgba(255, 241, 221, 0.94), rgba(255, 253, 249, 0.98)),
+    #fffaf4;
+}
+
+.data-download-page.is-merged-mode .data-download-shared-params {
+  grid-template-columns: minmax(240px, 0.8fr) minmax(320px, 1.2fr);
+  border: 1px solid #efbd7d;
+  background:
+    linear-gradient(100deg, rgba(255, 241, 221, 0.94), rgba(255, 253, 249, 0.98)),
+    #fffaf4;
+}
+
+.data-download-shared-params-copy {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.data-download-shared-params-label {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: #9a4e03;
+  background: #ffe3bd;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.data-download-shared-params-copy h2 {
+  margin: 1px 0 0;
+  font-size: 17px;
+}
+
+.data-download-shared-params-copy p {
+  margin: 5px 0 0;
+  color: #6b5a49;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.data-download-shared-token input {
+  border-color: #dda45f;
+}
+
 .data-download-page.is-merged-mode .data-download-head {
   align-items: center;
 }
@@ -262,9 +312,44 @@
   align-items: end;
 }
 
+.data-download-dragon-status {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: #5f6978;
+  font-size: 13px;
+}
+
+.data-download-dragon-status strong {
+  color: #2f3a48;
+  font-size: 14px;
+}
+
+.data-download-dragon-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 210px) minmax(150px, 210px) auto auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.data-download-dragon-today {
+  min-width: 132px;
+}
+
+.data-download-dragon-row .data-download-secondary-btn {
+  min-height: 42px;
+}
+
 .data-download-page.is-merged-mode .data-download-inline-grid {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
   gap: 8px 12px;
+}
+
+@media (max-width: 760px) {
+  .data-download-dragon-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .data-download-page.is-merged-mode .data-download-field-span-2,
@@ -849,6 +934,8 @@
 }
 
 @media (max-width: 1080px) {
+  .data-download-shared-params,
+  .data-download-page.is-merged-mode .data-download-shared-params,
   .data-download-top-grid,
   .data-download-panel-grid,
   .data-download-summary,

@@ -35,7 +35,7 @@ const STOCK_DATA_STAGE_TABLE: &str = "stock_data_stage";
 const STOCK_DATA_REBUILD_TABLE: &str = "stock_data_rebuild_tmp";
 const STOCK_DATA_INDICATOR_STAGE_TABLE: &str = "stock_data_indicator_stage";
 
-const STOCK_DATA_INSERT_COLUMNS: [&str; 13] = [
+const STOCK_DATA_INSERT_COLUMNS: [&str; 22] = [
     "ts_code",
     "trade_date",
     "adj_type",
@@ -49,9 +49,18 @@ const STOCK_DATA_INSERT_COLUMNS: [&str; 13] = [
     "vol",
     "amount",
     "tor",
+    "buy_sm_vol",
+    "sell_sm_vol",
+    "buy_md_vol",
+    "sell_md_vol",
+    "buy_lg_vol",
+    "sell_lg_vol",
+    "buy_elg_vol",
+    "sell_elg_vol",
+    "net_mf_vol",
 ];
 
-const STOCK_DATA_BASE_COLUMN_DEFS: [(&str, &str); 13] = [
+const STOCK_DATA_BASE_COLUMN_DEFS: [(&str, &str); 22] = [
     ("ts_code", "VARCHAR"),
     ("trade_date", "VARCHAR"),
     ("adj_type", "VARCHAR"),
@@ -65,6 +74,15 @@ const STOCK_DATA_BASE_COLUMN_DEFS: [(&str, &str); 13] = [
     ("vol", "DECIMAL(15,2)"),
     ("amount", "DECIMAL(20,2)"),
     ("tor", "DECIMAL(10,4)"),
+    ("buy_sm_vol", "DOUBLE"),
+    ("sell_sm_vol", "DOUBLE"),
+    ("buy_md_vol", "DOUBLE"),
+    ("sell_md_vol", "DOUBLE"),
+    ("buy_lg_vol", "DOUBLE"),
+    ("sell_lg_vol", "DOUBLE"),
+    ("buy_elg_vol", "DOUBLE"),
+    ("sell_elg_vol", "DOUBLE"),
+    ("net_mf_vol", "DOUBLE"),
 ];
 
 fn build_stock_data_create_sql(table_name: &str, indicator_columns: &[String]) -> String {
@@ -190,6 +208,20 @@ fn append_rows_to_table(
         let vol = round_to(row.vol, 2);
         let amount = round_to(row.amount, 2);
         let turnover_rate = round_opt_to(row.turnover_rate, 4);
+        let moneyflow_values = match row.moneyflow.as_ref() {
+            Some(moneyflow) => [
+                moneyflow.buy_sm_vol,
+                moneyflow.sell_sm_vol,
+                moneyflow.buy_md_vol,
+                moneyflow.sell_md_vol,
+                moneyflow.buy_lg_vol,
+                moneyflow.sell_lg_vol,
+                moneyflow.buy_elg_vol,
+                moneyflow.sell_elg_vol,
+                moneyflow.net_mf_vol,
+            ],
+            None => [None; 9],
+        };
 
         let mut params: Vec<&dyn ToSql> =
             Vec::with_capacity(STOCK_DATA_INSERT_COLUMNS.len() + indicator_names.len());
@@ -206,6 +238,9 @@ fn append_rows_to_table(
         params.push(&vol);
         params.push(&amount);
         params.push(&turnover_rate);
+        for value in &moneyflow_values {
+            params.push(value);
+        }
 
         if let Some(indicators) = indicators {
             for name in &indicator_names {
@@ -989,6 +1024,62 @@ mod tests {
             .expect("system time")
             .as_nanos();
         std::env::temp_dir().join(format!("lianghua-rs-{prefix}-{nanos}"))
+    }
+
+    #[test]
+    fn stock_data_rows_persist_attached_moneyflow_fields() {
+        let source_dir = temp_dir_path("stock-data-moneyflow");
+        create_dir_all(&source_dir).expect("create temp dir");
+        let db_path = source_dir.join("stock_data.db");
+        init_stock_data_db(db_path.to_str().expect("utf8 path")).expect("init stock_data");
+        let conn = Connection::open(&db_path).expect("open db");
+
+        insert_pro_bar_rows(
+            &conn,
+            AdjType::Qfq,
+            &[ProBarRow {
+                ts_code: "000001.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                open: 10.0,
+                high: 10.5,
+                low: 9.8,
+                close: 10.2,
+                pre_close: 10.0,
+                change: 0.2,
+                pct_chg: 2.0,
+                vol: 1000.0,
+                amount: 10000.0,
+                turnover_rate: Some(1.2),
+                volume_ratio: None,
+                moneyflow: Some(crate::download::MoneyflowRow {
+                    ts_code: "000001.SZ".to_string(),
+                    trade_date: "20240102".to_string(),
+                    buy_sm_vol: Some(1.0),
+                    sell_sm_vol: Some(3.0),
+                    buy_md_vol: Some(5.0),
+                    sell_md_vol: Some(7.0),
+                    buy_lg_vol: Some(9.0),
+                    sell_lg_vol: Some(11.0),
+                    buy_elg_vol: Some(13.0),
+                    sell_elg_vol: Some(15.0),
+                    net_mf_vol: Some(17.0),
+                }),
+            }],
+        )
+        .expect("write stock row");
+
+        let (buy_sm_vol, net_mf_vol): (f64, f64) = conn
+            .query_row(
+                "SELECT buy_sm_vol, net_mf_vol FROM stock_data WHERE ts_code = '000001.SZ'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read moneyflow fields");
+        assert_eq!(buy_sm_vol, 1.0);
+        assert_eq!(net_mf_vol, 17.0);
+
+        drop(conn);
+        let _ = remove_dir_all(source_dir);
     }
 
     #[test]

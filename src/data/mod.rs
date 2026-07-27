@@ -4,6 +4,7 @@ pub mod cyq_chen;
 pub mod cyq_chen_data;
 pub mod cyq_data;
 pub mod download_data;
+pub mod dragon_tiger_data;
 pub mod scoring_data;
 pub mod simulate;
 
@@ -23,6 +24,10 @@ use crate::expr::{
 
 pub fn source_db_path(source_dir: &str) -> PathBuf {
     Path::new(source_dir).join("stock_data.db")
+}
+
+pub fn dragon_tiger_db_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("dragon_tiger.db")
 }
 
 pub fn result_db_path(source_dir: &str) -> PathBuf {

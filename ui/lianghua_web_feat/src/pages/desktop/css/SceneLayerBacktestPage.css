@@ -1145,7 +1145,781 @@
   width: 92px;
 }
 
+.dragon-tiger-card {
+  display: grid;
+  gap: 14px;
+}
+
+.dragon-tiger-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.dragon-tiger-heading .scene-layer-caption {
+  margin-bottom: 0;
+}
+
+.dragon-tiger-view-controls {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.dragon-tiger-view-controls .scene-layer-field {
+  min-width: 170px;
+}
+
+.dragon-tiger-view-controls .scene-layer-primary-btn,
+.dragon-tiger-view-controls .scene-layer-secondary-btn {
+  min-height: 36px;
+  white-space: nowrap;
+}
+
+.dragon-tiger-refresh-btn {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #9a3412;
+  font-weight: 700;
+}
+
+.dragon-tiger-refresh-btn:hover {
+  background: #ffedd5;
+}
+
+.dragon-tiger-notice {
+  border: 1px solid #bbf7d0;
+  border-radius: 9px;
+  padding: 10px 12px;
+  background: #f0fdf4;
+  color: #166534;
+  font-size: 13px;
+}
+
+.dragon-tiger-table-section {
+  border: 1px solid #e1e7ef;
+  border-radius: 10px;
+  background: #fbfcfe;
+  overflow: hidden;
+}
+
+.dragon-tiger-table-section > summary {
+  padding: 11px 13px;
+  color: #334155;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  user-select: none;
+}
+
+.dragon-tiger-table-section[open] > summary {
+  border-bottom: 1px solid #e1e7ef;
+  background: #fff8f1;
+  color: #7c2d12;
+}
+
+.dragon-tiger-empty {
+  border: 1px solid #d8e4f5;
+  border-radius: 9px;
+  padding: 10px 12px;
+  background: #f7faff;
+  color: #3f5065;
+  font-size: 13px;
+}
+
+.market-analysis-main-card .dragon-tiger-table-wrap {
+  max-height: 62vh;
+  border: 0;
+  border-radius: 0;
+}
+
+.market-analysis-main-card .dragon-tiger-list-table,
+.market-analysis-main-card .dragon-tiger-inst-table {
+  width: max-content;
+  min-width: 100%;
+  table-layout: auto;
+}
+
+.market-analysis-main-card .dragon-tiger-list-table th,
+.market-analysis-main-card .dragon-tiger-list-table td,
+.market-analysis-main-card .dragon-tiger-inst-table th,
+.market-analysis-main-card .dragon-tiger-inst-table td {
+  width: auto;
+  max-width: 300px;
+}
+
+.market-analysis-main-card .dragon-tiger-list-table th:last-child,
+.market-analysis-main-card .dragon-tiger-list-table td:last-child,
+.market-analysis-main-card .dragon-tiger-inst-table th:last-child,
+.market-analysis-main-card .dragon-tiger-inst-table td:last-child {
+  min-width: 320px;
+  text-align: left;
+  white-space: normal;
+}
+
+.market-analysis-main-card .dragon-tiger-list-table th:nth-child(n + 4):nth-child(-n + 9),
+.market-analysis-main-card .dragon-tiger-list-table td:nth-child(n + 4):nth-child(-n + 9),
+.market-analysis-main-card .dragon-tiger-inst-table th:nth-child(n + 5):nth-child(-n + 9),
+.market-analysis-main-card .dragon-tiger-inst-table td:nth-child(n + 5):nth-child(-n + 9) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.market-analysis-main-card .dragon-tiger-list-table .scene-layer-market-stock-link {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.dragon-tiger-detail-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1500;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(15, 23, 42, 0.48);
+  backdrop-filter: blur(6px);
+}
+
+.dragon-tiger-detail-modal {
+  position: relative;
+  display: flex;
+  width: min(1420px, 100%);
+  max-height: calc(100vh - 56px);
+  min-height: min(760px, calc(100vh - 56px));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 20px;
+  background: #f7f8fa;
+  box-shadow: 0 28px 90px rgba(15, 23, 42, 0.34);
+}
+
+.dragon-tiger-detail-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 20px 24px 17px;
+  background:
+    radial-gradient(circle at 12% 0%, rgba(251, 146, 60, 0.2), transparent 38%),
+    #fff;
+}
+
+.dragon-tiger-detail-header-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.dragon-tiger-detail-kicker {
+  margin-bottom: 5px;
+  color: #9a3412;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.dragon-tiger-detail-headline {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.dragon-tiger-detail-stock {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.dragon-tiger-detail-stock h3 {
+  margin: 0;
+  color: #172033;
+  font-size: 25px;
+}
+
+.dragon-tiger-detail-stock > span {
+  color: #64748b;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dragon-tiger-detail-date {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  border-left: 3px solid #ea580c;
+  padding: 5px 10px;
+  background: #fff7ed;
+}
+
+.dragon-tiger-detail-date span {
+  color: #9a3412;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.dragon-tiger-detail-date strong {
+  color: #7c2d12;
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dragon-tiger-detail-header-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 18px;
+  margin-top: 11px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.dragon-tiger-detail-header-stats span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.dragon-tiger-detail-header-stats strong {
+  color: #334155;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dragon-tiger-detail-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.dragon-tiger-detail-text-btn {
+  appearance: none;
+  border: 0;
+  padding: 5px;
+  background: transparent;
+  color: #64748b;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.dragon-tiger-detail-text-btn:hover {
+  color: #9a3412;
+  text-decoration: underline;
+}
+
+.dragon-tiger-detail-body {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 18px 22px 92px;
+}
+
+.dragon-tiger-detail-modal .scene-layer-value-up {
+  color: #dc2626;
+}
+
+.dragon-tiger-detail-modal .scene-layer-value-down {
+  color: #16a34a;
+}
+
+.dragon-tiger-detail-modal .scene-layer-value-flat {
+  color: #64748b;
+}
+
+.dragon-tiger-detail-state {
+  display: grid;
+  min-height: 110px;
+  place-items: center;
+  border: 1px dashed #cbd5e1;
+  border-radius: 12px;
+  background: #fff;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.dragon-tiger-reason-list {
+  display: grid;
+  gap: 14px;
+}
+
+.dragon-tiger-reason-section,
+.dragon-tiger-history-section {
+  overflow: hidden;
+  border: 1px solid #dde4ed;
+  border-radius: 14px;
+  background: #fff;
+}
+
+.dragon-tiger-reason-heading,
+.dragon-tiger-history-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border-bottom: 1px solid #e8edf3;
+  padding: 12px 15px;
+  background: #fffaf5;
+}
+
+.dragon-tiger-reason-heading > div:first-child,
+.dragon-tiger-history-heading > div {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+
+.dragon-tiger-reason-heading span,
+.dragon-tiger-history-heading span {
+  color: #9a3412;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.dragon-tiger-reason-heading strong,
+.dragon-tiger-history-heading strong {
+  color: #334155;
+  font-size: 14px;
+}
+
+.dragon-tiger-reason-net {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: #64748b;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.dragon-tiger-reason-net strong {
+  font-size: 16px;
+}
+
+.dragon-tiger-seat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.dragon-tiger-seat-card + .dragon-tiger-seat-card {
+  border-left: 1px solid #e8edf3;
+}
+
+.dragon-tiger-seat-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 13px;
+}
+
+.dragon-tiger-seat-card-buy .dragon-tiger-seat-title {
+  background: #fff5f5;
+  color: #b91c1c;
+}
+
+.dragon-tiger-seat-card-sell .dragon-tiger-seat-title {
+  background: #f0fdf4;
+  color: #15803d;
+}
+
+.dragon-tiger-seat-title strong {
+  font-size: 13px;
+}
+
+.dragon-tiger-seat-title span {
+  font-size: 11px;
+  opacity: 0.78;
+}
+
+.dragon-tiger-seat-empty {
+  display: grid;
+  min-height: 120px;
+  place-items: center;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.dragon-tiger-seat-stat-trigger {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-start;
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #334155;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dragon-tiger-seat-stat-trigger span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dragon-tiger-seat-stat-trigger:hover span {
+  color: #9a3412;
+  text-decoration: underline;
+}
+
+.dragon-tiger-stat-name-link,
+.dragon-tiger-history-date-link {
+  color: #c2410c;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.dragon-tiger-history-date-link {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  font-family: inherit;
+}
+
+.dragon-tiger-stat-name-link:hover,
+.dragon-tiger-history-date-link:hover {
+  color: #9a3412;
+  text-decoration: underline;
+}
+
+.dragon-tiger-detail-table-wrap {
+  overflow: auto;
+}
+
+.dragon-tiger-detail-table {
+  width: 100%;
+  border-collapse: collapse;
+  color: #334155;
+  font-size: 12px;
+}
+
+.dragon-tiger-detail-table th,
+.dragon-tiger-detail-table td {
+  border-bottom: 1px solid #edf1f5;
+  padding: 9px 10px;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.dragon-tiger-detail-table th {
+  background: #fafbfc;
+  color: #64748b;
+  font-weight: 700;
+}
+
+.dragon-tiger-detail-table th:first-child,
+.dragon-tiger-detail-table td:first-child {
+  max-width: 330px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dragon-tiger-detail-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.dragon-tiger-history-section {
+  margin-top: 15px;
+}
+
+.dragon-tiger-history-heading {
+  background: #f8fafc;
+}
+
+.dragon-tiger-history-heading small {
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.dragon-tiger-history-table {
+  min-width: 1000px;
+}
+
+.dragon-tiger-history-table th:last-child,
+.dragon-tiger-history-table td:last-child {
+  min-width: 360px;
+  text-align: left;
+  white-space: normal;
+}
+
+.dragon-tiger-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+  border-top: 1px solid #edf1f5;
+  padding: 9px 11px;
+  background: #fafbfc;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.dragon-tiger-pagination button {
+  appearance: none;
+  border: 0;
+  padding: 3px 5px;
+  background: transparent;
+  color: #c2410c;
+  font: inherit;
+  cursor: pointer;
+}
+
+.dragon-tiger-pagination button:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.dragon-tiger-pagination button:disabled {
+  color: #cbd5e1;
+  cursor: default;
+}
+
+.dragon-tiger-quote-fab {
+  position: absolute;
+  right: 24px;
+  bottom: 20px;
+  z-index: 2;
+  border: 1px solid rgba(154, 52, 18, 0.2);
+  border-radius: 999px;
+  padding: 8px 14px;
+  background: rgba(255, 247, 237, 0.96);
+  box-shadow: 0 12px 34px rgba(124, 45, 18, 0.2);
+  color: #9a3412;
+  text-decoration: none;
+  backdrop-filter: blur(12px);
+  font-weight: 800;
+  font-size: 12px;
+}
+
+.dragon-tiger-quote-fab:hover {
+  transform: translateY(-1px);
+  background: #fff;
+  box-shadow: 0 15px 38px rgba(124, 45, 18, 0.26);
+}
+
+.dragon-tiger-seat-stat-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1750;
+  display: grid;
+  place-items: center;
+  padding: 42px;
+  background: rgba(15, 23, 42, 0.58);
+  backdrop-filter: blur(8px);
+}
+
+.dragon-tiger-seat-stat-modal {
+  display: flex;
+  width: min(1260px, 100%);
+  max-height: calc(100vh - 84px);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 18px;
+  background: #f7f8fa;
+  box-shadow: 0 28px 90px rgba(15, 23, 42, 0.4);
+}
+
+.dragon-tiger-seat-stat-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 18px 21px;
+  background:
+    radial-gradient(circle at 10% 0%, rgba(59, 130, 246, 0.14), transparent 38%),
+    #fff;
+}
+
+.dragon-tiger-seat-stat-header span {
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.dragon-tiger-seat-stat-header h3 {
+  max-width: 950px;
+  margin: 6px 0 0;
+  color: #172033;
+  font-size: 19px;
+  line-height: 1.4;
+}
+
+.dragon-tiger-seat-stat-body {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 17px 19px 24px;
+}
+
+.dragon-tiger-seat-stat-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 9px;
+  margin-bottom: 14px;
+}
+
+.dragon-tiger-seat-stat-summary > div {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #dfe6ef;
+  border-radius: 11px;
+  padding: 11px 12px;
+  background: #fff;
+}
+
+.dragon-tiger-seat-stat-summary span,
+.dragon-tiger-seat-stat-summary small {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.dragon-tiger-seat-stat-summary strong {
+  color: #172033;
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dragon-tiger-seat-stat-modal .scene-layer-value-up {
+  color: #dc2626;
+}
+
+.dragon-tiger-seat-stat-modal .scene-layer-value-down {
+  color: #16a34a;
+}
+
+.dragon-tiger-seat-stat-section {
+  overflow: hidden;
+  border: 1px solid #dde4ed;
+  border-radius: 13px;
+  background: #fff;
+}
+
+.dragon-tiger-seat-stat-section + .dragon-tiger-seat-stat-section {
+  margin-top: 14px;
+}
+
+.dragon-tiger-seat-favorite-table {
+  min-width: 760px;
+}
+
+.dragon-tiger-seat-record-table {
+  min-width: 1050px;
+}
+
+.dragon-tiger-seat-favorite-table td:first-child strong,
+.dragon-tiger-seat-favorite-table td:first-child small,
+.dragon-tiger-seat-record-table td:nth-child(2) strong,
+.dragon-tiger-seat-record-table td:nth-child(2) small {
+  display: block;
+}
+
+.dragon-tiger-seat-favorite-table td:first-child small,
+.dragon-tiger-seat-record-table td:nth-child(2) small {
+  color: #94a3b8;
+  font-size: 10px;
+}
+
+.dragon-tiger-seat-record-table th:last-child,
+.dragon-tiger-seat-record-table td:last-child {
+  min-width: 320px;
+  text-align: left;
+  white-space: normal;
+}
+
 @media (max-width: 900px) {
+  .dragon-tiger-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dragon-tiger-view-controls {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .dragon-tiger-detail-backdrop {
+    padding: 0;
+  }
+
+  .dragon-tiger-seat-stat-backdrop {
+    padding: 0;
+  }
+
+  .dragon-tiger-seat-stat-modal {
+    width: 100%;
+    max-height: 100vh;
+    min-height: 100vh;
+    border-radius: 0;
+  }
+
+  .dragon-tiger-seat-stat-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dragon-tiger-detail-modal {
+    width: 100%;
+    max-height: 100vh;
+    min-height: 100vh;
+    border-radius: 0;
+  }
+
+  .dragon-tiger-detail-header {
+    padding: 15px;
+  }
+
+  .dragon-tiger-detail-headline {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .dragon-tiger-detail-date {
+    border-left: 0;
+    border-bottom: 2px solid #ea580c;
+  }
+
+  .dragon-tiger-detail-body {
+    padding: 14px 12px 82px;
+  }
+
+  .dragon-tiger-seat-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dragon-tiger-seat-card + .dragon-tiger-seat-card {
+    border-top: 1px solid #e8edf3;
+    border-left: 0;
+  }
+
+  .dragon-tiger-reason-heading,
+  .dragon-tiger-history-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .dragon-tiger-quote-fab {
+    right: 14px;
+    bottom: 12px;
+  }
+
   .market-analysis-main-card .scene-layer-contrib-table th,
   .market-analysis-main-card .scene-layer-contrib-table td {
     padding: 8px;

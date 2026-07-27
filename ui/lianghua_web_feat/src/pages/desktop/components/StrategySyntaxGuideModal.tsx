@@ -36,7 +36,6 @@ const SYNTAX_GUIDE_FUNCTIONS: SyntaxGuideFunction[] = [
   { name: 'DIV', signature: 'DIV(a, b)', returns: '数值序列', description: '安全除法，除数为 0 时返回 0。', example: 'a=[6,5], b=[2,0] -> [3,0]' },
   { name: 'COUNT', signature: 'COUNT(cond, n)', returns: '数值序列', description: '统计最近 n 根里条件成立的次数。', example: 'cond=[真,假,真,真], n=3 -> [1,1,2,2]' },
   { name: 'EXIST', signature: 'EXIST(cond, n)', returns: '布尔序列', description: '判断最近 n 根里条件是否至少成立过一次。', example: 'cond=[假,真,假,假], n=3 -> [假,真,真,真]' },
-  { name: 'EXISTD', signature: 'EXISTD(cond, win, max_win)', returns: '布尔序列', description: '动态窗口版 EXIST，每根使用当根 win 判断最近 win 根是否命中过。', example: 'cond=[假,真,假,假], win=[1,1,2,3] -> [假,真,真,真]' },
   { name: 'MA', signature: 'MA(x, n)', returns: '数值序列', description: '简单移动平均。', example: 'x=[1,2,3,4], n=3 -> [空,空,2,3]' },
   { name: 'REF', signature: 'REF(x, n)', returns: '数值序列', description: '取 n 根之前的值。', example: 'x=[10,11,12,13], n=2 -> [空,空,10,11]' },
   { name: 'LAST', signature: 'LAST(x, n)', returns: '标量(数字或布尔)', description: '取倒数第 n+1 根的值；n=0 表示最新值。', example: 'x=[10,11,12,13], n=0 -> 13；x=[假,真,真], n=1 -> 真' },
@@ -67,13 +66,18 @@ const SYNTAX_GUIDE_DYNAMIC_FUNCTIONS: SyntaxGuideDynamicFunction[] = [
 const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
   {
     title: '5. 常用行情字段',
-    note: '这些字段来自历史 K 线或实时拼接后的 K 线序列，大部分表达式都可以直接使用。',
+    note: '这些字段来自历史 K 线或实时拼接后的 K 线序列，大部分表达式都可以直接使用。资金流向只保留成交量口径；对应交易日没有数据或实时交易日尚未下载资金流向时按空值处理。',
     fields: [
       { name: 'C / O / H / L / V', scope: '通用', description: '收盘 / 开盘 / 最高 / 最低 / 成交量。', example: 'C > O AND V > MA(V, 5)' },
       { name: 'AMOUNT', scope: '通用', description: '成交额。', example: 'AMOUNT > MA(AMOUNT, 10)' },
       { name: 'PRE_CLOSE', scope: '通用', description: '昨收价。', example: 'C > PRE_CLOSE' },
       { name: 'CHANGE / PCT_CHG', scope: '通用', description: '涨跌额 / 涨跌幅；其中 PCT_CHG 的单位是百分比。', example: 'PCT_CHG >= 5' },
       { name: 'TOR / TURNOVER_RATE', scope: '通用', description: '换手率；TOR 是常用简写，两者会按数据列互通。', example: 'TOR > 8' },
+      { name: 'BUY_SM_VOL / SELL_SM_VOL', scope: '通用', description: '小单买入量 / 卖出量。', example: 'BUY_SM_VOL > SELL_SM_VOL' },
+      { name: 'BUY_MD_VOL / SELL_MD_VOL', scope: '通用', description: '中单买入量 / 卖出量。', example: 'BUY_MD_VOL > MA(BUY_MD_VOL, 5)' },
+      { name: 'BUY_LG_VOL / SELL_LG_VOL', scope: '通用', description: '大单买入量 / 卖出量。', example: 'BUY_LG_VOL > SELL_LG_VOL' },
+      { name: 'BUY_ELG_VOL / SELL_ELG_VOL', scope: '通用', description: '特大单买入量 / 卖出量。', example: 'BUY_ELG_VOL > MA(BUY_ELG_VOL, 5)' },
+      { name: 'NET_MF_VOL', scope: '通用', description: '净流入量。', example: 'NET_MF_VOL > 0' },
     ],
   },
   {

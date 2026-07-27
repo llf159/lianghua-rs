@@ -2,7 +2,10 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::Path,
-    sync::mpsc::{SyncSender, sync_channel},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{SyncSender, sync_channel},
+    },
     thread,
 };
 
@@ -28,11 +31,15 @@ use crate::{
             ensure_indicator_columns, flush_stock_data_indicator_stage_table,
             list_stock_data_indicator_columns, reset_stock_data_indicator_stage_table,
         },
-        ind_toml_path, load_stock_list, load_ths_concepts_list, load_trade_date_list,
-        source_db_path, stock_list_path, ths_concepts_path, trade_calendar_path,
+        dragon_tiger_db_path, ind_toml_path, load_stock_list, load_ths_concepts_list,
+        load_trade_date_list, source_db_path, stock_list_path, ths_concepts_path,
+        trade_calendar_path,
     },
     download::{
         AdjType, DownloadSummary, ProBarRow,
+        dragon_tiger::{
+            DragonTigerDownloadConfig, download_dragon_tiger as core_download_dragon_tiger,
+        },
         ind_calc::{cache_ind_build, calc_inds_for_rows_with_cache},
         runner::{
             DownloadProgress, DownloadProgressCallback, DownloadRuntimeConfig,
@@ -74,10 +81,23 @@ pub struct DataDownloadFileStatus {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DragonTigerDbStatus {
+    pub file_name: String,
+    pub exists: bool,
+    pub min_trade_date: Option<String>,
+    pub max_trade_date: Option<String>,
+    pub synced_trade_dates: u64,
+    pub top_list_rows: u64,
+    pub top_inst_rows: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DataDownloadStatus {
     pub source_path: String,
     pub source_db: DataDownloadDbRange,
     pub concept_performance_db: DataDownloadDbRange,
+    pub dragon_tiger_db: DragonTigerDbStatus,
     pub stock_list: DataDownloadFileStatus,
     pub trade_calendar: DataDownloadFileStatus,
     pub ths_concepts: DataDownloadFileStatus,
@@ -113,6 +133,17 @@ pub struct MissingStockRepairRunInput {
     pub retry_times: usize,
     pub limit_calls_per_min: usize,
     pub include_turnover: bool,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DragonTigerDownloadRunInput {
+    pub source_path: String,
+    pub token: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub retry_times: usize,
+    pub limit_calls_per_min: usize,
 }
 
 #[derive(Clone, Deserialize)]
@@ -269,6 +300,18 @@ pub struct PreparedMissingStockRepairRun {
 }
 
 #[derive(Clone)]
+pub struct PreparedDragonTigerDownloadRun {
+    pub source_path: String,
+    pub token: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub retry_times: usize,
+    pub limit_calls_per_min: usize,
+    pub action: String,
+    pub action_label: String,
+}
+
+#[derive(Clone)]
 pub struct PreparedThsConceptDownloadRun {
     pub source_path: String,
     pub retry_enabled: bool,
@@ -416,6 +459,40 @@ fn emit_chip_maintenance_progress(
     }
 }
 
+fn hide_chip_repair_local_counter(mut progress: DownloadProgress) -> DownloadProgress {
+    let repair_done = progress.total > 0 && progress.finished >= progress.total;
+    progress.finished = 0;
+    progress.total = 0;
+    progress.message = if repair_done {
+        "断点股票的筹码局部修复已完成，正在衔接其余增量股票。".to_string()
+    } else if let Some(ts_code) = progress.current_label.as_deref() {
+        format!("正在修复断点股票 {ts_code} 的筹码数据，随后继续维护其余增量股票。")
+    } else {
+        "正在修复本轮断点股票的筹码数据，随后继续维护其余增量股票。".to_string()
+    };
+    progress
+}
+
+fn merge_chip_repair_into_incremental_progress(
+    mut progress: DownloadProgress,
+    repaired_stock_count: usize,
+) -> DownloadProgress {
+    if repaired_stock_count == 0 || progress.total == 0 {
+        return progress;
+    }
+
+    let incremental_finished = progress.finished.min(progress.total);
+    let incremental_total = progress.total;
+    progress.finished = repaired_stock_count.saturating_add(incremental_finished);
+    progress.total = repaired_stock_count.saturating_add(incremental_total);
+    progress.message = format!(
+        "断点股票已修复 {repaired_stock_count} 只；其余增量维护已完成 \
+         {incremental_finished} / {incremental_total} 只，总进度 {} / {}。",
+        progress.finished, progress.total
+    );
+    progress
+}
+
 fn maintain_chip_after_incremental_download(
     source_path: &str,
     chip_model: &str,
@@ -435,6 +512,21 @@ fn maintain_chip_after_incremental_download(
                     "检测到筹码策略已变化，已按确认选择跳过新筹码全量维护。".to_string(),
                 ));
             }
+            let merge_repair_progress =
+                !maintenance_status.strategy_changed && !recovered_stock_codes.is_empty();
+            let repaired_stock_count = AtomicUsize::new(0);
+            let repair_progress_cb = |progress: DownloadProgress| {
+                if merge_repair_progress && progress.total > 0 {
+                    repaired_stock_count
+                        .fetch_max(progress.finished.min(progress.total), Ordering::Relaxed);
+                    emit_chip_maintenance_progress(
+                        progress_cb,
+                        hide_chip_repair_local_counter(progress),
+                    );
+                } else {
+                    emit_chip_maintenance_progress(progress_cb, progress);
+                }
+            };
             let repair_summary = if recovered_stock_codes.is_empty() {
                 None
             } else {
@@ -442,8 +534,19 @@ fn maintain_chip_after_incremental_download(
                     source_path,
                     recovered_stock_codes,
                     allow_cyq_chen_strategy_rebuild,
-                    Some(&chip_progress_cb),
+                    Some(&repair_progress_cb),
                 )?
+            };
+            let repaired_stock_count = if repair_summary.is_some() && merge_repair_progress {
+                repaired_stock_count.load(Ordering::Relaxed)
+            } else {
+                0
+            };
+            let incremental_progress_cb = |progress: DownloadProgress| {
+                emit_chip_maintenance_progress(
+                    progress_cb,
+                    merge_chip_repair_into_incremental_progress(progress, repaired_stock_count),
+                );
             };
             let incremental_summary = if maintenance_status.strategy_changed
                 && allow_cyq_chen_strategy_rebuild
@@ -454,7 +557,7 @@ fn maintain_chip_after_incremental_download(
                 maintain_cyq_chen_incremental_if_db_exists(
                     source_path,
                     allow_cyq_chen_strategy_rebuild,
-                    Some(&chip_progress_cb),
+                    Some(&incremental_progress_cb),
                 )?
             };
             let snapshot_rows = repair_summary
@@ -702,6 +805,7 @@ fn load_stock_data_rows_for_indicator_rebuild(
             amount: row.get(10).map_err(|e| format!("读取amount失败:{e}"))?,
             turnover_rate: row.get(11).map_err(|e| format!("读取tor失败:{e}"))?,
             volume_ratio: None,
+            moneyflow: None,
         });
     }
 
@@ -957,6 +1061,54 @@ fn query_trade_calendar_status(source_path: &str) -> Result<DataDownloadFileStat
     })
 }
 
+fn query_dragon_tiger_db_status(source_path: &str) -> Result<DragonTigerDbStatus, String> {
+    let db_path = dragon_tiger_db_path(source_path);
+    if !db_path.exists() {
+        return Ok(DragonTigerDbStatus {
+            file_name: "dragon_tiger.db".to_string(),
+            exists: false,
+            min_trade_date: None,
+            max_trade_date: None,
+            synced_trade_dates: 0,
+            top_list_rows: 0,
+            top_inst_rows: 0,
+        });
+    }
+
+    let conn = Connection::open(&db_path)
+        .map_err(|error| format!("打开 dragon_tiger.db 失败: {error}"))?;
+    let (min_trade_date, max_trade_date, synced_trade_dates): (
+        Option<String>,
+        Option<String>,
+        i64,
+    ) = conn
+        .query_row(
+            r#"
+            SELECT MIN(trade_date), MAX(trade_date), COUNT(*)
+            FROM dragon_tiger_sync_log
+            "#,
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| format!("查询龙虎榜同步范围失败: {error}"))?;
+    let top_list_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM top_list", [], |row| row.get(0))
+        .map_err(|error| format!("查询龙虎榜每日明细行数失败: {error}"))?;
+    let top_inst_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM top_inst", [], |row| row.get(0))
+        .map_err(|error| format!("查询龙虎榜席位明细行数失败: {error}"))?;
+
+    Ok(DragonTigerDbStatus {
+        file_name: "dragon_tiger.db".to_string(),
+        exists: true,
+        min_trade_date,
+        max_trade_date,
+        synced_trade_dates: synced_trade_dates.max(0) as u64,
+        top_list_rows: top_list_rows.max(0) as u64,
+        top_inst_rows: top_inst_rows.max(0) as u64,
+    })
+}
+
 fn query_stock_list_status(source_path: &str) -> Result<DataDownloadFileStatus, String> {
     let file_path = stock_list_path(source_path);
     if !file_path.exists() {
@@ -1205,6 +1357,7 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
         "concept_performance.db",
         "concept_performance",
     )?;
+    let dragon_tiger_db = query_dragon_tiger_db_status(trimmed)?;
     let trade_calendar = query_trade_calendar_status(trimmed)?;
     let stock_list = query_stock_list_status(trimmed)?;
     let ths_concepts = query_ths_concepts_status(trimmed)?;
@@ -1226,6 +1379,7 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
         source_path: trimmed.to_string(),
         source_db,
         concept_performance_db,
+        dragon_tiger_db,
         stock_list,
         trade_calendar,
         ths_concepts,
@@ -1324,6 +1478,39 @@ pub fn prepare_data_download_run(
         chip_model: normalize_chip_model(input.chip_model.as_deref()),
         action: status.planned_action,
         action_label: status.planned_action_label,
+    })
+}
+
+pub fn prepare_dragon_tiger_download_run(
+    input: DragonTigerDownloadRunInput,
+) -> Result<PreparedDragonTigerDownloadRun, String> {
+    let source_path = input.source_path.trim().to_string();
+    if source_path.is_empty() {
+        return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
+    }
+    let token = input.token.trim().to_string();
+    if token.is_empty() {
+        return Err("Token 不能为空".to_string());
+    }
+    let start_date = normalize_download_date(&input.start_date, "开始日期")?;
+    let end_date = normalize_download_end_date(&input.end_date)?;
+    if end_date != "today" && start_date > end_date {
+        return Err("开始日期不能晚于结束日期".to_string());
+    }
+    let status = get_data_download_status(&source_path)?;
+    if !status.trade_calendar.exists || status.trade_calendar.row_count == 0 {
+        return Err("交易日历不存在或为空，请先完成基础数据刷新。".to_string());
+    }
+
+    Ok(PreparedDragonTigerDownloadRun {
+        source_path,
+        token,
+        start_date,
+        end_date,
+        retry_times: input.retry_times,
+        limit_calls_per_min: input.limit_calls_per_min.max(1),
+        action: "download-dragon-tiger".to_string(),
+        action_label: "龙虎榜下载".to_string(),
     })
 }
 
@@ -1520,7 +1707,7 @@ pub fn run_prepared_data_download(
             cb(crate::download::runner::DownloadProgress {
                 phase: "maintain_cyq_incremental".to_string(),
                 finished: 0,
-                total: 1,
+                total: 0,
                 current_label: None,
                 message: if has_recovered_stocks {
                     format!(
@@ -1548,8 +1735,8 @@ pub fn run_prepared_data_download(
         if let Some(cb) = progress_cb {
             cb(crate::download::runner::DownloadProgress {
                 phase: "maintain_cyq_incremental".to_string(),
-                finished: 1,
-                total: 1,
+                finished: 0,
+                total: 0,
                 current_label: None,
                 message: chip_message.unwrap_or_else(|| "筹码数据维护完成。".to_string()),
             });
@@ -1610,6 +1797,44 @@ pub fn run_prepared_missing_stock_repair(
         elapsed_ms: 0,
         summary: build_data_download_summary(summary),
         completion_details,
+        status,
+    })
+}
+
+pub fn run_prepared_dragon_tiger_download(
+    prepared: &PreparedDragonTigerDownloadRun,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+) -> Result<DataDownloadRunResult, String> {
+    let summary = core_download_dragon_tiger(
+        &DragonTigerDownloadConfig {
+            source_dir: prepared.source_path.clone(),
+            token: prepared.token.clone(),
+            start_date: prepared.start_date.clone(),
+            end_date: prepared.end_date.clone(),
+            retry_times: prepared.retry_times,
+            limit_calls_per_min: prepared.limit_calls_per_min,
+        },
+        progress_cb,
+    )?;
+    let status = get_data_download_status(&prepared.source_path)?;
+
+    Ok(DataDownloadRunResult {
+        action: prepared.action.clone(),
+        action_label: prepared.action_label.clone(),
+        elapsed_ms: 0,
+        summary: DataDownloadSummary {
+            success_count: summary.synced_trade_dates as u64,
+            failed_count: 0,
+            saved_rows: (summary.top_list_rows + summary.top_inst_rows) as u64,
+            concept_performance_rows: 0,
+            failed_items: Vec::new(),
+        },
+        completion_details: vec![
+            format!("龙虎榜每日明细 {} 行", summary.top_list_rows),
+            format!("龙虎榜席位明细 {} 行", summary.top_inst_rows),
+            format!("跳过 {} 个已同步交易日", summary.skipped_trade_dates),
+            format!("暂缓 {} 个尚未更新交易日", summary.deferred_trade_dates),
+        ],
         status,
     })
 }
@@ -2147,6 +2372,29 @@ mod tests {
     }
 
     #[test]
+    fn hides_the_separate_chip_repair_counter_before_incremental_progress() {
+        let mut repair_progress = progress("compute_cyq_chen", 1, 1);
+        repair_progress.current_label = Some("000001.SZ".to_string());
+
+        let next = hide_chip_repair_local_counter(repair_progress);
+
+        assert_eq!(next.finished, 0);
+        assert_eq!(next.total, 0);
+        assert!(next.message.contains("局部修复已完成"));
+        assert!(next.message.contains("其余增量股票"));
+    }
+
+    #[test]
+    fn merges_repaired_stocks_into_following_chip_incremental_counter() {
+        let next =
+            merge_chip_repair_into_incremental_progress(progress("compute_cyq_chen", 6, 14), 1);
+
+        assert_eq!(next.finished, 7);
+        assert_eq!(next.total, 15);
+        assert!(next.message.contains("总进度 7 / 15"));
+    }
+
+    #[test]
     fn qfq_range_ignores_newer_index_rows() {
         let source_dir = temp_dir_path("lianghua_data_download_qfq_range");
         create_dir_all(&source_dir).expect("create temp dir");
@@ -2167,6 +2415,40 @@ mod tests {
 
         assert_eq!(source_all.max_trade_date.as_deref(), Some("20240103"));
         assert_eq!(source_qfq.max_trade_date.as_deref(), Some("20240102"));
+
+        let _ = remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn dragon_tiger_status_reports_both_table_counts() {
+        let source_dir = temp_dir_path("lianghua_data_download_dragon_tiger_status");
+        let source_path = source_dir.to_str().expect("utf8 path");
+        let conn = crate::data::dragon_tiger_data::open_dragon_tiger_db(source_path)
+            .expect("open dragon tiger db");
+        conn.execute(
+            "INSERT INTO top_list (trade_date, ts_code, name, reason) VALUES (?, ?, ?, ?)",
+            params!["20260724", "000011.SZ", "深物业A", "测试原因"],
+        )
+        .expect("insert top_list");
+        conn.execute(
+            "INSERT INTO top_inst (trade_date, ts_code, exalter, side, reason) VALUES (?, ?, ?, ?, ?)",
+            params!["20260724", "000011.SZ", "测试营业部", "0", "测试原因"],
+        )
+        .expect("insert top_inst");
+        conn.execute(
+            "INSERT INTO dragon_tiger_sync_log (trade_date, top_list_row_count, top_inst_row_count) VALUES (?, ?, ?)",
+            params!["20260724", 1_i64, 1_i64],
+        )
+        .expect("insert sync log");
+        drop(conn);
+
+        let status = query_dragon_tiger_db_status(source_path).expect("query status");
+        assert!(status.exists);
+        assert_eq!(status.min_trade_date.as_deref(), Some("20260724"));
+        assert_eq!(status.max_trade_date.as_deref(), Some("20260724"));
+        assert_eq!(status.synced_trade_dates, 1);
+        assert_eq!(status.top_list_rows, 1);
+        assert_eq!(status.top_inst_rows, 1);
 
         let _ = remove_dir_all(source_dir);
     }

@@ -17,7 +17,7 @@ use crate::{
     utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
 };
 
-const IND_INPUT_KEYS: [&str; 10] = [
+const IND_INPUT_KEYS: [&str; 19] = [
     "O",
     "H",
     "L",
@@ -28,6 +28,15 @@ const IND_INPUT_KEYS: [&str; 10] = [
     "CHANGE",
     "PCT_CHG",
     "TURNOVER_RATE",
+    "BUY_SM_VOL",
+    "SELL_SM_VOL",
+    "BUY_MD_VOL",
+    "SELL_MD_VOL",
+    "BUY_LG_VOL",
+    "SELL_LG_VOL",
+    "BUY_ELG_VOL",
+    "SELL_ELG_VOL",
+    "NET_MF_VOL",
 ];
 
 #[derive(Clone)]
@@ -429,6 +438,26 @@ fn pro_bar_rows_to_row_data(rows: &[ProBarRow]) -> Result<RowData, String> {
         cols.get_mut("TURNOVER_RATE")
             .expect("TURNOVER_RATE should exist")
             .push(row.turnover_rate);
+        let moneyflow = row.moneyflow.as_ref();
+        let moneyflow_values = [
+            ("BUY_SM_VOL", moneyflow.and_then(|value| value.buy_sm_vol)),
+            ("SELL_SM_VOL", moneyflow.and_then(|value| value.sell_sm_vol)),
+            ("BUY_MD_VOL", moneyflow.and_then(|value| value.buy_md_vol)),
+            ("SELL_MD_VOL", moneyflow.and_then(|value| value.sell_md_vol)),
+            ("BUY_LG_VOL", moneyflow.and_then(|value| value.buy_lg_vol)),
+            ("SELL_LG_VOL", moneyflow.and_then(|value| value.sell_lg_vol)),
+            ("BUY_ELG_VOL", moneyflow.and_then(|value| value.buy_elg_vol)),
+            (
+                "SELL_ELG_VOL",
+                moneyflow.and_then(|value| value.sell_elg_vol),
+            ),
+            ("NET_MF_VOL", moneyflow.and_then(|value| value.net_mf_vol)),
+        ];
+        for (key, value) in moneyflow_values {
+            cols.get_mut(key)
+                .expect("moneyflow indicator input should exist")
+                .push(value);
+        }
     }
 
     let row_data = RowData { trade_dates, cols };

@@ -2,6 +2,51 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
 const DATA_DOWNLOAD_EVENT = 'data-download-status'
+export const DATA_DOWNLOAD_DRAFT_STORAGE_KEY = 'lh_data_download_draft_v1'
+
+export type StoredDragonTigerDownloadSettings = {
+  token: string
+  startDate: string
+  retryTimes: number
+  limitCallsPerMin: number
+}
+
+export function readStoredDragonTigerDownloadSettings(): StoredDragonTigerDownloadSettings {
+  const fallback: StoredDragonTigerDownloadSettings = {
+    token: '',
+    startDate: '2005-01-01',
+    retryTimes: 3,
+    limitCallsPerMin: 190,
+  }
+  if (typeof window === 'undefined') {
+    return fallback
+  }
+
+  try {
+    const raw = window.localStorage.getItem(DATA_DOWNLOAD_DRAFT_STORAGE_KEY)
+    if (!raw) {
+      return fallback
+    }
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    return {
+      token: typeof parsed.token === 'string' ? parsed.token.trim() : fallback.token,
+      startDate:
+        typeof parsed.dragonTigerStartDate === 'string'
+          ? parsed.dragonTigerStartDate
+          : fallback.startDate,
+      retryTimes:
+        typeof parsed.retryTimes === 'number' && Number.isFinite(parsed.retryTimes)
+          ? Math.max(0, parsed.retryTimes)
+          : fallback.retryTimes,
+      limitCallsPerMin:
+        typeof parsed.limitCallsPerMin === 'number' && Number.isFinite(parsed.limitCallsPerMin)
+          ? Math.max(1, parsed.limitCallsPerMin)
+          : fallback.limitCallsPerMin,
+    }
+  } catch {
+    return fallback
+  }
+}
 
 export type DataDownloadFileStatus = {
   fileName: string
@@ -21,10 +66,21 @@ export type RankComputeDbRange = {
   rowCount: number
 }
 
+export type DragonTigerDbStatus = {
+  fileName: string
+  exists: boolean
+  minTradeDate: string | null
+  maxTradeDate: string | null
+  syncedTradeDates: number
+  topListRows: number
+  topInstRows: number
+}
+
 export type DataDownloadStatus = {
   sourcePath: string
   sourceDb: RankComputeDbRange
   conceptPerformanceDb: RankComputeDbRange
+  dragonTigerDb: DragonTigerDbStatus
   stockList: DataDownloadFileStatus
   tradeCalendar: DataDownloadFileStatus
   thsConcepts: DataDownloadFileStatus
@@ -74,6 +130,16 @@ export type MissingStockRepairRequest = {
   retryTimes: number
   limitCallsPerMin: number
   includeTurnover: boolean
+}
+
+export type DragonTigerDownloadRequest = {
+  downloadId: string
+  sourcePath: string
+  token: string
+  startDate: string
+  endDate: string
+  retryTimes: number
+  limitCallsPerMin: number
 }
 
 export type ThsConceptDownloadRequest = {
@@ -164,6 +230,10 @@ export async function runDataDownload(request: DataDownloadRequest) {
 
 export async function runMissingStockRepair(request: MissingStockRepairRequest) {
   return invoke<DataDownloadRunResult>('run_missing_stock_repair', { request })
+}
+
+export async function runDragonTigerDownload(request: DragonTigerDownloadRequest) {
+  return invoke<DataDownloadRunResult>('run_dragon_tiger_download', { request })
 }
 
 export async function runThsConceptDownload(request: ThsConceptDownloadRequest) {

@@ -2038,6 +2038,11 @@ fn download_pending_all_market_after_basic_data(
     if adj_type != AdjType::Qfq {
         return Err("当前增量pre_close校验只支持 qfq".to_string());
     }
+    let db_path = source_db_path(source_dir);
+    let db_path_str = db_path
+        .to_str()
+        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
+    init_stock_data_db(db_path_str)?;
 
     let last_saved_trade_date = load_latest_trade_date(source_dir, adj_type)?
         .ok_or_else(|| "数据库里还没有可用于增量的历史数据，请先做首次下载".to_string())?;
@@ -2247,10 +2252,6 @@ fn download_pending_all_market_after_basic_data(
         .sum::<usize>();
     let write_total = passed_write_batches.len() + failed_items.len();
 
-    let db_path = source_db_path(source_dir);
-    let db_path_str = db_path
-        .to_str()
-        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
     let conn = Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
     emit_progress(
         progress_cb,
@@ -2634,6 +2635,7 @@ mod tests {
                 amount: 13000.0,
                 turnover_rate: Some(1.5),
                 volume_ratio: None,
+                moneyflow: None,
             }],
             indicators: HashMap::new(),
         };
@@ -2659,6 +2661,7 @@ mod tests {
                 amount: 10000.0,
                 turnover_rate: Some(1.2),
                 volume_ratio: None,
+                moneyflow: None,
             }],
             indicators: HashMap::from([("MA5".to_string(), Vec::new())]),
         };
@@ -2725,6 +2728,7 @@ mod tests {
                 amount: 20000.0,
                 turnover_rate: Some(2.0),
                 volume_ratio: None,
+                moneyflow: None,
             }],
             indicators: HashMap::from([("MA5".to_string(), Vec::new())]),
         };

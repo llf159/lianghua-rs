@@ -1604,6 +1604,7 @@ type SceneOverviewItem = {
   hitDate: string;
   lag: number | null;
   sceneRuleScore: number | null;
+  sceneRuleTriggered: boolean;
   contributionPct: number | null;
   contributionPctDisplay: number | null;
   color: string;
@@ -1627,33 +1628,44 @@ function getSceneOverviewColor(index: number) {
   return SCENE_OVERVIEW_COLORS[index % SCENE_OVERVIEW_COLORS.length];
 }
 
-function buildSceneRuleScoreMap(detail: StockDetailPageData | null | undefined) {
+function buildSceneRuleScoreBundle(rows: DetailStrategyTriggerRow[]) {
   const byScene = new Map<string, number>();
-  const rows = [
-    ...(detail?.strategy_triggers?.triggered ?? []),
-    ...(detail?.strategy_triggers?.untriggered ?? []),
-  ];
+  const triggeredScenes = new Set<string>();
 
   let assignedTotal = 0;
   rows.forEach((row) => {
     const sceneName = row.scene_name?.trim();
+    if (!sceneName) {
+      return;
+    }
+    if (isStrategyTriggered(row)) {
+      triggeredScenes.add(sceneName);
+    }
     const ruleScore =
       typeof row.rule_score === "number" && Number.isFinite(row.rule_score)
         ? row.rule_score
         : null;
-    if (!sceneName || ruleScore === null) {
+    if (ruleScore === null) {
       return;
     }
     assignedTotal += ruleScore;
     byScene.set(sceneName, (byScene.get(sceneName) ?? 0) + ruleScore);
   });
 
-  return { byScene, assignedTotal };
+  return { byScene, triggeredScenes, assignedTotal };
+}
+
+function buildSceneRuleScoreMap(detail: StockDetailPageData | null | undefined) {
+  return buildSceneRuleScoreBundle([
+    ...(detail?.strategy_triggers?.triggered ?? []),
+    ...(detail?.strategy_triggers?.untriggered ?? []),
+  ]);
 }
 
 function buildSceneOverviewItems(
   rows: DetailSceneTriggerRow[],
   sceneRuleScoreMap: Map<string, number>,
+  triggeredSceneNames: Set<string>,
   assignedRuleTotal: number,
 ): SceneOverviewItem[] {
   const sortedRows = [...rows].sort((left, right) => {
@@ -1688,7 +1700,8 @@ function buildSceneOverviewItems(
       typeof row.stage_score === "number" && Number.isFinite(row.stage_score)
         ? row.stage_score
         : null;
-    const sceneRuleScore = sceneRuleScoreMap.get(row.scene_name) ?? null;
+    const normalizedSceneName = row.scene_name.trim();
+    const sceneRuleScore = sceneRuleScoreMap.get(normalizedSceneName) ?? null;
 
     return {
       sceneName: row.scene_name,
@@ -1702,6 +1715,7 @@ function buildSceneOverviewItems(
       hitDate: row.hit_date?.trim() ?? "",
       lag: typeof row.lag === "number" && Number.isFinite(row.lag) ? row.lag : null,
       sceneRuleScore,
+      sceneRuleTriggered: triggeredSceneNames.has(normalizedSceneName),
       contributionPct:
         denominator !== null && sceneRuleScore !== null
           ? (sceneRuleScore / denominator) * 100
@@ -3873,11 +3887,17 @@ function SceneOverviewTableSection({
   emptyText,
   selectedKey,
   onSelectRow,
+  compareRuleScoreMap,
+  compareTriggeredSceneNames,
+  compareTradeDate,
 }: {
   items: SceneOverviewItem[];
   emptyText: string;
   selectedKey?: string | null;
   onSelectRow?: (row: DetailSceneTriggerRow) => void;
+  compareRuleScoreMap?: Map<string, number> | null;
+  compareTriggeredSceneNames?: Set<string> | null;
+  compareTradeDate?: string | null;
 }) {
   const sortDefinitions = useMemo(
     () =>
@@ -4002,9 +4022,54 @@ function SceneOverviewTableSection({
             const stageToken = getSceneStageToken(item.stage);
             const rowKey = buildSceneRowKey(item.sceneRow);
             const isSelected = selectedKey === rowKey;
+            const normalizedCompareTradeDate = compareTradeDate?.trim() ?? "";
+            const normalizedSceneName = item.sceneName.trim();
+            const hasComparison =
+              compareRuleScoreMap !== null &&
+              compareRuleScoreMap !== undefined &&
+              compareTriggeredSceneNames !== null &&
+              compareTriggeredSceneNames !== undefined &&
+              normalizedCompareTradeDate !== "";
+            const compareScore = hasComparison
+              ? (compareRuleScoreMap.get(normalizedSceneName) ?? 0)
+              : null;
+            const wasTriggered = hasComparison
+              ? compareTriggeredSceneNames.has(normalizedSceneName)
+              : false;
+            const currentScore = item.sceneRuleScore ?? 0;
+            const scoreDelta = currentScore - (compareScore ?? 0);
+            let changeType = "";
+            let badgeText = "";
+            let badgeTitle = "";
+
+            if (hasComparison) {
+              if (!item.sceneRuleTriggered && wasTriggered) {
+                changeType = "out";
+                badgeText = "OUT";
+                badgeTitle = `相对 ${normalizedCompareTradeDate} 由触发转为未触发`;
+              } else if (item.sceneRuleTriggered && !wasTriggered) {
+                changeType = "new";
+                badgeText = "NEW";
+                badgeTitle = `相对 ${normalizedCompareTradeDate} 为新触发`;
+              } else if (
+                item.sceneRuleTriggered &&
+                wasTriggered &&
+                Math.abs(scoreDelta) >= Number.EPSILON
+              ) {
+                changeType = scoreDelta > 0 ? "up" : "down";
+                badgeText = formatSignedNumber(scoreDelta);
+                badgeTitle = `相对 ${normalizedCompareTradeDate} ${badgeText}`;
+              }
+            }
+
             return (
               <tr
-                className={isSelected ? "details-table-current-row" : ""}
+                className={[
+                  isSelected ? "details-table-current-row" : "",
+                  changeType ? `details-table-strategy-row-${changeType}` : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
                 key={rowKey}
                 onClick={() => onSelectRow?.(item.sceneRow)}
               >
@@ -4030,7 +4095,19 @@ function SceneOverviewTableSection({
                 <td>{formatFieldValue(item.riskScore)}</td>
                 <td>{formatFieldValue(item.hitDate)}</td>
                 <td>{formatFieldValue(item.lag)}</td>
-                <td>{formatFieldValue(item.sceneRuleScore)}</td>
+                <td>
+                  <div className="details-strategy-score-cell">
+                    <span>{formatFieldValue(item.sceneRuleScore)}</span>
+                    {badgeText ? (
+                      <span
+                        className={`details-strategy-delta details-strategy-delta-${changeType}`}
+                        title={badgeTitle}
+                      >
+                        {badgeText}
+                      </span>
+                    ) : null}
+                  </div>
+                </td>
                 <td>
                   {item.contributionPctDisplay === null
                     ? "--"
@@ -5307,11 +5384,22 @@ export default function DetailsPage({
   );
   const sceneTotalCount = sceneRows.length;
   const sceneRuleScoreBundle = useMemo(() => buildSceneRuleScoreMap(detailData), [detailData]);
+  const compareSceneRuleScoreBundle = useMemo(() => {
+    if (
+      !strategyCompareSnapshot ||
+      strategyCompareSnapshot.tsCode !== resolvedTsCode ||
+      strategySnapshotTradeDate === ""
+    ) {
+      return null;
+    }
+    return buildSceneRuleScoreBundle(strategyCompareSnapshot.rows);
+  }, [resolvedTsCode, strategyCompareSnapshot, strategySnapshotTradeDate]);
   const sceneOverviewItems = useMemo(
     () =>
       buildSceneOverviewItems(
         sceneRows,
         sceneRuleScoreBundle.byScene,
+        sceneRuleScoreBundle.triggeredScenes,
         sceneRuleScoreBundle.assignedTotal,
       ),
     [sceneRows, sceneRuleScoreBundle],
@@ -8064,6 +8152,9 @@ export default function DetailsPage({
                   items={sceneOverviewItems}
                   emptyText="暂无 scene 状态数据"
                   selectedKey={selectedSceneRowKey}
+                  compareRuleScoreMap={compareSceneRuleScoreBundle?.byScene}
+                  compareTriggeredSceneNames={compareSceneRuleScoreBundle?.triggeredScenes}
+                  compareTradeDate={strategySnapshotTradeDate}
                   onSelectRow={(row) => {
                     setSceneDetailTarget(row);
                     setSceneDetailModalOpen(true);

@@ -11,6 +11,7 @@ import { splitTsCode } from "../../shared/stockCode";
 import { filterBoardItems, isStBoard, useConceptExclusions } from "../../shared/conceptExclusions";
 import { readJsonStorage, readStoredSourcePath, writeJsonStorage } from "../../shared/storage";
 import { STOCK_PICK_BOARD_OPTIONS } from "../../shared/stockPickShared";
+import DragonTigerMarketPanel from "./components/DragonTigerMarketPanel";
 import "./css/SceneLayerBacktestPage.css";
 
 function formatDateLabel(value?: string | null) {
@@ -772,6 +773,11 @@ export default function MarketAnalysisPage() {
           </div>
         </section>
       ) : null}
+
+      <DragonTigerMarketPanel
+        sourcePath={sourcePath}
+        referenceTradeDate={result?.resolved_reference_trade_date ?? normalizeDateInput(referenceDateInput)}
+      />
 
       {isContributionModalOpen && contributionResult ? (
         <div

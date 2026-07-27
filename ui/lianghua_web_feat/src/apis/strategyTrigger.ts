@@ -433,6 +433,105 @@ export type MarketAnalysisData = {
   daily: MarketAnalysisSnapshot
 }
 
+export type DragonTigerMarketSummary = {
+  top_list_rows: number
+  stock_count: number
+  top_inst_rows: number
+  total_l_buy: number
+  total_l_sell: number
+  total_net_amount: number
+}
+
+export type DragonTigerTopListItem = {
+  trade_date: string
+  ts_code: string
+  name: string
+  close?: number | null
+  pct_change?: number | null
+  turnover_rate?: number | null
+  amount?: number | null
+  l_sell?: number | null
+  l_buy?: number | null
+  l_amount?: number | null
+  net_amount?: number | null
+  net_rate?: number | null
+  amount_rate?: number | null
+  float_values?: number | null
+  reason: string
+}
+
+export type DragonTigerTopInstItem = {
+  trade_date: string
+  ts_code: string
+  exalter: string
+  buy?: number | null
+  buy_rate?: number | null
+  sell?: number | null
+  sell_rate?: number | null
+  net_buy?: number | null
+  side: string
+  reason: string
+}
+
+export type DragonTigerMarketData = {
+  db_exists: boolean
+  latest_sync_trade_date?: string | null
+  resolved_trade_date?: string | null
+  available_trade_dates: string[]
+  summary: DragonTigerMarketSummary
+  top_list: DragonTigerTopListItem[]
+  top_inst: DragonTigerTopInstItem[]
+}
+
+export type DragonTigerStockDetailData = {
+  ts_code: string
+  name: string
+  resolved_trade_date?: string | null
+  current_list: DragonTigerTopListItem[]
+  seats: DragonTigerTopInstItem[]
+  history: DragonTigerTopListItem[]
+  history_trade_count: number
+  history_record_count: number
+}
+
+export type DragonTigerSeatStatisticsSummary = {
+  appearance_count: number
+  trade_date_count: number
+  stock_count: number
+  buy_count: number
+  sell_count: number
+  total_buy: number
+  total_sell: number
+  total_net_buy: number
+}
+
+export type DragonTigerSeatStatisticsRow = {
+  trade_date: string
+  ts_code: string
+  name: string
+  buy?: number | null
+  sell?: number | null
+  net_buy?: number | null
+  side: string
+  reason: string
+}
+
+export type DragonTigerSeatFavoriteStock = {
+  ts_code: string
+  name: string
+  appearance_count: number
+  total_buy: number
+  total_sell: number
+  total_net_buy: number
+}
+
+export type DragonTigerSeatStatisticsData = {
+  exalter: string
+  summary: DragonTigerSeatStatisticsSummary
+  favorite_stocks: DragonTigerSeatFavoriteStock[]
+  recent_records: DragonTigerSeatStatisticsRow[]
+}
+
 export type MarketContributorItem = {
   ts_code: string
   name?: string | null
@@ -590,6 +689,28 @@ export async function getMarketAnalysis(query: {
   minBoardStockCount?: number
 }) {
   return invoke<MarketAnalysisData>('get_market_analysis', query)
+}
+
+export async function getDragonTigerMarketData(query: {
+  sourcePath: string
+  referenceTradeDate?: string
+}) {
+  return invoke<DragonTigerMarketData>('get_dragon_tiger_market_data', query)
+}
+
+export async function getDragonTigerStockDetail(query: {
+  sourcePath: string
+  tsCode: string
+  tradeDate: string
+}) {
+  return invoke<DragonTigerStockDetailData>('get_dragon_tiger_stock_detail', query)
+}
+
+export async function getDragonTigerSeatStatistics(query: {
+  sourcePath: string
+  exalter: string
+}) {
+  return invoke<DragonTigerSeatStatisticsData>('get_dragon_tiger_seat_statistics', query)
 }
 
 export async function getMarketContribution(query: {

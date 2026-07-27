@@ -1,10 +1,12 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { inspectManagedSourceStatus } from '../../apis/managedSource'
 import {
+  DATA_DOWNLOAD_DRAFT_STORAGE_KEY,
   getDataDownloadStatus,
   listenDataDownloadProgress,
   runConceptMostRelatedRepair,
   runDataDownload,
+  runDragonTigerDownload,
   runMissingStockRepair,
   runThsConceptDownload,
   type DataDownloadProgress,
@@ -29,7 +31,7 @@ import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
 import './css/DataDownloadPage.css'
 
 type BusyAction = 'idle' | 'loading' | 'running'
-type TaskSection = 'main' | 'concept'
+type TaskSection = 'main' | 'dragonTiger' | 'concept'
 
 type DataDownloadDraft = {
   token: string
@@ -40,6 +42,9 @@ type DataDownloadDraft = {
   retryTimes: number
   limitCallsPerMin: number
   includeTurnover: boolean
+  dragonTigerStartDate: string
+  dragonTigerEndDate: string
+  dragonTigerUseTodayEnd: boolean
   thsConceptRetryEnabled: boolean
   thsConceptRetryTimes: number
   thsConceptRetryIntervalSecs: number
@@ -47,7 +52,6 @@ type DataDownloadDraft = {
   thsConceptWorkerThreads: number
 }
 
-const DATA_DOWNLOAD_DRAFT_KEY = 'lh_data_download_draft_v1'
 const STALE_STOCK_LIST_CONFIRM_REQUIRED_PREFIX = 'STALE_STOCK_LIST_CONFIRM_REQUIRED:'
 
 function parseStaleStockListConfirmMessage(error: unknown) {
@@ -140,6 +144,12 @@ function formatPhaseLabel(phase: string | null | undefined) {
       return '概念重试'
     case 'write_ths_concepts':
       return '写入概念文件'
+    case 'download_dragon_tiger':
+      return '拉取龙虎榜'
+    case 'write_dragon_tiger':
+      return '写入龙虎榜库'
+    case 'dragon_tiger_done':
+      return '龙虎榜下载完成'
     case 'rebuild_incremental_concept_performance':
       return '维护本轮概念表现'
     case 'rebuild_concept_performance':
@@ -227,6 +237,12 @@ function getProgressWorkflow(action: string | null | undefined) {
         'retry_ths_concepts',
         'write_ths_concepts',
         'done_ths_concepts',
+      ] as ProgressWorkflowStep[]
+    case 'download-dragon-tiger':
+      return [
+        'download_dragon_tiger',
+        'write_dragon_tiger',
+        'dragon_tiger_done',
       ] as ProgressWorkflowStep[]
     case 'rebuild-concept-performance':
       return ['rebuild_concept_performance'] as ProgressWorkflowStep[]
@@ -319,6 +335,20 @@ function formatCyqChenMaintenanceSummary(status: DataDownloadStatus | null) {
   return maintenance.strategyChanged ? '策略已变化' : '策略一致'
 }
 
+function formatDragonTigerSummary(status: DataDownloadStatus | null) {
+  const dragonTiger = status?.dragonTigerDb
+  if (!dragonTiger) {
+    return '读取中...'
+  }
+  if (!dragonTiger.exists) {
+    return 'dragon_tiger.db 不存在'
+  }
+  if (!dragonTiger.minTradeDate || !dragonTiger.maxTradeDate) {
+    return '龙虎榜库已创建，暂无同步日期'
+  }
+  return `${formatTradeDate(dragonTiger.minTradeDate)} 至 ${formatTradeDate(dragonTiger.maxTradeDate)}`
+}
+
 function readDraft(): DataDownloadDraft {
   const fallback: DataDownloadDraft = {
     token: '',
@@ -329,6 +359,9 @@ function readDraft(): DataDownloadDraft {
     retryTimes: 3,
     limitCallsPerMin: 190,
     includeTurnover: true,
+    dragonTigerStartDate: '2005-01-01',
+    dragonTigerEndDate: '',
+    dragonTigerUseTodayEnd: true,
     thsConceptRetryEnabled: true,
     thsConceptRetryTimes: 4,
     thsConceptRetryIntervalSecs: 30,
@@ -336,7 +369,7 @@ function readDraft(): DataDownloadDraft {
     thsConceptWorkerThreads: 4,
   }
 
-  const parsed = readJsonStorage<Partial<DataDownloadDraft>>(typeof window === 'undefined' ? null : window.localStorage, DATA_DOWNLOAD_DRAFT_KEY)
+  const parsed = readJsonStorage<Partial<DataDownloadDraft>>(typeof window === 'undefined' ? null : window.localStorage, DATA_DOWNLOAD_DRAFT_STORAGE_KEY)
   if (!parsed) {
     return fallback
   }
@@ -359,6 +392,18 @@ function readDraft(): DataDownloadDraft {
       typeof parsed.includeTurnover === 'boolean'
         ? parsed.includeTurnover
         : fallback.includeTurnover,
+    dragonTigerStartDate:
+      typeof parsed.dragonTigerStartDate === 'string'
+        ? parsed.dragonTigerStartDate
+        : fallback.dragonTigerStartDate,
+    dragonTigerEndDate:
+      typeof parsed.dragonTigerEndDate === 'string'
+        ? parsed.dragonTigerEndDate
+        : fallback.dragonTigerEndDate,
+    dragonTigerUseTodayEnd:
+      typeof parsed.dragonTigerUseTodayEnd === 'boolean'
+        ? parsed.dragonTigerUseTodayEnd
+        : fallback.dragonTigerUseTodayEnd,
     thsConceptRetryEnabled:
       typeof parsed.thsConceptRetryEnabled === 'boolean'
         ? parsed.thsConceptRetryEnabled
@@ -399,6 +444,9 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
   const [retryTimes, setRetryTimes] = useState(String(draft.retryTimes))
   const [limitCallsPerMin, setLimitCallsPerMin] = useState(String(draft.limitCallsPerMin))
   const [includeTurnover, setIncludeTurnover] = useState(draft.includeTurnover)
+  const [dragonTigerStartDate, setDragonTigerStartDate] = useState(draft.dragonTigerStartDate)
+  const [dragonTigerEndDate, setDragonTigerEndDate] = useState(draft.dragonTigerEndDate)
+  const [dragonTigerUseTodayEnd, setDragonTigerUseTodayEnd] = useState(draft.dragonTigerUseTodayEnd)
   const [thsConceptRetryEnabled, setThsConceptRetryEnabled] = useState(draft.thsConceptRetryEnabled)
   const [thsConceptRetryTimes, setThsConceptRetryTimes] = useState(String(draft.thsConceptRetryTimes))
   const [thsConceptRetryIntervalSecs, setThsConceptRetryIntervalSecs] = useState(String(draft.thsConceptRetryIntervalSecs))
@@ -430,6 +478,7 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
       : calcProgressPercent(deferredProgress, getProgressWorkflow, [
           'done',
           'done_ths_concepts',
+          'dragon_tiger_done',
         ])
   const shownProgressPercent = useAnimatedProgressPercent(busyAction === 'running', progressPercent)
   const phaseStep = getPhaseStep(deferredProgress?.action, deferredProgress?.phase, getProgressWorkflow)
@@ -451,15 +500,18 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
           deferredProgress?.action,
           deferredProgress?.phase,
           getProgressWorkflow,
-          ['done', 'done_ths_concepts'],
+          ['done', 'done_ths_concepts', 'dragon_tiger_done'],
           formatPhaseLabel,
         )
   const missingStockRepair = status?.missingStockRepair ?? null
   const showMainProgress = busyAction === 'running' && activeTaskSection === 'main'
+  const showDragonTigerProgress = busyAction === 'running' && activeTaskSection === 'dragonTiger'
   const showConceptProgress = busyAction === 'running' && activeTaskSection === 'concept'
   const showMainNotice = Boolean(notice) && feedbackSection === 'main'
+  const showDragonTigerNotice = Boolean(notice) && feedbackSection === 'dragonTiger'
   const showConceptNotice = Boolean(notice) && feedbackSection === 'concept'
   const showMainError = Boolean(error) && feedbackSection === 'main'
+  const showDragonTigerError = Boolean(error) && feedbackSection === 'dragonTiger'
   const showConceptError = Boolean(error) && feedbackSection === 'concept'
 
   useEffect(() => {
@@ -469,7 +521,7 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
   }, [busyAction])
 
   useEffect(() => {
-    writeJsonStorage(typeof window === 'undefined' ? null : window.localStorage, DATA_DOWNLOAD_DRAFT_KEY, {
+    writeJsonStorage(typeof window === 'undefined' ? null : window.localStorage, DATA_DOWNLOAD_DRAFT_STORAGE_KEY, {
       token,
       startDate: startDateInput,
       endDate: endDateInput,
@@ -478,6 +530,9 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
       retryTimes: Number(retryTimes),
       limitCallsPerMin: Number(limitCallsPerMin),
       includeTurnover,
+      dragonTigerStartDate,
+      dragonTigerEndDate,
+      dragonTigerUseTodayEnd,
       thsConceptRetryEnabled,
       thsConceptRetryTimes: Number(thsConceptRetryTimes),
       thsConceptRetryIntervalSecs: Number(thsConceptRetryIntervalSecs),
@@ -486,6 +541,9 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
     })
   }, [
     endDateInput,
+    dragonTigerEndDate,
+    dragonTigerStartDate,
+    dragonTigerUseTodayEnd,
     includeTurnover,
     limitCallsPerMin,
     retryTimes,
@@ -588,6 +646,10 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
       } else if (result.action === 'rebuild-stock-data-indicator-columns') {
         setNotice(
           `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；补算 ${result.summary.successCount} 组，回写 ${result.summary.savedRows} 行${formatCompletionDetailTail(result.completionDetails)}。`,
+        )
+      } else if (result.action === 'download-dragon-tiger') {
+        setNotice(
+          `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；同步 ${result.summary.successCount} 个交易日，写入 ${result.summary.savedRows} 行${formatCompletionDetailTail(result.completionDetails)}。`,
         )
       } else {
         const failedDetail =
@@ -750,6 +812,49 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
     )
   }
 
+  async function onRunDragonTigerDownload() {
+    if (!sourcePath) {
+      setFeedbackSection('dragonTiger')
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+    if (!token.trim()) {
+      setFeedbackSection('dragonTiger')
+      setError('请先在通用参数中填写 Tushare Token。')
+      return
+    }
+
+    const startDate = inputDateToCompact(dragonTigerStartDate)
+    const endDate = dragonTigerUseTodayEnd ? 'today' : inputDateToCompact(dragonTigerEndDate)
+    if (!startDate) {
+      setFeedbackSection('dragonTiger')
+      setError('请填写龙虎榜下载开始日期。')
+      return
+    }
+    if (!endDate) {
+      setFeedbackSection('dragonTiger')
+      setError('请填写龙虎榜下载结束日期，或勾选自动到当前交易日。')
+      return
+    }
+    if (endDate !== 'today' && startDate > endDate) {
+      setFeedbackSection('dragonTiger')
+      setError('龙虎榜下载开始日期不能晚于结束日期。')
+      return
+    }
+
+    await runDataTask('dragonTiger', (downloadId) =>
+      runDragonTigerDownload({
+        downloadId,
+        sourcePath,
+        token: token.trim(),
+        startDate,
+        endDate,
+        retryTimes: Math.max(0, Number(retryTimes) || 0),
+        limitCallsPerMin: Math.max(1, Number(limitCallsPerMin) || 1),
+      }),
+    )
+  }
+
   async function onRunConceptMostRelatedRepair() {
     if (!sourcePath) {
       setFeedbackSection('concept')
@@ -767,10 +872,30 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
 
   return (
     <div className={mergedMode ? 'data-download-page is-merged-mode' : 'data-download-page'}>
+      <section className="data-download-card data-download-shared-params">
+        <div className="data-download-shared-params-copy">
+          <span className="data-download-shared-params-label">公共参数</span>
+          <div>
+            <h2>下载任务 Token</h2>
+            <p>行情下载、缺失股票补全和龙虎榜下载共用；概念下载不需要 Token。</p>
+          </div>
+        </div>
+
+        <label className="data-download-field data-download-shared-token">
+          <span>Tushare Token</span>
+          <input
+            type="password"
+            value={token}
+            onChange={(event) => setToken(event.target.value)}
+            placeholder="输入后缓存在当前浏览器 localStorage"
+          />
+        </label>
+      </section>
+
       <section className="data-download-card">
         <div className="data-download-head">
           <div>
-            <h2>{mergedMode ? '下载任务' : '数据下载'}</h2>
+            <h2>{mergedMode ? '行情数据下载' : '数据下载'}</h2>
             <p>
               下载或增量更新行情数据，并按当前数据状态选择合适的参数表单。
             </p>
@@ -913,20 +1038,10 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
         <div className="data-download-panel-grid">
           <section className="data-download-panel">
             <div className="data-download-panel-head">
-              <h3>通用参数</h3>
+              <h3>行情下载参数</h3>
             </div>
 
             <div className="data-download-form-grid">
-              <label className="data-download-field data-download-field-span-2">
-                <span>Tushare Token</span>
-                <input
-                  type="password"
-                  value={token}
-                  onChange={(event) => setToken(event.target.value)}
-                  placeholder="输入后缓存在当前浏览器 localStorage"
-                />
-              </label>
-
               <div className="data-download-inline-grid data-download-field-span-2">
                 <label className="data-download-check data-download-check-compact">
                   <input
@@ -1062,6 +1177,84 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
 
         {showMainNotice ? <div className="data-download-notice">{notice}</div> : null}
         {showMainError ? <div className="data-download-error">{error}</div> : null}
+      </section>
+
+      <section className="data-download-card">
+        <section className="data-download-panel">
+          <div className="data-download-panel-head">
+            <h3>龙虎榜数据下载</h3>
+            <p>
+              同步龙虎榜每日明细和营业部/机构席位明细，写入独立的 dragon_tiger.db。已经同步的交易日会自动跳过。
+            </p>
+          </div>
+
+          <div className="data-download-dragon-status">
+            <strong>{formatDragonTigerSummary(status)}</strong>
+            <span>
+              {status?.dragonTigerDb
+                ? `${status.dragonTigerDb.syncedTradeDates} 个交易日 · 每日明细 ${status.dragonTigerDb.topListRows} 行 · 席位明细 ${status.dragonTigerDb.topInstRows} 行`
+                : '正在读取龙虎榜库状态'}
+            </span>
+          </div>
+
+          <div className="data-download-dragon-row">
+            <label className="data-download-field data-download-field-compact">
+              <span>开始日期</span>
+              <input
+                type="date"
+                value={dragonTigerStartDate}
+                onChange={(event) => setDragonTigerStartDate(event.target.value)}
+              />
+            </label>
+
+            <label className="data-download-field data-download-field-compact">
+              <span>结束日期</span>
+              <input
+                type="date"
+                value={dragonTigerEndDate}
+                onChange={(event) => setDragonTigerEndDate(event.target.value)}
+                disabled={dragonTigerUseTodayEnd}
+              />
+            </label>
+
+            <label className="data-download-check data-download-check-compact data-download-dragon-today">
+              <input
+                type="checkbox"
+                checked={dragonTigerUseTodayEnd}
+                onChange={(event) => setDragonTigerUseTodayEnd(event.target.checked)}
+              />
+              <span>自动到今天</span>
+            </label>
+
+            <button
+              className="data-download-secondary-btn"
+              type="button"
+              onClick={() => void onRunDragonTigerDownload()}
+              disabled={isBusy || !sourcePath}
+            >
+              {showDragonTigerProgress ? '龙虎榜下载中...' : isBusy ? '任务执行中...' : '开始龙虎榜下载'}
+            </button>
+          </div>
+
+          {showDragonTigerProgress ? (
+            <DataTaskProgress
+              phaseLabel={phaseLabel}
+              phaseStepPillText={phaseStep ? ` · ${phaseStep.current}/${phaseStep.total}` : ''}
+              phaseStepStatText={phaseStep ? ` ${phaseStep.current}/${phaseStep.total}` : ''}
+              actionLabel={deferredProgress?.actionLabel ?? '龙虎榜数据下载'}
+              progressPercent={progressPercent}
+              progressSegments={progressSegments}
+              elapsedText={formatElapsedMs(deferredProgress?.elapsedMs ?? 0)}
+              shownProgressPercent={shownProgressPercent}
+              progressCounterText={progressCounterText}
+              currentObjectText={getCurrentObjectText(deferredProgress)}
+              message={deferredProgress?.message}
+              fallbackMessage="龙虎榜下载已经启动，正在等待后端返回当前交易日进度。"
+            />
+          ) : null}
+          {showDragonTigerNotice ? <div className="data-download-notice">{notice}</div> : null}
+          {showDragonTigerError ? <div className="data-download-error">{error}</div> : null}
+        </section>
       </section>
 
       <section className="data-download-card">

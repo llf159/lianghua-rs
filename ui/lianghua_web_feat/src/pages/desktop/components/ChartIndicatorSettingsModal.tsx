@@ -40,6 +40,15 @@ const BASE_FIELDS = [
   'PCT_CHG',
   'TOR',
   'TURNOVER_RATE',
+  'BUY_SM_VOL',
+  'SELL_SM_VOL',
+  'BUY_MD_VOL',
+  'SELL_MD_VOL',
+  'BUY_LG_VOL',
+  'SELL_LG_VOL',
+  'BUY_ELG_VOL',
+  'SELL_ELG_VOL',
+  'NET_MF_VOL',
   'RANK',
   'SCORE',
   'ZHANG',
@@ -1218,7 +1227,7 @@ function ReferenceStrip({
 }) {
   return (
     <div className="chart-indicator-reference-strip">
-      <span>基础字段：{BASE_FIELDS.join(' / ')}</span>
+      <span>行情字段：{BASE_FIELDS.join(' / ')}</span>
       <span>前序序列：{previousSeriesKeys.length > 0 ? previousSeriesKeys.join(' / ') : '无'}</span>
       <span>已落库指标：{databaseIndicatorColumns.length > 0 ? databaseIndicatorColumns.slice(0, 18).join(' / ') : '未读取到'}</span>
       <span>函数：{FUNCTIONS.join(' / ')}</span>

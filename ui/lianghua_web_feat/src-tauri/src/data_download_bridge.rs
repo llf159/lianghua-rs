@@ -8,6 +8,7 @@ use lianghua_rs::{
         prepare_concept_most_related_repair_run as core_prepare_concept_most_related_repair_run,
         prepare_concept_performance_repair_run as core_prepare_concept_performance_repair_run,
         prepare_data_download_run as core_prepare_data_download_run,
+        prepare_dragon_tiger_download_run as core_prepare_dragon_tiger_download_run,
         prepare_missing_stock_repair_run as core_prepare_missing_stock_repair_run,
         prepare_stock_data_indicator_columns_delete_run as core_prepare_stock_data_indicator_columns_delete_run,
         prepare_stock_data_indicator_columns_rebuild_run as core_prepare_stock_data_indicator_columns_rebuild_run,
@@ -15,6 +16,7 @@ use lianghua_rs::{
         run_prepared_concept_most_related_repair as core_run_prepared_concept_most_related_repair,
         run_prepared_concept_performance_repair as core_run_prepared_concept_performance_repair,
         run_prepared_data_download as core_run_prepared_data_download,
+        run_prepared_dragon_tiger_download as core_run_prepared_dragon_tiger_download,
         run_prepared_missing_stock_repair as core_run_prepared_missing_stock_repair,
         run_prepared_stock_data_indicator_columns_delete as core_run_prepared_stock_data_indicator_columns_delete,
         run_prepared_stock_data_indicator_columns_rebuild as core_run_prepared_stock_data_indicator_columns_rebuild,
@@ -23,7 +25,8 @@ use lianghua_rs::{
         ConceptMostRelatedRepairRunInput as CoreConceptMostRelatedRepairRunInput,
         ConceptPerformanceRepairRunInput as CoreConceptPerformanceRepairRunInput,
         DataDownloadRunInput as CoreDataDownloadRunInput, DataDownloadRunResult,
-        DataDownloadStatus, IndicatorManageDraft as CoreIndicatorManageDraft,
+        DataDownloadStatus, DragonTigerDownloadRunInput as CoreDragonTigerDownloadRunInput,
+        IndicatorManageDraft as CoreIndicatorManageDraft,
         IndicatorManagePageData, MissingStockRepairRunInput as CoreMissingStockRepairRunInput,
         StockDataIndicatorColumnsDeleteRunInput as CoreStockDataIndicatorColumnsDeleteRunInput,
         StockDataIndicatorColumnsRebuildRunInput as CoreStockDataIndicatorColumnsRebuildRunInput,
@@ -63,6 +66,18 @@ pub struct MissingStockRepairRequest {
     retry_times: usize,
     limit_calls_per_min: usize,
     include_turnover: bool,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DragonTigerDownloadRequest {
+    download_id: String,
+    source_path: String,
+    token: String,
+    start_date: String,
+    end_date: String,
+    retry_times: usize,
+    limit_calls_per_min: usize,
 }
 
 #[derive(Clone, Deserialize)]
@@ -461,6 +476,109 @@ pub async fn run_data_download(
                         action_label,
                         run_result.summary.success_count,
                         run_result.summary.failed_count,
+                        format_completion_detail_tail(&run_result.completion_details)
+                    ),
+                },
+            ),
+            Err(error) => emit_data_download_event(
+                &app,
+                DataDownloadEventPayload {
+                    download_id: download_id.clone(),
+                    phase: "failed".to_string(),
+                    action: action.clone(),
+                    action_label: action_label.clone(),
+                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    finished: 0,
+                    total: 0,
+                    current_label: None,
+                    message: format!("{} 失败: {}", action_label, error),
+                },
+            ),
+        }
+
+        result
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn run_dragon_tiger_download(
+    app: tauri::AppHandle,
+    request: DragonTigerDownloadRequest,
+) -> Result<DataDownloadRunResult, String> {
+    let download_id = request.download_id.trim().to_string();
+    if download_id.is_empty() {
+        return Err("download_id 不能为空".to_string());
+    }
+
+    let prepared = core_prepare_dragon_tiger_download_run(CoreDragonTigerDownloadRunInput {
+        source_path: request.source_path,
+        token: request.token,
+        start_date: request.start_date,
+        end_date: request.end_date,
+        retry_times: request.retry_times,
+        limit_calls_per_min: request.limit_calls_per_min,
+    })?;
+    let action = prepared.action.clone();
+    let action_label = prepared.action_label.clone();
+    emit_data_download_event(
+        &app,
+        DataDownloadEventPayload {
+            download_id: download_id.clone(),
+            phase: "started".to_string(),
+            action: action.clone(),
+            action_label: action_label.clone(),
+            elapsed_ms: 0,
+            finished: 0,
+            total: 0,
+            current_label: None,
+            message: format!("{action_label} 已启动，正在准备执行下载。"),
+        },
+    );
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let started_at = Instant::now();
+        let result = (|| -> Result<DataDownloadRunResult, String> {
+            let progress_app = app.clone();
+            let progress_download_id = download_id.clone();
+            let progress_action = action.clone();
+            let progress_action_label = action_label.clone();
+            let progress_started_at = started_at;
+            let progress_cb = move |progress: CoreDownloadProgress| {
+                emit_core_download_progress(
+                    &progress_app,
+                    progress_download_id.as_str(),
+                    progress_action.as_str(),
+                    progress_action_label.as_str(),
+                    progress_started_at.elapsed().as_millis() as u64,
+                    progress,
+                );
+            };
+
+            let mut run_result =
+                core_run_prepared_dragon_tiger_download(&prepared, Some(&progress_cb))?;
+            run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
+            Ok(run_result)
+        })();
+
+        match &result {
+            Ok(run_result) => emit_data_download_event(
+                &app,
+                DataDownloadEventPayload {
+                    download_id: download_id.clone(),
+                    phase: "completed".to_string(),
+                    action: action.clone(),
+                    action_label: action_label.clone(),
+                    elapsed_ms: run_result.elapsed_ms,
+                    finished: run_result.summary.success_count,
+                    total: run_result.summary.success_count,
+                    current_label: None,
+                    message: format!(
+                        "{} 已完成，同步 {} 个交易日，写入 {} 行{}。",
+                        action_label,
+                        run_result.summary.success_count,
+                        run_result.summary.saved_rows,
                         format_completion_detail_tail(&run_result.completion_details)
                     ),
                 },

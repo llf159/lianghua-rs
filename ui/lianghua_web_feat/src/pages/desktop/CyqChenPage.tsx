@@ -1040,7 +1040,9 @@ function CyqChenProjectChart({
   const chartTouchPointersRef = useRef<Map<number, CyqChenChartTouchPointer>>(new Map())
   const chartPinchRef = useRef<CyqChenChartPinchState | null>(null)
   const [visibleBarCount, setVisibleBarCount] = useState(DEFAULT_VISIBLE_BARS)
-  const [visibleStartIndex, setVisibleStartIndex] = useState(0)
+  const [visibleStartIndex, setVisibleStartIndex] = useState(() => (
+    Math.max(kline.length - Math.min(DEFAULT_VISIBLE_BARS, kline.length), 0)
+  ))
   const [focus, setFocus] = useState<CyqChenChartFocus | null>(null)
   const [chartLayoutWidth, setChartLayoutWidth] = useState(readInitialChartLayoutWidth)
   const [chartMainWidthRatio, setChartMainWidthRatio] = useState(() => readStoredChartMainWidthRatio())
@@ -2500,6 +2502,7 @@ export default function CyqChenPage() {
   const [stockLookupRows, setStockLookupRows] = useState<StockLookupRow[]>([])
   const [stockLookupFocused, setStockLookupFocused] = useState(false)
   const [result, setResult] = useState<CyqChenSingleStockData | null>(null)
+  const [chartResultRevision, setChartResultRevision] = useState(0)
   const [savedRuns, setSavedRuns] = useState<SavedRun[]>([])
   const [selectedTradeDate, setSelectedTradeDate] = useState('')
   const [chipPeakMode, setChipPeakMode] = useState<ChipPeakMode>('total')
@@ -2700,6 +2703,7 @@ export default function CyqChenPage() {
       })
       const lastTradeDate = nextResult.snapshots[nextResult.snapshots.length - 1]?.tradeDate ?? ''
       setResult(nextResult)
+      setChartResultRevision((value) => value + 1)
       setSelectedTradeDate(lastTradeDate)
       setSavedRuns((items) => [
         {
@@ -2809,6 +2813,7 @@ export default function CyqChenPage() {
                   className="cyq-chen-history-btn"
                   onClick={() => {
                     setResult(item.data)
+                    setChartResultRevision((value) => value + 1)
                     setSelectedTradeDate(item.data.snapshots[item.data.snapshots.length - 1]?.tradeDate ?? '')
                   }}
                 >
@@ -2874,6 +2879,7 @@ export default function CyqChenPage() {
             </div>
           </div>
           <CyqChenProjectChart
+            key={chartResultRevision}
             kline={chartRows}
             panels={chartPanels}
             snapshots={snapshotOptions}
