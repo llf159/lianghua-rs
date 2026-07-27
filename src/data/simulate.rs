@@ -81,7 +81,7 @@ pub fn build_simulated_row_data(
     let previous_close = latest_value(&["C"]).ok_or_else(|| "模拟数据缺少最近的C".to_string())?;
     let previous_volume = latest_value(&["V"]).unwrap_or(0.0);
     let previous_amount = latest_value(&["AMOUNT"]).unwrap_or(0.0);
-    let previous_turnover_rate = latest_value(&["TURNOVER_RATE", "TOR"]);
+    let previous_turnover_rate = latest_value(&["TOR"]);
 
     let simulated_open = previous_close * (1.0 + simulate.open_gap_pct / 100.0);
     let simulated_close = if simulate.pct_chg_relative_to_open {
@@ -128,9 +128,7 @@ pub fn build_simulated_row_data(
     }
 
     let total_len = row_data.trade_dates.len();
-    let has_turnover_col = previous_turnover_rate.is_some()
-        || row_data.cols.contains_key("TURNOVER_RATE")
-        || row_data.cols.contains_key("TOR");
+    let has_turnover_col = previous_turnover_rate.is_some() || row_data.cols.contains_key("TOR");
 
     for (key, value) in [
         ("O", Some(simulated_open)),
@@ -156,17 +154,15 @@ pub fn build_simulated_row_data(
     }
 
     if has_turnover_col {
-        for key in ["TURNOVER_RATE", "TOR"] {
-            let series = row_data
-                .cols
-                .entry(key.to_string())
-                .or_insert_with(|| vec![None; total_len]);
-            if series.len() < total_len {
-                series.resize(total_len, None);
-            }
-            if let Some(last) = series.last_mut() {
-                *last = simulated_turnover_rate;
-            }
+        let series = row_data
+            .cols
+            .entry("TOR".to_string())
+            .or_insert_with(|| vec![None; total_len]);
+        if series.len() < total_len {
+            series.resize(total_len, None);
+        }
+        if let Some(last) = series.last_mut() {
+            *last = simulated_turnover_rate;
         }
     }
 
@@ -250,10 +246,6 @@ mod tests {
         assert_close(row_data.cols["C"].last().copied().flatten(), Some(10.71));
         assert_close(row_data.cols["V"].last().copied().flatten(), Some(180.0));
         assert_close(row_data.cols["TOR"].last().copied().flatten(), Some(1.8));
-        assert_close(
-            row_data.cols["TURNOVER_RATE"].last().copied().flatten(),
-            Some(1.8),
-        );
         assert_close(
             row_data.cols["ZHANG"].last().copied().flatten(),
             Some(0.095),

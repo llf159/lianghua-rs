@@ -1224,10 +1224,9 @@ fn build_kline_rows(
     let close = required_series(row_data, "C")?;
     let turnover_rate = row_data
         .cols
-        .get("TURNOVER_RATE")
-        .or_else(|| row_data.cols.get("TOR"))
+        .get("TOR")
         .map(Vec::as_slice)
-        .ok_or_else(|| "RowData 缺少 TURNOVER_RATE/TOR 列".to_string())?;
+        .ok_or_else(|| "RowData 缺少 TOR 列".to_string())?;
 
     let mut rows = Vec::new();
     for (index, trade_date) in row_data.trade_dates.iter().enumerate() {

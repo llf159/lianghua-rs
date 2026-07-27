@@ -27,16 +27,16 @@ const IND_INPUT_KEYS: [&str; 19] = [
     "PRE_CLOSE",
     "CHANGE",
     "PCT_CHG",
-    "TURNOVER_RATE",
-    "BUY_SM_VOL",
-    "SELL_SM_VOL",
-    "BUY_MD_VOL",
-    "SELL_MD_VOL",
-    "BUY_LG_VOL",
-    "SELL_LG_VOL",
-    "BUY_ELG_VOL",
-    "SELL_ELG_VOL",
-    "NET_MF_VOL",
+    "TOR",
+    "B_SM_V",
+    "S_SM_V",
+    "B_MD_V",
+    "S_MD_V",
+    "B_LG_V",
+    "S_LG_V",
+    "B_ELG_V",
+    "S_ELG_V",
+    "NET_MF_V",
 ];
 
 #[derive(Clone)]
@@ -435,23 +435,20 @@ fn pro_bar_rows_to_row_data(rows: &[ProBarRow]) -> Result<RowData, String> {
         cols.get_mut("PCT_CHG")
             .expect("PCT_CHG should exist")
             .push(Some(row.pct_chg));
-        cols.get_mut("TURNOVER_RATE")
-            .expect("TURNOVER_RATE should exist")
+        cols.get_mut("TOR")
+            .expect("TOR should exist")
             .push(row.turnover_rate);
         let moneyflow = row.moneyflow.as_ref();
         let moneyflow_values = [
-            ("BUY_SM_VOL", moneyflow.and_then(|value| value.buy_sm_vol)),
-            ("SELL_SM_VOL", moneyflow.and_then(|value| value.sell_sm_vol)),
-            ("BUY_MD_VOL", moneyflow.and_then(|value| value.buy_md_vol)),
-            ("SELL_MD_VOL", moneyflow.and_then(|value| value.sell_md_vol)),
-            ("BUY_LG_VOL", moneyflow.and_then(|value| value.buy_lg_vol)),
-            ("SELL_LG_VOL", moneyflow.and_then(|value| value.sell_lg_vol)),
-            ("BUY_ELG_VOL", moneyflow.and_then(|value| value.buy_elg_vol)),
-            (
-                "SELL_ELG_VOL",
-                moneyflow.and_then(|value| value.sell_elg_vol),
-            ),
-            ("NET_MF_VOL", moneyflow.and_then(|value| value.net_mf_vol)),
+            ("B_SM_V", moneyflow.and_then(|value| value.b_sm_v)),
+            ("S_SM_V", moneyflow.and_then(|value| value.s_sm_v)),
+            ("B_MD_V", moneyflow.and_then(|value| value.b_md_v)),
+            ("S_MD_V", moneyflow.and_then(|value| value.s_md_v)),
+            ("B_LG_V", moneyflow.and_then(|value| value.b_lg_v)),
+            ("S_LG_V", moneyflow.and_then(|value| value.s_lg_v)),
+            ("B_ELG_V", moneyflow.and_then(|value| value.b_elg_v)),
+            ("S_ELG_V", moneyflow.and_then(|value| value.s_elg_v)),
+            ("NET_MF_V", moneyflow.and_then(|value| value.net_mf_v)),
         ];
         for (key, value) in moneyflow_values {
             cols.get_mut(key)

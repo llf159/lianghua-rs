@@ -881,17 +881,7 @@ impl DataReader {
 }
 
 fn runtime_key_required(required_runtime_keys: &HashSet<String>, runtime_key: &str) -> bool {
-    if required_runtime_keys.contains(runtime_key) {
-        return true;
-    }
-
-    matches!(
-        runtime_key,
-        "TOR" if required_runtime_keys.contains("TURNOVER_RATE")
-    ) || matches!(
-        runtime_key,
-        "TURNOVER_RATE" if required_runtime_keys.contains("TOR")
-    )
+    required_runtime_keys.contains(runtime_key)
 }
 
 fn is_runtime_index_pct_key(runtime_key: &str) -> bool {
@@ -1348,10 +1338,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{
-        DataReader, RuleTag, ScoreConfig, collect_assigned_names_from_expr_program,
-        runtime_key_required,
-    };
+    use super::{DataReader, RuleTag, ScoreConfig, collect_assigned_names_from_expr_program};
     use duckdb::{Connection, params};
 
     fn parse_score_config(text: &str) -> ScoreConfig {
@@ -1455,15 +1442,6 @@ explain = "test"
 
         let error = ScoreConfig::validate(&cfg).expect_err("unknown function should fail");
         assert!(error.contains("第1条规则(未知函数)表达式引用未知函数"));
-    }
-
-    #[test]
-    fn turnover_runtime_keys_match_tor_and_turnover_rate_aliases() {
-        let required = HashSet::from(["TOR".to_string()]);
-        assert!(runtime_key_required(&required, "TURNOVER_RATE"));
-
-        let required = HashSet::from(["TURNOVER_RATE".to_string()]);
-        assert!(runtime_key_required(&required, "TOR"));
     }
 
     #[test]

@@ -93,13 +93,11 @@ fn required_series<'a>(row_data: &'a RowData, key: &str) -> Result<&'a [Option<f
 }
 
 fn optional_turnover_series<'a>(row_data: &'a RowData) -> Result<&'a [Option<f64>], String> {
-    if let Some(series) = row_data.cols.get("TURNOVER_RATE") {
-        return Ok(series.as_slice());
-    }
-    if let Some(series) = row_data.cols.get("TOR") {
-        return Ok(series.as_slice());
-    }
-    Err("RowData 缺少 TURNOVER_RATE/TOR 列".to_string())
+    row_data
+        .cols
+        .get("TOR")
+        .map(Vec::as_slice)
+        .ok_or_else(|| "RowData 缺少 TOR 列".to_string())
 }
 
 pub fn build_cyq_bars_from_row_data(row_data: &RowData) -> Result<Vec<CyqBar>, String> {
@@ -431,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn build_cyq_bars_from_row_data_supports_tor_alias() {
+    fn build_cyq_bars_from_row_data_uses_tor() {
         let bars = build_cyq_bars_from_row_data(&sample_row_data()).expect("build cyq bars");
 
         assert_eq!(bars.len(), 4);

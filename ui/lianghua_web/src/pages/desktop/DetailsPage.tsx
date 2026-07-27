@@ -923,12 +923,7 @@ function formatPercentValue(value: number | null) {
   return `${value.toFixed(2)}%`;
 }
 
-const TURNOVER_VALUE_KEYS = [
-  "tor",
-  "turnover_rate",
-  "turnover",
-  "turnover_rate_f",
-] as const;
+const TURNOVER_VALUE_KEYS = ["tor"] as const;
 
 function findTurnoverNumber(item: DetailKlineRow | null) {
   if (!item) {

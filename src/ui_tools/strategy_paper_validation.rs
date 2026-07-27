@@ -50,7 +50,7 @@ const PAPER_VALIDATION_INJECTED_RUNTIME_KEYS: [&str; 7] = [
     "TOTAL_MV_YI",
 ];
 const PAPER_VALIDATION_RUNTIME_ALIASES: [(&str, &str); 0] = [];
-const PAPER_VALIDATION_INPUT_KEYS: [&str; 11] = [
+const PAPER_VALIDATION_INPUT_KEYS: [&str; 10] = [
     "O",
     "H",
     "L",
@@ -60,7 +60,6 @@ const PAPER_VALIDATION_INPUT_KEYS: [&str; 11] = [
     "PRE_CLOSE",
     "CHANGE",
     "PCT_CHG",
-    "TURNOVER_RATE",
     "TOR",
 ];
 
@@ -2109,7 +2108,7 @@ mod tests {
         cols.insert("PRE_CLOSE".to_string(), pre_close_series);
         cols.insert("CHANGE".to_string(), change_series);
         cols.insert("PCT_CHG".to_string(), pct_chg_series);
-        cols.insert("TURNOVER_RATE".to_string(), vec![Some(1.0); len]);
+        cols.insert("TOR".to_string(), vec![Some(1.0); len]);
         cols.insert("ZHANG".to_string(), vec![Some(zhang_pct); len]);
 
         RowData { trade_dates, cols }

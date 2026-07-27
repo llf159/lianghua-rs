@@ -21,7 +21,7 @@ use crate::{
 const DEFAULT_WARMUP_DAYS: usize = 120;
 const DEFAULT_BUCKET_PCT: f64 = 1.0;
 const EPS: f64 = 1e-10;
-const CHEN_CHIP_ALWAYS_RUNTIME_KEYS: [&str; 5] = ["O", "H", "L", "C", "TURNOVER_RATE"];
+const CHEN_CHIP_ALWAYS_RUNTIME_KEYS: [&str; 5] = ["O", "H", "L", "C", "TOR"];
 const CHEN_CHIP_INJECTED_RUNTIME_KEYS: [&str; 9] = [
     "RATEO",
     "RATEH",
@@ -857,13 +857,11 @@ fn required_series<'a>(row_data: &'a RowData, key: &str) -> Result<&'a [Option<f
 }
 
 fn turnover_series(row_data: &RowData) -> Result<&[Option<f64>], String> {
-    if let Some(series) = row_data.cols.get("TURNOVER_RATE") {
-        return Ok(series.as_slice());
-    }
-    if let Some(series) = row_data.cols.get("TOR") {
-        return Ok(series.as_slice());
-    }
-    Err("RowData 缺少 TURNOVER_RATE/TOR 列".to_string())
+    row_data
+        .cols
+        .get("TOR")
+        .map(Vec::as_slice)
+        .ok_or_else(|| "RowData 缺少 TOR 列".to_string())
 }
 
 fn build_validated_bars(
@@ -910,7 +908,7 @@ fn parse_bar_at(
     let high = required_value(trade_date, "H", high)?;
     let low = required_value(trade_date, "L", low)?;
     let close = required_value(trade_date, "C", close)?;
-    let turnover_rate = required_value(trade_date, "TURNOVER_RATE/TOR", turnover_rate)?;
+    let turnover_rate = required_value(trade_date, "TOR", turnover_rate)?;
 
     for (name, value) in [("O", open), ("H", high), ("L", low), ("C", close)] {
         if !value.is_finite() || value <= 0.0 {

@@ -737,7 +737,6 @@ fn row_data_into_chart_runtime(row_data: RowData) -> Result<Runtime, String> {
     insert_existing_runtime_alias(&mut runtime, "L", "LOW");
     insert_existing_runtime_alias(&mut runtime, "C", "CLOSE");
     insert_existing_runtime_alias(&mut runtime, "V", "VOL");
-    insert_existing_runtime_alias(&mut runtime, "TOR", "TURNOVER_RATE");
 
     Ok(runtime)
 }
@@ -1109,7 +1108,6 @@ fn is_base_runtime_key(key: &str) -> bool {
             | "CHANGE"
             | "PCT_CHG"
             | "TOR"
-            | "TURNOVER_RATE"
     )
 }
 

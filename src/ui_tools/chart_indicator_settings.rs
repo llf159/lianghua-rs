@@ -483,7 +483,6 @@ fn stock_data_indicator_columns_from_all(columns: HashSet<String>) -> Vec<String
         "vol",
         "amount",
         "tor",
-        "turnover_rate",
         "adj_type",
     ];
 

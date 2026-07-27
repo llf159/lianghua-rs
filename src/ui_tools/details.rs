@@ -1492,7 +1492,7 @@ fn build_chart_indicator_row_data_from_items(
         "PRE_CLOSE",
         "CHANGE",
         "PCT_CHG",
-        "TURNOVER_RATE",
+        "TOR",
     ] {
         cols.insert(key.to_string(), Vec::with_capacity(items.len()));
     }
@@ -1539,8 +1539,8 @@ fn build_chart_indicator_row_data_from_items(
         cols.get_mut("PCT_CHG")
             .expect("PCT_CHG should exist")
             .push(pct_chg);
-        cols.get_mut("TURNOVER_RATE")
-            .expect("TURNOVER_RATE should exist")
+        cols.get_mut("TOR")
+            .expect("TOR should exist")
             .push(item.tor);
         for db_col in &compiled.database_indicator_columns {
             let normalized = db_col.to_ascii_uppercase();

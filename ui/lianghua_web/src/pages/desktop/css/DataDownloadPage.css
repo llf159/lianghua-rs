@@ -87,6 +87,10 @@
   display: block;
 }
 
+.data-download-page.is-merged-mode .data-download-status-stack {
+  margin-top: 12px;
+}
+
 .data-download-head {
   display: flex;
   justify-content: space-between;

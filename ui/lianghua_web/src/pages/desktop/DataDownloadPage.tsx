@@ -911,16 +911,14 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
             >
               {missingStockRepair?.missingCount ? `缺失股票补全 (${missingStockRepair.missingCount})` : '缺失股票补全'}
             </button>
-            {!mergedMode ? (
-              <button
-                className="data-download-secondary-btn"
-                type="button"
-                onClick={() => void loadStatus()}
-                disabled={isBusy}
-              >
-                {busyAction === 'loading' ? '刷新中...' : '刷新状态'}
-              </button>
-            ) : null}
+            <button
+              className="data-download-secondary-btn"
+              type="button"
+              onClick={() => void loadStatus()}
+              disabled={isBusy}
+            >
+              {busyAction === 'loading' ? '刷新中...' : '刷新状态'}
+            </button>
           </div>
         </div>
 
@@ -964,75 +962,73 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
             ) : null}
           </div>
 
-          {!mergedMode ? (
-            <div className="data-download-status-stack">
-              <div className="data-download-summary">
-                <div className="data-download-summary-item">
-                  <span>原始库状态</span>
-                  <strong>{formatDbRange(status?.sourceDb)}</strong>
-                  <small>
-                    {status?.sourceDb
-                      ? `${status.sourceDb.distinctTradeDates} 个交易日，${status.sourceDb.rowCount} 行`
-                      : '读取中...'}
-                  </small>
-                </div>
-                <div className="data-download-summary-item">
-                  <span>概念表现库</span>
-                  <strong>{formatDbRange(status?.conceptPerformanceDb)}</strong>
-                  <small>
-                    {status?.conceptPerformanceDb
-                      ? `${status.conceptPerformanceDb.distinctTradeDates} 个交易日，${status.conceptPerformanceDb.rowCount} 行`
-                      : '读取中...'}
-                  </small>
-                </div>
-                <div className="data-download-summary-item">
-                  <span>交易日历</span>
-                  <strong>{formatFileRange(status?.tradeCalendar)}</strong>
-                  <small>
-                    {status?.tradeCalendar
-                      ? `${status.tradeCalendar.rowCount} 行`
-                      : '读取中...'}
-                  </small>
-                </div>
-                <div className="data-download-summary-item">
-                  <span>股票列表</span>
-                  <strong>{formatFileRange(status?.stockList)}</strong>
-                  <small>
-                    {status?.stockList
-                      ? `${status.stockList.rowCount} 行`
-                      : '读取中...'}
-                  </small>
-                </div>
-                <div className="data-download-summary-item">
-                  <span>概念文件</span>
-                  <strong>{formatFileRange(status?.thsConcepts)}</strong>
-                  <small>
-                    {status?.thsConcepts
-                      ? `${status.thsConcepts.rowCount} 行`
-                      : '读取中...'}
-                  </small>
-                </div>
-                <div className="data-download-summary-item">
-                  <span>缺失股票补全</span>
-                  <strong>{formatMissingStockSummary(status)}</strong>
-                  <small>
-                    {status?.missingStockRepair
-                      ? status.missingStockRepair.detail
-                      : '读取中...'}
-                  </small>
-                </div>
-                <div className="data-download-summary-item">
-                  <span>新筹码维护</span>
-                  <strong>{formatCyqChenMaintenanceSummary(status)}</strong>
-                  <small>
-                    {status?.cyqChenMaintenance
-                      ? status.cyqChenMaintenance.detail
-                      : '读取中...'}
-                  </small>
-                </div>
+          <div className="data-download-status-stack">
+            <div className="data-download-summary">
+              <div className="data-download-summary-item">
+                <span>原始库状态</span>
+                <strong>{formatDbRange(status?.sourceDb)}</strong>
+                <small>
+                  {status?.sourceDb
+                    ? `${status.sourceDb.distinctTradeDates} 个交易日，${status.sourceDb.rowCount} 行`
+                    : '读取中...'}
+                </small>
+              </div>
+              <div className="data-download-summary-item">
+                <span>概念表现库</span>
+                <strong>{formatDbRange(status?.conceptPerformanceDb)}</strong>
+                <small>
+                  {status?.conceptPerformanceDb
+                    ? `${status.conceptPerformanceDb.distinctTradeDates} 个交易日，${status.conceptPerformanceDb.rowCount} 行`
+                    : '读取中...'}
+                </small>
+              </div>
+              <div className="data-download-summary-item">
+                <span>交易日历</span>
+                <strong>{formatFileRange(status?.tradeCalendar)}</strong>
+                <small>
+                  {status?.tradeCalendar
+                    ? `${status.tradeCalendar.rowCount} 行`
+                    : '读取中...'}
+                </small>
+              </div>
+              <div className="data-download-summary-item">
+                <span>股票列表</span>
+                <strong>{formatFileRange(status?.stockList)}</strong>
+                <small>
+                  {status?.stockList
+                    ? `${status.stockList.rowCount} 行`
+                    : '读取中...'}
+                </small>
+              </div>
+              <div className="data-download-summary-item">
+                <span>概念文件</span>
+                <strong>{formatFileRange(status?.thsConcepts)}</strong>
+                <small>
+                  {status?.thsConcepts
+                    ? `${status.thsConcepts.rowCount} 行`
+                    : '读取中...'}
+                </small>
+              </div>
+              <div className="data-download-summary-item">
+                <span>缺失股票补全</span>
+                <strong>{formatMissingStockSummary(status)}</strong>
+                <small>
+                  {status?.missingStockRepair
+                    ? status.missingStockRepair.detail
+                    : '读取中...'}
+                </small>
+              </div>
+              <div className="data-download-summary-item">
+                <span>新筹码维护</span>
+                <strong>{formatCyqChenMaintenanceSummary(status)}</strong>
+                <small>
+                  {status?.cyqChenMaintenance
+                    ? status.cyqChenMaintenance.detail
+                    : '读取中...'}
+                </small>
               </div>
             </div>
-          ) : null}
+          </div>
         </div>
 
         <div className="data-download-panel-grid">

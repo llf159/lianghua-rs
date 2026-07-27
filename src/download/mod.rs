@@ -107,15 +107,15 @@ pub struct DailyBasicRow {
 pub struct MoneyflowRow {
     pub ts_code: String,
     pub trade_date: String,
-    pub buy_sm_vol: Option<f64>,
-    pub sell_sm_vol: Option<f64>,
-    pub buy_md_vol: Option<f64>,
-    pub sell_md_vol: Option<f64>,
-    pub buy_lg_vol: Option<f64>,
-    pub sell_lg_vol: Option<f64>,
-    pub buy_elg_vol: Option<f64>,
-    pub sell_elg_vol: Option<f64>,
-    pub net_mf_vol: Option<f64>,
+    pub b_sm_v: Option<f64>,
+    pub s_sm_v: Option<f64>,
+    pub b_md_v: Option<f64>,
+    pub s_md_v: Option<f64>,
+    pub b_lg_v: Option<f64>,
+    pub s_lg_v: Option<f64>,
+    pub b_elg_v: Option<f64>,
+    pub s_elg_v: Option<f64>,
+    pub net_mf_v: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1081,15 +1081,15 @@ pub fn parse_moneyflow_rows(table: &TushareTable) -> Result<Vec<MoneyflowRow>, S
         rows.push(MoneyflowRow {
             ts_code: TushareTable::value_as_string(&item[ts_code_idx], "ts_code")?,
             trade_date: TushareTable::value_as_string(&item[trade_date_idx], "trade_date")?,
-            buy_sm_vol: values.next().transpose()?.flatten(),
-            sell_sm_vol: values.next().transpose()?.flatten(),
-            buy_md_vol: values.next().transpose()?.flatten(),
-            sell_md_vol: values.next().transpose()?.flatten(),
-            buy_lg_vol: values.next().transpose()?.flatten(),
-            sell_lg_vol: values.next().transpose()?.flatten(),
-            buy_elg_vol: values.next().transpose()?.flatten(),
-            sell_elg_vol: values.next().transpose()?.flatten(),
-            net_mf_vol: values.next().transpose()?.flatten(),
+            b_sm_v: values.next().transpose()?.flatten(),
+            s_sm_v: values.next().transpose()?.flatten(),
+            b_md_v: values.next().transpose()?.flatten(),
+            s_md_v: values.next().transpose()?.flatten(),
+            b_lg_v: values.next().transpose()?.flatten(),
+            s_lg_v: values.next().transpose()?.flatten(),
+            b_elg_v: values.next().transpose()?.flatten(),
+            s_elg_v: values.next().transpose()?.flatten(),
+            net_mf_v: values.next().transpose()?.flatten(),
         });
     }
 
@@ -1834,19 +1834,19 @@ mod tests {
         }
     }
 
-    fn moneyflow_row(ts_code: &str, trade_date: &str, net_mf_vol: f64) -> MoneyflowRow {
+    fn moneyflow_row(ts_code: &str, trade_date: &str, net_mf_v: f64) -> MoneyflowRow {
         MoneyflowRow {
             ts_code: ts_code.to_string(),
             trade_date: trade_date.to_string(),
-            buy_sm_vol: Some(1.0),
-            sell_sm_vol: Some(3.0),
-            buy_md_vol: Some(5.0),
-            sell_md_vol: Some(7.0),
-            buy_lg_vol: Some(9.0),
-            sell_lg_vol: Some(11.0),
-            buy_elg_vol: Some(13.0),
-            sell_elg_vol: Some(15.0),
-            net_mf_vol: Some(net_mf_vol),
+            b_sm_v: Some(1.0),
+            s_sm_v: Some(3.0),
+            b_md_v: Some(5.0),
+            s_md_v: Some(7.0),
+            b_lg_v: Some(9.0),
+            s_lg_v: Some(11.0),
+            b_elg_v: Some(13.0),
+            s_elg_v: Some(15.0),
+            net_mf_v: Some(net_mf_v),
         }
     }
 
@@ -1866,7 +1866,7 @@ mod tests {
             rows[1]
                 .moneyflow
                 .as_ref()
-                .and_then(|moneyflow| moneyflow.net_mf_vol),
+                .and_then(|moneyflow| moneyflow.net_mf_v),
             Some(123.45)
         );
     }
@@ -1955,8 +1955,8 @@ mod tests {
         let rows = parse_moneyflow_rows(&table).expect("parse moneyflow");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].ts_code, "000001.SZ");
-        assert_eq!(rows[0].sell_sm_vol, None);
-        assert_eq!(rows[0].net_mf_vol, Some(17.0));
+        assert_eq!(rows[0].s_sm_v, None);
+        assert_eq!(rows[0].net_mf_v, Some(17.0));
     }
 
     #[test]

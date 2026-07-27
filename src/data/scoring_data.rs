@@ -862,7 +862,6 @@ pub(crate) fn rank_scene_rows(rows: &mut [SceneDetails]) {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap,
         fs,
         sync::mpsc::channel,
         time::{SystemTime, UNIX_EPOCH},
@@ -872,9 +871,9 @@ mod tests {
 
     use super::{
         SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage, init_result_db,
-        rank_scene_rows, row_into_rt, write_score_batches_from_channel,
+        rank_scene_rows, write_score_batches_from_channel,
     };
-    use crate::{data::RowData, expr::eval::Value, scoring::TieBreakWay};
+    use crate::scoring::TieBreakWay;
 
     fn scene_row(
         ts_code: &str,
@@ -933,20 +932,6 @@ mod tests {
             .find(|row| row.scene_name == "防守")
             .and_then(|row| row.scene_rank);
         assert_eq!(defense_rank, Some(1));
-    }
-
-    #[test]
-    fn row_into_rt_adds_turnover_aliases() {
-        let row_data = RowData {
-            trade_dates: vec!["20240102".to_string()],
-            cols: HashMap::from([("TOR".to_string(), vec![Some(3.2)])]),
-        };
-        let rt = row_into_rt(row_data).expect("runtime");
-
-        let Some(Value::NumSeries(series)) = rt.vars.get("TURNOVER_RATE") else {
-            panic!("missing TURNOVER_RATE alias");
-        };
-        assert_eq!(series.as_slice(), &[Some(3.2)]);
     }
 
     #[test]
@@ -1324,19 +1309,7 @@ pub fn row_into_rt(row_data: RowData) -> Result<Runtime, String> {
         rt.vars.insert(name, n_series);
     }
 
-    insert_existing_runtime_alias(&mut rt, "TOR", "TURNOVER_RATE");
-    insert_existing_runtime_alias(&mut rt, "TURNOVER_RATE", "TOR");
-
     Ok(rt)
-}
-
-fn insert_existing_runtime_alias(rt: &mut Runtime, from: &str, to: &str) {
-    if rt.vars.contains_key(to) {
-        return;
-    }
-    if let Some(value) = rt.vars.get(from).cloned() {
-        rt.vars.insert(to.to_string(), value);
-    }
 }
 
 pub fn cache_rule_build(

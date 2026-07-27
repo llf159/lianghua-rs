@@ -47,7 +47,7 @@ const INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS: [&str; 10] = [
     "REALTIME_FALL_FROM_HIGH_PCT",
 ];
 const INTRADAY_TEMPLATE_RUNTIME_ALIASES: [(&str, &str); 0] = [];
-const RUNTIME_INPUT_KEYS: [&str; 11] = [
+const RUNTIME_INPUT_KEYS: [&str; 10] = [
     "O",
     "H",
     "L",
@@ -57,7 +57,6 @@ const RUNTIME_INPUT_KEYS: [&str; 11] = [
     "PRE_CLOSE",
     "CHANGE",
     "PCT_CHG",
-    "TURNOVER_RATE",
     "TOR",
 ];
 const INTRADAY_TEMPLATE_PAR_CHUNK_SIZE: usize = 64;
@@ -961,7 +960,6 @@ pub(crate) fn build_quote_only_runtime_row_data(
     cols.insert("PRE_CLOSE".to_string(), vec![Some(quote.pre_close)]);
     cols.insert("CHANGE".to_string(), vec![Some(change)]);
     cols.insert("PCT_CHG".to_string(), vec![pct_chg]);
-    cols.insert("TURNOVER_RATE".to_string(), vec![None]);
     cols.insert("TOR".to_string(), vec![None]);
 
     let out = RowData {
@@ -1012,7 +1010,6 @@ pub(crate) fn merge_realtime_quote_into_row_data(
         ("PRE_CLOSE", Some(quote.pre_close)),
         ("CHANGE", Some(change)),
         ("PCT_CHG", pct_chg),
-        ("TURNOVER_RATE", None),
         ("TOR", None),
     ] {
         let series = row_data

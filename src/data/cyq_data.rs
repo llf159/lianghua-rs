@@ -36,7 +36,7 @@ const CYQ_GROUP_SIZE: usize = 128;
 const CYQ_GROUP_SIZE_INCREMENTAL: usize = 8;
 const CYQ_QUEUE_BOUND: usize = 8;
 const CYQ_FLUSH_BATCH_SIZE: usize = 32;
-const CYQ_RUNTIME_KEYS: [&str; 5] = ["O", "H", "L", "C", "TURNOVER_RATE"];
+const CYQ_RUNTIME_KEYS: [&str; 5] = ["O", "H", "L", "C", "TOR"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CyqRebuildSummary {
