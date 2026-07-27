@@ -12,7 +12,7 @@ use crate::{
     data::{cyq_chen_db_path, cyq_db_path, result_db_path, score_rule_path, source_db_path},
     download::ind_calc::{cache_ind_build, calc_inds_with_cache},
     scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map},
-    ui_tools_feat::{
+    ui_tools::{
         build_area_map, build_circ_mv_map, build_concepts_map, build_industry_map,
         build_most_related_concept_map, build_name_map, build_total_mv_map,
         chart_indicator::{
@@ -987,13 +987,10 @@ fn build_basic_detail_overview(
 
 #[cfg(test)]
 fn default_kline_panels() -> Vec<DetailKlinePanel> {
-    let config = crate::ui_tools_feat::chart_indicator::load_chart_indicator_config("")
-        .unwrap_or_else(|_| {
-            crate::ui_tools_feat::chart_indicator::default_chart_indicator_config()
-        });
-    let compiled =
-        crate::ui_tools_feat::chart_indicator::compile_chart_indicator_config(&config, None)
-            .expect("default chart indicator config should compile");
+    let config = crate::ui_tools::chart_indicator::load_chart_indicator_config("")
+        .unwrap_or_else(|_| crate::ui_tools::chart_indicator::default_chart_indicator_config());
+    let compiled = crate::ui_tools::chart_indicator::compile_chart_indicator_config(&config, None)
+        .expect("default chart indicator config should compile");
     detail_kline_panels_from_compiled(&compiled)
 }
 

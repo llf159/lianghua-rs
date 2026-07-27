@@ -19,7 +19,7 @@ use crate::{
         load_trade_date_list, source_db_path,
     },
     scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map},
-    ui_tools_feat::{details::DetailKlinePayload, watch_observe::normalize_ts_code},
+    ui_tools::{details::DetailKlinePayload, watch_observe::normalize_ts_code},
 };
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
@@ -1074,9 +1074,9 @@ fn build_detail_kline_payload(
         .to_str()
         .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
     let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
-    let name_map = crate::ui_tools_feat::build_name_map(source_path).unwrap_or_default();
+    let name_map = crate::ui_tools::build_name_map(source_path).unwrap_or_default();
     let watermark_name = name_map.get(ts_code).cloned();
-    let mut payload = crate::ui_tools_feat::details::query_kline(
+    let mut payload = crate::ui_tools::details::query_kline(
         &conn,
         source_path,
         ts_code,

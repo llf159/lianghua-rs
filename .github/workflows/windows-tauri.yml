@@ -23,7 +23,7 @@ jobs:
         with:
           node-version: lts/*
           cache: npm
-          cache-dependency-path: ui/lianghua_web_feat/package-lock.json
+          cache-dependency-path: ui/lianghua_web/package-lock.json
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -33,14 +33,14 @@ jobs:
         with:
           workspaces: |
             . -> target
-            ui/lianghua_web_feat/src-tauri -> target
+            ui/lianghua_web/src-tauri -> target
 
       - name: Install frontend dependencies
-        working-directory: ui/lianghua_web_feat
+        working-directory: ui/lianghua_web
         run: npm ci
 
       - name: Build Tauri app (Windows)
-        working-directory: ui/lianghua_web_feat
+        working-directory: ui/lianghua_web
         run: npm run tauri build
 
       - name: Upload Windows bundles
@@ -48,7 +48,7 @@ jobs:
         with:
           name: tauri-windows-bundles
           path: |
-            ui/lianghua_web_feat/src-tauri/target/release/bundle/**/*.msi
-            ui/lianghua_web_feat/src-tauri/target/release/bundle/**/*.exe
-            ui/lianghua_web_feat/src-tauri/target/release/bundle/**/*.nsis.zip
+            ui/lianghua_web/src-tauri/target/release/bundle/**/*.msi
+            ui/lianghua_web/src-tauri/target/release/bundle/**/*.exe
+            ui/lianghua_web/src-tauri/target/release/bundle/**/*.nsis.zip
           if-no-files-found: error

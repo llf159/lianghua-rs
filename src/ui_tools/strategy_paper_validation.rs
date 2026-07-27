@@ -26,7 +26,7 @@ use crate::{
         load_st_list, load_total_share_map, rt_max_len,
     },
     simulate::DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
-    ui_tools_feat::watch_observe::normalize_ts_code,
+    ui_tools::watch_observe::normalize_ts_code,
     utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
 };
 

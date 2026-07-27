@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     data::source_db_path,
-    ui_tools_feat::chart_indicator::{
+    ui_tools::chart_indicator::{
         ChartIndicatorConfig, ChartPanelConfig, ChartPanelKind, ChartPanelRole, ChartSeriesKind,
         ChartTooltipFormat, chart_indicator_config_path, compile_chart_indicator_config,
         default_chart_indicator_config, normalize_chart_indicator_config,
@@ -278,12 +278,9 @@ fn serialize_chart_indicator_config(config: &ChartIndicatorConfig) -> Result<Str
                 lines.push(format!(
                     "position = {}",
                     toml_string(match position {
-                        crate::ui_tools_feat::chart_indicator::ChartMarkerPosition::Above =>
-                            "above",
-                        crate::ui_tools_feat::chart_indicator::ChartMarkerPosition::Below =>
-                            "below",
-                        crate::ui_tools_feat::chart_indicator::ChartMarkerPosition::Value =>
-                            "value",
+                        crate::ui_tools::chart_indicator::ChartMarkerPosition::Above => "above",
+                        crate::ui_tools::chart_indicator::ChartMarkerPosition::Below => "below",
+                        crate::ui_tools::chart_indicator::ChartMarkerPosition::Value => "value",
                     })?
                 ));
             }
@@ -291,12 +288,12 @@ fn serialize_chart_indicator_config(config: &ChartIndicatorConfig) -> Result<Str
                 lines.push(format!(
                     "shape = {}",
                     toml_string(match shape {
-                        crate::ui_tools_feat::chart_indicator::ChartMarkerShape::Dot => "dot",
-                        crate::ui_tools_feat::chart_indicator::ChartMarkerShape::TriangleUp =>
+                        crate::ui_tools::chart_indicator::ChartMarkerShape::Dot => "dot",
+                        crate::ui_tools::chart_indicator::ChartMarkerShape::TriangleUp =>
                             "triangle_up",
-                        crate::ui_tools_feat::chart_indicator::ChartMarkerShape::TriangleDown =>
+                        crate::ui_tools::chart_indicator::ChartMarkerShape::TriangleDown =>
                             "triangle_down",
-                        crate::ui_tools_feat::chart_indicator::ChartMarkerShape::Flag => "flag",
+                        crate::ui_tools::chart_indicator::ChartMarkerShape::Flag => "flag",
                     })?
                 ));
             }

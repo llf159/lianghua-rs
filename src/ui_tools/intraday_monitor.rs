@@ -23,7 +23,7 @@ use crate::{
         inject_optional_cyq_chen_fields, inject_stock_extra_fields, load_st_list,
         load_total_share_map, rt_max_len,
     },
-    ui_tools_feat::{
+    ui_tools::{
         build_concepts_map, build_name_map, build_total_mv_map, filter_mv,
         realtime::{
             fetch_realtime_quote_map, fetch_tencent_realtime_quote_map, normalize_quote_trade_date,

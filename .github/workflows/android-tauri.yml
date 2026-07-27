@@ -108,7 +108,7 @@ jobs:
         with:
           node-version: lts/*
           cache: npm
-          cache-dependency-path: ui/lianghua_web_feat/package-lock.json
+          cache-dependency-path: ui/lianghua_web/package-lock.json
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -120,7 +120,7 @@ jobs:
         with:
           workspaces: |
             . -> target
-            ui/lianghua_web_feat/src-tauri -> target
+            ui/lianghua_web/src-tauri -> target
 
       - name: Install Cargo Tauri CLI
         run: cargo install tauri-cli --locked --version 2.10.1
@@ -129,11 +129,11 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Install frontend dependencies
-        working-directory: ui/lianghua_web_feat
+        working-directory: ui/lianghua_web
         run: npm ci
 
       - name: Build Tauri app (Android)
-        working-directory: ui/lianghua_web_feat
+        working-directory: ui/lianghua_web
         shell: bash
         run: |
           args=(android build --ci)
@@ -159,6 +159,6 @@ jobs:
         with:
           name: tauri-android-${{ inputs.build_variant }}-${{ inputs.android_targets }}
           path: |
-            ui/lianghua_web_feat/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
-            ui/lianghua_web_feat/src-tauri/gen/android/app/build/outputs/bundle/**/*.aab
+            ui/lianghua_web/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+            ui/lianghua_web/src-tauri/gen/android/app/build/outputs/bundle/**/*.aab
           if-no-files-found: error

@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use lianghua_rs::{
     download::runner::DownloadProgress as CoreDownloadProgress,
-    ui_tools_feat::data_download::{
+    ui_tools::data_download::{
         get_data_download_status as core_get_data_download_status,
         get_indicator_manage_page as core_get_indicator_manage_page,
         prepare_concept_most_related_repair_run as core_prepare_concept_most_related_repair_run,

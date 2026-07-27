@@ -25,7 +25,7 @@ use crate::{
         CyqChenFieldInjector, inject_empty_optional_cyq_chen_fields, inject_latest_num_fields,
         inject_stock_extra_fields, load_total_share_map, rt_max_len,
     },
-    ui_tools_feat::{
+    ui_tools::{
         build_concepts_map,
         intraday_monitor::{
             CompiledIntradayMonitorTemplate, DEFAULT_ADJ_TYPE, IntradayMonitorTemplate,
@@ -1759,7 +1759,7 @@ mod tests {
     use super::*;
     use crate::{
         expr::parser::{Parser, lex_all},
-        ui_tools_feat::intraday_monitor::compile_intraday_templates,
+        ui_tools::intraday_monitor::compile_intraday_templates,
     };
 
     fn sample_meta() -> SourceMetaCacheEntry {
