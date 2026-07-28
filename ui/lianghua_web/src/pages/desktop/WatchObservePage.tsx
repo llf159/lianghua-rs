@@ -46,6 +46,7 @@ type ViewMode = "db" | "realtime";
 type WatchObserveSortKey =
   | "latestClose"
   | "latestChangePct"
+  | "return3dPct"
   | "volumeRatio"
   | "postWatchReturnPct"
   | "todayRank";
@@ -195,6 +196,7 @@ export default function WatchObservePage() {
       ({
         latestClose: { value: (row) => row.latestClose },
         latestChangePct: { value: (row) => row.latestChangePct },
+        return3dPct: { value: (row) => row.return3dPct },
         volumeRatio: { value: (row) => row.volumeRatio },
         postWatchReturnPct: { value: (row) => row.postWatchReturnPct },
         todayRank: { value: (row) => row.todayRank },
@@ -729,20 +731,22 @@ export default function WatchObservePage() {
             >
               <table
                 className="watch-observe-table"
-                style={{ minWidth: isDeleteMode ? "1334px" : "1286px" }}
+                style={{ minWidth: isDeleteMode ? "1482px" : "1434px" }}
               >
                 <colgroup>
                   {isDeleteMode ? <col style={{ width: "48px" }} /> : null}
-                  <col style={{ width: "96px" }} />
-                  <col style={{ width: "88px" }} />
+                  <col style={{ width: "94px" }} />
+                  <col style={{ width: "80px" }} />
+                  <col style={{ width: "116px" }} />
                   <col style={{ width: "104px" }} />
-                  <col style={{ width: "96px" }} />
-                  <col style={{ width: "88px" }} />
-                  <col style={{ width: "92px" }} />
-                  <col style={{ width: "118px" }} />
-                  <col style={{ width: "118px" }} />
-                  <col style={{ width: "120px" }} />
-                  <col style={{ width: "152px" }} />
+                  <col style={{ width: "104px" }} />
+                  <col style={{ width: "72px" }} />
+                  <col style={{ width: "90px" }} />
+                  <col style={{ width: "116px" }} />
+                  <col style={{ width: "116px" }} />
+                  <col style={{ width: "116px" }} />
+                  <col style={{ width: "170px" }} />
+                  <col style={{ width: "116px" }} />
                   <col />
                 </colgroup>
                 <thead>
@@ -778,6 +782,20 @@ export default function WatchObservePage() {
                         direction={sortDirection}
                         onClick={() => toggleSort("latestChangePct")}
                         title={`按${latestChangeHeader}排序`}
+                      />
+                    </th>
+                    <th
+                      aria-sort={getAriaSort(
+                        sortKey === "return3dPct",
+                        sortDirection,
+                      )}
+                    >
+                      <TableSortButton
+                        label="三日涨幅"
+                        isActive={sortKey === "return3dPct"}
+                        direction={sortDirection}
+                        onClick={() => toggleSort("return3dPct")}
+                        title="按三日涨幅排序"
                       />
                     </th>
                     <th
@@ -824,6 +842,7 @@ export default function WatchObservePage() {
                         title={`按${rankHeader}排序`}
                       />
                     </th>
+                    <th>最好场景排名</th>
                     <th>标签</th>
                     <th>概念</th>
                   </tr>
@@ -843,7 +862,7 @@ export default function WatchObservePage() {
                       <Fragment key={row.tsCode}>
                         {isGroupStart ? (
                           <tr className="watch-observe-date-group">
-                            <td colSpan={isDeleteMode ? 12 : 11}>
+                            <td colSpan={isDeleteMode ? 14 : 13}>
                               <span>自选日期</span>
                               <strong>{watchDate}</strong>
                               <span>{watchDateCounts.get(watchDate) ?? 0} 只</span>
@@ -909,6 +928,12 @@ export default function WatchObservePage() {
                           title={formatPercent(row.latestChangePct)}
                         >
                           {formatPercent(row.latestChangePct)}
+                        </td>
+                        <td
+                          className={getPercentClassName(row.return3dPct)}
+                          title={formatPercent(row.return3dPct)}
+                        >
+                          {formatPercent(row.return3dPct)}
                         </td>
                         <td title={formatRatio(row.volumeRatio)}>
                           {formatRatio(row.volumeRatio)}
@@ -982,6 +1007,9 @@ export default function WatchObservePage() {
                         </td>
                         <td title={formatNumber(row.todayRank, 0)}>
                           {formatNumber(row.todayRank, 0)}
+                        </td>
+                        <td title={row.sceneMarker ?? "--"}>
+                          {row.sceneMarker ?? "--"}
                         </td>
                         <td title={row.tag || "添加标签"}>
                           {isDeleteMode ? (

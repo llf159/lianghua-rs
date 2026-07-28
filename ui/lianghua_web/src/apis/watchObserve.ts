@@ -14,9 +14,11 @@ export type WatchObserveRow = {
   latestClose: number | null
   latestChangePct: number | null
   volumeRatio: number | null
+  return3dPct: number | null
   watchDate: string
   postWatchReturnPct: number | null
   todayRank: number | null
+  sceneMarker: string | null
   tag: string
   concept: string
   markedDate: string | null
@@ -43,6 +45,19 @@ export type WatchObserveInput = {
 
 let watchObservePreloadPromise: Promise<WatchObserveRow[]> | null = null
 let watchObservePreloadKey = ''
+const ALL_MARKET_SCENE_STAGE_THRESHOLD_KEY = 'am_scene_stage_threshold'
+
+function readSceneStageThreshold() {
+  try {
+    const value = localStorage.getItem(ALL_MARKET_SCENE_STAGE_THRESHOLD_KEY)
+    if (value === 'observe' || value === 'trigger' || value === 'confirm') {
+      return value
+    }
+  } catch {
+    // localStorage unavailable
+  }
+  return 'trigger'
+}
 
 function resolveSourcePath(sourcePath?: string | null) {
   const trimmed = sourcePath?.trim() ?? ''
@@ -86,6 +101,7 @@ async function listHydratedWatchObserveRows(
   return invoke<WatchObserveRow[]>('list_watch_observe_rows', {
     sourcePath: resolveSourcePath(sourcePath),
     referenceTradeDate: referenceTradeDate?.trim() || undefined,
+    sceneStageThreshold: readSceneStageThreshold(),
     rows: rows.map(buildStoredRowPayloadFromRow),
   })
 }
@@ -98,6 +114,7 @@ async function refreshHydratedWatchObserveRows(
   return invoke<WatchObserveSnapshotData>('refresh_watch_observe_rows', {
     sourcePath: resolveSourcePath(sourcePath),
     referenceTradeDate: referenceTradeDate?.trim() || undefined,
+    sceneStageThreshold: readSceneStageThreshold(),
     rows: rows.map(buildStoredRowPayloadFromRow),
   })
 }

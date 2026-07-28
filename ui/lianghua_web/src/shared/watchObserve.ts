@@ -9,9 +9,11 @@ export type WatchObserveRow = {
   latestClose: number | null
   latestChangePct: number | null
   volumeRatio: number | null
+  return3dPct: number | null
   watchDate: string
   postWatchReturnPct: number | null
   todayRank: number | null
+  sceneMarker: string | null
   tag: string
   concept: string
   markedDate: string | null
@@ -28,9 +30,11 @@ function mergeWatchObserveRow(primary: WatchObserveRow, secondary: WatchObserveR
     latestClose: primary.latestClose ?? secondary.latestClose,
     latestChangePct: primary.latestChangePct ?? secondary.latestChangePct,
     volumeRatio: primary.volumeRatio ?? secondary.volumeRatio,
+    return3dPct: primary.return3dPct ?? secondary.return3dPct,
     watchDate: primary.watchDate || secondary.watchDate,
     postWatchReturnPct: primary.postWatchReturnPct ?? secondary.postWatchReturnPct,
     todayRank: primary.todayRank ?? secondary.todayRank,
+    sceneMarker: primary.sceneMarker ?? secondary.sceneMarker,
     tag: primary.tag || secondary.tag,
     concept: primary.concept || secondary.concept,
     markedDate: primary.markedDate ?? secondary.markedDate,
@@ -62,6 +66,10 @@ function normalizeRowInput(
       typeof input.volumeRatio === 'number' && Number.isFinite(input.volumeRatio)
         ? input.volumeRatio
         : null,
+    return3dPct:
+      typeof input.return3dPct === 'number' && Number.isFinite(input.return3dPct)
+        ? input.return3dPct
+        : null,
     watchDate: normalizeDateValue(input.watchDate ?? ''),
     postWatchReturnPct:
       typeof input.postWatchReturnPct === 'number' && Number.isFinite(input.postWatchReturnPct)
@@ -69,6 +77,7 @@ function normalizeRowInput(
         : null,
     todayRank:
       typeof input.todayRank === 'number' && Number.isFinite(input.todayRank) ? input.todayRank : null,
+    sceneMarker: input.sceneMarker?.trim() || null,
     tag: input.tag?.trim() ?? '',
     concept: input.concept?.trim() ?? '',
     markedDate: (() => {
@@ -102,11 +111,13 @@ function buildWatchRowFromCacheRecord(record: Record<string, unknown>) {
     latestClose: normalizeNumberValue(record.latest_close),
     latestChangePct: normalizeNumberValue(record.latest_change_pct),
     volumeRatio: normalizeNumberValue(record.volume_ratio),
+    return3dPct: normalizeNumberValue(record.return_3d_pct),
     watchDate: normalizeDateValue(
       normalizeTextValue(record.watch_date ?? record.added_date),
     ),
     postWatchReturnPct: normalizeNumberValue(record.post_watch_return_pct),
     todayRank: normalizeNumberValue(record.today_rank),
+    sceneMarker: normalizeTextValue(record.scene_marker) || null,
     tag: normalizeTextValue(record.tag),
     concept: normalizeTextValue(record.concept),
     markedDate: markedDate === '' ? null : markedDate,
@@ -156,9 +167,11 @@ export function writeWatchObserveRowsToCache(rows: WatchObserveRow[]) {
     latest_close: row.latestClose,
     latest_change_pct: row.latestChangePct,
     volume_ratio: row.volumeRatio,
+    return_3d_pct: row.return3dPct,
     watch_date: row.watchDate || undefined,
     post_watch_return_pct: row.postWatchReturnPct,
     today_rank: row.todayRank,
+    scene_marker: row.sceneMarker,
     tag: row.tag || undefined,
     concept: row.concept || undefined,
     marked_date: row.markedDate || undefined,

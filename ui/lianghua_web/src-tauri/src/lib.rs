@@ -2073,13 +2073,19 @@ fn list_watch_observe_rows(
     app: tauri::AppHandle,
     source_path: Option<String>,
     reference_trade_date: Option<String>,
+    scene_stage_threshold: Option<String>,
     rows: Option<Vec<WatchObserveUpsertPayload>>,
 ) -> Result<Vec<CoreWatchObserveRow>, String> {
     let stored_rows = match rows {
         Some(rows) => normalize_watch_observe_rows_payload(rows)?,
         None => read_watch_observe_storage(&app)?,
     };
-    core_hydrate_watch_observe_rows(source_path.as_deref(), &stored_rows, reference_trade_date)
+    core_hydrate_watch_observe_rows(
+        source_path.as_deref(),
+        &stored_rows,
+        reference_trade_date,
+        scene_stage_threshold,
+    )
 }
 
 #[tauri::command]
@@ -2087,13 +2093,19 @@ fn refresh_watch_observe_rows(
     app: tauri::AppHandle,
     source_path: Option<String>,
     reference_trade_date: Option<String>,
+    scene_stage_threshold: Option<String>,
     rows: Option<Vec<WatchObserveUpsertPayload>>,
 ) -> Result<WatchObserveSnapshotData, String> {
     let stored_rows = match rows {
         Some(rows) => normalize_watch_observe_rows_payload(rows)?,
         None => read_watch_observe_storage(&app)?,
     };
-    core_refresh_watch_observe_rows(source_path.as_deref(), &stored_rows, reference_trade_date)
+    core_refresh_watch_observe_rows(
+        source_path.as_deref(),
+        &stored_rows,
+        reference_trade_date,
+        scene_stage_threshold,
+    )
 }
 
 #[tauri::command]
@@ -2115,7 +2127,7 @@ fn upsert_watch_observe_row(
     }
 
     write_watch_observe_storage(&app, &rows)?;
-    core_hydrate_watch_observe_rows(source_path.as_deref(), &rows, None)
+    core_hydrate_watch_observe_rows(source_path.as_deref(), &rows, None, None)
 }
 
 #[tauri::command]
@@ -2141,7 +2153,7 @@ fn merge_watch_observe_rows(
     }
 
     write_watch_observe_storage(&app, &saved_rows)?;
-    core_hydrate_watch_observe_rows(source_path.as_deref(), &saved_rows, None)
+    core_hydrate_watch_observe_rows(source_path.as_deref(), &saved_rows, None, None)
 }
 
 #[tauri::command]
@@ -2163,7 +2175,7 @@ fn update_watch_observe_tag(
 
     existing_row.tag = tag.trim().to_string();
     write_watch_observe_storage(&app, &rows)?;
-    core_hydrate_watch_observe_rows(source_path.as_deref(), &rows, None)
+    core_hydrate_watch_observe_rows(source_path.as_deref(), &rows, None, None)
 }
 
 #[tauri::command]
@@ -2187,7 +2199,7 @@ fn update_watch_observe_marked_date(
 
     existing_row.marked_date = Some(normalized_marked_date);
     write_watch_observe_storage(&app, &rows)?;
-    core_hydrate_watch_observe_rows(source_path.as_deref(), &rows, None)
+    core_hydrate_watch_observe_rows(source_path.as_deref(), &rows, None, None)
 }
 
 #[tauri::command]
@@ -2207,7 +2219,7 @@ fn remove_watch_observe_rows(
             .any(|ts_code| ts_code == &item.ts_code)
     });
     write_watch_observe_storage(&app, &rows)?;
-    core_hydrate_watch_observe_rows(source_path.as_deref(), &rows, None)
+    core_hydrate_watch_observe_rows(source_path.as_deref(), &rows, None, None)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

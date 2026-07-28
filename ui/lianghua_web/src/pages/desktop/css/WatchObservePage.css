@@ -195,7 +195,7 @@
 }
 
 .watch-observe-date-group td {
-  padding: 9px 12px;
+  padding: 4px 12px;
   border-top: 2px solid var(--theme-orange-300);
   border-bottom: 1px solid var(--theme-orange-200);
   background: linear-gradient(
@@ -369,7 +369,7 @@
 
 .watch-observe-tag-input {
   width: 100%;
-  min-width: 136px;
+  min-width: 96px;
   border: 1px solid #c6d0da;
   border-radius: 8px;
   padding: 6px 8px;

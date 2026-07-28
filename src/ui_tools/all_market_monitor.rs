@@ -413,7 +413,7 @@ fn cached_rank_context(
     Ok(ranks)
 }
 
-fn scene_stage_level(raw: Option<&str>) -> i32 {
+pub(super) fn scene_stage_level(raw: Option<&str>) -> i32 {
     match raw
         .map(|value| value.trim().to_ascii_lowercase())
         .as_deref()
@@ -426,7 +426,7 @@ fn scene_stage_level(raw: Option<&str>) -> i32 {
     }
 }
 
-fn parse_scene_stage_threshold(raw: Option<&str>) -> i32 {
+pub(super) fn parse_scene_stage_threshold(raw: Option<&str>) -> i32 {
     match raw
         .map(|value| value.trim().to_ascii_lowercase())
         .as_deref()
