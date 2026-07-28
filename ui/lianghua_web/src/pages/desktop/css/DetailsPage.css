@@ -1178,6 +1178,11 @@
   stroke-dasharray: 6 4;
 }
 
+.details-chart-annotation-line {
+  pointer-events: none;
+  vector-effect: non-scaling-stroke;
+}
+
 .details-chart-zero-line {
   stroke: rgba(68, 87, 111, 0.28);
   stroke-width: 1;
@@ -1298,7 +1303,8 @@
 }
 
 .details-chart-marker-dot,
-.details-chart-marker-flag {
+.details-chart-marker-flag,
+.details-chart-marker-square {
   border-radius: 999px;
   background: var(--details-chart-marker-color);
 }
@@ -1306,6 +1312,36 @@
 .details-chart-marker-flag {
   width: 10px;
   height: 10px;
+}
+
+.details-chart-marker-square {
+  border-radius: 1px;
+}
+
+.details-chart-marker-diamond {
+  width: 10px;
+  height: 10px;
+}
+
+.details-chart-marker-diamond::before {
+  position: absolute;
+  inset: 1px;
+  background: var(--details-chart-marker-color);
+  content: "";
+  transform: rotate(45deg);
+}
+
+.details-chart-marker-star {
+  width: 14px;
+  height: 14px;
+  color: var(--details-chart-marker-color);
+  font-size: 15px;
+  line-height: 14px;
+  text-align: center;
+}
+
+.details-chart-marker-star::before {
+  content: "★";
 }
 
 .details-chart-marker-triangle_up,
@@ -1335,6 +1371,24 @@
   font-weight: 700;
   line-height: 1;
   white-space: nowrap;
+}
+
+.details-chart-annotation-line-badge {
+  position: absolute;
+  z-index: 1;
+  min-width: 18px;
+  max-width: 84px;
+  padding: 2px 4px;
+  overflow: hidden;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.9);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transform: translate(-50%, -50%);
 }
 
 .details-chart-svg .details-chart-marker {

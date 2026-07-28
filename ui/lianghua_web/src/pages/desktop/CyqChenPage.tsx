@@ -17,7 +17,7 @@ import {
   type CyqChenSnapshot,
   type CyqChenStrategyDraft,
 } from '../../apis/cyqChen'
-import type { DetailChartMarker, DetailChartSeries, DetailChartTooltip, DetailKlinePanel, DetailKlineRow } from '../../apis/details'
+import type { DetailChartSeries, DetailChartTooltip, DetailKlinePanel, DetailKlineRow } from '../../apis/details'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import { listStockLookupRows, type StockLookupRow } from '../../apis/reader'
 import { readStoredChartMainWidthRatio } from '../../shared/chartSettings'
@@ -25,6 +25,13 @@ import DetailsLink from '../../shared/DetailsLink'
 import { sanitizeCodeInput, stdTsCode } from '../../shared/stockCode'
 import { buildStockLookupCandidates, findExactStockLookupMatch, getLookupDigits } from '../../shared/stockLookup'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
+import {
+  buildDetailAnnotationRenderData,
+  DETAIL_ANNOTATION_PROVIDERS,
+  renderDetailAnnotationOverlayPoint,
+  renderDetailAnnotationSvgLines,
+  useDetailAnnotationProviders,
+} from '../../shared/detailAnnotations'
 import './css/DetailsPage.css'
 import './css/CyqChenPage.css'
 
@@ -127,15 +134,6 @@ type TooltipSection = {
   key: string
   rows: FieldRow[]
   variant?: 'default' | 'ohlc'
-}
-
-type ChartMarkerOverlayPoint = {
-  key: string
-  leftPercent: number
-  topPercent: number
-  shape: DetailChartMarker['shape']
-  color: string
-  text?: string | null
 }
 
 type CyqChenSummaryItem = {
@@ -792,91 +790,6 @@ function buildDetailTooltipRows(panel: DetailKlinePanel, item: CyqChenChartRow |
   return sections
 }
 
-function getMarkerYValue(row: CyqChenChartRow, marker: DetailChartMarker) {
-  const key = marker.y_key?.trim()
-  if (!key) {
-    return getChartRowNumber(row, 'close')
-  }
-
-  const normalizedKey = key.toLowerCase()
-  const mappedKey =
-    normalizedKey === 'o' || normalizedKey === 'open'
-      ? 'open'
-      : normalizedKey === 'h' || normalizedKey === 'high'
-        ? 'high'
-        : normalizedKey === 'l' || normalizedKey === 'low'
-          ? 'low'
-          : normalizedKey === 'c' || normalizedKey === 'close'
-            ? 'close'
-            : normalizedKey === 'v' || normalizedKey === 'vol'
-              ? 'vol'
-              : key
-  return getChartRowNumber(row, mappedKey)
-}
-
-function buildChartMarkerOverlayPoints(
-  panel: DetailKlinePanel,
-  items: CyqChenChartRow[],
-  xAt: (itemIndex: number) => number,
-  yAt: (value: number) => number,
-): ChartMarkerOverlayPoint[] {
-  const markers = panel.markers ?? []
-  if (markers.length === 0) {
-    return []
-  }
-
-  return markers.flatMap((marker) =>
-    items.flatMap((row, itemIndex) => {
-      if (row[marker.when_key] !== true) {
-        return []
-      }
-      const value = getMarkerYValue(row, marker)
-      if (value === null) {
-        return []
-      }
-
-      const x = xAt(itemIndex)
-      const baseY = yAt(value)
-      const position = marker.position ?? 'value'
-      const y = position === 'above'
-        ? CHART_MARGIN.top + 10
-        : position === 'below'
-          ? CHART_VIEWBOX_HEIGHT - CHART_MARGIN.bottom - 10
-          : baseY
-
-      return [{
-        key: `${panel.key}-${marker.key}-${row.tradeDate}`,
-        leftPercent: (x / CHART_VIEWBOX_WIDTH) * 100,
-        topPercent: (y / CHART_VIEWBOX_HEIGHT) * 100,
-        shape: marker.shape,
-        color: marker.color ?? CANDLE_UP_COLOR,
-        text: marker.text,
-      }]
-    }),
-  )
-}
-
-function renderChartMarkerOverlayPoint(point: ChartMarkerOverlayPoint) {
-  const shape = point.shape ?? 'dot'
-  return (
-    <span
-      className={[
-        'details-chart-marker',
-        `details-chart-marker-${shape}`,
-        point.text ? 'details-chart-marker-with-text' : '',
-      ].filter(Boolean).join(' ')}
-      key={point.key}
-      style={{
-        left: `${point.leftPercent}%`,
-        top: `${point.topPercent}%`,
-        '--details-chart-marker-color': point.color,
-      } as CSSProperties}
-    >
-      {point.text ? <span>{point.text}</span> : null}
-    </span>
-  )
-}
-
 function chipValueByMode(bin: CyqChenBin, mode: ChipPeakMode) {
   if (mode === 'main') {
     return bin.mainChip
@@ -1055,6 +968,21 @@ function CyqChenProjectChart({
     series: [],
     tooltips: [],
   } satisfies DetailKlinePanel
+  const annotationProviderContext = useMemo(
+    () => ({
+      startTradeDate: kline[0]?.tradeDate,
+      endTradeDate: kline[kline.length - 1]?.tradeDate,
+      indicator: {
+        panels,
+        rows: kline,
+      },
+    }),
+    [kline, panels],
+  )
+  const { layers: annotationLayers } = useDetailAnnotationProviders(
+    DETAIL_ANNOTATION_PROVIDERS,
+    annotationProviderContext,
+  )
 
   const totalItems = kline.length
   const minVisibleBars = totalItems === 0 ? 1 : Math.min(MIN_VISIBLE_BARS, totalItems)
@@ -1073,6 +1001,23 @@ function CyqChenProjectChart({
   const layoutSlotCount = getChartLayoutSlotCount(visibleItems.length, kline.length)
   const step = layoutSlotCount > 0 ? klinePlotWidth / layoutSlotCount : klinePlotWidth
   const xAt = (itemIndex: number) => getChartItemX(itemIndex, visibleItems.length, layoutSlotCount, reserveCyqPanelWidth)
+  const buildAnnotationRenderData = (
+    panelKey: string,
+    yAt: (value: number) => number,
+  ) => buildDetailAnnotationRenderData({
+    layers: annotationLayers,
+    panelKey,
+    items: visibleItems,
+    xAt,
+    yAt,
+    getTradeDate: (row) => row.tradeDate,
+    getNumericValue: getChartRowNumber,
+    isConditionTrue: (row, key) => row[key] === true,
+    viewBoxWidth: CHART_VIEWBOX_WIDTH,
+    viewBoxHeight: CHART_VIEWBOX_HEIGHT,
+    marginTop: CHART_MARGIN.top,
+    marginBottom: CHART_MARGIN.bottom,
+  })
   const priceValues = visibleItems.flatMap((item) =>
     [
       item.open,
@@ -1643,7 +1588,7 @@ function CyqChenProjectChart({
               leftPercent: xAt(itemIndex) / CHART_VIEWBOX_WIDTH * 100,
             }))
             const barWidth = Math.max(Math.min(step * 0.58, 18), 3)
-            const markerOverlayPoints = buildChartMarkerOverlayPoints(panel, visibleItems, xAt, yAt)
+            const annotationRenderData = buildAnnotationRenderData(panel.key, yAt)
 
             return (
               <>
@@ -1675,6 +1620,11 @@ function CyqChenProjectChart({
                       y2={CHART_VIEWBOX_HEIGHT - CHART_MARGIN.bottom}
                     />
                   ))}
+                  {renderDetailAnnotationSvgLines(
+                    annotationRenderData.lines,
+                    CHART_MARGIN.top,
+                    CHART_VIEWBOX_HEIGHT - CHART_MARGIN.bottom,
+                  )}
                   {renderKind === 'brick' ? brickBodies.map((body) => {
                     const x = xAt(body.itemIndex)
                     const openY = yAt(body.open)
@@ -1797,9 +1747,9 @@ function CyqChenProjectChart({
                       </span>
                     ))}
                   </div>
-                  {markerOverlayPoints.length > 0 ? (
+                  {annotationRenderData.overlayPoints.length > 0 ? (
                     <div className="details-chart-marker-layer">
-                      {markerOverlayPoints.map(renderChartMarkerOverlayPoint)}
+                      {annotationRenderData.overlayPoints.map(renderDetailAnnotationOverlayPoint)}
                     </div>
                   ) : null}
                   {focusXPercent !== null ? (
@@ -2014,7 +1964,7 @@ function CyqChenProjectChart({
                 : false
               const peakBin = findChipPeakBin(visibleCyqBins, chipPeakMode)
               const priceOverlaySeries = getPanelSeries(pricePanel)
-              const markerOverlayPoints = buildChartMarkerOverlayPoints(pricePanel, visibleItems, xAt, yAt)
+              const annotationRenderData = buildAnnotationRenderData(pricePanel.key, yAt)
               const priceTooltipSections = buildDetailTooltipRows(pricePanel, focusedRow)
 
               return (
@@ -2048,6 +1998,11 @@ function CyqChenProjectChart({
                         y2={CHART_VIEWBOX_HEIGHT - CHART_MARGIN.bottom}
                       />
                     ))}
+                    {renderDetailAnnotationSvgLines(
+                      annotationRenderData.lines,
+                      CHART_MARGIN.top,
+                      CHART_VIEWBOX_HEIGHT - CHART_MARGIN.bottom,
+                    )}
 
                     {selectedVisibleIndex >= 0 ? (
                       <line
@@ -2238,9 +2193,9 @@ function CyqChenProjectChart({
                         </span>
                       ))}
                     </div>
-                    {markerOverlayPoints.length > 0 ? (
+                    {annotationRenderData.overlayPoints.length > 0 ? (
                       <div className="details-chart-marker-layer">
-                        {markerOverlayPoints.map(renderChartMarkerOverlayPoint)}
+                        {annotationRenderData.overlayPoints.map(renderDetailAnnotationOverlayPoint)}
                       </div>
                     ) : null}
                     {focusXPercent !== null ? (

@@ -8,7 +8,18 @@ export type ChartSeriesKind = 'line' | 'bar' | 'histogram' | 'area' | 'band' | '
 
 export type ChartMarkerPosition = 'above' | 'below' | 'value'
 
-export type ChartMarkerShape = 'dot' | 'triangle_up' | 'triangle_down' | 'flag'
+export type ChartMarkerKind = 'symbol' | 'vertical_line'
+
+export type ChartMarkerShape =
+  | 'dot'
+  | 'triangle_up'
+  | 'triangle_down'
+  | 'flag'
+  | 'square'
+  | 'diamond'
+  | 'star'
+
+export type ChartMarkerLineStyle = 'solid' | 'dashed' | 'dotted'
 
 export type ChartTooltipFormat = 'number' | 'percent' | 'ratio'
 
@@ -34,10 +45,14 @@ export type ChartMarkerDraft = {
   label?: string | null
   when: string
   y?: string | null
+  kind?: ChartMarkerKind | null
   position?: ChartMarkerPosition | null
   shape?: ChartMarkerShape | null
   color?: string | null
   text?: string | null
+  line_style?: ChartMarkerLineStyle | null
+  line_width?: number | null
+  opacity?: number | null
 }
 
 export type ChartTooltipDraft = {

@@ -65,10 +65,14 @@ pub struct ChartMarkerConfig {
     pub label: Option<String>,
     pub when: String,
     pub y: Option<String>,
+    pub kind: Option<ChartMarkerKind>,
     pub position: Option<ChartMarkerPosition>,
     pub shape: Option<ChartMarkerShape>,
     pub color: Option<String>,
     pub text: Option<String>,
+    pub line_style: Option<ChartMarkerLineStyle>,
+    pub line_width: Option<f64>,
+    pub opacity: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -147,10 +151,14 @@ pub struct ChartSeriesRenderConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChartMarkerRenderConfig {
     pub label: Option<String>,
+    pub kind: Option<ChartMarkerKind>,
     pub position: Option<ChartMarkerPosition>,
     pub shape: Option<ChartMarkerShape>,
     pub color: Option<String>,
     pub text: Option<String>,
+    pub line_style: Option<ChartMarkerLineStyle>,
+    pub line_width: Option<f64>,
+    pub opacity: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -206,6 +214,13 @@ pub enum ChartSeriesKind {
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum ChartMarkerKind {
+    Symbol,
+    VerticalLine,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ChartMarkerPosition {
     Above,
     Below,
@@ -219,6 +234,17 @@ pub enum ChartMarkerShape {
     TriangleUp,
     TriangleDown,
     Flag,
+    Square,
+    Diamond,
+    Star,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChartMarkerLineStyle {
+    Solid,
+    Dashed,
+    Dotted,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -448,6 +474,22 @@ pub fn validate_chart_indicator_config(config: &ChartIndicatorConfig) -> Result<
                     color,
                 )?;
             }
+            if let Some(line_width) = marker.line_width {
+                if !line_width.is_finite() || !(0.5..=6.0).contains(&line_width) {
+                    return Err(format!(
+                        "panel.{}.marker.{}.line_width must be between 0.5 and 6",
+                        panel.key, marker.key
+                    ));
+                }
+            }
+            if let Some(opacity) = marker.opacity {
+                if !opacity.is_finite() || !(0.0..=1.0).contains(&opacity) {
+                    return Err(format!(
+                        "panel.{}.marker.{}.opacity must be between 0 and 1",
+                        panel.key, marker.key
+                    ));
+                }
+            }
         }
 
         for tooltip in &panel.tooltips {
@@ -566,7 +608,8 @@ pub fn compile_chart_indicator_config(
                 db_column_lookup.as_ref(),
                 &mut database_indicator_columns,
             )?;
-            if let Some(y_key) = marker.y.as_deref() {
+            let is_vertical_line = marker.kind == Some(ChartMarkerKind::VerticalLine);
+            if !is_vertical_line && let Some(y_key) = marker.y.as_deref() {
                 collect_marker_y_dependency(
                     y_key,
                     &format!("panel.{}.marker.{}.y", panel.key, marker.key),
@@ -580,13 +623,21 @@ pub fn compile_chart_indicator_config(
                 key: marker.key.clone(),
                 when_key: format!("__marker_{}_{}", panel.key, marker.key),
                 when_expr,
-                y_key: marker.y.clone(),
+                y_key: if is_vertical_line {
+                    None
+                } else {
+                    marker.y.clone()
+                },
                 render: ChartMarkerRenderConfig {
                     label: marker.label.clone(),
+                    kind: marker.kind,
                     position: marker.position,
                     shape: marker.shape,
                     color: marker.color.clone(),
                     text: marker.text.clone(),
+                    line_style: marker.line_style,
+                    line_width: marker.line_width,
+                    opacity: marker.opacity,
                 },
             });
         }
@@ -1401,6 +1452,69 @@ shape = "flag"
             execution.values.get("__marker_price_flag_j"),
             Some(&vec![serde_json::json!(false), serde_json::json!(true)])
         );
+    }
+
+    #[test]
+    fn vertical_line_marker_render_options_compile() {
+        let config = parse_chart_indicator_config(
+            r##"
+version = 1
+
+[[panel]]
+key = "price"
+label = "Price"
+role = "main"
+kind = "candles"
+
+[[panel.marker]]
+key = "breakout"
+label = "Breakout"
+when = "CROSS(C, MA(C, 5))"
+y = "IGNORED_FOR_VERTICAL_LINE"
+kind = "vertical_line"
+color = "#7c3aed"
+text = "B"
+line_style = "dotted"
+line_width = 2.5
+opacity = 0.65
+"##,
+        )
+        .expect("vertical line marker should parse");
+        let compiled = compile_chart_indicator_config(&config, Some(&HashSet::new()))
+            .expect("vertical line marker should compile");
+        let marker = &compiled.panels[0].markers[0];
+
+        assert_eq!(marker.y_key, None);
+        assert_eq!(marker.render.kind, Some(ChartMarkerKind::VerticalLine));
+        assert_eq!(marker.render.line_style, Some(ChartMarkerLineStyle::Dotted));
+        assert_eq!(marker.render.line_width, Some(2.5));
+        assert_eq!(marker.render.opacity, Some(0.65));
+        assert_eq!(marker.render.text.as_deref(), Some("B"));
+    }
+
+    #[test]
+    fn marker_render_ranges_are_validated() {
+        let error = parse_chart_indicator_config(
+            r##"
+version = 1
+
+[[panel]]
+key = "price"
+label = "Price"
+role = "main"
+kind = "candles"
+
+[[panel.marker]]
+key = "invalid"
+when = "C > O"
+kind = "vertical_line"
+line_width = 8
+opacity = 1.2
+"##,
+        )
+        .expect_err("invalid marker render ranges should fail");
+
+        assert!(error.contains("line_width"));
     }
 
     #[test]

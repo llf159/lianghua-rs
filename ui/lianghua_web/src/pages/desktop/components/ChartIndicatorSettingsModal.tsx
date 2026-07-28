@@ -7,6 +7,8 @@ import {
   type ChartIndicatorConfigDraft,
   type ChartIndicatorSettingsPayload,
   type ChartMarkerDraft,
+  type ChartMarkerKind,
+  type ChartMarkerLineStyle,
   type ChartMarkerPosition,
   type ChartMarkerShape,
   type ChartPanelDraft,
@@ -356,10 +358,14 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
       label: null,
       when: '',
       y: null,
+      kind: 'symbol',
       position: 'value',
       shape: 'dot',
       color: null,
       text: null,
+      line_style: null,
+      line_width: null,
+      opacity: 1,
     }
     updatePanel(selectedPanelIndex, { marker: [...existing, marker] })
     setDetailSelection({ kind: 'marker', index: existing.length })
@@ -1089,6 +1095,8 @@ function MarkerEditor({
   onCopy,
   onDelete,
 }: MarkerEditorProps) {
+  const markerKind = marker.kind ?? 'symbol'
+  const markerOpacity = marker.opacity ?? 1
   return (
     <div className="chart-indicator-detail-form">
       <div className="chart-indicator-subsection-head">
@@ -1122,33 +1130,66 @@ function MarkerEditor({
       </label>
       <div className="chart-indicator-field-grid">
         <label className="settings-field">
-          <span>定位字段</span>
-          <input value={marker.y ?? ''} onChange={(event) => onUpdate(index, { y: optionalString(event.target.value) })} placeholder="C / L / ma20" />
-        </label>
-        <label className="settings-field">
-          <span>位置</span>
-          <select value={marker.position ?? 'value'} onChange={(event) => onUpdate(index, { position: event.target.value as ChartMarkerPosition })}>
-            <option value="above">上方（面板上沿）</option>
-            <option value="below">下方（面板下沿）</option>
-            <option value="value">数值处</option>
+          <span>标记类型</span>
+          <select value={markerKind} onChange={(event) => onUpdate(index, { kind: event.target.value as ChartMarkerKind })}>
+            <option value="symbol">符号</option>
+            <option value="vertical_line">纵向线</option>
           </select>
         </label>
-        <label className="settings-field">
-          <span>形状</span>
-          <select value={marker.shape ?? 'dot'} onChange={(event) => onUpdate(index, { shape: event.target.value as ChartMarkerShape })}>
-            <option value="dot">圆点</option>
-            <option value="triangle_up">上三角</option>
-            <option value="triangle_down">下三角</option>
-            <option value="flag">旗标</option>
-          </select>
-        </label>
+        {markerKind === 'symbol' ? (
+          <>
+            <label className="settings-field">
+              <span>定位字段</span>
+              <input value={marker.y ?? ''} onChange={(event) => onUpdate(index, { y: optionalString(event.target.value) })} placeholder="C / L / ma20" />
+            </label>
+            <label className="settings-field">
+              <span>位置</span>
+              <select value={marker.position ?? 'value'} onChange={(event) => onUpdate(index, { position: event.target.value as ChartMarkerPosition })}>
+                <option value="above">上方（面板上沿）</option>
+                <option value="below">下方（面板下沿）</option>
+                <option value="value">数值处</option>
+              </select>
+            </label>
+            <label className="settings-field">
+              <span>形状</span>
+              <select value={marker.shape ?? 'dot'} onChange={(event) => onUpdate(index, { shape: event.target.value as ChartMarkerShape })}>
+                <option value="dot">圆点</option>
+                <option value="triangle_up">上三角</option>
+                <option value="triangle_down">下三角</option>
+                <option value="flag">旗标</option>
+                <option value="square">方块</option>
+                <option value="diamond">菱形</option>
+                <option value="star">星形</option>
+              </select>
+            </label>
+          </>
+        ) : (
+          <>
+            <label className="settings-field">
+              <span>线型</span>
+              <select value={marker.line_style ?? 'dashed'} onChange={(event) => onUpdate(index, { line_style: event.target.value as ChartMarkerLineStyle })}>
+                <option value="solid">实线</option>
+                <option value="dashed">虚线</option>
+                <option value="dotted">点线</option>
+              </select>
+            </label>
+            <label className="settings-field">
+              <span>线宽</span>
+              <input type="number" min={0.5} max={6} step={0.1} value={marker.line_width ?? ''} onChange={(event) => onUpdate(index, { line_width: optionalNumber(event.target.value) })} />
+            </label>
+          </>
+        )}
         <label className="settings-field">
           <span>颜色</span>
           <input value={marker.color ?? ''} onChange={(event) => onUpdate(index, { color: optionalString(event.target.value) })} placeholder="#d9485f" />
         </label>
         <label className="settings-field">
-          <span>文本</span>
-          <input value={marker.text ?? ''} onChange={(event) => onUpdate(index, { text: optionalString(event.target.value) })} placeholder="B / S" />
+          <span>透明度 {markerOpacity.toFixed(2)}</span>
+          <input type="range" min={0} max={1} step={0.05} value={markerOpacity} onChange={(event) => onUpdate(index, { opacity: Number(event.target.value) })} />
+        </label>
+        <label className="settings-field">
+          <span>{markerKind === 'vertical_line' ? '线顶文字' : '文本'}</span>
+          <input value={marker.text ?? ''} onChange={(event) => onUpdate(index, { text: optionalString(event.target.value) })} placeholder={markerKind === 'vertical_line' ? '触发' : 'B / S'} />
         </label>
       </div>
     </div>
@@ -1267,7 +1308,15 @@ function normalizeConfig(config: ChartIndicatorConfigDraft | null | undefined): 
   }]).map((panel) => ({
     ...panel,
     series: (panel.series ?? []).map((series) => normalizeSeriesByKind({ ...series, color_when: series.color_when ?? [] })),
-    marker: panel.marker ?? [],
+    marker: (panel.marker ?? []).map((marker) => ({
+      ...marker,
+      kind: marker.kind ?? 'symbol',
+      position: marker.position ?? 'value',
+      shape: marker.shape ?? 'dot',
+      line_style: marker.line_style ?? null,
+      line_width: marker.line_width ?? null,
+      opacity: marker.opacity ?? 1,
+    })),
     tooltip: (panel.tooltip ?? []).map((tooltip) => ({ ...tooltip, format: tooltip.format ?? 'number' })),
   }))
   return {
@@ -1373,6 +1422,12 @@ function validateDraft(config: ChartIndicatorConfigDraft) {
       if (marker.color && !COLOR_PATTERN.test(marker.color)) {
         issues.push(`标记 ${marker.key} 的颜色格式不合法。`)
       }
+      if (marker.opacity !== null && marker.opacity !== undefined && (marker.opacity < 0 || marker.opacity > 1)) {
+        issues.push(`标记 ${marker.key} 的透明度必须在 0 到 1 之间。`)
+      }
+      if (marker.line_width !== null && marker.line_width !== undefined && (marker.line_width < 0.5 || marker.line_width > 6)) {
+        issues.push(`标记 ${marker.key} 的线宽必须在 0.5 到 6 之间。`)
+      }
     })
     ;(panel.tooltip ?? []).forEach((tooltip) => {
       if (!KEY_PATTERN.test(tooltip.key.trim())) {
@@ -1441,19 +1496,23 @@ function serializeConfigToToml(config: ChartIndicatorConfigDraft) {
       lines.push('')
     })
     ;(panel.marker ?? []).forEach((marker) => {
+      const isVerticalLine = marker.kind === 'vertical_line'
       lines.push('[[panel.marker]]')
       lines.push(`key = ${tomlString(marker.key.trim())}`)
       if (marker.label?.trim()) {
         lines.push(`label = ${tomlString(marker.label.trim())}`)
       }
       lines.push(`when = ${tomlString(marker.when)}`)
-      if (marker.y?.trim()) {
+      if (!isVerticalLine && marker.y?.trim()) {
         lines.push(`y = ${tomlString(marker.y.trim())}`)
       }
-      if (marker.position) {
+      if (marker.kind) {
+        lines.push(`kind = ${tomlString(marker.kind)}`)
+      }
+      if (!isVerticalLine && marker.position) {
         lines.push(`position = ${tomlString(marker.position)}`)
       }
-      if (marker.shape) {
+      if (!isVerticalLine && marker.shape) {
         lines.push(`shape = ${tomlString(marker.shape)}`)
       }
       if (marker.color?.trim()) {
@@ -1461,6 +1520,15 @@ function serializeConfigToToml(config: ChartIndicatorConfigDraft) {
       }
       if (marker.text?.trim()) {
         lines.push(`text = ${tomlString(marker.text.trim())}`)
+      }
+      if (isVerticalLine && marker.line_style) {
+        lines.push(`line_style = ${tomlString(marker.line_style)}`)
+      }
+      if (isVerticalLine && marker.line_width !== null && marker.line_width !== undefined) {
+        lines.push(`line_width = ${formatNumber(marker.line_width)}`)
+      }
+      if (marker.opacity !== null && marker.opacity !== undefined) {
+        lines.push(`opacity = ${formatNumber(marker.opacity)}`)
       }
       lines.push('')
     })

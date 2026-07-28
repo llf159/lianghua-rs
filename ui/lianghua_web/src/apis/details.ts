@@ -41,7 +41,18 @@ export type DetailChartSeriesKind = 'line' | 'bar' | 'histogram' | 'area' | 'ban
 
 export type DetailChartMarkerPosition = 'above' | 'below' | 'value'
 
-export type DetailChartMarkerShape = 'dot' | 'triangle_up' | 'triangle_down' | 'flag'
+export type DetailChartMarkerKind = 'symbol' | 'vertical_line'
+
+export type DetailChartMarkerShape =
+  | 'dot'
+  | 'triangle_up'
+  | 'triangle_down'
+  | 'flag'
+  | 'square'
+  | 'diamond'
+  | 'star'
+
+export type DetailChartMarkerLineStyle = 'solid' | 'dashed' | 'dotted'
 
 export type DetailChartColorRule = {
   when_key: string
@@ -64,10 +75,14 @@ export type DetailChartMarker = {
   label?: string | null
   when_key: string
   y_key?: string | null
+  kind?: DetailChartMarkerKind | null
   position?: DetailChartMarkerPosition | null
   shape?: DetailChartMarkerShape | null
   color?: string | null
   text?: string | null
+  line_style?: DetailChartMarkerLineStyle | null
+  line_width?: number | null
+  opacity?: number | null
 }
 
 export type DetailChartTooltip = {

@@ -20,7 +20,6 @@ import {
   getStockDetailStrategySnapshot,
   getStockDetailPrevRanks,
   getStockSimilarityPage,
-  type DetailChartMarker,
   type DetailCyqBin,
   type DetailCyqSnapshot,
   type DetailKlinePanel,
@@ -90,6 +89,15 @@ import {
 import type { DetailsNavigationItem } from "../../shared/detailsLinkState";
 import type { DetailsStrategyCompareSnapshot } from "../../shared/detailsLinkState";
 import DetailsLink from "../../shared/DetailsLink";
+import {
+  buildDetailAnnotationRenderData,
+  DETAIL_ANNOTATION_PROVIDERS,
+  renderDetailAnnotationOverlayPoint,
+  renderDetailAnnotationSvgLines,
+  useDetailAnnotationProviders,
+  type DetailAnnotationLayer,
+  type DetailAnnotationRenderData,
+} from "../../shared/detailAnnotations";
 import "./css/DetailsPage.css";
 
 const DEFAULT_TOP_LIMIT = "100";
@@ -202,15 +210,6 @@ type ChartPointerSnapshot = {
 type ChartAnchorSnapshot = {
   visiblePosition: number;
   visibleRatio: number;
-};
-
-type ChartMarkerOverlayPoint = {
-  key: string;
-  leftPercent: number;
-  topPercent: number;
-  shape: DetailChartMarker["shape"];
-  color: string;
-  text?: string | null;
 };
 
 type ChartExtremaOverlayPoint = {
@@ -2525,98 +2524,6 @@ function buildBrickBodies(
   return bodies;
 }
 
-function getMarkerYValue(row: DetailKlineRow, marker: DetailChartMarker) {
-  const key = marker.y_key?.trim();
-  if (!key) {
-    return getNumericField(row, "close");
-  }
-
-  const normalizedKey = key.toLowerCase();
-  const mappedKey =
-    normalizedKey === "o" || normalizedKey === "open"
-      ? "open"
-      : normalizedKey === "h" || normalizedKey === "high"
-        ? "high"
-        : normalizedKey === "l" || normalizedKey === "low"
-          ? "low"
-          : normalizedKey === "c" || normalizedKey === "close"
-            ? "close"
-            : normalizedKey === "v" || normalizedKey === "vol"
-              ? "vol"
-              : key;
-  return getNumericField(row, mappedKey);
-}
-
-function buildChartMarkerOverlayPoints(
-  panel: DetailKlinePanel,
-  items: DetailKlineRow[],
-  xAt: (itemIndex: number) => number,
-  yAt: (value: number) => number,
-): ChartMarkerOverlayPoint[] {
-  const markers = panel.markers ?? [];
-  if (markers.length === 0) {
-    return [];
-  }
-
-  return markers.flatMap((marker) =>
-    items.flatMap((row, itemIndex) => {
-      if (row[marker.when_key] !== true) {
-        return [];
-      }
-      const value = getMarkerYValue(row, marker);
-      if (value === null) {
-        return [];
-      }
-
-      const x = xAt(itemIndex);
-      const baseY = yAt(value);
-      const position = marker.position ?? "value";
-      const y =
-        position === "above"
-          ? CHART_MARGIN.top + 10
-          : position === "below"
-            ? CHART_VIEWBOX_HEIGHT - CHART_MARGIN.bottom - 10
-            : baseY;
-      const color = marker.color ?? CANDLE_UP_COLOR;
-      const key = `${panel.key}-${marker.key}-${row.trade_date}`;
-
-      return [
-        {
-          key,
-          leftPercent: (x / CHART_VIEWBOX_WIDTH) * 100,
-          topPercent: (y / CHART_VIEWBOX_HEIGHT) * 100,
-          shape: marker.shape,
-          color,
-          text: marker.text,
-        },
-      ];
-    }),
-  );
-}
-
-function renderChartMarkerOverlayPoint(point: ChartMarkerOverlayPoint) {
-  const shape = point.shape ?? "dot";
-  return (
-    <span
-      className={[
-        "details-chart-marker",
-        `details-chart-marker-${shape}`,
-        point.text ? "details-chart-marker-with-text" : "",
-      ]
-        .filter(Boolean)
-        .join(" ")}
-      key={point.key}
-      style={{
-        left: `${point.leftPercent}%`,
-        top: `${point.topPercent}%`,
-        "--details-chart-marker-color": point.color,
-      } as CSSProperties}
-    >
-      {point.text ? <span>{point.text}</span> : null}
-    </span>
-  );
-}
-
 function buildChartExtremaOverlayPoints(
   items: DetailKlineRow[],
   xAt: (itemIndex: number) => number,
@@ -2702,6 +2609,7 @@ function renderChartPanel(
   effectiveVisibleStart: number,
   allItems: DetailKlineRow[],
   referenceTradeDate: string | null,
+  annotationLayers: readonly DetailAnnotationLayer[],
   onChartPointerDown: (
     panelKey: string,
     event: ReactPointerEvent<HTMLDivElement>,
@@ -2770,6 +2678,21 @@ function renderChartPanel(
       layoutSlotCount,
       reserveCyqPanelWidth,
     );
+  const buildAnnotationRenderData = (yAt: (value: number) => number) =>
+    buildDetailAnnotationRenderData({
+      layers: annotationLayers,
+      panelKey: panel.key,
+      items,
+      xAt,
+      yAt,
+      getTradeDate: (row) => row.trade_date,
+      getNumericValue: getNumericField,
+      isConditionTrue: (row, key) => row[key] === true,
+      viewBoxWidth: CHART_VIEWBOX_WIDTH,
+      viewBoxHeight: CHART_VIEWBOX_HEIGHT,
+      marginTop: CHART_MARGIN.top,
+      marginBottom: CHART_MARGIN.bottom,
+    });
   const activeVisibleIndex =
     chartFocus &&
     chartFocus.absoluteIndex >= effectiveVisibleStart &&
@@ -2842,7 +2765,10 @@ function renderChartPanel(
   let zeroY: number | null = null;
   let svgContent: ReactNode = null;
   let cyqSvgContent: ReactNode = null;
-  let markerOverlayPoints: ChartMarkerOverlayPoint[] = [];
+  let annotationRenderData: DetailAnnotationRenderData = {
+    lines: [],
+    overlayPoints: [],
+  };
   let extremaOverlayPoints: ChartExtremaOverlayPoint[] = [];
 
   if (kind === "candles") {
@@ -3098,7 +3024,7 @@ function renderChartPanel(
         }
       }
 
-      markerOverlayPoints = buildChartMarkerOverlayPoints(panel, items, xAt, yAt);
+      annotationRenderData = buildAnnotationRenderData(yAt);
       extremaOverlayPoints = isInteractivePricePanel(panel)
         ? buildChartExtremaOverlayPoints(items, xAt, yAt)
         : [];
@@ -3140,7 +3066,7 @@ function renderChartPanel(
           </g>
         );
       });
-      markerOverlayPoints = buildChartMarkerOverlayPoints(panel, items, xAt, yAt);
+      annotationRenderData = buildAnnotationRenderData(yAt);
       svgContent = lineNodes;
     }
   } else if (kind === "bar") {
@@ -3227,7 +3153,7 @@ function renderChartPanel(
           )),
         );
 
-      markerOverlayPoints = buildChartMarkerOverlayPoints(panel, items, xAt, yAt);
+      annotationRenderData = buildAnnotationRenderData(yAt);
       svgContent = [...barNodes, ...overlayNodes];
     }
   } else if (kind === "brick") {
@@ -3316,7 +3242,7 @@ function renderChartPanel(
           </g>
         );
       });
-      markerOverlayPoints = buildChartMarkerOverlayPoints(panel, items, xAt, yAt);
+      annotationRenderData = buildAnnotationRenderData(yAt);
       svgContent = brickNodes;
     }
   }
@@ -3434,6 +3360,12 @@ function renderChartPanel(
               />
             ))}
 
+            {renderDetailAnnotationSvgLines(
+              annotationRenderData.lines,
+              CHART_MARGIN.top,
+              CHART_VIEWBOX_HEIGHT - CHART_MARGIN.bottom,
+            )}
+
             {referenceVisibleIndex >= 0 ? (
               <line
                 className="details-chart-reference-line"
@@ -3489,9 +3421,11 @@ function renderChartPanel(
             </div>
           ) : null}
 
-          {markerOverlayPoints.length > 0 ? (
+          {annotationRenderData.overlayPoints.length > 0 ? (
             <div className="details-chart-marker-layer">
-              {markerOverlayPoints.map(renderChartMarkerOverlayPoint)}
+              {annotationRenderData.overlayPoints.map(
+                renderDetailAnnotationOverlayPoint,
+              )}
             </div>
           ) : null}
 
@@ -5467,7 +5401,27 @@ export default function DetailsPage({
     chartItems.length,
     totalChartItems,
   );
-  const panels = kline?.panels?.length ? kline.panels : buildDefaultPanels();
+  const panels = useMemo(
+    () => (kline?.panels?.length ? kline.panels : buildDefaultPanels()),
+    [kline?.panels],
+  );
+  const annotationProviderContext = useMemo(
+    () => ({
+      sourcePath: sourcePathTrimmed,
+      tsCode: resolvedTsCode !== "--" ? resolvedTsCode : undefined,
+      startTradeDate: allChartItems[0]?.trade_date,
+      endTradeDate: allChartItems[allChartItems.length - 1]?.trade_date,
+      indicator: {
+        panels,
+        rows: allChartItems,
+      },
+    }),
+    [allChartItems, panels, resolvedTsCode, sourcePathTrimmed],
+  );
+  const { layers: annotationLayers } = useDetailAnnotationProviders(
+    DETAIL_ANNOTATION_PROVIDERS,
+    annotationProviderContext,
+  );
   const indicatorPanelCount = panels.filter((panel) => !isMainChartPanel(panel)).length;
   const shouldReserveCyqPanelWidth =
     detailCyqVisible &&
@@ -7632,6 +7586,7 @@ export default function DetailsPage({
               effectiveVisibleStart,
               allChartItems,
               resolvedTradeDate !== "--" ? resolvedTradeDate : null,
+              annotationLayers,
               onChartPointerDown,
               onChartPointerMove,
               onChartPointerUp,

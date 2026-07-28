@@ -16,8 +16,9 @@ use crate::{
         build_area_map, build_circ_mv_map, build_concepts_map, build_industry_map,
         build_most_related_concept_map, build_name_map, build_total_mv_map,
         chart_indicator::{
-            ChartMarkerPosition, ChartMarkerShape, ChartPanelKind, ChartPanelRole, ChartSeriesKind,
-            ChartTooltipFormat, CompiledChartIndicatorConfig, execute_chart_indicator_config,
+            ChartMarkerKind, ChartMarkerLineStyle, ChartMarkerPosition, ChartMarkerShape,
+            ChartPanelKind, ChartPanelRole, ChartSeriesKind, ChartTooltipFormat,
+            CompiledChartIndicatorConfig, execute_chart_indicator_config,
             load_compiled_chart_indicator_config,
         },
         realtime::{RealtimeFetchMeta, fetch_realtime_quote_map, normalize_quote_trade_date},
@@ -99,10 +100,14 @@ pub struct DetailKlineMarker {
     pub label: Option<String>,
     pub when_key: String,
     pub y_key: Option<String>,
+    pub kind: Option<String>,
     pub position: Option<String>,
     pub shape: Option<String>,
     pub color: Option<String>,
     pub text: Option<String>,
+    pub line_style: Option<String>,
+    pub line_width: Option<f64>,
+    pub opacity: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1036,6 +1041,11 @@ fn detail_kline_panels_from_compiled(
                     label: marker.render.label.clone(),
                     when_key: marker.when_key.clone(),
                     y_key: marker.y_key.clone(),
+                    kind: marker
+                        .render
+                        .kind
+                        .map(chart_marker_kind_name)
+                        .map(str::to_string),
                     position: marker
                         .render
                         .position
@@ -1048,6 +1058,13 @@ fn detail_kline_panels_from_compiled(
                         .map(str::to_string),
                     color: marker.render.color.clone(),
                     text: marker.render.text.clone(),
+                    line_style: marker
+                        .render
+                        .line_style
+                        .map(chart_marker_line_style_name)
+                        .map(str::to_string),
+                    line_width: marker.render.line_width,
+                    opacity: marker.render.opacity,
                 })
                 .collect::<Vec<_>>();
             DetailKlinePanel {
@@ -1113,12 +1130,30 @@ fn chart_marker_position_name(position: ChartMarkerPosition) -> &'static str {
     }
 }
 
+fn chart_marker_kind_name(kind: ChartMarkerKind) -> &'static str {
+    match kind {
+        ChartMarkerKind::Symbol => "symbol",
+        ChartMarkerKind::VerticalLine => "vertical_line",
+    }
+}
+
 fn chart_marker_shape_name(shape: ChartMarkerShape) -> &'static str {
     match shape {
         ChartMarkerShape::Dot => "dot",
         ChartMarkerShape::TriangleUp => "triangle_up",
         ChartMarkerShape::TriangleDown => "triangle_down",
         ChartMarkerShape::Flag => "flag",
+        ChartMarkerShape::Square => "square",
+        ChartMarkerShape::Diamond => "diamond",
+        ChartMarkerShape::Star => "star",
+    }
+}
+
+fn chart_marker_line_style_name(style: ChartMarkerLineStyle) -> &'static str {
+    match style {
+        ChartMarkerLineStyle::Solid => "solid",
+        ChartMarkerLineStyle::Dashed => "dashed",
+        ChartMarkerLineStyle::Dotted => "dotted",
     }
 }
 

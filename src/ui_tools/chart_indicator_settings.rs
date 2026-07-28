@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     data::source_db_path,
     ui_tools::chart_indicator::{
-        ChartIndicatorConfig, ChartPanelConfig, ChartPanelKind, ChartPanelRole, ChartSeriesKind,
-        ChartTooltipFormat, chart_indicator_config_path, compile_chart_indicator_config,
+        ChartIndicatorConfig, ChartMarkerKind, ChartMarkerLineStyle, ChartPanelConfig,
+        ChartPanelKind, ChartPanelRole, ChartSeriesKind, ChartTooltipFormat,
+        chart_indicator_config_path, compile_chart_indicator_config,
         default_chart_indicator_config, normalize_chart_indicator_config,
         parse_chart_indicator_config,
     },
@@ -261,6 +262,7 @@ fn serialize_chart_indicator_config(config: &ChartIndicatorConfig) -> Result<Str
         }
 
         for marker in &panel.markers {
+            let is_vertical_line = marker.kind == Some(ChartMarkerKind::VerticalLine);
             lines.push("[[panel.marker]]".to_string());
             lines.push(format!("key = {}", toml_string(&marker.key)?));
             if let Some(label) = marker
@@ -271,10 +273,21 @@ fn serialize_chart_indicator_config(config: &ChartIndicatorConfig) -> Result<Str
                 lines.push(format!("label = {}", toml_string(label)?));
             }
             lines.push(format!("when = {}", toml_string(&marker.when)?));
-            if let Some(y) = marker.y.as_deref().filter(|value| !value.trim().is_empty()) {
+            if !is_vertical_line
+                && let Some(y) = marker.y.as_deref().filter(|value| !value.trim().is_empty())
+            {
                 lines.push(format!("y = {}", toml_string(y)?));
             }
-            if let Some(position) = marker.position {
+            if let Some(kind) = marker.kind {
+                lines.push(format!(
+                    "kind = {}",
+                    toml_string(match kind {
+                        ChartMarkerKind::Symbol => "symbol",
+                        ChartMarkerKind::VerticalLine => "vertical_line",
+                    })?
+                ));
+            }
+            if !is_vertical_line && let Some(position) = marker.position {
                 lines.push(format!(
                     "position = {}",
                     toml_string(match position {
@@ -284,7 +297,7 @@ fn serialize_chart_indicator_config(config: &ChartIndicatorConfig) -> Result<Str
                     })?
                 ));
             }
-            if let Some(shape) = marker.shape {
+            if !is_vertical_line && let Some(shape) = marker.shape {
                 lines.push(format!(
                     "shape = {}",
                     toml_string(match shape {
@@ -294,6 +307,9 @@ fn serialize_chart_indicator_config(config: &ChartIndicatorConfig) -> Result<Str
                         crate::ui_tools::chart_indicator::ChartMarkerShape::TriangleDown =>
                             "triangle_down",
                         crate::ui_tools::chart_indicator::ChartMarkerShape::Flag => "flag",
+                        crate::ui_tools::chart_indicator::ChartMarkerShape::Square => "square",
+                        crate::ui_tools::chart_indicator::ChartMarkerShape::Diamond => "diamond",
+                        crate::ui_tools::chart_indicator::ChartMarkerShape::Star => "star",
                     })?
                 ));
             }
@@ -310,6 +326,22 @@ fn serialize_chart_indicator_config(config: &ChartIndicatorConfig) -> Result<Str
                 .filter(|value| !value.trim().is_empty())
             {
                 lines.push(format!("text = {}", toml_string(text)?));
+            }
+            if is_vertical_line && let Some(line_style) = marker.line_style {
+                lines.push(format!(
+                    "line_style = {}",
+                    toml_string(match line_style {
+                        ChartMarkerLineStyle::Solid => "solid",
+                        ChartMarkerLineStyle::Dashed => "dashed",
+                        ChartMarkerLineStyle::Dotted => "dotted",
+                    })?
+                ));
+            }
+            if is_vertical_line && let Some(line_width) = marker.line_width {
+                lines.push(format!("line_width = {}", format_number(line_width)));
+            }
+            if let Some(opacity) = marker.opacity {
+                lines.push(format!("opacity = {}", format_number(opacity)));
             }
             lines.push(String::new());
         }
@@ -496,4 +528,47 @@ fn stock_data_indicator_columns_from_all(columns: HashSet<String>) -> Vec<String
         .collect::<Vec<_>>();
     indicator_columns.sort();
     indicator_columns
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marker_provider_render_fields_round_trip_through_settings_text() {
+        let config = parse_chart_indicator_config(
+            r##"
+version = 1
+
+[[panel]]
+key = "price"
+label = "主K"
+role = "main"
+kind = "candles"
+
+[[panel.marker]]
+key = "trigger_line"
+label = "触发线"
+when = "C > O"
+kind = "vertical_line"
+color = "#7c3aed"
+text = "触发"
+line_style = "dashed"
+line_width = 2.2
+opacity = 0.75
+"##,
+        )
+        .expect("config should parse");
+
+        let serialized =
+            serialize_chart_indicator_config(&config).expect("config should serialize");
+        let reparsed =
+            parse_chart_indicator_config(&serialized).expect("serialized config should parse");
+
+        assert_eq!(reparsed, config);
+        assert!(serialized.contains("kind = \"vertical_line\""));
+        assert!(serialized.contains("line_style = \"dashed\""));
+        assert!(serialized.contains("line_width = 2.2"));
+        assert!(serialized.contains("opacity = 0.75"));
+    }
 }
