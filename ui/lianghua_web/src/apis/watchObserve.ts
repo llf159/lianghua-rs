@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { readStoredSourcePath } from '../shared/storage'
 import { normalizeTsCode } from '../shared/stockCode'
+import { normalizeDateValue } from '../shared/tradeDate'
 import {
   readWatchObserveRowsFromCache,
   upsertWatchObserveRow as upsertCachedWatchObserveRow,
@@ -13,12 +14,12 @@ export type WatchObserveRow = {
   latestClose: number | null
   latestChangePct: number | null
   volumeRatio: number | null
-  addedDate: string
+  watchDate: string
   postWatchReturnPct: number | null
   todayRank: number | null
   tag: string
   concept: string
-  tradeDate: string | null
+  markedDate: string | null
 }
 
 export type WatchObserveSnapshotData = {
@@ -35,10 +36,9 @@ export type WatchObserveSnapshotData = {
 export type WatchObserveInput = {
   tsCode: string
   name?: string
-  addedDate?: string
   tag?: string
   concept?: string
-  tradeDate?: string | null
+  markedDate?: string | null
 }
 
 let watchObservePreloadPromise: Promise<WatchObserveRow[]> | null = null
@@ -54,14 +54,16 @@ function resolveSourcePath(sourcePath?: string | null) {
   return stored !== '' ? stored : null
 }
 
-function buildStoredRowPayload(input: WatchObserveInput) {
+function buildStoredRowPayload(
+  input: WatchObserveInput & { watchDate?: string },
+) {
   return {
     tsCode: input.tsCode,
     name: input.name?.trim() || undefined,
-    addedDate: input.addedDate?.trim() || undefined,
+    watchDate: input.watchDate?.trim() || undefined,
     tag: input.tag?.trim() || undefined,
     concept: input.concept?.trim() || undefined,
-    tradeDate: input.tradeDate?.trim() || undefined,
+    markedDate: input.markedDate?.trim() || undefined,
   }
 }
 
@@ -69,10 +71,10 @@ function buildStoredRowPayloadFromRow(row: WatchObserveRow) {
   return buildStoredRowPayload({
     tsCode: row.tsCode,
     name: row.name,
-    addedDate: row.addedDate,
+    watchDate: row.watchDate,
     tag: row.tag,
     concept: row.concept,
-    tradeDate: row.tradeDate,
+    markedDate: row.markedDate,
   })
 }
 
@@ -119,6 +121,31 @@ function updateCachedWatchObserveTag(tsCode: string, tag: string) {
   return nextRows
 }
 
+function updateCachedWatchObserveMarkedDate(tsCode: string, markedDate: string) {
+  const normalizedTsCode = normalizeTsCode(tsCode)
+  if (!normalizedTsCode) {
+    throw new Error('自选代码无效')
+  }
+  const normalizedMarkedDate = normalizeDateValue(markedDate)
+  if (!/^\d{8}$/.test(normalizedMarkedDate)) {
+    throw new Error('标记日期无效')
+  }
+
+  const rows = readWatchObserveRowsFromCache()
+  const existing = rows.find((row) => row.tsCode === normalizedTsCode)
+  if (!existing) {
+    throw new Error(`未找到自选记录: ${normalizedTsCode}`)
+  }
+
+  const nextRows = rows.map((row) =>
+    row.tsCode === normalizedTsCode
+      ? { ...row, markedDate: normalizedMarkedDate }
+      : row,
+  )
+  writeWatchObserveRowsToCache(nextRows)
+  return nextRows
+}
+
 function removeCachedWatchObserveRows(tsCodes: string[]) {
   const normalizedCodes = tsCodes
     .map((value) => normalizeTsCode(value))
@@ -160,19 +187,35 @@ export async function refreshWatchObserveRows(
 }
 
 export async function upsertWatchObserveRow(input: WatchObserveInput, sourcePath?: string | null) {
+  const resolvedSourcePath = resolveSourcePath(sourcePath)
+  if (!resolvedSourcePath) {
+    throw new Error('请先配置数据源目录')
+  }
+  const watchDate = await invoke<string>('resolve_watch_observe_watch_date', {
+    sourcePath: resolvedSourcePath,
+  })
   upsertCachedWatchObserveRow({
     tsCode: input.tsCode,
     name: input.name,
-    addedDate: input.addedDate,
+    watchDate,
     tag: input.tag,
     concept: input.concept,
-    tradeDate: input.tradeDate,
+    markedDate: input.markedDate,
   })
-  return listHydratedWatchObserveRows(sourcePath)
+  return listHydratedWatchObserveRows(resolvedSourcePath)
 }
 
 export async function updateWatchObserveTag(tsCode: string, tag: string, sourcePath?: string | null) {
   updateCachedWatchObserveTag(tsCode, tag)
+  return listHydratedWatchObserveRows(sourcePath)
+}
+
+export async function updateWatchObserveMarkedDate(
+  tsCode: string,
+  markedDate: string,
+  sourcePath?: string | null,
+) {
+  updateCachedWatchObserveMarkedDate(tsCode, markedDate)
   return listHydratedWatchObserveRows(sourcePath)
 }
 

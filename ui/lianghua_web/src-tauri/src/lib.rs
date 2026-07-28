@@ -182,6 +182,7 @@ use lianghua_rs::ui_tools::{
         normalize_trade_date as core_normalize_watch_observe_trade_date,
         normalize_ts_code as core_normalize_watch_observe_ts_code,
         refresh_watch_observe_rows as core_refresh_watch_observe_rows,
+        resolve_current_watch_date as core_resolve_current_watch_observe_date,
         WatchObserveRow as CoreWatchObserveRow, WatchObserveSnapshotData, WatchObserveStoredRow,
     },
 };
@@ -307,10 +308,12 @@ fn run_with_heap_trim<T>(f: impl FnOnce() -> T) -> T {
 struct WatchObserveUpsertPayload {
     ts_code: String,
     name: Option<String>,
-    added_date: Option<String>,
+    #[serde(default, alias = "addedDate")]
+    watch_date: Option<String>,
     tag: Option<String>,
     concept: Option<String>,
-    trade_date: Option<String>,
+    #[serde(default, alias = "tradeDate")]
+    marked_date: Option<String>,
 }
 
 #[cfg(target_os = "android")]
@@ -392,10 +395,10 @@ fn merge_stored_watch_observe_row(
     let existing = existing.cloned().unwrap_or(WatchObserveStoredRow {
         ts_code: incoming.ts_code.clone(),
         name: String::new(),
-        added_date: String::new(),
+        watch_date: String::new(),
         tag: String::new(),
         concept: String::new(),
-        trade_date: None,
+        marked_date: None,
     });
 
     WatchObserveStoredRow {
@@ -405,10 +408,10 @@ fn merge_stored_watch_observe_row(
         } else {
             incoming.name
         },
-        added_date: if incoming.added_date.trim().is_empty() {
-            existing.added_date
+        watch_date: if incoming.watch_date.trim().is_empty() {
+            existing.watch_date
         } else {
-            incoming.added_date
+            incoming.watch_date
         },
         tag: if incoming.tag.trim().is_empty() {
             existing.tag
@@ -420,7 +423,7 @@ fn merge_stored_watch_observe_row(
         } else {
             incoming.concept
         },
-        trade_date: incoming.trade_date.or(existing.trade_date),
+        marked_date: incoming.marked_date.or(existing.marked_date),
     }
 }
 
@@ -429,23 +432,23 @@ fn normalize_watch_observe_upsert_payload(
 ) -> Result<WatchObserveStoredRow, String> {
     let ts_code = core_normalize_watch_observe_ts_code(&row.ts_code)
         .ok_or_else(|| "自选代码无效".to_string())?;
-    let added_date = row
-        .added_date
+    let watch_date = row
+        .watch_date
         .as_deref()
         .and_then(core_normalize_watch_observe_trade_date)
         .unwrap_or_default();
-    let trade_date = row
-        .trade_date
+    let marked_date = row
+        .marked_date
         .as_deref()
         .and_then(core_normalize_watch_observe_trade_date);
 
     Ok(WatchObserveStoredRow {
         ts_code,
         name: row.name.unwrap_or_default().trim().to_string(),
-        added_date,
+        watch_date,
         tag: row.tag.unwrap_or_default().trim().to_string(),
         concept: row.concept.unwrap_or_default().trim().to_string(),
-        trade_date,
+        marked_date,
     })
 }
 
@@ -2061,6 +2064,11 @@ fn run_concept_stock_pick(
 }
 
 #[tauri::command]
+fn resolve_watch_observe_watch_date(source_path: String) -> Result<String, String> {
+    core_resolve_current_watch_observe_date(&source_path)
+}
+
+#[tauri::command]
 fn list_watch_observe_rows(
     app: tauri::AppHandle,
     source_path: Option<String>,
@@ -2154,6 +2162,30 @@ fn update_watch_observe_tag(
     };
 
     existing_row.tag = tag.trim().to_string();
+    write_watch_observe_storage(&app, &rows)?;
+    core_hydrate_watch_observe_rows(source_path.as_deref(), &rows, None)
+}
+
+#[tauri::command]
+fn update_watch_observe_marked_date(
+    app: tauri::AppHandle,
+    source_path: Option<String>,
+    ts_code: String,
+    marked_date: String,
+) -> Result<Vec<CoreWatchObserveRow>, String> {
+    let normalized_ts_code =
+        core_normalize_watch_observe_ts_code(&ts_code).ok_or_else(|| "自选代码无效".to_string())?;
+    let normalized_marked_date = core_normalize_watch_observe_trade_date(&marked_date)
+        .ok_or_else(|| "标记日期无效".to_string())?;
+    let mut rows = read_watch_observe_storage(&app)?;
+    let Some(existing_row) = rows
+        .iter_mut()
+        .find(|item| item.ts_code == normalized_ts_code)
+    else {
+        return Err(format!("未找到自选记录: {normalized_ts_code}"));
+    };
+
+    existing_row.marked_date = Some(normalized_marked_date);
     write_watch_observe_storage(&app, &rows)?;
     core_hydrate_watch_observe_rows(source_path.as_deref(), &rows, None)
 }
@@ -2310,6 +2342,8 @@ pub fn run() {
             upsert_watch_observe_row,
             merge_watch_observe_rows,
             update_watch_observe_tag,
+            update_watch_observe_marked_date,
+            resolve_watch_observe_watch_date,
             remove_watch_observe_rows
         ])
         .run(tauri::generate_context!())

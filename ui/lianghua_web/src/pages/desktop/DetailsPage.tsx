@@ -7017,8 +7017,7 @@ export default function DetailsPage({
       const nextItems = await upsertWatchObserveRow(
         {
           tsCode: resolvedTsCode,
-          addedDate: resolvedTradeDate,
-          tradeDate: resolvedTradeDate,
+          markedDate: resolvedTradeDate,
           name: detailData?.overview?.name,
           concept: detailData?.overview?.concept ?? "",
         },
@@ -7774,7 +7773,7 @@ export default function DetailsPage({
                     }
                     title={
                       isCurrentWatched
-                        ? `当前自选日 ${currentWatchObserveItem?.addedDate ?? "--"}`
+                        ? `自选日期 ${currentWatchObserveItem?.watchDate ?? "--"}，标记日期 ${currentWatchObserveItem?.markedDate ?? "--"}`
                         : `加入自选`
                     }
                     onPointerDown={(event) => {

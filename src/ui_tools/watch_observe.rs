@@ -1,9 +1,10 @@
+use chrono::{Local, Timelike};
 use duckdb::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::{
-    data::{result_db_path, source_db_path},
+    data::{load_trade_date_list, result_db_path, source_db_path},
     ui_tools::{
         build_concepts_map, build_latest_vol_map, build_name_map,
         realtime::{RealtimeFetchMeta, fetch_realtime_quote_map},
@@ -18,10 +19,12 @@ const DEFAULT_ADJ_TYPE: &str = "qfq";
 pub struct WatchObserveStoredRow {
     pub ts_code: String,
     pub name: String,
-    pub added_date: String,
+    #[serde(default, alias = "addedDate")]
+    pub watch_date: String,
     pub tag: String,
     pub concept: String,
-    pub trade_date: Option<String>,
+    #[serde(default, alias = "tradeDate")]
+    pub marked_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -32,12 +35,12 @@ pub struct WatchObserveRow {
     pub latest_close: Option<f64>,
     pub latest_change_pct: Option<f64>,
     pub volume_ratio: Option<f64>,
-    pub added_date: String,
+    pub watch_date: String,
     pub post_watch_return_pct: Option<f64>,
     pub today_rank: Option<i64>,
     pub tag: String,
     pub concept: String,
-    pub trade_date: Option<String>,
+    pub marked_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,6 +109,40 @@ pub fn normalize_trade_date(raw: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+pub fn resolve_watch_date_for_clock(
+    trade_dates: &[String],
+    today: &str,
+    current_hhmm: u32,
+) -> Result<String, String> {
+    let today = normalize_trade_date(today).ok_or_else(|| format!("系统日期无效: {today}"))?;
+    let mut normalized_dates: Vec<String> = trade_dates
+        .iter()
+        .filter_map(|value| normalize_trade_date(value))
+        .collect();
+    normalized_dates.sort();
+    normalized_dates.dedup();
+
+    if current_hhmm >= 930 && normalized_dates.binary_search(&today).is_ok() {
+        return Ok(today);
+    }
+
+    normalized_dates
+        .into_iter()
+        .rev()
+        .find(|value| value < &today)
+        .ok_or_else(|| format!("交易日历中找不到 {today} 开盘前的上一交易日"))
+}
+
+pub fn resolve_current_watch_date(source_path: &str) -> Result<String, String> {
+    let trade_dates = load_trade_date_list(source_path)?;
+    let now = Local::now();
+    resolve_watch_date_for_clock(
+        &trade_dates,
+        &now.format("%Y%m%d").to_string(),
+        now.hour() * 100 + now.minute(),
+    )
 }
 
 fn query_optional_rank(
@@ -278,12 +315,12 @@ pub fn hydrate_watch_observe_rows(
                 latest_close: None,
                 latest_change_pct: None,
                 volume_ratio: None,
-                added_date: row.added_date.clone(),
+                watch_date: row.watch_date.clone(),
                 post_watch_return_pct: None,
                 today_rank: None,
                 tag: row.tag.clone(),
                 concept: row.concept.clone(),
-                trade_date: row.trade_date.clone(),
+                marked_date: row.marked_date.clone(),
             })
             .collect());
     };
@@ -319,10 +356,10 @@ pub fn hydrate_watch_observe_rows(
             _ => None,
         };
         let observe_trade_date = row
-            .trade_date
+            .marked_date
             .as_deref()
             .and_then(normalize_trade_date)
-            .or_else(|| normalize_trade_date(&row.added_date));
+            .or_else(|| normalize_trade_date(&row.watch_date));
         let post_watch_return_pct = match (source_conn.as_ref(), observe_trade_date.as_deref()) {
             (Some(conn), Some(trade_date)) => {
                 calc_post_watch_return_pct(conn, trade_date, &row.ts_code, None)?
@@ -336,12 +373,12 @@ pub fn hydrate_watch_observe_rows(
             latest_close,
             latest_change_pct,
             volume_ratio,
-            added_date: row.added_date.clone(),
+            watch_date: row.watch_date.clone(),
             post_watch_return_pct,
             today_rank,
             tag: row.tag.clone(),
             concept,
-            trade_date: row.trade_date.clone(),
+            marked_date: row.marked_date.clone(),
         });
     }
 
@@ -421,10 +458,10 @@ pub fn build_watch_observe_snapshot_data(
             _ => None,
         };
         let observe_trade_date = row
-            .trade_date
+            .marked_date
             .as_deref()
             .and_then(normalize_trade_date)
-            .or_else(|| normalize_trade_date(&row.added_date));
+            .or_else(|| normalize_trade_date(&row.watch_date));
         let post_watch_return_pct = match (source_conn.as_ref(), observe_trade_date.as_deref()) {
             (Some(conn), Some(trade_date)) => {
                 calc_post_watch_return_pct(conn, trade_date, &row.ts_code, latest_close)?
@@ -445,12 +482,12 @@ pub fn build_watch_observe_snapshot_data(
             latest_close,
             latest_change_pct,
             volume_ratio,
-            added_date: row.added_date.clone(),
+            watch_date: row.watch_date.clone(),
             post_watch_return_pct,
             today_rank,
             tag: row.tag.clone(),
             concept,
-            trade_date: row.trade_date.clone(),
+            marked_date: row.marked_date.clone(),
         });
     }
 
@@ -464,4 +501,48 @@ pub fn build_watch_observe_snapshot_data(
         fetched_count: fetch_meta.fetched_count,
         truncated: fetch_meta.truncated,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_watch_date_for_clock;
+
+    fn dates() -> Vec<String> {
+        ["20260727", "20260728", "20260729", "20260731"]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn watch_date_stays_on_previous_trade_day_before_open() {
+        assert_eq!(
+            resolve_watch_date_for_clock(&dates(), "20260729", 929).unwrap(),
+            "20260728"
+        );
+    }
+
+    #[test]
+    fn watch_date_switches_to_today_at_open() {
+        assert_eq!(
+            resolve_watch_date_for_clock(&dates(), "20260729", 930).unwrap(),
+            "20260729"
+        );
+    }
+
+    #[test]
+    fn watch_date_stays_on_today_after_close() {
+        assert_eq!(
+            resolve_watch_date_for_clock(&dates(), "20260729", 1700).unwrap(),
+            "20260729"
+        );
+    }
+
+    #[test]
+    fn watch_date_stays_on_last_trade_day_during_market_break() {
+        assert_eq!(
+            resolve_watch_date_for_clock(&dates(), "20260730", 1200).unwrap(),
+            "20260729"
+        );
+    }
 }

@@ -1,10 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import { listRankTradeDates } from "../../apis/reader";
 import {
   listWatchObserveRows,
   refreshWatchObserveRows,
   removeWatchObserveRows,
+  updateWatchObserveMarkedDate,
   updateWatchObserveTag,
   type WatchObserveRow,
 } from "../../apis/watchObserve";
@@ -28,6 +36,7 @@ import {
 } from "../../shared/tableSort";
 import {
   DEFAULT_DATE_OPTION,
+  normalizeDateValue,
   normalizeTradeDates,
   pickDateValue,
 } from "../../shared/tradeDate";
@@ -38,7 +47,6 @@ type WatchObserveSortKey =
   | "latestClose"
   | "latestChangePct"
   | "volumeRatio"
-  | "addedDate"
   | "postWatchReturnPct"
   | "todayRank";
 const WATCH_OBSERVE_STATE_KEY = "lh_watch_observe_page_state_v1";
@@ -104,7 +112,18 @@ export default function WatchObservePage() {
 
     return {
       rows: Array.isArray(parsed.rows)
-        ? (parsed.rows as WatchObserveRow[])
+        ? (parsed.rows as Array<
+            WatchObserveRow & {
+              addedDate?: string;
+              tradeDate?: string | null;
+            }
+          >).map((row) => ({
+            ...row,
+            watchDate: normalizeDateValue(row.watchDate || row.addedDate || ""),
+            markedDate:
+              normalizeDateValue(row.markedDate || row.tradeDate || "") ||
+              null,
+          }))
         : [],
       sourcePath:
         typeof parsed.sourcePath === "string" ? parsed.sourcePath : "",
@@ -142,6 +161,10 @@ export default function WatchObservePage() {
   );
   const [editingTsCode, setEditingTsCode] = useState<string | null>(null);
   const [tagDraft, setTagDraft] = useState("");
+  const [editingMarkedDateTsCode, setEditingMarkedDateTsCode] = useState<
+    string | null
+  >(null);
+  const [markedDateDraft, setMarkedDateDraft] = useState("");
   const [isDeleteMode, setIsDeleteMode] = useState(false);
   const [pendingDeleteTsCodes, setPendingDeleteTsCodes] = useState<string[]>(
     [],
@@ -173,7 +196,6 @@ export default function WatchObservePage() {
         latestClose: { value: (row) => row.latestClose },
         latestChangePct: { value: (row) => row.latestChangePct },
         volumeRatio: { value: (row) => row.volumeRatio },
-        addedDate: { value: (row) => row.addedDate },
         postWatchReturnPct: { value: (row) => row.postWatchReturnPct },
         todayRank: { value: (row) => row.todayRank },
       }) satisfies Partial<
@@ -185,15 +207,48 @@ export default function WatchObservePage() {
     WatchObserveRow,
     WatchObserveSortKey
   >(rows, sortDefinitions);
-  const detailNavigationItems = sortedRows.map((row) => ({
+  const displayRows = useMemo(
+    () =>
+      sortedRows
+        .map((row, index) => ({ row, index }))
+        .sort((left, right) => {
+          const dateOrder = (right.row.watchDate || "").localeCompare(
+            left.row.watchDate || "",
+          );
+          return dateOrder || left.index - right.index;
+        })
+        .map(({ row }) => row),
+    [sortedRows],
+  );
+  const watchDateCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    displayRows.forEach((row) => {
+      const date = row.watchDate || "未记录";
+      counts.set(date, (counts.get(date) ?? 0) + 1);
+    });
+    return counts;
+  }, [displayRows]);
+  const markedDateOptions = useMemo(
+    () =>
+      normalizeTradeDates([
+        ...dateOptions,
+        ...rows.flatMap((row) =>
+          [row.markedDate, row.watchDate].filter(
+            (value): value is string => Boolean(value),
+          ),
+        ),
+      ]),
+    [dateOptions, rows],
+  );
+  const detailNavigationItems = displayRows.map((row) => ({
     tsCode: row.tsCode,
-    tradeDate: resolvedReferenceTradeDate ?? row.tradeDate,
+    tradeDate: resolvedReferenceTradeDate ?? row.markedDate,
     sourcePath: sourcePathTrimmed || undefined,
     name: row.name || undefined,
   }));
   const tableWrapRef = useRouteScrollRegion<HTMLDivElement>(
     "watch-observe-table",
-    [sortedRows.length, isDeleteMode, viewMode],
+    [displayRows.length, isDeleteMode, viewMode],
   );
 
   useEffect(() => {
@@ -359,7 +414,7 @@ export default function WatchObservePage() {
         `当前共 ${rows.length} 条`,
         "正在刷新实时行情，请稍候…",
         resolvedReferenceTradeDate
-          ? `参考日 ${resolvedReferenceTradeDate}`
+          ? `排名参考日 ${resolvedReferenceTradeDate}`
           : null,
       ]
         .filter(Boolean)
@@ -370,7 +425,7 @@ export default function WatchObservePage() {
       return [
         refreshedAt ? `最新刷新 ${refreshedAt}` : null,
         resolvedReferenceTradeDate
-          ? `当前参考日 ${resolvedReferenceTradeDate}`
+          ? `排名参考日 ${resolvedReferenceTradeDate}`
           : null,
         refreshSummary || null,
       ]
@@ -380,7 +435,7 @@ export default function WatchObservePage() {
     return [
       `当前共 ${rows.length} 条`,
       resolvedReferenceTradeDate
-        ? `当前参考日 ${resolvedReferenceTradeDate}`
+        ? `排名参考日 ${resolvedReferenceTradeDate}`
         : null,
       "当前展示数据库最新价格",
     ]
@@ -430,6 +485,8 @@ export default function WatchObservePage() {
   }
 
   function onStartEditTag(row: WatchObserveRow) {
+    setEditingMarkedDateTsCode(null);
+    setMarkedDateDraft("");
     setEditingTsCode(row.tsCode);
     setTagDraft(row.tag);
   }
@@ -463,11 +520,59 @@ export default function WatchObservePage() {
     }
   }
 
+  function onStartEditMarkedDate(row: WatchObserveRow) {
+    setEditingTsCode(null);
+    setTagDraft("");
+    setEditingMarkedDateTsCode(row.tsCode);
+    setMarkedDateDraft(
+      row.markedDate || row.watchDate || markedDateOptions[0] || "",
+    );
+  }
+
+  function onCancelEditMarkedDate() {
+    setEditingMarkedDateTsCode(null);
+    setMarkedDateDraft("");
+  }
+
+  async function onSaveMarkedDate(tsCode: string) {
+    if (!markedDateDraft) {
+      setError("请选择标记日期。");
+      return;
+    }
+
+    const requestId = databaseLoadRequestRef.current + 1;
+    databaseLoadRequestRef.current = requestId;
+    try {
+      await updateWatchObserveMarkedDate(
+        tsCode,
+        markedDateDraft,
+        sourcePathTrimmed,
+      );
+      const nextRows = await listWatchObserveRows(
+        sourcePathTrimmed,
+        referenceTradeDate,
+      );
+      if (databaseLoadRequestRef.current !== requestId) {
+        return;
+      }
+      applyDatabaseRows(nextRows, referenceTradeDate);
+      setError("");
+      onCancelEditMarkedDate();
+    } catch (saveError) {
+      if (databaseLoadRequestRef.current !== requestId) {
+        return;
+      }
+      setError(`保存标记日期失败: ${String(saveError)}`);
+    }
+  }
+
   function onEnterDeleteMode() {
     setIsDeleteMode(true);
     setPendingDeleteTsCodes([]);
     setEditingTsCode(null);
     setTagDraft("");
+    setEditingMarkedDateTsCode(null);
+    setMarkedDateDraft("");
   }
 
   function onTogglePendingDelete(tsCode: string) {
@@ -530,7 +635,7 @@ export default function WatchObservePage() {
             <div className="watch-observe-table-toolbar">
               <div className="watch-observe-table-toolbar-left">
                 <label className="watch-observe-filter-field">
-                  <span>参考日</span>
+                  <span>排名参考日</span>
                   <select
                     value={referenceTradeDate}
                     onChange={(event) =>
@@ -624,7 +729,7 @@ export default function WatchObservePage() {
             >
               <table
                 className="watch-observe-table"
-                style={{ minWidth: isDeleteMode ? "1216px" : "1168px" }}
+                style={{ minWidth: isDeleteMode ? "1334px" : "1286px" }}
               >
                 <colgroup>
                   {isDeleteMode ? <col style={{ width: "48px" }} /> : null}
@@ -634,6 +739,7 @@ export default function WatchObservePage() {
                   <col style={{ width: "96px" }} />
                   <col style={{ width: "88px" }} />
                   <col style={{ width: "92px" }} />
+                  <col style={{ width: "118px" }} />
                   <col style={{ width: "118px" }} />
                   <col style={{ width: "120px" }} />
                   <col style={{ width: "152px" }} />
@@ -688,20 +794,8 @@ export default function WatchObservePage() {
                         title="按量比排序"
                       />
                     </th>
-                    <th
-                      aria-sort={getAriaSort(
-                        sortKey === "addedDate",
-                        sortDirection,
-                      )}
-                    >
-                      <TableSortButton
-                        label="加入日期"
-                        isActive={sortKey === "addedDate"}
-                        direction={sortDirection}
-                        onClick={() => toggleSort("addedDate")}
-                        title="按加入日期排序"
-                      />
-                    </th>
+                    <th>自选日期</th>
+                    <th>标记日期</th>
                     <th
                       aria-sort={getAriaSort(
                         sortKey === "postWatchReturnPct",
@@ -735,20 +829,34 @@ export default function WatchObservePage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {sortedRows.map((row) => {
+                  {displayRows.map((row, index) => {
                     const conceptText = formatConceptText(
                       row.concept,
                       excludedConcepts,
                     );
+                    const watchDate = row.watchDate || "未记录";
+                    const isGroupStart =
+                      index === 0 ||
+                      (displayRows[index - 1]?.watchDate || "未记录") !==
+                        watchDate;
                     return (
-                      <tr
-                        key={row.tsCode}
-                        className={
-                          pendingDeleteTsCodes.includes(row.tsCode)
-                            ? "watch-observe-row-pending-delete"
-                            : ""
-                        }
-                      >
+                      <Fragment key={row.tsCode}>
+                        {isGroupStart ? (
+                          <tr className="watch-observe-date-group">
+                            <td colSpan={isDeleteMode ? 12 : 11}>
+                              <span>自选日期</span>
+                              <strong>{watchDate}</strong>
+                              <span>{watchDateCounts.get(watchDate) ?? 0} 只</span>
+                            </td>
+                          </tr>
+                        ) : null}
+                        <tr
+                          className={
+                            pendingDeleteTsCodes.includes(row.tsCode)
+                              ? "watch-observe-row-pending-delete"
+                              : ""
+                          }
+                        >
                         {isDeleteMode ? (
                           <td className="watch-observe-action-col">
                             <button
@@ -780,7 +888,9 @@ export default function WatchObservePage() {
                             <DetailsLink
                               className="watch-observe-stock-link"
                               tsCode={splitTsCode(row.tsCode)}
-                              tradeDate={resolvedReferenceTradeDate ?? row.tradeDate}
+                              tradeDate={
+                                resolvedReferenceTradeDate ?? row.markedDate
+                              }
                               sourcePath={sourcePathTrimmed}
                               title={`查看 ${row.name} 详情`}
                               navigationItems={detailNavigationItems}
@@ -803,8 +913,64 @@ export default function WatchObservePage() {
                         <td title={formatRatio(row.volumeRatio)}>
                           {formatRatio(row.volumeRatio)}
                         </td>
-                        <td title={row.addedDate || "--"}>
-                          {row.addedDate || "--"}
+                        <td title={row.watchDate || "--"}>
+                          {row.watchDate || "--"}
+                        </td>
+                        <td title={row.markedDate || "修改标记日期"}>
+                          {isDeleteMode ? (
+                            row.markedDate || "--"
+                          ) : editingMarkedDateTsCode === row.tsCode ? (
+                            <div className="watch-observe-date-editor">
+                              <select
+                                className="watch-observe-date-select"
+                                value={markedDateDraft}
+                                onChange={(event) =>
+                                  setMarkedDateDraft(event.target.value)
+                                }
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") {
+                                    void onSaveMarkedDate(row.tsCode);
+                                  }
+                                  if (event.key === "Escape") {
+                                    onCancelEditMarkedDate();
+                                  }
+                                }}
+                                autoFocus
+                              >
+                                {markedDateOptions.map((option) => (
+                                  <option key={option} value={option}>
+                                    {option}
+                                  </option>
+                                ))}
+                              </select>
+                              <div className="watch-observe-date-actions">
+                                <button
+                                  className="watch-observe-date-save"
+                                  type="button"
+                                  onClick={() =>
+                                    void onSaveMarkedDate(row.tsCode)
+                                  }
+                                >
+                                  保存
+                                </button>
+                                <button
+                                  className="watch-observe-date-cancel"
+                                  type="button"
+                                  onClick={onCancelEditMarkedDate}
+                                >
+                                  取消
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <button
+                              className="watch-observe-date-edit"
+                              type="button"
+                              onClick={() => onStartEditMarkedDate(row)}
+                            >
+                              {row.markedDate || "设置"}
+                            </button>
+                          )}
                         </td>
                         <td
                           className={getPercentClassName(
@@ -876,7 +1042,8 @@ export default function WatchObservePage() {
                           )}
                         </td>
                         <td title={conceptText}>{conceptText}</td>
-                      </tr>
+                        </tr>
+                      </Fragment>
                     );
                   })}
                 </tbody>

@@ -9,12 +9,12 @@ export type WatchObserveRow = {
   latestClose: number | null
   latestChangePct: number | null
   volumeRatio: number | null
-  addedDate: string
+  watchDate: string
   postWatchReturnPct: number | null
   todayRank: number | null
   tag: string
   concept: string
-  tradeDate: string | null
+  markedDate: string | null
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -28,12 +28,12 @@ function mergeWatchObserveRow(primary: WatchObserveRow, secondary: WatchObserveR
     latestClose: primary.latestClose ?? secondary.latestClose,
     latestChangePct: primary.latestChangePct ?? secondary.latestChangePct,
     volumeRatio: primary.volumeRatio ?? secondary.volumeRatio,
-    addedDate: primary.addedDate || secondary.addedDate,
+    watchDate: primary.watchDate || secondary.watchDate,
     postWatchReturnPct: primary.postWatchReturnPct ?? secondary.postWatchReturnPct,
     todayRank: primary.todayRank ?? secondary.todayRank,
     tag: primary.tag || secondary.tag,
     concept: primary.concept || secondary.concept,
-    tradeDate: primary.tradeDate ?? secondary.tradeDate,
+    markedDate: primary.markedDate ?? secondary.markedDate,
   }
 }
 
@@ -62,7 +62,7 @@ function normalizeRowInput(
       typeof input.volumeRatio === 'number' && Number.isFinite(input.volumeRatio)
         ? input.volumeRatio
         : null,
-    addedDate: normalizeDateValue(input.addedDate ?? ''),
+    watchDate: normalizeDateValue(input.watchDate ?? ''),
     postWatchReturnPct:
       typeof input.postWatchReturnPct === 'number' && Number.isFinite(input.postWatchReturnPct)
         ? input.postWatchReturnPct
@@ -71,8 +71,8 @@ function normalizeRowInput(
       typeof input.todayRank === 'number' && Number.isFinite(input.todayRank) ? input.todayRank : null,
     tag: input.tag?.trim() ?? '',
     concept: input.concept?.trim() ?? '',
-    tradeDate: (() => {
-      const value = normalizeDateValue(input.tradeDate ?? '')
+    markedDate: (() => {
+      const value = normalizeDateValue(input.markedDate ?? '')
       return value === '' ? null : value
     })(),
   }
@@ -92,7 +92,9 @@ function buildWatchRowFromCacheRecord(record: Record<string, unknown>) {
     return null
   }
 
-  const tradeDate = normalizeDateValue(normalizeTextValue(record.trade_date))
+  const markedDate = normalizeDateValue(
+    normalizeTextValue(record.marked_date ?? record.trade_date),
+  )
 
   return {
     tsCode,
@@ -100,12 +102,14 @@ function buildWatchRowFromCacheRecord(record: Record<string, unknown>) {
     latestClose: normalizeNumberValue(record.latest_close),
     latestChangePct: normalizeNumberValue(record.latest_change_pct),
     volumeRatio: normalizeNumberValue(record.volume_ratio),
-    addedDate: normalizeDateValue(normalizeTextValue(record.watch_date)),
+    watchDate: normalizeDateValue(
+      normalizeTextValue(record.watch_date ?? record.added_date),
+    ),
     postWatchReturnPct: normalizeNumberValue(record.post_watch_return_pct),
     todayRank: normalizeNumberValue(record.today_rank),
     tag: normalizeTextValue(record.tag),
     concept: normalizeTextValue(record.concept),
-    tradeDate: tradeDate === '' ? null : tradeDate,
+    markedDate: markedDate === '' ? null : markedDate,
   } satisfies WatchObserveRow
 }
 
@@ -152,12 +156,12 @@ export function writeWatchObserveRowsToCache(rows: WatchObserveRow[]) {
     latest_close: row.latestClose,
     latest_change_pct: row.latestChangePct,
     volume_ratio: row.volumeRatio,
-    watch_date: row.addedDate || undefined,
+    watch_date: row.watchDate || undefined,
     post_watch_return_pct: row.postWatchReturnPct,
     today_rank: row.todayRank,
     tag: row.tag || undefined,
     concept: row.concept || undefined,
-    trade_date: row.tradeDate || undefined,
+    marked_date: row.markedDate || undefined,
   }))
 
   window.localStorage.setItem(WATCH_CACHE_WRITE_KEY, JSON.stringify(payload))

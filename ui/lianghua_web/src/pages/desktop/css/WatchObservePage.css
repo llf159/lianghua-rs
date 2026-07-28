@@ -194,6 +194,34 @@
   font-weight: 600;
 }
 
+.watch-observe-date-group td {
+  padding: 9px 12px;
+  border-top: 2px solid var(--theme-orange-300);
+  border-bottom: 1px solid var(--theme-orange-200);
+  background: linear-gradient(
+    90deg,
+    var(--theme-orange-100),
+    var(--theme-orange-50) 58%,
+    #fff
+  );
+  color: var(--theme-orange-800);
+}
+
+.watch-observe-date-group td span,
+.watch-observe-date-group td strong {
+  margin-right: 10px;
+}
+
+.watch-observe-date-group td span {
+  font-size: 12px;
+  color: #7b6655;
+}
+
+.watch-observe-date-group td strong {
+  font-size: 15px;
+  font-weight: 700;
+}
+
 .watch-observe-action-col {
   text-align: center !important;
   padding-left: 6px !important;
@@ -266,7 +294,10 @@
 .watch-observe-tag-add,
 .watch-observe-tag-chip,
 .watch-observe-tag-save,
-.watch-observe-tag-cancel {
+.watch-observe-tag-cancel,
+.watch-observe-date-edit,
+.watch-observe-date-save,
+.watch-observe-date-cancel {
   border-radius: 999px;
   padding: 4px 10px;
   font-size: 12px;
@@ -284,6 +315,51 @@
   border: 1px solid var(--theme-orange-200);
   background: var(--theme-orange-100);
   color: var(--theme-orange-700);
+}
+
+.watch-observe-date-edit {
+  border: 1px solid var(--theme-orange-200);
+  background: var(--theme-orange-50);
+  color: var(--theme-orange-800);
+}
+
+.watch-observe-date-editor {
+  display: grid;
+  gap: 6px;
+}
+
+.watch-observe-date-select {
+  width: 100%;
+  min-width: 108px;
+  border: 1px solid #c6d0da;
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: #fff;
+  color: #1f2a37;
+  font-size: 13px;
+}
+
+.watch-observe-date-select:focus {
+  outline: 2px solid var(--theme-orange-300);
+  outline-offset: 1px;
+}
+
+.watch-observe-date-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.watch-observe-date-save {
+  border: 1px solid var(--theme-orange-600);
+  background: var(--theme-orange-600);
+  color: #fff;
+}
+
+.watch-observe-date-cancel {
+  border: 1px solid #c7d0da;
+  background: #fff;
+  color: #4f5f73;
 }
 
 .watch-observe-tag-editor {
