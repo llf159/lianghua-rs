@@ -12,7 +12,10 @@ use crate::expr::parser::{Expr, Stmt, Stmts};
 use crate::{
     data::{DataReader, RuleStage, SceneDirection, ScoreConfig, score_rule_path},
     expr::parser::{Parser, lex_all},
-    scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map, rt_max_len},
+    scoring::tools::{
+        collect_used_cyq_chen_runtime_keys, inject_optional_cyq_chen_fields,
+        inject_stock_extra_fields, load_st_list, load_total_share_map, rt_max_len,
+    },
     utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
 };
 
@@ -323,7 +326,7 @@ fn validate_scene_draft_basic(
 }
 
 fn validate_rule_definition(
-    _source_path: &str,
+    source_path: &str,
     reader: Option<&DataReader>,
     sample_ts_code: Option<&str>,
     latest_trade_date: Option<&str>,
@@ -424,6 +427,13 @@ fn validate_rule_definition(
             st_list.contains(sample_ts_code),
             total_share_map.get(sample_ts_code).copied(),
         )?;
+        let used_cyq_chen_keys = collect_used_cyq_chen_runtime_keys(&[&stmts]);
+        inject_optional_cyq_chen_fields(
+            &mut row_data,
+            source_path,
+            sample_ts_code,
+            &used_cyq_chen_keys,
+        );
         let mut rt = row_into_rt(row_data)?;
         let value = rt
             .eval_program(&stmts)
@@ -792,7 +802,102 @@ pub fn save_strategy_manage_refactor_file(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_rule_file_text;
+    use std::{
+        fs::{create_dir_all, remove_dir_all, write},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use duckdb::{Connection, params};
+
+    use super::{StrategyManageRuleDraft, check_strategy_manage_rule_draft, parse_rule_file_text};
+    use crate::data::source_db_path;
+
+    fn temp_source_dir() -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("lianghua_strategy_manage_{unique}"))
+    }
+
+    fn prepare_strategy_validation_source(source_dir: &std::path::Path) {
+        create_dir_all(source_dir).expect("create source dir");
+        write(
+            source_dir.join("stock_list.csv"),
+            "ts_code,unused,name\n000001.SZ,,样本股\n",
+        )
+        .expect("write stock_list.csv");
+        write(
+            source_dir.join("score_rule.toml"),
+            r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "基础规则"
+scene = "趋势启动"
+stage = "base"
+scope_windows = 1
+scope_way = "LAST"
+when = "C > O"
+points = 1.0
+explain = "test"
+"#,
+        )
+        .expect("write score_rule.toml");
+
+        let conn = Connection::open(source_db_path(source_dir.to_str().expect("utf8")))
+            .expect("open source db");
+        conn.execute(
+            r#"
+            CREATE TABLE stock_data (
+                ts_code VARCHAR,
+                trade_date VARCHAR,
+                adj_type VARCHAR,
+                open DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                close DOUBLE,
+                vol DOUBLE,
+                amount DOUBLE,
+                pre_close DOUBLE,
+                change DOUBLE,
+                pct_chg DOUBLE
+            )
+            "#,
+            [],
+        )
+        .expect("create stock_data");
+        for (trade_date, open, high, low, close, pre_close, change, pct_chg) in [
+            ("20240102", 10.0, 10.5, 9.8, 10.2, 10.0, 0.2, 2.0),
+            ("20240103", 10.2, 11.0, 10.1, 10.8, 10.2, 0.6, 5.88),
+        ] {
+            conn.execute(
+                r#"
+                INSERT INTO stock_data VALUES (?, ?, 'qfq', ?, ?, ?, ?, 1000, 10000, ?, ?, ?)
+                "#,
+                params![
+                    "000001.SZ",
+                    trade_date,
+                    open,
+                    high,
+                    low,
+                    close,
+                    pre_close,
+                    change,
+                    pct_chg
+                ],
+            )
+            .expect("insert stock row");
+        }
+    }
 
     #[test]
     fn parse_strategy_rule_file_in_current_format() {
@@ -852,5 +957,39 @@ explain = "test"
         let file = parse_rule_file_text(text).expect("legacy-weight file should parse");
         assert_eq!(file.rule.len(), 1);
         assert_eq!(file.rule[0].name, "启动测试");
+    }
+
+    #[test]
+    fn rule_draft_validation_accepts_optional_cyq_chen_fields() {
+        let source_dir = temp_source_dir();
+        prepare_strategy_validation_source(&source_dir);
+
+        let result = check_strategy_manage_rule_draft(
+            source_dir.to_str().expect("utf8"),
+            None,
+            StrategyManageRuleDraft {
+                name: "攻击K".to_string(),
+                scene_name: "趋势启动".to_string(),
+                stage: "trigger".to_string(),
+                scope_way: "LAST".to_string(),
+                scope_windows: 1,
+                when: r#"
+Y_TRAPPED := REF(CYQ_TTR, 1);
+RELEASED := Y_TRAPPED - CYQ_TTR;
+Y_TRAPPED >= 0.60
+AND RELEASED >= 0.30
+AND CYQ_TPR >= 0.70
+AND PCT_CHG >= 4
+AND C >= H * 0.98
+"#
+                .to_string(),
+                points: 6.0,
+                dist_points: None,
+                explain: "大量解放套牢盘".to_string(),
+            },
+        );
+
+        remove_dir_all(&source_dir).expect("remove source dir");
+        assert_eq!(result.as_deref(), Ok("rule 草稿检查通过"));
     }
 }

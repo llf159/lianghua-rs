@@ -1124,11 +1124,6 @@ fn build_template_runtime_row_data(
             ("RT_FH", quote_fall_from_high_pct(quote)),
             ("RT_VR", row.realtime_vol_ratio),
             ("RT_AVG", row.realtime_avg_price),
-            ("REALTIME_CHANGE_OPEN_PCT", row.realtime_change_open_pct),
-            (
-                "REALTIME_FALL_FROM_HIGH_PCT",
-                quote_fall_from_high_pct(quote),
-            ),
         ],
     )?;
 

@@ -34,7 +34,7 @@ use crate::{
 
 const BOARD_ST: &str = "ST";
 pub(crate) const DEFAULT_ADJ_TYPE: &str = "qfq";
-const INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS: [&str; 10] = [
+const INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS: [&str; 8] = [
     "RANK",
     "SCORE",
     "ZHANG",
@@ -43,8 +43,6 @@ const INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS: [&str; 10] = [
     "RT_FH",
     "RT_VR",
     "RT_AVG",
-    "REALTIME_CHANGE_OPEN_PCT",
-    "REALTIME_FALL_FROM_HIGH_PCT",
 ];
 const INTRADAY_TEMPLATE_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 const RUNTIME_INPUT_KEYS: [&str; 10] = [
@@ -90,7 +88,6 @@ pub struct IntradayMonitorRow {
     pub realtime_amount: Option<f64>,
     pub realtime_change_pct: Option<f64>,
     pub realtime_change_open_pct: Option<f64>,
-    pub realtime_fall_from_high_pct: Option<f64>,
     pub realtime_vol_ratio: Option<f64>,
     pub return_5d_pct: Option<f64>,
     pub return_5d_base_close: Option<f64>,
@@ -487,6 +484,15 @@ fn calc_return_pct(price: Option<f64>, base: Option<f64>) -> Option<f64> {
     }
 }
 
+fn calc_fall_from_high_pct(high: Option<f64>, price: Option<f64>) -> Option<f64> {
+    match (high, price) {
+        (Some(high), Some(price)) if high.is_finite() && price.is_finite() && high > 0.0 => {
+            Some(((high - price) / high).max(0.0) * 100.0)
+        }
+        _ => None,
+    }
+}
+
 fn hydrate_intraday_monitor_rows_from_shared_context(
     source_path: &str,
     rows: &mut [IntradayMonitorRow],
@@ -779,14 +785,7 @@ pub(crate) fn normalize_runtime_row_data(row_data: RowData) -> Result<RowData, S
 fn inject_template_validation_extra_series(row_data: &mut RowData) -> Result<(), String> {
     let len = row_data.trade_dates.len();
 
-    for key in [
-        "RT_OP",
-        "RT_FH",
-        "RT_VR",
-        "RT_AVG",
-        "REALTIME_CHANGE_OPEN_PCT",
-        "REALTIME_FALL_FROM_HIGH_PCT",
-    ] {
+    for key in ["RT_OP", "RT_FH", "RT_VR", "RT_AVG"] {
         let mut series = vec![None; len];
         if let Some(last) = series.last_mut() {
             *last = Some(1.0);
@@ -911,14 +910,7 @@ fn build_intraday_template_validation_row_data(
         cols.insert(key.to_string(), series);
     }
 
-    for key in [
-        "RT_OP",
-        "RT_FH",
-        "RT_VR",
-        "RT_AVG",
-        "REALTIME_CHANGE_OPEN_PCT",
-        "REALTIME_FALL_FROM_HIGH_PCT",
-    ] {
+    for key in ["RT_OP", "RT_FH", "RT_VR", "RT_AVG"] {
         let mut series = vec![None; len];
         if let Some(last) = series.last_mut() {
             *last = Some(1.0);
@@ -1036,14 +1028,12 @@ fn attach_runtime_extra_series(
         row_data,
         &[
             ("RT_OP", row.realtime_change_open_pct),
-            ("RT_FH", row.realtime_fall_from_high_pct),
+            (
+                "RT_FH",
+                calc_fall_from_high_pct(row.realtime_high, row.realtime_price),
+            ),
             ("RT_VR", row.realtime_vol_ratio),
             ("RT_AVG", row.realtime_avg_price),
-            ("REALTIME_CHANGE_OPEN_PCT", row.realtime_change_open_pct),
-            (
-                "REALTIME_FALL_FROM_HIGH_PCT",
-                row.realtime_fall_from_high_pct,
-            ),
         ],
     )
 }
@@ -1509,11 +1499,6 @@ fn apply_sina_quote_to_intraday_row(row: &mut IntradayMonitorRow, quote: &SinaQu
         } else {
             None
         };
-    row.realtime_fall_from_high_pct = if quote.high > 0.0 {
-        Some(((quote.high - quote.price) / quote.high).max(0.0) * 100.0)
-    } else {
-        None
-    };
     row.realtime_vol_ratio = None;
     row.return_5d_pct = calc_return_pct(Some(quote.price), row.return_5d_base_close);
 }
@@ -1535,11 +1520,6 @@ fn apply_tencent_quote_to_intraday_row(row: &mut IntradayMonitorRow, quote: &Ten
         } else {
             None
         };
-    row.realtime_fall_from_high_pct = if quote.high > 0.0 {
-        Some(((quote.high - quote.price) / quote.high).max(0.0) * 100.0)
-    } else {
-        None
-    };
     row.realtime_vol_ratio = quote.volume_ratio;
     row.return_5d_pct = calc_return_pct(Some(quote.price), row.return_5d_base_close);
 }
@@ -1556,7 +1536,6 @@ fn clear_realtime_intraday_row(row: &mut IntradayMonitorRow) {
     row.realtime_amount = None;
     row.realtime_change_pct = None;
     row.realtime_change_open_pct = None;
-    row.realtime_fall_from_high_pct = None;
     row.realtime_vol_ratio = None;
 }
 
@@ -1804,7 +1783,6 @@ pub fn get_intraday_monitor_page(
                     realtime_amount: None,
                     realtime_change_pct: None,
                     realtime_change_open_pct: None,
-                    realtime_fall_from_high_pct: None,
                     realtime_vol_ratio: None,
                     return_5d_pct: None,
                     return_5d_base_close: None,
@@ -1961,7 +1939,6 @@ pub fn get_intraday_monitor_page(
                     realtime_amount: None,
                     realtime_change_pct: None,
                     realtime_change_open_pct: None,
-                    realtime_fall_from_high_pct: None,
                     realtime_vol_ratio: None,
                     return_5d_pct: None,
                     return_5d_base_close: None,
@@ -2059,7 +2036,6 @@ mod tests {
             realtime_amount: None,
             realtime_change_pct: None,
             realtime_change_open_pct: None,
-            realtime_fall_from_high_pct: None,
             realtime_vol_ratio: None,
             return_5d_pct: None,
             return_5d_base_close: None,
@@ -2140,7 +2116,6 @@ mod tests {
             realtime_amount: Some(5678.0),
             realtime_change_pct: Some(3.03),
             realtime_change_open_pct: Some(2.0),
-            realtime_fall_from_high_pct: Some(1.0),
             realtime_vol_ratio: Some(1.5),
             return_5d_pct: None,
             return_5d_base_close: None,
@@ -2185,7 +2160,6 @@ mod tests {
             realtime_amount: Some(5678.0),
             realtime_change_pct: Some(3.03),
             realtime_change_open_pct: Some(2.0),
-            realtime_fall_from_high_pct: Some(1.0),
             realtime_vol_ratio: Some(1.5),
             return_5d_pct: None,
             return_5d_base_close: None,
@@ -2209,6 +2183,22 @@ mod tests {
         let error = validate_intraday_monitor_template_expression(None, "rank <= 100".to_string())
             .expect_err("lowercase rank should not be injected");
         assert!(error.contains("变量不存在:rank"));
+    }
+
+    #[test]
+    fn template_validation_supports_short_realtime_fields_but_rejects_removed_long_aliases() {
+        validate_intraday_monitor_template_expression(
+            None,
+            "RT_OP >= 1 AND RT_FH <= 1".to_string(),
+        )
+        .expect("short realtime fields should validate");
+
+        for field in ["REALTIME_CHANGE_OPEN_PCT", "REALTIME_FALL_FROM_HIGH_PCT"] {
+            let error =
+                validate_intraday_monitor_template_expression(None, format!("{field} <= 1"))
+                    .expect_err("removed long alias should not validate");
+            assert!(error.contains(&format!("变量不存在:{field}")));
+        }
     }
 
     #[test]

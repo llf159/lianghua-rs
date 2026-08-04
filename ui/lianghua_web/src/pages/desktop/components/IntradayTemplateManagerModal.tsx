@@ -293,10 +293,10 @@ export default function IntradayTemplateManagerModal({
             指标字段：可直接引用 <code>stock_data</code> 已落库指标列，或 <code>ind.toml</code> 中定义的指标名。
           </div>
           <div>
-            实时字段：<code>REALTIME_CHANGE_OPEN_PCT</code> 为实体涨幅；还可用 <code>REALTIME_FALL_FROM_HIGH_PCT / RT_AVG / RT_VR</code>
+            实时字段：<code>RT_OP</code> 为实体涨幅；还可用 <code>RT_FH / RT_AVG / RT_VR</code>
           </div>
           <div>
-            高点回落：<code>REALTIME_FALL_FROM_HIGH_PCT</code> 为非负百分比值，<code>0</code> 表示当前价等于今日高点，不会返回负数；计算口径 = max((今日高点 - 当前价) / 今日高点, 0) × 100%
+            高点回落：<code>RT_FH</code> 为非负百分比值，<code>0</code> 表示当前价等于今日高点；计算口径 = max((今日高点 - 当前价) / 今日高点, 0) × 100%
           </div>
           <div>
             盘中量比：<code>RT_VR</code> 使用行情源返回值；新浪源没有该字段时为空

@@ -83,7 +83,7 @@ function buildLegacyTemplateExpression(
   base: "preclose" | "open",
 ) {
   const threshold = Math.abs(thresholdPct);
-  const field = base === "open" ? "REALTIME_CHANGE_OPEN_PCT" : "PCT_CHG";
+  const field = base === "open" ? "RT_OP" : "PCT_CHG";
   return direction === "down"
     ? `${field} <= -${threshold}`
     : `${field} >= ${threshold}`;

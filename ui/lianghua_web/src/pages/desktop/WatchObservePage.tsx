@@ -614,7 +614,7 @@ export default function WatchObservePage() {
     }
   }
 
-  const latestPriceHeader = viewMode === "realtime" ? "实时价*" : "最新收盘价";
+  const latestPriceHeader = viewMode === "realtime" ? "实时价*" : "最新价";
   const latestChangeHeader = viewMode === "realtime" ? "实时涨幅*" : "最新涨幅";
   const rankHeader = "参考日排名";
 
@@ -731,13 +731,13 @@ export default function WatchObservePage() {
             >
               <table
                 className="watch-observe-table"
-                style={{ minWidth: isDeleteMode ? "1482px" : "1434px" }}
+                style={{ minWidth: isDeleteMode ? "1476px" : "1428px" }}
               >
                 <colgroup>
                   {isDeleteMode ? <col style={{ width: "48px" }} /> : null}
-                  <col style={{ width: "94px" }} />
+                  <col style={{ width: "108px" }} />
                   <col style={{ width: "80px" }} />
-                  <col style={{ width: "116px" }} />
+                  <col style={{ width: "96px" }} />
                   <col style={{ width: "104px" }} />
                   <col style={{ width: "104px" }} />
                   <col style={{ width: "72px" }} />

@@ -109,7 +109,6 @@ export type IntradayMonitorRow = {
   realtime_amount?: number | null;
   realtime_change_pct?: number | null;
   realtime_change_open_pct?: number | null;
-  realtime_fall_from_high_pct?: number | null;
   realtime_vol_ratio?: number | null;
   return_5d_pct?: number | null;
   return_5d_base_close?: number | null;
