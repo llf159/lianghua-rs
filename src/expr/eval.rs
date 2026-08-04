@@ -1510,48 +1510,82 @@ impl Runtime {
     }
 }
 
+macro_rules! define_expression_functions {
+    ($($variant:ident => $name:literal),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy)]
+        pub(crate) enum ExpressionFunction {
+            $($variant),+
+        }
+
+        impl ExpressionFunction {
+            const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            pub(crate) fn parse(name: &str) -> Option<Self> {
+                match name.trim().to_ascii_uppercase().as_str() {
+                    $($name => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+
+            const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name),+
+                }
+            }
+        }
+    };
+}
+
+define_expression_functions! {
+    Abs => "ABS",
+    Max => "MAX",
+    Min => "MIN",
+    Div => "DIV",
+    Hhv => "HHV",
+    Hhvd => "HHVD",
+    Llv => "LLV",
+    Llvd => "LLVD",
+    Count => "COUNT",
+    Countd => "COUNTD",
+    Exist => "EXIST",
+    Existd => "EXISTD",
+    Ma => "MA",
+    Mad => "MAD",
+    Ref => "REF",
+    Refd => "REFD",
+    Last => "LAST",
+    Sum => "SUM",
+    Sumd => "SUMD",
+    Std => "STD",
+    Stdd => "STDD",
+    If => "IF",
+    Cross => "CROSS",
+    Ema => "EMA",
+    Sma => "SMA",
+    Barslast => "BARSLAST",
+    Rsv => "RSV",
+    Rsvd => "RSVD",
+    Grank => "GRANK",
+    Grankd => "GRANKD",
+    Gtopcount => "GTOPCOUNT",
+    Gtopcountd => "GTOPCOUNTD",
+    Ltopcount => "LTOPCOUNT",
+    Ltopcountd => "LTOPCOUNTD",
+    Lrank => "LRANK",
+    Lrankd => "LRANKD",
+    Get => "GET",
+    Getd => "GETD",
+}
+
+pub fn supported_expression_functions() -> impl ExactSizeIterator<Item = &'static str> {
+    ExpressionFunction::ALL
+        .iter()
+        .copied()
+        .map(ExpressionFunction::name)
+}
+
 pub fn is_supported_expression_function(name: &str) -> bool {
-    matches!(
-        name.trim().to_ascii_uppercase().as_str(),
-        "ABS"
-            | "MAX"
-            | "MIN"
-            | "DIV"
-            | "HHV"
-            | "HHVD"
-            | "LLV"
-            | "LLVD"
-            | "COUNT"
-            | "COUNTD"
-            | "EXIST"
-            | "EXISTD"
-            | "MA"
-            | "MAD"
-            | "REF"
-            | "REFD"
-            | "LAST"
-            | "SUM"
-            | "SUMD"
-            | "STD"
-            | "STDD"
-            | "IF"
-            | "CROSS"
-            | "EMA"
-            | "SMA"
-            | "BARSLAST"
-            | "RSV"
-            | "RSVD"
-            | "GRANK"
-            | "GRANKD"
-            | "GTOPCOUNT"
-            | "GTOPCOUNTD"
-            | "LTOPCOUNT"
-            | "LTOPCOUNTD"
-            | "LRANK"
-            | "LRANKD"
-            | "GET"
-            | "GETD"
-    )
+    ExpressionFunction::parse(name).is_some()
 }
 
 impl Runtime {
@@ -1575,49 +1609,50 @@ impl Runtime {
 
     fn eval_call(&mut self, name: &str, args: &[Expr]) -> Result<Value, EvalErr> {
         let fn_name = name.to_ascii_uppercase();
-        match fn_name.as_str() {
-            "ABS" => Ok(self.impl_abs(args)?),
-            "MAX" => Ok(self.impl_max(args)?),
-            "MIN" => Ok(self.impl_min(args)?),
-            "DIV" => Ok(self.impl_div(args)?),
-            "HHV" => Ok(self.impl_hhv(args)?),
-            "HHVD" => Ok(self.impl_hhvd(args)?),
-            "LLV" => Ok(self.impl_llv(args)?),
-            "LLVD" => Ok(self.impl_llvd(args)?),
-            "COUNT" => Ok(self.impl_count(args)?),
-            "COUNTD" => Ok(self.impl_countd(args)?),
-            "EXIST" => Ok(self.impl_exist(args)?),
-            "EXISTD" => Ok(self.impl_existd(args)?),
-            "MA" => Ok(self.impl_ma(args)?),
-            "MAD" => Ok(self.impl_window_sumd(args, true)?),
-            "REF" => Ok(self.impl_ref(args)?),
-            "REFD" => Ok(self.impl_refd(args)?),
-            "LAST" => Ok(self.impl_last(args)?),
-            "SUM" => Ok(self.impl_sum(args)?),
-            "SUMD" => Ok(self.impl_window_sumd(args, false)?),
-            "STD" => Ok(self.impl_std(args)?),
-            "STDD" => Ok(self.impl_stdd(args)?),
-            "IF" => Ok(self.impl_if(args)?),
-            "CROSS" => Ok(self.impl_cross(args)?),
-            "EMA" => Ok(self.impl_ema(args)?),
-            "SMA" => Ok(self.impl_sma(args)?),
-            "BARSLAST" => Ok(self.impl_barslast(args)?),
-            "RSV" => Ok(self.impl_rsv(args)?),
-            "RSVD" => Ok(self.impl_rsvd(args)?),
-            "GRANK" => Ok(self.impl_grank(args)?),
-            "GRANKD" => Ok(self.impl_rankd(args, "GRANKD", true)?),
-            "GTOPCOUNT" => Ok(self.impl_gtopcount(args)?),
-            "GTOPCOUNTD" => Ok(self.impl_gtopcountd(args)?),
-            "LTOPCOUNT" => Ok(self.impl_ltopcount(args)?),
-            "LTOPCOUNTD" => Ok(self.impl_ltopcountd(args)?),
-            "LRANK" => Ok(self.impl_lrank(args)?),
-            "LRANKD" => Ok(self.impl_rankd(args, "LRANKD", false)?),
-            "GET" => Ok(self.impl_get(args)?),
-            "GETD" => Ok(self.impl_getd(args)?),
-
-            other => Err(EvalErr {
-                msg: format!("未定义函数:{:?}", other),
-            }),
+        let Some(function) = ExpressionFunction::parse(&fn_name) else {
+            return Err(EvalErr {
+                msg: format!("未定义函数:{fn_name:?}"),
+            });
+        };
+        match function {
+            ExpressionFunction::Abs => self.impl_abs(args),
+            ExpressionFunction::Max => self.impl_max(args),
+            ExpressionFunction::Min => self.impl_min(args),
+            ExpressionFunction::Div => self.impl_div(args),
+            ExpressionFunction::Hhv => self.impl_hhv(args),
+            ExpressionFunction::Hhvd => self.impl_hhvd(args),
+            ExpressionFunction::Llv => self.impl_llv(args),
+            ExpressionFunction::Llvd => self.impl_llvd(args),
+            ExpressionFunction::Count => self.impl_count(args),
+            ExpressionFunction::Countd => self.impl_countd(args),
+            ExpressionFunction::Exist => self.impl_exist(args),
+            ExpressionFunction::Existd => self.impl_existd(args),
+            ExpressionFunction::Ma => self.impl_ma(args),
+            ExpressionFunction::Mad => self.impl_window_sumd(args, true),
+            ExpressionFunction::Ref => self.impl_ref(args),
+            ExpressionFunction::Refd => self.impl_refd(args),
+            ExpressionFunction::Last => self.impl_last(args),
+            ExpressionFunction::Sum => self.impl_sum(args),
+            ExpressionFunction::Sumd => self.impl_window_sumd(args, false),
+            ExpressionFunction::Std => self.impl_std(args),
+            ExpressionFunction::Stdd => self.impl_stdd(args),
+            ExpressionFunction::If => self.impl_if(args),
+            ExpressionFunction::Cross => self.impl_cross(args),
+            ExpressionFunction::Ema => self.impl_ema(args),
+            ExpressionFunction::Sma => self.impl_sma(args),
+            ExpressionFunction::Barslast => self.impl_barslast(args),
+            ExpressionFunction::Rsv => self.impl_rsv(args),
+            ExpressionFunction::Rsvd => self.impl_rsvd(args),
+            ExpressionFunction::Grank => self.impl_grank(args),
+            ExpressionFunction::Grankd => self.impl_rankd(args, "GRANKD", true),
+            ExpressionFunction::Gtopcount => self.impl_gtopcount(args),
+            ExpressionFunction::Gtopcountd => self.impl_gtopcountd(args),
+            ExpressionFunction::Ltopcount => self.impl_ltopcount(args),
+            ExpressionFunction::Ltopcountd => self.impl_ltopcountd(args),
+            ExpressionFunction::Lrank => self.impl_lrank(args),
+            ExpressionFunction::Lrankd => self.impl_rankd(args, "LRANKD", false),
+            ExpressionFunction::Get => self.impl_get(args),
+            ExpressionFunction::Getd => self.impl_getd(args),
         }
     }
 

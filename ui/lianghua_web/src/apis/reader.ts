@@ -218,6 +218,32 @@ export type IntradayMonitorTemplateValidationData = {
   message: string;
 };
 
+export type ExpressionFieldData = {
+  name: string;
+  description: string;
+  example: string;
+};
+
+export type ExpressionCapabilitiesData = {
+  supportedFunctions: string[];
+  intradayRealtimeFields: ExpressionFieldData[];
+};
+
+let expressionCapabilitiesRequest: Promise<ExpressionCapabilitiesData> | null =
+  null;
+
+export function getExpressionCapabilities() {
+  if (!expressionCapabilitiesRequest) {
+    expressionCapabilitiesRequest = invoke<ExpressionCapabilitiesData>(
+      "get_expression_capabilities",
+    ).catch((error) => {
+      expressionCapabilitiesRequest = null;
+      throw error;
+    });
+  }
+  return expressionCapabilitiesRequest;
+}
+
 export type StockLookupRow = {
   ts_code: string;
   name: string;

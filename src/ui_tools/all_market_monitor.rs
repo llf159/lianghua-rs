@@ -27,6 +27,9 @@ use crate::{
     },
     ui_tools::{
         build_concepts_map,
+        expression::{
+            RT_AVERAGE_PRICE, RT_FALL_FROM_HIGH_PCT, RT_OPEN_CHANGE_PCT, RT_VOLUME_RATIO,
+        },
         intraday_monitor::{
             CompiledIntradayMonitorTemplate, DEFAULT_ADJ_TYPE, IntradayMonitorTemplate,
             add_indicator_input_runtime_keys, build_quote_only_runtime_row_data,
@@ -1120,10 +1123,10 @@ fn build_template_runtime_row_data(
     inject_latest_num_fields(
         &mut row_data,
         &[
-            ("RT_OP", row.realtime_change_open_pct),
-            ("RT_FH", quote_fall_from_high_pct(quote)),
-            ("RT_VR", row.realtime_vol_ratio),
-            ("RT_AVG", row.realtime_avg_price),
+            (RT_OPEN_CHANGE_PCT, row.realtime_change_open_pct),
+            (RT_FALL_FROM_HIGH_PCT, quote_fall_from_high_pct(quote)),
+            (RT_VOLUME_RATIO, row.realtime_vol_ratio),
+            (RT_AVERAGE_PRICE, row.realtime_avg_price),
         ],
     )?;
 

@@ -12,7 +12,8 @@ use crate::{
     data::RowData,
     expr::{
         eval::{Runtime, Value},
-        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+        parser::{Expr, Stmt, Stmts},
+        validation::{first_unsupported_expression_function, parse_expression_program},
     },
 };
 
@@ -828,12 +829,11 @@ fn bool_series_to_json_values(series: &[bool]) -> Vec<serde_json::Value> {
 }
 
 fn compile_expression(expr: &str, path: &str) -> Result<Stmts, String> {
-    let tokens = lex_all(expr);
-    let mut parser = Parser::new(tokens);
-    let stmts = parser
-        .parse_main()
+    let stmts = parse_expression_program(expr)
         .map_err(|error| format!("{path} parse failed at {}: {}", error.idx, error.msg))?;
-    validate_expression_functions(&stmts, path)?;
+    if let Some(name) = first_unsupported_expression_function(&stmts) {
+        return Err(format!("{path} references unknown function `{name}`"));
+    }
     Ok(stmts)
 }
 
@@ -1053,37 +1053,6 @@ fn collect_expr_identifiers(
     }
 }
 
-fn validate_expression_functions(stmts: &Stmts, path: &str) -> Result<(), String> {
-    for stmt in &stmts.item {
-        match stmt {
-            Stmt::Assign { value, .. } => validate_expr_functions(value, path)?,
-            Stmt::Expr(expr) => validate_expr_functions(expr, path)?,
-        }
-    }
-    Ok(())
-}
-
-fn validate_expr_functions(expr: &Expr, path: &str) -> Result<(), String> {
-    match expr {
-        Expr::Number(_) | Expr::Ident(_) => Ok(()),
-        Expr::Call { name, args } => {
-            let normalized = normalize_identifier(name);
-            if !is_expression_function(&normalized) {
-                return Err(format!("{path} references unknown function `{name}`"));
-            }
-            for arg in args {
-                validate_expr_functions(arg, path)?;
-            }
-            Ok(())
-        }
-        Expr::Unary { rhs, .. } => validate_expr_functions(rhs, path),
-        Expr::Binary { lhs, rhs, .. } => {
-            validate_expr_functions(lhs, path)?;
-            validate_expr_functions(rhs, path)
-        }
-    }
-}
-
 fn normalize_identifier(identifier: &str) -> String {
     identifier.trim().to_ascii_uppercase()
 }
@@ -1096,50 +1065,6 @@ fn injected_runtime_db_dependency(key: &str) -> Option<&'static str> {
     CHART_INDICATOR_RUNTIME_ALIASES
         .iter()
         .find_map(|(alias, dependency)| (*alias == key).then_some(*dependency))
-}
-
-fn is_expression_function(name: &str) -> bool {
-    matches!(
-        name,
-        "ABS"
-            | "MAX"
-            | "MIN"
-            | "DIV"
-            | "HHV"
-            | "HHVD"
-            | "LLV"
-            | "LLVD"
-            | "COUNT"
-            | "COUNTD"
-            | "EXIST"
-            | "EXISTD"
-            | "MA"
-            | "MAD"
-            | "REF"
-            | "REFD"
-            | "LAST"
-            | "SUM"
-            | "SUMD"
-            | "STD"
-            | "STDD"
-            | "IF"
-            | "CROSS"
-            | "EMA"
-            | "SMA"
-            | "BARSLAST"
-            | "RSV"
-            | "RSVD"
-            | "GRANK"
-            | "GRANKD"
-            | "GTOPCOUNT"
-            | "GTOPCOUNTD"
-            | "LTOPCOUNT"
-            | "LTOPCOUNTD"
-            | "LRANK"
-            | "LRANKD"
-            | "GET"
-            | "GETD"
-    )
 }
 
 fn is_base_runtime_key(key: &str) -> bool {

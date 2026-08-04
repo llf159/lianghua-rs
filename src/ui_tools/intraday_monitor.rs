@@ -15,7 +15,10 @@ use crate::{
     },
     expr::{
         eval::Value,
-        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+        parser::Stmts,
+        validation::{
+            estimate_expression_warmup, parse_expression_program, validate_expression_functions,
+        },
     },
     scoring::tools::{
         collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names,
@@ -24,26 +27,23 @@ use crate::{
         load_total_share_map, rt_max_len,
     },
     ui_tools::{
-        build_concepts_map, build_name_map, build_total_mv_map, filter_mv,
+        build_concepts_map, build_name_map, build_total_mv_map,
+        expression::{
+            INTRADAY_REALTIME_FIELDS, RT_AVERAGE_PRICE, RT_FALL_FROM_HIGH_PCT, RT_OPEN_CHANGE_PCT,
+            RT_VOLUME_RATIO,
+        },
+        filter_mv,
         realtime::{
             fetch_realtime_quote_map, fetch_tencent_realtime_quote_map, normalize_quote_trade_date,
         },
     },
-    utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
+    utils::utils::board_category,
 };
 
 const BOARD_ST: &str = "ST";
 pub(crate) const DEFAULT_ADJ_TYPE: &str = "qfq";
-const INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS: [&str; 8] = [
-    "RANK",
-    "SCORE",
-    "ZHANG",
-    "TOTAL_MV_YI",
-    "RT_OP",
-    "RT_FH",
-    "RT_VR",
-    "RT_AVG",
-];
+const INTRADAY_TEMPLATE_BASE_INJECTED_RUNTIME_KEYS: [&str; 4] =
+    ["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI"];
 const INTRADAY_TEMPLATE_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 const RUNTIME_INPUT_KEYS: [&str; 10] = [
     "O",
@@ -577,48 +577,12 @@ fn default_template_name(raw: &str) -> String {
     }
 }
 
-fn estimate_intraday_template_warmup(stmts: &Stmts) -> Result<usize, String> {
-    let mut locals = HashMap::new();
-    let mut consts: HashMap<String, usize> = HashMap::new();
-    let mut expr_need = 0usize;
-
-    for stmt in stmts.item.iter().cloned() {
-        match stmt {
-            Stmt::Assign { name, value } => match value {
-                Expr::Number(v) => {
-                    if v < 0.0 {
-                        return Err("表达式常量赋值结果不能为负数".to_string());
-                    }
-                    consts.insert(name, v as usize);
-                }
-                Expr::Binary { op, lhs, rhs } => {
-                    if let Some(out) = eval_binary_for_warmup(&op, &lhs, &rhs, &consts)? {
-                        consts.insert(name, out as usize);
-                    } else {
-                        let value_need =
-                            impl_expr_warmup(Expr::Binary { op, lhs, rhs }, &locals, &consts)?;
-                        locals.insert(name, value_need);
-                    }
-                }
-                _ => {
-                    let value_need = impl_expr_warmup(value, &locals, &consts)?;
-                    locals.insert(name, value_need);
-                }
-            },
-            Stmt::Expr(expr) => {
-                expr_need = expr_need.max(impl_expr_warmup(expr, &locals, &consts)?);
-            }
-        }
-    }
-
-    Ok(expr_need)
-}
-
 pub(crate) fn collect_intraday_template_runtime_keys(programs: &[&Stmts]) -> HashSet<String> {
     let cyq_chen_keys = cyq_chen_runtime_key_names();
-    let injected_keys = INTRADAY_TEMPLATE_INJECTED_RUNTIME_KEYS
+    let injected_keys = INTRADAY_TEMPLATE_BASE_INJECTED_RUNTIME_KEYS
         .iter()
         .copied()
+        .chain(INTRADAY_REALTIME_FIELDS.iter().map(|field| field.name))
         .chain(cyq_chen_keys)
         .collect::<Vec<_>>();
 
@@ -665,12 +629,10 @@ pub(crate) fn compile_intraday_templates(
         }
 
         let compiled = (|| -> Result<ReadyIntradayMonitorTemplate, String> {
-            let tokens = lex_all(expression);
-            let mut parser = Parser::new(tokens);
-            let ast = parser
-                .parse_main()
+            let ast = parse_expression_program(expression)
                 .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
-            let warmup_need = estimate_intraday_template_warmup(&ast)?;
+            validate_expression_functions(&ast)?;
+            let warmup_need = estimate_expression_warmup(&ast)?;
             Ok(ReadyIntradayMonitorTemplate {
                 name: name.clone(),
                 ast,
@@ -706,12 +668,10 @@ pub fn validate_intraday_monitor_template_expression(
         return Err("表达式不能为空".to_string());
     }
 
-    let tokens = lex_all(&normalized);
-    let mut parser = Parser::new(tokens);
-    let ast = parser
-        .parse_main()
+    let ast = parse_expression_program(&normalized)
         .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
-    let warmup_need = estimate_intraday_template_warmup(&ast)?;
+    validate_expression_functions(&ast)?;
+    let warmup_need = estimate_expression_warmup(&ast)?;
     let required_runtime_keys = collect_intraday_template_runtime_keys(&[&ast]);
     let cyq_chen_runtime_keys = collect_intraday_template_cyq_chen_keys(&[&ast]);
     let row_data = build_intraday_template_validation_row_data(
@@ -785,7 +745,7 @@ pub(crate) fn normalize_runtime_row_data(row_data: RowData) -> Result<RowData, S
 fn inject_template_validation_extra_series(row_data: &mut RowData) -> Result<(), String> {
     let len = row_data.trade_dates.len();
 
-    for key in ["RT_OP", "RT_FH", "RT_VR", "RT_AVG"] {
+    for key in INTRADAY_REALTIME_FIELDS.iter().map(|field| field.name) {
         let mut series = vec![None; len];
         if let Some(last) = series.last_mut() {
             *last = Some(1.0);
@@ -910,7 +870,7 @@ fn build_intraday_template_validation_row_data(
         cols.insert(key.to_string(), series);
     }
 
-    for key in ["RT_OP", "RT_FH", "RT_VR", "RT_AVG"] {
+    for key in INTRADAY_REALTIME_FIELDS.iter().map(|field| field.name) {
         let mut series = vec![None; len];
         if let Some(last) = series.last_mut() {
             *last = Some(1.0);
@@ -1027,13 +987,13 @@ fn attach_runtime_extra_series(
     inject_latest_num_fields(
         row_data,
         &[
-            ("RT_OP", row.realtime_change_open_pct),
+            (RT_OPEN_CHANGE_PCT, row.realtime_change_open_pct),
             (
-                "RT_FH",
+                RT_FALL_FROM_HIGH_PCT,
                 calc_fall_from_high_pct(row.realtime_high, row.realtime_price),
             ),
-            ("RT_VR", row.realtime_vol_ratio),
-            ("RT_AVG", row.realtime_avg_price),
+            (RT_VOLUME_RATIO, row.realtime_vol_ratio),
+            (RT_AVERAGE_PRICE, row.realtime_avg_price),
         ],
     )
 }
@@ -2203,11 +2163,10 @@ mod tests {
 
     #[test]
     fn intraday_template_runtime_key_collection_skips_injected_fields() {
-        let tokens = lex_all(
+        let program = parse_expression_program(
             "M := MA(C, 5); M > MY_RT_IND AND RANK <= 50 AND SCORE > 0 AND RT_VR > 1 AND TOTAL_MV_YI > 10 AND CYQ_TPR > 0.6",
-        );
-        let mut parser = Parser::new(tokens);
-        let program = parser.parse_main().expect("expression should parse");
+        )
+        .expect("expression should parse");
 
         let keys = collect_intraday_template_runtime_keys(&[&program]);
 

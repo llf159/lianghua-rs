@@ -12,14 +12,17 @@ use crate::{
     },
     expr::{
         eval::Value,
-        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+        parser::Stmts,
+        validation::{
+            estimate_expression_warmup, parse_expression_program, validate_expression_functions,
+        },
     },
     scoring::tools::{
         CyqChenFieldInjector, calc_query_need_rows, calc_query_start_date,
         collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names, inject_stock_extra_fields,
         load_st_list, load_total_share_map, rt_max_len,
     },
-    utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
+    utils::utils::board_category,
 };
 
 use super::{
@@ -360,38 +363,7 @@ pub fn get_stock_pick_options(source_path: &str) -> Result<StockPickOptionsData,
 }
 
 fn estimate_custom_warmup(stmts: &Stmts, scope_way: PickScopeWay) -> Result<usize, String> {
-    let mut locals = HashMap::new();
-    let mut consts: HashMap<String, usize> = HashMap::new();
-    let mut expr_need = 0usize;
-
-    for stmt in stmts.item.clone() {
-        match stmt {
-            Stmt::Assign { name, value } => match value {
-                Expr::Number(v) => {
-                    if v < 0.0 {
-                        return Err("表达式常量赋值结果不能为负数".to_string());
-                    }
-                    consts.insert(name, v as usize);
-                }
-                Expr::Binary { op, lhs, rhs } => {
-                    if let Some(out) = eval_binary_for_warmup(&op, &lhs, &rhs, &consts)? {
-                        consts.insert(name, out as usize);
-                    } else {
-                        let need =
-                            impl_expr_warmup(Expr::Binary { op, lhs, rhs }, &locals, &consts)?;
-                        locals.insert(name, need);
-                    }
-                }
-                other => {
-                    let need = impl_expr_warmup(other, &locals, &consts)?;
-                    locals.insert(name, need);
-                }
-            },
-            Stmt::Expr(expr) => {
-                expr_need = expr_need.max(impl_expr_warmup(expr, &locals, &consts)?);
-            }
-        }
-    }
+    let expression_need = estimate_expression_warmup(stmts)?;
 
     let extra_need = match scope_way {
         PickScopeWay::Last => 0,
@@ -399,7 +371,7 @@ fn estimate_custom_warmup(stmts: &Stmts, scope_way: PickScopeWay) -> Result<usiz
         PickScopeWay::Consec(threshold) => threshold.saturating_sub(1),
     };
 
-    Ok(expr_need + extra_need)
+    Ok(expression_need + extra_need)
 }
 
 fn collect_expression_stock_pick_runtime_keys(stmts: &Stmts) -> HashSet<String> {
@@ -429,11 +401,9 @@ pub fn validate_expression_stock_pick_template_expression(
         return Err("表达式不能为空".to_string());
     }
 
-    let tokens = lex_all(&normalized_expression);
-    let mut parser = Parser::new(tokens);
-    let stmts = parser
-        .parse_main()
+    let stmts = parse_expression_program(&normalized_expression)
         .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
+    validate_expression_functions(&stmts)?;
     let warmup_need = estimate_custom_warmup(&stmts, PickScopeWay::Last)?;
     let required_runtime_keys = collect_expression_stock_pick_runtime_keys(&stmts);
     let used_cyq_chen_keys = collect_used_cyq_chen_runtime_keys(&[&stmts]);
@@ -763,11 +733,9 @@ pub fn run_expression_stock_pick(
         return Err("表达式不能为空".to_string());
     }
 
-    let tokens = lex_all(expression);
-    let mut parser = Parser::new(tokens);
-    let stmts = parser
-        .parse_main()
+    let stmts = parse_expression_program(expression)
         .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
+    validate_expression_functions(&stmts)?;
 
     let warmup_need = estimate_custom_warmup(&stmts, parsed_scope_way)?;
     let required_runtime_keys = collect_expression_stock_pick_runtime_keys(&stmts);
@@ -1060,9 +1028,7 @@ mod tests {
     use super::*;
 
     fn parse_program(expression: &str) -> Stmts {
-        let tokens = lex_all(expression);
-        let mut parser = Parser::new(tokens);
-        parser.parse_main().expect("expression should parse")
+        parse_expression_program(expression).expect("expression should parse")
     }
 
     #[test]

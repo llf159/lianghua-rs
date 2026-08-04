@@ -8,15 +8,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::scoring_data::row_into_rt;
 use crate::expr::eval::Value;
-use crate::expr::parser::{Expr, Stmt, Stmts};
+use crate::expr::{
+    parser::Stmts,
+    validation::{
+        estimate_expression_warmup, parse_expression_program, validate_expression_functions,
+    },
+};
 use crate::{
     data::{DataReader, RuleStage, SceneDirection, ScoreConfig, score_rule_path},
-    expr::parser::{Parser, lex_all},
     scoring::tools::{
         collect_used_cyq_chen_runtime_keys, inject_optional_cyq_chen_fields,
         inject_stock_extra_fields, load_st_list, load_total_share_map, rt_max_len,
     },
-    utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
 };
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
@@ -231,38 +234,7 @@ fn estimate_rule_warmup(
     scope_way: StrategyScopeWay,
     scope_windows: usize,
 ) -> Result<usize, String> {
-    let mut locals = std::collections::HashMap::new();
-    let mut consts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut expr_need = 0usize;
-
-    for stmt in stmts.item.clone() {
-        match stmt {
-            Stmt::Assign { name, value } => match value {
-                Expr::Number(v) => {
-                    if v < 0.0 {
-                        return Err("表达式常量赋值结果不能为负数".to_string());
-                    }
-                    consts.insert(name, v as usize);
-                }
-                Expr::Binary { op, lhs, rhs } => {
-                    if let Some(out) = eval_binary_for_warmup(&op, &lhs, &rhs, &consts)? {
-                        consts.insert(name, out as usize);
-                    } else {
-                        let need =
-                            impl_expr_warmup(Expr::Binary { op, lhs, rhs }, &locals, &consts)?;
-                        locals.insert(name, need);
-                    }
-                }
-                other => {
-                    let need = impl_expr_warmup(other, &locals, &consts)?;
-                    locals.insert(name, need);
-                }
-            },
-            Stmt::Expr(expr) => {
-                expr_need = expr_need.max(impl_expr_warmup(expr, &locals, &consts)?);
-            }
-        }
-    }
+    let expression_need = estimate_expression_warmup(stmts)?;
 
     let scope_extra = match scope_way {
         StrategyScopeWay::Last => 0,
@@ -274,7 +246,7 @@ fn estimate_rule_warmup(
             .max(threshold.saturating_sub(1)),
     };
 
-    Ok(expr_need + scope_extra)
+    Ok(expression_need + scope_extra)
 }
 
 fn validate_scene_values(draft: &StrategyManageSceneDraft) -> Result<(), String> {
@@ -394,11 +366,9 @@ fn validate_rule_definition(
         }
     }
 
-    let tokens = lex_all(&rule.when);
-    let mut parser = Parser::new(tokens);
-    let stmts = parser
-        .parse_main()
+    let stmts = parse_expression_program(&rule.when)
         .map_err(|e| format!("策略 {} 表达式解析错误在{}:{}", rule.name, e.idx, e.msg))?;
+    validate_expression_functions(&stmts).map_err(|error| format!("策略 {} {error}", rule.name))?;
 
     if let (
         Some(reader),

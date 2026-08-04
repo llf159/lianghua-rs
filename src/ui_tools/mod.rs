@@ -19,6 +19,7 @@ pub mod data_import;
 pub mod data_viewer;
 pub mod details;
 pub mod dragon_tiger;
+pub mod expression;
 pub mod expression_stock_pick;
 pub mod intraday_monitor;
 pub mod overview;

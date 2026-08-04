@@ -49,7 +49,7 @@ use crate::{
             download_ths_concepts as core_download_ths_concepts, init_stock_basic_data,
         },
     },
-    expr::parser::{Parser, lex_all},
+    expr::validation::{parse_expression_program, validate_expression_functions},
 };
 
 use super::normalize_trade_date;
@@ -2265,11 +2265,10 @@ fn build_indicator_manage_toml(items: &[IndicatorManageDraft]) -> Result<String,
 
     let parsed_items = IndsData::parse_from_text(&text)?;
     for item in parsed_items {
-        let tokens = lex_all(&item.expr);
-        let mut parser = Parser::new(tokens);
-        parser
-            .parse_main()
+        let program = parse_expression_program(&item.expr)
             .map_err(|e| format!("指标 {} 表达式解析错误在{}:{}", item.name, e.idx, e.msg))?;
+        validate_expression_functions(&program)
+            .map_err(|error| format!("指标 {} {error}", item.name))?;
     }
 
     Ok(text)

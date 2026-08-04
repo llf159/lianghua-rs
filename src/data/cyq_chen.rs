@@ -13,9 +13,12 @@ use crate::{
     },
     expr::{
         eval::{Runtime, Value},
-        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+        parser::{Expr, Stmt, Stmts},
+        validation::{
+            estimate_expression_warmup, parse_expression_program, validate_expression_functions,
+        },
     },
-    utils::utils::{eval_binary_for_warmup, impl_expr_warmup, round_f64_to_scale},
+    utils::utils::round_f64_to_scale,
 };
 
 const DEFAULT_WARMUP_DAYS: usize = 120;
@@ -362,39 +365,7 @@ pub fn estimate_chen_chip_expression_warmup(
     let mut max_warmup = 0usize;
 
     for strategy in &chip_config.strategies {
-        let mut locals = HashMap::new();
-        let mut consts: HashMap<String, usize> = HashMap::new();
-        let mut expr_need = 0usize;
-
-        for stmt in strategy.when_ast.item.clone() {
-            match stmt {
-                Stmt::Assign { name, value } => match value {
-                    Expr::Number(value) => {
-                        if value.is_finite() && value >= 0.0 {
-                            consts.insert(name, value as usize);
-                        }
-                    }
-                    Expr::Binary { op, lhs, rhs } => {
-                        if let Some(out) = eval_binary_for_warmup(&op, &lhs, &rhs, &consts)? {
-                            consts.insert(name, out as usize);
-                        } else {
-                            let value_need =
-                                impl_expr_warmup(Expr::Binary { op, lhs, rhs }, &locals, &consts)?;
-                            locals.insert(name, value_need);
-                        }
-                    }
-                    other => {
-                        let value_need = impl_expr_warmup(other, &locals, &consts)?;
-                        locals.insert(name, value_need);
-                    }
-                },
-                Stmt::Expr(expr) => {
-                    expr_need = expr_need.max(impl_expr_warmup(expr, &locals, &consts)?);
-                }
-            }
-        }
-
-        max_warmup = max_warmup.max(expr_need);
+        max_warmup = max_warmup.max(estimate_expression_warmup(&strategy.when_ast)?);
     }
 
     Ok(max_warmup)
@@ -623,14 +594,15 @@ fn parse_strategy_expression(
     strategy_index: usize,
     strategy_name: &str,
 ) -> Result<Stmts, String> {
-    let tokens = lex_all(expression);
-    let mut parser = Parser::new(tokens);
-    parser.parse_main().map_err(|error| {
+    let program = parse_expression_program(expression).map_err(|error| {
         format!(
             "第{strategy_index}个strategy({strategy_name})表达式解析错误在{}:{}",
             error.idx, error.msg
         )
-    })
+    })?;
+    validate_expression_functions(&program)
+        .map_err(|error| format!("第{strategy_index}个strategy({strategy_name}){error}"))?;
+    Ok(program)
 }
 
 fn optimize_strategy_program(

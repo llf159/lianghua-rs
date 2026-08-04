@@ -91,6 +91,10 @@ use lianghua_rs::ui_tools::{
         get_dragon_tiger_stock_detail as core_get_dragon_tiger_stock_detail,
         DragonTigerMarketData, DragonTigerSeatStatisticsData, DragonTigerStockDetailData,
     },
+    expression::{
+        ExpressionCapabilitiesData,
+        get_expression_capabilities as core_get_expression_capabilities,
+    },
     expression_stock_pick::{
         validate_expression_stock_pick_template_expression as core_validate_expression_stock_pick_template_expression,
         ExpressionStockPickTemplateValidationData,
@@ -661,6 +665,11 @@ async fn refresh_intraday_monitor_template_tags(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn get_expression_capabilities() -> ExpressionCapabilitiesData {
+    core_get_expression_capabilities()
 }
 
 #[tauri::command]
@@ -2280,6 +2289,7 @@ pub fn run() {
             get_intraday_monitor_page,
             refresh_intraday_monitor_realtime,
             refresh_intraday_monitor_template_tags,
+            get_expression_capabilities,
             validate_intraday_monitor_template_expression,
             get_all_market_monitor_snapshot,
             get_stock_detail_page,

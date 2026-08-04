@@ -7,9 +7,12 @@ use crate::data::{
     load_stock_list, load_trade_date_list,
 };
 use crate::expr::eval::{Runtime, Value};
-use crate::expr::parser::{Expr, Parser, Stmt, Stmts, lex_all};
-use crate::utils::utils::eval_binary_for_warmup;
-use crate::utils::utils::impl_expr_warmup;
+use crate::expr::{
+    parser::Stmts,
+    validation::{
+        estimate_expression_warmup, parse_expression_program, validate_expression_functions,
+    },
+};
 
 pub const CYQ_CHEN_RUNTIME_FIELDS: [(&str, &str); 16] = [
     ("CYQ_MIN", "min_price"),
@@ -61,56 +64,19 @@ pub fn warmup_rows_estimate(
     let mut all_expr_max_need = 0;
 
     for rule in rules {
-        let tok = lex_all(&rule.when); // 变成带序号字符
-        let mut p = Parser::new(tok); // 变成基础语句
-        let stmts = p
-            .parse_main()
+        let stmts = parse_expression_program(&rule.when)
             .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
-        let mut locals = HashMap::new();
-        let mut consts: HashMap<String, usize> = HashMap::new();
-        let mut all_expr_need = 0;
-        // println!("{:#?}", stmt);
-
-        for stmt in stmts.item {
-            match stmt {
-                Stmt::Assign { name, value } => match value {
-                    Expr::Number(v) => {
-                        consts.insert(name, v as usize);
-                    }
-                    Expr::Binary { op, lhs, rhs } => {
-                        if let Some(out) = eval_binary_for_warmup(&op, &lhs, &rhs, &consts)? {
-                            consts.insert(name, out as usize);
-                        } else {
-                            let value_need =
-                                impl_expr_warmup(Expr::Binary { op, lhs, rhs }, &locals, &consts)?;
-                            locals.insert(name, value_need);
-                        }
-                    }
-                    _ => {
-                        let value_need = impl_expr_warmup(value, &locals, &consts)?;
-                        locals.insert(name, value_need);
-                    }
-                },
-                Stmt::Expr(v) => {
-                    let expr_need = impl_expr_warmup(v, &locals, &consts)?;
-                    if expr_need > all_expr_need {
-                        all_expr_need = expr_need
-                    }
-                }
-            }
-        }
+        validate_expression_functions(&stmts)?;
+        let expression_need = estimate_expression_warmup(&stmts)?;
 
         let extra_need = match rule.scope_way {
             ScopeWay::Last => 0,
-            ScopeWay::Any => rule.scope_windows - 1,
-            ScopeWay::Consec(_) => rule.scope_windows - 1,
-            ScopeWay::Each => rule.scope_windows - 1,
-            ScopeWay::Recent => rule.scope_windows - 1,
+            ScopeWay::Any | ScopeWay::Consec(_) | ScopeWay::Each | ScopeWay::Recent => {
+                rule.scope_windows.saturating_sub(1)
+            }
         };
 
-        if extra_need + all_expr_need > all_expr_max_need {
-            all_expr_max_need = extra_need + all_expr_need;
-        }
+        all_expr_max_need = all_expr_max_need.max(extra_need + expression_need);
     }
 
     Ok(all_expr_max_need)

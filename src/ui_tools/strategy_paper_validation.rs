@@ -18,7 +18,12 @@ use crate::{
     },
     expr::{
         eval::{Runtime, Value},
-        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+        parser::Stmts,
+        validation::{
+            estimate_expression_warmup,
+            parse_expression_program as parse_shared_expression_program,
+            validate_expression_functions,
+        },
     },
     scoring::tools::{
         CyqChenFieldInjector, calc_query_need_rows, calc_query_start_date,
@@ -27,7 +32,7 @@ use crate::{
     },
     simulate::DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
     ui_tools::watch_observe::normalize_ts_code,
-    utils::utils::{board_category, eval_binary_for_warmup, impl_expr_warmup},
+    utils::utils::board_category,
 };
 
 use super::build_name_map;
@@ -1609,11 +1614,10 @@ fn normalize_valid_price(price: Option<f64>) -> Option<f64> {
 }
 
 fn parse_expression_program(expression: &str, label: &str) -> Result<Stmts, String> {
-    let tokens = lex_all(expression);
-    let mut parser = Parser::new(tokens);
-    parser
-        .parse_main()
-        .map_err(|error| format!("{label}解析错误在{}:{}", error.idx, error.msg))
+    let program = parse_shared_expression_program(expression)
+        .map_err(|error| format!("{label}解析错误在{}:{}", error.idx, error.msg))?;
+    validate_expression_functions(&program).map_err(|error| format!("{label}{error}"))?;
+    Ok(program)
 }
 
 fn evaluate_program_as_bool_series(
@@ -1625,43 +1629,6 @@ fn evaluate_program_as_bool_series(
         .map_err(|error| format!("表达式计算错误: {}", error.msg))?;
     let len = rt_max_len(&runtime);
     Value::as_bool_series(&value, len).map_err(|error| format!("表达式返回值非布尔: {}", error.msg))
-}
-
-fn estimate_expression_warmup(stmts: &Stmts) -> Result<usize, String> {
-    let mut locals = HashMap::new();
-    let mut consts: HashMap<String, usize> = HashMap::new();
-    let mut expr_need = 0usize;
-
-    for stmt in stmts.item.clone() {
-        match stmt {
-            Stmt::Assign { name, value } => match value {
-                Expr::Number(value) => {
-                    if value < 0.0 {
-                        return Err("表达式常量赋值结果不能为负数".to_string());
-                    }
-                    consts.insert(name, value as usize);
-                }
-                Expr::Binary { op, lhs, rhs } => {
-                    if let Some(out) = eval_binary_for_warmup(&op, &lhs, &rhs, &consts)? {
-                        consts.insert(name, out as usize);
-                    } else {
-                        let need =
-                            impl_expr_warmup(Expr::Binary { op, lhs, rhs }, &locals, &consts)?;
-                        locals.insert(name, need);
-                    }
-                }
-                other => {
-                    let need = impl_expr_warmup(other, &locals, &consts)?;
-                    locals.insert(name, need);
-                }
-            },
-            Stmt::Expr(expr) => {
-                expr_need = expr_need.max(impl_expr_warmup(expr, &locals, &consts)?);
-            }
-        }
-    }
-
-    Ok(expr_need)
 }
 
 fn collect_paper_validation_runtime_keys(

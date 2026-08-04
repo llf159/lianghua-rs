@@ -18,8 +18,8 @@ use duckdb::{Connection, params};
 use serde::{Deserialize, Deserializer, de};
 
 use crate::expr::{
-    eval::is_supported_expression_function,
-    parser::{Expr, Parser, Stmt, Stmts, lex_all},
+    parser::{Expr, Stmt, Stmts},
+    validation::{parse_expression_program, validate_expression_functions},
 };
 
 pub fn source_db_path(source_dir: &str) -> PathBuf {
@@ -1167,58 +1167,15 @@ fn parse_and_validate_score_rule_expression(
     rule_index: usize,
     rule_name: &str,
 ) -> Result<Stmts, String> {
-    let tokens = lex_all(expression);
-    let mut parser = Parser::new(tokens);
-    let stmts = parser.parse_main().map_err(|error| {
+    let stmts = parse_expression_program(expression).map_err(|error| {
         format!(
             "第{rule_index}条规则({rule_name})表达式解析错误在{}:{}",
             error.idx, error.msg
         )
     })?;
-    validate_score_rule_expression_functions(&stmts, rule_index, rule_name)?;
+    validate_expression_functions(&stmts)
+        .map_err(|error| format!("第{rule_index}条规则({rule_name}){error}"))?;
     Ok(stmts)
-}
-
-fn validate_score_rule_expression_functions(
-    stmts: &Stmts,
-    rule_index: usize,
-    rule_name: &str,
-) -> Result<(), String> {
-    for stmt in &stmts.item {
-        match stmt {
-            Stmt::Assign { value, .. } => {
-                validate_score_rule_expr_functions(value, rule_index, rule_name)?
-            }
-            Stmt::Expr(expr) => validate_score_rule_expr_functions(expr, rule_index, rule_name)?,
-        }
-    }
-    Ok(())
-}
-
-fn validate_score_rule_expr_functions(
-    expr: &Expr,
-    rule_index: usize,
-    rule_name: &str,
-) -> Result<(), String> {
-    match expr {
-        Expr::Number(_) | Expr::Ident(_) => Ok(()),
-        Expr::Call { name, args } => {
-            if !is_supported_expression_function(name) {
-                return Err(format!(
-                    "第{rule_index}条规则({rule_name})表达式引用未知函数: {name}"
-                ));
-            }
-            for arg in args {
-                validate_score_rule_expr_functions(arg, rule_index, rule_name)?;
-            }
-            Ok(())
-        }
-        Expr::Unary { rhs, .. } => validate_score_rule_expr_functions(rhs, rule_index, rule_name),
-        Expr::Binary { lhs, rhs, .. } => {
-            validate_score_rule_expr_functions(lhs, rule_index, rule_name)?;
-            validate_score_rule_expr_functions(rhs, rule_index, rule_name)
-        }
-    }
 }
 
 fn scope_way_supports_dist_points(scope_way: ScopeWay) -> bool {

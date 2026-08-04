@@ -17,7 +17,7 @@ use std::time;
 
 use crate::data::{RowData, ScoreRule, collect_assigned_names_from_expr_program};
 use crate::expr::eval::{Runtime, Value};
-use crate::expr::parser::{Parser, lex_all};
+use crate::expr::validation::{parse_expression_program, validate_expression_functions};
 use crate::scoring::{CachedRule, RuleScoreSeries, SceneScoreSeries, TieBreakWay};
 
 #[derive(Debug, Default, Clone)]
@@ -1319,11 +1319,9 @@ pub fn cache_rule_build(
     let rules = ScoreRule::load_rules_with_strategy_path(source_dir, strategy_path)?;
     let mut out = Vec::with_capacity(128);
     for rule in rules {
-        let tok = lex_all(&rule.when);
-        let mut parser = Parser::new(tok);
-        let stmt = parser
-            .parse_main()
+        let stmt = parse_expression_program(&rule.when)
             .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
+        validate_expression_functions(&stmt)?;
         let assigned_names = collect_assigned_names_from_expr_program(&stmt);
         out.push(CachedRule {
             name: rule.name,

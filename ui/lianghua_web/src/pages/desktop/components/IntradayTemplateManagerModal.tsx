@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
+  type ExpressionFieldData,
   type IntradayMonitorTemplate,
+  getExpressionCapabilities,
   validateIntradayMonitorTemplateExpression,
 } from "../../../apis/reader";
 import "../css/IntradayTemplateManagerModal.css";
@@ -55,6 +57,24 @@ export default function IntradayTemplateManagerModal({
   const [templateEditorNotice, setTemplateEditorNotice] = useState("");
   const [templateEditorError, setTemplateEditorError] = useState("");
   const [templateValidating, setTemplateValidating] = useState(false);
+  const [realtimeFields, setRealtimeFields] = useState<ExpressionFieldData[]>(
+    [],
+  );
+
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    void getExpressionCapabilities()
+      .then((capabilities) => {
+        if (active) setRealtimeFields(capabilities.intradayRealtimeFields);
+      })
+      .catch(() => {
+        if (active) setRealtimeFields([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [open]);
 
   const sourcePathTrimmed = sourcePath.trim();
 
@@ -292,15 +312,16 @@ export default function IntradayTemplateManagerModal({
           <div>
             指标字段：可直接引用 <code>stock_data</code> 已落库指标列，或 <code>ind.toml</code> 中定义的指标名。
           </div>
-          <div>
-            实时字段：<code>RT_OP</code> 为实体涨幅；还可用 <code>RT_FH / RT_AVG / RT_VR</code>
-          </div>
-          <div>
-            高点回落：<code>RT_FH</code> 为非负百分比值，<code>0</code> 表示当前价等于今日高点；计算口径 = max((今日高点 - 当前价) / 今日高点, 0) × 100%
-          </div>
-          <div>
-            盘中量比：<code>RT_VR</code> 使用行情源返回值；新浪源没有该字段时为空
-          </div>
+          {realtimeFields.length > 0 ? (
+            realtimeFields.map((field) => (
+              <div key={field.name}>
+                <code>{field.name}</code>：{field.description} 示例：
+                <code>{field.example}</code>
+              </div>
+            ))
+          ) : (
+            <div>实时字段说明暂不可用，请以表达式验证结果为准。</div>
+          )}
           <div>
             切换模板后可点“仅刷新标记”，基于已有实时行情快照重算标签，无需重新拉取行情。
           </div>

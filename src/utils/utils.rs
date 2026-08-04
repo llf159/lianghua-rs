@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use crate::expr::parser::{BinaryOp, Expr};
+use crate::expr::{
+    eval::ExpressionFunction,
+    parser::{BinaryOp, Expr},
+};
 
 const EPS: f64 = 1e-12;
 
@@ -169,8 +172,11 @@ pub fn impl_expr_warmup(
         }
         Expr::Call { name, args } => {
             let name = name.to_ascii_uppercase();
-            match name.as_str() {
-                "REF" | "LAST" => {
+            let Some(function) = ExpressionFunction::parse(&name) else {
+                return Ok(0);
+            };
+            match function {
+                ExpressionFunction::Ref | ExpressionFunction::Last => {
                     let mut it = args.into_iter();
                     let src = it
                         .next()
@@ -200,7 +206,15 @@ pub fn impl_expr_warmup(
 
                     max_need = src_need + win_need;
                 }
-                "HHV" | "LLV" | "MA" | "SUM" | "STD" | "COUNT" | "EXIST" | "LRANK" | "GRANK" => {
+                ExpressionFunction::Hhv
+                | ExpressionFunction::Llv
+                | ExpressionFunction::Ma
+                | ExpressionFunction::Sum
+                | ExpressionFunction::Std
+                | ExpressionFunction::Count
+                | ExpressionFunction::Exist
+                | ExpressionFunction::Lrank
+                | ExpressionFunction::Grank => {
                     let mut it = args.into_iter();
                     let src = it
                         .next()
@@ -230,7 +244,7 @@ pub fn impl_expr_warmup(
 
                     max_need = (src_need + win_need).saturating_sub(1);
                 }
-                "REFD" => {
+                ExpressionFunction::Refd => {
                     let mut it = args.into_iter();
                     let src = it
                         .next()
@@ -248,8 +262,15 @@ pub fn impl_expr_warmup(
 
                     max_need = win_need.max(src_need + max_win);
                 }
-                "HHVD" | "LLVD" | "MAD" | "SUMD" | "STDD" | "COUNTD" | "EXISTD" | "LRANKD"
-                | "GRANKD" => {
+                ExpressionFunction::Hhvd
+                | ExpressionFunction::Llvd
+                | ExpressionFunction::Mad
+                | ExpressionFunction::Sumd
+                | ExpressionFunction::Stdd
+                | ExpressionFunction::Countd
+                | ExpressionFunction::Existd
+                | ExpressionFunction::Lrankd
+                | ExpressionFunction::Grankd => {
                     let mut it = args.into_iter();
                     let src = it
                         .next()
@@ -267,7 +288,7 @@ pub fn impl_expr_warmup(
 
                     max_need = win_need.max(src_need + max_win.saturating_sub(1));
                 }
-                "GTOPCOUNTD" | "LTOPCOUNTD" => {
+                ExpressionFunction::Gtopcountd | ExpressionFunction::Ltopcountd => {
                     let mut it = args.into_iter();
                     let value = it
                         .next()
@@ -292,7 +313,7 @@ pub fn impl_expr_warmup(
 
                     max_need = win_need.max(value_need.max(cond_need) + max_win.saturating_sub(1));
                 }
-                "GTOPCOUNT" | "LTOPCOUNT" => {
+                ExpressionFunction::Gtopcount | ExpressionFunction::Ltopcount => {
                     let mut it = args.into_iter();
                     let value = it
                         .next()
@@ -329,7 +350,7 @@ pub fn impl_expr_warmup(
 
                     max_need = value_need.max(cond_need) + win_need.saturating_sub(1);
                 }
-                "CROSS" => {
+                ExpressionFunction::Cross => {
                     let mut it = args.into_iter();
                     let left = it
                         .next()
@@ -343,7 +364,7 @@ pub fn impl_expr_warmup(
 
                     max_need = l_need.max(r_need) + 1;
                 }
-                "GET" => {
+                ExpressionFunction::Get => {
                     let mut it = args.into_iter();
                     let cond = it
                         .next()
@@ -376,7 +397,7 @@ pub fn impl_expr_warmup(
                     };
                     max_need = cond_need.max(value_need) + win_need;
                 }
-                "GETD" => {
+                ExpressionFunction::Getd => {
                     let mut it = args.into_iter();
                     let cond = it
                         .next()
@@ -398,7 +419,7 @@ pub fn impl_expr_warmup(
 
                     max_need = win_need.max(cond_need.max(value_need) + max_win);
                 }
-                "ABS" => {
+                ExpressionFunction::Abs => {
                     let mut it = args.into_iter();
                     let src = it
                         .next()
@@ -406,7 +427,7 @@ pub fn impl_expr_warmup(
                     max_need = impl_expr_warmup(src, locals, consts)?;
                 }
 
-                "MAX" | "MIN" | "DIV" => {
+                ExpressionFunction::Max | ExpressionFunction::Min | ExpressionFunction::Div => {
                     let mut it = args.into_iter();
                     let left = it
                         .next()
@@ -421,7 +442,7 @@ pub fn impl_expr_warmup(
                     max_need = l_need.max(r_need);
                 }
 
-                "IF" => {
+                ExpressionFunction::If => {
                     let mut it = args.into_iter();
                     let cond = it
                         .next()
@@ -440,7 +461,7 @@ pub fn impl_expr_warmup(
                     max_need = c_need.max(l_need).max(r_need);
                 }
 
-                "EMA" | "SMA" => {
+                ExpressionFunction::Ema | ExpressionFunction::Sma => {
                     let mut it = args.into_iter();
                     let src = it
                         .next()
@@ -449,7 +470,7 @@ pub fn impl_expr_warmup(
                     max_need = impl_expr_warmup(src, locals, consts)?;
                 }
 
-                "BARSLAST" => {
+                ExpressionFunction::Barslast => {
                     let mut it = args.into_iter();
                     let cond = it
                         .next()
@@ -458,7 +479,7 @@ pub fn impl_expr_warmup(
                     max_need = impl_expr_warmup(cond, locals, consts)?;
                 }
 
-                "RSV" => {
+                ExpressionFunction::Rsv => {
                     let mut it = args.into_iter();
                     let c = it.next().ok_or_else(|| format!("{name}缺少第1个参数: c"))?;
                     let h = it.next().ok_or_else(|| format!("{name}缺少第2个参数: h"))?;
@@ -490,7 +511,7 @@ pub fn impl_expr_warmup(
 
                     max_need = c_need.max(h_need.max(l_need) + win_need.saturating_sub(1));
                 }
-                "RSVD" => {
+                ExpressionFunction::Rsvd => {
                     let mut it = args.into_iter();
                     let c = it.next().ok_or_else(|| format!("{name}缺少第1个参数: c"))?;
                     let h = it.next().ok_or_else(|| format!("{name}缺少第2个参数: h"))?;
@@ -511,8 +532,6 @@ pub fn impl_expr_warmup(
                     max_need =
                         win_need.max(c_need.max(h_need.max(l_need) + max_win.saturating_sub(1)));
                 }
-
-                _ => {}
             }
         }
         Expr::Number(_) => {}
@@ -571,50 +590,16 @@ pub fn board_category(ts_code: &str, stock_name: Option<&str>) -> &'static str {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::expr::parser::{Expr, Parser, Stmt, lex_all};
+    use crate::expr::{
+        parser::Expr,
+        validation::{estimate_expression_warmup, parse_expression_program},
+    };
 
-    use super::{board_category, eval_binary_for_warmup, impl_expr_warmup, round_f64_to_scale};
+    use super::{board_category, impl_expr_warmup, round_f64_to_scale};
 
     fn estimate_program_warmup(expr: &str) -> usize {
-        let mut parser = Parser::new(lex_all(expr));
-        let stmts = parser.parse_main().expect("parse should succeed");
-        let mut locals = HashMap::new();
-        let mut consts: HashMap<String, usize> = HashMap::new();
-        let mut expr_need = 0usize;
-
-        for stmt in stmts.item {
-            match stmt {
-                Stmt::Assign { name, value } => match value {
-                    Expr::Number(v) => {
-                        consts.insert(name, v as usize);
-                    }
-                    Expr::Binary { op, lhs, rhs } => {
-                        if let Some(out) = eval_binary_for_warmup(&op, &lhs, &rhs, &consts)
-                            .expect("const warmup should evaluate")
-                        {
-                            consts.insert(name, out as usize);
-                        } else {
-                            let need =
-                                impl_expr_warmup(Expr::Binary { op, lhs, rhs }, &locals, &consts)
-                                    .expect("warmup should evaluate");
-                            locals.insert(name, need);
-                        }
-                    }
-                    other => {
-                        let need = impl_expr_warmup(other, &locals, &consts)
-                            .expect("warmup should evaluate");
-                        locals.insert(name, need);
-                    }
-                },
-                Stmt::Expr(expr) => {
-                    expr_need = expr_need.max(
-                        impl_expr_warmup(expr, &locals, &consts).expect("warmup should evaluate"),
-                    );
-                }
-            }
-        }
-
-        expr_need
+        let program = parse_expression_program(expr).expect("parse should succeed");
+        estimate_expression_warmup(&program).expect("warmup should evaluate")
     }
 
     #[test]

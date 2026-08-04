@@ -25,7 +25,10 @@ use crate::{
     expr::{
         eval::{Runtime, Value},
         lexer::TokenKind,
-        parser::{Expr, Parser, Stmt, Stmts, lex_all},
+        parser::{Stmt, Stmts, lex_all},
+        validation::{
+            estimate_expression_warmup, parse_expression_program, validate_expression_functions,
+        },
     },
     scoring::runner::{ScoringMemoryMode, scoring_all_to_memory_with_mode},
     scoring::tools::{
@@ -59,7 +62,6 @@ use crate::{
     },
     ui_tools::{build_concepts_map, build_name_map, build_total_mv_map, filter_mv},
     utils::utils::board_category,
-    utils::utils::{eval_binary_for_warmup, impl_expr_warmup},
 };
 
 const TOP_RANK_THRESHOLD: i64 = 100;
@@ -1868,38 +1870,7 @@ fn estimate_rule_warmup(
     scope_way: ScopeWay,
     scope_windows: usize,
 ) -> Result<usize, String> {
-    let mut locals = std::collections::HashMap::new();
-    let mut consts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut expr_need = 0usize;
-
-    for stmt in stmts.item.clone() {
-        match stmt {
-            Stmt::Assign { name, value } => match value {
-                Expr::Number(v) => {
-                    if v < 0.0 {
-                        return Err("表达式常量赋值结果不能为负数".to_string());
-                    }
-                    consts.insert(name, v as usize);
-                }
-                Expr::Binary { op, lhs, rhs } => {
-                    if let Some(out) = eval_binary_for_warmup(&op, &lhs, &rhs, &consts)? {
-                        consts.insert(name, out as usize);
-                    } else {
-                        let need =
-                            impl_expr_warmup(Expr::Binary { op, lhs, rhs }, &locals, &consts)?;
-                        locals.insert(name, need);
-                    }
-                }
-                other => {
-                    let need = impl_expr_warmup(other, &locals, &consts)?;
-                    locals.insert(name, need);
-                }
-            },
-            Stmt::Expr(expr) => {
-                expr_need = expr_need.max(impl_expr_warmup(expr, &locals, &consts)?);
-            }
-        }
-    }
+    let expression_need = estimate_expression_warmup(stmts)?;
 
     let scope_extra = match scope_way {
         ScopeWay::Last => 0,
@@ -1909,7 +1880,7 @@ fn estimate_rule_warmup(
             .max(threshold.saturating_sub(1)),
     };
 
-    Ok(expr_need + scope_extra)
+    Ok(expression_need + scope_extra)
 }
 
 fn build_validation_cached_rule(
@@ -1921,11 +1892,9 @@ fn build_validation_cached_rule(
     tag: crate::data::RuleTag,
     formula: &str,
 ) -> Result<CachedRule, String> {
-    let tokens = lex_all(formula);
-    let mut parser = Parser::new(tokens);
-    let stmts = parser
-        .parse_main()
+    let stmts = parse_expression_program(formula)
         .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
+    validate_expression_functions(&stmts)?;
     let assigned_names = collect_assigned_names_from_expr_program(&stmts);
 
     Ok(CachedRule {
