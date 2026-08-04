@@ -121,6 +121,7 @@ export type IntradayMonitorTemplate = {
   id: string;
   name: string;
   expression: string;
+  enabled: boolean;
 };
 
 export type AllMarketTemplateHit = {

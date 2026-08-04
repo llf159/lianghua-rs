@@ -31,6 +31,7 @@ function createTemplate(name = "", expression = ""): IntradayMonitorTemplate {
     id: createId(),
     name,
     expression,
+    enabled: true,
   };
 }
 
@@ -77,6 +78,9 @@ export default function IntradayTemplateManagerModal({
   }, [open]);
 
   const sourcePathTrimmed = sourcePath.trim();
+  const enabledTemplateCount = templates.filter(
+    (template) => template.enabled,
+  ).length;
 
   function resetTemplateEditor() {
     setTemplateEditorMode("create");
@@ -153,6 +157,7 @@ export default function IntradayTemplateManagerModal({
           id: createId(),
           name,
           expression,
+          enabled: true,
         },
       ]);
       setTemplateEditorNotice("模板已新增");
@@ -180,21 +185,39 @@ export default function IntradayTemplateManagerModal({
     }
   }
 
+  function toggleTemplate(templateId: string) {
+    onChangeTemplates(
+      templates.map((template) =>
+        template.id === templateId
+          ? { ...template, enabled: !template.enabled }
+          : template,
+      ),
+    );
+  }
+
   if (!open) {
     return null;
   }
 
   return (
-    <div
-      className="intraday-template-modal-mask"
-      onClick={onClose}
-    >
+    <div className="intraday-template-modal-mask" onClick={onClose}>
       <div
         className="intraday-template-modal"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="intraday-template-modal-head">
-          <h4>{title}</h4>
+          <div className="intraday-template-modal-title">
+            <div
+              className="intraday-template-modal-title-icon"
+              aria-hidden="true"
+            >
+              T
+            </div>
+            <div>
+              <h4>{title}</h4>
+              <p>只有已开启的策略会参与实时判断</p>
+            </div>
+          </div>
           <button
             type="button"
             className="intraday-template-modal-close"
@@ -207,8 +230,17 @@ export default function IntradayTemplateManagerModal({
         <div className="intraday-template-workspace">
           <section className="intraday-template-list-panel">
             <div className="intraday-template-panel-head">
-              <h5>模板列表</h5>
-              <button type="button" onClick={resetTemplateEditor}>
+              <div>
+                <h5>模板策略</h5>
+                <span className="intraday-template-count">
+                  {enabledTemplateCount} 个启用 · 共 {templates.length} 个
+                </span>
+              </div>
+              <button
+                type="button"
+                className="intraday-template-create-btn"
+                onClick={resetTemplateEditor}
+              >
                 新建模板
               </button>
             </div>
@@ -219,25 +251,57 @@ export default function IntradayTemplateManagerModal({
                 templates.map((tpl) => (
                   <div
                     key={tpl.id}
-                    className={
+                    className={[
+                      "intraday-template-modal-item",
                       templateEditorOriginalId === tpl.id
-                        ? "intraday-template-modal-item intraday-template-modal-item-active"
-                        : "intraday-template-modal-item"
-                    }
+                        ? "intraday-template-modal-item-active"
+                        : "",
+                      tpl.enabled ? "" : "is-disabled",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
                   >
                     <div className="intraday-template-item-main">
-                      <strong>{tpl.name}</strong>
+                      <div className="intraday-template-item-title">
+                        <strong>{tpl.name}</strong>
+                        <span
+                          className={
+                            tpl.enabled
+                              ? "intraday-template-status is-enabled"
+                              : "intraday-template-status"
+                          }
+                        >
+                          {tpl.enabled ? "判断中" : "已停用"}
+                        </span>
+                      </div>
                       <span>{summarizeExpression(tpl.expression, 96)}</span>
                     </div>
                     <div className="intraday-template-item-actions">
                       <button
                         type="button"
+                        className={
+                          tpl.enabled
+                            ? "intraday-template-switch is-active"
+                            : "intraday-template-switch"
+                        }
+                        role="switch"
+                        aria-checked={tpl.enabled}
+                        aria-label={`${tpl.name}${tpl.enabled ? "关闭" : "开启"}实时判断`}
+                        title={tpl.enabled ? "关闭实时判断" : "开启实时判断"}
+                        onClick={() => toggleTemplate(tpl.id)}
+                      >
+                        <span />
+                      </button>
+                      <button
+                        type="button"
+                        className="intraday-template-action-btn"
                         onClick={() => openTemplateEditorForEdit(tpl)}
                       >
                         编辑
                       </button>
                       <button
                         type="button"
+                        className="intraday-template-action-btn is-danger"
                         onClick={() => removeTemplate(tpl.id)}
                       >
                         删除
@@ -257,38 +321,50 @@ export default function IntradayTemplateManagerModal({
               <div className="intraday-template-editor-actions">
                 <button
                   type="button"
+                  className="intraday-template-validate-btn"
                   onClick={() => void onValidateTemplateExpression()}
                   disabled={templateValidating}
                 >
                   {templateValidating ? "校验中..." : "表达式验证"}
                 </button>
-                <button type="button" onClick={() => void onSaveTemplate()}>
+                <button
+                  type="button"
+                  className="intraday-template-save-btn"
+                  onClick={() => void onSaveTemplate()}
+                  disabled={templateValidating}
+                >
                   {templateEditorMode === "create" ? "保存新增" : "保存更新"}
                 </button>
               </div>
             </div>
 
             <div className="intraday-template-modal-form">
-              <input
-                value={templateEditorDraft.name}
-                onChange={(event) =>
-                  setTemplateEditorDraft((draft) => ({
-                    ...draft,
-                    name: event.target.value,
-                  }))
-                }
-                placeholder="模板名，例如：放量突破"
-              />
-              <textarea
-                value={templateEditorDraft.expression}
-                onChange={(event) =>
-                  setTemplateEditorDraft((draft) => ({
-                    ...draft,
-                    expression: event.target.value,
-                  }))
-                }
-                placeholder="示例：C > RT_AVG AND RT_VR >= 2"
-              />
+              <label>
+                <span>模板名称</span>
+                <input
+                  value={templateEditorDraft.name}
+                  onChange={(event) =>
+                    setTemplateEditorDraft((draft) => ({
+                      ...draft,
+                      name: event.target.value,
+                    }))
+                  }
+                  placeholder="例如：放量突破"
+                />
+              </label>
+              <label>
+                <span>判断表达式</span>
+                <textarea
+                  value={templateEditorDraft.expression}
+                  onChange={(event) =>
+                    setTemplateEditorDraft((draft) => ({
+                      ...draft,
+                      expression: event.target.value,
+                    }))
+                  }
+                  placeholder="示例：C > RT_AVG AND RT_VR >= 2"
+                />
+              </label>
             </div>
 
             {templateEditorNotice ? (
@@ -307,10 +383,12 @@ export default function IntradayTemplateManagerModal({
 
         <div className="intraday-template-tip-block">
           <div>
-            常用字段：<code>C / O / H / L / V / PCT_CHG / TOR / TOTAL_MV_YI / ZHANG</code>
+            常用字段：
+            <code>C / O / H / L / V / PCT_CHG / TOR / TOTAL_MV_YI / ZHANG</code>
           </div>
           <div>
-            指标字段：可直接引用 <code>stock_data</code> 已落库指标列，或 <code>ind.toml</code> 中定义的指标名。
+            指标字段：可直接引用 <code>stock_data</code> 已落库指标列，或{" "}
+            <code>ind.toml</code> 中定义的指标名。
           </div>
           {realtimeFields.length > 0 ? (
             realtimeFields.map((field) => (

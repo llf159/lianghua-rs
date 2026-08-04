@@ -101,6 +101,7 @@ function normalizeTemplate(input: unknown): IntradayMonitorTemplate | null {
       id: item.id,
       name: typeof item.name === "string" ? item.name : "",
       expression: directExpression,
+      enabled: item.enabled !== false,
     };
   }
 
@@ -113,6 +114,7 @@ function normalizeTemplate(input: unknown): IntradayMonitorTemplate | null {
       Number.isFinite(threshold) ? threshold : 0,
       item.base === "open" ? "open" : "preclose",
     ),
+    enabled: item.enabled !== false,
   };
 }
 
@@ -200,11 +202,14 @@ function fingerprintMonitorRefreshConfig(
   config: MonitorRefreshConfig,
   realtimeProvider: "sina" | "tencent",
 ) {
+  const enabledTemplates = config.templates.filter(
+    (template) => template.enabled,
+  );
   return JSON.stringify({
     realtimeProvider,
     sceneStageThreshold: config.sceneStageThreshold,
     templateEnabled: config.templateEnabled,
-    templates: config.templateEnabled ? config.templates : [],
+    templates: config.templateEnabled ? enabledTemplates : [],
     watchlistEnabled: config.watchlistEnabled,
     watchlistCodes: config.watchlistEnabled
       ? [...config.watchlistCodes].sort()
@@ -649,6 +654,10 @@ export default function AllMarketMonitorPage() {
   };
 
   const sourcePathTrimmed = sourcePath.trim();
+  const enabledTemplates = useMemo(
+    () => templates.filter((template) => template.enabled),
+    [templates],
+  );
   const isVolumeRatioBoard = primarySortKey === "realtime_vol_ratio";
   const showOtherSortColumn = primarySortKey === "other_sort_value";
   const hitPanelMode: HitPanelMode =
@@ -670,7 +679,21 @@ export default function AllMarketMonitorPage() {
 
   const updateTemplates = useCallback(
     (nextTemplates: IntradayMonitorTemplate[]) => {
+      const enabledTemplateIds = new Set(
+        nextTemplates
+          .filter((template) => template.enabled)
+          .map((template) => template.id),
+      );
       setTemplates(nextTemplates);
+      setRows((currentRows) =>
+        currentRows.map((row) => ({
+          ...row,
+          template_hits: row.template_hits?.filter((hit) =>
+            enabledTemplateIds.has(hit.template_id),
+          ),
+        })),
+      );
+      forceProcessLatestRef.current = true;
       writeJsonStorage(
         typeof window === "undefined" ? null : window.localStorage,
         INTRADAY_MONITOR_TEMPLATE_STORAGE_KEY,
@@ -895,7 +918,9 @@ export default function AllMarketMonitorPage() {
         realtimeProvider,
         config.sceneStageThreshold,
         config.templateEnabled,
-        config.templateEnabled ? config.templates : undefined,
+        config.templateEnabled
+          ? config.templates.filter((template) => template.enabled)
+          : undefined,
         config.watchlistEnabled ? config.watchlistCodes : undefined,
         config.otherSortExpression.trim() || undefined,
         true,
@@ -1431,10 +1456,7 @@ export default function AllMarketMonitorPage() {
             }
             title="3日优 / 5日优"
           >
-            排{" "}
-            {rankParts
-              .map((item) => item.split(":")[1] ?? item)
-              .join("/")}
+            排 {rankParts.map((item) => item.split(":")[1] ?? item).join("/")}
           </span>
         ) : null}
         {hasAvgPrice ? (
@@ -1507,7 +1529,11 @@ export default function AllMarketMonitorPage() {
                 行情 {fetchedCount}/{requestedCount}
               </span>
               {rankDate ? <span>排名 {rankDate}</span> : null}
-              {templateEnabled ? <span>模板 {templates.length}</span> : null}
+              {templateEnabled ? (
+                <span>
+                  模板 {enabledTemplates.length}/{templates.length}
+                </span>
+              ) : null}
               {watchlistEnabled ? (
                 <span>名单模式 {watchlistCodes.length}只</span>
               ) : null}
