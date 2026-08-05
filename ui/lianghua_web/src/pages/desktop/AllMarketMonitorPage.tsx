@@ -60,6 +60,7 @@ const LS_KEY_OTHER_SORT_DIRECTION = "am_other_sort_direction";
 const LS_KEY_COMPACT_MODE = "am_compact_mode";
 const LS_KEY_SIDE_LIST_VISIBLE = "am_side_list_visibility";
 const LS_KEY_SIDE_LIST_DEBUG_ROWS = "am_side_list_debug_rows";
+const LS_KEY_TEMPLATE_DISPLAY_MODE = "am_template_display_mode";
 const INTRADAY_MONITOR_TEMPLATE_STORAGE_KEY =
   "lh_intraday_monitor_realtime_templates_v1";
 const DEBUG_SIDE_LIST_LIMIT = 12;
@@ -149,6 +150,7 @@ type PrimarySortKey =
   | "realtime_change_pct"
   | "speed_pct"
   | "realtime_vol_ratio";
+type TemplateDisplayMode = "off" | "mark" | "hits_only";
 type HitPanelMode = "realtime_change_pct" | "realtime_vol_ratio" | "speed_pct";
 type SpeedPeriod = (typeof SPEED_PERIOD_OPTIONS)[number];
 type BoardFilter = (typeof STOCK_PICK_BOARD_OPTIONS)[number];
@@ -264,6 +266,18 @@ function readLocalStorageBoolean(key: string, fallback: boolean) {
     // localStorage unavailable
   }
   return fallback;
+}
+
+function readLocalStorageTemplateDisplayMode(): TemplateDisplayMode {
+  try {
+    const raw = localStorage.getItem(LS_KEY_TEMPLATE_DISPLAY_MODE);
+    if (raw === "off" || raw === "mark" || raw === "hits_only") {
+      return raw;
+    }
+  } catch {
+    // localStorage unavailable
+  }
+  return "off";
 }
 
 function readLocalStorageSideListVisible() {
@@ -530,7 +544,8 @@ export default function AllMarketMonitorPage() {
   const { excludedConcepts } = useConceptExclusions();
   const [sourcePath, setSourcePath] = useState("");
   const [enabled, setEnabled] = useState(false);
-  const [templateEnabled, setTemplateEnabled] = useState(false);
+  const [templateDisplayMode, setTemplateDisplayMode] =
+    useState<TemplateDisplayMode>(() => readLocalStorageTemplateDisplayMode());
   const [templates, setTemplates] = useState<IntradayMonitorTemplate[]>(() =>
     readStoredTemplates(),
   );
@@ -625,6 +640,8 @@ export default function AllMarketMonitorPage() {
     readStoredIntradayMonitorWatchlist(),
   );
   const [watchlistModalOpen, setWatchlistModalOpen] = useState(false);
+  const templateEnabled = templateDisplayMode !== "off";
+  const showTemplateHitsOnly = templateDisplayMode === "hits_only";
 
   const inFlightRef = useRef(false);
   const enabledRef = useRef(false);
@@ -816,6 +833,14 @@ export default function AllMarketMonitorPage() {
       // localStorage unavailable
     }
   }, [compactMode]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_KEY_TEMPLATE_DISPLAY_MODE, templateDisplayMode);
+    } catch {
+      // localStorage unavailable
+    }
+  }, [templateDisplayMode]);
 
   useEffect(() => {
     writeJsonStorage(
@@ -1146,6 +1171,7 @@ export default function AllMarketMonitorPage() {
   const displayRows = useMemo<DisplayRow[]>(() => {
     const filteredRows = rows
       .filter((row) => boardFilter === "全部" || row.board === boardFilter)
+      .filter((row) => !showTemplateHitsOnly || getTemplateHits(row).length > 0)
       .map((row) => ({
         ...row,
         speed_pct: speedMap.get(row.ts_code) ?? null,
@@ -1202,6 +1228,7 @@ export default function AllMarketMonitorPage() {
         speedMinTicks,
       );
       const shouldPinTemplateHit =
+        !showTemplateHitsOnly &&
         templateHit &&
         (primarySortKey === "realtime_change_pct" ||
           (primarySortKey === "realtime_vol_ratio" &&
@@ -1231,6 +1258,7 @@ export default function AllMarketMonitorPage() {
     speedMap,
     speedMinTicks,
     speedThresholdPct,
+    showTemplateHitsOnly,
     templateEnabled,
     topLimit,
     volumeRatioThreshold,
@@ -1251,9 +1279,11 @@ export default function AllMarketMonitorPage() {
   const filteredHitRecords = useMemo(
     () =>
       hitRecords.filter(
-        (record) => boardFilter === "全部" || record.board === boardFilter,
+        (record) =>
+          (boardFilter === "全部" || record.board === boardFilter) &&
+          (!showTemplateHitsOnly || getTemplateHits(record).length > 0),
       ),
-    [boardFilter, hitRecords],
+    [boardFilter, hitRecords, showTemplateHitsOnly],
   );
   const recordHighRows = useMemo<RecordHighDisplayRow[]>(() => {
     const eventTimes =
@@ -1268,6 +1298,7 @@ export default function AllMarketMonitorPage() {
 
     return rows
       .filter((row) => boardFilter === "全部" || row.board === boardFilter)
+      .filter((row) => !showTemplateHitsOnly || getTemplateHits(row).length > 0)
       .filter((row) => {
         if (hitPanelMode !== "realtime_vol_ratio") {
           return true;
@@ -1296,6 +1327,7 @@ export default function AllMarketMonitorPage() {
     changePctRecordHighEventTimes,
     hitPanelMode,
     rows,
+    showTemplateHitsOnly,
     speedMap,
     volumeRatioThreshold,
     volumeRatioRecordHighEventTimes,
@@ -1541,24 +1573,43 @@ export default function AllMarketMonitorPage() {
           </div>
 
           <div className="all-market-head-actions">
-            <button
-              type="button"
-              className={
-                templateEnabled
-                  ? "all-market-toggle is-active"
-                  : "all-market-toggle"
-              }
-              role="switch"
-              aria-checked={templateEnabled}
-              onClick={() => setTemplateEnabled((value) => !value)}
+            <div
+              className="all-market-template-mode"
+              role="group"
+              aria-label="模板展示模式"
             >
-              <span className="all-market-toggle-track" aria-hidden="true">
-                <span className="all-market-toggle-thumb" />
+              <span className="all-market-template-mode-label">模板</span>
+              <span className="all-market-template-mode-options">
+                <button
+                  type="button"
+                  className={
+                    templateDisplayMode === "off" ? "is-active is-off" : ""
+                  }
+                  aria-pressed={templateDisplayMode === "off"}
+                  onClick={() => setTemplateDisplayMode("off")}
+                >
+                  关闭
+                </button>
+                <button
+                  type="button"
+                  className={templateDisplayMode === "mark" ? "is-active" : ""}
+                  aria-pressed={templateDisplayMode === "mark"}
+                  onClick={() => setTemplateDisplayMode("mark")}
+                >
+                  标记命中
+                </button>
+                <button
+                  type="button"
+                  className={
+                    templateDisplayMode === "hits_only" ? "is-active" : ""
+                  }
+                  aria-pressed={templateDisplayMode === "hits_only"}
+                  onClick={() => setTemplateDisplayMode("hits_only")}
+                >
+                  只看命中
+                </button>
               </span>
-              <span className="all-market-toggle-text">
-                {templateEnabled ? "模板判断中" : "模板已关闭"}
-              </span>
-            </button>
+            </div>
 
             <button
               type="button"
@@ -2191,7 +2242,11 @@ export default function AllMarketMonitorPage() {
               </table>
             ) : (
               <div className="all-market-empty-state">
-                {enabled ? "等待行情返回。" : "开启爬虫后开始刷新。"}
+                {showTemplateHitsOnly && rows.length > 0
+                  ? "当前没有模板命中的股票。"
+                  : enabled
+                    ? "等待行情返回。"
+                    : "开启爬虫后开始刷新。"}
               </div>
             )}
           </div>

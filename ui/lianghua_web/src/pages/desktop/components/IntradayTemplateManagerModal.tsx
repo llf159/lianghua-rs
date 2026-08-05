@@ -253,6 +253,8 @@ export default function IntradayTemplateManagerModal({
                     key={tpl.id}
                     className={[
                       "intraday-template-modal-item",
+                      "is-card-editable",
+                      "has-switch",
                       templateEditorOriginalId === tpl.id
                         ? "intraday-template-modal-item-active"
                         : "",
@@ -261,6 +263,30 @@ export default function IntradayTemplateManagerModal({
                       .filter(Boolean)
                       .join(" ")}
                   >
+                    <button
+                      type="button"
+                      className="intraday-template-item-edit-target"
+                      aria-label={`编辑策略 ${tpl.name}`}
+                      onClick={() => openTemplateEditorForEdit(tpl)}
+                    />
+                    <button
+                      type="button"
+                      className={
+                        tpl.enabled
+                          ? "intraday-template-switch is-active"
+                          : "intraday-template-switch"
+                      }
+                      role="switch"
+                      aria-checked={tpl.enabled}
+                      aria-label={`${tpl.name}${tpl.enabled ? "关闭" : "开启"}实时判断`}
+                      title={tpl.enabled ? "关闭实时判断" : "开启实时判断"}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleTemplate(tpl.id);
+                      }}
+                    >
+                      <span />
+                    </button>
                     <div className="intraday-template-item-main">
                       <div className="intraday-template-item-title">
                         <strong>{tpl.name}</strong>
@@ -279,30 +305,11 @@ export default function IntradayTemplateManagerModal({
                     <div className="intraday-template-item-actions">
                       <button
                         type="button"
-                        className={
-                          tpl.enabled
-                            ? "intraday-template-switch is-active"
-                            : "intraday-template-switch"
-                        }
-                        role="switch"
-                        aria-checked={tpl.enabled}
-                        aria-label={`${tpl.name}${tpl.enabled ? "关闭" : "开启"}实时判断`}
-                        title={tpl.enabled ? "关闭实时判断" : "开启实时判断"}
-                        onClick={() => toggleTemplate(tpl.id)}
-                      >
-                        <span />
-                      </button>
-                      <button
-                        type="button"
-                        className="intraday-template-action-btn"
-                        onClick={() => openTemplateEditorForEdit(tpl)}
-                      >
-                        编辑
-                      </button>
-                      <button
-                        type="button"
                         className="intraday-template-action-btn is-danger"
-                        onClick={() => removeTemplate(tpl.id)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          removeTemplate(tpl.id);
+                        }}
                       >
                         删除
                       </button>

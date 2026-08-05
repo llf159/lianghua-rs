@@ -175,10 +175,16 @@ export default function ExpressionStockPickTemplateManagerModal({
                     key={tpl.id}
                     className={
                       templateEditorOriginalId === tpl.id
-                        ? 'intraday-template-modal-item intraday-template-modal-item-active'
-                        : 'intraday-template-modal-item'
+                        ? 'intraday-template-modal-item is-card-editable intraday-template-modal-item-active'
+                        : 'intraday-template-modal-item is-card-editable'
                     }
                   >
+                    <button
+                      type="button"
+                      className="intraday-template-item-edit-target"
+                      aria-label={`编辑模板 ${tpl.name}`}
+                      onClick={() => openTemplateEditorForEdit(tpl)}
+                    />
                     <div className="intraday-template-item-main">
                       <strong>{tpl.name}</strong>
                       <span>{summarizeExpression(tpl.expression)}</span>
@@ -186,13 +192,11 @@ export default function ExpressionStockPickTemplateManagerModal({
                     <div className="intraday-template-item-actions">
                       <button
                         type="button"
-                        onClick={() => openTemplateEditorForEdit(tpl)}
-                      >
-                        编辑
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => removeTemplate(tpl.id)}
+                        className="intraday-template-action-btn is-danger"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          removeTemplate(tpl.id)
+                        }}
                       >
                         删除
                       </button>

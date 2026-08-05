@@ -223,18 +223,43 @@
 }
 
 .intraday-template-modal-item {
+  position: relative;
   border: 1px solid #e2e8f0;
   border-radius: 11px;
   padding: 11px 10px 10px 12px;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
   background: #fff;
   transition:
     border-color 0.18s ease,
     background 0.18s ease,
     box-shadow 0.18s ease;
+}
+
+.intraday-template-modal-item.has-switch {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.intraday-template-modal-item.is-card-editable {
+  cursor: pointer;
+}
+
+.intraday-template-item-edit-target {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  border: 0;
+  border-radius: inherit;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.intraday-template-item-edit-target:focus-visible {
+  outline: 3px solid rgba(37, 99, 235, 0.22);
+  outline-offset: 2px;
 }
 
 .intraday-template-modal-item:hover {
@@ -257,10 +282,17 @@
 }
 
 .intraday-template-item-main {
+  position: relative;
+  z-index: 1;
   flex: 1;
   min-width: 0;
   display: grid;
   gap: 4px;
+}
+
+.intraday-template-modal-item.is-card-editable
+  .intraday-template-item-main {
+  pointer-events: none;
 }
 
 .intraday-template-item-main strong {
@@ -298,6 +330,8 @@
 }
 
 .intraday-template-item-actions {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -325,6 +359,7 @@
 
 .intraday-template-switch {
   position: relative;
+  z-index: 1;
   width: 34px;
   height: 20px;
   flex: 0 0 auto;
@@ -434,16 +469,6 @@
 
   .intraday-template-panel-head {
     align-items: flex-start;
-  }
-
-  .intraday-template-modal-item {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .intraday-template-item-actions {
-    width: 100%;
-    justify-content: flex-end;
   }
 
   .intraday-template-editor-panel .intraday-template-panel-head {
