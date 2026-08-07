@@ -410,12 +410,19 @@ export type MarketRankItem = {
   ts_code?: string | null
   start_date?: string | null
   end_date?: string | null
+  concepts?: string | null
+  three_day_gain?: number | null
+  five_day_gain?: number | null
 }
 
 export type MarketAnalysisSnapshot = {
   trade_date?: string | null
   concept_top: MarketRankItem[]
   industry_top: MarketRankItem[]
+  concept_money_flow_top: MarketRankItem[]
+  industry_money_flow_top: MarketRankItem[]
+  concept_money_outflow_top: MarketRankItem[]
+  industry_money_outflow_top: MarketRankItem[]
   gain_top: MarketRankItem[]
   sub_interval_gain_top: MarketRankItem[]
 }

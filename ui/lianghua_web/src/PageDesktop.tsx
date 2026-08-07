@@ -14,6 +14,7 @@ const overviewSubRoutes = [
 ]
 
 const strategyTriggerSimilarityMenuItem = { path: '/strategy-trigger-similarity', label: '策略触发相似' }
+const marketAnalysisMenuItem = { path: '/market-analysis', label: '市场分析' }
 const settingsMenuItem = { path: '/settings', label: '设置' }
 
 const strategySubRoutes = [
@@ -26,7 +27,6 @@ const backtestSubRoutes = [
   { path: '/backtest/strategy-trigger', label: '策略触发统计' },
   { path: '/backtest/strategy-paper-validation', label: '策略模拟盘验证' },
   { path: '/backtest/scene-layer', label: '策略回测' },
-  { path: '/backtest/market-analysis', label: '市场分析' },
 ]
 
 const stockPickSubRoutes = [
@@ -108,6 +108,13 @@ export default function PageDesktop() {
             className={({ isActive }) => (isActive ? 'menu-item active' : 'menu-item')}
           >
             实时监控
+          </NavLink>
+
+          <NavLink
+            to={marketAnalysisMenuItem.path}
+            className={({ isActive }) => (isActive ? 'menu-item active' : 'menu-item')}
+          >
+            {marketAnalysisMenuItem.label}
           </NavLink>
 
           <div className="menu-group">

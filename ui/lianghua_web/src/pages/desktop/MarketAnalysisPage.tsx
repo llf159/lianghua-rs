@@ -70,6 +70,20 @@ function formatPercent(value?: number | null, digits = 2) {
   return `${value.toFixed(digits)}%`;
 }
 
+function formatMoneyAmount(value?: number | null) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "--";
+  }
+  const absolute = Math.abs(value);
+  if (absolute >= 100_000_000) {
+    return `${(value / 100_000_000).toFixed(2)} 亿元`;
+  }
+  if (absolute >= 10_000) {
+    return `${(value / 10_000).toFixed(2)} 万元`;
+  }
+  return `${value.toFixed(0)} 元`;
+}
+
 function getPercentToneClass(value?: number | null) {
   if (value === null || value === undefined || !Number.isFinite(value) || value === 0) {
     return "scene-layer-value-flat";
@@ -93,6 +107,34 @@ function getRankItemDisplayName(item: { name: string; ts_code?: string | null })
 
 function isNonNull<T>(value: T | null): value is T {
   return value !== null;
+}
+
+function MoneyFlowRanking({
+  title,
+  items,
+  direction,
+}: {
+  title: string;
+  items: Array<{ name: string; value: number }>;
+  direction: "inflow" | "outflow";
+}) {
+  return (
+    <div className={`scene-layer-market-list market-analysis-money-flow-list market-analysis-money-flow-list-${direction}`}>
+      <h4>{title}</h4>
+      {items.length > 0 ? (
+        <ol>
+          {items.map((item) => (
+            <li key={`${title}-${item.name}`}>
+              <span title={item.name}>{item.name}</span>
+              <strong>{formatMoneyAmount(item.value)}</strong>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="market-analysis-empty">暂无净{direction === "inflow" ? "流入" : "流出"}数据</p>
+      )}
+    </div>
+  );
 }
 
 const MARKET_BOARD_FILTER_OPTIONS = STOCK_PICK_BOARD_OPTIONS.filter(
@@ -396,15 +438,59 @@ export default function MarketAnalysisPage() {
     [excludedConceptSet, result?.daily.concept_top],
   );
 
+  const filteredIntervalConceptMoneyFlowTop = useMemo(
+    () =>
+      (result?.interval.concept_money_flow_top ?? []).filter(
+        (item) => !excludedConceptSet.has(item.name.trim().toLocaleLowerCase()),
+      ),
+    [excludedConceptSet, result?.interval.concept_money_flow_top],
+  );
+
+  const filteredDailyConceptMoneyFlowTop = useMemo(
+    () =>
+      (result?.daily.concept_money_flow_top ?? []).filter(
+        (item) => !excludedConceptSet.has(item.name.trim().toLocaleLowerCase()),
+      ),
+    [excludedConceptSet, result?.daily.concept_money_flow_top],
+  );
+
+  const filteredIntervalConceptMoneyOutflowTop = useMemo(
+    () =>
+      (result?.interval.concept_money_outflow_top ?? []).filter(
+        (item) => !excludedConceptSet.has(item.name.trim().toLocaleLowerCase()),
+      ),
+    [excludedConceptSet, result?.interval.concept_money_outflow_top],
+  );
+
+  const filteredDailyConceptMoneyOutflowTop = useMemo(
+    () =>
+      (result?.daily.concept_money_outflow_top ?? []).filter(
+        (item) => !excludedConceptSet.has(item.name.trim().toLocaleLowerCase()),
+      ),
+    [excludedConceptSet, result?.daily.concept_money_outflow_top],
+  );
+
   return (
     <div className="scene-layer-page market-analysis-page">
       <section className="scene-layer-card market-analysis-filter-card">
-        <h2 className="scene-layer-title">市场分析</h2>
-        <p className="scene-layer-caption">
-          根据回看周期和参考日，展示区间与当日的概念榜、行业榜（list.market 分类）、涨幅榜（参考日默认自动取最新交易日）。
-        </p>
+        <div className="market-analysis-filter-heading">
+          <div>
+            <h2 className="scene-layer-title">市场分析</h2>
+            <p className="scene-layer-caption">
+              汇总区间与当日的主题表现、板块资金净流入和个股涨幅；参考日默认取最新交易日。
+            </p>
+          </div>
+          <button
+            type="button"
+            className="scene-layer-primary-btn"
+            onClick={() => void onRunMarketAnalysis()}
+            disabled={loading || initializing}
+          >
+            {loading ? "分析中..." : "执行市场分析"}
+          </button>
+        </div>
 
-        <div className="scene-layer-form-grid scene-layer-form-grid-market">
+        <div className="scene-layer-form-grid scene-layer-form-grid-market market-analysis-primary-filters">
           <label className="scene-layer-field">
             <span>回看周期（交易日）</span>
             <input
@@ -480,17 +566,6 @@ export default function MarketAnalysisPage() {
               <option value="start">带入起点</option>
             </select>
           </label>
-        </div>
-
-        <div className="scene-layer-actions">
-          <button
-            type="button"
-            className="scene-layer-primary-btn"
-            onClick={() => void onRunMarketAnalysis()}
-            disabled={loading || initializing}
-          >
-            {loading ? "分析中..." : "执行市场分析"}
-          </button>
         </div>
 
         {error ? <div className="scene-layer-error">{error}</div> : null}
@@ -620,16 +695,47 @@ export default function MarketAnalysisPage() {
               </section>
             </div>
 
+            <section className="market-analysis-money-flow-section">
+              <div className="market-analysis-section-heading">
+                <div>
+                  <h3>资金流向分析</h3>
+                  <p>按个股净流入量和当日成交均价估算金额，分别统计资金净流入与净流出板块。</p>
+                </div>
+                <span>金额口径</span>
+              </div>
+              <div className="market-analysis-money-flow-scopes">
+                <section className="scene-layer-market-panel">
+                  <h3>区间资金净流入</h3>
+                  <div className="scene-layer-market-lists scene-layer-market-lists-two">
+                    <MoneyFlowRanking title="概念净流入" items={filteredIntervalConceptMoneyFlowTop} direction="inflow" />
+                    <MoneyFlowRanking title="行业净流入" items={result.interval.industry_money_flow_top ?? []} direction="inflow" />
+                    <MoneyFlowRanking title="概念净流出" items={filteredIntervalConceptMoneyOutflowTop} direction="outflow" />
+                    <MoneyFlowRanking title="行业净流出" items={result.interval.industry_money_outflow_top ?? []} direction="outflow" />
+                  </div>
+                </section>
+                <section className="scene-layer-market-panel">
+                  <h3>当日资金净流入（{formatDateLabel(result.daily.trade_date)}）</h3>
+                  <div className="scene-layer-market-lists scene-layer-market-lists-two">
+                    <MoneyFlowRanking title="概念净流入" items={filteredDailyConceptMoneyFlowTop} direction="inflow" />
+                    <MoneyFlowRanking title="行业净流入" items={result.daily.industry_money_flow_top ?? []} direction="inflow" />
+                    <MoneyFlowRanking title="概念净流出" items={filteredDailyConceptMoneyOutflowTop} direction="outflow" />
+                    <MoneyFlowRanking title="行业净流出" items={result.daily.industry_money_outflow_top ?? []} direction="outflow" />
+                  </div>
+                </section>
+              </div>
+            </section>
+
             <div className="scene-layer-market-gainers-grid">
               <section className="scene-layer-market-panel scene-layer-market-gainers-panel">
                 <h3>区间个股涨幅榜</h3>
                 <div className="scene-layer-contrib-table-wrap">
-                  <table className="scene-layer-contrib-table">
+                  <table className="scene-layer-contrib-table market-analysis-interval-gain-table">
                     <thead>
                       <tr>
                         <th>#</th>
                         <th>代码</th>
                         <th>名称</th>
+                        <th>概念</th>
                         <th>涨幅</th>
                       </tr>
                     </thead>
@@ -661,6 +767,11 @@ export default function MarketAnalysisPage() {
                               ) : (
                                 displayName
                               )}
+                            </td>
+                            <td>
+                              <span className="market-analysis-concepts" title={item.concepts || "暂无概念"}>
+                                {item.concepts || "--"}
+                              </span>
                             </td>
                             <td className={getPercentToneClass(item.value)}>{formatPercent(item.value)}</td>
                           </tr>
@@ -726,13 +837,16 @@ export default function MarketAnalysisPage() {
               <section className="scene-layer-market-panel scene-layer-market-gainers-panel">
                 <h3>当日个股涨幅榜（{formatDateLabel(result.daily.trade_date)}）</h3>
                 <div className="scene-layer-contrib-table-wrap">
-                  <table className="scene-layer-contrib-table">
+                  <table className="scene-layer-contrib-table market-analysis-daily-gain-table">
                     <thead>
                       <tr>
                         <th>#</th>
                         <th>代码</th>
                         <th>名称</th>
-                        <th>涨幅</th>
+                        <th>概念</th>
+                        <th>当日涨幅</th>
+                        <th>3 日涨幅</th>
+                        <th>5 日涨幅</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -759,7 +873,14 @@ export default function MarketAnalysisPage() {
                                 displayName
                               )}
                             </td>
+                            <td>
+                              <span className="market-analysis-concepts" title={item.concepts || "暂无概念"}>
+                                {item.concepts || "--"}
+                              </span>
+                            </td>
                             <td className={getPercentToneClass(item.value)}>{formatPercent(item.value)}</td>
+                            <td className={getPercentToneClass(item.three_day_gain)}>{formatPercent(item.three_day_gain)}</td>
+                            <td className={getPercentToneClass(item.five_day_gain)}>{formatPercent(item.five_day_gain)}</td>
                           </tr>
                         );
                       })}

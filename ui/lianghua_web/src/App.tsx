@@ -92,6 +92,7 @@ function AppRoutes() {
             <Route path="strategy-manage" element={<Navigate to="/strategy/rules" replace />} />
           </Route>
           <Route path="intraday-monitor" element={<AllMarketMonitorPage />} />
+          <Route path="market-analysis" element={<MarketAnalysisPage />} />
           <Route path="backtest" element={<BacktestPage />}>
             <Route index element={<Navigate to="/backtest/strategy-trigger" replace />} />
             <Route path="strategy-trigger" element={<StrategyTriggerPage />} />
@@ -101,7 +102,7 @@ function AppRoutes() {
               path={EXPRESSION_VALIDATION_SAMPLES_ROUTE_PATH}
               element={<ExpressionValidationSamplesPage />}
             />
-            <Route path="market-analysis" element={<MarketAnalysisPage />} />
+            <Route path="market-analysis" element={<Navigate to="/market-analysis" replace />} />
           </Route>
         </Route>
       </Routes>

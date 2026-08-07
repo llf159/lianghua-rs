@@ -564,6 +564,9 @@ pub struct MarketRankItem {
     pub ts_code: Option<String>,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
+    pub concepts: Option<String>,
+    pub three_day_gain: Option<f64>,
+    pub five_day_gain: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -571,6 +574,10 @@ pub struct MarketAnalysisSnapshot {
     pub trade_date: Option<String>,
     pub concept_top: Vec<MarketRankItem>,
     pub industry_top: Vec<MarketRankItem>,
+    pub concept_money_flow_top: Vec<MarketRankItem>,
+    pub industry_money_flow_top: Vec<MarketRankItem>,
+    pub concept_money_outflow_top: Vec<MarketRankItem>,
+    pub industry_money_outflow_top: Vec<MarketRankItem>,
     pub gain_top: Vec<MarketRankItem>,
     pub sub_interval_gain_top: Vec<MarketRankItem>,
 }
@@ -604,6 +611,9 @@ fn market_rank_item(name: String, value: f64) -> MarketRankItem {
         ts_code: None,
         start_date: None,
         end_date: None,
+        concepts: None,
+        three_day_gain: None,
+        five_day_gain: None,
     }
 }
 
@@ -624,7 +634,23 @@ fn market_stock_rank_item(
         ts_code: Some(ts_code),
         start_date,
         end_date,
+        concepts: None,
+        three_day_gain: None,
+        five_day_gain: None,
     }
+}
+
+fn trailing_period_gain(rows: &[(String, f64)], period: usize) -> Option<f64> {
+    if period == 0 || rows.len() <= period {
+        return None;
+    }
+    let start_close = rows.get(rows.len() - period - 1)?.1;
+    let end_close = rows.last()?.1;
+    if !start_close.is_finite() || !end_close.is_finite() || start_close <= f64::EPSILON {
+        return None;
+    }
+    let value = (end_close / start_close - 1.0) * 100.0;
+    value.is_finite().then_some(value)
 }
 
 #[derive(Debug, Serialize)]
@@ -3940,39 +3966,6 @@ fn build_backtest_stock_filter(
     ))
 }
 
-fn load_concept_stock_count_map(source_path: &str) -> Result<HashMap<String, usize>, String> {
-    let rows = match load_ths_concepts_list(source_path) {
-        Ok(rows) => rows,
-        Err(error) if error.contains("打开stock_concepts.csv失败") => return Ok(HashMap::new()),
-        Err(error) => return Err(error),
-    };
-    let mut concept_stocks: HashMap<String, HashSet<String>> = HashMap::new();
-
-    for cols in rows {
-        let Some(ts_code) = cols.first().map(|value| value.trim()) else {
-            continue;
-        };
-        let Some(concept_raw) = cols.get(2).map(|value| value.trim()) else {
-            continue;
-        };
-        if ts_code.is_empty() || concept_raw.is_empty() {
-            continue;
-        }
-        let ts_code = ts_code.to_ascii_uppercase();
-        for concept in split_board_tags(concept_raw) {
-            concept_stocks
-                .entry(concept)
-                .or_default()
-                .insert(ts_code.clone());
-        }
-    }
-
-    Ok(concept_stocks
-        .into_iter()
-        .map(|(concept, stocks)| (concept, stocks.len()))
-        .collect())
-}
-
 fn build_industry_maps(
     source_path: &str,
 ) -> Result<(HashMap<String, Vec<String>>, HashMap<String, usize>), String> {
@@ -4029,6 +4022,169 @@ fn has_min_stock_count(
     min_stock_count <= 1 || stock_counts.get(name).copied().unwrap_or(0) >= min_stock_count
 }
 
+fn build_concept_maps(
+    source_path: &str,
+) -> Result<(HashMap<String, Vec<String>>, HashMap<String, usize>), String> {
+    let rows = match load_ths_concepts_list(source_path) {
+        Ok(rows) => rows,
+        Err(error) if error.contains("打开stock_concepts.csv失败") => {
+            return Ok((HashMap::new(), HashMap::new()));
+        }
+        Err(error) => return Err(error),
+    };
+    let mut ts_concept_map: HashMap<String, Vec<String>> = HashMap::new();
+    let mut concept_stocks: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for cols in rows {
+        let Some(ts_code) = cols
+            .first()
+            .map(|value| value.trim().to_ascii_uppercase())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(concept_raw) = cols.get(2).map(|value| value.trim()) else {
+            continue;
+        };
+        if concept_raw.is_empty() {
+            continue;
+        }
+
+        let concepts = split_board_tags(concept_raw);
+        for concept in &concepts {
+            concept_stocks
+                .entry(concept.clone())
+                .or_default()
+                .insert(ts_code.clone());
+        }
+        if !concepts.is_empty() {
+            ts_concept_map.entry(ts_code).or_default().extend(concepts);
+        }
+    }
+
+    for concepts in ts_concept_map.values_mut() {
+        concepts.sort();
+        concepts.dedup();
+    }
+    let concept_stock_counts = concept_stocks
+        .into_iter()
+        .map(|(concept, stocks)| (concept, stocks.len()))
+        .collect();
+    Ok((ts_concept_map, concept_stock_counts))
+}
+
+fn estimate_net_money_flow_yuan(net_mf_vol: f64, vol: f64, amount: f64) -> Option<f64> {
+    if !net_mf_vol.is_finite()
+        || !vol.is_finite()
+        || !amount.is_finite()
+        || vol <= f64::EPSILON
+        || amount < 0.0
+    {
+        return None;
+    }
+
+    // Tushare 日线 amount 的单位为千元，vol / net_mf_vol 的单位均为手。
+    // 用成交额 / 成交量得到当日均价后折算净流入金额，结果统一为元。
+    let value = net_mf_vol / vol * amount * 1_000.0;
+    value.is_finite().then_some(value)
+}
+
+fn accumulate_board_money_flow(
+    acc: &mut HashMap<String, f64>,
+    board_map: &HashMap<String, Vec<String>>,
+    ts_code: &str,
+    net_amount_yuan: f64,
+) {
+    let Some(boards) = board_map.get(ts_code) else {
+        return;
+    };
+    for board in boards {
+        *acc.entry(board.clone()).or_insert(0.0) += net_amount_yuan;
+    }
+}
+
+fn money_flow_rank_items(
+    acc: HashMap<String, f64>,
+    stock_counts: &HashMap<String, usize>,
+    min_stock_count: usize,
+) -> Vec<MarketRankItem> {
+    let mut items = acc
+        .into_iter()
+        .filter_map(|(name, value)| {
+            if value <= 0.0
+                || !value.is_finite()
+                || !has_min_stock_count(stock_counts, &name, min_stock_count)
+            {
+                return None;
+            }
+            Some(market_rank_item(name, value))
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|a, b| {
+        b.value
+            .partial_cmp(&a.value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    items.truncate(20);
+    items
+}
+
+fn money_outflow_rank_items(
+    acc: HashMap<String, f64>,
+    stock_counts: &HashMap<String, usize>,
+    min_stock_count: usize,
+) -> Vec<MarketRankItem> {
+    let mut items = acc
+        .into_iter()
+        .filter_map(|(name, value)| {
+            if value >= 0.0
+                || !value.is_finite()
+                || !has_min_stock_count(stock_counts, &name, min_stock_count)
+            {
+                return None;
+            }
+            Some(market_rank_item(name, value))
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|a, b| {
+        a.value
+            .partial_cmp(&b.value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    items.truncate(20);
+    items
+}
+
+fn stock_data_has_money_flow_columns(conn: &Connection) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT LOWER(column_name)
+            FROM information_schema.columns
+            WHERE LOWER(table_name) = 'stock_data'
+            "#,
+        )
+        .map_err(|e| format!("预编译资金流向列检查失败: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("执行资金流向列检查失败: {e}"))?;
+    let mut columns = HashSet::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取资金流向列检查失败: {e}"))?
+    {
+        let name: String = row
+            .get(0)
+            .map_err(|e| format!("读取资金流向列名失败: {e}"))?;
+        columns.insert(name);
+    }
+    Ok(["net_mf_v", "vol", "amount"]
+        .iter()
+        .all(|name| columns.contains(*name)))
+}
+
 pub fn get_market_analysis(
     source_path: String,
     lookback_period: Option<usize>,
@@ -4072,7 +4228,7 @@ pub fn get_market_analysis(
         .or_else(|| latest_trade_date.clone());
 
     let (board_options, ts_board_map) = get_or_build_board_maps(&source_path)?;
-    let concept_stock_counts = load_concept_stock_count_map(&source_path)?;
+    let (ts_concept_map, concept_stock_counts) = build_concept_maps(&source_path)?;
     let (ts_industry_map, industry_stock_counts) = build_industry_maps(&source_path)?;
     let resolved_board = resolve_board_filter(board, &board_options);
     let exclude_st_board = exclude_st_board.unwrap_or(false);
@@ -4093,6 +4249,10 @@ pub fn get_market_analysis(
                 trade_date: None,
                 concept_top: Vec::new(),
                 industry_top: Vec::new(),
+                concept_money_flow_top: Vec::new(),
+                industry_money_flow_top: Vec::new(),
+                concept_money_outflow_top: Vec::new(),
+                industry_money_outflow_top: Vec::new(),
                 gain_top: Vec::new(),
                 sub_interval_gain_top: Vec::new(),
             },
@@ -4100,6 +4260,10 @@ pub fn get_market_analysis(
                 trade_date: None,
                 concept_top: Vec::new(),
                 industry_top: Vec::new(),
+                concept_money_flow_top: Vec::new(),
+                industry_money_flow_top: Vec::new(),
+                concept_money_outflow_top: Vec::new(),
+                industry_money_outflow_top: Vec::new(),
                 gain_top: Vec::new(),
                 sub_interval_gain_top: Vec::new(),
             },
@@ -4148,6 +4312,10 @@ pub fn get_market_analysis(
                 trade_date: None,
                 concept_top: Vec::new(),
                 industry_top: Vec::new(),
+                concept_money_flow_top: Vec::new(),
+                industry_money_flow_top: Vec::new(),
+                concept_money_outflow_top: Vec::new(),
+                industry_money_outflow_top: Vec::new(),
                 gain_top: Vec::new(),
                 sub_interval_gain_top: Vec::new(),
             },
@@ -4155,6 +4323,10 @@ pub fn get_market_analysis(
                 trade_date: Some(ref_date),
                 concept_top: Vec::new(),
                 industry_top: Vec::new(),
+                concept_money_flow_top: Vec::new(),
+                industry_money_flow_top: Vec::new(),
+                concept_money_outflow_top: Vec::new(),
+                industry_money_outflow_top: Vec::new(),
                 gain_top: Vec::new(),
                 sub_interval_gain_top: Vec::new(),
             },
@@ -4318,13 +4490,18 @@ pub fn get_market_analysis(
             if !value.is_finite() {
                 return None;
             }
-            Some(market_stock_rank_item(
+            let mut rank_item = market_stock_rank_item(
                 &stock_name_map,
                 ts_code.clone(),
                 value,
                 Some(start_date.clone()),
                 Some(end_date.clone()),
-            ))
+            );
+            rank_item.concepts = ts_concept_map
+                .get(ts_code)
+                .map(|items| items.join(" / "))
+                .filter(|value| !value.is_empty());
+            Some(rank_item)
         })
         .collect::<Vec<_>>();
     interval_gain_top.sort_by(|a, b| {
@@ -4474,6 +4651,54 @@ pub fn get_market_analysis(
     });
     daily_industry_top.truncate(20);
 
+    let mut trailing_gain_stmt = source_conn
+        .prepare(
+            r#"
+            SELECT ts_code, trade_date, TRY_CAST(close AS DOUBLE) AS close_price
+            FROM stock_data
+            WHERE adj_type = 'qfq'
+              AND trade_date IN (
+                  SELECT trade_date
+                  FROM (
+                      SELECT DISTINCT trade_date
+                      FROM stock_data
+                      WHERE adj_type = 'qfq'
+                        AND trade_date <= ?
+                      ORDER BY trade_date DESC
+                      LIMIT 6
+                  ) AS recent_dates
+              )
+            ORDER BY ts_code ASC, trade_date ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译当日多周期涨幅 SQL 失败: {e}"))?;
+    let mut trailing_gain_rows = trailing_gain_stmt
+        .query(params![&ref_date])
+        .map_err(|e| format!("执行当日多周期涨幅 SQL 失败: {e}"))?;
+    let mut trailing_gain_acc: HashMap<String, Vec<(String, f64)>> = HashMap::new();
+    while let Some(row) = trailing_gain_rows
+        .next()
+        .map_err(|e| format!("读取当日多周期涨幅失败: {e}"))?
+    {
+        let ts_code: String = row
+            .get(0)
+            .map_err(|e| format!("读取多周期涨幅代码失败: {e}"))?;
+        let trade_date: String = row
+            .get(1)
+            .map_err(|e| format!("读取多周期涨幅日期失败: {e}"))?;
+        let close_price: Option<f64> = row
+            .get(2)
+            .map_err(|e| format!("读取多周期收盘价失败: {e}"))?;
+        let Some(close_price) = close_price.filter(|value| value.is_finite() && *value > 0.0)
+        else {
+            continue;
+        };
+        trailing_gain_acc
+            .entry(ts_code.trim().to_ascii_uppercase())
+            .or_default()
+            .push((trade_date, close_price));
+    }
+
     let mut daily_gain_stmt = source_conn
         .prepare(
             r#"
@@ -4509,17 +4734,172 @@ pub fn get_market_analysis(
             continue;
         }
 
-        daily_gain_top.push(market_stock_rank_item(
+        let concepts = ts_concept_map
+            .get(&ts_code)
+            .map(|items| items.join(" / "))
+            .filter(|value| !value.is_empty());
+        let trailing_rows = trailing_gain_acc
+            .get(&ts_code)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let mut rank_item = market_stock_rank_item(
             &stock_name_map,
             ts_code,
             value,
             Some(ref_date.clone()),
             Some(ref_date.clone()),
-        ));
+        );
+        rank_item.concepts = concepts;
+        rank_item.three_day_gain = trailing_period_gain(trailing_rows, 3);
+        rank_item.five_day_gain = trailing_period_gain(trailing_rows, 5);
+        daily_gain_top.push(rank_item);
         if daily_gain_top.len() >= stock_rank_limit {
             break;
         }
     }
+
+    let (
+        interval_concept_money_flow_top,
+        interval_industry_money_flow_top,
+        daily_concept_money_flow_top,
+        daily_industry_money_flow_top,
+        interval_concept_money_outflow_top,
+        interval_industry_money_outflow_top,
+        daily_concept_money_outflow_top,
+        daily_industry_money_outflow_top,
+    ) = if stock_data_has_money_flow_columns(&source_conn)? {
+        let mut money_flow_stmt = source_conn
+            .prepare(
+                r#"
+                SELECT
+                    ts_code,
+                    trade_date,
+                    TRY_CAST(net_mf_v AS DOUBLE) AS net_mf_vol,
+                    TRY_CAST(vol AS DOUBLE) AS trade_vol,
+                    TRY_CAST(amount AS DOUBLE) AS trade_amount
+                FROM stock_data
+                WHERE adj_type = 'qfq'
+                  AND trade_date >= ?
+                  AND trade_date <= ?
+                  AND net_mf_v IS NOT NULL
+                "#,
+            )
+            .map_err(|e| format!("预编译资金流向统计 SQL 失败: {e}"))?;
+        let mut money_flow_rows = money_flow_stmt
+            .query(params![&interval_start, &interval_end])
+            .map_err(|e| format!("执行资金流向统计 SQL 失败: {e}"))?;
+        let mut interval_concept_acc = HashMap::new();
+        let mut interval_industry_acc = HashMap::new();
+        let mut daily_concept_acc = HashMap::new();
+        let mut daily_industry_acc = HashMap::new();
+
+        while let Some(row) = money_flow_rows
+            .next()
+            .map_err(|e| format!("读取资金流向统计失败: {e}"))?
+        {
+            let ts_code: String = row
+                .get(0)
+                .map_err(|e| format!("读取资金流向代码失败: {e}"))?;
+            let trade_date: String = row
+                .get(1)
+                .map_err(|e| format!("读取资金流向日期失败: {e}"))?;
+            let net_mf_vol: Option<f64> =
+                row.get(2).map_err(|e| format!("读取净流入量失败: {e}"))?;
+            let vol: Option<f64> = row.get(3).map_err(|e| format!("读取成交量失败: {e}"))?;
+            let amount: Option<f64> = row.get(4).map_err(|e| format!("读取成交额失败: {e}"))?;
+            let Some(net_amount_yuan) =
+                net_mf_vol
+                    .zip(vol)
+                    .zip(amount)
+                    .and_then(|((net_mf_vol, vol), amount)| {
+                        estimate_net_money_flow_yuan(net_mf_vol, vol, amount)
+                    })
+            else {
+                continue;
+            };
+            let ts_code = ts_code.trim().to_ascii_uppercase();
+            accumulate_board_money_flow(
+                &mut interval_concept_acc,
+                &ts_concept_map,
+                &ts_code,
+                net_amount_yuan,
+            );
+            accumulate_board_money_flow(
+                &mut interval_industry_acc,
+                &ts_industry_map,
+                &ts_code,
+                net_amount_yuan,
+            );
+            if trade_date == ref_date {
+                accumulate_board_money_flow(
+                    &mut daily_concept_acc,
+                    &ts_concept_map,
+                    &ts_code,
+                    net_amount_yuan,
+                );
+                accumulate_board_money_flow(
+                    &mut daily_industry_acc,
+                    &ts_industry_map,
+                    &ts_code,
+                    net_amount_yuan,
+                );
+            }
+        }
+
+        (
+            money_flow_rank_items(
+                interval_concept_acc.clone(),
+                &concept_stock_counts,
+                min_board_stock_count,
+            ),
+            money_flow_rank_items(
+                interval_industry_acc.clone(),
+                &industry_stock_counts,
+                min_board_stock_count,
+            ),
+            money_flow_rank_items(
+                daily_concept_acc.clone(),
+                &concept_stock_counts,
+                min_board_stock_count,
+            ),
+            money_flow_rank_items(
+                daily_industry_acc.clone(),
+                &industry_stock_counts,
+                min_board_stock_count,
+            ),
+            money_outflow_rank_items(
+                interval_concept_acc,
+                &concept_stock_counts,
+                min_board_stock_count,
+            ),
+            money_outflow_rank_items(
+                interval_industry_acc,
+                &industry_stock_counts,
+                min_board_stock_count,
+            ),
+            money_outflow_rank_items(
+                daily_concept_acc,
+                &concept_stock_counts,
+                min_board_stock_count,
+            ),
+            money_outflow_rank_items(
+                daily_industry_acc,
+                &industry_stock_counts,
+                min_board_stock_count,
+            ),
+        )
+    } else {
+        (
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    };
 
     Ok(MarketAnalysisData {
         lookback_period,
@@ -4534,6 +4914,10 @@ pub fn get_market_analysis(
             trade_date: Some(format!("{}~{}", interval_start, interval_end)),
             concept_top: interval_concept_top,
             industry_top: interval_industry_top,
+            concept_money_flow_top: interval_concept_money_flow_top,
+            industry_money_flow_top: interval_industry_money_flow_top,
+            concept_money_outflow_top: interval_concept_money_outflow_top,
+            industry_money_outflow_top: interval_industry_money_outflow_top,
             gain_top: interval_gain_top,
             sub_interval_gain_top,
         },
@@ -4541,6 +4925,10 @@ pub fn get_market_analysis(
             trade_date: Some(ref_date),
             concept_top: daily_concept_top,
             industry_top: daily_industry_top,
+            concept_money_flow_top: daily_concept_money_flow_top,
+            industry_money_flow_top: daily_industry_money_flow_top,
+            concept_money_outflow_top: daily_concept_money_outflow_top,
+            industry_money_outflow_top: daily_industry_money_outflow_top,
             gain_top: daily_gain_top,
             sub_interval_gain_top: Vec::new(),
         },
@@ -6853,8 +7241,9 @@ mod tests {
         build_validation_sample_groups, build_validation_similarity_rows,
         build_validation_triggered_scores, build_validation_triggered_scores_for_combos,
         collect_rule_validation_runtime_keys, collect_validation_assigned_names,
-        derive_validation_volatility_group, resolve_validation_sample_board_label,
-        resolve_validation_trigger_count,
+        derive_validation_volatility_group, estimate_net_money_flow_yuan, money_flow_rank_items,
+        money_outflow_rank_items, resolve_validation_sample_board_label,
+        resolve_validation_trigger_count, trailing_period_gain,
     };
     use crate::data::ScopeWay;
 
@@ -6912,6 +7301,79 @@ mod tests {
         );
         assert!(!industry_counts.contains_key("主板"));
         assert!(!industry_counts.contains_key("创业板"));
+    }
+
+    #[test]
+    fn market_analysis_money_flow_converts_volume_to_yuan() {
+        assert_eq!(
+            estimate_net_money_flow_yuan(100.0, 1_000.0, 5_000.0),
+            Some(500_000.0)
+        );
+        assert_eq!(estimate_net_money_flow_yuan(100.0, 0.0, 5_000.0), None);
+        assert_eq!(
+            estimate_net_money_flow_yuan(f64::NAN, 1_000.0, 5_000.0),
+            None
+        );
+    }
+
+    #[test]
+    fn market_analysis_money_flow_only_ranks_positive_eligible_boards() {
+        let acc = HashMap::from([
+            ("算力".to_string(), 200_000_000.0),
+            ("机器人".to_string(), 80_000_000.0),
+            ("银行".to_string(), -50_000_000.0),
+        ]);
+        let counts = HashMap::from([
+            ("算力".to_string(), 12),
+            ("机器人".to_string(), 1),
+            ("银行".to_string(), 20),
+        ]);
+
+        let items = money_flow_rank_items(acc, &counts, 2);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "算力");
+        assert_eq!(items[0].value, 200_000_000.0);
+    }
+
+    #[test]
+    fn market_analysis_money_outflow_ranks_largest_outflow_first() {
+        let acc = HashMap::from([
+            ("算力".to_string(), 20_000_000.0),
+            ("机器人".to_string(), -80_000_000.0),
+            ("银行".to_string(), -150_000_000.0),
+        ]);
+        let counts = HashMap::from([
+            ("算力".to_string(), 12),
+            ("机器人".to_string(), 8),
+            ("银行".to_string(), 20),
+        ]);
+
+        let items = money_outflow_rank_items(acc, &counts, 2);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].name, "银行");
+        assert_eq!(items[0].value, -150_000_000.0);
+        assert_eq!(items[1].name, "机器人");
+    }
+
+    #[test]
+    fn market_analysis_trailing_gain_uses_requested_trade_day_window() {
+        let rows = vec![
+            ("20240102".to_string(), 10.0),
+            ("20240103".to_string(), 11.0),
+            ("20240104".to_string(), 12.0),
+            ("20240105".to_string(), 15.0),
+            ("20240108".to_string(), 20.0),
+            ("20240109".to_string(), 24.0),
+        ];
+
+        let three_day = trailing_period_gain(&rows, 3).expect("three day gain");
+        let five_day = trailing_period_gain(&rows, 5).expect("five day gain");
+
+        assert!((three_day - 100.0).abs() < 1e-9);
+        assert!((five_day - 140.0).abs() < 1e-9);
+        assert_eq!(trailing_period_gain(&rows[..5], 5), None);
     }
 
     fn temp_source_dir() -> PathBuf {
