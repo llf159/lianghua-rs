@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     data::{
-        IndsData,
+        DataReader, IndsData,
         concept_performance_data::{
             rebuild_concept_performance_all, rebuild_most_related_concept_csv,
         },
@@ -36,11 +36,11 @@ use crate::{
         trade_calendar_path,
     },
     download::{
-        AdjType, DownloadSummary, ProBarRow,
+        AdjType, DownloadSummary,
         dragon_tiger::{
             DragonTigerDownloadConfig, download_dragon_tiger as core_download_dragon_tiger,
         },
-        ind_calc::{cache_ind_build, calc_inds_for_rows_with_cache},
+        ind_calc::{cache_ind_build, calc_inds_with_cache},
         runner::{
             DownloadProgress, DownloadProgressCallback, DownloadRuntimeConfig,
             ThsConceptDownloadConfig, download_after_basic_data as core_run_download_with_progress,
@@ -369,6 +369,9 @@ fn normalize_download_end_date(raw: &str) -> Result<String, String> {
 struct StockDataIndicatorWorkItem {
     ts_code: String,
     adj_type: String,
+    start_date: String,
+    end_date: String,
+    row_count: u64,
 }
 
 struct StockDataIndicatorRebuildBatch {
@@ -376,7 +379,7 @@ struct StockDataIndicatorRebuildBatch {
     adj_type: AdjType,
     adj_type_label: String,
     row_count: u64,
-    rows: Vec<ProBarRow>,
+    trade_dates: Vec<String>,
     indicators: HashMap<String, Vec<Option<f64>>>,
 }
 
@@ -733,7 +736,7 @@ fn list_stock_data_indicator_work_items(
     let mut stmt = conn
         .prepare(
             r#"
-            SELECT ts_code, adj_type, COUNT(*)
+            SELECT ts_code, adj_type, MIN(trade_date), MAX(trade_date), COUNT(*)
             FROM stock_data
             GROUP BY ts_code, adj_type
             ORDER BY adj_type ASC, ts_code ASC
@@ -751,65 +754,23 @@ fn list_stock_data_indicator_work_items(
     {
         let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
         let adj_type: String = row.get(1).map_err(|e| format!("读取adj_type失败:{e}"))?;
-        items.push(StockDataIndicatorWorkItem { ts_code, adj_type });
-    }
-
-    Ok(items)
-}
-
-fn load_stock_data_rows_for_indicator_rebuild(
-    conn: &Connection,
-    ts_code: &str,
-    adj_type: &str,
-) -> Result<Vec<ProBarRow>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT
-                ts_code,
-                trade_date,
-                TRY_CAST(open AS DOUBLE),
-                TRY_CAST(high AS DOUBLE),
-                TRY_CAST(low AS DOUBLE),
-                TRY_CAST(close AS DOUBLE),
-                TRY_CAST(pre_close AS DOUBLE),
-                TRY_CAST(change AS DOUBLE),
-                TRY_CAST(pct_chg AS DOUBLE),
-                TRY_CAST(vol AS DOUBLE),
-                TRY_CAST(amount AS DOUBLE),
-                TRY_CAST(tor AS DOUBLE)
-            FROM stock_data
-            WHERE ts_code = ?
-              AND adj_type = ?
-            ORDER BY trade_date ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译指标补算行情SQL失败:{e}"))?;
-    let mut query = stmt
-        .query(params![ts_code, adj_type])
-        .map_err(|e| format!("查询指标补算行情失败:{e}"))?;
-    let mut rows = Vec::new();
-
-    while let Some(row) = query.next().map_err(|e| format!("读取行情行失败:{e}"))? {
-        rows.push(ProBarRow {
-            ts_code: row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?,
-            trade_date: row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?,
-            open: row.get(2).map_err(|e| format!("读取open失败:{e}"))?,
-            high: row.get(3).map_err(|e| format!("读取high失败:{e}"))?,
-            low: row.get(4).map_err(|e| format!("读取low失败:{e}"))?,
-            close: row.get(5).map_err(|e| format!("读取close失败:{e}"))?,
-            pre_close: row.get(6).map_err(|e| format!("读取pre_close失败:{e}"))?,
-            change: row.get(7).map_err(|e| format!("读取change失败:{e}"))?,
-            pct_chg: row.get(8).map_err(|e| format!("读取pct_chg失败:{e}"))?,
-            vol: row.get(9).map_err(|e| format!("读取vol失败:{e}"))?,
-            amount: row.get(10).map_err(|e| format!("读取amount失败:{e}"))?,
-            turnover_rate: row.get(11).map_err(|e| format!("读取tor失败:{e}"))?,
-            volume_ratio: None,
-            moneyflow: None,
+        let start_date: String = row
+            .get(2)
+            .map_err(|e| format!("读取最早trade_date失败:{e}"))?;
+        let end_date: String = row
+            .get(3)
+            .map_err(|e| format!("读取最晚trade_date失败:{e}"))?;
+        let row_count: i64 = row.get(4).map_err(|e| format!("读取行情数量失败:{e}"))?;
+        items.push(StockDataIndicatorWorkItem {
+            ts_code,
+            adj_type,
+            start_date,
+            end_date,
+            row_count: row_count.max(0) as u64,
         });
     }
 
-    Ok(rows)
+    Ok(items)
 }
 
 fn compute_stock_data_indicator_rebuild_batch(
@@ -818,19 +779,30 @@ fn compute_stock_data_indicator_rebuild_batch(
     inds_cache: &[crate::download::ind_calc::IndsCache],
     work_group: &[StockDataIndicatorWorkItem],
 ) -> Result<(), String> {
-    let conn = open_source_db_conn(source_path)?;
+    let reader = DataReader::new(source_path)?;
 
     for item in work_group {
-        let rows = load_stock_data_rows_for_indicator_rebuild(
-            &conn,
+        let row_data = reader.load_one(
             item.ts_code.as_str(),
             item.adj_type.as_str(),
+            item.start_date.as_str(),
+            item.end_date.as_str(),
         )?;
-        if rows.is_empty() {
+        if row_data.trade_dates.is_empty() {
             continue;
         }
+        if row_data.trade_dates.len() as u64 != item.row_count {
+            return Err(format!(
+                "指标补算读取行数变化: {} / {}, {} != {}",
+                item.ts_code,
+                item.adj_type,
+                row_data.trade_dates.len(),
+                item.row_count
+            ));
+        }
 
-        let indicators = calc_inds_for_rows_with_cache(inds_cache, &rows)?;
+        let trade_dates = row_data.trade_dates.clone();
+        let indicators = calc_inds_with_cache(inds_cache, row_data)?;
         let adj_type = parse_stock_data_adj_type(item.adj_type.as_str())?;
 
         sender
@@ -839,8 +811,8 @@ fn compute_stock_data_indicator_rebuild_batch(
                     ts_code: item.ts_code.clone(),
                     adj_type,
                     adj_type_label: item.adj_type.clone(),
-                    row_count: rows.len() as u64,
-                    rows,
+                    row_count: item.row_count,
+                    trade_dates,
                     indicators,
                 },
             ))
@@ -2096,7 +2068,7 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
                         &indicator_names,
                         batch.ts_code.as_str(),
                         batch.adj_type,
-                        &batch.rows,
+                        &batch.trade_dates,
                         &batch.indicators,
                     )?;
                     updated_rows += batch.row_count;
@@ -2415,6 +2387,81 @@ mod tests {
         assert_eq!(source_all.max_trade_date.as_deref(), Some("20240103"));
         assert_eq!(source_qfq.max_trade_date.as_deref(), Some("20240102"));
 
+        let _ = remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn indicator_rebuild_uses_persisted_moneyflow_columns() {
+        let source_dir = temp_dir_path("lianghua_indicator_rebuild_moneyflow");
+        create_dir_all(&source_dir).expect("create temp dir");
+        let source_path = source_dir.to_str().expect("utf8 path");
+        let db_path = source_db_path(source_path);
+        crate::data::download_data::init_stock_data_db(
+            db_path.to_str().expect("utf8 database path"),
+        )
+        .expect("init stock data");
+        let conn = Connection::open(&db_path).expect("open stock data");
+        crate::data::download_data::insert_pro_bar_rows(
+            &conn,
+            AdjType::Qfq,
+            &[crate::download::ProBarRow {
+                ts_code: "000001.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                open: 10.0,
+                high: 10.5,
+                low: 9.8,
+                close: 10.2,
+                pre_close: 10.0,
+                change: 0.2,
+                pct_chg: 2.0,
+                vol: 1000.0,
+                amount: 10000.0,
+                turnover_rate: Some(1.2),
+                volume_ratio: None,
+                moneyflow: Some(crate::download::MoneyflowRow {
+                    ts_code: "000001.SZ".to_string(),
+                    trade_date: "20240102".to_string(),
+                    b_sm_v: Some(1.0),
+                    s_sm_v: Some(3.0),
+                    b_md_v: Some(5.0),
+                    s_md_v: Some(7.0),
+                    b_lg_v: Some(9.0),
+                    s_lg_v: Some(11.0),
+                    b_elg_v: Some(13.0),
+                    s_elg_v: Some(15.0),
+                    net_mf_v: Some(17.0),
+                }),
+            }],
+        )
+        .expect("insert stock data");
+        fs::write(
+            ind_toml_path(source_path),
+            r#"
+            version = 1
+
+            [[ind]]
+            name = "FLOW_SUM"
+            expr = "B_SM_V + NET_MF_V"
+            prec = 2
+            "#,
+        )
+        .expect("write indicator config");
+
+        let cache = cache_ind_build(source_path).expect("build indicator cache");
+        let work_items = list_stock_data_indicator_work_items(&conn).expect("list work items");
+        let (sender, receiver) = sync_channel(1);
+        compute_stock_data_indicator_rebuild_batch(&sender, source_path, &cache, &work_items)
+            .expect("compute rebuilt indicators");
+
+        let StockDataIndicatorRebuildMessage::Batch(batch) =
+            receiver.recv().expect("receive rebuilt indicators")
+        else {
+            panic!("expected rebuilt indicator batch");
+        };
+        assert_eq!(batch.trade_dates, vec!["20240102".to_string()]);
+        assert_eq!(batch.indicators.get("FLOW_SUM"), Some(&vec![Some(18.0)]));
+
+        drop(conn);
         let _ = remove_dir_all(source_dir);
     }
 

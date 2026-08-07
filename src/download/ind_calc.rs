@@ -10,7 +10,7 @@ use duckdb::params_from_iter;
 
 use crate::{
     data::scoring_data::row_into_rt,
-    data::{DataReader, IndsData, RowData, ind_toml_path},
+    data::{DataReader, IndsData, RowData, STOCK_DATA_RUNTIME_FIELDS, ind_toml_path},
     download::ProBarRow,
     expr::eval::Value,
     expr::{
@@ -20,28 +20,6 @@ use crate::{
         },
     },
 };
-
-const IND_INPUT_KEYS: [&str; 19] = [
-    "O",
-    "H",
-    "L",
-    "C",
-    "V",
-    "AMOUNT",
-    "PRE_CLOSE",
-    "CHANGE",
-    "PCT_CHG",
-    "TOR",
-    "B_SM_V",
-    "S_SM_V",
-    "B_MD_V",
-    "S_MD_V",
-    "B_LG_V",
-    "S_LG_V",
-    "B_ELG_V",
-    "S_ELG_V",
-    "NET_MF_V",
-];
 
 #[derive(Clone)]
 pub struct IndsCache {
@@ -255,18 +233,21 @@ pub fn load_many_tail_rows_with_warmup_need(
         .iter()
         .map(|(db_col, key)| (key.as_str(), db_col.as_str()))
         .collect::<HashMap<_, _>>();
-    let input_selects = IND_INPUT_KEYS
+    let input_selects = STOCK_DATA_RUNTIME_FIELDS
         .iter()
-        .map(|key| match runtime_to_db.get(key) {
+        .map(|field| match runtime_to_db.get(field.runtime_key) {
             Some(db_col) => {
-                format!("TRY_CAST(stock_data.\"{db_col}\" AS DOUBLE) AS \"{key}\"")
+                format!(
+                    "TRY_CAST(stock_data.\"{db_col}\" AS DOUBLE) AS \"{}\"",
+                    field.runtime_key
+                )
             }
-            None => format!("CAST(NULL AS DOUBLE) AS \"{key}\""),
+            None => format!("CAST(NULL AS DOUBLE) AS \"{}\"", field.runtime_key),
         })
         .collect::<Vec<_>>();
-    let output_selects = IND_INPUT_KEYS
+    let output_selects = STOCK_DATA_RUNTIME_FIELDS
         .iter()
-        .map(|key| format!("ranked.\"{key}\""))
+        .map(|field| format!("ranked.\"{}\"", field.runtime_key))
         .collect::<Vec<_>>();
     let values_sql = std::iter::repeat_n("(?, ?)", requests.len())
         .collect::<Vec<_>>()
@@ -333,16 +314,16 @@ pub fn load_many_tail_rows_with_warmup_need(
             .push(trade_date);
 
         let cols = cols_by_stock.entry(ts_code).or_insert_with(|| {
-            IND_INPUT_KEYS
+            STOCK_DATA_RUNTIME_FIELDS
                 .iter()
-                .map(|key| (key.to_string(), Vec::new()))
+                .map(|field| (field.runtime_key.to_string(), Vec::new()))
                 .collect::<HashMap<_, _>>()
         });
-        for (idx, key) in IND_INPUT_KEYS.iter().enumerate() {
+        for (idx, field) in STOCK_DATA_RUNTIME_FIELDS.iter().enumerate() {
             let value: Option<f64> = row
                 .get(idx + 2)
-                .map_err(|e| format!("读取{key}失败: {e}"))?;
-            cols.get_mut(*key)
+                .map_err(|e| format!("读取{}失败: {e}", field.runtime_key))?;
+            cols.get_mut(field.runtime_key)
                 .expect("indicator input key should exist")
                 .push(value);
         }
@@ -363,61 +344,22 @@ pub fn load_many_tail_rows_with_warmup_need(
 
 fn pro_bar_rows_to_row_data(rows: &[ProBarRow]) -> Result<RowData, String> {
     let mut trade_dates = Vec::with_capacity(rows.len());
-    let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
-
-    for key in IND_INPUT_KEYS {
-        cols.insert(key.to_string(), Vec::with_capacity(rows.len()));
-    }
+    let mut cols = STOCK_DATA_RUNTIME_FIELDS
+        .iter()
+        .map(|field| {
+            (
+                field.runtime_key.to_string(),
+                Vec::with_capacity(rows.len()),
+            )
+        })
+        .collect::<HashMap<_, _>>();
 
     for row in rows {
         trade_dates.push(row.trade_date.clone());
-
-        cols.get_mut("O")
-            .expect("O should exist")
-            .push(Some(row.open));
-        cols.get_mut("H")
-            .expect("H should exist")
-            .push(Some(row.high));
-        cols.get_mut("L")
-            .expect("L should exist")
-            .push(Some(row.low));
-        cols.get_mut("C")
-            .expect("C should exist")
-            .push(Some(row.close));
-        cols.get_mut("V")
-            .expect("V should exist")
-            .push(Some(row.vol));
-        cols.get_mut("AMOUNT")
-            .expect("AMOUNT should exist")
-            .push(Some(row.amount));
-        cols.get_mut("PRE_CLOSE")
-            .expect("PRE_CLOSE should exist")
-            .push(Some(row.pre_close));
-        cols.get_mut("CHANGE")
-            .expect("CHANGE should exist")
-            .push(Some(row.change));
-        cols.get_mut("PCT_CHG")
-            .expect("PCT_CHG should exist")
-            .push(Some(row.pct_chg));
-        cols.get_mut("TOR")
-            .expect("TOR should exist")
-            .push(row.turnover_rate);
-        let moneyflow = row.moneyflow.as_ref();
-        let moneyflow_values = [
-            ("B_SM_V", moneyflow.and_then(|value| value.b_sm_v)),
-            ("S_SM_V", moneyflow.and_then(|value| value.s_sm_v)),
-            ("B_MD_V", moneyflow.and_then(|value| value.b_md_v)),
-            ("S_MD_V", moneyflow.and_then(|value| value.s_md_v)),
-            ("B_LG_V", moneyflow.and_then(|value| value.b_lg_v)),
-            ("S_LG_V", moneyflow.and_then(|value| value.s_lg_v)),
-            ("B_ELG_V", moneyflow.and_then(|value| value.b_elg_v)),
-            ("S_ELG_V", moneyflow.and_then(|value| value.s_elg_v)),
-            ("NET_MF_V", moneyflow.and_then(|value| value.net_mf_v)),
-        ];
-        for (key, value) in moneyflow_values {
-            cols.get_mut(key)
-                .expect("moneyflow indicator input should exist")
-                .push(value);
+        for field in STOCK_DATA_RUNTIME_FIELDS {
+            cols.get_mut(field.runtime_key)
+                .expect("indicator input key should exist")
+                .push((field.value_from_row)(row));
         }
     }
 
@@ -428,15 +370,15 @@ fn pro_bar_rows_to_row_data(rows: &[ProBarRow]) -> Result<RowData, String> {
 
 fn normalize_row_data_for_indicators(row_data: RowData) -> Result<RowData, String> {
     let len = row_data.trade_dates.len();
-    let mut cols = HashMap::with_capacity(IND_INPUT_KEYS.len());
+    let mut cols = HashMap::with_capacity(STOCK_DATA_RUNTIME_FIELDS.len());
 
-    for key in IND_INPUT_KEYS {
+    for field in STOCK_DATA_RUNTIME_FIELDS {
         let series = row_data
             .cols
-            .get(key)
+            .get(field.runtime_key)
             .cloned()
             .unwrap_or_else(|| vec![None; len]);
-        cols.insert(key.to_string(), series);
+        cols.insert(field.runtime_key.to_string(), series);
     }
 
     let out = RowData {
@@ -457,7 +399,8 @@ fn merge_history_with_rows(
         return Ok(current);
     };
 
-    for key in IND_INPUT_KEYS {
+    for field in STOCK_DATA_RUNTIME_FIELDS {
+        let key = field.runtime_key;
         let src = current
             .cols
             .get(key)
@@ -610,8 +553,9 @@ pub fn calc_one_stock_inds(
 mod tests {
     use std::collections::HashMap;
 
-    use super::{calc_inds_with_cache, compile_indicator_defs};
+    use super::{calc_inds_for_rows_with_cache, calc_inds_with_cache, compile_indicator_defs};
     use crate::data::{IndsData, RowData};
+    use crate::download::{MoneyflowRow, ProBarRow};
 
     #[test]
     fn calculated_indicator_remains_available_to_later_indicators() {
@@ -647,5 +591,53 @@ mod tests {
         assert_eq!(result.get("A"), Some(&vec![Some(1.24), Some(2.35)]));
         assert_eq!(result.get("B"), Some(&vec![Some(2.48), Some(4.7)]));
         assert_eq!(result.get("D"), Some(&vec![Some(2.48), Some(4.7)]));
+    }
+
+    #[test]
+    fn downloaded_rows_expose_moneyflow_to_indicators() {
+        let definitions = IndsData::parse_from_text(
+            r#"
+            version = 1
+
+            [[ind]]
+            name = "FLOW_SUM"
+            expr = "B_SM_V + NET_MF_V"
+            prec = 2
+            "#,
+        )
+        .expect("parse indicators");
+        let cache = compile_indicator_defs(definitions).expect("compile indicators");
+        let rows = vec![ProBarRow {
+            ts_code: "000001.SZ".to_string(),
+            trade_date: "20240102".to_string(),
+            open: 10.0,
+            high: 10.5,
+            low: 9.8,
+            close: 10.2,
+            pre_close: 10.0,
+            change: 0.2,
+            pct_chg: 2.0,
+            vol: 1000.0,
+            amount: 10000.0,
+            turnover_rate: Some(1.2),
+            volume_ratio: None,
+            moneyflow: Some(MoneyflowRow {
+                ts_code: "000001.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                b_sm_v: Some(1.0),
+                s_sm_v: Some(3.0),
+                b_md_v: Some(5.0),
+                s_md_v: Some(7.0),
+                b_lg_v: Some(9.0),
+                s_lg_v: Some(11.0),
+                b_elg_v: Some(13.0),
+                s_elg_v: Some(15.0),
+                net_mf_v: Some(17.0),
+            }),
+        }];
+
+        let result = calc_inds_for_rows_with_cache(&cache, &rows).expect("calculate indicators");
+
+        assert_eq!(result.get("FLOW_SUM"), Some(&vec![Some(18.0)]));
     }
 }

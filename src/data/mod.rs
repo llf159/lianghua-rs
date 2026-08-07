@@ -7,6 +7,9 @@ pub mod download_data;
 pub mod dragon_tiger_data;
 pub mod scoring_data;
 pub mod simulate;
+mod stock_data_fields;
+
+pub(crate) use stock_data_fields::{STOCK_DATA_KEY_COLUMN_DEFS, STOCK_DATA_RUNTIME_FIELDS};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -435,54 +438,25 @@ impl DataReader {
             all_cols_name.push(name);
         }
 
-        let base_pairs = [
-            ("open", "O"),
-            ("high", "H"),
-            ("low", "L"),
-            ("close", "C"),
-            ("vol", "V"),
-            ("amount", "AMOUNT"),
-            ("pre_close", "PRE_CLOSE"),
-            ("change", "CHANGE"),
-            ("pct_chg", "PCT_CHG"),
-        ];
-
         let mut db_cols_table: Vec<(String, String)> = Vec::new();
-        for (db_col, pair) in base_pairs {
-            if required_runtime_keys
-                .map(|keys| !keys.contains(pair))
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            let db_cols = all_cols_name
+        if required_runtime_keys.is_none() {
+            for field in STOCK_DATA_RUNTIME_FIELDS
                 .iter()
-                .find(|c| c.eq_ignore_ascii_case(db_col))
-                .cloned()
-                .ok_or_else(|| format!("数据库缺少基础列:{db_col}"))?;
-            db_cols_table.push((db_cols, pair.to_string()));
+                .filter(|field| field.required_in_database)
+            {
+                if !all_cols_name
+                    .iter()
+                    .any(|column| column.eq_ignore_ascii_case(field.db_column))
+                {
+                    return Err(format!("数据库缺少基础列:{}", field.db_column));
+                }
+            }
         }
 
         for col in &all_cols_name {
-            let low = col.to_ascii_lowercase();
-            if matches!(low.as_str(), "ts_code" | "trade_date" | "adj_type") {
+            let Some(runtime_key) = stock_data_runtime_key(col) else {
                 continue;
-            }
-            if matches!(
-                low.as_str(),
-                "open"
-                    | "high"
-                    | "low"
-                    | "close"
-                    | "vol"
-                    | "amount"
-                    | "pre_close"
-                    | "change"
-                    | "pct_chg"
-            ) {
-                continue;
-            }
-            let runtime_key = col.to_ascii_uppercase();
+            };
             if is_runtime_index_pct_key(&runtime_key) {
                 continue;
             }
@@ -492,7 +466,7 @@ impl DataReader {
             {
                 continue;
             }
-            db_cols_table.push((col.clone(), col.to_ascii_uppercase()));
+            db_cols_table.push((col.clone(), runtime_key));
         }
 
         let runtime_index_pct_cols = resolve_runtime_index_pct_cols(required_runtime_keys);
@@ -882,6 +856,24 @@ impl DataReader {
 
 fn runtime_key_required(required_runtime_keys: &HashSet<String>, runtime_key: &str) -> bool {
     required_runtime_keys.contains(runtime_key)
+}
+
+fn stock_data_runtime_key(db_column: &str) -> Option<String> {
+    if STOCK_DATA_KEY_COLUMN_DEFS
+        .iter()
+        .any(|(column, _)| db_column.eq_ignore_ascii_case(column))
+    {
+        return None;
+    }
+
+    if let Some(field) = STOCK_DATA_RUNTIME_FIELDS
+        .iter()
+        .find(|field| db_column.eq_ignore_ascii_case(field.db_column))
+    {
+        return Some(field.runtime_key.to_string());
+    }
+
+    Some(db_column.to_ascii_uppercase())
 }
 
 fn is_runtime_index_pct_key(runtime_key: &str) -> bool {

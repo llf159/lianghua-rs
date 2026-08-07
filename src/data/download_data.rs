@@ -4,7 +4,10 @@ use duckdb::{Appender, Connection, ToSql, params, params_from_iter};
 
 use crate::{
     crawler::concept::ThsConceptRow,
-    data::{source_db_path, stock_list_path, ths_concepts_path, trade_calendar_path},
+    data::{
+        STOCK_DATA_KEY_COLUMN_DEFS, STOCK_DATA_RUNTIME_FIELDS, source_db_path, stock_list_path,
+        ths_concepts_path, trade_calendar_path,
+    },
     download::{AdjType, ProBarRow, StockListRow, TradeCalRow},
     utils::utils::round_f64_to_scale,
 };
@@ -22,74 +25,42 @@ fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-fn round_to(value: f64, scale: i32) -> f64 {
-    round_f64_to_scale(value, scale.max(0) as u32)
-}
-
-fn round_opt_to(value: Option<f64>, scale: i32) -> Option<f64> {
-    value.map(|v| round_to(v, scale))
-}
-
 const STOCK_DATA_TABLE: &str = "stock_data";
 const STOCK_DATA_STAGE_TABLE: &str = "stock_data_stage";
 const STOCK_DATA_REBUILD_TABLE: &str = "stock_data_rebuild_tmp";
 const STOCK_DATA_INDICATOR_STAGE_TABLE: &str = "stock_data_indicator_stage";
 
-const STOCK_DATA_INSERT_COLUMNS: [&str; 22] = [
-    "ts_code",
-    "trade_date",
-    "adj_type",
-    "open",
-    "high",
-    "low",
-    "close",
-    "pre_close",
-    "change",
-    "pct_chg",
-    "vol",
-    "amount",
-    "tor",
-    "b_sm_v",
-    "s_sm_v",
-    "b_md_v",
-    "s_md_v",
-    "b_lg_v",
-    "s_lg_v",
-    "b_elg_v",
-    "s_elg_v",
-    "net_mf_v",
-];
+fn stock_data_insert_columns() -> Vec<&'static str> {
+    STOCK_DATA_KEY_COLUMN_DEFS
+        .iter()
+        .map(|(column, _)| *column)
+        .chain(
+            STOCK_DATA_RUNTIME_FIELDS
+                .iter()
+                .map(|field| field.db_column),
+        )
+        .collect()
+}
 
-const STOCK_DATA_BASE_COLUMN_DEFS: [(&str, &str); 22] = [
-    ("ts_code", "VARCHAR"),
-    ("trade_date", "VARCHAR"),
-    ("adj_type", "VARCHAR"),
-    ("open", "DECIMAL(10,2)"),
-    ("high", "DECIMAL(10,2)"),
-    ("low", "DECIMAL(10,2)"),
-    ("close", "DECIMAL(10,2)"),
-    ("pre_close", "DECIMAL(10,2)"),
-    ("change", "DECIMAL(10,2)"),
-    ("pct_chg", "DECIMAL(10,4)"),
-    ("vol", "DECIMAL(15,2)"),
-    ("amount", "DECIMAL(20,2)"),
-    ("tor", "DECIMAL(10,4)"),
-    ("b_sm_v", "DOUBLE"),
-    ("s_sm_v", "DOUBLE"),
-    ("b_md_v", "DOUBLE"),
-    ("s_md_v", "DOUBLE"),
-    ("b_lg_v", "DOUBLE"),
-    ("s_lg_v", "DOUBLE"),
-    ("b_elg_v", "DOUBLE"),
-    ("s_elg_v", "DOUBLE"),
-    ("net_mf_v", "DOUBLE"),
-];
+fn is_stock_data_base_column(name: &str) -> bool {
+    STOCK_DATA_KEY_COLUMN_DEFS
+        .iter()
+        .any(|(column, _)| name.eq_ignore_ascii_case(column))
+        || STOCK_DATA_RUNTIME_FIELDS
+            .iter()
+            .any(|field| name.eq_ignore_ascii_case(field.db_column))
+}
 
 fn build_stock_data_create_sql(table_name: &str, indicator_columns: &[String]) -> String {
-    let mut column_defs = STOCK_DATA_BASE_COLUMN_DEFS
+    let mut column_defs = STOCK_DATA_KEY_COLUMN_DEFS
         .iter()
         .map(|(name, ty)| format!("{} {}", quote_ident(name), ty))
         .collect::<Vec<_>>();
+    column_defs.extend(
+        STOCK_DATA_RUNTIME_FIELDS
+            .iter()
+            .map(|field| format!("{} {}", quote_ident(field.db_column), field.sql_type)),
+    );
 
     for name in indicator_columns {
         column_defs.push(format!("{} DOUBLE", quote_ident(name)));
@@ -185,7 +156,7 @@ fn append_rows_to_table(
         _ => Vec::new(),
     };
     let adj_type = adj_type_name(adj_type);
-    let mut requested_columns = STOCK_DATA_INSERT_COLUMNS.to_vec();
+    let mut requested_columns = stock_data_insert_columns();
     requested_columns.extend(indicator_names.iter().map(String::as_str));
     let resolved_columns = resolve_appender_columns(conn, table_name, &requested_columns)?;
     let resolved_column_refs = resolved_columns
@@ -198,47 +169,26 @@ fn append_rows_to_table(
         .map_err(|e| format!("创建 {table_name} Appender失败: {e}"))?;
 
     for (row_idx, row) in rows.iter().enumerate() {
-        let open = round_to(row.open, 2);
-        let high = round_to(row.high, 2);
-        let low = round_to(row.low, 2);
-        let close = round_to(row.close, 2);
-        let pre_close = round_to(row.pre_close, 2);
-        let change = round_to(row.change, 2);
-        let pct_chg = round_to(row.pct_chg, 4);
-        let vol = round_to(row.vol, 2);
-        let amount = round_to(row.amount, 2);
-        let turnover_rate = round_opt_to(row.turnover_rate, 4);
-        let moneyflow_values = match row.moneyflow.as_ref() {
-            Some(moneyflow) => [
-                moneyflow.b_sm_v,
-                moneyflow.s_sm_v,
-                moneyflow.b_md_v,
-                moneyflow.s_md_v,
-                moneyflow.b_lg_v,
-                moneyflow.s_lg_v,
-                moneyflow.b_elg_v,
-                moneyflow.s_elg_v,
-                moneyflow.net_mf_v,
-            ],
-            None => [None; 9],
-        };
+        let runtime_values = STOCK_DATA_RUNTIME_FIELDS
+            .iter()
+            .map(|field| {
+                let value = (field.value_from_row)(row);
+                match field.persisted_scale {
+                    Some(scale) => value.map(|value| round_f64_to_scale(value, scale)),
+                    None => value,
+                }
+            })
+            .collect::<Vec<_>>();
 
-        let mut params: Vec<&dyn ToSql> =
-            Vec::with_capacity(STOCK_DATA_INSERT_COLUMNS.len() + indicator_names.len());
+        let mut params: Vec<&dyn ToSql> = Vec::with_capacity(
+            STOCK_DATA_KEY_COLUMN_DEFS.len()
+                + STOCK_DATA_RUNTIME_FIELDS.len()
+                + indicator_names.len(),
+        );
         params.push(&row.ts_code);
         params.push(&row.trade_date);
         params.push(&adj_type);
-        params.push(&open);
-        params.push(&high);
-        params.push(&low);
-        params.push(&close);
-        params.push(&pre_close);
-        params.push(&change);
-        params.push(&pct_chg);
-        params.push(&vol);
-        params.push(&amount);
-        params.push(&turnover_rate);
-        for value in &moneyflow_values {
+        for value in &runtime_values {
             params.push(value);
         }
 
@@ -401,7 +351,7 @@ pub fn append_stock_data_indicator_stage_rows(
     indicator_names: &[String],
     ts_code: &str,
     adj_type: AdjType,
-    rows: &[ProBarRow],
+    trade_dates: &[String],
     indicators: &HashMap<String, Vec<Option<f64>>>,
 ) -> Result<(), String> {
     let mut appender =
@@ -411,7 +361,7 @@ pub fn append_stock_data_indicator_stage_rows(
         indicator_names,
         ts_code,
         adj_type,
-        rows,
+        trade_dates,
         indicators,
     )?;
     appender
@@ -451,10 +401,10 @@ pub fn append_stock_data_indicator_stage_rows_with_appender(
     indicator_names: &[String],
     ts_code: &str,
     adj_type: AdjType,
-    rows: &[ProBarRow],
+    trade_dates: &[String],
     indicators: &HashMap<String, Vec<Option<f64>>>,
 ) -> Result<(), String> {
-    if indicators.is_empty() || rows.is_empty() {
+    if indicators.is_empty() || trade_dates.is_empty() {
         return Ok(());
     }
 
@@ -464,19 +414,19 @@ pub fn append_stock_data_indicator_stage_rows_with_appender(
         let Some(series) = indicators.get(name) else {
             return Err(format!("缺少指标{name}的数据"));
         };
-        if series.len() != rows.len() {
+        if series.len() != trade_dates.len() {
             return Err(format!(
                 "指标{name}长度与行情行数不一致: {} != {}",
                 series.len(),
-                rows.len()
+                trade_dates.len()
             ));
         }
     }
 
-    for (row_idx, row) in rows.iter().enumerate() {
+    for (row_idx, trade_date) in trade_dates.iter().enumerate() {
         let mut values: Vec<&dyn ToSql> = Vec::with_capacity(indicator_names.len() + 3);
         values.push(&ts_code);
-        values.push(&row.trade_date);
+        values.push(trade_date);
         values.push(&adj_type);
         for name in indicator_names {
             let series = indicators
@@ -488,7 +438,7 @@ pub fn append_stock_data_indicator_stage_rows_with_appender(
         appender.append_row(values.as_slice()).map_err(|e| {
             format!(
                 "Appender写入指标临时表失败, ts_code={}, trade_date={}: {e}",
-                ts_code, row.trade_date
+                ts_code, trade_date
             )
         })?;
     }
@@ -606,10 +556,7 @@ pub fn list_stock_data_indicator_columns(conn: &Connection) -> Result<Vec<String
     let mut indicator_columns = Vec::new();
 
     for name in existing {
-        if STOCK_DATA_INSERT_COLUMNS
-            .iter()
-            .any(|base| name.eq_ignore_ascii_case(base))
-        {
+        if is_stock_data_base_column(&name) {
             continue;
         }
         indicator_columns.push(name);
@@ -634,7 +581,7 @@ pub fn drop_stock_data_columns(conn: &Connection, column_names: &[String]) -> Re
         .cloned()
         .collect::<Vec<_>>();
 
-    for base in STOCK_DATA_INSERT_COLUMNS {
+    for base in stock_data_insert_columns() {
         if !keep_columns
             .iter()
             .any(|name| name.eq_ignore_ascii_case(base))
@@ -645,11 +592,7 @@ pub fn drop_stock_data_columns(conn: &Connection, column_names: &[String]) -> Re
 
     let indicator_columns = keep_columns
         .iter()
-        .filter(|name| {
-            !STOCK_DATA_INSERT_COLUMNS
-                .iter()
-                .any(|base| name.eq_ignore_ascii_case(base))
-        })
+        .filter(|name| !is_stock_data_base_column(name))
         .cloned()
         .collect::<Vec<_>>();
 
