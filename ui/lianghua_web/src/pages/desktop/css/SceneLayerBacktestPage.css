@@ -1129,7 +1129,7 @@
 
 .market-analysis-money-flow-scopes {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -2028,7 +2028,8 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .market-analysis-main-card .scene-layer-market-section-grid {
+  .market-analysis-main-card .scene-layer-market-section-grid,
+  .market-analysis-money-flow-scopes {
     grid-template-columns: minmax(0, 1fr);
   }
 
