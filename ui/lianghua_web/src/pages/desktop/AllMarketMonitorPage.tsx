@@ -1946,7 +1946,7 @@ export default function AllMarketMonitorPage() {
                                 rankDate || row.realtime_trade_date || undefined
                               }
                               sourcePath={sourcePathTrimmed || undefined}
-                              autoRealtime
+                              autoIntraday
                               className="all-market-stock-link"
                               title={`查看 ${row.name || row.ts_code} 详情`}
                               navigationItems={navigationItems}
@@ -2277,7 +2277,7 @@ export default function AllMarketMonitorPage() {
                               undefined
                             }
                             sourcePath={sourcePathTrimmed || undefined}
-                            autoRealtime
+                            autoIntraday
                             className="all-market-hit-name-link"
                             title={`查看 ${record.name || record.ts_code} 详情`}
                             navigationItems={navigationItems}
@@ -2317,7 +2317,7 @@ export default function AllMarketMonitorPage() {
                               undefined
                             }
                             sourcePath={sourcePathTrimmed || undefined}
-                            autoRealtime
+                            autoIntraday
                             className="all-market-hit-name-link"
                             title={`查看 ${record.name || record.ts_code} 详情`}
                             navigationItems={navigationItems}
@@ -2377,7 +2377,7 @@ export default function AllMarketMonitorPage() {
                               undefined
                             }
                             sourcePath={sourcePathTrimmed || undefined}
-                            autoRealtime
+                            autoIntraday
                             className="all-market-hit-name-link"
                             title={`查看 ${record.name || record.ts_code} 详情`}
                             navigationItems={hitNavigationItems}
@@ -2423,7 +2423,7 @@ export default function AllMarketMonitorPage() {
                       rankDate || openHitRecord.realtime_trade_date || undefined
                     }
                     sourcePath={sourcePathTrimmed || undefined}
-                    autoRealtime
+                    autoIntraday
                     className="all-market-stock-link"
                     title={`查看 ${openHitRecord.name || openHitRecord.ts_code} 详情`}
                     navigationItems={navigationItems}

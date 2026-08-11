@@ -1,4 +1,5 @@
 pub mod concept;
+pub mod intraday;
 
 use encoding_rs::GBK;
 use rayon::prelude::*;

@@ -15,6 +15,7 @@ import {
 import { useSearchParams } from "react-router-dom";
 import {
   getStockDetailCyq,
+  getStockDetailIntraday,
   getStockDetailRealtime,
   getStockDetailPage,
   getStockDetailStrategySnapshot,
@@ -34,9 +35,11 @@ import {
   type StockSimilarityPageData,
   type StockSimilarityRow,
   type StockDetailCyqData,
+  type TencentIntradayData,
   type StockDetailRealtimeData,
   type StockDetailPageData,
 } from "../../apis/details";
+import IntradayChart from "./components/IntradayChart";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import {
   listRankTradeDates,
@@ -4235,6 +4238,15 @@ export default function DetailsPage({
   const [watchObserveSaving, setWatchObserveSaving] = useState(false);
   const [detailRealtimeData, setDetailRealtimeData] =
     useState<StockDetailRealtimeData | null>(null);
+  const [detailIntradayData, setDetailIntradayData] =
+    useState<TencentIntradayData | null>(null);
+  const [detailIntradayLoading, setDetailIntradayLoading] = useState(false);
+  const [detailIntradayError, setDetailIntradayError] = useState("");
+  const [detailIntradayVisible, setDetailIntradayVisible] = useState(
+    () =>
+      searchParams.get("autoIntraday") === "1" ||
+      searchParams.get("autoRealtime") === "1",
+  );
   const [detailCyqData, setDetailCyqData] = useState<StockDetailCyqData | null>(
     null,
   );
@@ -4304,6 +4316,7 @@ export default function DetailsPage({
   const detailRealtimeLoadingRef = useRef(false);
   const detailRealtimeAutoRefreshKeyRef = useRef("");
   const detailRealtimeRequestKeyRef = useRef("");
+  const detailIntradayRequestIdRef = useRef(0);
   const detailCyqRequestKeyRef = useRef("");
   const stockSimilarityRequestKeyRef = useRef("");
   const detailStrategyRequestKeyRef = useRef("");
@@ -4321,7 +4334,9 @@ export default function DetailsPage({
   const routeIntervalEndTradeDate =
     searchParams.get("intervalEndTradeDate")?.trim() ?? "";
   const routeSourcePath = searchParams.get("sourcePath")?.trim() ?? "";
-  const routeAutoRealtime = searchParams.get("autoRealtime") === "1";
+  const routeAutoIntraday =
+    searchParams.get("autoIntraday") === "1" ||
+    searchParams.get("autoRealtime") === "1";
   const routeIntervalRestore = useMemo(
     () =>
       normalizeIntervalRestoreRequest(
@@ -4522,6 +4537,40 @@ export default function DetailsPage({
     },
     [],
   );
+
+  const loadDetailIntraday = useCallback(async (nextTsCode: string) => {
+    const normalizedTsCode = nextTsCode.trim();
+    if (normalizedTsCode === "" || normalizedTsCode === "--") {
+      detailIntradayRequestIdRef.current += 1;
+      setDetailIntradayData(null);
+      setDetailIntradayLoading(false);
+      setDetailIntradayError("");
+      return null;
+    }
+
+    const requestId = detailIntradayRequestIdRef.current + 1;
+    detailIntradayRequestIdRef.current = requestId;
+    setDetailIntradayLoading(true);
+    setDetailIntradayError("");
+    try {
+      const intraday = await getStockDetailIntraday({ tsCode: normalizedTsCode });
+      if (detailIntradayRequestIdRef.current !== requestId) {
+        return null;
+      }
+      setDetailIntradayData(intraday);
+      return intraday;
+    } catch (error) {
+      if (detailIntradayRequestIdRef.current !== requestId) {
+        return null;
+      }
+      setDetailIntradayError(`读取分时失败: ${String(error)}`);
+      return null;
+    } finally {
+      if (detailIntradayRequestIdRef.current === requestId) {
+        setDetailIntradayLoading(false);
+      }
+    }
+  }, []);
 
   useEffect(() => {
     if (!sourcePathTrimmed) {
@@ -6004,6 +6053,22 @@ export default function DetailsPage({
   }, [detailData?.resolved_trade_date, detailData?.resolved_ts_code]);
 
   useEffect(() => {
+    setDetailIntradayVisible(routeAutoIntraday);
+  }, [routeAutoIntraday]);
+
+  useEffect(() => {
+    const nextTsCode = detailData?.resolved_ts_code?.trim() ?? "";
+    if (!detailIntradayVisible || nextTsCode === "") {
+      detailIntradayRequestIdRef.current += 1;
+      setDetailIntradayData(null);
+      setDetailIntradayLoading(false);
+      setDetailIntradayError("");
+      return;
+    }
+    void loadDetailIntraday(nextTsCode);
+  }, [detailData?.resolved_ts_code, detailIntradayVisible, loadDetailIntraday]);
+
+  useEffect(() => {
     return () => {
       if (detailRealtimeLongPressTimerRef.current !== null) {
         window.clearTimeout(detailRealtimeLongPressTimerRef.current);
@@ -7003,6 +7068,9 @@ export default function DetailsPage({
 
     const requestKey = [sourcePathTrimmed, resolvedTsCode].join("|");
     detailRealtimeRequestKeyRef.current = requestKey;
+    if (detailIntradayVisible) {
+      void loadDetailIntraday(resolvedTsCode);
+    }
     setDetailRealtimeLoading(true);
     setDetailRealtimeNotice("");
     try {
@@ -7025,7 +7093,7 @@ export default function DetailsPage({
         setDetailRealtimeLoading(false);
       }
     }
-  }, [resolvedTsCode, sourcePathTrimmed]);
+  }, [detailIntradayVisible, loadDetailIntraday, resolvedTsCode, sourcePathTrimmed]);
 
   const onToggleCyqPanel = useCallback(async () => {
     const nextVisible = !detailCyqVisible;
@@ -7092,7 +7160,7 @@ export default function DetailsPage({
   );
 
   useEffect(() => {
-    if (!detailRealtimePinned && !routeAutoRealtime) {
+    if (!detailRealtimePinned) {
       detailRealtimeAutoRefreshKeyRef.current = "";
       return;
     }
@@ -7120,7 +7188,6 @@ export default function DetailsPage({
     detailData?.resolved_trade_date,
     detailData?.resolved_ts_code,
     onRefreshRealtimeDetail,
-    routeAutoRealtime,
     sourcePathTrimmed,
   ]);
 
@@ -7530,6 +7597,25 @@ export default function DetailsPage({
       {isLinkedOverlay && detailError ? (
         <div className="details-error">{detailError}</div>
       ) : null}
+
+      <IntradayChart
+        data={detailIntradayData}
+        loading={detailIntradayLoading}
+        error={detailIntradayError}
+        canRefresh={resolvedTsCode !== "--"}
+        expanded={detailIntradayVisible}
+        onToggle={() => {
+          if (detailIntradayVisible) {
+            setDetailIntradayVisible(false);
+            return;
+          }
+          setDetailIntradayVisible(true);
+          void onRefreshRealtimeDetail();
+        }}
+        onRefresh={() => {
+          void loadDetailIntraday(resolvedTsCode);
+        }}
+      />
 
       <section className="details-card details-chart-card" ref={chartCardRef}>
         <h3 className="details-subtitle">K线图</h3>

@@ -78,6 +78,7 @@ use lianghua_rs::ui_tools::{
     data_viewer::{list_stock_lookup_rows as core_list_stock_lookup_rows, StockLookupRow},
     details::{
         get_stock_detail_cyq as core_get_stock_detail_cyq,
+        get_stock_detail_intraday as core_get_stock_detail_intraday,
         get_stock_detail_page as core_get_stock_detail_page,
         get_stock_detail_prev_ranks as core_get_stock_detail_prev_ranks,
         get_stock_detail_realtime as core_get_stock_detail_realtime,
@@ -766,6 +767,15 @@ fn get_stock_detail_realtime(
     chart_window_days: Option<u32>,
 ) -> Result<StockDetailRealtimeData, String> {
     core_get_stock_detail_realtime(source_path, ts_code, chart_window_days)
+}
+
+#[tauri::command]
+async fn get_stock_detail_intraday(
+    ts_code: String,
+) -> Result<lianghua_rs::crawler::intraday::TencentIntradayData, String> {
+    tauri::async_runtime::spawn_blocking(move || core_get_stock_detail_intraday(ts_code))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2297,6 +2307,7 @@ pub fn run() {
             get_stock_detail_prev_ranks,
             get_stock_detail_cyq,
             get_stock_detail_realtime,
+            get_stock_detail_intraday,
             get_stock_similarity_page,
             get_strategy_trigger_similarity_page,
             get_strategy_statistics_page,

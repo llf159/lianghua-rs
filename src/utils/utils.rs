@@ -576,7 +576,7 @@ pub fn board_category(ts_code: &str, stock_name: Option<&str>) -> &'static str {
         return "北交所";
     }
     if (ts.ends_with(".SZ") && ts.starts_with("30"))
-        || (ts.ends_with(".SH") && ts.starts_with("688"))
+        || (ts.ends_with(".SH") && (ts.starts_with("688") || ts.starts_with("689")))
     {
         return "创业/科创";
     }
@@ -608,6 +608,11 @@ mod tests {
         assert_eq!(board_category("600001.SH", Some(" 退市整理 ")), "ST");
         assert_eq!(board_category("300001.SZ", Some("海创退")), "ST");
         assert_eq!(board_category("688001.SH", Some(" 海创退 ")), "ST");
+    }
+
+    #[test]
+    fn board_category_treats_689_prefix_as_star_market() {
+        assert_eq!(board_category("689001.SH", Some("测试股份")), "创业/科创");
     }
 
     #[test]

@@ -240,6 +240,39 @@ export type StockDetailRealtimeData = {
   kline: DetailKlinePayload
 }
 
+export type TencentIntradayPoint = {
+  time: string
+  price: number
+  average_price?: number | null
+  vol: number
+  amount: number
+  cumulative_vol: number
+  cumulative_amount: number
+}
+
+export type TencentIntradaySummary = {
+  name: string
+  refreshed_at?: string | null
+  latest_price: number
+  pre_close: number
+  open: number
+  high: number
+  low: number
+  upper_limit?: number | null
+  lower_limit?: number | null
+  change_pct?: number | null
+  average_price?: number | null
+  total_vol: number
+  total_amount: number
+}
+
+export type TencentIntradayData = {
+  ts_code: string
+  trade_date: string
+  summary?: TencentIntradaySummary | null
+  points: TencentIntradayPoint[]
+}
+
 export type DetailCyqBin = {
   price: number
   price_low: number
@@ -320,6 +353,10 @@ export async function getStockDetailRealtime(query: {
   chartWindowDays?: number
 }) {
   return invoke<StockDetailRealtimeData>('get_stock_detail_realtime', query)
+}
+
+export async function getStockDetailIntraday(query: { tsCode: string }) {
+  return invoke<TencentIntradayData>('get_stock_detail_intraday', query)
 }
 
 export async function getStockDetailCyq(query: {

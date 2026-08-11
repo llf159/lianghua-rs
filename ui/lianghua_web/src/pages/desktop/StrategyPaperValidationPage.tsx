@@ -321,7 +321,8 @@ function resolveTradeBoard(tsCode: string, stockName?: string | null) {
   }
   if (
     (normalizedCode.endsWith('.SZ') && normalizedCode.startsWith('30')) ||
-    (normalizedCode.endsWith('.SH') && normalizedCode.startsWith('688'))
+    (normalizedCode.endsWith('.SH') &&
+      (normalizedCode.startsWith('688') || normalizedCode.startsWith('689')))
   ) {
     return '创业/科创'
   }

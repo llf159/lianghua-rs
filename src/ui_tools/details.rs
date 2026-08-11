@@ -2,12 +2,14 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::Path,
+    time::Duration,
 };
 
 use duckdb::{AccessMode, Config, Connection, params};
 use serde::Serialize;
 
 use crate::{
+    crawler::intraday::{TencentIntradayData, fetch_tencent_intraday},
     data::{RowData, ScoreConfig},
     data::{cyq_chen_db_path, cyq_db_path, result_db_path, score_rule_path, source_db_path},
     download::ind_calc::{cache_ind_build, calc_inds_with_cache},
@@ -28,6 +30,8 @@ use crate::{
 };
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
+const INTRADAY_CONNECT_TIMEOUT_SECS: u64 = 6;
+const INTRADAY_REQUEST_TIMEOUT_SECS: u64 = 12;
 
 #[derive(Debug, Serialize)]
 pub struct DetailOverview {
@@ -2282,6 +2286,21 @@ pub fn get_stock_detail_realtime(
         quote_map,
         fetch_meta,
     )
+}
+
+pub fn get_stock_detail_intraday(ts_code: String) -> Result<TencentIntradayData, String> {
+    let normalized_ts_code = normalize_ts_code(&ts_code);
+    if normalized_ts_code.trim().is_empty() {
+        return Err("股票代码不能为空".to_string());
+    }
+
+    let http = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(INTRADAY_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(INTRADAY_REQUEST_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("创建腾讯分时行情客户端失败: {e}"))?;
+    fetch_tencent_intraday(&http, &normalized_ts_code)
 }
 
 pub fn build_stock_detail_realtime_from_quote_map(
