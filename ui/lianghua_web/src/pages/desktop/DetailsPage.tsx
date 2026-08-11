@@ -15,7 +15,7 @@ import {
 import { useSearchParams } from "react-router-dom";
 import {
   getStockDetailCyq,
-  getStockDetailIntraday,
+  getStockDetailIntradaySnapshot,
   getStockDetailKlineIndicators,
   getStockDetailOverview,
   getStockDetailRealtime,
@@ -43,6 +43,7 @@ import {
 } from "../../apis/details";
 import IntradayChart from "./components/IntradayChart";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
+import { readStoredRealtimeQuoteProvider } from "../../shared/realtimeSettings";
 import {
   listRankTradeDates,
   listStockLookupRows,
@@ -4251,7 +4252,6 @@ export default function DetailsPage({
       searchParams.get("autoIntraday") === "1" ||
       searchParams.get("autoRealtime") === "1",
   );
-  const detailIntradayVisibleRef = useRef(detailIntradayVisible);
   const [detailCyqData, setDetailCyqData] = useState<StockDetailCyqData | null>(
     null,
   );
@@ -4324,7 +4324,7 @@ export default function DetailsPage({
   const detailRequestIdRef = useRef(0);
   const detailIntradayRequestIdRef = useRef(0);
   const detailIntradayRequestKeyRef = useRef("");
-  const detailIntradayLoadedTsCodeRef = useRef("");
+  const detailIntradayLoadedKeyRef = useRef("");
   const detailCyqRequestKeyRef = useRef("");
   const stockSimilarityRequestKeyRef = useRef("");
   const detailStrategyRequestKeyRef = useRef("");
@@ -4448,58 +4448,89 @@ export default function DetailsPage({
   }, [detailCyqModel]);
 
   const loadDetailIntraday = useCallback(
-    async (nextTsCode: string, force = false) => {
+    async (
+      nextTsCode: string,
+      force = false,
+      nextSourcePath = sourcePathTrimmed,
+    ) => {
       const normalizedTsCode = nextTsCode.trim();
+      const normalizedSourcePath = nextSourcePath.trim();
       if (normalizedTsCode === "" || normalizedTsCode === "--") {
         detailIntradayRequestIdRef.current += 1;
         detailIntradayRequestKeyRef.current = "";
-        detailIntradayLoadedTsCodeRef.current = "";
+        detailIntradayLoadedKeyRef.current = "";
         setDetailIntradayData(null);
         setDetailIntradayLoading(false);
         setDetailIntradayError("");
         return null;
       }
+      if (normalizedSourcePath === "") {
+        setDetailIntradayError("数据目录为空，无法生成实时日K");
+        return null;
+      }
+      const intradayLoadKey = [normalizedSourcePath, normalizedTsCode].join("|");
 
       if (
         !force &&
-        (detailIntradayRequestKeyRef.current === normalizedTsCode ||
-          detailIntradayLoadedTsCodeRef.current === normalizedTsCode)
+        (detailIntradayRequestKeyRef.current === intradayLoadKey ||
+          detailIntradayLoadedKeyRef.current === intradayLoadKey)
       ) {
         return null;
       }
 
       const requestId = detailIntradayRequestIdRef.current + 1;
       detailIntradayRequestIdRef.current = requestId;
-      detailIntradayRequestKeyRef.current = normalizedTsCode;
-      if (detailIntradayLoadedTsCodeRef.current !== normalizedTsCode) {
-        detailIntradayLoadedTsCodeRef.current = "";
+      detailIntradayRequestKeyRef.current = intradayLoadKey;
+      const realtimeRequestKey = intradayLoadKey;
+      detailRealtimeRequestKeyRef.current = realtimeRequestKey;
+      if (detailIntradayLoadedKeyRef.current !== intradayLoadKey) {
+        detailIntradayLoadedKeyRef.current = "";
         setDetailIntradayData(null);
       }
       setDetailIntradayLoading(true);
       setDetailIntradayError("");
+      setDetailRealtimeLoading(true);
+      setDetailRealtimeNotice("");
       try {
-        const intraday = await getStockDetailIntraday({ tsCode: normalizedTsCode });
+        const snapshot = await getStockDetailIntradaySnapshot({
+          sourcePath: normalizedSourcePath,
+          tsCode: normalizedTsCode,
+          chartWindowDays: DETAIL_CHART_WINDOW_DAYS,
+        });
         if (detailIntradayRequestIdRef.current !== requestId) {
           return null;
         }
-        detailIntradayLoadedTsCodeRef.current = normalizedTsCode;
-        setDetailIntradayData(intraday);
-        return intraday;
+        detailIntradayLoadedKeyRef.current = intradayLoadKey;
+        setDetailIntradayData(snapshot.intraday);
+        if (snapshot.realtime) {
+          setDetailRealtimeData(snapshot.realtime);
+          setDetailRealtimeNotice("");
+        } else {
+          setDetailRealtimeNotice(
+            snapshot.realtimeError
+              ? `刷新实时日K失败: ${snapshot.realtimeError}`
+              : "刷新实时日K失败",
+          );
+        }
+        return snapshot.intraday;
       } catch (error) {
         if (detailIntradayRequestIdRef.current !== requestId) {
           return null;
         }
-        detailIntradayLoadedTsCodeRef.current = "";
+        detailIntradayLoadedKeyRef.current = "";
         setDetailIntradayError(`读取分时失败: ${String(error)}`);
         return null;
       } finally {
         if (detailIntradayRequestIdRef.current === requestId) {
           detailIntradayRequestKeyRef.current = "";
           setDetailIntradayLoading(false);
+          if (detailRealtimeRequestKeyRef.current === realtimeRequestKey) {
+            setDetailRealtimeLoading(false);
+          }
         }
       }
     },
-    [],
+    [sourcePathTrimmed],
   );
 
   const readDetail = useCallback(
@@ -4529,12 +4560,6 @@ export default function DetailsPage({
       setStockSimilarityError("");
       setDetailStrategyError("");
       setPrevRanksError("");
-      if (detailIntradayVisibleRef.current) {
-        // Realtime-monitor links expand the intraday chart automatically, so start
-        // its independent crawl with the base K-line read. Ordinary detail links do
-        // not fetch intraday data until the user expands the chart.
-        void loadDetailIntraday(nextNormalizedCode);
-      }
       try {
         const detail = await getStockDetailPage({
           sourcePath: nextSourcePath,
@@ -4643,7 +4668,7 @@ export default function DetailsPage({
         }
       }
     },
-    [loadDetailIntraday],
+    [],
   );
 
   const loadDetailCyq = useCallback(
@@ -6177,7 +6202,6 @@ export default function DetailsPage({
   }, [detailData?.resolved_trade_date, detailData?.resolved_ts_code]);
 
   useEffect(() => {
-    detailIntradayVisibleRef.current = routeAutoIntraday;
     setDetailIntradayVisible(routeAutoIntraday);
   }, [routeAutoIntraday]);
 
@@ -7187,11 +7211,13 @@ export default function DetailsPage({
       return;
     }
 
+    if (detailIntradayVisible) {
+      await loadDetailIntraday(resolvedTsCode, true, sourcePathTrimmed);
+      return;
+    }
+
     const requestKey = [sourcePathTrimmed, resolvedTsCode].join("|");
     detailRealtimeRequestKeyRef.current = requestKey;
-    if (detailIntradayVisible) {
-      void loadDetailIntraday(resolvedTsCode, true);
-    }
     setDetailRealtimeLoading(true);
     setDetailRealtimeNotice("");
     try {
@@ -7199,6 +7225,7 @@ export default function DetailsPage({
         sourcePath: sourcePathTrimmed,
         tsCode: resolvedTsCode,
         chartWindowDays: DETAIL_CHART_WINDOW_DAYS,
+        realtimeProvider: readStoredRealtimeQuoteProvider(),
       });
       if (detailRealtimeRequestKeyRef.current !== requestKey) {
         return;
@@ -7727,13 +7754,12 @@ export default function DetailsPage({
         expanded={detailIntradayVisible}
         onToggle={() => {
           const nextVisible = !detailIntradayVisible;
-          detailIntradayVisibleRef.current = nextVisible;
           if (!nextVisible) {
             setDetailIntradayVisible(false);
             return;
           }
           setDetailIntradayVisible(true);
-          void onRefreshRealtimeDetail();
+          void loadDetailIntraday(resolvedTsCode, true, sourcePathTrimmed);
         }}
         onRefresh={() => {
           void loadDetailIntraday(resolvedTsCode, true);

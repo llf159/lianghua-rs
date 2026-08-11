@@ -512,7 +512,7 @@ export default function SettingsPage() {
           <button className="settings-list-item" type="button" onClick={openRealtimeProviderSetting}>
             <div className="settings-list-item-main">
               <strong>实时行情源</strong>
-              <span>控制实时监控股票行情源；指数表现会自动使用另一个行情源。</span>
+              <span>控制实时监控及详情日 K 刷新使用的股票行情源；指数表现会自动使用另一个行情源。</span>
             </div>
             <span className="settings-list-item-value">{getRealtimeQuoteProviderLabel(realtimeQuoteProvider)}</span>
           </button>

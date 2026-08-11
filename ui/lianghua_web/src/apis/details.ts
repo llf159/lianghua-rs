@@ -284,6 +284,12 @@ export type TencentIntradayData = {
   points: TencentIntradayPoint[]
 }
 
+export type StockDetailIntradaySnapshotData = {
+  intraday: TencentIntradayData
+  realtime?: StockDetailRealtimeData | null
+  realtimeError?: string | null
+}
+
 export type DetailCyqBin = {
   price: number
   price_low: number
@@ -382,12 +388,24 @@ export async function getStockDetailRealtime(query: {
   sourcePath: string
   tsCode: string
   chartWindowDays?: number
+  realtimeProvider?: 'sina' | 'tencent'
 }) {
   return invoke<StockDetailRealtimeData>('get_stock_detail_realtime', query)
 }
 
 export async function getStockDetailIntraday(query: { tsCode: string }) {
   return invoke<TencentIntradayData>('get_stock_detail_intraday', query)
+}
+
+export async function getStockDetailIntradaySnapshot(query: {
+  sourcePath: string
+  tsCode: string
+  chartWindowDays?: number
+}) {
+  return invoke<StockDetailIntradaySnapshotData>(
+    'get_stock_detail_intraday_snapshot',
+    query,
+  )
 }
 
 export async function getStockDetailCyq(query: {

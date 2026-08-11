@@ -9,7 +9,10 @@ use duckdb::{AccessMode, Config, Connection, params};
 use serde::Serialize;
 
 use crate::{
-    crawler::intraday::{TencentIntradayData, fetch_tencent_intraday},
+    crawler::{
+        SinaQuote,
+        intraday::{TencentIntradayData, fetch_tencent_intraday},
+    },
     data::{RowData, ScoreConfig},
     data::{
         cyq_chen_db_path, cyq_db_path, result_db_path, score_rule_path, source_db_path,
@@ -24,7 +27,9 @@ use crate::{
             CompiledChartIndicatorConfig, execute_chart_indicator_config,
             load_compiled_chart_indicator_config,
         },
-        realtime::{RealtimeFetchMeta, fetch_realtime_quote_map, normalize_quote_trade_date},
+        realtime::{
+            RealtimeFetchMeta, fetch_realtime_quote_map_with_provider, normalize_quote_trade_date,
+        },
         stock_similarity::StockSimilarityPageData,
     },
     utils::utils::board_category,
@@ -231,6 +236,14 @@ pub struct StockDetailRealtimeData {
     pub quote_time: Option<String>,
     pub has_database_trade_date: bool,
     pub kline: DetailKlinePayload,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StockDetailIntradaySnapshotData {
+    pub intraday: TencentIntradayData,
+    pub realtime: Option<StockDetailRealtimeData>,
+    pub realtime_error: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -2440,10 +2453,13 @@ pub fn get_stock_detail_realtime(
     source_path: String,
     ts_code: String,
     chart_window_days: Option<u32>,
+    realtime_provider: Option<String>,
 ) -> Result<StockDetailRealtimeData, String> {
     let normalized_ts_code = normalize_ts_code(&ts_code);
-    let (quote_map, fetch_meta) =
-        fetch_realtime_quote_map(std::slice::from_ref(&normalized_ts_code))?;
+    let (quote_map, fetch_meta) = fetch_realtime_quote_map_with_provider(
+        std::slice::from_ref(&normalized_ts_code),
+        realtime_provider.as_deref(),
+    )?;
     build_stock_detail_realtime_from_quote_map(
         source_path,
         normalized_ts_code,
@@ -2466,6 +2482,73 @@ pub fn get_stock_detail_intraday(ts_code: String) -> Result<TencentIntradayData,
         .build()
         .map_err(|e| format!("创建腾讯分时行情客户端失败: {e}"))?;
     fetch_tencent_intraday(&http, &normalized_ts_code)
+}
+
+pub fn get_stock_detail_intraday_snapshot(
+    source_path: String,
+    ts_code: String,
+    chart_window_days: Option<u32>,
+) -> Result<StockDetailIntradaySnapshotData, String> {
+    let intraday = get_stock_detail_intraday(ts_code)?;
+    let realtime_result = (|| {
+        let summary = intraday
+            .summary
+            .as_ref()
+            .ok_or_else(|| "腾讯分时响应缺少汇总行情，无法生成实时日K".to_string())?;
+        let quote_time = summary
+            .refreshed_at
+            .as_deref()
+            .and_then(|value| value.split_whitespace().nth(1))
+            .map(str::to_string)
+            .or_else(|| intraday.points.last().map(|point| point.time.clone()))
+            .unwrap_or_else(|| "00:00:00".to_string());
+        let refreshed_at = summary
+            .refreshed_at
+            .clone()
+            .or_else(|| Some(format!("{} {}", intraday.trade_date, quote_time)));
+        let quote = SinaQuote {
+            date: intraday.trade_date.clone(),
+            time: quote_time.clone(),
+            ts_code: intraday.ts_code.clone(),
+            name: summary.name.clone(),
+            open: summary.open,
+            high: summary.high,
+            low: summary.low,
+            pre_close: summary.pre_close,
+            price: summary.latest_price,
+            vol: summary.total_vol,
+            amount: summary.total_amount,
+            change_pct: summary.change_pct,
+        };
+        let mut quote_map = HashMap::with_capacity(1);
+        quote_map.insert(intraday.ts_code.clone(), quote);
+        let fetch_meta = RealtimeFetchMeta {
+            requested_count: 1,
+            effective_count: 1,
+            fetched_count: 1,
+            truncated: false,
+            refreshed_at,
+            quote_trade_date: Some(intraday.trade_date.clone()),
+            quote_time: Some(quote_time),
+        };
+        build_stock_detail_realtime_from_quote_map(
+            source_path,
+            intraday.ts_code.clone(),
+            chart_window_days,
+            quote_map,
+            fetch_meta,
+        )
+    })();
+
+    let (realtime, realtime_error) = match realtime_result {
+        Ok(realtime) => (Some(realtime), None),
+        Err(error) => (None, Some(error)),
+    };
+    Ok(StockDetailIntradaySnapshotData {
+        intraday,
+        realtime,
+        realtime_error,
+    })
 }
 
 pub fn build_stock_detail_realtime_from_quote_map(

@@ -289,6 +289,30 @@ pub fn fetch_tencent_realtime_quote_map(
     Ok((quote_map, fetch_meta))
 }
 
+pub fn fetch_realtime_quote_map_with_provider(
+    ts_codes: &[String],
+    provider: Option<&str>,
+) -> Result<(HashMap<String, SinaQuote>, RealtimeFetchMeta), String> {
+    match provider
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "tencent".to_string())
+        .as_str()
+    {
+        "" | "tencent" | "qq" | "gtimg" => {
+            let (quote_map, fetch_meta) = fetch_tencent_realtime_quote_map(ts_codes)?;
+            Ok((
+                quote_map
+                    .into_iter()
+                    .map(|(ts_code, quote)| (ts_code, quote.into_sina_quote()))
+                    .collect(),
+                fetch_meta,
+            ))
+        }
+        "sina" | "sinajs" => fetch_realtime_quote_map(ts_codes),
+        _ => Err("实时行情源仅支持 sina 或 tencent".to_string()),
+    }
+}
+
 pub fn fetch_all_market_realtime_quote_map(
     source_path: &str,
 ) -> Result<(HashMap<String, SinaQuote>, RealtimeFetchMeta), String> {

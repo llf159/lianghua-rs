@@ -79,15 +79,16 @@ use lianghua_rs::ui_tools::{
     details::{
         get_stock_detail_cyq as core_get_stock_detail_cyq,
         get_stock_detail_intraday as core_get_stock_detail_intraday,
+        get_stock_detail_intraday_snapshot as core_get_stock_detail_intraday_snapshot,
         get_stock_detail_kline_indicators as core_get_stock_detail_kline_indicators,
         get_stock_detail_overview as core_get_stock_detail_overview,
         get_stock_detail_page as core_get_stock_detail_page,
         get_stock_detail_prev_ranks as core_get_stock_detail_prev_ranks,
         get_stock_detail_realtime as core_get_stock_detail_realtime,
         get_stock_detail_strategy_snapshot as core_get_stock_detail_strategy_snapshot,
-        StockDetailCyqData, StockDetailKlineIndicatorsData, StockDetailOverviewData,
-        StockDetailPageData, StockDetailPrevRanksData, StockDetailRealtimeData,
-        StockDetailStrategySnapshotData,
+        StockDetailCyqData, StockDetailIntradaySnapshotData, StockDetailKlineIndicatorsData,
+        StockDetailOverviewData, StockDetailPageData, StockDetailPrevRanksData,
+        StockDetailRealtimeData, StockDetailStrategySnapshotData,
     },
     dragon_tiger::{
         get_dragon_tiger_market_data as core_get_dragon_tiger_market_data,
@@ -816,9 +817,15 @@ async fn get_stock_detail_realtime(
     source_path: String,
     ts_code: String,
     chart_window_days: Option<u32>,
+    realtime_provider: Option<String>,
 ) -> Result<StockDetailRealtimeData, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        core_get_stock_detail_realtime(source_path, ts_code, chart_window_days)
+        core_get_stock_detail_realtime(
+            source_path,
+            ts_code,
+            chart_window_days,
+            realtime_provider,
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -831,6 +838,19 @@ async fn get_stock_detail_intraday(
     tauri::async_runtime::spawn_blocking(move || core_get_stock_detail_intraday(ts_code))
         .await
         .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_stock_detail_intraday_snapshot(
+    source_path: String,
+    ts_code: String,
+    chart_window_days: Option<u32>,
+) -> Result<StockDetailIntradaySnapshotData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_stock_detail_intraday_snapshot(source_path, ts_code, chart_window_days)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2365,6 +2385,7 @@ pub fn run() {
             get_stock_detail_cyq,
             get_stock_detail_realtime,
             get_stock_detail_intraday,
+            get_stock_detail_intraday_snapshot,
             get_stock_similarity_page,
             get_strategy_trigger_similarity_page,
             get_strategy_statistics_page,
