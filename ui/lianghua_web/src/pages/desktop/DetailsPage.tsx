@@ -16,6 +16,8 @@ import { useSearchParams } from "react-router-dom";
 import {
   getStockDetailCyq,
   getStockDetailIntraday,
+  getStockDetailKlineIndicators,
+  getStockDetailOverview,
   getStockDetailRealtime,
   getStockDetailPage,
   getStockDetailStrategySnapshot,
@@ -4220,6 +4222,8 @@ export default function DetailsPage({
 
   const [topLoading, setTopLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [detailIndicatorsLoading, setDetailIndicatorsLoading] = useState(false);
+  const [detailIndicatorsNotice, setDetailIndicatorsNotice] = useState("");
   const [dateOptionsLoading, setDateOptionsLoading] = useState(false);
   const [topError, setTopError] = useState("");
   const [detailError, setDetailError] = useState("");
@@ -4247,6 +4251,7 @@ export default function DetailsPage({
       searchParams.get("autoIntraday") === "1" ||
       searchParams.get("autoRealtime") === "1",
   );
+  const detailIntradayVisibleRef = useRef(detailIntradayVisible);
   const [detailCyqData, setDetailCyqData] = useState<StockDetailCyqData | null>(
     null,
   );
@@ -4316,7 +4321,10 @@ export default function DetailsPage({
   const detailRealtimeLoadingRef = useRef(false);
   const detailRealtimeAutoRefreshKeyRef = useRef("");
   const detailRealtimeRequestKeyRef = useRef("");
+  const detailRequestIdRef = useRef(0);
   const detailIntradayRequestIdRef = useRef(0);
+  const detailIntradayRequestKeyRef = useRef("");
+  const detailIntradayLoadedTsCodeRef = useRef("");
   const detailCyqRequestKeyRef = useRef("");
   const stockSimilarityRequestKeyRef = useRef("");
   const detailStrategyRequestKeyRef = useRef("");
@@ -4439,6 +4447,61 @@ export default function DetailsPage({
     }
   }, [detailCyqModel]);
 
+  const loadDetailIntraday = useCallback(
+    async (nextTsCode: string, force = false) => {
+      const normalizedTsCode = nextTsCode.trim();
+      if (normalizedTsCode === "" || normalizedTsCode === "--") {
+        detailIntradayRequestIdRef.current += 1;
+        detailIntradayRequestKeyRef.current = "";
+        detailIntradayLoadedTsCodeRef.current = "";
+        setDetailIntradayData(null);
+        setDetailIntradayLoading(false);
+        setDetailIntradayError("");
+        return null;
+      }
+
+      if (
+        !force &&
+        (detailIntradayRequestKeyRef.current === normalizedTsCode ||
+          detailIntradayLoadedTsCodeRef.current === normalizedTsCode)
+      ) {
+        return null;
+      }
+
+      const requestId = detailIntradayRequestIdRef.current + 1;
+      detailIntradayRequestIdRef.current = requestId;
+      detailIntradayRequestKeyRef.current = normalizedTsCode;
+      if (detailIntradayLoadedTsCodeRef.current !== normalizedTsCode) {
+        detailIntradayLoadedTsCodeRef.current = "";
+        setDetailIntradayData(null);
+      }
+      setDetailIntradayLoading(true);
+      setDetailIntradayError("");
+      try {
+        const intraday = await getStockDetailIntraday({ tsCode: normalizedTsCode });
+        if (detailIntradayRequestIdRef.current !== requestId) {
+          return null;
+        }
+        detailIntradayLoadedTsCodeRef.current = normalizedTsCode;
+        setDetailIntradayData(intraday);
+        return intraday;
+      } catch (error) {
+        if (detailIntradayRequestIdRef.current !== requestId) {
+          return null;
+        }
+        detailIntradayLoadedTsCodeRef.current = "";
+        setDetailIntradayError(`读取分时失败: ${String(error)}`);
+        return null;
+      } finally {
+        if (detailIntradayRequestIdRef.current === requestId) {
+          detailIntradayRequestKeyRef.current = "";
+          setDetailIntradayLoading(false);
+        }
+      }
+    },
+    [],
+  );
+
   const readDetail = useCallback(
     async (
       nextSourcePath: string,
@@ -4446,6 +4509,11 @@ export default function DetailsPage({
       nextNormalizedCode: string,
       _intervalRestore?: IntervalRestoreRequest | null,
     ) => {
+      const requestId = detailRequestIdRef.current + 1;
+      detailRequestIdRef.current = requestId;
+      setDetailLoading(false);
+      setDetailIndicatorsLoading(false);
+      setDetailIndicatorsNotice("");
       if (!nextSourcePath) {
         setDetailError("请先到“数据管理”页完成数据准备");
         return null;
@@ -4461,6 +4529,12 @@ export default function DetailsPage({
       setStockSimilarityError("");
       setDetailStrategyError("");
       setPrevRanksError("");
+      if (detailIntradayVisibleRef.current) {
+        // Realtime-monitor links expand the intraday chart automatically, so start
+        // its independent crawl with the base K-line read. Ordinary detail links do
+        // not fetch intraday data until the user expands the chart.
+        void loadDetailIntraday(nextNormalizedCode);
+      }
       try {
         const detail = await getStockDetailPage({
           sourcePath: nextSourcePath,
@@ -4469,6 +4543,10 @@ export default function DetailsPage({
           chartWindowDays: DETAIL_CHART_WINDOW_DAYS,
         });
 
+        if (detailRequestIdRef.current !== requestId) {
+          return null;
+        }
+
         setDetailData(detail);
         setDetailRealtimeData(null);
         setDetailRealtimeNotice("");
@@ -4476,16 +4554,96 @@ export default function DetailsPage({
           detail.overview?.name?.trim() ??
             getLookupDigits(detail.resolved_ts_code ?? nextNormalizedCode),
         );
+
+        const resolvedCode = detail.resolved_ts_code?.trim() || nextNormalizedCode;
+        const resolvedDate =
+          detail.resolved_trade_date?.trim() || nextTradeDate.trim();
+        void (async () => {
+          await waitForNextPaint();
+          if (
+            detailRequestIdRef.current !== requestId ||
+            resolvedDate === ""
+          ) {
+            return;
+          }
+          try {
+            const overviewData = await getStockDetailOverview({
+              sourcePath: nextSourcePath,
+              tradeDate: resolvedDate,
+              tsCode: resolvedCode,
+            });
+            if (
+              detailRequestIdRef.current !== requestId ||
+              overviewData.resolved_ts_code.trim() !== resolvedCode ||
+              overviewData.resolved_trade_date.trim() !== resolvedDate
+            ) {
+              return;
+            }
+            setDetailData((current) =>
+              current?.resolved_ts_code?.trim() === resolvedCode &&
+              current?.resolved_trade_date?.trim() === resolvedDate
+                ? { ...current, overview: overviewData.overview }
+                : current,
+            );
+            const resolvedName = overviewData.overview.name?.trim();
+            if (resolvedName) {
+              setLookupInput(resolvedName);
+            }
+          } catch {
+            // The base chart remains usable when optional overview metadata fails.
+          }
+        })();
+        setDetailIndicatorsLoading(true);
+        void (async () => {
+          // Let React commit and paint the base candles before starting indicator
+          // configuration reads and expression execution.
+          await waitForNextPaint();
+          if (detailRequestIdRef.current !== requestId) {
+            return;
+          }
+          try {
+            const enriched = await getStockDetailKlineIndicators({
+              sourcePath: nextSourcePath,
+              tsCode: resolvedCode,
+              chartWindowDays: DETAIL_CHART_WINDOW_DAYS,
+              watermarkName: detail.overview?.name?.trim() || undefined,
+            });
+            if (
+              detailRequestIdRef.current !== requestId ||
+              enriched.resolved_ts_code.trim() !== resolvedCode
+            ) {
+              return;
+            }
+            setDetailData((current) =>
+              current?.resolved_ts_code?.trim() === resolvedCode
+                ? { ...current, kline: enriched.kline }
+                : current,
+            );
+          } catch (error) {
+            if (detailRequestIdRef.current === requestId) {
+              setDetailIndicatorsNotice(`指标加载失败: ${String(error)}`);
+            }
+          } finally {
+            if (detailRequestIdRef.current === requestId) {
+              setDetailIndicatorsLoading(false);
+            }
+          }
+        })();
         return detail;
       } catch (error) {
+        if (detailRequestIdRef.current !== requestId) {
+          return null;
+        }
         setDetailData(null);
         setDetailError(`读取详情失败: ${String(error)}`);
         return null;
       } finally {
-        setDetailLoading(false);
+        if (detailRequestIdRef.current === requestId) {
+          setDetailLoading(false);
+        }
       }
     },
-    [],
+    [loadDetailIntraday],
   );
 
   const loadDetailCyq = useCallback(
@@ -4537,40 +4695,6 @@ export default function DetailsPage({
     },
     [],
   );
-
-  const loadDetailIntraday = useCallback(async (nextTsCode: string) => {
-    const normalizedTsCode = nextTsCode.trim();
-    if (normalizedTsCode === "" || normalizedTsCode === "--") {
-      detailIntradayRequestIdRef.current += 1;
-      setDetailIntradayData(null);
-      setDetailIntradayLoading(false);
-      setDetailIntradayError("");
-      return null;
-    }
-
-    const requestId = detailIntradayRequestIdRef.current + 1;
-    detailIntradayRequestIdRef.current = requestId;
-    setDetailIntradayLoading(true);
-    setDetailIntradayError("");
-    try {
-      const intraday = await getStockDetailIntraday({ tsCode: normalizedTsCode });
-      if (detailIntradayRequestIdRef.current !== requestId) {
-        return null;
-      }
-      setDetailIntradayData(intraday);
-      return intraday;
-    } catch (error) {
-      if (detailIntradayRequestIdRef.current !== requestId) {
-        return null;
-      }
-      setDetailIntradayError(`读取分时失败: ${String(error)}`);
-      return null;
-    } finally {
-      if (detailIntradayRequestIdRef.current === requestId) {
-        setDetailIntradayLoading(false);
-      }
-    }
-  }, []);
 
   useEffect(() => {
     if (!sourcePathTrimmed) {
@@ -6053,16 +6177,13 @@ export default function DetailsPage({
   }, [detailData?.resolved_trade_date, detailData?.resolved_ts_code]);
 
   useEffect(() => {
+    detailIntradayVisibleRef.current = routeAutoIntraday;
     setDetailIntradayVisible(routeAutoIntraday);
   }, [routeAutoIntraday]);
 
   useEffect(() => {
     const nextTsCode = detailData?.resolved_ts_code?.trim() ?? "";
     if (!detailIntradayVisible || nextTsCode === "") {
-      detailIntradayRequestIdRef.current += 1;
-      setDetailIntradayData(null);
-      setDetailIntradayLoading(false);
-      setDetailIntradayError("");
       return;
     }
     void loadDetailIntraday(nextTsCode);
@@ -7069,7 +7190,7 @@ export default function DetailsPage({
     const requestKey = [sourcePathTrimmed, resolvedTsCode].join("|");
     detailRealtimeRequestKeyRef.current = requestKey;
     if (detailIntradayVisible) {
-      void loadDetailIntraday(resolvedTsCode);
+      void loadDetailIntraday(resolvedTsCode, true);
     }
     setDetailRealtimeLoading(true);
     setDetailRealtimeNotice("");
@@ -7605,7 +7726,9 @@ export default function DetailsPage({
         canRefresh={resolvedTsCode !== "--"}
         expanded={detailIntradayVisible}
         onToggle={() => {
-          if (detailIntradayVisible) {
+          const nextVisible = !detailIntradayVisible;
+          detailIntradayVisibleRef.current = nextVisible;
+          if (!nextVisible) {
             setDetailIntradayVisible(false);
             return;
           }
@@ -7613,12 +7736,18 @@ export default function DetailsPage({
           void onRefreshRealtimeDetail();
         }}
         onRefresh={() => {
-          void loadDetailIntraday(resolvedTsCode);
+          void loadDetailIntraday(resolvedTsCode, true);
         }}
       />
 
       <section className="details-card details-chart-card" ref={chartCardRef}>
-        <h3 className="details-subtitle">K线图</h3>
+        <h3 className="details-subtitle">
+          K线图
+          {detailIndicatorsLoading ? " · 指标异步加载中" : ""}
+          {!detailIndicatorsLoading && detailIndicatorsNotice
+            ? ` · ${detailIndicatorsNotice}`
+            : ""}
+        </h3>
 
         <div className="details-chart-toolbar">
           <label className="details-chart-slider-field">

@@ -224,6 +224,17 @@ export type StockDetailPrevRanksData = {
   prev_ranks?: DetailPrevRankRow[]
 }
 
+export type StockDetailKlineIndicatorsData = {
+  resolved_ts_code: string
+  kline: DetailKlinePayload
+}
+
+export type StockDetailOverviewData = {
+  resolved_trade_date: string
+  resolved_ts_code: string
+  overview: DetailOverview
+}
+
 export type StockDetailStrategySnapshotData = {
   resolved_trade_date?: string
   resolved_ts_code?: string
@@ -319,6 +330,26 @@ export type StockDetailCyqData = {
 
 export async function getStockDetailPage(query: StockDetailQuery) {
   return invoke<StockDetailPageData>('get_stock_detail_page', query)
+}
+
+export async function getStockDetailKlineIndicators(query: {
+  sourcePath: string
+  tsCode: string
+  chartWindowDays?: number
+  watermarkName?: string
+}) {
+  return invoke<StockDetailKlineIndicatorsData>(
+    'get_stock_detail_kline_indicators',
+    query,
+  )
+}
+
+export async function getStockDetailOverview(query: {
+  sourcePath: string
+  tradeDate: string
+  tsCode: string
+}) {
+  return invoke<StockDetailOverviewData>('get_stock_detail_overview', query)
 }
 
 export async function getStockDetailStrategySnapshot(query: {

@@ -11,12 +11,13 @@ use serde::Serialize;
 use crate::{
     crawler::intraday::{TencentIntradayData, fetch_tencent_intraday},
     data::{RowData, ScoreConfig},
-    data::{cyq_chen_db_path, cyq_db_path, result_db_path, score_rule_path, source_db_path},
+    data::{
+        cyq_chen_db_path, cyq_db_path, result_db_path, score_rule_path, source_db_path,
+        stock_list_path, ths_concepts_path,
+    },
     download::ind_calc::{cache_ind_build, calc_inds_with_cache},
     scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map},
     ui_tools::{
-        build_area_map, build_circ_mv_map, build_concepts_map, build_industry_map,
-        build_most_related_concept_map, build_name_map, build_total_mv_map,
         chart_indicator::{
             ChartMarkerKind, ChartMarkerLineStyle, ChartMarkerPosition, ChartMarkerShape,
             ChartPanelKind, ChartPanelRole, ChartSeriesKind, ChartTooltipFormat,
@@ -209,6 +210,19 @@ pub struct StockDetailPrevRanksData {
 }
 
 #[derive(Debug, Serialize)]
+pub struct StockDetailOverviewData {
+    pub resolved_trade_date: String,
+    pub resolved_ts_code: String,
+    pub overview: DetailOverview,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StockDetailKlineIndicatorsData {
+    pub resolved_ts_code: String,
+    pub kline: DetailKlinePayload,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StockDetailRealtimeData {
     pub ts_code: String,
@@ -313,28 +327,79 @@ struct DetailTriggerSnapshot {
 
 #[derive(Debug, Default)]
 struct DetailSourceMeta {
-    name_map: HashMap<String, String>,
-    area_map: HashMap<String, String>,
-    industry_map: HashMap<String, String>,
-    total_mv_map: HashMap<String, f64>,
-    circ_mv_map: HashMap<String, f64>,
-    concept_map: HashMap<String, String>,
-    most_related_concept_map: HashMap<String, String>,
+    name: Option<String>,
+    area: Option<String>,
+    industry: Option<String>,
+    total_mv_yi: Option<f64>,
+    circ_mv_yi: Option<f64>,
+    concept: Option<String>,
+    most_related_concept: Option<String>,
 }
 
 impl DetailSourceMeta {
-    fn load(source_path: &str) -> Self {
-        Self {
-            name_map: build_name_map(source_path).unwrap_or_default(),
-            area_map: build_area_map(source_path).unwrap_or_default(),
-            industry_map: build_industry_map(source_path).unwrap_or_default(),
-            total_mv_map: build_total_mv_map(source_path).unwrap_or_default(),
-            circ_mv_map: build_circ_mv_map(source_path).unwrap_or_default(),
-            concept_map: build_concepts_map(source_path).unwrap_or_default(),
-            most_related_concept_map: build_most_related_concept_map(source_path)
-                .unwrap_or_default(),
+    fn load(source_path: &str, ts_code: &str) -> Self {
+        let mut meta = Self::default();
+
+        if let Ok(mut reader) = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_path(stock_list_path(source_path))
+        {
+            for row in reader.records().flatten() {
+                if row.get(0).map(str::trim) != Some(ts_code) {
+                    continue;
+                }
+                meta.name = detail_csv_text(&row, 2);
+                meta.area = detail_csv_text(&row, 3);
+                meta.industry = detail_csv_text(&row, 4);
+                meta.total_mv_yi = detail_csv_number(&row, 9).map(|value| value / 1e4);
+                meta.circ_mv_yi = detail_csv_number(&row, 10).map(|value| value / 1e4);
+                break;
+            }
         }
+
+        if let Ok(mut reader) = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_path(ths_concepts_path(source_path))
+        {
+            let (ts_code_index, concept_index, related_index) = reader
+                .headers()
+                .map(|headers| {
+                    let find = |name: &str| {
+                        headers
+                            .iter()
+                            .position(|header| header.trim().eq_ignore_ascii_case(name))
+                    };
+                    (
+                        find("ts_code").unwrap_or(0),
+                        find("concept").or(Some(2)),
+                        find("most_related_concept"),
+                    )
+                })
+                .unwrap_or((0, Some(2), None));
+            for row in reader.records().flatten() {
+                if row.get(ts_code_index).map(str::trim) != Some(ts_code) {
+                    continue;
+                }
+                meta.concept = concept_index.and_then(|index| detail_csv_text(&row, index));
+                meta.most_related_concept =
+                    related_index.and_then(|index| detail_csv_text(&row, index));
+                break;
+            }
+        }
+
+        meta
     }
+}
+
+fn detail_csv_text(row: &csv::StringRecord, index: usize) -> Option<String> {
+    row.get(index)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn detail_csv_number(row: &csv::StringRecord, index: usize) -> Option<f64> {
+    row.get(index)?.trim().parse::<f64>().ok()
 }
 
 fn resolve_trade_date(conn: &Connection, trade_date: Option<String>) -> Result<String, String> {
@@ -847,19 +912,10 @@ fn query_detail_overview(
 
     Ok(DetailOverview {
         ts_code: ts_code.to_string(),
-        name: source_meta.name_map.get(ts_code).cloned(),
-        board: Some(
-            board_category(
-                ts_code,
-                source_meta
-                    .name_map
-                    .get(ts_code)
-                    .map(|value| value.as_str()),
-            )
-            .to_string(),
-        ),
-        area: source_meta.area_map.get(ts_code).cloned(),
-        industry: source_meta.industry_map.get(ts_code).cloned(),
+        name: source_meta.name.clone(),
+        board: Some(board_category(ts_code, source_meta.name.as_deref()).to_string()),
+        area: source_meta.area.clone(),
+        industry: source_meta.industry.clone(),
         trade_date: Some(effective_trade_date.to_string()),
         total_score: row
             .get(0)
@@ -868,10 +924,10 @@ fn query_detail_overview(
         total: row
             .get(2)
             .map_err(|e| format!("读取详情 total 失败: {e}"))?,
-        total_mv_yi: source_meta.total_mv_map.get(ts_code).copied(),
-        circ_mv_yi: source_meta.circ_mv_map.get(ts_code).copied(),
-        most_related_concept: source_meta.most_related_concept_map.get(ts_code).cloned(),
-        concept: source_meta.concept_map.get(ts_code).cloned(),
+        total_mv_yi: source_meta.total_mv_yi,
+        circ_mv_yi: source_meta.circ_mv_yi,
+        most_related_concept: source_meta.most_related_concept.clone(),
+        concept: source_meta.concept.clone(),
     })
 }
 
@@ -970,27 +1026,18 @@ fn build_basic_detail_overview(
 ) -> DetailOverview {
     DetailOverview {
         ts_code: ts_code.to_string(),
-        name: source_meta.name_map.get(ts_code).cloned(),
-        board: Some(
-            board_category(
-                ts_code,
-                source_meta
-                    .name_map
-                    .get(ts_code)
-                    .map(|value| value.as_str()),
-            )
-            .to_string(),
-        ),
-        area: source_meta.area_map.get(ts_code).cloned(),
-        industry: source_meta.industry_map.get(ts_code).cloned(),
+        name: source_meta.name.clone(),
+        board: Some(board_category(ts_code, source_meta.name.as_deref()).to_string()),
+        area: source_meta.area.clone(),
+        industry: source_meta.industry.clone(),
         trade_date: Some(effective_trade_date.to_string()),
         total_score: None,
         rank: None,
         total: None,
-        total_mv_yi: source_meta.total_mv_map.get(ts_code).copied(),
-        circ_mv_yi: source_meta.circ_mv_map.get(ts_code).copied(),
-        most_related_concept: source_meta.most_related_concept_map.get(ts_code).cloned(),
-        concept: source_meta.concept_map.get(ts_code).cloned(),
+        total_mv_yi: source_meta.total_mv_yi,
+        circ_mv_yi: source_meta.circ_mv_yi,
+        most_related_concept: source_meta.most_related_concept.clone(),
+        concept: source_meta.concept.clone(),
     }
 }
 
@@ -1371,6 +1418,62 @@ pub(crate) fn query_kline(
     default_window_days: usize,
     watermark_name: Option<String>,
 ) -> Result<DetailKlinePayload, String> {
+    query_kline_with_options(
+        source_conn,
+        source_path,
+        ts_code,
+        default_window_days,
+        watermark_name,
+        true,
+    )
+}
+
+fn query_kline_base(
+    source_conn: &Connection,
+    ts_code: &str,
+    default_window_days: usize,
+    watermark_name: Option<String>,
+) -> Result<DetailKlinePayload, String> {
+    let db_columns = load_stock_data_columns(source_conn)?;
+    let (items, _) = query_kline_rows(source_conn, ts_code, &db_columns, &[])?;
+
+    Ok(DetailKlinePayload {
+        items: Some(items),
+        panels: None,
+        default_window: Some(default_window_days as u32),
+        chart_height: Some(820),
+        watermark_name,
+        watermark_code: Some(split_ts_code(ts_code)),
+    })
+}
+
+fn query_kline_with_options(
+    source_conn: &Connection,
+    source_path: &str,
+    ts_code: &str,
+    default_window_days: usize,
+    watermark_name: Option<String>,
+    execute_indicators: bool,
+) -> Result<DetailKlinePayload, String> {
+    query_kline_with_compiled(
+        source_conn,
+        source_path,
+        ts_code,
+        default_window_days,
+        watermark_name,
+        execute_indicators,
+    )
+    .map(|(payload, _)| payload)
+}
+
+fn query_kline_with_compiled(
+    source_conn: &Connection,
+    source_path: &str,
+    ts_code: &str,
+    default_window_days: usize,
+    watermark_name: Option<String>,
+    execute_indicators: bool,
+) -> Result<(DetailKlinePayload, CompiledChartIndicatorConfig), String> {
     let db_columns = load_stock_data_columns(source_conn)?;
     let compiled = load_compiled_chart_indicator_config(source_path, Some(&db_columns))?;
     let panels = detail_kline_panels_from_compiled(&compiled);
@@ -1387,6 +1490,36 @@ pub(crate) fn query_kline(
         })
         .cloned()
         .collect::<Vec<_>>();
+    let (mut items, mut row_data) =
+        query_kline_rows(source_conn, ts_code, &db_columns, &dependency_columns)?;
+
+    if execute_indicators {
+        inject_chart_indicator_extra_runtime_fields(&mut row_data, source_path, ts_code)?;
+        let execution = execute_chart_indicator_config(&compiled, row_data)?;
+        apply_chart_indicator_execution(&mut items, execution.values);
+    }
+
+    Ok((
+        DetailKlinePayload {
+            items: Some(items),
+            panels: Some(panels),
+            default_window: Some(default_window_days as u32),
+            chart_height: Some(820),
+            watermark_name,
+            watermark_code: Some(split_ts_code(ts_code)),
+        },
+        compiled,
+    ))
+}
+
+fn query_kline_rows(
+    source_conn: &Connection,
+    ts_code: &str,
+    db_columns: &HashSet<String>,
+    dependency_columns: &[String],
+) -> Result<(Vec<DetailKlineRow>, RowData), String> {
+    let column_lookup = build_case_insensitive_column_lookup(db_columns);
+    let base_columns = resolve_kline_base_columns(&column_lookup)?;
     let mut select_cols = vec!["trade_date".to_string()];
     for (db_col, _) in &base_columns {
         select_cols.push(format!(
@@ -1395,7 +1528,7 @@ pub(crate) fn query_kline(
             quote_sql_ident(db_col)
         ));
     }
-    for db_col in &dependency_columns {
+    for db_col in dependency_columns {
         select_cols.push(format!(
             "TRY_CAST({} AS DOUBLE) AS {}",
             quote_sql_ident(db_col),
@@ -1428,7 +1561,7 @@ pub(crate) fn query_kline(
     for (_, runtime_key) in &base_columns {
         row_data.cols.insert(runtime_key.clone(), Vec::new());
     }
-    for db_col in &dependency_columns {
+    for db_col in dependency_columns {
         row_data
             .cols
             .entry(db_col.to_ascii_uppercase())
@@ -1494,18 +1627,7 @@ pub(crate) fn query_kline(
             runtime_values,
         });
     }
-    inject_chart_indicator_extra_runtime_fields(&mut row_data, source_path, ts_code)?;
-    let execution = execute_chart_indicator_config(&compiled, row_data)?;
-    apply_chart_indicator_execution(&mut items, execution.values);
-
-    Ok(DetailKlinePayload {
-        items: Some(items),
-        panels: Some(panels),
-        default_window: Some(default_window_days as u32),
-        chart_height: Some(820),
-        watermark_name,
-        watermark_code: Some(split_ts_code(ts_code)),
-    })
+    Ok((items, row_data))
 }
 
 fn build_chart_indicator_row_data_from_items(
@@ -1611,24 +1733,22 @@ fn indicator_value_by_normalized_key(item: &DetailKlineRow, normalized_key: &str
 }
 
 fn rerun_realtime_chart_indicators(
-    source_conn: &Connection,
     source_path: &str,
     ts_code: &str,
     items: &mut [DetailKlineRow],
     realtime_pre_close: f64,
+    compiled: &CompiledChartIndicatorConfig,
 ) -> Result<(), String> {
     if items.is_empty() || items.last().and_then(|row| row.is_realtime) != Some(true) {
         return Ok(());
     }
 
-    let db_columns = load_stock_data_columns(source_conn)?;
-    let compiled = load_compiled_chart_indicator_config(source_path, Some(&db_columns))?;
     let mut row_data = build_chart_indicator_row_data_from_items(
         items,
         source_path,
         ts_code,
         Some(realtime_pre_close),
-        &compiled,
+        compiled,
     )?;
     let ind_cache = cache_ind_build(source_path)?;
     if !ind_cache.is_empty() {
@@ -1636,7 +1756,7 @@ fn rerun_realtime_chart_indicators(
             row_data.cols.insert(name, series);
         }
     }
-    let execution = execute_chart_indicator_config(&compiled, row_data)?;
+    let execution = execute_chart_indicator_config(compiled, row_data)?;
 
     for item in items.iter_mut() {
         for panel in &compiled.panels {
@@ -2163,41 +2283,86 @@ pub fn get_stock_detail_page(
     } else {
         query_latest_kline_trade_date(&source_conn, &normalized_ts_code)?
     };
-    let source_meta = DetailSourceMeta::load(&source_path);
-
-    let overview = match result_conn.as_ref() {
-        Some(conn) => query_detail_overview(
-            conn,
-            &source_meta,
-            &effective_trade_date,
-            &normalized_ts_code,
-        )
-        .unwrap_or_else(|_| {
-            build_basic_detail_overview(&source_meta, &effective_trade_date, &normalized_ts_code)
-        }),
-        None => {
-            build_basic_detail_overview(&source_meta, &effective_trade_date, &normalized_ts_code)
-        }
-    };
-
-    let kline = query_kline(
+    // The first response deliberately contains only OHLCV data. Overview metadata
+    // and chart indicators are loaded after the base candles have painted.
+    let kline = query_kline_base(
         &source_conn,
-        &source_path,
         &normalized_ts_code,
         chart_window_days.unwrap_or(280) as usize,
-        overview.name.clone(),
+        None,
     )?;
 
     Ok(StockDetailPageData {
         resolved_trade_date: Some(effective_trade_date),
         resolved_ts_code: Some(normalized_ts_code),
-        overview: Some(overview),
+        overview: None,
         prev_ranks: None,
         stock_similarity: None,
         stock_similarity_error: None,
         kline: Some(kline),
         strategy_triggers: None,
         strategy_scenes: None,
+    })
+}
+
+pub fn get_stock_detail_overview(
+    source_path: String,
+    trade_date: String,
+    ts_code: String,
+) -> Result<StockDetailOverviewData, String> {
+    let normalized_ts_code = normalize_ts_code(&ts_code);
+    let effective_trade_date = trade_date.trim().to_string();
+    if effective_trade_date.is_empty() {
+        return Err("详情交易日为空".to_string());
+    }
+    let source_meta = DetailSourceMeta::load(&source_path, &normalized_ts_code);
+    let overview = if result_db_path(&source_path).exists() {
+        open_result_conn(&source_path)
+            .and_then(|conn| {
+                query_detail_overview(
+                    &conn,
+                    &source_meta,
+                    &effective_trade_date,
+                    &normalized_ts_code,
+                )
+            })
+            .unwrap_or_else(|_| {
+                build_basic_detail_overview(
+                    &source_meta,
+                    &effective_trade_date,
+                    &normalized_ts_code,
+                )
+            })
+    } else {
+        build_basic_detail_overview(&source_meta, &effective_trade_date, &normalized_ts_code)
+    };
+
+    Ok(StockDetailOverviewData {
+        resolved_trade_date: effective_trade_date,
+        resolved_ts_code: normalized_ts_code,
+        overview,
+    })
+}
+
+pub fn get_stock_detail_kline_indicators(
+    source_path: String,
+    ts_code: String,
+    chart_window_days: Option<u32>,
+    watermark_name: Option<String>,
+) -> Result<StockDetailKlineIndicatorsData, String> {
+    let normalized_ts_code = normalize_ts_code(&ts_code);
+    let source_conn = open_source_conn(&source_path)?;
+    let kline = query_kline(
+        &source_conn,
+        &source_path,
+        &normalized_ts_code,
+        chart_window_days.unwrap_or(280) as usize,
+        watermark_name.filter(|value| !value.trim().is_empty()),
+    )?;
+
+    Ok(StockDetailKlineIndicatorsData {
+        resolved_ts_code: normalized_ts_code,
+        kline,
     })
 }
 
@@ -2311,26 +2476,29 @@ pub fn build_stock_detail_realtime_from_quote_map(
     fetch_meta: RealtimeFetchMeta,
 ) -> Result<StockDetailRealtimeData, String> {
     let source_conn = open_source_conn(&source_path)?;
-    let name_map = build_name_map(&source_path).unwrap_or_default();
-    let watermark_name = name_map.get(&normalized_ts_code).cloned();
-    let kline = query_kline(
+    let quote = quote_map
+        .get(&normalized_ts_code)
+        .ok_or_else(|| format!("未获取到 {} 的实时行情", normalized_ts_code))?;
+    let watermark_name = Some(quote.name.clone()).filter(|value| !value.trim().is_empty());
+    // Load dependencies and panel metadata once, but defer expression execution
+    // until after the realtime row has been merged. This avoids calculating every
+    // indicator twice on each refresh.
+    let (kline, compiled) = query_kline_with_compiled(
         &source_conn,
         &source_path,
         &normalized_ts_code,
         chart_window_days.unwrap_or(280) as usize,
         watermark_name,
+        false,
     )?;
-    let quote = quote_map
-        .get(&normalized_ts_code)
-        .ok_or_else(|| format!("未获取到 {} 的实时行情", normalized_ts_code))?;
     let (mut kline, has_database_trade_date) = merge_realtime_kline(kline, quote);
     if let Some(items) = kline.items.as_mut() {
         rerun_realtime_chart_indicators(
-            &source_conn,
             &source_path,
             &normalized_ts_code,
             items,
             quote.pre_close,
+            &compiled,
         )?;
     }
 
@@ -2402,6 +2570,19 @@ mod tests {
         );
 
         fs::remove_dir_all(source_path).ok();
+    }
+
+    #[test]
+    fn query_kline_base_returns_candles_without_indicator_work() {
+        let conn = build_test_stock_data_conn();
+        let payload = query_kline_base(&conn, "000001.SZ", 280, Some("测试股".to_string()))
+            .expect("base kline should query");
+
+        let items = payload.items.expect("items should exist");
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| item.indicators.is_empty()));
+        assert!(payload.panels.is_none());
+        assert_eq!(payload.watermark_name.as_deref(), Some("测试股"));
     }
 
     #[test]
@@ -2488,14 +2669,21 @@ mod tests {
         fs::create_dir_all(&source_path).expect("temp dir should be created");
         write_ma2_chart_config(&source_path);
 
-        let payload = query_kline(
+        let (payload, compiled) = query_kline_with_compiled(
             &conn,
             source_path.to_str().expect("temp path should be utf8"),
             "000001.SZ",
             280,
             None,
+            false,
         )
         .expect("kline should query");
+        assert!(
+            payload
+                .items
+                .as_ref()
+                .is_some_and(|items| items.iter().all(|item| item.indicators.is_empty()))
+        );
         let quote = crate::crawler::SinaQuote {
             date: "2024-01-03".to_string(),
             time: "10:00:00".to_string(),
@@ -2515,11 +2703,11 @@ mod tests {
         let items = payload.items.as_mut().expect("items should exist");
 
         rerun_realtime_chart_indicators(
-            &conn,
             source_path.to_str().expect("temp path should be utf8"),
             "000001.SZ",
             items,
             quote.pre_close,
+            &compiled,
         )
         .expect("realtime chart indicators should rerun");
 
@@ -2538,12 +2726,13 @@ mod tests {
         write_ind_j_config(&source_path);
         write_j_chart_config(&source_path);
 
-        let payload = query_kline(
+        let (payload, compiled) = query_kline_with_compiled(
             &conn,
             source_path.to_str().expect("temp path should be utf8"),
             "000001.SZ",
             280,
             None,
+            false,
         )
         .expect("kline should query");
         let quote = crate::crawler::SinaQuote {
@@ -2565,11 +2754,11 @@ mod tests {
         let items = payload.items.as_mut().expect("items should exist");
 
         rerun_realtime_chart_indicators(
-            &conn,
             source_path.to_str().expect("temp path should be utf8"),
             "000001.SZ",
             items,
             quote.pre_close,
+            &compiled,
         )
         .expect("realtime chart indicators should rerun");
 
