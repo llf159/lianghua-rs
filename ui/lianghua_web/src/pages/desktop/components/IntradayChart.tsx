@@ -500,8 +500,20 @@ export default function IntradayChart({
                 ) : null}
               </>
             ) : null}
-            <line x1={PLOT_LEFT} x2={VIEWBOX_WIDTH - PLOT_RIGHT} y1={VOLUME_TOP} y2={VOLUME_TOP} className="details-intraday-grid" />
-            <text x={PLOT_LEFT} y={VOLUME_TOP - 8} className="details-intraday-volume-label">VOL</text>
+            <line
+              x1={PLOT_LEFT}
+              x2={VIEWBOX_WIDTH - PLOT_RIGHT}
+              y1={VOLUME_TOP}
+              y2={VOLUME_TOP}
+              className="details-intraday-grid details-intraday-section-divider"
+            />
+            <text
+              x={PLOT_LEFT}
+              y={VOLUME_TOP - 9}
+              className="details-intraday-volume-label"
+            >
+              分时量
+            </text>
             {points.map((point, index) => {
               const previousPrice = points[index - 1]?.price ?? summary?.preClose ?? point.price;
               const height = Math.max((point.vol / maxVolume) * (VOLUME_BOTTOM - VOLUME_TOP), 1);

@@ -36,6 +36,7 @@ pub fn resolve_source_root(app_data_root: &Path, source_dir: &str) -> Result<Pat
 pub fn managed_source_file_name(file_id: &str) -> Option<&'static str> {
     match file_id {
         "source-db" => Some("stock_data.db"),
+        "dragon-tiger-db" => Some("dragon_tiger.db"),
         "stock-list" => Some("stock_list.csv"),
         "trade-calendar" => Some("trade_calendar.csv"),
         "result-db" => Some("scoring_result.db"),
@@ -48,6 +49,23 @@ pub fn managed_source_file_name(file_id: &str) -> Option<&'static str> {
         "chart-indicator-config" => Some("chart_indicators.toml"),
         "ths-concepts" => Some("stock_concepts.csv"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::managed_source_file_name;
+
+    #[test]
+    fn resolves_all_specialized_managed_assets() {
+        assert_eq!(
+            managed_source_file_name("dragon-tiger-db"),
+            Some("dragon_tiger.db")
+        );
+        assert_eq!(
+            managed_source_file_name("chip-change-rule"),
+            Some("chip_change_rule.toml")
+        );
     }
 }
 

@@ -4,8 +4,9 @@ use duckdb::Connection;
 use serde::Serialize;
 
 use crate::data::{
-    concept_performance_db_path, cyq_chen_db_path, cyq_db_path, load_stock_list, result_db_path,
-    source_db_path, stock_list_path, ths_concepts_path, trade_calendar_path,
+    concept_performance_db_path, cyq_chen_db_path, cyq_db_path, dragon_tiger_db_path,
+    load_stock_list, result_db_path, source_db_path, stock_list_path, ths_concepts_path,
+    trade_calendar_path,
 };
 
 use super::data_import::{resolve_source_root, validate_target_relative_path};
@@ -248,6 +249,40 @@ pub fn preview_managed_source_dataset(
             all_columns = columns;
             selected_columns = selected;
             order_by_sql = "trade_date DESC, ts_code ASC";
+        }
+        "dragon-tiger-top-list" | "dragon-tiger-top-inst" => {
+            let db_path = dragon_tiger_db_path(source_path_str);
+            if !db_path.exists() {
+                return Err(format!("龙虎榜库不存在: {}", db_path.display()));
+            }
+            let db_path_str = db_path
+                .to_str()
+                .ok_or_else(|| "dragon_tiger.db 路径不是有效 UTF-8".to_string())?;
+            let conn = Connection::open(db_path_str)
+                .map_err(|error| format!("打开 dragon_tiger.db 失败: {error}"))?;
+            let (table_name, label, order_by) = if normalized_dataset_id.ends_with("top-list") {
+                (
+                    "top_list",
+                    "龙虎榜每日明细",
+                    "trade_date DESC, ts_code ASC, net_amount DESC NULLS LAST",
+                )
+            } else {
+                (
+                    "top_inst",
+                    "龙虎榜席位明细",
+                    "trade_date DESC, ts_code ASC, net_buy DESC NULLS LAST, exalter ASC",
+                )
+            };
+            let relation = quote_ident(table_name);
+            let columns = load_relation_columns(&conn, &relation)?;
+            filter_trade_column = Some("trade_date");
+            filter_ts_code_column = Some("ts_code");
+            dataset_label = label;
+            target_path = db_path.display().to_string();
+            relation_sql = relation;
+            selected_columns = columns.clone();
+            all_columns = columns;
+            order_by_sql = order_by;
         }
         "score-summary" => {
             let db_path = result_db_path(source_path_str);
@@ -497,6 +532,13 @@ pub fn preview_managed_source_dataset(
             .to_str()
             .ok_or_else(|| "cyq.db 路径不是有效 UTF-8".to_string())?;
         Connection::open(db_path_str).map_err(|error| format!("打开 cyq.db 失败: {error}"))?
+    } else if normalized_dataset_id.starts_with("dragon-tiger-") {
+        let db_path = dragon_tiger_db_path(source_path_str);
+        let db_path_str = db_path
+            .to_str()
+            .ok_or_else(|| "dragon_tiger.db 路径不是有效 UTF-8".to_string())?;
+        Connection::open(db_path_str)
+            .map_err(|error| format!("打开 dragon_tiger.db 失败: {error}"))?
     } else if normalized_dataset_id.starts_with("stock-data-") {
         let db_path = source_db_path(source_path_str);
         let db_path_str = db_path
@@ -739,4 +781,74 @@ pub fn preview_managed_source_stock_data(
         max_trade_date,
         rows: preview_rows,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use crate::data::dragon_tiger_data::open_dragon_tiger_db;
+
+    use super::preview_managed_source_dataset;
+
+    fn temp_app_data_root() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("lianghua-data-viewer-{nanos}"))
+    }
+
+    #[test]
+    fn previews_dragon_tiger_business_tables() {
+        let app_data_root = temp_app_data_root();
+        let source_path = app_data_root.join("source");
+        let source_path_str = source_path.to_str().expect("utf8 source path");
+        let conn = open_dragon_tiger_db(source_path_str).expect("open dragon tiger db");
+        conn.execute(
+            "INSERT INTO top_list (trade_date, ts_code, name, reason) VALUES (?, ?, ?, ?)",
+            ["20260808", "000001.SZ", "平安银行", "测试原因"],
+        )
+        .expect("insert top list");
+        conn.execute(
+            "INSERT INTO top_inst (trade_date, ts_code, exalter, side, reason) VALUES (?, ?, ?, ?, ?)",
+            ["20260808", "000001.SZ", "测试席位", "0", "测试原因"],
+        )
+        .expect("insert top inst");
+        drop(conn);
+
+        let top_list = preview_managed_source_dataset(
+            &app_data_root,
+            "source".to_string(),
+            "dragon-tiger-top-list".to_string(),
+            Some("20260808".to_string()),
+            Some("000001.SZ".to_string()),
+            100,
+        )
+        .expect("preview top list");
+        assert_eq!(top_list.dataset_label, "龙虎榜每日明细");
+        assert_eq!(top_list.row_count, 1);
+        assert_eq!(top_list.matched_rows, 1);
+        assert_eq!(top_list.rows.len(), 1);
+
+        let top_inst = preview_managed_source_dataset(
+            &app_data_root,
+            "source".to_string(),
+            "dragon-tiger-top-inst".to_string(),
+            Some("20260808".to_string()),
+            Some("000001.SZ".to_string()),
+            100,
+        )
+        .expect("preview top inst");
+        assert_eq!(top_inst.dataset_label, "龙虎榜席位明细");
+        assert_eq!(top_inst.row_count, 1);
+        assert_eq!(top_inst.matched_rows, 1);
+        assert_eq!(top_inst.rows.len(), 1);
+
+        fs::remove_dir_all(app_data_root).ok();
+    }
 }

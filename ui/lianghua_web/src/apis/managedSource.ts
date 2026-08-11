@@ -23,6 +23,16 @@ export const MANAGED_SOURCE_FILES = [
     scanPathHints: [] as string[],
   },
   {
+    id: 'dragon-tiger-db',
+    label: '龙虎榜库',
+    description: '龙虎榜每日明细、席位明细与同步记录。',
+    fileName: 'dragon_tiger.db',
+    expectedSourcePath: 'source/dragon_tiger.db',
+    targetRelativePathSuffix: 'dragon_tiger.db',
+    extensions: ['db'],
+    scanPathHints: ['dragon', 'tiger'],
+  },
+  {
     id: 'stock-list',
     label: '股票列表',
     description: '名称、市值和股票基础信息。',
@@ -83,9 +93,19 @@ export const MANAGED_SOURCE_FILES = [
     scanPathHints: ['cyq', 'chen', 'chip'],
   },
   {
+    id: 'chip-change-rule',
+    label: '筹码策略文件',
+    description: '新筹码计算与测试使用的策略配置，内容在筹码策略页维护。',
+    fileName: 'chip_change_rule.toml',
+    expectedSourcePath: 'source/chip_change_rule.toml',
+    targetRelativePathSuffix: 'chip_change_rule.toml',
+    extensions: ['toml'],
+    scanPathHints: ['chip', 'change', 'rule'],
+  },
+  {
     id: 'score-rule',
-    label: '规则文件',
-    description: '个股详情里的规则说明和表达式来源。',
+    label: '打分策略文件',
+    description: '打分、场景与规则表达式配置，内容在打分策略页维护。',
     fileName: 'score_rule.toml',
     expectedSourcePath: 'source/score_rule.toml',
     targetRelativePathSuffix: 'score_rule.toml',
@@ -223,6 +243,8 @@ export type ManagedSourceDbPreviewResult = {
 export type ManagedSourceDatasetId =
   | 'stock-data-base'
   | 'stock-data-indicators'
+  | 'dragon-tiger-top-list'
+  | 'dragon-tiger-top-inst'
   | 'score-summary'
   | 'rule-details'
   | 'scene-details'

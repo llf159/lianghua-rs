@@ -372,6 +372,11 @@
   stroke-dasharray: 3 4;
 }
 
+.details-intraday-section-divider {
+  stroke: #9eabbc;
+  stroke-width: 1.5;
+}
+
 .details-intraday-axis-label {
   fill: #7f8b9b;
   font-size: 11px;
@@ -485,9 +490,13 @@
 }
 
 .details-intraday-volume-label {
-  fill: #8a96a6;
-  font-size: 10px;
+  fill: #627083;
+  font-size: 8px;
   font-weight: 600;
+  letter-spacing: 0.5px;
+  stroke: #fbfcfe;
+  stroke-width: 3px;
+  paint-order: stroke;
 }
 
 .details-intraday-volume {

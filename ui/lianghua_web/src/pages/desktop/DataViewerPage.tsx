@@ -36,6 +36,22 @@ const DATASET_OPTIONS: DatasetOption[] = [
     supportsTsCode: true,
   },
   {
+    id: 'dragon-tiger-top-list',
+    label: '龙虎榜每日明细',
+    description: '查看 dragon_tiger.db 的 top_list。',
+    requiredFileId: 'dragon-tiger-db',
+    supportsTradeDate: true,
+    supportsTsCode: true,
+  },
+  {
+    id: 'dragon-tiger-top-inst',
+    label: '龙虎榜席位明细',
+    description: '查看 dragon_tiger.db 的 top_inst。',
+    requiredFileId: 'dragon-tiger-db',
+    supportsTradeDate: true,
+    supportsTsCode: true,
+  },
+  {
     id: 'score-summary',
     label: '结果库汇总',
     description: '查看 scoring_result.db 的 score_summary。',

@@ -350,8 +350,35 @@
   border: 1px solid #ffc7d0;
 }
 
-.settings-file-list {
+.settings-file-groups {
   margin-top: 12px;
+  display: grid;
+  gap: 20px;
+}
+
+.settings-file-group {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-file-group-head h4,
+.settings-file-group-head p {
+  margin: 0;
+}
+
+.settings-file-group-head h4 {
+  color: #1f2937;
+  font-size: 15px;
+}
+
+.settings-file-group-head p {
+  margin-top: 3px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.settings-file-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(300px, 1fr));
   gap: 12px;

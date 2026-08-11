@@ -33,6 +33,32 @@ type BusyAction =
   | `exporting-file:${ManagedSourceFileId}`
   | `file:${ManagedSourceFileId}`
 
+const MANAGED_SOURCE_FILE_GROUPS = [
+  {
+    id: 'base',
+    label: '基础数据',
+    description: '行情、证券基础信息、交易日历与概念映射。',
+    fileIds: ['source-db', 'stock-list', 'trade-calendar', 'ths-concepts'],
+  },
+  {
+    id: 'derived',
+    label: '下载与计算产物',
+    description: '龙虎榜、评分、概念表现及筹码计算结果。',
+    fileIds: ['dragon-tiger-db', 'result-db', 'concept-performance-db', 'cyq-db', 'cyq-chen-db'],
+  },
+  {
+    id: 'config',
+    label: '配置与策略',
+    description: '指标、图表及策略配置；策略内容仍在对应策略页维护。',
+    fileIds: ['indicator-config', 'chart-indicator-config', 'score-rule', 'chip-change-rule'],
+  },
+] as const satisfies ReadonlyArray<{
+  id: string
+  label: string
+  description: string
+  fileIds: readonly ManagedSourceFileId[]
+}>
+
 function formatImportTime(value: string | null) {
   if (!value) {
     return '暂无导入记录'
@@ -64,21 +90,19 @@ function formatBytes(value: number | null) {
 }
 
 function buildDirectoryImportNotice(result: ManagedSourceDirectoryImportResult) {
-  const visibleImportedFileIds = result.importedFileIds.filter((fileId) => fileId !== 'score-rule')
-  const visibleMissingFileIds = result.missingFileIds.filter((fileId) => fileId !== 'score-rule')
-  const missingLabels = visibleMissingFileIds
+  const missingLabels = result.missingFileIds
     .map((fileId) => MANAGED_SOURCE_FILES.find((item) => item.id === fileId)?.label ?? fileId)
     .join('、')
 
-  if (visibleImportedFileIds.length === 0) {
+  if (result.importedFileIds.length === 0) {
     return `扫描完成，但目录里没有找到可导入文件: ${result.scannedPath}`
   }
 
-  if (visibleMissingFileIds.length === 0) {
-    return `目录扫描完成，已导入 ${visibleImportedFileIds.length} 个文件: ${result.scannedPath}`
+  if (result.missingFileIds.length === 0) {
+    return `目录扫描完成，已导入 ${result.importedFileIds.length} 个文件: ${result.scannedPath}`
   }
 
-  return `目录扫描完成，已导入 ${visibleImportedFileIds.length} 个文件；仍缺少 ${missingLabels}: ${result.scannedPath}`
+  return `目录扫描完成，已导入 ${result.importedFileIds.length} 个文件；仍缺少 ${missingLabels}: ${result.scannedPath}`
 }
 
 function findManagedSourceFileLabel(targetRelativePath: string) {
@@ -95,7 +119,7 @@ function findManagedSourceFileLabel(targetRelativePath: string) {
 export default function DataImportPage() {
   const directoryImportSupported = isDirectoryImportSupported()
   const isMobileClient = !directoryImportSupported
-  const visibleManagedFiles = MANAGED_SOURCE_FILES.filter((item) => item.id !== 'score-rule')
+  const visibleManagedFiles = MANAGED_SOURCE_FILES
   const [status, setStatus] = useState<ManagedSourceStatus | null>(null)
   const [busyAction, setBusyAction] = useState<BusyAction>('loading')
   const [notice, setNotice] = useState('')
@@ -116,9 +140,8 @@ export default function DataImportPage() {
     ])
   }, [])
 
-  const importedCount =
-    status?.items.filter((item) => item.id !== 'score-rule' && item.isImported).length ?? 0
-  const visibleStatusItems = status?.items.filter((item) => item.id !== 'score-rule') ?? []
+  const importedCount = status?.items.filter((item) => item.isImported).length ?? 0
+  const visibleStatusItems = status?.items ?? []
   const isBusy = busyAction !== 'idle'
 
   const updateBusyAction = useCallback((nextBusyAction: BusyAction) => {
@@ -477,66 +500,78 @@ export default function DataImportPage() {
           <p className="settings-section-note">支持逐个导入、导出或删除文件。</p>
         </div>
 
-        <div className="settings-file-list">
-          {visibleManagedFiles.map((file) => {
-            const itemStatus = status?.items.find((item) => item.id === file.id)
-            const isFileBusy = busyAction === `file:${file.id}`
-            const isDeleteBusy = busyAction === `deleting-file:${file.id}`
-            const isExportBusy = busyAction === `exporting-file:${file.id}`
-            return (
-              <article key={file.id} className="settings-file-card">
-                <div className="settings-file-row">
-                  <div>
-                    <h4>{file.label}</h4>
-                    <p>{file.description}</p>
-                  </div>
-                  <span className={itemStatus?.isImported ? 'settings-badge ok' : 'settings-badge'}>
-                    {itemStatus?.isImported ? '已导入' : '缺失'}
-                  </span>
-                </div>
+        <div className="settings-file-groups">
+          {MANAGED_SOURCE_FILE_GROUPS.map((group) => (
+            <section className="settings-file-group" key={group.id}>
+              <div className="settings-file-group-head">
+                <h4>{group.label}</h4>
+                <p>{group.description}</p>
+              </div>
+              <div className="settings-file-list">
+                {visibleManagedFiles
+                  .filter((file) => group.fileIds.some((fileId) => fileId === file.id))
+                  .map((file) => {
+                    const itemStatus = status?.items.find((item) => item.id === file.id)
+                    const isFileBusy = busyAction === `file:${file.id}`
+                    const isDeleteBusy = busyAction === `deleting-file:${file.id}`
+                    const isExportBusy = busyAction === `exporting-file:${file.id}`
+                    return (
+                      <article key={file.id} className="settings-file-card">
+                        <div className="settings-file-row">
+                          <div>
+                            <h4>{file.label}</h4>
+                            <p>{file.description}</p>
+                          </div>
+                          <span className={itemStatus?.isImported ? 'settings-badge ok' : 'settings-badge'}>
+                            {itemStatus?.isImported ? '已导入' : '缺失'}
+                          </span>
+                        </div>
 
-                <div className="settings-file-meta">
-                  <span>要求文件名</span>
-                  <strong>{file.fileName}</strong>
-                </div>
-                <div className="settings-file-meta">
-                  <span>标准源目录示例</span>
-                  <strong>{file.expectedSourcePath}</strong>
-                </div>
-                <div className="settings-file-meta">
-                  <span>目标路径</span>
-                  <strong
-                    className="settings-path-value"
-                    title={itemStatus?.targetPath ?? ''}
-                  >
-                    {itemStatus?.targetPath ?? '读取中...'}
-                  </strong>
-                </div>
+                        <div className="settings-file-meta">
+                          <span>要求文件名</span>
+                          <strong>{file.fileName}</strong>
+                        </div>
+                        <div className="settings-file-meta">
+                          <span>标准源目录示例</span>
+                          <strong>{file.expectedSourcePath}</strong>
+                        </div>
+                        <div className="settings-file-meta">
+                          <span>目标路径</span>
+                          <strong
+                            className="settings-path-value"
+                            title={itemStatus?.targetPath ?? ''}
+                          >
+                            {itemStatus?.targetPath ?? '读取中...'}
+                          </strong>
+                        </div>
 
-                <div className="settings-file-actions">
-                  <button className="settings-primary-btn" type="button" onClick={() => void onImportFile(file.id)} disabled={isBusy}>
-                    {isFileBusy ? '导入中...' : '选择文件导入'}
-                  </button>
-                  <button
-                    className="settings-secondary-btn"
-                    type="button"
-                    onClick={() => void onExportFile(file.id)}
-                    disabled={isBusy || !itemStatus?.isImported}
-                  >
-                    {isExportBusy ? '导出中...' : '导出文件'}
-                  </button>
-                  <button
-                    className="settings-danger-btn"
-                    type="button"
-                    onClick={() => void onDeleteFile(file.id)}
-                    disabled={isBusy || !itemStatus?.isImported}
-                  >
-                    {isDeleteBusy ? '删除中...' : '删除文件'}
-                  </button>
-                </div>
-              </article>
-            )
-          })}
+                        <div className="settings-file-actions">
+                          <button className="settings-primary-btn" type="button" onClick={() => void onImportFile(file.id)} disabled={isBusy}>
+                            {isFileBusy ? '导入中...' : '选择文件导入'}
+                          </button>
+                          <button
+                            className="settings-secondary-btn"
+                            type="button"
+                            onClick={() => void onExportFile(file.id)}
+                            disabled={isBusy || !itemStatus?.isImported}
+                          >
+                            {isExportBusy ? '导出中...' : '导出文件'}
+                          </button>
+                          <button
+                            className="settings-danger-btn"
+                            type="button"
+                            onClick={() => void onDeleteFile(file.id)}
+                            disabled={isBusy || !itemStatus?.isImported}
+                          >
+                            {isDeleteBusy ? '删除中...' : '删除文件'}
+                          </button>
+                        </div>
+                      </article>
+                    )
+                  })}
+              </div>
+            </section>
+          ))}
         </div>
       </section>
 
