@@ -1,5 +1,8 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, HashMap, HashSet},
+};
 
 use duckdb::{Connection, params_from_iter};
 use rayon::prelude::*;
@@ -157,6 +160,16 @@ pub struct RuleLayerMetricsWithTriggeredSamples {
 #[derive(Debug, Clone)]
 pub struct RuleLayerRuntimeCache {
     day_groups: Vec<RuleDayGroup>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RuleJointRidgeDayStats {
+    pub trade_date: String,
+    pub sample_count: usize,
+    pub exposed_sample_count: usize,
+    pub feature_cross_products: Vec<f64>,
+    pub feature_residual_products: Vec<f64>,
+    pub residual_sum_squares: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -1114,6 +1127,32 @@ pub struct RuleLayerSamplePointRef<'a> {
     pub residual_return: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RuleLayerBaseSampleRef<'a> {
+    pub ts_code: &'a str,
+    pub trade_date: &'a str,
+    pub residual_return: f64,
+}
+
+pub(crate) fn visit_rule_layer_base_samples_from_cache<F>(
+    runtime_cache: &RuleLayerRuntimeCache,
+    mut visit: F,
+) -> Result<(), String>
+where
+    F: FnMut(RuleLayerBaseSampleRef<'_>) -> Result<(), String>,
+{
+    for day_group in &runtime_cache.day_groups {
+        for sample in &day_group.samples {
+            visit(RuleLayerBaseSampleRef {
+                ts_code: &*sample.ts_code,
+                trade_date: &*day_group.trade_date,
+                residual_return: sample.residual_return,
+            })?;
+        }
+    }
+    Ok(())
+}
+
 pub fn visit_triggered_rule_samples_from_cache<F>(
     runtime_cache: &RuleLayerRuntimeCache,
     triggered_score_map: &HashMap<String, HashMap<String, f64>>,
@@ -1142,6 +1181,191 @@ where
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn calc_rule_joint_ridge_day_stats_from_cache(
+    runtime_cache: &RuleLayerRuntimeCache,
+    exposures_by_ts_date: &HashMap<String, HashMap<String, Vec<(usize, f64)>>>,
+    feature_count: usize,
+    min_samples_per_day: usize,
+) -> Vec<RuleJointRidgeDayStats> {
+    calc_rule_joint_ridge_day_stats_from_cache_inner(
+        runtime_cache,
+        exposures_by_ts_date,
+        feature_count,
+        min_samples_per_day,
+        None,
+    )
+}
+
+pub(crate) fn calc_rule_joint_ridge_day_stats_from_cache_head_weighted(
+    runtime_cache: &RuleLayerRuntimeCache,
+    exposures_by_ts_date: &HashMap<String, HashMap<String, Vec<(usize, f64)>>>,
+    feature_count: usize,
+    min_samples_per_day: usize,
+    current_weights: &[f64],
+) -> Vec<RuleJointRidgeDayStats> {
+    calc_rule_joint_ridge_day_stats_from_cache_inner(
+        runtime_cache,
+        exposures_by_ts_date,
+        feature_count,
+        min_samples_per_day,
+        Some(current_weights),
+    )
+}
+
+fn joint_head_training_weights(current_scores: &[f64]) -> Vec<f64> {
+    let sample_count = current_scores.len();
+    if sample_count == 0 {
+        return Vec::new();
+    }
+    let mut order = (0..sample_count).collect::<Vec<_>>();
+    order.sort_by(|left, right| {
+        current_scores[*right]
+            .partial_cmp(&current_scores[*left])
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.cmp(right))
+    });
+    let top_one_percent = ((sample_count as f64 * 0.01).ceil() as usize).max(1);
+    let top_five_percent = ((sample_count as f64 * 0.05).ceil() as usize).max(1);
+    let top_ten_percent = ((sample_count as f64 * 0.10).ceil() as usize).max(1);
+    let mut weights = vec![1.0; sample_count];
+    for (rank, sample_index) in order.into_iter().enumerate() {
+        weights[sample_index] = if rank < 20 {
+            12.0
+        } else if rank < 50 {
+            10.0
+        } else if rank < 100 {
+            8.0
+        } else if rank < top_one_percent {
+            6.0
+        } else if rank < top_five_percent {
+            4.0
+        } else if rank < top_ten_percent {
+            2.0
+        } else {
+            1.0
+        };
+    }
+    let raw_weight_sum = weights.iter().sum::<f64>();
+    let normalization = sample_count as f64 / raw_weight_sum;
+    for weight in &mut weights {
+        *weight *= normalization;
+    }
+    weights
+}
+
+fn calc_rule_joint_ridge_day_stats_from_cache_inner(
+    runtime_cache: &RuleLayerRuntimeCache,
+    exposures_by_ts_date: &HashMap<String, HashMap<String, Vec<(usize, f64)>>>,
+    feature_count: usize,
+    min_samples_per_day: usize,
+    current_weights: Option<&[f64]>,
+) -> Vec<RuleJointRidgeDayStats> {
+    if feature_count == 0 {
+        return Vec::new();
+    }
+
+    let mut rows = runtime_cache
+        .day_groups
+        .par_iter()
+        .filter_map(|day_group| {
+            let sample_count = day_group.samples.len();
+            if sample_count < min_samples_per_day.max(1) {
+                return None;
+            }
+
+            let mut exposed_sample_count = 0usize;
+            let mut feature_sums = vec![0.0; feature_count];
+            let mut feature_cross_products = vec![0.0; feature_count * feature_count];
+            let mut feature_residual_products = vec![0.0; feature_count];
+            let mut residual_sum = 0.0;
+            let mut residual_sum_squares = 0.0;
+
+            let sample_weights = current_weights.map(|current_weights| {
+                let current_scores = day_group
+                    .samples
+                    .iter()
+                    .map(|sample| {
+                        exposures_by_ts_date
+                            .get(sample.ts_code.as_ref())
+                            .and_then(|date_map| date_map.get(day_group.trade_date.as_ref()))
+                            .into_iter()
+                            .flatten()
+                            .filter(|(feature_index, value)| {
+                                *feature_index < current_weights.len() && value.is_finite()
+                            })
+                            .map(|(feature_index, value)| current_weights[*feature_index] * *value)
+                            .sum::<f64>()
+                    })
+                    .collect::<Vec<_>>();
+                joint_head_training_weights(&current_scores)
+            });
+
+            for (sample_index, sample) in day_group.samples.iter().enumerate() {
+                let sample_weight = sample_weights
+                    .as_ref()
+                    .map(|weights| weights[sample_index])
+                    .unwrap_or(1.0);
+                let residual = sample.residual_return;
+                residual_sum += sample_weight * residual;
+                residual_sum_squares += sample_weight * residual * residual;
+
+                let Some(exposures) = exposures_by_ts_date
+                    .get(sample.ts_code.as_ref())
+                    .and_then(|date_map| date_map.get(day_group.trade_date.as_ref()))
+                else {
+                    continue;
+                };
+                if exposures.is_empty() {
+                    continue;
+                }
+                exposed_sample_count += 1;
+                for &(feature_index, value) in exposures {
+                    if feature_index >= feature_count || !value.is_finite() {
+                        continue;
+                    }
+                    feature_sums[feature_index] += sample_weight * value;
+                    feature_residual_products[feature_index] += sample_weight * value * residual;
+                }
+                for &(left_index, left_value) in exposures {
+                    if left_index >= feature_count || !left_value.is_finite() {
+                        continue;
+                    }
+                    for &(right_index, right_value) in exposures {
+                        if right_index >= feature_count || !right_value.is_finite() {
+                            continue;
+                        }
+                        feature_cross_products[left_index * feature_count + right_index] +=
+                            sample_weight * left_value * right_value;
+                    }
+                }
+            }
+            let sample_count_f64 = sample_count as f64;
+            for left_index in 0..feature_count {
+                feature_residual_products[left_index] -=
+                    feature_sums[left_index] * residual_sum / sample_count_f64;
+                for right_index in 0..feature_count {
+                    feature_cross_products[left_index * feature_count + right_index] -=
+                        feature_sums[left_index] * feature_sums[right_index] / sample_count_f64;
+                }
+            }
+            residual_sum_squares =
+                (residual_sum_squares - residual_sum * residual_sum / sample_count_f64).max(0.0);
+
+            Some(RuleJointRidgeDayStats {
+                trade_date: day_group.trade_date.to_string(),
+                sample_count,
+                exposed_sample_count,
+                feature_cross_products,
+                feature_residual_products,
+                residual_sum_squares,
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.trade_date.cmp(&right.trade_date));
+    rows
 }
 
 pub fn collect_triggered_rule_samples_from_cache(
@@ -2546,11 +2770,12 @@ mod tests {
         RuleDayBaseSample, RuleDayGroup, RuleLayerConfig, RuleLayerFromDbInput,
         RuleLayerRuntimeCache, RuleSample, build_forward_backtest_outcome_map,
         build_rule_layer_runtime_cache, build_rule_layer_runtime_cache_from_stock_data,
-        calc_all_rule_layer_metrics_from_db, calc_efficiency_ratio_map, calc_rule_layer_metrics,
+        calc_all_rule_layer_metrics_from_db, calc_efficiency_ratio_map,
+        calc_rule_joint_ridge_day_stats_from_cache, calc_rule_layer_metrics,
         calc_rule_layer_metrics_from_cache, calc_rule_layer_metrics_from_db,
         calc_rule_layer_metrics_with_samples_from_cache,
         calc_rule_layer_metrics_with_triggered_samples_from_cache,
-        collect_triggered_rule_samples_from_cache,
+        collect_triggered_rule_samples_from_cache, joint_head_training_weights,
     };
 
     fn assert_opt_close(left: Option<f64>, right: Option<f64>) {
@@ -3334,5 +3559,53 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["20240102", "20240103"]
         );
+    }
+
+    #[test]
+    fn joint_ridge_day_stats_center_features_and_residuals_by_day() {
+        let runtime_cache = RuleLayerRuntimeCache {
+            day_groups: vec![RuleDayGroup {
+                trade_date: Arc::from("20240102"),
+                samples: vec![
+                    RuleDayBaseSample {
+                        ts_code: Arc::from("000001.SZ"),
+                        residual_return: 1.0,
+                        er_change: 0.0,
+                    },
+                    RuleDayBaseSample {
+                        ts_code: Arc::from("000002.SZ"),
+                        residual_return: -1.0,
+                        er_change: 0.0,
+                    },
+                ],
+            }],
+        };
+        let exposures = HashMap::from([(
+            "000001.SZ".to_string(),
+            HashMap::from([("20240102".to_string(), vec![(0usize, 1.0)])]),
+        )]);
+
+        let rows = calc_rule_joint_ridge_day_stats_from_cache(&runtime_cache, &exposures, 1, 1);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].sample_count, 2);
+        assert_eq!(rows[0].exposed_sample_count, 1);
+        assert!((rows[0].feature_cross_products[0] - 0.5).abs() < 1e-10);
+        assert!((rows[0].feature_residual_products[0] - 1.0).abs() < 1e-10);
+        assert!((rows[0].residual_sum_squares - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn joint_head_training_weights_prioritize_real_ranking_head_and_keep_total_weight() {
+        let scores = (0..10_000).map(|value| value as f64).collect::<Vec<_>>();
+        let weights = joint_head_training_weights(&scores);
+
+        assert!((weights.iter().sum::<f64>() - scores.len() as f64).abs() < 1e-8);
+        assert!(weights[9_999] > weights[9_970]);
+        assert!(weights[9_970] > weights[9_920]);
+        assert!(weights[9_920] > weights[9_850]);
+        assert!((weights[9_850] - weights[9_600]).abs() < 1e-12);
+        assert!(weights[9_600] > weights[9_200]);
+        assert!(weights[9_200] > weights[8_000]);
     }
 }
