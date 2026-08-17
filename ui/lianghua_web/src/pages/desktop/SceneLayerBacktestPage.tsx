@@ -5,6 +5,7 @@ import { getStrategyManagePage, type StrategyManageRuleItem } from "../../apis/s
 import {
   getRuleLayerBacktestDefaults,
   runRankLayerBacktest,
+  runRuleExpressionCalibration,
   runRuleExpressionValidation,
   runTransientRankLayerBacktest,
   runTransientRuleLayerBacktest,
@@ -15,6 +16,8 @@ import {
   type RankLayerBacktestData,
   type RankLayerMethod,
   type RankLayerSampleGroup,
+  type RuleExpressionCalibrationCandidate,
+  type RuleExpressionCalibrationData,
   type RuleExpressionValidationData,
   type RuleValidationComboResult,
   type RuleLayerBacktestData,
@@ -192,6 +195,27 @@ function formatPercent(value?: number | null, digits = 2) {
     return "--";
   }
   return `${value.toFixed(digits)}%`;
+}
+
+function formatCalibrationDistancePoints(candidate: RuleExpressionCalibrationCandidate) {
+  if (candidate.suggested_dist_points.length === 0) {
+    return "—";
+  }
+  return candidate.suggested_dist_points
+    .map((item) => `${item.min}-${item.max}:${formatNumber(item.points, 2)}`)
+    .join("；");
+}
+
+function formatCalibrationBuckets(candidate: RuleExpressionCalibrationCandidate) {
+  if (candidate.score_buckets.length === 0) {
+    return "无可用分桶";
+  }
+  return candidate.score_buckets
+    .map(
+      (item) =>
+        `×${formatNumber(item.score_multiplier, 2)}：${item.sample_count}样本 / ${formatPercent(item.avg_residual_return)}`,
+    )
+    .join("；");
 }
 
 function formatBacktestBoardLabel(value?: {
@@ -625,6 +649,10 @@ export default function SceneLayerBacktestPage() {
   const [validationLoading, setValidationLoading] = useState(false);
   const [validationError, setValidationError] = useState("");
   const [validationResult, setValidationResult] = useState<RuleExpressionValidationData | null>(null);
+  const [validationCalibrationLoading, setValidationCalibrationLoading] = useState(false);
+  const [validationCalibrationError, setValidationCalibrationError] = useState("");
+  const [validationCalibrationResult, setValidationCalibrationResult] =
+    useState<RuleExpressionCalibrationData | null>(null);
   const [validationSelectedComboKey, setValidationSelectedComboKey] = useState("");
   const [validationRestoredComboKey, setValidationRestoredComboKey] = useState("");
   const [validationDetailModalOpen, setValidationDetailModalOpen] = useState(false);
@@ -639,7 +667,8 @@ export default function SceneLayerBacktestPage() {
     rankTransientLoading ||
     ruleLoading ||
     ruleTransientLoading ||
-    validationLoading;
+    validationLoading ||
+    validationCalibrationLoading;
   const backtestBoardOptions = useMemo(
     () => buildBoardFilterOptions(STOCK_PICK_BOARD_OPTIONS, excludeStBoard),
     [excludeStBoard],
@@ -882,6 +911,13 @@ export default function SceneLayerBacktestPage() {
       ) ?? validationResult.combo_results[0] ?? null
     );
   }, [validationResult, validationSelectedComboKey]);
+  const activeValidationCalibration =
+    validationCalibrationResult?.combo_key === selectedValidationCombo?.combo_key
+      ? validationCalibrationResult
+      : null;
+  const recommendedValidationCalibration = activeValidationCalibration?.candidates.find(
+    (item) => item.candidate_key === activeValidationCalibration.recommended_candidate_key,
+  );
 
   const validationComboCount = validationResult?.combo_results.length ?? 0;
   const hasUnknownValidationCombo =
@@ -1471,6 +1507,8 @@ export default function SceneLayerBacktestPage() {
     const matched = strategyRuleOptions.find((item) => item.name === ruleName);
     if (!matched) {
       setValidationResult(null);
+      setValidationCalibrationResult(null);
+      setValidationCalibrationError("");
       setValidationError("");
       return;
     }
@@ -1489,6 +1527,8 @@ export default function SceneLayerBacktestPage() {
       setValidationUnknownConfigs([]);
     }
     setValidationResult(null);
+    setValidationCalibrationResult(null);
+    setValidationCalibrationError("");
     setValidationError("");
   }
 
@@ -1516,6 +1556,8 @@ export default function SceneLayerBacktestPage() {
     setValidationUnknownConfigs([]);
     setValidationSampleLimitText(String(VALIDATION_DEFAULT_SAMPLE_LIMIT));
     setValidationResult(null);
+    setValidationCalibrationResult(null);
+    setValidationCalibrationError("");
     setValidationSelectedComboKey("");
     setValidationRestoredComboKey("");
     setValidationDetailModalOpen(false);
@@ -1634,6 +1676,8 @@ export default function SceneLayerBacktestPage() {
     const normalizedManualPoints = validationDirection === "negative" ? -1 : 1;
 
     setValidationResult(null);
+    setValidationCalibrationResult(null);
+    setValidationCalibrationError("");
     setValidationSelectedComboKey("");
     setValidationRestoredComboKey("");
     setValidationDetailModalOpen(false);
@@ -1681,6 +1725,35 @@ export default function SceneLayerBacktestPage() {
       setValidationError(`执行表达式验证失败: ${String(runError)}`);
     } finally {
       setValidationLoading(false);
+    }
+  }
+
+  async function onRunRuleExpressionCalibration() {
+    if (!validationResult || !selectedValidationCombo) {
+      setValidationCalibrationError("请先完成基础表达式验证并选择一个参数组合。");
+      return;
+    }
+    const continuationId = validationResult.continuation_id?.trim();
+    if (!continuationId) {
+      setValidationCalibrationError(
+        "当前结果没有可复用的基础数据，可能来自旧会话或策略回测详情；请重新执行一次表达式验证。",
+      );
+      return;
+    }
+
+    setValidationCalibrationLoading(true);
+    setValidationCalibrationError("");
+    setValidationCalibrationResult(null);
+    try {
+      const data = await runRuleExpressionCalibration(
+        continuationId,
+        selectedValidationCombo.combo_key,
+      );
+      setValidationCalibrationResult(data);
+    } catch (runError) {
+      setValidationCalibrationError(`继续验证失败: ${String(runError)}`);
+    } finally {
+      setValidationCalibrationLoading(false);
     }
   }
 
@@ -2920,6 +2993,127 @@ export default function SceneLayerBacktestPage() {
               </table>
             </div>
           </div>
+
+          <div className="scene-layer-calibration-entry">
+            <div className="scene-layer-calibration-entry-copy">
+              <h3>继续验证：量化定分与触发方式</h3>
+              <p>
+                复用上面的收益样本，对选中组合比较 LAST、ANY、EACH、CONSEC 和带衰减的
+                RECENT；这一步不会随基础回测自动执行。
+              </p>
+            </div>
+            <button
+              type="button"
+              className="scene-layer-primary-btn"
+              onClick={() => void onRunRuleExpressionCalibration()}
+              disabled={heavyTaskRunning || !selectedValidationCombo}
+            >
+              {validationCalibrationLoading ? "继续验证中..." : "继续验证定分与触发方式"}
+            </button>
+          </div>
+          {validationCalibrationError ? (
+            <div className="scene-layer-error">{validationCalibrationError}</div>
+          ) : null}
+
+          {activeValidationCalibration ? (
+            <div className="scene-layer-calibration-results">
+              <div className="scene-layer-summary-grid">
+                <div className="scene-layer-summary-item">
+                  <span>验证参数组合</span>
+                  <strong>{activeValidationCalibration.combo_label}</strong>
+                </div>
+                <div className="scene-layer-summary-item">
+                  <span>候选触发方式</span>
+                  <strong>{activeValidationCalibration.candidate_count}</strong>
+                </div>
+                <div className="scene-layer-summary-item">
+                  <span>建议触发方式</span>
+                  <strong>{recommendedValidationCalibration?.scope_label ?? "暂无可靠建议"}</strong>
+                </div>
+                <div className="scene-layer-summary-item">
+                  <span>建议单次分 / 典型总分</span>
+                  <strong>
+                    {recommendedValidationCalibration
+                      ? `${formatNumber(recommendedValidationCalibration.suggested_points, 1)} / ${formatNumber(recommendedValidationCalibration.suggested_total_points, 1)}`
+                      : "--"}
+                  </strong>
+                </div>
+              </div>
+              <p className="scene-layer-calibration-note">
+                {activeValidationCalibration.point_scale_description}。建议分只用于给出一致标尺，最终仍应在整套策略组合回测中确认。
+              </p>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table scene-layer-calibration-table">
+                  <thead>
+                    <tr>
+                      <th>候选方式</th>
+                      <th>结论</th>
+                      <th>样本 / 交易日</th>
+                      <th>日均触发</th>
+                      <th>日度超额残差</th>
+                      <th>90%保守边际</th>
+                      <th>前半 / 后半</th>
+                      <th>IC / t值</th>
+                      <th>分数单调性</th>
+                      <th>平均分倍数</th>
+                      <th>建议单次分</th>
+                      <th>典型总分</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {activeValidationCalibration.candidates.map((candidate) => {
+                      const isRecommended =
+                        candidate.candidate_key ===
+                        activeValidationCalibration.recommended_candidate_key;
+                      return (
+                        <tr
+                          key={candidate.candidate_key}
+                          className={isRecommended ? "scene-layer-calibration-row-recommended" : undefined}
+                        >
+                          <td>
+                            <div className="scene-layer-calibration-candidate-name">
+                              <strong>{candidate.scope_label}</strong>
+                              {isRecommended ? <span>建议</span> : null}
+                              {candidate.is_current ? <span>当前</span> : null}
+                            </div>
+                            {candidate.suggested_dist_points.length > 0 ? (
+                              <small title={formatCalibrationDistancePoints(candidate)}>
+                                衰减分：{formatCalibrationDistancePoints(candidate)}
+                              </small>
+                            ) : null}
+                          </td>
+                          <td>
+                            <span className={`scene-layer-calibration-status scene-layer-calibration-status-${candidate.status}`}>
+                              {candidate.status_label}
+                            </span>
+                          </td>
+                          <td>{candidate.trigger_samples} / {candidate.triggered_days}</td>
+                          <td>{formatNumber(candidate.avg_daily_trigger, 2)}</td>
+                          <td>{formatPercent(candidate.avg_excess_residual_mean)}</td>
+                          <td>{formatPercent(candidate.conservative_edge)}</td>
+                          <td>
+                            {formatPercent(candidate.early_excess_residual_mean)} / {formatPercent(candidate.late_excess_residual_mean)}
+                          </td>
+                          <td>{formatNumber(candidate.ic_mean)} / {formatNumber(candidate.ic_t_value, 2)}</td>
+                          <td title={formatCalibrationBuckets(candidate)}>
+                            {candidate.score_monotonicity === null || candidate.score_monotonicity === undefined
+                              ? "--"
+                              : `${formatNumber(candidate.score_monotonicity * 100, 0)}%`}
+                          </td>
+                          <td>{formatNumber(candidate.avg_score_multiplier, 2)}</td>
+                          <td><strong>{formatNumber(candidate.suggested_points, 1)}</strong></td>
+                          <td><strong>{formatNumber(candidate.suggested_total_points, 1)}</strong></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <p className="scene-layer-calibration-note">
+                “单次分”可作为 points 起点；EACH 会按触发次数累加，所以同时看“平均分倍数”和“典型总分”。悬停“分数单调性”可查看各倍数分桶的样本与收益。
+              </p>
+            </div>
+          ) : null}
 
           {!shouldUseValidationDetailModal && selectedValidationCombo ? (
             <>

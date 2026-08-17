@@ -573,6 +573,112 @@
   color: #64748b;
 }
 
+.scene-layer-calibration-entry {
+  margin-top: 14px;
+  border: 1px solid #fed7aa;
+  border-radius: 10px;
+  padding: 12px;
+  background: #fffaf5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.scene-layer-calibration-entry-copy h3 {
+  margin: 0 0 4px;
+  color: #9a3412;
+  font-size: 15px;
+}
+
+.scene-layer-calibration-entry-copy p,
+.scene-layer-calibration-note {
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.scene-layer-calibration-entry .scene-layer-primary-btn {
+  flex: 0 0 auto;
+}
+
+.scene-layer-calibration-results {
+  margin-top: 12px;
+  border: 1px solid #e1e7ef;
+  border-radius: 10px;
+  padding: 12px;
+  background: #fcfdff;
+}
+
+.scene-layer-calibration-results .scene-layer-calibration-note {
+  margin: 10px 0;
+}
+
+.scene-layer-calibration-table {
+  min-width: 1500px;
+}
+
+.scene-layer-calibration-table td:first-child {
+  min-width: 210px;
+  white-space: normal;
+}
+
+.scene-layer-calibration-table td:first-child small {
+  display: block;
+  margin-top: 4px;
+  max-width: 320px;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.scene-layer-calibration-row-recommended {
+  background: #fff7ed;
+}
+
+.scene-layer-calibration-candidate-name {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.scene-layer-calibration-candidate-name span {
+  border: 1px solid #fdba74;
+  border-radius: 999px;
+  padding: 1px 5px;
+  background: #ffedd5;
+  color: #9a3412;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.scene-layer-calibration-status {
+  display: inline-flex;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.scene-layer-calibration-status-reliable {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.scene-layer-calibration-status-unstable {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.scene-layer-calibration-status-no_edge,
+.scene-layer-calibration-status-insufficient {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
 .scene-layer-validation-detail-link {
   border: 0;
   background: transparent;

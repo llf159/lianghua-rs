@@ -402,6 +402,59 @@ export type RuleExpressionValidationData = {
   sample_limit_per_group: number
   combo_results: RuleValidationComboResult[]
   best_combo_key?: string | null
+  continuation_id?: string | null
+}
+
+export type RuleExpressionCalibrationBucket = {
+  score_multiplier: number
+  sample_count: number
+  avg_residual_return?: number | null
+}
+
+export type RuleExpressionCalibrationDistancePoint = {
+  min: number
+  max: number
+  points: number
+}
+
+export type RuleExpressionCalibrationCandidate = {
+  candidate_key: string
+  scope_way: string
+  scope_label: string
+  scope_windows: number
+  is_current: boolean
+  trigger_samples: number
+  triggered_days: number
+  avg_daily_trigger: number
+  avg_residual_mean?: number | null
+  avg_excess_residual_mean?: number | null
+  daily_std?: number | null
+  standard_error?: number | null
+  conservative_edge?: number | null
+  early_excess_residual_mean?: number | null
+  late_excess_residual_mean?: number | null
+  ic_mean?: number | null
+  ic_t_value?: number | null
+  score_monotonicity?: number | null
+  avg_score_multiplier?: number | null
+  suggested_points: number
+  suggested_total_points: number
+  calibration_score: number
+  status: string
+  status_label: string
+  score_buckets: RuleExpressionCalibrationBucket[]
+  suggested_dist_points: RuleExpressionCalibrationDistancePoint[]
+}
+
+export type RuleExpressionCalibrationData = {
+  continuation_id: string
+  combo_key: string
+  combo_label: string
+  direction: string
+  candidate_count: number
+  point_scale_description: string
+  recommended_candidate_key?: string | null
+  candidates: RuleExpressionCalibrationCandidate[]
 }
 
 export type MarketRankItem = {
@@ -682,6 +735,13 @@ export async function runTransientRankLayerBacktest(query: RankLayerBacktestQuer
 
 export async function runRuleExpressionValidation(query: RuleExpressionValidationQuery) {
   return invoke<RuleExpressionValidationData>('run_rule_expression_validation', query)
+}
+
+export async function runRuleExpressionCalibration(continuationId: string, comboKey: string) {
+  return invoke<RuleExpressionCalibrationData>('run_rule_expression_calibration', {
+    continuationId,
+    comboKey,
+  })
 }
 
 export async function getMarketAnalysis(query: {

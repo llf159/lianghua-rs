@@ -146,6 +146,7 @@ use lianghua_rs::ui_tools::{
         get_strategy_statistics_page as core_get_strategy_statistics_page,
         get_strategy_triggered_stocks as core_get_strategy_triggered_stocks,
         run_rank_layer_backtest as core_run_rank_layer_backtest,
+        run_rule_expression_calibration as core_run_rule_expression_calibration,
         run_rule_expression_validation as core_run_rule_expression_validation,
         run_rule_layer_backtest as core_run_rule_layer_backtest,
         run_scene_layer_backtest as core_run_scene_layer_backtest,
@@ -153,10 +154,11 @@ use lianghua_rs::ui_tools::{
         run_transient_rule_layer_backtest as core_run_transient_rule_layer_backtest,
         run_transient_scene_layer_backtest as core_run_transient_scene_layer_backtest,
         MarketAnalysisData, MarketContributionData, RankLayerBacktestData,
-        RuleExpressionValidationData, RuleExpressionValidationManualStrategy,
-        RuleLayerBacktestData, RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig,
-        SceneLayerBacktestData, SceneLayerBacktestDefaultsData, SceneStatisticsPageData,
-        StrategyStatisticsDetailData, StrategyStatisticsPageData, TriggeredStockRow,
+        RuleExpressionCalibrationData, RuleExpressionValidationData,
+        RuleExpressionValidationManualStrategy, RuleLayerBacktestData,
+        RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig, SceneLayerBacktestData,
+        SceneLayerBacktestDefaultsData, SceneStatisticsPageData, StrategyStatisticsDetailData,
+        StrategyStatisticsPageData, TriggeredStockRow,
     },
     stock_pick::{get_stock_pick_options as core_get_stock_pick_options, StockPickOptionsData},
     stock_similarity::{
@@ -1419,6 +1421,20 @@ async fn run_rule_expression_validation(
 }
 
 #[tauri::command]
+async fn run_rule_expression_calibration(
+    continuation_id: String,
+    combo_key: String,
+) -> Result<RuleExpressionCalibrationData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        run_with_heap_trim(|| {
+            core_run_rule_expression_calibration(continuation_id, combo_key)
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 fn check_strategy_manage_scene_draft(
     source_path: String,
     original_name: Option<String>,
@@ -2409,6 +2425,7 @@ pub fn run() {
             run_transient_scene_layer_backtest,
             run_transient_rule_layer_backtest,
             run_rule_expression_validation,
+            run_rule_expression_calibration,
             get_ranking_compute_status,
             preview_ranking_score_calculation_warnings,
             run_ranking_score_calculation,

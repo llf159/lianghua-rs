@@ -1,7 +1,8 @@
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
-    sync::Mutex,
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use duckdb::{Connection, params, params_from_iter};
@@ -49,7 +50,7 @@ use crate::{
             build_rule_layer_runtime_cache_from_stock_data_with_ts_filter,
             calc_all_rule_layer_metrics_with_samples_from_db_map_with_ts_filter,
             calc_all_rule_layer_metrics_with_samples_from_rows_map,
-            calc_rule_layer_metrics_from_db_with_ts_filter,
+            calc_rule_layer_metrics_from_cache, calc_rule_layer_metrics_from_db_with_ts_filter,
             calc_rule_layer_metrics_with_samples_from_cache,
             visit_triggered_rule_samples_from_cache,
         },
@@ -402,6 +403,12 @@ const VALIDATION_MAX_COMBINATIONS: usize = 256;
 const VALIDATION_COMBO_EVAL_BATCH_SIZE: usize = 16;
 const VALIDATION_DEFAULT_SAMPLE_LIMIT_PER_GROUP: usize = 30;
 const VALIDATION_MAX_SAMPLE_LIMIT_PER_GROUP: usize = 200;
+const VALIDATION_CONTINUATION_CACHE_LIMIT: usize = 2;
+const VALIDATION_CONTINUATION_TTL: Duration = Duration::from_secs(30 * 60);
+const VALIDATION_CALIBRATION_MIN_SAMPLES: usize = 100;
+const VALIDATION_CALIBRATION_MIN_DAYS: usize = 20;
+const VALIDATION_CALIBRATION_LCB_Z: f64 = 1.28;
+const VALIDATION_CALIBRATION_POINT_SCALE: f64 = 40.0;
 const RULE_BACKTEST_DETAIL_SAMPLE_LIMIT_PER_GROUP: usize = 5;
 const RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP: usize = 5;
 #[cfg(test)]
@@ -500,6 +507,63 @@ pub struct RuleExpressionValidationData {
     pub sample_limit_per_group: usize,
     pub combo_results: Vec<RuleValidationComboResult>,
     pub best_combo_key: Option<String>,
+    pub continuation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleExpressionCalibrationBucket {
+    pub score_multiplier: f64,
+    pub sample_count: usize,
+    pub avg_residual_return: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleExpressionCalibrationDistancePoint {
+    pub min: usize,
+    pub max: usize,
+    pub points: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleExpressionCalibrationCandidate {
+    pub candidate_key: String,
+    pub scope_way: String,
+    pub scope_label: String,
+    pub scope_windows: usize,
+    pub is_current: bool,
+    pub trigger_samples: usize,
+    pub triggered_days: usize,
+    pub avg_daily_trigger: f64,
+    pub avg_residual_mean: Option<f64>,
+    pub avg_excess_residual_mean: Option<f64>,
+    pub daily_std: Option<f64>,
+    pub standard_error: Option<f64>,
+    pub conservative_edge: Option<f64>,
+    pub early_excess_residual_mean: Option<f64>,
+    pub late_excess_residual_mean: Option<f64>,
+    pub ic_mean: Option<f64>,
+    pub ic_t_value: Option<f64>,
+    pub score_monotonicity: Option<f64>,
+    pub avg_score_multiplier: Option<f64>,
+    pub suggested_points: f64,
+    pub suggested_total_points: f64,
+    pub calibration_score: f64,
+    pub status: String,
+    pub status_label: String,
+    pub score_buckets: Vec<RuleExpressionCalibrationBucket>,
+    pub suggested_dist_points: Vec<RuleExpressionCalibrationDistancePoint>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleExpressionCalibrationData {
+    pub continuation_id: String,
+    pub combo_key: String,
+    pub combo_label: String,
+    pub direction: String,
+    pub candidate_count: usize,
+    pub point_scale_description: String,
+    pub recommended_candidate_key: Option<String>,
+    pub candidates: Vec<RuleExpressionCalibrationCandidate>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -555,6 +619,78 @@ struct ValidationSeedRule {
     dist_points: Option<Vec<crate::data::DistPoint>>,
     tag: RuleTag,
     exclude_rule_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ValidationContinuationCombo {
+    combo_key: String,
+    combo_label: String,
+    formula: String,
+}
+
+#[derive(Debug)]
+struct ValidationContinuationSession {
+    created_at: Instant,
+    source_path: String,
+    params: RuleLayerBacktestRunParams,
+    runtime_cache: Arc<RuleLayerRuntimeCache>,
+    seed_rule: ValidationSeedRule,
+    validation_ts_codes: Vec<String>,
+    combos: HashMap<String, ValidationContinuationCombo>,
+}
+
+static VALIDATION_CONTINUATION_CACHE: OnceLock<
+    Mutex<HashMap<String, Arc<ValidationContinuationSession>>>,
+> = OnceLock::new();
+
+fn validation_continuation_cache()
+-> &'static Mutex<HashMap<String, Arc<ValidationContinuationSession>>> {
+    VALIDATION_CONTINUATION_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn store_validation_continuation_session(
+    session: ValidationContinuationSession,
+) -> Result<String, String> {
+    let mut cache = validation_continuation_cache()
+        .lock()
+        .map_err(|_| "保存表达式继续验证基础数据失败:缓存锁已损坏".to_string())?;
+    cache.retain(|_, item| item.created_at.elapsed() <= VALIDATION_CONTINUATION_TTL);
+    while cache.len() >= VALIDATION_CONTINUATION_CACHE_LIMIT {
+        let Some(oldest_key) = cache
+            .iter()
+            .max_by_key(|(_, item)| item.created_at.elapsed())
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        cache.remove(&oldest_key);
+    }
+
+    let continuation_id = loop {
+        let candidate = format!(
+            "expr-calibration-{:016x}{:016x}",
+            random::<u64>(),
+            random::<u64>()
+        );
+        if !cache.contains_key(&candidate) {
+            break candidate;
+        }
+    };
+    cache.insert(continuation_id.clone(), Arc::new(session));
+    Ok(continuation_id)
+}
+
+fn load_validation_continuation_session(
+    continuation_id: &str,
+) -> Result<Arc<ValidationContinuationSession>, String> {
+    let mut cache = validation_continuation_cache()
+        .lock()
+        .map_err(|_| "读取表达式继续验证基础数据失败:缓存锁已损坏".to_string())?;
+    cache.retain(|_, item| item.created_at.elapsed() <= VALIDATION_CONTINUATION_TTL);
+    cache
+        .get(continuation_id.trim())
+        .cloned()
+        .ok_or_else(|| "表达式基础验证缓存已失效，请重新执行一次表达式验证".to_string())
 }
 
 #[derive(Debug, Serialize)]
@@ -3579,19 +3715,21 @@ pub fn run_rule_expression_validation(
         backtest_period: params.backtest_period,
         min_listed_trade_days: params.min_listed_trade_days,
     };
-    let runtime_cache = build_rule_layer_runtime_cache_from_stock_data_with_ts_filter(
-        &source_conn,
-        &source_path,
-        &params.stock_adj_type,
-        &params.index_ts_code,
-        params.index_beta,
-        params.concept_beta,
-        params.industry_beta,
-        &params.start_date,
-        &params.end_date,
-        &layer_config,
-        params.allowed_ts_codes.as_ref(),
-    )?;
+    let runtime_cache = Arc::new(
+        build_rule_layer_runtime_cache_from_stock_data_with_ts_filter(
+            &source_conn,
+            &source_path,
+            &params.stock_adj_type,
+            &params.index_ts_code,
+            params.index_beta,
+            params.concept_beta,
+            params.industry_beta,
+            &params.start_date,
+            &params.end_date,
+            &layer_config,
+            params.allowed_ts_codes.as_ref(),
+        )?,
+    );
     let validation_required_runtime_keys =
         collect_rule_validation_runtime_keys(&execution_plan.combos);
     let validation_reader =
@@ -3640,7 +3778,7 @@ pub fn run_rule_expression_validation(
                 &seed_rule,
                 combo,
                 triggered_score_map,
-                &runtime_cache,
+                runtime_cache.as_ref(),
                 &layer_config,
                 &similarity_cache,
                 &explain_map,
@@ -3658,6 +3796,30 @@ pub fn run_rule_expression_validation(
     });
 
     let best_combo_key = combo_results.first().map(|item| item.combo_key.clone());
+    let continuation_combos = execution_plan
+        .combos
+        .iter()
+        .map(|combo| {
+            (
+                combo.variant.combo_key.clone(),
+                ValidationContinuationCombo {
+                    combo_key: combo.variant.combo_key.clone(),
+                    combo_label: combo.variant.combo_label.clone(),
+                    formula: combo.variant.formula.clone(),
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let continuation_id = store_validation_continuation_session(ValidationContinuationSession {
+        created_at: Instant::now(),
+        source_path: source_path.clone(),
+        params: params.clone(),
+        runtime_cache: Arc::clone(&runtime_cache),
+        seed_rule: seed_rule.clone(),
+        validation_ts_codes,
+        combos: continuation_combos,
+    })
+    .ok();
 
     Ok(RuleExpressionValidationData {
         import_rule_name: seed_rule.rule_name,
@@ -3667,6 +3829,530 @@ pub fn run_rule_expression_validation(
         sample_limit_per_group,
         combo_results,
         best_combo_key,
+        continuation_id,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct ValidationCalibrationSpec {
+    candidate_key: String,
+    scope_way: ScopeWay,
+    scope_windows: usize,
+    scope_label: String,
+    dist_points: Option<Vec<crate::data::DistPoint>>,
+    is_current: bool,
+}
+
+#[derive(Debug, Default)]
+struct ValidationCalibrationBucketAgg {
+    score_multiplier: f64,
+    sample_count: usize,
+    residual_sum: f64,
+}
+
+fn scope_way_config_label(scope_way: ScopeWay) -> String {
+    match scope_way {
+        ScopeWay::Any => "ANY".to_string(),
+        ScopeWay::Last => "LAST".to_string(),
+        ScopeWay::Each => "EACH".to_string(),
+        ScopeWay::Recent => "RECENT".to_string(),
+        ScopeWay::Consec(threshold) => format!("CONSEC>={threshold}"),
+    }
+}
+
+fn normalize_calibration_dist_points(
+    items: Option<Vec<crate::data::DistPoint>>,
+    direction_sign: f64,
+) -> Option<Vec<crate::data::DistPoint>> {
+    let items = items?;
+    let max_abs = items
+        .iter()
+        .map(|item| item.points.abs())
+        .fold(0.0_f64, f64::max);
+    if max_abs <= VALIDATION_EPS {
+        return None;
+    }
+    Some(
+        items
+            .into_iter()
+            .map(|item| crate::data::DistPoint {
+                min: item.min,
+                max: item.max,
+                points: direction_sign * item.points.abs() / max_abs,
+            })
+            .collect(),
+    )
+}
+
+fn build_recent_decay_dist_points(
+    scope_windows: usize,
+    direction_sign: f64,
+) -> Vec<crate::data::DistPoint> {
+    let half_life = ((scope_windows.max(2) - 1) as f64 / 2.0).max(1.0);
+    (0..scope_windows)
+        .map(|offset| crate::data::DistPoint {
+            min: offset,
+            max: offset,
+            points: direction_sign * 0.5_f64.powf(offset as f64 / half_life),
+        })
+        .collect()
+}
+
+fn build_validation_calibration_specs(
+    seed_rule: &ValidationSeedRule,
+) -> Vec<ValidationCalibrationSpec> {
+    let direction_sign = if seed_rule.points < 0.0 { -1.0 } else { 1.0 };
+    let current_scope_label = scope_way_config_label(seed_rule.scope_way);
+    let mut specs = vec![ValidationCalibrationSpec {
+        candidate_key: "current".to_string(),
+        scope_way: seed_rule.scope_way,
+        scope_windows: seed_rule.scope_windows,
+        scope_label: format!("{}（当前）", current_scope_label),
+        dist_points: normalize_calibration_dist_points(
+            seed_rule.dist_points.clone(),
+            direction_sign,
+        ),
+        is_current: true,
+    }];
+    let mut seen = HashSet::from([format!(
+        "{}:{}",
+        current_scope_label, seed_rule.scope_windows
+    )]);
+
+    let mut push_plain = |scope_way: ScopeWay, scope_windows: usize| {
+        let label = scope_way_config_label(scope_way);
+        let dedupe_key = format!("{label}:{scope_windows}");
+        if !seen.insert(dedupe_key) {
+            return;
+        }
+        specs.push(ValidationCalibrationSpec {
+            candidate_key: format!(
+                "{}-{}",
+                label.to_ascii_lowercase().replace(">=", "-"),
+                scope_windows
+            ),
+            scope_way,
+            scope_windows,
+            scope_label: label,
+            dist_points: None,
+            is_current: false,
+        });
+    };
+
+    push_plain(ScopeWay::Last, 1);
+    for window in [3, 5, 10] {
+        push_plain(ScopeWay::Any, window);
+    }
+    for window in [3, 5, 10] {
+        push_plain(ScopeWay::Each, window);
+    }
+    for (threshold, windows) in [(2, [3, 5, 10]), (3, [3, 5, 10])] {
+        for window in windows {
+            if window >= threshold {
+                push_plain(ScopeWay::Consec(threshold), window);
+            }
+        }
+    }
+    drop(push_plain);
+
+    for window in [3, 5, 10] {
+        specs.push(ValidationCalibrationSpec {
+            candidate_key: format!("recent-decay-{window}"),
+            scope_way: ScopeWay::Recent,
+            scope_windows: window,
+            scope_label: "RECENT（自动衰减）".to_string(),
+            dist_points: Some(build_recent_decay_dist_points(window, direction_sign)),
+            is_current: false,
+        });
+    }
+    specs
+}
+
+fn sample_std_f64(values: &[f64]) -> Option<f64> {
+    if values.len() < 2 {
+        return None;
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let variance = values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / (values.len() - 1) as f64;
+    variance.is_finite().then_some(variance.sqrt())
+}
+
+fn round_to_half(value: f64) -> f64 {
+    (value * 2.0).round() / 2.0
+}
+
+fn calibration_stability_factor(
+    direction_sign: f64,
+    early_mean: Option<f64>,
+    late_mean: Option<f64>,
+) -> f64 {
+    match (
+        early_mean.map(|value| value * direction_sign),
+        late_mean.map(|value| value * direction_sign),
+    ) {
+        (Some(early), Some(late)) if early > 0.0 && late > 0.0 => 1.0,
+        (Some(early), Some(late)) if early > 0.0 || late > 0.0 => 0.5,
+        _ => 0.0,
+    }
+}
+
+fn calibration_scope_structure_factor(scope_way: ScopeWay, monotonicity: Option<f64>) -> f64 {
+    match scope_way {
+        ScopeWay::Each => monotonicity.unwrap_or(0.25).clamp(0.25, 1.0),
+        ScopeWay::Recent => (0.5 + monotonicity.unwrap_or(0.5) * 0.5).clamp(0.5, 1.0),
+        _ => 1.0,
+    }
+}
+
+fn build_calibration_candidate(
+    spec: &ValidationCalibrationSpec,
+    direction_sign: f64,
+    metrics: crate::simulate::rule::RuleLayerMetrics,
+    runtime_cache: &RuleLayerRuntimeCache,
+    triggered_score_map: &ValidationTriggeredScoreMap,
+) -> Result<RuleExpressionCalibrationCandidate, String> {
+    let mut daily_excess = metrics
+        .points
+        .iter()
+        .filter_map(|point| {
+            point
+                .avg_excess_residual_return
+                .filter(|value| value.is_finite())
+                .map(|value| (point.trade_date.clone(), value))
+        })
+        .collect::<Vec<_>>();
+    daily_excess.sort_by(|left, right| left.0.cmp(&right.0));
+    let daily_values = daily_excess
+        .iter()
+        .map(|(_, value)| *value)
+        .collect::<Vec<_>>();
+    let daily_mean = mean_f64(&daily_values);
+    let daily_std = sample_std_f64(&daily_values);
+    let standard_error = daily_std.map(|std| std / (daily_values.len() as f64).sqrt());
+    let conservative_edge = daily_mean.zip(standard_error).map(|(mean, se)| {
+        let oriented_lcb = mean * direction_sign - VALIDATION_CALIBRATION_LCB_Z * se;
+        direction_sign * oriented_lcb
+    });
+
+    let split_index = daily_excess.len() / 2;
+    let early_values = daily_excess[..split_index]
+        .iter()
+        .map(|(_, value)| *value)
+        .collect::<Vec<_>>();
+    let late_values = daily_excess[split_index..]
+        .iter()
+        .map(|(_, value)| *value)
+        .collect::<Vec<_>>();
+    let early_mean = mean_f64(&early_values);
+    let late_mean = mean_f64(&late_values);
+    let stability_factor = calibration_stability_factor(direction_sign, early_mean, late_mean);
+
+    let mut trigger_samples = 0usize;
+    let mut triggered_days = HashSet::new();
+    let mut multiplier_sum = 0.0;
+    let mut bucket_map = HashMap::<u64, ValidationCalibrationBucketAgg>::new();
+    visit_triggered_rule_samples_from_cache(runtime_cache, triggered_score_map, |sample| {
+        let score_multiplier = sample.rule_score.abs();
+        if !score_multiplier.is_finite() || score_multiplier <= VALIDATION_EPS {
+            return Ok(());
+        }
+        trigger_samples += 1;
+        triggered_days.insert(sample.trade_date.to_string());
+        multiplier_sum += score_multiplier;
+        let entry = bucket_map
+            .entry(score_multiplier.to_bits())
+            .or_insert_with(|| ValidationCalibrationBucketAgg {
+                score_multiplier,
+                ..ValidationCalibrationBucketAgg::default()
+            });
+        entry.sample_count += 1;
+        entry.residual_sum += sample.residual_return;
+        Ok(())
+    })?;
+    let triggered_day_count = triggered_days.len();
+    let avg_score_multiplier = if trigger_samples > 0 {
+        Some(multiplier_sum / trigger_samples as f64)
+    } else {
+        None
+    };
+
+    let mut score_buckets = bucket_map
+        .into_values()
+        .map(|bucket| RuleExpressionCalibrationBucket {
+            score_multiplier: bucket.score_multiplier,
+            sample_count: bucket.sample_count,
+            avg_residual_return: (bucket.sample_count > 0)
+                .then_some(bucket.residual_sum / bucket.sample_count as f64),
+        })
+        .collect::<Vec<_>>();
+    score_buckets.sort_by(|left, right| {
+        left.score_multiplier
+            .partial_cmp(&right.score_multiplier)
+            .unwrap_or(Ordering::Equal)
+    });
+    let monotonic_buckets = score_buckets
+        .iter()
+        .filter(|bucket| bucket.sample_count >= 30)
+        .filter_map(|bucket| {
+            bucket
+                .avg_residual_return
+                .map(|value| value * direction_sign)
+        })
+        .collect::<Vec<_>>();
+    let score_monotonicity = if monotonic_buckets.len() >= 2 {
+        let monotonic_pairs = monotonic_buckets
+            .windows(2)
+            .filter(|window| window[1] + VALIDATION_EPS >= window[0])
+            .count();
+        Some(monotonic_pairs as f64 / (monotonic_buckets.len() - 1) as f64)
+    } else {
+        None
+    };
+
+    let enough_samples = trigger_samples >= VALIDATION_CALIBRATION_MIN_SAMPLES
+        && triggered_day_count >= VALIDATION_CALIBRATION_MIN_DAYS;
+    let oriented_lcb = conservative_edge.map(|value| value * direction_sign);
+    let (status, status_label) = if !enough_samples {
+        ("insufficient", "样本不足")
+    } else if oriented_lcb.is_none_or(|value| value <= 0.0) {
+        ("no_edge", "保守边际不足")
+    } else if stability_factor < 1.0 {
+        ("unstable", "前后段不稳定")
+    } else {
+        ("reliable", "相对稳定")
+    };
+
+    let normalized_edge = match (oriented_lcb, daily_std) {
+        (Some(edge), Some(std)) if edge > 0.0 && std > VALIDATION_EPS => edge / std,
+        _ => 0.0,
+    };
+    let structure_factor = calibration_scope_structure_factor(spec.scope_way, score_monotonicity);
+    let ic_support = metrics
+        .ic_t_value
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value / (daily_values.len().max(1) as f64).sqrt())
+        .unwrap_or(0.0);
+    let calibration_score = if enough_samples {
+        (normalized_edge + ic_support * 0.15) * stability_factor * structure_factor
+    } else {
+        0.0
+    };
+    let desired_total_points = if enough_samples && normalized_edge > 0.0 {
+        round_to_half(
+            (VALIDATION_CALIBRATION_POINT_SCALE
+                * normalized_edge
+                * stability_factor
+                * structure_factor)
+                .clamp(0.0, 10.0),
+        )
+    } else {
+        0.0
+    };
+    let unit_points_abs = avg_score_multiplier
+        .filter(|value| *value > VALIDATION_EPS)
+        .map(|value| round_to_half((desired_total_points / value).clamp(0.0, 10.0)))
+        .unwrap_or(0.0);
+    let suggested_points = direction_sign * unit_points_abs;
+    let suggested_total_points = direction_sign * desired_total_points;
+    let suggested_dist_points = spec
+        .dist_points
+        .as_ref()
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| RuleExpressionCalibrationDistancePoint {
+                    min: item.min,
+                    max: item.max,
+                    points: suggested_points * item.points.abs(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(RuleExpressionCalibrationCandidate {
+        candidate_key: spec.candidate_key.clone(),
+        scope_way: scope_way_config_label(spec.scope_way),
+        scope_label: spec.scope_label.clone(),
+        scope_windows: spec.scope_windows,
+        is_current: spec.is_current,
+        trigger_samples,
+        triggered_days: triggered_day_count,
+        avg_daily_trigger: if triggered_day_count > 0 {
+            trigger_samples as f64 / triggered_day_count as f64
+        } else {
+            0.0
+        },
+        avg_residual_mean: metrics.avg_residual_mean,
+        avg_excess_residual_mean: daily_mean,
+        daily_std,
+        standard_error,
+        conservative_edge,
+        early_excess_residual_mean: early_mean,
+        late_excess_residual_mean: late_mean,
+        ic_mean: metrics.ic_mean,
+        ic_t_value: metrics.ic_t_value,
+        score_monotonicity,
+        avg_score_multiplier,
+        suggested_points,
+        suggested_total_points,
+        calibration_score,
+        status: status.to_string(),
+        status_label: status_label.to_string(),
+        score_buckets,
+        suggested_dist_points,
+    })
+}
+
+fn calibration_status_rank(status: &str) -> usize {
+    match status {
+        "reliable" => 0,
+        "unstable" => 1,
+        "no_edge" => 2,
+        _ => 3,
+    }
+}
+
+pub fn run_rule_expression_calibration(
+    continuation_id: String,
+    combo_key: String,
+) -> Result<RuleExpressionCalibrationData, String> {
+    let continuation_id = continuation_id.trim().to_string();
+    let combo_key = combo_key.trim().to_string();
+    if continuation_id.is_empty() || combo_key.is_empty() {
+        return Err("继续验证标识和参数组合不能为空".to_string());
+    }
+    let session = load_validation_continuation_session(&continuation_id)?;
+    let combo = session
+        .combos
+        .get(&combo_key)
+        .cloned()
+        .ok_or_else(|| format!("继续验证基础数据中不存在参数组合:{combo_key}"))?;
+    let direction_sign = if session.seed_rule.points < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
+    let specs = build_validation_calibration_specs(&session.seed_rule);
+    let mut prepared = Vec::with_capacity(specs.len());
+    for spec in &specs {
+        let cached_rule = build_validation_cached_rule(
+            format!("calibration__{}", spec.candidate_key),
+            spec.scope_way,
+            spec.scope_windows,
+            direction_sign,
+            spec.dist_points.clone(),
+            session.seed_rule.tag,
+            &combo.formula,
+        )?;
+        prepared.push(PreparedValidationCombo {
+            variant: ValidationVariant {
+                combo_key: spec.candidate_key.clone(),
+                combo_label: spec.scope_label.clone(),
+                formula: combo.formula.clone(),
+                unknown_values: Vec::new(),
+            },
+            assigned_names: collect_validation_assigned_names(&cached_rule.when_ast),
+            cached_rule,
+        });
+    }
+
+    let max_warmup_need = prepared.iter().try_fold(0usize, |current, item| {
+        estimate_rule_warmup(
+            &item.cached_rule.when_ast,
+            item.cached_rule.scope_way,
+            item.cached_rule.scope_windows,
+        )
+        .map(|need| current.max(need))
+    })?;
+    let need_rows = calc_query_need_rows(
+        &session.source_path,
+        max_warmup_need,
+        &session.params.start_date,
+        &session.params.end_date,
+    )?;
+    let query_start_date = calc_query_start_date(
+        &session.source_path,
+        max_warmup_need,
+        &session.params.start_date,
+    )?;
+    let st_list = load_st_list(&session.source_path)?;
+    let triggered_maps = build_validation_triggered_scores_for_combos(
+        &session.source_path,
+        &session.params.stock_adj_type,
+        &query_start_date,
+        &session.params.start_date,
+        &session.params.end_date,
+        need_rows,
+        &session.validation_ts_codes,
+        &st_list,
+        &prepared,
+    )?;
+    let layer_config = RuleLayerConfig {
+        min_samples_per_day: session.params.min_samples_per_day,
+        backtest_period: session.params.backtest_period,
+        min_listed_trade_days: session.params.min_listed_trade_days,
+    };
+    let mut candidates = Vec::with_capacity(specs.len());
+    for (spec, triggered_score_map) in specs.iter().zip(triggered_maps.iter()) {
+        let metrics = calc_rule_layer_metrics_from_cache(
+            session.runtime_cache.as_ref(),
+            triggered_score_map,
+            &layer_config,
+        )?;
+        candidates.push(build_calibration_candidate(
+            spec,
+            direction_sign,
+            metrics,
+            session.runtime_cache.as_ref(),
+            triggered_score_map,
+        )?);
+    }
+
+    let recommended_candidate_key = candidates
+        .iter()
+        .filter(|item| matches!(item.status.as_str(), "reliable" | "unstable"))
+        .max_by(|left, right| {
+            calibration_status_rank(right.status.as_str())
+                .cmp(&calibration_status_rank(left.status.as_str()))
+                .then_with(|| {
+                    left.calibration_score
+                        .partial_cmp(&right.calibration_score)
+                        .unwrap_or(Ordering::Equal)
+                })
+        })
+        .map(|item| item.candidate_key.clone());
+    candidates.sort_by(|left, right| {
+        calibration_status_rank(left.status.as_str())
+            .cmp(&calibration_status_rank(right.status.as_str()))
+            .then_with(|| {
+                right
+                    .calibration_score
+                    .partial_cmp(&left.calibration_score)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .then_with(|| left.scope_label.cmp(&right.scope_label))
+            .then_with(|| left.scope_windows.cmp(&right.scope_windows))
+    });
+
+    Ok(RuleExpressionCalibrationData {
+        continuation_id,
+        combo_key: combo.combo_key,
+        combo_label: combo.combo_label,
+        direction: if direction_sign < 0.0 {
+            "negative".to_string()
+        } else {
+            "positive".to_string()
+        },
+        candidate_count: candidates.len(),
+        point_scale_description:
+            "建议分使用按交易日超额残差的90%保守边际；4分约对应0.1个日度标准差，EACH/RECENT同时折算为单次基础分"
+                .to_string(),
+        recommended_candidate_key,
+        candidates,
     })
 }
 
@@ -7234,16 +7920,18 @@ mod tests {
     };
 
     use super::{
-        PreparedValidationCombo, ValidationSampleRawRow, ValidationSampleStockMeta,
-        ValidationSimilarityCache, ValidationVariant, build_industry_maps_from_rows,
-        build_rank_layer_sample_groups, build_rule_contribution_averages_from_rows,
-        build_validation_cached_rule, build_validation_return_distribution,
-        build_validation_sample_groups, build_validation_similarity_rows,
-        build_validation_triggered_scores, build_validation_triggered_scores_for_combos,
+        PreparedValidationCombo, VALIDATION_EPS, ValidationSampleRawRow, ValidationSampleStockMeta,
+        ValidationSeedRule, ValidationSimilarityCache, ValidationVariant,
+        build_industry_maps_from_rows, build_rank_layer_sample_groups,
+        build_recent_decay_dist_points, build_rule_contribution_averages_from_rows,
+        build_validation_cached_rule, build_validation_calibration_specs,
+        build_validation_return_distribution, build_validation_sample_groups,
+        build_validation_similarity_rows, build_validation_triggered_scores,
+        build_validation_triggered_scores_for_combos, calibration_stability_factor,
         collect_rule_validation_runtime_keys, collect_validation_assigned_names,
         derive_validation_volatility_group, estimate_net_money_flow_yuan, money_flow_rank_items,
         money_outflow_rank_items, resolve_validation_sample_board_label,
-        resolve_validation_trigger_count, trailing_period_gain,
+        resolve_validation_trigger_count, scope_way_config_label, trailing_period_gain,
     };
     use crate::data::ScopeWay;
 
@@ -8116,5 +8804,75 @@ explain = "test"
         assert_eq!(rows[1].overlap_rate_vs_existing, Some(1.0));
         assert_eq!(rows[1].overlap_lift, Some(6.0));
         assert!(rows[1].explain.is_none());
+    }
+
+    #[test]
+    fn validation_calibration_candidates_cover_trigger_modes_without_plain_duplicate() {
+        let seed_rule = ValidationSeedRule {
+            rule_name: "测试策略".to_string(),
+            rule_explain: String::new(),
+            scope_way: ScopeWay::Last,
+            scope_windows: 1,
+            formula: "C > O".to_string(),
+            points: 1.0,
+            dist_points: None,
+            tag: RuleTag::Normal,
+            exclude_rule_name: None,
+        };
+
+        let specs = build_validation_calibration_specs(&seed_rule);
+
+        assert_eq!(
+            specs
+                .iter()
+                .filter(|item| {
+                    scope_way_config_label(item.scope_way) == "LAST" && item.scope_windows == 1
+                })
+                .count(),
+            1
+        );
+        for scope_label in ["ANY", "EACH", "CONSEC>=2", "CONSEC>=3", "RECENT"] {
+            assert!(
+                specs
+                    .iter()
+                    .any(|item| scope_way_config_label(item.scope_way) == scope_label),
+                "missing {scope_label}"
+            );
+        }
+    }
+
+    #[test]
+    fn validation_recent_decay_weights_keep_direction_and_decay() {
+        let positive = build_recent_decay_dist_points(3, 1.0);
+        let negative = build_recent_decay_dist_points(3, -1.0);
+
+        assert_eq!(positive.len(), 3);
+        assert!((positive[0].points - 1.0).abs() < VALIDATION_EPS);
+        assert!((positive[1].points - 0.5).abs() < VALIDATION_EPS);
+        assert!((positive[2].points - 0.25).abs() < VALIDATION_EPS);
+        assert!((negative[0].points + 1.0).abs() < VALIDATION_EPS);
+        assert!((negative[1].points + 0.5).abs() < VALIDATION_EPS);
+        assert!((negative[2].points + 0.25).abs() < VALIDATION_EPS);
+    }
+
+    #[test]
+    fn validation_calibration_stability_requires_both_time_halves() {
+        assert_eq!(calibration_stability_factor(1.0, Some(0.3), Some(0.1)), 1.0);
+        assert_eq!(
+            calibration_stability_factor(-1.0, Some(-0.3), Some(-0.1)),
+            1.0
+        );
+        assert_eq!(
+            calibration_stability_factor(1.0, Some(0.3), Some(-0.1)),
+            0.5
+        );
+        assert_eq!(
+            calibration_stability_factor(-1.0, Some(0.3), Some(-0.1)),
+            0.5
+        );
+        assert_eq!(
+            calibration_stability_factor(1.0, Some(-0.3), Some(-0.1)),
+            0.0
+        );
     }
 }
