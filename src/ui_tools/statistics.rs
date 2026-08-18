@@ -505,13 +505,13 @@ const VALIDATION_MAX_COMBINATIONS: usize = 256;
 const VALIDATION_COMBO_EVAL_BATCH_SIZE: usize = 16;
 const VALIDATION_DEFAULT_SAMPLE_LIMIT_PER_GROUP: usize = 30;
 const VALIDATION_MAX_SAMPLE_LIMIT_PER_GROUP: usize = 200;
-const VALIDATION_CONTINUATION_CACHE_LIMIT: usize = 2;
+const VALIDATION_CONTINUATION_CACHE_LIMIT: usize = 1;
 const VALIDATION_CONTINUATION_TTL: Duration = Duration::from_secs(30 * 60);
 const VALIDATION_CALIBRATION_MIN_SAMPLES: usize = 100;
 const VALIDATION_CALIBRATION_MIN_DAYS: usize = 20;
 const VALIDATION_CALIBRATION_LCB_Z: f64 = 1.28;
 const VALIDATION_CALIBRATION_POINT_SCALE: f64 = 40.0;
-const RULE_JOINT_VALIDATION_CACHE_LIMIT: usize = 2;
+const RULE_JOINT_VALIDATION_CACHE_LIMIT: usize = 1;
 const RULE_JOINT_VALIDATION_TTL: Duration = Duration::from_secs(30 * 60);
 const RULE_JOINT_RIDGE_MAX_FEATURES: usize = 256;
 const RULE_JOINT_WALK_FORWARD_MAX_FOLDS: usize = 5;
@@ -819,7 +819,6 @@ struct RuleJointValidationSession {
     source_path: String,
     params: RuleLayerBacktestRunParams,
     summary_rows: Arc<Vec<ScoreSummary>>,
-    detail_rows: Arc<Vec<ScoreDetails>>,
     features: Vec<RuleJointValidationFeature>,
 }
 
@@ -1315,7 +1314,6 @@ fn store_rule_joint_validation_from_rows(
     source_path: &str,
     params: &RuleLayerBacktestRunParams,
     summary_rows: Vec<ScoreSummary>,
-    detail_rows: Vec<ScoreDetails>,
 ) -> Option<String> {
     let features = load_rule_joint_validation_features(source_path).ok()?;
     store_rule_joint_validation_session(RuleJointValidationSession {
@@ -1323,7 +1321,6 @@ fn store_rule_joint_validation_from_rows(
         source_path: source_path.to_string(),
         params: params.clone(),
         summary_rows: Arc::new(summary_rows),
-        detail_rows: Arc::new(detail_rows),
         features,
     })
     .ok()
@@ -5189,8 +5186,13 @@ pub fn run_rule_joint_ridge_validation(
         &session.params.end_date,
         &layer_config,
     )?;
+    let detail_rows = load_score_detail_rows_from_db(
+        &session.source_path,
+        &session.params.start_date,
+        &session.params.end_date,
+    )?;
     let (exposures, trigger_samples) =
-        build_joint_exposures(&session.features, session.detail_rows.as_ref());
+        build_joint_exposures(&session.features, &detail_rows);
     let current_weights = session
         .features
         .iter()
@@ -7258,41 +7260,38 @@ fn ts_code_allowed_by_filter(allowed_ts_codes: Option<&HashSet<String>>, ts_code
 }
 
 fn filter_score_summary_rows_by_ts_codes(
-    rows: &[ScoreSummary],
+    rows: Vec<ScoreSummary>,
     allowed_ts_codes: Option<&HashSet<String>>,
 ) -> Vec<ScoreSummary> {
     if allowed_ts_codes.is_none() {
-        return rows.to_vec();
+        return rows;
     }
-    rows.iter()
+    rows.into_iter()
         .filter(|row| ts_code_allowed_by_filter(allowed_ts_codes, &row.ts_code))
-        .cloned()
         .collect()
 }
 
 fn filter_score_detail_rows_by_ts_codes(
-    rows: &[ScoreDetails],
+    rows: Vec<ScoreDetails>,
     allowed_ts_codes: Option<&HashSet<String>>,
 ) -> Vec<ScoreDetails> {
     if allowed_ts_codes.is_none() {
-        return rows.to_vec();
+        return rows;
     }
-    rows.iter()
+    rows.into_iter()
         .filter(|row| ts_code_allowed_by_filter(allowed_ts_codes, &row.ts_code))
-        .cloned()
         .collect()
 }
 
 fn filter_scene_detail_rows_by_ts_codes(
-    rows: &[SceneDetails],
+    rows: Vec<SceneDetails>,
     allowed_ts_codes: Option<&HashSet<String>>,
 ) -> Vec<SceneDetails> {
     if allowed_ts_codes.is_none() {
-        return rows.to_vec();
+        return rows;
     }
-    rows.iter()
+    rows.into_iter()
         .filter(|row| ts_code_allowed_by_filter(allowed_ts_codes, &row.ts_code))
-        .cloned()
         .collect()
 }
 
@@ -7380,6 +7379,47 @@ fn load_rule_backtest_score_rows_from_db(
     }
 
     Ok((summaries, details))
+}
+
+fn load_score_detail_rows_from_db(
+    source_path: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<Vec<ScoreDetails>, String> {
+    let result_conn = open_result_conn(source_path)?;
+    let mut detail_stmt = result_conn
+        .prepare(
+            r#"
+            SELECT ts_code, trade_date, rule_name, TRY_CAST(rule_score AS DOUBLE)
+            FROM rule_details
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
+            ORDER BY trade_date ASC, rule_name ASC, ts_code ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译策略回测规则原始行失败: {e}"))?;
+    let mut detail_rows = detail_stmt
+        .query(params![start_date, end_date])
+        .map_err(|e| format!("查询策略回测规则原始行失败: {e}"))?;
+    let mut details = Vec::new();
+    while let Some(row) = detail_rows
+        .next()
+        .map_err(|e| format!("读取策略回测规则原始行失败: {e}"))?
+    {
+        let rule_score: f64 = row.get(3).map_err(|e| format!("读取规则分数失败: {e}"))?;
+        let item = ScoreDetails {
+            ts_code: row.get(0).map_err(|e| format!("读取规则代码失败: {e}"))?,
+            trade_date: row.get(1).map_err(|e| format!("读取规则日期失败: {e}"))?,
+            rule_name: row.get(2).map_err(|e| format!("读取规则名称失败: {e}"))?,
+            rule_score,
+        };
+        if rule_score.is_finite() {
+            details.push(item);
+        }
+    }
+
+    Ok(details)
 }
 
 fn build_rule_contribution_averages_from_rows(
@@ -8263,7 +8303,7 @@ fn run_rank_layer_backtest_core(
         end_date: params.end_date.clone(),
         layer_config,
     };
-    let (summary_rows, detail_rows) = load_rule_backtest_score_rows_from_db(
+    let summary_rows = load_score_summary_rows_from_db(
         source_path,
         &params.start_date,
         &params.end_date,
@@ -8288,7 +8328,6 @@ fn run_rank_layer_backtest_core(
         source_path,
         &joint_params,
         summary_rows,
-        detail_rows,
     );
 
     Ok(RankLayerBacktestData {
@@ -8714,7 +8753,7 @@ pub fn run_transient_scene_layer_backtest(
         ScoringMemoryMode::SceneOnly,
     )?;
     let scene_rows = filter_scene_detail_rows_by_ts_codes(
-        &score_batch.scene_rows,
+        score_batch.scene_rows,
         params.allowed_ts_codes.as_ref(),
     );
     let scene_options = load_scene_options(&source_path)?;
@@ -8852,11 +8891,11 @@ pub fn run_transient_rule_layer_backtest(
         ScoringMemoryMode::SummaryAndDetails,
     )?;
     let summary_rows = filter_score_summary_rows_by_ts_codes(
-        &score_batch.summary_rows,
+        score_batch.summary_rows,
         params.allowed_ts_codes.as_ref(),
     );
     let detail_rows = filter_score_detail_rows_by_ts_codes(
-        &score_batch.detail_rows,
+        score_batch.detail_rows,
         params.allowed_ts_codes.as_ref(),
     );
     let (rule_options, rule_meta_map) = load_rule_meta(&source_path)?;
@@ -9049,14 +9088,10 @@ pub fn run_transient_rank_layer_backtest(
         &input.stock_adj_type,
         &input.start_date,
         &input.end_date,
-        ScoringMemoryMode::SummaryAndDetails,
+        ScoringMemoryMode::SummaryOnly,
     )?;
     let summary_rows = filter_score_summary_rows_by_ts_codes(
-        &score_batch.summary_rows,
-        params.allowed_ts_codes.as_ref(),
-    );
-    let detail_rows = filter_score_detail_rows_by_ts_codes(
-        &score_batch.detail_rows,
+        score_batch.summary_rows,
         params.allowed_ts_codes.as_ref(),
     );
     let metrics =
@@ -9077,7 +9112,6 @@ pub fn run_transient_rank_layer_backtest(
         &source_path,
         &joint_params,
         summary_rows,
-        detail_rows,
     );
 
     Ok(RankLayerBacktestData {
