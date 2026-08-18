@@ -17,16 +17,16 @@ open class RustPlugin : Plugin<Project> {
     override fun apply(project: Project) = with(project) {
         config = extensions.create("rust", Config::class.java)
 
-        val defaultAbiList = listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+        val defaultAbiList = listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64");
         val abiList = (findProperty("abiList") as? String)?.split(',') ?: defaultAbiList
 
-        val defaultArchList = listOf("arm64", "arm", "x86", "x86_64")
+        val defaultArchList = listOf("arm64", "arm", "x86", "x86_64");
         val archList = (findProperty("archList") as? String)?.split(',') ?: defaultArchList
 
-        val targetsList = (findProperty("targetList") as? String)?.split(',')
-            ?: listOf("aarch64", "armv7", "i686", "x86_64")
+        val targetsList = (findProperty("targetList") as? String)?.split(',') ?: listOf("aarch64", "armv7", "i686", "x86_64")
 
         extensions.configure<ApplicationExtension> {
+            @Suppress("UnstableApiUsage")
             flavorDimensions.add("abi")
             productFlavors {
                 create("universal") {
@@ -51,7 +51,7 @@ open class RustPlugin : Plugin<Project> {
                 val profileCapitalized = profile.replaceFirstChar { it.uppercase() }
                 val buildTask = tasks.maybeCreate(
                     "rustBuildUniversal$profileCapitalized",
-                    DefaultTask::class.java,
+                    DefaultTask::class.java
                 ).apply {
                     group = TASK_GROUP
                     description = "Build dynamic library in $profile mode for all targets"
@@ -59,12 +59,13 @@ open class RustPlugin : Plugin<Project> {
 
                 tasks["mergeUniversal${profileCapitalized}JniLibFolders"].dependsOn(buildTask)
 
-                for ((index, targetName) in targetsList.withIndex()) {
-                    val targetArch = archList[index]
+                for (targetPair in targetsList.withIndex()) {
+                    val targetName = targetPair.value
+                    val targetArch = archList[targetPair.index]
                     val targetArchCapitalized = targetArch.replaceFirstChar { it.uppercase() }
-                    val targetBuildTask = tasks.maybeCreate(
+                    val targetBuildTask = project.tasks.maybeCreate(
                         "rustBuild$targetArchCapitalized$profileCapitalized",
-                        BuildTask::class.java,
+                        BuildTask::class.java
                     ).apply {
                         group = TASK_GROUP
                         description = "Build dynamic library in $profile mode for $targetArch"
@@ -75,7 +76,7 @@ open class RustPlugin : Plugin<Project> {
 
                     buildTask.dependsOn(targetBuildTask)
                     tasks["merge$targetArchCapitalized${profileCapitalized}JniLibFolders"].dependsOn(
-                        targetBuildTask,
+                        targetBuildTask
                     )
                 }
             }

@@ -1,5 +1,4 @@
 import java.io.File
-import javax.inject.Inject
 import org.apache.tools.ant.taskdefs.condition.Os
 import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
@@ -8,9 +7,7 @@ import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.TaskAction
 import org.gradle.process.ExecOperations
 
-abstract class BuildTask @Inject constructor(
-    private val execOperations: ExecOperations,
-) : DefaultTask() {
+open class BuildTask : DefaultTask() {
     @Input
     var rootDirRel: String? = null
     @Input
@@ -20,11 +17,12 @@ abstract class BuildTask @Inject constructor(
 
     @TaskAction
     fun assemble() {
-        val executable = "cargo"
+        val executable = """cargo""";
         try {
             runTauriCli(executable)
         } catch (e: Exception) {
             if (Os.isFamily(Os.FAMILY_WINDOWS)) {
+                // Try different Windows-specific extensions
                 val fallbacks = listOf(
                     "$executable.exe",
                     "$executable.cmd",
@@ -42,28 +40,31 @@ abstract class BuildTask @Inject constructor(
                 }
                 throw lastException
             } else {
-                throw e
+                throw e;
             }
         }
     }
 
-    private fun runTauriCli(executable: String) {
+    fun runTauriCli(executable: String) {
         val rootDirRel = rootDirRel ?: throw GradleException("rootDirRel cannot be null")
         val target = target ?: throw GradleException("target cannot be null")
         val release = release ?: throw GradleException("release cannot be null")
+        val argsList = listOf("tauri", "android", "android-studio-script")
 
+        val execOperations = project.extensions.getByType(ExecOperations::class.java)
         execOperations.exec {
             workingDir(File(project.projectDir, rootDirRel))
             executable(executable)
-            args("tauri", "android", "android-studio-script")
-            when {
-                project.logger.isEnabled(LogLevel.DEBUG) -> args("-vv")
-                project.logger.isEnabled(LogLevel.INFO) -> args("-v")
+            args(argsList)
+            if (project.logger.isEnabled(LogLevel.DEBUG)) {
+                args("-vv")
+            } else if (project.logger.isEnabled(LogLevel.INFO)) {
+                args("-v")
             }
             if (release) {
                 args("--release")
             }
-            args("--target", target)
+            args(listOf("--target", target))
         }.assertNormalExitValue()
     }
 }

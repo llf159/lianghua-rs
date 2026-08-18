@@ -8,6 +8,7 @@ import { getStockPickOptions } from '../../apis/stockPick'
 import { filterConceptItems, useConceptExclusions } from '../../shared/conceptExclusions'
 import ChartIndicatorSettingsModal from './components/ChartIndicatorSettingsModal'
 import StrategySyntaxGuideModal from './components/StrategySyntaxGuideModal'
+import AlgorithmGuideModal from './components/AlgorithmGuideModal'
 import {
   DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MAX,
   DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MIN,
@@ -87,6 +88,7 @@ export default function SettingsPage() {
   const [lookupFocused, setLookupFocused] = useState(false)
   const [activeModal, setActiveModal] = useState<SettingsModalType>(null)
   const [isSyntaxGuideOpen, setIsSyntaxGuideOpen] = useState(false)
+  const [isAlgorithmGuideOpen, setIsAlgorithmGuideOpen] = useState(false)
   const [chartMainRatioInput, setChartMainRatioInput] = useState(() =>
     readStoredChartMainWidthRatio().toFixed(2),
   )
@@ -454,6 +456,13 @@ export default function SettingsPage() {
             <p className="settings-section-note">每项设置单独编辑，点击条目打开对应设置弹窗。</p>
           </div>
           <div className="settings-actions">
+            <button
+              className="settings-secondary-btn"
+              type="button"
+              onClick={() => setIsAlgorithmGuideOpen(true)}
+            >
+              算法说明
+            </button>
             <button
               className="settings-secondary-btn"
               type="button"
@@ -1080,6 +1089,10 @@ export default function SettingsPage() {
       <StrategySyntaxGuideModal
         open={isSyntaxGuideOpen}
         onClose={() => setIsSyntaxGuideOpen(false)}
+      />
+      <AlgorithmGuideModal
+        open={isAlgorithmGuideOpen}
+        onClose={() => setIsAlgorithmGuideOpen(false)}
       />
     </div>
   )

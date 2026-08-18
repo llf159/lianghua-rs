@@ -1,0 +1,119 @@
+.algorithm-guide-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1040;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(15, 23, 42, 0.38);
+}
+
+.algorithm-guide-modal {
+  width: min(1180px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  border: 1px solid #dbe3ee;
+  border-radius: 14px;
+  padding: 16px;
+  background: #fff;
+  display: grid;
+  gap: 14px;
+  box-shadow: 0 24px 52px rgba(15, 23, 42, 0.22);
+}
+
+.algorithm-guide-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.algorithm-guide-head h3 {
+  margin: 0 0 8px;
+  color: #1f2937;
+  font-size: 18px;
+}
+
+.algorithm-guide-head p,
+.algorithm-guide-section p {
+  margin: 0;
+  color: #526173;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.algorithm-guide-section {
+  display: grid;
+  gap: 10px;
+}
+
+.algorithm-guide-section h4 {
+  margin: 0;
+  color: #1f2a37;
+  font-size: 15px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.algorithm-guide-items {
+  display: grid;
+  gap: 12px;
+}
+
+.algorithm-guide-item {
+  display: grid;
+  gap: 6px;
+}
+
+.algorithm-guide-item h5 {
+  margin: 0;
+  color: #374151;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.algorithm-guide-item p {
+  margin: 0;
+  color: #4b5563;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.algorithm-guide-code {
+  margin: 0;
+  border: 1px solid #e4eaf2;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  color: #1f2a37;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "JetBrains Mono", "SFMono-Regular", "Consolas", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.algorithm-guide-interpretation {
+  border-left: 3px solid #93c5fd;
+  padding: 8px 12px;
+  background: #eff6ff;
+  border-radius: 0 8px 8px 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #1e40af;
+}
+
+.algorithm-guide-interpretation strong {
+  color: #1e3a8a;
+}
+
+@media (max-width: 720px) {
+  .algorithm-guide-backdrop {
+    padding: 10px;
+  }
+
+  .algorithm-guide-modal {
+    max-height: calc(100vh - 20px);
+  }
+}
