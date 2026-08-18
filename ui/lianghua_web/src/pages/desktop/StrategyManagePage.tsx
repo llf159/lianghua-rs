@@ -307,6 +307,8 @@ function buildPreparedDraft(
   distPointsText: string,
   maxPointsText: string,
   maxBonusPointsText: string,
+  combinationBonusPointTexts: string[],
+  combinationHitPointTexts: string[],
 ) {
   const nextDraft: StrategyManageRuleDraft = {
     ...draft,
@@ -330,6 +332,16 @@ function buildPreparedDraft(
     if (nextDraft.scope_way.toUpperCase() === 'RECENT') {
       throw new Error('组合策略不支持 RECENT scope_way')
     }
+    if (combinationBonusPointTexts.length !== nextDraft.conditions.length) {
+      throw new Error('条件额外加分数量与条件数量不一致')
+    }
+    nextDraft.conditions = nextDraft.conditions.map((condition, index) => ({
+      ...condition,
+      bonus_points: parseRequiredNumber(
+        combinationBonusPointTexts[index] ?? '',
+        `条件 ${index + 1} 的额外加分`,
+      ),
+    }))
     nextDraft.conditions.forEach((condition, index) => {
       if (!condition.name || !condition.when) {
         throw new Error(`条件 ${index + 1} 的名称和表达式不能为空`)
@@ -338,7 +350,16 @@ function buildPreparedDraft(
         throw new Error(`条件 ${index + 1} 的额外加分必须是合法数字`)
       }
     })
-    const pointsByHits = nextDraft.points_by_hits ?? []
+    if (combinationHitPointTexts.length !== nextDraft.conditions.length) {
+      throw new Error('命中数得分档位必须与条件数量一致')
+    }
+    const pointsByHits = [
+      0,
+      ...combinationHitPointTexts.map((points, index) =>
+        parseRequiredNumber(points, `命中 ${index + 1} 条的分数`),
+      ),
+    ]
+    nextDraft.points_by_hits = pointsByHits
     if (pointsByHits.length !== nextDraft.conditions.length + 1) {
       throw new Error('命中数得分档位必须与条件数量一致')
     }
@@ -354,10 +375,10 @@ function buildPreparedDraft(
     nextDraft.when = ''
     nextDraft.points = 0
     nextDraft.dist_points = null
-    nextDraft.max_points = parseOptionalPositiveNumber(maxPointsText, '总分上限')
+    nextDraft.max_points = parseOptionalPositiveNumber(maxPointsText, '最终总分的正负限制值')
     nextDraft.max_bonus_points = parseOptionalPositiveNumber(
       maxBonusPointsText,
-      '额外加分上限',
+      '额外分的正负限制值',
     )
   } else {
     if (scoreMode === 'dist') {
@@ -381,7 +402,7 @@ function buildPreparedDraft(
     nextDraft.points_by_hits = null
     nextDraft.max_points =
       nextDraft.scope_way.toUpperCase() === 'EACH'
-        ? parseOptionalPositiveNumber(maxPointsText, '最终得分上限')
+        ? parseOptionalPositiveNumber(maxPointsText, '窗口累计得分的正负限制值')
         : null
     nextDraft.max_bonus_points = null
   }
@@ -492,6 +513,8 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
   const [distPointsText, setDistPointsText] = useState('')
   const [maxPointsText, setMaxPointsText] = useState('')
   const [maxBonusPointsText, setMaxBonusPointsText] = useState('')
+  const [combinationBonusPointTexts, setCombinationBonusPointTexts] = useState<string[]>([])
+  const [combinationHitPointTexts, setCombinationHitPointTexts] = useState<string[]>([])
   const [observeThresholdText, setObserveThresholdText] = useState('1')
   const [triggerThresholdText, setTriggerThresholdText] = useState('2')
   const [confirmThresholdText, setConfirmThresholdText] = useState('3')
@@ -672,13 +695,13 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
         rule.max_points != null &&
         rule.scope_way.trim().toUpperCase() !== 'EACH'
       ) {
-        issues.push(`普通 Rule ${rule.name || '(未命名)'} 仅 EACH 支持最终得分上限`)
+        issues.push(`普通 Rule ${rule.name || '(未命名)'} 仅 EACH 支持窗口累计得分限制`)
       }
       if (
         rule.max_points != null &&
         (!Number.isFinite(rule.max_points) || rule.max_points <= 0)
       ) {
-        issues.push(`Rule ${rule.name || '(未命名)'} 的最终得分上限必须为正数`)
+        issues.push(`Rule ${rule.name || '(未命名)'} 的分数正负限制值必须为正数`)
       }
 
       if (!Number.isInteger(rule.scope_windows) || rule.scope_windows < 1) {
@@ -799,6 +822,8 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
     setDistPointsText('')
     setMaxPointsText('')
     setMaxBonusPointsText('')
+    setCombinationBonusPointTexts([])
+    setCombinationHitPointTexts([])
     setEditorError('')
     setCheckNotice('')
     setError('')
@@ -836,6 +861,8 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
         conditions,
         points_by_hits: pointsByHits,
       })
+      setCombinationBonusPointTexts(conditions.map((condition) => String(condition.bonus_points)))
+      setCombinationHitPointTexts(pointsByHits.slice(1).map(String))
       setScoreMode('fixed')
       return
     }
@@ -854,6 +881,8 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
       conditions,
       points_by_hits: [...currentPoints.slice(0, conditions.length), lastPoints + 1],
     })
+    setCombinationBonusPointTexts((current) => [...current, '0'])
+    setCombinationHitPointTexts((current) => [...current, String(conditions.length)])
   }
 
   function updateCombinationCondition(
@@ -864,11 +893,17 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
     if (!draft) {
       return
     }
+    if (field === 'bonus_points') {
+      setCombinationBonusPointTexts((current) =>
+        current.map((points, conditionIndex) => (conditionIndex === index ? value : points)),
+      )
+      return
+    }
     setDraft({
       ...draft,
       conditions: draft.conditions.map((condition, conditionIndex) =>
         conditionIndex === index
-          ? { ...condition, [field]: field === 'bonus_points' ? Number(value) : value }
+          ? { ...condition, [field]: value }
           : condition,
       ),
     })
@@ -884,15 +919,19 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
       conditions,
       points_by_hits: (draft.points_by_hits ?? [0]).slice(0, conditions.length + 1),
     })
+    setCombinationBonusPointTexts((current) =>
+      current.filter((_, conditionIndex) => conditionIndex !== index),
+    )
+    setCombinationHitPointTexts((current) => current.slice(0, conditions.length))
   }
 
   function updateCombinationHitPoints(index: number, value: string) {
-    if (!draft) {
+    if (!draft || index === 0) {
       return
     }
-    const pointsByHits = [...(draft.points_by_hits ?? [])]
-    pointsByHits[index] = index === 0 ? 0 : Number(value)
-    setDraft({ ...draft, points_by_hits: pointsByHits })
+    setCombinationHitPointTexts((current) =>
+      current.map((points, pointIndex) => (pointIndex === index - 1 ? value : points)),
+    )
   }
 
   function openCreateSceneEditor() {
@@ -1048,6 +1087,10 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
     setMaxBonusPointsText(
       rule.max_bonus_points == null ? '' : String(rule.max_bonus_points),
     )
+    setCombinationBonusPointTexts(
+      nextDraft.conditions.map((condition) => String(condition.bonus_points)),
+    )
+    setCombinationHitPointTexts((nextDraft.points_by_hits ?? []).slice(1).map(String))
     setEditorError('')
     setCheckNotice('')
     setError('')
@@ -1184,6 +1227,8 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
         distPointsText,
         maxPointsText,
         maxBonusPointsText,
+        combinationBonusPointTexts,
+        combinationHitPointTexts,
       )
       const message = await checkStrategyManageRuleDraft(
         sourcePath,
@@ -1236,6 +1281,8 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
         distPointsText,
         maxPointsText,
         maxBonusPointsText,
+        combinationBonusPointTexts,
+        combinationHitPointTexts,
       )
       const message = await checkStrategyManageRuleDraft(
         sourcePath,
@@ -2302,14 +2349,14 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                   )}
                   {draft.scope_way.toUpperCase() === 'EACH' ? (
                     <label className="strategy-manage-field strategy-manage-field-span-full">
-                      <span>最终得分绝对值上限</span>
+                      <span>窗口累计得分的正负限制值</span>
                       <input
                         type="number"
                         min="0"
                         step="any"
                         value={maxPointsText}
                         onChange={(event) => setMaxPointsText(event.target.value)}
-                        placeholder="不限"
+                        placeholder="例如 5：得分限制在 -5～5"
                       />
                     </label>
                   ) : null}
@@ -2374,7 +2421,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                             <input
                               type="number"
                               step="any"
-                              value={condition.bonus_points}
+                              value={combinationBonusPointTexts[index] ?? ''}
                               onChange={(event) =>
                                 updateCombinationCondition(
                                   index,
@@ -2397,7 +2444,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                       </div>
                     </div>
                     <div className="strategy-manage-hit-score-grid">
-                      {(draft.points_by_hits ?? []).slice(1).map((points, index) => {
+                      {combinationHitPointTexts.map((points, index) => {
                         const hitCount = index + 1
                         return (
                           <label className="strategy-manage-hit-score-item" key={`hit-score-${hitCount}`}>
@@ -2417,31 +2464,31 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                   <section className="strategy-manage-combination-section">
                     <div className="strategy-manage-combination-section-head">
                       <div>
-                        <strong>分数保护</strong>
-                        <span>均为可选，留空表示不限制</span>
+                        <strong>分数范围限制</strong>
+                        <span>填写 5 表示分数最高为 5、最低为 -5；留空表示不限制</span>
                       </div>
                     </div>
                     <div className="strategy-manage-combination-cap-grid">
                       <label className="strategy-manage-field">
-                        <span>额外加分绝对值上限</span>
+                        <span>额外分的正负限制值</span>
                         <input
                           type="number"
                           min="0"
                           step="any"
                           value={maxBonusPointsText}
                           onChange={(event) => setMaxBonusPointsText(event.target.value)}
-                          placeholder="不限"
+                          placeholder="例如 5：限制在 -5～5"
                         />
                       </label>
                       <label className="strategy-manage-field">
-                        <span>最终总分绝对值上限</span>
+                        <span>最终总分的正负限制值</span>
                         <input
                           type="number"
                           min="0"
                           step="any"
                           value={maxPointsText}
                           onChange={(event) => setMaxPointsText(event.target.value)}
-                          placeholder="不限"
+                          placeholder="例如 5：限制在 -5～5"
                         />
                       </label>
                     </div>

@@ -1,4 +1,5 @@
 import org.gradle.buildconfiguration.tasks.UpdateDaemonJvm
+import com.android.build.api.dsl.LibraryExtension
 
 buildscript {
     repositories {
@@ -15,6 +16,18 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+    }
+}
+
+subprojects {
+    plugins.withId("com.android.library") {
+        afterEvaluate {
+            extensions.configure<LibraryExtension> {
+                // Some published Tauri plugins declare consumer-rules.pro without
+                // packaging the file. AGP 9 rejects those missing files in release builds.
+                defaultConfig.consumerProguardFiles.removeAll { !it.exists() }
+            }
+        }
     }
 }
 
