@@ -15,7 +15,7 @@ use crate::expr::{
     },
 };
 use crate::{
-    data::{DataReader, RuleStage, SceneDirection, ScoreConfig, score_rule_path},
+    data::{DataReader, RuleKind, RuleStage, SceneDirection, ScoreConfig, score_rule_path},
     scoring::tools::{
         collect_used_cyq_chen_runtime_keys, inject_optional_cyq_chen_fields,
         inject_stock_extra_fields, load_st_list, load_total_share_map, rt_max_len,
@@ -28,6 +28,21 @@ const DEFAULT_ADJ_TYPE: &str = "qfq";
 pub struct StrategyManageDistPoint {
     pub min: usize,
     pub max: usize,
+    pub points: f64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StrategyManageRuleCondition {
+    pub name: String,
+    pub when: String,
+    #[serde(default)]
+    pub bonus_points: f64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StrategyManageRuleBonus {
+    pub name: String,
+    pub when: String,
     pub points: f64,
 }
 
@@ -58,6 +73,7 @@ pub struct StrategyManageRuleItem {
     pub index: usize,
     pub name: String,
     pub scene_name: String,
+    pub kind: RuleKind,
     pub stage: String,
     pub scope_way: String,
     pub scope_windows: usize,
@@ -65,18 +81,31 @@ pub struct StrategyManageRuleItem {
     pub explain: String,
     pub when: String,
     pub dist_points: Option<Vec<StrategyManageDistPoint>>,
+    pub conditions: Vec<StrategyManageRuleCondition>,
+    pub points_by_hits: Option<Vec<f64>>,
+    pub max_points: Option<f64>,
+    pub max_bonus_points: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StrategyManageRuleDraft {
     pub name: String,
     pub scene_name: String,
+    #[serde(default)]
+    pub kind: RuleKind,
     pub stage: String,
     pub scope_way: String,
     pub scope_windows: usize,
+    #[serde(default)]
     pub when: String,
+    #[serde(default)]
     pub points: f64,
     pub dist_points: Option<Vec<StrategyManageDistPoint>>,
+    #[serde(default)]
+    pub conditions: Vec<StrategyManageRuleCondition>,
+    pub points_by_hits: Option<Vec<f64>>,
+    pub max_points: Option<f64>,
+    pub max_bonus_points: Option<f64>,
     pub explain: String,
 }
 
@@ -110,17 +139,39 @@ struct StrategyRuleFileScene {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+struct StrategyRuleFileCondition {
+    name: String,
+    when: String,
+    #[serde(default)]
+    bonus_points: f64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct StrategyRuleFileRule {
     name: String,
     #[serde(rename = "scene")]
     scene_name: String,
+    #[serde(default)]
+    kind: RuleKind,
     stage: RuleStage,
     scope_windows: usize,
     scope_way: String,
+    #[serde(default)]
     when: String,
+    #[serde(default)]
     points: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     dist_points: Option<Vec<StrategyManageDistPoint>>,
+    #[serde(default, rename = "condition")]
+    conditions: Vec<StrategyRuleFileCondition>,
+    #[serde(default, rename = "bonus", skip_serializing)]
+    unbound_bonuses: Vec<StrategyManageRuleBonus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    points_by_hits: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_points: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_bonus_points: Option<f64>,
     explain: String,
 }
 
@@ -137,7 +188,18 @@ fn load_rule_file(source_path: &str) -> Result<StrategyRuleFile, String> {
     let path = score_rule_path(source_path);
     let text = fs::read_to_string(&path)
         .map_err(|e| format!("读取策略规则文件失败: path={}, err={e}", path.display()))?;
-    parse_rule_file_text(&text).map_err(|e| format!("解析策略规则文件失败: {e}"))
+    let file = parse_rule_file_text(&text).map_err(|e| format!("解析策略规则文件失败: {e}"))?;
+    if let Some(rule) = file
+        .rule
+        .iter()
+        .find(|rule| !rule.unbound_bonuses.is_empty())
+    {
+        return Err(format!(
+            "策略 {} 存在旧版独立 bonus，请改为 condition.bonus_points",
+            rule.name
+        ));
+    }
+    Ok(file)
 }
 
 fn parse_rule_file_text(text: &str) -> Result<StrategyRuleFile, toml::de::Error> {
@@ -316,59 +378,115 @@ fn validate_rule_definition(
     {
         return Err(format!("规则 {} 引用的 scene 不存在", rule.name));
     }
-    if rule.when.trim().is_empty() {
-        return Err(format!("策略 {} 的表达式不能为空", rule.name));
-    }
     if rule.explain.trim().is_empty() {
         return Err(format!("策略 {} 的说明不能为空", rule.name));
     }
     if rule.scope_windows == 0 {
         return Err(format!("策略 {} 的 scope_windows 必须 >= 1", rule.name));
     }
-    if !rule.points.is_finite() {
-        return Err(format!("策略 {} 的 points 非法", rule.name));
-    }
     let scope_way = parse_scope_way(&rule.scope_way)?;
-    if let Some(dist_points) = &rule.dist_points {
-        if !dist_points.is_empty() && !strategy_scope_way_supports_dist_points(scope_way) {
-            return Err(format!(
-                "策略 {} 的 scope_way 不支持 dist_points，仅 EACH/RECENT 支持区间字典分",
-                rule.name
-            ));
-        }
-        for (index, item) in dist_points.iter().enumerate() {
-            if item.min > item.max {
+    let expression_programs = match rule.kind {
+        RuleKind::Single => {
+            if rule.when.trim().is_empty() {
+                return Err(format!("策略 {} 的表达式不能为空", rule.name));
+            }
+            if !rule.points.is_finite() {
+                return Err(format!("策略 {} 的 points 非法", rule.name));
+            }
+            if !rule.conditions.is_empty()
+                || !rule.unbound_bonuses.is_empty()
+                || rule.points_by_hits.is_some()
+                || rule.max_points.is_some()
+                || rule.max_bonus_points.is_some()
+            {
                 return Err(format!(
-                    "策略 {} 的 dist_points 第{}段 min > max",
+                    "普通策略 {} 不能配置 condition、bonus、points_by_hits 或分数上限",
+                    rule.name
+                ));
+            }
+            validate_strategy_dist_points(rule, scope_way)?;
+            vec![(
+                rule.name.clone(),
+                parse_strategy_expression(&rule.name, &rule.when)?,
+            )]
+        }
+        RuleKind::Combination => {
+            if !rule.when.trim().is_empty() || rule.points != 0.0 || rule.dist_points.is_some() {
+                return Err(format!(
+                    "组合策略 {} 不能配置 when、points 或 dist_points",
+                    rule.name
+                ));
+            }
+            if rule.conditions.is_empty() {
+                return Err(format!("组合策略 {} 至少需要一个 condition", rule.name));
+            }
+            if !rule.unbound_bonuses.is_empty() {
+                return Err(format!(
+                    "组合策略 {} 存在旧版独立 bonus，请改为 condition.bonus_points",
+                    rule.name
+                ));
+            }
+            let Some(points_by_hits) = rule.points_by_hits.as_deref() else {
+                return Err(format!("组合策略 {} 缺少 points_by_hits", rule.name));
+            };
+            if points_by_hits.len() != rule.conditions.len() + 1 {
+                return Err(format!(
+                    "组合策略 {} 的 points_by_hits 长度应为 {}（condition 数量 + 1）",
                     rule.name,
-                    index + 1
+                    rule.conditions.len() + 1
                 ));
             }
-            if !item.points.is_finite() {
+            if points_by_hits.first().copied() != Some(0.0) {
                 return Err(format!(
-                    "策略 {} 的 dist_points 第{}段 points 非法",
-                    rule.name,
-                    index + 1
+                    "组合策略 {} 的 points_by_hits[0] 必须为 0",
+                    rule.name
                 ));
             }
-        }
-        let mut sorted = dist_points.iter().collect::<Vec<_>>();
-        sorted.sort_by_key(|item| item.min);
-        for index in 1..sorted.len() {
-            let prev = sorted[index - 1];
-            let curr = sorted[index];
-            if prev.max >= curr.min {
+            if points_by_hits.iter().any(|points| !points.is_finite())
+                || points_by_hits.iter().all(|points| *points == 0.0)
+            {
                 return Err(format!(
-                    "策略 {} 的 dist_points 区间重叠: [{}-{}] 和 [{}-{}]",
-                    rule.name, prev.min, prev.max, curr.min, curr.max
+                    "组合策略 {} 的 points_by_hits 非法或全部为 0",
+                    rule.name
                 ));
             }
-        }
-    }
+            for (field, cap) in [
+                ("max_points", rule.max_points),
+                ("max_bonus_points", rule.max_bonus_points),
+            ] {
+                if cap.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+                    return Err(format!("组合策略 {} 的 {field} 必须为有限正数", rule.name));
+                }
+            }
 
-    let stmts = parse_expression_program(&rule.when)
-        .map_err(|e| format!("策略 {} 表达式解析错误在{}:{}", rule.name, e.idx, e.msg))?;
-    validate_expression_functions(&stmts).map_err(|error| format!("策略 {} {error}", rule.name))?;
+            let mut names = HashSet::new();
+            let mut programs = Vec::with_capacity(rule.conditions.len());
+            for condition in &rule.conditions {
+                let name = condition.name.trim();
+                if name.is_empty() || condition.when.trim().is_empty() {
+                    return Err(format!("组合策略 {} 存在空条件名称或表达式", rule.name));
+                }
+                if !names.insert(name.to_string()) {
+                    return Err(format!(
+                        "组合策略 {} 的条件/加分项名称重复: {name}",
+                        rule.name
+                    ));
+                }
+                let label = format!("{} / 条件 {name}", rule.name);
+                programs.push((
+                    label.clone(),
+                    parse_strategy_expression(&label, &condition.when)?,
+                ));
+                if !condition.bonus_points.is_finite() {
+                    return Err(format!(
+                        "组合策略 {} 的条件 {name} bonus_points 非法",
+                        rule.name
+                    ));
+                }
+            }
+            programs
+        }
+    };
 
     if let (
         Some(reader),
@@ -383,7 +501,13 @@ fn validate_rule_definition(
         st_list,
         total_share_map,
     ) {
-        let warmup_need = estimate_rule_warmup(&stmts, scope_way, rule.scope_windows)?;
+        let warmup_need = expression_programs
+            .iter()
+            .map(|(_, stmts)| estimate_rule_warmup(stmts, scope_way, rule.scope_windows))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .max()
+            .unwrap_or(0);
         let need_rows = (warmup_need + rule.scope_windows).max(1);
         let mut row_data = reader.load_one_tail_rows(
             sample_ts_code,
@@ -397,22 +521,79 @@ fn validate_rule_definition(
             st_list.contains(sample_ts_code),
             total_share_map.get(sample_ts_code).copied(),
         )?;
-        let used_cyq_chen_keys = collect_used_cyq_chen_runtime_keys(&[&stmts]);
+        let program_refs = expression_programs
+            .iter()
+            .map(|(_, stmts)| stmts)
+            .collect::<Vec<_>>();
+        let used_cyq_chen_keys = collect_used_cyq_chen_runtime_keys(&program_refs);
         inject_optional_cyq_chen_fields(
             &mut row_data,
             source_path,
             sample_ts_code,
             &used_cyq_chen_keys,
         );
-        let mut rt = row_into_rt(row_data)?;
-        let value = rt
-            .eval_program(&stmts)
-            .map_err(|e| format!("策略 {} 表达式运行错误:{}", rule.name, e.msg))?;
-        let len = rt_max_len(&rt);
-        Value::as_bool_series(&value, len)
-            .map_err(|e| format!("策略 {} 表达式返回值非布尔:{}", rule.name, e.msg))?;
+        for (label, stmts) in &expression_programs {
+            let mut rt = row_into_rt(row_data.clone())?;
+            let value = rt
+                .eval_program(stmts)
+                .map_err(|e| format!("策略 {label} 表达式运行错误:{}", e.msg))?;
+            let len = rt_max_len(&rt);
+            Value::as_bool_series(&value, len)
+                .map_err(|e| format!("策略 {label} 表达式返回值非布尔:{}", e.msg))?;
+        }
     }
 
+    Ok(())
+}
+
+fn parse_strategy_expression(label: &str, expression: &str) -> Result<Stmts, String> {
+    let stmts = parse_expression_program(expression)
+        .map_err(|error| format!("策略 {label} 表达式解析错误在{}:{}", error.idx, error.msg))?;
+    validate_expression_functions(&stmts).map_err(|error| format!("策略 {label} {error}"))?;
+    Ok(stmts)
+}
+
+fn validate_strategy_dist_points(
+    rule: &StrategyRuleFileRule,
+    scope_way: StrategyScopeWay,
+) -> Result<(), String> {
+    let Some(dist_points) = &rule.dist_points else {
+        return Ok(());
+    };
+    if !dist_points.is_empty() && !strategy_scope_way_supports_dist_points(scope_way) {
+        return Err(format!(
+            "策略 {} 的 scope_way 不支持 dist_points，仅 EACH/RECENT 支持区间字典分",
+            rule.name
+        ));
+    }
+    for (index, item) in dist_points.iter().enumerate() {
+        if item.min > item.max {
+            return Err(format!(
+                "策略 {} 的 dist_points 第{}段 min > max",
+                rule.name,
+                index + 1
+            ));
+        }
+        if !item.points.is_finite() {
+            return Err(format!(
+                "策略 {} 的 dist_points 第{}段 points 非法",
+                rule.name,
+                index + 1
+            ));
+        }
+    }
+    let mut sorted = dist_points.iter().collect::<Vec<_>>();
+    sorted.sort_by_key(|item| item.min);
+    for pair in sorted.windows(2) {
+        let previous = pair[0];
+        let current = pair[1];
+        if previous.max >= current.min {
+            return Err(format!(
+                "策略 {} 的 dist_points 区间重叠: [{}-{}] 和 [{}-{}]",
+                rule.name, previous.min, previous.max, current.min, current.max
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -473,12 +654,26 @@ fn draft_to_rule(draft: StrategyManageRuleDraft) -> Result<StrategyRuleFileRule,
     Ok(StrategyRuleFileRule {
         name: draft.name.trim().to_string(),
         scene_name: draft.scene_name.trim().to_string(),
+        kind: draft.kind,
         stage: parse_rule_stage(&draft.stage)?,
         scope_windows: draft.scope_windows.max(1),
         scope_way: normalize_scope_way(&draft.scope_way)?,
         when: draft.when.trim().to_string(),
         points: draft.points,
         dist_points: map_dist_points(draft.dist_points),
+        conditions: draft
+            .conditions
+            .into_iter()
+            .map(|condition| StrategyRuleFileCondition {
+                name: condition.name.trim().to_string(),
+                when: condition.when.trim().to_string(),
+                bonus_points: condition.bonus_points,
+            })
+            .collect(),
+        unbound_bonuses: Vec::new(),
+        points_by_hits: draft.points_by_hits,
+        max_points: draft.max_points,
+        max_bonus_points: draft.max_bonus_points,
         explain: draft.explain.trim().to_string(),
     })
 }
@@ -524,6 +719,7 @@ fn build_page_data(config: &StrategyRuleFile) -> StrategyManagePageData {
             index,
             name: rule.name.clone(),
             scene_name: rule.scene_name.clone(),
+            kind: rule.kind,
             stage: format_rule_stage(rule.stage),
             scope_way: rule.scope_way.clone(),
             scope_windows: rule.scope_windows,
@@ -531,6 +727,18 @@ fn build_page_data(config: &StrategyRuleFile) -> StrategyManagePageData {
             explain: rule.explain.clone(),
             when: rule.when.clone(),
             dist_points: rule.dist_points.clone(),
+            conditions: rule
+                .conditions
+                .iter()
+                .map(|condition| StrategyManageRuleCondition {
+                    name: condition.name.clone(),
+                    when: condition.when.clone(),
+                    bonus_points: condition.bonus_points,
+                })
+                .collect(),
+            points_by_hits: rule.points_by_hits.clone(),
+            max_points: rule.max_points,
+            max_bonus_points: rule.max_bonus_points,
         })
         .collect();
 
@@ -900,6 +1108,44 @@ explain = "test"
     }
 
     #[test]
+    fn combination_bonus_points_round_trip_with_condition() {
+        let text = r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "量价组合"
+scene = "趋势启动"
+kind = "combination"
+stage = "trigger"
+scope_windows = 1
+scope_way = "LAST"
+points_by_hits = [0.0, 1.0]
+explain = "test"
+
+[[rule.condition]]
+name = "收红"
+when = "C > O"
+bonus_points = 1.0
+"#;
+
+        let file = parse_rule_file_text(text).expect("condition bonus should parse");
+        assert_eq!(file.rule[0].conditions[0].bonus_points, 1.0);
+
+        let serialized = toml::to_string_pretty(&file).expect("condition bonus should serialize");
+        assert!(serialized.contains("bonus_points = 1.0"));
+        let reparsed = parse_rule_file_text(&serialized).expect("serialized file should parse");
+        assert_eq!(reparsed.rule[0].conditions[0].bonus_points, 1.0);
+    }
+
+    #[test]
     fn parse_strategy_rule_file_with_legacy_weight() {
         let text = r#"
 version = 1
@@ -940,6 +1186,7 @@ explain = "test"
             StrategyManageRuleDraft {
                 name: "攻击K".to_string(),
                 scene_name: "趋势启动".to_string(),
+                kind: crate::data::RuleKind::Single,
                 stage: "trigger".to_string(),
                 scope_way: "LAST".to_string(),
                 scope_windows: 1,
@@ -955,6 +1202,10 @@ AND C >= H * 0.98
                 .to_string(),
                 points: 6.0,
                 dist_points: None,
+                conditions: Vec::new(),
+                points_by_hits: None,
+                max_points: None,
+                max_bonus_points: None,
                 explain: "大量解放套牢盘".to_string(),
             },
         );

@@ -158,7 +158,7 @@ fn scoring_single_core(
 fn collect_scoring_runtime_keys(rules_cache: &[CachedRule]) -> HashSet<String> {
     let programs = rules_cache
         .iter()
-        .map(|rule| &rule.when_ast)
+        .flat_map(CachedRule::expression_programs)
         .collect::<Vec<_>>();
     let cyq_chen_keys = cyq_chen_runtime_key_names();
     let injected_keys = SCORING_INJECTED_RUNTIME_KEYS
@@ -180,7 +180,7 @@ fn collect_scoring_runtime_keys(rules_cache: &[CachedRule]) -> HashSet<String> {
 fn collect_scoring_used_cyq_chen_runtime_keys(rules_cache: &[CachedRule]) -> HashSet<String> {
     let programs = rules_cache
         .iter()
-        .map(|rule| &rule.when_ast)
+        .flat_map(CachedRule::expression_programs)
         .collect::<Vec<_>>();
     collect_used_cyq_chen_runtime_keys(&programs)
 }
@@ -616,6 +616,7 @@ mod tests {
             when_src: expression.to_string(),
             when_ast,
             assigned_names,
+            combination: None,
         }
     }
 

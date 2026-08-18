@@ -88,6 +88,43 @@ pub struct CachedRule {
     pub when_src: String,
     pub when_ast: Stmts,
     pub assigned_names: Vec<String>,
+    pub combination: Option<CachedCombinationRule>,
+}
+
+#[derive(Clone)]
+pub struct CachedRuleExpression {
+    pub name: String,
+    pub when_src: String,
+    pub when_ast: Stmts,
+    pub assigned_names: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct CachedCombinationCondition {
+    pub expression: CachedRuleExpression,
+    pub bonus_points: f64,
+}
+
+#[derive(Clone)]
+pub struct CachedCombinationRule {
+    pub conditions: Vec<CachedCombinationCondition>,
+    pub points_by_hits: Vec<f64>,
+    pub max_points: Option<f64>,
+    pub max_bonus_points: Option<f64>,
+}
+
+impl CachedRule {
+    pub fn expression_programs(&self) -> Vec<&Stmts> {
+        let Some(combination) = &self.combination else {
+            return vec![&self.when_ast];
+        };
+
+        combination
+            .conditions
+            .iter()
+            .map(|condition| &condition.expression.when_ast)
+            .collect()
+    }
 }
 
 #[derive(Clone)]
@@ -126,6 +163,23 @@ fn hit_when_cache(rule: &CachedRule, rt: &mut Runtime) -> Result<Vec<bool>, Stri
     let len = rt_max_len(rt);
 
     Value::as_bool_series(&value, len).map_err(|e| format!("表达式返回值非布尔:{}", e.msg))
+}
+
+fn hit_cached_expression(
+    expression: &CachedRuleExpression,
+    rt: &mut Runtime,
+) -> Result<Vec<bool>, String> {
+    let snapshots = snapshot_runtime_values(rt, &expression.assigned_names);
+    let result = rt
+        .eval_program(&expression.when_ast)
+        .map_err(|error| format!("表达式({})计算错误:{}", expression.name, error.msg))
+        .and_then(|value| {
+            let len = rt_max_len(rt);
+            Value::as_bool_series(&value, len)
+                .map_err(|error| format!("表达式({})返回值非布尔:{}", expression.name, error.msg))
+        });
+    restore_runtime_values(rt, &snapshots);
+    result
 }
 
 fn hit_scopeway(scopeway: ScopeWay, windows: usize, bs: &[bool], i: usize) -> ScopeHit {
@@ -226,10 +280,88 @@ fn score_at(scopeway: ScopeHit, dps: Option<&[DistPoint]>, points: f64) -> f64 {
     }
 }
 
+fn scope_hit_triggered(hit: &ScopeHit) -> bool {
+    match hit {
+        ScopeHit::Bool(ok) => *ok,
+        ScopeHit::EachOffsets(offsets) => !offsets.is_empty(),
+        ScopeHit::Recent(value) => value.is_some(),
+    }
+}
+
+fn clamp_score(value: f64, cap: Option<f64>) -> f64 {
+    match cap {
+        Some(cap) => value.clamp(-cap, cap),
+        None => value,
+    }
+}
+
+fn scoring_combination_rule_cache(
+    rule: &CachedRule,
+    combination: &CachedCombinationRule,
+    rt: &mut Runtime,
+) -> Result<(Vec<f64>, Vec<bool>), String> {
+    let condition_hits = combination
+        .conditions
+        .iter()
+        .map(|condition| hit_cached_expression(&condition.expression, rt))
+        .collect::<Result<Vec<_>, _>>()?;
+    let len = rt_max_len(rt);
+    let mut scores = Vec::with_capacity(len);
+    let mut triggered = Vec::with_capacity(len);
+
+    for index in 0..len {
+        let hit_count = condition_hits
+            .iter()
+            .filter(|hits| {
+                scope_hit_triggered(&hit_scopeway(
+                    rule.scope_way,
+                    rule.scope_windows,
+                    hits,
+                    index,
+                ))
+            })
+            .count();
+        let base_score = combination.points_by_hits[hit_count];
+        let is_triggered = base_score != 0.0;
+        triggered.push(is_triggered);
+
+        if !is_triggered {
+            scores.push(0.0);
+            continue;
+        }
+
+        let bonus_score = combination
+            .conditions
+            .iter()
+            .zip(&condition_hits)
+            .filter_map(|(condition, hits)| {
+                scope_hit_triggered(&hit_scopeway(
+                    rule.scope_way,
+                    rule.scope_windows,
+                    hits,
+                    index,
+                ))
+                .then_some(condition.bonus_points)
+            })
+            .sum::<f64>();
+        let bonus_score = clamp_score(bonus_score, combination.max_bonus_points);
+        scores.push(clamp_score(
+            base_score + bonus_score,
+            combination.max_points,
+        ));
+    }
+
+    Ok((scores, triggered))
+}
+
 fn scoring_rule_cache(
     rule: &CachedRule,
     rt: &mut Runtime,
 ) -> Result<(Vec<f64>, Vec<bool>), String> {
+    if let Some(combination) = &rule.combination {
+        return scoring_combination_rule_cache(rule, combination, rt);
+    }
+
     let snapshots = snapshot_runtime_values(rt, &rule.assigned_names);
     let bs_result = hit_when_cache(rule, rt);
     restore_runtime_values(rt, &snapshots);
@@ -239,11 +371,7 @@ fn scoring_rule_cache(
 
     for i in 0..bs.len() {
         let hit = hit_scopeway(rule.scope_way, rule.scope_windows, &bs, i);
-        triggered.push(match &hit {
-            ScopeHit::Bool(ok) => *ok,
-            ScopeHit::EachOffsets(offsets) => !offsets.is_empty(),
-            ScopeHit::Recent(v) => v.is_some(),
-        });
+        triggered.push(scope_hit_triggered(&hit));
         let s = score_at(hit, rule.dist_points.as_deref(), rule.points);
         out.push(s);
     }
@@ -534,7 +662,10 @@ pub fn build_rank_tiebreak(
 
 #[cfg(test)]
 mod tests {
-    use super::{CachedRule, evaluate_cached_rule_scores};
+    use super::{
+        CachedCombinationCondition, CachedCombinationRule, CachedRule, CachedRuleExpression,
+        evaluate_cached_rule_scores,
+    };
     use crate::{
         data::{ScopeWay, collect_assigned_names_from_expr_program},
         expr::{
@@ -559,6 +690,55 @@ mod tests {
             when_src: expression.to_string(),
             when_ast,
             assigned_names,
+            combination: None,
+        }
+    }
+
+    fn cached_expression(name: &str, expression: &str) -> CachedRuleExpression {
+        let tokens = lex_all(expression);
+        let mut parser = Parser::new(tokens);
+        let when_ast = parser.parse_main().expect("expression should parse");
+        let assigned_names = collect_assigned_names_from_expr_program(&when_ast);
+        CachedRuleExpression {
+            name: name.to_string(),
+            when_src: expression.to_string(),
+            when_ast,
+            assigned_names,
+        }
+    }
+
+    fn combination_rule(
+        condition_expressions: &[&str],
+        points_by_hits: Vec<f64>,
+        bonus_points: &[f64],
+        max_points: Option<f64>,
+        max_bonus_points: Option<f64>,
+    ) -> CachedRule {
+        let conditions = condition_expressions
+            .iter()
+            .enumerate()
+            .map(|(index, expression)| CachedCombinationCondition {
+                expression: cached_expression(&format!("condition_{}", index + 1), expression),
+                bonus_points: bonus_points.get(index).copied().unwrap_or(0.0),
+            })
+            .collect::<Vec<_>>();
+        let first = conditions[0].expression.clone();
+        CachedRule {
+            name: "combination".to_string(),
+            scope_windows: 1,
+            scope_way: ScopeWay::Last,
+            points: 0.0,
+            dist_points: None,
+            tag: crate::data::RuleTag::Normal,
+            when_src: first.when_src,
+            when_ast: first.when_ast,
+            assigned_names: first.assigned_names,
+            combination: Some(CachedCombinationRule {
+                conditions,
+                points_by_hits,
+                max_points,
+                max_bonus_points,
+            }),
         }
     }
 
@@ -613,5 +793,77 @@ mod tests {
 
         assert_eq!(triggered, vec![true, true, true, true, false]);
         assert_eq!(scores, vec![1.0, 1.0, 1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn combination_rule_scores_distinct_hits_and_bonus() {
+        let mut runtime = runtime_with_close_series(&[0.0, 2.0, 3.0, 4.0, 5.0]);
+        let rule = combination_rule(
+            &["C > 1", "C > 2", "C > 3"],
+            vec![0.0, 1.0, 3.0, 5.0],
+            &[0.0, 0.0, 2.0],
+            None,
+            None,
+        );
+
+        let (scores, triggered) =
+            evaluate_cached_rule_scores(&rule, &mut runtime).expect("combination evaluates");
+
+        assert_eq!(scores, vec![0.0, 1.0, 3.0, 7.0, 7.0]);
+        assert_eq!(triggered, vec![false, true, true, true, true]);
+    }
+
+    #[test]
+    fn combination_bonus_requires_nonzero_base_score() {
+        let mut runtime = runtime_with_close_series(&[3.0, 11.0]);
+        let rule = combination_rule(
+            &["C > 1", "C > 10"],
+            vec![0.0, 0.0, 3.0],
+            &[2.0, 0.0],
+            None,
+            None,
+        );
+
+        let (scores, triggered) =
+            evaluate_cached_rule_scores(&rule, &mut runtime).expect("combination evaluates");
+
+        assert_eq!(scores, vec![0.0, 5.0]);
+        assert_eq!(triggered, vec![false, true]);
+    }
+
+    #[test]
+    fn combination_bonus_follows_condition_hit() {
+        let mut runtime = runtime_with_close_series(&[5.0, 11.0]);
+        let rule = combination_rule(
+            &["C > 10", "C > 1"],
+            vec![0.0, 1.0, 2.0],
+            &[3.0, 0.0],
+            None,
+            None,
+        );
+
+        let (scores, triggered) =
+            evaluate_cached_rule_scores(&rule, &mut runtime).expect("combination evaluates");
+
+        assert_eq!(scores, vec![1.0, 5.0]);
+        assert_eq!(triggered, vec![true, true]);
+    }
+
+    #[test]
+    fn combination_rule_applies_bonus_and_total_caps() {
+        let mut runtime = runtime_with_close_series(&[5.0]);
+        let rule = combination_rule(
+            &["C > 1", "C > 2"],
+            vec![0.0, 1.0, 5.0],
+            &[2.0, 2.0],
+            Some(5.5),
+            Some(1.0),
+        );
+
+        let (scores, triggered) =
+            evaluate_cached_rule_scores(&rule, &mut runtime).expect("combination evaluates");
+
+        assert_eq!(scores, vec![5.5]);
+        assert_eq!(triggered, vec![true]);
     }
 }

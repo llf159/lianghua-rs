@@ -22,6 +22,7 @@ import {
   type RuleExpressionCalibrationData,
   type RuleExpressionValidationData,
   type RuleValidationComboResult,
+  type RuleDecayValidation,
   type RuleLayerBacktestData,
   type RuleLayerRuleSummary,
   type RuleValidationUnknownConfig,
@@ -62,6 +63,7 @@ type RuleSummarySortKey =
   | "avg_er_change"
   | "avg_contribution_score"
   | "avg_contribution_per_trigger"
+  | "decay_20"
   | "ic_mean"
   | "icir"
   | "ic_t_value";
@@ -204,6 +206,83 @@ function formatFractionPercent(value?: number | null, digits = 2) {
     return "--";
   }
   return `${(value * 100).toFixed(digits)}%`;
+}
+
+function getRuleDecayValidation(
+  row: RuleLayerRuleSummary,
+  windowDays: number,
+): RuleDecayValidation | undefined {
+  return (row.decay_validations ?? []).find((item) => item.window_days === windowDays);
+}
+
+function decayStatusClass(status?: string | null) {
+  switch (status) {
+    case "significant_decay":
+    case "decay":
+      return "scene-layer-decay-status-danger";
+    case "weakening":
+    case "weak":
+      return "scene-layer-decay-status-warning";
+    case "improving":
+      return "scene-layer-decay-status-improving";
+    case "stable":
+      return "scene-layer-decay-status-stable";
+    default:
+      return "scene-layer-decay-status-insufficient";
+  }
+}
+
+function formatDecayValidationTitle(
+  item: RuleDecayValidation,
+  valueLabel = "方向超额",
+) {
+  const dateRange = item.recent_start_date && item.recent_end_date
+    ? `${formatDateLabel(item.recent_start_date)} ~ ${formatDateLabel(item.recent_end_date)}`
+    : "--";
+  return [
+    `最近窗口：${dateRange}`,
+    `近期${valueLabel}：${formatPercent(item.recent_directional_excess_mean, 4)}`,
+    `此前${valueLabel}：${formatPercent(item.prior_directional_excess_mean, 4)}`,
+    `变化：${formatPercent(item.decay_change, 4)}`,
+    `Welch t值：${formatNumber(item.decay_t_value, 3)}`,
+    `有效日：近期${item.recent_day_count} / 此前${item.prior_day_count}`,
+  ].join("；");
+}
+
+function renderDecayValidations(
+  validations: RuleDecayValidation[] | undefined,
+  keyPrefix: string,
+  valueLabel?: string,
+) {
+  const rows = validations ?? [];
+  if (rows.length === 0) {
+    return "--";
+  }
+  return (
+    <div className="scene-layer-decay-list">
+      {rows.map((item) => (
+        <div
+          key={`${keyPrefix}-decay-${item.window_days}`}
+          className={`scene-layer-decay-item ${decayStatusClass(item.status)}`}
+          title={formatDecayValidationTitle(item, valueLabel)}
+        >
+          <span>{item.window_days}日</span>
+          <strong>{item.status_label}</strong>
+          <em>
+            近 {formatPercent(item.recent_directional_excess_mean, 2)} / Δ {formatPercent(item.decay_change, 2)}
+          </em>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function renderRuleDecayValidations(row: RuleLayerRuleSummary) {
+  const validations = row.decay_validations ?? [];
+  if (validations.length === 0) {
+    return "--";
+  }
+  return renderDecayValidations(validations, row.rule_name);
 }
 
 function formatCalibrationDistancePoints(candidate: RuleExpressionCalibrationCandidate) {
@@ -1042,6 +1121,10 @@ export default function SceneLayerBacktestPage() {
         },
         avg_contribution_per_trigger: {
           value: (row: RuleLayerRuleSummary) => row.avg_contribution_per_trigger,
+        },
+        decay_20: {
+          value: (row: RuleLayerRuleSummary) =>
+            getRuleDecayValidation(row, 20)?.decay_change,
         },
         ic_mean: {
           value: (row: RuleLayerRuleSummary) => row.ic_mean,
@@ -2722,6 +2805,9 @@ export default function SceneLayerBacktestPage() {
         <section className="scene-layer-card">
           <div className="scene-layer-layer-summary">
             <h3>策略回测汇总</h3>
+            <p className="scene-layer-validation-table-hint">
+              组合衰减先按每条策略方向归一化，再计算每个交易日全部有效策略的平均超额，比较最近 20/40/60 日与此前历史；每条策略在同一天等权。
+            </p>
             <div className="scene-layer-contrib-table-wrap">
               <table className="scene-layer-contrib-table">
                 <thead>
@@ -2740,6 +2826,7 @@ export default function SceneLayerBacktestPage() {
                     <th>平均单次贡献</th>
                     <th>盈亏比</th>
                     <th>超额残差（日度）</th>
+                    <th>组合近期衰减</th>
                     <th title="收益统计区间最后一天 ER(20) 减触发日 ER(20)">ΔER(20)</th>
                     <th>IC 均值</th>
                     <th>IC t值</th>
@@ -2764,6 +2851,13 @@ export default function SceneLayerBacktestPage() {
                     <td className={residualMetricHighlightClass(ruleResult.avg_excess_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}>
                       {renderResidualMetric(ruleResult.avg_excess_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}
                     </td>
+                    <td className="scene-layer-decay-cell">
+                      {renderDecayValidations(
+                        ruleResult.decay_validations,
+                        "all-rules",
+                        "策略篮子方向超额",
+                      )}
+                    </td>
                     <td>{formatNumber(ruleResult.avg_er_change, 4)}</td>
                     <td className={metricHighlightClass("ic", ruleResult.ic_mean)}>{formatNumber(ruleResult.ic_mean)}</td>
                     <td className={metricHighlightClass("t", ruleResult.ic_t_value)}>{formatNumber(ruleResult.ic_t_value)}</td>
@@ -2781,6 +2875,9 @@ export default function SceneLayerBacktestPage() {
           {allRuleSummaries.length > 0 ? (
             <div className="scene-layer-layer-summary">
               <h3>全部策略明细（点击表头排序）</h3>
+              <p className="scene-layer-caption">
+                衰减验证按策略方向归一化：正分策略上涨、负分策略下跌都记为正向超额；分别比较最近 20/40/60 个有效触发日与此前历史，Δ 为近期减此前。
+              </p>
               <div className="scene-layer-contrib-table-wrap">
                 <table className="scene-layer-contrib-table scene-layer-rule-detail-table">
                   <thead>
@@ -2837,6 +2934,15 @@ export default function SceneLayerBacktestPage() {
                           direction={ruleSummarySortDirection}
                           onClick={() => toggleRuleSummarySort("avg_excess_residual_mean")}
                           title="按超额残差排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "decay_20", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="近期衰减"
+                          isActive={ruleSummarySortKey === "decay_20" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("decay_20")}
+                          title="按最近20个有效触发日相对此前历史的方向超额变化排序"
                         />
                       </th>
                       <th aria-sort={getAriaSort(ruleSummarySortKey === "avg_er_change", ruleSummarySortDirection)}>
@@ -2896,6 +3002,7 @@ export default function SceneLayerBacktestPage() {
                         <td className={residualMetricHighlightClass(item.avg_excess_residual_mean, resolveResidualDirection(item.avg_contribution_score))}>
                           {renderResidualMetric(item.avg_excess_residual_mean, resolveResidualDirection(item.avg_contribution_score))}
                         </td>
+                        <td className="scene-layer-decay-cell">{renderRuleDecayValidations(item)}</td>
                         <td>{formatNumber(item.avg_er_change, 4)}</td>
                         <td className={metricHighlightClass("ic", item.ic_mean)}>{formatNumber(item.ic_mean)}</td>
                         <td className={metricHighlightClass("t", item.ic_t_value)}>{formatNumber(item.ic_t_value)}</td>

@@ -6,6 +6,14 @@ export type StrategyManageDistPoint = {
   points: number
 }
 
+export type StrategyManageRuleKind = 'single' | 'combination'
+
+export type StrategyManageRuleCondition = {
+  name: string
+  when: string
+  bonus_points: number
+}
+
 export type StrategyManageSceneItem = {
   index: number
   name: string
@@ -30,6 +38,7 @@ export type StrategyManageRuleItem = {
   index: number
   name: string
   scene_name: string
+  kind: StrategyManageRuleKind
   stage: string
   scope_way: string
   scope_windows: number
@@ -37,17 +46,26 @@ export type StrategyManageRuleItem = {
   explain: string
   when: string
   dist_points?: StrategyManageDistPoint[] | null
+  conditions: StrategyManageRuleCondition[]
+  points_by_hits?: number[] | null
+  max_points?: number | null
+  max_bonus_points?: number | null
 }
 
 export type StrategyManageRuleDraft = {
   name: string
   scene_name: string
+  kind: StrategyManageRuleKind
   stage: string
   scope_way: string
   scope_windows: number
   when: string
   points: number
   dist_points?: StrategyManageDistPoint[] | null
+  conditions: StrategyManageRuleCondition[]
+  points_by_hits?: number[] | null
+  max_points?: number | null
+  max_bonus_points?: number | null
   explain: string
 }
 

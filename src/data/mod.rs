@@ -1007,17 +1007,51 @@ pub enum RuleStage {
     Fail,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleKind {
+    #[default]
+    Single,
+    Combination,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScoreRuleCondition {
+    pub name: String,
+    pub when: String,
+    #[serde(default)]
+    pub bonus_points: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScoreRuleBonus {
+    pub name: String,
+    pub when: String,
+    pub points: f64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScoreRule {
     pub name: String,
     #[serde(rename = "scene")]
     pub scene_name: String,
+    #[serde(default)]
+    pub kind: RuleKind,
     pub stage: RuleStage,
     pub scope_windows: usize,
     pub scope_way: ScopeWay,
+    #[serde(default)]
     pub when: String,
+    #[serde(default)]
     pub points: f64,
     pub dist_points: Option<Vec<DistPoint>>,
+    #[serde(default, rename = "condition")]
+    pub conditions: Vec<ScoreRuleCondition>,
+    #[serde(default, rename = "bonus")]
+    pub unbound_bonuses: Vec<ScoreRuleBonus>,
+    pub points_by_hits: Option<Vec<f64>>,
+    pub max_points: Option<f64>,
+    pub max_bonus_points: Option<f64>,
     pub explain: String,
     #[serde(default, skip_deserializing)]
     pub tag: RuleTag,
@@ -1097,61 +1131,167 @@ impl ScoreConfig {
             if !scene_name_set.contains(r.scene_name.trim()) {
                 return Err(format!("第{n}条规则引用的scene不存在: {}", r.scene_name));
             }
-            if r.when.trim().is_empty() {
-                return Err(format!("第{:?}个表达式when字段为空", n));
-            };
-            let _ = parse_and_validate_score_rule_expression(r.when.trim(), n, r.name.trim())?;
             if r.explain.trim().is_empty() {
                 return Err(format!("第{n}条规则 explain 字段为空"));
-            }
-            if !r.points.is_finite() {
-                return Err(format!("第{n}条规则 score 非法"));
-            }
-            let has_points = r.points.is_finite();
-            let has_dist = matches!(r.dist_points.as_ref(), Some(v) if !v.is_empty());
-            if !has_points && !has_dist {
-                return Err(format!(
-                    "第{n}条规则 points 和 dist_points 不能同时无效/为空"
-                ));
-            }
-
-            if r.dist_points.is_some() {
-                let Some(dist) = &r.dist_points else {
-                    return Err(format!("第{:?}个表达式dist_points字段错误", n));
-                };
-                if !dist.is_empty() && !scope_way_supports_dist_points(r.scope_way) {
-                    return Err(format!(
-                        "第{n}条规则 scope_way 不支持 dist_points，仅 EACH/RECENT 支持区间字典分"
-                    ));
-                }
-                for (j, v) in dist.iter().enumerate() {
-                    if v.min > v.max {
-                        return Err(format!("第{n}条规则 dist_points 第{}段 min > max", j + 1));
-                    }
-                    if !v.points.is_finite() {
-                        return Err(format!("第{n}条规则 dist_points 第{}段 points 非法", j + 1));
-                    }
-                }
-                let mut dist: Vec<&DistPoint> = dist.iter().collect();
-                dist.sort_by_key(|x| x.min);
-                for k in 1..dist.len() {
-                    let prev = dist[k - 1];
-                    let curr = dist[k];
-
-                    if prev.max >= curr.min {
-                        return Err(format!(
-                            "区间重叠: [{}-{}] 和 [{}-{}]",
-                            prev.min, prev.max, curr.min, curr.max
-                        ));
-                    }
-                }
             }
             if r.scope_windows == 0 {
                 return Err(format!("第{:?}个表达式scope_windows字段错误", n));
             };
+
+            match r.kind {
+                RuleKind::Single => validate_single_score_rule(r, n)?,
+                RuleKind::Combination => validate_combination_score_rule(r, n)?,
+            }
         }
         Ok(())
     }
+}
+
+fn validate_single_score_rule(rule: &ScoreRule, rule_index: usize) -> Result<(), String> {
+    if rule.when.trim().is_empty() {
+        return Err(format!("第{rule_index}个表达式when字段为空"));
+    }
+    let _ =
+        parse_and_validate_score_rule_expression(rule.when.trim(), rule_index, rule.name.trim())?;
+    if !rule.points.is_finite() {
+        return Err(format!("第{rule_index}条规则 points 非法"));
+    }
+    if !rule.conditions.is_empty()
+        || !rule.unbound_bonuses.is_empty()
+        || rule.points_by_hits.is_some()
+        || rule.max_points.is_some()
+        || rule.max_bonus_points.is_some()
+    {
+        return Err(format!(
+            "第{rule_index}条普通规则不能配置 condition、bonus、points_by_hits 或分数上限"
+        ));
+    }
+
+    if let Some(dist) = &rule.dist_points {
+        if !dist.is_empty() && !scope_way_supports_dist_points(rule.scope_way) {
+            return Err(format!(
+                "第{rule_index}条规则 scope_way 不支持 dist_points，仅 EACH/RECENT 支持区间字典分"
+            ));
+        }
+        for (index, item) in dist.iter().enumerate() {
+            if item.min > item.max {
+                return Err(format!(
+                    "第{rule_index}条规则 dist_points 第{}段 min > max",
+                    index + 1
+                ));
+            }
+            if !item.points.is_finite() {
+                return Err(format!(
+                    "第{rule_index}条规则 dist_points 第{}段 points 非法",
+                    index + 1
+                ));
+            }
+        }
+        let mut sorted: Vec<&DistPoint> = dist.iter().collect();
+        sorted.sort_by_key(|item| item.min);
+        for pair in sorted.windows(2) {
+            let previous = pair[0];
+            let current = pair[1];
+            if previous.max >= current.min {
+                return Err(format!(
+                    "区间重叠: [{}-{}] 和 [{}-{}]",
+                    previous.min, previous.max, current.min, current.max
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_combination_score_rule(rule: &ScoreRule, rule_index: usize) -> Result<(), String> {
+    if !rule.when.trim().is_empty() || rule.points != 0.0 || rule.dist_points.is_some() {
+        return Err(format!(
+            "第{rule_index}条组合规则不能配置 when、points 或 dist_points"
+        ));
+    }
+    if rule.conditions.is_empty() {
+        return Err(format!("第{rule_index}条组合规则至少需要一个 condition"));
+    }
+    if !rule.unbound_bonuses.is_empty() {
+        return Err(format!(
+            "第{rule_index}条组合规则存在旧版独立 bonus，请改为 condition.bonus_points"
+        ));
+    }
+
+    let Some(points_by_hits) = rule.points_by_hits.as_deref() else {
+        return Err(format!("第{rule_index}条组合规则 points_by_hits 字段为空"));
+    };
+    let expected_len = rule.conditions.len() + 1;
+    if points_by_hits.len() != expected_len {
+        return Err(format!(
+            "第{rule_index}条组合规则 points_by_hits 长度应为 {expected_len}（condition 数量 + 1），实际为 {}",
+            points_by_hits.len()
+        ));
+    }
+    if points_by_hits.first().copied() != Some(0.0) {
+        return Err(format!(
+            "第{rule_index}条组合规则 points_by_hits[0] 必须为 0"
+        ));
+    }
+    if points_by_hits.iter().any(|points| !points.is_finite()) {
+        return Err(format!(
+            "第{rule_index}条组合规则 points_by_hits 包含非法分数"
+        ));
+    }
+    if points_by_hits.iter().all(|points| *points == 0.0) {
+        return Err(format!(
+            "第{rule_index}条组合规则 points_by_hits 不能全部为 0"
+        ));
+    }
+
+    let mut expression_names = HashSet::new();
+    for (index, condition) in rule.conditions.iter().enumerate() {
+        let name = condition.name.trim();
+        if name.is_empty() {
+            return Err(format!(
+                "第{rule_index}条组合规则第{}个 condition 的 name 为空",
+                index + 1
+            ));
+        }
+        if !expression_names.insert(name.to_string()) {
+            return Err(format!(
+                "第{rule_index}条组合规则条件/加分项名称重复: {name}"
+            ));
+        }
+        if condition.when.trim().is_empty() {
+            return Err(format!(
+                "第{rule_index}条组合规则 condition({name}) 的 when 为空"
+            ));
+        }
+        let expression_name = format!("{} / 条件 {name}", rule.name.trim());
+        let _ = parse_and_validate_score_rule_expression(
+            condition.when.trim(),
+            rule_index,
+            &expression_name,
+        )?;
+        if !condition.bonus_points.is_finite() {
+            return Err(format!(
+                "第{rule_index}条组合规则 condition({name}) 的 bonus_points 非法"
+            ));
+        }
+    }
+
+    validate_positive_score_cap(rule.max_points, rule_index, "max_points")?;
+    validate_positive_score_cap(rule.max_bonus_points, rule_index, "max_bonus_points")?;
+    Ok(())
+}
+
+fn validate_positive_score_cap(
+    cap: Option<f64>,
+    rule_index: usize,
+    field: &str,
+) -> Result<(), String> {
+    if let Some(cap) = cap
+        && (!cap.is_finite() || cap <= 0.0)
+    {
+        return Err(format!("第{rule_index}条组合规则 {field} 必须为有限正数"));
+    }
+    Ok(())
 }
 
 fn parse_and_validate_score_rule_expression(
@@ -1197,6 +1337,62 @@ impl ScoreRule {
         strategy_path: Option<&str>,
     ) -> Result<Vec<ScoreRule>, String> {
         Ok(ScoreConfig::load_with_strategy_path(source_dir, strategy_path)?.rule)
+    }
+
+    pub fn representative_points(&self) -> f64 {
+        if self.kind == RuleKind::Single {
+            return self
+                .dist_points
+                .as_ref()
+                .filter(|items| !items.is_empty())
+                .and_then(|items| {
+                    items.iter().max_by(|left, right| {
+                        left.points
+                            .abs()
+                            .partial_cmp(&right.points.abs())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                })
+                .map(|item| item.points)
+                .unwrap_or(self.points);
+        }
+
+        let bonus_min = self
+            .conditions
+            .iter()
+            .map(|condition| condition.bonus_points.min(0.0))
+            .sum::<f64>();
+        let bonus_max = self
+            .conditions
+            .iter()
+            .map(|condition| condition.bonus_points.max(0.0))
+            .sum::<f64>();
+        let clamp_bonus = |value: f64| match self.max_bonus_points {
+            Some(cap) => value.clamp(-cap, cap),
+            None => value,
+        };
+        let clamp_total = |value: f64| match self.max_points {
+            Some(cap) => value.clamp(-cap, cap),
+            None => value,
+        };
+        self.points_by_hits
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|base| **base != 0.0)
+            .flat_map(|base| {
+                [
+                    clamp_total(*base),
+                    clamp_total(*base + clamp_bonus(bonus_min)),
+                    clamp_total(*base + clamp_bonus(bonus_max)),
+                ]
+            })
+            .max_by(|left, right| {
+                left.abs()
+                    .partial_cmp(&right.abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(0.0)
     }
 }
 
@@ -1391,6 +1587,84 @@ explain = "test"
 
         let error = ScoreConfig::validate(&cfg).expect_err("unknown function should fail");
         assert!(error.contains("第1条规则(未知函数)表达式引用未知函数"));
+    }
+
+    #[test]
+    fn score_config_accepts_combination_rule() {
+        let cfg = parse_score_config(
+            r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "量价组合"
+scene = "趋势启动"
+kind = "combination"
+stage = "trigger"
+scope_windows = 3
+scope_way = "ANY"
+points_by_hits = [0.0, 1.0, 3.0]
+max_points = 5.0
+max_bonus_points = 2.0
+explain = "组合命中计分"
+
+[[rule.condition]]
+name = "收红"
+when = "C > O"
+
+[[rule.condition]]
+name = "放量"
+when = "V > REF(V, 1)"
+bonus_points = 1.0
+"#,
+        );
+
+        ScoreConfig::validate(&cfg).expect("combination rule should validate");
+        assert_eq!(cfg.rule[0].conditions.len(), 2);
+        assert_eq!(cfg.rule[0].conditions[0].bonus_points, 0.0);
+        assert_eq!(cfg.rule[0].conditions[1].bonus_points, 1.0);
+        assert_eq!(cfg.rule[0].representative_points(), 4.0);
+    }
+
+    #[test]
+    fn score_config_rejects_invalid_combination_points_table() {
+        let cfg = parse_score_config(
+            r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "量价组合"
+scene = "趋势启动"
+kind = "combination"
+stage = "trigger"
+scope_windows = 1
+scope_way = "LAST"
+points_by_hits = [1.0, 3.0]
+explain = "组合命中计分"
+
+[[rule.condition]]
+name = "收红"
+when = "C > O"
+"#,
+        );
+
+        let error = ScoreConfig::validate(&cfg).expect_err("zero-hit points must be zero");
+        assert!(error.contains("points_by_hits[0] 必须为 0"));
     }
 
     #[test]

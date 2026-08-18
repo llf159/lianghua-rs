@@ -195,6 +195,20 @@ export type RuleLayerPoint = {
   ic?: number | null
 }
 
+export type RuleDecayValidation = {
+  window_days: number
+  recent_start_date?: string | null
+  recent_end_date?: string | null
+  recent_day_count: number
+  prior_day_count: number
+  recent_directional_excess_mean?: number | null
+  prior_directional_excess_mean?: number | null
+  decay_change?: number | null
+  decay_t_value?: number | null
+  status: 'significant_decay' | 'decay' | 'weakening' | 'weak' | 'stable' | 'improving' | 'insufficient' | string
+  status_label: string
+}
+
 export type RuleLayerRuleSummary = {
   rule_name: string
   point_count: number
@@ -209,6 +223,7 @@ export type RuleLayerRuleSummary = {
   ic_std?: number | null
   icir?: number | null
   ic_t_value?: number | null
+  decay_validations?: RuleDecayValidation[]
 }
 
 export type RuleLayerBacktestData = {
@@ -230,6 +245,7 @@ export type RuleLayerBacktestData = {
   points: RuleLayerPoint[]
   avg_residual_mean?: number | null
   avg_excess_residual_mean?: number | null
+  decay_validations?: RuleDecayValidation[]
   avg_er_change?: number | null
   profit_loss_ratio?: number | null
   spread_mean?: number | null

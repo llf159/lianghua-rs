@@ -447,6 +447,73 @@
   font-variant-numeric: tabular-nums;
 }
 
+.scene-layer-contrib-table tbody td.scene-layer-decay-cell {
+  min-width: 258px;
+  text-align: left;
+}
+
+.scene-layer-decay-list {
+  display: grid;
+  gap: 4px;
+}
+
+.scene-layer-decay-item {
+  display: grid;
+  grid-template-columns: 34px 58px minmax(118px, 1fr);
+  align-items: center;
+  gap: 6px;
+  padding: 3px 7px;
+  border: 1px solid #e2e8f0;
+  border-left-width: 3px;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.scene-layer-decay-item strong {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.scene-layer-decay-item em {
+  color: #64748b;
+  font-style: normal;
+  text-align: right;
+}
+
+.scene-layer-decay-status-danger {
+  border-left-color: #dc2626;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.scene-layer-decay-status-warning {
+  border-left-color: #d97706;
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.scene-layer-decay-status-improving {
+  border-left-color: #16a34a;
+  background: #f0fdf4;
+  color: #15803d;
+}
+
+.scene-layer-decay-status-stable {
+  border-left-color: #0284c7;
+  background: #f0f9ff;
+  color: #0369a1;
+}
+
+.scene-layer-decay-status-insufficient {
+  border-left-color: #94a3b8;
+  background: #f8fafc;
+  color: #64748b;
+}
+
 .scene-layer-metric-hit {
   color: #b45309;
   background: #fff7ed;

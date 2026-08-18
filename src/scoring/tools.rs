@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use duckdb::{Connection, params};
 
 use crate::data::{
-    RowData, ScopeWay, ScoreRule, cyq_chen_data::init_cyq_chen_db, cyq_chen_db_path,
+    RowData, RuleKind, ScopeWay, ScoreRule, cyq_chen_data::init_cyq_chen_db, cyq_chen_db_path,
     load_stock_list, load_trade_date_list,
 };
 use crate::expr::eval::{Runtime, Value};
@@ -64,19 +64,27 @@ pub fn warmup_rows_estimate(
     let mut all_expr_max_need = 0;
 
     for rule in rules {
-        let stmts = parse_expression_program(&rule.when)
-            .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
-        validate_expression_functions(&stmts)?;
-        let expression_need = estimate_expression_warmup(&stmts)?;
-
         let extra_need = match rule.scope_way {
             ScopeWay::Last => 0,
             ScopeWay::Any | ScopeWay::Consec(_) | ScopeWay::Each | ScopeWay::Recent => {
                 rule.scope_windows.saturating_sub(1)
             }
         };
-
-        all_expr_max_need = all_expr_max_need.max(extra_need + expression_need);
+        let expressions = match rule.kind {
+            RuleKind::Single => vec![rule.when.as_str()],
+            RuleKind::Combination => rule
+                .conditions
+                .iter()
+                .map(|condition| condition.when.as_str())
+                .collect(),
+        };
+        for expression in expressions {
+            let stmts = parse_expression_program(expression)
+                .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
+            validate_expression_functions(&stmts)?;
+            let expression_need = estimate_expression_warmup(&stmts)?;
+            all_expr_max_need = all_expr_max_need.max(extra_need + expression_need);
+        }
     }
 
     Ok(all_expr_max_need)

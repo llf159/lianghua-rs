@@ -18,10 +18,11 @@ use crate::{
         row_into_rt,
     },
     data::{
-        DataReader, RuleStage, RuleTag, RuntimeKeyCollectOptions, ScopeWay, ScoreRule, ScoreScene,
-        collect_assigned_names_from_expr_program, collect_runtime_keys_from_expr_programs,
-        concept_performance_db_path, expr_program_uses_runtime_key, load_stock_list,
-        load_ths_concepts_list, result_db_path, source_db_path,
+        DataReader, RuleKind, RuleStage, RuleTag, RuntimeKeyCollectOptions, ScopeWay, ScoreRule,
+        ScoreScene, collect_assigned_names_from_expr_program,
+        collect_runtime_keys_from_expr_programs, concept_performance_db_path,
+        expr_program_uses_runtime_key, load_stock_list, load_ths_concepts_list, result_db_path,
+        source_db_path,
     },
     expr::{
         eval::{Runtime, Value},
@@ -67,6 +68,8 @@ use crate::{
 };
 
 const TOP_RANK_THRESHOLD: i64 = 100;
+const RULE_DECAY_WINDOWS: [usize; 3] = [20, 40, 60];
+const RULE_DECAY_MIN_PRIOR_DAYS: usize = 10;
 const RULE_VALIDATION_INJECTED_RUNTIME_KEYS: [&str; 4] = ["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI"];
 const RULE_VALIDATION_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 const BACKTEST_INJECTED_RUNTIME_KEYS: [&str; 2] = ["ZHANG", "TOTAL_MV_YI"];
@@ -263,6 +266,21 @@ pub struct RuleLayerPointPayload {
     pub ic: Option<f64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleDecayValidation {
+    pub window_days: usize,
+    pub recent_start_date: Option<String>,
+    pub recent_end_date: Option<String>,
+    pub recent_day_count: usize,
+    pub prior_day_count: usize,
+    pub recent_directional_excess_mean: Option<f64>,
+    pub prior_directional_excess_mean: Option<f64>,
+    pub decay_change: Option<f64>,
+    pub decay_t_value: Option<f64>,
+    pub status: String,
+    pub status_label: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct RuleLayerRuleSummary {
     pub rule_name: String,
@@ -280,6 +298,9 @@ pub struct RuleLayerRuleSummary {
     pub ic_std: Option<f64>,
     pub icir: Option<f64>,
     pub ic_t_value: Option<f64>,
+    pub decay_validations: Vec<RuleDecayValidation>,
+    #[serde(skip)]
+    pub decay_daily_values: Vec<(String, f64)>,
 }
 
 #[derive(Debug, Serialize)]
@@ -302,6 +323,7 @@ pub struct RuleLayerBacktestData {
     pub points: Vec<RuleLayerPointPayload>,
     pub avg_residual_mean: Option<f64>,
     pub avg_excess_residual_mean: Option<f64>,
+    pub decay_validations: Vec<RuleDecayValidation>,
     pub avg_er_change: Option<f64>,
     pub profit_loss_ratio: Option<f64>,
     pub spread_mean: Option<f64>,
@@ -1076,6 +1098,15 @@ fn resolve_validation_seed_rule(
         .and_then(|strategy| strategy.dist_points.clone())
         .and_then(|items| if items.is_empty() { None } else { Some(items) });
 
+    if import_rule
+        .as_ref()
+        .is_some_and(|rule| rule.kind == RuleKind::Combination)
+        && top_formula.is_none()
+        && manual_formula.is_none()
+    {
+        return Err("组合策略不能导入到单表达式验证，请直接在“策略回测”中验证".to_string());
+    }
+
     let manual_scope_way = match manual_strategy
         .and_then(|strategy| read_non_empty_owned(strategy.scope_way.as_deref()))
     {
@@ -1203,19 +1234,51 @@ fn load_rule_meta(source_path: &str) -> Result<(Vec<String>, HashMap<String, Rul
 
     for rule in rules {
         order.push(rule.name.clone());
+        let when = match rule.kind {
+            RuleKind::Single => rule.when.clone(),
+            RuleKind::Combination => format_combination_rule_formula(&rule),
+        };
+        let points = rule.representative_points();
         meta_map.insert(
             rule.name,
             RuleMeta {
-                when: rule.when,
+                when,
                 explain: rule.explain,
                 trigger_mode: scope_way_label(rule.scope_way),
-                is_each: matches!(rule.scope_way, ScopeWay::Each),
-                points: rule.points,
+                is_each: rule.kind == RuleKind::Single && matches!(rule.scope_way, ScopeWay::Each),
+                points,
             },
         );
     }
 
     Ok((order, meta_map))
+}
+
+fn format_combination_rule_formula(rule: &ScoreRule) -> String {
+    let conditions = rule
+        .conditions
+        .iter()
+        .map(|condition| format!("{}: {}", condition.name, condition.when))
+        .collect::<Vec<_>>()
+        .join("；");
+    let bonuses = rule
+        .conditions
+        .iter()
+        .filter(|condition| condition.bonus_points != 0.0)
+        .map(|condition| format!("{}: {:+}", condition.name, condition.bonus_points))
+        .collect::<Vec<_>>()
+        .join("；");
+    let mut parts = vec![
+        format!("组合条件：{conditions}"),
+        format!(
+            "命中数得分：{:?}",
+            rule.points_by_hits.as_deref().unwrap_or_default()
+        ),
+    ];
+    if !bonuses.is_empty() {
+        parts.push(format!("额外加分：{bonuses}"));
+    }
+    parts.join("；")
 }
 
 fn load_rule_joint_validation_features(
@@ -1233,20 +1296,7 @@ fn load_rule_joint_validation_features(
     rules
         .into_iter()
         .map(|rule| {
-            let representative_points = rule
-                .dist_points
-                .as_ref()
-                .filter(|items| !items.is_empty())
-                .and_then(|items| {
-                    items.iter().max_by(|left, right| {
-                        left.points
-                            .abs()
-                            .partial_cmp(&right.points.abs())
-                            .unwrap_or(Ordering::Equal)
-                    })
-                })
-                .map(|item| item.points)
-                .unwrap_or(rule.points);
+            let representative_points = rule.representative_points();
             let score_scale = representative_points.abs();
             if !score_scale.is_finite() || score_scale <= VALIDATION_EPS {
                 return Err(format!("策略 {} 缺少可归一化的有效分数", rule.name));
@@ -2291,6 +2341,7 @@ fn build_validation_cached_rule(
         when_src: formula.to_string(),
         when_ast: stmts,
         assigned_names,
+        combination: None,
     })
 }
 
@@ -3013,6 +3064,7 @@ fn build_rule_backtest_payload(
     metrics: crate::simulate::rule::RuleLayerMetrics,
     layer_details: Option<ValidationScoreLayerDetails>,
 ) -> RuleLayerBacktestData {
+    let decay_validations = build_rule_decay_validations(&metrics.points);
     let (spread_mean, layer_count, layer_method, layer_method_label, layer_summaries) =
         match layer_details {
             Some(layer_details) => {
@@ -3047,6 +3099,7 @@ fn build_rule_backtest_payload(
         points: Vec::new(),
         avg_residual_mean: metrics.avg_residual_mean,
         avg_excess_residual_mean: metrics.avg_excess_residual_mean,
+        decay_validations,
         avg_er_change: metrics.avg_er_change,
         profit_loss_ratio: metrics.profit_loss_ratio,
         spread_mean,
@@ -7674,6 +7727,7 @@ fn run_rule_layer_backtest_core(
             &input,
             params.allowed_ts_codes.as_ref(),
         )?;
+        let decay_validations = build_rule_decay_validations(&metrics.points);
 
         return Ok(RuleLayerBacktestData {
             rule_name: input.rule_name,
@@ -7706,6 +7760,7 @@ fn run_rule_layer_backtest_core(
                 .collect(),
             avg_residual_mean: metrics.avg_residual_mean,
             avg_excess_residual_mean: metrics.avg_excess_residual_mean,
+            decay_validations,
             avg_er_change: metrics.avg_er_change,
             profit_loss_ratio: metrics.profit_loss_ratio,
             spread_mean: None,
@@ -7790,6 +7845,7 @@ fn run_rule_layer_backtest_core(
     );
     let (all_rule_summaries, rule_validation_details) =
         split_and_sort_rule_backtest_summaries_and_details(summary_detail_items?);
+    let decay_validations = build_all_rule_decay_validations(&all_rule_summaries);
 
     let (
         avg_residual_mean,
@@ -7821,6 +7877,7 @@ fn run_rule_layer_backtest_core(
         points: Vec::new(),
         avg_residual_mean,
         avg_excess_residual_mean,
+        decay_validations,
         avg_er_change,
         profit_loss_ratio,
         spread_mean: None,
@@ -7844,6 +7901,162 @@ fn run_rule_layer_backtest_core(
     })
 }
 
+fn rule_decay_t_value(recent: &[f64], prior: &[f64], change: f64) -> Option<f64> {
+    let recent_std = sample_std_f64(recent)?;
+    let prior_std = sample_std_f64(prior)?;
+    let standard_error = ((recent_std * recent_std / recent.len() as f64)
+        + (prior_std * prior_std / prior.len() as f64))
+        .sqrt();
+    if !standard_error.is_finite() || standard_error <= RULE_BACKTEST_EPS {
+        None
+    } else {
+        Some(change / standard_error)
+    }
+}
+
+fn rule_decay_status(
+    recent_mean: f64,
+    change: f64,
+    t_value: Option<f64>,
+) -> (&'static str, &'static str) {
+    if change < 0.0 && t_value.is_some_and(|value| value <= -2.0) {
+        ("significant_decay", "显著衰减")
+    } else if change < 0.0 && recent_mean < 0.0 {
+        ("decay", "衰减")
+    } else if change < 0.0 {
+        ("weakening", "走弱")
+    } else if recent_mean < 0.0 {
+        ("weak", "近期偏弱")
+    } else if change > 0.0 {
+        ("improving", "改善")
+    } else {
+        ("stable", "稳定")
+    }
+}
+
+fn build_decay_validations_from_daily_values(
+    mut daily_values: Vec<(String, f64)>,
+) -> Vec<RuleDecayValidation> {
+    daily_values.retain(|(_, value)| value.is_finite());
+    daily_values.sort_by(|left, right| left.0.cmp(&right.0));
+
+    RULE_DECAY_WINDOWS
+        .into_iter()
+        .map(|window_days| {
+            let recent_day_count = daily_values.len().min(window_days);
+            let recent_start_index = daily_values.len().saturating_sub(recent_day_count);
+            let prior_day_count = recent_start_index;
+            let recent_start_date = daily_values
+                .get(recent_start_index)
+                .map(|(trade_date, _)| trade_date.clone());
+            let recent_end_date = daily_values
+                .last()
+                .map(|(trade_date, _)| trade_date.clone());
+
+            if recent_day_count < window_days || prior_day_count < RULE_DECAY_MIN_PRIOR_DAYS {
+                return RuleDecayValidation {
+                    window_days,
+                    recent_start_date,
+                    recent_end_date,
+                    recent_day_count,
+                    prior_day_count,
+                    recent_directional_excess_mean: None,
+                    prior_directional_excess_mean: None,
+                    decay_change: None,
+                    decay_t_value: None,
+                    status: "insufficient".to_string(),
+                    status_label: "样本不足".to_string(),
+                };
+            }
+
+            let prior = daily_values[..recent_start_index]
+                .iter()
+                .map(|(_, value)| *value)
+                .collect::<Vec<_>>();
+            let recent = daily_values[recent_start_index..]
+                .iter()
+                .map(|(_, value)| *value)
+                .collect::<Vec<_>>();
+            let recent_mean = mean_f64(&recent).unwrap_or_default();
+            let prior_mean = mean_f64(&prior).unwrap_or_default();
+            let change = recent_mean - prior_mean;
+            let t_value = rule_decay_t_value(&recent, &prior, change);
+            let (status, status_label) = rule_decay_status(recent_mean, change, t_value);
+
+            RuleDecayValidation {
+                window_days,
+                recent_start_date,
+                recent_end_date,
+                recent_day_count,
+                prior_day_count,
+                recent_directional_excess_mean: Some(recent_mean),
+                prior_directional_excess_mean: Some(prior_mean),
+                decay_change: Some(change),
+                decay_t_value: t_value,
+                status: status.to_string(),
+                status_label: status_label.to_string(),
+            }
+        })
+        .collect()
+}
+
+fn build_rule_directional_excess_daily_values(
+    points: &[crate::simulate::rule::RuleLayerPoint],
+) -> Vec<(String, f64)> {
+    let direction_score_sum = points
+        .iter()
+        .filter_map(|point| point.avg_rule_score.filter(|value| value.is_finite()))
+        .sum::<f64>();
+    let direction_sign = if direction_score_sum < 0.0 { -1.0 } else { 1.0 };
+    points
+        .iter()
+        .filter_map(|point| {
+            point
+                .avg_excess_residual_return
+                .filter(|value| value.is_finite())
+                .map(|value| (point.trade_date.clone(), value * direction_sign))
+        })
+        .collect()
+}
+
+fn build_rule_decay_validations(
+    points: &[crate::simulate::rule::RuleLayerPoint],
+) -> Vec<RuleDecayValidation> {
+    build_decay_validations_from_daily_values(build_rule_directional_excess_daily_values(points))
+}
+
+fn build_rule_basket_decay_from_daily_groups<'a>(
+    daily_groups: impl IntoIterator<Item = &'a [(String, f64)]>,
+) -> Vec<RuleDecayValidation> {
+    let mut daily_aggregates = HashMap::<String, (f64, usize)>::new();
+    for (trade_date, value) in daily_groups.into_iter().flatten() {
+        if !value.is_finite() {
+            continue;
+        }
+        let aggregate = daily_aggregates.entry(trade_date.clone()).or_default();
+        aggregate.0 += *value;
+        aggregate.1 += 1;
+    }
+    build_decay_validations_from_daily_values(
+        daily_aggregates
+            .into_iter()
+            .filter_map(|(trade_date, (sum, count))| {
+                (count > 0).then_some((trade_date, sum / count as f64))
+            })
+            .collect(),
+    )
+}
+
+fn build_all_rule_decay_validations(
+    summaries: &[RuleLayerRuleSummary],
+) -> Vec<RuleDecayValidation> {
+    build_rule_basket_decay_from_daily_groups(
+        summaries
+            .iter()
+            .map(|summary| summary.decay_daily_values.as_slice()),
+    )
+}
+
 fn build_one_rule_backtest_summary_and_detail(
     one_rule_name: &str,
     metrics_with_samples: RuleLayerMetricsWithSamples,
@@ -7860,6 +8073,8 @@ fn build_one_rule_backtest_summary_and_detail(
         .get(one_rule_name)
         .cloned()
         .unwrap_or_default();
+    let decay_daily_values = build_rule_directional_excess_daily_values(&metrics.points);
+    let decay_validations = build_decay_validations_from_daily_values(decay_daily_values.clone());
     let summary = RuleLayerRuleSummary {
         rule_name: one_rule_name.to_string(),
         point_count: metrics.points.len(),
@@ -7875,6 +8090,8 @@ fn build_one_rule_backtest_summary_and_detail(
         ic_std: metrics.ic_std,
         icir: metrics.icir,
         ic_t_value: metrics.ic_t_value,
+        decay_validations,
+        decay_daily_values,
     };
     let detail = rule_meta_map.get(one_rule_name).map(|rule_meta| {
         build_strategy_rule_validation_detail(
@@ -8229,7 +8446,7 @@ fn validate_backtest_strategy_expressions(source_path: &str) -> Result<(), Strin
     let rules_cache = build_scoring_rule_cache(source_path, None)?;
     let programs = rules_cache
         .iter()
-        .map(|rule| &rule.when_ast)
+        .flat_map(CachedRule::expression_programs)
         .collect::<Vec<_>>();
     let cyq_chen_keys = cyq_chen_runtime_key_names();
     let injected_keys = BACKTEST_INJECTED_RUNTIME_KEYS
@@ -8700,6 +8917,7 @@ pub fn run_transient_rule_layer_backtest(
     );
     let (all_rule_summaries, rule_validation_details) =
         split_and_sort_rule_backtest_summaries_and_details(summary_detail_items?);
+    let decay_validations = build_all_rule_decay_validations(&all_rule_summaries);
 
     let (
         avg_residual_mean,
@@ -8731,6 +8949,7 @@ pub fn run_transient_rule_layer_backtest(
         points: Vec::new(),
         avg_residual_mean,
         avg_excess_residual_mean,
+        decay_validations,
         avg_er_change,
         profit_loss_ratio,
         spread_mean: None,
@@ -8923,7 +9142,7 @@ mod tests {
         },
         scoring::tools::load_st_list,
         simulate::rank::RankLayerSamplePoint,
-        simulate::rule::{RuleJointRidgeDayStats, RuleLayerSamplePoint},
+        simulate::rule::{RuleJointRidgeDayStats, RuleLayerPoint, RuleLayerSamplePoint},
     };
 
     use super::{
@@ -8931,7 +9150,8 @@ mod tests {
         ValidationSampleRawRow, ValidationSampleStockMeta, ValidationSeedRule,
         ValidationSimilarityCache, ValidationVariant, build_industry_maps_from_rows,
         build_joint_exposures, build_joint_walk_forward_models, build_rank_layer_sample_groups,
-        build_recent_decay_dist_points, build_rule_contribution_averages_from_rows,
+        build_recent_decay_dist_points, build_rule_basket_decay_from_daily_groups,
+        build_rule_contribution_averages_from_rows, build_rule_decay_validations,
         build_validation_cached_rule, build_validation_calibration_specs,
         build_validation_return_distribution, build_validation_sample_groups,
         build_validation_similarity_rows, build_validation_triggered_scores,
@@ -9986,5 +10206,141 @@ explain = "test"
 
         assert_eq!(row, &vec![(0, 2.0), (1, -2.0)]);
         assert_eq!(trigger_counts, vec![1, 1]);
+    }
+
+    fn decay_test_point(index: usize, score: f64, excess: f64) -> RuleLayerPoint {
+        RuleLayerPoint {
+            trade_date: format!("{index:08}"),
+            sample_count: 10,
+            avg_rule_score: Some(score),
+            avg_residual_return: Some(excess),
+            avg_excess_residual_return: Some(excess),
+            top_bottom_spread: None,
+            ic: None,
+        }
+    }
+
+    #[test]
+    fn rule_decay_validation_detects_recent_positive_rule_decay() {
+        let points = (0..80)
+            .map(|index| {
+                let excess = if index < 60 {
+                    0.20 + (index % 2) as f64 * 0.02
+                } else {
+                    -0.50 + (index % 2) as f64 * 0.02
+                };
+                decay_test_point(index, 1.0, excess)
+            })
+            .collect::<Vec<_>>();
+
+        let validations = build_rule_decay_validations(&points);
+        let recent_20 = validations
+            .iter()
+            .find(|item| item.window_days == 20)
+            .expect("20-day validation");
+
+        assert_eq!(recent_20.status, "significant_decay");
+        assert_eq!(recent_20.recent_day_count, 20);
+        assert_eq!(recent_20.prior_day_count, 60);
+        assert!(
+            recent_20
+                .recent_directional_excess_mean
+                .is_some_and(|value| value < 0.0)
+        );
+        assert!(recent_20.decay_change.is_some_and(|value| value < -0.6));
+        assert!(recent_20.decay_t_value.is_some_and(|value| value < -2.0));
+    }
+
+    #[test]
+    fn rule_decay_validation_normalizes_negative_rule_direction() {
+        let points = (0..80)
+            .map(|index| {
+                let excess = if index < 60 {
+                    -0.30 - (index % 2) as f64 * 0.02
+                } else {
+                    0.20 - (index % 2) as f64 * 0.02
+                };
+                decay_test_point(index, -1.0, excess)
+            })
+            .collect::<Vec<_>>();
+
+        let validations = build_rule_decay_validations(&points);
+        let recent_20 = validations
+            .iter()
+            .find(|item| item.window_days == 20)
+            .expect("20-day validation");
+
+        assert_eq!(recent_20.status, "significant_decay");
+        assert!(
+            recent_20
+                .prior_directional_excess_mean
+                .is_some_and(|value| value > 0.0)
+        );
+        assert!(
+            recent_20
+                .recent_directional_excess_mean
+                .is_some_and(|value| value < 0.0)
+        );
+        assert!(recent_20.decay_change.is_some_and(|value| value < 0.0));
+    }
+
+    #[test]
+    fn rule_decay_validation_marks_short_history_as_insufficient() {
+        let points = (0..25)
+            .map(|index| decay_test_point(index, 1.0, 0.10))
+            .collect::<Vec<_>>();
+
+        let validations = build_rule_decay_validations(&points);
+
+        assert_eq!(validations.len(), 3);
+        assert!(validations.iter().all(|item| item.status == "insufficient"));
+        let recent_20 = validations
+            .iter()
+            .find(|item| item.window_days == 20)
+            .expect("20-day validation");
+        assert_eq!(recent_20.recent_day_count, 20);
+        assert_eq!(recent_20.prior_day_count, 5);
+        assert_eq!(recent_20.decay_change, None);
+    }
+
+    #[test]
+    fn all_rule_basket_decay_averages_directional_strategy_days() {
+        let first = (0..80)
+            .map(|index| {
+                let value = if index < 60 {
+                    0.20 + (index % 2) as f64 * 0.02
+                } else {
+                    -0.30 + (index % 2) as f64 * 0.02
+                };
+                (format!("{index:08}"), value)
+            })
+            .collect::<Vec<_>>();
+        let second = (0..80)
+            .map(|index| {
+                let value = if index < 60 {
+                    0.40 + (index % 2) as f64 * 0.02
+                } else {
+                    -0.10 + (index % 2) as f64 * 0.02
+                };
+                (format!("{index:08}"), value)
+            })
+            .collect::<Vec<_>>();
+
+        let validations =
+            build_rule_basket_decay_from_daily_groups([first.as_slice(), second.as_slice()]);
+        let recent_20 = validations
+            .iter()
+            .find(|item| item.window_days == 20)
+            .expect("20-day basket validation");
+
+        assert_eq!(recent_20.status, "significant_decay");
+        assert_eq!(recent_20.recent_day_count, 20);
+        assert_eq!(recent_20.prior_day_count, 60);
+        assert!(
+            recent_20
+                .recent_directional_excess_mean
+                .is_some_and(|value| value < -0.18)
+        );
+        assert!(recent_20.decay_change.is_some_and(|value| value < -0.49));
     }
 }
