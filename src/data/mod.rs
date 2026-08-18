@@ -1159,13 +1159,18 @@ fn validate_single_score_rule(rule: &ScoreRule, rule_index: usize) -> Result<(),
     if !rule.conditions.is_empty()
         || !rule.unbound_bonuses.is_empty()
         || rule.points_by_hits.is_some()
-        || rule.max_points.is_some()
         || rule.max_bonus_points.is_some()
     {
         return Err(format!(
-            "第{rule_index}条普通规则不能配置 condition、bonus、points_by_hits 或分数上限"
+            "第{rule_index}条普通规则不能配置 condition、bonus、points_by_hits 或额外加分上限"
         ));
     }
+    if rule.max_points.is_some() && !matches!(rule.scope_way, ScopeWay::Each) {
+        return Err(format!(
+            "第{rule_index}条普通规则仅 scope_way=EACH 时支持 max_points"
+        ));
+    }
+    validate_positive_score_cap(rule.max_points, rule_index, "max_points")?;
 
     if let Some(dist) = &rule.dist_points {
         if !dist.is_empty() && !scope_way_supports_dist_points(rule.scope_way) {
@@ -1211,6 +1216,9 @@ fn validate_combination_score_rule(rule: &ScoreRule, rule_index: usize) -> Resul
     }
     if rule.conditions.is_empty() {
         return Err(format!("第{rule_index}条组合规则至少需要一个 condition"));
+    }
+    if matches!(rule.scope_way, ScopeWay::Recent) {
+        return Err(format!("第{rule_index}条组合规则不支持 RECENT scope_way"));
     }
     if !rule.unbound_bonuses.is_empty() {
         return Err(format!(
@@ -1289,7 +1297,7 @@ fn validate_positive_score_cap(
     if let Some(cap) = cap
         && (!cap.is_finite() || cap <= 0.0)
     {
-        return Err(format!("第{rule_index}条组合规则 {field} 必须为有限正数"));
+        return Err(format!("第{rule_index}条规则 {field} 必须为有限正数"));
     }
     Ok(())
 }
@@ -1341,7 +1349,7 @@ impl ScoreRule {
 
     pub fn representative_points(&self) -> f64 {
         if self.kind == RuleKind::Single {
-            return self
+            let points = self
                 .dist_points
                 .as_ref()
                 .filter(|items| !items.is_empty())
@@ -1355,6 +1363,10 @@ impl ScoreRule {
                 })
                 .map(|item| item.points)
                 .unwrap_or(self.points);
+            return match self.max_points {
+                Some(cap) => points.clamp(-cap, cap),
+                None => points,
+            };
         }
 
         let bonus_min = self
@@ -1483,7 +1495,9 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{DataReader, RuleTag, ScoreConfig, collect_assigned_names_from_expr_program};
+    use super::{
+        DataReader, RuleTag, ScopeWay, ScoreConfig, collect_assigned_names_from_expr_program,
+    };
     use duckdb::{Connection, params};
 
     fn parse_score_config(text: &str) -> ScoreConfig {
@@ -1590,8 +1604,48 @@ explain = "test"
     }
 
     #[test]
+    fn score_config_allows_max_points_only_for_single_each_rule() {
+        let mut cfg = parse_score_config(
+            r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "窗口累计"
+scene = "趋势启动"
+stage = "base"
+scope_windows = 3
+scope_way = "EACH"
+when = "C > O"
+points = 2.0
+max_points = 3.0
+explain = "test"
+"#,
+        );
+
+        ScoreConfig::validate(&cfg).expect("single EACH max_points should validate");
+        assert_eq!(cfg.rule[0].representative_points(), 2.0);
+
+        cfg.rule[0].scope_way = ScopeWay::Last;
+        let error = ScoreConfig::validate(&cfg).expect_err("single LAST max_points must fail");
+        assert!(error.contains("仅 scope_way=EACH"));
+
+        cfg.rule[0].scope_way = ScopeWay::Each;
+        cfg.rule[0].max_points = Some(0.0);
+        let error = ScoreConfig::validate(&cfg).expect_err("zero max_points must fail");
+        assert!(error.contains("max_points 必须为有限正数"));
+    }
+
+    #[test]
     fn score_config_accepts_combination_rule() {
-        let cfg = parse_score_config(
+        let mut cfg = parse_score_config(
             r#"
 version = 1
 
@@ -1631,6 +1685,10 @@ bonus_points = 1.0
         assert_eq!(cfg.rule[0].conditions[0].bonus_points, 0.0);
         assert_eq!(cfg.rule[0].conditions[1].bonus_points, 1.0);
         assert_eq!(cfg.rule[0].representative_points(), 4.0);
+
+        cfg.rule[0].scope_way = ScopeWay::Recent;
+        let error = ScoreConfig::validate(&cfg).expect_err("combination RECENT must be rejected");
+        assert!(error.contains("不支持 RECENT"));
     }
 
     #[test]

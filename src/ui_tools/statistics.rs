@@ -2337,6 +2337,7 @@ fn build_validation_cached_rule(
         scope_way,
         points,
         dist_points,
+        max_points: None,
         tag,
         when_src: formula.to_string(),
         when_ast: stmts,

@@ -396,11 +396,25 @@ fn validate_rule_definition(
             if !rule.conditions.is_empty()
                 || !rule.unbound_bonuses.is_empty()
                 || rule.points_by_hits.is_some()
-                || rule.max_points.is_some()
                 || rule.max_bonus_points.is_some()
             {
                 return Err(format!(
-                    "普通策略 {} 不能配置 condition、bonus、points_by_hits 或分数上限",
+                    "普通策略 {} 不能配置 condition、bonus、points_by_hits 或额外加分上限",
+                    rule.name
+                ));
+            }
+            if rule.max_points.is_some() && !matches!(scope_way, StrategyScopeWay::Each) {
+                return Err(format!(
+                    "普通策略 {} 仅 scope_way=EACH 时支持 max_points",
+                    rule.name
+                ));
+            }
+            if rule
+                .max_points
+                .is_some_and(|value| !value.is_finite() || value <= 0.0)
+            {
+                return Err(format!(
+                    "普通策略 {} 的 max_points 必须为有限正数",
                     rule.name
                 ));
             }
@@ -419,6 +433,9 @@ fn validate_rule_definition(
             }
             if rule.conditions.is_empty() {
                 return Err(format!("组合策略 {} 至少需要一个 condition", rule.name));
+            }
+            if matches!(scope_way, StrategyScopeWay::Recent) {
+                return Err(format!("组合策略 {} 不支持 RECENT scope_way", rule.name));
             }
             if !rule.unbound_bonuses.is_empty() {
                 return Err(format!(

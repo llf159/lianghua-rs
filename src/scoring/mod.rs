@@ -84,6 +84,7 @@ pub struct CachedRule {
     pub scope_way: ScopeWay,
     pub points: f64,
     pub dist_points: Option<Vec<DistPoint>>,
+    pub max_points: Option<f64>,
     pub tag: RuleTag,
     pub when_src: String,
     pub when_ast: Stmts,
@@ -295,6 +296,36 @@ fn clamp_score(value: f64, cap: Option<f64>) -> f64 {
     }
 }
 
+fn combination_score_parts(
+    combination: &CachedCombinationRule,
+    mut condition_hit: impl FnMut(usize) -> bool,
+) -> (f64, f64, bool) {
+    let hit_count = (0..combination.conditions.len())
+        .filter(|index| condition_hit(*index))
+        .count();
+    let base_score = combination.points_by_hits[hit_count];
+    if base_score == 0.0 {
+        return (0.0, 0.0, false);
+    }
+
+    let bonus_score = combination
+        .conditions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, condition)| condition_hit(index).then_some(condition.bonus_points))
+        .sum::<f64>();
+    (base_score, bonus_score, true)
+}
+
+fn finish_combination_score(
+    combination: &CachedCombinationRule,
+    base_score: f64,
+    bonus_score: f64,
+) -> f64 {
+    let bonus_score = clamp_score(bonus_score, combination.max_bonus_points);
+    clamp_score(base_score + bonus_score, combination.max_points)
+}
+
 fn scoring_combination_rule_cache(
     rule: &CachedRule,
     combination: &CachedCombinationRule,
@@ -310,45 +341,61 @@ fn scoring_combination_rule_cache(
     let mut triggered = Vec::with_capacity(len);
 
     for index in 0..len {
-        let hit_count = condition_hits
-            .iter()
-            .filter(|hits| {
+        let start = (index + 1).saturating_sub(rule.scope_windows);
+        let (base_score, bonus_score, is_triggered) = match rule.scope_way {
+            ScopeWay::Last => {
+                combination_score_parts(combination, |condition| condition_hits[condition][index])
+            }
+            ScopeWay::Any => {
+                // ANY 取窗口内条件命中数最多的一天；并列时取更近的一天。
+                let best_day = (start..=index)
+                    .max_by_key(|day| {
+                        (
+                            condition_hits.iter().filter(|hits| hits[*day]).count(),
+                            *day,
+                        )
+                    })
+                    .unwrap_or(index);
+                combination_score_parts(combination, |condition| {
+                    condition_hits[condition][best_day]
+                })
+            }
+            ScopeWay::Each => {
+                let mut base_total = 0.0;
+                let mut bonus_total = 0.0;
+                let mut any_triggered = false;
+                for day in start..=index {
+                    let (day_base, day_bonus, day_triggered) =
+                        combination_score_parts(combination, |condition| {
+                            condition_hits[condition][day]
+                        });
+                    if day_triggered {
+                        base_total += day_base;
+                        bonus_total += day_bonus;
+                        any_triggered = true;
+                    }
+                }
+                (base_total, bonus_total, any_triggered)
+            }
+            ScopeWay::Consec(_) => combination_score_parts(combination, |condition| {
                 scope_hit_triggered(&hit_scopeway(
                     rule.scope_way,
                     rule.scope_windows,
-                    hits,
+                    &condition_hits[condition],
                     index,
                 ))
-            })
-            .count();
-        let base_score = combination.points_by_hits[hit_count];
-        let is_triggered = base_score != 0.0;
+            }),
+            ScopeWay::Recent => {
+                return Err("组合策略不支持 RECENT scope_way".to_string());
+            }
+        };
+
         triggered.push(is_triggered);
-
-        if !is_triggered {
-            scores.push(0.0);
-            continue;
-        }
-
-        let bonus_score = combination
-            .conditions
-            .iter()
-            .zip(&condition_hits)
-            .filter_map(|(condition, hits)| {
-                scope_hit_triggered(&hit_scopeway(
-                    rule.scope_way,
-                    rule.scope_windows,
-                    hits,
-                    index,
-                ))
-                .then_some(condition.bonus_points)
-            })
-            .sum::<f64>();
-        let bonus_score = clamp_score(bonus_score, combination.max_bonus_points);
-        scores.push(clamp_score(
-            base_score + bonus_score,
-            combination.max_points,
-        ));
+        scores.push(if is_triggered {
+            finish_combination_score(combination, base_score, bonus_score)
+        } else {
+            0.0
+        });
     }
 
     Ok((scores, triggered))
@@ -373,7 +420,7 @@ fn scoring_rule_cache(
         let hit = hit_scopeway(rule.scope_way, rule.scope_windows, &bs, i);
         triggered.push(scope_hit_triggered(&hit));
         let s = score_at(hit, rule.dist_points.as_deref(), rule.points);
-        out.push(s);
+        out.push(clamp_score(s, rule.max_points));
     }
 
     Ok((out, triggered))
@@ -686,6 +733,7 @@ mod tests {
             scope_way: ScopeWay::Last,
             points: 1.0,
             dist_points: None,
+            max_points: None,
             tag: crate::data::RuleTag::Normal,
             when_src: expression.to_string(),
             when_ast,
@@ -729,6 +777,7 @@ mod tests {
             scope_way: ScopeWay::Last,
             points: 0.0,
             dist_points: None,
+            max_points: None,
             tag: crate::data::RuleTag::Normal,
             when_src: first.when_src,
             when_ast: first.when_ast,
@@ -796,6 +845,27 @@ mod tests {
     }
 
     #[test]
+    fn single_each_rule_applies_final_score_absolute_cap() {
+        let mut runtime = runtime_with_close_series(&[1.0, 2.0, 3.0]);
+        let mut rule = cached_rule("C > 0");
+        rule.scope_way = ScopeWay::Each;
+        rule.scope_windows = 3;
+        rule.points = 2.0;
+        rule.max_points = Some(3.0);
+
+        let (scores, triggered) =
+            evaluate_cached_rule_scores(&rule, &mut runtime).expect("single EACH evaluates");
+
+        assert_eq!(scores, vec![2.0, 3.0, 3.0]);
+        assert_eq!(triggered, vec![true, true, true]);
+
+        rule.points = -2.0;
+        let (scores, _) =
+            evaluate_cached_rule_scores(&rule, &mut runtime).expect("negative EACH evaluates");
+        assert_eq!(scores, vec![-2.0, -3.0, -3.0]);
+    }
+
+    #[test]
     fn combination_rule_scores_distinct_hits_and_bonus() {
         let mut runtime = runtime_with_close_series(&[0.0, 2.0, 3.0, 4.0, 5.0]);
         let rule = combination_rule(
@@ -847,6 +917,58 @@ mod tests {
 
         assert_eq!(scores, vec![1.0, 5.0]);
         assert_eq!(triggered, vec![true, true]);
+    }
+
+    #[test]
+    fn combination_any_scores_the_most_hits_day_and_prefers_the_latest_tie() {
+        let mut runtime = runtime_with_close_series(&[1.0, 2.0, 3.0]);
+        let mut rule = combination_rule(
+            &["C > 0", "C < 1.5", "C > 2.5"],
+            vec![0.0, 1.0, 3.0, 6.0],
+            &[0.0, 10.0, 20.0],
+            None,
+            None,
+        );
+        rule.scope_way = ScopeWay::Any;
+        rule.scope_windows = 3;
+
+        let (scores, triggered) =
+            evaluate_cached_rule_scores(&rule, &mut runtime).expect("combination evaluates");
+
+        assert_eq!(scores, vec![13.0, 13.0, 23.0]);
+        assert_eq!(triggered, vec![true, true, true]);
+    }
+
+    #[test]
+    fn combination_each_sums_each_days_score_in_the_window() {
+        let mut runtime = runtime_with_close_series(&[1.0, 2.0, 3.0]);
+        let mut rule = combination_rule(
+            &["C > 0", "C < 1.5", "C > 2.5"],
+            vec![0.0, 1.0, 3.0, 6.0],
+            &[0.0, 10.0, 20.0],
+            None,
+            None,
+        );
+        rule.scope_way = ScopeWay::Each;
+        rule.scope_windows = 3;
+
+        let (scores, triggered) =
+            evaluate_cached_rule_scores(&rule, &mut runtime).expect("combination evaluates");
+
+        assert_eq!(scores, vec![13.0, 14.0, 37.0]);
+        assert_eq!(triggered, vec![true, true, true]);
+    }
+
+    #[test]
+    fn combination_recent_is_rejected_at_runtime() {
+        let mut runtime = runtime_with_close_series(&[1.0]);
+        let mut rule = combination_rule(&["C > 0"], vec![0.0, 1.0], &[0.0], None, None);
+        rule.scope_way = ScopeWay::Recent;
+
+        let error = evaluate_cached_rule_scores(&rule, &mut runtime)
+            .expect_err("combination RECENT must be rejected");
+
+        assert!(error.contains("不支持 RECENT"));
     }
 
     #[test]

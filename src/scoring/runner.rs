@@ -612,6 +612,7 @@ mod tests {
             scope_way: ScopeWay::Last,
             points: 1.0,
             dist_points: None,
+            max_points: None,
             tag: RuleTag::Normal,
             when_src: expression.to_string(),
             when_ast,

@@ -31,6 +31,7 @@ import StrategyAssetModal from './StrategyAssetModal'
 import './css/StrategyManagePage.css'
 
 const SCOPE_OPTIONS = ['LAST', 'ANY', 'EACH', 'RECENT', 'CONSEC>=2'] as const
+const COMBINATION_SCOPE_OPTIONS = ['LAST', 'ANY', 'EACH', 'CONSEC>=2'] as const
 const STAGE_OPTIONS = ['base', 'trigger', 'confirm', 'risk', 'fail'] as const
 const RULE_KIND_OPTIONS = [
   { value: 'single', label: '单语句策略' },
@@ -326,6 +327,9 @@ function buildPreparedDraft(
     if (nextDraft.conditions.length === 0) {
       throw new Error('组合策略至少需要一条条件')
     }
+    if (nextDraft.scope_way.toUpperCase() === 'RECENT') {
+      throw new Error('组合策略不支持 RECENT scope_way')
+    }
     nextDraft.conditions.forEach((condition, index) => {
       if (!condition.name || !condition.when) {
         throw new Error(`条件 ${index + 1} 的名称和表达式不能为空`)
@@ -375,7 +379,10 @@ function buildPreparedDraft(
     }
     nextDraft.conditions = []
     nextDraft.points_by_hits = null
-    nextDraft.max_points = null
+    nextDraft.max_points =
+      nextDraft.scope_way.toUpperCase() === 'EACH'
+        ? parseOptionalPositiveNumber(maxPointsText, '最终得分上限')
+        : null
     nextDraft.max_bonus_points = null
   }
 
@@ -639,6 +646,9 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
         if (rule.conditions.length === 0) {
           issues.push(`组合 Rule ${rule.name || '(未命名)'} 至少需要一条条件`)
         }
+        if (rule.scope_way.trim().toUpperCase() === 'RECENT') {
+          issues.push(`组合 Rule ${rule.name || '(未命名)'} 不支持 RECENT scope_way`)
+        }
         rule.conditions.forEach((condition, index) => {
           if (!condition.name.trim() || !condition.when.trim()) {
             issues.push(`组合 Rule ${rule.name || '(未命名)'} 的条件 ${index + 1} 不完整`)
@@ -655,6 +665,20 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
         }
       } else if (!rule.when.trim()) {
         issues.push(`Rule ${rule.name || '(未命名)'} 的表达式不能为空`)
+      }
+
+      if (
+        rule.kind === 'single' &&
+        rule.max_points != null &&
+        rule.scope_way.trim().toUpperCase() !== 'EACH'
+      ) {
+        issues.push(`普通 Rule ${rule.name || '(未命名)'} 仅 EACH 支持最终得分上限`)
+      }
+      if (
+        rule.max_points != null &&
+        (!Number.isFinite(rule.max_points) || rule.max_points <= 0)
+      ) {
+        issues.push(`Rule ${rule.name || '(未命名)'} 的最终得分上限必须为正数`)
       }
 
       if (!Number.isInteger(rule.scope_windows) || rule.scope_windows < 1) {
@@ -689,6 +713,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
   const draftScopeSupportsDistPoints = draft
     ? scopeWaySupportsDistPoints(draft.scope_way)
     : false
+  const draftScopeOptions = draft?.kind === 'combination' ? COMBINATION_SCOPE_OPTIONS : SCOPE_OPTIONS
 
   function applyChipStrategyPage(page: CyqChenStrategyPageData) {
     setChipStrategies(page.strategies ?? [])
@@ -804,7 +829,13 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
         }
         return currentPoints[index] ?? index
       })
-      setDraft({ ...draft, kind, conditions, points_by_hits: pointsByHits })
+      setDraft({
+        ...draft,
+        kind,
+        scope_way: draft.scope_way.trim().toUpperCase() === 'RECENT' ? 'LAST' : draft.scope_way,
+        conditions,
+        points_by_hits: pointsByHits,
+      })
       setScoreMode('fixed')
       return
     }
@@ -2211,7 +2242,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
               <label className="strategy-manage-field">
                 <span>Scope</span>
                 <select value={draft.scope_way} onChange={(event) => updateDraftScopeWay(event.target.value)}>
-                  {SCOPE_OPTIONS.map((item) => (
+                  {draftScopeOptions.map((item) => (
                     <option key={item} value={item}>
                       {item}
                     </option>
@@ -2269,6 +2300,19 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                       <textarea rows={6} value={distPointsText} onChange={(event) => setDistPointsText(event.target.value)} />
                     </label>
                   )}
+                  {draft.scope_way.toUpperCase() === 'EACH' ? (
+                    <label className="strategy-manage-field strategy-manage-field-span-full">
+                      <span>最终得分绝对值上限</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="any"
+                        value={maxPointsText}
+                        onChange={(event) => setMaxPointsText(event.target.value)}
+                        placeholder="不限"
+                      />
+                    </label>
+                  ) : null}
                 </>
               ) : (
                 <div className="strategy-manage-combination-editor strategy-manage-field-span-full">
