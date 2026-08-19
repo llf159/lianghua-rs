@@ -5191,8 +5191,7 @@ pub fn run_rule_joint_ridge_validation(
         &session.params.start_date,
         &session.params.end_date,
     )?;
-    let (exposures, trigger_samples) =
-        build_joint_exposures(&session.features, &detail_rows);
+    let (exposures, trigger_samples) = build_joint_exposures(&session.features, &detail_rows);
     let current_weights = session
         .features
         .iter()
@@ -8324,11 +8323,8 @@ fn run_rank_layer_backtest_core(
         &stock_meta_map,
     );
     let joint_params = rule_joint_validation_params_from_rank(params);
-    let joint_validation_continuation_id = store_rule_joint_validation_from_rows(
-        source_path,
-        &joint_params,
-        summary_rows,
-    );
+    let joint_validation_continuation_id =
+        store_rule_joint_validation_from_rows(source_path, &joint_params, summary_rows);
 
     Ok(RankLayerBacktestData {
         stock_adj_type: input.stock_adj_type,
@@ -9108,11 +9104,8 @@ pub fn run_transient_rank_layer_backtest(
         input.layer_config.layer_count,
         &stock_meta_map,
     );
-    let joint_validation_continuation_id = store_rule_joint_validation_from_rows(
-        &source_path,
-        &joint_params,
-        summary_rows,
-    );
+    let joint_validation_continuation_id =
+        store_rule_joint_validation_from_rows(&source_path, &joint_params, summary_rows);
 
     Ok(RankLayerBacktestData {
         stock_adj_type: input.stock_adj_type,
