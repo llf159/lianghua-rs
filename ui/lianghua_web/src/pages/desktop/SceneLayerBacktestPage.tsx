@@ -5,7 +5,6 @@ import { getStrategyManagePage, type StrategyManageRuleItem } from "../../apis/s
 import {
   getRuleLayerBacktestDefaults,
   runRankLayerBacktest,
-  runRuleJointRidgeValidation,
   runRuleExpressionCalibration,
   runRuleExpressionValidation,
   runTransientRankLayerBacktest,
@@ -17,7 +16,6 @@ import {
   type RankLayerBacktestData,
   type RankLayerMethod,
   type RankLayerSampleGroup,
-  type RuleJointRidgeValidationData,
   type RuleExpressionCalibrationCandidate,
   type RuleExpressionCalibrationData,
   type RuleExpressionValidationData,
@@ -199,13 +197,6 @@ function formatPercent(value?: number | null, digits = 2) {
     return "--";
   }
   return `${value.toFixed(digits)}%`;
-}
-
-function formatFractionPercent(value?: number | null, digits = 2) {
-  if (value === null || value === undefined || !Number.isFinite(value)) {
-    return "--";
-  }
-  return `${(value * 100).toFixed(digits)}%`;
 }
 
 function getRuleDecayValidation(
@@ -719,11 +710,6 @@ export default function SceneLayerBacktestPage() {
   const [ruleResult, setRuleResult] = useState<RuleLayerBacktestData | null>(() =>
     readTransientStrategyBacktestResult(),
   );
-  const [ruleJointLoading, setRuleJointLoading] = useState(false);
-  const [ruleJointError, setRuleJointError] = useState("");
-  const [ruleJointResult, setRuleJointResult] =
-    useState<RuleJointRidgeValidationData | null>(null);
-
   const [strategyRuleOptions, setStrategyRuleOptions] = useState<StrategyManageRuleItem[]>([]);
   const [validationImportRuleName, setValidationImportRuleName] = useState("");
   const [validationExpression, setValidationExpression] = useState("");
@@ -759,7 +745,6 @@ export default function SceneLayerBacktestPage() {
     rankTransientLoading ||
     ruleLoading ||
     ruleTransientLoading ||
-    ruleJointLoading ||
     validationLoading ||
     validationCalibrationLoading;
   const backtestBoardOptions = useMemo(
@@ -952,6 +937,8 @@ export default function SceneLayerBacktestPage() {
   }, [ruleResult]);
   const validationComboRows = validationResult?.combo_results ?? EMPTY_VALIDATION_COMBO_RESULTS;
   const rankLayerSummaries = rankResult?.layer_summaries ?? [];
+  const rankTopKSummaries = rankResult?.top_k_summaries ?? [];
+  const rankTopKPeriodSummaries = rankResult?.top_k_period_summaries ?? [];
   const rankLayerSampleGroupByIndex = useMemo(() => {
     const groups = rankResult?.layer_sample_groups ?? [];
     return new Map(groups.map((item) => [item.layer_index, item]));
@@ -1391,8 +1378,6 @@ export default function SceneLayerBacktestPage() {
 
     setRankResult(null);
     setRankLayerSampleModal(null);
-    setRuleJointResult(null);
-    setRuleJointError("");
     setRankLoading(true);
     setRankError("");
     try {
@@ -1454,8 +1439,6 @@ export default function SceneLayerBacktestPage() {
 
     setRankResult(null);
     setRankLayerSampleModal(null);
-    setRuleJointResult(null);
-    setRuleJointError("");
     setRankTransientLoading(true);
     setRankError("");
     try {
@@ -1600,26 +1583,6 @@ export default function SceneLayerBacktestPage() {
       setRuleError(`执行变更策略回测验证失败: ${String(runError)}`);
     } finally {
       setRuleTransientLoading(false);
-    }
-  }
-
-  async function onRunRankJointRidgeValidation() {
-    const continuationId = rankResult?.joint_validation_continuation_id?.trim();
-    if (!continuationId) {
-      setRuleJointError(
-        "当前结果没有整体验证缓存，可能来自旧会话；请重新执行一次排名整体回测或变更策略验证。",
-      );
-      return;
-    }
-    setRuleJointLoading(true);
-    setRuleJointError("");
-    setRuleJointResult(null);
-    try {
-      setRuleJointResult(await runRuleJointRidgeValidation(continuationId));
-    } catch (runError) {
-      setRuleJointError(`整体走步岭回归失败: ${String(runError)}`);
-    } finally {
-      setRuleJointLoading(false);
     }
   }
 
@@ -2294,7 +2257,7 @@ export default function SceneLayerBacktestPage() {
       <section className="scene-layer-card">
         <h2 className="scene-layer-title">排名整体回测</h2>
         <p className="scene-layer-caption">
-          使用 score_summary 中的总分做分层回测，检验总分对后续残差收益的影响，并展示分层差、IC、t、ICIR 及分层依据表。
+          使用 score_summary 中的总分检验后续残差收益，除分层与 IC 外，直接展示每日等权 Top-K、持有期重叠修正后的 HAC t值及年度稳定性。
         </p>
 
         <div className="scene-layer-actions">
@@ -2363,7 +2326,7 @@ export default function SceneLayerBacktestPage() {
                       <th>分层差均值（日度高分层-低分层）</th>
                       <th title="收益统计区间最后一天 ER(20) 减触发日 ER(20)">ΔER(20)</th>
                       <th>IC 均值</th>
-                      <th>IC t值</th>
+                      <th title="按回测持有期修正重叠样本的 Newey-West t值">IC HAC t值</th>
                       <th>ICIR</th>
                     </tr>
                   </thead>
@@ -2380,6 +2343,83 @@ export default function SceneLayerBacktestPage() {
               </div>
             </div>
           </div>
+
+          {rankTopKSummaries.length > 0 ? (
+            <div className="scene-layer-layer-summary">
+              <h3>Top-K 直接组合检验（每日等权）</h3>
+              <p className="scene-layer-caption">
+                直接检验实际会买到的头部股票；当日不足 K 只使用有效样本，HAC t值按持有期重叠修正标准误，避免普通t值虚高。
+              </p>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table">
+                  <thead>
+                    <tr>
+                      <th>组合</th>
+                      <th>有效交易日</th>
+                      <th>样本数</th>
+                      <th>日均残差收益</th>
+                      <th>日收益中位数</th>
+                      <th>正收益日占比</th>
+                      <th>日波动</th>
+                      <th>HAC t值</th>
+                      <th>HAC滞后</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rankTopKSummaries.map((item) => (
+                      <tr key={item.top_k}>
+                        <td>Top {item.top_k}</td>
+                        <td>{item.point_count}</td>
+                        <td>{item.sample_count}</td>
+                        <td>{formatPercent(item.avg_daily_residual_return)}</td>
+                        <td>{formatPercent(item.median_daily_residual_return)}</td>
+                        <td>{formatRate(item.positive_day_ratio)}</td>
+                        <td>{formatPercent(item.daily_std)}</td>
+                        <td className={metricHighlightClass("t", item.hac_t_value)}>{formatNumber(item.hac_t_value)}</td>
+                        <td>{item.hac_lag}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
+
+          {rankTopKPeriodSummaries.length > 0 ? (
+            <div className="scene-layer-layer-summary">
+              <h3>Top-K 年度稳定性</h3>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table">
+                  <thead>
+                    <tr>
+                      <th>年度</th>
+                      <th>组合</th>
+                      <th>区间</th>
+                      <th>有效交易日</th>
+                      <th>日均残差收益</th>
+                      <th>日收益中位数</th>
+                      <th>正收益日占比</th>
+                      <th>HAC t值</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rankTopKPeriodSummaries.map((item) => (
+                      <tr key={`${item.period_label}-${item.top_k}`}>
+                        <td>{item.period_label}</td>
+                        <td>Top {item.top_k}</td>
+                        <td>{formatDateLabel(item.start_date)} ~ {formatDateLabel(item.end_date)}</td>
+                        <td>{item.point_count}</td>
+                        <td>{formatPercent(item.avg_daily_residual_return)}</td>
+                        <td>{formatPercent(item.median_daily_residual_return)}</td>
+                        <td>{formatRate(item.positive_day_ratio)}</td>
+                        <td className={metricHighlightClass("t", item.hac_t_value)}>{formatNumber(item.hac_t_value)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
 
           {rankLayerSummaries.length === 0 ? (
             <div className="scene-layer-empty">当前没有可用于分层的总分样本。</div>
@@ -2464,206 +2504,6 @@ export default function SceneLayerBacktestPage() {
                     ))}
                   </tbody>
                 </table>
-              </div>
-            </div>
-          ) : null}
-
-          <div className="scene-layer-calibration-entry scene-layer-joint-ridge-entry">
-            <div className="scene-layer-calibration-entry-copy">
-              <h3>继续验证：排名整体走步岭回归</h3>
-              <p>
-                把形成总分排名的全部策略同时放入模型，识别共触发和重复信息；每折只用过去训练，隔离未来收益标签后验证下一段，并比较新权重与当前总分的样本外头部表现。
-              </p>
-            </div>
-            <button
-              type="button"
-              className="scene-layer-primary-btn"
-              onClick={() => void onRunRankJointRidgeValidation()}
-              disabled={heavyTaskRunning}
-            >
-              {ruleJointLoading ? "排名走步验证中..." : "继续验证整体定分"}
-            </button>
-          </div>
-          {ruleJointError ? <div className="scene-layer-error">{ruleJointError}</div> : null}
-
-          {ruleJointResult ? (
-            <div className="scene-layer-joint-ridge-results">
-              <div className="scene-layer-summary-grid">
-                <div className="scene-layer-summary-item">
-                  <span>策略 / 有效交易日</span>
-                  <strong>{ruleJointResult.feature_count} / {ruleJointResult.valid_days}</strong>
-                </div>
-                <div className="scene-layer-summary-item">
-                  <span>走步折数 / 隔离交易日</span>
-                  <strong>{ruleJointResult.fold_count} / {ruleJointResult.purge_days}</strong>
-                </div>
-                <div className="scene-layer-summary-item">
-                  <span>岭回归头部加权 OOS R²</span>
-                  <strong>{formatFractionPercent(ruleJointResult.ridge_oos_r2, 3)}</strong>
-                </div>
-                <div className="scene-layer-summary-item">
-                  <span>当前总分头部加权 OOS R²</span>
-                  <strong>{formatFractionPercent(ruleJointResult.current_score_oos_r2, 3)}</strong>
-                </div>
-                <div className="scene-layer-summary-item">
-                  <span>岭回归{ruleJointResult.primary_head_label}超额</span>
-                  <strong>{formatPercent(ruleJointResult.ridge_head_excess_mean)}</strong>
-                </div>
-                <div className="scene-layer-summary-item">
-                  <span>当前总分{ruleJointResult.primary_head_label}超额</span>
-                  <strong>{formatPercent(ruleJointResult.current_head_excess_mean)}</strong>
-                </div>
-                <div className="scene-layer-summary-item">
-                  <span>最终岭参数 α</span>
-                  <strong>{formatNumber(ruleJointResult.selected_ridge_alpha, 3)}</strong>
-                </div>
-                <div className="scene-layer-summary-item">
-                  <span>股票日样本 / 有策略触发</span>
-                  <strong>{ruleJointResult.sample_count} / {ruleJointResult.exposed_sample_count}</strong>
-                </div>
-              </div>
-              <div
-                className={
-                  ruleJointResult.validation_passed
-                    ? "scene-layer-joint-validation-gate passed"
-                    : "scene-layer-joint-validation-gate failed"
-                }
-              >
-                <strong>{ruleJointResult.validation_status_label}</strong>
-                <span>
-                  {ruleJointResult.primary_head_label}获胜折数：
-                  {ruleJointResult.head_winning_fold_count}/{ruleJointResult.fold_count}，要求至少
-                  {ruleJointResult.required_head_winning_folds}折；最近一折：
-                  {ruleJointResult.latest_head_fold_passed ? "通过" : "未通过"}
-                </span>
-              </div>
-              <p className="scene-layer-calibration-note">
-                {ruleJointResult.training_weight_description}。{ruleJointResult.point_scale_description}。
-                R²使用相同头部权重作为辅助诊断，是否允许改分以真实头部表现为准。
-              </p>
-
-              <div className="scene-layer-layer-summary">
-                <h3>多档头部样本外表现</h3>
-                <div className="scene-layer-contrib-table-wrap">
-                  <table className="scene-layer-contrib-table scene-layer-joint-head-table">
-                    <thead>
-                      <tr>
-                        <th>头部口径</th>
-                        <th>岭回归头部超额</th>
-                        <th>当前总分头部超额</th>
-                        <th>岭回归获胜折</th>
-                        <th>评估交易日</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {ruleJointResult.head_metrics.map((metric) => (
-                        <tr key={metric.key}>
-                          <td><strong>{metric.label}</strong></td>
-                          <td>{formatPercent(metric.ridge_head_excess_mean)}</td>
-                          <td>{formatPercent(metric.current_head_excess_mean)}</td>
-                          <td>{metric.ridge_winning_fold_count}/{metric.valid_fold_count}</td>
-                          <td>{metric.evaluated_day_count}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {ruleJointResult.fold_count === 0 ? (
-                <div className="scene-layer-empty">
-                  有效区间不足以形成“至少40日训练＋隔离期＋10日测试”的走步折，当前分数只能视为全样本探索值。
-                </div>
-              ) : (
-                <div className="scene-layer-layer-summary">
-                  <h3>走步折明细</h3>
-                  <div className="scene-layer-contrib-table-wrap">
-                    <table className="scene-layer-contrib-table scene-layer-joint-fold-table">
-                      <thead>
-                        <tr>
-                          <th>折</th>
-                          <th>训练区间</th>
-                          <th>隔离</th>
-                          <th>测试区间</th>
-                          <th>α</th>
-                          <th>岭回归头部加权 OOS R²</th>
-                          <th>当前总分头部加权 OOS R²</th>
-                          <th>岭回归{ruleJointResult.primary_head_label}超额</th>
-                          <th>当前{ruleJointResult.primary_head_label}超额</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {ruleJointResult.folds.map((fold) => (
-                          <tr key={fold.fold_index}>
-                            <td>{fold.fold_index}</td>
-                            <td>{formatDateLabel(fold.train_start_date)} ~ {formatDateLabel(fold.train_end_date)}（{fold.train_days}日）</td>
-                            <td>{fold.purge_days}日</td>
-                            <td>{formatDateLabel(fold.test_start_date)} ~ {formatDateLabel(fold.test_end_date)}（{fold.test_days}日）</td>
-                            <td>{formatNumber(fold.ridge_alpha, 3)}</td>
-                            <td>{formatFractionPercent(fold.ridge_oos_r2, 3)}</td>
-                            <td>{formatFractionPercent(fold.current_score_oos_r2, 3)}</td>
-                            <td>{formatPercent(fold.ridge_head_excess_mean)}</td>
-                            <td>{formatPercent(fold.current_head_excess_mean)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-              <div className="scene-layer-layer-summary">
-                <h3>联合定分结果</h3>
-                <p className="scene-layer-validation-table-hint">
-                  “岭回归原始分”只用于诊断。只有整体头部验证通过，并且单策略至少80%测试折正贡献、累计样本外贡献为正，才允许改变“门槛后建议分”；否则保持当前分。
-                </p>
-                <div className="scene-layer-contrib-table-wrap">
-                  <table className="scene-layer-contrib-table scene-layer-joint-rule-table">
-                    <thead>
-                      <tr>
-                        <th>策略</th>
-                        <th>结论</th>
-                        <th>当前分</th>
-                        <th>岭回归原始分</th>
-                        <th>门槛后建议分</th>
-                        <th>变化</th>
-                        <th>触发样本</th>
-                        <th>联合系数</th>
-                        <th>标准化系数</th>
-                        <th>测试折正贡献率</th>
-                        <th>样本外贡献</th>
-                        <th>最高相关策略</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {ruleJointResult.rules.map((rule) => (
-                        <tr key={rule.rule_name}>
-                          <td title={rule.explain}><strong>{rule.rule_name}</strong></td>
-                          <td>
-                            <span className={`scene-layer-joint-status scene-layer-joint-status-${rule.status}`}>
-                              {rule.status_label}
-                            </span>
-                          </td>
-                          <td>{formatNumber(rule.current_points, 1)}</td>
-                          <td>{formatNumber(rule.raw_suggested_points, 1)}</td>
-                          <td><strong>{formatNumber(rule.suggested_points, 1)}</strong></td>
-                          <td>{formatNumber(rule.point_change, 1)}</td>
-                          <td>{rule.trigger_samples}</td>
-                          <td>{formatNumber(rule.ridge_coefficient, 5)}</td>
-                          <td>{formatNumber(rule.standardized_coefficient, 4)}</td>
-                          <td>{formatFractionPercent(rule.positive_fold_rate, 0)}</td>
-                          <td>{formatFractionPercent(rule.oos_contribution, 3)}</td>
-                          <td title={rule.most_correlated_rule ?? undefined}>
-                            {rule.most_correlated_rule ?? "--"}
-                            {rule.max_correlation === null || rule.max_correlation === undefined
-                              ? ""
-                              : `（${formatFractionPercent(rule.max_correlation, 0)}）`}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
               </div>
             </div>
           ) : null}

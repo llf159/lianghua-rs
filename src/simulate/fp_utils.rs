@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 pub(crate) const EPS: f64 = 1e-12;
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ProfitLossSums {
+pub struct ProfitLossSums {
     positive_sum: f64,
     negative_loss_sum: f64,
 }
@@ -25,7 +25,7 @@ impl ProfitLossSums {
         self.negative_loss_sum += other.negative_loss_sum;
     }
 
-    pub(crate) fn ratio(self) -> Option<f64> {
+    pub fn ratio(self) -> Option<f64> {
         if self.positive_sum > EPS && self.negative_loss_sum > EPS {
             Some(self.positive_sum / self.negative_loss_sum)
         } else {
@@ -34,7 +34,7 @@ impl ProfitLossSums {
     }
 }
 
-pub(crate) fn calc_profit_loss_sums(values: &[f64]) -> ProfitLossSums {
+pub fn calc_profit_loss_sums(values: &[f64]) -> ProfitLossSums {
     let mut sums = ProfitLossSums::default();
     for value in values {
         sums.push(*value);
@@ -88,7 +88,7 @@ pub(crate) fn calc_top_bottom_spread(rule_scores: &[f64], residuals: &[f64]) -> 
     Some(high_sum / half as f64 - low_sum / half as f64)
 }
 
-pub(crate) fn mean(values: &[f64]) -> Option<f64> {
+pub fn mean(values: &[f64]) -> Option<f64> {
     if values.is_empty() {
         return None;
     }
@@ -124,7 +124,48 @@ pub(crate) fn calc_t_value(
     }
 }
 
-pub(crate) fn spearman_corr(x: &[f64], y: &[f64]) -> Option<f64> {
+/// Newey-West/HAC t 值，用于前瞻持有期重叠的日度序列。
+///
+/// `max_lag` 通常取 `holding_period - 1`。相比把每天视为独立样本的普通
+/// t 值，这会把相邻重叠收益的自相关计入标准误，避免显著性被系统性高估。
+pub(crate) fn calc_newey_west_t_value(values: &[f64], max_lag: usize) -> Option<f64> {
+    let finite = values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if finite.len() < 2 {
+        return None;
+    }
+
+    let avg = mean(&finite)?;
+    let centered = finite.iter().map(|value| *value - avg).collect::<Vec<_>>();
+    let sample_count = centered.len();
+    let lag_count = max_lag.min(sample_count - 1);
+    let denominator = sample_count as f64;
+
+    let mut long_run_variance =
+        centered.iter().map(|value| value * value).sum::<f64>() / denominator;
+    for lag in 1..=lag_count {
+        let covariance = centered
+            .iter()
+            .skip(lag)
+            .zip(centered.iter())
+            .map(|(current, previous)| current * previous)
+            .sum::<f64>()
+            / denominator;
+        let bartlett_weight = 1.0 - lag as f64 / (lag_count + 1) as f64;
+        long_run_variance += 2.0 * bartlett_weight * covariance;
+    }
+
+    if !long_run_variance.is_finite() || long_run_variance <= EPS {
+        return None;
+    }
+    let standard_error = (long_run_variance / denominator).sqrt();
+    (standard_error > EPS).then_some(avg / standard_error)
+}
+
+pub fn spearman_corr(x: &[f64], y: &[f64]) -> Option<f64> {
     if x.len() != y.len() || x.len() < 2 {
         return None;
     }
@@ -259,6 +300,21 @@ mod tests {
     fn mean_empty_returns_none() {
         let empty: [f64; 0] = [];
         assert_eq!(mean(&empty), None);
+    }
+
+    #[test]
+    fn newey_west_t_penalizes_overlapping_autocorrelation() {
+        let values = vec![1.0, 1.2, 0.8, 1.1, 0.9, -0.5, -0.4, -0.6];
+        let ordinary =
+            calc_t_value(mean(&values), sample_std(&values), values.len()).expect("ordinary t");
+        let robust = calc_newey_west_t_value(&values, 2).expect("HAC t");
+        assert!(robust.abs() < ordinary.abs());
+    }
+
+    #[test]
+    fn newey_west_t_ignores_non_finite_values() {
+        let values = vec![1.0, f64::NAN, 2.0, f64::INFINITY, 3.0];
+        assert!(calc_newey_west_t_value(&values, 1).is_some());
     }
 
     #[test]

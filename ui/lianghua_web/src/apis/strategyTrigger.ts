@@ -271,80 +271,6 @@ export type RuleLayerBacktestDefaultsData = {
   end_date?: string | null
 }
 
-export type RuleJointWalkForwardFold = {
-  fold_index: number
-  train_start_date: string
-  train_end_date: string
-  test_start_date: string
-  test_end_date: string
-  train_days: number
-  purge_days: number
-  test_days: number
-  ridge_alpha: number
-  ridge_oos_r2?: number | null
-  current_score_oos_r2?: number | null
-  ridge_head_excess_mean?: number | null
-  current_head_excess_mean?: number | null
-}
-
-export type RuleJointRidgeRuleResult = {
-  rule_name: string
-  explain: string
-  current_points: number
-  score_scale: number
-  trigger_samples: number
-  ridge_coefficient: number
-  standardized_coefficient: number
-  raw_suggested_points: number
-  suggested_points: number
-  point_change: number
-  positive_fold_rate?: number | null
-  oos_contribution?: number | null
-  max_correlation?: number | null
-  most_correlated_rule?: string | null
-  status: string
-  status_label: string
-}
-
-export type RuleJointHeadMetric = {
-  key: string
-  label: string
-  ridge_head_excess_mean?: number | null
-  current_head_excess_mean?: number | null
-  ridge_winning_fold_count: number
-  valid_fold_count: number
-  evaluated_day_count: number
-}
-
-export type RuleJointRidgeValidationData = {
-  continuation_id: string
-  start_date: string
-  end_date: string
-  feature_count: number
-  sample_count: number
-  exposed_sample_count: number
-  valid_days: number
-  fold_count: number
-  purge_days: number
-  selected_ridge_alpha: number
-  ridge_oos_r2?: number | null
-  current_score_oos_r2?: number | null
-  ridge_head_excess_mean?: number | null
-  current_head_excess_mean?: number | null
-  primary_head_key: string
-  primary_head_label: string
-  head_metrics: RuleJointHeadMetric[]
-  validation_passed: boolean
-  validation_status_label: string
-  head_winning_fold_count: number
-  required_head_winning_folds: number
-  latest_head_fold_passed: boolean
-  training_weight_description: string
-  point_scale_description: string
-  folds: RuleJointWalkForwardFold[]
-  rules: RuleJointRidgeRuleResult[]
-}
-
 export type RankLayerBucketSummary = {
   layer_index: number
   layer_label: string
@@ -393,10 +319,37 @@ export type RankLayerBacktestData = {
   ic_std?: number | null
   icir?: number | null
   ic_t_value?: number | null
-  joint_validation_continuation_id?: string | null
+  top_k_summaries?: RankTopKSummary[]
+  top_k_period_summaries?: RankTopKPeriodSummary[]
   layer_summaries: RankLayerBucketSummary[]
   layer_sample_groups?: RankLayerSampleGroup[]
   market_value_summaries?: RankLayerMarketValueSummary[]
+}
+
+export type RankTopKSummary = {
+  top_k: number
+  point_count: number
+  sample_count: number
+  avg_daily_residual_return?: number | null
+  median_daily_residual_return?: number | null
+  positive_day_ratio?: number | null
+  daily_std?: number | null
+  hac_t_value?: number | null
+  hac_lag: number
+}
+
+export type RankTopKPeriodSummary = {
+  period_label: string
+  start_date: string
+  end_date: string
+  top_k: number
+  point_count: number
+  sample_count: number
+  avg_daily_residual_return?: number | null
+  median_daily_residual_return?: number | null
+  positive_day_ratio?: number | null
+  hac_t_value?: number | null
+  hac_lag: number
 }
 
 export type RankLayerMarketValueSummary = {
@@ -832,12 +785,6 @@ export async function runRuleExpressionCalibration(continuationId: string, combo
   return invoke<RuleExpressionCalibrationData>('run_rule_expression_calibration', {
     continuationId,
     comboKey,
-  })
-}
-
-export async function runRuleJointRidgeValidation(continuationId: string) {
-  return invoke<RuleJointRidgeValidationData>('run_rule_joint_ridge_validation', {
-    continuationId,
   })
 }
 

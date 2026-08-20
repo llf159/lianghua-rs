@@ -46,15 +46,13 @@ use crate::{
             calc_rank_layer_metrics_from_rank_samples, calc_rank_layer_metrics_from_score_rows,
         },
         rule::{
-            DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE, RuleJointRidgeDayStats, RuleLayerConfig,
-            RuleLayerFromDbInput, RuleLayerMetricsWithSamples, RuleLayerRuntimeCache,
-            RuleLayerSamplePointRef, build_rule_layer_runtime_cache_from_stock_data_with_ts_filter,
-            build_rule_layer_runtime_cache_from_summary_rows,
+            DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE, RuleLayerConfig, RuleLayerFromDbInput,
+            RuleLayerMetricsWithSamples, RuleLayerRuntimeCache, RuleLayerSamplePointRef,
+            build_rule_layer_runtime_cache_from_stock_data_with_ts_filter,
             calc_all_rule_layer_metrics_with_samples_from_rows_map,
-            calc_rule_joint_ridge_day_stats_from_cache_head_weighted,
             calc_rule_layer_metrics_from_cache, calc_rule_layer_metrics_from_db_with_ts_filter,
             calc_rule_layer_metrics_with_samples_from_cache,
-            visit_rule_layer_base_samples_from_cache, visit_triggered_rule_samples_from_cache,
+            visit_triggered_rule_samples_from_cache,
         },
         scene::{
             SceneLayerConfig, SceneLayerFromDbInput,
@@ -350,84 +348,6 @@ pub struct RuleLayerBacktestDefaultsData {
     pub end_date: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct RuleJointWalkForwardFold {
-    pub fold_index: usize,
-    pub train_start_date: String,
-    pub train_end_date: String,
-    pub test_start_date: String,
-    pub test_end_date: String,
-    pub train_days: usize,
-    pub purge_days: usize,
-    pub test_days: usize,
-    pub ridge_alpha: f64,
-    pub ridge_oos_r2: Option<f64>,
-    pub current_score_oos_r2: Option<f64>,
-    pub ridge_head_excess_mean: Option<f64>,
-    pub current_head_excess_mean: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RuleJointRidgeRuleResult {
-    pub rule_name: String,
-    pub explain: String,
-    pub current_points: f64,
-    pub score_scale: f64,
-    pub trigger_samples: usize,
-    pub ridge_coefficient: f64,
-    pub standardized_coefficient: f64,
-    pub raw_suggested_points: f64,
-    pub suggested_points: f64,
-    pub point_change: f64,
-    pub positive_fold_rate: Option<f64>,
-    pub oos_contribution: Option<f64>,
-    pub max_correlation: Option<f64>,
-    pub most_correlated_rule: Option<String>,
-    pub status: String,
-    pub status_label: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RuleJointHeadMetric {
-    pub key: String,
-    pub label: String,
-    pub ridge_head_excess_mean: Option<f64>,
-    pub current_head_excess_mean: Option<f64>,
-    pub ridge_winning_fold_count: usize,
-    pub valid_fold_count: usize,
-    pub evaluated_day_count: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RuleJointRidgeValidationData {
-    pub continuation_id: String,
-    pub start_date: String,
-    pub end_date: String,
-    pub feature_count: usize,
-    pub sample_count: usize,
-    pub exposed_sample_count: usize,
-    pub valid_days: usize,
-    pub fold_count: usize,
-    pub purge_days: usize,
-    pub selected_ridge_alpha: f64,
-    pub ridge_oos_r2: Option<f64>,
-    pub current_score_oos_r2: Option<f64>,
-    pub ridge_head_excess_mean: Option<f64>,
-    pub current_head_excess_mean: Option<f64>,
-    pub primary_head_key: String,
-    pub primary_head_label: String,
-    pub head_metrics: Vec<RuleJointHeadMetric>,
-    pub validation_passed: bool,
-    pub validation_status_label: String,
-    pub head_winning_fold_count: usize,
-    pub required_head_winning_folds: usize,
-    pub latest_head_fold_passed: bool,
-    pub training_weight_description: String,
-    pub point_scale_description: String,
-    pub folds: Vec<RuleJointWalkForwardFold>,
-    pub rules: Vec<RuleJointRidgeRuleResult>,
-}
-
 #[derive(Debug, Serialize)]
 pub struct RankLayerBucketSummary {
     pub layer_index: usize,
@@ -437,6 +357,34 @@ pub struct RankLayerBucketSummary {
     pub avg_score: Option<f64>,
     pub avg_residual_return: Option<f64>,
     pub avg_er_change: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RankTopKSummaryData {
+    pub top_k: usize,
+    pub point_count: usize,
+    pub sample_count: usize,
+    pub avg_daily_residual_return: Option<f64>,
+    pub median_daily_residual_return: Option<f64>,
+    pub positive_day_ratio: Option<f64>,
+    pub daily_std: Option<f64>,
+    pub hac_t_value: Option<f64>,
+    pub hac_lag: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RankTopKPeriodSummaryData {
+    pub period_label: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub top_k: usize,
+    pub point_count: usize,
+    pub sample_count: usize,
+    pub avg_daily_residual_return: Option<f64>,
+    pub median_daily_residual_return: Option<f64>,
+    pub positive_day_ratio: Option<f64>,
+    pub hac_t_value: Option<f64>,
+    pub hac_lag: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -479,10 +427,11 @@ pub struct RankLayerBacktestData {
     pub ic_std: Option<f64>,
     pub icir: Option<f64>,
     pub ic_t_value: Option<f64>,
+    pub top_k_summaries: Vec<RankTopKSummaryData>,
+    pub top_k_period_summaries: Vec<RankTopKPeriodSummaryData>,
     pub layer_summaries: Vec<RankLayerBucketSummary>,
     pub layer_sample_groups: Vec<RankLayerSampleGroup>,
     pub market_value_summaries: Vec<RankLayerMarketValueSummary>,
-    pub joint_validation_continuation_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -511,16 +460,6 @@ const VALIDATION_CALIBRATION_MIN_SAMPLES: usize = 100;
 const VALIDATION_CALIBRATION_MIN_DAYS: usize = 20;
 const VALIDATION_CALIBRATION_LCB_Z: f64 = 1.28;
 const VALIDATION_CALIBRATION_POINT_SCALE: f64 = 40.0;
-const RULE_JOINT_VALIDATION_CACHE_LIMIT: usize = 1;
-const RULE_JOINT_VALIDATION_TTL: Duration = Duration::from_secs(30 * 60);
-const RULE_JOINT_RIDGE_MAX_FEATURES: usize = 256;
-const RULE_JOINT_WALK_FORWARD_MAX_FOLDS: usize = 5;
-const RULE_JOINT_WALK_FORWARD_MIN_TRAIN_DAYS: usize = 40;
-const RULE_JOINT_WALK_FORWARD_MIN_TEST_DAYS: usize = 10;
-const RULE_JOINT_PRIMARY_HEAD_INDEX: usize = 2;
-const RULE_JOINT_RULE_MIN_POSITIVE_FOLD_RATE: f64 = 0.8;
-const RULE_JOINT_POINT_SCALE: f64 = 40.0;
-const RULE_JOINT_RIDGE_ALPHAS: [f64; 9] = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0];
 const RULE_BACKTEST_DETAIL_SAMPLE_LIMIT_PER_GROUP: usize = 5;
 const RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP: usize = 5;
 #[cfg(test)]
@@ -803,76 +742,6 @@ fn load_validation_continuation_session(
         .get(continuation_id.trim())
         .cloned()
         .ok_or_else(|| "表达式基础验证缓存已失效，请重新执行一次表达式验证".to_string())
-}
-
-#[derive(Debug, Clone)]
-struct RuleJointValidationFeature {
-    rule_name: String,
-    explain: String,
-    current_points: f64,
-    score_scale: f64,
-}
-
-#[derive(Debug)]
-struct RuleJointValidationSession {
-    created_at: Instant,
-    source_path: String,
-    params: RuleLayerBacktestRunParams,
-    summary_rows: Arc<Vec<ScoreSummary>>,
-    features: Vec<RuleJointValidationFeature>,
-}
-
-static RULE_JOINT_VALIDATION_CACHE: OnceLock<
-    Mutex<HashMap<String, Arc<RuleJointValidationSession>>>,
-> = OnceLock::new();
-
-fn rule_joint_validation_cache() -> &'static Mutex<HashMap<String, Arc<RuleJointValidationSession>>>
-{
-    RULE_JOINT_VALIDATION_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn store_rule_joint_validation_session(
-    session: RuleJointValidationSession,
-) -> Result<String, String> {
-    let mut cache = rule_joint_validation_cache()
-        .lock()
-        .map_err(|_| "保存排名整体继续验证数据失败:缓存锁已损坏".to_string())?;
-    cache.retain(|_, item| item.created_at.elapsed() <= RULE_JOINT_VALIDATION_TTL);
-    while cache.len() >= RULE_JOINT_VALIDATION_CACHE_LIMIT {
-        let Some(oldest_key) = cache
-            .iter()
-            .max_by_key(|(_, item)| item.created_at.elapsed())
-            .map(|(key, _)| key.clone())
-        else {
-            break;
-        };
-        cache.remove(&oldest_key);
-    }
-    let continuation_id = loop {
-        let candidate = format!(
-            "rule-joint-ridge-{:016x}{:016x}",
-            random::<u64>(),
-            random::<u64>()
-        );
-        if !cache.contains_key(&candidate) {
-            break candidate;
-        }
-    };
-    cache.insert(continuation_id.clone(), Arc::new(session));
-    Ok(continuation_id)
-}
-
-fn load_rule_joint_validation_session(
-    continuation_id: &str,
-) -> Result<Arc<RuleJointValidationSession>, String> {
-    let mut cache = rule_joint_validation_cache()
-        .lock()
-        .map_err(|_| "读取排名整体继续验证数据失败:缓存锁已损坏".to_string())?;
-    cache.retain(|_, item| item.created_at.elapsed() <= RULE_JOINT_VALIDATION_TTL);
-    cache
-        .get(continuation_id.trim())
-        .cloned()
-        .ok_or_else(|| "排名整体回测缓存已失效，请重新执行一次排名整体回测".to_string())
 }
 
 #[derive(Debug, Serialize)]
@@ -1278,52 +1147,6 @@ fn format_combination_rule_formula(rule: &ScoreRule) -> String {
         parts.push(format!("额外加分：{bonuses}"));
     }
     parts.join("；")
-}
-
-fn load_rule_joint_validation_features(
-    source_path: &str,
-) -> Result<Vec<RuleJointValidationFeature>, String> {
-    let rules = ScoreRule::load_rules(source_path)?;
-    if rules.len() > RULE_JOINT_RIDGE_MAX_FEATURES {
-        return Err(format!(
-            "整体岭回归最多支持{}条策略，当前为{}条",
-            RULE_JOINT_RIDGE_MAX_FEATURES,
-            rules.len()
-        ));
-    }
-
-    rules
-        .into_iter()
-        .map(|rule| {
-            let representative_points = rule.representative_points();
-            let score_scale = representative_points.abs();
-            if !score_scale.is_finite() || score_scale <= VALIDATION_EPS {
-                return Err(format!("策略 {} 缺少可归一化的有效分数", rule.name));
-            }
-            Ok(RuleJointValidationFeature {
-                rule_name: rule.name,
-                explain: rule.explain,
-                current_points: representative_points,
-                score_scale,
-            })
-        })
-        .collect()
-}
-
-fn store_rule_joint_validation_from_rows(
-    source_path: &str,
-    params: &RuleLayerBacktestRunParams,
-    summary_rows: Vec<ScoreSummary>,
-) -> Option<String> {
-    let features = load_rule_joint_validation_features(source_path).ok()?;
-    store_rule_joint_validation_session(RuleJointValidationSession {
-        created_at: Instant::now(),
-        source_path: source_path.to_string(),
-        params: params.clone(),
-        summary_rows: Arc::new(summary_rows),
-        features,
-    })
-    .ok()
 }
 
 fn load_scene_options(source_path: &str) -> Result<Vec<String>, String> {
@@ -4629,857 +4452,6 @@ pub fn run_rule_expression_calibration(
     })
 }
 
-#[derive(Debug, Clone)]
-struct JointRidgeAggregate {
-    feature_cross_products: Vec<f64>,
-    feature_residual_products: Vec<f64>,
-    residual_sum_squares: f64,
-    sample_count: usize,
-    exposed_sample_count: usize,
-}
-
-#[derive(Debug, Clone)]
-struct JointWalkForwardModel {
-    fold_index: usize,
-    train_start_date: String,
-    train_end_date: String,
-    test_start_date: String,
-    test_end_date: String,
-    train_days: usize,
-    purge_days: usize,
-    test_days: usize,
-    ridge_alpha: f64,
-    ridge_beta: Vec<f64>,
-    head_test_dates: Vec<String>,
-    test_residual_sum_squares: f64,
-    ridge_oos_r2: Option<f64>,
-    current_score_oos_r2: Option<f64>,
-    oos_contributions: Vec<f64>,
-}
-
-#[derive(Debug, Default, Clone)]
-struct JointHeadFoldAggregate {
-    ridge_excess_sum: f64,
-    current_excess_sum: f64,
-    day_count: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum JointHeadSize {
-    Fixed(usize),
-    Fraction(f64),
-}
-
-#[derive(Debug, Clone, Copy)]
-struct JointHeadDefinition {
-    key: &'static str,
-    label: &'static str,
-    size: JointHeadSize,
-}
-
-const RULE_JOINT_HEAD_DEFINITIONS: [JointHeadDefinition; 6] = [
-    JointHeadDefinition {
-        key: "top20",
-        label: "Top20",
-        size: JointHeadSize::Fixed(20),
-    },
-    JointHeadDefinition {
-        key: "top50",
-        label: "Top50",
-        size: JointHeadSize::Fixed(50),
-    },
-    JointHeadDefinition {
-        key: "top100",
-        label: "Top100",
-        size: JointHeadSize::Fixed(100),
-    },
-    JointHeadDefinition {
-        key: "top1pct",
-        label: "Top1%",
-        size: JointHeadSize::Fraction(0.01),
-    },
-    JointHeadDefinition {
-        key: "top5pct",
-        label: "Top5%",
-        size: JointHeadSize::Fraction(0.05),
-    },
-    JointHeadDefinition {
-        key: "top10pct",
-        label: "Top10%",
-        size: JointHeadSize::Fraction(0.10),
-    },
-];
-
-fn resolve_joint_head_count(definition: JointHeadDefinition, sample_count: usize) -> usize {
-    match definition.size {
-        JointHeadSize::Fixed(count) => count,
-        JointHeadSize::Fraction(fraction) => (sample_count as f64 * fraction).ceil() as usize,
-    }
-    .max(1)
-    .min(sample_count)
-}
-
-fn evaluate_joint_validation_gate(
-    valid_fold_count: usize,
-    winning_fold_count: usize,
-    ridge_head_excess_mean: Option<f64>,
-    current_head_excess_mean: Option<f64>,
-    latest_fold_passed: bool,
-) -> (bool, usize, String) {
-    let required_winning_folds = if valid_fold_count == 0 {
-        0
-    } else {
-        (valid_fold_count * 3).div_ceil(5)
-    };
-    let enough_folds = valid_fold_count >= 3;
-    let aggregate_passed = ridge_head_excess_mean
-        .zip(current_head_excess_mean)
-        .is_some_and(|(ridge, current)| ridge > current);
-    let fold_win_passed = winning_fold_count >= required_winning_folds.max(1);
-    let passed = enough_folds && aggregate_passed && fold_win_passed && latest_fold_passed;
-    let label = if !enough_folds {
-        "未通过：有效走步折少于3折"
-    } else if !aggregate_passed {
-        "未通过：Top100总体未胜过当前总分"
-    } else if !fold_win_passed {
-        "未通过：Top100获胜折数不足60%"
-    } else if !latest_fold_passed {
-        "未通过：最近一折Top100未胜过当前总分"
-    } else {
-        "通过：允许输出经过单策略稳定性门槛的建议分"
-    };
-    (passed, required_winning_folds, label.to_string())
-}
-
-fn aggregate_joint_ridge_days(
-    days: &[RuleJointRidgeDayStats],
-    feature_count: usize,
-) -> JointRidgeAggregate {
-    let mut aggregate = JointRidgeAggregate {
-        feature_cross_products: vec![0.0; feature_count * feature_count],
-        feature_residual_products: vec![0.0; feature_count],
-        residual_sum_squares: 0.0,
-        sample_count: 0,
-        exposed_sample_count: 0,
-    };
-    for day in days {
-        for (target, value) in aggregate
-            .feature_cross_products
-            .iter_mut()
-            .zip(day.feature_cross_products.iter())
-        {
-            *target += *value;
-        }
-        for (target, value) in aggregate
-            .feature_residual_products
-            .iter_mut()
-            .zip(day.feature_residual_products.iter())
-        {
-            *target += *value;
-        }
-        aggregate.residual_sum_squares += day.residual_sum_squares;
-        aggregate.sample_count += day.sample_count;
-        aggregate.exposed_sample_count += day.exposed_sample_count;
-    }
-    aggregate
-}
-
-fn solve_positive_definite(mut matrix: Vec<f64>, mut rhs: Vec<f64>) -> Option<Vec<f64>> {
-    let size = rhs.len();
-    if size == 0 || matrix.len() != size * size {
-        return None;
-    }
-
-    for row in 0..size {
-        for col in 0..=row {
-            let mut value = matrix[row * size + col];
-            for inner in 0..col {
-                value -= matrix[row * size + inner] * matrix[col * size + inner];
-            }
-            if row == col {
-                if !value.is_finite() || value <= VALIDATION_EPS {
-                    return None;
-                }
-                matrix[row * size + col] = value.sqrt();
-            } else {
-                matrix[row * size + col] = value / matrix[col * size + col];
-            }
-        }
-    }
-
-    for row in 0..size {
-        let mut value = rhs[row];
-        for col in 0..row {
-            value -= matrix[row * size + col] * rhs[col];
-        }
-        rhs[row] = value / matrix[row * size + row];
-    }
-    for row in (0..size).rev() {
-        let mut value = rhs[row];
-        for col in (row + 1)..size {
-            value -= matrix[col * size + row] * rhs[col];
-        }
-        rhs[row] = value / matrix[row * size + row];
-    }
-    rhs.iter().all(|value| value.is_finite()).then_some(rhs)
-}
-
-fn fit_joint_ridge(
-    aggregate: &JointRidgeAggregate,
-    feature_count: usize,
-    alpha: f64,
-) -> Option<Vec<f64>> {
-    if aggregate.sample_count == 0 || feature_count == 0 {
-        return None;
-    }
-    let mut scales = vec![1.0; feature_count];
-    for feature_index in 0..feature_count {
-        let diagonal =
-            aggregate.feature_cross_products[feature_index * feature_count + feature_index];
-        if diagonal > VALIDATION_EPS {
-            scales[feature_index] = (diagonal / aggregate.sample_count as f64).sqrt();
-        }
-    }
-
-    let mut standardized_cross = vec![0.0; feature_count * feature_count];
-    let mut standardized_target = vec![0.0; feature_count];
-    let penalty = alpha.max(1e-8) * aggregate.sample_count as f64;
-    for row in 0..feature_count {
-        standardized_target[row] = aggregate.feature_residual_products[row] / scales[row];
-        for col in 0..feature_count {
-            standardized_cross[row * feature_count + col] = aggregate.feature_cross_products
-                [row * feature_count + col]
-                / (scales[row] * scales[col]);
-        }
-        standardized_cross[row * feature_count + row] += penalty;
-    }
-
-    let standardized_beta = solve_positive_definite(standardized_cross, standardized_target)?;
-    Some(
-        standardized_beta
-            .into_iter()
-            .zip(scales)
-            .map(|(coefficient, scale)| coefficient / scale)
-            .collect(),
-    )
-}
-
-fn joint_prediction_gain(beta: &[f64], aggregate: &JointRidgeAggregate) -> f64 {
-    let feature_count = beta.len();
-    let linear = beta
-        .iter()
-        .zip(aggregate.feature_residual_products.iter())
-        .map(|(coefficient, target)| coefficient * target)
-        .sum::<f64>();
-    let mut quadratic = 0.0;
-    for row in 0..feature_count {
-        for col in 0..feature_count {
-            quadratic +=
-                beta[row] * aggregate.feature_cross_products[row * feature_count + col] * beta[col];
-        }
-    }
-    2.0 * linear - quadratic
-}
-
-fn joint_prediction_r2(beta: &[f64], aggregate: &JointRidgeAggregate) -> Option<f64> {
-    (aggregate.residual_sum_squares > VALIDATION_EPS)
-        .then_some(joint_prediction_gain(beta, aggregate) / aggregate.residual_sum_squares)
-}
-
-fn joint_oos_contributions(beta: &[f64], aggregate: &JointRidgeAggregate) -> Vec<f64> {
-    let feature_count = beta.len();
-    (0..feature_count)
-        .map(|row| {
-            let fitted_cross = (0..feature_count)
-                .map(|col| aggregate.feature_cross_products[row * feature_count + col] * beta[col])
-                .sum::<f64>();
-            beta[row] * (2.0 * aggregate.feature_residual_products[row] - fitted_cross)
-        })
-        .collect()
-}
-
-fn fit_current_score_scale(aggregate: &JointRidgeAggregate, current_weights: &[f64]) -> Vec<f64> {
-    let feature_count = current_weights.len();
-    let numerator = current_weights
-        .iter()
-        .zip(aggregate.feature_residual_products.iter())
-        .map(|(weight, target)| weight * target)
-        .sum::<f64>();
-    let mut denominator = 0.0;
-    for row in 0..feature_count {
-        for col in 0..feature_count {
-            denominator += current_weights[row]
-                * aggregate.feature_cross_products[row * feature_count + col]
-                * current_weights[col];
-        }
-    }
-    let scale = if denominator > VALIDATION_EPS {
-        (numerator / (denominator * 1.001)).max(0.0)
-    } else {
-        0.0
-    };
-    current_weights
-        .iter()
-        .map(|weight| weight * scale)
-        .collect()
-}
-
-fn choose_joint_ridge_alpha(
-    training_days: &[RuleJointRidgeDayStats],
-    feature_count: usize,
-    purge_days: usize,
-) -> f64 {
-    let validation_days = (training_days.len() / 5).max(RULE_JOINT_WALK_FORWARD_MIN_TEST_DAYS);
-    if training_days.len() < RULE_JOINT_WALK_FORWARD_MIN_TRAIN_DAYS + purge_days + validation_days {
-        return 0.1;
-    }
-    let validation_start = training_days.len() - validation_days;
-    let inner_train_end = validation_start.saturating_sub(purge_days);
-    if inner_train_end < RULE_JOINT_WALK_FORWARD_MIN_TRAIN_DAYS {
-        return 0.1;
-    }
-    let train = aggregate_joint_ridge_days(&training_days[..inner_train_end], feature_count);
-    let validation = aggregate_joint_ridge_days(&training_days[validation_start..], feature_count);
-
-    RULE_JOINT_RIDGE_ALPHAS
-        .iter()
-        .filter_map(|alpha| {
-            fit_joint_ridge(&train, feature_count, *alpha)
-                .map(|beta| (*alpha, joint_prediction_gain(&beta, &validation)))
-        })
-        .max_by(|left, right| left.1.partial_cmp(&right.1).unwrap_or(Ordering::Equal))
-        .map(|(alpha, _)| alpha)
-        .unwrap_or(0.1)
-}
-
-fn build_joint_walk_forward_models(
-    days: &[RuleJointRidgeDayStats],
-    feature_count: usize,
-    purge_days: usize,
-    current_weights: &[f64],
-) -> Vec<JointWalkForwardModel> {
-    let minimum_need =
-        RULE_JOINT_WALK_FORWARD_MIN_TRAIN_DAYS + purge_days + RULE_JOINT_WALK_FORWARD_MIN_TEST_DAYS;
-    if days.len() < minimum_need {
-        return Vec::new();
-    }
-    let available = days.len() - RULE_JOINT_WALK_FORWARD_MIN_TRAIN_DAYS - purge_days;
-    let test_days =
-        (available / RULE_JOINT_WALK_FORWARD_MAX_FOLDS).max(RULE_JOINT_WALK_FORWARD_MIN_TEST_DAYS);
-    let fold_count = (available / test_days).min(RULE_JOINT_WALK_FORWARD_MAX_FOLDS);
-    if fold_count == 0 {
-        return Vec::new();
-    }
-    let initial_train_days = days.len() - purge_days - fold_count * test_days;
-
-    let mut models = Vec::with_capacity(fold_count);
-    for fold_offset in 0..fold_count {
-        let test_start = initial_train_days + purge_days + fold_offset * test_days;
-        let train_end = test_start - purge_days;
-        let test_end = (test_start + test_days).min(days.len());
-        if train_end < RULE_JOINT_WALK_FORWARD_MIN_TRAIN_DAYS || test_start >= test_end {
-            continue;
-        }
-        let training_days = &days[..train_end];
-        let testing_days = &days[test_start..test_end];
-        let ridge_alpha = choose_joint_ridge_alpha(training_days, feature_count, purge_days);
-        let train = aggregate_joint_ridge_days(training_days, feature_count);
-        let test = aggregate_joint_ridge_days(testing_days, feature_count);
-        let Some(ridge_beta) = fit_joint_ridge(&train, feature_count, ridge_alpha) else {
-            continue;
-        };
-        let current_beta = fit_current_score_scale(&train, current_weights);
-        models.push(JointWalkForwardModel {
-            fold_index: models.len() + 1,
-            train_start_date: days[0].trade_date.clone(),
-            train_end_date: days[train_end - 1].trade_date.clone(),
-            test_start_date: days[test_start].trade_date.clone(),
-            test_end_date: days[test_end - 1].trade_date.clone(),
-            train_days: train_end,
-            purge_days,
-            test_days: test_end - test_start,
-            ridge_alpha,
-            ridge_oos_r2: joint_prediction_r2(&ridge_beta, &test),
-            current_score_oos_r2: joint_prediction_r2(&current_beta, &test),
-            oos_contributions: joint_oos_contributions(&ridge_beta, &test),
-            ridge_beta,
-            head_test_dates: testing_days
-                .iter()
-                .filter(|day| day.exposed_sample_count > 0)
-                .map(|day| day.trade_date.clone())
-                .collect(),
-            test_residual_sum_squares: test.residual_sum_squares,
-        });
-    }
-    models
-}
-
-fn finish_joint_head_day(
-    fold_index: usize,
-    rows: &mut Vec<(f64, f64, f64)>,
-    aggregates: &mut [Vec<JointHeadFoldAggregate>],
-) {
-    if rows.is_empty()
-        || aggregates
-            .first()
-            .is_none_or(|folds| fold_index >= folds.len())
-    {
-        rows.clear();
-        return;
-    }
-    let market_mean = rows.iter().map(|item| item.2).sum::<f64>() / rows.len() as f64;
-    let mut ridge_sorted = rows.clone();
-    let mut current_sorted = rows.clone();
-    ridge_sorted.sort_by(|left, right| right.0.partial_cmp(&left.0).unwrap_or(Ordering::Equal));
-    current_sorted.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(Ordering::Equal));
-    for (definition_index, definition) in RULE_JOINT_HEAD_DEFINITIONS.iter().enumerate() {
-        let head_count = resolve_joint_head_count(*definition, rows.len());
-        let ridge_mean = ridge_sorted[..head_count]
-            .iter()
-            .map(|item| item.2)
-            .sum::<f64>()
-            / head_count as f64;
-        let current_mean = current_sorted[..head_count]
-            .iter()
-            .map(|item| item.2)
-            .sum::<f64>()
-            / head_count as f64;
-        aggregates[definition_index][fold_index].ridge_excess_sum += ridge_mean - market_mean;
-        aggregates[definition_index][fold_index].current_excess_sum += current_mean - market_mean;
-        aggregates[definition_index][fold_index].day_count += 1;
-    }
-    rows.clear();
-}
-
-fn evaluate_joint_walk_forward_heads(
-    runtime_cache: &RuleLayerRuntimeCache,
-    exposures_by_ts_date: &HashMap<String, HashMap<String, Vec<(usize, f64)>>>,
-    models: &[JointWalkForwardModel],
-    current_weights: &[f64],
-) -> Result<Vec<Vec<JointHeadFoldAggregate>>, String> {
-    let mut aggregates = vec![
-        vec![JointHeadFoldAggregate::default(); models.len()];
-        RULE_JOINT_HEAD_DEFINITIONS.len()
-    ];
-    let mut active_fold_index = None;
-    let mut active_trade_date = String::new();
-    let mut day_rows = Vec::<(f64, f64, f64)>::new();
-
-    visit_rule_layer_base_samples_from_cache(runtime_cache, |sample| {
-        let fold_index = models.iter().position(|model| {
-            model
-                .head_test_dates
-                .binary_search_by(|date| date.as_str().cmp(sample.trade_date))
-                .is_ok()
-        });
-        if active_fold_index != fold_index || active_trade_date != sample.trade_date {
-            if let Some(previous_fold_index) = active_fold_index {
-                finish_joint_head_day(previous_fold_index, &mut day_rows, &mut aggregates);
-            } else {
-                day_rows.clear();
-            }
-            active_fold_index = fold_index;
-            active_trade_date = sample.trade_date.to_string();
-        }
-        let Some(fold_index) = fold_index else {
-            return Ok(());
-        };
-        let exposures = exposures_by_ts_date
-            .get(sample.ts_code)
-            .and_then(|date_map| date_map.get(sample.trade_date));
-        let ridge_score = exposures
-            .into_iter()
-            .flatten()
-            .map(|(feature_index, value)| models[fold_index].ridge_beta[*feature_index] * *value)
-            .sum::<f64>();
-        let current_score = exposures
-            .into_iter()
-            .flatten()
-            .map(|(feature_index, value)| current_weights[*feature_index] * *value)
-            .sum::<f64>();
-        day_rows.push((ridge_score, current_score, sample.residual_return));
-        Ok(())
-    })?;
-    if let Some(fold_index) = active_fold_index {
-        finish_joint_head_day(fold_index, &mut day_rows, &mut aggregates);
-    }
-    Ok(aggregates)
-}
-
-fn build_joint_exposures(
-    features: &[RuleJointValidationFeature],
-    detail_rows: &[ScoreDetails],
-) -> (
-    HashMap<String, HashMap<String, Vec<(usize, f64)>>>,
-    Vec<usize>,
-) {
-    let feature_indices = features
-        .iter()
-        .enumerate()
-        .map(|(index, feature)| (feature.rule_name.as_str(), index))
-        .collect::<HashMap<_, _>>();
-    let mut exposures = HashMap::<String, HashMap<String, Vec<(usize, f64)>>>::new();
-    let mut trigger_samples = vec![0usize; features.len()];
-    for row in detail_rows {
-        let Some(feature_index) = feature_indices.get(row.rule_name.as_str()).copied() else {
-            continue;
-        };
-        let value = row.rule_score / features[feature_index].score_scale;
-        if !value.is_finite() || value.abs() <= VALIDATION_EPS {
-            continue;
-        }
-        let sample_exposures = exposures
-            .entry(row.ts_code.clone())
-            .or_default()
-            .entry(row.trade_date.clone())
-            .or_default();
-        if let Some((_, existing)) = sample_exposures
-            .iter_mut()
-            .find(|(index, _)| *index == feature_index)
-        {
-            *existing += value;
-        } else {
-            sample_exposures.push((feature_index, value));
-            trigger_samples[feature_index] += 1;
-        }
-    }
-    (exposures, trigger_samples)
-}
-
-fn round_joint_points(value: f64) -> f64 {
-    (value.clamp(0.0, 10.0) * 2.0).round() / 2.0
-}
-
-pub fn run_rule_joint_ridge_validation(
-    continuation_id: String,
-) -> Result<RuleJointRidgeValidationData, String> {
-    let continuation_id = continuation_id.trim().to_string();
-    if continuation_id.is_empty() {
-        return Err("排名整体继续验证标识不能为空".to_string());
-    }
-    let session = load_rule_joint_validation_session(&continuation_id)?;
-    if session.features.is_empty() {
-        return Err("当前策略配置中没有可用于联合回归的策略".to_string());
-    }
-    let feature_count = session.features.len();
-    let source_db = source_db_path(&session.source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
-    let source_conn =
-        Connection::open(source_db_str).map_err(|error| format!("打开原始库失败:{error}"))?;
-    let layer_config = RuleLayerConfig {
-        min_samples_per_day: session.params.min_samples_per_day,
-        backtest_period: session.params.backtest_period,
-        min_listed_trade_days: session.params.min_listed_trade_days,
-    };
-    let runtime_cache = build_rule_layer_runtime_cache_from_summary_rows(
-        &source_conn,
-        &session.source_path,
-        session.summary_rows.as_ref(),
-        &session.params.stock_adj_type,
-        &session.params.index_ts_code,
-        session.params.index_beta,
-        session.params.concept_beta,
-        session.params.industry_beta,
-        &session.params.start_date,
-        &session.params.end_date,
-        &layer_config,
-    )?;
-    let detail_rows = load_score_detail_rows_from_db(
-        &session.source_path,
-        &session.params.start_date,
-        &session.params.end_date,
-    )?;
-    let (exposures, trigger_samples) = build_joint_exposures(&session.features, &detail_rows);
-    let current_weights = session
-        .features
-        .iter()
-        .map(|feature| feature.score_scale)
-        .collect::<Vec<_>>();
-    let days = calc_rule_joint_ridge_day_stats_from_cache_head_weighted(
-        &runtime_cache,
-        &exposures,
-        feature_count,
-        session.params.min_samples_per_day,
-        &current_weights,
-    );
-    if days.is_empty() {
-        return Err("没有形成可用于整体岭回归的股票交易日样本".to_string());
-    }
-
-    let purge_days = session.params.backtest_period.max(1);
-    let models =
-        build_joint_walk_forward_models(&days, feature_count, purge_days, &current_weights);
-    let head_aggregates =
-        evaluate_joint_walk_forward_heads(&runtime_cache, &exposures, &models, &current_weights)?;
-    let mut selected_alphas = models
-        .iter()
-        .map(|model| model.ridge_alpha)
-        .collect::<Vec<_>>();
-    selected_alphas.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
-    let selected_ridge_alpha = selected_alphas
-        .get(selected_alphas.len() / 2)
-        .copied()
-        .unwrap_or(0.1);
-    let full = aggregate_joint_ridge_days(&days, feature_count);
-    if full.exposed_sample_count == 0 {
-        return Err("回测区间内没有任何策略触发样本，无法执行整体岭回归".to_string());
-    }
-    let full_beta = fit_joint_ridge(&full, feature_count, selected_ridge_alpha)
-        .ok_or_else(|| "整体岭回归求解失败，请检查策略特征是否全部为空".to_string())?;
-    let residual_std = if full.sample_count > 0 && full.residual_sum_squares > VALIDATION_EPS {
-        (full.residual_sum_squares / full.sample_count as f64).sqrt()
-    } else {
-        0.0
-    };
-
-    let total_oos_yty = models
-        .iter()
-        .map(|model| model.test_residual_sum_squares)
-        .sum::<f64>();
-    let ridge_oos_gain = models
-        .iter()
-        .map(|model| model.ridge_oos_r2.unwrap_or(0.0) * model.test_residual_sum_squares)
-        .sum::<f64>();
-    let current_oos_gain = models
-        .iter()
-        .map(|model| model.current_score_oos_r2.unwrap_or(0.0) * model.test_residual_sum_squares)
-        .sum::<f64>();
-    let ridge_oos_r2 = (total_oos_yty > VALIDATION_EPS).then_some(ridge_oos_gain / total_oos_yty);
-    let current_score_oos_r2 =
-        (total_oos_yty > VALIDATION_EPS).then_some(current_oos_gain / total_oos_yty);
-
-    let head_metrics = RULE_JOINT_HEAD_DEFINITIONS
-        .iter()
-        .zip(head_aggregates.iter())
-        .map(|(definition, folds)| {
-            let evaluated_day_count = folds.iter().map(|item| item.day_count).sum::<usize>();
-            let valid_folds = folds
-                .iter()
-                .filter(|item| item.day_count > 0)
-                .collect::<Vec<_>>();
-            let ridge_winning_fold_count = valid_folds
-                .iter()
-                .filter(|item| item.ridge_excess_sum > item.current_excess_sum)
-                .count();
-            RuleJointHeadMetric {
-                key: definition.key.to_string(),
-                label: definition.label.to_string(),
-                ridge_head_excess_mean: (evaluated_day_count > 0).then_some(
-                    folds.iter().map(|item| item.ridge_excess_sum).sum::<f64>()
-                        / evaluated_day_count as f64,
-                ),
-                current_head_excess_mean: (evaluated_day_count > 0).then_some(
-                    folds
-                        .iter()
-                        .map(|item| item.current_excess_sum)
-                        .sum::<f64>()
-                        / evaluated_day_count as f64,
-                ),
-                ridge_winning_fold_count,
-                valid_fold_count: valid_folds.len(),
-                evaluated_day_count,
-            }
-        })
-        .collect::<Vec<_>>();
-    let primary_head = &head_metrics[RULE_JOINT_PRIMARY_HEAD_INDEX];
-    let latest_head_fold_passed = head_aggregates[RULE_JOINT_PRIMARY_HEAD_INDEX]
-        .iter()
-        .rev()
-        .find(|item| item.day_count > 0)
-        .is_some_and(|item| item.ridge_excess_sum > item.current_excess_sum);
-    let (validation_passed, required_head_winning_folds, validation_status_label) =
-        evaluate_joint_validation_gate(
-            primary_head.valid_fold_count,
-            primary_head.ridge_winning_fold_count,
-            primary_head.ridge_head_excess_mean,
-            primary_head.current_head_excess_mean,
-            latest_head_fold_passed,
-        );
-
-    let mut contribution_sums = vec![0.0; feature_count];
-    let mut contribution_positive_counts = vec![0usize; feature_count];
-    for model in &models {
-        for (feature_index, contribution) in model.oos_contributions.iter().enumerate() {
-            contribution_sums[feature_index] += *contribution;
-            if *contribution > 0.0 {
-                contribution_positive_counts[feature_index] += 1;
-            }
-        }
-    }
-
-    let mut rules = Vec::with_capacity(feature_count);
-    for feature_index in 0..feature_count {
-        let feature = &session.features[feature_index];
-        let diagonal = full.feature_cross_products[feature_index * feature_count + feature_index];
-        let feature_std = if full.sample_count > 0 && diagonal > VALIDATION_EPS {
-            (diagonal / full.sample_count as f64).sqrt()
-        } else {
-            0.0
-        };
-        let coefficient = full_beta[feature_index];
-        let standardized_coefficient = if residual_std > VALIDATION_EPS {
-            coefficient * feature_std / residual_std
-        } else {
-            0.0
-        };
-        let raw_points_abs = if residual_std > VALIDATION_EPS && coefficient > 0.0 {
-            round_joint_points(RULE_JOINT_POINT_SCALE * coefficient / residual_std)
-        } else {
-            0.0
-        };
-        let positive_fold_rate = (!models.is_empty())
-            .then_some(contribution_positive_counts[feature_index] as f64 / models.len() as f64);
-        let direction_sign = if feature.current_points < 0.0 {
-            -1.0
-        } else {
-            1.0
-        };
-
-        let mut max_correlation = None::<f64>;
-        let mut most_correlated_rule = None;
-        for other_index in 0..feature_count {
-            if other_index == feature_index {
-                continue;
-            }
-            let other_diagonal =
-                full.feature_cross_products[other_index * feature_count + other_index];
-            let denominator = (diagonal * other_diagonal).sqrt();
-            if denominator <= VALIDATION_EPS {
-                continue;
-            }
-            let correlation = full.feature_cross_products
-                [feature_index * feature_count + other_index]
-                / denominator;
-            if max_correlation.is_none_or(|current| correlation.abs() > current.abs()) {
-                max_correlation = Some(correlation);
-                most_correlated_rule = Some(session.features[other_index].rule_name.clone());
-            }
-        }
-
-        let current_abs = feature.current_points.abs();
-        let oos_contribution = (total_oos_yty > VALIDATION_EPS)
-            .then_some(contribution_sums[feature_index] / total_oos_yty);
-        let rule_stability_passed = positive_fold_rate
-            .is_some_and(|rate| rate + VALIDATION_EPS >= RULE_JOINT_RULE_MIN_POSITIVE_FOLD_RATE)
-            && oos_contribution.is_some_and(|value| value > 0.0);
-        let diagnostic_points_abs =
-            round_joint_points(raw_points_abs * positive_fold_rate.unwrap_or(0.0));
-        let diagnostic_points = direction_sign * diagnostic_points_abs;
-        let (suggested_points, status, status_label) = if trigger_samples[feature_index] < 100 {
-            (feature.current_points, "insufficient", "样本不足，暂不改分")
-        } else if models.is_empty() {
-            (
-                feature.current_points,
-                "insufficient",
-                "走步区间不足，暂不改分",
-            )
-        } else if !validation_passed && coefficient <= 0.0 {
-            (feature.current_points, "observe", "观察：联合方向反转")
-        } else if !validation_passed && !rule_stability_passed {
-            (feature.current_points, "observe", "观察：样本外贡献不稳")
-        } else if !validation_passed {
-            (feature.current_points, "hold", "整体未通过，暂不改分")
-        } else if !rule_stability_passed {
-            (feature.current_points, "observe", "单策略门槛未通过")
-        } else if coefficient <= 0.0 {
-            (0.0, "suppress", "稳定反向，建议停用")
-        } else if diagnostic_points_abs + 0.25 < current_abs {
-            (diagnostic_points, "reduce", "建议压低")
-        } else if diagnostic_points_abs > current_abs + 0.25 {
-            (diagnostic_points, "increase", "建议提高")
-        } else {
-            (feature.current_points, "keep", "建议保持")
-        };
-        rules.push(RuleJointRidgeRuleResult {
-            rule_name: feature.rule_name.clone(),
-            explain: feature.explain.clone(),
-            current_points: feature.current_points,
-            score_scale: feature.score_scale,
-            trigger_samples: trigger_samples[feature_index],
-            ridge_coefficient: coefficient,
-            standardized_coefficient,
-            raw_suggested_points: direction_sign * raw_points_abs,
-            suggested_points,
-            point_change: suggested_points - feature.current_points,
-            positive_fold_rate,
-            oos_contribution,
-            max_correlation,
-            most_correlated_rule,
-            status: status.to_string(),
-            status_label: status_label.to_string(),
-        });
-    }
-    rules.sort_by(|left, right| {
-        left.suggested_points
-            .abs()
-            .partial_cmp(&right.suggested_points.abs())
-            .unwrap_or(Ordering::Equal)
-            .reverse()
-            .then_with(|| left.rule_name.cmp(&right.rule_name))
-    });
-
-    let folds = models
-        .iter()
-        .zip(head_aggregates[RULE_JOINT_PRIMARY_HEAD_INDEX].iter())
-        .map(|(model, head)| RuleJointWalkForwardFold {
-            fold_index: model.fold_index,
-            train_start_date: model.train_start_date.clone(),
-            train_end_date: model.train_end_date.clone(),
-            test_start_date: model.test_start_date.clone(),
-            test_end_date: model.test_end_date.clone(),
-            train_days: model.train_days,
-            purge_days: model.purge_days,
-            test_days: model.test_days,
-            ridge_alpha: model.ridge_alpha,
-            ridge_oos_r2: model.ridge_oos_r2,
-            current_score_oos_r2: model.current_score_oos_r2,
-            ridge_head_excess_mean: (head.day_count > 0)
-                .then_some(head.ridge_excess_sum / head.day_count as f64),
-            current_head_excess_mean: (head.day_count > 0)
-                .then_some(head.current_excess_sum / head.day_count as f64),
-        })
-        .collect::<Vec<_>>();
-    let ridge_head_excess_mean = primary_head.ridge_head_excess_mean;
-    let current_head_excess_mean = primary_head.current_head_excess_mean;
-    let head_winning_fold_count = primary_head.ridge_winning_fold_count;
-    let primary_head_definition = RULE_JOINT_HEAD_DEFINITIONS[RULE_JOINT_PRIMARY_HEAD_INDEX];
-
-    Ok(RuleJointRidgeValidationData {
-        continuation_id,
-        start_date: session.params.start_date.clone(),
-        end_date: session.params.end_date.clone(),
-        feature_count,
-        sample_count: full.sample_count,
-        exposed_sample_count: full.exposed_sample_count,
-        valid_days: days.len(),
-        fold_count: folds.len(),
-        purge_days,
-        selected_ridge_alpha,
-        ridge_oos_r2,
-        current_score_oos_r2,
-        ridge_head_excess_mean,
-        current_head_excess_mean,
-        primary_head_key: primary_head_definition.key.to_string(),
-        primary_head_label: primary_head_definition.label.to_string(),
-        head_metrics,
-        validation_passed,
-        validation_status_label,
-        head_winning_fold_count,
-        required_head_winning_folds,
-        latest_head_fold_passed,
-        training_weight_description:
-            "按当前总分排名进行头部加权：Top20/50/100权重最高，Top1%/5%/10%依次递减，其余样本保留基础权重；每日权重归一化避免改变岭参数尺度"
-                .to_string(),
-        point_scale_description:
-            "只有整体Top100通过、最近一折通过，且单策略至少80%测试折正贡献并且累计样本外贡献为正时才输出改分；否则建议分保持当前值"
-                .to_string(),
-        folds,
-        rules,
-    })
-}
-
 fn load_stock_name_map(source_path: &str) -> Result<HashMap<String, String>, String> {
     let rows = load_stock_list(source_path)?;
     let mut out = HashMap::with_capacity(rows.len());
@@ -7186,29 +6158,6 @@ struct RankLayerBacktestRunParams {
     allowed_ts_codes: Option<HashSet<String>>,
 }
 
-fn rule_joint_validation_params_from_rank(
-    params: &RankLayerBacktestRunParams,
-) -> RuleLayerBacktestRunParams {
-    RuleLayerBacktestRunParams {
-        stock_adj_type: params.stock_adj_type.clone(),
-        index_ts_code: params.index_ts_code.clone(),
-        index_beta: params.index_beta,
-        concept_beta: params.concept_beta,
-        industry_beta: params.industry_beta,
-        start_date: params.start_date.clone(),
-        end_date: params.end_date.clone(),
-        min_samples_per_day: params.min_samples_per_day,
-        min_listed_trade_days: params.min_listed_trade_days,
-        backtest_period: params.backtest_period,
-        parallel_batch_size: DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE,
-        resolved_board: params.resolved_board.clone(),
-        exclude_st_board: params.exclude_st_board,
-        total_mv_min: None,
-        total_mv_max: None,
-        allowed_ts_codes: params.allowed_ts_codes.clone(),
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 struct RuleContributionAverages {
     avg_contribution_score: Option<f64>,
@@ -7378,47 +6327,6 @@ fn load_rule_backtest_score_rows_from_db(
     }
 
     Ok((summaries, details))
-}
-
-fn load_score_detail_rows_from_db(
-    source_path: &str,
-    start_date: &str,
-    end_date: &str,
-) -> Result<Vec<ScoreDetails>, String> {
-    let result_conn = open_result_conn(source_path)?;
-    let mut detail_stmt = result_conn
-        .prepare(
-            r#"
-            SELECT ts_code, trade_date, rule_name, TRY_CAST(rule_score AS DOUBLE)
-            FROM rule_details
-            WHERE trade_date >= ?
-              AND trade_date <= ?
-              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
-            ORDER BY trade_date ASC, rule_name ASC, ts_code ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译策略回测规则原始行失败: {e}"))?;
-    let mut detail_rows = detail_stmt
-        .query(params![start_date, end_date])
-        .map_err(|e| format!("查询策略回测规则原始行失败: {e}"))?;
-    let mut details = Vec::new();
-    while let Some(row) = detail_rows
-        .next()
-        .map_err(|e| format!("读取策略回测规则原始行失败: {e}"))?
-    {
-        let rule_score: f64 = row.get(3).map_err(|e| format!("读取规则分数失败: {e}"))?;
-        let item = ScoreDetails {
-            ts_code: row.get(0).map_err(|e| format!("读取规则代码失败: {e}"))?,
-            trade_date: row.get(1).map_err(|e| format!("读取规则日期失败: {e}"))?,
-            rule_name: row.get(2).map_err(|e| format!("读取规则名称失败: {e}"))?,
-            rule_score,
-        };
-        if rule_score.is_finite() {
-            details.push(item);
-        }
-    }
-
-    Ok(details)
 }
 
 fn build_rule_contribution_averages_from_rows(
@@ -8192,6 +7100,46 @@ fn rank_layer_method_label(layer_method: RankLayerMethod) -> &'static str {
     }
 }
 
+fn rank_top_k_summary_data(
+    items: Vec<crate::simulate::rank::RankTopKSummary>,
+) -> Vec<RankTopKSummaryData> {
+    items
+        .into_iter()
+        .map(|item| RankTopKSummaryData {
+            top_k: item.top_k,
+            point_count: item.point_count,
+            sample_count: item.sample_count,
+            avg_daily_residual_return: item.avg_daily_residual_return,
+            median_daily_residual_return: item.median_daily_residual_return,
+            positive_day_ratio: item.positive_day_ratio,
+            daily_std: item.daily_std,
+            hac_t_value: item.hac_t_value,
+            hac_lag: item.hac_lag,
+        })
+        .collect()
+}
+
+fn rank_top_k_period_summary_data(
+    items: Vec<crate::simulate::rank::RankTopKPeriodSummary>,
+) -> Vec<RankTopKPeriodSummaryData> {
+    items
+        .into_iter()
+        .map(|item| RankTopKPeriodSummaryData {
+            period_label: item.period_label,
+            start_date: item.start_date,
+            end_date: item.end_date,
+            top_k: item.top_k,
+            point_count: item.point_count,
+            sample_count: item.sample_count,
+            avg_daily_residual_return: item.avg_daily_residual_return,
+            median_daily_residual_return: item.median_daily_residual_return,
+            positive_day_ratio: item.positive_day_ratio,
+            hac_t_value: item.hac_t_value,
+            hac_lag: item.hac_lag,
+        })
+        .collect()
+}
+
 fn rank_market_value_groups() -> [(&'static str, Option<f64>, Option<f64>); 3] {
     [
         ("小市值(<50亿)", None, Some(50.0)),
@@ -8322,10 +7270,6 @@ fn run_rank_layer_backtest_core(
         input.layer_config.layer_count,
         &stock_meta_map,
     );
-    let joint_params = rule_joint_validation_params_from_rank(params);
-    let joint_validation_continuation_id =
-        store_rule_joint_validation_from_rows(source_path, &joint_params, summary_rows);
-
     Ok(RankLayerBacktestData {
         stock_adj_type: input.stock_adj_type,
         index_ts_code: input.index_ts_code,
@@ -8351,6 +7295,8 @@ fn run_rank_layer_backtest_core(
         ic_std: metrics.ic_std,
         icir: metrics.icir,
         ic_t_value: metrics.ic_t_value,
+        top_k_summaries: rank_top_k_summary_data(metrics.top_k_summaries),
+        top_k_period_summaries: rank_top_k_period_summary_data(metrics.top_k_period_summaries),
         layer_summaries: metrics
             .layers
             .into_iter()
@@ -8366,7 +7312,6 @@ fn run_rank_layer_backtest_core(
             .collect(),
         layer_sample_groups,
         market_value_summaries,
-        joint_validation_continuation_id,
     })
 }
 
@@ -9060,7 +8005,6 @@ pub fn run_transient_rank_layer_backtest(
         exclude_st_board,
         allowed_ts_codes,
     };
-    let joint_params = rule_joint_validation_params_from_rank(&params);
     let layer_config = RankLayerConfig {
         min_samples_per_day: params.min_samples_per_day,
         backtest_period: params.backtest_period,
@@ -9104,9 +8048,6 @@ pub fn run_transient_rank_layer_backtest(
         input.layer_config.layer_count,
         &stock_meta_map,
     );
-    let joint_validation_continuation_id =
-        store_rule_joint_validation_from_rows(&source_path, &joint_params, summary_rows);
-
     Ok(RankLayerBacktestData {
         stock_adj_type: input.stock_adj_type,
         index_ts_code: input.index_ts_code,
@@ -9132,6 +8073,8 @@ pub fn run_transient_rank_layer_backtest(
         ic_std: metrics.ic_std,
         icir: metrics.icir,
         ic_t_value: metrics.ic_t_value,
+        top_k_summaries: rank_top_k_summary_data(metrics.top_k_summaries),
+        top_k_period_summaries: rank_top_k_period_summary_data(metrics.top_k_period_summaries),
         layer_summaries: metrics
             .layers
             .into_iter()
@@ -9147,7 +8090,6 @@ pub fn run_transient_rank_layer_backtest(
             .collect(),
         layer_sample_groups,
         market_value_summaries,
-        joint_validation_continuation_id,
     })
 }
 
@@ -9170,14 +8112,13 @@ mod tests {
         },
         scoring::tools::load_st_list,
         simulate::rank::RankLayerSamplePoint,
-        simulate::rule::{RuleJointRidgeDayStats, RuleLayerPoint, RuleLayerSamplePoint},
+        simulate::rule::{RuleLayerPoint, RuleLayerSamplePoint},
     };
 
     use super::{
-        JointRidgeAggregate, PreparedValidationCombo, RuleJointValidationFeature, VALIDATION_EPS,
-        ValidationSampleRawRow, ValidationSampleStockMeta, ValidationSeedRule,
-        ValidationSimilarityCache, ValidationVariant, build_industry_maps_from_rows,
-        build_joint_exposures, build_joint_walk_forward_models, build_rank_layer_sample_groups,
+        PreparedValidationCombo, VALIDATION_EPS, ValidationSampleRawRow, ValidationSampleStockMeta,
+        ValidationSeedRule, ValidationSimilarityCache, ValidationVariant,
+        build_industry_maps_from_rows, build_rank_layer_sample_groups,
         build_recent_decay_dist_points, build_rule_basket_decay_from_daily_groups,
         build_rule_contribution_averages_from_rows, build_rule_decay_validations,
         build_validation_cached_rule, build_validation_calibration_specs,
@@ -9185,11 +8126,9 @@ mod tests {
         build_validation_similarity_rows, build_validation_triggered_scores,
         build_validation_triggered_scores_for_combos, calibration_stability_factor,
         collect_rule_validation_runtime_keys, collect_validation_assigned_names,
-        derive_validation_volatility_group, estimate_net_money_flow_yuan,
-        evaluate_joint_validation_gate, joint_oos_contributions, joint_prediction_gain,
-        money_flow_rank_items, money_outflow_rank_items, resolve_validation_sample_board_label,
-        resolve_validation_trigger_count, scope_way_config_label, solve_positive_definite,
-        trailing_period_gain,
+        derive_validation_volatility_group, estimate_net_money_flow_yuan, money_flow_rank_items,
+        money_outflow_rank_items, resolve_validation_sample_board_label,
+        resolve_validation_trigger_count, scope_way_config_label, trailing_period_gain,
     };
     use crate::data::ScopeWay;
 
@@ -10132,108 +9071,6 @@ explain = "test"
             calibration_stability_factor(1.0, Some(-0.3), Some(-0.1)),
             0.0
         );
-    }
-
-    #[test]
-    fn joint_ridge_cholesky_solver_matches_known_solution() {
-        let solution = solve_positive_definite(vec![4.0, 1.0, 1.0, 3.0], vec![1.0, 2.0])
-            .expect("solve positive definite system");
-
-        assert!((solution[0] - 1.0 / 11.0).abs() < 1e-10);
-        assert!((solution[1] - 7.0 / 11.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn joint_validation_gate_requires_aggregate_fold_and_latest_head_wins() {
-        let passed = evaluate_joint_validation_gate(5, 3, Some(0.2), Some(0.1), true);
-        assert!(passed.0);
-        assert_eq!(passed.1, 3);
-
-        assert!(!evaluate_joint_validation_gate(5, 3, Some(0.05), Some(0.1), true).0);
-        assert!(!evaluate_joint_validation_gate(5, 2, Some(0.2), Some(0.1), true).0);
-        assert!(!evaluate_joint_validation_gate(5, 4, Some(0.2), Some(0.1), false).0);
-        assert!(!evaluate_joint_validation_gate(2, 2, Some(0.2), Some(0.1), true).0);
-    }
-
-    #[test]
-    fn joint_ridge_oos_contributions_decompose_prediction_gain() {
-        let aggregate = JointRidgeAggregate {
-            feature_cross_products: vec![100.0, 30.0, 30.0, 80.0],
-            feature_residual_products: vec![12.0, 8.0],
-            residual_sum_squares: 200.0,
-            sample_count: 100,
-            exposed_sample_count: 60,
-        };
-        let beta = vec![0.08, 0.04];
-        let contributions = joint_oos_contributions(&beta, &aggregate);
-
-        assert!(
-            (contributions.iter().sum::<f64>() - joint_prediction_gain(&beta, &aggregate)).abs()
-                < 1e-10
-        );
-    }
-
-    #[test]
-    fn joint_walk_forward_keeps_purge_gap_and_only_trains_on_past_days() {
-        let days = (0..120)
-            .map(|index| RuleJointRidgeDayStats {
-                trade_date: format!("{index:08}"),
-                sample_count: 100,
-                exposed_sample_count: 50,
-                feature_cross_products: vec![100.0],
-                feature_residual_products: vec![10.0],
-                residual_sum_squares: 100.0,
-            })
-            .collect::<Vec<_>>();
-
-        let models = build_joint_walk_forward_models(&days, 1, 5, &[1.0]);
-
-        assert_eq!(models.len(), 5);
-        for model in models {
-            let train_end = model.train_end_date.parse::<usize>().expect("train date");
-            let test_start = model.test_start_date.parse::<usize>().expect("test date");
-            assert_eq!(test_start - train_end - 1, 5);
-            assert!(model.ridge_oos_r2.is_some_and(|value| value > 0.0));
-            assert!(model.oos_contributions[0] > 0.0);
-        }
-    }
-
-    #[test]
-    fn joint_exposures_normalize_scores_without_losing_rule_direction() {
-        let features = vec![
-            RuleJointValidationFeature {
-                rule_name: "加分".to_string(),
-                explain: String::new(),
-                current_points: 3.0,
-                score_scale: 3.0,
-            },
-            RuleJointValidationFeature {
-                rule_name: "扣分".to_string(),
-                explain: String::new(),
-                current_points: -4.0,
-                score_scale: 4.0,
-            },
-        ];
-        let details = vec![
-            ScoreDetails {
-                ts_code: "000001.SZ".to_string(),
-                trade_date: "20240102".to_string(),
-                rule_name: "加分".to_string(),
-                rule_score: 6.0,
-            },
-            ScoreDetails {
-                ts_code: "000001.SZ".to_string(),
-                trade_date: "20240102".to_string(),
-                rule_name: "扣分".to_string(),
-                rule_score: -8.0,
-            },
-        ];
-
-        let (exposures, trigger_counts) = build_joint_exposures(&features, &details);
-        let row = &exposures["000001.SZ"]["20240102"];
-
-        assert_eq!(row, &vec![(0, 2.0), (1, -2.0)]);
-        assert_eq!(trigger_counts, vec![1, 1]);
     }
 
     fn decay_test_point(index: usize, score: f64, excess: f64) -> RuleLayerPoint {
