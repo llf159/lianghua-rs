@@ -28,6 +28,7 @@ export type RankingComputeStatus = {
   strategyPath: string
   sourceDb: RankComputeDbRange
   resultDb: RankComputeDbRange
+  convolutionRankDb: RankComputeDbRange
   resultDbContinuity: RankComputeResultContinuity
   cyqDb: RankComputeDbRange
   cyqBinRowCount: number
@@ -55,6 +56,17 @@ export type RankingComputeRunResult = {
   timings: RankComputeTimingItem[]
   warnings: string[]
   status: RankingComputeStatus
+}
+
+export type ConvolutionRankComputeResult = {
+  action: string
+  kernelName: string
+  windowSize: number
+  startDate: string
+  endDate: string
+  elapsedMs: number
+  savedRows: number
+  tradeDates: number
 }
 
 export async function getRankingComputeStatus(sourcePath: string, strategyPath?: string) {
@@ -112,6 +124,18 @@ export async function runRankingScoreCalculation(
   return invoke<RankingComputeRunResult>('run_ranking_score_calculation', {
     sourcePath,
     strategyPath,
+    startDate,
+    endDate,
+  })
+}
+
+export async function runConvolutionRankCompute(
+  sourcePath: string,
+  startDate: string,
+  endDate: string,
+) {
+  return invoke<ConvolutionRankComputeResult>('run_convolution_rank_compute', {
+    sourcePath,
     startDate,
     endDate,
   })

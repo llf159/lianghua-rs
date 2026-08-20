@@ -517,6 +517,20 @@ fn delete_score_range(
         params![start_date, end_date],
     )
     .map_err(|e| format!("删除scene_details旧数据失败:{e}"))?;
+    let convolution_rank_exists = tx
+        .query_row(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'convolution_rank'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("检查convolution_rank表失败:{e}"))?;
+    if convolution_rank_exists > 0 {
+        tx.execute(
+            "DELETE FROM convolution_rank WHERE trade_date >= ? AND trade_date <= ?",
+            params![start_date, end_date],
+        )
+        .map_err(|e| format!("清理过期卷积排名失败:{e}"))?;
+    }
     Ok(())
 }
 

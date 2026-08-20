@@ -15,6 +15,173 @@ const DEFAULT_LAYER_COUNT: usize = 5;
 const MAX_LAYER_COUNT: usize = 100;
 const DEFAULT_TOP_KS: [usize; 4] = [1, 5, 20, 100];
 
+pub const DEFAULT_CONVOLUTION_KERNEL_NAME: &str = "H30-L50";
+pub const DEFAULT_CONVOLUTION_WINDOW: usize = 30;
+
+/// 回测后选定的双尺度默认卷积核。
+///
+/// 50% 权重分配给三日快核 `[1.0, 0.7, 0.49]`，另外 50% 分配给
+/// 三十日等权均值。返回顺序为“当前交易日 -> 更早交易日”。
+pub fn default_convolution_kernel() -> Vec<f64> {
+    let short_weights = [1.0, 0.7, 0.49];
+    let short_sum = short_weights.iter().sum::<f64>();
+    let mut weights = vec![0.5 / DEFAULT_CONVOLUTION_WINDOW as f64; DEFAULT_CONVOLUTION_WINDOW];
+    for (lag, short_weight) in short_weights.iter().enumerate() {
+        weights[lag] += 0.5 * short_weight / short_sum;
+    }
+    weights
+}
+
+/// 一只股票在目标交易日的原始分数与时间卷积分数排名对比。
+///
+/// `score_history` 按从旧到新的顺序保存；卷积核则约定 `kernel[0]`
+/// 作用于目标交易日，后续权重依次作用于更早的交易日。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConvolutionRankRow {
+    pub ts_code: String,
+    pub trade_date: String,
+    pub database_rank: Option<i64>,
+    pub raw_score: f64,
+    pub convolved_score: f64,
+    pub raw_rank: usize,
+    pub convolution_rank: usize,
+    /// 正数表示卷积后名次上升，负数表示下降。
+    pub rank_change: isize,
+    pub score_history: Vec<f64>,
+}
+
+/// 对每只股票的 `total_score` 做因果加权卷积，然后在目标日重新排名。
+///
+/// - `kernel` 按“当前、前一日、前二日……”排列；
+/// - 权重会自动归一化，因此 `[5, 3, 2]` 与 `[0.5, 0.3, 0.2]` 等价；
+/// - 只保留窗口内每个交易日都有有效分数的股票；
+/// - 原始排名也在这批完整窗口股票中重算，保证名次变化可直接比较。
+pub fn calc_convolution_ranking(
+    score_summary_rows: &[ScoreSummary],
+    target_date: &str,
+    kernel: &[f64],
+) -> Result<Vec<ConvolutionRankRow>, String> {
+    let target_date = target_date.trim();
+    if target_date.is_empty() {
+        return Err("卷积排行榜目标交易日不能为空".to_string());
+    }
+    if kernel.is_empty() {
+        return Err("卷积核不能为空".to_string());
+    }
+    if kernel
+        .iter()
+        .any(|weight| !weight.is_finite() || *weight < 0.0)
+    {
+        return Err("平滑卷积核权重必须是有限的非负数".to_string());
+    }
+    let kernel_sum = kernel.iter().sum::<f64>();
+    if kernel_sum <= EPS {
+        return Err("平滑卷积核权重之和必须大于0".to_string());
+    }
+
+    let mut trade_dates = score_summary_rows
+        .iter()
+        .filter_map(|row| {
+            let trade_date = row.trade_date.trim();
+            (!trade_date.is_empty() && trade_date <= target_date).then_some(trade_date)
+        })
+        .collect::<Vec<_>>();
+    trade_dates.sort_unstable();
+    trade_dates.dedup();
+    if trade_dates.len() < kernel.len() {
+        return Err(format!(
+            "目标日及之前只有{}个交易日，无法计算{}日卷积",
+            trade_dates.len(),
+            kernel.len()
+        ));
+    }
+    let window_dates = &trade_dates[trade_dates.len() - kernel.len()..];
+    if window_dates.last().copied() != Some(target_date) {
+        return Err(format!("目标交易日{target_date}没有评分数据"));
+    }
+
+    let mut scores_by_stock = HashMap::<String, HashMap<&str, (f64, Option<i64>)>>::new();
+    for row in score_summary_rows {
+        let ts_code = row.ts_code.trim();
+        let trade_date = row.trade_date.trim();
+        if ts_code.is_empty()
+            || !row.total_score.is_finite()
+            || trade_date < window_dates[0]
+            || trade_date > target_date
+        {
+            continue;
+        }
+        scores_by_stock
+            .entry(ts_code.to_string())
+            .or_default()
+            .insert(trade_date, (row.total_score, row.rank));
+    }
+
+    let mut ranking = Vec::new();
+    for (ts_code, scores_by_date) in scores_by_stock {
+        let Some(score_history) = window_dates
+            .iter()
+            .map(|trade_date| scores_by_date.get(trade_date).map(|item| item.0))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let raw_score = *score_history.last().expect("非空卷积核对应非空分数窗口");
+        let convolved_score = kernel
+            .iter()
+            .enumerate()
+            .map(|(lag, weight)| weight * score_history[score_history.len() - 1 - lag])
+            .sum::<f64>()
+            / kernel_sum;
+        let database_rank = scores_by_date
+            .get(target_date)
+            .and_then(|item| item.1)
+            .filter(|rank| *rank > 0);
+
+        ranking.push(ConvolutionRankRow {
+            ts_code,
+            trade_date: target_date.to_string(),
+            database_rank,
+            raw_score,
+            convolved_score,
+            raw_rank: 0,
+            convolution_rank: 0,
+            rank_change: 0,
+            score_history,
+        });
+    }
+    if ranking.is_empty() {
+        return Err(format!(
+            "没有股票具备截至{target_date}的完整{}日评分窗口",
+            kernel.len()
+        ));
+    }
+
+    let mut raw_order = (0..ranking.len()).collect::<Vec<_>>();
+    raw_order.sort_by(|left, right| {
+        ranking[*right]
+            .raw_score
+            .total_cmp(&ranking[*left].raw_score)
+            .then_with(|| ranking[*left].ts_code.cmp(&ranking[*right].ts_code))
+    });
+    for (rank_index, row_index) in raw_order.into_iter().enumerate() {
+        ranking[row_index].raw_rank = rank_index + 1;
+    }
+
+    ranking.sort_by(|left, right| {
+        right
+            .convolved_score
+            .total_cmp(&left.convolved_score)
+            .then_with(|| left.ts_code.cmp(&right.ts_code))
+    });
+    for (rank_index, row) in ranking.iter_mut().enumerate() {
+        row.convolution_rank = rank_index + 1;
+        row.rank_change = row.raw_rank as isize - row.convolution_rank as isize;
+    }
+
+    Ok(ranking)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RankLayerMethod {
     Score,
@@ -1076,9 +1243,10 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        RankLayerConfig, RankLayerLookup, RankLayerMethod, calc_rank_layer_metrics,
-        calc_rank_layer_metrics_with_lookup,
+        RankLayerConfig, RankLayerLookup, RankLayerMethod, calc_convolution_ranking,
+        calc_rank_layer_metrics, calc_rank_layer_metrics_with_lookup, default_convolution_kernel,
     };
+    use crate::data::scoring_data::ScoreSummary;
     use crate::simulate::rule::RuleLayerSamplePoint;
 
     fn assert_opt_close(left: Option<f64>, right: Option<f64>) {
@@ -1087,6 +1255,83 @@ mod tests {
             (None, None) => {}
             _ => panic!("left={left:?}, right={right:?}"),
         }
+    }
+
+    #[test]
+    fn convolution_ranking_rewards_persistent_scores() {
+        let mut rows = Vec::new();
+        for (ts_code, scores, database_rank) in [
+            ("000001.SZ", [0.0, 0.0, 100.0], 1),
+            ("000002.SZ", [60.0, 60.0, 60.0], 2),
+            ("000003.SZ", [30.0, 30.0, 30.0], 3),
+        ] {
+            for (index, trade_date) in ["20240102", "20240103", "20240104"].into_iter().enumerate()
+            {
+                rows.push(ScoreSummary {
+                    ts_code: ts_code.to_string(),
+                    trade_date: trade_date.to_string(),
+                    total_score: scores[index],
+                    rank: (index == 2).then_some(database_rank),
+                });
+            }
+        }
+        // 缺少第一天的股票不能进入完整窗口排行榜。
+        for (trade_date, score) in [("20240103", 90.0), ("20240104", 90.0)] {
+            rows.push(ScoreSummary {
+                ts_code: "000004.SZ".to_string(),
+                trade_date: trade_date.to_string(),
+                total_score: score,
+                rank: None,
+            });
+        }
+
+        let ranking = calc_convolution_ranking(&rows, "20240104", &[0.5, 0.3, 0.2])
+            .expect("convolution ranking should build");
+
+        assert_eq!(ranking.len(), 3);
+        assert_eq!(ranking[0].ts_code, "000002.SZ");
+        assert_eq!(ranking[0].raw_rank, 2);
+        assert_eq!(ranking[0].convolution_rank, 1);
+        assert_eq!(ranking[0].rank_change, 1);
+        assert!((ranking[0].convolved_score - 60.0).abs() < 1e-9);
+        assert_eq!(ranking[1].ts_code, "000001.SZ");
+        assert_eq!(ranking[1].raw_rank, 1);
+        assert_eq!(ranking[1].rank_change, -1);
+        assert!((ranking[1].convolved_score - 50.0).abs() < 1e-9);
+        assert_eq!(ranking[1].score_history, vec![0.0, 0.0, 100.0]);
+    }
+
+    #[test]
+    fn convolution_ranking_normalizes_kernel_and_rejects_negative_weights() {
+        let rows = ["20240102", "20240103", "20240104"]
+            .into_iter()
+            .map(|trade_date| ScoreSummary {
+                ts_code: "000001.SZ".to_string(),
+                trade_date: trade_date.to_string(),
+                total_score: 10.0,
+                rank: Some(1),
+            })
+            .collect::<Vec<_>>();
+
+        let ranking = calc_convolution_ranking(&rows, "20240104", &[5.0, 3.0, 2.0])
+            .expect("kernel should be normalized");
+        assert!((ranking[0].convolved_score - 10.0).abs() < 1e-9);
+        assert!(calc_convolution_ranking(&rows, "20240104", &[1.0, -0.1]).is_err());
+    }
+
+    #[test]
+    fn default_convolution_kernel_is_normalized_h30_l50() {
+        let kernel = default_convolution_kernel();
+        assert_eq!(kernel.len(), 30);
+        assert!((kernel.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        assert!(kernel[0] > kernel[1]);
+        assert!(kernel[1] > kernel[2]);
+        assert!(kernel[2] > kernel[3]);
+        assert!(
+            kernel[3..]
+                .windows(2)
+                .all(|window| (window[0] - window[1]).abs() < 1e-12)
+        );
     }
 
     #[test]

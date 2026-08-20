@@ -87,6 +87,7 @@ pub struct RankComputeStatus {
     pub strategy_path: String,
     pub source_db: RankComputeDbRange,
     pub result_db: RankComputeDbRange,
+    pub convolution_rank_db: RankComputeDbRange,
     pub result_db_continuity: RankComputeResultContinuity,
     pub cyq_db: RankComputeDbRange,
     pub cyq_bin_row_count: u64,
@@ -560,6 +561,8 @@ fn get_rank_compute_status_inner(
     let cyq_chen_db = cyq_chen_db_path(source_path);
     let source_db_range = query_trade_date_range(&source_db, "stock_data.db", "stock_data")?;
     let result_db_range = query_trade_date_range(&result_db, "scoring_result.db", "score_summary")?;
+    let convolution_rank_db_range =
+        query_trade_date_range(&result_db, "scoring_result.db", "convolution_rank")?;
     let result_db_continuity = check_result_db_continuity(source_path, &result_db_range)?;
     let cyq_db_range = query_trade_date_range(&cyq_db, "cyq.db", "cyq_snapshot")?;
     let cyq_bin_row_count = query_table_row_count(&cyq_db, "cyq.db", "cyq_bin")?;
@@ -590,6 +593,7 @@ fn get_rank_compute_status_inner(
         strategy_path: normalize_strategy_path(source_path, strategy_path),
         source_db: source_db_range,
         result_db: result_db_range,
+        convolution_rank_db: convolution_rank_db_range,
         result_db_continuity,
         cyq_db: cyq_db_range,
         cyq_bin_row_count,

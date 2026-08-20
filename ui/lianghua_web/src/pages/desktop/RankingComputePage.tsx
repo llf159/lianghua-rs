@@ -19,6 +19,7 @@ import {
   runConceptPerformanceCompute,
   runCyqChenCompute,
   runCyqCompute,
+  runConvolutionRankCompute,
   runRankingScoreCalculation,
   type RankComputeDbRange,
   type RankComputeResultContinuity,
@@ -51,13 +52,14 @@ type BusyAction =
   | 'idle'
   | 'loading'
   | 'computing'
+  | 'convolution-computing'
   | 'recomputing-result-db'
   | 'cyq-computing'
   | 'cyq-chen-computing'
   | 'deleting-cyq-chen-db'
   | 'indicator-running'
 type IndicatorEditorMode = 'create' | 'edit'
-type FeedbackSlot = 'status' | 'rank' | 'otherData' | 'cyq' | 'cyqChen' | 'indicatorTask'
+type FeedbackSlot = 'status' | 'rank' | 'convolutionRank' | 'otherData' | 'cyq' | 'cyqChen' | 'indicatorTask'
 type CardFeedback = Record<FeedbackSlot, { notice: string; error: string }>
 type PendingConfirmState =
   | { kind: 'delete-indicator'; item: IndicatorManageItem }
@@ -70,6 +72,7 @@ function createEmptyCardFeedback(): CardFeedback {
   return {
     status: { notice: '', error: '' },
     rank: { notice: '', error: '' },
+    convolutionRank: { notice: '', error: '' },
     otherData: { notice: '', error: '' },
     cyq: { notice: '', error: '' },
     cyqChen: { notice: '', error: '' },
@@ -227,6 +230,8 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
   const [busyAction, setBusyAction] = useState<BusyAction>('loading')
   const [startDateInput, setStartDateInput] = useState('')
   const [endDateInput, setEndDateInput] = useState('')
+  const [convolutionStartDateInput, setConvolutionStartDateInput] = useState('')
+  const [convolutionEndDateInput, setConvolutionEndDateInput] = useState('')
   const [cyqFactorInput, setCyqFactorInput] = useState('50')
   const [cyqStartDateInput, setCyqStartDateInput] = useState('')
   const [cyqEndDateInput, setCyqEndDateInput] = useState('')
@@ -567,6 +572,16 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
           ? compactDateToInput(nextStatus.suggestedEndDate)
           : current || compactDateToInput(nextStatus.suggestedEndDate),
       )
+      setConvolutionStartDateInput((current) =>
+        syncSuggestedInputs
+          ? compactDateToInput(nextStatus.resultDb.minTradeDate)
+          : current || compactDateToInput(nextStatus.resultDb.minTradeDate),
+      )
+      setConvolutionEndDateInput((current) =>
+        syncSuggestedInputs
+          ? compactDateToInput(nextStatus.resultDb.maxTradeDate)
+          : current || compactDateToInput(nextStatus.resultDb.maxTradeDate),
+      )
       setCyqFactorInput((current) =>
         current.trim() !== '' ? current : String(nextStatus.cyqFactor ?? 50),
       )
@@ -806,6 +821,35 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
       await runRankingComputeForRange(startDate, endDate)
     } catch (actionError) {
       setFeedbackError('rank', `排名计算失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  async function onRunConvolutionRankCompute() {
+    if (!sourcePath) {
+      setFeedbackError('convolutionRank', '当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    const startDate = inputDateToCompact(convolutionStartDateInput)
+    const endDate = inputDateToCompact(convolutionEndDateInput)
+    if (!startDate || !endDate) {
+      setFeedbackError('convolutionRank', '请先输入开始日期和结束日期。')
+      return
+    }
+
+    setBusyAction('convolution-computing')
+    clearFeedback('convolutionRank')
+    try {
+      const result = await runConvolutionRankCompute(sourcePath, startDate, endDate)
+      setFeedbackNotice(
+        'convolutionRank',
+        `卷积排名计算完成：${result.kernelName}，${result.tradeDates} 个交易日，写入 ${result.savedRows} 行，耗时 ${formatElapsedMs(result.elapsedMs)}。`,
+      )
+      await loadStatus({ preserveNotice: true })
+    } catch (actionError) {
+      setFeedbackError('convolutionRank', `卷积排名计算失败: ${String(actionError)}`)
     } finally {
       setBusyAction('idle')
     }
@@ -1167,6 +1211,51 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
         ) : null}
 
         {renderCardFeedback('rank')}
+      </section>
+
+      <section className="ranking-compute-card">
+        <div className="ranking-compute-summary">
+          <div className="ranking-compute-summary-item">
+            <span>卷积排名计算</span>
+            <strong>convolution_rank · H30-L50</strong>
+            <small>
+              50% 三日快核 + 50% 三十日均值；当前结果：{describeDbRange(status?.convolutionRankDb)}。
+            </small>
+          </div>
+        </div>
+
+        <div className="ranking-compute-form">
+          <label className="ranking-compute-field">
+            <span>开始日期</span>
+            <input
+              type="date"
+              value={convolutionStartDateInput}
+              onChange={(event) => setConvolutionStartDateInput(event.target.value)}
+            />
+          </label>
+
+          <label className="ranking-compute-field">
+            <span>结束日期</span>
+            <input
+              type="date"
+              value={convolutionEndDateInput}
+              onChange={(event) => setConvolutionEndDateInput(event.target.value)}
+            />
+          </label>
+
+          <div className="ranking-compute-actions">
+            <button
+              className="ranking-compute-primary-btn"
+              type="button"
+              onClick={() => void onRunConvolutionRankCompute()}
+              disabled={isBusy || sourcePath === '' || !status?.resultDb.minTradeDate}
+            >
+              {busyAction === 'convolution-computing' ? '计算中...' : '计算卷积排名'}
+            </button>
+          </div>
+        </div>
+
+        {renderCardFeedback('convolutionRank')}
       </section>
 
       <section className="ranking-compute-card">

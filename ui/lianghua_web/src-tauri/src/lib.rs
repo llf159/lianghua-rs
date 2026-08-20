@@ -59,6 +59,11 @@ use lianghua_rs::ui_tools::{
         run_concept_stock_pick as core_run_concept_stock_pick,
         StockPickResultData as ConceptStockPickResultData,
     },
+    convolution_rank::{
+        get_convolution_rank_page as core_get_convolution_rank_page,
+        run_convolution_rank_compute as core_run_convolution_rank_compute,
+        ConvolutionRankComputeResult, ConvolutionRankPageData,
+    },
     cyq_chen::{
         activate_cyq_chen_strategy_backup as core_activate_cyq_chen_strategy_backup,
         auto_backup_cyq_chen_strategy_file_on_entry as core_auto_backup_cyq_chen_strategy_file_on_entry,
@@ -581,6 +586,40 @@ fn get_rank_overview_page(
         total_mv_min,
         total_mv_max,
     )
+}
+
+#[tauri::command]
+fn get_convolution_rank_page(
+    source_path: String,
+    trade_date: Option<String>,
+    limit: Option<u32>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
+    total_mv_min: Option<f64>,
+    total_mv_max: Option<f64>,
+) -> Result<ConvolutionRankPageData, String> {
+    core_get_convolution_rank_page(
+        source_path,
+        trade_date,
+        limit,
+        board,
+        exclude_st_board,
+        total_mv_min,
+        total_mv_max,
+    )
+}
+
+#[tauri::command]
+async fn run_convolution_rank_compute(
+    source_path: String,
+    start_date: String,
+    end_date: String,
+) -> Result<ConvolutionRankComputeResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_run_convolution_rank_compute(&source_path, &start_date, &end_date)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2385,6 +2424,8 @@ pub fn run() {
             get_rank_overview,
             get_rank_trade_date_options,
             get_rank_overview_page,
+            get_convolution_rank_page,
+            run_convolution_rank_compute,
             get_scene_rank_trade_date_options,
             get_scene_rank_overview_page,
             get_intraday_monitor_page,
