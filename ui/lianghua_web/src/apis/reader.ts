@@ -46,6 +46,41 @@ export type OverviewPageData = {
   resolved_ref_date?: string;
 };
 
+export type ConvolutionRankRow = {
+  ts_code: string;
+  name: string;
+  board: string;
+  concept: string;
+  total_mv_yi?: number | null;
+  trade_date: string;
+  database_rank?: number | null;
+  raw_rank: number;
+  convolution_rank: number;
+  rank_change: number;
+  raw_score: number;
+  convolution_score: number;
+  score_history: number[];
+};
+
+export type ConvolutionRankPageQuery = {
+  sourcePath: string;
+  tradeDate?: string;
+  limit?: number;
+  board?: string;
+  excludeStBoard?: boolean;
+  totalMvMin?: number;
+  totalMvMax?: number;
+};
+
+export type ConvolutionRankPageData = {
+  rows: ConvolutionRankRow[];
+  resolved_trade_date: string;
+  kernel_name: string;
+  kernel: number[];
+  history_trade_dates: string[];
+  universe_size: number;
+};
+
 export type SceneOverviewRow = {
   ts_code: string;
   trade_date?: string;
@@ -257,6 +292,10 @@ export async function rankOverview(query: OverviewQuery) {
 
 export async function rankOverviewPage(query: OverviewPageQuery) {
   return invoke<OverviewPageData>("get_rank_overview_page", query);
+}
+
+export async function convolutionRankPage(query: ConvolutionRankPageQuery) {
+  return invoke<ConvolutionRankPageData>("get_convolution_rank_page", query);
 }
 
 export async function listRankTradeDates(sourcePath: string) {

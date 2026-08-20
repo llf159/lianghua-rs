@@ -10,6 +10,7 @@ const menuList = [
 
 const overviewSubRoutes = [
   { path: '/overview/raw', label: '原始排名' },
+  { path: '/overview/convolution', label: '卷积排名' },
   { path: '/overview/scene', label: '场景排名' },
 ]
 

@@ -11,6 +11,7 @@ import DownloadComputePage from './pages/desktop/DownloadComputePage'
 import DataImportPage from './pages/desktop/DataImportPage'
 import DataViewerPage from './pages/desktop/DataViewerPage'
 import DetailsLinkedPage from './pages/desktop/DetailsLinkedPage'
+import OverviewConvolutionPage from './pages/desktop/OverviewConvolutionPage'
 import OverviewScenePage from './pages/desktop/OverviewScenePage'
 import OverviewRawPage from './pages/desktop/OverviewRawPage'
 import RankingOverviewPage from './pages/desktop/RankingOverviewPage'
@@ -60,6 +61,7 @@ function AppRoutes() {
           <Route path="overview" element={<RankingOverviewPage />}>
             <Route index element={<Navigate to="/overview/raw" replace />} />
             <Route path="raw" element={<OverviewRawPage />} />
+            <Route path="convolution" element={<OverviewConvolutionPage />} />
             <Route path="scene" element={<OverviewScenePage />} />
           </Route>
           <Route path="details" element={<LegacyDetailsRedirect />} />
