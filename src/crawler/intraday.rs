@@ -10,7 +10,8 @@ const TENCENT_INTRADAY_URL: &str = "https://web.ifzq.gtimg.cn/appstock/app/minut
 /// 腾讯当日分时接口的一分钟数据。
 ///
 /// 腾讯返回的成交量和成交额是开盘以来的累计值。这里同时提供由相邻记录
-/// 计算出的单分钟增量，成交量单位与项目里的实时行情保持一致，均为“手”。
+/// 计算出的单分钟增量。腾讯在不同市场返回的成交量单位可能是“手”或“股”，
+/// 因此成交均价会根据首个有效分时点自动判断单位。
 #[derive(Debug, Clone, Serialize)]
 pub struct TencentIntradayPoint {
     pub time: String,
@@ -108,10 +109,32 @@ fn parse_non_negative_f64(raw: &str, field_name: &str, row: &str) -> Result<f64,
     Ok(value)
 }
 
+const MAX_REASONABLE_AVERAGE_PRICE_DEVIATION_RATIO: f64 = 0.5;
+
+fn infer_shares_per_volume_unit(price: f64, cumulative_vol: f64, cumulative_amount: f64) -> f64 {
+    if price <= 0.0 || cumulative_vol <= 0.0 || cumulative_amount <= 0.0 {
+        return 100.0;
+    }
+
+    let hand_average_price = cumulative_amount / (cumulative_vol * 100.0);
+    let share_average_price = cumulative_amount / cumulative_vol;
+    let hand_deviation = (hand_average_price - price).abs() / price;
+    let share_deviation = (share_average_price - price).abs() / price;
+
+    if hand_deviation > MAX_REASONABLE_AVERAGE_PRICE_DEVIATION_RATIO
+        && share_deviation < hand_deviation
+    {
+        1.0
+    } else {
+        100.0
+    }
+}
+
 fn parse_intraday_points(rows: &[String]) -> Result<Vec<TencentIntradayPoint>, String> {
     let mut points = Vec::with_capacity(rows.len());
     let mut previous_vol = 0.0;
     let mut previous_amount = 0.0;
+    let mut shares_per_volume_unit = None;
 
     for row in rows {
         let fields = row.split_whitespace().collect::<Vec<_>>();
@@ -131,7 +154,10 @@ fn parse_intraday_points(rows: &[String]) -> Result<Vec<TencentIntradayPoint>, S
         let vol = cumulative_vol - previous_vol;
         let amount = cumulative_amount - previous_amount;
         let average_price = if cumulative_vol > 0.0 {
-            Some(cumulative_amount / (cumulative_vol * 100.0))
+            let unit = *shares_per_volume_unit.get_or_insert_with(|| {
+                infer_shares_per_volume_unit(price, cumulative_vol, cumulative_amount)
+            });
+            Some(cumulative_amount / (cumulative_vol * unit))
         } else {
             None
         };
@@ -340,6 +366,38 @@ mod tests {
         assert_close(
             data.points[1].average_price.unwrap(),
             11.325_509_049_773_755,
+        );
+    }
+
+    #[test]
+    fn corrects_average_price_when_volume_is_reported_in_shares() {
+        let raw = r#"{
+            "code": 0,
+            "data": {
+                "sh688185": {
+                    "data": {
+                        "data": [
+                            "0930 70.06 1457695 102126112.00",
+                            "0931 70.50 1600000 112500000.00"
+                        ],
+                        "date": "20260821"
+                    }
+                }
+            }
+        }"#;
+        let data = parse_tencent_intraday_text(raw, "688185.SH")
+            .expect("share-volume payload should parse");
+
+        assert_close(data.points[0].average_price.unwrap(), 70.060_000_205_804_37);
+        assert_close(data.points[1].average_price.unwrap(), 70.3125);
+        assert_eq!(data.points[1].vol, 142305.0);
+    }
+
+    #[test]
+    fn keeps_hand_unit_when_average_price_is_reasonable() {
+        assert_eq!(
+            infer_shares_per_volume_unit(11.31, 2670.0, 3019770.0),
+            100.0
         );
     }
 
