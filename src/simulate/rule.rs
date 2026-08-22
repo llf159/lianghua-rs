@@ -1,5 +1,8 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, HashMap, HashSet},
+};
 
 use duckdb::{Connection, params_from_iter};
 use rayon::prelude::*;
@@ -154,6 +157,27 @@ pub struct RuleLayerMetricsWithTriggeredSamples {
     pub triggered_samples: Vec<RuleLayerSamplePoint>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleLayerDailyScoreGroup {
+    pub score: f64,
+    pub sample_count: usize,
+    pub avg_residual_return: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleLayerDailyScoreLayers {
+    pub trade_date: String,
+    pub groups: Vec<RuleLayerDailyScoreGroup>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleLayerMetricsWithValidation {
+    pub metrics: RuleLayerMetrics,
+    pub triggered_samples: Vec<RuleLayerSamplePoint>,
+    pub daily_score_layers: Vec<RuleLayerDailyScoreLayers>,
+    pub return_distribution_counts: [usize; 7],
+}
+
 #[derive(Debug, Clone)]
 pub struct RuleLayerRuntimeCache {
     day_groups: Vec<RuleDayGroup>,
@@ -191,12 +215,15 @@ struct RuleLayerCollectOptions {
     metrics: bool,
     all_samples: bool,
     triggered_samples: bool,
+    validation_details: bool,
 }
 
 struct RuleLayerComputation {
     metrics: RuleLayerMetrics,
     all_samples: Vec<RuleLayerSamplePoint>,
     triggered_samples: Vec<RuleLayerSamplePoint>,
+    daily_score_layers: Vec<RuleLayerDailyScoreLayers>,
+    return_distribution_counts: [usize; 7],
 }
 
 type TriggeredScoreMap = HashMap<String, HashMap<String, f64>>;
@@ -475,6 +502,89 @@ where
     Ok(out)
 }
 
+pub fn calc_all_rule_layer_metrics_with_validation_from_db_map_with_ts_filter<T, F>(
+    source_conn: &Connection,
+    source_dir: &str,
+    rule_names: &[String],
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+    allowed_ts_codes: Option<&HashSet<String>>,
+    parallel_batch_size: usize,
+    map_result: F,
+) -> Result<Vec<T>, String>
+where
+    T: Send,
+    F: Fn(&str, RuleLayerMetricsWithValidation) -> Result<T, String> + Sync,
+{
+    validate_rule_common_input(
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+
+    if rule_names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let runtime_cache = build_rule_layer_runtime_cache_with_ts_filter(
+        source_conn,
+        source_dir,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+        allowed_ts_codes,
+    )?;
+    let triggered_score_map_by_rule = load_triggered_score_maps_for_names_filtered(
+        source_dir,
+        rule_names,
+        start_date,
+        end_date,
+        allowed_ts_codes,
+    )?;
+
+    let mut grouped_results = Vec::with_capacity(rule_names.len());
+    for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
+        let mut batch_results: Vec<Result<T, String>> = rule_batch
+            .par_iter()
+            .map(|rule_name| {
+                let empty_triggered_score_map = TriggeredScoreMap::new();
+                let triggered_score_map = triggered_score_map_by_rule
+                    .get(rule_name)
+                    .unwrap_or(&empty_triggered_score_map);
+                let metrics = calc_rule_layer_metrics_with_validation_from_cache(
+                    &runtime_cache,
+                    triggered_score_map,
+                    layer_config,
+                )?;
+                map_result(rule_name, metrics)
+            })
+            .collect();
+        grouped_results.append(&mut batch_results);
+    }
+
+    let mut out = Vec::with_capacity(grouped_results.len());
+    for item in grouped_results {
+        out.push(item?);
+    }
+    Ok(out)
+}
+
 pub fn calc_all_rule_layer_metrics_from_rows(
     source_conn: &Connection,
     source_dir: &str,
@@ -665,6 +775,89 @@ where
         out.push(item?);
     }
 
+    Ok(out)
+}
+
+pub fn calc_all_rule_layer_metrics_with_validation_from_rows_map<T, F>(
+    source_conn: &Connection,
+    source_dir: &str,
+    rule_names: &[String],
+    score_summary_rows: &[ScoreSummary],
+    score_detail_rows: &[ScoreDetails],
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+    parallel_batch_size: usize,
+    map_result: F,
+) -> Result<Vec<T>, String>
+where
+    T: Send,
+    F: Fn(&str, RuleLayerMetricsWithValidation) -> Result<T, String> + Sync,
+{
+    validate_rule_common_input(
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+
+    if rule_names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let runtime_cache = build_rule_layer_runtime_cache_from_summary_rows(
+        source_conn,
+        source_dir,
+        score_summary_rows,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+    let triggered_score_map_by_rule = build_triggered_score_maps_from_detail_rows(
+        rule_names,
+        score_detail_rows,
+        start_date,
+        end_date,
+    );
+
+    let mut grouped_results = Vec::with_capacity(rule_names.len());
+    for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
+        let mut batch_results: Vec<Result<T, String>> = rule_batch
+            .par_iter()
+            .map(|rule_name| {
+                let empty_triggered_score_map = TriggeredScoreMap::new();
+                let triggered_score_map = triggered_score_map_by_rule
+                    .get(rule_name)
+                    .unwrap_or(&empty_triggered_score_map);
+                let metrics = calc_rule_layer_metrics_with_validation_from_cache(
+                    &runtime_cache,
+                    triggered_score_map,
+                    layer_config,
+                )?;
+                map_result(rule_name, metrics)
+            })
+            .collect();
+        grouped_results.append(&mut batch_results);
+    }
+
+    let mut out = Vec::with_capacity(grouped_results.len());
+    for item in grouped_results {
+        out.push(item?);
+    }
     Ok(out)
 }
 
@@ -1057,6 +1250,7 @@ pub fn calc_rule_layer_metrics_with_samples_from_cache(
             metrics: true,
             all_samples: true,
             triggered_samples: false,
+            validation_details: false,
         },
     )?;
 
@@ -1079,12 +1273,38 @@ pub fn calc_rule_layer_metrics_with_triggered_samples_from_cache(
             metrics: true,
             all_samples: false,
             triggered_samples: true,
+            validation_details: false,
         },
     )?;
 
     Ok(RuleLayerMetricsWithTriggeredSamples {
         metrics: computation.metrics,
         triggered_samples: computation.triggered_samples,
+    })
+}
+
+pub fn calc_rule_layer_metrics_with_validation_from_cache(
+    runtime_cache: &RuleLayerRuntimeCache,
+    triggered_score_map: &HashMap<String, HashMap<String, f64>>,
+    layer_config: &RuleLayerConfig,
+) -> Result<RuleLayerMetricsWithValidation, String> {
+    let computation = compute_rule_layer_from_day_groups(
+        &runtime_cache.day_groups,
+        Some(triggered_score_map),
+        layer_config,
+        RuleLayerCollectOptions {
+            metrics: true,
+            all_samples: false,
+            triggered_samples: false,
+            validation_details: true,
+        },
+    )?;
+
+    Ok(RuleLayerMetricsWithValidation {
+        metrics: computation.metrics,
+        triggered_samples: computation.triggered_samples,
+        daily_score_layers: computation.daily_score_layers,
+        return_distribution_counts: computation.return_distribution_counts,
     })
 }
 
@@ -1101,6 +1321,7 @@ pub fn calc_rule_layer_metrics_from_cache(
             metrics: true,
             all_samples: false,
             triggered_samples: false,
+            validation_details: false,
         },
     )?
     .metrics)
@@ -1156,6 +1377,7 @@ pub fn collect_triggered_rule_samples_from_cache(
             metrics: false,
             all_samples: false,
             triggered_samples: true,
+            validation_details: false,
         },
     )
     .map(|computation| computation.triggered_samples)
@@ -1175,6 +1397,7 @@ pub fn collect_all_rule_samples_from_cache(
             metrics: false,
             all_samples: true,
             triggered_samples: false,
+            validation_details: false,
         },
     )?
     .all_samples)
@@ -1313,6 +1536,8 @@ fn compute_rule_layer_from_day_groups(
             metrics: empty_metrics(),
             all_samples: Vec::new(),
             triggered_samples: Vec::new(),
+            daily_score_layers: Vec::new(),
+            return_distribution_counts: [0; 7],
         });
     }
 
@@ -1360,6 +1585,8 @@ fn compute_rule_layer_from_day_groups(
         },
         all_samples: accum.all_samples,
         triggered_samples: accum.triggered_samples,
+        daily_score_layers: accum.daily_score_layers,
+        return_distribution_counts: accum.return_distribution_counts,
     })
 }
 
@@ -1375,6 +1602,8 @@ struct DayGroupsFoldAccum {
     ic_values: Vec<f64>,
     all_samples: Vec<RuleLayerSamplePoint>,
     triggered_samples: Vec<RuleLayerSamplePoint>,
+    daily_score_layers: Vec<RuleLayerDailyScoreLayers>,
+    return_distribution_counts: [usize; 7],
 }
 
 impl DayGroupsFoldAccum {
@@ -1386,6 +1615,7 @@ impl DayGroupsFoldAccum {
         collect_options: RuleLayerCollectOptions,
     ) {
         let collect_metrics = collect_options.metrics;
+        let collect_validation_details = collect_options.validation_details;
         let cap = day_group.samples.len();
         let mut rule_scores: Vec<f64> = if collect_metrics {
             Vec::with_capacity(cap)
@@ -1420,6 +1650,12 @@ impl DayGroupsFoldAccum {
                 residuals.push(sample.residual_return);
             }
 
+            if collect_validation_details
+                && let Some(bucket_index) = return_distribution_bucket(sample.residual_return)
+            {
+                self.return_distribution_counts[bucket_index] += 1;
+            }
+
             if let Some(rule_score) = triggered_score {
                 if collect_metrics {
                     triggered_residuals.push(sample.residual_return);
@@ -1428,7 +1664,7 @@ impl DayGroupsFoldAccum {
                     }
                 }
 
-                if collect_options.triggered_samples {
+                if collect_options.triggered_samples || collect_validation_details {
                     self.triggered_samples.push(RuleLayerSamplePoint {
                         ts_code: String::from(&*sample.ts_code),
                         trade_date: String::from(&*day_group.trade_date),
@@ -1486,6 +1722,13 @@ impl DayGroupsFoldAccum {
                 top_bottom_spread,
                 ic,
             });
+            if collect_validation_details {
+                self.daily_score_layers.push(build_daily_score_layers(
+                    day_group.trade_date.as_ref(),
+                    &rule_scores,
+                    &residuals,
+                ));
+            }
         }
     }
 
@@ -1500,6 +1743,75 @@ impl DayGroupsFoldAccum {
         self.ic_values.extend(other.ic_values);
         self.all_samples.extend(other.all_samples);
         self.triggered_samples.extend(other.triggered_samples);
+        self.daily_score_layers.extend(other.daily_score_layers);
+        for (count, other_count) in self
+            .return_distribution_counts
+            .iter_mut()
+            .zip(other.return_distribution_counts)
+        {
+            *count += other_count;
+        }
+    }
+}
+
+fn return_distribution_bucket(residual_return: f64) -> Option<usize> {
+    if !residual_return.is_finite() {
+        return None;
+    }
+    Some(if residual_return <= -10.0 {
+        0
+    } else if residual_return <= -5.0 {
+        1
+    } else if residual_return <= -2.0 {
+        2
+    } else if residual_return <= 2.0 {
+        3
+    } else if residual_return <= 5.0 {
+        4
+    } else if residual_return <= 10.0 {
+        5
+    } else {
+        6
+    })
+}
+
+fn build_daily_score_layers(
+    trade_date: &str,
+    rule_scores: &[f64],
+    residuals: &[f64],
+) -> RuleLayerDailyScoreLayers {
+    let mut ordered = rule_scores
+        .iter()
+        .zip(residuals)
+        .map(|(score, residual_return)| {
+            let score = if score.abs() < EPS { 0.0 } else { *score };
+            (score, *residual_return)
+        })
+        .collect::<Vec<_>>();
+    ordered.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(Ordering::Equal));
+
+    let mut groups = Vec::new();
+    let mut index = 0usize;
+    while index < ordered.len() {
+        let score = ordered[index].0;
+        let score_bits = score.to_bits();
+        let mut residual_sum = 0.0;
+        let mut sample_count = 0usize;
+        while index < ordered.len() && ordered[index].0.to_bits() == score_bits {
+            residual_sum += ordered[index].1;
+            sample_count += 1;
+            index += 1;
+        }
+        groups.push(RuleLayerDailyScoreGroup {
+            score,
+            sample_count,
+            avg_residual_return: residual_sum / sample_count as f64,
+        });
+    }
+
+    RuleLayerDailyScoreLayers {
+        trade_date: trade_date.to_string(),
+        groups,
     }
 }
 
@@ -2550,6 +2862,7 @@ mod tests {
         calc_rule_layer_metrics_from_cache, calc_rule_layer_metrics_from_db,
         calc_rule_layer_metrics_with_samples_from_cache,
         calc_rule_layer_metrics_with_triggered_samples_from_cache,
+        calc_rule_layer_metrics_with_validation_from_cache,
         collect_triggered_rule_samples_from_cache,
     };
 
@@ -3187,10 +3500,21 @@ mod tests {
             },
         )
         .expect("compute triggered samples");
+        let validation = calc_rule_layer_metrics_with_validation_from_cache(
+            &runtime_cache,
+            &triggered_score_map,
+            &RuleLayerConfig {
+                min_samples_per_day: 1,
+                backtest_period: 1,
+                min_listed_trade_days: 0,
+            },
+        )
+        .expect("compute validation aggregates");
         let collected_triggered =
             collect_triggered_rule_samples_from_cache(&runtime_cache, &triggered_score_map);
 
         assert_eq!(full_samples.metrics, triggered_samples.metrics);
+        assert_eq!(full_samples.metrics, validation.metrics);
         assert_eq!(full_samples.metrics.points.len(), 2);
         assert_eq!(full_samples.metrics.points[0].trade_date, "20240102");
         assert_eq!(full_samples.metrics.points[0].sample_count, 2);
@@ -3231,6 +3555,21 @@ mod tests {
 
         assert_eq!(triggered_samples.triggered_samples.len(), 1);
         assert_eq!(triggered_samples.triggered_samples, collected_triggered);
+        assert_eq!(validation.triggered_samples, collected_triggered);
+        assert_eq!(validation.daily_score_layers.len(), 2);
+        assert_eq!(validation.daily_score_layers[0].trade_date, "20240102");
+        assert_eq!(validation.daily_score_layers[0].groups.len(), 2);
+        assert_eq!(validation.daily_score_layers[0].groups[0].score, 0.0);
+        assert_eq!(validation.daily_score_layers[0].groups[0].sample_count, 1);
+        assert_eq!(validation.daily_score_layers[0].groups[1].score, 1.5);
+        assert_eq!(validation.daily_score_layers[0].groups[1].sample_count, 1);
+        assert_eq!(validation.daily_score_layers[1].groups.len(), 1);
+        assert_eq!(validation.daily_score_layers[1].groups[0].score, 0.0);
+        assert_eq!(validation.daily_score_layers[1].groups[0].sample_count, 2);
+        assert_eq!(
+            validation.return_distribution_counts.iter().sum::<usize>(),
+            4
+        );
         assert_eq!(triggered_samples.triggered_samples[0].ts_code, "000001.SZ");
         assert_eq!(
             triggered_samples.triggered_samples[0].trade_date,
