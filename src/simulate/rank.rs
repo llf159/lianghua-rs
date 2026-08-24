@@ -17,6 +17,18 @@ const DEFAULT_TOP_KS: [usize; 4] = [1, 5, 20, 100];
 
 pub const DEFAULT_CONVOLUTION_KERNEL_NAME: &str = "H30-L50";
 pub const DEFAULT_CONVOLUTION_WINDOW: usize = 30;
+/// 卷积分数在该精度内视为并列，再用股票代码稳定排序。
+///
+/// SQL 的滚动和与 Rust 的逐项乘加可能仅因浮点加法顺序产生约 1e-14
+/// 的差异。统一量化排序键可让即时计算与落盘计算得到相同名次，同时
+/// 保留完整精度的 `convolved_score` 用于展示和审计。
+pub const CONVOLUTION_RANK_SCORE_DECIMALS: u32 = 10;
+
+#[inline]
+fn convolution_rank_sort_key(score: f64) -> f64 {
+    let scale = 10_f64.powi(CONVOLUTION_RANK_SCORE_DECIMALS as i32);
+    (score * scale).round()
+}
 
 /// 回测后选定的双尺度默认卷积核。
 ///
@@ -169,9 +181,8 @@ pub fn calc_convolution_ranking(
     }
 
     ranking.sort_by(|left, right| {
-        right
-            .convolved_score
-            .total_cmp(&left.convolved_score)
+        convolution_rank_sort_key(right.convolved_score)
+            .total_cmp(&convolution_rank_sort_key(left.convolved_score))
             .then_with(|| left.ts_code.cmp(&right.ts_code))
     });
     for (rank_index, row) in ranking.iter_mut().enumerate() {
@@ -494,9 +505,6 @@ fn calc_rank_layer_metrics_with_lookup(
 ) -> Result<RankLayerMetrics, String> {
     config.validate()?;
 
-    let (top_k_summaries, top_k_period_summaries) =
-        calc_rank_top_k_summaries(samples, config, rank_lookup);
-
     let mut grouped_by_day: BTreeMap<&str, Vec<&RuleLayerSamplePoint>> = BTreeMap::new();
     for sample in samples {
         let trade_date = sample.trade_date.trim();
@@ -536,6 +544,11 @@ fn calc_rank_layer_metrics_with_lookup(
     let mut layer_day_return_counts = vec![0usize; layer_count];
     let mut layer_sample_counts = vec![0usize; layer_count];
     let mut layer_samples = Vec::new();
+    let mut top_k_daily_points = DEFAULT_TOP_KS
+        .iter()
+        .copied()
+        .map(|top_k| (top_k, Vec::<RankTopKDailyPoint>::new()))
+        .collect::<BTreeMap<_, _>>();
 
     for day_result in day_results.into_iter().flatten() {
         if let Some(value) = day_result.point.top_bottom_spread {
@@ -557,8 +570,17 @@ fn calc_rank_layer_metrics_with_lookup(
             layer_sample_counts[index] += day_result.layer_sample_counts[index];
         }
         layer_samples.extend(day_result.layer_samples);
+        for (top_k, point) in day_result.top_k_daily_points {
+            top_k_daily_points
+                .get_mut(&top_k)
+                .expect("default Top-K bucket must exist")
+                .push(point);
+        }
         points.push(day_result.point);
     }
+
+    let (top_k_summaries, top_k_period_summaries) =
+        build_rank_top_k_summaries(top_k_daily_points, config.backtest_period);
 
     let ic_mean = mean(&ic_values);
     let ic_std = sample_std(&ic_values);
@@ -630,82 +652,83 @@ struct RankTopKDailyPoint {
     avg_residual_return: f64,
 }
 
-fn calc_rank_top_k_summaries(
-    samples: &[RuleLayerSamplePoint],
-    config: &RankLayerConfig,
+fn calc_rank_top_k_daily_points(
+    trade_date: &str,
+    day_samples: &[&RuleLayerSamplePoint],
     rank_lookup: Option<&RankLayerLookup>,
-) -> (Vec<RankTopKSummary>, Vec<RankTopKPeriodSummary>) {
-    let mut grouped_by_day: BTreeMap<&str, Vec<&RuleLayerSamplePoint>> = BTreeMap::new();
-    for sample in samples {
-        let trade_date = sample.trade_date.trim();
-        if trade_date.is_empty()
-            || !sample.rule_score.is_finite()
-            || !sample.residual_return.is_finite()
-        {
-            continue;
-        }
-        grouped_by_day.entry(trade_date).or_default().push(sample);
-    }
-
-    let mut daily_by_k = DEFAULT_TOP_KS
-        .iter()
-        .copied()
-        .map(|top_k| (top_k, Vec::<RankTopKDailyPoint>::new()))
-        .collect::<BTreeMap<_, _>>();
-    let min_samples_per_day = config.effective_min_samples_per_day();
-
-    for (trade_date, mut day_samples) in grouped_by_day {
-        if day_samples.len() < min_samples_per_day {
-            continue;
-        }
-        day_samples.sort_by(|left, right| {
-            let left_rank = rank_lookup.and_then(|lookup| {
-                lookup
-                    .sample_ranks
-                    .get(&left.ts_code)
-                    .and_then(|rows| rows.get(trade_date))
-                    .copied()
-            });
-            let right_rank = rank_lookup.and_then(|lookup| {
-                lookup
-                    .sample_ranks
-                    .get(&right.ts_code)
-                    .and_then(|rows| rows.get(trade_date))
-                    .copied()
-            });
-            match (left_rank, right_rank) {
-                (Some(a), Some(b)) => a.cmp(&b),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => right
-                    .rule_score
-                    .total_cmp(&left.rule_score)
-                    .then_with(|| left.ts_code.cmp(&right.ts_code)),
-            }
+) -> Vec<(usize, RankTopKDailyPoint)> {
+    let mut top_k_order = day_samples.iter().copied().enumerate().collect::<Vec<_>>();
+    let compare = |left: &(usize, &RuleLayerSamplePoint),
+                   right: &(usize, &RuleLayerSamplePoint)| {
+        let left_rank = rank_lookup.and_then(|lookup| {
+            lookup
+                .sample_ranks
+                .get(&left.1.ts_code)
+                .and_then(|rows| rows.get(trade_date))
+                .copied()
         });
+        let right_rank = rank_lookup.and_then(|lookup| {
+            lookup
+                .sample_ranks
+                .get(&right.1.ts_code)
+                .and_then(|rows| rows.get(trade_date))
+                .copied()
+        });
+        match (left_rank, right_rank) {
+            (Some(a), Some(b)) => a.cmp(&b).then_with(|| left.0.cmp(&right.0)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => right
+                .1
+                .rule_score
+                .total_cmp(&left.1.rule_score)
+                .then_with(|| left.1.ts_code.cmp(&right.1.ts_code))
+                .then_with(|| left.0.cmp(&right.0)),
+        }
+    };
 
-        for top_k in DEFAULT_TOP_KS {
-            let selected_count = top_k.min(day_samples.len());
+    // 指标最多只读取 Top100。股票数更大时先线性选择前 100，再只排序
+    // 这个小切片，避免为几千只股票执行不必要的完整 O(n log n) 排序。
+    let retained_count = DEFAULT_TOP_KS
+        .last()
+        .copied()
+        .unwrap_or(0)
+        .min(top_k_order.len());
+    if retained_count < top_k_order.len() {
+        top_k_order.select_nth_unstable_by(retained_count, &compare);
+        top_k_order.truncate(retained_count);
+    }
+    top_k_order.sort_by(compare);
+
+    DEFAULT_TOP_KS
+        .into_iter()
+        .filter_map(|top_k| {
+            let selected_count = top_k.min(top_k_order.len());
             if selected_count == 0 {
-                continue;
+                return None;
             }
-            let avg_residual_return = day_samples
+            let avg_residual_return = top_k_order
                 .iter()
                 .take(selected_count)
-                .map(|sample| sample.residual_return)
+                .map(|(_, sample)| sample.residual_return)
                 .sum::<f64>()
                 / selected_count as f64;
-            daily_by_k
-                .get_mut(&top_k)
-                .expect("default Top-K bucket must exist")
-                .push(RankTopKDailyPoint {
+            Some((
+                top_k,
+                RankTopKDailyPoint {
                     trade_date: trade_date.to_string(),
                     sample_count: selected_count,
                     avg_residual_return,
-                });
-        }
-    }
+                },
+            ))
+        })
+        .collect()
+}
 
+fn build_rank_top_k_summaries(
+    mut daily_by_k: BTreeMap<usize, Vec<RankTopKDailyPoint>>,
+    backtest_period: usize,
+) -> (Vec<RankTopKSummary>, Vec<RankTopKPeriodSummary>) {
     let mut summaries = Vec::with_capacity(DEFAULT_TOP_KS.len());
     let mut period_summaries = Vec::new();
     for top_k in DEFAULT_TOP_KS {
@@ -713,7 +736,7 @@ fn calc_rank_top_k_summaries(
         summaries.push(build_rank_top_k_summary(
             top_k,
             &daily_points,
-            config.backtest_period,
+            backtest_period,
         ));
 
         let mut by_period: BTreeMap<String, Vec<RankTopKDailyPoint>> = BTreeMap::new();
@@ -727,7 +750,7 @@ fn calc_rank_top_k_summaries(
             by_period.entry(period_label).or_default().push(point);
         }
         for (period_label, points) in by_period {
-            let summary = build_rank_top_k_summary(top_k, &points, config.backtest_period);
+            let summary = build_rank_top_k_summary(top_k, &points, backtest_period);
             period_summaries.push(RankTopKPeriodSummary {
                 period_label,
                 start_date: points
@@ -808,6 +831,7 @@ struct RankLayerDayResult {
     layer_avg_returns: Vec<Option<f64>>,
     layer_sample_counts: Vec<usize>,
     layer_samples: Vec<RankLayerSamplePoint>,
+    top_k_daily_points: Vec<(usize, RankTopKDailyPoint)>,
 }
 
 fn calc_rank_layer_day(
@@ -821,6 +845,10 @@ fn calc_rank_layer_day(
         return None;
     }
 
+    // Top-K 与分层指标共享同一份按日样本，并随每日分层任务一起并行计算。
+    // 两者的排序规则不同，因此仍各自排序，避免改变数据库排名优先的语义。
+    let top_k_daily_points = calc_rank_top_k_daily_points(trade_date, &day_samples, rank_lookup);
+
     let mut ordered = day_samples
         .iter()
         .map(|sample| (sample.rule_score, sample.residual_return))
@@ -831,6 +859,17 @@ fn calc_rank_layer_day(
             .0
             .partial_cmp(&right.1.0)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                if config.layer_method != RankLayerMethod::SampleCount {
+                    return std::cmp::Ordering::Equal;
+                }
+                // 数据库 rank=1 表示最高排名。总分从低到高分层时，同分股票按
+                // 数据库排名从低到高排列，因此较大的 rank 先进入低层。
+                let left_rank = sample_database_rank(trade_date, day_samples[left.0], rank_lookup);
+                let right_rank =
+                    sample_database_rank(trade_date, day_samples[right.0], rank_lookup);
+                right_rank.cmp(&left_rank)
+            })
             .then_with(|| left.0.cmp(&right.0))
     });
 
@@ -900,6 +939,7 @@ fn calc_rank_layer_day(
         layer_avg_returns,
         layer_sample_counts,
         layer_samples,
+        top_k_daily_points,
     })
 }
 
@@ -914,13 +954,9 @@ fn build_layer_sample_indices(
         RankLayerMethod::Score => {
             build_score_range_layer_sample_indices(ordered, config.layer_count)
         }
-        RankLayerMethod::SampleCount => build_sample_count_layer_sample_indices(
-            trade_date,
-            day_samples,
-            ordered,
-            config.layer_count,
-            rank_lookup,
-        ),
+        RankLayerMethod::SampleCount => {
+            build_sample_count_layer_sample_indices(ordered, config.layer_count)
+        }
         RankLayerMethod::Rank => build_rank_layer_sample_indices(
             trade_date,
             day_samples,
@@ -932,36 +968,16 @@ fn build_layer_sample_indices(
 }
 
 fn build_sample_count_layer_sample_indices(
-    trade_date: &str,
-    day_samples: &[&RuleLayerSamplePoint],
     ordered: &[(usize, (f64, f64))],
     layer_count: usize,
-    rank_lookup: Option<&RankLayerLookup>,
 ) -> Vec<Vec<usize>> {
     let mut layers = vec![Vec::new(); layer_count];
     if ordered.is_empty() || layer_count == 0 {
         return layers;
     }
 
-    let mut ranked = ordered.to_vec();
-    ranked.sort_by(|left, right| {
-        left.1
-            .0
-            .partial_cmp(&right.1.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                // 数据库 rank=1 表示最高排名。总分从低到高分层时，同分股票按
-                // 数据库排名从低到高排列，因此较大的 rank 先进入低层。
-                let left_rank = sample_database_rank(trade_date, day_samples[left.0], rank_lookup);
-                let right_rank =
-                    sample_database_rank(trade_date, day_samples[right.0], rank_lookup);
-                right_rank.cmp(&left_rank)
-            })
-            .then_with(|| left.0.cmp(&right.0))
-    });
-
-    for (ordered_index, (sample_index, _)) in ranked.iter().enumerate() {
-        let layer_index = ordered_index * layer_count / ranked.len();
+    for (ordered_index, (sample_index, _)) in ordered.iter().enumerate() {
+        let layer_index = ordered_index * layer_count / ordered.len();
         layers[layer_index].push(*sample_index);
     }
 
@@ -1332,6 +1348,30 @@ mod tests {
                 .windows(2)
                 .all(|window| (window[0] - window[1]).abs() < 1e-12)
         );
+    }
+
+    #[test]
+    fn convolution_ranking_treats_sub_precision_score_differences_as_ties() {
+        let rows = vec![
+            ScoreSummary {
+                ts_code: "000001.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                total_score: 10.0,
+                rank: None,
+            },
+            ScoreSummary {
+                ts_code: "000002.SZ".to_string(),
+                trade_date: "20240102".to_string(),
+                total_score: 10.0 + 1e-12,
+                rank: None,
+            },
+        ];
+
+        let ranking = calc_convolution_ranking(&rows, "20240102", &[1.0])
+            .expect("near-equal scores should rank");
+        assert_eq!(ranking[0].ts_code, "000001.SZ");
+        assert_eq!(ranking[1].ts_code, "000002.SZ");
+        assert!(ranking[1].convolved_score > ranking[0].convolved_score);
     }
 
     #[test]
@@ -1719,5 +1759,56 @@ mod tests {
                 .iter()
                 .any(|item| item.period_label == "2025" && item.top_k == 1)
         );
+    }
+
+    #[test]
+    fn rank_metrics_select_top_hundred_without_sorting_the_full_day() {
+        let trade_date = "20240102";
+        let samples = (1..=150)
+            .rev()
+            .map(|rank| RuleLayerSamplePoint {
+                ts_code: format!("{rank:06}.SZ"),
+                trade_date: trade_date.to_string(),
+                rule_score: (151 - rank) as f64,
+                residual_return: rank as f64,
+                er_change: 0.0,
+            })
+            .collect::<Vec<_>>();
+        let rank_lookup = RankLayerLookup {
+            sample_ranks: samples
+                .iter()
+                .map(|sample| {
+                    let rank = sample.residual_return as i64;
+                    (
+                        sample.ts_code.clone(),
+                        HashMap::from([(trade_date.to_string(), rank)]),
+                    )
+                })
+                .collect(),
+            day_max_ranks: HashMap::from([(trade_date.to_string(), 150)]),
+        };
+
+        let metrics = calc_rank_layer_metrics_with_lookup(
+            &samples,
+            &RankLayerConfig {
+                min_samples_per_day: 1,
+                backtest_period: 1,
+                min_listed_trade_days: 0,
+                layer_count: 5,
+                layer_method: RankLayerMethod::SampleCount,
+            },
+            Some(&rank_lookup),
+        )
+        .expect("rank metrics should build");
+
+        for (top_k, expected_avg) in [(1, 1.0), (5, 3.0), (20, 10.5), (100, 50.5)] {
+            let summary = metrics
+                .top_k_summaries
+                .iter()
+                .find(|summary| summary.top_k == top_k)
+                .expect("Top-K summary should exist");
+            assert_eq!(summary.sample_count, top_k);
+            assert_opt_close(summary.avg_daily_residual_return, Some(expected_avg));
+        }
     }
 }

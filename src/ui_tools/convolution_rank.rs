@@ -6,7 +6,8 @@ use serde::Serialize;
 use crate::{
     data::{result_db_path, scoring_data::ScoreSummary},
     simulate::rank::{
-        DEFAULT_CONVOLUTION_KERNEL_NAME, calc_convolution_ranking, default_convolution_kernel,
+        CONVOLUTION_RANK_SCORE_DECIMALS, DEFAULT_CONVOLUTION_KERNEL_NAME, calc_convolution_ranking,
+        default_convolution_kernel,
     },
     ui_tools::{
         build_concepts_map, build_name_map, build_total_mv_map, filter_mv, normalize_trade_date,
@@ -70,11 +71,11 @@ fn open_result_conn(source_path: &str) -> Result<Connection, String> {
     Connection::open(result_db_str).map_err(|e| format!("打开结果库失败: {e}"))
 }
 
-fn load_recent_score_rows(
+fn load_recent_trade_dates(
     conn: &Connection,
     target_date: &str,
     window_size: usize,
-) -> Result<(Vec<String>, Vec<ScoreSummary>), String> {
+) -> Result<Vec<String>, String> {
     let mut date_stmt = conn
         .prepare(
             r#"
@@ -104,22 +105,46 @@ fn load_recent_score_rows(
         ));
     }
 
-    let placeholders = std::iter::repeat_n("?", trade_dates.len())
+    Ok(trade_dates)
+}
+
+fn load_score_rows_for_dates(
+    conn: &Connection,
+    trade_dates: &[String],
+    stock_codes: Option<&[String]>,
+) -> Result<Vec<ScoreSummary>, String> {
+    if trade_dates.is_empty() || stock_codes.is_some_and(<[String]>::is_empty) {
+        return Ok(Vec::new());
+    }
+
+    let date_placeholders = std::iter::repeat_n("?", trade_dates.len())
         .collect::<Vec<_>>()
         .join(", ");
+    let stock_filter = stock_codes
+        .map(|codes| {
+            let placeholders = std::iter::repeat_n("?", codes.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" AND ts_code IN ({placeholders})")
+        })
+        .unwrap_or_default();
     let sql = format!(
         r#"
         SELECT ts_code, trade_date, TRY_CAST(total_score AS DOUBLE), rank
         FROM score_summary
-        WHERE trade_date IN ({placeholders})
+        WHERE trade_date IN ({date_placeholders}){stock_filter}
         ORDER BY trade_date ASC, ts_code ASC
         "#
     );
+    let mut query_params = trade_dates.iter().map(String::as_str).collect::<Vec<_>>();
+    if let Some(codes) = stock_codes {
+        query_params.extend(codes.iter().map(String::as_str));
+    }
     let mut score_stmt = conn
         .prepare(&sql)
         .map_err(|e| format!("预编译卷积评分查询失败: {e}"))?;
     let score_rows = score_stmt
-        .query_map(params_from_iter(trade_dates.iter()), |row| {
+        .query_map(params_from_iter(query_params), |row| {
             Ok(ScoreSummary {
                 ts_code: row.get(0)?,
                 trade_date: row.get(1)?,
@@ -132,14 +157,23 @@ fn load_recent_score_rows(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("读取卷积评分失败: {e}"))?;
 
+    Ok(score_rows)
+}
+
+#[cfg(test)]
+fn load_recent_score_rows(
+    conn: &Connection,
+    target_date: &str,
+    window_size: usize,
+) -> Result<(Vec<String>, Vec<ScoreSummary>), String> {
+    let trade_dates = load_recent_trade_dates(conn, target_date, window_size)?;
+    let score_rows = load_score_rows_for_dates(conn, &trade_dates, None)?;
     Ok((trade_dates, score_rows))
 }
 
 fn load_stored_convolution_ranking(
     conn: &Connection,
     target_date: &str,
-    history_trade_dates: &[String],
-    score_rows: &[ScoreSummary],
 ) -> Result<Option<Vec<crate::simulate::rank::ConvolutionRankRow>>, String> {
     let table_exists = conn
         .query_row(
@@ -150,17 +184,6 @@ fn load_stored_convolution_ranking(
         .map_err(|e| format!("检查卷积排名表失败: {e}"))?;
     if table_exists <= 0 {
         return Ok(None);
-    }
-
-    let mut scores_by_stock =
-        std::collections::HashMap::<&str, std::collections::HashMap<&str, f64>>::new();
-    for row in score_rows {
-        if row.total_score.is_finite() {
-            scores_by_stock
-                .entry(row.ts_code.as_str())
-                .or_default()
-                .insert(row.trade_date.as_str(), row.total_score);
-        }
     }
 
     let mut stmt = conn
@@ -192,16 +215,6 @@ fn load_stored_convolution_ranking(
         let ts_code: String = row
             .get(0)
             .map_err(|e| format!("读取卷积排名代码失败: {e}"))?;
-        let Some(scores_by_date) = scores_by_stock.get(ts_code.as_str()) else {
-            continue;
-        };
-        let Some(score_history) = history_trade_dates
-            .iter()
-            .map(|trade_date| scores_by_date.get(trade_date.as_str()).copied())
-            .collect::<Option<Vec<_>>>()
-        else {
-            continue;
-        };
         let raw_rank = row
             .get::<_, i64>(5)
             .map_err(|e| format!("读取原始名次失败: {e}"))?
@@ -227,7 +240,7 @@ fn load_stored_convolution_ranking(
             raw_rank,
             convolution_rank,
             rank_change,
-            score_history,
+            score_history: Vec::new(),
         });
     }
 
@@ -236,6 +249,51 @@ fn load_stored_convolution_ranking(
     } else {
         Ok(Some(ranking))
     }
+}
+
+fn hydrate_score_histories(
+    conn: &Connection,
+    history_trade_dates: &[String],
+    ranking: &mut [crate::simulate::rank::ConvolutionRankRow],
+) -> Result<(), String> {
+    if ranking.is_empty() {
+        return Ok(());
+    }
+    let stock_codes = ranking
+        .iter()
+        .map(|row| row.ts_code.clone())
+        .collect::<Vec<_>>();
+    let score_rows = load_score_rows_for_dates(conn, history_trade_dates, Some(&stock_codes))?;
+    let mut scores_by_stock =
+        std::collections::HashMap::<String, std::collections::HashMap<String, f64>>::new();
+    for row in score_rows {
+        if row.total_score.is_finite() {
+            scores_by_stock
+                .entry(row.ts_code)
+                .or_default()
+                .insert(row.trade_date, row.total_score);
+        }
+    }
+
+    for row in ranking {
+        let Some(scores_by_date) = scores_by_stock.get(&row.ts_code) else {
+            return Err(format!(
+                "已落盘卷积排名缺少{}的评分历史，请重新计算卷积排名",
+                row.ts_code
+            ));
+        };
+        row.score_history = history_trade_dates
+            .iter()
+            .map(|trade_date| scores_by_date.get(trade_date).copied())
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                format!(
+                    "已落盘卷积排名缺少{}的完整评分窗口，请重新计算卷积排名",
+                    row.ts_code
+                )
+            })?;
+    }
+    Ok(())
 }
 
 fn ensure_convolution_rank_table(conn: &Connection) -> Result<(), String> {
@@ -271,6 +329,43 @@ fn convolution_score_sql(kernel: &[f64]) -> String {
         .join(" + ")
 }
 
+/// 为默认 H30-L50 构建等价但更窄的窗口计算。
+///
+/// 默认核从第 4 个权重起都是相同的三十日慢核权重，因此可将 30 个
+/// LAG 列化简成当前/前两日三个分数列和一个 30 日滚动和。自定义核仍
+/// 使用通用逐 lag 路径，避免改变其语义。
+fn optimized_h30_l50_sql(kernel: &[f64]) -> Option<(String, String)> {
+    let default_kernel = default_convolution_kernel();
+    if kernel.len() != default_kernel.len()
+        || !kernel
+            .iter()
+            .zip(default_kernel.iter())
+            .all(|(actual, expected)| (actual - expected).abs() <= 1e-12)
+    {
+        return None;
+    }
+
+    let slow_weight = kernel[3];
+    let lag_columns = format!(
+        r#"TRY_CAST(s.total_score AS DOUBLE) AS score_lag_0,
+                LAG(TRY_CAST(s.total_score AS DOUBLE), 1) OVER stock_window AS score_lag_1,
+                LAG(TRY_CAST(s.total_score AS DOUBLE), 2) OVER stock_window AS score_lag_2,
+                SUM(TRY_CAST(s.total_score AS DOUBLE)) OVER (
+                    PARTITION BY s.ts_code
+                    ORDER BY dates.date_no
+                    ROWS BETWEEN {} PRECEDING AND CURRENT ROW
+                ) AS score_sum_30"#,
+        kernel.len() - 1,
+    );
+    let score_sql = format!(
+        "score_sum_30 * {slow_weight:.17} + score_lag_0 * {:.17} + score_lag_1 * {:.17} + score_lag_2 * {:.17}",
+        kernel[0] - slow_weight,
+        kernel[1] - slow_weight,
+        kernel[2] - slow_weight,
+    );
+    Some((lag_columns, score_sql))
+}
+
 fn compute_convolution_rank_range(
     conn: &mut Connection,
     start_date: &str,
@@ -297,21 +392,23 @@ fn compute_convolution_rank_range(
         .map_err(|e| format!("查询卷积排名预热日期失败: {e}"))?
         .ok_or_else(|| format!("截至{start_date}没有评分数据"))?;
 
-    let lag_columns = kernel
-        .iter()
-        .enumerate()
-        .map(|(lag, _)| {
-            if lag == 0 {
-                "TRY_CAST(s.total_score AS DOUBLE) AS score_lag_0".to_string()
-            } else {
-                format!(
-                    "LAG(TRY_CAST(s.total_score AS DOUBLE), {lag}) OVER stock_window AS score_lag_{lag}"
-                )
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(",\n                ");
-    let score_sql = convolution_score_sql(kernel);
+    let (lag_columns, score_sql) = optimized_h30_l50_sql(kernel).unwrap_or_else(|| {
+        let lag_columns = kernel
+            .iter()
+            .enumerate()
+            .map(|(lag, _)| {
+                if lag == 0 {
+                    "TRY_CAST(s.total_score AS DOUBLE) AS score_lag_0".to_string()
+                } else {
+                    format!(
+                        "LAG(TRY_CAST(s.total_score AS DOUBLE), {lag}) OVER stock_window AS score_lag_{lag}"
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",\n                ");
+        (lag_columns, convolution_score_sql(kernel))
+    });
     let oldest_lag = kernel.len() - 1;
     let sql = format!(
         r#"
@@ -359,7 +456,8 @@ fn compute_convolution_rank_range(
                 ) AS raw_rank,
                 ROW_NUMBER() OVER (
                     PARTITION BY trade_date
-                    ORDER BY convolution_score DESC, ts_code ASC
+                    ORDER BY ROUND(convolution_score, {CONVOLUTION_RANK_SCORE_DECIMALS}) DESC,
+                             ts_code ASC
                 ) AS convolution_rank
             FROM candidates
         )
@@ -477,17 +575,17 @@ pub fn get_convolution_rank_page(
     let conn = open_result_conn(&source_path)?;
     let effective_trade_date = resolve_trade_date(&conn, trade_date)?;
     let kernel = default_convolution_kernel();
-    let (history_trade_dates, score_rows) =
-        load_recent_score_rows(&conn, &effective_trade_date, kernel.len())?;
-    let ranking = load_stored_convolution_ranking(
-        &conn,
-        &effective_trade_date,
-        &history_trade_dates,
-        &score_rows,
-    )?
-    .map(Ok)
-    .unwrap_or_else(|| calc_convolution_ranking(&score_rows, &effective_trade_date, &kernel))?;
-    let universe_size = ranking.len();
+    let history_trade_dates = load_recent_trade_dates(&conn, &effective_trade_date, kernel.len())?;
+    let stored_ranking = load_stored_convolution_ranking(&conn, &effective_trade_date)?;
+    let loaded_from_store = stored_ranking.is_some();
+    let ranking = match stored_ranking {
+        Some(ranking) => ranking,
+        None => {
+            let score_rows = load_score_rows_for_dates(&conn, &history_trade_dates, None)?;
+            calc_convolution_ranking(&score_rows, &effective_trade_date, &kernel)?
+        }
+    };
+    let mut universe_size = ranking.len();
 
     let name_map = build_name_map(&source_path)?;
     let total_mv_map = build_total_mv_map(&source_path)?;
@@ -498,23 +596,49 @@ pub fn get_convolution_rank_page(
     let exclude_st_board = exclude_st_board.unwrap_or(false);
     let effective_limit = limit.filter(|value| *value > 0).map(|value| value as usize);
 
-    let mut rows = Vec::new();
-    for rank_row in ranking {
+    let select_ranking = |ranking: Vec<crate::simulate::rank::ConvolutionRankRow>| {
+        let mut selected = Vec::new();
+        for rank_row in ranking {
+            let name = name_map.get(&rank_row.ts_code).cloned().unwrap_or_default();
+            let board_value = board_category(&rank_row.ts_code, Some(&name)).to_string();
+            if exclude_st_board && board_value == BOARD_ST {
+                continue;
+            }
+            if board_filter
+                .as_ref()
+                .is_some_and(|filter| filter != &board_value)
+            {
+                continue;
+            }
+            if !filter_mv(&total_mv_map, &rank_row.ts_code, total_mv_min, total_mv_max) {
+                continue;
+            }
+
+            selected.push(rank_row);
+            if effective_limit.is_some_and(|limit| selected.len() >= limit) {
+                break;
+            }
+        }
+        selected
+    };
+
+    let mut selected_ranking = select_ranking(ranking);
+    if loaded_from_store
+        && hydrate_score_histories(&conn, &history_trade_dates, &mut selected_ranking).is_err()
+    {
+        // score_summary 更新时正常会同步清理对应卷积日期。若遇到旧库或
+        // 外部修改造成的残留记录，退回即时全量计算以维持页面正确性。
+        let score_rows = load_score_rows_for_dates(&conn, &history_trade_dates, None)?;
+        let fallback_ranking =
+            calc_convolution_ranking(&score_rows, &effective_trade_date, &kernel)?;
+        universe_size = fallback_ranking.len();
+        selected_ranking = select_ranking(fallback_ranking);
+    }
+
+    let mut rows = Vec::with_capacity(selected_ranking.len());
+    for rank_row in selected_ranking {
         let name = name_map.get(&rank_row.ts_code).cloned().unwrap_or_default();
         let board_value = board_category(&rank_row.ts_code, Some(&name)).to_string();
-        if exclude_st_board && board_value == BOARD_ST {
-            continue;
-        }
-        if board_filter
-            .as_ref()
-            .is_some_and(|filter| filter != &board_value)
-        {
-            continue;
-        }
-        if !filter_mv(&total_mv_map, &rank_row.ts_code, total_mv_min, total_mv_max) {
-            continue;
-        }
-
         rows.push(ConvolutionRankItem {
             total_mv_yi: total_mv_map.get(&rank_row.ts_code).copied(),
             concept: concepts_map
@@ -533,10 +657,6 @@ pub fn get_convolution_rank_page(
             convolution_score: rank_row.convolved_score,
             score_history: rank_row.score_history,
         });
-
-        if effective_limit.is_some_and(|limit| rows.len() >= limit) {
-            break;
-        }
     }
 
     Ok(ConvolutionRankPageData {
@@ -578,6 +698,11 @@ mod tests {
             load_recent_score_rows(&conn, "20240103", 2).expect("window should load");
         assert_eq!(dates, vec!["20240102", "20240103"]);
         assert_eq!(rows.len(), 4);
+        let selected_codes = vec!["000002.SZ".to_string()];
+        let selected_rows = load_score_rows_for_dates(&conn, &dates, Some(&selected_codes))
+            .expect("selected stock history should load");
+        assert_eq!(selected_rows.len(), 2);
+        assert!(selected_rows.iter().all(|row| row.ts_code == "000002.SZ"));
         assert!(
             load_recent_score_rows(&conn, "20240101", 2)
                 .unwrap_err()
@@ -631,5 +756,86 @@ mod tests {
             )
             .expect("rank change should exist");
         assert_eq!(change, -1);
+    }
+
+    #[test]
+    fn optimized_h30_l50_sql_matches_rust_ranking() {
+        let mut conn = Connection::open_in_memory().expect("in-memory db should open");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE score_summary (
+                ts_code TEXT,
+                trade_date TEXT,
+                total_score DOUBLE,
+                rank BIGINT
+            );
+            "#,
+        )
+        .expect("fixture table should be created");
+
+        let mut source_rows = Vec::new();
+        for day in 1..=35 {
+            let trade_date = format!("2024{day:04}");
+            for (stock_index, ts_code) in ["000001.SZ", "000002.SZ", "000003.SZ"]
+                .into_iter()
+                .enumerate()
+            {
+                let total_score = day as f64 * (stock_index as f64 + 1.0)
+                    + ((day + stock_index) % 4) as f64 * 0.125;
+                conn.execute(
+                    "INSERT INTO score_summary VALUES (?, ?, ?, ?)",
+                    params![ts_code, trade_date, total_score, stock_index as i64 + 1],
+                )
+                .expect("fixture row should insert");
+                source_rows.push(ScoreSummary {
+                    ts_code: ts_code.to_string(),
+                    trade_date: trade_date.clone(),
+                    total_score,
+                    rank: Some(stock_index as i64 + 1),
+                });
+            }
+        }
+
+        let kernel = default_convolution_kernel();
+        let (lag_sql, score_sql) =
+            optimized_h30_l50_sql(&kernel).expect("default kernel should optimize");
+        assert!(lag_sql.contains("score_sum_30"));
+        assert!(!lag_sql.contains("score_lag_29"));
+        assert!(score_sql.contains("score_sum_30"));
+
+        compute_convolution_rank_range(&mut conn, "20240030", "20240035", &kernel)
+            .expect("optimized convolution range should compute");
+
+        for target_date in ["20240030", "20240035"] {
+            let rust_ranking = calc_convolution_ranking(&source_rows, target_date, &kernel)
+                .expect("Rust ranking should compute");
+            let expected = rust_ranking
+                .into_iter()
+                .map(|row| (row.ts_code, (row.convolved_score, row.convolution_rank)))
+                .collect::<std::collections::HashMap<_, _>>();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT ts_code, convolution_score, convolution_rank \
+                     FROM convolution_rank WHERE trade_date = ?",
+                )
+                .expect("stored ranking query should prepare");
+            let stored = stmt
+                .query_map(params![target_date], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, i64>(2)? as usize,
+                    ))
+                })
+                .expect("stored ranking should query")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("stored ranking should read");
+            assert_eq!(stored.len(), expected.len());
+            for (ts_code, sql_score, sql_rank) in stored {
+                let (rust_score, rust_rank) = expected[&ts_code];
+                assert!((sql_score - rust_score).abs() < 1e-10);
+                assert_eq!(sql_rank, rust_rank);
+            }
+        }
     }
 }
