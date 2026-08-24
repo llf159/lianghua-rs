@@ -2,3 +2,21 @@
   margin: 0;
   min-height: 100%;
 }
+
+/*
+ * The page (or modal) owns vertical scrolling. Keeping table wrappers out of
+ * the scroll chain lets every header stick to the visible area's top without
+ * forcing tables into a fixed-height inner scroller.
+ */
+[class*="table-wrap"] {
+  max-height: none !important;
+  overflow: visible !important;
+  overscroll-behavior: auto;
+}
+
+table thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background-color: #fff;
+}
