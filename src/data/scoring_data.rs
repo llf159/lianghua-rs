@@ -102,6 +102,9 @@ pub struct ScoreWriteProfile {
 const SCORE_SUMMARY_TABLE: &str = "score_summary";
 const RULE_DETAILS_TABLE: &str = "rule_details";
 const SCENE_DETAILS_TABLE: &str = "scene_details";
+const SCORE_SUMMARY_SHADOW_TABLE: &str = "score_summary_write_shadow";
+const RULE_DETAILS_SHADOW_TABLE: &str = "rule_details_write_shadow";
+const SCENE_DETAILS_SHADOW_TABLE: &str = "scene_details_write_shadow";
 
 impl ScoreSummary {
     pub fn build(ts_code: &str, trade_dates: &[String], total_scores: &[f64]) -> Vec<Self> {
@@ -332,6 +335,8 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
     ensure_result_table_schema(&conn, SCORE_SUMMARY_TABLE)?;
     ensure_result_table_schema(&conn, RULE_DETAILS_TABLE)?;
     ensure_result_table_schema(&conn, SCENE_DETAILS_TABLE)?;
+    drop_redundant_result_db_indexes(&conn)?;
+    ensure_result_db_indexes(&conn)?;
 
     Ok(())
 }
@@ -483,25 +488,13 @@ fn ensure_result_table_schema(conn: &Connection, table_name: &str) -> Result<(),
     create_result_table(conn, table_name)
 }
 
-fn drop_result_db_indexes(conn: &Connection) -> Result<(), String> {
-    conn.execute(
-        "DROP INDEX IF EXISTS idx_score_summary_trade_date_rank_ts",
-        [],
-    )
-    .map_err(|e| format!("删除score_summary索引失败:{e}"))?;
+fn drop_redundant_result_db_indexes(conn: &Connection) -> Result<(), String> {
     conn.execute("DROP INDEX IF EXISTS idx_score_summary_ts_date", [])
-        .map_err(|e| format!("删除score_summary索引失败:{e}"))?;
-    conn.execute("DROP INDEX IF EXISTS idx_rule_details_rule_date_ts", [])
-        .map_err(|e| format!("删除rule_details索引失败:{e}"))?;
+        .map_err(|e| format!("删除score_summary冗余索引失败:{e}"))?;
     conn.execute("DROP INDEX IF EXISTS idx_rule_details_ts_date_rule", [])
-        .map_err(|e| format!("删除rule_details索引失败:{e}"))?;
-    conn.execute(
-        "DROP INDEX IF EXISTS idx_scene_details_trade_date_scene_rank_ts",
-        [],
-    )
-    .map_err(|e| format!("删除scene_details索引失败:{e}"))?;
+        .map_err(|e| format!("删除rule_details冗余索引失败:{e}"))?;
     conn.execute("DROP INDEX IF EXISTS idx_scene_details_ts_date_scene", [])
-        .map_err(|e| format!("删除scene_details索引失败:{e}"))?;
+        .map_err(|e| format!("删除scene_details冗余索引失败:{e}"))?;
     conn.execute("DROP INDEX IF EXISTS idx_score_summary_trade_date_ts", [])
         .map_err(|e| format!("删除旧score_summary索引失败:{e}"))?;
     conn.execute("DROP INDEX IF EXISTS idx_scene_details_scene_date_ts", [])
@@ -516,17 +509,7 @@ fn ensure_result_db_indexes(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| format!("创建score_summary索引失败:{e}"))?;
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_score_summary_ts_date ON score_summary(ts_code, trade_date)",
-        [],
-    )
-    .map_err(|e| format!("创建score_summary索引失败:{e}"))?;
-    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_rule_details_rule_date_ts ON rule_details(rule_name, trade_date, ts_code)",
-        [],
-    )
-    .map_err(|e| format!("创建rule_details索引失败:{e}"))?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_rule_details_ts_date_rule ON rule_details(ts_code, trade_date, rule_name)",
         [],
     )
     .map_err(|e| format!("创建rule_details索引失败:{e}"))?;
@@ -535,11 +518,85 @@ fn ensure_result_db_indexes(conn: &Connection) -> Result<(), String> {
         [],
     )
     .map_err(|e| format!("创建scene_details索引失败:{e}"))?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_scene_details_ts_date_scene ON scene_details(ts_code, trade_date, scene_name)",
-        [],
-    )
-    .map_err(|e| format!("创建scene_details索引失败:{e}"))?;
+    Ok(())
+}
+
+fn score_range_replaces_all_rows(
+    conn: &Connection,
+    start_date: &str,
+    end_date: &str,
+) -> Result<bool, String> {
+    for table_name in [SCORE_SUMMARY_TABLE, RULE_DETAILS_TABLE, SCENE_DETAILS_TABLE] {
+        let sql = format!(
+            "SELECT EXISTS(SELECT 1 FROM {table_name} WHERE trade_date < ? OR trade_date > ? LIMIT 1)"
+        );
+        let has_rows_outside_range = conn
+            .query_row(&sql, params![start_date, end_date], |row| {
+                row.get::<_, bool>(0)
+            })
+            .map_err(|e| format!("检查{table_name}写入范围失败:{e}"))?;
+        if has_rows_outside_range {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn create_shadow_result_tables(tx: &Transaction<'_>) -> Result<(), String> {
+    tx.execute_batch(&format!(
+        r#"
+        DROP TABLE IF EXISTS {SCORE_SUMMARY_SHADOW_TABLE};
+        DROP TABLE IF EXISTS {RULE_DETAILS_SHADOW_TABLE};
+        DROP TABLE IF EXISTS {SCENE_DETAILS_SHADOW_TABLE};
+
+        CREATE TABLE {SCORE_SUMMARY_SHADOW_TABLE} (
+            ts_code VARCHAR,
+            trade_date VARCHAR,
+            total_score DOUBLE,
+            rank INTEGER
+        );
+        CREATE TABLE {RULE_DETAILS_SHADOW_TABLE} (
+            ts_code VARCHAR,
+            trade_date VARCHAR,
+            rule_name VARCHAR,
+            rule_score DOUBLE
+        );
+        CREATE TABLE {SCENE_DETAILS_SHADOW_TABLE} (
+            ts_code VARCHAR,
+            trade_date VARCHAR,
+            scene_name VARCHAR,
+            direction VARCHAR,
+            stage VARCHAR,
+            stage_score DOUBLE,
+            risk_score DOUBLE,
+            confirm_strength DOUBLE,
+            risk_intensity DOUBLE,
+            scene_rank INTEGER
+        );
+        "#
+    ))
+    .map_err(|e| format!("创建结果库影子表失败:{e}"))?;
+    Ok(())
+}
+
+fn replace_result_tables_from_shadow(tx: &Transaction<'_>) -> Result<(), String> {
+    tx.execute_batch(&format!(
+        r#"
+        ALTER TABLE {SCORE_SUMMARY_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date);
+        ALTER TABLE {RULE_DETAILS_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date, rule_name);
+        ALTER TABLE {SCENE_DETAILS_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date, scene_name);
+
+        DROP TABLE {SCORE_SUMMARY_TABLE};
+        DROP TABLE {RULE_DETAILS_TABLE};
+        DROP TABLE {SCENE_DETAILS_TABLE};
+
+        ALTER TABLE {SCORE_SUMMARY_SHADOW_TABLE} RENAME TO {SCORE_SUMMARY_TABLE};
+        ALTER TABLE {RULE_DETAILS_SHADOW_TABLE} RENAME TO {RULE_DETAILS_TABLE};
+        ALTER TABLE {SCENE_DETAILS_SHADOW_TABLE} RENAME TO {SCENE_DETAILS_TABLE};
+        "#
+    ))
+    .map_err(|e| format!("切换结果库影子表失败:{e}"))?;
+    ensure_result_db_indexes(tx)?;
     Ok(())
 }
 
@@ -563,6 +620,14 @@ fn delete_score_range(
         params![start_date, end_date],
     )
     .map_err(|e| format!("删除scene_details旧数据失败:{e}"))?;
+    delete_convolution_rank_range(tx, start_date, end_date)
+}
+
+fn delete_convolution_rank_range(
+    tx: &Transaction<'_>,
+    start_date: &str,
+    end_date: &str,
+) -> Result<(), String> {
     let convolution_rank_exists = tx
         .query_row(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'convolution_rank'",
@@ -684,12 +749,13 @@ fn insert_ranked_summary_from_stage(
     tx: &Transaction<'_>,
     tie_break: TieBreakWay,
     adj_type: &str,
+    target_table: &str,
 ) -> Result<(), String> {
     match tie_break {
         TieBreakWay::TsCode => {
-            tx.execute(
+            let sql = format!(
                 r#"
-                INSERT INTO score_summary (ts_code, trade_date, total_score, rank)
+                INSERT INTO {target_table} (ts_code, trade_date, total_score, rank)
                 SELECT
                     ts_code,
                     trade_date,
@@ -701,15 +767,15 @@ fn insert_ranked_summary_from_stage(
                         ) AS INTEGER
                     ) AS rank
                 FROM score_summary_stage
-                "#,
-                [],
-            )
-            .map_err(|e| format!("写入总榜排名失败:{e}"))?;
+                "#
+            );
+            tx.execute(&sql, [])
+                .map_err(|e| format!("写入总榜排名失败:{e}"))?;
         }
         TieBreakWay::KdjJ => {
-            tx.execute(
+            let sql = format!(
                 r#"
-                INSERT INTO score_summary (ts_code, trade_date, total_score, rank)
+                INSERT INTO {target_table} (ts_code, trade_date, total_score, rank)
                 SELECT
                     st.ts_code,
                     st.trade_date,
@@ -725,10 +791,10 @@ fn insert_ranked_summary_from_stage(
                   ON st.ts_code = src.ts_code
                  AND st.trade_date = src.trade_date
                  AND src.adj_type = ?
-                "#,
-                params![adj_type],
-            )
-            .map_err(|e| format!("写入J值同分总榜排名失败:{e}"))?;
+                "#
+            );
+            tx.execute(&sql, params![adj_type])
+                .map_err(|e| format!("写入J值同分总榜排名失败:{e}"))?;
         }
     }
     Ok(())
@@ -934,7 +1000,8 @@ mod tests {
 
     use super::{
         SceneBacktestRow, SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage,
-        init_result_db, rank_scene_rows, write_score_batches_from_channel,
+        init_result_db, rank_scene_rows, result_table_has_primary_key,
+        write_score_batches_from_channel,
     };
     use crate::{
         data::SceneDirection,
@@ -1079,6 +1146,184 @@ mod tests {
             })
             .expect("count details");
         assert_eq!(detail_count, 1);
+
+        drop(conn);
+        fs::remove_dir_all(temp_dir).expect("remove temp dir");
+    }
+
+    fn explicit_result_index_names(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT index_name
+                FROM duckdb_indexes()
+                WHERE table_name IN ('score_summary', 'rule_details', 'scene_details')
+                ORDER BY index_name
+                "#,
+            )
+            .expect("prepare index query");
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .expect("query indexes")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect indexes")
+    }
+
+    #[test]
+    fn init_result_db_removes_primary_key_duplicate_indexes() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("lianghua_score_indexes_{unique}"));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let db_path = temp_dir.join("scoring_result.db");
+        init_result_db(&db_path).expect("init db");
+
+        let conn = Connection::open(&db_path).expect("open result db");
+        conn.execute_batch(
+            r#"
+            CREATE INDEX idx_score_summary_ts_date
+                ON score_summary(ts_code, trade_date);
+            CREATE INDEX idx_rule_details_ts_date_rule
+                ON rule_details(ts_code, trade_date, rule_name);
+            CREATE INDEX idx_scene_details_ts_date_scene
+                ON scene_details(ts_code, trade_date, scene_name);
+            "#,
+        )
+        .expect("create redundant indexes");
+        drop(conn);
+
+        init_result_db(&db_path).expect("migrate indexes");
+        let conn = Connection::open(&db_path).expect("reopen result db");
+        assert_eq!(
+            explicit_result_index_names(&conn),
+            vec![
+                "idx_rule_details_rule_date_ts".to_string(),
+                "idx_scene_details_trade_date_scene_rank_ts".to_string(),
+                "idx_score_summary_trade_date_rank_ts".to_string(),
+            ]
+        );
+
+        drop(conn);
+        fs::remove_dir_all(temp_dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn incremental_score_write_keeps_other_dates_and_indexes() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("lianghua_score_incremental_{unique}"));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let db_path = temp_dir.join("scoring_result.db");
+        init_result_db(&db_path).expect("init db");
+        let db_path_str = db_path.to_str().expect("db path utf8");
+
+        for (trade_date, total_score) in [("20240102", 1.0), ("20240103", 2.0)] {
+            let (tx, rx) = channel();
+            tx.send(ScoreWriteMessage::Batch(ScoreBatch {
+                summary_rows: vec![ScoreSummary {
+                    ts_code: "000001.SZ".to_string(),
+                    trade_date: trade_date.to_string(),
+                    total_score,
+                    rank: None,
+                }],
+                ..ScoreBatch::default()
+            }))
+            .expect("send batch");
+            drop(tx);
+            write_score_batches_from_channel(
+                db_path_str,
+                None,
+                "qfq",
+                TieBreakWay::TsCode,
+                trade_date,
+                trade_date,
+                rx,
+            )
+            .expect("write score batch");
+        }
+
+        let conn = Connection::open(&db_path).expect("open result db");
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM score_summary", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count summary rows"),
+            2
+        );
+        assert_eq!(
+            explicit_result_index_names(&conn),
+            vec![
+                "idx_rule_details_rule_date_ts".to_string(),
+                "idx_scene_details_trade_date_scene_rank_ts".to_string(),
+                "idx_score_summary_trade_date_rank_ts".to_string(),
+            ]
+        );
+        for table_name in ["score_summary", "rule_details", "scene_details"] {
+            assert!(
+                result_table_has_primary_key(&conn, table_name).expect("check primary key"),
+                "{table_name} should retain its primary key"
+            );
+        }
+
+        drop(conn);
+        fs::remove_dir_all(temp_dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn interrupted_full_replace_keeps_official_tables_unchanged() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("lianghua_score_rollback_{unique}"));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let db_path = temp_dir.join("scoring_result.db");
+        init_result_db(&db_path).expect("init db");
+        let conn = Connection::open(&db_path).expect("open result db");
+        conn.execute(
+            "INSERT INTO score_summary VALUES ('000001.SZ', '20240102', 9.0, 1)",
+            [],
+        )
+        .expect("insert existing summary");
+        drop(conn);
+
+        let (tx, rx) = channel();
+        tx.send(ScoreWriteMessage::Abort("test abort".to_string()))
+            .expect("send abort");
+        drop(tx);
+        let result = write_score_batches_from_channel(
+            db_path.to_str().expect("db path utf8"),
+            None,
+            "qfq",
+            TieBreakWay::TsCode,
+            "20240102",
+            "20240102",
+            rx,
+        );
+        assert!(result.is_err());
+
+        let conn = Connection::open(&db_path).expect("reopen result db");
+        assert_eq!(
+            conn.query_row(
+                "SELECT total_score FROM score_summary WHERE ts_code = '000001.SZ' AND trade_date = '20240102'",
+                [],
+                |row| row.get::<_, f64>(0),
+            )
+            .expect("read existing summary"),
+            9.0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name LIKE '%write_shadow'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count shadow tables"),
+            0
+        );
 
         drop(conn);
         fs::remove_dir_all(temp_dir).expect("remove temp dir");
@@ -1284,10 +1529,7 @@ pub fn write_score_batches_from_channel(
     let total_started_at = time::Instant::now();
     let mut profile = ScoreWriteProfile::default();
     let mut conn = Connection::open(db_path).map_err(|e| format!("结果库连接失败:{e}"))?;
-
-    let drop_indexes_started_at = time::Instant::now();
-    drop_result_db_indexes(&conn)?;
-    profile.drop_indexes_ms = drop_indexes_started_at.elapsed().as_millis() as u64;
+    let full_replace = score_range_replaces_all_rows(&conn, start_date, end_date)?;
 
     let mut source_db_attached = false;
     if let TieBreakWay::KdjJ = tie_break {
@@ -1307,9 +1549,30 @@ pub fn write_score_batches_from_channel(
             .map_err(|e| format!("创建数据库事务失败:{e}"))?;
 
         let delete_started_at = time::Instant::now();
-        delete_score_range(&tx, start_date, end_date)?;
+        if full_replace {
+            create_shadow_result_tables(&tx)?;
+            delete_convolution_rank_range(&tx, start_date, end_date)?;
+        } else {
+            delete_score_range(&tx, start_date, end_date)?;
+        }
         profile.delete_range_ms = delete_started_at.elapsed().as_millis() as u64;
         create_score_summary_stage(&tx)?;
+
+        let summary_target = if full_replace {
+            SCORE_SUMMARY_SHADOW_TABLE
+        } else {
+            SCORE_SUMMARY_TABLE
+        };
+        let detail_target = if full_replace {
+            RULE_DETAILS_SHADOW_TABLE
+        } else {
+            RULE_DETAILS_TABLE
+        };
+        let scene_target = if full_replace {
+            SCENE_DETAILS_SHADOW_TABLE
+        } else {
+            SCENE_DETAILS_TABLE
+        };
 
         let receive_and_append_started_at = time::Instant::now();
         let mut batch_count = 0usize;
@@ -1319,7 +1582,7 @@ pub fn write_score_batches_from_channel(
                 .appender("score_summary_stage")
                 .map_err(|e| format!("score_summary临时表appender创建失败:{e}"))?;
             let mut detail_app = tx
-                .appender("rule_details")
+                .appender(detail_target)
                 .map_err(|e| format!("rule_details appender创建失败:{e}"))?;
 
             for message in rx {
@@ -1355,7 +1618,7 @@ pub fn write_score_batches_from_channel(
         rank_scene_rows(&mut scene_rows);
         {
             let mut scene_app = tx
-                .appender("scene_details")
+                .appender(scene_target)
                 .map_err(|e| format!("scene_details appender创建失败:{e}"))?;
             append_scene_rows(&mut scene_app, &scene_rows)?;
             scene_app
@@ -1367,8 +1630,14 @@ pub fn write_score_batches_from_channel(
         profile.batch_count = batch_count;
 
         let summary_rank_started_at = time::Instant::now();
-        insert_ranked_summary_from_stage(&tx, tie_break, adj_type)?;
+        insert_ranked_summary_from_stage(&tx, tie_break, adj_type, summary_target)?;
         profile.summary_rank_ms = summary_rank_started_at.elapsed().as_millis() as u64;
+
+        if full_replace {
+            let recreate_indexes_started_at = time::Instant::now();
+            replace_result_tables_from_shadow(&tx)?;
+            profile.recreate_indexes_ms = recreate_indexes_started_at.elapsed().as_millis() as u64;
+        }
 
         let commit_started_at = time::Instant::now();
         tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
@@ -1388,13 +1657,8 @@ pub fn write_score_batches_from_channel(
     } else {
         Ok(())
     };
-    let recreate_indexes_started_at = time::Instant::now();
-    let recreate_indexes_result = ensure_result_db_indexes(&conn);
-    profile.recreate_indexes_ms = recreate_indexes_started_at.elapsed().as_millis() as u64;
-
     write_result?;
     detach_source_result?;
-    recreate_indexes_result?;
     profile.total_ms = total_started_at.elapsed().as_millis() as u64;
 
     Ok(profile)
