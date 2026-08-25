@@ -181,6 +181,10 @@ pub struct RuleLayerMetricsWithValidation {
 #[derive(Debug, Clone)]
 pub struct RuleLayerRuntimeCache {
     day_groups: Vec<RuleDayGroup>,
+    ts_codes: Vec<Arc<str>>,
+    ts_code_ids: HashMap<String, u32>,
+    day_group_ids: HashMap<String, usize>,
+    score_column_len: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -199,7 +203,7 @@ struct RuleUniverseRow {
 
 #[derive(Debug, Clone)]
 struct RuleDayBaseSample {
-    ts_code: Arc<str>,
+    ts_code_id: u32,
     residual_return: f64,
     er_change: f64,
 }
@@ -207,6 +211,7 @@ struct RuleDayBaseSample {
 #[derive(Debug, Clone)]
 struct RuleDayGroup {
     trade_date: Arc<str>,
+    score_offset: usize,
     samples: Vec<RuleDayBaseSample>,
 }
 
@@ -228,6 +233,39 @@ struct RuleLayerComputation {
 
 type TriggeredScoreMap = HashMap<String, HashMap<String, f64>>;
 
+/// 规则触发分数按运行时样本顺序连续存放。`valid` 必须与 `values` 分离，
+/// 因为分数为 0 的记录仍然表示“已触发”，不能用 0 或 NaN 充当缺失哨兵。
+#[derive(Debug, Clone)]
+struct TriggeredScoreColumn {
+    values: Vec<f64>,
+    valid: Vec<bool>,
+}
+
+impl TriggeredScoreColumn {
+    fn empty() -> Self {
+        Self {
+            values: Vec::new(),
+            valid: Vec::new(),
+        }
+    }
+
+    fn with_len(len: usize) -> Self {
+        Self {
+            values: vec![0.0; len],
+            valid: vec![false; len],
+        }
+    }
+
+    #[inline]
+    fn get(&self, index: usize) -> Option<f64> {
+        self.valid
+            .get(index)
+            .copied()
+            .unwrap_or(false)
+            .then(|| self.values[index])
+    }
+}
+
 struct ResidualCacheInput<'a> {
     stock_adj_type: &'a str,
     index_ts_code: &'a str,
@@ -244,6 +282,51 @@ struct ResidualCacheInput<'a> {
 struct RuleBacktestOutcome {
     residual_return: f64,
     er_change: f64,
+}
+
+impl RuleLayerRuntimeCache {
+    fn empty() -> Self {
+        Self {
+            day_groups: Vec::new(),
+            ts_codes: Vec::new(),
+            ts_code_ids: HashMap::new(),
+            day_group_ids: HashMap::new(),
+            score_column_len: 0,
+        }
+    }
+
+    fn encode_triggered_scores(&self, scores: &TriggeredScoreMap) -> TriggeredScoreColumn {
+        if scores.is_empty() || self.score_column_len == 0 {
+            return TriggeredScoreColumn::empty();
+        }
+
+        let mut encoded = TriggeredScoreColumn::with_len(self.score_column_len);
+        for (ts_code, scores_by_date) in scores {
+            let Some(&ts_code_id) = self.ts_code_ids.get(ts_code) else {
+                continue;
+            };
+            for (trade_date, &score) in scores_by_date {
+                let Some(&day_group_id) = self.day_group_ids.get(trade_date) else {
+                    continue;
+                };
+                let day_group = &self.day_groups[day_group_id];
+                let flat_index = day_group.score_offset + ts_code_id as usize;
+                encoded.values[flat_index] = score;
+                encoded.valid[flat_index] = true;
+            }
+        }
+        encoded
+    }
+
+    #[inline]
+    fn ts_code(&self, ts_code_id: u32) -> &str {
+        &self.ts_codes[ts_code_id as usize]
+    }
+
+    #[inline]
+    fn score_index(&self, day_group: &RuleDayGroup, sample: &RuleDayBaseSample) -> usize {
+        day_group.score_offset + sample.ts_code_id as usize
+    }
 }
 
 pub fn calc_rule_layer_metrics_from_db(
@@ -917,9 +1000,7 @@ pub fn build_rule_layer_runtime_cache_with_ts_filter(
         allowed_ts_codes,
     );
     if universe_rows.is_empty() {
-        return Ok(RuleLayerRuntimeCache {
-            day_groups: Vec::new(),
-        });
+        return Ok(RuleLayerRuntimeCache::empty());
     }
 
     let concept_map = load_most_related_concept_map(source_dir)?;
@@ -950,9 +1031,7 @@ pub fn build_rule_layer_runtime_cache_with_ts_filter(
             min_listed_trade_days: layer_config.min_listed_trade_days,
         },
     )?;
-    let day_groups = build_rule_day_groups(universe_rows, &residual_map_cache);
-
-    Ok(RuleLayerRuntimeCache { day_groups })
+    Ok(build_rule_day_groups(universe_rows, &residual_map_cache))
 }
 
 pub fn build_rule_layer_runtime_cache_from_stock_data(
@@ -1103,9 +1182,7 @@ pub(crate) fn build_rule_layer_runtime_cache_from_summary_rows_with_ts_filter(
     });
 
     if universe_rows.is_empty() {
-        return Ok(RuleLayerRuntimeCache {
-            day_groups: Vec::new(),
-        });
+        return Ok(RuleLayerRuntimeCache::empty());
     }
 
     build_rule_layer_runtime_cache_from_universe_rows(
@@ -1137,9 +1214,7 @@ fn build_rule_layer_runtime_cache_from_universe_rows(
     layer_config: &RuleLayerConfig,
 ) -> Result<RuleLayerRuntimeCache, String> {
     if universe_rows.is_empty() {
-        return Ok(RuleLayerRuntimeCache {
-            day_groups: Vec::new(),
-        });
+        return Ok(RuleLayerRuntimeCache::empty());
     }
 
     let concept_map = load_most_related_concept_map(source_dir)?;
@@ -1170,9 +1245,7 @@ fn build_rule_layer_runtime_cache_from_universe_rows(
             min_listed_trade_days: layer_config.min_listed_trade_days,
         },
     )?;
-    let day_groups = build_rule_day_groups(universe_rows, &residual_map_cache);
-
-    Ok(RuleLayerRuntimeCache { day_groups })
+    Ok(build_rule_day_groups(universe_rows, &residual_map_cache))
 }
 
 pub fn calc_rule_layer_metrics_from_triggered_scores(
@@ -1242,9 +1315,10 @@ pub fn calc_rule_layer_metrics_with_samples_from_cache(
     triggered_score_map: &HashMap<String, HashMap<String, f64>>,
     layer_config: &RuleLayerConfig,
 ) -> Result<RuleLayerMetricsWithSamples, String> {
-    let computation = compute_rule_layer_from_day_groups(
-        &runtime_cache.day_groups,
-        Some(triggered_score_map),
+    let triggered_scores = runtime_cache.encode_triggered_scores(triggered_score_map);
+    let computation = compute_rule_layer_from_runtime_cache(
+        runtime_cache,
+        Some(&triggered_scores),
         layer_config,
         RuleLayerCollectOptions {
             metrics: true,
@@ -1265,9 +1339,10 @@ pub fn calc_rule_layer_metrics_with_triggered_samples_from_cache(
     triggered_score_map: &HashMap<String, HashMap<String, f64>>,
     layer_config: &RuleLayerConfig,
 ) -> Result<RuleLayerMetricsWithTriggeredSamples, String> {
-    let computation = compute_rule_layer_from_day_groups(
-        &runtime_cache.day_groups,
-        Some(triggered_score_map),
+    let triggered_scores = runtime_cache.encode_triggered_scores(triggered_score_map);
+    let computation = compute_rule_layer_from_runtime_cache(
+        runtime_cache,
+        Some(&triggered_scores),
         layer_config,
         RuleLayerCollectOptions {
             metrics: true,
@@ -1288,9 +1363,10 @@ pub fn calc_rule_layer_metrics_with_validation_from_cache(
     triggered_score_map: &HashMap<String, HashMap<String, f64>>,
     layer_config: &RuleLayerConfig,
 ) -> Result<RuleLayerMetricsWithValidation, String> {
-    let computation = compute_rule_layer_from_day_groups(
-        &runtime_cache.day_groups,
-        Some(triggered_score_map),
+    let triggered_scores = runtime_cache.encode_triggered_scores(triggered_score_map);
+    let computation = compute_rule_layer_from_runtime_cache(
+        runtime_cache,
+        Some(&triggered_scores),
         layer_config,
         RuleLayerCollectOptions {
             metrics: true,
@@ -1313,9 +1389,10 @@ pub fn calc_rule_layer_metrics_from_cache(
     triggered_score_map: &HashMap<String, HashMap<String, f64>>,
     layer_config: &RuleLayerConfig,
 ) -> Result<RuleLayerMetrics, String> {
-    Ok(compute_rule_layer_from_day_groups(
-        &runtime_cache.day_groups,
-        Some(triggered_score_map),
+    let triggered_scores = runtime_cache.encode_triggered_scores(triggered_score_map);
+    Ok(compute_rule_layer_from_runtime_cache(
+        runtime_cache,
+        Some(&triggered_scores),
         layer_config,
         RuleLayerCollectOptions {
             metrics: true,
@@ -1343,19 +1420,18 @@ pub fn visit_triggered_rule_samples_from_cache<F>(
 where
     F: FnMut(RuleLayerSamplePointRef<'_>) -> Result<(), String>,
 {
+    let triggered_scores = runtime_cache.encode_triggered_scores(triggered_score_map);
     for day_group in &runtime_cache.day_groups {
         for sample in &day_group.samples {
-            let Some(rule_score) = triggered_score_map
-                .get(sample.ts_code.as_ref())
-                .and_then(|date_score| date_score.get(day_group.trade_date.as_ref()))
-                .copied()
+            let Some(rule_score) =
+                triggered_scores.get(runtime_cache.score_index(day_group, sample))
             else {
                 continue;
             };
 
             visit(RuleLayerSamplePointRef {
-                ts_code: &*sample.ts_code,
-                trade_date: &*day_group.trade_date,
+                ts_code: runtime_cache.ts_code(sample.ts_code_id),
+                trade_date: day_group.trade_date.as_ref(),
                 rule_score,
                 residual_return: sample.residual_return,
             })?;
@@ -1369,9 +1445,10 @@ pub fn collect_triggered_rule_samples_from_cache(
     runtime_cache: &RuleLayerRuntimeCache,
     triggered_score_map: &HashMap<String, HashMap<String, f64>>,
 ) -> Vec<RuleLayerSamplePoint> {
-    compute_rule_layer_from_day_groups(
-        &runtime_cache.day_groups,
-        Some(triggered_score_map),
+    let triggered_scores = runtime_cache.encode_triggered_scores(triggered_score_map);
+    compute_rule_layer_from_runtime_cache(
+        runtime_cache,
+        Some(&triggered_scores),
         &RuleLayerConfig::default(),
         RuleLayerCollectOptions {
             metrics: false,
@@ -1389,9 +1466,10 @@ pub fn collect_all_rule_samples_from_cache(
     triggered_score_map: &HashMap<String, HashMap<String, f64>>,
     layer_config: &RuleLayerConfig,
 ) -> Result<Vec<RuleLayerSamplePoint>, String> {
-    Ok(compute_rule_layer_from_day_groups(
-        &runtime_cache.day_groups,
-        Some(triggered_score_map),
+    let triggered_scores = runtime_cache.encode_triggered_scores(triggered_score_map);
+    Ok(compute_rule_layer_from_runtime_cache(
+        runtime_cache,
+        Some(&triggered_scores),
         layer_config,
         RuleLayerCollectOptions {
             metrics: false,
@@ -1523,15 +1601,15 @@ pub fn calc_rule_layer_metrics(
     })
 }
 
-fn compute_rule_layer_from_day_groups(
-    day_groups: &[RuleDayGroup],
-    triggered_score_map: Option<&TriggeredScoreMap>,
+fn compute_rule_layer_from_runtime_cache(
+    runtime_cache: &RuleLayerRuntimeCache,
+    triggered_scores: Option<&TriggeredScoreColumn>,
     config: &RuleLayerConfig,
     collect_options: RuleLayerCollectOptions,
 ) -> Result<RuleLayerComputation, String> {
     config.validate()?;
 
-    if day_groups.is_empty() {
+    if runtime_cache.day_groups.is_empty() {
         return Ok(RuleLayerComputation {
             metrics: empty_metrics(),
             all_samples: Vec::new(),
@@ -1544,10 +1622,17 @@ fn compute_rule_layer_from_day_groups(
     // 使用 fold+reduce 消除中间 day_results Vec，避免全部交易日的
     // all_samples / triggered_samples 同时占据内存。
     let identity = || DayGroupsFoldAccum::default();
-    let accum = day_groups
+    let accum = runtime_cache
+        .day_groups
         .par_iter()
         .fold(identity, |mut acc, day_group| {
-            acc.process_day_group(day_group, triggered_score_map, config, collect_options);
+            acc.process_day_group(
+                runtime_cache,
+                day_group,
+                triggered_scores,
+                config,
+                collect_options,
+            );
             acc
         })
         .reduce(identity, |mut a, b| {
@@ -1609,8 +1694,9 @@ struct DayGroupsFoldAccum {
 impl DayGroupsFoldAccum {
     fn process_day_group(
         &mut self,
+        runtime_cache: &RuleLayerRuntimeCache,
         day_group: &RuleDayGroup,
-        triggered_score_map: Option<&TriggeredScoreMap>,
+        triggered_scores: Option<&TriggeredScoreColumn>,
         config: &RuleLayerConfig,
         collect_options: RuleLayerCollectOptions,
     ) {
@@ -1639,10 +1725,8 @@ impl DayGroupsFoldAccum {
         };
 
         for sample in &day_group.samples {
-            let triggered_score = triggered_score_map
-                .and_then(|score_map| score_map.get(sample.ts_code.as_ref()))
-                .and_then(|date_score| date_score.get(day_group.trade_date.as_ref()))
-                .copied();
+            let triggered_score = triggered_scores
+                .and_then(|scores| scores.get(runtime_cache.score_index(day_group, sample)));
             let rule_score = triggered_score.unwrap_or(0.0);
 
             if collect_metrics {
@@ -1666,7 +1750,7 @@ impl DayGroupsFoldAccum {
 
                 if collect_options.triggered_samples || collect_validation_details {
                     self.triggered_samples.push(RuleLayerSamplePoint {
-                        ts_code: String::from(&*sample.ts_code),
+                        ts_code: runtime_cache.ts_code(sample.ts_code_id).to_string(),
                         trade_date: String::from(&*day_group.trade_date),
                         rule_score,
                         residual_return: sample.residual_return,
@@ -1677,7 +1761,7 @@ impl DayGroupsFoldAccum {
 
             if collect_options.all_samples {
                 self.all_samples.push(RuleLayerSamplePoint {
-                    ts_code: String::from(&*sample.ts_code),
+                    ts_code: runtime_cache.ts_code(sample.ts_code_id).to_string(),
                     trade_date: String::from(&*day_group.trade_date),
                     rule_score,
                     residual_return: sample.residual_return,
@@ -1818,12 +1902,32 @@ fn build_daily_score_layers(
 fn build_rule_day_groups(
     universe_rows: Vec<RuleUniverseRow>,
     residual_map_cache: &HashMap<String, HashMap<String, RuleBacktestOutcome>>,
-) -> Vec<RuleDayGroup> {
+) -> RuleLayerRuntimeCache {
+    if universe_rows.is_empty() || residual_map_cache.is_empty() {
+        return RuleLayerRuntimeCache::empty();
+    }
+
+    let mut ts_code_names = universe_rows
+        .iter()
+        .map(|row| row.ts_code.as_str())
+        .collect::<Vec<_>>();
+    ts_code_names.sort_unstable();
+    ts_code_names.dedup();
+    let ts_codes = ts_code_names
+        .iter()
+        .map(|ts_code| Arc::<str>::from(*ts_code))
+        .collect::<Vec<_>>();
+    let ts_code_ids = ts_code_names
+        .into_iter()
+        .enumerate()
+        .map(|(index, ts_code)| (ts_code.to_string(), index as u32))
+        .collect::<HashMap<_, _>>();
+
     let mut day_groups: Vec<RuleDayGroup> = Vec::new();
-    let mut ts_code_cache: HashMap<String, Arc<str>> =
-        HashMap::with_capacity(residual_map_cache.len());
+    let mut day_group_ids = HashMap::new();
     let mut current_trade_date: Arc<str> = Arc::from("");
     let mut current_samples: Vec<RuleDayBaseSample> = Vec::new();
+    let stock_count = ts_codes.len();
 
     for row in universe_rows {
         let Some(residual_map) = residual_map_cache.get(&row.ts_code) else {
@@ -1836,20 +1940,22 @@ fn build_rule_day_groups(
         if current_trade_date.as_ref() != row.trade_date.as_str() {
             if !current_trade_date.as_ref().is_empty() {
                 current_samples.shrink_to_fit();
+                let day_group_id = day_groups.len();
+                day_group_ids.insert(current_trade_date.to_string(), day_group_id);
                 day_groups.push(RuleDayGroup {
                     trade_date: current_trade_date,
+                    score_offset: day_group_id * stock_count,
                     samples: std::mem::take(&mut current_samples),
                 });
             }
             current_trade_date = Arc::from(row.trade_date.as_str());
         }
 
-        let ts_code = ts_code_cache
-            .entry(row.ts_code)
-            .or_insert_with_key(|value| Arc::from(value.as_str()))
-            .clone();
+        let Some(&ts_code_id) = ts_code_ids.get(&row.ts_code) else {
+            continue;
+        };
         current_samples.push(RuleDayBaseSample {
-            ts_code,
+            ts_code_id,
             residual_return: outcome.residual_return,
             er_change: outcome.er_change,
         });
@@ -1857,14 +1963,24 @@ fn build_rule_day_groups(
 
     if !current_trade_date.as_ref().is_empty() {
         current_samples.shrink_to_fit();
+        let day_group_id = day_groups.len();
+        day_group_ids.insert(current_trade_date.to_string(), day_group_id);
         day_groups.push(RuleDayGroup {
             trade_date: current_trade_date,
+            score_offset: day_group_id * stock_count,
             samples: current_samples,
         });
     }
 
     day_groups.shrink_to_fit();
-    day_groups
+    let score_column_len = day_groups.len() * stock_count;
+    RuleLayerRuntimeCache {
+        day_groups,
+        ts_codes,
+        ts_code_ids,
+        day_group_ids,
+        score_column_len,
+    }
 }
 
 fn empty_metrics() -> RuleLayerMetrics {
@@ -2842,9 +2958,10 @@ mod tests {
     use std::{
         collections::HashMap,
         fs::{create_dir_all, write},
+        hint::black_box,
         path::PathBuf,
         sync::Arc,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     use duckdb::{Connection, params};
@@ -2855,15 +2972,17 @@ mod tests {
     };
 
     use super::{
-        RuleDayBaseSample, RuleDayGroup, RuleLayerConfig, RuleLayerFromDbInput,
-        RuleLayerRuntimeCache, RuleSample, build_forward_backtest_outcome_map,
-        build_rule_layer_runtime_cache, build_rule_layer_runtime_cache_from_stock_data,
+        RuleBacktestOutcome, RuleDayBaseSample, RuleDayGroup, RuleLayerConfig,
+        RuleLayerFromDbInput, RuleLayerRuntimeCache, RuleSample, RuleUniverseRow,
+        TriggeredScoreColumn, TriggeredScoreMap, build_forward_backtest_outcome_map,
+        build_rule_day_groups, build_rule_layer_runtime_cache,
+        build_rule_layer_runtime_cache_from_stock_data, build_triggered_score_map,
         calc_all_rule_layer_metrics_from_db, calc_efficiency_ratio_map, calc_rule_layer_metrics,
         calc_rule_layer_metrics_from_cache, calc_rule_layer_metrics_from_db,
         calc_rule_layer_metrics_with_samples_from_cache,
         calc_rule_layer_metrics_with_triggered_samples_from_cache,
         calc_rule_layer_metrics_with_validation_from_cache,
-        collect_triggered_rule_samples_from_cache,
+        collect_triggered_rule_samples_from_cache, load_rule_rows_filtered,
     };
 
     fn assert_opt_close(left: Option<f64>, right: Option<f64>) {
@@ -2872,6 +2991,251 @@ mod tests {
             (None, None) => {}
             _ => panic!("left={left:?}, right={right:?}"),
         }
+    }
+
+    fn scan_legacy_triggered_scores(
+        runtime_cache: &RuleLayerRuntimeCache,
+        triggered_scores: &TriggeredScoreMap,
+    ) -> (usize, f64) {
+        let mut triggered_count = 0usize;
+        let mut checksum = 0.0;
+        for day_group in &runtime_cache.day_groups {
+            for sample in &day_group.samples {
+                let score = triggered_scores
+                    .get(runtime_cache.ts_code(sample.ts_code_id))
+                    .and_then(|scores_by_date| scores_by_date.get(day_group.trade_date.as_ref()))
+                    .copied();
+                if let Some(score) = score {
+                    triggered_count += 1;
+                    checksum += black_box(score);
+                }
+            }
+        }
+        black_box((triggered_count, checksum))
+    }
+
+    fn scan_encoded_triggered_scores(
+        runtime_cache: &RuleLayerRuntimeCache,
+        triggered_scores: &TriggeredScoreColumn,
+    ) -> (usize, f64) {
+        let mut triggered_count = 0usize;
+        let mut checksum = 0.0;
+        for day_group in &runtime_cache.day_groups {
+            for sample in &day_group.samples {
+                let score = triggered_scores.get(runtime_cache.score_index(day_group, sample));
+                if let Some(score) = score {
+                    triggered_count += 1;
+                    checksum += black_box(score);
+                }
+            }
+        }
+        black_box((triggered_count, checksum))
+    }
+
+    fn median_duration(mut durations: Vec<Duration>) -> Duration {
+        durations.sort_unstable();
+        durations[durations.len() / 2]
+    }
+
+    #[test]
+    fn encoded_triggered_scores_match_nested_map_for_zero_missing_and_duplicate_rows() {
+        let universe_rows = vec![
+            RuleUniverseRow {
+                ts_code: "a".to_string(),
+                trade_date: "d0".to_string(),
+            },
+            RuleUniverseRow {
+                ts_code: "a".to_string(),
+                trade_date: "d0".to_string(),
+            },
+            RuleUniverseRow {
+                ts_code: "b".to_string(),
+                trade_date: "d0".to_string(),
+            },
+            RuleUniverseRow {
+                ts_code: "a".to_string(),
+                trade_date: "d1".to_string(),
+            },
+        ];
+        let residual_map = HashMap::from([
+            (
+                "a".to_string(),
+                HashMap::from([
+                    (
+                        "d0".to_string(),
+                        RuleBacktestOutcome {
+                            residual_return: 1.0,
+                            er_change: 0.0,
+                        },
+                    ),
+                    (
+                        "d1".to_string(),
+                        RuleBacktestOutcome {
+                            residual_return: 2.0,
+                            er_change: 0.0,
+                        },
+                    ),
+                ]),
+            ),
+            (
+                "b".to_string(),
+                HashMap::from([(
+                    "d0".to_string(),
+                    RuleBacktestOutcome {
+                        residual_return: 3.0,
+                        er_change: 0.0,
+                    },
+                )]),
+            ),
+        ]);
+        let runtime_cache = build_rule_day_groups(universe_rows, &residual_map);
+        let triggered_scores = HashMap::from([
+            (
+                "a".to_string(),
+                HashMap::from([("d0".to_string(), 0.0), ("missing-date".to_string(), 7.0)]),
+            ),
+            (
+                "missing-stock".to_string(),
+                HashMap::from([("d0".to_string(), 9.0)]),
+            ),
+        ]);
+
+        let encoded = runtime_cache.encode_triggered_scores(&triggered_scores);
+        assert_eq!(
+            runtime_cache
+                .day_groups
+                .iter()
+                .map(|group| group.samples.len())
+                .sum::<usize>(),
+            4
+        );
+        assert_eq!(
+            scan_legacy_triggered_scores(&runtime_cache, &triggered_scores),
+            (2, 0.0)
+        );
+        assert_eq!(
+            scan_encoded_triggered_scores(&runtime_cache, &encoded),
+            (2, 0.0)
+        );
+        assert_eq!(encoded.get(0), Some(0.0));
+        assert_eq!(encoded.get(1), None);
+        assert_eq!(encoded.get(2), None);
+        assert_eq!(encoded.get(3), None);
+    }
+
+    /// 真实库比较基准。运行示例：
+    /// `LIANGHUA_BENCH_DATA_DIR=/path/to/source cargo test --release
+    /// benchmark_encoded_triggered_score_lookup_real_data -- --ignored --nocapture`
+    #[test]
+    #[ignore = "需要本机真实行情与评分数据库"]
+    fn benchmark_encoded_triggered_score_lookup_real_data() {
+        let source_dir = std::env::var("LIANGHUA_BENCH_DATA_DIR")
+            .expect("set LIANGHUA_BENCH_DATA_DIR to a real data directory");
+        let start_date =
+            std::env::var("LIANGHUA_BENCH_START_DATE").unwrap_or_else(|_| "20250101".to_string());
+        let end_date =
+            std::env::var("LIANGHUA_BENCH_END_DATE").unwrap_or_else(|_| "20250801".to_string());
+        let source_conn = Connection::open(source_db_path(&source_dir)).expect("open source db");
+        let result_conn = Connection::open(result_db_path(&source_dir)).expect("open result db");
+        let rule_name: String = result_conn
+            .query_row(
+                r#"
+                SELECT rule_name
+                FROM rule_details
+                WHERE trade_date >= ? AND trade_date <= ?
+                GROUP BY rule_name
+                ORDER BY COUNT(*) DESC, rule_name ASC
+                LIMIT 1
+                "#,
+                params![&start_date, &end_date],
+                |row| row.get(0),
+            )
+            .expect("select benchmark rule");
+        let config = RuleLayerConfig {
+            min_samples_per_day: 1,
+            backtest_period: 1,
+            min_listed_trade_days: 0,
+        };
+        let input = RuleLayerFromDbInput {
+            rule_name: rule_name.clone(),
+            stock_adj_type: "qfq".to_string(),
+            index_ts_code: "399300.SZ".to_string(),
+            index_beta: 0.0,
+            concept_beta: 0.0,
+            industry_beta: 0.0,
+            start_date: start_date.clone(),
+            end_date: end_date.clone(),
+            layer_config: config.clone(),
+        };
+
+        let cache_started = Instant::now();
+        let runtime_cache = build_rule_layer_runtime_cache(
+            &source_conn,
+            &source_dir,
+            "qfq",
+            "399300.SZ",
+            0.0,
+            0.0,
+            0.0,
+            &start_date,
+            &end_date,
+            &config,
+        )
+        .expect("build runtime cache");
+        let cache_elapsed = cache_started.elapsed();
+        let rule_rows = load_rule_rows_filtered(&source_dir, &input, None).expect("load rule rows");
+        let triggered_scores = build_triggered_score_map(rule_rows);
+
+        let legacy_expected = scan_legacy_triggered_scores(&runtime_cache, &triggered_scores);
+        let encoded = runtime_cache.encode_triggered_scores(&triggered_scores);
+        assert_eq!(
+            scan_encoded_triggered_scores(&runtime_cache, &encoded),
+            legacy_expected
+        );
+
+        let rounds = 7;
+        let mut legacy_times = Vec::with_capacity(rounds);
+        let mut encode_times = Vec::with_capacity(rounds);
+        let mut indexed_times = Vec::with_capacity(rounds);
+        for _ in 0..rounds {
+            let started = Instant::now();
+            let result = scan_legacy_triggered_scores(&runtime_cache, &triggered_scores);
+            legacy_times.push(started.elapsed());
+            assert_eq!(result, legacy_expected);
+
+            let started = Instant::now();
+            let one_encoded = runtime_cache.encode_triggered_scores(&triggered_scores);
+            encode_times.push(started.elapsed());
+
+            let started = Instant::now();
+            let result = scan_encoded_triggered_scores(&runtime_cache, &one_encoded);
+            indexed_times.push(started.elapsed());
+            assert_eq!(result, legacy_expected);
+        }
+
+        let legacy_median = median_duration(legacy_times);
+        let encode_median = median_duration(encode_times);
+        let indexed_median = median_duration(indexed_times);
+        let new_total = encode_median + indexed_median;
+        println!(
+            "real-data triggered-score lookup benchmark: rule={rule_name}, dates={start_date}..{end_date}, days={}, samples={}, triggered={}, cache_build_ms={}, legacy_scan_ms={:.3}, encode_ms={:.3}, indexed_scan_ms={:.3}, new_total_ms={:.3}, total_speedup={:.3}x, scan_speedup={:.3}x, encoded_bytes~{}",
+            runtime_cache.day_groups.len(),
+            runtime_cache
+                .day_groups
+                .iter()
+                .map(|group| group.samples.len())
+                .sum::<usize>(),
+            legacy_expected.0,
+            cache_elapsed.as_millis(),
+            legacy_median.as_secs_f64() * 1_000.0,
+            encode_median.as_secs_f64() * 1_000.0,
+            indexed_median.as_secs_f64() * 1_000.0,
+            new_total.as_secs_f64() * 1_000.0,
+            legacy_median.as_secs_f64() / new_total.as_secs_f64(),
+            legacy_median.as_secs_f64() / indexed_median.as_secs_f64(),
+            runtime_cache.score_column_len * std::mem::size_of::<f64>()
+                + runtime_cache.score_column_len.div_ceil(8),
+        );
     }
 
     #[test]
@@ -2926,28 +3290,34 @@ mod tests {
             day_groups: vec![
                 RuleDayGroup {
                     trade_date: Arc::from("d0"),
+                    score_offset: 0,
                     samples: vec![RuleDayBaseSample {
-                        ts_code: Arc::from("a"),
+                        ts_code_id: 0,
                         residual_return: 1.0,
                         er_change: 1.0,
                     }],
                 },
                 RuleDayGroup {
                     trade_date: Arc::from("d1"),
+                    score_offset: 2,
                     samples: vec![
                         RuleDayBaseSample {
-                            ts_code: Arc::from("a"),
+                            ts_code_id: 0,
                             residual_return: 1.0,
                             er_change: 0.0,
                         },
                         RuleDayBaseSample {
-                            ts_code: Arc::from("b"),
+                            ts_code_id: 1,
                             residual_return: 1.0,
                             er_change: 0.0,
                         },
                     ],
                 },
             ],
+            ts_codes: vec![Arc::from("a"), Arc::from("b")],
+            ts_code_ids: HashMap::from([("a".to_string(), 0), ("b".to_string(), 1)]),
+            day_group_ids: HashMap::from([("d0".to_string(), 0), ("d1".to_string(), 1)]),
+            score_column_len: 4,
         };
         let triggered_score_map = HashMap::from([
             (
