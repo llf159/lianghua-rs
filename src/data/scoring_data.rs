@@ -20,7 +20,7 @@ use crate::expr::eval::{Runtime, Value};
 use crate::expr::validation::{parse_expression_program, validate_expression_functions};
 use crate::scoring::{
     CachedCombinationCondition, CachedCombinationRule, CachedRule, CachedRuleExpression,
-    RuleScoreSeries, SceneScoreSeries, TieBreakWay,
+    RuleScoreSeries, SceneResolvedStage, SceneScoreSeries, TieBreakWay,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -54,11 +54,20 @@ pub struct SceneDetails {
     pub scene_rank: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SceneBacktestRow {
+    pub ts_code: Arc<str>,
+    pub trade_date: Arc<str>,
+    pub scene_name: Arc<str>,
+    pub stage: Option<SceneResolvedStage>,
+}
+
 #[derive(Debug, Default)]
 pub struct ScoreBatch {
     pub summary_rows: Vec<ScoreSummary>,
     pub detail_rows: Vec<ScoreDetails>,
     pub scene_rows: Vec<SceneDetails>,
+    pub scene_backtest_rows: Vec<SceneBacktestRow>,
 }
 
 impl ScoreBatch {
@@ -66,6 +75,7 @@ impl ScoreBatch {
         self.summary_rows.extend(other.summary_rows);
         self.detail_rows.extend(other.detail_rows);
         self.scene_rows.extend(other.scene_rows);
+        self.scene_backtest_rows.extend(other.scene_backtest_rows);
     }
 }
 
@@ -259,7 +269,7 @@ impl SceneDetails {
                     trade_date: trade_dates[i].clone(),
                     scene_name: scene_name.clone(),
                     direction: scene.direction.as_str().to_string(),
-                    stage: scene.stage[i].clone(),
+                    stage: scene.stage[i].map(|stage| stage.as_str().to_string()),
                     stage_score: scene.stage_score[i],
                     risk_score: scene.risk_score[i],
                     confirm_strength: scene.confirm_strength[i],
@@ -269,6 +279,42 @@ impl SceneDetails {
                 });
             }
         }
+        out
+    }
+}
+
+impl SceneBacktestRow {
+    pub fn build(
+        ts_code: &str,
+        trade_dates: &[String],
+        scene_score_series: &[SceneScoreSeries],
+    ) -> Vec<Self> {
+        let ts_code: Arc<str> = Arc::from(ts_code);
+        let trade_dates = trade_dates
+            .iter()
+            .map(|trade_date| Arc::<str>::from(trade_date.as_str()))
+            .collect::<Vec<_>>();
+        let mut out = Vec::new();
+
+        for scene in scene_score_series {
+            if trade_dates.len() != scene.triggered.len() || trade_dates.len() != scene.stage.len()
+            {
+                continue;
+            }
+            let scene_name: Arc<str> = Arc::from(scene.name.as_str());
+            for i in 0..trade_dates.len() {
+                if !scene.triggered[i] {
+                    continue;
+                }
+                out.push(Self {
+                    ts_code: Arc::clone(&ts_code),
+                    trade_date: Arc::clone(&trade_dates[i]),
+                    scene_name: Arc::clone(&scene_name),
+                    stage: scene.stage[i],
+                });
+            }
+        }
+
         out
     }
 }
@@ -880,17 +926,51 @@ pub(crate) fn rank_scene_rows(rows: &mut [SceneDetails]) {
 mod tests {
     use std::{
         fs,
-        sync::mpsc::channel,
+        sync::{Arc, mpsc::channel},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use duckdb::Connection;
 
     use super::{
-        SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage, init_result_db,
-        rank_scene_rows, write_score_batches_from_channel,
+        SceneBacktestRow, SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage,
+        init_result_db, rank_scene_rows, write_score_batches_from_channel,
     };
-    use crate::scoring::TieBreakWay;
+    use crate::{
+        data::SceneDirection,
+        scoring::{SceneResolvedStage, SceneScoreSeries, TieBreakWay},
+    };
+
+    #[test]
+    fn compact_scene_backtest_rows_match_full_scene_rows() {
+        let trade_dates = vec!["20240102".to_string(), "20240103".to_string()];
+        let total_scores = vec![51.0, 49.0];
+        let scene_series = vec![SceneScoreSeries {
+            name: "主升".to_string(),
+            direction: SceneDirection::Long,
+            stage: vec![Some(SceneResolvedStage::Confirm), None],
+            stage_score: vec![3.0, 0.5],
+            risk_score: vec![0.0, -1.0],
+            confirm_strength: vec![1.0, 0.1],
+            risk_intensity: vec![0.0, 0.5],
+            triggered: vec![true, true],
+        }];
+
+        let full = SceneDetails::build("000001.SZ", &trade_dates, &total_scores, &scene_series);
+        let compact = SceneBacktestRow::build("000001.SZ", &trade_dates, &scene_series);
+
+        assert_eq!(compact.len(), full.len());
+        for (compact, full) in compact.iter().zip(&full) {
+            assert_eq!(compact.ts_code.as_ref(), full.ts_code);
+            assert_eq!(compact.trade_date.as_ref(), full.trade_date);
+            assert_eq!(compact.scene_name.as_ref(), full.scene_name);
+            assert_eq!(
+                compact.stage.map(SceneResolvedStage::as_str),
+                full.stage.as_deref()
+            );
+        }
+        assert!(Arc::ptr_eq(&compact[0].ts_code, &compact[1].ts_code));
+    }
 
     fn scene_row(
         ts_code: &str,
@@ -1112,6 +1192,7 @@ mod tests {
                     scene_rank: None,
                 },
             ],
+            scene_backtest_rows: Vec::new(),
         }))
         .expect("send batch");
         drop(tx);

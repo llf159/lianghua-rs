@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::{Arc, OnceLock},
+};
 
 use duckdb::{Connection, params_from_iter};
 use rayon::prelude::*;
@@ -12,7 +15,7 @@ use crate::{
     data::{
         concept_performance_data::{load_concept_trend_series_map, load_industry_trend_series_map},
         load_stock_list, load_ths_concepts_named_map, result_db_path,
-        scoring_data::SceneDetails,
+        scoring_data::SceneBacktestRow,
     },
     simulate::fp_utils::{EPS, calc_t_value, mean, sample_std, spearman_corr},
 };
@@ -96,8 +99,8 @@ impl SceneLayerFromDbInput {
 
 #[derive(Debug, Clone)]
 pub struct SceneSample {
-    pub trade_date: String,
-    pub scene_state: String,
+    pub trade_date: Arc<str>,
+    pub scene_state: Arc<str>,
     pub residual_return: f64,
 }
 
@@ -298,7 +301,7 @@ pub fn calc_all_scene_layer_metrics_from_rows(
     source_conn: &Connection,
     source_dir: &str,
     scene_names: &[String],
-    scene_detail_rows: &[SceneDetails],
+    scene_detail_rows: Vec<SceneBacktestRow>,
     stock_adj_type: &str,
     index_ts_code: &str,
     index_beta: f64,
@@ -326,37 +329,27 @@ pub fn calc_all_scene_layer_metrics_from_rows(
     let scene_name_set: HashSet<&str> = scene_names.iter().map(String::as_str).collect();
     let concept_map = load_most_related_concept_map(source_dir)?;
     let industry_map = load_stock_industry_map(source_dir)?;
-    let mut rows_by_scene: HashMap<String, HashMap<String, Vec<SceneDbRow>>> = HashMap::new();
-    let mut unique_ts_codes = HashSet::new();
+    let mut unique_ts_codes = HashSet::<Arc<str>>::new();
 
-    for row in scene_detail_rows {
-        if !scene_name_set.contains(row.scene_name.as_str())
-            || row.trade_date.as_str() < start_date
-            || row.trade_date.as_str() > end_date
+    for row in &scene_detail_rows {
+        if !scene_name_set.contains(row.scene_name.as_ref())
+            || row.trade_date.as_ref() < start_date
+            || row.trade_date.as_ref() > end_date
             || row.ts_code.trim().is_empty()
             || row.trade_date.trim().is_empty()
         {
             continue;
         }
-        validate_direction(&row.direction)?;
-        unique_ts_codes.insert(row.ts_code.clone());
-        rows_by_scene
-            .entry(row.scene_name.clone())
-            .or_default()
-            .entry(row.ts_code.clone())
-            .or_default()
-            .push(SceneDbRow {
-                scene_name: row.scene_name.clone(),
-                ts_code: row.ts_code.clone(),
-                trade_date: row.trade_date.clone(),
-                scene_state: row.stage.clone().unwrap_or_default(),
-            });
+        unique_ts_codes.insert(Arc::clone(&row.ts_code));
     }
 
     let residual_map_cache = build_residual_map_cache(
         source_conn,
         source_dir,
-        unique_ts_codes.into_iter().collect(),
+        unique_ts_codes
+            .into_iter()
+            .map(|ts_code| ts_code.to_string())
+            .collect(),
         &concept_map,
         &industry_map,
         &ResidualCacheInput {
@@ -372,15 +365,63 @@ pub fn calc_all_scene_layer_metrics_from_rows(
         },
     )?;
 
+    // Consume the compact scoring result here. Only trade_date, stage and
+    // residual_return are retained by the metrics, so unused scoring fields
+    // never expand back into the former full SceneDetails representation.
+    let mut samples_by_scene: HashMap<Arc<str>, Vec<SceneSample>> = HashMap::new();
+    for row in scene_detail_rows {
+        if !scene_name_set.contains(row.scene_name.as_ref())
+            || row.trade_date.as_ref() < start_date
+            || row.trade_date.as_ref() > end_date
+            || row.ts_code.trim().is_empty()
+            || row.trade_date.trim().is_empty()
+        {
+            continue;
+        }
+        let Some(residual_return) = residual_map_cache
+            .get(row.ts_code.as_ref())
+            .and_then(|by_date| by_date.get(row.trade_date.as_ref()))
+            .copied()
+        else {
+            continue;
+        };
+        samples_by_scene
+            .entry(row.scene_name)
+            .or_default()
+            .push(SceneSample {
+                trade_date: row.trade_date,
+                scene_state: shared_scene_state(row.stage),
+                residual_return,
+            });
+    }
+
     let mut out = Vec::with_capacity(scene_names.len());
     for scene_name in scene_names {
-        let rows_by_ts = rows_by_scene.remove(scene_name).unwrap_or_default();
-        let samples = collect_scene_samples(rows_by_ts, &residual_map_cache)?;
+        let samples = samples_by_scene
+            .remove(scene_name.as_str())
+            .unwrap_or_default();
         let metrics = calc_scene_layer_metrics(&samples, layer_config)?;
         out.push((scene_name.clone(), metrics));
     }
 
     Ok(out)
+}
+
+fn shared_scene_state(stage: Option<crate::scoring::SceneResolvedStage>) -> Arc<str> {
+    static UNKNOWN: OnceLock<Arc<str>> = OnceLock::new();
+    static OBSERVE: OnceLock<Arc<str>> = OnceLock::new();
+    static TRIGGER: OnceLock<Arc<str>> = OnceLock::new();
+    static CONFIRM: OnceLock<Arc<str>> = OnceLock::new();
+    static FAIL: OnceLock<Arc<str>> = OnceLock::new();
+
+    let (cell, value) = match stage {
+        Some(crate::scoring::SceneResolvedStage::Observe) => (&OBSERVE, "observe"),
+        Some(crate::scoring::SceneResolvedStage::Trigger) => (&TRIGGER, "trigger"),
+        Some(crate::scoring::SceneResolvedStage::Confirm) => (&CONFIRM, "confirm"),
+        Some(crate::scoring::SceneResolvedStage::Fail) => (&FAIL, "fail"),
+        None => (&UNKNOWN, ""),
+    };
+    Arc::clone(cell.get_or_init(|| Arc::from(value)))
 }
 
 pub fn calc_scene_layer_metrics(
@@ -389,13 +430,13 @@ pub fn calc_scene_layer_metrics(
 ) -> Result<SceneLayerMetrics, String> {
     config.validate()?;
 
-    let mut grouped_by_day: BTreeMap<String, Vec<&SceneSample>> = BTreeMap::new();
+    let mut grouped_by_day: BTreeMap<Arc<str>, Vec<&SceneSample>> = BTreeMap::new();
     for sample in samples {
         if sample.trade_date.trim().is_empty() || !sample.residual_return.is_finite() {
             continue;
         }
         grouped_by_day
-            .entry(sample.trade_date.trim().to_string())
+            .entry(Arc::clone(&sample.trade_date))
             .or_default()
             .push(sample);
     }
@@ -458,7 +499,7 @@ pub fn calc_scene_layer_metrics(
         }
 
         points.push(SceneLayerPoint {
-            trade_date,
+            trade_date: trade_date.to_string(),
             state_avg_residual_returns,
             top_bottom_spread,
             ic,
@@ -575,8 +616,8 @@ fn collect_scene_samples(
         for row in rows {
             if let Some(residual_return) = residual_map.get(&row.trade_date).copied() {
                 samples.push(SceneSample {
-                    trade_date: row.trade_date,
-                    scene_state: row.scene_state,
+                    trade_date: Arc::from(row.trade_date),
+                    scene_state: Arc::from(row.scene_state),
                     residual_return,
                 });
             }

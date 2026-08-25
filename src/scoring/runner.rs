@@ -6,9 +6,9 @@ use std::{
 };
 
 use crate::data::scoring_data::{
-    SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage, ScoreWriteProfile,
-    cache_rule_build, init_result_db, rank_scene_rows, rank_summary_rows_by_score, row_into_rt,
-    write_score_batches_from_channel,
+    SceneBacktestRow, SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage,
+    ScoreWriteProfile, cache_rule_build, init_result_db, rank_scene_rows,
+    rank_summary_rows_by_score, row_into_rt, write_score_batches_from_channel,
 };
 use crate::data::{
     DataReader, RowData, RuntimeKeyCollectOptions, ScoreRule, ScoreScene,
@@ -26,6 +26,10 @@ use crate::scoring::{
 };
 
 const SCORING_GROUP_SIZE: usize = 128;
+// In-memory validation retains every output row until all stocks finish. Keep
+// its input batches smaller than the streaming-to-DB path so each Rayon worker
+// does not also pin 128 stocks worth of indicator columns at the same time.
+const SCORING_MEMORY_GROUP_SIZE: usize = 32;
 const SCORING_QUEUE_BOUND: usize = 8;
 const SCORING_INJECTED_RUNTIME_KEYS: [&str; 2] = ["ZHANG", "TOTAL_MV_YI"];
 const SCORING_RUNTIME_ALIASES: [(&str, &str); 0] = [];
@@ -96,7 +100,15 @@ fn scoring_single_core(
     rule_scene_meta: &[RuleSceneMeta],
     scenes: &[ScoreScene],
     memory_mode: ScoringMemoryMode,
-) -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>, Vec<SceneDetails>), String> {
+) -> Result<
+    (
+        Vec<ScoreSummary>,
+        Vec<ScoreDetails>,
+        Vec<SceneDetails>,
+        Vec<SceneBacktestRow>,
+    ),
+    String,
+> {
     let trade_dates = row_data.trade_dates.clone();
     let mut rt = row_into_rt(row_data)?;
 
@@ -105,7 +117,7 @@ fn scoring_single_core(
         .unwrap_or_else(|i| i);
 
     if keep_from >= trade_dates.len() {
-        return Ok((Vec::new(), Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     }
 
     let kept_trade_dates = &trade_dates[keep_from..];
@@ -114,7 +126,7 @@ fn scoring_single_core(
         let total_scores = scoring_rules_total_cache(&mut rt, rules_cache)?;
         let kept_scores = &total_scores[keep_from..];
         let summary = ScoreSummary::build(ts_code, kept_trade_dates, kept_scores);
-        return Ok((summary, Vec::new(), Vec::new()));
+        return Ok((summary, Vec::new(), Vec::new(), Vec::new()));
     }
 
     let result = scoring_rules_details_cache(&mut rt, rules_cache)?;
@@ -142,17 +154,27 @@ fn scoring_single_core(
     } else {
         Vec::new()
     };
-    let scene_details = if matches!(
+    let (scene_details, scene_backtest_rows) = if matches!(
         memory_mode,
         ScoringMemoryMode::All | ScoringMemoryMode::SceneOnly
     ) {
         let scene_series = build_scene_score_series(rule_scene_meta, &details_series, scenes);
-        SceneDetails::build(ts_code, kept_trade_dates, kept_scores, &scene_series)
+        if matches!(memory_mode, ScoringMemoryMode::SceneOnly) {
+            (
+                Vec::new(),
+                SceneBacktestRow::build(ts_code, kept_trade_dates, &scene_series),
+            )
+        } else {
+            (
+                SceneDetails::build(ts_code, kept_trade_dates, kept_scores, &scene_series),
+                Vec::new(),
+            )
+        }
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
-    Ok((summary, details, scene_details))
+    Ok((summary, details, scene_details, scene_backtest_rows))
 }
 
 fn collect_scoring_runtime_keys(rules_cache: &[CachedRule]) -> HashSet<String> {
@@ -222,7 +244,7 @@ fn scoring_stock_batch(
         st_list.contains(ts_code),
         total_share_map.get(ts_code).copied(),
     )?;
-    let (summary_rows, detail_rows, scene_rows) = scoring_single_core(
+    let (summary_rows, detail_rows, scene_rows, scene_backtest_rows) = scoring_single_core(
         row,
         ts_code,
         score_start_date,
@@ -236,6 +258,7 @@ fn scoring_stock_batch(
         summary_rows,
         detail_rows,
         scene_rows,
+        scene_backtest_rows,
     })
 }
 
@@ -486,7 +509,7 @@ pub fn scoring_all_to_memory_with_mode(
 
     let compute_started_at = time::Instant::now();
     let batch = tc_list
-        .par_chunks(SCORING_GROUP_SIZE)
+        .par_chunks(SCORING_MEMORY_GROUP_SIZE)
         .map(|ts_group| -> Result<ScoreBatch, String> {
             let worker_reader =
                 DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
@@ -514,7 +537,7 @@ pub fn scoring_all_to_memory_with_mode(
         })?;
     let compute_and_send_batches_ms = compute_started_at.elapsed().as_millis() as u64;
 
-    let batch_count = (tc_list.len() + SCORING_GROUP_SIZE - 1) / SCORING_GROUP_SIZE;
+    let batch_count = (tc_list.len() + SCORING_MEMORY_GROUP_SIZE - 1) / SCORING_MEMORY_GROUP_SIZE;
 
     let mut batch = batch;
     if !batch.summary_rows.is_empty() {
@@ -581,7 +604,7 @@ pub fn scoring_single_period(
             })
             .collect();
     let scenes = ScoreScene::load_scenes_with_strategy_path(source_dir, strategy_path)?;
-    Ok(scoring_single_core(
+    let (summary, details, scenes, _) = scoring_single_core(
         row_data,
         ts_code,
         start_date,
@@ -589,7 +612,8 @@ pub fn scoring_single_period(
         &rule_scene_meta,
         &scenes,
         ScoringMemoryMode::All,
-    )?)
+    )?;
+    Ok((summary, details, scenes))
 }
 
 #[cfg(test)]

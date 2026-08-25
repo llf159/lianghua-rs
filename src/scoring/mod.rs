@@ -61,12 +61,31 @@ pub struct RuleScoreSeries {
 pub struct SceneScoreSeries {
     pub name: String,
     pub direction: SceneDirection,
-    pub stage: Vec<Option<String>>,
+    pub stage: Vec<Option<SceneResolvedStage>>,
     pub stage_score: Vec<f64>,
     pub risk_score: Vec<f64>,
     pub confirm_strength: Vec<f64>,
     pub risk_intensity: Vec<f64>,
     pub triggered: Vec<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneResolvedStage {
+    Observe,
+    Trigger,
+    Confirm,
+    Fail,
+}
+
+impl SceneResolvedStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Observe => "observe",
+            Self::Trigger => "trigger",
+            Self::Confirm => "confirm",
+            Self::Fail => "fail",
+        }
+    }
 }
 
 const SCENE_EPS: f64 = 1e-12;
@@ -483,18 +502,18 @@ fn resolve_scene_stage(
     has_trigger: bool,
     has_confirm: bool,
     has_fail: bool,
-) -> Option<String> {
+) -> Option<SceneResolvedStage> {
     if has_fail && cross_fail_threshold(scene.direction, risk_score, scene.fail_threshold) {
-        return Some("fail".to_string());
+        return Some(SceneResolvedStage::Fail);
     }
     if has_confirm && cross_stage_threshold(scene.direction, stage_score, scene.confirm_threshold) {
-        return Some("confirm".to_string());
+        return Some(SceneResolvedStage::Confirm);
     }
     if has_trigger && cross_stage_threshold(scene.direction, stage_score, scene.trigger_threshold) {
-        return Some("trigger".to_string());
+        return Some(SceneResolvedStage::Trigger);
     }
     if has_trigger && cross_stage_threshold(scene.direction, stage_score, scene.observe_threshold) {
-        return Some("observe".to_string());
+        return Some(SceneResolvedStage::Observe);
     }
     None
 }

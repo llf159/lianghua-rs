@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     data::scoring_data::{
-        SceneDetails, ScoreDetails, ScoreSummary, cache_rule_build as build_scoring_rule_cache,
+        SceneBacktestRow, ScoreDetails, ScoreSummary, cache_rule_build as build_scoring_rule_cache,
         row_into_rt,
     },
     data::{
@@ -6398,9 +6398,9 @@ fn filter_score_detail_rows_by_ts_codes(
 }
 
 fn filter_scene_detail_rows_by_ts_codes(
-    rows: Vec<SceneDetails>,
+    rows: Vec<SceneBacktestRow>,
     allowed_ts_codes: Option<&HashSet<String>>,
-) -> Vec<SceneDetails> {
+) -> Vec<SceneBacktestRow> {
     if allowed_ts_codes.is_none() {
         return rows;
     }
@@ -7868,7 +7868,7 @@ pub fn run_transient_scene_layer_backtest(
         ScoringMemoryMode::SceneOnly,
     )?;
     let scene_rows = filter_scene_detail_rows_by_ts_codes(
-        score_batch.scene_rows,
+        score_batch.scene_backtest_rows,
         params.allowed_ts_codes.as_ref(),
     );
     let scene_options = load_scene_options(&source_path)?;
@@ -7876,7 +7876,7 @@ pub fn run_transient_scene_layer_backtest(
         &source_conn,
         &source_path,
         &scene_options,
-        &scene_rows,
+        scene_rows,
         &params.stock_adj_type,
         &params.index_ts_code,
         params.index_beta,
