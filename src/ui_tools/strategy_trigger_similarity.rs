@@ -4,7 +4,10 @@ use duckdb::{AccessMode, Config, Connection, params, params_from_iter};
 use rayon::prelude::*;
 use serde::Serialize;
 
-use crate::data::{result_db_path, source_db_path};
+use crate::{
+    data::{result_db_path, source_db_path},
+    download::runner::INDEX_TS_CODES,
+};
 
 use super::{
     build_concepts_map, build_industry_map, build_name_map, normalize_trade_date,
@@ -18,8 +21,13 @@ const DEFAULT_LIMIT: usize = 30;
 const MAX_POOL_SEGMENTS: usize = 12;
 const MAX_INDICATOR_COLUMNS: usize = 24;
 const MAX_CANDIDATE_ANCHORS: usize = 50_000;
-const TRIGGER_PREFILTER_ANCHORS: usize = 40_000;
-const HISTORY_DIVERSITY_ANCHORS: usize = MAX_CANDIDATE_ANCHORS - TRIGGER_PREFILTER_ANCHORS;
+// 候选池优先覆盖近期事件，同时保留跨期分散样本；不再用只含触发摘要的代理分数
+// 预判包含量价、指标和市场环境的最终相似度。
+const RECENT_CANDIDATE_ANCHORS: usize = 40_000;
+const HISTORY_DIVERSITY_ANCHORS: usize = MAX_CANDIDATE_ANCHORS - RECENT_CANDIDATE_ANCHORS;
+// 评级样本独立于页面展示条数，并限制重叠事件对有效样本量的虚增。
+const RATING_SAMPLE_LIMIT: usize = 30;
+const RATING_MAX_PER_OUTCOME_WINDOW: usize = 3;
 // 大块读取减少 DuckDB 对 rule_details/stock_data 的重复扫描；池化后每块内存仍可控。
 const ANCHOR_CHUNK_SIZE: usize = 8_192;
 const SHRINKAGE_STRENGTH: f64 = 8.0;
@@ -29,7 +37,7 @@ const TRIGGER_SIMILARITY_WEIGHT: f64 = 0.35;
 const PRICE_VOLUME_SIMILARITY_WEIGHT: f64 = 0.30;
 const INDICATOR_SIMILARITY_WEIGHT: f64 = 0.15;
 const MARKET_SIMILARITY_WEIGHT: f64 = 0.20;
-const INDEX_CODES: [&str; 3] = ["000001.SH", "399300.SZ", "000852.SH"];
+const DEFAULT_BENCHMARK_INDEX_CODE: &str = "000001.SH";
 const KERNEL_NAMES: [&str; 6] = [
     "均匀核",
     "短期指数核",
@@ -78,6 +86,7 @@ pub struct StrategyTriggerSimilarityRow {
     pub concept: Option<String>,
     pub candidate_start_trade_date: String,
     pub candidate_end_trade_date: String,
+    pub outcome_start_trade_date: String,
     pub outcome_end_trade_date: String,
     pub similarity_score: f64,
     pub trigger_similarity: f64,
@@ -104,6 +113,7 @@ pub struct StrategyTriggerSimilarityPageData {
     pub pool_segments: usize,
     pub outcome_trade_days: usize,
     pub historical_cutoff_date: String,
+    pub benchmark_index_code: String,
     pub kernel_names: Vec<String>,
     pub indicator_columns: Vec<String>,
     pub candidate_universe_count: usize,
@@ -148,6 +158,7 @@ struct MarketObservation {
 #[derive(Debug, Clone)]
 struct FutureObservation {
     trade_date: String,
+    open: f64,
     close: f64,
     high: f64,
     low: f64,
@@ -155,11 +166,18 @@ struct FutureObservation {
 
 #[derive(Debug, Clone)]
 struct Outcome {
+    start_trade_date: String,
     end_trade_date: String,
     return_pct: f64,
     excess_return_pct: Option<f64>,
     mfe_pct: f64,
     mae_pct: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BenchmarkObservation {
+    open: f64,
+    close: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -218,6 +236,29 @@ fn normalize_ts_code(ts_code: &str) -> String {
     } else {
         format!("{normalized}.BJ")
     }
+}
+
+fn resolve_benchmark_index_code(value: Option<&str>) -> Result<String, String> {
+    let code = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_BENCHMARK_INDEX_CODE)
+        .to_ascii_uppercase();
+    if INDEX_TS_CODES.contains(&code.as_str()) {
+        Ok(code)
+    } else {
+        Err(format!(
+            "不支持的评级基准指数: {code}，可选值为 {}",
+            INDEX_TS_CODES.join("、")
+        ))
+    }
+}
+
+pub fn list_strategy_trigger_similarity_benchmark_index_codes() -> Vec<String> {
+    INDEX_TS_CODES
+        .iter()
+        .map(|code| (*code).to_string())
+        .collect()
 }
 
 fn sql_string_literal(value: &str) -> String {
@@ -403,11 +444,7 @@ fn distinct_rule_names(events: &[RuleEvent]) -> Vec<String> {
 
 fn load_candidate_anchors(
     conn: &Connection,
-    target_events: &[RuleEvent],
     target_rule_names: &[String],
-    target_recent_start_date: &str,
-    target_end_date: &str,
-    history_start_date: &str,
     earliest_date: &str,
     cutoff_date: &str,
     all_trade_dates: &[String],
@@ -421,176 +458,41 @@ fn load_candidate_anchors(
         .map(|name| sql_string_literal(name))
         .collect::<Vec<_>>()
         .join(", ");
-    let daily_rule_columns = target_rule_names
-        .iter()
-        .enumerate()
-        .map(|(index, name)| {
-            format!(
-                "SUM(CASE WHEN rule_name = {} THEN TRY_CAST(rule_score AS DOUBLE) ELSE 0.0 END) AS rule_{index}",
-                sql_string_literal(name)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",\n                   ");
-    let base_rule_columns = (0..target_rule_names.len())
-        .map(|index| format!("COALESCE(d.rule_{index}, 0.0) AS rule_{index}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let profile_base_columns = (0..target_rule_names.len())
-        .map(|index| format!("rule_{index}"))
-        .chain(["total_count".to_string(), "total_score".to_string()])
-        .collect::<Vec<_>>();
-    let recent_days = window_trade_days.min(5);
-    let rolling_profile_columns = profile_base_columns
-        .iter()
-        .map(|column| {
-            format!(
-                "{column} AS {column}_current, \
-                 SUM({column}) OVER full_window / {window_trade_days}.0 AS {column}_full, \
-                 SUM({column}) OVER recent_window / {recent_days}.0 AS {column}_recent"
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let candidate_profile_exprs = profile_base_columns
-        .iter()
-        .flat_map(|column| {
-            [
-                format!("{column}_full"),
-                format!("{column}_recent"),
-                format!("{column}_current"),
-                format!("({column}_recent - {column}_full)"),
-            ]
-        })
-        .collect::<Vec<_>>();
-    let mut target_profile = Vec::with_capacity(candidate_profile_exprs.len());
-    for rule_name in target_rule_names {
-        let full_sum = target_events
-            .iter()
-            .filter(|event| event.rule_name == *rule_name)
-            .map(|event| event.score)
-            .sum::<f64>();
-        let recent_sum = target_events
-            .iter()
-            .filter(|event| {
-                event.rule_name == *rule_name
-                    && event.trade_date.as_str() >= target_recent_start_date
-            })
-            .map(|event| event.score)
-            .sum::<f64>();
-        let current = target_events
-            .iter()
-            .filter(|event| {
-                event.rule_name == *rule_name && event.trade_date.as_str() == target_end_date
-            })
-            .map(|event| event.score)
-            .sum::<f64>();
-        let full = full_sum / window_trade_days as f64;
-        let recent = recent_sum / recent_days as f64;
-        target_profile.extend([full, recent, current, recent - full]);
-    }
-    for score_mode in [false, true] {
-        let value = |event: &RuleEvent| if score_mode { event.score } else { 1.0 };
-        let full = target_events.iter().map(&value).sum::<f64>() / window_trade_days as f64;
-        let recent = target_events
-            .iter()
-            .filter(|event| event.trade_date.as_str() >= target_recent_start_date)
-            .map(&value)
-            .sum::<f64>()
-            / recent_days as f64;
-        let current = target_events
-            .iter()
-            .filter(|event| event.trade_date.as_str() == target_end_date)
-            .map(&value)
-            .sum::<f64>();
-        target_profile.extend([full, recent, current, recent - full]);
-    }
-    let dot_expr = candidate_profile_exprs
-        .iter()
-        .zip(&target_profile)
-        .map(|(expression, value)| format!("(({expression}) * {value:.17})"))
-        .collect::<Vec<_>>()
-        .join(" + ");
-    let candidate_norm_expr = candidate_profile_exprs
-        .iter()
-        .map(|expression| format!("(({expression}) * ({expression}))"))
-        .collect::<Vec<_>>()
-        .join(" + ");
-    let target_norm = target_profile
-        .iter()
-        .map(|value| value * value)
-        .sum::<f64>();
     let sql = format!(
         r#"
-        WITH daily AS (
-            SELECT ts_code, trade_date,
-                   {daily_rule_columns},
-                   COUNT(*)::DOUBLE AS total_count,
-                   SUM(TRY_CAST(rule_score AS DOUBLE)) AS total_score,
-                   MAX(CASE WHEN rule_name IN ({target_rule_literals}) THEN 1 ELSE 0 END) AS has_target_rule
+        WITH candidates AS (
+            SELECT DISTINCT ts_code, trade_date
             FROM rule_details
-            WHERE trade_date >= {history_start_date} AND trade_date <= {cutoff_date}
+            WHERE trade_date >= {earliest_date} AND trade_date <= {cutoff_date}
+              AND rule_name IN ({target_rule_literals})
               AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
               AND ABS(TRY_CAST(rule_score AS DOUBLE)) > {EPS}
-            GROUP BY ts_code, trade_date
-        ),
-        base AS (
-            SELECT s.ts_code, s.trade_date, {base_rule_columns},
-                   COALESCE(d.total_count, 0.0) AS total_count,
-                   COALESCE(d.total_score, 0.0) AS total_score,
-                   COALESCE(d.has_target_rule, 0) AS has_target_rule
-            FROM score_summary s
-            LEFT JOIN daily d USING (ts_code, trade_date)
-            WHERE s.trade_date >= {history_start_date} AND s.trade_date <= {cutoff_date}
-        ),
-        rolling AS (
-            SELECT ts_code, trade_date, has_target_rule, {rolling_profile_columns}
-            FROM base
-            WINDOW full_window AS (
-                PARTITION BY ts_code ORDER BY trade_date
-                ROWS BETWEEN {window_preceding} PRECEDING AND CURRENT ROW
-            ), recent_window AS (
-                PARTITION BY ts_code ORDER BY trade_date
-                ROWS BETWEEN {recent_preceding} PRECEDING AND CURRENT ROW
-            )
-        ),
-        candidates AS (
-            SELECT ts_code, trade_date,
-                   GREATEST(0.0, LEAST(100.0,
-                       50.0 * (1.0 + (({dot_expr}) + 1.0)
-                           / (SQRT(({candidate_norm_expr}) + 1.0) * SQRT({target_norm:.17} + 1.0)))
-                   )) AS cheap_trigger_similarity
-            FROM rolling
-            WHERE trade_date >= {earliest_date} AND has_target_rule = 1
         ),
         counted AS (
             SELECT *, COUNT(*) OVER () AS candidate_total
             FROM candidates
         ),
-        top_trigger AS MATERIALIZED (
+        recent_history AS MATERIALIZED (
             SELECT * FROM counted
-            ORDER BY cheap_trigger_similarity DESC, hash(ts_code, trade_date)
-            LIMIT {trigger_limit}
+            ORDER BY trade_date DESC, hash(ts_code, trade_date)
+            LIMIT {recent_limit}
         ),
         diverse_history AS (
             SELECT c.* FROM counted c
             WHERE NOT EXISTS (
-                SELECT 1 FROM top_trigger t
+                SELECT 1 FROM recent_history t
                 WHERE t.ts_code = c.ts_code AND t.trade_date = c.trade_date
             )
             ORDER BY hash(c.ts_code, c.trade_date)
             LIMIT {diversity_limit}
         )
-        SELECT ts_code, trade_date, candidate_total FROM top_trigger
+        SELECT ts_code, trade_date, candidate_total FROM recent_history
         UNION ALL
         SELECT ts_code, trade_date, candidate_total FROM diverse_history
         "#,
-        history_start_date = sql_string_literal(history_start_date),
         cutoff_date = sql_string_literal(cutoff_date),
         earliest_date = sql_string_literal(earliest_date),
-        window_preceding = window_trade_days.saturating_sub(1),
-        recent_preceding = recent_days.saturating_sub(1),
-        trigger_limit = TRIGGER_PREFILTER_ANCHORS,
+        recent_limit = RECENT_CANDIDATE_ANCHORS,
         diversity_limit = HISTORY_DIVERSITY_ANCHORS,
     );
     let mut stmt = conn
@@ -776,14 +678,15 @@ fn load_future_rows(
         r#"
         WITH anchors(anchor_id, ts_code, start_date, end_date) AS (VALUES {}),
         future AS (
-            SELECT a.anchor_id, s.trade_date, TRY_CAST(s.close AS DOUBLE) AS close_value,
+            SELECT a.anchor_id, s.trade_date, TRY_CAST(s.open AS DOUBLE) AS open_value,
+                   TRY_CAST(s.close AS DOUBLE) AS close_value,
                    TRY_CAST(s.high AS DOUBLE) AS high_value,
                    TRY_CAST(s.low AS DOUBLE) AS low_value,
                    ROW_NUMBER() OVER (PARTITION BY a.anchor_id ORDER BY s.trade_date) rn
             FROM anchors a JOIN trigger_market_db.stock_data s ON s.ts_code = a.ts_code
              AND s.trade_date > a.end_date AND s.trade_date <= {} AND s.adj_type = 'qfq'
         )
-        SELECT anchor_id, trade_date, close_value, high_value, low_value
+        SELECT anchor_id, trade_date, open_value, close_value, high_value, low_value
         FROM future WHERE rn <= {}
         ORDER BY anchor_id, trade_date
         "#,
@@ -800,19 +703,21 @@ fn load_future_rows(
     let mut out = HashMap::<usize, Vec<FutureObservation>>::new();
     while let Some(row) = rows.next().map_err(|e| format!("读取事件后验失败: {e}"))? {
         let anchor_id: i64 = row.get(0).map_err(|e| format!("读取事件编号失败: {e}"))?;
-        let close: Option<f64> = row.get(2).map_err(|e| format!("读取后验收盘价失败: {e}"))?;
-        let high: Option<f64> = row.get(3).map_err(|e| format!("读取后验最高价失败: {e}"))?;
-        let low: Option<f64> = row.get(4).map_err(|e| format!("读取后验最低价失败: {e}"))?;
-        let (Some(close), Some(high), Some(low)) = (close, high, low) else {
+        let open: Option<f64> = row.get(2).map_err(|e| format!("读取后验开盘价失败: {e}"))?;
+        let close: Option<f64> = row.get(3).map_err(|e| format!("读取后验收盘价失败: {e}"))?;
+        let high: Option<f64> = row.get(4).map_err(|e| format!("读取后验最高价失败: {e}"))?;
+        let low: Option<f64> = row.get(5).map_err(|e| format!("读取后验最低价失败: {e}"))?;
+        let (Some(open), Some(close), Some(high), Some(low)) = (open, close, high, low) else {
             continue;
         };
-        if !close.is_finite() || !high.is_finite() || !low.is_finite() {
+        if !open.is_finite() || !close.is_finite() || !high.is_finite() || !low.is_finite() {
             continue;
         }
         out.entry(anchor_id.max(0) as usize)
             .or_default()
             .push(FutureObservation {
                 trade_date: row.get(1).map_err(|e| format!("读取后验日期失败: {e}"))?,
+                open,
                 close,
                 high,
                 low,
@@ -879,7 +784,7 @@ fn load_market_environment(
     );
     let mut environment = MarketEnvironment {
         by_date: HashMap::new(),
-        channel_count: 7 + INDEX_CODES.len(),
+        channel_count: 7 + INDEX_TS_CODES.len(),
     };
     let mut stmt = conn
         .prepare(&sql)
@@ -900,7 +805,7 @@ fn load_market_environment(
         environment.by_date.insert(date, values);
     }
 
-    let placeholders = std::iter::repeat_n("?", INDEX_CODES.len())
+    let placeholders = std::iter::repeat_n("?", INDEX_TS_CODES.len())
         .collect::<Vec<_>>()
         .join(", ");
     let index_sql = format!(
@@ -908,7 +813,7 @@ fn load_market_environment(
          WHERE adj_type = 'ind' AND trade_date >= ? AND trade_date <= ? AND ts_code IN ({placeholders})"
     );
     let mut values = vec![start_date.to_string(), end_date.to_string()];
-    values.extend(INDEX_CODES.iter().map(|value| value.to_string()));
+    values.extend(INDEX_TS_CODES.iter().map(|value| value.to_string()));
     let mut stmt = conn
         .prepare(&index_sql)
         .map_err(|e| format!("预编译宽基环境查询失败: {e}"))?;
@@ -919,7 +824,10 @@ fn load_market_environment(
         let code: String = row.get(0).map_err(|e| format!("读取宽基代码失败: {e}"))?;
         let date: String = row.get(1).map_err(|e| format!("读取宽基日期失败: {e}"))?;
         let value: Option<f64> = row.get(2).map_err(|e| format!("读取宽基涨跌失败: {e}"))?;
-        if let Some(index) = INDEX_CODES.iter().position(|candidate| *candidate == code) {
+        if let Some(index) = INDEX_TS_CODES
+            .iter()
+            .position(|candidate| *candidate == code)
+        {
             environment
                 .by_date
                 .entry(date)
@@ -1249,15 +1157,16 @@ fn window_dates_for_anchor<'a>(anchor: &Anchor, dates: &'a [String]) -> &'a [Str
 }
 
 fn build_outcome(
-    market_rows: &[MarketObservation],
+    _market_rows: &[MarketObservation],
     future_rows: &[FutureObservation],
     horizon: usize,
-    index_closes: &HashMap<String, f64>,
+    benchmark_rows: &HashMap<String, BenchmarkObservation>,
 ) -> Option<Outcome> {
     if future_rows.len() != horizon {
         return None;
     }
-    let entry = market_rows.last()?.close.filter(|v| v.abs() > EPS)?;
+    let first = future_rows.first()?;
+    let entry = (first.open.abs() > EPS).then_some(first.open)?;
     let last = future_rows.last()?;
     let return_pct = (last.close / entry - 1.0) * 100.0;
     let mfe_pct = future_rows
@@ -1268,17 +1177,17 @@ fn build_outcome(
         .iter()
         .map(|r| (r.low / entry - 1.0) * 100.0)
         .fold(f64::INFINITY, f64::min);
-    let anchor_date = &market_rows.last()?.trade_date;
     let excess_return_pct = match (
-        index_closes.get(anchor_date),
-        index_closes.get(&last.trade_date),
+        benchmark_rows.get(&first.trade_date),
+        benchmark_rows.get(&last.trade_date),
     ) {
-        (Some(start), Some(end)) if start.abs() > EPS => {
-            Some(return_pct - (end / start - 1.0) * 100.0)
+        (Some(start), Some(end)) if start.open.abs() > EPS => {
+            Some(return_pct - (end.close / start.open - 1.0) * 100.0)
         }
         _ => None,
     };
     Some(Outcome {
+        start_trade_date: first.trade_date.clone(),
         end_trade_date: last.trade_date.clone(),
         return_pct,
         excess_return_pct,
@@ -1287,29 +1196,35 @@ fn build_outcome(
     })
 }
 
-fn load_index_close_map(
+fn load_benchmark_rows(
     conn: &Connection,
     start: &str,
     end: &str,
-) -> Result<HashMap<String, f64>, String> {
+    benchmark_index_code: &str,
+) -> Result<HashMap<String, BenchmarkObservation>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT trade_date, TRY_CAST(close AS DOUBLE) FROM trigger_market_db.stock_data \
-         WHERE adj_type='ind' AND ts_code='000001.SH' AND trade_date>=? AND trade_date<=?",
+            "SELECT trade_date, TRY_CAST(open AS DOUBLE), TRY_CAST(close AS DOUBLE) \
+             FROM trigger_market_db.stock_data \
+             WHERE adj_type='ind' AND ts_code=? AND trade_date>=? AND trade_date<=?",
         )
-        .map_err(|e| format!("预编译指数收盘价查询失败: {e}"))?;
+        .map_err(|e| format!("预编译基准指数行情查询失败: {e}"))?;
     let mut rows = stmt
-        .query(params![start, end])
-        .map_err(|e| format!("查询指数收盘价失败: {e}"))?;
+        .query(params![benchmark_index_code, start, end])
+        .map_err(|e| format!("查询基准指数行情失败: {e}"))?;
     let mut out = HashMap::new();
     while let Some(row) = rows
         .next()
-        .map_err(|e| format!("读取指数收盘价失败: {e}"))?
+        .map_err(|e| format!("读取基准指数行情失败: {e}"))?
     {
         let date: String = row.get(0).map_err(|e| format!("读取指数日期失败: {e}"))?;
-        let close: Option<f64> = row.get(1).map_err(|e| format!("读取指数收盘价失败: {e}"))?;
-        if let Some(close) = close.filter(|v| v.is_finite()) {
-            out.insert(date, close);
+        let open: Option<f64> = row.get(1).map_err(|e| format!("读取指数开盘价失败: {e}"))?;
+        let close: Option<f64> = row.get(2).map_err(|e| format!("读取指数收盘价失败: {e}"))?;
+        if let (Some(open), Some(close)) = (
+            open.filter(|value| value.is_finite()),
+            close.filter(|value| value.is_finite()),
+        ) {
+            out.insert(date, BenchmarkObservation { open, close });
         }
     }
     Ok(out)
@@ -1321,7 +1236,7 @@ struct SampleBuildContext<'a> {
     target_rule_names: &'a [String],
     all_trade_dates: &'a [String],
     environment_fingerprints: &'a HashMap<String, Vec<Option<Vec<f64>>>>,
-    index_closes: &'a HashMap<String, f64>,
+    benchmark_rows: &'a HashMap<String, BenchmarkObservation>,
     pool_segments: usize,
     outcome_trade_days: usize,
     target_trade_date: &'a str,
@@ -1394,7 +1309,7 @@ fn build_samples_for_chunk(
                         .map(Vec::as_slice)
                         .unwrap_or(&[]),
                     context.outcome_trade_days,
-                    context.index_closes,
+                    context.benchmark_rows,
                 )
             } else {
                 None
@@ -1515,6 +1430,63 @@ fn summarize_outcomes(
     }
 }
 
+fn build_rating_sample(
+    sorted_items: &[StrategyTriggerSimilarityRow],
+    all_trade_dates: &[String],
+    window_trade_days: usize,
+    outcome_trade_days: usize,
+) -> Vec<StrategyTriggerSimilarityRow> {
+    let date_indices = all_trade_dates
+        .iter()
+        .enumerate()
+        .map(|(index, date)| (date.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let same_stock_exclusion = window_trade_days.max(outcome_trade_days).max(1);
+    let outcome_exclusion = outcome_trade_days.max(1);
+    let mut selected = Vec::with_capacity(RATING_SAMPLE_LIMIT);
+    let mut selected_end_indices = Vec::<usize>::with_capacity(RATING_SAMPLE_LIMIT);
+    let mut selected_by_stock = HashMap::<&str, Vec<usize>>::new();
+
+    for item in sorted_items {
+        if item.forward_excess_return_pct.is_none() {
+            continue;
+        }
+        let Some(end_index) = date_indices
+            .get(item.candidate_end_trade_date.as_str())
+            .copied()
+        else {
+            continue;
+        };
+        let nearby_outcome_count = selected_end_indices
+            .iter()
+            .filter(|selected_index| selected_index.abs_diff(end_index) < outcome_exclusion)
+            .count();
+        if nearby_outcome_count >= RATING_MAX_PER_OUTCOME_WINDOW {
+            continue;
+        }
+        if selected_by_stock
+            .get(item.ts_code.as_str())
+            .is_some_and(|indices| {
+                indices
+                    .iter()
+                    .any(|selected_index| selected_index.abs_diff(end_index) < same_stock_exclusion)
+            })
+        {
+            continue;
+        }
+        selected_end_indices.push(end_index);
+        selected_by_stock
+            .entry(item.ts_code.as_str())
+            .or_default()
+            .push(end_index);
+        selected.push(item.clone());
+        if selected.len() >= RATING_SAMPLE_LIMIT {
+            break;
+        }
+    }
+    selected
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn get_strategy_trigger_similarity_page(
     source_path: String,
@@ -1523,6 +1495,7 @@ pub fn get_strategy_trigger_similarity_page(
     window_trade_days: Option<u32>,
     pool_segments: Option<u32>,
     outcome_trade_days: Option<u32>,
+    benchmark_index_code: Option<String>,
     limit: Option<u32>,
 ) -> Result<StrategyTriggerSimilarityPageData, String> {
     let source_path = source_path.trim().to_string();
@@ -1532,6 +1505,7 @@ pub fn get_strategy_trigger_similarity_page(
     let conn = open_result_conn(&source_path)?;
     let resolved_trade_date = resolve_existing_trade_date(&conn, trade_date)?;
     let resolved_ts_code = normalize_ts_code(&ts_code);
+    let benchmark_index_code = resolve_benchmark_index_code(benchmark_index_code.as_deref())?;
     let window_trade_days = window_trade_days
         .map(|v| v as usize)
         .filter(|v| *v >= 3)
@@ -1580,7 +1554,12 @@ pub fn get_strategy_trigger_similarity_page(
         window_trade_days,
         pool_segments,
     );
-    let index_closes = load_index_close_map(&conn, first_date, &resolved_trade_date)?;
+    let benchmark_rows = load_benchmark_rows(
+        &conn,
+        first_date,
+        &resolved_trade_date,
+        &benchmark_index_code,
+    )?;
     let target_anchor = Anchor {
         id: 0,
         ts_code: resolved_ts_code.clone(),
@@ -1592,7 +1571,7 @@ pub fn get_strategy_trigger_similarity_page(
         target_rule_names: &target_rule_names,
         all_trade_dates: &all_trade_dates,
         environment_fingerprints: &environment_fingerprints,
-        index_closes: &index_closes,
+        benchmark_rows: &benchmark_rows,
         pool_segments,
         outcome_trade_days,
         target_trade_date: &resolved_trade_date,
@@ -1611,15 +1590,9 @@ pub fn get_strategy_trigger_similarity_page(
         .get(window_trade_days.saturating_sub(1))
         .map(String::as_str)
         .unwrap_or(&all_trade_dates[0]);
-    let target_recent_start_date =
-        &all_trade_dates[(target_end_index + 1).saturating_sub(window_trade_days.min(5))];
     let (candidate_anchors, candidate_universe_count) = load_candidate_anchors(
         &conn,
-        &target_events,
         &target_rule_names,
-        target_recent_start_date,
-        &resolved_trade_date,
-        first_date,
         earliest_candidate_date,
         &historical_cutoff_date,
         &all_trade_dates,
@@ -1673,6 +1646,7 @@ pub fn get_strategy_trigger_similarity_page(
                 ts_code: sample.anchor.ts_code,
                 candidate_start_trade_date: sample.anchor.start_trade_date,
                 candidate_end_trade_date: sample.anchor.end_trade_date,
+                outcome_start_trade_date: outcome.start_trade_date,
                 outcome_end_trade_date: outcome.end_trade_date,
                 similarity_score,
                 trigger_similarity,
@@ -1698,8 +1672,14 @@ pub fn get_strategy_trigger_similarity_page(
             .then_with(|| b.candidate_end_trade_date.cmp(&a.candidate_end_trade_date))
             .then_with(|| a.ts_code.cmp(&b.ts_code))
     });
+    let rating_sample = build_rating_sample(
+        &items,
+        &all_trade_dates,
+        window_trade_days,
+        outcome_trade_days,
+    );
+    let outcome_summary = summarize_outcomes(&rating_sample);
     items.truncate(limit);
-    let outcome_summary = summarize_outcomes(&items);
     let target_dimension = target_sample.fingerprint.dimension();
     Ok(StrategyTriggerSimilarityPageData {
         resolved_trade_date: resolved_trade_date.clone(),
@@ -1708,6 +1688,7 @@ pub fn get_strategy_trigger_similarity_page(
         pool_segments,
         outcome_trade_days,
         historical_cutoff_date,
+        benchmark_index_code,
         kernel_names: KERNEL_NAMES.iter().map(|v| v.to_string()).collect(),
         indicator_columns: schema.indicator_columns,
         candidate_universe_count,
@@ -1733,10 +1714,40 @@ pub fn get_strategy_trigger_similarity_page(
 #[cfg(test)]
 mod tests {
     use super::{
-        INDICATOR_SIMILARITY_WEIGHT, KERNEL_NAMES, MARKET_SIMILARITY_WEIGHT,
-        PRICE_VOLUME_SIMILARITY_WEIGHT, TRIGGER_SIMILARITY_WEIGHT, cosine_similarity,
-        final_similarity, temporal_signature, weighted_quantile, weighted_winsorized_mean,
+        BenchmarkObservation, FutureObservation, INDEX_TS_CODES, INDICATOR_SIMILARITY_WEIGHT,
+        KERNEL_NAMES, MARKET_SIMILARITY_WEIGHT, PRICE_VOLUME_SIMILARITY_WEIGHT,
+        StrategyTriggerSimilarityRow, TRIGGER_SIMILARITY_WEIGHT, build_outcome,
+        build_rating_sample, cosine_similarity, final_similarity,
+        list_strategy_trigger_similarity_benchmark_index_codes, resolve_benchmark_index_code,
+        temporal_signature, weighted_quantile, weighted_winsorized_mean,
     };
+
+    fn similarity_row(ts_code: &str, end_trade_date: &str) -> StrategyTriggerSimilarityRow {
+        StrategyTriggerSimilarityRow {
+            ts_code: ts_code.to_string(),
+            name: None,
+            industry: None,
+            concept: None,
+            candidate_start_trade_date: end_trade_date.to_string(),
+            candidate_end_trade_date: end_trade_date.to_string(),
+            outcome_start_trade_date: end_trade_date.to_string(),
+            outcome_end_trade_date: end_trade_date.to_string(),
+            similarity_score: 90.0,
+            trigger_similarity: 90.0,
+            price_volume_similarity: Some(90.0),
+            indicator_similarity: Some(90.0),
+            market_similarity: Some(90.0),
+            matched_rule_count: 1,
+            matched_rule_names: vec!["test".to_string()],
+            candidate_trigger_count: 1,
+            forward_return_pct: 1.0,
+            forward_excess_return_pct: Some(0.5),
+            mfe_pct: 2.0,
+            mae_pct: -1.0,
+            total_score: Some(1.0),
+            rank: Some(1),
+        }
+    }
 
     #[test]
     fn temporal_signature_contains_pool_and_multiple_kernels() {
@@ -1774,5 +1785,85 @@ mod tests {
         assert_eq!(weighted_quantile(&values, 0.9), Some(8.0));
         let winsorized = weighted_winsorized_mean(&values, 0.1).expect("winsorized mean");
         assert!((winsorized - 4.4).abs() < 1e-12);
+    }
+
+    #[test]
+    fn benchmark_index_is_configurable_but_validated() {
+        assert_eq!(
+            list_strategy_trigger_similarity_benchmark_index_codes(),
+            INDEX_TS_CODES.map(str::to_string)
+        );
+        for code in INDEX_TS_CODES {
+            assert_eq!(
+                resolve_benchmark_index_code(Some(code)).as_deref(),
+                Ok(code)
+            );
+        }
+        assert!(resolve_benchmark_index_code(Some("invalid")).is_err());
+    }
+
+    #[test]
+    fn outcome_uses_next_day_open_for_stock_and_benchmark() {
+        let future = vec![
+            FutureObservation {
+                trade_date: "20240102".to_string(),
+                open: 100.0,
+                close: 105.0,
+                high: 110.0,
+                low: 95.0,
+            },
+            FutureObservation {
+                trade_date: "20240103".to_string(),
+                open: 106.0,
+                close: 121.0,
+                high: 125.0,
+                low: 104.0,
+            },
+        ];
+        let benchmark = std::collections::HashMap::from([
+            (
+                "20240102".to_string(),
+                BenchmarkObservation {
+                    open: 100.0,
+                    close: 103.0,
+                },
+            ),
+            (
+                "20240103".to_string(),
+                BenchmarkObservation {
+                    open: 104.0,
+                    close: 110.0,
+                },
+            ),
+        ]);
+        let outcome = build_outcome(&[], &future, 2, &benchmark).expect("outcome");
+        assert_eq!(outcome.start_trade_date, "20240102");
+        assert!((outcome.return_pct - 21.0).abs() < 1e-9);
+        assert!((outcome.excess_return_pct.expect("excess") - 11.0).abs() < 1e-9);
+        assert!((outcome.mfe_pct - 25.0).abs() < 1e-9);
+        assert!((outcome.mae_pct + 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rating_sample_rejects_overlapping_stock_and_market_windows() {
+        let dates = (1..=12)
+            .map(|day| format!("202401{day:02}"))
+            .collect::<Vec<_>>();
+        let rows = vec![
+            similarity_row("A", "20240105"),
+            similarity_row("A", "20240106"),
+            similarity_row("B", "20240105"),
+            similarity_row("C", "20240105"),
+            similarity_row("D", "20240105"),
+            similarity_row("E", "20240110"),
+        ];
+        let selected = build_rating_sample(&rows, &dates, 5, 3);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|item| item.ts_code.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "B", "C", "E"]
+        );
     }
 }

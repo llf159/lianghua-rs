@@ -42,7 +42,7 @@
 
 .trigger-sim-form-grid {
   display: grid;
-  grid-template-columns: minmax(160px, 0.8fr) minmax(300px, 1.6fr) repeat(4, minmax(110px, 0.55fr)) auto;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(300px, 1.6fr) repeat(5, minmax(110px, 0.55fr)) auto;
   gap: 10px;
   align-items: end;
 }

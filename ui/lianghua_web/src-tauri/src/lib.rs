@@ -171,6 +171,7 @@ use lianghua_rs::ui_tools::{
     },
     strategy_trigger_similarity::{
         get_strategy_trigger_similarity_page as core_get_strategy_trigger_similarity_page,
+        list_strategy_trigger_similarity_benchmark_index_codes as core_list_strategy_trigger_similarity_benchmark_index_codes,
         StrategyTriggerSimilarityPageData,
     },
     strategy_manage::{
@@ -909,6 +910,11 @@ async fn get_stock_similarity_page(
 }
 
 #[tauri::command]
+fn list_strategy_trigger_similarity_benchmark_index_codes() -> Vec<String> {
+    core_list_strategy_trigger_similarity_benchmark_index_codes()
+}
+
+#[tauri::command]
 async fn get_strategy_trigger_similarity_page(
     source_path: String,
     trade_date: Option<String>,
@@ -916,6 +922,7 @@ async fn get_strategy_trigger_similarity_page(
     window_trade_days: Option<u32>,
     pool_segments: Option<u32>,
     outcome_trade_days: Option<u32>,
+    benchmark_index_code: Option<String>,
     limit: Option<u32>,
 ) -> Result<StrategyTriggerSimilarityPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -926,6 +933,7 @@ async fn get_strategy_trigger_similarity_page(
             window_trade_days,
             pool_segments,
             outcome_trade_days,
+            benchmark_index_code,
             limit,
         )
     })
@@ -2446,6 +2454,7 @@ pub fn run() {
             get_stock_detail_intraday,
             get_stock_detail_intraday_snapshot,
             get_stock_similarity_page,
+            list_strategy_trigger_similarity_benchmark_index_codes,
             get_strategy_trigger_similarity_page,
             get_strategy_statistics_page,
             get_strategy_paper_validation_defaults,

@@ -33,6 +33,7 @@ export type StrategyTriggerSimilarityRow = {
   concept?: string | null
   candidateStartTradeDate: string
   candidateEndTradeDate: string
+  outcomeStartTradeDate: string
   outcomeEndTradeDate: string
   similarityScore: number
   triggerSimilarity: number
@@ -57,6 +58,7 @@ export type StrategyTriggerSimilarityPageData = {
   poolSegments: number
   outcomeTradeDays: number
   historicalCutoffDate: string
+  benchmarkIndexCode: string
   kernelNames: string[]
   indicatorColumns: string[]
   candidateUniverseCount: number
@@ -75,7 +77,12 @@ export type StrategyTriggerSimilarityQuery = {
   windowTradeDays?: number
   poolSegments?: number
   outcomeTradeDays?: number
+  benchmarkIndexCode?: string
   limit?: number
+}
+
+export async function listStrategyTriggerSimilarityBenchmarkIndexCodes() {
+  return invoke<string[]>('list_strategy_trigger_similarity_benchmark_index_codes')
 }
 
 export async function getStrategyTriggerSimilarityPage(query: StrategyTriggerSimilarityQuery) {

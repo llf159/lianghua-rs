@@ -3,6 +3,7 @@ import { ensureManagedSourcePath } from '../../apis/managedSource'
 import { listRankTradeDates, listStockLookupRows, type StockLookupRow } from '../../apis/reader'
 import {
   getStrategyTriggerSimilarityPage,
+  listStrategyTriggerSimilarityBenchmarkIndexCodes,
   type StrategyTriggerSimilarityPageData,
   type StrategyTriggerSimilarityOutcomeSummary,
 } from '../../apis/strategyTriggerSimilarity'
@@ -26,6 +27,20 @@ const DEFAULT_WINDOW_TRADE_DAYS = '20'
 const DEFAULT_POOL_SEGMENTS = '5'
 const DEFAULT_OUTCOME_TRADE_DAYS = '5'
 const DEFAULT_LIMIT = '30'
+const DEFAULT_BENCHMARK_INDEX_CODE = '000001.SH'
+const BENCHMARK_INDEX_LABELS: Record<string, string> = {
+  '000001.SH': '上证指数',
+  '399001.SZ': '深证成指',
+  '399300.SZ': '沪深300',
+  '399905.SZ': '中证500',
+  '399006.SZ': '创业板指',
+  '000016.SH': '上证50',
+  '000852.SH': '中证1000',
+}
+
+function benchmarkIndexLabel(code: string) {
+  return BENCHMARK_INDEX_LABELS[code] || code
+}
 
 function parsePositiveInt(value: string, fallback: number) {
   const parsed = Number.parseInt(value.trim(), 10)
@@ -98,6 +113,10 @@ export default function StrategyTriggerSimilarityPage() {
   const [outcomeTradeDaysInput, setOutcomeTradeDaysInput] = useState(
     DEFAULT_OUTCOME_TRADE_DAYS,
   )
+  const [benchmarkIndexCodes, setBenchmarkIndexCodes] = useState<string[]>([
+    DEFAULT_BENCHMARK_INDEX_CODE,
+  ])
+  const [benchmarkIndexCode, setBenchmarkIndexCode] = useState(DEFAULT_BENCHMARK_INDEX_CODE)
   const [limitInput, setLimitInput] = useState(DEFAULT_LIMIT)
   const [loading, setLoading] = useState(false)
   const [initLoading, setInitLoading] = useState(true)
@@ -145,9 +164,10 @@ export default function StrategyTriggerSimilarityPage() {
           return
         }
         setSourcePath(resolvedSourcePath)
-        const [dates, stocks] = await Promise.all([
+        const [dates, stocks, indexCodes] = await Promise.all([
           listRankTradeDates(resolvedSourcePath),
           listStockLookupRows(resolvedSourcePath),
+          listStrategyTriggerSimilarityBenchmarkIndexCodes(),
         ])
         if (cancelled) {
           return
@@ -156,6 +176,10 @@ export default function StrategyTriggerSimilarityPage() {
         setTradeDateOptions(normalizedDates)
         setTradeDateInput((current) => pickDateValue(current, normalizedDates))
         setLookupRows(stocks)
+        setBenchmarkIndexCodes(indexCodes)
+        setBenchmarkIndexCode((current) =>
+          indexCodes.includes(current) ? current : indexCodes[0] || DEFAULT_BENCHMARK_INDEX_CODE,
+        )
       } catch (loadError) {
         if (!cancelled) {
           setError(`初始化失败: ${String(loadError)}`)
@@ -202,6 +226,7 @@ export default function StrategyTriggerSimilarityPage() {
           outcomeTradeDaysInput,
           Number(DEFAULT_OUTCOME_TRADE_DAYS),
         ),
+        benchmarkIndexCode,
         limit: parsePositiveInt(limitInput, Number(DEFAULT_LIMIT)),
       })
       setData(result)
@@ -320,6 +345,20 @@ export default function StrategyTriggerSimilarityPage() {
           </label>
 
           <label className="trigger-sim-field">
+            <span>评级基准指数</span>
+            <select
+              value={benchmarkIndexCode}
+              onChange={(event) => setBenchmarkIndexCode(event.target.value)}
+            >
+              {benchmarkIndexCodes.map((code) => (
+                <option key={code} value={code}>
+                  {benchmarkIndexLabel(code)} · {code}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="trigger-sim-field">
             <span>结果数量</span>
             <input
               type="number"
@@ -356,8 +395,8 @@ export default function StrategyTriggerSimilarityPage() {
               </p>
             </div>
             <span>
-              有效样本 {formatNumber(data.outcomeSummary.effectiveSampleCount, 1)} / 返回{' '}
-              {data.outcomeSummary.sampleCount}
+              评级样本 {data.outcomeSummary.sampleCount} / 有效{' '}
+              {formatNumber(data.outcomeSummary.effectiveSampleCount, 1)}
             </span>
           </div>
 
@@ -420,7 +459,9 @@ export default function StrategyTriggerSimilarityPage() {
             </div>
           </div>
           <p className="trigger-sim-direction-note">
-            稳健方向仅在去极值超额、加权超额中位数和超额胜率三项方向一致时给出。
+            收益区间为事件次日开盘至周期末收盘，超额基准为
+            {benchmarkIndexLabel(data.benchmarkIndexCode)}；评级固定最多取 30 个去重叠样本，
+            仅在去极值超额、加权超额中位数和超额胜率三项方向一致时给出方向。
           </p>
 
           <div className="trigger-sim-engine-meta">
@@ -431,7 +472,7 @@ export default function StrategyTriggerSimilarityPage() {
             <span>
               事件全集 {data.candidateUniverseCount} / 入选 {data.candidateAnchorCount} / 有效{' '}
               {data.evaluatedAnchorCount}
-              {data.candidatePoolTruncated ? '（已达安全上限）' : ''}
+              {data.candidatePoolTruncated ? '（最近主体 + 全历史分散补样）' : ''}
             </span>
           </div>
           {data.indicatorColumns.length > 0 ? (
@@ -520,7 +561,9 @@ export default function StrategyTriggerSimilarityPage() {
                       <td>{formatNumber(row.marketSimilarity, 1)}</td>
                       <td className={outcomeTone(row.forwardReturnPct)}>
                         {formatPercent(row.forwardReturnPct)}
-                        <span className="trigger-sim-date-separator">至 {row.outcomeEndTradeDate}</span>
+                        <span className="trigger-sim-date-separator">
+                          {row.outcomeStartTradeDate} 至 {row.outcomeEndTradeDate}
+                        </span>
                       </td>
                       <td className={outcomeTone(row.forwardExcessReturnPct)}>
                         {formatPercent(row.forwardExcessReturnPct)}
