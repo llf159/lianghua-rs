@@ -914,7 +914,8 @@ async fn get_strategy_trigger_similarity_page(
     trade_date: Option<String>,
     ts_code: String,
     window_trade_days: Option<u32>,
-    max_gap_trade_days: Option<u32>,
+    pool_segments: Option<u32>,
+    outcome_trade_days: Option<u32>,
     limit: Option<u32>,
 ) -> Result<StrategyTriggerSimilarityPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -923,7 +924,8 @@ async fn get_strategy_trigger_similarity_page(
             trade_date,
             ts_code,
             window_trade_days,
-            max_gap_trade_days,
+            pool_segments,
+            outcome_trade_days,
             limit,
         )
     })

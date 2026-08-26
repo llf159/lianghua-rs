@@ -22,7 +22,8 @@ import './css/StrategyTriggerSimilarityPage.css'
 
 const MAX_STOCK_NAME_CANDIDATES = 12
 const DEFAULT_WINDOW_TRADE_DAYS = '20'
-const DEFAULT_MAX_GAP_TRADE_DAYS = '5'
+const DEFAULT_POOL_SEGMENTS = '5'
+const DEFAULT_OUTCOME_TRADE_DAYS = '5'
 const DEFAULT_LIMIT = '30'
 
 function parsePositiveInt(value: string, fallback: number) {
@@ -30,16 +31,25 @@ function parsePositiveInt(value: string, fallback: number) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
 }
 
-function parseNonNegativeInt(value: string, fallback: number) {
-  const parsed = Number.parseInt(value.trim(), 10)
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
-}
-
 function formatNumber(value: number | null | undefined, digits = 1) {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return '--'
   }
   return value.toFixed(digits)
+}
+
+function formatPercent(value: number | null | undefined, digits = 2) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '--'
+  }
+  return `${value > 0 ? '+' : ''}${value.toFixed(digits)}%`
+}
+
+function outcomeTone(value: number | null | undefined) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value === 0) {
+    return ''
+  }
+  return value > 0 ? ' is-positive' : ' is-negative'
 }
 
 function displayStockName(row: { tsCode: string; name?: string | null }) {
@@ -60,7 +70,10 @@ export default function StrategyTriggerSimilarityPage() {
   const [lookupInput, setLookupInput] = useState('')
   const [lookupFocused, setLookupFocused] = useState(false)
   const [windowTradeDaysInput, setWindowTradeDaysInput] = useState(DEFAULT_WINDOW_TRADE_DAYS)
-  const [maxGapTradeDaysInput, setMaxGapTradeDaysInput] = useState(DEFAULT_MAX_GAP_TRADE_DAYS)
+  const [poolSegmentsInput, setPoolSegmentsInput] = useState(DEFAULT_POOL_SEGMENTS)
+  const [outcomeTradeDaysInput, setOutcomeTradeDaysInput] = useState(
+    DEFAULT_OUTCOME_TRADE_DAYS,
+  )
   const [limitInput, setLimitInput] = useState(DEFAULT_LIMIT)
   const [loading, setLoading] = useState(false)
   const [initLoading, setInitLoading] = useState(true)
@@ -159,9 +172,10 @@ export default function StrategyTriggerSimilarityPage() {
         tradeDate: tradeDateInput || undefined,
         tsCode: readTargetCode,
         windowTradeDays: parsePositiveInt(windowTradeDaysInput, Number(DEFAULT_WINDOW_TRADE_DAYS)),
-        maxGapTradeDays: parseNonNegativeInt(
-          maxGapTradeDaysInput,
-          Number(DEFAULT_MAX_GAP_TRADE_DAYS),
+        poolSegments: parsePositiveInt(poolSegmentsInput, Number(DEFAULT_POOL_SEGMENTS)),
+        outcomeTradeDays: parsePositiveInt(
+          outcomeTradeDaysInput,
+          Number(DEFAULT_OUTCOME_TRADE_DAYS),
         ),
         limit: parsePositiveInt(limitInput, Number(DEFAULT_LIMIT)),
       })
@@ -258,13 +272,25 @@ export default function StrategyTriggerSimilarityPage() {
           </label>
 
           <label className="trigger-sim-field">
-            <span>最大错位交易日</span>
+            <span>池化分段</span>
             <input
               type="number"
-              min={0}
+              min={1}
+              max={12}
               step={1}
-              value={maxGapTradeDaysInput}
-              onChange={(event) => setMaxGapTradeDaysInput(event.target.value)}
+              value={poolSegmentsInput}
+              onChange={(event) => setPoolSegmentsInput(event.target.value)}
+            />
+          </label>
+
+          <label className="trigger-sim-field">
+            <span>后验交易日</span>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={outcomeTradeDaysInput}
+              onChange={(event) => setOutcomeTradeDaysInput(event.target.value)}
             />
           </label>
 
@@ -294,6 +320,78 @@ export default function StrategyTriggerSimilarityPage() {
         {error ? <div className="trigger-sim-error">{error}</div> : null}
       </section>
 
+      {data ? (
+        <section className="trigger-sim-card trigger-sim-experience-card">
+          <div className="trigger-sim-result-head">
+            <div>
+              <h3>相似事件经验</h3>
+              <p>
+                仅使用 {data.historicalCutoffDate} 以前触发、且已完整走完 {data.outcomeTradeDays}{' '}
+                个交易日的历史事件
+              </p>
+            </div>
+            <span>
+              有效样本 {formatNumber(data.outcomeSummary.effectiveSampleCount, 1)} / 返回{' '}
+              {data.outcomeSummary.sampleCount}
+            </span>
+          </div>
+
+          <div className="trigger-sim-metric-grid">
+            <div className="trigger-sim-metric">
+              <span>加权收益</span>
+              <strong className={outcomeTone(data.outcomeSummary.weightedReturnPct)}>
+                {formatPercent(data.outcomeSummary.weightedReturnPct)}
+              </strong>
+            </div>
+            <div className="trigger-sim-metric">
+              <span>加权超额</span>
+              <strong className={outcomeTone(data.outcomeSummary.weightedExcessReturnPct)}>
+                {formatPercent(data.outcomeSummary.weightedExcessReturnPct)}
+              </strong>
+            </div>
+            <div className="trigger-sim-metric trigger-sim-metric-primary">
+              <span>收缩后超额</span>
+              <strong className={outcomeTone(data.outcomeSummary.shrunkExcessReturnPct)}>
+                {formatPercent(data.outcomeSummary.shrunkExcessReturnPct)}
+              </strong>
+            </div>
+            <div className="trigger-sim-metric">
+              <span>加权胜率</span>
+              <strong>{formatPercent(data.outcomeSummary.weightedPositiveRate, 1)}</strong>
+            </div>
+            <div className="trigger-sim-metric">
+              <span>平均 MFE</span>
+              <strong className={outcomeTone(data.outcomeSummary.weightedMfePct)}>
+                {formatPercent(data.outcomeSummary.weightedMfePct)}
+              </strong>
+            </div>
+            <div className="trigger-sim-metric">
+              <span>平均 MAE</span>
+              <strong className={outcomeTone(data.outcomeSummary.weightedMaePct)}>
+                {formatPercent(data.outcomeSummary.weightedMaePct)}
+              </strong>
+            </div>
+          </div>
+
+          <div className="trigger-sim-engine-meta">
+            <span>指纹 {data.target.pooledFeatureDimension} 维</span>
+            <span>池化 {data.poolSegments} 段</span>
+            <span>{data.kernelNames.join(' · ')}</span>
+            <span>数据库指标 {data.indicatorColumns.length} 个</span>
+            <span>
+              事件池 {data.candidateAnchorCount} / 有效 {data.evaluatedAnchorCount}
+              {data.candidatePoolTruncated ? '（已达安全上限）' : ''}
+            </span>
+          </div>
+          {data.indicatorColumns.length > 0 ? (
+            <details className="trigger-sim-indicator-details">
+              <summary>查看参与计算的数据库指标</summary>
+              <p>{data.indicatorColumns.join('、')}</p>
+            </details>
+          ) : null}
+        </section>
+      ) : null}
+
       <section className="trigger-sim-card">
         <div className="trigger-sim-result-head">
           <div>
@@ -306,7 +404,7 @@ export default function StrategyTriggerSimilarityPage() {
           </div>
           {data ? (
             <span>
-              {data.items.length} 条 · 窗口 {data.windowTradeDays} · 错位 {data.maxGapTradeDays}
+              {data.items.length} 条 · 窗口 {data.windowTradeDays} · 后验 {data.outcomeTradeDays}
             </span>
           ) : null}
         </div>
@@ -314,7 +412,7 @@ export default function StrategyTriggerSimilarityPage() {
         {!data ? (
           <div className="trigger-sim-empty">暂无查询结果</div>
         ) : data.items.length === 0 ? (
-          <div className="trigger-sim-empty">没有找到策略触发时间相似的股票</div>
+          <div className="trigger-sim-empty">没有找到具备完整量价窗口和后验的历史触发事件</div>
         ) : (
           <div className="trigger-sim-table-wrap">
             <table className="trigger-sim-table">
@@ -324,12 +422,15 @@ export default function StrategyTriggerSimilarityPage() {
                   <th>匹配区间</th>
                   <th>行业</th>
                   <th>概念</th>
-                  <th>双向相似度</th>
-                  <th>匹配触发</th>
-                  <th>平均错位</th>
-                  <th>候选触发</th>
-                  <th>总分</th>
-                  <th>总榜</th>
+                  <th>综合相似</th>
+                  <th>触发</th>
+                  <th>量价</th>
+                  <th>指标</th>
+                  <th>市场</th>
+                  <th>后验收益</th>
+                  <th>后验超额</th>
+                  <th>MFE / MAE</th>
+                  <th>规则</th>
                 </tr>
               </thead>
               <tbody>
@@ -362,11 +463,29 @@ export default function StrategyTriggerSimilarityPage() {
                         {conceptText}
                       </td>
                       <td>{formatNumber(row.similarityScore, 1)}</td>
-                      <td>{row.matchedEventCount}</td>
-                      <td>{formatNumber(row.avgDateGapTradeDays, 2)}</td>
-                      <td>{row.candidateTriggerCount}</td>
-                      <td>{formatNumber(row.totalScore, 1)}</td>
-                      <td>{row.rank === null || row.rank === undefined ? '--' : `#${row.rank}`}</td>
+                      <td>{formatNumber(row.triggerSimilarity, 1)}</td>
+                      <td>{formatNumber(row.priceVolumeSimilarity, 1)}</td>
+                      <td>{formatNumber(row.indicatorSimilarity, 1)}</td>
+                      <td>{formatNumber(row.marketSimilarity, 1)}</td>
+                      <td className={outcomeTone(row.forwardReturnPct)}>
+                        {formatPercent(row.forwardReturnPct)}
+                        <span className="trigger-sim-date-separator">至 {row.outcomeEndTradeDate}</span>
+                      </td>
+                      <td className={outcomeTone(row.forwardExcessReturnPct)}>
+                        {formatPercent(row.forwardExcessReturnPct)}
+                      </td>
+                      <td>
+                        <span className="is-positive">{formatPercent(row.mfePct)}</span>
+                        <span className="trigger-sim-date-separator is-negative">
+                          {formatPercent(row.maePct)}
+                        </span>
+                      </td>
+                      <td
+                        className="trigger-sim-rules-cell"
+                        title={row.matchedRuleNames.join('、')}
+                      >
+                        {row.matchedRuleCount} / {row.candidateTriggerCount}
+                      </td>
                     </tr>
                   )
                 })}

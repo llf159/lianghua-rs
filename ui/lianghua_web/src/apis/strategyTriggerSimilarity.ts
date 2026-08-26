@@ -1,13 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
 
-export type StrategyTriggerSimilarityMatchedEvent = {
-  ruleName: string
-  targetTradeDate: string
-  candidateTradeDate: string
-  dateGapTradeDays: number
-  eventScore: number
-}
-
 export type StrategyTriggerSimilarityTarget = {
   tsCode: string
   name?: string | null
@@ -17,6 +9,18 @@ export type StrategyTriggerSimilarityTarget = {
   endTradeDate: string
   triggerCount: number
   ruleNames: string[]
+  pooledFeatureDimension: number
+}
+
+export type StrategyTriggerSimilarityOutcomeSummary = {
+  sampleCount: number
+  effectiveSampleCount: number
+  weightedReturnPct?: number | null
+  weightedExcessReturnPct?: number | null
+  shrunkExcessReturnPct?: number | null
+  weightedPositiveRate?: number | null
+  weightedMfePct?: number | null
+  weightedMaePct?: number | null
 }
 
 export type StrategyTriggerSimilarityRow = {
@@ -26,14 +30,19 @@ export type StrategyTriggerSimilarityRow = {
   concept?: string | null
   candidateStartTradeDate: string
   candidateEndTradeDate: string
+  outcomeEndTradeDate: string
   similarityScore: number
-  matchedEventCount: number
-  targetTriggerCount: number
+  triggerSimilarity: number
+  priceVolumeSimilarity?: number | null
+  indicatorSimilarity?: number | null
+  marketSimilarity?: number | null
   candidateTriggerCount: number
   matchedRuleCount: number
-  avgDateGapTradeDays?: number | null
   matchedRuleNames: string[]
-  matchedEvents: StrategyTriggerSimilarityMatchedEvent[]
+  forwardReturnPct: number
+  forwardExcessReturnPct?: number | null
+  mfePct: number
+  maePct: number
   totalScore?: number | null
   rank?: number | null
 }
@@ -42,8 +51,16 @@ export type StrategyTriggerSimilarityPageData = {
   resolvedTradeDate: string
   resolvedTsCode: string
   windowTradeDays: number
-  maxGapTradeDays: number
+  poolSegments: number
+  outcomeTradeDays: number
+  historicalCutoffDate: string
+  kernelNames: string[]
+  indicatorColumns: string[]
+  candidateAnchorCount: number
+  evaluatedAnchorCount: number
+  candidatePoolTruncated: boolean
   target: StrategyTriggerSimilarityTarget
+  outcomeSummary: StrategyTriggerSimilarityOutcomeSummary
   items: StrategyTriggerSimilarityRow[]
 }
 
@@ -52,7 +69,8 @@ export type StrategyTriggerSimilarityQuery = {
   tradeDate?: string
   tsCode: string
   windowTradeDays?: number
-  maxGapTradeDays?: number
+  poolSegments?: number
+  outcomeTradeDays?: number
   limit?: number
 }
 
