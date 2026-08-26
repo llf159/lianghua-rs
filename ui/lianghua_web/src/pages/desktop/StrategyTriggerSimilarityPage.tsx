@@ -4,6 +4,7 @@ import { listRankTradeDates, listStockLookupRows, type StockLookupRow } from '..
 import {
   getStrategyTriggerSimilarityPage,
   type StrategyTriggerSimilarityPageData,
+  type StrategyTriggerSimilarityOutcomeSummary,
 } from '../../apis/strategyTriggerSimilarity'
 import {
   buildStockLookupCandidates,
@@ -50,6 +51,29 @@ function outcomeTone(value: number | null | undefined) {
     return ''
   }
   return value > 0 ? ' is-positive' : ' is-negative'
+}
+
+function assessRobustDirection(summary: StrategyTriggerSimilarityOutcomeSummary) {
+  const winsorized = summary.winsorizedExcessReturnPct
+  const median = summary.weightedMedianExcessReturnPct
+  const positiveRate = summary.weightedExcessPositiveRate
+  if (
+    typeof winsorized !== 'number' ||
+    !Number.isFinite(winsorized) ||
+    typeof median !== 'number' ||
+    !Number.isFinite(median) ||
+    typeof positiveRate !== 'number' ||
+    !Number.isFinite(positiveRate)
+  ) {
+    return { label: '样本不足', tone: 0 }
+  }
+  if (winsorized > 0 && median > 0 && positiveRate > 50) {
+    return { label: '偏正', tone: 1 }
+  }
+  if (winsorized < 0 && median < 0 && positiveRate < 50) {
+    return { label: '偏负', tone: -1 }
+  }
+  return { label: '方向分歧', tone: 0 }
 }
 
 function displayStockName(row: { tsCode: string; name?: string | null }) {
@@ -108,6 +132,7 @@ export default function StrategyTriggerSimilarityPage() {
       })),
     [data, sourcePath],
   )
+  const robustDirection = data ? assessRobustDirection(data.outcomeSummary) : null
 
   useEffect(() => {
     let cancelled = false
@@ -337,6 +362,28 @@ export default function StrategyTriggerSimilarityPage() {
           </div>
 
           <div className="trigger-sim-metric-grid">
+            <div className="trigger-sim-metric trigger-sim-metric-primary">
+              <span>稳健方向</span>
+              <strong className={outcomeTone(robustDirection?.tone)}>
+                {robustDirection?.label || '--'}
+              </strong>
+            </div>
+            <div className="trigger-sim-metric">
+              <span>10% 去极值超额</span>
+              <strong className={outcomeTone(data.outcomeSummary.winsorizedExcessReturnPct)}>
+                {formatPercent(data.outcomeSummary.winsorizedExcessReturnPct)}
+              </strong>
+            </div>
+            <div className="trigger-sim-metric">
+              <span>加权超额中位数</span>
+              <strong className={outcomeTone(data.outcomeSummary.weightedMedianExcessReturnPct)}>
+                {formatPercent(data.outcomeSummary.weightedMedianExcessReturnPct)}
+              </strong>
+            </div>
+            <div className="trigger-sim-metric">
+              <span>超额胜率</span>
+              <strong>{formatPercent(data.outcomeSummary.weightedExcessPositiveRate, 1)}</strong>
+            </div>
             <div className="trigger-sim-metric">
               <span>加权收益</span>
               <strong className={outcomeTone(data.outcomeSummary.weightedReturnPct)}>
@@ -349,7 +396,7 @@ export default function StrategyTriggerSimilarityPage() {
                 {formatPercent(data.outcomeSummary.weightedExcessReturnPct)}
               </strong>
             </div>
-            <div className="trigger-sim-metric trigger-sim-metric-primary">
+            <div className="trigger-sim-metric">
               <span>收缩后超额</span>
               <strong className={outcomeTone(data.outcomeSummary.shrunkExcessReturnPct)}>
                 {formatPercent(data.outcomeSummary.shrunkExcessReturnPct)}
@@ -372,6 +419,9 @@ export default function StrategyTriggerSimilarityPage() {
               </strong>
             </div>
           </div>
+          <p className="trigger-sim-direction-note">
+            稳健方向仅在去极值超额、加权超额中位数和超额胜率三项方向一致时给出。
+          </p>
 
           <div className="trigger-sim-engine-meta">
             <span>指纹 {data.target.pooledFeatureDimension} 维</span>
@@ -379,7 +429,8 @@ export default function StrategyTriggerSimilarityPage() {
             <span>{data.kernelNames.join(' · ')}</span>
             <span>数据库指标 {data.indicatorColumns.length} 个</span>
             <span>
-              事件池 {data.candidateAnchorCount} / 有效 {data.evaluatedAnchorCount}
+              事件全集 {data.candidateUniverseCount} / 入选 {data.candidateAnchorCount} / 有效{' '}
+              {data.evaluatedAnchorCount}
               {data.candidatePoolTruncated ? '（已达安全上限）' : ''}
             </span>
           </div>

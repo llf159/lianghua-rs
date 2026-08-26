@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use duckdb::{Connection, params, params_from_iter};
+use duckdb::{AccessMode, Config, Connection, params, params_from_iter};
+use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::data::{result_db_path, source_db_path};
@@ -17,10 +18,17 @@ const DEFAULT_LIMIT: usize = 30;
 const MAX_POOL_SEGMENTS: usize = 12;
 const MAX_INDICATOR_COLUMNS: usize = 24;
 const MAX_CANDIDATE_ANCHORS: usize = 50_000;
+const TRIGGER_PREFILTER_ANCHORS: usize = 40_000;
+const HISTORY_DIVERSITY_ANCHORS: usize = MAX_CANDIDATE_ANCHORS - TRIGGER_PREFILTER_ANCHORS;
 // 大块读取减少 DuckDB 对 rule_details/stock_data 的重复扫描；池化后每块内存仍可控。
-const ANCHOR_CHUNK_SIZE: usize = 2_048;
+const ANCHOR_CHUNK_SIZE: usize = 8_192;
 const SHRINKAGE_STRENGTH: f64 = 8.0;
 const EPS: f64 = 1e-12;
+// 两阶段候选池上进行跨期样本外复核后的精排权重；四项之和必须为 1。
+const TRIGGER_SIMILARITY_WEIGHT: f64 = 0.35;
+const PRICE_VOLUME_SIMILARITY_WEIGHT: f64 = 0.30;
+const INDICATOR_SIMILARITY_WEIGHT: f64 = 0.15;
+const MARKET_SIMILARITY_WEIGHT: f64 = 0.20;
 const INDEX_CODES: [&str; 3] = ["000001.SH", "399300.SZ", "000852.SH"];
 const KERNEL_NAMES: [&str; 6] = [
     "均匀核",
@@ -54,6 +62,9 @@ pub struct StrategyTriggerSimilarityOutcomeSummary {
     pub weighted_excess_return_pct: Option<f64>,
     pub shrunk_excess_return_pct: Option<f64>,
     pub weighted_positive_rate: Option<f64>,
+    pub weighted_median_excess_return_pct: Option<f64>,
+    pub winsorized_excess_return_pct: Option<f64>,
+    pub weighted_excess_positive_rate: Option<f64>,
     pub weighted_mfe_pct: Option<f64>,
     pub weighted_mae_pct: Option<f64>,
 }
@@ -95,6 +106,7 @@ pub struct StrategyTriggerSimilarityPageData {
     pub historical_cutoff_date: String,
     pub kernel_names: Vec<String>,
     pub indicator_columns: Vec<String>,
+    pub candidate_universe_count: usize,
     pub candidate_anchor_count: usize,
     pub evaluated_anchor_count: usize,
     pub candidate_pool_truncated: bool,
@@ -221,7 +233,11 @@ fn open_result_conn(source_path: &str) -> Result<Connection, String> {
     let result_db_str = result_db
         .to_str()
         .ok_or_else(|| "结果库路径不是有效UTF-8".to_string())?;
-    let conn = Connection::open(result_db_str).map_err(|e| format!("打开结果库失败: {e}"))?;
+    let config = Config::default()
+        .access_mode(AccessMode::ReadOnly)
+        .map_err(|e| format!("配置结果库只读模式失败: {e}"))?;
+    let conn = Connection::open_with_flags(result_db_str, config)
+        .map_err(|e| format!("打开结果库失败: {e}"))?;
     let market_db = source_db_path(source_path);
     let market_db_str = market_db
         .to_str()
@@ -387,37 +403,201 @@ fn distinct_rule_names(events: &[RuleEvent]) -> Vec<String> {
 
 fn load_candidate_anchors(
     conn: &Connection,
+    target_events: &[RuleEvent],
     target_rule_names: &[String],
+    target_recent_start_date: &str,
+    target_end_date: &str,
+    history_start_date: &str,
     earliest_date: &str,
     cutoff_date: &str,
     all_trade_dates: &[String],
     window_trade_days: usize,
-) -> Result<(Vec<Anchor>, bool), String> {
+) -> Result<(Vec<Anchor>, usize), String> {
     if target_rule_names.is_empty() {
-        return Ok((Vec::new(), false));
+        return Ok((Vec::new(), 0));
     }
-    let placeholders = std::iter::repeat_n("?", target_rule_names.len())
+    let target_rule_literals = target_rule_names
+        .iter()
+        .map(|name| sql_string_literal(name))
         .collect::<Vec<_>>()
         .join(", ");
+    let daily_rule_columns = target_rule_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            format!(
+                "SUM(CASE WHEN rule_name = {} THEN TRY_CAST(rule_score AS DOUBLE) ELSE 0.0 END) AS rule_{index}",
+                sql_string_literal(name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n                   ");
+    let base_rule_columns = (0..target_rule_names.len())
+        .map(|index| format!("COALESCE(d.rule_{index}, 0.0) AS rule_{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let profile_base_columns = (0..target_rule_names.len())
+        .map(|index| format!("rule_{index}"))
+        .chain(["total_count".to_string(), "total_score".to_string()])
+        .collect::<Vec<_>>();
+    let recent_days = window_trade_days.min(5);
+    let rolling_profile_columns = profile_base_columns
+        .iter()
+        .map(|column| {
+            format!(
+                "{column} AS {column}_current, \
+                 SUM({column}) OVER full_window / {window_trade_days}.0 AS {column}_full, \
+                 SUM({column}) OVER recent_window / {recent_days}.0 AS {column}_recent"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let candidate_profile_exprs = profile_base_columns
+        .iter()
+        .flat_map(|column| {
+            [
+                format!("{column}_full"),
+                format!("{column}_recent"),
+                format!("{column}_current"),
+                format!("({column}_recent - {column}_full)"),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let mut target_profile = Vec::with_capacity(candidate_profile_exprs.len());
+    for rule_name in target_rule_names {
+        let full_sum = target_events
+            .iter()
+            .filter(|event| event.rule_name == *rule_name)
+            .map(|event| event.score)
+            .sum::<f64>();
+        let recent_sum = target_events
+            .iter()
+            .filter(|event| {
+                event.rule_name == *rule_name
+                    && event.trade_date.as_str() >= target_recent_start_date
+            })
+            .map(|event| event.score)
+            .sum::<f64>();
+        let current = target_events
+            .iter()
+            .filter(|event| {
+                event.rule_name == *rule_name && event.trade_date.as_str() == target_end_date
+            })
+            .map(|event| event.score)
+            .sum::<f64>();
+        let full = full_sum / window_trade_days as f64;
+        let recent = recent_sum / recent_days as f64;
+        target_profile.extend([full, recent, current, recent - full]);
+    }
+    for score_mode in [false, true] {
+        let value = |event: &RuleEvent| if score_mode { event.score } else { 1.0 };
+        let full = target_events.iter().map(&value).sum::<f64>() / window_trade_days as f64;
+        let recent = target_events
+            .iter()
+            .filter(|event| event.trade_date.as_str() >= target_recent_start_date)
+            .map(&value)
+            .sum::<f64>()
+            / recent_days as f64;
+        let current = target_events
+            .iter()
+            .filter(|event| event.trade_date.as_str() == target_end_date)
+            .map(&value)
+            .sum::<f64>();
+        target_profile.extend([full, recent, current, recent - full]);
+    }
+    let dot_expr = candidate_profile_exprs
+        .iter()
+        .zip(&target_profile)
+        .map(|(expression, value)| format!("(({expression}) * {value:.17})"))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let candidate_norm_expr = candidate_profile_exprs
+        .iter()
+        .map(|expression| format!("(({expression}) * ({expression}))"))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let target_norm = target_profile
+        .iter()
+        .map(|value| value * value)
+        .sum::<f64>();
     let sql = format!(
         r#"
-        SELECT DISTINCT ts_code, trade_date
-        FROM rule_details
-        WHERE trade_date >= ? AND trade_date <= ? AND rule_name IN ({placeholders})
-          AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
-          AND ABS(TRY_CAST(rule_score AS DOUBLE)) > {EPS}
-        ORDER BY trade_date DESC, ts_code ASC
-        LIMIT {}
+        WITH daily AS (
+            SELECT ts_code, trade_date,
+                   {daily_rule_columns},
+                   COUNT(*)::DOUBLE AS total_count,
+                   SUM(TRY_CAST(rule_score AS DOUBLE)) AS total_score,
+                   MAX(CASE WHEN rule_name IN ({target_rule_literals}) THEN 1 ELSE 0 END) AS has_target_rule
+            FROM rule_details
+            WHERE trade_date >= {history_start_date} AND trade_date <= {cutoff_date}
+              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
+              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > {EPS}
+            GROUP BY ts_code, trade_date
+        ),
+        base AS (
+            SELECT s.ts_code, s.trade_date, {base_rule_columns},
+                   COALESCE(d.total_count, 0.0) AS total_count,
+                   COALESCE(d.total_score, 0.0) AS total_score,
+                   COALESCE(d.has_target_rule, 0) AS has_target_rule
+            FROM score_summary s
+            LEFT JOIN daily d USING (ts_code, trade_date)
+            WHERE s.trade_date >= {history_start_date} AND s.trade_date <= {cutoff_date}
+        ),
+        rolling AS (
+            SELECT ts_code, trade_date, has_target_rule, {rolling_profile_columns}
+            FROM base
+            WINDOW full_window AS (
+                PARTITION BY ts_code ORDER BY trade_date
+                ROWS BETWEEN {window_preceding} PRECEDING AND CURRENT ROW
+            ), recent_window AS (
+                PARTITION BY ts_code ORDER BY trade_date
+                ROWS BETWEEN {recent_preceding} PRECEDING AND CURRENT ROW
+            )
+        ),
+        candidates AS (
+            SELECT ts_code, trade_date,
+                   GREATEST(0.0, LEAST(100.0,
+                       50.0 * (1.0 + (({dot_expr}) + 1.0)
+                           / (SQRT(({candidate_norm_expr}) + 1.0) * SQRT({target_norm:.17} + 1.0)))
+                   )) AS cheap_trigger_similarity
+            FROM rolling
+            WHERE trade_date >= {earliest_date} AND has_target_rule = 1
+        ),
+        counted AS (
+            SELECT *, COUNT(*) OVER () AS candidate_total
+            FROM candidates
+        ),
+        top_trigger AS MATERIALIZED (
+            SELECT * FROM counted
+            ORDER BY cheap_trigger_similarity DESC, hash(ts_code, trade_date)
+            LIMIT {trigger_limit}
+        ),
+        diverse_history AS (
+            SELECT c.* FROM counted c
+            WHERE NOT EXISTS (
+                SELECT 1 FROM top_trigger t
+                WHERE t.ts_code = c.ts_code AND t.trade_date = c.trade_date
+            )
+            ORDER BY hash(c.ts_code, c.trade_date)
+            LIMIT {diversity_limit}
+        )
+        SELECT ts_code, trade_date, candidate_total FROM top_trigger
+        UNION ALL
+        SELECT ts_code, trade_date, candidate_total FROM diverse_history
         "#,
-        MAX_CANDIDATE_ANCHORS + 1
+        history_start_date = sql_string_literal(history_start_date),
+        cutoff_date = sql_string_literal(cutoff_date),
+        earliest_date = sql_string_literal(earliest_date),
+        window_preceding = window_trade_days.saturating_sub(1),
+        recent_preceding = recent_days.saturating_sub(1),
+        trigger_limit = TRIGGER_PREFILTER_ANCHORS,
+        diversity_limit = HISTORY_DIVERSITY_ANCHORS,
     );
-    let mut values = vec![earliest_date.to_string(), cutoff_date.to_string()];
-    values.extend(target_rule_names.iter().cloned());
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| format!("预编译历史事件锚点查询失败: {e}"))?;
     let mut rows = stmt
-        .query(params_from_iter(values.iter()))
+        .query([])
         .map_err(|e| format!("查询历史事件锚点失败: {e}"))?;
     let date_index = all_trade_dates
         .iter()
@@ -425,17 +605,17 @@ fn load_candidate_anchors(
         .map(|(index, date)| (date.as_str(), index))
         .collect::<HashMap<_, _>>();
     let mut anchors = Vec::new();
-    let mut truncated = false;
+    let mut candidate_universe_count = 0;
     while let Some(row) = rows
         .next()
         .map_err(|e| format!("读取历史事件锚点失败: {e}"))?
     {
-        if anchors.len() >= MAX_CANDIDATE_ANCHORS {
-            truncated = true;
-            break;
-        }
         let ts_code: String = row.get(0).map_err(|e| format!("读取锚点代码失败: {e}"))?;
         let end_trade_date: String = row.get(1).map_err(|e| format!("读取锚点日期失败: {e}"))?;
+        let total: i64 = row
+            .get(2)
+            .map_err(|e| format!("读取候选全集数量失败: {e}"))?;
+        candidate_universe_count = total.max(0) as usize;
         let Some(end_index) = date_index.get(end_trade_date.as_str()).copied() else {
             continue;
         };
@@ -447,7 +627,7 @@ fn load_candidate_anchors(
             end_trade_date,
         });
     }
-    Ok((anchors, truncated))
+    Ok((anchors, candidate_universe_count))
 }
 
 fn anchors_values_sql(anchors: &[Anchor]) -> String {
@@ -514,8 +694,9 @@ fn load_market_rows(
         .map_err(|e| format!("读取事件量价窗口失败: {e}"))?
     {
         let anchor_id: i64 = row.get(0).map_err(|e| format!("读取事件编号失败: {e}"))?;
-        let mut indicators = Vec::with_capacity(schema.indicator_columns.len());
-        for index in 0..schema.indicator_columns.len() {
+        let indicator_count = schema.indicator_columns.len();
+        let mut indicators = Vec::with_capacity(indicator_count);
+        for index in 0..indicator_count {
             indicators.push(
                 row.get::<_, Option<f64>>(11 + index)
                     .map_err(|e| format!("读取指标窗口失败: {e}"))?,
@@ -595,13 +776,15 @@ fn load_future_rows(
         r#"
         WITH anchors(anchor_id, ts_code, start_date, end_date) AS (VALUES {}),
         future AS (
-            SELECT a.anchor_id, s.trade_date, TRY_CAST(s.close AS DOUBLE) close,
-                   TRY_CAST(s.high AS DOUBLE) high, TRY_CAST(s.low AS DOUBLE) low,
+            SELECT a.anchor_id, s.trade_date, TRY_CAST(s.close AS DOUBLE) AS close_value,
+                   TRY_CAST(s.high AS DOUBLE) AS high_value,
+                   TRY_CAST(s.low AS DOUBLE) AS low_value,
                    ROW_NUMBER() OVER (PARTITION BY a.anchor_id ORDER BY s.trade_date) rn
             FROM anchors a JOIN trigger_market_db.stock_data s ON s.ts_code = a.ts_code
              AND s.trade_date > a.end_date AND s.trade_date <= {} AND s.adj_type = 'qfq'
         )
-        SELECT anchor_id, trade_date, close, high, low FROM future WHERE rn <= {}
+        SELECT anchor_id, trade_date, close_value, high_value, low_value
+        FROM future WHERE rn <= {}
         ORDER BY anchor_id, trade_date
         "#,
         anchors_values_sql(anchors),
@@ -984,6 +1167,29 @@ fn build_environment_channels(
         .collect()
 }
 
+fn build_environment_fingerprint_map(
+    environment: &MarketEnvironment,
+    all_trade_dates: &[String],
+    window_trade_days: usize,
+    segments: usize,
+) -> HashMap<String, Vec<Option<Vec<f64>>>> {
+    all_trade_dates
+        .iter()
+        .enumerate()
+        .map(|(end_index, end_date)| {
+            let start_index = (end_index + 1).saturating_sub(window_trade_days);
+            (
+                end_date.clone(),
+                build_environment_channels(
+                    environment,
+                    &all_trade_dates[start_index..=end_index],
+                    segments,
+                ),
+            )
+        })
+        .collect()
+}
+
 fn cosine_similarity(left: &[f64], right: &[f64]) -> f64 {
     if left.len() != right.len() || left.is_empty() {
         return 0.0;
@@ -1018,9 +1224,13 @@ fn final_similarity(
     indicator: Option<f64>,
     market: Option<f64>,
 ) -> f64 {
-    let mut total = trigger * 0.35;
-    let mut weight = 0.35;
-    for (score, w) in [(price, 0.30), (indicator, 0.15), (market, 0.20)] {
+    let mut total = trigger * TRIGGER_SIMILARITY_WEIGHT;
+    let mut weight = TRIGGER_SIMILARITY_WEIGHT;
+    for (score, w) in [
+        (price, PRICE_VOLUME_SIMILARITY_WEIGHT),
+        (indicator, INDICATOR_SIMILARITY_WEIGHT),
+        (market, MARKET_SIMILARITY_WEIGHT),
+    ] {
         if let Some(score) = score {
             total += score * w;
             weight += w;
@@ -1105,16 +1315,18 @@ fn load_index_close_map(
     Ok(out)
 }
 
+#[derive(Clone, Copy)]
 struct SampleBuildContext<'a> {
     schema: &'a MarketSchema,
     target_rule_names: &'a [String],
     all_trade_dates: &'a [String],
-    environment: &'a MarketEnvironment,
+    environment_fingerprints: &'a HashMap<String, Vec<Option<Vec<f64>>>>,
     index_closes: &'a HashMap<String, f64>,
     pool_segments: usize,
     outcome_trade_days: usize,
     target_trade_date: &'a str,
     include_outcome: bool,
+    include_summaries: bool,
 }
 
 fn build_samples_for_chunk(
@@ -1124,7 +1336,11 @@ fn build_samples_for_chunk(
 ) -> Result<Vec<EventSample>, String> {
     let market_by_anchor = load_market_rows(conn, anchors, context.schema)?;
     let rules_by_anchor = load_rule_rows(conn, anchors)?;
-    let summaries = load_summary_rows(conn, anchors)?;
+    let summaries = if context.include_summaries {
+        load_summary_rows(conn, anchors)?
+    } else {
+        HashMap::new()
+    };
     let future_by_anchor = if context.include_outcome {
         load_future_rows(
             conn,
@@ -1135,70 +1351,104 @@ fn build_samples_for_chunk(
     } else {
         HashMap::new()
     };
-    let mut samples = Vec::new();
-    for anchor in anchors {
-        let Some(market_rows) = market_by_anchor.get(&anchor.id) else {
-            continue;
-        };
-        if market_rows.len() < 3
-            || market_rows.last().map(|r| r.trade_date.as_str())
-                != Some(anchor.end_trade_date.as_str())
-        {
-            continue;
-        }
-        let rules = rules_by_anchor
-            .get(&anchor.id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let window_dates = window_dates_for_anchor(anchor, context.all_trade_dates);
-        let (trigger, matched_rule_names) = build_trigger_fingerprint(
-            rules,
-            context.target_rule_names,
-            window_dates,
-            context.pool_segments,
-        );
-        let fingerprint = EventFingerprint {
-            trigger,
-            price_volume: build_price_volume_channels(market_rows, context.pool_segments),
-            indicators: build_indicator_channels(
-                market_rows,
-                context.schema.indicator_columns.len(),
-                context.pool_segments,
-            ),
-            market: build_environment_channels(
-                context.environment,
+    let samples = anchors
+        .par_iter()
+        .filter_map(|anchor| {
+            let market_rows = market_by_anchor.get(&anchor.id)?;
+            if market_rows.len() < 3
+                || market_rows.last().map(|r| r.trade_date.as_str())
+                    != Some(anchor.end_trade_date.as_str())
+            {
+                return None;
+            }
+            let rules = rules_by_anchor
+                .get(&anchor.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let window_dates = window_dates_for_anchor(anchor, context.all_trade_dates);
+            let (trigger, matched_rule_names) = build_trigger_fingerprint(
+                rules,
+                context.target_rule_names,
                 window_dates,
                 context.pool_segments,
-            ),
-        };
-        let outcome = if context.include_outcome {
-            build_outcome(
-                market_rows,
-                future_by_anchor
-                    .get(&anchor.id)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
-                context.outcome_trade_days,
-                context.index_closes,
-            )
-        } else {
-            None
-        };
-        if context.include_outcome && outcome.is_none() {
-            continue;
-        }
-        let (total_score, rank) = summaries.get(&anchor.id).copied().unwrap_or((None, None));
-        samples.push(EventSample {
-            anchor: anchor.clone(),
-            fingerprint,
-            matched_rule_names,
-            trigger_count: rules.len(),
-            outcome,
-            total_score,
-            rank,
-        });
-    }
+            );
+            let fingerprint = EventFingerprint {
+                trigger,
+                price_volume: build_price_volume_channels(market_rows, context.pool_segments),
+                indicators: build_indicator_channels(
+                    market_rows,
+                    context.schema.indicator_columns.len(),
+                    context.pool_segments,
+                ),
+                market: context
+                    .environment_fingerprints
+                    .get(&anchor.end_trade_date)
+                    .cloned()
+                    .unwrap_or_default(),
+            };
+            let outcome = if context.include_outcome {
+                build_outcome(
+                    market_rows,
+                    future_by_anchor
+                        .get(&anchor.id)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]),
+                    context.outcome_trade_days,
+                    context.index_closes,
+                )
+            } else {
+                None
+            };
+            if context.include_outcome && outcome.is_none() {
+                return None;
+            }
+            let (total_score, rank) = summaries.get(&anchor.id).copied().unwrap_or((None, None));
+            Some(EventSample {
+                anchor: anchor.clone(),
+                fingerprint,
+                matched_rule_names,
+                trigger_count: rules.len(),
+                outcome,
+                total_score,
+                rank,
+            })
+        })
+        .collect();
     Ok(samples)
+}
+
+fn weighted_quantile(values: &[(f64, f64)], quantile: f64) -> Option<f64> {
+    let mut finite = values
+        .iter()
+        .copied()
+        .filter(|(value, weight)| value.is_finite() && weight.is_finite() && *weight > EPS)
+        .collect::<Vec<_>>();
+    if finite.is_empty() {
+        return None;
+    }
+    finite.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let total_weight = finite.iter().map(|(_, weight)| weight).sum::<f64>();
+    let target_weight = quantile.clamp(0.0, 1.0) * total_weight;
+    let mut cumulative_weight = 0.0;
+    for (value, weight) in &finite {
+        cumulative_weight += weight;
+        if cumulative_weight + EPS >= target_weight {
+            return Some(*value);
+        }
+    }
+    finite.last().map(|(value, _)| *value)
+}
+
+fn weighted_winsorized_mean(values: &[(f64, f64)], tail_fraction: f64) -> Option<f64> {
+    let lower = weighted_quantile(values, tail_fraction)?;
+    let upper = weighted_quantile(values, 1.0 - tail_fraction)?;
+    let (weighted_sum, weight_sum) = values
+        .iter()
+        .filter(|(value, weight)| value.is_finite() && weight.is_finite() && *weight > EPS)
+        .fold((0.0, 0.0), |(sum, total), (value, weight)| {
+            (sum + value.clamp(lower, upper) * weight, total + weight)
+        });
+    (weight_sum > EPS).then_some(weighted_sum / weight_sum)
 }
 
 fn summarize_outcomes(
@@ -1219,6 +1469,9 @@ fn summarize_outcomes(
             weighted_excess_return_pct: None,
             shrunk_excess_return_pct: None,
             weighted_positive_rate: None,
+            weighted_median_excess_return_pct: None,
+            winsorized_excess_return_pct: None,
+            weighted_excess_positive_rate: None,
             weighted_mfe_pct: None,
             weighted_mae_pct: None,
         };
@@ -1233,6 +1486,16 @@ fn summarize_outcomes(
     let excess_weight = excess.iter().map(|(_, w)| w).sum::<f64>();
     let weighted_excess = (excess_weight > EPS)
         .then(|| excess.iter().map(|(v, w)| v * w).sum::<f64>() / excess_weight);
+    let weighted_median_excess = weighted_quantile(&excess, 0.5);
+    let winsorized_excess = weighted_winsorized_mean(&excess, 0.1);
+    let weighted_excess_positive_rate = (excess_weight > EPS).then(|| {
+        excess
+            .iter()
+            .map(|(value, weight)| (*value > 0.0) as u8 as f64 * weight)
+            .sum::<f64>()
+            / excess_weight
+            * 100.0
+    });
     let effective = weight_sum * weight_sum / weight_sq_sum.max(EPS);
     StrategyTriggerSimilarityOutcomeSummary {
         sample_count: weighted.len(),
@@ -1244,6 +1507,9 @@ fn summarize_outcomes(
         weighted_positive_rate: Some(
             average(|i| (i.forward_return_pct > 0.0) as u8 as f64) * 100.0,
         ),
+        weighted_median_excess_return_pct: weighted_median_excess,
+        winsorized_excess_return_pct: winsorized_excess,
+        weighted_excess_positive_rate,
         weighted_mfe_pct: Some(average(|i| i.mfe_pct)),
         weighted_mae_pct: Some(average(|i| i.mae_pct)),
     }
@@ -1308,6 +1574,12 @@ pub fn get_strategy_trigger_similarity_page(
         .map(String::as_str)
         .unwrap_or(&target_start_date);
     let environment = load_market_environment(&conn, first_date, &resolved_trade_date, &schema)?;
+    let environment_fingerprints = build_environment_fingerprint_map(
+        &environment,
+        &all_trade_dates,
+        window_trade_days,
+        pool_segments,
+    );
     let index_closes = load_index_close_map(&conn, first_date, &resolved_trade_date)?;
     let target_anchor = Anchor {
         id: 0,
@@ -1319,12 +1591,13 @@ pub fn get_strategy_trigger_similarity_page(
         schema: &schema,
         target_rule_names: &target_rule_names,
         all_trade_dates: &all_trade_dates,
-        environment: &environment,
+        environment_fingerprints: &environment_fingerprints,
         index_closes: &index_closes,
         pool_segments,
         outcome_trade_days,
         target_trade_date: &resolved_trade_date,
         include_outcome: false,
+        include_summaries: false,
     };
     let target_sample =
         build_samples_for_chunk(&conn, std::slice::from_ref(&target_anchor), &target_context)?
@@ -1338,17 +1611,25 @@ pub fn get_strategy_trigger_similarity_page(
         .get(window_trade_days.saturating_sub(1))
         .map(String::as_str)
         .unwrap_or(&all_trade_dates[0]);
-    let (candidate_anchors, candidate_pool_truncated) = load_candidate_anchors(
+    let target_recent_start_date =
+        &all_trade_dates[(target_end_index + 1).saturating_sub(window_trade_days.min(5))];
+    let (candidate_anchors, candidate_universe_count) = load_candidate_anchors(
         &conn,
+        &target_events,
         &target_rule_names,
+        target_recent_start_date,
+        &resolved_trade_date,
+        first_date,
         earliest_candidate_date,
         &historical_cutoff_date,
         &all_trade_dates,
         window_trade_days,
     )?;
     let candidate_anchor_count = candidate_anchors.len();
+    let candidate_pool_truncated = candidate_universe_count > candidate_anchor_count;
     let candidate_context = SampleBuildContext {
         include_outcome: true,
+        include_summaries: true,
         ..target_context
     };
     let name_map = build_name_map(&source_path).unwrap_or_default();
@@ -1429,6 +1710,7 @@ pub fn get_strategy_trigger_similarity_page(
         historical_cutoff_date,
         kernel_names: KERNEL_NAMES.iter().map(|v| v.to_string()).collect(),
         indicator_columns: schema.indicator_columns,
+        candidate_universe_count,
         candidate_anchor_count,
         evaluated_anchor_count,
         candidate_pool_truncated,
@@ -1450,7 +1732,11 @@ pub fn get_strategy_trigger_similarity_page(
 
 #[cfg(test)]
 mod tests {
-    use super::{KERNEL_NAMES, cosine_similarity, temporal_signature};
+    use super::{
+        INDICATOR_SIMILARITY_WEIGHT, KERNEL_NAMES, MARKET_SIMILARITY_WEIGHT,
+        PRICE_VOLUME_SIMILARITY_WEIGHT, TRIGGER_SIMILARITY_WEIGHT, cosine_similarity,
+        final_similarity, temporal_signature, weighted_quantile, weighted_winsorized_mean,
+    };
 
     #[test]
     fn temporal_signature_contains_pool_and_multiple_kernels() {
@@ -1464,5 +1750,29 @@ mod tests {
         assert!((cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]) - 100.0).abs() < 1e-9);
         assert!(cosine_similarity(&[1.0, 0.0], &[-1.0, 0.0]).abs() < 1e-9);
         assert!((cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]) - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn calibrated_similarity_weights_sum_to_one_and_renormalize_missing_channels() {
+        let weight_sum = TRIGGER_SIMILARITY_WEIGHT
+            + PRICE_VOLUME_SIMILARITY_WEIGHT
+            + INDICATOR_SIMILARITY_WEIGHT
+            + MARKET_SIMILARITY_WEIGHT;
+        assert!((weight_sum - 1.0).abs() < 1e-12);
+        let expected = 100.0 * TRIGGER_SIMILARITY_WEIGHT
+            / (TRIGGER_SIMILARITY_WEIGHT + PRICE_VOLUME_SIMILARITY_WEIGHT);
+        assert!((final_similarity(100.0, Some(0.0), None, None) - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn robust_outcome_statistics_resist_large_positive_outlier() {
+        let values = (0..9)
+            .map(|value| (value as f64, 1.0))
+            .chain(std::iter::once((100.0, 1.0)))
+            .collect::<Vec<_>>();
+        assert_eq!(weighted_quantile(&values, 0.5), Some(4.0));
+        assert_eq!(weighted_quantile(&values, 0.9), Some(8.0));
+        let winsorized = weighted_winsorized_mean(&values, 0.1).expect("winsorized mean");
+        assert!((winsorized - 4.4).abs() < 1e-12);
     }
 }

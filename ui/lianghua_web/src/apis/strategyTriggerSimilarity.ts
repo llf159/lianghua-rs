@@ -19,6 +19,9 @@ export type StrategyTriggerSimilarityOutcomeSummary = {
   weightedExcessReturnPct?: number | null
   shrunkExcessReturnPct?: number | null
   weightedPositiveRate?: number | null
+  weightedMedianExcessReturnPct?: number | null
+  winsorizedExcessReturnPct?: number | null
+  weightedExcessPositiveRate?: number | null
   weightedMfePct?: number | null
   weightedMaePct?: number | null
 }
@@ -56,6 +59,7 @@ export type StrategyTriggerSimilarityPageData = {
   historicalCutoffDate: string
   kernelNames: string[]
   indicatorColumns: string[]
+  candidateUniverseCount: number
   candidateAnchorCount: number
   evaluatedAnchorCount: number
   candidatePoolTruncated: boolean

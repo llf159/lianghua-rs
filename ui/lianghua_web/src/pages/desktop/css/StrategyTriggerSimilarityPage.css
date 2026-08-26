@@ -180,7 +180,7 @@
 
 .trigger-sim-metric-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
   gap: 8px;
 }
 
@@ -208,6 +208,12 @@
   color: #263244;
   font-size: 20px;
   font-variant-numeric: tabular-nums;
+}
+
+.trigger-sim-direction-note {
+  margin: -2px 0 0;
+  color: #66758a;
+  font-size: 12px;
 }
 
 .trigger-sim-engine-meta {
