@@ -75,6 +75,14 @@
   justify-content: flex-start;
 }
 
+.settings-toggle-row {
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .settings-summary-grid {
   margin-top: 14px;
   display: grid;

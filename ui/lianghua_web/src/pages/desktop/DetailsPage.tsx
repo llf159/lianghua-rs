@@ -80,8 +80,13 @@ import {
 import {
   readStoredDetailsNavLongPressIntervalSeconds,
   readStoredChartIndicatorWidthRatio,
+  readStoredChartMainHeightMode,
+  readStoredChartMainPercentMaxHeight,
+  readStoredChartMainPercentMinHeight,
+  readStoredChartMainPercentPixels,
   readStoredChartMainWidthRatio,
   readStoredDetailCyqModel,
+  type ChartMainHeightMode,
   type DetailCyqModel,
 } from "../../shared/chartSettings";
 import {
@@ -130,6 +135,7 @@ const CHART_TOUCH_FOCUS_HIT_SLOP = 24;
 const CHART_CYQ_PANEL_WIDTH_RATIO = 0.22;
 const CHART_CYQ_PANEL_GAP = 12;
 const CHART_PANEL_GAP_PX = 8;
+const CHART_MAIN_PANEL_CHROME_HEIGHT_PX = 40;
 const STRATEGY_SPLIT_DEFAULT = 0.64;
 const STRATEGY_SPLIT_MIN = 0.24;
 const STRATEGY_SPLIT_MAX = 0.76;
@@ -2020,6 +2026,55 @@ function buildDomain(values: number[], includeZero = false) {
   };
 }
 
+function buildMainPanelPercentSpan(
+  panel: DetailKlinePanel | null | undefined,
+  items: DetailKlineRow[],
+) {
+  if (!panel || items.length === 0) {
+    return null;
+  }
+
+  const overlayKeys = getPanelSeries(panel).map((series) => series.key);
+  const values = items.flatMap((row) => {
+    const rowValues = ["open", "high", "low", "close", ...overlayKeys]
+      .map((key) => getNumericField(row, key))
+      .filter((value): value is number => value !== null);
+    return rowValues;
+  });
+  const domain = buildDomain(values);
+  if (!domain) {
+    return null;
+  }
+
+  const tenPercentStep = getCenteredPercentStep(domain.min, domain.max);
+  if (!Number.isFinite(tenPercentStep) || tenPercentStep <= 0) {
+    return null;
+  }
+
+  return ((domain.max - domain.min) / tenPercentStep) * 10;
+}
+
+function buildPercentScaledMainPanelHeight(
+  panel: DetailKlinePanel | null | undefined,
+  items: DetailKlineRow[],
+  pixelsPerPercent: number,
+  minHeight: number,
+  maxHeight: number,
+  fallbackHeight: number,
+) {
+  const percentSpan = buildMainPanelPercentSpan(panel, items);
+  if (percentSpan === null) {
+    return fallbackHeight;
+  }
+
+  const plotScale =
+    CHART_VIEWBOX_HEIGHT /
+    (CHART_VIEWBOX_HEIGHT - CHART_MARGIN.top - CHART_MARGIN.bottom);
+  const targetHeight =
+    CHART_MAIN_PANEL_CHROME_HEIGHT_PX + percentSpan * pixelsPerPercent * plotScale;
+  return Math.min(maxHeight, Math.max(minHeight, targetHeight));
+}
+
 function formatAxisValue(value: number) {
   const abs = Math.abs(value);
   if (abs >= 100000000) {
@@ -2049,9 +2104,14 @@ function formatTradeDateLabel(value: string) {
   return value;
 }
 
+function getCenteredPercentStep(min: number, max: number) {
+  const midpoint = (min + max) / 2;
+  return Math.max(Math.abs(midpoint), (max - min) / 2, 1) * 0.1;
+}
+
 function buildCenteredPercentGrid(min: number, max: number) {
   const midpoint = (min + max) / 2;
-  const step = Math.max(Math.abs(midpoint), (max - min) / 2, 1) * 0.1;
+  const step = getCenteredPercentStep(min, max);
   const values = new Set<number>();
   const epsilon = step * 0.1;
 
@@ -4282,6 +4342,17 @@ export default function DetailsPage({
   const [chartMainWidthRatio, setChartMainWidthRatio] = useState(() =>
     readStoredChartMainWidthRatio(),
   );
+  const [chartMainHeightMode, setChartMainHeightMode] =
+    useState<ChartMainHeightMode>(() => readStoredChartMainHeightMode());
+  const [chartMainPercentPixels, setChartMainPercentPixels] = useState(() =>
+    readStoredChartMainPercentPixels(),
+  );
+  const [chartMainPercentMinHeight, setChartMainPercentMinHeight] = useState(
+    () => readStoredChartMainPercentMinHeight(),
+  );
+  const [chartMainPercentMaxHeight, setChartMainPercentMaxHeight] = useState(
+    () => readStoredChartMainPercentMaxHeight(),
+  );
   const [chartIndicatorWidthRatio, setChartIndicatorWidthRatio] = useState(() =>
     readStoredChartIndicatorWidthRatio(),
   );
@@ -5629,7 +5700,20 @@ export default function DetailsPage({
     detailCyqVisible && shouldReserveCyqPanelWidth && selectedCyqSnapshot !== null;
   const shouldUseCyqSummaryIndicatorSlot =
     shouldShowCyqSummary && indicatorPanelCount === 0;
-  const chartMainPanelHeight = chartLayoutWidth * chartMainWidthRatio;
+  const fixedChartMainPanelHeight = chartLayoutWidth * chartMainWidthRatio;
+  const mainChartPanel =
+    panels.find((panel) => isMainChartPanel(panel)) ?? panels[0] ?? null;
+  const chartMainPanelHeight =
+    chartMainHeightMode === "percent"
+      ? buildPercentScaledMainPanelHeight(
+          mainChartPanel,
+          chartItems,
+          chartMainPercentPixels,
+          chartMainPercentMinHeight,
+          chartMainPercentMaxHeight,
+          fixedChartMainPanelHeight,
+        )
+      : fixedChartMainPanelHeight;
   const chartIndicatorPanelBaseHeight =
     (chartLayoutWidth * chartIndicatorWidthRatio) /
     DEFAULT_INDICATOR_PANEL_COUNT;
@@ -5968,10 +6052,18 @@ export default function DetailsPage({
         event.key === null ||
         event.key === "lh_chart_main_width_ratio_v1" ||
         event.key === "lh_chart_indicator_width_ratio_v1" ||
+        event.key === "lh_chart_main_height_mode_v1" ||
+        event.key === "lh_chart_main_percent_pixels_v1" ||
+        event.key === "lh_chart_main_percent_min_height_v1" ||
+        event.key === "lh_chart_main_percent_max_height_v1" ||
         event.key === "lh_details_nav_long_press_interval_seconds_v1"
       ) {
         setChartMainWidthRatio(readStoredChartMainWidthRatio());
         setChartIndicatorWidthRatio(readStoredChartIndicatorWidthRatio());
+        setChartMainHeightMode(readStoredChartMainHeightMode());
+        setChartMainPercentPixels(readStoredChartMainPercentPixels());
+        setChartMainPercentMinHeight(readStoredChartMainPercentMinHeight());
+        setChartMainPercentMaxHeight(readStoredChartMainPercentMaxHeight());
         setDetailsNavLongPressIntervalSeconds(
           readStoredDetailsNavLongPressIntervalSeconds(),
         );
@@ -5980,6 +6072,10 @@ export default function DetailsPage({
 
     setChartMainWidthRatio(readStoredChartMainWidthRatio());
     setChartIndicatorWidthRatio(readStoredChartIndicatorWidthRatio());
+    setChartMainHeightMode(readStoredChartMainHeightMode());
+    setChartMainPercentPixels(readStoredChartMainPercentPixels());
+    setChartMainPercentMinHeight(readStoredChartMainPercentMinHeight());
+    setChartMainPercentMaxHeight(readStoredChartMainPercentMaxHeight());
     setDetailsNavLongPressIntervalSeconds(
       readStoredDetailsNavLongPressIntervalSeconds(),
     );
@@ -7811,6 +7907,10 @@ export default function DetailsPage({
           className="details-chart-shell"
           style={{
             height: `${chartShellHeight}px`,
+            minHeight:
+              chartMainHeightMode === "percent"
+                ? `${chartShellHeight}px`
+                : undefined,
             gridTemplateRows: chartTemplateRows,
           }}
         >

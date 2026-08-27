@@ -14,20 +14,35 @@ import {
   DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MIN,
   CHART_INDICATOR_WIDTH_RATIO_MAX,
   CHART_INDICATOR_WIDTH_RATIO_MIN,
+  CHART_MAIN_PERCENT_HEIGHT_LIMIT_MAX,
+  CHART_MAIN_PERCENT_HEIGHT_LIMIT_MIN,
+  CHART_MAIN_PERCENT_PIXELS_MAX,
+  CHART_MAIN_PERCENT_PIXELS_MIN,
   CHART_MAIN_WIDTH_RATIO_MAX,
   CHART_MAIN_WIDTH_RATIO_MIN,
+  clampChartMainPercentHeight,
+  clampChartMainPercentPixels,
   clampChartIndicatorWidthRatio,
   clampChartMainWidthRatio,
   clampDetailsNavLongPressIntervalSeconds,
   readStoredChartIndicatorWidthRatio,
+  readStoredChartMainHeightMode,
+  readStoredChartMainPercentMaxHeight,
+  readStoredChartMainPercentMinHeight,
+  readStoredChartMainPercentPixels,
   readStoredChartMainWidthRatio,
   readStoredDetailCyqModel,
   readStoredDetailsNavLongPressIntervalSeconds,
   writeStoredChartIndicatorWidthRatio,
+  writeStoredChartMainHeightMode,
+  writeStoredChartMainPercentMaxHeight,
+  writeStoredChartMainPercentMinHeight,
+  writeStoredChartMainPercentPixels,
   writeStoredChartMainWidthRatio,
   writeStoredDetailCyqModel,
   writeStoredDetailsNavLongPressIntervalSeconds,
   type DetailCyqModel,
+  type ChartMainHeightMode,
 } from '../../shared/chartSettings'
 import {
   BACKTEST_IC_THRESHOLD_DEFAULT,
@@ -94,6 +109,18 @@ export default function SettingsPage() {
   )
   const [chartIndicatorRatioInput, setChartIndicatorRatioInput] = useState(() =>
     readStoredChartIndicatorWidthRatio().toFixed(2),
+  )
+  const [chartMainHeightMode, setChartMainHeightMode] = useState<ChartMainHeightMode>(
+    () => readStoredChartMainHeightMode(),
+  )
+  const [chartMainPercentPixelsInput, setChartMainPercentPixelsInput] = useState(
+    () => String(readStoredChartMainPercentPixels()),
+  )
+  const [chartMainPercentMinHeightInput, setChartMainPercentMinHeightInput] = useState(
+    () => String(readStoredChartMainPercentMinHeight()),
+  )
+  const [chartMainPercentMaxHeightInput, setChartMainPercentMaxHeightInput] = useState(
+    () => String(readStoredChartMainPercentMaxHeight()),
   )
   const [chartLayoutSettingError, setChartLayoutSettingError] = useState('')
   const [chartLayoutSettingNotice, setChartLayoutSettingNotice] = useState('')
@@ -265,6 +292,8 @@ export default function SettingsPage() {
 
   const currentChartMainWidthRatio = readStoredChartMainWidthRatio()
   const currentChartIndicatorWidthRatio = readStoredChartIndicatorWidthRatio()
+  const currentChartMainHeightMode = readStoredChartMainHeightMode()
+  const currentChartMainPercentPixels = readStoredChartMainPercentPixels()
   const currentDetailsNavLongPressInterval = readStoredDetailsNavLongPressIntervalSeconds()
   const currentBacktestHighlightSettings = readStoredBacktestHighlightSettings()
   const detailsNavLongPressIntervalPreview = useMemo(() => {
@@ -290,6 +319,10 @@ export default function SettingsPage() {
     setActiveModal('chart-layout')
     setChartMainRatioInput(readStoredChartMainWidthRatio().toFixed(2))
     setChartIndicatorRatioInput(readStoredChartIndicatorWidthRatio().toFixed(2))
+    setChartMainHeightMode(readStoredChartMainHeightMode())
+    setChartMainPercentPixelsInput(String(readStoredChartMainPercentPixels()))
+    setChartMainPercentMinHeightInput(String(readStoredChartMainPercentMinHeight()))
+    setChartMainPercentMaxHeightInput(String(readStoredChartMainPercentMaxHeight()))
     setChartLayoutSettingError('')
     setChartLayoutSettingNotice('')
   }
@@ -344,7 +377,16 @@ export default function SettingsPage() {
   function onSaveChartLayoutRatios() {
     const parsedMainValue = Number(chartMainRatioInput.trim())
     const parsedIndicatorValue = Number(chartIndicatorRatioInput.trim())
-    if (!Number.isFinite(parsedMainValue) || !Number.isFinite(parsedIndicatorValue)) {
+    const parsedPercentPixels = Number(chartMainPercentPixelsInput.trim())
+    const parsedPercentMinHeight = Number(chartMainPercentMinHeightInput.trim())
+    const parsedPercentMaxHeight = Number(chartMainPercentMaxHeightInput.trim())
+    if (
+      !Number.isFinite(parsedMainValue) ||
+      !Number.isFinite(parsedIndicatorValue) ||
+      !Number.isFinite(parsedPercentPixels) ||
+      !Number.isFinite(parsedPercentMinHeight) ||
+      !Number.isFinite(parsedPercentMaxHeight)
+    ) {
       setChartLayoutSettingError('请输入有效数字。')
       setChartLayoutSettingNotice('')
       return
@@ -352,12 +394,34 @@ export default function SettingsPage() {
 
     const normalizedMainValue = clampChartMainWidthRatio(parsedMainValue)
     const normalizedIndicatorValue = clampChartIndicatorWidthRatio(parsedIndicatorValue)
+    const normalizedPercentPixels = clampChartMainPercentPixels(parsedPercentPixels)
+    const normalizedPercentMinHeight = clampChartMainPercentHeight(
+      parsedPercentMinHeight,
+      readStoredChartMainPercentMinHeight(),
+    )
+    const normalizedPercentMaxHeight = clampChartMainPercentHeight(
+      parsedPercentMaxHeight,
+      readStoredChartMainPercentMaxHeight(),
+    )
+    if (normalizedPercentMinHeight > normalizedPercentMaxHeight) {
+      setChartLayoutSettingError('百分比模式的最小高度不能大于最大高度。')
+      setChartLayoutSettingNotice('')
+      return
+    }
+
     writeStoredChartMainWidthRatio(normalizedMainValue)
     writeStoredChartIndicatorWidthRatio(normalizedIndicatorValue)
+    writeStoredChartMainHeightMode(chartMainHeightMode)
+    writeStoredChartMainPercentPixels(normalizedPercentPixels)
+    writeStoredChartMainPercentMinHeight(normalizedPercentMinHeight)
+    writeStoredChartMainPercentMaxHeight(normalizedPercentMaxHeight)
     setChartMainRatioInput(normalizedMainValue.toFixed(2))
     setChartIndicatorRatioInput(normalizedIndicatorValue.toFixed(2))
+    setChartMainPercentPixelsInput(String(normalizedPercentPixels))
+    setChartMainPercentMinHeightInput(String(normalizedPercentMinHeight))
+    setChartMainPercentMaxHeightInput(String(normalizedPercentMaxHeight))
     setChartLayoutSettingError('')
-    setChartLayoutSettingNotice('已保存。切回详情页后会使用新比例。')
+    setChartLayoutSettingNotice('已保存。切回详情页后会使用新的高度设置。')
   }
 
   function onSaveDetailsNavLongPressInterval() {
@@ -492,11 +556,14 @@ export default function SettingsPage() {
 
           <button className="settings-list-item" type="button" onClick={openChartLayoutSetting}>
             <div className="settings-list-item-main">
-              <strong>图表高度比例</strong>
-              <span>统一设置主图区与指标区高度比例。</span>
+              <strong>图表高度</strong>
+              <span>主图区可切换固定高度与百分比高度，指标区仍使用固定比例。</span>
             </div>
             <span className="settings-list-item-value">
-              主 {currentChartMainWidthRatio.toFixed(2)} / 指标 {currentChartIndicatorWidthRatio.toFixed(2)}
+              {currentChartMainHeightMode === 'percent'
+                ? `主 ${currentChartMainPercentPixels}px / 1%`
+                : `主 ${currentChartMainWidthRatio.toFixed(2)}`}
+              {' / '}指标 {currentChartIndicatorWidthRatio.toFixed(2)}
             </span>
           </button>
 
@@ -591,12 +658,12 @@ export default function SettingsPage() {
             }
           }}
         >
-          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="图表高度比例设置">
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="图表高度设置">
             <div className="settings-modal-head">
               <div>
-                <h3 className="settings-subtitle-head">图表高度比例</h3>
+                <h3 className="settings-subtitle-head">图表高度</h3>
                 <p className="settings-section-note">
-                  主图区与指标区分开设置，保存时会同时写入两项配置。
+                  固定高度沿用容器宽度比例；百分比高度让主图中相同涨跌幅尽量保持相同像素距离。
                 </p>
               </div>
               <div className="settings-actions">
@@ -606,23 +673,83 @@ export default function SettingsPage() {
               </div>
             </div>
 
-            <div className="settings-field settings-field-textarea">
-              <span>CHART_MAIN_WIDTH_RATIO</span>
-              <input
-                type="number"
-                min={CHART_MAIN_WIDTH_RATIO_MIN}
-                max={CHART_MAIN_WIDTH_RATIO_MAX}
-                step={RATIO_INPUT_STEP}
-                value={chartMainRatioInput}
-                onChange={(event) => setChartMainRatioInput(event.target.value)}
-              />
-              <small>
-                主图区预览：{chartMainWidthRatioPreview === null ? '--' : chartMainWidthRatioPreview.toFixed(2)}
-              </small>
+            <div className="settings-toggle-row" role="group" aria-label="主图高度模式">
+              <button
+                className={chartMainHeightMode === 'fixed' ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
+                type="button"
+                onClick={() => setChartMainHeightMode('fixed')}
+              >
+                固定高度
+              </button>
+              <button
+                className={chartMainHeightMode === 'percent' ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
+                type="button"
+                onClick={() => setChartMainHeightMode('percent')}
+              >
+                百分比高度
+              </button>
             </div>
 
+            {chartMainHeightMode === 'fixed' ? (
+              <div className="settings-field settings-field-textarea">
+                <span>主图区高度 / 容器宽度</span>
+                <input
+                  type="number"
+                  min={CHART_MAIN_WIDTH_RATIO_MIN}
+                  max={CHART_MAIN_WIDTH_RATIO_MAX}
+                  step={RATIO_INPUT_STEP}
+                  value={chartMainRatioInput}
+                  onChange={(event) => setChartMainRatioInput(event.target.value)}
+                />
+                <small>
+                  比例预览：{chartMainWidthRatioPreview === null ? '--' : chartMainWidthRatioPreview.toFixed(2)}
+                </small>
+              </div>
+            ) : (
+              <>
+                <div className="settings-field settings-field-textarea">
+                  <span>每 1% 像素数</span>
+                  <input
+                    type="number"
+                    min={CHART_MAIN_PERCENT_PIXELS_MIN}
+                    max={CHART_MAIN_PERCENT_PIXELS_MAX}
+                    step={0.5}
+                    value={chartMainPercentPixelsInput}
+                    onChange={(event) => setChartMainPercentPixelsInput(event.target.value)}
+                  />
+                  <small>以价格区间中点为基准，与主图现有 10% 分隔线使用同一口径。</small>
+                </div>
+
+                <div className="settings-field settings-field-textarea">
+                  <span>最小高度（px）</span>
+                  <input
+                    type="number"
+                    min={CHART_MAIN_PERCENT_HEIGHT_LIMIT_MIN}
+                    max={CHART_MAIN_PERCENT_HEIGHT_LIMIT_MAX}
+                    step={20}
+                    value={chartMainPercentMinHeightInput}
+                    onChange={(event) => setChartMainPercentMinHeightInput(event.target.value)}
+                  />
+                  <small>小波动区间不会低于此高度，避免主图过扁。</small>
+                </div>
+
+                <div className="settings-field settings-field-textarea">
+                  <span>最大高度（px）</span>
+                  <input
+                    type="number"
+                    min={CHART_MAIN_PERCENT_HEIGHT_LIMIT_MIN}
+                    max={CHART_MAIN_PERCENT_HEIGHT_LIMIT_MAX}
+                    step={20}
+                    value={chartMainPercentMaxHeightInput}
+                    onChange={(event) => setChartMainPercentMaxHeightInput(event.target.value)}
+                  />
+                  <small>大波动区间不会超过此高度，避免极端行情把页面拉得过长。</small>
+                </div>
+              </>
+            )}
+
             <div className="settings-field settings-field-textarea">
-              <span>CHART_INDICATOR_WIDTH_RATIO</span>
+              <span>指标区总高度 / 容器宽度</span>
               <input
                 type="number"
                 min={CHART_INDICATOR_WIDTH_RATIO_MIN}
