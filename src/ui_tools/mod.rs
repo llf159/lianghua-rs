@@ -1,12 +1,15 @@
 use std::{
     collections::HashMap,
+    fs,
     sync::{Mutex, OnceLock},
+    time::UNIX_EPOCH,
 };
 
 use duckdb::{Connection, params_from_iter};
 
 use crate::data::{
     load_stock_list, load_ths_concepts_list, load_ths_concepts_named_map, source_db_path,
+    stock_list_path,
 };
 
 pub mod all_market_monitor;
@@ -182,9 +185,22 @@ fn load_total_mv_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
 }
 
 pub fn build_total_mv_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
-    cached_number_map(format!("{source_dir}\0total_mv"), || {
-        load_total_mv_map(source_dir)
-    })
+    let stock_list_stamp = fs::metadata(stock_list_path(source_dir))
+        .ok()
+        .map(|metadata| {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                .map(|value| value.as_nanos())
+                .unwrap_or_default();
+            format!("{}:{modified}", metadata.len())
+        })
+        .unwrap_or_else(|| "missing".to_string());
+    cached_number_map(
+        format!("{source_dir}\0total_mv\0{stock_list_stamp}"),
+        || load_total_mv_map(source_dir),
+    )
 }
 
 fn load_circ_mv_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
@@ -267,7 +283,19 @@ pub fn build_most_related_concept_map(source_dir: &str) -> Result<HashMap<String
 }
 
 pub fn build_name_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
-    cached_string_map(format!("{source_dir}\0name"), || {
+    let stock_list_stamp = fs::metadata(stock_list_path(source_dir))
+        .ok()
+        .map(|metadata| {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                .map(|value| value.as_nanos())
+                .unwrap_or_default();
+            format!("{}:{modified}", metadata.len())
+        })
+        .unwrap_or_else(|| "missing".to_string());
+    cached_string_map(format!("{source_dir}\0name\0{stock_list_stamp}"), || {
         build_stock_list_text_map(source_dir, 2)
     })
 }

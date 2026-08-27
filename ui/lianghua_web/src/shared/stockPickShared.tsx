@@ -20,7 +20,8 @@ import {
 export const STOCK_PICK_BOARD_OPTIONS = [
   "全部",
   "主板",
-  "创业/科创",
+  "科创板",
+  "创业板",
   "北交所",
   "ST",
 ] as const;

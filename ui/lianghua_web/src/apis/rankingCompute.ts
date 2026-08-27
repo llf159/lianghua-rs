@@ -10,6 +10,14 @@ export type RankComputeDbRange = {
   rowCount: number
 }
 
+export type StrategySimilarityActiveConfig = {
+  algorithmVersion: string
+  windowTradeDays: number
+  poolSegments: number
+  outcomeTradeDays: number
+  benchmarkIndexCode: string
+}
+
 export type RankComputeResultContinuity = {
   checked: boolean
   isContinuous: boolean
@@ -30,6 +38,7 @@ export type RankingComputeStatus = {
   resultDb: RankComputeDbRange
   convolutionRankDb: RankComputeDbRange
   similarityRankDb: RankComputeDbRange
+  similarityActiveConfig?: StrategySimilarityActiveConfig | null
   conceptPerformanceDb: RankComputeDbRange
   resultDbContinuity: RankComputeResultContinuity
   cyqDb: RankComputeDbRange

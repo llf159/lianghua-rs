@@ -1773,7 +1773,7 @@ mod tests {
                 StockMeta {
                     ts_code: "300001.SZ".to_string(),
                     name: "特锐德".to_string(),
-                    board: "创业/科创".to_string(),
+                    board: "创业板".to_string(),
                     total_mv_yi: None,
                     concept: String::new(),
                 },

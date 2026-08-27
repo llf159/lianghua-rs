@@ -71,6 +71,11 @@ type PendingConfirmState =
   | { kind: 'delete-cyq-chen-db' }
   | null
 
+const DEFAULT_SIMILARITY_WINDOW_TRADE_DAYS = 20
+const DEFAULT_SIMILARITY_POOL_SEGMENTS = 5
+const DEFAULT_SIMILARITY_OUTCOME_TRADE_DAYS = 5
+const DEFAULT_SIMILARITY_BENCHMARK_INDEX_CODE = '000001.SH'
+
 function createEmptyCardFeedback(): CardFeedback {
   return {
     status: { notice: '', error: '' },
@@ -254,11 +259,21 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
   const [startDateInput, setStartDateInput] = useState('')
   const [endDateInput, setEndDateInput] = useState('')
   const [similarityTradeDateInput, setSimilarityTradeDateInput] = useState('')
-  const [similarityWindowDaysInput, setSimilarityWindowDaysInput] = useState('20')
-  const [similarityPoolSegmentsInput, setSimilarityPoolSegmentsInput] = useState('5')
-  const [similarityOutcomeDaysInput, setSimilarityOutcomeDaysInput] = useState('5')
-  const [similarityBenchmarkCodes, setSimilarityBenchmarkCodes] = useState(['000001.SH'])
-  const [similarityBenchmarkCode, setSimilarityBenchmarkCode] = useState('000001.SH')
+  const [similarityWindowDaysInput, setSimilarityWindowDaysInput] = useState(
+    String(DEFAULT_SIMILARITY_WINDOW_TRADE_DAYS),
+  )
+  const [similarityPoolSegmentsInput, setSimilarityPoolSegmentsInput] = useState(
+    String(DEFAULT_SIMILARITY_POOL_SEGMENTS),
+  )
+  const [similarityOutcomeDaysInput, setSimilarityOutcomeDaysInput] = useState(
+    String(DEFAULT_SIMILARITY_OUTCOME_TRADE_DAYS),
+  )
+  const [similarityBenchmarkCodes, setSimilarityBenchmarkCodes] = useState([
+    DEFAULT_SIMILARITY_BENCHMARK_INDEX_CODE,
+  ])
+  const [similarityBenchmarkCode, setSimilarityBenchmarkCode] = useState(
+    DEFAULT_SIMILARITY_BENCHMARK_INDEX_CODE,
+  )
   const [cyqFactorInput, setCyqFactorInput] = useState('50')
   const [cyqStartDateInput, setCyqStartDateInput] = useState('')
   const [cyqEndDateInput, setCyqEndDateInput] = useState('')
@@ -289,6 +304,7 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
   const activeDownloadIdRef = useRef('')
   const progressUnlistenRef = useRef<UnlistenFn | null>(null)
   const pendingStatusRefreshRef = useRef(false)
+  const similarityConfigLoadedRef = useRef(false)
   const busyActionRef = useRef(busyAction)
   busyActionRef.current = busyAction
 
@@ -337,6 +353,28 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
       ...current,
       [slot]: { notice: '', error: '' },
     }))
+  }
+
+  function applySimilarityActiveConfig(
+    config: RankingComputeStatus['similarityActiveConfig'],
+    force = false,
+  ) {
+    if (!force && similarityConfigLoadedRef.current) {
+      return
+    }
+    setSimilarityWindowDaysInput(
+      String(config?.windowTradeDays ?? DEFAULT_SIMILARITY_WINDOW_TRADE_DAYS),
+    )
+    setSimilarityPoolSegmentsInput(
+      String(config?.poolSegments ?? DEFAULT_SIMILARITY_POOL_SEGMENTS),
+    )
+    setSimilarityOutcomeDaysInput(
+      String(config?.outcomeTradeDays ?? DEFAULT_SIMILARITY_OUTCOME_TRADE_DAYS),
+    )
+    setSimilarityBenchmarkCode(
+      config?.benchmarkIndexCode ?? DEFAULT_SIMILARITY_BENCHMARK_INDEX_CODE,
+    )
+    similarityConfigLoadedRef.current = true
   }
 
   function clearAllFeedback() {
@@ -598,6 +636,10 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
       const nextStatus = await getRankingComputeStatus(managedStatus.sourcePath)
 
       setStatus(nextStatus)
+      applySimilarityActiveConfig(
+        nextStatus.similarityActiveConfig,
+        syncSuggestedInputs,
+      )
       if (!preserveNotice) {
         clearAllFeedback()
       }
@@ -890,14 +932,25 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
       const result = await runStrategyTriggerSimilarityRanking({
         sourcePath,
         tradeDate,
-        windowTradeDays: normalizePositiveInt(similarityWindowDaysInput, 20, 3),
-        poolSegments: normalizePositiveInt(similarityPoolSegmentsInput, 5),
-        outcomeTradeDays: normalizePositiveInt(similarityOutcomeDaysInput, 5),
+        windowTradeDays: normalizePositiveInt(
+          similarityWindowDaysInput,
+          DEFAULT_SIMILARITY_WINDOW_TRADE_DAYS,
+          3,
+        ),
+        poolSegments: normalizePositiveInt(
+          similarityPoolSegmentsInput,
+          DEFAULT_SIMILARITY_POOL_SEGMENTS,
+        ),
+        outcomeTradeDays: normalizePositiveInt(
+          similarityOutcomeDaysInput,
+          DEFAULT_SIMILARITY_OUTCOME_TRADE_DAYS,
+        ),
         benchmarkIndexCode: similarityBenchmarkCode,
         limit: 1,
       })
       const nextStatus = await getRankingComputeStatus(sourcePath)
       setStatus(nextStatus)
+      applySimilarityActiveConfig(nextStatus.similarityActiveConfig, true)
       setFeedbackNotice(
         'similarityRank',
         `走势相似排名计算完成：${result.resolvedTradeDate}，股票池 ${result.universeCount}，有效排名 ${result.rankedCount}，历史模板 ${result.evaluatedAnchorCount}，耗时 ${formatElapsedMs(result.elapsedMs ?? 0)}。`,

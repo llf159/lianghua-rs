@@ -10,8 +10,8 @@ use crate::{
 };
 
 use super::{
-    build_concepts_map, build_industry_map, build_name_map, normalize_trade_date,
-    resolve_trade_date,
+    build_concepts_map, build_industry_map, build_name_map, build_total_mv_map,
+    normalize_trade_date, resolve_trade_date,
 };
 
 #[path = "strategy_trigger_similarity_ranking.rs"]
@@ -1002,8 +1002,15 @@ fn build_trigger_fingerprint(
 fn build_price_volume_channels(
     rows: &[MarketObservation],
     segments: usize,
+    total_mv_yi: Option<f64>,
+    market_categories: [f64; 5],
 ) -> Vec<Option<Vec<f64>>> {
-    let mut channels = vec![Vec::new(); 12];
+    let mut channels = vec![Vec::new(); 18];
+    // stock_list.csv 目前提供最新总市值而非逐日历史总市值。用固定对数尺度编码为
+    // [0, 1]，作为股票规模这一项基本特征；不把它伪装成时间序列趋势。
+    let normalized_market_cap = total_mv_yi
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| (value.log10() / 5.0).clamp(0.0, 1.0));
     let mut previous_close: Option<f64> = None;
     for row in rows {
         channels[0].push(row.close.filter(|v| *v > 0.0).map(f64::ln));
@@ -1049,18 +1056,40 @@ fn build_price_volume_channels(
             }
             _ => None,
         });
+        channels[12].push(normalized_market_cap);
+        for (offset, value) in market_categories.iter().copied().enumerate() {
+            channels[13 + offset].push(Some(value));
+        }
         previous_close = row.close.filter(|value| value.is_finite());
     }
     // 价格水平、成交量和成交额只比较相对形态；跳空、收益、振幅、影线、位置、
     // 换手和资金流保留原始状态，以免把方向、缺口和风险强度标准化掉。
     let standardize = [
-        true, false, false, false, false, true, true, false, false, false, false, false,
+        true, false, false, false, false, true, true, false, false, false, false, false, false,
+        false, false, false, false, false,
     ];
     channels
         .iter()
         .zip(standardize)
         .map(|(series, standardize)| temporal_signature(series, segments, standardize))
         .collect()
+}
+
+// 与全局板块筛选保持一致：主板、科创板、创业板、北交所、ST 五类独热编码。
+fn market_category_features(ts_code: &str, stock_name: Option<&str>) -> [f64; 5] {
+    let mut features = [0.0; 5];
+    let index = match crate::utils::utils::board_category(ts_code, stock_name) {
+        "主板" => Some(0),
+        "科创板" => Some(1),
+        "创业板" => Some(2),
+        "北交所" => Some(3),
+        "ST" => Some(4),
+        _ => None,
+    };
+    if let Some(index) = index {
+        features[index] = 1.0;
+    }
+    features
 }
 
 fn build_indicator_channels(
@@ -1264,6 +1293,8 @@ struct SampleBuildContext<'a> {
     all_trade_dates: &'a [String],
     environment_fingerprints: &'a HashMap<String, Vec<Option<Vec<f64>>>>,
     benchmark_rows: &'a HashMap<String, BenchmarkObservation>,
+    total_mv_map: &'a HashMap<String, f64>,
+    name_map: &'a HashMap<String, String>,
     pool_segments: usize,
     outcome_trade_days: usize,
     target_trade_date: &'a str,
@@ -1316,7 +1347,15 @@ fn build_samples_for_chunk(
             );
             let fingerprint = EventFingerprint {
                 trigger,
-                price_volume: build_price_volume_channels(market_rows, context.pool_segments),
+                price_volume: build_price_volume_channels(
+                    market_rows,
+                    context.pool_segments,
+                    context.total_mv_map.get(&anchor.ts_code).copied(),
+                    market_category_features(
+                        &anchor.ts_code,
+                        context.name_map.get(&anchor.ts_code).map(String::as_str),
+                    ),
+                ),
                 indicators: build_indicator_channels(
                     market_rows,
                     context.schema.indicator_columns.len(),
@@ -1587,6 +1626,8 @@ pub fn get_strategy_trigger_similarity_page(
         &resolved_trade_date,
         &benchmark_index_code,
     )?;
+    let total_mv_map = build_total_mv_map(&source_path).unwrap_or_default();
+    let name_map = build_name_map(&source_path).unwrap_or_default();
     let target_anchor = Anchor {
         id: 0,
         ts_code: resolved_ts_code.clone(),
@@ -1599,6 +1640,8 @@ pub fn get_strategy_trigger_similarity_page(
         all_trade_dates: &all_trade_dates,
         environment_fingerprints: &environment_fingerprints,
         benchmark_rows: &benchmark_rows,
+        total_mv_map: &total_mv_map,
+        name_map: &name_map,
         pool_segments,
         outcome_trade_days,
         target_trade_date: &resolved_trade_date,
@@ -1632,7 +1675,6 @@ pub fn get_strategy_trigger_similarity_page(
         include_summaries: true,
         ..target_context
     };
-    let name_map = build_name_map(&source_path).unwrap_or_default();
     let industry_map = build_industry_map(&source_path).unwrap_or_default();
     let concept_map = build_concepts_map(&source_path).unwrap_or_default();
     let mut items = Vec::new();
@@ -1745,8 +1787,9 @@ mod tests {
         KERNEL_NAMES, MARKET_SIMILARITY_WEIGHT, MarketObservation, PRICE_VOLUME_SIMILARITY_WEIGHT,
         StrategyTriggerSimilarityRow, TRIGGER_SIMILARITY_WEIGHT, build_outcome,
         build_price_volume_channels, build_rating_sample, cosine_similarity, final_similarity,
-        list_strategy_trigger_similarity_benchmark_index_codes, resolve_benchmark_index_code,
-        temporal_signature, weighted_quantile, weighted_winsorized_mean,
+        list_strategy_trigger_similarity_benchmark_index_codes, market_category_features,
+        resolve_benchmark_index_code, temporal_signature, weighted_quantile,
+        weighted_winsorized_mean,
     };
 
     fn similarity_row(ts_code: &str, end_trade_date: &str) -> StrategyTriggerSimilarityRow {
@@ -1801,13 +1844,16 @@ mod tests {
                     indicators: Vec::new(),
                 }
             };
+        let observations = [
+            row("20240101", 10.0, 11.0, 9.0, 10.5),
+            row("20240102", 12.0, 12.2, 10.8, 11.0),
+            row("20240103", 11.0, 15.0, 10.8, 12.0),
+        ];
         let channels = build_price_volume_channels(
-            &[
-                row("20240101", 10.0, 11.0, 9.0, 10.5),
-                row("20240102", 12.0, 12.2, 10.8, 11.0),
-                row("20240103", 11.0, 15.0, 10.8, 12.0),
-            ],
+            &observations,
             3,
+            Some(100.0),
+            market_category_features("688001.SH", Some("*ST 测试")),
         );
 
         let gap = channels[9].as_ref().expect("gap channel");
@@ -1822,6 +1868,31 @@ mod tests {
         let lower_wick = channels[11].as_ref().expect("lower wick channel");
         assert!((lower_wick[1] - 0.14285714285714285).abs() < 1e-12);
         assert!((lower_wick[2] - 0.047619047619047616).abs() < 1e-12);
+
+        let market_cap = channels[12].as_ref().expect("market cap channel");
+        assert!(market_cap.iter().any(|value| *value > 0.0));
+        let large_market_cap = build_price_volume_channels(
+            &observations,
+            3,
+            Some(10_000.0),
+            market_category_features("688001.SH", Some("*ST 测试")),
+        )[12]
+            .clone()
+            .expect("large market cap channel");
+        assert!(cosine_similarity(market_cap, &large_market_cap) < 100.0);
+        assert!(
+            build_price_volume_channels(
+                &observations,
+                3,
+                None,
+                market_category_features("688001.SH", Some("*ST 测试")),
+            )[12]
+                .is_none()
+        );
+        for channel in &channels[13..17] {
+            assert!(channel.as_ref().is_some_and(|values| values[0] == 0.0));
+        }
+        assert!(channels[17].as_ref().is_some_and(|values| values[0] == 1.0));
     }
 
     #[test]

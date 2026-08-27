@@ -575,10 +575,11 @@ pub fn board_category(ts_code: &str, stock_name: Option<&str>) -> &'static str {
     if ts.ends_with(".BJ") {
         return "北交所";
     }
-    if (ts.ends_with(".SZ") && ts.starts_with("30"))
-        || (ts.ends_with(".SH") && (ts.starts_with("688") || ts.starts_with("689")))
-    {
-        return "创业/科创";
+    if ts.ends_with(".SH") && (ts.starts_with("688") || ts.starts_with("689")) {
+        return "科创板";
+    }
+    if ts.ends_with(".SZ") && ts.starts_with("30") {
+        return "创业板";
     }
     if ts.ends_with(".SH") || ts.ends_with(".SZ") {
         return "主板";
@@ -612,7 +613,10 @@ mod tests {
 
     #[test]
     fn board_category_treats_689_prefix_as_star_market() {
-        assert_eq!(board_category("689001.SH", Some("测试股份")), "创业/科创");
+        assert_eq!(board_category("689001.SH", Some("测试股份")), "科创板");
+        assert_eq!(board_category("688001.SH", Some("测试股份")), "科创板");
+        assert_eq!(board_category("300001.SZ", Some("测试股份")), "创业板");
+        assert_eq!(board_category("830001.BJ", Some("测试股份")), "北交所");
     }
 
     #[test]

@@ -59,7 +59,8 @@ const INDEX_OPTIONS = [
 const BOARD_OPTIONS = [
   { value: '', label: '全部板块' },
   { value: '主板', label: '主板' },
-  { value: '创业/科创', label: '创业/科创' },
+  { value: '科创板', label: '科创板' },
+  { value: '创业板', label: '创业板' },
   { value: '北交所', label: '北交所' },
   { value: 'ST', label: 'ST' },
   { value: '其他', label: '其他' },
@@ -320,11 +321,13 @@ function resolveTradeBoard(tsCode: string, stockName?: string | null) {
     return '北交所'
   }
   if (
-    (normalizedCode.endsWith('.SZ') && normalizedCode.startsWith('30')) ||
-    (normalizedCode.endsWith('.SH') &&
-      (normalizedCode.startsWith('688') || normalizedCode.startsWith('689')))
+    normalizedCode.endsWith('.SH') &&
+    (normalizedCode.startsWith('688') || normalizedCode.startsWith('689'))
   ) {
-    return '创业/科创'
+    return '科创板'
+  }
+  if (normalizedCode.endsWith('.SZ') && normalizedCode.startsWith('30')) {
+    return '创业板'
   }
   if (normalizedCode.endsWith('.SH') || normalizedCode.endsWith('.SZ')) {
     return '主板'

@@ -53,6 +53,7 @@ pub struct CyqChenComputeResult {
 }
 
 use super::normalize_trade_date;
+use super::strategy_trigger_similarity::ranking::get_strategy_trigger_similarity_active_config;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +86,8 @@ pub struct RankComputeResultContinuity {
 #[serde(rename_all = "camelCase")]
 pub struct RankComputeStatus {
     pub source_path: String,
+    pub similarity_active_config:
+        Option<super::strategy_trigger_similarity::ranking::StrategyTriggerSimilarityActiveConfig>,
     pub strategy_path: String,
     pub source_db: RankComputeDbRange,
     pub result_db: RankComputeDbRange,
@@ -554,6 +557,75 @@ fn normalize_strategy_path(source_path: &str, strategy_path: Option<&str>) -> St
         .to_string()
 }
 
+fn query_similarity_rank_range(
+    db_path: &Path,
+) -> Result<
+    (
+        RankComputeDbRange,
+        Option<super::strategy_trigger_similarity::ranking::StrategyTriggerSimilarityActiveConfig>,
+    ),
+    String,
+> {
+    let empty_range = |exists: bool| RankComputeDbRange {
+        file_name: "scoring_result.db".to_string(),
+        table_name: "strategy_trigger_similarity_rank".to_string(),
+        exists,
+        min_trade_date: None,
+        max_trade_date: None,
+        distinct_trade_dates: 0,
+        row_count: 0,
+    };
+    if !db_path.exists() {
+        return Ok((empty_range(false), None));
+    }
+    let db_path_str = db_path
+        .to_str()
+        .ok_or_else(|| "scoring_result.db 路径不是有效 UTF-8".to_string())?;
+    let conn =
+        Connection::open(db_path_str).map_err(|e| format!("打开 scoring_result.db 失败: {e}"))?;
+    let table_exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='main' AND table_name='strategy_trigger_similarity_rank'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("检查走势相似排名表失败: {e}"))? > 0;
+    let active_config = get_strategy_trigger_similarity_active_config(&conn)?;
+    let Some(config) = active_config.clone() else {
+        return Ok((empty_range(table_exists), None));
+    };
+    if !table_exists {
+        return Ok((empty_range(false), Some(config)));
+    }
+    let config_key = format!(
+        "{}:w{}:p{}:h{}:b{}",
+        config.algorithm_version,
+        config.window_trade_days,
+        config.pool_segments,
+        config.outcome_trade_days,
+        config.benchmark_index_code
+    );
+    let range = conn
+        .query_row(
+            "SELECT MIN(trade_date), MAX(trade_date), COUNT(DISTINCT trade_date), COUNT(*) \
+             FROM strategy_trigger_similarity_rank WHERE config_key=?",
+            [&config_key],
+            |row| {
+                Ok(RankComputeDbRange {
+                    file_name: "scoring_result.db".to_string(),
+                    table_name: "strategy_trigger_similarity_rank".to_string(),
+                    exists: true,
+                    min_trade_date: row.get(0)?,
+                    max_trade_date: row.get(1)?,
+                    distinct_trade_dates: row.get::<_, Option<i64>>(2)?.unwrap_or(0) as u64,
+                    row_count: row.get::<_, Option<i64>>(3)?.unwrap_or(0) as u64,
+                })
+            },
+        )
+        .map_err(|e| format!("读取走势相似排名库状态失败: {e}"))?;
+    Ok((range, Some(config)))
+}
+
 fn get_rank_compute_status_inner(
     source_path: &str,
     strategy_path: Option<&str>,
@@ -568,11 +640,7 @@ fn get_rank_compute_status_inner(
         query_trade_date_range(&result_db, "scoring_result.db", "convolution_rank")?;
     let result_db_continuity = check_result_db_continuity(source_path, &result_db_range)?;
     let cyq_db_range = query_trade_date_range(&cyq_db, "cyq.db", "cyq_snapshot")?;
-    let similarity_rank_db = query_trade_date_range(
-        &result_db,
-        "scoring_result.db",
-        "strategy_trigger_similarity_rank",
-    )?;
+    let (similarity_rank_db, similarity_active_config) = query_similarity_rank_range(&result_db)?;
     let cyq_bin_row_count = query_table_row_count(&cyq_db, "cyq.db", "cyq_bin")?;
     let cyq_factor = query_cyq_factor(&cyq_db)?;
     let concept_performance_db = query_trade_date_range(
@@ -603,6 +671,7 @@ fn get_rank_compute_status_inner(
 
     Ok(RankComputeStatus {
         source_path: source_path.trim().to_string(),
+        similarity_active_config,
         strategy_path: normalize_strategy_path(source_path, strategy_path),
         source_db: source_db_range,
         result_db: result_db_range,
