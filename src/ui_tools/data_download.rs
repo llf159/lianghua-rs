@@ -6,6 +6,7 @@ use std::{
     thread,
 };
 
+use chrono::{Local, Timelike};
 use duckdb::{Connection, params};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -100,9 +101,27 @@ pub struct DataDownloadStatus {
     pub ths_concepts: DataDownloadFileStatus,
     pub missing_stock_repair: DataDownloadMissingStockRepairStatus,
     pub cyq_chen_maintenance: DataDownloadCyqChenMaintenanceStatus,
+    pub daily_target_trade_date: Option<String>,
     pub planned_action: String,
     pub planned_action_label: String,
     pub planned_action_detail: String,
+}
+
+fn resolve_daily_target_trade_date(
+    trade_dates: &[String],
+    today: &str,
+    current_hhmm: u32,
+) -> Option<String> {
+    let today_is_trade_date = trade_dates.iter().any(|trade_date| trade_date == today);
+    if today_is_trade_date && current_hhmm >= 1600 {
+        return Some(today.to_string());
+    }
+
+    trade_dates
+        .iter()
+        .rev()
+        .find(|trade_date| trade_date.as_str() < today)
+        .cloned()
 }
 
 #[derive(Clone, Deserialize)]
@@ -1344,6 +1363,12 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
         })?;
     let (planned_action, planned_action_label, planned_action_detail) =
         plan_download_action(&source_db);
+    let now = Local::now();
+    let today = now.format("%Y%m%d").to_string();
+    let current_hhmm = now.hour() * 100 + now.minute();
+    let daily_target_trade_date = load_trade_date_list(trimmed).ok().and_then(|trade_dates| {
+        resolve_daily_target_trade_date(&trade_dates, &today, current_hhmm)
+    });
 
     Ok(DataDownloadStatus {
         source_path: trimmed.to_string(),
@@ -1355,6 +1380,7 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
         ths_concepts,
         missing_stock_repair,
         cyq_chen_maintenance,
+        daily_target_trade_date,
         planned_action,
         planned_action_label,
         planned_action_detail,
@@ -2361,6 +2387,24 @@ mod tests {
         assert_eq!(next.finished, 7);
         assert_eq!(next.total, 15);
         assert!(next.message.contains("总进度 7 / 15"));
+    }
+
+    #[test]
+    fn daily_target_uses_previous_trade_date_before_close_and_today_after_close() {
+        let trade_dates = vec!["20260825".to_string(), "20260826".to_string()];
+
+        assert_eq!(
+            resolve_daily_target_trade_date(&trade_dates, "20260826", 1559).as_deref(),
+            Some("20260825")
+        );
+        assert_eq!(
+            resolve_daily_target_trade_date(&trade_dates, "20260826", 1600).as_deref(),
+            Some("20260826")
+        );
+        assert_eq!(
+            resolve_daily_target_trade_date(&trade_dates, "20260827", 1200).as_deref(),
+            Some("20260826")
+        );
     }
 
     #[test]

@@ -1,10 +1,54 @@
-import { useRef, useState } from 'react'
-import { readStoredDragonTigerDownloadSettings } from '../../apis/dataDownload'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  getDataDownloadStatus,
+  readStoredDragonTigerDownloadSettings,
+} from '../../apis/dataDownload'
+import { inspectManagedSourceStatus } from '../../apis/managedSource'
+import { getRankingComputeStatus } from '../../apis/rankingCompute'
+import {
+  getManagedStrategyAssetsStatus,
+  getManagedStrategyBackupDiff,
+} from '../../apis/strategyAssets'
+import DataTaskProgress from '../../shared/DataTaskProgress'
 import DataDownloadPage, { type DataDownloadPageHandle } from './DataDownloadPage'
 import RankingComputePage, { type RankingComputePageHandle } from './RankingComputePage'
 import './css/DownloadComputePage.css'
 
 type DailyWorkflowStage = 'idle' | 'download' | 'ranking' | 'similarity' | 'completed' | 'skipped' | 'failed'
+
+type DailyCompletion = {
+  loading: boolean
+  targetTradeDate: string | null
+  download: boolean
+  ranking: boolean
+  similarity: boolean
+  rankingStrategyChanged: boolean
+  error: string
+}
+
+const EMPTY_DAILY_COMPLETION: DailyCompletion = {
+  loading: true,
+  targetTradeDate: null,
+  download: false,
+  ranking: false,
+  similarity: false,
+  rankingStrategyChanged: false,
+  error: '',
+}
+
+function formatCompactTradeDate(value: string | null) {
+  if (!value || !/^\d{8}$/.test(value)) {
+    return value ?? '--'
+  }
+  return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`
+}
+
+function formatElapsedMs(value: number) {
+  if (value < 1000) {
+    return `${Math.max(0, Math.round(value))} ms`
+  }
+  return `${(value / 1000).toFixed(value >= 10_000 ? 1 : 2)} s`
+}
 
 export default function DownloadComputePage() {
   const [rankingStatusRefreshSignal, setRankingStatusRefreshSignal] = useState(0)
@@ -13,10 +57,82 @@ export default function DownloadComputePage() {
   )
   const [dailyWorkflowStage, setDailyWorkflowStage] = useState<DailyWorkflowStage>('idle')
   const [dailyWorkflowMessage, setDailyWorkflowMessage] = useState('依次执行增量更新、当日排名和走势相似度排名。')
+  const [dailyWorkflowStartedAt, setDailyWorkflowStartedAt] = useState<number | null>(null)
+  const [dailyWorkflowElapsedMs, setDailyWorkflowElapsedMs] = useState(0)
+  const [dailyCompletion, setDailyCompletion] = useState<DailyCompletion>(EMPTY_DAILY_COMPLETION)
   const downloadPageRef = useRef<DataDownloadPageHandle>(null)
   const rankingPageRef = useRef<RankingComputePageHandle>(null)
   const dailyWorkflowRunningRef = useRef(false)
   const dailyWorkflowRunning = ['download', 'ranking', 'similarity'].includes(dailyWorkflowStage)
+  const dailyAllCompleted =
+    Boolean(dailyCompletion.targetTradeDate) &&
+    dailyCompletion.download &&
+    dailyCompletion.ranking &&
+    dailyCompletion.similarity
+
+  const refreshDailyCompletion = useCallback(async () => {
+    setDailyCompletion((current) => ({ ...current, loading: true, error: '' }))
+    try {
+      const managedStatus = await inspectManagedSourceStatus()
+      const [downloadStatus, rankingStatus, strategyAssetsStatus] = await Promise.all([
+        getDataDownloadStatus(managedStatus.sourcePath),
+        getRankingComputeStatus(managedStatus.sourcePath),
+        getManagedStrategyAssetsStatus(),
+      ])
+      const latestComputeSnapshot = strategyAssetsStatus.backups.find(
+        (item) => item.sourceKind === 'rank_compute',
+      )
+      const rankingStrategyChanged = latestComputeSnapshot
+        ? (await getManagedStrategyBackupDiff(latestComputeSnapshot.backupId)).changedLineCount > 0
+        : false
+      const targetTradeDate = downloadStatus.dailyTargetTradeDate
+      const reachesTarget = (latestTradeDate: string | null | undefined) =>
+        Boolean(targetTradeDate && latestTradeDate && latestTradeDate >= targetTradeDate)
+      setDailyCompletion({
+        loading: false,
+        targetTradeDate,
+        download: reachesTarget(downloadStatus.sourceDb.maxTradeDate),
+        ranking: !rankingStrategyChanged && reachesTarget(rankingStatus.resultDb.maxTradeDate),
+        similarity:
+          !rankingStrategyChanged && reachesTarget(rankingStatus.similarityRankDb.maxTradeDate),
+        rankingStrategyChanged,
+        error: '',
+      })
+    } catch (completionError) {
+      setDailyCompletion((current) => ({
+        ...current,
+        loading: false,
+        error: `检测失败：${String(completionError)}`,
+      }))
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshDailyCompletion()
+  }, [refreshDailyCompletion])
+
+  useEffect(() => {
+    if (!dailyWorkflowRunning || dailyWorkflowStartedAt === null) {
+      return
+    }
+
+    const updateElapsed = () => setDailyWorkflowElapsedMs(Date.now() - dailyWorkflowStartedAt)
+    updateElapsed()
+    const timer = window.setInterval(updateElapsed, 250)
+    return () => window.clearInterval(timer)
+  }, [dailyWorkflowRunning, dailyWorkflowStartedAt])
+
+  const dailyStageIndex =
+    dailyWorkflowStage === 'download' ? 0 : dailyWorkflowStage === 'ranking' ? 1 : 2
+  const dailyStageLabels = ['增量更新', '排名计算', '相似度计算']
+  const dailyProgressPercent = dailyWorkflowRunning
+    ? Math.round((dailyStageIndex / dailyStageLabels.length) * 100)
+    : null
+  const dailyProgressSegments = dailyStageLabels.map((label, index) => ({
+    key: label,
+    label,
+    state: index < dailyStageIndex ? 'done' as const : index === dailyStageIndex ? 'active' as const : 'pending' as const,
+  }))
 
   async function runDailyWorkflow() {
     if (!downloadPageRef.current || !rankingPageRef.current) {
@@ -24,6 +140,8 @@ export default function DownloadComputePage() {
     }
 
     dailyWorkflowRunningRef.current = true
+    setDailyWorkflowStartedAt(Date.now())
+    setDailyWorkflowElapsedMs(0)
     setDailyWorkflowStage('download')
     setDailyWorkflowMessage('正在执行行情增量更新；如新筹码策略有变化，将自动跳过新筹码维护。')
     try {
@@ -63,6 +181,7 @@ export default function DownloadComputePage() {
       setDailyWorkflowStage('failed')
       setDailyWorkflowMessage(`每日工作流失败：${String(workflowError)}`)
     } finally {
+      await refreshDailyCompletion()
       dailyWorkflowRunningRef.current = false
     }
   }
@@ -102,8 +221,50 @@ export default function DownloadComputePage() {
             {dailyWorkflowRunning ? '每日工作流执行中...' : '开始每日工作流'}
           </button>
         </header>
-        <div className={`download-compute-daily-status is-${dailyWorkflowStage}`}>
-          {dailyWorkflowMessage}
+        {!dailyWorkflowRunning ? (
+          <div className={`download-compute-daily-status is-${dailyWorkflowStage}`}>
+            {dailyWorkflowMessage}
+          </div>
+        ) : null}
+        {dailyWorkflowRunning ? (
+          <DataTaskProgress
+            phaseLabel={dailyStageLabels[dailyStageIndex]}
+            phaseStepPillText={` · ${dailyStageIndex + 1}/3`}
+            phaseStepStatText={` ${dailyStageIndex + 1}/3`}
+            actionLabel="每日工作流"
+            progressPercent={dailyProgressPercent}
+            progressSegments={dailyProgressSegments}
+            elapsedText={formatElapsedMs(dailyWorkflowElapsedMs)}
+            shownProgressPercent={dailyProgressPercent ?? 0}
+            progressCounterText={`${dailyStageIndex + 1} / 3`}
+            currentObjectText={formatCompactTradeDate(dailyCompletion.targetTradeDate)}
+            message={dailyWorkflowMessage}
+            fallbackMessage="每日工作流正在执行。"
+          />
+        ) : null}
+        <div className={`download-compute-daily-check${dailyAllCompleted ? ' is-completed' : ''}`}>
+          <div>
+            <strong>
+              {dailyCompletion.loading
+                ? '正在检测当日完成状态...'
+                : dailyCompletion.error
+                  ? dailyCompletion.error
+                  : dailyAllCompleted
+                    ? '当日工作已全部完成'
+                    : '当日工作尚未全部完成'}
+            </strong>
+            <span>
+              目标交易日：{formatCompactTradeDate(dailyCompletion.targetTradeDate)}
+              {dailyCompletion.rankingStrategyChanged ? '；排名策略有变化' : ''}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void refreshDailyCompletion()}
+            disabled={dailyCompletion.loading || dailyWorkflowRunning}
+          >
+            {dailyCompletion.loading ? '检测中...' : '重新检测'}
+          </button>
         </div>
       </section>
 

@@ -86,6 +86,7 @@ export type DataDownloadStatus = {
   thsConcepts: DataDownloadFileStatus
   missingStockRepair: DataDownloadMissingStockRepairStatus
   cyqChenMaintenance: DataDownloadCyqChenMaintenanceStatus
+  dailyTargetTradeDate: string | null
   plannedAction: string
   plannedActionLabel: string
   plannedActionDetail: string
