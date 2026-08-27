@@ -43,3 +43,8 @@ duckdb = { version = "1.4.4", features = ["bundled", "appender-arrow"] }
 libc = "0.2"
 jni = "0.21.1"
 rustls-platform-verifier = "0.6.2"
+
+# 全市场相似度包含大量纯 Rust 浮点循环。开发界面仍保留调试信息，
+# 仅优化核心库，避免 `tauri dev` 与 release 的计算耗时相差一个数量级。
+[profile.dev.package.lianghua-rs]
+opt-level = 3

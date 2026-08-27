@@ -19,12 +19,15 @@ import {
   runConceptPerformanceCompute,
   runCyqChenCompute,
   runCyqCompute,
-  runConvolutionRankCompute,
   runRankingScoreCalculation,
   type RankComputeDbRange,
   type RankComputeResultContinuity,
   type RankingComputeStatus,
 } from '../../apis/rankingCompute'
+import {
+  listStrategyTriggerSimilarityBenchmarkIndexCodes,
+  runStrategyTriggerSimilarityRanking,
+} from '../../apis/strategyTriggerSimilarity'
 import {
   getCyqChenStrategyBackupDiff,
   getCyqChenStrategyPage,
@@ -52,14 +55,14 @@ type BusyAction =
   | 'idle'
   | 'loading'
   | 'computing'
-  | 'convolution-computing'
+  | 'similarity-ranking-computing'
   | 'recomputing-result-db'
   | 'cyq-computing'
   | 'cyq-chen-computing'
   | 'deleting-cyq-chen-db'
   | 'indicator-running'
 type IndicatorEditorMode = 'create' | 'edit'
-type FeedbackSlot = 'status' | 'rank' | 'convolutionRank' | 'otherData' | 'cyq' | 'cyqChen' | 'indicatorTask'
+type FeedbackSlot = 'status' | 'rank' | 'similarityRank' | 'otherData' | 'cyq' | 'cyqChen' | 'indicatorTask'
 type CardFeedback = Record<FeedbackSlot, { notice: string; error: string }>
 type PendingConfirmState =
   | { kind: 'delete-indicator'; item: IndicatorManageItem }
@@ -72,7 +75,7 @@ function createEmptyCardFeedback(): CardFeedback {
   return {
     status: { notice: '', error: '' },
     rank: { notice: '', error: '' },
-    convolutionRank: { notice: '', error: '' },
+    similarityRank: { notice: '', error: '' },
     otherData: { notice: '', error: '' },
     cyq: { notice: '', error: '' },
     cyqChen: { notice: '', error: '' },
@@ -184,6 +187,11 @@ function normalizeCyqFactorInput(raw: string) {
   return Math.max(2, Number(trimmed))
 }
 
+function normalizePositiveInt(raw: string, fallback: number, minimum = 1) {
+  const parsed = Number.parseInt(raw.trim(), 10)
+  return Number.isFinite(parsed) ? Math.max(minimum, parsed) : fallback
+}
+
 function formatPhaseLabel(phase: string | null | undefined) {
   switch (normalizeProgressPhase(phase)) {
     case 'delete_stock_data_indicator_columns':
@@ -230,8 +238,12 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
   const [busyAction, setBusyAction] = useState<BusyAction>('loading')
   const [startDateInput, setStartDateInput] = useState('')
   const [endDateInput, setEndDateInput] = useState('')
-  const [convolutionStartDateInput, setConvolutionStartDateInput] = useState('')
-  const [convolutionEndDateInput, setConvolutionEndDateInput] = useState('')
+  const [similarityTradeDateInput, setSimilarityTradeDateInput] = useState('')
+  const [similarityWindowDaysInput, setSimilarityWindowDaysInput] = useState('20')
+  const [similarityPoolSegmentsInput, setSimilarityPoolSegmentsInput] = useState('5')
+  const [similarityOutcomeDaysInput, setSimilarityOutcomeDaysInput] = useState('5')
+  const [similarityBenchmarkCodes, setSimilarityBenchmarkCodes] = useState(['000001.SH'])
+  const [similarityBenchmarkCode, setSimilarityBenchmarkCode] = useState('000001.SH')
   const [cyqFactorInput, setCyqFactorInput] = useState('50')
   const [cyqStartDateInput, setCyqStartDateInput] = useState('')
   const [cyqEndDateInput, setCyqEndDateInput] = useState('')
@@ -572,12 +584,7 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
           ? compactDateToInput(nextStatus.suggestedEndDate)
           : current || compactDateToInput(nextStatus.suggestedEndDate),
       )
-      setConvolutionStartDateInput((current) =>
-        syncSuggestedInputs
-          ? compactDateToInput(nextStatus.resultDb.minTradeDate)
-          : current || compactDateToInput(nextStatus.resultDb.minTradeDate),
-      )
-      setConvolutionEndDateInput((current) =>
+      setSimilarityTradeDateInput((current) =>
         syncSuggestedInputs
           ? compactDateToInput(nextStatus.resultDb.maxTradeDate)
           : current || compactDateToInput(nextStatus.resultDb.maxTradeDate),
@@ -613,6 +620,17 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
 
   useEffect(() => {
     void loadStatusRef.current()
+  }, [])
+
+  useEffect(() => {
+    void listStrategyTriggerSimilarityBenchmarkIndexCodes()
+      .then((codes) => {
+        setSimilarityBenchmarkCodes(codes)
+        setSimilarityBenchmarkCode((current) =>
+          codes.includes(current) ? current : codes[0] || '000001.SH',
+        )
+      })
+      .catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -826,30 +844,36 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
     }
   }
 
-  async function onRunConvolutionRankCompute() {
+  async function onRunSimilarityRankingCompute() {
     if (!sourcePath) {
-      setFeedbackError('convolutionRank', '当前数据目录为空，请先到数据管理页确认目录。')
+      setFeedbackError('similarityRank', '当前数据目录为空，请先到数据管理页确认目录。')
       return
     }
 
-    const startDate = inputDateToCompact(convolutionStartDateInput)
-    const endDate = inputDateToCompact(convolutionEndDateInput)
-    if (!startDate || !endDate) {
-      setFeedbackError('convolutionRank', '请先输入开始日期和结束日期。')
+    const tradeDate = inputDateToCompact(similarityTradeDateInput)
+    if (!tradeDate) {
+      setFeedbackError('similarityRank', '请先输入排名日期。')
       return
     }
 
-    setBusyAction('convolution-computing')
-    clearFeedback('convolutionRank')
+    setBusyAction('similarity-ranking-computing')
+    clearFeedback('similarityRank')
     try {
-      const result = await runConvolutionRankCompute(sourcePath, startDate, endDate)
+      const result = await runStrategyTriggerSimilarityRanking({
+        sourcePath,
+        tradeDate,
+        windowTradeDays: normalizePositiveInt(similarityWindowDaysInput, 20, 3),
+        poolSegments: normalizePositiveInt(similarityPoolSegmentsInput, 5),
+        outcomeTradeDays: normalizePositiveInt(similarityOutcomeDaysInput, 5),
+        benchmarkIndexCode: similarityBenchmarkCode,
+        limit: 1,
+      })
       setFeedbackNotice(
-        'convolutionRank',
-        `卷积排名计算完成：${result.kernelName}，${result.tradeDates} 个交易日，写入 ${result.savedRows} 行，耗时 ${formatElapsedMs(result.elapsedMs)}。`,
+        'similarityRank',
+        `走势相似排名计算完成：${result.resolvedTradeDate}，股票池 ${result.universeCount}，有效排名 ${result.rankedCount}，历史模板 ${result.evaluatedAnchorCount}，耗时 ${formatElapsedMs(result.elapsedMs ?? 0)}。`,
       )
-      await loadStatus({ preserveNotice: true })
     } catch (actionError) {
-      setFeedbackError('convolutionRank', `卷积排名计算失败: ${String(actionError)}`)
+      setFeedbackError('similarityRank', `走势相似排名计算失败: ${String(actionError)}`)
     } finally {
       setBusyAction('idle')
     }
@@ -1216,46 +1240,48 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
       <section className="ranking-compute-card">
         <div className="ranking-compute-summary">
           <div className="ranking-compute-summary-item">
-            <span>卷积排名计算</span>
-            <strong>convolution_rank · H30-L50</strong>
-            <small>
-              50% 三日快核 + 50% 三十日均值；当前结果：{describeDbRange(status?.convolutionRankDb)}。
-            </small>
+            <span>走势相似排行榜计算</span>
+            <strong>未来表现反推启动模板 + 四通道精确相似度</strong>
+            <small>完整历史候选参与，使用策略触发、量价、指标和市场环境；结果在“排名总览 → 走势相似排名”查看。</small>
           </div>
         </div>
 
-        <div className="ranking-compute-form">
+        <div className="ranking-compute-form ranking-compute-similarity-form">
           <label className="ranking-compute-field">
-            <span>开始日期</span>
+            <span>排名日期</span>
             <input
               type="date"
-              value={convolutionStartDateInput}
-              onChange={(event) => setConvolutionStartDateInput(event.target.value)}
+              value={similarityTradeDateInput}
+              onChange={(event) => setSimilarityTradeDateInput(event.target.value)}
+            />
+          </label>
+          <label className="ranking-compute-field">
+            <span>窗口交易日</span>
+            <input
+              type="number"
+              min={3}
+              value={similarityWindowDaysInput}
+              onChange={(event) => setSimilarityWindowDaysInput(event.target.value)}
             />
           </label>
 
-          <label className="ranking-compute-field">
-            <span>结束日期</span>
-            <input
-              type="date"
-              value={convolutionEndDateInput}
-              onChange={(event) => setConvolutionEndDateInput(event.target.value)}
-            />
-          </label>
+          <label className="ranking-compute-field"><span>池化分段</span><input type="number" min={1} max={12} value={similarityPoolSegmentsInput} onChange={(event) => setSimilarityPoolSegmentsInput(event.target.value)} /></label>
+          <label className="ranking-compute-field"><span>后验交易日</span><input type="number" min={1} value={similarityOutcomeDaysInput} onChange={(event) => setSimilarityOutcomeDaysInput(event.target.value)} /></label>
+          <label className="ranking-compute-field"><span>基准指数</span><select value={similarityBenchmarkCode} onChange={(event) => setSimilarityBenchmarkCode(event.target.value)}>{similarityBenchmarkCodes.map((code) => <option key={code} value={code}>{code}</option>)}</select></label>
 
           <div className="ranking-compute-actions">
             <button
               className="ranking-compute-primary-btn"
               type="button"
-              onClick={() => void onRunConvolutionRankCompute()}
-              disabled={isBusy || sourcePath === '' || !status?.resultDb.minTradeDate}
+              onClick={() => void onRunSimilarityRankingCompute()}
+              disabled={isBusy || sourcePath === '' || !status?.resultDb.maxTradeDate}
             >
-              {busyAction === 'convolution-computing' ? '计算中...' : '计算卷积排名'}
+              {busyAction === 'similarity-ranking-computing' ? '精确计算中...' : '计算走势相似排名'}
             </button>
           </div>
         </div>
 
-        {renderCardFeedback('convolutionRank')}
+        {renderCardFeedback('similarityRank')}
       </section>
 
       <section className="ranking-compute-card">

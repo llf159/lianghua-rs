@@ -172,6 +172,11 @@ use lianghua_rs::ui_tools::{
     strategy_trigger_similarity::{
         get_strategy_trigger_similarity_page as core_get_strategy_trigger_similarity_page,
         list_strategy_trigger_similarity_benchmark_index_codes as core_list_strategy_trigger_similarity_benchmark_index_codes,
+        ranking::{
+            get_strategy_trigger_similarity_ranking_page as core_get_strategy_trigger_similarity_ranking_page,
+            run_strategy_trigger_similarity_ranking as core_run_strategy_trigger_similarity_ranking,
+            StrategyTriggerRankingPageData,
+        },
         StrategyTriggerSimilarityPageData,
     },
     strategy_manage::{
@@ -930,6 +935,56 @@ async fn get_strategy_trigger_similarity_page(
             source_path,
             trade_date,
             ts_code,
+            window_trade_days,
+            pool_segments,
+            outcome_trade_days,
+            benchmark_index_code,
+            limit,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_strategy_trigger_similarity_ranking_page(
+    source_path: String,
+    trade_date: Option<String>,
+    window_trade_days: Option<u32>,
+    pool_segments: Option<u32>,
+    outcome_trade_days: Option<u32>,
+    benchmark_index_code: Option<String>,
+    limit: Option<u32>,
+) -> Result<StrategyTriggerRankingPageData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_strategy_trigger_similarity_ranking_page(
+            source_path,
+            trade_date,
+            window_trade_days,
+            pool_segments,
+            outcome_trade_days,
+            benchmark_index_code,
+            limit,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn run_strategy_trigger_similarity_ranking(
+    source_path: String,
+    trade_date: Option<String>,
+    window_trade_days: Option<u32>,
+    pool_segments: Option<u32>,
+    outcome_trade_days: Option<u32>,
+    benchmark_index_code: Option<String>,
+    limit: Option<u32>,
+) -> Result<StrategyTriggerRankingPageData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_run_strategy_trigger_similarity_ranking(
+            source_path,
+            trade_date,
             window_trade_days,
             pool_segments,
             outcome_trade_days,
@@ -2456,6 +2511,8 @@ pub fn run() {
             get_stock_similarity_page,
             list_strategy_trigger_similarity_benchmark_index_codes,
             get_strategy_trigger_similarity_page,
+            get_strategy_trigger_similarity_ranking_page,
+            run_strategy_trigger_similarity_ranking,
             get_strategy_statistics_page,
             get_strategy_paper_validation_defaults,
             validate_strategy_paper_validation_template_expressions,

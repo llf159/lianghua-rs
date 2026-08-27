@@ -355,14 +355,30 @@ mod tests {
     fn comment_before_expr() {
         let tokens = lex_all("# this is a comment\nC > 5");
         let kinds: Vec<_> = tokens.into_iter().map(|t| t.kind).collect();
-        assert_eq!(kinds, vec![TokenKind::Ident("C".into()), TokenKind::Gt, TokenKind::Number(5.0), TokenKind::Eof]);
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Ident("C".into()),
+                TokenKind::Gt,
+                TokenKind::Number(5.0),
+                TokenKind::Eof
+            ]
+        );
     }
 
     #[test]
     fn comment_after_expr() {
         let tokens = lex_all("C > 5 # trailing comment");
         let kinds: Vec<_> = tokens.into_iter().map(|t| t.kind).collect();
-        assert_eq!(kinds, vec![TokenKind::Ident("C".into()), TokenKind::Gt, TokenKind::Number(5.0), TokenKind::Eof]);
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Ident("C".into()),
+                TokenKind::Gt,
+                TokenKind::Number(5.0),
+                TokenKind::Eof
+            ]
+        );
     }
 
     #[test]

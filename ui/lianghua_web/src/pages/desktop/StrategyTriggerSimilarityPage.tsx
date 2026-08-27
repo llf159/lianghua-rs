@@ -3,7 +3,10 @@ import { ensureManagedSourcePath } from '../../apis/managedSource'
 import { listRankTradeDates, listStockLookupRows, type StockLookupRow } from '../../apis/reader'
 import {
   getStrategyTriggerSimilarityPage,
+  getStrategyTriggerSimilarityRankingPage,
   listStrategyTriggerSimilarityBenchmarkIndexCodes,
+  runStrategyTriggerSimilarityRanking,
+  type StrategyTriggerRankingPageData,
   type StrategyTriggerSimilarityPageData,
   type StrategyTriggerSimilarityOutcomeSummary,
 } from '../../apis/strategyTriggerSimilarity'
@@ -28,6 +31,7 @@ const DEFAULT_POOL_SEGMENTS = '5'
 const DEFAULT_OUTCOME_TRADE_DAYS = '5'
 const DEFAULT_LIMIT = '30'
 const DEFAULT_BENCHMARK_INDEX_CODE = '000001.SH'
+const SHOW_FULL_MARKET_RANKING = false
 const BENCHMARK_INDEX_LABELS: Record<string, string> = {
   '000001.SH': '上证指数',
   '399001.SZ': '深证成指',
@@ -100,6 +104,23 @@ function displayText(value: string | null | undefined) {
   return text ? text : '--'
 }
 
+function formatElapsed(value: number | null | undefined) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '--'
+  }
+  if (value < 60_000) {
+    return `${(value / 1000).toFixed(1)} 秒`
+  }
+  return `${Math.floor(value / 60_000)} 分 ${Math.round((value % 60_000) / 1000)} 秒`
+}
+
+function formatGeneratedAt(value: number | null | undefined) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '--'
+  }
+  return new Date(value * 1000).toLocaleString()
+}
+
 export default function StrategyTriggerSimilarityPage() {
   const { excludedConcepts } = useConceptExclusions()
   const [sourcePath, setSourcePath] = useState('')
@@ -122,6 +143,9 @@ export default function StrategyTriggerSimilarityPage() {
   const [initLoading, setInitLoading] = useState(true)
   const [error, setError] = useState('')
   const [data, setData] = useState<StrategyTriggerSimilarityPageData | null>(null)
+  const [rankingData, setRankingData] = useState<StrategyTriggerRankingPageData | null>(null)
+  const [rankingLoading, setRankingLoading] = useState(false)
+  const [rankingError, setRankingError] = useState('')
 
   const deferredLookupInput = useDeferredValue(lookupInput)
   const inputCodeDigits = sanitizeCodeInput(lookupInput)
@@ -152,6 +176,16 @@ export default function StrategyTriggerSimilarityPage() {
     [data, sourcePath],
   )
   const robustDirection = data ? assessRobustDirection(data.outcomeSummary) : null
+  const rankingNavigationItems = useMemo<DetailsNavigationItem[]>(
+    () =>
+      (rankingData?.items ?? []).map((row) => ({
+        tsCode: row.tsCode,
+        tradeDate: rankingData?.resolvedTradeDate,
+        sourcePath: sourcePath.trim() || undefined,
+        name: displayStockName(row),
+      })),
+    [rankingData, sourcePath],
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -197,6 +231,58 @@ export default function StrategyTriggerSimilarityPage() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!SHOW_FULL_MARKET_RANKING) {
+      return
+    }
+    if (sourcePath.trim() === '' || tradeDateInput === '') {
+      return
+    }
+    let cancelled = false
+    async function loadRanking() {
+      setRankingLoading(true)
+      setRankingError('')
+      setRankingData(null)
+      try {
+        const result = await getStrategyTriggerSimilarityRankingPage({
+          sourcePath: sourcePath.trim(),
+          tradeDate: tradeDateInput,
+          windowTradeDays: parsePositiveInt(windowTradeDaysInput, Number(DEFAULT_WINDOW_TRADE_DAYS)),
+          poolSegments: parsePositiveInt(poolSegmentsInput, Number(DEFAULT_POOL_SEGMENTS)),
+          outcomeTradeDays: parsePositiveInt(
+            outcomeTradeDaysInput,
+            Number(DEFAULT_OUTCOME_TRADE_DAYS),
+          ),
+          benchmarkIndexCode,
+          limit: 100,
+        })
+        if (!cancelled) {
+          setRankingData(result)
+        }
+      } catch (loadError) {
+        if (!cancelled) {
+          setRankingData(null)
+          setRankingError(`读取排行榜失败: ${String(loadError)}`)
+        }
+      } finally {
+        if (!cancelled) {
+          setRankingLoading(false)
+        }
+      }
+    }
+    void loadRanking()
+    return () => {
+      cancelled = true
+    }
+  }, [
+    benchmarkIndexCode,
+    outcomeTradeDaysInput,
+    poolSegmentsInput,
+    sourcePath,
+    tradeDateInput,
+    windowTradeDaysInput,
+  ])
+
   function onSelectStockCandidate(row: StockLookupRow) {
     setLookupInput(row.name || getLookupDigits(row.ts_code) || row.ts_code)
     setLookupFocused(false)
@@ -215,6 +301,7 @@ export default function StrategyTriggerSimilarityPage() {
 
     setLoading(true)
     setError('')
+    setData(null)
     try {
       const result = await getStrategyTriggerSimilarityPage({
         sourcePath: sourcePathTrimmed,
@@ -238,11 +325,41 @@ export default function StrategyTriggerSimilarityPage() {
     }
   }
 
+  async function onRefreshRanking() {
+    const sourcePathTrimmed = sourcePath.trim()
+    if (sourcePathTrimmed === '' || tradeDateInput === '') {
+      setRankingError('数据源路径或参考日为空')
+      return
+    }
+    setRankingLoading(true)
+    setRankingError('')
+    setRankingData(null)
+    try {
+      const result = await runStrategyTriggerSimilarityRanking({
+        sourcePath: sourcePathTrimmed,
+        tradeDate: tradeDateInput,
+        windowTradeDays: parsePositiveInt(windowTradeDaysInput, Number(DEFAULT_WINDOW_TRADE_DAYS)),
+        poolSegments: parsePositiveInt(poolSegmentsInput, Number(DEFAULT_POOL_SEGMENTS)),
+        outcomeTradeDays: parsePositiveInt(
+          outcomeTradeDaysInput,
+          Number(DEFAULT_OUTCOME_TRADE_DAYS),
+        ),
+        benchmarkIndexCode,
+        limit: 100,
+      })
+      setRankingData(result)
+    } catch (refreshError) {
+      setRankingError(`计算排行榜失败: ${String(refreshError)}`)
+    } finally {
+      setRankingLoading(false)
+    }
+  }
+
   return (
     <div className="trigger-sim-page">
       <section className="trigger-sim-card trigger-sim-query-card">
         <div className="trigger-sim-head">
-          <h2>策略触发相似</h2>
+          <h2>综合相似走势分析</h2>
           <span>{initLoading ? '初始化中...' : sourcePath || '--'}</span>
         </div>
 
@@ -383,6 +500,162 @@ export default function StrategyTriggerSimilarityPage() {
 
         {error ? <div className="trigger-sim-error">{error}</div> : null}
       </section>
+
+      {SHOW_FULL_MARKET_RANKING ? <section className="trigger-sim-card trigger-sim-ranking-card">
+        <div className="trigger-sim-result-head">
+          <div>
+            <h3>策略触发未来走势排行榜</h3>
+            <p>
+              先从全部历史评分走势的未来表现反推启动点，再读取启动窗口中的策略触发序列；预测周期{' '}
+              {rankingData?.outcomeTradeDays ?? outcomeTradeDaysInput} 日
+            </p>
+          </div>
+          <span>
+            {rankingLoading
+              ? '正在计算或核验数据水位...'
+              : rankingData?.isFresh
+                ? `已同步 · ${formatGeneratedAt(rankingData.generatedAtEpochSeconds)}`
+                : '需要计算'}
+          </span>
+        </div>
+
+        {rankingError ? <div className="trigger-sim-error">{rankingError}</div> : null}
+        {rankingData && !rankingData.isFresh ? (
+          <div className="trigger-sim-stale-banner">
+            <strong>排行榜不可视为最新</strong>
+            <span>{rankingData.staleReason}</span>
+            <button type="button" disabled={rankingLoading} onClick={onRefreshRanking}>
+              立即按当前数据重算
+            </button>
+          </div>
+        ) : null}
+
+        {rankingData?.isFresh ? (
+          <>
+            <div className="trigger-sim-engine-meta">
+              <span>股票池 {rankingData.universeCount}</span>
+              <span>有效排名 {rankingData.rankedCount}</span>
+              <span>
+                历史锚点 {rankingData.evaluatedAnchorCount} / {rankingData.candidateAnchorCount}
+              </span>
+              <span>历史截止 {rankingData.historicalCutoffDate}</span>
+              <span>耗时 {formatElapsed(rankingData.elapsedMs)}</span>
+              <span>实时水位核验</span>
+            </div>
+            <p className="trigger-sim-direction-note">
+              历史质量由未来超额分位45%、MFE分位25%、MAE分位20%和上涨持续性分位10%组成；
+              取首次进入每日横截面前20%的成功启动，以及首次进入后20%的失败对照。规则不决定历史样本身份，
+              但启动窗口必须存在策略触发，当前股票也必须在观察窗口内有触发。预测分由相似成功/失败模板的
+              连续质量加权并结合有效样本置信度后，在当日股票池内转为百分位。
+            </p>
+            {rankingData.timings.length > 0 ? (
+              <details className="trigger-sim-indicator-details">
+                <summary>查看批量计算各阶段耗时</summary>
+                <p>
+                  {rankingData.timings
+                    .map((timing) => `${timing.label} ${formatElapsed(timing.elapsedMs)}`)
+                    .join(' · ')}
+                </p>
+              </details>
+            ) : null}
+          </>
+        ) : null}
+
+        {!rankingData || rankingData.items.length === 0 ? (
+          <div className="trigger-sim-empty">
+            {rankingLoading ? '全市场批量计算中，请保持页面打开' : '当前参数尚无排行榜结果'}
+          </div>
+        ) : (
+          <div className="trigger-sim-table-wrap">
+            <table className="trigger-sim-table trigger-sim-ranking-table">
+              <thead>
+                <tr>
+                  <th>排名</th>
+                  <th>股票</th>
+                  <th>预测分</th>
+                  <th>模板收缩超额</th>
+                  <th>模板超额胜率</th>
+                  <th>模板收益 / 超额</th>
+                  <th>模板 MFE / MAE</th>
+                  <th>置信度</th>
+                  <th>样本</th>
+                  <th>相似度</th>
+                  <th>策略触发</th>
+                  <th>当前策略排名</th>
+                  <th>代表历史事件</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rankingData.items.map((row) => {
+                  const matchTitle = row.topMatches
+                    .map(
+                      (match) =>
+                        `${match.name || match.tsCode} ${match.candidateEndTradeDate} · 相似 ${formatNumber(match.similarityScore, 1)} · 超额 ${formatPercent(match.forwardExcessReturnPct)}`,
+                    )
+                    .join('\n')
+                  return (
+                    <tr key={row.tsCode}>
+                      <td>{row.rank ?? '--'}</td>
+                      <td>
+                        <DetailsLink
+                          className="trigger-sim-stock-link"
+                          tsCode={row.tsCode}
+                          tradeDate={rankingData.resolvedTradeDate}
+                          sourcePath={sourcePath}
+                          navigationItems={rankingNavigationItems}
+                          title={`查看 ${displayStockName(row)} 详情`}
+                        >
+                          <strong>{displayStockName(row)}</strong>
+                          <span>{row.tsCode}</span>
+                        </DetailsLink>
+                      </td>
+                      <td>{formatNumber(row.rankingScore, 1)}</td>
+                      <td className={outcomeTone(row.shrunkExcessReturnPct)}>
+                        {formatPercent(row.shrunkExcessReturnPct)}
+                      </td>
+                      <td>{formatPercent(row.excessPositiveRate, 1)}</td>
+                      <td>
+                        <span className={outcomeTone(row.expectedReturnPct)}>
+                          {formatPercent(row.expectedReturnPct)}
+                        </span>
+                        <span className={`trigger-sim-date-separator${outcomeTone(row.expectedExcessReturnPct)}`}>
+                          {formatPercent(row.expectedExcessReturnPct)}
+                        </span>
+                      </td>
+                      <td>
+                        <span className="is-positive">{formatPercent(row.expectedMfePct)}</span>
+                        <span className="trigger-sim-date-separator is-negative">
+                          {formatPercent(row.expectedMaePct)}
+                        </span>
+                      </td>
+                      <td>{formatPercent(row.confidence * 100, 1)}</td>
+                      <td>
+                        {row.sampleCount}
+                        <span className="trigger-sim-date-separator">
+                          有效 {formatNumber(row.effectiveSampleCount, 1)}
+                        </span>
+                      </td>
+                      <td>
+                        {formatNumber(row.averageSimilarity, 1)}
+                        <span className="trigger-sim-date-separator">
+                          最高 {formatNumber(row.bestSimilarity, 1)}
+                        </span>
+                      </td>
+                      <td>{row.triggerCount}</td>
+                      <td>{row.originalRank ?? '--'}</td>
+                      <td className="trigger-sim-rules-cell" title={matchTitle}>
+                        {row.topMatches.length > 0
+                          ? `${row.topMatches[0].name || row.topMatches[0].tsCode} · ${row.topMatches[0].candidateEndTradeDate}`
+                          : '--'}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section> : null}
 
       {data ? (
         <section className="trigger-sim-card trigger-sim-experience-card">

@@ -14,6 +14,8 @@ use super::{
     resolve_trade_date,
 };
 
+pub mod ranking;
+
 const DEFAULT_WINDOW_TRADE_DAYS: usize = 20;
 const DEFAULT_POOL_SEGMENTS: usize = 5;
 const DEFAULT_OUTCOME_TRADE_DAYS: usize = 5;

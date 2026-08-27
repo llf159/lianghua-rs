@@ -86,6 +86,10 @@
   align-items: end;
 }
 
+.ranking-compute-form.ranking-compute-similarity-form {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
 .ranking-compute-cyq-form {
   grid-template-columns:
     minmax(180px, 220px)
@@ -100,7 +104,8 @@
   gap: 6px;
 }
 
-.ranking-compute-field input {
+.ranking-compute-field input,
+.ranking-compute-field select {
   width: 100%;
   border: 1px solid #c6d0da;
   border-radius: 8px;
@@ -108,7 +113,8 @@
   font-size: 14px;
 }
 
-.ranking-compute-field input:focus {
+.ranking-compute-field input:focus,
+.ranking-compute-field select:focus {
   outline: 2px solid var(--theme-orange-300);
   outline-offset: 1px;
 }

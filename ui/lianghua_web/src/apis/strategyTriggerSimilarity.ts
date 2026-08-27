@@ -88,3 +88,94 @@ export async function listStrategyTriggerSimilarityBenchmarkIndexCodes() {
 export async function getStrategyTriggerSimilarityPage(query: StrategyTriggerSimilarityQuery) {
   return invoke<StrategyTriggerSimilarityPageData>('get_strategy_trigger_similarity_page', query)
 }
+
+export type StrategyTriggerRankingMatch = {
+  tsCode: string
+  name?: string | null
+  candidateStartTradeDate: string
+  candidateEndTradeDate: string
+  similarityScore: number
+  forwardExcessReturnPct?: number | null
+  mfePct: number
+  maePct: number
+}
+
+export type StrategyTriggerRankingRow = {
+  rank?: number | null
+  tsCode: string
+  name?: string | null
+  industry?: string | null
+  concept?: string | null
+  originalScore?: number | null
+  originalRank?: number | null
+  rankingScore?: number | null
+  predictionSignal?: number | null
+  confidence: number
+  sampleCount: number
+  effectiveSampleCount: number
+  expectedReturnPct?: number | null
+  expectedExcessReturnPct?: number | null
+  shrunkExcessReturnPct?: number | null
+  excessPositiveRate?: number | null
+  expectedMfePct?: number | null
+  expectedMaePct?: number | null
+  averageSimilarity?: number | null
+  bestSimilarity?: number | null
+  triggerCount: number
+  topMatches: StrategyTriggerRankingMatch[]
+}
+
+export type StrategyTriggerRankingTiming = {
+  label: string
+  elapsedMs: number
+}
+
+export type StrategyTriggerRankingPageData = {
+  resolvedTradeDate: string
+  historicalCutoffDate: string
+  windowTradeDays: number
+  poolSegments: number
+  outcomeTradeDays: number
+  benchmarkIndexCode: string
+  algorithmVersion: string
+  dataSignature: string
+  generatedAtEpochSeconds?: number | null
+  isFresh: boolean
+  staleReason?: string | null
+  universeCount: number
+  rankedCount: number
+  candidateUniverseCount: number
+  candidateAnchorCount: number
+  evaluatedAnchorCount: number
+  elapsedMs?: number | null
+  timings: StrategyTriggerRankingTiming[]
+  items: StrategyTriggerRankingRow[]
+}
+
+export type StrategyTriggerRankingQuery = {
+  sourcePath: string
+  tradeDate?: string
+  windowTradeDays?: number
+  poolSegments?: number
+  outcomeTradeDays?: number
+  benchmarkIndexCode?: string
+  limit?: number
+}
+
+export async function getStrategyTriggerSimilarityRankingPage(
+  query: StrategyTriggerRankingQuery,
+) {
+  return invoke<StrategyTriggerRankingPageData>(
+    'get_strategy_trigger_similarity_ranking_page',
+    query,
+  )
+}
+
+export async function runStrategyTriggerSimilarityRanking(
+  query: StrategyTriggerRankingQuery,
+) {
+  return invoke<StrategyTriggerRankingPageData>(
+    'run_strategy_trigger_similarity_ranking',
+    query,
+  )
+}

@@ -10,11 +10,14 @@ const menuList = [
 
 const overviewSubRoutes = [
   { path: '/overview/raw', label: '原始排名' },
-  { path: '/overview/convolution', label: '卷积排名' },
+  { path: '/overview/convolution', label: '走势相似排名' },
   { path: '/overview/scene', label: '场景排名' },
 ]
 
-const strategyTriggerSimilarityMenuItem = { path: '/strategy-trigger-similarity', label: '策略触发相似' }
+const strategyTriggerSimilarityMenuItem = {
+  path: '/strategy-trigger-similarity',
+  label: '综合相似走势分析',
+}
 const marketAnalysisMenuItem = { path: '/market-analysis', label: '市场分析' }
 const settingsMenuItem = { path: '/settings', label: '设置' }
 
