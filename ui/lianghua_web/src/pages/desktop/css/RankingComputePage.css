@@ -57,6 +57,11 @@
   min-width: 0;
 }
 
+.ranking-compute-summary-item.is-warning {
+  border-color: #f2c265;
+  background: #fffaf0;
+}
+
 .ranking-compute-summary-item-wide {
   grid-column: span 3;
 }

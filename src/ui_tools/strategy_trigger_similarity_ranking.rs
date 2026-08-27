@@ -15,7 +15,7 @@ use super::*;
 use crate::ui_tools::build_total_mv_map;
 use crate::utils::utils::board_category;
 
-const ALGORITHM_VERSION: &str = "outcome-reverse-startup-ranking-v3";
+const ALGORITHM_VERSION: &str = "outcome-reverse-startup-ranking-v4";
 const TOP_MATCH_HEAP_SIZE: usize = 256;
 const MIN_RATING_SAMPLE_COUNT: usize = 5;
 const MIN_EFFECTIVE_SAMPLE_COUNT: f64 = 3.0;
@@ -130,7 +130,7 @@ struct SparseTriggerFingerprint {
 struct ChannelFingerprint {
     vectors: Vec<Option<Vec<f64>>>,
     norms: Vec<f64>,
-    presence_mask: u64,
+    has_vectors: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -371,24 +371,21 @@ fn build_sparse_trigger_fingerprint(
 }
 
 fn build_channel_fingerprint(vectors: Vec<Option<Vec<f64>>>) -> ChannelFingerprint {
-    let mut presence_mask = 0_u64;
+    let mut has_vectors = false;
     let norms = vectors
         .iter()
-        .enumerate()
-        .map(|(index, vector)| {
+        .map(|vector| {
             let Some(vector) = vector else {
                 return 0.0;
             };
-            if index < u64::BITS as usize {
-                presence_mask |= 1_u64 << index;
-            }
+            has_vectors = true;
             vector.iter().map(|value| value * value).sum::<f64>().sqrt()
         })
         .collect();
     ChannelFingerprint {
         vectors,
         norms,
-        presence_mask,
+        has_vectors,
     }
 }
 
@@ -1019,15 +1016,12 @@ fn rank_one_target(
             &target.fingerprint.trigger,
             &candidate.fingerprint.trigger,
         );
-        let price_available = target.fingerprint.price_volume.presence_mask
-            & candidate.fingerprint.price_volume.presence_mask
-            != 0;
-        let indicator_available = target.fingerprint.indicators.presence_mask
-            & candidate.fingerprint.indicators.presence_mask
-            != 0;
-        let market_available = target.fingerprint.market.presence_mask
-            & candidate.fingerprint.market.presence_mask
-            != 0;
+        let price_available = target.fingerprint.price_volume.has_vectors
+            && candidate.fingerprint.price_volume.has_vectors;
+        let indicator_available = target.fingerprint.indicators.has_vectors
+            && candidate.fingerprint.indicators.has_vectors;
+        let market_available =
+            target.fingerprint.market.has_vectors && candidate.fingerprint.market.has_vectors;
         let total_weight = TRIGGER_SIMILARITY_WEIGHT
             + if price_available {
                 PRICE_VOLUME_SIMILARITY_WEIGHT
@@ -2006,11 +2000,12 @@ pub fn run_strategy_trigger_similarity_ranking(
 #[cfg(test)]
 mod tests {
     use super::{
-        ANCHOR_CHUNK_SIZE, SparseTriggerFingerprint, assign_ranks,
+        ANCHOR_CHUNK_SIZE, SparseTriggerFingerprint, assign_ranks, build_channel_fingerprint,
         build_environment_fingerprint_map, build_ranking_samples_for_chunk,
-        directed_trigger_similarity, get_strategy_trigger_similarity_ranking_page,
-        load_all_trade_dates, load_benchmark_rows, load_market_environment, load_market_schema,
-        load_outcome_selected_anchors, open_result_conn, run_strategy_trigger_similarity_ranking,
+        cached_channel_similarity, directed_trigger_similarity,
+        get_strategy_trigger_similarity_ranking_page, load_all_trade_dates, load_benchmark_rows,
+        load_market_environment, load_market_schema, load_outcome_selected_anchors,
+        open_result_conn, run_strategy_trigger_similarity_ranking,
     };
     use crate::ui_tools::strategy_trigger_similarity::ranking::StrategyTriggerRankingRow;
     use std::collections::HashMap;
@@ -2070,6 +2065,45 @@ mod tests {
             total_norm_sq: 2.0,
         };
         assert!((directed_trigger_similarity(&target, &candidate) - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn market_schema_keeps_all_numeric_indicator_columns() {
+        let conn = Connection::open_in_memory().expect("open in-memory DuckDB");
+        let indicator_columns = (0..30)
+            .map(|index| format!("indicator_{index:02} DOUBLE"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        conn.execute_batch(&format!(
+            "ATTACH ':memory:' AS trigger_market_db; \
+             CREATE TABLE trigger_market_db.stock_data (\
+                 ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR, {indicator_columns});"
+        ))
+        .expect("create market schema");
+        let schema = load_market_schema(&conn).expect("load market schema");
+        assert_eq!(schema.indicator_columns.len(), 30);
+        assert_eq!(
+            schema.indicator_columns.first().map(String::as_str),
+            Some("indicator_00")
+        );
+        assert_eq!(
+            schema.indicator_columns.last().map(String::as_str),
+            Some("indicator_29")
+        );
+    }
+
+    #[test]
+    fn channel_fingerprint_supports_more_than_sixty_four_indicators() {
+        let target =
+            build_channel_fingerprint((0..80).map(|index| Some(vec![index as f64])).collect());
+        let candidate =
+            build_channel_fingerprint((0..80).map(|index| Some(vec![index as f64])).collect());
+        assert!(target.has_vectors);
+        assert!(candidate.has_vectors);
+        assert!(
+            (cached_channel_similarity(&target, &candidate).expect("similarity") - 100.0).abs()
+                < 1e-9
+        );
     }
 
     #[test]

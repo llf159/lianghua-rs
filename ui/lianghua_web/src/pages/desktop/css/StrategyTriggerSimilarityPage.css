@@ -303,6 +303,32 @@
   border-radius: 8px;
 }
 
+/* Keep wide ranking tables out of the page's horizontal scroll chain. This
+   class intentionally does not contain "table-wrap", which App.css reserves
+   for page-level scrolling. */
+.trigger-sim-ranking-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  border: 1px solid #e1e7ef;
+  border-radius: 8px;
+}
+
+.trigger-sim-ranking-scroll::-webkit-scrollbar {
+  height: 10px;
+}
+
+.trigger-sim-ranking-scroll::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: #cbd5e1 content-box;
+}
+
+.trigger-sim-history-link strong {
+  font-weight: 600;
+}
+
 .trigger-sim-table {
   width: 100%;
   min-width: 1720px;

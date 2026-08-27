@@ -155,6 +155,21 @@ function formatDateSample(values: string[]) {
   return values.map((value) => formatTradeDate(value)).join('、')
 }
 
+function isCalculationBehind(
+  range: RankComputeDbRange | null | undefined,
+  referenceTradeDate: string | null | undefined,
+) {
+  if (!range) {
+    return false
+  }
+
+  if (!range.exists || !range.maxTradeDate) {
+    return true
+  }
+
+  return Boolean(referenceTradeDate && range.maxTradeDate < referenceTradeDate)
+}
+
 function buildEmptyIndicatorDraft(): IndicatorManageDraft {
   return {
     name: '',
@@ -289,6 +304,19 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
   const shownProgressPercent = useAnimatedProgressPercent(showComputeProgress, progressPercent)
   const phaseStep = getPhaseStep(deferredProgress?.action, deferredProgress?.phase, getProgressWorkflow)
   const progressCounterText = getProgressCounterText(deferredProgress, formatPhaseLabel)
+  const sourceLatestTradeDate = status?.sourceDb.maxTradeDate
+  const resultLatestTradeDate = status?.resultDb.maxTradeDate
+  const isResultStale = isCalculationBehind(status?.resultDb, sourceLatestTradeDate)
+  const isResultDiscontinuous = Boolean(
+    status?.resultDbContinuity.checked && !status.resultDbContinuity.isContinuous,
+  )
+  const isSimilarityStale = isCalculationBehind(status?.similarityRankDb, resultLatestTradeDate)
+  const isOldChipStale = isCalculationBehind(status?.cyqDb, sourceLatestTradeDate)
+  const isNewChipStale = isCalculationBehind(status?.cyqChenDb, sourceLatestTradeDate)
+  const isConvolutionStale = isCalculationBehind(
+    status?.convolutionRankDb,
+    resultLatestTradeDate,
+  )
 
   function setFeedbackNotice(slot: FeedbackSlot, message: string) {
     setCardFeedback((current) => ({
@@ -868,6 +896,8 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
         benchmarkIndexCode: similarityBenchmarkCode,
         limit: 1,
       })
+      const nextStatus = await getRankingComputeStatus(sourcePath)
+      setStatus(nextStatus)
       setFeedbackNotice(
         'similarityRank',
         `走势相似排名计算完成：${result.resolvedTradeDate}，股票池 ${result.universeCount}，有效排名 ${result.rankedCount}，历史模板 ${result.evaluatedAnchorCount}，耗时 ${formatElapsedMs(result.elapsedMs ?? 0)}。`,
@@ -1078,15 +1108,31 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
 
         <div className="ranking-compute-summary">
           <div className="ranking-compute-summary-item">
-            <span>结果库日期范围</span>
+            <span>原始行情库基准</span>
+            <strong>{describeDbRange(status?.sourceDb)}</strong>
+            <small>
+              {status?.sourceDb
+                ? `${status.sourceDb.distinctTradeDates} 个交易日，${status.sourceDb.rowCount} 行；用于判断计算是否落后。`
+                : '读取中...'}
+            </small>
+          </div>
+
+          <div className={`ranking-compute-summary-item${isResultStale || isResultDiscontinuous ? ' is-warning' : ''}`}>
+            <span>排名结果库</span>
             <strong>{describeDbRange(status?.resultDb)}</strong>
             <small>
               {status?.resultDb
                 ? `${status.resultDb.distinctTradeDates} 个交易日，${status.resultDb.rowCount} 行`
                 : '读取中...'}
             </small>
+            {isResultStale ? (
+              <small className="ranking-compute-summary-alert">
+                结果库为空或落后于原始行情库，请补算
+              </small>
+            ) : null}
           </div>
-          <div className="ranking-compute-summary-item">
+
+          <div className={`ranking-compute-summary-item${isResultDiscontinuous ? ' is-warning' : ''}`}>
             <span>结果库区间检查</span>
             <strong>{describeResultDbContinuity(status?.resultDbContinuity)}</strong>
             <small>
@@ -1094,38 +1140,94 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
                 ? `检查区间 ${formatTradeDate(status.resultDbContinuity.rangeStart)} 至 ${formatTradeDate(status.resultDbContinuity.rangeEnd)}，应有 ${status.resultDbContinuity.expectedTradeDates} 个交易日，结果库里有 ${status.resultDbContinuity.actualTradeDates} 个。`
                 : '结果库为空或没有交易日，暂不检查连续性。'}
             </small>
-            {status?.resultDbContinuity?.checked && !status.resultDbContinuity.isContinuous ? (
+            {isResultDiscontinuous ? (
               <small className="ranking-compute-summary-alert">
-                缺失 {status.resultDbContinuity.missingTradeDatesCount} 个交易日
-                {status.resultDbContinuity.missingTradeDatesCount > 0
-                  ? `：${formatDateSample(status.resultDbContinuity.missingTradeDatesSample)}`
+                缺失 {status?.resultDbContinuity.missingTradeDatesCount ?? 0} 个交易日
+                {(status?.resultDbContinuity.missingTradeDatesCount ?? 0) > 0
+                  ? `：${formatDateSample(status!.resultDbContinuity.missingTradeDatesSample)}`
                   : ''}
-                {status.resultDbContinuity.unexpectedTradeDatesCount > 0
-                  ? `；另有 ${status.resultDbContinuity.unexpectedTradeDatesCount} 个不在交易日列表内的日期：${formatDateSample(status.resultDbContinuity.unexpectedTradeDatesSample)}`
+                {(status?.resultDbContinuity.unexpectedTradeDatesCount ?? 0) > 0
+                  ? `；另有 ${status!.resultDbContinuity.unexpectedTradeDatesCount} 个不在交易日列表内的日期：${formatDateSample(status!.resultDbContinuity.unexpectedTradeDatesSample)}`
                   : ''}
               </small>
             ) : null}
           </div>
-          <div className="ranking-compute-summary-item">
-            <span>筹码库日期范围</span>
+
+          <div className={`ranking-compute-summary-item${isConvolutionStale ? ' is-warning' : ''}`}>
+            <span>卷积排名库</span>
+            <strong>{describeDbRange(status?.convolutionRankDb)}</strong>
+            <small>
+              {status?.convolutionRankDb
+                ? `${status.convolutionRankDb.distinctTradeDates} 个交易日，${status.convolutionRankDb.rowCount} 行`
+                : '读取中...'}
+            </small>
+            {isConvolutionStale ? (
+              <small className="ranking-compute-summary-alert">
+                卷积排名为空或落后于结果库，会在查看时自动按需生成
+              </small>
+            ) : null}
+          </div>
+
+          <div className={`ranking-compute-summary-item${isSimilarityStale ? ' is-warning' : ''}`}>
+            <span>走势相似排名库</span>
+            <strong>{describeDbRange(status?.similarityRankDb)}</strong>
+            <small>
+              {status?.similarityRankDb
+                ? `${status.similarityRankDb.distinctTradeDates} 个交易日，${status.similarityRankDb.rowCount} 行`
+                : '读取中...'}
+            </small>
+            {isSimilarityStale ? (
+              <small className="ranking-compute-summary-alert">
+                最新排名为空或早于结果库最新日期，请按需要补算
+              </small>
+            ) : null}
+          </div>
+
+          <div className={`ranking-compute-summary-item${isCalculationBehind(status?.conceptPerformanceDb, sourceLatestTradeDate) ? ' is-warning' : ''}`}>
+            <span>概念表现库</span>
+            <strong>{describeDbRange(status?.conceptPerformanceDb)}</strong>
+            <small>
+              {status?.conceptPerformanceDb
+                ? `${status.conceptPerformanceDb.distinctTradeDates} 个交易日，${status.conceptPerformanceDb.rowCount} 行`
+                : '读取中...'}
+            </small>
+            {isCalculationBehind(status?.conceptPerformanceDb, sourceLatestTradeDate) ? (
+              <small className="ranking-compute-summary-alert">
+                概念表现为空或落后于原始行情库，请开始其他数据计算
+              </small>
+            ) : null}
+          </div>
+
+          <div className={`ranking-compute-summary-item${isOldChipStale ? ' is-warning' : ''}`}>
+            <span>筹码库</span>
             <strong>{describeDbRange(status?.cyqDb)}</strong>
             <small>
               {status?.cyqDb
                 ? `${status.cyqDb.distinctTradeDates} 个交易日，${status.cyqDb.rowCount} 条摘要，${status.cyqBinRowCount} 条分桶；当前分桶 ${status.cyqFactor ?? '--'}。`
                 : '读取中...'}
             </small>
+            {isOldChipStale ? (
+              <small className="ranking-compute-summary-alert">
+                筹码库为空或落后于原始行情库，请按需要重算
+              </small>
+            ) : null}
           </div>
-          <div className="ranking-compute-summary-item">
-            <span>新筹码库日期范围</span>
+
+          <div className={`ranking-compute-summary-item${isNewChipStale ? ' is-warning' : ''}`}>
+            <span>新筹码库</span>
             <strong>{describeDbRange(status?.cyqChenDb)}</strong>
             <small>
               {status?.cyqChenDb
                 ? `${status.cyqChenDb.distinctTradeDates} 个交易日，${status.cyqChenDb.rowCount} 条摘要，${status.cyqChenBinRowCount} 条分桶；预热 ${status.cyqChenWarmupDays ?? '--'} 天，分桶 ${status.cyqChenBucketPct ?? '--'}%。`
               : '读取中...'}
             </small>
+            {isNewChipStale ? (
+              <small className="ranking-compute-summary-alert">
+                新筹码库为空或落后于原始行情库，请按需要重算
+              </small>
+            ) : null}
           </div>
         </div>
-
         {renderCardFeedback('status')}
       </section>
 
@@ -1276,7 +1378,7 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
               onClick={() => void onRunSimilarityRankingCompute()}
               disabled={isBusy || sourcePath === '' || !status?.resultDb.maxTradeDate}
             >
-              {busyAction === 'similarity-ranking-computing' ? '精确计算中...' : '计算走势相似排名'}
+              {busyAction === 'similarity-ranking-computing' ? '计算中...' : '计算走势相似排名'}
             </button>
           </div>
         </div>

@@ -22,7 +22,6 @@ const DEFAULT_POOL_SEGMENTS: usize = 5;
 const DEFAULT_OUTCOME_TRADE_DAYS: usize = 5;
 const DEFAULT_LIMIT: usize = 30;
 const MAX_POOL_SEGMENTS: usize = 12;
-const MAX_INDICATOR_COLUMNS: usize = 24;
 const MAX_CANDIDATE_ANCHORS: usize = 50_000;
 // 候选池优先覆盖近期事件，同时保留跨期分散样本；不再用只含触发摘要的代理分数
 // 预判包含量价、指标和市场环境的最终相似度。
@@ -388,7 +387,6 @@ fn load_market_schema(conn: &Connection) -> Result<MarketSchema, String> {
         .map(|(name, _)| name)
         .collect::<Vec<_>>();
     indicator_columns.sort();
-    indicator_columns.truncate(MAX_INDICATOR_COLUMNS);
     Ok(MarketSchema {
         columns,
         indicator_columns,
@@ -1005,7 +1003,8 @@ fn build_price_volume_channels(
     rows: &[MarketObservation],
     segments: usize,
 ) -> Vec<Option<Vec<f64>>> {
-    let mut channels = vec![Vec::new(); 9];
+    let mut channels = vec![Vec::new(); 12];
+    let mut previous_close: Option<f64> = None;
     for row in rows {
         channels[0].push(row.close.filter(|v| *v > 0.0).map(f64::ln));
         channels[1].push(row.pct_chg);
@@ -1028,10 +1027,35 @@ fn build_price_volume_channels(
             (Some(f), Some(v)) if v.abs() > EPS => Some(f / v),
             _ => None,
         });
+        channels[9].push(match (previous_close, row.open) {
+            (Some(previous), Some(open)) if previous.abs() > EPS && open.abs() > EPS => {
+                Some((open / previous - 1.0) * 100.0)
+            }
+            _ => None,
+        });
+        channels[10].push(match (row.open, row.close, row.low, row.high) {
+            (Some(open), Some(close), Some(low), Some(high))
+                if (high - low).abs() > EPS && high >= open.max(close) =>
+            {
+                Some((high - open.max(close)) / (high - low))
+            }
+            _ => None,
+        });
+        channels[11].push(match (row.open, row.close, row.low, row.high) {
+            (Some(open), Some(close), Some(low), Some(high))
+                if (high - low).abs() > EPS && low <= open.min(close) =>
+            {
+                Some((open.min(close) - low) / (high - low))
+            }
+            _ => None,
+        });
+        previous_close = row.close.filter(|value| value.is_finite());
     }
-    // 价格水平、成交量和成交额只比较相对形态；收益、振幅、位置、换手和资金流
-    // 保留原始状态，以免把牛熊方向与风险强度标准化掉。
-    let standardize = [true, false, false, false, false, true, true, false, false];
+    // 价格水平、成交量和成交额只比较相对形态；跳空、收益、振幅、影线、位置、
+    // 换手和资金流保留原始状态，以免把方向、缺口和风险强度标准化掉。
+    let standardize = [
+        true, false, false, false, false, true, true, false, false, false, false, false,
+    ];
     channels
         .iter()
         .zip(standardize)
@@ -1718,9 +1742,9 @@ pub fn get_strategy_trigger_similarity_page(
 mod tests {
     use super::{
         BenchmarkObservation, FutureObservation, INDEX_TS_CODES, INDICATOR_SIMILARITY_WEIGHT,
-        KERNEL_NAMES, MARKET_SIMILARITY_WEIGHT, PRICE_VOLUME_SIMILARITY_WEIGHT,
+        KERNEL_NAMES, MARKET_SIMILARITY_WEIGHT, MarketObservation, PRICE_VOLUME_SIMILARITY_WEIGHT,
         StrategyTriggerSimilarityRow, TRIGGER_SIMILARITY_WEIGHT, build_outcome,
-        build_rating_sample, cosine_similarity, final_similarity,
+        build_price_volume_channels, build_rating_sample, cosine_similarity, final_similarity,
         list_strategy_trigger_similarity_benchmark_index_codes, resolve_benchmark_index_code,
         temporal_signature, weighted_quantile, weighted_winsorized_mean,
     };
@@ -1757,6 +1781,47 @@ mod tests {
         let values = (1..=20).map(|value| Some(value as f64)).collect::<Vec<_>>();
         let signature = temporal_signature(&values, 5, true).expect("signature");
         assert_eq!(signature.len(), 5 + KERNEL_NAMES.len() + 1);
+    }
+
+    #[test]
+    fn price_volume_channels_include_gap_and_wick_details() {
+        let row =
+            |trade_date: &str, open: f64, high: f64, low: f64, close: f64| -> MarketObservation {
+                MarketObservation {
+                    trade_date: trade_date.to_string(),
+                    open: Some(open),
+                    high: Some(high),
+                    low: Some(low),
+                    close: Some(close),
+                    pct_chg: Some(1.0),
+                    vol: Some(100.0),
+                    amount: Some(1_000.0),
+                    turnover: Some(2.0),
+                    net_flow: Some(10.0),
+                    indicators: Vec::new(),
+                }
+            };
+        let channels = build_price_volume_channels(
+            &[
+                row("20240101", 10.0, 11.0, 9.0, 10.5),
+                row("20240102", 12.0, 12.2, 10.8, 11.0),
+                row("20240103", 11.0, 15.0, 10.8, 12.0),
+            ],
+            3,
+        );
+
+        let gap = channels[9].as_ref().expect("gap channel");
+        assert_eq!(gap[0], 0.0);
+        assert!((gap[1] - 14.285714285714286).abs() < 1e-12);
+        assert!((gap[2] - 0.0).abs() < 1e-12);
+
+        let upper_wick = channels[10].as_ref().expect("upper wick channel");
+        assert!((upper_wick[1] - 0.14285714285714285).abs() < 1e-12);
+        assert!((upper_wick[2] - 0.7142857142857143).abs() < 1e-12);
+
+        let lower_wick = channels[11].as_ref().expect("lower wick channel");
+        assert!((lower_wick[1] - 0.14285714285714285).abs() < 1e-12);
+        assert!((lower_wick[2] - 0.047619047619047616).abs() < 1e-12);
     }
 
     #[test]

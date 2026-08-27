@@ -78,6 +78,21 @@ export default function OverviewSimilarityRankingPage() {
     [data, sourcePath],
   )
 
+  const historicalNavigationItems = useMemo(
+    () =>
+      (data?.items ?? []).flatMap((row) =>
+        row.topMatches.map((match) => ({
+          tsCode: match.tsCode,
+          tradeDate: match.candidateEndTradeDate,
+          intervalStartTradeDate: match.candidateStartTradeDate,
+          intervalEndTradeDate: match.candidateEndTradeDate,
+          sourcePath: sourcePath || undefined,
+          name: match.name || match.tsCode,
+        })),
+      ),
+    [data, sourcePath],
+  )
+
   useEffect(() => {
     let cancelled = false
     void ensureManagedSourcePath()
@@ -184,7 +199,6 @@ export default function OverviewSimilarityRankingPage() {
         <div className="trigger-sim-head">
           <div>
             <h2>走势相似排名</h2>
-            <p>自动读取该日期最近一次成功计算的配置与结果；本页面不配置算法，也不触发重计算。</p>
           </div>
           <span>{sourcePath || '--'}</span>
         </div>
@@ -269,7 +283,7 @@ export default function OverviewSimilarityRankingPage() {
             <span>窗口 {data.windowTradeDays} · 池化 {data.poolSegments} · 后验 {data.outcomeTradeDays}</span>
             <span>基准 {data.benchmarkIndexCode}</span><span>实时水位核验通过</span>
           </div>
-          <div className="trigger-sim-table-wrap">
+          <div className="trigger-sim-ranking-scroll">
             <table className="trigger-sim-table trigger-sim-ranking-table">
               <thead><tr><th>排名</th><th>股票</th><th>板块</th><th>总市值(亿)</th><th>预测分</th><th>收缩超额</th><th>超额胜率</th><th>收益 / 超额</th><th>MFE / MAE</th><th>置信度</th><th>样本</th><th>相似度</th><th>策略排名</th><th>代表历史事件</th></tr></thead>
               <tbody>{data.items.map((row) => (
@@ -287,7 +301,25 @@ export default function OverviewSimilarityRankingPage() {
                   <td>{row.sampleCount} / 有效 {formatNumber(row.effectiveSampleCount)}</td>
                   <td>{formatNumber(row.averageSimilarity)} / {formatNumber(row.bestSimilarity)}</td>
                   <td>{row.originalRank ?? '--'}</td>
-                  <td>{row.topMatches[0] ? `${row.topMatches[0].name || row.topMatches[0].tsCode} · ${row.topMatches[0].candidateEndTradeDate}` : '--'}</td>
+                  <td>
+                    {row.topMatches[0] ? (
+                      <DetailsLink
+                        className="trigger-sim-stock-link trigger-sim-history-link"
+                        tsCode={row.topMatches[0].tsCode}
+                        tradeDate={row.topMatches[0].candidateEndTradeDate}
+                        intervalStartTradeDate={row.topMatches[0].candidateStartTradeDate}
+                        intervalEndTradeDate={row.topMatches[0].candidateEndTradeDate}
+                        sourcePath={sourcePath}
+                        navigationItems={historicalNavigationItems}
+                        title={`查看 ${row.topMatches[0].name || row.topMatches[0].tsCode} 历史事件详情`}
+                      >
+                        <strong>{row.topMatches[0].name || row.topMatches[0].tsCode}</strong>
+                        <span>{row.topMatches[0].candidateEndTradeDate}</span>
+                      </DetailsLink>
+                    ) : (
+                      '--'
+                    )}
+                  </td>
                 </tr>
               ))}</tbody>
             </table>

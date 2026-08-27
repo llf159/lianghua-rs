@@ -284,6 +284,40 @@ pub fn preview_managed_source_dataset(
             all_columns = columns;
             order_by_sql = order_by;
         }
+        "strategy-trigger-similarity-rank" | "strategy-trigger-similarity-meta" => {
+            let db_path = result_db_path(source_path_str);
+            if !db_path.exists() {
+                return Err(format!("结果库不存在: {}", db_path.display()));
+            }
+            let db_path_str = db_path
+                .to_str()
+                .ok_or_else(|| "scoring_result.db 路径不是有效 UTF-8".to_string())?;
+            let conn = Connection::open(db_path_str)
+                .map_err(|error| format!("打开 scoring_result.db 失败: {error}"))?;
+            let (table_name, label, order_by) = if normalized_dataset_id.ends_with("meta") {
+                (
+                    "strategy_trigger_similarity_rank_meta",
+                    "走势相似排名元数据",
+                    "trade_date DESC, config_key ASC, generated_at_epoch_seconds DESC",
+                )
+            } else {
+                (
+                    "strategy_trigger_similarity_rank",
+                    "走势相似排名明细",
+                    "trade_date DESC, config_key ASC, rank NULLS LAST, ts_code ASC",
+                )
+            };
+            let relation = quote_ident(table_name);
+            let columns = load_relation_columns(&conn, &relation)?;
+            filter_trade_column = Some("trade_date");
+            filter_ts_code_column = Some("ts_code");
+            dataset_label = label;
+            target_path = db_path.display().to_string();
+            relation_sql = relation;
+            selected_columns = columns.clone();
+            all_columns = columns;
+            order_by_sql = order_by;
+        }
         "score-summary" => {
             let db_path = result_db_path(source_path_str);
             if !db_path.exists() {

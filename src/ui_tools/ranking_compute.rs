@@ -5,10 +5,11 @@ use serde::Serialize;
 
 use crate::{
     data::{
-        concept_performance_data::rebuild_concept_performance_all, cyq::CyqConfig,
-        cyq_chen::ChenChipConfig, cyq_chen_data::rebuild_cyq_chen_all_with_progress,
-        cyq_chen_db_path, cyq_data::rebuild_cyq_all_with_progress, cyq_db_path,
-        load_trade_date_list, result_db_path, source_db_path,
+        concept_performance_data::rebuild_concept_performance_all, concept_performance_db_path,
+        cyq::CyqConfig, cyq_chen::ChenChipConfig,
+        cyq_chen_data::rebuild_cyq_chen_all_with_progress, cyq_chen_db_path,
+        cyq_data::rebuild_cyq_all_with_progress, cyq_db_path, load_trade_date_list, result_db_path,
+        source_db_path,
     },
     download::runner::DownloadProgressCallback,
     scoring::{
@@ -88,6 +89,8 @@ pub struct RankComputeStatus {
     pub source_db: RankComputeDbRange,
     pub result_db: RankComputeDbRange,
     pub convolution_rank_db: RankComputeDbRange,
+    pub similarity_rank_db: RankComputeDbRange,
+    pub concept_performance_db: RankComputeDbRange,
     pub result_db_continuity: RankComputeResultContinuity,
     pub cyq_db: RankComputeDbRange,
     pub cyq_bin_row_count: u64,
@@ -565,8 +568,18 @@ fn get_rank_compute_status_inner(
         query_trade_date_range(&result_db, "scoring_result.db", "convolution_rank")?;
     let result_db_continuity = check_result_db_continuity(source_path, &result_db_range)?;
     let cyq_db_range = query_trade_date_range(&cyq_db, "cyq.db", "cyq_snapshot")?;
+    let similarity_rank_db = query_trade_date_range(
+        &result_db,
+        "scoring_result.db",
+        "strategy_trigger_similarity_rank",
+    )?;
     let cyq_bin_row_count = query_table_row_count(&cyq_db, "cyq.db", "cyq_bin")?;
     let cyq_factor = query_cyq_factor(&cyq_db)?;
+    let concept_performance_db = query_trade_date_range(
+        &concept_performance_db_path(source_path),
+        "concept_performance.db",
+        "concept_performance",
+    )?;
     let cyq_chen_db_range =
         query_trade_date_range(&cyq_chen_db, "cyq_chen.db", "cyq_chen_snapshot")?;
     let cyq_chen_bin_row_count =
@@ -594,6 +607,8 @@ fn get_rank_compute_status_inner(
         source_db: source_db_range,
         result_db: result_db_range,
         convolution_rank_db: convolution_rank_db_range,
+        similarity_rank_db,
+        concept_performance_db,
         result_db_continuity,
         cyq_db: cyq_db_range,
         cyq_bin_row_count,

@@ -674,7 +674,7 @@ export default function OverviewScenePage() {
         {sortedRows.length === 0 ? (
           <div className="overview-empty">当前场景下暂无数据</div>
         ) : (
-          <div className="overview-table-wrap" ref={tableWrapRef}>
+          <div className="overview-table-scroll" ref={tableWrapRef}>
             <table className="overview-table" style={{ minWidth: `${tableMinWidth}px` }}>
               <colgroup>
                 {VISIBLE_COLUMNS.map((key) => (

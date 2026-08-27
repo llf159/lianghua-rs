@@ -76,6 +76,22 @@ const DATASET_OPTIONS: DatasetOption[] = [
     supportsTsCode: true,
   },
   {
+    id: 'strategy-trigger-similarity-rank',
+    label: '走势相似排名明细',
+    description: '查看 scoring_result.db 的 strategy_trigger_similarity_rank。',
+    requiredFileId: 'result-db',
+    supportsTradeDate: true,
+    supportsTsCode: true,
+  },
+  {
+    id: 'strategy-trigger-similarity-meta',
+    label: '走势相似排名元数据',
+    description: '查看 scoring_result.db 的 strategy_trigger_similarity_rank_meta。',
+    requiredFileId: 'result-db',
+    supportsTradeDate: true,
+    supportsTsCode: false,
+  },
+  {
     id: 'concept-performance',
     label: '概念表现库',
     description: '查看 concept_performance.db 的 concept_performance。',

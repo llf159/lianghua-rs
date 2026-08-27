@@ -29,6 +29,8 @@ export type RankingComputeStatus = {
   sourceDb: RankComputeDbRange
   resultDb: RankComputeDbRange
   convolutionRankDb: RankComputeDbRange
+  similarityRankDb: RankComputeDbRange
+  conceptPerformanceDb: RankComputeDbRange
   resultDbContinuity: RankComputeResultContinuity
   cyqDb: RankComputeDbRange
   cyqBinRowCount: number
