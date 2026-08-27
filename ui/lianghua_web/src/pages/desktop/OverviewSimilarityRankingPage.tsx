@@ -7,8 +7,15 @@ import {
   type StrategyTriggerRankingPageData,
 } from '../../apis/strategyTriggerSimilarity'
 import DetailsLink from '../../shared/DetailsLink'
+import {
+  filterBoardItems,
+  isStBoard,
+  useConceptExclusions,
+} from '../../shared/conceptExclusions'
+import { STOCK_PICK_BOARD_OPTIONS } from '../../shared/stockPickShared'
 import { normalizeTradeDates, pickDateValue } from '../../shared/tradeDate'
 import './css/StrategyTriggerSimilarityPage.css'
+import './css/OverviewScenePage.css'
 
 function formatNumber(value: number | null | undefined, digits = 1) {
   return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '--'
@@ -43,6 +50,22 @@ export default function OverviewSimilarityRankingPage() {
   const [data, setData] = useState<StrategyTriggerRankingPageData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const { excludeStBoard } = useConceptExclusions()
+  const [limitInput, setLimitInput] = useState('100')
+  const [boardFilter, setBoardFilter] = useState('全部')
+  const [totalMvMinInput, setTotalMvMinInput] = useState('')
+  const [totalMvMaxInput, setTotalMvMaxInput] = useState('')
+
+  const boardOptions = useMemo(
+    () => filterBoardItems(STOCK_PICK_BOARD_OPTIONS, excludeStBoard),
+    [excludeStBoard],
+  )
+
+  useEffect(() => {
+    if (excludeStBoard && isStBoard(boardFilter)) {
+      setBoardFilter('全部')
+    }
+  }, [boardFilter, excludeStBoard])
 
   const navigationItems = useMemo(
     () =>
@@ -90,11 +113,61 @@ export default function OverviewSimilarityRankingPage() {
     if (!sourcePath || !tradeDate) return
     setLoading(true)
     setError('')
+    let limit: number | undefined
+    const limitRaw = limitInput.trim()
+    if (limitRaw) {
+      const parsedLimit = Number(limitRaw)
+      if (!Number.isInteger(parsedLimit) || parsedLimit <= 0) {
+        setError('限制行数必须是正整数')
+        setLoading(false)
+        return
+      }
+      limit = parsedLimit
+    }
+
+    let totalMvMin: number | undefined
+    const minRaw = totalMvMinInput.trim()
+    if (minRaw) {
+      const parsedMin = Number(minRaw)
+      if (!Number.isFinite(parsedMin)) {
+        setError('总市值最小值必须是数字')
+        setLoading(false)
+        return
+      }
+      totalMvMin = parsedMin
+    }
+
+    let totalMvMax: number | undefined
+    const maxRaw = totalMvMaxInput.trim()
+    if (maxRaw) {
+      const parsedMax = Number(maxRaw)
+      if (!Number.isFinite(parsedMax)) {
+        setError('总市值最大值必须是数字')
+        setLoading(false)
+        return
+      }
+      totalMvMax = parsedMax
+    }
+
+    if (
+      totalMvMin !== undefined &&
+      totalMvMax !== undefined &&
+      totalMvMin > totalMvMax
+    ) {
+      setError('总市值最小值不能大于最大值')
+      setLoading(false)
+      return
+    }
+
     try {
       const result = await getStrategyTriggerSimilarityRankingPage({
         sourcePath,
         tradeDate,
-        limit: 100,
+        limit,
+        board: boardFilter === '全部' ? undefined : boardFilter,
+        excludeStBoard: excludeStBoard || undefined,
+        totalMvMin,
+        totalMvMax,
       })
       setData(result)
     } catch (readError) {
@@ -115,18 +188,71 @@ export default function OverviewSimilarityRankingPage() {
           </div>
           <span>{sourcePath || '--'}</span>
         </div>
-        <div className="trigger-sim-form-grid">
-          <label className="trigger-sim-field">
+        <div className="overview-form-grid">
+          <label className="overview-field">
             <span>排名日期</span>
             <select value={tradeDate} onChange={(event) => setTradeDate(event.target.value)}>
               {dateOptions.map((date) => <option key={date} value={date}>{date}</option>)}
             </select>
           </label>
-          <div className="trigger-sim-actions">
-            <button className="trigger-sim-primary-btn" type="button" disabled={loading || !sourcePath || !tradeDate} onClick={() => void onRead()}>
-              {loading ? '读取中...' : '读取排名'}
-            </button>
-          </div>
+          <label className="overview-field">
+            <span>限制行数</span>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={limitInput}
+              onChange={(e) => setLimitInput(e.target.value)}
+              placeholder="100"
+            />
+          </label>
+          <label className="overview-field">
+            <span>板块筛选</span>
+            <select
+              value={boardFilter}
+              onChange={(event) =>
+                setBoardFilter(
+                  event.target.value as (typeof STOCK_PICK_BOARD_OPTIONS)[number],
+                )
+              }
+            >
+              {boardOptions.map((board) => (
+                <option key={board} value={board}>
+                  {board}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="overview-field">
+            <span>总市值最小(亿)</span>
+            <input
+              type="number"
+              step={0.01}
+              value={totalMvMinInput}
+              onChange={(e) => setTotalMvMinInput(e.target.value)}
+              placeholder="留空=不限"
+            />
+          </label>
+          <label className="overview-field">
+            <span>总市值最大(亿)</span>
+            <input
+              type="number"
+              step={0.01}
+              value={totalMvMaxInput}
+              onChange={(e) => setTotalMvMaxInput(e.target.value)}
+              placeholder="留空=不限"
+            />
+          </label>
+        </div>
+        <div className="overview-actions">
+          <button
+            className="overview-read-btn"
+            type="button"
+            disabled={loading || !sourcePath || !tradeDate}
+            onClick={() => void onRead()}
+          >
+            {loading ? '读取中...' : '读取排名'}
+          </button>
         </div>
         {error ? <div className="trigger-sim-error">{error}</div> : null}
       </section>
@@ -145,11 +271,13 @@ export default function OverviewSimilarityRankingPage() {
           </div>
           <div className="trigger-sim-table-wrap">
             <table className="trigger-sim-table trigger-sim-ranking-table">
-              <thead><tr><th>排名</th><th>股票</th><th>预测分</th><th>收缩超额</th><th>超额胜率</th><th>收益 / 超额</th><th>MFE / MAE</th><th>置信度</th><th>样本</th><th>相似度</th><th>策略排名</th><th>代表历史事件</th></tr></thead>
+              <thead><tr><th>排名</th><th>股票</th><th>板块</th><th>总市值(亿)</th><th>预测分</th><th>收缩超额</th><th>超额胜率</th><th>收益 / 超额</th><th>MFE / MAE</th><th>置信度</th><th>样本</th><th>相似度</th><th>策略排名</th><th>代表历史事件</th></tr></thead>
               <tbody>{data.items.map((row) => (
                 <tr key={row.tsCode}>
                   <td>{row.rank ?? '--'}</td>
                   <td><DetailsLink className="trigger-sim-stock-link" tsCode={row.tsCode} tradeDate={data.resolvedTradeDate} sourcePath={sourcePath} navigationItems={navigationItems}><strong>{row.name || row.tsCode}</strong><span>{row.tsCode}</span></DetailsLink></td>
+                  <td>{row.board || '--'}</td>
+                  <td>{formatNumber(row.totalMvYi, 2)}</td>
                   <td>{formatNumber(row.rankingScore)}</td>
                   <td className={outcomeTone(row.shrunkExcessReturnPct)}>{formatPercent(row.shrunkExcessReturnPct)}</td>
                   <td>{formatPercent(row.excessPositiveRate, 1)}</td>

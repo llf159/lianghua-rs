@@ -14,6 +14,7 @@ use super::{
     resolve_trade_date,
 };
 
+#[path = "strategy_trigger_similarity_ranking.rs"]
 pub mod ranking;
 
 const DEFAULT_WINDOW_TRADE_DAYS: usize = 20;

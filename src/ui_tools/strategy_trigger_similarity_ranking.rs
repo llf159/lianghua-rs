@@ -12,6 +12,8 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use crate::ui_tools::build_total_mv_map;
+use crate::utils::utils::board_category;
 
 const ALGORITHM_VERSION: &str = "outcome-reverse-startup-ranking-v3";
 const TOP_MATCH_HEAP_SIZE: usize = 256;
@@ -63,6 +65,7 @@ pub struct StrategyTriggerRankingRow {
     pub name: Option<String>,
     pub industry: Option<String>,
     pub concept: Option<String>,
+    pub board: Option<String>,
     pub original_score: Option<f64>,
     pub original_rank: Option<i64>,
     pub ranking_score: Option<f64>,
@@ -79,6 +82,7 @@ pub struct StrategyTriggerRankingRow {
     pub average_similarity: Option<f64>,
     pub best_similarity: Option<f64>,
     pub trigger_count: usize,
+    pub total_mv_yi: Option<f64>,
     pub top_matches: Vec<StrategyTriggerRankingMatch>,
 }
 
@@ -1192,6 +1196,8 @@ fn rank_one_target(
         name: name_map.get(&target.anchor.ts_code).cloned(),
         industry: industry_map.get(&target.anchor.ts_code).cloned(),
         concept: concept_map.get(&target.anchor.ts_code).cloned(),
+        board: None,
+        total_mv_yi: None,
         original_score: target.total_score,
         original_rank: target.original_rank,
         ranking_score: None,
@@ -1552,6 +1558,7 @@ fn load_stored_rows(
             name: row.get(2).map_err(|e| format!("读取名称失败: {e}"))?,
             industry: row.get(3).map_err(|e| format!("读取行业失败: {e}"))?,
             concept: row.get(4).map_err(|e| format!("读取概念失败: {e}"))?,
+            board: None,
             original_score: row.get(5).map_err(|e| format!("读取原始分失败: {e}"))?,
             original_rank: row.get(6).map_err(|e| format!("读取原始排名失败: {e}"))?,
             ranking_score: row.get(7).map_err(|e| format!("读取排行分失败: {e}"))?,
@@ -1580,6 +1587,7 @@ fn load_stored_rows(
                 .get::<_, i64>(20)
                 .map_err(|e| format!("读取触发数失败: {e}"))?
                 .max(0) as usize,
+            total_mv_yi: None,
             top_matches: serde_json::from_str(&matches_json).unwrap_or_default(),
         });
     }
@@ -1595,6 +1603,10 @@ pub fn get_strategy_trigger_similarity_ranking_page(
     outcome_trade_days: Option<u32>,
     benchmark_index_code: Option<String>,
     limit: Option<u32>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
+    total_mv_min: Option<f64>,
+    total_mv_max: Option<f64>,
 ) -> Result<StrategyTriggerRankingPageData, String> {
     let source_path = source_path.trim().to_string();
     if source_path.is_empty() {
@@ -1672,6 +1684,44 @@ pub fn get_strategy_trigger_similarity_ranking_page(
     } else {
         Vec::new()
     };
+    let name_map = build_name_map(&source_path).unwrap_or_default();
+    let total_mv_map = build_total_mv_map(&source_path).unwrap_or_default();
+    let exclude_st_board = exclude_st_board.unwrap_or(false);
+    let board_filter = board
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && value != "全部");
+    let mut items = items;
+    items = items
+        .into_iter()
+        .filter_map(|mut row| {
+            let board_value =
+                board_category(&row.ts_code, name_map.get(&row.ts_code).map(|value| value.as_str()))
+                    .to_string();
+            if exclude_st_board && board_value == "ST" {
+                return None;
+            }
+            if let Some(ref board_value_filter) = board_filter {
+                if &board_value != board_value_filter {
+                    return None;
+                }
+            }
+            let total_mv = total_mv_map.get(&row.ts_code).copied();
+            if let Some(min_v) = total_mv_min {
+                if total_mv.unwrap_or(f64::NEG_INFINITY) < min_v {
+                    return None;
+                }
+            }
+            if let Some(max_v) = total_mv_max {
+                if total_mv.unwrap_or(f64::NEG_INFINITY) > max_v {
+                    return None;
+                }
+            }
+            row.board = Some(board_value);
+            row.total_mv_yi = total_mv;
+            Some(row)
+        })
+        .collect();
     Ok(StrategyTriggerRankingPageData {
         resolved_trade_date,
         historical_cutoff_date: meta
@@ -1713,6 +1763,10 @@ pub fn run_strategy_trigger_similarity_ranking(
     outcome_trade_days: Option<u32>,
     benchmark_index_code: Option<String>,
     limit: Option<u32>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
+    total_mv_min: Option<f64>,
+    total_mv_max: Option<f64>,
 ) -> Result<StrategyTriggerRankingPageData, String> {
     let _guard = RANKING_COMPUTE_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -1942,6 +1996,10 @@ pub fn run_strategy_trigger_similarity_ranking(
         Some(outcome_trade_days as u32),
         Some(benchmark_index_code),
         limit,
+        board,
+        exclude_st_board,
+        total_mv_min,
+        total_mv_max,
     )
 }
 
@@ -1970,6 +2028,7 @@ mod tests {
             name: None,
             industry: None,
             concept: None,
+            board: None,
             original_score: None,
             original_rank: None,
             ranking_score: None,
@@ -1986,6 +2045,7 @@ mod tests {
             average_similarity: None,
             best_similarity: None,
             trigger_count: 0,
+            total_mv_yi: None,
             top_matches: Vec::new(),
         }
     }
@@ -2138,6 +2198,10 @@ mod tests {
             Some(5),
             Some("000001.SH".to_string()),
             Some(100),
+            None,
+            None,
+            None,
+            None,
         )
         .expect("compute real full-market ranking");
         eprintln!(
@@ -2281,6 +2345,10 @@ mod tests {
             Some(2),
             Some("000001.SH".to_string()),
             Some(100),
+            None,
+            None,
+            None,
+            None,
         )
         .expect("compute ranking");
         assert!(computed.is_fresh);
@@ -2296,6 +2364,10 @@ mod tests {
             Some(2),
             Some("000001.SH".to_string()),
             Some(100),
+            None,
+            None,
+            None,
+            None,
         )
         .expect("read ranking");
         assert!(reread.is_fresh);
@@ -2318,6 +2390,10 @@ mod tests {
             Some(2),
             Some("000001.SH".to_string()),
             Some(100),
+            None,
+            None,
+            None,
+            None,
         )
         .expect("revalidate changed ranking");
         assert!(!stale.is_fresh);

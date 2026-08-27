@@ -106,6 +106,8 @@ export type StrategyTriggerRankingRow = {
   name?: string | null
   industry?: string | null
   concept?: string | null
+  board?: string | null
+  totalMvYi?: number | null
   originalScore?: number | null
   originalRank?: number | null
   rankingScore?: number | null
@@ -160,6 +162,10 @@ export type StrategyTriggerRankingQuery = {
   outcomeTradeDays?: number
   benchmarkIndexCode?: string
   limit?: number
+  board?: string
+  excludeStBoard?: boolean
+  totalMvMin?: number
+  totalMvMax?: number
 }
 
 export async function getStrategyTriggerSimilarityRankingPage(

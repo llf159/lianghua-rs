@@ -467,3 +467,10 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* Sample tables can be wider than their card. Preserve their own scroller
+   despite the shared sticky-table helper. */
+body .expression-validation-samples-table-wrap {
+  max-height: calc(100vh - 280px) !important;
+  overflow: auto !important;
+}

@@ -20,3 +20,20 @@ table thead {
   z-index: 2;
   background-color: #fff;
 }
+
+[class*="table-wrap"] {
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+
+[class*="table-wrap"]::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+[class*="table-wrap"]::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: #cbd5e1 content-box;
+}

@@ -955,6 +955,10 @@ async fn get_strategy_trigger_similarity_ranking_page(
     outcome_trade_days: Option<u32>,
     benchmark_index_code: Option<String>,
     limit: Option<u32>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
+    total_mv_min: Option<f64>,
+    total_mv_max: Option<f64>,
 ) -> Result<StrategyTriggerRankingPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_get_strategy_trigger_similarity_ranking_page(
@@ -965,6 +969,10 @@ async fn get_strategy_trigger_similarity_ranking_page(
             outcome_trade_days,
             benchmark_index_code,
             limit,
+            board,
+            exclude_st_board,
+            total_mv_min,
+            total_mv_max,
         )
     })
     .await
@@ -980,6 +988,10 @@ async fn run_strategy_trigger_similarity_ranking(
     outcome_trade_days: Option<u32>,
     benchmark_index_code: Option<String>,
     limit: Option<u32>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
+    total_mv_min: Option<f64>,
+    total_mv_max: Option<f64>,
 ) -> Result<StrategyTriggerRankingPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_run_strategy_trigger_similarity_ranking(
@@ -990,6 +1002,10 @@ async fn run_strategy_trigger_similarity_ranking(
             outcome_trade_days,
             benchmark_index_code,
             limit,
+            board,
+            exclude_st_board,
+            total_mv_min,
+            total_mv_max,
         )
     })
     .await

@@ -562,3 +562,10 @@
     max-height: calc(100vh - 20px);
   }
 }
+
+/* Database previews can exceed the viewport width. Keep their scroller
+   enabled despite the shared sticky-table helper. */
+body .settings-db-table-wrap {
+  max-height: calc(100vh - 300px) !important;
+  overflow: auto !important;
+}

@@ -363,6 +363,54 @@
   border-radius: 6px;
 }
 
+/* Pin identification columns while the large ranking/result tables slide.
+   Explicit colors are required for the pinned layers to stay opaque. */
+.trigger-sim-ranking-table th:nth-child(1),
+.trigger-sim-ranking-table td:nth-child(1) {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  width: 76px;
+  min-width: 76px;
+  background-color: #fff;
+  box-shadow: 1px 0 0 #e6ebf2;
+}
+
+.trigger-sim-ranking-table th:nth-child(2),
+.trigger-sim-ranking-table td:nth-child(2) {
+  position: sticky;
+  left: 76px;
+  z-index: 2;
+  width: 180px;
+  min-width: 180px;
+  max-width: 180px;
+  background-color: #fff;
+  box-shadow: 1px 0 0 #e6ebf2;
+}
+
+.trigger-sim-table:not(.trigger-sim-ranking-table) th:nth-child(1),
+.trigger-sim-table:not(.trigger-sim-ranking-table) td:nth-child(1) {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  width: 180px;
+  min-width: 180px;
+  max-width: 180px;
+  background-color: #fff;
+  box-shadow: 1px 0 0 #e6ebf2;
+}
+
+.trigger-sim-ranking-table tbody tr:hover td:nth-child(-n + 2),
+.trigger-sim-table:not(.trigger-sim-ranking-table) tbody tr:hover td:nth-child(1) {
+  background-color: #fff8f1;
+}
+
+.trigger-sim-ranking-table thead th:nth-child(-n + 2),
+.trigger-sim-table:not(.trigger-sim-ranking-table) thead th:nth-child(1) {
+  z-index: 3;
+  background-color: #f7f9fc;
+}
+
 .trigger-sim-date-separator {
   display: block;
   color: #66758a;

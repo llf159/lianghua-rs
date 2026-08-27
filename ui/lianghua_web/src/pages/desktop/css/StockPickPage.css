@@ -692,3 +692,11 @@
     grid-column: auto;
   }
 }
+
+/* Advanced result tables intentionally exceed the available card width. Keep
+   them sliding horizontally inside their own container. */
+body .stock-pick-table-wrap,
+body .stock-pick-table-wrap-advanced {
+  max-height: calc(100vh - 280px) !important;
+  overflow: auto !important;
+}

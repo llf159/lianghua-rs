@@ -497,6 +497,14 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+/* The generic sticky-table helper removes wrapper heights. Restore this
+   realtime table's viewport-sized scroller: it keeps the wide table inside
+   its column while preserving horizontal and vertical scrolling. */
+.all-market-monitor-grid .all-market-table-wrap {
+  max-height: calc(100vh - 300px) !important;
+  overflow: auto !important;
+}
+
 .all-market-table-card {
   min-width: 0;
   min-height: 360px;
@@ -899,6 +907,34 @@
 
 .all-market-table tbody tr:hover {
   background: #fff8f0;
+}
+
+/* Lock the stock identifier while wide realtime data slides sideways.
+   Explicit row-state colors prevent lower cells from showing through. */
+.all-market-table th.all-market-name-col,
+.all-market-table td.all-market-name-cell {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background-color: #fff;
+  box-shadow: 1px 0 0 #e8edf3;
+}
+
+.all-market-table tbody tr:nth-child(even) td.all-market-name-cell {
+  background-color: #fbfcfe;
+}
+
+.all-market-table tbody tr.is-template-hit td.all-market-name-cell {
+  background-color: #fff7ed;
+}
+
+.all-market-table tbody tr:hover td.all-market-name-cell {
+  background-color: #fff8f0;
+}
+
+.all-market-table thead th.all-market-name-col {
+  z-index: 3;
+  background-color: #f7f9fc;
 }
 
 .all-market-table-card.is-compact .all-market-table-wrap {

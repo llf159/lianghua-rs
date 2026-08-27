@@ -557,3 +557,9 @@
     grid-column: 1 / -1;
   }
 }
+
+/* Restore the compact histogram/table scroller disabled globally. */
+body .cyq-chen-bin-table-wrap {
+  max-height: 280px !important;
+  overflow: auto !important;
+}

@@ -398,3 +398,10 @@
   background: #fff;
   color: #4f5f73;
 }
+
+/* The shared sticky-table helper disables scrollable wraps. Restore the
+   intended self-contained scroller for this very wide watchlist table. */
+body .watch-observe-table-wrap {
+  max-height: calc(100vh - 220px) !important;
+  overflow: auto !important;
+}

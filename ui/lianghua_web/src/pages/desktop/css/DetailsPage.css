@@ -2705,3 +2705,15 @@
     font-size: 10px;
   }
 }
+
+/* Keep wide strategy/detail tables within their card while preserving the
+   rank-card's full-height layout used elsewhere on Details pages. */
+body .details-subcard .details-table-wrap {
+  max-height: 420px !important;
+  overflow: auto !important;
+}
+
+body .details-scene-overview-table-wrap {
+  max-height: calc(100vh - 300px) !important;
+  overflow: auto !important;
+}

@@ -1204,3 +1204,11 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* Keep the stocks side panel bounded, but leave statistics/backtest result
+   tables unrestricted so headers stick to the outer content viewport. */
+body .strategy-trigger-page .strategy-trigger-table-wrap-stocks {
+  flex: 1 !important;
+  min-height: 0 !important;
+  overflow-y: auto !important;
+}
