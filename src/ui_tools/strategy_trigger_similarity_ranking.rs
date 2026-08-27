@@ -71,6 +71,7 @@ pub struct StrategyTriggerRankingRow {
     pub board: Option<String>,
     pub original_score: Option<f64>,
     pub original_rank: Option<i64>,
+    pub best_rank_3d: Option<i64>,
     pub ranking_score: Option<f64>,
     pub prediction_signal: Option<f64>,
     pub confidence: f64,
@@ -1398,6 +1399,7 @@ fn rank_one_target(
         total_mv_yi: None,
         original_score: target.total_score,
         original_rank: target.original_rank,
+        best_rank_3d: None,
         ranking_score: None,
         prediction_signal,
         confidence,
@@ -1826,20 +1828,35 @@ fn load_stored_rows(
     let mut stmt = conn
         .prepare(
             r#"
-            SELECT rank, ts_code, name, industry, concept, original_score, original_rank,
-                   ranking_score, prediction_signal, confidence, sample_count,
-                   effective_sample_count, expected_return_pct, expected_excess_return_pct,
-                   shrunk_excess_return_pct, excess_positive_rate, expected_mfe_pct,
-                   expected_mae_pct, average_similarity, best_similarity, trigger_count,
-                   top_matches_json
-            FROM strategy_trigger_similarity_rank
-            WHERE trade_date=? AND config_key=?
-            ORDER BY rank NULLS LAST, ts_code LIMIT ?
+            WITH ranked AS (
+                SELECT rank, ts_code, name, industry, concept, original_score, original_rank,
+                       ranking_score, prediction_signal, confidence, sample_count,
+                       effective_sample_count, expected_return_pct, expected_excess_return_pct,
+                       shrunk_excess_return_pct, excess_positive_rate, expected_mfe_pct,
+                       expected_mae_pct, average_similarity, best_similarity, trigger_count,
+                       top_matches_json
+                FROM strategy_trigger_similarity_rank
+                WHERE trade_date=? AND config_key=?
+                ORDER BY rank NULLS LAST, ts_code
+                LIMIT ?
+            )
+            SELECT r.*, b.best_rank_3d
+            FROM ranked r
+            LEFT JOIN (
+                SELECT b3.ts_code, MIN(b3.rank) AS best_rank_3d
+                FROM score_summary b3
+                WHERE b3.rank IS NOT NULL AND b3.trade_date IN (
+                    SELECT DISTINCT trade_date FROM score_summary
+                    WHERE trade_date <= ? ORDER BY trade_date DESC LIMIT 3
+                )
+                GROUP BY b3.ts_code
+            ) b ON b.ts_code = r.ts_code
+            ORDER BY r.rank NULLS LAST, r.ts_code
             "#,
         )
         .map_err(|e| format!("预编译相似排行读取失败: {e}"))?;
     let mut rows = stmt
-        .query(params![trade_date, config_key, limit as i64])
+        .query(params![trade_date, config_key, limit as i64, trade_date])
         .map_err(|e| format!("查询相似排行失败: {e}"))?;
     let mut out = Vec::new();
     while let Some(row) = rows.next().map_err(|e| format!("读取相似排行失败: {e}"))? {
@@ -1856,6 +1873,7 @@ fn load_stored_rows(
             board: None,
             original_score: row.get(5).map_err(|e| format!("读取原始分失败: {e}"))?,
             original_rank: row.get(6).map_err(|e| format!("读取原始排名失败: {e}"))?,
+            best_rank_3d: row.get(22).map_err(|e| format!("读取三日优排名失败: {e}"))?,
             ranking_score: row.get(7).map_err(|e| format!("读取排行分失败: {e}"))?,
             prediction_signal: row.get(8).map_err(|e| format!("读取预测信号失败: {e}"))?,
             confidence: row.get(9).map_err(|e| format!("读取置信度失败: {e}"))?,
@@ -2370,6 +2388,7 @@ mod tests {
             board: None,
             original_score: None,
             original_rank: None,
+            best_rank_3d: None,
             ranking_score: None,
             prediction_signal: signal,
             confidence: 0.0,

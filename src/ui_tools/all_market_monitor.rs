@@ -63,7 +63,7 @@ struct SourceMetaCacheEntry {
 struct RankContext {
     rank: Option<i64>,
     best_rank_3d: Option<i64>,
-    best_rank_5d: Option<i64>,
+    similarity_rank: Option<i64>,
     total_score: Option<f64>,
 }
 
@@ -107,7 +107,7 @@ pub struct AllMarketMonitorRow {
     pub concept: String,
     pub rank: Option<i64>,
     pub best_rank_3d: Option<i64>,
-    pub best_rank_5d: Option<i64>,
+    pub similarity_rank: Option<i64>,
     pub total_score: Option<f64>,
     pub realtime_trade_date: Option<String>,
     pub realtime_price: Option<f64>,
@@ -302,118 +302,162 @@ fn open_source_conn(source_path: &str) -> Result<Connection, String> {
     Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))
 }
 
-fn query_latest_rank_date(conn: &Connection) -> Result<String, String> {
-    let mut stmt = conn
-        .prepare("SELECT MAX(trade_date) FROM score_summary")
-        .map_err(|e| format!("预编译最新总榜日期失败: {e}"))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("查询最新总榜日期失败: {e}"))?;
-
-    if let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取最新总榜日期失败: {e}"))?
-    {
-        let trade_date: Option<String> = row
-            .get(0)
-            .map_err(|e| format!("读取最新总榜日期字段失败: {e}"))?;
-        if let Some(value) = trade_date.filter(|value| !value.trim().is_empty()) {
-            return Ok(value);
-        }
-    }
-
-    Err("score_summary 没有可用交易日".to_string())
+fn similarity_board_ready(conn: &Connection) -> bool {
+    table_exists(conn, "strategy_trigger_similarity_rank")
+        && table_exists(conn, "strategy_trigger_similarity_active_config")
 }
 
-fn load_rank_context(
-    conn: &Connection,
-    rank_date: &str,
-) -> Result<HashMap<String, RankContext>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            WITH recent_dates AS (
-                SELECT
-                    trade_date,
-                    ROW_NUMBER() OVER (ORDER BY trade_date DESC) AS date_rank
-                FROM (
-                    SELECT trade_date
-                    FROM score_summary
-                    GROUP BY trade_date
-                    ORDER BY trade_date DESC
-                    LIMIT 5
-                ) dates
-            )
+fn table_exists(conn: &Connection, table_name: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema='main' AND table_name=?",
+        params![table_name],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
+
+/// 读取总榜排名与策略触发相似榜单排名：最新总榜日期、当日排名/总分、三日优、
+/// 相似榜单排名全部合并进一条 SQL。相似榜单表不存在时自动退化为纯总榜查询
+/// （允许不存在，不阻塞）。
+fn load_rank_context(conn: &Connection) -> Result<(String, HashMap<String, RankContext>), String> {
+    let similarity_board = similarity_board_ready(conn);
+    let latest_sim_cte = if similarity_board {
+        r#",
+            latest_sim AS (
+                SELECT r.ts_code, MAX(r.rank) AS similarity_rank
+                FROM strategy_trigger_similarity_rank r
+                WHERE r.config_key = (
+                    SELECT config_key FROM strategy_trigger_similarity_active_config WHERE id = 1
+                )
+                  AND r.trade_date = (
+                      SELECT MAX(m.trade_date)
+                      FROM strategy_trigger_similarity_rank m
+                      WHERE m.config_key = (
+                          SELECT config_key
+                          FROM strategy_trigger_similarity_active_config WHERE id = 1
+                      )
+                  )
+                  AND r.rank IS NOT NULL
+                GROUP BY r.ts_code
+            )"#
+    } else {
+        ""
+    };
+    let sim_column = if similarity_board {
+        "sim.similarity_rank"
+    } else {
+        "CAST(NULL AS BIGINT)"
+    };
+    let sim_join = if similarity_board {
+        "LEFT JOIN latest_sim sim ON sim.ts_code = agg.ts_code"
+    } else {
+        ""
+    };
+
+    let sql = format!(
+        r#"
+        WITH recent_dates AS (
+            SELECT
+                trade_date,
+                ROW_NUMBER() OVER (ORDER BY trade_date DESC) AS date_rank
+            FROM (
+                SELECT trade_date
+                FROM score_summary
+                GROUP BY trade_date
+                ORDER BY trade_date DESC
+                LIMIT 3
+            ) dates
+        ),
+        agg AS (
             SELECT
                 s.ts_code,
-                MAX(CASE WHEN s.trade_date = ? THEN s.rank ELSE NULL END) AS current_rank,
+                MAX(CASE WHEN s.trade_date = latest.rd THEN s.rank ELSE NULL END) AS current_rank,
                 MIN(CASE WHEN d.date_rank <= 3 AND s.rank IS NOT NULL THEN s.rank ELSE NULL END) AS best_rank_3d,
-                MIN(CASE WHEN d.date_rank <= 5 AND s.rank IS NOT NULL THEN s.rank ELSE NULL END) AS best_rank_5d,
-                MAX(CASE WHEN s.trade_date = ? THEN s.total_score ELSE NULL END) AS current_total_score
+                MAX(CASE WHEN s.trade_date = latest.rd THEN s.total_score ELSE NULL END) AS current_total_score
             FROM score_summary s
             INNER JOIN recent_dates d ON s.trade_date = d.trade_date
+            CROSS JOIN (SELECT MAX(trade_date) AS rd FROM score_summary) latest
             GROUP BY s.ts_code
-            "#,
-        )
+        ){latest_sim_cte}
+        SELECT
+            (SELECT MAX(trade_date) FROM score_summary),
+            agg.ts_code,
+            agg.current_rank,
+            agg.best_rank_3d,
+            agg.current_total_score,
+            {sim_column}
+        FROM agg
+        {sim_join}
+        "#
+    );
+
+    let mut stmt = conn
+        .prepare(&sql)
         .map_err(|e| format!("预编译全市场总榜排名失败: {e}"))?;
     let mut rows = stmt
-        .query(params![rank_date, rank_date])
+        .query([])
         .map_err(|e| format!("查询全市场总榜排名失败: {e}"))?;
     let mut out = HashMap::new();
+    let mut rank_date: Option<String> = None;
 
     while let Some(row) = rows
         .next()
         .map_err(|e| format!("读取全市场总榜排名失败: {e}"))?
     {
-        let ts_code: String = row.get(0).map_err(|e| format!("读取排名代码失败: {e}"))?;
+        let ts_code: String = row.get(1).map_err(|e| format!("读取排名代码失败: {e}"))?;
         if ts_code.trim().is_empty() {
             continue;
+        }
+        if rank_date.is_none() {
+            let date: Option<String> = row
+                .get(0)
+                .map_err(|e| format!("读取最新总榜日期字段失败: {e}"))?;
+            rank_date = date.filter(|value| !value.trim().is_empty());
         }
         out.insert(
             ts_code,
             RankContext {
-                rank: row.get(1).map_err(|e| format!("读取排名失败: {e}"))?,
+                rank: row.get(2).map_err(|e| format!("读取排名失败: {e}"))?,
                 best_rank_3d: row
-                    .get(2)
-                    .map_err(|e| format!("读取三日最优排名失败: {e}"))?,
-                best_rank_5d: row
                     .get(3)
-                    .map_err(|e| format!("读取五日最优排名失败: {e}"))?,
+                    .map_err(|e| format!("读取三日最优排名失败: {e}"))?,
+                similarity_rank: row
+                    .get(5)
+                    .map_err(|e| format!("读取相似榜单排名失败: {e}"))?,
                 total_score: row.get(4).map_err(|e| format!("读取总分失败: {e}"))?,
             },
         );
     }
 
-    Ok(out)
+    let rank_date = rank_date.ok_or_else(|| "score_summary 没有可用交易日".to_string())?;
+    Ok((rank_date, out))
 }
 
 fn cached_rank_context(
     source_path: &str,
     conn: &Connection,
-    rank_date: &str,
-) -> Result<HashMap<String, RankContext>, String> {
-    if let Some(entry) = rank_context_cache()
-        .lock()
-        .map_err(|_| "排名缓存锁已损坏".to_string())?
-        .get(source_path)
-        .filter(|entry| entry.rank_date == rank_date)
-        .cloned()
+) -> Result<(String, HashMap<String, RankContext>), String> {
     {
-        return Ok(entry.ranks);
+        let cache = rank_context_cache()
+            .lock()
+            .map_err(|_| "排名缓存锁已损坏".to_string())?;
+        if let Some(entry) = cache.get(source_path) {
+            return Ok((entry.rank_date.clone(), entry.ranks.clone()));
+        }
     }
 
-    let ranks = load_rank_context(conn, rank_date)?;
+    let (rank_date, ranks) = load_rank_context(conn)?;
     rank_context_cache()
         .lock()
         .map_err(|_| "排名缓存锁已损坏".to_string())?
         .insert(
             source_path.to_string(),
             RankCacheEntry {
-                rank_date: rank_date.to_string(),
+                rank_date: rank_date.clone(),
                 ranks: ranks.clone(),
             },
         );
-    Ok(ranks)
+    Ok((rank_date, ranks))
 }
 
 pub(super) fn scene_stage_level(raw: Option<&str>) -> i32 {
@@ -1543,7 +1587,7 @@ fn build_rows(
                 concept: stock.concept.clone(),
                 rank: rank.and_then(|item| item.rank),
                 best_rank_3d: rank.and_then(|item| item.best_rank_3d),
-                best_rank_5d: rank.and_then(|item| item.best_rank_5d),
+                similarity_rank: rank.and_then(|item| item.similarity_rank),
                 total_score: rank.and_then(|item| item.total_score),
                 realtime_trade_date: quote.and_then(|item| normalize_quote_trade_date(&item.date)),
                 realtime_price: quote.map(|item| item.price),
@@ -1692,8 +1736,7 @@ pub fn get_all_market_monitor_snapshot(
     }
 
     let conn = open_result_conn(source_path)?;
-    let rank_date = query_latest_rank_date(&conn)?;
-    let ranks = cached_rank_context(source_path, &conn, &rank_date)?;
+    let (rank_date, ranks) = cached_rank_context(source_path, &conn)?;
     let scene_marker_candidates =
         cached_scene_marker_candidates(source_path, &conn, &rank_date).unwrap_or_default();
     let scene_marker_map = build_scene_marker_map(
@@ -1859,7 +1902,7 @@ mod tests {
             RankContext {
                 rank: Some(12),
                 best_rank_3d: Some(5),
-                best_rank_5d: Some(3),
+                similarity_rank: Some(3),
                 total_score: Some(88.5),
             },
         );
@@ -1896,7 +1939,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].rank, Some(12));
         assert_eq!(rows[0].best_rank_3d, Some(5));
-        assert_eq!(rows[0].best_rank_5d, Some(3));
+        assert_eq!(rows[0].similarity_rank, Some(3));
         assert_eq!(rows[0].total_score, Some(88.5));
         assert_eq!(rows[0].concept, "银行;互联金融");
         assert_eq!(rows[0].realtime_trade_date.as_deref(), Some("20240603"));

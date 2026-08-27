@@ -285,7 +285,7 @@ export default function OverviewSimilarityRankingPage() {
           </div>
           <div className="trigger-sim-ranking-scroll">
             <table className="trigger-sim-table trigger-sim-ranking-table">
-              <thead><tr><th>排名</th><th>股票</th><th>板块</th><th>总市值(亿)</th><th>预测分</th><th>收缩超额</th><th>超额胜率</th><th>收益 / 超额</th><th>MFE / MAE</th><th>置信度</th><th>样本</th><th>相似度</th><th>策略排名</th><th>代表历史事件</th></tr></thead>
+              <thead><tr><th>排名</th><th>股票</th><th>板块</th><th>总市值(亿)</th><th>预测分</th><th>收缩超额</th><th>超额胜率</th><th>收益 / 超额</th><th>MFE / MAE</th><th>置信度</th><th>相似度</th><th>三日优排名</th><th>代表历史事件</th></tr></thead>
               <tbody>{data.items.map((row) => (
                 <tr key={row.tsCode}>
                   <td>{row.rank ?? '--'}</td>
@@ -298,9 +298,8 @@ export default function OverviewSimilarityRankingPage() {
                   <td>{formatPercent(row.expectedReturnPct)} / {formatPercent(row.expectedExcessReturnPct)}</td>
                   <td>{formatPercent(row.expectedMfePct)} / {formatPercent(row.expectedMaePct)}</td>
                   <td>{formatPercent(row.confidence * 100, 1)}</td>
-                  <td>{row.sampleCount} / 有效 {formatNumber(row.effectiveSampleCount)}</td>
                   <td>{formatNumber(row.averageSimilarity)} / {formatNumber(row.bestSimilarity)}</td>
-                  <td>{row.originalRank ?? '--'}</td>
+                  <td>{row.bestRank3d ?? '--'}</td>
                   <td>
                     {row.topMatches[0] ? (
                       <DetailsLink

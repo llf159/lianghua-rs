@@ -110,6 +110,7 @@ export type StrategyTriggerRankingRow = {
   totalMvYi?: number | null
   originalScore?: number | null
   originalRank?: number | null
+  bestRank3d?: number | null
   rankingScore?: number | null
   predictionSignal?: number | null
   confidence: number

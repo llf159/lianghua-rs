@@ -156,7 +156,7 @@ type SpeedPeriod = (typeof SPEED_PERIOD_OPTIONS)[number];
 type BoardFilter = (typeof STOCK_PICK_BOARD_OPTIONS)[number];
 type SortKey =
   | "best_rank_3d"
-  | "best_rank_5d"
+  | "similarity_rank"
   | "other_sort_value"
   | "realtime_change_pct"
   | "return_5d_pct"
@@ -1179,7 +1179,7 @@ export default function AllMarketMonitorPage() {
 
     const sortDefinitions = {
       best_rank_3d: { value: (row: DisplayRow) => row.best_rank_3d },
-      best_rank_5d: { value: (row: DisplayRow) => row.best_rank_5d },
+      similarity_rank: { value: (row: DisplayRow) => row.similarity_rank },
       other_sort_value: { value: (row: DisplayRow) => row.other_sort_value },
       realtime_change_pct: {
         value: (row: DisplayRow) => row.realtime_change_pct,
@@ -1454,13 +1454,13 @@ export default function AllMarketMonitorPage() {
       isFiniteNumber(row.best_rank_3d)
         ? `3:${formatNumber(row.best_rank_3d, 0)}`
         : null,
-      isFiniteNumber(row.best_rank_5d)
-        ? `5:${formatNumber(row.best_rank_5d, 0)}`
+      isFiniteNumber(row.similarity_rank)
+        ? `相似:${formatNumber(row.similarity_rank, 0)}`
         : null,
     ].filter((item): item is string => item !== null);
     const rankHighlighted =
       isRankHighlight(row.best_rank_3d, rankHighlightThreshold) ||
-      isRankHighlight(row.best_rank_5d, rankHighlightThreshold);
+      isRankHighlight(row.similarity_rank, rankHighlightThreshold);
     const hasAvgPrice =
       isFiniteNumber(row.realtime_price) &&
       isFiniteNumber(row.realtime_avg_price) &&
@@ -1486,7 +1486,7 @@ export default function AllMarketMonitorPage() {
                 ? "all-market-hit-tag is-rank-highlight"
                 : "all-market-hit-tag"
             }
-            title="3日优 / 5日优"
+            title="3日优 / 策略触发相似榜排名"
           >
             排 {rankParts.map((item) => item.split(":")[1] ?? item).join("/")}
           </span>
@@ -1812,11 +1812,11 @@ export default function AllMarketMonitorPage() {
                     <th
                       className="all-market-basic-col"
                       aria-sort={getAriaSort(
-                        sortKey === "best_rank_5d",
+                        sortKey === "similarity_rank",
                         sortDirection,
                       )}
                     >
-                      {renderSortHeader("5日优", "best_rank_5d")}
+                      {renderSortHeader("相似榜", "similarity_rank")}
                     </th>
                     <th
                       className="all-market-basic-col"
@@ -1922,8 +1922,8 @@ export default function AllMarketMonitorPage() {
                       row.best_rank_3d,
                       rankHighlightThreshold,
                     );
-                    const rank5dHighlighted = isRankHighlight(
-                      row.best_rank_5d,
+                    const rankSimHighlighted = isRankHighlight(
+                      row.similarity_rank,
                       rankHighlightThreshold,
                     );
                     const volumeRatioAlert =
@@ -1969,12 +1969,12 @@ export default function AllMarketMonitorPage() {
                             </span>
                             <span
                               className={
-                                rank5dHighlighted
+                                rankSimHighlighted
                                   ? "all-market-compact-item is-highlight"
                                   : "all-market-compact-item"
                               }
                             >
-                              5日 {formatNumber(row.best_rank_5d, 0)}
+                              相似 {formatNumber(row.similarity_rank, 0)}
                             </span>
                             <span
                               className={`all-market-compact-item ${getPercentClassName(
@@ -2050,12 +2050,12 @@ export default function AllMarketMonitorPage() {
                         </td>
                         <td
                           className={
-                            rank5dHighlighted
+                            rankSimHighlighted
                               ? "all-market-rank-cell all-market-basic-col is-highlight"
                               : "all-market-rank-cell all-market-basic-col"
                           }
                         >
-                          {formatNumber(row.best_rank_5d, 0)}
+                          {formatNumber(row.similarity_rank, 0)}
                         </td>
                         <td
                           className={`all-market-basic-col ${getPercentClassName(
@@ -2447,8 +2447,8 @@ export default function AllMarketMonitorPage() {
                     <dd>{formatNumber(openHitRecord.best_rank_3d, 0)}</dd>
                   </div>
                   <div>
-                    <dt>5日优</dt>
-                    <dd>{formatNumber(openHitRecord.best_rank_5d, 0)}</dd>
+                    <dt>相似榜</dt>
+                    <dd>{formatNumber(openHitRecord.similarity_rank, 0)}</dd>
                   </div>
                   <div>
                     <dt>涨幅</dt>

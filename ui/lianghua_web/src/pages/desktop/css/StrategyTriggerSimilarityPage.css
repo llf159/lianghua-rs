@@ -337,7 +337,7 @@
 }
 
 .trigger-sim-ranking-table {
-  min-width: 1560px;
+  min-width: 1380px;
 }
 
 .trigger-sim-table th,
@@ -396,8 +396,8 @@
   position: sticky;
   left: 0;
   z-index: 2;
-  width: 76px;
-  min-width: 76px;
+  width: 50px;
+  min-width: 50px;
   background-color: #fff;
   box-shadow: 1px 0 0 #e6ebf2;
 }
@@ -405,11 +405,11 @@
 .trigger-sim-ranking-table th:nth-child(2),
 .trigger-sim-ranking-table td:nth-child(2) {
   position: sticky;
-  left: 76px;
+  left: 50px;
   z-index: 2;
-  width: 180px;
-  min-width: 180px;
-  max-width: 180px;
+  width: 120px;
+  min-width: 120px;
+  max-width: 120px;
   background-color: #fff;
   box-shadow: 1px 0 0 #e6ebf2;
 }

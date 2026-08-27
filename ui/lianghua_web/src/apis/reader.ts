@@ -198,7 +198,7 @@ export type AllMarketMonitorRow = {
   concept?: string;
   rank?: number | null;
   best_rank_3d?: number | null;
-  best_rank_5d?: number | null;
+  similarity_rank?: number | null;
   total_score?: number | null;
   realtime_trade_date?: string | null;
   realtime_price?: number | null;
