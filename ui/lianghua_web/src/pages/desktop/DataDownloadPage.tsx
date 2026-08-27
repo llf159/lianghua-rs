@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
+import { forwardRef, useDeferredValue, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { inspectManagedSourceStatus } from '../../apis/managedSource'
 import {
   DATA_DOWNLOAD_DRAFT_STORAGE_KEY,
@@ -430,13 +430,35 @@ function readDraft(): DataDownloadDraft {
 type DataDownloadPageProps = {
   mergedMode?: boolean
   onMainTaskComplete?: () => void
+  sharedToken?: string
+  onSharedTokenChange?: (token: string) => void
+  hideSharedTokenSection?: boolean
 }
 
-export default function DataDownloadPage({ mergedMode = false, onMainTaskComplete }: DataDownloadPageProps) {
+export type DailyDownloadOutcome = {
+  completed: boolean
+  latestTradeDate: string | null
+  chipStrategySkipped: boolean
+}
+
+export type DataDownloadPageHandle = {
+  runDailyIncrementalUpdate: () => Promise<DailyDownloadOutcome>
+}
+
+const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProps>(function DataDownloadPage(
+  {
+    mergedMode = false,
+    onMainTaskComplete,
+    sharedToken,
+    onSharedTokenChange,
+    hideSharedTokenSection = false,
+  },
+  ref,
+) {
   const draft = useMemo(() => readDraft(), [])
   const [status, setStatus] = useState<DataDownloadStatus | null>(null)
   const [busyAction, setBusyAction] = useState<BusyAction>('loading')
-  const [token, setToken] = useState(draft.token)
+  const [localToken, setLocalToken] = useState(draft.token)
   const [startDateInput, setStartDateInput] = useState(draft.startDate)
   const [endDateInput, setEndDateInput] = useState(draft.endDate)
   const [useTodayEnd, setUseTodayEnd] = useState(draft.useTodayEnd)
@@ -464,6 +486,14 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
   const [feedbackSection, setFeedbackSection] = useState<TaskSection>('main')
   const activeDownloadIdRef = useRef('')
   const progressUnlistenRef = useRef<null | (() => void)>(null)
+  const busyActionRef = useRef(busyAction)
+  busyActionRef.current = busyAction
+  const token = sharedToken ?? localToken
+
+  function setToken(nextToken: string) {
+    setLocalToken(nextToken)
+    onSharedTokenChange?.(nextToken)
+  }
 
   const sourcePath = status?.sourcePath?.trim() ?? ''
   const isBusy = busyAction !== 'idle'
@@ -661,17 +691,19 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
           `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；成功 ${result.summary.successCount} 只，写入 ${result.summary.savedRows} 行${detailTail}。`,
         )
       }
+      return result
     } catch (runError) {
       const staleStockListMessage = section === 'main' ? parseStaleStockListConfirmMessage(runError) : null
       if (staleStockListMessage) {
         setNotice('')
         setError('')
         setStaleStockListConfirmMessage(staleStockListMessage)
-        return
+        return null
       }
 
       setNotice('')
       setError(`执行下载失败: ${String(runError)}`)
+      return null
     } finally {
       progressUnlistenRef.current?.()
       progressUnlistenRef.current = null
@@ -683,6 +715,7 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
   async function onRunDownload(
     allowStaleStockList = false,
     allowCyqChenStrategyRebuild?: boolean,
+    skipCyqChenStrategyConfirm = false,
   ) {
     if (!sourcePath) {
       setFeedbackSection('main')
@@ -725,7 +758,8 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
       status?.plannedAction === 'incremental-download' &&
       chipModel === 'chen' &&
       status.cyqChenMaintenance.strategyChanged &&
-      allowCyqChenStrategyRebuild === undefined
+      allowCyqChenStrategyRebuild === undefined &&
+      !skipCyqChenStrategyConfirm
     ) {
       setFeedbackSection('main')
       setError('')
@@ -739,7 +773,7 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
       return
     }
 
-    await runDataTask('main', (downloadId) =>
+    return runDataTask('main', (downloadId) =>
       runDataDownload({
         downloadId,
         sourcePath,
@@ -756,6 +790,26 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
       }),
     )
   }
+
+  useImperativeHandle(ref, () => ({
+    async runDailyIncrementalUpdate() {
+      if (busyActionRef.current !== 'idle') {
+        throw new Error('下载页当前有任务正在执行。')
+      }
+      if (status?.plannedAction !== 'incremental-download') {
+        throw new Error('每日工作流仅适用于已有行情库的增量更新；请先完成首次下载。')
+      }
+
+      const chipStrategySkipped =
+        readStoredDetailCyqModel() === 'chen' && status.cyqChenMaintenance.strategyChanged
+      const result = await onRunDownload(false, false, true)
+      return {
+        completed: Boolean(result),
+        latestTradeDate: result?.status.sourceDb.maxTradeDate ?? null,
+        chipStrategySkipped,
+      }
+    },
+  }))
 
   async function onRunMissingStockRepair() {
     if (!sourcePath) {
@@ -872,7 +926,7 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
 
   return (
     <div className={mergedMode ? 'data-download-page is-merged-mode' : 'data-download-page'}>
-      <section className="data-download-card data-download-shared-params">
+      {!hideSharedTokenSection ? <section className="data-download-card data-download-shared-params">
         <div className="data-download-shared-params-copy">
           <span className="data-download-shared-params-label">公共参数</span>
           <div>
@@ -890,7 +944,7 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
             placeholder="输入后缓存在当前浏览器 localStorage"
           />
         </label>
-      </section>
+      </section> : null}
 
       <section className="data-download-card">
         <div className="data-download-head">
@@ -1424,4 +1478,6 @@ export default function DataDownloadPage({ mergedMode = false, onMainTaskComplet
 
     </div>
   )
-}
+})
+
+export default DataDownloadPage

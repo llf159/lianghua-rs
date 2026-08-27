@@ -4,6 +4,59 @@
   min-width: 0;
 }
 
+.download-compute-token-card {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.8fr) minmax(320px, 1.2fr);
+  gap: 22px;
+  align-items: end;
+  padding: 18px;
+  border: 1px solid #cbd5e1;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 10px 28px rgba(30, 41, 59, 0.07);
+}
+
+.download-compute-token-card > div > span,
+.download-compute-token-card label > span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.download-compute-token-card h1 {
+  margin: 4px 0 0;
+  color: #172033;
+  font-size: 22px;
+}
+
+.download-compute-token-card p {
+  margin: 5px 0 0;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.download-compute-token-card label {
+  display: grid;
+  gap: 7px;
+}
+
+.download-compute-token-card input {
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid #bdc9d8;
+  border-radius: 9px;
+  color: #172033;
+  background: #fbfdff;
+  font: inherit;
+}
+
+.download-compute-token-card input:focus {
+  border-color: #4c83bd;
+  outline: 3px solid rgba(76, 131, 189, 0.14);
+}
+
 .download-compute-section {
   position: relative;
   display: grid;
@@ -20,6 +73,12 @@
     linear-gradient(180deg, rgba(255, 247, 237, 0.98) 0, rgba(255, 252, 248, 0.92) 180px),
     #fffdf9;
   box-shadow: 0 14px 34px rgba(180, 93, 18, 0.09);
+}
+
+.download-compute-section-daily {
+  border-color: #cbc7e8;
+  background: linear-gradient(135deg, #f6f4ff, #fcfbff);
+  box-shadow: 0 14px 34px rgba(76, 66, 139, 0.09);
 }
 
 .download-compute-section-compute {
@@ -46,6 +105,11 @@
   border-bottom-color: #cbdced;
 }
 
+.download-compute-section-daily .download-compute-section-head {
+  align-items: center;
+  border-bottom-color: #d9d5ee;
+}
+
 .download-compute-section-index {
   flex: 0 0 auto;
   border-radius: 999px;
@@ -63,6 +127,47 @@
 .download-compute-section-compute .download-compute-section-index {
   color: #245d91;
   background: #dcecff;
+}
+
+.download-compute-section-daily .download-compute-section-index {
+  color: #51458f;
+  background: #e8e4fa;
+}
+
+.download-compute-daily-btn {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 10px 18px;
+  border: 0;
+  border-radius: 10px;
+  color: #fff;
+  background: #6254a6;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.download-compute-daily-btn:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+.download-compute-daily-status {
+  padding: 11px 13px;
+  border-radius: 10px;
+  color: #4d4965;
+  background: rgba(255, 255, 255, 0.76);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.download-compute-daily-status.is-failed {
+  color: #9f2d24;
+  background: #fff0ee;
+}
+
+.download-compute-daily-status.is-skipped {
+  color: #8a5a09;
+  background: #fff8e7;
 }
 
 .download-compute-section-head h1 {
@@ -98,9 +203,19 @@
     border-radius: 14px;
   }
 
+  .download-compute-token-card {
+    grid-template-columns: 1fr;
+    padding: 14px;
+  }
+
   .download-compute-section-head {
     display: grid;
     gap: 9px;
+  }
+
+  .download-compute-daily-btn {
+    width: 100%;
+    margin-left: 0;
   }
 
   .download-compute-section-head h1 {

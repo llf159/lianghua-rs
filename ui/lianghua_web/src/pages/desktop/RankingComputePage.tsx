@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useRef, useState } from 'react'
+import { forwardRef, useDeferredValue, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import { inspectManagedSourceStatus, removeManagedSourceFile } from '../../apis/managedSource'
 import {
@@ -69,6 +69,12 @@ type PendingConfirmState =
   | { kind: 'delete-stock-indicator-columns' }
   | { kind: 'recompute-result-db' }
   | { kind: 'delete-cyq-chen-db' }
+  | {
+      kind: 'run-ranking-with-strategy-change'
+      startDate: string
+      endDate: string
+      changedLineCount: number
+    }
   | null
 
 const DEFAULT_SIMILARITY_WINDOW_TRADE_DAYS = 20
@@ -253,7 +259,22 @@ type RankingComputePageProps = {
   statusRefreshSignal?: number
 }
 
-export default function RankingComputePage({ mergedMode = false, statusRefreshSignal = 0 }: RankingComputePageProps) {
+export type DailyRankingOutcome = {
+  completed: boolean
+  strategyChanged: boolean
+}
+
+export type RankingComputePageHandle = {
+  runDailyRankingWorkflow: (
+    tradeDate: string,
+    onStageChange?: (stage: 'ranking' | 'similarity') => void,
+  ) => Promise<DailyRankingOutcome>
+}
+
+const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePageProps>(function RankingComputePage(
+  { mergedMode = false, statusRefreshSignal = 0 },
+  ref,
+) {
   const [status, setStatus] = useState<RankingComputeStatus | null>(null)
   const [busyAction, setBusyAction] = useState<BusyAction>('loading')
   const [startDateInput, setStartDateInput] = useState('')
@@ -888,6 +909,19 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
     }
   }
 
+  async function runConfirmedRankingCompute(startDate: string, endDate: string) {
+    setBusyAction('computing')
+    clearFeedback('rank')
+
+    try {
+      await runRankingComputeForRange(startDate, endDate)
+    } catch (actionError) {
+      setFeedbackError('rank', `排名计算失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
   async function onRunCompute() {
     if (!sourcePath) {
       setFeedbackError('rank', '当前数据目录为空，请先到数据管理页确认目录。')
@@ -904,14 +938,32 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
     setBusyAction('computing')
     clearFeedback('rank')
     setStrategyDiff(null)
-
     try {
-      await runRankingComputeForRange(startDate, endDate)
+      const assetsStatus = await getManagedStrategyAssetsStatus()
+      const latestComputeSnapshot = assetsStatus.backups.find(
+        (item) => item.sourceKind === 'rank_compute',
+      )
+      if (latestComputeSnapshot) {
+        const diff = await getManagedStrategyBackupDiff(latestComputeSnapshot.backupId)
+        if (diff.changedLineCount > 0) {
+          setStrategyDiff(diff)
+          setPendingConfirm({
+            kind: 'run-ranking-with-strategy-change',
+            startDate,
+            endDate,
+            changedLineCount: diff.changedLineCount,
+          })
+          return
+        }
+      }
     } catch (actionError) {
-      setFeedbackError('rank', `排名计算失败: ${String(actionError)}`)
+      setFeedbackError('rank', `检查排名策略变化失败: ${String(actionError)}`)
+      return
     } finally {
       setBusyAction('idle')
     }
+
+    await runConfirmedRankingCompute(startDate, endDate)
   }
 
   async function onRunSimilarityRankingCompute() {
@@ -961,6 +1013,89 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
       setBusyAction('idle')
     }
   }
+
+  useImperativeHandle(ref, () => ({
+    async runDailyRankingWorkflow(tradeDate, onStageChange) {
+      if (busyActionRef.current !== 'idle') {
+        throw new Error('计算页当前有任务正在执行。')
+      }
+      if (!sourcePath) {
+        throw new Error('当前数据目录为空，请先到数据管理页确认目录。')
+      }
+      if (!/^\d{8}$/.test(tradeDate)) {
+        throw new Error('增量更新未返回有效的最新交易日。')
+      }
+
+      setBusyAction('computing')
+      try {
+        clearFeedback('rank')
+        clearFeedback('similarityRank')
+        const assetsStatus = await getManagedStrategyAssetsStatus()
+        const latestComputeSnapshot = assetsStatus.backups.find(
+          (item) => item.sourceKind === 'rank_compute',
+        )
+        if (latestComputeSnapshot) {
+          const diff = await getManagedStrategyBackupDiff(latestComputeSnapshot.backupId)
+          if (diff.changedLineCount > 0) {
+            setStrategyDiff(diff)
+            setFeedbackNotice(
+              'rank',
+              `每日工作流检测到排名策略已有 ${diff.changedLineCount} 行变化，已跳过排名和走势相似度计算。`,
+            )
+            return { completed: false, strategyChanged: true }
+          }
+        }
+
+        const dailyStatus = await getRankingComputeStatus(sourcePath)
+        const rankingStartDate = dailyStatus.suggestedStartDate ?? tradeDate
+        const rankingEndDate = dailyStatus.suggestedEndDate ?? tradeDate
+        setStrategyDiff(null)
+        setStartDateInput(compactDateToInput(rankingStartDate))
+        setEndDateInput(compactDateToInput(rankingEndDate))
+        setSimilarityTradeDateInput(compactDateToInput(rankingEndDate))
+        onStageChange?.('ranking')
+        await runRankingComputeForRange(
+          rankingStartDate,
+          rankingEndDate,
+          '每日工作流排名计算完成',
+        )
+        setBusyAction('similarity-ranking-computing')
+        onStageChange?.('similarity')
+        const result = await runStrategyTriggerSimilarityRanking({
+          sourcePath,
+          tradeDate: rankingEndDate,
+          windowTradeDays: normalizePositiveInt(
+            similarityWindowDaysInput,
+            DEFAULT_SIMILARITY_WINDOW_TRADE_DAYS,
+            3,
+          ),
+          poolSegments: normalizePositiveInt(
+            similarityPoolSegmentsInput,
+            DEFAULT_SIMILARITY_POOL_SEGMENTS,
+          ),
+          outcomeTradeDays: normalizePositiveInt(
+            similarityOutcomeDaysInput,
+            DEFAULT_SIMILARITY_OUTCOME_TRADE_DAYS,
+          ),
+          benchmarkIndexCode: similarityBenchmarkCode,
+          limit: 1,
+        })
+        const nextStatus = await getRankingComputeStatus(sourcePath)
+        setStatus(nextStatus)
+        applySimilarityActiveConfig(nextStatus.similarityActiveConfig, true)
+        setFeedbackNotice(
+          'similarityRank',
+          `每日工作流走势相似排名完成：${result.resolvedTradeDate}，有效排名 ${result.rankedCount}。`,
+        )
+        return { completed: true, strategyChanged: false }
+      } catch (actionError) {
+        setFeedbackError('similarityRank', `每日工作流计算失败: ${String(actionError)}`)
+        throw actionError
+      } finally {
+        setBusyAction('idle')
+      }
+    },
+  }))
 
   async function onViewStrategyDiff() {
     setStrategyDiffLoading(true)
@@ -1138,6 +1273,11 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
 
     if (current.kind === 'delete-cyq-chen-db') {
       await onDeleteCyqChenDb()
+      return
+    }
+
+    if (current.kind === 'run-ranking-with-strategy-change') {
+      await runConfirmedRankingCompute(current.startDate, current.endDate)
       return
     }
 
@@ -1854,6 +1994,8 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
               ? '确认清空指标列'
               : pendingConfirm?.kind === 'delete-cyq-chen-db'
                 ? '确认删除新筹码库'
+                : pendingConfirm?.kind === 'run-ranking-with-strategy-change'
+                  ? '排名策略已变化'
                 : '确认一键重算结果库'
         }
         message={
@@ -1863,15 +2005,21 @@ export default function RankingComputePage({ mergedMode = false, statusRefreshSi
               ? '确认清空 stock_data 中的所有非基础指标列吗？\n\n该操作会重建 stock_data 表，只保留基础行情列和已有基础行情数据；数据量较大时耗时会更久。'
               : pendingConfirm?.kind === 'delete-cyq-chen-db'
                 ? '确认删除当前新筹码库 cyq_chen.db 吗？将清空 cyq_chen_snapshot / cyq_chen_bin，删除后需要重新计算新筹码。'
+                : pendingConfirm?.kind === 'run-ranking-with-strategy-change'
+                  ? `检测到当前排名策略相对最近计算快照有 ${pendingConfirm.changedLineCount} 行变化。是否仍使用当前策略计算 ${formatTradeDate(pendingConfirm.startDate)} 至 ${formatTradeDate(pendingConfirm.endDate)}？`
                 : `确认先删除当前结果库 scoring_result.db，再按原结果库日期范围 ${formatTradeDate(status?.resultDb.minTradeDate)} 至 ${formatTradeDate(status?.resultDb.maxTradeDate)} 重算排名吗？`
         }
-        confirmText="确认"
+        confirmText={
+          pendingConfirm?.kind === 'run-ranking-with-strategy-change' ? '仍然继续计算' : '确认'
+        }
         cancelText="取消"
-        danger
+        danger={pendingConfirm?.kind !== 'run-ranking-with-strategy-change'}
         busy={isBusy}
         onCancel={() => setPendingConfirm(null)}
         onConfirm={() => void onConfirmPendingAction()}
       />
     </div>
   )
-}
+})
+
+export default RankingComputePage

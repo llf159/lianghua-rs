@@ -2,10 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::Path,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        mpsc::{SyncSender, sync_channel},
-    },
+    sync::mpsc::{SyncSender, sync_channel},
     thread,
 };
 
@@ -517,11 +514,8 @@ fn maintain_chip_after_incremental_download(
             }
             let merge_repair_progress =
                 !maintenance_status.strategy_changed && !recovered_stock_codes.is_empty();
-            let repaired_stock_count = AtomicUsize::new(0);
             let repair_progress_cb = |progress: DownloadProgress| {
                 if merge_repair_progress && progress.total > 0 {
-                    repaired_stock_count
-                        .fetch_max(progress.finished.min(progress.total), Ordering::Relaxed);
                     emit_chip_maintenance_progress(
                         progress_cb,
                         hide_chip_repair_local_counter(progress),
@@ -541,7 +535,11 @@ fn maintain_chip_after_incremental_download(
                 )?
             };
             let repaired_stock_count = if repair_summary.is_some() && merge_repair_progress {
-                repaired_stock_count.load(Ordering::Relaxed)
+                // These are the successfully recovered market-data stocks passed into the
+                // chip repair. Use the stable task count instead of deriving it from callback
+                // timing, otherwise the following incremental phase can briefly report 1/14
+                // for a 15-stock combined job.
+                recovered_stock_codes.len()
             } else {
                 0
             };
