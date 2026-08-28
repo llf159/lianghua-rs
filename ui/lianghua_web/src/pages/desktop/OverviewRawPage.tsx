@@ -32,6 +32,7 @@ import {
   useTableSort,
 } from "../../shared/tableSort";
 import { STOCK_PICK_BOARD_OPTIONS } from "../../shared/stockPickShared";
+import { readStoredDefaultBoardFilter } from "../../shared/defaultBoardFilter";
 import "./css/OverviewScenePage.css";
 
 const OVERVIEW_PAGE_STATE_KEY = "lh_overview_page_state";
@@ -73,6 +74,7 @@ type PersistedOverviewFilterState = {
   refDateInput: string;
   limitInput: string;
   boardFilter: (typeof STOCK_PICK_BOARD_OPTIONS)[number];
+  defaultBoardFilter: (typeof STOCK_PICK_BOARD_OPTIONS)[number];
   totalMvMinInput: string;
   totalMvMaxInput: string;
   sortKey: string | null;
@@ -259,10 +261,12 @@ export default function OverviewRawPage() {
       limitInput:
         typeof merged.limitInput === "string" ? merged.limitInput : "100",
       boardFilter:
+        merged.defaultBoardFilter === readStoredDefaultBoardFilter() &&
         merged.boardFilter &&
         STOCK_PICK_BOARD_OPTIONS.includes(merged.boardFilter)
           ? merged.boardFilter
-          : "全部",
+          : readStoredDefaultBoardFilter(),
+      defaultBoardFilter: readStoredDefaultBoardFilter(),
       totalMvMinInput:
         typeof merged.totalMvMinInput === "string"
           ? merged.totalMvMinInput
@@ -298,7 +302,7 @@ export default function OverviewRawPage() {
   );
   const [boardFilter, setBoardFilter] = useState<
     (typeof STOCK_PICK_BOARD_OPTIONS)[number]
-  >(() => persistedState?.boardFilter ?? "全部");
+  >(() => persistedState?.boardFilter ?? readStoredDefaultBoardFilter());
   const [totalMvMinInput, setTotalMvMinInput] = useState(
     () => persistedState?.totalMvMinInput ?? "",
   );
@@ -400,6 +404,7 @@ export default function OverviewRawPage() {
         refDateInput,
         limitInput,
         boardFilter,
+        defaultBoardFilter: readStoredDefaultBoardFilter(),
         totalMvMinInput,
         totalMvMaxInput,
         sortKey,

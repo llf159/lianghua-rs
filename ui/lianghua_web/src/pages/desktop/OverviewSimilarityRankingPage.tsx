@@ -13,6 +13,7 @@ import {
   useConceptExclusions,
 } from '../../shared/conceptExclusions'
 import { STOCK_PICK_BOARD_OPTIONS } from '../../shared/stockPickShared'
+import { readStoredDefaultBoardFilter } from '../../shared/defaultBoardFilter'
 import { normalizeTradeDates, pickDateValue } from '../../shared/tradeDate'
 import './css/StrategyTriggerSimilarityPage.css'
 import './css/OverviewScenePage.css'
@@ -52,7 +53,7 @@ export default function OverviewSimilarityRankingPage() {
   const [error, setError] = useState('')
   const { excludeStBoard } = useConceptExclusions()
   const [limitInput, setLimitInput] = useState('100')
-  const [boardFilter, setBoardFilter] = useState('全部')
+  const [boardFilter, setBoardFilter] = useState(() => readStoredDefaultBoardFilter())
   const [totalMvMinInput, setTotalMvMinInput] = useState('')
   const [totalMvMaxInput, setTotalMvMaxInput] = useState('')
 

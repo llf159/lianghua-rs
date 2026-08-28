@@ -6,6 +6,7 @@ const CHART_MAIN_PERCENT_MIN_HEIGHT_STORAGE_KEY = 'lh_chart_main_percent_min_hei
 const CHART_MAIN_PERCENT_MAX_HEIGHT_STORAGE_KEY = 'lh_chart_main_percent_max_height_v1'
 const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_STORAGE_KEY = 'lh_details_nav_long_press_interval_seconds_v1'
 const DETAIL_CYQ_MODEL_STORAGE_KEY = 'lh_detail_cyq_model_v1'
+const CHART_DEFAULT_VISIBLE_BARS_STORAGE_KEY = 'lh_chart_default_visible_bars_v1'
 
 export type DetailCyqModel = 'legacy' | 'chen'
 export type ChartMainHeightMode = 'fixed' | 'percent'
@@ -28,11 +29,41 @@ export const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_DEFAULT = 1
 export const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MIN = 0.2
 export const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MAX = 10
 export const DETAIL_CYQ_MODEL_DEFAULT: DetailCyqModel = 'legacy'
+export const CHART_DEFAULT_VISIBLE_BARS_DEFAULT = 90
+export const CHART_DEFAULT_VISIBLE_BARS_MIN = 20
+export const CHART_DEFAULT_VISIBLE_BARS_MAX = 280
 
 export function normalizeChartMainHeightMode(
   value: string | null | undefined,
 ): ChartMainHeightMode {
   return value === 'percent' ? 'percent' : CHART_MAIN_HEIGHT_MODE_DEFAULT
+}
+
+export function clampChartDefaultVisibleBars(value: number) {
+  return Math.round(clampNumber(
+    value,
+    CHART_DEFAULT_VISIBLE_BARS_DEFAULT,
+    CHART_DEFAULT_VISIBLE_BARS_MIN,
+    CHART_DEFAULT_VISIBLE_BARS_MAX,
+  ))
+}
+
+export function readStoredChartDefaultVisibleBars() {
+  return clampChartDefaultVisibleBars(readStoredNumber(
+    CHART_DEFAULT_VISIBLE_BARS_STORAGE_KEY,
+    CHART_DEFAULT_VISIBLE_BARS_DEFAULT,
+  ))
+}
+
+export function writeStoredChartDefaultVisibleBars(nextValue: number) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  window.localStorage.setItem(
+    CHART_DEFAULT_VISIBLE_BARS_STORAGE_KEY,
+    clampChartDefaultVisibleBars(nextValue).toString(),
+  )
 }
 
 function clampNumber(value: number, fallback: number, min: number, max: number) {

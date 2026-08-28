@@ -11,6 +11,7 @@ import {
 import { isStBoard, useConceptExclusions } from '../../shared/conceptExclusions'
 import { useStockPickOutletContext } from './StockPickPage'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
+import { readStoredDefaultBoardFilter } from '../../shared/defaultBoardFilter'
 import {
   writeStoredIntradayMonitorWatchlist,
   writeStoredIntradayMonitorWatchlistEnabled,
@@ -36,6 +37,7 @@ type CopySeparatorOption = (typeof COPY_SEPARATOR_OPTIONS)[number]['value']
 
 type PersistedExpressionStockPickFilterState = {
   board: (typeof STOCK_PICK_BOARD_OPTIONS)[number]
+  defaultBoardFilter: (typeof STOCK_PICK_BOARD_OPTIONS)[number]
   referenceTradeDate: string
   lookbackPeriods: string
   scopeWay: (typeof STOCK_PICK_SCOPE_OPTIONS)[number]
@@ -124,9 +126,11 @@ export default function ExpressionStockPickPage() {
 
     return {
       board:
+        merged.defaultBoardFilter === readStoredDefaultBoardFilter() &&
         merged.board && STOCK_PICK_BOARD_OPTIONS.includes(merged.board)
           ? merged.board
-          : '全部',
+          : readStoredDefaultBoardFilter(),
+      defaultBoardFilter: readStoredDefaultBoardFilter(),
       referenceTradeDate:
         typeof merged.referenceTradeDate === 'string'
           ? merged.referenceTradeDate
@@ -163,7 +167,9 @@ export default function ExpressionStockPickPage() {
       .map(normalizeTemplate)
       .filter((item): item is ExpressionStockPickTemplate => item !== null)
   }, [])
-  const [board, setBoard] = useState<(typeof STOCK_PICK_BOARD_OPTIONS)[number]>(() => persistedState?.board ?? '全部')
+  const [board, setBoard] = useState<(typeof STOCK_PICK_BOARD_OPTIONS)[number]>(
+    () => persistedState?.board ?? readStoredDefaultBoardFilter(),
+  )
   const [referenceTradeDate, setReferenceTradeDate] = useState(() => persistedState?.referenceTradeDate ?? '')
   const [lookbackPeriods, setLookbackPeriods] = useState(() => persistedState?.lookbackPeriods ?? '1')
   const [scopeWay, setScopeWay] = useState<(typeof STOCK_PICK_SCOPE_OPTIONS)[number]>(() => persistedState?.scopeWay ?? 'LAST')
@@ -209,6 +215,7 @@ export default function ExpressionStockPickPage() {
       EXPRESSION_STOCK_PICK_FILTER_STATE_KEY,
       {
         board,
+        defaultBoardFilter: readStoredDefaultBoardFilter(),
         referenceTradeDate,
         lookbackPeriods,
         scopeWay,

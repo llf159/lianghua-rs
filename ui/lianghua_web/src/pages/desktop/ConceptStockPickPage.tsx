@@ -15,6 +15,7 @@ import {
 import { filterConceptItems, isStBoard, useConceptExclusions } from '../../shared/conceptExclusions'
 import { useStockPickOutletContext } from './StockPickPage'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
+import { readStoredDefaultBoardFilter } from '../../shared/defaultBoardFilter'
 
 const CONCEPT_STOCK_PICK_STATE_KEY = 'concept-stock-pick-state-v1'
 const CONCEPT_STOCK_PICK_FILTER_STATE_KEY = 'concept-stock-pick-filter-state-v3'
@@ -22,6 +23,7 @@ const CONCEPT_STOCK_PICK_RESULT_STATE_KEY = 'concept-stock-pick-result-state-v2'
 
 type PersistedConceptStockPickFilterState = {
   board: (typeof STOCK_PICK_BOARD_OPTIONS)[number]
+  defaultBoardFilter: (typeof STOCK_PICK_BOARD_OPTIONS)[number]
   tradeDate: string
   matchMode: (typeof STOCK_PICK_MATCH_MODE_OPTIONS)[number]
   conceptKeyword: string
@@ -86,9 +88,11 @@ export default function ConceptStockPickPage() {
 
     return {
       board:
+        merged.defaultBoardFilter === readStoredDefaultBoardFilter() &&
         merged.board && STOCK_PICK_BOARD_OPTIONS.includes(merged.board)
           ? merged.board
-          : '全部',
+          : readStoredDefaultBoardFilter(),
+      defaultBoardFilter: readStoredDefaultBoardFilter(),
       tradeDate: typeof merged.tradeDate === 'string' ? merged.tradeDate : '',
       matchMode:
         merged.matchMode && STOCK_PICK_MATCH_MODE_OPTIONS.includes(merged.matchMode)
@@ -127,7 +131,9 @@ export default function ConceptStockPickPage() {
       resolvedTradeDate: typeof merged.resolvedTradeDate === 'string' ? merged.resolvedTradeDate : '',
     } satisfies PersistedConceptStockPickState
   }, [])
-  const [board, setBoard] = useState<(typeof STOCK_PICK_BOARD_OPTIONS)[number]>(() => persistedState?.board ?? '全部')
+  const [board, setBoard] = useState<(typeof STOCK_PICK_BOARD_OPTIONS)[number]>(
+    () => persistedState?.board ?? readStoredDefaultBoardFilter(),
+  )
   const [tradeDate, setTradeDate] = useState(() => persistedState?.tradeDate ?? '')
   const [matchMode, setMatchMode] = useState<(typeof STOCK_PICK_MATCH_MODE_OPTIONS)[number]>(() => persistedState?.matchMode ?? 'OR')
   const [conceptKeyword, setConceptKeyword] = useState(() => persistedState?.conceptKeyword ?? '')
@@ -209,6 +215,7 @@ export default function ConceptStockPickPage() {
       CONCEPT_STOCK_PICK_FILTER_STATE_KEY,
       {
         board,
+        defaultBoardFilter: readStoredDefaultBoardFilter(),
         tradeDate,
         matchMode,
         conceptKeyword,

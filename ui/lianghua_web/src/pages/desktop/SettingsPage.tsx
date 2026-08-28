@@ -10,6 +10,8 @@ import ChartIndicatorSettingsModal from './components/ChartIndicatorSettingsModa
 import StrategySyntaxGuideModal from './components/StrategySyntaxGuideModal'
 import AlgorithmGuideModal from './components/AlgorithmGuideModal'
 import {
+  CHART_DEFAULT_VISIBLE_BARS_MAX,
+  CHART_DEFAULT_VISIBLE_BARS_MIN,
   DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MAX,
   DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MIN,
   CHART_INDICATOR_WIDTH_RATIO_MAX,
@@ -20,11 +22,13 @@ import {
   CHART_MAIN_PERCENT_PIXELS_MIN,
   CHART_MAIN_WIDTH_RATIO_MAX,
   CHART_MAIN_WIDTH_RATIO_MIN,
+  clampChartDefaultVisibleBars,
   clampChartMainPercentHeight,
   clampChartMainPercentPixels,
   clampChartIndicatorWidthRatio,
   clampChartMainWidthRatio,
   clampDetailsNavLongPressIntervalSeconds,
+  readStoredChartDefaultVisibleBars,
   readStoredChartIndicatorWidthRatio,
   readStoredChartMainHeightMode,
   readStoredChartMainPercentMaxHeight,
@@ -33,6 +37,7 @@ import {
   readStoredChartMainWidthRatio,
   readStoredDetailCyqModel,
   readStoredDetailsNavLongPressIntervalSeconds,
+  writeStoredChartDefaultVisibleBars,
   writeStoredChartIndicatorWidthRatio,
   writeStoredChartMainHeightMode,
   writeStoredChartMainPercentMaxHeight,
@@ -44,6 +49,12 @@ import {
   type DetailCyqModel,
   type ChartMainHeightMode,
 } from '../../shared/chartSettings'
+import {
+  DEFAULT_BOARD_FILTER_OPTIONS,
+  readStoredDefaultBoardFilter,
+  writeStoredDefaultBoardFilter,
+  type DefaultBoardFilter,
+} from '../../shared/defaultBoardFilter'
 import {
   BACKTEST_IC_THRESHOLD_DEFAULT,
   BACKTEST_IR_THRESHOLD_DEFAULT,
@@ -80,6 +91,8 @@ type SettingsModalType =
   | 'concept'
   | 'st'
   | 'chart-layout'
+  | 'chart-default-visible-bars'
+  | 'default-board-filter'
   | 'chart-indicator'
   | 'detail-cyq-model'
   | 'details-nav-long-press'
@@ -106,6 +119,14 @@ export default function SettingsPage() {
   const [isAlgorithmGuideOpen, setIsAlgorithmGuideOpen] = useState(false)
   const [chartMainRatioInput, setChartMainRatioInput] = useState(() =>
     readStoredChartMainWidthRatio().toFixed(2),
+  )
+  const [chartDefaultVisibleBarsInput, setChartDefaultVisibleBarsInput] = useState(
+    () => String(readStoredChartDefaultVisibleBars()),
+  )
+  const [chartDefaultVisibleBarsError, setChartDefaultVisibleBarsError] = useState('')
+  const [chartDefaultVisibleBarsNotice, setChartDefaultVisibleBarsNotice] = useState('')
+  const [defaultBoardFilter, setDefaultBoardFilter] = useState<DefaultBoardFilter>(
+    () => readStoredDefaultBoardFilter(),
   )
   const [chartIndicatorRatioInput, setChartIndicatorRatioInput] = useState(() =>
     readStoredChartIndicatorWidthRatio().toFixed(2),
@@ -166,6 +187,8 @@ export default function SettingsPage() {
   const isConceptEditorOpen = activeModal === 'concept'
   const isStSettingOpen = activeModal === 'st'
   const isChartLayoutSettingOpen = activeModal === 'chart-layout'
+  const isChartDefaultVisibleBarsSettingOpen = activeModal === 'chart-default-visible-bars'
+  const isDefaultBoardFilterSettingOpen = activeModal === 'default-board-filter'
   const isChartIndicatorSettingOpen = activeModal === 'chart-indicator'
   const isDetailCyqModelSettingOpen = activeModal === 'detail-cyq-model'
   const isDetailsNavLongPressSettingOpen = activeModal === 'details-nav-long-press'
@@ -281,6 +304,14 @@ export default function SettingsPage() {
     return clampChartMainWidthRatio(parsedValue)
   }, [chartMainRatioInput])
 
+  const chartDefaultVisibleBarsPreview = useMemo(() => {
+    const parsedValue = Number(chartDefaultVisibleBarsInput.trim())
+    if (!Number.isFinite(parsedValue)) {
+      return null
+    }
+    return clampChartDefaultVisibleBars(parsedValue)
+  }, [chartDefaultVisibleBarsInput])
+
   const chartIndicatorWidthRatioPreview = useMemo(() => {
     const parsedValue = Number(chartIndicatorRatioInput.trim())
     if (!Number.isFinite(parsedValue)) {
@@ -325,6 +356,18 @@ export default function SettingsPage() {
     setChartMainPercentMaxHeightInput(String(readStoredChartMainPercentMaxHeight()))
     setChartLayoutSettingError('')
     setChartLayoutSettingNotice('')
+  }
+
+  function openChartDefaultVisibleBarsSetting() {
+    setActiveModal('chart-default-visible-bars')
+    setChartDefaultVisibleBarsInput(String(readStoredChartDefaultVisibleBars()))
+    setChartDefaultVisibleBarsError('')
+    setChartDefaultVisibleBarsNotice('')
+  }
+
+  function openDefaultBoardFilterSetting() {
+    setDefaultBoardFilter(readStoredDefaultBoardFilter())
+    setActiveModal('default-board-filter')
   }
 
   function openChartIndicatorSetting() {
@@ -422,6 +465,36 @@ export default function SettingsPage() {
     setChartMainPercentMaxHeightInput(String(normalizedPercentMaxHeight))
     setChartLayoutSettingError('')
     setChartLayoutSettingNotice('已保存。切回详情页后会使用新的高度设置。')
+  }
+
+  function onSaveChartDefaultVisibleBars() {
+    const parsedValue = Number(chartDefaultVisibleBarsInput.trim())
+    if (!Number.isInteger(parsedValue)) {
+      setChartDefaultVisibleBarsError('请输入整数根数。')
+      setChartDefaultVisibleBarsNotice('')
+      return
+    }
+    if (
+      parsedValue < CHART_DEFAULT_VISIBLE_BARS_MIN ||
+      parsedValue > CHART_DEFAULT_VISIBLE_BARS_MAX
+    ) {
+      setChartDefaultVisibleBarsError(
+        `根数需在 ${CHART_DEFAULT_VISIBLE_BARS_MIN} 到 ${CHART_DEFAULT_VISIBLE_BARS_MAX} 之间。`,
+      )
+      setChartDefaultVisibleBarsNotice('')
+      return
+    }
+
+    const normalizedValue = clampChartDefaultVisibleBars(parsedValue)
+    writeStoredChartDefaultVisibleBars(normalizedValue)
+    setChartDefaultVisibleBarsInput(String(normalizedValue))
+    setChartDefaultVisibleBarsError('')
+    setChartDefaultVisibleBarsNotice('已保存。之后打开个股详情时会使用新的默认根数。')
+  }
+
+  function onSelectDefaultBoardFilter(nextValue: DefaultBoardFilter) {
+    const normalizedValue = writeStoredDefaultBoardFilter(nextValue)
+    setDefaultBoardFilter(normalizedValue)
   }
 
   function onSaveDetailsNavLongPressInterval() {
@@ -565,6 +638,22 @@ export default function SettingsPage() {
                 : `主 ${currentChartMainWidthRatio.toFixed(2)}`}
               {' / '}指标 {currentChartIndicatorWidthRatio.toFixed(2)}
             </span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openChartDefaultVisibleBarsSetting}>
+            <div className="settings-list-item-main">
+              <strong>主图默认根数</strong>
+              <span>控制新打开个股详情时，主图默认展示的 K 线根数。</span>
+            </div>
+            <span className="settings-list-item-value">{readStoredChartDefaultVisibleBars()} 根</span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openDefaultBoardFilterSetting}>
+            <div className="settings-list-item-main">
+              <strong>默认板块筛选</strong>
+              <span>作为排名展示和选股页面没有当前会话筛选时的默认板块。</span>
+            </div>
+            <span className="settings-list-item-value">{defaultBoardFilter}</span>
           </button>
 
           <button className="settings-list-item" type="button" onClick={openChartIndicatorSetting}>
@@ -770,6 +859,89 @@ export default function SettingsPage() {
               <button className="settings-primary-btn" type="button" onClick={onSaveChartLayoutRatios}>
                 保存
               </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isChartDefaultVisibleBarsSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="主图默认根数设置">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">主图默认根数</h3>
+                <p className="settings-section-note">设置新打开个股详情时主图默认显示多少根 K 线，当前默认值为 90。</p>
+              </div>
+              <button className="settings-secondary-btn" type="button" onClick={closeActiveModal}>
+                关闭
+              </button>
+            </div>
+
+            <div className="settings-field settings-field-textarea">
+              <span>K 线根数</span>
+              <input
+                type="number"
+                min={CHART_DEFAULT_VISIBLE_BARS_MIN}
+                max={CHART_DEFAULT_VISIBLE_BARS_MAX}
+                step={1}
+                value={chartDefaultVisibleBarsInput}
+                onChange={(event) => setChartDefaultVisibleBarsInput(event.target.value)}
+              />
+              <small>预览：{chartDefaultVisibleBarsPreview === null ? '--' : `${chartDefaultVisibleBarsPreview} 根`}</small>
+            </div>
+
+            {chartDefaultVisibleBarsError ? <div className="settings-error">{chartDefaultVisibleBarsError}</div> : null}
+            {chartDefaultVisibleBarsNotice ? <div className="settings-notice">{chartDefaultVisibleBarsNotice}</div> : null}
+
+            <div className="settings-actions">
+              <button className="settings-primary-btn" type="button" onClick={onSaveChartDefaultVisibleBars}>
+                保存
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isDefaultBoardFilterSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="默认板块筛选设置">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">默认板块筛选</h3>
+                <p className="settings-section-note">排名展示和选股页面首次进入时会默认选择该板块；页面内临时选择仍会在当前会话保留。</p>
+              </div>
+              <button className="settings-primary-btn" type="button" onClick={closeActiveModal}>
+                完成
+              </button>
+            </div>
+
+            <div className="settings-actions settings-actions-left">
+              {DEFAULT_BOARD_FILTER_OPTIONS.map((board) => (
+                <button
+                  key={board}
+                  className={defaultBoardFilter === board ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
+                  type="button"
+                  onClick={() => onSelectDefaultBoardFilter(board)}
+                >
+                  {board}
+                </button>
+              ))}
             </div>
           </section>
         </div>

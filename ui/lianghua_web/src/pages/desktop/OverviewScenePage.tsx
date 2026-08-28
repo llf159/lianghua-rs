@@ -13,6 +13,7 @@ import {
   useConceptExclusions,
 } from '../../shared/conceptExclusions'
 import { STOCK_PICK_BOARD_OPTIONS } from '../../shared/stockPickShared'
+import { readStoredDefaultBoardFilter } from '../../shared/defaultBoardFilter'
 import DetailsLink from '../../shared/DetailsLink'
 import {
   TableSortButton,
@@ -59,6 +60,7 @@ type PersistedSceneOverviewFilterState = {
   rankDateInput: string
   limitInput: string
   boardFilter: (typeof STOCK_PICK_BOARD_OPTIONS)[number]
+  defaultBoardFilter: (typeof STOCK_PICK_BOARD_OPTIONS)[number]
   totalMvMinInput: string
   totalMvMaxInput: string
   selectedSceneName: string
@@ -174,9 +176,11 @@ export default function OverviewScenePage() {
       rankDateInput: typeof merged.rankDateInput === 'string' ? merged.rankDateInput : '',
       limitInput: typeof merged.limitInput === 'string' ? merged.limitInput : '100',
       boardFilter:
+        merged.defaultBoardFilter === readStoredDefaultBoardFilter() &&
         merged.boardFilter && STOCK_PICK_BOARD_OPTIONS.includes(merged.boardFilter)
           ? merged.boardFilter
-          : '全部',
+          : readStoredDefaultBoardFilter(),
+      defaultBoardFilter: readStoredDefaultBoardFilter(),
       totalMvMinInput: typeof merged.totalMvMinInput === 'string' ? merged.totalMvMinInput : '',
       totalMvMaxInput: typeof merged.totalMvMaxInput === 'string' ? merged.totalMvMaxInput : '',
       rows: Array.isArray(merged.rows) ? merged.rows : [],
@@ -204,7 +208,7 @@ export default function OverviewScenePage() {
   const [limitInput, setLimitInput] = useState(() => persistedState?.limitInput ?? '100')
   const [boardFilter, setBoardFilter] = useState<
     (typeof STOCK_PICK_BOARD_OPTIONS)[number]
-  >(() => persistedState?.boardFilter ?? '全部')
+  >(() => persistedState?.boardFilter ?? readStoredDefaultBoardFilter())
   const [totalMvMinInput, setTotalMvMinInput] = useState(
     () => persistedState?.totalMvMinInput ?? '',
   )
@@ -328,6 +332,7 @@ export default function OverviewScenePage() {
         rankDateInput,
         limitInput,
         boardFilter,
+        defaultBoardFilter: readStoredDefaultBoardFilter(),
         totalMvMinInput,
         totalMvMaxInput,
         selectedSceneName,

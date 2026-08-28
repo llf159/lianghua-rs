@@ -79,6 +79,7 @@ import {
 } from "../../shared/conceptExclusions";
 import {
   readStoredDetailsNavLongPressIntervalSeconds,
+  readStoredChartDefaultVisibleBars,
   readStoredChartIndicatorWidthRatio,
   readStoredChartMainHeightMode,
   readStoredChartMainPercentMaxHeight,
@@ -114,7 +115,6 @@ import "./css/DetailsPage.css";
 const DEFAULT_TOP_LIMIT = "100";
 const DETAIL_CHART_WINDOW_DAYS = 280;
 const DETAIL_CYQ_SCALE_WINDOW_DAYS = 60;
-const DEFAULT_VISIBLE_BARS = 90;
 const MIN_VISIBLE_BARS = 20;
 const CHART_MIN_RIGHT_ALIGNED_SLOTS = 60;
 const DEFAULT_INDICATOR_PANEL_COUNT = 3;
@@ -4265,6 +4265,7 @@ export default function DetailsPage({
   const [tradeDateInput, setTradeDateInput] = useState("");
   const [lookupInput, setLookupInput] = useState("");
   const [topLimitInput, setTopLimitInput] = useState(DEFAULT_TOP_LIMIT);
+  const [defaultVisibleBars] = useState(() => readStoredChartDefaultVisibleBars());
 
   const [topRows, setTopRows] = useState<OverviewRow[]>([]);
   const [stockLookupRows, setStockLookupRows] = useState<StockLookupRow[]>([]);
@@ -4288,7 +4289,7 @@ export default function DetailsPage({
   const [dateOptionsLoading, setDateOptionsLoading] = useState(false);
   const [topError, setTopError] = useState("");
   const [detailError, setDetailError] = useState("");
-  const [visibleBarCount, setVisibleBarCount] = useState(DEFAULT_VISIBLE_BARS);
+  const [visibleBarCount, setVisibleBarCount] = useState(defaultVisibleBars);
   const [visibleStartIndex, setVisibleStartIndex] = useState(0);
   const [chartFocus, setChartFocus] = useState<ChartFocus | null>(null);
   const [strategySplitRatio, setStrategySplitRatio] = useState(
@@ -5906,7 +5907,7 @@ export default function DetailsPage({
 
     if (totalChartItems === 0) {
       chartDragRef.current = null;
-      setVisibleBarCount(DEFAULT_VISIBLE_BARS);
+      setVisibleBarCount(defaultVisibleBars);
       setVisibleStartIndex(0);
       setChartFocus(null);
       setChartIntervalSelection(null);
@@ -5922,7 +5923,7 @@ export default function DetailsPage({
     }
 
     const nextVisibleBarCount = clampNumber(
-      DEFAULT_VISIBLE_BARS,
+      defaultVisibleBars,
       Math.min(MIN_VISIBLE_BARS, totalChartItems),
       totalChartItems,
     );
@@ -5949,7 +5950,7 @@ export default function DetailsPage({
             resolvedIntervalRestore.startAbsoluteIndex +
           1;
         const restoredVisibleBarCount = clampNumber(
-          Math.max(DEFAULT_VISIBLE_BARS, intervalBarCount + 20),
+          Math.max(defaultVisibleBars, intervalBarCount + 20),
           Math.min(MIN_VISIBLE_BARS, totalChartItems),
           totalChartItems,
         );
@@ -6005,6 +6006,7 @@ export default function DetailsPage({
     detailRealtimeData?.quoteTradeDate,
     pendingIntervalRestore,
     chartAnchorTradeDate,
+    defaultVisibleBars,
     totalChartItems,
   ]);
 
