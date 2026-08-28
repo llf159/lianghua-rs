@@ -1,4 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    borrow::Cow,
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    sync::{Arc, OnceLock},
+};
 
 use duckdb::{AccessMode, Config, Connection, params, params_from_iter};
 use rayon::prelude::*;
@@ -43,6 +48,7 @@ const TRIGGER_RULE_SET_WEIGHT: f64 = 0.45;
 const TRIGGER_RULE_TIMING_WEIGHT: f64 = 0.35;
 const TRIGGER_AGGREGATE_RHYTHM_WEIGHT: f64 = 0.20;
 const TRIGGER_TIME_DECAY_DAYS: f64 = 3.0;
+const MAX_CACHED_TRIGGER_DAY_GAP: usize = 512;
 const DEFAULT_BENCHMARK_INDEX_CODE: &str = "000001.SH";
 const SHORT_KERNEL_MAX_DAYS: usize = 10;
 const SHORT_KERNEL_HALF_LIFE_DAYS: f64 = 5.0;
@@ -197,7 +203,7 @@ struct EventFingerprint {
     trigger: TriggerFingerprint,
     price_volume: Vec<Option<Vec<f64>>>,
     indicators: Vec<Option<Vec<f64>>>,
-    market: Vec<Option<Vec<f64>>>,
+    market: Arc<Vec<Option<Vec<f64>>>>,
 }
 
 impl EventFingerprint {
@@ -224,6 +230,8 @@ struct TriggerFingerprint {
     by_rule: HashMap<String, Vec<RuleTriggerHit>>,
     total_count: Vec<f64>,
     total_score: Vec<f64>,
+    total_count_norm: f64,
+    total_score_norm: f64,
 }
 
 impl TriggerFingerprint {
@@ -242,7 +250,6 @@ impl TriggerFingerprint {
 struct EventSample {
     anchor: Anchor,
     fingerprint: EventFingerprint,
-    matched_rule_names: Vec<String>,
     trigger_count: usize,
     outcome: Option<Outcome>,
     total_score: Option<f64>,
@@ -923,15 +930,13 @@ fn pool_series(values: &[Option<f64>], segments: usize) -> Vec<f64> {
         .map(|segment| {
             let start = segment * len / segments;
             let end = (segment + 1) * len / segments;
-            let finite = values[start..end]
+            let (sum, count) = values[start..end]
                 .iter()
                 .filter_map(|value| value.filter(|number| number.is_finite()))
-                .collect::<Vec<_>>();
-            if finite.is_empty() {
-                0.0
-            } else {
-                finite.iter().sum::<f64>() / finite.len() as f64
-            }
+                .fold((0.0, 0_usize), |(sum, count), value| {
+                    (sum + value, count + 1)
+                });
+            if count == 0 { 0.0 } else { sum / count as f64 }
         })
         .collect()
 }
@@ -952,55 +957,82 @@ fn weighted_projection(values: &[Option<f64>], weights: &[f64]) -> f64 {
     }
 }
 
+struct TemporalKernelWeights {
+    uniform: Vec<f64>,
+    short_exp: Vec<f64>,
+    medium_exp: Vec<f64>,
+    recent_linear: Vec<f64>,
+    turning: Vec<f64>,
+}
+
+thread_local! {
+    static TEMPORAL_KERNEL_CACHE: RefCell<HashMap<usize, Arc<TemporalKernelWeights>>> =
+        RefCell::new(HashMap::new());
+}
+
+fn temporal_kernel_weights(len: usize) -> Arc<TemporalKernelWeights> {
+    TEMPORAL_KERNEL_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        Arc::clone(cache.entry(len).or_insert_with(|| {
+            let uniform = vec![1.0; len];
+            let short_exp = (0..len)
+                .map(|index| {
+                    let age = len - 1 - index;
+                    if age < SHORT_KERNEL_MAX_DAYS {
+                        0.5_f64.powf(age as f64 / SHORT_KERNEL_HALF_LIFE_DAYS)
+                    } else {
+                        0.0
+                    }
+                })
+                .collect::<Vec<_>>();
+            let medium_exp = (0..len)
+                .map(|index| {
+                    let age = len - 1 - index;
+                    if age < MEDIUM_KERNEL_MAX_DAYS {
+                        0.5_f64.powf(age as f64 / MEDIUM_KERNEL_HALF_LIFE_DAYS)
+                    } else {
+                        0.0
+                    }
+                })
+                .collect::<Vec<_>>();
+            let recent_linear = (1..=len).map(|value| value as f64).collect::<Vec<_>>();
+            let mut turning = vec![0.0; len];
+            if len >= 3 {
+                turning[len - 3] = 1.0;
+                turning[len - 2] = -2.0;
+                turning[len - 1] = 1.0;
+            } else if len >= 2 {
+                turning[len - 2] = -1.0;
+                turning[len - 1] = 1.0;
+            }
+            Arc::new(TemporalKernelWeights {
+                uniform,
+                short_exp,
+                medium_exp,
+                recent_linear,
+                turning,
+            })
+        }))
+    })
+}
+
 fn kernel_responses(values: &[Option<f64>]) -> Vec<f64> {
-    let len = values.len();
-    let ages = (0..len).map(|index| len - 1 - index).collect::<Vec<_>>();
-    let uniform = vec![1.0; len];
-    let short_exp = ages
-        .iter()
-        .map(|age| {
-            if *age < SHORT_KERNEL_MAX_DAYS {
-                0.5_f64.powf(*age as f64 / SHORT_KERNEL_HALF_LIFE_DAYS)
-            } else {
-                0.0
-            }
-        })
-        .collect::<Vec<_>>();
-    let medium_exp = ages
-        .iter()
-        .map(|age| {
-            if *age < MEDIUM_KERNEL_MAX_DAYS {
-                0.5_f64.powf(*age as f64 / MEDIUM_KERNEL_HALF_LIFE_DAYS)
-            } else {
-                0.0
-            }
-        })
-        .collect::<Vec<_>>();
-    let recent_linear = (1..=len).map(|value| value as f64).collect::<Vec<_>>();
+    let weights = temporal_kernel_weights(values.len());
     // 固定按窗口位置切成 [0, 1/3)、[1/3, 2/3)、[2/3, 1] 三段，
     // 分别保留前中、中后和前后的水平变化，不再压缩成单一前后趋势。
     let stage_levels = pool_series(values, 3);
     let front_to_middle = stage_levels[1] - stage_levels[0];
     let middle_to_back = stage_levels[2] - stage_levels[1];
     let front_to_back = stage_levels[2] - stage_levels[0];
-    let mut turning = vec![0.0; len];
-    if len >= 3 {
-        turning[len - 3] = 1.0;
-        turning[len - 2] = -2.0;
-        turning[len - 1] = 1.0;
-    } else if len >= 2 {
-        turning[len - 2] = -1.0;
-        turning[len - 1] = 1.0;
-    }
     vec![
-        weighted_projection(values, &uniform),
-        weighted_projection(values, &short_exp),
-        weighted_projection(values, &medium_exp),
-        weighted_projection(values, &recent_linear),
+        weighted_projection(values, &weights.uniform),
+        weighted_projection(values, &weights.short_exp),
+        weighted_projection(values, &weights.medium_exp),
+        weighted_projection(values, &weights.recent_linear),
         front_to_middle,
         middle_to_back,
         front_to_back,
-        weighted_projection(values, &turning),
+        weighted_projection(values, &weights.turning),
     ]
 }
 
@@ -1009,30 +1041,37 @@ fn temporal_signature(
     segments: usize,
     standardize: bool,
 ) -> Option<Vec<f64>> {
-    let finite = values
+    let finite_count = values
         .iter()
         .filter_map(|value| value.filter(|number| number.is_finite()))
-        .collect::<Vec<_>>();
-    if finite.len() < 2 {
+        .count();
+    if finite_count < 2 {
         return None;
     }
     let transformed = if standardize {
-        let mean = finite.iter().sum::<f64>() / finite.len() as f64;
-        let variance = finite
+        let mean = values
             .iter()
+            .filter_map(|value| value.filter(|number| number.is_finite()))
+            .sum::<f64>()
+            / finite_count as f64;
+        let variance = values
+            .iter()
+            .filter_map(|value| value.filter(|number| number.is_finite()))
             .map(|value| (value - mean).powi(2))
             .sum::<f64>()
-            / finite.len() as f64;
+            / finite_count as f64;
         let std = variance.sqrt();
         if std <= EPS {
             return None;
         }
-        values
-            .iter()
-            .map(|value| value.map(|number| (number - mean) / std))
-            .collect::<Vec<_>>()
+        Cow::Owned(
+            values
+                .iter()
+                .map(|value| value.map(|number| (number - mean) / std))
+                .collect::<Vec<_>>(),
+        )
     } else {
-        values.to_vec()
+        Cow::Borrowed(values)
     };
     let mut signature = pool_series(&transformed, segments);
     signature.extend(kernel_responses(&transformed));
@@ -1085,12 +1124,16 @@ fn build_trigger_fingerprint(
         }
     }
     let signature_len = segments + KERNEL_NAMES.len() + 1;
+    let total_count = temporal_signature(&total_count, segments, false)
+        .unwrap_or_else(|| vec![0.0; signature_len]);
+    let total_score = temporal_signature(&total_score, segments, false)
+        .unwrap_or_else(|| vec![0.0; signature_len]);
     TriggerFingerprint {
         by_rule,
-        total_count: temporal_signature(&total_count, segments, false)
-            .unwrap_or_else(|| vec![0.0; signature_len]),
-        total_score: temporal_signature(&total_score, segments, false)
-            .unwrap_or_else(|| vec![0.0; signature_len]),
+        total_count_norm: vector_norm(&total_count),
+        total_score_norm: vector_norm(&total_score),
+        total_count,
+        total_score,
     }
 }
 
@@ -1145,21 +1188,39 @@ fn rule_weight(rule_weights: &HashMap<String, f64>, rule_name: &str) -> f64 {
         .unwrap_or(1.0)
 }
 
+fn trigger_rule_weight_sum(
+    fingerprint: &TriggerFingerprint,
+    rule_weights: &HashMap<String, f64>,
+) -> f64 {
+    fingerprint
+        .by_rule
+        .keys()
+        .map(|name| rule_weight(rule_weights, name))
+        .sum()
+}
+
+#[cfg(test)]
 fn weighted_rule_set_similarity(
     target: &TriggerFingerprint,
     candidate: &TriggerFingerprint,
     rule_weights: &HashMap<String, f64>,
 ) -> f64 {
-    let target_weight = target
-        .by_rule
-        .keys()
-        .map(|name| rule_weight(rule_weights, name))
-        .sum::<f64>();
-    let candidate_weight = candidate
-        .by_rule
-        .keys()
-        .map(|name| rule_weight(rule_weights, name))
-        .sum::<f64>();
+    weighted_rule_set_similarity_with_masses(
+        target,
+        candidate,
+        rule_weights,
+        trigger_rule_weight_sum(target, rule_weights),
+        trigger_rule_weight_sum(candidate, rule_weights),
+    )
+}
+
+fn weighted_rule_set_similarity_with_masses(
+    target: &TriggerFingerprint,
+    candidate: &TriggerFingerprint,
+    rule_weights: &HashMap<String, f64>,
+    target_weight: f64,
+    candidate_weight: f64,
+) -> f64 {
     if target_weight <= EPS && candidate_weight <= EPS {
         return 1.0;
     }
@@ -1169,6 +1230,14 @@ fn weighted_rule_set_similarity(
         .filter(|name| candidate.by_rule.contains_key(*name))
         .map(|name| rule_weight(rule_weights, name))
         .sum::<f64>();
+    weighted_rule_set_similarity_from_masses(target_weight, candidate_weight, intersection_weight)
+}
+
+fn weighted_rule_set_similarity_from_masses(
+    target_weight: f64,
+    candidate_weight: f64,
+    intersection_weight: f64,
+) -> f64 {
     let union_weight = target_weight + candidate_weight - intersection_weight;
     if union_weight <= EPS {
         0.0
@@ -1186,32 +1255,50 @@ fn signed_score_similarity(left: f64, right: f64) -> f64 {
     }
 }
 
+fn trigger_time_decay_scores() -> &'static [f64] {
+    static SCORES: OnceLock<Vec<f64>> = OnceLock::new();
+    SCORES.get_or_init(|| {
+        (0..=MAX_CACHED_TRIGGER_DAY_GAP)
+            .map(|gap| (-(gap as f64) / TRIGGER_TIME_DECAY_DAYS).exp())
+            .collect()
+    })
+}
+
+thread_local! {
+    // 精排在线程池内会调用数百万次。复用单行 DP，避免每个规则配对都创建、排序
+    // left.len() * right.len() 个候选及两组占用标记。
+    static TRIGGER_MATCH_DP: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
+}
+
 fn matched_rule_timing_similarity(left: &[RuleTriggerHit], right: &[RuleTriggerHit]) -> f64 {
     if left.is_empty() || right.is_empty() {
         return 0.0;
     }
-    let mut pairs = Vec::with_capacity(left.len() * right.len());
-    for (left_index, left_hit) in left.iter().enumerate() {
-        for (right_index, right_hit) in right.iter().enumerate() {
-            let day_gap = left_hit.day_index.abs_diff(right_hit.day_index) as f64;
-            let time_score = (-day_gap / TRIGGER_TIME_DECAY_DAYS).exp();
-            let intensity_score = signed_score_similarity(left_hit.score, right_hit.score);
-            pairs.push((time_score * intensity_score, left_index, right_index));
+    // 加权序列匹配：每个触发仍然只匹配一次，并保持时间先后关系。复杂度从
+    // O(m*n*log(m*n)) 降到 O(m*n)，且不在热循环中反复分配内存。
+    TRIGGER_MATCH_DP.with(|scratch| {
+        let time_decay_scores = trigger_time_decay_scores();
+        let mut dp = scratch.borrow_mut();
+        dp.resize(right.len() + 1, 0.0);
+        dp.fill(0.0);
+        for left_hit in left {
+            let mut diagonal = 0.0;
+            for (right_index, right_hit) in right.iter().enumerate() {
+                let column = right_index + 1;
+                let previous_row = dp[column];
+                let day_gap = left_hit.day_index.abs_diff(right_hit.day_index);
+                let time_score = time_decay_scores
+                    .get(day_gap)
+                    .copied()
+                    .unwrap_or_else(|| (-(day_gap as f64) / TRIGGER_TIME_DECAY_DAYS).exp());
+                let intensity_score = signed_score_similarity(left_hit.score, right_hit.score);
+                let matched = diagonal + time_score * intensity_score;
+                dp[column] = dp[column].max(dp[column - 1]).max(matched);
+                diagonal = previous_row;
+            }
         }
-    }
-    pairs.sort_unstable_by(|left_pair, right_pair| right_pair.0.total_cmp(&left_pair.0));
-    let mut used_left = vec![false; left.len()];
-    let mut used_right = vec![false; right.len()];
-    let mut score_sum = 0.0;
-    for (score, left_index, right_index) in pairs {
-        if used_left[left_index] || used_right[right_index] {
-            continue;
-        }
-        used_left[left_index] = true;
-        used_right[right_index] = true;
-        score_sum += score;
-    }
-    score_sum / left.len().max(right.len()) as f64
+        dp[right.len()] / left.len().max(right.len()) as f64
+    })
 }
 
 fn weighted_rule_timing_similarity(
@@ -1219,33 +1306,94 @@ fn weighted_rule_timing_similarity(
     candidate: &TriggerFingerprint,
     rule_weights: &HashMap<String, f64>,
 ) -> f64 {
+    weighted_rule_timing_similarity_with_minimum(target, candidate, rule_weights, f64::NEG_INFINITY)
+        .unwrap_or(0.0)
+}
+
+fn weighted_rule_timing_similarity_with_minimum(
+    target: &TriggerFingerprint,
+    candidate: &TriggerFingerprint,
+    rule_weights: &HashMap<String, f64>,
+    minimum_similarity: f64,
+) -> Option<f64> {
+    let total_weight = target
+        .by_rule
+        .keys()
+        .filter(|name| candidate.by_rule.contains_key(*name))
+        .map(|name| rule_weight(rule_weights, name))
+        .sum::<f64>();
+    if total_weight <= EPS {
+        return (0.0 + EPS >= minimum_similarity).then_some(0.0);
+    }
     let mut weighted_sum = 0.0;
-    let mut weight_sum = 0.0;
+    let mut remaining_weight = total_weight;
     for (name, target_hits) in &target.by_rule {
         let Some(candidate_hits) = candidate.by_rule.get(name) else {
             continue;
         };
         let weight = rule_weight(rule_weights, name);
         weighted_sum += matched_rule_timing_similarity(target_hits, candidate_hits) * weight;
-        weight_sum += weight;
+        remaining_weight = (remaining_weight - weight).max(0.0);
+        let upper_bound = (weighted_sum + remaining_weight) / total_weight;
+        if upper_bound + EPS < minimum_similarity {
+            return None;
+        }
     }
-    if weight_sum <= EPS {
-        0.0
-    } else {
-        (weighted_sum / weight_sum).clamp(0.0, 1.0)
-    }
+    Some((weighted_sum / total_weight).clamp(0.0, 1.0))
 }
 
+#[cfg(test)]
 fn trigger_fingerprint_similarity(
     target: &TriggerFingerprint,
     candidate: &TriggerFingerprint,
     rule_weights: &HashMap<String, f64>,
 ) -> f64 {
-    let rule_set = weighted_rule_set_similarity(target, candidate, rule_weights);
+    trigger_fingerprint_similarity_with_masses(
+        target,
+        candidate,
+        rule_weights,
+        trigger_rule_weight_sum(target, rule_weights),
+        trigger_rule_weight_sum(candidate, rule_weights),
+    )
+}
+
+fn trigger_fingerprint_similarity_with_masses(
+    target: &TriggerFingerprint,
+    candidate: &TriggerFingerprint,
+    rule_weights: &HashMap<String, f64>,
+    target_rule_weight: f64,
+    candidate_rule_weight: f64,
+) -> f64 {
+    let rule_set = weighted_rule_set_similarity_with_masses(
+        target,
+        candidate,
+        rule_weights,
+        target_rule_weight,
+        candidate_rule_weight,
+    );
     let timing = weighted_rule_timing_similarity(target, candidate, rule_weights);
-    let aggregate = (cosine_similarity(&target.total_count, &candidate.total_count)
-        + cosine_similarity(&target.total_score, &candidate.total_score))
-        / 200.0;
+    let aggregate = trigger_aggregate_similarity(target, candidate);
+    combine_trigger_similarity(rule_set, timing, aggregate)
+}
+
+fn trigger_aggregate_similarity(
+    target: &TriggerFingerprint,
+    candidate: &TriggerFingerprint,
+) -> f64 {
+    (cosine_similarity_with_norms(
+        &target.total_count,
+        &candidate.total_count,
+        target.total_count_norm,
+        candidate.total_count_norm,
+    ) + cosine_similarity_with_norms(
+        &target.total_score,
+        &candidate.total_score,
+        target.total_score_norm,
+        candidate.total_score_norm,
+    )) / 200.0
+}
+
+fn combine_trigger_similarity(rule_set: f64, timing: f64, aggregate: f64) -> f64 {
     100.0
         * (rule_set * TRIGGER_RULE_SET_WEIGHT
             + timing * TRIGGER_RULE_TIMING_WEIGHT
@@ -1407,13 +1555,82 @@ fn build_environment_fingerprint_map(
         .collect()
 }
 
+fn share_environment_channel_map(
+    fingerprints: HashMap<String, Vec<Option<Vec<f64>>>>,
+) -> HashMap<String, Arc<Vec<Option<Vec<f64>>>>> {
+    fingerprints
+        .into_iter()
+        .map(|(trade_date, channels)| (trade_date, Arc::new(channels)))
+        .collect()
+}
+
+fn empty_environment_fingerprint() -> Arc<Vec<Option<Vec<f64>>>> {
+    static EMPTY: OnceLock<Arc<Vec<Option<Vec<f64>>>>> = OnceLock::new();
+    Arc::clone(EMPTY.get_or_init(|| Arc::new(Vec::new())))
+}
+
 fn cosine_similarity(left: &[f64], right: &[f64]) -> f64 {
+    cosine_similarity_with_norms(left, right, vector_norm(left), vector_norm(right))
+}
+
+#[inline]
+fn scalar_dot_product(left: &[f64], right: &[f64]) -> f64 {
+    left.iter().zip(right).map(|(a, b)| a * b).sum()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_dot_product(left: &[f64], right: &[f64]) -> f64 {
+    use std::arch::x86_64::{
+        _mm_add_pd, _mm_cvtsd_f64, _mm_unpackhi_pd, _mm256_add_pd, _mm256_castpd256_pd128,
+        _mm256_extractf128_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_setzero_pd,
+    };
+
+    let len = left.len().min(right.len());
+    let vectorized_len = len / 4 * 4;
+    let mut accumulator = _mm256_setzero_pd();
+    let mut index = 0;
+    while index < vectorized_len {
+        let left_values = unsafe { _mm256_loadu_pd(left.as_ptr().add(index)) };
+        let right_values = unsafe { _mm256_loadu_pd(right.as_ptr().add(index)) };
+        accumulator = _mm256_add_pd(accumulator, _mm256_mul_pd(left_values, right_values));
+        index += 4;
+    }
+    let low = _mm256_castpd256_pd128(accumulator);
+    let high = _mm256_extractf128_pd(accumulator, 1);
+    let pair_sums = _mm_add_pd(low, high);
+    let mut sum = _mm_cvtsd_f64(pair_sums) + _mm_cvtsd_f64(_mm_unpackhi_pd(pair_sums, pair_sums));
+    while index < len {
+        sum += left[index] * right[index];
+        index += 1;
+    }
+    sum
+}
+
+#[inline]
+fn dot_product(left: &[f64], right: &[f64]) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 availability is checked at runtime immediately above.
+        return unsafe { avx2_dot_product(left, right) };
+    }
+    scalar_dot_product(left, right)
+}
+
+fn vector_norm(values: &[f64]) -> f64 {
+    dot_product(values, values).sqrt()
+}
+
+fn cosine_similarity_with_norms(
+    left: &[f64],
+    right: &[f64],
+    left_norm: f64,
+    right_norm: f64,
+) -> f64 {
     if left.len() != right.len() || left.is_empty() {
         return 0.0;
     }
-    let dot = left.iter().zip(right).map(|(a, b)| a * b).sum::<f64>();
-    let left_norm = left.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let right_norm = right.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let dot = dot_product(left, right);
     if left_norm <= EPS && right_norm <= EPS {
         100.0
     } else if left_norm <= EPS || right_norm <= EPS {
@@ -1542,9 +1759,8 @@ fn load_benchmark_rows(
 #[derive(Clone, Copy)]
 struct SampleBuildContext<'a> {
     schema: &'a MarketSchema,
-    target_rule_names: &'a [String],
     all_trade_dates: &'a [String],
-    environment_fingerprints: &'a HashMap<String, Vec<Option<Vec<f64>>>>,
+    environment_fingerprints: &'a HashMap<String, Arc<Vec<Option<Vec<f64>>>>>,
     benchmark_rows: &'a HashMap<String, BenchmarkObservation>,
     total_mv_map: &'a HashMap<String, f64>,
     name_map: &'a HashMap<String, String>,
@@ -1557,20 +1773,20 @@ struct SampleBuildContext<'a> {
 
 fn build_samples_for_chunk(
     conn: &Connection,
-    anchors: &[Anchor],
+    anchors: Vec<Anchor>,
     context: &SampleBuildContext<'_>,
 ) -> Result<Vec<EventSample>, String> {
-    let market_by_anchor = load_market_rows(conn, anchors, context.schema)?;
-    let rules_by_anchor = load_rule_rows(conn, anchors)?;
+    let market_by_anchor = load_market_rows(conn, &anchors, context.schema)?;
+    let rules_by_anchor = load_rule_rows(conn, &anchors)?;
     let summaries = if context.include_summaries {
-        load_summary_rows(conn, anchors)?
+        load_summary_rows(conn, &anchors)?
     } else {
         HashMap::new()
     };
     let future_by_anchor = if context.include_outcome {
         load_future_rows(
             conn,
-            anchors,
+            &anchors,
             context.outcome_trade_days,
             context.target_trade_date,
         )?
@@ -1578,7 +1794,7 @@ fn build_samples_for_chunk(
         HashMap::new()
     };
     let samples = anchors
-        .par_iter()
+        .into_par_iter()
         .filter_map(|anchor| {
             let market_rows = market_by_anchor.get(&anchor.id)?;
             if market_rows.len() < 3
@@ -1591,14 +1807,8 @@ fn build_samples_for_chunk(
                 .get(&anchor.id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            let window_dates = window_dates_for_anchor(anchor, context.all_trade_dates);
+            let window_dates = window_dates_for_anchor(&anchor, context.all_trade_dates);
             let trigger = build_trigger_fingerprint(rules, window_dates, context.pool_segments);
-            let matched_rule_names = context
-                .target_rule_names
-                .iter()
-                .filter(|name| trigger.by_rule.contains_key(*name))
-                .cloned()
-                .collect::<Vec<_>>();
             let fingerprint = EventFingerprint {
                 trigger,
                 price_volume: build_price_volume_channels(
@@ -1619,7 +1829,7 @@ fn build_samples_for_chunk(
                     .environment_fingerprints
                     .get(&anchor.end_trade_date)
                     .cloned()
-                    .unwrap_or_default(),
+                    .unwrap_or_else(empty_environment_fingerprint),
             };
             let outcome = if context.include_outcome {
                 build_outcome(
@@ -1639,13 +1849,12 @@ fn build_samples_for_chunk(
             }
             let (total_score, rank) = summaries.get(&anchor.id).copied().unwrap_or((None, None));
             Some(EventSample {
-                anchor: anchor.clone(),
                 fingerprint,
-                matched_rule_names,
                 trigger_count: rules.len(),
                 outcome,
                 total_score,
                 rank,
+                anchor,
             })
         })
         .collect();
@@ -1868,12 +2077,13 @@ pub fn get_strategy_trigger_similarity_page(
         .map(String::as_str)
         .unwrap_or(&target_start_date);
     let environment = load_market_environment(&conn, first_date, &resolved_trade_date, &schema)?;
-    let environment_fingerprints = build_environment_fingerprint_map(
-        &environment,
-        &all_trade_dates,
-        window_trade_days,
-        pool_segments,
-    );
+    let environment_fingerprints =
+        share_environment_channel_map(build_environment_fingerprint_map(
+            &environment,
+            &all_trade_dates,
+            window_trade_days,
+            pool_segments,
+        ));
     let benchmark_rows = load_benchmark_rows(
         &conn,
         first_date,
@@ -1890,7 +2100,6 @@ pub fn get_strategy_trigger_similarity_page(
     };
     let target_context = SampleBuildContext {
         schema: &schema,
-        target_rule_names: &target_rule_names,
         all_trade_dates: &all_trade_dates,
         environment_fingerprints: &environment_fingerprints,
         benchmark_rows: &benchmark_rows,
@@ -1902,13 +2111,10 @@ pub fn get_strategy_trigger_similarity_page(
         include_outcome: false,
         include_summaries: false,
     };
-    let target_sample =
-        build_samples_for_chunk(&conn, std::slice::from_ref(&target_anchor), &target_context)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                format!("{resolved_ts_code} 在 {resolved_trade_date} 没有完整量价窗口")
-            })?;
+    let target_sample = build_samples_for_chunk(&conn, vec![target_anchor], &target_context)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("{resolved_ts_code} 在 {resolved_trade_date} 没有完整量价窗口"))?;
 
     let earliest_candidate_date = all_trade_dates
         .get(window_trade_days.saturating_sub(1))
@@ -1924,6 +2130,8 @@ pub fn get_strategy_trigger_similarity_page(
     )?;
     let rule_weights =
         load_rule_idf_weights(&conn, earliest_candidate_date, &historical_cutoff_date)?;
+    let target_rule_weight =
+        trigger_rule_weight_sum(&target_sample.fingerprint.trigger, &rule_weights);
     let candidate_anchor_count = candidate_anchors.len();
     let candidate_pool_truncated = candidate_universe_count > candidate_anchor_count;
     let candidate_context = SampleBuildContext {
@@ -1935,14 +2143,31 @@ pub fn get_strategy_trigger_similarity_page(
     let concept_map = build_concepts_map(&source_path).unwrap_or_default();
     let mut items = Vec::new();
     let mut evaluated_anchor_count = 0;
-    for chunk in candidate_anchors.chunks(ANCHOR_CHUNK_SIZE) {
+    let mut candidate_anchor_iter = candidate_anchors.into_iter();
+    loop {
+        let chunk = candidate_anchor_iter
+            .by_ref()
+            .take(ANCHOR_CHUNK_SIZE)
+            .collect::<Vec<_>>();
+        if chunk.is_empty() {
+            break;
+        }
         let samples = build_samples_for_chunk(&conn, chunk, &candidate_context)?;
         evaluated_anchor_count += samples.len();
         for sample in samples {
-            let trigger_similarity = trigger_fingerprint_similarity(
+            // 单股查询与全市场排名保持 leave-one-stock-out 口径，避免目标股票
+            // 的历史滚动窗口因共享走势与静态特征而主导近邻结果。
+            if sample.anchor.ts_code == resolved_ts_code {
+                continue;
+            }
+            let candidate_rule_weight =
+                trigger_rule_weight_sum(&sample.fingerprint.trigger, &rule_weights);
+            let trigger_similarity = trigger_fingerprint_similarity_with_masses(
                 &target_sample.fingerprint.trigger,
                 &sample.fingerprint.trigger,
                 &rule_weights,
+                target_rule_weight,
+                candidate_rule_weight,
             );
             let price_volume_similarity = channel_similarity(
                 &target_sample.fingerprint.price_volume,
@@ -1965,6 +2190,16 @@ pub fn get_strategy_trigger_similarity_page(
             let Some(outcome) = sample.outcome else {
                 continue;
             };
+            // 触发指纹在本候选打分后不再使用，直接移动其中已有的规则名，避免
+            // 为每个候选提前维护第二份 matched_rule_names 字符串集合。
+            let mut matched_rule_names = sample
+                .fingerprint
+                .trigger
+                .by_rule
+                .into_keys()
+                .filter(|name| target_sample.fingerprint.trigger.by_rule.contains_key(name))
+                .collect::<Vec<_>>();
+            matched_rule_names.sort();
             items.push(StrategyTriggerSimilarityRow {
                 name: name_map.get(&sample.anchor.ts_code).cloned(),
                 industry: industry_map.get(&sample.anchor.ts_code).cloned(),
@@ -1979,8 +2214,8 @@ pub fn get_strategy_trigger_similarity_page(
                 price_volume_similarity,
                 indicator_similarity,
                 market_similarity,
-                matched_rule_count: sample.matched_rule_names.len(),
-                matched_rule_names: sample.matched_rule_names,
+                matched_rule_count: matched_rule_names.len(),
+                matched_rule_names,
                 candidate_trigger_count: sample.trigger_count,
                 forward_return_pct: outcome.return_pct,
                 forward_excess_return_pct: outcome.excess_return_pct,
@@ -2044,11 +2279,13 @@ mod tests {
         KERNEL_NAMES, MARKET_SIMILARITY_WEIGHT, MarketObservation, PRICE_VOLUME_SIMILARITY_WEIGHT,
         RuleEvent, StrategyTriggerSimilarityRow, TRIGGER_SIMILARITY_WEIGHT, build_outcome,
         build_price_volume_channels, build_rating_sample, build_trigger_fingerprint,
-        cosine_similarity, final_similarity, is_beijing_exchange_index_code, kernel_responses,
-        list_strategy_trigger_similarity_benchmark_index_codes,
+        cosine_similarity, dot_product, final_similarity, is_beijing_exchange_index_code,
+        kernel_responses, list_strategy_trigger_similarity_benchmark_index_codes,
         load_market_environment_index_codes, market_category_features,
-        resolve_benchmark_index_code, temporal_signature, trigger_fingerprint_similarity,
-        weighted_quantile, weighted_rule_set_similarity, weighted_winsorized_mean,
+        resolve_benchmark_index_code, scalar_dot_product, temporal_signature,
+        trigger_fingerprint_similarity, trigger_time_decay_scores, weighted_quantile,
+        weighted_rule_set_similarity, weighted_rule_timing_similarity,
+        weighted_rule_timing_similarity_with_minimum, weighted_winsorized_mean,
     };
     use duckdb::Connection;
     use std::collections::HashMap;
@@ -2139,6 +2376,45 @@ mod tests {
             trigger_fingerprint_similarity(&target, &shifted, &weights)
                 < trigger_fingerprint_similarity(&target, &identical, &weights)
         );
+
+        let exact_timing = weighted_rule_timing_similarity(&target, &shifted, &weights);
+        let retained =
+            weighted_rule_timing_similarity_with_minimum(&target, &shifted, &weights, exact_timing)
+                .expect("候选达到精确下限时不能被剪枝");
+        assert!((retained - exact_timing).abs() < 1e-12);
+        assert!(
+            weighted_rule_timing_similarity_with_minimum(
+                &target,
+                &shifted,
+                &weights,
+                exact_timing + 1e-6,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn cached_trigger_time_decay_is_bit_exact() {
+        for (gap, cached) in trigger_time_decay_scores().iter().copied().enumerate() {
+            let direct = (-(gap as f64) / super::TRIGGER_TIME_DECAY_DAYS).exp();
+            assert_eq!(cached.to_bits(), direct.to_bits());
+        }
+    }
+
+    #[test]
+    fn vectorized_dot_product_keeps_f64_accuracy() {
+        for len in 0..=65 {
+            let left = (0..len)
+                .map(|index| (index as f64 * 0.137).sin() * 1_000.0)
+                .collect::<Vec<_>>();
+            let right = (0..len)
+                .map(|index| (index as f64 * 0.193).cos() / 7.0)
+                .collect::<Vec<_>>();
+            let scalar = scalar_dot_product(&left, &right);
+            let vectorized = dot_product(&left, &right);
+            let tolerance = 1e-12 * scalar.abs().max(1.0);
+            assert!((vectorized - scalar).abs() <= tolerance);
+        }
     }
 
     #[test]
