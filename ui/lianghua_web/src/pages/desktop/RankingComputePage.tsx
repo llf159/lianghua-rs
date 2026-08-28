@@ -77,10 +77,19 @@ type PendingConfirmState =
     }
   | null
 
-const DEFAULT_SIMILARITY_WINDOW_TRADE_DAYS = 20
-const DEFAULT_SIMILARITY_POOL_SEGMENTS = 5
+const DEFAULT_SIMILARITY_WINDOW_TRADE_DAYS = 30
+const DEFAULT_SIMILARITY_POOL_SEGMENTS = 3
 const DEFAULT_SIMILARITY_OUTCOME_TRADE_DAYS = 5
 const DEFAULT_SIMILARITY_BENCHMARK_INDEX_CODE = '000001.SH'
+const SIMILARITY_BENCHMARK_INDEX_LABELS: Record<string, string> = {
+  '000001.SH': '上证指数',
+  '399001.SZ': '深证成指',
+  '399300.SZ': '沪深300',
+  '399905.SZ': '中证500',
+  '399006.SZ': '创业板指',
+  '000016.SH': '上证50',
+  '000852.SH': '中证1000',
+}
 
 function createEmptyCardFeedback(): CardFeedback {
   return {
@@ -350,11 +359,6 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
   const isSimilarityStale = isCalculationBehind(status?.similarityRankDb, resultLatestTradeDate)
   const isOldChipStale = isCalculationBehind(status?.cyqDb, sourceLatestTradeDate)
   const isNewChipStale = isCalculationBehind(status?.cyqChenDb, sourceLatestTradeDate)
-  const isConvolutionStale = isCalculationBehind(
-    status?.convolutionRankDb,
-    resultLatestTradeDate,
-  )
-
   function setFeedbackNotice(slot: FeedbackSlot, message: string) {
     setCardFeedback((current) => ({
       ...current,
@@ -1346,21 +1350,6 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
             ) : null}
           </div>
 
-          <div className={`ranking-compute-summary-item${isConvolutionStale ? ' is-warning' : ''}`}>
-            <span>卷积排名库</span>
-            <strong>{describeDbRange(status?.convolutionRankDb)}</strong>
-            <small>
-              {status?.convolutionRankDb
-                ? `${status.convolutionRankDb.distinctTradeDates} 个交易日，${status.convolutionRankDb.rowCount} 行`
-                : '读取中...'}
-            </small>
-            {isConvolutionStale ? (
-              <small className="ranking-compute-summary-alert">
-                卷积排名为空或落后于结果库，会在查看时自动按需生成
-              </small>
-            ) : null}
-          </div>
-
           <div className={`ranking-compute-summary-item${isSimilarityStale ? ' is-warning' : ''}`}>
             <span>走势相似排名库</span>
             <strong>{describeDbRange(status?.similarityRankDb)}</strong>
@@ -1562,7 +1551,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
 
           <label className="ranking-compute-field"><span>池化分段</span><input type="number" min={1} max={12} value={similarityPoolSegmentsInput} onChange={(event) => setSimilarityPoolSegmentsInput(event.target.value)} /></label>
           <label className="ranking-compute-field"><span>后验交易日</span><input type="number" min={1} value={similarityOutcomeDaysInput} onChange={(event) => setSimilarityOutcomeDaysInput(event.target.value)} /></label>
-          <label className="ranking-compute-field"><span>基准指数</span><select value={similarityBenchmarkCode} onChange={(event) => setSimilarityBenchmarkCode(event.target.value)}>{similarityBenchmarkCodes.map((code) => <option key={code} value={code}>{code}</option>)}</select></label>
+          <label className="ranking-compute-field"><span>基准指数</span><select value={similarityBenchmarkCode} onChange={(event) => setSimilarityBenchmarkCode(event.target.value)}>{similarityBenchmarkCodes.map((code) => <option key={code} value={code}>{SIMILARITY_BENCHMARK_INDEX_LABELS[code] ?? code}</option>)}</select></label>
 
           <div className="ranking-compute-actions">
             <button

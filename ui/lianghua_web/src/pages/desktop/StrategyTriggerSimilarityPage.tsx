@@ -26,8 +26,8 @@ import { normalizeTradeDates, pickDateValue } from '../../shared/tradeDate'
 import './css/StrategyTriggerSimilarityPage.css'
 
 const MAX_STOCK_NAME_CANDIDATES = 12
-const DEFAULT_WINDOW_TRADE_DAYS = '20'
-const DEFAULT_POOL_SEGMENTS = '5'
+const DEFAULT_WINDOW_TRADE_DAYS = '30'
+const DEFAULT_POOL_SEGMENTS = '3'
 const DEFAULT_OUTCOME_TRADE_DAYS = '5'
 const DEFAULT_LIMIT = '30'
 const DEFAULT_BENCHMARK_INDEX_CODE = '000001.SH'

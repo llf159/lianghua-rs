@@ -36,7 +36,6 @@ export type RankingComputeStatus = {
   strategyPath: string
   sourceDb: RankComputeDbRange
   resultDb: RankComputeDbRange
-  convolutionRankDb: RankComputeDbRange
   similarityRankDb: RankComputeDbRange
   similarityActiveConfig?: StrategySimilarityActiveConfig | null
   conceptPerformanceDb: RankComputeDbRange

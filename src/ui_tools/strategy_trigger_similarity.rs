@@ -39,13 +39,23 @@ const TRIGGER_SIMILARITY_WEIGHT: f64 = 0.35;
 const PRICE_VOLUME_SIMILARITY_WEIGHT: f64 = 0.30;
 const INDICATOR_SIMILARITY_WEIGHT: f64 = 0.15;
 const MARKET_SIMILARITY_WEIGHT: f64 = 0.20;
+const TRIGGER_RULE_SET_WEIGHT: f64 = 0.45;
+const TRIGGER_RULE_TIMING_WEIGHT: f64 = 0.35;
+const TRIGGER_AGGREGATE_RHYTHM_WEIGHT: f64 = 0.20;
+const TRIGGER_TIME_DECAY_DAYS: f64 = 3.0;
 const DEFAULT_BENCHMARK_INDEX_CODE: &str = "000001.SH";
-const KERNEL_NAMES: [&str; 6] = [
+const SHORT_KERNEL_MAX_DAYS: usize = 10;
+const SHORT_KERNEL_HALF_LIFE_DAYS: f64 = 5.0;
+const MEDIUM_KERNEL_MAX_DAYS: usize = 30;
+const MEDIUM_KERNEL_HALF_LIFE_DAYS: f64 = 10.0;
+const KERNEL_NAMES: [&str; 8] = [
     "均匀核",
-    "短期指数核",
-    "中期指数核",
+    "短期指数核（5-10日）",
+    "中期指数核（10-30日）",
     "近期增强核",
-    "趋势对比核",
+    "前中趋势核",
+    "中后趋势核",
+    "前后趋势核",
     "拐点核",
 ];
 
@@ -184,7 +194,7 @@ struct BenchmarkObservation {
 
 #[derive(Debug, Clone)]
 struct EventFingerprint {
-    trigger: Vec<f64>,
+    trigger: TriggerFingerprint,
     price_volume: Vec<Option<Vec<f64>>>,
     indicators: Vec<Option<Vec<f64>>>,
     market: Vec<Option<Vec<f64>>>,
@@ -192,13 +202,38 @@ struct EventFingerprint {
 
 impl EventFingerprint {
     fn dimension(&self) -> usize {
-        self.trigger.len()
+        self.trigger.dimension()
             + self
                 .price_volume
                 .iter()
                 .chain(self.indicators.iter())
                 .chain(self.market.iter())
                 .filter_map(|channel| channel.as_ref().map(Vec::len))
+                .sum::<usize>()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuleTriggerHit {
+    day_index: usize,
+    score: f64,
+}
+
+#[derive(Debug, Clone)]
+struct TriggerFingerprint {
+    by_rule: HashMap<String, Vec<RuleTriggerHit>>,
+    total_count: Vec<f64>,
+    total_score: Vec<f64>,
+}
+
+impl TriggerFingerprint {
+    fn dimension(&self) -> usize {
+        self.total_count.len()
+            + self.total_score.len()
+            + self
+                .by_rule
+                .values()
+                .map(|hits| hits.len() * 2)
                 .sum::<usize>()
     }
 }
@@ -769,6 +804,7 @@ fn load_market_environment(
     end_date: &str,
     schema: &MarketSchema,
 ) -> Result<MarketEnvironment, String> {
+    let index_codes = load_market_environment_index_codes(conn)?;
     let amount_expr = column_expr(schema, "amount", "s");
     let turnover_expr = column_expr(schema, "tor", "s");
     let sql = format!(
@@ -785,7 +821,7 @@ fn load_market_environment(
     );
     let mut environment = MarketEnvironment {
         by_date: HashMap::new(),
-        channel_count: 7 + INDEX_TS_CODES.len(),
+        channel_count: 7 + index_codes.len(),
     };
     let mut stmt = conn
         .prepare(&sql)
@@ -806,29 +842,40 @@ fn load_market_environment(
         environment.by_date.insert(date, values);
     }
 
-    let placeholders = std::iter::repeat_n("?", INDEX_TS_CODES.len())
+    if index_codes.is_empty() {
+        return Ok(environment);
+    }
+
+    let placeholders = std::iter::repeat_n("?", index_codes.len())
         .collect::<Vec<_>>()
         .join(", ");
     let index_sql = format!(
-        "SELECT ts_code, trade_date, TRY_CAST(pct_chg AS DOUBLE) FROM trigger_market_db.stock_data \
-         WHERE adj_type = 'ind' AND trade_date >= ? AND trade_date <= ? AND ts_code IN ({placeholders})"
+        "SELECT UPPER(TRIM(ts_code)), trade_date, TRY_CAST(pct_chg AS DOUBLE) \
+         FROM trigger_market_db.stock_data \
+         WHERE adj_type = 'ind' AND trade_date >= ? AND trade_date <= ? \
+           AND UPPER(TRIM(ts_code)) IN ({placeholders})"
     );
     let mut values = vec![start_date.to_string(), end_date.to_string()];
-    values.extend(INDEX_TS_CODES.iter().map(|value| value.to_string()));
+    values.extend(index_codes.iter().cloned());
+    let index_positions = index_codes
+        .iter()
+        .enumerate()
+        .map(|(index, code)| (code.as_str(), index))
+        .collect::<HashMap<_, _>>();
     let mut stmt = conn
         .prepare(&index_sql)
-        .map_err(|e| format!("预编译宽基环境查询失败: {e}"))?;
+        .map_err(|e| format!("预编译指数市场环境查询失败: {e}"))?;
     let mut rows = stmt
         .query(params_from_iter(values.iter()))
-        .map_err(|e| format!("查询宽基环境失败: {e}"))?;
-    while let Some(row) = rows.next().map_err(|e| format!("读取宽基环境失败: {e}"))? {
-        let code: String = row.get(0).map_err(|e| format!("读取宽基代码失败: {e}"))?;
-        let date: String = row.get(1).map_err(|e| format!("读取宽基日期失败: {e}"))?;
-        let value: Option<f64> = row.get(2).map_err(|e| format!("读取宽基涨跌失败: {e}"))?;
-        if let Some(index) = INDEX_TS_CODES
-            .iter()
-            .position(|candidate| *candidate == code)
-        {
+        .map_err(|e| format!("查询指数市场环境失败: {e}"))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取指数市场环境失败: {e}"))?
+    {
+        let code: String = row.get(0).map_err(|e| format!("读取指数代码失败: {e}"))?;
+        let date: String = row.get(1).map_err(|e| format!("读取指数日期失败: {e}"))?;
+        let value: Option<f64> = row.get(2).map_err(|e| format!("读取指数涨跌失败: {e}"))?;
+        if let Some(index) = index_positions.get(code.as_str()).copied() {
             environment
                 .by_date
                 .entry(date)
@@ -836,6 +883,38 @@ fn load_market_environment(
         }
     }
     Ok(environment)
+}
+
+fn load_market_environment_index_codes(conn: &Connection) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT UPPER(TRIM(ts_code)) AS ts_code \
+             FROM trigger_market_db.stock_data \
+             WHERE adj_type='ind' AND ts_code IS NOT NULL AND TRIM(ts_code)<>'' \
+             ORDER BY ts_code",
+        )
+        .map_err(|e| format!("预编译市场环境指数列表查询失败: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("查询市场环境指数列表失败: {e}"))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取市场环境指数列表失败: {e}"))?
+    {
+        let code: String = row
+            .get(0)
+            .map_err(|e| format!("读取市场环境指数代码失败: {e}"))?;
+        if !is_beijing_exchange_index_code(&code) {
+            out.push(code);
+        }
+    }
+    Ok(out)
+}
+
+fn is_beijing_exchange_index_code(code: &str) -> bool {
+    let normalized = code.trim().to_ascii_uppercase();
+    normalized.ends_with(".BJ") || normalized.starts_with("899")
 }
 
 fn pool_series(values: &[Option<f64>], segments: usize) -> Vec<f64> {
@@ -879,17 +958,31 @@ fn kernel_responses(values: &[Option<f64>]) -> Vec<f64> {
     let uniform = vec![1.0; len];
     let short_exp = ages
         .iter()
-        .map(|age| 0.55_f64.powi(*age as i32))
+        .map(|age| {
+            if *age < SHORT_KERNEL_MAX_DAYS {
+                0.5_f64.powf(*age as f64 / SHORT_KERNEL_HALF_LIFE_DAYS)
+            } else {
+                0.0
+            }
+        })
         .collect::<Vec<_>>();
     let medium_exp = ages
         .iter()
-        .map(|age| 0.82_f64.powi(*age as i32))
+        .map(|age| {
+            if *age < MEDIUM_KERNEL_MAX_DAYS {
+                0.5_f64.powf(*age as f64 / MEDIUM_KERNEL_HALF_LIFE_DAYS)
+            } else {
+                0.0
+            }
+        })
         .collect::<Vec<_>>();
     let recent_linear = (1..=len).map(|value| value as f64).collect::<Vec<_>>();
-    let midpoint = len.saturating_sub(1) as f64 / 2.0;
-    let trend = (0..len)
-        .map(|index| index as f64 - midpoint)
-        .collect::<Vec<_>>();
+    // 固定按窗口位置切成 [0, 1/3)、[1/3, 2/3)、[2/3, 1] 三段，
+    // 分别保留前中、中后和前后的水平变化，不再压缩成单一前后趋势。
+    let stage_levels = pool_series(values, 3);
+    let front_to_middle = stage_levels[1] - stage_levels[0];
+    let middle_to_back = stage_levels[2] - stage_levels[1];
+    let front_to_back = stage_levels[2] - stage_levels[0];
     let mut turning = vec![0.0; len];
     if len >= 3 {
         turning[len - 3] = 1.0;
@@ -899,17 +992,16 @@ fn kernel_responses(values: &[Option<f64>]) -> Vec<f64> {
         turning[len - 2] = -1.0;
         turning[len - 1] = 1.0;
     }
-    [
-        uniform,
-        short_exp,
-        medium_exp,
-        recent_linear,
-        trend,
-        turning,
+    vec![
+        weighted_projection(values, &uniform),
+        weighted_projection(values, &short_exp),
+        weighted_projection(values, &medium_exp),
+        weighted_projection(values, &recent_linear),
+        front_to_middle,
+        middle_to_back,
+        front_to_back,
+        weighted_projection(values, &turning),
     ]
-    .iter()
-    .map(|weights| weighted_projection(values, weights))
-    .collect()
 }
 
 fn temporal_signature(
@@ -951,52 +1043,213 @@ fn temporal_signature(
 
 fn build_trigger_fingerprint(
     events: &[RuleEvent],
-    target_rule_names: &[String],
     window_dates: &[String],
     segments: usize,
-) -> (Vec<f64>, Vec<String>) {
+) -> TriggerFingerprint {
     let date_index = window_dates
         .iter()
         .enumerate()
         .map(|(i, date)| (date.as_str(), i))
         .collect::<HashMap<_, _>>();
-    let signature_len = segments + KERNEL_NAMES.len() + 1;
-    let mut out = Vec::new();
-    let mut matched = Vec::new();
-    for rule_name in target_rule_names {
-        let mut series = vec![Some(0.0); window_dates.len()];
-        let mut hit = false;
-        for event in events.iter().filter(|event| event.rule_name == *rule_name) {
-            if let Some(index) = date_index.get(event.trade_date.as_str()).copied() {
-                series[index] = Some(series[index].unwrap_or(0.0) + event.score);
-                hit = true;
-            }
-        }
-        if hit {
-            matched.push(rule_name.clone());
-        }
-        out.extend(
-            temporal_signature(&series, segments, false)
-                .unwrap_or_else(|| vec![0.0; signature_len]),
-        );
-    }
+    let mut by_rule = HashMap::<String, Vec<RuleTriggerHit>>::new();
     let mut total_count = vec![Some(0.0); window_dates.len()];
     let mut total_score = vec![Some(0.0); window_dates.len()];
     for event in events {
         if let Some(index) = date_index.get(event.trade_date.as_str()).copied() {
-            total_count[index] = Some(total_count[index].unwrap_or(0.0) + 1.0);
-            total_score[index] = Some(total_score[index].unwrap_or(0.0) + event.score);
+            by_rule
+                .entry(event.rule_name.clone())
+                .or_default()
+                .push(RuleTriggerHit {
+                    day_index: index,
+                    score: event.score,
+                });
         }
     }
-    out.extend(
-        temporal_signature(&total_count, segments, false)
+    for hits in by_rule.values_mut() {
+        hits.sort_unstable_by_key(|hit| hit.day_index);
+        let mut merged = Vec::<RuleTriggerHit>::with_capacity(hits.len());
+        for hit in hits.drain(..) {
+            if let Some(previous) = merged.last_mut()
+                && previous.day_index == hit.day_index
+            {
+                previous.score += hit.score;
+            } else {
+                merged.push(hit);
+            }
+        }
+        *hits = merged;
+        for hit in hits.iter() {
+            total_count[hit.day_index] = Some(total_count[hit.day_index].unwrap_or(0.0) + 1.0);
+            total_score[hit.day_index] =
+                Some(total_score[hit.day_index].unwrap_or(0.0) + hit.score);
+        }
+    }
+    let signature_len = segments + KERNEL_NAMES.len() + 1;
+    TriggerFingerprint {
+        by_rule,
+        total_count: temporal_signature(&total_count, segments, false)
             .unwrap_or_else(|| vec![0.0; signature_len]),
-    );
-    out.extend(
-        temporal_signature(&total_score, segments, false)
+        total_score: temporal_signature(&total_score, segments, false)
             .unwrap_or_else(|| vec![0.0; signature_len]),
-    );
-    (out, matched)
+    }
+}
+
+fn load_rule_idf_weights(
+    conn: &Connection,
+    start_date: &str,
+    end_date: &str,
+) -> Result<HashMap<String, f64>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT rule_name, COUNT(*) \
+             FROM rule_details \
+             WHERE trade_date>=? AND trade_date<=? \
+               AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL \
+               AND ABS(TRY_CAST(rule_score AS DOUBLE))>? \
+             GROUP BY rule_name",
+        )
+        .map_err(|e| format!("预编译规则稀有度查询失败: {e}"))?;
+    let mut rows = stmt
+        .query(params![start_date, end_date, EPS])
+        .map_err(|e| format!("查询规则稀有度失败: {e}"))?;
+    let mut counts = Vec::<(String, f64)>::new();
+    let mut total = 0.0;
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取规则稀有度失败: {e}"))?
+    {
+        let name: String = row.get(0).map_err(|e| format!("读取规则名称失败: {e}"))?;
+        let count = row
+            .get::<_, i64>(1)
+            .map_err(|e| format!("读取规则触发次数失败: {e}"))?
+            .max(0) as f64;
+        if count > 0.0 {
+            total += count;
+            counts.push((name, count));
+        }
+    }
+    Ok(counts
+        .into_iter()
+        .map(|(name, count)| {
+            let idf = (1.0 + total / count).ln().clamp(1.0, 6.0);
+            (name, idf)
+        })
+        .collect())
+}
+
+fn rule_weight(rule_weights: &HashMap<String, f64>, rule_name: &str) -> f64 {
+    rule_weights
+        .get(rule_name)
+        .copied()
+        .filter(|weight| weight.is_finite() && *weight > 0.0)
+        .unwrap_or(1.0)
+}
+
+fn weighted_rule_set_similarity(
+    target: &TriggerFingerprint,
+    candidate: &TriggerFingerprint,
+    rule_weights: &HashMap<String, f64>,
+) -> f64 {
+    let target_weight = target
+        .by_rule
+        .keys()
+        .map(|name| rule_weight(rule_weights, name))
+        .sum::<f64>();
+    let candidate_weight = candidate
+        .by_rule
+        .keys()
+        .map(|name| rule_weight(rule_weights, name))
+        .sum::<f64>();
+    if target_weight <= EPS && candidate_weight <= EPS {
+        return 1.0;
+    }
+    let intersection_weight = target
+        .by_rule
+        .keys()
+        .filter(|name| candidate.by_rule.contains_key(*name))
+        .map(|name| rule_weight(rule_weights, name))
+        .sum::<f64>();
+    let union_weight = target_weight + candidate_weight - intersection_weight;
+    if union_weight <= EPS {
+        0.0
+    } else {
+        (intersection_weight / union_weight).clamp(0.0, 1.0)
+    }
+}
+
+fn signed_score_similarity(left: f64, right: f64) -> f64 {
+    let denominator = left.abs() + right.abs();
+    if denominator <= EPS {
+        1.0
+    } else {
+        (1.0 - (left - right).abs() / denominator).clamp(0.0, 1.0)
+    }
+}
+
+fn matched_rule_timing_similarity(left: &[RuleTriggerHit], right: &[RuleTriggerHit]) -> f64 {
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    let mut pairs = Vec::with_capacity(left.len() * right.len());
+    for (left_index, left_hit) in left.iter().enumerate() {
+        for (right_index, right_hit) in right.iter().enumerate() {
+            let day_gap = left_hit.day_index.abs_diff(right_hit.day_index) as f64;
+            let time_score = (-day_gap / TRIGGER_TIME_DECAY_DAYS).exp();
+            let intensity_score = signed_score_similarity(left_hit.score, right_hit.score);
+            pairs.push((time_score * intensity_score, left_index, right_index));
+        }
+    }
+    pairs.sort_unstable_by(|left_pair, right_pair| right_pair.0.total_cmp(&left_pair.0));
+    let mut used_left = vec![false; left.len()];
+    let mut used_right = vec![false; right.len()];
+    let mut score_sum = 0.0;
+    for (score, left_index, right_index) in pairs {
+        if used_left[left_index] || used_right[right_index] {
+            continue;
+        }
+        used_left[left_index] = true;
+        used_right[right_index] = true;
+        score_sum += score;
+    }
+    score_sum / left.len().max(right.len()) as f64
+}
+
+fn weighted_rule_timing_similarity(
+    target: &TriggerFingerprint,
+    candidate: &TriggerFingerprint,
+    rule_weights: &HashMap<String, f64>,
+) -> f64 {
+    let mut weighted_sum = 0.0;
+    let mut weight_sum = 0.0;
+    for (name, target_hits) in &target.by_rule {
+        let Some(candidate_hits) = candidate.by_rule.get(name) else {
+            continue;
+        };
+        let weight = rule_weight(rule_weights, name);
+        weighted_sum += matched_rule_timing_similarity(target_hits, candidate_hits) * weight;
+        weight_sum += weight;
+    }
+    if weight_sum <= EPS {
+        0.0
+    } else {
+        (weighted_sum / weight_sum).clamp(0.0, 1.0)
+    }
+}
+
+fn trigger_fingerprint_similarity(
+    target: &TriggerFingerprint,
+    candidate: &TriggerFingerprint,
+    rule_weights: &HashMap<String, f64>,
+) -> f64 {
+    let rule_set = weighted_rule_set_similarity(target, candidate, rule_weights);
+    let timing = weighted_rule_timing_similarity(target, candidate, rule_weights);
+    let aggregate = (cosine_similarity(&target.total_count, &candidate.total_count)
+        + cosine_similarity(&target.total_score, &candidate.total_score))
+        / 200.0;
+    100.0
+        * (rule_set * TRIGGER_RULE_SET_WEIGHT
+            + timing * TRIGGER_RULE_TIMING_WEIGHT
+            + aggregate * TRIGGER_AGGREGATE_RHYTHM_WEIGHT)
 }
 
 fn build_price_volume_channels(
@@ -1005,7 +1258,7 @@ fn build_price_volume_channels(
     total_mv_yi: Option<f64>,
     market_categories: [f64; 5],
 ) -> Vec<Option<Vec<f64>>> {
-    let mut channels = vec![Vec::new(); 18];
+    let mut channels = vec![Vec::new(); 13];
     // stock_list.csv 目前提供最新总市值而非逐日历史总市值。用固定对数尺度编码为
     // [0, 1]，作为股票规模这一项基本特征；不把它伪装成时间序列趋势。
     let normalized_market_cap = total_mv_yi
@@ -1057,25 +1310,25 @@ fn build_price_volume_channels(
             _ => None,
         });
         channels[12].push(normalized_market_cap);
-        for (offset, value) in market_categories.iter().copied().enumerate() {
-            channels[13 + offset].push(Some(value));
-        }
         previous_close = row.close.filter(|value| value.is_finite());
     }
     // 价格水平、成交量和成交额只比较相对形态；跳空、收益、振幅、影线、位置、
     // 换手和资金流保留原始状态，以免把方向、缺口和风险强度标准化掉。
     let standardize = [
         true, false, false, false, false, true, true, false, false, false, false, false, false,
-        false, false, false, false, false,
     ];
-    channels
+    let mut fingerprints = channels
         .iter()
         .zip(standardize)
         .map(|(series, standardize)| temporal_signature(series, segments, standardize))
-        .collect()
+        .collect::<Vec<_>>();
+    // 市场类别是静态名义变量，不存在时间趋势或类别远近。保留五维独热向量，
+    // 作为一个独立通道直接参与余弦比较，避免扩展成五组重复的时间签名。
+    fingerprints.push(Some(market_categories.to_vec()));
+    fingerprints
 }
 
-// 与全局板块筛选保持一致：主板、科创板、创业板、北交所、ST 五类独热编码。
+// 与全局板块筛选保持一致：主板、科创板、创业板、北交所、ST 五维独热编码。
 fn market_category_features(ts_code: &str, stock_name: Option<&str>) -> [f64; 5] {
     let mut features = [0.0; 5];
     let index = match crate::utils::utils::board_category(ts_code, stock_name) {
@@ -1339,12 +1592,13 @@ fn build_samples_for_chunk(
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
             let window_dates = window_dates_for_anchor(anchor, context.all_trade_dates);
-            let (trigger, matched_rule_names) = build_trigger_fingerprint(
-                rules,
-                context.target_rule_names,
-                window_dates,
-                context.pool_segments,
-            );
+            let trigger = build_trigger_fingerprint(rules, window_dates, context.pool_segments);
+            let matched_rule_names = context
+                .target_rule_names
+                .iter()
+                .filter(|name| trigger.by_rule.contains_key(*name))
+                .cloned()
+                .collect::<Vec<_>>();
             let fingerprint = EventFingerprint {
                 trigger,
                 price_volume: build_price_volume_channels(
@@ -1668,6 +1922,8 @@ pub fn get_strategy_trigger_similarity_page(
         &all_trade_dates,
         window_trade_days,
     )?;
+    let rule_weights =
+        load_rule_idf_weights(&conn, earliest_candidate_date, &historical_cutoff_date)?;
     let candidate_anchor_count = candidate_anchors.len();
     let candidate_pool_truncated = candidate_universe_count > candidate_anchor_count;
     let candidate_context = SampleBuildContext {
@@ -1683,9 +1939,10 @@ pub fn get_strategy_trigger_similarity_page(
         let samples = build_samples_for_chunk(&conn, chunk, &candidate_context)?;
         evaluated_anchor_count += samples.len();
         for sample in samples {
-            let trigger_similarity = cosine_similarity(
+            let trigger_similarity = trigger_fingerprint_similarity(
                 &target_sample.fingerprint.trigger,
                 &sample.fingerprint.trigger,
+                &rule_weights,
             );
             let price_volume_similarity = channel_similarity(
                 &target_sample.fingerprint.price_volume,
@@ -1785,12 +2042,16 @@ mod tests {
     use super::{
         BenchmarkObservation, FutureObservation, INDEX_TS_CODES, INDICATOR_SIMILARITY_WEIGHT,
         KERNEL_NAMES, MARKET_SIMILARITY_WEIGHT, MarketObservation, PRICE_VOLUME_SIMILARITY_WEIGHT,
-        StrategyTriggerSimilarityRow, TRIGGER_SIMILARITY_WEIGHT, build_outcome,
-        build_price_volume_channels, build_rating_sample, cosine_similarity, final_similarity,
-        list_strategy_trigger_similarity_benchmark_index_codes, market_category_features,
-        resolve_benchmark_index_code, temporal_signature, weighted_quantile,
-        weighted_winsorized_mean,
+        RuleEvent, StrategyTriggerSimilarityRow, TRIGGER_SIMILARITY_WEIGHT, build_outcome,
+        build_price_volume_channels, build_rating_sample, build_trigger_fingerprint,
+        cosine_similarity, final_similarity, is_beijing_exchange_index_code, kernel_responses,
+        list_strategy_trigger_similarity_benchmark_index_codes,
+        load_market_environment_index_codes, market_category_features,
+        resolve_benchmark_index_code, temporal_signature, trigger_fingerprint_similarity,
+        weighted_quantile, weighted_rule_set_similarity, weighted_winsorized_mean,
     };
+    use duckdb::Connection;
+    use std::collections::HashMap;
 
     fn similarity_row(ts_code: &str, end_trade_date: &str) -> StrategyTriggerSimilarityRow {
         StrategyTriggerSimilarityRow {
@@ -1824,6 +2085,79 @@ mod tests {
         let values = (1..=20).map(|value| Some(value as f64)).collect::<Vec<_>>();
         let signature = temporal_signature(&values, 5, true).expect("signature");
         assert_eq!(signature.len(), 5 + KERNEL_NAMES.len() + 1);
+    }
+
+    #[test]
+    fn trigger_similarity_penalizes_extra_rules_and_time_misalignment() {
+        let dates = (1..=10)
+            .map(|day| format!("202401{day:02}"))
+            .collect::<Vec<_>>();
+        let event = |name: &str, date: &str, score: f64| RuleEvent {
+            rule_name: name.to_string(),
+            trade_date: date.to_string(),
+            score,
+        };
+        let target_events = vec![
+            event("A", "20240110", 1.0),
+            event("A", "20240110", 1.0),
+            event("B", "20240105", -3.0),
+        ];
+        let target = build_trigger_fingerprint(&target_events, &dates, 3);
+        assert_eq!(target.by_rule["A"].len(), 1);
+        assert_eq!(target.by_rule["A"][0].score, 2.0);
+        let identical = build_trigger_fingerprint(
+            &[event("A", "20240110", 2.0), event("B", "20240105", -3.0)],
+            &dates,
+            3,
+        );
+        let with_extra = build_trigger_fingerprint(
+            &[
+                event("A", "20240110", 2.0),
+                event("B", "20240105", -3.0),
+                event("C", "20240108", 1.0),
+            ],
+            &dates,
+            3,
+        );
+        let shifted = build_trigger_fingerprint(
+            &[event("A", "20240107", 2.0), event("B", "20240102", -3.0)],
+            &dates,
+            3,
+        );
+        let weights = HashMap::from([
+            ("A".to_string(), 2.0),
+            ("B".to_string(), 1.0),
+            ("C".to_string(), 1.0),
+        ]);
+
+        assert!(
+            (trigger_fingerprint_similarity(&target, &identical, &weights) - 100.0).abs() < 1e-9
+        );
+        assert!((weighted_rule_set_similarity(&target, &with_extra, &weights) - 0.75).abs() < 1e-9);
+        assert!(trigger_fingerprint_similarity(&target, &with_extra, &weights) < 100.0);
+        assert!(
+            trigger_fingerprint_similarity(&target, &shifted, &weights)
+                < trigger_fingerprint_similarity(&target, &identical, &weights)
+        );
+    }
+
+    #[test]
+    fn kernels_use_bounded_horizons_and_three_equal_position_stages() {
+        let stages = [1.0, 1.0, 1.0, 3.0, 3.0, 3.0, 6.0, 6.0, 6.0]
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
+        let responses = kernel_responses(&stages);
+        assert_eq!(responses.len(), KERNEL_NAMES.len());
+        assert!((responses[4] - 2.0).abs() < 1e-12);
+        assert!((responses[5] - 3.0).abs() < 1e-12);
+        assert!((responses[6] - 5.0).abs() < 1e-12);
+
+        let mut outside_horizons = vec![Some(0.0); 40];
+        outside_horizons[0] = Some(100.0);
+        let responses = kernel_responses(&outside_horizons);
+        assert_eq!(responses[1], 0.0);
+        assert_eq!(responses[2], 0.0);
     }
 
     #[test]
@@ -1889,10 +2223,15 @@ mod tests {
             )[12]
                 .is_none()
         );
-        for channel in &channels[13..17] {
-            assert!(channel.as_ref().is_some_and(|values| values[0] == 0.0));
-        }
-        assert!(channels[17].as_ref().is_some_and(|values| values[0] == 1.0));
+        assert_eq!(channels.len(), 14);
+        assert_eq!(
+            channels[13].as_deref(),
+            Some([0.0, 0.0, 0.0, 0.0, 1.0].as_slice())
+        );
+        let main_board = market_category_features("600000.SH", Some("浦发银行"));
+        let growth_board = market_category_features("300001.SZ", Some("特锐德"));
+        assert_eq!(cosine_similarity(&main_board, &main_board), 100.0);
+        assert_eq!(cosine_similarity(&main_board, &growth_board), 50.0);
     }
 
     #[test]
@@ -1939,6 +2278,33 @@ mod tests {
             );
         }
         assert!(resolve_benchmark_index_code(Some("invalid")).is_err());
+    }
+
+    #[test]
+    fn market_environment_uses_every_non_beijing_exchange_index() {
+        assert!(is_beijing_exchange_index_code("899050.BJ"));
+        assert!(is_beijing_exchange_index_code("899050"));
+        assert!(!is_beijing_exchange_index_code("000001.SH"));
+
+        let conn = Connection::open_in_memory().expect("open memory db");
+        conn.execute_batch(
+            "ATTACH ':memory:' AS trigger_market_db; \
+             CREATE TABLE trigger_market_db.stock_data \
+               (ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR); \
+             INSERT INTO trigger_market_db.stock_data VALUES \
+               ('399001.SZ', '20240102', 'ind'), \
+               ('000001.SH', '20240102', 'ind'), \
+               ('000510.SH', '20240102', 'ind'), \
+               ('899050.BJ', '20240102', 'ind'), \
+               ('899999', '20240102', 'ind'), \
+               ('000001.SZ', '20240102', 'qfq');",
+        )
+        .expect("seed index rows");
+
+        assert_eq!(
+            load_market_environment_index_codes(&conn).expect("load environment indexes"),
+            vec!["000001.SH", "000510.SH", "399001.SZ"]
+        );
     }
 
     #[test]

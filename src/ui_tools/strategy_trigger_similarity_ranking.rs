@@ -16,7 +16,7 @@ use crate::data::{ind_toml_path, score_rule_path, stock_list_path};
 use crate::ui_tools::build_total_mv_map;
 use crate::utils::utils::board_category;
 
-const ALGORITHM_VERSION: &str = "outcome-reverse-startup-ranking-v5";
+const ALGORITHM_VERSION: &str = "outcome-reverse-startup-ranking-v6";
 const TOP_MATCH_HEAP_SIZE: usize = 256;
 const MIN_RATING_SAMPLE_COUNT: usize = 5;
 const MIN_EFFECTIVE_SAMPLE_COUNT: f64 = 3.0;
@@ -139,15 +139,6 @@ pub struct StrategyTriggerRankingPageData {
 }
 
 #[derive(Debug, Clone)]
-struct SparseTriggerFingerprint {
-    by_rule: HashMap<String, Vec<f64>>,
-    total_count: Vec<f64>,
-    total_score: Vec<f64>,
-    norm_sq: f64,
-    total_norm_sq: f64,
-}
-
-#[derive(Debug, Clone)]
 struct ChannelFingerprint {
     vectors: Vec<Option<Vec<f64>>>,
     norms: Vec<f64>,
@@ -156,7 +147,7 @@ struct ChannelFingerprint {
 
 #[derive(Debug, Clone)]
 struct RankingFingerprint {
-    trigger: SparseTriggerFingerprint,
+    trigger: TriggerFingerprint,
     price_volume: ChannelFingerprint,
     indicators: ChannelFingerprint,
     market: ChannelFingerprint,
@@ -517,55 +508,8 @@ fn build_sparse_trigger_fingerprint(
     events: &[RuleEvent],
     window_dates: &[String],
     segments: usize,
-) -> SparseTriggerFingerprint {
-    let date_index = window_dates
-        .iter()
-        .enumerate()
-        .map(|(index, date)| (date.as_str(), index))
-        .collect::<HashMap<_, _>>();
-    let mut by_rule_series = HashMap::<String, Vec<Option<f64>>>::new();
-    let mut total_count = vec![Some(0.0); window_dates.len()];
-    let mut total_score = vec![Some(0.0); window_dates.len()];
-    for event in events {
-        let Some(index) = date_index.get(event.trade_date.as_str()).copied() else {
-            continue;
-        };
-        let series = by_rule_series
-            .entry(event.rule_name.clone())
-            .or_insert_with(|| vec![Some(0.0); window_dates.len()]);
-        series[index] = Some(series[index].unwrap_or_default() + event.score);
-        total_count[index] = Some(total_count[index].unwrap_or_default() + 1.0);
-        total_score[index] = Some(total_score[index].unwrap_or_default() + event.score);
-    }
-    let by_rule = by_rule_series
-        .into_iter()
-        .filter_map(|(name, series)| {
-            temporal_signature(&series, segments, false).map(|v| (name, v))
-        })
-        .collect::<HashMap<String, Vec<f64>>>();
-    let signature_len = segments + KERNEL_NAMES.len() + 1;
-    let total_count = temporal_signature(&total_count, segments, false)
-        .unwrap_or_else(|| vec![0.0; signature_len]);
-    let total_score = temporal_signature(&total_score, segments, false)
-        .unwrap_or_else(|| vec![0.0; signature_len]);
-    let total_norm_sq = total_count
-        .iter()
-        .chain(&total_score)
-        .map(|value| value * value)
-        .sum::<f64>();
-    let norm_sq = total_norm_sq
-        + by_rule
-            .values()
-            .flatten()
-            .map(|value| value * value)
-            .sum::<f64>();
-    SparseTriggerFingerprint {
-        by_rule,
-        total_count,
-        total_score,
-        norm_sq,
-        total_norm_sq,
-    }
+) -> TriggerFingerprint {
+    build_trigger_fingerprint(events, window_dates, segments)
 }
 
 fn build_channel_fingerprint(vectors: Vec<Option<Vec<f64>>>) -> ChannelFingerprint {
@@ -614,35 +558,11 @@ fn cached_channel_similarity(
 }
 
 fn directed_trigger_similarity(
-    target: &SparseTriggerFingerprint,
-    candidate: &SparseTriggerFingerprint,
+    target: &TriggerFingerprint,
+    candidate: &TriggerFingerprint,
+    rule_weights: &HashMap<String, f64>,
 ) -> f64 {
-    let mut dot = 0.0;
-    let left_norm_sq = target.norm_sq;
-    let mut right_norm_sq = candidate.total_norm_sq;
-    for (rule_name, left) in &target.by_rule {
-        if let Some(right) = candidate.by_rule.get(rule_name) {
-            for (left_value, right_value) in left.iter().zip(right) {
-                dot += left_value * right_value;
-                right_norm_sq += right_value * right_value;
-            }
-        }
-    }
-    for (left, right) in [
-        (&target.total_count, &candidate.total_count),
-        (&target.total_score, &candidate.total_score),
-    ] {
-        dot += left.iter().zip(right).map(|(a, b)| a * b).sum::<f64>();
-    }
-    let left_norm = left_norm_sq.sqrt();
-    let right_norm = right_norm_sq.sqrt();
-    if left_norm <= EPS && right_norm <= EPS {
-        100.0
-    } else if left_norm <= EPS || right_norm <= EPS {
-        0.0
-    } else {
-        (50.0 * (1.0 + dot / (left_norm * right_norm))).clamp(0.0, 100.0)
-    }
+    trigger_fingerprint_similarity(target, candidate, rule_weights)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1196,6 +1116,7 @@ fn rank_one_target(
     industry_map: &HashMap<String, String>,
     concept_map: &HashMap<String, String>,
     candidate_quality_by_stock: &HashMap<String, HashMap<String, f64>>,
+    rule_weights: &HashMap<String, f64>,
 ) -> StrategyTriggerRankingRow {
     let mut candidate_indices = target
         .anchor_rule_names
@@ -1220,6 +1141,7 @@ fn rank_one_target(
         let trigger_similarity = directed_trigger_similarity(
             &target.fingerprint.trigger,
             &candidate.fingerprint.trigger,
+            rule_weights,
         );
         let price_available = target.fingerprint.price_volume.has_vectors
             && candidate.fingerprint.price_volume.has_vectors;
@@ -2278,6 +2200,8 @@ pub fn run_strategy_trigger_similarity_ranking(
     let name_map = build_name_map(&source_path).unwrap_or_default();
     let industry_map = build_industry_map(&source_path).unwrap_or_default();
     let concept_map = build_concepts_map(&source_path).unwrap_or_default();
+    let rule_weights =
+        load_rule_idf_weights(&conn, earliest_candidate_date, &historical_cutoff_date)?;
 
     let phase = Instant::now();
     let mut ranking_rows = targets
@@ -2294,6 +2218,7 @@ pub fn run_strategy_trigger_similarity_ranking(
                 &industry_map,
                 &concept_map,
                 &candidate_quality_by_stock,
+                &rule_weights,
             )
         })
         .collect::<Vec<_>>();
@@ -2358,9 +2283,9 @@ pub fn run_strategy_trigger_similarity_ranking(
 #[cfg(test)]
 mod tests {
     use super::{
-        ANCHOR_CHUNK_SIZE, SparseTriggerFingerprint, assign_ranks, build_channel_fingerprint,
+        ANCHOR_CHUNK_SIZE, assign_ranks, build_channel_fingerprint,
         build_environment_fingerprint_map, build_ranking_samples_for_chunk,
-        cached_channel_similarity, directed_trigger_similarity, ensure_ranking_tables,
+        cached_channel_similarity, ensure_ranking_tables,
         get_strategy_trigger_similarity_active_config,
         get_strategy_trigger_similarity_ranking_page, load_all_trade_dates, load_benchmark_rows,
         load_market_environment, load_market_schema, load_outcome_selected_anchors,
@@ -2370,7 +2295,6 @@ mod tests {
     use crate::ui_tools::{
         build_total_mv_map, strategy_trigger_similarity::ranking::StrategyTriggerRankingRow,
     };
-    use std::collections::HashMap;
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
@@ -2406,28 +2330,6 @@ mod tests {
             total_mv_yi: None,
             top_matches: Vec::new(),
         }
-    }
-
-    #[test]
-    fn directed_trigger_similarity_ignores_unrequested_candidate_rules() {
-        let target = SparseTriggerFingerprint {
-            by_rule: HashMap::from([("A".to_string(), vec![1.0, 0.0])]),
-            total_count: vec![1.0],
-            total_score: vec![1.0],
-            norm_sq: 3.0,
-            total_norm_sq: 2.0,
-        };
-        let candidate = SparseTriggerFingerprint {
-            by_rule: HashMap::from([
-                ("A".to_string(), vec![1.0, 0.0]),
-                ("B".to_string(), vec![100.0, 100.0]),
-            ]),
-            total_count: vec![1.0],
-            total_score: vec![1.0],
-            norm_sq: 20_003.0,
-            total_norm_sq: 2.0,
-        };
-        assert!((directed_trigger_similarity(&target, &candidate) - 100.0).abs() < 1e-9);
     }
 
     #[test]
