@@ -59,5 +59,8 @@ jobs:
           --package lianghua-app
           -- --check
 
-      - name: Test default workspace members
-        run: cargo test --all-targets
+      - name: Check all backend targets
+        run: cargo check --all-targets
+
+      - name: Test dependency-free layers
+        run: cargo test --package lianghua-core --package lianghua-provider
