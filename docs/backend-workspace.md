@@ -52,10 +52,20 @@ workspace crate and re-export only when compatibility requires it.
 Run from the repository root:
 
 ```bash
-cargo fmt --all -- --check
-cargo test --all-targets
+cargo fmt \
+  --package lianghua-rs \
+  --package lianghua-core \
+  --package lianghua-provider \
+  --package lianghua-engine \
+  --package lianghua-backtest \
+  --package lianghua-app \
+  -- --check
+cargo check --all-targets
+cargo test --package lianghua-core --package lianghua-provider
 ```
 
 The default workspace members cover the facade and all backend layers without
-requiring the platform-specific Tauri package. The Tauri workflows continue to
-verify Windows and Android packaging separately.
+requiring the platform-specific Tauri package. Linux CI uses `cargo check` for
+DuckDB-dependent crates because the project intentionally links the system
+DuckDB library on Linux. Dependency-free layers run their test binaries in CI;
+the Tauri workflows continue to verify bundled Windows and Android builds.
