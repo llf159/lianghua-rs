@@ -27,6 +27,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 concurrency:
   group: backend-workspace-${{ github.ref }}
   cancel-in-progress: true
