@@ -22,12 +22,10 @@ use rayon::prelude::*;
 
 use lianghua_model::{DownloadProgress, DownloadProgressCallback};
 
-use crate::{
-    data::{
-        DataReader, RowData,
-        cyq::{CyqConfig, CyqSnapshot, compute_cyq_snapshots_from_row_data},
-        cyq_db_path, load_trade_date_list, source_db_path,
-    },
+use crate::data::{
+    DataReader, RowData,
+    cyq::{CyqConfig, CyqSnapshot, compute_cyq_snapshots_from_row_data},
+    cyq_db_path, load_trade_date_list, source_db_path,
 };
 
 const CYQ_SNAPSHOT_TABLE: &str = "cyq_snapshot";

@@ -10,4 +10,3 @@ pub fn row_into_rt(row_data: RowData) -> Result<Runtime, String> {
     }
     Ok(runtime)
 }
-

@@ -2,13 +2,13 @@ use std::collections::{HashMap, HashSet};
 
 use duckdb::{Connection, params};
 
-use crate::data::{
-    RowData, RuleKind, ScopeWay, ScoreRule, cyq_chen_data::init_cyq_chen_db, cyq_chen_db_path,
-    load_trade_date_list,
-};
 pub use crate::data::extras::{
     calc_zhang_pct, inject_constant_num_fields, inject_latest_num_fields,
     inject_stock_extra_fields, load_st_list, load_total_share_map,
+};
+use crate::data::{
+    RowData, RuleKind, ScopeWay, ScoreRule, cyq_chen_data::init_cyq_chen_db, cyq_chen_db_path,
+    load_trade_date_list,
 };
 use crate::expr::eval::{Runtime, Value};
 use crate::expr::{

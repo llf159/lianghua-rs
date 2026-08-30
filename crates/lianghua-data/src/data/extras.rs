@@ -118,4 +118,3 @@ pub fn load_total_share_map(source_dir: &str) -> Result<HashMap<String, f64>, St
     }
     Ok(out)
 }
-

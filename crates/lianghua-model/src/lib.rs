@@ -186,4 +186,3 @@ pub struct DownloadProgress {
 }
 
 pub type DownloadProgressCallback<'a> = dyn Fn(DownloadProgress) + Send + Sync + 'a;
-
