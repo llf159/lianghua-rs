@@ -9,7 +9,6 @@ use std::{
 };
 
 use duckdb::{Connection, params};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::*;
