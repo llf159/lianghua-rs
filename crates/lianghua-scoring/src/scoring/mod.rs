@@ -12,6 +12,7 @@ use crate::{
 };
 
 pub mod runner;
+pub mod scoring_data;
 pub mod tools;
 
 enum ScopeHit {

@@ -23,6 +23,8 @@ use crate::scoring::{
     RuleScoreSeries, SceneResolvedStage, SceneScoreSeries, TieBreakWay,
 };
 
+pub use crate::data::runtime::row_into_rt;
+
 #[derive(Debug, Default, Clone)]
 pub struct ScoreSummary {
     pub ts_code: String,
@@ -1662,16 +1664,6 @@ pub fn write_score_batches_from_channel(
     profile.total_ms = total_started_at.elapsed().as_millis() as u64;
 
     Ok(profile)
-}
-
-pub fn row_into_rt(row_data: RowData) -> Result<Runtime, String> {
-    let mut rt = Runtime::default();
-    for (name, col) in row_data.cols {
-        let n_series = Value::NumSeries(col);
-        rt.vars.insert(name, n_series);
-    }
-
-    Ok(rt)
 }
 
 pub fn cache_rule_build(

@@ -9,8 +9,10 @@ use std::{
 use duckdb::params_from_iter;
 
 use crate::{
-    data::scoring_data::row_into_rt,
-    data::{DataReader, IndsData, RowData, STOCK_DATA_RUNTIME_FIELDS, ind_toml_path},
+    data::{
+        DataReader, IndsData, RowData, STOCK_DATA_RUNTIME_FIELDS, ind_toml_path,
+        runtime::row_into_rt,
+    },
     download::ProBarRow,
     expr::eval::Value,
     expr::{

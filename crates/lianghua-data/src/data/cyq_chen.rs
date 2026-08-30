@@ -9,7 +9,7 @@ use crate::{
     data::{
         RowData, RuntimeKeyCollectOptions, chip_change_rule_path,
         collect_assigned_names_from_expr_program, collect_runtime_keys_from_expr_programs,
-        scoring_data::row_into_rt,
+        runtime::row_into_rt,
     },
     expr::{
         eval::{Runtime, Value},

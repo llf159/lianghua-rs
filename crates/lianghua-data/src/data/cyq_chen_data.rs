@@ -21,6 +21,8 @@ use duckdb::{
 };
 use rayon::prelude::*;
 
+use lianghua_model::{DownloadProgress, DownloadProgressCallback};
+
 use crate::{
     data::{
         DataReader, RowData, chip_change_rule_path,
@@ -31,10 +33,10 @@ use crate::{
             compute_chen_chip_snapshots_with_compiled_config, estimate_chen_chip_expression_warmup,
             load_compiled_chip_change_config, round_chen_chip_snapshot, round_chen_chip_value,
         },
-        cyq_chen_db_path, load_trade_date_list, source_db_path,
+        cyq_chen_db_path,
+        extras::{inject_stock_extra_fields, load_st_list, load_total_share_map},
+        load_trade_date_list, source_db_path,
     },
-    download::runner::{DownloadProgress, DownloadProgressCallback},
-    scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map},
 };
 
 const CYQ_CHEN_SNAPSHOT_TABLE: &str = "cyq_chen_snapshot";

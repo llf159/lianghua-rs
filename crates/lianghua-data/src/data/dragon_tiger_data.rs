@@ -1,11 +1,9 @@
 use std::{collections::HashSet, fs::create_dir_all};
 
 use duckdb::{Connection, params};
+use lianghua_model::{TopInstRow, TopListRow};
 
-use crate::{
-    data::dragon_tiger_db_path,
-    download::{TopInstRow, TopListRow},
-};
+use crate::data::dragon_tiger_db_path;
 
 pub fn open_dragon_tiger_db(source_dir: &str) -> Result<Connection, String> {
     let db_path = dragon_tiger_db_path(source_dir);

@@ -14,6 +14,8 @@ use chrono::{Datelike, Local, NaiveDate, Timelike, Weekday};
 use duckdb::Connection;
 use rayon::{ThreadPool, ThreadPoolBuilder, prelude::*};
 
+pub use lianghua_model::{DownloadProgress, DownloadProgressCallback};
+
 use crate::{
     crawler::concept::{ThsConceptFetchItem, ThsConceptRow, fetch_one_ths_concept_row},
     data::{
@@ -42,17 +44,6 @@ use crate::{
 fn price_equal(ref_close: f64, pre_close: f64) -> bool {
     (ref_close - pre_close).abs() < 0.001
 }
-
-#[derive(Debug, Clone)]
-pub struct DownloadProgress {
-    pub phase: String,
-    pub finished: usize,
-    pub total: usize,
-    pub current_label: Option<String>,
-    pub message: String,
-}
-
-pub type DownloadProgressCallback<'a> = dyn Fn(DownloadProgress) + Send + Sync + 'a;
 
 const INCREMENTAL_INDICATOR_CHUNK_SIZE: usize = 256;
 const THS_CONCEPT_RETRY_DELAY_SECS: u64 = 30;

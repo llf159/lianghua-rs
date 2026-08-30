@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fs::create_dir_all, path::Path};
 
 use duckdb::{Appender, Connection, ToSql, params, params_from_iter};
+use lianghua_model::{AdjType, ProBarRow, StockListRow, TradeCalRow};
 
 use crate::{
     crawler::concept::ThsConceptRow,
@@ -8,7 +9,6 @@ use crate::{
         STOCK_DATA_KEY_COLUMN_DEFS, STOCK_DATA_RUNTIME_FIELDS, source_db_path, stock_list_path,
         ths_concepts_path, trade_calendar_path,
     },
-    download::{AdjType, ProBarRow, StockListRow, TradeCalRow},
     utils::utils::round_f64_to_scale,
 };
 
@@ -994,7 +994,7 @@ mod tests {
                 amount: 10000.0,
                 turnover_rate: Some(1.2),
                 volume_ratio: None,
-                moneyflow: Some(crate::download::MoneyflowRow {
+                moneyflow: Some(lianghua_model::MoneyflowRow {
                     ts_code: "000001.SZ".to_string(),
                     trade_date: "20240102".to_string(),
                     b_sm_v: Some(1.0),

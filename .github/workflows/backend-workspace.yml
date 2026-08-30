@@ -57,6 +57,10 @@ jobs:
           --package lianghua-rs
           --package lianghua-core
           --package lianghua-provider
+          --package lianghua-model
+          --package lianghua-data
+          --package lianghua-download
+          --package lianghua-scoring
           --package lianghua-engine
           --package lianghua-backtest
           --package lianghua-app
@@ -66,4 +70,4 @@ jobs:
         run: cargo check --all-targets
 
       - name: Test dependency-free layers
-        run: cargo test --package lianghua-core --package lianghua-provider
+        run: cargo test --package lianghua-core --package lianghua-provider --package lianghua-model

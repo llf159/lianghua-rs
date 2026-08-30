@@ -1,11 +1,15 @@
-//! Storage, ingestion, indicator calculation, and scoring engine.
+//! Compatibility aggregation for the backend capability crates.
 //!
-//! The re-exports preserve the former `crate::expr`, `crate::utils`, and
-//! `crate::crawler` paths while keeping the physical dependency graph acyclic.
+//! Implementation belongs in the narrow `lianghua-data`,
+//! `lianghua-download`, or `lianghua-scoring` crate.
 
 pub use lianghua_core::{expr, utils};
+pub use lianghua_download::download;
 pub use lianghua_provider::crawler;
+pub use lianghua_scoring::scoring;
 
-pub mod data;
-pub mod download;
-pub mod scoring;
+pub mod data {
+    pub use lianghua_data::data::*;
+    pub use lianghua_download::download::simulate;
+    pub use lianghua_scoring::scoring::scoring_data;
+}

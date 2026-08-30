@@ -9,6 +9,10 @@ members = [
     ".",
     "crates/lianghua-core",
     "crates/lianghua-provider",
+    "crates/lianghua-model",
+    "crates/lianghua-data",
+    "crates/lianghua-download",
+    "crates/lianghua-scoring",
     "crates/lianghua-engine",
     "crates/lianghua-backtest",
     "crates/lianghua-app",
@@ -19,6 +23,10 @@ default-members = [
     ".",
     "crates/lianghua-core",
     "crates/lianghua-provider",
+    "crates/lianghua-model",
+    "crates/lianghua-data",
+    "crates/lianghua-download",
+    "crates/lianghua-scoring",
     "crates/lianghua-engine",
     "crates/lianghua-backtest",
     "crates/lianghua-app",
@@ -48,6 +56,15 @@ webpki-roots = "1"
 opt-level = 3
 
 [profile.dev.package.lianghua-engine]
+opt-level = 3
+
+[profile.dev.package.lianghua-data]
+opt-level = 3
+
+[profile.dev.package.lianghua-download]
+opt-level = 3
+
+[profile.dev.package.lianghua-scoring]
 opt-level = 3
 
 [profile.dev.package.lianghua-backtest]

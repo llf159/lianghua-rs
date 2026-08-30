@@ -1,5 +1,5 @@
 use crate::{
-    data::{RowData, scoring_data::row_into_rt},
+    data::{RowData, runtime::row_into_rt},
     download::ind_calc::{cache_ind_build, calc_inds_with_cache},
     expr::eval::Runtime,
 };

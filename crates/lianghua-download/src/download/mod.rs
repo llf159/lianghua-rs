@@ -1,6 +1,7 @@
 pub mod dragon_tiger;
 pub mod ind_calc;
 pub mod runner;
+pub mod simulate;
 
 use rayon::prelude::*;
 use std::{
@@ -11,6 +12,11 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+
+pub use lianghua_model::{
+    AdjFactorRow, AdjType, BarFreq, BarRow, DailyBasicRow, DailyBasicSnapshotRow, MoneyflowRow,
+    ProBarRow, StockBasicRow, StockListRow, TopInstRow, TopListRow, TradeCalRow,
+};
 
 use crate::data::download_data::{write_stock_list_csv, write_trade_calendar_csv};
 use crate::download::ind_calc::calc_one_stock_inds;
@@ -58,171 +64,12 @@ const TOP_LIST_FIELDS: &str = "trade_date,ts_code,name,close,pct_change,turnover
 const TOP_INST_FIELDS: &str =
     "trade_date,ts_code,exalter,buy,buy_rate,sell,sell_rate,net_buy,side,reason";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdjType {
-    Qfq,
-    Hfq,
-    Raw,
-    Ind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BarFreq {
-    Daily,
-    Weekly,
-    Monthly,
-}
-
-#[derive(Debug, Clone)]
-pub struct BarRow {
-    pub ts_code: String,
-    pub trade_date: String,
-    pub open: f64,
-    pub high: f64,
-    pub low: f64,
-    pub close: f64,
-    pub pre_close: f64,
-    pub change: f64,
-    pub pct_chg: f64,
-    pub vol: f64,
-    pub amount: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct AdjFactorRow {
-    pub ts_code: String,
-    pub trade_date: String,
-    pub adj_factor: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct DailyBasicRow {
-    pub ts_code: String,
-    pub trade_date: String,
-    pub turnover_rate: Option<f64>,
-    pub volume_ratio: Option<f64>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct MoneyflowRow {
-    pub ts_code: String,
-    pub trade_date: String,
-    pub b_sm_v: Option<f64>,
-    pub s_sm_v: Option<f64>,
-    pub b_md_v: Option<f64>,
-    pub s_md_v: Option<f64>,
-    pub b_lg_v: Option<f64>,
-    pub s_lg_v: Option<f64>,
-    pub b_elg_v: Option<f64>,
-    pub s_elg_v: Option<f64>,
-    pub net_mf_v: Option<f64>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TopListRow {
-    pub trade_date: String,
-    pub ts_code: String,
-    pub name: String,
-    pub close: Option<f64>,
-    pub pct_change: Option<f64>,
-    pub turnover_rate: Option<f64>,
-    pub amount: Option<f64>,
-    pub l_sell: Option<f64>,
-    pub l_buy: Option<f64>,
-    pub l_amount: Option<f64>,
-    pub net_amount: Option<f64>,
-    pub net_rate: Option<f64>,
-    pub amount_rate: Option<f64>,
-    pub float_values: Option<f64>,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TopInstRow {
-    pub trade_date: String,
-    pub ts_code: String,
-    pub exalter: String,
-    pub buy: Option<f64>,
-    pub buy_rate: Option<f64>,
-    pub sell: Option<f64>,
-    pub sell_rate: Option<f64>,
-    pub net_buy: Option<f64>,
-    pub side: String,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct StockBasicRow {
-    pub ts_code: String,
-    pub symbol: String,
-    pub name: String,
-    pub area: String,
-    pub industry: String,
-    pub fullname: String,
-    pub enname: String,
-    pub cnspell: String,
-    pub market: String,
-    pub exchange: String,
-    pub curr_type: String,
-    pub list_status: String,
-    pub list_date: String,
-    pub delist_date: String,
-    pub is_hs: String,
-    pub act_name: String,
-    pub act_ent_type: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct DailyBasicSnapshotRow {
-    pub ts_code: String,
-    pub trade_date: String,
-    pub total_share: Option<f64>,
-    pub float_share: Option<f64>,
-    pub total_mv: Option<f64>,
-    pub circ_mv: Option<f64>,
-}
-
-#[derive(Debug, Clone)]
-pub struct StockListRow {
-    pub ts_code: String,
-    pub symbol: String,
-    pub name: String,
-    pub area: String,
-    pub industry: String,
-    pub list_date: String,
-    pub trade_date: String,
-    pub total_share: Option<f64>,
-    pub float_share: Option<f64>,
-    pub total_mv: Option<f64>,
-    pub circ_mv: Option<f64>,
-    pub fullname: String,
-    pub enname: String,
-    pub cnspell: String,
-    pub market: String,
-    pub exchange: String,
-    pub curr_type: String,
-    pub list_status: String,
-    pub delist_date: String,
-    pub is_hs: String,
-    pub act_name: String,
-    pub act_ent_type: String,
-}
-
 #[derive(Debug, Clone)]
 pub struct StockListFetchResult {
     pub rows: Vec<StockListRow>,
     pub basic_row_count: usize,
     pub snapshot_row_count: usize,
     pub market_value_row_count: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct TradeCalRow {
-    // 交易日列表返回值结构
-    pub exchange: String,
-    pub cal_date: String,
-    pub is_open: String,
-    pub pretrade_date: String,
 }
 
 #[derive(Serialize)]
@@ -1365,24 +1212,6 @@ pub fn parse_trade_cal_rows(table: &TushareTable) -> Result<Vec<TradeCalRow>, St
     }
 
     Ok(rows)
-}
-
-#[derive(Debug, Clone)]
-pub struct ProBarRow {
-    pub ts_code: String,
-    pub trade_date: String,
-    pub open: f64,
-    pub high: f64,
-    pub low: f64,
-    pub close: f64,
-    pub pre_close: f64,
-    pub change: f64,
-    pub pct_chg: f64,
-    pub vol: f64,
-    pub amount: f64,
-    pub turnover_rate: Option<f64>,
-    pub volume_ratio: Option<f64>,
-    pub moneyflow: Option<MoneyflowRow>,
 }
 
 pub fn build_single_moneyflow_map(

@@ -1,13 +1,13 @@
-use crate::download::ProBarRow;
+use lianghua_model::ProBarRow;
 
-pub(crate) const STOCK_DATA_KEY_COLUMN_DEFS: [(&str, &str); 3] = [
+pub const STOCK_DATA_KEY_COLUMN_DEFS: [(&str, &str); 3] = [
     ("ts_code", "VARCHAR"),
     ("trade_date", "VARCHAR"),
     ("adj_type", "VARCHAR"),
 ];
 
 #[derive(Clone, Copy)]
-pub(crate) struct StockDataRuntimeField {
+pub struct StockDataRuntimeField {
     pub db_column: &'static str,
     pub runtime_key: &'static str,
     pub sql_type: &'static str,
@@ -17,7 +17,7 @@ pub(crate) struct StockDataRuntimeField {
 }
 
 // 行情数据从下载、落库、历史读取到指标运行时只维护这一份字段定义。
-pub(crate) const STOCK_DATA_RUNTIME_FIELDS: [StockDataRuntimeField; 19] = [
+pub const STOCK_DATA_RUNTIME_FIELDS: [StockDataRuntimeField; 19] = [
     StockDataRuntimeField {
         db_column: "open",
         runtime_key: "O",

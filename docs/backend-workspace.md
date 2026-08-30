@@ -8,31 +8,38 @@ the required capability.
 ## Dependency layers
 
 ```text
-lianghua-core       expression DSL and shared utilities
-       |
-       +--------------------+
+lianghua-core          expression DSL and shared utilities
+lianghua-provider      external market-data protocols
+lianghua-model         shared market DTOs and progress contracts
+        |                    |                    |
+        v                    v                    v
+lianghua-data    lianghua-download    lianghua-scoring
+ storage/domain      ingestion/indicators      rules/ranking
+        \___________________|___________________/
+                            v
+                    lianghua-engine
+                   compatibility facade
                             |
-lianghua-provider           | external market-data protocols
-       |                    |
-       +--------+-----------+
-                v
-         lianghua-engine     storage, ingestion, indicators, scoring
-                |
-                v
-       lianghua-backtest     simulations and statistical backtests
-                |
-                v
-          lianghua-app       application-facing use cases
-                |
-                v
-           Tauri adapter
+                            v
+                   lianghua-backtest
+                            |
+                            v
+                      lianghua-app
+                            |
+                            v
+                       Tauri adapter
 ```
 
 The dependency graph must remain acyclic. In particular:
 
 - `lianghua-core` must not depend on storage, network, Tauri, or DuckDB.
-- `lianghua-provider` returns provider DTOs and must not open local databases.
-- `lianghua-engine` owns the tightly coupled synchronous data/scoring pipeline.
+- `lianghua-provider` implements external protocols and must not open local databases.
+- `lianghua-model` contains contracts only and has no infrastructure dependency.
+- `lianghua-data` owns persistence and domain configuration; it must not depend on
+  download or scoring.
+- `lianghua-download` may depend on data, while `lianghua-scoring` may depend on
+  data; they must not depend on one another.
+- `lianghua-engine` is a compatibility facade and contains no implementation.
 - `lianghua-backtest` may read engine contracts but the engine must not call it.
 - `lianghua-app` is the only backend crate intended for UI adapters.
 - Tauri-specific commands, filesystem plugins, and dialogs stay in
@@ -56,12 +63,16 @@ cargo fmt \
   --package lianghua-rs \
   --package lianghua-core \
   --package lianghua-provider \
+  --package lianghua-model \
+  --package lianghua-data \
+  --package lianghua-download \
+  --package lianghua-scoring \
   --package lianghua-engine \
   --package lianghua-backtest \
   --package lianghua-app \
   -- --check
 cargo check --all-targets
-cargo test --package lianghua-core --package lianghua-provider
+cargo test --package lianghua-core --package lianghua-provider --package lianghua-model
 ```
 
 The default workspace members cover the facade and all backend layers without

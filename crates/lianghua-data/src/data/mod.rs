@@ -5,11 +5,11 @@ pub mod cyq_chen_data;
 pub mod cyq_data;
 pub mod download_data;
 pub mod dragon_tiger_data;
-pub mod scoring_data;
-pub mod simulate;
+pub mod extras;
+pub mod runtime;
 mod stock_data_fields;
 
-pub(crate) use stock_data_fields::{STOCK_DATA_KEY_COLUMN_DEFS, STOCK_DATA_RUNTIME_FIELDS};
+pub use stock_data_fields::{STOCK_DATA_KEY_COLUMN_DEFS, STOCK_DATA_RUNTIME_FIELDS};
 
 use std::{
     collections::{HashMap, HashSet},
