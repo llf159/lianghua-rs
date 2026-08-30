@@ -49,7 +49,15 @@ jobs:
           workspaces: . -> target
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: >-
+          cargo fmt
+          --package lianghua-rs
+          --package lianghua-core
+          --package lianghua-provider
+          --package lianghua-engine
+          --package lianghua-backtest
+          --package lianghua-app
+          -- --check
 
       - name: Test default workspace members
         run: cargo test --all-targets
