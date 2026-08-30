@@ -12,7 +12,7 @@ use crate::data::concept_performance_data::{
 };
 use crate::data::{load_trade_date_list, stock_list_path};
 
-pub(crate) const DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS: usize = 60;
+pub const DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS: usize = 60;
 
 pub(super) fn build_forward_backtest_residual_map(
     mut residual_points: Vec<ResidualReturnPoint>,
@@ -65,14 +65,14 @@ pub(super) fn build_forward_backtest_residual_map(
 }
 
 #[derive(Debug, Clone, Default)]
-pub(super) struct BacktestSampleEligibility {
+pub struct BacktestSampleEligibility {
     trade_date_to_index: HashMap<String, usize>,
     listed_trade_index_by_ts: HashMap<String, usize>,
     min_listed_trade_days: usize,
 }
 
 impl BacktestSampleEligibility {
-    pub(crate) fn allows_sample(&self, ts_code: &str, trade_date: &str) -> bool {
+    pub fn allows_sample(&self, ts_code: &str, trade_date: &str) -> bool {
         if self.min_listed_trade_days == 0 {
             return true;
         }
@@ -88,7 +88,7 @@ impl BacktestSampleEligibility {
     }
 }
 
-pub(crate) fn build_backtest_sample_eligibility(
+pub fn build_backtest_sample_eligibility(
     source_dir: &str,
     min_listed_trade_days: usize,
 ) -> Result<BacktestSampleEligibility, String> {

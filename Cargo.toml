@@ -3,7 +3,33 @@ name = "lianghua-rs"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+resolver = "3"
+members = [
+    ".",
+    "crates/lianghua-core",
+    "crates/lianghua-provider",
+    "crates/lianghua-engine",
+    "crates/lianghua-backtest",
+    "crates/lianghua-app",
+    "analysis_tools/market_analyze",
+    "ui/lianghua_web/src-tauri",
+]
+default-members = [
+    ".",
+    "crates/lianghua-core",
+    "crates/lianghua-provider",
+    "crates/lianghua-engine",
+    "crates/lianghua-backtest",
+    "crates/lianghua-app",
+]
+
 [dependencies]
+lianghua-core = { path = "crates/lianghua-core" }
+lianghua-provider = { path = "crates/lianghua-provider" }
+lianghua-engine = { path = "crates/lianghua-engine" }
+lianghua-backtest = { path = "crates/lianghua-backtest" }
+lianghua-app = { path = "crates/lianghua-app" }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.9"
 duckdb = { version = "1.4.4", features = ["appender-arrow"] }
@@ -16,3 +42,13 @@ chrono = "0.4.44"
 rand = "0.9.2"
 rustls = "0.23"
 webpki-roots = "1"
+
+# Keep compute-heavy backend crates optimized during Tauri development builds.
+[profile.dev.package.lianghua-app]
+opt-level = 3
+
+[profile.dev.package.lianghua-engine]
+opt-level = 3
+
+[profile.dev.package.lianghua-backtest]
+opt-level = 3

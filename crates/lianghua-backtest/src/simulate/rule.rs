@@ -25,7 +25,7 @@ use crate::simulate::fp_utils::{
 const PCT_CHG_BATCH_SIZE: usize = 512;
 const EFFICIENCY_RATIO_PERIOD: usize = 20;
 const EFFICIENCY_RATIO_STOCK_BATCH_SIZE: usize = 128;
-pub(crate) const DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE: usize = 4;
+pub const DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct RuleLayerConfig {
