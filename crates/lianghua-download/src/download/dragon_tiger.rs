@@ -38,14 +38,6 @@ pub struct DragonTigerDownloadSummary {
     pub top_inst_rows: usize,
 }
 
-fn resolve_end_date(raw: &str) -> String {
-    if raw.eq_ignore_ascii_case("today") {
-        Local::now().format("%Y%m%d").to_string()
-    } else {
-        raw.to_string()
-    }
-}
-
 fn pending_trade_dates(
     trade_dates: &[String],
     synced_dates: &HashSet<String>,
@@ -90,27 +82,17 @@ where
     ))
 }
 
-fn fetch_trade_date_with_retries(
-    client: &TushareClient,
-    trade_date: &str,
-    retry_times: usize,
-) -> Result<(Vec<TopListRow>, Vec<TopInstRow>), String> {
-    let top_list_rows =
-        fetch_with_retries(trade_date, "龙虎榜每日明细", retry_times, || {
-            client.fetch_top_list_by_trade_date(trade_date)
-        })?;
-    let top_inst_rows =
-        fetch_with_retries(trade_date, "龙虎榜席位明细", retry_times, || {
-            client.fetch_top_inst_by_trade_date(trade_date)
-        })?;
-    Ok((top_list_rows, top_inst_rows))
-}
-
 pub fn download_dragon_tiger(
     config: &DragonTigerDownloadConfig,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DragonTigerDownloadSummary, String> {
-    let end_date = resolve_end_date(config.end_date.as_str());
+    let end_date = (|raw: &str| -> String {
+        if raw.eq_ignore_ascii_case("today") {
+            Local::now().format("%Y%m%d").to_string()
+        } else {
+            raw.to_string()
+        }
+    })(config.end_date.as_str());
     if config.start_date.as_str() > end_date.as_str() {
         return Err("龙虎榜开始日期不能晚于结束日期".to_string());
     }
@@ -176,7 +158,20 @@ pub fn download_dragon_tiger(
         }
 
         let (top_list_rows, top_inst_rows) =
-            fetch_trade_date_with_retries(&client, trade_date, config.retry_times)?;
+            (|client: &TushareClient,
+              trade_date: &str,
+              retry_times: usize|
+             -> Result<(Vec<TopListRow>, Vec<TopInstRow>), String> {
+                let top_list_rows =
+                    fetch_with_retries(trade_date, "龙虎榜每日明细", retry_times, || {
+                        client.fetch_top_list_by_trade_date(trade_date)
+                    })?;
+                let top_inst_rows =
+                    fetch_with_retries(trade_date, "龙虎榜席位明细", retry_times, || {
+                        client.fetch_top_inst_by_trade_date(trade_date)
+                    })?;
+                Ok((top_list_rows, top_inst_rows))
+            })(&client, trade_date, config.retry_times)?;
         if trade_date == &today && top_list_rows.is_empty() && top_inst_rows.is_empty() {
             summary.deferred_trade_dates += 1;
             if let Some(cb) = progress_cb {

@@ -96,24 +96,6 @@ fn build_stock_list_text_map(
     Ok(out)
 }
 
-fn load_total_mv_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
-    let stock_list = load_stock_list(source_dir)?;
-    let mut out = HashMap::with_capacity(stock_list.len());
-    for cols in stock_list {
-        let Some(ts_code) = cols.first() else {
-            continue;
-        };
-        let Some(total_mv_raw) = cols.get(9) else {
-            continue;
-        };
-        let Ok(total_mv) = total_mv_raw.trim().parse::<f64>() else {
-            continue;
-        };
-        out.insert(ts_code.trim().to_string(), total_mv / 1e4);
-    }
-    Ok(out)
-}
-
 pub fn build_total_mv_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
     let stock_list_stamp = fs::metadata(stock_list_path(source_dir))
         .ok()
@@ -129,31 +111,47 @@ pub fn build_total_mv_map(source_dir: &str) -> Result<HashMap<String, f64>, Stri
         .unwrap_or_else(|| "missing".to_string());
     cached_number_map(
         format!("{source_dir}\0total_mv\0{stock_list_stamp}"),
-        || load_total_mv_map(source_dir),
+        || {
+            (|source_dir: &str| -> Result<HashMap<String, f64>, String> {
+                let stock_list = load_stock_list(source_dir)?;
+                let mut out = HashMap::with_capacity(stock_list.len());
+                for cols in stock_list {
+                    let Some(ts_code) = cols.first() else {
+                        continue;
+                    };
+                    let Some(total_mv_raw) = cols.get(9) else {
+                        continue;
+                    };
+                    let Ok(total_mv) = total_mv_raw.trim().parse::<f64>() else {
+                        continue;
+                    };
+                    out.insert(ts_code.trim().to_string(), total_mv / 1e4);
+                }
+                Ok(out)
+            })(source_dir)
+        },
     )
-}
-
-fn load_circ_mv_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
-    let stock_list = load_stock_list(source_dir)?;
-    let mut out = HashMap::with_capacity(stock_list.len());
-    for cols in stock_list {
-        let Some(ts_code) = cols.first() else {
-            continue;
-        };
-        let Some(circ_mv_raw) = cols.get(10) else {
-            continue;
-        };
-        let Ok(circ_mv) = circ_mv_raw.trim().parse::<f64>() else {
-            continue;
-        };
-        out.insert(ts_code.trim().to_string(), circ_mv / 1e4);
-    }
-    Ok(out)
 }
 
 pub fn build_circ_mv_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
     cached_number_map(format!("{source_dir}\0circ_mv"), || {
-        load_circ_mv_map(source_dir)
+        (|source_dir: &str| -> Result<HashMap<String, f64>, String> {
+            let stock_list = load_stock_list(source_dir)?;
+            let mut out = HashMap::with_capacity(stock_list.len());
+            for cols in stock_list {
+                let Some(ts_code) = cols.first() else {
+                    continue;
+                };
+                let Some(circ_mv_raw) = cols.get(10) else {
+                    continue;
+                };
+                let Ok(circ_mv) = circ_mv_raw.trim().parse::<f64>() else {
+                    continue;
+                };
+                out.insert(ts_code.trim().to_string(), circ_mv / 1e4);
+            }
+            Ok(out)
+        })(source_dir)
     })
 }
 
@@ -185,24 +183,22 @@ pub fn filter_mv(
     true
 }
 
-fn load_concepts_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
-    let concepts_list = load_ths_concepts_list(source_dir)?;
-    let mut out = HashMap::new();
-    for cols in concepts_list {
-        let Some(ts_code) = cols.first() else {
-            continue;
-        };
-        let Some(concept) = cols.get(2) else {
-            continue;
-        };
-        out.insert(ts_code.to_string(), concept.to_string());
-    }
-    Ok(out)
-}
-
 pub fn build_concepts_map(source_dir: &str) -> Result<HashMap<String, String>, String> {
     cached_string_map(format!("{source_dir}\0concepts"), || {
-        load_concepts_map(source_dir)
+        (|source_dir: &str| -> Result<HashMap<String, String>, String> {
+            let concepts_list = load_ths_concepts_list(source_dir)?;
+            let mut out = HashMap::new();
+            for cols in concepts_list {
+                let Some(ts_code) = cols.first() else {
+                    continue;
+                };
+                let Some(concept) = cols.get(2) else {
+                    continue;
+                };
+                out.insert(ts_code.to_string(), concept.to_string());
+            }
+            Ok(out)
+        })(source_dir)
     })
 }
 

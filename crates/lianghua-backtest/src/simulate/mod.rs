@@ -568,32 +568,6 @@ mod tests {
         conn
     }
 
-    fn prepare_concept_performance_db(source_dir: &str) {
-        let db_path = concept_performance_db_path(source_dir);
-        let conn = Connection::open(db_path).expect("open concept db");
-        conn.execute(
-            r#"
-            CREATE TABLE concept_performance (
-                trade_date VARCHAR,
-                performance_type VARCHAR,
-                concept VARCHAR,
-                performance_pct DOUBLE
-            )
-            "#,
-            [],
-        )
-        .expect("create concept_performance");
-
-        let mut app = conn
-            .appender("concept_performance")
-            .expect("appender concept_performance");
-        app.append_row(params!["20240102", "industry", "银行", 2.0_f64])
-            .expect("industry row1");
-        app.append_row(params!["20240103", "industry", "银行", 0.5_f64])
-            .expect("industry row2");
-        app.flush().expect("flush concept_performance");
-    }
-
     #[test]
     fn backtest_sample_eligibility_uses_list_date_and_trade_calendar() {
         let source_dir = temp_source_dir();
@@ -678,7 +652,31 @@ mod tests {
         let source_dir_str = source_dir.to_str().expect("utf8 source dir");
 
         let conn = prepare_source_db(source_dir_str);
-        prepare_concept_performance_db(source_dir_str);
+        (|source_dir: &str| {
+            let db_path = concept_performance_db_path(source_dir);
+            let conn = Connection::open(db_path).expect("open concept db");
+            conn.execute(
+                r#"
+            CREATE TABLE concept_performance (
+                trade_date VARCHAR,
+                performance_type VARCHAR,
+                concept VARCHAR,
+                performance_pct DOUBLE
+            )
+            "#,
+                [],
+            )
+            .expect("create concept_performance");
+
+            let mut app = conn
+                .appender("concept_performance")
+                .expect("appender concept_performance");
+            app.append_row(params!["20240102", "industry", "银行", 2.0_f64])
+                .expect("industry row1");
+            app.append_row(params!["20240103", "industry", "银行", 0.5_f64])
+                .expect("industry row2");
+            app.flush().expect("flush concept_performance");
+        })(source_dir_str);
 
         let input = ResidualReturnInput {
             ts_code: "000001.SZ".to_string(),

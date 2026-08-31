@@ -30,7 +30,20 @@ pub fn round_f64_to_scale(value: f64, scale: u32) -> f64 {
             .unwrap_or(value);
     }
 
-    if value.abs() >= round_identity_threshold(scale) {
+    if value.abs()
+        >= match scale {
+            0 => 4_503_599_627_370_496.0,
+            1 => 562_949_953_421_312.0,
+            2 => 70_368_744_177_664.0,
+            3 => 8_796_093_022_208.0,
+            4 => 549_755_813_888.0,
+            5 => 68_719_476_736.0,
+            6 => 8_589_934_592.0,
+            7 => 536_870_912.0,
+            8 => 67_108_864.0,
+            _ => unreachable!(),
+        }
+    {
         return value;
     }
 
@@ -65,21 +78,6 @@ pub fn round_f64_to_scale(value: f64, scale: u32) -> f64 {
     };
     let rounded = rounded_scaled as f64 / scale_factor as f64;
     if negative { -rounded } else { rounded }
-}
-
-const fn round_identity_threshold(scale: u32) -> f64 {
-    match scale {
-        0 => 4_503_599_627_370_496.0,
-        1 => 562_949_953_421_312.0,
-        2 => 70_368_744_177_664.0,
-        3 => 8_796_093_022_208.0,
-        4 => 549_755_813_888.0,
-        5 => 68_719_476_736.0,
-        6 => 8_589_934_592.0,
-        7 => 536_870_912.0,
-        8 => 67_108_864.0,
-        _ => unreachable!(),
-    }
 }
 
 pub fn eval_binary_for_warmup(
@@ -544,30 +542,29 @@ pub fn impl_expr_warmup(
     Ok(max_need)
 }
 
-fn st_board_category(stock_name: Option<&str>) -> Option<&'static str> {
-    let normalized = stock_name
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            value
-                .to_ascii_uppercase()
-                .replace(' ', "")
-                .replace('＊', "*")
-        })?;
-
-    if normalized.starts_with("*ST")
-        || normalized.starts_with("ST")
-        || normalized.starts_with("退市")
-        || normalized.ends_with('退')
-    {
-        Some("ST")
-    } else {
-        None
-    }
-}
-
 pub fn board_category(ts_code: &str, stock_name: Option<&str>) -> &'static str {
-    if let Some(st_board) = st_board_category(stock_name) {
+    if let Some(st_board) = (|stock_name: Option<&str>| -> Option<&'static str> {
+        let normalized = stock_name
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                value
+                    .to_ascii_uppercase()
+                    .replace(' ', "")
+                    .replace('＊', "*")
+            })?;
+
+        if normalized.starts_with("*ST")
+            || normalized.starts_with("ST")
+            || normalized.starts_with("退市")
+            || normalized.ends_with('退')
+        {
+            Some("ST")
+        } else {
+            None
+        }
+    })(stock_name)
+    {
         return st_board;
     }
 

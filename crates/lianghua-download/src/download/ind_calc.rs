@@ -44,15 +44,13 @@ struct IndicatorCacheEntry {
 
 static INDICATOR_CACHE: OnceLock<Mutex<HashMap<String, IndicatorCacheEntry>>> = OnceLock::new();
 
-fn round_to(value: f64, scale: usize) -> f64 {
-    let factor = 10_f64.powi(scale as i32);
-    (value * factor).round() / factor
-}
-
 fn round_series(mut series: Vec<Option<f64>>, scale: usize) -> Vec<Option<f64>> {
     for value in &mut series {
         if let Some(number) = value {
-            *number = round_to(*number, scale);
+            *number = (|value: f64, scale: usize| -> f64 {
+                let factor = 10_f64.powi(scale as i32);
+                (value * factor).round() / factor
+            })(*number, scale);
         }
     }
     series
@@ -68,21 +66,6 @@ fn collect_calculated_indicators(
             (name, series)
         })
         .collect()
-}
-
-fn indicator_cache_store() -> &'static Mutex<HashMap<String, IndicatorCacheEntry>> {
-    INDICATOR_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn build_indicator_file_stamp(path: &Path) -> Result<IndicatorFileStamp, String> {
-    let metadata = fs::metadata(path)
-        .map_err(|e| format!("读取指标文件元数据失败: path={}, err={e}", path.display()))?;
-    let modified = metadata.modified().ok();
-
-    Ok(IndicatorFileStamp {
-        modified,
-        len: metadata.len(),
-    })
 }
 
 fn compile_indicator_defs(inds: Vec<crate::data::IndData>) -> Result<Vec<IndsCache>, String> {
@@ -128,9 +111,20 @@ pub fn cache_ind_build(source_dir: &str) -> Result<Vec<IndsCache>, String> {
 }
 
 pub fn cache_ind_build_from_path(indicator_path: &Path) -> Result<Vec<IndsCache>, String> {
-    let stamp = build_indicator_file_stamp(indicator_path)?;
+    let stamp = (|path: &Path| -> Result<IndicatorFileStamp, String> {
+        let metadata = fs::metadata(path)
+            .map_err(|e| format!("读取指标文件元数据失败: path={}, err={e}", path.display()))?;
+        let modified = metadata.modified().ok();
+
+        Ok(IndicatorFileStamp {
+            modified,
+            len: metadata.len(),
+        })
+    })(indicator_path)?;
     let cache_key = indicator_path.to_string_lossy().to_string();
-    let cache_store = indicator_cache_store();
+    let cache_store = (|| -> &'static Mutex<HashMap<String, IndicatorCacheEntry>> {
+        INDICATOR_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    })();
 
     {
         let cache_map = cache_store
@@ -184,24 +178,6 @@ pub fn warmup_ind_estimate(source_dir: &str) -> Result<usize, String> {
     }
 
     Ok(all_ind_max_need)
-}
-
-fn load_one_tail_rows_with_warmup_need(
-    dr: &DataReader,
-    ts_code: &str,
-    adj_type: &str,
-    end_date: &str,
-    warmup_need: usize,
-) -> Result<Option<RowData>, String> {
-    if warmup_need == 0 {
-        return Ok(None);
-    }
-
-    match dr.load_one_tail_rows(ts_code, adj_type, end_date, warmup_need) {
-        Ok(row_data) => Ok(Some(normalize_row_data_for_indicators(row_data)?)),
-        Err(err) if err.contains("trade_dates为空") => Ok(None),
-        Err(err) => Err(err),
-    }
 }
 
 pub fn load_many_tail_rows_with_warmup_need(
@@ -370,54 +346,6 @@ fn pro_bar_rows_to_row_data(rows: &[ProBarRow]) -> Result<RowData, String> {
     Ok(row_data)
 }
 
-fn normalize_row_data_for_indicators(row_data: RowData) -> Result<RowData, String> {
-    let len = row_data.trade_dates.len();
-    let mut cols = HashMap::with_capacity(STOCK_DATA_RUNTIME_FIELDS.len());
-
-    for field in STOCK_DATA_RUNTIME_FIELDS {
-        let series = row_data
-            .cols
-            .get(field.runtime_key)
-            .cloned()
-            .unwrap_or_else(|| vec![None; len]);
-        cols.insert(field.runtime_key.to_string(), series);
-    }
-
-    let out = RowData {
-        trade_dates: row_data.trade_dates,
-        cols,
-    };
-    out.validate()?;
-    Ok(out)
-}
-
-fn merge_history_with_rows(
-    history: Option<RowData>,
-    rows: &[ProBarRow],
-) -> Result<RowData, String> {
-    let current = pro_bar_rows_to_row_data(rows)?;
-
-    let Some(mut history) = history else {
-        return Ok(current);
-    };
-
-    for field in STOCK_DATA_RUNTIME_FIELDS {
-        let key = field.runtime_key;
-        let src = current
-            .cols
-            .get(key)
-            .ok_or_else(|| format!("缺少指标输入列:{key}"))?;
-        let dst = history
-            .cols
-            .get_mut(key)
-            .ok_or_else(|| format!("历史数据缺少指标输入列:{key}"))?;
-        dst.extend_from_slice(src);
-    }
-    history.trade_dates.extend(current.trade_dates);
-    history.validate()?;
-    Ok(history)
-}
-
 pub fn calc_increment_inds_from_history(
     inds_cache: &[IndsCache],
     history: Option<RowData>,
@@ -427,7 +355,29 @@ pub fn calc_increment_inds_from_history(
         return Err("增量指标计算失败: new_rows为空".to_string());
     }
 
-    let combined = merge_history_with_rows(history, new_rows)?;
+    let combined = (|history: Option<RowData>, rows: &[ProBarRow]| -> Result<RowData, String> {
+        let current = pro_bar_rows_to_row_data(rows)?;
+
+        let Some(mut history) = history else {
+            return Ok(current);
+        };
+
+        for field in STOCK_DATA_RUNTIME_FIELDS {
+            let key = field.runtime_key;
+            let src = current
+                .cols
+                .get(key)
+                .ok_or_else(|| format!("缺少指标输入列:{key}"))?;
+            let dst = history
+                .cols
+                .get_mut(key)
+                .ok_or_else(|| format!("历史数据缺少指标输入列:{key}"))?;
+            dst.extend_from_slice(src);
+        }
+        history.trade_dates.extend(current.trade_dates);
+        history.validate()?;
+        Ok(history)
+    })(history, new_rows)?;
     let indicators = calc_inds_with_cache(inds_cache, combined)?;
     let keep_len = new_rows.len();
     let mut out = HashMap::with_capacity(indicators.len());
@@ -517,9 +467,41 @@ pub fn calc_increment_one_stock_inds(
     new_rows: &[ProBarRow],
 ) -> Result<HashMap<String, Vec<Option<f64>>>, String> {
     let history = match history_end_date {
-        Some(end_date) => {
-            load_one_tail_rows_with_warmup_need(dr, ts_code, adj_type, end_date, warmup_need)?
-        }
+        Some(end_date) => (|dr: &DataReader,
+                            ts_code: &str,
+                            adj_type: &str,
+                            end_date: &str,
+                            warmup_need: usize|
+         -> Result<Option<RowData>, String> {
+            if warmup_need == 0 {
+                return Ok(None);
+            }
+
+            match dr.load_one_tail_rows(ts_code, adj_type, end_date, warmup_need) {
+                Ok(row_data) => Ok(Some((|row_data: RowData| -> Result<RowData, String> {
+                    let len = row_data.trade_dates.len();
+                    let mut cols = HashMap::with_capacity(STOCK_DATA_RUNTIME_FIELDS.len());
+
+                    for field in STOCK_DATA_RUNTIME_FIELDS {
+                        let series = row_data
+                            .cols
+                            .get(field.runtime_key)
+                            .cloned()
+                            .unwrap_or_else(|| vec![None; len]);
+                        cols.insert(field.runtime_key.to_string(), series);
+                    }
+
+                    let out = RowData {
+                        trade_dates: row_data.trade_dates,
+                        cols,
+                    };
+                    out.validate()?;
+                    Ok(out)
+                })(row_data)?)),
+                Err(err) if err.contains("trade_dates为空") => Ok(None),
+                Err(err) => Err(err),
+            }
+        })(dr, ts_code, adj_type, end_date, warmup_need)?,
         None => None,
     };
     calc_increment_inds_from_history(inds_cache, history, new_rows)

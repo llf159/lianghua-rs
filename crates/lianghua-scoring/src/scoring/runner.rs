@@ -34,14 +34,10 @@ use crate::scoring::{
     },
 };
 
-const SCORING_GROUP_SIZE: usize = 128;
 // In-memory validation retains every output row until all stocks finish. Keep
 // its input batches smaller than the streaming-to-DB path so each Rayon worker
 // does not also pin 128 stocks worth of indicator columns at the same time.
 const SCORING_MEMORY_GROUP_SIZE: usize = 32;
-const SCORING_QUEUE_BOUND: usize = 8;
-const SCORING_INJECTED_RUNTIME_KEYS: [&str; 2] = ["ZHANG", "TOTAL_MV_YI"];
-const SCORING_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 
 #[derive(Debug, Clone, Copy)]
 pub enum ScoringMemoryMode {
@@ -68,37 +64,6 @@ fn format_elapsed_ms(elapsed_ms: u64) -> String {
     }
 
     format!("{:.3}s", elapsed_ms as f64 / 1_000.0)
-}
-
-fn log_scoring_run_profile(profile: &ScoringRunProfile) {
-    println!(
-        "排名计算耗时: 总计={}；初始化={}；准备={}；评分={}；写库={}",
-        format_elapsed_ms(profile.total_ms),
-        format_elapsed_ms(profile.init_result_db_ms),
-        format_elapsed_ms(profile.prepare_ms),
-        format_elapsed_ms(profile.compute_and_send_batches_ms),
-        format_elapsed_ms(profile.writer.total_ms),
-    );
-    println!(
-        "写库明细: 删索引={}；附加原始库={}；删旧数据={}；接收+写入批次(含等待)={}；总榜排名写入={}；提交={}；卸载原始库={}；建索引={}；批次={}",
-        format_elapsed_ms(profile.writer.drop_indexes_ms),
-        profile
-            .writer
-            .attach_source_db_ms
-            .map(format_elapsed_ms)
-            .unwrap_or_else(|| "-".to_string()),
-        format_elapsed_ms(profile.writer.delete_range_ms),
-        format_elapsed_ms(profile.writer.receive_and_append_batches_ms),
-        format_elapsed_ms(profile.writer.summary_rank_ms),
-        format_elapsed_ms(profile.writer.commit_ms),
-        profile
-            .writer
-            .detach_source_db_ms
-            .map(format_elapsed_ms)
-            .unwrap_or_else(|| "-".to_string()),
-        format_elapsed_ms(profile.writer.recreate_indexes_ms),
-        profile.writer.batch_count,
-    );
 }
 
 fn scoring_single_core(
@@ -192,7 +157,7 @@ fn collect_scoring_runtime_keys(rules_cache: &[CachedRule]) -> HashSet<String> {
         .flat_map(CachedRule::expression_programs)
         .collect::<Vec<_>>();
     let cyq_chen_keys = cyq_chen_runtime_key_names();
-    let injected_keys = SCORING_INJECTED_RUNTIME_KEYS
+    let injected_keys = (["ZHANG", "TOTAL_MV_YI"])
         .iter()
         .copied()
         .chain(cyq_chen_keys)
@@ -203,7 +168,7 @@ fn collect_scoring_runtime_keys(rules_cache: &[CachedRule]) -> HashSet<String> {
         RuntimeKeyCollectOptions {
             always_keys: &[],
             injected_keys: &injected_keys,
-            aliases: &SCORING_RUNTIME_ALIASES,
+            aliases: &([]),
         },
     )
 }
@@ -232,43 +197,6 @@ pub fn preview_scoring_runtime_warnings(
         warmup_need,
         &used_cyq_chen_keys,
     ))
-}
-
-fn scoring_stock_batch(
-    mut row: RowData,
-    score_start_date: &str,
-    rules_cache: &[CachedRule],
-    rule_scene_meta: &[RuleSceneMeta],
-    scenes: &[ScoreScene],
-    cyq_chen_injector: &CyqChenFieldInjector,
-    ts_code: &str,
-    st_list: &HashSet<String>,
-    total_share_map: &HashMap<String, f64>,
-    memory_mode: ScoringMemoryMode,
-) -> Result<ScoreBatch, String> {
-    let _ = cyq_chen_injector.inject(&mut row, ts_code);
-    inject_stock_extra_fields(
-        &mut row,
-        ts_code,
-        st_list.contains(ts_code),
-        total_share_map.get(ts_code).copied(),
-    )?;
-    let (summary_rows, detail_rows, scene_rows, scene_backtest_rows) = scoring_single_core(
-        row,
-        ts_code,
-        score_start_date,
-        rules_cache,
-        rule_scene_meta,
-        scenes,
-        memory_mode,
-    )?;
-
-    Ok(ScoreBatch {
-        summary_rows,
-        detail_rows,
-        scene_rows,
-        scene_backtest_rows,
-    })
 }
 
 fn scoring_stock_group_batch(
@@ -318,7 +246,41 @@ fn scoring_stock_group_batch(
             continue;
         }
 
-        let batch = scoring_stock_batch(
+        let batch = (|mut row: RowData,
+                      score_start_date: &str,
+                      rules_cache: &[CachedRule],
+                      rule_scene_meta: &[RuleSceneMeta],
+                      scenes: &[ScoreScene],
+                      cyq_chen_injector: &CyqChenFieldInjector,
+                      ts_code: &str,
+                      st_list: &HashSet<String>,
+                      total_share_map: &HashMap<String, f64>,
+                      memory_mode: ScoringMemoryMode|
+         -> Result<ScoreBatch, String> {
+            let _ = cyq_chen_injector.inject(&mut row, ts_code);
+            inject_stock_extra_fields(
+                &mut row,
+                ts_code,
+                st_list.contains(ts_code),
+                total_share_map.get(ts_code).copied(),
+            )?;
+            let (summary_rows, detail_rows, scene_rows, scene_backtest_rows) = scoring_single_core(
+                row,
+                ts_code,
+                score_start_date,
+                rules_cache,
+                rule_scene_meta,
+                scenes,
+                memory_mode,
+            )?;
+
+            Ok(ScoreBatch {
+                summary_rows,
+                detail_rows,
+                scene_rows,
+                scene_backtest_rows,
+            })
+        })(
             row,
             score_start_date,
             rules_cache,
@@ -385,7 +347,7 @@ pub fn scoring_all_to_db(
         .to_str()
         .ok_or_else(|| "原始数据库路径不是有效UTF-8".to_string())?;
 
-    let (tx, rx) = sync_channel(SCORING_QUEUE_BOUND);
+    let (tx, rx) = sync_channel(8);
     let abort_tx = tx.clone();
     let db_path = out_db_path.to_string();
     let source_db_path = source_db_path.to_string();
@@ -405,34 +367,34 @@ pub fn scoring_all_to_db(
     });
 
     let compute_started_at = time::Instant::now();
-    let compute_result = tc_list.par_chunks(SCORING_GROUP_SIZE).try_for_each_with(
-        tx,
-        |sender, ts_group| -> Result<(), String> {
-            let worker_reader =
-                DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
-            let batch = scoring_stock_group_batch(
-                &worker_reader,
-                source_dir,
-                adj_type,
-                start_date,
-                end_date,
-                &query_start_date,
-                need_rows,
-                &rules_cache,
-                &rule_scene_meta,
-                &scenes,
-                &st_list,
-                &total_share_map,
-                &used_cyq_chen_keys,
-                ts_group,
-                ScoringMemoryMode::All,
-            )?;
-            sender
-                .send(ScoreWriteMessage::Batch(batch))
-                .map_err(|e| format!("发送评分批次失败:{e}"))?;
-            Ok(())
-        },
-    );
+    let compute_result =
+        tc_list
+            .par_chunks(128)
+            .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
+                let worker_reader =
+                    DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
+                let batch = scoring_stock_group_batch(
+                    &worker_reader,
+                    source_dir,
+                    adj_type,
+                    start_date,
+                    end_date,
+                    &query_start_date,
+                    need_rows,
+                    &rules_cache,
+                    &rule_scene_meta,
+                    &scenes,
+                    &st_list,
+                    &total_share_map,
+                    &used_cyq_chen_keys,
+                    ts_group,
+                    ScoringMemoryMode::All,
+                )?;
+                sender
+                    .send(ScoreWriteMessage::Batch(batch))
+                    .map_err(|e| format!("发送评分批次失败:{e}"))?;
+                Ok(())
+            });
     let compute_and_send_batches_ms = compute_started_at.elapsed().as_millis() as u64;
 
     if let Err(err) = &compute_result {
@@ -457,7 +419,36 @@ pub fn scoring_all_to_db(
         writer,
         warnings,
     };
-    log_scoring_run_profile(&profile);
+    (|profile: &ScoringRunProfile| {
+        println!(
+            "排名计算耗时: 总计={}；初始化={}；准备={}；评分={}；写库={}",
+            format_elapsed_ms(profile.total_ms),
+            format_elapsed_ms(profile.init_result_db_ms),
+            format_elapsed_ms(profile.prepare_ms),
+            format_elapsed_ms(profile.compute_and_send_batches_ms),
+            format_elapsed_ms(profile.writer.total_ms),
+        );
+        println!(
+            "写库明细: 删索引={}；附加原始库={}；删旧数据={}；接收+写入批次(含等待)={}；总榜排名写入={}；提交={}；卸载原始库={}；建索引={}；批次={}",
+            format_elapsed_ms(profile.writer.drop_indexes_ms),
+            profile
+                .writer
+                .attach_source_db_ms
+                .map(format_elapsed_ms)
+                .unwrap_or_else(|| "-".to_string()),
+            format_elapsed_ms(profile.writer.delete_range_ms),
+            format_elapsed_ms(profile.writer.receive_and_append_batches_ms),
+            format_elapsed_ms(profile.writer.summary_rank_ms),
+            format_elapsed_ms(profile.writer.commit_ms),
+            profile
+                .writer
+                .detach_source_db_ms
+                .map(format_elapsed_ms)
+                .unwrap_or_else(|| "-".to_string()),
+            format_elapsed_ms(profile.writer.recreate_indexes_ms),
+            profile.writer.batch_count,
+        );
+    })(&profile);
     Ok(profile)
 }
 

@@ -24,9 +24,7 @@ use crate::{
 use lianghua_app_shared::normalize_ts_code;
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
-const DEFAULT_VISIBLE_KLINE_WINDOW_DAYS: usize = 90;
 const CHIP_CHANGE_BACKUP_DIR_NAME: &str = "chip_change_rule_backups";
-const CHIP_CHANGE_META_SUFFIX: &str = ".meta.json";
 const EMPTY_CHIP_CHANGE_TEMPLATE: &str = "version = 1\n";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -128,44 +126,6 @@ struct CyqChenStrategyBackupMeta {
     description: Option<String>,
 }
 
-fn default_chip_change_strategies() -> Vec<ChipChangeStrategy> {
-    toml::from_str::<ChipChangeConfig>(
-        r#"
-version = 1
-
-[[strategy]]
-name = "主力低位承接"
-holder = "main"
-direction = "buy"
-when = "RATEL < -8 AND C > O"
-bias = 1.5
-
-[[strategy]]
-name = "散户追高买入"
-holder = "retail"
-direction = "buy"
-when = "RATEC > 5 AND C >= H * 0.98"
-bias = 1.2
-
-[[strategy]]
-name = "散户获利卖出"
-holder = "retail"
-direction = "sell"
-when = "RATEH > 12"
-bias = 1.0
-
-[[strategy]]
-name = "主力高位派发"
-holder = "main"
-direction = "sell"
-when = "RATEC > 20 AND C < O"
-bias = -0.6
-"#,
-    )
-    .map(|config| config.strategy)
-    .unwrap_or_default()
-}
-
 fn chip_change_backup_dir(source_path: &str) -> PathBuf {
     Path::new(source_path).join(CHIP_CHANGE_BACKUP_DIR_NAME)
 }
@@ -206,14 +166,7 @@ fn chip_change_backup_path(source_path: &str, backup_id: &str) -> Result<PathBuf
 
 fn chip_change_backup_meta_path(source_path: &str, backup_id: &str) -> Result<PathBuf, String> {
     let backup_id = validate_chip_change_backup_id(backup_id)?;
-    Ok(chip_change_backup_dir(source_path).join(format!("{backup_id}{CHIP_CHANGE_META_SUFFIX}")))
-}
-
-fn now_millis_suffix() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default()
+    Ok(chip_change_backup_dir(source_path).join(format!("{backup_id}.meta.json")))
 }
 
 fn write_chip_change_backup_meta(
@@ -233,7 +186,12 @@ fn write_chip_change_backup_meta(
             .file_name()
             .and_then(|value| value.to_str())
             .unwrap_or("chip_change_rule.meta.json"),
-        now_millis_suffix()
+        (|| -> u128 {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_millis())
+                .unwrap_or_default()
+        })()
     ));
     fs::write(&temp_path, payload).map_err(|e| {
         format!(
@@ -248,15 +206,6 @@ fn write_chip_change_backup_meta(
             meta_path.display()
         )
     })
-}
-
-fn read_chip_change_backup_meta(
-    source_path: &str,
-    backup_id: &str,
-) -> Option<CyqChenStrategyBackupMeta> {
-    let meta_path = chip_change_backup_meta_path(source_path, backup_id).ok()?;
-    let raw = fs::read_to_string(meta_path).ok()?;
-    serde_json::from_str(&raw).ok()
 }
 
 fn files_have_same_content(left: &Path, right: &Path) -> Result<bool, String> {
@@ -280,40 +229,6 @@ fn files_have_same_content(left: &Path, right: &Path) -> Result<bool, String> {
     let right_bytes = fs::read(right)
         .map_err(|e| format!("读取筹码策略备份失败: path={}, err={e}", right.display()))?;
     Ok(left_bytes == right_bytes)
-}
-
-fn has_equivalent_chip_change_backup(
-    source_path: &str,
-    active_path: &Path,
-) -> Result<bool, String> {
-    let backup_dir = chip_change_backup_dir(source_path);
-    if !backup_dir.exists() {
-        return Ok(false);
-    }
-    for entry in fs::read_dir(&backup_dir).map_err(|e| {
-        format!(
-            "读取筹码策略备份目录失败: path={}, err={e}",
-            backup_dir.display()
-        )
-    })? {
-        let entry = entry.map_err(|e| format!("读取筹码策略备份项失败: {e}"))?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        if !file_name.ends_with(".toml") {
-            continue;
-        }
-        match files_have_same_content(active_path, &path) {
-            Ok(true) => return Ok(true),
-            Ok(false) => {}
-            Err(_) => {}
-        }
-    }
-    Ok(false)
 }
 
 fn copy_file_to_destination(
@@ -350,75 +265,115 @@ fn copy_file_to_destination(
     })
 }
 
-fn list_chip_change_backups(source_path: &str) -> Result<Vec<CyqChenStrategyBackupItem>, String> {
-    let backup_dir = chip_change_backup_dir(source_path);
-    if !backup_dir.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut backups = Vec::new();
-    for entry in fs::read_dir(&backup_dir).map_err(|e| {
-        format!(
-            "读取筹码策略备份目录失败: path={}, err={e}",
-            backup_dir.display()
-        )
-    })? {
-        let entry = entry.map_err(|e| format!("读取筹码策略备份项失败: {e}"))?;
-        let path = entry.path();
-        let metadata = entry.metadata().map_err(|e| {
-            format!(
-                "读取筹码策略备份元信息失败: path={}, err={e}",
-                path.display()
-            )
-        })?;
-        if !metadata.is_file() {
-            continue;
-        }
-        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        if !file_name.ends_with(".toml") {
-            continue;
-        }
-        let modified_at = metadata.modified().ok().map(|time| {
-            chrono::DateTime::<Local>::from(time)
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string()
-        });
-        let meta = read_chip_change_backup_meta(source_path, file_name);
-        backups.push(CyqChenStrategyBackupItem {
-            backup_id: file_name.to_string(),
-            file_name: file_name.to_string(),
-            file_path: path.display().to_string(),
-            created_at: meta.as_ref().map(|item| item.created_at.clone()),
-            modified_at,
-            size_bytes: metadata.len(),
-            source_kind: meta
-                .as_ref()
-                .map(|item| item.source_kind.clone())
-                .unwrap_or_else(|| "backup".to_string()),
-            source_file_name: meta.as_ref().and_then(|item| item.source_file_name.clone()),
-            description: meta.and_then(|item| item.description),
-        });
-    }
-
-    backups.sort_by(|left, right| right.file_name.cmp(&left.file_name));
-    Ok(backups)
-}
-
 fn build_strategy_page_data(source_path: &str) -> Result<CyqChenStrategyPageData, String> {
     let path = chip_change_rule_path(source_path);
     let exists = path.exists();
     let strategies = if exists {
         ChipChangeConfig::load(source_path)?.strategy
     } else {
-        default_chip_change_strategies()
+        (|| -> Vec<ChipChangeStrategy> {
+            toml::from_str::<ChipChangeConfig>(
+                r#"
+version = 1
+
+[[strategy]]
+name = "主力低位承接"
+holder = "main"
+direction = "buy"
+when = "RATEL < -8 AND C > O"
+bias = 1.5
+
+[[strategy]]
+name = "散户追高买入"
+holder = "retail"
+direction = "buy"
+when = "RATEC > 5 AND C >= H * 0.98"
+bias = 1.2
+
+[[strategy]]
+name = "散户获利卖出"
+holder = "retail"
+direction = "sell"
+when = "RATEH > 12"
+bias = 1.0
+
+[[strategy]]
+name = "主力高位派发"
+holder = "main"
+direction = "sell"
+when = "RATEC > 20 AND C < O"
+bias = -0.6
+"#,
+            )
+            .map(|config| config.strategy)
+            .unwrap_or_default()
+        })()
     };
     Ok(CyqChenStrategyPageData {
         file_path: path.display().to_string(),
         exists,
         strategies,
-        backups: list_chip_change_backups(source_path)?,
+        backups: (|source_path: &str| -> Result<Vec<CyqChenStrategyBackupItem>, String> {
+            let backup_dir = chip_change_backup_dir(source_path);
+            if !backup_dir.exists() {
+                return Ok(Vec::new());
+            }
+
+            let mut backups = Vec::new();
+            for entry in fs::read_dir(&backup_dir).map_err(|e| {
+                format!(
+                    "读取筹码策略备份目录失败: path={}, err={e}",
+                    backup_dir.display()
+                )
+            })? {
+                let entry = entry.map_err(|e| format!("读取筹码策略备份项失败: {e}"))?;
+                let path = entry.path();
+                let metadata = entry.metadata().map_err(|e| {
+                    format!(
+                        "读取筹码策略备份元信息失败: path={}, err={e}",
+                        path.display()
+                    )
+                })?;
+                if !metadata.is_file() {
+                    continue;
+                }
+                let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                if !file_name.ends_with(".toml") {
+                    continue;
+                }
+                let modified_at = metadata.modified().ok().map(|time| {
+                    chrono::DateTime::<Local>::from(time)
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string()
+                });
+                let meta = (|source_path: &str,
+                             backup_id: &str|
+                 -> Option<CyqChenStrategyBackupMeta> {
+                    let meta_path = chip_change_backup_meta_path(source_path, backup_id).ok()?;
+                    let raw = fs::read_to_string(meta_path).ok()?;
+                    serde_json::from_str(&raw).ok()
+                })(source_path, file_name);
+                backups.push(CyqChenStrategyBackupItem {
+                    backup_id: file_name.to_string(),
+                    file_name: file_name.to_string(),
+                    file_path: path.display().to_string(),
+                    created_at: meta.as_ref().map(|item| item.created_at.clone()),
+                    modified_at,
+                    size_bytes: metadata.len(),
+                    source_kind: meta
+                        .as_ref()
+                        .map(|item| item.source_kind.clone())
+                        .unwrap_or_else(|| "backup".to_string()),
+                    source_file_name: meta.as_ref().and_then(|item| item.source_file_name.clone()),
+                    description: meta.and_then(|item| item.description),
+                });
+            }
+
+            backups.sort_by(|left, right| right.file_name.cmp(&left.file_name));
+            Ok(backups)
+        })(source_path)?,
     })
 }
 
@@ -430,196 +385,25 @@ fn is_chip_strategy_entry_header(line: &str) -> bool {
     line.trim() == "[[strategy]]"
 }
 
-fn chip_strategy_entry_range_for_line(
-    lines: &[&str],
-    line_number: usize,
-) -> Option<(usize, usize)> {
-    if line_number == 0 || line_number > lines.len() {
-        return None;
-    }
-
-    let index = line_number - 1;
-    let start = (0..=index)
-        .rev()
-        .find(|&candidate| is_chip_strategy_entry_header(lines[candidate]))
-        .unwrap_or(index);
-    let end = ((index + 1)..lines.len())
-        .find(|&candidate| is_chip_strategy_entry_header(lines[candidate]))
-        .unwrap_or(lines.len());
-    Some((start, end))
-}
-
 fn mark_chip_strategy_entry_range(keep: &mut [bool], lines: &[&str], line_number: usize) {
-    let Some((start, end)) = chip_strategy_entry_range_for_line(lines, line_number) else {
+    let Some((start, end)) = (|lines: &[&str], line_number: usize| -> Option<(usize, usize)> {
+        if line_number == 0 || line_number > lines.len() {
+            return None;
+        }
+
+        let index = line_number - 1;
+        let start = (0..=index)
+            .rev()
+            .find(|&candidate| is_chip_strategy_entry_header(lines[candidate]))
+            .unwrap_or(index);
+        let end = ((index + 1)..lines.len())
+            .find(|&candidate| is_chip_strategy_entry_header(lines[candidate]))
+            .unwrap_or(lines.len());
+        Some((start, end))
+    })(lines, line_number) else {
         return;
     };
     keep[start..end].fill(true);
-}
-
-fn compact_chip_strategy_diff_lines_by_entry(
-    lines: Vec<CyqChenStrategyBackupDiffLine>,
-    backup_lines: &[&str],
-    active_lines: &[&str],
-) -> Vec<CyqChenStrategyBackupDiffLine> {
-    if lines.is_empty() {
-        return vec![CyqChenStrategyBackupDiffLine {
-            kind: "omitted".to_string(),
-            backup_line: None,
-            active_line: None,
-            text: "没有可显示的内容".to_string(),
-        }];
-    }
-
-    if lines.iter().all(|line| line.kind == "context") {
-        return vec![CyqChenStrategyBackupDiffLine {
-            kind: "omitted".to_string(),
-            backup_line: None,
-            active_line: None,
-            text: "没有差异".to_string(),
-        }];
-    }
-
-    let mut keep_backup = vec![false; backup_lines.len()];
-    let mut keep_active = vec![false; active_lines.len()];
-    for line in &lines {
-        if line.kind == "context" {
-            continue;
-        }
-        if let Some(line_number) = line.backup_line {
-            mark_chip_strategy_entry_range(&mut keep_backup, backup_lines, line_number);
-        }
-        if let Some(line_number) = line.active_line {
-            mark_chip_strategy_entry_range(&mut keep_active, active_lines, line_number);
-        }
-    }
-
-    let mut compacted = Vec::new();
-    let mut omitted_count = 0usize;
-    for line in lines {
-        let keep_line = line
-            .backup_line
-            .and_then(|line_number| keep_backup.get(line_number.saturating_sub(1)))
-            .copied()
-            .unwrap_or(false)
-            || line
-                .active_line
-                .and_then(|line_number| keep_active.get(line_number.saturating_sub(1)))
-                .copied()
-                .unwrap_or(false);
-
-        if keep_line {
-            if omitted_count > 0 {
-                compacted.push(CyqChenStrategyBackupDiffLine {
-                    kind: "omitted".to_string(),
-                    backup_line: None,
-                    active_line: None,
-                    text: format!("省略 {omitted_count} 行未变化策略"),
-                });
-                omitted_count = 0;
-            }
-            compacted.push(line);
-        } else {
-            omitted_count += 1;
-        }
-    }
-
-    if omitted_count > 0 {
-        compacted.push(CyqChenStrategyBackupDiffLine {
-            kind: "omitted".to_string(),
-            backup_line: None,
-            active_line: None,
-            text: format!("省略 {omitted_count} 行未变化策略"),
-        });
-    }
-
-    compacted
-}
-
-fn build_chip_strategy_backup_diff_lines(
-    backup_text: &str,
-    active_text: &str,
-) -> (Vec<CyqChenStrategyBackupDiffLine>, usize) {
-    let backup_lines: Vec<&str> = backup_text.lines().collect();
-    let active_lines: Vec<&str> = active_text.lines().collect();
-    let rows = backup_lines.len();
-    let cols = active_lines.len();
-    let width = cols + 1;
-    let mut lcs = vec![0usize; (rows + 1) * (cols + 1)];
-
-    for row in (0..rows).rev() {
-        for col in (0..cols).rev() {
-            lcs[row * width + col] = if backup_lines[row] == active_lines[col] {
-                1 + lcs_value(&lcs, width, row + 1, col + 1)
-            } else {
-                lcs_value(&lcs, width, row + 1, col).max(lcs_value(&lcs, width, row, col + 1))
-            };
-        }
-    }
-
-    let mut diff_lines = Vec::new();
-    let mut changed_line_count = 0usize;
-    let mut backup_index = 0usize;
-    let mut active_index = 0usize;
-
-    while backup_index < rows && active_index < cols {
-        if backup_lines[backup_index] == active_lines[active_index] {
-            diff_lines.push(CyqChenStrategyBackupDiffLine {
-                kind: "context".to_string(),
-                backup_line: Some(backup_index + 1),
-                active_line: Some(active_index + 1),
-                text: backup_lines[backup_index].to_string(),
-            });
-            backup_index += 1;
-            active_index += 1;
-        } else if lcs_value(&lcs, width, backup_index + 1, active_index)
-            >= lcs_value(&lcs, width, backup_index, active_index + 1)
-        {
-            diff_lines.push(CyqChenStrategyBackupDiffLine {
-                kind: "backup".to_string(),
-                backup_line: Some(backup_index + 1),
-                active_line: None,
-                text: backup_lines[backup_index].to_string(),
-            });
-            changed_line_count += 1;
-            backup_index += 1;
-        } else {
-            diff_lines.push(CyqChenStrategyBackupDiffLine {
-                kind: "active".to_string(),
-                backup_line: None,
-                active_line: Some(active_index + 1),
-                text: active_lines[active_index].to_string(),
-            });
-            changed_line_count += 1;
-            active_index += 1;
-        }
-    }
-
-    while backup_index < rows {
-        diff_lines.push(CyqChenStrategyBackupDiffLine {
-            kind: "backup".to_string(),
-            backup_line: Some(backup_index + 1),
-            active_line: None,
-            text: backup_lines[backup_index].to_string(),
-        });
-        changed_line_count += 1;
-        backup_index += 1;
-    }
-
-    while active_index < cols {
-        diff_lines.push(CyqChenStrategyBackupDiffLine {
-            kind: "active".to_string(),
-            backup_line: None,
-            active_line: Some(active_index + 1),
-            text: active_lines[active_index].to_string(),
-        });
-        changed_line_count += 1;
-        active_index += 1;
-    }
-
-    (
-        compact_chip_strategy_diff_lines_by_entry(diff_lines, &backup_lines, &active_lines),
-        changed_line_count,
-    )
 }
 
 pub fn get_cyq_chen_strategy_page(source_path: &str) -> Result<CyqChenStrategyPageData, String> {
@@ -718,7 +502,37 @@ pub fn auto_backup_cyq_chen_strategy_file_on_entry(
     if !active_path.exists() || !active_path.is_file() {
         return Ok(None);
     }
-    if has_equivalent_chip_change_backup(source_path, &active_path)? {
+    if (|source_path: &str, active_path: &Path| -> Result<bool, String> {
+        let backup_dir = chip_change_backup_dir(source_path);
+        if !backup_dir.exists() {
+            return Ok(false);
+        }
+        for entry in fs::read_dir(&backup_dir).map_err(|e| {
+            format!(
+                "读取筹码策略备份目录失败: path={}, err={e}",
+                backup_dir.display()
+            )
+        })? {
+            let entry = entry.map_err(|e| format!("读取筹码策略备份项失败: {e}"))?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if !file_name.ends_with(".toml") {
+                continue;
+            }
+            match files_have_same_content(active_path, &path) {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(_) => {}
+            }
+        }
+        Ok(false)
+    })(source_path, &active_path)?
+    {
         return Ok(None);
     }
     backup_cyq_chen_strategy_file_with_meta(source_path, "auto_entry", "自动备份：进入筹码策略页")
@@ -905,8 +719,167 @@ pub fn get_cyq_chen_strategy_backup_diff(
             active_path.display()
         )
     })?;
-    let (lines, changed_line_count) =
-        build_chip_strategy_backup_diff_lines(&backup_text, &active_text);
+    let (lines, changed_line_count) = (|backup_text: &str,
+                                        active_text: &str|
+     -> (Vec<CyqChenStrategyBackupDiffLine>, usize) {
+        let backup_lines: Vec<&str> = backup_text.lines().collect();
+        let active_lines: Vec<&str> = active_text.lines().collect();
+        let rows = backup_lines.len();
+        let cols = active_lines.len();
+        let width = cols + 1;
+        let mut lcs = vec![0usize; (rows + 1) * (cols + 1)];
+
+        for row in (0..rows).rev() {
+            for col in (0..cols).rev() {
+                lcs[row * width + col] = if backup_lines[row] == active_lines[col] {
+                    1 + lcs_value(&lcs, width, row + 1, col + 1)
+                } else {
+                    lcs_value(&lcs, width, row + 1, col).max(lcs_value(&lcs, width, row, col + 1))
+                };
+            }
+        }
+
+        let mut diff_lines = Vec::new();
+        let mut changed_line_count = 0usize;
+        let mut backup_index = 0usize;
+        let mut active_index = 0usize;
+
+        while backup_index < rows && active_index < cols {
+            if backup_lines[backup_index] == active_lines[active_index] {
+                diff_lines.push(CyqChenStrategyBackupDiffLine {
+                    kind: "context".to_string(),
+                    backup_line: Some(backup_index + 1),
+                    active_line: Some(active_index + 1),
+                    text: backup_lines[backup_index].to_string(),
+                });
+                backup_index += 1;
+                active_index += 1;
+            } else if lcs_value(&lcs, width, backup_index + 1, active_index)
+                >= lcs_value(&lcs, width, backup_index, active_index + 1)
+            {
+                diff_lines.push(CyqChenStrategyBackupDiffLine {
+                    kind: "backup".to_string(),
+                    backup_line: Some(backup_index + 1),
+                    active_line: None,
+                    text: backup_lines[backup_index].to_string(),
+                });
+                changed_line_count += 1;
+                backup_index += 1;
+            } else {
+                diff_lines.push(CyqChenStrategyBackupDiffLine {
+                    kind: "active".to_string(),
+                    backup_line: None,
+                    active_line: Some(active_index + 1),
+                    text: active_lines[active_index].to_string(),
+                });
+                changed_line_count += 1;
+                active_index += 1;
+            }
+        }
+
+        while backup_index < rows {
+            diff_lines.push(CyqChenStrategyBackupDiffLine {
+                kind: "backup".to_string(),
+                backup_line: Some(backup_index + 1),
+                active_line: None,
+                text: backup_lines[backup_index].to_string(),
+            });
+            changed_line_count += 1;
+            backup_index += 1;
+        }
+
+        while active_index < cols {
+            diff_lines.push(CyqChenStrategyBackupDiffLine {
+                kind: "active".to_string(),
+                backup_line: None,
+                active_line: Some(active_index + 1),
+                text: active_lines[active_index].to_string(),
+            });
+            changed_line_count += 1;
+            active_index += 1;
+        }
+
+        (
+            (|lines: Vec<CyqChenStrategyBackupDiffLine>,
+              backup_lines: &[&str],
+              active_lines: &[&str]|
+             -> Vec<CyqChenStrategyBackupDiffLine> {
+                if lines.is_empty() {
+                    return vec![CyqChenStrategyBackupDiffLine {
+                        kind: "omitted".to_string(),
+                        backup_line: None,
+                        active_line: None,
+                        text: "没有可显示的内容".to_string(),
+                    }];
+                }
+
+                if lines.iter().all(|line| line.kind == "context") {
+                    return vec![CyqChenStrategyBackupDiffLine {
+                        kind: "omitted".to_string(),
+                        backup_line: None,
+                        active_line: None,
+                        text: "没有差异".to_string(),
+                    }];
+                }
+
+                let mut keep_backup = vec![false; backup_lines.len()];
+                let mut keep_active = vec![false; active_lines.len()];
+                for line in &lines {
+                    if line.kind == "context" {
+                        continue;
+                    }
+                    if let Some(line_number) = line.backup_line {
+                        mark_chip_strategy_entry_range(&mut keep_backup, backup_lines, line_number);
+                    }
+                    if let Some(line_number) = line.active_line {
+                        mark_chip_strategy_entry_range(&mut keep_active, active_lines, line_number);
+                    }
+                }
+
+                let mut compacted = Vec::new();
+                let mut omitted_count = 0usize;
+                for line in lines {
+                    let keep_line = line
+                        .backup_line
+                        .and_then(|line_number| keep_backup.get(line_number.saturating_sub(1)))
+                        .copied()
+                        .unwrap_or(false)
+                        || line
+                            .active_line
+                            .and_then(|line_number| keep_active.get(line_number.saturating_sub(1)))
+                            .copied()
+                            .unwrap_or(false);
+
+                    if keep_line {
+                        if omitted_count > 0 {
+                            compacted.push(CyqChenStrategyBackupDiffLine {
+                                kind: "omitted".to_string(),
+                                backup_line: None,
+                                active_line: None,
+                                text: format!("省略 {omitted_count} 行未变化策略"),
+                            });
+                            omitted_count = 0;
+                        }
+                        compacted.push(line);
+                    } else {
+                        omitted_count += 1;
+                    }
+                }
+
+                if omitted_count > 0 {
+                    compacted.push(CyqChenStrategyBackupDiffLine {
+                        kind: "omitted".to_string(),
+                        backup_line: None,
+                        active_line: None,
+                        text: format!("省略 {omitted_count} 行未变化策略"),
+                    });
+                }
+
+                compacted
+            })(diff_lines, &backup_lines, &active_lines),
+            changed_line_count,
+        )
+    })(&backup_text, &active_text);
     Ok(CyqChenStrategyBackupDiff {
         backup_id: backup_id.clone(),
         backup_label: backup_id,
@@ -965,11 +938,78 @@ pub fn run_cyq_chen_single_stock_test(
     };
     let compiled_chip_config = chip_config.compile()?;
 
-    let (start_date, end_date) =
-        resolve_requested_range(source_path, request.start_date, request.end_date)?;
-    let load_start_date =
-        resolve_load_start_date(source_path, &start_date, &end_date, config.warmup_days)?
-            .unwrap_or_else(|| start_date.clone());
+    let (start_date, end_date) = (|source_path: &str,
+                                   start_date: Option<String>,
+                                   end_date: Option<String>|
+     -> Result<(String, String), String> {
+        let source_db = source_db_path(source_path);
+        let source_db_str = source_db
+            .to_str()
+            .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
+        let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
+
+        let mut stmt = conn
+            .prepare("SELECT MIN(trade_date), MAX(trade_date) FROM stock_data WHERE adj_type = ?")
+            .map_err(|e| format!("预编译交易日范围查询失败:{e}"))?;
+        let mut rows = stmt
+            .query(params![DEFAULT_ADJ_TYPE])
+            .map_err(|e| format!("查询交易日范围失败:{e}"))?;
+        let Some(row) = rows.next().map_err(|e| format!("读取交易日范围失败:{e}"))? else {
+            return Err("stock_data没有可用交易日".to_string());
+        };
+        let source_start: Option<String> =
+            row.get(0).map_err(|e| format!("读取最早交易日失败:{e}"))?;
+        let source_end: Option<String> =
+            row.get(1).map_err(|e| format!("读取最晚交易日失败:{e}"))?;
+        let source_start = source_start.ok_or_else(|| "stock_data没有可用交易日".to_string())?;
+        let source_end = source_end.ok_or_else(|| "stock_data没有可用交易日".to_string())?;
+
+        let start_date = normalize_trade_date_input(start_date)
+            .map(|value| {
+                if value.as_str() > source_start.as_str() {
+                    value
+                } else {
+                    source_start.clone()
+                }
+            })
+            .unwrap_or_else(|| source_start.clone());
+        let end_date = normalize_trade_date_input(end_date)
+            .map(|value| {
+                if value.as_str() < source_end.as_str() {
+                    value
+                } else {
+                    source_end.clone()
+                }
+            })
+            .unwrap_or_else(|| source_end.clone());
+
+        if start_date > end_date {
+            return Err(format!("计算区间无效: {start_date} > {end_date}"));
+        }
+
+        Ok((start_date, end_date))
+    })(source_path, request.start_date, request.end_date)?;
+    let load_start_date = (|source_path: &str,
+                            output_start_date: &str,
+                            output_end_date: &str,
+                            warmup_days: usize|
+     -> Result<Option<String>, String> {
+        let trade_dates = load_trade_date_list(source_path)?;
+        if trade_dates.is_empty() {
+            return Ok(None);
+        }
+
+        let Some(first_output_index) = trade_dates.iter().position(|trade_date| {
+            let trade_date = trade_date.as_str();
+            trade_date >= output_start_date && trade_date <= output_end_date
+        }) else {
+            return Ok(None);
+        };
+
+        let load_start_index = first_output_index.saturating_sub(warmup_days);
+        Ok(Some(trade_dates[load_start_index].clone()))
+    })(source_path, &start_date, &end_date, config.warmup_days)?
+    .unwrap_or_else(|| start_date.clone());
 
     let required_runtime_keys = collect_chen_chip_runtime_keys(&compiled_chip_config);
     let reader = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
@@ -1003,7 +1043,16 @@ pub fn run_cyq_chen_single_stock_test(
     }
 
     if resolve_output_start_date(&row_data, &start_date, &end_date, config.warmup_days).is_none() {
-        let output_rows = count_visible_rows(&row_data, &start_date, &end_date);
+        let output_rows = (|row_data: &RowData, start_date: &str, end_date: &str| -> usize {
+            row_data
+                .trade_dates
+                .iter()
+                .filter(|trade_date| {
+                    let trade_date = trade_date.as_str();
+                    trade_date >= start_date && trade_date <= end_date
+                })
+                .count()
+        })(&row_data, &start_date, &end_date);
         let need_rows = config.warmup_days.saturating_add(output_rows);
         if need_rows > 0 {
             let tail_row_data =
@@ -1023,8 +1072,60 @@ pub fn run_cyq_chen_single_stock_test(
         total_share_map.get(&ts_code).copied(),
     )?;
 
-    let kline = build_kline_rows(&row_data, &start_date, &end_date)?;
-    let kline_payload = build_detail_kline_payload(source_path, &ts_code, &start_date, &end_date)?;
+    let kline = (|row_data: &RowData,
+                  start_date: &str,
+                  end_date: &str|
+     -> Result<Vec<CyqChenKlineRow>, String> {
+        let open = required_series(row_data, "O")?;
+        let high = required_series(row_data, "H")?;
+        let low = required_series(row_data, "L")?;
+        let close = required_series(row_data, "C")?;
+        let turnover_rate = row_data
+            .cols
+            .get("TOR")
+            .map(Vec::as_slice)
+            .ok_or_else(|| "RowData 缺少 TOR 列".to_string())?;
+
+        let mut rows = Vec::new();
+        for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
+            let trade_date_str = trade_date.as_str();
+            if trade_date_str < start_date || trade_date_str > end_date {
+                continue;
+            }
+            rows.push(CyqChenKlineRow {
+                trade_date: trade_date.clone(),
+                open: open[index],
+                high: high[index],
+                low: low[index],
+                close: close[index],
+                turnover_rate: turnover_rate[index],
+            });
+        }
+        Ok(rows)
+    })(&row_data, &start_date, &end_date)?;
+    let kline_payload = (|source_path: &str,
+                          ts_code: &str,
+                          start_date: &str,
+                          end_date: &str|
+     -> Result<Option<DetailKlinePayload>, String> {
+        let source_db = source_db_path(source_path);
+        let source_db_str = source_db
+            .to_str()
+            .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
+        let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
+        let name_map = lianghua_app_shared::build_name_map(source_path).unwrap_or_default();
+        let watermark_name = name_map.get(ts_code).cloned();
+        let mut payload =
+            crate::details::query_kline(&conn, source_path, ts_code, 90, watermark_name)?;
+
+        if let Some(items) = payload.items.as_mut() {
+            items.retain(|item| {
+                item.trade_date.as_str() >= start_date && item.trade_date.as_str() <= end_date
+            });
+        }
+
+        Ok(Some(payload))
+    })(source_path, &ts_code, &start_date, &end_date)?;
     let output_start_date =
         resolve_output_start_date(&row_data, &start_date, &end_date, config.warmup_days);
     let mut snapshots: Vec<ChenChipSnapshot> =
@@ -1064,87 +1165,6 @@ pub fn run_cyq_chen_single_stock_test(
     })
 }
 
-fn build_detail_kline_payload(
-    source_path: &str,
-    ts_code: &str,
-    start_date: &str,
-    end_date: &str,
-) -> Result<Option<DetailKlinePayload>, String> {
-    let source_db = source_db_path(source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-    let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
-    let name_map = lianghua_app_shared::build_name_map(source_path).unwrap_or_default();
-    let watermark_name = name_map.get(ts_code).cloned();
-    let mut payload = crate::details::query_kline(
-        &conn,
-        source_path,
-        ts_code,
-        DEFAULT_VISIBLE_KLINE_WINDOW_DAYS,
-        watermark_name,
-    )?;
-
-    if let Some(items) = payload.items.as_mut() {
-        items.retain(|item| {
-            item.trade_date.as_str() >= start_date && item.trade_date.as_str() <= end_date
-        });
-    }
-
-    Ok(Some(payload))
-}
-
-fn resolve_requested_range(
-    source_path: &str,
-    start_date: Option<String>,
-    end_date: Option<String>,
-) -> Result<(String, String), String> {
-    let source_db = source_db_path(source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-    let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
-
-    let mut stmt = conn
-        .prepare("SELECT MIN(trade_date), MAX(trade_date) FROM stock_data WHERE adj_type = ?")
-        .map_err(|e| format!("预编译交易日范围查询失败:{e}"))?;
-    let mut rows = stmt
-        .query(params![DEFAULT_ADJ_TYPE])
-        .map_err(|e| format!("查询交易日范围失败:{e}"))?;
-    let Some(row) = rows.next().map_err(|e| format!("读取交易日范围失败:{e}"))? else {
-        return Err("stock_data没有可用交易日".to_string());
-    };
-    let source_start: Option<String> = row.get(0).map_err(|e| format!("读取最早交易日失败:{e}"))?;
-    let source_end: Option<String> = row.get(1).map_err(|e| format!("读取最晚交易日失败:{e}"))?;
-    let source_start = source_start.ok_or_else(|| "stock_data没有可用交易日".to_string())?;
-    let source_end = source_end.ok_or_else(|| "stock_data没有可用交易日".to_string())?;
-
-    let start_date = normalize_trade_date_input(start_date)
-        .map(|value| {
-            if value.as_str() > source_start.as_str() {
-                value
-            } else {
-                source_start.clone()
-            }
-        })
-        .unwrap_or_else(|| source_start.clone());
-    let end_date = normalize_trade_date_input(end_date)
-        .map(|value| {
-            if value.as_str() < source_end.as_str() {
-                value
-            } else {
-                source_end.clone()
-            }
-        })
-        .unwrap_or_else(|| source_end.clone());
-
-    if start_date > end_date {
-        return Err(format!("计算区间无效: {start_date} > {end_date}"));
-    }
-
-    Ok((start_date, end_date))
-}
-
 fn normalize_trade_date_input(value: Option<String>) -> Option<String> {
     value
         .as_deref()
@@ -1157,28 +1177,6 @@ fn normalize_trade_date_input(value: Option<String>) -> Option<String> {
                 .collect::<String>()
         })
         .filter(|value| value.len() == 8)
-}
-
-fn resolve_load_start_date(
-    source_path: &str,
-    output_start_date: &str,
-    output_end_date: &str,
-    warmup_days: usize,
-) -> Result<Option<String>, String> {
-    let trade_dates = load_trade_date_list(source_path)?;
-    if trade_dates.is_empty() {
-        return Ok(None);
-    }
-
-    let Some(first_output_index) = trade_dates.iter().position(|trade_date| {
-        let trade_date = trade_date.as_str();
-        trade_date >= output_start_date && trade_date <= output_end_date
-    }) else {
-        return Ok(None);
-    };
-
-    let load_start_index = first_output_index.saturating_sub(warmup_days);
-    Ok(Some(trade_dates[load_start_index].clone()))
 }
 
 fn resolve_output_start_date(
@@ -1201,50 +1199,6 @@ fn resolve_output_start_date(
             }
             Some(trade_date.clone())
         })
-}
-
-fn count_visible_rows(row_data: &RowData, start_date: &str, end_date: &str) -> usize {
-    row_data
-        .trade_dates
-        .iter()
-        .filter(|trade_date| {
-            let trade_date = trade_date.as_str();
-            trade_date >= start_date && trade_date <= end_date
-        })
-        .count()
-}
-
-fn build_kline_rows(
-    row_data: &RowData,
-    start_date: &str,
-    end_date: &str,
-) -> Result<Vec<CyqChenKlineRow>, String> {
-    let open = required_series(row_data, "O")?;
-    let high = required_series(row_data, "H")?;
-    let low = required_series(row_data, "L")?;
-    let close = required_series(row_data, "C")?;
-    let turnover_rate = row_data
-        .cols
-        .get("TOR")
-        .map(Vec::as_slice)
-        .ok_or_else(|| "RowData 缺少 TOR 列".to_string())?;
-
-    let mut rows = Vec::new();
-    for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
-        let trade_date_str = trade_date.as_str();
-        if trade_date_str < start_date || trade_date_str > end_date {
-            continue;
-        }
-        rows.push(CyqChenKlineRow {
-            trade_date: trade_date.clone(),
-            open: open[index],
-            high: high[index],
-            low: low[index],
-            close: close[index],
-            turnover_rate: turnover_rate[index],
-        });
-    }
-    Ok(rows)
 }
 
 fn required_series<'a>(row_data: &'a RowData, key: &str) -> Result<&'a [Option<f64>], String> {

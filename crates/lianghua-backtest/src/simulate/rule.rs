@@ -24,7 +24,6 @@ use crate::simulate::fp_utils::{
 };
 const PCT_CHG_BATCH_SIZE: usize = 512;
 const EFFICIENCY_RATIO_PERIOD: usize = 20;
-const EFFICIENCY_RATIO_STOCK_BATCH_SIZE: usize = 128;
 pub const DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE: usize = 4;
 
 #[derive(Debug, Clone)]
@@ -996,7 +995,60 @@ pub fn build_rule_layer_runtime_cache_with_ts_filter(
     )?;
 
     let universe_rows = filter_universe_rows_by_ts_codes(
-        load_rule_universe_rows(source_dir, start_date, end_date)?,
+        (|source_dir: &str,
+          start_date: &str,
+          end_date: &str|
+         -> Result<Vec<RuleUniverseRow>, String> {
+            let result_db = result_db_path(source_dir);
+            if !result_db.exists() {
+                return Ok(Vec::new());
+            }
+
+            let result_db_str = result_db
+                .to_str()
+                .ok_or_else(|| "result_db路径不是有效UTF-8".to_string())?;
+            let conn = Connection::open(result_db_str)
+                .map_err(|e| format!("打开scoring_result.db失败:{e}"))?;
+
+            let mut stmt = conn
+                .prepare(
+                    r#"
+            SELECT
+                ts_code,
+                trade_date
+            FROM score_summary
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY trade_date ASC, ts_code ASC
+            "#,
+                )
+                .map_err(|e| format!("预编译score_summary查询失败:{e}"))?;
+
+            let mut rows = stmt
+                .query(params_from_iter([start_date.trim(), end_date.trim()]))
+                .map_err(|e| format!("查询score_summary失败:{e}"))?;
+
+            let mut out = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| format!("读取score_summary失败:{e}"))?
+            {
+                let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
+                let trade_date: String =
+                    row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
+
+                if ts_code.trim().is_empty() || trade_date.trim().is_empty() {
+                    continue;
+                }
+
+                out.push(RuleUniverseRow {
+                    ts_code,
+                    trade_date,
+                });
+            }
+
+            Ok(out)
+        })(source_dir, start_date, end_date)?,
         allowed_ts_codes,
     );
     if universe_rows.is_empty() {
@@ -1086,7 +1138,55 @@ pub fn build_rule_layer_runtime_cache_from_stock_data_with_ts_filter(
     )?;
 
     let universe_rows = filter_universe_rows_by_ts_codes(
-        load_stock_data_universe_rows(source_conn, stock_adj_type, start_date, end_date)?,
+        (|source_conn: &Connection,
+          stock_adj_type: &str,
+          start_date: &str,
+          end_date: &str|
+         -> Result<Vec<RuleUniverseRow>, String> {
+            let mut stmt = source_conn
+                .prepare(
+                    r#"
+            SELECT DISTINCT
+                ts_code,
+                trade_date
+            FROM stock_data
+            WHERE adj_type = ?
+              AND trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY trade_date ASC, ts_code ASC
+            "#,
+                )
+                .map_err(|e| format!("预编译stock_data样本范围查询失败:{e}"))?;
+
+            let mut rows = stmt
+                .query(params_from_iter([
+                    stock_adj_type.trim(),
+                    start_date.trim(),
+                    end_date.trim(),
+                ]))
+                .map_err(|e| format!("查询stock_data样本范围失败:{e}"))?;
+
+            let mut out = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| format!("读取stock_data样本范围失败:{e}"))?
+            {
+                let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
+                let trade_date: String =
+                    row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
+
+                if ts_code.trim().is_empty() || trade_date.trim().is_empty() {
+                    continue;
+                }
+
+                out.push(RuleUniverseRow {
+                    ts_code,
+                    trade_date,
+                });
+            }
+
+            Ok(out)
+        })(source_conn, stock_adj_type, start_date, end_date)?,
         allowed_ts_codes,
     );
     build_rule_layer_runtime_cache_from_universe_rows(
@@ -1735,7 +1835,26 @@ impl DayGroupsFoldAccum {
             }
 
             if collect_validation_details
-                && let Some(bucket_index) = return_distribution_bucket(sample.residual_return)
+                && let Some(bucket_index) = (|residual_return: f64| -> Option<usize> {
+                    if !residual_return.is_finite() {
+                        return None;
+                    }
+                    Some(if residual_return <= -10.0 {
+                        0
+                    } else if residual_return <= -5.0 {
+                        1
+                    } else if residual_return <= -2.0 {
+                        2
+                    } else if residual_return <= 2.0 {
+                        3
+                    } else if residual_return <= 5.0 {
+                        4
+                    } else if residual_return <= 10.0 {
+                        5
+                    } else {
+                        6
+                    })
+                })(sample.residual_return)
             {
                 self.return_distribution_counts[bucket_index] += 1;
             }
@@ -1807,7 +1926,46 @@ impl DayGroupsFoldAccum {
                 ic,
             });
             if collect_validation_details {
-                self.daily_score_layers.push(build_daily_score_layers(
+                self.daily_score_layers.push((|trade_date: &str,
+                                               rule_scores: &[f64],
+                                               residuals: &[f64]|
+                 -> RuleLayerDailyScoreLayers {
+                    let mut ordered = rule_scores
+                        .iter()
+                        .zip(residuals)
+                        .map(|(score, residual_return)| {
+                            let score = if score.abs() < EPS { 0.0 } else { *score };
+                            (score, *residual_return)
+                        })
+                        .collect::<Vec<_>>();
+                    ordered.sort_by(|left, right| {
+                        left.0.partial_cmp(&right.0).unwrap_or(Ordering::Equal)
+                    });
+
+                    let mut groups = Vec::new();
+                    let mut index = 0usize;
+                    while index < ordered.len() {
+                        let score = ordered[index].0;
+                        let score_bits = score.to_bits();
+                        let mut residual_sum = 0.0;
+                        let mut sample_count = 0usize;
+                        while index < ordered.len() && ordered[index].0.to_bits() == score_bits {
+                            residual_sum += ordered[index].1;
+                            sample_count += 1;
+                            index += 1;
+                        }
+                        groups.push(RuleLayerDailyScoreGroup {
+                            score,
+                            sample_count,
+                            avg_residual_return: residual_sum / sample_count as f64,
+                        });
+                    }
+
+                    RuleLayerDailyScoreLayers {
+                        trade_date: trade_date.to_string(),
+                        groups,
+                    }
+                })(
                     day_group.trade_date.as_ref(),
                     &rule_scores,
                     &residuals,
@@ -1835,67 +1993,6 @@ impl DayGroupsFoldAccum {
         {
             *count += other_count;
         }
-    }
-}
-
-fn return_distribution_bucket(residual_return: f64) -> Option<usize> {
-    if !residual_return.is_finite() {
-        return None;
-    }
-    Some(if residual_return <= -10.0 {
-        0
-    } else if residual_return <= -5.0 {
-        1
-    } else if residual_return <= -2.0 {
-        2
-    } else if residual_return <= 2.0 {
-        3
-    } else if residual_return <= 5.0 {
-        4
-    } else if residual_return <= 10.0 {
-        5
-    } else {
-        6
-    })
-}
-
-fn build_daily_score_layers(
-    trade_date: &str,
-    rule_scores: &[f64],
-    residuals: &[f64],
-) -> RuleLayerDailyScoreLayers {
-    let mut ordered = rule_scores
-        .iter()
-        .zip(residuals)
-        .map(|(score, residual_return)| {
-            let score = if score.abs() < EPS { 0.0 } else { *score };
-            (score, *residual_return)
-        })
-        .collect::<Vec<_>>();
-    ordered.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(Ordering::Equal));
-
-    let mut groups = Vec::new();
-    let mut index = 0usize;
-    while index < ordered.len() {
-        let score = ordered[index].0;
-        let score_bits = score.to_bits();
-        let mut residual_sum = 0.0;
-        let mut sample_count = 0usize;
-        while index < ordered.len() && ordered[index].0.to_bits() == score_bits {
-            residual_sum += ordered[index].1;
-            sample_count += 1;
-            index += 1;
-        }
-        groups.push(RuleLayerDailyScoreGroup {
-            score,
-            sample_count,
-            avg_residual_return: residual_sum / sample_count as f64,
-        });
-    }
-
-    RuleLayerDailyScoreLayers {
-        trade_date: trade_date.to_string(),
-        groups,
     }
 }
 
@@ -2133,111 +2230,6 @@ fn filter_universe_rows_by_ts_codes(
         .collect()
 }
 
-fn load_rule_universe_rows(
-    source_dir: &str,
-    start_date: &str,
-    end_date: &str,
-) -> Result<Vec<RuleUniverseRow>, String> {
-    let result_db = result_db_path(source_dir);
-    if !result_db.exists() {
-        return Ok(Vec::new());
-    }
-
-    let result_db_str = result_db
-        .to_str()
-        .ok_or_else(|| "result_db路径不是有效UTF-8".to_string())?;
-    let conn =
-        Connection::open(result_db_str).map_err(|e| format!("打开scoring_result.db失败:{e}"))?;
-
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT
-                ts_code,
-                trade_date
-            FROM score_summary
-            WHERE trade_date >= ?
-              AND trade_date <= ?
-            ORDER BY trade_date ASC, ts_code ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译score_summary查询失败:{e}"))?;
-
-    let mut rows = stmt
-        .query(params_from_iter([start_date.trim(), end_date.trim()]))
-        .map_err(|e| format!("查询score_summary失败:{e}"))?;
-
-    let mut out = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取score_summary失败:{e}"))?
-    {
-        let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
-        let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
-
-        if ts_code.trim().is_empty() || trade_date.trim().is_empty() {
-            continue;
-        }
-
-        out.push(RuleUniverseRow {
-            ts_code,
-            trade_date,
-        });
-    }
-
-    Ok(out)
-}
-
-fn load_stock_data_universe_rows(
-    source_conn: &Connection,
-    stock_adj_type: &str,
-    start_date: &str,
-    end_date: &str,
-) -> Result<Vec<RuleUniverseRow>, String> {
-    let mut stmt = source_conn
-        .prepare(
-            r#"
-            SELECT DISTINCT
-                ts_code,
-                trade_date
-            FROM stock_data
-            WHERE adj_type = ?
-              AND trade_date >= ?
-              AND trade_date <= ?
-            ORDER BY trade_date ASC, ts_code ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译stock_data样本范围查询失败:{e}"))?;
-
-    let mut rows = stmt
-        .query(params_from_iter([
-            stock_adj_type.trim(),
-            start_date.trim(),
-            end_date.trim(),
-        ]))
-        .map_err(|e| format!("查询stock_data样本范围失败:{e}"))?;
-
-    let mut out = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取stock_data样本范围失败:{e}"))?
-    {
-        let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
-        let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
-
-        if ts_code.trim().is_empty() || trade_date.trim().is_empty() {
-            continue;
-        }
-
-        out.push(RuleUniverseRow {
-            ts_code,
-            trade_date,
-        });
-    }
-
-    Ok(out)
-}
-
 fn build_residual_map_cache(
     source_conn: &Connection,
     source_dir: &str,
@@ -2287,19 +2279,105 @@ fn build_residual_map_cache(
     )?
     .remove(input.index_ts_code)
     .unwrap_or_default();
-    let er_column = find_stock_data_column(source_conn, "ER")?;
+    let er_column = (|conn: &Connection, requested: &str| -> Result<Option<String>, String> {
+        let mut stmt = conn
+            .prepare("DESCRIBE stock_data")
+            .map_err(|e| format!("预编译 stock_data 列查询失败:{e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("查询 stock_data 列失败:{e}"))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取 stock_data 列失败:{e}"))?
+        {
+            let name: String = row
+                .get(0)
+                .map_err(|e| format!("读取 stock_data 列名失败:{e}"))?;
+            if name.eq_ignore_ascii_case(requested) {
+                return Ok(Some(name));
+            }
+        }
+        Ok(None)
+    })(source_conn, "ER")?;
 
     let mut out = HashMap::with_capacity(ts_codes.len());
-    for ts_code_batch in ts_codes.chunks(EFFICIENCY_RATIO_STOCK_BATCH_SIZE) {
+    for ts_code_batch in ts_codes.chunks(128) {
         let mut er_series_cache = match er_column.as_deref() {
-            Some(column) => load_indicator_series_cache_for_ts_codes(
-                source_conn,
-                ts_code_batch,
-                input.stock_adj_type,
-                input.start_date,
-                input.end_date,
-                column,
-            )?,
+            Some(column) => {
+                (|conn: &Connection,
+                  ts_codes: &[String],
+                  adj_type: &str,
+                  start_date: &str,
+                  end_date: &str,
+                  indicator_column: &str|
+                 -> Result<HashMap<String, HashMap<String, f64>>, String> {
+                    if ts_codes.is_empty() {
+                        return Ok(HashMap::new());
+                    }
+
+                    let mut out =
+                        HashMap::<String, HashMap<String, f64>>::with_capacity(ts_codes.len());
+                    let quoted_column = (|identifier: &str| -> String {
+                        format!("\"{}\"", identifier.replace('"', "\"\""))
+                    })(indicator_column);
+                    for chunk in ts_codes.chunks(PCT_CHG_BATCH_SIZE) {
+                        let placeholders = std::iter::repeat_n("?", chunk.len())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let sql = format!(
+                            r#"
+            SELECT
+                ts_code,
+                trade_date,
+                TRY_CAST({quoted_column} AS DOUBLE)
+            FROM stock_data
+            WHERE adj_type = ?
+              AND ts_code IN ({placeholders})
+              AND trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY ts_code ASC, trade_date ASC
+            "#
+                        );
+                        let mut stmt = conn
+                            .prepare(&sql)
+                            .map_err(|e| format!("预编译批量 {indicator_column} 查询失败:{e}"))?;
+                        let query_params = std::iter::once(adj_type.trim())
+                            .chain(chunk.iter().map(|ts_code| ts_code.trim()))
+                            .chain(std::iter::once(start_date.trim()))
+                            .chain(std::iter::once(end_date.trim()));
+                        let mut rows = stmt
+                            .query(params_from_iter(query_params))
+                            .map_err(|e| format!("查询批量 {indicator_column} 失败:{e}"))?;
+
+                        while let Some(row) = rows
+                            .next()
+                            .map_err(|e| format!("读取批量 {indicator_column} 失败:{e}"))?
+                        {
+                            let ts_code: String =
+                                row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
+                            let trade_date: String =
+                                row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
+                            let value: Option<f64> = row
+                                .get(2)
+                                .map_err(|e| format!("读取{indicator_column}失败:{e}"))?;
+
+                            let Some(value) = value.filter(|value| value.is_finite()) else {
+                                continue;
+                            };
+                            out.entry(ts_code).or_default().insert(trade_date, value);
+                        }
+                    }
+
+                    Ok(out)
+                })(
+                    source_conn,
+                    ts_code_batch,
+                    input.stock_adj_type,
+                    input.start_date,
+                    input.end_date,
+                    column,
+                )?
+            }
             None => HashMap::new(),
         };
         let fallback_ts_codes = ts_code_batch
@@ -2308,13 +2386,88 @@ fn build_residual_map_cache(
             .cloned()
             .collect::<Vec<_>>();
         if !fallback_ts_codes.is_empty() {
-            let close_series_cache = load_close_series_cache_for_ts_codes(
-                source_conn,
-                &fallback_ts_codes,
-                input.stock_adj_type,
-                input.start_date,
-                input.end_date,
-            )?;
+            let close_series_cache =
+                (|conn: &Connection,
+                  ts_codes: &[String],
+                  adj_type: &str,
+                  start_date: &str,
+                  end_date: &str|
+                 -> Result<HashMap<String, Vec<(String, f64)>>, String> {
+                    if ts_codes.is_empty() {
+                        return Ok(HashMap::new());
+                    }
+
+                    let mut out =
+                        HashMap::<String, Vec<(String, f64)>>::with_capacity(ts_codes.len());
+                    for chunk in ts_codes.chunks(PCT_CHG_BATCH_SIZE) {
+                        let placeholders = std::iter::repeat_n("?", chunk.len())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let sql = format!(
+                            r#"
+            WITH ranked AS (
+                SELECT
+                    ts_code,
+                    trade_date,
+                    TRY_CAST(close AS DOUBLE) AS close_price,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY
+                            ts_code,
+                            CASE WHEN trade_date < ? THEN 0 ELSE 1 END
+                        ORDER BY trade_date DESC
+                    ) AS history_rank
+                FROM stock_data
+                WHERE adj_type = ?
+                  AND ts_code IN ({placeholders})
+                  AND trade_date <= ?
+            )
+            SELECT
+                ts_code,
+                trade_date,
+                close_price
+            FROM ranked
+            WHERE trade_date >= ?
+               OR history_rank <= {EFFICIENCY_RATIO_PERIOD}
+            ORDER BY ts_code ASC, trade_date ASC
+            "#
+                        );
+                        let mut stmt = conn
+                            .prepare(&sql)
+                            .map_err(|e| format!("预编译批量收盘价查询失败:{e}"))?;
+                        let query_params = std::iter::once(start_date.trim())
+                            .chain(std::iter::once(adj_type.trim()))
+                            .chain(chunk.iter().map(|ts_code| ts_code.trim()))
+                            .chain(std::iter::once(end_date.trim()))
+                            .chain(std::iter::once(start_date.trim()));
+                        let mut rows = stmt
+                            .query(params_from_iter(query_params))
+                            .map_err(|e| format!("查询批量收盘价失败:{e}"))?;
+
+                        while let Some(row) =
+                            rows.next().map_err(|e| format!("读取批量收盘价失败:{e}"))?
+                        {
+                            let ts_code: String =
+                                row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
+                            let trade_date: String =
+                                row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
+                            let close: Option<f64> =
+                                row.get(2).map_err(|e| format!("读取close失败:{e}"))?;
+
+                            let Some(close) = close.filter(|value| value.is_finite()) else {
+                                continue;
+                            };
+                            out.entry(ts_code).or_default().push((trade_date, close));
+                        }
+                    }
+
+                    Ok(out)
+                })(
+                    source_conn,
+                    &fallback_ts_codes,
+                    input.stock_adj_type,
+                    input.start_date,
+                    input.end_date,
+                )?;
             for (ts_code, close_series) in close_series_cache {
                 er_series_cache.insert(
                     ts_code,
@@ -2585,165 +2738,6 @@ fn load_pct_chg_series_cache_for_ts_codes(
     Ok(out)
 }
 
-fn find_stock_data_column(conn: &Connection, requested: &str) -> Result<Option<String>, String> {
-    let mut stmt = conn
-        .prepare("DESCRIBE stock_data")
-        .map_err(|e| format!("预编译 stock_data 列查询失败:{e}"))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("查询 stock_data 列失败:{e}"))?;
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取 stock_data 列失败:{e}"))?
-    {
-        let name: String = row
-            .get(0)
-            .map_err(|e| format!("读取 stock_data 列名失败:{e}"))?;
-        if name.eq_ignore_ascii_case(requested) {
-            return Ok(Some(name));
-        }
-    }
-    Ok(None)
-}
-
-fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
-}
-
-fn load_indicator_series_cache_for_ts_codes(
-    conn: &Connection,
-    ts_codes: &[String],
-    adj_type: &str,
-    start_date: &str,
-    end_date: &str,
-    indicator_column: &str,
-) -> Result<HashMap<String, HashMap<String, f64>>, String> {
-    if ts_codes.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let mut out = HashMap::<String, HashMap<String, f64>>::with_capacity(ts_codes.len());
-    let quoted_column = quote_identifier(indicator_column);
-    for chunk in ts_codes.chunks(PCT_CHG_BATCH_SIZE) {
-        let placeholders = std::iter::repeat_n("?", chunk.len())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            r#"
-            SELECT
-                ts_code,
-                trade_date,
-                TRY_CAST({quoted_column} AS DOUBLE)
-            FROM stock_data
-            WHERE adj_type = ?
-              AND ts_code IN ({placeholders})
-              AND trade_date >= ?
-              AND trade_date <= ?
-            ORDER BY ts_code ASC, trade_date ASC
-            "#
-        );
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| format!("预编译批量 {indicator_column} 查询失败:{e}"))?;
-        let query_params = std::iter::once(adj_type.trim())
-            .chain(chunk.iter().map(|ts_code| ts_code.trim()))
-            .chain(std::iter::once(start_date.trim()))
-            .chain(std::iter::once(end_date.trim()));
-        let mut rows = stmt
-            .query(params_from_iter(query_params))
-            .map_err(|e| format!("查询批量 {indicator_column} 失败:{e}"))?;
-
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| format!("读取批量 {indicator_column} 失败:{e}"))?
-        {
-            let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
-            let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
-            let value: Option<f64> = row
-                .get(2)
-                .map_err(|e| format!("读取{indicator_column}失败:{e}"))?;
-
-            let Some(value) = value.filter(|value| value.is_finite()) else {
-                continue;
-            };
-            out.entry(ts_code).or_default().insert(trade_date, value);
-        }
-    }
-
-    Ok(out)
-}
-
-fn load_close_series_cache_for_ts_codes(
-    conn: &Connection,
-    ts_codes: &[String],
-    adj_type: &str,
-    start_date: &str,
-    end_date: &str,
-) -> Result<HashMap<String, Vec<(String, f64)>>, String> {
-    if ts_codes.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let mut out = HashMap::<String, Vec<(String, f64)>>::with_capacity(ts_codes.len());
-    for chunk in ts_codes.chunks(PCT_CHG_BATCH_SIZE) {
-        let placeholders = std::iter::repeat_n("?", chunk.len())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            r#"
-            WITH ranked AS (
-                SELECT
-                    ts_code,
-                    trade_date,
-                    TRY_CAST(close AS DOUBLE) AS close_price,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY
-                            ts_code,
-                            CASE WHEN trade_date < ? THEN 0 ELSE 1 END
-                        ORDER BY trade_date DESC
-                    ) AS history_rank
-                FROM stock_data
-                WHERE adj_type = ?
-                  AND ts_code IN ({placeholders})
-                  AND trade_date <= ?
-            )
-            SELECT
-                ts_code,
-                trade_date,
-                close_price
-            FROM ranked
-            WHERE trade_date >= ?
-               OR history_rank <= {EFFICIENCY_RATIO_PERIOD}
-            ORDER BY ts_code ASC, trade_date ASC
-            "#
-        );
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| format!("预编译批量收盘价查询失败:{e}"))?;
-        let query_params = std::iter::once(start_date.trim())
-            .chain(std::iter::once(adj_type.trim()))
-            .chain(chunk.iter().map(|ts_code| ts_code.trim()))
-            .chain(std::iter::once(end_date.trim()))
-            .chain(std::iter::once(start_date.trim()));
-        let mut rows = stmt
-            .query(params_from_iter(query_params))
-            .map_err(|e| format!("查询批量收盘价失败:{e}"))?;
-
-        while let Some(row) = rows.next().map_err(|e| format!("读取批量收盘价失败:{e}"))? {
-            let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
-            let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
-            let close: Option<f64> = row.get(2).map_err(|e| format!("读取close失败:{e}"))?;
-
-            let Some(close) = close.filter(|value| value.is_finite()) else {
-                continue;
-            };
-            out.entry(ts_code).or_default().push((trade_date, close));
-        }
-    }
-
-    Ok(out)
-}
-
 fn build_concept_series_cache(
     source_dir: &str,
     ts_codes: &[String],
@@ -2803,7 +2797,13 @@ fn load_rule_rows_filtered(
     input: &RuleLayerFromDbInput,
     allowed_ts_codes: Option<&HashSet<String>>,
 ) -> Result<Vec<RuleDbRow>, String> {
-    load_rule_rows_for_names(
+    (|source_dir: &str,
+      rule_names: &[String],
+      start_date: &str,
+      end_date: &str|
+     -> Result<Vec<RuleDbRow>, String> {
+        load_rule_rows_for_names_filtered(source_dir, rule_names, start_date, end_date, None)
+    })(
         source_dir,
         std::slice::from_ref(&input.rule_name),
         &input.start_date,
@@ -2819,15 +2819,6 @@ fn load_rule_rows_filtered(
     })
 }
 
-fn load_rule_rows_for_names(
-    source_dir: &str,
-    rule_names: &[String],
-    start_date: &str,
-    end_date: &str,
-) -> Result<Vec<RuleDbRow>, String> {
-    load_rule_rows_for_names_filtered(source_dir, rule_names, start_date, end_date, None)
-}
-
 fn load_rule_rows_for_names_filtered(
     source_dir: &str,
     rule_names: &[String],
@@ -2835,40 +2826,31 @@ fn load_rule_rows_for_names_filtered(
     end_date: &str,
     allowed_ts_codes: Option<&HashSet<String>>,
 ) -> Result<Vec<RuleDbRow>, String> {
-    let mut rows =
-        load_rule_rows_for_names_unfiltered(source_dir, rule_names, start_date, end_date)?;
-    if allowed_ts_codes.is_some() {
-        rows.retain(|row| ts_code_allowed(allowed_ts_codes, &row.ts_code));
-    }
-    Ok(rows)
-}
+    let mut rows = (|source_dir: &str,
+                     rule_names: &[String],
+                     start_date: &str,
+                     end_date: &str|
+     -> Result<Vec<RuleDbRow>, String> {
+        if rule_names.is_empty() {
+            return Ok(Vec::new());
+        }
 
-fn load_rule_rows_for_names_unfiltered(
-    source_dir: &str,
-    rule_names: &[String],
-    start_date: &str,
-    end_date: &str,
-) -> Result<Vec<RuleDbRow>, String> {
-    if rule_names.is_empty() {
-        return Ok(Vec::new());
-    }
+        let result_db = result_db_path(source_dir);
+        if !result_db.exists() {
+            return Ok(Vec::new());
+        }
 
-    let result_db = result_db_path(source_dir);
-    if !result_db.exists() {
-        return Ok(Vec::new());
-    }
+        let result_db_str = result_db
+            .to_str()
+            .ok_or_else(|| "result_db路径不是有效UTF-8".to_string())?;
+        let conn = Connection::open(result_db_str)
+            .map_err(|e| format!("打开scoring_result.db失败:{e}"))?;
 
-    let result_db_str = result_db
-        .to_str()
-        .ok_or_else(|| "result_db路径不是有效UTF-8".to_string())?;
-    let conn =
-        Connection::open(result_db_str).map_err(|e| format!("打开scoring_result.db失败:{e}"))?;
-
-    let placeholders = std::iter::repeat_n("?", rule_names.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        r#"
+        let placeholders = std::iter::repeat_n("?", rule_names.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            r#"
         SELECT
             rule_name,
             ts_code,
@@ -2881,47 +2863,52 @@ fn load_rule_rows_for_names_unfiltered(
           AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
         ORDER BY rule_name ASC, trade_date ASC, ts_code ASC
         "#
-    );
+        );
 
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| format!("预编译rule_details查询失败:{e}"))?;
-    let query_params = rule_names
-        .iter()
-        .map(|name| name.trim())
-        .chain(std::iter::once(start_date.trim()))
-        .chain(std::iter::once(end_date.trim()));
-    let mut rows = stmt
-        .query(params_from_iter(query_params))
-        .map_err(|e| format!("查询rule_details失败:{e}"))?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("预编译rule_details查询失败:{e}"))?;
+        let query_params = rule_names
+            .iter()
+            .map(|name| name.trim())
+            .chain(std::iter::once(start_date.trim()))
+            .chain(std::iter::once(end_date.trim()));
+        let mut rows = stmt
+            .query(params_from_iter(query_params))
+            .map_err(|e| format!("查询rule_details失败:{e}"))?;
 
-    let mut out = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取rule_details失败:{e}"))?
-    {
-        let rule_name: String = row.get(0).map_err(|e| format!("读取rule_name失败:{e}"))?;
-        let ts_code: String = row.get(1).map_err(|e| format!("读取ts_code失败:{e}"))?;
-        let trade_date: String = row.get(2).map_err(|e| format!("读取trade_date失败:{e}"))?;
-        let rule_score: f64 = row.get(3).map_err(|e| format!("读取rule_score失败:{e}"))?;
-
-        if rule_name.trim().is_empty()
-            || ts_code.trim().is_empty()
-            || trade_date.trim().is_empty()
-            || !rule_score.is_finite()
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取rule_details失败:{e}"))?
         {
-            continue;
+            let rule_name: String = row.get(0).map_err(|e| format!("读取rule_name失败:{e}"))?;
+            let ts_code: String = row.get(1).map_err(|e| format!("读取ts_code失败:{e}"))?;
+            let trade_date: String = row.get(2).map_err(|e| format!("读取trade_date失败:{e}"))?;
+            let rule_score: f64 = row.get(3).map_err(|e| format!("读取rule_score失败:{e}"))?;
+
+            if rule_name.trim().is_empty()
+                || ts_code.trim().is_empty()
+                || trade_date.trim().is_empty()
+                || !rule_score.is_finite()
+            {
+                continue;
+            }
+
+            out.push(RuleDbRow {
+                rule_name,
+                ts_code,
+                trade_date,
+                rule_score,
+            });
         }
 
-        out.push(RuleDbRow {
-            rule_name,
-            ts_code,
-            trade_date,
-            rule_score,
-        });
+        Ok(out)
+    })(source_dir, rule_names, start_date, end_date)?;
+    if allowed_ts_codes.is_some() {
+        rows.retain(|row| ts_code_allowed(allowed_ts_codes, &row.ts_code));
     }
-
-    Ok(out)
+    Ok(rows)
 }
 
 fn load_most_related_concept_map(source_dir: &str) -> Result<HashMap<String, String>, String> {

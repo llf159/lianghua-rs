@@ -208,20 +208,6 @@ fn parse_rule_file_text(text: &str) -> Result<StrategyRuleFile, toml::de::Error>
     toml::from_str(text)
 }
 
-fn rule_file_output_path(source_path: &str, file_name: &str) -> Result<PathBuf, String> {
-    let trimmed = file_name.trim();
-    if trimmed.is_empty() {
-        return Err("策略文件名不能为空".to_string());
-    }
-    if !trimmed.ends_with(".toml") {
-        return Err("策略文件名必须以 .toml 结尾".to_string());
-    }
-    if trimmed.contains('/') || trimmed.contains('\\') {
-        return Err("策略文件名不能包含路径分隔符".to_string());
-    }
-    Ok(std::path::Path::new(source_path).join(trimmed))
-}
-
 fn save_rule_file(source_path: &str, file: &StrategyRuleFile) -> Result<(), String> {
     let path = score_rule_path(source_path);
     let text = toml::to_string_pretty(file).map_err(|e| format!("序列化策略规则文件失败: {e}"))?;
@@ -250,28 +236,6 @@ fn parse_scope_way(scope_way: &str) -> Result<StrategyScopeWay, String> {
     }
 }
 
-fn normalize_scope_way(scope_way: &str) -> Result<String, String> {
-    let parsed = parse_scope_way(scope_way)?;
-    Ok(match parsed {
-        StrategyScopeWay::Any => "ANY".to_string(),
-        StrategyScopeWay::Last => "LAST".to_string(),
-        StrategyScopeWay::Each => "EACH".to_string(),
-        StrategyScopeWay::Recent => "RECENT".to_string(),
-        StrategyScopeWay::Consec(n) => format!("CONSEC>={n}"),
-    })
-}
-
-fn parse_rule_stage(stage: &str) -> Result<RuleStage, String> {
-    match stage.trim().to_ascii_lowercase().as_str() {
-        "base" => Ok(RuleStage::Base),
-        "trigger" => Ok(RuleStage::Trigger),
-        "confirm" => Ok(RuleStage::Confirm),
-        "risk" => Ok(RuleStage::Risk),
-        "fail" => Ok(RuleStage::Fail),
-        other => Err(format!("stage 不支持: {other}")),
-    }
-}
-
 fn parse_scene_direction(direction: &str) -> Result<SceneDirection, String> {
     match direction.trim().to_ascii_lowercase().as_str() {
         "long" => Ok(SceneDirection::Long),
@@ -280,17 +244,6 @@ fn parse_scene_direction(direction: &str) -> Result<SceneDirection, String> {
             "scene direction 不支持: {other}，仅支持 long/short"
         )),
     }
-}
-
-fn format_rule_stage(stage: RuleStage) -> String {
-    match stage {
-        RuleStage::Base => "base",
-        RuleStage::Trigger => "trigger",
-        RuleStage::Confirm => "confirm",
-        RuleStage::Risk => "risk",
-        RuleStage::Fail => "fail",
-    }
-    .to_string()
 }
 
 fn estimate_rule_warmup(
@@ -420,7 +373,50 @@ fn validate_rule_definition(
                     rule.name
                 ));
             }
-            validate_strategy_dist_points(rule, scope_way)?;
+            (|rule: &StrategyRuleFileRule, scope_way: StrategyScopeWay| -> Result<(), String> {
+                let Some(dist_points) = &rule.dist_points else {
+                    return Ok(());
+                };
+                if !dist_points.is_empty()
+                    && !(|scope_way: StrategyScopeWay| -> bool {
+                        matches!(scope_way, StrategyScopeWay::Each | StrategyScopeWay::Recent)
+                    })(scope_way)
+                {
+                    return Err(format!(
+                        "策略 {} 的 scope_way 不支持 dist_points，仅 EACH/RECENT 支持区间字典分",
+                        rule.name
+                    ));
+                }
+                for (index, item) in dist_points.iter().enumerate() {
+                    if item.min > item.max {
+                        return Err(format!(
+                            "策略 {} 的 dist_points 第{}段 min > max",
+                            rule.name,
+                            index + 1
+                        ));
+                    }
+                    if !item.points.is_finite() {
+                        return Err(format!(
+                            "策略 {} 的 dist_points 第{}段 points 非法",
+                            rule.name,
+                            index + 1
+                        ));
+                    }
+                }
+                let mut sorted = dist_points.iter().collect::<Vec<_>>();
+                sorted.sort_by_key(|item| item.min);
+                for pair in sorted.windows(2) {
+                    let previous = pair[0];
+                    let current = pair[1];
+                    if previous.max >= current.min {
+                        return Err(format!(
+                            "策略 {} 的 dist_points 区间重叠: [{}-{}] 和 [{}-{}]",
+                            rule.name, previous.min, previous.max, current.min, current.max
+                        ));
+                    }
+                }
+                Ok(())
+            })(rule, scope_way)?;
             vec![(
                 rule.name.clone(),
                 parse_strategy_expression(&rule.name, &rule.when)?,
@@ -572,60 +568,6 @@ fn parse_strategy_expression(label: &str, expression: &str) -> Result<Stmts, Str
     Ok(stmts)
 }
 
-fn validate_strategy_dist_points(
-    rule: &StrategyRuleFileRule,
-    scope_way: StrategyScopeWay,
-) -> Result<(), String> {
-    let Some(dist_points) = &rule.dist_points else {
-        return Ok(());
-    };
-    if !dist_points.is_empty() && !strategy_scope_way_supports_dist_points(scope_way) {
-        return Err(format!(
-            "策略 {} 的 scope_way 不支持 dist_points，仅 EACH/RECENT 支持区间字典分",
-            rule.name
-        ));
-    }
-    for (index, item) in dist_points.iter().enumerate() {
-        if item.min > item.max {
-            return Err(format!(
-                "策略 {} 的 dist_points 第{}段 min > max",
-                rule.name,
-                index + 1
-            ));
-        }
-        if !item.points.is_finite() {
-            return Err(format!(
-                "策略 {} 的 dist_points 第{}段 points 非法",
-                rule.name,
-                index + 1
-            ));
-        }
-    }
-    let mut sorted = dist_points.iter().collect::<Vec<_>>();
-    sorted.sort_by_key(|item| item.min);
-    for pair in sorted.windows(2) {
-        let previous = pair[0];
-        let current = pair[1];
-        if previous.max >= current.min {
-            return Err(format!(
-                "策略 {} 的 dist_points 区间重叠: [{}-{}] 和 [{}-{}]",
-                rule.name, previous.min, previous.max, current.min, current.max
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn strategy_scope_way_supports_dist_points(scope_way: StrategyScopeWay) -> bool {
-    matches!(scope_way, StrategyScopeWay::Each | StrategyScopeWay::Recent)
-}
-
-fn map_dist_points(
-    values: Option<Vec<StrategyManageDistPoint>>,
-) -> Option<Vec<StrategyManageDistPoint>> {
-    values.filter(|items| !items.is_empty())
-}
-
 fn load_validation_context(
     source_path: &str,
 ) -> Result<
@@ -674,12 +616,32 @@ fn draft_to_rule(draft: StrategyManageRuleDraft) -> Result<StrategyRuleFileRule,
         name: draft.name.trim().to_string(),
         scene_name: draft.scene_name.trim().to_string(),
         kind: draft.kind,
-        stage: parse_rule_stage(&draft.stage)?,
+        stage: (|stage : & str| -> Result < RuleStage , String > {
+    match stage.trim().to_ascii_lowercase().as_str() {
+        "base" => Ok(RuleStage::Base),
+        "trigger" => Ok(RuleStage::Trigger),
+        "confirm" => Ok(RuleStage::Confirm),
+        "risk" => Ok(RuleStage::Risk),
+        "fail" => Ok(RuleStage::Fail),
+        other => Err(format!("stage 不支持: {other}")),
+    }
+})(&draft.stage)?,
         scope_windows: draft.scope_windows.max(1),
-        scope_way: normalize_scope_way(&draft.scope_way)?,
+        scope_way: (|scope_way : & str| -> Result < String , String > {
+    let parsed = parse_scope_way(scope_way)?;
+    Ok(match parsed {
+        StrategyScopeWay::Any => "ANY".to_string(),
+        StrategyScopeWay::Last => "LAST".to_string(),
+        StrategyScopeWay::Each => "EACH".to_string(),
+        StrategyScopeWay::Recent => "RECENT".to_string(),
+        StrategyScopeWay::Consec(n) => format!("CONSEC>={n}"),
+    })
+})(&draft.scope_way)?,
         when: draft.when.trim().to_string(),
         points: draft.points,
-        dist_points: map_dist_points(draft.dist_points),
+        dist_points: (|values : Option < Vec < StrategyManageDistPoint > >| -> Option < Vec < StrategyManageDistPoint > > {
+    values.filter(|items| !items.is_empty())
+})(draft.dist_points),
         conditions: draft
             .conditions
             .into_iter()
@@ -708,65 +670,72 @@ fn scene_draft_to_file(draft: StrategyManageSceneDraft) -> Result<StrategyRuleFi
     })
 }
 
-fn build_page_data(config: &StrategyRuleFile) -> StrategyManagePageData {
-    let mut rule_count_map: HashMap<&str, usize> = HashMap::new();
-    for rule in &config.rule {
-        *rule_count_map.entry(rule.scene_name.trim()).or_default() += 1;
-    }
-
-    let scenes = config
-        .scene
-        .iter()
-        .enumerate()
-        .map(|(index, scene)| StrategyManageSceneItem {
-            index,
-            name: scene.name.clone(),
-            direction: scene.direction.as_str().to_string(),
-            observe_threshold: scene.observe_threshold,
-            trigger_threshold: scene.trigger_threshold,
-            confirm_threshold: scene.confirm_threshold,
-            fail_threshold: scene.fail_threshold,
-            rule_count: rule_count_map.get(scene.name.trim()).copied().unwrap_or(0),
-        })
-        .collect();
-
-    let rules = config
-        .rule
-        .iter()
-        .enumerate()
-        .map(|(index, rule)| StrategyManageRuleItem {
-            index,
-            name: rule.name.clone(),
-            scene_name: rule.scene_name.clone(),
-            kind: rule.kind,
-            stage: format_rule_stage(rule.stage),
-            scope_way: rule.scope_way.clone(),
-            scope_windows: rule.scope_windows,
-            points: rule.points,
-            explain: rule.explain.clone(),
-            when: rule.when.clone(),
-            dist_points: rule.dist_points.clone(),
-            conditions: rule
-                .conditions
-                .iter()
-                .map(|condition| StrategyManageRuleCondition {
-                    name: condition.name.clone(),
-                    when: condition.when.clone(),
-                    bonus_points: condition.bonus_points,
-                })
-                .collect(),
-            points_by_hits: rule.points_by_hits.clone(),
-            max_points: rule.max_points,
-            max_bonus_points: rule.max_bonus_points,
-        })
-        .collect();
-
-    StrategyManagePageData { scenes, rules }
-}
-
 pub fn get_strategy_manage_page(source_path: &str) -> Result<StrategyManagePageData, String> {
     let config = load_rule_file(source_path)?;
-    Ok(build_page_data(&config))
+    Ok((|config: &StrategyRuleFile| -> StrategyManagePageData {
+        let mut rule_count_map: HashMap<&str, usize> = HashMap::new();
+        for rule in &config.rule {
+            *rule_count_map.entry(rule.scene_name.trim()).or_default() += 1;
+        }
+
+        let scenes = config
+            .scene
+            .iter()
+            .enumerate()
+            .map(|(index, scene)| StrategyManageSceneItem {
+                index,
+                name: scene.name.clone(),
+                direction: scene.direction.as_str().to_string(),
+                observe_threshold: scene.observe_threshold,
+                trigger_threshold: scene.trigger_threshold,
+                confirm_threshold: scene.confirm_threshold,
+                fail_threshold: scene.fail_threshold,
+                rule_count: rule_count_map.get(scene.name.trim()).copied().unwrap_or(0),
+            })
+            .collect();
+
+        let rules = config
+            .rule
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| StrategyManageRuleItem {
+                index,
+                name: rule.name.clone(),
+                scene_name: rule.scene_name.clone(),
+                kind: rule.kind,
+                stage: (|stage: RuleStage| -> String {
+                    match stage {
+                        RuleStage::Base => "base",
+                        RuleStage::Trigger => "trigger",
+                        RuleStage::Confirm => "confirm",
+                        RuleStage::Risk => "risk",
+                        RuleStage::Fail => "fail",
+                    }
+                    .to_string()
+                })(rule.stage),
+                scope_way: rule.scope_way.clone(),
+                scope_windows: rule.scope_windows,
+                points: rule.points,
+                explain: rule.explain.clone(),
+                when: rule.when.clone(),
+                dist_points: rule.dist_points.clone(),
+                conditions: rule
+                    .conditions
+                    .iter()
+                    .map(|condition| StrategyManageRuleCondition {
+                        name: condition.name.clone(),
+                        when: condition.when.clone(),
+                        bonus_points: condition.bonus_points,
+                    })
+                    .collect(),
+                points_by_hits: rule.points_by_hits.clone(),
+                max_points: rule.max_points,
+                max_bonus_points: rule.max_bonus_points,
+            })
+            .collect();
+
+        StrategyManagePageData { scenes, rules }
+    })(&config))
 }
 
 pub fn check_strategy_manage_scene_draft(
@@ -938,7 +907,19 @@ pub fn save_strategy_manage_refactor_file(
         return Err("至少需要一条 rule".to_string());
     }
 
-    let output_path = rule_file_output_path(source_path, file_name)?;
+    let output_path = (|source_path: &str, file_name: &str| -> Result<PathBuf, String> {
+        let trimmed = file_name.trim();
+        if trimmed.is_empty() {
+            return Err("策略文件名不能为空".to_string());
+        }
+        if !trimmed.ends_with(".toml") {
+            return Err("策略文件名必须以 .toml 结尾".to_string());
+        }
+        if trimmed.contains('/') || trimmed.contains('\\') {
+            return Err("策略文件名不能包含路径分隔符".to_string());
+        }
+        Ok(std::path::Path::new(source_path).join(trimmed))
+    })(source_path, file_name)?;
 
     let mut scene_name_set: HashSet<String> = HashSet::new();
     let mut scene_items = Vec::with_capacity(draft.scenes.len());
@@ -1015,85 +996,6 @@ mod tests {
             .expect("clock")
             .as_nanos();
         std::env::temp_dir().join(format!("lianghua_strategy_manage_{unique}"))
-    }
-
-    fn prepare_strategy_validation_source(source_dir: &std::path::Path) {
-        create_dir_all(source_dir).expect("create source dir");
-        write(
-            source_dir.join("stock_list.csv"),
-            "ts_code,unused,name\n000001.SZ,,样本股\n",
-        )
-        .expect("write stock_list.csv");
-        write(
-            source_dir.join("score_rule.toml"),
-            r#"
-version = 1
-
-[[scene]]
-name = "趋势启动"
-direction = "long"
-observe_threshold = 1.0
-trigger_threshold = 2.0
-confirm_threshold = 3.0
-fail_threshold = 1.0
-
-[[rule]]
-name = "基础规则"
-scene = "趋势启动"
-stage = "base"
-scope_windows = 1
-scope_way = "LAST"
-when = "C > O"
-points = 1.0
-explain = "test"
-"#,
-        )
-        .expect("write score_rule.toml");
-
-        let conn = Connection::open(source_db_path(source_dir.to_str().expect("utf8")))
-            .expect("open source db");
-        conn.execute(
-            r#"
-            CREATE TABLE stock_data (
-                ts_code VARCHAR,
-                trade_date VARCHAR,
-                adj_type VARCHAR,
-                open DOUBLE,
-                high DOUBLE,
-                low DOUBLE,
-                close DOUBLE,
-                vol DOUBLE,
-                amount DOUBLE,
-                pre_close DOUBLE,
-                change DOUBLE,
-                pct_chg DOUBLE
-            )
-            "#,
-            [],
-        )
-        .expect("create stock_data");
-        for (trade_date, open, high, low, close, pre_close, change, pct_chg) in [
-            ("20240102", 10.0, 10.5, 9.8, 10.2, 10.0, 0.2, 2.0),
-            ("20240103", 10.2, 11.0, 10.1, 10.8, 10.2, 0.6, 5.88),
-        ] {
-            conn.execute(
-                r#"
-                INSERT INTO stock_data VALUES (?, ?, 'qfq', ?, ?, ?, ?, 1000, 10000, ?, ?, ?)
-                "#,
-                params![
-                    "000001.SZ",
-                    trade_date,
-                    open,
-                    high,
-                    low,
-                    close,
-                    pre_close,
-                    change,
-                    pct_chg
-                ],
-            )
-            .expect("insert stock row");
-        }
     }
 
     #[test]
@@ -1197,7 +1099,84 @@ explain = "test"
     #[test]
     fn rule_draft_validation_accepts_optional_cyq_chen_fields() {
         let source_dir = temp_source_dir();
-        prepare_strategy_validation_source(&source_dir);
+        (|source_dir: &std::path::Path| {
+            create_dir_all(source_dir).expect("create source dir");
+            write(
+                source_dir.join("stock_list.csv"),
+                "ts_code,unused,name\n000001.SZ,,样本股\n",
+            )
+            .expect("write stock_list.csv");
+            write(
+                source_dir.join("score_rule.toml"),
+                r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "基础规则"
+scene = "趋势启动"
+stage = "base"
+scope_windows = 1
+scope_way = "LAST"
+when = "C > O"
+points = 1.0
+explain = "test"
+"#,
+            )
+            .expect("write score_rule.toml");
+
+            let conn = Connection::open(source_db_path(source_dir.to_str().expect("utf8")))
+                .expect("open source db");
+            conn.execute(
+                r#"
+            CREATE TABLE stock_data (
+                ts_code VARCHAR,
+                trade_date VARCHAR,
+                adj_type VARCHAR,
+                open DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                close DOUBLE,
+                vol DOUBLE,
+                amount DOUBLE,
+                pre_close DOUBLE,
+                change DOUBLE,
+                pct_chg DOUBLE
+            )
+            "#,
+                [],
+            )
+            .expect("create stock_data");
+            for (trade_date, open, high, low, close, pre_close, change, pct_chg) in [
+                ("20240102", 10.0, 10.5, 9.8, 10.2, 10.0, 0.2, 2.0),
+                ("20240103", 10.2, 11.0, 10.1, 10.8, 10.2, 0.6, 5.88),
+            ] {
+                conn.execute(
+                    r#"
+                INSERT INTO stock_data VALUES (?, ?, 'qfq', ?, ?, ?, ?, 1000, 10000, ?, ?, ?)
+                "#,
+                    params![
+                        "000001.SZ",
+                        trade_date,
+                        open,
+                        high,
+                        low,
+                        close,
+                        pre_close,
+                        change,
+                        pct_chg
+                    ],
+                )
+                .expect("insert stock row");
+            }
+        })(&source_dir);
 
         let result = check_strategy_manage_rule_draft(
             source_dir.to_str().expect("utf8"),

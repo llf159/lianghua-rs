@@ -34,8 +34,6 @@ use lianghua_app_shared::{canonical_ts_code, resolve_trade_date};
 use lianghua_app_strategy::stock_similarity::StockSimilarityPageData;
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
-const INTRADAY_CONNECT_TIMEOUT_SECS: u64 = 6;
-const INTRADAY_REQUEST_TIMEOUT_SECS: u64 = 12;
 
 #[derive(Debug, Serialize)]
 pub struct DetailOverview {
@@ -429,35 +427,6 @@ fn open_source_conn(source_path: &str) -> Result<Connection, String> {
     Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))
 }
 
-fn open_cyq_conn(source_path: &str) -> Result<Option<Connection>, String> {
-    let cyq_db = cyq_db_path(source_path);
-    if !cyq_db.exists() {
-        return Ok(None);
-    }
-    let cyq_db_str = cyq_db
-        .to_str()
-        .ok_or_else(|| "筹码库路径不是有效UTF-8".to_string())?;
-    Connection::open(cyq_db_str)
-        .map(Some)
-        .map_err(|e| format!("打开筹码库失败: {e}"))
-}
-
-fn open_cyq_chen_conn(source_path: &str) -> Result<Option<Connection>, String> {
-    let cyq_chen_db = cyq_chen_db_path(source_path);
-    if !cyq_chen_db.exists() {
-        return Ok(None);
-    }
-    let cyq_chen_db_str = cyq_chen_db
-        .to_str()
-        .ok_or_else(|| "新筹码库路径不是有效UTF-8".to_string())?;
-    let config = Config::default()
-        .access_mode(AccessMode::ReadOnly)
-        .map_err(|e| format!("配置新筹码库只读模式失败: {e}"))?;
-    Connection::open_with_flags(cyq_chen_db_str, config)
-        .map(Some)
-        .map_err(|e| format!("打开新筹码库失败: {e}"))
-}
-
 fn cyq_table_exists(conn: &Connection, table_name: &str) -> Result<bool, String> {
     let count = conn
         .query_row(
@@ -469,485 +438,8 @@ fn cyq_table_exists(conn: &Connection, table_name: &str) -> Result<bool, String>
     Ok(count > 0)
 }
 
-fn query_stock_detail_cyq(source_path: &str, ts_code: &str) -> Result<StockDetailCyqData, String> {
-    let normalized_ts_code = canonical_ts_code(ts_code);
-    let Some(conn) = open_cyq_conn(source_path)? else {
-        return Ok(StockDetailCyqData {
-            resolved_ts_code: normalized_ts_code,
-            model: "legacy".to_string(),
-            factor: None,
-            snapshots: Vec::new(),
-        });
-    };
-    if !cyq_table_exists(&conn, "cyq_snapshot")? || !cyq_table_exists(&conn, "cyq_bin")? {
-        return Ok(StockDetailCyqData {
-            resolved_ts_code: normalized_ts_code,
-            model: "legacy".to_string(),
-            factor: None,
-            snapshots: Vec::new(),
-        });
-    }
-
-    let mut factor_stmt = conn
-        .prepare("SELECT MAX(factor) FROM cyq_snapshot WHERE ts_code = ? AND adj_type = ?")
-        .map_err(|e| format!("预编译筹码分桶查询失败: {e}"))?;
-    let mut factor_rows = factor_stmt
-        .query(params![&normalized_ts_code, DEFAULT_ADJ_TYPE])
-        .map_err(|e| format!("查询筹码分桶失败: {e}"))?;
-    let factor = if let Some(row) = factor_rows
-        .next()
-        .map_err(|e| format!("读取筹码分桶失败: {e}"))?
-    {
-        let value: Option<i64> = row.get(0).map_err(|e| format!("读取筹码分桶值失败: {e}"))?;
-        value.and_then(|item| u32::try_from(item.max(0)).ok())
-    } else {
-        None
-    };
-
-    let mut snapshot_stmt = conn
-        .prepare(
-            r#"
-            SELECT trade_date, close, min_price, max_price, total_chips, benefit_part,
-                   percent_70_price_low, percent_70_price_high, percent_70_concentration,
-                   percent_90_price_low, percent_90_price_high, percent_90_concentration
-            FROM cyq_snapshot
-            WHERE ts_code = ? AND adj_type = ?
-            ORDER BY trade_date ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译筹码摘要查询失败: {e}"))?;
-    let mut snapshot_rows = snapshot_stmt
-        .query(params![&normalized_ts_code, DEFAULT_ADJ_TYPE])
-        .map_err(|e| format!("查询筹码摘要失败: {e}"))?;
-
-    let mut snapshots = Vec::new();
-    while let Some(row) = snapshot_rows
-        .next()
-        .map_err(|e| format!("读取筹码摘要失败: {e}"))?
-    {
-        let trade_date: String = row
-            .get(0)
-            .map_err(|e| format!("读取筹码摘要日期失败: {e}"))?;
-        let close: Option<f64> = row
-            .get(1)
-            .map_err(|e| format!("读取筹码摘要收盘价失败: {e}"))?;
-        snapshots.push(DetailCyqSnapshot {
-            trade_date,
-            close: close.unwrap_or(0.0),
-            min_price: row.get(2).map_err(|e| format!("读取筹码最低价失败: {e}"))?,
-            max_price: row.get(3).map_err(|e| format!("读取筹码最高价失败: {e}"))?,
-            main_total: None,
-            retail_total: None,
-            total_chips: row.get(4).map_err(|e| format!("读取筹码总量失败: {e}"))?,
-            total_profit_ratio: row
-                .get(5)
-                .map_err(|e| format!("读取筹码获利比例失败: {e}"))?,
-            total_trapped_ratio: None,
-            main_profit_ratio: None,
-            main_trapped_ratio: None,
-            main_avg_cost: None,
-            chip_peak_price: None,
-            percent_70_price_low: row
-                .get(6)
-                .map_err(|e| format!("读取70%筹码下沿失败: {e}"))?,
-            percent_70_price_high: row
-                .get(7)
-                .map_err(|e| format!("读取70%筹码上沿失败: {e}"))?,
-            percent_70_concentration: row
-                .get(8)
-                .map_err(|e| format!("读取70%筹码集中度失败: {e}"))?,
-            percent_90_price_low: row
-                .get(9)
-                .map_err(|e| format!("读取90%筹码下沿失败: {e}"))?,
-            percent_90_price_high: row
-                .get(10)
-                .map_err(|e| format!("读取90%筹码上沿失败: {e}"))?,
-            percent_90_concentration: row
-                .get(11)
-                .map_err(|e| format!("读取90%筹码集中度失败: {e}"))?,
-            bins: Vec::new(),
-        });
-    }
-
-    if snapshots.is_empty() {
-        return Ok(StockDetailCyqData {
-            resolved_ts_code: normalized_ts_code,
-            model: "legacy".to_string(),
-            factor,
-            snapshots,
-        });
-    }
-
-    let mut snapshot_index_by_trade_date = HashMap::with_capacity(snapshots.len());
-    for (index, snapshot) in snapshots.iter().enumerate() {
-        snapshot_index_by_trade_date.insert(snapshot.trade_date.clone(), index);
-    }
-
-    let mut bin_stmt = conn
-        .prepare(
-            r#"
-            SELECT trade_date, price, price_low, price_high, chip, chip_pct
-            FROM cyq_bin
-            WHERE ts_code = ? AND adj_type = ?
-            ORDER BY trade_date ASC, bin_index ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译筹码分布查询失败: {e}"))?;
-    let mut bin_rows = bin_stmt
-        .query(params![&normalized_ts_code, DEFAULT_ADJ_TYPE])
-        .map_err(|e| format!("查询筹码分布失败: {e}"))?;
-
-    while let Some(row) = bin_rows
-        .next()
-        .map_err(|e| format!("读取筹码分布失败: {e}"))?
-    {
-        let trade_date: String = row
-            .get(0)
-            .map_err(|e| format!("读取筹码分布日期失败: {e}"))?;
-        let Some(snapshot_index) = snapshot_index_by_trade_date.get(&trade_date).copied() else {
-            continue;
-        };
-        snapshots[snapshot_index].bins.push(DetailCyqBin {
-            price: row.get(1).map_err(|e| format!("读取筹码价格失败: {e}"))?,
-            price_low: row
-                .get(2)
-                .map_err(|e| format!("读取筹码价格下沿失败: {e}"))?,
-            price_high: row
-                .get(3)
-                .map_err(|e| format!("读取筹码价格上沿失败: {e}"))?,
-            chip: row.get(4).map_err(|e| format!("读取筹码值失败: {e}"))?,
-            chip_pct: row.get(5).map_err(|e| format!("读取筹码占比失败: {e}"))?,
-            main_chip: None,
-            main_chip_pct: None,
-            retail_chip: None,
-            retail_chip_pct: None,
-            total_chip: None,
-            total_chip_pct: None,
-        });
-    }
-
-    Ok(StockDetailCyqData {
-        resolved_ts_code: normalized_ts_code,
-        model: "legacy".to_string(),
-        factor,
-        snapshots,
-    })
-}
-
-fn query_stock_detail_cyq_chen(
-    source_path: &str,
-    ts_code: &str,
-) -> Result<StockDetailCyqData, String> {
-    let normalized_ts_code = canonical_ts_code(ts_code);
-    let Some(conn) = open_cyq_chen_conn(source_path)? else {
-        return Ok(StockDetailCyqData {
-            resolved_ts_code: normalized_ts_code,
-            model: "chen".to_string(),
-            factor: None,
-            snapshots: Vec::new(),
-        });
-    };
-    if !cyq_table_exists(&conn, "cyq_chen_snapshot")? || !cyq_table_exists(&conn, "cyq_chen_bin")? {
-        return Ok(StockDetailCyqData {
-            resolved_ts_code: normalized_ts_code,
-            model: "chen".to_string(),
-            factor: None,
-            snapshots: Vec::new(),
-        });
-    }
-
-    let mut snapshot_stmt = conn
-        .prepare(
-            r#"
-            SELECT trade_date, close, min_price, max_price, main_total, retail_total,
-                   total_chips, total_profit_ratio, total_trapped_ratio, main_avg_cost,
-                   chip_peak_price,
-                   percent_70_price_low, percent_70_price_high, percent_70_concentration,
-                   percent_90_price_low, percent_90_price_high, percent_90_concentration,
-                   main_profit_ratio, main_trapped_ratio
-            FROM cyq_chen_snapshot
-            WHERE ts_code = ? AND adj_type = ?
-            ORDER BY trade_date ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译新筹码摘要查询失败: {e}"))?;
-    let mut snapshot_rows = snapshot_stmt
-        .query(params![&normalized_ts_code, DEFAULT_ADJ_TYPE])
-        .map_err(|e| format!("查询新筹码摘要失败: {e}"))?;
-
-    let mut snapshots = Vec::new();
-    while let Some(row) = snapshot_rows
-        .next()
-        .map_err(|e| format!("读取新筹码摘要失败: {e}"))?
-    {
-        let trade_date: String = row
-            .get(0)
-            .map_err(|e| format!("读取新筹码摘要日期失败: {e}"))?;
-        let close: Option<f64> = row
-            .get(1)
-            .map_err(|e| format!("读取新筹码摘要收盘价失败: {e}"))?;
-        snapshots.push(DetailCyqSnapshot {
-            trade_date,
-            close: close.unwrap_or(0.0),
-            min_price: row
-                .get(2)
-                .map_err(|e| format!("读取新筹码最低价失败: {e}"))?,
-            max_price: row
-                .get(3)
-                .map_err(|e| format!("读取新筹码最高价失败: {e}"))?,
-            main_total: row
-                .get(4)
-                .map_err(|e| format!("读取新筹码主力总量失败: {e}"))?,
-            retail_total: row
-                .get(5)
-                .map_err(|e| format!("读取新筹码散户总量失败: {e}"))?,
-            total_chips: row.get(6).map_err(|e| format!("读取新筹码总量失败: {e}"))?,
-            total_profit_ratio: row
-                .get(7)
-                .map_err(|e| format!("读取新筹码获利比例失败: {e}"))?,
-            total_trapped_ratio: row
-                .get(8)
-                .map_err(|e| format!("读取新筹码套牢比例失败: {e}"))?,
-            main_profit_ratio: row
-                .get(17)
-                .map_err(|e| format!("读取新筹码主力获利比例失败: {e}"))?,
-            main_trapped_ratio: row
-                .get(18)
-                .map_err(|e| format!("读取新筹码主力套牢比例失败: {e}"))?,
-            main_avg_cost: row
-                .get(9)
-                .map_err(|e| format!("读取新筹码主力平均成本失败: {e}"))?,
-            chip_peak_price: row
-                .get(10)
-                .map_err(|e| format!("读取新筹码峰值价格失败: {e}"))?,
-            percent_70_price_low: row
-                .get(11)
-                .map_err(|e| format!("读取新筹码70%下沿失败: {e}"))?,
-            percent_70_price_high: row
-                .get(12)
-                .map_err(|e| format!("读取新筹码70%上沿失败: {e}"))?,
-            percent_70_concentration: row
-                .get(13)
-                .map_err(|e| format!("读取新筹码70%集中度失败: {e}"))?,
-            percent_90_price_low: row
-                .get(14)
-                .map_err(|e| format!("读取新筹码90%下沿失败: {e}"))?,
-            percent_90_price_high: row
-                .get(15)
-                .map_err(|e| format!("读取新筹码90%上沿失败: {e}"))?,
-            percent_90_concentration: row
-                .get(16)
-                .map_err(|e| format!("读取新筹码90%集中度失败: {e}"))?,
-            bins: Vec::new(),
-        });
-    }
-
-    if snapshots.is_empty() {
-        return Ok(StockDetailCyqData {
-            resolved_ts_code: normalized_ts_code,
-            model: "chen".to_string(),
-            factor: None,
-            snapshots,
-        });
-    }
-
-    let mut snapshot_index_by_trade_date = HashMap::with_capacity(snapshots.len());
-    for (index, snapshot) in snapshots.iter().enumerate() {
-        snapshot_index_by_trade_date.insert(snapshot.trade_date.clone(), index);
-    }
-
-    let mut bin_stmt = conn
-        .prepare(
-            r#"
-            SELECT bin.trade_date, bin.price, bin.price_low, bin.price_high,
-                   bin.main_chip, bin.retail_chip, bin.total_chip,
-                   snap.main_total, snap.retail_total, snap.total_chips
-            FROM cyq_chen_bin bin
-            JOIN cyq_chen_snapshot snap
-              ON snap.ts_code = bin.ts_code
-             AND snap.trade_date = bin.trade_date
-             AND snap.adj_type = bin.adj_type
-            WHERE bin.ts_code = ? AND bin.adj_type = ?
-            ORDER BY bin.trade_date ASC, bin.bin_index ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译新筹码分布查询失败: {e}"))?;
-    let mut bin_rows = bin_stmt
-        .query(params![&normalized_ts_code, DEFAULT_ADJ_TYPE])
-        .map_err(|e| format!("查询新筹码分布失败: {e}"))?;
-
-    while let Some(row) = bin_rows
-        .next()
-        .map_err(|e| format!("读取新筹码分布失败: {e}"))?
-    {
-        let trade_date: String = row
-            .get(0)
-            .map_err(|e| format!("读取新筹码分布日期失败: {e}"))?;
-        let Some(snapshot_index) = snapshot_index_by_trade_date.get(&trade_date).copied() else {
-            continue;
-        };
-        let main_chip: f64 = row
-            .get(4)
-            .map_err(|e| format!("读取新筹码主力值失败: {e}"))?;
-        let retail_chip: f64 = row
-            .get(5)
-            .map_err(|e| format!("读取新筹码散户值失败: {e}"))?;
-        let total_chip: f64 = row
-            .get(6)
-            .map_err(|e| format!("读取新筹码混合值失败: {e}"))?;
-        let main_total: f64 = row
-            .get(7)
-            .map_err(|e| format!("读取新筹码主力总量失败: {e}"))?;
-        let retail_total: f64 = row
-            .get(8)
-            .map_err(|e| format!("读取新筹码散户总量失败: {e}"))?;
-        let total_chips: f64 = row.get(9).map_err(|e| format!("读取新筹码总量失败: {e}"))?;
-        let pct = |value: f64, total: f64| {
-            if total.abs() <= f64::EPSILON {
-                0.0
-            } else {
-                value / total
-            }
-        };
-
-        snapshots[snapshot_index].bins.push(DetailCyqBin {
-            price: row.get(1).map_err(|e| format!("读取新筹码价格失败: {e}"))?,
-            price_low: row
-                .get(2)
-                .map_err(|e| format!("读取新筹码价格下沿失败: {e}"))?,
-            price_high: row
-                .get(3)
-                .map_err(|e| format!("读取新筹码价格上沿失败: {e}"))?,
-            chip: total_chip,
-            chip_pct: pct(total_chip, total_chips),
-            main_chip: Some(main_chip),
-            main_chip_pct: Some(pct(main_chip, main_total)),
-            retail_chip: Some(retail_chip),
-            retail_chip_pct: Some(pct(retail_chip, retail_total)),
-            total_chip: Some(total_chip),
-            total_chip_pct: Some(pct(total_chip, total_chips)),
-        });
-    }
-
-    Ok(StockDetailCyqData {
-        resolved_ts_code: normalized_ts_code,
-        model: "chen".to_string(),
-        factor: None,
-        snapshots,
-    })
-}
-
 fn split_ts_code(ts_code: &str) -> String {
     ts_code.split('.').next().unwrap_or(ts_code).to_string()
-}
-
-fn query_detail_overview(
-    conn: &Connection,
-    source_meta: &DetailSourceMeta,
-    effective_trade_date: &str,
-    ts_code: &str,
-) -> Result<DetailOverview, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT
-                s.total_score,
-                s.rank,
-                (
-                    SELECT COUNT(*)
-                    FROM score_summary AS totals
-                    WHERE totals.trade_date = s.trade_date
-                ) AS total
-            FROM score_summary AS s
-            WHERE s.trade_date = ? AND s.ts_code = ?
-            LIMIT 1
-            "#,
-        )
-        .map_err(|e| format!("预编译详情总览失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![effective_trade_date, ts_code])
-        .map_err(|e| format!("查询详情总览失败: {e}"))?;
-
-    let Some(row) = rows.next().map_err(|e| format!("读取详情总览失败: {e}"))? else {
-        return Err(format!(
-            "未找到 {} 在 {} 的排名结果",
-            ts_code, effective_trade_date
-        ));
-    };
-
-    Ok(DetailOverview {
-        ts_code: ts_code.to_string(),
-        name: source_meta.name.clone(),
-        board: Some(board_category(ts_code, source_meta.name.as_deref()).to_string()),
-        area: source_meta.area.clone(),
-        industry: source_meta.industry.clone(),
-        trade_date: Some(effective_trade_date.to_string()),
-        total_score: row
-            .get(0)
-            .map_err(|e| format!("读取详情 total_score 失败: {e}"))?,
-        rank: row.get(1).map_err(|e| format!("读取详情 rank 失败: {e}"))?,
-        total: row
-            .get(2)
-            .map_err(|e| format!("读取详情 total 失败: {e}"))?,
-        total_mv_yi: source_meta.total_mv_yi,
-        circ_mv_yi: source_meta.circ_mv_yi,
-        most_related_concept: source_meta.most_related_concept.clone(),
-        concept: source_meta.concept.clone(),
-    })
-}
-
-fn query_rank_history(
-    conn: &Connection,
-    ts_code: &str,
-    limit: Option<usize>,
-) -> Result<Vec<DetailPrevRankRow>, String> {
-    let limit_clause = if limit.is_some() { "LIMIT ?" } else { "" };
-    let sql = format!(
-        r#"
-        WITH target_rows AS (
-            SELECT trade_date, rank
-            FROM score_summary
-            WHERE ts_code = ?
-            ORDER BY trade_date DESC
-            {limit_clause}
-        )
-        SELECT
-            t.trade_date,
-            t.rank,
-            (
-                SELECT COUNT(*)
-                FROM score_summary AS totals
-                WHERE totals.trade_date = t.trade_date
-            ) AS total
-        FROM target_rows AS t
-        ORDER BY t.trade_date DESC
-        "#
-    );
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| format!("预编译排名历史失败: {e}"))?;
-    let mut rows = if let Some(limit) = limit {
-        stmt.query(params![ts_code, limit as i64])
-            .map_err(|e| format!("查询排名历史失败: {e}"))?
-    } else {
-        stmt.query(params![ts_code])
-            .map_err(|e| format!("查询排名历史失败: {e}"))?
-    };
-
-    let mut out = Vec::new();
-    while let Some(row) = rows.next().map_err(|e| format!("读取排名历史失败: {e}"))? {
-        out.push(DetailPrevRankRow {
-            trade_date: row
-                .get(0)
-                .map_err(|e| format!("读取排名历史日期失败: {e}"))?,
-            rank: row.get(1).map_err(|e| format!("读取排名历史值失败: {e}"))?,
-            total: row
-                .get(2)
-                .map_err(|e| format!("读取排名历史总数失败: {e}"))?,
-        });
-    }
-
-    Ok(out)
 }
 
 fn query_latest_kline_trade_date(
@@ -1006,15 +498,6 @@ fn build_basic_detail_overview(
     }
 }
 
-#[cfg(test)]
-fn default_kline_panels() -> Vec<DetailKlinePanel> {
-    let config = lianghua_app_chart::indicator::load_chart_indicator_config("")
-        .unwrap_or_else(|_| lianghua_app_chart::indicator::default_chart_indicator_config());
-    let compiled = lianghua_app_chart::indicator::compile_chart_indicator_config(&config, None)
-        .expect("default chart indicator config should compile");
-    detail_kline_panels_from_compiled(&compiled)
-}
-
 fn detail_kline_panels_from_compiled(
     compiled: &CompiledChartIndicatorConfig,
 ) -> Vec<DetailKlinePanel> {
@@ -1028,7 +511,17 @@ fn detail_kline_panels_from_compiled(
                 .map(|series| DetailKlineSeries {
                     key: series.key.clone(),
                     label: series.render.label.clone(),
-                    kind: chart_series_kind_name(series.render.kind).to_string(),
+                    kind: (|kind: ChartSeriesKind| -> &'static str {
+                        match kind {
+                            ChartSeriesKind::Line => "line",
+                            ChartSeriesKind::Bar => "bar",
+                            ChartSeriesKind::Histogram => "histogram",
+                            ChartSeriesKind::Area => "area",
+                            ChartSeriesKind::Band => "band",
+                            ChartSeriesKind::Brick => "brick",
+                        }
+                    })(series.render.kind)
+                    .to_string(),
                     color: series.render.color.clone(),
                     color_when: if series.color_rules.is_empty() {
                         None
@@ -1060,24 +553,51 @@ fn detail_kline_panels_from_compiled(
                     kind: marker
                         .render
                         .kind
-                        .map(chart_marker_kind_name)
+                        .map(|kind: ChartMarkerKind| -> &'static str {
+                            match kind {
+                                ChartMarkerKind::Symbol => "symbol",
+                                ChartMarkerKind::VerticalLine => "vertical_line",
+                            }
+                        })
                         .map(str::to_string),
                     position: marker
                         .render
                         .position
-                        .map(chart_marker_position_name)
+                        .map(|position: ChartMarkerPosition| -> &'static str {
+                            match position {
+                                ChartMarkerPosition::Above => "above",
+                                ChartMarkerPosition::Below => "below",
+                                ChartMarkerPosition::Value => "value",
+                            }
+                        })
                         .map(str::to_string),
                     shape: marker
                         .render
                         .shape
-                        .map(chart_marker_shape_name)
+                        .map(|shape: ChartMarkerShape| -> &'static str {
+                            match shape {
+                                ChartMarkerShape::Dot => "dot",
+                                ChartMarkerShape::TriangleUp => "triangle_up",
+                                ChartMarkerShape::TriangleDown => "triangle_down",
+                                ChartMarkerShape::Flag => "flag",
+                                ChartMarkerShape::Square => "square",
+                                ChartMarkerShape::Diamond => "diamond",
+                                ChartMarkerShape::Star => "star",
+                            }
+                        })
                         .map(str::to_string),
                     color: marker.render.color.clone(),
                     text: marker.render.text.clone(),
                     line_style: marker
                         .render
                         .line_style
-                        .map(chart_marker_line_style_name)
+                        .map(|style: ChartMarkerLineStyle| -> &'static str {
+                            match style {
+                                ChartMarkerLineStyle::Solid => "solid",
+                                ChartMarkerLineStyle::Dashed => "dashed",
+                                ChartMarkerLineStyle::Dotted => "dotted",
+                            }
+                        })
                         .map(str::to_string),
                     line_width: marker.render.line_width,
                     opacity: marker.render.opacity,
@@ -1086,8 +606,26 @@ fn detail_kline_panels_from_compiled(
             DetailKlinePanel {
                 key: panel.key.clone(),
                 label: panel.label.clone(),
-                role: Some(chart_panel_role_name(panel.role).to_string()),
-                kind: Some(chart_panel_kind_name(panel.kind).to_string()),
+                role: Some(
+                    (|role: ChartPanelRole| -> &'static str {
+                        match role {
+                            ChartPanelRole::Main => "main",
+                            ChartPanelRole::Sub => "sub",
+                        }
+                    })(panel.role)
+                    .to_string(),
+                ),
+                kind: Some(
+                    (|kind: ChartPanelKind| -> &'static str {
+                        match kind {
+                            ChartPanelKind::Candles => "candles",
+                            ChartPanelKind::Line => "line",
+                            ChartPanelKind::Bar => "bar",
+                            ChartPanelKind::Brick => "brick",
+                        }
+                    })(panel.kind)
+                    .to_string(),
+                ),
                 series: Some(series),
                 markers: Some(markers),
                 tooltips: Some(
@@ -1101,7 +639,13 @@ fn detail_kline_panels_from_compiled(
                             format: tooltip
                                 .render
                                 .format
-                                .map(chart_tooltip_format_name)
+                                .map(|format: ChartTooltipFormat| -> &'static str {
+                                    match format {
+                                        ChartTooltipFormat::Number => "number",
+                                        ChartTooltipFormat::Percent => "percent",
+                                        ChartTooltipFormat::Ratio => "ratio",
+                                    }
+                                })
                                 .map(str::to_string),
                         })
                         .collect(),
@@ -1109,76 +653,6 @@ fn detail_kline_panels_from_compiled(
             }
         })
         .collect()
-}
-
-fn chart_panel_role_name(role: ChartPanelRole) -> &'static str {
-    match role {
-        ChartPanelRole::Main => "main",
-        ChartPanelRole::Sub => "sub",
-    }
-}
-
-fn chart_panel_kind_name(kind: ChartPanelKind) -> &'static str {
-    match kind {
-        ChartPanelKind::Candles => "candles",
-        ChartPanelKind::Line => "line",
-        ChartPanelKind::Bar => "bar",
-        ChartPanelKind::Brick => "brick",
-    }
-}
-
-fn chart_series_kind_name(kind: ChartSeriesKind) -> &'static str {
-    match kind {
-        ChartSeriesKind::Line => "line",
-        ChartSeriesKind::Bar => "bar",
-        ChartSeriesKind::Histogram => "histogram",
-        ChartSeriesKind::Area => "area",
-        ChartSeriesKind::Band => "band",
-        ChartSeriesKind::Brick => "brick",
-    }
-}
-
-fn chart_marker_position_name(position: ChartMarkerPosition) -> &'static str {
-    match position {
-        ChartMarkerPosition::Above => "above",
-        ChartMarkerPosition::Below => "below",
-        ChartMarkerPosition::Value => "value",
-    }
-}
-
-fn chart_marker_kind_name(kind: ChartMarkerKind) -> &'static str {
-    match kind {
-        ChartMarkerKind::Symbol => "symbol",
-        ChartMarkerKind::VerticalLine => "vertical_line",
-    }
-}
-
-fn chart_marker_shape_name(shape: ChartMarkerShape) -> &'static str {
-    match shape {
-        ChartMarkerShape::Dot => "dot",
-        ChartMarkerShape::TriangleUp => "triangle_up",
-        ChartMarkerShape::TriangleDown => "triangle_down",
-        ChartMarkerShape::Flag => "flag",
-        ChartMarkerShape::Square => "square",
-        ChartMarkerShape::Diamond => "diamond",
-        ChartMarkerShape::Star => "star",
-    }
-}
-
-fn chart_marker_line_style_name(style: ChartMarkerLineStyle) -> &'static str {
-    match style {
-        ChartMarkerLineStyle::Solid => "solid",
-        ChartMarkerLineStyle::Dashed => "dashed",
-        ChartMarkerLineStyle::Dotted => "dotted",
-    }
-}
-
-fn chart_tooltip_format_name(format: ChartTooltipFormat) -> &'static str {
-    match format {
-        ChartTooltipFormat::Number => "number",
-        ChartTooltipFormat::Percent => "percent",
-        ChartTooltipFormat::Ratio => "ratio",
-    }
 }
 
 fn load_stock_data_columns(source_conn: &Connection) -> Result<HashSet<String>, String> {
@@ -1244,29 +718,28 @@ fn apply_chart_indicator_execution(
     values: HashMap<String, Vec<serde_json::Value>>,
 ) {
     for (key, series) in values {
-        if is_fixed_kline_output_key(&key) {
+        if (|key: &str| -> bool {
+            matches!(
+                key.trim().to_ascii_lowercase().as_str(),
+                "trade_date"
+                    | "open"
+                    | "high"
+                    | "low"
+                    | "close"
+                    | "vol"
+                    | "amount"
+                    | "tor"
+                    | "is_realtime"
+                    | "realtime_color_hint"
+            )
+        })(&key)
+        {
             continue;
         }
         for (item, value) in items.iter_mut().zip(series) {
             item.indicators.insert(key.clone(), value);
         }
     }
-}
-
-fn is_fixed_kline_output_key(key: &str) -> bool {
-    matches!(
-        key.trim().to_ascii_lowercase().as_str(),
-        "trade_date"
-            | "open"
-            | "high"
-            | "low"
-            | "close"
-            | "vol"
-            | "amount"
-            | "tor"
-            | "is_realtime"
-            | "realtime_color_hint"
-    )
 }
 
 fn inject_chart_indicator_extra_runtime_fields(
@@ -1284,96 +757,87 @@ fn inject_chart_indicator_extra_runtime_fields(
         st_list.contains(ts_code),
         fallback_total_share,
     )?;
-    inject_chart_indicator_rank_series(row_data, source_path, ts_code)
-}
-
-fn inject_chart_indicator_rank_series(
-    row_data: &mut RowData,
-    source_path: &str,
-    ts_code: &str,
-) -> Result<(), String> {
-    let len = row_data.trade_dates.len();
-    let mut rank_series = vec![None; len];
-    let mut score_series = vec![None; len];
-    if len == 0 {
-        row_data.cols.insert("RANK".to_string(), rank_series);
-        row_data.cols.insert("SCORE".to_string(), score_series);
-        return row_data.validate();
-    }
-
-    let Some(start_date) = row_data.trade_dates.first() else {
-        row_data.cols.insert("RANK".to_string(), rank_series);
-        row_data.cols.insert("SCORE".to_string(), score_series);
-        return row_data.validate();
-    };
-    let Some(end_date) = row_data.trade_dates.last() else {
-        row_data.cols.insert("RANK".to_string(), rank_series);
-        row_data.cols.insert("SCORE".to_string(), score_series);
-        return row_data.validate();
-    };
-    let rank_map = load_chart_indicator_rank_series_map(source_path, ts_code, start_date, end_date);
-    for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
-        if let Some(values) = rank_map.get(trade_date) {
-            rank_series[index] = values.rank;
-            score_series[index] = values.score;
+    (|row_data: &mut RowData, source_path: &str, ts_code: &str| -> Result<(), String> {
+        let len = row_data.trade_dates.len();
+        let mut rank_series = vec![None; len];
+        let mut score_series = vec![None; len];
+        if len == 0 {
+            row_data.cols.insert("RANK".to_string(), rank_series);
+            row_data.cols.insert("SCORE".to_string(), score_series);
+            return row_data.validate();
         }
-    }
 
-    row_data.cols.insert("RANK".to_string(), rank_series);
-    row_data.cols.insert("SCORE".to_string(), score_series);
-    row_data.validate()
+        let Some(start_date) = row_data.trade_dates.first() else {
+            row_data.cols.insert("RANK".to_string(), rank_series);
+            row_data.cols.insert("SCORE".to_string(), score_series);
+            return row_data.validate();
+        };
+        let Some(end_date) = row_data.trade_dates.last() else {
+            row_data.cols.insert("RANK".to_string(), rank_series);
+            row_data.cols.insert("SCORE".to_string(), score_series);
+            return row_data.validate();
+        };
+        let rank_map = (|source_path: &str,
+                         ts_code: &str,
+                         start_date: &str,
+                         end_date: &str|
+         -> HashMap<String, ChartIndicatorRankScoreValues> {
+            let result_db = result_db_path(source_path);
+            if !result_db.exists() {
+                return HashMap::new();
+            }
+
+            let Some(result_db_str) = result_db.to_str() else {
+                return HashMap::new();
+            };
+            let Ok(conn) = Connection::open(result_db_str) else {
+                return HashMap::new();
+            };
+            let Ok(mut stmt) = conn.prepare(
+                r#"
+        SELECT trade_date, rank, total_score
+        FROM score_summary
+        WHERE ts_code = ? AND trade_date >= ? AND trade_date <= ?
+        "#,
+            ) else {
+                return HashMap::new();
+            };
+            let Ok(mut rows) = stmt.query(params![ts_code, start_date, end_date]) else {
+                return HashMap::new();
+            };
+
+            let mut out = HashMap::new();
+            while let Ok(Some(row)) = rows.next() {
+                let Ok(trade_date) = row.get::<_, String>(0) else {
+                    continue;
+                };
+                let rank = row
+                    .get::<_, Option<i64>>(1)
+                    .ok()
+                    .flatten()
+                    .map(|value| value as f64);
+                let score = row.get::<_, Option<f64>>(2).ok().flatten();
+                out.insert(trade_date, ChartIndicatorRankScoreValues { rank, score });
+            }
+            out
+        })(source_path, ts_code, start_date, end_date);
+        for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
+            if let Some(values) = rank_map.get(trade_date) {
+                rank_series[index] = values.rank;
+                score_series[index] = values.score;
+            }
+        }
+
+        row_data.cols.insert("RANK".to_string(), rank_series);
+        row_data.cols.insert("SCORE".to_string(), score_series);
+        row_data.validate()
+    })(row_data, source_path, ts_code)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 struct ChartIndicatorRankScoreValues {
     rank: Option<f64>,
     score: Option<f64>,
-}
-
-fn load_chart_indicator_rank_series_map(
-    source_path: &str,
-    ts_code: &str,
-    start_date: &str,
-    end_date: &str,
-) -> HashMap<String, ChartIndicatorRankScoreValues> {
-    let result_db = result_db_path(source_path);
-    if !result_db.exists() {
-        return HashMap::new();
-    }
-
-    let Some(result_db_str) = result_db.to_str() else {
-        return HashMap::new();
-    };
-    let Ok(conn) = Connection::open(result_db_str) else {
-        return HashMap::new();
-    };
-    let Ok(mut stmt) = conn.prepare(
-        r#"
-        SELECT trade_date, rank, total_score
-        FROM score_summary
-        WHERE ts_code = ? AND trade_date >= ? AND trade_date <= ?
-        "#,
-    ) else {
-        return HashMap::new();
-    };
-    let Ok(mut rows) = stmt.query(params![ts_code, start_date, end_date]) else {
-        return HashMap::new();
-    };
-
-    let mut out = HashMap::new();
-    while let Ok(Some(row)) = rows.next() {
-        let Ok(trade_date) = row.get::<_, String>(0) else {
-            continue;
-        };
-        let rank = row
-            .get::<_, Option<i64>>(1)
-            .ok()
-            .flatten()
-            .map(|value| value as f64);
-        let score = row.get::<_, Option<f64>>(2).ok().flatten();
-        out.insert(trade_date, ChartIndicatorRankScoreValues { rank, score });
-    }
-    out
 }
 
 pub(crate) fn query_kline(
@@ -1383,7 +847,23 @@ pub(crate) fn query_kline(
     default_window_days: usize,
     watermark_name: Option<String>,
 ) -> Result<DetailKlinePayload, String> {
-    query_kline_with_options(
+    (|source_conn: &Connection,
+      source_path: &str,
+      ts_code: &str,
+      default_window_days: usize,
+      watermark_name: Option<String>,
+      execute_indicators: bool|
+     -> Result<DetailKlinePayload, String> {
+        query_kline_with_compiled(
+            source_conn,
+            source_path,
+            ts_code,
+            default_window_days,
+            watermark_name,
+            execute_indicators,
+        )
+        .map(|(payload, _)| payload)
+    })(
         source_conn,
         source_path,
         ts_code,
@@ -1410,25 +890,6 @@ fn query_kline_base(
         watermark_name,
         watermark_code: Some(split_ts_code(ts_code)),
     })
-}
-
-fn query_kline_with_options(
-    source_conn: &Connection,
-    source_path: &str,
-    ts_code: &str,
-    default_window_days: usize,
-    watermark_name: Option<String>,
-    execute_indicators: bool,
-) -> Result<DetailKlinePayload, String> {
-    query_kline_with_compiled(
-        source_conn,
-        source_path,
-        ts_code,
-        default_window_days,
-        watermark_name,
-        execute_indicators,
-    )
-    .map(|(payload, _)| payload)
 }
 
 fn query_kline_with_compiled(
@@ -1595,108 +1056,6 @@ fn query_kline_rows(
     Ok((items, row_data))
 }
 
-fn build_chart_indicator_row_data_from_items(
-    items: &[DetailKlineRow],
-    source_path: &str,
-    ts_code: &str,
-    realtime_pre_close: Option<f64>,
-    compiled: &CompiledChartIndicatorConfig,
-) -> Result<RowData, String> {
-    if items.is_empty() {
-        return Err("详情图指标计算失败: items为空".to_string());
-    }
-
-    let mut trade_dates = Vec::with_capacity(items.len());
-    let mut cols = HashMap::with_capacity(10 + compiled.database_indicator_columns.len());
-    for key in [
-        "O",
-        "H",
-        "L",
-        "C",
-        "V",
-        "AMOUNT",
-        "PRE_CLOSE",
-        "CHANGE",
-        "PCT_CHG",
-        "TOR",
-    ] {
-        cols.insert(key.to_string(), Vec::with_capacity(items.len()));
-    }
-    for db_col in &compiled.database_indicator_columns {
-        cols.entry(db_col.to_ascii_uppercase())
-            .or_insert_with(|| Vec::with_capacity(items.len()));
-    }
-
-    let mut prev_close = None;
-    let last_index = items.len().saturating_sub(1);
-    for (index, item) in items.iter().enumerate() {
-        trade_dates.push(item.trade_date.clone());
-
-        let pre_close = if index == last_index && item.is_realtime == Some(true) {
-            realtime_pre_close.or(prev_close)
-        } else {
-            prev_close
-        };
-        let change = match (item.close, pre_close) {
-            (Some(close), Some(previous)) => Some(close - previous),
-            _ => None,
-        };
-        let pct_chg = match (change, pre_close) {
-            (Some(change_value), Some(previous)) if previous.abs() > f64::EPSILON => {
-                Some(change_value / previous * 100.0)
-            }
-            _ => None,
-        };
-
-        cols.get_mut("O").expect("O should exist").push(item.open);
-        cols.get_mut("H").expect("H should exist").push(item.high);
-        cols.get_mut("L").expect("L should exist").push(item.low);
-        cols.get_mut("C").expect("C should exist").push(item.close);
-        cols.get_mut("V").expect("V should exist").push(item.vol);
-        cols.get_mut("AMOUNT")
-            .expect("AMOUNT should exist")
-            .push(item.amount);
-        cols.get_mut("PRE_CLOSE")
-            .expect("PRE_CLOSE should exist")
-            .push(pre_close);
-        cols.get_mut("CHANGE")
-            .expect("CHANGE should exist")
-            .push(change);
-        cols.get_mut("PCT_CHG")
-            .expect("PCT_CHG should exist")
-            .push(pct_chg);
-        cols.get_mut("TOR")
-            .expect("TOR should exist")
-            .push(item.tor);
-        for db_col in &compiled.database_indicator_columns {
-            let normalized = db_col.to_ascii_uppercase();
-            let value = item
-                .runtime_values
-                .get(&normalized)
-                .copied()
-                .flatten()
-                .or_else(|| indicator_value_by_normalized_key(item, &normalized));
-            cols.entry(normalized).or_default().push(value);
-        }
-
-        prev_close = item.close;
-    }
-
-    let mut row_data = RowData { trade_dates, cols };
-    inject_chart_indicator_extra_runtime_fields(&mut row_data, source_path, ts_code)?;
-    Ok(row_data)
-}
-
-fn indicator_value_by_normalized_key(item: &DetailKlineRow, normalized_key: &str) -> Option<f64> {
-    item.indicators.iter().find_map(|(key, value)| {
-        if key.to_ascii_uppercase() == normalized_key {
-            value.as_f64()
-        } else {
-            None
-        }
-    })
-}
-
 fn rerun_realtime_chart_indicators(
     source_path: &str,
     ts_code: &str,
@@ -1708,7 +1067,106 @@ fn rerun_realtime_chart_indicators(
         return Ok(());
     }
 
-    let mut row_data = build_chart_indicator_row_data_from_items(
+    let mut row_data = (|items: &[DetailKlineRow],
+                         source_path: &str,
+                         ts_code: &str,
+                         realtime_pre_close: Option<f64>,
+                         compiled: &CompiledChartIndicatorConfig|
+     -> Result<RowData, String> {
+        if items.is_empty() {
+            return Err("详情图指标计算失败: items为空".to_string());
+        }
+
+        let mut trade_dates = Vec::with_capacity(items.len());
+        let mut cols = HashMap::with_capacity(10 + compiled.database_indicator_columns.len());
+        for key in [
+            "O",
+            "H",
+            "L",
+            "C",
+            "V",
+            "AMOUNT",
+            "PRE_CLOSE",
+            "CHANGE",
+            "PCT_CHG",
+            "TOR",
+        ] {
+            cols.insert(key.to_string(), Vec::with_capacity(items.len()));
+        }
+        for db_col in &compiled.database_indicator_columns {
+            cols.entry(db_col.to_ascii_uppercase())
+                .or_insert_with(|| Vec::with_capacity(items.len()));
+        }
+
+        let mut prev_close = None;
+        let last_index = items.len().saturating_sub(1);
+        for (index, item) in items.iter().enumerate() {
+            trade_dates.push(item.trade_date.clone());
+
+            let pre_close = if index == last_index && item.is_realtime == Some(true) {
+                realtime_pre_close.or(prev_close)
+            } else {
+                prev_close
+            };
+            let change = match (item.close, pre_close) {
+                (Some(close), Some(previous)) => Some(close - previous),
+                _ => None,
+            };
+            let pct_chg = match (change, pre_close) {
+                (Some(change_value), Some(previous)) if previous.abs() > f64::EPSILON => {
+                    Some(change_value / previous * 100.0)
+                }
+                _ => None,
+            };
+
+            cols.get_mut("O").expect("O should exist").push(item.open);
+            cols.get_mut("H").expect("H should exist").push(item.high);
+            cols.get_mut("L").expect("L should exist").push(item.low);
+            cols.get_mut("C").expect("C should exist").push(item.close);
+            cols.get_mut("V").expect("V should exist").push(item.vol);
+            cols.get_mut("AMOUNT")
+                .expect("AMOUNT should exist")
+                .push(item.amount);
+            cols.get_mut("PRE_CLOSE")
+                .expect("PRE_CLOSE should exist")
+                .push(pre_close);
+            cols.get_mut("CHANGE")
+                .expect("CHANGE should exist")
+                .push(change);
+            cols.get_mut("PCT_CHG")
+                .expect("PCT_CHG should exist")
+                .push(pct_chg);
+            cols.get_mut("TOR")
+                .expect("TOR should exist")
+                .push(item.tor);
+            for db_col in &compiled.database_indicator_columns {
+                let normalized = db_col.to_ascii_uppercase();
+                let value = item
+                    .runtime_values
+                    .get(&normalized)
+                    .copied()
+                    .flatten()
+                    .or_else(|| {
+                        (|item: &DetailKlineRow, normalized_key: &str| -> Option<f64> {
+                            item.indicators.iter().find_map(|(key, value)| {
+                                if key.to_ascii_uppercase() == normalized_key {
+                                    value.as_f64()
+                                } else {
+                                    None
+                                }
+                            })
+                        })(item, &normalized)
+                    });
+                cols.entry(normalized).or_default().push(value);
+            }
+
+            prev_close = item.close;
+        }
+
+        let mut row_data = RowData { trade_dates, cols };
+        inject_chart_indicator_extra_runtime_fields(&mut row_data, source_path, ts_code)?;
+        Ok(row_data)
+    })(
         items,
         source_path,
         ts_code,
@@ -1743,30 +1201,6 @@ fn rerun_realtime_chart_indicators(
     Ok(())
 }
 
-fn build_realtime_kline_row(quote: &crate::crawler::SinaQuote) -> Option<DetailKlineRow> {
-    let trade_date = normalize_quote_trade_date(&quote.date)?;
-    let realtime_color_hint = match quote.change_pct {
-        Some(value) if value > 0.0 => Some("up".to_string()),
-        Some(value) if value < 0.0 => Some("down".to_string()),
-        _ => Some("flat".to_string()),
-    };
-
-    Some(DetailKlineRow {
-        trade_date,
-        open: Some(quote.open),
-        high: Some(quote.high),
-        low: Some(quote.low),
-        close: Some(quote.price),
-        vol: Some(quote.vol),
-        amount: Some(quote.amount),
-        tor: None,
-        is_realtime: Some(true),
-        realtime_color_hint,
-        indicators: HashMap::new(),
-        runtime_values: HashMap::new(),
-    })
-}
-
 fn merge_realtime_kline(
     mut kline: DetailKlinePayload,
     quote: &crate::crawler::SinaQuote,
@@ -1774,7 +1208,29 @@ fn merge_realtime_kline(
     let Some(items) = kline.items.as_mut() else {
         return (kline, false);
     };
-    let Some(mut realtime_row) = build_realtime_kline_row(quote) else {
+    let Some(mut realtime_row) = (|quote: &crate::crawler::SinaQuote| -> Option<DetailKlineRow> {
+        let trade_date = normalize_quote_trade_date(&quote.date)?;
+        let realtime_color_hint = match quote.change_pct {
+            Some(value) if value > 0.0 => Some("up".to_string()),
+            Some(value) if value < 0.0 => Some("down".to_string()),
+            _ => Some("flat".to_string()),
+        };
+
+        Some(DetailKlineRow {
+            trade_date,
+            open: Some(quote.open),
+            high: Some(quote.high),
+            low: Some(quote.low),
+            close: Some(quote.price),
+            vol: Some(quote.vol),
+            amount: Some(quote.amount),
+            tor: None,
+            is_realtime: Some(true),
+            realtime_color_hint,
+            indicators: HashMap::new(),
+            runtime_values: HashMap::new(),
+        })
+    })(quote) else {
         return (kline, false);
     };
 
@@ -1797,302 +1253,6 @@ fn merge_realtime_kline(
     (kline, false)
 }
 
-fn load_rule_meta_list(source_path: &str) -> Result<Vec<RuleMeta>, String> {
-    let imported_rule_path = score_rule_path(source_path);
-    let project_rule_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("source")
-        .join("score_rule.toml");
-    let rule_path = if imported_rule_path.exists() {
-        imported_rule_path
-    } else {
-        project_rule_path
-    };
-    let text = fs::read_to_string(&rule_path)
-        .map_err(|e| format!("读取规则文件失败: path={}, err={e}", rule_path.display()))?;
-    let config: ScoreConfig =
-        toml::from_str(&text).map_err(|e| format!("解析规则文件失败: {e}"))?;
-
-    Ok(config
-        .rule
-        .into_iter()
-        .map(|rule| RuleMeta {
-            rule_name: rule.name,
-            scene_name: rule.scene_name,
-            explain: rule.explain,
-            when: rule.when,
-        })
-        .collect())
-}
-
-fn load_scene_meta_list(source_path: &str) -> Result<Vec<SceneMeta>, String> {
-    let imported_rule_path = score_rule_path(source_path);
-    let project_rule_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("source")
-        .join("score_rule.toml");
-    let rule_path = if imported_rule_path.exists() {
-        imported_rule_path
-    } else {
-        project_rule_path
-    };
-    let text = fs::read_to_string(&rule_path)
-        .map_err(|e| format!("读取规则文件失败: path={}, err={e}", rule_path.display()))?;
-    let config: ScoreConfig =
-        toml::from_str(&text).map_err(|e| format!("解析规则文件失败: {e}"))?;
-
-    Ok(config
-        .scene
-        .into_iter()
-        .map(|scene| SceneMeta {
-            scene_name: scene.name,
-            direction: scene.direction.as_str().to_string(),
-            observe_threshold: scene.observe_threshold,
-            trigger_threshold: scene.trigger_threshold,
-            confirm_threshold: scene.confirm_threshold,
-            fail_threshold: scene.fail_threshold,
-        })
-        .collect())
-}
-
-fn build_trade_day_index_map(conn: &Connection) -> Result<HashMap<String, usize>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT DISTINCT trade_date
-            FROM score_summary
-            ORDER BY trade_date ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译交易日索引失败: {e}"))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("查询交易日索引失败: {e}"))?;
-
-    let mut out = HashMap::new();
-    let mut index = 0usize;
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取交易日索引失败: {e}"))?
-    {
-        let trade_date: String = row.get(0).map_err(|e| format!("读取交易日字段失败: {e}"))?;
-        out.insert(trade_date, index);
-        index += 1;
-    }
-
-    Ok(out)
-}
-
-fn load_detail_trigger_snapshot(
-    conn: &Connection,
-    ts_code: &str,
-    effective_trade_date: &str,
-) -> Result<DetailTriggerSnapshot, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            WITH current_rule AS (
-                SELECT rule_name, rule_score
-                FROM rule_details
-                WHERE ts_code = ? AND trade_date = ?
-            ),
-            current_scene AS (
-                SELECT scene_name, direction, stage, stage_score, risk_score, confirm_strength, risk_intensity, scene_rank
-                FROM scene_details
-                WHERE ts_code = ? AND trade_date = ?
-            )
-            SELECT
-                'rule' AS item_type,
-                cr.rule_name AS item_name,
-                cr.rule_score,
-                CAST(NULL AS VARCHAR) AS direction,
-                CAST(NULL AS VARCHAR) AS stage,
-                CAST(NULL AS DOUBLE) AS stage_score,
-                CAST(NULL AS DOUBLE) AS risk_score,
-                CAST(NULL AS DOUBLE) AS confirm_strength,
-                CAST(NULL AS DOUBLE) AS risk_intensity,
-                CAST(NULL AS BIGINT) AS scene_rank,
-                CAST(NULL AS VARCHAR) AS hit_date
-            FROM current_rule AS cr
-            UNION ALL
-            SELECT
-                'scene' AS item_type,
-                cs.scene_name AS item_name,
-                CAST(NULL AS DOUBLE) AS rule_score,
-                cs.direction,
-                cs.stage,
-                cs.stage_score,
-                cs.risk_score,
-                cs.confirm_strength,
-                cs.risk_intensity,
-                cs.scene_rank,
-                CAST(NULL AS VARCHAR) AS hit_date
-            FROM current_scene AS cs
-            "#,
-        )
-        .map_err(|e| format!("预编译当前策略/场景合并查询失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![
-            ts_code,
-            effective_trade_date,
-            ts_code,
-            effective_trade_date
-        ])
-        .map_err(|e| format!("执行当前策略/场景合并查询失败: {e}"))?;
-
-    let mut snapshot = DetailTriggerSnapshot {
-        trade_day_index_map: build_trade_day_index_map(conn)?,
-        ..DetailTriggerSnapshot::default()
-    };
-
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取当前策略/场景合并查询失败: {e}"))?
-    {
-        let item_type: String = row
-            .get(0)
-            .map_err(|e| format!("读取 item_type 失败: {e}"))?;
-        let item_name: String = row
-            .get(1)
-            .map_err(|e| format!("读取 item_name 失败: {e}"))?;
-
-        match item_type.as_str() {
-            "rule" => {
-                let rule_score: Option<f64> = row
-                    .get(2)
-                    .map_err(|e| format!("读取 rule_score 失败: {e}"))?;
-                if let Some(score) = rule_score {
-                    snapshot.current_rule_state_map.insert(
-                        item_name.clone(),
-                        CurrentRuleState {
-                            rule_score: score,
-                            is_triggered: true,
-                        },
-                    );
-                }
-            }
-            "scene" => {
-                let direction: Option<String> = row
-                    .get(3)
-                    .map_err(|e| format!("读取 direction 失败: {e}"))?;
-                let stage: Option<String> =
-                    row.get(4).map_err(|e| format!("读取 stage 失败: {e}"))?;
-                let stage_score: Option<f64> = row
-                    .get(5)
-                    .map_err(|e| format!("读取 stage_score 失败: {e}"))?;
-                let risk_score: Option<f64> = row
-                    .get(6)
-                    .map_err(|e| format!("读取 risk_score 失败: {e}"))?;
-                let confirm_strength: Option<f64> = row
-                    .get(7)
-                    .map_err(|e| format!("读取 confirm_strength 失败: {e}"))?;
-                let risk_intensity: Option<f64> = row
-                    .get(8)
-                    .map_err(|e| format!("读取 risk_intensity 失败: {e}"))?;
-                let scene_rank: Option<i64> = row
-                    .get(9)
-                    .map_err(|e| format!("读取 scene_rank 失败: {e}"))?;
-                if direction.is_some()
-                    || stage.is_some()
-                    || stage_score.is_some()
-                    || risk_score.is_some()
-                    || confirm_strength.is_some()
-                    || risk_intensity.is_some()
-                    || scene_rank.is_some()
-                {
-                    snapshot.current_scene_state_map.insert(
-                        item_name.clone(),
-                        CurrentSceneState {
-                            direction,
-                            stage,
-                            stage_score: stage_score.unwrap_or(0.0),
-                            risk_score: risk_score.unwrap_or(0.0),
-                            confirm_strength: confirm_strength.unwrap_or(0.0),
-                            risk_intensity: risk_intensity.unwrap_or(0.0),
-                            scene_rank,
-                            is_triggered: true,
-                        },
-                    );
-                }
-            }
-            _ => {}
-        }
-    }
-
-    snapshot.latest_rule_hit_date_map =
-        load_latest_rule_hit_date_map(conn, ts_code, effective_trade_date)?;
-    snapshot.latest_scene_hit_date_map =
-        load_latest_scene_hit_date_map(conn, ts_code, effective_trade_date)?;
-
-    Ok(snapshot)
-}
-
-fn load_latest_rule_hit_date_map(
-    conn: &Connection,
-    ts_code: &str,
-    effective_trade_date: &str,
-) -> Result<HashMap<String, String>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT rule_name, MAX(trade_date) AS hit_date
-            FROM rule_details
-            WHERE ts_code = ? AND trade_date <= ?
-            GROUP BY rule_name
-            "#,
-        )
-        .map_err(|e| format!("预编译最近规则命中日期失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![ts_code, effective_trade_date])
-        .map_err(|e| format!("查询最近规则命中日期失败: {e}"))?;
-
-    let mut out = HashMap::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取最近规则命中日期失败: {e}"))?
-    {
-        let rule_name: String = row
-            .get(0)
-            .map_err(|e| format!("读取 rule_name 失败: {e}"))?;
-        let hit_date: String = row.get(1).map_err(|e| format!("读取 hit_date 失败: {e}"))?;
-        out.insert(rule_name, hit_date);
-    }
-
-    Ok(out)
-}
-
-fn load_latest_scene_hit_date_map(
-    conn: &Connection,
-    ts_code: &str,
-    effective_trade_date: &str,
-) -> Result<HashMap<String, String>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT scene_name, MAX(trade_date) AS hit_date
-            FROM scene_details
-            WHERE ts_code = ? AND trade_date <= ?
-            GROUP BY scene_name
-            "#,
-        )
-        .map_err(|e| format!("预编译最近场景命中日期失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![ts_code, effective_trade_date])
-        .map_err(|e| format!("查询最近场景命中日期失败: {e}"))?;
-
-    let mut out = HashMap::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取最近场景命中日期失败: {e}"))?
-    {
-        let scene_name: String = row
-            .get(0)
-            .map_err(|e| format!("读取 scene_name 失败: {e}"))?;
-        let hit_date: String = row.get(1).map_err(|e| format!("读取 hit_date 失败: {e}"))?;
-        out.insert(scene_name, hit_date);
-    }
-
-    Ok(out)
-}
-
 fn calc_lag(
     trade_day_index_map: &HashMap<String, usize>,
     effective_trade_date: &str,
@@ -2102,123 +1262,6 @@ fn calc_lag(
     let current_index = trade_day_index_map.get(effective_trade_date)?;
     let hit_index = trade_day_index_map.get(hit_date)?;
     Some((*current_index as i64) - (*hit_index as i64))
-}
-
-fn build_strategy_triggers(
-    source_path: &str,
-    effective_trade_date: &str,
-    snapshot: &DetailTriggerSnapshot,
-) -> Result<DetailStrategyPayload, String> {
-    let rule_meta_list = load_rule_meta_list(source_path)?;
-
-    let mut triggered = Vec::new();
-    let mut untriggered = Vec::new();
-
-    for meta in rule_meta_list {
-        let current_state = snapshot
-            .current_rule_state_map
-            .get(&meta.rule_name)
-            .copied()
-            .unwrap_or(CurrentRuleState {
-                rule_score: 0.0,
-                is_triggered: false,
-            });
-        let hit_date = snapshot
-            .latest_rule_hit_date_map
-            .get(&meta.rule_name)
-            .cloned();
-        let row = DetailStrategyTriggerRow {
-            rule_name: meta.rule_name.clone(),
-            scene_name: Some(meta.scene_name.clone()),
-            rule_score: Some(current_state.rule_score),
-            is_triggered: Some(current_state.is_triggered),
-            hit_date: hit_date.clone(),
-            lag: calc_lag(
-                &snapshot.trade_day_index_map,
-                effective_trade_date,
-                hit_date.as_ref(),
-            ),
-            explain: Some(meta.explain),
-            when: Some(meta.when),
-        };
-
-        if current_state.is_triggered {
-            triggered.push(row);
-        } else {
-            untriggered.push(row);
-        }
-    }
-
-    Ok(DetailStrategyPayload {
-        triggered: Some(triggered),
-        untriggered: Some(untriggered),
-    })
-}
-
-fn build_scene_triggers(
-    source_path: &str,
-    effective_trade_date: &str,
-    snapshot: &DetailTriggerSnapshot,
-) -> Result<DetailScenePayload, String> {
-    let scene_meta_list = load_scene_meta_list(source_path)?;
-
-    let mut triggered = Vec::new();
-    let mut untriggered = Vec::new();
-
-    for meta in scene_meta_list {
-        let current_state = snapshot
-            .current_scene_state_map
-            .get(&meta.scene_name)
-            .cloned()
-            .unwrap_or(CurrentSceneState {
-                direction: None,
-                stage: None,
-                stage_score: 0.0,
-                risk_score: 0.0,
-                confirm_strength: 0.0,
-                risk_intensity: 0.0,
-                scene_rank: None,
-                is_triggered: false,
-            });
-        let hit_date = snapshot
-            .latest_scene_hit_date_map
-            .get(&meta.scene_name)
-            .cloned();
-        let row = DetailSceneTriggerRow {
-            scene_name: meta.scene_name.clone(),
-            direction: current_state
-                .direction
-                .clone()
-                .or_else(|| Some(meta.direction.clone())),
-            stage: current_state.stage.clone(),
-            stage_score: Some(current_state.stage_score),
-            risk_score: Some(current_state.risk_score),
-            confirm_strength: Some(current_state.confirm_strength),
-            risk_intensity: Some(current_state.risk_intensity),
-            scene_rank: current_state.scene_rank,
-            hit_date: hit_date.clone(),
-            lag: calc_lag(
-                &snapshot.trade_day_index_map,
-                effective_trade_date,
-                hit_date.as_ref(),
-            ),
-            observe_threshold: Some(meta.observe_threshold),
-            trigger_threshold: Some(meta.trigger_threshold),
-            confirm_threshold: Some(meta.confirm_threshold),
-            fail_threshold: Some(meta.fail_threshold),
-        };
-
-        if current_state.is_triggered {
-            triggered.push(row);
-        } else {
-            untriggered.push(row);
-        }
-    }
-
-    Ok(DetailScenePayload {
-        triggered: Some(triggered),
-        untriggered: Some(untriggered),
-    })
 }
 
 pub fn get_stock_detail_page(
@@ -2284,7 +1327,62 @@ pub fn get_stock_detail_overview(
     let overview = if result_db_path(&source_path).exists() {
         open_result_conn(&source_path)
             .and_then(|conn| {
-                query_detail_overview(
+                (|conn: &Connection,
+                  source_meta: &DetailSourceMeta,
+                  effective_trade_date: &str,
+                  ts_code: &str|
+                 -> Result<DetailOverview, String> {
+                    let mut stmt = conn
+                        .prepare(
+                            r#"
+            SELECT
+                s.total_score,
+                s.rank,
+                (
+                    SELECT COUNT(*)
+                    FROM score_summary AS totals
+                    WHERE totals.trade_date = s.trade_date
+                ) AS total
+            FROM score_summary AS s
+            WHERE s.trade_date = ? AND s.ts_code = ?
+            LIMIT 1
+            "#,
+                        )
+                        .map_err(|e| format!("预编译详情总览失败: {e}"))?;
+                    let mut rows = stmt
+                        .query(params![effective_trade_date, ts_code])
+                        .map_err(|e| format!("查询详情总览失败: {e}"))?;
+
+                    let Some(row) = rows.next().map_err(|e| format!("读取详情总览失败: {e}"))?
+                    else {
+                        return Err(format!(
+                            "未找到 {} 在 {} 的排名结果",
+                            ts_code, effective_trade_date
+                        ));
+                    };
+
+                    Ok(DetailOverview {
+                        ts_code: ts_code.to_string(),
+                        name: source_meta.name.clone(),
+                        board: Some(
+                            board_category(ts_code, source_meta.name.as_deref()).to_string(),
+                        ),
+                        area: source_meta.area.clone(),
+                        industry: source_meta.industry.clone(),
+                        trade_date: Some(effective_trade_date.to_string()),
+                        total_score: row
+                            .get(0)
+                            .map_err(|e| format!("读取详情 total_score 失败: {e}"))?,
+                        rank: row.get(1).map_err(|e| format!("读取详情 rank 失败: {e}"))?,
+                        total: row
+                            .get(2)
+                            .map_err(|e| format!("读取详情 total 失败: {e}"))?,
+                        total_mv_yi: source_meta.total_mv_yi,
+                        circ_mv_yi: source_meta.circ_mv_yi,
+                        most_related_concept: source_meta.most_related_concept.clone(),
+                        concept: source_meta.concept.clone(),
+                    })
+                })(
                     &conn,
                     &source_meta,
                     &effective_trade_date,
@@ -2339,12 +1437,403 @@ pub fn get_stock_detail_strategy_snapshot(
     let normalized_ts_code = canonical_ts_code(&ts_code);
     let result_conn = open_result_conn(&source_path)?;
     let effective_trade_date = resolve_trade_date(&result_conn, trade_date)?;
-    let trigger_snapshot =
-        load_detail_trigger_snapshot(&result_conn, &normalized_ts_code, &effective_trade_date)?;
-    let strategy_triggers =
-        build_strategy_triggers(&source_path, &effective_trade_date, &trigger_snapshot)?;
-    let strategy_scenes =
-        build_scene_triggers(&source_path, &effective_trade_date, &trigger_snapshot)?;
+    let trigger_snapshot = (|conn: &Connection,
+                             ts_code: &str,
+                             effective_trade_date: &str|
+     -> Result<DetailTriggerSnapshot, String> {
+        let mut stmt = conn
+        .prepare(
+            r#"
+            WITH current_rule AS (
+                SELECT rule_name, rule_score
+                FROM rule_details
+                WHERE ts_code = ? AND trade_date = ?
+            ),
+            current_scene AS (
+                SELECT scene_name, direction, stage, stage_score, risk_score, confirm_strength, risk_intensity, scene_rank
+                FROM scene_details
+                WHERE ts_code = ? AND trade_date = ?
+            )
+            SELECT
+                'rule' AS item_type,
+                cr.rule_name AS item_name,
+                cr.rule_score,
+                CAST(NULL AS VARCHAR) AS direction,
+                CAST(NULL AS VARCHAR) AS stage,
+                CAST(NULL AS DOUBLE) AS stage_score,
+                CAST(NULL AS DOUBLE) AS risk_score,
+                CAST(NULL AS DOUBLE) AS confirm_strength,
+                CAST(NULL AS DOUBLE) AS risk_intensity,
+                CAST(NULL AS BIGINT) AS scene_rank,
+                CAST(NULL AS VARCHAR) AS hit_date
+            FROM current_rule AS cr
+            UNION ALL
+            SELECT
+                'scene' AS item_type,
+                cs.scene_name AS item_name,
+                CAST(NULL AS DOUBLE) AS rule_score,
+                cs.direction,
+                cs.stage,
+                cs.stage_score,
+                cs.risk_score,
+                cs.confirm_strength,
+                cs.risk_intensity,
+                cs.scene_rank,
+                CAST(NULL AS VARCHAR) AS hit_date
+            FROM current_scene AS cs
+            "#,
+        )
+        .map_err(|e| format!("预编译当前策略/场景合并查询失败: {e}"))?;
+        let mut rows = stmt
+            .query(params![
+                ts_code,
+                effective_trade_date,
+                ts_code,
+                effective_trade_date
+            ])
+            .map_err(|e| format!("执行当前策略/场景合并查询失败: {e}"))?;
+
+        let mut snapshot = DetailTriggerSnapshot {
+            trade_day_index_map: (|conn: &Connection| -> Result<HashMap<String, usize>, String> {
+                let mut stmt = conn
+                    .prepare(
+                        r#"
+            SELECT DISTINCT trade_date
+            FROM score_summary
+            ORDER BY trade_date ASC
+            "#,
+                    )
+                    .map_err(|e| format!("预编译交易日索引失败: {e}"))?;
+                let mut rows = stmt
+                    .query([])
+                    .map_err(|e| format!("查询交易日索引失败: {e}"))?;
+
+                let mut out = HashMap::new();
+                let mut index = 0usize;
+                while let Some(row) = rows
+                    .next()
+                    .map_err(|e| format!("读取交易日索引失败: {e}"))?
+                {
+                    let trade_date: String =
+                        row.get(0).map_err(|e| format!("读取交易日字段失败: {e}"))?;
+                    out.insert(trade_date, index);
+                    index += 1;
+                }
+
+                Ok(out)
+            })(conn)?,
+            ..DetailTriggerSnapshot::default()
+        };
+
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取当前策略/场景合并查询失败: {e}"))?
+        {
+            let item_type: String = row
+                .get(0)
+                .map_err(|e| format!("读取 item_type 失败: {e}"))?;
+            let item_name: String = row
+                .get(1)
+                .map_err(|e| format!("读取 item_name 失败: {e}"))?;
+
+            match item_type.as_str() {
+                "rule" => {
+                    let rule_score: Option<f64> = row
+                        .get(2)
+                        .map_err(|e| format!("读取 rule_score 失败: {e}"))?;
+                    if let Some(score) = rule_score {
+                        snapshot.current_rule_state_map.insert(
+                            item_name.clone(),
+                            CurrentRuleState {
+                                rule_score: score,
+                                is_triggered: true,
+                            },
+                        );
+                    }
+                }
+                "scene" => {
+                    let direction: Option<String> = row
+                        .get(3)
+                        .map_err(|e| format!("读取 direction 失败: {e}"))?;
+                    let stage: Option<String> =
+                        row.get(4).map_err(|e| format!("读取 stage 失败: {e}"))?;
+                    let stage_score: Option<f64> = row
+                        .get(5)
+                        .map_err(|e| format!("读取 stage_score 失败: {e}"))?;
+                    let risk_score: Option<f64> = row
+                        .get(6)
+                        .map_err(|e| format!("读取 risk_score 失败: {e}"))?;
+                    let confirm_strength: Option<f64> = row
+                        .get(7)
+                        .map_err(|e| format!("读取 confirm_strength 失败: {e}"))?;
+                    let risk_intensity: Option<f64> = row
+                        .get(8)
+                        .map_err(|e| format!("读取 risk_intensity 失败: {e}"))?;
+                    let scene_rank: Option<i64> = row
+                        .get(9)
+                        .map_err(|e| format!("读取 scene_rank 失败: {e}"))?;
+                    if direction.is_some()
+                        || stage.is_some()
+                        || stage_score.is_some()
+                        || risk_score.is_some()
+                        || confirm_strength.is_some()
+                        || risk_intensity.is_some()
+                        || scene_rank.is_some()
+                    {
+                        snapshot.current_scene_state_map.insert(
+                            item_name.clone(),
+                            CurrentSceneState {
+                                direction,
+                                stage,
+                                stage_score: stage_score.unwrap_or(0.0),
+                                risk_score: risk_score.unwrap_or(0.0),
+                                confirm_strength: confirm_strength.unwrap_or(0.0),
+                                risk_intensity: risk_intensity.unwrap_or(0.0),
+                                scene_rank,
+                                is_triggered: true,
+                            },
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        snapshot.latest_rule_hit_date_map = (|conn: &Connection,
+                                              ts_code: &str,
+                                              effective_trade_date: &str|
+         -> Result<HashMap<String, String>, String> {
+            let mut stmt = conn
+                .prepare(
+                    r#"
+            SELECT rule_name, MAX(trade_date) AS hit_date
+            FROM rule_details
+            WHERE ts_code = ? AND trade_date <= ?
+            GROUP BY rule_name
+            "#,
+                )
+                .map_err(|e| format!("预编译最近规则命中日期失败: {e}"))?;
+            let mut rows = stmt
+                .query(params![ts_code, effective_trade_date])
+                .map_err(|e| format!("查询最近规则命中日期失败: {e}"))?;
+
+            let mut out = HashMap::new();
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| format!("读取最近规则命中日期失败: {e}"))?
+            {
+                let rule_name: String = row
+                    .get(0)
+                    .map_err(|e| format!("读取 rule_name 失败: {e}"))?;
+                let hit_date: String =
+                    row.get(1).map_err(|e| format!("读取 hit_date 失败: {e}"))?;
+                out.insert(rule_name, hit_date);
+            }
+
+            Ok(out)
+        })(conn, ts_code, effective_trade_date)?;
+        snapshot.latest_scene_hit_date_map =
+            (|conn: &Connection,
+              ts_code: &str,
+              effective_trade_date: &str|
+             -> Result<HashMap<String, String>, String> {
+                let mut stmt = conn
+                    .prepare(
+                        r#"
+            SELECT scene_name, MAX(trade_date) AS hit_date
+            FROM scene_details
+            WHERE ts_code = ? AND trade_date <= ?
+            GROUP BY scene_name
+            "#,
+                    )
+                    .map_err(|e| format!("预编译最近场景命中日期失败: {e}"))?;
+                let mut rows = stmt
+                    .query(params![ts_code, effective_trade_date])
+                    .map_err(|e| format!("查询最近场景命中日期失败: {e}"))?;
+
+                let mut out = HashMap::new();
+                while let Some(row) = rows
+                    .next()
+                    .map_err(|e| format!("读取最近场景命中日期失败: {e}"))?
+                {
+                    let scene_name: String = row
+                        .get(0)
+                        .map_err(|e| format!("读取 scene_name 失败: {e}"))?;
+                    let hit_date: String =
+                        row.get(1).map_err(|e| format!("读取 hit_date 失败: {e}"))?;
+                    out.insert(scene_name, hit_date);
+                }
+
+                Ok(out)
+            })(conn, ts_code, effective_trade_date)?;
+
+        Ok(snapshot)
+    })(&result_conn, &normalized_ts_code, &effective_trade_date)?;
+    let strategy_triggers = (|source_path: &str,
+                              effective_trade_date: &str,
+                              snapshot: &DetailTriggerSnapshot|
+     -> Result<DetailStrategyPayload, String> {
+        let rule_meta_list = (|source_path: &str| -> Result<Vec<RuleMeta>, String> {
+            let imported_rule_path = score_rule_path(source_path);
+            let project_rule_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("source")
+                .join("score_rule.toml");
+            let rule_path = if imported_rule_path.exists() {
+                imported_rule_path
+            } else {
+                project_rule_path
+            };
+            let text = fs::read_to_string(&rule_path)
+                .map_err(|e| format!("读取规则文件失败: path={}, err={e}", rule_path.display()))?;
+            let config: ScoreConfig =
+                toml::from_str(&text).map_err(|e| format!("解析规则文件失败: {e}"))?;
+
+            Ok(config
+                .rule
+                .into_iter()
+                .map(|rule| RuleMeta {
+                    rule_name: rule.name,
+                    scene_name: rule.scene_name,
+                    explain: rule.explain,
+                    when: rule.when,
+                })
+                .collect())
+        })(source_path)?;
+
+        let mut triggered = Vec::new();
+        let mut untriggered = Vec::new();
+
+        for meta in rule_meta_list {
+            let current_state = snapshot
+                .current_rule_state_map
+                .get(&meta.rule_name)
+                .copied()
+                .unwrap_or(CurrentRuleState {
+                    rule_score: 0.0,
+                    is_triggered: false,
+                });
+            let hit_date = snapshot
+                .latest_rule_hit_date_map
+                .get(&meta.rule_name)
+                .cloned();
+            let row = DetailStrategyTriggerRow {
+                rule_name: meta.rule_name.clone(),
+                scene_name: Some(meta.scene_name.clone()),
+                rule_score: Some(current_state.rule_score),
+                is_triggered: Some(current_state.is_triggered),
+                hit_date: hit_date.clone(),
+                lag: calc_lag(
+                    &snapshot.trade_day_index_map,
+                    effective_trade_date,
+                    hit_date.as_ref(),
+                ),
+                explain: Some(meta.explain),
+                when: Some(meta.when),
+            };
+
+            if current_state.is_triggered {
+                triggered.push(row);
+            } else {
+                untriggered.push(row);
+            }
+        }
+
+        Ok(DetailStrategyPayload {
+            triggered: Some(triggered),
+            untriggered: Some(untriggered),
+        })
+    })(&source_path, &effective_trade_date, &trigger_snapshot)?;
+    let strategy_scenes = (|source_path: &str,
+                            effective_trade_date: &str,
+                            snapshot: &DetailTriggerSnapshot|
+     -> Result<DetailScenePayload, String> {
+        let scene_meta_list = (|source_path: &str| -> Result<Vec<SceneMeta>, String> {
+            let imported_rule_path = score_rule_path(source_path);
+            let project_rule_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("source")
+                .join("score_rule.toml");
+            let rule_path = if imported_rule_path.exists() {
+                imported_rule_path
+            } else {
+                project_rule_path
+            };
+            let text = fs::read_to_string(&rule_path)
+                .map_err(|e| format!("读取规则文件失败: path={}, err={e}", rule_path.display()))?;
+            let config: ScoreConfig =
+                toml::from_str(&text).map_err(|e| format!("解析规则文件失败: {e}"))?;
+
+            Ok(config
+                .scene
+                .into_iter()
+                .map(|scene| SceneMeta {
+                    scene_name: scene.name,
+                    direction: scene.direction.as_str().to_string(),
+                    observe_threshold: scene.observe_threshold,
+                    trigger_threshold: scene.trigger_threshold,
+                    confirm_threshold: scene.confirm_threshold,
+                    fail_threshold: scene.fail_threshold,
+                })
+                .collect())
+        })(source_path)?;
+
+        let mut triggered = Vec::new();
+        let mut untriggered = Vec::new();
+
+        for meta in scene_meta_list {
+            let current_state = snapshot
+                .current_scene_state_map
+                .get(&meta.scene_name)
+                .cloned()
+                .unwrap_or(CurrentSceneState {
+                    direction: None,
+                    stage: None,
+                    stage_score: 0.0,
+                    risk_score: 0.0,
+                    confirm_strength: 0.0,
+                    risk_intensity: 0.0,
+                    scene_rank: None,
+                    is_triggered: false,
+                });
+            let hit_date = snapshot
+                .latest_scene_hit_date_map
+                .get(&meta.scene_name)
+                .cloned();
+            let row = DetailSceneTriggerRow {
+                scene_name: meta.scene_name.clone(),
+                direction: current_state
+                    .direction
+                    .clone()
+                    .or_else(|| Some(meta.direction.clone())),
+                stage: current_state.stage.clone(),
+                stage_score: Some(current_state.stage_score),
+                risk_score: Some(current_state.risk_score),
+                confirm_strength: Some(current_state.confirm_strength),
+                risk_intensity: Some(current_state.risk_intensity),
+                scene_rank: current_state.scene_rank,
+                hit_date: hit_date.clone(),
+                lag: calc_lag(
+                    &snapshot.trade_day_index_map,
+                    effective_trade_date,
+                    hit_date.as_ref(),
+                ),
+                observe_threshold: Some(meta.observe_threshold),
+                trigger_threshold: Some(meta.trigger_threshold),
+                confirm_threshold: Some(meta.confirm_threshold),
+                fail_threshold: Some(meta.fail_threshold),
+            };
+
+            if current_state.is_triggered {
+                triggered.push(row);
+            } else {
+                untriggered.push(row);
+            }
+        }
+
+        Ok(DetailScenePayload {
+            triggered: Some(triggered),
+            untriggered: Some(untriggered),
+        })
+    })(&source_path, &effective_trade_date, &trigger_snapshot)?;
 
     Ok(StockDetailStrategySnapshotData {
         resolved_trade_date: Some(effective_trade_date),
@@ -2363,7 +1852,58 @@ pub fn get_stock_detail_prev_ranks(
     let normalized_ts_code = canonical_ts_code(&ts_code);
     let result_conn = open_result_conn(&source_path)?;
     let effective_trade_date = resolve_trade_date(&result_conn, trade_date)?;
-    let prev_ranks = query_rank_history(
+    let prev_ranks = (|conn: &Connection,
+                       ts_code: &str,
+                       limit: Option<usize>|
+     -> Result<Vec<DetailPrevRankRow>, String> {
+        let limit_clause = if limit.is_some() { "LIMIT ?" } else { "" };
+        let sql = format!(
+            r#"
+        WITH target_rows AS (
+            SELECT trade_date, rank
+            FROM score_summary
+            WHERE ts_code = ?
+            ORDER BY trade_date DESC
+            {limit_clause}
+        )
+        SELECT
+            t.trade_date,
+            t.rank,
+            (
+                SELECT COUNT(*)
+                FROM score_summary AS totals
+                WHERE totals.trade_date = t.trade_date
+            ) AS total
+        FROM target_rows AS t
+        ORDER BY t.trade_date DESC
+        "#
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("预编译排名历史失败: {e}"))?;
+        let mut rows = if let Some(limit) = limit {
+            stmt.query(params![ts_code, limit as i64])
+                .map_err(|e| format!("查询排名历史失败: {e}"))?
+        } else {
+            stmt.query(params![ts_code])
+                .map_err(|e| format!("查询排名历史失败: {e}"))?
+        };
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| format!("读取排名历史失败: {e}"))? {
+            out.push(DetailPrevRankRow {
+                trade_date: row
+                    .get(0)
+                    .map_err(|e| format!("读取排名历史日期失败: {e}"))?,
+                rank: row.get(1).map_err(|e| format!("读取排名历史值失败: {e}"))?,
+                total: row
+                    .get(2)
+                    .map_err(|e| format!("读取排名历史总数失败: {e}"))?,
+            });
+        }
+
+        Ok(out)
+    })(
         &result_conn,
         &normalized_ts_code,
         prev_rank_days
@@ -2396,8 +1936,404 @@ pub fn get_stock_detail_cyq(
         .to_ascii_lowercase()
         .as_str()
     {
-        "chen" | "new" => query_stock_detail_cyq_chen(&source_path, &ts_code),
-        _ => query_stock_detail_cyq(&source_path, &ts_code),
+        "chen" | "new" => (|source_path: &str,
+                            ts_code: &str|
+         -> Result<StockDetailCyqData, String> {
+            let normalized_ts_code = canonical_ts_code(ts_code);
+            let Some(conn) = (|source_path: &str| -> Result<Option<Connection>, String> {
+                let cyq_chen_db = cyq_chen_db_path(source_path);
+                if !cyq_chen_db.exists() {
+                    return Ok(None);
+                }
+                let cyq_chen_db_str = cyq_chen_db
+                    .to_str()
+                    .ok_or_else(|| "新筹码库路径不是有效UTF-8".to_string())?;
+                let config = Config::default()
+                    .access_mode(AccessMode::ReadOnly)
+                    .map_err(|e| format!("配置新筹码库只读模式失败: {e}"))?;
+                Connection::open_with_flags(cyq_chen_db_str, config)
+                    .map(Some)
+                    .map_err(|e| format!("打开新筹码库失败: {e}"))
+            })(source_path)?
+            else {
+                return Ok(StockDetailCyqData {
+                    resolved_ts_code: normalized_ts_code,
+                    model: "chen".to_string(),
+                    factor: None,
+                    snapshots: Vec::new(),
+                });
+            };
+            if !cyq_table_exists(&conn, "cyq_chen_snapshot")?
+                || !cyq_table_exists(&conn, "cyq_chen_bin")?
+            {
+                return Ok(StockDetailCyqData {
+                    resolved_ts_code: normalized_ts_code,
+                    model: "chen".to_string(),
+                    factor: None,
+                    snapshots: Vec::new(),
+                });
+            }
+
+            let mut snapshot_stmt = conn
+                .prepare(
+                    r#"
+            SELECT trade_date, close, min_price, max_price, main_total, retail_total,
+                   total_chips, total_profit_ratio, total_trapped_ratio, main_avg_cost,
+                   chip_peak_price,
+                   percent_70_price_low, percent_70_price_high, percent_70_concentration,
+                   percent_90_price_low, percent_90_price_high, percent_90_concentration,
+                   main_profit_ratio, main_trapped_ratio
+            FROM cyq_chen_snapshot
+            WHERE ts_code = ? AND adj_type = ?
+            ORDER BY trade_date ASC
+            "#,
+                )
+                .map_err(|e| format!("预编译新筹码摘要查询失败: {e}"))?;
+            let mut snapshot_rows = snapshot_stmt
+                .query(params![&normalized_ts_code, DEFAULT_ADJ_TYPE])
+                .map_err(|e| format!("查询新筹码摘要失败: {e}"))?;
+
+            let mut snapshots = Vec::new();
+            while let Some(row) = snapshot_rows
+                .next()
+                .map_err(|e| format!("读取新筹码摘要失败: {e}"))?
+            {
+                let trade_date: String = row
+                    .get(0)
+                    .map_err(|e| format!("读取新筹码摘要日期失败: {e}"))?;
+                let close: Option<f64> = row
+                    .get(1)
+                    .map_err(|e| format!("读取新筹码摘要收盘价失败: {e}"))?;
+                snapshots.push(DetailCyqSnapshot {
+                    trade_date,
+                    close: close.unwrap_or(0.0),
+                    min_price: row
+                        .get(2)
+                        .map_err(|e| format!("读取新筹码最低价失败: {e}"))?,
+                    max_price: row
+                        .get(3)
+                        .map_err(|e| format!("读取新筹码最高价失败: {e}"))?,
+                    main_total: row
+                        .get(4)
+                        .map_err(|e| format!("读取新筹码主力总量失败: {e}"))?,
+                    retail_total: row
+                        .get(5)
+                        .map_err(|e| format!("读取新筹码散户总量失败: {e}"))?,
+                    total_chips: row.get(6).map_err(|e| format!("读取新筹码总量失败: {e}"))?,
+                    total_profit_ratio: row
+                        .get(7)
+                        .map_err(|e| format!("读取新筹码获利比例失败: {e}"))?,
+                    total_trapped_ratio: row
+                        .get(8)
+                        .map_err(|e| format!("读取新筹码套牢比例失败: {e}"))?,
+                    main_profit_ratio: row
+                        .get(17)
+                        .map_err(|e| format!("读取新筹码主力获利比例失败: {e}"))?,
+                    main_trapped_ratio: row
+                        .get(18)
+                        .map_err(|e| format!("读取新筹码主力套牢比例失败: {e}"))?,
+                    main_avg_cost: row
+                        .get(9)
+                        .map_err(|e| format!("读取新筹码主力平均成本失败: {e}"))?,
+                    chip_peak_price: row
+                        .get(10)
+                        .map_err(|e| format!("读取新筹码峰值价格失败: {e}"))?,
+                    percent_70_price_low: row
+                        .get(11)
+                        .map_err(|e| format!("读取新筹码70%下沿失败: {e}"))?,
+                    percent_70_price_high: row
+                        .get(12)
+                        .map_err(|e| format!("读取新筹码70%上沿失败: {e}"))?,
+                    percent_70_concentration: row
+                        .get(13)
+                        .map_err(|e| format!("读取新筹码70%集中度失败: {e}"))?,
+                    percent_90_price_low: row
+                        .get(14)
+                        .map_err(|e| format!("读取新筹码90%下沿失败: {e}"))?,
+                    percent_90_price_high: row
+                        .get(15)
+                        .map_err(|e| format!("读取新筹码90%上沿失败: {e}"))?,
+                    percent_90_concentration: row
+                        .get(16)
+                        .map_err(|e| format!("读取新筹码90%集中度失败: {e}"))?,
+                    bins: Vec::new(),
+                });
+            }
+
+            if snapshots.is_empty() {
+                return Ok(StockDetailCyqData {
+                    resolved_ts_code: normalized_ts_code,
+                    model: "chen".to_string(),
+                    factor: None,
+                    snapshots,
+                });
+            }
+
+            let mut snapshot_index_by_trade_date = HashMap::with_capacity(snapshots.len());
+            for (index, snapshot) in snapshots.iter().enumerate() {
+                snapshot_index_by_trade_date.insert(snapshot.trade_date.clone(), index);
+            }
+
+            let mut bin_stmt = conn
+                .prepare(
+                    r#"
+            SELECT bin.trade_date, bin.price, bin.price_low, bin.price_high,
+                   bin.main_chip, bin.retail_chip, bin.total_chip,
+                   snap.main_total, snap.retail_total, snap.total_chips
+            FROM cyq_chen_bin bin
+            JOIN cyq_chen_snapshot snap
+              ON snap.ts_code = bin.ts_code
+             AND snap.trade_date = bin.trade_date
+             AND snap.adj_type = bin.adj_type
+            WHERE bin.ts_code = ? AND bin.adj_type = ?
+            ORDER BY bin.trade_date ASC, bin.bin_index ASC
+            "#,
+                )
+                .map_err(|e| format!("预编译新筹码分布查询失败: {e}"))?;
+            let mut bin_rows = bin_stmt
+                .query(params![&normalized_ts_code, DEFAULT_ADJ_TYPE])
+                .map_err(|e| format!("查询新筹码分布失败: {e}"))?;
+
+            while let Some(row) = bin_rows
+                .next()
+                .map_err(|e| format!("读取新筹码分布失败: {e}"))?
+            {
+                let trade_date: String = row
+                    .get(0)
+                    .map_err(|e| format!("读取新筹码分布日期失败: {e}"))?;
+                let Some(snapshot_index) = snapshot_index_by_trade_date.get(&trade_date).copied()
+                else {
+                    continue;
+                };
+                let main_chip: f64 = row
+                    .get(4)
+                    .map_err(|e| format!("读取新筹码主力值失败: {e}"))?;
+                let retail_chip: f64 = row
+                    .get(5)
+                    .map_err(|e| format!("读取新筹码散户值失败: {e}"))?;
+                let total_chip: f64 = row
+                    .get(6)
+                    .map_err(|e| format!("读取新筹码混合值失败: {e}"))?;
+                let main_total: f64 = row
+                    .get(7)
+                    .map_err(|e| format!("读取新筹码主力总量失败: {e}"))?;
+                let retail_total: f64 = row
+                    .get(8)
+                    .map_err(|e| format!("读取新筹码散户总量失败: {e}"))?;
+                let total_chips: f64 =
+                    row.get(9).map_err(|e| format!("读取新筹码总量失败: {e}"))?;
+                let pct = |value: f64, total: f64| {
+                    if total.abs() <= f64::EPSILON {
+                        0.0
+                    } else {
+                        value / total
+                    }
+                };
+
+                snapshots[snapshot_index].bins.push(DetailCyqBin {
+                    price: row.get(1).map_err(|e| format!("读取新筹码价格失败: {e}"))?,
+                    price_low: row
+                        .get(2)
+                        .map_err(|e| format!("读取新筹码价格下沿失败: {e}"))?,
+                    price_high: row
+                        .get(3)
+                        .map_err(|e| format!("读取新筹码价格上沿失败: {e}"))?,
+                    chip: total_chip,
+                    chip_pct: pct(total_chip, total_chips),
+                    main_chip: Some(main_chip),
+                    main_chip_pct: Some(pct(main_chip, main_total)),
+                    retail_chip: Some(retail_chip),
+                    retail_chip_pct: Some(pct(retail_chip, retail_total)),
+                    total_chip: Some(total_chip),
+                    total_chip_pct: Some(pct(total_chip, total_chips)),
+                });
+            }
+
+            Ok(StockDetailCyqData {
+                resolved_ts_code: normalized_ts_code,
+                model: "chen".to_string(),
+                factor: None,
+                snapshots,
+            })
+        })(&source_path, &ts_code),
+        _ => (|source_path: &str, ts_code: &str| -> Result<StockDetailCyqData, String> {
+            let normalized_ts_code = canonical_ts_code(ts_code);
+            let Some(conn) = (|source_path: &str| -> Result<Option<Connection>, String> {
+                let cyq_db = cyq_db_path(source_path);
+                if !cyq_db.exists() {
+                    return Ok(None);
+                }
+                let cyq_db_str = cyq_db
+                    .to_str()
+                    .ok_or_else(|| "筹码库路径不是有效UTF-8".to_string())?;
+                Connection::open(cyq_db_str)
+                    .map(Some)
+                    .map_err(|e| format!("打开筹码库失败: {e}"))
+            })(source_path)?
+            else {
+                return Ok(StockDetailCyqData {
+                    resolved_ts_code: normalized_ts_code,
+                    model: "legacy".to_string(),
+                    factor: None,
+                    snapshots: Vec::new(),
+                });
+            };
+            if !cyq_table_exists(&conn, "cyq_snapshot")? || !cyq_table_exists(&conn, "cyq_bin")? {
+                return Ok(StockDetailCyqData {
+                    resolved_ts_code: normalized_ts_code,
+                    model: "legacy".to_string(),
+                    factor: None,
+                    snapshots: Vec::new(),
+                });
+            }
+
+            let mut factor_stmt = conn
+                .prepare("SELECT MAX(factor) FROM cyq_snapshot WHERE ts_code = ? AND adj_type = ?")
+                .map_err(|e| format!("预编译筹码分桶查询失败: {e}"))?;
+            let mut factor_rows = factor_stmt
+                .query(params![&normalized_ts_code, DEFAULT_ADJ_TYPE])
+                .map_err(|e| format!("查询筹码分桶失败: {e}"))?;
+            let factor = if let Some(row) = factor_rows
+                .next()
+                .map_err(|e| format!("读取筹码分桶失败: {e}"))?
+            {
+                let value: Option<i64> =
+                    row.get(0).map_err(|e| format!("读取筹码分桶值失败: {e}"))?;
+                value.and_then(|item| u32::try_from(item.max(0)).ok())
+            } else {
+                None
+            };
+
+            let mut snapshot_stmt = conn
+                .prepare(
+                    r#"
+            SELECT trade_date, close, min_price, max_price, total_chips, benefit_part,
+                   percent_70_price_low, percent_70_price_high, percent_70_concentration,
+                   percent_90_price_low, percent_90_price_high, percent_90_concentration
+            FROM cyq_snapshot
+            WHERE ts_code = ? AND adj_type = ?
+            ORDER BY trade_date ASC
+            "#,
+                )
+                .map_err(|e| format!("预编译筹码摘要查询失败: {e}"))?;
+            let mut snapshot_rows = snapshot_stmt
+                .query(params![&normalized_ts_code, DEFAULT_ADJ_TYPE])
+                .map_err(|e| format!("查询筹码摘要失败: {e}"))?;
+
+            let mut snapshots = Vec::new();
+            while let Some(row) = snapshot_rows
+                .next()
+                .map_err(|e| format!("读取筹码摘要失败: {e}"))?
+            {
+                let trade_date: String = row
+                    .get(0)
+                    .map_err(|e| format!("读取筹码摘要日期失败: {e}"))?;
+                let close: Option<f64> = row
+                    .get(1)
+                    .map_err(|e| format!("读取筹码摘要收盘价失败: {e}"))?;
+                snapshots.push(DetailCyqSnapshot {
+                    trade_date,
+                    close: close.unwrap_or(0.0),
+                    min_price: row.get(2).map_err(|e| format!("读取筹码最低价失败: {e}"))?,
+                    max_price: row.get(3).map_err(|e| format!("读取筹码最高价失败: {e}"))?,
+                    main_total: None,
+                    retail_total: None,
+                    total_chips: row.get(4).map_err(|e| format!("读取筹码总量失败: {e}"))?,
+                    total_profit_ratio: row
+                        .get(5)
+                        .map_err(|e| format!("读取筹码获利比例失败: {e}"))?,
+                    total_trapped_ratio: None,
+                    main_profit_ratio: None,
+                    main_trapped_ratio: None,
+                    main_avg_cost: None,
+                    chip_peak_price: None,
+                    percent_70_price_low: row
+                        .get(6)
+                        .map_err(|e| format!("读取70%筹码下沿失败: {e}"))?,
+                    percent_70_price_high: row
+                        .get(7)
+                        .map_err(|e| format!("读取70%筹码上沿失败: {e}"))?,
+                    percent_70_concentration: row
+                        .get(8)
+                        .map_err(|e| format!("读取70%筹码集中度失败: {e}"))?,
+                    percent_90_price_low: row
+                        .get(9)
+                        .map_err(|e| format!("读取90%筹码下沿失败: {e}"))?,
+                    percent_90_price_high: row
+                        .get(10)
+                        .map_err(|e| format!("读取90%筹码上沿失败: {e}"))?,
+                    percent_90_concentration: row
+                        .get(11)
+                        .map_err(|e| format!("读取90%筹码集中度失败: {e}"))?,
+                    bins: Vec::new(),
+                });
+            }
+
+            if snapshots.is_empty() {
+                return Ok(StockDetailCyqData {
+                    resolved_ts_code: normalized_ts_code,
+                    model: "legacy".to_string(),
+                    factor,
+                    snapshots,
+                });
+            }
+
+            let mut snapshot_index_by_trade_date = HashMap::with_capacity(snapshots.len());
+            for (index, snapshot) in snapshots.iter().enumerate() {
+                snapshot_index_by_trade_date.insert(snapshot.trade_date.clone(), index);
+            }
+
+            let mut bin_stmt = conn
+                .prepare(
+                    r#"
+            SELECT trade_date, price, price_low, price_high, chip, chip_pct
+            FROM cyq_bin
+            WHERE ts_code = ? AND adj_type = ?
+            ORDER BY trade_date ASC, bin_index ASC
+            "#,
+                )
+                .map_err(|e| format!("预编译筹码分布查询失败: {e}"))?;
+            let mut bin_rows = bin_stmt
+                .query(params![&normalized_ts_code, DEFAULT_ADJ_TYPE])
+                .map_err(|e| format!("查询筹码分布失败: {e}"))?;
+
+            while let Some(row) = bin_rows
+                .next()
+                .map_err(|e| format!("读取筹码分布失败: {e}"))?
+            {
+                let trade_date: String = row
+                    .get(0)
+                    .map_err(|e| format!("读取筹码分布日期失败: {e}"))?;
+                let Some(snapshot_index) = snapshot_index_by_trade_date.get(&trade_date).copied()
+                else {
+                    continue;
+                };
+                snapshots[snapshot_index].bins.push(DetailCyqBin {
+                    price: row.get(1).map_err(|e| format!("读取筹码价格失败: {e}"))?,
+                    price_low: row
+                        .get(2)
+                        .map_err(|e| format!("读取筹码价格下沿失败: {e}"))?,
+                    price_high: row
+                        .get(3)
+                        .map_err(|e| format!("读取筹码价格上沿失败: {e}"))?,
+                    chip: row.get(4).map_err(|e| format!("读取筹码值失败: {e}"))?,
+                    chip_pct: row.get(5).map_err(|e| format!("读取筹码占比失败: {e}"))?,
+                    main_chip: None,
+                    main_chip_pct: None,
+                    retail_chip: None,
+                    retail_chip_pct: None,
+                    total_chip: None,
+                    total_chip_pct: None,
+                });
+            }
+
+            Ok(StockDetailCyqData {
+                resolved_ts_code: normalized_ts_code,
+                model: "legacy".to_string(),
+                factor,
+                snapshots,
+            })
+        })(&source_path, &ts_code),
     }
 }
 
@@ -2429,8 +2365,8 @@ pub fn get_stock_detail_intraday(ts_code: String) -> Result<TencentIntradayData,
 
     let http = reqwest::blocking::Client::builder()
         .no_proxy()
-        .connect_timeout(Duration::from_secs(INTRADAY_CONNECT_TIMEOUT_SECS))
-        .timeout(Duration::from_secs(INTRADAY_REQUEST_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(6))
+        .timeout(Duration::from_secs(12))
         .build()
         .map_err(|e| format!("创建腾讯分时行情客户端失败: {e}"))?;
     fetch_tencent_intraday(&http, &normalized_ts_code)
@@ -2560,7 +2496,16 @@ mod tests {
 
     #[test]
     fn default_kline_panels_only_contains_price_panel() {
-        let panels = default_kline_panels();
+        let panels = (|| -> Vec<DetailKlinePanel> {
+            let config = lianghua_app_chart::indicator::load_chart_indicator_config("")
+                .unwrap_or_else(|_| {
+                    lianghua_app_chart::indicator::default_chart_indicator_config()
+                });
+            let compiled =
+                lianghua_app_chart::indicator::compile_chart_indicator_config(&config, None)
+                    .expect("default chart indicator config should compile");
+            detail_kline_panels_from_compiled(&compiled)
+        })();
         assert_eq!(panels.len(), 1);
 
         let price_panel = panels
@@ -2664,8 +2609,62 @@ mod tests {
         let conn = build_test_stock_data_conn();
         let source_path = unique_temp_dir("details_chart_rank_score");
         fs::create_dir_all(&source_path).expect("temp dir should be created");
-        write_rank_score_result_db(&source_path);
-        write_rank_score_chart_config(&source_path);
+        (|source_path: &std::path::Path| {
+            let conn = Connection::open(result_db_path(source_path.to_str().expect("utf8 path")))
+                .expect("result db should open");
+            conn.execute_batch(
+                r#"
+            CREATE TABLE score_summary (
+                ts_code TEXT,
+                trade_date TEXT,
+                rank BIGINT,
+                total_score DOUBLE
+            );
+            "#,
+            )
+            .expect("score_summary should be created");
+            conn.execute(
+                "INSERT INTO score_summary VALUES (?, ?, ?, ?), (?, ?, ?, ?)",
+                params![
+                    "000001.SZ",
+                    "20240101",
+                    11_i64,
+                    88.5_f64,
+                    "000001.SZ",
+                    "20240102",
+                    7_i64,
+                    91.25_f64,
+                ],
+            )
+            .expect("rank score rows should be inserted");
+        })(&source_path);
+        (|source_path: &std::path::Path| {
+            fs::write(
+                source_path.join("chart_indicators.toml"),
+                r##"
+version = 1
+
+[[panel]]
+key = "price"
+label = "Price"
+role = "main"
+kind = "candles"
+
+[[panel.series]]
+key = "rank_line"
+label = "Rank"
+expr = "RANK"
+kind = "line"
+
+[[panel.series]]
+key = "score_line"
+label = "Score"
+expr = "SCORE"
+kind = "line"
+"##,
+            )
+            .expect("config should be written");
+        })(&source_path);
 
         let payload = query_kline(
             &conn,
@@ -2758,8 +2757,41 @@ mod tests {
         let conn = build_test_stock_data_conn();
         let source_path = unique_temp_dir("details_chart_realtime_ind_toml");
         fs::create_dir_all(&source_path).expect("temp dir should be created");
-        write_ind_j_config(&source_path);
-        write_j_chart_config(&source_path);
+        (|source_path: &std::path::Path| {
+            fs::write(
+                source_path.join("ind.toml"),
+                r#"
+version = 1
+
+[[ind]]
+name = "J"
+expr = "MA(C, 2)"
+prec = 2
+"#,
+            )
+            .expect("ind config should be written");
+        })(&source_path);
+        (|source_path: &std::path::Path| {
+            fs::write(
+                source_path.join("chart_indicators.toml"),
+                r##"
+version = 1
+
+[[panel]]
+key = "price"
+label = "Price"
+role = "main"
+kind = "candles"
+
+[[panel.series]]
+key = "j_line"
+label = "J"
+expr = "J"
+kind = "line"
+"##,
+            )
+            .expect("config should be written");
+        })(&source_path);
 
         let (payload, compiled) = query_kline_with_compiled(
             &conn,
@@ -2823,101 +2855,6 @@ kind = "candles"
 key = "ma2"
 label = "MA2"
 expr = "MA(C, 2)"
-kind = "line"
-"##,
-        )
-        .expect("config should be written");
-    }
-
-    fn write_rank_score_chart_config(source_path: &std::path::Path) {
-        fs::write(
-            source_path.join("chart_indicators.toml"),
-            r##"
-version = 1
-
-[[panel]]
-key = "price"
-label = "Price"
-role = "main"
-kind = "candles"
-
-[[panel.series]]
-key = "rank_line"
-label = "Rank"
-expr = "RANK"
-kind = "line"
-
-[[panel.series]]
-key = "score_line"
-label = "Score"
-expr = "SCORE"
-kind = "line"
-"##,
-        )
-        .expect("config should be written");
-    }
-
-    fn write_rank_score_result_db(source_path: &std::path::Path) {
-        let conn = Connection::open(result_db_path(source_path.to_str().expect("utf8 path")))
-            .expect("result db should open");
-        conn.execute_batch(
-            r#"
-            CREATE TABLE score_summary (
-                ts_code TEXT,
-                trade_date TEXT,
-                rank BIGINT,
-                total_score DOUBLE
-            );
-            "#,
-        )
-        .expect("score_summary should be created");
-        conn.execute(
-            "INSERT INTO score_summary VALUES (?, ?, ?, ?), (?, ?, ?, ?)",
-            params![
-                "000001.SZ",
-                "20240101",
-                11_i64,
-                88.5_f64,
-                "000001.SZ",
-                "20240102",
-                7_i64,
-                91.25_f64,
-            ],
-        )
-        .expect("rank score rows should be inserted");
-    }
-
-    fn write_ind_j_config(source_path: &std::path::Path) {
-        fs::write(
-            source_path.join("ind.toml"),
-            r#"
-version = 1
-
-[[ind]]
-name = "J"
-expr = "MA(C, 2)"
-prec = 2
-"#,
-        )
-        .expect("ind config should be written");
-    }
-
-    fn write_j_chart_config(source_path: &std::path::Path) {
-        fs::write(
-            source_path.join("chart_indicators.toml"),
-            r##"
-version = 1
-
-[[panel]]
-key = "price"
-label = "Price"
-role = "main"
-kind = "candles"
-
-[[panel.series]]
-key = "j_line"
-label = "J"
-expr = "J"
 kind = "line"
 "##,
         )

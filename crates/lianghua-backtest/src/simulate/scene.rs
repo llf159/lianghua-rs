@@ -158,15 +158,30 @@ pub fn calc_scene_layer_metrics_from_db_with_ts_filter(
 ) -> Result<SceneLayerMetrics, String> {
     input.validate()?;
 
-    let scene_rows =
-        filter_scene_rows_by_ts_codes(load_scene_rows(source_dir, input)?, allowed_ts_codes);
+    let scene_rows = filter_scene_rows_by_ts_codes(
+        (|source_dir: &str, input: &SceneLayerFromDbInput| -> Result<Vec<SceneDbRow>, String> {
+            load_scene_rows_for_names(
+                source_dir,
+                std::slice::from_ref(&input.scene_name),
+                &input.start_date,
+                &input.end_date,
+            )
+        })(source_dir, input)?,
+        allowed_ts_codes,
+    );
     let concept_map = load_most_related_concept_map(source_dir)?;
     let industry_map = load_stock_industry_map(source_dir)?;
     if scene_rows.is_empty() {
         return Ok(empty_metrics());
     }
 
-    let rows_by_ts = group_rows_by_ts(scene_rows);
+    let rows_by_ts = (|scene_rows: Vec<SceneDbRow>| -> HashMap<String, Vec<SceneDbRow>> {
+        let mut rows_by_ts: HashMap<String, Vec<SceneDbRow>> = HashMap::new();
+        for row in scene_rows {
+            rows_by_ts.entry(row.ts_code.clone()).or_default().push(row);
+        }
+        rows_by_ts
+    })(scene_rows);
     let residual_map_cache = build_residual_map_cache(
         source_conn,
         source_dir,
@@ -390,7 +405,29 @@ pub fn calc_all_scene_layer_metrics_from_rows(
             .or_default()
             .push(SceneSample {
                 trade_date: row.trade_date,
-                scene_state: shared_scene_state(row.stage),
+                scene_state:
+                    (|stage: Option<crate::scoring_model::SceneResolvedStage>| -> Arc<str> {
+                        static UNKNOWN: OnceLock<Arc<str>> = OnceLock::new();
+                        static OBSERVE: OnceLock<Arc<str>> = OnceLock::new();
+                        static TRIGGER: OnceLock<Arc<str>> = OnceLock::new();
+                        static CONFIRM: OnceLock<Arc<str>> = OnceLock::new();
+                        static FAIL: OnceLock<Arc<str>> = OnceLock::new();
+
+                        let (cell, value) = match stage {
+                            Some(crate::scoring_model::SceneResolvedStage::Observe) => {
+                                (&OBSERVE, "observe")
+                            }
+                            Some(crate::scoring_model::SceneResolvedStage::Trigger) => {
+                                (&TRIGGER, "trigger")
+                            }
+                            Some(crate::scoring_model::SceneResolvedStage::Confirm) => {
+                                (&CONFIRM, "confirm")
+                            }
+                            Some(crate::scoring_model::SceneResolvedStage::Fail) => (&FAIL, "fail"),
+                            None => (&UNKNOWN, ""),
+                        };
+                        Arc::clone(cell.get_or_init(|| Arc::from(value)))
+                    })(row.stage),
                 residual_return,
             });
     }
@@ -405,23 +442,6 @@ pub fn calc_all_scene_layer_metrics_from_rows(
     }
 
     Ok(out)
-}
-
-fn shared_scene_state(stage: Option<crate::scoring_model::SceneResolvedStage>) -> Arc<str> {
-    static UNKNOWN: OnceLock<Arc<str>> = OnceLock::new();
-    static OBSERVE: OnceLock<Arc<str>> = OnceLock::new();
-    static TRIGGER: OnceLock<Arc<str>> = OnceLock::new();
-    static CONFIRM: OnceLock<Arc<str>> = OnceLock::new();
-    static FAIL: OnceLock<Arc<str>> = OnceLock::new();
-
-    let (cell, value) = match stage {
-        Some(crate::scoring_model::SceneResolvedStage::Observe) => (&OBSERVE, "observe"),
-        Some(crate::scoring_model::SceneResolvedStage::Trigger) => (&TRIGGER, "trigger"),
-        Some(crate::scoring_model::SceneResolvedStage::Confirm) => (&CONFIRM, "confirm"),
-        Some(crate::scoring_model::SceneResolvedStage::Fail) => (&FAIL, "fail"),
-        None => (&UNKNOWN, ""),
-    };
-    Arc::clone(cell.get_or_init(|| Arc::from(value)))
 }
 
 pub fn calc_scene_layer_metrics(
@@ -455,7 +475,13 @@ pub fn calc_scene_layer_metrics(
         let mut residuals = Vec::new();
 
         for sample in day_samples {
-            let state = normalize_state(&sample.scene_state);
+            let state = (|state: &str| -> String {
+                let s = state.trim().to_ascii_lowercase();
+                if s.is_empty() {
+                    return "unknown".to_string();
+                }
+                s
+            })(&sample.scene_state);
             state_group
                 .entry(state.clone())
                 .or_default()
@@ -573,23 +599,6 @@ fn validate_scene_common_input(
     layer_config.validate()
 }
 
-fn group_rows_by_ts(scene_rows: Vec<SceneDbRow>) -> HashMap<String, Vec<SceneDbRow>> {
-    let mut rows_by_ts: HashMap<String, Vec<SceneDbRow>> = HashMap::new();
-    for row in scene_rows {
-        rows_by_ts.entry(row.ts_code.clone()).or_default().push(row);
-    }
-    rows_by_ts
-}
-
-fn scene_ts_code_allowed(allowed_ts_codes: Option<&HashSet<String>>, ts_code: &str) -> bool {
-    let Some(allowed_ts_codes) = allowed_ts_codes else {
-        return true;
-    };
-    let trimmed = ts_code.trim();
-    allowed_ts_codes.contains(trimmed)
-        || allowed_ts_codes.contains(trimmed.to_ascii_uppercase().as_str())
-}
-
 fn filter_scene_rows_by_ts_codes(
     rows: Vec<SceneDbRow>,
     allowed_ts_codes: Option<&HashSet<String>>,
@@ -598,7 +607,16 @@ fn filter_scene_rows_by_ts_codes(
         return rows;
     }
     rows.into_iter()
-        .filter(|row| scene_ts_code_allowed(allowed_ts_codes, &row.ts_code))
+        .filter(|row| {
+            (|allowed_ts_codes: Option<&HashSet<String>>, ts_code: &str| -> bool {
+                let Some(allowed_ts_codes) = allowed_ts_codes else {
+                    return true;
+                };
+                let trimmed = ts_code.trim();
+                allowed_ts_codes.contains(trimmed)
+                    || allowed_ts_codes.contains(trimmed.to_ascii_uppercase().as_str())
+            })(allowed_ts_codes, &row.ts_code)
+        })
         .collect()
 }
 
@@ -625,13 +643,6 @@ fn collect_scene_samples(
     }
 
     Ok(samples)
-}
-
-fn validate_direction(direction: &str) -> Result<(), String> {
-    match direction.trim().to_ascii_lowercase().as_str() {
-        "long" | "short" => Ok(()),
-        other => Err(format!("scene direction非法: {other}，仅支持long/short")),
-    }
 }
 
 fn build_residual_map_cache(
@@ -891,14 +902,6 @@ fn build_industry_series_cache(
     load_industry_trend_series_map(source_dir, &names, start_date.trim(), end_date.trim())
 }
 
-fn normalize_state(state: &str) -> String {
-    let s = state.trim().to_ascii_lowercase();
-    if s.is_empty() {
-        return "unknown".to_string();
-    }
-    s
-}
-
 fn state_rank(state: &str) -> i32 {
     match state {
         "fail" => 0,
@@ -907,18 +910,6 @@ fn state_rank(state: &str) -> i32 {
         "confirm" => 3,
         _ => 1,
     }
-}
-
-fn load_scene_rows(
-    source_dir: &str,
-    input: &SceneLayerFromDbInput,
-) -> Result<Vec<SceneDbRow>, String> {
-    load_scene_rows_for_names(
-        source_dir,
-        std::slice::from_ref(&input.scene_name),
-        &input.start_date,
-        &input.end_date,
-    )
 }
 
 fn load_scene_rows_for_names(
@@ -984,7 +975,12 @@ fn load_scene_rows_for_names(
         let trade_date: String = row.get(2).map_err(|e| format!("读取trade_date失败:{e}"))?;
         let direction: String = row.get(3).map_err(|e| format!("读取direction失败:{e}"))?;
         let stage: Option<String> = row.get(4).map_err(|e| format!("读取stage失败:{e}"))?;
-        validate_direction(&direction)?;
+        (|direction: &str| -> Result<(), String> {
+            match direction.trim().to_ascii_lowercase().as_str() {
+                "long" | "short" => Ok(()),
+                other => Err(format!("scene direction非法: {other}，仅支持long/short")),
+            }
+        })(&direction)?;
 
         out.push(SceneDbRow {
             scene_name,

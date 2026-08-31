@@ -136,245 +136,6 @@ fn resolve_trade_date(
     .map_err(|error| format!("解析龙虎榜参考交易日失败: {error}"))
 }
 
-fn load_available_trade_dates(conn: &Connection) -> Result<Vec<String>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT trade_date
-             FROM dragon_tiger_sync_log
-             ORDER BY trade_date DESC
-             LIMIT 250",
-        )
-        .map_err(|error| format!("预编译龙虎榜日期列表查询失败: {error}"))?;
-    let rows = stmt
-        .query_map([], |row| row.get(0))
-        .map_err(|error| format!("查询龙虎榜日期列表失败: {error}"))?;
-    rows.collect::<Result<Vec<String>, _>>()
-        .map_err(|error| format!("读取龙虎榜日期列表失败: {error}"))
-}
-
-fn load_top_list(
-    conn: &Connection,
-    trade_date: &str,
-) -> Result<Vec<DragonTigerTopListItem>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT
-                trade_date, ts_code, name, close, pct_change, turnover_rate,
-                amount, l_sell, l_buy, l_amount, net_amount, net_rate,
-                amount_rate, float_values, reason
-            FROM top_list
-            WHERE trade_date = ?
-            ORDER BY net_amount DESC NULLS LAST, ts_code, reason
-            "#,
-        )
-        .map_err(|error| format!("预编译龙虎榜每日明细查询失败: {error}"))?;
-    let rows = stmt
-        .query_map([trade_date], |row| {
-            Ok(DragonTigerTopListItem {
-                trade_date: row.get(0)?,
-                ts_code: row.get(1)?,
-                name: row.get(2)?,
-                close: row.get(3)?,
-                pct_change: row.get(4)?,
-                turnover_rate: row.get(5)?,
-                amount: row.get(6)?,
-                l_sell: row.get(7)?,
-                l_buy: row.get(8)?,
-                l_amount: row.get(9)?,
-                net_amount: row.get(10)?,
-                net_rate: row.get(11)?,
-                amount_rate: row.get(12)?,
-                float_values: row.get(13)?,
-                reason: row.get(14)?,
-            })
-        })
-        .map_err(|error| format!("查询龙虎榜每日明细失败: {error}"))?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("读取龙虎榜每日明细失败: {error}"))
-}
-
-fn load_top_inst(
-    conn: &Connection,
-    trade_date: &str,
-) -> Result<Vec<DragonTigerTopInstItem>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT
-                trade_date, ts_code, exalter, buy, buy_rate,
-                sell, sell_rate, net_buy, side, reason
-            FROM top_inst
-            WHERE trade_date = ?
-            ORDER BY net_buy DESC NULLS LAST, ts_code, side, exalter
-            "#,
-        )
-        .map_err(|error| format!("预编译龙虎榜席位明细查询失败: {error}"))?;
-    let rows = stmt
-        .query_map([trade_date], |row| {
-            Ok(DragonTigerTopInstItem {
-                trade_date: row.get(0)?,
-                ts_code: row.get(1)?,
-                exalter: row.get(2)?,
-                buy: row.get(3)?,
-                buy_rate: row.get(4)?,
-                sell: row.get(5)?,
-                sell_rate: row.get(6)?,
-                net_buy: row.get(7)?,
-                side: row.get(8)?,
-                reason: row.get(9)?,
-            })
-        })
-        .map_err(|error| format!("查询龙虎榜席位明细失败: {error}"))?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("读取龙虎榜席位明细失败: {error}"))
-}
-
-fn load_stock_list_for_date(
-    conn: &Connection,
-    trade_date: &str,
-    ts_code: &str,
-) -> Result<Vec<DragonTigerTopListItem>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT
-                trade_date, ts_code, name, close, pct_change, turnover_rate,
-                amount, l_sell, l_buy, l_amount, net_amount, net_rate,
-                amount_rate, float_values, reason
-            FROM top_list
-            WHERE trade_date = ? AND ts_code = ?
-            ORDER BY net_amount DESC NULLS LAST, reason
-            "#,
-        )
-        .map_err(|error| format!("预编译个股龙虎榜当日明细查询失败: {error}"))?;
-    let rows = stmt
-        .query_map(params![trade_date, ts_code], |row| {
-            Ok(DragonTigerTopListItem {
-                trade_date: row.get(0)?,
-                ts_code: row.get(1)?,
-                name: row.get(2)?,
-                close: row.get(3)?,
-                pct_change: row.get(4)?,
-                turnover_rate: row.get(5)?,
-                amount: row.get(6)?,
-                l_sell: row.get(7)?,
-                l_buy: row.get(8)?,
-                l_amount: row.get(9)?,
-                net_amount: row.get(10)?,
-                net_rate: row.get(11)?,
-                amount_rate: row.get(12)?,
-                float_values: row.get(13)?,
-                reason: row.get(14)?,
-            })
-        })
-        .map_err(|error| format!("查询个股龙虎榜当日明细失败: {error}"))?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("读取个股龙虎榜当日明细失败: {error}"))
-}
-
-fn load_stock_seats_for_date(
-    conn: &Connection,
-    trade_date: &str,
-    ts_code: &str,
-) -> Result<Vec<DragonTigerTopInstItem>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT
-                trade_date, ts_code, exalter, buy, buy_rate,
-                sell, sell_rate, net_buy, side, reason
-            FROM top_inst
-            WHERE trade_date = ? AND ts_code = ?
-            ORDER BY reason, side, net_buy DESC NULLS LAST, exalter
-            "#,
-        )
-        .map_err(|error| format!("预编译个股龙虎榜席位查询失败: {error}"))?;
-    let rows = stmt
-        .query_map(params![trade_date, ts_code], |row| {
-            Ok(DragonTigerTopInstItem {
-                trade_date: row.get(0)?,
-                ts_code: row.get(1)?,
-                exalter: row.get(2)?,
-                buy: row.get(3)?,
-                buy_rate: row.get(4)?,
-                sell: row.get(5)?,
-                sell_rate: row.get(6)?,
-                net_buy: row.get(7)?,
-                side: row.get(8)?,
-                reason: row.get(9)?,
-            })
-        })
-        .map_err(|error| format!("查询个股龙虎榜席位失败: {error}"))?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("读取个股龙虎榜席位失败: {error}"))
-}
-
-fn load_stock_history(
-    conn: &Connection,
-    trade_date: &str,
-    ts_code: &str,
-) -> Result<Vec<DragonTigerTopListItem>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT
-                trade_date, ts_code, name, close, pct_change, turnover_rate,
-                amount, l_sell, l_buy, l_amount, net_amount, net_rate,
-                amount_rate, float_values, reason
-            FROM top_list
-            WHERE ts_code = ? AND trade_date < ?
-            ORDER BY trade_date DESC, net_amount DESC NULLS LAST, reason
-            LIMIT 100
-            "#,
-        )
-        .map_err(|error| format!("预编译个股历史上榜查询失败: {error}"))?;
-    let rows = stmt
-        .query_map(params![ts_code, trade_date], |row| {
-            Ok(DragonTigerTopListItem {
-                trade_date: row.get(0)?,
-                ts_code: row.get(1)?,
-                name: row.get(2)?,
-                close: row.get(3)?,
-                pct_change: row.get(4)?,
-                turnover_rate: row.get(5)?,
-                amount: row.get(6)?,
-                l_sell: row.get(7)?,
-                l_buy: row.get(8)?,
-                l_amount: row.get(9)?,
-                net_amount: row.get(10)?,
-                net_rate: row.get(11)?,
-                amount_rate: row.get(12)?,
-                float_values: row.get(13)?,
-                reason: row.get(14)?,
-            })
-        })
-        .map_err(|error| format!("查询个股历史上榜失败: {error}"))?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("读取个股历史上榜失败: {error}"))
-}
-
-fn load_stock_history_counts(
-    conn: &Connection,
-    trade_date: &str,
-    ts_code: &str,
-) -> Result<(usize, usize), String> {
-    let (trade_count, record_count): (i64, i64) = conn
-        .query_row(
-            "SELECT COUNT(DISTINCT trade_date), COUNT(*)
-             FROM top_list
-             WHERE ts_code = ? AND trade_date < ?",
-            params![ts_code, trade_date],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|error| format!("查询个股历史上榜次数失败: {error}"))?;
-    let trade_count = usize::try_from(trade_count)
-        .map_err(|error| format!("解析个股历史上榜交易日数失败: {error}"))?;
-    let record_count = usize::try_from(record_count)
-        .map_err(|error| format!("解析个股历史上榜记录数失败: {error}"))?;
-    Ok((trade_count, record_count))
-}
-
 pub fn get_dragon_tiger_market_data(
     source_dir: String,
     reference_trade_date: Option<String>,
@@ -393,7 +154,21 @@ pub fn get_dragon_tiger_market_data(
     let latest_sync_trade_date =
         load_optional_max_date(&conn, "SELECT MAX(trade_date) FROM dragon_tiger_sync_log")?;
     let resolved_trade_date = resolve_trade_date(&conn, reference_trade_date)?;
-    let available_trade_dates = load_available_trade_dates(&conn)?;
+    let available_trade_dates = (|conn: &Connection| -> Result<Vec<String>, String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT trade_date
+             FROM dragon_tiger_sync_log
+             ORDER BY trade_date DESC
+             LIMIT 250",
+            )
+            .map_err(|error| format!("预编译龙虎榜日期列表查询失败: {error}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|error| format!("查询龙虎榜日期列表失败: {error}"))?;
+        rows.collect::<Result<Vec<String>, _>>()
+            .map_err(|error| format!("读取龙虎榜日期列表失败: {error}"))
+    })(&conn)?;
     let Some(trade_date) = resolved_trade_date.as_deref() else {
         return Ok(DragonTigerMarketData {
             db_exists: true,
@@ -403,8 +178,78 @@ pub fn get_dragon_tiger_market_data(
         });
     };
 
-    let top_list = load_top_list(&conn, trade_date)?;
-    let top_inst = load_top_inst(&conn, trade_date)?;
+    let top_list =
+        (|conn: &Connection, trade_date: &str| -> Result<Vec<DragonTigerTopListItem>, String> {
+            let mut stmt = conn
+                .prepare(
+                    r#"
+            SELECT
+                trade_date, ts_code, name, close, pct_change, turnover_rate,
+                amount, l_sell, l_buy, l_amount, net_amount, net_rate,
+                amount_rate, float_values, reason
+            FROM top_list
+            WHERE trade_date = ?
+            ORDER BY net_amount DESC NULLS LAST, ts_code, reason
+            "#,
+                )
+                .map_err(|error| format!("预编译龙虎榜每日明细查询失败: {error}"))?;
+            let rows = stmt
+                .query_map([trade_date], |row| {
+                    Ok(DragonTigerTopListItem {
+                        trade_date: row.get(0)?,
+                        ts_code: row.get(1)?,
+                        name: row.get(2)?,
+                        close: row.get(3)?,
+                        pct_change: row.get(4)?,
+                        turnover_rate: row.get(5)?,
+                        amount: row.get(6)?,
+                        l_sell: row.get(7)?,
+                        l_buy: row.get(8)?,
+                        l_amount: row.get(9)?,
+                        net_amount: row.get(10)?,
+                        net_rate: row.get(11)?,
+                        amount_rate: row.get(12)?,
+                        float_values: row.get(13)?,
+                        reason: row.get(14)?,
+                    })
+                })
+                .map_err(|error| format!("查询龙虎榜每日明细失败: {error}"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("读取龙虎榜每日明细失败: {error}"))
+        })(&conn, trade_date)?;
+    let top_inst =
+        (|conn: &Connection, trade_date: &str| -> Result<Vec<DragonTigerTopInstItem>, String> {
+            let mut stmt = conn
+                .prepare(
+                    r#"
+            SELECT
+                trade_date, ts_code, exalter, buy, buy_rate,
+                sell, sell_rate, net_buy, side, reason
+            FROM top_inst
+            WHERE trade_date = ?
+            ORDER BY net_buy DESC NULLS LAST, ts_code, side, exalter
+            "#,
+                )
+                .map_err(|error| format!("预编译龙虎榜席位明细查询失败: {error}"))?;
+            let rows = stmt
+                .query_map([trade_date], |row| {
+                    Ok(DragonTigerTopInstItem {
+                        trade_date: row.get(0)?,
+                        ts_code: row.get(1)?,
+                        exalter: row.get(2)?,
+                        buy: row.get(3)?,
+                        buy_rate: row.get(4)?,
+                        sell: row.get(5)?,
+                        sell_rate: row.get(6)?,
+                        net_buy: row.get(7)?,
+                        side: row.get(8)?,
+                        reason: row.get(9)?,
+                    })
+                })
+                .map_err(|error| format!("查询龙虎榜席位明细失败: {error}"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("读取龙虎榜席位明细失败: {error}"))
+        })(&conn, trade_date)?;
     let mut stock_codes = std::collections::HashSet::new();
     let mut summary = DragonTigerMarketSummary {
         top_list_rows: top_list.len(),
@@ -452,16 +297,146 @@ pub fn get_dragon_tiger_stock_detail(
             db_path.display()
         )
     })?;
-    let current_list = load_stock_list_for_date(&conn, &normalized_date, &trimmed_code)?;
+    let current_list = (|conn: &Connection,
+                         trade_date: &str,
+                         ts_code: &str|
+     -> Result<Vec<DragonTigerTopListItem>, String> {
+        let mut stmt = conn
+            .prepare(
+                r#"
+            SELECT
+                trade_date, ts_code, name, close, pct_change, turnover_rate,
+                amount, l_sell, l_buy, l_amount, net_amount, net_rate,
+                amount_rate, float_values, reason
+            FROM top_list
+            WHERE trade_date = ? AND ts_code = ?
+            ORDER BY net_amount DESC NULLS LAST, reason
+            "#,
+            )
+            .map_err(|error| format!("预编译个股龙虎榜当日明细查询失败: {error}"))?;
+        let rows = stmt
+            .query_map(params![trade_date, ts_code], |row| {
+                Ok(DragonTigerTopListItem {
+                    trade_date: row.get(0)?,
+                    ts_code: row.get(1)?,
+                    name: row.get(2)?,
+                    close: row.get(3)?,
+                    pct_change: row.get(4)?,
+                    turnover_rate: row.get(5)?,
+                    amount: row.get(6)?,
+                    l_sell: row.get(7)?,
+                    l_buy: row.get(8)?,
+                    l_amount: row.get(9)?,
+                    net_amount: row.get(10)?,
+                    net_rate: row.get(11)?,
+                    amount_rate: row.get(12)?,
+                    float_values: row.get(13)?,
+                    reason: row.get(14)?,
+                })
+            })
+            .map_err(|error| format!("查询个股龙虎榜当日明细失败: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("读取个股龙虎榜当日明细失败: {error}"))
+    })(&conn, &normalized_date, &trimmed_code)?;
     if current_list.is_empty() {
         return Err(format!(
             "未找到 {trimmed_code} 在 {normalized_date} 的龙虎榜记录"
         ));
     }
-    let seats = load_stock_seats_for_date(&conn, &normalized_date, &trimmed_code)?;
-    let history = load_stock_history(&conn, &normalized_date, &trimmed_code)?;
+    let seats = (|conn: &Connection,
+                  trade_date: &str,
+                  ts_code: &str|
+     -> Result<Vec<DragonTigerTopInstItem>, String> {
+        let mut stmt = conn
+            .prepare(
+                r#"
+            SELECT
+                trade_date, ts_code, exalter, buy, buy_rate,
+                sell, sell_rate, net_buy, side, reason
+            FROM top_inst
+            WHERE trade_date = ? AND ts_code = ?
+            ORDER BY reason, side, net_buy DESC NULLS LAST, exalter
+            "#,
+            )
+            .map_err(|error| format!("预编译个股龙虎榜席位查询失败: {error}"))?;
+        let rows = stmt
+            .query_map(params![trade_date, ts_code], |row| {
+                Ok(DragonTigerTopInstItem {
+                    trade_date: row.get(0)?,
+                    ts_code: row.get(1)?,
+                    exalter: row.get(2)?,
+                    buy: row.get(3)?,
+                    buy_rate: row.get(4)?,
+                    sell: row.get(5)?,
+                    sell_rate: row.get(6)?,
+                    net_buy: row.get(7)?,
+                    side: row.get(8)?,
+                    reason: row.get(9)?,
+                })
+            })
+            .map_err(|error| format!("查询个股龙虎榜席位失败: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("读取个股龙虎榜席位失败: {error}"))
+    })(&conn, &normalized_date, &trimmed_code)?;
+    let history = (|conn: &Connection,
+                    trade_date: &str,
+                    ts_code: &str|
+     -> Result<Vec<DragonTigerTopListItem>, String> {
+        let mut stmt = conn
+            .prepare(
+                r#"
+            SELECT
+                trade_date, ts_code, name, close, pct_change, turnover_rate,
+                amount, l_sell, l_buy, l_amount, net_amount, net_rate,
+                amount_rate, float_values, reason
+            FROM top_list
+            WHERE ts_code = ? AND trade_date < ?
+            ORDER BY trade_date DESC, net_amount DESC NULLS LAST, reason
+            LIMIT 100
+            "#,
+            )
+            .map_err(|error| format!("预编译个股历史上榜查询失败: {error}"))?;
+        let rows = stmt
+            .query_map(params![ts_code, trade_date], |row| {
+                Ok(DragonTigerTopListItem {
+                    trade_date: row.get(0)?,
+                    ts_code: row.get(1)?,
+                    name: row.get(2)?,
+                    close: row.get(3)?,
+                    pct_change: row.get(4)?,
+                    turnover_rate: row.get(5)?,
+                    amount: row.get(6)?,
+                    l_sell: row.get(7)?,
+                    l_buy: row.get(8)?,
+                    l_amount: row.get(9)?,
+                    net_amount: row.get(10)?,
+                    net_rate: row.get(11)?,
+                    amount_rate: row.get(12)?,
+                    float_values: row.get(13)?,
+                    reason: row.get(14)?,
+                })
+            })
+            .map_err(|error| format!("查询个股历史上榜失败: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("读取个股历史上榜失败: {error}"))
+    })(&conn, &normalized_date, &trimmed_code)?;
     let (history_trade_count, history_record_count) =
-        load_stock_history_counts(&conn, &normalized_date, &trimmed_code)?;
+        (|conn: &Connection, trade_date: &str, ts_code: &str| -> Result<(usize, usize), String> {
+            let (trade_count, record_count): (i64, i64) = conn
+                .query_row(
+                    "SELECT COUNT(DISTINCT trade_date), COUNT(*)
+             FROM top_list
+             WHERE ts_code = ? AND trade_date < ?",
+                    params![ts_code, trade_date],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|error| format!("查询个股历史上榜次数失败: {error}"))?;
+            let trade_count = usize::try_from(trade_count)
+                .map_err(|error| format!("解析个股历史上榜交易日数失败: {error}"))?;
+            let record_count = usize::try_from(record_count)
+                .map_err(|error| format!("解析个股历史上榜记录数失败: {error}"))?;
+            Ok((trade_count, record_count))
+        })(&conn, &normalized_date, &trimmed_code)?;
     let name = current_list
         .first()
         .map(|item| item.name.clone())

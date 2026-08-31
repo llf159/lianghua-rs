@@ -26,11 +26,10 @@ const DEFAULT_POOL_SEGMENTS: usize = 5;
 const DEFAULT_OUTCOME_TRADE_DAYS: usize = 5;
 const DEFAULT_LIMIT: usize = 30;
 const MAX_POOL_SEGMENTS: usize = 12;
-const MAX_CANDIDATE_ANCHORS: usize = 50_000;
 // 候选池优先覆盖近期事件，同时保留跨期分散样本；不再用只含触发摘要的代理分数
 // 预判包含量价、指标和市场环境的最终相似度。
 const RECENT_CANDIDATE_ANCHORS: usize = 40_000;
-const HISTORY_DIVERSITY_ANCHORS: usize = MAX_CANDIDATE_ANCHORS - RECENT_CANDIDATE_ANCHORS;
+const HISTORY_DIVERSITY_ANCHORS: usize = (50_000) - RECENT_CANDIDATE_ANCHORS;
 // 评级样本独立于页面展示条数，并限制重叠事件对有效样本量的虚增。
 const RATING_SAMPLE_LIMIT: usize = 30;
 const RATING_MAX_PER_OUTCOME_WINDOW: usize = 3;
@@ -47,12 +46,6 @@ const TRIGGER_RULE_SET_WEIGHT: f64 = 0.45;
 const TRIGGER_RULE_TIMING_WEIGHT: f64 = 0.35;
 const TRIGGER_AGGREGATE_RHYTHM_WEIGHT: f64 = 0.20;
 const TRIGGER_TIME_DECAY_DAYS: f64 = 3.0;
-const MAX_CACHED_TRIGGER_DAY_GAP: usize = 512;
-const DEFAULT_BENCHMARK_INDEX_CODE: &str = "000001.SH";
-const SHORT_KERNEL_MAX_DAYS: usize = 10;
-const SHORT_KERNEL_HALF_LIFE_DAYS: f64 = 5.0;
-const MEDIUM_KERNEL_MAX_DAYS: usize = 30;
-const MEDIUM_KERNEL_HALF_LIFE_DAYS: f64 = 10.0;
 const KERNEL_NAMES: [&str; 8] = [
     "均匀核",
     "短期指数核（5-10日）",
@@ -271,7 +264,7 @@ fn resolve_benchmark_index_code(value: Option<&str>) -> Result<String, String> {
     let code = value
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(DEFAULT_BENCHMARK_INDEX_CODE)
+        .unwrap_or("000001.SH")
         .to_ascii_uppercase();
     if INDEX_TS_CODES.contains(&code.as_str()) {
         Ok(code)
@@ -426,138 +419,6 @@ fn column_expr(schema: &MarketSchema, logical_name: &str, alias: &str) -> String
         .get(&logical_name.to_ascii_lowercase())
         .map(|actual| format!("TRY_CAST({alias}.{} AS DOUBLE)", quote_ident(actual)))
         .unwrap_or_else(|| "CAST(NULL AS DOUBLE)".to_string())
-}
-
-fn load_target_rule_events(
-    conn: &Connection,
-    ts_code: &str,
-    start_date: &str,
-    end_date: &str,
-) -> Result<Vec<RuleEvent>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT rule_name, trade_date, TRY_CAST(rule_score AS DOUBLE)
-            FROM rule_details
-            WHERE ts_code = ? AND trade_date >= ? AND trade_date <= ?
-              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
-              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > ?
-            ORDER BY trade_date, rule_name
-            "#,
-        )
-        .map_err(|e| format!("预编译目标触发查询失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![ts_code, start_date, end_date, EPS])
-        .map_err(|e| format!("查询目标触发失败: {e}"))?;
-    let mut out = Vec::new();
-    while let Some(row) = rows.next().map_err(|e| format!("读取目标触发失败: {e}"))? {
-        out.push(RuleEvent {
-            rule_name: row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?,
-            trade_date: row.get(1).map_err(|e| format!("读取触发日失败: {e}"))?,
-            score: row.get(2).map_err(|e| format!("读取规则分数失败: {e}"))?,
-        });
-    }
-    Ok(out)
-}
-
-fn distinct_rule_names(events: &[RuleEvent]) -> Vec<String> {
-    let mut names = events
-        .iter()
-        .map(|event| event.rule_name.clone())
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    names
-}
-
-fn load_candidate_anchors(
-    conn: &Connection,
-    target_rule_names: &[String],
-    earliest_date: &str,
-    cutoff_date: &str,
-    all_trade_dates: &[String],
-    window_trade_days: usize,
-) -> Result<(Vec<Anchor>, usize), String> {
-    if target_rule_names.is_empty() {
-        return Ok((Vec::new(), 0));
-    }
-    let target_rule_literals = target_rule_names
-        .iter()
-        .map(|name| sql_string_literal(name))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        r#"
-        WITH candidates AS (
-            SELECT DISTINCT ts_code, trade_date
-            FROM rule_details
-            WHERE trade_date >= {earliest_date} AND trade_date <= {cutoff_date}
-              AND rule_name IN ({target_rule_literals})
-              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
-              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > {EPS}
-        ),
-        counted AS (
-            SELECT *, COUNT(*) OVER () AS candidate_total
-            FROM candidates
-        ),
-        recent_history AS MATERIALIZED (
-            SELECT * FROM counted
-            ORDER BY trade_date DESC, hash(ts_code, trade_date)
-            LIMIT {recent_limit}
-        ),
-        diverse_history AS (
-            SELECT c.* FROM counted c
-            WHERE NOT EXISTS (
-                SELECT 1 FROM recent_history t
-                WHERE t.ts_code = c.ts_code AND t.trade_date = c.trade_date
-            )
-            ORDER BY hash(c.ts_code, c.trade_date)
-            LIMIT {diversity_limit}
-        )
-        SELECT ts_code, trade_date, candidate_total FROM recent_history
-        UNION ALL
-        SELECT ts_code, trade_date, candidate_total FROM diverse_history
-        "#,
-        cutoff_date = sql_string_literal(cutoff_date),
-        earliest_date = sql_string_literal(earliest_date),
-        recent_limit = RECENT_CANDIDATE_ANCHORS,
-        diversity_limit = HISTORY_DIVERSITY_ANCHORS,
-    );
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| format!("预编译历史事件锚点查询失败: {e}"))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("查询历史事件锚点失败: {e}"))?;
-    let date_index = all_trade_dates
-        .iter()
-        .enumerate()
-        .map(|(index, date)| (date.as_str(), index))
-        .collect::<HashMap<_, _>>();
-    let mut anchors = Vec::new();
-    let mut candidate_universe_count = 0;
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取历史事件锚点失败: {e}"))?
-    {
-        let ts_code: String = row.get(0).map_err(|e| format!("读取锚点代码失败: {e}"))?;
-        let end_trade_date: String = row.get(1).map_err(|e| format!("读取锚点日期失败: {e}"))?;
-        let total: i64 = row
-            .get(2)
-            .map_err(|e| format!("读取候选全集数量失败: {e}"))?;
-        candidate_universe_count = total.max(0) as usize;
-        let Some(end_index) = date_index.get(end_trade_date.as_str()).copied() else {
-            continue;
-        };
-        let start_index = (end_index + 1).saturating_sub(window_trade_days);
-        anchors.push(Anchor {
-            id: anchors.len(),
-            ts_code,
-            start_trade_date: all_trade_dates[start_index].clone(),
-            end_trade_date,
-        });
-    }
-    Ok((anchors, candidate_universe_count))
 }
 
 fn anchors_values_sql(anchors: &[Anchor]) -> String {
@@ -955,54 +816,52 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
-fn temporal_kernel_weights(len: usize) -> Arc<TemporalKernelWeights> {
-    TEMPORAL_KERNEL_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        Arc::clone(cache.entry(len).or_insert_with(|| {
-            let uniform = vec![1.0; len];
-            let short_exp = (0..len)
-                .map(|index| {
-                    let age = len - 1 - index;
-                    if age < SHORT_KERNEL_MAX_DAYS {
-                        0.5_f64.powf(age as f64 / SHORT_KERNEL_HALF_LIFE_DAYS)
-                    } else {
-                        0.0
-                    }
-                })
-                .collect::<Vec<_>>();
-            let medium_exp = (0..len)
-                .map(|index| {
-                    let age = len - 1 - index;
-                    if age < MEDIUM_KERNEL_MAX_DAYS {
-                        0.5_f64.powf(age as f64 / MEDIUM_KERNEL_HALF_LIFE_DAYS)
-                    } else {
-                        0.0
-                    }
-                })
-                .collect::<Vec<_>>();
-            let recent_linear = (1..=len).map(|value| value as f64).collect::<Vec<_>>();
-            let mut turning = vec![0.0; len];
-            if len >= 3 {
-                turning[len - 3] = 1.0;
-                turning[len - 2] = -2.0;
-                turning[len - 1] = 1.0;
-            } else if len >= 2 {
-                turning[len - 2] = -1.0;
-                turning[len - 1] = 1.0;
-            }
-            Arc::new(TemporalKernelWeights {
-                uniform,
-                short_exp,
-                medium_exp,
-                recent_linear,
-                turning,
-            })
-        }))
-    })
-}
-
 fn kernel_responses(values: &[Option<f64>]) -> Vec<f64> {
-    let weights = temporal_kernel_weights(values.len());
+    let weights = (|len: usize| -> Arc<TemporalKernelWeights> {
+        TEMPORAL_KERNEL_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            Arc::clone(cache.entry(len).or_insert_with(|| {
+                let uniform = vec![1.0; len];
+                let short_exp = (0..len)
+                    .map(|index| {
+                        let age = len - 1 - index;
+                        if age < (10) {
+                            0.5_f64.powf(age as f64 / (5.0))
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let medium_exp = (0..len)
+                    .map(|index| {
+                        let age = len - 1 - index;
+                        if age < (30) {
+                            0.5_f64.powf(age as f64 / (10.0))
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let recent_linear = (1..=len).map(|value| value as f64).collect::<Vec<_>>();
+                let mut turning = vec![0.0; len];
+                if len >= 3 {
+                    turning[len - 3] = 1.0;
+                    turning[len - 2] = -2.0;
+                    turning[len - 1] = 1.0;
+                } else if len >= 2 {
+                    turning[len - 2] = -1.0;
+                    turning[len - 1] = 1.0;
+                }
+                Arc::new(TemporalKernelWeights {
+                    uniform,
+                    short_exp,
+                    medium_exp,
+                    recent_linear,
+                    turning,
+                })
+            }))
+        })
+    })(values.len());
     // 固定按窗口位置切成 [0, 1/3)、[1/3, 2/3)、[2/3, 1] 三段，
     // 分别保留前中、中后和前后的水平变化，不再压缩成单一前后趋势。
     let stage_levels = pool_series(values, 3);
@@ -1231,19 +1090,10 @@ fn weighted_rule_set_similarity_from_masses(
     }
 }
 
-fn signed_score_similarity(left: f64, right: f64) -> f64 {
-    let denominator = left.abs() + right.abs();
-    if denominator <= EPS {
-        1.0
-    } else {
-        (1.0 - (left - right).abs() / denominator).clamp(0.0, 1.0)
-    }
-}
-
 fn trigger_time_decay_scores() -> &'static [f64] {
     static SCORES: OnceLock<Vec<f64>> = OnceLock::new();
     SCORES.get_or_init(|| {
-        (0..=MAX_CACHED_TRIGGER_DAY_GAP)
+        (0..=(512))
             .map(|gap| (-(gap as f64) / TRIGGER_TIME_DECAY_DAYS).exp())
             .collect()
     })
@@ -1253,37 +1103,6 @@ thread_local! {
     // 精排在线程池内会调用数百万次。复用单行 DP，避免每个规则配对都创建、排序
     // left.len() * right.len() 个候选及两组占用标记。
     static TRIGGER_MATCH_DP: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
-}
-
-fn matched_rule_timing_similarity(left: &[RuleTriggerHit], right: &[RuleTriggerHit]) -> f64 {
-    if left.is_empty() || right.is_empty() {
-        return 0.0;
-    }
-    // 加权序列匹配：每个触发仍然只匹配一次，并保持时间先后关系。复杂度从
-    // O(m*n*log(m*n)) 降到 O(m*n)，且不在热循环中反复分配内存。
-    TRIGGER_MATCH_DP.with(|scratch| {
-        let time_decay_scores = trigger_time_decay_scores();
-        let mut dp = scratch.borrow_mut();
-        dp.resize(right.len() + 1, 0.0);
-        dp.fill(0.0);
-        for left_hit in left {
-            let mut diagonal = 0.0;
-            for (right_index, right_hit) in right.iter().enumerate() {
-                let column = right_index + 1;
-                let previous_row = dp[column];
-                let day_gap = left_hit.day_index.abs_diff(right_hit.day_index);
-                let time_score = time_decay_scores
-                    .get(day_gap)
-                    .copied()
-                    .unwrap_or_else(|| (-(day_gap as f64) / TRIGGER_TIME_DECAY_DAYS).exp());
-                let intensity_score = signed_score_similarity(left_hit.score, right_hit.score);
-                let matched = diagonal + time_score * intensity_score;
-                dp[column] = dp[column].max(dp[column - 1]).max(matched);
-                diagonal = previous_row;
-            }
-        }
-        dp[right.len()] / left.len().max(right.len()) as f64
-    })
 }
 
 fn weighted_rule_timing_similarity(
@@ -1317,7 +1136,45 @@ fn weighted_rule_timing_similarity_with_minimum(
             continue;
         };
         let weight = rule_weight(rule_weights, name);
-        weighted_sum += matched_rule_timing_similarity(target_hits, candidate_hits) * weight;
+        weighted_sum += (|left: &[RuleTriggerHit], right: &[RuleTriggerHit]| -> f64 {
+            if left.is_empty() || right.is_empty() {
+                return 0.0;
+            }
+            // 加权序列匹配：每个触发仍然只匹配一次，并保持时间先后关系。复杂度从
+            // O(m*n*log(m*n)) 降到 O(m*n)，且不在热循环中反复分配内存。
+            TRIGGER_MATCH_DP.with(|scratch| {
+                let time_decay_scores = trigger_time_decay_scores();
+                let mut dp = scratch.borrow_mut();
+                dp.resize(right.len() + 1, 0.0);
+                dp.fill(0.0);
+                for left_hit in left {
+                    let mut diagonal = 0.0;
+                    for (right_index, right_hit) in right.iter().enumerate() {
+                        let column = right_index + 1;
+                        let previous_row = dp[column];
+                        let day_gap = left_hit.day_index.abs_diff(right_hit.day_index);
+                        let time_score = time_decay_scores
+                            .get(day_gap)
+                            .copied()
+                            .unwrap_or_else(|| (-(day_gap as f64) / TRIGGER_TIME_DECAY_DAYS).exp());
+                        let intensity_score =
+                            (|left: f64, right: f64| -> f64 {
+                                let denominator = left.abs() + right.abs();
+                                if denominator <= EPS {
+                                    1.0
+                                } else {
+                                    (1.0 - (left - right).abs() / denominator).clamp(0.0, 1.0)
+                                }
+                            })(left_hit.score, right_hit.score);
+                        let matched = diagonal + time_score * intensity_score;
+                        dp[column] = dp[column].max(dp[column - 1]).max(matched);
+                        diagonal = previous_row;
+                    }
+                }
+                dp[right.len()] / left.len().max(right.len()) as f64
+            })
+        })(target_hits, candidate_hits)
+            * weight;
         remaining_weight = (remaining_weight - weight).max(0.0);
         let upper_bound = (weighted_sum + remaining_weight) / total_weight;
         if upper_bound + EPS < minimum_similarity {
@@ -1494,29 +1351,6 @@ fn build_indicator_channels(
         .collect()
 }
 
-fn build_environment_channels(
-    environment: &MarketEnvironment,
-    window_dates: &[String],
-    segments: usize,
-) -> Vec<Option<Vec<f64>>> {
-    (0..environment.channel_count)
-        .map(|index| {
-            let series = window_dates
-                .iter()
-                .map(|date| {
-                    environment
-                        .by_date
-                        .get(date)
-                        .and_then(|v| v.get(index))
-                        .copied()
-                        .flatten()
-                })
-                .collect::<Vec<_>>();
-            temporal_signature(&series, segments, true)
-        })
-        .collect()
-}
-
 fn build_environment_fingerprint_map(
     environment: &MarketEnvironment,
     all_trade_dates: &[String],
@@ -1530,7 +1364,27 @@ fn build_environment_fingerprint_map(
             let start_index = (end_index + 1).saturating_sub(window_trade_days);
             (
                 end_date.clone(),
-                build_environment_channels(
+                (|environment: &MarketEnvironment,
+                  window_dates: &[String],
+                  segments: usize|
+                 -> Vec<Option<Vec<f64>>> {
+                    (0..environment.channel_count)
+                        .map(|index| {
+                            let series = window_dates
+                                .iter()
+                                .map(|date| {
+                                    environment
+                                        .by_date
+                                        .get(date)
+                                        .and_then(|v| v.get(index))
+                                        .copied()
+                                        .flatten()
+                                })
+                                .collect::<Vec<_>>();
+                            temporal_signature(&series, segments, true)
+                        })
+                        .collect()
+                })(
                     environment,
                     &all_trade_dates[start_index..=end_index],
                     segments,
@@ -1538,20 +1392,6 @@ fn build_environment_fingerprint_map(
             )
         })
         .collect()
-}
-
-fn share_environment_channel_map(
-    fingerprints: HashMap<String, Vec<Option<Vec<f64>>>>,
-) -> HashMap<String, Arc<Vec<Option<Vec<f64>>>>> {
-    fingerprints
-        .into_iter()
-        .map(|(trade_date, channels)| (trade_date, Arc::new(channels)))
-        .collect()
-}
-
-fn empty_environment_fingerprint() -> Arc<Vec<Option<Vec<f64>>>> {
-    static EMPTY: OnceLock<Arc<Vec<Option<Vec<f64>>>>> = OnceLock::new();
-    Arc::clone(EMPTY.get_or_init(|| Arc::new(Vec::new())))
 }
 
 fn cosine_similarity(left: &[f64], right: &[f64]) -> f64 {
@@ -1814,7 +1654,10 @@ fn build_samples_for_chunk(
                     .environment_fingerprints
                     .get(&anchor.end_trade_date)
                     .cloned()
-                    .unwrap_or_else(empty_environment_fingerprint),
+                    .unwrap_or_else(|| -> Arc<Vec<Option<Vec<f64>>>> {
+                        static EMPTY: OnceLock<Arc<Vec<Option<Vec<f64>>>>> = OnceLock::new();
+                        Arc::clone(EMPTY.get_or_init(|| Arc::new(Vec::new())))
+                    }),
             };
             let outcome = if context.include_outcome {
                 build_outcome(
@@ -2049,13 +1892,50 @@ pub fn get_strategy_trigger_similarity_page(
     let target_start_index = (target_end_index + 1).saturating_sub(window_trade_days);
     let target_start_date = all_trade_dates[target_start_index].clone();
     let historical_cutoff_date = all_trade_dates[target_end_index - outcome_trade_days].clone();
-    let target_events = load_target_rule_events(
+    let target_events = (|conn: &Connection,
+                          ts_code: &str,
+                          start_date: &str,
+                          end_date: &str|
+     -> Result<Vec<RuleEvent>, String> {
+        let mut stmt = conn
+            .prepare(
+                r#"
+            SELECT rule_name, trade_date, TRY_CAST(rule_score AS DOUBLE)
+            FROM rule_details
+            WHERE ts_code = ? AND trade_date >= ? AND trade_date <= ?
+              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
+              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > ?
+            ORDER BY trade_date, rule_name
+            "#,
+            )
+            .map_err(|e| format!("预编译目标触发查询失败: {e}"))?;
+        let mut rows = stmt
+            .query(params![ts_code, start_date, end_date, EPS])
+            .map_err(|e| format!("查询目标触发失败: {e}"))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| format!("读取目标触发失败: {e}"))? {
+            out.push(RuleEvent {
+                rule_name: row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?,
+                trade_date: row.get(1).map_err(|e| format!("读取触发日失败: {e}"))?,
+                score: row.get(2).map_err(|e| format!("读取规则分数失败: {e}"))?,
+            });
+        }
+        Ok(out)
+    })(
         &conn,
         &resolved_ts_code,
         &target_start_date,
         &resolved_trade_date,
     )?;
-    let target_rule_names = distinct_rule_names(&target_events);
+    let target_rule_names = (|events: &[RuleEvent]| -> Vec<String> {
+        let mut names = events
+            .iter()
+            .map(|event| event.rule_name.clone())
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        names
+    })(&target_events);
     let schema = load_market_schema(&conn)?;
     let first_date = all_trade_dates
         .first()
@@ -2063,7 +1943,12 @@ pub fn get_strategy_trigger_similarity_page(
         .unwrap_or(&target_start_date);
     let environment = load_market_environment(&conn, first_date, &resolved_trade_date, &schema)?;
     let environment_fingerprints =
-        share_environment_channel_map(build_environment_fingerprint_map(
+        (|fingerprints : HashMap < String , Vec < Option < Vec < f64 > > > >| -> HashMap < String , Arc < Vec < Option < Vec < f64 > > > > > {
+    fingerprints
+        .into_iter()
+        .map(|(trade_date, channels)| (trade_date, Arc::new(channels)))
+        .collect()
+})(build_environment_fingerprint_map(
             &environment,
             &all_trade_dates,
             window_trade_days,
@@ -2105,14 +1990,103 @@ pub fn get_strategy_trigger_similarity_page(
         .get(window_trade_days.saturating_sub(1))
         .map(String::as_str)
         .unwrap_or(&all_trade_dates[0]);
-    let (candidate_anchors, candidate_universe_count) = load_candidate_anchors(
-        &conn,
-        &target_rule_names,
-        earliest_candidate_date,
-        &historical_cutoff_date,
-        &all_trade_dates,
-        window_trade_days,
-    )?;
+    let (candidate_anchors, candidate_universe_count) =
+        (|conn: &Connection,
+          target_rule_names: &[String],
+          earliest_date: &str,
+          cutoff_date: &str,
+          all_trade_dates: &[String],
+          window_trade_days: usize|
+         -> Result<(Vec<Anchor>, usize), String> {
+            if target_rule_names.is_empty() {
+                return Ok((Vec::new(), 0));
+            }
+            let target_rule_literals = target_rule_names
+                .iter()
+                .map(|name| sql_string_literal(name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                r#"
+        WITH candidates AS (
+            SELECT DISTINCT ts_code, trade_date
+            FROM rule_details
+            WHERE trade_date >= {earliest_date} AND trade_date <= {cutoff_date}
+              AND rule_name IN ({target_rule_literals})
+              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
+              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > {EPS}
+        ),
+        counted AS (
+            SELECT *, COUNT(*) OVER () AS candidate_total
+            FROM candidates
+        ),
+        recent_history AS MATERIALIZED (
+            SELECT * FROM counted
+            ORDER BY trade_date DESC, hash(ts_code, trade_date)
+            LIMIT {recent_limit}
+        ),
+        diverse_history AS (
+            SELECT c.* FROM counted c
+            WHERE NOT EXISTS (
+                SELECT 1 FROM recent_history t
+                WHERE t.ts_code = c.ts_code AND t.trade_date = c.trade_date
+            )
+            ORDER BY hash(c.ts_code, c.trade_date)
+            LIMIT {diversity_limit}
+        )
+        SELECT ts_code, trade_date, candidate_total FROM recent_history
+        UNION ALL
+        SELECT ts_code, trade_date, candidate_total FROM diverse_history
+        "#,
+                cutoff_date = sql_string_literal(cutoff_date),
+                earliest_date = sql_string_literal(earliest_date),
+                recent_limit = RECENT_CANDIDATE_ANCHORS,
+                diversity_limit = HISTORY_DIVERSITY_ANCHORS,
+            );
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| format!("预编译历史事件锚点查询失败: {e}"))?;
+            let mut rows = stmt
+                .query([])
+                .map_err(|e| format!("查询历史事件锚点失败: {e}"))?;
+            let date_index = all_trade_dates
+                .iter()
+                .enumerate()
+                .map(|(index, date)| (date.as_str(), index))
+                .collect::<HashMap<_, _>>();
+            let mut anchors = Vec::new();
+            let mut candidate_universe_count = 0;
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| format!("读取历史事件锚点失败: {e}"))?
+            {
+                let ts_code: String = row.get(0).map_err(|e| format!("读取锚点代码失败: {e}"))?;
+                let end_trade_date: String =
+                    row.get(1).map_err(|e| format!("读取锚点日期失败: {e}"))?;
+                let total: i64 = row
+                    .get(2)
+                    .map_err(|e| format!("读取候选全集数量失败: {e}"))?;
+                candidate_universe_count = total.max(0) as usize;
+                let Some(end_index) = date_index.get(end_trade_date.as_str()).copied() else {
+                    continue;
+                };
+                let start_index = (end_index + 1).saturating_sub(window_trade_days);
+                anchors.push(Anchor {
+                    id: anchors.len(),
+                    ts_code,
+                    start_trade_date: all_trade_dates[start_index].clone(),
+                    end_trade_date,
+                });
+            }
+            Ok((anchors, candidate_universe_count))
+        })(
+            &conn,
+            &target_rule_names,
+            earliest_candidate_date,
+            &historical_cutoff_date,
+            &all_trade_dates,
+            window_trade_days,
+        )?;
     let rule_weights =
         load_rule_idf_weights(&conn, earliest_candidate_date, &historical_cutoff_date)?;
     let target_rule_weight =

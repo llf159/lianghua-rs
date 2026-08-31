@@ -246,7 +246,39 @@ impl CyqChenFieldInjector {
             );
         }
 
-        let select_sql = Some(build_cyq_chen_select_sql(&available_fields));
+        let select_sql = Some(
+            (|available_fields: &[(&'static str, &'static str)]| -> String {
+                let mut select_cols = vec!["snap.trade_date AS trade_date".to_string()];
+                for (runtime_key, db_col) in available_fields {
+                    select_cols.push((|runtime_key : & str, db_col : & str| -> String {
+    match runtime_key {
+        "CYQ_MPR" => format!(
+            "COALESCE(TRY_CAST(snap.\"{db_col}\" AS DOUBLE), {}) AS \"{db_col}\"",
+            cyq_chen_main_profit_ratio_expr()
+        ),
+        "CYQ_MTR" => format!(
+            "COALESCE(TRY_CAST(snap.\"{db_col}\" AS DOUBLE), CASE WHEN snap.main_total > 1e-10 THEN 1.0 - ({}) ELSE 0.0 END) AS \"{db_col}\"",
+            cyq_chen_main_profit_ratio_expr()
+        ),
+        _ => format!("TRY_CAST(snap.\"{db_col}\" AS DOUBLE) AS \"{db_col}\""),
+    }
+})(runtime_key, db_col));
+                }
+
+                format!(
+                    r#"
+        SELECT {}
+        FROM {CYQ_CHEN_SNAPSHOT_TABLE} AS snap
+        WHERE snap.ts_code = ?
+          AND snap.adj_type = ?
+          AND snap.trade_date >= ?
+          AND snap.trade_date <= ?
+        ORDER BY snap.trade_date ASC
+        "#,
+                    select_cols.join(", ")
+                )
+            })(&available_fields),
+        );
         Self {
             conn: Some(conn),
             fields,
@@ -344,26 +376,6 @@ impl CyqChenFieldInjector {
     }
 }
 
-fn build_cyq_chen_select_sql(available_fields: &[(&'static str, &'static str)]) -> String {
-    let mut select_cols = vec!["snap.trade_date AS trade_date".to_string()];
-    for (runtime_key, db_col) in available_fields {
-        select_cols.push(cyq_chen_select_expr(runtime_key, db_col));
-    }
-
-    format!(
-        r#"
-        SELECT {}
-        FROM {CYQ_CHEN_SNAPSHOT_TABLE} AS snap
-        WHERE snap.ts_code = ?
-          AND snap.adj_type = ?
-          AND snap.trade_date >= ?
-          AND snap.trade_date <= ?
-        ORDER BY snap.trade_date ASC
-        "#,
-        select_cols.join(", ")
-    )
-}
-
 fn cyq_chen_main_profit_ratio_expr() -> &'static str {
     r#"
     CASE
@@ -379,20 +391,6 @@ fn cyq_chen_main_profit_ratio_expr() -> &'static str {
       ELSE 0.0
     END
     "#
-}
-
-fn cyq_chen_select_expr(runtime_key: &str, db_col: &str) -> String {
-    match runtime_key {
-        "CYQ_MPR" => format!(
-            "COALESCE(TRY_CAST(snap.\"{db_col}\" AS DOUBLE), {}) AS \"{db_col}\"",
-            cyq_chen_main_profit_ratio_expr()
-        ),
-        "CYQ_MTR" => format!(
-            "COALESCE(TRY_CAST(snap.\"{db_col}\" AS DOUBLE), CASE WHEN snap.main_total > 1e-10 THEN 1.0 - ({}) ELSE 0.0 END) AS \"{db_col}\"",
-            cyq_chen_main_profit_ratio_expr()
-        ),
-        _ => format!("TRY_CAST(snap.\"{db_col}\" AS DOUBLE) AS \"{db_col}\""),
-    }
 }
 
 pub fn inject_empty_optional_cyq_chen_fields(
@@ -434,12 +432,6 @@ fn cyq_chen_existing_columns(conn: &Connection) -> Result<HashSet<String>, Strin
     Ok(out)
 }
 
-fn format_cyq_chen_used_keys(used_keys: &HashSet<String>) -> String {
-    let mut keys = used_keys.iter().cloned().collect::<Vec<_>>();
-    keys.sort();
-    keys.join(", ")
-}
-
 pub fn preview_optional_cyq_chen_injection_warnings(
     source_dir: &str,
     start_date: &str,
@@ -452,7 +444,11 @@ pub fn preview_optional_cyq_chen_injection_warnings(
         return Vec::new();
     }
 
-    let used_keys_text = format_cyq_chen_used_keys(used_keys);
+    let used_keys_text = (|used_keys: &HashSet<String>| -> String {
+        let mut keys = used_keys.iter().cloned().collect::<Vec<_>>();
+        keys.sort();
+        keys.join(", ")
+    })(used_keys);
     let cyq_db = cyq_chen_db_path(source_dir);
     if !cyq_db.exists() {
         return vec![format!(

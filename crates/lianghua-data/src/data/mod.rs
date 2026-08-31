@@ -235,7 +235,19 @@ pub fn collect_runtime_keys_from_expr_programs(
         .collect::<HashSet<_>>();
 
     for program in programs {
-        collect_stmts_runtime_keys(program, options, &mut keys);
+        (|stmts: &Stmts, options: RuntimeKeyCollectOptions<'_>, keys: &mut HashSet<String>| {
+            let mut locals = HashSet::new();
+
+            for stmt in &stmts.item {
+                match stmt {
+                    Stmt::Assign { name, value } => {
+                        collect_expr_runtime_keys(value, &locals, options, keys);
+                        locals.insert(name.clone());
+                    }
+                    Stmt::Expr(expr) => collect_expr_runtime_keys(expr, &locals, options, keys),
+                }
+            }
+        })(program, options, &mut keys);
     }
 
     keys
@@ -274,24 +286,6 @@ pub fn collect_assigned_names_from_expr_program(stmts: &Stmts) -> Vec<String> {
     let mut out = assigned.into_iter().collect::<Vec<_>>();
     out.sort();
     out
-}
-
-fn collect_stmts_runtime_keys(
-    stmts: &Stmts,
-    options: RuntimeKeyCollectOptions<'_>,
-    keys: &mut HashSet<String>,
-) {
-    let mut locals = HashSet::new();
-
-    for stmt in &stmts.item {
-        match stmt {
-            Stmt::Assign { name, value } => {
-                collect_expr_runtime_keys(value, &locals, options, keys);
-                locals.insert(name.clone());
-            }
-            Stmt::Expr(expr) => collect_expr_runtime_keys(expr, &locals, options, keys),
-        }
-    }
 }
 
 fn collect_expr_runtime_keys(
@@ -364,8 +358,6 @@ pub struct DataReader {
     pub cols_table: Vec<(String, String)>, // 数据库列名, runtime规范列名
     pub runtime_index_pct_cols: Vec<RuntimeIndexPctCol>,
 }
-
-const RUNTIME_INDEX_ADJ_TYPE: &str = "ind";
 
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeIndexPctCol {
@@ -455,10 +447,31 @@ impl DataReader {
         }
 
         for col in &all_cols_name {
-            let Some(runtime_key) = stock_data_runtime_key(col) else {
+            let Some(runtime_key) = (|db_column: &str| -> Option<String> {
+                if STOCK_DATA_KEY_COLUMN_DEFS
+                    .iter()
+                    .any(|(column, _)| db_column.eq_ignore_ascii_case(column))
+                {
+                    return None;
+                }
+
+                if let Some(field) = STOCK_DATA_RUNTIME_FIELDS
+                    .iter()
+                    .find(|field| db_column.eq_ignore_ascii_case(field.db_column))
+                {
+                    return Some(field.runtime_key.to_string());
+                }
+
+                Some(db_column.to_ascii_uppercase())
+            })(col) else {
                 continue;
             };
-            if is_runtime_index_pct_key(&runtime_key) {
+            if (|runtime_key: &str| -> bool {
+                RUNTIME_INDEX_PCT_COLS
+                    .iter()
+                    .any(|item| item.runtime_key == runtime_key)
+            })(&runtime_key)
+            {
                 continue;
             }
             if required_runtime_keys
@@ -470,7 +483,18 @@ impl DataReader {
             db_cols_table.push((col.clone(), runtime_key));
         }
 
-        let runtime_index_pct_cols = resolve_runtime_index_pct_cols(required_runtime_keys);
+        let runtime_index_pct_cols =
+            (|required_runtime_keys: Option<&HashSet<String>>| -> Vec<RuntimeIndexPctCol> {
+                let Some(required_runtime_keys) = required_runtime_keys else {
+                    return Vec::new();
+                };
+
+                RUNTIME_INDEX_PCT_COLS
+                    .iter()
+                    .copied()
+                    .filter(|item| required_runtime_keys.contains(item.runtime_key))
+                    .collect()
+            })(required_runtime_keys);
         if let Some(required_runtime_keys) = required_runtime_keys {
             let mut selected_runtime_keys = db_cols_table
                 .iter()
@@ -799,7 +823,7 @@ impl DataReader {
             .prepare(&sql)
             .map_err(|e| format!("预编译指数涨幅运行时列SQL失败:{e}"))?;
         let mut rows = stmt
-            .query(params![RUNTIME_INDEX_ADJ_TYPE, start_date, end_date])
+            .query(params![("ind"), start_date, end_date])
             .map_err(|e| format!("查询指数涨幅运行时列失败:{e}"))?;
 
         let ts_code_to_key = self
@@ -857,44 +881,6 @@ impl DataReader {
 
 fn runtime_key_required(required_runtime_keys: &HashSet<String>, runtime_key: &str) -> bool {
     required_runtime_keys.contains(runtime_key)
-}
-
-fn stock_data_runtime_key(db_column: &str) -> Option<String> {
-    if STOCK_DATA_KEY_COLUMN_DEFS
-        .iter()
-        .any(|(column, _)| db_column.eq_ignore_ascii_case(column))
-    {
-        return None;
-    }
-
-    if let Some(field) = STOCK_DATA_RUNTIME_FIELDS
-        .iter()
-        .find(|field| db_column.eq_ignore_ascii_case(field.db_column))
-    {
-        return Some(field.runtime_key.to_string());
-    }
-
-    Some(db_column.to_ascii_uppercase())
-}
-
-fn is_runtime_index_pct_key(runtime_key: &str) -> bool {
-    RUNTIME_INDEX_PCT_COLS
-        .iter()
-        .any(|item| item.runtime_key == runtime_key)
-}
-
-fn resolve_runtime_index_pct_cols(
-    required_runtime_keys: Option<&HashSet<String>>,
-) -> Vec<RuntimeIndexPctCol> {
-    let Some(required_runtime_keys) = required_runtime_keys else {
-        return Vec::new();
-    };
-
-    RUNTIME_INDEX_PCT_COLS
-        .iter()
-        .copied()
-        .filter(|item| required_runtime_keys.contains(item.runtime_key))
-        .collect()
 }
 
 // ============================================ 策略部分 ================================================
@@ -1140,154 +1126,168 @@ impl ScoreConfig {
             };
 
             match r.kind {
-                RuleKind::Single => validate_single_score_rule(r, n)?,
-                RuleKind::Combination => validate_combination_score_rule(r, n)?,
+                RuleKind::Single => {
+                    (|rule: &ScoreRule, rule_index: usize| -> Result<(), String> {
+                        if rule.when.trim().is_empty() {
+                            return Err(format!("第{rule_index}个表达式when字段为空"));
+                        }
+                        let _ = parse_and_validate_score_rule_expression(
+                            rule.when.trim(),
+                            rule_index,
+                            rule.name.trim(),
+                        )?;
+                        if !rule.points.is_finite() {
+                            return Err(format!("第{rule_index}条规则 points 非法"));
+                        }
+                        if !rule.conditions.is_empty()
+                            || !rule.unbound_bonuses.is_empty()
+                            || rule.points_by_hits.is_some()
+                            || rule.max_bonus_points.is_some()
+                        {
+                            return Err(format!(
+                                "第{rule_index}条普通规则不能配置 condition、bonus、points_by_hits 或额外加分上限"
+                            ));
+                        }
+                        if rule.max_points.is_some() && !matches!(rule.scope_way, ScopeWay::Each) {
+                            return Err(format!(
+                                "第{rule_index}条普通规则仅 scope_way=EACH 时支持 max_points"
+                            ));
+                        }
+                        validate_positive_score_cap(rule.max_points, rule_index, "max_points")?;
+
+                        if let Some(dist) = &rule.dist_points {
+                            if !dist.is_empty()
+                                && !(|scope_way: ScopeWay| -> bool {
+                                    matches!(scope_way, ScopeWay::Each | ScopeWay::Recent)
+                                })(rule.scope_way)
+                            {
+                                return Err(format!(
+                                    "第{rule_index}条规则 scope_way 不支持 dist_points，仅 EACH/RECENT 支持区间字典分"
+                                ));
+                            }
+                            for (index, item) in dist.iter().enumerate() {
+                                if item.min > item.max {
+                                    return Err(format!(
+                                        "第{rule_index}条规则 dist_points 第{}段 min > max",
+                                        index + 1
+                                    ));
+                                }
+                                if !item.points.is_finite() {
+                                    return Err(format!(
+                                        "第{rule_index}条规则 dist_points 第{}段 points 非法",
+                                        index + 1
+                                    ));
+                                }
+                            }
+                            let mut sorted: Vec<&DistPoint> = dist.iter().collect();
+                            sorted.sort_by_key(|item| item.min);
+                            for pair in sorted.windows(2) {
+                                let previous = pair[0];
+                                let current = pair[1];
+                                if previous.max >= current.min {
+                                    return Err(format!(
+                                        "区间重叠: [{}-{}] 和 [{}-{}]",
+                                        previous.min, previous.max, current.min, current.max
+                                    ));
+                                }
+                            }
+                        }
+                        Ok(())
+                    })(r, n)?
+                }
+                RuleKind::Combination => (|rule: &ScoreRule,
+                                           rule_index: usize|
+                 -> Result<(), String> {
+                    if !rule.when.trim().is_empty()
+                        || rule.points != 0.0
+                        || rule.dist_points.is_some()
+                    {
+                        return Err(format!(
+                            "第{rule_index}条组合规则不能配置 when、points 或 dist_points"
+                        ));
+                    }
+                    if rule.conditions.is_empty() {
+                        return Err(format!("第{rule_index}条组合规则至少需要一个 condition"));
+                    }
+                    if matches!(rule.scope_way, ScopeWay::Recent) {
+                        return Err(format!("第{rule_index}条组合规则不支持 RECENT scope_way"));
+                    }
+                    if !rule.unbound_bonuses.is_empty() {
+                        return Err(format!(
+                            "第{rule_index}条组合规则存在旧版独立 bonus，请改为 condition.bonus_points"
+                        ));
+                    }
+
+                    let Some(points_by_hits) = rule.points_by_hits.as_deref() else {
+                        return Err(format!("第{rule_index}条组合规则 points_by_hits 字段为空"));
+                    };
+                    let expected_len = rule.conditions.len() + 1;
+                    if points_by_hits.len() != expected_len {
+                        return Err(format!(
+                            "第{rule_index}条组合规则 points_by_hits 长度应为 {expected_len}（condition 数量 + 1），实际为 {}",
+                            points_by_hits.len()
+                        ));
+                    }
+                    if points_by_hits.first().copied() != Some(0.0) {
+                        return Err(format!(
+                            "第{rule_index}条组合规则 points_by_hits[0] 必须为 0"
+                        ));
+                    }
+                    if points_by_hits.iter().any(|points| !points.is_finite()) {
+                        return Err(format!(
+                            "第{rule_index}条组合规则 points_by_hits 包含非法分数"
+                        ));
+                    }
+                    if points_by_hits.iter().all(|points| *points == 0.0) {
+                        return Err(format!(
+                            "第{rule_index}条组合规则 points_by_hits 不能全部为 0"
+                        ));
+                    }
+
+                    let mut expression_names = HashSet::new();
+                    for (index, condition) in rule.conditions.iter().enumerate() {
+                        let name = condition.name.trim();
+                        if name.is_empty() {
+                            return Err(format!(
+                                "第{rule_index}条组合规则第{}个 condition 的 name 为空",
+                                index + 1
+                            ));
+                        }
+                        if !expression_names.insert(name.to_string()) {
+                            return Err(format!(
+                                "第{rule_index}条组合规则条件/加分项名称重复: {name}"
+                            ));
+                        }
+                        if condition.when.trim().is_empty() {
+                            return Err(format!(
+                                "第{rule_index}条组合规则 condition({name}) 的 when 为空"
+                            ));
+                        }
+                        let expression_name = format!("{} / 条件 {name}", rule.name.trim());
+                        let _ = parse_and_validate_score_rule_expression(
+                            condition.when.trim(),
+                            rule_index,
+                            &expression_name,
+                        )?;
+                        if !condition.bonus_points.is_finite() {
+                            return Err(format!(
+                                "第{rule_index}条组合规则 condition({name}) 的 bonus_points 非法"
+                            ));
+                        }
+                    }
+
+                    validate_positive_score_cap(rule.max_points, rule_index, "max_points")?;
+                    validate_positive_score_cap(
+                        rule.max_bonus_points,
+                        rule_index,
+                        "max_bonus_points",
+                    )?;
+                    Ok(())
+                })(r, n)?,
             }
         }
         Ok(())
     }
-}
-
-fn validate_single_score_rule(rule: &ScoreRule, rule_index: usize) -> Result<(), String> {
-    if rule.when.trim().is_empty() {
-        return Err(format!("第{rule_index}个表达式when字段为空"));
-    }
-    let _ =
-        parse_and_validate_score_rule_expression(rule.when.trim(), rule_index, rule.name.trim())?;
-    if !rule.points.is_finite() {
-        return Err(format!("第{rule_index}条规则 points 非法"));
-    }
-    if !rule.conditions.is_empty()
-        || !rule.unbound_bonuses.is_empty()
-        || rule.points_by_hits.is_some()
-        || rule.max_bonus_points.is_some()
-    {
-        return Err(format!(
-            "第{rule_index}条普通规则不能配置 condition、bonus、points_by_hits 或额外加分上限"
-        ));
-    }
-    if rule.max_points.is_some() && !matches!(rule.scope_way, ScopeWay::Each) {
-        return Err(format!(
-            "第{rule_index}条普通规则仅 scope_way=EACH 时支持 max_points"
-        ));
-    }
-    validate_positive_score_cap(rule.max_points, rule_index, "max_points")?;
-
-    if let Some(dist) = &rule.dist_points {
-        if !dist.is_empty() && !scope_way_supports_dist_points(rule.scope_way) {
-            return Err(format!(
-                "第{rule_index}条规则 scope_way 不支持 dist_points，仅 EACH/RECENT 支持区间字典分"
-            ));
-        }
-        for (index, item) in dist.iter().enumerate() {
-            if item.min > item.max {
-                return Err(format!(
-                    "第{rule_index}条规则 dist_points 第{}段 min > max",
-                    index + 1
-                ));
-            }
-            if !item.points.is_finite() {
-                return Err(format!(
-                    "第{rule_index}条规则 dist_points 第{}段 points 非法",
-                    index + 1
-                ));
-            }
-        }
-        let mut sorted: Vec<&DistPoint> = dist.iter().collect();
-        sorted.sort_by_key(|item| item.min);
-        for pair in sorted.windows(2) {
-            let previous = pair[0];
-            let current = pair[1];
-            if previous.max >= current.min {
-                return Err(format!(
-                    "区间重叠: [{}-{}] 和 [{}-{}]",
-                    previous.min, previous.max, current.min, current.max
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_combination_score_rule(rule: &ScoreRule, rule_index: usize) -> Result<(), String> {
-    if !rule.when.trim().is_empty() || rule.points != 0.0 || rule.dist_points.is_some() {
-        return Err(format!(
-            "第{rule_index}条组合规则不能配置 when、points 或 dist_points"
-        ));
-    }
-    if rule.conditions.is_empty() {
-        return Err(format!("第{rule_index}条组合规则至少需要一个 condition"));
-    }
-    if matches!(rule.scope_way, ScopeWay::Recent) {
-        return Err(format!("第{rule_index}条组合规则不支持 RECENT scope_way"));
-    }
-    if !rule.unbound_bonuses.is_empty() {
-        return Err(format!(
-            "第{rule_index}条组合规则存在旧版独立 bonus，请改为 condition.bonus_points"
-        ));
-    }
-
-    let Some(points_by_hits) = rule.points_by_hits.as_deref() else {
-        return Err(format!("第{rule_index}条组合规则 points_by_hits 字段为空"));
-    };
-    let expected_len = rule.conditions.len() + 1;
-    if points_by_hits.len() != expected_len {
-        return Err(format!(
-            "第{rule_index}条组合规则 points_by_hits 长度应为 {expected_len}（condition 数量 + 1），实际为 {}",
-            points_by_hits.len()
-        ));
-    }
-    if points_by_hits.first().copied() != Some(0.0) {
-        return Err(format!(
-            "第{rule_index}条组合规则 points_by_hits[0] 必须为 0"
-        ));
-    }
-    if points_by_hits.iter().any(|points| !points.is_finite()) {
-        return Err(format!(
-            "第{rule_index}条组合规则 points_by_hits 包含非法分数"
-        ));
-    }
-    if points_by_hits.iter().all(|points| *points == 0.0) {
-        return Err(format!(
-            "第{rule_index}条组合规则 points_by_hits 不能全部为 0"
-        ));
-    }
-
-    let mut expression_names = HashSet::new();
-    for (index, condition) in rule.conditions.iter().enumerate() {
-        let name = condition.name.trim();
-        if name.is_empty() {
-            return Err(format!(
-                "第{rule_index}条组合规则第{}个 condition 的 name 为空",
-                index + 1
-            ));
-        }
-        if !expression_names.insert(name.to_string()) {
-            return Err(format!(
-                "第{rule_index}条组合规则条件/加分项名称重复: {name}"
-            ));
-        }
-        if condition.when.trim().is_empty() {
-            return Err(format!(
-                "第{rule_index}条组合规则 condition({name}) 的 when 为空"
-            ));
-        }
-        let expression_name = format!("{} / 条件 {name}", rule.name.trim());
-        let _ = parse_and_validate_score_rule_expression(
-            condition.when.trim(),
-            rule_index,
-            &expression_name,
-        )?;
-        if !condition.bonus_points.is_finite() {
-            return Err(format!(
-                "第{rule_index}条组合规则 condition({name}) 的 bonus_points 非法"
-            ));
-        }
-    }
-
-    validate_positive_score_cap(rule.max_points, rule_index, "max_points")?;
-    validate_positive_score_cap(rule.max_bonus_points, rule_index, "max_bonus_points")?;
-    Ok(())
 }
 
 fn validate_positive_score_cap(
@@ -1317,10 +1317,6 @@ fn parse_and_validate_score_rule_expression(
     validate_expression_functions(&stmts)
         .map_err(|error| format!("第{rule_index}条规则({rule_name}){error}"))?;
     Ok(stmts)
-}
-
-fn scope_way_supports_dist_points(scope_way: ScopeWay) -> bool {
-    matches!(scope_way, ScopeWay::Each | ScopeWay::Recent)
 }
 
 impl ScoreScene {

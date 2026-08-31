@@ -3,8 +3,6 @@ use std::collections::HashSet;
 use encoding_rs::GBK;
 use serde::Serialize;
 
-const THS_CONCEPT_URL_PREFIX: &str = "https://basic.10jqka.com.cn";
-
 #[derive(Debug, Clone, Serialize)]
 pub struct ThsConceptRow {
     pub ts_code: String,
@@ -54,33 +52,29 @@ fn emit_ths_progress(
     }
 }
 
-fn ts_code_to_ths_symbol(ts_code: &str) -> Result<String, String> {
-    let std_code = ts_code.trim().to_ascii_uppercase();
-
-    let (code, market) = std_code
-        .split_once('.')
-        .ok_or_else(|| format!("输入代码不是标准 ts_code: {ts_code}"))?;
-
-    if code.len() != 6 || !code.chars().all(|ch| ch.is_ascii_digit()) {
-        return Err(format!("股票代码部分不是 6 位数字: {ts_code}"));
-    }
-
-    match market {
-        "SH" | "SZ" | "BJ" => Ok(code.to_string()),
-        _ => Err(format!("暂不支持的市场后缀: {market}")),
-    }
-}
-
-fn build_ths_concept_url(ts_code: &str) -> Result<String, String> {
-    let symbol = ts_code_to_ths_symbol(ts_code)?;
-    Ok(format!("{THS_CONCEPT_URL_PREFIX}/{symbol}/concept.html"))
-}
-
 pub fn fetch_ths_concept_html(
     http: &reqwest::blocking::Client,
     ts_code: &str,
 ) -> Result<String, String> {
-    let url = build_ths_concept_url(ts_code)?;
+    let url = (|ts_code: &str| -> Result<String, String> {
+        let symbol = (|ts_code: &str| -> Result<String, String> {
+            let std_code = ts_code.trim().to_ascii_uppercase();
+
+            let (code, market) = std_code
+                .split_once('.')
+                .ok_or_else(|| format!("输入代码不是标准 ts_code: {ts_code}"))?;
+
+            if code.len() != 6 || !code.chars().all(|ch| ch.is_ascii_digit()) {
+                return Err(format!("股票代码部分不是 6 位数字: {ts_code}"));
+            }
+
+            match market {
+                "SH" | "SZ" | "BJ" => Ok(code.to_string()),
+                _ => Err(format!("暂不支持的市场后缀: {market}")),
+            }
+        })(ts_code)?;
+        Ok(format!("https://basic.10jqka.com.cn/{symbol}/concept.html"))
+    })(ts_code)?;
 
     let response = http
         .get(&url)
@@ -105,69 +99,18 @@ pub fn fetch_ths_concept_html(
     Ok(html.into_owned())
 }
 
-fn strip_html_tags(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut in_tag = false;
-
-    for ch in raw.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
-        }
-    }
-
-    out
-}
-
-fn decode_html_entities(raw: &str) -> String {
-    raw.replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-}
-
-fn normalize_html_text(raw: &str) -> String {
-    let decoded = decode_html_entities(raw);
-    let plain = strip_html_tags(&decoded);
-    plain.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn extract_gn_content_table(html: &str) -> Result<&str, String> {
-    let start = html
-        .find(r#"<table class="gnContent">"#)
-        .ok_or_else(|| "未找到 gnContent 概念表格".to_string())?;
-    let table_html = &html[start..];
-    let end = table_html
-        .find("</table>")
-        .ok_or_else(|| "概念表格缺少 </table> 结尾".to_string())?;
-
-    Ok(&table_html[..end])
-}
-
-fn extract_row_cells(row_html: &str) -> Vec<String> {
-    let mut cells = Vec::new();
-
-    for part in row_html.split("<td").skip(1) {
-        let Some((_, after_open)) = part.split_once('>') else {
-            continue;
-        };
-        let Some((cell_html, _)) = after_open.split_once("</td>") else {
-            continue;
-        };
-
-        let text = normalize_html_text(cell_html);
-        cells.push(text);
-    }
-
-    cells
-}
-
 pub fn parse_ths_concept_names(html: &str) -> Result<Vec<String>, String> {
-    let table_html = extract_gn_content_table(html)?;
+    let table_html = {
+        let start = html
+            .find(r#"<table class="gnContent">"#)
+            .ok_or_else(|| "未找到 gnContent 概念表格".to_string())?;
+        let table_html = &html[start..];
+        let end = table_html
+            .find("</table>")
+            .ok_or_else(|| "概念表格缺少 </table> 结尾".to_string())?;
+
+        &table_html[..end]
+    };
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
@@ -175,7 +118,48 @@ pub fn parse_ths_concept_names(html: &str) -> Result<Vec<String>, String> {
         let Some((_, row_html)) = part.split_once('>') else {
             continue;
         };
-        let cells = extract_row_cells(row_html);
+        let cells = (|row_html: &str| -> Vec<String> {
+            let mut cells = Vec::new();
+
+            for part in row_html.split("<td").skip(1) {
+                let Some((_, after_open)) = part.split_once('>') else {
+                    continue;
+                };
+                let Some((cell_html, _)) = after_open.split_once("</td>") else {
+                    continue;
+                };
+
+                let text = (|raw: &str| -> String {
+                    let decoded = (|raw: &str| -> String {
+                        raw.replace("&nbsp;", " ")
+                            .replace("&amp;", "&")
+                            .replace("&lt;", "<")
+                            .replace("&gt;", ">")
+                            .replace("&quot;", "\"")
+                            .replace("&#39;", "'")
+                    })(raw);
+                    let plain = (|raw: &str| -> String {
+                        let mut out = String::with_capacity(raw.len());
+                        let mut in_tag = false;
+
+                        for ch in raw.chars() {
+                            match ch {
+                                '<' => in_tag = true,
+                                '>' => in_tag = false,
+                                _ if !in_tag => out.push(ch),
+                                _ => {}
+                            }
+                        }
+
+                        out
+                    })(&decoded);
+                    plain.split_whitespace().collect::<Vec<_>>().join(" ")
+                })(cell_html);
+                cells.push(text);
+            }
+
+            cells
+        })(row_html);
         let Some(index_text) = cells.first() else {
             continue;
         };
@@ -205,10 +189,6 @@ pub fn parse_ths_concept_text(html: &str) -> Result<String, String> {
     Ok(names.join(","))
 }
 
-fn is_missing_concept_table_error(error: &str) -> bool {
-    error.contains("未找到 gnContent 概念表格")
-}
-
 pub fn fetch_one_ths_concept_row(
     http: &reqwest::blocking::Client,
     ts_code: &str,
@@ -223,7 +203,13 @@ pub fn fetch_one_ths_concept_row(
     let html = fetch_ths_concept_html(http, &normalized_ts_code)?;
     let concept = match parse_ths_concept_text(&html) {
         Ok(value) => value,
-        Err(error) if is_missing_concept_table_error(&error) => String::new(),
+        Err(error)
+            if (|error: &str| -> bool { error.contains("未找到 gnContent 概念表格") })(
+                &error,
+            ) =>
+        {
+            String::new()
+        }
         Err(error) => return Err(error),
     };
 

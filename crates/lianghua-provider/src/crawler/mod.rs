@@ -5,8 +5,6 @@ use encoding_rs::GBK;
 use rayon::prelude::*;
 use serde::Serialize;
 
-const SINA_REALTIME_URL: &str = "http://hq.sinajs.cn/";
-const TENCENT_REALTIME_URL: &str = "http://qt.gtimg.cn/q=";
 pub const DEFAULT_REALTIME_INDEX_TS_CODES: [&str; 10] = [
     "000001.SH", // 上证指数
     "399001.SZ", // 深证成指
@@ -92,38 +90,8 @@ fn ts_code_to_sina_code(ts_code: &str) -> Result<String, String> {
     }
 }
 
-fn sina_code_to_ts_code(sina_code: &str) -> Result<String, String> {
-    if let Some(code) = sina_code.strip_prefix("sh") {
-        return Ok(format!("{code}.SH"));
-    }
-
-    if let Some(code) = sina_code.strip_prefix("sz") {
-        return Ok(format!("{code}.SZ"));
-    }
-
-    if let Some(code) = sina_code.strip_prefix("bj") {
-        return Ok(format!("{code}.BJ"));
-    }
-    Err(format!("无法识别的新浪symbol: {sina_code}"))
-}
-
 fn ts_code_to_tencent_code(ts_code: &str) -> Result<String, String> {
     ts_code_to_sina_code(ts_code)
-}
-
-fn tencent_code_to_ts_code(tencent_code: &str) -> Result<String, String> {
-    if let Some(code) = tencent_code.strip_prefix("sh") {
-        return Ok(format!("{code}.SH"));
-    }
-
-    if let Some(code) = tencent_code.strip_prefix("sz") {
-        return Ok(format!("{code}.SZ"));
-    }
-
-    if let Some(code) = tencent_code.strip_prefix("bj") {
-        return Ok(format!("{code}.BJ"));
-    }
-    Err(format!("无法识别的腾讯symbol: {tencent_code}"))
 }
 
 fn parse_f64_field(fields: &[&str], idx: usize, field_name: &str) -> Result<f64, String> {
@@ -209,11 +177,11 @@ fn tencent_list_build(ts_codes: &[String], batch_size: usize) -> Result<Vec<Stri
 }
 
 fn sina_realtime_url(list: &str) -> String {
-    format!("{SINA_REALTIME_URL}?list={list}")
+    format!("http://hq.sinajs.cn/?list={list}")
 }
 
 fn tencent_realtime_url(list: &str) -> String {
-    format!("{TENCENT_REALTIME_URL}{list}")
+    format!("http://qt.gtimg.cn/q={list}")
 }
 
 fn fetch_sina_real_time_data(
@@ -270,127 +238,6 @@ fn fetch_tencent_real_time_data(
     Ok(text.into_owned())
 }
 
-async fn fetch_sina_real_time_data_async(
-    http: &reqwest::Client,
-    list: &str,
-) -> Result<String, String> {
-    let response = http
-        .get(sina_realtime_url(list))
-        .header("Accept", "*/*")
-        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-        .header("Connection", "keep-alive")
-        .header("Referer", "https://finance.sina.com.cn")
-        .header("User-Agent", "Mozilla/5.0")
-        .send()
-        .await
-        .map_err(|e| format!("请求新浪失败: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("新浪实时行情返回HTTP错误: {e}"))?;
-
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("读取新浪响应字节失败: {e}"))?;
-
-    let (text, _, had_err) = GBK.decode(&bytes);
-    if had_err {
-        return Err("新浪响应按GBK解码时出现乱码".to_string());
-    }
-    Ok(text.into_owned())
-}
-
-async fn fetch_tencent_real_time_data_async(
-    http: &reqwest::Client,
-    list: &str,
-) -> Result<String, String> {
-    let response = http
-        .get(tencent_realtime_url(list))
-        .header("Accept", "*/*")
-        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-        .header("Connection", "keep-alive")
-        .header("Referer", "https://gu.qq.com")
-        .header("User-Agent", "Mozilla/5.0")
-        .send()
-        .await
-        .map_err(|e| format!("请求腾讯失败: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("腾讯实时行情返回HTTP错误: {e}"))?;
-
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("读取腾讯响应字节失败: {e}"))?;
-
-    let (text, _, had_err) = GBK.decode(&bytes);
-    if had_err {
-        return Err("腾讯响应按GBK解码时出现乱码".to_string());
-    }
-    Ok(text.into_owned())
-}
-
-fn parse_sina_quote_line(line: &str) -> Result<Option<SinaQuote>, String> {
-    let line = line.trim();
-    if line.is_empty() {
-        return Ok(None);
-    }
-
-    let (left, right) = line
-        .split_once("=\"")
-        .ok_or_else(|| format!("行情行格式错误，缺少 =\": {line}"))?;
-
-    let symbol = left
-        .strip_prefix("var hq_str_")
-        .ok_or_else(|| format!("行情行前缀错误: {left}"))?;
-
-    let payload = right
-        .strip_suffix("\";")
-        .ok_or_else(|| format!("行情行结尾错误: {right}"))?;
-
-    if payload.is_empty() {
-        return Ok(None);
-    }
-
-    let fields: Vec<&str> = payload.split(',').collect();
-    if fields.len() < 32 {
-        return Err(format!("字段数量不足: {symbol}, len={}", fields.len()));
-    }
-
-    let ts_code = sina_code_to_ts_code(symbol)?;
-    let name = fields[0].to_string();
-    let open = parse_f64_field(&fields, 1, "open")?;
-    let pre_close = parse_f64_field(&fields, 2, "pre_close")?;
-    let price = parse_f64_field(&fields, 3, "price")?;
-    let high = parse_f64_field(&fields, 4, "high")?;
-    let low = parse_f64_field(&fields, 5, "low")?;
-    // 新浪 level-1 返回的是成交股数；库里的 stock_data.vol 使用“手”，这里统一 /100。
-    let vol = parse_f64_field(&fields, 8, "volume")? / 100.0;
-    let amount = parse_f64_field(&fields, 9, "amount")?;
-    let date = fields[30].to_string();
-    let time = fields[31].to_string();
-    let change_pct = {
-        if pre_close > 0.0 {
-            Some((price / pre_close - 1.0) * 100.0)
-        } else {
-            None
-        }
-    };
-
-    Ok(Some(SinaQuote {
-        date,
-        time,
-        ts_code,
-        name,
-        open,
-        high,
-        low,
-        pre_close,
-        price,
-        vol,
-        amount,
-        change_pct,
-    }))
-}
-
 fn parse_tencent_datetime(raw: &str) -> Result<(String, String), String> {
     let digits: String = raw.chars().filter(|ch| ch.is_ascii_digit()).collect();
     if digits.len() < 14 {
@@ -403,74 +250,86 @@ fn parse_tencent_datetime(raw: &str) -> Result<(String, String), String> {
     ))
 }
 
-fn parse_tencent_quote_segment(segment: &str) -> Result<Option<TencentQuote>, String> {
-    let segment = segment.trim();
-    if segment.is_empty() {
-        return Ok(None);
-    }
-
-    let (left, right) = segment
-        .split_once("=\"")
-        .ok_or_else(|| format!("腾讯行情段格式错误，缺少 =\": {segment}"))?;
-
-    let symbol = left
-        .trim()
-        .strip_prefix("v_")
-        .ok_or_else(|| format!("腾讯行情段前缀错误: {left}"))?;
-
-    let payload = right
-        .strip_suffix('"')
-        .ok_or_else(|| format!("腾讯行情段结尾错误: {right}"))?;
-
-    if payload.is_empty() {
-        return Ok(None);
-    }
-
-    let fields: Vec<&str> = payload.split('~').collect();
-    if fields.len() <= 49 {
-        return Ok(None);
-    }
-
-    let ts_code = tencent_code_to_ts_code(symbol)?;
-    let name = fields[1].to_string();
-    let price = parse_f64_field(&fields, 3, "now")?;
-    let pre_close = parse_f64_field(&fields, 4, "close")?;
-    let open = parse_f64_field(&fields, 5, "open")?;
-    let high = parse_f64_field(&fields, 33, "high")?;
-    let low = parse_f64_field(&fields, 34, "low")?;
-    let vol = parse_f64_field(&fields, 36, "volume_hand")?;
-    let amount = parse_tencent_amount(&fields)?;
-    let change_pct = parse_optional_f64_field(&fields, 32, "change_pct")?;
-    let volume_ratio = parse_optional_f64_field(&fields, 49, "volume_ratio")?;
-    let avg_price = parse_optional_f64_field(&fields, 51, "avg_price")?;
-    let datetime = fields
-        .get(30)
-        .ok_or_else(|| format!("字段缺失: datetime, {symbol}"))?;
-    let (date, time) = parse_tencent_datetime(datetime)?;
-
-    Ok(Some(TencentQuote {
-        date,
-        time,
-        ts_code,
-        name,
-        open,
-        high,
-        low,
-        pre_close,
-        price,
-        vol,
-        amount,
-        change_pct,
-        volume_ratio,
-        avg_price,
-    }))
-}
-
 fn parse_sina_quote_text(raw: &str) -> Result<Vec<SinaQuote>, String> {
     let mut quotes = Vec::new();
 
     for line in raw.lines() {
-        if let Some(quote) = parse_sina_quote_line(line)? {
+        if let Some(quote) = (|line: &str| -> Result<Option<SinaQuote>, String> {
+            let line = line.trim();
+            if line.is_empty() {
+                return Ok(None);
+            }
+
+            let (left, right) = line
+                .split_once("=\"")
+                .ok_or_else(|| format!("行情行格式错误，缺少 =\": {line}"))?;
+
+            let symbol = left
+                .strip_prefix("var hq_str_")
+                .ok_or_else(|| format!("行情行前缀错误: {left}"))?;
+
+            let payload = right
+                .strip_suffix("\";")
+                .ok_or_else(|| format!("行情行结尾错误: {right}"))?;
+
+            if payload.is_empty() {
+                return Ok(None);
+            }
+
+            let fields: Vec<&str> = payload.split(',').collect();
+            if fields.len() < 32 {
+                return Err(format!("字段数量不足: {symbol}, len={}", fields.len()));
+            }
+
+            let ts_code = (|sina_code: &str| -> Result<String, String> {
+                if let Some(code) = sina_code.strip_prefix("sh") {
+                    return Ok(format!("{code}.SH"));
+                }
+
+                if let Some(code) = sina_code.strip_prefix("sz") {
+                    return Ok(format!("{code}.SZ"));
+                }
+
+                if let Some(code) = sina_code.strip_prefix("bj") {
+                    return Ok(format!("{code}.BJ"));
+                }
+                Err(format!("无法识别的新浪symbol: {sina_code}"))
+            })(symbol)?;
+            let name = fields[0].to_string();
+            let open = parse_f64_field(&fields, 1, "open")?;
+            let pre_close = parse_f64_field(&fields, 2, "pre_close")?;
+            let price = parse_f64_field(&fields, 3, "price")?;
+            let high = parse_f64_field(&fields, 4, "high")?;
+            let low = parse_f64_field(&fields, 5, "low")?;
+            // 新浪 level-1 返回的是成交股数；库里的 stock_data.vol 使用“手”，这里统一 /100。
+            let vol = parse_f64_field(&fields, 8, "volume")? / 100.0;
+            let amount = parse_f64_field(&fields, 9, "amount")?;
+            let date = fields[30].to_string();
+            let time = fields[31].to_string();
+            let change_pct = {
+                if pre_close > 0.0 {
+                    Some((price / pre_close - 1.0) * 100.0)
+                } else {
+                    None
+                }
+            };
+
+            Ok(Some(SinaQuote {
+                date,
+                time,
+                ts_code,
+                name,
+                open,
+                high,
+                low,
+                pre_close,
+                price,
+                vol,
+                amount,
+                change_pct,
+            }))
+        })(line)?
+        {
             quotes.push(quote);
         }
     }
@@ -482,7 +341,82 @@ fn parse_tencent_quote_text(raw: &str) -> Result<Vec<TencentQuote>, String> {
     let mut quotes = Vec::new();
 
     for segment in raw.split(';') {
-        if let Some(quote) = parse_tencent_quote_segment(segment)? {
+        if let Some(quote) = (|segment: &str| -> Result<Option<TencentQuote>, String> {
+            let segment = segment.trim();
+            if segment.is_empty() {
+                return Ok(None);
+            }
+
+            let (left, right) = segment
+                .split_once("=\"")
+                .ok_or_else(|| format!("腾讯行情段格式错误，缺少 =\": {segment}"))?;
+
+            let symbol = left
+                .trim()
+                .strip_prefix("v_")
+                .ok_or_else(|| format!("腾讯行情段前缀错误: {left}"))?;
+
+            let payload = right
+                .strip_suffix('"')
+                .ok_or_else(|| format!("腾讯行情段结尾错误: {right}"))?;
+
+            if payload.is_empty() {
+                return Ok(None);
+            }
+
+            let fields: Vec<&str> = payload.split('~').collect();
+            if fields.len() <= 49 {
+                return Ok(None);
+            }
+
+            let ts_code = (|tencent_code: &str| -> Result<String, String> {
+                if let Some(code) = tencent_code.strip_prefix("sh") {
+                    return Ok(format!("{code}.SH"));
+                }
+
+                if let Some(code) = tencent_code.strip_prefix("sz") {
+                    return Ok(format!("{code}.SZ"));
+                }
+
+                if let Some(code) = tencent_code.strip_prefix("bj") {
+                    return Ok(format!("{code}.BJ"));
+                }
+                Err(format!("无法识别的腾讯symbol: {tencent_code}"))
+            })(symbol)?;
+            let name = fields[1].to_string();
+            let price = parse_f64_field(&fields, 3, "now")?;
+            let pre_close = parse_f64_field(&fields, 4, "close")?;
+            let open = parse_f64_field(&fields, 5, "open")?;
+            let high = parse_f64_field(&fields, 33, "high")?;
+            let low = parse_f64_field(&fields, 34, "low")?;
+            let vol = parse_f64_field(&fields, 36, "volume_hand")?;
+            let amount = parse_tencent_amount(&fields)?;
+            let change_pct = parse_optional_f64_field(&fields, 32, "change_pct")?;
+            let volume_ratio = parse_optional_f64_field(&fields, 49, "volume_ratio")?;
+            let avg_price = parse_optional_f64_field(&fields, 51, "avg_price")?;
+            let datetime = fields
+                .get(30)
+                .ok_or_else(|| format!("字段缺失: datetime, {symbol}"))?;
+            let (date, time) = parse_tencent_datetime(datetime)?;
+
+            Ok(Some(TencentQuote {
+                date,
+                time,
+                ts_code,
+                name,
+                open,
+                high,
+                low,
+                pre_close,
+                price,
+                vol,
+                amount,
+                change_pct,
+                volume_ratio,
+                avg_price,
+            }))
+        })(segment)?
+        {
             quotes.push(quote);
         }
     }
@@ -604,7 +538,33 @@ pub async fn fetch_sina_quotes_async(
     let mut all_quotes = Vec::new();
 
     for batch in &batches {
-        let raw = fetch_sina_real_time_data_async(http, batch).await?;
+        let raw = async {
+            let list = batch.as_str();
+            let response = http
+                .get(sina_realtime_url(list))
+                .header("Accept", "*/*")
+                .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+                .header("Connection", "keep-alive")
+                .header("Referer", "https://finance.sina.com.cn")
+                .header("User-Agent", "Mozilla/5.0")
+                .send()
+                .await
+                .map_err(|e| format!("请求新浪失败: {e}"))?
+                .error_for_status()
+                .map_err(|e| format!("新浪实时行情返回HTTP错误: {e}"))?;
+
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|e| format!("读取新浪响应字节失败: {e}"))?;
+
+            let (text, _, had_err) = GBK.decode(&bytes);
+            if had_err {
+                return Err("新浪响应按GBK解码时出现乱码".to_string());
+            }
+            Ok(text.into_owned())
+        }
+        .await?;
         let quotes = parse_sina_quote_text(&raw)?;
         all_quotes.extend(quotes);
     }
@@ -637,7 +597,33 @@ pub async fn fetch_tencent_quotes_async(
     let mut all_quotes = Vec::new();
 
     for batch in &batches {
-        let raw = fetch_tencent_real_time_data_async(http, batch).await?;
+        let raw = async {
+            let list = batch.as_str();
+            let response = http
+                .get(tencent_realtime_url(list))
+                .header("Accept", "*/*")
+                .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+                .header("Connection", "keep-alive")
+                .header("Referer", "https://gu.qq.com")
+                .header("User-Agent", "Mozilla/5.0")
+                .send()
+                .await
+                .map_err(|e| format!("请求腾讯失败: {e}"))?
+                .error_for_status()
+                .map_err(|e| format!("腾讯实时行情返回HTTP错误: {e}"))?;
+
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|e| format!("读取腾讯响应字节失败: {e}"))?;
+
+            let (text, _, had_err) = GBK.decode(&bytes);
+            if had_err {
+                return Err("腾讯响应按GBK解码时出现乱码".to_string());
+            }
+            Ok(text.into_owned())
+        }
+        .await?;
         let quotes = parse_tencent_quote_text(&raw)?;
         all_quotes.extend(quotes);
     }

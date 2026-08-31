@@ -4,11 +4,6 @@ use std::env;
 use duckdb::{Connection, params};
 use lianghua_data::data::{result_db_path, source_db_path};
 
-const DEFAULT_LOOKBACK_DAYS: usize = 500;
-const DEFAULT_TOP_K: usize = 20;
-const DEFAULT_HOLDING_DAYS: usize = 5;
-const DEFAULT_TRAIN_RATIO: f64 = 0.7;
-const DEFAULT_INDEX: &str = "399300.SZ";
 const STOCK_ADJ_TYPE: &str = "qfq";
 const WINDOWS: [usize; 8] = [1, 2, 3, 5, 10, 15, 20, 30];
 const DECAYS: [f64; 5] = [0.25, 0.5, 0.7, 0.85, 1.0];
@@ -119,57 +114,6 @@ fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-fn load_score_dates(conn: &Connection, lookback_days: usize) -> Result<Vec<String>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT DISTINCT trade_date
-             FROM score_summary
-             WHERE total_score IS NOT NULL
-             ORDER BY trade_date DESC
-             LIMIT ?",
-        )
-        .map_err(|e| format!("预编译评分日期查询失败: {e}"))?;
-    let rows = stmt
-        .query_map(params![lookback_days as i64], |row| row.get::<_, String>(0))
-        .map_err(|e| format!("查询评分日期失败: {e}"))?;
-    let mut dates = rows
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("读取评分日期失败: {e}"))?;
-    dates.reverse();
-    Ok(dates)
-}
-
-fn resolve_extended_start(
-    conn: &Connection,
-    start_date: &str,
-    history_days: usize,
-) -> Result<String, String> {
-    if history_days == 0 {
-        return Ok(start_date.to_string());
-    }
-    let mut stmt = conn
-        .prepare(
-            "SELECT DISTINCT trade_date
-             FROM score_summary
-             WHERE trade_date < ? AND total_score IS NOT NULL
-             ORDER BY trade_date DESC
-             LIMIT ?",
-        )
-        .map_err(|e| format!("预编译卷积预热日期查询失败: {e}"))?;
-    let rows = stmt
-        .query_map(params![start_date, history_days as i64], |row| {
-            row.get::<_, String>(0)
-        })
-        .map_err(|e| format!("查询卷积预热日期失败: {e}"))?;
-    let dates = rows
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("读取卷积预热日期失败: {e}"))?;
-    Ok(dates
-        .last()
-        .cloned()
-        .unwrap_or_else(|| start_date.to_string()))
-}
-
 struct BaseTableInput<'a> {
     source_db: &'a str,
     start_date: &'a str,
@@ -178,179 +122,6 @@ struct BaseTableInput<'a> {
     holding_days: usize,
     index_ts_code: &'a str,
     max_window: usize,
-}
-
-fn build_backtest_base(conn: &Connection, input: &BaseTableInput<'_>) -> Result<usize, String> {
-    let attach_sql = format!(
-        "ATTACH {} AS market_db (READ_ONLY)",
-        sql_string_literal(input.source_db)
-    );
-    conn.execute(&attach_sql, [])
-        .map_err(|e| format!("挂载行情数据库失败: {e}"))?;
-
-    let lag_columns = (1..input.max_window)
-        .map(|lag| {
-            format!(
-                "LAG(TRY_CAST(total_score AS DOUBLE), {lag}) OVER \
-                 (PARTITION BY ts_code ORDER BY trade_date) AS score_{lag}"
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",\n                ");
-    let lag_columns = if lag_columns.is_empty() {
-        String::new()
-    } else {
-        format!(",\n                {lag_columns}")
-    };
-    let sql = format!(
-        r#"
-        CREATE TEMP TABLE convolution_backtest_base AS
-        WITH score_lags AS (
-            SELECT
-                ts_code,
-                trade_date,
-                TRY_CAST(total_score AS DOUBLE) AS score_0
-                {lag_columns}
-            FROM score_summary
-            WHERE trade_date >= {extended_start}
-              AND trade_date <= {end_date}
-              AND TRY_CAST(total_score AS DOUBLE) IS NOT NULL
-        ),
-        stock_window AS (
-            SELECT
-                ts_code,
-                trade_date,
-                SUM(TRY_CAST(pct_chg AS DOUBLE)) OVER (
-                    PARTITION BY ts_code
-                    ORDER BY trade_date
-                    ROWS BETWEEN 1 FOLLOWING AND {holding_days} FOLLOWING
-                ) AS forward_stock_return,
-                COUNT(TRY_CAST(pct_chg AS DOUBLE)) OVER (
-                    PARTITION BY ts_code
-                    ORDER BY trade_date
-                    ROWS BETWEEN 1 FOLLOWING AND {holding_days} FOLLOWING
-                ) AS forward_count
-            FROM market_db.stock_data
-            WHERE adj_type = {stock_adj_type}
-              AND trade_date >= {start_date}
-        ),
-        index_window AS (
-            SELECT
-                trade_date,
-                SUM(TRY_CAST(pct_chg AS DOUBLE)) OVER (
-                    ORDER BY trade_date
-                    ROWS BETWEEN 1 FOLLOWING AND {holding_days} FOLLOWING
-                ) AS forward_index_return,
-                COUNT(TRY_CAST(pct_chg AS DOUBLE)) OVER (
-                    ORDER BY trade_date
-                    ROWS BETWEEN 1 FOLLOWING AND {holding_days} FOLLOWING
-                ) AS forward_count
-            FROM market_db.stock_data
-            WHERE adj_type = 'ind'
-              AND ts_code = {index_ts_code}
-              AND trade_date >= {start_date}
-        )
-        SELECT
-            scores.*,
-            stock.forward_stock_return - idx.forward_index_return AS forward_residual_return
-        FROM score_lags scores
-        JOIN stock_window stock
-          ON stock.ts_code = scores.ts_code
-         AND stock.trade_date = scores.trade_date
-        JOIN index_window idx
-          ON idx.trade_date = scores.trade_date
-        WHERE scores.trade_date >= {start_date}
-          AND scores.trade_date <= {end_date}
-          AND stock.forward_count = {holding_days}
-          AND idx.forward_count = {holding_days}
-        "#,
-        lag_columns = lag_columns,
-        extended_start = sql_string_literal(input.extended_start),
-        start_date = sql_string_literal(input.start_date),
-        end_date = sql_string_literal(input.end_date),
-        holding_days = input.holding_days,
-        stock_adj_type = sql_string_literal(STOCK_ADJ_TYPE),
-        index_ts_code = sql_string_literal(input.index_ts_code),
-    );
-    conn.execute(&sql, [])
-        .map_err(|e| format!("构建卷积回测样本失败: {e}"))?;
-    let sample_count = conn
-        .query_row(
-            "SELECT COUNT(*) FROM convolution_backtest_base",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|count| count.max(0) as usize)
-        .map_err(|e| format!("统计卷积回测样本失败: {e}"))?;
-    if sample_count > 0 {
-        return Ok(sample_count);
-    }
-
-    let score_count = conn
-        .query_row(
-            &format!(
-                "SELECT COUNT(*) FROM score_summary WHERE trade_date >= {} AND trade_date <= {}",
-                sql_string_literal(input.start_date),
-                sql_string_literal(input.end_date)
-            ),
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or_default();
-    let stock_count = conn
-        .query_row(
-            &format!(
-                "SELECT COUNT(*) FROM market_db.stock_data WHERE adj_type = {} AND trade_date >= {}",
-                sql_string_literal(STOCK_ADJ_TYPE),
-                sql_string_literal(input.start_date)
-            ),
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or_default();
-    let index_count = conn
-        .query_row(
-            &format!(
-                "SELECT COUNT(*) FROM market_db.stock_data WHERE adj_type = 'ind' AND ts_code = {} AND trade_date >= {}",
-                sql_string_literal(input.index_ts_code),
-                sql_string_literal(input.start_date)
-            ),
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or_default();
-    let index_adj_types = conn
-        .query_row(
-            &format!(
-                "SELECT COALESCE(string_agg(DISTINCT adj_type, ','), '-') FROM market_db.stock_data WHERE ts_code = {}",
-                sql_string_literal(input.index_ts_code)
-            ),
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .unwrap_or_else(|_| "-".to_string());
-    let available_indexes = conn
-        .query_row(
-            "SELECT COALESCE(string_agg(ts_code, ','), '-') FROM (SELECT DISTINCT ts_code FROM market_db.stock_data WHERE adj_type = 'ind' ORDER BY ts_code LIMIT 20)",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .unwrap_or_else(|_| "-".to_string());
-    let joined_count = conn
-        .query_row(
-            &format!(
-                "SELECT COUNT(*) FROM score_summary scores JOIN market_db.stock_data market ON market.ts_code = scores.ts_code AND market.trade_date = scores.trade_date WHERE scores.trade_date >= {} AND scores.trade_date <= {} AND market.adj_type = {}",
-                sql_string_literal(input.start_date),
-                sql_string_literal(input.end_date),
-                sql_string_literal(STOCK_ADJ_TYPE)
-            ),
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or_default();
-    Err(format!(
-        "卷积回测样本为空: score_rows={score_count}, qfq_market_rows={stock_count}, index_rows={index_count}, index_adj_types={index_adj_types}, available_indexes={available_indexes}, score_market_join={joined_count}"
-    ))
 }
 
 fn load_candidate_daily_returns(
@@ -466,42 +237,10 @@ fn summarize(points: &[&DailyReturn], holding_days: usize) -> PeriodMetrics {
     }
 }
 
-fn paired_differences(candidate: &[DailyReturn], baseline: &[DailyReturn]) -> Vec<DailyReturn> {
-    let baseline_by_date = baseline
-        .iter()
-        .map(|point| (point.trade_date.as_str(), point.residual_return))
-        .collect::<std::collections::HashMap<_, _>>();
-    candidate
-        .iter()
-        .filter_map(|point| {
-            baseline_by_date
-                .get(point.trade_date.as_str())
-                .map(|baseline_return| DailyReturn {
-                    trade_date: point.trade_date.clone(),
-                    residual_return: point.residual_return - baseline_return,
-                })
-        })
-        .collect()
-}
-
 fn metric_or_min(value: Option<f64>) -> f64 {
     value
         .filter(|value| value.is_finite())
         .unwrap_or(f64::NEG_INFINITY)
-}
-
-fn compare_evaluations(left: &CandidateEvaluation, right: &CandidateEvaluation) -> Ordering {
-    metric_or_min(right.train_delta.hac_t)
-        .total_cmp(&metric_or_min(left.train_delta.hac_t))
-        .then_with(|| {
-            metric_or_min(right.train_delta.mean).total_cmp(&metric_or_min(left.train_delta.mean))
-        })
-        .then_with(|| {
-            metric_or_min(right.train_delta.median)
-                .total_cmp(&metric_or_min(left.train_delta.median))
-        })
-        .then_with(|| left.candidate.window.cmp(&right.candidate.window))
-        .then_with(|| left.candidate.decay.total_cmp(&right.candidate.decay))
 }
 
 fn format_metric(value: Option<f64>, precision: usize) -> String {
@@ -518,11 +257,11 @@ fn main() -> Result<(), String> {
     }
 
     let source_dir = &args[0];
-    let lookback_days = parse_arg(&args, 1, DEFAULT_LOOKBACK_DAYS, "回看交易日数")?;
-    let top_k = parse_arg(&args, 2, DEFAULT_TOP_K, "Top-K")?;
-    let holding_days = parse_arg(&args, 3, DEFAULT_HOLDING_DAYS, "持有交易日数")?;
-    let train_ratio = parse_arg(&args, 4, DEFAULT_TRAIN_RATIO, "训练集比例")?;
-    let index_ts_code = args.get(5).map(String::as_str).unwrap_or(DEFAULT_INDEX);
+    let lookback_days = parse_arg(&args, 1, 500, "回看交易日数")?;
+    let top_k = parse_arg(&args, 2, 20, "Top-K")?;
+    let holding_days = parse_arg(&args, 3, 5, "持有交易日数")?;
+    let train_ratio = parse_arg(&args, 4, 0.7, "训练集比例")?;
+    let index_ts_code = args.get(5).map(String::as_str).unwrap_or("399300.SZ");
     if lookback_days < 60 || top_k == 0 || holding_days == 0 {
         return Err("lookback_days必须>=60，top_k和holding_days必须>=1".to_string());
     }
@@ -541,7 +280,25 @@ fn main() -> Result<(), String> {
     }
     let conn = Connection::open(&result_db)
         .map_err(|e| format!("打开评分数据库失败: {}, err={e}", result_db.display()))?;
-    let dates = load_score_dates(&conn, lookback_days)?;
+    let dates = (|conn: &Connection, lookback_days: usize| -> Result<Vec<String>, String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT trade_date
+             FROM score_summary
+             WHERE total_score IS NOT NULL
+             ORDER BY trade_date DESC
+             LIMIT ?",
+            )
+            .map_err(|e| format!("预编译评分日期查询失败: {e}"))?;
+        let rows = stmt
+            .query_map(params![lookback_days as i64], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("查询评分日期失败: {e}"))?;
+        let mut dates = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("读取评分日期失败: {e}"))?;
+        dates.reverse();
+        Ok(dates)
+    })(&conn, lookback_days)?;
     if dates.len() < 60 {
         return Err(format!("评分交易日不足60日，实际只有{}日", dates.len()));
     }
@@ -555,13 +312,212 @@ fn main() -> Result<(), String> {
     let train_end = &dates[train_end_index];
     let validation_start = &dates[split_index];
     let max_window = *WINDOWS.iter().max().expect("非空窗口集合");
-    let extended_start = resolve_extended_start(&conn, start_date, max_window - 1)?;
+    let extended_start =
+        (|conn: &Connection, start_date: &str, history_days: usize| -> Result<String, String> {
+            if history_days == 0 {
+                return Ok(start_date.to_string());
+            }
+            let mut stmt = conn
+                .prepare(
+                    "SELECT DISTINCT trade_date
+             FROM score_summary
+             WHERE trade_date < ? AND total_score IS NOT NULL
+             ORDER BY trade_date DESC
+             LIMIT ?",
+                )
+                .map_err(|e| format!("预编译卷积预热日期查询失败: {e}"))?;
+            let rows = stmt
+                .query_map(params![start_date, history_days as i64], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|e| format!("查询卷积预热日期失败: {e}"))?;
+            let dates = rows
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("读取卷积预热日期失败: {e}"))?;
+            Ok(dates
+                .last()
+                .cloned()
+                .unwrap_or_else(|| start_date.to_string()))
+        })(&conn, start_date, max_window - 1)?;
     let source_db_str = source_db
         .to_str()
         .ok_or_else(|| "行情数据库路径不是有效UTF-8".to_string())?;
 
     println!("正在构建回测样本……");
-    let sample_count = build_backtest_base(
+    let sample_count = (|conn: &Connection,
+                         input: &BaseTableInput<'_>|
+     -> Result<usize, String> {
+        let attach_sql = format!(
+            "ATTACH {} AS market_db (READ_ONLY)",
+            sql_string_literal(input.source_db)
+        );
+        conn.execute(&attach_sql, [])
+            .map_err(|e| format!("挂载行情数据库失败: {e}"))?;
+
+        let lag_columns = (1..input.max_window)
+            .map(|lag| {
+                format!(
+                    "LAG(TRY_CAST(total_score AS DOUBLE), {lag}) OVER \
+                 (PARTITION BY ts_code ORDER BY trade_date) AS score_{lag}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n                ");
+        let lag_columns = if lag_columns.is_empty() {
+            String::new()
+        } else {
+            format!(",\n                {lag_columns}")
+        };
+        let sql = format!(
+            r#"
+        CREATE TEMP TABLE convolution_backtest_base AS
+        WITH score_lags AS (
+            SELECT
+                ts_code,
+                trade_date,
+                TRY_CAST(total_score AS DOUBLE) AS score_0
+                {lag_columns}
+            FROM score_summary
+            WHERE trade_date >= {extended_start}
+              AND trade_date <= {end_date}
+              AND TRY_CAST(total_score AS DOUBLE) IS NOT NULL
+        ),
+        stock_window AS (
+            SELECT
+                ts_code,
+                trade_date,
+                SUM(TRY_CAST(pct_chg AS DOUBLE)) OVER (
+                    PARTITION BY ts_code
+                    ORDER BY trade_date
+                    ROWS BETWEEN 1 FOLLOWING AND {holding_days} FOLLOWING
+                ) AS forward_stock_return,
+                COUNT(TRY_CAST(pct_chg AS DOUBLE)) OVER (
+                    PARTITION BY ts_code
+                    ORDER BY trade_date
+                    ROWS BETWEEN 1 FOLLOWING AND {holding_days} FOLLOWING
+                ) AS forward_count
+            FROM market_db.stock_data
+            WHERE adj_type = {stock_adj_type}
+              AND trade_date >= {start_date}
+        ),
+        index_window AS (
+            SELECT
+                trade_date,
+                SUM(TRY_CAST(pct_chg AS DOUBLE)) OVER (
+                    ORDER BY trade_date
+                    ROWS BETWEEN 1 FOLLOWING AND {holding_days} FOLLOWING
+                ) AS forward_index_return,
+                COUNT(TRY_CAST(pct_chg AS DOUBLE)) OVER (
+                    ORDER BY trade_date
+                    ROWS BETWEEN 1 FOLLOWING AND {holding_days} FOLLOWING
+                ) AS forward_count
+            FROM market_db.stock_data
+            WHERE adj_type = 'ind'
+              AND ts_code = {index_ts_code}
+              AND trade_date >= {start_date}
+        )
+        SELECT
+            scores.*,
+            stock.forward_stock_return - idx.forward_index_return AS forward_residual_return
+        FROM score_lags scores
+        JOIN stock_window stock
+          ON stock.ts_code = scores.ts_code
+         AND stock.trade_date = scores.trade_date
+        JOIN index_window idx
+          ON idx.trade_date = scores.trade_date
+        WHERE scores.trade_date >= {start_date}
+          AND scores.trade_date <= {end_date}
+          AND stock.forward_count = {holding_days}
+          AND idx.forward_count = {holding_days}
+        "#,
+            lag_columns = lag_columns,
+            extended_start = sql_string_literal(input.extended_start),
+            start_date = sql_string_literal(input.start_date),
+            end_date = sql_string_literal(input.end_date),
+            holding_days = input.holding_days,
+            stock_adj_type = sql_string_literal(STOCK_ADJ_TYPE),
+            index_ts_code = sql_string_literal(input.index_ts_code),
+        );
+        conn.execute(&sql, [])
+            .map_err(|e| format!("构建卷积回测样本失败: {e}"))?;
+        let sample_count = conn
+            .query_row(
+                "SELECT COUNT(*) FROM convolution_backtest_base",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count.max(0) as usize)
+            .map_err(|e| format!("统计卷积回测样本失败: {e}"))?;
+        if sample_count > 0 {
+            return Ok(sample_count);
+        }
+
+        let score_count = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM score_summary WHERE trade_date >= {} AND trade_date <= {}",
+                sql_string_literal(input.start_date),
+                sql_string_literal(input.end_date)
+            ),
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or_default();
+        let stock_count = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM market_db.stock_data WHERE adj_type = {} AND trade_date >= {}",
+                sql_string_literal(STOCK_ADJ_TYPE),
+                sql_string_literal(input.start_date)
+            ),
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or_default();
+        let index_count = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM market_db.stock_data WHERE adj_type = 'ind' AND ts_code = {} AND trade_date >= {}",
+                sql_string_literal(input.index_ts_code),
+                sql_string_literal(input.start_date)
+            ),
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or_default();
+        let index_adj_types = conn
+        .query_row(
+            &format!(
+                "SELECT COALESCE(string_agg(DISTINCT adj_type, ','), '-') FROM market_db.stock_data WHERE ts_code = {}",
+                sql_string_literal(input.index_ts_code)
+            ),
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "-".to_string());
+        let available_indexes = conn
+        .query_row(
+            "SELECT COALESCE(string_agg(ts_code, ','), '-') FROM (SELECT DISTINCT ts_code FROM market_db.stock_data WHERE adj_type = 'ind' ORDER BY ts_code LIMIT 20)",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "-".to_string());
+        let joined_count = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM score_summary scores JOIN market_db.stock_data market ON market.ts_code = scores.ts_code AND market.trade_date = scores.trade_date WHERE scores.trade_date >= {} AND scores.trade_date <= {} AND market.adj_type = {}",
+                sql_string_literal(input.start_date),
+                sql_string_literal(input.end_date),
+                sql_string_literal(STOCK_ADJ_TYPE)
+            ),
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or_default();
+        Err(format!(
+            "卷积回测样本为空: score_rows={score_count}, qfq_market_rows={stock_count}, index_rows={index_count}, index_adj_types={index_adj_types}, available_indexes={available_indexes}, score_market_join={joined_count}"
+        ))
+    })(
         &conn,
         &BaseTableInput {
             source_db: source_db_str,
@@ -592,7 +548,23 @@ fn main() -> Result<(), String> {
         } else {
             load_candidate_daily_returns(&conn, &candidate, top_k)?
         };
-        let deltas = paired_differences(&daily, &baseline_daily);
+        let deltas = (|candidate: &[DailyReturn], baseline: &[DailyReturn]| -> Vec<DailyReturn> {
+            let baseline_by_date = baseline
+                .iter()
+                .map(|point| (point.trade_date.as_str(), point.residual_return))
+                .collect::<std::collections::HashMap<_, _>>();
+            candidate
+                .iter()
+                .filter_map(|point| {
+                    baseline_by_date
+                        .get(point.trade_date.as_str())
+                        .map(|baseline_return| DailyReturn {
+                            trade_date: point.trade_date.clone(),
+                            residual_return: point.residual_return - baseline_return,
+                        })
+                })
+                .collect()
+        })(&daily, &baseline_daily);
         let train_points = daily
             .iter()
             .filter(|point| point.trade_date.as_str() <= train_end.as_str())
@@ -624,7 +596,22 @@ fn main() -> Result<(), String> {
             validation_delta,
         });
     }
-    evaluations.sort_by(compare_evaluations);
+    evaluations.sort_by(
+        |left: &CandidateEvaluation, right: &CandidateEvaluation| -> Ordering {
+            metric_or_min(right.train_delta.hac_t)
+                .total_cmp(&metric_or_min(left.train_delta.hac_t))
+                .then_with(|| {
+                    metric_or_min(right.train_delta.mean)
+                        .total_cmp(&metric_or_min(left.train_delta.mean))
+                })
+                .then_with(|| {
+                    metric_or_min(right.train_delta.median)
+                        .total_cmp(&metric_or_min(left.train_delta.median))
+                })
+                .then_with(|| left.candidate.window.cmp(&right.candidate.window))
+                .then_with(|| left.candidate.decay.total_cmp(&right.candidate.decay))
+        },
+    );
 
     println!("\n训练集排序（选择只看 train，validation 为样本外验证）:");
     println!(

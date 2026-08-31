@@ -75,29 +75,6 @@ fn build_stock_data_create_sql(table_name: &str, indicator_columns: &[String]) -
     )
 }
 
-fn validate_indicator_series(
-    rows: &[ProBarRow],
-    indicators: &HashMap<String, Vec<Option<f64>>>,
-) -> Result<Vec<String>, String> {
-    let mut indicator_names = indicators.keys().cloned().collect::<Vec<_>>();
-    indicator_names.sort();
-
-    for name in &indicator_names {
-        let Some(series) = indicators.get(name) else {
-            return Err(format!("缺少指标{name}的数据"));
-        };
-        if series.len() != rows.len() {
-            return Err(format!(
-                "指标{name}长度与行情行数不一致: {} != {}",
-                series.len(),
-                rows.len()
-            ));
-        }
-    }
-
-    Ok(indicator_names)
-}
-
 fn load_table_columns(conn: &Connection, table_name: &str) -> Result<Vec<String>, String> {
     let mut stmt = conn
         .prepare(&format!("DESCRIBE {table_name}"))
@@ -152,7 +129,29 @@ fn append_rows_to_table(
     }
 
     let indicator_names = match indicators {
-        Some(indicators) if !indicators.is_empty() => validate_indicator_series(rows, indicators)?,
+        Some(indicators) if !indicators.is_empty() => {
+            (|rows: &[ProBarRow],
+              indicators: &HashMap<String, Vec<Option<f64>>>|
+             -> Result<Vec<String>, String> {
+                let mut indicator_names = indicators.keys().cloned().collect::<Vec<_>>();
+                indicator_names.sort();
+
+                for name in &indicator_names {
+                    let Some(series) = indicators.get(name) else {
+                        return Err(format!("缺少指标{name}的数据"));
+                    };
+                    if series.len() != rows.len() {
+                        return Err(format!(
+                            "指标{name}长度与行情行数不一致: {} != {}",
+                            series.len(),
+                            rows.len()
+                        ));
+                    }
+                }
+
+                Ok(indicator_names)
+            })(rows, indicators)?
+        }
         _ => Vec::new(),
     };
     let adj_type = adj_type_name(adj_type);
@@ -799,38 +798,36 @@ pub fn write_trade_calendar_csv(source_dir: &str, rows: &[TradeCalRow]) -> Resul
     Ok(())
 }
 
-fn write_ths_concepts_csv_by_path(path: &Path, rows: &[ThsConceptRow]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            create_dir_all(parent).map_err(|e| format!("创建概念目录失败:{e}"))?;
-        }
-    }
-
-    let mut writer = csv::Writer::from_path(path)
-        .map_err(|e| format!("创建概念CSV失败:路径:{:?},错误:{e}", path))?;
-
-    writer
-        .write_record(["ts_code", "name", "concept"])
-        .map_err(|e| format!("写入概念CSV表头失败:{e}"))?;
-
-    for row in rows {
-        writer
-            .write_record([
-                row.ts_code.as_str(),
-                row.name.as_str(),
-                row.concept.as_str(),
-            ])
-            .map_err(|e| format!("写入概念CSV失败, ts_code={}: {e}", row.ts_code))?;
-    }
-
-    writer.flush().map_err(|e| format!("刷新概念CSV失败:{e}"))?;
-
-    Ok(())
-}
-
 pub fn write_ths_concepts_csv(source_dir: &str, rows: &[ThsConceptRow]) -> Result<(), String> {
     let path = ths_concepts_path(source_dir);
-    write_ths_concepts_csv_by_path(&path, rows)
+    (|path: &Path, rows: &[ThsConceptRow]| -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                create_dir_all(parent).map_err(|e| format!("创建概念目录失败:{e}"))?;
+            }
+        }
+
+        let mut writer = csv::Writer::from_path(path)
+            .map_err(|e| format!("创建概念CSV失败:路径:{:?},错误:{e}", path))?;
+
+        writer
+            .write_record(["ts_code", "name", "concept"])
+            .map_err(|e| format!("写入概念CSV表头失败:{e}"))?;
+
+        for row in rows {
+            writer
+                .write_record([
+                    row.ts_code.as_str(),
+                    row.name.as_str(),
+                    row.concept.as_str(),
+                ])
+                .map_err(|e| format!("写入概念CSV失败, ts_code={}: {e}", row.ts_code))?;
+        }
+
+        writer.flush().map_err(|e| format!("刷新概念CSV失败:{e}"))?;
+
+        Ok(())
+    })(&path, rows)
 }
 
 pub struct LatestCloseRow {

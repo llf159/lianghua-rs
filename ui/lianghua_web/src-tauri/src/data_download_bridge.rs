@@ -34,8 +34,6 @@ use lianghua_download::download::runner::DownloadProgress as CoreDownloadProgres
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
-const DATA_DOWNLOAD_EVENT: &str = "data-download-status";
-
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DataDownloadRequest {
@@ -133,7 +131,7 @@ struct DataDownloadEventPayload {
 }
 
 fn emit_data_download_event(app: &tauri::AppHandle, payload: DataDownloadEventPayload) {
-    if let Err(emit_error) = app.emit(DATA_DOWNLOAD_EVENT, payload) {
+    if let Err(emit_error) = app.emit("data-download-status", payload) {
         log::warn!("failed to emit data download event: {}", emit_error);
     }
 }

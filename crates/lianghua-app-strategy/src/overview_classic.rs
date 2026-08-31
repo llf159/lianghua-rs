@@ -163,15 +163,6 @@ fn quote_sql_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-fn selected_ts_codes_cte(ts_codes: &[String]) -> String {
-    let values = ts_codes
-        .iter()
-        .map(|ts_code| format!("({})", quote_sql_string(ts_code)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("selected_ts_codes(ts_code) AS (VALUES {values})")
-}
-
 fn query_post_rank_return_pct_map(
     source_conn: &Connection,
     trade_date: &str,
@@ -181,7 +172,14 @@ fn query_post_rank_return_pct_map(
         return Ok(HashMap::new());
     }
 
-    let selected_cte = selected_ts_codes_cte(ts_codes);
+    let selected_cte = (|ts_codes: &[String]| -> String {
+        let values = ts_codes
+            .iter()
+            .map(|ts_code| format!("({})", quote_sql_string(ts_code)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("selected_ts_codes(ts_code) AS (VALUES {values})")
+    })(ts_codes);
     let sql = format!(
         r#"
         WITH
@@ -424,10 +422,12 @@ pub fn get_rank_overview_page(
 mod tests {
     use super::*;
 
-    fn build_result_conn() -> Connection {
-        let conn = Connection::open_in_memory().expect("in-memory result db should open");
-        conn.execute_batch(
-            r#"
+    #[test]
+    fn overview_page_batch_queries_return_supplement_fields() {
+        let result_conn = (|| -> Connection {
+            let conn = Connection::open_in_memory().expect("in-memory result db should open");
+            conn.execute_batch(
+                r#"
             CREATE TABLE score_summary (
                 ts_code TEXT,
                 trade_date TEXT,
@@ -440,15 +440,14 @@ mod tests {
                 ('000001.SZ', '20240101', 70.0, 4),
                 ('000002.SZ', '20240101', 60.0, 8);
             "#,
-        )
-        .expect("result fixture should be created");
-        conn
-    }
-
-    fn build_source_conn() -> Connection {
-        let conn = Connection::open_in_memory().expect("in-memory source db should open");
-        conn.execute_batch(
-            r#"
+            )
+            .expect("result fixture should be created");
+            conn
+        })();
+        let source_conn = (|| -> Connection {
+            let conn = Connection::open_in_memory().expect("in-memory source db should open");
+            conn.execute_batch(
+                r#"
             CREATE TABLE stock_data (
                 ts_code TEXT,
                 trade_date TEXT,
@@ -465,15 +464,10 @@ mod tests {
                 ('000002.SZ', '20240104', 'qfq', 0.0, 8.0, 23.0),
                 ('000001.SZ', '20240105', 'hfq', 200.0, 240.0, 350.0);
             "#,
-        )
-        .expect("source fixture should be created");
-        conn
-    }
-
-    #[test]
-    fn overview_page_batch_queries_return_supplement_fields() {
-        let result_conn = build_result_conn();
-        let source_conn = build_source_conn();
+            )
+            .expect("source fixture should be created");
+            conn
+        })();
 
         let rank_map = query_rank_map(&result_conn, "20240101").expect("rank map");
         assert_eq!(rank_map.get("000001.SZ").copied().flatten(), Some(4));

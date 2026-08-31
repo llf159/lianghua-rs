@@ -92,39 +92,36 @@ pub fn load_synced_dragon_tiger_trade_dates(conn: &Connection) -> Result<HashSet
     Ok(dates)
 }
 
-fn validate_trade_dates(
-    trade_date: &str,
-    top_list_rows: &[TopListRow],
-    top_inst_rows: &[TopInstRow],
-) -> Result<(), String> {
-    if let Some(row) = top_list_rows
-        .iter()
-        .find(|row| row.trade_date != trade_date)
-    {
-        return Err(format!(
-            "top_list 交易日期不匹配: 请求 {trade_date}，返回 {} / {}",
-            row.ts_code, row.trade_date
-        ));
-    }
-    if let Some(row) = top_inst_rows
-        .iter()
-        .find(|row| row.trade_date != trade_date)
-    {
-        return Err(format!(
-            "top_inst 交易日期不匹配: 请求 {trade_date}，返回 {} / {}",
-            row.ts_code, row.trade_date
-        ));
-    }
-    Ok(())
-}
-
 pub fn replace_dragon_tiger_trade_date(
     conn: &mut Connection,
     trade_date: &str,
     top_list_rows: &[TopListRow],
     top_inst_rows: &[TopInstRow],
 ) -> Result<(), String> {
-    validate_trade_dates(trade_date, top_list_rows, top_inst_rows)?;
+    (|trade_date: &str,
+      top_list_rows: &[TopListRow],
+      top_inst_rows: &[TopInstRow]|
+     -> Result<(), String> {
+        if let Some(row) = top_list_rows
+            .iter()
+            .find(|row| row.trade_date != trade_date)
+        {
+            return Err(format!(
+                "top_list 交易日期不匹配: 请求 {trade_date}，返回 {} / {}",
+                row.ts_code, row.trade_date
+            ));
+        }
+        if let Some(row) = top_inst_rows
+            .iter()
+            .find(|row| row.trade_date != trade_date)
+        {
+            return Err(format!(
+                "top_inst 交易日期不匹配: 请求 {trade_date}，返回 {} / {}",
+                row.ts_code, row.trade_date
+            ));
+        }
+        Ok(())
+    })(trade_date, top_list_rows, top_inst_rows)?;
     let tx = conn
         .transaction()
         .map_err(|error| format!("创建龙虎榜写入事务失败: {error}"))?;

@@ -21,33 +21,7 @@ use crate::{
     utils::utils::round_f64_to_scale,
 };
 
-const DEFAULT_WARMUP_DAYS: usize = 120;
-const DEFAULT_BUCKET_PCT: f64 = 1.0;
 const EPS: f64 = 1e-10;
-const CHEN_CHIP_ALWAYS_RUNTIME_KEYS: [&str; 5] = ["O", "H", "L", "C", "TOR"];
-const CHEN_CHIP_INJECTED_RUNTIME_KEYS: [&str; 9] = [
-    "RATEO",
-    "RATEH",
-    "RATEL",
-    "RATEC",
-    "MAIN_CHIP_RATIO",
-    "MAIN_CHIP_TOTAL",
-    "RETAIL_CHIP_TOTAL",
-    "ZHANG",
-    "TOTAL_MV_YI",
-];
-const CHEN_CHIP_SELL_DYNAMIC_RUNTIME_KEYS: [&str; 7] = [
-    "RATEO",
-    "RATEH",
-    "RATEL",
-    "RATEC",
-    "MAIN_CHIP_RATIO",
-    "MAIN_CHIP_TOTAL",
-    "RETAIL_CHIP_TOTAL",
-];
-const CHEN_CHIP_BUY_DYNAMIC_RUNTIME_KEYS: [&str; 3] =
-    ["MAIN_CHIP_RATIO", "MAIN_CHIP_TOTAL", "RETAIL_CHIP_TOTAL"];
-const CHEN_CHIP_BUCKET_RATE_KEYS: [&str; 4] = ["RATEO", "RATEH", "RATEL", "RATEC"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChipChangeConfig {
@@ -115,8 +89,8 @@ pub struct ChenChipConfig {
 impl Default for ChenChipConfig {
     fn default() -> Self {
         Self {
-            warmup_days: DEFAULT_WARMUP_DAYS,
-            bucket_pct: DEFAULT_BUCKET_PCT,
+            warmup_days: (120),
+            bucket_pct: (1.0),
         }
     }
 }
@@ -194,7 +168,14 @@ pub fn round_chen_chip_snapshot(snapshot: &mut ChenChipSnapshot) {
     round_chen_chip_percent_range(&mut snapshot.percent_70);
     round_chen_chip_percent_range(&mut snapshot.percent_90);
     for bin in &mut snapshot.bins {
-        round_chen_chip_bin(bin);
+        (|bin: &mut ChenChipBin| {
+            bin.price = round_chen_chip_value(bin.price);
+            bin.price_low = round_chen_chip_value(bin.price_low);
+            bin.price_high = round_chen_chip_value(bin.price_high);
+            bin.main_chip = round_chen_chip_value(bin.main_chip);
+            bin.retail_chip = round_chen_chip_value(bin.retail_chip);
+            bin.total_chip = round_chen_chip_value(bin.total_chip);
+        })(bin);
     }
 }
 
@@ -203,15 +184,6 @@ fn round_chen_chip_percent_range(range: &mut ChenChipPercentRange) {
     range.price_low = round_chen_chip_value(range.price_low);
     range.price_high = round_chen_chip_value(range.price_high);
     range.concentration = round_chen_chip_value(range.concentration);
-}
-
-fn round_chen_chip_bin(bin: &mut ChenChipBin) {
-    bin.price = round_chen_chip_value(bin.price);
-    bin.price_low = round_chen_chip_value(bin.price_low);
-    bin.price_high = round_chen_chip_value(bin.price_high);
-    bin.main_chip = round_chen_chip_value(bin.main_chip);
-    bin.retail_chip = round_chen_chip_value(bin.retail_chip);
-    bin.total_chip = round_chen_chip_value(bin.total_chip);
 }
 
 #[derive(Debug, Clone)]
@@ -271,7 +243,75 @@ impl ChipChangeConfig {
             let when_ast = parse_strategy_expression(&strategy.when, n, &strategy.name)?;
             let direction = strategy.direction;
             let (optimized_when_ast, cached_exprs) =
-                optimize_strategy_program(&when_ast, direction, index);
+                (|program: &Stmts,
+                  direction: ChipDirection,
+                  strategy_index: usize|
+                 -> (Stmts, Vec<CompiledChipCachedExpr>) {
+                    let dynamic_runtime_keys = match direction {
+                        ChipDirection::Buy => {
+                            (["MAIN_CHIP_RATIO", "MAIN_CHIP_TOTAL", "RETAIL_CHIP_TOTAL"]).as_slice()
+                        }
+                        ChipDirection::Sell => ([
+                            "RATEO",
+                            "RATEH",
+                            "RATEL",
+                            "RATEC",
+                            "MAIN_CHIP_RATIO",
+                            "MAIN_CHIP_TOTAL",
+                            "RETAIL_CHIP_TOTAL",
+                        ])
+                        .as_slice(),
+                    };
+                    let mut local_dynamic = HashMap::<String, bool>::new();
+                    let mut static_prefix = Vec::<Stmt>::new();
+                    let mut cached_exprs = Vec::<CompiledChipCachedExpr>::new();
+                    let mut optimized_items = Vec::with_capacity(program.item.len());
+
+                    for stmt in &program.item {
+                        match stmt {
+                            Stmt::Assign { name, value } => {
+                                let is_dynamic = expr_depends_on_dynamic(
+                                    value,
+                                    &local_dynamic,
+                                    dynamic_runtime_keys,
+                                );
+                                let optimized_value = optimize_strategy_expr(
+                                    value,
+                                    &local_dynamic,
+                                    dynamic_runtime_keys,
+                                    &static_prefix,
+                                    strategy_index,
+                                    &mut cached_exprs,
+                                );
+                                optimized_items.push(Stmt::Assign {
+                                    name: name.clone(),
+                                    value: optimized_value,
+                                });
+                                local_dynamic.insert(name.clone(), is_dynamic);
+                                if !is_dynamic {
+                                    static_prefix.push(stmt.clone());
+                                }
+                            }
+                            Stmt::Expr(expr) => {
+                                optimized_items.push(Stmt::Expr(optimize_strategy_expr(
+                                    expr,
+                                    &local_dynamic,
+                                    dynamic_runtime_keys,
+                                    &static_prefix,
+                                    strategy_index,
+                                    &mut cached_exprs,
+                                )));
+                            }
+                        }
+                    }
+
+                    (
+                        Stmts {
+                            item: optimized_items,
+                        },
+                        cached_exprs,
+                    )
+                })(&when_ast, direction, index);
             let assigned_names = collect_assigned_names_from_expr_program(&optimized_when_ast);
             strategies.push(CompiledChipChangeStrategy {
                 name: strategy.name.trim().to_string(),
@@ -288,7 +328,29 @@ impl ChipChangeConfig {
 
         let sell_uses_bucket_rate_series = strategies.iter().any(|strategy| {
             strategy.direction == ChipDirection::Sell
-                && program_depends_on_runtime_keys(&strategy.when_ast, &CHEN_CHIP_BUCKET_RATE_KEYS)
+                && (|program: &Stmts, runtime_keys: &[&str]| -> bool {
+                    let mut local_dynamic = HashMap::<String, bool>::new();
+
+                    for stmt in &program.item {
+                        match stmt {
+                            Stmt::Assign { name, value } => {
+                                let is_dynamic =
+                                    expr_depends_on_dynamic(value, &local_dynamic, runtime_keys);
+                                if is_dynamic {
+                                    return true;
+                                }
+                                local_dynamic.insert(name.clone(), false);
+                            }
+                            Stmt::Expr(expr) => {
+                                if expr_depends_on_dynamic(expr, &local_dynamic, runtime_keys) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+
+                    false
+                })(&strategy.when_ast, &(["RATEO", "RATEH", "RATEL", "RATEC"]))
         });
 
         Ok(CompiledChipChangeConfig {
@@ -352,8 +414,18 @@ pub fn collect_chen_chip_runtime_keys(chip_config: &CompiledChipChangeConfig) ->
     collect_runtime_keys_from_expr_programs(
         &programs,
         RuntimeKeyCollectOptions {
-            always_keys: &CHEN_CHIP_ALWAYS_RUNTIME_KEYS,
-            injected_keys: &CHEN_CHIP_INJECTED_RUNTIME_KEYS,
+            always_keys: &(["O", "H", "L", "C", "TOR"]),
+            injected_keys: &([
+                "RATEO",
+                "RATEH",
+                "RATEL",
+                "RATEC",
+                "MAIN_CHIP_RATIO",
+                "MAIN_CHIP_TOTAL",
+                "RETAIL_CHIP_TOTAL",
+                "ZHANG",
+                "TOTAL_MV_YI",
+            ]),
             aliases: &[],
         },
     )
@@ -416,9 +488,83 @@ pub fn compute_chen_chip_snapshots_with_compiled_config(
         return Ok(Vec::new());
     }
 
-    let initial_range = resolve_initial_range(&bars, output_start_index, config.warmup_days)?;
+    let initial_range = (|bars: &[Option<ChenChipBar>],
+                          output_start_index: usize,
+                          warmup_days: usize|
+     -> Result<(f64, f64), String> {
+        let range_start = output_start_index.saturating_sub(warmup_days);
+        let range_end_exclusive = if warmup_days == 0 {
+            output_start_index + 1
+        } else {
+            output_start_index
+        };
+
+        let mut min_price = f64::INFINITY;
+        let mut max_price = f64::NEG_INFINITY;
+        for bar in &bars[range_start..range_end_exclusive] {
+            let Some(bar) = bar.as_ref() else {
+                return Ok((f64::NAN, f64::NAN));
+            };
+            min_price = min_price.min(bar.low);
+            max_price = max_price.max(bar.high);
+        }
+
+        if !min_price.is_finite() || !max_price.is_finite() {
+            return Ok((f64::NAN, f64::NAN));
+        }
+        if min_price <= 0.0 || max_price <= 0.0 || max_price + EPS < min_price {
+            return Err("预热窗口价格区间非法".to_string());
+        }
+
+        Ok((min_price, max_price))
+    })(&bars, output_start_index, config.warmup_days)?;
     let step = bucket_step(config.bucket_pct);
-    let mut buckets = build_initial_buckets(initial_range.0, initial_range.1, step)?;
+    let mut buckets =
+        (|min_price: f64, max_price: f64, step: f64| -> Result<Vec<ChipBucket>, String> {
+            if !min_price.is_finite() || !max_price.is_finite() {
+                return Ok(Vec::new());
+            }
+            if !step.is_finite() || step <= 1.0 {
+                return Err("bucket_pct必须是有限正数".to_string());
+            }
+
+            let mut boundaries = vec![min_price];
+            let mut upper = min_price;
+            while upper + EPS < max_price {
+                upper *= step;
+                if !upper.is_finite() {
+                    return Err("动态分桶价格边界出现非有限数值".to_string());
+                }
+                if upper <= *boundaries.last().expect("boundary exists") + EPS {
+                    return Err("动态分桶价格边界未递增".to_string());
+                }
+                boundaries.push(upper);
+            }
+
+            if boundaries.len() == 1 {
+                boundaries.push(min_price * step);
+            }
+
+            let bucket_count = boundaries.len() - 1;
+            let main_each = 50.0 / bucket_count as f64;
+            let retail_each = 50.0 / bucket_count as f64;
+
+            let mut buckets = Vec::with_capacity(bucket_count);
+            for index in 0..bucket_count {
+                buckets.push(ChipBucket {
+                    price_low: boundaries[index],
+                    price_high: boundaries[index + 1],
+                    main_chip: main_each,
+                    retail_chip: retail_each,
+                    rateo: None,
+                    rateh: None,
+                    ratel: None,
+                    ratec: None,
+                });
+            }
+
+            Ok(buckets)
+        })(initial_range.0, initial_range.1, step)?;
     if buckets.is_empty() {
         return Ok(Vec::new());
     }
@@ -527,13 +673,64 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
 
     let bars = build_validated_bars(row_data, output_start_index)?;
     let step = bucket_step(config.bucket_pct);
-    let mut buckets = build_buckets_from_snapshot_bins(initial_bins)?;
+    let mut buckets = (|bins: &[ChenChipBin]| -> Result<Vec<ChipBucket>, String> {
+        let mut buckets = Vec::with_capacity(bins.len());
+        for bin in bins {
+            if !bin.price_low.is_finite()
+                || !bin.price_high.is_finite()
+                || !bin.main_chip.is_finite()
+                || !bin.retail_chip.is_finite()
+                || bin.price_low <= 0.0
+                || bin.price_high <= bin.price_low + EPS
+            {
+                return Err("初始筹码分桶非法，无法续算".to_string());
+            }
+            buckets.push(ChipBucket {
+                price_low: bin.price_low,
+                price_high: bin.price_high,
+                main_chip: bin.main_chip,
+                retail_chip: bin.retail_chip,
+                rateo: None,
+                rateh: None,
+                ratel: None,
+                ratec: None,
+            });
+        }
+
+        for window in buckets.windows(2) {
+            if window[0].price_high > window[1].price_low + EPS {
+                return Err("初始筹码分桶价格区间重叠，无法续算".to_string());
+            }
+        }
+
+        normalize_buckets(&mut buckets)?;
+        Ok(buckets)
+    })(initial_bins)?;
     if chip_config.sell_uses_bucket_rate_series {
         ensure_bucket_rate_series(&mut buckets, &bars);
     }
     let len = row_data.trade_dates.len();
-    let mut main_ratio_history =
-        build_initial_main_ratio_history(initial_main_ratio_history, initial_bins.len(), len)?;
+    let mut main_ratio_history = (|initial_history: &[Arc<Vec<Option<f64>>>],
+                                   bucket_count: usize,
+                                   series_len: usize|
+     -> Result<Vec<Arc<Vec<Option<f64>>>>, String> {
+        if initial_history.is_empty() {
+            return Ok((0..bucket_count)
+                .map(|_| Arc::new(vec![None; series_len]))
+                .collect());
+        }
+        if initial_history.len() != bucket_count {
+            return Err("初始MAIN_CHIP_RATIO历史分桶数不匹配".to_string());
+        }
+
+        for history in initial_history {
+            if history.len() != series_len {
+                return Err("初始MAIN_CHIP_RATIO历史长度不匹配".to_string());
+            }
+        }
+
+        Ok(initial_history.to_vec())
+    })(initial_main_ratio_history, initial_bins.len(), len)?;
     let mut base_runtime = row_into_rt(row_data.clone())?;
     share_runtime_num_series(&mut base_runtime);
     let mut buy_runtime = build_new_participant_buy_runtime(&base_runtime, &bars)?;
@@ -603,63 +800,6 @@ fn parse_strategy_expression(
     validate_expression_functions(&program)
         .map_err(|error| format!("第{strategy_index}个strategy({strategy_name}){error}"))?;
     Ok(program)
-}
-
-fn optimize_strategy_program(
-    program: &Stmts,
-    direction: ChipDirection,
-    strategy_index: usize,
-) -> (Stmts, Vec<CompiledChipCachedExpr>) {
-    let dynamic_runtime_keys = match direction {
-        ChipDirection::Buy => CHEN_CHIP_BUY_DYNAMIC_RUNTIME_KEYS.as_slice(),
-        ChipDirection::Sell => CHEN_CHIP_SELL_DYNAMIC_RUNTIME_KEYS.as_slice(),
-    };
-    let mut local_dynamic = HashMap::<String, bool>::new();
-    let mut static_prefix = Vec::<Stmt>::new();
-    let mut cached_exprs = Vec::<CompiledChipCachedExpr>::new();
-    let mut optimized_items = Vec::with_capacity(program.item.len());
-
-    for stmt in &program.item {
-        match stmt {
-            Stmt::Assign { name, value } => {
-                let is_dynamic =
-                    expr_depends_on_dynamic(value, &local_dynamic, dynamic_runtime_keys);
-                let optimized_value = optimize_strategy_expr(
-                    value,
-                    &local_dynamic,
-                    dynamic_runtime_keys,
-                    &static_prefix,
-                    strategy_index,
-                    &mut cached_exprs,
-                );
-                optimized_items.push(Stmt::Assign {
-                    name: name.clone(),
-                    value: optimized_value,
-                });
-                local_dynamic.insert(name.clone(), is_dynamic);
-                if !is_dynamic {
-                    static_prefix.push(stmt.clone());
-                }
-            }
-            Stmt::Expr(expr) => {
-                optimized_items.push(Stmt::Expr(optimize_strategy_expr(
-                    expr,
-                    &local_dynamic,
-                    dynamic_runtime_keys,
-                    &static_prefix,
-                    strategy_index,
-                    &mut cached_exprs,
-                )));
-            }
-        }
-    }
-
-    (
-        Stmts {
-            item: optimized_items,
-        },
-        cached_exprs,
-    )
 }
 
 fn optimize_strategy_expr(
@@ -772,29 +912,6 @@ fn expr_depends_on_dynamic(
     }
 }
 
-fn program_depends_on_runtime_keys(program: &Stmts, runtime_keys: &[&str]) -> bool {
-    let mut local_dynamic = HashMap::<String, bool>::new();
-
-    for stmt in &program.item {
-        match stmt {
-            Stmt::Assign { name, value } => {
-                let is_dynamic = expr_depends_on_dynamic(value, &local_dynamic, runtime_keys);
-                if is_dynamic {
-                    return true;
-                }
-                local_dynamic.insert(name.clone(), false);
-            }
-            Stmt::Expr(expr) => {
-                if expr_depends_on_dynamic(expr, &local_dynamic, runtime_keys) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
-}
-
 fn validate_compute_config(config: ChenChipConfig) -> Result<(), String> {
     if !config.bucket_pct.is_finite() || config.bucket_pct <= 0.0 {
         return Err("bucket_pct必须是有限正数".to_string());
@@ -848,7 +965,40 @@ fn build_validated_bars(
 
     let mut bars = Vec::with_capacity(row_data.trade_dates.len());
     for index in 0..row_data.trade_dates.len() {
-        match parse_bar_at(
+        match (|trade_date: &str,
+                open: Option<f64>,
+                high: Option<f64>,
+                low: Option<f64>,
+                close: Option<f64>,
+                turnover_rate: Option<f64>|
+         -> Result<ChenChipBar, String> {
+            let open = required_value(trade_date, "O", open)?;
+            let high = required_value(trade_date, "H", high)?;
+            let low = required_value(trade_date, "L", low)?;
+            let close = required_value(trade_date, "C", close)?;
+            let turnover_rate = required_value(trade_date, "TOR", turnover_rate)?;
+
+            for (name, value) in [("O", open), ("H", high), ("L", low), ("C", close)] {
+                if !value.is_finite() || value <= 0.0 {
+                    return Err(format!("{trade_date} 的{name}必须是有限正数"));
+                }
+            }
+            if high + EPS < low {
+                return Err(format!("{trade_date} 的最高价小于最低价"));
+            }
+            if !turnover_rate.is_finite() || !(0.0..=100.0).contains(&turnover_rate) {
+                return Err(format!("{trade_date} 的换手率必须是[0,100]之间的有限数值"));
+            }
+
+            Ok(ChenChipBar {
+                trade_date: trade_date.to_string(),
+                open,
+                high,
+                low,
+                close,
+                turnover_rate,
+            })
+        })(
             row_data.trade_dates[index].as_str(),
             open_series[index],
             high_series[index],
@@ -868,130 +1018,12 @@ fn build_validated_bars(
     Ok(bars)
 }
 
-fn parse_bar_at(
-    trade_date: &str,
-    open: Option<f64>,
-    high: Option<f64>,
-    low: Option<f64>,
-    close: Option<f64>,
-    turnover_rate: Option<f64>,
-) -> Result<ChenChipBar, String> {
-    let open = required_value(trade_date, "O", open)?;
-    let high = required_value(trade_date, "H", high)?;
-    let low = required_value(trade_date, "L", low)?;
-    let close = required_value(trade_date, "C", close)?;
-    let turnover_rate = required_value(trade_date, "TOR", turnover_rate)?;
-
-    for (name, value) in [("O", open), ("H", high), ("L", low), ("C", close)] {
-        if !value.is_finite() || value <= 0.0 {
-            return Err(format!("{trade_date} 的{name}必须是有限正数"));
-        }
-    }
-    if high + EPS < low {
-        return Err(format!("{trade_date} 的最高价小于最低价"));
-    }
-    if !turnover_rate.is_finite() || !(0.0..=100.0).contains(&turnover_rate) {
-        return Err(format!("{trade_date} 的换手率必须是[0,100]之间的有限数值"));
-    }
-
-    Ok(ChenChipBar {
-        trade_date: trade_date.to_string(),
-        open,
-        high,
-        low,
-        close,
-        turnover_rate,
-    })
-}
-
 fn required_value(trade_date: &str, name: &str, value: Option<f64>) -> Result<f64, String> {
     value.ok_or_else(|| format!("{trade_date} 缺少 {name}"))
 }
 
-fn resolve_initial_range(
-    bars: &[Option<ChenChipBar>],
-    output_start_index: usize,
-    warmup_days: usize,
-) -> Result<(f64, f64), String> {
-    let range_start = output_start_index.saturating_sub(warmup_days);
-    let range_end_exclusive = if warmup_days == 0 {
-        output_start_index + 1
-    } else {
-        output_start_index
-    };
-
-    let mut min_price = f64::INFINITY;
-    let mut max_price = f64::NEG_INFINITY;
-    for bar in &bars[range_start..range_end_exclusive] {
-        let Some(bar) = bar.as_ref() else {
-            return Ok((f64::NAN, f64::NAN));
-        };
-        min_price = min_price.min(bar.low);
-        max_price = max_price.max(bar.high);
-    }
-
-    if !min_price.is_finite() || !max_price.is_finite() {
-        return Ok((f64::NAN, f64::NAN));
-    }
-    if min_price <= 0.0 || max_price <= 0.0 || max_price + EPS < min_price {
-        return Err("预热窗口价格区间非法".to_string());
-    }
-
-    Ok((min_price, max_price))
-}
-
 fn bucket_step(bucket_pct: f64) -> f64 {
     1.0 + bucket_pct / 100.0
-}
-
-fn build_initial_buckets(
-    min_price: f64,
-    max_price: f64,
-    step: f64,
-) -> Result<Vec<ChipBucket>, String> {
-    if !min_price.is_finite() || !max_price.is_finite() {
-        return Ok(Vec::new());
-    }
-    if !step.is_finite() || step <= 1.0 {
-        return Err("bucket_pct必须是有限正数".to_string());
-    }
-
-    let mut boundaries = vec![min_price];
-    let mut upper = min_price;
-    while upper + EPS < max_price {
-        upper *= step;
-        if !upper.is_finite() {
-            return Err("动态分桶价格边界出现非有限数值".to_string());
-        }
-        if upper <= *boundaries.last().expect("boundary exists") + EPS {
-            return Err("动态分桶价格边界未递增".to_string());
-        }
-        boundaries.push(upper);
-    }
-
-    if boundaries.len() == 1 {
-        boundaries.push(min_price * step);
-    }
-
-    let bucket_count = boundaries.len() - 1;
-    let main_each = 50.0 / bucket_count as f64;
-    let retail_each = 50.0 / bucket_count as f64;
-
-    let mut buckets = Vec::with_capacity(bucket_count);
-    for index in 0..bucket_count {
-        buckets.push(ChipBucket {
-            price_low: boundaries[index],
-            price_high: boundaries[index + 1],
-            main_chip: main_each,
-            retail_chip: retail_each,
-            rateo: None,
-            rateh: None,
-            ratel: None,
-            ratec: None,
-        });
-    }
-
-    Ok(buckets)
 }
 
 fn compute_bucket_rate_series(
@@ -1041,63 +1073,6 @@ fn ensure_bucket_rate_series(buckets: &mut [ChipBucket], bars: &[Option<ChenChip
         bucket.ratel = Some(ratel);
         bucket.ratec = Some(ratec);
     }
-}
-
-fn build_buckets_from_snapshot_bins(bins: &[ChenChipBin]) -> Result<Vec<ChipBucket>, String> {
-    let mut buckets = Vec::with_capacity(bins.len());
-    for bin in bins {
-        if !bin.price_low.is_finite()
-            || !bin.price_high.is_finite()
-            || !bin.main_chip.is_finite()
-            || !bin.retail_chip.is_finite()
-            || bin.price_low <= 0.0
-            || bin.price_high <= bin.price_low + EPS
-        {
-            return Err("初始筹码分桶非法，无法续算".to_string());
-        }
-        buckets.push(ChipBucket {
-            price_low: bin.price_low,
-            price_high: bin.price_high,
-            main_chip: bin.main_chip,
-            retail_chip: bin.retail_chip,
-            rateo: None,
-            rateh: None,
-            ratel: None,
-            ratec: None,
-        });
-    }
-
-    for window in buckets.windows(2) {
-        if window[0].price_high > window[1].price_low + EPS {
-            return Err("初始筹码分桶价格区间重叠，无法续算".to_string());
-        }
-    }
-
-    normalize_buckets(&mut buckets)?;
-    Ok(buckets)
-}
-
-fn build_initial_main_ratio_history(
-    initial_history: &[Arc<Vec<Option<f64>>>],
-    bucket_count: usize,
-    series_len: usize,
-) -> Result<Vec<Arc<Vec<Option<f64>>>>, String> {
-    if initial_history.is_empty() {
-        return Ok((0..bucket_count)
-            .map(|_| Arc::new(vec![None; series_len]))
-            .collect());
-    }
-    if initial_history.len() != bucket_count {
-        return Err("初始MAIN_CHIP_RATIO历史分桶数不匹配".to_string());
-    }
-
-    for history in initial_history {
-        if history.len() != series_len {
-            return Err("初始MAIN_CHIP_RATIO历史长度不匹配".to_string());
-        }
-    }
-
-    Ok(initial_history.to_vec())
 }
 
 fn expand_buckets_for_bar(
@@ -1250,7 +1225,62 @@ fn apply_sell_for_day(
             continue;
         }
 
-        configure_bucket_runtime(
+        (|runtime: &mut Runtime,
+          bucket: &ChipBucket,
+          main_ratio_history: Arc<Vec<Option<f64>>>,
+          main_chip_total: f64,
+          retail_chip_total: f64,
+          bars: &[Option<ChenChipBar>],
+          needs_bucket_rate_series: bool|
+         -> Result<(), String> {
+            if !bucket.price().is_finite() || bucket.price() <= 0.0 {
+                return Err("价格分桶中点价非法".to_string());
+            }
+            if !main_chip_total.is_finite() || !retail_chip_total.is_finite() {
+                return Err("主力/散户总筹码出现非有限数值".to_string());
+            }
+
+            if needs_bucket_rate_series {
+                match (&bucket.rateo, &bucket.rateh, &bucket.ratel, &bucket.ratec) {
+                    (Some(rateo), Some(rateh), Some(ratel), Some(ratec)) => {
+                        set_num_series_arc_with_alias(runtime, "RATEO", "rateo", Arc::clone(rateo));
+                        set_num_series_arc_with_alias(runtime, "RATEH", "rateh", Arc::clone(rateh));
+                        set_num_series_arc_with_alias(runtime, "RATEL", "ratel", Arc::clone(ratel));
+                        set_num_series_arc_with_alias(runtime, "RATEC", "ratec", Arc::clone(ratec));
+                    }
+                    _ => {
+                        let cost_price = bucket.price();
+                        let (rateo, rateh, ratel, ratec) =
+                            compute_bucket_rate_series(bars, cost_price);
+                        set_num_series_arc_with_alias(runtime, "RATEO", "rateo", rateo);
+                        set_num_series_arc_with_alias(runtime, "RATEH", "rateh", rateh);
+                        set_num_series_arc_with_alias(runtime, "RATEL", "ratel", ratel);
+                        set_num_series_arc_with_alias(runtime, "RATEC", "ratec", ratec);
+                    }
+                }
+            }
+
+            set_num_series_arc_with_alias(
+                runtime,
+                "MAIN_CHIP_RATIO",
+                "main_chip_ratio",
+                main_ratio_history,
+            );
+            set_num_with_alias(
+                runtime,
+                "MAIN_CHIP_TOTAL",
+                "main_chip_total",
+                main_chip_total,
+            );
+            set_num_with_alias(
+                runtime,
+                "RETAIL_CHIP_TOTAL",
+                "retail_chip_total",
+                retail_chip_total,
+            );
+
+            Ok(())
+        })(
             bucket_runtime,
             &buckets[bucket_index],
             Arc::clone(&main_ratio_history[bucket_index]),
@@ -1301,7 +1331,23 @@ fn apply_sell_for_day(
     let bar = bars[day_index]
         .as_ref()
         .ok_or_else(|| format!("第{day_index}根K线缺少有效数据"))?;
-    let retail_trapped_entries = retail_trapped_chip_entries(buckets, bar.close);
+    let retail_trapped_entries = (|buckets: &[ChipBucket], close: f64| -> Vec<SellEntry> {
+        buckets
+            .iter()
+            .enumerate()
+            .filter_map(|(bucket_index, bucket)| {
+                if bucket.price() > close + EPS && bucket.retail_chip > EPS {
+                    Some(SellEntry {
+                        bucket_index,
+                        holder: ChipHolder::Retail,
+                        weight: 1.0,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    })(buckets, bar.close);
     remaining = apply_weighted_sell(buckets, retail_trapped_entries, remaining)?;
 
     if remaining <= EPS {
@@ -1320,7 +1366,12 @@ fn apply_sell_for_day(
     }
 
     if remaining > EPS {
-        let all_entries = all_chip_entries(buckets);
+        let all_entries = (|buckets: &[ChipBucket]| -> Vec<SellEntry> {
+            let mut entries = Vec::with_capacity(buckets.len() * 2);
+            entries.extend(holder_chip_entries(buckets, ChipHolder::Main));
+            entries.extend(holder_chip_entries(buckets, ChipHolder::Retail));
+            entries
+        })(buckets);
         apply_weighted_sell(buckets, all_entries, remaining)?;
     }
 
@@ -1340,13 +1391,93 @@ fn apply_buy_for_day(
         return Ok(());
     }
 
-    let weights = trade_distribution_weight_entries(buckets, bar)?;
+    let weights =
+        (|buckets: &[ChipBucket], bar: &ChenChipBar| -> Result<Vec<(usize, f64)>, String> {
+            if buckets.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            if (bar.high - bar.low).abs() <= EPS {
+                let index = find_bucket_containing_price(buckets, bar.close)
+                    .or_else(|| find_bucket_containing_price(buckets, bar.low))
+                    .unwrap_or_else(|| nearest_bucket_index(buckets, bar.close));
+                return Ok(vec![(index, 1.0)]);
+            }
+
+            let center = (bar.open + bar.high + bar.low + bar.close) / 4.0;
+            let center = center.clamp(bar.low, bar.high);
+            let start_index = buckets.partition_point(|bucket| bucket.price_high <= bar.low + EPS);
+            let mut weights = Vec::new();
+
+            for (index, bucket) in buckets.iter().enumerate().skip(start_index) {
+                if bucket.price_low >= bar.high - EPS {
+                    break;
+                }
+                let overlap_low = bucket.price_low.max(bar.low);
+                let overlap_high = bucket.price_high.min(bar.high);
+                if overlap_high <= overlap_low + EPS {
+                    continue;
+                }
+                let midpoint = (overlap_low + overlap_high) / 2.0;
+                let height = (|price: f64, low: f64, center: f64, high: f64| -> f64 {
+                    let slope = 2.0 / (high - low);
+                    if price <= center {
+                        if (center - low).abs() <= EPS {
+                            slope
+                        } else {
+                            (price - low) / (center - low) * slope
+                        }
+                    } else if (high - center).abs() <= EPS {
+                        slope
+                    } else {
+                        (high - price) / (high - center) * slope
+                    }
+                })(midpoint, bar.low, center, bar.high);
+                let width = overlap_high - overlap_low;
+                let weight = (height * width).max(0.0);
+                if weight > EPS {
+                    weights.push((index, weight));
+                }
+            }
+
+            let total_weight = weights.iter().map(|(_, weight)| *weight).sum::<f64>();
+            if !total_weight.is_finite() {
+                return Err("成交价格分布权重出现非有限数值".to_string());
+            }
+            if total_weight <= EPS {
+                let index = find_bucket_containing_price(buckets, center)
+                    .unwrap_or_else(|| nearest_bucket_index(buckets, center));
+                weights.push((index, 1.0));
+            }
+
+            Ok(weights)
+        })(buckets, bar)?;
     let total_weight = weights.iter().map(|(_, weight)| *weight).sum::<f64>();
     if total_weight <= EPS {
         return Ok(());
     }
     let (main_chip_total, retail_chip_total) = holder_chip_totals(buckets);
-    set_dynamic_holder_fields(buy_runtime, main_chip_total, retail_chip_total);
+    (|runtime: &mut Runtime, main_chip_total: f64, retail_chip_total: f64| {
+        let total = main_chip_total + retail_chip_total;
+        let main_ratio = if total > EPS {
+            main_chip_total / total
+        } else {
+            0.5
+        };
+        set_num_with_alias(runtime, "MAIN_CHIP_RATIO", "main_chip_ratio", main_ratio);
+        set_num_with_alias(
+            runtime,
+            "MAIN_CHIP_TOTAL",
+            "main_chip_total",
+            main_chip_total,
+        );
+        set_num_with_alias(
+            runtime,
+            "RETAIL_CHIP_TOTAL",
+            "retail_chip_total",
+            retail_chip_total,
+        );
+    })(buy_runtime, main_chip_total, retail_chip_total);
     let (main_bias, retail_bias) = strategy_biases_at(
         buy_runtime,
         chip_config,
@@ -1364,28 +1495,6 @@ fn apply_buy_for_day(
     }
 
     Ok(())
-}
-
-fn set_dynamic_holder_fields(runtime: &mut Runtime, main_chip_total: f64, retail_chip_total: f64) {
-    let total = main_chip_total + retail_chip_total;
-    let main_ratio = if total > EPS {
-        main_chip_total / total
-    } else {
-        0.5
-    };
-    set_num_with_alias(runtime, "MAIN_CHIP_RATIO", "main_chip_ratio", main_ratio);
-    set_num_with_alias(
-        runtime,
-        "MAIN_CHIP_TOTAL",
-        "main_chip_total",
-        main_chip_total,
-    );
-    set_num_with_alias(
-        runtime,
-        "RETAIL_CHIP_TOTAL",
-        "retail_chip_total",
-        retail_chip_total,
-    );
 }
 
 fn build_new_participant_buy_runtime(
@@ -1452,9 +1561,21 @@ fn inject_strategy_expression_caches(
                     .map_err(|error| {
                         format!("策略 {} 公共表达式预计算错误: {}", strategy.name, error.msg)
                     })?;
-            runtime
-                .vars
-                .insert(cached_expr.key.clone(), share_cached_value(value));
+            runtime.vars.insert(
+                cached_expr.key.clone(),
+                (|value: Value| -> Value {
+                    match value {
+                        Value::NumSeries(series) => Value::SharedNumSeries(Arc::new(series)),
+                        Value::BoolSeries(series) => Value::SharedNumSeries(Arc::new(
+                            series
+                                .into_iter()
+                                .map(|value| Some(if value { 1.0 } else { 0.0 }))
+                                .collect(),
+                        )),
+                        other => other,
+                    }
+                })(value),
+            );
         }
     }
     Ok(())
@@ -1485,76 +1606,6 @@ fn eval_program_scoped(
         }
     }
     result
-}
-
-fn share_cached_value(value: Value) -> Value {
-    match value {
-        Value::NumSeries(series) => Value::SharedNumSeries(Arc::new(series)),
-        Value::BoolSeries(series) => Value::SharedNumSeries(Arc::new(
-            series
-                .into_iter()
-                .map(|value| Some(if value { 1.0 } else { 0.0 }))
-                .collect(),
-        )),
-        other => other,
-    }
-}
-
-fn configure_bucket_runtime(
-    runtime: &mut Runtime,
-    bucket: &ChipBucket,
-    main_ratio_history: Arc<Vec<Option<f64>>>,
-    main_chip_total: f64,
-    retail_chip_total: f64,
-    bars: &[Option<ChenChipBar>],
-    needs_bucket_rate_series: bool,
-) -> Result<(), String> {
-    if !bucket.price().is_finite() || bucket.price() <= 0.0 {
-        return Err("价格分桶中点价非法".to_string());
-    }
-    if !main_chip_total.is_finite() || !retail_chip_total.is_finite() {
-        return Err("主力/散户总筹码出现非有限数值".to_string());
-    }
-
-    if needs_bucket_rate_series {
-        match (&bucket.rateo, &bucket.rateh, &bucket.ratel, &bucket.ratec) {
-            (Some(rateo), Some(rateh), Some(ratel), Some(ratec)) => {
-                set_num_series_arc_with_alias(runtime, "RATEO", "rateo", Arc::clone(rateo));
-                set_num_series_arc_with_alias(runtime, "RATEH", "rateh", Arc::clone(rateh));
-                set_num_series_arc_with_alias(runtime, "RATEL", "ratel", Arc::clone(ratel));
-                set_num_series_arc_with_alias(runtime, "RATEC", "ratec", Arc::clone(ratec));
-            }
-            _ => {
-                let cost_price = bucket.price();
-                let (rateo, rateh, ratel, ratec) = compute_bucket_rate_series(bars, cost_price);
-                set_num_series_arc_with_alias(runtime, "RATEO", "rateo", rateo);
-                set_num_series_arc_with_alias(runtime, "RATEH", "rateh", rateh);
-                set_num_series_arc_with_alias(runtime, "RATEL", "ratel", ratel);
-                set_num_series_arc_with_alias(runtime, "RATEC", "ratec", ratec);
-            }
-        }
-    }
-
-    set_num_series_arc_with_alias(
-        runtime,
-        "MAIN_CHIP_RATIO",
-        "main_chip_ratio",
-        main_ratio_history,
-    );
-    set_num_with_alias(
-        runtime,
-        "MAIN_CHIP_TOTAL",
-        "main_chip_total",
-        main_chip_total,
-    );
-    set_num_with_alias(
-        runtime,
-        "RETAIL_CHIP_TOTAL",
-        "retail_chip_total",
-        retail_chip_total,
-    );
-
-    Ok(())
 }
 
 fn set_runtime_value(runtime: &mut Runtime, key: &str, value: Value) {
@@ -1680,31 +1731,6 @@ fn holder_chip_entries(buckets: &[ChipBucket], holder: ChipHolder) -> Vec<SellEn
         .collect()
 }
 
-fn retail_trapped_chip_entries(buckets: &[ChipBucket], close: f64) -> Vec<SellEntry> {
-    buckets
-        .iter()
-        .enumerate()
-        .filter_map(|(bucket_index, bucket)| {
-            if bucket.price() > close + EPS && bucket.retail_chip > EPS {
-                Some(SellEntry {
-                    bucket_index,
-                    holder: ChipHolder::Retail,
-                    weight: 1.0,
-                })
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-fn all_chip_entries(buckets: &[ChipBucket]) -> Vec<SellEntry> {
-    let mut entries = Vec::with_capacity(buckets.len() * 2);
-    entries.extend(holder_chip_entries(buckets, ChipHolder::Main));
-    entries.extend(holder_chip_entries(buckets, ChipHolder::Retail));
-    entries
-}
-
 fn apply_weighted_sell(
     buckets: &mut [ChipBucket],
     entries: Vec<SellEntry>,
@@ -1758,72 +1784,6 @@ fn apply_weighted_sell(
     }
 
     Ok(remaining)
-}
-
-fn trade_distribution_weight_entries(
-    buckets: &[ChipBucket],
-    bar: &ChenChipBar,
-) -> Result<Vec<(usize, f64)>, String> {
-    if buckets.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    if (bar.high - bar.low).abs() <= EPS {
-        let index = find_bucket_containing_price(buckets, bar.close)
-            .or_else(|| find_bucket_containing_price(buckets, bar.low))
-            .unwrap_or_else(|| nearest_bucket_index(buckets, bar.close));
-        return Ok(vec![(index, 1.0)]);
-    }
-
-    let center = (bar.open + bar.high + bar.low + bar.close) / 4.0;
-    let center = center.clamp(bar.low, bar.high);
-    let start_index = buckets.partition_point(|bucket| bucket.price_high <= bar.low + EPS);
-    let mut weights = Vec::new();
-
-    for (index, bucket) in buckets.iter().enumerate().skip(start_index) {
-        if bucket.price_low >= bar.high - EPS {
-            break;
-        }
-        let overlap_low = bucket.price_low.max(bar.low);
-        let overlap_high = bucket.price_high.min(bar.high);
-        if overlap_high <= overlap_low + EPS {
-            continue;
-        }
-        let midpoint = (overlap_low + overlap_high) / 2.0;
-        let height = triangle_height(midpoint, bar.low, center, bar.high);
-        let width = overlap_high - overlap_low;
-        let weight = (height * width).max(0.0);
-        if weight > EPS {
-            weights.push((index, weight));
-        }
-    }
-
-    let total_weight = weights.iter().map(|(_, weight)| *weight).sum::<f64>();
-    if !total_weight.is_finite() {
-        return Err("成交价格分布权重出现非有限数值".to_string());
-    }
-    if total_weight <= EPS {
-        let index = find_bucket_containing_price(buckets, center)
-            .unwrap_or_else(|| nearest_bucket_index(buckets, center));
-        weights.push((index, 1.0));
-    }
-
-    Ok(weights)
-}
-
-fn triangle_height(price: f64, low: f64, center: f64, high: f64) -> f64 {
-    let slope = 2.0 / (high - low);
-    if price <= center {
-        if (center - low).abs() <= EPS {
-            slope
-        } else {
-            (price - low) / (center - low) * slope
-        }
-    } else if (high - center).abs() <= EPS {
-        slope
-    } else {
-        (high - price) / (high - center) * slope
-    }
 }
 
 fn find_bucket_containing_price(buckets: &[ChipBucket], price: f64) -> Option<usize> {

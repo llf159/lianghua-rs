@@ -12,12 +12,9 @@ use crate::data::{
     ths_concepts_path,
 };
 
-const GDNM_BX_BIAO: &str = "concept_performance";
 const MR_FQFS: &str = "qfq";
-const GDNM_BX_DATES_PER_CHUNK: usize = 32;
 const PERFORMANCE_TYPE_CONCEPT: &str = "concept";
 const PERFORMANCE_TYPE_INDUSTRY: &str = "industry";
-const PERFORMANCE_SERIES_BATCH_SIZE: usize = 512;
 const DATA_ISSUE_SAMPLE_LIMIT: usize = 12;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,10 +29,6 @@ pub struct GdNmBXRow {
 struct GdNmJxQr {
     jxqr_vhfu_he: f64,
     qrvs_he: f64,
-}
-
-fn round_to_3(value: f64) -> f64 {
-    (value * 1000.0).round() / 1000.0
 }
 
 pub fn init_concept_performance_db(db_path: &Path) -> Result<(), String> {
@@ -135,10 +128,92 @@ pub fn rebuild_concept_performance_range(
         ));
     }
 
-    let concept_map = load_concept_map(source_dir)?.unwrap_or_default();
-    let industry_map = load_industry_map(source_dir)?;
+    let concept_map =
+        (|source_dir: &str| -> Result<Option<HashMap<String, Vec<String>>>, String> {
+            let rows = match load_ths_concepts_list(source_dir) {
+                Ok(rows) => rows,
+                Err(error) if error.contains("打开stock_concepts.csv失败") => return Ok(None),
+                Err(error) => return Err(error),
+            };
 
-    let uivi_map = load_uivi_map(source_dir)?;
+            let mut gdnm_map = HashMap::with_capacity(rows.len());
+            for cols in rows {
+                let Some(ts_code) = cols.first().map(|v| v.trim()) else {
+                    continue;
+                };
+                let Some(gdnm_raw) = cols.get(2).map(|v| v.trim()) else {
+                    continue;
+                };
+                if ts_code.is_empty() || gdnm_raw.is_empty() {
+                    continue;
+                }
+                let gdnm_list = split_gdnm_items(gdnm_raw);
+                if gdnm_list.is_empty() {
+                    continue;
+                }
+                gdnm_map
+                    .entry(ts_code.to_string())
+                    .and_modify(|old_list: &mut Vec<String>| {
+                        old_list.extend(gdnm_list.clone());
+                        *old_list = split_gdnm_items(&old_list.join(","));
+                    })
+                    .or_insert(gdnm_list);
+            }
+
+            Ok(Some(gdnm_map))
+        })(source_dir)?
+        .unwrap_or_default();
+    let industry_map = (|source_dir: &str| -> Result<HashMap<String, Vec<String>>, String> {
+        let rows = load_stock_list(source_dir)?;
+        let mut industry_map = HashMap::with_capacity(rows.len());
+        for cols in rows.iter() {
+            let Some(ts_code) = cols.first().map(|v| v.trim()).filter(|v| !v.is_empty()) else {
+                continue;
+            };
+
+            let Some(industry_raw) = cols.get(4).map(|v| v.trim()).filter(|v| !v.is_empty()) else {
+                continue;
+            };
+
+            let industry_list = split_gdnm_items(industry_raw);
+            if industry_list.is_empty() {
+                continue;
+            }
+            industry_map
+                .entry(ts_code.to_string())
+                .and_modify(|old_list: &mut Vec<String>| {
+                    old_list.extend(industry_list.clone());
+                    *old_list = split_gdnm_items(&old_list.join(","));
+                })
+                .or_insert(industry_list);
+        }
+
+        Ok(industry_map)
+    })(source_dir)?;
+
+    let uivi_map = (|source_dir: &str| -> Result<HashMap<String, f64>, String> {
+        let rows = load_stock_list(source_dir)?;
+        let mut uivi_map = HashMap::with_capacity(rows.len());
+        for cols in rows.iter() {
+            let Some(ts_code) = cols.first().map(|v| v.trim()).filter(|v| !v.is_empty()) else {
+                continue;
+            };
+
+            let Some(total_mv_raw) = cols.get(9).map(|v| v.trim()).filter(|v| !v.is_empty()) else {
+                continue;
+            };
+
+            let Ok(total_mv) = total_mv_raw.parse::<f64>() else {
+                continue;
+            };
+            if total_mv <= 0.0 || !total_mv.is_finite() {
+                continue;
+            }
+            uivi_map.insert(ts_code.to_string(), total_mv);
+        }
+
+        Ok(uivi_map)
+    })(source_dir)?;
 
     let mut bx_rows = Vec::new();
     if !uivi_map.is_empty() && !concept_map.is_empty() {
@@ -164,7 +239,47 @@ pub fn rebuild_concept_performance_range(
 
     let bx_db = concept_performance_db_path(source_dir);
     init_concept_performance_db(&bx_db)?;
-    write_concept_performance_range(&bx_db, start_date, end_date, &bx_rows)?;
+    (|db_path: &Path,
+      start_date: &str,
+      end_date: &str,
+      bx_rows: &[GdNmBXRow]|
+     -> Result<(), String> {
+        let mut conn = Connection::open(db_path).map_err(|e| format!("打开概念表现库失败:{e}"))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("创建概念表现事务失败:{e}"))?;
+        tx.execute(
+            "DELETE FROM concept_performance WHERE trade_date >= ? AND trade_date <= ?",
+            params![start_date, end_date],
+        )
+        .map_err(|e| format!("删除概念表现旧数据失败:{e}"))?;
+
+        if !bx_rows.is_empty() {
+            let mut app = tx
+                .appender("concept_performance")
+                .map_err(|e| format!("创建concept_performance写入器失败:{e}"))?;
+            for row in bx_rows {
+                app.append_row(params![
+                    &row.trade_date,
+                    &row.performance_type,
+                    &row.concept,
+                    row.performance_pct
+                ])
+                .map_err(|e| {
+                    format!(
+                        "写入概念表现失败, trade_date={}, performance_type={}, concept={}: {e}",
+                        row.trade_date, row.performance_type, row.concept
+                    )
+                })?;
+            }
+            app.flush()
+                .map_err(|e| format!("刷新concept_performance写入器失败:{e}"))?;
+        }
+
+        tx.commit()
+            .map_err(|e| format!("提交概念表现事务失败:{e}"))?;
+        Ok(())
+    })(&bx_db, start_date, end_date, &bx_rows)?;
     Ok(bx_rows.len())
 }
 
@@ -177,49 +292,6 @@ fn clear_concept_performance_all(db_path: &Path) -> Result<(), String> {
         .map_err(|e| format!("清空concept_performance失败:{e}"))?;
     tx.commit()
         .map_err(|e| format!("提交概念表现清空事务失败:{e}"))?;
-    Ok(())
-}
-
-fn write_concept_performance_range(
-    db_path: &Path,
-    start_date: &str,
-    end_date: &str,
-    bx_rows: &[GdNmBXRow],
-) -> Result<(), String> {
-    let mut conn = Connection::open(db_path).map_err(|e| format!("打开概念表现库失败:{e}"))?;
-    let tx = conn
-        .transaction()
-        .map_err(|e| format!("创建概念表现事务失败:{e}"))?;
-    tx.execute(
-        "DELETE FROM concept_performance WHERE trade_date >= ? AND trade_date <= ?",
-        params![start_date, end_date],
-    )
-    .map_err(|e| format!("删除概念表现旧数据失败:{e}"))?;
-
-    if !bx_rows.is_empty() {
-        let mut app = tx
-            .appender(GDNM_BX_BIAO)
-            .map_err(|e| format!("创建concept_performance写入器失败:{e}"))?;
-        for row in bx_rows {
-            app.append_row(params![
-                &row.trade_date,
-                &row.performance_type,
-                &row.concept,
-                row.performance_pct
-            ])
-            .map_err(|e| {
-                format!(
-                    "写入概念表现失败, trade_date={}, performance_type={}, concept={}: {e}",
-                    row.trade_date, row.performance_type, row.concept
-                )
-            })?;
-        }
-        app.flush()
-            .map_err(|e| format!("刷新concept_performance写入器失败:{e}"))?;
-    }
-
-    tx.commit()
-        .map_err(|e| format!("提交概念表现事务失败:{e}"))?;
     Ok(())
 }
 
@@ -237,7 +309,7 @@ fn calc_gdnm_bx_rows(
     }
 
     let date_ranges: Vec<(String, String)> = trade_dates
-        .chunks(GDNM_BX_DATES_PER_CHUNK)
+        .chunks(32)
         .map(|chunk| {
             (
                 chunk.first().cloned().unwrap_or_default(),
@@ -250,83 +322,7 @@ fn calc_gdnm_bx_rows(
     let chunk_results: Vec<Result<Vec<GdNmBXRow>, String>> = date_ranges
         .par_iter()
         .map(|(chunk_start, chunk_end)| {
-            calc_gdnm_bx_rows_chunk(
-                source_dir,
-                chunk_start,
-                chunk_end,
-                performance_type,
-                gdnm_map,
-                uivi_map,
-            )
-        })
-        .collect();
-
-    let mut bx_rows = Vec::new();
-    for chunk_result in chunk_results {
-        let mut chunk_rows = chunk_result?;
-        bx_rows.append(&mut chunk_rows);
-    }
-    bx_rows.sort_by(|left, right| {
-        left.trade_date
-            .cmp(&right.trade_date)
-            .then_with(|| left.performance_type.cmp(&right.performance_type))
-            .then_with(|| left.concept.cmp(&right.concept))
-    });
-
-    Ok(bx_rows)
-}
-
-fn load_trade_dates_in_range(
-    source_dir: &str,
-    start_date: &str,
-    end_date: &str,
-) -> Result<Vec<String>, String> {
-    let source_db = source_db_path(source_dir);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-    let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
-
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT DISTINCT trade_date
-            FROM stock_data
-            WHERE adj_type = ?
-              AND trade_date >= ?
-              AND trade_date <= ?
-            ORDER BY trade_date ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译概念表现日期列表查询失败:{e}"))?;
-    let mut rows = stmt
-        .query(params![MR_FQFS, start_date, end_date])
-        .map_err(|e| format!("查询概念表现日期列表失败:{e}"))?;
-
-    let mut trade_dates = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取概念表现日期列表失败:{e}"))?
-    {
-        let trade_date: String = row
-            .get(0)
-            .map_err(|e| format!("读取概念表现交易日失败:{e}"))?;
-        if !trade_date.trim().is_empty() {
-            trade_dates.push(trade_date);
-        }
-    }
-
-    Ok(trade_dates)
-}
-
-fn calc_gdnm_bx_rows_chunk(
-    source_dir: &str,
-    start_date: &str,
-    end_date: &str,
-    performance_type: &str,
-    gdnm_map: &HashMap<String, Vec<String>>,
-    uivi_map: &HashMap<String, f64>,
-) -> Result<Vec<GdNmBXRow>, String> {
+            (|source_dir : & str, start_date : & str, end_date : & str, performance_type : & str, gdnm_map : & HashMap < String , Vec < String > >, uivi_map : & HashMap < String , f64 >| -> Result < Vec < GdNmBXRow > , String > {
     let source_db = source_db_path(source_dir);
     let source_db_str = source_db
         .to_str()
@@ -409,7 +405,9 @@ fn calc_gdnm_bx_rows_chunk(
         if juhe.qrvs_he <= 0.0 || !juhe.qrvs_he.is_finite() {
             continue;
         }
-        let performance_pct = round_to_3(juhe.jxqr_vhfu_he / juhe.qrvs_he);
+        let performance_pct = (|value : f64| -> f64 {
+    (value * 1000.0).round() / 1000.0
+})(juhe.jxqr_vhfu_he / juhe.qrvs_he);
         if !performance_pct.is_finite() {
             continue;
         }
@@ -422,92 +420,73 @@ fn calc_gdnm_bx_rows_chunk(
     }
 
     Ok(bx_rows)
+})(
+                source_dir,
+                chunk_start,
+                chunk_end,
+                performance_type,
+                gdnm_map,
+                uivi_map,
+            )
+        })
+        .collect();
+
+    let mut bx_rows = Vec::new();
+    for chunk_result in chunk_results {
+        let mut chunk_rows = chunk_result?;
+        bx_rows.append(&mut chunk_rows);
+    }
+    bx_rows.sort_by(|left, right| {
+        left.trade_date
+            .cmp(&right.trade_date)
+            .then_with(|| left.performance_type.cmp(&right.performance_type))
+            .then_with(|| left.concept.cmp(&right.concept))
+    });
+
+    Ok(bx_rows)
 }
 
-fn load_concept_map(source_dir: &str) -> Result<Option<HashMap<String, Vec<String>>>, String> {
-    let rows = match load_ths_concepts_list(source_dir) {
-        Ok(rows) => rows,
-        Err(error) if error.contains("打开stock_concepts.csv失败") => return Ok(None),
-        Err(error) => return Err(error),
-    };
+fn load_trade_dates_in_range(
+    source_dir: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<Vec<String>, String> {
+    let source_db = source_db_path(source_dir);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
+    let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
 
-    let mut gdnm_map = HashMap::with_capacity(rows.len());
-    for cols in rows {
-        let Some(ts_code) = cols.first().map(|v| v.trim()) else {
-            continue;
-        };
-        let Some(gdnm_raw) = cols.get(2).map(|v| v.trim()) else {
-            continue;
-        };
-        if ts_code.is_empty() || gdnm_raw.is_empty() {
-            continue;
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT DISTINCT trade_date
+            FROM stock_data
+            WHERE adj_type = ?
+              AND trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY trade_date ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译概念表现日期列表查询失败:{e}"))?;
+    let mut rows = stmt
+        .query(params![MR_FQFS, start_date, end_date])
+        .map_err(|e| format!("查询概念表现日期列表失败:{e}"))?;
+
+    let mut trade_dates = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取概念表现日期列表失败:{e}"))?
+    {
+        let trade_date: String = row
+            .get(0)
+            .map_err(|e| format!("读取概念表现交易日失败:{e}"))?;
+        if !trade_date.trim().is_empty() {
+            trade_dates.push(trade_date);
         }
-        let gdnm_list = split_gdnm_items(gdnm_raw);
-        if gdnm_list.is_empty() {
-            continue;
-        }
-        gdnm_map
-            .entry(ts_code.to_string())
-            .and_modify(|old_list: &mut Vec<String>| {
-                old_list.extend(gdnm_list.clone());
-                *old_list = split_gdnm_items(&old_list.join(","));
-            })
-            .or_insert(gdnm_list);
     }
 
-    Ok(Some(gdnm_map))
-}
-
-fn load_industry_map(source_dir: &str) -> Result<HashMap<String, Vec<String>>, String> {
-    let rows = load_stock_list(source_dir)?;
-    let mut industry_map = HashMap::with_capacity(rows.len());
-    for cols in rows.iter() {
-        let Some(ts_code) = cols.first().map(|v| v.trim()).filter(|v| !v.is_empty()) else {
-            continue;
-        };
-
-        let Some(industry_raw) = cols.get(4).map(|v| v.trim()).filter(|v| !v.is_empty()) else {
-            continue;
-        };
-
-        let industry_list = split_gdnm_items(industry_raw);
-        if industry_list.is_empty() {
-            continue;
-        }
-        industry_map
-            .entry(ts_code.to_string())
-            .and_modify(|old_list: &mut Vec<String>| {
-                old_list.extend(industry_list.clone());
-                *old_list = split_gdnm_items(&old_list.join(","));
-            })
-            .or_insert(industry_list);
-    }
-
-    Ok(industry_map)
-}
-
-fn load_uivi_map(source_dir: &str) -> Result<HashMap<String, f64>, String> {
-    let rows = load_stock_list(source_dir)?;
-    let mut uivi_map = HashMap::with_capacity(rows.len());
-    for cols in rows.iter() {
-        let Some(ts_code) = cols.first().map(|v| v.trim()).filter(|v| !v.is_empty()) else {
-            continue;
-        };
-
-        let Some(total_mv_raw) = cols.get(9).map(|v| v.trim()).filter(|v| !v.is_empty()) else {
-            continue;
-        };
-
-        let Ok(total_mv) = total_mv_raw.parse::<f64>() else {
-            continue;
-        };
-        if total_mv <= 0.0 || !total_mv.is_finite() {
-            continue;
-        }
-        uivi_map.insert(ts_code.to_string(), total_mv);
-    }
-
-    Ok(uivi_map)
+    Ok(trade_dates)
 }
 
 fn split_gdnm_items(value: &str) -> Vec<String> {
@@ -698,7 +677,7 @@ fn load_performance_trend_series_map(
     let conn = Connection::open(concept_db_str)
         .map_err(|e| format!("打开 concept_performance.db 失败: {e}"))?;
 
-    for chunk in names.chunks(PERFORMANCE_SERIES_BATCH_SIZE) {
+    for chunk in names.chunks(512) {
         let placeholders = std::iter::repeat_n("?", chunk.len())
             .collect::<Vec<_>>()
             .join(", ");
@@ -1094,33 +1073,6 @@ ts_code,concepts_code,concepts_name,stock_name
         app.flush().expect("flush");
     }
 
-    fn xieru_source_db_many_trade_dates(source_dir: &Path, trade_dates: &[String]) {
-        let db_path = source_db_path(source_dir.to_str().expect("utf8 path"));
-        let conn = Connection::open(db_path).expect("open source db");
-        conn.execute(
-            r#"
-            CREATE TABLE stock_data (
-                ts_code VARCHAR,
-                trade_date VARCHAR,
-                adj_type VARCHAR,
-                pct_chg DOUBLE
-            )
-            "#,
-            [],
-        )
-        .expect("create stock_data");
-
-        let mut app = conn.appender("stock_data").expect("appender");
-        for (index, trade_date) in trade_dates.iter().enumerate() {
-            let day_pct = (index + 1) as f64;
-            app.append_row(params!["000001.SZ", trade_date, "qfq", day_pct])
-                .expect("row stock1");
-            app.append_row(params!["000002.SZ", trade_date, "qfq", day_pct * 2.0_f64])
-                .expect("row stock2");
-        }
-        app.flush().expect("flush");
-    }
-
     #[test]
     fn rebuild_concept_performance_range_builds_weighted_rows() {
         let source_dir = linshi_mulu();
@@ -1319,7 +1271,32 @@ ts_code,concepts_code,concepts_name,stock_name
         xieru_gdnm_csv(&source_dir);
 
         let trade_dates: Vec<String> = (1..=40).map(|day| format!("202402{:02}", day)).collect();
-        xieru_source_db_many_trade_dates(&source_dir, &trade_dates);
+        (|source_dir: &Path, trade_dates: &[String]| {
+            let db_path = source_db_path(source_dir.to_str().expect("utf8 path"));
+            let conn = Connection::open(db_path).expect("open source db");
+            conn.execute(
+                r#"
+            CREATE TABLE stock_data (
+                ts_code VARCHAR,
+                trade_date VARCHAR,
+                adj_type VARCHAR,
+                pct_chg DOUBLE
+            )
+            "#,
+                [],
+            )
+            .expect("create stock_data");
+
+            let mut app = conn.appender("stock_data").expect("appender");
+            for (index, trade_date) in trade_dates.iter().enumerate() {
+                let day_pct = (index + 1) as f64;
+                app.append_row(params!["000001.SZ", trade_date, "qfq", day_pct])
+                    .expect("row stock1");
+                app.append_row(params!["000002.SZ", trade_date, "qfq", day_pct * 2.0_f64])
+                    .expect("row stock2");
+            }
+            app.flush().expect("flush");
+        })(&source_dir, &trade_dates);
 
         let row_count = rebuild_concept_performance_range(
             source_dir.to_str().expect("utf8 path"),

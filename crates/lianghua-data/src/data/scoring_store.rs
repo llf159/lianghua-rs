@@ -39,7 +39,19 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
     ensure_result_table_schema(&conn, SCORE_SUMMARY_TABLE)?;
     ensure_result_table_schema(&conn, RULE_DETAILS_TABLE)?;
     ensure_result_table_schema(&conn, SCENE_DETAILS_TABLE)?;
-    drop_redundant_result_db_indexes(&conn)?;
+    (|conn: &Connection| -> Result<(), String> {
+        conn.execute("DROP INDEX IF EXISTS idx_score_summary_ts_date", [])
+            .map_err(|e| format!("删除score_summary冗余索引失败:{e}"))?;
+        conn.execute("DROP INDEX IF EXISTS idx_rule_details_ts_date_rule", [])
+            .map_err(|e| format!("删除rule_details冗余索引失败:{e}"))?;
+        conn.execute("DROP INDEX IF EXISTS idx_scene_details_ts_date_scene", [])
+            .map_err(|e| format!("删除scene_details冗余索引失败:{e}"))?;
+        conn.execute("DROP INDEX IF EXISTS idx_score_summary_trade_date_ts", [])
+            .map_err(|e| format!("删除旧score_summary索引失败:{e}"))?;
+        conn.execute("DROP INDEX IF EXISTS idx_scene_details_scene_date_ts", [])
+            .map_err(|e| format!("删除scene_details索引失败:{e}"))?;
+        Ok(())
+    })(&conn)?;
     ensure_result_db_indexes(&conn)?;
 
     Ok(())
@@ -94,59 +106,6 @@ fn create_result_table(conn: &Connection, table_name: &str) -> Result<(), String
     Ok(())
 }
 
-fn result_table_expected_columns(table_name: &str) -> Result<Vec<&'static str>, String> {
-    match table_name {
-        SCORE_SUMMARY_TABLE => Ok(vec!["ts_code", "trade_date", "total_score", "rank"]),
-        RULE_DETAILS_TABLE => Ok(vec!["ts_code", "trade_date", "rule_name", "rule_score"]),
-        SCENE_DETAILS_TABLE => Ok(vec![
-            "ts_code",
-            "trade_date",
-            "scene_name",
-            "direction",
-            "stage",
-            "stage_score",
-            "risk_score",
-            "confirm_strength",
-            "risk_intensity",
-            "scene_rank",
-        ]),
-        _ => Err(format!("不支持的结果表:{table_name}")),
-    }
-}
-
-fn result_table_exists(conn: &Connection, table_name: &str) -> Result<bool, String> {
-    let count = conn
-        .query_row(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
-            [table_name],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|e| format!("检查{table_name}是否存在失败:{e}"))?;
-    Ok(count > 0)
-}
-
-fn query_result_table_columns(conn: &Connection, table_name: &str) -> Result<Vec<String>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = ? ORDER BY ordinal_position",
-        )
-        .map_err(|e| format!("准备{table_name}列结构查询失败:{e}"))?;
-    let mut rows = stmt
-        .query([table_name])
-        .map_err(|e| format!("查询{table_name}列结构失败:{e}"))?;
-    let mut columns = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取{table_name}列结构失败:{e}"))?
-    {
-        columns.push(
-            row.get::<_, String>(0)
-                .map_err(|e| format!("读取{table_name}列名失败:{e}"))?,
-        );
-    }
-    Ok(columns)
-}
-
 fn result_table_has_primary_key(conn: &Connection, table_name: &str) -> Result<bool, String> {
     let sql = format!("SELECT CAST(pk AS BIGINT) AS pk FROM pragma_table_info('{table_name}')");
     let mut stmt = conn
@@ -170,12 +129,60 @@ fn result_table_has_primary_key(conn: &Connection, table_name: &str) -> Result<b
 }
 
 fn ensure_result_table_schema(conn: &Connection, table_name: &str) -> Result<(), String> {
-    if !result_table_exists(conn, table_name)? {
+    if !(|conn: &Connection, table_name: &str| -> Result<bool, String> {
+        let count = conn
+            .query_row(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+                [table_name],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| format!("检查{table_name}是否存在失败:{e}"))?;
+        Ok(count > 0)
+    })(conn, table_name)?
+    {
         return create_result_table(conn, table_name);
     }
 
-    let expected_columns = result_table_expected_columns(table_name)?;
-    let actual_columns = query_result_table_columns(conn, table_name)?;
+    let expected_columns = (|table_name: &str| -> Result<Vec<&'static str>, String> {
+        match table_name {
+            SCORE_SUMMARY_TABLE => Ok(vec!["ts_code", "trade_date", "total_score", "rank"]),
+            RULE_DETAILS_TABLE => Ok(vec!["ts_code", "trade_date", "rule_name", "rule_score"]),
+            SCENE_DETAILS_TABLE => Ok(vec![
+                "ts_code",
+                "trade_date",
+                "scene_name",
+                "direction",
+                "stage",
+                "stage_score",
+                "risk_score",
+                "confirm_strength",
+                "risk_intensity",
+                "scene_rank",
+            ]),
+            _ => Err(format!("不支持的结果表:{table_name}")),
+        }
+    })(table_name)?;
+    let actual_columns = (|conn: &Connection, table_name: &str| -> Result<Vec<String>, String> {
+        let mut stmt = conn
+        .prepare(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ? ORDER BY ordinal_position",
+        )
+        .map_err(|e| format!("准备{table_name}列结构查询失败:{e}"))?;
+        let mut rows = stmt
+            .query([table_name])
+            .map_err(|e| format!("查询{table_name}列结构失败:{e}"))?;
+        let mut columns = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取{table_name}列结构失败:{e}"))?
+        {
+            columns.push(
+                row.get::<_, String>(0)
+                    .map_err(|e| format!("读取{table_name}列名失败:{e}"))?,
+            );
+        }
+        Ok(columns)
+    })(conn, table_name)?;
     let columns_match = actual_columns
         == expected_columns
             .iter()
@@ -190,20 +197,6 @@ fn ensure_result_table_schema(conn: &Connection, table_name: &str) -> Result<(),
     conn.execute(&format!("DROP TABLE {table_name}"), [])
         .map_err(|e| format!("删除旧{table_name}失败:{e}"))?;
     create_result_table(conn, table_name)
-}
-
-fn drop_redundant_result_db_indexes(conn: &Connection) -> Result<(), String> {
-    conn.execute("DROP INDEX IF EXISTS idx_score_summary_ts_date", [])
-        .map_err(|e| format!("删除score_summary冗余索引失败:{e}"))?;
-    conn.execute("DROP INDEX IF EXISTS idx_rule_details_ts_date_rule", [])
-        .map_err(|e| format!("删除rule_details冗余索引失败:{e}"))?;
-    conn.execute("DROP INDEX IF EXISTS idx_scene_details_ts_date_scene", [])
-        .map_err(|e| format!("删除scene_details冗余索引失败:{e}"))?;
-    conn.execute("DROP INDEX IF EXISTS idx_score_summary_trade_date_ts", [])
-        .map_err(|e| format!("删除旧score_summary索引失败:{e}"))?;
-    conn.execute("DROP INDEX IF EXISTS idx_scene_details_scene_date_ts", [])
-        .map_err(|e| format!("删除scene_details索引失败:{e}"))?;
-    Ok(())
 }
 
 fn ensure_result_db_indexes(conn: &Connection) -> Result<(), String> {
@@ -223,108 +216,6 @@ fn ensure_result_db_indexes(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| format!("创建scene_details索引失败:{e}"))?;
     Ok(())
-}
-
-fn score_range_replaces_all_rows(
-    conn: &Connection,
-    start_date: &str,
-    end_date: &str,
-) -> Result<bool, String> {
-    for table_name in [SCORE_SUMMARY_TABLE, RULE_DETAILS_TABLE, SCENE_DETAILS_TABLE] {
-        let sql = format!(
-            "SELECT EXISTS(SELECT 1 FROM {table_name} WHERE trade_date < ? OR trade_date > ? LIMIT 1)"
-        );
-        let has_rows_outside_range = conn
-            .query_row(&sql, params![start_date, end_date], |row| {
-                row.get::<_, bool>(0)
-            })
-            .map_err(|e| format!("检查{table_name}写入范围失败:{e}"))?;
-        if has_rows_outside_range {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-fn create_shadow_result_tables(tx: &Transaction<'_>) -> Result<(), String> {
-    tx.execute_batch(&format!(
-        r#"
-        DROP TABLE IF EXISTS {SCORE_SUMMARY_SHADOW_TABLE};
-        DROP TABLE IF EXISTS {RULE_DETAILS_SHADOW_TABLE};
-        DROP TABLE IF EXISTS {SCENE_DETAILS_SHADOW_TABLE};
-
-        CREATE TABLE {SCORE_SUMMARY_SHADOW_TABLE} (
-            ts_code VARCHAR,
-            trade_date VARCHAR,
-            total_score DOUBLE,
-            rank INTEGER
-        );
-        CREATE TABLE {RULE_DETAILS_SHADOW_TABLE} (
-            ts_code VARCHAR,
-            trade_date VARCHAR,
-            rule_name VARCHAR,
-            rule_score DOUBLE
-        );
-        CREATE TABLE {SCENE_DETAILS_SHADOW_TABLE} (
-            ts_code VARCHAR,
-            trade_date VARCHAR,
-            scene_name VARCHAR,
-            direction VARCHAR,
-            stage VARCHAR,
-            stage_score DOUBLE,
-            risk_score DOUBLE,
-            confirm_strength DOUBLE,
-            risk_intensity DOUBLE,
-            scene_rank INTEGER
-        );
-        "#
-    ))
-    .map_err(|e| format!("创建结果库影子表失败:{e}"))?;
-    Ok(())
-}
-
-fn replace_result_tables_from_shadow(tx: &Transaction<'_>) -> Result<(), String> {
-    tx.execute_batch(&format!(
-        r#"
-        ALTER TABLE {SCORE_SUMMARY_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date);
-        ALTER TABLE {RULE_DETAILS_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date, rule_name);
-        ALTER TABLE {SCENE_DETAILS_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date, scene_name);
-
-        DROP TABLE {SCORE_SUMMARY_TABLE};
-        DROP TABLE {RULE_DETAILS_TABLE};
-        DROP TABLE {SCENE_DETAILS_TABLE};
-
-        ALTER TABLE {SCORE_SUMMARY_SHADOW_TABLE} RENAME TO {SCORE_SUMMARY_TABLE};
-        ALTER TABLE {RULE_DETAILS_SHADOW_TABLE} RENAME TO {RULE_DETAILS_TABLE};
-        ALTER TABLE {SCENE_DETAILS_SHADOW_TABLE} RENAME TO {SCENE_DETAILS_TABLE};
-        "#
-    ))
-    .map_err(|e| format!("切换结果库影子表失败:{e}"))?;
-    ensure_result_db_indexes(tx)?;
-    Ok(())
-}
-
-fn delete_score_range(
-    tx: &Transaction<'_>,
-    start_date: &str,
-    end_date: &str,
-) -> Result<(), String> {
-    tx.execute(
-        "DELETE FROM score_summary WHERE trade_date >= ? AND trade_date <= ?",
-        params![start_date, end_date],
-    )
-    .map_err(|e| format!("删除score_summary旧数据失败:{e}"))?;
-    tx.execute(
-        "DELETE FROM rule_details WHERE trade_date >= ? AND trade_date <= ?",
-        params![start_date, end_date],
-    )
-    .map_err(|e| format!("删除rule_details旧数据失败:{e}"))?;
-    tx.execute(
-        "DELETE FROM scene_details WHERE trade_date >= ? AND trade_date <= ?",
-        params![start_date, end_date],
-    )
-    .map_err(|e| format!("删除scene_details旧数据失败:{e}"))?;
-    delete_convolution_rank_range(tx, start_date, end_date)
 }
 
 fn delete_convolution_rank_range(
@@ -349,219 +240,12 @@ fn delete_convolution_rank_range(
     Ok(())
 }
 
-fn create_score_summary_stage(tx: &Transaction<'_>) -> Result<(), String> {
-    tx.execute(
-        r#"
-        CREATE TEMP TABLE score_summary_stage (
-            ts_code VARCHAR,
-            trade_date VARCHAR,
-            total_score DOUBLE
-        )
-        "#,
-        [],
-    )
-    .map_err(|e| format!("创建score_summary临时表失败:{e}"))?;
-    Ok(())
-}
-
 fn score_string_array(values: StringArray) -> ArrayRef {
     Arc::new(values)
 }
 
 fn score_float64_array(values: Vec<f64>) -> ArrayRef {
     Arc::new(Float64Array::from(values))
-}
-
-fn score_int32_opt_array(values: Vec<Option<i32>>) -> ArrayRef {
-    Arc::new(Int32Array::from(values))
-}
-
-fn checked_rank(rank: Option<i64>, label: &str) -> Result<Option<i32>, String> {
-    rank.map(|value| i32::try_from(value).map_err(|_| format!("{label}超出INTEGER范围: {value}")))
-        .transpose()
-}
-
-fn append_summary_stage_rows(app: &mut Appender<'_>, rows: &[ScoreSummary]) -> Result<(), String> {
-    if rows.is_empty() {
-        return Ok(());
-    }
-
-    let mut ts_code = StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(12));
-    let mut trade_date = StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(8));
-    let mut total_score = Vec::with_capacity(rows.len());
-    for row in rows {
-        ts_code.append_value(&row.ts_code);
-        trade_date.append_value(&row.trade_date);
-        total_score.push(row.total_score);
-    }
-
-    let schema = Schema::new(vec![
-        Field::new("ts_code", DataType::Utf8, false),
-        Field::new("trade_date", DataType::Utf8, false),
-        Field::new("total_score", DataType::Float64, false),
-    ]);
-    let batch = RecordBatch::try_new(
-        Arc::new(schema),
-        vec![
-            score_string_array(ts_code.finish()),
-            score_string_array(trade_date.finish()),
-            score_float64_array(total_score),
-        ],
-    )
-    .map_err(|e| format!("创建score_summary临时批次失败:{e}"))?;
-    app.append_record_batch(batch)
-        .map_err(|e| format!("批量插入score_summary临时表失败:{e}"))
-}
-
-fn insert_ranked_summary_from_stage(
-    tx: &Transaction<'_>,
-    tie_break: TieBreakWay,
-    adj_type: &str,
-    target_table: &str,
-) -> Result<(), String> {
-    match tie_break {
-        TieBreakWay::TsCode => {
-            let sql = format!(
-                r#"
-                INSERT INTO {target_table} (ts_code, trade_date, total_score, rank)
-                SELECT
-                    ts_code,
-                    trade_date,
-                    total_score,
-                    CAST(
-                        ROW_NUMBER() OVER (
-                            PARTITION BY trade_date
-                            ORDER BY total_score DESC, ts_code ASC
-                        ) AS INTEGER
-                    ) AS rank
-                FROM score_summary_stage
-                "#
-            );
-            tx.execute(&sql, [])
-                .map_err(|e| format!("写入总榜排名失败:{e}"))?;
-        }
-        TieBreakWay::KdjJ => {
-            let sql = format!(
-                r#"
-                INSERT INTO {target_table} (ts_code, trade_date, total_score, rank)
-                SELECT
-                    st.ts_code,
-                    st.trade_date,
-                    st.total_score,
-                    CAST(
-                        ROW_NUMBER() OVER (
-                            PARTITION BY st.trade_date
-                            ORDER BY st.total_score DESC, src.j ASC NULLS LAST, st.ts_code ASC
-                        ) AS INTEGER
-                    ) AS rank
-                FROM score_summary_stage AS st
-                LEFT JOIN src_db.stock_data AS src
-                  ON st.ts_code = src.ts_code
-                 AND st.trade_date = src.trade_date
-                 AND src.adj_type = ?
-                "#
-            );
-            tx.execute(&sql, params![adj_type])
-                .map_err(|e| format!("写入J值同分总榜排名失败:{e}"))?;
-        }
-    }
-    Ok(())
-}
-
-fn append_detail_rows(app: &mut Appender<'_>, rows: &[ScoreDetails]) -> Result<(), String> {
-    if rows.is_empty() {
-        return Ok(());
-    }
-
-    let mut ts_code = StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(12));
-    let mut trade_date = StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(8));
-    let mut rule_name = StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(16));
-    let mut rule_score = Vec::with_capacity(rows.len());
-    for row in rows {
-        ts_code.append_value(&row.ts_code);
-        trade_date.append_value(&row.trade_date);
-        rule_name.append_value(&row.rule_name);
-        rule_score.push(row.rule_score);
-    }
-
-    let schema = Schema::new(vec![
-        Field::new("ts_code", DataType::Utf8, false),
-        Field::new("trade_date", DataType::Utf8, false),
-        Field::new("rule_name", DataType::Utf8, false),
-        Field::new("rule_score", DataType::Float64, false),
-    ]);
-    let batch = RecordBatch::try_new(
-        Arc::new(schema),
-        vec![
-            score_string_array(ts_code.finish()),
-            score_string_array(trade_date.finish()),
-            score_string_array(rule_name.finish()),
-            score_float64_array(rule_score),
-        ],
-    )
-    .map_err(|e| format!("创建rule_details批次失败:{e}"))?;
-    app.append_record_batch(batch)
-        .map_err(|e| format!("批量插入rule_details失败:{e}"))
-}
-
-fn append_scene_rows(app: &mut Appender<'_>, rows: &[SceneDetails]) -> Result<(), String> {
-    if rows.is_empty() {
-        return Ok(());
-    }
-
-    let mut ts_code = StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(12));
-    let mut trade_date = StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(8));
-    let mut scene_name = StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(16));
-    let mut direction = StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(6));
-    let mut stage = StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(8));
-    let mut stage_score = Vec::with_capacity(rows.len());
-    let mut risk_score = Vec::with_capacity(rows.len());
-    let mut confirm_strength = Vec::with_capacity(rows.len());
-    let mut risk_intensity = Vec::with_capacity(rows.len());
-    let mut scene_rank = Vec::with_capacity(rows.len());
-    for row in rows {
-        ts_code.append_value(&row.ts_code);
-        trade_date.append_value(&row.trade_date);
-        scene_name.append_value(&row.scene_name);
-        direction.append_value(&row.direction);
-        stage.append_option(row.stage.as_deref());
-        stage_score.push(row.stage_score);
-        risk_score.push(row.risk_score);
-        confirm_strength.push(row.confirm_strength);
-        risk_intensity.push(row.risk_intensity);
-        scene_rank.push(checked_rank(row.scene_rank, "scene_details.scene_rank")?);
-    }
-
-    let schema = Schema::new(vec![
-        Field::new("ts_code", DataType::Utf8, false),
-        Field::new("trade_date", DataType::Utf8, false),
-        Field::new("scene_name", DataType::Utf8, false),
-        Field::new("direction", DataType::Utf8, false),
-        Field::new("stage", DataType::Utf8, true),
-        Field::new("stage_score", DataType::Float64, false),
-        Field::new("risk_score", DataType::Float64, false),
-        Field::new("confirm_strength", DataType::Float64, false),
-        Field::new("risk_intensity", DataType::Float64, false),
-        Field::new("scene_rank", DataType::Int32, true),
-    ]);
-    let batch = RecordBatch::try_new(
-        Arc::new(schema),
-        vec![
-            score_string_array(ts_code.finish()),
-            score_string_array(trade_date.finish()),
-            score_string_array(scene_name.finish()),
-            score_string_array(direction.finish()),
-            score_string_array(stage.finish()),
-            score_float64_array(stage_score),
-            score_float64_array(risk_score),
-            score_float64_array(confirm_strength),
-            score_float64_array(risk_intensity),
-            score_int32_opt_array(scene_rank),
-        ],
-    )
-    .map_err(|e| format!("创建scene_details批次失败:{e}"))?;
-    app.append_record_batch(batch)
-        .map_err(|e| format!("批量插入scene_details失败:{e}"))
 }
 
 fn duckdb_string_literal(value: &str) -> String {
@@ -1206,7 +890,25 @@ pub fn write_score_batches_from_channel(
     let total_started_at = time::Instant::now();
     let mut profile = ScoreWriteProfile::default();
     let mut conn = Connection::open(db_path).map_err(|e| format!("结果库连接失败:{e}"))?;
-    let full_replace = score_range_replaces_all_rows(&conn, start_date, end_date)?;
+    let full_replace = (|conn: &Connection,
+                         start_date: &str,
+                         end_date: &str|
+     -> Result<bool, String> {
+        for table_name in [SCORE_SUMMARY_TABLE, RULE_DETAILS_TABLE, SCENE_DETAILS_TABLE] {
+            let sql = format!(
+                "SELECT EXISTS(SELECT 1 FROM {table_name} WHERE trade_date < ? OR trade_date > ? LIMIT 1)"
+            );
+            let has_rows_outside_range = conn
+                .query_row(&sql, params![start_date, end_date], |row| {
+                    row.get::<_, bool>(0)
+                })
+                .map_err(|e| format!("检查{table_name}写入范围失败:{e}"))?;
+            if has_rows_outside_range {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    })(&conn, start_date, end_date)?;
 
     let mut source_db_attached = false;
     if let TieBreakWay::KdjJ = tie_break {
@@ -1227,13 +929,78 @@ pub fn write_score_batches_from_channel(
 
         let delete_started_at = time::Instant::now();
         if full_replace {
-            create_shadow_result_tables(&tx)?;
+            (|tx: &Transaction<'_>| -> Result<(), String> {
+                tx.execute_batch(&format!(
+                    r#"
+        DROP TABLE IF EXISTS {SCORE_SUMMARY_SHADOW_TABLE};
+        DROP TABLE IF EXISTS {RULE_DETAILS_SHADOW_TABLE};
+        DROP TABLE IF EXISTS {SCENE_DETAILS_SHADOW_TABLE};
+
+        CREATE TABLE {SCORE_SUMMARY_SHADOW_TABLE} (
+            ts_code VARCHAR,
+            trade_date VARCHAR,
+            total_score DOUBLE,
+            rank INTEGER
+        );
+        CREATE TABLE {RULE_DETAILS_SHADOW_TABLE} (
+            ts_code VARCHAR,
+            trade_date VARCHAR,
+            rule_name VARCHAR,
+            rule_score DOUBLE
+        );
+        CREATE TABLE {SCENE_DETAILS_SHADOW_TABLE} (
+            ts_code VARCHAR,
+            trade_date VARCHAR,
+            scene_name VARCHAR,
+            direction VARCHAR,
+            stage VARCHAR,
+            stage_score DOUBLE,
+            risk_score DOUBLE,
+            confirm_strength DOUBLE,
+            risk_intensity DOUBLE,
+            scene_rank INTEGER
+        );
+        "#
+                ))
+                .map_err(|e| format!("创建结果库影子表失败:{e}"))?;
+                Ok(())
+            })(&tx)?;
             delete_convolution_rank_range(&tx, start_date, end_date)?;
         } else {
-            delete_score_range(&tx, start_date, end_date)?;
+            (|tx: &Transaction<'_>, start_date: &str, end_date: &str| -> Result<(), String> {
+                tx.execute(
+                    "DELETE FROM score_summary WHERE trade_date >= ? AND trade_date <= ?",
+                    params![start_date, end_date],
+                )
+                .map_err(|e| format!("删除score_summary旧数据失败:{e}"))?;
+                tx.execute(
+                    "DELETE FROM rule_details WHERE trade_date >= ? AND trade_date <= ?",
+                    params![start_date, end_date],
+                )
+                .map_err(|e| format!("删除rule_details旧数据失败:{e}"))?;
+                tx.execute(
+                    "DELETE FROM scene_details WHERE trade_date >= ? AND trade_date <= ?",
+                    params![start_date, end_date],
+                )
+                .map_err(|e| format!("删除scene_details旧数据失败:{e}"))?;
+                delete_convolution_rank_range(tx, start_date, end_date)
+            })(&tx, start_date, end_date)?;
         }
         profile.delete_range_ms = delete_started_at.elapsed().as_millis() as u64;
-        create_score_summary_stage(&tx)?;
+        (|tx: &Transaction<'_>| -> Result<(), String> {
+            tx.execute(
+                r#"
+        CREATE TEMP TABLE score_summary_stage (
+            ts_code VARCHAR,
+            trade_date VARCHAR,
+            total_score DOUBLE
+        )
+        "#,
+                [],
+            )
+            .map_err(|e| format!("创建score_summary临时表失败:{e}"))?;
+            Ok(())
+        })(&tx)?;
 
         let summary_target = if full_replace {
             SCORE_SUMMARY_SHADOW_TABLE
@@ -1270,8 +1037,77 @@ pub fn write_score_batches_from_channel(
                     }
                 };
 
-                append_summary_stage_rows(&mut summary_app, &batch.summary_rows)?;
-                append_detail_rows(&mut detail_app, &batch.detail_rows)?;
+                (|app: &mut Appender<'_>, rows: &[ScoreSummary]| -> Result<(), String> {
+                    if rows.is_empty() {
+                        return Ok(());
+                    }
+
+                    let mut ts_code =
+                        StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(12));
+                    let mut trade_date =
+                        StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(8));
+                    let mut total_score = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        ts_code.append_value(&row.ts_code);
+                        trade_date.append_value(&row.trade_date);
+                        total_score.push(row.total_score);
+                    }
+
+                    let schema = Schema::new(vec![
+                        Field::new("ts_code", DataType::Utf8, false),
+                        Field::new("trade_date", DataType::Utf8, false),
+                        Field::new("total_score", DataType::Float64, false),
+                    ]);
+                    let batch = RecordBatch::try_new(
+                        Arc::new(schema),
+                        vec![
+                            score_string_array(ts_code.finish()),
+                            score_string_array(trade_date.finish()),
+                            score_float64_array(total_score),
+                        ],
+                    )
+                    .map_err(|e| format!("创建score_summary临时批次失败:{e}"))?;
+                    app.append_record_batch(batch)
+                        .map_err(|e| format!("批量插入score_summary临时表失败:{e}"))
+                })(&mut summary_app, &batch.summary_rows)?;
+                (|app: &mut Appender<'_>, rows: &[ScoreDetails]| -> Result<(), String> {
+                    if rows.is_empty() {
+                        return Ok(());
+                    }
+
+                    let mut ts_code =
+                        StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(12));
+                    let mut trade_date =
+                        StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(8));
+                    let mut rule_name =
+                        StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(16));
+                    let mut rule_score = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        ts_code.append_value(&row.ts_code);
+                        trade_date.append_value(&row.trade_date);
+                        rule_name.append_value(&row.rule_name);
+                        rule_score.push(row.rule_score);
+                    }
+
+                    let schema = Schema::new(vec![
+                        Field::new("ts_code", DataType::Utf8, false),
+                        Field::new("trade_date", DataType::Utf8, false),
+                        Field::new("rule_name", DataType::Utf8, false),
+                        Field::new("rule_score", DataType::Float64, false),
+                    ]);
+                    let batch = RecordBatch::try_new(
+                        Arc::new(schema),
+                        vec![
+                            score_string_array(ts_code.finish()),
+                            score_string_array(trade_date.finish()),
+                            score_string_array(rule_name.finish()),
+                            score_float64_array(rule_score),
+                        ],
+                    )
+                    .map_err(|e| format!("创建rule_details批次失败:{e}"))?;
+                    app.append_record_batch(batch)
+                        .map_err(|e| format!("批量插入rule_details失败:{e}"))
+                })(&mut detail_app, &batch.detail_rows)?;
                 scene_rows.extend(batch.scene_rows);
                 batch_count += 1;
 
@@ -1297,7 +1133,82 @@ pub fn write_score_batches_from_channel(
             let mut scene_app = tx
                 .appender(scene_target)
                 .map_err(|e| format!("scene_details appender创建失败:{e}"))?;
-            append_scene_rows(&mut scene_app, &scene_rows)?;
+            (|app: &mut Appender<'_>, rows: &[SceneDetails]| -> Result<(), String> {
+                if rows.is_empty() {
+                    return Ok(());
+                }
+
+                let mut ts_code =
+                    StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(12));
+                let mut trade_date =
+                    StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(8));
+                let mut scene_name =
+                    StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(16));
+                let mut direction =
+                    StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(6));
+                let mut stage =
+                    StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(8));
+                let mut stage_score = Vec::with_capacity(rows.len());
+                let mut risk_score = Vec::with_capacity(rows.len());
+                let mut confirm_strength = Vec::with_capacity(rows.len());
+                let mut risk_intensity = Vec::with_capacity(rows.len());
+                let mut scene_rank = Vec::with_capacity(rows.len());
+                for row in rows {
+                    ts_code.append_value(&row.ts_code);
+                    trade_date.append_value(&row.trade_date);
+                    scene_name.append_value(&row.scene_name);
+                    direction.append_value(&row.direction);
+                    stage.append_option(row.stage.as_deref());
+                    stage_score.push(row.stage_score);
+                    risk_score.push(row.risk_score);
+                    confirm_strength.push(row.confirm_strength);
+                    risk_intensity.push(row.risk_intensity);
+                    scene_rank.push((|rank: Option<i64>,
+                                      label: &str|
+                     -> Result<Option<i32>, String> {
+                        rank.map(|value| {
+                            i32::try_from(value)
+                                .map_err(|_| format!("{label}超出INTEGER范围: {value}"))
+                        })
+                        .transpose()
+                    })(
+                        row.scene_rank, "scene_details.scene_rank"
+                    )?);
+                }
+
+                let schema = Schema::new(vec![
+                    Field::new("ts_code", DataType::Utf8, false),
+                    Field::new("trade_date", DataType::Utf8, false),
+                    Field::new("scene_name", DataType::Utf8, false),
+                    Field::new("direction", DataType::Utf8, false),
+                    Field::new("stage", DataType::Utf8, true),
+                    Field::new("stage_score", DataType::Float64, false),
+                    Field::new("risk_score", DataType::Float64, false),
+                    Field::new("confirm_strength", DataType::Float64, false),
+                    Field::new("risk_intensity", DataType::Float64, false),
+                    Field::new("scene_rank", DataType::Int32, true),
+                ]);
+                let batch = RecordBatch::try_new(
+                    Arc::new(schema),
+                    vec![
+                        score_string_array(ts_code.finish()),
+                        score_string_array(trade_date.finish()),
+                        score_string_array(scene_name.finish()),
+                        score_string_array(direction.finish()),
+                        score_string_array(stage.finish()),
+                        score_float64_array(stage_score),
+                        score_float64_array(risk_score),
+                        score_float64_array(confirm_strength),
+                        score_float64_array(risk_intensity),
+                        (|values: Vec<Option<i32>>| -> ArrayRef {
+                            Arc::new(Int32Array::from(values))
+                        })(scene_rank),
+                    ],
+                )
+                .map_err(|e| format!("创建scene_details批次失败:{e}"))?;
+                app.append_record_batch(batch)
+                    .map_err(|e| format!("批量插入scene_details失败:{e}"))
+            })(&mut scene_app, &scene_rows)?;
             scene_app
                 .flush()
                 .map_err(|e| format!("刷新scene_details失败:{e}"))?;
@@ -1307,12 +1218,83 @@ pub fn write_score_batches_from_channel(
         profile.batch_count = batch_count;
 
         let summary_rank_started_at = time::Instant::now();
-        insert_ranked_summary_from_stage(&tx, tie_break, adj_type, summary_target)?;
+        (|tx: &Transaction<'_>,
+          tie_break: TieBreakWay,
+          adj_type: &str,
+          target_table: &str|
+         -> Result<(), String> {
+            match tie_break {
+                TieBreakWay::TsCode => {
+                    let sql = format!(
+                        r#"
+                INSERT INTO {target_table} (ts_code, trade_date, total_score, rank)
+                SELECT
+                    ts_code,
+                    trade_date,
+                    total_score,
+                    CAST(
+                        ROW_NUMBER() OVER (
+                            PARTITION BY trade_date
+                            ORDER BY total_score DESC, ts_code ASC
+                        ) AS INTEGER
+                    ) AS rank
+                FROM score_summary_stage
+                "#
+                    );
+                    tx.execute(&sql, [])
+                        .map_err(|e| format!("写入总榜排名失败:{e}"))?;
+                }
+                TieBreakWay::KdjJ => {
+                    let sql = format!(
+                        r#"
+                INSERT INTO {target_table} (ts_code, trade_date, total_score, rank)
+                SELECT
+                    st.ts_code,
+                    st.trade_date,
+                    st.total_score,
+                    CAST(
+                        ROW_NUMBER() OVER (
+                            PARTITION BY st.trade_date
+                            ORDER BY st.total_score DESC, src.j ASC NULLS LAST, st.ts_code ASC
+                        ) AS INTEGER
+                    ) AS rank
+                FROM score_summary_stage AS st
+                LEFT JOIN src_db.stock_data AS src
+                  ON st.ts_code = src.ts_code
+                 AND st.trade_date = src.trade_date
+                 AND src.adj_type = ?
+                "#
+                    );
+                    tx.execute(&sql, params![adj_type])
+                        .map_err(|e| format!("写入J值同分总榜排名失败:{e}"))?;
+                }
+            }
+            Ok(())
+        })(&tx, tie_break, adj_type, summary_target)?;
         profile.summary_rank_ms = summary_rank_started_at.elapsed().as_millis() as u64;
 
         if full_replace {
             let recreate_indexes_started_at = time::Instant::now();
-            replace_result_tables_from_shadow(&tx)?;
+            (|tx: &Transaction<'_>| -> Result<(), String> {
+                tx.execute_batch(&format!(
+                    r#"
+        ALTER TABLE {SCORE_SUMMARY_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date);
+        ALTER TABLE {RULE_DETAILS_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date, rule_name);
+        ALTER TABLE {SCENE_DETAILS_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date, scene_name);
+
+        DROP TABLE {SCORE_SUMMARY_TABLE};
+        DROP TABLE {RULE_DETAILS_TABLE};
+        DROP TABLE {SCENE_DETAILS_TABLE};
+
+        ALTER TABLE {SCORE_SUMMARY_SHADOW_TABLE} RENAME TO {SCORE_SUMMARY_TABLE};
+        ALTER TABLE {RULE_DETAILS_SHADOW_TABLE} RENAME TO {RULE_DETAILS_TABLE};
+        ALTER TABLE {SCENE_DETAILS_SHADOW_TABLE} RENAME TO {SCENE_DETAILS_TABLE};
+        "#
+                ))
+                .map_err(|e| format!("切换结果库影子表失败:{e}"))?;
+                ensure_result_db_indexes(tx)?;
+                Ok(())
+            })(&tx)?;
             profile.recreate_indexes_ms = recreate_indexes_started_at.elapsed().as_millis() as u64;
         }
 

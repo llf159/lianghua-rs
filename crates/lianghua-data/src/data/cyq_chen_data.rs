@@ -41,7 +41,6 @@ const CYQ_CHEN_SNAPSHOT_TABLE: &str = "cyq_chen_snapshot";
 const CYQ_CHEN_BIN_TABLE: &str = "cyq_chen_bin";
 const CYQ_CHEN_META_TABLE: &str = "cyq_chen_meta";
 const DEFAULT_ADJ_TYPE: &str = "qfq";
-const CYQ_CHEN_GROUP_SIZE: usize = 128;
 const CYQ_CHEN_GROUP_SIZE_INCREMENTAL: usize = 8;
 const CYQ_CHEN_QUEUE_BOUND: usize = 8;
 const CYQ_CHEN_FLUSH_BATCH_SIZE: usize = 32;
@@ -156,7 +155,45 @@ pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
     )
     .map_err(|e| format!("创建cyq_chen_meta失败:{e}"))?;
 
-    ensure_cyq_chen_snapshot_columns(&conn)?;
+    (|conn: &Connection| -> Result<(), String> {
+        for (column_name, column_type) in [
+            ("total_profit_ratio", "DOUBLE"),
+            ("total_trapped_ratio", "DOUBLE"),
+            ("main_avg_cost", "DOUBLE"),
+            ("chip_peak_price", "DOUBLE"),
+            ("percent_70_price_low", "DOUBLE"),
+            ("percent_70_price_high", "DOUBLE"),
+            ("percent_70_concentration", "DOUBLE"),
+            ("percent_90_price_low", "DOUBLE"),
+            ("percent_90_price_high", "DOUBLE"),
+            ("percent_90_concentration", "DOUBLE"),
+            ("main_profit_ratio", "DOUBLE"),
+            ("main_trapped_ratio", "DOUBLE"),
+        ] {
+            let exists = conn
+                .query_row(
+                    r#"
+                SELECT COUNT(*)
+                FROM information_schema.columns
+                WHERE table_name = ? AND column_name = ?
+                "#,
+                    params![CYQ_CHEN_SNAPSHOT_TABLE, column_name],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|e| format!("检查cyq_chen_snapshot字段失败:{e}"))?;
+            if exists <= 0 {
+                conn.execute(
+                &format!(
+                    "ALTER TABLE {CYQ_CHEN_SNAPSHOT_TABLE} ADD COLUMN {column_name} {column_type}"
+                ),
+                [],
+            )
+            .map_err(|e| format!("补充cyq_chen_snapshot字段 {column_name} 失败:{e}"))?;
+            }
+        }
+
+        Ok(())
+    })(&conn)?;
     ensure_cyq_chen_snapshot_index(&conn)?;
 
     Ok(())
@@ -191,24 +228,6 @@ fn remove_cyq_chen_db_artifacts(db_path: &Path) {
     let _ = fs::remove_file(db_path);
     let _ = fs::remove_file(path_with_suffix(db_path, ".wal"));
     let _ = fs::remove_dir_all(path_with_suffix(db_path, ".tmp"));
-}
-
-fn cyq_chen_rebuild_temp_path(db_path: &Path) -> Result<std::path::PathBuf, String> {
-    let parent = db_path
-        .parent()
-        .ok_or_else(|| format!("新筹码库路径缺少父目录: {}", db_path.display()))?;
-    let file_name = db_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| format!("新筹码库文件名不是有效UTF-8: {}", db_path.display()))?;
-    let unique_suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    Ok(parent.join(format!(
-        ".{file_name}.rebuild-{}-{unique_suffix}.tmp",
-        std::process::id()
-    )))
 }
 
 fn checkpoint_cyq_chen_db_if_exists(db_path: &Path) -> Result<(), String> {
@@ -272,46 +291,6 @@ fn replace_cyq_chen_db(temp_path: &Path, db_path: &Path) -> Result<(), String> {
     }
 }
 
-fn ensure_cyq_chen_snapshot_columns(conn: &Connection) -> Result<(), String> {
-    for (column_name, column_type) in [
-        ("total_profit_ratio", "DOUBLE"),
-        ("total_trapped_ratio", "DOUBLE"),
-        ("main_avg_cost", "DOUBLE"),
-        ("chip_peak_price", "DOUBLE"),
-        ("percent_70_price_low", "DOUBLE"),
-        ("percent_70_price_high", "DOUBLE"),
-        ("percent_70_concentration", "DOUBLE"),
-        ("percent_90_price_low", "DOUBLE"),
-        ("percent_90_price_high", "DOUBLE"),
-        ("percent_90_concentration", "DOUBLE"),
-        ("main_profit_ratio", "DOUBLE"),
-        ("main_trapped_ratio", "DOUBLE"),
-    ] {
-        let exists = conn
-            .query_row(
-                r#"
-                SELECT COUNT(*)
-                FROM information_schema.columns
-                WHERE table_name = ? AND column_name = ?
-                "#,
-                params![CYQ_CHEN_SNAPSHOT_TABLE, column_name],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(|e| format!("检查cyq_chen_snapshot字段失败:{e}"))?;
-        if exists <= 0 {
-            conn.execute(
-                &format!(
-                    "ALTER TABLE {CYQ_CHEN_SNAPSHOT_TABLE} ADD COLUMN {column_name} {column_type}"
-                ),
-                [],
-            )
-            .map_err(|e| format!("补充cyq_chen_snapshot字段 {column_name} 失败:{e}"))?;
-        }
-    }
-
-    Ok(())
-}
-
 fn clear_cyq_chen_tables(db_path: &Path) -> Result<(), String> {
     init_cyq_chen_db(db_path)?;
 
@@ -329,15 +308,6 @@ fn clear_cyq_chen_tables(db_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn stable_text_hash(text: &str) -> String {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in text.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{hash:016x}:{:016x}", text.len())
-}
-
 fn current_chip_change_strategy_hash(source_dir: &str) -> Result<String, String> {
     let path = chip_change_rule_path(source_dir);
     let text = read_to_string(&path).map_err(|e| {
@@ -346,7 +316,14 @@ fn current_chip_change_strategy_hash(source_dir: &str) -> Result<String, String>
             path.display()
         )
     })?;
-    Ok(stable_text_hash(&text))
+    Ok((|text: &str| -> String {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for byte in text.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{hash:016x}:{:016x}", text.len())
+    })(&text))
 }
 
 fn query_cyq_chen_meta_value(db_path: &Path, key: &str) -> Result<Option<String>, String> {
@@ -445,54 +422,6 @@ fn query_latest_cyq_chen_metadata(
     Ok(Some((trade_date, config)))
 }
 
-fn query_existing_cyq_chen_trade_date_range(
-    db_path: &Path,
-) -> Result<Option<(String, String)>, String> {
-    init_cyq_chen_db(db_path)?;
-    let conn = Connection::open(db_path).map_err(|e| format!("打开新筹码库失败:{e}"))?;
-    let table_exists = conn
-        .query_row(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
-            [CYQ_CHEN_SNAPSHOT_TABLE],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|e| format!("检查新筹码库表结构失败:{e}"))?;
-    if table_exists <= 0 {
-        return Ok(None);
-    }
-
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT MIN(trade_date), MAX(trade_date)
-            FROM cyq_chen_snapshot
-            WHERE adj_type = ?
-            "#,
-        )
-        .map_err(|e| format!("预编译新筹码库日期范围查询失败:{e}"))?;
-    let mut rows = stmt
-        .query(params![DEFAULT_ADJ_TYPE])
-        .map_err(|e| format!("查询新筹码库日期范围失败:{e}"))?;
-    let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取新筹码库日期范围失败:{e}"))?
-    else {
-        return Ok(None);
-    };
-
-    let min_trade_date: Option<String> = row
-        .get(0)
-        .map_err(|e| format!("读取新筹码库最早日期失败:{e}"))?;
-    let max_trade_date: Option<String> = row
-        .get(1)
-        .map_err(|e| format!("读取新筹码库最晚日期失败:{e}"))?;
-
-    Ok(match (min_trade_date, max_trade_date) {
-        (Some(min_trade_date), Some(max_trade_date)) => Some((min_trade_date, max_trade_date)),
-        _ => None,
-    })
-}
-
 pub fn query_cyq_chen_strategy_maintenance_status(
     source_dir: &str,
 ) -> Result<CyqChenStrategyMaintenanceStatus, String> {
@@ -548,164 +477,6 @@ fn bucket_history_key(price_low: f64, price_high: f64) -> (u64, u64) {
         round_chen_chip_value(price_low).to_bits(),
         round_chen_chip_value(price_high).to_bits(),
     )
-}
-
-fn load_cyq_chen_initial_state(
-    conn: &Connection,
-    ts_code: &str,
-    output_start_date: &str,
-    row_trade_dates: &[String],
-    output_start_index: usize,
-) -> Result<Option<CyqChenInitialState>, String> {
-    let latest_state_date = conn
-        .query_row(
-            r#"
-            SELECT MAX(trade_date)
-            FROM cyq_chen_snapshot
-            WHERE ts_code = ? AND adj_type = ? AND trade_date < ?
-            "#,
-            params![ts_code, DEFAULT_ADJ_TYPE, output_start_date],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .map_err(|e| format!("查询新筹码最新状态失败, ts_code={ts_code}: {e}"))?;
-    let Some(state_trade_date) = latest_state_date else {
-        return Ok(None);
-    };
-
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT bin_index, price, price_low, price_high, main_chip, retail_chip, total_chip
-            FROM cyq_chen_bin
-            WHERE ts_code = ? AND adj_type = ? AND trade_date = ?
-            ORDER BY bin_index ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译新筹码状态分桶查询失败, ts_code={ts_code}: {e}"))?;
-    let mut rows = stmt
-        .query(params![
-            ts_code,
-            DEFAULT_ADJ_TYPE,
-            state_trade_date.as_str()
-        ])
-        .map_err(|e| format!("查询新筹码状态分桶失败, ts_code={ts_code}: {e}"))?;
-    let mut bins = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取新筹码状态分桶失败, ts_code={ts_code}: {e}"))?
-    {
-        let index_i64: i64 = row
-            .get(0)
-            .map_err(|e| format!("读取新筹码分桶序号失败, ts_code={ts_code}: {e}"))?;
-        bins.push(ChenChipBin {
-            index: index_i64.max(0) as usize,
-            price: row
-                .get(1)
-                .map_err(|e| format!("读取新筹码分桶价格失败, ts_code={ts_code}: {e}"))?,
-            price_low: row
-                .get(2)
-                .map_err(|e| format!("读取新筹码分桶下沿失败, ts_code={ts_code}: {e}"))?,
-            price_high: row
-                .get(3)
-                .map_err(|e| format!("读取新筹码分桶上沿失败, ts_code={ts_code}: {e}"))?,
-            main_chip: row
-                .get(4)
-                .map_err(|e| format!("读取新筹码主力筹码失败, ts_code={ts_code}: {e}"))?,
-            retail_chip: row
-                .get(5)
-                .map_err(|e| format!("读取新筹码散户筹码失败, ts_code={ts_code}: {e}"))?,
-            total_chip: row
-                .get(6)
-                .map_err(|e| format!("读取新筹码总筹码失败, ts_code={ts_code}: {e}"))?,
-        });
-    }
-    if bins.is_empty() {
-        return Ok(None);
-    }
-
-    let mut bin_index_by_key = HashMap::new();
-    for (index, bin) in bins.iter().enumerate() {
-        bin_index_by_key.insert(bucket_history_key(bin.price_low, bin.price_high), index);
-    }
-
-    let mut main_ratio_history: Vec<Arc<Vec<Option<f64>>>> = (0..bins.len())
-        .map(|_| Arc::new(vec![None; row_trade_dates.len()]))
-        .collect();
-    if output_start_index > 0 {
-        let history_start_date = row_trade_dates
-            .first()
-            .map(String::as_str)
-            .unwrap_or(state_trade_date.as_str());
-        let mut history_stmt = conn
-            .prepare(
-                r#"
-                SELECT trade_date, price_low, price_high, main_chip, retail_chip
-                FROM cyq_chen_bin
-                WHERE ts_code = ?
-                  AND adj_type = ?
-                  AND trade_date >= ?
-                  AND trade_date < ?
-                ORDER BY trade_date ASC, bin_index ASC
-                "#,
-            )
-            .map_err(|e| format!("预编译新筹码历史比例查询失败, ts_code={ts_code}: {e}"))?;
-        let mut history_rows = history_stmt
-            .query(params![
-                ts_code,
-                DEFAULT_ADJ_TYPE,
-                history_start_date,
-                output_start_date
-            ])
-            .map_err(|e| format!("查询新筹码历史比例失败, ts_code={ts_code}: {e}"))?;
-        let row_index_by_date = row_trade_dates
-            .iter()
-            .take(output_start_index)
-            .enumerate()
-            .map(|(index, trade_date)| (trade_date.as_str(), index))
-            .collect::<HashMap<_, _>>();
-
-        while let Some(row) = history_rows
-            .next()
-            .map_err(|e| format!("读取新筹码历史比例失败, ts_code={ts_code}: {e}"))?
-        {
-            let trade_date: String = row
-                .get(0)
-                .map_err(|e| format!("读取新筹码历史日期失败, ts_code={ts_code}: {e}"))?;
-            let Some(row_index) = row_index_by_date.get(trade_date.as_str()).copied() else {
-                continue;
-            };
-            let price_low: f64 = row
-                .get(1)
-                .map_err(|e| format!("读取新筹码历史分桶下沿失败, ts_code={ts_code}: {e}"))?;
-            let price_high: f64 = row
-                .get(2)
-                .map_err(|e| format!("读取新筹码历史分桶上沿失败, ts_code={ts_code}: {e}"))?;
-            let main_chip: f64 = row
-                .get(3)
-                .map_err(|e| format!("读取新筹码历史主力筹码失败, ts_code={ts_code}: {e}"))?;
-            let retail_chip: f64 = row
-                .get(4)
-                .map_err(|e| format!("读取新筹码历史散户筹码失败, ts_code={ts_code}: {e}"))?;
-            let Some(bucket_index) = bin_index_by_key
-                .get(&bucket_history_key(price_low, price_high))
-                .copied()
-            else {
-                continue;
-            };
-            let total = main_chip + retail_chip;
-            Arc::make_mut(&mut main_ratio_history[bucket_index])[row_index] = if total > 1e-10 {
-                Some(main_chip / total)
-            } else {
-                Some(0.0)
-            };
-        }
-    }
-
-    Ok(Some(CyqChenInitialState {
-        state_trade_date,
-        bins,
-        main_ratio_history,
-    }))
 }
 
 fn source_stock_data_exists(conn: &Connection) -> Result<bool, String> {
@@ -807,17 +578,6 @@ fn resolve_cyq_chen_load_start_date(
     Ok(Some(trade_dates[load_start_index].clone()))
 }
 
-fn count_output_rows(row_data: &RowData, start_date: &str, end_date: &str) -> usize {
-    row_data
-        .trade_dates
-        .iter()
-        .filter(|trade_date| {
-            let trade_date = trade_date.as_str();
-            trade_date >= start_date && trade_date <= end_date
-        })
-        .count()
-}
-
 fn resolve_first_computable_output_date(
     row_data: &RowData,
     start_date: &str,
@@ -838,111 +598,6 @@ fn resolve_first_computable_output_date(
             }
             Some(trade_date.clone())
         })
-}
-
-fn compute_cyq_chen_stock(
-    mut row_data: RowData,
-    state_conn: Option<&Connection>,
-    ts_code: &str,
-    start_date: &str,
-    end_date: &str,
-    chip_config: &CompiledChipChangeConfig,
-    config: ChenChipConfig,
-    st_list: &HashSet<String>,
-    total_share_map: &HashMap<String, f64>,
-) -> Result<ComputedCyqChenStock, String> {
-    if row_data.trade_dates.is_empty() {
-        return Ok(ComputedCyqChenStock {
-            ts_code: ts_code.to_string(),
-            snapshots: Vec::new(),
-        });
-    }
-
-    inject_stock_extra_fields(
-        &mut row_data,
-        ts_code,
-        st_list.contains(ts_code),
-        total_share_map.get(ts_code).copied(),
-    )?;
-
-    let Some(output_start_date) =
-        resolve_first_computable_output_date(&row_data, start_date, end_date, 0)
-    else {
-        return Ok(ComputedCyqChenStock {
-            ts_code: ts_code.to_string(),
-            snapshots: Vec::new(),
-        });
-    };
-
-    let output_start_index = row_data
-        .trade_dates
-        .iter()
-        .position(|trade_date| trade_date == &output_start_date)
-        .ok_or_else(|| format!("缺少新筹码输出起始日期: {output_start_date}"))?;
-    let initial_state = match state_conn {
-        Some(conn) => load_cyq_chen_initial_state(
-            conn,
-            ts_code,
-            &output_start_date,
-            &row_data.trade_dates,
-            output_start_index,
-        )?,
-        None => None,
-    };
-
-    let snapshots = if let Some(initial_state) = initial_state {
-        let Some(continuation_start_date) = row_data
-            .trade_dates
-            .iter()
-            .find(|trade_date| trade_date.as_str() > initial_state.state_trade_date.as_str())
-            .cloned()
-        else {
-            return Ok(ComputedCyqChenStock {
-                ts_code: ts_code.to_string(),
-                snapshots: Vec::new(),
-            });
-        };
-        compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
-            &row_data,
-            &continuation_start_date,
-            &initial_state.bins,
-            &initial_state.main_ratio_history,
-            chip_config,
-            config,
-        )?
-    } else {
-        let Some(output_start_date) = resolve_first_computable_output_date(
-            &row_data,
-            start_date,
-            end_date,
-            config.warmup_days,
-        ) else {
-            return Ok(ComputedCyqChenStock {
-                ts_code: ts_code.to_string(),
-                snapshots: Vec::new(),
-            });
-        };
-        compute_chen_chip_snapshots_with_compiled_config(
-            &row_data,
-            &output_start_date,
-            chip_config,
-            config,
-        )?
-    };
-    let snapshots = snapshots
-        .into_iter()
-        .filter(|snapshot| {
-            snapshot
-                .trade_date
-                .as_deref()
-                .is_some_and(|trade_date| trade_date >= start_date && trade_date <= end_date)
-        })
-        .collect();
-
-    Ok(ComputedCyqChenStock {
-        ts_code: ts_code.to_string(),
-        snapshots,
-    })
 }
 
 fn compute_cyq_chen_stock_group_batch(
@@ -991,7 +646,16 @@ fn compute_cyq_chen_stock_group_batch(
             )
             .is_none()
         {
-            let output_rows = count_output_rows(&row_data, start_date, end_date);
+            let output_rows = (|row_data: &RowData, start_date: &str, end_date: &str| -> usize {
+                row_data
+                    .trade_dates
+                    .iter()
+                    .filter(|trade_date| {
+                        let trade_date = trade_date.as_str();
+                        trade_date >= start_date && trade_date <= end_date
+                    })
+                    .count()
+            })(&row_data, start_date, end_date);
             if output_rows > 0 {
                 let need_rows = config.warmup_days.saturating_add(output_rows);
                 if need_rows > 0 {
@@ -1023,7 +687,274 @@ fn compute_cyq_chen_stock_group_batch(
             }
         }
 
-        let stock = compute_cyq_chen_stock(
+        let stock = (|mut row_data: RowData,
+                      state_conn: Option<&Connection>,
+                      ts_code: &str,
+                      start_date: &str,
+                      end_date: &str,
+                      chip_config: &CompiledChipChangeConfig,
+                      config: ChenChipConfig,
+                      st_list: &HashSet<String>,
+                      total_share_map: &HashMap<String, f64>|
+         -> Result<ComputedCyqChenStock, String> {
+            if row_data.trade_dates.is_empty() {
+                return Ok(ComputedCyqChenStock {
+                    ts_code: ts_code.to_string(),
+                    snapshots: Vec::new(),
+                });
+            }
+
+            inject_stock_extra_fields(
+                &mut row_data,
+                ts_code,
+                st_list.contains(ts_code),
+                total_share_map.get(ts_code).copied(),
+            )?;
+
+            let Some(output_start_date) =
+                resolve_first_computable_output_date(&row_data, start_date, end_date, 0)
+            else {
+                return Ok(ComputedCyqChenStock {
+                    ts_code: ts_code.to_string(),
+                    snapshots: Vec::new(),
+                });
+            };
+
+            let output_start_index = row_data
+                .trade_dates
+                .iter()
+                .position(|trade_date| trade_date == &output_start_date)
+                .ok_or_else(|| format!("缺少新筹码输出起始日期: {output_start_date}"))?;
+            let initial_state = match state_conn {
+                Some(conn) => (|conn: &Connection,
+                                ts_code: &str,
+                                output_start_date: &str,
+                                row_trade_dates: &[String],
+                                output_start_index: usize|
+                 -> Result<Option<CyqChenInitialState>, String> {
+                    let latest_state_date = conn
+                        .query_row(
+                            r#"
+            SELECT MAX(trade_date)
+            FROM cyq_chen_snapshot
+            WHERE ts_code = ? AND adj_type = ? AND trade_date < ?
+            "#,
+                            params![ts_code, DEFAULT_ADJ_TYPE, output_start_date],
+                            |row| row.get::<_, Option<String>>(0),
+                        )
+                        .map_err(|e| format!("查询新筹码最新状态失败, ts_code={ts_code}: {e}"))?;
+                    let Some(state_trade_date) = latest_state_date else {
+                        return Ok(None);
+                    };
+
+                    let mut stmt = conn
+                        .prepare(
+                            r#"
+            SELECT bin_index, price, price_low, price_high, main_chip, retail_chip, total_chip
+            FROM cyq_chen_bin
+            WHERE ts_code = ? AND adj_type = ? AND trade_date = ?
+            ORDER BY bin_index ASC
+            "#,
+                        )
+                        .map_err(|e| {
+                            format!("预编译新筹码状态分桶查询失败, ts_code={ts_code}: {e}")
+                        })?;
+                    let mut rows = stmt
+                        .query(params![
+                            ts_code,
+                            DEFAULT_ADJ_TYPE,
+                            state_trade_date.as_str()
+                        ])
+                        .map_err(|e| format!("查询新筹码状态分桶失败, ts_code={ts_code}: {e}"))?;
+                    let mut bins = Vec::new();
+                    while let Some(row) = rows
+                        .next()
+                        .map_err(|e| format!("读取新筹码状态分桶失败, ts_code={ts_code}: {e}"))?
+                    {
+                        let index_i64: i64 = row.get(0).map_err(|e| {
+                            format!("读取新筹码分桶序号失败, ts_code={ts_code}: {e}")
+                        })?;
+                        bins.push(ChenChipBin {
+                            index: index_i64.max(0) as usize,
+                            price: row.get(1).map_err(|e| {
+                                format!("读取新筹码分桶价格失败, ts_code={ts_code}: {e}")
+                            })?,
+                            price_low: row.get(2).map_err(|e| {
+                                format!("读取新筹码分桶下沿失败, ts_code={ts_code}: {e}")
+                            })?,
+                            price_high: row.get(3).map_err(|e| {
+                                format!("读取新筹码分桶上沿失败, ts_code={ts_code}: {e}")
+                            })?,
+                            main_chip: row.get(4).map_err(|e| {
+                                format!("读取新筹码主力筹码失败, ts_code={ts_code}: {e}")
+                            })?,
+                            retail_chip: row.get(5).map_err(|e| {
+                                format!("读取新筹码散户筹码失败, ts_code={ts_code}: {e}")
+                            })?,
+                            total_chip: row.get(6).map_err(|e| {
+                                format!("读取新筹码总筹码失败, ts_code={ts_code}: {e}")
+                            })?,
+                        });
+                    }
+                    if bins.is_empty() {
+                        return Ok(None);
+                    }
+
+                    let mut bin_index_by_key = HashMap::new();
+                    for (index, bin) in bins.iter().enumerate() {
+                        bin_index_by_key
+                            .insert(bucket_history_key(bin.price_low, bin.price_high), index);
+                    }
+
+                    let mut main_ratio_history: Vec<Arc<Vec<Option<f64>>>> = (0..bins.len())
+                        .map(|_| Arc::new(vec![None; row_trade_dates.len()]))
+                        .collect();
+                    if output_start_index > 0 {
+                        let history_start_date = row_trade_dates
+                            .first()
+                            .map(String::as_str)
+                            .unwrap_or(state_trade_date.as_str());
+                        let mut history_stmt = conn
+                            .prepare(
+                                r#"
+                SELECT trade_date, price_low, price_high, main_chip, retail_chip
+                FROM cyq_chen_bin
+                WHERE ts_code = ?
+                  AND adj_type = ?
+                  AND trade_date >= ?
+                  AND trade_date < ?
+                ORDER BY trade_date ASC, bin_index ASC
+                "#,
+                            )
+                            .map_err(|e| {
+                                format!("预编译新筹码历史比例查询失败, ts_code={ts_code}: {e}")
+                            })?;
+                        let mut history_rows = history_stmt
+                            .query(params![
+                                ts_code,
+                                DEFAULT_ADJ_TYPE,
+                                history_start_date,
+                                output_start_date
+                            ])
+                            .map_err(|e| {
+                                format!("查询新筹码历史比例失败, ts_code={ts_code}: {e}")
+                            })?;
+                        let row_index_by_date = row_trade_dates
+                            .iter()
+                            .take(output_start_index)
+                            .enumerate()
+                            .map(|(index, trade_date)| (trade_date.as_str(), index))
+                            .collect::<HashMap<_, _>>();
+
+                        while let Some(row) = history_rows.next().map_err(|e| {
+                            format!("读取新筹码历史比例失败, ts_code={ts_code}: {e}")
+                        })? {
+                            let trade_date: String = row.get(0).map_err(|e| {
+                                format!("读取新筹码历史日期失败, ts_code={ts_code}: {e}")
+                            })?;
+                            let Some(row_index) =
+                                row_index_by_date.get(trade_date.as_str()).copied()
+                            else {
+                                continue;
+                            };
+                            let price_low: f64 = row.get(1).map_err(|e| {
+                                format!("读取新筹码历史分桶下沿失败, ts_code={ts_code}: {e}")
+                            })?;
+                            let price_high: f64 = row.get(2).map_err(|e| {
+                                format!("读取新筹码历史分桶上沿失败, ts_code={ts_code}: {e}")
+                            })?;
+                            let main_chip: f64 = row.get(3).map_err(|e| {
+                                format!("读取新筹码历史主力筹码失败, ts_code={ts_code}: {e}")
+                            })?;
+                            let retail_chip: f64 = row.get(4).map_err(|e| {
+                                format!("读取新筹码历史散户筹码失败, ts_code={ts_code}: {e}")
+                            })?;
+                            let Some(bucket_index) = bin_index_by_key
+                                .get(&bucket_history_key(price_low, price_high))
+                                .copied()
+                            else {
+                                continue;
+                            };
+                            let total = main_chip + retail_chip;
+                            Arc::make_mut(&mut main_ratio_history[bucket_index])[row_index] =
+                                if total > 1e-10 {
+                                    Some(main_chip / total)
+                                } else {
+                                    Some(0.0)
+                                };
+                        }
+                    }
+
+                    Ok(Some(CyqChenInitialState {
+                        state_trade_date,
+                        bins,
+                        main_ratio_history,
+                    }))
+                })(
+                    conn,
+                    ts_code,
+                    &output_start_date,
+                    &row_data.trade_dates,
+                    output_start_index,
+                )?,
+                None => None,
+            };
+
+            let snapshots = if let Some(initial_state) = initial_state {
+                let Some(continuation_start_date) = row_data
+                    .trade_dates
+                    .iter()
+                    .find(|trade_date| {
+                        trade_date.as_str() > initial_state.state_trade_date.as_str()
+                    })
+                    .cloned()
+                else {
+                    return Ok(ComputedCyqChenStock {
+                        ts_code: ts_code.to_string(),
+                        snapshots: Vec::new(),
+                    });
+                };
+                compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
+                    &row_data,
+                    &continuation_start_date,
+                    &initial_state.bins,
+                    &initial_state.main_ratio_history,
+                    chip_config,
+                    config,
+                )?
+            } else {
+                let Some(output_start_date) = resolve_first_computable_output_date(
+                    &row_data,
+                    start_date,
+                    end_date,
+                    config.warmup_days,
+                ) else {
+                    return Ok(ComputedCyqChenStock {
+                        ts_code: ts_code.to_string(),
+                        snapshots: Vec::new(),
+                    });
+                };
+                compute_chen_chip_snapshots_with_compiled_config(
+                    &row_data,
+                    &output_start_date,
+                    chip_config,
+                    config,
+                )?
+            };
+            let snapshots = snapshots
+                .into_iter()
+                .filter(|snapshot| {
+                    snapshot.trade_date.as_deref().is_some_and(|trade_date| {
+                        trade_date >= start_date && trade_date <= end_date
+                    })
+                })
+                .collect();
+
+            Ok(ComputedCyqChenStock {
+                ts_code: ts_code.to_string(),
+                snapshots,
+            })
+        })(
             row_data,
             state_conn,
             ts_code,
@@ -1153,7 +1084,85 @@ fn append_cyq_chen_batch_rows(
 
     if snapshot_rows > 0 {
         snapshot_app
-            .append_record_batch(build_cyq_chen_snapshot_record_batch(
+            .append_record_batch((|ts_code: StringArray,
+                                   trade_date: StringArray,
+                                   adj_type: StringArray,
+                                   warmup_days: Vec<i32>,
+                                   bucket_pct: Vec<f64>,
+                                   close: Vec<f64>,
+                                   min_price: Vec<f64>,
+                                   max_price: Vec<f64>,
+                                   main_total: Vec<f64>,
+                                   retail_total: Vec<f64>,
+                                   total_chips: Vec<f64>,
+                                   total_profit_ratio: Vec<f64>,
+                                   total_trapped_ratio: Vec<f64>,
+                                   main_avg_cost: Vec<f64>,
+                                   chip_peak_price: Vec<f64>,
+                                   percent_70_price_low: Vec<f64>,
+                                   percent_70_price_high: Vec<f64>,
+                                   percent_70_concentration: Vec<f64>,
+                                   percent_90_price_low: Vec<f64>,
+                                   percent_90_price_high: Vec<f64>,
+                                   percent_90_concentration: Vec<f64>,
+                                   main_profit_ratio: Vec<f64>,
+                                   main_trapped_ratio: Vec<f64>|
+             -> Result<RecordBatch, String> {
+                let schema = Schema::new(vec![
+                    Field::new("ts_code", DataType::Utf8, false),
+                    Field::new("trade_date", DataType::Utf8, false),
+                    Field::new("adj_type", DataType::Utf8, false),
+                    Field::new("warmup_days", DataType::Int32, false),
+                    Field::new("bucket_pct", DataType::Float64, false),
+                    Field::new("close", DataType::Float64, false),
+                    Field::new("min_price", DataType::Float64, false),
+                    Field::new("max_price", DataType::Float64, false),
+                    Field::new("main_total", DataType::Float64, false),
+                    Field::new("retail_total", DataType::Float64, false),
+                    Field::new("total_chips", DataType::Float64, false),
+                    Field::new("total_profit_ratio", DataType::Float64, false),
+                    Field::new("total_trapped_ratio", DataType::Float64, false),
+                    Field::new("main_avg_cost", DataType::Float64, false),
+                    Field::new("chip_peak_price", DataType::Float64, false),
+                    Field::new("percent_70_price_low", DataType::Float64, false),
+                    Field::new("percent_70_price_high", DataType::Float64, false),
+                    Field::new("percent_70_concentration", DataType::Float64, false),
+                    Field::new("percent_90_price_low", DataType::Float64, false),
+                    Field::new("percent_90_price_high", DataType::Float64, false),
+                    Field::new("percent_90_concentration", DataType::Float64, false),
+                    Field::new("main_profit_ratio", DataType::Float64, false),
+                    Field::new("main_trapped_ratio", DataType::Float64, false),
+                ]);
+                RecordBatch::try_new(
+                    Arc::new(schema),
+                    vec![
+                        string_array(ts_code),
+                        string_array(trade_date),
+                        string_array(adj_type),
+                        int32_array(warmup_days),
+                        float64_array(bucket_pct),
+                        float64_array(close),
+                        float64_array(min_price),
+                        float64_array(max_price),
+                        float64_array(main_total),
+                        float64_array(retail_total),
+                        float64_array(total_chips),
+                        float64_array(total_profit_ratio),
+                        float64_array(total_trapped_ratio),
+                        float64_array(main_avg_cost),
+                        float64_array(chip_peak_price),
+                        float64_array(percent_70_price_low),
+                        float64_array(percent_70_price_high),
+                        float64_array(percent_70_concentration),
+                        float64_array(percent_90_price_low),
+                        float64_array(percent_90_price_high),
+                        float64_array(percent_90_concentration),
+                        float64_array(main_profit_ratio),
+                        float64_array(main_trapped_ratio),
+                    ],
+                )
+                .map_err(|e| format!("创建cyq_chen_snapshot批次失败:{e}"))
+            })(
                 snapshot_ts_code.finish(),
                 snapshot_trade_date.finish(),
                 snapshot_adj_type.finish(),
@@ -1183,7 +1192,46 @@ fn append_cyq_chen_batch_rows(
 
     if bin_rows > 0 {
         bin_app
-            .append_record_batch(build_cyq_chen_bin_record_batch(
+            .append_record_batch((|ts_code: StringArray,
+                                   trade_date: StringArray,
+                                   adj_type: StringArray,
+                                   bin_index: Vec<i32>,
+                                   price: Vec<f64>,
+                                   price_low: Vec<f64>,
+                                   price_high: Vec<f64>,
+                                   main_chip: Vec<f64>,
+                                   retail_chip: Vec<f64>,
+                                   total_chip: Vec<f64>|
+             -> Result<RecordBatch, String> {
+                let schema = Schema::new(vec![
+                    Field::new("ts_code", DataType::Utf8, false),
+                    Field::new("trade_date", DataType::Utf8, false),
+                    Field::new("adj_type", DataType::Utf8, false),
+                    Field::new("bin_index", DataType::Int32, false),
+                    Field::new("price", DataType::Float64, false),
+                    Field::new("price_low", DataType::Float64, false),
+                    Field::new("price_high", DataType::Float64, false),
+                    Field::new("main_chip", DataType::Float64, false),
+                    Field::new("retail_chip", DataType::Float64, false),
+                    Field::new("total_chip", DataType::Float64, false),
+                ]);
+                RecordBatch::try_new(
+                    Arc::new(schema),
+                    vec![
+                        string_array(ts_code),
+                        string_array(trade_date),
+                        string_array(adj_type),
+                        int32_array(bin_index),
+                        float64_array(price),
+                        float64_array(price_low),
+                        float64_array(price_high),
+                        float64_array(main_chip),
+                        float64_array(retail_chip),
+                        float64_array(total_chip),
+                    ],
+                )
+                .map_err(|e| format!("创建cyq_chen_bin批次失败:{e}"))
+            })(
                 bin_ts_code.finish(),
                 bin_trade_date.finish(),
                 bin_adj_type.finish(),
@@ -1211,131 +1259,6 @@ fn int32_array(values: Vec<i32>) -> ArrayRef {
 
 fn float64_array(values: Vec<f64>) -> ArrayRef {
     Arc::new(Float64Array::from(values))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_cyq_chen_snapshot_record_batch(
-    ts_code: StringArray,
-    trade_date: StringArray,
-    adj_type: StringArray,
-    warmup_days: Vec<i32>,
-    bucket_pct: Vec<f64>,
-    close: Vec<f64>,
-    min_price: Vec<f64>,
-    max_price: Vec<f64>,
-    main_total: Vec<f64>,
-    retail_total: Vec<f64>,
-    total_chips: Vec<f64>,
-    total_profit_ratio: Vec<f64>,
-    total_trapped_ratio: Vec<f64>,
-    main_avg_cost: Vec<f64>,
-    chip_peak_price: Vec<f64>,
-    percent_70_price_low: Vec<f64>,
-    percent_70_price_high: Vec<f64>,
-    percent_70_concentration: Vec<f64>,
-    percent_90_price_low: Vec<f64>,
-    percent_90_price_high: Vec<f64>,
-    percent_90_concentration: Vec<f64>,
-    main_profit_ratio: Vec<f64>,
-    main_trapped_ratio: Vec<f64>,
-) -> Result<RecordBatch, String> {
-    let schema = Schema::new(vec![
-        Field::new("ts_code", DataType::Utf8, false),
-        Field::new("trade_date", DataType::Utf8, false),
-        Field::new("adj_type", DataType::Utf8, false),
-        Field::new("warmup_days", DataType::Int32, false),
-        Field::new("bucket_pct", DataType::Float64, false),
-        Field::new("close", DataType::Float64, false),
-        Field::new("min_price", DataType::Float64, false),
-        Field::new("max_price", DataType::Float64, false),
-        Field::new("main_total", DataType::Float64, false),
-        Field::new("retail_total", DataType::Float64, false),
-        Field::new("total_chips", DataType::Float64, false),
-        Field::new("total_profit_ratio", DataType::Float64, false),
-        Field::new("total_trapped_ratio", DataType::Float64, false),
-        Field::new("main_avg_cost", DataType::Float64, false),
-        Field::new("chip_peak_price", DataType::Float64, false),
-        Field::new("percent_70_price_low", DataType::Float64, false),
-        Field::new("percent_70_price_high", DataType::Float64, false),
-        Field::new("percent_70_concentration", DataType::Float64, false),
-        Field::new("percent_90_price_low", DataType::Float64, false),
-        Field::new("percent_90_price_high", DataType::Float64, false),
-        Field::new("percent_90_concentration", DataType::Float64, false),
-        Field::new("main_profit_ratio", DataType::Float64, false),
-        Field::new("main_trapped_ratio", DataType::Float64, false),
-    ]);
-    RecordBatch::try_new(
-        Arc::new(schema),
-        vec![
-            string_array(ts_code),
-            string_array(trade_date),
-            string_array(adj_type),
-            int32_array(warmup_days),
-            float64_array(bucket_pct),
-            float64_array(close),
-            float64_array(min_price),
-            float64_array(max_price),
-            float64_array(main_total),
-            float64_array(retail_total),
-            float64_array(total_chips),
-            float64_array(total_profit_ratio),
-            float64_array(total_trapped_ratio),
-            float64_array(main_avg_cost),
-            float64_array(chip_peak_price),
-            float64_array(percent_70_price_low),
-            float64_array(percent_70_price_high),
-            float64_array(percent_70_concentration),
-            float64_array(percent_90_price_low),
-            float64_array(percent_90_price_high),
-            float64_array(percent_90_concentration),
-            float64_array(main_profit_ratio),
-            float64_array(main_trapped_ratio),
-        ],
-    )
-    .map_err(|e| format!("创建cyq_chen_snapshot批次失败:{e}"))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_cyq_chen_bin_record_batch(
-    ts_code: StringArray,
-    trade_date: StringArray,
-    adj_type: StringArray,
-    bin_index: Vec<i32>,
-    price: Vec<f64>,
-    price_low: Vec<f64>,
-    price_high: Vec<f64>,
-    main_chip: Vec<f64>,
-    retail_chip: Vec<f64>,
-    total_chip: Vec<f64>,
-) -> Result<RecordBatch, String> {
-    let schema = Schema::new(vec![
-        Field::new("ts_code", DataType::Utf8, false),
-        Field::new("trade_date", DataType::Utf8, false),
-        Field::new("adj_type", DataType::Utf8, false),
-        Field::new("bin_index", DataType::Int32, false),
-        Field::new("price", DataType::Float64, false),
-        Field::new("price_low", DataType::Float64, false),
-        Field::new("price_high", DataType::Float64, false),
-        Field::new("main_chip", DataType::Float64, false),
-        Field::new("retail_chip", DataType::Float64, false),
-        Field::new("total_chip", DataType::Float64, false),
-    ]);
-    RecordBatch::try_new(
-        Arc::new(schema),
-        vec![
-            string_array(ts_code),
-            string_array(trade_date),
-            string_array(adj_type),
-            int32_array(bin_index),
-            float64_array(price),
-            float64_array(price_low),
-            float64_array(price_high),
-            float64_array(main_chip),
-            float64_array(retail_chip),
-            float64_array(total_chip),
-        ],
-    )
-    .map_err(|e| format!("创建cyq_chen_bin批次失败:{e}"))
 }
 
 fn write_cyq_chen_batches_from_channel(
@@ -1506,103 +1429,6 @@ fn write_cyq_chen_incremental_batches_from_channel(
         (Ok(rows), Ok(())) => Ok(rows),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
-    }
-}
-
-fn write_cyq_chen_stock_repair_batches_from_channel(
-    db_path: &str,
-    rx: Receiver<CyqChenWriteMessage>,
-    config: ChenChipConfig,
-    ts_codes: &[String],
-    start_date: &str,
-    end_date: &str,
-    strategy_hash: String,
-) -> Result<(usize, usize), String> {
-    let mut conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
-    ensure_cyq_chen_db_indexes(&conn)?;
-
-    let write_result = (|| -> Result<(usize, usize), String> {
-        let tx = conn
-            .transaction()
-            .map_err(|e| format!("创建筹码库事务失败:{e}"))?;
-        drop_cyq_chen_db_indexes(&tx)?;
-
-        for ts_code in ts_codes {
-            tx.execute(
-                "DELETE FROM cyq_chen_bin WHERE ts_code = ? AND adj_type = ? AND trade_date >= ? AND trade_date <= ?",
-                params![ts_code, DEFAULT_ADJ_TYPE, start_date, end_date],
-            )
-            .map_err(|e| format!("清理股票新筹码分桶失败, ts_code={ts_code}: {e}"))?;
-            tx.execute(
-                "DELETE FROM cyq_chen_snapshot WHERE ts_code = ? AND adj_type = ? AND trade_date >= ? AND trade_date <= ?",
-                params![ts_code, DEFAULT_ADJ_TYPE, start_date, end_date],
-            )
-            .map_err(|e| format!("清理股票新筹码摘要失败, ts_code={ts_code}: {e}"))?;
-        }
-
-        let mut snapshot_rows = 0usize;
-        let mut bin_rows = 0usize;
-        let mut batch_count = 0usize;
-        let mut abort_reason = None;
-        {
-            let mut snapshot_app = tx
-                .appender(CYQ_CHEN_SNAPSHOT_TABLE)
-                .map_err(|e| format!("创建cyq_chen_snapshot写入器失败:{e}"))?;
-            let mut bin_app = tx
-                .appender(CYQ_CHEN_BIN_TABLE)
-                .map_err(|e| format!("创建cyq_chen_bin写入器失败:{e}"))?;
-
-            for message in rx {
-                let batch = match message {
-                    CyqChenWriteMessage::Batch(batch) => batch,
-                    CyqChenWriteMessage::Abort(reason) => {
-                        abort_reason = Some(reason);
-                        break;
-                    }
-                };
-
-                let (added_snapshot_rows, added_bin_rows) =
-                    append_cyq_chen_batch_rows(&mut snapshot_app, &mut bin_app, batch, config)?;
-                snapshot_rows += added_snapshot_rows;
-                bin_rows += added_bin_rows;
-                batch_count += 1;
-
-                if batch_count % CYQ_CHEN_FLUSH_BATCH_SIZE == 0 {
-                    snapshot_app
-                        .flush()
-                        .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
-                    bin_app
-                        .flush()
-                        .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
-                }
-            }
-
-            if abort_reason.is_none() {
-                snapshot_app
-                    .flush()
-                    .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
-                bin_app
-                    .flush()
-                    .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
-            }
-        }
-
-        if let Some(reason) = abort_reason {
-            tx.rollback()
-                .map_err(|e| format!("新筹码局部修复中断且结果库回滚失败:{reason}; {e}"))?;
-            return Err(format!("新筹码局部修复中断，结果库已回滚:{reason}"));
-        }
-
-        write_cyq_chen_meta(&tx, config, &strategy_hash)?;
-        tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
-        Ok((snapshot_rows, bin_rows))
-    })();
-
-    let recreate_result = ensure_cyq_chen_db_indexes(&conn);
-    match (write_result, recreate_result) {
-        (Ok(rows), Ok(())) => Ok(rows),
-        (Err(write_error), _) => Err(write_error),
-        (Ok(_), Err(index_error)) => Err(index_error),
     }
 }
 
@@ -1909,8 +1735,54 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
             .map(Some);
     }
 
-    let Some((existing_start_date, existing_end_date)) =
-        query_existing_cyq_chen_trade_date_range(&cyq_chen_db)?
+    let Some((existing_start_date, existing_end_date)) = (|db_path: &Path| -> Result<
+        Option<(String, String)>,
+        String,
+    > {
+        init_cyq_chen_db(db_path)?;
+        let conn = Connection::open(db_path).map_err(|e| format!("打开新筹码库失败:{e}"))?;
+        let table_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+                [CYQ_CHEN_SNAPSHOT_TABLE],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| format!("检查新筹码库表结构失败:{e}"))?;
+        if table_exists <= 0 {
+            return Ok(None);
+        }
+
+        let mut stmt = conn
+            .prepare(
+                r#"
+            SELECT MIN(trade_date), MAX(trade_date)
+            FROM cyq_chen_snapshot
+            WHERE adj_type = ?
+            "#,
+            )
+            .map_err(|e| format!("预编译新筹码库日期范围查询失败:{e}"))?;
+        let mut rows = stmt
+            .query(params![DEFAULT_ADJ_TYPE])
+            .map_err(|e| format!("查询新筹码库日期范围失败:{e}"))?;
+        let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取新筹码库日期范围失败:{e}"))?
+        else {
+            return Ok(None);
+        };
+
+        let min_trade_date: Option<String> = row
+            .get(0)
+            .map_err(|e| format!("读取新筹码库最早日期失败:{e}"))?;
+        let max_trade_date: Option<String> = row
+            .get(1)
+            .map_err(|e| format!("读取新筹码库最晚日期失败:{e}"))?;
+
+        Ok(match (min_trade_date, max_trade_date) {
+            (Some(min_trade_date), Some(max_trade_date)) => Some((min_trade_date, max_trade_date)),
+            _ => None,
+        })
+    })(&cyq_chen_db)?
     else {
         return Ok(Some(CyqChenRebuildSummary {
             snapshot_rows: 0,
@@ -1997,7 +1869,105 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
     let write_end_date = end_date.clone();
     let writer_strategy_hash = strategy_hash.clone();
     let writer_handle = thread::spawn(move || {
-        write_cyq_chen_stock_repair_batches_from_channel(
+        (|db_path: &str,
+          rx: Receiver<CyqChenWriteMessage>,
+          config: ChenChipConfig,
+          ts_codes: &[String],
+          start_date: &str,
+          end_date: &str,
+          strategy_hash: String|
+         -> Result<(usize, usize), String> {
+            let mut conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
+            ensure_cyq_chen_db_indexes(&conn)?;
+
+            let write_result = (|| -> Result<(usize, usize), String> {
+                let tx = conn
+                    .transaction()
+                    .map_err(|e| format!("创建筹码库事务失败:{e}"))?;
+                drop_cyq_chen_db_indexes(&tx)?;
+
+                for ts_code in ts_codes {
+                    tx.execute(
+                "DELETE FROM cyq_chen_bin WHERE ts_code = ? AND adj_type = ? AND trade_date >= ? AND trade_date <= ?",
+                params![ts_code, DEFAULT_ADJ_TYPE, start_date, end_date],
+            )
+            .map_err(|e| format!("清理股票新筹码分桶失败, ts_code={ts_code}: {e}"))?;
+                    tx.execute(
+                "DELETE FROM cyq_chen_snapshot WHERE ts_code = ? AND adj_type = ? AND trade_date >= ? AND trade_date <= ?",
+                params![ts_code, DEFAULT_ADJ_TYPE, start_date, end_date],
+            )
+            .map_err(|e| format!("清理股票新筹码摘要失败, ts_code={ts_code}: {e}"))?;
+                }
+
+                let mut snapshot_rows = 0usize;
+                let mut bin_rows = 0usize;
+                let mut batch_count = 0usize;
+                let mut abort_reason = None;
+                {
+                    let mut snapshot_app = tx
+                        .appender(CYQ_CHEN_SNAPSHOT_TABLE)
+                        .map_err(|e| format!("创建cyq_chen_snapshot写入器失败:{e}"))?;
+                    let mut bin_app = tx
+                        .appender(CYQ_CHEN_BIN_TABLE)
+                        .map_err(|e| format!("创建cyq_chen_bin写入器失败:{e}"))?;
+
+                    for message in rx {
+                        let batch = match message {
+                            CyqChenWriteMessage::Batch(batch) => batch,
+                            CyqChenWriteMessage::Abort(reason) => {
+                                abort_reason = Some(reason);
+                                break;
+                            }
+                        };
+
+                        let (added_snapshot_rows, added_bin_rows) = append_cyq_chen_batch_rows(
+                            &mut snapshot_app,
+                            &mut bin_app,
+                            batch,
+                            config,
+                        )?;
+                        snapshot_rows += added_snapshot_rows;
+                        bin_rows += added_bin_rows;
+                        batch_count += 1;
+
+                        if batch_count % CYQ_CHEN_FLUSH_BATCH_SIZE == 0 {
+                            snapshot_app
+                                .flush()
+                                .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
+                            bin_app
+                                .flush()
+                                .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
+                        }
+                    }
+
+                    if abort_reason.is_none() {
+                        snapshot_app
+                            .flush()
+                            .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
+                        bin_app
+                            .flush()
+                            .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
+                    }
+                }
+
+                if let Some(reason) = abort_reason {
+                    tx.rollback()
+                        .map_err(|e| format!("新筹码局部修复中断且结果库回滚失败:{reason}; {e}"))?;
+                    return Err(format!("新筹码局部修复中断，结果库已回滚:{reason}"));
+                }
+
+                write_cyq_chen_meta(&tx, config, &strategy_hash)?;
+                tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
+                Ok((snapshot_rows, bin_rows))
+            })();
+
+            let recreate_result = ensure_cyq_chen_db_indexes(&conn);
+            match (write_result, recreate_result) {
+                (Ok(rows), Ok(())) => Ok(rows),
+                (Err(write_error), _) => Err(write_error),
+                (Ok(_), Err(index_error)) => Err(index_error),
+            }
+        })(
             &cyq_chen_db_str,
             rx,
             config,
@@ -2167,7 +2137,23 @@ pub fn rebuild_cyq_chen_all_with_progress(
     let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
     let reader = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
     let ts_codes = reader.list_ts_code(DEFAULT_ADJ_TYPE, &load_start_date, &end_date)?;
-    let rebuild_db = cyq_chen_rebuild_temp_path(&cyq_chen_db)?;
+    let rebuild_db = (|db_path: &Path| -> Result<std::path::PathBuf, String> {
+        let parent = db_path
+            .parent()
+            .ok_or_else(|| format!("新筹码库路径缺少父目录: {}", db_path.display()))?;
+        let file_name = db_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| format!("新筹码库文件名不是有效UTF-8: {}", db_path.display()))?;
+        let unique_suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        Ok(parent.join(format!(
+            ".{file_name}.rebuild-{}-{unique_suffix}.tmp",
+            std::process::id()
+        )))
+    })(&cyq_chen_db)?;
     remove_cyq_chen_db_artifacts(&rebuild_db);
     init_cyq_chen_db(&rebuild_db).inspect_err(|_| {
         remove_cyq_chen_db_artifacts(&rebuild_db);
@@ -2201,46 +2187,47 @@ pub fn rebuild_cyq_chen_all_with_progress(
     });
 
     let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
-    let compute_result = ts_codes.par_chunks(CYQ_CHEN_GROUP_SIZE).try_for_each_with(
-        tx,
-        |sender, ts_group| -> Result<(), String> {
-            let worker_reader =
-                DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
-            let progress_stock_done = |ts_code: &str| {
-                if let Some(progress_cb) = progress_cb {
-                    let finished =
-                        finished_stock_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    progress_cb(DownloadProgress {
-                        phase: "compute_cyq_chen".to_string(),
-                        finished,
-                        total: ts_codes.len(),
-                        current_label: Some(ts_code.to_string()),
-                        message: format!(
-                            "新筹码计算中，已完成 {finished} / {} 只股票。",
-                            ts_codes.len()
-                        ),
-                    });
-                }
-            };
-            let batch = compute_cyq_chen_stock_group_batch(
-                &worker_reader,
-                None,
-                &load_start_date,
-                &start_date,
-                &end_date,
-                &chip_config,
-                config,
-                &st_list,
-                &total_share_map,
-                ts_group,
-                Some(&progress_stock_done),
-            )?;
-            sender
-                .send(CyqChenWriteMessage::Batch(batch))
-                .map_err(|e| format!("发送筹码批次失败:{e}"))?;
-            Ok(())
-        },
-    );
+    let compute_result =
+        ts_codes
+            .par_chunks(128)
+            .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
+                let worker_reader =
+                    DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
+                let progress_stock_done = |ts_code: &str| {
+                    if let Some(progress_cb) = progress_cb {
+                        let finished = finished_stock_count
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                            + 1;
+                        progress_cb(DownloadProgress {
+                            phase: "compute_cyq_chen".to_string(),
+                            finished,
+                            total: ts_codes.len(),
+                            current_label: Some(ts_code.to_string()),
+                            message: format!(
+                                "新筹码计算中，已完成 {finished} / {} 只股票。",
+                                ts_codes.len()
+                            ),
+                        });
+                    }
+                };
+                let batch = compute_cyq_chen_stock_group_batch(
+                    &worker_reader,
+                    None,
+                    &load_start_date,
+                    &start_date,
+                    &end_date,
+                    &chip_config,
+                    config,
+                    &st_list,
+                    &total_share_map,
+                    ts_group,
+                    Some(&progress_stock_done),
+                )?;
+                sender
+                    .send(CyqChenWriteMessage::Batch(batch))
+                    .map_err(|e| format!("发送筹码批次失败:{e}"))?;
+                Ok(())
+            });
 
     if let Err(err) = &compute_result {
         let _ = abort_tx.send(CyqChenWriteMessage::Abort(err.clone()));
@@ -2317,10 +2304,22 @@ mod tests {
         std::env::temp_dir().join(format!("lianghua-cyq-chen-test-{nanos}"))
     }
 
-    fn write_strategy(source_dir: &Path) {
+    fn prepare_source_db(source_dir: &Path) {
+        fs::create_dir_all(source_dir).expect("create temp dir");
         fs::write(
-            chip_change_rule_path(source_dir.to_str().expect("utf8 path")),
-            r#"
+            trade_calendar_path(source_dir.to_str().expect("utf8 path")),
+            "cal_date\n20260401\n20260402\n20260403\n20260407\n20260408\n",
+        )
+        .expect("write trade calendar");
+        fs::write(
+            stock_list_path(source_dir.to_str().expect("utf8 path")),
+            "ts_code,symbol,name,area,industry,list_date,market,total_share\n000001.SZ,000001,平安银行,深圳,银行,19910403,主板,20000\n",
+        )
+        .expect("write stock list");
+        (|source_dir: &Path| {
+            fs::write(
+                chip_change_rule_path(source_dir.to_str().expect("utf8 path")),
+                r#"
 version = 1
 
 [[strategy]]
@@ -2337,23 +2336,9 @@ direction = "sell"
 when = "RATEC > 1"
 bias = 1.0
 "#,
-        )
-        .expect("write strategy");
-    }
-
-    fn prepare_source_db(source_dir: &Path) {
-        fs::create_dir_all(source_dir).expect("create temp dir");
-        fs::write(
-            trade_calendar_path(source_dir.to_str().expect("utf8 path")),
-            "cal_date\n20260401\n20260402\n20260403\n20260407\n20260408\n",
-        )
-        .expect("write trade calendar");
-        fs::write(
-            stock_list_path(source_dir.to_str().expect("utf8 path")),
-            "ts_code,symbol,name,area,industry,list_date,market,total_share\n000001.SZ,000001,平安银行,深圳,银行,19910403,主板,20000\n",
-        )
-        .expect("write stock list");
-        write_strategy(source_dir);
+            )
+            .expect("write strategy");
+        })(source_dir);
 
         let source_db = source_db_path(source_dir.to_str().expect("utf8 path"));
         let conn = Connection::open(&source_db).expect("open source db");
@@ -2512,35 +2497,6 @@ bias = 1.0
         out
     }
 
-    fn data_table_primary_key_count(source_path: &str) -> i64 {
-        let cyq_chen_db = cyq_chen_db_path(source_path);
-        let conn = Connection::open(&cyq_chen_db).expect("open cyq chen db");
-        conn.query_row(
-            r#"
-            SELECT COUNT(*)
-            FROM duckdb_constraints()
-            WHERE table_name IN ('cyq_chen_snapshot', 'cyq_chen_bin')
-              AND constraint_type = 'PRIMARY KEY'
-            "#,
-            [],
-            |row| row.get(0),
-        )
-        .expect("count data table primary keys")
-    }
-
-    fn rebuild_temp_file_count(source_dir: &Path) -> usize {
-        fs::read_dir(source_dir)
-            .expect("read source dir")
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".cyq_chen.db.rebuild-")
-            })
-            .count()
-    }
-
     #[test]
     fn rebuild_cyq_chen_all_writes_snapshot_and_bin_rows() {
         let source_dir = unique_temp_source_dir();
@@ -2585,7 +2541,24 @@ bias = 1.0
             index_names_for_compare(source_path),
             vec!["idx_cyq_chen_snapshot_stock_date".to_string()]
         );
-        assert_eq!(data_table_primary_key_count(source_path), 0);
+        assert_eq!(
+            (|source_path: &str| -> i64 {
+                let cyq_chen_db = cyq_chen_db_path(source_path);
+                let conn = Connection::open(&cyq_chen_db).expect("open cyq chen db");
+                conn.query_row(
+                    r#"
+            SELECT COUNT(*)
+            FROM duckdb_constraints()
+            WHERE table_name IN ('cyq_chen_snapshot', 'cyq_chen_bin')
+              AND constraint_type = 'PRIMARY KEY'
+            "#,
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count data table primary keys")
+            })(source_path),
+            0
+        );
         assert_eq!(
             meta_rows_for_compare(source_path)
                 .into_iter()
@@ -2593,7 +2566,21 @@ bias = 1.0
                 .map(|(_, value)| value),
             Some(CYQ_CHEN_SCHEMA_VERSION.to_string())
         );
-        assert_eq!(rebuild_temp_file_count(&source_dir), 0);
+        assert_eq!(
+            (|source_dir: &Path| -> usize {
+                fs::read_dir(source_dir)
+                    .expect("read source dir")
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".cyq_chen.db.rebuild-")
+                    })
+                    .count()
+            })(&source_dir),
+            0
+        );
 
         let first_trade_date = conn
             .query_row(

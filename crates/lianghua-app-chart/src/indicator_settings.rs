@@ -78,7 +78,15 @@ pub fn get_chart_indicator_settings(
         }),
         Err(error) => {
             let fallback_config = default_chart_indicator_config();
-            let summary = summarize_chart_indicator_config(&source_path, &fallback_config)?;
+            let summary = (|source_path: &str,
+                            config: &ChartIndicatorConfig|
+             -> Result<ChartIndicatorSettingsSummary, String> {
+                summarize_chart_indicator_config_with_columns(
+                    source_path,
+                    config,
+                    load_stock_data_columns_if_available(source_path)?,
+                )
+            })(&source_path, &fallback_config)?;
             Ok(ChartIndicatorSettingsPayload {
                 source_path,
                 file_path: config_path.display().to_string(),
@@ -146,17 +154,6 @@ fn parse_and_compile_chart_indicator_settings(
     Ok((config, summary))
 }
 
-fn summarize_chart_indicator_config(
-    source_path: &str,
-    config: &ChartIndicatorConfig,
-) -> Result<ChartIndicatorSettingsSummary, String> {
-    summarize_chart_indicator_config_with_columns(
-        source_path,
-        config,
-        load_stock_data_columns_if_available(source_path)?,
-    )
-}
-
 fn summarize_chart_indicator_config_with_columns(
     source_path: &str,
     config: &ChartIndicatorConfig,
@@ -179,7 +176,32 @@ fn summarize_chart_indicator_config_with_columns(
         .map(|panel| panel.tooltips.len())
         .sum::<usize>();
     let database_indicator_columns = match db_columns {
-        Some(columns) => stock_data_indicator_columns_from_all(columns),
+        Some(columns) => (|columns: HashSet<String>| -> Vec<String> {
+            let mut indicator_columns = columns
+                .into_iter()
+                .filter(|name| {
+                    !(&[
+                        "ts_code",
+                        "trade_date",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "pre_close",
+                        "change",
+                        "pct_chg",
+                        "vol",
+                        "amount",
+                        "tor",
+                        "adj_type",
+                    ])
+                        .iter()
+                        .any(|base| name.eq_ignore_ascii_case(base))
+                })
+                .collect::<Vec<_>>();
+            indicator_columns.sort();
+            indicator_columns
+        })(columns),
         None => {
             let db_path = source_db_path(source_path);
             if db_path.exists() {
@@ -208,11 +230,44 @@ fn serialize_chart_indicator_config(config: &ChartIndicatorConfig) -> Result<Str
         lines.push(format!("label = {}", toml_string(&panel.label)?));
         lines.push(format!(
             "role = {}",
-            toml_string(panel_role_name(panel.role))?
+            toml_string((|role: ChartPanelRole| -> &'static str {
+                match role {
+                    ChartPanelRole::Main => "main",
+                    ChartPanelRole::Sub => "sub",
+                }
+            })(panel.role))?
         ));
         lines.push(format!(
             "kind = {}",
-            toml_string(panel_kind_name(infer_panel_kind(panel)))?
+            toml_string((|kind: ChartPanelKind| -> &'static str {
+                match kind {
+                    ChartPanelKind::Candles => "candles",
+                    ChartPanelKind::Line => "line",
+                    ChartPanelKind::Bar => "bar",
+                    ChartPanelKind::Brick => "brick",
+                }
+            })(
+                (|panel: &ChartPanelConfig| -> ChartPanelKind {
+                    if panel.role == ChartPanelRole::Main {
+                        return ChartPanelKind::Candles;
+                    }
+                    if panel
+                        .series
+                        .iter()
+                        .any(|series| series.kind == ChartSeriesKind::Brick)
+                    {
+                        return ChartPanelKind::Brick;
+                    }
+                    if panel
+                        .series
+                        .iter()
+                        .any(|series| series.kind == ChartSeriesKind::Bar)
+                    {
+                        return ChartPanelKind::Bar;
+                    }
+                    ChartPanelKind::Line
+                })(panel)
+            ))?
         ));
         lines.push(String::new());
 
@@ -229,7 +284,16 @@ fn serialize_chart_indicator_config(config: &ChartIndicatorConfig) -> Result<Str
             lines.push(format!("expr = {}", toml_string(&series.expr)?));
             lines.push(format!(
                 "kind = {}",
-                toml_string(series_kind_name(series.kind))?
+                toml_string((|kind: ChartSeriesKind| -> &'static str {
+                    match kind {
+                        ChartSeriesKind::Line => "line",
+                        ChartSeriesKind::Bar => "bar",
+                        ChartSeriesKind::Histogram => "histogram",
+                        ChartSeriesKind::Area => "area",
+                        ChartSeriesKind::Band => "band",
+                        ChartSeriesKind::Brick => "brick",
+                    }
+                })(series.kind))?
             ));
             if let Some(color) = series
                 .color
@@ -384,54 +448,6 @@ fn format_number(value: f64) -> String {
     }
 }
 
-fn panel_role_name(role: ChartPanelRole) -> &'static str {
-    match role {
-        ChartPanelRole::Main => "main",
-        ChartPanelRole::Sub => "sub",
-    }
-}
-
-fn panel_kind_name(kind: ChartPanelKind) -> &'static str {
-    match kind {
-        ChartPanelKind::Candles => "candles",
-        ChartPanelKind::Line => "line",
-        ChartPanelKind::Bar => "bar",
-        ChartPanelKind::Brick => "brick",
-    }
-}
-
-fn series_kind_name(kind: ChartSeriesKind) -> &'static str {
-    match kind {
-        ChartSeriesKind::Line => "line",
-        ChartSeriesKind::Bar => "bar",
-        ChartSeriesKind::Histogram => "histogram",
-        ChartSeriesKind::Area => "area",
-        ChartSeriesKind::Band => "band",
-        ChartSeriesKind::Brick => "brick",
-    }
-}
-
-fn infer_panel_kind(panel: &ChartPanelConfig) -> ChartPanelKind {
-    if panel.role == ChartPanelRole::Main {
-        return ChartPanelKind::Candles;
-    }
-    if panel
-        .series
-        .iter()
-        .any(|series| series.kind == ChartSeriesKind::Brick)
-    {
-        return ChartPanelKind::Brick;
-    }
-    if panel
-        .series
-        .iter()
-        .any(|series| series.kind == ChartSeriesKind::Bar)
-    {
-        return ChartPanelKind::Bar;
-    }
-    ChartPanelKind::Line
-}
-
 fn normalize_source_path(source_path: &str) -> Result<String, String> {
     let trimmed = source_path.trim();
     if trimmed.is_empty() {
@@ -447,7 +463,11 @@ fn atomic_write_text(path: &Path, text: &str) -> Result<(), String> {
     fs::create_dir_all(parent)
         .map_err(|error| format!("创建图表指标配置目录失败: {}, {error}", parent.display()))?;
 
-    let tmp_path = tmp_path_for(path);
+    let tmp_path = (|path: &Path| -> PathBuf {
+        let mut tmp_path = path.to_path_buf();
+        tmp_path.set_extension("toml.tmp");
+        tmp_path
+    })(path);
     fs::write(&tmp_path, text).map_err(|error| {
         format!(
             "写入图表指标配置临时文件失败: {}, {error}",
@@ -456,12 +476,6 @@ fn atomic_write_text(path: &Path, text: &str) -> Result<(), String> {
     })?;
     fs::rename(&tmp_path, path)
         .map_err(|error| format!("保存图表指标配置失败: {}, {error}", path.display()))
-}
-
-fn tmp_path_for(path: &Path) -> PathBuf {
-    let mut tmp_path = path.to_path_buf();
-    tmp_path.set_extension("toml.tmp");
-    tmp_path
 }
 
 fn load_stock_data_columns_if_available(
@@ -497,35 +511,6 @@ fn load_stock_data_columns_if_available(
     }
 
     Ok(Some(columns))
-}
-
-fn stock_data_indicator_columns_from_all(columns: HashSet<String>) -> Vec<String> {
-    const BASE_COLUMNS: &[&str] = &[
-        "ts_code",
-        "trade_date",
-        "open",
-        "high",
-        "low",
-        "close",
-        "pre_close",
-        "change",
-        "pct_chg",
-        "vol",
-        "amount",
-        "tor",
-        "adj_type",
-    ];
-
-    let mut indicator_columns = columns
-        .into_iter()
-        .filter(|name| {
-            !BASE_COLUMNS
-                .iter()
-                .any(|base| name.eq_ignore_ascii_case(base))
-        })
-        .collect::<Vec<_>>();
-    indicator_columns.sort();
-    indicator_columns
 }
 
 #[cfg(test)]

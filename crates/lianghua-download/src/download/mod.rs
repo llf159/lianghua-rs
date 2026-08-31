@@ -60,9 +60,6 @@ struct MoneyflowTradeDateParams<'a> {
 }
 
 const MONEYFLOW_FIELDS: &str = "ts_code,trade_date,buy_sm_vol,sell_sm_vol,buy_md_vol,sell_md_vol,buy_lg_vol,sell_lg_vol,buy_elg_vol,sell_elg_vol,net_mf_vol";
-const TOP_LIST_FIELDS: &str = "trade_date,ts_code,name,close,pct_change,turnover_rate,amount,l_sell,l_buy,l_amount,net_amount,net_rate,amount_rate,float_values,reason";
-const TOP_INST_FIELDS: &str =
-    "trade_date,ts_code,exalter,buy,buy_rate,sell,sell_rate,net_buy,side,reason";
 
 #[derive(Debug, Clone)]
 pub struct StockListFetchResult {
@@ -593,7 +590,16 @@ impl TushareClient {
         let bar_rows = parse_bar_rows(&bar_table)?;
         let mut rows = build_pro_bar_rows(bar_rows);
         rows.sort_by(|a, b| a.trade_date.cmp(&b.trade_date));
-        recalc_change_fields(&mut rows);
+        (|rows: &mut [ProBarRow]| {
+            for row in rows.iter_mut() {
+                row.change = row.close - row.pre_close;
+                row.pct_chg = if row.pre_close.abs() < f64::EPSILON {
+                    0.0
+                } else {
+                    row.change / row.pre_close * 100.0
+                };
+            }
+        })(&mut rows);
         Ok(rows)
     }
 
@@ -774,7 +780,7 @@ impl TushareClient {
         trade_date: &str,
     ) -> Result<Vec<TopListRow>, String> {
         let params = TradeDateParams { trade_date };
-        let table = self.post_table("top_list", &params, TOP_LIST_FIELDS)?;
+        let table = self.post_table("top_list", &params, "trade_date,ts_code,name,close,pct_change,turnover_rate,amount,l_sell,l_buy,l_amount,net_amount,net_rate,amount_rate,float_values,reason")?;
         parse_top_list_rows(&table)
     }
 
@@ -783,7 +789,11 @@ impl TushareClient {
         trade_date: &str,
     ) -> Result<Vec<TopInstRow>, String> {
         let params = TradeDateParams { trade_date };
-        let table = self.post_table("top_inst", &params, TOP_INST_FIELDS)?;
+        let table = self.post_table(
+            "top_inst",
+            &params,
+            "trade_date,ts_code,exalter,buy,buy_rate,sell,sell_rate,net_buy,side,reason",
+        )?;
         parse_top_inst_rows(&table)
     }
 }
@@ -1360,51 +1370,6 @@ pub fn build_adj_factor_map(
     Ok(map)
 }
 
-fn build_aligned_adj_factors(
-    rows: &[ProBarRow],
-    adj_map: &HashMap<String, AdjFactorRow>,
-) -> Result<Vec<f64>, String> {
-    let mut factors = Vec::with_capacity(rows.len());
-
-    for row in rows {
-        let factor = adj_map.get(&row.trade_date).map(|v| {
-            if v.ts_code != row.ts_code {
-                return Err(format!(
-                    "adj_factor ts_code 不匹配: {} != {}",
-                    v.ts_code, row.ts_code
-                ));
-            }
-            Ok(v.adj_factor)
-        });
-
-        match factor {
-            Some(v) => factors.push(Some(v?)),
-            None => factors.push(None),
-        }
-    }
-
-    for i in (0..factors.len()).rev() {
-        if factors[i].is_none() {
-            if i + 1 < factors.len() {
-                factors[i] = factors[i + 1];
-            }
-        }
-    }
-
-    let mut out = Vec::with_capacity(factors.len());
-    for (idx, factor) in factors.into_iter().enumerate() {
-        let Some(factor) = factor else {
-            return Err(format!(
-                "无法为 trade_date={} 补齐 adj_factor",
-                rows[idx].trade_date
-            ));
-        };
-        out.push(factor);
-    }
-
-    Ok(out)
-}
-
 pub fn build_pro_bar_rows(bar_rows: Vec<BarRow>) -> Vec<ProBarRow> {
     let mut out = Vec::with_capacity(bar_rows.len());
 
@@ -1457,7 +1422,49 @@ pub fn apply_adj_to_rows(
     adj_type: &AdjType,
     adj_map: &HashMap<String, AdjFactorRow>,
 ) -> Result<(), String> {
-    let factors = build_aligned_adj_factors(rows, adj_map)?;
+    let factors = (|rows: &[ProBarRow],
+                    adj_map: &HashMap<String, AdjFactorRow>|
+     -> Result<Vec<f64>, String> {
+        let mut factors = Vec::with_capacity(rows.len());
+
+        for row in rows {
+            let factor = adj_map.get(&row.trade_date).map(|v| {
+                if v.ts_code != row.ts_code {
+                    return Err(format!(
+                        "adj_factor ts_code 不匹配: {} != {}",
+                        v.ts_code, row.ts_code
+                    ));
+                }
+                Ok(v.adj_factor)
+            });
+
+            match factor {
+                Some(v) => factors.push(Some(v?)),
+                None => factors.push(None),
+            }
+        }
+
+        for i in (0..factors.len()).rev() {
+            if factors[i].is_none() {
+                if i + 1 < factors.len() {
+                    factors[i] = factors[i + 1];
+                }
+            }
+        }
+
+        let mut out = Vec::with_capacity(factors.len());
+        for (idx, factor) in factors.into_iter().enumerate() {
+            let Some(factor) = factor else {
+                return Err(format!(
+                    "无法为 trade_date={} 补齐 adj_factor",
+                    rows[idx].trade_date
+                ));
+            };
+            out.push(factor);
+        }
+
+        Ok(out)
+    })(rows, adj_map)?;
 
     let qfq_base = match adj_type {
         AdjType::Qfq => Some(
@@ -1489,29 +1496,16 @@ fn pro_bar_format(value: f64, scale: usize) -> f64 {
     round_f64_to_scale(value, scale as u32)
 }
 
-fn normalize_stock_price_fields_like_pro_bar(rows: &mut [ProBarRow]) {
-    for row in rows {
-        row.open = pro_bar_format(row.open, 2);
-        row.high = pro_bar_format(row.high, 2);
-        row.low = pro_bar_format(row.low, 2);
-        row.close = pro_bar_format(row.close, 2);
-        row.pre_close = pro_bar_format(row.pre_close, 2);
-    }
-}
-
-fn recalc_change_fields(rows: &mut [ProBarRow]) {
-    for row in rows.iter_mut() {
-        row.change = row.close - row.pre_close;
-        row.pct_chg = if row.pre_close.abs() < f64::EPSILON {
-            0.0
-        } else {
-            row.change / row.pre_close * 100.0
-        };
-    }
-}
-
 fn normalize_stock_rows_like_pro_bar(rows: &mut [ProBarRow]) {
-    normalize_stock_price_fields_like_pro_bar(rows);
+    (|rows: &mut [ProBarRow]| {
+        for row in rows {
+            row.open = pro_bar_format(row.open, 2);
+            row.high = pro_bar_format(row.high, 2);
+            row.low = pro_bar_format(row.low, 2);
+            row.close = pro_bar_format(row.close, 2);
+            row.pre_close = pro_bar_format(row.pre_close, 2);
+        }
+    })(rows);
 
     for row in rows.iter_mut() {
         let change = row.close - row.pre_close;
@@ -1663,30 +1657,31 @@ mod tests {
         }
     }
 
-    fn moneyflow_row(ts_code: &str, trade_date: &str, net_mf_v: f64) -> MoneyflowRow {
-        MoneyflowRow {
-            ts_code: ts_code.to_string(),
-            trade_date: trade_date.to_string(),
-            b_sm_v: Some(1.0),
-            s_sm_v: Some(3.0),
-            b_md_v: Some(5.0),
-            s_md_v: Some(7.0),
-            b_lg_v: Some(9.0),
-            s_lg_v: Some(11.0),
-            b_elg_v: Some(13.0),
-            s_elg_v: Some(15.0),
-            net_mf_v: Some(net_mf_v),
-        }
-    }
-
     #[test]
     fn single_stock_rows_attach_moneyflow_by_trade_date() {
         let mut rows = vec![
             probar_row("000001.SZ", "20240102", 10.0, 9.8),
             probar_row("000001.SZ", "20240103", 10.2, 10.0),
         ];
-        let map = build_single_moneyflow_map(vec![moneyflow_row("000001.SZ", "20240103", 123.45)])
-            .expect("build moneyflow map");
+        let map = build_single_moneyflow_map(vec![(|ts_code: &str,
+                                                    trade_date: &str,
+                                                    net_mf_v: f64|
+         -> MoneyflowRow {
+            MoneyflowRow {
+                ts_code: ts_code.to_string(),
+                trade_date: trade_date.to_string(),
+                b_sm_v: Some(1.0),
+                s_sm_v: Some(3.0),
+                b_md_v: Some(5.0),
+                s_md_v: Some(7.0),
+                b_lg_v: Some(9.0),
+                s_lg_v: Some(11.0),
+                b_elg_v: Some(13.0),
+                s_elg_v: Some(15.0),
+                net_mf_v: Some(net_mf_v),
+            }
+        })("000001.SZ", "20240103", 123.45)])
+        .expect("build moneyflow map");
 
         attach_single_moneyflow(&mut rows, &map).expect("attach moneyflow");
 

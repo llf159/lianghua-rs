@@ -198,71 +198,6 @@ fn query_optional_scene_marker(
     Ok(None)
 }
 
-fn query_optional_next_open(
-    source_conn: &Connection,
-    trade_date: &str,
-    ts_code: &str,
-) -> Result<Option<f64>, String> {
-    let mut stmt = source_conn
-        .prepare(
-            r#"
-            SELECT TRY_CAST(open AS DOUBLE)
-            FROM stock_data
-            WHERE ts_code = ? AND adj_type = ? AND trade_date > ?
-            ORDER BY trade_date ASC
-            LIMIT 1
-            "#,
-        )
-        .map_err(|e| format!("预编译自选次日开盘价失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![ts_code, DEFAULT_ADJ_TYPE, trade_date])
-        .map_err(|e| format!("查询自选次日开盘价失败: {e}"))?;
-
-    if let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取自选次日开盘价失败: {e}"))?
-    {
-        let open_value: Option<f64> = row
-            .get(0)
-            .map_err(|e| format!("读取自选次日开盘价字段失败: {e}"))?;
-        Ok(open_value)
-    } else {
-        Ok(None)
-    }
-}
-
-fn query_optional_latest_close(
-    source_conn: &Connection,
-    ts_code: &str,
-) -> Result<Option<f64>, String> {
-    let mut stmt = source_conn
-        .prepare(
-            r#"
-            SELECT TRY_CAST(close AS DOUBLE)
-            FROM stock_data
-            WHERE ts_code = ? AND adj_type = ?
-            ORDER BY trade_date DESC
-            LIMIT 1
-            "#,
-        )
-        .map_err(|e| format!("预编译自选最新收盘价失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![ts_code, DEFAULT_ADJ_TYPE])
-        .map_err(|e| format!("查询自选最新收盘价失败: {e}"))?;
-
-    if let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取自选最新收盘价失败: {e}"))?
-    {
-        let close_value: Option<f64> = row
-            .get(0)
-            .map_err(|e| format!("读取自选最新收盘价字段失败: {e}"))?;
-        Ok(close_value)
-    } else {
-        Ok(None)
-    }
-}
-
 fn query_latest_snapshot(
     source_conn: &Connection,
     ts_code: &str,
@@ -323,16 +258,74 @@ fn calc_post_watch_return_pct(
     ts_code: &str,
     latest_price_override: Option<f64>,
 ) -> Result<Option<f64>, String> {
-    let Some(next_open) = query_optional_next_open(source_conn, trade_date, ts_code)? else {
+    let Some(next_open) = (|source_conn: &Connection,
+                            trade_date: &str,
+                            ts_code: &str|
+     -> Result<Option<f64>, String> {
+        let mut stmt = source_conn
+            .prepare(
+                r#"
+            SELECT TRY_CAST(open AS DOUBLE)
+            FROM stock_data
+            WHERE ts_code = ? AND adj_type = ? AND trade_date > ?
+            ORDER BY trade_date ASC
+            LIMIT 1
+            "#,
+            )
+            .map_err(|e| format!("预编译自选次日开盘价失败: {e}"))?;
+        let mut rows = stmt
+            .query(params![ts_code, DEFAULT_ADJ_TYPE, trade_date])
+            .map_err(|e| format!("查询自选次日开盘价失败: {e}"))?;
+
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取自选次日开盘价失败: {e}"))?
+        {
+            let open_value: Option<f64> = row
+                .get(0)
+                .map_err(|e| format!("读取自选次日开盘价字段失败: {e}"))?;
+            Ok(open_value)
+        } else {
+            Ok(None)
+        }
+    })(source_conn, trade_date, ts_code)?
+    else {
         return Ok(None);
     };
     if next_open <= 0.0 {
         return Ok(None);
     }
 
-    let Some(latest_close) =
-        latest_price_override.or(query_optional_latest_close(source_conn, ts_code)?)
-    else {
+    let Some(latest_close) = latest_price_override.or((|source_conn: &Connection,
+                                                        ts_code: &str|
+     -> Result<Option<f64>, String> {
+        let mut stmt = source_conn
+            .prepare(
+                r#"
+            SELECT TRY_CAST(close AS DOUBLE)
+            FROM stock_data
+            WHERE ts_code = ? AND adj_type = ?
+            ORDER BY trade_date DESC
+            LIMIT 1
+            "#,
+            )
+            .map_err(|e| format!("预编译自选最新收盘价失败: {e}"))?;
+        let mut rows = stmt
+            .query(params![ts_code, DEFAULT_ADJ_TYPE])
+            .map_err(|e| format!("查询自选最新收盘价失败: {e}"))?;
+
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取自选最新收盘价失败: {e}"))?
+        {
+            let close_value: Option<f64> = row
+                .get(0)
+                .map_err(|e| format!("读取自选最新收盘价字段失败: {e}"))?;
+            Ok(close_value)
+        } else {
+            Ok(None)
+        }
+    })(source_conn, ts_code)?) else {
         return Ok(None);
     };
 

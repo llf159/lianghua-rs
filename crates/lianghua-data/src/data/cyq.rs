@@ -2,9 +2,6 @@ use serde::Serialize;
 
 use crate::data::RowData;
 
-const DEFAULT_RANGE: usize = 120;
-const DEFAULT_FACTOR: usize = 50;
-const DEFAULT_MIN_ACCURACY: f64 = 0.01;
 const EPS: f64 = 1e-12;
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -18,9 +15,9 @@ pub struct CyqConfig {
 impl Default for CyqConfig {
     fn default() -> Self {
         Self {
-            range: DEFAULT_RANGE,
-            factor: DEFAULT_FACTOR,
-            min_accuracy: DEFAULT_MIN_ACCURACY,
+            range: (120),
+            factor: (50),
+            min_accuracy: (0.01),
         }
     }
 }
@@ -92,14 +89,6 @@ fn required_series<'a>(row_data: &'a RowData, key: &str) -> Result<&'a [Option<f
         .ok_or_else(|| format!("RowData 缺少 {key} 列"))
 }
 
-fn optional_turnover_series<'a>(row_data: &'a RowData) -> Result<&'a [Option<f64>], String> {
-    row_data
-        .cols
-        .get("TOR")
-        .map(Vec::as_slice)
-        .ok_or_else(|| "RowData 缺少 TOR 列".to_string())
-}
-
 pub fn build_cyq_bars_from_row_data(row_data: &RowData) -> Result<Vec<CyqBar>, String> {
     row_data.validate()?;
 
@@ -107,7 +96,11 @@ pub fn build_cyq_bars_from_row_data(row_data: &RowData) -> Result<Vec<CyqBar>, S
     let high_series = required_series(row_data, "H")?;
     let low_series = required_series(row_data, "L")?;
     let close_series = required_series(row_data, "C")?;
-    let turnover_series = optional_turnover_series(row_data)?;
+    let turnover_series = row_data
+        .cols
+        .get("TOR")
+        .map(Vec::as_slice)
+        .ok_or_else(|| "RowData 缺少 TOR 列".to_string())?;
 
     let mut bars = Vec::with_capacity(row_data.trade_dates.len());
 

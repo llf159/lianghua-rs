@@ -18,8 +18,6 @@ use crate::{
 };
 
 pub const CHART_INDICATORS_FILE_NAME: &str = "chart_indicators.toml";
-const CHART_INDICATOR_INJECTED_RUNTIME_KEYS: [&str; 4] = ["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI"];
-const CHART_INDICATOR_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 
 static CHART_INDICATOR_COMPILE_CACHE: OnceLock<
     Mutex<HashMap<ChartIndicatorCacheKey, CompiledChartIndicatorConfig>>,
@@ -388,9 +386,44 @@ pub fn load_compiled_chart_indicator_config(
     let source_path = source_path.as_ref();
     let config_path = chart_indicator_config_path(source_path);
     let cache_key = ChartIndicatorCacheKey {
-        file_stamp: chart_indicator_file_stamp(&config_path)?,
+        file_stamp: (|path: &Path| -> Result<ChartIndicatorFileStamp, String> {
+            if !path.exists() {
+                return Ok(ChartIndicatorFileStamp::Missing);
+            }
+            if !path.is_file() {
+                return Err(format!(
+                    "chart indicator config path is not a file: {}",
+                    path.display()
+                ));
+            }
+
+            let metadata = fs::metadata(path).map_err(|error| {
+                format!(
+                    "read chart indicator config metadata failed: {}, {error}",
+                    path.display()
+                )
+            })?;
+            let modified_millis = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis())
+                .unwrap_or(0);
+
+            Ok(ChartIndicatorFileStamp::File {
+                len: metadata.len(),
+                modified_millis,
+            })
+        })(&config_path)?,
         config_path,
-        db_columns: available_db_columns.map(sorted_db_columns_cache_key),
+        db_columns: available_db_columns.map(|columns: &HashSet<String>| -> Vec<String> {
+            let mut columns = columns
+                .iter()
+                .map(|column| column.to_string())
+                .collect::<Vec<_>>();
+            columns.sort();
+            columns
+        }),
     };
 
     let cache = CHART_INDICATOR_COMPILE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -509,7 +542,45 @@ pub fn validate_chart_indicator_config(config: &ChartIndicatorConfig) -> Result<
             }
         }
 
-        validate_panel_series_combination(panel)?;
+        (|panel: &ChartPanelConfig| -> Result<(), String> {
+            if panel.role == ChartPanelRole::Main {
+                for series in &panel.series {
+                    if series.kind != ChartSeriesKind::Line {
+                        return Err(format!(
+                            "main panel {} only supports line overlay series: {}",
+                            panel.key, series.key
+                        ));
+                    }
+                }
+                return Ok(());
+            }
+
+            let brick_count = panel
+                .series
+                .iter()
+                .filter(|series| series.kind == ChartSeriesKind::Brick)
+                .count();
+            if brick_count > 0 {
+                if panel.series.len() != 1 || brick_count != 1 {
+                    return Err(format!(
+                        "brick series in panel {} must be the only series",
+                        panel.key
+                    ));
+                }
+                return Ok(());
+            }
+
+            for series in &panel.series {
+                if !matches!(series.kind, ChartSeriesKind::Bar | ChartSeriesKind::Line) {
+                    return Err(format!(
+                        "sub panel {} does not support {:?} series: {}",
+                        panel.key, series.kind, series.key
+                    ));
+                }
+            }
+
+            Ok(())
+        })(panel)?;
     }
 
     if main_count != 1 {
@@ -528,8 +599,21 @@ pub fn compile_chart_indicator_config(
     let config = normalize_chart_indicator_config(config);
     validate_chart_indicator_config(&config)?;
 
-    let db_column_lookup = available_db_columns.map(build_db_column_lookup);
-    let all_series_keys = collect_all_series_keys(&config);
+    let db_column_lookup =
+        available_db_columns.map(|columns: &HashSet<String>| -> HashMap<String, String> {
+            columns
+                .iter()
+                .map(|column| (normalize_identifier(column), column.clone()))
+                .collect()
+        });
+    let all_series_keys = (|config: &ChartIndicatorConfig| -> HashSet<String> {
+        config
+            .panels
+            .iter()
+            .flat_map(|panel| panel.series.iter())
+            .map(|series| normalize_identifier(&series.key))
+            .collect()
+    })(&config);
     let mut available_series_keys = HashSet::new();
     let mut database_indicator_columns = HashSet::new();
     let mut compiled_panels = Vec::with_capacity(config.panels.len());
@@ -611,7 +695,49 @@ pub fn compile_chart_indicator_config(
             )?;
             let is_vertical_line = marker.kind == Some(ChartMarkerKind::VerticalLine);
             if !is_vertical_line && let Some(y_key) = marker.y.as_deref() {
-                collect_marker_y_dependency(
+                (|y_key: &str,
+                  path: &str,
+                  all_series_keys: &HashSet<String>,
+                  available_series_keys: &HashSet<String>,
+                  db_column_lookup: Option<&HashMap<String, String>>,
+                  database_indicator_columns: &mut HashSet<String>|
+                 -> Result<(), String> {
+                    validate_key(path, y_key)?;
+                    let normalized = normalize_identifier(y_key);
+                    if is_base_runtime_key(&normalized)
+                        || available_series_keys.contains(&normalized)
+                    {
+                        return Ok(());
+                    }
+                    if let Some(db_dependency) = injected_runtime_db_dependency(&normalized) {
+                        if let Some(db_column_lookup) = db_column_lookup {
+                            if let Some(column) = db_column_lookup.get(db_dependency) {
+                                database_indicator_columns.insert(column.clone());
+                            }
+                        }
+                        return Ok(());
+                    }
+                    if is_injected_runtime_key(&normalized) {
+                        return Ok(());
+                    }
+                    if let Some(db_column_lookup) = db_column_lookup {
+                        if let Some(column) = db_column_lookup.get(&normalized) {
+                            database_indicator_columns.insert(column.clone());
+                            return Ok(());
+                        }
+                        if all_series_keys.contains(&normalized) {
+                            return Err(format!(
+                                "{path} references series `{y_key}` before it is declared"
+                            ));
+                        }
+                        return Err(format!(
+                            "{path} references unknown database indicator column `{y_key}`"
+                        ));
+                    }
+
+                    database_indicator_columns.insert(y_key.to_string());
+                    Ok(())
+                })(
                     y_key,
                     &format!("panel.{}.marker.{}.y", panel.key, marker.key),
                     &all_series_keys,
@@ -693,7 +819,22 @@ pub fn execute_chart_indicator_config(
     row_data: RowData,
 ) -> Result<ChartIndicatorExecution, String> {
     let series_len = row_data.trade_dates.len();
-    let mut runtime = row_data_into_chart_runtime(row_data)?;
+    let mut runtime = (|row_data: RowData| -> Result<Runtime, String> {
+        row_data.validate()?;
+        let mut runtime = Runtime::default();
+
+        for (name, series) in row_data.cols {
+            insert_runtime_series_aliases(&mut runtime, &name, series);
+        }
+
+        insert_existing_runtime_alias(&mut runtime, "O", "OPEN");
+        insert_existing_runtime_alias(&mut runtime, "H", "HIGH");
+        insert_existing_runtime_alias(&mut runtime, "L", "LOW");
+        insert_existing_runtime_alias(&mut runtime, "C", "CLOSE");
+        insert_existing_runtime_alias(&mut runtime, "V", "VOL");
+
+        Ok(runtime)
+    })(row_data)?;
     let mut values = HashMap::new();
 
     for panel in &compiled.panels {
@@ -749,7 +890,34 @@ pub fn execute_chart_indicator_config(
             );
 
             if let Some(y_key) = marker.y_key.as_deref() {
-                expose_marker_y_values(y_key, &runtime, series_len, &mut values)?;
+                (|y_key: &str,
+                  runtime: &Runtime,
+                  series_len: usize,
+                  values: &mut HashMap<String, Vec<serde_json::Value>>|
+                 -> Result<(), String> {
+                    if is_base_runtime_key(&normalize_identifier(y_key))
+                        || values.contains_key(y_key)
+                    {
+                        return Ok(());
+                    }
+
+                    let value = runtime
+                        .vars
+                        .get(y_key)
+                        .or_else(|| runtime.vars.get(&normalize_identifier(y_key)))
+                        .cloned();
+                    let Some(value) = value else {
+                        return Ok(());
+                    };
+                    let num_series = Value::as_num_series(&value, series_len).map_err(|error| {
+                        format!(
+                            "chart marker y `{y_key}` is not numeric series: {}",
+                            error.msg
+                        )
+                    })?;
+                    values.insert(y_key.to_string(), num_series_to_json_values(&num_series));
+                    Ok(())
+                })(y_key, &runtime, series_len, &mut values)?;
             }
         }
 
@@ -774,23 +942,6 @@ pub fn execute_chart_indicator_config(
     }
 
     Ok(ChartIndicatorExecution { values })
-}
-
-fn row_data_into_chart_runtime(row_data: RowData) -> Result<Runtime, String> {
-    row_data.validate()?;
-    let mut runtime = Runtime::default();
-
-    for (name, series) in row_data.cols {
-        insert_runtime_series_aliases(&mut runtime, &name, series);
-    }
-
-    insert_existing_runtime_alias(&mut runtime, "O", "OPEN");
-    insert_existing_runtime_alias(&mut runtime, "H", "HIGH");
-    insert_existing_runtime_alias(&mut runtime, "L", "LOW");
-    insert_existing_runtime_alias(&mut runtime, "C", "CLOSE");
-    insert_existing_runtime_alias(&mut runtime, "V", "VOL");
-
-    Ok(runtime)
 }
 
 fn insert_runtime_series_aliases(runtime: &mut Runtime, key: &str, series: Vec<Option<f64>>) {
@@ -837,61 +988,6 @@ fn compile_expression(expr: &str, path: &str) -> Result<Stmts, String> {
     Ok(stmts)
 }
 
-fn build_db_column_lookup(columns: &HashSet<String>) -> HashMap<String, String> {
-    columns
-        .iter()
-        .map(|column| (normalize_identifier(column), column.clone()))
-        .collect()
-}
-
-fn chart_indicator_file_stamp(path: &Path) -> Result<ChartIndicatorFileStamp, String> {
-    if !path.exists() {
-        return Ok(ChartIndicatorFileStamp::Missing);
-    }
-    if !path.is_file() {
-        return Err(format!(
-            "chart indicator config path is not a file: {}",
-            path.display()
-        ));
-    }
-
-    let metadata = fs::metadata(path).map_err(|error| {
-        format!(
-            "read chart indicator config metadata failed: {}, {error}",
-            path.display()
-        )
-    })?;
-    let modified_millis = metadata
-        .modified()
-        .ok()
-        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-
-    Ok(ChartIndicatorFileStamp::File {
-        len: metadata.len(),
-        modified_millis,
-    })
-}
-
-fn sorted_db_columns_cache_key(columns: &HashSet<String>) -> Vec<String> {
-    let mut columns = columns
-        .iter()
-        .map(|column| column.to_string())
-        .collect::<Vec<_>>();
-    columns.sort();
-    columns
-}
-
-fn collect_all_series_keys(config: &ChartIndicatorConfig) -> HashSet<String> {
-    config
-        .panels
-        .iter()
-        .flat_map(|panel| panel.series.iter())
-        .map(|series| normalize_identifier(&series.key))
-        .collect()
-}
-
 fn collect_database_dependencies(
     stmts: &Stmts,
     path: &str,
@@ -900,7 +996,22 @@ fn collect_database_dependencies(
     db_column_lookup: Option<&HashMap<String, String>>,
     database_indicator_columns: &mut HashSet<String>,
 ) -> Result<(), String> {
-    let identifiers = collect_program_identifiers(stmts);
+    let identifiers = (|stmts: &Stmts| -> HashSet<String> {
+        let mut locals = HashSet::new();
+        let mut identifiers = HashSet::new();
+
+        for stmt in &stmts.item {
+            match stmt {
+                Stmt::Assign { name, value } => {
+                    collect_expr_identifiers(value, &locals, &mut identifiers);
+                    locals.insert(name.clone());
+                }
+                Stmt::Expr(expr) => collect_expr_identifiers(expr, &locals, &mut identifiers),
+            }
+        }
+
+        identifiers
+    })(stmts);
     for identifier in identifiers {
         let normalized = normalize_identifier(&identifier);
         if is_base_runtime_key(&normalized) {
@@ -940,94 +1051,6 @@ fn collect_database_dependencies(
     Ok(())
 }
 
-fn collect_marker_y_dependency(
-    y_key: &str,
-    path: &str,
-    all_series_keys: &HashSet<String>,
-    available_series_keys: &HashSet<String>,
-    db_column_lookup: Option<&HashMap<String, String>>,
-    database_indicator_columns: &mut HashSet<String>,
-) -> Result<(), String> {
-    validate_key(path, y_key)?;
-    let normalized = normalize_identifier(y_key);
-    if is_base_runtime_key(&normalized) || available_series_keys.contains(&normalized) {
-        return Ok(());
-    }
-    if let Some(db_dependency) = injected_runtime_db_dependency(&normalized) {
-        if let Some(db_column_lookup) = db_column_lookup {
-            if let Some(column) = db_column_lookup.get(db_dependency) {
-                database_indicator_columns.insert(column.clone());
-            }
-        }
-        return Ok(());
-    }
-    if is_injected_runtime_key(&normalized) {
-        return Ok(());
-    }
-    if let Some(db_column_lookup) = db_column_lookup {
-        if let Some(column) = db_column_lookup.get(&normalized) {
-            database_indicator_columns.insert(column.clone());
-            return Ok(());
-        }
-        if all_series_keys.contains(&normalized) {
-            return Err(format!(
-                "{path} references series `{y_key}` before it is declared"
-            ));
-        }
-        return Err(format!(
-            "{path} references unknown database indicator column `{y_key}`"
-        ));
-    }
-
-    database_indicator_columns.insert(y_key.to_string());
-    Ok(())
-}
-
-fn expose_marker_y_values(
-    y_key: &str,
-    runtime: &Runtime,
-    series_len: usize,
-    values: &mut HashMap<String, Vec<serde_json::Value>>,
-) -> Result<(), String> {
-    if is_base_runtime_key(&normalize_identifier(y_key)) || values.contains_key(y_key) {
-        return Ok(());
-    }
-
-    let value = runtime
-        .vars
-        .get(y_key)
-        .or_else(|| runtime.vars.get(&normalize_identifier(y_key)))
-        .cloned();
-    let Some(value) = value else {
-        return Ok(());
-    };
-    let num_series = Value::as_num_series(&value, series_len).map_err(|error| {
-        format!(
-            "chart marker y `{y_key}` is not numeric series: {}",
-            error.msg
-        )
-    })?;
-    values.insert(y_key.to_string(), num_series_to_json_values(&num_series));
-    Ok(())
-}
-
-fn collect_program_identifiers(stmts: &Stmts) -> HashSet<String> {
-    let mut locals = HashSet::new();
-    let mut identifiers = HashSet::new();
-
-    for stmt in &stmts.item {
-        match stmt {
-            Stmt::Assign { name, value } => {
-                collect_expr_identifiers(value, &locals, &mut identifiers);
-                locals.insert(name.clone());
-            }
-            Stmt::Expr(expr) => collect_expr_identifiers(expr, &locals, &mut identifiers),
-        }
-    }
-
-    identifiers
-}
-
 fn collect_expr_identifiers(
     expr: &Expr,
     locals: &HashSet<String>,
@@ -1058,13 +1081,12 @@ fn normalize_identifier(identifier: &str) -> String {
 }
 
 fn is_injected_runtime_key(key: &str) -> bool {
-    CHART_INDICATOR_INJECTED_RUNTIME_KEYS.contains(&key)
+    (["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI"]).contains(&key)
 }
 
 fn injected_runtime_db_dependency(key: &str) -> Option<&'static str> {
-    CHART_INDICATOR_RUNTIME_ALIASES
-        .iter()
-        .find_map(|(alias, dependency)| (*alias == key).then_some(*dependency))
+    let _ = key;
+    None
 }
 
 fn is_base_runtime_key(key: &str) -> bool {
@@ -1085,46 +1107,6 @@ fn is_base_runtime_key(key: &str) -> bool {
             | "PCT_CHG"
             | "TOR"
     )
-}
-
-fn validate_panel_series_combination(panel: &ChartPanelConfig) -> Result<(), String> {
-    if panel.role == ChartPanelRole::Main {
-        for series in &panel.series {
-            if series.kind != ChartSeriesKind::Line {
-                return Err(format!(
-                    "main panel {} only supports line overlay series: {}",
-                    panel.key, series.key
-                ));
-            }
-        }
-        return Ok(());
-    }
-
-    let brick_count = panel
-        .series
-        .iter()
-        .filter(|series| series.kind == ChartSeriesKind::Brick)
-        .count();
-    if brick_count > 0 {
-        if panel.series.len() != 1 || brick_count != 1 {
-            return Err(format!(
-                "brick series in panel {} must be the only series",
-                panel.key
-            ));
-        }
-        return Ok(());
-    }
-
-    for series in &panel.series {
-        if !matches!(series.kind, ChartSeriesKind::Bar | ChartSeriesKind::Line) {
-            return Err(format!(
-                "sub panel {} does not support {:?} series: {}",
-                panel.key, series.kind, series.key
-            ));
-        }
-    }
-
-    Ok(())
 }
 
 fn validate_key(path: &str, key: &str) -> Result<(), String> {
@@ -1352,8 +1334,11 @@ shape = "flag"
 "##,
         )
         .expect("config should parse");
-        let compiled = compile_chart_indicator_config(&config, Some(&hash_set(["J"])))
-            .expect("marker y dependency should compile");
+        let compiled = compile_chart_indicator_config(
+            &config,
+            Some(&["J"].into_iter().map(str::to_string).collect()),
+        )
+        .expect("marker y dependency should compile");
 
         assert_eq!(compiled.database_indicator_columns, vec!["J".to_string()]);
 
@@ -1814,9 +1799,5 @@ kind = "area"
             .expect("system time should be after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("{prefix}_{nanos}"))
-    }
-
-    fn hash_set<const N: usize>(items: [&str; N]) -> HashSet<String> {
-        items.into_iter().map(str::to_string).collect()
     }
 }

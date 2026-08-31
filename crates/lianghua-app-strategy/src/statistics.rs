@@ -65,14 +65,6 @@ use crate::{
 };
 use lianghua_app_shared::{build_concepts_map, build_name_map, build_total_mv_map, filter_mv};
 
-const TOP_RANK_THRESHOLD: i64 = 100;
-const RULE_DECAY_WINDOWS: [usize; 3] = [20, 40, 60];
-const RULE_DECAY_MIN_PRIOR_DAYS: usize = 10;
-const RULE_VALIDATION_INJECTED_RUNTIME_KEYS: [&str; 4] = ["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI"];
-const RULE_VALIDATION_RUNTIME_ALIASES: [(&str, &str); 0] = [];
-const BACKTEST_INJECTED_RUNTIME_KEYS: [&str; 2] = ["ZHANG", "TOTAL_MV_YI"];
-const BACKTEST_RUNTIME_ALIASES: [(&str, &str); 0] = [];
-
 #[derive(Debug, Clone)]
 struct RuleMeta {
     when: String,
@@ -451,19 +443,8 @@ pub struct RankLayerMarketValueSummary {
 const VALIDATION_EPS: f64 = 1e-12;
 const RULE_BACKTEST_EPS: f64 = 1e-12;
 const VALIDATION_MAX_COMBINATIONS: usize = 256;
-const VALIDATION_COMBO_EVAL_BATCH_SIZE: usize = 16;
-const VALIDATION_DEFAULT_SAMPLE_LIMIT_PER_GROUP: usize = 30;
-const VALIDATION_MAX_SAMPLE_LIMIT_PER_GROUP: usize = 200;
-const VALIDATION_CONTINUATION_CACHE_LIMIT: usize = 1;
 const VALIDATION_CONTINUATION_TTL: Duration = Duration::from_secs(30 * 60);
-const VALIDATION_CALIBRATION_MIN_SAMPLES: usize = 100;
-const VALIDATION_CALIBRATION_MIN_DAYS: usize = 20;
-const VALIDATION_CALIBRATION_LCB_Z: f64 = 1.28;
-const VALIDATION_CALIBRATION_POINT_SCALE: f64 = 40.0;
-const RULE_BACKTEST_DETAIL_SAMPLE_LIMIT_PER_GROUP: usize = 5;
 const RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP: usize = 5;
-#[cfg(test)]
-const VALIDATION_RANDOM_SAMPLE_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RuleValidationUnknownConfig {
@@ -699,51 +680,6 @@ fn validation_continuation_cache()
     VALIDATION_CONTINUATION_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn store_validation_continuation_session(
-    session: ValidationContinuationSession,
-) -> Result<String, String> {
-    let mut cache = validation_continuation_cache()
-        .lock()
-        .map_err(|_| "保存表达式继续验证基础数据失败:缓存锁已损坏".to_string())?;
-    cache.retain(|_, item| item.created_at.elapsed() <= VALIDATION_CONTINUATION_TTL);
-    while cache.len() >= VALIDATION_CONTINUATION_CACHE_LIMIT {
-        let Some(oldest_key) = cache
-            .iter()
-            .max_by_key(|(_, item)| item.created_at.elapsed())
-            .map(|(key, _)| key.clone())
-        else {
-            break;
-        };
-        cache.remove(&oldest_key);
-    }
-
-    let continuation_id = loop {
-        let candidate = format!(
-            "expr-calibration-{:016x}{:016x}",
-            random::<u64>(),
-            random::<u64>()
-        );
-        if !cache.contains_key(&candidate) {
-            break candidate;
-        }
-    };
-    cache.insert(continuation_id.clone(), Arc::new(session));
-    Ok(continuation_id)
-}
-
-fn load_validation_continuation_session(
-    continuation_id: &str,
-) -> Result<Arc<ValidationContinuationSession>, String> {
-    let mut cache = validation_continuation_cache()
-        .lock()
-        .map_err(|_| "读取表达式继续验证基础数据失败:缓存锁已损坏".to_string())?;
-    cache.retain(|_, item| item.created_at.elapsed() <= VALIDATION_CONTINUATION_TTL);
-    cache
-        .get(continuation_id.trim())
-        .cloned()
-        .ok_or_else(|| "表达式基础验证缓存已失效，请重新执行一次表达式验证".to_string())
-}
-
 #[derive(Debug, Serialize)]
 pub struct MarketRankItem {
     pub name: String,
@@ -894,205 +830,10 @@ fn parse_scope_way_input(scope_way_raw: &str) -> Result<ScopeWay, String> {
     }
 }
 
-fn parse_rule_stage_input(stage_raw: &str) -> Result<RuleStage, String> {
-    match stage_raw.trim().to_ascii_lowercase().as_str() {
-        "base" => Ok(RuleStage::Base),
-        "trigger" => Ok(RuleStage::Trigger),
-        "confirm" => Ok(RuleStage::Confirm),
-        "risk" => Ok(RuleStage::Risk),
-        "fail" => Ok(RuleStage::Fail),
-        _ => Err(format!(
-            "stage 不支持: {stage_raw}，仅支持 base/trigger/confirm/risk/fail"
-        )),
-    }
-}
-
-fn parse_rule_tag_input(tag_raw: &str) -> Result<RuleTag, String> {
-    match tag_raw.trim().to_ascii_lowercase().as_str() {
-        "" | "normal" => Ok(RuleTag::Normal),
-        "opportunity" => Ok(RuleTag::Opportunity),
-        "rare" => Ok(RuleTag::Rare),
-        _ => Err(format!(
-            "tag 不支持: {tag_raw}，仅支持 normal/opportunity/rare"
-        )),
-    }
-}
-
 fn read_non_empty_owned(raw: Option<&str>) -> Option<String> {
     raw.map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-}
-
-fn normalize_validation_points(raw: Option<f64>) -> Result<f64, String> {
-    match raw {
-        Some(value) if !value.is_finite() => Err("手动策略 points 非法".to_string()),
-        Some(value) if value < 0.0 => Ok(-1.0),
-        Some(_) | None => Ok(1.0),
-    }
-}
-
-fn resolve_validation_seed_rule(
-    import_rule_name_raw: &str,
-    manual_strategy: Option<&RuleExpressionValidationManualStrategy>,
-    when: Option<&str>,
-    scope_way: Option<&str>,
-    scope_windows: Option<usize>,
-    all_rules: &[ScoreRule],
-) -> Result<ValidationSeedRule, String> {
-    let import_rule_name = import_rule_name_raw.trim();
-    let import_rule = if import_rule_name.is_empty() {
-        None
-    } else {
-        all_rules
-            .iter()
-            .find(|rule| rule.name.trim() == import_rule_name)
-            .cloned()
-    };
-
-    let top_formula = read_non_empty_owned(when);
-    let top_scope_way = read_non_empty_owned(scope_way);
-
-    let manual_name =
-        manual_strategy.and_then(|strategy| read_non_empty_owned(strategy.name.as_deref()));
-    let manual_formula =
-        manual_strategy.and_then(|strategy| read_non_empty_owned(strategy.when.as_deref()));
-    let manual_explain =
-        manual_strategy.and_then(|strategy| read_non_empty_owned(strategy.explain.as_deref()));
-    let manual_scope_windows = manual_strategy.and_then(|strategy| strategy.scope_windows);
-    let manual_points =
-        normalize_validation_points(manual_strategy.and_then(|strategy| strategy.points))?;
-    let manual_dist_points = manual_strategy
-        .and_then(|strategy| strategy.dist_points.clone())
-        .and_then(|items| if items.is_empty() { None } else { Some(items) });
-
-    if import_rule
-        .as_ref()
-        .is_some_and(|rule| rule.kind == RuleKind::Combination)
-        && top_formula.is_none()
-        && manual_formula.is_none()
-    {
-        return Err("组合策略不能导入到单表达式验证，请直接在“策略回测”中验证".to_string());
-    }
-
-    let manual_scope_way = match manual_strategy
-        .and_then(|strategy| read_non_empty_owned(strategy.scope_way.as_deref()))
-    {
-        Some(raw) => Some(parse_scope_way_input(&raw)?),
-        None => None,
-    };
-
-    let manual_tag = match manual_strategy.and_then(|strategy| strategy.tag.as_deref()) {
-        Some(raw) if !raw.trim().is_empty() => Some(parse_rule_tag_input(raw)?),
-        _ => None,
-    };
-
-    if let Some(stage_raw) = manual_strategy.and_then(|strategy| strategy.stage.as_deref()) {
-        if !stage_raw.trim().is_empty() {
-            let _ = parse_rule_stage_input(stage_raw)?;
-        }
-    }
-
-    let has_manual_override = manual_name.is_some()
-        || manual_formula.is_some()
-        || manual_scope_way.is_some()
-        || manual_scope_windows.is_some()
-        || manual_dist_points.is_some()
-        || manual_explain.is_some()
-        || manual_tag.is_some()
-        || manual_strategy
-            .and_then(|strategy| strategy.scene_name.as_deref())
-            .map(str::trim)
-            .is_some_and(|value| !value.is_empty())
-        || manual_strategy
-            .and_then(|strategy| strategy.stage.as_deref())
-            .map(str::trim)
-            .is_some_and(|value| !value.is_empty());
-
-    if !import_rule_name.is_empty() && import_rule.is_none() && !has_manual_override {
-        return Err(format!("未找到策略: {import_rule_name}"));
-    }
-
-    let formula = top_formula
-        .or(manual_formula)
-        .or_else(|| {
-            import_rule
-                .as_ref()
-                .map(|rule| rule.when.trim().to_string())
-        })
-        .ok_or_else(|| "表达式不能为空".to_string())?;
-
-    let resolved_scope_way = if let Some(raw) = top_scope_way {
-        parse_scope_way_input(&raw)?
-    } else if let Some(value) = manual_scope_way {
-        value
-    } else if let Some(rule) = import_rule.as_ref() {
-        rule.scope_way
-    } else {
-        ScopeWay::Any
-    };
-
-    let resolved_scope_windows = scope_windows
-        .or(manual_scope_windows)
-        .or_else(|| import_rule.as_ref().map(|rule| rule.scope_windows))
-        .unwrap_or(1)
-        .max(1);
-
-    if let ScopeWay::Consec(threshold) = resolved_scope_way {
-        if resolved_scope_windows < threshold {
-            return Err(format!(
-                "scope_windows({resolved_scope_windows}) 不能小于 CONSEC 阈值 {threshold}"
-            ));
-        }
-    }
-
-    let rule_name = manual_name
-        .or_else(|| {
-            import_rule
-                .as_ref()
-                .map(|rule| rule.name.trim().to_string())
-        })
-        .or_else(|| read_non_empty_owned(Some(import_rule_name)))
-        .unwrap_or_else(|| "manual_validation_rule".to_string());
-
-    let rule_explain = manual_explain
-        .or_else(|| {
-            import_rule
-                .as_ref()
-                .map(|rule| rule.explain.trim().to_string())
-        })
-        .unwrap_or_else(|| format!("表达式验证策略: {rule_name}"));
-
-    let points = manual_points;
-    if !points.is_finite() {
-        return Err("策略 points 非法".to_string());
-    }
-
-    let dist_points = manual_dist_points;
-
-    let tag = manual_tag
-        .or_else(|| import_rule.as_ref().map(|rule| rule.tag))
-        .unwrap_or(RuleTag::Normal);
-
-    let exclude_rule_name = if let Some(rule) = import_rule.as_ref() {
-        Some(rule.name.clone())
-    } else if all_rules.iter().any(|rule| rule.name.trim() == rule_name) {
-        Some(rule_name.clone())
-    } else {
-        None
-    };
-
-    Ok(ValidationSeedRule {
-        rule_name,
-        rule_explain,
-        scope_way: resolved_scope_way,
-        scope_windows: resolved_scope_windows,
-        formula,
-        points,
-        dist_points,
-        tag,
-        exclude_rule_name,
-    })
 }
 
 fn load_rule_meta(source_path: &str) -> Result<(Vec<String>, HashMap<String, RuleMeta>), String> {
@@ -1104,7 +845,32 @@ fn load_rule_meta(source_path: &str) -> Result<(Vec<String>, HashMap<String, Rul
         order.push(rule.name.clone());
         let when = match rule.kind {
             RuleKind::Single => rule.when.clone(),
-            RuleKind::Combination => format_combination_rule_formula(&rule),
+            RuleKind::Combination => (|rule: &ScoreRule| -> String {
+                let conditions = rule
+                    .conditions
+                    .iter()
+                    .map(|condition| format!("{}: {}", condition.name, condition.when))
+                    .collect::<Vec<_>>()
+                    .join("；");
+                let bonuses = rule
+                    .conditions
+                    .iter()
+                    .filter(|condition| condition.bonus_points != 0.0)
+                    .map(|condition| format!("{}: {:+}", condition.name, condition.bonus_points))
+                    .collect::<Vec<_>>()
+                    .join("；");
+                let mut parts = vec![
+                    format!("组合条件：{conditions}"),
+                    format!(
+                        "命中数得分：{:?}",
+                        rule.points_by_hits.as_deref().unwrap_or_default()
+                    ),
+                ];
+                if !bonuses.is_empty() {
+                    parts.push(format!("额外加分：{bonuses}"));
+                }
+                parts.join("；")
+            })(&rule),
         };
         let points = rule.representative_points();
         meta_map.insert(
@@ -1122,135 +888,29 @@ fn load_rule_meta(source_path: &str) -> Result<(Vec<String>, HashMap<String, Rul
     Ok((order, meta_map))
 }
 
-fn format_combination_rule_formula(rule: &ScoreRule) -> String {
-    let conditions = rule
-        .conditions
-        .iter()
-        .map(|condition| format!("{}: {}", condition.name, condition.when))
-        .collect::<Vec<_>>()
-        .join("；");
-    let bonuses = rule
-        .conditions
-        .iter()
-        .filter(|condition| condition.bonus_points != 0.0)
-        .map(|condition| format!("{}: {:+}", condition.name, condition.bonus_points))
-        .collect::<Vec<_>>()
-        .join("；");
-    let mut parts = vec![
-        format!("组合条件：{conditions}"),
-        format!(
-            "命中数得分：{:?}",
-            rule.points_by_hits.as_deref().unwrap_or_default()
-        ),
-    ];
-    if !bonuses.is_empty() {
-        parts.push(format!("额外加分：{bonuses}"));
-    }
-    parts.join("；")
-}
-
 fn load_scene_options(source_path: &str) -> Result<Vec<String>, String> {
     let scenes = ScoreScene::load_scenes(source_path)?;
     Ok(scenes.into_iter().map(|scene| scene.name).collect())
 }
 
-fn load_scene_rule_name_sets(
-    source_path: &str,
-) -> Result<HashMap<String, HashSet<String>>, String> {
-    let rules = ScoreRule::load_rules(source_path)?;
-    let mut out: HashMap<String, HashSet<String>> = HashMap::new();
-
-    for rule in rules {
-        out.entry(rule.scene_name).or_default().insert(rule.name);
-    }
-
-    Ok(out)
-}
-
-fn query_overview(conn: &Connection) -> Result<StrategyOverviewPayload, String> {
-    let sql = r#"
-        WITH per_stock_day AS (
-            SELECT
-                trade_date,
-                ts_code,
-                COUNT(*) AS hit_rule_count
-            FROM rule_details
-            WHERE rule_score IS NOT NULL
-              AND ABS(rule_score) > 1e-12
-            GROUP BY 1, 2
-        ),
-        daily_level AS (
-            SELECT
-                trade_date,
-                AVG(hit_rule_count) AS day_level
-            FROM per_stock_day
-            GROUP BY 1
-        ),
-        overall_level AS (
-            SELECT AVG(hit_rule_count) AS avg_level
-            FROM per_stock_day
-        )
-        SELECT
-            d.trade_date,
-            d.day_level,
-            o.avg_level,
-            d.day_level - o.avg_level AS delta_level,
-            CASE
-                WHEN d.day_level IS NULL OR o.avg_level IS NULL THEN NULL
-                ELSE d.day_level > o.avg_level
-            END AS above_avg
-        FROM daily_level AS d
-        CROSS JOIN overall_level AS o
-        ORDER BY d.trade_date ASC
-    "#;
-
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|e| format!("预编译总体统计 SQL 失败: {e}"))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("执行总体统计 SQL 失败: {e}"))?;
-
-    let mut items = Vec::new();
-    let mut latest_trade_date = None;
-    let mut average_level = None;
-
-    while let Some(row) = rows.next().map_err(|e| format!("读取总体统计失败: {e}"))? {
-        let trade_date: String = row.get(0).map_err(|e| format!("读取交易日失败: {e}"))?;
-        let avg_level: Option<f64> = row.get(2).map_err(|e| format!("读取平均水平失败: {e}"))?;
-
-        latest_trade_date = Some(trade_date.clone());
-        average_level = avg_level;
-        items.push(StrategyHeatmapCell {
-            trade_date,
-            day_level: row.get(1).map_err(|e| format!("读取当日水平失败: {e}"))?,
-            avg_level,
-            delta_level: row.get(3).map_err(|e| format!("读取差值失败: {e}"))?,
-            above_avg: row.get(4).map_err(|e| format!("读取强弱标记失败: {e}"))?,
-        });
-    }
-
-    Ok(StrategyOverviewPayload {
-        items: Some(items),
-        latest_trade_date,
-        average_level,
-    })
-}
-
-fn query_each_rule_medians(
+fn query_daily_rows(
     conn: &Connection,
+    rule_order: &[String],
     meta_map: &HashMap<String, RuleMeta>,
-) -> Result<HashMap<(String, String), f64>, String> {
-    let mut out = HashMap::new();
+) -> Result<Vec<StrategyDailyRow>, String> {
+    let each_medians = (|conn: &Connection,
+                         meta_map: &HashMap<String, RuleMeta>|
+     -> Result<HashMap<(String, String), f64>, String> {
+        let mut out = HashMap::new();
 
-    for (rule_name, meta) in meta_map {
-        if !meta.is_each || meta.points == 0.0 {
-            continue;
-        }
+        for (rule_name, meta) in meta_map {
+            if !meta.is_each || meta.points == 0.0 {
+                continue;
+            }
 
-        let mut stmt = conn
-            .prepare(
-                r#"
+            let mut stmt = conn
+                .prepare(
+                    r#"
                 SELECT
                     trade_date,
                     QUANTILE_CONT(ABS(rule_score / ?), 0.5) AS median_trigger_count
@@ -1261,35 +921,28 @@ fn query_each_rule_medians(
                 GROUP BY 1
                 ORDER BY 1 ASC
                 "#,
-            )
-            .map_err(|e| format!("预编译 EACH 中位触发次数 SQL 失败: {e}"))?;
-        let mut rows = stmt
-            .query(params![meta.points, rule_name])
-            .map_err(|e| format!("执行 EACH 中位触发次数 SQL 失败: {e}"))?;
+                )
+                .map_err(|e| format!("预编译 EACH 中位触发次数 SQL 失败: {e}"))?;
+            let mut rows = stmt
+                .query(params![meta.points, rule_name])
+                .map_err(|e| format!("执行 EACH 中位触发次数 SQL 失败: {e}"))?;
 
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| format!("读取 EACH 中位触发次数失败: {e}"))?
-        {
-            let trade_date: String = row.get(0).map_err(|e| format!("读取交易日失败: {e}"))?;
-            let median: Option<f64> = row
-                .get(1)
-                .map_err(|e| format!("读取中位触发次数失败: {e}"))?;
-            if let Some(value) = median {
-                out.insert((trade_date, rule_name.clone()), value);
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| format!("读取 EACH 中位触发次数失败: {e}"))?
+            {
+                let trade_date: String = row.get(0).map_err(|e| format!("读取交易日失败: {e}"))?;
+                let median: Option<f64> = row
+                    .get(1)
+                    .map_err(|e| format!("读取中位触发次数失败: {e}"))?;
+                if let Some(value) = median {
+                    out.insert((trade_date, rule_name.clone()), value);
+                }
             }
         }
-    }
 
-    Ok(out)
-}
-
-fn query_daily_rows(
-    conn: &Connection,
-    rule_order: &[String],
-    meta_map: &HashMap<String, RuleMeta>,
-) -> Result<Vec<StrategyDailyRow>, String> {
-    let each_medians = query_each_rule_medians(conn, meta_map)?;
+        Ok(out)
+    })(conn, meta_map)?;
     let mut sample_stmt = conn
         .prepare(
             r#"
@@ -1359,7 +1012,7 @@ fn query_daily_rows(
         .prepare(sql)
         .map_err(|e| format!("预编译日度策略统计 SQL 失败: {e}"))?;
     let mut rows = stmt
-        .query(params![TOP_RANK_THRESHOLD])
+        .query(params![(100)])
         .map_err(|e| format!("执行日度策略统计 SQL 失败: {e}"))?;
 
     let mut out = Vec::new();
@@ -1428,30 +1081,6 @@ fn query_daily_rows(
     Ok(out)
 }
 
-fn resolve_strategy_name(requested: Option<String>, strategy_options: &[String]) -> Option<String> {
-    let requested = requested
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
-    if let Some(name) = requested {
-        if strategy_options.iter().any(|item| item == &name) {
-            return Some(name);
-        }
-    }
-    None
-}
-
-fn resolve_scene_name(requested: Option<String>, scene_options: &[String]) -> Option<String> {
-    let requested = requested
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    if let Some(scene_name) = requested {
-        if scene_options.iter().any(|item| item == &scene_name) {
-            return Some(scene_name);
-        }
-    }
-    scene_options.first().cloned()
-}
-
 fn resolve_analysis_trade_date(
     requested: Option<String>,
     trade_date_options: &[String],
@@ -1465,207 +1094,6 @@ fn resolve_analysis_trade_date(
         }
     }
     trade_date_options.first().cloned()
-}
-
-fn query_scene_trade_date_options(conn: &Connection) -> Result<Vec<String>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT DISTINCT trade_date
-            FROM scene_details
-            ORDER BY trade_date DESC
-            "#,
-        )
-        .map_err(|e| format!("预编译 scene 交易日 SQL 失败: {e}"))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("执行 scene 交易日 SQL 失败: {e}"))?;
-
-    let mut out = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取 scene 交易日失败: {e}"))?
-    {
-        let trade_date: String = row.get(0).map_err(|e| format!("读取交易日字段失败: {e}"))?;
-        if !trade_date.trim().is_empty() {
-            out.push(trade_date);
-        }
-    }
-
-    Ok(out)
-}
-
-fn query_scene_stage_rows(
-    conn: &Connection,
-    scene_name: &str,
-    trade_date: &str,
-) -> Result<(Vec<SceneStageRow>, i64, i64), String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT
-                COALESCE(NULLIF(stage, ''), 'none') AS stage,
-                COUNT(*) AS sample_count
-            FROM scene_details
-            WHERE trade_date = ?
-              AND scene_name = ?
-            GROUP BY 1
-            "#,
-        )
-        .map_err(|e| format!("预编译 scene 阶段统计 SQL 失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![trade_date, scene_name])
-        .map_err(|e| format!("执行 scene 阶段统计 SQL 失败: {e}"))?;
-
-    let mut stage_count_map: HashMap<String, i64> = HashMap::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取 scene 阶段统计失败: {e}"))?
-    {
-        let stage: String = row.get(0).map_err(|e| format!("读取阶段字段失败: {e}"))?;
-        let sample_count: i64 = row.get(1).map_err(|e| format!("读取阶段数量失败: {e}"))?;
-        let normalized_stage = stage.trim().to_ascii_lowercase();
-        stage_count_map.insert(normalized_stage, sample_count);
-    }
-
-    let total_sample_count: i64 = stage_count_map.values().sum();
-    let none_count = stage_count_map.get("none").copied().unwrap_or(0);
-    let covered_count = (total_sample_count - none_count).max(0);
-
-    let mut rows_out = Vec::new();
-    let stage_order = ["trigger", "confirm", "observe", "fail", "none"];
-
-    for stage in stage_order {
-        let sample_count = stage_count_map.remove(stage).unwrap_or(0);
-        rows_out.push(SceneStageRow {
-            stage: stage.to_string(),
-            sample_count,
-            stage_ratio_in_scene: if total_sample_count > 0 {
-                Some(sample_count as f64 / total_sample_count as f64)
-            } else {
-                None
-            },
-        });
-    }
-
-    let mut remain_stages = stage_count_map.into_iter().collect::<Vec<_>>();
-    remain_stages.sort_by(|a, b| a.0.cmp(&b.0));
-    for (stage, sample_count) in remain_stages {
-        rows_out.push(SceneStageRow {
-            stage,
-            sample_count,
-            stage_ratio_in_scene: if total_sample_count > 0 {
-                Some(sample_count as f64 / total_sample_count as f64)
-            } else {
-                None
-            },
-        });
-    }
-
-    Ok((rows_out, total_sample_count, covered_count))
-}
-
-fn query_rule_contribution_by_date(
-    conn: &Connection,
-    trade_date: &str,
-) -> Result<HashMap<String, f64>, String> {
-    let sql = r#"
-        WITH daily_rank_bounds AS (
-            SELECT
-                trade_date,
-                MAX(rank) AS max_rank
-            FROM score_summary
-            WHERE trade_date = ?
-            GROUP BY 1
-        ),
-        triggered_rule_rows AS (
-            SELECT *
-            FROM rule_details
-            WHERE trade_date = ?
-              AND rule_score IS NOT NULL
-              AND ABS(rule_score) > 1e-12
-        )
-        SELECT
-            d.rule_name,
-            SUM(
-                CASE
-                    WHEN s.rank IS NOT NULL
-                      AND b.max_rank IS NOT NULL
-                      AND b.max_rank > 0
-                    THEN d.rule_score * CAST((b.max_rank + 1 - s.rank) AS DOUBLE) / CAST(b.max_rank AS DOUBLE)
-                    ELSE 0
-                END
-            ) AS contribution_score
-        FROM triggered_rule_rows AS d
-        LEFT JOIN score_summary AS s
-          ON s.ts_code = d.ts_code
-         AND s.trade_date = d.trade_date
-        LEFT JOIN daily_rank_bounds AS b
-          ON b.trade_date = d.trade_date
-        GROUP BY 1
-    "#;
-
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|e| format!("预编译 scene 规则贡献度 SQL 失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![trade_date, trade_date])
-        .map_err(|e| format!("执行 scene 规则贡献度 SQL 失败: {e}"))?;
-
-    let mut out = HashMap::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取 scene 规则贡献度失败: {e}"))?
-    {
-        let rule_name: String = row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?;
-        let contribution_score = row
-            .get::<usize, Option<f64>>(1)
-            .map_err(|e| format!("读取规则贡献度失败: {e}"))?
-            .unwrap_or(0.0);
-        out.insert(rule_name, contribution_score);
-    }
-
-    Ok(out)
-}
-
-fn build_scene_contribution_summary(
-    scene_total_sample_count: i64,
-    scene_covered_count: i64,
-    scene_rule_names: Option<&HashSet<String>>,
-    contribution_by_rule: &HashMap<String, f64>,
-) -> SceneContributionSummary {
-    let scene_rule_contribution_score = scene_rule_names.map(|rule_names| {
-        contribution_by_rule
-            .iter()
-            .filter(|(rule_name, _)| rule_names.contains(*rule_name))
-            .map(|(_, score)| *score)
-            .sum::<f64>()
-    });
-    let all_rule_contribution_score = if contribution_by_rule.is_empty() {
-        None
-    } else {
-        Some(contribution_by_rule.values().sum::<f64>())
-    };
-    let scene_rule_contribution_ratio =
-        match (scene_rule_contribution_score, all_rule_contribution_score) {
-            (Some(scene_score), Some(all_score)) if all_score.abs() > 1e-12 => {
-                Some(scene_score / all_score)
-            }
-            _ => None,
-        };
-
-    SceneContributionSummary {
-        scene_covered_count,
-        scene_total_sample_count,
-        scene_coverage_ratio: if scene_total_sample_count > 0 {
-            Some(scene_covered_count as f64 / scene_total_sample_count as f64)
-        } else {
-            None
-        },
-        scene_rule_contribution_score,
-        all_rule_contribution_score,
-        scene_rule_contribution_ratio,
-    }
 }
 
 fn build_chart(strategy_rows: &[StrategyDailyRow]) -> StrategyChartPayload {
@@ -1813,11 +1241,91 @@ pub fn get_strategy_statistics_page(
     analysis_trade_date: Option<String>,
 ) -> Result<StrategyStatisticsPageData, String> {
     let conn = open_result_conn(&source_path)?;
-    let overview = query_overview(&conn)?;
+    let overview = (|conn: &Connection| -> Result<StrategyOverviewPayload, String> {
+        let sql = r#"
+        WITH per_stock_day AS (
+            SELECT
+                trade_date,
+                ts_code,
+                COUNT(*) AS hit_rule_count
+            FROM rule_details
+            WHERE rule_score IS NOT NULL
+              AND ABS(rule_score) > 1e-12
+            GROUP BY 1, 2
+        ),
+        daily_level AS (
+            SELECT
+                trade_date,
+                AVG(hit_rule_count) AS day_level
+            FROM per_stock_day
+            GROUP BY 1
+        ),
+        overall_level AS (
+            SELECT AVG(hit_rule_count) AS avg_level
+            FROM per_stock_day
+        )
+        SELECT
+            d.trade_date,
+            d.day_level,
+            o.avg_level,
+            d.day_level - o.avg_level AS delta_level,
+            CASE
+                WHEN d.day_level IS NULL OR o.avg_level IS NULL THEN NULL
+                ELSE d.day_level > o.avg_level
+            END AS above_avg
+        FROM daily_level AS d
+        CROSS JOIN overall_level AS o
+        ORDER BY d.trade_date ASC
+    "#;
+
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| format!("预编译总体统计 SQL 失败: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("执行总体统计 SQL 失败: {e}"))?;
+
+        let mut items = Vec::new();
+        let mut latest_trade_date = None;
+        let mut average_level = None;
+
+        while let Some(row) = rows.next().map_err(|e| format!("读取总体统计失败: {e}"))? {
+            let trade_date: String = row.get(0).map_err(|e| format!("读取交易日失败: {e}"))?;
+            let avg_level: Option<f64> =
+                row.get(2).map_err(|e| format!("读取平均水平失败: {e}"))?;
+
+            latest_trade_date = Some(trade_date.clone());
+            average_level = avg_level;
+            items.push(StrategyHeatmapCell {
+                trade_date,
+                day_level: row.get(1).map_err(|e| format!("读取当日水平失败: {e}"))?,
+                avg_level,
+                delta_level: row.get(3).map_err(|e| format!("读取差值失败: {e}"))?,
+                above_avg: row.get(4).map_err(|e| format!("读取强弱标记失败: {e}"))?,
+            });
+        }
+
+        Ok(StrategyOverviewPayload {
+            items: Some(items),
+            latest_trade_date,
+            average_level,
+        })
+    })(&conn)?;
     let (strategy_options, meta_map) = load_rule_meta(&source_path)?;
     let detail_rows_all = query_daily_rows(&conn, &strategy_options, &meta_map)?;
 
-    let resolved_strategy_name = resolve_strategy_name(strategy_name, &strategy_options);
+    let resolved_strategy_name =
+        (|requested: Option<String>, strategy_options: &[String]| -> Option<String> {
+            let requested = requested
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty());
+            if let Some(name) = requested {
+                if strategy_options.iter().any(|item| item == &name) {
+                    return Some(name);
+                }
+            }
+            None
+        })(strategy_name, &strategy_options);
 
     let strategy_rows: Vec<StrategyDailyRow> =
         if let Some(selected_name) = resolved_strategy_name.as_ref() {
@@ -1892,8 +1400,45 @@ pub fn get_scene_statistics_page(
 ) -> Result<SceneStatisticsPageData, String> {
     let conn = open_result_conn(&source_path)?;
     let scene_options = load_scene_options(&source_path)?;
-    let resolved_scene_name = resolve_scene_name(scene_name, &scene_options);
-    let analysis_trade_date_options = query_scene_trade_date_options(&conn)?;
+    let resolved_scene_name =
+        (|requested: Option<String>, scene_options: &[String]| -> Option<String> {
+            let requested = requested
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            if let Some(scene_name) = requested {
+                if scene_options.iter().any(|item| item == &scene_name) {
+                    return Some(scene_name);
+                }
+            }
+            scene_options.first().cloned()
+        })(scene_name, &scene_options);
+    let analysis_trade_date_options = (|conn: &Connection| -> Result<Vec<String>, String> {
+        let mut stmt = conn
+            .prepare(
+                r#"
+            SELECT DISTINCT trade_date
+            FROM scene_details
+            ORDER BY trade_date DESC
+            "#,
+            )
+            .map_err(|e| format!("预编译 scene 交易日 SQL 失败: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("执行 scene 交易日 SQL 失败: {e}"))?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取 scene 交易日失败: {e}"))?
+        {
+            let trade_date: String = row.get(0).map_err(|e| format!("读取交易日字段失败: {e}"))?;
+            if !trade_date.trim().is_empty() {
+                out.push(trade_date);
+            }
+        }
+
+        Ok(out)
+    })(&conn)?;
     let resolved_analysis_trade_date =
         resolve_analysis_trade_date(analysis_trade_date, &analysis_trade_date_options);
 
@@ -1905,12 +1450,187 @@ pub fn get_scene_statistics_page(
         resolved_analysis_trade_date.as_deref(),
     ) {
         let (next_stage_rows, total_sample_count, covered_count) =
-            query_scene_stage_rows(&conn, selected_scene_name, selected_trade_date)?;
+            (|conn: &Connection,
+              scene_name: &str,
+              trade_date: &str|
+             -> Result<(Vec<SceneStageRow>, i64, i64), String> {
+                let mut stmt = conn
+                    .prepare(
+                        r#"
+            SELECT
+                COALESCE(NULLIF(stage, ''), 'none') AS stage,
+                COUNT(*) AS sample_count
+            FROM scene_details
+            WHERE trade_date = ?
+              AND scene_name = ?
+            GROUP BY 1
+            "#,
+                    )
+                    .map_err(|e| format!("预编译 scene 阶段统计 SQL 失败: {e}"))?;
+                let mut rows = stmt
+                    .query(params![trade_date, scene_name])
+                    .map_err(|e| format!("执行 scene 阶段统计 SQL 失败: {e}"))?;
+
+                let mut stage_count_map: HashMap<String, i64> = HashMap::new();
+                while let Some(row) = rows
+                    .next()
+                    .map_err(|e| format!("读取 scene 阶段统计失败: {e}"))?
+                {
+                    let stage: String = row.get(0).map_err(|e| format!("读取阶段字段失败: {e}"))?;
+                    let sample_count: i64 =
+                        row.get(1).map_err(|e| format!("读取阶段数量失败: {e}"))?;
+                    let normalized_stage = stage.trim().to_ascii_lowercase();
+                    stage_count_map.insert(normalized_stage, sample_count);
+                }
+
+                let total_sample_count: i64 = stage_count_map.values().sum();
+                let none_count = stage_count_map.get("none").copied().unwrap_or(0);
+                let covered_count = (total_sample_count - none_count).max(0);
+
+                let mut rows_out = Vec::new();
+                let stage_order = ["trigger", "confirm", "observe", "fail", "none"];
+
+                for stage in stage_order {
+                    let sample_count = stage_count_map.remove(stage).unwrap_or(0);
+                    rows_out.push(SceneStageRow {
+                        stage: stage.to_string(),
+                        sample_count,
+                        stage_ratio_in_scene: if total_sample_count > 0 {
+                            Some(sample_count as f64 / total_sample_count as f64)
+                        } else {
+                            None
+                        },
+                    });
+                }
+
+                let mut remain_stages = stage_count_map.into_iter().collect::<Vec<_>>();
+                remain_stages.sort_by(|a, b| a.0.cmp(&b.0));
+                for (stage, sample_count) in remain_stages {
+                    rows_out.push(SceneStageRow {
+                        stage,
+                        sample_count,
+                        stage_ratio_in_scene: if total_sample_count > 0 {
+                            Some(sample_count as f64 / total_sample_count as f64)
+                        } else {
+                            None
+                        },
+                    });
+                }
+
+                Ok((rows_out, total_sample_count, covered_count))
+            })(&conn, selected_scene_name, selected_trade_date)?;
         stage_rows = next_stage_rows;
 
-        let scene_rule_name_sets = load_scene_rule_name_sets(&source_path)?;
-        let contribution_by_rule = query_rule_contribution_by_date(&conn, selected_trade_date)?;
-        summary = Some(build_scene_contribution_summary(
+        let scene_rule_name_sets =
+            (|source_path: &str| -> Result<HashMap<String, HashSet<String>>, String> {
+                let rules = ScoreRule::load_rules(source_path)?;
+                let mut out: HashMap<String, HashSet<String>> = HashMap::new();
+
+                for rule in rules {
+                    out.entry(rule.scene_name).or_default().insert(rule.name);
+                }
+
+                Ok(out)
+            })(&source_path)?;
+        let contribution_by_rule = (|conn: &Connection,
+                                     trade_date: &str|
+         -> Result<HashMap<String, f64>, String> {
+            let sql = r#"
+        WITH daily_rank_bounds AS (
+            SELECT
+                trade_date,
+                MAX(rank) AS max_rank
+            FROM score_summary
+            WHERE trade_date = ?
+            GROUP BY 1
+        ),
+        triggered_rule_rows AS (
+            SELECT *
+            FROM rule_details
+            WHERE trade_date = ?
+              AND rule_score IS NOT NULL
+              AND ABS(rule_score) > 1e-12
+        )
+        SELECT
+            d.rule_name,
+            SUM(
+                CASE
+                    WHEN s.rank IS NOT NULL
+                      AND b.max_rank IS NOT NULL
+                      AND b.max_rank > 0
+                    THEN d.rule_score * CAST((b.max_rank + 1 - s.rank) AS DOUBLE) / CAST(b.max_rank AS DOUBLE)
+                    ELSE 0
+                END
+            ) AS contribution_score
+        FROM triggered_rule_rows AS d
+        LEFT JOIN score_summary AS s
+          ON s.ts_code = d.ts_code
+         AND s.trade_date = d.trade_date
+        LEFT JOIN daily_rank_bounds AS b
+          ON b.trade_date = d.trade_date
+        GROUP BY 1
+    "#;
+
+            let mut stmt = conn
+                .prepare(sql)
+                .map_err(|e| format!("预编译 scene 规则贡献度 SQL 失败: {e}"))?;
+            let mut rows = stmt
+                .query(params![trade_date, trade_date])
+                .map_err(|e| format!("执行 scene 规则贡献度 SQL 失败: {e}"))?;
+
+            let mut out = HashMap::new();
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| format!("读取 scene 规则贡献度失败: {e}"))?
+            {
+                let rule_name: String = row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?;
+                let contribution_score = row
+                    .get::<usize, Option<f64>>(1)
+                    .map_err(|e| format!("读取规则贡献度失败: {e}"))?
+                    .unwrap_or(0.0);
+                out.insert(rule_name, contribution_score);
+            }
+
+            Ok(out)
+        })(&conn, selected_trade_date)?;
+        summary = Some((|scene_total_sample_count: i64,
+                         scene_covered_count: i64,
+                         scene_rule_names: Option<&HashSet<String>>,
+                         contribution_by_rule: &HashMap<String, f64>|
+         -> SceneContributionSummary {
+            let scene_rule_contribution_score = scene_rule_names.map(|rule_names| {
+                contribution_by_rule
+                    .iter()
+                    .filter(|(rule_name, _)| rule_names.contains(*rule_name))
+                    .map(|(_, score)| *score)
+                    .sum::<f64>()
+            });
+            let all_rule_contribution_score = if contribution_by_rule.is_empty() {
+                None
+            } else {
+                Some(contribution_by_rule.values().sum::<f64>())
+            };
+            let scene_rule_contribution_ratio =
+                match (scene_rule_contribution_score, all_rule_contribution_score) {
+                    (Some(scene_score), Some(all_score)) if all_score.abs() > 1e-12 => {
+                        Some(scene_score / all_score)
+                    }
+                    _ => None,
+                };
+
+            SceneContributionSummary {
+                scene_covered_count,
+                scene_total_sample_count,
+                scene_coverage_ratio: if scene_total_sample_count > 0 {
+                    Some(scene_covered_count as f64 / scene_total_sample_count as f64)
+                } else {
+                    None
+                },
+                scene_rule_contribution_score,
+                all_rule_contribution_score,
+                scene_rule_contribution_ratio,
+            }
+        })(
             total_sample_count,
             covered_count,
             scene_rule_name_sets.get(selected_scene_name),
@@ -1942,181 +1662,6 @@ fn format_validation_number(value: f64) -> String {
         }
         text
     }
-}
-
-fn expand_unknown_config(config: &RuleValidationUnknownConfig) -> Result<Vec<f64>, String> {
-    let name = config.name.trim();
-    if name.is_empty() {
-        return Err("未知数名称不能为空".to_string());
-    }
-    if !config.start.is_finite() || !config.end.is_finite() || !config.step.is_finite() {
-        return Err(format!("未知数 {name} 存在非法数值"));
-    }
-    if config.step <= 0.0 {
-        return Err(format!("未知数 {name} 的 step 必须 > 0"));
-    }
-    if config.end < config.start {
-        return Err(format!("未知数 {name} 的 end 不能小于 start"));
-    }
-
-    let mut values = Vec::new();
-    let mut current = config.start;
-    let mut guard = 0usize;
-    while current <= config.end + config.step * 1e-9 {
-        values.push(current.min(config.end));
-        current += config.step;
-        guard += 1;
-        if guard > VALIDATION_MAX_COMBINATIONS * 8 {
-            return Err(format!(
-                "未知数 {name} 的取值数量过多，请增大 step 或缩小范围"
-            ));
-        }
-    }
-    if values.is_empty() {
-        values.push(config.start);
-    }
-    Ok(values)
-}
-
-fn replace_validation_unknowns(formula: &str, assignments: &[(String, f64)]) -> String {
-    if assignments.is_empty() {
-        return formula.to_string();
-    }
-
-    let replace_map = assignments
-        .iter()
-        .map(|(name, value)| (name.as_str(), format_validation_number(*value)))
-        .collect::<HashMap<_, _>>();
-
-    let tokens = lex_all(formula);
-    let mut out = String::with_capacity(formula.len() + assignments.len() * 4);
-    let mut cursor = 0usize;
-
-    for token in tokens {
-        if token.start > cursor {
-            out.push_str(&formula[cursor..token.start]);
-        }
-        match token.kind {
-            TokenKind::Ident(name) => {
-                if let Some(replacement) = replace_map.get(name.as_str()) {
-                    out.push_str(replacement);
-                } else {
-                    out.push_str(&formula[token.start..token.end]);
-                }
-            }
-            TokenKind::Eof => {}
-            _ => out.push_str(&formula[token.start..token.end]),
-        }
-        cursor = token.end;
-    }
-
-    if cursor < formula.len() {
-        out.push_str(&formula[cursor..]);
-    }
-
-    out
-}
-
-fn build_validation_variants(
-    formula: &str,
-    unknown_configs: &[RuleValidationUnknownConfig],
-) -> Result<Vec<ValidationVariant>, String> {
-    let formula = formula.trim();
-    if formula.is_empty() {
-        return Err("表达式不能为空".to_string());
-    }
-
-    let mut unknown_groups = Vec::<(String, Vec<f64>)>::new();
-    let mut total_combinations = 1usize;
-    let mut seen = HashSet::new();
-
-    for config in unknown_configs {
-        let name = config.name.trim();
-        if name.is_empty() {
-            continue;
-        }
-        if !seen.insert(name.to_string()) {
-            return Err(format!("未知数名称重复: {name}"));
-        }
-
-        let values = expand_unknown_config(config)?;
-        total_combinations = total_combinations.saturating_mul(values.len().max(1));
-        if total_combinations > VALIDATION_MAX_COMBINATIONS {
-            return Err(format!(
-                "未知数组合过多({total_combinations})，当前上限为 {VALIDATION_MAX_COMBINATIONS}"
-            ));
-        }
-
-        unknown_groups.push((name.to_string(), values));
-    }
-
-    let mut out = Vec::new();
-    let mut assignments = Vec::<(String, f64)>::new();
-
-    fn walk_variants(
-        index: usize,
-        unknown_groups: &[(String, Vec<f64>)],
-        assignments: &mut Vec<(String, f64)>,
-        formula: &str,
-        out: &mut Vec<ValidationVariant>,
-    ) {
-        if index >= unknown_groups.len() {
-            let mut sorted = assignments.clone();
-            sorted.sort_by(|left, right| {
-                right
-                    .0
-                    .len()
-                    .cmp(&left.0.len())
-                    .then_with(|| left.0.cmp(&right.0))
-            });
-            let unknown_values = sorted
-                .iter()
-                .map(|(name, value)| RuleValidationUnknownValue {
-                    name: name.clone(),
-                    value: *value,
-                })
-                .collect::<Vec<_>>();
-            let replaced_formula = replace_validation_unknowns(formula, &sorted);
-            let combo_key = format!("validation_combo_{:03}", out.len() + 1);
-            let combo_label = if unknown_values.is_empty() {
-                "默认参数".to_string()
-            } else {
-                unknown_values
-                    .iter()
-                    .map(|item| format!("{}={}", item.name, format_validation_number(item.value)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-
-            out.push(ValidationVariant {
-                combo_key,
-                combo_label,
-                formula: replaced_formula,
-                unknown_values,
-            });
-            return;
-        }
-
-        let (name, values) = &unknown_groups[index];
-        for value in values {
-            assignments.push((name.clone(), *value));
-            walk_variants(index + 1, unknown_groups, assignments, formula, out);
-            assignments.pop();
-        }
-    }
-
-    walk_variants(0, &unknown_groups, &mut assignments, formula, &mut out);
-
-    if out.is_empty() {
-        out.push(ValidationVariant {
-            combo_key: "validation_combo_001".to_string(),
-            combo_label: "默认参数".to_string(),
-            formula: formula.to_string(),
-            unknown_values: Vec::new(),
-        });
-    }
-
-    Ok(out)
 }
 
 fn estimate_rule_warmup(
@@ -2185,7 +1730,7 @@ fn collect_rule_validation_runtime_keys(combos: &[PreparedValidationCombo]) -> H
         .map(|combo| &combo.cached_rule.when_ast)
         .collect::<Vec<_>>();
     let cyq_chen_keys = cyq_chen_runtime_key_names();
-    let injected_keys = RULE_VALIDATION_INJECTED_RUNTIME_KEYS
+    let injected_keys = (["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI"])
         .iter()
         .copied()
         .chain(cyq_chen_keys)
@@ -2196,70 +1741,9 @@ fn collect_rule_validation_runtime_keys(combos: &[PreparedValidationCombo]) -> H
         RuntimeKeyCollectOptions {
             always_keys: &[],
             injected_keys: &injected_keys,
-            aliases: &RULE_VALIDATION_RUNTIME_ALIASES,
+            aliases: &([]),
         },
     )
-}
-
-fn collect_rule_validation_cyq_chen_runtime_keys(
-    combos: &[PreparedValidationCombo],
-) -> HashSet<String> {
-    let programs = combos
-        .iter()
-        .map(|combo| &combo.cached_rule.when_ast)
-        .collect::<Vec<_>>();
-    collect_used_cyq_chen_runtime_keys(&programs)
-}
-
-fn prepare_validation_combo(
-    seed_rule: &ValidationSeedRule,
-    variant: ValidationVariant,
-) -> Result<PreparedValidationCombo, String> {
-    let cached_rule = build_validation_cached_rule(
-        variant.combo_key.clone(),
-        seed_rule.scope_way,
-        seed_rule.scope_windows,
-        seed_rule.points,
-        seed_rule.dist_points.clone(),
-        seed_rule.tag,
-        &variant.formula,
-    )?;
-    let assigned_names = collect_validation_assigned_names(&cached_rule.when_ast);
-
-    Ok(PreparedValidationCombo {
-        variant,
-        cached_rule,
-        assigned_names,
-    })
-}
-
-fn build_validation_execution_plan(
-    source_path: &str,
-    start_date: &str,
-    end_date: &str,
-    seed_rule: &ValidationSeedRule,
-    variants: Vec<ValidationVariant>,
-) -> Result<ValidationExecutionPlan, String> {
-    let mut max_warmup_need = 0usize;
-    let mut combos = Vec::with_capacity(variants.len());
-
-    for variant in variants {
-        let combo = prepare_validation_combo(seed_rule, variant)?;
-        max_warmup_need = max_warmup_need.max(estimate_rule_warmup(
-            &combo.cached_rule.when_ast,
-            combo.cached_rule.scope_way,
-            combo.cached_rule.scope_windows,
-        )?);
-        combos.push(combo);
-    }
-
-    let need_rows = calc_query_need_rows(source_path, max_warmup_need, start_date, end_date)?;
-    let query_start_date = calc_query_start_date(source_path, max_warmup_need, start_date)?;
-    Ok(ValidationExecutionPlan {
-        combos,
-        need_rows,
-        query_start_date,
-    })
 }
 
 fn snapshot_runtime_values(runtime: &Runtime, names: &[String]) -> Vec<(String, Value)> {
@@ -2281,194 +1765,10 @@ fn restore_runtime_values(runtime: &mut Runtime, values: &[(String, Value)]) {
     }
 }
 
-fn build_validation_date_score_map(
-    trade_dates: &[String],
-    keep_from: usize,
-    scores: &[f64],
-    triggered_flags: &[bool],
-    rule_points: f64,
-) -> Option<HashMap<String, f64>> {
-    let min_len = usize::min(
-        trade_dates.len(),
-        usize::min(scores.len(), triggered_flags.len()),
-    );
-    if keep_from >= min_len {
-        return None;
-    }
-
-    let mut date_score_map = HashMap::new();
-    for index in keep_from..min_len {
-        let Some(score) =
-            normalize_validation_trigger_score(scores[index], triggered_flags[index], rule_points)
-        else {
-            continue;
-        };
-        date_score_map.insert(trade_dates[index].clone(), score);
-    }
-
-    if date_score_map.is_empty() {
-        None
-    } else {
-        Some(date_score_map)
-    }
-}
-
-fn validation_combos_use_rank_score(combos: &[PreparedValidationCombo]) -> bool {
-    combos.iter().any(|combo| {
-        expr_program_uses_runtime_key(&combo.cached_rule.when_ast, "RANK")
-            || expr_program_uses_runtime_key(&combo.cached_rule.when_ast, "SCORE")
-    })
-}
-
 #[derive(Debug, Clone, Copy, Default)]
 struct ValidationRankScoreInfo {
     rank: Option<f64>,
     score: Option<f64>,
-}
-
-fn load_validation_rank_score_series_map(
-    source_path: &str,
-    start_date: &str,
-    end_date: &str,
-) -> HashMap<String, HashMap<String, ValidationRankScoreInfo>> {
-    let result_db = result_db_path(source_path);
-    if !result_db.exists() {
-        return HashMap::new();
-    }
-
-    let Some(result_db_str) = result_db.to_str() else {
-        return HashMap::new();
-    };
-    let Ok(conn) = Connection::open(result_db_str) else {
-        return HashMap::new();
-    };
-    let Ok(mut stmt) = conn.prepare(
-        r#"
-        SELECT ts_code, trade_date, rank, total_score
-        FROM score_summary
-        WHERE trade_date >= ? AND trade_date <= ?
-        "#,
-    ) else {
-        return HashMap::new();
-    };
-    let Ok(mut rows) = stmt.query(params![start_date, end_date]) else {
-        return HashMap::new();
-    };
-
-    let mut out: HashMap<String, HashMap<String, ValidationRankScoreInfo>> = HashMap::new();
-    while let Ok(Some(row)) = rows.next() {
-        let Ok(ts_code) = row.get::<_, String>(0) else {
-            continue;
-        };
-        let Ok(trade_date) = row.get::<_, String>(1) else {
-            continue;
-        };
-        let rank = row
-            .get::<_, Option<i64>>(2)
-            .ok()
-            .flatten()
-            .map(|value| value as f64);
-        let score = row.get::<_, Option<f64>>(3).ok().flatten();
-        out.entry(ts_code)
-            .or_default()
-            .insert(trade_date, ValidationRankScoreInfo { rank, score });
-    }
-
-    out
-}
-
-fn inject_validation_rank_score_series(
-    row_data: &mut crate::data::RowData,
-    ts_code: &str,
-    rank_score_series_map: &HashMap<String, HashMap<String, ValidationRankScoreInfo>>,
-) -> Result<(), String> {
-    let len = row_data.trade_dates.len();
-    let mut rank_series = vec![None; len];
-    let mut score_series = vec![None; len];
-
-    if let Some(date_to_values) = rank_score_series_map.get(ts_code) {
-        for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
-            if let Some(values) = date_to_values.get(trade_date).copied() {
-                rank_series[index] = values.rank;
-                score_series[index] = values.score;
-            }
-        }
-    }
-
-    row_data.cols.insert("RANK".to_string(), rank_series);
-    row_data.cols.insert("SCORE".to_string(), score_series);
-    row_data.validate()
-}
-
-fn evaluate_validation_combos_for_ts_code(
-    reader: &mut DataReader,
-    cyq_chen_injector: &CyqChenFieldInjector,
-    ts_code: &str,
-    stock_adj_type: &str,
-    start_date: &str,
-    end_date: &str,
-    need_rows: usize,
-    st_list: &HashSet<String>,
-    total_share_map: &HashMap<String, f64>,
-    rank_score_series_map: &HashMap<String, HashMap<String, ValidationRankScoreInfo>>,
-    needs_rank_score: bool,
-    combos: &[PreparedValidationCombo],
-) -> Result<ValidationTsCodeEvaluation, String> {
-    let mut row_data = reader.load_one_tail_rows(ts_code, stock_adj_type, end_date, need_rows)?;
-    let _ = cyq_chen_injector.inject(&mut row_data, ts_code);
-    inject_stock_extra_fields(
-        &mut row_data,
-        ts_code,
-        st_list.contains(ts_code),
-        total_share_map.get(ts_code).copied(),
-    )?;
-    if needs_rank_score {
-        inject_validation_rank_score_series(&mut row_data, ts_code, rank_score_series_map)?;
-    }
-
-    let trade_dates = row_data.trade_dates.clone();
-    if trade_dates.is_empty() {
-        return Ok(ValidationTsCodeEvaluation {
-            ts_code: ts_code.to_string(),
-            combo_hits: Vec::new(),
-        });
-    }
-
-    let keep_from = trade_dates
-        .binary_search_by(|date| date.as_str().cmp(start_date))
-        .unwrap_or_else(|index| index);
-    let mut runtime = row_into_rt(row_data)?;
-    let restore_values = combos
-        .iter()
-        .map(|combo| snapshot_runtime_values(&runtime, &combo.assigned_names))
-        .collect::<Vec<_>>();
-    let mut combo_hits = Vec::new();
-
-    // All combos originate from the same formula template with different constants,
-    // so one runtime load can be reused as long as any overwritten base columns are restored.
-    for (combo_index, combo) in combos.iter().enumerate() {
-        if !restore_values[combo_index].is_empty() {
-            restore_runtime_values(&mut runtime, &restore_values[combo_index]);
-        }
-
-        let (scores, triggered_flags) =
-            evaluate_cached_rule_scores(&combo.cached_rule, &mut runtime)?;
-        let Some(date_score_map) = build_validation_date_score_map(
-            &trade_dates,
-            keep_from,
-            &scores,
-            &triggered_flags,
-            combo.cached_rule.points,
-        ) else {
-            continue;
-        };
-        combo_hits.push((combo_index, date_score_map));
-    }
-
-    Ok(ValidationTsCodeEvaluation {
-        ts_code: ts_code.to_string(),
-        combo_hits,
-    })
 }
 
 fn build_validation_triggered_scores_for_combos(
@@ -2487,11 +1787,70 @@ fn build_validation_triggered_scores_for_combos(
     }
 
     let required_runtime_keys = collect_rule_validation_runtime_keys(combos);
-    let used_cyq_chen_keys = collect_rule_validation_cyq_chen_runtime_keys(combos);
+    let used_cyq_chen_keys = (|combos: &[PreparedValidationCombo]| -> HashSet<String> {
+        let programs = combos
+            .iter()
+            .map(|combo| &combo.cached_rule.when_ast)
+            .collect::<Vec<_>>();
+        collect_used_cyq_chen_runtime_keys(&programs)
+    })(combos);
     let total_share_map = load_total_share_map(source_path).unwrap_or_default();
-    let needs_rank_score = validation_combos_use_rank_score(combos);
+    let needs_rank_score = (|combos: &[PreparedValidationCombo]| -> bool {
+        combos.iter().any(|combo| {
+            expr_program_uses_runtime_key(&combo.cached_rule.when_ast, "RANK")
+                || expr_program_uses_runtime_key(&combo.cached_rule.when_ast, "SCORE")
+        })
+    })(combos);
     let rank_score_series_map = if needs_rank_score {
-        load_validation_rank_score_series_map(source_path, query_start_date, end_date)
+        (|source_path: &str,
+          start_date: &str,
+          end_date: &str|
+         -> HashMap<String, HashMap<String, ValidationRankScoreInfo>> {
+            let result_db = result_db_path(source_path);
+            if !result_db.exists() {
+                return HashMap::new();
+            }
+
+            let Some(result_db_str) = result_db.to_str() else {
+                return HashMap::new();
+            };
+            let Ok(conn) = Connection::open(result_db_str) else {
+                return HashMap::new();
+            };
+            let Ok(mut stmt) = conn.prepare(
+                r#"
+        SELECT ts_code, trade_date, rank, total_score
+        FROM score_summary
+        WHERE trade_date >= ? AND trade_date <= ?
+        "#,
+            ) else {
+                return HashMap::new();
+            };
+            let Ok(mut rows) = stmt.query(params![start_date, end_date]) else {
+                return HashMap::new();
+            };
+
+            let mut out: HashMap<String, HashMap<String, ValidationRankScoreInfo>> = HashMap::new();
+            while let Ok(Some(row)) = rows.next() {
+                let Ok(ts_code) = row.get::<_, String>(0) else {
+                    continue;
+                };
+                let Ok(trade_date) = row.get::<_, String>(1) else {
+                    continue;
+                };
+                let rank = row
+                    .get::<_, Option<i64>>(2)
+                    .ok()
+                    .flatten()
+                    .map(|value| value as f64);
+                let score = row.get::<_, Option<f64>>(3).ok().flatten();
+                out.entry(ts_code)
+                    .or_default()
+                    .insert(trade_date, ValidationRankScoreInfo { rank, score });
+            }
+
+            out
+        })(source_path, query_start_date, end_date)
     } else {
         HashMap::new()
     };
@@ -2518,7 +1877,155 @@ fn build_validation_triggered_scores_for_combos(
                 let ValidationTsCodeEvaluation {
                     ts_code,
                     combo_hits,
-                } = evaluate_validation_combos_for_ts_code(
+                } = (|reader: &mut DataReader,
+                      cyq_chen_injector: &CyqChenFieldInjector,
+                      ts_code: &str,
+                      stock_adj_type: &str,
+                      start_date: &str,
+                      end_date: &str,
+                      need_rows: usize,
+                      st_list: &HashSet<String>,
+                      total_share_map: &HashMap<String, f64>,
+                      rank_score_series_map: &HashMap<
+                    String,
+                    HashMap<String, ValidationRankScoreInfo>,
+                >,
+                      needs_rank_score: bool,
+                      combos: &[PreparedValidationCombo]|
+                 -> Result<ValidationTsCodeEvaluation, String> {
+                    let mut row_data =
+                        reader.load_one_tail_rows(ts_code, stock_adj_type, end_date, need_rows)?;
+                    let _ = cyq_chen_injector.inject(&mut row_data, ts_code);
+                    inject_stock_extra_fields(
+                        &mut row_data,
+                        ts_code,
+                        st_list.contains(ts_code),
+                        total_share_map.get(ts_code).copied(),
+                    )?;
+                    if needs_rank_score {
+                        (|row_data: &mut crate::data::RowData,
+                          ts_code: &str,
+                          rank_score_series_map: &HashMap<
+                            String,
+                            HashMap<String, ValidationRankScoreInfo>,
+                        >|
+                         -> Result<(), String> {
+                            let len = row_data.trade_dates.len();
+                            let mut rank_series = vec![None; len];
+                            let mut score_series = vec![None; len];
+
+                            if let Some(date_to_values) = rank_score_series_map.get(ts_code) {
+                                for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
+                                    if let Some(values) = date_to_values.get(trade_date).copied() {
+                                        rank_series[index] = values.rank;
+                                        score_series[index] = values.score;
+                                    }
+                                }
+                            }
+
+                            row_data.cols.insert("RANK".to_string(), rank_series);
+                            row_data.cols.insert("SCORE".to_string(), score_series);
+                            row_data.validate()
+                        })(&mut row_data, ts_code, rank_score_series_map)?;
+                    }
+
+                    let trade_dates = row_data.trade_dates.clone();
+                    if trade_dates.is_empty() {
+                        return Ok(ValidationTsCodeEvaluation {
+                            ts_code: ts_code.to_string(),
+                            combo_hits: Vec::new(),
+                        });
+                    }
+
+                    let keep_from = trade_dates
+                        .binary_search_by(|date| date.as_str().cmp(start_date))
+                        .unwrap_or_else(|index| index);
+                    let mut runtime = row_into_rt(row_data)?;
+                    let restore_values = combos
+                        .iter()
+                        .map(|combo| snapshot_runtime_values(&runtime, &combo.assigned_names))
+                        .collect::<Vec<_>>();
+                    let mut combo_hits = Vec::new();
+
+                    // All combos originate from the same formula template with different constants,
+                    // so one runtime load can be reused as long as any overwritten base columns are restored.
+                    for (combo_index, combo) in combos.iter().enumerate() {
+                        if !restore_values[combo_index].is_empty() {
+                            restore_runtime_values(&mut runtime, &restore_values[combo_index]);
+                        }
+
+                        let (scores, triggered_flags) =
+                            evaluate_cached_rule_scores(&combo.cached_rule, &mut runtime)?;
+                        let Some(date_score_map) =
+                            (|trade_dates: &[String],
+                              keep_from: usize,
+                              scores: &[f64],
+                              triggered_flags: &[bool],
+                              rule_points: f64|
+                             -> Option<HashMap<String, f64>> {
+                                let min_len = usize::min(
+                                    trade_dates.len(),
+                                    usize::min(scores.len(), triggered_flags.len()),
+                                );
+                                if keep_from >= min_len {
+                                    return None;
+                                }
+
+                                let mut date_score_map = HashMap::new();
+                                for index in keep_from..min_len {
+                                    let Some(score) =
+                                        (|score: f64,
+                                          triggered: bool,
+                                          rule_points: f64|
+                                         -> Option<f64> {
+                                            if !score.is_finite() {
+                                                return None;
+                                            }
+                                            if score.abs() > VALIDATION_EPS {
+                                                return Some(score);
+                                            }
+                                            if !triggered {
+                                                return None;
+                                            }
+
+                                            if rule_points.is_finite()
+                                                && rule_points.abs() > VALIDATION_EPS
+                                            {
+                                                return Some(rule_points.signum());
+                                            }
+                                            Some(1.0)
+                                        })(
+                                            scores[index], triggered_flags[index], rule_points
+                                        )
+                                    else {
+                                        continue;
+                                    };
+                                    date_score_map.insert(trade_dates[index].clone(), score);
+                                }
+
+                                if date_score_map.is_empty() {
+                                    None
+                                } else {
+                                    Some(date_score_map)
+                                }
+                            })(
+                                &trade_dates,
+                                keep_from,
+                                &scores,
+                                &triggered_flags,
+                                combo.cached_rule.points,
+                            )
+                        else {
+                            continue;
+                        };
+                        combo_hits.push((combo_index, date_score_map));
+                    }
+
+                    Ok(ValidationTsCodeEvaluation {
+                        ts_code: ts_code.to_string(),
+                        combo_hits,
+                    })
+                })(
                     reader,
                     cyq_chen_injector,
                     ts_code,
@@ -2596,104 +2103,6 @@ fn build_validation_triggered_scores(
         &[combo],
     )?;
     Ok(triggered_maps.pop().unwrap_or_default())
-}
-
-fn build_validation_combo_result(
-    params: &RuleLayerBacktestRunParams,
-    seed_rule: &ValidationSeedRule,
-    combo: &PreparedValidationCombo,
-    triggered_score_map: ValidationTriggeredScoreMap,
-    runtime_cache: &RuleLayerRuntimeCache,
-    layer_config: &RuleLayerConfig,
-    similarity_cache: &ValidationSimilarityCache,
-    explain_map: &HashMap<String, String>,
-    stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
-    sample_limit_per_group: usize,
-) -> Result<RuleValidationComboResult, String> {
-    let metrics_with_samples = calc_rule_layer_metrics_with_samples_from_cache(
-        runtime_cache,
-        &triggered_score_map,
-        layer_config,
-    )?;
-    let validation_layer_details = build_validation_score_layer_details(
-        &metrics_with_samples.samples,
-        layer_config.min_samples_per_day,
-    );
-    let return_distribution = build_validation_return_distribution(&metrics_with_samples.samples);
-    let mut sample_accumulator = ValidationSampleAccumulator::new(
-        sample_limit_per_group,
-        stock_meta_map,
-        similarity_cache,
-        matches!(seed_rule.scope_way, ScopeWay::Each),
-        seed_rule.points,
-        seed_rule.dist_points.is_some(),
-    );
-    visit_triggered_rule_samples_from_cache(runtime_cache, &triggered_score_map, |sample| {
-        sample_accumulator.push(sample);
-        Ok(())
-    })?;
-    let (
-        trigger_samples,
-        triggered_days,
-        sample_stats,
-        trigger_count_stats,
-        sample_groups,
-        overlap_hit_count,
-    ) = sample_accumulator.into_parts();
-    let backtest = build_rule_backtest_payload(
-        &combo.variant.combo_key,
-        params,
-        metrics_with_samples.metrics,
-        Some(validation_layer_details),
-    );
-    let similarity_rows = build_validation_similarity_rows_from_overlap(
-        similarity_cache,
-        trigger_samples,
-        overlap_hit_count,
-        seed_rule.exclude_rule_name.as_deref(),
-        explain_map,
-    );
-
-    Ok(RuleValidationComboResult {
-        combo_key: combo.variant.combo_key.clone(),
-        combo_label: combo.variant.combo_label.clone(),
-        formula: combo.variant.formula.clone(),
-        unknown_values: combo.variant.unknown_values.clone(),
-        trigger_samples,
-        triggered_days,
-        avg_daily_trigger: if triggered_days > 0 {
-            trigger_samples as f64 / triggered_days as f64
-        } else {
-            0.0
-        },
-        sample_stats,
-        trigger_count_stats,
-        sample_groups,
-        return_distribution,
-        backtest,
-        similarity_rows,
-    })
-}
-
-fn normalize_validation_trigger_score(
-    score: f64,
-    triggered: bool,
-    rule_points: f64,
-) -> Option<f64> {
-    if !score.is_finite() {
-        return None;
-    }
-    if score.abs() > VALIDATION_EPS {
-        return Some(score);
-    }
-    if !triggered {
-        return None;
-    }
-
-    if rule_points.is_finite() && rule_points.abs() > VALIDATION_EPS {
-        return Some(rule_points.signum());
-    }
-    Some(1.0)
 }
 
 struct ValidationScoreLayerAgg {
@@ -2921,23 +2330,22 @@ fn build_validation_return_distribution(
 fn build_validation_return_distribution_from_counts(
     counts: [usize; 7],
 ) -> Vec<RuleValidationReturnDistributionBucket> {
-    const BUCKET_LABELS: [&str; 7] = [
-        "<= -10%", "-10%~-5%", "-5%~-2%", "-2%~2%", "2%~5%", "5%~10%", ">= 10%",
-    ];
     let total = counts.iter().sum::<usize>();
-    BUCKET_LABELS
-        .into_iter()
-        .enumerate()
-        .map(|(index, label)| RuleValidationReturnDistributionBucket {
-            bucket_label: label.to_string(),
-            sample_count: counts[index],
-            sample_ratio: if total > 0 {
-                Some(counts[index] as f64 / total as f64)
-            } else {
-                None
-            },
-        })
-        .collect()
+    ([
+        "<= -10%", "-10%~-5%", "-5%~-2%", "-2%~2%", "2%~5%", "5%~10%", ">= 10%",
+    ])
+    .into_iter()
+    .enumerate()
+    .map(|(index, label)| RuleValidationReturnDistributionBucket {
+        bucket_label: label.to_string(),
+        sample_count: counts[index],
+        sample_ratio: if total > 0 {
+            Some(counts[index] as f64 / total as f64)
+        } else {
+            None
+        },
+    })
+    .collect()
 }
 
 fn format_validation_score_layer_label(score: f64) -> String {
@@ -3009,167 +2417,12 @@ fn build_rule_backtest_payload(
     }
 }
 
-fn build_strategy_rule_validation_detail(
-    params: &RuleLayerBacktestRunParams,
-    rule_name: &str,
-    rule_meta: &RuleMeta,
-    validation: RuleLayerMetricsWithValidation,
-    similarity_cache: &ValidationSimilarityCache,
-    explain_map: &HashMap<String, String>,
-    stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
-) -> RuleValidationComboResult {
-    let RuleLayerMetricsWithValidation {
-        metrics,
-        triggered_samples,
-        daily_score_layers,
-        return_distribution_counts,
-    } = validation;
-    let validation_layer_details =
-        build_validation_score_layer_details_from_daily_layers(daily_score_layers);
-    let return_distribution =
-        build_validation_return_distribution_from_counts(return_distribution_counts);
-    let mut sample_accumulator = ValidationSampleAccumulator::new(
-        RULE_BACKTEST_DETAIL_SAMPLE_LIMIT_PER_GROUP,
-        stock_meta_map,
-        similarity_cache,
-        rule_meta.is_each,
-        rule_meta.points,
-        false,
-    );
-    for sample in &triggered_samples {
-        if sample.rule_score.abs() <= RULE_BACKTEST_EPS {
-            continue;
-        }
-        sample_accumulator.push(RuleLayerSamplePointRef {
-            ts_code: &sample.ts_code,
-            trade_date: &sample.trade_date,
-            rule_score: sample.rule_score,
-            residual_return: sample.residual_return,
-        });
-    }
-
-    let (
-        trigger_samples,
-        triggered_days,
-        sample_stats,
-        trigger_count_stats,
-        sample_groups,
-        overlap_hit_count,
-    ) = sample_accumulator.into_parts();
-    let backtest =
-        build_rule_backtest_payload(rule_name, params, metrics, Some(validation_layer_details));
-    let similarity_rows = build_validation_similarity_rows_from_overlap(
-        similarity_cache,
-        trigger_samples,
-        overlap_hit_count,
-        Some(rule_name),
-        explain_map,
-    );
-
-    RuleValidationComboResult {
-        combo_key: rule_name.to_string(),
-        combo_label: rule_name.to_string(),
-        formula: rule_meta.when.clone(),
-        unknown_values: Vec::new(),
-        trigger_samples,
-        triggered_days,
-        avg_daily_trigger: if triggered_days > 0 {
-            trigger_samples as f64 / triggered_days as f64
-        } else {
-            0.0
-        },
-        sample_stats,
-        trigger_count_stats,
-        sample_groups,
-        return_distribution,
-        backtest,
-        similarity_rows,
-    }
-}
-
 #[derive(Debug, Clone)]
 struct ValidationSimilarityCache {
     total_samples: f64,
     rule_names: Vec<String>,
     rule_hit_counts: Vec<usize>,
     pair_to_rule_indices: HashMap<String, HashMap<String, Vec<usize>>>,
-}
-
-fn load_validation_similarity_cache(
-    result_conn: &Connection,
-    start_date: &str,
-    end_date: &str,
-) -> Result<ValidationSimilarityCache, String> {
-    let total_samples = result_conn
-        .query_row(
-            r#"
-            SELECT COUNT(*)
-            FROM score_summary
-            WHERE trade_date >= ?
-              AND trade_date <= ?
-            "#,
-            params![start_date, end_date],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|e| format!("读取验证样本总数失败: {e}"))?
-        .max(0) as f64;
-
-    let mut stmt = result_conn
-        .prepare(
-            r#"
-            SELECT
-                rule_name,
-                ts_code,
-                trade_date
-            FROM rule_details
-            WHERE trade_date >= ?
-              AND trade_date <= ?
-              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
-              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > 1e-12
-            "#,
-        )
-        .map_err(|e| format!("预编译触发相似度查询失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![start_date, end_date])
-        .map_err(|e| format!("查询触发相似度失败: {e}"))?;
-
-    let mut rule_names = Vec::new();
-    let mut rule_name_to_index = HashMap::<String, usize>::new();
-    let mut rule_hit_counts = Vec::new();
-    let mut pair_to_rule_indices = HashMap::<String, HashMap<String, Vec<usize>>>::new();
-
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取触发相似度失败: {e}"))?
-    {
-        let rule_name: String = row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?;
-        let ts_code: String = row.get(1).map_err(|e| format!("读取代码失败: {e}"))?;
-        let trade_date: String = row.get(2).map_err(|e| format!("读取交易日失败: {e}"))?;
-        let rule_index = if let Some(index) = rule_name_to_index.get(&rule_name) {
-            *index
-        } else {
-            let index = rule_names.len();
-            rule_name_to_index.insert(rule_name.clone(), index);
-            rule_names.push(rule_name);
-            rule_hit_counts.push(0);
-            index
-        };
-
-        rule_hit_counts[rule_index] += 1;
-        pair_to_rule_indices
-            .entry(ts_code)
-            .or_default()
-            .entry(trade_date)
-            .or_default()
-            .push(rule_index);
-    }
-
-    Ok(ValidationSimilarityCache {
-        total_samples,
-        rule_names,
-        rule_hit_counts,
-        pair_to_rule_indices,
-    })
 }
 
 fn empty_validation_similarity_cache() -> ValidationSimilarityCache {
@@ -3192,7 +2445,82 @@ fn load_validation_similarity_cache_optional(
     }
 
     let result_conn = open_result_conn(source_path)?;
-    match load_validation_similarity_cache(&result_conn, start_date, end_date) {
+    match (|result_conn: &Connection,
+            start_date: &str,
+            end_date: &str|
+     -> Result<ValidationSimilarityCache, String> {
+        let total_samples = result_conn
+            .query_row(
+                r#"
+            SELECT COUNT(*)
+            FROM score_summary
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+            "#,
+                params![start_date, end_date],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| format!("读取验证样本总数失败: {e}"))?
+            .max(0) as f64;
+
+        let mut stmt = result_conn
+            .prepare(
+                r#"
+            SELECT
+                rule_name,
+                ts_code,
+                trade_date
+            FROM rule_details
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
+              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > 1e-12
+            "#,
+            )
+            .map_err(|e| format!("预编译触发相似度查询失败: {e}"))?;
+        let mut rows = stmt
+            .query(params![start_date, end_date])
+            .map_err(|e| format!("查询触发相似度失败: {e}"))?;
+
+        let mut rule_names = Vec::new();
+        let mut rule_name_to_index = HashMap::<String, usize>::new();
+        let mut rule_hit_counts = Vec::new();
+        let mut pair_to_rule_indices = HashMap::<String, HashMap<String, Vec<usize>>>::new();
+
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取触发相似度失败: {e}"))?
+        {
+            let rule_name: String = row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?;
+            let ts_code: String = row.get(1).map_err(|e| format!("读取代码失败: {e}"))?;
+            let trade_date: String = row.get(2).map_err(|e| format!("读取交易日失败: {e}"))?;
+            let rule_index = if let Some(index) = rule_name_to_index.get(&rule_name) {
+                *index
+            } else {
+                let index = rule_names.len();
+                rule_name_to_index.insert(rule_name.clone(), index);
+                rule_names.push(rule_name);
+                rule_hit_counts.push(0);
+                index
+            };
+
+            rule_hit_counts[rule_index] += 1;
+            pair_to_rule_indices
+                .entry(ts_code)
+                .or_default()
+                .entry(trade_date)
+                .or_default()
+                .push(rule_index);
+        }
+
+        Ok(ValidationSimilarityCache {
+            total_samples,
+            rule_names,
+            rule_hit_counts,
+            pair_to_rule_indices,
+        })
+    })(&result_conn, start_date, end_date)
+    {
         Ok(cache) => Ok(cache),
         Err(_) => Ok(empty_validation_similarity_cache()),
     }
@@ -3381,7 +2709,31 @@ impl<'a> ValidationSampleAccumulator<'a> {
         self.sample_by_stock
             .entry(sample_key)
             .and_modify(|current| {
-                if should_replace_validation_stock_sample(current, &row) {
+                if (|current: &ValidationSampleRawRow,
+                     candidate: &ValidationSampleRawRow|
+                 -> bool {
+                    let strength_order = candidate
+                        .residual_return
+                        .abs()
+                        .partial_cmp(&current.residual_return.abs())
+                        .unwrap_or(Ordering::Equal);
+                    if strength_order != Ordering::Equal {
+                        return strength_order == Ordering::Greater;
+                    }
+
+                    let date_order = candidate.trade_date.cmp(&current.trade_date);
+                    if date_order != Ordering::Equal {
+                        return date_order == Ordering::Greater;
+                    }
+
+                    candidate
+                        .rule_score
+                        .abs()
+                        .partial_cmp(&current.rule_score.abs())
+                        .unwrap_or(Ordering::Equal)
+                        == Ordering::Greater
+                })(current, &row)
+                {
                     *current = row.clone();
                 }
             })
@@ -3549,32 +2901,6 @@ fn sample_board(
         .unwrap_or_else(|| "其他".to_string())
 }
 
-fn should_replace_validation_stock_sample(
-    current: &ValidationSampleRawRow,
-    candidate: &ValidationSampleRawRow,
-) -> bool {
-    let strength_order = candidate
-        .residual_return
-        .abs()
-        .partial_cmp(&current.residual_return.abs())
-        .unwrap_or(Ordering::Equal);
-    if strength_order != Ordering::Equal {
-        return strength_order == Ordering::Greater;
-    }
-
-    let date_order = candidate.trade_date.cmp(&current.trade_date);
-    if date_order != Ordering::Equal {
-        return date_order == Ordering::Greater;
-    }
-
-    candidate
-        .rule_score
-        .abs()
-        .partial_cmp(&current.rule_score.abs())
-        .unwrap_or(Ordering::Equal)
-        == Ordering::Greater
-}
-
 fn compare_positive_validation_sample(
     left: &ValidationSampleRawRow,
     right: &ValidationSampleRawRow,
@@ -3709,7 +3035,7 @@ fn build_validation_sample_groups(
             .then_with(|| left.ts_code.cmp(&right.ts_code))
     });
 
-    let mut rng = StdRng::seed_from_u64(VALIDATION_RANDOM_SAMPLE_SEED);
+    let mut rng = StdRng::seed_from_u64(0x9E37_79B9_7F4A_7C15);
     let mut random_pool = samples.to_vec();
     random_pool.par_sort_by(|left, right| {
         left.trade_date
@@ -3814,7 +3140,194 @@ pub fn run_rule_expression_validation(
 
     let import_rule_name = import_rule_name.trim().to_string();
     let all_rules = ScoreRule::load_rules(&source_path)?;
-    let seed_rule = resolve_validation_seed_rule(
+    let seed_rule = (|import_rule_name_raw: &str,
+                      manual_strategy: Option<&RuleExpressionValidationManualStrategy>,
+                      when: Option<&str>,
+                      scope_way: Option<&str>,
+                      scope_windows: Option<usize>,
+                      all_rules: &[ScoreRule]|
+     -> Result<ValidationSeedRule, String> {
+        let import_rule_name = import_rule_name_raw.trim();
+        let import_rule = if import_rule_name.is_empty() {
+            None
+        } else {
+            all_rules
+                .iter()
+                .find(|rule| rule.name.trim() == import_rule_name)
+                .cloned()
+        };
+
+        let top_formula = read_non_empty_owned(when);
+        let top_scope_way = read_non_empty_owned(scope_way);
+
+        let manual_name =
+            manual_strategy.and_then(|strategy| read_non_empty_owned(strategy.name.as_deref()));
+        let manual_formula =
+            manual_strategy.and_then(|strategy| read_non_empty_owned(strategy.when.as_deref()));
+        let manual_explain =
+            manual_strategy.and_then(|strategy| read_non_empty_owned(strategy.explain.as_deref()));
+        let manual_scope_windows = manual_strategy.and_then(|strategy| strategy.scope_windows);
+        let manual_points = (|raw: Option<f64>| -> Result<f64, String> {
+            match raw {
+                Some(value) if !value.is_finite() => Err("手动策略 points 非法".to_string()),
+                Some(value) if value < 0.0 => Ok(-1.0),
+                Some(_) | None => Ok(1.0),
+            }
+        })(manual_strategy.and_then(|strategy| strategy.points))?;
+        let manual_dist_points = manual_strategy
+            .and_then(|strategy| strategy.dist_points.clone())
+            .and_then(|items| if items.is_empty() { None } else { Some(items) });
+
+        if import_rule
+            .as_ref()
+            .is_some_and(|rule| rule.kind == RuleKind::Combination)
+            && top_formula.is_none()
+            && manual_formula.is_none()
+        {
+            return Err("组合策略不能导入到单表达式验证，请直接在“策略回测”中验证".to_string());
+        }
+
+        let manual_scope_way = match manual_strategy
+            .and_then(|strategy| read_non_empty_owned(strategy.scope_way.as_deref()))
+        {
+            Some(raw) => Some(parse_scope_way_input(&raw)?),
+            None => None,
+        };
+
+        let manual_tag = match manual_strategy.and_then(|strategy| strategy.tag.as_deref()) {
+            Some(raw) if !raw.trim().is_empty() => {
+                Some((|tag_raw: &str| -> Result<RuleTag, String> {
+                    match tag_raw.trim().to_ascii_lowercase().as_str() {
+                        "" | "normal" => Ok(RuleTag::Normal),
+                        "opportunity" => Ok(RuleTag::Opportunity),
+                        "rare" => Ok(RuleTag::Rare),
+                        _ => Err(format!(
+                            "tag 不支持: {tag_raw}，仅支持 normal/opportunity/rare"
+                        )),
+                    }
+                })(raw)?)
+            }
+            _ => None,
+        };
+
+        if let Some(stage_raw) = manual_strategy.and_then(|strategy| strategy.stage.as_deref()) {
+            if !stage_raw.trim().is_empty() {
+                let _ = (|stage_raw: &str| -> Result<RuleStage, String> {
+                    match stage_raw.trim().to_ascii_lowercase().as_str() {
+                        "base" => Ok(RuleStage::Base),
+                        "trigger" => Ok(RuleStage::Trigger),
+                        "confirm" => Ok(RuleStage::Confirm),
+                        "risk" => Ok(RuleStage::Risk),
+                        "fail" => Ok(RuleStage::Fail),
+                        _ => Err(format!(
+                            "stage 不支持: {stage_raw}，仅支持 base/trigger/confirm/risk/fail"
+                        )),
+                    }
+                })(stage_raw)?;
+            }
+        }
+
+        let has_manual_override = manual_name.is_some()
+            || manual_formula.is_some()
+            || manual_scope_way.is_some()
+            || manual_scope_windows.is_some()
+            || manual_dist_points.is_some()
+            || manual_explain.is_some()
+            || manual_tag.is_some()
+            || manual_strategy
+                .and_then(|strategy| strategy.scene_name.as_deref())
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty())
+            || manual_strategy
+                .and_then(|strategy| strategy.stage.as_deref())
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
+
+        if !import_rule_name.is_empty() && import_rule.is_none() && !has_manual_override {
+            return Err(format!("未找到策略: {import_rule_name}"));
+        }
+
+        let formula = top_formula
+            .or(manual_formula)
+            .or_else(|| {
+                import_rule
+                    .as_ref()
+                    .map(|rule| rule.when.trim().to_string())
+            })
+            .ok_or_else(|| "表达式不能为空".to_string())?;
+
+        let resolved_scope_way = if let Some(raw) = top_scope_way {
+            parse_scope_way_input(&raw)?
+        } else if let Some(value) = manual_scope_way {
+            value
+        } else if let Some(rule) = import_rule.as_ref() {
+            rule.scope_way
+        } else {
+            ScopeWay::Any
+        };
+
+        let resolved_scope_windows = scope_windows
+            .or(manual_scope_windows)
+            .or_else(|| import_rule.as_ref().map(|rule| rule.scope_windows))
+            .unwrap_or(1)
+            .max(1);
+
+        if let ScopeWay::Consec(threshold) = resolved_scope_way {
+            if resolved_scope_windows < threshold {
+                return Err(format!(
+                    "scope_windows({resolved_scope_windows}) 不能小于 CONSEC 阈值 {threshold}"
+                ));
+            }
+        }
+
+        let rule_name = manual_name
+            .or_else(|| {
+                import_rule
+                    .as_ref()
+                    .map(|rule| rule.name.trim().to_string())
+            })
+            .or_else(|| read_non_empty_owned(Some(import_rule_name)))
+            .unwrap_or_else(|| "manual_validation_rule".to_string());
+
+        let rule_explain = manual_explain
+            .or_else(|| {
+                import_rule
+                    .as_ref()
+                    .map(|rule| rule.explain.trim().to_string())
+            })
+            .unwrap_or_else(|| format!("表达式验证策略: {rule_name}"));
+
+        let points = manual_points;
+        if !points.is_finite() {
+            return Err("策略 points 非法".to_string());
+        }
+
+        let dist_points = manual_dist_points;
+
+        let tag = manual_tag
+            .or_else(|| import_rule.as_ref().map(|rule| rule.tag))
+            .unwrap_or(RuleTag::Normal);
+
+        let exclude_rule_name = if let Some(rule) = import_rule.as_ref() {
+            Some(rule.name.clone())
+        } else if all_rules.iter().any(|rule| rule.name.trim() == rule_name) {
+            Some(rule_name.clone())
+        } else {
+            None
+        };
+
+        Ok(ValidationSeedRule {
+            rule_name,
+            rule_explain,
+            scope_way: resolved_scope_way,
+            scope_windows: resolved_scope_windows,
+            formula,
+            points,
+            dist_points,
+            tag,
+            exclude_rule_name,
+        })
+    })(
         &import_rule_name,
         manual_strategy.as_ref(),
         when.as_deref(),
@@ -3824,15 +3337,224 @@ pub fn run_rule_expression_validation(
     )?;
     let start_date = start_date.trim().to_string();
     let end_date = end_date.trim().to_string();
-    let variants =
-        build_validation_variants(&seed_rule.formula, &unknown_configs.unwrap_or_default())?;
-    let execution_plan = build_validation_execution_plan(
-        &source_path,
-        &start_date,
-        &end_date,
-        &seed_rule,
-        variants,
-    )?;
+    let variants = (|formula: &str,
+                     unknown_configs: &[RuleValidationUnknownConfig]|
+     -> Result<Vec<ValidationVariant>, String> {
+        let formula = formula.trim();
+        if formula.is_empty() {
+            return Err("表达式不能为空".to_string());
+        }
+
+        let mut unknown_groups = Vec::<(String, Vec<f64>)>::new();
+        let mut total_combinations = 1usize;
+        let mut seen = HashSet::new();
+
+        for config in unknown_configs {
+            let name = config.name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            if !seen.insert(name.to_string()) {
+                return Err(format!("未知数名称重复: {name}"));
+            }
+
+            let values = (|config: &RuleValidationUnknownConfig| -> Result<Vec<f64>, String> {
+                let name = config.name.trim();
+                if name.is_empty() {
+                    return Err("未知数名称不能为空".to_string());
+                }
+                if !config.start.is_finite() || !config.end.is_finite() || !config.step.is_finite()
+                {
+                    return Err(format!("未知数 {name} 存在非法数值"));
+                }
+                if config.step <= 0.0 {
+                    return Err(format!("未知数 {name} 的 step 必须 > 0"));
+                }
+                if config.end < config.start {
+                    return Err(format!("未知数 {name} 的 end 不能小于 start"));
+                }
+
+                let mut values = Vec::new();
+                let mut current = config.start;
+                let mut guard = 0usize;
+                while current <= config.end + config.step * 1e-9 {
+                    values.push(current.min(config.end));
+                    current += config.step;
+                    guard += 1;
+                    if guard > VALIDATION_MAX_COMBINATIONS * 8 {
+                        return Err(format!(
+                            "未知数 {name} 的取值数量过多，请增大 step 或缩小范围"
+                        ));
+                    }
+                }
+                if values.is_empty() {
+                    values.push(config.start);
+                }
+                Ok(values)
+            })(config)?;
+            total_combinations = total_combinations.saturating_mul(values.len().max(1));
+            if total_combinations > VALIDATION_MAX_COMBINATIONS {
+                return Err(format!(
+                    "未知数组合过多({total_combinations})，当前上限为 {VALIDATION_MAX_COMBINATIONS}"
+                ));
+            }
+
+            unknown_groups.push((name.to_string(), values));
+        }
+
+        let mut out = Vec::new();
+        let mut assignments = Vec::<(String, f64)>::new();
+
+        fn walk_variants(
+            index: usize,
+            unknown_groups: &[(String, Vec<f64>)],
+            assignments: &mut Vec<(String, f64)>,
+            formula: &str,
+            out: &mut Vec<ValidationVariant>,
+        ) {
+            if index >= unknown_groups.len() {
+                let mut sorted = assignments.clone();
+                sorted.sort_by(|left, right| {
+                    right
+                        .0
+                        .len()
+                        .cmp(&left.0.len())
+                        .then_with(|| left.0.cmp(&right.0))
+                });
+                let unknown_values = sorted
+                    .iter()
+                    .map(|(name, value)| RuleValidationUnknownValue {
+                        name: name.clone(),
+                        value: *value,
+                    })
+                    .collect::<Vec<_>>();
+                let replaced_formula = (|formula: &str, assignments: &[(String, f64)]| -> String {
+                    if assignments.is_empty() {
+                        return formula.to_string();
+                    }
+
+                    let replace_map = assignments
+                        .iter()
+                        .map(|(name, value)| (name.as_str(), format_validation_number(*value)))
+                        .collect::<HashMap<_, _>>();
+
+                    let tokens = lex_all(formula);
+                    let mut out = String::with_capacity(formula.len() + assignments.len() * 4);
+                    let mut cursor = 0usize;
+
+                    for token in tokens {
+                        if token.start > cursor {
+                            out.push_str(&formula[cursor..token.start]);
+                        }
+                        match token.kind {
+                            TokenKind::Ident(name) => {
+                                if let Some(replacement) = replace_map.get(name.as_str()) {
+                                    out.push_str(replacement);
+                                } else {
+                                    out.push_str(&formula[token.start..token.end]);
+                                }
+                            }
+                            TokenKind::Eof => {}
+                            _ => out.push_str(&formula[token.start..token.end]),
+                        }
+                        cursor = token.end;
+                    }
+
+                    if cursor < formula.len() {
+                        out.push_str(&formula[cursor..]);
+                    }
+
+                    out
+                })(formula, &sorted);
+                let combo_key = format!("validation_combo_{:03}", out.len() + 1);
+                let combo_label = if unknown_values.is_empty() {
+                    "默认参数".to_string()
+                } else {
+                    unknown_values
+                        .iter()
+                        .map(|item| {
+                            format!("{}={}", item.name, format_validation_number(item.value))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+
+                out.push(ValidationVariant {
+                    combo_key,
+                    combo_label,
+                    formula: replaced_formula,
+                    unknown_values,
+                });
+                return;
+            }
+
+            let (name, values) = &unknown_groups[index];
+            for value in values {
+                assignments.push((name.clone(), *value));
+                walk_variants(index + 1, unknown_groups, assignments, formula, out);
+                assignments.pop();
+            }
+        }
+
+        walk_variants(0, &unknown_groups, &mut assignments, formula, &mut out);
+
+        if out.is_empty() {
+            out.push(ValidationVariant {
+                combo_key: "validation_combo_001".to_string(),
+                combo_label: "默认参数".to_string(),
+                formula: formula.to_string(),
+                unknown_values: Vec::new(),
+            });
+        }
+
+        Ok(out)
+    })(&seed_rule.formula, &unknown_configs.unwrap_or_default())?;
+    let execution_plan = (|source_path: &str,
+                           start_date: &str,
+                           end_date: &str,
+                           seed_rule: &ValidationSeedRule,
+                           variants: Vec<ValidationVariant>|
+     -> Result<ValidationExecutionPlan, String> {
+        let mut max_warmup_need = 0usize;
+        let mut combos = Vec::with_capacity(variants.len());
+
+        for variant in variants {
+            let combo = (|seed_rule: &ValidationSeedRule,
+                          variant: ValidationVariant|
+             -> Result<PreparedValidationCombo, String> {
+                let cached_rule = build_validation_cached_rule(
+                    variant.combo_key.clone(),
+                    seed_rule.scope_way,
+                    seed_rule.scope_windows,
+                    seed_rule.points,
+                    seed_rule.dist_points.clone(),
+                    seed_rule.tag,
+                    &variant.formula,
+                )?;
+                let assigned_names = collect_validation_assigned_names(&cached_rule.when_ast);
+
+                Ok(PreparedValidationCombo {
+                    variant,
+                    cached_rule,
+                    assigned_names,
+                })
+            })(seed_rule, variant)?;
+            max_warmup_need = max_warmup_need.max(estimate_rule_warmup(
+                &combo.cached_rule.when_ast,
+                combo.cached_rule.scope_way,
+                combo.cached_rule.scope_windows,
+            )?);
+            combos.push(combo);
+        }
+
+        let need_rows = calc_query_need_rows(source_path, max_warmup_need, start_date, end_date)?;
+        let query_start_date = calc_query_start_date(source_path, max_warmup_need, start_date)?;
+        Ok(ValidationExecutionPlan {
+            combos,
+            need_rows,
+            query_start_date,
+        })
+    })(&source_path, &start_date, &end_date, &seed_rule, variants)?;
 
     let (resolved_board, exclude_st_board, total_mv_min, total_mv_max, allowed_ts_codes) =
         build_backtest_stock_filter(
@@ -3866,9 +3588,7 @@ pub fn run_rule_expression_validation(
         allowed_ts_codes,
     };
 
-    let sample_limit_per_group = sample_limit_per_group
-        .unwrap_or(VALIDATION_DEFAULT_SAMPLE_LIMIT_PER_GROUP)
-        .clamp(1, VALIDATION_MAX_SAMPLE_LIMIT_PER_GROUP);
+    let sample_limit_per_group = sample_limit_per_group.unwrap_or(30).clamp(1, 200);
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
         .to_str()
@@ -3920,10 +3640,7 @@ pub fn run_rule_expression_validation(
         &params.end_date,
     )?;
     let mut combo_results = Vec::with_capacity(execution_plan.combos.len());
-    for combo_chunk in execution_plan
-        .combos
-        .chunks(VALIDATION_COMBO_EVAL_BATCH_SIZE)
-    {
+    for combo_chunk in execution_plan.combos.chunks(16) {
         let combo_triggered_maps = build_validation_triggered_scores_for_combos(
             &source_path,
             &params.stock_adj_type,
@@ -3938,18 +3655,99 @@ pub fn run_rule_expression_validation(
 
         for (combo, triggered_score_map) in combo_chunk.iter().zip(combo_triggered_maps.into_iter())
         {
-            combo_results.push(build_validation_combo_result(
-                &params,
-                &seed_rule,
-                combo,
-                triggered_score_map,
-                runtime_cache.as_ref(),
-                &layer_config,
-                &similarity_cache,
-                &explain_map,
-                &stock_meta_map,
-                sample_limit_per_group,
-            )?);
+            combo_results.push(
+                (|params: &RuleLayerBacktestRunParams,
+                  seed_rule: &ValidationSeedRule,
+                  combo: &PreparedValidationCombo,
+                  triggered_score_map: ValidationTriggeredScoreMap,
+                  runtime_cache: &RuleLayerRuntimeCache,
+                  layer_config: &RuleLayerConfig,
+                  similarity_cache: &ValidationSimilarityCache,
+                  explain_map: &HashMap<String, String>,
+                  stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
+                  sample_limit_per_group: usize|
+                 -> Result<RuleValidationComboResult, String> {
+                    let metrics_with_samples = calc_rule_layer_metrics_with_samples_from_cache(
+                        runtime_cache,
+                        &triggered_score_map,
+                        layer_config,
+                    )?;
+                    let validation_layer_details = build_validation_score_layer_details(
+                        &metrics_with_samples.samples,
+                        layer_config.min_samples_per_day,
+                    );
+                    let return_distribution =
+                        build_validation_return_distribution(&metrics_with_samples.samples);
+                    let mut sample_accumulator = ValidationSampleAccumulator::new(
+                        sample_limit_per_group,
+                        stock_meta_map,
+                        similarity_cache,
+                        matches!(seed_rule.scope_way, ScopeWay::Each),
+                        seed_rule.points,
+                        seed_rule.dist_points.is_some(),
+                    );
+                    visit_triggered_rule_samples_from_cache(
+                        runtime_cache,
+                        &triggered_score_map,
+                        |sample| {
+                            sample_accumulator.push(sample);
+                            Ok(())
+                        },
+                    )?;
+                    let (
+                        trigger_samples,
+                        triggered_days,
+                        sample_stats,
+                        trigger_count_stats,
+                        sample_groups,
+                        overlap_hit_count,
+                    ) = sample_accumulator.into_parts();
+                    let backtest = build_rule_backtest_payload(
+                        &combo.variant.combo_key,
+                        params,
+                        metrics_with_samples.metrics,
+                        Some(validation_layer_details),
+                    );
+                    let similarity_rows = build_validation_similarity_rows_from_overlap(
+                        similarity_cache,
+                        trigger_samples,
+                        overlap_hit_count,
+                        seed_rule.exclude_rule_name.as_deref(),
+                        explain_map,
+                    );
+
+                    Ok(RuleValidationComboResult {
+                        combo_key: combo.variant.combo_key.clone(),
+                        combo_label: combo.variant.combo_label.clone(),
+                        formula: combo.variant.formula.clone(),
+                        unknown_values: combo.variant.unknown_values.clone(),
+                        trigger_samples,
+                        triggered_days,
+                        avg_daily_trigger: if triggered_days > 0 {
+                            trigger_samples as f64 / triggered_days as f64
+                        } else {
+                            0.0
+                        },
+                        sample_stats,
+                        trigger_count_stats,
+                        sample_groups,
+                        return_distribution,
+                        backtest,
+                        similarity_rows,
+                    })
+                })(
+                    &params,
+                    &seed_rule,
+                    combo,
+                    triggered_score_map,
+                    runtime_cache.as_ref(),
+                    &layer_config,
+                    &similarity_cache,
+                    &explain_map,
+                    &stock_meta_map,
+                    sample_limit_per_group,
+                )?,
+            );
         }
     }
 
@@ -3975,7 +3773,35 @@ pub fn run_rule_expression_validation(
             )
         })
         .collect::<HashMap<_, _>>();
-    let continuation_id = store_validation_continuation_session(ValidationContinuationSession {
+    let continuation_id = (|session: ValidationContinuationSession| -> Result<String, String> {
+        let mut cache = validation_continuation_cache()
+            .lock()
+            .map_err(|_| "保存表达式继续验证基础数据失败:缓存锁已损坏".to_string())?;
+        cache.retain(|_, item| item.created_at.elapsed() <= VALIDATION_CONTINUATION_TTL);
+        while cache.len() >= (1) {
+            let Some(oldest_key) = cache
+                .iter()
+                .max_by_key(|(_, item)| item.created_at.elapsed())
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            cache.remove(&oldest_key);
+        }
+
+        let continuation_id = loop {
+            let candidate = format!(
+                "expr-calibration-{:016x}{:016x}",
+                random::<u64>(),
+                random::<u64>()
+            );
+            if !cache.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        cache.insert(continuation_id.clone(), Arc::new(session));
+        Ok(continuation_id)
+    })(ValidationContinuationSession {
         created_at: Instant::now(),
         source_path: source_path.clone(),
         params: params.clone(),
@@ -4025,30 +3851,6 @@ fn scope_way_config_label(scope_way: ScopeWay) -> String {
     }
 }
 
-fn normalize_calibration_dist_points(
-    items: Option<Vec<crate::data::DistPoint>>,
-    direction_sign: f64,
-) -> Option<Vec<crate::data::DistPoint>> {
-    let items = items?;
-    let max_abs = items
-        .iter()
-        .map(|item| item.points.abs())
-        .fold(0.0_f64, f64::max);
-    if max_abs <= VALIDATION_EPS {
-        return None;
-    }
-    Some(
-        items
-            .into_iter()
-            .map(|item| crate::data::DistPoint {
-                min: item.min,
-                max: item.max,
-                points: direction_sign * item.points.abs() / max_abs,
-            })
-            .collect(),
-    )
-}
-
 fn build_recent_decay_dist_points(
     scope_windows: usize,
     direction_sign: f64,
@@ -4073,10 +3875,28 @@ fn build_validation_calibration_specs(
         scope_way: seed_rule.scope_way,
         scope_windows: seed_rule.scope_windows,
         scope_label: format!("{}（当前）", current_scope_label),
-        dist_points: normalize_calibration_dist_points(
-            seed_rule.dist_points.clone(),
-            direction_sign,
-        ),
+        dist_points: (|items: Option<Vec<crate::data::DistPoint>>,
+                       direction_sign: f64|
+         -> Option<Vec<crate::data::DistPoint>> {
+            let items = items?;
+            let max_abs = items
+                .iter()
+                .map(|item| item.points.abs())
+                .fold(0.0_f64, f64::max);
+            if max_abs <= VALIDATION_EPS {
+                return None;
+            }
+            Some(
+                items
+                    .into_iter()
+                    .map(|item| crate::data::DistPoint {
+                        min: item.min,
+                        max: item.max,
+                        points: direction_sign * item.points.abs() / max_abs,
+                    })
+                    .collect(),
+            )
+        })(seed_rule.dist_points.clone(), direction_sign),
         is_current: true,
     }];
     let mut seen = HashSet::from([format!(
@@ -4165,213 +3985,6 @@ fn calibration_stability_factor(
     }
 }
 
-fn calibration_scope_structure_factor(scope_way: ScopeWay, monotonicity: Option<f64>) -> f64 {
-    match scope_way {
-        ScopeWay::Each => monotonicity.unwrap_or(0.25).clamp(0.25, 1.0),
-        ScopeWay::Recent => (0.5 + monotonicity.unwrap_or(0.5) * 0.5).clamp(0.5, 1.0),
-        _ => 1.0,
-    }
-}
-
-fn build_calibration_candidate(
-    spec: &ValidationCalibrationSpec,
-    direction_sign: f64,
-    metrics: crate::simulate::rule::RuleLayerMetrics,
-    runtime_cache: &RuleLayerRuntimeCache,
-    triggered_score_map: &ValidationTriggeredScoreMap,
-) -> Result<RuleExpressionCalibrationCandidate, String> {
-    let mut daily_excess = metrics
-        .points
-        .iter()
-        .filter_map(|point| {
-            point
-                .avg_excess_residual_return
-                .filter(|value| value.is_finite())
-                .map(|value| (point.trade_date.clone(), value))
-        })
-        .collect::<Vec<_>>();
-    daily_excess.sort_by(|left, right| left.0.cmp(&right.0));
-    let daily_values = daily_excess
-        .iter()
-        .map(|(_, value)| *value)
-        .collect::<Vec<_>>();
-    let daily_mean = mean_f64(&daily_values);
-    let daily_std = sample_std_f64(&daily_values);
-    let standard_error = daily_std.map(|std| std / (daily_values.len() as f64).sqrt());
-    let conservative_edge = daily_mean.zip(standard_error).map(|(mean, se)| {
-        let oriented_lcb = mean * direction_sign - VALIDATION_CALIBRATION_LCB_Z * se;
-        direction_sign * oriented_lcb
-    });
-
-    let split_index = daily_excess.len() / 2;
-    let early_values = daily_excess[..split_index]
-        .iter()
-        .map(|(_, value)| *value)
-        .collect::<Vec<_>>();
-    let late_values = daily_excess[split_index..]
-        .iter()
-        .map(|(_, value)| *value)
-        .collect::<Vec<_>>();
-    let early_mean = mean_f64(&early_values);
-    let late_mean = mean_f64(&late_values);
-    let stability_factor = calibration_stability_factor(direction_sign, early_mean, late_mean);
-
-    let mut trigger_samples = 0usize;
-    let mut triggered_days = HashSet::new();
-    let mut multiplier_sum = 0.0;
-    let mut bucket_map = HashMap::<u64, ValidationCalibrationBucketAgg>::new();
-    visit_triggered_rule_samples_from_cache(runtime_cache, triggered_score_map, |sample| {
-        let score_multiplier = sample.rule_score.abs();
-        if !score_multiplier.is_finite() || score_multiplier <= VALIDATION_EPS {
-            return Ok(());
-        }
-        trigger_samples += 1;
-        triggered_days.insert(sample.trade_date.to_string());
-        multiplier_sum += score_multiplier;
-        let entry = bucket_map
-            .entry(score_multiplier.to_bits())
-            .or_insert_with(|| ValidationCalibrationBucketAgg {
-                score_multiplier,
-                ..ValidationCalibrationBucketAgg::default()
-            });
-        entry.sample_count += 1;
-        entry.residual_sum += sample.residual_return;
-        Ok(())
-    })?;
-    let triggered_day_count = triggered_days.len();
-    let avg_score_multiplier = if trigger_samples > 0 {
-        Some(multiplier_sum / trigger_samples as f64)
-    } else {
-        None
-    };
-
-    let mut score_buckets = bucket_map
-        .into_values()
-        .map(|bucket| RuleExpressionCalibrationBucket {
-            score_multiplier: bucket.score_multiplier,
-            sample_count: bucket.sample_count,
-            avg_residual_return: (bucket.sample_count > 0)
-                .then_some(bucket.residual_sum / bucket.sample_count as f64),
-        })
-        .collect::<Vec<_>>();
-    score_buckets.sort_by(|left, right| {
-        left.score_multiplier
-            .partial_cmp(&right.score_multiplier)
-            .unwrap_or(Ordering::Equal)
-    });
-    let monotonic_buckets = score_buckets
-        .iter()
-        .filter(|bucket| bucket.sample_count >= 30)
-        .filter_map(|bucket| {
-            bucket
-                .avg_residual_return
-                .map(|value| value * direction_sign)
-        })
-        .collect::<Vec<_>>();
-    let score_monotonicity = if monotonic_buckets.len() >= 2 {
-        let monotonic_pairs = monotonic_buckets
-            .windows(2)
-            .filter(|window| window[1] + VALIDATION_EPS >= window[0])
-            .count();
-        Some(monotonic_pairs as f64 / (monotonic_buckets.len() - 1) as f64)
-    } else {
-        None
-    };
-
-    let enough_samples = trigger_samples >= VALIDATION_CALIBRATION_MIN_SAMPLES
-        && triggered_day_count >= VALIDATION_CALIBRATION_MIN_DAYS;
-    let oriented_lcb = conservative_edge.map(|value| value * direction_sign);
-    let (status, status_label) = if !enough_samples {
-        ("insufficient", "样本不足")
-    } else if oriented_lcb.is_none_or(|value| value <= 0.0) {
-        ("no_edge", "保守边际不足")
-    } else if stability_factor < 1.0 {
-        ("unstable", "前后段不稳定")
-    } else {
-        ("reliable", "相对稳定")
-    };
-
-    let normalized_edge = match (oriented_lcb, daily_std) {
-        (Some(edge), Some(std)) if edge > 0.0 && std > VALIDATION_EPS => edge / std,
-        _ => 0.0,
-    };
-    let structure_factor = calibration_scope_structure_factor(spec.scope_way, score_monotonicity);
-    let ic_support = metrics
-        .ic_t_value
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .map(|value| value / (daily_values.len().max(1) as f64).sqrt())
-        .unwrap_or(0.0);
-    let calibration_score = if enough_samples {
-        (normalized_edge + ic_support * 0.15) * stability_factor * structure_factor
-    } else {
-        0.0
-    };
-    let desired_total_points = if enough_samples && normalized_edge > 0.0 {
-        round_to_half(
-            (VALIDATION_CALIBRATION_POINT_SCALE
-                * normalized_edge
-                * stability_factor
-                * structure_factor)
-                .clamp(0.0, 10.0),
-        )
-    } else {
-        0.0
-    };
-    let unit_points_abs = avg_score_multiplier
-        .filter(|value| *value > VALIDATION_EPS)
-        .map(|value| round_to_half((desired_total_points / value).clamp(0.0, 10.0)))
-        .unwrap_or(0.0);
-    let suggested_points = direction_sign * unit_points_abs;
-    let suggested_total_points = direction_sign * desired_total_points;
-    let suggested_dist_points = spec
-        .dist_points
-        .as_ref()
-        .map(|items| {
-            items
-                .iter()
-                .map(|item| RuleExpressionCalibrationDistancePoint {
-                    min: item.min,
-                    max: item.max,
-                    points: suggested_points * item.points.abs(),
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    Ok(RuleExpressionCalibrationCandidate {
-        candidate_key: spec.candidate_key.clone(),
-        scope_way: scope_way_config_label(spec.scope_way),
-        scope_label: spec.scope_label.clone(),
-        scope_windows: spec.scope_windows,
-        is_current: spec.is_current,
-        trigger_samples,
-        triggered_days: triggered_day_count,
-        avg_daily_trigger: if triggered_day_count > 0 {
-            trigger_samples as f64 / triggered_day_count as f64
-        } else {
-            0.0
-        },
-        avg_residual_mean: metrics.avg_residual_mean,
-        avg_excess_residual_mean: daily_mean,
-        daily_std,
-        standard_error,
-        conservative_edge,
-        early_excess_residual_mean: early_mean,
-        late_excess_residual_mean: late_mean,
-        ic_mean: metrics.ic_mean,
-        ic_t_value: metrics.ic_t_value,
-        score_monotonicity,
-        avg_score_multiplier,
-        suggested_points,
-        suggested_total_points,
-        calibration_score,
-        status: status.to_string(),
-        status_label: status_label.to_string(),
-        score_buckets,
-        suggested_dist_points,
-    })
-}
-
 fn calibration_status_rank(status: &str) -> usize {
     match status {
         "reliable" => 0,
@@ -4390,7 +4003,16 @@ pub fn run_rule_expression_calibration(
     if continuation_id.is_empty() || combo_key.is_empty() {
         return Err("继续验证标识和参数组合不能为空".to_string());
     }
-    let session = load_validation_continuation_session(&continuation_id)?;
+    let session = (|continuation_id: &str| -> Result<Arc<ValidationContinuationSession>, String> {
+        let mut cache = validation_continuation_cache()
+            .lock()
+            .map_err(|_| "读取表达式继续验证基础数据失败:缓存锁已损坏".to_string())?;
+        cache.retain(|_, item| item.created_at.elapsed() <= VALIDATION_CONTINUATION_TTL);
+        cache
+            .get(continuation_id.trim())
+            .cloned()
+            .ok_or_else(|| "表达式基础验证缓存已失效，请重新执行一次表达式验证".to_string())
+    })(&continuation_id)?;
     let combo = session
         .combos
         .get(&combo_key)
@@ -4468,7 +4090,213 @@ pub fn run_rule_expression_calibration(
             triggered_score_map,
             &layer_config,
         )?;
-        candidates.push(build_calibration_candidate(
+        candidates.push((|spec: &ValidationCalibrationSpec,
+                          direction_sign: f64,
+                          metrics: crate::simulate::rule::RuleLayerMetrics,
+                          runtime_cache: &RuleLayerRuntimeCache,
+                          triggered_score_map: &ValidationTriggeredScoreMap|
+         -> Result<
+            RuleExpressionCalibrationCandidate,
+            String,
+        > {
+            let mut daily_excess = metrics
+                .points
+                .iter()
+                .filter_map(|point| {
+                    point
+                        .avg_excess_residual_return
+                        .filter(|value| value.is_finite())
+                        .map(|value| (point.trade_date.clone(), value))
+                })
+                .collect::<Vec<_>>();
+            daily_excess.sort_by(|left, right| left.0.cmp(&right.0));
+            let daily_values = daily_excess
+                .iter()
+                .map(|(_, value)| *value)
+                .collect::<Vec<_>>();
+            let daily_mean = mean_f64(&daily_values);
+            let daily_std = sample_std_f64(&daily_values);
+            let standard_error = daily_std.map(|std| std / (daily_values.len() as f64).sqrt());
+            let conservative_edge = daily_mean.zip(standard_error).map(|(mean, se)| {
+                let oriented_lcb = mean * direction_sign - (1.28) * se;
+                direction_sign * oriented_lcb
+            });
+
+            let split_index = daily_excess.len() / 2;
+            let early_values = daily_excess[..split_index]
+                .iter()
+                .map(|(_, value)| *value)
+                .collect::<Vec<_>>();
+            let late_values = daily_excess[split_index..]
+                .iter()
+                .map(|(_, value)| *value)
+                .collect::<Vec<_>>();
+            let early_mean = mean_f64(&early_values);
+            let late_mean = mean_f64(&late_values);
+            let stability_factor =
+                calibration_stability_factor(direction_sign, early_mean, late_mean);
+
+            let mut trigger_samples = 0usize;
+            let mut triggered_days = HashSet::new();
+            let mut multiplier_sum = 0.0;
+            let mut bucket_map = HashMap::<u64, ValidationCalibrationBucketAgg>::new();
+            visit_triggered_rule_samples_from_cache(
+                runtime_cache,
+                triggered_score_map,
+                |sample| {
+                    let score_multiplier = sample.rule_score.abs();
+                    if !score_multiplier.is_finite() || score_multiplier <= VALIDATION_EPS {
+                        return Ok(());
+                    }
+                    trigger_samples += 1;
+                    triggered_days.insert(sample.trade_date.to_string());
+                    multiplier_sum += score_multiplier;
+                    let entry = bucket_map
+                        .entry(score_multiplier.to_bits())
+                        .or_insert_with(|| ValidationCalibrationBucketAgg {
+                            score_multiplier,
+                            ..ValidationCalibrationBucketAgg::default()
+                        });
+                    entry.sample_count += 1;
+                    entry.residual_sum += sample.residual_return;
+                    Ok(())
+                },
+            )?;
+            let triggered_day_count = triggered_days.len();
+            let avg_score_multiplier = if trigger_samples > 0 {
+                Some(multiplier_sum / trigger_samples as f64)
+            } else {
+                None
+            };
+
+            let mut score_buckets = bucket_map
+                .into_values()
+                .map(|bucket| RuleExpressionCalibrationBucket {
+                    score_multiplier: bucket.score_multiplier,
+                    sample_count: bucket.sample_count,
+                    avg_residual_return: (bucket.sample_count > 0)
+                        .then_some(bucket.residual_sum / bucket.sample_count as f64),
+                })
+                .collect::<Vec<_>>();
+            score_buckets.sort_by(|left, right| {
+                left.score_multiplier
+                    .partial_cmp(&right.score_multiplier)
+                    .unwrap_or(Ordering::Equal)
+            });
+            let monotonic_buckets = score_buckets
+                .iter()
+                .filter(|bucket| bucket.sample_count >= 30)
+                .filter_map(|bucket| {
+                    bucket
+                        .avg_residual_return
+                        .map(|value| value * direction_sign)
+                })
+                .collect::<Vec<_>>();
+            let score_monotonicity = if monotonic_buckets.len() >= 2 {
+                let monotonic_pairs = monotonic_buckets
+                    .windows(2)
+                    .filter(|window| window[1] + VALIDATION_EPS >= window[0])
+                    .count();
+                Some(monotonic_pairs as f64 / (monotonic_buckets.len() - 1) as f64)
+            } else {
+                None
+            };
+
+            let enough_samples = trigger_samples >= (100) && triggered_day_count >= (20);
+            let oriented_lcb = conservative_edge.map(|value| value * direction_sign);
+            let (status, status_label) = if !enough_samples {
+                ("insufficient", "样本不足")
+            } else if oriented_lcb.is_none_or(|value| value <= 0.0) {
+                ("no_edge", "保守边际不足")
+            } else if stability_factor < 1.0 {
+                ("unstable", "前后段不稳定")
+            } else {
+                ("reliable", "相对稳定")
+            };
+
+            let normalized_edge = match (oriented_lcb, daily_std) {
+                (Some(edge), Some(std)) if edge > 0.0 && std > VALIDATION_EPS => edge / std,
+                _ => 0.0,
+            };
+            let structure_factor = (|scope_way: ScopeWay, monotonicity: Option<f64>| -> f64 {
+                match scope_way {
+                    ScopeWay::Each => monotonicity.unwrap_or(0.25).clamp(0.25, 1.0),
+                    ScopeWay::Recent => (0.5 + monotonicity.unwrap_or(0.5) * 0.5).clamp(0.5, 1.0),
+                    _ => 1.0,
+                }
+            })(spec.scope_way, score_monotonicity);
+            let ic_support = metrics
+                .ic_t_value
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .map(|value| value / (daily_values.len().max(1) as f64).sqrt())
+                .unwrap_or(0.0);
+            let calibration_score = if enough_samples {
+                (normalized_edge + ic_support * 0.15) * stability_factor * structure_factor
+            } else {
+                0.0
+            };
+            let desired_total_points = if enough_samples && normalized_edge > 0.0 {
+                round_to_half(
+                    ((40.0) * normalized_edge * stability_factor * structure_factor)
+                        .clamp(0.0, 10.0),
+                )
+            } else {
+                0.0
+            };
+            let unit_points_abs = avg_score_multiplier
+                .filter(|value| *value > VALIDATION_EPS)
+                .map(|value| round_to_half((desired_total_points / value).clamp(0.0, 10.0)))
+                .unwrap_or(0.0);
+            let suggested_points = direction_sign * unit_points_abs;
+            let suggested_total_points = direction_sign * desired_total_points;
+            let suggested_dist_points = spec
+                .dist_points
+                .as_ref()
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| RuleExpressionCalibrationDistancePoint {
+                            min: item.min,
+                            max: item.max,
+                            points: suggested_points * item.points.abs(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            Ok(RuleExpressionCalibrationCandidate {
+                candidate_key: spec.candidate_key.clone(),
+                scope_way: scope_way_config_label(spec.scope_way),
+                scope_label: spec.scope_label.clone(),
+                scope_windows: spec.scope_windows,
+                is_current: spec.is_current,
+                trigger_samples,
+                triggered_days: triggered_day_count,
+                avg_daily_trigger: if triggered_day_count > 0 {
+                    trigger_samples as f64 / triggered_day_count as f64
+                } else {
+                    0.0
+                },
+                avg_residual_mean: metrics.avg_residual_mean,
+                avg_excess_residual_mean: daily_mean,
+                daily_std,
+                standard_error,
+                conservative_edge,
+                early_excess_residual_mean: early_mean,
+                late_excess_residual_mean: late_mean,
+                ic_mean: metrics.ic_mean,
+                ic_t_value: metrics.ic_t_value,
+                score_monotonicity,
+                avg_score_multiplier,
+                suggested_points,
+                suggested_total_points,
+                calibration_score,
+                status: status.to_string(),
+                status_label: status_label.to_string(),
+                score_buckets,
+                suggested_dist_points,
+            })
+        })(
             spec,
             direction_sign,
             metrics,
@@ -4519,27 +4347,6 @@ pub fn run_rule_expression_calibration(
         recommended_candidate_key,
         candidates,
     })
-}
-
-fn load_stock_name_map(source_path: &str) -> Result<HashMap<String, String>, String> {
-    let rows = load_stock_list(source_path)?;
-    let mut out = HashMap::with_capacity(rows.len());
-
-    for cols in rows {
-        let Some(ts_code) = cols.first().map(|value| value.trim()) else {
-            continue;
-        };
-        let Some(name_raw) = cols.get(2).map(|value| value.trim()) else {
-            continue;
-        };
-        if ts_code.is_empty() || name_raw.is_empty() {
-            continue;
-        }
-
-        out.insert(ts_code.to_string(), name_raw.to_string());
-    }
-
-    Ok(out)
 }
 
 fn load_validation_sample_stock_meta_map(
@@ -4593,33 +4400,31 @@ fn resolve_validation_sample_board_label(
         return category_board.to_string();
     }
 
-    if let Some(board) = market_label.and_then(normalize_validation_market_label) {
+    if let Some(board) = market_label.and_then(|market_label: &str| -> Option<String> {
+        let market_label = market_label.trim();
+        if market_label.is_empty() {
+            return None;
+        }
+
+        if market_label.contains("北交") {
+            return Some("北交所".to_string());
+        }
+        if market_label.contains("科创") {
+            return Some("科创板".to_string());
+        }
+        if market_label.contains("创业") {
+            return Some("创业板".to_string());
+        }
+        if market_label.contains("主板") {
+            return Some("主板".to_string());
+        }
+
+        Some(market_label.to_string())
+    }) {
         return board;
     }
 
     category_board.to_string()
-}
-
-fn normalize_validation_market_label(market_label: &str) -> Option<String> {
-    let market_label = market_label.trim();
-    if market_label.is_empty() {
-        return None;
-    }
-
-    if market_label.contains("北交") {
-        return Some("北交所".to_string());
-    }
-    if market_label.contains("科创") {
-        return Some("科创板".to_string());
-    }
-    if market_label.contains("创业") {
-        return Some("创业板".to_string());
-    }
-    if market_label.contains("主板") {
-        return Some("主板".to_string());
-    }
-
-    Some(market_label.to_string())
 }
 
 fn derive_validation_volatility_group(board: &str) -> &'static str {
@@ -4729,13 +4534,6 @@ fn resolve_board_filter(requested: Option<String>, board_options: &[String]) -> 
     None
 }
 
-fn match_board_filter(board_list: &[String], selected_board: Option<&str>) -> bool {
-    let Some(selected_board) = selected_board else {
-        return true;
-    };
-    board_list.iter().any(|board| board == selected_board)
-}
-
 fn match_board_filter_with_st(
     board_list: &[String],
     selected_board: Option<&str>,
@@ -4744,21 +4542,12 @@ fn match_board_filter_with_st(
     if exclude_st_board && board_list.iter().any(|board| board == "ST") {
         return false;
     }
-    match_board_filter(board_list, selected_board)
-}
-
-fn normalize_market_value_bounds(
-    total_mv_min: Option<f64>,
-    total_mv_max: Option<f64>,
-) -> Result<(Option<f64>, Option<f64>), String> {
-    let total_mv_min = total_mv_min.filter(|value| value.is_finite());
-    let total_mv_max = total_mv_max.filter(|value| value.is_finite());
-    if let (Some(min_v), Some(max_v)) = (total_mv_min, total_mv_max) {
-        if min_v > max_v {
-            return Err("总市值最小值不能大于最大值".to_string());
-        }
-    }
-    Ok((total_mv_min, total_mv_max))
+    (|board_list: &[String], selected_board: Option<&str>| -> bool {
+        let Some(selected_board) = selected_board else {
+            return true;
+        };
+        board_list.iter().any(|board| board == selected_board)
+    })(board_list, selected_board)
 }
 
 fn build_backtest_stock_filter(
@@ -4781,7 +4570,18 @@ fn build_backtest_stock_filter(
     let requested_board = board
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty() && value != "全部");
-    let (total_mv_min, total_mv_max) = normalize_market_value_bounds(total_mv_min, total_mv_max)?;
+    let (total_mv_min, total_mv_max) = (|total_mv_min: Option<f64>,
+                                         total_mv_max: Option<f64>|
+     -> Result<(Option<f64>, Option<f64>), String> {
+        let total_mv_min = total_mv_min.filter(|value| value.is_finite());
+        let total_mv_max = total_mv_max.filter(|value| value.is_finite());
+        if let (Some(min_v), Some(max_v)) = (total_mv_min, total_mv_max) {
+            if min_v > max_v {
+                return Err("总市值最小值不能大于最大值".to_string());
+            }
+        }
+        Ok((total_mv_min, total_mv_max))
+    })(total_mv_min, total_mv_max)?;
     let has_mv_filter = total_mv_min.is_some() || total_mv_max.is_some();
 
     if requested_board.is_none() && !exclude_st_board && !has_mv_filter {
@@ -4815,13 +4615,6 @@ fn build_backtest_stock_filter(
         total_mv_max,
         Some(allowed_ts_codes),
     ))
-}
-
-fn build_industry_maps(
-    source_path: &str,
-) -> Result<(HashMap<String, Vec<String>>, HashMap<String, usize>), String> {
-    let stock_rows = load_stock_list(source_path)?;
-    Ok(build_industry_maps_from_rows(stock_rows))
 }
 
 fn build_industry_maps_from_rows(
@@ -4871,57 +4664,6 @@ fn has_min_stock_count(
     min_stock_count: usize,
 ) -> bool {
     min_stock_count <= 1 || stock_counts.get(name).copied().unwrap_or(0) >= min_stock_count
-}
-
-fn build_concept_maps(
-    source_path: &str,
-) -> Result<(HashMap<String, Vec<String>>, HashMap<String, usize>), String> {
-    let rows = match load_ths_concepts_list(source_path) {
-        Ok(rows) => rows,
-        Err(error) if error.contains("打开stock_concepts.csv失败") => {
-            return Ok((HashMap::new(), HashMap::new()));
-        }
-        Err(error) => return Err(error),
-    };
-    let mut ts_concept_map: HashMap<String, Vec<String>> = HashMap::new();
-    let mut concept_stocks: HashMap<String, HashSet<String>> = HashMap::new();
-
-    for cols in rows {
-        let Some(ts_code) = cols
-            .first()
-            .map(|value| value.trim().to_ascii_uppercase())
-            .filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-        let Some(concept_raw) = cols.get(2).map(|value| value.trim()) else {
-            continue;
-        };
-        if concept_raw.is_empty() {
-            continue;
-        }
-
-        let concepts = split_board_tags(concept_raw);
-        for concept in &concepts {
-            concept_stocks
-                .entry(concept.clone())
-                .or_default()
-                .insert(ts_code.clone());
-        }
-        if !concepts.is_empty() {
-            ts_concept_map.entry(ts_code).or_default().extend(concepts);
-        }
-    }
-
-    for concepts in ts_concept_map.values_mut() {
-        concepts.sort();
-        concepts.dedup();
-    }
-    let concept_stock_counts = concept_stocks
-        .into_iter()
-        .map(|(concept, stocks)| (concept, stocks.len()))
-        .collect();
-    Ok((ts_concept_map, concept_stock_counts))
 }
 
 fn estimate_net_money_flow_yuan(net_mf_vol: f64, vol: f64, amount: f64) -> Option<f64> {
@@ -5008,34 +4750,6 @@ fn money_outflow_rank_items(
     items
 }
 
-fn stock_data_has_money_flow_columns(conn: &Connection) -> Result<bool, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT LOWER(column_name)
-            FROM information_schema.columns
-            WHERE LOWER(table_name) = 'stock_data'
-            "#,
-        )
-        .map_err(|e| format!("预编译资金流向列检查失败: {e}"))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("执行资金流向列检查失败: {e}"))?;
-    let mut columns = HashSet::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取资金流向列检查失败: {e}"))?
-    {
-        let name: String = row
-            .get(0)
-            .map_err(|e| format!("读取资金流向列名失败: {e}"))?;
-        columns.insert(name);
-    }
-    Ok(["net_mf_v", "vol", "amount"]
-        .iter()
-        .all(|name| columns.contains(*name)))
-}
-
 pub fn get_market_analysis(
     source_path: String,
     lookback_period: Option<usize>,
@@ -5079,8 +4793,64 @@ pub fn get_market_analysis(
         .or_else(|| latest_trade_date.clone());
 
     let (board_options, ts_board_map) = get_or_build_board_maps(&source_path)?;
-    let (ts_concept_map, concept_stock_counts) = build_concept_maps(&source_path)?;
-    let (ts_industry_map, industry_stock_counts) = build_industry_maps(&source_path)?;
+    let (ts_concept_map, concept_stock_counts) = (|source_path: &str| -> Result<
+        (HashMap<String, Vec<String>>, HashMap<String, usize>),
+        String,
+    > {
+        let rows = match load_ths_concepts_list(source_path) {
+            Ok(rows) => rows,
+            Err(error) if error.contains("打开stock_concepts.csv失败") => {
+                return Ok((HashMap::new(), HashMap::new()));
+            }
+            Err(error) => return Err(error),
+        };
+        let mut ts_concept_map: HashMap<String, Vec<String>> = HashMap::new();
+        let mut concept_stocks: HashMap<String, HashSet<String>> = HashMap::new();
+
+        for cols in rows {
+            let Some(ts_code) = cols
+                .first()
+                .map(|value| value.trim().to_ascii_uppercase())
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let Some(concept_raw) = cols.get(2).map(|value| value.trim()) else {
+                continue;
+            };
+            if concept_raw.is_empty() {
+                continue;
+            }
+
+            let concepts = split_board_tags(concept_raw);
+            for concept in &concepts {
+                concept_stocks
+                    .entry(concept.clone())
+                    .or_default()
+                    .insert(ts_code.clone());
+            }
+            if !concepts.is_empty() {
+                ts_concept_map.entry(ts_code).or_default().extend(concepts);
+            }
+        }
+
+        for concepts in ts_concept_map.values_mut() {
+            concepts.sort();
+            concepts.dedup();
+        }
+        let concept_stock_counts = concept_stocks
+            .into_iter()
+            .map(|(concept, stocks)| (concept, stocks.len()))
+            .collect();
+        Ok((ts_concept_map, concept_stock_counts))
+    })(&source_path)?;
+    let (ts_industry_map, industry_stock_counts) = (|source_path: &str| -> Result<
+        (HashMap<String, Vec<String>>, HashMap<String, usize>),
+        String,
+    > {
+        let stock_rows = load_stock_list(source_path)?;
+        Ok(build_industry_maps_from_rows(stock_rows))
+    })(&source_path)?;
     let resolved_board = resolve_board_filter(board, &board_options);
     let exclude_st_board = exclude_st_board.unwrap_or(false);
     let sample_eligibility =
@@ -5286,7 +5056,26 @@ pub fn get_market_analysis(
     });
     interval_industry_top.truncate(20);
 
-    let stock_name_map = load_stock_name_map(&source_path)?;
+    let stock_name_map = (|source_path: &str| -> Result<HashMap<String, String>, String> {
+        let rows = load_stock_list(source_path)?;
+        let mut out = HashMap::with_capacity(rows.len());
+
+        for cols in rows {
+            let Some(ts_code) = cols.first().map(|value| value.trim()) else {
+                continue;
+            };
+            let Some(name_raw) = cols.get(2).map(|value| value.trim()) else {
+                continue;
+            };
+            if ts_code.is_empty() || name_raw.is_empty() {
+                continue;
+            }
+
+            out.insert(ts_code.to_string(), name_raw.to_string());
+        }
+
+        Ok(out)
+    })(&source_path)?;
 
     let mut interval_gain_stmt = source_conn
         .prepare(
@@ -5618,7 +5407,34 @@ pub fn get_market_analysis(
         interval_industry_money_outflow_top,
         daily_concept_money_outflow_top,
         daily_industry_money_outflow_top,
-    ) = if stock_data_has_money_flow_columns(&source_conn)? {
+    ) = if (|conn: &Connection| -> Result<bool, String> {
+        let mut stmt = conn
+            .prepare(
+                r#"
+            SELECT LOWER(column_name)
+            FROM information_schema.columns
+            WHERE LOWER(table_name) = 'stock_data'
+            "#,
+            )
+            .map_err(|e| format!("预编译资金流向列检查失败: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("执行资金流向列检查失败: {e}"))?;
+        let mut columns = HashSet::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取资金流向列检查失败: {e}"))?
+        {
+            let name: String = row
+                .get(0)
+                .map_err(|e| format!("读取资金流向列名失败: {e}"))?;
+            columns.insert(name);
+        }
+        Ok(["net_mf_v", "vol", "amount"]
+            .iter()
+            .all(|name| columns.contains(*name)))
+    })(&source_conn)?
+    {
         let mut money_flow_stmt = source_conn
             .prepare(
                 r#"
@@ -6335,34 +6151,6 @@ fn build_rule_contribution_averages(
     Ok(out)
 }
 
-fn finalize_rule_contribution_averages(
-    acc_map: HashMap<String, RuleContributionAccumulator>,
-) -> HashMap<String, RuleContributionAverages> {
-    acc_map
-        .into_iter()
-        .map(|(rule_name, acc)| {
-            let avg_contribution_score = if acc.contribution_days > 0 {
-                Some(acc.contribution_sum / acc.contribution_days as f64)
-            } else {
-                None
-            };
-            let avg_contribution_per_trigger = if acc.trigger_count > 0 {
-                Some(acc.contribution_sum / acc.trigger_count as f64)
-            } else {
-                None
-            };
-
-            (
-                rule_name,
-                RuleContributionAverages {
-                    avg_contribution_score,
-                    avg_contribution_per_trigger,
-                },
-            )
-        })
-        .collect()
-}
-
 fn ts_code_allowed_by_filter(allowed_ts_codes: Option<&HashSet<String>>, ts_code: &str) -> bool {
     let Some(allowed_ts_codes) = allowed_ts_codes else {
         return true;
@@ -6375,30 +6163,6 @@ fn filter_score_summary_rows_by_ts_codes(
     rows: Vec<ScoreSummary>,
     allowed_ts_codes: Option<&HashSet<String>>,
 ) -> Vec<ScoreSummary> {
-    if allowed_ts_codes.is_none() {
-        return rows;
-    }
-    rows.into_iter()
-        .filter(|row| ts_code_allowed_by_filter(allowed_ts_codes, &row.ts_code))
-        .collect()
-}
-
-fn filter_score_detail_rows_by_ts_codes(
-    rows: Vec<ScoreDetails>,
-    allowed_ts_codes: Option<&HashSet<String>>,
-) -> Vec<ScoreDetails> {
-    if allowed_ts_codes.is_none() {
-        return rows;
-    }
-    rows.into_iter()
-        .filter(|row| ts_code_allowed_by_filter(allowed_ts_codes, &row.ts_code))
-        .collect()
-}
-
-fn filter_scene_detail_rows_by_ts_codes(
-    rows: Vec<SceneBacktestRow>,
-    allowed_ts_codes: Option<&HashSet<String>>,
-) -> Vec<SceneBacktestRow> {
     if allowed_ts_codes.is_none() {
         return rows;
     }
@@ -6446,51 +6210,6 @@ fn load_score_summary_rows_from_db(
     }
 
     Ok(summaries)
-}
-
-fn load_rule_backtest_score_rows_from_db(
-    source_path: &str,
-    start_date: &str,
-    end_date: &str,
-    allowed_ts_codes: Option<&HashSet<String>>,
-) -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>), String> {
-    let result_conn = open_result_conn(source_path)?;
-    let summaries =
-        load_score_summary_rows_from_db(source_path, start_date, end_date, allowed_ts_codes)?;
-
-    let mut detail_stmt = result_conn
-        .prepare(
-            r#"
-            SELECT ts_code, trade_date, rule_name, TRY_CAST(rule_score AS DOUBLE)
-            FROM rule_details
-            WHERE trade_date >= ?
-              AND trade_date <= ?
-              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
-            ORDER BY trade_date ASC, rule_name ASC, ts_code ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译策略回测规则原始行失败: {e}"))?;
-    let mut detail_rows = detail_stmt
-        .query(params![start_date, end_date])
-        .map_err(|e| format!("查询策略回测规则原始行失败: {e}"))?;
-    let mut details = Vec::new();
-    while let Some(row) = detail_rows
-        .next()
-        .map_err(|e| format!("读取策略回测规则原始行失败: {e}"))?
-    {
-        let rule_score: f64 = row.get(3).map_err(|e| format!("读取规则分数失败: {e}"))?;
-        let item = ScoreDetails {
-            ts_code: row.get(0).map_err(|e| format!("读取规则代码失败: {e}"))?,
-            trade_date: row.get(1).map_err(|e| format!("读取规则日期失败: {e}"))?,
-            rule_name: row.get(2).map_err(|e| format!("读取规则名称失败: {e}"))?,
-            rule_score,
-        };
-        if rule_score.is_finite() && ts_code_allowed_by_filter(allowed_ts_codes, &item.ts_code) {
-            details.push(item);
-        }
-    }
-
-    Ok((summaries, details))
 }
 
 fn build_rule_contribution_averages_from_rows(
@@ -6556,7 +6275,31 @@ fn build_rule_contribution_averages_from_rows(
         acc.trigger_count += agg.trigger_count.max(0);
     }
 
-    finalize_rule_contribution_averages(acc_map)
+    (|acc_map : HashMap < String , RuleContributionAccumulator >| -> HashMap < String , RuleContributionAverages > {
+    acc_map
+        .into_iter()
+        .map(|(rule_name, acc)| {
+            let avg_contribution_score = if acc.contribution_days > 0 {
+                Some(acc.contribution_sum / acc.contribution_days as f64)
+            } else {
+                None
+            };
+            let avg_contribution_per_trigger = if acc.trigger_count > 0 {
+                Some(acc.contribution_sum / acc.trigger_count as f64)
+            } else {
+                None
+            };
+
+            (
+                rule_name,
+                RuleContributionAverages {
+                    avg_contribution_score,
+                    avg_contribution_per_trigger,
+                },
+            )
+        })
+        .collect()
+})(acc_map)
 }
 
 fn weighted_rule_summary_metric(
@@ -6588,28 +6331,6 @@ fn weighted_rule_summary_metric(
     }
 }
 
-fn aggregate_rule_er_change(summaries: &[RuleLayerRuleSummary]) -> Option<f64> {
-    let mut weighted_sum = 0.0;
-    let mut total_weight = 0usize;
-
-    for summary in summaries {
-        let Some(avg_er_change) = summary.avg_er_change.filter(|value| value.is_finite()) else {
-            continue;
-        };
-        if summary.er_change_sample_count == 0 {
-            continue;
-        }
-        weighted_sum += avg_er_change * summary.er_change_sample_count as f64;
-        total_weight += summary.er_change_sample_count;
-    }
-
-    if total_weight == 0 {
-        None
-    } else {
-        Some(weighted_sum / total_weight as f64)
-    }
-}
-
 fn aggregate_all_rule_summary_metrics(
     summaries: &[RuleLayerRuleSummary],
 ) -> (
@@ -6626,7 +6347,28 @@ fn aggregate_all_rule_summary_metrics(
     let avg_residual_mean = weighted_rule_summary_metric(summaries, |item| item.avg_residual_mean);
     let avg_excess_residual_mean =
         weighted_rule_summary_metric(summaries, |item| item.avg_excess_residual_mean);
-    let avg_er_change = aggregate_rule_er_change(summaries);
+    let avg_er_change = (|summaries: &[RuleLayerRuleSummary]| -> Option<f64> {
+        let mut weighted_sum = 0.0;
+        let mut total_weight = 0usize;
+
+        for summary in summaries {
+            let Some(avg_er_change) = summary.avg_er_change.filter(|value| value.is_finite())
+            else {
+                continue;
+            };
+            if summary.er_change_sample_count == 0 {
+                continue;
+            }
+            weighted_sum += avg_er_change * summary.er_change_sample_count as f64;
+            total_weight += summary.er_change_sample_count;
+        }
+
+        if total_weight == 0 {
+            None
+        } else {
+            Some(weighted_sum / total_weight as f64)
+        }
+    })(summaries);
     let profit_loss_ratio = weighted_rule_summary_metric(summaries, |item| item.profit_loss_ratio);
     let spread_mean = weighted_rule_summary_metric(summaries, |item| item.spread_mean);
     let ic_mean = weighted_rule_summary_metric(summaries, |item| item.ic_mean);
@@ -6656,413 +6398,13 @@ fn aggregate_all_rule_summary_metrics(
     )
 }
 
-fn run_scene_layer_backtest_core(
-    source_conn: &Connection,
-    source_path: &str,
-    scene_name: Option<&str>,
-    params: &SceneLayerBacktestRunParams,
-) -> Result<SceneLayerBacktestData, String> {
-    let layer_config = SceneLayerConfig {
-        min_samples_per_day: params.min_samples_per_day,
-        backtest_period: params.backtest_period,
-        min_listed_trade_days: params.min_listed_trade_days,
-    };
-
-    if let Some(scene_name) = scene_name {
-        let scene_name = scene_name.trim();
-        if scene_name.is_empty() {
-            return Err("scene_name不能为空".to_string());
-        }
-
-        let input = SceneLayerFromDbInput {
-            scene_name: scene_name.to_string(),
-            stock_adj_type: params.stock_adj_type.clone(),
-            index_ts_code: params.index_ts_code.clone(),
-            index_beta: params.index_beta,
-            concept_beta: params.concept_beta,
-            industry_beta: params.industry_beta,
-            start_date: params.start_date.clone(),
-            end_date: params.end_date.clone(),
-            layer_config,
-        };
-
-        let metrics = calc_scene_layer_metrics_from_db_with_ts_filter(
-            source_conn,
-            source_path,
-            &input,
-            params.allowed_ts_codes.as_ref(),
-        )?;
-
-        return Ok(SceneLayerBacktestData {
-            scene_name: input.scene_name,
-            stock_adj_type: input.stock_adj_type,
-            index_ts_code: input.index_ts_code,
-            index_beta: input.index_beta,
-            concept_beta: input.concept_beta,
-            industry_beta: input.industry_beta,
-            start_date: input.start_date,
-            end_date: input.end_date,
-            resolved_board: params.resolved_board.clone(),
-            exclude_st_board: params.exclude_st_board,
-            total_mv_min: params.total_mv_min,
-            total_mv_max: params.total_mv_max,
-            min_samples_per_scene_day: input.layer_config.min_samples_per_day,
-            min_listed_trade_days: input.layer_config.min_listed_trade_days,
-            backtest_period: input.layer_config.backtest_period,
-            points: metrics
-                .points
-                .into_iter()
-                .map(|point| SceneLayerPointPayload {
-                    trade_date: point.trade_date,
-                    state_avg_residual_returns: point
-                        .state_avg_residual_returns
-                        .into_iter()
-                        .map(|(scene_state, avg_residual_return)| {
-                            SceneLayerStateAvgResidualReturn {
-                                scene_state,
-                                avg_residual_return: Some(avg_residual_return),
-                            }
-                        })
-                        .collect(),
-                    top_bottom_spread: point.top_bottom_spread,
-                    ic: point.ic,
-                })
-                .collect(),
-            spread_mean: metrics.spread_mean,
-            ic_mean: metrics.ic_mean,
-            ic_std: metrics.ic_std,
-            icir: metrics.icir,
-            ic_t_value: metrics.ic_t_value,
-            is_all_scenes: false,
-            all_scene_summaries: Vec::new(),
-        });
-    }
-
-    let scene_options = load_scene_options(source_path)?;
-    let all_metrics = calc_all_scene_layer_metrics_from_db_with_ts_filter(
-        source_conn,
-        source_path,
-        &scene_options,
-        &params.stock_adj_type,
-        &params.index_ts_code,
-        params.index_beta,
-        params.concept_beta,
-        params.industry_beta,
-        &params.start_date,
-        &params.end_date,
-        &layer_config,
-        params.allowed_ts_codes.as_ref(),
-    )?;
-    let mut all_scene_summaries = Vec::with_capacity(all_metrics.len());
-
-    for (one_scene_name, metrics) in all_metrics {
-        all_scene_summaries.push(SceneLayerSceneSummary {
-            scene_name: one_scene_name,
-            point_count: metrics.points.len(),
-            spread_mean: metrics.spread_mean,
-            ic_mean: metrics.ic_mean,
-            ic_std: metrics.ic_std,
-            icir: metrics.icir,
-            ic_t_value: metrics.ic_t_value,
-        });
-    }
-
-    all_scene_summaries.sort_by(|a, b| {
-        b.spread_mean
-            .unwrap_or(f64::NEG_INFINITY)
-            .partial_cmp(&a.spread_mean.unwrap_or(f64::NEG_INFINITY))
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.point_count.cmp(&a.point_count))
-            .then_with(|| a.scene_name.cmp(&b.scene_name))
-    });
-
-    Ok(SceneLayerBacktestData {
-        scene_name: String::new(),
-        stock_adj_type: params.stock_adj_type.clone(),
-        index_ts_code: params.index_ts_code.clone(),
-        index_beta: params.index_beta,
-        concept_beta: params.concept_beta,
-        industry_beta: params.industry_beta,
-        start_date: params.start_date.clone(),
-        end_date: params.end_date.clone(),
-        resolved_board: params.resolved_board.clone(),
-        exclude_st_board: params.exclude_st_board,
-        total_mv_min: params.total_mv_min,
-        total_mv_max: params.total_mv_max,
-        min_samples_per_scene_day: params.min_samples_per_day,
-        min_listed_trade_days: params.min_listed_trade_days,
-        backtest_period: params.backtest_period,
-        points: Vec::new(),
-        spread_mean: None,
-        ic_mean: None,
-        ic_std: None,
-        icir: None,
-        ic_t_value: None,
-        is_all_scenes: true,
-        all_scene_summaries,
-    })
-}
-
-fn run_rule_layer_backtest_core(
-    source_conn: &Connection,
-    source_path: &str,
-    rule_name: Option<&str>,
-    params: &RuleLayerBacktestRunParams,
-) -> Result<RuleLayerBacktestData, String> {
-    let layer_config = RuleLayerConfig {
-        min_samples_per_day: params.min_samples_per_day,
-        backtest_period: params.backtest_period,
-        min_listed_trade_days: params.min_listed_trade_days,
-    };
-
-    if let Some(rule_name) = rule_name {
-        let rule_name = rule_name.trim();
-        if rule_name.is_empty() {
-            return Err("rule_name不能为空".to_string());
-        }
-
-        let input = RuleLayerFromDbInput {
-            rule_name: rule_name.to_string(),
-            stock_adj_type: params.stock_adj_type.clone(),
-            index_ts_code: params.index_ts_code.clone(),
-            index_beta: params.index_beta,
-            concept_beta: params.concept_beta,
-            industry_beta: params.industry_beta,
-            start_date: params.start_date.clone(),
-            end_date: params.end_date.clone(),
-            layer_config,
-        };
-
-        let metrics = calc_rule_layer_metrics_from_db_with_ts_filter(
-            source_conn,
-            source_path,
-            &input,
-            params.allowed_ts_codes.as_ref(),
-        )?;
-        let decay_validations = build_rule_decay_validations(&metrics.points);
-
-        return Ok(RuleLayerBacktestData {
-            rule_name: input.rule_name,
-            stock_adj_type: input.stock_adj_type,
-            index_ts_code: input.index_ts_code,
-            index_beta: input.index_beta,
-            concept_beta: input.concept_beta,
-            industry_beta: input.industry_beta,
-            start_date: input.start_date,
-            end_date: input.end_date,
-            resolved_board: params.resolved_board.clone(),
-            exclude_st_board: params.exclude_st_board,
-            total_mv_min: params.total_mv_min,
-            total_mv_max: params.total_mv_max,
-            min_samples_per_rule_day: input.layer_config.min_samples_per_day,
-            min_listed_trade_days: input.layer_config.min_listed_trade_days,
-            backtest_period: input.layer_config.backtest_period,
-            points: metrics
-                .points
-                .into_iter()
-                .map(|point| RuleLayerPointPayload {
-                    trade_date: point.trade_date,
-                    sample_count: point.sample_count,
-                    avg_rule_score: point.avg_rule_score,
-                    avg_residual_return: point.avg_residual_return,
-                    avg_excess_residual_return: point.avg_excess_residual_return,
-                    top_bottom_spread: None,
-                    ic: point.ic,
-                })
-                .collect(),
-            avg_residual_mean: metrics.avg_residual_mean,
-            avg_excess_residual_mean: metrics.avg_excess_residual_mean,
-            decay_validations,
-            avg_er_change: metrics.avg_er_change,
-            profit_loss_ratio: metrics.profit_loss_ratio,
-            spread_mean: None,
-            avg_contribution_score: None,
-            avg_contribution_per_trigger: None,
-            ic_mean: metrics.ic_mean,
-            ic_std: metrics.ic_std,
-            icir: metrics.icir,
-            ic_t_value: metrics.ic_t_value,
-            layer_count: None,
-            layer_method: None,
-            layer_method_label: None,
-            layer_summaries: Vec::new(),
-            is_all_rules: false,
-            all_rule_summaries: Vec::new(),
-            rule_validation_details: Vec::new(),
-        });
-    }
-
-    let (rule_options, rule_meta_map) = load_rule_meta(source_path)?;
-    let explain_map = rule_meta_map
-        .iter()
-        .map(|(rule_name, meta)| (rule_name.clone(), meta.explain.clone()))
-        .collect::<HashMap<_, _>>();
-    let has_rule_meta_match = rule_options
-        .iter()
-        .any(|rule_name| rule_meta_map.contains_key(rule_name));
-    let stock_meta_map = if has_rule_meta_match {
-        load_validation_sample_stock_meta_map(source_path)?
-    } else {
-        HashMap::new()
-    };
-    let similarity_cache = if has_rule_meta_match {
-        load_validation_similarity_cache_optional(
-            source_path,
-            &params.start_date,
-            &params.end_date,
-        )?
-    } else {
-        empty_validation_similarity_cache()
-    };
-    let contribution_averages = if params.allowed_ts_codes.is_some() {
-        // 股票范围过滤需要逐行计算贡献度；把原始行限制在这个作用域内，确保在
-        // 进入策略并发前释放，避免与运行时缓存及每策略校验数据同时常驻。
-        let (summary_rows, detail_rows) = load_rule_backtest_score_rows_from_db(
-            source_path,
-            &params.start_date,
-            &params.end_date,
-            params.allowed_ts_codes.as_ref(),
-        )?;
-        build_rule_contribution_averages_from_rows(
-            &summary_rows,
-            &detail_rows,
-            &params.start_date,
-            &params.end_date,
-        )
-    } else {
-        build_rule_contribution_averages(
-            source_path,
-            &rule_options,
-            &params.start_date,
-            &params.end_date,
-        )?
-    };
-    let summary_detail_items =
-        calc_all_rule_layer_metrics_with_validation_from_db_map_with_ts_filter(
-            source_conn,
-            source_path,
-            &rule_options,
-            &params.stock_adj_type,
-            &params.index_ts_code,
-            params.index_beta,
-            params.concept_beta,
-            params.industry_beta,
-            &params.start_date,
-            &params.end_date,
-            &layer_config,
-            params.allowed_ts_codes.as_ref(),
-            params.parallel_batch_size,
-            |one_rule_name, validation| {
-                Ok(build_one_rule_backtest_summary_and_detail(
-                    one_rule_name,
-                    validation,
-                    &rule_meta_map,
-                    &contribution_averages,
-                    &explain_map,
-                    params,
-                    &similarity_cache,
-                    &stock_meta_map,
-                ))
-            },
-        );
-    let (all_rule_summaries, rule_validation_details) =
-        split_and_sort_rule_backtest_summaries_and_details(summary_detail_items?);
-    let decay_validations = build_all_rule_decay_validations(&all_rule_summaries);
-
-    let (
-        avg_residual_mean,
-        avg_excess_residual_mean,
-        avg_er_change,
-        profit_loss_ratio,
-        _spread_mean,
-        ic_mean,
-        ic_std,
-        icir,
-        ic_t_value,
-    ) = aggregate_all_rule_summary_metrics(&all_rule_summaries);
-    Ok(RuleLayerBacktestData {
-        rule_name: String::new(),
-        stock_adj_type: params.stock_adj_type.clone(),
-        index_ts_code: params.index_ts_code.clone(),
-        index_beta: params.index_beta,
-        concept_beta: params.concept_beta,
-        industry_beta: params.industry_beta,
-        start_date: params.start_date.clone(),
-        end_date: params.end_date.clone(),
-        resolved_board: params.resolved_board.clone(),
-        exclude_st_board: params.exclude_st_board,
-        total_mv_min: params.total_mv_min,
-        total_mv_max: params.total_mv_max,
-        min_samples_per_rule_day: params.min_samples_per_day,
-        min_listed_trade_days: params.min_listed_trade_days,
-        backtest_period: params.backtest_period,
-        points: Vec::new(),
-        avg_residual_mean,
-        avg_excess_residual_mean,
-        decay_validations,
-        avg_er_change,
-        profit_loss_ratio,
-        spread_mean: None,
-        avg_contribution_score: weighted_rule_summary_metric(&all_rule_summaries, |item| {
-            item.avg_contribution_score
-        }),
-        avg_contribution_per_trigger: weighted_rule_summary_metric(&all_rule_summaries, |item| {
-            item.avg_contribution_per_trigger
-        }),
-        ic_mean,
-        ic_std,
-        icir,
-        ic_t_value,
-        layer_count: None,
-        layer_method: None,
-        layer_method_label: None,
-        layer_summaries: Vec::new(),
-        is_all_rules: true,
-        all_rule_summaries,
-        rule_validation_details,
-    })
-}
-
-fn rule_decay_t_value(recent: &[f64], prior: &[f64], change: f64) -> Option<f64> {
-    let recent_std = sample_std_f64(recent)?;
-    let prior_std = sample_std_f64(prior)?;
-    let standard_error = ((recent_std * recent_std / recent.len() as f64)
-        + (prior_std * prior_std / prior.len() as f64))
-        .sqrt();
-    if !standard_error.is_finite() || standard_error <= RULE_BACKTEST_EPS {
-        None
-    } else {
-        Some(change / standard_error)
-    }
-}
-
-fn rule_decay_status(
-    recent_mean: f64,
-    change: f64,
-    t_value: Option<f64>,
-) -> (&'static str, &'static str) {
-    if change < 0.0 && t_value.is_some_and(|value| value <= -2.0) {
-        ("significant_decay", "显著衰减")
-    } else if change < 0.0 && recent_mean < 0.0 {
-        ("decay", "衰减")
-    } else if change < 0.0 {
-        ("weakening", "走弱")
-    } else if recent_mean < 0.0 {
-        ("weak", "近期偏弱")
-    } else if change > 0.0 {
-        ("improving", "改善")
-    } else {
-        ("stable", "稳定")
-    }
-}
-
 fn build_decay_validations_from_daily_values(
     mut daily_values: Vec<(String, f64)>,
 ) -> Vec<RuleDecayValidation> {
     daily_values.retain(|(_, value)| value.is_finite());
     daily_values.sort_by(|left, right| left.0.cmp(&right.0));
 
-    RULE_DECAY_WINDOWS
+    ([20, 40, 60])
         .into_iter()
         .map(|window_days| {
             let recent_day_count = daily_values.len().min(window_days);
@@ -7075,7 +6417,7 @@ fn build_decay_validations_from_daily_values(
                 .last()
                 .map(|(trade_date, _)| trade_date.clone());
 
-            if recent_day_count < window_days || prior_day_count < RULE_DECAY_MIN_PRIOR_DAYS {
+            if recent_day_count < window_days || prior_day_count < (10) {
                 return RuleDecayValidation {
                     window_days,
                     recent_start_date,
@@ -7102,8 +6444,36 @@ fn build_decay_validations_from_daily_values(
             let recent_mean = mean_f64(&recent).unwrap_or_default();
             let prior_mean = mean_f64(&prior).unwrap_or_default();
             let change = recent_mean - prior_mean;
-            let t_value = rule_decay_t_value(&recent, &prior, change);
-            let (status, status_label) = rule_decay_status(recent_mean, change, t_value);
+            let t_value = (|recent: &[f64], prior: &[f64], change: f64| -> Option<f64> {
+                let recent_std = sample_std_f64(recent)?;
+                let prior_std = sample_std_f64(prior)?;
+                let standard_error = ((recent_std * recent_std / recent.len() as f64)
+                    + (prior_std * prior_std / prior.len() as f64))
+                    .sqrt();
+                if !standard_error.is_finite() || standard_error <= RULE_BACKTEST_EPS {
+                    None
+                } else {
+                    Some(change / standard_error)
+                }
+            })(&recent, &prior, change);
+            let (status, status_label) = (|recent_mean: f64,
+                                           change: f64,
+                                           t_value: Option<f64>|
+             -> (&'static str, &'static str) {
+                if change < 0.0 && t_value.is_some_and(|value| value <= -2.0) {
+                    ("significant_decay", "显著衰减")
+                } else if change < 0.0 && recent_mean < 0.0 {
+                    ("decay", "衰减")
+                } else if change < 0.0 {
+                    ("weakening", "走弱")
+                } else if recent_mean < 0.0 {
+                    ("weak", "近期偏弱")
+                } else if change > 0.0 {
+                    ("improving", "改善")
+                } else {
+                    ("stable", "稳定")
+                }
+            })(recent_mean, change, t_value);
 
             RuleDecayValidation {
                 window_days,
@@ -7215,7 +6585,86 @@ fn build_one_rule_backtest_summary_and_detail(
         decay_daily_values,
     };
     let detail = rule_meta_map.get(one_rule_name).map(|rule_meta| {
-        build_strategy_rule_validation_detail(
+        (|params: &RuleLayerBacktestRunParams,
+          rule_name: &str,
+          rule_meta: &RuleMeta,
+          validation: RuleLayerMetricsWithValidation,
+          similarity_cache: &ValidationSimilarityCache,
+          explain_map: &HashMap<String, String>,
+          stock_meta_map: &HashMap<String, ValidationSampleStockMeta>|
+         -> RuleValidationComboResult {
+            let RuleLayerMetricsWithValidation {
+                metrics,
+                triggered_samples,
+                daily_score_layers,
+                return_distribution_counts,
+            } = validation;
+            let validation_layer_details =
+                build_validation_score_layer_details_from_daily_layers(daily_score_layers);
+            let return_distribution =
+                build_validation_return_distribution_from_counts(return_distribution_counts);
+            let mut sample_accumulator = ValidationSampleAccumulator::new(
+                5,
+                stock_meta_map,
+                similarity_cache,
+                rule_meta.is_each,
+                rule_meta.points,
+                false,
+            );
+            for sample in &triggered_samples {
+                if sample.rule_score.abs() <= RULE_BACKTEST_EPS {
+                    continue;
+                }
+                sample_accumulator.push(RuleLayerSamplePointRef {
+                    ts_code: &sample.ts_code,
+                    trade_date: &sample.trade_date,
+                    rule_score: sample.rule_score,
+                    residual_return: sample.residual_return,
+                });
+            }
+
+            let (
+                trigger_samples,
+                triggered_days,
+                sample_stats,
+                trigger_count_stats,
+                sample_groups,
+                overlap_hit_count,
+            ) = sample_accumulator.into_parts();
+            let backtest = build_rule_backtest_payload(
+                rule_name,
+                params,
+                metrics,
+                Some(validation_layer_details),
+            );
+            let similarity_rows = build_validation_similarity_rows_from_overlap(
+                similarity_cache,
+                trigger_samples,
+                overlap_hit_count,
+                Some(rule_name),
+                explain_map,
+            );
+
+            RuleValidationComboResult {
+                combo_key: rule_name.to_string(),
+                combo_label: rule_name.to_string(),
+                formula: rule_meta.when.clone(),
+                unknown_values: Vec::new(),
+                trigger_samples,
+                triggered_days,
+                avg_daily_trigger: if triggered_days > 0 {
+                    trigger_samples as f64 / triggered_days as f64
+                } else {
+                    0.0
+                },
+                sample_stats,
+                trigger_count_stats,
+                sample_groups,
+                return_distribution,
+                backtest,
+                similarity_rows,
+            }
+        })(
             params,
             one_rule_name,
             rule_meta,
@@ -7312,14 +6761,6 @@ fn rank_top_k_period_summary_data(
         .collect()
 }
 
-fn rank_market_value_groups() -> [(&'static str, Option<f64>, Option<f64>); 3] {
-    [
-        ("小市值(<50亿)", None, Some(50.0)),
-        ("中市值(50-200亿)", Some(50.0), Some(200.0)),
-        ("大市值(>=200亿)", Some(200.0), None),
-    ]
-}
-
 fn stock_total_mv(total_mv_map: &HashMap<String, f64>, ts_code: &str) -> Option<f64> {
     let ts_code = ts_code.trim();
     total_mv_map.get(ts_code).copied().or_else(|| {
@@ -7327,28 +6768,6 @@ fn stock_total_mv(total_mv_map: &HashMap<String, f64>, ts_code: &str) -> Option<
             .get(ts_code.to_ascii_uppercase().as_str())
             .copied()
     })
-}
-
-fn rank_row_in_market_value_group(
-    total_mv_map: &HashMap<String, f64>,
-    row: &ScoreSummary,
-    min_value: Option<f64>,
-    max_value: Option<f64>,
-) -> bool {
-    let Some(total_mv) = stock_total_mv(total_mv_map, &row.ts_code) else {
-        return false;
-    };
-    if let Some(min_value) = min_value {
-        if total_mv < min_value {
-            return false;
-        }
-    }
-    if let Some(max_value) = max_value {
-        if total_mv >= max_value {
-            return false;
-        }
-    }
-    true
 }
 
 fn build_rank_market_value_summaries(
@@ -7360,11 +6779,38 @@ fn build_rank_market_value_summaries(
     let total_mv_map = build_total_mv_map(source_path)?;
     let mut out = Vec::new();
 
-    for (group_label, total_mv_min, total_mv_max) in rank_market_value_groups() {
+    for (group_label, total_mv_min, total_mv_max) in
+        (|| -> [(&'static str, Option<f64>, Option<f64>); 3] {
+            [
+                ("小市值(<50亿)", None, Some(50.0)),
+                ("中市值(50-200亿)", Some(50.0), Some(200.0)),
+                ("大市值(>=200亿)", Some(200.0), None),
+            ]
+        })()
+    {
         let group_rows = summary_rows
             .iter()
             .filter(|row| {
-                rank_row_in_market_value_group(&total_mv_map, row, total_mv_min, total_mv_max)
+                (|total_mv_map: &HashMap<String, f64>,
+                  row: &ScoreSummary,
+                  min_value: Option<f64>,
+                  max_value: Option<f64>|
+                 -> bool {
+                    let Some(total_mv) = stock_total_mv(total_mv_map, &row.ts_code) else {
+                        return false;
+                    };
+                    if let Some(min_value) = min_value {
+                        if total_mv < min_value {
+                            return false;
+                        }
+                    }
+                    if let Some(max_value) = max_value {
+                        if total_mv >= max_value {
+                            return false;
+                        }
+                    }
+                    true
+                })(&total_mv_map, row, total_mv_min, total_mv_max)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -7398,93 +6844,6 @@ fn build_rank_market_value_summaries(
     }
 
     Ok(out)
-}
-
-fn run_rank_layer_backtest_core(
-    source_conn: &Connection,
-    source_path: &str,
-    params: &RankLayerBacktestRunParams,
-) -> Result<RankLayerBacktestData, String> {
-    let layer_config = RankLayerConfig {
-        min_samples_per_day: params.min_samples_per_day,
-        backtest_period: params.backtest_period,
-        min_listed_trade_days: params.min_listed_trade_days,
-        layer_count: params.layer_count,
-        layer_method: params.layer_method,
-    };
-    let input = RankLayerFromDbInput {
-        stock_adj_type: params.stock_adj_type.clone(),
-        index_ts_code: params.index_ts_code.clone(),
-        index_beta: params.index_beta,
-        concept_beta: params.concept_beta,
-        industry_beta: params.industry_beta,
-        start_date: params.start_date.clone(),
-        end_date: params.end_date.clone(),
-        layer_config,
-    };
-    let summary_rows = load_score_summary_rows_from_db(
-        source_path,
-        &params.start_date,
-        &params.end_date,
-        params.allowed_ts_codes.as_ref(),
-    )?;
-    let metrics =
-        calc_rank_layer_metrics_from_score_rows(source_conn, source_path, &input, &summary_rows)?;
-    let market_value_summaries = build_rank_market_value_summaries(
-        source_path,
-        &input,
-        &summary_rows,
-        &metrics.layer_samples,
-    )?;
-    let stock_meta_map = load_validation_sample_stock_meta_map(source_path)?;
-    let layer_sample_groups = build_rank_layer_sample_groups(
-        &metrics.layer_samples,
-        input.layer_config.layer_count,
-        &stock_meta_map,
-    );
-    Ok(RankLayerBacktestData {
-        stock_adj_type: input.stock_adj_type,
-        index_ts_code: input.index_ts_code,
-        index_beta: input.index_beta,
-        concept_beta: input.concept_beta,
-        industry_beta: input.industry_beta,
-        start_date: input.start_date,
-        end_date: input.end_date,
-        resolved_board: params.resolved_board.clone(),
-        exclude_st_board: params.exclude_st_board,
-        market_value_grouping: true,
-        min_samples_per_rank_day: input.layer_config.effective_min_samples_per_day(),
-        min_listed_trade_days: input.layer_config.min_listed_trade_days,
-        backtest_period: input.layer_config.backtest_period,
-        layer_count: input.layer_config.layer_count,
-        layer_method: input.layer_config.layer_method.as_str().to_string(),
-        layer_method_label: rank_layer_method_label(input.layer_config.layer_method).to_string(),
-        point_count: metrics.point_count,
-        sample_count: metrics.sample_count,
-        avg_er_change: metrics.avg_er_change,
-        spread_mean: metrics.spread_mean,
-        ic_mean: metrics.ic_mean,
-        ic_std: metrics.ic_std,
-        icir: metrics.icir,
-        ic_t_value: metrics.ic_t_value,
-        top_k_summaries: rank_top_k_summary_data(metrics.top_k_summaries),
-        top_k_period_summaries: rank_top_k_period_summary_data(metrics.top_k_period_summaries),
-        layer_summaries: metrics
-            .layers
-            .into_iter()
-            .map(|item| RankLayerBucketSummary {
-                layer_index: item.layer_index,
-                layer_label: rank_layer_label(item.layer_index, input.layer_config.layer_count),
-                point_count: item.point_count,
-                sample_count: item.sample_count,
-                avg_score: item.avg_score,
-                avg_residual_return: item.avg_residual_return,
-                avg_er_change: item.avg_er_change,
-            })
-            .collect(),
-        layer_sample_groups,
-        market_value_summaries,
-    })
 }
 
 #[derive(Default)]
@@ -7602,7 +6961,7 @@ fn validate_backtest_strategy_expressions(source_path: &str) -> Result<(), Strin
         .flat_map(CachedRule::expression_programs)
         .collect::<Vec<_>>();
     let cyq_chen_keys = cyq_chen_runtime_key_names();
-    let injected_keys = BACKTEST_INJECTED_RUNTIME_KEYS
+    let injected_keys = (["ZHANG", "TOTAL_MV_YI"])
         .iter()
         .copied()
         .chain(cyq_chen_keys)
@@ -7612,7 +6971,7 @@ fn validate_backtest_strategy_expressions(source_path: &str) -> Result<(), Strin
         RuntimeKeyCollectOptions {
             always_keys: &[],
             injected_keys: &injected_keys,
-            aliases: &BACKTEST_RUNTIME_ALIASES,
+            aliases: &([]),
         },
     );
 
@@ -7677,7 +7036,151 @@ pub fn run_scene_layer_backtest(
     };
 
     // 当前入口固定全量；后续如需恢复单场景，仅需传入 Some(scene_name)。
-    run_scene_layer_backtest_core(&source_conn, &source_path, None, &params)
+    (|source_conn: &Connection,
+      source_path: &str,
+      scene_name: Option<&str>,
+      params: &SceneLayerBacktestRunParams|
+     -> Result<SceneLayerBacktestData, String> {
+        let layer_config = SceneLayerConfig {
+            min_samples_per_day: params.min_samples_per_day,
+            backtest_period: params.backtest_period,
+            min_listed_trade_days: params.min_listed_trade_days,
+        };
+
+        if let Some(scene_name) = scene_name {
+            let scene_name = scene_name.trim();
+            if scene_name.is_empty() {
+                return Err("scene_name不能为空".to_string());
+            }
+
+            let input = SceneLayerFromDbInput {
+                scene_name: scene_name.to_string(),
+                stock_adj_type: params.stock_adj_type.clone(),
+                index_ts_code: params.index_ts_code.clone(),
+                index_beta: params.index_beta,
+                concept_beta: params.concept_beta,
+                industry_beta: params.industry_beta,
+                start_date: params.start_date.clone(),
+                end_date: params.end_date.clone(),
+                layer_config,
+            };
+
+            let metrics = calc_scene_layer_metrics_from_db_with_ts_filter(
+                source_conn,
+                source_path,
+                &input,
+                params.allowed_ts_codes.as_ref(),
+            )?;
+
+            return Ok(SceneLayerBacktestData {
+                scene_name: input.scene_name,
+                stock_adj_type: input.stock_adj_type,
+                index_ts_code: input.index_ts_code,
+                index_beta: input.index_beta,
+                concept_beta: input.concept_beta,
+                industry_beta: input.industry_beta,
+                start_date: input.start_date,
+                end_date: input.end_date,
+                resolved_board: params.resolved_board.clone(),
+                exclude_st_board: params.exclude_st_board,
+                total_mv_min: params.total_mv_min,
+                total_mv_max: params.total_mv_max,
+                min_samples_per_scene_day: input.layer_config.min_samples_per_day,
+                min_listed_trade_days: input.layer_config.min_listed_trade_days,
+                backtest_period: input.layer_config.backtest_period,
+                points: metrics
+                    .points
+                    .into_iter()
+                    .map(|point| SceneLayerPointPayload {
+                        trade_date: point.trade_date,
+                        state_avg_residual_returns: point
+                            .state_avg_residual_returns
+                            .into_iter()
+                            .map(|(scene_state, avg_residual_return)| {
+                                SceneLayerStateAvgResidualReturn {
+                                    scene_state,
+                                    avg_residual_return: Some(avg_residual_return),
+                                }
+                            })
+                            .collect(),
+                        top_bottom_spread: point.top_bottom_spread,
+                        ic: point.ic,
+                    })
+                    .collect(),
+                spread_mean: metrics.spread_mean,
+                ic_mean: metrics.ic_mean,
+                ic_std: metrics.ic_std,
+                icir: metrics.icir,
+                ic_t_value: metrics.ic_t_value,
+                is_all_scenes: false,
+                all_scene_summaries: Vec::new(),
+            });
+        }
+
+        let scene_options = load_scene_options(source_path)?;
+        let all_metrics = calc_all_scene_layer_metrics_from_db_with_ts_filter(
+            source_conn,
+            source_path,
+            &scene_options,
+            &params.stock_adj_type,
+            &params.index_ts_code,
+            params.index_beta,
+            params.concept_beta,
+            params.industry_beta,
+            &params.start_date,
+            &params.end_date,
+            &layer_config,
+            params.allowed_ts_codes.as_ref(),
+        )?;
+        let mut all_scene_summaries = Vec::with_capacity(all_metrics.len());
+
+        for (one_scene_name, metrics) in all_metrics {
+            all_scene_summaries.push(SceneLayerSceneSummary {
+                scene_name: one_scene_name,
+                point_count: metrics.points.len(),
+                spread_mean: metrics.spread_mean,
+                ic_mean: metrics.ic_mean,
+                ic_std: metrics.ic_std,
+                icir: metrics.icir,
+                ic_t_value: metrics.ic_t_value,
+            });
+        }
+
+        all_scene_summaries.sort_by(|a, b| {
+            b.spread_mean
+                .unwrap_or(f64::NEG_INFINITY)
+                .partial_cmp(&a.spread_mean.unwrap_or(f64::NEG_INFINITY))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.point_count.cmp(&a.point_count))
+                .then_with(|| a.scene_name.cmp(&b.scene_name))
+        });
+
+        Ok(SceneLayerBacktestData {
+            scene_name: String::new(),
+            stock_adj_type: params.stock_adj_type.clone(),
+            index_ts_code: params.index_ts_code.clone(),
+            index_beta: params.index_beta,
+            concept_beta: params.concept_beta,
+            industry_beta: params.industry_beta,
+            start_date: params.start_date.clone(),
+            end_date: params.end_date.clone(),
+            resolved_board: params.resolved_board.clone(),
+            exclude_st_board: params.exclude_st_board,
+            total_mv_min: params.total_mv_min,
+            total_mv_max: params.total_mv_max,
+            min_samples_per_scene_day: params.min_samples_per_day,
+            min_listed_trade_days: params.min_listed_trade_days,
+            backtest_period: params.backtest_period,
+            points: Vec::new(),
+            spread_mean: None,
+            ic_mean: None,
+            ic_std: None,
+            icir: None,
+            ic_t_value: None,
+            is_all_scenes: true,
+            all_scene_summaries,
+        })
+    })(&source_conn, &source_path, None, &params)
 }
 
 pub fn run_rule_layer_backtest(
@@ -7740,7 +7243,275 @@ pub fn run_rule_layer_backtest(
     };
 
     // 当前入口固定全量；后续如需恢复单策略，仅需传入 Some(rule_name)。
-    run_rule_layer_backtest_core(&source_conn, &source_path, None, &params)
+    (|source_conn: &Connection,
+      source_path: &str,
+      rule_name: Option<&str>,
+      params: &RuleLayerBacktestRunParams|
+     -> Result<RuleLayerBacktestData, String> {
+        let layer_config = RuleLayerConfig {
+            min_samples_per_day: params.min_samples_per_day,
+            backtest_period: params.backtest_period,
+            min_listed_trade_days: params.min_listed_trade_days,
+        };
+
+        if let Some(rule_name) = rule_name {
+            let rule_name = rule_name.trim();
+            if rule_name.is_empty() {
+                return Err("rule_name不能为空".to_string());
+            }
+
+            let input = RuleLayerFromDbInput {
+                rule_name: rule_name.to_string(),
+                stock_adj_type: params.stock_adj_type.clone(),
+                index_ts_code: params.index_ts_code.clone(),
+                index_beta: params.index_beta,
+                concept_beta: params.concept_beta,
+                industry_beta: params.industry_beta,
+                start_date: params.start_date.clone(),
+                end_date: params.end_date.clone(),
+                layer_config,
+            };
+
+            let metrics = calc_rule_layer_metrics_from_db_with_ts_filter(
+                source_conn,
+                source_path,
+                &input,
+                params.allowed_ts_codes.as_ref(),
+            )?;
+            let decay_validations = build_rule_decay_validations(&metrics.points);
+
+            return Ok(RuleLayerBacktestData {
+                rule_name: input.rule_name,
+                stock_adj_type: input.stock_adj_type,
+                index_ts_code: input.index_ts_code,
+                index_beta: input.index_beta,
+                concept_beta: input.concept_beta,
+                industry_beta: input.industry_beta,
+                start_date: input.start_date,
+                end_date: input.end_date,
+                resolved_board: params.resolved_board.clone(),
+                exclude_st_board: params.exclude_st_board,
+                total_mv_min: params.total_mv_min,
+                total_mv_max: params.total_mv_max,
+                min_samples_per_rule_day: input.layer_config.min_samples_per_day,
+                min_listed_trade_days: input.layer_config.min_listed_trade_days,
+                backtest_period: input.layer_config.backtest_period,
+                points: metrics
+                    .points
+                    .into_iter()
+                    .map(|point| RuleLayerPointPayload {
+                        trade_date: point.trade_date,
+                        sample_count: point.sample_count,
+                        avg_rule_score: point.avg_rule_score,
+                        avg_residual_return: point.avg_residual_return,
+                        avg_excess_residual_return: point.avg_excess_residual_return,
+                        top_bottom_spread: None,
+                        ic: point.ic,
+                    })
+                    .collect(),
+                avg_residual_mean: metrics.avg_residual_mean,
+                avg_excess_residual_mean: metrics.avg_excess_residual_mean,
+                decay_validations,
+                avg_er_change: metrics.avg_er_change,
+                profit_loss_ratio: metrics.profit_loss_ratio,
+                spread_mean: None,
+                avg_contribution_score: None,
+                avg_contribution_per_trigger: None,
+                ic_mean: metrics.ic_mean,
+                ic_std: metrics.ic_std,
+                icir: metrics.icir,
+                ic_t_value: metrics.ic_t_value,
+                layer_count: None,
+                layer_method: None,
+                layer_method_label: None,
+                layer_summaries: Vec::new(),
+                is_all_rules: false,
+                all_rule_summaries: Vec::new(),
+                rule_validation_details: Vec::new(),
+            });
+        }
+
+        let (rule_options, rule_meta_map) = load_rule_meta(source_path)?;
+        let explain_map = rule_meta_map
+            .iter()
+            .map(|(rule_name, meta)| (rule_name.clone(), meta.explain.clone()))
+            .collect::<HashMap<_, _>>();
+        let has_rule_meta_match = rule_options
+            .iter()
+            .any(|rule_name| rule_meta_map.contains_key(rule_name));
+        let stock_meta_map = if has_rule_meta_match {
+            load_validation_sample_stock_meta_map(source_path)?
+        } else {
+            HashMap::new()
+        };
+        let similarity_cache = if has_rule_meta_match {
+            load_validation_similarity_cache_optional(
+                source_path,
+                &params.start_date,
+                &params.end_date,
+            )?
+        } else {
+            empty_validation_similarity_cache()
+        };
+        let contribution_averages = if params.allowed_ts_codes.is_some() {
+            // 股票范围过滤需要逐行计算贡献度；把原始行限制在这个作用域内，确保在
+            // 进入策略并发前释放，避免与运行时缓存及每策略校验数据同时常驻。
+            let (summary_rows, detail_rows) =
+                (|source_path: &str,
+                  start_date: &str,
+                  end_date: &str,
+                  allowed_ts_codes: Option<&HashSet<String>>|
+                 -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>), String> {
+                    let result_conn = open_result_conn(source_path)?;
+                    let summaries = load_score_summary_rows_from_db(
+                        source_path,
+                        start_date,
+                        end_date,
+                        allowed_ts_codes,
+                    )?;
+
+                    let mut detail_stmt = result_conn
+                        .prepare(
+                            r#"
+            SELECT ts_code, trade_date, rule_name, TRY_CAST(rule_score AS DOUBLE)
+            FROM rule_details
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
+            ORDER BY trade_date ASC, rule_name ASC, ts_code ASC
+            "#,
+                        )
+                        .map_err(|e| format!("预编译策略回测规则原始行失败: {e}"))?;
+                    let mut detail_rows = detail_stmt
+                        .query(params![start_date, end_date])
+                        .map_err(|e| format!("查询策略回测规则原始行失败: {e}"))?;
+                    let mut details = Vec::new();
+                    while let Some(row) = detail_rows
+                        .next()
+                        .map_err(|e| format!("读取策略回测规则原始行失败: {e}"))?
+                    {
+                        let rule_score: f64 =
+                            row.get(3).map_err(|e| format!("读取规则分数失败: {e}"))?;
+                        let item = ScoreDetails {
+                            ts_code: row.get(0).map_err(|e| format!("读取规则代码失败: {e}"))?,
+                            trade_date: row.get(1).map_err(|e| format!("读取规则日期失败: {e}"))?,
+                            rule_name: row.get(2).map_err(|e| format!("读取规则名称失败: {e}"))?,
+                            rule_score,
+                        };
+                        if rule_score.is_finite()
+                            && ts_code_allowed_by_filter(allowed_ts_codes, &item.ts_code)
+                        {
+                            details.push(item);
+                        }
+                    }
+
+                    Ok((summaries, details))
+                })(
+                    source_path,
+                    &params.start_date,
+                    &params.end_date,
+                    params.allowed_ts_codes.as_ref(),
+                )?;
+            build_rule_contribution_averages_from_rows(
+                &summary_rows,
+                &detail_rows,
+                &params.start_date,
+                &params.end_date,
+            )
+        } else {
+            build_rule_contribution_averages(
+                source_path,
+                &rule_options,
+                &params.start_date,
+                &params.end_date,
+            )?
+        };
+        let summary_detail_items =
+            calc_all_rule_layer_metrics_with_validation_from_db_map_with_ts_filter(
+                source_conn,
+                source_path,
+                &rule_options,
+                &params.stock_adj_type,
+                &params.index_ts_code,
+                params.index_beta,
+                params.concept_beta,
+                params.industry_beta,
+                &params.start_date,
+                &params.end_date,
+                &layer_config,
+                params.allowed_ts_codes.as_ref(),
+                params.parallel_batch_size,
+                |one_rule_name, validation| {
+                    Ok(build_one_rule_backtest_summary_and_detail(
+                        one_rule_name,
+                        validation,
+                        &rule_meta_map,
+                        &contribution_averages,
+                        &explain_map,
+                        params,
+                        &similarity_cache,
+                        &stock_meta_map,
+                    ))
+                },
+            );
+        let (all_rule_summaries, rule_validation_details) =
+            split_and_sort_rule_backtest_summaries_and_details(summary_detail_items?);
+        let decay_validations = build_all_rule_decay_validations(&all_rule_summaries);
+
+        let (
+            avg_residual_mean,
+            avg_excess_residual_mean,
+            avg_er_change,
+            profit_loss_ratio,
+            _spread_mean,
+            ic_mean,
+            ic_std,
+            icir,
+            ic_t_value,
+        ) = aggregate_all_rule_summary_metrics(&all_rule_summaries);
+        Ok(RuleLayerBacktestData {
+            rule_name: String::new(),
+            stock_adj_type: params.stock_adj_type.clone(),
+            index_ts_code: params.index_ts_code.clone(),
+            index_beta: params.index_beta,
+            concept_beta: params.concept_beta,
+            industry_beta: params.industry_beta,
+            start_date: params.start_date.clone(),
+            end_date: params.end_date.clone(),
+            resolved_board: params.resolved_board.clone(),
+            exclude_st_board: params.exclude_st_board,
+            total_mv_min: params.total_mv_min,
+            total_mv_max: params.total_mv_max,
+            min_samples_per_rule_day: params.min_samples_per_day,
+            min_listed_trade_days: params.min_listed_trade_days,
+            backtest_period: params.backtest_period,
+            points: Vec::new(),
+            avg_residual_mean,
+            avg_excess_residual_mean,
+            decay_validations,
+            avg_er_change,
+            profit_loss_ratio,
+            spread_mean: None,
+            avg_contribution_score: weighted_rule_summary_metric(&all_rule_summaries, |item| {
+                item.avg_contribution_score
+            }),
+            avg_contribution_per_trigger: weighted_rule_summary_metric(
+                &all_rule_summaries,
+                |item| item.avg_contribution_per_trigger,
+            ),
+            ic_mean,
+            ic_std,
+            icir,
+            ic_t_value,
+            layer_count: None,
+            layer_method: None,
+            layer_method_label: None,
+            layer_summaries: Vec::new(),
+            is_all_rules: true,
+            all_rule_summaries,
+            rule_validation_details,
+        })
+    })(&source_conn, &source_path, None, &params)
 }
 
 pub fn run_rank_layer_backtest(
@@ -7795,7 +7566,96 @@ pub fn run_rank_layer_backtest(
         allowed_ts_codes,
     };
 
-    run_rank_layer_backtest_core(&source_conn, &source_path, &params)
+    (|source_conn: &Connection,
+      source_path: &str,
+      params: &RankLayerBacktestRunParams|
+     -> Result<RankLayerBacktestData, String> {
+        let layer_config = RankLayerConfig {
+            min_samples_per_day: params.min_samples_per_day,
+            backtest_period: params.backtest_period,
+            min_listed_trade_days: params.min_listed_trade_days,
+            layer_count: params.layer_count,
+            layer_method: params.layer_method,
+        };
+        let input = RankLayerFromDbInput {
+            stock_adj_type: params.stock_adj_type.clone(),
+            index_ts_code: params.index_ts_code.clone(),
+            index_beta: params.index_beta,
+            concept_beta: params.concept_beta,
+            industry_beta: params.industry_beta,
+            start_date: params.start_date.clone(),
+            end_date: params.end_date.clone(),
+            layer_config,
+        };
+        let summary_rows = load_score_summary_rows_from_db(
+            source_path,
+            &params.start_date,
+            &params.end_date,
+            params.allowed_ts_codes.as_ref(),
+        )?;
+        let metrics = calc_rank_layer_metrics_from_score_rows(
+            source_conn,
+            source_path,
+            &input,
+            &summary_rows,
+        )?;
+        let market_value_summaries = build_rank_market_value_summaries(
+            source_path,
+            &input,
+            &summary_rows,
+            &metrics.layer_samples,
+        )?;
+        let stock_meta_map = load_validation_sample_stock_meta_map(source_path)?;
+        let layer_sample_groups = build_rank_layer_sample_groups(
+            &metrics.layer_samples,
+            input.layer_config.layer_count,
+            &stock_meta_map,
+        );
+        Ok(RankLayerBacktestData {
+            stock_adj_type: input.stock_adj_type,
+            index_ts_code: input.index_ts_code,
+            index_beta: input.index_beta,
+            concept_beta: input.concept_beta,
+            industry_beta: input.industry_beta,
+            start_date: input.start_date,
+            end_date: input.end_date,
+            resolved_board: params.resolved_board.clone(),
+            exclude_st_board: params.exclude_st_board,
+            market_value_grouping: true,
+            min_samples_per_rank_day: input.layer_config.effective_min_samples_per_day(),
+            min_listed_trade_days: input.layer_config.min_listed_trade_days,
+            backtest_period: input.layer_config.backtest_period,
+            layer_count: input.layer_config.layer_count,
+            layer_method: input.layer_config.layer_method.as_str().to_string(),
+            layer_method_label: rank_layer_method_label(input.layer_config.layer_method)
+                .to_string(),
+            point_count: metrics.point_count,
+            sample_count: metrics.sample_count,
+            avg_er_change: metrics.avg_er_change,
+            spread_mean: metrics.spread_mean,
+            ic_mean: metrics.ic_mean,
+            ic_std: metrics.ic_std,
+            icir: metrics.icir,
+            ic_t_value: metrics.ic_t_value,
+            top_k_summaries: rank_top_k_summary_data(metrics.top_k_summaries),
+            top_k_period_summaries: rank_top_k_period_summary_data(metrics.top_k_period_summaries),
+            layer_summaries: metrics
+                .layers
+                .into_iter()
+                .map(|item| RankLayerBucketSummary {
+                    layer_index: item.layer_index,
+                    layer_label: rank_layer_label(item.layer_index, input.layer_config.layer_count),
+                    point_count: item.point_count,
+                    sample_count: item.sample_count,
+                    avg_score: item.avg_score,
+                    avg_residual_return: item.avg_residual_return,
+                    avg_er_change: item.avg_er_change,
+                })
+                .collect(),
+            layer_sample_groups,
+            market_value_summaries,
+        })
+    })(&source_conn, &source_path, &params)
 }
 
 pub fn run_transient_scene_layer_backtest(
@@ -7865,7 +7725,16 @@ pub fn run_transient_scene_layer_backtest(
         &params.end_date,
         ScoringMemoryMode::SceneOnly,
     )?;
-    let scene_rows = filter_scene_detail_rows_by_ts_codes(
+    let scene_rows = (|rows: Vec<SceneBacktestRow>,
+                       allowed_ts_codes: Option<&HashSet<String>>|
+     -> Vec<SceneBacktestRow> {
+        if allowed_ts_codes.is_none() {
+            return rows;
+        }
+        rows.into_iter()
+            .filter(|row| ts_code_allowed_by_filter(allowed_ts_codes, &row.ts_code))
+            .collect()
+    })(
         score_batch.scene_backtest_rows,
         params.allowed_ts_codes.as_ref(),
     );
@@ -8007,10 +7876,16 @@ pub fn run_transient_rule_layer_backtest(
         score_batch.summary_rows,
         params.allowed_ts_codes.as_ref(),
     );
-    let detail_rows = filter_score_detail_rows_by_ts_codes(
-        score_batch.detail_rows,
-        params.allowed_ts_codes.as_ref(),
-    );
+    let detail_rows = (|rows: Vec<ScoreDetails>,
+                        allowed_ts_codes: Option<&HashSet<String>>|
+     -> Vec<ScoreDetails> {
+        if allowed_ts_codes.is_none() {
+            return rows;
+        }
+        rows.into_iter()
+            .filter(|row| ts_code_allowed_by_filter(allowed_ts_codes, &row.ts_code))
+            .collect()
+    })(score_batch.detail_rows, params.allowed_ts_codes.as_ref());
     let (rule_options, rule_meta_map) = load_rule_meta(&source_path)?;
     let explain_map = rule_meta_map
         .iter()
@@ -8829,42 +8704,6 @@ explain = "test"
         }
     }
 
-    fn prepare_validation_result_rank_rows(source_dir: &str) {
-        let result_conn = Connection::open(result_db_path(source_dir)).expect("open result db");
-        result_conn
-            .execute(
-                r#"
-                CREATE TABLE score_summary (
-                    ts_code VARCHAR,
-                    trade_date VARCHAR,
-                    total_score DOUBLE,
-                    rank BIGINT
-                )
-                "#,
-                [],
-            )
-            .expect("create score_summary");
-        result_conn
-            .execute(
-                "INSERT INTO score_summary VALUES (?, ?, ?, ?), (?, ?, ?, ?), (?, ?, ?, ?)",
-                params![
-                    "000001.SZ",
-                    "20240102",
-                    80.0_f64,
-                    3_i64,
-                    "000001.SZ",
-                    "20240103",
-                    90.0_f64,
-                    2_i64,
-                    "000001.SZ",
-                    "20240104",
-                    100.0_f64,
-                    1_i64,
-                ],
-            )
-            .expect("insert rank rows");
-    }
-
     #[test]
     fn validation_triggered_scores_cover_full_analysis_window() {
         let source_dir = temp_source_dir();
@@ -8913,7 +8752,41 @@ explain = "test"
         let source_dir = temp_source_dir();
         let source_dir_str = source_dir.to_str().expect("utf8 source dir");
         prepare_validation_source_files(source_dir_str);
-        prepare_validation_result_rank_rows(source_dir_str);
+        (|source_dir: &str| {
+            let result_conn = Connection::open(result_db_path(source_dir)).expect("open result db");
+            result_conn
+                .execute(
+                    r#"
+                CREATE TABLE score_summary (
+                    ts_code VARCHAR,
+                    trade_date VARCHAR,
+                    total_score DOUBLE,
+                    rank BIGINT
+                )
+                "#,
+                    [],
+                )
+                .expect("create score_summary");
+            result_conn
+                .execute(
+                    "INSERT INTO score_summary VALUES (?, ?, ?, ?), (?, ?, ?, ?), (?, ?, ?, ?)",
+                    params![
+                        "000001.SZ",
+                        "20240102",
+                        80.0_f64,
+                        3_i64,
+                        "000001.SZ",
+                        "20240103",
+                        90.0_f64,
+                        2_i64,
+                        "000001.SZ",
+                        "20240104",
+                        100.0_f64,
+                        1_i64,
+                    ],
+                )
+                .expect("insert rank rows");
+        })(source_dir_str);
 
         let cached_rule = build_validation_cached_rule(
             "validation_rank_rule".to_string(),

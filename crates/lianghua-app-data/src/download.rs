@@ -52,9 +52,6 @@ use lianghua_download::download::{
     },
 };
 
-const STOCK_DATA_INDICATOR_REBUILD_GROUP_SIZE: usize = 256;
-const STOCK_DATA_INDICATOR_REBUILD_QUEUE_BOUND: usize = 16;
-
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DataDownloadDbRange {
@@ -276,13 +273,6 @@ struct IndicatorManageFileItem {
     prec: usize,
 }
 
-const DEFAULT_J_INDICATOR_EXPR: &str = r#"RSV1 := RSV(C, H, L, 9);
-K1 := SMA(RSV1, 3, 1);
-D1 := SMA(K1, 3, 1);
-3 * K1 - 2 * D1;"#;
-const DEFAULT_ER_INDICATOR_EXPR: &str = r#"N := 20;
-(C - REF(C, N)) / SUM(ABS(C - REF(C, 1)), N);"#;
-
 #[derive(Clone)]
 pub struct PreparedDataDownloadRun {
     pub source_path: String,
@@ -461,13 +451,6 @@ fn emit_nested_data_download_progress(
     }
 }
 
-fn normalize_chip_model(raw: Option<&str>) -> String {
-    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-        Some("chen") | Some("new") => "chen".to_string(),
-        _ => "legacy".to_string(),
-    }
-}
-
 fn emit_chip_maintenance_progress(
     progress_cb: Option<&DownloadProgressCallback<'_>>,
     mut progress: DownloadProgress,
@@ -512,197 +495,6 @@ fn merge_chip_repair_into_incremental_progress(
     progress
 }
 
-fn maintain_chip_after_incremental_download(
-    source_path: &str,
-    chip_model: &str,
-    recovered_stock_codes: &[String],
-    allow_cyq_chen_strategy_rebuild: bool,
-    progress_cb: Option<&DownloadProgressCallback<'_>>,
-) -> Result<Option<String>, String> {
-    let chip_progress_cb = |progress: DownloadProgress| {
-        emit_chip_maintenance_progress(progress_cb, progress);
-    };
-
-    match chip_model {
-        "chen" => {
-            let maintenance_status = query_cyq_chen_strategy_maintenance_status(source_path)?;
-            if maintenance_status.strategy_changed && !allow_cyq_chen_strategy_rebuild {
-                return Ok(Some(
-                    "检测到筹码策略已变化，已按确认选择跳过新筹码全量维护。".to_string(),
-                ));
-            }
-            let merge_repair_progress =
-                !maintenance_status.strategy_changed && !recovered_stock_codes.is_empty();
-            let repair_progress_cb = |progress: DownloadProgress| {
-                if merge_repair_progress && progress.total > 0 {
-                    emit_chip_maintenance_progress(
-                        progress_cb,
-                        hide_chip_repair_local_counter(progress),
-                    );
-                } else {
-                    emit_chip_maintenance_progress(progress_cb, progress);
-                }
-            };
-            let repair_summary = if recovered_stock_codes.is_empty() {
-                None
-            } else {
-                repair_cyq_chen_stocks_if_db_exists(
-                    source_path,
-                    recovered_stock_codes,
-                    allow_cyq_chen_strategy_rebuild,
-                    Some(&repair_progress_cb),
-                )?
-            };
-            let repaired_stock_count = if repair_summary.is_some() && merge_repair_progress {
-                // These are the successfully recovered market-data stocks passed into the
-                // chip repair. Use the stable task count instead of deriving it from callback
-                // timing, otherwise the following incremental phase can briefly report 1/14
-                // for a 15-stock combined job.
-                recovered_stock_codes.len()
-            } else {
-                0
-            };
-            let incremental_progress_cb = |progress: DownloadProgress| {
-                emit_chip_maintenance_progress(
-                    progress_cb,
-                    merge_chip_repair_into_incremental_progress(progress, repaired_stock_count),
-                );
-            };
-            let incremental_summary = if maintenance_status.strategy_changed
-                && allow_cyq_chen_strategy_rebuild
-                && repair_summary.is_some()
-            {
-                None
-            } else {
-                maintain_cyq_chen_incremental_if_db_exists(
-                    source_path,
-                    allow_cyq_chen_strategy_rebuild,
-                    Some(&incremental_progress_cb),
-                )?
-            };
-            let snapshot_rows = repair_summary
-                .as_ref()
-                .map(|summary| summary.snapshot_rows)
-                .unwrap_or(0)
-                + incremental_summary
-                    .as_ref()
-                    .map(|summary| summary.snapshot_rows)
-                    .unwrap_or(0);
-            let bin_rows = repair_summary
-                .as_ref()
-                .map(|summary| summary.bin_rows)
-                .unwrap_or(0)
-                + incremental_summary
-                    .as_ref()
-                    .map(|summary| summary.bin_rows)
-                    .unwrap_or(0);
-            let start_date = repair_summary
-                .as_ref()
-                .and_then(|summary| summary.start_date.as_deref())
-                .or_else(|| {
-                    incremental_summary
-                        .as_ref()
-                        .and_then(|summary| summary.start_date.as_deref())
-                });
-            let end_date = incremental_summary
-                .as_ref()
-                .and_then(|summary| summary.end_date.as_deref())
-                .or_else(|| {
-                    repair_summary
-                        .as_ref()
-                        .and_then(|summary| summary.end_date.as_deref())
-                });
-            Ok(Some(
-                if repair_summary.is_none() && incremental_summary.is_none() {
-                    "未发现新筹码库 cyq_chen.db，已跳过筹码数据维护。".to_string()
-                } else if snapshot_rows > 0 || bin_rows > 0 {
-                    let mode = if recovered_stock_codes.is_empty() {
-                        "增量"
-                    } else if maintenance_status.strategy_changed {
-                        "全量"
-                    } else {
-                        "局部+增量"
-                    };
-                    format!(
-                        "新筹码{}维护完成，区间 {} 至 {}，写入 {} 条摘要和 {} 条分桶。",
-                        mode,
-                        start_date.unwrap_or("--"),
-                        end_date.unwrap_or("--"),
-                        snapshot_rows,
-                        bin_rows
-                    )
-                } else {
-                    "新筹码库已存在，但当前没有需要补算的筹码数据。".to_string()
-                },
-            ))
-        }
-        _ => {
-            let repair_summary = if recovered_stock_codes.is_empty() {
-                None
-            } else {
-                repair_cyq_stocks_if_db_exists(
-                    source_path,
-                    recovered_stock_codes,
-                    Some(&chip_progress_cb),
-                )?
-            };
-            let incremental_summary = maintain_cyq_incremental_if_db_exists(source_path)?;
-            let snapshot_rows = repair_summary
-                .as_ref()
-                .map(|summary| summary.snapshot_rows)
-                .unwrap_or(0)
-                + incremental_summary
-                    .as_ref()
-                    .map(|summary| summary.snapshot_rows)
-                    .unwrap_or(0);
-            let bin_rows = repair_summary
-                .as_ref()
-                .map(|summary| summary.bin_rows)
-                .unwrap_or(0)
-                + incremental_summary
-                    .as_ref()
-                    .map(|summary| summary.bin_rows)
-                    .unwrap_or(0);
-            let start_date = repair_summary
-                .as_ref()
-                .and_then(|summary| summary.start_date.as_deref())
-                .or_else(|| {
-                    incremental_summary
-                        .as_ref()
-                        .and_then(|summary| summary.start_date.as_deref())
-                });
-            let end_date = incremental_summary
-                .as_ref()
-                .and_then(|summary| summary.end_date.as_deref())
-                .or_else(|| {
-                    repair_summary
-                        .as_ref()
-                        .and_then(|summary| summary.end_date.as_deref())
-                });
-            Ok(Some(
-                if repair_summary.is_none() && incremental_summary.is_none() {
-                    "未发现筹码库 cyq.db，已跳过筹码数据维护。".to_string()
-                } else if snapshot_rows > 0 || bin_rows > 0 {
-                    format!(
-                        "筹码{}维护完成，区间 {} 至 {}，写入 {} 条摘要和 {} 条分桶。",
-                        if recovered_stock_codes.is_empty() {
-                            "增量"
-                        } else {
-                            "局部+增量"
-                        },
-                        start_date.unwrap_or("--"),
-                        end_date.unwrap_or("--"),
-                        snapshot_rows,
-                        bin_rows
-                    )
-                } else {
-                    "筹码库已存在，但当前没有需要补算的筹码数据。".to_string()
-                },
-            ))
-        }
-    }
-}
-
 fn with_transaction<T, F>(conn: &Connection, action: F) -> Result<T, String>
 where
     F: FnOnce(&Connection) -> Result<T, String>,
@@ -735,16 +527,6 @@ fn open_source_db_conn(source_path: &str) -> Result<Connection, String> {
         .to_str()
         .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
     Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))
-}
-
-fn parse_stock_data_adj_type(raw: &str) -> Result<AdjType, String> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "qfq" => Ok(AdjType::Qfq),
-        "hfq" => Ok(AdjType::Hfq),
-        "raw" => Ok(AdjType::Raw),
-        "ind" => Ok(AdjType::Ind),
-        _ => Err(format!("不支持的adj_type: {raw}")),
-    }
 }
 
 fn list_stock_data_indicator_work_items(
@@ -820,7 +602,15 @@ fn compute_stock_data_indicator_rebuild_batch(
 
         let trade_dates = row_data.trade_dates.clone();
         let indicators = calc_inds_with_cache(inds_cache, row_data)?;
-        let adj_type = parse_stock_data_adj_type(item.adj_type.as_str())?;
+        let adj_type = (|raw: &str| -> Result<AdjType, String> {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "qfq" => Ok(AdjType::Qfq),
+                "hfq" => Ok(AdjType::Hfq),
+                "raw" => Ok(AdjType::Raw),
+                "ind" => Ok(AdjType::Ind),
+                _ => Err(format!("不支持的adj_type: {raw}")),
+            }
+        })(item.adj_type.as_str())?;
 
         sender
             .send(StockDataIndicatorRebuildMessage::Batch(
@@ -1025,31 +815,6 @@ fn query_stock_data_adj_type_range(
     })
 }
 
-fn query_trade_calendar_status(source_path: &str) -> Result<DataDownloadFileStatus, String> {
-    let file_path = trade_calendar_path(source_path);
-    if !file_path.exists() {
-        return Ok(DataDownloadFileStatus {
-            file_name: "trade_calendar.csv".to_string(),
-            exists: false,
-            row_count: 0,
-            min_trade_date: None,
-            max_trade_date: None,
-        });
-    }
-
-    let trade_dates = load_trade_date_list(source_path)?;
-    let min_trade_date = trade_dates.first().cloned();
-    let max_trade_date = trade_dates.last().cloned();
-
-    Ok(DataDownloadFileStatus {
-        file_name: "trade_calendar.csv".to_string(),
-        exists: true,
-        row_count: trade_dates.len() as u64,
-        min_trade_date,
-        max_trade_date,
-    })
-}
-
 fn query_dragon_tiger_db_status(source_path: &str) -> Result<DragonTigerDbStatus, String> {
     let db_path = dragon_tiger_db_path(source_path);
     if !db_path.exists() {
@@ -1098,138 +863,6 @@ fn query_dragon_tiger_db_status(source_path: &str) -> Result<DragonTigerDbStatus
     })
 }
 
-fn query_stock_list_status(source_path: &str) -> Result<DataDownloadFileStatus, String> {
-    let file_path = stock_list_path(source_path);
-    if !file_path.exists() {
-        return Ok(DataDownloadFileStatus {
-            file_name: "stock_list.csv".to_string(),
-            exists: false,
-            row_count: 0,
-            min_trade_date: None,
-            max_trade_date: None,
-        });
-    }
-
-    let rows = load_stock_list(source_path)?;
-    let mut min_trade_date: Option<String> = None;
-    let mut max_trade_date: Option<String> = None;
-
-    for cols in &rows {
-        let Some(trade_date) = cols.get(6).map(|value| value.trim()) else {
-            continue;
-        };
-        if trade_date.is_empty() {
-            continue;
-        }
-
-        match min_trade_date.as_deref() {
-            Some(current) if current <= trade_date => {}
-            _ => min_trade_date = Some(trade_date.to_string()),
-        }
-        match max_trade_date.as_deref() {
-            Some(current) if current >= trade_date => {}
-            _ => max_trade_date = Some(trade_date.to_string()),
-        }
-    }
-
-    Ok(DataDownloadFileStatus {
-        file_name: "stock_list.csv".to_string(),
-        exists: true,
-        row_count: rows.len() as u64,
-        min_trade_date,
-        max_trade_date,
-    })
-}
-
-fn query_ths_concepts_status(source_path: &str) -> Result<DataDownloadFileStatus, String> {
-    let file_path = ths_concepts_path(source_path);
-    if !file_path.exists() {
-        return Ok(DataDownloadFileStatus {
-            file_name: "stock_concepts.csv".to_string(),
-            exists: false,
-            row_count: 0,
-            min_trade_date: None,
-            max_trade_date: None,
-        });
-    }
-
-    let rows = load_ths_concepts_list(source_path)?;
-    Ok(DataDownloadFileStatus {
-        file_name: "stock_concepts.csv".to_string(),
-        exists: true,
-        row_count: rows.len() as u64,
-        min_trade_date: None,
-        max_trade_date: None,
-    })
-}
-
-fn plan_download_action(source_db: &DataDownloadDbRange) -> (String, String, String) {
-    match source_db.max_trade_date.as_deref() {
-        Some(max_trade_date) if source_db.row_count > 0 => (
-            "incremental-download".to_string(),
-            "增量更新下载".to_string(),
-            format!(
-                "将先刷新交易日历和股票列表，再从当前原始库最新日期 {} 之后继续补齐行情与指标。",
-                max_trade_date
-            ),
-        ),
-        _ => (
-            "first-download".to_string(),
-            "首次全量下载".to_string(),
-            "将先刷新交易日历和股票列表，再下载全市场历史行情与指标，并初始化原始库。".to_string(),
-        ),
-    }
-}
-
-fn query_existing_stock_codes(source_path: &str) -> Result<HashSet<String>, String> {
-    let db_path = source_db_path(source_path);
-    if !db_path.exists() {
-        return Ok(HashSet::new());
-    }
-
-    let db_path_str = db_path
-        .to_str()
-        .ok_or_else(|| "stock_data.db 路径不是有效 UTF-8".to_string())?;
-    let conn =
-        Connection::open(db_path_str).map_err(|e| format!("打开 stock_data.db 失败: {e}"))?;
-    let table_exists = conn
-        .query_row(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
-            ["stock_data"],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|e| format!("检查 stock_data 表结构失败: {e}"))?;
-    if table_exists <= 0 {
-        return Ok(HashSet::new());
-    }
-
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT DISTINCT ts_code
-            FROM stock_data
-            WHERE adj_type = ? AND ts_code IS NOT NULL AND TRIM(ts_code) <> ''
-            "#,
-        )
-        .map_err(|e| format!("预编译现有股票代码查询失败: {e}"))?;
-    let mut rows = stmt
-        .query(["qfq"])
-        .map_err(|e| format!("查询现有股票代码失败: {e}"))?;
-
-    let mut out = HashSet::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取现有股票代码失败: {e}"))?
-    {
-        let ts_code: String = row.get(0).map_err(|e| format!("读取 ts_code 失败: {e}"))?;
-        if !ts_code.trim().is_empty() {
-            out.insert(ts_code);
-        }
-    }
-
-    Ok(out)
-}
-
 fn scan_missing_stock_codes(
     source_path: &str,
     source_db: &DataDownloadDbRange,
@@ -1269,7 +902,54 @@ fn scan_missing_stock_codes(
         .filter_map(|row| row.first().cloned())
         .filter(|value| !value.trim().is_empty())
         .collect();
-    let existing_codes = query_existing_stock_codes(source_path)?;
+    let existing_codes = (|source_path: &str| -> Result<HashSet<String>, String> {
+        let db_path = source_db_path(source_path);
+        if !db_path.exists() {
+            return Ok(HashSet::new());
+        }
+
+        let db_path_str = db_path
+            .to_str()
+            .ok_or_else(|| "stock_data.db 路径不是有效 UTF-8".to_string())?;
+        let conn =
+            Connection::open(db_path_str).map_err(|e| format!("打开 stock_data.db 失败: {e}"))?;
+        let table_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+                ["stock_data"],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| format!("检查 stock_data 表结构失败: {e}"))?;
+        if table_exists <= 0 {
+            return Ok(HashSet::new());
+        }
+
+        let mut stmt = conn
+            .prepare(
+                r#"
+            SELECT DISTINCT ts_code
+            FROM stock_data
+            WHERE adj_type = ? AND ts_code IS NOT NULL AND TRIM(ts_code) <> ''
+            "#,
+            )
+            .map_err(|e| format!("预编译现有股票代码查询失败: {e}"))?;
+        let mut rows = stmt
+            .query(["qfq"])
+            .map_err(|e| format!("查询现有股票代码失败: {e}"))?;
+
+        let mut out = HashSet::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取现有股票代码失败: {e}"))?
+        {
+            let ts_code: String = row.get(0).map_err(|e| format!("读取 ts_code 失败: {e}"))?;
+            if !ts_code.trim().is_empty() {
+                out.insert(ts_code);
+            }
+        }
+
+        Ok(out)
+    })(source_path)?;
 
     let mut missing_codes: Vec<String> = list_codes
         .into_iter()
@@ -1315,16 +995,6 @@ fn build_data_download_summary(summary: DownloadSummary) -> DataDownloadSummary 
     }
 }
 
-fn normalize_completion_detail(message: impl Into<String>) -> Option<String> {
-    let message = message.into();
-    let message = message.trim().trim_end_matches('。').trim();
-    if message.is_empty() {
-        None
-    } else {
-        Some(message.to_string())
-    }
-}
-
 fn concept_performance_completion_detail(rows: usize) -> Option<String> {
     if rows > 0 {
         Some(format!("概念表现写入 {rows} 行"))
@@ -1347,9 +1017,93 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
         "concept_performance",
     )?;
     let dragon_tiger_db = query_dragon_tiger_db_status(trimmed)?;
-    let trade_calendar = query_trade_calendar_status(trimmed)?;
-    let stock_list = query_stock_list_status(trimmed)?;
-    let ths_concepts = query_ths_concepts_status(trimmed)?;
+    let trade_calendar = (|source_path: &str| -> Result<DataDownloadFileStatus, String> {
+        let file_path = trade_calendar_path(source_path);
+        if !file_path.exists() {
+            return Ok(DataDownloadFileStatus {
+                file_name: "trade_calendar.csv".to_string(),
+                exists: false,
+                row_count: 0,
+                min_trade_date: None,
+                max_trade_date: None,
+            });
+        }
+
+        let trade_dates = load_trade_date_list(source_path)?;
+        let min_trade_date = trade_dates.first().cloned();
+        let max_trade_date = trade_dates.last().cloned();
+
+        Ok(DataDownloadFileStatus {
+            file_name: "trade_calendar.csv".to_string(),
+            exists: true,
+            row_count: trade_dates.len() as u64,
+            min_trade_date,
+            max_trade_date,
+        })
+    })(trimmed)?;
+    let stock_list = (|source_path: &str| -> Result<DataDownloadFileStatus, String> {
+        let file_path = stock_list_path(source_path);
+        if !file_path.exists() {
+            return Ok(DataDownloadFileStatus {
+                file_name: "stock_list.csv".to_string(),
+                exists: false,
+                row_count: 0,
+                min_trade_date: None,
+                max_trade_date: None,
+            });
+        }
+
+        let rows = load_stock_list(source_path)?;
+        let mut min_trade_date: Option<String> = None;
+        let mut max_trade_date: Option<String> = None;
+
+        for cols in &rows {
+            let Some(trade_date) = cols.get(6).map(|value| value.trim()) else {
+                continue;
+            };
+            if trade_date.is_empty() {
+                continue;
+            }
+
+            match min_trade_date.as_deref() {
+                Some(current) if current <= trade_date => {}
+                _ => min_trade_date = Some(trade_date.to_string()),
+            }
+            match max_trade_date.as_deref() {
+                Some(current) if current >= trade_date => {}
+                _ => max_trade_date = Some(trade_date.to_string()),
+            }
+        }
+
+        Ok(DataDownloadFileStatus {
+            file_name: "stock_list.csv".to_string(),
+            exists: true,
+            row_count: rows.len() as u64,
+            min_trade_date,
+            max_trade_date,
+        })
+    })(trimmed)?;
+    let ths_concepts = (|source_path: &str| -> Result<DataDownloadFileStatus, String> {
+        let file_path = ths_concepts_path(source_path);
+        if !file_path.exists() {
+            return Ok(DataDownloadFileStatus {
+                file_name: "stock_concepts.csv".to_string(),
+                exists: false,
+                row_count: 0,
+                min_trade_date: None,
+                max_trade_date: None,
+            });
+        }
+
+        let rows = load_ths_concepts_list(source_path)?;
+        Ok(DataDownloadFileStatus {
+            file_name: "stock_concepts.csv".to_string(),
+            exists: true,
+            row_count: rows.len() as u64,
+            min_trade_date: None,
+            max_trade_date: None,
+        })
+    })(trimmed)?;
     let (_, missing_stock_repair) =
         scan_missing_stock_codes(trimmed, &source_db, &stock_list, &trade_calendar)?;
     let cyq_chen_maintenance =
@@ -1362,7 +1116,24 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
             }
         })?;
     let (planned_action, planned_action_label, planned_action_detail) =
-        plan_download_action(&source_db);
+        (|source_db: &DataDownloadDbRange| -> (String, String, String) {
+            match source_db.max_trade_date.as_deref() {
+                Some(max_trade_date) if source_db.row_count > 0 => (
+                    "incremental-download".to_string(),
+                    "增量更新下载".to_string(),
+                    format!(
+                        "将先刷新交易日历和股票列表，再从当前原始库最新日期 {} 之后继续补齐行情与指标。",
+                        max_trade_date
+                    ),
+                ),
+                _ => (
+                    "first-download".to_string(),
+                    "首次全量下载".to_string(),
+                    "将先刷新交易日历和股票列表，再下载全市场历史行情与指标，并初始化原始库。"
+                        .to_string(),
+                ),
+            }
+        })(&source_db);
     let now = Local::now();
     let today = now.format("%Y%m%d").to_string();
     let current_hhmm = now.hour() * 100 + now.minute();
@@ -1471,7 +1242,12 @@ pub fn prepare_data_download_run(
         include_turnover: input.include_turnover,
         allow_stale_stock_list: input.allow_stale_stock_list,
         allow_cyq_chen_strategy_rebuild: input.allow_cyq_chen_strategy_rebuild,
-        chip_model: normalize_chip_model(input.chip_model.as_deref()),
+        chip_model: (|raw: Option<&str>| -> String {
+            match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+                Some("chen") | Some("new") => "chen".to_string(),
+                _ => "legacy".to_string(),
+            }
+        })(input.chip_model.as_deref()),
         action: status.planned_action,
         action_label: status.planned_action_label,
     })
@@ -1715,17 +1491,216 @@ pub fn run_prepared_data_download(
                 },
             });
         }
-        let chip_message = maintain_chip_after_incremental_download(
+        let chip_message = (|source_path: &str,
+                             chip_model: &str,
+                             recovered_stock_codes: &[String],
+                             allow_cyq_chen_strategy_rebuild: bool,
+                             progress_cb: Option<&DownloadProgressCallback<'_>>|
+         -> Result<Option<String>, String> {
+            let chip_progress_cb = |progress: DownloadProgress| {
+                emit_chip_maintenance_progress(progress_cb, progress);
+            };
+
+            match chip_model {
+                "chen" => {
+                    let maintenance_status =
+                        query_cyq_chen_strategy_maintenance_status(source_path)?;
+                    if maintenance_status.strategy_changed && !allow_cyq_chen_strategy_rebuild {
+                        return Ok(Some(
+                            "检测到筹码策略已变化，已按确认选择跳过新筹码全量维护。".to_string(),
+                        ));
+                    }
+                    let merge_repair_progress =
+                        !maintenance_status.strategy_changed && !recovered_stock_codes.is_empty();
+                    let repair_progress_cb = |progress: DownloadProgress| {
+                        if merge_repair_progress && progress.total > 0 {
+                            emit_chip_maintenance_progress(
+                                progress_cb,
+                                hide_chip_repair_local_counter(progress),
+                            );
+                        } else {
+                            emit_chip_maintenance_progress(progress_cb, progress);
+                        }
+                    };
+                    let repair_summary = if recovered_stock_codes.is_empty() {
+                        None
+                    } else {
+                        repair_cyq_chen_stocks_if_db_exists(
+                            source_path,
+                            recovered_stock_codes,
+                            allow_cyq_chen_strategy_rebuild,
+                            Some(&repair_progress_cb),
+                        )?
+                    };
+                    let repaired_stock_count = if repair_summary.is_some() && merge_repair_progress
+                    {
+                        // These are the successfully recovered market-data stocks passed into the
+                        // chip repair. Use the stable task count instead of deriving it from callback
+                        // timing, otherwise the following incremental phase can briefly report 1/14
+                        // for a 15-stock combined job.
+                        recovered_stock_codes.len()
+                    } else {
+                        0
+                    };
+                    let incremental_progress_cb = |progress: DownloadProgress| {
+                        emit_chip_maintenance_progress(
+                            progress_cb,
+                            merge_chip_repair_into_incremental_progress(
+                                progress,
+                                repaired_stock_count,
+                            ),
+                        );
+                    };
+                    let incremental_summary = if maintenance_status.strategy_changed
+                        && allow_cyq_chen_strategy_rebuild
+                        && repair_summary.is_some()
+                    {
+                        None
+                    } else {
+                        maintain_cyq_chen_incremental_if_db_exists(
+                            source_path,
+                            allow_cyq_chen_strategy_rebuild,
+                            Some(&incremental_progress_cb),
+                        )?
+                    };
+                    let snapshot_rows = repair_summary
+                        .as_ref()
+                        .map(|summary| summary.snapshot_rows)
+                        .unwrap_or(0)
+                        + incremental_summary
+                            .as_ref()
+                            .map(|summary| summary.snapshot_rows)
+                            .unwrap_or(0);
+                    let bin_rows = repair_summary
+                        .as_ref()
+                        .map(|summary| summary.bin_rows)
+                        .unwrap_or(0)
+                        + incremental_summary
+                            .as_ref()
+                            .map(|summary| summary.bin_rows)
+                            .unwrap_or(0);
+                    let start_date = repair_summary
+                        .as_ref()
+                        .and_then(|summary| summary.start_date.as_deref())
+                        .or_else(|| {
+                            incremental_summary
+                                .as_ref()
+                                .and_then(|summary| summary.start_date.as_deref())
+                        });
+                    let end_date = incremental_summary
+                        .as_ref()
+                        .and_then(|summary| summary.end_date.as_deref())
+                        .or_else(|| {
+                            repair_summary
+                                .as_ref()
+                                .and_then(|summary| summary.end_date.as_deref())
+                        });
+                    Ok(Some(
+                        if repair_summary.is_none() && incremental_summary.is_none() {
+                            "未发现新筹码库 cyq_chen.db，已跳过筹码数据维护。".to_string()
+                        } else if snapshot_rows > 0 || bin_rows > 0 {
+                            let mode = if recovered_stock_codes.is_empty() {
+                                "增量"
+                            } else if maintenance_status.strategy_changed {
+                                "全量"
+                            } else {
+                                "局部+增量"
+                            };
+                            format!(
+                                "新筹码{}维护完成，区间 {} 至 {}，写入 {} 条摘要和 {} 条分桶。",
+                                mode,
+                                start_date.unwrap_or("--"),
+                                end_date.unwrap_or("--"),
+                                snapshot_rows,
+                                bin_rows
+                            )
+                        } else {
+                            "新筹码库已存在，但当前没有需要补算的筹码数据。".to_string()
+                        },
+                    ))
+                }
+                _ => {
+                    let repair_summary = if recovered_stock_codes.is_empty() {
+                        None
+                    } else {
+                        repair_cyq_stocks_if_db_exists(
+                            source_path,
+                            recovered_stock_codes,
+                            Some(&chip_progress_cb),
+                        )?
+                    };
+                    let incremental_summary = maintain_cyq_incremental_if_db_exists(source_path)?;
+                    let snapshot_rows = repair_summary
+                        .as_ref()
+                        .map(|summary| summary.snapshot_rows)
+                        .unwrap_or(0)
+                        + incremental_summary
+                            .as_ref()
+                            .map(|summary| summary.snapshot_rows)
+                            .unwrap_or(0);
+                    let bin_rows = repair_summary
+                        .as_ref()
+                        .map(|summary| summary.bin_rows)
+                        .unwrap_or(0)
+                        + incremental_summary
+                            .as_ref()
+                            .map(|summary| summary.bin_rows)
+                            .unwrap_or(0);
+                    let start_date = repair_summary
+                        .as_ref()
+                        .and_then(|summary| summary.start_date.as_deref())
+                        .or_else(|| {
+                            incremental_summary
+                                .as_ref()
+                                .and_then(|summary| summary.start_date.as_deref())
+                        });
+                    let end_date = incremental_summary
+                        .as_ref()
+                        .and_then(|summary| summary.end_date.as_deref())
+                        .or_else(|| {
+                            repair_summary
+                                .as_ref()
+                                .and_then(|summary| summary.end_date.as_deref())
+                        });
+                    Ok(Some(
+                        if repair_summary.is_none() && incremental_summary.is_none() {
+                            "未发现筹码库 cyq.db，已跳过筹码数据维护。".to_string()
+                        } else if snapshot_rows > 0 || bin_rows > 0 {
+                            format!(
+                                "筹码{}维护完成，区间 {} 至 {}，写入 {} 条摘要和 {} 条分桶。",
+                                if recovered_stock_codes.is_empty() {
+                                    "增量"
+                                } else {
+                                    "局部+增量"
+                                },
+                                start_date.unwrap_or("--"),
+                                end_date.unwrap_or("--"),
+                                snapshot_rows,
+                                bin_rows
+                            )
+                        } else {
+                            "筹码库已存在，但当前没有需要补算的筹码数据。".to_string()
+                        },
+                    ))
+                }
+            }
+        })(
             &prepared.source_path,
             prepared.chip_model.as_str(),
             &recovered_stock_codes,
             prepared.allow_cyq_chen_strategy_rebuild,
             progress_cb,
         )?;
-        if let Some(detail) = chip_message
-            .as_ref()
-            .and_then(|message| normalize_completion_detail(message.clone()))
-        {
+        if let Some(detail) = chip_message.as_ref().and_then(|message| {
+            (|message: String| -> Option<String> {
+                let message = message.trim().trim_end_matches('。').trim();
+                if message.is_empty() {
+                    None
+                } else {
+                    Some(message.to_string())
+                }
+            })(message.clone())
+        }) {
             completion_details.push(detail);
         }
         if let Some(cb) = progress_cb {
@@ -2046,22 +2021,23 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
         });
     }
 
-    let (tx, rx) = sync_channel(STOCK_DATA_INDICATOR_REBUILD_QUEUE_BOUND);
+    let (tx, rx) = sync_channel(16);
     let abort_tx = tx.clone();
     let source_path = prepared.source_path.clone();
     let inds_cache_for_workers = inds_cache.clone();
     let work_items_for_workers = work_items.clone();
     let compute_handle = thread::spawn(move || {
-        let compute_result = work_items_for_workers
-            .par_chunks(STOCK_DATA_INDICATOR_REBUILD_GROUP_SIZE)
-            .try_for_each_with(tx, |sender, work_group| {
-                compute_stock_data_indicator_rebuild_batch(
-                    sender,
-                    &source_path,
-                    &inds_cache_for_workers,
-                    work_group,
-                )
-            });
+        let compute_result =
+            work_items_for_workers
+                .par_chunks(256)
+                .try_for_each_with(tx, |sender, work_group| {
+                    compute_stock_data_indicator_rebuild_batch(
+                        sender,
+                        &source_path,
+                        &inds_cache_for_workers,
+                        work_group,
+                    )
+                });
 
         match &compute_result {
             Ok(_) => {
@@ -2196,21 +2172,6 @@ pub fn get_indicator_manage_page(source_path: &str) -> Result<IndicatorManagePag
     })
 }
 
-fn default_indicator_manage_items() -> Vec<IndicatorManageDraft> {
-    vec![
-        IndicatorManageDraft {
-            name: "J".to_string(),
-            expr: DEFAULT_J_INDICATOR_EXPR.to_string(),
-            prec: 2,
-        },
-        IndicatorManageDraft {
-            name: "ER".to_string(),
-            expr: DEFAULT_ER_INDICATOR_EXPR.to_string(),
-            prec: 6,
-        },
-    ]
-}
-
 fn ensure_default_indicator_manage_file(source_path: &str) -> Result<(), String> {
     let path = ind_toml_path(source_path);
     if path.exists() {
@@ -2226,7 +2187,26 @@ fn ensure_default_indicator_manage_file(source_path: &str) -> Result<(), String>
         }
     }
 
-    let text = build_indicator_manage_toml(&default_indicator_manage_items())?;
+    let text = build_indicator_manage_toml(&(|| -> Vec<IndicatorManageDraft> {
+        vec![
+            IndicatorManageDraft {
+                name: "J".to_string(),
+                expr: (r#"RSV1 := RSV(C, H, L, 9);
+K1 := SMA(RSV1, 3, 1);
+D1 := SMA(K1, 3, 1);
+3 * K1 - 2 * D1;"#)
+                    .to_string(),
+                prec: 2,
+            },
+            IndicatorManageDraft {
+                name: "ER".to_string(),
+                expr: (r#"N := 20;
+(C - REF(C, N)) / SUM(ABS(C - REF(C, 1)), N);"#)
+                    .to_string(),
+                prec: 6,
+            },
+        ]
+    })())?;
     fs::write(&path, text)
         .map_err(|e| format!("写入默认指标配置失败: path={}, err={e}", path.display()))?;
     Ok(())
@@ -2316,28 +2296,6 @@ mod tests {
         std::env::temp_dir().join(format!("{prefix}_{nanos}"))
     }
 
-    fn write_source_rows(source_dir: &Path, rows: &[(&str, &str, &str)]) {
-        let db_path = source_db_path(source_dir.to_str().expect("utf8 path"));
-        let conn = Connection::open(db_path).expect("open source db");
-        conn.execute(
-            r#"
-            CREATE TABLE stock_data (
-                ts_code VARCHAR,
-                trade_date VARCHAR,
-                adj_type VARCHAR
-            )
-            "#,
-            [],
-        )
-        .expect("create stock_data");
-        let mut app = conn.appender("stock_data").expect("appender stock_data");
-        for (ts_code, trade_date, adj_type) in rows {
-            app.append_row(params![ts_code, trade_date, adj_type])
-                .expect("append stock row");
-        }
-        app.flush().expect("flush stock rows");
-    }
-
     #[test]
     fn normalizes_stock_nested_terminal_progress_to_non_terminal_phase() {
         let next = normalize_nested_data_download_progress(
@@ -2411,7 +2369,27 @@ mod tests {
     fn qfq_range_ignores_newer_index_rows() {
         let source_dir = temp_dir_path("lianghua_data_download_qfq_range");
         create_dir_all(&source_dir).expect("create temp dir");
-        write_source_rows(
+        (|source_dir: &Path, rows: &[(&str, &str, &str)]| {
+            let db_path = source_db_path(source_dir.to_str().expect("utf8 path"));
+            let conn = Connection::open(db_path).expect("open source db");
+            conn.execute(
+                r#"
+            CREATE TABLE stock_data (
+                ts_code VARCHAR,
+                trade_date VARCHAR,
+                adj_type VARCHAR
+            )
+            "#,
+                [],
+            )
+            .expect("create stock_data");
+            let mut app = conn.appender("stock_data").expect("appender stock_data");
+            for (ts_code, trade_date, adj_type) in rows {
+                app.append_row(params![ts_code, trade_date, adj_type])
+                    .expect("append stock row");
+            }
+            app.flush().expect("flush stock rows");
+        })(
             &source_dir,
             &[
                 ("000001.SZ", "20240102", "qfq"),

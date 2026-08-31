@@ -33,9 +33,6 @@ use lianghua_app_shared::{
 const DEFAULT_ADJ_TYPE: &str = "qfq";
 const BOARD_ALL: &str = "全部";
 const BOARD_ST: &str = "ST";
-const EXPRESSION_STOCK_PICK_INJECTED_RUNTIME_KEYS: [&str; 4] =
-    ["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI"];
-const EXPRESSION_STOCK_PICK_RUNTIME_ALIASES: [(&str, &str); 0] = [];
 
 #[derive(Debug, Clone, Copy)]
 enum PickScopeWay {
@@ -123,61 +120,6 @@ fn parse_scope_way(
     }
 }
 
-fn normalize_date_range(
-    trade_date_options: &[String],
-    start_date: Option<String>,
-    end_date: Option<String>,
-) -> Result<(String, String), String> {
-    let Some(latest_trade_date) = trade_date_options.last().cloned() else {
-        return Err("没有可用交易日".to_string());
-    };
-
-    let resolved_start = start_date
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| latest_trade_date.clone());
-    let resolved_end = end_date
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| latest_trade_date.clone());
-
-    if resolved_start > resolved_end {
-        return Err("起始日期不能晚于结束日期".to_string());
-    }
-
-    Ok((resolved_start, resolved_end))
-}
-
-fn resolve_expression_trade_window(
-    trade_date_options: &[String],
-    reference_trade_date: Option<String>,
-    lookback_periods: Option<usize>,
-    scope_way: PickScopeWay,
-) -> Result<(String, String), String> {
-    let resolved_reference_trade_date =
-        normalize_single_trade_date(trade_date_options, reference_trade_date)?;
-    let reference_index = trade_date_options
-        .iter()
-        .position(|item| item == &resolved_reference_trade_date)
-        .ok_or_else(|| format!("交易日不存在: {resolved_reference_trade_date}"))?;
-
-    let resolved_start_index = match scope_way {
-        PickScopeWay::Last => reference_index,
-        _ => {
-            let periods = lookback_periods.unwrap_or(1);
-            if periods == 0 {
-                return Err("前推周期数必须 >= 1".to_string());
-            }
-            reference_index.saturating_sub(periods.saturating_sub(1))
-        }
-    };
-
-    Ok((
-        trade_date_options[resolved_start_index].clone(),
-        resolved_reference_trade_date,
-    ))
-}
-
 fn load_trade_date_options(source_path: &str) -> Result<Vec<String>, String> {
     let source_db = crate::data::source_db_path(source_path);
     let source_db_str = source_db
@@ -233,60 +175,6 @@ fn split_concept_items(value: &str) -> Vec<String> {
     }
 }
 
-fn load_concept_options(source_path: &str) -> Result<Vec<String>, String> {
-    let rows = load_ths_concepts_list(source_path)?;
-    let mut items = Vec::new();
-    let mut seen = HashSet::new();
-    for cols in rows {
-        let Some(value) = cols.get(2) else {
-            continue;
-        };
-        for item in split_concept_items(value) {
-            if seen.insert(item.clone()) {
-                items.push(item);
-            }
-        }
-    }
-    items.sort();
-    Ok(items)
-}
-
-fn load_score_trade_date_options(source_path: &str) -> Result<Vec<String>, String> {
-    let result_db = result_db_path(source_path);
-    if !result_db.exists() {
-        return Ok(Vec::new());
-    }
-
-    let result_db_str = result_db
-        .to_str()
-        .ok_or_else(|| "结果库路径不是有效UTF-8".to_string())?;
-    let conn = Connection::open(result_db_str).map_err(|e| format!("打开结果库失败: {e}"))?;
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT DISTINCT trade_date
-            FROM score_summary
-            ORDER BY trade_date ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译评分交易日查询失败: {e}"))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("读取评分交易日失败: {e}"))?;
-
-    let mut out = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取评分交易日行失败: {e}"))?
-    {
-        let trade_date: String = row
-            .get(0)
-            .map_err(|e| format!("读取评分交易日字段失败: {e}"))?;
-        out.push(trade_date);
-    }
-    Ok(out)
-}
-
 fn unique_sorted_options(values: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -301,54 +189,80 @@ fn unique_sorted_options(values: impl IntoIterator<Item = String>) -> Vec<String
     out
 }
 
-fn load_area_options(source_path: &str) -> Result<Vec<String>, String> {
-    Ok(unique_sorted_options(
-        build_area_map(source_path)?
-            .into_values()
-            .collect::<Vec<_>>(),
-    ))
-}
-
-fn load_industry_options(source_path: &str) -> Result<Vec<String>, String> {
-    Ok(unique_sorted_options(
-        build_industry_map(source_path)?
-            .into_values()
-            .collect::<Vec<_>>(),
-    ))
-}
-
-fn load_strategy_options(source_path: &str) -> Result<Vec<String>, String> {
-    let rules = ScoreRule::load_rules(source_path)?;
-    Ok(rules.into_iter().map(|rule| rule.name).collect())
-}
-
-fn normalize_single_trade_date(
-    trade_date_options: &[String],
-    trade_date: Option<String>,
-) -> Result<String, String> {
-    let Some(latest_trade_date) = trade_date_options.last().cloned() else {
-        return Err("没有可用交易日".to_string());
-    };
-    let resolved = trade_date
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or(latest_trade_date);
-    if trade_date_options.iter().any(|item| item == &resolved) {
-        Ok(resolved)
-    } else {
-        Err(format!("交易日不存在: {resolved}"))
-    }
-}
-
 pub fn get_stock_pick_options(source_path: &str) -> Result<StockPickOptionsData, String> {
     let trade_date_options = load_trade_date_options(source_path)?;
     let latest_trade_date = trade_date_options.last().cloned();
-    let score_trade_date_options = load_score_trade_date_options(source_path)?;
+    let score_trade_date_options = (|source_path: &str| -> Result<Vec<String>, String> {
+        let result_db = result_db_path(source_path);
+        if !result_db.exists() {
+            return Ok(Vec::new());
+        }
+
+        let result_db_str = result_db
+            .to_str()
+            .ok_or_else(|| "结果库路径不是有效UTF-8".to_string())?;
+        let conn = Connection::open(result_db_str).map_err(|e| format!("打开结果库失败: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                r#"
+            SELECT DISTINCT trade_date
+            FROM score_summary
+            ORDER BY trade_date ASC
+            "#,
+            )
+            .map_err(|e| format!("预编译评分交易日查询失败: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("读取评分交易日失败: {e}"))?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取评分交易日行失败: {e}"))?
+        {
+            let trade_date: String = row
+                .get(0)
+                .map_err(|e| format!("读取评分交易日字段失败: {e}"))?;
+            out.push(trade_date);
+        }
+        Ok(out)
+    })(source_path)?;
     let latest_score_trade_date = score_trade_date_options.last().cloned();
-    let concept_options = load_concept_options(source_path)?;
-    let area_options = load_area_options(source_path)?;
-    let industry_options = load_industry_options(source_path)?;
-    let strategy_options = load_strategy_options(source_path)?;
+    let concept_options = (|source_path: &str| -> Result<Vec<String>, String> {
+        let rows = load_ths_concepts_list(source_path)?;
+        let mut items = Vec::new();
+        let mut seen = HashSet::new();
+        for cols in rows {
+            let Some(value) = cols.get(2) else {
+                continue;
+            };
+            for item in split_concept_items(value) {
+                if seen.insert(item.clone()) {
+                    items.push(item);
+                }
+            }
+        }
+        items.sort();
+        Ok(items)
+    })(source_path)?;
+    let area_options = (|source_path: &str| -> Result<Vec<String>, String> {
+        Ok(unique_sorted_options(
+            build_area_map(source_path)?
+                .into_values()
+                .collect::<Vec<_>>(),
+        ))
+    })(source_path)?;
+    let industry_options = (|source_path: &str| -> Result<Vec<String>, String> {
+        Ok(unique_sorted_options(
+            build_industry_map(source_path)?
+                .into_values()
+                .collect::<Vec<_>>(),
+        ))
+    })(source_path)?;
+    let strategy_options = (|source_path: &str| -> Result<Vec<String>, String> {
+        let rules = ScoreRule::load_rules(source_path)?;
+        Ok(rules.into_iter().map(|rule| rule.name).collect())
+    })(source_path)?;
 
     Ok(StockPickOptionsData {
         trade_date_options,
@@ -376,7 +290,7 @@ fn estimate_custom_warmup(stmts: &Stmts, scope_way: PickScopeWay) -> Result<usiz
 
 fn collect_expression_stock_pick_runtime_keys(stmts: &Stmts) -> HashSet<String> {
     let cyq_chen_keys = cyq_chen_runtime_key_names();
-    let injected_keys = EXPRESSION_STOCK_PICK_INJECTED_RUNTIME_KEYS
+    let injected_keys = (["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI"])
         .iter()
         .copied()
         .chain(cyq_chen_keys)
@@ -387,7 +301,7 @@ fn collect_expression_stock_pick_runtime_keys(stmts: &Stmts) -> HashSet<String> 
         RuntimeKeyCollectOptions {
             always_keys: &[],
             injected_keys: &injected_keys,
-            aliases: &EXPRESSION_STOCK_PICK_RUNTIME_ALIASES,
+            aliases: &([]),
         },
     )
 }
@@ -469,83 +383,6 @@ pub fn validate_expression_stock_pick_template_expression(
         warmup_need,
         message: "表达式可用于表达式选股模板".to_string(),
     })
-}
-
-fn hit_scope_period(scope_way: PickScopeWay, bs: &[bool]) -> ScopeHit {
-    if bs.is_empty() {
-        return match scope_way {
-            PickScopeWay::Each => ScopeHit::Count(0),
-            PickScopeWay::Recent => ScopeHit::Recent(None),
-            _ => ScopeHit::Bool(false),
-        };
-    }
-
-    match scope_way {
-        PickScopeWay::Last => ScopeHit::Bool(bs.last().copied().unwrap_or(false)),
-        PickScopeWay::Any => ScopeHit::Bool(bs.iter().any(|item| *item)),
-        PickScopeWay::Each => ScopeHit::Count(bs.iter().filter(|item| **item).count()),
-        PickScopeWay::Recent => {
-            let end_index = bs.len() - 1;
-            for index in (0..=end_index).rev() {
-                if bs[index] {
-                    return ScopeHit::Recent(Some(end_index - index));
-                }
-            }
-            ScopeHit::Recent(None)
-        }
-        PickScopeWay::Consec(threshold) => {
-            let mut best = 0usize;
-            let mut current = 0usize;
-            for item in bs {
-                if *item {
-                    current += 1;
-                    best = best.max(current);
-                } else {
-                    current = 0;
-                }
-            }
-            ScopeHit::Bool(best >= threshold)
-        }
-    }
-}
-
-fn scope_hit_matches(hit: &ScopeHit) -> bool {
-    match hit {
-        ScopeHit::Bool(value) => *value,
-        ScopeHit::Count(value) => *value > 0,
-        ScopeHit::Recent(value) => value.is_some(),
-    }
-}
-
-fn scope_hit_note(hit: &ScopeHit, scope_way: PickScopeWay) -> String {
-    match (scope_way, hit) {
-        (PickScopeWay::Last, ScopeHit::Bool(true)) => "当日命中".to_string(),
-        (PickScopeWay::Any, ScopeHit::Bool(true)) => "周期内命中".to_string(),
-        (PickScopeWay::Consec(threshold), ScopeHit::Bool(true)) => format!("连续命中>={threshold}"),
-        (PickScopeWay::Each, ScopeHit::Count(value)) => format!("命中 {value} 次"),
-        (PickScopeWay::Recent, ScopeHit::Recent(Some(value))) => {
-            format!("最近命中距今 {value} 个交易日")
-        }
-        _ => "--".to_string(),
-    }
-}
-
-fn resolve_latest_trigger_trade_date(
-    trade_dates: &[String],
-    keep_from: usize,
-    bs: &[bool],
-) -> Option<String> {
-    if keep_from >= trade_dates.len() || trade_dates.len() != bs.len() {
-        return None;
-    }
-
-    for index in (keep_from..bs.len()).rev() {
-        if bs[index] {
-            return trade_dates.get(index).cloned();
-        }
-    }
-
-    None
 }
 
 fn load_summary_map(source_path: &str, trade_date: &str) -> HashMap<String, SummaryInfo> {
@@ -679,36 +516,6 @@ fn filter_board(
     current_board == board
 }
 
-fn concept_matches(
-    concept_text: Option<&str>,
-    include_concepts: &[String],
-    match_mode: &str,
-) -> bool {
-    if include_concepts.is_empty() {
-        return true;
-    }
-    let items = concept_text.map(split_concept_items).unwrap_or_default();
-    if match_mode == "AND" {
-        include_concepts
-            .iter()
-            .all(|item| items.iter().any(|value| value == item))
-    } else {
-        include_concepts
-            .iter()
-            .any(|item| items.iter().any(|value| value == item))
-    }
-}
-
-fn concept_excluded(concept_text: Option<&str>, exclude_concepts: &[String]) -> bool {
-    if exclude_concepts.is_empty() {
-        return false;
-    }
-    let items = concept_text.map(split_concept_items).unwrap_or_default();
-    exclude_concepts
-        .iter()
-        .any(|item| items.iter().any(|value| value == item))
-}
-
 pub fn run_expression_stock_pick(
     source_path: &str,
     board: Option<String>,
@@ -721,7 +528,48 @@ pub fn run_expression_stock_pick(
 ) -> Result<StockPickResultData, String> {
     let trade_date_options = load_trade_date_options(source_path)?;
     let parsed_scope_way = parse_scope_way(&scope_way, consec_threshold)?;
-    let (resolved_start_date, resolved_end_date) = resolve_expression_trade_window(
+    let (resolved_start_date, resolved_end_date) = (|trade_date_options: &[String],
+                                                     reference_trade_date: Option<String>,
+                                                     lookback_periods: Option<usize>,
+                                                     scope_way: PickScopeWay|
+     -> Result<(String, String), String> {
+        let resolved_reference_trade_date = (|trade_date_options: &[String],
+                                              trade_date: Option<String>|
+         -> Result<String, String> {
+            let Some(latest_trade_date) = trade_date_options.last().cloned() else {
+                return Err("没有可用交易日".to_string());
+            };
+            let resolved = trade_date
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or(latest_trade_date);
+            if trade_date_options.iter().any(|item| item == &resolved) {
+                Ok(resolved)
+            } else {
+                Err(format!("交易日不存在: {resolved}"))
+            }
+        })(trade_date_options, reference_trade_date)?;
+        let reference_index = trade_date_options
+            .iter()
+            .position(|item| item == &resolved_reference_trade_date)
+            .ok_or_else(|| format!("交易日不存在: {resolved_reference_trade_date}"))?;
+
+        let resolved_start_index = match scope_way {
+            PickScopeWay::Last => reference_index,
+            _ => {
+                let periods = lookback_periods.unwrap_or(1);
+                if periods == 0 {
+                    return Err("前推周期数必须 >= 1".to_string());
+                }
+                reference_index.saturating_sub(periods.saturating_sub(1))
+            }
+        };
+
+        Ok((
+            trade_date_options[resolved_start_index].clone(),
+            resolved_reference_trade_date,
+        ))
+    })(
         &trade_date_options,
         reference_trade_date,
         lookback_periods,
@@ -825,12 +673,69 @@ pub fn run_expression_stock_pick(
                 let bool_series = Value::as_bool_series(&value, len)
                     .map_err(|e| format!("表达式返回值非布尔:{}", e.msg))?;
                 let kept_series = &bool_series[keep_from..];
-                let hit = hit_scope_period(parsed_scope_way, kept_series);
-                if !scope_hit_matches(&hit) {
+                let hit = (|scope_way: PickScopeWay, bs: &[bool]| -> ScopeHit {
+                    if bs.is_empty() {
+                        return match scope_way {
+                            PickScopeWay::Each => ScopeHit::Count(0),
+                            PickScopeWay::Recent => ScopeHit::Recent(None),
+                            _ => ScopeHit::Bool(false),
+                        };
+                    }
+
+                    match scope_way {
+                        PickScopeWay::Last => ScopeHit::Bool(bs.last().copied().unwrap_or(false)),
+                        PickScopeWay::Any => ScopeHit::Bool(bs.iter().any(|item| *item)),
+                        PickScopeWay::Each => {
+                            ScopeHit::Count(bs.iter().filter(|item| **item).count())
+                        }
+                        PickScopeWay::Recent => {
+                            let end_index = bs.len() - 1;
+                            for index in (0..=end_index).rev() {
+                                if bs[index] {
+                                    return ScopeHit::Recent(Some(end_index - index));
+                                }
+                            }
+                            ScopeHit::Recent(None)
+                        }
+                        PickScopeWay::Consec(threshold) => {
+                            let mut best = 0usize;
+                            let mut current = 0usize;
+                            for item in bs {
+                                if *item {
+                                    current += 1;
+                                    best = best.max(current);
+                                } else {
+                                    current = 0;
+                                }
+                            }
+                            ScopeHit::Bool(best >= threshold)
+                        }
+                    }
+                })(parsed_scope_way, kept_series);
+                if !(|hit: &ScopeHit| -> bool {
+                    match hit {
+                        ScopeHit::Bool(value) => *value,
+                        ScopeHit::Count(value) => *value > 0,
+                        ScopeHit::Recent(value) => value.is_some(),
+                    }
+                })(&hit)
+                {
                     continue;
                 }
                 let latest_trigger_trade_date =
-                    resolve_latest_trigger_trade_date(&trade_dates, keep_from, &bool_series);
+                    (|trade_dates: &[String], keep_from: usize, bs: &[bool]| -> Option<String> {
+                        if keep_from >= trade_dates.len() || trade_dates.len() != bs.len() {
+                            return None;
+                        }
+
+                        for index in (keep_from..bs.len()).rev() {
+                            if bs[index] {
+                                return trade_dates.get(index).cloned();
+                            }
+                        }
+
+                        None
+                    })(&trade_dates, keep_from, &bool_series);
 
                 let summary = summary_map.get(ts_code);
                 group_rows.push(StockPickRow {
@@ -845,7 +750,22 @@ pub fn run_expression_stock_pick(
                     rank: summary.and_then(|item| item.rank),
                     total_score: summary.and_then(|item| item.total_score),
                     latest_trigger_trade_date,
-                    pick_note: scope_hit_note(&hit, parsed_scope_way),
+                    pick_note: (|hit: &ScopeHit, scope_way: PickScopeWay| -> String {
+                        match (scope_way, hit) {
+                            (PickScopeWay::Last, ScopeHit::Bool(true)) => "当日命中".to_string(),
+                            (PickScopeWay::Any, ScopeHit::Bool(true)) => "周期内命中".to_string(),
+                            (PickScopeWay::Consec(threshold), ScopeHit::Bool(true)) => {
+                                format!("连续命中>={threshold}")
+                            }
+                            (PickScopeWay::Each, ScopeHit::Count(value)) => {
+                                format!("命中 {value} 次")
+                            }
+                            (PickScopeWay::Recent, ScopeHit::Recent(Some(value))) => {
+                                format!("最近命中距今 {value} 个交易日")
+                            }
+                            _ => "--".to_string(),
+                        }
+                    })(&hit, parsed_scope_way),
                 });
             }
 
@@ -885,8 +805,29 @@ pub fn run_concept_stock_pick(
     match_mode: String,
 ) -> Result<StockPickResultData, String> {
     let trade_date_options = load_trade_date_options(source_path)?;
-    let (_, resolved_trade_date) =
-        normalize_date_range(&trade_date_options, trade_date.clone(), trade_date)?;
+    let (_, resolved_trade_date) = (|trade_date_options: &[String],
+                                     start_date: Option<String>,
+                                     end_date: Option<String>|
+     -> Result<(String, String), String> {
+        let Some(latest_trade_date) = trade_date_options.last().cloned() else {
+            return Err("没有可用交易日".to_string());
+        };
+
+        let resolved_start = start_date
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| latest_trade_date.clone());
+        let resolved_end = end_date
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| latest_trade_date.clone());
+
+        if resolved_start > resolved_end {
+            return Err("起始日期不能晚于结束日期".to_string());
+        }
+
+        Ok((resolved_start, resolved_end))
+    })(&trade_date_options, trade_date.clone(), trade_date)?;
     let include_concepts: Vec<String> = include_concepts
         .into_iter()
         .map(|value| value.trim().to_string())
@@ -955,14 +896,40 @@ pub fn run_concept_stock_pick(
             if !filter_mv(&total_mv_map, &ts_code, total_mv_min, total_mv_max) {
                 return None;
             }
-            if !concept_matches(
+            if !(|concept_text: Option<&str>,
+                  include_concepts: &[String],
+                  match_mode: &str|
+             -> bool {
+                if include_concepts.is_empty() {
+                    return true;
+                }
+                let items = concept_text.map(split_concept_items).unwrap_or_default();
+                if match_mode == "AND" {
+                    include_concepts
+                        .iter()
+                        .all(|item| items.iter().any(|value| value == item))
+                } else {
+                    include_concepts
+                        .iter()
+                        .any(|item| items.iter().any(|value| value == item))
+                }
+            })(
                 concept_text.as_deref(),
                 &include_concepts,
                 match_mode.as_str(),
             ) {
                 return None;
             }
-            if concept_excluded(concept_text.as_deref(), &exclude_concepts) {
+            if (|concept_text: Option<&str>, exclude_concepts: &[String]| -> bool {
+                if exclude_concepts.is_empty() {
+                    return false;
+                }
+                let items = concept_text.map(split_concept_items).unwrap_or_default();
+                exclude_concepts
+                    .iter()
+                    .any(|item| items.iter().any(|value| value == item))
+            })(concept_text.as_deref(), &exclude_concepts)
+            {
                 return None;
             }
 

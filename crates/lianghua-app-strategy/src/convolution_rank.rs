@@ -172,164 +172,6 @@ fn load_recent_score_rows(
     Ok((trade_dates, score_rows))
 }
 
-fn load_stored_convolution_ranking(
-    conn: &Connection,
-    target_date: &str,
-) -> Result<Option<Vec<crate::simulate::rank::ConvolutionRankRow>>, String> {
-    let table_exists = conn
-        .query_row(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'convolution_rank'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|e| format!("检查卷积排名表失败: {e}"))?;
-    if table_exists <= 0 {
-        return Ok(None);
-    }
-
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT
-                ts_code,
-                trade_date,
-                database_rank,
-                raw_score,
-                convolution_score,
-                raw_rank,
-                convolution_rank,
-                rank_change
-            FROM convolution_rank
-            WHERE trade_date = ? AND kernel_name = ?
-            ORDER BY convolution_rank ASC, ts_code ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译已计算卷积排名查询失败: {e}"))?;
-    let mut query_rows = stmt
-        .query(params![target_date, DEFAULT_CONVOLUTION_KERNEL_NAME])
-        .map_err(|e| format!("查询已计算卷积排名失败: {e}"))?;
-    let mut ranking = Vec::new();
-    while let Some(row) = query_rows
-        .next()
-        .map_err(|e| format!("读取已计算卷积排名失败: {e}"))?
-    {
-        let ts_code: String = row
-            .get(0)
-            .map_err(|e| format!("读取卷积排名代码失败: {e}"))?;
-        let raw_rank = row
-            .get::<_, i64>(5)
-            .map_err(|e| format!("读取原始名次失败: {e}"))?
-            .max(0) as usize;
-        let convolution_rank = row
-            .get::<_, i64>(6)
-            .map_err(|e| format!("读取卷积名次失败: {e}"))?
-            .max(0) as usize;
-        let rank_change_i64 = row
-            .get::<_, i64>(7)
-            .map_err(|e| format!("读取卷积名次变化失败: {e}"))?;
-        let rank_change = isize::try_from(rank_change_i64)
-            .map_err(|_| format!("卷积名次变化超出范围: {rank_change_i64}"))?;
-
-        ranking.push(crate::simulate::rank::ConvolutionRankRow {
-            ts_code,
-            trade_date: row
-                .get(1)
-                .map_err(|e| format!("读取卷积排名日期失败: {e}"))?,
-            database_rank: row.get(2).map_err(|e| format!("读取数据库名次失败: {e}"))?,
-            raw_score: row.get(3).map_err(|e| format!("读取原始分数失败: {e}"))?,
-            convolved_score: row.get(4).map_err(|e| format!("读取卷积分数失败: {e}"))?,
-            raw_rank,
-            convolution_rank,
-            rank_change,
-            score_history: Vec::new(),
-        });
-    }
-
-    if ranking.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(ranking))
-    }
-}
-
-fn hydrate_score_histories(
-    conn: &Connection,
-    history_trade_dates: &[String],
-    ranking: &mut [crate::simulate::rank::ConvolutionRankRow],
-) -> Result<(), String> {
-    if ranking.is_empty() {
-        return Ok(());
-    }
-    let stock_codes = ranking
-        .iter()
-        .map(|row| row.ts_code.clone())
-        .collect::<Vec<_>>();
-    let score_rows = load_score_rows_for_dates(conn, history_trade_dates, Some(&stock_codes))?;
-    let mut scores_by_stock =
-        std::collections::HashMap::<String, std::collections::HashMap<String, f64>>::new();
-    for row in score_rows {
-        if row.total_score.is_finite() {
-            scores_by_stock
-                .entry(row.ts_code)
-                .or_default()
-                .insert(row.trade_date, row.total_score);
-        }
-    }
-
-    for row in ranking {
-        let Some(scores_by_date) = scores_by_stock.get(&row.ts_code) else {
-            return Err(format!(
-                "已落盘卷积排名缺少{}的评分历史，请重新计算卷积排名",
-                row.ts_code
-            ));
-        };
-        row.score_history = history_trade_dates
-            .iter()
-            .map(|trade_date| scores_by_date.get(trade_date).copied())
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| {
-                format!(
-                    "已落盘卷积排名缺少{}的完整评分窗口，请重新计算卷积排名",
-                    row.ts_code
-                )
-            })?;
-    }
-    Ok(())
-}
-
-fn ensure_convolution_rank_table(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS convolution_rank (
-            ts_code VARCHAR NOT NULL,
-            trade_date VARCHAR NOT NULL,
-            kernel_name VARCHAR NOT NULL,
-            raw_score DOUBLE NOT NULL,
-            convolution_score DOUBLE NOT NULL,
-            database_rank BIGINT,
-            raw_rank BIGINT NOT NULL,
-            convolution_rank BIGINT NOT NULL,
-            rank_change BIGINT NOT NULL,
-            PRIMARY KEY (ts_code, trade_date, kernel_name)
-        );
-        CREATE INDEX IF NOT EXISTS idx_convolution_rank_date_rank_ts
-            ON convolution_rank(trade_date, kernel_name, convolution_rank, ts_code);
-        CREATE INDEX IF NOT EXISTS idx_convolution_rank_ts_date
-            ON convolution_rank(ts_code, trade_date, kernel_name);
-        "#,
-    )
-    .map_err(|e| format!("初始化卷积排名表失败: {e}"))
-}
-
-fn convolution_score_sql(kernel: &[f64]) -> String {
-    kernel
-        .iter()
-        .enumerate()
-        .map(|(lag, weight)| format!("score_lag_{lag} * {weight:.17}"))
-        .collect::<Vec<_>>()
-        .join(" + ")
-}
-
 /// 为默认 H30-L50 构建等价但更窄的窗口计算。
 ///
 /// 默认核从第 4 个权重起都是相同的三十日慢核权重，因此可将 30 个
@@ -373,7 +215,29 @@ fn compute_convolution_rank_range(
     end_date: &str,
     kernel: &[f64],
 ) -> Result<(usize, usize), String> {
-    ensure_convolution_rank_table(conn)?;
+    (|conn: &Connection| -> Result<(), String> {
+        conn.execute_batch(
+            r#"
+        CREATE TABLE IF NOT EXISTS convolution_rank (
+            ts_code VARCHAR NOT NULL,
+            trade_date VARCHAR NOT NULL,
+            kernel_name VARCHAR NOT NULL,
+            raw_score DOUBLE NOT NULL,
+            convolution_score DOUBLE NOT NULL,
+            database_rank BIGINT,
+            raw_rank BIGINT NOT NULL,
+            convolution_rank BIGINT NOT NULL,
+            rank_change BIGINT NOT NULL,
+            PRIMARY KEY (ts_code, trade_date, kernel_name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_convolution_rank_date_rank_ts
+            ON convolution_rank(trade_date, kernel_name, convolution_rank, ts_code);
+        CREATE INDEX IF NOT EXISTS idx_convolution_rank_ts_date
+            ON convolution_rank(ts_code, trade_date, kernel_name);
+        "#,
+        )
+        .map_err(|e| format!("初始化卷积排名表失败: {e}"))
+    })(conn)?;
 
     let warmup_start = conn
         .query_row(
@@ -408,7 +272,14 @@ fn compute_convolution_rank_range(
             })
             .collect::<Vec<_>>()
             .join(",\n                ");
-        (lag_columns, convolution_score_sql(kernel))
+        (lag_columns, (|kernel : & [f64]| -> String {
+    kernel
+        .iter()
+        .enumerate()
+        .map(|(lag, weight)| format!("score_lag_{lag} * {weight:.17}"))
+        .collect::<Vec<_>>()
+        .join(" + ")
+})(kernel))
     });
     let oldest_lag = kernel.len() - 1;
     let sql = format!(
@@ -577,7 +448,85 @@ pub fn get_convolution_rank_page(
     let effective_trade_date = resolve_trade_date(&conn, trade_date)?;
     let kernel = default_convolution_kernel();
     let history_trade_dates = load_recent_trade_dates(&conn, &effective_trade_date, kernel.len())?;
-    let stored_ranking = load_stored_convolution_ranking(&conn, &effective_trade_date)?;
+    let stored_ranking =
+        (|conn: &Connection,
+          target_date: &str|
+         -> Result<Option<Vec<crate::simulate::rank::ConvolutionRankRow>>, String> {
+            let table_exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'convolution_rank'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("检查卷积排名表失败: {e}"))?;
+            if table_exists <= 0 {
+                return Ok(None);
+            }
+
+            let mut stmt = conn
+                .prepare(
+                    r#"
+            SELECT
+                ts_code,
+                trade_date,
+                database_rank,
+                raw_score,
+                convolution_score,
+                raw_rank,
+                convolution_rank,
+                rank_change
+            FROM convolution_rank
+            WHERE trade_date = ? AND kernel_name = ?
+            ORDER BY convolution_rank ASC, ts_code ASC
+            "#,
+                )
+                .map_err(|e| format!("预编译已计算卷积排名查询失败: {e}"))?;
+            let mut query_rows = stmt
+                .query(params![target_date, DEFAULT_CONVOLUTION_KERNEL_NAME])
+                .map_err(|e| format!("查询已计算卷积排名失败: {e}"))?;
+            let mut ranking = Vec::new();
+            while let Some(row) = query_rows
+                .next()
+                .map_err(|e| format!("读取已计算卷积排名失败: {e}"))?
+            {
+                let ts_code: String = row
+                    .get(0)
+                    .map_err(|e| format!("读取卷积排名代码失败: {e}"))?;
+                let raw_rank = row
+                    .get::<_, i64>(5)
+                    .map_err(|e| format!("读取原始名次失败: {e}"))?
+                    .max(0) as usize;
+                let convolution_rank = row
+                    .get::<_, i64>(6)
+                    .map_err(|e| format!("读取卷积名次失败: {e}"))?
+                    .max(0) as usize;
+                let rank_change_i64 = row
+                    .get::<_, i64>(7)
+                    .map_err(|e| format!("读取卷积名次变化失败: {e}"))?;
+                let rank_change = isize::try_from(rank_change_i64)
+                    .map_err(|_| format!("卷积名次变化超出范围: {rank_change_i64}"))?;
+
+                ranking.push(crate::simulate::rank::ConvolutionRankRow {
+                    ts_code,
+                    trade_date: row
+                        .get(1)
+                        .map_err(|e| format!("读取卷积排名日期失败: {e}"))?,
+                    database_rank: row.get(2).map_err(|e| format!("读取数据库名次失败: {e}"))?,
+                    raw_score: row.get(3).map_err(|e| format!("读取原始分数失败: {e}"))?,
+                    convolved_score: row.get(4).map_err(|e| format!("读取卷积分数失败: {e}"))?,
+                    raw_rank,
+                    convolution_rank,
+                    rank_change,
+                    score_history: Vec::new(),
+                });
+            }
+
+            if ranking.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(ranking))
+            }
+        })(&conn, &effective_trade_date)?;
     let loaded_from_store = stored_ranking.is_some();
     let ranking = match stored_ranking {
         Some(ranking) => ranking,
@@ -625,7 +574,51 @@ pub fn get_convolution_rank_page(
 
     let mut selected_ranking = select_ranking(ranking);
     if loaded_from_store
-        && hydrate_score_histories(&conn, &history_trade_dates, &mut selected_ranking).is_err()
+        && (|conn: &Connection,
+             history_trade_dates: &[String],
+             ranking: &mut [crate::simulate::rank::ConvolutionRankRow]|
+         -> Result<(), String> {
+            if ranking.is_empty() {
+                return Ok(());
+            }
+            let stock_codes = ranking
+                .iter()
+                .map(|row| row.ts_code.clone())
+                .collect::<Vec<_>>();
+            let score_rows =
+                load_score_rows_for_dates(conn, history_trade_dates, Some(&stock_codes))?;
+            let mut scores_by_stock =
+                std::collections::HashMap::<String, std::collections::HashMap<String, f64>>::new();
+            for row in score_rows {
+                if row.total_score.is_finite() {
+                    scores_by_stock
+                        .entry(row.ts_code)
+                        .or_default()
+                        .insert(row.trade_date, row.total_score);
+                }
+            }
+
+            for row in ranking {
+                let Some(scores_by_date) = scores_by_stock.get(&row.ts_code) else {
+                    return Err(format!(
+                        "已落盘卷积排名缺少{}的评分历史，请重新计算卷积排名",
+                        row.ts_code
+                    ));
+                };
+                row.score_history = history_trade_dates
+                    .iter()
+                    .map(|trade_date| scores_by_date.get(trade_date).copied())
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| {
+                        format!(
+                            "已落盘卷积排名缺少{}的完整评分窗口，请重新计算卷积排名",
+                            row.ts_code
+                        )
+                    })?;
+            }
+            Ok(())
+        })(&conn, &history_trade_dates, &mut selected_ranking)
+        .is_err()
     {
         // score_summary 更新时正常会同步清理对应卷积日期。若遇到旧库或
         // 外部修改造成的残留记录，退回即时全量计算以维持页面正确性。

@@ -61,35 +61,6 @@ pub enum BinaryOp {
     Or,
 }
 
-fn infix_bp(kind: &TokenKind) -> Option<(u8, u8, BinaryOp)> {
-    // 先套运算,再套比较,最后套逻辑,优先级高的先套括号
-    match kind {
-        TokenKind::Ge => Some((30, 31, BinaryOp::Ge)),
-        TokenKind::Gt => Some((30, 31, BinaryOp::Gt)),
-        TokenKind::Le => Some((30, 31, BinaryOp::Le)),
-        TokenKind::Lt => Some((30, 31, BinaryOp::Lt)),
-        TokenKind::Eq => Some((30, 31, BinaryOp::Eq)),
-        TokenKind::Ne => Some((30, 31, BinaryOp::Ne)),
-
-        TokenKind::Plus => Some((40, 41, BinaryOp::Add)),
-        TokenKind::Minus => Some((40, 41, BinaryOp::Sub)),
-        TokenKind::Star => Some((50, 51, BinaryOp::Mul)),
-        TokenKind::Slash => Some((50, 51, BinaryOp::Div)),
-
-        TokenKind::And => Some((20, 21, BinaryOp::And)),
-        TokenKind::Or => Some((10, 11, BinaryOp::Or)),
-
-        _ => None,
-    }
-}
-
-fn in_bp(kind: &TokenKind) -> Option<(u8, u8)> {
-    match kind {
-        TokenKind::In => Some((30, 31)),
-        _ => None,
-    }
-}
-
 // 储存表达式的结构体
 #[derive(Debug, Clone)]
 pub struct Parser {
@@ -186,7 +157,13 @@ impl Parser {
 
         // 匹配优先级
         loop {
-            if let Some((l_bp, _r_bp)) = in_bp(self.peek_kind()) {
+            if let Some((l_bp, _r_bp)) = (|kind: &TokenKind| -> Option<(u8, u8)> {
+                match kind {
+                    TokenKind::In => Some((30, 31)),
+                    _ => None,
+                }
+            })(self.peek_kind())
+            {
                 if l_bp < min_bp {
                     break;
                 }
@@ -197,7 +174,27 @@ impl Parser {
             }
 
             // 初始化比较表
-            let Some((l_bp, r_bp, op)) = infix_bp(self.peek_kind()) else {
+            let Some((l_bp, r_bp, op)) = (|kind: &TokenKind| -> Option<(u8, u8, BinaryOp)> {
+                // 先套运算,再套比较,最后套逻辑,优先级高的先套括号
+                match kind {
+                    TokenKind::Ge => Some((30, 31, BinaryOp::Ge)),
+                    TokenKind::Gt => Some((30, 31, BinaryOp::Gt)),
+                    TokenKind::Le => Some((30, 31, BinaryOp::Le)),
+                    TokenKind::Lt => Some((30, 31, BinaryOp::Lt)),
+                    TokenKind::Eq => Some((30, 31, BinaryOp::Eq)),
+                    TokenKind::Ne => Some((30, 31, BinaryOp::Ne)),
+
+                    TokenKind::Plus => Some((40, 41, BinaryOp::Add)),
+                    TokenKind::Minus => Some((40, 41, BinaryOp::Sub)),
+                    TokenKind::Star => Some((50, 51, BinaryOp::Mul)),
+                    TokenKind::Slash => Some((50, 51, BinaryOp::Div)),
+
+                    TokenKind::And => Some((20, 21, BinaryOp::And)),
+                    TokenKind::Or => Some((10, 11, BinaryOp::Or)),
+
+                    _ => None,
+                }
+            })(self.peek_kind()) else {
                 break;
             };
             // 如果优先级比较低,比如先遇到乘法后遇到加法,则把获取到的lhs给乘法

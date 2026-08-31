@@ -103,206 +103,10 @@ fn open_result_conn(source_path: &str) -> Result<Connection, String> {
     Connection::open(result_db_str).map_err(|e| format!("打开结果库失败: {e}"))
 }
 
-fn load_target_summary_row(
-    conn: &Connection,
-    trade_date: &str,
-    ts_code: &str,
-) -> Result<Option<SummaryRow>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT ts_code, total_score, rank
-            FROM score_summary
-            WHERE trade_date = ? AND ts_code = ?
-            LIMIT 1
-            "#,
-        )
-        .map_err(|e| format!("预编译相似股目标查询失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![trade_date, ts_code])
-        .map_err(|e| format!("查询相似股目标失败: {e}"))?;
-
-    let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取相似股目标失败: {e}"))?
-    else {
-        return Ok(None);
-    };
-
-    Ok(Some(SummaryRow {
-        ts_code: row.get(0).map_err(|e| format!("读取 ts_code 失败: {e}"))?,
-        total_score: row
-            .get(1)
-            .map_err(|e| format!("读取 total_score 失败: {e}"))?,
-        rank: row.get(2).map_err(|e| format!("读取 rank 失败: {e}"))?,
-    }))
-}
-
-fn load_candidate_summary_rows(
-    conn: &Connection,
-    trade_date: &str,
-    candidate_codes: &HashSet<String>,
-) -> Result<Vec<SummaryRow>, String> {
-    if candidate_codes.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut sorted_codes = candidate_codes.iter().cloned().collect::<Vec<_>>();
-    sorted_codes.sort();
-    let placeholders = std::iter::repeat_n("(?)", sorted_codes.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        r#"
-        WITH candidates(ts_code) AS (VALUES {placeholders})
-        SELECT s.ts_code, s.total_score, s.rank
-        FROM score_summary AS s
-        INNER JOIN candidates AS c ON c.ts_code = s.ts_code
-        WHERE s.trade_date = ?
-        ORDER BY s.rank ASC NULLS LAST, s.total_score DESC NULLS LAST, s.ts_code ASC
-        "#
-    );
-    let mut params = sorted_codes;
-    params.push(trade_date.to_string());
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| format!("预编译相似股候选查询失败: {e}"))?;
-    let mut rows = stmt
-        .query(params_from_iter(params.iter()))
-        .map_err(|e| format!("查询相似股候选失败: {e}"))?;
-
-    let mut out = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取相似股候选失败: {e}"))?
-    {
-        out.push(SummaryRow {
-            ts_code: row.get(0).map_err(|e| format!("读取 ts_code 失败: {e}"))?,
-            total_score: row
-                .get(1)
-                .map_err(|e| format!("读取 total_score 失败: {e}"))?,
-            rank: row.get(2).map_err(|e| format!("读取 rank 失败: {e}"))?,
-        });
-    }
-
-    Ok(out)
-}
-
 fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.iter().any(|existing| existing == &value) {
         values.push(value);
     }
-}
-
-fn load_target_trigger_scenes(
-    conn: &Connection,
-    trade_date: &str,
-    ts_code: &str,
-) -> Result<Vec<String>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT scene_name
-            FROM scene_details
-            WHERE trade_date = ? AND ts_code = ?
-              AND stage IN ('trigger', 'confirm')
-            ORDER BY scene_name ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译相似股目标场景查询失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![trade_date, ts_code])
-        .map_err(|e| format!("查询相似股目标场景失败: {e}"))?;
-
-    let mut out = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取相似股目标场景失败: {e}"))?
-    {
-        let scene_name: String = row.get(0).map_err(|e| format!("读取场景名称失败: {e}"))?;
-        let scene_name = scene_name.trim();
-        if scene_name.is_empty() {
-            continue;
-        }
-        push_unique(&mut out, scene_name.to_string());
-    }
-
-    Ok(out)
-}
-
-fn load_matching_scene_map(
-    conn: &Connection,
-    trade_date: &str,
-    ts_code: &str,
-) -> Result<HashMap<String, Vec<String>>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            WITH target_scene AS (
-                SELECT DISTINCT scene_name
-                FROM scene_details
-                WHERE trade_date = ?
-                  AND ts_code = ?
-                  AND stage IN ('trigger', 'confirm')
-                  AND scene_name IS NOT NULL
-                  AND TRIM(scene_name) <> ''
-            )
-            SELECT cand.ts_code, cand.scene_name
-            FROM scene_details AS cand
-            INNER JOIN target_scene AS target
-              ON target.scene_name = cand.scene_name
-            WHERE cand.trade_date = ?
-              AND cand.ts_code <> ?
-              AND cand.stage IN ('trigger', 'confirm')
-            ORDER BY cand.ts_code ASC, cand.scene_name ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译相似股匹配场景查询失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![trade_date, ts_code, trade_date, ts_code])
-        .map_err(|e| format!("查询相似股匹配场景失败: {e}"))?;
-
-    let mut out = HashMap::<String, Vec<String>>::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取相似股匹配场景失败: {e}"))?
-    {
-        let candidate_ts_code: String = row
-            .get(0)
-            .map_err(|e| format!("读取场景 ts_code 失败: {e}"))?;
-        let scene_name: String = row.get(1).map_err(|e| format!("读取场景名称失败: {e}"))?;
-        let scene_name = scene_name.trim();
-        if scene_name.is_empty() {
-            continue;
-        }
-        push_unique(
-            out.entry(candidate_ts_code).or_default(),
-            scene_name.to_string(),
-        );
-    }
-
-    Ok(out)
-}
-
-fn build_available_score(
-    target_industry: Option<&String>,
-    target_concepts: &[String],
-    target_trigger_scenes: &[String],
-) -> f64 {
-    let mut out = 0.0;
-    if !target_concepts.is_empty() {
-        out += CONCEPT_WEIGHT;
-    }
-    if target_industry
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-    {
-        out += INDUSTRY_WEIGHT;
-    }
-    if !target_trigger_scenes.is_empty() {
-        out += SCENE_WEIGHT;
-    }
-    out
 }
 
 fn calc_ratio_score(
@@ -325,29 +129,6 @@ fn calc_ratio_score(
     (score, matched_items)
 }
 
-pub(crate) fn get_stock_similarity_page_with_conn(
-    conn: &Connection,
-    source_path: &str,
-    effective_trade_date: &str,
-    ts_code: &str,
-    limit: Option<u32>,
-) -> Result<StockSimilarityPageData, String> {
-    let name_map = build_name_map(source_path).unwrap_or_default();
-    let concept_map = build_concepts_map(source_path).unwrap_or_default();
-    let industry_map = build_industry_map(source_path).unwrap_or_default();
-    get_stock_similarity_page_with_conn_and_maps(
-        conn,
-        effective_trade_date,
-        ts_code,
-        limit,
-        StockSimilarityMaps {
-            name_map: &name_map,
-            concept_map: &concept_map,
-            industry_map: &industry_map,
-        },
-    )
-}
-
 pub(crate) fn get_stock_similarity_page_with_conn_and_maps(
     conn: &Connection,
     effective_trade_date: &str,
@@ -356,7 +137,41 @@ pub(crate) fn get_stock_similarity_page_with_conn_and_maps(
     maps: StockSimilarityMaps<'_>,
 ) -> Result<StockSimilarityPageData, String> {
     let normalized_ts_code = canonical_ts_code(ts_code);
-    if load_target_summary_row(conn, effective_trade_date, &normalized_ts_code)?.is_none() {
+    if (|conn: &Connection,
+         trade_date: &str,
+         ts_code: &str|
+     -> Result<Option<SummaryRow>, String> {
+        let mut stmt = conn
+            .prepare(
+                r#"
+            SELECT ts_code, total_score, rank
+            FROM score_summary
+            WHERE trade_date = ? AND ts_code = ?
+            LIMIT 1
+            "#,
+            )
+            .map_err(|e| format!("预编译相似股目标查询失败: {e}"))?;
+        let mut rows = stmt
+            .query(params![trade_date, ts_code])
+            .map_err(|e| format!("查询相似股目标失败: {e}"))?;
+
+        let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取相似股目标失败: {e}"))?
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(SummaryRow {
+            ts_code: row.get(0).map_err(|e| format!("读取 ts_code 失败: {e}"))?,
+            total_score: row
+                .get(1)
+                .map_err(|e| format!("读取 total_score 失败: {e}"))?,
+            rank: row.get(2).map_err(|e| format!("读取 rank 失败: {e}"))?,
+        }))
+    })(conn, effective_trade_date, &normalized_ts_code)?
+    .is_none()
+    {
         return Err(format!(
             "未找到 {} 在 {} 的评分结果",
             normalized_ts_code, effective_trade_date
@@ -370,8 +185,57 @@ pub(crate) fn get_stock_similarity_page_with_conn_and_maps(
         .map(split_match_items)
         .unwrap_or_default();
     let target_trigger_scenes =
-        load_target_trigger_scenes(conn, effective_trade_date, &normalized_ts_code)?;
-    let available_score = build_available_score(
+        (|conn: &Connection, trade_date: &str, ts_code: &str| -> Result<Vec<String>, String> {
+            let mut stmt = conn
+                .prepare(
+                    r#"
+            SELECT scene_name
+            FROM scene_details
+            WHERE trade_date = ? AND ts_code = ?
+              AND stage IN ('trigger', 'confirm')
+            ORDER BY scene_name ASC
+            "#,
+                )
+                .map_err(|e| format!("预编译相似股目标场景查询失败: {e}"))?;
+            let mut rows = stmt
+                .query(params![trade_date, ts_code])
+                .map_err(|e| format!("查询相似股目标场景失败: {e}"))?;
+
+            let mut out = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| format!("读取相似股目标场景失败: {e}"))?
+            {
+                let scene_name: String =
+                    row.get(0).map_err(|e| format!("读取场景名称失败: {e}"))?;
+                let scene_name = scene_name.trim();
+                if scene_name.is_empty() {
+                    continue;
+                }
+                push_unique(&mut out, scene_name.to_string());
+            }
+
+            Ok(out)
+        })(conn, effective_trade_date, &normalized_ts_code)?;
+    let available_score = (|target_industry: Option<&String>,
+                            target_concepts: &[String],
+                            target_trigger_scenes: &[String]|
+     -> f64 {
+        let mut out = 0.0;
+        if !target_concepts.is_empty() {
+            out += CONCEPT_WEIGHT;
+        }
+        if target_industry
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            out += INDUSTRY_WEIGHT;
+        }
+        if !target_trigger_scenes.is_empty() {
+            out += SCENE_WEIGHT;
+        }
+        out
+    })(
         target_industry.as_ref(),
         &target_concept_items,
         &target_trigger_scenes,
@@ -392,7 +256,59 @@ pub(crate) fn get_stock_similarity_page_with_conn_and_maps(
     let matching_scene_map = if target_trigger_scenes.is_empty() {
         HashMap::new()
     } else {
-        load_matching_scene_map(conn, effective_trade_date, &normalized_ts_code)?
+        (|conn: &Connection,
+          trade_date: &str,
+          ts_code: &str|
+         -> Result<HashMap<String, Vec<String>>, String> {
+            let mut stmt = conn
+                .prepare(
+                    r#"
+            WITH target_scene AS (
+                SELECT DISTINCT scene_name
+                FROM scene_details
+                WHERE trade_date = ?
+                  AND ts_code = ?
+                  AND stage IN ('trigger', 'confirm')
+                  AND scene_name IS NOT NULL
+                  AND TRIM(scene_name) <> ''
+            )
+            SELECT cand.ts_code, cand.scene_name
+            FROM scene_details AS cand
+            INNER JOIN target_scene AS target
+              ON target.scene_name = cand.scene_name
+            WHERE cand.trade_date = ?
+              AND cand.ts_code <> ?
+              AND cand.stage IN ('trigger', 'confirm')
+            ORDER BY cand.ts_code ASC, cand.scene_name ASC
+            "#,
+                )
+                .map_err(|e| format!("预编译相似股匹配场景查询失败: {e}"))?;
+            let mut rows = stmt
+                .query(params![trade_date, ts_code, trade_date, ts_code])
+                .map_err(|e| format!("查询相似股匹配场景失败: {e}"))?;
+
+            let mut out = HashMap::<String, Vec<String>>::new();
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| format!("读取相似股匹配场景失败: {e}"))?
+            {
+                let candidate_ts_code: String = row
+                    .get(0)
+                    .map_err(|e| format!("读取场景 ts_code 失败: {e}"))?;
+                let scene_name: String =
+                    row.get(1).map_err(|e| format!("读取场景名称失败: {e}"))?;
+                let scene_name = scene_name.trim();
+                if scene_name.is_empty() {
+                    continue;
+                }
+                push_unique(
+                    out.entry(candidate_ts_code).or_default(),
+                    scene_name.to_string(),
+                );
+            }
+
+            Ok(out)
+        })(conn, effective_trade_date, &normalized_ts_code)?
     };
     let mut candidate_codes = HashSet::new();
     if let Some(target_industry) = target_industry.as_deref().map(str::trim) {
@@ -425,7 +341,54 @@ pub(crate) fn get_stock_similarity_page_with_conn_and_maps(
         candidate_codes.insert(candidate_ts_code.clone());
     }
 
-    let summary_rows = load_candidate_summary_rows(conn, effective_trade_date, &candidate_codes)?;
+    let summary_rows = (|conn: &Connection,
+                         trade_date: &str,
+                         candidate_codes: &HashSet<String>|
+     -> Result<Vec<SummaryRow>, String> {
+        if candidate_codes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut sorted_codes = candidate_codes.iter().cloned().collect::<Vec<_>>();
+        sorted_codes.sort();
+        let placeholders = std::iter::repeat_n("(?)", sorted_codes.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            r#"
+        WITH candidates(ts_code) AS (VALUES {placeholders})
+        SELECT s.ts_code, s.total_score, s.rank
+        FROM score_summary AS s
+        INNER JOIN candidates AS c ON c.ts_code = s.ts_code
+        WHERE s.trade_date = ?
+        ORDER BY s.rank ASC NULLS LAST, s.total_score DESC NULLS LAST, s.ts_code ASC
+        "#
+        );
+        let mut params = sorted_codes;
+        params.push(trade_date.to_string());
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("预编译相似股候选查询失败: {e}"))?;
+        let mut rows = stmt
+            .query(params_from_iter(params.iter()))
+            .map_err(|e| format!("查询相似股候选失败: {e}"))?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取相似股候选失败: {e}"))?
+        {
+            out.push(SummaryRow {
+                ts_code: row.get(0).map_err(|e| format!("读取 ts_code 失败: {e}"))?,
+                total_score: row
+                    .get(1)
+                    .map_err(|e| format!("读取 total_score 失败: {e}"))?,
+                rank: row.get(2).map_err(|e| format!("读取 rank 失败: {e}"))?,
+            });
+        }
+
+        Ok(out)
+    })(conn, effective_trade_date, &candidate_codes)?;
     let mut items = Vec::new();
     for row in summary_rows {
         if row.ts_code == normalized_ts_code {
@@ -540,7 +503,27 @@ pub fn get_stock_similarity_page(
 ) -> Result<StockSimilarityPageData, String> {
     let conn = open_result_conn(&source_path)?;
     let effective_trade_date = resolve_trade_date(&conn, trade_date)?;
-    get_stock_similarity_page_with_conn(&conn, &source_path, &effective_trade_date, &ts_code, limit)
+    (|conn: &Connection,
+      source_path: &str,
+      effective_trade_date: &str,
+      ts_code: &str,
+      limit: Option<u32>|
+     -> Result<StockSimilarityPageData, String> {
+        let name_map = build_name_map(source_path).unwrap_or_default();
+        let concept_map = build_concepts_map(source_path).unwrap_or_default();
+        let industry_map = build_industry_map(source_path).unwrap_or_default();
+        get_stock_similarity_page_with_conn_and_maps(
+            conn,
+            effective_trade_date,
+            ts_code,
+            limit,
+            StockSimilarityMaps {
+                name_map: &name_map,
+                concept_map: &concept_map,
+                industry_map: &industry_map,
+            },
+        )
+    })(&conn, &source_path, &effective_trade_date, &ts_code, limit)
 }
 
 #[cfg(test)]

@@ -36,12 +36,7 @@ use lianghua_app_shared::{build_name_map, normalize_ts_code};
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
 const DEFAULT_INDEX_TS_CODE: &str = "000001.SH";
-const DEFAULT_BUY_PRICE_BASIS: &str = "open";
-const DEFAULT_MAX_POSITION_COUNT: usize = 5;
-const DEFAULT_BUY_SELECTION_MODE: &str = "random";
-const PAPER_VALIDATION_RANDOM_SEED: u64 = 0x4c48_5056_2026_0509;
 const PRICE_EPS: f64 = 1e-12;
-const PAPER_VALIDATION_ALWAYS_RUNTIME_KEYS: [&str; 4] = ["O", "H", "C", "PRE_CLOSE"];
 const PAPER_VALIDATION_INJECTED_RUNTIME_KEYS: [&str; 7] = [
     "RANK",
     "SCORE",
@@ -293,9 +288,25 @@ pub fn get_strategy_paper_validation_defaults(
     let trade_date_options = load_trade_date_options(source_path)?;
     let latest_trade_date = trade_date_options.last().cloned();
     let end_date = latest_trade_date.clone();
-    let start_date = end_date
-        .as_deref()
-        .and_then(|value| resolve_one_year_earlier_trade_date(&trade_date_options, value));
+    let start_date = end_date.as_deref().and_then(|value| {
+        (|trade_date_options: &[String], end_date: &str| -> Option<String> {
+            let end_date = NaiveDate::parse_from_str(end_date, "%Y%m%d").ok()?;
+            let target = end_date
+                .checked_sub_days(Days::new(365))
+                .unwrap_or(end_date);
+            let target_text = target.format("%Y%m%d").to_string();
+
+            let index = match trade_date_options
+                .binary_search_by(|value| value.as_str().cmp(&target_text))
+            {
+                Ok(index) => index,
+                Err(index) if index < trade_date_options.len() => index,
+                Err(_) => trade_date_options.len().saturating_sub(1),
+            };
+
+            trade_date_options.get(index).cloned()
+        })(&trade_date_options, value)
+    });
 
     Ok(StrategyPaperValidationDefaultsData {
         latest_trade_date,
@@ -303,10 +314,10 @@ pub fn get_strategy_paper_validation_defaults(
         end_date,
         min_listed_trade_days: DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
         index_ts_code: DEFAULT_INDEX_TS_CODE.to_string(),
-        buy_price_basis: DEFAULT_BUY_PRICE_BASIS.to_string(),
+        buy_price_basis: ("open").to_string(),
         slippage_pct: 0.0,
-        max_position_count: DEFAULT_MAX_POSITION_COUNT,
-        buy_selection_mode: DEFAULT_BUY_SELECTION_MODE.to_string(),
+        max_position_count: (5),
+        buy_selection_mode: ("random").to_string(),
     })
 }
 
@@ -396,9 +407,32 @@ pub fn run_strategy_paper_validation(
     let warmup_need =
         estimate_expression_warmup(&buy_program)?.max(estimate_expression_warmup(&sell_program)?);
     let required_runtime_keys = collect_paper_validation_runtime_keys(&buy_program, &sell_program);
-    let used_cyq_chen_keys =
-        collect_paper_validation_cyq_chen_runtime_keys(&buy_program, &sell_program);
-    let sell_runtime_keys = collect_paper_validation_sell_runtime_keys(&sell_program);
+    let used_cyq_chen_keys = (|buy_program: &Stmts, sell_program: &Stmts| -> HashSet<String> {
+        collect_used_cyq_chen_runtime_keys(&[buy_program, sell_program])
+    })(&buy_program, &sell_program);
+    let sell_runtime_keys = (|sell_program: &Stmts| -> HashSet<String> {
+        let cyq_chen_keys = cyq_chen_runtime_key_names();
+        let injected_keys = PAPER_VALIDATION_INJECTED_RUNTIME_KEYS
+            .iter()
+            .copied()
+            .chain(cyq_chen_keys.clone())
+            .collect::<Vec<_>>();
+        let mut keys = collect_runtime_keys_from_expr_programs(
+            &[sell_program],
+            RuntimeKeyCollectOptions {
+                always_keys: &[],
+                injected_keys: &injected_keys,
+                aliases: &PAPER_VALIDATION_RUNTIME_ALIASES,
+            },
+        );
+        keys.extend(
+            PAPER_VALIDATION_INJECTED_RUNTIME_KEYS
+                .iter()
+                .map(|key| key.to_string()),
+        );
+        keys.extend(cyq_chen_keys.into_iter().map(|key| key.to_string()));
+        keys
+    })(&sell_program);
     let needs_rank_score = matches!(parsed_buy_selection_mode, BuySelectionMode::RankTop)
         || expr_program_uses_runtime_key(&buy_program, "RANK")
         || expr_program_uses_runtime_key(&sell_program, "RANK")
@@ -439,7 +473,85 @@ pub fn run_strategy_paper_validation(
     let test_stock_name = normalized_test_ts_code
         .as_ref()
         .and_then(|ts_code| name_map.get(ts_code).cloned());
-    let eligibility = build_paper_trade_eligibility(
+    let eligibility = (|source_path: &str,
+                        min_listed_trade_days: usize|
+     -> Result<PaperTradeEligibility, String> {
+        if min_listed_trade_days == 0 {
+            return Ok(PaperTradeEligibility::default());
+        }
+
+        let trade_dates = load_trade_date_list(source_path)?;
+        let mut trade_date_to_index = HashMap::with_capacity(trade_dates.len());
+        for (index, trade_date) in trade_dates.iter().enumerate() {
+            trade_date_to_index.insert(trade_date.clone(), index);
+        }
+
+        let stock_list = stock_list_path(source_path);
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_path(&stock_list)
+            .map_err(|e| format!("打开stock_list.csv失败:路径:{:?},错误:{e}", stock_list))?;
+        let headers = reader
+            .headers()
+            .map_err(|e| format!("读取stock_list.csv表头失败:{e}"))?
+            .iter()
+            .map(|value| value.trim().to_string())
+            .collect::<Vec<_>>();
+
+        let Some(ts_code_index) = headers
+            .iter()
+            .position(|header| header.eq_ignore_ascii_case("ts_code"))
+        else {
+            return Ok(PaperTradeEligibility {
+                trade_date_to_index,
+                listed_trade_index_by_ts: HashMap::new(),
+                min_listed_trade_days,
+            });
+        };
+        let Some(list_date_index) = headers
+            .iter()
+            .position(|header| header.eq_ignore_ascii_case("list_date"))
+        else {
+            return Ok(PaperTradeEligibility {
+                trade_date_to_index,
+                listed_trade_index_by_ts: HashMap::new(),
+                min_listed_trade_days,
+            });
+        };
+
+        let mut listed_trade_index_by_ts = HashMap::new();
+        for row_result in reader.records() {
+            let row = row_result.map_err(|e| format!("解析stock_list.csv失败:{e}"))?;
+            let Some(ts_code) = row
+                .get(ts_code_index)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let Some(list_date) = row
+                .get(list_date_index)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+
+            let listed_index =
+                match trade_dates.binary_search_by(|value| value.as_str().cmp(list_date)) {
+                    Ok(index) => index,
+                    Err(index) if index < trade_dates.len() => index,
+                    Err(_) => continue,
+                };
+            listed_trade_index_by_ts.insert(ts_code.to_string(), listed_index);
+        }
+
+        Ok(PaperTradeEligibility {
+            trade_date_to_index,
+            listed_trade_index_by_ts,
+            min_listed_trade_days,
+        })
+    })(
         source_path,
         min_listed_trade_days.unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
     )?;
@@ -460,23 +572,177 @@ pub fn run_strategy_paper_validation(
             let mut out = Vec::new();
 
             for ts_code in ts_group {
-                if let Some(stock) = prepare_paper_stock_for_portfolio(
-                    &worker_reader,
-                    ts_code,
-                    name_map.get(ts_code),
-                    st_list.contains(ts_code),
-                    total_share_map.get(ts_code).copied(),
-                    &worker_buy_program,
-                    &sell_runtime_keys,
-                    &rank_score_series_map,
-                    needs_rank_score,
-                    &cyq_chen_injector,
-                    &resolved_start_date,
-                    &resolved_end_date,
-                    &query_start_date,
-                    warmup_need,
-                    need_rows,
-                )? {
+                if let Some(stock) =
+                    (|reader: &DataReader,
+                      ts_code: &str,
+                      stock_name: Option<&String>,
+                      is_st: bool,
+                      total_share: Option<f64>,
+                      buy_program: &Stmts,
+                      sell_runtime_keys: &HashSet<String>,
+                      rank_score_series_map: &HashMap<String, HashMap<String, RankScoreInfo>>,
+                      needs_rank_score: bool,
+                      cyq_chen_injector: &CyqChenFieldInjector,
+                      start_date: &str,
+                      end_date: &str,
+                      query_start_date: &str,
+                      warmup_need: usize,
+                      need_rows: usize|
+                     -> Result<Option<PreparedPaperStock>, String> {
+                        let mut row_data = (|reader: &DataReader,
+                                             ts_code: &str,
+                                             query_start_date: &str,
+                                             start_date: &str,
+                                             end_date: &str,
+                                             warmup_need: usize,
+                                             need_rows: usize|
+                         -> Result<RowData, String> {
+                            match reader.load_one(
+                                ts_code,
+                                DEFAULT_ADJ_TYPE,
+                                query_start_date,
+                                end_date,
+                            ) {
+                                Ok(row_data)
+                                    if (|trade_dates: &[String],
+                                         start_date: &str,
+                                         warmup_need: usize|
+                                     -> bool {
+                                        let keep_from = trade_dates
+                                            .binary_search_by(|value| {
+                                                value.as_str().cmp(start_date)
+                                            })
+                                            .unwrap_or_else(|index| index);
+
+                                        keep_from < trade_dates.len() && keep_from >= warmup_need
+                                    })(
+                                        &row_data.trade_dates, start_date, warmup_need
+                                    ) =>
+                                {
+                                    Ok(row_data)
+                                }
+                                Ok(row_data)
+                                    if row_data
+                                        .trade_dates
+                                        .binary_search_by(|value| value.as_str().cmp(start_date))
+                                        .unwrap_or_else(|index| index)
+                                        >= row_data.trade_dates.len() =>
+                                {
+                                    Ok(row_data)
+                                }
+                                Ok(_) => reader.load_one_tail_rows(
+                                    ts_code,
+                                    DEFAULT_ADJ_TYPE,
+                                    end_date,
+                                    need_rows,
+                                ),
+                                Err(error) if error == "trade_dates为空" => reader
+                                    .load_one_tail_rows(
+                                        ts_code,
+                                        DEFAULT_ADJ_TYPE,
+                                        end_date,
+                                        need_rows,
+                                    ),
+                                Err(error) => Err(error),
+                            }
+                        })(
+                            reader,
+                            ts_code,
+                            query_start_date,
+                            start_date,
+                            end_date,
+                            warmup_need,
+                            need_rows,
+                        )?;
+                        if row_data.trade_dates.is_empty() {
+                            return Ok(None);
+                        }
+
+                        inject_stock_extra_fields(&mut row_data, ts_code, is_st, total_share)?;
+                        let _ = cyq_chen_injector.inject(&mut row_data, ts_code);
+                        if needs_rank_score {
+                            inject_runtime_rank_score_series(
+                                &mut row_data,
+                                ts_code,
+                                rank_score_series_map,
+                            )?;
+                        }
+
+                        let trade_dates = std::mem::take(&mut row_data.trade_dates);
+                        let keep_from = trade_dates
+                            .binary_search_by(|value| value.as_str().cmp(start_date))
+                            .unwrap_or_else(|index| index);
+                        if keep_from >= trade_dates.len() {
+                            return Ok(None);
+                        }
+
+                        let mut base_runtime = row_into_rt(row_data)?;
+                        let mut buy_runtime = base_runtime.clone();
+                        let buy_signal_series =
+                            evaluate_program_as_bool_series(&mut buy_runtime, buy_program)
+                                .map_err(|error| format!("{ts_code} 买点方程执行失败: {error}"))?;
+                        if !buy_signal_series
+                            .get(keep_from..)
+                            .unwrap_or_default()
+                            .iter()
+                            .any(|hit| *hit)
+                        {
+                            return Ok(None);
+                        }
+
+                        let open_series = runtime_num_series(&base_runtime, "O")
+                            .map_err(|error| format!("{ts_code} {error}"))?
+                            .to_vec();
+                        let high_series = runtime_num_series(&base_runtime, "H")
+                            .map_err(|error| format!("{ts_code} {error}"))?
+                            .to_vec();
+                        let close_series = runtime_num_series(&base_runtime, "C")
+                            .map_err(|error| format!("{ts_code} {error}"))?
+                            .to_vec();
+                        let pre_close_series = runtime_num_series(&base_runtime, "PRE_CLOSE")
+                            .map_err(|error| format!("{ts_code} {error}"))?
+                            .to_vec();
+                        let zhang_series = runtime_num_series(&base_runtime, "ZHANG")
+                            .map_err(|error| format!("{ts_code} {error}"))?
+                            .to_vec();
+                        let rank_series = runtime_num_series_optional(&base_runtime, "RANK")
+                            .map(|series| series.to_vec());
+                        base_runtime
+                            .vars
+                            .retain(|key, _| sell_runtime_keys.contains(key));
+
+                        Ok(Some(PreparedPaperStock {
+                            ts_code: ts_code.to_string(),
+                            name: stock_name.cloned(),
+                            trade_dates,
+                            open_series,
+                            high_series,
+                            close_series,
+                            pre_close_series,
+                            zhang_series,
+                            rank_series,
+                            base_runtime,
+                            buy_signal_series,
+                            keep_from,
+                        }))
+                    })(
+                        &worker_reader,
+                        ts_code,
+                        name_map.get(ts_code),
+                        st_list.contains(ts_code),
+                        total_share_map.get(ts_code).copied(),
+                        &worker_buy_program,
+                        &sell_runtime_keys,
+                        &rank_score_series_map,
+                        needs_rank_score,
+                        &cyq_chen_injector,
+                        &resolved_start_date,
+                        &resolved_end_date,
+                        &query_start_date,
+                        warmup_need,
+                        need_rows,
+                    )?
+                {
                     out.push(stock);
                 }
             }
@@ -515,7 +781,63 @@ pub fn run_strategy_paper_validation(
             .then_with(|| left.sell_date.cmp(&right.sell_date))
     });
 
-    let summary = build_trade_summary(&trades);
+    let summary =
+        (|trades: &[StrategyPaperValidationTradeRow]| -> StrategyPaperValidationSummaryData {
+            let mut closed_trade_count = 0usize;
+            let mut open_trade_count = 0usize;
+            let mut win_count = 0usize;
+            let mut return_sum = 0.0;
+            let mut return_count = 0usize;
+            let mut hold_days_sum = 0usize;
+            let mut best_return: Option<f64> = None;
+            let mut worst_return: Option<f64> = None;
+
+            for trade in trades {
+                if trade.status == "open" {
+                    open_trade_count += 1;
+                    continue;
+                }
+                if trade.status != "closed" {
+                    continue;
+                }
+                closed_trade_count += 1;
+                let Some(return_pct) = trade.realized_return_pct else {
+                    continue;
+                };
+                if return_pct > 0.0 {
+                    win_count += 1;
+                }
+                return_sum += return_pct;
+                return_count += 1;
+                hold_days_sum += trade.hold_days;
+                best_return = Some(best_return.map_or(return_pct, |value| value.max(return_pct)));
+                worst_return = Some(worst_return.map_or(return_pct, |value| value.min(return_pct)));
+            }
+
+            StrategyPaperValidationSummaryData {
+                buy_signal_count: trades.len(),
+                total_trade_count: trades.len(),
+                closed_trade_count,
+                open_trade_count,
+                win_rate: if return_count == 0 {
+                    None
+                } else {
+                    Some(win_count as f64 / return_count as f64)
+                },
+                avg_return_pct: if return_count == 0 {
+                    None
+                } else {
+                    Some(return_sum / return_count as f64)
+                },
+                avg_hold_days: if return_count == 0 {
+                    None
+                } else {
+                    Some(hold_days_sum as f64 / return_count as f64)
+                },
+                best_return_pct: best_return,
+                worst_return_pct: worst_return,
+            }
+        })(&trades);
     let index_daily_returns = load_index_daily_returns(
         source_path,
         &resolved_index_ts_code,
@@ -631,160 +953,6 @@ fn build_template_validation_runtime(warmup_need: usize, include_sell_fields: bo
     Runtime { vars }
 }
 
-fn build_trade_summary(
-    trades: &[StrategyPaperValidationTradeRow],
-) -> StrategyPaperValidationSummaryData {
-    let mut closed_trade_count = 0usize;
-    let mut open_trade_count = 0usize;
-    let mut win_count = 0usize;
-    let mut return_sum = 0.0;
-    let mut return_count = 0usize;
-    let mut hold_days_sum = 0usize;
-    let mut best_return: Option<f64> = None;
-    let mut worst_return: Option<f64> = None;
-
-    for trade in trades {
-        if trade.status == "open" {
-            open_trade_count += 1;
-            continue;
-        }
-        if trade.status != "closed" {
-            continue;
-        }
-        closed_trade_count += 1;
-        let Some(return_pct) = trade.realized_return_pct else {
-            continue;
-        };
-        if return_pct > 0.0 {
-            win_count += 1;
-        }
-        return_sum += return_pct;
-        return_count += 1;
-        hold_days_sum += trade.hold_days;
-        best_return = Some(best_return.map_or(return_pct, |value| value.max(return_pct)));
-        worst_return = Some(worst_return.map_or(return_pct, |value| value.min(return_pct)));
-    }
-
-    StrategyPaperValidationSummaryData {
-        buy_signal_count: trades.len(),
-        total_trade_count: trades.len(),
-        closed_trade_count,
-        open_trade_count,
-        win_rate: if return_count == 0 {
-            None
-        } else {
-            Some(win_count as f64 / return_count as f64)
-        },
-        avg_return_pct: if return_count == 0 {
-            None
-        } else {
-            Some(return_sum / return_count as f64)
-        },
-        avg_hold_days: if return_count == 0 {
-            None
-        } else {
-            Some(hold_days_sum as f64 / return_count as f64)
-        },
-        best_return_pct: best_return,
-        worst_return_pct: worst_return,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn prepare_paper_stock_for_portfolio(
-    reader: &DataReader,
-    ts_code: &str,
-    stock_name: Option<&String>,
-    is_st: bool,
-    total_share: Option<f64>,
-    buy_program: &Stmts,
-    sell_runtime_keys: &HashSet<String>,
-    rank_score_series_map: &HashMap<String, HashMap<String, RankScoreInfo>>,
-    needs_rank_score: bool,
-    cyq_chen_injector: &CyqChenFieldInjector,
-    start_date: &str,
-    end_date: &str,
-    query_start_date: &str,
-    warmup_need: usize,
-    need_rows: usize,
-) -> Result<Option<PreparedPaperStock>, String> {
-    let mut row_data = load_paper_validation_row_data(
-        reader,
-        ts_code,
-        query_start_date,
-        start_date,
-        end_date,
-        warmup_need,
-        need_rows,
-    )?;
-    if row_data.trade_dates.is_empty() {
-        return Ok(None);
-    }
-
-    inject_stock_extra_fields(&mut row_data, ts_code, is_st, total_share)?;
-    let _ = cyq_chen_injector.inject(&mut row_data, ts_code);
-    if needs_rank_score {
-        inject_runtime_rank_score_series(&mut row_data, ts_code, rank_score_series_map)?;
-    }
-
-    let trade_dates = std::mem::take(&mut row_data.trade_dates);
-    let keep_from = trade_dates
-        .binary_search_by(|value| value.as_str().cmp(start_date))
-        .unwrap_or_else(|index| index);
-    if keep_from >= trade_dates.len() {
-        return Ok(None);
-    }
-
-    let mut base_runtime = row_into_rt(row_data)?;
-    let mut buy_runtime = base_runtime.clone();
-    let buy_signal_series = evaluate_program_as_bool_series(&mut buy_runtime, buy_program)
-        .map_err(|error| format!("{ts_code} 买点方程执行失败: {error}"))?;
-    if !buy_signal_series
-        .get(keep_from..)
-        .unwrap_or_default()
-        .iter()
-        .any(|hit| *hit)
-    {
-        return Ok(None);
-    }
-
-    let open_series = runtime_num_series(&base_runtime, "O")
-        .map_err(|error| format!("{ts_code} {error}"))?
-        .to_vec();
-    let high_series = runtime_num_series(&base_runtime, "H")
-        .map_err(|error| format!("{ts_code} {error}"))?
-        .to_vec();
-    let close_series = runtime_num_series(&base_runtime, "C")
-        .map_err(|error| format!("{ts_code} {error}"))?
-        .to_vec();
-    let pre_close_series = runtime_num_series(&base_runtime, "PRE_CLOSE")
-        .map_err(|error| format!("{ts_code} {error}"))?
-        .to_vec();
-    let zhang_series = runtime_num_series(&base_runtime, "ZHANG")
-        .map_err(|error| format!("{ts_code} {error}"))?
-        .to_vec();
-    let rank_series =
-        runtime_num_series_optional(&base_runtime, "RANK").map(|series| series.to_vec());
-    base_runtime
-        .vars
-        .retain(|key, _| sell_runtime_keys.contains(key));
-
-    Ok(Some(PreparedPaperStock {
-        ts_code: ts_code.to_string(),
-        name: stock_name.cloned(),
-        trade_dates,
-        open_series,
-        high_series,
-        close_series,
-        pre_close_series,
-        zhang_series,
-        rank_series,
-        base_runtime,
-        buy_signal_series,
-        keep_from,
-    }))
-}
-
 #[allow(clippy::too_many_arguments)]
 fn simulate_portfolio_trade_rows(
     stocks: &[PreparedPaperStock],
@@ -805,10 +973,119 @@ fn simulate_portfolio_trade_rows(
     let mut pending_candidates: BTreeMap<String, Vec<PaperBuyCandidate>> = BTreeMap::new();
     let mut open_positions: Vec<PortfolioOpenPosition> = Vec::new();
     let mut trades = Vec::new();
-    let mut rng = StdRng::seed_from_u64(PAPER_VALIDATION_RANDOM_SEED);
+    let mut rng = StdRng::seed_from_u64(0x4c48_5056_2026_0509);
 
     for trade_date in global_trade_dates {
-        process_portfolio_sells(
+        (|stocks: &[PreparedPaperStock],
+          sell_program: &Stmts,
+          trade_date: &str,
+          open_positions: &mut Vec<PortfolioOpenPosition>,
+          trades: &mut Vec<StrategyPaperValidationTradeRow>,
+          buy_price_basis: BuyPriceBasis|
+         -> Result<(), String> {
+            let mut remaining_positions = Vec::with_capacity(open_positions.len());
+
+            for mut item in open_positions.drain(..) {
+                let stock = &stocks[item.stock_index];
+                let Ok(scan_index) = stock
+                    .trade_dates
+                    .binary_search_by(|value| value.as_str().cmp(trade_date))
+                else {
+                    remaining_positions.push(item);
+                    continue;
+                };
+                if scan_index < item.position.buy_index {
+                    remaining_positions.push(item);
+                    continue;
+                }
+
+                if item.position.last_sell_runtime_index < scan_index {
+                    extend_sell_runtime_series(
+                        &mut item.position.sell_runtime,
+                        &stock.open_series,
+                        &stock.high_series,
+                        item.position.buy_index,
+                        item.position.buy_cost_price,
+                        item.position.last_sell_runtime_index + 1,
+                        scan_index,
+                    )?;
+                    item.position.last_sell_runtime_index = scan_index;
+                }
+
+                let sell_hit = if item.position.pending_sell {
+                    true
+                } else {
+                    evaluate_sell_hit(&mut item.position.sell_runtime, sell_program, scan_index)
+                        .map_err(|error| format!("{} 卖点方程执行失败: {error}", stock.ts_code))?
+                };
+                let sell_price = resolve_normal_sell_price(
+                    stock.close_series.get(scan_index).copied().flatten(),
+                    stock.open_series.get(scan_index).copied().flatten(),
+                );
+                let pre_close = stock.pre_close_series.get(scan_index).copied().flatten();
+                let zhang_pct = stock.zhang_series.get(scan_index).copied().flatten();
+                let sell_executable = is_sell_price_executable(sell_price, pre_close, zhang_pct);
+
+                if sell_hit && sell_executable {
+                    trades.push((|stock: &PreparedPaperStock,
+                                  position: OpenPosition,
+                                  sell_index: usize,
+                                  buy_price_basis: BuyPriceBasis|
+                     -> StrategyPaperValidationTradeRow {
+                        let sell_price = resolve_normal_sell_price(
+                            stock.close_series.get(sell_index).copied().flatten(),
+                            stock.open_series.get(sell_index).copied().flatten(),
+                        );
+                        StrategyPaperValidationTradeRow {
+                            ts_code: stock.ts_code.clone(),
+                            name: stock.name.clone(),
+                            buy_date: position.buy_date,
+                            sell_date: stock.trade_dates.get(sell_index).cloned(),
+                            buy_rank: position.buy_rank,
+                            hold_days: sell_index.saturating_sub(position.buy_index),
+                            buy_price_basis: buy_price_basis.as_str().to_string(),
+                            buy_basis_price: Some(position.buy_basis_price),
+                            buy_cost_price: Some(position.buy_cost_price),
+                            sell_price,
+                            open_return_pct: calc_return_pct(
+                                stock.open_series.get(sell_index).copied().flatten(),
+                                position.buy_cost_price,
+                            ),
+                            high_return_pct: calc_return_pct(
+                                stock.high_series.get(sell_index).copied().flatten(),
+                                position.buy_cost_price,
+                            ),
+                            close_return_pct: calc_return_pct(
+                                stock.close_series.get(sell_index).copied().flatten(),
+                                position.buy_cost_price,
+                            ),
+                            realized_return_pct: calc_return_pct(
+                                sell_price,
+                                position.buy_cost_price,
+                            ),
+                            daily_holding_close_returns: build_daily_holding_close_returns(
+                                &stock.trade_dates,
+                                &stock.close_series,
+                                position.buy_index,
+                                sell_index,
+                                position.buy_cost_price,
+                            ),
+                            status: "closed".to_string(),
+                        }
+                    })(
+                        stock, item.position, scan_index, buy_price_basis
+                    ));
+                } else {
+                    if sell_hit {
+                        item.position.pending_sell = true;
+                    }
+                    remaining_positions.push(item);
+                }
+            }
+
+            *open_positions = remaining_positions;
+            Ok(())
+        })(
             stocks,
             sell_program,
             trade_date,
@@ -898,7 +1175,37 @@ fn simulate_portfolio_trade_rows(
         let Some(mut due_candidates) = pending_candidates.remove(trade_date.as_str()) else {
             continue;
         };
-        order_buy_candidates(&mut due_candidates, buy_selection_mode, &mut rng);
+        (|candidates: &mut [PaperBuyCandidate],
+          buy_selection_mode: BuySelectionMode,
+          rng: &mut StdRng| {
+            candidates.sort_by(|left, right| {
+                left.buy_date
+                    .cmp(&right.buy_date)
+                    .then_with(|| left.signal_date.cmp(&right.signal_date))
+                    .then_with(|| left.ts_code.cmp(&right.ts_code))
+            });
+
+            match buy_selection_mode {
+                BuySelectionMode::RankTop => candidates.sort_by(|left, right| {
+                    match (left.buy_rank, right.buy_rank) {
+                        (Some(left_rank), Some(right_rank)) => left_rank.cmp(&right_rank),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    }
+                    .then_with(|| left.signal_date.cmp(&right.signal_date))
+                    .then_with(|| left.ts_code.cmp(&right.ts_code))
+                }),
+                BuySelectionMode::Random => {
+                    if candidates.len() > 1 {
+                        for index in (1..candidates.len()).rev() {
+                            let swap_index = rng.random_range(0..=index);
+                            candidates.swap(index, swap_index);
+                        }
+                    }
+                }
+            }
+        })(&mut due_candidates, buy_selection_mode, &mut rng);
 
         let mut held_ts_codes = open_positions
             .iter()
@@ -948,462 +1255,52 @@ fn simulate_portfolio_trade_rows(
         }
     }
 
-    finalize_open_portfolio_positions(stocks, open_positions, &mut trades, buy_price_basis);
-    Ok(trades)
-}
-
-fn order_buy_candidates(
-    candidates: &mut [PaperBuyCandidate],
-    buy_selection_mode: BuySelectionMode,
-    rng: &mut StdRng,
-) {
-    candidates.sort_by(|left, right| {
-        left.buy_date
-            .cmp(&right.buy_date)
-            .then_with(|| left.signal_date.cmp(&right.signal_date))
-            .then_with(|| left.ts_code.cmp(&right.ts_code))
-    });
-
-    match buy_selection_mode {
-        BuySelectionMode::RankTop => candidates.sort_by(|left, right| {
-            match (left.buy_rank, right.buy_rank) {
-                (Some(left_rank), Some(right_rank)) => left_rank.cmp(&right_rank),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            }
-            .then_with(|| left.signal_date.cmp(&right.signal_date))
-            .then_with(|| left.ts_code.cmp(&right.ts_code))
-        }),
-        BuySelectionMode::Random => {
-            if candidates.len() > 1 {
-                for index in (1..candidates.len()).rev() {
-                    let swap_index = rng.random_range(0..=index);
-                    candidates.swap(index, swap_index);
-                }
-            }
-        }
-    }
-}
-
-fn process_portfolio_sells(
-    stocks: &[PreparedPaperStock],
-    sell_program: &Stmts,
-    trade_date: &str,
-    open_positions: &mut Vec<PortfolioOpenPosition>,
-    trades: &mut Vec<StrategyPaperValidationTradeRow>,
-    buy_price_basis: BuyPriceBasis,
-) -> Result<(), String> {
-    let mut remaining_positions = Vec::with_capacity(open_positions.len());
-
-    for mut item in open_positions.drain(..) {
-        let stock = &stocks[item.stock_index];
-        let Ok(scan_index) = stock
-            .trade_dates
-            .binary_search_by(|value| value.as_str().cmp(trade_date))
-        else {
-            remaining_positions.push(item);
-            continue;
-        };
-        if scan_index < item.position.buy_index {
-            remaining_positions.push(item);
-            continue;
-        }
-
-        if item.position.last_sell_runtime_index < scan_index {
-            extend_sell_runtime_series(
-                &mut item.position.sell_runtime,
-                &stock.open_series,
-                &stock.high_series,
-                item.position.buy_index,
-                item.position.buy_cost_price,
-                item.position.last_sell_runtime_index + 1,
-                scan_index,
-            )?;
-            item.position.last_sell_runtime_index = scan_index;
-        }
-
-        let sell_hit = if item.position.pending_sell {
-            true
-        } else {
-            evaluate_sell_hit(&mut item.position.sell_runtime, sell_program, scan_index)
-                .map_err(|error| format!("{} 卖点方程执行失败: {error}", stock.ts_code))?
-        };
-        let sell_price = resolve_normal_sell_price(
-            stock.close_series.get(scan_index).copied().flatten(),
-            stock.open_series.get(scan_index).copied().flatten(),
-        );
-        let pre_close = stock.pre_close_series.get(scan_index).copied().flatten();
-        let zhang_pct = stock.zhang_series.get(scan_index).copied().flatten();
-        let sell_executable = is_sell_price_executable(sell_price, pre_close, zhang_pct);
-
-        if sell_hit && sell_executable {
-            trades.push(build_closed_trade_row(
-                stock,
-                item.position,
-                scan_index,
-                buy_price_basis,
-            ));
-        } else {
-            if sell_hit {
-                item.position.pending_sell = true;
-            }
-            remaining_positions.push(item);
-        }
-    }
-
-    *open_positions = remaining_positions;
-    Ok(())
-}
-
-fn build_closed_trade_row(
-    stock: &PreparedPaperStock,
-    position: OpenPosition,
-    sell_index: usize,
-    buy_price_basis: BuyPriceBasis,
-) -> StrategyPaperValidationTradeRow {
-    let sell_price = resolve_normal_sell_price(
-        stock.close_series.get(sell_index).copied().flatten(),
-        stock.open_series.get(sell_index).copied().flatten(),
-    );
-    StrategyPaperValidationTradeRow {
-        ts_code: stock.ts_code.clone(),
-        name: stock.name.clone(),
-        buy_date: position.buy_date,
-        sell_date: stock.trade_dates.get(sell_index).cloned(),
-        buy_rank: position.buy_rank,
-        hold_days: sell_index.saturating_sub(position.buy_index),
-        buy_price_basis: buy_price_basis.as_str().to_string(),
-        buy_basis_price: Some(position.buy_basis_price),
-        buy_cost_price: Some(position.buy_cost_price),
-        sell_price,
-        open_return_pct: calc_return_pct(
-            stock.open_series.get(sell_index).copied().flatten(),
-            position.buy_cost_price,
-        ),
-        high_return_pct: calc_return_pct(
-            stock.high_series.get(sell_index).copied().flatten(),
-            position.buy_cost_price,
-        ),
-        close_return_pct: calc_return_pct(
-            stock.close_series.get(sell_index).copied().flatten(),
-            position.buy_cost_price,
-        ),
-        realized_return_pct: calc_return_pct(sell_price, position.buy_cost_price),
-        daily_holding_close_returns: build_daily_holding_close_returns(
-            &stock.trade_dates,
-            &stock.close_series,
-            position.buy_index,
-            sell_index,
-            position.buy_cost_price,
-        ),
-        status: "closed".to_string(),
-    }
-}
-
-fn finalize_open_portfolio_positions(
-    stocks: &[PreparedPaperStock],
-    open_positions: Vec<PortfolioOpenPosition>,
-    trades: &mut Vec<StrategyPaperValidationTradeRow>,
-    buy_price_basis: BuyPriceBasis,
-) {
-    for item in open_positions {
-        let stock = &stocks[item.stock_index];
-        let last_index = stock.trade_dates.len().saturating_sub(1);
-        let position = item.position;
-        trades.push(StrategyPaperValidationTradeRow {
-            ts_code: stock.ts_code.clone(),
-            name: stock.name.clone(),
-            buy_date: position.buy_date,
-            sell_date: None,
-            buy_rank: position.buy_rank,
-            hold_days: last_index.saturating_sub(position.buy_index),
-            buy_price_basis: buy_price_basis.as_str().to_string(),
-            buy_basis_price: Some(position.buy_basis_price),
-            buy_cost_price: Some(position.buy_cost_price),
-            sell_price: None,
-            open_return_pct: calc_return_pct(
-                stock.open_series.get(last_index).copied().flatten(),
-                position.buy_cost_price,
-            ),
-            high_return_pct: calc_return_pct(
-                stock.high_series.get(last_index).copied().flatten(),
-                position.buy_cost_price,
-            ),
-            close_return_pct: calc_return_pct(
-                stock.close_series.get(last_index).copied().flatten(),
-                position.buy_cost_price,
-            ),
-            realized_return_pct: calc_return_pct(
-                stock.close_series.get(last_index).copied().flatten(),
-                position.buy_cost_price,
-            ),
-            daily_holding_close_returns: build_daily_holding_close_returns(
-                &stock.trade_dates,
-                &stock.close_series,
-                position.buy_index,
-                last_index,
-                position.buy_cost_price,
-            ),
-            status: "open".to_string(),
-        });
-    }
-}
-
-fn load_paper_validation_row_data(
-    reader: &DataReader,
-    ts_code: &str,
-    query_start_date: &str,
-    start_date: &str,
-    end_date: &str,
-    warmup_need: usize,
-    need_rows: usize,
-) -> Result<RowData, String> {
-    match reader.load_one(ts_code, DEFAULT_ADJ_TYPE, query_start_date, end_date) {
-        Ok(row_data)
-            if has_required_paper_warmup(&row_data.trade_dates, start_date, warmup_need) =>
-        {
-            Ok(row_data)
-        }
-        Ok(row_data)
-            if row_data
-                .trade_dates
-                .binary_search_by(|value| value.as_str().cmp(start_date))
-                .unwrap_or_else(|index| index)
-                >= row_data.trade_dates.len() =>
-        {
-            Ok(row_data)
-        }
-        Ok(_) => reader.load_one_tail_rows(ts_code, DEFAULT_ADJ_TYPE, end_date, need_rows),
-        Err(error) if error == "trade_dates为空" => {
-            reader.load_one_tail_rows(ts_code, DEFAULT_ADJ_TYPE, end_date, need_rows)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn has_required_paper_warmup(trade_dates: &[String], start_date: &str, warmup_need: usize) -> bool {
-    let keep_from = trade_dates
-        .binary_search_by(|value| value.as_str().cmp(start_date))
-        .unwrap_or_else(|index| index);
-
-    keep_from < trade_dates.len() && keep_from >= warmup_need
-}
-
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-fn simulate_trade_rows_from_runtime(
-    ts_code: &str,
-    stock_name: Option<&String>,
-    trade_dates: &[String],
-    base_runtime: &Runtime,
-    buy_program: &Stmts,
-    sell_program: &Stmts,
-    eligibility: &PaperTradeEligibility,
-    keep_from: usize,
-    buy_price_basis: BuyPriceBasis,
-    slippage_pct: f64,
-) -> Result<Vec<StrategyPaperValidationTradeRow>, String> {
-    let mut buy_runtime = base_runtime.clone();
-    let buy_signal_series = evaluate_program_as_bool_series(&mut buy_runtime, buy_program)
-        .map_err(|error| format!("{ts_code} 买点方程执行失败: {error}"))?;
-    let open_series =
-        runtime_num_series(base_runtime, "O").map_err(|error| format!("{ts_code} {error}"))?;
-    let high_series =
-        runtime_num_series(base_runtime, "H").map_err(|error| format!("{ts_code} {error}"))?;
-    let close_series =
-        runtime_num_series(base_runtime, "C").map_err(|error| format!("{ts_code} {error}"))?;
-    let pre_close_series = runtime_num_series(base_runtime, "PRE_CLOSE")
-        .map_err(|error| format!("{ts_code} {error}"))?;
-    let zhang_series =
-        runtime_num_series(base_runtime, "ZHANG").map_err(|error| format!("{ts_code} {error}"))?;
-    let rank_series = runtime_num_series_optional(base_runtime, "RANK");
-
-    let mut open_positions = Vec::new();
-    let mut trades = Vec::new();
-
-    for scan_index in keep_from..trade_dates.len() {
-        let trade_date = &trade_dates[scan_index];
-
-        if open_positions.is_empty() && buy_signal_series.get(scan_index).copied().unwrap_or(false)
-        {
-            let buy_index = match buy_price_basis {
-                BuyPriceBasis::NextOpen => scan_index + 1,
-                BuyPriceBasis::Open | BuyPriceBasis::Close => scan_index,
-            };
-            let Some(buy_date) = trade_dates.get(buy_index) else {
-                continue;
-            };
-            if !eligibility.allows_buy(ts_code, buy_date) {
-                continue;
-            }
-            let basis_price = match buy_price_basis {
-                BuyPriceBasis::Open | BuyPriceBasis::NextOpen => {
-                    open_series.get(buy_index).copied().flatten()
-                }
-                BuyPriceBasis::Close => close_series.get(buy_index).copied().flatten(),
-            };
-            if let Some(basis_price) = normalize_valid_price(basis_price) {
-                let pre_close = pre_close_series.get(buy_index).copied().flatten();
-                let zhang_pct = zhang_series.get(buy_index).copied().flatten();
-                if is_buy_basis_executable(basis_price, pre_close, zhang_pct) {
-                    let buy_cost_price = basis_price * (1.0 + slippage_pct / 100.0);
-                    if buy_cost_price.is_finite() && buy_cost_price > PRICE_EPS {
-                        let sell_runtime = init_sell_runtime(
-                            base_runtime,
-                            trade_dates.len(),
-                            open_series,
-                            high_series,
-                            buy_index,
-                            buy_cost_price,
-                        )?;
-                        open_positions.push(OpenPosition {
-                            buy_date: buy_date.clone(),
-                            buy_index,
-                            buy_rank: rank_series
-                                .and_then(|series| series.get(scan_index))
-                                .copied()
-                                .flatten()
-                                .map(|value| value.round() as i64),
-                            buy_basis_price: basis_price,
-                            buy_cost_price,
-                            last_sell_runtime_index: buy_index,
-                            pending_sell: false,
-                            sell_runtime,
-                        });
-                    }
-                }
-            }
-        }
-
-        if open_positions.is_empty() {
-            continue;
-        }
-
-        let mut remaining_positions = Vec::with_capacity(open_positions.len());
-        for mut position in open_positions.drain(..) {
-            if scan_index < position.buy_index {
-                remaining_positions.push(position);
-                continue;
-            }
-
-            if position.last_sell_runtime_index < scan_index {
-                extend_sell_runtime_series(
-                    &mut position.sell_runtime,
-                    open_series,
-                    high_series,
+    (|stocks: &[PreparedPaperStock],
+      open_positions: Vec<PortfolioOpenPosition>,
+      trades: &mut Vec<StrategyPaperValidationTradeRow>,
+      buy_price_basis: BuyPriceBasis| {
+        for item in open_positions {
+            let stock = &stocks[item.stock_index];
+            let last_index = stock.trade_dates.len().saturating_sub(1);
+            let position = item.position;
+            trades.push(StrategyPaperValidationTradeRow {
+                ts_code: stock.ts_code.clone(),
+                name: stock.name.clone(),
+                buy_date: position.buy_date,
+                sell_date: None,
+                buy_rank: position.buy_rank,
+                hold_days: last_index.saturating_sub(position.buy_index),
+                buy_price_basis: buy_price_basis.as_str().to_string(),
+                buy_basis_price: Some(position.buy_basis_price),
+                buy_cost_price: Some(position.buy_cost_price),
+                sell_price: None,
+                open_return_pct: calc_return_pct(
+                    stock.open_series.get(last_index).copied().flatten(),
+                    position.buy_cost_price,
+                ),
+                high_return_pct: calc_return_pct(
+                    stock.high_series.get(last_index).copied().flatten(),
+                    position.buy_cost_price,
+                ),
+                close_return_pct: calc_return_pct(
+                    stock.close_series.get(last_index).copied().flatten(),
+                    position.buy_cost_price,
+                ),
+                realized_return_pct: calc_return_pct(
+                    stock.close_series.get(last_index).copied().flatten(),
+                    position.buy_cost_price,
+                ),
+                daily_holding_close_returns: build_daily_holding_close_returns(
+                    &stock.trade_dates,
+                    &stock.close_series,
                     position.buy_index,
+                    last_index,
                     position.buy_cost_price,
-                    position.last_sell_runtime_index + 1,
-                    scan_index,
-                )?;
-                position.last_sell_runtime_index = scan_index;
-            }
-
-            let sell_hit = if position.pending_sell {
-                true
-            } else {
-                evaluate_sell_hit(&mut position.sell_runtime, sell_program, scan_index)
-                    .map_err(|error| format!("{ts_code} 卖点方程执行失败: {error}"))?
-            };
-            let sell_price = resolve_normal_sell_price(
-                close_series.get(scan_index).copied().flatten(),
-                open_series.get(scan_index).copied().flatten(),
-            );
-            let pre_close = pre_close_series.get(scan_index).copied().flatten();
-            let zhang_pct = zhang_series.get(scan_index).copied().flatten();
-            let sell_executable = is_sell_price_executable(sell_price, pre_close, zhang_pct);
-
-            if sell_hit && sell_executable {
-                let open_return_pct = calc_return_pct(
-                    open_series.get(scan_index).copied().flatten(),
-                    position.buy_cost_price,
-                );
-                let high_return_pct = calc_return_pct(
-                    high_series.get(scan_index).copied().flatten(),
-                    position.buy_cost_price,
-                );
-                let close_return_pct = calc_return_pct(
-                    close_series.get(scan_index).copied().flatten(),
-                    position.buy_cost_price,
-                );
-                let daily_holding_close_returns = build_daily_holding_close_returns(
-                    trade_dates,
-                    close_series,
-                    position.buy_index,
-                    scan_index,
-                    position.buy_cost_price,
-                );
-
-                trades.push(StrategyPaperValidationTradeRow {
-                    ts_code: ts_code.to_string(),
-                    name: stock_name.cloned(),
-                    buy_date: position.buy_date,
-                    sell_date: Some(trade_date.clone()),
-                    buy_rank: position.buy_rank,
-                    hold_days: scan_index.saturating_sub(position.buy_index),
-                    buy_price_basis: buy_price_basis.as_str().to_string(),
-                    buy_basis_price: Some(position.buy_basis_price),
-                    buy_cost_price: Some(position.buy_cost_price),
-                    sell_price,
-                    open_return_pct,
-                    high_return_pct,
-                    close_return_pct,
-                    realized_return_pct: calc_return_pct(sell_price, position.buy_cost_price),
-                    daily_holding_close_returns,
-                    status: "closed".to_string(),
-                });
-            } else {
-                if sell_hit {
-                    position.pending_sell = true;
-                }
-                remaining_positions.push(position);
-            }
+                ),
+                status: "open".to_string(),
+            });
         }
-        open_positions = remaining_positions;
-    }
-
-    let last_index = trade_dates.len().saturating_sub(1);
-    for position in open_positions {
-        let daily_holding_close_returns = build_daily_holding_close_returns(
-            trade_dates,
-            close_series,
-            position.buy_index,
-            last_index,
-            position.buy_cost_price,
-        );
-        trades.push(StrategyPaperValidationTradeRow {
-            ts_code: ts_code.to_string(),
-            name: stock_name.cloned(),
-            buy_date: position.buy_date,
-            sell_date: None,
-            buy_rank: position.buy_rank,
-            hold_days: last_index.saturating_sub(position.buy_index),
-            buy_price_basis: buy_price_basis.as_str().to_string(),
-            buy_basis_price: Some(position.buy_basis_price),
-            buy_cost_price: Some(position.buy_cost_price),
-            sell_price: None,
-            open_return_pct: calc_return_pct(
-                open_series.get(last_index).copied().flatten(),
-                position.buy_cost_price,
-            ),
-            high_return_pct: calc_return_pct(
-                high_series.get(last_index).copied().flatten(),
-                position.buy_cost_price,
-            ),
-            close_return_pct: calc_return_pct(
-                close_series.get(last_index).copied().flatten(),
-                position.buy_cost_price,
-            ),
-            realized_return_pct: calc_return_pct(
-                close_series.get(last_index).copied().flatten(),
-                position.buy_cost_price,
-            ),
-            daily_holding_close_returns,
-            status: "open".to_string(),
-        });
-    }
-
+    })(stocks, open_positions, &mut trades, buy_price_basis);
     Ok(trades)
 }
 
@@ -1494,36 +1391,23 @@ fn extend_sell_runtime_series(
     Ok(())
 }
 
-fn resolve_limit_up_price(pre_close: Option<f64>, zhang_pct: Option<f64>) -> Option<f64> {
-    let pre_close = normalize_valid_price(pre_close)?;
-    let zhang_pct = zhang_pct.filter(|value| value.is_finite() && *value >= 0.0)?;
-    let limit_up = pre_close * (1.0 + zhang_pct);
-    if limit_up.is_finite() && limit_up > PRICE_EPS {
-        Some(limit_up)
-    } else {
-        None
-    }
-}
-
-fn resolve_limit_down_price(pre_close: Option<f64>, zhang_pct: Option<f64>) -> Option<f64> {
-    let pre_close = normalize_valid_price(pre_close)?;
-    let zhang_pct = zhang_pct.filter(|value| value.is_finite() && *value >= 0.0)?;
-    let limit_down = pre_close * (1.0 - zhang_pct);
-    if limit_down.is_finite() && limit_down > PRICE_EPS {
-        Some(limit_down)
-    } else {
-        None
-    }
-}
-
 fn is_buy_basis_executable(
     basis_price: f64,
     pre_close: Option<f64>,
     zhang_pct: Option<f64>,
 ) -> bool {
-    resolve_limit_up_price(pre_close, zhang_pct)
-        .map(|limit_up| basis_price < limit_up - PRICE_EPS)
-        .unwrap_or(true)
+    (|pre_close: Option<f64>, zhang_pct: Option<f64>| -> Option<f64> {
+        let pre_close = normalize_valid_price(pre_close)?;
+        let zhang_pct = zhang_pct.filter(|value| value.is_finite() && *value >= 0.0)?;
+        let limit_up = pre_close * (1.0 + zhang_pct);
+        if limit_up.is_finite() && limit_up > PRICE_EPS {
+            Some(limit_up)
+        } else {
+            None
+        }
+    })(pre_close, zhang_pct)
+    .map(|limit_up| basis_price < limit_up - PRICE_EPS)
+    .unwrap_or(true)
 }
 
 fn resolve_normal_sell_price(close_price: Option<f64>, open_price: Option<f64>) -> Option<f64> {
@@ -1539,9 +1423,18 @@ fn is_sell_price_executable(
         return false;
     };
 
-    resolve_limit_down_price(pre_close, zhang_pct)
-        .map(|limit_down| sell_price > limit_down + PRICE_EPS)
-        .unwrap_or(true)
+    (|pre_close: Option<f64>, zhang_pct: Option<f64>| -> Option<f64> {
+        let pre_close = normalize_valid_price(pre_close)?;
+        let zhang_pct = zhang_pct.filter(|value| value.is_finite() && *value >= 0.0)?;
+        let limit_down = pre_close * (1.0 - zhang_pct);
+        if limit_down.is_finite() && limit_down > PRICE_EPS {
+            Some(limit_down)
+        } else {
+            None
+        }
+    })(pre_close, zhang_pct)
+    .map(|limit_down| sell_price > limit_down + PRICE_EPS)
+    .unwrap_or(true)
 }
 
 fn calc_return_pct(price: Option<f64>, buy_cost_price: f64) -> Option<f64> {
@@ -1642,123 +1535,11 @@ fn collect_paper_validation_runtime_keys(
     collect_runtime_keys_from_expr_programs(
         &[buy_program, sell_program],
         RuntimeKeyCollectOptions {
-            always_keys: &PAPER_VALIDATION_ALWAYS_RUNTIME_KEYS,
+            always_keys: &(["O", "H", "C", "PRE_CLOSE"]),
             injected_keys: &injected_keys,
             aliases: &PAPER_VALIDATION_RUNTIME_ALIASES,
         },
     )
-}
-
-fn collect_paper_validation_cyq_chen_runtime_keys(
-    buy_program: &Stmts,
-    sell_program: &Stmts,
-) -> HashSet<String> {
-    collect_used_cyq_chen_runtime_keys(&[buy_program, sell_program])
-}
-
-fn collect_paper_validation_sell_runtime_keys(sell_program: &Stmts) -> HashSet<String> {
-    let cyq_chen_keys = cyq_chen_runtime_key_names();
-    let injected_keys = PAPER_VALIDATION_INJECTED_RUNTIME_KEYS
-        .iter()
-        .copied()
-        .chain(cyq_chen_keys.clone())
-        .collect::<Vec<_>>();
-    let mut keys = collect_runtime_keys_from_expr_programs(
-        &[sell_program],
-        RuntimeKeyCollectOptions {
-            always_keys: &[],
-            injected_keys: &injected_keys,
-            aliases: &PAPER_VALIDATION_RUNTIME_ALIASES,
-        },
-    );
-    keys.extend(
-        PAPER_VALIDATION_INJECTED_RUNTIME_KEYS
-            .iter()
-            .map(|key| key.to_string()),
-    );
-    keys.extend(cyq_chen_keys.into_iter().map(|key| key.to_string()));
-    keys
-}
-
-fn build_paper_trade_eligibility(
-    source_path: &str,
-    min_listed_trade_days: usize,
-) -> Result<PaperTradeEligibility, String> {
-    if min_listed_trade_days == 0 {
-        return Ok(PaperTradeEligibility::default());
-    }
-
-    let trade_dates = load_trade_date_list(source_path)?;
-    let mut trade_date_to_index = HashMap::with_capacity(trade_dates.len());
-    for (index, trade_date) in trade_dates.iter().enumerate() {
-        trade_date_to_index.insert(trade_date.clone(), index);
-    }
-
-    let stock_list = stock_list_path(source_path);
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .from_path(&stock_list)
-        .map_err(|e| format!("打开stock_list.csv失败:路径:{:?},错误:{e}", stock_list))?;
-    let headers = reader
-        .headers()
-        .map_err(|e| format!("读取stock_list.csv表头失败:{e}"))?
-        .iter()
-        .map(|value| value.trim().to_string())
-        .collect::<Vec<_>>();
-
-    let Some(ts_code_index) = headers
-        .iter()
-        .position(|header| header.eq_ignore_ascii_case("ts_code"))
-    else {
-        return Ok(PaperTradeEligibility {
-            trade_date_to_index,
-            listed_trade_index_by_ts: HashMap::new(),
-            min_listed_trade_days,
-        });
-    };
-    let Some(list_date_index) = headers
-        .iter()
-        .position(|header| header.eq_ignore_ascii_case("list_date"))
-    else {
-        return Ok(PaperTradeEligibility {
-            trade_date_to_index,
-            listed_trade_index_by_ts: HashMap::new(),
-            min_listed_trade_days,
-        });
-    };
-
-    let mut listed_trade_index_by_ts = HashMap::new();
-    for row_result in reader.records() {
-        let row = row_result.map_err(|e| format!("解析stock_list.csv失败:{e}"))?;
-        let Some(ts_code) = row
-            .get(ts_code_index)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-        let Some(list_date) = row
-            .get(list_date_index)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-
-        let listed_index = match trade_dates.binary_search_by(|value| value.as_str().cmp(list_date))
-        {
-            Ok(index) => index,
-            Err(index) if index < trade_dates.len() => index,
-            Err(_) => continue,
-        };
-        listed_trade_index_by_ts.insert(ts_code.to_string(), listed_index);
-    }
-
-    Ok(PaperTradeEligibility {
-        trade_date_to_index,
-        listed_trade_index_by_ts,
-        min_listed_trade_days,
-    })
 }
 
 fn load_trade_date_options(source_path: &str) -> Result<Vec<String>, String> {
@@ -1878,26 +1659,6 @@ fn normalize_trade_date_input(
             TradeDateResolveMode::End => Err(format!("{field_name}早于交易日历第一天: {digits}")),
         },
     }
-}
-
-fn resolve_one_year_earlier_trade_date(
-    trade_date_options: &[String],
-    end_date: &str,
-) -> Option<String> {
-    let end_date = NaiveDate::parse_from_str(end_date, "%Y%m%d").ok()?;
-    let target = end_date
-        .checked_sub_days(Days::new(365))
-        .unwrap_or(end_date);
-    let target_text = target.format("%Y%m%d").to_string();
-
-    let index = match trade_date_options.binary_search_by(|value| value.as_str().cmp(&target_text))
-    {
-        Ok(index) => index,
-        Err(index) if index < trade_date_options.len() => index,
-        Err(_) => trade_date_options.len().saturating_sub(1),
-    };
-
-    trade_date_options.get(index).cloned()
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -2096,7 +1857,224 @@ mod tests {
         let sell_program = parse_expression_program(sell_expression, "卖点方程")
             .expect("sell expression should parse");
 
-        simulate_trade_rows_from_runtime(
+        (|ts_code: &str,
+          stock_name: Option<&String>,
+          trade_dates: &[String],
+          base_runtime: &Runtime,
+          buy_program: &Stmts,
+          sell_program: &Stmts,
+          eligibility: &PaperTradeEligibility,
+          keep_from: usize,
+          buy_price_basis: BuyPriceBasis,
+          slippage_pct: f64|
+         -> Result<Vec<StrategyPaperValidationTradeRow>, String> {
+            let mut buy_runtime = base_runtime.clone();
+            let buy_signal_series = evaluate_program_as_bool_series(&mut buy_runtime, buy_program)
+                .map_err(|error| format!("{ts_code} 买点方程执行失败: {error}"))?;
+            let open_series = runtime_num_series(base_runtime, "O")
+                .map_err(|error| format!("{ts_code} {error}"))?;
+            let high_series = runtime_num_series(base_runtime, "H")
+                .map_err(|error| format!("{ts_code} {error}"))?;
+            let close_series = runtime_num_series(base_runtime, "C")
+                .map_err(|error| format!("{ts_code} {error}"))?;
+            let pre_close_series = runtime_num_series(base_runtime, "PRE_CLOSE")
+                .map_err(|error| format!("{ts_code} {error}"))?;
+            let zhang_series = runtime_num_series(base_runtime, "ZHANG")
+                .map_err(|error| format!("{ts_code} {error}"))?;
+            let rank_series = runtime_num_series_optional(base_runtime, "RANK");
+
+            let mut open_positions = Vec::new();
+            let mut trades = Vec::new();
+
+            for scan_index in keep_from..trade_dates.len() {
+                let trade_date = &trade_dates[scan_index];
+
+                if open_positions.is_empty()
+                    && buy_signal_series.get(scan_index).copied().unwrap_or(false)
+                {
+                    let buy_index = match buy_price_basis {
+                        BuyPriceBasis::NextOpen => scan_index + 1,
+                        BuyPriceBasis::Open | BuyPriceBasis::Close => scan_index,
+                    };
+                    let Some(buy_date) = trade_dates.get(buy_index) else {
+                        continue;
+                    };
+                    if !eligibility.allows_buy(ts_code, buy_date) {
+                        continue;
+                    }
+                    let basis_price = match buy_price_basis {
+                        BuyPriceBasis::Open | BuyPriceBasis::NextOpen => {
+                            open_series.get(buy_index).copied().flatten()
+                        }
+                        BuyPriceBasis::Close => close_series.get(buy_index).copied().flatten(),
+                    };
+                    if let Some(basis_price) = normalize_valid_price(basis_price) {
+                        let pre_close = pre_close_series.get(buy_index).copied().flatten();
+                        let zhang_pct = zhang_series.get(buy_index).copied().flatten();
+                        if is_buy_basis_executable(basis_price, pre_close, zhang_pct) {
+                            let buy_cost_price = basis_price * (1.0 + slippage_pct / 100.0);
+                            if buy_cost_price.is_finite() && buy_cost_price > PRICE_EPS {
+                                let sell_runtime = init_sell_runtime(
+                                    base_runtime,
+                                    trade_dates.len(),
+                                    open_series,
+                                    high_series,
+                                    buy_index,
+                                    buy_cost_price,
+                                )?;
+                                open_positions.push(OpenPosition {
+                                    buy_date: buy_date.clone(),
+                                    buy_index,
+                                    buy_rank: rank_series
+                                        .and_then(|series| series.get(scan_index))
+                                        .copied()
+                                        .flatten()
+                                        .map(|value| value.round() as i64),
+                                    buy_basis_price: basis_price,
+                                    buy_cost_price,
+                                    last_sell_runtime_index: buy_index,
+                                    pending_sell: false,
+                                    sell_runtime,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                if open_positions.is_empty() {
+                    continue;
+                }
+
+                let mut remaining_positions = Vec::with_capacity(open_positions.len());
+                for mut position in open_positions.drain(..) {
+                    if scan_index < position.buy_index {
+                        remaining_positions.push(position);
+                        continue;
+                    }
+
+                    if position.last_sell_runtime_index < scan_index {
+                        extend_sell_runtime_series(
+                            &mut position.sell_runtime,
+                            open_series,
+                            high_series,
+                            position.buy_index,
+                            position.buy_cost_price,
+                            position.last_sell_runtime_index + 1,
+                            scan_index,
+                        )?;
+                        position.last_sell_runtime_index = scan_index;
+                    }
+
+                    let sell_hit = if position.pending_sell {
+                        true
+                    } else {
+                        evaluate_sell_hit(&mut position.sell_runtime, sell_program, scan_index)
+                            .map_err(|error| format!("{ts_code} 卖点方程执行失败: {error}"))?
+                    };
+                    let sell_price = resolve_normal_sell_price(
+                        close_series.get(scan_index).copied().flatten(),
+                        open_series.get(scan_index).copied().flatten(),
+                    );
+                    let pre_close = pre_close_series.get(scan_index).copied().flatten();
+                    let zhang_pct = zhang_series.get(scan_index).copied().flatten();
+                    let sell_executable =
+                        is_sell_price_executable(sell_price, pre_close, zhang_pct);
+
+                    if sell_hit && sell_executable {
+                        let open_return_pct = calc_return_pct(
+                            open_series.get(scan_index).copied().flatten(),
+                            position.buy_cost_price,
+                        );
+                        let high_return_pct = calc_return_pct(
+                            high_series.get(scan_index).copied().flatten(),
+                            position.buy_cost_price,
+                        );
+                        let close_return_pct = calc_return_pct(
+                            close_series.get(scan_index).copied().flatten(),
+                            position.buy_cost_price,
+                        );
+                        let daily_holding_close_returns = build_daily_holding_close_returns(
+                            trade_dates,
+                            close_series,
+                            position.buy_index,
+                            scan_index,
+                            position.buy_cost_price,
+                        );
+
+                        trades.push(StrategyPaperValidationTradeRow {
+                            ts_code: ts_code.to_string(),
+                            name: stock_name.cloned(),
+                            buy_date: position.buy_date,
+                            sell_date: Some(trade_date.clone()),
+                            buy_rank: position.buy_rank,
+                            hold_days: scan_index.saturating_sub(position.buy_index),
+                            buy_price_basis: buy_price_basis.as_str().to_string(),
+                            buy_basis_price: Some(position.buy_basis_price),
+                            buy_cost_price: Some(position.buy_cost_price),
+                            sell_price,
+                            open_return_pct,
+                            high_return_pct,
+                            close_return_pct,
+                            realized_return_pct: calc_return_pct(
+                                sell_price,
+                                position.buy_cost_price,
+                            ),
+                            daily_holding_close_returns,
+                            status: "closed".to_string(),
+                        });
+                    } else {
+                        if sell_hit {
+                            position.pending_sell = true;
+                        }
+                        remaining_positions.push(position);
+                    }
+                }
+                open_positions = remaining_positions;
+            }
+
+            let last_index = trade_dates.len().saturating_sub(1);
+            for position in open_positions {
+                let daily_holding_close_returns = build_daily_holding_close_returns(
+                    trade_dates,
+                    close_series,
+                    position.buy_index,
+                    last_index,
+                    position.buy_cost_price,
+                );
+                trades.push(StrategyPaperValidationTradeRow {
+                    ts_code: ts_code.to_string(),
+                    name: stock_name.cloned(),
+                    buy_date: position.buy_date,
+                    sell_date: None,
+                    buy_rank: position.buy_rank,
+                    hold_days: last_index.saturating_sub(position.buy_index),
+                    buy_price_basis: buy_price_basis.as_str().to_string(),
+                    buy_basis_price: Some(position.buy_basis_price),
+                    buy_cost_price: Some(position.buy_cost_price),
+                    sell_price: None,
+                    open_return_pct: calc_return_pct(
+                        open_series.get(last_index).copied().flatten(),
+                        position.buy_cost_price,
+                    ),
+                    high_return_pct: calc_return_pct(
+                        high_series.get(last_index).copied().flatten(),
+                        position.buy_cost_price,
+                    ),
+                    close_return_pct: calc_return_pct(
+                        close_series.get(last_index).copied().flatten(),
+                        position.buy_cost_price,
+                    ),
+                    realized_return_pct: calc_return_pct(
+                        close_series.get(last_index).copied().flatten(),
+                        position.buy_cost_price,
+                    ),
+                    daily_holding_close_returns,
+                    status: "open".to_string(),
+                });
+            }
+
+            Ok(trades)
+        })(
             ts_code,
             None,
             &trade_dates,

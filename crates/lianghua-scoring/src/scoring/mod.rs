@@ -41,8 +41,6 @@ pub struct SceneScoreSeries {
     pub triggered: Vec<bool>,
 }
 
-const SCENE_EPS: f64 = 1e-12;
-
 #[derive(Debug, Clone)]
 pub struct RuleSceneMeta {
     pub scene_name: String,
@@ -129,32 +127,6 @@ fn restore_runtime_values(rt: &mut Runtime, snapshots: &[RuntimeSnapshotEntry]) 
     }
 }
 
-fn hit_when_cache(rule: &CachedRule, rt: &mut Runtime) -> Result<Vec<bool>, String> {
-    let value = rt
-        .eval_program(&rule.when_ast)
-        .map_err(|e| format!("表达式计算错误:{}", e.msg))?;
-    let len = rt_max_len(rt);
-
-    Value::as_bool_series(&value, len).map_err(|e| format!("表达式返回值非布尔:{}", e.msg))
-}
-
-fn hit_cached_expression(
-    expression: &CachedRuleExpression,
-    rt: &mut Runtime,
-) -> Result<Vec<bool>, String> {
-    let snapshots = snapshot_runtime_values(rt, &expression.assigned_names);
-    let result = rt
-        .eval_program(&expression.when_ast)
-        .map_err(|error| format!("表达式({})计算错误:{}", expression.name, error.msg))
-        .and_then(|value| {
-            let len = rt_max_len(rt);
-            Value::as_bool_series(&value, len)
-                .map_err(|error| format!("表达式({})返回值非布尔:{}", expression.name, error.msg))
-        });
-    restore_runtime_values(rt, &snapshots);
-    result
-}
-
 fn hit_scopeway(scopeway: ScopeWay, windows: usize, bs: &[bool], i: usize) -> ScopeHit {
     match scopeway {
         ScopeWay::Last => ScopeHit::Bool(bs[i]),
@@ -214,45 +186,6 @@ fn score_from_dist_points(value: usize, dps: &[DistPoint]) -> f64 {
     0.0
 }
 
-fn score_at(scopeway: ScopeHit, dps: Option<&[DistPoint]>, points: f64) -> f64 {
-    // scopeway分发到得分
-    match scopeway {
-        ScopeHit::Bool(ok) => {
-            if ok {
-                points
-            } else {
-                0.0
-            }
-        }
-        ScopeHit::EachOffsets(offsets) => {
-            if offsets.is_empty() {
-                return 0.0;
-            }
-            if let Some(dp) = dps {
-                offsets
-                    .iter()
-                    .map(|distance| score_from_dist_points(*distance, dp))
-                    .sum::<f64>()
-            } else {
-                offsets.len() as f64 * points
-            }
-        }
-        ScopeHit::Recent(v) => {
-            if let Some(dp) = dps {
-                match v {
-                    Some(last) => score_from_dist_points(last, dp),
-                    None => 0.0,
-                }
-            } else {
-                match v {
-                    Some(_) => points,
-                    None => 0.0,
-                }
-            }
-        }
-    }
-}
-
 fn scope_hit_triggered(hit: &ScopeHit) -> bool {
     match hit {
         ScopeHit::Bool(ok) => *ok,
@@ -289,100 +222,120 @@ fn combination_score_parts(
     (base_score, bonus_score, true)
 }
 
-fn finish_combination_score(
-    combination: &CachedCombinationRule,
-    base_score: f64,
-    bonus_score: f64,
-) -> f64 {
-    let bonus_score = clamp_score(bonus_score, combination.max_bonus_points);
-    clamp_score(base_score + bonus_score, combination.max_points)
-}
-
-fn scoring_combination_rule_cache(
-    rule: &CachedRule,
-    combination: &CachedCombinationRule,
-    rt: &mut Runtime,
-) -> Result<(Vec<f64>, Vec<bool>), String> {
-    let condition_hits = combination
-        .conditions
-        .iter()
-        .map(|condition| hit_cached_expression(&condition.expression, rt))
-        .collect::<Result<Vec<_>, _>>()?;
-    let len = rt_max_len(rt);
-    let mut scores = Vec::with_capacity(len);
-    let mut triggered = Vec::with_capacity(len);
-
-    for index in 0..len {
-        let start = (index + 1).saturating_sub(rule.scope_windows);
-        let (base_score, bonus_score, is_triggered) = match rule.scope_way {
-            ScopeWay::Last => {
-                combination_score_parts(combination, |condition| condition_hits[condition][index])
-            }
-            ScopeWay::Any => {
-                // ANY 取窗口内条件命中数最多的一天；并列时取更近的一天。
-                let best_day = (start..=index)
-                    .max_by_key(|day| {
-                        (
-                            condition_hits.iter().filter(|hits| hits[*day]).count(),
-                            *day,
-                        )
-                    })
-                    .unwrap_or(index);
-                combination_score_parts(combination, |condition| {
-                    condition_hits[condition][best_day]
-                })
-            }
-            ScopeWay::Each => {
-                let mut base_total = 0.0;
-                let mut bonus_total = 0.0;
-                let mut any_triggered = false;
-                for day in start..=index {
-                    let (day_base, day_bonus, day_triggered) =
-                        combination_score_parts(combination, |condition| {
-                            condition_hits[condition][day]
-                        });
-                    if day_triggered {
-                        base_total += day_base;
-                        bonus_total += day_bonus;
-                        any_triggered = true;
-                    }
-                }
-                (base_total, bonus_total, any_triggered)
-            }
-            ScopeWay::Consec(_) => combination_score_parts(combination, |condition| {
-                scope_hit_triggered(&hit_scopeway(
-                    rule.scope_way,
-                    rule.scope_windows,
-                    &condition_hits[condition],
-                    index,
-                ))
-            }),
-            ScopeWay::Recent => {
-                return Err("组合策略不支持 RECENT scope_way".to_string());
-            }
-        };
-
-        triggered.push(is_triggered);
-        scores.push(if is_triggered {
-            finish_combination_score(combination, base_score, bonus_score)
-        } else {
-            0.0
-        });
-    }
-
-    Ok((scores, triggered))
-}
-
 fn scoring_rule_cache(
     rule: &CachedRule,
     rt: &mut Runtime,
 ) -> Result<(Vec<f64>, Vec<bool>), String> {
     if let Some(combination) = &rule.combination {
-        return scoring_combination_rule_cache(rule, combination, rt);
+        return (|rule: &CachedRule,
+                 combination: &CachedCombinationRule,
+                 rt: &mut Runtime|
+         -> Result<(Vec<f64>, Vec<bool>), String> {
+            let condition_hits = combination
+                .conditions
+                .iter()
+                .map(|condition| {
+                    (|expression: &CachedRuleExpression,
+                      rt: &mut Runtime|
+                     -> Result<Vec<bool>, String> {
+                        let snapshots = snapshot_runtime_values(rt, &expression.assigned_names);
+                        let result = rt
+                            .eval_program(&expression.when_ast)
+                            .map_err(|error| {
+                                format!("表达式({})计算错误:{}", expression.name, error.msg)
+                            })
+                            .and_then(|value| {
+                                let len = rt_max_len(rt);
+                                Value::as_bool_series(&value, len).map_err(|error| {
+                                    format!("表达式({})返回值非布尔:{}", expression.name, error.msg)
+                                })
+                            });
+                        restore_runtime_values(rt, &snapshots);
+                        result
+                    })(&condition.expression, rt)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let len = rt_max_len(rt);
+            let mut scores = Vec::with_capacity(len);
+            let mut triggered = Vec::with_capacity(len);
+
+            for index in 0..len {
+                let start = (index + 1).saturating_sub(rule.scope_windows);
+                let (base_score, bonus_score, is_triggered) = match rule.scope_way {
+                    ScopeWay::Last => combination_score_parts(combination, |condition| {
+                        condition_hits[condition][index]
+                    }),
+                    ScopeWay::Any => {
+                        // ANY 取窗口内条件命中数最多的一天；并列时取更近的一天。
+                        let best_day = (start..=index)
+                            .max_by_key(|day| {
+                                (
+                                    condition_hits.iter().filter(|hits| hits[*day]).count(),
+                                    *day,
+                                )
+                            })
+                            .unwrap_or(index);
+                        combination_score_parts(combination, |condition| {
+                            condition_hits[condition][best_day]
+                        })
+                    }
+                    ScopeWay::Each => {
+                        let mut base_total = 0.0;
+                        let mut bonus_total = 0.0;
+                        let mut any_triggered = false;
+                        for day in start..=index {
+                            let (day_base, day_bonus, day_triggered) =
+                                combination_score_parts(combination, |condition| {
+                                    condition_hits[condition][day]
+                                });
+                            if day_triggered {
+                                base_total += day_base;
+                                bonus_total += day_bonus;
+                                any_triggered = true;
+                            }
+                        }
+                        (base_total, bonus_total, any_triggered)
+                    }
+                    ScopeWay::Consec(_) => combination_score_parts(combination, |condition| {
+                        scope_hit_triggered(&hit_scopeway(
+                            rule.scope_way,
+                            rule.scope_windows,
+                            &condition_hits[condition],
+                            index,
+                        ))
+                    }),
+                    ScopeWay::Recent => {
+                        return Err("组合策略不支持 RECENT scope_way".to_string());
+                    }
+                };
+
+                triggered.push(is_triggered);
+                scores.push(if is_triggered {
+                    (|combination: &CachedCombinationRule,
+                      base_score: f64,
+                      bonus_score: f64|
+                     -> f64 {
+                        let bonus_score = clamp_score(bonus_score, combination.max_bonus_points);
+                        clamp_score(base_score + bonus_score, combination.max_points)
+                    })(combination, base_score, bonus_score)
+                } else {
+                    0.0
+                });
+            }
+
+            Ok((scores, triggered))
+        })(rule, combination, rt);
     }
 
     let snapshots = snapshot_runtime_values(rt, &rule.assigned_names);
-    let bs_result = hit_when_cache(rule, rt);
+    let bs_result = (|rule: &CachedRule, rt: &mut Runtime| -> Result<Vec<bool>, String> {
+        let value = rt
+            .eval_program(&rule.when_ast)
+            .map_err(|e| format!("表达式计算错误:{}", e.msg))?;
+        let len = rt_max_len(rt);
+
+        Value::as_bool_series(&value, len).map_err(|e| format!("表达式返回值非布尔:{}", e.msg))
+    })(rule, rt);
     restore_runtime_values(rt, &snapshots);
     let bs = bs_result?;
     let mut out = Vec::with_capacity(bs.len());
@@ -391,7 +344,44 @@ fn scoring_rule_cache(
     for i in 0..bs.len() {
         let hit = hit_scopeway(rule.scope_way, rule.scope_windows, &bs, i);
         triggered.push(scope_hit_triggered(&hit));
-        let s = score_at(hit, rule.dist_points.as_deref(), rule.points);
+        let s = (|scopeway: ScopeHit, dps: Option<&[DistPoint]>, points: f64| -> f64 {
+            // scopeway分发到得分
+            match scopeway {
+                ScopeHit::Bool(ok) => {
+                    if ok {
+                        points
+                    } else {
+                        0.0
+                    }
+                }
+                ScopeHit::EachOffsets(offsets) => {
+                    if offsets.is_empty() {
+                        return 0.0;
+                    }
+                    if let Some(dp) = dps {
+                        offsets
+                            .iter()
+                            .map(|distance| score_from_dist_points(*distance, dp))
+                            .sum::<f64>()
+                    } else {
+                        offsets.len() as f64 * points
+                    }
+                }
+                ScopeHit::Recent(v) => {
+                    if let Some(dp) = dps {
+                        match v {
+                            Some(last) => score_from_dist_points(last, dp),
+                            None => 0.0,
+                        }
+                    } else {
+                        match v {
+                            Some(_) => points,
+                            None => 0.0,
+                        }
+                    }
+                }
+            }
+        })(hit, rule.dist_points.as_deref(), rule.points);
         out.push(clamp_score(s, rule.max_points));
     }
 
@@ -448,29 +438,6 @@ pub fn scoring_rules_total_cache(
     Ok(total)
 }
 
-fn resolve_scene_stage(
-    scene: &ScoreScene,
-    stage_score: f64,
-    risk_score: f64,
-    has_trigger: bool,
-    has_confirm: bool,
-    has_fail: bool,
-) -> Option<SceneResolvedStage> {
-    if has_fail && cross_fail_threshold(scene.direction, risk_score, scene.fail_threshold) {
-        return Some(SceneResolvedStage::Fail);
-    }
-    if has_confirm && cross_stage_threshold(scene.direction, stage_score, scene.confirm_threshold) {
-        return Some(SceneResolvedStage::Confirm);
-    }
-    if has_trigger && cross_stage_threshold(scene.direction, stage_score, scene.trigger_threshold) {
-        return Some(SceneResolvedStage::Trigger);
-    }
-    if has_trigger && cross_stage_threshold(scene.direction, stage_score, scene.observe_threshold) {
-        return Some(SceneResolvedStage::Observe);
-    }
-    None
-}
-
 fn cross_stage_threshold(direction: SceneDirection, score: f64, threshold: f64) -> bool {
     if !score.is_finite() || !threshold.is_finite() {
         return false;
@@ -481,18 +448,8 @@ fn cross_stage_threshold(direction: SceneDirection, score: f64, threshold: f64) 
     }
 }
 
-fn cross_fail_threshold(direction: SceneDirection, risk_score: f64, threshold: f64) -> bool {
-    if !risk_score.is_finite() || !threshold.is_finite() {
-        return false;
-    }
-    match direction {
-        SceneDirection::Long => risk_score <= -threshold,
-        SceneDirection::Short => risk_score >= threshold,
-    }
-}
-
 fn calc_intensity(score: f64, threshold: f64) -> f64 {
-    if !score.is_finite() || !threshold.is_finite() || threshold.abs() < SCENE_EPS {
+    if !score.is_finite() || !threshold.is_finite() || threshold.abs() < (1e-12) {
         return 0.0;
     }
     score.abs() / threshold.abs()
@@ -581,7 +538,43 @@ pub fn build_scene_score_series(
             out[scene_pos].confirm_strength[i] =
                 calc_intensity(stage_score, scene.confirm_threshold);
             out[scene_pos].risk_intensity[i] = calc_intensity(risk_score, scene.fail_threshold);
-            out[scene_pos].stage[i] = resolve_scene_stage(
+            out[scene_pos].stage[i] = (|scene: &ScoreScene,
+                                        stage_score: f64,
+                                        risk_score: f64,
+                                        has_trigger: bool,
+                                        has_confirm: bool,
+                                        has_fail: bool|
+             -> Option<SceneResolvedStage> {
+                if has_fail
+                    && (|direction: SceneDirection, risk_score: f64, threshold: f64| -> bool {
+                        if !risk_score.is_finite() || !threshold.is_finite() {
+                            return false;
+                        }
+                        match direction {
+                            SceneDirection::Long => risk_score <= -threshold,
+                            SceneDirection::Short => risk_score >= threshold,
+                        }
+                    })(scene.direction, risk_score, scene.fail_threshold)
+                {
+                    return Some(SceneResolvedStage::Fail);
+                }
+                if has_confirm
+                    && cross_stage_threshold(scene.direction, stage_score, scene.confirm_threshold)
+                {
+                    return Some(SceneResolvedStage::Confirm);
+                }
+                if has_trigger
+                    && cross_stage_threshold(scene.direction, stage_score, scene.trigger_threshold)
+                {
+                    return Some(SceneResolvedStage::Trigger);
+                }
+                if has_trigger
+                    && cross_stage_threshold(scene.direction, stage_score, scene.observe_threshold)
+                {
+                    return Some(SceneResolvedStage::Observe);
+                }
+                None
+            })(
                 scene,
                 stage_score,
                 risk_score,
@@ -630,19 +623,6 @@ mod tests {
         }
     }
 
-    fn cached_expression(name: &str, expression: &str) -> CachedRuleExpression {
-        let tokens = lex_all(expression);
-        let mut parser = Parser::new(tokens);
-        let when_ast = parser.parse_main().expect("expression should parse");
-        let assigned_names = collect_assigned_names_from_expr_program(&when_ast);
-        CachedRuleExpression {
-            name: name.to_string(),
-            when_src: expression.to_string(),
-            when_ast,
-            assigned_names,
-        }
-    }
-
     fn combination_rule(
         condition_expressions: &[&str],
         points_by_hits: Vec<f64>,
@@ -654,7 +634,18 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, expression)| CachedCombinationCondition {
-                expression: cached_expression(&format!("condition_{}", index + 1), expression),
+                expression: (|name: &str, expression: &str| -> CachedRuleExpression {
+                    let tokens = lex_all(expression);
+                    let mut parser = Parser::new(tokens);
+                    let when_ast = parser.parse_main().expect("expression should parse");
+                    let assigned_names = collect_assigned_names_from_expr_program(&when_ast);
+                    CachedRuleExpression {
+                        name: name.to_string(),
+                        when_src: expression.to_string(),
+                        when_ast,
+                        assigned_names,
+                    }
+                })(&format!("condition_{}", index + 1), expression),
                 bonus_points: bonus_points.get(index).copied().unwrap_or(0.0),
             })
             .collect::<Vec<_>>();

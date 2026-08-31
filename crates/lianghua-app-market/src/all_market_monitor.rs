@@ -238,54 +238,6 @@ fn other_sort_daily_value_cache()
     OTHER_SORT_DAILY_VALUE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn parse_total_mv_yi(raw: Option<&String>) -> Option<f64> {
-    raw?.trim()
-        .parse::<f64>()
-        .ok()
-        .filter(|value| value.is_finite())
-        .map(|value| value / 1e4)
-}
-
-fn load_source_meta(source_path: &str) -> Result<SourceMetaCacheEntry, String> {
-    let mut stocks = Vec::new();
-    let concepts_map = build_concepts_map(source_path).unwrap_or_default();
-    for cols in load_stock_list(source_path)? {
-        let Some(ts_code) = cols.first().map(|value| value.trim()) else {
-            continue;
-        };
-        if ts_code.is_empty() {
-            continue;
-        }
-        let name = cols.get(2).map(|value| value.trim()).unwrap_or_default();
-        stocks.push(StockMeta {
-            ts_code: ts_code.to_string(),
-            name: name.to_string(),
-            board: board_category(ts_code, Some(name)).to_string(),
-            total_mv_yi: parse_total_mv_yi(cols.get(9)),
-            concept: concepts_map.get(ts_code).cloned().unwrap_or_default(),
-        });
-    }
-    Ok(SourceMetaCacheEntry { stocks })
-}
-
-fn cached_source_meta(source_path: &str) -> Result<SourceMetaCacheEntry, String> {
-    if let Some(entry) = source_meta_cache()
-        .lock()
-        .map_err(|_| "股票基础信息缓存锁已损坏".to_string())?
-        .get(source_path)
-        .cloned()
-    {
-        return Ok(entry);
-    }
-
-    let entry = load_source_meta(source_path)?;
-    source_meta_cache()
-        .lock()
-        .map_err(|_| "股票基础信息缓存锁已损坏".to_string())?
-        .insert(source_path.to_string(), entry.clone());
-    Ok(entry)
-}
-
 fn open_result_conn(source_path: &str) -> Result<Connection, String> {
     let result_db = result_db_path(source_path);
     let result_db_str = result_db
@@ -302,11 +254,6 @@ fn open_source_conn(source_path: &str) -> Result<Connection, String> {
     Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))
 }
 
-fn similarity_board_ready(conn: &Connection) -> bool {
-    table_exists(conn, "strategy_trigger_similarity_rank")
-        && table_exists(conn, "strategy_trigger_similarity_active_config")
-}
-
 fn table_exists(conn: &Connection, table_name: &str) -> bool {
     conn.query_row(
         "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema='main' AND table_name=?",
@@ -314,262 +261,6 @@ fn table_exists(conn: &Connection, table_name: &str) -> bool {
         |row| row.get::<_, bool>(0),
     )
     .unwrap_or(false)
-}
-
-/// 读取总榜排名与策略触发相似榜单排名：最新总榜日期、当日排名/总分、三日优、
-/// 相似榜单排名全部合并进一条 SQL。相似榜单表不存在时自动退化为纯总榜查询
-/// （允许不存在，不阻塞）。
-fn load_rank_context(conn: &Connection) -> Result<(String, HashMap<String, RankContext>), String> {
-    let similarity_board = similarity_board_ready(conn);
-    let latest_sim_cte = if similarity_board {
-        r#",
-            latest_sim AS (
-                SELECT r.ts_code, MAX(r.rank) AS similarity_rank
-                FROM strategy_trigger_similarity_rank r
-                WHERE r.config_key = (
-                    SELECT config_key FROM strategy_trigger_similarity_active_config WHERE id = 1
-                )
-                  AND r.trade_date = (
-                      SELECT MAX(m.trade_date)
-                      FROM strategy_trigger_similarity_rank m
-                      WHERE m.config_key = (
-                          SELECT config_key
-                          FROM strategy_trigger_similarity_active_config WHERE id = 1
-                      )
-                  )
-                  AND r.rank IS NOT NULL
-                GROUP BY r.ts_code
-            )"#
-    } else {
-        ""
-    };
-    let sim_column = if similarity_board {
-        "sim.similarity_rank"
-    } else {
-        "CAST(NULL AS BIGINT)"
-    };
-    let sim_join = if similarity_board {
-        "LEFT JOIN latest_sim sim ON sim.ts_code = agg.ts_code"
-    } else {
-        ""
-    };
-
-    let sql = format!(
-        r#"
-        WITH recent_dates AS (
-            SELECT
-                trade_date,
-                ROW_NUMBER() OVER (ORDER BY trade_date DESC) AS date_rank
-            FROM (
-                SELECT trade_date
-                FROM score_summary
-                GROUP BY trade_date
-                ORDER BY trade_date DESC
-                LIMIT 3
-            ) dates
-        ),
-        agg AS (
-            SELECT
-                s.ts_code,
-                MAX(CASE WHEN s.trade_date = latest.rd THEN s.rank ELSE NULL END) AS current_rank,
-                MIN(CASE WHEN d.date_rank <= 3 AND s.rank IS NOT NULL THEN s.rank ELSE NULL END) AS best_rank_3d,
-                MAX(CASE WHEN s.trade_date = latest.rd THEN s.total_score ELSE NULL END) AS current_total_score
-            FROM score_summary s
-            INNER JOIN recent_dates d ON s.trade_date = d.trade_date
-            CROSS JOIN (SELECT MAX(trade_date) AS rd FROM score_summary) latest
-            GROUP BY s.ts_code
-        ){latest_sim_cte}
-        SELECT
-            (SELECT MAX(trade_date) FROM score_summary),
-            agg.ts_code,
-            agg.current_rank,
-            agg.best_rank_3d,
-            agg.current_total_score,
-            {sim_column}
-        FROM agg
-        {sim_join}
-        "#
-    );
-
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| format!("预编译全市场总榜排名失败: {e}"))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("查询全市场总榜排名失败: {e}"))?;
-    let mut out = HashMap::new();
-    let mut rank_date: Option<String> = None;
-
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取全市场总榜排名失败: {e}"))?
-    {
-        let ts_code: String = row.get(1).map_err(|e| format!("读取排名代码失败: {e}"))?;
-        if ts_code.trim().is_empty() {
-            continue;
-        }
-        if rank_date.is_none() {
-            let date: Option<String> = row
-                .get(0)
-                .map_err(|e| format!("读取最新总榜日期字段失败: {e}"))?;
-            rank_date = date.filter(|value| !value.trim().is_empty());
-        }
-        out.insert(
-            ts_code,
-            RankContext {
-                rank: row.get(2).map_err(|e| format!("读取排名失败: {e}"))?,
-                best_rank_3d: row
-                    .get(3)
-                    .map_err(|e| format!("读取三日最优排名失败: {e}"))?,
-                similarity_rank: row
-                    .get(5)
-                    .map_err(|e| format!("读取相似榜单排名失败: {e}"))?,
-                total_score: row.get(4).map_err(|e| format!("读取总分失败: {e}"))?,
-            },
-        );
-    }
-
-    let rank_date = rank_date.ok_or_else(|| "score_summary 没有可用交易日".to_string())?;
-    Ok((rank_date, out))
-}
-
-fn cached_rank_context(
-    source_path: &str,
-    conn: &Connection,
-) -> Result<(String, HashMap<String, RankContext>), String> {
-    {
-        let cache = rank_context_cache()
-            .lock()
-            .map_err(|_| "排名缓存锁已损坏".to_string())?;
-        if let Some(entry) = cache.get(source_path) {
-            return Ok((entry.rank_date.clone(), entry.ranks.clone()));
-        }
-    }
-
-    let (rank_date, ranks) = load_rank_context(conn)?;
-    rank_context_cache()
-        .lock()
-        .map_err(|_| "排名缓存锁已损坏".to_string())?
-        .insert(
-            source_path.to_string(),
-            RankCacheEntry {
-                rank_date: rank_date.clone(),
-                ranks: ranks.clone(),
-            },
-        );
-    Ok((rank_date, ranks))
-}
-
-fn load_scene_marker_candidates(
-    conn: &Connection,
-    rank_date: &str,
-) -> Result<HashMap<String, Vec<SceneMarkerCandidate>>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT
-                ts_code,
-                scene_name,
-                stage,
-                scene_rank
-            FROM scene_details
-            WHERE trade_date = ?
-              AND scene_name IS NOT NULL
-              AND TRIM(scene_name) <> ''
-            ORDER BY
-                ts_code ASC,
-                COALESCE(scene_rank, 999999) ASC,
-                scene_name ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译全市场场景标记失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![rank_date])
-        .map_err(|e| format!("查询全市场场景标记失败: {e}"))?;
-    let mut out = HashMap::<String, Vec<SceneMarkerCandidate>>::new();
-
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取全市场场景标记失败: {e}"))?
-    {
-        let ts_code: String = row
-            .get(0)
-            .map_err(|e| format!("读取场景标记代码失败: {e}"))?;
-        let scene_name: String = row
-            .get(1)
-            .map_err(|e| format!("读取场景标记名称失败: {e}"))?;
-        let stage: Option<String> = row
-            .get(2)
-            .map_err(|e| format!("读取场景标记等级失败: {e}"))?;
-        let scene_rank: Option<i64> = row
-            .get(3)
-            .map_err(|e| format!("读取场景标记排名失败: {e}"))?;
-        if ts_code.trim().is_empty() || scene_name.trim().is_empty() {
-            continue;
-        }
-        out.entry(ts_code).or_default().push(SceneMarkerCandidate {
-            scene_name: scene_name.trim().to_string(),
-            scene_rank,
-            stage_level: scene_stage_level(stage.as_deref()),
-        });
-    }
-
-    Ok(out)
-}
-
-fn cached_scene_marker_candidates(
-    source_path: &str,
-    conn: &Connection,
-    rank_date: &str,
-) -> Result<HashMap<String, Vec<SceneMarkerCandidate>>, String> {
-    if let Some(entry) = scene_marker_cache()
-        .lock()
-        .map_err(|_| "场景标记缓存锁已损坏".to_string())?
-        .get(source_path)
-        .filter(|entry| entry.rank_date == rank_date)
-        .cloned()
-    {
-        return Ok(entry.candidates);
-    }
-
-    let candidates = load_scene_marker_candidates(conn, rank_date)?;
-    scene_marker_cache()
-        .lock()
-        .map_err(|_| "场景标记缓存锁已损坏".to_string())?
-        .insert(
-            source_path.to_string(),
-            SceneMarkerCacheEntry {
-                rank_date: rank_date.to_string(),
-                candidates: candidates.clone(),
-            },
-        );
-    Ok(candidates)
-}
-
-fn build_scene_marker_map(
-    candidates: &HashMap<String, Vec<SceneMarkerCandidate>>,
-    threshold_level: i32,
-) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    for (ts_code, items) in candidates {
-        let best = items
-            .iter()
-            .filter(|item| item.stage_level >= threshold_level)
-            .min_by(|left, right| {
-                left.scene_rank
-                    .unwrap_or(i64::MAX)
-                    .cmp(&right.scene_rank.unwrap_or(i64::MAX))
-                    .then_with(|| left.scene_name.cmp(&right.scene_name))
-            });
-        if let Some(item) = best {
-            let marker = match item.scene_rank {
-                Some(rank) => format!("{} #{}", item.scene_name, rank),
-                None => item.scene_name.clone(),
-            };
-            out.insert(ts_code.clone(), marker);
-        }
-    }
-    out
 }
 
 fn load_return_5d_context_map(
@@ -638,28 +329,6 @@ fn load_return_5d_context_map(
     Ok(out)
 }
 
-fn cached_return_5d_context_map(
-    source_path: &str,
-    conn: &Connection,
-    ts_codes: &[String],
-) -> Result<HashMap<String, Return5dContext>, String> {
-    if let Some(entry) = return_5d_context_cache()
-        .lock()
-        .map_err(|_| "五日涨幅缓存锁已损坏".to_string())?
-        .get(source_path)
-        .cloned()
-    {
-        return Ok(entry);
-    }
-
-    let entry = load_return_5d_context_map(conn, ts_codes)?;
-    return_5d_context_cache()
-        .lock()
-        .map_err(|_| "五日涨幅缓存锁已损坏".to_string())?
-        .insert(source_path.to_string(), entry.clone());
-    Ok(entry)
-}
-
 fn calc_return_pct(price: Option<f64>, base: Option<f64>) -> Option<f64> {
     match (price, base) {
         (Some(price), Some(base)) if price.is_finite() && base.is_finite() && base > 0.0 => {
@@ -673,22 +342,6 @@ fn normalize_quote_trade_date(raw: &str) -> Option<String> {
     let digits: String = raw.chars().filter(|ch| ch.is_ascii_digit()).collect();
     if digits.len() == 8 {
         Some(digits)
-    } else {
-        None
-    }
-}
-
-fn quote_body_change_pct(quote: &SinaQuote) -> Option<f64> {
-    if quote.pre_close > 0.0 && quote.open.is_finite() && quote.price.is_finite() {
-        Some((quote.price - quote.open) / quote.pre_close * 100.0)
-    } else {
-        None
-    }
-}
-
-fn quote_fall_from_high_pct(quote: &SinaQuote) -> Option<f64> {
-    if quote.high > 0.0 {
-        Some(((quote.high - quote.price) / quote.high).max(0.0) * 100.0)
     } else {
         None
     }
@@ -711,41 +364,8 @@ fn hash_to_hex<T: Hash>(value: &T) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-fn fingerprint_templates(templates: &[IntradayMonitorTemplate]) -> String {
-    let parts = templates
-        .iter()
-        .map(|item| {
-            (
-                item.id.trim().to_string(),
-                item.name.trim().to_string(),
-                item.expression.trim().to_string(),
-            )
-        })
-        .collect::<Vec<_>>();
-    hash_to_hex(&parts)
-}
-
 fn fingerprint_strings(values: &[String]) -> String {
     hash_to_hex(&values)
-}
-
-fn fingerprint_runtime_keys(keys: &HashSet<String>) -> String {
-    let mut values = keys.iter().cloned().collect::<Vec<_>>();
-    values.sort();
-    hash_to_hex(&values)
-}
-
-fn collect_template_order(templates: &[IntradayMonitorTemplate]) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    for template in templates {
-        let id = template.id.trim();
-        if id.is_empty() || !seen.insert(id.to_string()) {
-            continue;
-        }
-        out.push(id.to_string());
-    }
-    out
 }
 
 fn expr_uses_ident(expr: &Expr, targets: &HashSet<&str>) -> bool {
@@ -765,114 +385,6 @@ fn program_uses_ident(program: &Stmts, targets: &HashSet<&str>) -> bool {
         Stmt::Expr(expr) => expr_uses_ident(expr, targets),
         Stmt::Assign { value, .. } => expr_uses_ident(value, targets),
     })
-}
-
-fn filter_used_indicator_cache(
-    indicator_cache: Vec<IndsCache>,
-    required_runtime_keys: &HashSet<String>,
-) -> Vec<IndsCache> {
-    if required_runtime_keys.is_empty() {
-        return Vec::new();
-    }
-    indicator_cache
-        .into_iter()
-        .filter(|item| required_runtime_keys.contains(item.name.trim()))
-        .collect()
-}
-
-fn query_template_history_window(
-    conn: &Connection,
-    need_rows: usize,
-) -> Result<(String, String), String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT trade_date
-            FROM (
-                SELECT DISTINCT trade_date
-                FROM stock_data
-                WHERE adj_type = ?
-                ORDER BY trade_date DESC
-                LIMIT ?
-            ) recent_dates
-            ORDER BY trade_date ASC
-            "#,
-        )
-        .map_err(|e| format!("预编译模板预热交易日窗口失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![DEFAULT_ADJ_TYPE, need_rows.max(1) as i64])
-        .map_err(|e| format!("查询模板预热交易日窗口失败: {e}"))?;
-    let mut dates = Vec::new();
-
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取模板预热交易日窗口失败: {e}"))?
-    {
-        let trade_date: String = row
-            .get(0)
-            .map_err(|e| format!("读取模板预热交易日失败: {e}"))?;
-        if !trade_date.trim().is_empty() {
-            dates.push(trade_date);
-        }
-    }
-
-    let start_date = dates
-        .first()
-        .cloned()
-        .ok_or_else(|| "stock_data 没有可用于模板预热的交易日".to_string())?;
-    let end_date = dates
-        .last()
-        .cloned()
-        .ok_or_else(|| "stock_data 没有可用于模板预热的交易日".to_string())?;
-    Ok((start_date, end_date))
-}
-
-fn load_template_rank_score_series_map(
-    conn: &Connection,
-    start_date: &str,
-    end_date: &str,
-) -> Result<HashMap<String, HashMap<String, TemplateRankScoreInfo>>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT ts_code, trade_date, rank, total_score
-            FROM score_summary
-            WHERE trade_date >= ?
-              AND trade_date <= ?
-            "#,
-        )
-        .map_err(|e| format!("预编译全市场模板总榜序列失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![start_date, end_date])
-        .map_err(|e| format!("查询全市场模板总榜序列失败: {e}"))?;
-    let mut out = HashMap::<String, HashMap<String, TemplateRankScoreInfo>>::new();
-
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取全市场模板总榜序列失败: {e}"))?
-    {
-        let ts_code: String = row
-            .get(0)
-            .map_err(|e| format!("读取全市场模板总榜代码失败: {e}"))?;
-        let trade_date: String = row
-            .get(1)
-            .map_err(|e| format!("读取全市场模板总榜日期失败: {e}"))?;
-        let rank = row
-            .get::<_, Option<i64>>(2)
-            .map_err(|e| format!("读取全市场模板总榜排名失败: {e}"))?
-            .map(|value| value as f64);
-        let score = row
-            .get::<_, Option<f64>>(3)
-            .map_err(|e| format!("读取全市场模板总榜得分失败: {e}"))?;
-        if ts_code.trim().is_empty() || trade_date.trim().is_empty() {
-            continue;
-        }
-        out.entry(ts_code)
-            .or_default()
-            .insert(trade_date, TemplateRankScoreInfo { rank, score });
-    }
-
-    Ok(out)
 }
 
 fn inject_template_rank_score_series(
@@ -936,7 +448,18 @@ fn cached_template_runtime(
     data_mode: TemplateRuntimeDataMode,
 ) -> Result<Arc<AllMarketTemplateRuntimeCacheEntry>, String> {
     let compiled_templates = compile_intraday_templates(templates);
-    let template_order = collect_template_order(templates);
+    let template_order = (|templates: &[IntradayMonitorTemplate]| -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for template in templates {
+            let id = template.id.trim();
+            if id.is_empty() || !seen.insert(id.to_string()) {
+                continue;
+            }
+            out.push(id.to_string());
+        }
+        out
+    })(templates);
     let ready_programs = compiled_templates
         .values()
         .filter_map(|item| match item {
@@ -958,7 +481,17 @@ fn cached_template_runtime(
         })
         .max()
         .unwrap_or(0);
-    let indicator_cache = filter_used_indicator_cache(
+    let indicator_cache = (|indicator_cache: Vec<IndsCache>,
+                            required_runtime_keys: &HashSet<String>|
+     -> Vec<IndsCache> {
+        if required_runtime_keys.is_empty() {
+            return Vec::new();
+        }
+        indicator_cache
+            .into_iter()
+            .filter(|item| required_runtime_keys.contains(item.name.trim()))
+            .collect()
+    })(
         cache_ind_build(source_path).unwrap_or_default(),
         &required_runtime_keys,
     );
@@ -987,9 +520,25 @@ fn cached_template_runtime(
     let lookup_key = format!(
         "{}|tpl:{}|mode:{:?}|keys:{}|rows:{}|stocks:{}",
         source_path,
-        fingerprint_templates(templates),
+        (|templates: &[IntradayMonitorTemplate]| -> String {
+            let parts = templates
+                .iter()
+                .map(|item| {
+                    (
+                        item.id.trim().to_string(),
+                        item.name.trim().to_string(),
+                        item.expression.trim().to_string(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            hash_to_hex(&parts)
+        })(templates),
         resolved_data_mode,
-        fingerprint_runtime_keys(&required_runtime_keys),
+        (|keys: &HashSet<String>| -> String {
+            let mut values = keys.iter().cloned().collect::<Vec<_>>();
+            values.sort();
+            hash_to_hex(&values)
+        })(&required_runtime_keys),
         need_rows,
         fingerprint_strings(&ts_codes),
     );
@@ -1053,10 +602,98 @@ fn cached_template_runtime(
 
     let reader = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)
         .map_err(|e| format!("模板预热初始化日K读取器失败: {e}"))?;
-    let (start_date, end_date) = query_template_history_window(&reader.conn, need_rows)?;
+    let (start_date, end_date) =
+        (|conn: &Connection, need_rows: usize| -> Result<(String, String), String> {
+            let mut stmt = conn
+                .prepare(
+                    r#"
+            SELECT trade_date
+            FROM (
+                SELECT DISTINCT trade_date
+                FROM stock_data
+                WHERE adj_type = ?
+                ORDER BY trade_date DESC
+                LIMIT ?
+            ) recent_dates
+            ORDER BY trade_date ASC
+            "#,
+                )
+                .map_err(|e| format!("预编译模板预热交易日窗口失败: {e}"))?;
+            let mut rows = stmt
+                .query(params![DEFAULT_ADJ_TYPE, need_rows.max(1) as i64])
+                .map_err(|e| format!("查询模板预热交易日窗口失败: {e}"))?;
+            let mut dates = Vec::new();
+
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| format!("读取模板预热交易日窗口失败: {e}"))?
+            {
+                let trade_date: String = row
+                    .get(0)
+                    .map_err(|e| format!("读取模板预热交易日失败: {e}"))?;
+                if !trade_date.trim().is_empty() {
+                    dates.push(trade_date);
+                }
+            }
+
+            let start_date = dates
+                .first()
+                .cloned()
+                .ok_or_else(|| "stock_data 没有可用于模板预热的交易日".to_string())?;
+            let end_date = dates
+                .last()
+                .cloned()
+                .ok_or_else(|| "stock_data 没有可用于模板预热的交易日".to_string())?;
+            Ok((start_date, end_date))
+        })(&reader.conn, need_rows)?;
     let rank_score_map = if uses_rank_score {
-        load_template_rank_score_series_map(&open_result_conn(source_path)?, &start_date, &end_date)
-            .unwrap_or_default()
+        (|conn: &Connection,
+          start_date: &str,
+          end_date: &str|
+         -> Result<HashMap<String, HashMap<String, TemplateRankScoreInfo>>, String> {
+            let mut stmt = conn
+                .prepare(
+                    r#"
+            SELECT ts_code, trade_date, rank, total_score
+            FROM score_summary
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+            "#,
+                )
+                .map_err(|e| format!("预编译全市场模板总榜序列失败: {e}"))?;
+            let mut rows = stmt
+                .query(params![start_date, end_date])
+                .map_err(|e| format!("查询全市场模板总榜序列失败: {e}"))?;
+            let mut out = HashMap::<String, HashMap<String, TemplateRankScoreInfo>>::new();
+
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| format!("读取全市场模板总榜序列失败: {e}"))?
+            {
+                let ts_code: String = row
+                    .get(0)
+                    .map_err(|e| format!("读取全市场模板总榜代码失败: {e}"))?;
+                let trade_date: String = row
+                    .get(1)
+                    .map_err(|e| format!("读取全市场模板总榜日期失败: {e}"))?;
+                let rank = row
+                    .get::<_, Option<i64>>(2)
+                    .map_err(|e| format!("读取全市场模板总榜排名失败: {e}"))?
+                    .map(|value| value as f64);
+                let score = row
+                    .get::<_, Option<f64>>(3)
+                    .map_err(|e| format!("读取全市场模板总榜得分失败: {e}"))?;
+                if ts_code.trim().is_empty() || trade_date.trim().is_empty() {
+                    continue;
+                }
+                out.entry(ts_code)
+                    .or_default()
+                    .insert(trade_date, TemplateRankScoreInfo { rank, score });
+            }
+
+            Ok(out)
+        })(&open_result_conn(source_path)?, &start_date, &end_date)
+        .unwrap_or_default()
     } else {
         HashMap::new()
     };
@@ -1142,7 +779,16 @@ fn build_template_runtime_row_data(
         &mut row_data,
         &[
             (RT_OPEN_CHANGE_PCT, row.realtime_change_open_pct),
-            (RT_FALL_FROM_HIGH_PCT, quote_fall_from_high_pct(quote)),
+            (
+                RT_FALL_FROM_HIGH_PCT,
+                (|quote: &SinaQuote| -> Option<f64> {
+                    if quote.high > 0.0 {
+                        Some(((quote.high - quote.price) / quote.high).max(0.0) * 100.0)
+                    } else {
+                        None
+                    }
+                })(quote),
+            ),
             (RT_VOLUME_RATIO, row.realtime_vol_ratio),
             (RT_AVERAGE_PRICE, row.realtime_avg_price),
         ],
@@ -1158,27 +804,6 @@ fn build_template_runtime_row_data(
     Ok(row_data)
 }
 
-fn value_latest_as_sort_number(value: &Value, len: usize) -> Result<Option<f64>, String> {
-    match value {
-        Value::Num(value) => Ok(value.is_finite().then_some(*value)),
-        Value::Bool(value) => Ok(Some(if *value { 1.0 } else { 0.0 })),
-        Value::NumSeries(_) | Value::SharedNumSeries(_) => {
-            let series = Value::as_num_series(value, len)
-                .map_err(|error| format!("表达式返回值非数值:{}", error.msg))?;
-            Ok(series
-                .last()
-                .copied()
-                .flatten()
-                .filter(|value| value.is_finite()))
-        }
-        Value::BoolSeries(_) => {
-            let series = Value::as_bool_series(value, len)
-                .map_err(|error| format!("表达式返回值非布尔:{}", error.msg))?;
-            Ok(series.last().map(|value| if *value { 1.0 } else { 0.0 }))
-        }
-    }
-}
-
 fn eval_other_sort_value(
     runtime: &Runtime,
     ast: &crate::expr::parser::Stmts,
@@ -1188,7 +813,26 @@ fn eval_other_sort_value(
         .eval_program(ast)
         .map_err(|error| format!("表达式计算错误:{}", error.msg))?;
     let len = rt_max_len(&rt);
-    value_latest_as_sort_number(&value, len)
+    (|value: &Value, len: usize| -> Result<Option<f64>, String> {
+        match value {
+            Value::Num(value) => Ok(value.is_finite().then_some(*value)),
+            Value::Bool(value) => Ok(Some(if *value { 1.0 } else { 0.0 })),
+            Value::NumSeries(_) | Value::SharedNumSeries(_) => {
+                let series = Value::as_num_series(value, len)
+                    .map_err(|error| format!("表达式返回值非数值:{}", error.msg))?;
+                Ok(series
+                    .last()
+                    .copied()
+                    .flatten()
+                    .filter(|value| value.is_finite()))
+            }
+            Value::BoolSeries(_) => {
+                let series = Value::as_bool_series(value, len)
+                    .map_err(|error| format!("表达式返回值非布尔:{}", error.msg))?;
+                Ok(series.last().map(|value| if *value { 1.0 } else { 0.0 }))
+            }
+        }
+    })(&value, len)
 }
 
 fn build_other_sort_template(expression: &str) -> IntradayMonitorTemplate {
@@ -1215,312 +859,6 @@ fn build_other_sort_warning(messages: Vec<String>) -> Option<String> {
             first
         )),
     }
-}
-
-fn cached_daily_other_sort_values(
-    source_path: &str,
-    stocks: &[StockMeta],
-    expression: &str,
-) -> Result<(Arc<HashMap<String, Option<f64>>>, Option<String>), String> {
-    let template = build_other_sort_template(expression);
-    let templates = vec![template.clone()];
-    let lookup_key = format!(
-        "{}|other-sort-daily:{}|stocks:{}",
-        source_path,
-        hash_to_hex(&template.expression),
-        fingerprint_strings(
-            &stocks
-                .iter()
-                .map(|item| item.ts_code.clone())
-                .collect::<Vec<_>>()
-        ),
-    );
-
-    let entry = cached_template_runtime(
-        source_path,
-        stocks,
-        &templates,
-        TemplateRuntimeDataMode::History,
-    )?;
-    if let Some(values) = other_sort_daily_value_cache()
-        .lock()
-        .map_err(|_| "其他排序日K缓存锁已损坏".to_string())?
-        .get(&lookup_key)
-        .cloned()
-    {
-        return Ok((
-            values,
-            build_other_sort_warning(entry.warning_messages.clone()),
-        ));
-    }
-
-    let Some(CompiledIntradayMonitorTemplate::Ready(compiled)) =
-        entry.compiled_templates.get(&template.id)
-    else {
-        return Ok((
-            Arc::new(HashMap::new()),
-            build_other_sort_warning(entry.warning_messages.clone()),
-        ));
-    };
-
-    let eval_results = stocks
-        .par_iter()
-        .filter_map(|stock| {
-            let base_row = entry.base_rows.get(&stock.ts_code)?;
-            let mut row_data = base_row.clone();
-            if !entry.indicator_cache.is_empty() {
-                for (name, series) in calc_inds_with_cache_lossy(&entry.indicator_cache, &row_data)
-                {
-                    row_data.cols.insert(name, series);
-                }
-            }
-            let mut runtime = match row_data.validate().and_then(|_| row_into_rt(row_data)) {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    return Some(Err(format!(
-                        "{}: runtime 构建失败: {}",
-                        stock.ts_code, error
-                    )));
-                }
-            };
-            freeze_runtime_series(&mut runtime);
-            Some(
-                eval_other_sort_value(&runtime, &compiled.ast)
-                    .map(|value| (stock.ts_code.clone(), value))
-                    .map_err(|error| format!("{}: {}", stock.ts_code, error)),
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let mut values = HashMap::new();
-    let mut warnings = entry.warning_messages.clone();
-    for result in eval_results {
-        match result {
-            Ok((ts_code, value)) => {
-                values.insert(ts_code, value);
-            }
-            Err(error) => warnings.push(error),
-        }
-    }
-
-    let values = Arc::new(values);
-    other_sort_daily_value_cache()
-        .lock()
-        .map_err(|_| "其他排序日K缓存锁已损坏".to_string())?
-        .insert(lookup_key, values.clone());
-    Ok((values, build_other_sort_warning(warnings)))
-}
-
-fn apply_other_sort_values(
-    source_path: &str,
-    stocks: &[StockMeta],
-    rows: &mut [AllMarketMonitorRow],
-    quotes: &HashMap<String, SinaQuote>,
-    expression: Option<&str>,
-    use_realtime: bool,
-) -> Option<String> {
-    let expression = expression
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    if !use_realtime {
-        return match cached_daily_other_sort_values(source_path, stocks, expression) {
-            Ok((values, warning)) => {
-                for row in rows.iter_mut() {
-                    row.other_sort_value = values.get(&row.ts_code).copied().flatten();
-                }
-                warning
-            }
-            Err(error) => Some(format!("其他排序异常: {error}")),
-        };
-    }
-
-    let template = build_other_sort_template(expression);
-    let templates = vec![template.clone()];
-    let entry = match cached_template_runtime(
-        source_path,
-        stocks,
-        &templates,
-        TemplateRuntimeDataMode::QuoteOnly,
-    ) {
-        Ok(entry) => entry,
-        Err(error) => return Some(format!("其他排序异常: runtime 初始化失败: {error}")),
-    };
-
-    let Some(CompiledIntradayMonitorTemplate::Ready(compiled)) =
-        entry.compiled_templates.get(&template.id)
-    else {
-        return build_other_sort_warning(entry.warning_messages.clone());
-    };
-
-    let build_results = rows
-        .par_iter()
-        .enumerate()
-        .filter_map(|(row_index, row)| {
-            let quote = quotes.get(&row.ts_code)?;
-            let row_data = match build_template_runtime_row_data(&entry, row, quote) {
-                Ok(row_data) => row_data,
-                Err(error) => return Some(Err(format!("{}: {}", row.ts_code, error))),
-            };
-            let mut runtime = match row_into_rt(row_data) {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    return Some(Err(format!("{}: runtime 构建失败: {}", row.ts_code, error)));
-                }
-            };
-            freeze_runtime_series(&mut runtime);
-            Some(
-                eval_other_sort_value(&runtime, &compiled.ast)
-                    .map(|value| (row_index, value))
-                    .map_err(|error| format!("{}: {}", row.ts_code, error)),
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let mut warnings = entry.warning_messages.clone();
-    for result in build_results {
-        match result {
-            Ok((row_index, value)) => rows[row_index].other_sort_value = value,
-            Err(error) => warnings.push(error),
-        }
-    }
-
-    build_other_sort_warning(warnings)
-}
-
-fn apply_all_market_template_hits(
-    source_path: &str,
-    stocks: &[StockMeta],
-    rows: &mut [AllMarketMonitorRow],
-    quotes: &HashMap<String, SinaQuote>,
-    templates: &[IntradayMonitorTemplate],
-) -> Option<String> {
-    for row in rows.iter_mut() {
-        row.template_hits = Some(Vec::new());
-    }
-
-    if templates.is_empty() {
-        return None;
-    }
-
-    let entry = match cached_template_runtime(
-        source_path,
-        stocks,
-        templates,
-        TemplateRuntimeDataMode::QuoteOnly,
-    ) {
-        Ok(entry) => entry,
-        Err(err) => {
-            return Some(format!("模板计算异常: runtime 初始化失败: {err}"));
-        }
-    };
-
-    let mut warning_messages = entry.warning_messages.clone();
-
-    // Step 1: build Runtime for every row in parallel
-    struct RowEvalCtx {
-        row_index: usize,
-        ts_code: String,
-        runtime: Runtime,
-    }
-
-    let build_results: Vec<Option<Result<RowEvalCtx, String>>> = rows
-        .par_iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let quote = quotes.get(&row.ts_code)?;
-            let row_data = match build_template_runtime_row_data(&entry, row, quote) {
-                Ok(d) => d,
-                Err(e) => return Some(Err(format!("{}: {}", row.ts_code, e))),
-            };
-            let mut runtime = match row_into_rt(row_data) {
-                Ok(rt) => rt,
-                Err(e) => {
-                    return Some(Err(format!("{}: runtime 构建失败: {}", row.ts_code, e)));
-                }
-            };
-            freeze_runtime_series(&mut runtime);
-            Some(Ok(RowEvalCtx {
-                row_index: i,
-                ts_code: row.ts_code.clone(),
-                runtime,
-            }))
-        })
-        .collect();
-
-    let mut valid: Vec<RowEvalCtx> = Vec::with_capacity(rows.len());
-    for result in build_results.into_iter().flatten() {
-        match result {
-            Ok(ctx) => valid.push(ctx),
-            Err(w) => warning_messages.push(w),
-        }
-    }
-
-    // Step 2: evaluate every (row, template) pair in a single flat parallel pass
-    let tpl_count = entry.template_order.len();
-    let total = valid.len().checked_mul(tpl_count).unwrap_or(0);
-
-    if total > 0 {
-        let tpl_order = &entry.template_order;
-        let compiled = &entry.compiled_templates;
-
-        let eval_results: Vec<Option<Result<(usize, AllMarketTemplateHit), String>>> = (0..total)
-            .into_par_iter()
-            .map(|idx| {
-                let row_idx = idx / tpl_count;
-                let tpl_idx = idx % tpl_count;
-                let ctx = &valid[row_idx];
-                let tpl_id = &tpl_order[tpl_idx];
-
-                let tpl = match compiled.get(tpl_id) {
-                    Some(CompiledIntradayMonitorTemplate::Ready(t)) => t,
-                    _ => return None,
-                };
-
-                let mut rt = ctx.runtime.clone();
-                let hit = match (|| -> Result<bool, String> {
-                    let value = rt
-                        .eval_program(&tpl.ast)
-                        .map_err(|e| format!("表达式计算错误:{}", e.msg))?;
-                    let len = rt_max_len(&rt);
-                    let series = Value::as_bool_series(&value, len)
-                        .map_err(|e| format!("表达式返回值非布尔:{}", e.msg))?;
-                    Ok(series.last().copied().unwrap_or(false))
-                })() {
-                    Ok(true) => true,
-                    Ok(false) => false,
-                    Err(err) => {
-                        return Some(Err(format!("{}: {} · {}", ctx.ts_code, tpl.name, err)));
-                    }
-                };
-
-                if hit {
-                    Some(Ok((
-                        ctx.row_index,
-                        AllMarketTemplateHit {
-                            template_id: tpl_id.clone(),
-                            template_name: tpl.name.clone(),
-                        },
-                    )))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        for result in eval_results.into_iter().flatten() {
-            match result {
-                Ok((row_idx, hit)) => {
-                    rows[row_idx]
-                        .template_hits
-                        .get_or_insert_with(Vec::new)
-                        .push(hit);
-                }
-                Err(w) => warning_messages.push(w),
-            }
-        }
-    }
-
-    build_template_warning_message(warning_messages)
 }
 
 fn build_rows(
@@ -1571,7 +909,13 @@ fn build_rows(
                 realtime_pre_close: quote.map(|item| item.pre_close),
                 realtime_avg_price: avg_price_map.get(&stock.ts_code).copied(),
                 realtime_change_pct: quote.and_then(|item| item.change_pct),
-                realtime_change_open_pct: quote.and_then(quote_body_change_pct),
+                realtime_change_open_pct: quote.and_then(|quote: &SinaQuote| -> Option<f64> {
+                    if quote.pre_close > 0.0 && quote.open.is_finite() && quote.price.is_finite() {
+                        Some((quote.price - quote.open) / quote.pre_close * 100.0)
+                    } else {
+                        None
+                    }
+                }),
                 realtime_vol: quote.map(|item| item.vol),
                 realtime_amount: quote.map(|item| item.amount),
                 realtime_vol_ratio: volume_ratio_map.get(&stock.ts_code).copied(),
@@ -1584,48 +928,6 @@ fn build_rows(
             }
         })
         .collect()
-}
-
-fn build_index_rows(quotes: &HashMap<String, SinaQuote>) -> Vec<AllMarketIndexRow> {
-    default_realtime_index_ts_codes()
-        .into_iter()
-        .map(|ts_code| {
-            let quote = quotes.get(&ts_code);
-            AllMarketIndexRow {
-                ts_code: ts_code.clone(),
-                name: quote
-                    .map(|item| item.name.trim())
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or(ts_code.as_str())
-                    .to_string(),
-                realtime_trade_date: quote.and_then(|item| normalize_quote_trade_date(&item.date)),
-                realtime_price: quote.map(|item| item.price),
-                realtime_change_pct: quote.and_then(|item| item.change_pct),
-            }
-        })
-        .collect()
-}
-
-fn fetch_index_rows(provider: RealtimeQuoteProvider) -> Vec<AllMarketIndexRow> {
-    let index_ts_codes = default_realtime_index_ts_codes();
-    let quote_result = match provider {
-        RealtimeQuoteProvider::Sina => {
-            fetch_all_market_realtime_quote_map_for_codes(&index_ts_codes).map(|(quotes, _)| quotes)
-        }
-        RealtimeQuoteProvider::Tencent => fetch_all_market_tencent_realtime_quote_map_for_codes(
-            &index_ts_codes,
-        )
-        .map(|(quotes, _)| {
-            quotes
-                .into_iter()
-                .map(|(ts_code, quote)| (ts_code, quote.into_sina_quote()))
-                .collect::<HashMap<_, _>>()
-        }),
-    };
-
-    quote_result
-        .map(|quotes| build_index_rows(&quotes))
-        .unwrap_or_else(|_| Vec::new())
 }
 
 fn has_new_realtime_data(last_data_version: Option<&str>, data_version: Option<&str>) -> bool {
@@ -1654,7 +956,49 @@ pub fn get_all_market_monitor_snapshot(
     other_sort_use_realtime: Option<bool>,
     last_data_version: Option<String>,
 ) -> Result<AllMarketMonitorSnapshotData, String> {
-    let mut meta = cached_source_meta(source_path)?;
+    let mut meta = (|source_path: &str| -> Result<SourceMetaCacheEntry, String> {
+        if let Some(entry) = source_meta_cache()
+            .lock()
+            .map_err(|_| "股票基础信息缓存锁已损坏".to_string())?
+            .get(source_path)
+            .cloned()
+        {
+            return Ok(entry);
+        }
+
+        let entry = (|source_path: &str| -> Result<SourceMetaCacheEntry, String> {
+            let mut stocks = Vec::new();
+            let concepts_map = build_concepts_map(source_path).unwrap_or_default();
+            for cols in load_stock_list(source_path)? {
+                let Some(ts_code) = cols.first().map(|value| value.trim()) else {
+                    continue;
+                };
+                if ts_code.is_empty() {
+                    continue;
+                }
+                let name = cols.get(2).map(|value| value.trim()).unwrap_or_default();
+                stocks.push(StockMeta {
+                    ts_code: ts_code.to_string(),
+                    name: name.to_string(),
+                    board: board_category(ts_code, Some(name)).to_string(),
+                    total_mv_yi: (|raw: Option<&String>| -> Option<f64> {
+                        raw?.trim()
+                            .parse::<f64>()
+                            .ok()
+                            .filter(|value| value.is_finite())
+                            .map(|value| value / 1e4)
+                    })(cols.get(9)),
+                    concept: concepts_map.get(ts_code).cloned().unwrap_or_default(),
+                });
+            }
+            Ok(SourceMetaCacheEntry { stocks })
+        })(source_path)?;
+        source_meta_cache()
+            .lock()
+            .map_err(|_| "股票基础信息缓存锁已损坏".to_string())?
+            .insert(source_path.to_string(), entry.clone());
+        Ok(entry)
+    })(source_path)?;
     if let Some(ref codes) = ts_codes {
         let code_set: HashSet<&str> = codes.iter().map(|s| s.as_str()).collect();
         meta.stocks
@@ -1710,15 +1054,283 @@ pub fn get_all_market_monitor_snapshot(
     }
 
     let conn = open_result_conn(source_path)?;
-    let (rank_date, ranks) = cached_rank_context(source_path, &conn)?;
+    let (rank_date, ranks) = (|source_path: &str,
+                               conn: &Connection|
+     -> Result<(String, HashMap<String, RankContext>), String> {
+        {
+            let cache = rank_context_cache()
+                .lock()
+                .map_err(|_| "排名缓存锁已损坏".to_string())?;
+            if let Some(entry) = cache.get(source_path) {
+                return Ok((entry.rank_date.clone(), entry.ranks.clone()));
+            }
+        }
+
+        let (rank_date, ranks) =
+            (|conn: &Connection| -> Result<(String, HashMap<String, RankContext>), String> {
+                let similarity_board = (|conn: &Connection| -> bool {
+                    table_exists(conn, "strategy_trigger_similarity_rank")
+                        && table_exists(conn, "strategy_trigger_similarity_active_config")
+                })(conn);
+                let latest_sim_cte = if similarity_board {
+                    r#",
+            latest_sim AS (
+                SELECT r.ts_code, MAX(r.rank) AS similarity_rank
+                FROM strategy_trigger_similarity_rank r
+                WHERE r.config_key = (
+                    SELECT config_key FROM strategy_trigger_similarity_active_config WHERE id = 1
+                )
+                  AND r.trade_date = (
+                      SELECT MAX(m.trade_date)
+                      FROM strategy_trigger_similarity_rank m
+                      WHERE m.config_key = (
+                          SELECT config_key
+                          FROM strategy_trigger_similarity_active_config WHERE id = 1
+                      )
+                  )
+                  AND r.rank IS NOT NULL
+                GROUP BY r.ts_code
+            )"#
+                } else {
+                    ""
+                };
+                let sim_column = if similarity_board {
+                    "sim.similarity_rank"
+                } else {
+                    "CAST(NULL AS BIGINT)"
+                };
+                let sim_join = if similarity_board {
+                    "LEFT JOIN latest_sim sim ON sim.ts_code = agg.ts_code"
+                } else {
+                    ""
+                };
+
+                let sql = format!(
+                    r#"
+        WITH recent_dates AS (
+            SELECT
+                trade_date,
+                ROW_NUMBER() OVER (ORDER BY trade_date DESC) AS date_rank
+            FROM (
+                SELECT trade_date
+                FROM score_summary
+                GROUP BY trade_date
+                ORDER BY trade_date DESC
+                LIMIT 3
+            ) dates
+        ),
+        agg AS (
+            SELECT
+                s.ts_code,
+                MAX(CASE WHEN s.trade_date = latest.rd THEN s.rank ELSE NULL END) AS current_rank,
+                MIN(CASE WHEN d.date_rank <= 3 AND s.rank IS NOT NULL THEN s.rank ELSE NULL END) AS best_rank_3d,
+                MAX(CASE WHEN s.trade_date = latest.rd THEN s.total_score ELSE NULL END) AS current_total_score
+            FROM score_summary s
+            INNER JOIN recent_dates d ON s.trade_date = d.trade_date
+            CROSS JOIN (SELECT MAX(trade_date) AS rd FROM score_summary) latest
+            GROUP BY s.ts_code
+        ){latest_sim_cte}
+        SELECT
+            (SELECT MAX(trade_date) FROM score_summary),
+            agg.ts_code,
+            agg.current_rank,
+            agg.best_rank_3d,
+            agg.current_total_score,
+            {sim_column}
+        FROM agg
+        {sim_join}
+        "#
+                );
+
+                let mut stmt = conn
+                    .prepare(&sql)
+                    .map_err(|e| format!("预编译全市场总榜排名失败: {e}"))?;
+                let mut rows = stmt
+                    .query([])
+                    .map_err(|e| format!("查询全市场总榜排名失败: {e}"))?;
+                let mut out = HashMap::new();
+                let mut rank_date: Option<String> = None;
+
+                while let Some(row) = rows
+                    .next()
+                    .map_err(|e| format!("读取全市场总榜排名失败: {e}"))?
+                {
+                    let ts_code: String =
+                        row.get(1).map_err(|e| format!("读取排名代码失败: {e}"))?;
+                    if ts_code.trim().is_empty() {
+                        continue;
+                    }
+                    if rank_date.is_none() {
+                        let date: Option<String> = row
+                            .get(0)
+                            .map_err(|e| format!("读取最新总榜日期字段失败: {e}"))?;
+                        rank_date = date.filter(|value| !value.trim().is_empty());
+                    }
+                    out.insert(
+                        ts_code,
+                        RankContext {
+                            rank: row.get(2).map_err(|e| format!("读取排名失败: {e}"))?,
+                            best_rank_3d: row
+                                .get(3)
+                                .map_err(|e| format!("读取三日最优排名失败: {e}"))?,
+                            similarity_rank: row
+                                .get(5)
+                                .map_err(|e| format!("读取相似榜单排名失败: {e}"))?,
+                            total_score: row.get(4).map_err(|e| format!("读取总分失败: {e}"))?,
+                        },
+                    );
+                }
+
+                let rank_date =
+                    rank_date.ok_or_else(|| "score_summary 没有可用交易日".to_string())?;
+                Ok((rank_date, out))
+            })(conn)?;
+        rank_context_cache()
+            .lock()
+            .map_err(|_| "排名缓存锁已损坏".to_string())?
+            .insert(
+                source_path.to_string(),
+                RankCacheEntry {
+                    rank_date: rank_date.clone(),
+                    ranks: ranks.clone(),
+                },
+            );
+        Ok((rank_date, ranks))
+    })(source_path, &conn)?;
     let scene_marker_candidates =
-        cached_scene_marker_candidates(source_path, &conn, &rank_date).unwrap_or_default();
-    let scene_marker_map = build_scene_marker_map(
+        (|source_path: &str,
+          conn: &Connection,
+          rank_date: &str|
+         -> Result<HashMap<String, Vec<SceneMarkerCandidate>>, String> {
+            if let Some(entry) = scene_marker_cache()
+                .lock()
+                .map_err(|_| "场景标记缓存锁已损坏".to_string())?
+                .get(source_path)
+                .filter(|entry| entry.rank_date == rank_date)
+                .cloned()
+            {
+                return Ok(entry.candidates);
+            }
+
+            let candidates =
+                (|conn: &Connection,
+                  rank_date: &str|
+                 -> Result<HashMap<String, Vec<SceneMarkerCandidate>>, String> {
+                    let mut stmt = conn
+                        .prepare(
+                            r#"
+            SELECT
+                ts_code,
+                scene_name,
+                stage,
+                scene_rank
+            FROM scene_details
+            WHERE trade_date = ?
+              AND scene_name IS NOT NULL
+              AND TRIM(scene_name) <> ''
+            ORDER BY
+                ts_code ASC,
+                COALESCE(scene_rank, 999999) ASC,
+                scene_name ASC
+            "#,
+                        )
+                        .map_err(|e| format!("预编译全市场场景标记失败: {e}"))?;
+                    let mut rows = stmt
+                        .query(params![rank_date])
+                        .map_err(|e| format!("查询全市场场景标记失败: {e}"))?;
+                    let mut out = HashMap::<String, Vec<SceneMarkerCandidate>>::new();
+
+                    while let Some(row) = rows
+                        .next()
+                        .map_err(|e| format!("读取全市场场景标记失败: {e}"))?
+                    {
+                        let ts_code: String = row
+                            .get(0)
+                            .map_err(|e| format!("读取场景标记代码失败: {e}"))?;
+                        let scene_name: String = row
+                            .get(1)
+                            .map_err(|e| format!("读取场景标记名称失败: {e}"))?;
+                        let stage: Option<String> = row
+                            .get(2)
+                            .map_err(|e| format!("读取场景标记等级失败: {e}"))?;
+                        let scene_rank: Option<i64> = row
+                            .get(3)
+                            .map_err(|e| format!("读取场景标记排名失败: {e}"))?;
+                        if ts_code.trim().is_empty() || scene_name.trim().is_empty() {
+                            continue;
+                        }
+                        out.entry(ts_code).or_default().push(SceneMarkerCandidate {
+                            scene_name: scene_name.trim().to_string(),
+                            scene_rank,
+                            stage_level: scene_stage_level(stage.as_deref()),
+                        });
+                    }
+
+                    Ok(out)
+                })(conn, rank_date)?;
+            scene_marker_cache()
+                .lock()
+                .map_err(|_| "场景标记缓存锁已损坏".to_string())?
+                .insert(
+                    source_path.to_string(),
+                    SceneMarkerCacheEntry {
+                        rank_date: rank_date.to_string(),
+                        candidates: candidates.clone(),
+                    },
+                );
+            Ok(candidates)
+        })(source_path, &conn, &rank_date)
+        .unwrap_or_default();
+    let scene_marker_map = (|candidates: &HashMap<String, Vec<SceneMarkerCandidate>>,
+                             threshold_level: i32|
+     -> HashMap<String, String> {
+        let mut out = HashMap::new();
+        for (ts_code, items) in candidates {
+            let best = items
+                .iter()
+                .filter(|item| item.stage_level >= threshold_level)
+                .min_by(|left, right| {
+                    left.scene_rank
+                        .unwrap_or(i64::MAX)
+                        .cmp(&right.scene_rank.unwrap_or(i64::MAX))
+                        .then_with(|| left.scene_name.cmp(&right.scene_name))
+                });
+            if let Some(item) = best {
+                let marker = match item.scene_rank {
+                    Some(rank) => format!("{} #{}", item.scene_name, rank),
+                    None => item.scene_name.clone(),
+                };
+                out.insert(ts_code.clone(), marker);
+            }
+        }
+        out
+    })(
         &scene_marker_candidates,
         parse_scene_stage_threshold(scene_stage_threshold.as_deref()),
     );
     let return_5d_map = open_source_conn(source_path)
-        .and_then(|conn| cached_return_5d_context_map(source_path, &conn, &ts_codes))
+        .and_then(|conn| {
+            (|source_path: &str,
+              conn: &Connection,
+              ts_codes: &[String]|
+             -> Result<HashMap<String, Return5dContext>, String> {
+                if let Some(entry) = return_5d_context_cache()
+                    .lock()
+                    .map_err(|_| "五日涨幅缓存锁已损坏".to_string())?
+                    .get(source_path)
+                    .cloned()
+                {
+                    return Ok(entry);
+                }
+
+                let entry = load_return_5d_context_map(conn, ts_codes)?;
+                return_5d_context_cache()
+                    .lock()
+                    .map_err(|_| "五日涨幅缓存锁已损坏".to_string())?
+                    .insert(source_path.to_string(), entry.clone());
+                Ok(entry)
+            })(source_path, &conn, &ts_codes)
+        })
         .unwrap_or_default();
     let mut rows = build_rows(
         &meta,
@@ -1731,7 +1343,144 @@ pub fn get_all_market_monitor_snapshot(
         &fetch_meta,
     );
     let template_warning_message = if template_enabled.unwrap_or(false) {
-        apply_all_market_template_hits(
+        (|source_path: &str,
+          stocks: &[StockMeta],
+          rows: &mut [AllMarketMonitorRow],
+          quotes: &HashMap<String, SinaQuote>,
+          templates: &[IntradayMonitorTemplate]|
+         -> Option<String> {
+            for row in rows.iter_mut() {
+                row.template_hits = Some(Vec::new());
+            }
+
+            if templates.is_empty() {
+                return None;
+            }
+
+            let entry = match cached_template_runtime(
+                source_path,
+                stocks,
+                templates,
+                TemplateRuntimeDataMode::QuoteOnly,
+            ) {
+                Ok(entry) => entry,
+                Err(err) => {
+                    return Some(format!("模板计算异常: runtime 初始化失败: {err}"));
+                }
+            };
+
+            let mut warning_messages = entry.warning_messages.clone();
+
+            // Step 1: build Runtime for every row in parallel
+            struct RowEvalCtx {
+                row_index: usize,
+                ts_code: String,
+                runtime: Runtime,
+            }
+
+            let build_results: Vec<Option<Result<RowEvalCtx, String>>> = rows
+                .par_iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    let quote = quotes.get(&row.ts_code)?;
+                    let row_data = match build_template_runtime_row_data(&entry, row, quote) {
+                        Ok(d) => d,
+                        Err(e) => return Some(Err(format!("{}: {}", row.ts_code, e))),
+                    };
+                    let mut runtime = match row_into_rt(row_data) {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            return Some(Err(format!("{}: runtime 构建失败: {}", row.ts_code, e)));
+                        }
+                    };
+                    freeze_runtime_series(&mut runtime);
+                    Some(Ok(RowEvalCtx {
+                        row_index: i,
+                        ts_code: row.ts_code.clone(),
+                        runtime,
+                    }))
+                })
+                .collect();
+
+            let mut valid: Vec<RowEvalCtx> = Vec::with_capacity(rows.len());
+            for result in build_results.into_iter().flatten() {
+                match result {
+                    Ok(ctx) => valid.push(ctx),
+                    Err(w) => warning_messages.push(w),
+                }
+            }
+
+            // Step 2: evaluate every (row, template) pair in a single flat parallel pass
+            let tpl_count = entry.template_order.len();
+            let total = valid.len().checked_mul(tpl_count).unwrap_or(0);
+
+            if total > 0 {
+                let tpl_order = &entry.template_order;
+                let compiled = &entry.compiled_templates;
+
+                let eval_results: Vec<Option<Result<(usize, AllMarketTemplateHit), String>>> = (0
+                    ..total)
+                    .into_par_iter()
+                    .map(|idx| {
+                        let row_idx = idx / tpl_count;
+                        let tpl_idx = idx % tpl_count;
+                        let ctx = &valid[row_idx];
+                        let tpl_id = &tpl_order[tpl_idx];
+
+                        let tpl = match compiled.get(tpl_id) {
+                            Some(CompiledIntradayMonitorTemplate::Ready(t)) => t,
+                            _ => return None,
+                        };
+
+                        let mut rt = ctx.runtime.clone();
+                        let hit = match (|| -> Result<bool, String> {
+                            let value = rt
+                                .eval_program(&tpl.ast)
+                                .map_err(|e| format!("表达式计算错误:{}", e.msg))?;
+                            let len = rt_max_len(&rt);
+                            let series = Value::as_bool_series(&value, len)
+                                .map_err(|e| format!("表达式返回值非布尔:{}", e.msg))?;
+                            Ok(series.last().copied().unwrap_or(false))
+                        })() {
+                            Ok(true) => true,
+                            Ok(false) => false,
+                            Err(err) => {
+                                return Some(Err(format!(
+                                    "{}: {} · {}",
+                                    ctx.ts_code, tpl.name, err
+                                )));
+                            }
+                        };
+
+                        if hit {
+                            Some(Ok((
+                                ctx.row_index,
+                                AllMarketTemplateHit {
+                                    template_id: tpl_id.clone(),
+                                    template_name: tpl.name.clone(),
+                                },
+                            )))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                for result in eval_results.into_iter().flatten() {
+                    match result {
+                        Ok((row_idx, hit)) => {
+                            rows[row_idx]
+                                .template_hits
+                                .get_or_insert_with(Vec::new)
+                                .push(hit);
+                        }
+                        Err(w) => warning_messages.push(w),
+                    }
+                }
+            }
+
+            build_template_warning_message(warning_messages)
+        })(
             source_path,
             &meta.stocks,
             &mut rows,
@@ -1741,7 +1490,177 @@ pub fn get_all_market_monitor_snapshot(
     } else {
         None
     };
-    let other_sort_warning_message = apply_other_sort_values(
+    let other_sort_warning_message = (|source_path: &str,
+                                       stocks: &[StockMeta],
+                                       rows: &mut [AllMarketMonitorRow],
+                                       quotes: &HashMap<String, SinaQuote>,
+                                       expression: Option<&str>,
+                                       use_realtime: bool|
+     -> Option<String> {
+        let expression = expression
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        if !use_realtime {
+            return match (|source_path: &str,
+                           stocks: &[StockMeta],
+                           expression: &str|
+             -> Result<
+                (Arc<HashMap<String, Option<f64>>>, Option<String>),
+                String,
+            > {
+                let template = build_other_sort_template(expression);
+                let templates = vec![template.clone()];
+                let lookup_key = format!(
+                    "{}|other-sort-daily:{}|stocks:{}",
+                    source_path,
+                    hash_to_hex(&template.expression),
+                    fingerprint_strings(
+                        &stocks
+                            .iter()
+                            .map(|item| item.ts_code.clone())
+                            .collect::<Vec<_>>()
+                    ),
+                );
+
+                let entry = cached_template_runtime(
+                    source_path,
+                    stocks,
+                    &templates,
+                    TemplateRuntimeDataMode::History,
+                )?;
+                if let Some(values) = other_sort_daily_value_cache()
+                    .lock()
+                    .map_err(|_| "其他排序日K缓存锁已损坏".to_string())?
+                    .get(&lookup_key)
+                    .cloned()
+                {
+                    return Ok((
+                        values,
+                        build_other_sort_warning(entry.warning_messages.clone()),
+                    ));
+                }
+
+                let Some(CompiledIntradayMonitorTemplate::Ready(compiled)) =
+                    entry.compiled_templates.get(&template.id)
+                else {
+                    return Ok((
+                        Arc::new(HashMap::new()),
+                        build_other_sort_warning(entry.warning_messages.clone()),
+                    ));
+                };
+
+                let eval_results = stocks
+                    .par_iter()
+                    .filter_map(|stock| {
+                        let base_row = entry.base_rows.get(&stock.ts_code)?;
+                        let mut row_data = base_row.clone();
+                        if !entry.indicator_cache.is_empty() {
+                            for (name, series) in
+                                calc_inds_with_cache_lossy(&entry.indicator_cache, &row_data)
+                            {
+                                row_data.cols.insert(name, series);
+                            }
+                        }
+                        let mut runtime =
+                            match row_data.validate().and_then(|_| row_into_rt(row_data)) {
+                                Ok(runtime) => runtime,
+                                Err(error) => {
+                                    return Some(Err(format!(
+                                        "{}: runtime 构建失败: {}",
+                                        stock.ts_code, error
+                                    )));
+                                }
+                            };
+                        freeze_runtime_series(&mut runtime);
+                        Some(
+                            eval_other_sort_value(&runtime, &compiled.ast)
+                                .map(|value| (stock.ts_code.clone(), value))
+                                .map_err(|error| format!("{}: {}", stock.ts_code, error)),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
+                let mut values = HashMap::new();
+                let mut warnings = entry.warning_messages.clone();
+                for result in eval_results {
+                    match result {
+                        Ok((ts_code, value)) => {
+                            values.insert(ts_code, value);
+                        }
+                        Err(error) => warnings.push(error),
+                    }
+                }
+
+                let values = Arc::new(values);
+                other_sort_daily_value_cache()
+                    .lock()
+                    .map_err(|_| "其他排序日K缓存锁已损坏".to_string())?
+                    .insert(lookup_key, values.clone());
+                Ok((values, build_other_sort_warning(warnings)))
+            })(source_path, stocks, expression)
+            {
+                Ok((values, warning)) => {
+                    for row in rows.iter_mut() {
+                        row.other_sort_value = values.get(&row.ts_code).copied().flatten();
+                    }
+                    warning
+                }
+                Err(error) => Some(format!("其他排序异常: {error}")),
+            };
+        }
+
+        let template = build_other_sort_template(expression);
+        let templates = vec![template.clone()];
+        let entry = match cached_template_runtime(
+            source_path,
+            stocks,
+            &templates,
+            TemplateRuntimeDataMode::QuoteOnly,
+        ) {
+            Ok(entry) => entry,
+            Err(error) => return Some(format!("其他排序异常: runtime 初始化失败: {error}")),
+        };
+
+        let Some(CompiledIntradayMonitorTemplate::Ready(compiled)) =
+            entry.compiled_templates.get(&template.id)
+        else {
+            return build_other_sort_warning(entry.warning_messages.clone());
+        };
+
+        let build_results = rows
+            .par_iter()
+            .enumerate()
+            .filter_map(|(row_index, row)| {
+                let quote = quotes.get(&row.ts_code)?;
+                let row_data = match build_template_runtime_row_data(&entry, row, quote) {
+                    Ok(row_data) => row_data,
+                    Err(error) => return Some(Err(format!("{}: {}", row.ts_code, error))),
+                };
+                let mut runtime = match row_into_rt(row_data) {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        return Some(Err(format!("{}: runtime 构建失败: {}", row.ts_code, error)));
+                    }
+                };
+                freeze_runtime_series(&mut runtime);
+                Some(
+                    eval_other_sort_value(&runtime, &compiled.ast)
+                        .map(|value| (row_index, value))
+                        .map_err(|error| format!("{}: {}", row.ts_code, error)),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut warnings = entry.warning_messages.clone();
+        for result in build_results {
+            match result {
+                Ok((row_index, value)) => rows[row_index].other_sort_value = value,
+                Err(error) => warnings.push(error),
+            }
+        }
+
+        build_other_sort_warning(warnings)
+    })(
         source_path,
         &meta.stocks,
         &mut rows,
@@ -1754,7 +1673,50 @@ pub fn get_all_market_monitor_snapshot(
         (Some(message), None) | (None, Some(message)) => Some(message),
         (None, None) => None,
     };
-    let index_rows = fetch_index_rows(provider.opposite());
+    let index_rows = (|provider: RealtimeQuoteProvider| -> Vec<AllMarketIndexRow> {
+        let index_ts_codes = default_realtime_index_ts_codes();
+        let quote_result = match provider {
+            RealtimeQuoteProvider::Sina => {
+                fetch_all_market_realtime_quote_map_for_codes(&index_ts_codes)
+                    .map(|(quotes, _)| quotes)
+            }
+            RealtimeQuoteProvider::Tencent => {
+                fetch_all_market_tencent_realtime_quote_map_for_codes(&index_ts_codes).map(
+                    |(quotes, _)| {
+                        quotes
+                            .into_iter()
+                            .map(|(ts_code, quote)| (ts_code, quote.into_sina_quote()))
+                            .collect::<HashMap<_, _>>()
+                    },
+                )
+            }
+        };
+
+        quote_result
+            .map(|quotes| {
+                (|quotes: &HashMap<String, SinaQuote>| -> Vec<AllMarketIndexRow> {
+                    default_realtime_index_ts_codes()
+                        .into_iter()
+                        .map(|ts_code| {
+                            let quote = quotes.get(&ts_code);
+                            AllMarketIndexRow {
+                                ts_code: ts_code.clone(),
+                                name: quote
+                                    .map(|item| item.name.trim())
+                                    .filter(|value| !value.is_empty())
+                                    .unwrap_or(ts_code.as_str())
+                                    .to_string(),
+                                realtime_trade_date: quote
+                                    .and_then(|item| normalize_quote_trade_date(&item.date)),
+                                realtime_price: quote.map(|item| item.price),
+                                realtime_change_pct: quote.and_then(|item| item.change_pct),
+                            }
+                        })
+                        .collect()
+                })(&quotes)
+            })
+            .unwrap_or_else(|_| Vec::new())
+    })(provider.opposite());
 
     Ok(AllMarketMonitorSnapshotData {
         rows,
@@ -1776,39 +1738,6 @@ mod tests {
         expr::parser::{Parser, lex_all},
         intraday_monitor::compile_intraday_templates,
     };
-
-    fn sample_meta() -> SourceMetaCacheEntry {
-        SourceMetaCacheEntry {
-            stocks: vec![
-                StockMeta {
-                    ts_code: "000001.SZ".to_string(),
-                    name: "平安银行".to_string(),
-                    board: "主板".to_string(),
-                    total_mv_yi: Some(100.0),
-                    concept: "银行;互联金融".to_string(),
-                },
-                StockMeta {
-                    ts_code: "300001.SZ".to_string(),
-                    name: "特锐德".to_string(),
-                    board: "创业板".to_string(),
-                    total_mv_yi: None,
-                    concept: String::new(),
-                },
-            ],
-        }
-    }
-
-    fn sample_fetch_meta() -> RealtimeFetchMeta {
-        RealtimeFetchMeta {
-            requested_count: 2,
-            effective_count: 2,
-            fetched_count: 1,
-            truncated: false,
-            refreshed_at: Some("20240603 09:31:00".to_string()),
-            quote_trade_date: Some("20240603".to_string()),
-            quote_time: Some("09:31:00".to_string()),
-        }
-    }
 
     fn parse_program(expr: &str) -> Stmts {
         let mut parser = Parser::new(lex_all(expr));
@@ -1900,14 +1829,43 @@ mod tests {
         );
 
         let rows = build_rows(
-            &sample_meta(),
+            &(|| -> SourceMetaCacheEntry {
+                SourceMetaCacheEntry {
+                    stocks: vec![
+                        StockMeta {
+                            ts_code: "000001.SZ".to_string(),
+                            name: "平安银行".to_string(),
+                            board: "主板".to_string(),
+                            total_mv_yi: Some(100.0),
+                            concept: "银行;互联金融".to_string(),
+                        },
+                        StockMeta {
+                            ts_code: "300001.SZ".to_string(),
+                            name: "特锐德".to_string(),
+                            board: "创业板".to_string(),
+                            total_mv_yi: None,
+                            concept: String::new(),
+                        },
+                    ],
+                }
+            })(),
             &ranks,
             &quotes,
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
-            &sample_fetch_meta(),
+            &(|| -> RealtimeFetchMeta {
+                RealtimeFetchMeta {
+                    requested_count: 2,
+                    effective_count: 2,
+                    fetched_count: 1,
+                    truncated: false,
+                    refreshed_at: Some("20240603 09:31:00".to_string()),
+                    quote_trade_date: Some("20240603".to_string()),
+                    quote_time: Some("09:31:00".to_string()),
+                }
+            })(),
         );
 
         assert_eq!(rows.len(), 2);

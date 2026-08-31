@@ -829,17 +829,15 @@ mod tests {
 
     use super::preview_managed_source_dataset;
 
-    fn temp_app_data_root() -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos();
-        std::env::temp_dir().join(format!("lianghua-data-viewer-{nanos}"))
-    }
-
     #[test]
     fn previews_dragon_tiger_business_tables() {
-        let app_data_root = temp_app_data_root();
+        let app_data_root = (|| -> PathBuf {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos();
+            std::env::temp_dir().join(format!("lianghua-data-viewer-{nanos}"))
+        })();
         let source_path = app_data_root.join("source");
         let source_path_str = source_path.to_str().expect("utf8 source path");
         let conn = open_dragon_tiger_db(source_path_str).expect("open dragon tiger db");
