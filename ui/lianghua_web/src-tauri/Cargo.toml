@@ -18,9 +18,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.5.6", features = [] }
 
 [dependencies]
-# Keep the historical import name (`lianghua_rs`) inside the Tauri adapter,
-# while depending directly on the application layer instead of the facade.
-lianghua-rs = { package = "lianghua-app", path = "../../../crates/lianghua-app" }
+lianghua-app-chart = { path = "../../../crates/lianghua-app-chart" }
+lianghua-app-data = { path = "../../../crates/lianghua-app-data" }
+lianghua-app-expression = { path = "../../../crates/lianghua-app-expression" }
+lianghua-app-facade = { path = "../../../crates/lianghua-app-facade" }
+lianghua-app-market = { path = "../../../crates/lianghua-app-market" }
+lianghua-app-strategy = { path = "../../../crates/lianghua-app-strategy" }
+lianghua-data = { path = "../../../crates/lianghua-data" }
+lianghua-download = { path = "../../../crates/lianghua-download" }
+lianghua-provider = { path = "../../../crates/lianghua-provider" }
 
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }

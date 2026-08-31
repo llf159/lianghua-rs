@@ -4,7 +4,8 @@ use duckdb::{Connection, params, params_from_iter};
 use serde::Serialize;
 
 use crate::{
-    data::{result_db_path, scoring_data::ScoreSummary},
+    data::result_db_path,
+    scoring::scoring_data::ScoreSummary,
     simulate::rank::{
         CONVOLUTION_RANK_SCORE_DECIMALS, DEFAULT_CONVOLUTION_KERNEL_NAME, calc_convolution_ranking,
         default_convolution_kernel,

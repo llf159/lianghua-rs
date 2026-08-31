@@ -7,7 +7,9 @@ edition = "2024"
 lianghua-app-shared = { path = "../lianghua-app-shared" }
 lianghua-backtest = { path = "../lianghua-backtest" }
 lianghua-core = { path = "../lianghua-core" }
-lianghua-engine = { path = "../lianghua-engine" }
+lianghua-data = { path = "../lianghua-data" }
+lianghua-download = { path = "../lianghua-download" }
+lianghua-scoring = { path = "../lianghua-scoring" }
 chrono = "0.4.44"
 csv = "1.4.0"
 duckdb = { version = "1.4.4", features = ["appender-arrow"] }

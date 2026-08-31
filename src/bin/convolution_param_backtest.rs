@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::env;
 
 use duckdb::{Connection, params};
-use lianghua_rs::data::{result_db_path, source_db_path};
+use lianghua_data::data::{result_db_path, source_db_path};
 
 const DEFAULT_LOOKBACK_DAYS: usize = 500;
 const DEFAULT_TOP_K: usize = 20;
@@ -688,7 +688,7 @@ fn main() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{DECAYS, HYBRID_WINDOWS, LONG_SHARES, WINDOWS, kernel_candidates, newey_west_t};
-    use lianghua_rs::simulate::rank::{
+    use lianghua_backtest::simulate::rank::{
         DEFAULT_CONVOLUTION_KERNEL_NAME, default_convolution_kernel,
     };
 

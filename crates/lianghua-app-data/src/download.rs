@@ -37,7 +37,7 @@ use crate::{
 };
 
 use lianghua_app_shared::normalize_trade_date;
-use lianghua_engine::download::{
+use lianghua_download::download::{
     AdjType, DownloadSummary,
     dragon_tiger::{
         DragonTigerDownloadConfig, download_dragon_tiger as core_download_dragon_tiger,
@@ -793,7 +793,7 @@ fn list_stock_data_indicator_work_items(
 fn compute_stock_data_indicator_rebuild_batch(
     sender: &SyncSender<StockDataIndicatorRebuildMessage>,
     source_path: &str,
-    inds_cache: &[lianghua_engine::download::ind_calc::IndsCache],
+    inds_cache: &[lianghua_download::download::ind_calc::IndsCache],
     work_group: &[StockDataIndicatorWorkItem],
 ) -> Result<(), String> {
     let reader = DataReader::new(source_path)?;
@@ -1700,7 +1700,7 @@ pub fn run_prepared_data_download(
         let recovered_stock_codes = summary.recovered_stock_codes.clone();
         let has_recovered_stocks = !recovered_stock_codes.is_empty();
         if let Some(cb) = progress_cb {
-            cb(lianghua_engine::download::runner::DownloadProgress {
+            cb(lianghua_download::download::runner::DownloadProgress {
                 phase: "maintain_cyq_incremental".to_string(),
                 finished: 0,
                 total: 0,
@@ -1729,7 +1729,7 @@ pub fn run_prepared_data_download(
             completion_details.push(detail);
         }
         if let Some(cb) = progress_cb {
-            cb(lianghua_engine::download::runner::DownloadProgress {
+            cb(lianghua_download::download::runner::DownloadProgress {
                 phase: "maintain_cyq_incremental".to_string(),
                 finished: 0,
                 total: 0,
@@ -1873,7 +1873,7 @@ pub fn run_prepared_concept_performance_repair(
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DataDownloadRunResult, String> {
     if let Some(cb) = progress_cb {
-        cb(lianghua_engine::download::runner::DownloadProgress {
+        cb(lianghua_download::download::runner::DownloadProgress {
             phase: "rebuild_concept_performance".to_string(),
             finished: 0,
             total: 1,
@@ -1885,7 +1885,7 @@ pub fn run_prepared_concept_performance_repair(
     let saved_rows = rebuild_concept_performance_all(&prepared.source_path)?;
 
     if let Some(cb) = progress_cb {
-        cb(lianghua_engine::download::runner::DownloadProgress {
+        cb(lianghua_download::download::runner::DownloadProgress {
             phase: "rebuild_concept_performance".to_string(),
             finished: 1,
             total: 1,
@@ -1917,7 +1917,7 @@ pub fn run_prepared_concept_most_related_repair(
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DataDownloadRunResult, String> {
     if let Some(cb) = progress_cb {
-        cb(lianghua_engine::download::runner::DownloadProgress {
+        cb(lianghua_download::download::runner::DownloadProgress {
             phase: "repair_concept_most_related".to_string(),
             finished: 0,
             total: 1,
@@ -1929,7 +1929,7 @@ pub fn run_prepared_concept_most_related_repair(
     let updated_rows = rebuild_most_related_concept_csv(&prepared.source_path)?;
 
     if let Some(cb) = progress_cb {
-        cb(lianghua_engine::download::runner::DownloadProgress {
+        cb(lianghua_download::download::runner::DownloadProgress {
             phase: "repair_concept_most_related".to_string(),
             finished: 1,
             total: 1,
@@ -1964,7 +1964,7 @@ pub fn run_prepared_stock_data_indicator_columns_delete(
     let indicator_columns = list_stock_data_indicator_columns(&conn)?;
 
     if let Some(cb) = progress_cb {
-        cb(lianghua_engine::download::runner::DownloadProgress {
+        cb(lianghua_download::download::runner::DownloadProgress {
             phase: "delete_stock_data_indicator_columns".to_string(),
             finished: 0,
             total: indicator_columns.len(),
@@ -1986,7 +1986,7 @@ pub fn run_prepared_stock_data_indicator_columns_delete(
     })?;
 
     if let Some(cb) = progress_cb {
-        cb(lianghua_engine::download::runner::DownloadProgress {
+        cb(lianghua_download::download::runner::DownloadProgress {
             phase: "delete_stock_data_indicator_columns".to_string(),
             finished: indicator_columns.len(),
             total: indicator_columns.len(),
@@ -2034,7 +2034,7 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
     }
 
     if let Some(cb) = progress_cb {
-        cb(lianghua_engine::download::runner::DownloadProgress {
+        cb(lianghua_download::download::runner::DownloadProgress {
             phase: "rebuild_stock_data_indicator_columns".to_string(),
             finished: 0,
             total: work_items.len(),
@@ -2099,7 +2099,7 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
                     finished_groups += 1;
 
                     if let Some(cb) = progress_cb {
-                        cb(lianghua_engine::download::runner::DownloadProgress {
+                        cb(lianghua_download::download::runner::DownloadProgress {
                             phase: "rebuild_stock_data_indicator_columns".to_string(),
                             finished: finished_groups,
                             total: work_items.len(),
@@ -2446,7 +2446,7 @@ mod tests {
         crate::data::download_data::insert_pro_bar_rows(
             &conn,
             AdjType::Qfq,
-            &[lianghua_engine::download::ProBarRow {
+            &[lianghua_download::download::ProBarRow {
                 ts_code: "000001.SZ".to_string(),
                 trade_date: "20240102".to_string(),
                 open: 10.0,
@@ -2460,7 +2460,7 @@ mod tests {
                 amount: 10000.0,
                 turnover_rate: Some(1.2),
                 volume_ratio: None,
-                moneyflow: Some(lianghua_engine::download::MoneyflowRow {
+                moneyflow: Some(lianghua_download::download::MoneyflowRow {
                     ts_code: "000001.SZ".to_string(),
                     trade_date: "20240102".to_string(),
                     b_sm_v: Some(1.0),

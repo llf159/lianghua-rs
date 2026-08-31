@@ -1,71 +1,59 @@
-# Backend workspace architecture
+# 后端工作空间架构
 
-The Rust backend is a Cargo workspace with explicit, one-way dependency layers.
-The root `lianghua-rs` package is a compatibility facade for existing binaries
-and external callers; new code should depend on the narrowest crate that owns
-the required capability.
+Rust 后端采用 Cargo 工作空间，并明确规定单向依赖层级。仓库不保留后端或 UI 聚合门面；
+每个调用方直接依赖实际拥有所需能力的最窄 crate。
 
-## Dependency layers
+## 依赖层级
 
 ```text
-lianghua-core          expression DSL and shared utilities
-lianghua-provider      external market-data protocols
-lianghua-model         shared market DTOs and progress contracts
+lianghua-core          表达式 DSL 与通用工具
+lianghua-provider      外部市场数据协议
+lianghua-model         共享市场 DTO 与进度契约
         |                    |                    |
         v                    v                    v
 lianghua-data    lianghua-download    lianghua-scoring
- storage/domain      ingestion/indicators      rules/ranking
-        \___________________|___________________/
-                            v
-                    lianghua-engine
-                   compatibility facade
-                            |
-                            v
-                   lianghua-backtest
-                            |
-                            v
-              lianghua-app-* capability crates
-                            |
-                            v
-               lianghua-app compatibility facade
-                            |
-                            v
-                       Tauri adapter
+  存储与领域配置          下载与指标计算            规则与排名
+       |                    |                    |
+       └──────────────┬─────┴──────────────┬─────┘
+                      v                    v
+             lianghua-backtest    lianghua-app-* 能力 crate
+                      |                    |
+                      └───────────┬────────┘
+                                  v
+                             Tauri 适配层
+
+lianghua-rs 根目录二进制 ──> data / scoring / backtest
 ```
 
-The dependency graph must remain acyclic. In particular:
+最后一行表示仓库根目录中的演示与分析二进制同样直接依赖能力 crate，不提供
+`lianghua_rs::*` 库级兼容路径。
 
-- `lianghua-core` must not depend on storage, network, Tauri, or DuckDB.
-- `lianghua-provider` implements external protocols and must not open local databases.
-- `lianghua-model` contains contracts only and has no infrastructure dependency.
-- `lianghua-data` owns persistence and domain configuration; it must not depend on
-  download or scoring.
-- `lianghua-download` may depend on data, while `lianghua-scoring` may depend on
-  data; they must not depend on one another.
-- `lianghua-engine` is a compatibility facade and contains no implementation.
-- `lianghua-backtest` may read engine contracts but the engine must not call it.
-- `lianghua-app-*` crates own application capabilities; callers should depend on
-  the narrowest one when compatibility is not required.
-- `lianghua-app` contains compatibility re-exports only and remains the stable
-  entry point used by the Tauri adapter.
-- Tauri-specific commands, filesystem plugins, and dialogs stay in
-  `ui/lianghua_web/src-tauri`.
+依赖图必须保持无环，具体约束如下：
+
+- `lianghua-core` 不得依赖存储、网络、Tauri 或 DuckDB。
+- `lianghua-provider` 负责实现外部协议，不得打开本地数据库。
+- `lianghua-model` 只保存契约，不依赖基础设施。
+- `lianghua-data` 负责持久化和领域配置，不得依赖 download 或 scoring。
+- `lianghua-download` 和 `lianghua-scoring` 均可依赖 data，但二者不得互相依赖。
+- `lianghua-backtest` 直接依赖 data 与 scoring；data 和 scoring 不得反向依赖 backtest。
+- `lianghua-app-*` crate 各自拥有应用层能力，调用方应依赖最窄的 crate。
+- Tauri 直接依赖所需的 `lianghua-app-*`、data、download、provider 等契约所有者。
+- Tauri 专属命令、文件系统插件和对话框保留在 `ui/lianghua_web/src-tauri`。
 
 应用层内部的模块边界和兼容策略详见
 [`ui-tools-architecture.md`](ui-tools-architecture.md)。
 
-## Compatibility policy
+## 直接依赖策略
 
-`src/lib.rs` re-exports the workspace crates under their historical module
-paths. This keeps existing CLI binaries and third-party callers compiling while
-allowing the Tauri adapter to depend directly on `lianghua-app`.
+`lianghua-engine`、`lianghua-app` 和根包 `src/lib.rs` 兼容入口均已移除。后端代码、Tauri
+适配层和根目录二进制必须在 `Cargo.toml` 中显式声明真实依赖，并从对应 crate 导入类型。
 
-Do not add new implementation modules to the facade. Add them to the owning
-workspace crate and re-export only when compatibility requires it.
+不得重新创建跨业务域的聚合 crate 来缩短导入路径。实现应放入实际拥有该能力的工作空间
+crate；跨域页面组合只允许存在于明确的应用层 facade crate。
 
-## Verification
+## 验证
 
-Run from the repository root:
+在仓库根目录运行：
 
 ```bash
 cargo fmt \
@@ -76,7 +64,6 @@ cargo fmt \
   --package lianghua-data \
   --package lianghua-download \
   --package lianghua-scoring \
-  --package lianghua-engine \
   --package lianghua-backtest \
   --package lianghua-app-shared \
   --package lianghua-app-chart \
@@ -85,14 +72,12 @@ cargo fmt \
   --package lianghua-app-market \
   --package lianghua-app-strategy \
   --package lianghua-app-facade \
-  --package lianghua-app \
   -- --check
 cargo check --all-targets
 cargo test --package lianghua-core --package lianghua-provider --package lianghua-model
 ```
 
-The default workspace members cover the facade and all backend layers without
-requiring the platform-specific Tauri package. Linux CI uses `cargo check` for
-DuckDB-dependent crates because the project intentionally links the system
-DuckDB library on Linux. Dependency-free layers run their test binaries in CI;
-the Tauri workflows continue to verify bundled Windows and Android builds.
+默认工作空间成员覆盖所有后端层和应用能力 crate，不包含具有平台差异的 Tauri 包。项目在 Linux
+上有意链接系统 DuckDB 库，因此 Linux CI 对依赖 DuckDB 的 crate 运行 `cargo check`。
+不依赖基础设施的层会在 CI 中运行测试二进制；Tauri 工作流继续验证使用内置依赖的 Windows
+和 Android 构建。

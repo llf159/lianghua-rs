@@ -1,6 +1,6 @@
 //! Shared application-layer primitives without page ownership.
 
-pub use lianghua_engine::data;
+use lianghua_data::data;
 
 mod date;
 mod stock_metadata;

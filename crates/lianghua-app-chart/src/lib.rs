@@ -1,7 +1,7 @@
 //! Chart indicators and indicator configuration use cases.
 
-pub use lianghua_core::expr;
-pub use lianghua_engine::data;
+use lianghua_core::expr;
+use lianghua_data::data;
 
 pub mod indicator;
 pub mod indicator_settings;

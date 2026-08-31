@@ -2,8 +2,9 @@ use std::env;
 use std::path::Path;
 
 use duckdb::{Connection, params, params_from_iter};
-use lianghua_rs::data::{result_db_path, scoring_data::ScoreSummary};
-use lianghua_rs::simulate::rank::{calc_convolution_ranking, default_convolution_kernel};
+use lianghua_backtest::simulate::rank::{calc_convolution_ranking, default_convolution_kernel};
+use lianghua_data::data::result_db_path;
+use lianghua_scoring::scoring::scoring_data::ScoreSummary;
 
 const DEFAULT_TOP_N: usize = 20;
 

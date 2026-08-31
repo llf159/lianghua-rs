@@ -13,10 +13,6 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    data::scoring_data::{
-        SceneBacktestRow, ScoreDetails, ScoreSummary, cache_rule_build as build_scoring_rule_cache,
-        row_into_rt,
-    },
     data::{
         DataReader, RuleKind, RuleStage, RuleTag, RuntimeKeyCollectOptions, ScopeWay, ScoreRule,
         ScoreScene, collect_assigned_names_from_expr_program,
@@ -33,6 +29,10 @@ use crate::{
         },
     },
     scoring::runner::{ScoringMemoryMode, scoring_all_to_memory_with_mode},
+    scoring::scoring_data::{
+        SceneBacktestRow, ScoreDetails, ScoreSummary, cache_rule_build as build_scoring_rule_cache,
+        row_into_rt,
+    },
     scoring::tools::{
         CyqChenFieldInjector, calc_query_need_rows, calc_query_start_date,
         collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names, inject_stock_extra_fields,
@@ -8278,11 +8278,8 @@ mod tests {
     use duckdb::{Connection, params};
 
     use crate::{
-        data::{
-            DataReader, RuleTag, result_db_path,
-            scoring_data::{ScoreDetails, ScoreSummary},
-            source_db_path,
-        },
+        data::{DataReader, RuleTag, result_db_path, source_db_path},
+        scoring::scoring_data::{ScoreDetails, ScoreSummary},
         scoring::tools::load_st_list,
         simulate::rank::RankLayerSamplePoint,
         simulate::rule::{

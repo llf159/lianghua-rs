@@ -61,7 +61,6 @@ jobs:
           --package lianghua-data
           --package lianghua-download
           --package lianghua-scoring
-          --package lianghua-engine
           --package lianghua-backtest
           --package lianghua-app-shared
           --package lianghua-app-chart
@@ -70,7 +69,6 @@ jobs:
           --package lianghua-app-market
           --package lianghua-app-strategy
           --package lianghua-app-facade
-          --package lianghua-app
           -- --check
 
       - name: Check all backend targets

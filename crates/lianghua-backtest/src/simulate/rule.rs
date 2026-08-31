@@ -15,8 +15,8 @@ use super::{
 use crate::data::{
     concept_performance_data::{load_concept_trend_series_map, load_industry_trend_series_map},
     load_stock_list, load_ths_concepts_named_map, result_db_path,
-    scoring_data::{ScoreDetails, ScoreSummary},
 };
+use crate::scoring::scoring_data::{ScoreDetails, ScoreSummary};
 
 use crate::simulate::fp_utils::{
     EPS, ProfitLossSums, calc_profit_loss_sums, calc_t_value, calc_top_bottom_spread, mean,

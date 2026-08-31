@@ -6,7 +6,6 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::data::scoring_data::row_into_rt;
 use crate::expr::eval::Value;
 use crate::expr::{
     parser::Stmts,
@@ -14,6 +13,7 @@ use crate::expr::{
         estimate_expression_warmup, parse_expression_program, validate_expression_functions,
     },
 };
+use crate::scoring::scoring_data::row_into_rt;
 use crate::{
     data::{DataReader, RuleKind, RuleStage, SceneDirection, ScoreConfig, score_rule_path},
     scoring::tools::{

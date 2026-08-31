@@ -9,8 +9,10 @@ lianghua-app-market = { path = "../lianghua-app-market" }
 lianghua-app-shared = { path = "../lianghua-app-shared" }
 lianghua-app-strategy = { path = "../lianghua-app-strategy" }
 lianghua-core = { path = "../lianghua-core" }
-lianghua-engine = { path = "../lianghua-engine" }
+lianghua-data = { path = "../lianghua-data" }
+lianghua-download = { path = "../lianghua-download" }
 lianghua-provider = { path = "../lianghua-provider" }
+lianghua-scoring = { path = "../lianghua-scoring" }
 chrono = "0.4.44"
 csv = "1.4.0"
 duckdb = { version = "1.4.4", features = ["appender-arrow"] }

@@ -43,7 +43,27 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
-use lianghua_rs::ui_tools::{
+use lianghua_app_chart as chart;
+use lianghua_app_data as data;
+use lianghua_app_expression as expression;
+use lianghua_app_facade as facade;
+use lianghua_app_market as market;
+use lianghua_app_strategy as strategy;
+use lianghua_app_strategy::stock_pick::{
+    run_concept_stock_pick as core_run_concept_stock_pick,
+    StockPickResultData as ConceptStockPickResultData,
+};
+use lianghua_app_strategy::stock_pick::{
+    run_expression_stock_pick as core_run_expression_stock_pick,
+    validate_expression_stock_pick_template_expression as core_validate_expression_stock_pick_template_expression,
+    ExpressionStockPickTemplateValidationData,
+    StockPickResultData as ExpressionStockPickResultData,
+};
+use serde::{Deserialize, Serialize};
+use tauri::Emitter;
+use tauri_plugin_fs::{FilePath, FsExt};
+use zip::{write::FileOptions, CompressionMethod, ZipWriter};
+use {
     chart::indicator_settings::{
         get_chart_indicator_settings as core_get_chart_indicator_settings,
         reset_chart_indicator_settings as core_reset_chart_indicator_settings,
@@ -54,10 +74,6 @@ use lianghua_rs::ui_tools::{
     data::viewer::{list_stock_lookup_rows as core_list_stock_lookup_rows, StockLookupRow},
     expression::{
         get_expression_capabilities as core_get_expression_capabilities, ExpressionCapabilitiesData,
-    },
-    facade::concept_stock_pick::{
-        run_concept_stock_pick as core_run_concept_stock_pick,
-        StockPickResultData as ConceptStockPickResultData,
     },
     facade::cyq_chen::{
         activate_cyq_chen_strategy_backup as core_activate_cyq_chen_strategy_backup,
@@ -88,12 +104,6 @@ use lianghua_rs::ui_tools::{
         StockDetailCyqData, StockDetailIntradaySnapshotData, StockDetailKlineIndicatorsData,
         StockDetailOverviewData, StockDetailPageData, StockDetailPrevRanksData,
         StockDetailRealtimeData, StockDetailStrategySnapshotData,
-    },
-    facade::expression_stock_pick::{
-        run_expression_stock_pick as core_run_expression_stock_pick,
-        validate_expression_stock_pick_template_expression as core_validate_expression_stock_pick_template_expression,
-        ExpressionStockPickTemplateValidationData,
-        StockPickResultData as ExpressionStockPickResultData,
     },
     market::all_market_monitor::{
         get_all_market_monitor_snapshot as core_get_all_market_monitor_snapshot,
@@ -209,10 +219,6 @@ use lianghua_rs::ui_tools::{
         StrategyTriggerSimilarityPageData,
     },
 };
-use serde::{Deserialize, Serialize};
-use tauri::Emitter;
-use tauri_plugin_fs::{FilePath, FsExt};
-use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 
 use data_download_bridge::{
     get_data_download_status, get_indicator_manage_page, run_concept_most_related_repair,
@@ -876,7 +882,7 @@ async fn get_stock_detail_realtime(
 #[tauri::command]
 async fn get_stock_detail_intraday(
     ts_code: String,
-) -> Result<lianghua_rs::crawler::intraday::TencentIntradayData, String> {
+) -> Result<lianghua_provider::crawler::intraday::TencentIntradayData, String> {
     tauri::async_runtime::spawn_blocking(move || core_get_stock_detail_intraday(ts_code))
         .await
         .map_err(|error| error.to_string())?
@@ -1634,7 +1640,7 @@ async fn run_ranking_score_calculation(
 ) -> Result<RankComputeRunResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let strategy_file_path =
-            lianghua_rs::data::resolve_strategy_path(&source_path, strategy_path.as_deref());
+            lianghua_data::data::resolve_strategy_path(&source_path, strategy_path.as_deref());
         let app_data_root = app
             .path()
             .resolve("", tauri::path::BaseDirectory::AppData)
@@ -1704,7 +1710,7 @@ async fn run_cyq_compute(
         let progress_download_id = download_id.clone();
         let progress_action = action.clone();
         let progress_action_label = action_label.clone();
-        let progress_cb = move |progress: lianghua_rs::download::runner::DownloadProgress| {
+        let progress_cb = move |progress: lianghua_download::download::runner::DownloadProgress| {
             if let Some(download_id) = progress_download_id.as_deref() {
                 emit_ranking_compute_progress_event(
                     &progress_app,
@@ -1729,7 +1735,7 @@ async fn run_cyq_compute(
             start_date.as_deref(),
             end_date.as_deref(),
             download_id.as_ref().map(|_| {
-                &progress_cb as &lianghua_rs::download::runner::DownloadProgressCallback<'_>
+                &progress_cb as &lianghua_download::download::runner::DownloadProgressCallback<'_>
             }),
         );
         match (&result, download_id.as_deref()) {
@@ -1810,7 +1816,7 @@ async fn run_cyq_chen_compute(
         let progress_download_id = download_id.clone();
         let progress_action = action.clone();
         let progress_action_label = action_label.clone();
-        let progress_cb = move |progress: lianghua_rs::download::runner::DownloadProgress| {
+        let progress_cb = move |progress: lianghua_download::download::runner::DownloadProgress| {
             if let Some(download_id) = progress_download_id.as_deref() {
                 emit_ranking_compute_progress_event(
                     &progress_app,
@@ -1843,7 +1849,7 @@ async fn run_cyq_chen_compute(
             start_date.as_deref(),
             end_date.as_deref(),
             download_id.as_ref().map(|_| {
-                &progress_cb as &lianghua_rs::download::runner::DownloadProgressCallback<'_>
+                &progress_cb as &lianghua_download::download::runner::DownloadProgressCallback<'_>
             }),
         );
         match (&result, download_id.as_deref()) {

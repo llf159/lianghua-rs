@@ -6,12 +6,12 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use lianghua_rs::ui_tools::{
-    data::import::{
+use lianghua_app_data::{
+    import::{
         copy_directory_recursive, managed_source_file_name, resolve_managed_source_file_path,
         resolve_source_root, validate_target_relative_path,
     },
-    data::viewer::{
+    viewer::{
         preview_managed_source_dataset as core_preview_managed_source_dataset,
         preview_managed_source_stock_data as core_preview_managed_source_stock_data,
         ManagedSourceDatasetPreviewResult, ManagedSourceDbPreviewResult,

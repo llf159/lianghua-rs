@@ -8,12 +8,10 @@ use duckdb::{Connection, params};
 use rayon::prelude::*;
 use serde::Serialize;
 
+use crate::scoring::scoring_data::row_into_rt;
 use crate::{
     crawler::{SinaQuote, default_realtime_index_ts_codes},
-    data::{
-        DataReader, RowData, load_stock_list, result_db_path, scoring_data::row_into_rt,
-        source_db_path,
-    },
+    data::{DataReader, RowData, load_stock_list, result_db_path, source_db_path},
     download::ind_calc::{
         IndsCache, cache_ind_build, calc_inds_with_cache_lossy, warmup_ind_estimate,
     },
