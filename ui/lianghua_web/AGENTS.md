@@ -4,3 +4,4 @@
 - 禁止重新引入 `lianghua-app`、`lianghua-engine` 或类似聚合门面隐藏真实依赖。
 - Rust 侧改动只检查 `cargo check -p app`；前端改动按实际涉及范围验证，不运行无关全量测试。
 - Linux 桌面端启动时仅在检测到 Snap 宿主环境后清理 Snap 注入的 GTK/GIO 模块变量，避免系统 WebKit 误加载 Snap 内的 glibc，同时不影响普通终端中用户显式设置的 GTK 环境。
+- Android 的 Wry `Rust` 对象在 `WryActivity.onCreate` 中才通过 `System.loadLibrary` 加载 Tauri 原生库；`MainActivity` 调用自定义 JNI 方法初始化 `rustls-platform-verifier` 时必须先完成 `super.onCreate`。禁止在 native 库加载前调用并吞掉 `UnsatisfiedLinkError`，否则界面仍能启动，但首个 HTTPS 请求会在 reqwest 事件循环线程 panic。
