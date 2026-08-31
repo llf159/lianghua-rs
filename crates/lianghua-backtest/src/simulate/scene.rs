@@ -16,7 +16,7 @@ use crate::{
         concept_performance_data::{load_concept_trend_series_map, load_industry_trend_series_map},
         load_stock_list, load_ths_concepts_named_map, result_db_path,
     },
-    scoring::scoring_data::SceneBacktestRow,
+    scoring_model::SceneBacktestRow,
     simulate::fp_utils::{EPS, calc_t_value, mean, sample_std, spearman_corr},
 };
 
@@ -407,7 +407,7 @@ pub fn calc_all_scene_layer_metrics_from_rows(
     Ok(out)
 }
 
-fn shared_scene_state(stage: Option<crate::scoring::SceneResolvedStage>) -> Arc<str> {
+fn shared_scene_state(stage: Option<crate::scoring_model::SceneResolvedStage>) -> Arc<str> {
     static UNKNOWN: OnceLock<Arc<str>> = OnceLock::new();
     static OBSERVE: OnceLock<Arc<str>> = OnceLock::new();
     static TRIGGER: OnceLock<Arc<str>> = OnceLock::new();
@@ -415,10 +415,10 @@ fn shared_scene_state(stage: Option<crate::scoring::SceneResolvedStage>) -> Arc<
     static FAIL: OnceLock<Arc<str>> = OnceLock::new();
 
     let (cell, value) = match stage {
-        Some(crate::scoring::SceneResolvedStage::Observe) => (&OBSERVE, "observe"),
-        Some(crate::scoring::SceneResolvedStage::Trigger) => (&TRIGGER, "trigger"),
-        Some(crate::scoring::SceneResolvedStage::Confirm) => (&CONFIRM, "confirm"),
-        Some(crate::scoring::SceneResolvedStage::Fail) => (&FAIL, "fail"),
+        Some(crate::scoring_model::SceneResolvedStage::Observe) => (&OBSERVE, "observe"),
+        Some(crate::scoring_model::SceneResolvedStage::Trigger) => (&TRIGGER, "trigger"),
+        Some(crate::scoring_model::SceneResolvedStage::Confirm) => (&CONFIRM, "confirm"),
+        Some(crate::scoring_model::SceneResolvedStage::Fail) => (&FAIL, "fail"),
         None => (&UNKNOWN, ""),
     };
     Arc::clone(cell.get_or_init(|| Arc::from(value)))

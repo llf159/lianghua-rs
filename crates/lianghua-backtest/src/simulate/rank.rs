@@ -8,7 +8,7 @@ use super::rule::{
     RuleLayerConfig, RuleLayerSamplePoint, build_rule_layer_runtime_cache,
     build_rule_layer_runtime_cache_from_summary_rows, collect_all_rule_samples_from_cache,
 };
-use crate::{data::result_db_path, scoring::scoring_data::ScoreSummary};
+use crate::{data::result_db_path, scoring_model::ScoreSummary};
 
 const EPS: f64 = 1e-12;
 const DEFAULT_LAYER_COUNT: usize = 5;
@@ -1262,7 +1262,7 @@ mod tests {
         RankLayerConfig, RankLayerLookup, RankLayerMethod, calc_convolution_ranking,
         calc_rank_layer_metrics, calc_rank_layer_metrics_with_lookup, default_convolution_kernel,
     };
-    use crate::scoring::scoring_data::ScoreSummary;
+    use crate::scoring_model::ScoreSummary;
     use crate::simulate::rule::RuleLayerSamplePoint;
 
     fn assert_opt_close(left: Option<f64>, right: Option<f64>) {

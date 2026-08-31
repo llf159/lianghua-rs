@@ -1,6 +1,6 @@
-use std::{collections::HashMap, time::Instant};
+use std::collections::HashMap;
 
-use duckdb::Connection;
+use lianghua_model::scoring::SceneResolvedStage;
 
 use crate::{
     data::{DistPoint, RuleStage, RuleTag, SceneDirection, ScopeWay, ScoreScene},
@@ -11,44 +11,15 @@ use crate::{
     scoring::tools::rt_max_len,
 };
 
+pub mod result_build;
+pub mod rule_cache;
 pub mod runner;
-pub mod scoring_data;
 pub mod tools;
 
 enum ScopeHit {
     Bool(bool),
     EachOffsets(Vec<usize>),
     Recent(Option<usize>),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum TieBreakWay {
-    TsCode,
-    KdjJ,
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct RankTiebreakProfile {
-    pub total_ms: u64,
-    pub attach_source_db_ms: Option<u64>,
-    pub update_rank_ms: u64,
-    pub detach_source_db_ms: Option<u64>,
-}
-
-fn format_elapsed_ms(elapsed_ms: u64) -> String {
-    if elapsed_ms < 1_000 {
-        return format!("{elapsed_ms}ms");
-    }
-
-    format!("{:.3}s", elapsed_ms as f64 / 1_000.0)
-}
-
-fn log_rank_tiebreak_profile(profile: &RankTiebreakProfile) {
-    println!(
-        "补排名耗时: 总计={}；补排名={}",
-        format_elapsed_ms(profile.total_ms),
-        format_elapsed_ms(profile.update_rank_ms),
-    );
 }
 
 #[derive(Debug, Default)]
@@ -68,25 +39,6 @@ pub struct SceneScoreSeries {
     pub confirm_strength: Vec<f64>,
     pub risk_intensity: Vec<f64>,
     pub triggered: Vec<bool>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SceneResolvedStage {
-    Observe,
-    Trigger,
-    Confirm,
-    Fail,
-}
-
-impl SceneResolvedStage {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Observe => "observe",
-            Self::Trigger => "trigger",
-            Self::Confirm => "confirm",
-            Self::Fail => "fail",
-        }
-    }
 }
 
 const SCENE_EPS: f64 = 1e-12;
@@ -641,90 +593,6 @@ pub fn build_scene_score_series(
     }
 
     out
-}
-
-pub(crate) fn build_tirbreak_rank_sql(tie_break: TieBreakWay, adj_type: &str) -> String {
-    match tie_break {
-        TieBreakWay::TsCode => r#"
-            UPDATE score_summary AS s
-            SET rank = r.new_rank
-            FROM (
-                SELECT
-                    ts_code,
-                    trade_date,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY trade_date
-                        ORDER BY total_score DESC, ts_code ASC
-                    ) AS new_rank
-                FROM score_summary
-            ) AS r
-            WHERE s.ts_code = r.ts_code
-              AND s.trade_date = r.trade_date
-            "#
-        .to_string(),
-        TieBreakWay::KdjJ => {
-            format!(
-                r#"
-                UPDATE score_summary AS s
-                SET rank = r.new_rank
-                FROM (
-                    SELECT
-                        s.ts_code,
-                        s.trade_date,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY s.trade_date
-                            ORDER BY
-                                s.total_score DESC,
-                                src.j ASC NULLS LAST,
-                                s.ts_code ASC
-                        ) AS new_rank
-                    FROM score_summary AS s
-                    LEFT JOIN src_db.stock_data AS src
-                      ON s.ts_code = src.ts_code
-                     AND s.trade_date = src.trade_date
-                     AND src.adj_type = '{adj_type}'
-                ) AS r
-                WHERE s.ts_code = r.ts_code
-                  AND s.trade_date = r.trade_date
-                "#
-            )
-        }
-    }
-}
-
-pub fn build_rank_tiebreak(
-    result_db_path: &str,
-    source_db_path: &str,
-    adj_type: &str,
-    tie_break: TieBreakWay,
-) -> Result<RankTiebreakProfile, String> {
-    let total_started_at = Instant::now();
-    let mut profile = RankTiebreakProfile::default();
-    let conn = Connection::open(result_db_path).map_err(|e| format!("结果库连接失败:{e}"))?;
-
-    if let TieBreakWay::KdjJ = tie_break {
-        let attach_started_at = Instant::now();
-        let attach_sql = format!("ATTACH '{}' AS src_db", source_db_path);
-        conn.execute(&attach_sql, [])
-            .map_err(|e| format!("附加原始库失败:{e}"))?;
-        profile.attach_source_db_ms = Some(attach_started_at.elapsed().as_millis() as u64);
-    }
-
-    let sql = build_tirbreak_rank_sql(tie_break, adj_type);
-    let update_started_at = Instant::now();
-    conn.execute(&sql, [])
-        .map_err(|e| format!("补rank失败:{e}"))?;
-    profile.update_rank_ms = update_started_at.elapsed().as_millis() as u64;
-
-    if let TieBreakWay::KdjJ = tie_break {
-        let detach_started_at = Instant::now();
-        let _ = conn.execute("DETACH src_db", []);
-        profile.detach_source_db_ms = Some(detach_started_at.elapsed().as_millis() as u64);
-    }
-
-    profile.total_ms = total_started_at.elapsed().as_millis() as u64;
-    log_rank_tiebreak_profile(&profile);
-    Ok(profile)
 }
 
 #[cfg(test)]

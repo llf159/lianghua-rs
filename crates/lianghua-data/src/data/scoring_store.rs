@@ -1,3 +1,10 @@
+use std::{
+    fs::create_dir_all,
+    path::Path,
+    sync::{Arc, mpsc::Receiver},
+    time,
+};
+
 use duckdb::{
     Appender, Connection, Transaction,
     arrow::{
@@ -7,98 +14,10 @@ use duckdb::{
     },
     params,
 };
-use std::collections::HashSet;
-use std::fs::create_dir_all;
-use std::path::Path;
-use std::sync::{Arc, mpsc::Receiver};
-use std::time;
-// use std::fs::File;
-// use std::io::{BufWriter, Write};
-
-use crate::data::{RuleKind, ScoreRule, collect_assigned_names_from_expr_program};
-use crate::expr::validation::{parse_expression_program, validate_expression_functions};
-use crate::scoring::{
-    CachedCombinationCondition, CachedCombinationRule, CachedRule, CachedRuleExpression,
-    RuleScoreSeries, SceneResolvedStage, SceneScoreSeries, TieBreakWay,
+use lianghua_model::scoring::{
+    RankTiebreakProfile, SceneDetails, ScoreDetails, ScoreSummary, ScoreWriteMessage,
+    ScoreWriteProfile, TieBreakWay,
 };
-
-pub use crate::data::runtime::row_into_rt;
-
-#[derive(Debug, Default, Clone)]
-pub struct ScoreSummary {
-    pub ts_code: String,
-    pub trade_date: String,
-    pub total_score: f64,
-    pub rank: Option<i64>,
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct ScoreDetails {
-    pub ts_code: String,
-    pub trade_date: String,
-    pub rule_name: String,
-    pub rule_score: f64,
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct SceneDetails {
-    pub ts_code: String,
-    pub trade_date: String,
-    pub scene_name: String,
-    pub direction: String,
-    pub stage: Option<String>,
-    pub stage_score: f64,
-    pub risk_score: f64,
-    pub confirm_strength: f64,
-    pub risk_intensity: f64,
-    pub total_score: f64,
-    pub scene_rank: Option<i64>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SceneBacktestRow {
-    pub ts_code: Arc<str>,
-    pub trade_date: Arc<str>,
-    pub scene_name: Arc<str>,
-    pub stage: Option<SceneResolvedStage>,
-}
-
-#[derive(Debug, Default)]
-pub struct ScoreBatch {
-    pub summary_rows: Vec<ScoreSummary>,
-    pub detail_rows: Vec<ScoreDetails>,
-    pub scene_rows: Vec<SceneDetails>,
-    pub scene_backtest_rows: Vec<SceneBacktestRow>,
-}
-
-impl ScoreBatch {
-    pub fn extend(&mut self, other: ScoreBatch) {
-        self.summary_rows.extend(other.summary_rows);
-        self.detail_rows.extend(other.detail_rows);
-        self.scene_rows.extend(other.scene_rows);
-        self.scene_backtest_rows.extend(other.scene_backtest_rows);
-    }
-}
-
-#[derive(Debug)]
-pub enum ScoreWriteMessage {
-    Batch(ScoreBatch),
-    Abort(String),
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct ScoreWriteProfile {
-    pub total_ms: u64,
-    pub drop_indexes_ms: u64,
-    pub attach_source_db_ms: Option<u64>,
-    pub delete_range_ms: u64,
-    pub receive_and_append_batches_ms: u64,
-    pub summary_rank_ms: u64,
-    pub commit_ms: u64,
-    pub detach_source_db_ms: Option<u64>,
-    pub recreate_indexes_ms: u64,
-    pub batch_count: usize,
-}
 
 const SCORE_SUMMARY_TABLE: &str = "score_summary";
 const RULE_DETAILS_TABLE: &str = "rule_details";
@@ -106,222 +25,6 @@ const SCENE_DETAILS_TABLE: &str = "scene_details";
 const SCORE_SUMMARY_SHADOW_TABLE: &str = "score_summary_write_shadow";
 const RULE_DETAILS_SHADOW_TABLE: &str = "rule_details_write_shadow";
 const SCENE_DETAILS_SHADOW_TABLE: &str = "scene_details_write_shadow";
-
-impl ScoreSummary {
-    pub fn build(ts_code: &str, trade_dates: &[String], total_scores: &[f64]) -> Vec<Self> {
-        let mut sum: Vec<Self> = Vec::new();
-        for i in 0..trade_dates.len() {
-            let mut score = Self::default();
-            score.ts_code = ts_code.to_string();
-            score.trade_date = trade_dates[i].clone();
-            score.total_score = total_scores[i];
-            score.rank = None;
-            sum.push(score);
-        }
-        sum
-    }
-
-    // pub fn write_csv(path: &str, rows: &[ScoreSummary]) -> Result<(), String> {
-    //     let file = File::create(path).map_err(|e| format!("创建文件失败: {e}"))?;
-
-    //     let mut writer = BufWriter::new(file);
-
-    //     writeln!(writer, "ts_code,trade_date,total_score")
-    //         .map_err(|e| format!("写入表头失败: {e}"))?;
-
-    //     for row in rows {
-    //         writeln!(
-    //             writer,
-    //             "{},{},{}",
-    //             row.ts_code, row.trade_date, row.total_score
-    //         )
-    //         .map_err(|e| format!("写入数据行失败: {e}"))?;
-    //     }
-
-    //     writer.flush().map_err(|e| format!("刷新文件失败: {e}"))?;
-
-    //     Ok(())
-    // }
-
-    pub fn write_db(db_path: &str, rows: &[ScoreSummary]) -> Result<(), String> {
-        let mut conn =
-            Connection::open(db_path).map_err(|e| format!("summary数据库连接失败:{e}"))?;
-        let tx = conn
-            .transaction()
-            .map_err(|e| format!("创建数据库事务失败:{e}"))?;
-        let del_sql = r#"
-                DELETE FROM score_summary
-                WHERE trade_date = ?
-            "#;
-        let mut del = tx
-            .prepare(del_sql)
-            .map_err(|e| format!("预编译del_sql失败:{e}"))?;
-        let mut del_dates = HashSet::new();
-        for row in rows {
-            del_dates.insert(&row.trade_date);
-        }
-        for day in del_dates {
-            let _ = del
-                .execute(params![day])
-                .map_err(|e| format!("删除数据库旧数据失败:{e}"))?;
-        }
-        {
-            let mut app = tx
-                .appender("score_summary")
-                .map_err(|e| format!("summary数据库插入错误:{e}"))?;
-            append_summary_rows(&mut app, rows)?;
-            app.flush()
-                .map_err(|e| format!("插入数据库新数据失败:{e}"))?;
-        }
-        tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
-        Ok(())
-    }
-}
-
-impl ScoreDetails {
-    pub fn build(
-        ts_code: &str,
-        trade_dates: &[String],
-        rule_score_series: &[RuleScoreSeries],
-    ) -> Vec<ScoreDetails> {
-        let mut out = Vec::new();
-        for sin_rule in rule_score_series.iter() {
-            let rule_name = sin_rule.name.clone();
-            if trade_dates.len() == sin_rule.series.len()
-                && trade_dates.len() == sin_rule.triggered.len()
-            {
-                for i in 0..trade_dates.len() {
-                    if !sin_rule.triggered[i] {
-                        continue;
-                    }
-                    let rule_score = sin_rule.series[i];
-                    let mut rule_details = Self::default();
-                    rule_details.ts_code = ts_code.to_string();
-                    rule_details.rule_name = rule_name.clone();
-                    rule_details.trade_date = trade_dates[i].clone();
-                    rule_details.rule_score = rule_score;
-                    out.push(rule_details);
-                }
-            }
-        }
-        out
-    }
-
-    pub fn write_db(db_path: &str, rows: &[ScoreDetails]) -> Result<(), String> {
-        let mut conn =
-            Connection::open(db_path).map_err(|e| format!("details数据库连接失败:{e}"))?;
-        let tx = conn
-            .transaction()
-            .map_err(|e| format!("事务创建失败:{e}"))?;
-        let del_sql = r#"
-                DELETE FROM rule_details
-                WHERE trade_date = ?
-            "#;
-        let mut del = tx
-            .prepare(del_sql)
-            .map_err(|e| format!("预编译del_sql失败:{e}"))?;
-        let mut del_dates = HashSet::new();
-        for row in rows {
-            del_dates.insert(&row.trade_date);
-        }
-        for day in del_dates {
-            let _ = del
-                .execute(params![day])
-                .map_err(|e| format!("删除数据库旧数据失败:{e}"))?;
-        }
-
-        {
-            let mut app = tx
-                .appender("rule_details")
-                .map_err(|e| format!("details数据库插入错误:{e}"))?;
-            append_detail_rows(&mut app, rows)?;
-            app.flush()
-                .map_err(|e| format!("插入数据库新数据失败:{e}"))?;
-        }
-        tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
-        Ok(())
-    }
-}
-
-impl SceneDetails {
-    pub fn build(
-        ts_code: &str,
-        trade_dates: &[String],
-        total_scores: &[f64],
-        scene_score_series: &[SceneScoreSeries],
-    ) -> Vec<SceneDetails> {
-        let mut out = Vec::new();
-        for scene in scene_score_series {
-            let scene_name = scene.name.clone();
-            if trade_dates.len() != scene.triggered.len()
-                || trade_dates.len() != total_scores.len()
-                || trade_dates.len() != scene.stage_score.len()
-                || trade_dates.len() != scene.risk_score.len()
-                || trade_dates.len() != scene.confirm_strength.len()
-                || trade_dates.len() != scene.risk_intensity.len()
-                || trade_dates.len() != scene.stage.len()
-            {
-                continue;
-            }
-
-            for i in 0..trade_dates.len() {
-                if !scene.triggered[i] {
-                    continue;
-                }
-                out.push(SceneDetails {
-                    ts_code: ts_code.to_string(),
-                    trade_date: trade_dates[i].clone(),
-                    scene_name: scene_name.clone(),
-                    direction: scene.direction.as_str().to_string(),
-                    stage: scene.stage[i].map(|stage| stage.as_str().to_string()),
-                    stage_score: scene.stage_score[i],
-                    risk_score: scene.risk_score[i],
-                    confirm_strength: scene.confirm_strength[i],
-                    risk_intensity: scene.risk_intensity[i],
-                    total_score: total_scores[i],
-                    scene_rank: None,
-                });
-            }
-        }
-        out
-    }
-}
-
-impl SceneBacktestRow {
-    pub fn build(
-        ts_code: &str,
-        trade_dates: &[String],
-        scene_score_series: &[SceneScoreSeries],
-    ) -> Vec<Self> {
-        let ts_code: Arc<str> = Arc::from(ts_code);
-        let trade_dates = trade_dates
-            .iter()
-            .map(|trade_date| Arc::<str>::from(trade_date.as_str()))
-            .collect::<Vec<_>>();
-        let mut out = Vec::new();
-
-        for scene in scene_score_series {
-            if trade_dates.len() != scene.triggered.len() || trade_dates.len() != scene.stage.len()
-            {
-                continue;
-            }
-            let scene_name: Arc<str> = Arc::from(scene.name.as_str());
-            for i in 0..trade_dates.len() {
-                if !scene.triggered[i] {
-                    continue;
-                }
-                out.push(Self {
-                    ts_code: Arc::clone(&ts_code),
-                    trade_date: Arc::clone(&trade_dates[i]),
-                    scene_name: Arc::clone(&scene_name),
-                    stage: scene.stage[i],
-                });
-            }
-        }
-
-        out
-    }
-}
 
 pub fn init_result_db(db_path: &Path) -> Result<(), String> {
     let db_file = Path::new(db_path);
@@ -678,42 +381,6 @@ fn checked_rank(rank: Option<i64>, label: &str) -> Result<Option<i32>, String> {
         .transpose()
 }
 
-fn append_summary_rows(app: &mut Appender<'_>, rows: &[ScoreSummary]) -> Result<(), String> {
-    if rows.is_empty() {
-        return Ok(());
-    }
-
-    let mut ts_code = StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(12));
-    let mut trade_date = StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(8));
-    let mut total_score = Vec::with_capacity(rows.len());
-    let mut rank = Vec::with_capacity(rows.len());
-    for row in rows {
-        ts_code.append_value(&row.ts_code);
-        trade_date.append_value(&row.trade_date);
-        total_score.push(row.total_score);
-        rank.push(None);
-    }
-
-    let schema = Schema::new(vec![
-        Field::new("ts_code", DataType::Utf8, false),
-        Field::new("trade_date", DataType::Utf8, false),
-        Field::new("total_score", DataType::Float64, false),
-        Field::new("rank", DataType::Int32, true),
-    ]);
-    let batch = RecordBatch::try_new(
-        Arc::new(schema),
-        vec![
-            score_string_array(ts_code.finish()),
-            score_string_array(trade_date.finish()),
-            score_float64_array(total_score),
-            score_int32_opt_array(rank),
-        ],
-    )
-    .map_err(|e| format!("创建score_summary批次失败:{e}"))?;
-    app.append_record_batch(batch)
-        .map_err(|e| format!("批量插入score_summary失败:{e}"))
-}
-
 fn append_summary_stage_rows(app: &mut Appender<'_>, rows: &[ScoreSummary]) -> Result<(), String> {
     if rows.is_empty() {
         return Ok(());
@@ -911,7 +578,7 @@ fn scene_stage_rank_weight(stage: Option<&str>) -> i32 {
     }
 }
 
-pub(crate) fn rank_summary_rows_by_score(rows: &mut [ScoreSummary]) {
+pub fn rank_summary_rows_by_score(rows: &mut [ScoreSummary]) {
     rows.sort_by(|left, right| {
         left.trade_date
             .cmp(&right.trade_date)
@@ -937,7 +604,7 @@ pub(crate) fn rank_summary_rows_by_score(rows: &mut [ScoreSummary]) {
     }
 }
 
-pub(crate) fn rank_scene_rows(rows: &mut [SceneDetails]) {
+pub fn rank_scene_rows(rows: &mut [SceneDetails]) {
     rows.sort_by(|left, right| {
         left.trade_date
             .cmp(&right.trade_date)
@@ -989,55 +656,117 @@ pub(crate) fn rank_scene_rows(rows: &mut [SceneDetails]) {
     }
 }
 
+pub(crate) fn build_tiebreak_rank_sql(tie_break: TieBreakWay, adj_type: &str) -> String {
+    match tie_break {
+        TieBreakWay::TsCode => r#"
+            UPDATE score_summary AS s
+            SET rank = r.new_rank
+            FROM (
+                SELECT
+                    ts_code,
+                    trade_date,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY trade_date
+                        ORDER BY total_score DESC, ts_code ASC
+                    ) AS new_rank
+                FROM score_summary
+            ) AS r
+            WHERE s.ts_code = r.ts_code
+              AND s.trade_date = r.trade_date
+            "#
+        .to_string(),
+        TieBreakWay::KdjJ => format!(
+            r#"
+                UPDATE score_summary AS s
+                SET rank = r.new_rank
+                FROM (
+                    SELECT
+                        s.ts_code,
+                        s.trade_date,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY s.trade_date
+                            ORDER BY
+                                s.total_score DESC,
+                                src.j ASC NULLS LAST,
+                                s.ts_code ASC
+                        ) AS new_rank
+                    FROM score_summary AS s
+                    LEFT JOIN src_db.stock_data AS src
+                      ON s.ts_code = src.ts_code
+                     AND s.trade_date = src.trade_date
+                     AND src.adj_type = '{}'
+                ) AS r
+                WHERE s.ts_code = r.ts_code
+                  AND s.trade_date = r.trade_date
+                "#,
+            adj_type.replace("'", "''")
+        ),
+    }
+}
+
+pub fn build_rank_tiebreak(
+    result_db_path: &str,
+    source_db_path: &str,
+    adj_type: &str,
+    tie_break: TieBreakWay,
+) -> Result<RankTiebreakProfile, String> {
+    let total_started_at = time::Instant::now();
+    let mut profile = RankTiebreakProfile::default();
+    let conn = Connection::open(result_db_path).map_err(|e| format!("结果库连接失败:{e}"))?;
+
+    if let TieBreakWay::KdjJ = tie_break {
+        let attach_started_at = time::Instant::now();
+        let attach_sql = format!("ATTACH {} AS src_db", duckdb_string_literal(source_db_path));
+        conn.execute(&attach_sql, [])
+            .map_err(|e| format!("附加原始库失败:{e}"))?;
+        profile.attach_source_db_ms = Some(attach_started_at.elapsed().as_millis() as u64);
+    }
+
+    let sql = build_tiebreak_rank_sql(tie_break, adj_type);
+    let update_started_at = time::Instant::now();
+    conn.execute(&sql, [])
+        .map_err(|e| format!("补rank失败:{e}"))?;
+    profile.update_rank_ms = update_started_at.elapsed().as_millis() as u64;
+
+    if let TieBreakWay::KdjJ = tie_break {
+        let detach_started_at = time::Instant::now();
+        let _ = conn.execute("DETACH src_db", []);
+        profile.detach_source_db_ms = Some(detach_started_at.elapsed().as_millis() as u64);
+    }
+
+    profile.total_ms = total_started_at.elapsed().as_millis() as u64;
+    println!(
+        "补排名耗时: 总计={}ms；补排名={}ms",
+        profile.total_ms, profile.update_rank_ms,
+    );
+    Ok(profile)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
         fs,
-        sync::{Arc, mpsc::channel},
+        sync::mpsc::channel,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use duckdb::Connection;
 
     use super::{
-        SceneBacktestRow, SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage,
+        SceneDetails, ScoreDetails, ScoreSummary, ScoreWriteMessage, build_tiebreak_rank_sql,
         init_result_db, rank_scene_rows, result_table_has_primary_key,
         write_score_batches_from_channel,
     };
-    use crate::{
-        data::SceneDirection,
-        scoring::{SceneResolvedStage, SceneScoreSeries, TieBreakWay},
-    };
+    use lianghua_model::scoring::{ScoreBatch, TieBreakWay};
 
     #[test]
-    fn compact_scene_backtest_rows_match_full_scene_rows() {
-        let trade_dates = vec!["20240102".to_string(), "20240103".to_string()];
-        let total_scores = vec![51.0, 49.0];
-        let scene_series = vec![SceneScoreSeries {
-            name: "主升".to_string(),
-            direction: SceneDirection::Long,
-            stage: vec![Some(SceneResolvedStage::Confirm), None],
-            stage_score: vec![3.0, 0.5],
-            risk_score: vec![0.0, -1.0],
-            confirm_strength: vec![1.0, 0.1],
-            risk_intensity: vec![0.0, 0.5],
-            triggered: vec![true, true],
-        }];
+    fn tiebreak_rank_sql_uses_stable_order_and_escapes_adj_type() {
+        let ts_code_sql = build_tiebreak_rank_sql(TieBreakWay::TsCode, "qfq");
+        assert!(ts_code_sql.contains("total_score DESC, ts_code ASC"));
 
-        let full = SceneDetails::build("000001.SZ", &trade_dates, &total_scores, &scene_series);
-        let compact = SceneBacktestRow::build("000001.SZ", &trade_dates, &scene_series);
-
-        assert_eq!(compact.len(), full.len());
-        for (compact, full) in compact.iter().zip(&full) {
-            assert_eq!(compact.ts_code.as_ref(), full.ts_code);
-            assert_eq!(compact.trade_date.as_ref(), full.trade_date);
-            assert_eq!(compact.scene_name.as_ref(), full.scene_name);
-            assert_eq!(
-                compact.stage.map(SceneResolvedStage::as_str),
-                full.stage.as_deref()
-            );
-        }
-        assert!(Arc::ptr_eq(&compact[0].ts_code, &compact[1].ts_code));
+        let kdj_sql = build_tiebreak_rank_sql(TieBreakWay::KdjJ, "q'f'q");
+        assert!(kdj_sql.contains("src.j ASC NULLS LAST"));
+        assert!(kdj_sql.contains("src.adj_type = 'q''f''q'"));
     }
 
     fn scene_row(
@@ -1097,59 +826,6 @@ mod tests {
             .find(|row| row.scene_name == "防守")
             .and_then(|row| row.scene_rank);
         assert_eq!(defense_rank, Some(1));
-    }
-
-    #[test]
-    fn legacy_score_write_helpers_use_arrow_batches_without_changing_rank_semantics() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos();
-        let temp_dir = std::env::temp_dir().join(format!("lianghua_score_helper_{unique}"));
-        fs::create_dir_all(&temp_dir).expect("create temp dir");
-        let db_path = temp_dir.join("scoring_result.db");
-        init_result_db(&db_path).expect("init db");
-        let db_path_str = db_path.to_str().expect("db path utf8");
-
-        ScoreSummary::write_db(
-            db_path_str,
-            &[ScoreSummary {
-                ts_code: "000001.SZ".to_string(),
-                trade_date: "20240102".to_string(),
-                total_score: 1.0,
-                rank: Some(7),
-            }],
-        )
-        .expect("write summary");
-        ScoreDetails::write_db(
-            db_path_str,
-            &[ScoreDetails {
-                ts_code: "000001.SZ".to_string(),
-                trade_date: "20240102".to_string(),
-                rule_name: "测试规则".to_string(),
-                rule_score: 1.5,
-            }],
-        )
-        .expect("write details");
-
-        let conn = Connection::open(&db_path).expect("open result db");
-        let stored_rank = conn
-            .query_row(
-                "SELECT CAST(rank AS BIGINT) FROM score_summary",
-                [],
-                |row| row.get::<_, Option<i64>>(0),
-            )
-            .expect("read summary rank");
-        assert_eq!(stored_rank, None);
-        let detail_count = conn
-            .query_row("SELECT COUNT(*) FROM rule_details", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("count details");
-        assert_eq!(detail_count, 1);
-
-        drop(conn);
-        fs::remove_dir_all(temp_dir).expect("remove temp dir");
     }
 
     fn explicit_result_index_names(conn: &Connection) -> Vec<String> {
@@ -1663,155 +1339,4 @@ pub fn write_score_batches_from_channel(
     profile.total_ms = total_started_at.elapsed().as_millis() as u64;
 
     Ok(profile)
-}
-
-pub fn cache_rule_build(
-    source_dir: &str,
-    strategy_path: Option<&str>,
-) -> Result<Vec<CachedRule>, String> {
-    let rules = ScoreRule::load_rules_with_strategy_path(source_dir, strategy_path)?;
-    let mut out = Vec::with_capacity(128);
-    for rule in rules {
-        match rule.kind {
-            RuleKind::Single => {
-                let expression = build_cached_rule_expression(&rule.name, rule.when)?;
-                out.push(CachedRule {
-                    name: rule.name,
-                    scope_windows: rule.scope_windows,
-                    scope_way: rule.scope_way,
-                    points: rule.points,
-                    dist_points: rule.dist_points,
-                    max_points: rule.max_points,
-                    tag: rule.tag,
-                    when_src: expression.when_src,
-                    when_ast: expression.when_ast,
-                    assigned_names: expression.assigned_names,
-                    combination: None,
-                });
-            }
-            RuleKind::Combination => {
-                let conditions = rule
-                    .conditions
-                    .into_iter()
-                    .map(|condition| {
-                        let expression =
-                            build_cached_rule_expression(&condition.name, condition.when)?;
-                        Ok(CachedCombinationCondition {
-                            expression,
-                            bonus_points: condition.bonus_points,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                let first_condition = conditions
-                    .first()
-                    .ok_or_else(|| format!("组合规则({})没有条件", rule.name))?
-                    .expression
-                    .clone();
-                let points_by_hits = rule
-                    .points_by_hits
-                    .ok_or_else(|| format!("组合规则({})缺少 points_by_hits", rule.name))?;
-                out.push(CachedRule {
-                    name: rule.name,
-                    scope_windows: rule.scope_windows,
-                    scope_way: rule.scope_way,
-                    points: 0.0,
-                    dist_points: None,
-                    max_points: None,
-                    tag: rule.tag,
-                    when_src: first_condition.when_src,
-                    when_ast: first_condition.when_ast,
-                    assigned_names: first_condition.assigned_names,
-                    combination: Some(CachedCombinationRule {
-                        conditions,
-                        points_by_hits,
-                        max_points: rule.max_points,
-                        max_bonus_points: rule.max_bonus_points,
-                    }),
-                });
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn build_cached_rule_expression(
-    name: &str,
-    when_src: String,
-) -> Result<CachedRuleExpression, String> {
-    let when_ast = parse_expression_program(&when_src)
-        .map_err(|error| format!("表达式({name})解析错误在{}:{}", error.idx, error.msg))?;
-    validate_expression_functions(&when_ast)?;
-    let assigned_names = collect_assigned_names_from_expr_program(&when_ast);
-    Ok(CachedRuleExpression {
-        name: name.to_string(),
-        when_src,
-        when_ast,
-        assigned_names,
-    })
-}
-
-#[cfg(test)]
-mod combination_cache_tests {
-    use std::{
-        fs::{create_dir_all, remove_dir_all, write},
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
-    use super::cache_rule_build;
-
-    #[test]
-    fn cache_builder_compiles_all_combination_expressions() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let source_dir = std::env::temp_dir().join(format!("lianghua-combination-cache-{unique}"));
-        create_dir_all(&source_dir).expect("create temp source");
-        write(
-            source_dir.join("score_rule.toml"),
-            r#"
-version = 1
-
-[[scene]]
-name = "趋势启动"
-direction = "long"
-observe_threshold = 1.0
-trigger_threshold = 2.0
-confirm_threshold = 3.0
-fail_threshold = 1.0
-
-[[rule]]
-name = "量价组合"
-scene = "趋势启动"
-kind = "combination"
-stage = "trigger"
-scope_windows = 2
-scope_way = "ANY"
-points_by_hits = [0.0, 1.0, 3.0]
-explain = "组合命中计分"
-
-[[rule.condition]]
-name = "收红"
-when = "C > O"
-
-[[rule.condition]]
-name = "放量"
-when = "V > REF(V, 1)"
-bonus_points = 1.0
-"#,
-        )
-        .expect("write strategy");
-
-        let rules = cache_rule_build(source_dir.to_str().expect("utf8"), None)
-            .expect("build combination cache");
-        remove_dir_all(&source_dir).expect("remove temp source");
-
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].expression_programs().len(), 2);
-        let combination = rules[0].combination.as_ref().expect("combination cache");
-        assert_eq!(combination.conditions.len(), 2);
-        assert_eq!(combination.conditions[0].bonus_points, 0.0);
-        assert_eq!(combination.conditions[1].bonus_points, 1.0);
-        assert_eq!(combination.points_by_hits, vec![0.0, 1.0, 3.0]);
-    }
 }

@@ -18,7 +18,7 @@ use crate::{
         ScoreScene, collect_assigned_names_from_expr_program,
         collect_runtime_keys_from_expr_programs, concept_performance_db_path,
         expr_program_uses_runtime_key, load_stock_list, load_ths_concepts_list, result_db_path,
-        source_db_path,
+        runtime::row_into_rt, source_db_path,
     },
     expr::{
         eval::{Runtime, Value},
@@ -28,17 +28,15 @@ use crate::{
             estimate_expression_warmup, parse_expression_program, validate_expression_functions,
         },
     },
+    scoring::rule_cache::cache_rule_build as build_scoring_rule_cache,
     scoring::runner::{ScoringMemoryMode, scoring_all_to_memory_with_mode},
-    scoring::scoring_data::{
-        SceneBacktestRow, ScoreDetails, ScoreSummary, cache_rule_build as build_scoring_rule_cache,
-        row_into_rt,
-    },
     scoring::tools::{
         CyqChenFieldInjector, calc_query_need_rows, calc_query_start_date,
         collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names, inject_stock_extra_fields,
         load_st_list, load_total_share_map,
     },
     scoring::{CachedRule, evaluate_cached_rule_scores},
+    scoring_model::{SceneBacktestRow, ScoreDetails, ScoreSummary},
     simulate::{
         DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, build_backtest_sample_eligibility,
         rank::{
@@ -8279,8 +8277,8 @@ mod tests {
 
     use crate::{
         data::{DataReader, RuleTag, result_db_path, source_db_path},
-        scoring::scoring_data::{ScoreDetails, ScoreSummary},
         scoring::tools::load_st_list,
+        scoring_model::{ScoreDetails, ScoreSummary},
         simulate::rank::RankLayerSamplePoint,
         simulate::rule::{
             RuleLayerDailyScoreGroup, RuleLayerDailyScoreLayers, RuleLayerPoint,

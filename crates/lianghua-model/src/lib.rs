@@ -1,5 +1,7 @@
 //! Shared market-data contracts used by storage, ingestion, and scoring crates.
 
+pub mod scoring;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdjType {
     Qfq,

@@ -13,9 +13,11 @@ use crate::expr::{
         estimate_expression_warmup, parse_expression_program, validate_expression_functions,
     },
 };
-use crate::scoring::scoring_data::row_into_rt;
 use crate::{
-    data::{DataReader, RuleKind, RuleStage, SceneDirection, ScoreConfig, score_rule_path},
+    data::{
+        DataReader, RuleKind, RuleStage, SceneDirection, ScoreConfig, runtime::row_into_rt,
+        score_rule_path,
+    },
     scoring::tools::{
         collect_used_cyq_chen_runtime_keys, inject_optional_cyq_chen_fields,
         inject_stock_extra_fields, load_st_list, load_total_share_map, rt_max_len,

@@ -7,12 +7,11 @@ use serde::{Deserialize, Serialize};
 use crate::realtime::{
     fetch_realtime_quote_map, fetch_tencent_realtime_quote_map, normalize_quote_trade_date,
 };
-use crate::scoring::scoring_data::row_into_rt;
 use crate::{
     crawler::{SinaQuote, TencentQuote},
     data::{
         DataReader, RowData, RuntimeKeyCollectOptions, collect_runtime_keys_from_expr_programs,
-        result_db_path, source_db_path,
+        result_db_path, runtime::row_into_rt, source_db_path,
     },
     download::ind_calc::{
         IndsCache, cache_ind_build, calc_inds_with_cache_lossy, warmup_ind_estimate,

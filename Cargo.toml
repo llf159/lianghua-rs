@@ -44,7 +44,7 @@ default-members = [
 [dependencies]
 lianghua-backtest = { path = "crates/lianghua-backtest" }
 lianghua-data = { path = "crates/lianghua-data" }
-lianghua-scoring = { path = "crates/lianghua-scoring" }
+lianghua-model = { path = "crates/lianghua-model" }
 duckdb = { version = "1.4.4", features = ["appender-arrow"] }
 
 # Keep compute-heavy backend crates optimized during Tauri development builds.

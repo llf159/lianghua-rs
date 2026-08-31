@@ -9,13 +9,11 @@ use crate::{
         cyq::CyqConfig, cyq_chen::ChenChipConfig,
         cyq_chen_data::rebuild_cyq_chen_all_with_progress, cyq_chen_db_path,
         cyq_data::rebuild_cyq_all_with_progress, cyq_db_path, load_trade_date_list, result_db_path,
-        source_db_path,
+        scoring_store::build_rank_tiebreak, source_db_path,
     },
     download::runner::DownloadProgressCallback,
-    scoring::{
-        RankTiebreakProfile, TieBreakWay, build_rank_tiebreak,
-        runner::{ScoringRunProfile, preview_scoring_runtime_warnings, scoring_all_to_db},
-    },
+    scoring::runner::{ScoringRunProfile, preview_scoring_runtime_warnings, scoring_all_to_db},
+    scoring_model::{RankTiebreakProfile, TieBreakWay},
 };
 
 #[derive(Clone, Serialize)]

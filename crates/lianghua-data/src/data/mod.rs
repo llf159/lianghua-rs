@@ -7,6 +7,7 @@ pub mod download_data;
 pub mod dragon_tiger_data;
 pub mod extras;
 pub mod runtime;
+pub mod scoring_store;
 mod stock_data_fields;
 
 pub use stock_data_fields::{STOCK_DATA_KEY_COLUMN_DEFS, STOCK_DATA_RUNTIME_FIELDS};

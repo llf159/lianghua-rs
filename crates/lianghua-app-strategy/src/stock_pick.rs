@@ -8,6 +8,7 @@ use crate::{
     data::{
         DataReader, RuntimeKeyCollectOptions, ScoreRule, collect_runtime_keys_from_expr_programs,
         expr_program_uses_runtime_key, load_ths_concepts_list, result_db_path,
+        runtime::row_into_rt,
     },
     expr::{
         eval::Value,
@@ -16,7 +17,6 @@ use crate::{
             estimate_expression_warmup, parse_expression_program, validate_expression_functions,
         },
     },
-    scoring::scoring_data::row_into_rt,
     scoring::tools::{
         CyqChenFieldInjector, calc_query_need_rows, calc_query_start_date,
         collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names, inject_stock_extra_fields,

@@ -4,6 +4,7 @@ use lianghua_backtest::simulate;
 use lianghua_core::{expr, utils};
 use lianghua_data::data;
 use lianghua_download::download;
+use lianghua_model::scoring as scoring_model;
 use lianghua_scoring::scoring;
 
 pub mod convolution_rank;
