@@ -2449,8 +2449,18 @@ fn remove_watch_observe_rows(
     core_hydrate_watch_observe_rows(source_path.as_deref(), &rows, None, None)
 }
 
+fn install_rustls_crypto_provider() {
+    // The final Tauri binary enables both rustls built-in providers through
+    // different dependency paths. Pick the provider used by reqwest 0.13
+    // before any crate constructs a TLS client. A provider installed even
+    // earlier by the host is also valid, so repeated initialization is safe.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_rustls_crypto_provider();
+
     let builder = tauri::Builder::default().setup(|app| {
         if cfg!(debug_assertions) {
             app.handle().plugin(
@@ -2598,4 +2608,17 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn rustls_crypto_provider_is_available_before_tls_client_build() {
+        super::install_rustls_crypto_provider();
+
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+        let _ = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+    }
 }

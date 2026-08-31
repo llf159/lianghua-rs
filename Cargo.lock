@@ -107,6 +107,7 @@ dependencies = [
  "lianghua-provider",
  "libc",
  "log",
+ "rustls",
  "rustls-platform-verifier",
  "serde",
  "serde_json",
