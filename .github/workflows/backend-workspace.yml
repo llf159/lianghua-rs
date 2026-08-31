@@ -1,0 +1,73 @@
+name: backend-workspace
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+      - "crates/**"
+      - "analysis_tools/**"
+      - "ui/lianghua_web/src-tauri/**"
+      - ".github/workflows/backend-workspace.yml"
+  push:
+    branches:
+      - main
+      - "refactor/**"
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+      - "crates/**"
+      - "analysis_tools/**"
+      - "ui/lianghua_web/src-tauri/**"
+      - ".github/workflows/backend-workspace.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: backend-workspace-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Check formatting
+        run: >-
+          cargo fmt
+          --package lianghua-rs
+          --package lianghua-core
+          --package lianghua-provider
+          --package lianghua-model
+          --package lianghua-data
+          --package lianghua-download
+          --package lianghua-scoring
+          --package lianghua-engine
+          --package lianghua-backtest
+          --package lianghua-app
+          -- --check
+
+      - name: Check all backend targets
+        run: cargo check --all-targets
+
+      - name: Test dependency-free layers
+        run: cargo test --package lianghua-core --package lianghua-provider --package lianghua-model

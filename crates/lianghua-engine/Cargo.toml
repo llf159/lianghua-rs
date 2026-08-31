@@ -1,0 +1,11 @@
+[package]
+name = "lianghua-engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lianghua-core = { path = "../lianghua-core" }
+lianghua-provider = { path = "../lianghua-provider" }
+lianghua-data = { path = "../lianghua-data" }
+lianghua-download = { path = "../lianghua-download" }
+lianghua-scoring = { path = "../lianghua-scoring" }

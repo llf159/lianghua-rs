@@ -1,0 +1,19 @@
+[package]
+name = "lianghua-data"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lianghua-core = { path = "../lianghua-core" }
+lianghua-provider = { path = "../lianghua-provider" }
+lianghua-model = { path = "../lianghua-model" }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.9"
+duckdb = { version = "1.4.4", features = ["appender-arrow"] }
+rayon = "1.11.0"
+csv = "1.4.0"
+chrono = "0.4.44"
+rand = "0.9.2"
+
+[dev-dependencies]
+serde_json = "1.0.149"

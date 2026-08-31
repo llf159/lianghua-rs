@@ -1,0 +1,10 @@
+[package]
+name = "lianghua-backtest"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lianghua-engine = { path = "../lianghua-engine" }
+csv = "1.4.0"
+duckdb = { version = "1.4.4", features = ["appender-arrow"] }
+rayon = "1.11.0"

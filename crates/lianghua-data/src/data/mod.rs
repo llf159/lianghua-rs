@@ -1,0 +1,1822 @@
+pub mod concept_performance_data;
+pub mod cyq;
+pub mod cyq_chen;
+pub mod cyq_chen_data;
+pub mod cyq_data;
+pub mod download_data;
+pub mod dragon_tiger_data;
+pub mod extras;
+pub mod runtime;
+mod stock_data_fields;
+
+pub use stock_data_fields::{STOCK_DATA_KEY_COLUMN_DEFS, STOCK_DATA_RUNTIME_FIELDS};
+
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+};
+
+use duckdb::{Connection, params};
+use serde::{Deserialize, Deserializer, de};
+
+use crate::expr::{
+    parser::{Expr, Stmt, Stmts},
+    validation::{parse_expression_program, validate_expression_functions},
+};
+
+pub fn source_db_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("stock_data.db")
+}
+
+pub fn dragon_tiger_db_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("dragon_tiger.db")
+}
+
+pub fn result_db_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("scoring_result.db")
+}
+
+pub fn concept_performance_db_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("concept_performance.db")
+}
+
+pub fn cyq_db_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("cyq.db")
+}
+
+pub fn chip_change_rule_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("chip_change_rule.toml")
+}
+
+pub fn cyq_chen_db_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("cyq_chen.db")
+}
+
+pub fn ths_concepts_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("stock_concepts.csv")
+}
+
+pub fn stock_list_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("stock_list.csv")
+}
+
+pub fn trade_calendar_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("trade_calendar.csv")
+}
+
+pub fn score_rule_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("score_rule.toml")
+}
+
+pub fn resolve_strategy_path(source_dir: &str, strategy_path: Option<&str>) -> PathBuf {
+    let Some(path) = strategy_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return score_rule_path(source_dir);
+    };
+
+    let raw_path = Path::new(path);
+    if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        Path::new(source_dir).join(raw_path)
+    }
+}
+
+pub fn ind_toml_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("ind.toml")
+}
+
+pub fn load_stock_list(source_dir: &str) -> Result<Vec<Vec<String>>, String> {
+    let path = stock_list_path(source_dir);
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(&path)
+        .map_err(|e| format!("打开stock_list.csv失败:路径:{:?},错误:{e}", path))?;
+
+    let mut rows = Vec::new();
+    for row_result in reader.records() {
+        let row = row_result.map_err(|e| format!("解析stock_list.csv失败:{e}"))?;
+        rows.push(row.iter().map(|value| value.to_string()).collect());
+    }
+
+    Ok(rows)
+}
+
+pub fn load_trade_date_list(source_dir: &str) -> Result<Vec<String>, String> {
+    let path = trade_calendar_path(source_dir);
+    let text = fs::read_to_string(&path).map_err(|e| format!("读取trade_calendar.csv失败:{e}"))?;
+    let mut trade_date_list = Vec::with_capacity(1024);
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.eq_ignore_ascii_case("cal_date") {
+            continue;
+        }
+        trade_date_list.push(line.to_string());
+    }
+
+    Ok(trade_date_list)
+}
+
+pub fn load_ths_concepts_list(source_dir: &str) -> Result<Vec<Vec<String>>, String> {
+    let path = ths_concepts_path(source_dir);
+
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(&path)
+        .map_err(|e| format!("打开stock_concepts.csv失败:路径:{:?},错误:{e}", path))?;
+
+    let mut concept_list = Vec::with_capacity(6000);
+    for row_result in reader.records() {
+        let row = row_result.map_err(|e| format!("解析stock_concepts.csv失败:{e}"))?;
+        concept_list.push(row.iter().map(|value| value.to_string()).collect());
+    }
+
+    Ok(concept_list)
+}
+
+pub fn load_ths_concepts_named_map(
+    source_dir: &str,
+    value_column_names: &[&str],
+) -> Result<HashMap<String, String>, String> {
+    let path = ths_concepts_path(source_dir);
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(&path)
+        .map_err(|e| format!("打开stock_concepts.csv失败:路径:{:?},错误:{e}", path))?;
+
+    let headers = reader
+        .headers()
+        .map_err(|e| format!("读取stock_concepts.csv表头失败:{e}"))?
+        .iter()
+        .map(|value| value.trim().to_string())
+        .collect::<Vec<_>>();
+
+    let ts_code_idx = headers
+        .iter()
+        .position(|header| header.eq_ignore_ascii_case("ts_code"))
+        .unwrap_or(0);
+    let Some(value_idx) = value_column_names.iter().find_map(|column_name| {
+        headers
+            .iter()
+            .position(|header| header.eq_ignore_ascii_case(column_name))
+    }) else {
+        return Ok(HashMap::new());
+    };
+
+    let mut out = HashMap::new();
+    for row_result in reader.records() {
+        let row = row_result.map_err(|e| format!("解析stock_concepts.csv失败:{e}"))?;
+        let Some(ts_code) = row
+            .get(ts_code_idx)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(value) = row
+            .get(value_idx)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+
+        out.insert(ts_code.to_string(), value.to_string());
+    }
+
+    Ok(out)
+}
+
+// ============================================ 原数据部分 ================================================
+
+#[derive(Debug, Clone)]
+pub struct RowData {
+    pub trade_dates: Vec<String>,
+    pub cols: HashMap<String, Vec<Option<f64>>>,
+}
+
+impl RowData {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.trade_dates.is_empty() {
+            return Err("trade_dates为空".to_string());
+        }
+
+        let len = self.trade_dates.len();
+        for (name, series) in &self.cols {
+            if series.len() != len {
+                return Err(format!("{name}列长度与交易日长度有差异,数据缺失"));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeKeyCollectOptions<'a> {
+    pub always_keys: &'a [&'a str],
+    pub injected_keys: &'a [&'a str],
+    pub aliases: &'a [(&'a str, &'a str)],
+}
+
+pub fn collect_runtime_keys_from_expr_programs(
+    programs: &[&Stmts],
+    options: RuntimeKeyCollectOptions<'_>,
+) -> HashSet<String> {
+    let mut keys = options
+        .always_keys
+        .iter()
+        .map(|key| (*key).to_string())
+        .collect::<HashSet<_>>();
+
+    for program in programs {
+        collect_stmts_runtime_keys(program, options, &mut keys);
+    }
+
+    keys
+}
+
+pub fn expr_program_uses_runtime_key(stmts: &Stmts, target_key: &str) -> bool {
+    let mut locals = HashSet::new();
+
+    for stmt in &stmts.item {
+        match stmt {
+            Stmt::Assign { name, value } => {
+                if expr_uses_runtime_key(value, &locals, target_key) {
+                    return true;
+                }
+                locals.insert(name.clone());
+            }
+            Stmt::Expr(expr) => {
+                if expr_uses_runtime_key(expr, &locals, target_key) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+pub fn collect_assigned_names_from_expr_program(stmts: &Stmts) -> Vec<String> {
+    let mut assigned = HashSet::new();
+    for stmt in &stmts.item {
+        if let Stmt::Assign { name, .. } = stmt {
+            assigned.insert(name.clone());
+        }
+    }
+
+    let mut out = assigned.into_iter().collect::<Vec<_>>();
+    out.sort();
+    out
+}
+
+fn collect_stmts_runtime_keys(
+    stmts: &Stmts,
+    options: RuntimeKeyCollectOptions<'_>,
+    keys: &mut HashSet<String>,
+) {
+    let mut locals = HashSet::new();
+
+    for stmt in &stmts.item {
+        match stmt {
+            Stmt::Assign { name, value } => {
+                collect_expr_runtime_keys(value, &locals, options, keys);
+                locals.insert(name.clone());
+            }
+            Stmt::Expr(expr) => collect_expr_runtime_keys(expr, &locals, options, keys),
+        }
+    }
+}
+
+fn collect_expr_runtime_keys(
+    expr: &Expr,
+    locals: &HashSet<String>,
+    options: RuntimeKeyCollectOptions<'_>,
+    keys: &mut HashSet<String>,
+) {
+    match expr {
+        Expr::Number(_) => {}
+        Expr::Ident(name) => {
+            if locals.contains(name) {
+                return;
+            }
+
+            let runtime_key = name.to_ascii_uppercase();
+            if runtime_key == "TOTAL_MV_YI" {
+                keys.insert("C".to_string());
+                return;
+            }
+            if let Some((_, db_key)) = options
+                .aliases
+                .iter()
+                .find(|(from_key, _)| runtime_key == *from_key)
+            {
+                keys.insert((*db_key).to_string());
+                return;
+            }
+            if options
+                .injected_keys
+                .iter()
+                .any(|injected_key| runtime_key == *injected_key)
+            {
+                return;
+            }
+            keys.insert(runtime_key);
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_expr_runtime_keys(arg, locals, options, keys);
+            }
+        }
+        Expr::Unary { rhs, .. } => collect_expr_runtime_keys(rhs, locals, options, keys),
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_expr_runtime_keys(lhs, locals, options, keys);
+            collect_expr_runtime_keys(rhs, locals, options, keys);
+        }
+    }
+}
+
+fn expr_uses_runtime_key(expr: &Expr, locals: &HashSet<String>, target_key: &str) -> bool {
+    match expr {
+        Expr::Number(_) => false,
+        Expr::Ident(name) => !locals.contains(name) && name == target_key,
+        Expr::Call { args, .. } => args
+            .iter()
+            .any(|arg| expr_uses_runtime_key(arg, locals, target_key)),
+        Expr::Unary { rhs, .. } => expr_uses_runtime_key(rhs, locals, target_key),
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_uses_runtime_key(lhs, locals, target_key)
+                || expr_uses_runtime_key(rhs, locals, target_key)
+        }
+    }
+}
+
+pub struct DataReader {
+    pub conn: Connection,
+    pub query_sql: String,
+    pub query_tail_rows_sql: String,
+    pub cols_table: Vec<(String, String)>, // 数据库列名, runtime规范列名
+    pub runtime_index_pct_cols: Vec<RuntimeIndexPctCol>,
+}
+
+const RUNTIME_INDEX_ADJ_TYPE: &str = "ind";
+
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeIndexPctCol {
+    pub ts_code: &'static str,
+    pub runtime_key: &'static str,
+}
+
+const RUNTIME_INDEX_PCT_COLS: [RuntimeIndexPctCol; 7] = [
+    RuntimeIndexPctCol {
+        ts_code: "000001.SH",
+        runtime_key: "I",
+    },
+    RuntimeIndexPctCol {
+        ts_code: "399001.SZ",
+        runtime_key: "ISZ",
+    },
+    RuntimeIndexPctCol {
+        ts_code: "399300.SZ",
+        runtime_key: "I300",
+    },
+    RuntimeIndexPctCol {
+        ts_code: "399905.SZ",
+        runtime_key: "I500",
+    },
+    RuntimeIndexPctCol {
+        ts_code: "399006.SZ",
+        runtime_key: "ICY",
+    },
+    RuntimeIndexPctCol {
+        ts_code: "000016.SH",
+        runtime_key: "I50",
+    },
+    RuntimeIndexPctCol {
+        ts_code: "000852.SH",
+        runtime_key: "I1000",
+    },
+];
+
+impl DataReader {
+    pub fn new(source_dir: &str) -> Result<Self, String> {
+        Self::new_inner(source_dir, None)
+    }
+
+    pub fn new_with_runtime_keys(
+        source_dir: &str,
+        required_runtime_keys: &HashSet<String>,
+    ) -> Result<Self, String> {
+        Self::new_inner(source_dir, Some(required_runtime_keys))
+    }
+
+    fn new_inner(
+        source_dir: &str,
+        required_runtime_keys: Option<&HashSet<String>>,
+    ) -> Result<Self, String> {
+        let source_db = source_db_path(source_dir);
+        let source_db_str = source_db
+            .to_str()
+            .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
+        let conn = Connection::open(source_db_str).map_err(|e| format!("数据库连接错误:{e}"))?;
+
+        let mut sql_to_colsname = conn
+            .prepare("DESCRIBE stock_data")
+            .map_err(|e| format!("预编译SQL失败:{e}"))?;
+        let mut all_cols = sql_to_colsname
+            .query([])
+            .map_err(|e| format!("执行查询失败:{e}"))?;
+
+        let mut all_cols_name: Vec<String> = Vec::with_capacity(128);
+        while let Some(col) = all_cols.next().map_err(|e| format!("读取表名失败:{e}"))? {
+            let name: String = col.get(0).map_err(|e| format!("读取列名失败:{e}"))?;
+            all_cols_name.push(name);
+        }
+
+        let mut db_cols_table: Vec<(String, String)> = Vec::new();
+        if required_runtime_keys.is_none() {
+            for field in STOCK_DATA_RUNTIME_FIELDS
+                .iter()
+                .filter(|field| field.required_in_database)
+            {
+                if !all_cols_name
+                    .iter()
+                    .any(|column| column.eq_ignore_ascii_case(field.db_column))
+                {
+                    return Err(format!("数据库缺少基础列:{}", field.db_column));
+                }
+            }
+        }
+
+        for col in &all_cols_name {
+            let Some(runtime_key) = stock_data_runtime_key(col) else {
+                continue;
+            };
+            if is_runtime_index_pct_key(&runtime_key) {
+                continue;
+            }
+            if required_runtime_keys
+                .map(|keys| !runtime_key_required(keys, &runtime_key))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            db_cols_table.push((col.clone(), runtime_key));
+        }
+
+        let runtime_index_pct_cols = resolve_runtime_index_pct_cols(required_runtime_keys);
+        if let Some(required_runtime_keys) = required_runtime_keys {
+            let mut selected_runtime_keys = db_cols_table
+                .iter()
+                .map(|(_, runtime_key)| runtime_key.clone())
+                .collect::<HashSet<_>>();
+            for index_col in &runtime_index_pct_cols {
+                selected_runtime_keys.insert(index_col.runtime_key.to_string());
+            }
+            let mut missing_runtime_keys = required_runtime_keys
+                .iter()
+                .filter(|runtime_key| !runtime_key_required(&selected_runtime_keys, runtime_key))
+                .cloned()
+                .collect::<Vec<_>>();
+            missing_runtime_keys.sort();
+
+            if !missing_runtime_keys.is_empty() {
+                return Err(format!(
+                    "数据库缺少表达式所需列: {}",
+                    missing_runtime_keys.join(", ")
+                ));
+            }
+        }
+
+        let mut select_cols = vec!["trade_date".to_string()];
+        for (db_col, _) in &db_cols_table {
+            select_cols.push(format!(
+                "TRY_CAST(\"{}\" AS DOUBLE) AS \"{}\"",
+                db_col, db_col
+            ));
+        }
+
+        let query_sql = format!(
+            r#"
+                SELECT
+                    {}
+                FROM stock_data
+                WHERE ts_code = ?
+                  AND adj_type = ?
+                  AND trade_date >= ?
+                  AND trade_date <= ?
+                ORDER BY trade_date ASC
+            "#,
+            select_cols.join(",\n")
+        );
+
+        let query_tail_rows_sql = format!(
+            r#"
+                SELECT
+                    {}
+                FROM stock_data
+                WHERE ts_code = ?
+                  AND adj_type = ?
+                  AND trade_date <= ?
+                ORDER BY trade_date DESC
+                LIMIT ?
+            "#,
+            select_cols.join(",\n")
+        );
+
+        Ok(Self {
+            conn,
+            query_sql,
+            query_tail_rows_sql,
+            cols_table: db_cols_table,
+            runtime_index_pct_cols,
+        })
+    }
+
+    pub fn load_one(
+        &self,
+        ts_code: &str,
+        adj_type: &str,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<RowData, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(&self.query_sql)
+            .map_err(|e| format!("预编译SQL失败:{e}"))?;
+        let mut rows = stmt
+            .query(params![ts_code, adj_type, start_date, end_date])
+            .map_err(|e| format!("执行查询失败:{e}"))?;
+
+        let mut trade_dates = Vec::new();
+        let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
+        for (_, key) in &self.cols_table {
+            cols.entry(key.clone()).or_default();
+        }
+
+        while let Some(row) = rows.next().map_err(|e| format!("读取数据行失败:{e}"))? {
+            let trade_date: String = row.get(0).map_err(|e| format!("读取trade_date失败:{e}"))?;
+            trade_dates.push(trade_date);
+
+            for (i, (_, key)) in self.cols_table.iter().enumerate() {
+                let value: Option<f64> =
+                    row.get(i + 1).map_err(|e| format!("读取{}失败:{e}", key))?;
+                if let Some(series) = cols.get_mut(key) {
+                    series.push(value);
+                }
+            }
+        }
+
+        let mut out = RowData { trade_dates, cols };
+        self.inject_runtime_index_pct(&mut out)?;
+        out.validate()?;
+        Ok(out)
+    }
+
+    pub fn load_one_tail_rows(
+        &self,
+        ts_code: &str,
+        adj_type: &str,
+        end_date: &str,
+        need_rows: usize,
+    ) -> Result<RowData, String> {
+        if need_rows == 0 {
+            return Err("need_rows不能为0".to_string());
+        }
+
+        let mut stmt = self
+            .conn
+            .prepare_cached(&self.query_tail_rows_sql)
+            .map_err(|e| format!("预编译SQL失败:{e}"))?;
+        let mut rows = stmt
+            .query(params![ts_code, adj_type, end_date, need_rows as i64])
+            .map_err(|e| format!("执行查询失败:{e}"))?;
+
+        let mut trade_dates = Vec::new();
+        let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
+        for (_, key) in &self.cols_table {
+            cols.entry(key.clone()).or_default();
+        }
+
+        while let Some(row) = rows.next().map_err(|e| format!("读取数据行失败:{e}"))? {
+            let trade_date: String = row.get(0).map_err(|e| format!("读取trade_date失败:{e}"))?;
+            trade_dates.push(trade_date);
+
+            for (i, (_, key)) in self.cols_table.iter().enumerate() {
+                let value: Option<f64> =
+                    row.get(i + 1).map_err(|e| format!("读取{}失败:{e}", key))?;
+                if let Some(series) = cols.get_mut(key) {
+                    series.push(value);
+                }
+            }
+        }
+
+        trade_dates.reverse();
+        for series in cols.values_mut() {
+            series.reverse();
+        }
+
+        let mut out = RowData { trade_dates, cols };
+        self.inject_runtime_index_pct(&mut out)?;
+        out.validate()?;
+        Ok(out)
+    }
+
+    pub fn load_batch(
+        &self,
+        ts_codes: &[String],
+        adj_type: &str,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<HashMap<String, RowData>, String> {
+        if ts_codes.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut select_cols = vec!["ts_code".to_string(), "trade_date".to_string()];
+        for (db_col, _) in &self.cols_table {
+            select_cols.push(format!(
+                "TRY_CAST(\"{}\" AS DOUBLE) AS \"{}\"",
+                db_col, db_col
+            ));
+        }
+
+        let escaped: Vec<String> = ts_codes
+            .iter()
+            .map(|c| format!("'{}'", c.replace('\'', "''")))
+            .collect();
+
+        let sql = format!(
+            r#"
+            SELECT
+                {}
+            FROM stock_data
+            WHERE ts_code IN ({})
+              AND adj_type = ?
+              AND trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY ts_code, trade_date ASC
+            "#,
+            select_cols.join(",\n"),
+            escaped.join(", ")
+        );
+
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| format!("预编译批量查询SQL失败:{e}"))?;
+        let mut rows = stmt
+            .query(params![adj_type, start_date, end_date])
+            .map_err(|e| format!("执行批量查询失败:{e}"))?;
+
+        let mut result: HashMap<String, RowData> = HashMap::new();
+        while let Some(row) = rows.next().map_err(|e| format!("读取批量数据行失败:{e}"))? {
+            let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
+            let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
+
+            let entry = result.entry(ts_code).or_insert_with(|| {
+                let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
+                for (_, key) in &self.cols_table {
+                    cols.insert(key.clone(), Vec::new());
+                }
+                RowData {
+                    trade_dates: Vec::new(),
+                    cols,
+                }
+            });
+
+            entry.trade_dates.push(trade_date);
+
+            for (i, (_, key)) in self.cols_table.iter().enumerate() {
+                let value: Option<f64> =
+                    row.get(i + 2).map_err(|e| format!("读取{}失败:{e}", key))?;
+                if let Some(series) = entry.cols.get_mut(key) {
+                    series.push(value);
+                }
+            }
+        }
+
+        result.retain(|_, row_data| !row_data.trade_dates.is_empty());
+        if !result.is_empty() && !self.runtime_index_pct_cols.is_empty() {
+            let index_pct_by_key = self.load_runtime_index_pct_values(start_date, end_date)?;
+            for row_data in result.values_mut() {
+                self.inject_runtime_index_pct_series(row_data, &index_pct_by_key);
+                row_data.validate()?;
+            }
+        }
+
+        Ok(result)
+    }
+
+    pub fn list_ts_code(
+        &self,
+        adj_type: &str,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<Vec<String>, String> {
+        let sql = r#"
+            SELECT DISTINCT ts_code
+            FROM stock_data
+            WHERE adj_type = ?
+              AND trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY ts_code ASC
+        "#;
+
+        let mut list = Vec::with_capacity(512);
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| format!("sql预编译失败:{e}"))?;
+        let mut rows = stmt
+            .query(params![adj_type, start_date, end_date])
+            .map_err(|e| format!("数据库查询失败:{e}"))?;
+
+        while let Some(row) = rows.next().map_err(|e| format!("{e}"))? {
+            let ts_code: String = row.get(0).map_err(|e| format!("{e}"))?;
+            list.push(ts_code);
+        }
+
+        Ok(list)
+    }
+
+    fn inject_runtime_index_pct(&self, row_data: &mut RowData) -> Result<(), String> {
+        if self.runtime_index_pct_cols.is_empty() || row_data.trade_dates.is_empty() {
+            return Ok(());
+        }
+
+        let start_date = row_data
+            .trade_dates
+            .first()
+            .map(String::as_str)
+            .ok_or_else(|| "trade_dates为空".to_string())?;
+        let end_date = row_data
+            .trade_dates
+            .last()
+            .map(String::as_str)
+            .ok_or_else(|| "trade_dates为空".to_string())?;
+        let index_pct_by_key = self.load_runtime_index_pct_values(start_date, end_date)?;
+        self.inject_runtime_index_pct_series(row_data, &index_pct_by_key);
+        Ok(())
+    }
+
+    fn load_runtime_index_pct_values(
+        &self,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<HashMap<String, HashMap<String, Option<f64>>>, String> {
+        if self.runtime_index_pct_cols.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let escaped_ts_codes = self
+            .runtime_index_pct_cols
+            .iter()
+            .map(|item| format!("'{}'", item.ts_code.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            r#"
+                SELECT
+                    ts_code,
+                    trade_date,
+                    TRY_CAST(pct_chg AS DOUBLE)
+                FROM stock_data
+                WHERE ts_code IN ({escaped_ts_codes})
+                  AND adj_type = ?
+                  AND trade_date >= ?
+                  AND trade_date <= ?
+                ORDER BY ts_code ASC, trade_date ASC
+                "#
+        );
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| format!("预编译指数涨幅运行时列SQL失败:{e}"))?;
+        let mut rows = stmt
+            .query(params![RUNTIME_INDEX_ADJ_TYPE, start_date, end_date])
+            .map_err(|e| format!("查询指数涨幅运行时列失败:{e}"))?;
+
+        let ts_code_to_key = self
+            .runtime_index_pct_cols
+            .iter()
+            .map(|item| (item.ts_code, item.runtime_key))
+            .collect::<HashMap<_, _>>();
+        let mut out = self
+            .runtime_index_pct_cols
+            .iter()
+            .map(|item| (item.runtime_key.to_string(), HashMap::new()))
+            .collect::<HashMap<_, _>>();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取指数涨幅运行时列失败:{e}"))?
+        {
+            let ts_code: String = row.get(0).map_err(|e| format!("读取指数ts_code失败:{e}"))?;
+            let trade_date: String = row
+                .get(1)
+                .map_err(|e| format!("读取指数trade_date失败:{e}"))?;
+            let pct_chg: Option<f64> = row.get(2).map_err(|e| format!("读取指数涨幅失败:{e}"))?;
+            let Some(runtime_key) = ts_code_to_key.get(ts_code.as_str()) else {
+                continue;
+            };
+            if let Some(values_by_date) = out.get_mut(*runtime_key) {
+                values_by_date.insert(trade_date, pct_chg);
+            }
+        }
+
+        Ok(out)
+    }
+
+    fn inject_runtime_index_pct_series(
+        &self,
+        row_data: &mut RowData,
+        index_pct_by_key: &HashMap<String, HashMap<String, Option<f64>>>,
+    ) {
+        for index_col in &self.runtime_index_pct_cols {
+            let values_by_date = index_pct_by_key.get(index_col.runtime_key);
+            let mut series = Vec::with_capacity(row_data.trade_dates.len());
+            for trade_date in &row_data.trade_dates {
+                series.push(
+                    values_by_date
+                        .and_then(|values| values.get(trade_date.as_str()))
+                        .copied()
+                        .flatten(),
+                );
+            }
+            row_data
+                .cols
+                .insert(index_col.runtime_key.to_string(), series);
+        }
+    }
+}
+
+fn runtime_key_required(required_runtime_keys: &HashSet<String>, runtime_key: &str) -> bool {
+    required_runtime_keys.contains(runtime_key)
+}
+
+fn stock_data_runtime_key(db_column: &str) -> Option<String> {
+    if STOCK_DATA_KEY_COLUMN_DEFS
+        .iter()
+        .any(|(column, _)| db_column.eq_ignore_ascii_case(column))
+    {
+        return None;
+    }
+
+    if let Some(field) = STOCK_DATA_RUNTIME_FIELDS
+        .iter()
+        .find(|field| db_column.eq_ignore_ascii_case(field.db_column))
+    {
+        return Some(field.runtime_key.to_string());
+    }
+
+    Some(db_column.to_ascii_uppercase())
+}
+
+fn is_runtime_index_pct_key(runtime_key: &str) -> bool {
+    RUNTIME_INDEX_PCT_COLS
+        .iter()
+        .any(|item| item.runtime_key == runtime_key)
+}
+
+fn resolve_runtime_index_pct_cols(
+    required_runtime_keys: Option<&HashSet<String>>,
+) -> Vec<RuntimeIndexPctCol> {
+    let Some(required_runtime_keys) = required_runtime_keys else {
+        return Vec::new();
+    };
+
+    RUNTIME_INDEX_PCT_COLS
+        .iter()
+        .copied()
+        .filter(|item| required_runtime_keys.contains(item.runtime_key))
+        .collect()
+}
+
+// ============================================ 策略部分 ================================================
+
+// 设计的时候字段要完全适配文本,用Deserialize映射key
+impl<'de> Deserialize<'de> for ScopeWay {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let s = raw.trim().to_ascii_uppercase();
+
+        match s.as_str() {
+            "ANY" => Ok(ScopeWay::Any),
+            "LAST" => Ok(ScopeWay::Last),
+            "EACH" => Ok(ScopeWay::Each),
+            "RECENT" => Ok(ScopeWay::Recent),
+            _ => {
+                if let Some(num) = s.strip_prefix("CONSEC>=") {
+                    let k = num
+                        .parse::<usize>()
+                        .map_err(|_| de::Error::custom("CONSEC>= 后必须是正整数"))?;
+                    if k == 0 {
+                        return Err(de::Error::custom("CONSEC>=0 无效，必须 >= 1"));
+                    }
+                    Ok(ScopeWay::Consec(k))
+                } else {
+                    Err(de::Error::custom(
+                        "scope_way 仅支持 ANY/LAST/EACH/RECENT/CONSEC>=N",
+                    ))
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScoreConfig {
+    pub version: u32,
+    pub scene: Vec<ScoreScene>,
+    pub rule: Vec<ScoreRule>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ScopeWay {
+    Any,
+    Last,
+    Each,
+    Recent,
+    Consec(usize),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub enum RuleTag {
+    #[default]
+    Normal,
+    Opportunity,
+    Rare,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DistPoint {
+    pub min: usize,
+    pub max: usize,
+    pub points: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SceneDirection {
+    #[default]
+    Long,
+    Short,
+}
+
+impl SceneDirection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Long => "long",
+            Self::Short => "short",
+        }
+    }
+
+    pub fn sign(self) -> f64 {
+        match self {
+            Self::Long => 1.0,
+            Self::Short => -1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScoreScene {
+    pub name: String,
+    pub direction: SceneDirection,
+    pub observe_threshold: f64,
+    pub trigger_threshold: f64,
+    pub confirm_threshold: f64,
+    pub fail_threshold: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleStage {
+    #[default]
+    Base,
+    Trigger,
+    Confirm,
+    Risk,
+    Fail,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleKind {
+    #[default]
+    Single,
+    Combination,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScoreRuleCondition {
+    pub name: String,
+    pub when: String,
+    #[serde(default)]
+    pub bonus_points: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScoreRuleBonus {
+    pub name: String,
+    pub when: String,
+    pub points: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScoreRule {
+    pub name: String,
+    #[serde(rename = "scene")]
+    pub scene_name: String,
+    #[serde(default)]
+    pub kind: RuleKind,
+    pub stage: RuleStage,
+    pub scope_windows: usize,
+    pub scope_way: ScopeWay,
+    #[serde(default)]
+    pub when: String,
+    #[serde(default)]
+    pub points: f64,
+    pub dist_points: Option<Vec<DistPoint>>,
+    #[serde(default, rename = "condition")]
+    pub conditions: Vec<ScoreRuleCondition>,
+    #[serde(default, rename = "bonus")]
+    pub unbound_bonuses: Vec<ScoreRuleBonus>,
+    pub points_by_hits: Option<Vec<f64>>,
+    pub max_points: Option<f64>,
+    pub max_bonus_points: Option<f64>,
+    pub explain: String,
+    #[serde(default, skip_deserializing)]
+    pub tag: RuleTag,
+}
+
+impl ScoreConfig {
+    pub fn load(source_dir: &str) -> Result<ScoreConfig, String> {
+        Self::load_with_strategy_path(source_dir, None)
+    }
+
+    pub fn load_with_strategy_path(
+        source_dir: &str,
+        strategy_path: Option<&str>,
+    ) -> Result<ScoreConfig, String> {
+        let rule_path = resolve_strategy_path(source_dir, strategy_path);
+        let rule_toml = fs::read_to_string(&rule_path).map_err(|e| {
+            format!(
+                "规则文件不存在或不可读: path={}, err={e}",
+                rule_path.display()
+            )
+        })?;
+        let cfg: ScoreConfig =
+            toml::from_str(&rule_toml).map_err(|e| format!("规则文件格式错误: {e}"))?;
+        Self::validate(&cfg)?;
+        Ok(cfg)
+    }
+
+    fn validate(cfg: &ScoreConfig) -> Result<(), String> {
+        let mut scene_name_set = HashSet::new();
+        for (i, scene) in cfg.scene.iter().enumerate() {
+            let n = i + 1;
+            if scene.name.trim().is_empty() {
+                return Err(format!("第{n}个scene的name字段为空"));
+            }
+            if !scene.observe_threshold.is_finite() {
+                return Err(format!("第{n}个scene的observe_threshold非法"));
+            }
+            if scene.observe_threshold <= 0.0 {
+                return Err(format!("第{n}个scene的observe_threshold必须>0"));
+            }
+            if !scene.trigger_threshold.is_finite() {
+                return Err(format!("第{n}个scene的trigger_threshold非法"));
+            }
+            if scene.trigger_threshold <= 0.0 {
+                return Err(format!("第{n}个scene的trigger_threshold必须>0"));
+            }
+            if !scene.confirm_threshold.is_finite() {
+                return Err(format!("第{n}个scene的confirm_threshold非法"));
+            }
+            if scene.confirm_threshold <= 0.0 {
+                return Err(format!("第{n}个scene的confirm_threshold必须>0"));
+            }
+            if !scene.fail_threshold.is_finite() {
+                return Err(format!("第{n}个scene的fail_threshold非法"));
+            }
+            if scene.fail_threshold <= 0.0 {
+                return Err(format!("第{n}个scene的fail_threshold必须>0"));
+            }
+            if !scene_name_set.insert(scene.name.trim().to_string()) {
+                return Err(format!("scene名称重复: {}", scene.name));
+            }
+        }
+
+        let rules = &cfg.rule;
+        let mut rule_name_set = HashSet::new();
+        for (i, r) in rules.iter().enumerate() {
+            let n = i + 1;
+            if r.name.trim().is_empty() {
+                return Err(format!("第{:?}个表达式name字段为空", n));
+            };
+            if !rule_name_set.insert(r.name.trim().to_string()) {
+                return Err(format!("规则名称重复: {}", r.name));
+            }
+            if r.scene_name.trim().is_empty() {
+                return Err(format!("第{n}条规则 scene 字段为空"));
+            }
+            if !scene_name_set.contains(r.scene_name.trim()) {
+                return Err(format!("第{n}条规则引用的scene不存在: {}", r.scene_name));
+            }
+            if r.explain.trim().is_empty() {
+                return Err(format!("第{n}条规则 explain 字段为空"));
+            }
+            if r.scope_windows == 0 {
+                return Err(format!("第{:?}个表达式scope_windows字段错误", n));
+            };
+
+            match r.kind {
+                RuleKind::Single => validate_single_score_rule(r, n)?,
+                RuleKind::Combination => validate_combination_score_rule(r, n)?,
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_single_score_rule(rule: &ScoreRule, rule_index: usize) -> Result<(), String> {
+    if rule.when.trim().is_empty() {
+        return Err(format!("第{rule_index}个表达式when字段为空"));
+    }
+    let _ =
+        parse_and_validate_score_rule_expression(rule.when.trim(), rule_index, rule.name.trim())?;
+    if !rule.points.is_finite() {
+        return Err(format!("第{rule_index}条规则 points 非法"));
+    }
+    if !rule.conditions.is_empty()
+        || !rule.unbound_bonuses.is_empty()
+        || rule.points_by_hits.is_some()
+        || rule.max_bonus_points.is_some()
+    {
+        return Err(format!(
+            "第{rule_index}条普通规则不能配置 condition、bonus、points_by_hits 或额外加分上限"
+        ));
+    }
+    if rule.max_points.is_some() && !matches!(rule.scope_way, ScopeWay::Each) {
+        return Err(format!(
+            "第{rule_index}条普通规则仅 scope_way=EACH 时支持 max_points"
+        ));
+    }
+    validate_positive_score_cap(rule.max_points, rule_index, "max_points")?;
+
+    if let Some(dist) = &rule.dist_points {
+        if !dist.is_empty() && !scope_way_supports_dist_points(rule.scope_way) {
+            return Err(format!(
+                "第{rule_index}条规则 scope_way 不支持 dist_points，仅 EACH/RECENT 支持区间字典分"
+            ));
+        }
+        for (index, item) in dist.iter().enumerate() {
+            if item.min > item.max {
+                return Err(format!(
+                    "第{rule_index}条规则 dist_points 第{}段 min > max",
+                    index + 1
+                ));
+            }
+            if !item.points.is_finite() {
+                return Err(format!(
+                    "第{rule_index}条规则 dist_points 第{}段 points 非法",
+                    index + 1
+                ));
+            }
+        }
+        let mut sorted: Vec<&DistPoint> = dist.iter().collect();
+        sorted.sort_by_key(|item| item.min);
+        for pair in sorted.windows(2) {
+            let previous = pair[0];
+            let current = pair[1];
+            if previous.max >= current.min {
+                return Err(format!(
+                    "区间重叠: [{}-{}] 和 [{}-{}]",
+                    previous.min, previous.max, current.min, current.max
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_combination_score_rule(rule: &ScoreRule, rule_index: usize) -> Result<(), String> {
+    if !rule.when.trim().is_empty() || rule.points != 0.0 || rule.dist_points.is_some() {
+        return Err(format!(
+            "第{rule_index}条组合规则不能配置 when、points 或 dist_points"
+        ));
+    }
+    if rule.conditions.is_empty() {
+        return Err(format!("第{rule_index}条组合规则至少需要一个 condition"));
+    }
+    if matches!(rule.scope_way, ScopeWay::Recent) {
+        return Err(format!("第{rule_index}条组合规则不支持 RECENT scope_way"));
+    }
+    if !rule.unbound_bonuses.is_empty() {
+        return Err(format!(
+            "第{rule_index}条组合规则存在旧版独立 bonus，请改为 condition.bonus_points"
+        ));
+    }
+
+    let Some(points_by_hits) = rule.points_by_hits.as_deref() else {
+        return Err(format!("第{rule_index}条组合规则 points_by_hits 字段为空"));
+    };
+    let expected_len = rule.conditions.len() + 1;
+    if points_by_hits.len() != expected_len {
+        return Err(format!(
+            "第{rule_index}条组合规则 points_by_hits 长度应为 {expected_len}（condition 数量 + 1），实际为 {}",
+            points_by_hits.len()
+        ));
+    }
+    if points_by_hits.first().copied() != Some(0.0) {
+        return Err(format!(
+            "第{rule_index}条组合规则 points_by_hits[0] 必须为 0"
+        ));
+    }
+    if points_by_hits.iter().any(|points| !points.is_finite()) {
+        return Err(format!(
+            "第{rule_index}条组合规则 points_by_hits 包含非法分数"
+        ));
+    }
+    if points_by_hits.iter().all(|points| *points == 0.0) {
+        return Err(format!(
+            "第{rule_index}条组合规则 points_by_hits 不能全部为 0"
+        ));
+    }
+
+    let mut expression_names = HashSet::new();
+    for (index, condition) in rule.conditions.iter().enumerate() {
+        let name = condition.name.trim();
+        if name.is_empty() {
+            return Err(format!(
+                "第{rule_index}条组合规则第{}个 condition 的 name 为空",
+                index + 1
+            ));
+        }
+        if !expression_names.insert(name.to_string()) {
+            return Err(format!(
+                "第{rule_index}条组合规则条件/加分项名称重复: {name}"
+            ));
+        }
+        if condition.when.trim().is_empty() {
+            return Err(format!(
+                "第{rule_index}条组合规则 condition({name}) 的 when 为空"
+            ));
+        }
+        let expression_name = format!("{} / 条件 {name}", rule.name.trim());
+        let _ = parse_and_validate_score_rule_expression(
+            condition.when.trim(),
+            rule_index,
+            &expression_name,
+        )?;
+        if !condition.bonus_points.is_finite() {
+            return Err(format!(
+                "第{rule_index}条组合规则 condition({name}) 的 bonus_points 非法"
+            ));
+        }
+    }
+
+    validate_positive_score_cap(rule.max_points, rule_index, "max_points")?;
+    validate_positive_score_cap(rule.max_bonus_points, rule_index, "max_bonus_points")?;
+    Ok(())
+}
+
+fn validate_positive_score_cap(
+    cap: Option<f64>,
+    rule_index: usize,
+    field: &str,
+) -> Result<(), String> {
+    if let Some(cap) = cap
+        && (!cap.is_finite() || cap <= 0.0)
+    {
+        return Err(format!("第{rule_index}条规则 {field} 必须为有限正数"));
+    }
+    Ok(())
+}
+
+fn parse_and_validate_score_rule_expression(
+    expression: &str,
+    rule_index: usize,
+    rule_name: &str,
+) -> Result<Stmts, String> {
+    let stmts = parse_expression_program(expression).map_err(|error| {
+        format!(
+            "第{rule_index}条规则({rule_name})表达式解析错误在{}:{}",
+            error.idx, error.msg
+        )
+    })?;
+    validate_expression_functions(&stmts)
+        .map_err(|error| format!("第{rule_index}条规则({rule_name}){error}"))?;
+    Ok(stmts)
+}
+
+fn scope_way_supports_dist_points(scope_way: ScopeWay) -> bool {
+    matches!(scope_way, ScopeWay::Each | ScopeWay::Recent)
+}
+
+impl ScoreScene {
+    pub fn load_scenes(source_dir: &str) -> Result<Vec<ScoreScene>, String> {
+        Ok(ScoreConfig::load(source_dir)?.scene)
+    }
+
+    pub fn load_scenes_with_strategy_path(
+        source_dir: &str,
+        strategy_path: Option<&str>,
+    ) -> Result<Vec<ScoreScene>, String> {
+        Ok(ScoreConfig::load_with_strategy_path(source_dir, strategy_path)?.scene)
+    }
+}
+
+impl ScoreRule {
+    pub fn load_rules(source_dir: &str) -> Result<Vec<ScoreRule>, String> {
+        Ok(ScoreConfig::load(source_dir)?.rule)
+    }
+
+    pub fn load_rules_with_strategy_path(
+        source_dir: &str,
+        strategy_path: Option<&str>,
+    ) -> Result<Vec<ScoreRule>, String> {
+        Ok(ScoreConfig::load_with_strategy_path(source_dir, strategy_path)?.rule)
+    }
+
+    pub fn representative_points(&self) -> f64 {
+        if self.kind == RuleKind::Single {
+            let points = self
+                .dist_points
+                .as_ref()
+                .filter(|items| !items.is_empty())
+                .and_then(|items| {
+                    items.iter().max_by(|left, right| {
+                        left.points
+                            .abs()
+                            .partial_cmp(&right.points.abs())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                })
+                .map(|item| item.points)
+                .unwrap_or(self.points);
+            return match self.max_points {
+                Some(cap) => points.clamp(-cap, cap),
+                None => points,
+            };
+        }
+
+        let bonus_min = self
+            .conditions
+            .iter()
+            .map(|condition| condition.bonus_points.min(0.0))
+            .sum::<f64>();
+        let bonus_max = self
+            .conditions
+            .iter()
+            .map(|condition| condition.bonus_points.max(0.0))
+            .sum::<f64>();
+        let clamp_bonus = |value: f64| match self.max_bonus_points {
+            Some(cap) => value.clamp(-cap, cap),
+            None => value,
+        };
+        let clamp_total = |value: f64| match self.max_points {
+            Some(cap) => value.clamp(-cap, cap),
+            None => value,
+        };
+        self.points_by_hits
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|base| **base != 0.0)
+            .flat_map(|base| {
+                [
+                    clamp_total(*base),
+                    clamp_total(*base + clamp_bonus(bonus_min)),
+                    clamp_total(*base + clamp_bonus(bonus_max)),
+                ]
+            })
+            .max_by(|left, right| {
+                left.abs()
+                    .partial_cmp(&right.abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(0.0)
+    }
+}
+
+// ============================================ 指标部分 ================================================
+
+#[derive(Deserialize)]
+pub struct IndsData {
+    pub version: u32,
+    pub ind: Vec<IndData>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct IndData {
+    pub name: String,
+    pub expr: String,
+    pub prec: usize,
+}
+
+impl IndsData {
+    pub fn parse_from_text(ind_toml: &str) -> Result<Vec<IndData>, String> {
+        let mut cfg: IndsData =
+            toml::from_str(ind_toml).map_err(|e| format!("指标文件格式错误: {e}"))?;
+
+        for ind in &mut cfg.ind {
+            ind.name = ind.name.trim().to_ascii_uppercase();
+        }
+
+        Self::validate_inds(&cfg.ind)?;
+        Ok(cfg.ind)
+    }
+
+    pub fn load_inds(source_dir: &str) -> Result<Vec<IndData>, String> {
+        let ind_path = ind_toml_path(source_dir);
+        let ind_toml = fs::read_to_string(&ind_path).map_err(|e| {
+            format!(
+                "指标文件不存在或不可读: path={}, err={e}",
+                ind_path.display()
+            )
+        })?;
+        Self::parse_from_text(&ind_toml)
+    }
+
+    fn validate_inds(inds: &[IndData]) -> Result<(), String> {
+        let mut seen = HashSet::new();
+
+        for (i, ind) in inds.iter().enumerate() {
+            let n = i + 1;
+            let name = ind.name.trim();
+
+            if name.is_empty() {
+                return Err(format!("第{n}个指标的输出名称为空"));
+            } else {
+                let mut chars = name.chars();
+
+                let Some(first) = chars.next() else {
+                    return Err(format!(
+                        "第{n}个指标名称非法: {name}，只允许 ASCII 字母/数字/_，且不能以数字开头"
+                    ));
+                };
+
+                if !(first.is_ascii_alphabetic() || first == '_') {
+                    return Err(format!("第{n}个指标名称非法: {name}，不能以数字开头"));
+                }
+
+                if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+                    return Err(format!(
+                        "第{n}个指标名称非法: {name}，只允许 ASCII 字母/数字/_"
+                    ));
+                }
+            }
+
+            if !seen.insert(name.to_string()) {
+                return Err(format!("第{n}个指标名称重复: {name}"));
+            }
+
+            if ind.expr.trim().is_empty() {
+                return Err(format!("第{n}个指标的表达式为空"));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::fs::{create_dir_all, remove_dir_all};
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{
+        DataReader, RuleTag, ScopeWay, ScoreConfig, collect_assigned_names_from_expr_program,
+    };
+    use duckdb::{Connection, params};
+
+    fn parse_score_config(text: &str) -> ScoreConfig {
+        toml::from_str(text).expect("score config should parse")
+    }
+
+    fn temp_dir_path(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("lianghua-rs-{prefix}-{nanos}"))
+    }
+
+    #[test]
+    fn score_rule_tag_field_is_ignored_when_parsing_strategy_file() {
+        let cfg = parse_score_config(
+            r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "启动测试"
+scene = "趋势启动"
+stage = "base"
+scope_windows = 1
+scope_way = "LAST"
+when = "C > O"
+points = 2.0
+tag = "rare"
+explain = "test"
+"#,
+        );
+
+        assert_eq!(cfg.rule.len(), 1);
+        assert_eq!(cfg.rule[0].tag, RuleTag::Normal);
+    }
+
+    #[test]
+    fn score_config_validate_rejects_bad_rule_expression() {
+        let cfg = parse_score_config(
+            r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "坏表达式"
+scene = "趋势启动"
+stage = "base"
+scope_windows = 1
+scope_way = "LAST"
+when = "MA(C,"
+points = 2.0
+explain = "test"
+"#,
+        );
+
+        let error = ScoreConfig::validate(&cfg).expect_err("bad expression should fail");
+        assert!(error.contains("第1条规则(坏表达式)表达式解析错误"));
+    }
+
+    #[test]
+    fn score_config_validate_rejects_unknown_rule_function() {
+        let cfg = parse_score_config(
+            r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "未知函数"
+scene = "趋势启动"
+stage = "base"
+scope_windows = 1
+scope_way = "LAST"
+when = "NOT_A_FUNCTION(C) > 0"
+points = 2.0
+explain = "test"
+"#,
+        );
+
+        let error = ScoreConfig::validate(&cfg).expect_err("unknown function should fail");
+        assert!(error.contains("第1条规则(未知函数)表达式引用未知函数"));
+    }
+
+    #[test]
+    fn score_config_allows_max_points_only_for_single_each_rule() {
+        let mut cfg = parse_score_config(
+            r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "窗口累计"
+scene = "趋势启动"
+stage = "base"
+scope_windows = 3
+scope_way = "EACH"
+when = "C > O"
+points = 2.0
+max_points = 3.0
+explain = "test"
+"#,
+        );
+
+        ScoreConfig::validate(&cfg).expect("single EACH max_points should validate");
+        assert_eq!(cfg.rule[0].representative_points(), 2.0);
+
+        cfg.rule[0].scope_way = ScopeWay::Last;
+        let error = ScoreConfig::validate(&cfg).expect_err("single LAST max_points must fail");
+        assert!(error.contains("仅 scope_way=EACH"));
+
+        cfg.rule[0].scope_way = ScopeWay::Each;
+        cfg.rule[0].max_points = Some(0.0);
+        let error = ScoreConfig::validate(&cfg).expect_err("zero max_points must fail");
+        assert!(error.contains("max_points 必须为有限正数"));
+    }
+
+    #[test]
+    fn score_config_accepts_combination_rule() {
+        let mut cfg = parse_score_config(
+            r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "量价组合"
+scene = "趋势启动"
+kind = "combination"
+stage = "trigger"
+scope_windows = 3
+scope_way = "ANY"
+points_by_hits = [0.0, 1.0, 3.0]
+max_points = 5.0
+max_bonus_points = 2.0
+explain = "组合命中计分"
+
+[[rule.condition]]
+name = "收红"
+when = "C > O"
+
+[[rule.condition]]
+name = "放量"
+when = "V > REF(V, 1)"
+bonus_points = 1.0
+"#,
+        );
+
+        ScoreConfig::validate(&cfg).expect("combination rule should validate");
+        assert_eq!(cfg.rule[0].conditions.len(), 2);
+        assert_eq!(cfg.rule[0].conditions[0].bonus_points, 0.0);
+        assert_eq!(cfg.rule[0].conditions[1].bonus_points, 1.0);
+        assert_eq!(cfg.rule[0].representative_points(), 4.0);
+
+        cfg.rule[0].scope_way = ScopeWay::Recent;
+        let error = ScoreConfig::validate(&cfg).expect_err("combination RECENT must be rejected");
+        assert!(error.contains("不支持 RECENT"));
+    }
+
+    #[test]
+    fn score_config_rejects_invalid_combination_points_table() {
+        let cfg = parse_score_config(
+            r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "量价组合"
+scene = "趋势启动"
+kind = "combination"
+stage = "trigger"
+scope_windows = 1
+scope_way = "LAST"
+points_by_hits = [1.0, 3.0]
+explain = "组合命中计分"
+
+[[rule.condition]]
+name = "收红"
+when = "C > O"
+"#,
+        );
+
+        let error = ScoreConfig::validate(&cfg).expect_err("zero-hit points must be zero");
+        assert!(error.contains("points_by_hits[0] 必须为 0"));
+    }
+
+    #[test]
+    fn total_mv_yi_expression_collects_close_dependency() {
+        use super::{RuntimeKeyCollectOptions, collect_runtime_keys_from_expr_programs};
+        use crate::expr::parser::{Parser, lex_all};
+
+        let tokens = lex_all("TOTAL_MV_YI <= 300");
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_main().expect("expression should parse");
+        let keys = collect_runtime_keys_from_expr_programs(
+            &[&program],
+            RuntimeKeyCollectOptions {
+                always_keys: &[],
+                injected_keys: &["TOTAL_MV_YI"],
+                aliases: &[],
+            },
+        );
+
+        assert!(keys.contains("C"));
+        assert!(!keys.contains("TOTAL_MV"));
+        assert!(!keys.contains("TOTAL_MV_YI"));
+    }
+
+    #[test]
+    fn data_reader_injects_requested_index_pct_runtime_columns() {
+        let source_dir = temp_dir_path("runtime-index-pct");
+        create_dir_all(&source_dir).expect("create temp dir");
+        let db_path = source_dir.join("stock_data.db");
+        let conn = Connection::open(&db_path).expect("open db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE stock_data (
+                ts_code VARCHAR,
+                trade_date VARCHAR,
+                adj_type VARCHAR,
+                close DOUBLE,
+                pct_chg DOUBLE
+            )
+            "#,
+        )
+        .expect("create stock_data");
+
+        for (ts_code, trade_date, adj_type, close, pct_chg) in [
+            ("000001.SZ", "20240102", "qfq", 10.0, 1.0),
+            ("000001.SZ", "20240103", "qfq", 11.0, 2.0),
+            ("000001.SH", "20240102", "ind", 3000.0, 0.5),
+            ("000001.SH", "20240103", "ind", 3010.0, 0.7),
+            ("399300.SZ", "20240102", "ind", 3500.0, 1.5),
+            ("399300.SZ", "20240103", "ind", 3520.0, 1.7),
+            ("000852.SH", "20240103", "ind", 5000.0, -0.2),
+        ] {
+            conn.execute(
+                "INSERT INTO stock_data VALUES (?, ?, ?, ?, ?)",
+                params![ts_code, trade_date, adj_type, close, pct_chg],
+            )
+            .expect("insert row");
+        }
+
+        let required = HashSet::from([
+            "C".to_string(),
+            "I".to_string(),
+            "I300".to_string(),
+            "I1000".to_string(),
+        ]);
+        let reader = DataReader::new_with_runtime_keys(
+            source_dir.to_str().expect("utf8 source dir"),
+            &required,
+        )
+        .expect("build reader");
+        let row_data = reader
+            .load_one("000001.SZ", "qfq", "20240102", "20240103")
+            .expect("load row");
+
+        assert_eq!(row_data.cols["C"], vec![Some(10.0), Some(11.0)]);
+        assert_eq!(row_data.cols["I"], vec![Some(0.5), Some(0.7)]);
+        assert_eq!(row_data.cols["I300"], vec![Some(1.5), Some(1.7)]);
+        assert_eq!(row_data.cols["I1000"], vec![None, Some(-0.2)]);
+        assert!(!row_data.cols.contains_key("ISZ"));
+
+        let _ = remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn collect_assigned_names_deduplicates_and_sorts() {
+        use crate::expr::parser::{Parser, lex_all};
+
+        let tokens = lex_all("TMP := 1; C := REF(C, 1); TMP := 2; C > TMP");
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_main().expect("expression should parse");
+
+        assert_eq!(
+            collect_assigned_names_from_expr_program(&program),
+            vec!["C".to_string(), "TMP".to_string()]
+        );
+    }
+}
