@@ -1,0 +1,18 @@
+[package]
+name = "lianghua-download"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lianghua-core = { path = "../lianghua-core" }
+lianghua-provider = { path = "../lianghua-provider" }
+lianghua-model = { path = "../lianghua-model" }
+lianghua-data = { path = "../lianghua-data" }
+serde = { version = "1.0", features = ["derive"] }
+duckdb = { version = "1.4.4", features = ["appender-arrow"] }
+rayon = "1.11.0"
+reqwest = { version = "0.13.2", features = ["blocking", "json", "query"] }
+serde_json = "1.0.149"
+chrono = "0.4.44"
+rand = "0.9.2"
+

@@ -1,0 +1,55 @@
+//! Application use cases grouped by capability while preserving legacy module paths.
+
+mod common;
+pub use common::*;
+
+#[path = "market/all_market_monitor.rs"]
+pub mod all_market_monitor;
+#[path = "chart/indicator.rs"]
+pub mod chart_indicator;
+#[path = "chart/indicator_settings.rs"]
+pub mod chart_indicator_settings;
+#[path = "facade/concept_stock_pick.rs"]
+pub mod concept_stock_pick;
+#[path = "strategy/convolution_rank.rs"]
+pub mod convolution_rank;
+#[path = "market/cyq_chen.rs"]
+pub mod cyq_chen;
+#[path = "data/download.rs"]
+pub mod data_download;
+#[path = "data/import.rs"]
+pub mod data_import;
+#[path = "data/viewer.rs"]
+pub mod data_viewer;
+#[path = "chart/details.rs"]
+pub mod details;
+#[path = "market/dragon_tiger.rs"]
+pub mod dragon_tiger;
+#[path = "expression/capabilities.rs"]
+pub mod expression;
+#[path = "facade/expression_stock_pick.rs"]
+pub mod expression_stock_pick;
+#[path = "market/intraday_monitor.rs"]
+pub mod intraday_monitor;
+#[path = "chart/overview.rs"]
+pub mod overview;
+#[path = "chart/overview_classic.rs"]
+pub mod overview_classic;
+#[path = "strategy/ranking_compute.rs"]
+pub mod ranking_compute;
+#[path = "market/realtime.rs"]
+pub mod realtime;
+#[path = "strategy/statistics.rs"]
+pub mod statistics;
+#[path = "strategy/stock_pick.rs"]
+pub mod stock_pick;
+#[path = "strategy/stock_similarity.rs"]
+pub mod stock_similarity;
+#[path = "strategy/manage.rs"]
+pub mod strategy_manage;
+#[path = "strategy/paper_validation.rs"]
+pub mod strategy_paper_validation;
+#[path = "strategy/trigger_similarity.rs"]
+pub mod strategy_trigger_similarity;
+#[path = "market/watch_observe.rs"]
+pub mod watch_observe;

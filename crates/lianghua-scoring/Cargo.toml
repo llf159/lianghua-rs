@@ -1,0 +1,11 @@
+[package]
+name = "lianghua-scoring"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lianghua-core = { path = "../lianghua-core" }
+lianghua-data = { path = "../lianghua-data" }
+duckdb = { version = "1.4.4", features = ["appender-arrow"] }
+rayon = "1.11.0"
+
