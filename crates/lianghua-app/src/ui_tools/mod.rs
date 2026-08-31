@@ -53,4 +53,3 @@ pub mod strategy_paper_validation;
 pub mod strategy_trigger_similarity;
 #[path = "market/watch_observe.rs"]
 pub mod watch_observe;
-
