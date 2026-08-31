@@ -2412,8 +2412,10 @@ dependencies = [
  "rand 0.9.2",
  "rayon",
  "reqwest 0.13.2",
+ "rustls",
  "serde",
  "serde_json",
+ "webpki-roots",
 ]
 
 [[package]]

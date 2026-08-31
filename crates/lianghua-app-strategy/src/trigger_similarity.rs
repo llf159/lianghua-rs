@@ -1129,59 +1129,68 @@ fn weighted_rule_timing_similarity_with_minimum(
     if total_weight <= EPS {
         return (0.0 + EPS >= minimum_similarity).then_some(0.0);
     }
-    let mut weighted_sum = 0.0;
-    let mut remaining_weight = total_weight;
-    for (name, target_hits) in &target.by_rule {
-        let Some(candidate_hits) = candidate.by_rule.get(name) else {
-            continue;
+    TRIGGER_MATCH_DP.with(|scratch| {
+        let time_decay_scores = trigger_time_decay_scores();
+        let mut dp = scratch.borrow_mut();
+        let match_score = |left_hit: &RuleTriggerHit, right_hit: &RuleTriggerHit| {
+            let day_gap = left_hit.day_index.abs_diff(right_hit.day_index);
+            let time_score = time_decay_scores
+                .get(day_gap)
+                .copied()
+                .unwrap_or_else(|| (-(day_gap as f64) / TRIGGER_TIME_DECAY_DAYS).exp());
+            let denominator = left_hit.score.abs() + right_hit.score.abs();
+            let intensity_score = if denominator <= EPS {
+                1.0
+            } else {
+                (1.0 - (left_hit.score - right_hit.score).abs() / denominator).clamp(0.0, 1.0)
+            };
+            time_score * intensity_score
         };
-        let weight = rule_weight(rule_weights, name);
-        weighted_sum += (|left: &[RuleTriggerHit], right: &[RuleTriggerHit]| -> f64 {
-            if left.is_empty() || right.is_empty() {
-                return 0.0;
-            }
-            // 加权序列匹配：每个触发仍然只匹配一次，并保持时间先后关系。复杂度从
-            // O(m*n*log(m*n)) 降到 O(m*n)，且不在热循环中反复分配内存。
-            TRIGGER_MATCH_DP.with(|scratch| {
-                let time_decay_scores = trigger_time_decay_scores();
-                let mut dp = scratch.borrow_mut();
-                dp.resize(right.len() + 1, 0.0);
+        let mut weighted_sum = 0.0;
+        let mut remaining_weight = total_weight;
+        for (name, target_hits) in &target.by_rule {
+            let Some(candidate_hits) = candidate.by_rule.get(name) else {
+                continue;
+            };
+            let weight = rule_weight(rule_weights, name);
+            let timing_score = if target_hits.len() == 1 {
+                candidate_hits
+                    .iter()
+                    .map(|hit| match_score(&target_hits[0], hit))
+                    .fold(0.0, f64::max)
+                    / candidate_hits.len() as f64
+            } else if candidate_hits.len() == 1 {
+                target_hits
+                    .iter()
+                    .map(|hit| match_score(hit, &candidate_hits[0]))
+                    .fold(0.0, f64::max)
+                    / target_hits.len() as f64
+            } else {
+                // 加权序列匹配：每个触发仍然只匹配一次，并保持时间先后关系。复杂度从
+                // O(m*n*log(m*n)) 降到 O(m*n)，且不在热循环中反复分配内存。
+                dp.resize(candidate_hits.len() + 1, 0.0);
                 dp.fill(0.0);
-                for left_hit in left {
+                for left_hit in target_hits {
                     let mut diagonal = 0.0;
-                    for (right_index, right_hit) in right.iter().enumerate() {
+                    for (right_index, right_hit) in candidate_hits.iter().enumerate() {
                         let column = right_index + 1;
                         let previous_row = dp[column];
-                        let day_gap = left_hit.day_index.abs_diff(right_hit.day_index);
-                        let time_score = time_decay_scores
-                            .get(day_gap)
-                            .copied()
-                            .unwrap_or_else(|| (-(day_gap as f64) / TRIGGER_TIME_DECAY_DAYS).exp());
-                        let intensity_score =
-                            (|left: f64, right: f64| -> f64 {
-                                let denominator = left.abs() + right.abs();
-                                if denominator <= EPS {
-                                    1.0
-                                } else {
-                                    (1.0 - (left - right).abs() / denominator).clamp(0.0, 1.0)
-                                }
-                            })(left_hit.score, right_hit.score);
-                        let matched = diagonal + time_score * intensity_score;
+                        let matched = diagonal + match_score(left_hit, right_hit);
                         dp[column] = dp[column].max(dp[column - 1]).max(matched);
                         diagonal = previous_row;
                     }
                 }
-                dp[right.len()] / left.len().max(right.len()) as f64
-            })
-        })(target_hits, candidate_hits)
-            * weight;
-        remaining_weight = (remaining_weight - weight).max(0.0);
-        let upper_bound = (weighted_sum + remaining_weight) / total_weight;
-        if upper_bound + EPS < minimum_similarity {
-            return None;
+                dp[candidate_hits.len()] / target_hits.len().max(candidate_hits.len()) as f64
+            };
+            weighted_sum += timing_score * weight;
+            remaining_weight = (remaining_weight - weight).max(0.0);
+            let upper_bound = (weighted_sum + remaining_weight) / total_weight;
+            if upper_bound + EPS < minimum_similarity {
+                return None;
+            }
         }
-    }
-    Some((weighted_sum / total_weight).clamp(0.0, 1.0))
+        Some((weighted_sum / total_weight).clamp(0.0, 1.0))
+    })
 }
 
 #[cfg(test)]
@@ -2349,6 +2358,29 @@ mod tests {
                 exact_timing + 1e-6,
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn single_hit_timing_fast_paths_preserve_one_to_one_matching() {
+        let dates = (1..=5)
+            .map(|day| format!("202401{day:02}"))
+            .collect::<Vec<_>>();
+        let event = |date: &str| RuleEvent {
+            rule_name: "A".to_string(),
+            trade_date: date.to_string(),
+            score: 1.0,
+        };
+        let single = build_trigger_fingerprint(&[event("20240101")], &dates, 2);
+        let repeated =
+            build_trigger_fingerprint(&[event("20240101"), event("20240104")], &dates, 2);
+        let weights = HashMap::from([("A".to_string(), 1.0)]);
+
+        assert!(
+            (weighted_rule_timing_similarity(&single, &repeated, &weights) - 0.5).abs() < 1e-12
+        );
+        assert!(
+            (weighted_rule_timing_similarity(&repeated, &single, &weights) - 0.5).abs() < 1e-12
         );
     }
 

@@ -6,3 +6,4 @@
 - data/download/scoring/backtest 均直接依赖能力所有者，禁止重新引入聚合导出层。
 - 评分共享类型从 `lianghua-model` 导入，结果库操作从 `lianghua-data::data::scoring_store` 导入；不得借 scoring 建兼容路径。
 - 只运行 `cargo test -p lianghua-app-strategy`，不要因此触发全 workspace 测试。
+- 全市场触发近邻精排用触发次数推导的严格时序上界做剪枝，并用 101 个分数桶代替全候选排序；这是为了在保持精确 Top-K 语义的同时，线性地优先填满堆并提高后续 DP 剪枝率。

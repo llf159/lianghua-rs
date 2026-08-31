@@ -47,6 +47,11 @@ lianghua-data = { path = "crates/lianghua-data" }
 lianghua-model = { path = "crates/lianghua-model" }
 duckdb = { version = "1.4.4", features = ["appender-arrow"] }
 
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
 # Keep compute-heavy backend crates optimized during Tauri development builds.
 [profile.dev.package.lianghua-data]
 opt-level = 3

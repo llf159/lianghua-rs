@@ -178,12 +178,22 @@ struct ScoredCandidate {
     candidate_index: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CandidateRulePosting {
+    candidate_index: usize,
+    hit_count: usize,
+}
+
 #[derive(Default)]
 struct RankingTargetScratch {
     candidate_intersection_weights: Vec<f64>,
+    candidate_timing_upper_weights: Vec<f64>,
+    candidate_trigger_upper_bounds: Vec<f64>,
+    candidate_aggregate_similarities: Vec<f64>,
     candidate_generations: Vec<u32>,
     generation: u32,
     candidate_indices: Vec<usize>,
+    candidate_upper_buckets: Vec<Vec<usize>>,
     success_heap: BinaryHeap<Reverse<ScoredCandidate>>,
     failure_heap: BinaryHeap<Reverse<ScoredCandidate>>,
 }
@@ -192,6 +202,12 @@ impl RankingTargetScratch {
     fn prepare(&mut self, candidate_count: usize, per_class_limit: usize) {
         self.candidate_intersection_weights
             .resize(candidate_count, 0.0);
+        self.candidate_timing_upper_weights
+            .resize(candidate_count, 0.0);
+        self.candidate_trigger_upper_bounds
+            .resize(candidate_count, 0.0);
+        self.candidate_aggregate_similarities
+            .resize(candidate_count, 0.0);
         self.candidate_generations.resize(candidate_count, 0);
         self.generation = self.generation.wrapping_add(1);
         if self.generation == 0 {
@@ -199,6 +215,13 @@ impl RankingTargetScratch {
             self.generation = 1;
         }
         self.candidate_indices.clear();
+        if self.candidate_upper_buckets.is_empty() {
+            self.candidate_upper_buckets.resize_with(101, Vec::new);
+        } else {
+            for bucket in &mut self.candidate_upper_buckets {
+                bucket.clear();
+            }
+        }
         self.success_heap.clear();
         self.failure_heap.clear();
         let required_capacity = per_class_limit + 1;
@@ -210,13 +233,20 @@ impl RankingTargetScratch {
         }
     }
 
-    fn add_candidate_rule_weight(&mut self, candidate_index: usize, weight: f64) {
+    fn add_candidate_rule_weight(
+        &mut self,
+        candidate_index: usize,
+        weight: f64,
+        timing_upper: f64,
+    ) {
         if self.candidate_generations[candidate_index] != self.generation {
             self.candidate_generations[candidate_index] = self.generation;
             self.candidate_intersection_weights[candidate_index] = weight;
+            self.candidate_timing_upper_weights[candidate_index] = weight * timing_upper;
             self.candidate_indices.push(candidate_index);
         } else {
             self.candidate_intersection_weights[candidate_index] += weight;
+            self.candidate_timing_upper_weights[candidate_index] += weight * timing_upper;
         }
     }
 }
@@ -1772,13 +1802,16 @@ pub fn run_strategy_trigger_similarity_ranking(
         elapsed_ms: elapsed_ms(phase),
     });
 
-    let mut candidate_by_rule = HashMap::<&str, Vec<usize>>::new();
+    let mut candidate_by_rule = HashMap::<&str, Vec<CandidateRulePosting>>::new();
     for (index, candidate) in candidates.iter().enumerate() {
-        for rule_name in candidate.fingerprint.trigger.by_rule.keys() {
+        for (rule_name, hits) in &candidate.fingerprint.trigger.by_rule {
             candidate_by_rule
                 .entry(rule_name.as_str())
                 .or_default()
-                .push(index);
+                .push(CandidateRulePosting {
+                    candidate_index: index,
+                    hit_count: hits.len(),
+                });
         }
     }
     let name_map = build_name_map(&source_path).unwrap_or_default();
@@ -1832,7 +1865,7 @@ pub fn run_strategy_trigger_similarity_ranking(
               candidates: &[RankingSample],
               candidate_market_similarities: &[Option<f64>],
               candidate_rule_weight_sums: &[f64],
-              candidate_by_rule: &HashMap<&str, Vec<usize>>,
+              candidate_by_rule: &HashMap<&str, Vec<CandidateRulePosting>>,
               all_trade_dates: &[String],
               window_trade_days: usize,
               outcome_trade_days: usize,
@@ -1846,7 +1879,7 @@ pub fn run_strategy_trigger_similarity_ranking(
                       candidates: &[RankingSample],
                       candidate_market_similarities: &[Option<f64>],
                       candidate_rule_weight_sums: &[f64],
-                      candidate_by_rule: &HashMap<&str, Vec<usize>>,
+                      candidate_by_rule: &HashMap<&str, Vec<CandidateRulePosting>>,
                       all_trade_dates: &[String],
                       window_trade_days: usize,
                       outcome_trade_days: usize,
@@ -1862,14 +1895,61 @@ pub fn run_strategy_trigger_similarity_ranking(
                         // 线程内复用候选标记、规则交集权重和精排堆。代数标记让每个目标只写入
                         // 实际命中的候选，不再全量清零 candidates.len() 个浮点数。
                         scratch.prepare(candidates.len(), per_class_limit);
-                        for rule_name in target.fingerprint.trigger.by_rule.keys() {
+                        for (rule_name, target_hits) in &target.fingerprint.trigger.by_rule {
                             let Some(indices) = candidate_by_rule.get(rule_name.as_str()) else {
                                 continue;
                             };
                             let weight = rule_weight(rule_weights, rule_name);
-                            for &candidate_index in indices {
-                                scratch.add_candidate_rule_weight(candidate_index, weight);
+                            for posting in indices {
+                                let smaller = target_hits.len().min(posting.hit_count) as f64;
+                                let larger = target_hits.len().max(posting.hit_count) as f64;
+                                scratch.add_candidate_rule_weight(
+                                    posting.candidate_index,
+                                    weight,
+                                    smaller / larger,
+                                );
                             }
+                        }
+
+                        // 触发时序的单规则上界不会超过 min(m,n)/max(m,n)。用它
+                        // 给候选排序，尽早填满两个 Top-K 堆，不改变最终的精确结果。
+                        for position in 0..scratch.candidate_indices.len() {
+                            let candidate_index = scratch.candidate_indices[position];
+                            let candidate = &candidates[candidate_index];
+                            if candidate.template_class == 0
+                                || candidate.anchor.ts_code == target.anchor.ts_code
+                            {
+                                continue;
+                            }
+                            let intersection_weight =
+                                scratch.candidate_intersection_weights[candidate_index];
+                            let timing_upper = if intersection_weight <= EPS {
+                                0.0
+                            } else {
+                                (scratch.candidate_timing_upper_weights[candidate_index]
+                                    / intersection_weight)
+                                    .clamp(0.0, 1.0)
+                            };
+                            let rule_set = weighted_rule_set_similarity_from_masses(
+                                target_rule_weight_sum,
+                                candidate_rule_weight_sums[candidate_index],
+                                intersection_weight,
+                            );
+                            let aggregate = trigger_aggregate_similarity(
+                                &target.fingerprint.trigger,
+                                &candidate.fingerprint.trigger,
+                            );
+                            scratch.candidate_aggregate_similarities[candidate_index] = aggregate;
+                            let trigger_upper =
+                                combine_trigger_similarity(rule_set, timing_upper, aggregate);
+                            scratch.candidate_trigger_upper_bounds[candidate_index] = trigger_upper;
+                            scratch.candidate_upper_buckets
+                                [trigger_upper.clamp(0.0, 100.0).floor() as usize]
+                                .push(candidate_index);
+                        }
+                        scratch.candidate_indices.clear();
+                        for bucket in scratch.candidate_upper_buckets.iter_mut().rev() {
+                            scratch.candidate_indices.append(bucket);
                         }
 
                         for candidate_position in 0..scratch.candidate_indices.len() {
@@ -1877,11 +1957,6 @@ pub fn run_strategy_trigger_similarity_ranking(
                             let candidate = &candidates[candidate_index];
                             // Leave-one-stock-out：同一股票的滚动窗口会共享真实 K 线、触发和静态
                             // 特征，不能作为自己的历史近邻，否则会形成股票身份与窗口重叠泄漏。
-                            if candidate.template_class == 0
-                                || candidate.anchor.ts_code == target.anchor.ts_code
-                            {
-                                continue;
-                            }
                             let price_available = target.fingerprint.price_volume.has_vectors
                                 && candidate.fingerprint.price_volume.has_vectors;
                             let indicator_available = target.fingerprint.indicators.has_vectors
@@ -1930,12 +2005,10 @@ pub fn run_strategy_trigger_similarity_ranking(
                                 candidate_rule_weight_sums[candidate_index],
                                 scratch.candidate_intersection_weights[candidate_index],
                             );
-                            let aggregate = trigger_aggregate_similarity(
-                                &target.fingerprint.trigger,
-                                &candidate.fingerprint.trigger,
-                            );
+                            let aggregate =
+                                scratch.candidate_aggregate_similarities[candidate_index];
                             let trigger_upper_bound =
-                                combine_trigger_similarity(rule_set, 1.0, aggregate);
+                                scratch.candidate_trigger_upper_bounds[candidate_index];
                             let remaining_weight = total_weight - TRIGGER_SIMILARITY_WEIGHT;
                             if can_prune_exact_candidate(
                                 (trigger_upper_bound * TRIGGER_SIMILARITY_WEIGHT
@@ -2645,17 +2718,19 @@ mod tests {
     fn target_scratch_reuses_storage_without_leaking_rule_weights() {
         let mut scratch = RankingTargetScratch::default();
         scratch.prepare(8, 4);
-        scratch.add_candidate_rule_weight(3, 1.5);
-        scratch.add_candidate_rule_weight(3, 0.5);
+        scratch.add_candidate_rule_weight(3, 1.5, 0.5);
+        scratch.add_candidate_rule_weight(3, 0.5, 1.0);
         assert_eq!(scratch.candidate_indices, vec![3]);
         assert_eq!(scratch.candidate_intersection_weights[3], 2.0);
+        assert_eq!(scratch.candidate_timing_upper_weights[3], 1.25);
 
         let weights_capacity = scratch.candidate_intersection_weights.capacity();
         let indices_capacity = scratch.candidate_indices.capacity();
         scratch.prepare(8, 4);
-        scratch.add_candidate_rule_weight(3, 4.0);
+        scratch.add_candidate_rule_weight(3, 4.0, 0.25);
         assert_eq!(scratch.candidate_indices, vec![3]);
         assert_eq!(scratch.candidate_intersection_weights[3], 4.0);
+        assert_eq!(scratch.candidate_timing_upper_weights[3], 1.0);
         assert_eq!(
             scratch.candidate_intersection_weights.capacity(),
             weights_capacity
