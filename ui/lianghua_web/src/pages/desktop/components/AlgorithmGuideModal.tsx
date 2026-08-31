@@ -44,10 +44,69 @@ const ALGORITHM_SECTIONS: AlgorithmSection[] = [
         description: '所有股票按 total_score 降序排列，同分时按 ts_code 字典序打破平局。',
         interpretation: 'rank = 1 表示总分最高。排名每天重新计算，会随分数变化而变动。',
       },
+      {
+        heading: 'H30-L50 卷积排名',
+        description: '对一只股票最近 30 个完整评分交易日做时间加权：一半权重关注最近 3 日，一半权重取 30 日等权均值，再按平滑后的分数重新排名。',
+        formula: 'fast_3d = normalize([1, 0.7, 0.49])\nconvolution_score = 50% × fast_3d_score + 50% × mean(score[t-29…t])\nrank_change = raw_rank - convolution_rank',
+        interpretation: 'rank_change > 0 表示平滑后名次上升。该榜偏好近期仍强、且中期评分稳定的股票；它是固定核的时间平滑，不是神经网络预测，也不等于“走势相似排名”。',
+      },
     ],
   },
   {
-    title: '2. 回测指标算法',
+    title: '2. 定制相似算法',
+    items: [
+      {
+        heading: '先区分三种“相似”',
+        description: '程序中的相似分为三个独立用途：策略相似度检查比较规则是否经常共同触发；相似股票比较同一天的静态业务标签；走势相似比较当前窗口与历史事件窗口。三者的数据源、分母和分数范围不同，不能横向比较。',
+        formula: '策略相似度检查：同股 + 同日的触发集合\n相似股票：概念 + 行业 + trigger/confirm 场景\n走势相似：策略触发 + 量价 + 指标 + 市场环境的历史指纹',
+        interpretation: '这些分数表示“按本算法定义有多像”，不是上涨概率，也不是收益预测的置信概率。',
+      },
+      {
+        heading: '策略相似度检查：重叠率与 Lift',
+        description: '表达式验证时，把当前待验证组合和每条现有策略在验证区间内的触发样本按“股票代码 + 交易日”求交集。结果按同时触发样本数降序展示，并排除当前导入策略自身。',
+        formula: 'A = 当前组合触发样本，B = 现有策略触发样本，N = 区间内总评分样本\n同时触发 = |A ∩ B|\n占当前组合 = |A ∩ B| / |A|\n占现有策略 = |A ∩ B| / |B|\nLift = |A ∩ B| × N / (|A| × |B|)',
+        interpretation: 'Lift = 1 表示共同触发程度接近独立随机基线；> 1 表示正关联；< 1 表示共同触发偏少。重叠率高但 Lift 接近 1，可能只是现有策略本身触发很频繁。Lift 只描述共现，不证明两条策略逻辑等价或存在因果关系。',
+      },
+      {
+        heading: '相似股票：同日标签加权匹配',
+        description: '候选股只要与目标股共享至少一个行业、概念或有效场景即可进入候选池。概念和场景按“目标股被覆盖的比例”计分，行业完全相同则得固定分；场景仅使用 trigger / confirm 状态。',
+        formula: '概念分 = 40 × 共同概念数 / 目标股概念数\n行业分 = 同行业 ? 40 : 0\n场景分 = 30 × 共同场景数 / 目标股 trigger/confirm 场景数\nsimilarity_score = 概念分 + 行业分 + 场景分',
+        interpretation: '满信息理论上限为 110 分，不是百分制。目标股缺少某一类信息时，该类不参与可用满分，但结果不会把剩余维度重新归一化；应结合 available_score 和各分项解读。并列时依次比较场景分、概念分、行业分、原总榜排名和股票代码。',
+      },
+      {
+        heading: '走势相似：历史候选与防前视',
+        description: '以目标股票参考日之前的一段交易日作为目标窗口。历史候选必须至少命中过目标窗口中的一种策略规则，并且候选结束日不晚于“参考日减去未来评价天数”，确保候选的后验收益在参考日当时已经完整可见。单股查询还会排除目标股票自身的历史窗口。',
+        formula: 'target_window = [t-window+1, t]\nhistorical_cutoff = t 向前 outcome_trade_days 个交易日\n候选锚点：结束日 ≤ historical_cutoff 且至少共享一种触发规则',
+        interpretation: '候选全集过大时最多保留 50,000 个锚点：40,000 个近期样本 + 10,000 个确定性哈希分散样本。candidate_pool_truncated 为 true 表示发生截断，因此结果是受控候选池内的近邻，不保证遍历全部历史。',
+      },
+      {
+        heading: '走势相似：策略触发指纹',
+        description: '触发指纹同时比较“触发了哪些规则”“同一规则何时、以多大强度触发”和“整个窗口的触发数量/得分节奏”。历史上越少见的规则权重越大，额外规则会通过加权 Jaccard 的并集受到惩罚。',
+        formula: '规则权重 idf = clamp(ln(1 + 全部触发数 / 该规则触发数), 1, 6)\n规则集合相似 = Σidf(交集) / Σidf(并集)\n单次匹配 = exp(-|日期位置差| / 3) × clamp(1 - |分数差| / (|分数A|+|分数B|), 0, 1)\n触发相似 = 100 × (45% × 规则集合 + 35% × 时序匹配 + 20% × 聚合节奏)',
+        interpretation: '同名规则在相近窗口位置、以相近正负方向和强度触发时得分更高。时序匹配保持先后顺序且每次触发最多匹配一次；聚合节奏比较每日触发总数与总得分的形状。',
+      },
+      {
+        heading: '走势相似：量价、指标与市场环境指纹',
+        description: '每条数值序列先按窗口分段池化，再提取均匀、短期指数、中期指数、近期增强、前中/中后/前后趋势和拐点共 8 类响应。量价还包含收益、振幅、收盘位置、量额、换手、资金流、跳空、上下影线、市值与板块类别；行情库中的其他数值列作为指标通道；全市场横截面汇总形成市场环境通道。',
+        formula: '通道相似 = mean(50 × (1 + cosine(目标通道, 候选通道)))\n最终相似 = 35% × 触发 + 30% × 量价 + 15% × 指标 + 20% × 市场环境',
+        interpretation: '余弦值会从 [-1, 1] 映射到 [0, 100]，所以 50 分表示近似正交/无明显同向，不能简单理解为“一半相似”。某通道无有效数据时会跳过，并按仍可用通道的权重和重新归一化；缺失不会自动记 0 分。',
+      },
+      {
+        heading: '历史后验汇总与有效样本数',
+        description: '相似历史按 similarity² 加权，最多选择 30 个评级样本；同一股票的邻近窗口会去重，同一后验区间附近最多保留 3 个样本，降低重叠行情造成的伪样本量。未来收益从候选结束后的第一个交易日开盘买入，到评价窗口末日收盘卖出。',
+        formula: 'wᵢ = (similarityᵢ / 100)²\n加权均值 = Σ(wᵢ × outcomeᵢ) / Σwᵢ\n有效样本数 N_eff = (Σwᵢ)² / Σ(wᵢ²)\n收缩超额 = 加权超额 × N_eff / (N_eff + 8)',
+        interpretation: 'N_eff 越接近样本数，说明权重越均匀；明显更小说明结论被少数高相似样本主导。收缩超额会在样本少时主动靠近 0。MFE/MAE 分别是持有期最大有利/不利变动；历史后验仍是条件统计，不保证未来复现。',
+      },
+      {
+        heading: '走势相似排行榜：模板质量、预测信号与排行分',
+        description: '全市场榜先在每个历史截面把未来超额、MFE、MAE 和上涨持续性转换为横截面百分位，合成模板质量；只保留首次跨入成功区（≥ 0.80）或失败区（≤ 0.20）且窗口内有策略触发的模板。当前股票分别检索最相似的成功/失败模板并加权预测质量。',
+        formula: '模板质量 = 45% × 超额百分位 + 25% × MFE百分位 + 20% × MAE百分位 + 10% × 上涨持续性百分位\nconfidence = √(N_eff / (N_eff + 8))\nprediction_signal = 2 × (预测质量 - 0.5) × confidence\nranking_score = 按 prediction_signal 排名后的 0~100 线性名次分',
+        interpretation: '至少需要 5 个样本且 N_eff ≥ 3 才产生 prediction_signal。信号范围约为 [-1, 1]：正值偏向成功模板，负值偏向失败模板，绝对值同时受样本置信度压缩。ranking_score 只是榜内相对名次刻度，不是相似度、收益率或成功概率。MAE 百分位按数值从小到大排列，因此“跌得没那么深”的样本排名更高。',
+      },
+    ],
+  },
+  {
+    title: '3. 回测指标算法',
     items: [
       {
         heading: '残差收益率',
@@ -65,7 +124,7 @@ const ALGORITHM_SECTIONS: AlgorithmSection[] = [
         heading: 'ICIR（信息比率）',
         description: 'IC 的均值除以标准差，反映预测能力的稳定性。',
         formula: 'ICIR = mean(IC) / std(IC)',
-        interpretation: 'ICIR > 1 表示稳定盈利；0.5~1 是可接受区间；< 0.5 说明 IC 波动大、不稳定。',
+        interpretation: '绝对值越大表示 IC 相对自身波动越稳定，正负号表示预测方向。常见经验阈值只能作筛选参考；ICIR > 1 不等同于已经证明可稳定盈利，还需结合样本量、交易成本和样本外检验。',
       },
       {
         heading: 't 统计量',
@@ -106,7 +165,7 @@ const ALGORITHM_SECTIONS: AlgorithmSection[] = [
     ],
   },
   {
-    title: '3. 股票遴选算法',
+    title: '4. 股票遴选算法',
     items: [
       {
         heading: '表达式选股',
@@ -123,7 +182,7 @@ const ALGORITHM_SECTIONS: AlgorithmSection[] = [
     ],
   },
   {
-    title: '4. 实时监控算法',
+    title: '5. 实时监控算法',
     items: [
       {
         heading: '模板表达式求值',
@@ -140,7 +199,7 @@ const ALGORITHM_SECTIONS: AlgorithmSection[] = [
     ],
   },
   {
-    title: '5. 关键数据表解读',
+    title: '6. 关键数据表解读',
     items: [
       {
         heading: 'score_summary 表',
@@ -211,7 +270,7 @@ export default function AlgorithmGuideModal({
           <div>
             <h3>算法说明</h3>
             <p>
-              以下解释程序中用户可接触到的核心算法及其数据解读方式。
+              以下口径与当前生产实现保持一致，重点说明分数如何得到、适合比较什么，以及不应如何解读。
             </p>
           </div>
           <button type="button" className="settings-secondary-btn" onClick={onClose}>
