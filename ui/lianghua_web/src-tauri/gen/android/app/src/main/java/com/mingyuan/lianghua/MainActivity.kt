@@ -9,6 +9,8 @@ class MainActivity : TauriActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
+    super.onCreate(savedInstanceState)
+
     try {
       if (!initRustlsPlatformVerifier()) {
         Log.w(TAG, "rustls platform verifier init returned false")
@@ -18,8 +20,6 @@ class MainActivity : TauriActivity() {
     } catch (error: Throwable) {
       Log.e(TAG, "rustls platform verifier init failed", error)
     }
-
-    super.onCreate(savedInstanceState)
   }
 
   companion object {
