@@ -2259,22 +2259,113 @@ dependencies = [
 name = "lianghua-app"
 version = "0.1.0"
 dependencies = [
- "chrono",
- "csv",
- "duckdb",
- "encoding_rs",
+ "lianghua-app-chart",
+ "lianghua-app-data",
+ "lianghua-app-expression",
+ "lianghua-app-facade",
+ "lianghua-app-market",
+ "lianghua-app-shared",
+ "lianghua-app-strategy",
  "lianghua-backtest",
  "lianghua-core",
  "lianghua-engine",
  "lianghua-provider",
- "rand 0.9.2",
- "rayon",
- "reqwest 0.13.2",
- "rustls",
+]
+
+[[package]]
+name = "lianghua-app-chart"
+version = "0.1.0"
+dependencies = [
+ "duckdb",
+ "lianghua-core",
+ "lianghua-engine",
  "serde",
  "serde_json",
  "toml 0.9.11+spec-1.1.0",
- "webpki-roots",
+]
+
+[[package]]
+name = "lianghua-app-data"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "duckdb",
+ "lianghua-app-shared",
+ "lianghua-core",
+ "lianghua-engine",
+ "rayon",
+ "serde",
+ "toml 0.9.11+spec-1.1.0",
+]
+
+[[package]]
+name = "lianghua-app-expression"
+version = "0.1.0"
+dependencies = [
+ "lianghua-core",
+ "serde",
+]
+
+[[package]]
+name = "lianghua-app-facade"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "csv",
+ "duckdb",
+ "lianghua-app-chart",
+ "lianghua-app-market",
+ "lianghua-app-shared",
+ "lianghua-app-strategy",
+ "lianghua-core",
+ "lianghua-engine",
+ "lianghua-provider",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "toml 0.9.11+spec-1.1.0",
+]
+
+[[package]]
+name = "lianghua-app-market"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "duckdb",
+ "lianghua-app-expression",
+ "lianghua-app-shared",
+ "lianghua-core",
+ "lianghua-engine",
+ "lianghua-provider",
+ "rayon",
+ "reqwest 0.13.2",
+ "serde",
+]
+
+[[package]]
+name = "lianghua-app-shared"
+version = "0.1.0"
+dependencies = [
+ "duckdb",
+ "lianghua-engine",
+]
+
+[[package]]
+name = "lianghua-app-strategy"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "csv",
+ "duckdb",
+ "lianghua-app-shared",
+ "lianghua-backtest",
+ "lianghua-core",
+ "lianghua-engine",
+ "rand 0.9.2",
+ "rayon",
+ "serde",
+ "serde_json",
+ "toml 0.9.11+spec-1.1.0",
 ]
 
 [[package]]

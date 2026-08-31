@@ -1,0 +1,8 @@
+[package]
+name = "lianghua-app-shared"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lianghua-engine = { path = "../lianghua-engine" }
+duckdb = { version = "1.4.4", features = ["appender-arrow"] }

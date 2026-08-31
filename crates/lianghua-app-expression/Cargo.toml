@@ -1,0 +1,8 @@
+[package]
+name = "lianghua-app-expression"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lianghua-core = { path = "../lianghua-core" }
+serde = { version = "1.0", features = ["derive"] }

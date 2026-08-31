@@ -1,0 +1,16 @@
+[package]
+name = "lianghua-app-market"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lianghua-app-expression = { path = "../lianghua-app-expression" }
+lianghua-app-shared = { path = "../lianghua-app-shared" }
+lianghua-core = { path = "../lianghua-core" }
+lianghua-engine = { path = "../lianghua-engine" }
+lianghua-provider = { path = "../lianghua-provider" }
+chrono = "0.4.44"
+duckdb = { version = "1.4.4", features = ["appender-arrow"] }
+rayon = "1.11.0"
+reqwest = { version = "0.13.2", features = ["blocking", "json", "query"] }
+serde = { version = "1.0", features = ["derive"] }

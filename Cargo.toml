@@ -15,6 +15,13 @@ members = [
     "crates/lianghua-scoring",
     "crates/lianghua-engine",
     "crates/lianghua-backtest",
+    "crates/lianghua-app-shared",
+    "crates/lianghua-app-chart",
+    "crates/lianghua-app-expression",
+    "crates/lianghua-app-data",
+    "crates/lianghua-app-market",
+    "crates/lianghua-app-strategy",
+    "crates/lianghua-app-facade",
     "crates/lianghua-app",
     "ui/lianghua_web/src-tauri",
 ]
@@ -28,6 +35,13 @@ default-members = [
     "crates/lianghua-scoring",
     "crates/lianghua-engine",
     "crates/lianghua-backtest",
+    "crates/lianghua-app-shared",
+    "crates/lianghua-app-chart",
+    "crates/lianghua-app-expression",
+    "crates/lianghua-app-data",
+    "crates/lianghua-app-market",
+    "crates/lianghua-app-strategy",
+    "crates/lianghua-app-facade",
     "crates/lianghua-app",
 ]
 
@@ -51,9 +65,6 @@ rustls = "0.23"
 webpki-roots = "1"
 
 # Keep compute-heavy backend crates optimized during Tauri development builds.
-[profile.dev.package.lianghua-app]
-opt-level = 3
-
 [profile.dev.package.lianghua-engine]
 opt-level = 3
 

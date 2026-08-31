@@ -63,6 +63,13 @@ jobs:
           --package lianghua-scoring
           --package lianghua-engine
           --package lianghua-backtest
+          --package lianghua-app-shared
+          --package lianghua-app-chart
+          --package lianghua-app-expression
+          --package lianghua-app-data
+          --package lianghua-app-market
+          --package lianghua-app-strategy
+          --package lianghua-app-facade
           --package lianghua-app
           -- --check
 

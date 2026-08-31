@@ -24,7 +24,10 @@ lianghua-data    lianghua-download    lianghua-scoring
                    lianghua-backtest
                             |
                             v
-                      lianghua-app
+              lianghua-app-* capability crates
+                            |
+                            v
+               lianghua-app compatibility facade
                             |
                             v
                        Tauri adapter
@@ -41,7 +44,10 @@ The dependency graph must remain acyclic. In particular:
   data; they must not depend on one another.
 - `lianghua-engine` is a compatibility facade and contains no implementation.
 - `lianghua-backtest` may read engine contracts but the engine must not call it.
-- `lianghua-app` is the only backend crate intended for UI adapters.
+- `lianghua-app-*` crates own application capabilities; callers should depend on
+  the narrowest one when compatibility is not required.
+- `lianghua-app` contains compatibility re-exports only and remains the stable
+  entry point used by the Tauri adapter.
 - Tauri-specific commands, filesystem plugins, and dialogs stay in
   `ui/lianghua_web/src-tauri`.
 
@@ -72,6 +78,13 @@ cargo fmt \
   --package lianghua-scoring \
   --package lianghua-engine \
   --package lianghua-backtest \
+  --package lianghua-app-shared \
+  --package lianghua-app-chart \
+  --package lianghua-app-expression \
+  --package lianghua-app-data \
+  --package lianghua-app-market \
+  --package lianghua-app-strategy \
+  --package lianghua-app-facade \
   --package lianghua-app \
   -- --check
 cargo check --all-targets
