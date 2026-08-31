@@ -9,7 +9,7 @@ use crate::{
         CONVOLUTION_RANK_SCORE_DECIMALS, DEFAULT_CONVOLUTION_KERNEL_NAME, calc_convolution_ranking,
         default_convolution_kernel,
     },
-    ui_tools::{
+    ui_tools::shared::{
         build_concepts_map, build_name_map, build_total_mv_map, filter_mv, normalize_trade_date,
         resolve_trade_date,
     },

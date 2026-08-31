@@ -14,12 +14,11 @@ use crate::{
     download::runner::INDEX_TS_CODES,
 };
 
-use super::{
-    build_concepts_map, build_industry_map, build_name_map, build_total_mv_map,
+use crate::ui_tools::shared::{
+    build_concepts_map, build_industry_map, build_name_map, build_total_mv_map, canonical_ts_code,
     normalize_trade_date, resolve_trade_date,
 };
 
-#[path = "strategy_trigger_similarity_ranking.rs"]
 pub mod ranking;
 
 const DEFAULT_WINDOW_TRADE_DAYS: usize = 20;
@@ -266,20 +265,6 @@ struct MarketSchema {
 struct MarketEnvironment {
     by_date: HashMap<String, Vec<Option<f64>>>,
     channel_count: usize,
-}
-
-fn normalize_ts_code(ts_code: &str) -> String {
-    let normalized = ts_code.trim().to_ascii_uppercase();
-    if normalized.contains('.') {
-        return normalized;
-    }
-    if normalized.starts_with("30") || normalized.starts_with("00") {
-        format!("{normalized}.SZ")
-    } else if normalized.starts_with("60") || normalized.starts_with("68") {
-        format!("{normalized}.SH")
-    } else {
-        format!("{normalized}.BJ")
-    }
 }
 
 fn resolve_benchmark_index_code(value: Option<&str>) -> Result<String, String> {
@@ -2033,7 +2018,7 @@ pub fn get_strategy_trigger_similarity_page(
     }
     let conn = open_result_conn(&source_path)?;
     let resolved_trade_date = resolve_existing_trade_date(&conn, trade_date)?;
-    let resolved_ts_code = normalize_ts_code(&ts_code);
+    let resolved_ts_code = canonical_ts_code(&ts_code);
     let benchmark_index_code = resolve_benchmark_index_code(benchmark_index_code.as_deref())?;
     let window_trade_days = window_trade_days
         .map(|v| v as usize)

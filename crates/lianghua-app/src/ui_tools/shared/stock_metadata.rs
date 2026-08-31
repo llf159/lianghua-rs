@@ -69,50 +69,6 @@ fn cached_number_map(
     Ok(value)
 }
 
-pub fn normalize_trade_date(raw: &str) -> Option<String> {
-    let digits: String = raw
-        .trim()
-        .chars()
-        .filter(|ch| ch.is_ascii_digit())
-        .collect();
-    if digits.len() == 8 {
-        Some(digits)
-    } else {
-        None
-    }
-}
-
-pub fn resolve_trade_date(conn: &Connection, trade_date: Option<String>) -> Result<String, String> {
-    if let Some(d) = trade_date {
-        let d = d.trim().to_string();
-        if !d.is_empty() {
-            return Ok(d);
-        }
-    }
-
-    let mut stmt = conn
-        .prepare("SELECT MAX(trade_date) FROM score_summary")
-        .map_err(|e| format!("查询最新交易日预编译失败: {e}"))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("查询最新交易日失败: {e}"))?;
-
-    if let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取最新交易日结果失败: {e}"))?
-    {
-        let d: Option<String> = row
-            .get(0)
-            .map_err(|e| format!("读取最新交易日字段失败: {e}"))?;
-        if let Some(v) = d {
-            if !v.trim().is_empty() {
-                return Ok(v);
-            }
-        }
-    }
-    Err("score_summary 没有可用交易日".to_string())
-}
-
 fn build_stock_list_text_map(
     source_dir: &str,
     value_index: usize,

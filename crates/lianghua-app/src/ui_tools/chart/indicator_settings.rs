@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     data::source_db_path,
-    ui_tools::chart_indicator::{
+    ui_tools::chart::indicator::{
         ChartIndicatorConfig, ChartMarkerKind, ChartMarkerLineStyle, ChartPanelConfig,
         ChartPanelKind, ChartPanelRole, ChartSeriesKind, ChartTooltipFormat,
         chart_indicator_config_path, compile_chart_indicator_config,
@@ -291,9 +291,9 @@ fn serialize_chart_indicator_config(config: &ChartIndicatorConfig) -> Result<Str
                 lines.push(format!(
                     "position = {}",
                     toml_string(match position {
-                        crate::ui_tools::chart_indicator::ChartMarkerPosition::Above => "above",
-                        crate::ui_tools::chart_indicator::ChartMarkerPosition::Below => "below",
-                        crate::ui_tools::chart_indicator::ChartMarkerPosition::Value => "value",
+                        crate::ui_tools::chart::indicator::ChartMarkerPosition::Above => "above",
+                        crate::ui_tools::chart::indicator::ChartMarkerPosition::Below => "below",
+                        crate::ui_tools::chart::indicator::ChartMarkerPosition::Value => "value",
                     })?
                 ));
             }
@@ -301,15 +301,15 @@ fn serialize_chart_indicator_config(config: &ChartIndicatorConfig) -> Result<Str
                 lines.push(format!(
                     "shape = {}",
                     toml_string(match shape {
-                        crate::ui_tools::chart_indicator::ChartMarkerShape::Dot => "dot",
-                        crate::ui_tools::chart_indicator::ChartMarkerShape::TriangleUp =>
+                        crate::ui_tools::chart::indicator::ChartMarkerShape::Dot => "dot",
+                        crate::ui_tools::chart::indicator::ChartMarkerShape::TriangleUp =>
                             "triangle_up",
-                        crate::ui_tools::chart_indicator::ChartMarkerShape::TriangleDown =>
+                        crate::ui_tools::chart::indicator::ChartMarkerShape::TriangleDown =>
                             "triangle_down",
-                        crate::ui_tools::chart_indicator::ChartMarkerShape::Flag => "flag",
-                        crate::ui_tools::chart_indicator::ChartMarkerShape::Square => "square",
-                        crate::ui_tools::chart_indicator::ChartMarkerShape::Diamond => "diamond",
-                        crate::ui_tools::chart_indicator::ChartMarkerShape::Star => "star",
+                        crate::ui_tools::chart::indicator::ChartMarkerShape::Flag => "flag",
+                        crate::ui_tools::chart::indicator::ChartMarkerShape::Square => "square",
+                        crate::ui_tools::chart::indicator::ChartMarkerShape::Diamond => "diamond",
+                        crate::ui_tools::chart::indicator::ChartMarkerShape::Star => "star",
                     })?
                 ));
             }

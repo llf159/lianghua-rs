@@ -1,55 +1,27 @@
-//! Application use cases grouped by capability while preserving legacy module paths.
+//! Application use cases grouped by business capability.
+//!
+//! New code should use the nested modules (`chart`, `data`, `market`,
+//! `strategy`, and `shared`). The root-level module re-exports below preserve
+//! the historical API consumed by the Tauri adapter.
 
-mod common;
-pub use common::*;
-
-#[path = "market/all_market_monitor.rs"]
-pub mod all_market_monitor;
-#[path = "chart/indicator.rs"]
-pub mod chart_indicator;
-#[path = "chart/indicator_settings.rs"]
-pub mod chart_indicator_settings;
-#[path = "facade/concept_stock_pick.rs"]
-pub mod concept_stock_pick;
-#[path = "strategy/convolution_rank.rs"]
-pub mod convolution_rank;
-#[path = "market/cyq_chen.rs"]
-pub mod cyq_chen;
-#[path = "data/download.rs"]
-pub mod data_download;
-#[path = "data/import.rs"]
-pub mod data_import;
-#[path = "data/viewer.rs"]
-pub mod data_viewer;
-#[path = "chart/details.rs"]
-pub mod details;
-#[path = "market/dragon_tiger.rs"]
-pub mod dragon_tiger;
-#[path = "expression/capabilities.rs"]
+pub mod chart;
+pub mod data;
 pub mod expression;
-#[path = "facade/expression_stock_pick.rs"]
-pub mod expression_stock_pick;
-#[path = "market/intraday_monitor.rs"]
-pub mod intraday_monitor;
-#[path = "chart/overview.rs"]
-pub mod overview;
-#[path = "chart/overview_classic.rs"]
-pub mod overview_classic;
-#[path = "strategy/ranking_compute.rs"]
-pub mod ranking_compute;
-#[path = "market/realtime.rs"]
-pub mod realtime;
-#[path = "strategy/statistics.rs"]
-pub mod statistics;
-#[path = "strategy/stock_pick.rs"]
-pub mod stock_pick;
-#[path = "strategy/stock_similarity.rs"]
-pub mod stock_similarity;
-#[path = "strategy/manage.rs"]
-pub mod strategy_manage;
-#[path = "strategy/paper_validation.rs"]
-pub mod strategy_paper_validation;
-#[path = "strategy/trigger_similarity.rs"]
-pub mod strategy_trigger_similarity;
-#[path = "market/watch_observe.rs"]
-pub mod watch_observe;
+pub mod facade;
+pub mod market;
+pub mod shared;
+pub mod strategy;
+
+// Shared application support kept at the root for source compatibility.
+pub use shared::*;
+
+// Historical flat module paths.
+pub use chart::{indicator as chart_indicator, indicator_settings as chart_indicator_settings};
+pub use data::{download as data_download, import as data_import, viewer as data_viewer};
+pub use facade::{concept_stock_pick, cyq_chen, details, expression_stock_pick};
+pub use market::{all_market_monitor, dragon_tiger, intraday_monitor, realtime, watch_observe};
+pub use strategy::{
+    convolution_rank, manage as strategy_manage, overview, overview_classic,
+    paper_validation as strategy_paper_validation, ranking_compute, statistics, stock_pick,
+    stock_similarity, trigger_similarity as strategy_trigger_similarity,
+};

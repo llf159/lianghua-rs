@@ -15,8 +15,7 @@ use std::time;
 // use std::fs::File;
 // use std::io::{BufWriter, Write};
 
-use crate::data::{RowData, RuleKind, ScoreRule, collect_assigned_names_from_expr_program};
-use crate::expr::eval::{Runtime, Value};
+use crate::data::{RuleKind, ScoreRule, collect_assigned_names_from_expr_program};
 use crate::expr::validation::{parse_expression_program, validate_expression_functions};
 use crate::scoring::{
     CachedCombinationCondition, CachedCombinationRule, CachedRule, CachedRuleExpression,

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 use crate::data::{ind_toml_path, score_rule_path, stock_list_path};
-use crate::ui_tools::build_total_mv_map;
+use crate::ui_tools::shared::build_total_mv_map;
 use crate::utils::utils::board_category;
 
 const ALGORITHM_VERSION: &str = "outcome-reverse-startup-ranking-v8";
@@ -2529,9 +2529,10 @@ mod tests {
         load_market_environment, load_market_schema, load_outcome_selected_anchors,
         open_result_conn, run_strategy_trigger_similarity_ranking, share_environment_fingerprints,
     };
-    use crate::ui_tools::build_name_map;
+    use crate::ui_tools::shared::build_name_map;
     use crate::ui_tools::{
-        build_total_mv_map, strategy_trigger_similarity::ranking::StrategyTriggerRankingRow,
+        shared::build_total_mv_map,
+        strategy::trigger_similarity::ranking::StrategyTriggerRankingRow,
     };
     use std::{
         collections::HashMap,

@@ -16,7 +16,6 @@ members = [
     "crates/lianghua-engine",
     "crates/lianghua-backtest",
     "crates/lianghua-app",
-    "analysis_tools/market_analyze",
     "ui/lianghua_web/src-tauri",
 ]
 default-members = [

@@ -26,24 +26,28 @@ use crate::{
         inject_stock_extra_fields, load_total_share_map, rt_max_len,
     },
     ui_tools::{
-        build_concepts_map,
         expression::{
             RT_AVERAGE_PRICE, RT_FALL_FROM_HIGH_PCT, RT_OPEN_CHANGE_PCT, RT_VOLUME_RATIO,
         },
-        intraday_monitor::{
-            CompiledIntradayMonitorTemplate, DEFAULT_ADJ_TYPE, IntradayMonitorTemplate,
-            add_indicator_input_runtime_keys, build_quote_only_runtime_row_data,
-            collect_intraday_template_cyq_chen_keys, collect_intraday_template_runtime_keys,
-            compile_intraday_templates, merge_realtime_quote_into_row_data,
-            normalize_runtime_row_data,
+        market::{
+            intraday_monitor::{
+                CompiledIntradayMonitorTemplate, DEFAULT_ADJ_TYPE, IntradayMonitorTemplate,
+                add_indicator_input_runtime_keys, build_quote_only_runtime_row_data,
+                collect_intraday_template_cyq_chen_keys, collect_intraday_template_runtime_keys,
+                compile_intraday_templates, merge_realtime_quote_into_row_data,
+                normalize_runtime_row_data,
+            },
+            realtime::{
+                RealtimeFetchMeta, fetch_all_market_realtime_quote_map_for_codes,
+                fetch_all_market_tencent_realtime_quote_map_for_codes,
+            },
         },
-        realtime::{
-            RealtimeFetchMeta, fetch_all_market_realtime_quote_map_for_codes,
-            fetch_all_market_tencent_realtime_quote_map_for_codes,
-        },
+        shared::build_concepts_map,
     },
     utils::utils::board_category,
 };
+
+use super::scene_stage::{level as scene_stage_level, threshold as parse_scene_stage_threshold};
 
 #[derive(Debug, Clone)]
 struct StockMeta {
@@ -458,32 +462,6 @@ fn cached_rank_context(
             },
         );
     Ok((rank_date, ranks))
-}
-
-pub(super) fn scene_stage_level(raw: Option<&str>) -> i32 {
-    match raw
-        .map(|value| value.trim().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("confirm") => 3,
-        Some("trigger") => 2,
-        Some("observe") => 1,
-        Some("fail") => 0,
-        _ => -1,
-    }
-}
-
-pub(super) fn parse_scene_stage_threshold(raw: Option<&str>) -> i32 {
-    match raw
-        .map(|value| value.trim().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("confirm") => 3,
-        Some("observe") => 1,
-        Some("fail") => 0,
-        Some("trigger") | Some("") | None => 2,
-        _ => 2,
-    }
 }
 
 fn load_scene_marker_candidates(
@@ -1800,7 +1778,7 @@ mod tests {
     use super::*;
     use crate::{
         expr::parser::{Parser, lex_all},
-        ui_tools::intraday_monitor::compile_intraday_templates,
+        ui_tools::market::intraday_monitor::compile_intraday_templates,
     };
 
     fn sample_meta() -> SourceMetaCacheEntry {

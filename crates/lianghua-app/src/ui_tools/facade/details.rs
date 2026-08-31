@@ -21,16 +21,17 @@ use crate::{
     download::ind_calc::{cache_ind_build, calc_inds_with_cache},
     scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map},
     ui_tools::{
-        chart_indicator::{
+        chart::indicator::{
             ChartMarkerKind, ChartMarkerLineStyle, ChartMarkerPosition, ChartMarkerShape,
             ChartPanelKind, ChartPanelRole, ChartSeriesKind, ChartTooltipFormat,
             CompiledChartIndicatorConfig, execute_chart_indicator_config,
             load_compiled_chart_indicator_config,
         },
-        realtime::{
+        market::realtime::{
             RealtimeFetchMeta, fetch_realtime_quote_map_with_provider, normalize_quote_trade_date,
         },
-        stock_similarity::StockSimilarityPageData,
+        shared::{canonical_ts_code, resolve_trade_date},
+        strategy::stock_similarity::StockSimilarityPageData,
     },
     utils::utils::board_category,
 };
@@ -415,37 +416,6 @@ fn detail_csv_number(row: &csv::StringRecord, index: usize) -> Option<f64> {
     row.get(index)?.trim().parse::<f64>().ok()
 }
 
-fn resolve_trade_date(conn: &Connection, trade_date: Option<String>) -> Result<String, String> {
-    if let Some(d) = trade_date {
-        let d = d.trim().to_string();
-        if !d.is_empty() {
-            return Ok(d);
-        }
-    }
-
-    let mut stmt = conn
-        .prepare("SELECT MAX(trade_date) FROM score_summary")
-        .map_err(|e| format!("查询最新交易日预编译失败: {e}"))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("查询最新交易日失败: {e}"))?;
-
-    if let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取最新交易日结果失败: {e}"))?
-    {
-        let d: Option<String> = row
-            .get(0)
-            .map_err(|e| format!("读取最新交易日字段失败: {e}"))?;
-        if let Some(v) = d {
-            if !v.trim().is_empty() {
-                return Ok(v);
-            }
-        }
-    }
-    Err("score_summary 没有可用交易日".to_string())
-}
-
 fn open_result_conn(source_path: &str) -> Result<Connection, String> {
     let result_db = result_db_path(source_path);
     let result_db_str = result_db
@@ -503,7 +473,7 @@ fn cyq_table_exists(conn: &Connection, table_name: &str) -> Result<bool, String>
 }
 
 fn query_stock_detail_cyq(source_path: &str, ts_code: &str) -> Result<StockDetailCyqData, String> {
-    let normalized_ts_code = normalize_ts_code(ts_code);
+    let normalized_ts_code = canonical_ts_code(ts_code);
     let Some(conn) = open_cyq_conn(source_path)? else {
         return Ok(StockDetailCyqData {
             resolved_ts_code: normalized_ts_code,
@@ -671,7 +641,7 @@ fn query_stock_detail_cyq_chen(
     source_path: &str,
     ts_code: &str,
 ) -> Result<StockDetailCyqData, String> {
-    let normalized_ts_code = normalize_ts_code(ts_code);
+    let normalized_ts_code = canonical_ts_code(ts_code);
     let Some(conn) = open_cyq_chen_conn(source_path)? else {
         return Ok(StockDetailCyqData {
             resolved_ts_code: normalized_ts_code,
@@ -870,21 +840,6 @@ fn query_stock_detail_cyq_chen(
     })
 }
 
-fn normalize_ts_code(ts_code: &str) -> String {
-    let normalized = ts_code.trim().to_ascii_uppercase();
-    if normalized.contains('.') {
-        return normalized;
-    }
-
-    if normalized.starts_with("30") || normalized.starts_with("00") {
-        format!("{normalized}.SZ")
-    } else if normalized.starts_with("60") || normalized.starts_with("68") {
-        format!("{normalized}.SH")
-    } else {
-        format!("{normalized}.BJ")
-    }
-}
-
 fn split_ts_code(ts_code: &str) -> String {
     ts_code.split('.').next().unwrap_or(ts_code).to_string()
 }
@@ -1056,9 +1011,9 @@ fn build_basic_detail_overview(
 
 #[cfg(test)]
 fn default_kline_panels() -> Vec<DetailKlinePanel> {
-    let config = crate::ui_tools::chart_indicator::load_chart_indicator_config("")
-        .unwrap_or_else(|_| crate::ui_tools::chart_indicator::default_chart_indicator_config());
-    let compiled = crate::ui_tools::chart_indicator::compile_chart_indicator_config(&config, None)
+    let config = crate::ui_tools::chart::indicator::load_chart_indicator_config("")
+        .unwrap_or_else(|_| crate::ui_tools::chart::indicator::default_chart_indicator_config());
+    let compiled = crate::ui_tools::chart::indicator::compile_chart_indicator_config(&config, None)
         .expect("default chart indicator config should compile");
     detail_kline_panels_from_compiled(&compiled)
 }
@@ -2276,7 +2231,7 @@ pub fn get_stock_detail_page(
     chart_window_days: Option<u32>,
     _prev_rank_days: Option<u32>,
 ) -> Result<StockDetailPageData, String> {
-    let normalized_ts_code = normalize_ts_code(&ts_code);
+    let normalized_ts_code = canonical_ts_code(&ts_code);
     let source_conn = open_source_conn(&source_path)?;
     let result_conn = if result_db_path(&source_path).exists() {
         open_result_conn(&source_path).ok()
@@ -2323,7 +2278,7 @@ pub fn get_stock_detail_overview(
     trade_date: String,
     ts_code: String,
 ) -> Result<StockDetailOverviewData, String> {
-    let normalized_ts_code = normalize_ts_code(&ts_code);
+    let normalized_ts_code = canonical_ts_code(&ts_code);
     let effective_trade_date = trade_date.trim().to_string();
     if effective_trade_date.is_empty() {
         return Err("详情交易日为空".to_string());
@@ -2363,7 +2318,7 @@ pub fn get_stock_detail_kline_indicators(
     chart_window_days: Option<u32>,
     watermark_name: Option<String>,
 ) -> Result<StockDetailKlineIndicatorsData, String> {
-    let normalized_ts_code = normalize_ts_code(&ts_code);
+    let normalized_ts_code = canonical_ts_code(&ts_code);
     let source_conn = open_source_conn(&source_path)?;
     let kline = query_kline(
         &source_conn,
@@ -2384,7 +2339,7 @@ pub fn get_stock_detail_strategy_snapshot(
     trade_date: Option<String>,
     ts_code: String,
 ) -> Result<StockDetailStrategySnapshotData, String> {
-    let normalized_ts_code = normalize_ts_code(&ts_code);
+    let normalized_ts_code = canonical_ts_code(&ts_code);
     let result_conn = open_result_conn(&source_path)?;
     let effective_trade_date = resolve_trade_date(&result_conn, trade_date)?;
     let trigger_snapshot =
@@ -2408,7 +2363,7 @@ pub fn get_stock_detail_prev_ranks(
     ts_code: String,
     prev_rank_days: Option<u32>,
 ) -> Result<StockDetailPrevRanksData, String> {
-    let normalized_ts_code = normalize_ts_code(&ts_code);
+    let normalized_ts_code = canonical_ts_code(&ts_code);
     let result_conn = open_result_conn(&source_path)?;
     let effective_trade_date = resolve_trade_date(&result_conn, trade_date)?;
     let prev_ranks = query_rank_history(
@@ -2455,7 +2410,7 @@ pub fn get_stock_detail_realtime(
     chart_window_days: Option<u32>,
     realtime_provider: Option<String>,
 ) -> Result<StockDetailRealtimeData, String> {
-    let normalized_ts_code = normalize_ts_code(&ts_code);
+    let normalized_ts_code = canonical_ts_code(&ts_code);
     let (quote_map, fetch_meta) = fetch_realtime_quote_map_with_provider(
         std::slice::from_ref(&normalized_ts_code),
         realtime_provider.as_deref(),
@@ -2470,7 +2425,7 @@ pub fn get_stock_detail_realtime(
 }
 
 pub fn get_stock_detail_intraday(ts_code: String) -> Result<TencentIntradayData, String> {
-    let normalized_ts_code = normalize_ts_code(&ts_code);
+    let normalized_ts_code = canonical_ts_code(&ts_code);
     if normalized_ts_code.trim().is_empty() {
         return Err("股票代码不能为空".to_string());
     }

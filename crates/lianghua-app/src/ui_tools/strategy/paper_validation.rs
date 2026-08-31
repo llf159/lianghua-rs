@@ -31,11 +31,9 @@ use crate::{
         load_st_list, load_total_share_map, rt_max_len,
     },
     simulate::DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
-    ui_tools::watch_observe::normalize_ts_code,
+    ui_tools::shared::{build_name_map, normalize_ts_code},
     utils::utils::board_category,
 };
-
-use super::build_name_map;
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
 const DEFAULT_INDEX_TS_CODE: &str = "000001.SH";

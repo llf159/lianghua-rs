@@ -5,7 +5,9 @@ use serde::Serialize;
 
 use crate::data::result_db_path;
 
-use super::{build_concepts_map, build_industry_map, build_name_map, resolve_trade_date};
+use crate::ui_tools::shared::{
+    build_concepts_map, build_industry_map, build_name_map, canonical_ts_code, resolve_trade_date,
+};
 
 const CONCEPT_WEIGHT: f64 = 40.0;
 const INDUSTRY_WEIGHT: f64 = 40.0;
@@ -64,21 +66,6 @@ pub(crate) struct StockSimilarityMaps<'a> {
     pub name_map: &'a HashMap<String, String>,
     pub concept_map: &'a HashMap<String, String>,
     pub industry_map: &'a HashMap<String, String>,
-}
-
-fn normalize_ts_code(ts_code: &str) -> String {
-    let normalized = ts_code.trim().to_ascii_uppercase();
-    if normalized.contains('.') {
-        return normalized;
-    }
-
-    if normalized.starts_with("30") || normalized.starts_with("00") {
-        format!("{normalized}.SZ")
-    } else if normalized.starts_with("60") || normalized.starts_with("68") {
-        format!("{normalized}.SH")
-    } else {
-        format!("{normalized}.BJ")
-    }
 }
 
 fn split_match_items(value: &str) -> Vec<String> {
@@ -368,7 +355,7 @@ pub(crate) fn get_stock_similarity_page_with_conn_and_maps(
     limit: Option<u32>,
     maps: StockSimilarityMaps<'_>,
 ) -> Result<StockSimilarityPageData, String> {
-    let normalized_ts_code = normalize_ts_code(ts_code);
+    let normalized_ts_code = canonical_ts_code(ts_code);
     if load_target_summary_row(conn, effective_trade_date, &normalized_ts_code)?.is_none() {
         return Err(format!(
             "未找到 {} 在 {} 的评分结果",

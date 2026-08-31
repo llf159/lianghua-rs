@@ -52,8 +52,8 @@ pub struct CyqChenComputeResult {
     pub bucket_pct: f64,
 }
 
-use super::normalize_trade_date;
-use super::strategy_trigger_similarity::ranking::get_strategy_trigger_similarity_active_config;
+use super::trigger_similarity::ranking::get_strategy_trigger_similarity_active_config;
+use crate::ui_tools::shared::normalize_trade_date;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,7 +87,7 @@ pub struct RankComputeResultContinuity {
 pub struct RankComputeStatus {
     pub source_path: String,
     pub similarity_active_config:
-        Option<super::strategy_trigger_similarity::ranking::StrategyTriggerSimilarityActiveConfig>,
+        Option<super::trigger_similarity::ranking::StrategyTriggerSimilarityActiveConfig>,
     pub strategy_path: String,
     pub source_db: RankComputeDbRange,
     pub result_db: RankComputeDbRange,
@@ -561,7 +561,7 @@ fn query_similarity_rank_range(
 ) -> Result<
     (
         RankComputeDbRange,
-        Option<super::strategy_trigger_similarity::ranking::StrategyTriggerSimilarityActiveConfig>,
+        Option<super::trigger_similarity::ranking::StrategyTriggerSimilarityActiveConfig>,
     ),
     String,
 > {

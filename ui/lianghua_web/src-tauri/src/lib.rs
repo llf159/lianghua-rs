@@ -44,27 +44,22 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 use lianghua_rs::ui_tools::{
-    all_market_monitor::{
-        get_all_market_monitor_snapshot as core_get_all_market_monitor_snapshot,
-        AllMarketMonitorSnapshotData,
-    },
-    chart_indicator_settings::{
+    chart::indicator_settings::{
         get_chart_indicator_settings as core_get_chart_indicator_settings,
         reset_chart_indicator_settings as core_reset_chart_indicator_settings,
         save_chart_indicator_settings as core_save_chart_indicator_settings,
         validate_chart_indicator_settings as core_validate_chart_indicator_settings,
         ChartIndicatorSettingsPayload, ChartIndicatorValidationResult,
     },
-    concept_stock_pick::{
+    data::viewer::{list_stock_lookup_rows as core_list_stock_lookup_rows, StockLookupRow},
+    expression::{
+        get_expression_capabilities as core_get_expression_capabilities, ExpressionCapabilitiesData,
+    },
+    facade::concept_stock_pick::{
         run_concept_stock_pick as core_run_concept_stock_pick,
         StockPickResultData as ConceptStockPickResultData,
     },
-    convolution_rank::{
-        get_convolution_rank_page as core_get_convolution_rank_page,
-        run_convolution_rank_compute as core_run_convolution_rank_compute,
-        ConvolutionRankComputeResult, ConvolutionRankPageData,
-    },
-    cyq_chen::{
+    facade::cyq_chen::{
         activate_cyq_chen_strategy_backup as core_activate_cyq_chen_strategy_backup,
         auto_backup_cyq_chen_strategy_file_on_entry as core_auto_backup_cyq_chen_strategy_file_on_entry,
         backup_cyq_chen_strategy_file as core_backup_cyq_chen_strategy_file,
@@ -80,8 +75,7 @@ use lianghua_rs::ui_tools::{
         CyqChenSingleStockRequest, CyqChenStrategyBackupDiff, CyqChenStrategyFileDraft,
         CyqChenStrategyFileExportResult, CyqChenStrategyPageData,
     },
-    data_viewer::{list_stock_lookup_rows as core_list_stock_lookup_rows, StockLookupRow},
-    details::{
+    facade::details::{
         get_stock_detail_cyq as core_get_stock_detail_cyq,
         get_stock_detail_intraday as core_get_stock_detail_intraday,
         get_stock_detail_intraday_snapshot as core_get_stock_detail_intraday_snapshot,
@@ -95,23 +89,23 @@ use lianghua_rs::ui_tools::{
         StockDetailOverviewData, StockDetailPageData, StockDetailPrevRanksData,
         StockDetailRealtimeData, StockDetailStrategySnapshotData,
     },
-    dragon_tiger::{
-        get_dragon_tiger_market_data as core_get_dragon_tiger_market_data,
-        get_dragon_tiger_seat_statistics as core_get_dragon_tiger_seat_statistics,
-        get_dragon_tiger_stock_detail as core_get_dragon_tiger_stock_detail,
-        DragonTigerMarketData, DragonTigerSeatStatisticsData, DragonTigerStockDetailData,
-    },
-    expression::{
-        ExpressionCapabilitiesData,
-        get_expression_capabilities as core_get_expression_capabilities,
-    },
-    expression_stock_pick::{
+    facade::expression_stock_pick::{
+        run_expression_stock_pick as core_run_expression_stock_pick,
         validate_expression_stock_pick_template_expression as core_validate_expression_stock_pick_template_expression,
         ExpressionStockPickTemplateValidationData,
-        run_expression_stock_pick as core_run_expression_stock_pick,
         StockPickResultData as ExpressionStockPickResultData,
     },
-    intraday_monitor::{
+    market::all_market_monitor::{
+        get_all_market_monitor_snapshot as core_get_all_market_monitor_snapshot,
+        AllMarketMonitorSnapshotData,
+    },
+    market::dragon_tiger::{
+        get_dragon_tiger_market_data as core_get_dragon_tiger_market_data,
+        get_dragon_tiger_seat_statistics as core_get_dragon_tiger_seat_statistics,
+        get_dragon_tiger_stock_detail as core_get_dragon_tiger_stock_detail, DragonTigerMarketData,
+        DragonTigerSeatStatisticsData, DragonTigerStockDetailData,
+    },
+    market::intraday_monitor::{
         get_intraday_monitor_page as core_get_intraday_monitor_page,
         refresh_intraday_monitor_realtime as core_refresh_intraday_monitor_realtime,
         refresh_intraday_monitor_template_tags as core_refresh_intraday_monitor_template_tags,
@@ -119,18 +113,51 @@ use lianghua_rs::ui_tools::{
         IntradayMonitorPageData, IntradayMonitorRankModeConfig, IntradayMonitorRow,
         IntradayMonitorTemplate, IntradayMonitorTemplateValidationData,
     },
-    overview::{
+    market::watch_observe::{
+        hydrate_watch_observe_rows as core_hydrate_watch_observe_rows,
+        normalize_trade_date as core_normalize_watch_observe_trade_date,
+        normalize_ts_code as core_normalize_watch_observe_ts_code,
+        refresh_watch_observe_rows as core_refresh_watch_observe_rows,
+        resolve_current_watch_date as core_resolve_current_watch_observe_date,
+        WatchObserveRow as CoreWatchObserveRow, WatchObserveSnapshotData, WatchObserveStoredRow,
+    },
+    strategy::convolution_rank::{
+        get_convolution_rank_page as core_get_convolution_rank_page,
+        run_convolution_rank_compute as core_run_convolution_rank_compute,
+        ConvolutionRankComputeResult, ConvolutionRankPageData,
+    },
+    strategy::manage::{
+        check_strategy_manage_rule_draft as core_check_strategy_manage_rule_draft,
+        check_strategy_manage_scene_draft as core_check_strategy_manage_scene_draft,
+        create_strategy_manage_rule as core_create_strategy_manage_rule,
+        create_strategy_manage_scene as core_create_strategy_manage_scene,
+        get_strategy_manage_page as core_get_strategy_manage_page,
+        remove_strategy_manage_rules as core_remove_strategy_manage_rules,
+        remove_strategy_manage_scene as core_remove_strategy_manage_scene,
+        save_strategy_manage_refactor_file as core_save_strategy_manage_refactor_file,
+        update_strategy_manage_rule as core_update_strategy_manage_rule,
+        update_strategy_manage_scene as core_update_strategy_manage_scene, StrategyManagePageData,
+        StrategyManageRefactorDraft, StrategyManageRuleDraft, StrategyManageSceneDraft,
+    },
+    strategy::overview::{
         get_scene_rank_overview_page as core_get_scene_rank_overview_page,
         get_scene_rank_trade_date_options as core_get_scene_rank_trade_date_options,
         SceneOverviewPageData,
     },
-    overview_classic::{
+    strategy::overview_classic::{
         get_rank_overview as core_get_rank_overview,
         get_rank_overview_page as core_get_rank_overview_page,
         get_rank_trade_date_options as core_get_rank_trade_date_options, OverviewPageData,
         OverviewRow,
     },
-    ranking_compute::{
+    strategy::paper_validation::{
+        get_strategy_paper_validation_defaults as core_get_strategy_paper_validation_defaults,
+        run_strategy_paper_validation as core_run_strategy_paper_validation,
+        validate_strategy_paper_validation_template_expressions as core_validate_strategy_paper_validation_template_expressions,
+        StrategyPaperValidationData, StrategyPaperValidationDefaultsData,
+        StrategyPaperValidationTemplateValidationData,
+    },
+    strategy::ranking_compute::{
         get_ranking_compute_status as core_get_ranking_compute_status,
         preview_ranking_score_calculation_warnings as core_preview_ranking_score_calculation_warnings,
         run_concept_performance_compute as core_run_concept_performance_compute,
@@ -141,7 +168,7 @@ use lianghua_rs::ui_tools::{
         ConceptPerformanceComputeResult, CyqChenComputeResult, CyqComputeResult,
         RankComputeRunResult, RankComputeStatus,
     },
-    statistics::{
+    strategy::statistics::{
         get_market_analysis as core_get_market_analysis,
         get_market_contribution as core_get_market_contribution,
         get_rule_layer_backtest_defaults as core_get_rule_layer_backtest_defaults,
@@ -161,15 +188,17 @@ use lianghua_rs::ui_tools::{
         MarketAnalysisData, MarketContributionData, RankLayerBacktestData,
         RuleExpressionCalibrationData, RuleExpressionValidationData,
         RuleExpressionValidationManualStrategy, RuleLayerBacktestData,
-        RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig,
-        SceneLayerBacktestData, SceneLayerBacktestDefaultsData, SceneStatisticsPageData,
-        StrategyStatisticsDetailData, StrategyStatisticsPageData, TriggeredStockRow,
+        RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig, SceneLayerBacktestData,
+        SceneLayerBacktestDefaultsData, SceneStatisticsPageData, StrategyStatisticsDetailData,
+        StrategyStatisticsPageData, TriggeredStockRow,
     },
-    stock_pick::{get_stock_pick_options as core_get_stock_pick_options, StockPickOptionsData},
-    stock_similarity::{
+    strategy::stock_pick::{
+        get_stock_pick_options as core_get_stock_pick_options, StockPickOptionsData,
+    },
+    strategy::stock_similarity::{
         get_stock_similarity_page as core_get_stock_similarity_page, StockSimilarityPageData,
     },
-    strategy_trigger_similarity::{
+    strategy::trigger_similarity::{
         get_strategy_trigger_similarity_page as core_get_strategy_trigger_similarity_page,
         list_strategy_trigger_similarity_benchmark_index_codes as core_list_strategy_trigger_similarity_benchmark_index_codes,
         ranking::{
@@ -178,34 +207,6 @@ use lianghua_rs::ui_tools::{
             StrategyTriggerRankingPageData,
         },
         StrategyTriggerSimilarityPageData,
-    },
-    strategy_manage::{
-        check_strategy_manage_rule_draft as core_check_strategy_manage_rule_draft,
-        check_strategy_manage_scene_draft as core_check_strategy_manage_scene_draft,
-        create_strategy_manage_rule as core_create_strategy_manage_rule,
-        create_strategy_manage_scene as core_create_strategy_manage_scene,
-        get_strategy_manage_page as core_get_strategy_manage_page,
-        remove_strategy_manage_rules as core_remove_strategy_manage_rules,
-        remove_strategy_manage_scene as core_remove_strategy_manage_scene,
-        save_strategy_manage_refactor_file as core_save_strategy_manage_refactor_file,
-        update_strategy_manage_rule as core_update_strategy_manage_rule,
-        update_strategy_manage_scene as core_update_strategy_manage_scene, StrategyManagePageData,
-        StrategyManageRefactorDraft, StrategyManageRuleDraft, StrategyManageSceneDraft,
-    },
-    strategy_paper_validation::{
-        get_strategy_paper_validation_defaults as core_get_strategy_paper_validation_defaults,
-        run_strategy_paper_validation as core_run_strategy_paper_validation,
-        validate_strategy_paper_validation_template_expressions as core_validate_strategy_paper_validation_template_expressions,
-        StrategyPaperValidationData, StrategyPaperValidationDefaultsData,
-        StrategyPaperValidationTemplateValidationData,
-    },
-    watch_observe::{
-        hydrate_watch_observe_rows as core_hydrate_watch_observe_rows,
-        normalize_trade_date as core_normalize_watch_observe_trade_date,
-        normalize_ts_code as core_normalize_watch_observe_ts_code,
-        refresh_watch_observe_rows as core_refresh_watch_observe_rows,
-        resolve_current_watch_date as core_resolve_current_watch_observe_date,
-        WatchObserveRow as CoreWatchObserveRow, WatchObserveSnapshotData, WatchObserveStoredRow,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -216,9 +217,8 @@ use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 use data_download_bridge::{
     get_data_download_status, get_indicator_manage_page, run_concept_most_related_repair,
     run_concept_performance_repair, run_data_download, run_dragon_tiger_download,
-    run_missing_stock_repair,
-    run_stock_data_indicator_columns_delete, run_stock_data_indicator_columns_rebuild,
-    run_ths_concept_download, save_indicator_manage_page,
+    run_missing_stock_repair, run_stock_data_indicator_columns_delete,
+    run_stock_data_indicator_columns_rebuild, run_ths_concept_download, save_indicator_manage_page,
 };
 use managed_source_bridge::{
     activate_managed_strategy_backup, allow_import_path,
@@ -867,12 +867,7 @@ async fn get_stock_detail_realtime(
     realtime_provider: Option<String>,
 ) -> Result<StockDetailRealtimeData, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        core_get_stock_detail_realtime(
-            source_path,
-            ts_code,
-            chart_window_days,
-            realtime_provider,
-        )
+        core_get_stock_detail_realtime(source_path, ts_code, chart_window_days, realtime_provider)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1546,9 +1541,7 @@ async fn run_rule_expression_calibration(
     combo_key: String,
 ) -> Result<RuleExpressionCalibrationData, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        run_with_heap_trim(|| {
-            core_run_rule_expression_calibration(continuation_id, combo_key)
-        })
+        run_with_heap_trim(|| core_run_rule_expression_calibration(continuation_id, combo_key))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1841,7 +1834,7 @@ async fn run_cyq_chen_compute(
             "auto_entry",
             "自动备份：运行新筹码计算",
         )
-            .map_err(|error| format!("创建新筹码计算策略快照失败: {error}"))?;
+        .map_err(|error| format!("创建新筹码计算策略快照失败: {error}"))?;
 
         let result = core_run_cyq_chen_compute(
             &source_path,
@@ -2004,8 +1997,12 @@ fn append_cyq_chen_directory_to_zip<W: Write + Seek>(
             zip_writer
                 .add_directory(archive_name, file_options)
                 .map_err(|error| error.to_string())?;
-            backup_count +=
-                append_cyq_chen_directory_to_zip(zip_writer, source_root, &entry_path, archive_root)?;
+            backup_count += append_cyq_chen_directory_to_zip(
+                zip_writer,
+                source_root,
+                &entry_path,
+                archive_root,
+            )?;
             continue;
         }
 
@@ -2063,7 +2060,8 @@ fn export_cyq_chen_strategy_bundle_inner(
         zip_writer
             .start_file(format!("active/{CHIP_CHANGE_RULE_FILE_NAME}"), file_options)
             .map_err(|error| error.to_string())?;
-        let mut source_file = fs::File::open(&active_file_path).map_err(|error| error.to_string())?;
+        let mut source_file =
+            fs::File::open(&active_file_path).map_err(|error| error.to_string())?;
         std::io::copy(&mut source_file, &mut zip_writer).map_err(|error| error.to_string())?;
     }
 

@@ -63,7 +63,7 @@ use crate::{
             calc_scene_layer_metrics_from_db_with_ts_filter,
         },
     },
-    ui_tools::{build_concepts_map, build_name_map, build_total_mv_map, filter_mv},
+    ui_tools::shared::{build_concepts_map, build_name_map, build_total_mv_map, filter_mv},
     utils::utils::board_category,
 };
 

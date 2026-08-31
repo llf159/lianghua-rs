@@ -27,15 +27,14 @@ use crate::{
         load_total_share_map, rt_max_len,
     },
     ui_tools::{
-        build_concepts_map, build_name_map, build_total_mv_map,
         expression::{
             INTRADAY_REALTIME_FIELDS, RT_AVERAGE_PRICE, RT_FALL_FROM_HIGH_PCT, RT_OPEN_CHANGE_PCT,
             RT_VOLUME_RATIO,
         },
-        filter_mv,
-        realtime::{
+        market::realtime::{
             fetch_realtime_quote_map, fetch_tencent_realtime_quote_map, normalize_quote_trade_date,
         },
+        shared::{build_concepts_map, build_name_map, build_total_mv_map, filter_mv},
     },
     utils::utils::board_category,
 };

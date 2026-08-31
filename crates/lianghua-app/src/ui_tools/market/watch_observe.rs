@@ -6,12 +6,14 @@ use std::collections::HashMap;
 use crate::{
     data::{load_trade_date_list, result_db_path, source_db_path},
     ui_tools::{
-        all_market_monitor::{parse_scene_stage_threshold, scene_stage_level},
-        build_concepts_map, build_latest_vol_map, build_name_map,
-        realtime::{RealtimeFetchMeta, fetch_realtime_quote_map},
-        resolve_trade_date,
+        market::realtime::{RealtimeFetchMeta, fetch_realtime_quote_map},
+        shared::{build_concepts_map, build_latest_vol_map, build_name_map, resolve_trade_date},
     },
 };
+
+use super::scene_stage::{level as scene_stage_level, threshold as parse_scene_stage_threshold};
+
+pub use crate::ui_tools::shared::{normalize_trade_date, normalize_ts_code};
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
 
@@ -81,45 +83,6 @@ fn open_source_conn(source_path: &str) -> Result<Connection, String> {
         .to_str()
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
     Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))
-}
-
-pub fn normalize_ts_code(raw: &str) -> Option<String> {
-    let trimmed = raw.trim().to_ascii_uppercase();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if trimmed.contains('.') {
-        return Some(trimmed);
-    }
-
-    let digits: String = trimmed.chars().filter(|ch| ch.is_ascii_digit()).collect();
-    if digits.len() != 6 {
-        return None;
-    }
-
-    let suffix = if digits.starts_with("30") || digits.starts_with("00") {
-        ".SZ"
-    } else if digits.starts_with("60") || digits.starts_with("68") {
-        ".SH"
-    } else {
-        ".BJ"
-    };
-
-    Some(format!("{digits}{suffix}"))
-}
-
-pub fn normalize_trade_date(raw: &str) -> Option<String> {
-    let digits: String = raw
-        .trim()
-        .chars()
-        .filter(|ch| ch.is_ascii_digit())
-        .collect();
-    if digits.len() == 8 {
-        Some(digits)
-    } else {
-        None
-    }
 }
 
 pub fn resolve_watch_date_for_clock(

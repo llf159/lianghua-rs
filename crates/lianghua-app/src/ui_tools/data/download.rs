@@ -50,7 +50,7 @@ use crate::{
     expr::validation::{parse_expression_program, validate_expression_functions},
 };
 
-use super::normalize_trade_date;
+use crate::ui_tools::shared::normalize_trade_date;
 
 const STOCK_DATA_INDICATOR_REBUILD_GROUP_SIZE: usize = 256;
 const STOCK_DATA_INDICATOR_REBUILD_QUEUE_BOUND: usize = 16;

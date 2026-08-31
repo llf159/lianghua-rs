@@ -9,7 +9,7 @@ use crate::data::{
     trade_calendar_path,
 };
 
-use super::data_import::{resolve_source_root, validate_target_relative_path};
+use super::import::{resolve_source_root, validate_target_relative_path};
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

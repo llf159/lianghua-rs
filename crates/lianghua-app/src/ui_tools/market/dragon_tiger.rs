@@ -3,7 +3,7 @@ use std::path::Path;
 use duckdb::{Connection, params};
 use serde::Serialize;
 
-use crate::{data::dragon_tiger_db_path, ui_tools::normalize_trade_date};
+use crate::{data::dragon_tiger_db_path, ui_tools::shared::normalize_trade_date};
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DragonTigerMarketSummary {

@@ -2256,16 +2256,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lh_market_analyze"
-version = "0.1.0"
-dependencies = [
- "csv",
- "duckdb",
- "serde",
- "toml 0.9.11+spec-1.1.0",
-]
-
-[[package]]
 name = "lianghua-app"
 version = "0.1.0"
 dependencies = [

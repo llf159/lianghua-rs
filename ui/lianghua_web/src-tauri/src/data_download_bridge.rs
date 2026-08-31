@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use lianghua_rs::{
     download::runner::DownloadProgress as CoreDownloadProgress,
-    ui_tools::data_download::{
+    ui_tools::data::download::{
         get_data_download_status as core_get_data_download_status,
         get_indicator_manage_page as core_get_indicator_manage_page,
         prepare_concept_most_related_repair_run as core_prepare_concept_most_related_repair_run,
@@ -26,8 +26,8 @@ use lianghua_rs::{
         ConceptPerformanceRepairRunInput as CoreConceptPerformanceRepairRunInput,
         DataDownloadRunInput as CoreDataDownloadRunInput, DataDownloadRunResult,
         DataDownloadStatus, DragonTigerDownloadRunInput as CoreDragonTigerDownloadRunInput,
-        IndicatorManageDraft as CoreIndicatorManageDraft,
-        IndicatorManagePageData, MissingStockRepairRunInput as CoreMissingStockRepairRunInput,
+        IndicatorManageDraft as CoreIndicatorManageDraft, IndicatorManagePageData,
+        MissingStockRepairRunInput as CoreMissingStockRepairRunInput,
         StockDataIndicatorColumnsDeleteRunInput as CoreStockDataIndicatorColumnsDeleteRunInput,
         StockDataIndicatorColumnsRebuildRunInput as CoreStockDataIndicatorColumnsRebuildRunInput,
         ThsConceptDownloadRunInput as CoreThsConceptDownloadRunInput,

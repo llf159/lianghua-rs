@@ -45,6 +45,9 @@ The dependency graph must remain acyclic. In particular:
 - Tauri-specific commands, filesystem plugins, and dialogs stay in
   `ui/lianghua_web/src-tauri`.
 
+应用层内部的模块边界和兼容策略详见
+[`ui-tools-architecture.md`](ui-tools-architecture.md)。
+
 ## Compatibility policy
 
 `src/lib.rs` re-exports the workspace crates under their historical module

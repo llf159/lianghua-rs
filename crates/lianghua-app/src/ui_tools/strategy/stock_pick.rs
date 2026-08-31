@@ -25,7 +25,7 @@ use crate::{
     utils::utils::board_category,
 };
 
-use super::{
+use crate::ui_tools::shared::{
     build_area_map, build_concepts_map, build_industry_map, build_name_map, build_total_mv_map,
     filter_mv,
 };
