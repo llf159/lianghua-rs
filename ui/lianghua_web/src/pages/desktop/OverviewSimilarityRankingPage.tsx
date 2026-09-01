@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import { listRankTradeDates } from '../../apis/reader'
@@ -7,14 +7,11 @@ import {
   type StrategyTriggerRankingPageData,
 } from '../../apis/strategyTriggerSimilarity'
 import DetailsLink from '../../shared/DetailsLink'
-import {
-  filterBoardItems,
-  isStBoard,
-  useConceptExclusions,
-} from '../../shared/conceptExclusions'
+import { filterBoardItems, isStBoard, useConceptExclusions } from '../../shared/conceptExclusions'
 import { STOCK_PICK_BOARD_OPTIONS } from '../../shared/stockPickShared'
 import { readStoredDefaultBoardFilter } from '../../shared/defaultBoardFilter'
 import { normalizeTradeDates, pickDateValue } from '../../shared/tradeDate'
+import StickyHorizontalTable from '../../shared/StickyHorizontalTable'
 import './css/StrategyTriggerSimilarityPage.css'
 import './css/OverviewScenePage.css'
 
@@ -34,9 +31,7 @@ function formatElapsed(value: number | null | undefined) {
 }
 
 function formatGeneratedAt(value: number | null | undefined) {
-  return typeof value === 'number' && Number.isFinite(value)
-    ? new Date(value * 1000).toLocaleString()
-    : '--'
+  return typeof value === 'number' && Number.isFinite(value) ? new Date(value * 1000).toLocaleString() : '--'
 }
 
 function outcomeTone(value: number | null | undefined) {
@@ -56,11 +51,15 @@ export default function OverviewSimilarityRankingPage() {
   const [boardFilter, setBoardFilter] = useState(() => readStoredDefaultBoardFilter())
   const [totalMvMinInput, setTotalMvMinInput] = useState('')
   const [totalMvMaxInput, setTotalMvMaxInput] = useState('')
+  const initialAutoReadFiltersRef = useRef({
+    board:
+      boardFilter === '全部' || (excludeStBoard && isStBoard(boardFilter))
+        ? undefined
+        : boardFilter,
+    excludeStBoard: excludeStBoard || undefined,
+  })
 
-  const boardOptions = useMemo(
-    () => filterBoardItems(STOCK_PICK_BOARD_OPTIONS, excludeStBoard),
-    [excludeStBoard],
-  )
+  const boardOptions = useMemo(() => filterBoardItems(STOCK_PICK_BOARD_OPTIONS, excludeStBoard), [excludeStBoard])
 
   useEffect(() => {
     if (excludeStBoard && isStBoard(boardFilter)) {
@@ -110,6 +109,8 @@ export default function OverviewSimilarityRankingPage() {
             sourcePath: path,
             tradeDate: initialTradeDate,
             limit: 100,
+            board: initialAutoReadFiltersRef.current.board,
+            excludeStBoard: initialAutoReadFiltersRef.current.excludeStBoard,
           })
           if (!cancelled) setData(initialData)
         }
@@ -165,11 +166,7 @@ export default function OverviewSimilarityRankingPage() {
       totalMvMax = parsedMax
     }
 
-    if (
-      totalMvMin !== undefined &&
-      totalMvMax !== undefined &&
-      totalMvMin > totalMvMax
-    ) {
+    if (totalMvMin !== undefined && totalMvMax !== undefined && totalMvMin > totalMvMax) {
       setError('总市值最小值不能大于最大值')
       setLoading(false)
       return
@@ -194,6 +191,28 @@ export default function OverviewSimilarityRankingPage() {
     }
   }
 
+  function renderRankingHead(accessible: boolean) {
+    return (
+      <thead aria-hidden={accessible ? undefined : true}>
+        <tr>
+          <th>排名</th>
+          <th>股票</th>
+          <th>板块</th>
+          <th>总市值(亿)</th>
+          <th>预测分</th>
+          <th>收缩超额</th>
+          <th>超额胜率</th>
+          <th>收益 / 超额</th>
+          <th>MFE / MAE</th>
+          <th>置信度</th>
+          <th>相似度</th>
+          <th>三日优排名</th>
+          <th>代表历史事件</th>
+        </tr>
+      </thead>
+    )
+  }
+
   return (
     <div className="trigger-sim-page">
       <section className="trigger-sim-card trigger-sim-query-card">
@@ -207,7 +226,11 @@ export default function OverviewSimilarityRankingPage() {
           <label className="overview-field">
             <span>排名日期</span>
             <select value={tradeDate} onChange={(event) => setTradeDate(event.target.value)}>
-              {dateOptions.map((date) => <option key={date} value={date}>{date}</option>)}
+              {dateOptions.map((date) => (
+                <option key={date} value={date}>
+                  {date}
+                </option>
+              ))}
             </select>
           </label>
           <label className="overview-field">
@@ -225,11 +248,7 @@ export default function OverviewSimilarityRankingPage() {
             <span>板块筛选</span>
             <select
               value={boardFilter}
-              onChange={(event) =>
-                setBoardFilter(
-                  event.target.value as (typeof STOCK_PICK_BOARD_OPTIONS)[number],
-                )
-              }
+              onChange={(event) => setBoardFilter(event.target.value as (typeof STOCK_PICK_BOARD_OPTIONS)[number])}
             >
               {boardOptions.map((board) => (
                 <option key={board} value={board}>
@@ -275,55 +294,92 @@ export default function OverviewSimilarityRankingPage() {
       {data?.isFresh ? (
         <section className="trigger-sim-card trigger-sim-ranking-card">
           <div className="trigger-sim-result-head">
-            <div><h3>{data.resolvedTradeDate} 全市场排名</h3><p>历史截止 {data.historicalCutoffDate} · 生成于 {formatGeneratedAt(data.generatedAtEpochSeconds)}</p></div>
+            <div>
+              <h3>{data.resolvedTradeDate} 全市场排名</h3>
+              <p>
+                历史截止 {data.historicalCutoffDate} · 生成于 {formatGeneratedAt(data.generatedAtEpochSeconds)}
+              </p>
+            </div>
             <span>耗时 {formatElapsed(data.elapsedMs)}</span>
           </div>
           <div className="trigger-sim-engine-meta">
-            <span>股票池 {data.universeCount}</span><span>有效排名 {data.rankedCount}</span>
-            <span>历史模板 {data.evaluatedAnchorCount} / {data.candidateAnchorCount}</span>
-            <span>窗口 {data.windowTradeDays} · 池化 {data.poolSegments} · 后验 {data.outcomeTradeDays}</span>
-            <span>基准 {data.benchmarkIndexCode}</span><span>实时水位核验通过</span>
+            <span>股票池 {data.universeCount}</span>
+            <span>有效排名 {data.rankedCount}</span>
+            <span>
+              历史模板 {data.evaluatedAnchorCount} / {data.candidateAnchorCount}
+            </span>
+            <span>
+              窗口 {data.windowTradeDays} · 池化 {data.poolSegments} · 后验 {data.outcomeTradeDays}
+            </span>
+            <span>基准 {data.benchmarkIndexCode}</span>
+            <span>实时水位核验通过</span>
           </div>
-          <div className="trigger-sim-ranking-scroll">
+          <StickyHorizontalTable
+            scrollClassName="trigger-sim-ranking-scroll"
+            stickyHeader={
+              <table className="trigger-sim-table trigger-sim-ranking-table">{renderRankingHead(true)}</table>
+            }
+          >
             <table className="trigger-sim-table trigger-sim-ranking-table">
-              <thead><tr><th>排名</th><th>股票</th><th>板块</th><th>总市值(亿)</th><th>预测分</th><th>收缩超额</th><th>超额胜率</th><th>收益 / 超额</th><th>MFE / MAE</th><th>置信度</th><th>相似度</th><th>三日优排名</th><th>代表历史事件</th></tr></thead>
-              <tbody>{data.items.map((row) => (
-                <tr key={row.tsCode}>
-                  <td>{row.rank ?? '--'}</td>
-                  <td><DetailsLink className="trigger-sim-stock-link" tsCode={row.tsCode} tradeDate={data.resolvedTradeDate} sourcePath={sourcePath} navigationItems={navigationItems}><strong>{row.name || row.tsCode}</strong><span>{row.tsCode}</span></DetailsLink></td>
-                  <td>{row.board || '--'}</td>
-                  <td>{formatNumber(row.totalMvYi, 2)}</td>
-                  <td>{formatNumber(row.rankingScore)}</td>
-                  <td className={outcomeTone(row.shrunkExcessReturnPct)}>{formatPercent(row.shrunkExcessReturnPct)}</td>
-                  <td>{formatPercent(row.excessPositiveRate, 1)}</td>
-                  <td>{formatPercent(row.expectedReturnPct)} / {formatPercent(row.expectedExcessReturnPct)}</td>
-                  <td>{formatPercent(row.expectedMfePct)} / {formatPercent(row.expectedMaePct)}</td>
-                  <td>{formatPercent(row.confidence * 100, 1)}</td>
-                  <td>{formatNumber(row.averageSimilarity)} / {formatNumber(row.bestSimilarity)}</td>
-                  <td>{row.bestRank3d ?? '--'}</td>
-                  <td>
-                    {row.topMatches[0] ? (
+              {renderRankingHead(false)}
+              <tbody>
+                {data.items.map((row) => (
+                  <tr key={row.tsCode}>
+                    <td>{row.rank ?? '--'}</td>
+                    <td>
                       <DetailsLink
-                        className="trigger-sim-stock-link trigger-sim-history-link"
-                        tsCode={row.topMatches[0].tsCode}
-                        tradeDate={row.topMatches[0].candidateEndTradeDate}
-                        intervalStartTradeDate={row.topMatches[0].candidateStartTradeDate}
-                        intervalEndTradeDate={row.topMatches[0].candidateEndTradeDate}
+                        className="trigger-sim-stock-link"
+                        tsCode={row.tsCode}
+                        tradeDate={data.resolvedTradeDate}
                         sourcePath={sourcePath}
-                        navigationItems={historicalNavigationItems}
-                        title={`查看 ${row.topMatches[0].name || row.topMatches[0].tsCode} 历史事件详情`}
+                        navigationItems={navigationItems}
                       >
-                        <strong>{row.topMatches[0].name || row.topMatches[0].tsCode}</strong>
-                        <span>{row.topMatches[0].candidateEndTradeDate}</span>
+                        <strong>{row.name || row.tsCode}</strong>
+                        <span>{row.tsCode}</span>
                       </DetailsLink>
-                    ) : (
-                      '--'
-                    )}
-                  </td>
-                </tr>
-              ))}</tbody>
+                    </td>
+                    <td>{row.board || '--'}</td>
+                    <td>{formatNumber(row.totalMvYi, 2)}</td>
+                    <td>{formatNumber(row.rankingScore)}</td>
+                    <td className={outcomeTone(row.shrunkExcessReturnPct)}>
+                      {formatPercent(row.shrunkExcessReturnPct)}
+                    </td>
+                    <td>{formatPercent(row.excessPositiveRate, 1)}</td>
+                    <td>
+                      {formatPercent(row.expectedReturnPct)} / {formatPercent(row.expectedExcessReturnPct)}
+                    </td>
+                    <td>
+                      {formatPercent(row.expectedMfePct)} / {formatPercent(row.expectedMaePct)}
+                    </td>
+                    <td>{formatPercent(row.confidence * 100, 1)}</td>
+                    <td>
+                      {formatNumber(row.averageSimilarity)} / {formatNumber(row.bestSimilarity)}
+                    </td>
+                    <td>{row.bestRank3d ?? '--'}</td>
+                    <td>
+                      {row.topMatches[0] ? (
+                        <DetailsLink
+                          className="trigger-sim-stock-link trigger-sim-history-link"
+                          tsCode={row.topMatches[0].tsCode}
+                          tradeDate={row.topMatches[0].candidateEndTradeDate}
+                          intervalStartTradeDate={row.topMatches[0].candidateStartTradeDate}
+                          intervalEndTradeDate={row.topMatches[0].candidateEndTradeDate}
+                          sourcePath={sourcePath}
+                          navigationItems={historicalNavigationItems}
+                          title={`查看 ${row.topMatches[0].name || row.topMatches[0].tsCode} 历史事件详情`}
+                        >
+                          <strong>{row.topMatches[0].name || row.topMatches[0].tsCode}</strong>
+                          <span>{row.topMatches[0].candidateEndTradeDate}</span>
+                        </DetailsLink>
+                      ) : (
+                        '--'
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
             </table>
-          </div>
+          </StickyHorizontalTable>
         </section>
       ) : (
         <section className="trigger-sim-card">

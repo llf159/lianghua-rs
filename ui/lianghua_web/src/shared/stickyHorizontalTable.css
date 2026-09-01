@@ -1,0 +1,25 @@
+.sticky-horizontal-table-shell {
+  display: grid;
+  min-width: 0;
+}
+
+.sticky-horizontal-table-shell > :first-child,
+.sticky-horizontal-table-shell > :last-child {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+
+.sticky-horizontal-table-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  align-self: start;
+  width: calc(100% - 2px);
+  margin: 1px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.sticky-horizontal-table-head table thead {
+  position: static;
+}

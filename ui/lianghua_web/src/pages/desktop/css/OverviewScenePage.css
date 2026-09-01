@@ -383,9 +383,10 @@
   position: sticky;
   top: 0;
   z-index: 1;
-  background: linear-gradient(180deg, #fff8f1 0%, #ffedd5 100%);
-  color: #7c2d12;
-  font-weight: 700;
+  background: #f7f9fc;
+  color: #4b5563;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .overview-table tbody tr:nth-child(2n) {
@@ -398,6 +399,42 @@
 
 .overview-table tbody tr:last-child td {
   border-bottom: 0;
+}
+
+.overview-table-pinned-stock th:nth-child(1),
+.overview-table-pinned-stock td:nth-child(1) {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  width: 50px;
+  min-width: 50px;
+  background-color: #fff;
+  box-shadow: 1px 0 0 #e6ebf2;
+}
+
+.overview-table-pinned-stock th:nth-child(2),
+.overview-table-pinned-stock td:nth-child(2) {
+  position: sticky;
+  left: 50px;
+  z-index: 2;
+  width: 120px;
+  min-width: 120px;
+  max-width: 120px;
+  background-color: #fff;
+  box-shadow: 1px 0 0 #e6ebf2;
+}
+
+.overview-table-pinned-stock tbody tr:nth-child(2n) td:nth-child(-n + 2) {
+  background-color: #fcfdff;
+}
+
+.overview-table-pinned-stock tbody tr:hover td:nth-child(-n + 2) {
+  background-color: #fff7ed;
+}
+
+.overview-table-pinned-stock thead th:nth-child(-n + 2) {
+  z-index: 3;
+  background: #f7f9fc;
 }
 
 .overview-sort-button {
@@ -448,6 +485,23 @@
   outline: 2px solid var(--theme-orange-300);
   outline-offset: 2px;
   border-radius: 2px;
+}
+
+.overview-stock-identity-link {
+  display: grid;
+  gap: 2px;
+}
+
+.overview-stock-identity-link strong {
+  overflow: hidden;
+  color: #1f2a37;
+  font-weight: 600;
+  text-overflow: ellipsis;
+}
+
+.overview-stock-identity-link span {
+  color: #66758a;
+  font-size: 12px;
 }
 
 .overview-cell-positive {

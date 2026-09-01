@@ -287,6 +287,8 @@ type ChartIntervalDragTarget = ChartIntervalAdjustSide | "move";
 type ScrollSnapshot = {
   left: number;
   top: number;
+  chartEdge: "top" | "bottom" | null;
+  chartEdgeViewportOffset: number | null;
 };
 
 type StrategyCompareSnapshot = {
@@ -900,6 +902,33 @@ function getContentScrollElement() {
   return document.querySelector<HTMLElement>(
     '[data-details-scroll-root="true"], .content',
   );
+}
+
+function captureContentScroll(chartCard: HTMLElement | null): ScrollSnapshot {
+  const contentElement = getContentScrollElement();
+  const chartRect = chartCard?.getBoundingClientRect();
+  const contentRect = contentElement?.getBoundingClientRect();
+  const viewportTop = contentRect?.top ?? 0;
+  const viewportBottom = contentRect?.bottom ?? window.innerHeight;
+  const chartEdge = chartRect
+    ? chartRect.bottom <= viewportTop
+      ? "bottom"
+      : chartRect.top < viewportBottom && chartRect.bottom > viewportTop
+        ? "top"
+        : null
+    : null;
+
+  return {
+    left: contentElement?.scrollLeft ?? window.scrollX,
+    top: contentElement?.scrollTop ?? window.scrollY,
+    chartEdge,
+    chartEdgeViewportOffset:
+      chartEdge === "bottom"
+        ? chartRect?.bottom ?? null
+        : chartEdge === "top"
+          ? chartRect?.top ?? null
+          : null,
+  };
 }
 
 function buildRankValue(rank: unknown, total: unknown) {
@@ -6239,16 +6268,38 @@ export default function DetailsPage({
     }
 
     const contentElement = getContentScrollElement();
+    const chartRect = chartCardRef.current?.getBoundingClientRect();
+    const currentChartEdgeOffset =
+      pendingScroll.chartEdge === "bottom"
+        ? chartRect?.bottom
+        : pendingScroll.chartEdge === "top"
+          ? chartRect?.top
+          : undefined;
+    const scrollDelta =
+      currentChartEdgeOffset !== undefined &&
+      pendingScroll.chartEdgeViewportOffset !== null
+        ? currentChartEdgeOffset - pendingScroll.chartEdgeViewportOffset
+        : null;
     if (contentElement) {
       contentElement.scrollTo({
         left: pendingScroll.left,
-        top: pendingScroll.top,
+        top:
+          scrollDelta === null
+            ? pendingScroll.top
+            : contentElement.scrollTop + scrollDelta,
       });
     } else {
-      window.scrollTo(pendingScroll.left, pendingScroll.top);
+      window.scrollTo(
+        pendingScroll.left,
+        scrollDelta === null ? pendingScroll.top : window.scrollY + scrollDelta,
+      );
     }
-    pendingPageScrollRef.current = null;
+    if (!detailIndicatorsLoading) {
+      pendingPageScrollRef.current = null;
+    }
   }, [
+    chartShellHeight,
+    detailIndicatorsLoading,
     detailLoading,
     detailData?.resolved_trade_date,
     detailData?.resolved_ts_code,
@@ -7472,10 +7523,7 @@ export default function DetailsPage({
       return;
     }
 
-    const contentElement = getContentScrollElement();
-    pendingPageScrollRef.current = contentElement
-      ? { left: contentElement.scrollLeft, top: contentElement.scrollTop }
-      : { left: window.scrollX, top: window.scrollY };
+    pendingPageScrollRef.current = captureContentScroll(chartCardRef.current);
     const nextCompareSnapshot =
       detailData && resolvedTradeDate !== "--"
         ? {
@@ -7527,10 +7575,7 @@ export default function DetailsPage({
         return;
       }
 
-      const contentElement = getContentScrollElement();
-      pendingPageScrollRef.current = contentElement
-        ? { left: contentElement.scrollLeft, top: contentElement.scrollTop }
-        : { left: window.scrollX, top: window.scrollY };
+      pendingPageScrollRef.current = captureContentScroll(chartCardRef.current);
       autoFillTopRef.current = false;
       setSourcePath(nextSourcePath);
       setLookupInput(target.name?.trim() || nextCode);

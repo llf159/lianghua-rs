@@ -6,12 +6,7 @@ import {
   type SceneOverviewPageQuery,
   type SceneOverviewRow,
 } from '../../apis/reader'
-import {
-  filterBoardItems,
-  formatConceptText,
-  isStBoard,
-  useConceptExclusions,
-} from '../../shared/conceptExclusions'
+import { filterBoardItems, formatConceptText, isStBoard, useConceptExclusions } from '../../shared/conceptExclusions'
 import { STOCK_PICK_BOARD_OPTIONS } from '../../shared/stockPickShared'
 import { readStoredDefaultBoardFilter } from '../../shared/defaultBoardFilter'
 import DetailsLink from '../../shared/DetailsLink'
@@ -25,6 +20,7 @@ import {
 import { useRouteScrollRegion } from '../../shared/routeScroll'
 import { readJsonStorage, readStoredSourcePath, writeJsonStorage } from '../../shared/storage'
 import { DEFAULT_DATE_OPTION, normalizeTradeDates, pickDateValue } from '../../shared/tradeDate'
+import StickyHorizontalTable from '../../shared/StickyHorizontalTable'
 import './css/OverviewScenePage.css'
 
 const OVERVIEW_PAGE_STATE_KEY = 'lh_scene_overview_page_state'
@@ -32,9 +28,8 @@ const OVERVIEW_PAGE_FILTER_STATE_KEY = 'lh_scene_overview_page_filter_state_v2'
 const OVERVIEW_PAGE_RESULT_STATE_KEY = 'lh_scene_overview_page_result_state_v2'
 const VISIBLE_COLUMNS = [
   'rank',
-  'total_rank',
-  'ts_code',
   'name',
+  'total_rank',
   'total_mv_yi',
   'board',
   'scene_score',
@@ -74,14 +69,12 @@ type PersistedSceneOverviewResultState = {
   lastConfig: AppliedConfig | null
 }
 
-type PersistedSceneOverviewState = PersistedSceneOverviewFilterState &
-  PersistedSceneOverviewResultState
+type PersistedSceneOverviewState = PersistedSceneOverviewFilterState & PersistedSceneOverviewResultState
 
 const COLUMN_LABELS: Record<VisibleColumn, string> = {
   rank: '排名',
+  name: '股票',
   total_rank: '当日总榜排名',
-  ts_code: '代码',
-  name: '名称',
   total_mv_yi: '总市值(亿)',
   board: '板块',
   scene_score: '场景分',
@@ -91,10 +84,9 @@ const COLUMN_LABELS: Record<VisibleColumn, string> = {
 }
 
 const COLUMN_WIDTHS: Record<VisibleColumn, number> = {
-  rank: 64,
+  rank: 50,
+  name: 120,
   total_rank: 124,
-  ts_code: 120,
-  name: 108,
   total_mv_yi: 110,
   board: 108,
   scene_score: 96,
@@ -110,11 +102,7 @@ function formatNumber(value?: number | null, digits = 2) {
   return Number.isInteger(value) ? String(value) : value.toFixed(digits)
 }
 
-function formatCell(
-  key: VisibleColumn,
-  row: SceneOverviewRow,
-  excludedConcepts: readonly string[],
-) {
+function formatCell(key: VisibleColumn, row: SceneOverviewRow, excludedConcepts: readonly string[]) {
   if (key === 'concept') {
     return formatConceptText(row.concept, excludedConcepts)
   }
@@ -142,17 +130,14 @@ function formatCell(
 }
 
 function isSortableColumn(key: VisibleColumn) {
-  return key !== 'ts_code' && key !== 'name' && key !== 'concept'
+  return key !== 'name' && key !== 'concept'
 }
 
 export default function OverviewScenePage() {
   const { excludedConcepts, excludeStBoard } = useConceptExclusions()
   const persistedState = useMemo(() => {
     const storage = typeof window === 'undefined' ? null : window.sessionStorage
-    const parsed = readJsonStorage<Partial<PersistedSceneOverviewState>>(
-      storage,
-      OVERVIEW_PAGE_STATE_KEY,
-    )
+    const parsed = readJsonStorage<Partial<PersistedSceneOverviewState>>(storage, OVERVIEW_PAGE_STATE_KEY)
     const filterState = readJsonStorage<Partial<PersistedSceneOverviewFilterState>>(
       storage,
       OVERVIEW_PAGE_FILTER_STATE_KEY,
@@ -177,7 +162,8 @@ export default function OverviewScenePage() {
       limitInput: typeof merged.limitInput === 'string' ? merged.limitInput : '100',
       boardFilter:
         merged.defaultBoardFilter === readStoredDefaultBoardFilter() &&
-        merged.boardFilter && STOCK_PICK_BOARD_OPTIONS.includes(merged.boardFilter)
+        merged.boardFilter &&
+        STOCK_PICK_BOARD_OPTIONS.includes(merged.boardFilter)
           ? merged.boardFilter
           : readStoredDefaultBoardFilter(),
       defaultBoardFilter: readStoredDefaultBoardFilter(),
@@ -185,46 +171,25 @@ export default function OverviewScenePage() {
       totalMvMaxInput: typeof merged.totalMvMaxInput === 'string' ? merged.totalMvMaxInput : '',
       rows: Array.isArray(merged.rows) ? merged.rows : [],
       dateOptions: Array.isArray(merged.dateOptions) ? merged.dateOptions : [],
-      selectedSceneName:
-        typeof merged.selectedSceneName === 'string' ? merged.selectedSceneName : '',
-      lastConfig:
-        merged.lastConfig && typeof merged.lastConfig === 'object'
-          ? merged.lastConfig
-          : null,
+      selectedSceneName: typeof merged.selectedSceneName === 'string' ? merged.selectedSceneName : '',
+      lastConfig: merged.lastConfig && typeof merged.lastConfig === 'object' ? merged.lastConfig : null,
       sortKey: typeof merged.sortKey === 'string' ? merged.sortKey : null,
-      sortDirection:
-        merged.sortDirection === 'desc' || merged.sortDirection === 'asc'
-          ? merged.sortDirection
-          : null,
+      sortDirection: merged.sortDirection === 'desc' || merged.sortDirection === 'asc' ? merged.sortDirection : null,
     } satisfies PersistedSceneOverviewState
   }, [])
 
-  const [sourcePath, setSourcePath] = useState(
-    () => persistedState?.sourcePath ?? readStoredSourcePath(),
-  )
-  const [rankDateInput, setRankDateInput] = useState(
-    () => persistedState?.rankDateInput ?? '',
-  )
+  const [sourcePath, setSourcePath] = useState(() => persistedState?.sourcePath ?? readStoredSourcePath())
+  const [rankDateInput, setRankDateInput] = useState(() => persistedState?.rankDateInput ?? '')
   const [limitInput, setLimitInput] = useState(() => persistedState?.limitInput ?? '100')
-  const [boardFilter, setBoardFilter] = useState<
-    (typeof STOCK_PICK_BOARD_OPTIONS)[number]
-  >(() => persistedState?.boardFilter ?? readStoredDefaultBoardFilter())
-  const [totalMvMinInput, setTotalMvMinInput] = useState(
-    () => persistedState?.totalMvMinInput ?? '',
+  const [boardFilter, setBoardFilter] = useState<(typeof STOCK_PICK_BOARD_OPTIONS)[number]>(
+    () => persistedState?.boardFilter ?? readStoredDefaultBoardFilter(),
   )
-  const [totalMvMaxInput, setTotalMvMaxInput] = useState(
-    () => persistedState?.totalMvMaxInput ?? '',
-  )
+  const [totalMvMinInput, setTotalMvMinInput] = useState(() => persistedState?.totalMvMinInput ?? '')
+  const [totalMvMaxInput, setTotalMvMaxInput] = useState(() => persistedState?.totalMvMaxInput ?? '')
   const [rows, setRows] = useState<SceneOverviewRow[]>(() => persistedState?.rows ?? [])
-  const [dateOptions, setDateOptions] = useState<string[]>(
-    () => persistedState?.dateOptions ?? [],
-  )
-  const [selectedSceneName, setSelectedSceneName] = useState(
-    () => persistedState?.selectedSceneName ?? '',
-  )
-  const [lastConfig, setLastConfig] = useState<AppliedConfig | null>(
-    () => persistedState?.lastConfig ?? null,
-  )
+  const [dateOptions, setDateOptions] = useState<string[]>(() => persistedState?.dateOptions ?? [])
+  const [selectedSceneName, setSelectedSceneName] = useState(() => persistedState?.selectedSceneName ?? '')
+  const [lastConfig, setLastConfig] = useState<AppliedConfig | null>(() => persistedState?.lastConfig ?? null)
   const [loading, setLoading] = useState(false)
   const [dateOptionsLoading, setDateOptionsLoading] = useState(false)
   const [error, setError] = useState('')
@@ -287,15 +252,49 @@ export default function OverviewScenePage() {
     direction: persistedState?.sortDirection ?? null,
   })
 
-  const tableMinWidth = useMemo(
-    () => VISIBLE_COLUMNS.reduce((total, key) => total + COLUMN_WIDTHS[key], 0),
-    [],
-  )
+  const tableMinWidth = useMemo(() => VISIBLE_COLUMNS.reduce((total, key) => total + COLUMN_WIDTHS[key], 0), [])
   const tableWrapRef = useRouteScrollRegion<HTMLDivElement>('scene-overview-table', [
     sortedRows.length,
     tableMinWidth,
     selectedSceneName,
   ])
+
+  function renderSceneColGroup() {
+    return (
+      <colgroup>
+        {VISIBLE_COLUMNS.map((key) => (
+          <col key={key} style={{ width: `${COLUMN_WIDTHS[key]}px` }} />
+        ))}
+      </colgroup>
+    )
+  }
+
+  function renderSceneHead(interactive: boolean) {
+    return (
+      <thead aria-hidden={interactive ? undefined : true}>
+        <tr>
+          {VISIBLE_COLUMNS.map((key) => {
+            if (!interactive || !isSortableColumn(key)) {
+              return <th key={key}>{COLUMN_LABELS[key]}</th>
+            }
+            const isActive = sortKey === key && sortDirection !== null
+            return (
+              <th key={key} aria-sort={getAriaSort(isActive, sortDirection)}>
+                <TableSortButton
+                  label={COLUMN_LABELS[key]}
+                  isActive={isActive}
+                  direction={sortDirection}
+                  onClick={() => toggleSort(key)}
+                  title={`按${COLUMN_LABELS[key]}排序`}
+                />
+              </th>
+            )
+          })}
+        </tr>
+      </thead>
+    )
+  }
+
   const detailNavigationItems = sortedRows.map((row) => ({
     tsCode: row.ts_code,
     tradeDate: typeof row.trade_date === 'string' ? row.trade_date : null,
@@ -324,22 +323,18 @@ export default function OverviewScenePage() {
   }, [boardFilter, excludeStBoard])
 
   useEffect(() => {
-    writeJsonStorage(
-      typeof window === 'undefined' ? null : window.sessionStorage,
-      OVERVIEW_PAGE_FILTER_STATE_KEY,
-      {
-        sourcePath,
-        rankDateInput,
-        limitInput,
-        boardFilter,
-        defaultBoardFilter: readStoredDefaultBoardFilter(),
-        totalMvMinInput,
-        totalMvMaxInput,
-        selectedSceneName,
-        sortKey,
-        sortDirection,
-      } satisfies PersistedSceneOverviewFilterState,
-    )
+    writeJsonStorage(typeof window === 'undefined' ? null : window.sessionStorage, OVERVIEW_PAGE_FILTER_STATE_KEY, {
+      sourcePath,
+      rankDateInput,
+      limitInput,
+      boardFilter,
+      defaultBoardFilter: readStoredDefaultBoardFilter(),
+      totalMvMinInput,
+      totalMvMaxInput,
+      selectedSceneName,
+      sortKey,
+      sortDirection,
+    } satisfies PersistedSceneOverviewFilterState)
   }, [
     sourcePath,
     rankDateInput,
@@ -353,15 +348,11 @@ export default function OverviewScenePage() {
   ])
 
   useEffect(() => {
-    writeJsonStorage(
-      typeof window === 'undefined' ? null : window.sessionStorage,
-      OVERVIEW_PAGE_RESULT_STATE_KEY,
-      {
-        rows,
-        dateOptions,
-        lastConfig,
-      } satisfies PersistedSceneOverviewResultState,
-    )
+    writeJsonStorage(typeof window === 'undefined' ? null : window.sessionStorage, OVERVIEW_PAGE_RESULT_STATE_KEY, {
+      rows,
+      dateOptions,
+      lastConfig,
+    } satisfies PersistedSceneOverviewResultState)
   }, [rows, dateOptions, lastConfig])
 
   useEffect(() => {
@@ -442,11 +433,7 @@ export default function OverviewScenePage() {
       totalMvMax = parsedMax
     }
 
-    if (
-      totalMvMin !== undefined &&
-      totalMvMax !== undefined &&
-      totalMvMin > totalMvMax
-    ) {
+    if (totalMvMin !== undefined && totalMvMax !== undefined && totalMvMin > totalMvMax) {
       setError('总市值最小值不能大于最大值')
       return
     }
@@ -478,9 +465,7 @@ export default function OverviewScenePage() {
 
       const nextSceneNames = [...new Set(nextRows.map((row) => row.scene_name).filter(Boolean))]
       setRows(nextRows)
-      setSelectedSceneName((current) =>
-        nextSceneNames.includes(current) ? current : (nextSceneNames[0] ?? ''),
-      )
+      setSelectedSceneName((current) => (nextSceneNames.includes(current) ? current : (nextSceneNames[0] ?? '')))
       setLastConfig({
         rankDate: resolvedRankDate,
         limit: limit ?? null,
@@ -497,15 +482,7 @@ export default function OverviewScenePage() {
     } finally {
       setLoading(false)
     }
-  }, [
-    boardFilter,
-    excludeStBoard,
-    limitInput,
-    rankDateInput,
-    sourcePathTrimmed,
-    totalMvMaxInput,
-    totalMvMinInput,
-  ])
+  }, [boardFilter, excludeStBoard, limitInput, rankDateInput, sourcePathTrimmed, totalMvMaxInput, totalMvMinInput])
 
   useEffect(() => {
     if (autoReadTriggeredRef.current || dateOptionsLoading || !sourcePathTrimmed) {
@@ -529,9 +506,7 @@ export default function OverviewScenePage() {
               disabled={dateOptionsLoading}
             >
               {dateOptions.length === 0 ? (
-                <option value={DEFAULT_DATE_OPTION}>
-                  {dateOptionsLoading ? '加载日期中...' : '最新'}
-                </option>
+                <option value={DEFAULT_DATE_OPTION}>{dateOptionsLoading ? '加载日期中...' : '最新'}</option>
               ) : (
                 dateOptions.map((tradeDate) => (
                   <option key={tradeDate} value={tradeDate}>
@@ -558,9 +533,7 @@ export default function OverviewScenePage() {
             <span>板块筛选</span>
             <select
               value={boardFilter}
-              onChange={(event) =>
-                setBoardFilter(event.target.value as (typeof STOCK_PICK_BOARD_OPTIONS)[number])
-              }
+              onChange={(event) => setBoardFilter(event.target.value as (typeof STOCK_PICK_BOARD_OPTIONS)[number])}
             >
               {boardOptions.map((board) => (
                 <option key={board} value={board}>
@@ -679,34 +652,25 @@ export default function OverviewScenePage() {
         {sortedRows.length === 0 ? (
           <div className="overview-empty">当前场景下暂无数据</div>
         ) : (
-          <div className="overview-table-scroll" ref={tableWrapRef}>
-            <table className="overview-table" style={{ minWidth: `${tableMinWidth}px` }}>
-              <colgroup>
-                {VISIBLE_COLUMNS.map((key) => (
-                  <col key={key} style={{ width: `${COLUMN_WIDTHS[key]}px` }} />
-                ))}
-              </colgroup>
-              <thead>
-                <tr>
-                  {VISIBLE_COLUMNS.map((key) => {
-                    if (!isSortableColumn(key)) {
-                      return <th key={key}>{COLUMN_LABELS[key]}</th>
-                    }
-                    const isActive = sortKey === key && sortDirection !== null
-                    return (
-                      <th key={key} aria-sort={getAriaSort(isActive, sortDirection)}>
-                        <TableSortButton
-                          label={COLUMN_LABELS[key]}
-                          isActive={isActive}
-                          direction={sortDirection}
-                          onClick={() => toggleSort(key)}
-                          title={`按${COLUMN_LABELS[key]}排序`}
-                        />
-                      </th>
-                    )
-                  })}
-                </tr>
-              </thead>
+          <StickyHorizontalTable
+            scrollClassName="overview-table-scroll"
+            scrollRef={tableWrapRef}
+            stickyHeader={
+              <table
+                className="overview-table overview-table-pinned-stock"
+                style={{ minWidth: `${tableMinWidth}px` }}
+              >
+                {renderSceneColGroup()}
+                {renderSceneHead(true)}
+              </table>
+            }
+          >
+            <table
+              className="overview-table overview-table-pinned-stock"
+              style={{ minWidth: `${tableMinWidth}px` }}
+            >
+              {renderSceneColGroup()}
+              {renderSceneHead(false)}
               <tbody>
                 {sortedRows.map((row, index) => (
                   <tr key={`${row.scene_name}-${row.ts_code}-${row.trade_date ?? index}`}>
@@ -714,14 +678,15 @@ export default function OverviewScenePage() {
                       <td key={`${row.scene_name}-${row.ts_code}-${key}`}>
                         {key === 'name' && formatCell(key, row, excludedConcepts) !== '--' ? (
                           <DetailsLink
-                            className="overview-stock-link"
+                            className="overview-stock-link overview-stock-identity-link"
                             tsCode={row.ts_code}
                             tradeDate={typeof row.trade_date === 'string' ? row.trade_date : null}
                             sourcePath={sourcePathTrimmed}
                             title={`查看 ${formatCell(key, row, excludedConcepts)} 详情`}
                             navigationItems={detailNavigationItems}
                           >
-                            {formatCell(key, row, excludedConcepts)}
+                            <strong>{formatCell(key, row, excludedConcepts)}</strong>
+                            <span>{row.ts_code}</span>
                           </DetailsLink>
                         ) : (
                           formatCell(key, row, excludedConcepts)
@@ -732,7 +697,7 @@ export default function OverviewScenePage() {
                 ))}
               </tbody>
             </table>
-          </div>
+          </StickyHorizontalTable>
         )}
       </section>
     </div>

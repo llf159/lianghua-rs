@@ -33,6 +33,7 @@ import {
 } from "../../shared/tableSort";
 import { STOCK_PICK_BOARD_OPTIONS } from "../../shared/stockPickShared";
 import { readStoredDefaultBoardFilter } from "../../shared/defaultBoardFilter";
+import StickyHorizontalTable from "../../shared/StickyHorizontalTable";
 import "./css/OverviewScenePage.css";
 
 const OVERVIEW_PAGE_STATE_KEY = "lh_overview_page_state";
@@ -40,7 +41,6 @@ const OVERVIEW_PAGE_FILTER_STATE_KEY = "lh_overview_page_filter_state_v2";
 const OVERVIEW_PAGE_RESULT_STATE_KEY = "lh_overview_page_result_state_v2";
 const FIXED_VISIBLE_COLUMNS = [
   "rank",
-  "ts_code",
   "name",
   "total_mv_yi",
   "board",
@@ -95,9 +95,8 @@ const CONCEPT_COLUMN_MIN_WIDTH = 240;
 const DEFAULT_COLUMN_ORDER = 500;
 
 const COLUMN_CONFIG: Record<string, ColumnConfig> = {
-  rank: { label: "排名", order: 10, width: 64 },
-  ts_code: { label: "代码", order: 20, width: 120 },
-  name: { label: "名称", order: 30, width: 108 },
+  rank: { label: "排名", order: 10, width: 50 },
+  name: { label: "股票", order: 20, width: 120 },
   total_mv_yi: { label: "总市值(亿)", order: 40, width: 110 },
   board: { label: "板块", order: 50, width: 108 },
   board_category: { label: "板块分类" },
@@ -134,6 +133,7 @@ function buildVisibleColumns(rows: OverviewRow[]): string[] {
   rows.forEach((row) => {
     Object.keys(row).forEach((key) => {
       if (
+        key === "ts_code" ||
         key === "trade_date" ||
         key === "ref_date" ||
         key === "resolved_rank_date" ||
@@ -228,7 +228,8 @@ function findFirstPopulatedString(rows: OverviewRow[], key: string) {
 export default function OverviewRawPage() {
   const { excludedConcepts, excludeStBoard } = useConceptExclusions();
   const persistedState = useMemo(() => {
-    const storage = typeof window === "undefined" ? null : window.sessionStorage;
+    const storage =
+      typeof window === "undefined" ? null : window.sessionStorage;
     const parsed = readJsonStorage<Partial<PersistedOverviewState>>(
       storage,
       OVERVIEW_PAGE_STATE_KEY,
@@ -324,7 +325,11 @@ export default function OverviewRawPage() {
   const [error, setError] = useState("");
   const autoReadTriggeredRef = useRef(false);
   const boardOptions = useMemo(
-    () => filterBoardItems(STOCK_PICK_BOARD_OPTIONS, excludeStBoard) as (typeof STOCK_PICK_BOARD_OPTIONS)[number][],
+    () =>
+      filterBoardItems(
+        STOCK_PICK_BOARD_OPTIONS,
+        excludeStBoard,
+      ) as (typeof STOCK_PICK_BOARD_OPTIONS)[number][],
     [excludeStBoard],
   );
 
@@ -369,10 +374,56 @@ export default function OverviewRawPage() {
     sourcePath: sourcePathTrimmed || undefined,
     name: typeof row.name === "string" ? row.name : undefined,
   }));
-  const tableWrapRef = useRouteScrollRegion<HTMLDivElement>(
-    "overview-table",
-    [rows.length, tableMinWidth],
-  );
+  const tableWrapRef = useRouteScrollRegion<HTMLDivElement>("overview-table", [
+    rows.length,
+    tableMinWidth,
+  ]);
+  function renderOverviewColGroup() {
+    return (
+      <colgroup>
+        {visibleColumns.map((key) => {
+          const columnConfig = COLUMN_CONFIG[key];
+          return (
+            <col
+              key={key}
+              style={
+                columnConfig?.isFlexible
+                  ? undefined
+                  : { width: `${getColumnWidth(key)}px` }
+              }
+            />
+          );
+        })}
+      </colgroup>
+    );
+  }
+
+  function renderOverviewHead(interactive: boolean) {
+    return (
+      <thead aria-hidden={interactive ? undefined : true}>
+        <tr>
+          {visibleColumns.map((key) => {
+            const columnConfig = COLUMN_CONFIG[key];
+            if (!interactive || !isOverviewSortableColumn(key)) {
+              return <th key={key}>{columnConfig?.label ?? key}</th>;
+            }
+            const isActive = sortKey === key && sortDirection !== null;
+            return (
+              <th key={key} aria-sort={getAriaSort(isActive, sortDirection)}>
+                <TableSortButton
+                  label={columnConfig?.label ?? key}
+                  isActive={isActive}
+                  direction={sortDirection}
+                  onClick={() => toggleSort(key)}
+                  title={`按${columnConfig?.label ?? key}排序`}
+                />
+              </th>
+            );
+          })}
+        </tr>
+      </thead>
+    );
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -610,7 +661,11 @@ export default function OverviewRawPage() {
   ]);
 
   useEffect(() => {
-    if (autoReadTriggeredRef.current || dateOptionsLoading || !sourcePathTrimmed) {
+    if (
+      autoReadTriggeredRef.current ||
+      dateOptionsLoading ||
+      !sourcePathTrimmed
+    ) {
       return;
     }
     autoReadTriggeredRef.current = true;
@@ -772,51 +827,25 @@ export default function OverviewRawPage() {
         {rows.length === 0 ? (
           <div className="overview-empty">暂无数据</div>
         ) : (
-          <div className="overview-table-wrap" ref={tableWrapRef}>
+          <StickyHorizontalTable
+            scrollClassName="overview-table-scroll"
+            scrollRef={tableWrapRef}
+            stickyHeader={
+              <table
+                className="overview-table overview-table-pinned-stock"
+                style={{ minWidth: `${tableMinWidth}px` }}
+              >
+                {renderOverviewColGroup()}
+                {renderOverviewHead(true)}
+              </table>
+            }
+          >
             <table
-              className="overview-table"
+              className="overview-table overview-table-pinned-stock"
               style={{ minWidth: `${tableMinWidth}px` }}
             >
-              <colgroup>
-                {visibleColumns.map((key) => {
-                  const columnConfig = COLUMN_CONFIG[key];
-                  return (
-                    <col
-                      key={key}
-                      style={
-                        columnConfig?.isFlexible
-                          ? undefined
-                          : { width: `${getColumnWidth(key)}px` }
-                      }
-                    />
-                  );
-                })}
-              </colgroup>
-              <thead>
-                <tr>
-                  {visibleColumns.map((key) => {
-                    const columnConfig = COLUMN_CONFIG[key];
-                    if (!isOverviewSortableColumn(key)) {
-                      return <th key={key}>{columnConfig?.label ?? key}</th>;
-                    }
-                    const isActive = sortKey === key && sortDirection !== null;
-                    return (
-                      <th
-                        key={key}
-                        aria-sort={getAriaSort(isActive, sortDirection)}
-                      >
-                        <TableSortButton
-                          label={columnConfig?.label ?? key}
-                          isActive={isActive}
-                          direction={sortDirection}
-                          onClick={() => toggleSort(key)}
-                          title={`按${columnConfig?.label ?? key}排序`}
-                        />
-                      </th>
-                    );
-                  })}
-                </tr>
-              </thead>
+              {renderOverviewColGroup()}
+              {renderOverviewHead(false)}
               <tbody>
                 {sortedRows.map((row, rowIndex) => (
                   <tr
@@ -835,17 +864,18 @@ export default function OverviewRawPage() {
                           className={cellClassName || undefined}
                           title={cellValue}
                         >
-                          {key === "name" && cellValue !== "--" ? (
-                            <DetailsLink
-                              className="overview-stock-link"
+                            {key === "name" && cellValue !== "--" ? (
+                              <DetailsLink
+                                className="overview-stock-link overview-stock-identity-link"
                               tsCode={row.ts_code}
                               tradeDate={getRowDetailsTradeDate(row)}
                               sourcePath={sourcePathTrimmed}
                               title={`查看 ${cellValue} 详情`}
                               navigationItems={detailNavigationItems}
-                            >
-                              {cellValue}
-                            </DetailsLink>
+                              >
+                                <strong>{cellValue}</strong>
+                                <span>{row.ts_code}</span>
+                              </DetailsLink>
                           ) : (
                             cellValue
                           )}
@@ -856,7 +886,7 @@ export default function OverviewRawPage() {
                 ))}
               </tbody>
             </table>
-          </div>
+          </StickyHorizontalTable>
         )}
       </section>
     </div>

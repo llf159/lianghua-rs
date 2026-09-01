@@ -171,9 +171,3 @@
     grid-template-columns: 1fr;
   }
 }
-
-/* Syntax examples can be wider than the modal. Preserve horizontal scrolling. */
-body .strategy-syntax-guide-table-wrap {
-  max-height: min(60vh, calc(100vh - 240px)) !important;
-  overflow: auto !important;
-}
