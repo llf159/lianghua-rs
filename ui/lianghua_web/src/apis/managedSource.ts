@@ -249,6 +249,7 @@ export type ManagedSourceDatasetId =
   | 'rule-details'
   | 'scene-details'
   | 'strategy-trigger-similarity-rank'
+  | 'strategy-trigger-similarity-summary'
   | 'strategy-trigger-similarity-meta'
   | 'concept-performance'
   | 'cyq-snapshot'

@@ -7,7 +7,12 @@ import {
   type StrategyTriggerRankingPageData,
 } from '../../apis/strategyTriggerSimilarity'
 import DetailsLink from '../../shared/DetailsLink'
-import { filterBoardItems, isStBoard, useConceptExclusions } from '../../shared/conceptExclusions'
+import {
+  filterBoardItems,
+  formatConceptText,
+  isStBoard,
+  useConceptExclusions,
+} from '../../shared/conceptExclusions'
 import { STOCK_PICK_BOARD_OPTIONS } from '../../shared/stockPickShared'
 import { readStoredDefaultBoardFilter } from '../../shared/defaultBoardFilter'
 import { normalizeTradeDates, pickDateValue } from '../../shared/tradeDate'
@@ -46,7 +51,7 @@ export default function OverviewSimilarityRankingPage() {
   const [data, setData] = useState<StrategyTriggerRankingPageData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const { excludeStBoard } = useConceptExclusions()
+  const { excludedConcepts, excludeStBoard } = useConceptExclusions()
   const [limitInput, setLimitInput] = useState('100')
   const [boardFilter, setBoardFilter] = useState(() => readStoredDefaultBoardFilter())
   const [totalMvMinInput, setTotalMvMinInput] = useState('')
@@ -208,6 +213,7 @@ export default function OverviewSimilarityRankingPage() {
           <th>相似度</th>
           <th>三日优排名</th>
           <th>代表历史事件</th>
+          <th>概念</th>
         </tr>
       </thead>
     )
@@ -323,60 +329,66 @@ export default function OverviewSimilarityRankingPage() {
             <table className="trigger-sim-table trigger-sim-ranking-table">
               {renderRankingHead(false)}
               <tbody>
-                {data.items.map((row) => (
-                  <tr key={row.tsCode}>
-                    <td>{row.rank ?? '--'}</td>
-                    <td>
-                      <DetailsLink
-                        className="trigger-sim-stock-link"
-                        tsCode={row.tsCode}
-                        tradeDate={data.resolvedTradeDate}
-                        sourcePath={sourcePath}
-                        navigationItems={navigationItems}
-                      >
-                        <strong>{row.name || row.tsCode}</strong>
-                        <span>{row.tsCode}</span>
-                      </DetailsLink>
-                    </td>
-                    <td>{row.board || '--'}</td>
-                    <td>{formatNumber(row.totalMvYi, 2)}</td>
-                    <td>{formatNumber(row.rankingScore)}</td>
-                    <td className={outcomeTone(row.shrunkExcessReturnPct)}>
-                      {formatPercent(row.shrunkExcessReturnPct)}
-                    </td>
-                    <td>{formatPercent(row.excessPositiveRate, 1)}</td>
-                    <td>
-                      {formatPercent(row.expectedReturnPct)} / {formatPercent(row.expectedExcessReturnPct)}
-                    </td>
-                    <td>
-                      {formatPercent(row.expectedMfePct)} / {formatPercent(row.expectedMaePct)}
-                    </td>
-                    <td>{formatPercent(row.confidence * 100, 1)}</td>
-                    <td>
-                      {formatNumber(row.averageSimilarity)} / {formatNumber(row.bestSimilarity)}
-                    </td>
-                    <td>{row.bestRank3d ?? '--'}</td>
-                    <td>
-                      {row.topMatches[0] ? (
+                {data.items.map((row) => {
+                  const conceptText = formatConceptText(row.concept, excludedConcepts)
+                  return (
+                    <tr key={row.tsCode}>
+                      <td>{row.rank ?? '--'}</td>
+                      <td>
                         <DetailsLink
-                          className="trigger-sim-stock-link trigger-sim-history-link"
-                          tsCode={row.topMatches[0].tsCode}
-                          tradeDate={row.topMatches[0].candidateEndTradeDate}
-                          intervalStartTradeDate={row.topMatches[0].candidateStartTradeDate}
-                          intervalEndTradeDate={row.topMatches[0].candidateEndTradeDate}
+                          className="trigger-sim-stock-link"
+                          tsCode={row.tsCode}
+                          tradeDate={data.resolvedTradeDate}
                           sourcePath={sourcePath}
-                          navigationItems={historicalNavigationItems}
-                          title={`查看 ${row.topMatches[0].name || row.topMatches[0].tsCode} 历史事件详情`}
+                          navigationItems={navigationItems}
                         >
-                          <strong>{row.topMatches[0].name || row.topMatches[0].tsCode}</strong>
-                          <span>{row.topMatches[0].candidateEndTradeDate}</span>
+                          <strong>{row.name || row.tsCode}</strong>
+                          <span>{row.tsCode}</span>
                         </DetailsLink>
-                      ) : (
-                        '--'
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      <td>{row.board || '--'}</td>
+                      <td>{formatNumber(row.totalMvYi, 2)}</td>
+                      <td>{formatNumber(row.rankingScore)}</td>
+                      <td className={outcomeTone(row.shrunkExcessReturnPct)}>
+                        {formatPercent(row.shrunkExcessReturnPct)}
+                      </td>
+                      <td>{formatPercent(row.excessPositiveRate, 1)}</td>
+                      <td>
+                        {formatPercent(row.expectedReturnPct)} / {formatPercent(row.expectedExcessReturnPct)}
+                      </td>
+                      <td>
+                        {formatPercent(row.expectedMfePct)} / {formatPercent(row.expectedMaePct)}
+                      </td>
+                      <td>{formatPercent(row.confidence * 100, 1)}</td>
+                      <td>
+                        {formatNumber(row.averageSimilarity)} / {formatNumber(row.bestSimilarity)}
+                      </td>
+                      <td>{row.bestRank3d ?? '--'}</td>
+                      <td>
+                        {row.topMatches[0] ? (
+                          <DetailsLink
+                            className="trigger-sim-stock-link trigger-sim-history-link"
+                            tsCode={row.topMatches[0].tsCode}
+                            tradeDate={row.topMatches[0].candidateEndTradeDate}
+                            intervalStartTradeDate={row.topMatches[0].candidateStartTradeDate}
+                            intervalEndTradeDate={row.topMatches[0].candidateEndTradeDate}
+                            sourcePath={sourcePath}
+                            navigationItems={historicalNavigationItems}
+                            title={`查看 ${row.topMatches[0].name || row.topMatches[0].tsCode} 历史事件详情`}
+                          >
+                            <strong>{row.topMatches[0].name || row.topMatches[0].tsCode}</strong>
+                            <span>{row.topMatches[0].candidateEndTradeDate}</span>
+                          </DetailsLink>
+                        ) : (
+                          '--'
+                        )}
+                      </td>
+                      <td className="trigger-sim-concept-cell" title={conceptText}>
+                        {conceptText}
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </StickyHorizontalTable>
