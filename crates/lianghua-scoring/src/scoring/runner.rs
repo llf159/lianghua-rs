@@ -11,7 +11,7 @@ use std::{
 
 use crate::data::{
     DataReader, RowData, RuntimeKeyCollectOptions, ScoreRule, ScoreScene,
-    collect_runtime_keys_from_expr_programs, result_db_path,
+    collect_runtime_keys_from_expr_programs, expr_program_uses_runtime_key, result_db_path,
     runtime::row_into_rt,
     scoring_store::{
         init_result_db, rank_scene_rows, rank_summary_rows_by_score,
@@ -27,8 +27,8 @@ use crate::scoring::{
     rule_cache::cache_rule_build,
     scoring_rules_details_cache, scoring_rules_total_cache,
     tools::{
-        CyqChenFieldInjector, calc_query_need_rows, calc_query_start_date,
-        collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names,
+        CyqChenFieldInjector, SimilarityRankFieldInjector, calc_query_need_rows,
+        calc_query_start_date, collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names,
         inject_optional_cyq_chen_fields, inject_stock_extra_fields, load_st_list,
         load_total_share_map, preview_optional_cyq_chen_injection_warnings, warmup_rows_estimate,
     },
@@ -157,7 +157,7 @@ fn collect_scoring_runtime_keys(rules_cache: &[CachedRule]) -> HashSet<String> {
         .flat_map(CachedRule::expression_programs)
         .collect::<Vec<_>>();
     let cyq_chen_keys = cyq_chen_runtime_key_names();
-    let injected_keys = (["ZHANG", "TOTAL_MV_YI"])
+    let injected_keys = (["ZHANG", "TOTAL_MV_YI", "S_RANK"])
         .iter()
         .copied()
         .chain(cyq_chen_keys)
@@ -171,6 +171,13 @@ fn collect_scoring_runtime_keys(rules_cache: &[CachedRule]) -> HashSet<String> {
             aliases: &([]),
         },
     )
+}
+
+fn scoring_uses_similarity_rank(rules_cache: &[CachedRule]) -> bool {
+    rules_cache
+        .iter()
+        .flat_map(CachedRule::expression_programs)
+        .any(|program| expr_program_uses_runtime_key(program, "S_RANK"))
 }
 
 fn collect_scoring_used_cyq_chen_runtime_keys(rules_cache: &[CachedRule]) -> HashSet<String> {
@@ -213,11 +220,14 @@ fn scoring_stock_group_batch(
     st_list: &HashSet<String>,
     total_share_map: &HashMap<String, f64>,
     used_cyq_chen_keys: &HashSet<String>,
+    uses_similarity_rank: bool,
     ts_group: &[String],
     memory_mode: ScoringMemoryMode,
 ) -> Result<ScoreBatch, String> {
     let mut rows_map = worker_reader.load_batch(ts_group, adj_type, query_start_date, end_date)?;
     let cyq_chen_injector = CyqChenFieldInjector::new(source_dir, used_cyq_chen_keys);
+    let similarity_rank_injector =
+        SimilarityRankFieldInjector::new(source_dir, uses_similarity_rank);
     let mut group_batch = ScoreBatch::default();
 
     for ts_code in ts_group {
@@ -258,6 +268,9 @@ fn scoring_stock_group_batch(
                       memory_mode: ScoringMemoryMode|
          -> Result<ScoreBatch, String> {
             let _ = cyq_chen_injector.inject(&mut row, ts_code);
+            if uses_similarity_rank {
+                similarity_rank_injector.inject(&mut row, ts_code)?;
+            }
             inject_stock_extra_fields(
                 &mut row,
                 ts_code,
@@ -318,6 +331,7 @@ pub fn scoring_all_to_db(
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
+    let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache);
     let warnings = preview_optional_cyq_chen_injection_warnings(
         source_dir,
         start_date,
@@ -387,6 +401,7 @@ pub fn scoring_all_to_db(
                     &st_list,
                     &total_share_map,
                     &used_cyq_chen_keys,
+                    uses_similarity_rank,
                     ts_group,
                     ScoringMemoryMode::All,
                 )?;
@@ -486,6 +501,7 @@ pub fn scoring_all_to_memory_with_mode(
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
+    let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache);
     let warnings = preview_optional_cyq_chen_injection_warnings(
         source_dir,
         start_date,
@@ -527,6 +543,7 @@ pub fn scoring_all_to_memory_with_mode(
                 &st_list,
                 &total_share_map,
                 &used_cyq_chen_keys,
+                uses_similarity_rank,
                 ts_group,
                 memory_mode,
             )
@@ -577,6 +594,7 @@ pub fn scoring_single_period(
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
+    let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache);
     let required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
     let dr = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
 
@@ -589,6 +607,9 @@ pub fn scoring_single_period(
     }
     let _ =
         inject_optional_cyq_chen_fields(&mut row_data, source_dir, ts_code, &used_cyq_chen_keys);
+    if uses_similarity_rank {
+        SimilarityRankFieldInjector::new(source_dir, true).inject(&mut row_data, ts_code)?;
+    }
     inject_stock_extra_fields(
         &mut row_data,
         ts_code,
@@ -649,7 +670,7 @@ mod tests {
     fn scoring_runtime_key_collection_skips_injected_fields() {
         let rules = vec![cached_rule(
             "rule_a",
-            "M := MA(C, 5); M > MY_SCORE_IND AND ZHANG > 0 AND TOTAL_MV_YI <= 300 AND CYQ_TPR > 0.6",
+            "M := MA(C, 5); M > MY_SCORE_IND AND ZHANG > 0 AND TOTAL_MV_YI <= 300 AND S_RANK <= 100 AND CYQ_TPR > 0.6",
         )];
 
         let keys = collect_scoring_runtime_keys(&rules);
@@ -658,7 +679,7 @@ mod tests {
             assert!(keys.contains(required_key), "missing {required_key}");
         }
         assert!(!keys.contains("TOTAL_MV"));
-        for injected_key in ["ZHANG", "TOTAL_MV_YI", "CYQ_TPR"] {
+        for injected_key in ["ZHANG", "TOTAL_MV_YI", "S_RANK", "CYQ_TPR"] {
             assert!(!keys.contains(injected_key), "unexpected {injected_key}");
         }
         assert!(!keys.contains("O"));

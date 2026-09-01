@@ -19,8 +19,9 @@ use crate::{
         score_rule_path,
     },
     scoring::tools::{
-        collect_used_cyq_chen_runtime_keys, inject_optional_cyq_chen_fields,
-        inject_stock_extra_fields, load_st_list, load_total_share_map, rt_max_len,
+        SimilarityRankFieldInjector, collect_used_cyq_chen_runtime_keys,
+        inject_optional_cyq_chen_fields, inject_stock_extra_fields, load_st_list,
+        load_total_share_map, rt_max_len,
     },
 };
 
@@ -536,6 +537,8 @@ fn validate_rule_definition(
             st_list.contains(sample_ts_code),
             total_share_map.get(sample_ts_code).copied(),
         )?;
+        SimilarityRankFieldInjector::new(source_path, true)
+            .inject(&mut row_data, sample_ts_code)?;
         let program_refs = expression_programs
             .iter()
             .map(|(_, stmts)| stmts)

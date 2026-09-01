@@ -19,7 +19,9 @@ use crate::{
         stock_list_path, ths_concepts_path,
     },
     download::ind_calc::{cache_ind_build, calc_inds_with_cache},
-    scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map},
+    scoring::tools::{
+        SimilarityRankFieldInjector, inject_stock_extra_fields, load_st_list, load_total_share_map,
+    },
     utils::utils::board_category,
 };
 use lianghua_app_chart::indicator::{
@@ -831,7 +833,8 @@ fn inject_chart_indicator_extra_runtime_fields(
         row_data.cols.insert("RANK".to_string(), rank_series);
         row_data.cols.insert("SCORE".to_string(), score_series);
         row_data.validate()
-    })(row_data, source_path, ts_code)
+    })(row_data, source_path, ts_code)?;
+    SimilarityRankFieldInjector::new(source_path, true).inject(row_data, ts_code)
 }
 
 #[derive(Debug, Clone, Copy, Default)]

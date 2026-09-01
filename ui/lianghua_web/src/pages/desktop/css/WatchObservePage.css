@@ -251,7 +251,8 @@
 }
 
 .watch-observe-stock-link {
-  display: block;
+  display: grid;
+  gap: 2px;
   width: 100%;
   border: 0;
   padding: 0;
@@ -260,11 +261,24 @@
   text-align: left;
   text-decoration: none;
   font: inherit;
-  line-height: inherit;
-  white-space: nowrap;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.watch-observe-stock-link strong,
+.watch-observe-stock-link small {
   overflow: hidden;
   text-overflow: ellipsis;
-  cursor: pointer;
+  white-space: nowrap;
+}
+
+.watch-observe-stock-link strong {
+  font-weight: 600;
+}
+
+.watch-observe-stock-link small {
+  color: #718096;
+  font-size: 12px;
 }
 
 .watch-observe-stock-link:hover {

@@ -11,7 +11,7 @@ use crate::{
     crawler::{SinaQuote, TencentQuote},
     data::{
         DataReader, RowData, RuntimeKeyCollectOptions, collect_runtime_keys_from_expr_programs,
-        result_db_path, runtime::row_into_rt, source_db_path,
+        expr_program_uses_runtime_key, result_db_path, runtime::row_into_rt, source_db_path,
     },
     download::ind_calc::{
         IndsCache, cache_ind_build, calc_inds_with_cache_lossy, warmup_ind_estimate,
@@ -504,7 +504,7 @@ fn hydrate_intraday_monitor_rows_from_shared_context(
 
 pub(crate) fn collect_intraday_template_runtime_keys(programs: &[&Stmts]) -> HashSet<String> {
     let cyq_chen_keys = cyq_chen_runtime_key_names();
-    let injected_keys = (["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI"])
+    let injected_keys = (["RANK", "SCORE", "S_RANK", "ZHANG", "TOTAL_MV_YI"])
         .iter()
         .copied()
         .chain(INTRADAY_REALTIME_FIELDS.iter().map(|field| field.name))
@@ -979,6 +979,7 @@ struct IntradayTemplateRuntimeContext<'a> {
     indicator_cache: &'a [IndsCache],
     total_share_map: &'a HashMap<String, f64>,
     cyq_chen_runtime_keys: &'a HashSet<String>,
+    uses_similarity_rank: bool,
 }
 
 fn apply_intraday_template_tag_for_row(
@@ -1025,7 +1026,8 @@ fn apply_intraday_template_tag_for_row(
                                  need_rows: usize,
                                  indicator_cache: &[IndsCache],
                                  total_share: Option<f64>,
-                                 cyq_chen_runtime_keys: &HashSet<String>|
+                                 cyq_chen_runtime_keys: &HashSet<String>,
+                                 uses_similarity_rank: bool|
                  -> Result<RowData, String> {
                     let end_date = (|row: &IntradayMonitorRow,
                                      quote: &SinaQuote|
@@ -1188,6 +1190,50 @@ fn apply_intraday_template_tag_for_row(
                         result_conn, row, &start_date, &end_date
                     )?;
                     inject_runtime_rank_score_series(&mut row_data, &rank_score_series_map)?;
+                    if uses_similarity_rank {
+                        let mut similarity_rank_series = vec![None; row_data.trade_dates.len()];
+                        let similarity_table_exists = result_conn
+                        .query_row(
+                            "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema='main' AND table_name='strategy_trigger_similarity_summary'",
+                            [],
+                            |db_row| db_row.get::<_, bool>(0),
+                        )
+                        .unwrap_or(false);
+                        if similarity_table_exists {
+                            let date_index = row_data
+                                .trade_dates
+                                .iter()
+                                .enumerate()
+                                .map(|(index, trade_date)| (trade_date.as_str(), index))
+                                .collect::<HashMap<_, _>>();
+                            let mut stmt = result_conn
+                            .prepare(
+                                "SELECT trade_date, rank FROM strategy_trigger_similarity_summary WHERE ts_code=? AND trade_date>=? AND trade_date<=?",
+                            )
+                            .map_err(|e| format!("预编译相似榜序列失败: {e}"))?;
+                            let mut rows = stmt
+                                .query(params![row.ts_code, start_date, end_date])
+                                .map_err(|e| format!("查询相似榜序列失败: {e}"))?;
+                            while let Some(db_row) = rows
+                                .next()
+                                .map_err(|e| format!("读取相似榜序列失败: {e}"))?
+                            {
+                                let trade_date: String = db_row
+                                    .get(0)
+                                    .map_err(|e| format!("读取相似榜日期失败: {e}"))?;
+                                let rank = db_row
+                                    .get::<_, Option<i64>>(1)
+                                    .map_err(|e| format!("读取相似榜排名失败: {e}"))?
+                                    .map(|value| value as f64);
+                                if let Some(index) = date_index.get(trade_date.as_str()).copied() {
+                                    similarity_rank_series[index] = rank;
+                                }
+                            }
+                        }
+                        row_data
+                            .cols
+                            .insert("S_RANK".to_string(), similarity_rank_series);
+                    }
 
                     if !indicator_cache.is_empty() {
                         for (name, series) in calc_inds_with_cache_lossy(indicator_cache, &row_data)
@@ -1208,6 +1254,7 @@ fn apply_intraday_template_tag_for_row(
                     runtime_context.indicator_cache,
                     runtime_context.total_share_map.get(&row.ts_code).copied(),
                     runtime_context.cyq_chen_runtime_keys,
+                    runtime_context.uses_similarity_rank,
                 )?;
                 let mut rt = row_into_rt(row_data)?;
                 let value = rt
@@ -1256,6 +1303,9 @@ fn apply_intraday_template_tags(
         .collect::<Vec<_>>();
     let mut required_runtime_keys = collect_intraday_template_runtime_keys(&ready_programs);
     let cyq_chen_runtime_keys = collect_intraday_template_cyq_chen_keys(&ready_programs);
+    let uses_similarity_rank = ready_programs
+        .iter()
+        .any(|program| expr_program_uses_runtime_key(program, "S_RANK"));
     let template_warmup_need = compiled_templates
         .values()
         .filter_map(|item| match item {
@@ -1305,6 +1355,7 @@ fn apply_intraday_template_tags(
         indicator_cache: &indicator_cache,
         total_share_map: &total_share_map,
         cyq_chen_runtime_keys: &cyq_chen_runtime_keys,
+        uses_similarity_rank,
     };
 
     if has_ready_template {

@@ -1181,8 +1181,16 @@ fn ensure_ranking_tables(conn: &Connection) -> Result<(), String> {
             trigger_count BIGINT NOT NULL,
             top_matches_json VARCHAR NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS strategy_trigger_similarity_summary (
+            trade_date VARCHAR NOT NULL,
+            ts_code VARCHAR NOT NULL,
+            rank BIGINT,
+            CONSTRAINT pk_strategy_similarity_summary PRIMARY KEY (trade_date, ts_code)
+        );
         CREATE INDEX IF NOT EXISTS idx_strategy_similarity_rank_date_config_rank
           ON strategy_trigger_similarity_rank(trade_date, config_key, rank, ts_code);
+        CREATE INDEX IF NOT EXISTS idx_strategy_similarity_summary_code_date
+          ON strategy_trigger_similarity_summary(ts_code, trade_date);
         ALTER TABLE strategy_trigger_similarity_active_config
           ADD COLUMN IF NOT EXISTS algorithm_version VARCHAR;
         ALTER TABLE strategy_trigger_similarity_active_config
@@ -2415,25 +2423,27 @@ pub fn run_strategy_trigger_similarity_ranking(
             .transaction()
             .map_err(|e| format!("创建相似排行榜事务失败: {e}"))?;
         let previous_active = load_active_config_record(&tx)?;
-        // 只用策略和指标定义识别语义变化。每天重算复权行情、指标值或评分结果
-        // 不会因此清理历史快照。
+        // 配置、策略或指标定义变化会改变汇总口径；每天重算复权行情、指标值或评分结果
+        // 不改变口径，因此保留历史快照。
         if let Some(previous) = previous_active.as_ref() {
-            if previous.config_key == config_key
-                && previous
+            let semantics_changed = previous.config_key != config_key
+                || (previous
                     .scope_signature
                     .starts_with(SEMANTIC_DEFINITION_SIGNATURE_PREFIX)
-                && previous.scope_signature != scope_signature
-            {
+                    && previous.scope_signature != scope_signature);
+            if semantics_changed {
                 tx.execute(
                     "DELETE FROM strategy_trigger_similarity_rank WHERE config_key=?",
-                    params![config_key],
+                    params![previous.config_key],
                 )
                 .map_err(|e| format!("策略或指标变化后清理相似排行失败: {e}"))?;
                 tx.execute(
                     "DELETE FROM strategy_trigger_similarity_rank_meta WHERE config_key=?",
-                    params![config_key],
+                    params![previous.config_key],
                 )
                 .map_err(|e| format!("策略或指标变化后清理相似排行元数据失败: {e}"))?;
+                tx.execute("DELETE FROM strategy_trigger_similarity_summary", [])
+                    .map_err(|e| format!("相似榜口径变化后清理历史汇总失败: {e}"))?;
             }
         }
         // 生产库只允许存在当前生效配置；配置切换本身触发旧配置清理。
@@ -2457,6 +2467,11 @@ pub fn run_strategy_trigger_similarity_ranking(
             params![trade_date, config_key],
         )
         .map_err(|e| format!("清理旧相似排行元数据失败: {e}"))?;
+        tx.execute(
+            "DELETE FROM strategy_trigger_similarity_summary WHERE trade_date=?",
+            params![trade_date],
+        )
+        .map_err(|e| format!("清理旧相似排行汇总失败: {e}"))?;
         {
             let mut insert = tx
                 .prepare(
@@ -2498,6 +2513,22 @@ pub fn run_strategy_trigger_similarity_ranking(
                         top_matches_json,
                     ])
                     .map_err(|e| format!("写入相似排行失败 {}: {e}", row.ts_code))?;
+            }
+        }
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO strategy_trigger_similarity_summary (trade_date, ts_code, rank) VALUES (?, ?, ?)",
+                )
+                .map_err(|e| format!("预编译相似排行汇总写入失败: {e}"))?;
+            for row in rows {
+                insert
+                    .execute(params![
+                        trade_date,
+                        row.ts_code,
+                        row.rank.map(|value| value as i64),
+                    ])
+                    .map_err(|e| format!("写入相似排行汇总失败 {}: {e}", row.ts_code))?;
             }
         }
         let timings_json =
@@ -3097,6 +3128,16 @@ mod tests {
             2,
             "daily qfq and scoring rebuilds must not delete older snapshots"
         );
+        assert_eq!(
+            result
+                .query_row(
+                    "SELECT COUNT(DISTINCT trade_date) FROM strategy_trigger_similarity_summary",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count retained summary snapshots"),
+            2
+        );
         drop(result);
 
         let reread = get_strategy_trigger_similarity_ranking_page(
@@ -3171,6 +3212,16 @@ mod tests {
                 .expect("count snapshots after strategy change"),
             1,
             "strategy changes must clear old snapshots before writing the replacement"
+        );
+        assert_eq!(
+            result
+                .query_row(
+                    "SELECT COUNT(DISTINCT trade_date) FROM strategy_trigger_similarity_summary",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count summary snapshots after strategy change"),
+            1
         );
         drop(result);
 

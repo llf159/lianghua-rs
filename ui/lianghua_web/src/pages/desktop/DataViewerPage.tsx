@@ -84,6 +84,14 @@ const DATASET_OPTIONS: DatasetOption[] = [
     supportsTsCode: true,
   },
   {
+    id: 'strategy-trigger-similarity-summary',
+    label: '走势相似排名汇总',
+    description: '查看供表达式 S_RANK 使用的 strategy_trigger_similarity_summary。',
+    requiredFileId: 'result-db',
+    supportsTradeDate: true,
+    supportsTsCode: true,
+  },
+  {
     id: 'strategy-trigger-similarity-meta',
     label: '走势相似排名元数据',
     description: '查看 scoring_result.db 的 strategy_trigger_similarity_rank_meta。',

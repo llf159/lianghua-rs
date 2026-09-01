@@ -31,9 +31,9 @@ use crate::{
     scoring::rule_cache::cache_rule_build as build_scoring_rule_cache,
     scoring::runner::{ScoringMemoryMode, scoring_all_to_memory_with_mode},
     scoring::tools::{
-        CyqChenFieldInjector, calc_query_need_rows, calc_query_start_date,
-        collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names, inject_stock_extra_fields,
-        load_st_list, load_total_share_map,
+        CyqChenFieldInjector, SimilarityRankFieldInjector, calc_query_need_rows,
+        calc_query_start_date, collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names,
+        inject_stock_extra_fields, load_st_list, load_total_share_map,
     },
     scoring::{CachedRule, evaluate_cached_rule_scores},
     scoring_model::{SceneBacktestRow, ScoreDetails, ScoreSummary},
@@ -1730,7 +1730,7 @@ fn collect_rule_validation_runtime_keys(combos: &[PreparedValidationCombo]) -> H
         .map(|combo| &combo.cached_rule.when_ast)
         .collect::<Vec<_>>();
     let cyq_chen_keys = cyq_chen_runtime_key_names();
-    let injected_keys = (["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI"])
+    let injected_keys = (["RANK", "SCORE", "S_RANK", "ZHANG", "TOTAL_MV_YI"])
         .iter()
         .copied()
         .chain(cyq_chen_keys)
@@ -1801,6 +1801,9 @@ fn build_validation_triggered_scores_for_combos(
                 || expr_program_uses_runtime_key(&combo.cached_rule.when_ast, "SCORE")
         })
     })(combos);
+    let needs_similarity_rank = combos
+        .iter()
+        .any(|combo| expr_program_uses_runtime_key(&combo.cached_rule.when_ast, "S_RANK"));
     let rank_score_series_map = if needs_rank_score {
         (|source_path: &str,
           start_date: &str,
@@ -1868,17 +1871,20 @@ fn build_validation_triggered_scores_for_combos(
                         (
                             reader,
                             CyqChenFieldInjector::new(source_path, &used_cyq_chen_keys),
+                            SimilarityRankFieldInjector::new(source_path, needs_similarity_rank),
                         )
                     },
                 )
             },
             |worker_res, ts_code| {
-                let (reader, cyq_chen_injector) = worker_res.as_mut().map_err(|err| err.clone())?;
+                let (reader, cyq_chen_injector, similarity_rank_injector) =
+                    worker_res.as_mut().map_err(|err| err.clone())?;
                 let ValidationTsCodeEvaluation {
                     ts_code,
                     combo_hits,
                 } = (|reader: &mut DataReader,
                       cyq_chen_injector: &CyqChenFieldInjector,
+                      similarity_rank_injector: &SimilarityRankFieldInjector,
                       ts_code: &str,
                       stock_adj_type: &str,
                       start_date: &str,
@@ -1891,11 +1897,15 @@ fn build_validation_triggered_scores_for_combos(
                     HashMap<String, ValidationRankScoreInfo>,
                 >,
                       needs_rank_score: bool,
+                      needs_similarity_rank: bool,
                       combos: &[PreparedValidationCombo]|
                  -> Result<ValidationTsCodeEvaluation, String> {
                     let mut row_data =
                         reader.load_one_tail_rows(ts_code, stock_adj_type, end_date, need_rows)?;
                     let _ = cyq_chen_injector.inject(&mut row_data, ts_code);
+                    if needs_similarity_rank {
+                        similarity_rank_injector.inject(&mut row_data, ts_code)?;
+                    }
                     inject_stock_extra_fields(
                         &mut row_data,
                         ts_code,
@@ -2028,6 +2038,7 @@ fn build_validation_triggered_scores_for_combos(
                 })(
                     reader,
                     cyq_chen_injector,
+                    similarity_rank_injector,
                     ts_code,
                     stock_adj_type,
                     start_date,
@@ -2037,6 +2048,7 @@ fn build_validation_triggered_scores_for_combos(
                     &total_share_map,
                     &rank_score_series_map,
                     needs_rank_score,
+                    needs_similarity_rank,
                     combos,
                 )?;
 
@@ -6961,7 +6973,7 @@ fn validate_backtest_strategy_expressions(source_path: &str) -> Result<(), Strin
         .flat_map(CachedRule::expression_programs)
         .collect::<Vec<_>>();
     let cyq_chen_keys = cyq_chen_runtime_key_names();
-    let injected_keys = (["ZHANG", "TOTAL_MV_YI"])
+    let injected_keys = (["ZHANG", "TOTAL_MV_YI", "S_RANK"])
         .iter()
         .copied()
         .chain(cyq_chen_keys)
@@ -9105,7 +9117,7 @@ explain = "test"
             1.0,
             None,
             RuleTag::Normal,
-            "M := MA(C, 5); M > MY_VALIDATION_IND AND RANK <= 100 AND SCORE > 0 AND ZHANG > 0 AND TOTAL_MV_YI <= 300 AND CYQ_TPR > 0.6",
+            "M := MA(C, 5); M > MY_VALIDATION_IND AND RANK <= 100 AND SCORE > 0 AND ZHANG > 0 AND TOTAL_MV_YI <= 300 AND S_RANK <= 100 AND CYQ_TPR > 0.6",
         )
         .expect("build cached rule");
         let combo = PreparedValidationCombo {
@@ -9125,7 +9137,14 @@ explain = "test"
             assert!(keys.contains(required_key), "missing {required_key}");
         }
         assert!(!keys.contains("TOTAL_MV"));
-        for injected_key in ["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI", "CYQ_TPR"] {
+        for injected_key in [
+            "RANK",
+            "SCORE",
+            "ZHANG",
+            "TOTAL_MV_YI",
+            "S_RANK",
+            "CYQ_TPR",
+        ] {
             assert!(!keys.contains(injected_key), "unexpected {injected_key}");
         }
         assert!(!keys.contains("O"));

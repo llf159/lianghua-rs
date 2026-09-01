@@ -1081,7 +1081,7 @@ fn normalize_identifier(identifier: &str) -> String {
 }
 
 fn is_injected_runtime_key(key: &str) -> bool {
-    (["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI"]).contains(&key)
+    (["RANK", "SCORE", "S_RANK", "ZHANG", "TOTAL_MV_YI"]).contains(&key)
 }
 
 fn injected_runtime_db_dependency(key: &str) -> Option<&'static str> {
@@ -1501,6 +1501,11 @@ kind = "line"
 [[panel.series]]
 key = "score_line"
 expr = "SCORE"
+kind = "line"
+
+[[panel.series]]
+key = "similarity_rank_line"
+expr = "S_RANK"
 kind = "line"
 
 [[panel.tooltip]]

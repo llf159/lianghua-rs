@@ -284,7 +284,9 @@ pub fn preview_managed_source_dataset(
             all_columns = columns;
             order_by_sql = order_by;
         }
-        "strategy-trigger-similarity-rank" | "strategy-trigger-similarity-meta" => {
+        "strategy-trigger-similarity-rank"
+        | "strategy-trigger-similarity-meta"
+        | "strategy-trigger-similarity-summary" => {
             let db_path = result_db_path(source_path_str);
             if !db_path.exists() {
                 return Err(format!("结果库不存在: {}", db_path.display()));
@@ -299,6 +301,12 @@ pub fn preview_managed_source_dataset(
                     "strategy_trigger_similarity_rank_meta",
                     "走势相似排名元数据",
                     "trade_date DESC, config_key ASC, generated_at_epoch_seconds DESC",
+                )
+            } else if normalized_dataset_id.ends_with("summary") {
+                (
+                    "strategy_trigger_similarity_summary",
+                    "走势相似排名汇总",
+                    "trade_date DESC, rank NULLS LAST, ts_code ASC",
                 )
             } else {
                 (

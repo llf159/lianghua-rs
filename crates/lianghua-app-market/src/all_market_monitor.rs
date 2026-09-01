@@ -21,8 +21,8 @@ use crate::{
         parser::{Expr, Stmt, Stmts},
     },
     scoring::tools::{
-        CyqChenFieldInjector, inject_empty_optional_cyq_chen_fields, inject_latest_num_fields,
-        inject_stock_extra_fields, load_total_share_map, rt_max_len,
+        CyqChenFieldInjector, SimilarityRankFieldInjector, inject_empty_optional_cyq_chen_fields,
+        inject_latest_num_fields, inject_stock_extra_fields, load_total_share_map, rt_max_len,
     },
     utils::utils::board_category,
 };
@@ -473,6 +473,10 @@ fn cached_template_runtime(
     let uses_rank_score = ready_programs
         .iter()
         .any(|program| program_uses_ident(program, &rank_score_keys));
+    let similarity_rank_keys = HashSet::from(["S_RANK"]);
+    let uses_similarity_rank = ready_programs
+        .iter()
+        .any(|program| program_uses_ident(program, &similarity_rank_keys));
     let template_warmup_need = compiled_templates
         .values()
         .filter_map(|item| match item {
@@ -505,6 +509,7 @@ fn cached_template_runtime(
         || template_warmup_need > 0
         || indicator_warmup_need > 0
         || uses_rank_score
+        || uses_similarity_rank
         || !cyq_chen_runtime_keys.is_empty();
     let resolved_data_mode = if needs_history {
         TemplateRuntimeDataMode::History
@@ -703,6 +708,8 @@ fn cached_template_runtime(
         .map(|item| (item.ts_code.as_str(), item.board.as_str()))
         .collect::<HashMap<_, _>>();
     let cyq_injector = CyqChenFieldInjector::new(source_path, &cyq_chen_runtime_keys);
+    let similarity_rank_injector =
+        SimilarityRankFieldInjector::new(source_path, uses_similarity_rank);
     let mut base_rows = HashMap::with_capacity(raw_rows.len());
 
     for (ts_code, row_data) in raw_rows {
@@ -718,6 +725,9 @@ fn cached_template_runtime(
             total_share_map.get(&ts_code).copied(),
         )?;
         inject_template_rank_score_series(&mut row_data, rank_score_map.get(&ts_code))?;
+        if uses_similarity_rank {
+            similarity_rank_injector.inject(&mut row_data, &ts_code)?;
+        }
         let _ = cyq_injector.inject(&mut row_data, &ts_code);
         row_data.validate()?;
         base_rows.insert(ts_code, row_data);
@@ -791,6 +801,10 @@ fn build_template_runtime_row_data(
             ),
             (RT_VOLUME_RATIO, row.realtime_vol_ratio),
             (RT_AVERAGE_PRICE, row.realtime_avg_price),
+            (
+                "S_RANK",
+                row.similarity_rank.map(|value| value as f64),
+            ),
         ],
     )?;
 
@@ -1069,27 +1083,18 @@ pub fn get_all_market_monitor_snapshot(
         let (rank_date, ranks) =
             (|conn: &Connection| -> Result<(String, HashMap<String, RankContext>), String> {
                 let similarity_board = (|conn: &Connection| -> bool {
-                    table_exists(conn, "strategy_trigger_similarity_rank")
-                        && table_exists(conn, "strategy_trigger_similarity_active_config")
+                    table_exists(conn, "strategy_trigger_similarity_summary")
                 })(conn);
                 let latest_sim_cte = if similarity_board {
                     r#",
             latest_sim AS (
-                SELECT r.ts_code, MAX(r.rank) AS similarity_rank
-                FROM strategy_trigger_similarity_rank r
-                WHERE r.config_key = (
-                    SELECT config_key FROM strategy_trigger_similarity_active_config WHERE id = 1
-                )
-                  AND r.trade_date = (
+                SELECT r.ts_code, r.rank AS similarity_rank
+                FROM strategy_trigger_similarity_summary r
+                WHERE r.trade_date = (
                       SELECT MAX(m.trade_date)
-                      FROM strategy_trigger_similarity_rank m
-                      WHERE m.config_key = (
-                          SELECT config_key
-                          FROM strategy_trigger_similarity_active_config WHERE id = 1
-                      )
+                      FROM strategy_trigger_similarity_summary m
                   )
                   AND r.rank IS NOT NULL
-                GROUP BY r.ts_code
             )"#
                 } else {
                     ""

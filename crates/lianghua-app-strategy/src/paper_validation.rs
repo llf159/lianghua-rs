@@ -25,9 +25,9 @@ use crate::{
         },
     },
     scoring::tools::{
-        CyqChenFieldInjector, calc_query_need_rows, calc_query_start_date,
-        collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names, inject_stock_extra_fields,
-        load_st_list, load_total_share_map, rt_max_len,
+        CyqChenFieldInjector, SimilarityRankFieldInjector, calc_query_need_rows,
+        calc_query_start_date, collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names,
+        inject_stock_extra_fields, load_st_list, load_total_share_map, rt_max_len,
     },
     simulate::DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
     utils::utils::board_category,
@@ -37,9 +37,10 @@ use lianghua_app_shared::{build_name_map, normalize_ts_code};
 const DEFAULT_ADJ_TYPE: &str = "qfq";
 const DEFAULT_INDEX_TS_CODE: &str = "000001.SH";
 const PRICE_EPS: f64 = 1e-12;
-const PAPER_VALIDATION_INJECTED_RUNTIME_KEYS: [&str; 7] = [
+const PAPER_VALIDATION_INJECTED_RUNTIME_KEYS: [&str; 8] = [
     "RANK",
     "SCORE",
+    "S_RANK",
     "ZHANG",
     "TIME",
     "RATEO",
@@ -438,6 +439,8 @@ pub fn run_strategy_paper_validation(
         || expr_program_uses_runtime_key(&sell_program, "RANK")
         || expr_program_uses_runtime_key(&buy_program, "SCORE")
         || expr_program_uses_runtime_key(&sell_program, "SCORE");
+    let needs_similarity_rank = expr_program_uses_runtime_key(&buy_program, "S_RANK")
+        || expr_program_uses_runtime_key(&sell_program, "S_RANK");
     let query_start_date = calc_query_start_date(source_path, warmup_need, &resolved_start_date)?;
     let need_rows = calc_query_need_rows(
         source_path,
@@ -569,6 +572,8 @@ pub fn run_strategy_paper_validation(
             let worker_reader =
                 DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
             let cyq_chen_injector = CyqChenFieldInjector::new(source_path, &used_cyq_chen_keys);
+            let similarity_rank_injector =
+                SimilarityRankFieldInjector::new(source_path, needs_similarity_rank);
             let mut out = Vec::new();
 
             for ts_code in ts_group {
@@ -583,6 +588,8 @@ pub fn run_strategy_paper_validation(
                       rank_score_series_map: &HashMap<String, HashMap<String, RankScoreInfo>>,
                       needs_rank_score: bool,
                       cyq_chen_injector: &CyqChenFieldInjector,
+                      similarity_rank_injector: &SimilarityRankFieldInjector,
+                      needs_similarity_rank: bool,
                       start_date: &str,
                       end_date: &str,
                       query_start_date: &str,
@@ -660,6 +667,9 @@ pub fn run_strategy_paper_validation(
 
                         inject_stock_extra_fields(&mut row_data, ts_code, is_st, total_share)?;
                         let _ = cyq_chen_injector.inject(&mut row_data, ts_code);
+                        if needs_similarity_rank {
+                            similarity_rank_injector.inject(&mut row_data, ts_code)?;
+                        }
                         if needs_rank_score {
                             inject_runtime_rank_score_series(
                                 &mut row_data,
@@ -736,6 +746,8 @@ pub fn run_strategy_paper_validation(
                         &rank_score_series_map,
                         needs_rank_score,
                         &cyq_chen_injector,
+                        &similarity_rank_injector,
+                        needs_similarity_rank,
                         &resolved_start_date,
                         &resolved_end_date,
                         &query_start_date,
@@ -917,11 +929,15 @@ fn build_template_validation_runtime(warmup_need: usize, include_sell_fields: bo
     let rank_series = (0..len)
         .map(|index| Some((index + 1) as f64))
         .collect::<Vec<_>>();
-    vars.insert("RANK".to_string(), Value::NumSeries(rank_series));
+    vars.insert("RANK".to_string(), Value::NumSeries(rank_series.clone()));
     let score_series = (0..len)
         .map(|index| Some(100.0 - index as f64))
         .collect::<Vec<_>>();
     vars.insert("SCORE".to_string(), Value::NumSeries(score_series));
+    vars.insert(
+        "S_RANK".to_string(),
+        Value::NumSeries(rank_series.clone()),
+    );
     vars.insert(
         "ZHANG".to_string(),
         Value::NumSeries(vec![Some(0.095); len]),

@@ -52,6 +52,7 @@ const BASE_FIELDS = [
   'NET_MF_V',
   'RANK',
   'SCORE',
+  'S_RANK',
   'ZHANG',
   'TOTAL_MV_YI',
 ]

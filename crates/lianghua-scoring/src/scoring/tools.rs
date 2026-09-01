@@ -8,7 +8,7 @@ pub use crate::data::extras::{
 };
 use crate::data::{
     RowData, RuleKind, ScopeWay, ScoreRule, cyq_chen_data::init_cyq_chen_db, cyq_chen_db_path,
-    load_trade_date_list,
+    load_trade_date_list, result_db_path,
 };
 use crate::expr::eval::{Runtime, Value};
 use crate::expr::{
@@ -39,6 +39,65 @@ pub const CYQ_CHEN_RUNTIME_FIELDS: [(&str, &str); 16] = [
 
 const CYQ_CHEN_SNAPSHOT_TABLE: &str = "cyq_chen_snapshot";
 const DEFAULT_CYQ_CHEN_ADJ_TYPE: &str = "qfq";
+
+pub struct SimilarityRankFieldInjector {
+    conn: Option<Connection>,
+}
+
+impl SimilarityRankFieldInjector {
+    pub fn new(source_dir: &str, enabled: bool) -> Self {
+        if !enabled {
+            return Self { conn: None };
+        }
+        let db_path = result_db_path(source_dir);
+        let conn = db_path
+            .exists()
+            .then(|| Connection::open(db_path).ok())
+            .flatten();
+        let conn = conn.filter(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema='main' AND table_name='strategy_trigger_similarity_summary'",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false)
+        });
+        Self { conn }
+    }
+
+    pub fn inject(&self, row_data: &mut RowData, ts_code: &str) -> Result<(), String> {
+        let mut series = vec![None; row_data.trade_dates.len()];
+        if let (Some(conn), Some(first_date), Some(last_date)) = (
+            &self.conn,
+            row_data.trade_dates.first(),
+            row_data.trade_dates.last(),
+        ) {
+            let date_index = row_data
+                .trade_dates
+                .iter()
+                .enumerate()
+                .map(|(index, trade_date)| (trade_date.as_str(), index))
+                .collect::<HashMap<_, _>>();
+            if let Ok(mut stmt) = conn.prepare_cached(
+                "SELECT trade_date, rank FROM strategy_trigger_similarity_summary WHERE ts_code=? AND trade_date>=? AND trade_date<=?",
+            ) && let Ok(mut rows) = stmt.query(params![ts_code, first_date, last_date]) {
+                while let Ok(Some(row)) = rows.next() {
+                    let (Ok(trade_date), Ok(rank)) = (
+                        row.get::<_, String>(0),
+                        row.get::<_, Option<i64>>(1),
+                    ) else {
+                        continue;
+                    };
+                    if let Some(index) = date_index.get(trade_date.as_str()).copied() {
+                        series[index] = rank.map(|value| value as f64);
+                    }
+                }
+            }
+        }
+        row_data.cols.insert("S_RANK".to_string(), series);
+        row_data.validate()
+    }
+}
 
 pub fn warmup_rows_estimate(
     source_dir: &str,
@@ -582,7 +641,9 @@ pub fn inject_optional_cyq_chen_fields(
 mod tests {
     use std::collections::{HashMap, HashSet};
 
-    use super::{inject_optional_cyq_chen_fields, inject_stock_extra_fields};
+    use super::{
+        SimilarityRankFieldInjector, inject_optional_cyq_chen_fields, inject_stock_extra_fields,
+    };
     use crate::data::RowData;
 
     #[test]
@@ -618,6 +679,37 @@ mod tests {
             row_data.cols.get("TOTAL_MV_YI").map(Vec::as_slice),
             Some([Some(30.0), Some(24.0)].as_slice())
         );
+    }
+
+    #[test]
+    fn similarity_rank_field_aligns_saved_daily_summary_by_trade_date() {
+        let source_dir = std::env::temp_dir().join(format!(
+            "lianghua-similarity-rank-injector-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&source_dir).expect("create temp source directory");
+        let conn =
+            duckdb::Connection::open(source_dir.join("scoring_result.db")).expect("open result db");
+        conn.execute_batch(
+            "CREATE TABLE strategy_trigger_similarity_summary (trade_date VARCHAR, ts_code VARCHAR, rank BIGINT);\
+             INSERT INTO strategy_trigger_similarity_summary VALUES ('20240103', '000001.SZ', 7);",
+        )
+        .expect("seed similarity summary");
+        drop(conn);
+
+        let mut row_data = RowData {
+            trade_dates: vec!["20240102".to_string(), "20240103".to_string()],
+            cols: HashMap::from([("C".to_string(), vec![Some(10.0), Some(11.0)])]),
+        };
+        SimilarityRankFieldInjector::new(source_dir.to_str().expect("utf8 path"), true)
+            .inject(&mut row_data, "000001.SZ")
+            .expect("inject similarity rank");
+
+        assert_eq!(
+            row_data.cols.get("S_RANK").map(Vec::as_slice),
+            Some([None, Some(7.0)].as_slice())
+        );
+        std::fs::remove_dir_all(source_dir).expect("remove temp source directory");
     }
 
     #[test]
