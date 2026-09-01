@@ -312,8 +312,8 @@ fn trim_process_heap() {
 
         let mallopt: MalloptFn =
             std::mem::transmute::<*mut c_void, MalloptFn>(symbol.cast::<c_void>());
-        mallopt((-100), 0);
-        mallopt((-101), 0);
+        mallopt(-100, 0);
+        mallopt(-101, 0);
     }
 }
 
