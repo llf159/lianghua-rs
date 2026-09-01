@@ -93,7 +93,6 @@ import {
 import {
   findWatchObserveRow,
   listWatchObserveRows,
-  preloadWatchObserveRows,
   removeWatchObserveRows,
   type WatchObserveRow,
   upsertWatchObserveRow,
@@ -4330,7 +4329,11 @@ export default function DetailsPage({
     [],
   );
   const [watchObserveNotice, setWatchObserveNotice] = useState("");
-  const [watchObserveSaving, setWatchObserveSaving] = useState(false);
+  const [watchObserveSavingAction, setWatchObserveSavingAction] = useState<
+    "add" | "remove" | null
+  >(null);
+  const watchObserveSaving = watchObserveSavingAction !== null;
+  const watchObserveMutationVersionRef = useRef(0);
   const [detailRealtimeData, setDetailRealtimeData] =
     useState<StockDetailRealtimeData | null>(null);
   const [detailIntradayData, setDetailIntradayData] =
@@ -6308,16 +6311,21 @@ export default function DetailsPage({
   useEffect(() => {
     let cancelled = false;
 
-    void preloadWatchObserveRows(sourcePathTrimmed).catch(() => {});
-
     const syncWatchObserveItems = async () => {
+      const mutationVersion = watchObserveMutationVersionRef.current;
       try {
         const nextItems = await listWatchObserveRows(sourcePathTrimmed);
-        if (!cancelled) {
+        if (
+          !cancelled &&
+          watchObserveMutationVersionRef.current === mutationVersion
+        ) {
           setWatchObserveItems(nextItems);
         }
       } catch {
-        if (!cancelled) {
+        if (
+          !cancelled &&
+          watchObserveMutationVersionRef.current === mutationVersion
+        ) {
           setWatchObserveItems([]);
         }
       }
@@ -7303,27 +7311,50 @@ export default function DetailsPage({
   }
 
   async function onAddWatchObserve() {
-    if (resolvedTsCode === "--" || watchObserveSaving) {
+    if (
+      resolvedTsCode === "--" ||
+      watchObserveSaving ||
+      (currentWatchObserveItem === null && resolvedTradeDate === "--")
+    ) {
       return;
     }
 
     const isRemoving = currentWatchObserveItem !== null;
+    const previousItems = watchObserveItems;
+    watchObserveMutationVersionRef.current += 1;
     try {
-      setWatchObserveSaving(true);
+      setWatchObserveSavingAction(isRemoving ? "remove" : "add");
       setWatchObserveNotice(isRemoving ? "正在取消自选..." : "正在加入自选...");
+      if (isRemoving) {
+        setWatchObserveItems((current) =>
+          current.filter((item) => item.tsCode !== resolvedTsCode),
+        );
+      } else {
+        setWatchObserveItems((current) => [
+          {
+            tsCode: resolvedTsCode,
+            name: detailData?.overview?.name ?? "",
+            latestClose: null,
+            latestChangePct: null,
+            volumeRatio: null,
+            return3dPct: null,
+            watchDate: resolvedTradeDate === "--" ? "" : resolvedTradeDate,
+            postWatchReturnPct: null,
+            todayRank: null,
+            sceneMarker: null,
+            tag: "",
+            concept: detailData?.overview?.concept ?? "",
+            markedDate: resolvedTradeDate === "--" ? null : resolvedTradeDate,
+          },
+          ...current.filter((item) => item.tsCode !== resolvedTsCode),
+        ]);
+      }
       await waitForNextPaint();
 
       if (isRemoving) {
-        const nextItems = await removeWatchObserveRows(
-          [resolvedTsCode],
-          sourcePathTrimmed,
-        );
+        const nextItems = await removeWatchObserveRows([resolvedTsCode]);
         setWatchObserveItems(nextItems);
         setWatchObserveNotice("");
-        return;
-      }
-
-      if (resolvedTradeDate === "--") {
         return;
       }
 
@@ -7340,11 +7371,12 @@ export default function DetailsPage({
       setWatchObserveItems(nextItems);
       setWatchObserveNotice("");
     } catch {
+      setWatchObserveItems(previousItems);
       setWatchObserveNotice(
         isRemoving ? "取消自选失败" : "加入自选失败",
       );
     } finally {
-      setWatchObserveSaving(false);
+      setWatchObserveSavingAction(null);
     }
   }
 
@@ -8133,8 +8165,8 @@ export default function DetailsPage({
                       void onAddWatchObserve();
                     }}
                   >
-                    {watchObserveSaving
-                      ? isCurrentWatched
+                    {watchObserveSavingAction
+                      ? watchObserveSavingAction === "remove"
                         ? "取消中..."
                         : "加入中..."
                       : isCurrentWatched

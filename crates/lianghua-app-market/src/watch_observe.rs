@@ -1,5 +1,5 @@
 use chrono::{Local, Timelike};
-use duckdb::{Connection, params};
+use duckdb::{Connection, params_from_iter};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -119,128 +119,183 @@ pub fn resolve_current_watch_date(source_path: &str) -> Result<String, String> {
     )
 }
 
-fn query_optional_rank(
+fn query_rank_map(
     conn: &Connection,
     trade_date: &str,
-    ts_code: &str,
-) -> Result<Option<i64>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT rank
-            FROM score_summary
-            WHERE trade_date = ? AND ts_code = ?
-            LIMIT 1
-            "#,
-        )
-        .map_err(|e| format!("预编译自选排名失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![trade_date, ts_code])
-        .map_err(|e| format!("查询自选排名失败: {e}"))?;
-
-    if let Some(row) = rows.next().map_err(|e| format!("读取自选排名失败: {e}"))? {
-        let rank: Option<i64> = row
-            .get(0)
-            .map_err(|e| format!("读取自选排名字段失败: {e}"))?;
-        Ok(rank)
-    } else {
-        Ok(None)
+    ts_codes: &[String],
+) -> Result<HashMap<String, i64>, String> {
+    if ts_codes.is_empty() {
+        return Ok(HashMap::new());
     }
+    let placeholders = std::iter::repeat_n("?", ts_codes.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut stmt = conn
+        .prepare(&format!(
+            r#"
+            SELECT ts_code, rank
+            FROM score_summary
+            WHERE trade_date = ? AND ts_code IN ({placeholders})
+            "#
+        ))
+        .map_err(|e| format!("预编译自选排名失败: {e}"))?;
+    let mut query_params = Vec::with_capacity(ts_codes.len() + 1);
+    query_params.push(trade_date.to_string());
+    query_params.extend(ts_codes.iter().cloned());
+    let mut rows = stmt
+        .query(params_from_iter(query_params.iter()))
+        .map_err(|e| format!("查询自选排名失败: {e}"))?;
+    let mut out = HashMap::with_capacity(ts_codes.len());
+    while let Some(row) = rows.next().map_err(|e| format!("读取自选排名失败: {e}"))? {
+        let ts_code: String = row
+            .get(0)
+            .map_err(|e| format!("读取自选排名代码失败: {e}"))?;
+        let rank: Option<i64> = row
+            .get(1)
+            .map_err(|e| format!("读取自选排名字段失败: {e}"))?;
+        if let Some(rank) = rank {
+            out.insert(ts_code, rank);
+        }
+    }
+    Ok(out)
 }
 
-fn query_optional_scene_marker(
+fn query_scene_marker_map(
     conn: &Connection,
     trade_date: &str,
-    ts_code: &str,
+    ts_codes: &[String],
     scene_stage_threshold: Option<&str>,
-) -> Result<Option<String>, String> {
+) -> Result<HashMap<String, String>, String> {
+    if ts_codes.is_empty() {
+        return Ok(HashMap::new());
+    }
     let threshold_level = parse_scene_stage_threshold(scene_stage_threshold);
+    let placeholders = std::iter::repeat_n("?", ts_codes.len())
+        .collect::<Vec<_>>()
+        .join(", ");
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             r#"
-            SELECT scene_name, scene_rank, stage
+            SELECT ts_code, scene_name, scene_rank, stage
             FROM scene_details
-            WHERE trade_date = ?
-              AND ts_code = ?
+              WHERE trade_date = ?
+              AND ts_code IN ({placeholders})
               AND scene_name IS NOT NULL
               AND TRIM(scene_name) <> ''
-            ORDER BY COALESCE(scene_rank, 999999) ASC, scene_name ASC
-            "#,
-        )
+            ORDER BY ts_code, COALESCE(scene_rank, 999999) ASC, scene_name ASC
+            "#
+        ))
         .map_err(|e| format!("预编译自选场景排名失败: {e}"))?;
+    let mut query_params = Vec::with_capacity(ts_codes.len() + 1);
+    query_params.push(trade_date.to_string());
+    query_params.extend(ts_codes.iter().cloned());
     let mut rows = stmt
-        .query(params![trade_date, ts_code])
+        .query(params_from_iter(query_params.iter()))
         .map_err(|e| format!("查询自选场景排名失败: {e}"))?;
-
+    let mut out = HashMap::with_capacity(ts_codes.len());
     while let Some(row) = rows
         .next()
         .map_err(|e| format!("读取自选场景排名失败: {e}"))?
     {
-        let scene_name: String = row
+        let ts_code: String = row
             .get(0)
+            .map_err(|e| format!("读取自选场景代码失败: {e}"))?;
+        if out.contains_key(&ts_code) {
+            continue;
+        }
+        let scene_name: String = row
+            .get(1)
             .map_err(|e| format!("读取自选场景名称失败: {e}"))?;
         let scene_rank: Option<i64> = row
-            .get(1)
+            .get(2)
             .map_err(|e| format!("读取自选场景排名字段失败: {e}"))?;
         let stage: Option<String> = row
-            .get(2)
+            .get(3)
             .map_err(|e| format!("读取自选场景等级失败: {e}"))?;
         if scene_stage_level(stage.as_deref()) < threshold_level {
             continue;
         }
-
-        return Ok(Some(match scene_rank {
-            Some(rank) => format!("{} #{}", scene_name.trim(), rank),
-            None => scene_name.trim().to_string(),
-        }));
+        out.insert(
+            ts_code,
+            match scene_rank {
+                Some(rank) => format!("{} #{}", scene_name.trim(), rank),
+                None => scene_name.trim().to_string(),
+            },
+        );
     }
-
-    Ok(None)
+    Ok(out)
 }
 
-fn query_latest_snapshot(
+fn query_latest_snapshot_map(
     source_conn: &Connection,
-    ts_code: &str,
-) -> Result<LatestSnapshot, String> {
+    ts_codes: &[String],
+) -> Result<HashMap<String, LatestSnapshot>, String> {
+    if ts_codes.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = std::iter::repeat_n("?", ts_codes.len())
+        .collect::<Vec<_>>()
+        .join(", ");
     let mut stmt = source_conn
-        .prepare(
+        .prepare(&format!(
             r#"
-            SELECT TRY_CAST(close AS DOUBLE)
-            FROM stock_data
-            WHERE ts_code = ? AND adj_type = ?
-            ORDER BY trade_date DESC
-            LIMIT 4
-            "#,
-        )
+            SELECT
+                ts_code,
+                MAX(CASE WHEN row_num = 1 THEN close_value END),
+                MAX(CASE WHEN row_num = 2 THEN close_value END),
+                MAX(CASE WHEN row_num = 3 THEN close_value END),
+                MAX(CASE WHEN row_num = 4 THEN close_value END)
+            FROM (
+                SELECT
+                    ts_code,
+                    TRY_CAST(close AS DOUBLE) AS close_value,
+                    ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS row_num
+                FROM stock_data
+                WHERE adj_type = ? AND ts_code IN ({placeholders})
+            ) ranked
+            WHERE row_num <= 4
+            GROUP BY ts_code
+            "#
+        ))
         .map_err(|e| format!("预编译自选最新快照失败: {e}"))?;
+    let mut query_params = Vec::with_capacity(ts_codes.len() + 1);
+    query_params.push(DEFAULT_ADJ_TYPE.to_string());
+    query_params.extend(ts_codes.iter().cloned());
     let mut rows = stmt
-        .query(params![ts_code, DEFAULT_ADJ_TYPE])
+        .query(params_from_iter(query_params.iter()))
         .map_err(|e| format!("查询自选最新快照失败: {e}"))?;
-
-    let mut closes = Vec::with_capacity(4);
+    let mut out = HashMap::with_capacity(ts_codes.len());
     while let Some(row) = rows
         .next()
         .map_err(|e| format!("读取自选最新快照失败: {e}"))?
     {
-        let value: Option<f64> = row
+        let ts_code: String = row
             .get(0)
-            .map_err(|e| format!("读取自选最新快照字段失败: {e}"))?;
-        closes.push(value);
+            .map_err(|e| format!("读取自选最新快照代码失败: {e}"))?;
+        let latest_close: Option<f64> =
+            row.get(1).map_err(|e| format!("读取自选最新价失败: {e}"))?;
+        let previous_close: Option<f64> =
+            row.get(2).map_err(|e| format!("读取自选前收盘失败: {e}"))?;
+        out.insert(
+            ts_code,
+            LatestSnapshot {
+                latest_close,
+                latest_change_pct: match (latest_close, previous_close) {
+                    (Some(latest), Some(previous)) if previous > 0.0 => {
+                        Some((latest / previous - 1.0) * 100.0)
+                    }
+                    _ => None,
+                },
+                realtime_3d_base_close: row
+                    .get(3)
+                    .map_err(|e| format!("读取自选实时三日基准失败: {e}"))?,
+                daily_3d_base_close: row
+                    .get(4)
+                    .map_err(|e| format!("读取自选日线三日基准失败: {e}"))?,
+            },
+        );
     }
-
-    let latest_close = closes.first().copied().flatten();
-    let previous_close = closes.get(1).copied().flatten();
-    let latest_change_pct = match (latest_close, previous_close) {
-        (Some(latest), Some(previous)) if previous > 0.0 => Some((latest / previous - 1.0) * 100.0),
-        _ => None,
-    };
-
-    Ok(LatestSnapshot {
-        latest_close,
-        latest_change_pct,
-        realtime_3d_base_close: closes.get(2).copied().flatten(),
-        daily_3d_base_close: closes.get(3).copied().flatten(),
-    })
+    Ok(out)
 }
 
 fn calc_return_pct(price: Option<f64>, base: Option<f64>) -> Option<f64> {
@@ -252,84 +307,58 @@ fn calc_return_pct(price: Option<f64>, base: Option<f64>) -> Option<f64> {
     }
 }
 
-fn calc_post_watch_return_pct(
+fn query_post_watch_open_map(
     source_conn: &Connection,
-    trade_date: &str,
-    ts_code: &str,
-    latest_price_override: Option<f64>,
-) -> Result<Option<f64>, String> {
-    let Some(next_open) = (|source_conn: &Connection,
-                            trade_date: &str,
-                            ts_code: &str|
-     -> Result<Option<f64>, String> {
-        let mut stmt = source_conn
-            .prepare(
-                r#"
-            SELECT TRY_CAST(open AS DOUBLE)
-            FROM stock_data
-            WHERE ts_code = ? AND adj_type = ? AND trade_date > ?
-            ORDER BY trade_date ASC
-            LIMIT 1
-            "#,
-            )
-            .map_err(|e| format!("预编译自选次日开盘价失败: {e}"))?;
-        let mut rows = stmt
-            .query(params![ts_code, DEFAULT_ADJ_TYPE, trade_date])
-            .map_err(|e| format!("查询自选次日开盘价失败: {e}"))?;
-
-        if let Some(row) = rows
-            .next()
-            .map_err(|e| format!("读取自选次日开盘价失败: {e}"))?
-        {
-            let open_value: Option<f64> = row
-                .get(0)
-                .map_err(|e| format!("读取自选次日开盘价字段失败: {e}"))?;
-            Ok(open_value)
-        } else {
-            Ok(None)
-        }
-    })(source_conn, trade_date, ts_code)?
-    else {
-        return Ok(None);
-    };
-    if next_open <= 0.0 {
-        return Ok(None);
+    observe_dates: &HashMap<String, String>,
+) -> Result<HashMap<String, f64>, String> {
+    if observe_dates.is_empty() {
+        return Ok(HashMap::new());
     }
-
-    let Some(latest_close) = latest_price_override.or((|source_conn: &Connection,
-                                                        ts_code: &str|
-     -> Result<Option<f64>, String> {
-        let mut stmt = source_conn
-            .prepare(
-                r#"
-            SELECT TRY_CAST(close AS DOUBLE)
-            FROM stock_data
-            WHERE ts_code = ? AND adj_type = ?
-            ORDER BY trade_date DESC
-            LIMIT 1
-            "#,
-            )
-            .map_err(|e| format!("预编译自选最新收盘价失败: {e}"))?;
-        let mut rows = stmt
-            .query(params![ts_code, DEFAULT_ADJ_TYPE])
-            .map_err(|e| format!("查询自选最新收盘价失败: {e}"))?;
-
-        if let Some(row) = rows
-            .next()
-            .map_err(|e| format!("读取自选最新收盘价失败: {e}"))?
-        {
-            let close_value: Option<f64> = row
-                .get(0)
-                .map_err(|e| format!("读取自选最新收盘价字段失败: {e}"))?;
-            Ok(close_value)
-        } else {
-            Ok(None)
+    let requested_rows = std::iter::repeat_n("(?, ?)", observe_dates.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        r#"
+        WITH requested(ts_code, observe_date) AS (VALUES {requested_rows})
+        SELECT
+            requested.ts_code,
+            ARG_MIN(TRY_CAST(stock_data.open AS DOUBLE), stock_data.trade_date)
+        FROM requested
+        LEFT JOIN stock_data
+          ON stock_data.ts_code = requested.ts_code
+         AND stock_data.adj_type = ?
+         AND stock_data.trade_date > requested.observe_date
+        GROUP BY requested.ts_code
+        "#
+    );
+    let mut query_params = Vec::with_capacity(observe_dates.len() * 2 + 1);
+    for (ts_code, observe_date) in observe_dates {
+        query_params.push(ts_code.clone());
+        query_params.push(observe_date.clone());
+    }
+    query_params.push(DEFAULT_ADJ_TYPE.to_string());
+    let mut stmt = source_conn
+        .prepare(&sql)
+        .map_err(|e| format!("预编译自选次日开盘价失败: {e}"))?;
+    let mut rows = stmt
+        .query(params_from_iter(query_params.iter()))
+        .map_err(|e| format!("查询自选次日开盘价失败: {e}"))?;
+    let mut out = HashMap::with_capacity(observe_dates.len());
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取自选次日开盘价失败: {e}"))?
+    {
+        let ts_code: String = row
+            .get(0)
+            .map_err(|e| format!("读取自选次日开盘价代码失败: {e}"))?;
+        let next_open: Option<f64> = row
+            .get(1)
+            .map_err(|e| format!("读取自选次日开盘价字段失败: {e}"))?;
+        if let Some(next_open) = next_open.filter(|value| *value > 0.0) {
+            out.insert(ts_code, next_open);
         }
-    })(source_conn, ts_code)?) else {
-        return Ok(None);
-    };
-
-    Ok(Some((latest_close / next_open - 1.0) * 100.0))
+    }
+    Ok(out)
 }
 
 pub fn hydrate_watch_observe_rows(
@@ -367,6 +396,42 @@ pub fn hydrate_watch_observe_rows(
         (Some(conn), trade_date) => Some(resolve_trade_date(conn, trade_date)?),
         (None, trade_date) => trade_date,
     };
+    let ts_codes = stored_rows
+        .iter()
+        .map(|row| row.ts_code.clone())
+        .collect::<Vec<_>>();
+    let observe_dates = stored_rows
+        .iter()
+        .filter_map(|row| {
+            row.marked_date
+                .as_deref()
+                .and_then(normalize_trade_date)
+                .or_else(|| normalize_trade_date(&row.watch_date))
+                .map(|trade_date| (row.ts_code.clone(), trade_date))
+        })
+        .collect::<HashMap<_, _>>();
+    let latest_snapshot_map = source_conn
+        .as_ref()
+        .and_then(|conn| query_latest_snapshot_map(conn, &ts_codes).ok())
+        .unwrap_or_default();
+    let post_watch_open_map = match source_conn.as_ref() {
+        Some(conn) => query_post_watch_open_map(conn, &observe_dates)?,
+        None => HashMap::new(),
+    };
+    let today_rank_map = match (result_conn.as_ref(), resolved_rank_trade_date.as_deref()) {
+        (Some(conn), Some(trade_date)) => query_rank_map(conn, trade_date, &ts_codes)?,
+        _ => HashMap::new(),
+    };
+    let scene_marker_map = match (result_conn.as_ref(), resolved_rank_trade_date.as_deref()) {
+        (Some(conn), Some(trade_date)) => query_scene_marker_map(
+            conn,
+            trade_date,
+            &ts_codes,
+            scene_stage_threshold.as_deref(),
+        )
+        .unwrap_or_default(),
+        _ => HashMap::new(),
+    };
 
     let mut out = Vec::with_capacity(stored_rows.len());
     for row in stored_rows {
@@ -380,39 +445,19 @@ pub fn hydrate_watch_observe_rows(
             .cloned()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| row.concept.clone());
-        let latest_snapshot = source_conn
-            .as_ref()
-            .and_then(|conn| query_latest_snapshot(conn, &row.ts_code).ok())
+        let latest_snapshot = latest_snapshot_map
+            .get(&row.ts_code)
+            .copied()
             .unwrap_or_default();
         let latest_close = latest_snapshot.latest_close;
         let latest_change_pct = latest_snapshot.latest_change_pct;
         let volume_ratio = None;
         let return_3d_pct = calc_return_pct(latest_close, latest_snapshot.daily_3d_base_close);
-        let today_rank = match (result_conn.as_ref(), resolved_rank_trade_date.as_deref()) {
-            (Some(conn), Some(trade_date)) => query_optional_rank(conn, trade_date, &row.ts_code)?,
-            _ => None,
-        };
-        let scene_marker = match (result_conn.as_ref(), resolved_rank_trade_date.as_deref()) {
-            (Some(conn), Some(trade_date)) => query_optional_scene_marker(
-                conn,
-                trade_date,
-                &row.ts_code,
-                scene_stage_threshold.as_deref(),
-            )
-            .unwrap_or_default(),
-            _ => None,
-        };
-        let observe_trade_date = row
-            .marked_date
-            .as_deref()
-            .and_then(normalize_trade_date)
-            .or_else(|| normalize_trade_date(&row.watch_date));
-        let post_watch_return_pct = match (source_conn.as_ref(), observe_trade_date.as_deref()) {
-            (Some(conn), Some(trade_date)) => {
-                calc_post_watch_return_pct(conn, trade_date, &row.ts_code, None)?
-            }
-            _ => None,
-        };
+        let today_rank = today_rank_map.get(&row.ts_code).copied();
+        let scene_marker = scene_marker_map.get(&row.ts_code).cloned();
+        let post_watch_return_pct = post_watch_open_map
+            .get(&row.ts_code)
+            .and_then(|next_open| calc_return_pct(latest_close, Some(*next_open)));
 
         out.push(WatchObserveRow {
             ts_code: row.ts_code.clone(),
@@ -478,6 +523,44 @@ pub fn build_watch_observe_snapshot_data(
         (Some(conn), trade_date) => Some(resolve_trade_date(conn, trade_date)?),
         (None, trade_date) => trade_date.and_then(|value| normalize_trade_date(&value)),
     };
+    let observe_dates = stored_rows
+        .iter()
+        .filter_map(|row| {
+            row.marked_date
+                .as_deref()
+                .and_then(normalize_trade_date)
+                .or_else(|| normalize_trade_date(&row.watch_date))
+                .map(|trade_date| (row.ts_code.clone(), trade_date))
+        })
+        .collect::<HashMap<_, _>>();
+    let latest_snapshot_map = source_conn
+        .as_ref()
+        .and_then(|conn| query_latest_snapshot_map(conn, &ts_codes).ok())
+        .unwrap_or_default();
+    let post_watch_open_map = match source_conn.as_ref() {
+        Some(conn) => query_post_watch_open_map(conn, &observe_dates)?,
+        None => HashMap::new(),
+    };
+    let today_rank_map = match (
+        result_conn.as_ref(),
+        resolved_reference_trade_date.as_deref(),
+    ) {
+        (Some(conn), Some(trade_date)) => query_rank_map(conn, trade_date, &ts_codes)?,
+        _ => HashMap::new(),
+    };
+    let scene_marker_map = match (
+        result_conn.as_ref(),
+        resolved_reference_trade_date.as_deref(),
+    ) {
+        (Some(conn), Some(trade_date)) => query_scene_marker_map(
+            conn,
+            trade_date,
+            &ts_codes,
+            scene_stage_threshold.as_deref(),
+        )
+        .unwrap_or_default(),
+        _ => HashMap::new(),
+    };
 
     let mut out = Vec::with_capacity(stored_rows.len());
     for row in stored_rows {
@@ -492,9 +575,9 @@ pub fn build_watch_observe_snapshot_data(
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| row.concept.clone());
         let quote = quote_map.get(&row.ts_code);
-        let fallback_snapshot = source_conn
-            .as_ref()
-            .and_then(|conn| query_latest_snapshot(conn, &row.ts_code).ok())
+        let fallback_snapshot = latest_snapshot_map
+            .get(&row.ts_code)
+            .copied()
             .unwrap_or_default();
         let latest_close = quote
             .map(|item| item.price)
@@ -516,37 +599,11 @@ pub fn build_watch_observe_snapshot_data(
         } else {
             calc_return_pct(latest_close, fallback_snapshot.daily_3d_base_close)
         };
-        let observe_trade_date = row
-            .marked_date
-            .as_deref()
-            .and_then(normalize_trade_date)
-            .or_else(|| normalize_trade_date(&row.watch_date));
-        let post_watch_return_pct = match (source_conn.as_ref(), observe_trade_date.as_deref()) {
-            (Some(conn), Some(trade_date)) => {
-                calc_post_watch_return_pct(conn, trade_date, &row.ts_code, latest_close)?
-            }
-            _ => None,
-        };
-        let today_rank = match (
-            result_conn.as_ref(),
-            resolved_reference_trade_date.as_deref(),
-        ) {
-            (Some(conn), Some(trade_date)) => query_optional_rank(conn, trade_date, &row.ts_code)?,
-            _ => None,
-        };
-        let scene_marker = match (
-            result_conn.as_ref(),
-            resolved_reference_trade_date.as_deref(),
-        ) {
-            (Some(conn), Some(trade_date)) => query_optional_scene_marker(
-                conn,
-                trade_date,
-                &row.ts_code,
-                scene_stage_threshold.as_deref(),
-            )
-            .unwrap_or_default(),
-            _ => None,
-        };
+        let post_watch_return_pct = post_watch_open_map
+            .get(&row.ts_code)
+            .and_then(|next_open| calc_return_pct(latest_close, Some(*next_open)));
+        let today_rank = today_rank_map.get(&row.ts_code).copied();
+        let scene_marker = scene_marker_map.get(&row.ts_code).cloned();
 
         out.push(WatchObserveRow {
             ts_code: row.ts_code.clone(),
@@ -582,8 +639,8 @@ mod tests {
     use duckdb::{Connection, params};
 
     use super::{
-        calc_return_pct, query_latest_snapshot, query_optional_scene_marker,
-        resolve_watch_date_for_clock,
+        calc_return_pct, query_latest_snapshot_map, query_post_watch_open_map,
+        query_scene_marker_map, resolve_watch_date_for_clock,
     };
 
     fn dates() -> Vec<String> {
@@ -652,21 +709,39 @@ mod tests {
         }
 
         assert_eq!(
-            query_optional_scene_marker(&conn, "20260729", "000001.SZ", Some("trigger"))
-                .unwrap()
-                .as_deref(),
+            query_scene_marker_map(
+                &conn,
+                "20260729",
+                &["000001.SZ".to_string()],
+                Some("trigger")
+            )
+            .unwrap()
+            .get("000001.SZ")
+            .map(String::as_str),
             Some("触发场景 #2")
         );
         assert_eq!(
-            query_optional_scene_marker(&conn, "20260729", "000001.SZ", Some("observe"))
-                .unwrap()
-                .as_deref(),
+            query_scene_marker_map(
+                &conn,
+                "20260729",
+                &["000001.SZ".to_string()],
+                Some("observe")
+            )
+            .unwrap()
+            .get("000001.SZ")
+            .map(String::as_str),
             Some("观察场景 #1")
         );
         assert_eq!(
-            query_optional_scene_marker(&conn, "20260729", "000001.SZ", Some("confirm"))
-                .unwrap()
-                .as_deref(),
+            query_scene_marker_map(
+                &conn,
+                "20260729",
+                &["000001.SZ".to_string()],
+                Some("confirm")
+            )
+            .unwrap()
+            .get("000001.SZ")
+            .map(String::as_str),
             Some("确认场景 #5")
         );
     }
@@ -679,7 +754,8 @@ mod tests {
                 ts_code VARCHAR,
                 adj_type VARCHAR,
                 trade_date VARCHAR,
-                close DOUBLE
+                close DOUBLE,
+                open DOUBLE
             )",
             [],
         )
@@ -691,17 +767,27 @@ mod tests {
             ("20260729", 13.0_f64),
         ] {
             conn.execute(
-                "INSERT INTO stock_data VALUES (?, ?, ?, ?)",
-                params!["000001.SZ", "qfq", trade_date, close],
+                "INSERT INTO stock_data VALUES (?, ?, ?, ?, ?)",
+                params!["000001.SZ", "qfq", trade_date, close, close - 0.5],
             )
             .unwrap();
         }
 
-        let snapshot = query_latest_snapshot(&conn, "000001.SZ").unwrap();
+        let snapshots = query_latest_snapshot_map(&conn, &["000001.SZ".to_string()]).unwrap();
+        let snapshot = snapshots.get("000001.SZ").unwrap();
         let daily_return =
             calc_return_pct(snapshot.latest_close, snapshot.daily_3d_base_close).unwrap();
         assert!((daily_return - 30.0).abs() < 0.000_001);
         let realtime_return = calc_return_pct(Some(14.0), snapshot.realtime_3d_base_close).unwrap();
         assert!((realtime_return - 27.272_727).abs() < 0.000_001);
+
+        let next_opens = query_post_watch_open_map(
+            &conn,
+            &[("000001.SZ".to_string(), "20260727".to_string())]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(next_opens.get("000001.SZ"), Some(&11.5));
     }
 }

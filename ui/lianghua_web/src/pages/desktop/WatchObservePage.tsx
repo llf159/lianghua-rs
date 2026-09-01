@@ -502,7 +502,10 @@ export default function WatchObservePage() {
     const requestId = databaseLoadRequestRef.current + 1;
     databaseLoadRequestRef.current = requestId;
     try {
-      await updateWatchObserveTag(tsCode, tagDraft.trim(), sourcePathTrimmed);
+      await updateWatchObserveTag(
+        tsCode,
+        tagDraft.trim(),
+      );
       const nextRows = await listWatchObserveRows(
         sourcePathTrimmed,
         referenceTradeDate,
@@ -548,7 +551,6 @@ export default function WatchObservePage() {
       await updateWatchObserveMarkedDate(
         tsCode,
         markedDateDraft,
-        sourcePathTrimmed,
       );
       const nextRows = await listWatchObserveRows(
         sourcePathTrimmed,
@@ -594,7 +596,7 @@ export default function WatchObservePage() {
     const requestId = databaseLoadRequestRef.current + 1;
     databaseLoadRequestRef.current = requestId;
     try {
-      await removeWatchObserveRows(pendingDeleteTsCodes, sourcePathTrimmed);
+      await removeWatchObserveRows(pendingDeleteTsCodes);
       const nextRows = await listWatchObserveRows(
         sourcePathTrimmed,
         referenceTradeDate,

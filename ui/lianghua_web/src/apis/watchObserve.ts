@@ -193,7 +193,7 @@ export async function listWatchObserveRows(
   sourcePath?: string | null,
   referenceTradeDate?: string | null,
 ) {
-  return listHydratedWatchObserveRows(sourcePath, referenceTradeDate)
+  return preloadWatchObserveRows(sourcePath, referenceTradeDate)
 }
 
 export async function refreshWatchObserveRows(
@@ -219,26 +219,25 @@ export async function upsertWatchObserveRow(input: WatchObserveInput, sourcePath
     concept: input.concept,
     markedDate: input.markedDate,
   })
-  return listHydratedWatchObserveRows(resolvedSourcePath)
+  return readWatchObserveRowsFromCache()
 }
 
-export async function updateWatchObserveTag(tsCode: string, tag: string, sourcePath?: string | null) {
-  updateCachedWatchObserveTag(tsCode, tag)
-  return listHydratedWatchObserveRows(sourcePath)
+export async function updateWatchObserveTag(
+  tsCode: string,
+  tag: string,
+) {
+  return updateCachedWatchObserveTag(tsCode, tag)
 }
 
 export async function updateWatchObserveMarkedDate(
   tsCode: string,
   markedDate: string,
-  sourcePath?: string | null,
 ) {
-  updateCachedWatchObserveMarkedDate(tsCode, markedDate)
-  return listHydratedWatchObserveRows(sourcePath)
+  return updateCachedWatchObserveMarkedDate(tsCode, markedDate)
 }
 
-export async function removeWatchObserveRows(tsCodes: string[], sourcePath?: string | null) {
-  removeCachedWatchObserveRows(tsCodes)
-  return listHydratedWatchObserveRows(sourcePath)
+export async function removeWatchObserveRows(tsCodes: string[]) {
+  return removeCachedWatchObserveRows(tsCodes)
 }
 
 export function preloadWatchObserveRows(
