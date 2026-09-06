@@ -934,10 +934,7 @@ fn build_template_validation_runtime(warmup_need: usize, include_sell_fields: bo
         .map(|index| Some(100.0 - index as f64))
         .collect::<Vec<_>>();
     vars.insert("SCORE".to_string(), Value::NumSeries(score_series));
-    vars.insert(
-        "S_RANK".to_string(),
-        Value::NumSeries(rank_series.clone()),
-    );
+    vars.insert("S_RANK".to_string(), Value::NumSeries(rank_series.clone()));
     vars.insert(
         "ZHANG".to_string(),
         Value::NumSeries(vec![Some(0.095); len]),

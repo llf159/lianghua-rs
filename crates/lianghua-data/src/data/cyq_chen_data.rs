@@ -44,7 +44,7 @@ const DEFAULT_ADJ_TYPE: &str = "qfq";
 const CYQ_CHEN_GROUP_SIZE_INCREMENTAL: usize = 8;
 const CYQ_CHEN_QUEUE_BOUND: usize = 8;
 const CYQ_CHEN_FLUSH_BATCH_SIZE: usize = 32;
-const CYQ_CHEN_SCHEMA_VERSION: &str = "2";
+const CYQ_CHEN_SCHEMA_VERSION: &str = "4";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CyqChenRebuildSummary {
@@ -194,6 +194,8 @@ pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
 
         Ok(())
     })(&conn)?;
+    conn.execute("CREATE TABLE IF NOT EXISTS cyq_chen_checkpoint (ts_code VARCHAR, adj_type VARCHAR, trade_date VARCHAR, bins VARCHAR, PRIMARY KEY(ts_code, adj_type))", [])
+        .map_err(|e| format!("创建新筹码续算状态表失败: {e}"))?;
     ensure_cyq_chen_snapshot_index(&conn)?;
 
     Ok(())
@@ -298,6 +300,8 @@ fn clear_cyq_chen_tables(db_path: &Path) -> Result<(), String> {
     let tx = conn
         .transaction()
         .map_err(|e| format!("创建筹码库事务失败:{e}"))?;
+    tx.execute("DELETE FROM cyq_chen_checkpoint", [])
+        .map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM cyq_chen_bin", [])
         .map_err(|e| format!("清空cyq_chen_bin失败:{e}"))?;
     tx.execute("DELETE FROM cyq_chen_snapshot", [])
@@ -322,7 +326,7 @@ fn current_chip_change_strategy_hash(source_dir: &str) -> Result<String, String>
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
-        format!("{hash:016x}:{:016x}", text.len())
+        format!("{CYQ_CHEN_SCHEMA_VERSION}:{hash:016x}:{:016x}", text.len())
     })(&text))
 }
 
@@ -613,6 +617,9 @@ fn compute_cyq_chen_stock_group_batch(
     ts_group: &[String],
     on_stock_done: Option<&dyn Fn(&str)>,
 ) -> Result<CyqChenWriteBatch, String> {
+    let lookback = config
+        .warmup_days
+        .max(estimate_chen_chip_expression_warmup(chip_config)?);
     let mut rows_map =
         worker_reader.load_batch(ts_group, DEFAULT_ADJ_TYPE, load_start_date, end_date)?;
     let mut batch = CyqChenWriteBatch::default();
@@ -624,7 +631,7 @@ fn compute_cyq_chen_stock_group_batch(
                     ts_code,
                     DEFAULT_ADJ_TYPE,
                     end_date,
-                    config.warmup_days.max(1) * 2,
+                    lookback.max(1) * 2,
                 )?;
                 if tail.trade_dates.is_empty() {
                     RowData {
@@ -638,13 +645,8 @@ fn compute_cyq_chen_stock_group_batch(
         };
 
         if !row_data.trade_dates.is_empty()
-            && resolve_first_computable_output_date(
-                &row_data,
-                start_date,
-                end_date,
-                config.warmup_days,
-            )
-            .is_none()
+            && resolve_first_computable_output_date(&row_data, start_date, end_date, lookback)
+                .is_none()
         {
             let output_rows = (|row_data: &RowData, start_date: &str, end_date: &str| -> usize {
                 row_data
@@ -657,7 +659,7 @@ fn compute_cyq_chen_stock_group_batch(
                     .count()
             })(&row_data, start_date, end_date);
             if output_rows > 0 {
-                let need_rows = config.warmup_days.saturating_add(output_rows);
+                let need_rows = lookback.saturating_add(output_rows);
                 if need_rows > 0 {
                     let tail = worker_reader.load_one_tail_rows(
                         ts_code,
@@ -673,7 +675,7 @@ fn compute_cyq_chen_stock_group_batch(
         }
 
         if row_data.trade_dates.is_empty() {
-            let need_rows = config.warmup_days.max(60) * 2;
+            let need_rows = lookback.max(60) * 2;
             if need_rows > 0 {
                 let tail = worker_reader.load_one_tail_rows(
                     ts_code,
@@ -775,6 +777,7 @@ fn compute_cyq_chen_stock_group_batch(
                             format!("读取新筹码分桶序号失败, ts_code={ts_code}: {e}")
                         })?;
                         bins.push(ChenChipBin {
+                            pending: Vec::new(),
                             index: index_i64.max(0) as usize,
                             price: row.get(1).map_err(|e| {
                                 format!("读取新筹码分桶价格失败, ts_code={ts_code}: {e}")
@@ -795,6 +798,22 @@ fn compute_cyq_chen_stock_group_batch(
                                 format!("读取新筹码总筹码失败, ts_code={ts_code}: {e}")
                             })?,
                         });
+                    }
+                    let checkpoint = conn.query_row(
+                        "SELECT bins FROM cyq_chen_checkpoint WHERE ts_code = ? AND adj_type = ? AND trade_date = ?",
+                        params![ts_code, DEFAULT_ADJ_TYPE, state_trade_date.as_str()],
+                        |row| row.get::<_, String>(0),
+                    ).map(Some).or_else(|e| match e { duckdb::Error::QueryReturnedNoRows => Ok(None), other => Err(other) })
+                        .map_err(|e| format!("读取新筹码续算检查点失败: {e}"))?;
+                    if let Some(checkpoint) = checkpoint {
+                        bins = serde_json::from_str(&checkpoint)
+                            .map_err(|e| format!("新筹码检查点损坏: {e}"))?;
+                    } else if chip_config
+                        .strategies
+                        .iter()
+                        .any(|rule| rule.confirm_after > 0)
+                    {
+                        return Err(format!("{ts_code} 缺少后验续算检查点，请重建该股票筹码"));
                     }
                     if bins.is_empty() {
                         return Ok(None);
@@ -976,6 +995,7 @@ fn compute_cyq_chen_stock_group_batch(
 }
 
 fn append_cyq_chen_batch_rows(
+    conn: &Connection,
     snapshot_app: &mut Appender<'_>,
     bin_app: &mut Appender<'_>,
     batch: CyqChenWriteBatch,
@@ -1037,6 +1057,18 @@ fn append_cyq_chen_batch_rows(
 
     for stock in batch.stocks {
         let ts_code = stock.ts_code;
+        if let Some(last) = stock.snapshots.last() {
+            conn.execute(
+                "INSERT OR REPLACE INTO cyq_chen_checkpoint VALUES (?, ?, ?, ?)",
+                params![
+                    ts_code,
+                    DEFAULT_ADJ_TYPE,
+                    last.trade_date.as_deref(),
+                    serde_json::to_string(&last.bins).map_err(|e| e.to_string())?,
+                ],
+            )
+            .map_err(|e| format!("写入新筹码续算检查点失败: {e}"))?;
+        }
         for mut snapshot in stock.snapshots {
             let trade_date = snapshot
                 .trade_date
@@ -1272,6 +1304,8 @@ fn write_cyq_chen_batches_from_channel(
         .transaction()
         .map_err(|e| format!("创建筹码库事务失败:{e}"))?;
     drop_cyq_chen_db_indexes(&tx)?;
+    tx.execute("DELETE FROM cyq_chen_checkpoint", [])
+        .map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM cyq_chen_bin", [])
         .map_err(|e| format!("清空cyq_chen_bin失败:{e}"))?;
     tx.execute("DELETE FROM cyq_chen_snapshot", [])
@@ -1299,7 +1333,7 @@ fn write_cyq_chen_batches_from_channel(
             };
 
             let (added_snapshot_rows, added_bin_rows) =
-                append_cyq_chen_batch_rows(&mut snapshot_app, &mut bin_app, batch, config)?;
+                append_cyq_chen_batch_rows(&tx, &mut snapshot_app, &mut bin_app, batch, config)?;
             snapshot_rows += added_snapshot_rows;
             bin_rows += added_bin_rows;
             batch_count += 1;
@@ -1386,8 +1420,13 @@ fn write_cyq_chen_incremental_batches_from_channel(
                     }
                 };
 
-                let (added_snapshot_rows, added_bin_rows) =
-                    append_cyq_chen_batch_rows(&mut snapshot_app, &mut bin_app, batch, config)?;
+                let (added_snapshot_rows, added_bin_rows) = append_cyq_chen_batch_rows(
+                    &tx,
+                    &mut snapshot_app,
+                    &mut bin_app,
+                    batch,
+                    config,
+                )?;
                 snapshot_rows += added_snapshot_rows;
                 bin_rows += added_bin_rows;
                 batch_count += 1;
@@ -1888,6 +1927,11 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
 
                 for ts_code in ts_codes {
                     tx.execute(
+                        "DELETE FROM cyq_chen_checkpoint WHERE ts_code = ? AND adj_type = ?",
+                        params![ts_code, DEFAULT_ADJ_TYPE],
+                    )
+                    .map_err(|e| format!("清理股票新筹码检查点失败: {e}"))?;
+                    tx.execute(
                 "DELETE FROM cyq_chen_bin WHERE ts_code = ? AND adj_type = ? AND trade_date >= ? AND trade_date <= ?",
                 params![ts_code, DEFAULT_ADJ_TYPE, start_date, end_date],
             )
@@ -1921,6 +1965,7 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
                         };
 
                         let (added_snapshot_rows, added_bin_rows) = append_cyq_chen_batch_rows(
+                            &tx,
                             &mut snapshot_app,
                             &mut bin_app,
                             batch,
@@ -2495,6 +2540,50 @@ bias = 1.0
             out.push(row.get(0).expect("index name"));
         }
         out
+    }
+
+    #[test]
+    fn posterior_database_resume_matches_rebuild_after_pause() {
+        let incremental_dir = unique_temp_source_dir();
+        let full_dir = unique_temp_source_dir();
+        for dir in [&incremental_dir, &full_dir] {
+            prepare_source_db(dir);
+            let path = chip_change_rule_path(dir.to_str().unwrap());
+            let mut text = fs::read_to_string(&path).unwrap();
+            text.push_str(
+                r#"
+[[strategy]]
+name = "delayed retail confirmation"
+holder = "retail"
+direction = "buy"
+when = "C > REF(C, 2)"
+bias = 0.65
+confirm_after = 2
+"#,
+            );
+            fs::write(path, text).unwrap();
+        }
+        let incremental = incremental_dir.to_str().unwrap();
+        let full = full_dir.to_str().unwrap();
+        let config = ChenChipConfig {
+            warmup_days: 1,
+            bucket_pct: 5.0,
+        };
+        rebuild_cyq_chen_all(incremental, config, Some("20260401"), Some("20260403")).unwrap();
+        insert_paused_stock_resume_row(&incremental_dir);
+        insert_paused_stock_resume_row(&full_dir);
+        maintain_cyq_chen_incremental_if_db_exists(incremental, false, None).unwrap();
+        rebuild_cyq_chen_all(full, config, None, None).unwrap();
+        assert_eq!(
+            snapshot_rows_for_compare(incremental),
+            snapshot_rows_for_compare(full)
+        );
+        assert_eq!(
+            bin_rows_for_compare(incremental),
+            bin_rows_for_compare(full)
+        );
+        fs::remove_dir_all(incremental_dir).unwrap();
+        fs::remove_dir_all(full_dir).unwrap();
     }
 
     #[test]

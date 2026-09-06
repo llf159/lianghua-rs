@@ -1076,14 +1076,7 @@ mod tests {
             assert!(keys.contains(required_key), "missing {required_key}");
         }
         assert!(!keys.contains("TOTAL_MV"));
-        for injected_key in [
-            "RANK",
-            "SCORE",
-            "ZHANG",
-            "TOTAL_MV_YI",
-            "S_RANK",
-            "CYQ_TPR",
-        ] {
+        for injected_key in ["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI", "S_RANK", "CYQ_TPR"] {
             assert!(!keys.contains(injected_key), "unexpected {injected_key}");
         }
         assert!(!keys.contains("O"));

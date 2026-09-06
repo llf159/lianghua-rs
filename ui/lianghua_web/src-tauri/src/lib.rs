@@ -85,7 +85,7 @@ use {
         delete_cyq_chen_strategy_backup as core_delete_cyq_chen_strategy_backup,
         get_cyq_chen_strategy_backup_diff as core_get_cyq_chen_strategy_backup_diff,
         get_cyq_chen_strategy_page as core_get_cyq_chen_strategy_page,
-        import_cyq_chen_strategy_backup as core_import_cyq_chen_strategy_backup,
+        import_cyq_chen_strategy_backup_from_text as core_import_cyq_chen_strategy_backup_from_text,
         run_cyq_chen_single_stock_test as core_run_cyq_chen_single_stock_test,
         save_cyq_chen_strategy_file as core_save_cyq_chen_strategy_file, CyqChenSingleStockData,
         CyqChenSingleStockRequest, CyqChenStrategyBackupDiff, CyqChenStrategyFileDraft,
@@ -2047,11 +2047,41 @@ fn create_empty_cyq_chen_strategy_backup(
 }
 
 #[tauri::command]
-fn import_cyq_chen_strategy_backup(
+async fn import_cyq_chen_strategy_backup(
+    app: tauri::AppHandle,
     source_path: String,
     source_file: String,
 ) -> Result<CyqChenStrategyPageData, String> {
-    core_import_cyq_chen_strategy_backup(&source_path, &source_file)
+    tauri::async_runtime::spawn_blocking(move || {
+        let source_file = source_file.trim();
+        if source_file.is_empty() {
+            return Err("导入文件为空".to_string());
+        }
+        let file_path = FilePath::from_str(source_file).map_err(|error| error.to_string())?;
+        // URI 解码只用于备份标签，读取时保留选择器返回的 URI。
+        let source_label = match &file_path {
+            FilePath::Url(url) => decode_percent_encoded_path(url.path()),
+            FilePath::Path(path) => path.to_string_lossy().into_owned(),
+        };
+        let mut options = tauri_plugin_fs::OpenOptions::new();
+        options.read(true);
+        let mut file = app.fs().open(file_path, options).map_err(|error| {
+            format!("读取筹码策略导入文件失败: path={source_file}, err={error}")
+        })?;
+        let mut text = String::new();
+        file.read_to_string(&mut text).map_err(|error| {
+            format!("读取筹码策略导入文件失败: path={source_file}, err={error}")
+        })?;
+        core_import_cyq_chen_strategy_backup_from_text(
+            &source_path,
+            Path::new(&source_label)
+                .file_name()
+                .and_then(|value| value.to_str()),
+            &text,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

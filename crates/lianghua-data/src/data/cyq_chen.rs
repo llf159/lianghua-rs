@@ -36,6 +36,9 @@ pub struct ChipChangeStrategy {
     pub direction: ChipDirection,
     pub when: String,
     pub bias: f64,
+    /// Zero is an ordinary rule; otherwise confirm a surviving purchase cohort this many bars later.
+    #[serde(default)]
+    pub confirm_after: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +69,7 @@ pub struct CompiledChipChangeStrategy {
     pub direction: ChipDirection,
     pub when: String,
     pub bias: f64,
+    pub confirm_after: usize,
     pub when_ast: Stmts,
     optimized_when_ast: Stmts,
     cached_exprs: Vec<CompiledChipCachedExpr>,
@@ -95,7 +99,7 @@ impl Default for ChenChipConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChenChipBin {
     pub index: usize,
@@ -105,6 +109,8 @@ pub struct ChenChipBin {
     pub main_chip: f64,
     pub retail_chip: f64,
     pub total_chip: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<PosteriorChipLot>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -196,12 +202,22 @@ struct ChenChipBar {
     turnover_rate: f64,
 }
 
+/// Remaining holdings from one day's purchase, tracked by holder inside a cost bucket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PosteriorChipLot {
+    pub trade_date: String,
+    pub age: usize,
+    pub main_chip: f64,
+    pub retail_chip: f64,
+}
+
 #[derive(Debug, Clone)]
 struct ChipBucket {
     price_low: f64,
     price_high: f64,
     main_chip: f64,
     retail_chip: f64,
+    pending: Vec<PosteriorChipLot>,
     rateo: Option<Arc<Vec<Option<f64>>>>,
     rateh: Option<Arc<Vec<Option<f64>>>>,
     ratel: Option<Arc<Vec<Option<f64>>>>,
@@ -319,6 +335,7 @@ impl ChipChangeConfig {
                 direction,
                 when: strategy.when.trim().to_string(),
                 bias: strategy.bias,
+                confirm_after: strategy.confirm_after,
                 when_ast,
                 optimized_when_ast,
                 cached_exprs,
@@ -387,7 +404,74 @@ impl ChipChangeConfig {
             if !strategy.bias.is_finite() {
                 return Err(format!("第{n}个strategy的bias必须是有限数值"));
             }
-            parse_strategy_expression(strategy.when.trim(), n, strategy.name.trim())?;
+            let program = parse_strategy_expression(strategy.when.trim(), n, strategy.name.trim())?;
+            if strategy.confirm_after > 0 {
+                if strategy.direction != ChipDirection::Buy || !(0.0..=1.0).contains(&strategy.bias)
+                {
+                    return Err(format!(
+                        "第{n}个后验规则必须 direction=buy，bias 为 [0,1] 的归属修正比例"
+                    ));
+                }
+                // LAST reads the end of the loaded series; recursive indicators cannot be
+                // reproduced exactly from the finite continuation lookback.
+                let mut expressions = program
+                    .item
+                    .iter()
+                    .map(|stmt| match stmt {
+                        Stmt::Assign { value, .. } => value,
+                        Stmt::Expr(expr) => expr,
+                    })
+                    .collect::<Vec<_>>();
+                while let Some(expr) = expressions.pop() {
+                    match expr {
+                        Expr::Call { name, args } => {
+                            if !matches!(
+                                name.to_ascii_uppercase().as_str(),
+                                "REF"
+                                    | "HHV"
+                                    | "LLV"
+                                    | "MA"
+                                    | "SUM"
+                                    | "COUNT"
+                                    | "ABS"
+                                    | "MAX"
+                                    | "MIN"
+                                    | "CROSS"
+                                    | "RSV"
+                            ) {
+                                return Err(format!(
+                                    "第{n}个后验规则只支持有限窗口因果函数，不支持 {name}"
+                                ));
+                            }
+                            expressions.extend(args);
+                        }
+                        Expr::Unary { rhs, .. } => expressions.push(rhs),
+                        Expr::Binary { lhs, rhs, .. } => {
+                            expressions.push(lhs);
+                            expressions.push(rhs);
+                        }
+                        _ => {}
+                    }
+                }
+                estimate_expression_warmup(&program)?;
+                let keys = collect_runtime_keys_from_expr_programs(
+                    &[&program],
+                    RuntimeKeyCollectOptions {
+                        always_keys: &[],
+                        injected_keys: &[],
+                        aliases: &[],
+                    },
+                );
+                if keys.iter().any(|key| {
+                    key.starts_with("MAIN_CHIP")
+                        || key == "RETAIL_CHIP_TOTAL"
+                        || key.starts_with("CYQ_")
+                }) {
+                    return Err(format!(
+                        "第{n}个后验规则只能使用行情证据，不能循环依赖筹码归属"
+                    ));
+                }
+            }
         }
 
         Ok(())
@@ -488,36 +572,11 @@ pub fn compute_chen_chip_snapshots_with_compiled_config(
         return Ok(Vec::new());
     }
 
-    let initial_range = (|bars: &[Option<ChenChipBar>],
-                          output_start_index: usize,
-                          warmup_days: usize|
-     -> Result<(f64, f64), String> {
-        let range_start = output_start_index.saturating_sub(warmup_days);
-        let range_end_exclusive = if warmup_days == 0 {
-            output_start_index + 1
-        } else {
-            output_start_index
-        };
-
-        let mut min_price = f64::INFINITY;
-        let mut max_price = f64::NEG_INFINITY;
-        for bar in &bars[range_start..range_end_exclusive] {
-            let Some(bar) = bar.as_ref() else {
-                return Ok((f64::NAN, f64::NAN));
-            };
-            min_price = min_price.min(bar.low);
-            max_price = max_price.max(bar.high);
-        }
-
-        if !min_price.is_finite() || !max_price.is_finite() {
-            return Ok((f64::NAN, f64::NAN));
-        }
-        if min_price <= 0.0 || max_price <= 0.0 || max_price + EPS < min_price {
-            return Err("预热窗口价格区间非法".to_string());
-        }
-
-        Ok((min_price, max_price))
-    })(&bars, output_start_index, config.warmup_days)?;
+    let process_start_index = output_start_index.saturating_sub(config.warmup_days);
+    let Some(initial_bar) = bars[process_start_index].as_ref() else {
+        return Ok(Vec::new());
+    };
+    let initial_range = (initial_bar.low, initial_bar.high);
     let step = bucket_step(config.bucket_pct);
     let mut buckets =
         (|min_price: f64, max_price: f64, step: f64| -> Result<Vec<ChipBucket>, String> {
@@ -556,6 +615,7 @@ pub fn compute_chen_chip_snapshots_with_compiled_config(
                     price_high: boundaries[index + 1],
                     main_chip: main_each,
                     retail_chip: retail_each,
+                    pending: Vec::new(),
                     rateo: None,
                     rateh: None,
                     ratel: None,
@@ -580,7 +640,6 @@ pub fn compute_chen_chip_snapshots_with_compiled_config(
     let mut buy_runtime = build_new_participant_buy_runtime(&base_runtime, &bars)?;
     inject_strategy_expression_caches(&mut base_runtime, chip_config, ChipDirection::Sell)?;
     inject_strategy_expression_caches(&mut buy_runtime, chip_config, ChipDirection::Buy)?;
-    let process_start_index = output_start_index.saturating_sub(config.warmup_days);
     let mut snapshots = Vec::with_capacity(len.saturating_sub(output_start_index));
 
     for day_index in process_start_index..len {
@@ -625,6 +684,14 @@ pub fn compute_chen_chip_snapshots_with_compiled_config(
             len,
             day_index,
             bar.turnover_rate,
+        )?;
+        apply_posterior_for_day(
+            &mut buckets,
+            bar,
+            &mut buy_runtime,
+            chip_config,
+            len,
+            day_index,
         )?;
         normalize_buckets(&mut buckets)?;
 
@@ -685,11 +752,23 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
             {
                 return Err("初始筹码分桶非法，无法续算".to_string());
             }
+            if bin.pending.iter().any(|lot| {
+                !lot.main_chip.is_finite()
+                    || !lot.retail_chip.is_finite()
+                    || lot.main_chip < 0.0
+                    || lot.retail_chip < 0.0
+            }) || bin.pending.iter().map(|lot| lot.main_chip).sum::<f64>() > bin.main_chip + EPS
+                || bin.pending.iter().map(|lot| lot.retail_chip).sum::<f64>()
+                    > bin.retail_chip + EPS
+            {
+                return Err("后验续算状态非法：待确认筹码不能超过对应持有人余额".into());
+            }
             buckets.push(ChipBucket {
                 price_low: bin.price_low,
                 price_high: bin.price_high,
                 main_chip: bin.main_chip,
                 retail_chip: bin.retail_chip,
+                pending: bin.pending.clone(),
                 rateo: None,
                 rateh: None,
                 ratel: None,
@@ -778,12 +857,84 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
             day_index,
             bar.turnover_rate,
         )?;
+        apply_posterior_for_day(
+            &mut buckets,
+            bar,
+            &mut buy_runtime,
+            chip_config,
+            len,
+            day_index,
+        )?;
         normalize_buckets(&mut buckets)?;
 
         snapshots.push(build_snapshot(bar, &buckets)?);
     }
 
     Ok(snapshots)
+}
+
+fn apply_posterior_for_day(
+    buckets: &mut [ChipBucket],
+    bar: &ChenChipBar,
+    runtime: &mut Runtime,
+    config: &CompiledChipChangeConfig,
+    len: usize,
+    day: usize,
+) -> Result<(), String> {
+    let horizon = config
+        .strategies
+        .iter()
+        .map(|r| r.confirm_after)
+        .max()
+        .unwrap_or(0);
+    if horizon == 0 {
+        return Ok(());
+    }
+    let mut decisions = Vec::new();
+    for rule in config.strategies.iter().filter(|r| r.confirm_after > 0) {
+        let triggered = match runtime
+            .eval_program_bool_at(&rule.optimized_when_ast, day)
+            .map_err(|e| format!("后验规则 {}: {}", rule.name, e.msg))?
+        {
+            Some(value) => value,
+            None => {
+                let value =
+                    eval_program_scoped(runtime, &rule.optimized_when_ast, &rule.assigned_names)
+                        .map_err(|e| format!("后验规则 {}: {}", rule.name, e.msg))?;
+                Value::as_bool_series(&value, len)
+                    .map_err(|e| e.msg)?
+                    .get(day)
+                    .copied()
+                    .unwrap_or(false)
+            }
+        };
+        if triggered {
+            decisions.push(rule);
+        }
+    }
+    for bucket in buckets {
+        for lot in &mut bucket.pending {
+            if lot.trade_date == bar.trade_date {
+                continue;
+            }
+            lot.age += 1;
+            // At each age first matching rule wins, so contradictory evidence cannot double count.
+            if let Some(rule) = decisions.iter().find(|r| r.confirm_after == lot.age) {
+                let delta = match rule.holder {
+                    ChipHolder::Main => lot.retail_chip * rule.bias,
+                    ChipHolder::Retail => -lot.main_chip * rule.bias,
+                };
+                lot.main_chip += delta;
+                lot.retail_chip -= delta;
+                bucket.main_chip += delta;
+                bucket.retail_chip -= delta;
+            }
+        }
+        bucket
+            .pending
+            .retain(|lot| lot.age < horizon && lot.main_chip + lot.retail_chip > EPS);
+    }
+    Ok(())
 }
 
 fn parse_strategy_expression(
@@ -1145,6 +1296,7 @@ fn expand_buckets_for_bar(
                 price_high: ph,
                 main_chip: 0.0,
                 retail_chip: 0.0,
+                pending: Vec::new(),
                 rateo: rate_series.as_ref().map(|series| Arc::clone(&series.0)),
                 rateh: rate_series.as_ref().map(|series| Arc::clone(&series.1)),
                 ratel: rate_series.as_ref().map(|series| Arc::clone(&series.2)),
@@ -1171,6 +1323,7 @@ fn expand_buckets_for_bar(
                 price_high: new_high,
                 main_chip: 0.0,
                 retail_chip: 0.0,
+                pending: Vec::new(),
                 rateo: rate_series.as_ref().map(|series| Arc::clone(&series.0)),
                 rateh: rate_series.as_ref().map(|series| Arc::clone(&series.1)),
                 ratel: rate_series.as_ref().map(|series| Arc::clone(&series.2)),
@@ -1492,6 +1645,18 @@ fn apply_buy_for_day(
 
         buckets[bucket_index].main_chip += bucket_buy_amount * main_share;
         buckets[bucket_index].retail_chip += bucket_buy_amount * retail_share;
+        if chip_config
+            .strategies
+            .iter()
+            .any(|rule| rule.confirm_after > 0)
+        {
+            buckets[bucket_index].pending.push(PosteriorChipLot {
+                trade_date: bar.trade_date.clone(),
+                age: 0,
+                main_chip: bucket_buy_amount * main_share,
+                retail_chip: bucket_buy_amount * retail_share,
+            });
+        }
     }
 
     Ok(())
@@ -1654,7 +1819,7 @@ fn strategy_biases_at(
     for strategy in chip_config
         .strategies
         .iter()
-        .filter(|strategy| strategy.direction == direction)
+        .filter(|strategy| strategy.direction == direction && strategy.confirm_after == 0)
     {
         let triggered = match bucket_runtime
             .eval_program_bool_at(&strategy.optimized_when_ast, day_index)
@@ -1767,7 +1932,15 @@ fn apply_weighted_sell(
             let target = remaining * entry.weight / total_weight;
             let sell_amount = target.min(available);
             if sell_amount > EPS {
-                *buckets[entry.bucket_index].chip_mut(entry.holder) -= sell_amount;
+                let bucket = &mut buckets[entry.bucket_index];
+                let survival = (available - sell_amount) / available;
+                for lot in &mut bucket.pending {
+                    match entry.holder {
+                        ChipHolder::Main => lot.main_chip *= survival,
+                        ChipHolder::Retail => lot.retail_chip *= survival,
+                    }
+                }
+                *bucket.chip_mut(entry.holder) -= sell_amount;
                 removed += sell_amount;
             }
 
@@ -1847,6 +2020,10 @@ fn normalize_buckets(buckets: &mut [ChipBucket]) -> Result<(), String> {
     for bucket in buckets.iter_mut() {
         bucket.main_chip *= scale;
         bucket.retail_chip *= scale;
+        for lot in &mut bucket.pending {
+            lot.main_chip *= scale;
+            lot.retail_chip *= scale;
+        }
     }
     sanitize_buckets(buckets)?;
     Ok(())
@@ -1906,6 +2083,7 @@ fn build_snapshot(bar: &ChenChipBar, buckets: &[ChipBucket]) -> Result<ChenChipS
             main_chip: finite_value(bucket.main_chip)?,
             retail_chip: finite_value(bucket.retail_chip)?,
             total_chip: finite_value(total_chip)?,
+            pending: bucket.pending.clone(),
         });
     }
 
@@ -2111,6 +2289,87 @@ bias = 1.0
     }
 
     #[test]
+    fn posterior_is_causal_conserves_mass_and_resumes() {
+        let mut config = sample_config();
+        config.strategy[0].holder = ChipHolder::Retail;
+        let mut confirm = config.strategy[0].clone();
+        confirm.holder = ChipHolder::Main;
+        confirm.name = "confirm".into();
+        confirm.when = "C > REF(C, 2)".into();
+        confirm.confirm_after = 2;
+        confirm.bias = 0.5;
+        config.strategy.push(confirm);
+        let compiled = config.compile().unwrap();
+        let row = sample_row_data();
+        let compute = ChenChipConfig {
+            warmup_days: 0,
+            bucket_pct: 5.0,
+        };
+        let full = super::compute_chen_chip_snapshots_with_compiled_config(
+            &row,
+            &row.trade_dates[0],
+            &compiled,
+            compute,
+        )
+        .unwrap();
+        let mut prefix = row.clone();
+        prefix.trade_dates.truncate(3);
+        for values in prefix.cols.values_mut() {
+            values.truncate(3);
+        }
+        let early = super::compute_chen_chip_snapshots_with_compiled_config(
+            &prefix,
+            &prefix.trade_dates[0],
+            &compiled,
+            compute,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&full[..3]).unwrap(),
+            serde_json::to_value(&early).unwrap()
+        );
+        let saved = serde_json::to_string(&early[2].bins).unwrap();
+        let bins: Vec<super::ChenChipBin> = serde_json::from_str(&saved).unwrap();
+        let resumed = super::compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
+            &row,
+            &row.trade_dates[3],
+            &bins,
+            &[],
+            &compiled,
+            compute,
+        )
+        .unwrap();
+        for (expected, actual) in full[3..].iter().zip(&resumed) {
+            assert!((expected.main_total - actual.main_total).abs() < 1e-9);
+            assert!((actual.total_chips - 100.0).abs() < 1e-9);
+            for bin in &actual.bins {
+                assert!(
+                    bin.pending.iter().map(|l| l.main_chip).sum::<f64>() <= bin.main_chip + 1e-9
+                );
+                assert!(
+                    bin.pending.iter().map(|l| l.retail_chip).sum::<f64>()
+                        <= bin.retail_chip + 1e-9
+                );
+                assert!(bin.pending.iter().all(|l| l.age < 2));
+            }
+        }
+        config.strategy[1].when = "LAST(C, 0) > C".into();
+        assert!(config.compile().unwrap_err().contains("有限窗口因果函数"));
+        config.strategy.pop();
+        let prior =
+            compute_chen_chip_snapshots_from_row_data(&row, &row.trade_dates[0], &config, compute)
+                .unwrap();
+        assert!((full[0].main_total - prior[0].main_total).abs() < 1e-9);
+        assert!((full[1].main_total - prior[1].main_total).abs() < 1e-9);
+        assert!(full[2].main_total > prior[2].main_total);
+        for (before, after) in prior[..3].iter().zip(&full[..3]) {
+            for (b, a) in before.bins.iter().zip(&after.bins) {
+                assert!((b.total_chip - a.total_chip).abs() < 1e-9);
+            }
+        }
+    }
+
+    #[test]
     fn chip_strategy_caches_static_history_subexpressions_but_not_rate_history() {
         let config = ChipChangeConfig::from_toml_str(
             r#"
@@ -2230,6 +2489,7 @@ bias = 1.0
             price_high: 11.0,
             main_chip: 50.0,
             retail_chip: 50.0,
+            pending: Vec::new(),
             rateo: None,
             rateh: None,
             ratel: None,
@@ -2491,6 +2751,7 @@ bias = 1.0
                 price_high: 10.0,
                 main_chip: 30.0,
                 retail_chip: 20.0,
+                pending: Vec::new(),
                 rateo: None,
                 rateh: None,
                 ratel: None,
@@ -2501,6 +2762,7 @@ bias = 1.0
                 price_high: 11.0,
                 main_chip: 30.0,
                 retail_chip: 20.0,
+                pending: Vec::new(),
                 rateo: None,
                 rateh: None,
                 ratel: None,
@@ -2569,6 +2831,7 @@ bias = 1.0
                 price_high: 10.0,
                 main_chip: 0.1,
                 retail_chip: 10.0,
+                pending: Vec::new(),
                 rateo: None,
                 rateh: None,
                 ratel: None,
@@ -2579,6 +2842,7 @@ bias = 1.0
                 price_high: 11.0,
                 main_chip: 0.1,
                 retail_chip: 10.0,
+                pending: Vec::new(),
                 rateo: None,
                 rateh: None,
                 ratel: None,
@@ -2709,6 +2973,39 @@ bias = 1.0
                 .iter()
                 .any(|bin| bin.price_high > 11.0 && bin.total_chip > 0.0)
         );
+    }
+
+    #[test]
+    fn chen_chip_initial_state_does_not_use_later_warmup_prices() {
+        let row_data = RowData {
+            trade_dates: vec![
+                "20240102".to_string(),
+                "20240103".to_string(),
+                "20240104".to_string(),
+            ],
+            cols: HashMap::from([
+                ("O".to_string(), vec![Some(10.0), Some(100.0), Some(100.0)]),
+                ("H".to_string(), vec![Some(10.2), Some(102.0), Some(102.0)]),
+                ("L".to_string(), vec![Some(9.8), Some(98.0), Some(98.0)]),
+                ("C".to_string(), vec![Some(10.0), Some(100.0), Some(100.0)]),
+                ("TOR".to_string(), vec![Some(0.0), Some(0.0), Some(0.0)]),
+            ]),
+        };
+
+        let snapshots = compute_chen_chip_snapshots_from_row_data(
+            &row_data,
+            "20240104",
+            &sample_config(),
+            ChenChipConfig {
+                warmup_days: 2,
+                bucket_pct: 5.0,
+            },
+        )
+        .expect("compute should succeed");
+
+        assert_eq!(snapshots.len(), 1);
+        assert!(snapshots[0].max_price >= 102.0);
+        assert!(snapshots[0].percent_90.price_high < 20.0);
     }
 
     #[test]

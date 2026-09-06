@@ -2441,6 +2441,9 @@ dependencies = [
  "lianghua-backtest",
  "lianghua-data",
  "lianghua-model",
+ "lianghua-scoring",
+ "serde_json",
+ "toml 0.9.11+spec-1.1.0",
 ]
 
 [[package]]

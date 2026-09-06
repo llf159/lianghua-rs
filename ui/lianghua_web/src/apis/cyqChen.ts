@@ -12,6 +12,7 @@ export type CyqChenStrategyDraft = {
   direction: CyqChenDirection
   when: string
   bias: number
+  confirm_after?: number
 }
 
 export type CyqChenKlineRow = {

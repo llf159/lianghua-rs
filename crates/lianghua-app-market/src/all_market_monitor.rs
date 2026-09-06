@@ -801,10 +801,7 @@ fn build_template_runtime_row_data(
             ),
             (RT_VOLUME_RATIO, row.realtime_vol_ratio),
             (RT_AVERAGE_PRICE, row.realtime_avg_price),
-            (
-                "S_RANK",
-                row.similarity_rank.map(|value| value as f64),
-            ),
+            ("S_RANK", row.similarity_rank.map(|value| value as f64)),
         ],
     )?;
 

@@ -45,7 +45,10 @@ default-members = [
 lianghua-backtest = { path = "crates/lianghua-backtest" }
 lianghua-data = { path = "crates/lianghua-data" }
 lianghua-model = { path = "crates/lianghua-model" }
+lianghua-scoring = { path = "crates/lianghua-scoring" }
 duckdb = { version = "1.4.4", features = ["appender-arrow"] }
+serde_json = "1"
+toml = "0.9"
 
 [profile.release]
 opt-level = 3

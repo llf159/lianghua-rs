@@ -598,7 +598,25 @@ pub fn import_cyq_chen_strategy_backup(
             source_file_path.display()
         )
     })?;
-    ChipChangeConfig::from_toml_str(&text)?;
+    import_cyq_chen_strategy_backup_from_text(
+        source_path,
+        source_file_path
+            .file_name()
+            .and_then(|value| value.to_str()),
+        &text,
+    )
+}
+
+pub fn import_cyq_chen_strategy_backup_from_text(
+    source_path: &str,
+    source_file_name: Option<&str>,
+    text: &str,
+) -> Result<CyqChenStrategyPageData, String> {
+    let source_path = source_path.trim();
+    if source_path.is_empty() {
+        return Err("数据目录为空，请先确认当前数据源".to_string());
+    }
+    ChipChangeConfig::from_toml_str(text)?;
     let backup_dir = chip_change_backup_dir(source_path);
     fs::create_dir_all(&backup_dir).map_err(|e| {
         format!(
@@ -617,10 +635,6 @@ pub fn import_cyq_chen_strategy_backup(
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| "无法识别筹码策略备份文件名".to_string())?;
-    let source_file_name = source_file_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .map(str::to_string);
     write_chip_change_backup_meta(
         source_path,
         backup_id,
@@ -628,7 +642,7 @@ pub fn import_cyq_chen_strategy_backup(
             version: 1,
             created_at: chrono::Utc::now().to_rfc3339(),
             source_kind: "imported".to_string(),
-            source_file_name,
+            source_file_name: source_file_name.map(str::to_string),
             description: Some("外部导入筹码策略".to_string()),
         },
     )?;
@@ -1311,6 +1325,7 @@ mod tests {
                 direction: ChipDirection::Buy,
                 when: "C > O AND ZHANG > 0 AND TOTAL_MV_YI > 0".to_string(),
                 bias: 1.0,
+                confirm_after: 0,
             }],
         })
         .expect("run single stock test");
@@ -1341,6 +1356,7 @@ mod tests {
                 direction: ChipDirection::Buy,
                 when: "C > O AND ZHANG > 0 AND TOTAL_MV_YI > 0".to_string(),
                 bias: 1.0,
+                confirm_after: 0,
             }],
         })
         .expect("unknown stock should return an empty single-stock test result");

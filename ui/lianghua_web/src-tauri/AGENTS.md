@@ -1,5 +1,9 @@
 # Tauri crate 取舍
 
+后续 agents 修改本组件时请继续维护本文件。
+
+- 筹码策略导入与数据管理导入统一通过 `FilePath` 和 `app.fs().open` 读取选择器结果，并在 `spawn_blocking` 内执行；Android 返回的是 URI，不能直接交给 `std::fs`，否则会报路径不存在。百分号解码仅用于展示文件名，不改写读取 URI；业务层接收文本后继续完成 TOML 校验和备份。
+
 - Android 的 `MainActivity` 必须先调用 `super.onCreate`，再通过自定义 JNI 方法初始化 `rustls-platform-verifier`。Wry 0.54.4 会在加载 `WryActivity` 类时加载 Tauri 原生库，曾掩盖 JNI 调用过早的问题；Wry 0.55.1 改为在 `WryActivity.onCreate` 首次访问惰性的 `Rust` 对象时才执行 `System.loadLibrary`，因此禁止依赖类加载副作用，也禁止吞掉 `UnsatisfiedLinkError` 后继续启动，否则 verifier 实际未初始化，后续 HTTPS 请求会表现为证书验证失败。
 - `tauri = "2.10.3"` 是兼容版本约束，不会固定在 2.10.3；合并或重建 workspace 锁文件可能升级 Tauri/Wry。涉及 Android 启动代码时，必须结合 `Cargo.lock` 中实际解析的 Wry 版本检查原生库加载时序。
 
@@ -9,7 +13,7 @@
 
 - 最初故障由 Android Studio/Snap 自动更新到 JBR 25.0.2 触发：旧的 Gradle 8.14.3、AGP 8.11.0 不支持该运行组合，本机还实际出现过 JBR 25 的 HotSpot SIGSEGV。不要把这类故障误判成业务代码错误。
 - 当前 Android 工程使用 Gradle 9.2.0、AGP 9.0.1、KGP 2.2.10。Android Studio/Gradle launcher 可以运行在 Java 25，但 `gen/android/gradle/gradle-daemon-jvm.properties` 将真正执行构建的 daemon 固定为任意厂商的 Java 21。
-- 本机 Snap 的 JBR 21 路径只配置在用户级 `~/.gradle/gradle.properties`：`org.gradle.java.installations.paths=/snap/android-studio/236/jbr`，禁止把机器路径重新写入仓库。GitHub Action 使用 Temurin 21。
+- Gradle daemon 使用的 JDK 21 路径只配置在用户级 `~/.gradle/gradle.properties`；禁止把机器路径写入仓库，也不得固定到会被 Snap 升级清理的 Android Studio revision 路径。GitHub Action 使用 Temurin 21。
 - 锁文件实际解析为 Tauri 2.11.5、tauri-build 2.6.3、dialog 2.7.2、fs 2.5.1、log 2.9.0；前端锁文件为 API 2.11.1、CLI 2.11.4、dialog 2.7.0、fs 2.5.0。检查问题时以锁文件和 `cargo tree` 为准，不以 `Cargo.toml` 中的兼容下限为准。
 - 当前 Release 基线是 `aarch64 + APK`；产物为 `gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk`。未配置签名时出现 `unsigned` 是预期行为。
 

@@ -1137,6 +1137,11 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
     if (!Number.isFinite(prepared.bias)) {
       throw new Error('bias 必须是合法数字')
     }
+    const delay = prepared.confirm_after ?? 0
+    if (!Number.isSafeInteger(delay) || delay < 0) throw new Error('确认延迟必须是非负整数')
+    if (delay > 0 && (prepared.direction !== 'buy' || prepared.bias < 0 || prepared.bias > 1)) {
+      throw new Error('后验规则使用买入方向，归属修正比例必须在 0～1 之间')
+    }
     return prepared
   }
 
@@ -1899,7 +1904,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                             <strong>{formatChipDirection(strategy.direction)}</strong>
                           </div>
                           <div className="strategy-manage-summary-item">
-                            <span>Bias</span>
+                            <span>{strategy.confirm_after ? `后验修正（${strategy.confirm_after} 根后）` : 'Bias'}</span>
                             <strong>{formatNumber(Number(strategy.bias))}</strong>
                           </div>
                         </div>
@@ -2005,7 +2010,12 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                 </select>
               </label>
               <label className="strategy-manage-field">
-                <span>Bias</span>
+                <span>确认延迟（0 为当天规则）</span>
+                <input type="number" min={0} step={1} value={chipStrategyDraft.confirm_after ?? 0}
+                  onChange={(event) => setChipStrategyDraft((current) => current ? { ...current, confirm_after: Number(event.target.value) } : current)} />
+              </label>
+              <label className="strategy-manage-field">
+                <span>{chipStrategyDraft.confirm_after ? '归属修正比例（0～1，仅买入方向）' : 'Bias'}</span>
                 <input
                   type="text"
                   inputMode="decimal"
