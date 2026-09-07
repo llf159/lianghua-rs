@@ -213,12 +213,67 @@ use {
         list_strategy_trigger_similarity_benchmark_index_codes as core_list_strategy_trigger_similarity_benchmark_index_codes,
         ranking::{
             get_strategy_trigger_similarity_ranking_page as core_get_strategy_trigger_similarity_ranking_page,
+            get_strategy_trigger_similarity_ranking_progress as core_get_strategy_trigger_similarity_ranking_progress,
             run_strategy_trigger_similarity_ranking as core_run_strategy_trigger_similarity_ranking,
-            StrategyTriggerRankingPageData,
+            StrategyTriggerRankingPageData, StrategyTriggerRankingProgress,
         },
         StrategyTriggerSimilarityPageData,
     },
 };
+
+struct SimilarityDisplaySleepInhibitor(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl SimilarityDisplaySleepInhibitor {
+    fn acquire() -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            use std::process::Stdio;
+
+            let child = tokio::process::Command::new("systemd-inhibit")
+                .args([
+                    "--what=idle:sleep",
+                    "--who=lianghua",
+                    "--why=走势相似度正在计算",
+                    "--mode=block",
+                    "sleep",
+                    "infinity",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .kill_on_drop(true)
+                .spawn();
+            match child {
+                Ok(mut child) => {
+                    let (release, released) = tokio::sync::oneshot::channel();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::select! {
+                            status = child.wait() => {
+                                log::warn!("相似度计算的防休眠进程提前退出，仍将继续计算: {status:?}");
+                            }
+                            _ = released => {
+                                if let Err(error) = child.kill().await {
+                                    log::warn!("释放相似度计算防休眠进程失败: {error}");
+                                }
+                            }
+                        }
+                    });
+                    return Self(Some(release));
+                }
+                Err(error) => log::warn!("无法临时阻止系统息屏，仍将继续相似度计算: {error}"),
+            }
+        }
+        Self(None)
+    }
+}
+
+impl Drop for SimilarityDisplaySleepInhibitor {
+    fn drop(&mut self) {
+        if let Some(release) = self.0.take() {
+            let _ = release.send(());
+        }
+    }
+}
 
 use data_download_bridge::{
     get_data_download_status, get_indicator_manage_page, run_concept_most_related_repair,
@@ -973,6 +1028,11 @@ async fn get_strategy_trigger_similarity_ranking_page(
 }
 
 #[tauri::command]
+fn get_strategy_trigger_similarity_ranking_progress() -> Option<StrategyTriggerRankingProgress> {
+    core_get_strategy_trigger_similarity_ranking_progress()
+}
+
+#[tauri::command]
 async fn run_strategy_trigger_similarity_ranking(
     source_path: String,
     trade_date: Option<String>,
@@ -986,6 +1046,7 @@ async fn run_strategy_trigger_similarity_ranking(
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<StrategyTriggerRankingPageData, String> {
+    let _display_sleep_inhibitor = SimilarityDisplaySleepInhibitor::acquire();
     tauri::async_runtime::spawn_blocking(move || {
         core_run_strategy_trigger_similarity_ranking(
             source_path,
@@ -2555,6 +2616,7 @@ pub fn run() {
             list_strategy_trigger_similarity_benchmark_index_codes,
             get_strategy_trigger_similarity_page,
             get_strategy_trigger_similarity_ranking_page,
+            get_strategy_trigger_similarity_ranking_progress,
             run_strategy_trigger_similarity_ranking,
             get_strategy_statistics_page,
             get_strategy_paper_validation_defaults,

@@ -6,6 +6,9 @@
 
 - Android 的 `MainActivity` 必须先调用 `super.onCreate`，再通过自定义 JNI 方法初始化 `rustls-platform-verifier`。Wry 0.54.4 会在加载 `WryActivity` 类时加载 Tauri 原生库，曾掩盖 JNI 调用过早的问题；Wry 0.55.1 改为在 `WryActivity.onCreate` 首次访问惰性的 `Rust` 对象时才执行 `System.loadLibrary`，因此禁止依赖类加载副作用，也禁止吞掉 `UnsatisfiedLinkError` 后继续启动，否则 verifier 实际未初始化，后续 HTTPS 请求会表现为证书验证失败。
 - `tauri = "2.10.3"` 是兼容版本约束，不会固定在 2.10.3；合并或重建 workspace 锁文件可能升级 Tauri/Wry。涉及 Android 启动代码时，必须结合 `Cargo.lock` 中实际解析的 Wry 版本检查原生库加载时序。
+- Linux 相似度批量计算期间通过 `systemd-inhibit --what=idle:sleep` 临时阻止空闲息屏和睡眠，计算结束由 RAII 释放；问题是长时间同步计算会被桌面电源策略误认为空闲，选择 systemd-logind inhibitor 是为了不改永久电源配置，且命令不可用时只记录警告、不阻断计算。
+- 问题：进程启动成功不代表防休眠申请成功，且同步回收子进程可能阻塞异步执行器；解决方案选择：异步等待退出或 RAII 释放通知，保留 stderr 并记录提前退出状态；解释：让申请失败可见，释放时异步终止并回收进程，不等待防休眠申请成功才开始计算。
+- Android/移动 WebView 的相似度计算使用页面级 Screen Wake Lock，并在页面重新可见时重新申请；问题是移动系统会因页面隐藏或电量策略主动释放锁，选择可见页面标准接口是为了不申请常驻电源权限，且计算结束自动释放。
 
 ## Android Gradle 9 兼容性记录
 

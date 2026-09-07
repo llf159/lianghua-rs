@@ -1494,11 +1494,13 @@ mod tests {
         let raw = std::fs::read_to_string(&meta_path).unwrap();
         let meta: StrategyBackupMeta = serde_json::from_str(&raw).unwrap();
         assert_eq!(meta.source_kind, "auto_entry");
-        assert!(std::fs::read_dir(&temp_dir).unwrap().all(|entry| !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .ends_with(".tmp")));
+        assert!(std::fs::read_dir(&temp_dir).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
 
         std::fs::remove_dir_all(temp_dir).unwrap();
     }

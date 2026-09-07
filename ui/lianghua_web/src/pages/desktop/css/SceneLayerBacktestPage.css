@@ -360,8 +360,12 @@
   text-decoration: underline;
 }
 
-.scene-layer-contrib-table-wrap {
-  overflow: auto;
+body .scene-layer-contrib-table-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto !important;
+  overflow-y: visible !important;
+  overscroll-behavior-x: contain;
 }
 
 .scene-layer-contrib-table {

@@ -10,6 +10,8 @@ type DataTaskProgressProps = {
     state: 'done' | 'active' | 'pending'
   }> | null
   elapsedText: string
+  estimatedRemainingText?: string
+  estimatedTotalText?: string
   shownProgressPercent: number
   progressCounterText: string
   currentObjectText: string
@@ -25,6 +27,8 @@ export default function DataTaskProgress({
   progressPercent,
   progressSegments,
   elapsedText,
+  estimatedRemainingText,
+  estimatedTotalText,
   shownProgressPercent,
   progressCounterText,
   currentObjectText,
@@ -46,10 +50,17 @@ export default function DataTaskProgress({
           <span>{elapsedText}</span>
         </div>
       </div>
-      <div className="data-download-progress-bar">
+      <div
+        className="data-download-progress-bar"
+        role="progressbar"
+        aria-label={`${actionLabel} · ${phaseLabel}`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={progressPercent ?? undefined}
+      >
         <div
           className={`data-download-progress-bar-fill ${progressPercent === null ? 'is-indeterminate' : ''}`}
-          style={{ width: `${Math.max(shownProgressPercent, 10)}%` }}
+          style={{ width: `${progressPercent === null ? Math.max(shownProgressPercent, 10) : Math.max(0, Math.min(100, shownProgressPercent))}%` }}
         />
         {progressSegments && progressSegments.length > 1 ? (
           <div
@@ -83,6 +94,18 @@ export default function DataTaskProgress({
           <span>当前对象</span>
           <strong title={currentObjectText}>{currentObjectText}</strong>
         </div>
+        {estimatedRemainingText !== undefined ? (
+          <div className="data-download-progress-stat">
+            <span>阶段预计剩余</span>
+            <strong>{estimatedRemainingText}</strong>
+          </div>
+        ) : null}
+        {estimatedTotalText !== undefined ? (
+          <div className="data-download-progress-stat">
+            <span>阶段预计总耗时</span>
+            <strong>{estimatedTotalText}</strong>
+          </div>
+        ) : null}
       </div>
       <div className="data-download-progress-text">{message ?? fallbackMessage}</div>
     </div>

@@ -4,7 +4,10 @@ use std::{
     collections::{BinaryHeap, HashMap},
     fs,
     path::Path,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -42,6 +45,57 @@ struct RawOutcomeLabel {
 }
 
 static RANKING_COMPUTE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static RANKING_PROGRESS: OnceLock<Mutex<Option<StrategyTriggerRankingProgress>>> = OnceLock::new();
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyTriggerRankingProgress {
+    pub phase: String,
+    pub message: String,
+    pub completed: usize,
+    pub total: usize,
+    pub started_at_epoch_seconds: i64,
+    pub phase_started_at_epoch_seconds: i64,
+}
+
+fn set_ranking_progress(phase: &str, message: &str, completed: usize, total: usize) {
+    let mut progress = RANKING_PROGRESS
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("相似排行榜进度锁被污染");
+    if progress.as_ref().is_some_and(|item| {
+        item.phase == phase && item.total == total && completed < item.completed
+    }) {
+        return;
+    }
+    let now = now_epoch_seconds();
+    let started_at_epoch_seconds = progress
+        .as_ref()
+        .map(|item| item.started_at_epoch_seconds)
+        .unwrap_or(now);
+    let phase_started_at_epoch_seconds = progress
+        .as_ref()
+        .filter(|item| item.phase == phase)
+        .map(|item| item.phase_started_at_epoch_seconds)
+        .unwrap_or(now);
+    *progress = Some(StrategyTriggerRankingProgress {
+        phase: phase.to_string(),
+        message: message.to_string(),
+        completed,
+        total,
+        started_at_epoch_seconds,
+        phase_started_at_epoch_seconds,
+    });
+}
+
+pub fn get_strategy_trigger_similarity_ranking_progress() -> Option<StrategyTriggerRankingProgress>
+{
+    RANKING_PROGRESS
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("相似排行榜进度锁被污染")
+        .clone()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1609,6 +1663,11 @@ pub fn run_strategy_trigger_similarity_ranking(
         .try_lock()
         .map_err(|_| "全市场相似排行榜正在计算，请等待当前任务完成".to_string())?;
     let started = Instant::now();
+    *RANKING_PROGRESS
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("相似排行榜进度锁被污染") = None;
+    set_ranking_progress("prepare", "读取行情、策略触发和市场环境", 0, 0);
     let source_path = source_path.trim().to_string();
     if source_path.is_empty() {
         return Err("source_path 不能为空".to_string());
@@ -1692,6 +1751,7 @@ pub fn run_strategy_trigger_similarity_ranking(
     });
 
     let phase = Instant::now();
+    set_ranking_progress("select-templates", "正在扫描历史表现并筛选模板", 0, 0);
     let (selected_anchors, candidate_universe_count) = load_outcome_selected_anchors(
         &conn,
         earliest_candidate_date,
@@ -1718,6 +1778,13 @@ pub fn run_strategy_trigger_similarity_ranking(
         .collect::<Vec<_>>();
     let mut candidates = Vec::with_capacity(candidate_anchor_count);
     let mut candidate_anchor_iter = candidate_anchors.into_iter();
+    set_ranking_progress(
+        "candidate-fingerprints",
+        "正在计算历史模板指纹",
+        0,
+        candidate_anchor_count,
+    );
+    let mut candidate_completed = 0;
     loop {
         let chunk = candidate_anchor_iter
             .by_ref()
@@ -1726,6 +1793,7 @@ pub fn run_strategy_trigger_similarity_ranking(
         if chunk.is_empty() {
             break;
         }
+        let chunk_len = chunk.len();
         let mut chunk_samples = build_ranking_samples_for_chunk(
             &conn,
             chunk,
@@ -1747,6 +1815,13 @@ pub fn run_strategy_trigger_similarity_ranking(
             }
         }
         candidates.extend(chunk_samples);
+        candidate_completed += chunk_len;
+        set_ranking_progress(
+            "candidate-fingerprints",
+            "正在计算历史模板指纹",
+            candidate_completed.min(candidate_anchor_count),
+            candidate_anchor_count,
+        );
     }
     let evaluated_anchor_count = candidates.len();
     timings.push(StrategyTriggerRankingTiming {
@@ -1782,6 +1857,13 @@ pub fn run_strategy_trigger_similarity_ranking(
     let target_anchor_count = target_anchors.len();
     let mut targets = Vec::with_capacity(target_anchor_count);
     let mut target_anchor_iter = target_anchors.into_iter();
+    set_ranking_progress(
+        "target-fingerprints",
+        "正在计算当日股票指纹",
+        0,
+        target_anchor_count,
+    );
+    let mut target_completed = 0;
     loop {
         let chunk = target_anchor_iter
             .by_ref()
@@ -1790,6 +1872,7 @@ pub fn run_strategy_trigger_similarity_ranking(
         if chunk.is_empty() {
             break;
         }
+        let chunk_len = chunk.len();
         targets.extend(build_ranking_samples_for_chunk(
             &conn,
             chunk,
@@ -1804,6 +1887,13 @@ pub fn run_strategy_trigger_similarity_ranking(
             &resolved_trade_date,
             false,
         )?);
+        target_completed += chunk_len;
+        set_ranking_progress(
+            "target-fingerprints",
+            "正在计算当日股票指纹",
+            target_completed.min(target_anchor_count),
+            target_anchor_count,
+        );
     }
     timings.push(StrategyTriggerRankingTiming {
         label: "当日全市场指纹".to_string(),
@@ -1833,6 +1923,8 @@ pub fn run_strategy_trigger_similarity_ranking(
         .collect::<Vec<_>>();
 
     let phase = Instant::now();
+    let ranking_completed = AtomicUsize::new(0);
+    set_ranking_progress("ranking", "正在进行全市场近邻精排", 0, targets.len());
     let candidate_market_similarities =
         (|targets: &[RankingSample], candidates: &[RankingSample]| -> Vec<Option<f64>> {
             let Some(target) = targets.first() else {
@@ -1869,18 +1961,18 @@ pub fn run_strategy_trigger_similarity_ranking(
     let mut ranking_rows = targets
         .par_iter()
         .map(|target| {
-            (|target: &RankingSample,
-              candidates: &[RankingSample],
-              candidate_market_similarities: &[Option<f64>],
-              candidate_rule_weight_sums: &[f64],
-              candidate_by_rule: &HashMap<&str, Vec<CandidateRulePosting>>,
-              all_trade_dates: &[String],
-              window_trade_days: usize,
-              outcome_trade_days: usize,
-              name_map: &HashMap<String, String>,
-              industry_map: &HashMap<String, String>,
-              concept_map: &HashMap<String, String>,
-              rule_weights: &HashMap<String, f64>|
+            let row = (|target: &RankingSample,
+                        candidates: &[RankingSample],
+                        candidate_market_similarities: &[Option<f64>],
+                        candidate_rule_weight_sums: &[f64],
+                        candidate_by_rule: &HashMap<&str, Vec<CandidateRulePosting>>,
+                        all_trade_dates: &[String],
+                        window_trade_days: usize,
+                        outcome_trade_days: usize,
+                        name_map: &HashMap<String, String>,
+                        industry_map: &HashMap<String, String>,
+                        concept_map: &HashMap<String, String>,
+                        rule_weights: &HashMap<String, f64>|
              -> StrategyTriggerRankingRow {
                 RANKING_TARGET_SCRATCH.with(|scratch| {
                     (|target: &RankingSample,
@@ -2364,7 +2456,17 @@ pub fn run_strategy_trigger_similarity_ranking(
                 &industry_map,
                 &concept_map,
                 &rule_weights,
-            )
+            );
+            let completed = ranking_completed.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+            if completed == targets.len() || completed % 16 == 0 {
+                set_ranking_progress(
+                    "ranking",
+                    "正在进行全市场近邻精排",
+                    completed,
+                    targets.len(),
+                );
+            }
+            row
         })
         .collect::<Vec<_>>();
     assign_ranks(&mut ranking_rows);
@@ -2373,6 +2475,7 @@ pub fn run_strategy_trigger_similarity_ranking(
         elapsed_ms: elapsed_ms(phase),
     });
 
+    set_ranking_progress("validate", "正在校验计算期间的数据一致性", 0, 0);
     let final_signature = load_data_signature(&conn, &source_path, &resolved_trade_date)?;
     if final_signature != initial_signature {
         return Err(
@@ -2392,6 +2495,7 @@ pub fn run_strategy_trigger_similarity_ranking(
     drop(conn);
     let before_write_elapsed = elapsed_ms(started);
     let phase = Instant::now();
+    set_ranking_progress("write", "正在写入走势相似排行榜", 0, 0);
     let key = config_key(
         window_trade_days,
         pool_segments,
@@ -2597,8 +2701,9 @@ pub fn run_strategy_trigger_similarity_ranking(
         label: "原子写入排行榜".to_string(),
         elapsed_ms: elapsed_ms(phase),
     });
+    set_ranking_progress("read-result", "正在读取排行榜结果", 0, 0);
 
-    get_strategy_trigger_similarity_ranking_page(
+    let page = get_strategy_trigger_similarity_ranking_page(
         source_path,
         Some(resolved_trade_date),
         Some(window_trade_days as u32),
@@ -2610,11 +2715,47 @@ pub fn run_strategy_trigger_similarity_ranking(
         exclude_st_board,
         total_mv_min,
         total_mv_max,
-    )
+    )?;
+    set_ranking_progress("completed", "走势相似排行榜计算完成", 1, 1);
+    Ok(page)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ranking_progress_preserves_phase_time_and_rejects_stale_counts() {
+        let _compute = super::RANKING_COMPUTE_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        *super::RANKING_PROGRESS
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap() = Some(super::StrategyTriggerRankingProgress {
+            phase: "ranking".into(),
+            message: "精排".into(),
+            completed: 32,
+            total: 64,
+            started_at_epoch_seconds: 1,
+            phase_started_at_epoch_seconds: 2,
+        });
+        super::set_ranking_progress("ranking", "精排", 16, 64);
+        let progress = super::get_strategy_trigger_similarity_ranking_progress().unwrap();
+        assert_eq!(progress.completed, 32);
+        assert_eq!(progress.phase_started_at_epoch_seconds, 2);
+        super::set_ranking_progress("ranking", "精排", 64, 64);
+        let progress = super::get_strategy_trigger_similarity_ranking_progress().unwrap();
+        assert_eq!(progress.completed, 64);
+        assert_eq!(progress.phase_started_at_epoch_seconds, 2);
+        super::set_ranking_progress("write", "写库", 0, 0);
+        let progress = super::get_strategy_trigger_similarity_ranking_progress().unwrap();
+        assert_eq!(progress.phase, "write");
+        assert_eq!(progress.completed, 0);
+        assert_eq!(progress.started_at_epoch_seconds, 1);
+        assert!(progress.phase_started_at_epoch_seconds > 2);
+        *super::RANKING_PROGRESS.get().unwrap().lock().unwrap() = None;
+    }
+
     use super::StrategyTriggerRankingRow;
     use super::{
         ANCHOR_CHUNK_SIZE, RankingTargetScratch, assign_ranks, build_channel_fingerprint,

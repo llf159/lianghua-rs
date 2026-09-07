@@ -25,8 +25,10 @@ import {
   type RankingComputeStatus,
 } from '../../apis/rankingCompute'
 import {
+  getStrategyTriggerSimilarityRankingProgress,
   listStrategyTriggerSimilarityBenchmarkIndexCodes,
   runStrategyTriggerSimilarityRanking,
+  type StrategyTriggerRankingProgress,
 } from '../../apis/strategyTriggerSimilarity'
 import {
   getCyqChenStrategyBackupDiff,
@@ -81,6 +83,16 @@ const DEFAULT_SIMILARITY_WINDOW_TRADE_DAYS = 30
 const DEFAULT_SIMILARITY_POOL_SEGMENTS = 3
 const DEFAULT_SIMILARITY_OUTCOME_TRADE_DAYS = 5
 const DEFAULT_SIMILARITY_BENCHMARK_INDEX_CODE = '000001.SH'
+const SIMILARITY_PHASES = [
+  { key: 'prepare', label: '准备数据' },
+  { key: 'select-templates', label: '筛选历史模板' },
+  { key: 'candidate-fingerprints', label: '历史模板指纹' },
+  { key: 'target-fingerprints', label: '当日股票指纹' },
+  { key: 'ranking', label: '全市场精排' },
+  { key: 'validate', label: '校验数据' },
+  { key: 'write', label: '写入排行榜' },
+  { key: 'read-result', label: '读取结果' },
+]
 const SIMILARITY_BENCHMARK_INDEX_LABELS: Record<string, string> = {
   '000001.SH': '上证指数',
   '399001.SZ': '深证成指',
@@ -137,6 +149,16 @@ function formatElapsedMs(value: number) {
   }
 
   return `${(value / 1000).toFixed(value >= 10_000 ? 1 : 2)} s`
+}
+
+function formatProgressDuration(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return '估算中'
+  const seconds = Math.ceil(Math.max(0, value) / 1000)
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  if (hours > 0) return `${hours}小时 ${minutes}分 ${seconds % 60}秒`
+  if (minutes > 0) return `${minutes}分 ${seconds % 60}秒`
+  return `${seconds}秒`
 }
 
 function describeDbRange(range: RankComputeDbRange | null | undefined) {
@@ -313,6 +335,8 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
   const [cyqChenEndDateInput, setCyqChenEndDateInput] = useState('')
   const [cardFeedback, setCardFeedback] = useState<CardFeedback>(() => createEmptyCardFeedback())
   const [progress, setProgress] = useState<DataDownloadProgress | null>(null)
+  const [similarityProgress, setSimilarityProgress] = useState<StrategyTriggerRankingProgress | null>(null)
+  const [similarityNow, setSimilarityNow] = useState(0)
   const [strategyDiff, setStrategyDiff] = useState<ManagedStrategyBackupDiff | null>(null)
   const [strategyDiffLoading, setStrategyDiffLoading] = useState(false)
   const [cyqChenStrategyDiff, setCyqChenStrategyDiff] = useState<CyqChenStrategyBackupDiff | null>(null)
@@ -345,6 +369,27 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     busyAction === 'indicator-running' ||
     busyAction === 'cyq-computing' ||
     busyAction === 'cyq-chen-computing'
+  const showSimilarityProgress = busyAction === 'similarity-ranking-computing'
+  const similarityPhaseIndex = SIMILARITY_PHASES.findIndex((phase) => phase.key === similarityProgress?.phase)
+  const similarityPhaseLabel = similarityProgress?.phase === 'completed'
+    ? '计算完成'
+    : SIMILARITY_PHASES[similarityPhaseIndex]?.label ?? '准备数据'
+  const similarityProgressPercent = similarityProgress && similarityProgress.total > 0
+    ? Math.round(Math.max(0, Math.min(100, (similarityProgress.completed / similarityProgress.total) * 100)) * 10) / 10
+    : null
+  const shownSimilarityProgressPercent = useAnimatedProgressPercent(showSimilarityProgress, similarityProgressPercent, 0)
+  const similarityElapsedMs = similarityProgress
+    ? Math.max(0, similarityNow - similarityProgress.startedAtEpochSeconds * 1000)
+    : 0
+  const similarityPhaseElapsedMs = similarityProgress
+    ? Math.max(0, similarityNow - similarityProgress.phaseStartedAtEpochSeconds * 1000)
+    : 0
+  const similarityEstimatedTotalMs = similarityProgress && similarityProgress.completed > 0 && similarityProgress.total > 0
+    ? similarityPhaseElapsedMs * Math.max(1, similarityProgress.total / similarityProgress.completed)
+    : null
+  const similarityRemainingMs = similarityEstimatedTotalMs === null
+    ? null
+    : Math.max(0, similarityEstimatedTotalMs - similarityPhaseElapsedMs)
   const deferredProgress = useDeferredValue(progress)
   const progressPercent = calcProgressPercent(deferredProgress, getProgressWorkflow, ['done'])
   const shownProgressPercent = useAnimatedProgressPercent(showComputeProgress, progressPercent)
@@ -359,6 +404,79 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
   const isSimilarityStale = isCalculationBehind(status?.similarityRankDb, resultLatestTradeDate)
   const isOldChipStale = isCalculationBehind(status?.cyqDb, sourceLatestTradeDate)
   const isNewChipStale = isCalculationBehind(status?.cyqChenDb, sourceLatestTradeDate)
+
+  useEffect(() => {
+    if (busyAction !== 'similarity-ranking-computing') return
+    let cancelled = false
+    let requesting = false
+    let wakeLock: WakeLockSentinel | null = null
+    const releaseWakeLock = async () => {
+      const current = wakeLock
+      wakeLock = null
+      if (current) await current.release().catch(() => {})
+    }
+    const acquireWakeLock = async () => {
+      if (
+        cancelled ||
+        requesting ||
+        (wakeLock && !wakeLock.released) ||
+        document.visibilityState !== 'visible' ||
+        !('wakeLock' in navigator)
+      ) {
+        return
+      }
+      requesting = true
+      try {
+        const acquired = await navigator.wakeLock.request('screen')
+        if (cancelled || document.visibilityState !== 'visible') {
+          await acquired.release().catch(() => {})
+        } else {
+          wakeLock = acquired
+        }
+      } catch {
+        // Wake Lock is advisory; a denied request must not interrupt the calculation.
+      } finally {
+        requesting = false
+      }
+    }
+
+    void acquireWakeLock()
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void acquireWakeLock()
+      else void releaseWakeLock()
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => {
+      cancelled = true
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      void releaseWakeLock()
+    }
+  }, [busyAction])
+
+  useEffect(() => {
+    if (busyAction !== 'similarity-ranking-computing') {
+      return
+    }
+    let cancelled = false
+    let timer: number | undefined
+    const clockTimer = window.setInterval(() => setSimilarityNow(Date.now()), 1000)
+    const refresh = async () => {
+      try {
+        const next = await getStrategyTriggerSimilarityRankingProgress()
+        if (!cancelled && next) setSimilarityProgress(next)
+      } catch {
+        // The calculation result remains authoritative if a progress poll fails.
+      } finally {
+        if (!cancelled) timer = window.setTimeout(() => void refresh(), 1000)
+      }
+    }
+    void refresh()
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+      window.clearInterval(clockTimer)
+    }
+  }, [busyAction])
   function setFeedbackNotice(slot: FeedbackSlot, message: string) {
     setCardFeedback((current) => ({
       ...current,
@@ -983,6 +1101,8 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     }
 
     setBusyAction('similarity-ranking-computing')
+    setSimilarityProgress(null)
+    setSimilarityNow(Date.now())
     clearFeedback('similarityRank')
     try {
       const result = await runStrategyTriggerSimilarityRanking({
@@ -1064,6 +1184,8 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
           '每日工作流排名计算完成',
         )
         setBusyAction('similarity-ranking-computing')
+        setSimilarityProgress(null)
+        setSimilarityNow(Date.now())
         onStageChange?.('similarity')
         const result = await runStrategyTriggerSimilarityRanking({
           sourcePath,
@@ -1566,6 +1688,25 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         </div>
 
         {renderCardFeedback('similarityRank')}
+        {showSimilarityProgress ? (
+          <DataTaskProgress
+            phaseLabel={similarityPhaseLabel}
+            phaseStepPillText={similarityPhaseIndex >= 0 ? ` · ${similarityPhaseIndex + 1}/${SIMILARITY_PHASES.length}` : ''}
+            phaseStepStatText=""
+            actionLabel="走势相似排名"
+            progressPercent={similarityProgressPercent}
+            elapsedText={`总耗时 ${formatProgressDuration(similarityElapsedMs)}`}
+            estimatedRemainingText={formatProgressDuration(similarityRemainingMs)}
+            estimatedTotalText={formatProgressDuration(similarityEstimatedTotalMs)}
+            shownProgressPercent={shownSimilarityProgressPercent}
+            progressCounterText={similarityProgress && similarityProgress.total > 0
+              ? `${similarityProgress.completed.toLocaleString()} / ${similarityProgress.total.toLocaleString()}`
+              : '等待进度'}
+            currentObjectText={`参考日 ${similarityTradeDateInput || '--'}`}
+            message={similarityProgress?.message}
+            fallbackMessage="正在启动走势相似排名计算…"
+          />
+        ) : null}
       </section>
 
       <section className="ranking-compute-card">

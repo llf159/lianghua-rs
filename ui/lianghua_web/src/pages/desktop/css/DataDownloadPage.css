@@ -636,7 +636,7 @@
 .data-download-progress-bar-fill {
   position: absolute;
   inset: 0 auto 0 0;
-  min-width: 10%;
+  min-width: 0;
   border-radius: inherit;
   background:
     linear-gradient(90deg, #f7b955 0%, #ec8d2f 48%, #d6671e 100%);
@@ -713,7 +713,7 @@
 }
 
 .data-download-progress-stat-mid {
-  min-width: 260px;
+  min-width: 0;
 }
 
 .data-download-progress-stat-wide {

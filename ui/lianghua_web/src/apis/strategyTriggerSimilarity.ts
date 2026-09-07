@@ -133,6 +133,15 @@ export type StrategyTriggerRankingTiming = {
   elapsedMs: number
 }
 
+export type StrategyTriggerRankingProgress = {
+  phase: string
+  message: string
+  completed: number
+  total: number
+  startedAtEpochSeconds: number
+  phaseStartedAtEpochSeconds: number
+}
+
 export type StrategyTriggerRankingPageData = {
   resolvedTradeDate: string
   historicalCutoffDate: string
@@ -184,5 +193,11 @@ export async function runStrategyTriggerSimilarityRanking(
   return invoke<StrategyTriggerRankingPageData>(
     'run_strategy_trigger_similarity_ranking',
     query,
+  )
+}
+
+export async function getStrategyTriggerSimilarityRankingProgress() {
+  return invoke<StrategyTriggerRankingProgress | null>(
+    'get_strategy_trigger_similarity_ranking_progress',
   )
 }

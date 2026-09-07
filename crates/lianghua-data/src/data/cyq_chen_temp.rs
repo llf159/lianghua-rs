@@ -3,17 +3,40 @@ use std::{fs, path::Path};
 // Keep this file in place: unlinking a held lock would let another process lock
 // a different inode while the current rebuild is still using its staging files.
 pub(super) fn lock_rebuild_directory(source_dir: &Path) -> Result<Option<fs::File>, String> {
+    let lock_path = source_dir.join(".cyq_chen.rebuild.lock");
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(source_dir.join(".cyq_chen.rebuild.lock"))
-        .map_err(|e| format!("打开新筹码重建锁失败:{e}"))?;
-    match file.try_lock() {
+        .open(&lock_path)
+        .map_err(|e| format!("打开新筹码重建锁失败, path={}: {e}", lock_path.display()))?;
+    #[cfg(not(target_os = "android"))]
+    let result = file.try_lock();
+    #[cfg(target_os = "android")]
+    let result = {
+        use std::os::fd::AsRawFd;
+
+        // std::fs::File::try_lock is unsupported on Android in Rust 1.94.
+        // SAFETY: file owns this valid descriptor for the entire flock call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            Ok(())
+        } else {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                Err(std::fs::TryLockError::WouldBlock)
+            } else {
+                Err(std::fs::TryLockError::Error(error))
+            }
+        }
+    };
+    match result {
         Ok(()) => Ok(Some(file)),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-        Err(error) => Err(format!("锁定新筹码重建目录失败:{error}")),
+        Err(std::fs::TryLockError::Error(error)) => Err(format!(
+            "锁定新筹码重建目录失败, path={}: {error}",
+            lock_path.display()
+        )),
     }
 }
 

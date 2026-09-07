@@ -341,8 +341,17 @@ fn current_chip_change_strategy_hash(source_dir: &str) -> Result<String, String>
 }
 
 fn query_cyq_chen_meta_value(db_path: &Path, key: &str) -> Result<Option<String>, String> {
-    init_cyq_chen_db(db_path)?;
     let conn = Connection::open(db_path).map_err(|e| format!("打开新筹码库失败:{e}"))?;
+    let table_exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+            [CYQ_CHEN_META_TABLE],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("检查新筹码元信息表失败:{e}"))?;
+    if table_exists == 0 {
+        return Ok(None);
+    }
     conn.query_row(
         &format!("SELECT value FROM {CYQ_CHEN_META_TABLE} WHERE key = ?"),
         params![key],
@@ -383,7 +392,6 @@ fn write_cyq_chen_meta(
 fn query_latest_cyq_chen_metadata(
     db_path: &Path,
 ) -> Result<Option<(String, ChenChipConfig)>, String> {
-    init_cyq_chen_db(db_path)?;
     let conn = Connection::open(db_path).map_err(|e| format!("打开新筹码库失败:{e}"))?;
     let table_exists = conn
         .query_row(
@@ -2367,6 +2375,42 @@ mod tests {
             .expect("system time")
             .as_nanos();
         std::env::temp_dir().join(format!("lianghua-cyq-chen-test-{nanos}"))
+    }
+
+    #[test]
+    fn maintenance_status_does_not_initialize_or_clean_rebuild_files() {
+        let source_dir = unique_temp_source_dir();
+        fs::create_dir_all(&source_dir).unwrap();
+        // An unusable lock path must not prevent a metadata query.
+        fs::create_dir(source_dir.join(".cyq_chen.rebuild.lock")).unwrap();
+        let stale = source_dir.join(".cyq_chen.db.rebuild-123-456.tmp");
+        fs::write(&stale, "keep").unwrap();
+        let source_path = source_dir.to_str().unwrap();
+        fs::write(chip_change_rule_path(source_path), "version = 1\n").unwrap();
+        let db_path = cyq_chen_db_path(source_path);
+        let conn = Connection::open(&db_path).unwrap();
+        let status = query_cyq_chen_strategy_maintenance_status(source_path).unwrap();
+        assert!(status.db_exists);
+        assert!(!status.has_data);
+        conn.execute_batch(
+            "CREATE TABLE cyq_chen_snapshot (trade_date VARCHAR, warmup_days BIGINT, bucket_pct DOUBLE);
+             INSERT INTO cyq_chen_snapshot VALUES ('20260401', 120, 1.0);",
+        )
+        .unwrap();
+        let status = query_cyq_chen_strategy_maintenance_status(source_path).unwrap();
+        assert!(status.has_data);
+        assert!(status.strategy_changed);
+        let tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM information_schema.tables",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 1);
+        assert!(stale.exists());
+        drop(conn);
+        fs::remove_dir_all(source_dir).unwrap();
     }
 
     fn prepare_source_db(source_dir: &Path) {
