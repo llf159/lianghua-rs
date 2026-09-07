@@ -38,10 +38,10 @@ const ANCHOR_CHUNK_SIZE: usize = 8_192;
 const SHRINKAGE_STRENGTH: f64 = 8.0;
 const EPS: f64 = 1e-12;
 // 两阶段候选池上进行跨期样本外复核后的精排权重；四项之和必须为 1。
-const TRIGGER_SIMILARITY_WEIGHT: f64 = 0.35;
-const PRICE_VOLUME_SIMILARITY_WEIGHT: f64 = 0.15;
+const TRIGGER_SIMILARITY_WEIGHT: f64 = 0.40;
+const PRICE_VOLUME_SIMILARITY_WEIGHT: f64 = 0.20;
 const INDICATOR_SIMILARITY_WEIGHT: f64 = 0.15;
-const MARKET_SIMILARITY_WEIGHT: f64 = 0.35;
+const MARKET_SIMILARITY_WEIGHT: f64 = 0.25;
 const TRIGGER_RULE_SET_WEIGHT: f64 = 0.45;
 const TRIGGER_RULE_TIMING_WEIGHT: f64 = 0.35;
 const TRIGGER_AGGREGATE_RHYTHM_WEIGHT: f64 = 0.20;
@@ -939,13 +939,15 @@ fn build_trigger_fingerprint(
     let mut total_score = vec![Some(0.0); window_dates.len()];
     for event in events {
         if let Some(index) = date_index.get(event.trade_date.as_str()).copied() {
-            by_rule
-                .entry(event.rule_name.clone())
-                .or_default()
-                .push(RuleTriggerHit {
-                    day_index: index,
-                    score: event.score,
-                });
+            let hit = RuleTriggerHit {
+                day_index: index,
+                score: event.score,
+            };
+            if let Some(hits) = by_rule.get_mut(&event.rule_name) {
+                hits.push(hit);
+            } else {
+                by_rule.insert(event.rule_name.clone(), vec![hit]);
+            }
         }
     }
     for hits in by_rule.values_mut() {
@@ -1153,7 +1155,16 @@ fn weighted_rule_timing_similarity_with_minimum(
                 continue;
             };
             let weight = rule_weight(rule_weights, name);
-            let timing_score = if target_hits.len() == 1 {
+            let timing_score = if !target_hits.is_empty()
+                && target_hits.len() == candidate_hits.len()
+                && target_hits.iter().zip(candidate_hits).all(|(left, right)| {
+                    left.day_index == right.day_index
+                        && left.score.is_finite()
+                        && left.score == right.score
+                }) {
+                // 对角线上的每次匹配均为满分，已达到一对一匹配的理论上限。
+                1.0
+            } else if target_hits.len() == 1 {
                 candidate_hits
                     .iter()
                     .map(|hit| match_score(&target_hits[0], hit))
@@ -1170,7 +1181,7 @@ fn weighted_rule_timing_similarity_with_minimum(
                 // O(m*n*log(m*n)) 降到 O(m*n)，且不在热循环中反复分配内存。
                 dp.resize(candidate_hits.len() + 1, 0.0);
                 dp.fill(0.0);
-                for left_hit in target_hits {
+                for (left_index, left_hit) in target_hits.iter().enumerate() {
                     let mut diagonal = 0.0;
                     for (right_index, right_hit) in candidate_hits.iter().enumerate() {
                         let column = right_index + 1;
@@ -1178,6 +1189,19 @@ fn weighted_rule_timing_similarity_with_minimum(
                         let matched = diagonal + match_score(left_hit, right_hit);
                         dp[column] = dp[column].max(dp[column - 1]).max(matched);
                         diagonal = previous_row;
+                    }
+                    // 已处理行的最优值加上剩余行全部满分，仍达不到精排门槛时
+                    // 可以提前退出，避免低相似长序列一直算到最后一行。
+                    let timing_upper = (dp[candidate_hits.len()]
+                        + (target_hits.len() - left_index - 1) as f64)
+                        .min(target_hits.len().min(candidate_hits.len()) as f64)
+                        / target_hits.len().max(candidate_hits.len()) as f64;
+                    let upper_bound = (weighted_sum
+                        + timing_upper * weight
+                        + (remaining_weight - weight).max(0.0))
+                        / total_weight;
+                    if upper_bound + EPS < minimum_similarity {
+                        return None;
                     }
                 }
                 dp[candidate_hits.len()] / target_hits.len().max(candidate_hits.len()) as f64
@@ -1732,11 +1756,20 @@ fn weighted_winsorized_mean(values: &[(f64, f64)], tail_fraction: f64) -> Option
     (weight_sum > EPS).then_some(weighted_sum / weight_sum)
 }
 
+#[derive(Clone, Copy)]
+struct OutcomeSummarySample {
+    similarity_score: f64,
+    return_pct: f64,
+    excess_return_pct: Option<f64>,
+    mfe_pct: f64,
+    mae_pct: f64,
+}
+
 fn summarize_outcomes(
-    items: &[StrategyTriggerSimilarityRow],
+    items: impl IntoIterator<Item = OutcomeSummarySample>,
 ) -> StrategyTriggerSimilarityOutcomeSummary {
     let weighted = items
-        .iter()
+        .into_iter()
         .map(|item| (item, (item.similarity_score / 100.0).powi(2)))
         .filter(|(_, w)| *w > EPS)
         .collect::<Vec<_>>();
@@ -1757,12 +1790,12 @@ fn summarize_outcomes(
             weighted_mae_pct: None,
         };
     }
-    let average = |f: fn(&StrategyTriggerSimilarityRow) -> f64| {
+    let average = |f: fn(&OutcomeSummarySample) -> f64| {
         weighted.iter().map(|(i, w)| f(i) * w).sum::<f64>() / weight_sum
     };
     let excess = weighted
         .iter()
-        .filter_map(|(i, w)| i.forward_excess_return_pct.map(|v| (v, *w)))
+        .filter_map(|(i, w)| i.excess_return_pct.map(|v| (v, *w)))
         .collect::<Vec<_>>();
     let excess_weight = excess.iter().map(|(_, w)| w).sum::<f64>();
     let weighted_excess = (excess_weight > EPS)
@@ -1781,13 +1814,11 @@ fn summarize_outcomes(
     StrategyTriggerSimilarityOutcomeSummary {
         sample_count: weighted.len(),
         effective_sample_count: effective,
-        weighted_return_pct: Some(average(|i| i.forward_return_pct)),
+        weighted_return_pct: Some(average(|i| i.return_pct)),
         weighted_excess_return_pct: weighted_excess,
         shrunk_excess_return_pct: weighted_excess
             .map(|v| v * effective / (effective + SHRINKAGE_STRENGTH)),
-        weighted_positive_rate: Some(
-            average(|i| (i.forward_return_pct > 0.0) as u8 as f64) * 100.0,
-        ),
+        weighted_positive_rate: Some(average(|i| (i.return_pct > 0.0) as u8 as f64) * 100.0),
         weighted_median_excess_return_pct: weighted_median_excess,
         winsorized_excess_return_pct: winsorized_excess,
         weighted_excess_positive_rate,
@@ -2207,7 +2238,14 @@ pub fn get_strategy_trigger_similarity_page(
         window_trade_days,
         outcome_trade_days,
     );
-    let outcome_summary = summarize_outcomes(&rating_sample);
+    let outcome_summary =
+        summarize_outcomes(rating_sample.iter().map(|item| OutcomeSummarySample {
+            similarity_score: item.similarity_score,
+            return_pct: item.forward_return_pct,
+            excess_return_pct: item.forward_excess_return_pct,
+            mfe_pct: item.mfe_pct,
+            mae_pct: item.mae_pct,
+        }));
     items.truncate(limit);
     let target_dimension = target_sample.fingerprint.dimension();
     Ok(StrategyTriggerSimilarityPageData {
@@ -2358,6 +2396,47 @@ mod tests {
                 exact_timing + 1e-6,
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn dense_timing_fast_paths_preserve_scores_and_cutoffs() {
+        let dates = (0..120).map(|day| day.to_string()).collect::<Vec<_>>();
+        let events = dates
+            .iter()
+            .map(|date| RuleEvent {
+                rule_name: "dense".into(),
+                trade_date: date.clone(),
+                score: 1.0,
+            })
+            .collect::<Vec<_>>();
+        let target = build_trigger_fingerprint(&events, &dates, 3);
+        let weights = HashMap::new();
+        super::TRIGGER_MATCH_DP.with(|scratch| scratch.borrow_mut().clear());
+        assert_eq!(
+            weighted_rule_timing_similarity_with_minimum(&target, &target, &weights, 1.0),
+            Some(1.0)
+        );
+        super::TRIGGER_MATCH_DP.with(|scratch| assert!(scratch.borrow().is_empty()));
+        assert_eq!(
+            weighted_rule_timing_similarity_with_minimum(&target, &target, &weights, 1.01),
+            None
+        );
+        let opposite_events = events
+            .into_iter()
+            .map(|mut event| {
+                event.score = -1.0;
+                event
+            })
+            .collect::<Vec<_>>();
+        let opposite = build_trigger_fingerprint(&opposite_events, &dates, 3);
+        assert_eq!(
+            weighted_rule_timing_similarity_with_minimum(&target, &opposite, &weights, 0.9),
+            None
+        );
+        assert_eq!(
+            weighted_rule_timing_similarity_with_minimum(&target, &opposite, &weights, 0.0),
+            Some(0.0)
         );
     }
 

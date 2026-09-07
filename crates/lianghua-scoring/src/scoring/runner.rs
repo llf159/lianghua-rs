@@ -206,7 +206,6 @@ pub fn preview_scoring_runtime_warnings(
 
 fn scoring_stock_group_batch(
     worker_reader: &DataReader,
-    source_dir: &str,
     adj_type: &str,
     score_start_date: &str,
     end_date: &str,
@@ -217,16 +216,15 @@ fn scoring_stock_group_batch(
     scenes: &[ScoreScene],
     st_list: &HashSet<String>,
     total_share_map: &HashMap<String, f64>,
-    used_cyq_chen_keys: &HashSet<String>,
+    cyq_chen_injector: &CyqChenFieldInjector,
+    similarity_rank_injector: &SimilarityRankFieldInjector,
     uses_similarity_rank: bool,
     ts_group: &[String],
     memory_mode: ScoringMemoryMode,
 ) -> Result<ScoreBatch, String> {
     let mut rows_map = worker_reader.load_batch(ts_group, adj_type, query_start_date, end_date)?;
-    let cyq_chen_injector = CyqChenFieldInjector::new(source_dir, used_cyq_chen_keys);
-    let similarity_rank_injector =
-        SimilarityRankFieldInjector::new(source_dir, uses_similarity_rank);
     let mut group_batch = ScoreBatch::default();
+    let mut stock_rows = Vec::with_capacity(ts_group.len());
 
     for ts_code in ts_group {
         let mut row = match rows_map.remove(ts_code.as_str()) {
@@ -253,22 +251,25 @@ fn scoring_stock_group_batch(
         if row.trade_dates.is_empty() {
             continue;
         }
+        stock_rows.push((ts_code.clone(), row));
+    }
 
+    let _ = cyq_chen_injector.inject_batch(&mut stock_rows);
+    if uses_similarity_rank {
+        similarity_rank_injector.inject_batch(&mut stock_rows)?;
+    }
+
+    for (ts_code, row) in stock_rows {
         let batch = (|mut row: RowData,
                       score_start_date: &str,
                       rules_cache: &[CachedRule],
                       rule_scene_meta: &[RuleSceneMeta],
                       scenes: &[ScoreScene],
-                      cyq_chen_injector: &CyqChenFieldInjector,
                       ts_code: &str,
                       st_list: &HashSet<String>,
                       total_share_map: &HashMap<String, f64>,
                       memory_mode: ScoringMemoryMode|
          -> Result<ScoreBatch, String> {
-            let _ = cyq_chen_injector.inject(&mut row, ts_code);
-            if uses_similarity_rank {
-                similarity_rank_injector.inject(&mut row, ts_code)?;
-            }
             inject_stock_extra_fields(
                 &mut row,
                 ts_code,
@@ -297,8 +298,7 @@ fn scoring_stock_group_batch(
             rules_cache,
             rule_scene_meta,
             scenes,
-            &cyq_chen_injector,
-            ts_code,
+            &ts_code,
             st_list,
             total_share_map,
             memory_mode,
@@ -381,38 +381,53 @@ pub fn scoring_all_to_db(
     let compute_started_at = time::Instant::now();
     let compute_result = tc_list
         .par_chunks(SCORING_MEMORY_GROUP_SIZE)
-        .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
-            let worker_reader =
-                DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
-            let batch = scoring_stock_group_batch(
-                &worker_reader,
-                source_dir,
-                adj_type,
-                start_date,
-                end_date,
-                &query_start_date,
-                need_rows,
-                &rules_cache,
-                &rule_scene_meta,
-                &scenes,
-                &st_list,
-                &total_share_map,
-                &used_cyq_chen_keys,
-                uses_similarity_rank,
-                ts_group,
-                ScoringMemoryMode::All,
-            )?;
-            sender
-                .send(ScoreWriteMessage::Batch(batch))
-                .map_err(|e| format!("发送评分批次失败:{e}"))?;
-            Ok(())
-        });
+        .try_for_each_init(
+            || {
+                DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys).map(
+                    |reader| {
+                        (
+                            tx.clone(),
+                            reader,
+                            CyqChenFieldInjector::new(source_dir, &used_cyq_chen_keys),
+                            SimilarityRankFieldInjector::new(source_dir, uses_similarity_rank),
+                        )
+                    },
+                )
+            },
+            |worker, ts_group| -> Result<(), String> {
+                let (sender, worker_reader, cyq_chen_injector, similarity_rank_injector) =
+                    worker.as_ref().map_err(Clone::clone)?;
+                let batch = scoring_stock_group_batch(
+                    worker_reader,
+                    adj_type,
+                    start_date,
+                    end_date,
+                    &query_start_date,
+                    need_rows,
+                    &rules_cache,
+                    &rule_scene_meta,
+                    &scenes,
+                    &st_list,
+                    &total_share_map,
+                    cyq_chen_injector,
+                    similarity_rank_injector,
+                    uses_similarity_rank,
+                    ts_group,
+                    ScoringMemoryMode::All,
+                )?;
+                sender
+                    .send(ScoreWriteMessage::Batch(batch))
+                    .map_err(|e| format!("发送评分批次失败:{e}"))?;
+                Ok(())
+            },
+        );
     let compute_and_send_batches_ms = compute_started_at.elapsed().as_millis() as u64;
 
     if let Err(err) = &compute_result {
         let _ = abort_tx.send(ScoreWriteMessage::Abort(err.clone()));
     }
     drop(abort_tx);
+    drop(tx);
 
     let writer_result = match writer_handle.join() {
         Ok(result) => result,
@@ -523,28 +538,41 @@ pub fn scoring_all_to_memory_with_mode(
     let compute_started_at = time::Instant::now();
     let batch = tc_list
         .par_chunks(SCORING_MEMORY_GROUP_SIZE)
-        .map(|ts_group| -> Result<ScoreBatch, String> {
-            let worker_reader =
-                DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
-            scoring_stock_group_batch(
-                &worker_reader,
-                source_dir,
-                adj_type,
-                start_date,
-                end_date,
-                &query_start_date,
-                need_rows,
-                &rules_cache,
-                &rule_scene_meta,
-                &scenes,
-                &st_list,
-                &total_share_map,
-                &used_cyq_chen_keys,
-                uses_similarity_rank,
-                ts_group,
-                memory_mode,
-            )
-        })
+        .map_init(
+            || {
+                DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys).map(
+                    |reader| {
+                        (
+                            reader,
+                            CyqChenFieldInjector::new(source_dir, &used_cyq_chen_keys),
+                            SimilarityRankFieldInjector::new(source_dir, uses_similarity_rank),
+                        )
+                    },
+                )
+            },
+            |worker, ts_group| -> Result<ScoreBatch, String> {
+                let (worker_reader, cyq_chen_injector, similarity_rank_injector) =
+                    worker.as_ref().map_err(Clone::clone)?;
+                scoring_stock_group_batch(
+                    worker_reader,
+                    adj_type,
+                    start_date,
+                    end_date,
+                    &query_start_date,
+                    need_rows,
+                    &rules_cache,
+                    &rule_scene_meta,
+                    &scenes,
+                    &st_list,
+                    &total_share_map,
+                    cyq_chen_injector,
+                    similarity_rank_injector,
+                    uses_similarity_rank,
+                    ts_group,
+                    memory_mode,
+                )
+            },
+        )
         .try_reduce(ScoreBatch::default, |mut left, right| {
             left.extend(right);
             Ok(left)

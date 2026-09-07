@@ -1,14 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
-use duckdb::{Connection, params};
+use duckdb::{Connection, params, params_from_iter};
 
 pub use crate::data::extras::{
     calc_zhang_pct, inject_constant_num_fields, inject_latest_num_fields,
     inject_stock_extra_fields, load_st_list, load_total_share_map,
 };
 use crate::data::{
-    RowData, RuleKind, ScopeWay, ScoreRule, cyq_chen_data::init_cyq_chen_db, cyq_chen_db_path,
-    load_trade_date_list, result_db_path,
+    RowData, RuleKind, ScopeWay, ScoreRule, cyq_chen_db_path, load_trade_date_list, result_db_path,
 };
 use crate::expr::eval::{Runtime, Value};
 use crate::expr::{
@@ -96,6 +95,84 @@ impl SimilarityRankFieldInjector {
         }
         row_data.cols.insert("S_RANK".to_string(), series);
         row_data.validate()
+    }
+
+    pub fn inject_batch(&self, stock_rows: &mut [(String, RowData)]) -> Result<(), String> {
+        for (_, row_data) in stock_rows.iter_mut() {
+            row_data
+                .cols
+                .insert("S_RANK".to_string(), vec![None; row_data.trade_dates.len()]);
+        }
+        let Some(conn) = &self.conn else {
+            return Ok(());
+        };
+        let Some(first_date) = stock_rows
+            .iter()
+            .filter_map(|(_, row)| row.trade_dates.first())
+            .min()
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let Some(last_date) = stock_rows
+            .iter()
+            .filter_map(|(_, row)| row.trade_dates.last())
+            .max()
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let placeholders = std::iter::repeat_n("?", stock_rows.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT ts_code, trade_date, rank FROM strategy_trigger_similarity_summary \
+             WHERE ts_code IN ({placeholders}) AND trade_date>=? AND trade_date<=?"
+        );
+        let mut query_params = stock_rows
+            .iter()
+            .map(|(ts_code, _)| ts_code.clone())
+            .collect::<Vec<_>>();
+        query_params.push(first_date);
+        query_params.push(last_date);
+        let stock_index = stock_rows
+            .iter()
+            .enumerate()
+            .map(|(index, (ts_code, _))| (ts_code.clone(), index))
+            .collect::<HashMap<_, _>>();
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("预编译批量相似排名查询失败: {e}"))?;
+        let mut rows = stmt
+            .query(params_from_iter(query_params.iter()))
+            .map_err(|e| format!("批量查询相似排名失败: {e}"))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取批量相似排名失败: {e}"))?
+        {
+            let ts_code: String = row
+                .get(0)
+                .map_err(|e| format!("读取相似排名代码失败: {e}"))?;
+            let trade_date: String = row
+                .get(1)
+                .map_err(|e| format!("读取相似排名日期失败: {e}"))?;
+            let rank: Option<i64> = row.get(2).map_err(|e| format!("读取相似排名失败: {e}"))?;
+            let Some((_, row_data)) = stock_index
+                .get(&ts_code)
+                .and_then(|index| stock_rows.get_mut(*index))
+            else {
+                continue;
+            };
+            if let Ok(index) = row_data.trade_dates.binary_search(&trade_date)
+                && let Some(series) = row_data.cols.get_mut("S_RANK")
+            {
+                series[index] = rank.map(|value| value as f64);
+            }
+        }
+        for (_, row_data) in stock_rows {
+            row_data.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -236,7 +313,7 @@ pub struct CyqChenFieldInjector {
     conn: Option<Connection>,
     fields: Vec<(&'static str, &'static str)>,
     available_fields: Vec<(&'static str, &'static str)>,
-    select_sql: Option<String>,
+    select_columns: Option<String>,
     unavailable_warning: Option<String>,
 }
 
@@ -248,7 +325,7 @@ impl CyqChenFieldInjector {
                 conn: None,
                 fields,
                 available_fields: Vec::new(),
-                select_sql: None,
+                select_columns: None,
                 unavailable_warning: None,
             };
         }
@@ -257,13 +334,6 @@ impl CyqChenFieldInjector {
         if !cyq_db.exists() {
             return Self::unavailable(fields, "cyq_chen.db 不存在，新筹码字段已按空值注入。");
         }
-        if let Err(error) = init_cyq_chen_db(&cyq_db) {
-            return Self::unavailable(
-                fields,
-                format!("初始化 cyq_chen.db 失败: {error}；新筹码字段已按空值注入。"),
-            );
-        }
-
         let conn = match Connection::open(&cyq_db) {
             Ok(conn) => conn,
             Err(error) => {
@@ -305,7 +375,7 @@ impl CyqChenFieldInjector {
             );
         }
 
-        let select_sql = Some(
+        let select_columns = Some(
             (|available_fields: &[(&'static str, &'static str)]| -> String {
                 let mut select_cols = vec!["snap.trade_date AS trade_date".to_string()];
                 for (runtime_key, db_col) in available_fields {
@@ -324,25 +394,14 @@ impl CyqChenFieldInjector {
 })(runtime_key, db_col));
                 }
 
-                format!(
-                    r#"
-        SELECT {}
-        FROM {CYQ_CHEN_SNAPSHOT_TABLE} AS snap
-        WHERE snap.ts_code = ?
-          AND snap.adj_type = ?
-          AND snap.trade_date >= ?
-          AND snap.trade_date <= ?
-        ORDER BY snap.trade_date ASC
-        "#,
-                    select_cols.join(", ")
-                )
+                select_cols.join(", ")
             })(&available_fields),
         );
         Self {
             conn: Some(conn),
             fields,
             available_fields,
-            select_sql,
+            select_columns,
             unavailable_warning: None,
         }
     }
@@ -352,7 +411,7 @@ impl CyqChenFieldInjector {
             conn: None,
             fields,
             available_fields: Vec::new(),
-            select_sql: None,
+            select_columns: None,
             unavailable_warning: Some(warning.into()),
         }
     }
@@ -372,9 +431,19 @@ impl CyqChenFieldInjector {
         let Some(conn) = &self.conn else {
             return vec!["新筹码字段不可用，已按空值注入。".to_string()];
         };
-        let Some(sql) = &self.select_sql else {
+        let Some(select_columns) = &self.select_columns else {
             return vec!["新筹码字段查询不可用，已按空值注入。".to_string()];
         };
+        let sql = format!(
+            r#"
+        SELECT {select_columns}
+        FROM {CYQ_CHEN_SNAPSHOT_TABLE} AS snap
+        WHERE snap.ts_code = ?
+          AND snap.adj_type = ?
+          AND snap.trade_date >= ?
+          AND snap.trade_date <= ?
+        "#
+        );
         let first_date = row_data.trade_dates.first().cloned().unwrap_or_default();
         let last_date = row_data.trade_dates.last().cloned().unwrap_or_default();
         let date_index = row_data
@@ -384,7 +453,7 @@ impl CyqChenFieldInjector {
             .map(|(index, trade_date)| (trade_date.as_str(), index))
             .collect::<HashMap<_, _>>();
 
-        let mut stmt = match conn.prepare_cached(sql) {
+        let mut stmt = match conn.prepare_cached(&sql) {
             Ok(stmt) => stmt,
             Err(error) => {
                 return vec![format!(
@@ -432,6 +501,95 @@ impl CyqChenFieldInjector {
         } else {
             Vec::new()
         }
+    }
+
+    pub fn inject_batch(&self, stock_rows: &mut [(String, RowData)]) -> Vec<String> {
+        if self.fields.is_empty() {
+            return Vec::new();
+        }
+        for (_, row_data) in stock_rows.iter_mut() {
+            insert_empty_cyq_chen_fields(row_data, &self.fields);
+        }
+        if let Some(warning) = &self.unavailable_warning {
+            return vec![warning.clone()];
+        }
+        let (Some(conn), Some(select_columns)) = (&self.conn, &self.select_columns) else {
+            return vec!["新筹码字段查询不可用，已按空值注入。".to_string()];
+        };
+        let Some(first_date) = stock_rows
+            .iter()
+            .filter_map(|(_, row)| row.trade_dates.first())
+            .min()
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        let Some(last_date) = stock_rows
+            .iter()
+            .filter_map(|(_, row)| row.trade_dates.last())
+            .max()
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        let placeholders = std::iter::repeat_n("?", stock_rows.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT snap.ts_code, {select_columns} FROM {CYQ_CHEN_SNAPSHOT_TABLE} AS snap \
+             WHERE snap.ts_code IN ({placeholders}) AND snap.adj_type = ? \
+               AND snap.trade_date >= ? AND snap.trade_date <= ?"
+        );
+        let mut query_params = stock_rows
+            .iter()
+            .map(|(ts_code, _)| ts_code.clone())
+            .collect::<Vec<_>>();
+        query_params.push(DEFAULT_CYQ_CHEN_ADJ_TYPE.to_string());
+        query_params.push(first_date);
+        query_params.push(last_date);
+        let stock_index = stock_rows
+            .iter()
+            .enumerate()
+            .map(|(index, (ts_code, _))| (ts_code.clone(), index))
+            .collect::<HashMap<_, _>>();
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(stmt) => stmt,
+            Err(error) => {
+                return vec![format!(
+                    "预编译批量新筹码字段查询失败: {error}；新筹码字段已按空值注入。"
+                )];
+            }
+        };
+        let mut rows = match stmt.query(params_from_iter(query_params.iter())) {
+            Ok(rows) => rows,
+            Err(error) => {
+                return vec![format!(
+                    "批量查询新筹码字段失败: {error}；新筹码字段已按空值注入。"
+                )];
+            }
+        };
+        while let Ok(Some(row)) = rows.next() {
+            let (Ok(ts_code), Ok(trade_date)) = (row.get::<_, String>(0), row.get::<_, String>(1))
+            else {
+                continue;
+            };
+            let Some((_, row_data)) = stock_index
+                .get(&ts_code)
+                .and_then(|index| stock_rows.get_mut(*index))
+            else {
+                continue;
+            };
+            let Ok(row_index) = row_data.trade_dates.binary_search(&trade_date) else {
+                continue;
+            };
+            for (field_index, (runtime_key, _)) in self.available_fields.iter().enumerate() {
+                let value = row.get::<_, Option<f64>>(field_index + 2).ok().flatten();
+                if let Some(series) = row_data.cols.get_mut(*runtime_key) {
+                    series[row_index] = value;
+                }
+            }
+        }
+        Vec::new()
     }
 }
 
@@ -642,7 +800,8 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use super::{
-        SimilarityRankFieldInjector, inject_optional_cyq_chen_fields, inject_stock_extra_fields,
+        CyqChenFieldInjector, SimilarityRankFieldInjector, inject_optional_cyq_chen_fields,
+        inject_stock_extra_fields,
     };
     use crate::data::RowData;
 
@@ -701,13 +860,55 @@ mod tests {
             trade_dates: vec!["20240102".to_string(), "20240103".to_string()],
             cols: HashMap::from([("C".to_string(), vec![Some(10.0), Some(11.0)])]),
         };
+        let mut stock_rows = vec![("000001.SZ".to_string(), row_data)];
         SimilarityRankFieldInjector::new(source_dir.to_str().expect("utf8 path"), true)
-            .inject(&mut row_data, "000001.SZ")
+            .inject_batch(&mut stock_rows)
             .expect("inject similarity rank");
+        row_data = stock_rows.pop().expect("one stock").1;
 
         assert_eq!(
             row_data.cols.get("S_RANK").map(Vec::as_slice),
             Some([None, Some(7.0)].as_slice())
+        );
+        std::fs::remove_dir_all(source_dir).expect("remove temp source directory");
+    }
+
+    #[test]
+    fn cyq_chen_batch_injection_aligns_stocks_and_dates() {
+        let source_dir = std::env::temp_dir().join(format!(
+            "lianghua-cyq-chen-batch-injector-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&source_dir).expect("create temp source directory");
+        let conn = duckdb::Connection::open(source_dir.join("cyq_chen.db")).expect("open chip db");
+        conn.execute_batch(
+            "CREATE TABLE cyq_chen_snapshot (ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR, total_profit_ratio DOUBLE);\
+             INSERT INTO cyq_chen_snapshot VALUES ('000001.SZ', '20240103', 'qfq', 0.7), ('000002.SZ', '20240102', 'qfq', 0.4);",
+        )
+        .expect("seed chip snapshots");
+        drop(conn);
+
+        let row = || RowData {
+            trade_dates: vec!["20240102".to_string(), "20240103".to_string()],
+            cols: HashMap::from([("C".to_string(), vec![Some(10.0), Some(11.0)])]),
+        };
+        let mut stock_rows = vec![
+            ("000001.SZ".to_string(), row()),
+            ("000002.SZ".to_string(), row()),
+        ];
+        let injector = CyqChenFieldInjector::new(
+            source_dir.to_str().expect("utf8 path"),
+            &HashSet::from(["CYQ_TPR".to_string()]),
+        );
+        assert!(injector.inject_batch(&mut stock_rows).is_empty());
+
+        assert_eq!(
+            stock_rows[0].1.cols.get("CYQ_TPR").map(Vec::as_slice),
+            Some([None, Some(0.7)].as_slice())
+        );
+        assert_eq!(
+            stock_rows[1].1.cols.get("CYQ_TPR").map(Vec::as_slice),
+            Some([Some(0.4), None].as_slice())
         );
         std::fs::remove_dir_all(source_dir).expect("remove temp source directory");
     }

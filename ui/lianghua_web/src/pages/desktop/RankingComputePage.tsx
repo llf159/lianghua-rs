@@ -88,6 +88,7 @@ const SIMILARITY_PHASES = [
   { key: 'select-templates', label: '筛选历史模板' },
   { key: 'candidate-fingerprints', label: '历史模板指纹' },
   { key: 'target-fingerprints', label: '当日股票指纹' },
+  { key: 'candidate-index', label: '候选索引与权重' },
   { key: 'ranking', label: '全市场精排' },
   { key: 'validate', label: '校验数据' },
   { key: 'write', label: '写入排行榜' },
@@ -335,7 +336,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
   const [cyqChenEndDateInput, setCyqChenEndDateInput] = useState('')
   const [cardFeedback, setCardFeedback] = useState<CardFeedback>(() => createEmptyCardFeedback())
   const [progress, setProgress] = useState<DataDownloadProgress | null>(null)
-  const [similarityProgress, setSimilarityProgress] = useState<StrategyTriggerRankingProgress | null>(null)
+  const [similarityProgress, setSimilarityProgress] = useState<(StrategyTriggerRankingProgress & { sampledAtMs: number }) | null>(null)
   const [similarityNow, setSimilarityNow] = useState(0)
   const [strategyDiff, setStrategyDiff] = useState<ManagedStrategyBackupDiff | null>(null)
   const [strategyDiffLoading, setStrategyDiffLoading] = useState(false)
@@ -382,10 +383,11 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     ? Math.max(0, similarityNow - similarityProgress.startedAtEpochSeconds * 1000)
     : 0
   const similarityPhaseElapsedMs = similarityProgress
-    ? Math.max(0, similarityNow - similarityProgress.phaseStartedAtEpochSeconds * 1000)
+    ? Math.max(0, Math.max(similarityNow, similarityProgress.sampledAtMs) - similarityProgress.phaseStartedAtEpochSeconds * 1000)
     : 0
   const similarityEstimatedTotalMs = similarityProgress && similarityProgress.completed > 0 && similarityProgress.total > 0
-    ? similarityPhaseElapsedMs * Math.max(1, similarityProgress.total / similarityProgress.completed)
+    ? Math.max(0, similarityProgress.sampledAtMs - similarityProgress.phaseStartedAtEpochSeconds * 1000)
+      * Math.max(1, similarityProgress.total / similarityProgress.completed)
     : null
   const similarityRemainingMs = similarityEstimatedTotalMs === null
     ? null
@@ -463,7 +465,18 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     const refresh = async () => {
       try {
         const next = await getStrategyTriggerSimilarityRankingProgress()
-        if (!cancelled && next) setSimilarityProgress(next)
+        if (!cancelled && next) {
+          const sampledAtMs = Date.now()
+          setSimilarityProgress((current) => {
+            const sameSample = current
+              && current.startedAtEpochSeconds === next.startedAtEpochSeconds
+              && current.phaseStartedAtEpochSeconds === next.phaseStartedAtEpochSeconds
+              && current.phase === next.phase
+              && current.completed === next.completed
+              && current.total === next.total
+            return { ...next, sampledAtMs: sameSample ? current.sampledAtMs : sampledAtMs }
+          })
+        }
       } catch {
         // The calculation result remains authoritative if a progress poll fails.
       } finally {
@@ -1702,7 +1715,6 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
             progressCounterText={similarityProgress && similarityProgress.total > 0
               ? `${similarityProgress.completed.toLocaleString()} / ${similarityProgress.total.toLocaleString()}`
               : '等待进度'}
-            currentObjectText={`参考日 ${similarityTradeDateInput || '--'}`}
             message={similarityProgress?.message}
             fallbackMessage="正在启动走势相似排名计算…"
           />

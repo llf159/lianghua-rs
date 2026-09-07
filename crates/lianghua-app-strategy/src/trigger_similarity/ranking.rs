@@ -69,6 +69,7 @@ fn set_ranking_progress(phase: &str, message: &str, completed: usize, total: usi
         return;
     }
     let now = now_epoch_seconds();
+    let phase_changed = progress.as_ref().is_none_or(|item| item.phase != phase);
     let started_at_epoch_seconds = progress
         .as_ref()
         .map(|item| item.started_at_epoch_seconds)
@@ -86,6 +87,10 @@ fn set_ranking_progress(phase: &str, message: &str, completed: usize, total: usi
         started_at_epoch_seconds,
         phase_started_at_epoch_seconds,
     });
+    drop(progress);
+    if phase_changed {
+        log::info!("相似榜进入阶段 {phase}: {message}, completed={completed}, total={total}");
+    }
 }
 
 pub fn get_strategy_trigger_similarity_ranking_progress() -> Option<StrategyTriggerRankingProgress>
@@ -225,10 +230,6 @@ struct OutcomeSelectedAnchor {
 #[derive(Debug, Clone, Copy)]
 struct ScoredCandidate {
     score: f64,
-    trigger_similarity: f64,
-    price_volume_similarity: Option<f64>,
-    indicator_similarity: Option<f64>,
-    market_similarity: Option<f64>,
     candidate_index: usize,
 }
 
@@ -676,15 +677,31 @@ fn build_ranking_samples_for_chunk(
     outcome_trade_days: usize,
     target_trade_date: &str,
     include_outcome: bool,
+    progress: Option<(&str, usize, usize)>,
 ) -> Result<Vec<RankingSample>, String> {
+    if let Some((phase, completed, total)) = progress {
+        set_ranking_progress(phase, "正在读取本批股票的行情和指标窗口", completed, total);
+    }
     let market_by_anchor = load_market_rows(conn, &anchors, schema)?;
+    if let Some((phase, completed, total)) = progress {
+        set_ranking_progress(phase, "正在读取本批股票的策略触发窗口", completed, total);
+    }
     let rules_by_anchor = load_rule_rows(conn, &anchors)?;
+    if let Some((phase, completed, total)) = progress {
+        set_ranking_progress(phase, "正在读取本批股票的评分摘要", completed, total);
+    }
     let summaries = load_summary_rows(conn, &anchors)?;
     let future_by_anchor = if include_outcome {
+        if let Some((phase, completed, total)) = progress {
+            set_ranking_progress(phase, "正在读取本批历史模板的后验行情", completed, total);
+        }
         load_future_rows(conn, &anchors, outcome_trade_days, target_trade_date)?
     } else {
         HashMap::new()
     };
+    if let Some((phase, completed, total)) = progress {
+        set_ranking_progress(phase, "正在构建本批股票的指纹", completed, total);
+    }
     Ok(anchors
         .into_par_iter()
         .filter_map(|anchor| {
@@ -1807,6 +1824,11 @@ pub fn run_strategy_trigger_similarity_ranking(
             outcome_trade_days,
             &resolved_trade_date,
             true,
+            Some((
+                "candidate-fingerprints",
+                candidate_completed,
+                candidate_anchor_count,
+            )),
         )?;
         for sample in &mut chunk_samples {
             if let Some((quality_score, quality_class)) = selected_quality.get(&sample.anchor.id) {
@@ -1886,6 +1908,7 @@ pub fn run_strategy_trigger_similarity_ranking(
             outcome_trade_days,
             &resolved_trade_date,
             false,
+            Some(("target-fingerprints", target_completed, target_anchor_count)),
         )?);
         target_completed += chunk_len;
         set_ranking_progress(
@@ -1900,6 +1923,7 @@ pub fn run_strategy_trigger_similarity_ranking(
         elapsed_ms: elapsed_ms(phase),
     });
 
+    set_ranking_progress("candidate-index", "正在建立历史模板的规则倒排索引", 0, 0);
     let mut candidate_by_rule = HashMap::<&str, Vec<CandidateRulePosting>>::new();
     for (index, candidate) in candidates.iter().enumerate() {
         for (rule_name, hits) in &candidate.fingerprint.trigger.by_rule {
@@ -1912,9 +1936,9 @@ pub fn run_strategy_trigger_similarity_ranking(
                 });
         }
     }
-    let name_map = build_name_map(&source_path).unwrap_or_default();
     let industry_map = build_industry_map(&source_path).unwrap_or_default();
     let concept_map = build_concepts_map(&source_path).unwrap_or_default();
+    set_ranking_progress("candidate-index", "正在读取并计算规则权重", 0, 0);
     let rule_weights =
         load_rule_idf_weights(&conn, earliest_candidate_date, &historical_cutoff_date)?;
     let candidate_rule_weight_sums = candidates
@@ -1924,7 +1948,14 @@ pub fn run_strategy_trigger_similarity_ranking(
 
     let phase = Instant::now();
     let ranking_completed = AtomicUsize::new(0);
-    set_ranking_progress("ranking", "正在进行全市场近邻精排", 0, targets.len());
+    log::info!(
+        "相似榜精排开始: stocks={}, candidates={}, window_days={}, indicator_columns={}",
+        targets.len(),
+        candidates.len(),
+        window_trade_days,
+        schema.indicator_columns.len(),
+    );
+    set_ranking_progress("ranking", "正在计算候选市场相似度", 0, targets.len());
     let candidate_market_similarities =
         (|targets: &[RankingSample], candidates: &[RankingSample]| -> Vec<Option<f64>> {
             let Some(target) = targets.first() else {
@@ -1961,6 +1992,13 @@ pub fn run_strategy_trigger_similarity_ranking(
     let mut ranking_rows = targets
         .par_iter()
         .map(|target| {
+            let target_started = Instant::now();
+            set_ranking_progress(
+                "ranking",
+                &format!("正在精算 {}：建立候选索引", target.anchor.ts_code),
+                ranking_completed.load(AtomicOrdering::Relaxed),
+                targets.len(),
+            );
             let row = (|target: &RankingSample,
                         candidates: &[RankingSample],
                         candidate_market_similarities: &[Option<f64>],
@@ -1989,6 +2027,7 @@ pub fn run_strategy_trigger_similarity_ranking(
                       rule_weights: &HashMap<String, f64>,
                       scratch: &mut RankingTargetScratch|
                      -> StrategyTriggerRankingRow {
+                        let mut last_progress = Instant::now();
                         let target_rule_weight_sum =
                             trigger_rule_weight_sum(&target.fingerprint.trigger, rule_weights);
                         let per_class_limit = (256) / 2;
@@ -2053,6 +2092,22 @@ pub fn run_strategy_trigger_similarity_ranking(
                         }
 
                         for candidate_position in 0..scratch.candidate_indices.len() {
+                            if candidate_position % 256 == 0
+                                && last_progress.elapsed().as_secs() >= 1
+                            {
+                                set_ranking_progress(
+                                    "ranking",
+                                    &format!(
+                                        "正在精算 {}：已检查候选 {} / {}",
+                                        target.anchor.ts_code,
+                                        candidate_position,
+                                        scratch.candidate_indices.len(),
+                                    ),
+                                    ranking_completed.load(AtomicOrdering::Relaxed),
+                                    targets.len(),
+                                );
+                                last_progress = Instant::now();
+                            }
                             let candidate_index = scratch.candidate_indices[candidate_position];
                             let candidate = &candidates[candidate_index];
                             // Leave-one-stock-out：同一股票的滚动窗口会共享真实 K 线、触发和静态
@@ -2109,10 +2164,21 @@ pub fn run_strategy_trigger_similarity_ranking(
                                 scratch.candidate_aggregate_similarities[candidate_index];
                             let trigger_upper_bound =
                                 scratch.candidate_trigger_upper_bounds[candidate_index];
+                            // 市场分已按候选日期缓存，先用它收紧上界，避免为市场环境
+                            // 不匹配且不可能入堆的候选计算量价和指标点积。没有共同有效
+                            // 市场向量时仍保留原来的宽松上界，不把缺失市场分视为零分。
+                            let market_similarity = market_available
+                                .then(|| candidate_market_similarities[candidate_index])
+                                .flatten();
                             let remaining_weight = total_weight - TRIGGER_SIMILARITY_WEIGHT;
+                            let market_upper_score =
+                                market_similarity.map_or(remaining_weight * 100.0, |score| {
+                                    score * MARKET_SIMILARITY_WEIGHT
+                                        + (remaining_weight - MARKET_SIMILARITY_WEIGHT) * 100.0
+                                });
                             if can_prune_exact_candidate(
                                 (trigger_upper_bound * TRIGGER_SIMILARITY_WEIGHT
-                                    + remaining_weight * 100.0)
+                                    + market_upper_score)
                                     / total_weight,
                                 cutoff,
                             ) {
@@ -2135,19 +2201,7 @@ pub fn run_strategy_trigger_similarity_ranking(
                                 channel_weighted_score += score * PRICE_VOLUME_SIMILARITY_WEIGHT;
                                 remaining_weight -= PRICE_VOLUME_SIMILARITY_WEIGHT;
                             }
-                            if can_prune_exact_candidate(
-                                (trigger_upper_bound * TRIGGER_SIMILARITY_WEIGHT
-                                    + channel_weighted_score
-                                    + remaining_weight * 100.0)
-                                    / total_weight,
-                                cutoff,
-                            ) {
-                                continue;
-                            }
-
-                            let market_similarity = market_available
-                                .then(|| candidate_market_similarities[candidate_index])
-                                .flatten();
+                            // 保持量价、市场、指标的浮点累加顺序，与原评分结果一致。
                             if let Some(score) = market_similarity {
                                 channel_weighted_score += score * MARKET_SIMILARITY_WEIGHT;
                                 remaining_weight -= MARKET_SIMILARITY_WEIGHT;
@@ -2211,10 +2265,6 @@ pub fn run_strategy_trigger_similarity_ranking(
                                     indicator_similarity,
                                     market_similarity,
                                 ),
-                                trigger_similarity,
-                                price_volume_similarity,
-                                indicator_similarity,
-                                market_similarity,
                                 candidate_index,
                             };
                             if candidate.template_class > 0 {
@@ -2306,56 +2356,18 @@ pub fn run_strategy_trigger_similarity_ranking(
                             window_trade_days,
                             outcome_trade_days,
                         );
-                        let rating_sample = rating_candidates
-                            .iter()
-                            .copied()
-                            .filter_map(|scored| {
-                                (|candidate: &RankingSample,
-              scored: ScoredCandidate,
-              target_trigger: &TriggerFingerprint,
-              name_map: &HashMap<String, String>|
-             -> Option<StrategyTriggerSimilarityRow> {
-                let outcome = candidate.outcome.as_ref()?;
-                let mut matched_rule_names = target_trigger
-                    .by_rule
-                    .keys()
-                    .filter(|name| candidate.fingerprint.trigger.by_rule.contains_key(*name))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                matched_rule_names.sort();
-                Some(StrategyTriggerSimilarityRow {
-                    ts_code: candidate.anchor.ts_code.clone(),
-                    name: name_map.get(&candidate.anchor.ts_code).cloned(),
-                    industry: None,
-                    concept: None,
-                    candidate_start_trade_date: candidate.anchor.start_trade_date.clone(),
-                    candidate_end_trade_date: candidate.anchor.end_trade_date.clone(),
-                    outcome_start_trade_date: outcome.start_trade_date.clone(),
-                    outcome_end_trade_date: outcome.end_trade_date.clone(),
-                    similarity_score: scored.score,
-                    trigger_similarity: scored.trigger_similarity,
-                    price_volume_similarity: scored.price_volume_similarity,
-                    indicator_similarity: scored.indicator_similarity,
-                    market_similarity: scored.market_similarity,
-                    matched_rule_count: matched_rule_names.len(),
-                    matched_rule_names,
-                    candidate_trigger_count: candidate.trigger_count,
-                    forward_return_pct: outcome.return_pct,
-                    forward_excess_return_pct: outcome.excess_return_pct,
-                    mfe_pct: outcome.mfe_pct,
-                    mae_pct: outcome.mae_pct,
-                    total_score: candidate.total_score,
-                    rank: candidate.original_rank,
-                })
-            })(
-                &candidates[scored.candidate_index],
-                scored,
-                &target.fingerprint.trigger,
-                name_map,
-            )
-                            })
-                            .collect::<Vec<_>>();
-                        let summary = summarize_outcomes(&rating_sample);
+                        let summary = summarize_outcomes(rating_candidates.iter().filter_map(
+                            |scored| {
+                                let outcome = candidates[scored.candidate_index].outcome.as_ref()?;
+                                Some(OutcomeSummarySample {
+                                    similarity_score: scored.score,
+                                    return_pct: outcome.return_pct,
+                                    excess_return_pct: outcome.excess_return_pct,
+                                    mfe_pct: outcome.mfe_pct,
+                                    mae_pct: outcome.mae_pct,
+                                })
+                            },
+                        ));
                         let confidence = (summary.effective_sample_count
                             / (summary.effective_sample_count + SHRINKAGE_STRENGTH))
                             .max(0.0)
@@ -2379,25 +2391,32 @@ pub fn run_strategy_trigger_similarity_ranking(
                                 predicted_quality.map(|quality| (quality - 0.5) * 2.0 * confidence)
                             })
                             .flatten();
-                        let average_similarity = (!rating_sample.is_empty()).then(|| {
-                            rating_sample
+                        let average_similarity = (!rating_candidates.is_empty()).then(|| {
+                            rating_candidates
                                 .iter()
-                                .map(|row| row.similarity_score)
+                                .map(|row| row.score)
                                 .sum::<f64>()
-                                / rating_sample.len() as f64
+                                / rating_candidates.len() as f64
                         });
-                        let top_matches = rating_sample
+                        let top_matches = rating_candidates
                             .iter()
                             .take(5)
-                            .map(|row| StrategyTriggerRankingMatch {
-                                ts_code: row.ts_code.clone(),
-                                name: row.name.clone(),
-                                candidate_start_trade_date: row.candidate_start_trade_date.clone(),
-                                candidate_end_trade_date: row.candidate_end_trade_date.clone(),
-                                similarity_score: row.similarity_score,
-                                forward_excess_return_pct: row.forward_excess_return_pct,
-                                mfe_pct: row.mfe_pct,
-                                mae_pct: row.mae_pct,
+                            .filter_map(|scored| {
+                                let candidate = &candidates[scored.candidate_index];
+                                let outcome = candidate.outcome.as_ref()?;
+                                Some(StrategyTriggerRankingMatch {
+                                    ts_code: candidate.anchor.ts_code.clone(),
+                                    name: name_map.get(&candidate.anchor.ts_code).cloned(),
+                                    candidate_start_trade_date: candidate
+                                        .anchor
+                                        .start_trade_date
+                                        .clone(),
+                                    candidate_end_trade_date: candidate.anchor.end_trade_date.clone(),
+                                    similarity_score: scored.score,
+                                    forward_excess_return_pct: outcome.excess_return_pct,
+                                    mfe_pct: outcome.mfe_pct,
+                                    mae_pct: outcome.mae_pct,
+                                })
                             })
                             .collect();
                         StrategyTriggerRankingRow {
@@ -2423,7 +2442,7 @@ pub fn run_strategy_trigger_similarity_ranking(
                             expected_mfe_pct: summary.weighted_mfe_pct,
                             expected_mae_pct: summary.weighted_mae_pct,
                             average_similarity,
-                            best_similarity: rating_sample.first().map(|row| row.similarity_score),
+                            best_similarity: rating_candidates.first().map(|row| row.score),
                             trigger_count: target.trigger_count,
                             top_matches,
                         }
@@ -2458,14 +2477,23 @@ pub fn run_strategy_trigger_similarity_ranking(
                 &rule_weights,
             );
             let completed = ranking_completed.fetch_add(1, AtomicOrdering::Relaxed) + 1;
-            if completed == targets.len() || completed % 16 == 0 {
-                set_ranking_progress(
-                    "ranking",
-                    "正在进行全市场近邻精排",
+            if target_started.elapsed().as_secs() >= 5 {
+                log::info!(
+                    "相似榜慢股票: stock={}, elapsed_ms={}, triggers={}, candidate_pool={}, completed={}/{}",
+                    target.anchor.ts_code,
+                    target_started.elapsed().as_millis(),
+                    target.trigger_count,
+                    candidates.len(),
                     completed,
                     targets.len(),
                 );
             }
+            set_ranking_progress(
+                "ranking",
+                "正在进行全市场近邻精排",
+                completed,
+                targets.len(),
+            );
             row
         })
         .collect::<Vec<_>>();
@@ -3024,6 +3052,7 @@ mod tests {
                 horizon,
                 &target_date,
                 true,
+                None,
             )
             .expect("build candidate fingerprints")
             .len();

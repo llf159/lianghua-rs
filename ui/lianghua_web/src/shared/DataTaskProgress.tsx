@@ -14,7 +14,7 @@ type DataTaskProgressProps = {
   estimatedTotalText?: string
   shownProgressPercent: number
   progressCounterText: string
-  currentObjectText: string
+  currentObjectText?: string
   message: string | null | undefined
   fallbackMessage: string
 }
@@ -90,10 +90,12 @@ export default function DataTaskProgress({
           <span>进度</span>
           <strong>{progressCounterText}</strong>
         </div>
-        <div className="data-download-progress-stat data-download-progress-stat-wide">
-          <span>当前对象</span>
-          <strong title={currentObjectText}>{currentObjectText}</strong>
-        </div>
+        {currentObjectText !== undefined ? (
+          <div className="data-download-progress-stat data-download-progress-stat-wide">
+            <span>当前对象</span>
+            <strong title={currentObjectText}>{currentObjectText}</strong>
+          </div>
+        ) : null}
         {estimatedRemainingText !== undefined ? (
           <div className="data-download-progress-stat">
             <span>阶段预计剩余</span>
