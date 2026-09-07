@@ -8,7 +8,7 @@ use std::{
 use duckdb::{
     Appender, Connection, Transaction,
     arrow::{
-        array::{ArrayRef, Float64Array, Int32Array, StringArray, builder::StringBuilder},
+        array::{ArrayRef, Float64Array, StringArray, builder::StringBuilder},
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     },
@@ -488,6 +488,32 @@ mod tests {
             scene_row("000005.SZ", "防守", "observe", 3.0, 0.0, 0.5, 0.0, 50.0),
         ];
 
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!("lianghua_scene_rank_{unique}.db"));
+        init_result_db(&db_path).unwrap();
+        let (tx, rx) = channel();
+        for group in rows.chunks(2) {
+            tx.send(ScoreWriteMessage::Batch(ScoreBatch {
+                scene_rows: group.to_vec(),
+                ..ScoreBatch::default()
+            }))
+            .unwrap();
+        }
+        drop(tx);
+        write_score_batches_from_channel(
+            db_path.to_str().unwrap(),
+            None,
+            "qfq",
+            TieBreakWay::TsCode,
+            "20240102",
+            "20240102",
+            rx,
+        )
+        .unwrap();
+
         rank_scene_rows(&mut rows);
 
         let main_scene = rows
@@ -510,6 +536,19 @@ mod tests {
             .find(|row| row.scene_name == "防守")
             .and_then(|row| row.scene_rank);
         assert_eq!(defense_rank, Some(1));
+        let conn = Connection::open(&db_path).unwrap();
+        for row in &rows {
+            let stored_rank: i64 = conn
+                .query_row(
+                    "SELECT scene_rank FROM scene_details WHERE ts_code = ? AND scene_name = ?",
+                    duckdb::params![row.ts_code, row.scene_name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(Some(stored_rank), row.scene_rank);
+        }
+        drop(conn);
+        fs::remove_file(db_path).unwrap();
     }
 
     fn explicit_result_index_names(conn: &Connection) -> Vec<String> {
@@ -1020,7 +1059,15 @@ pub fn write_score_batches_from_channel(
 
         let receive_and_append_started_at = time::Instant::now();
         let mut batch_count = 0usize;
-        let mut scene_rows = Vec::new();
+        tx.execute(
+            &format!(
+                "CREATE TEMP TABLE scene_details_stage AS SELECT ts_code, trade_date,
+                scene_name, direction, stage, stage_score, risk_score, confirm_strength,
+                risk_intensity, CAST(0 AS DOUBLE) AS total_score FROM {scene_target} WHERE false"
+            ),
+            [],
+        )
+        .map_err(|e| format!("创建场景临时表失败:{e}"))?;
         {
             let mut summary_app = tx
                 .appender("score_summary_stage")
@@ -1029,6 +1076,9 @@ pub fn write_score_batches_from_channel(
                 .appender(detail_target)
                 .map_err(|e| format!("rule_details appender创建失败:{e}"))?;
 
+            let mut scene_app = tx
+                .appender("scene_details_stage")
+                .map_err(|e| format!("创建场景临时表写入器失败:{e}"))?;
             for message in rx {
                 let batch = match message {
                     ScoreWriteMessage::Batch(batch) => batch,
@@ -1108,10 +1158,77 @@ pub fn write_score_batches_from_channel(
                     app.append_record_batch(batch)
                         .map_err(|e| format!("批量插入rule_details失败:{e}"))
                 })(&mut detail_app, &batch.detail_rows)?;
-                scene_rows.extend(batch.scene_rows);
+                (|app: &mut Appender<'_>, rows: &[SceneDetails]| -> Result<(), String> {
+                    if rows.is_empty() {
+                        return Ok(());
+                    }
+
+                    let mut ts_code =
+                        StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(12));
+                    let mut trade_date =
+                        StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(8));
+                    let mut scene_name =
+                        StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(16));
+                    let mut direction =
+                        StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(6));
+                    let mut stage =
+                        StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(8));
+                    let mut stage_score = Vec::with_capacity(rows.len());
+                    let mut risk_score = Vec::with_capacity(rows.len());
+                    let mut confirm_strength = Vec::with_capacity(rows.len());
+                    let mut risk_intensity = Vec::with_capacity(rows.len());
+                    let mut total_score = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        ts_code.append_value(&row.ts_code);
+                        trade_date.append_value(&row.trade_date);
+                        scene_name.append_value(&row.scene_name);
+                        direction.append_value(&row.direction);
+                        stage.append_option(row.stage.as_deref());
+                        stage_score.push(row.stage_score);
+                        risk_score.push(row.risk_score);
+                        confirm_strength.push(row.confirm_strength);
+                        risk_intensity.push(row.risk_intensity);
+                        total_score.push(row.total_score);
+                    }
+
+                    let schema = Schema::new(vec![
+                        Field::new("ts_code", DataType::Utf8, false),
+                        Field::new("trade_date", DataType::Utf8, false),
+                        Field::new("scene_name", DataType::Utf8, false),
+                        Field::new("direction", DataType::Utf8, false),
+                        Field::new("stage", DataType::Utf8, true),
+                        Field::new("stage_score", DataType::Float64, false),
+                        Field::new("risk_score", DataType::Float64, false),
+                        Field::new("confirm_strength", DataType::Float64, false),
+                        Field::new("risk_intensity", DataType::Float64, false),
+                        Field::new("total_score", DataType::Float64, false),
+                    ]);
+                    let batch = RecordBatch::try_new(
+                        Arc::new(schema),
+                        vec![
+                            score_string_array(ts_code.finish()),
+                            score_string_array(trade_date.finish()),
+                            score_string_array(scene_name.finish()),
+                            score_string_array(direction.finish()),
+                            score_string_array(stage.finish()),
+                            score_float64_array(stage_score),
+                            score_float64_array(risk_score),
+                            score_float64_array(confirm_strength),
+                            score_float64_array(risk_intensity),
+                            score_float64_array(total_score),
+                        ],
+                    )
+                    .map_err(|e| format!("创建scene_details批次失败:{e}"))?;
+                    app.append_record_batch(batch)
+                        .map_err(|e| format!("批量插入scene_details失败:{e}"))
+                })(&mut scene_app, &batch.scene_rows)?;
+
                 batch_count += 1;
 
                 if batch_count % 32 == 0 {
+                    scene_app
+                        .flush()
+                        .map_err(|e| format!("刷新场景临时表失败:{e}"))?;
                     summary_app
                         .flush()
                         .map_err(|e| format!("刷新score_summary失败:{e}"))?;
@@ -1121,6 +1238,9 @@ pub fn write_score_batches_from_channel(
                 }
             }
 
+            scene_app
+                .flush()
+                .map_err(|e| format!("刷新场景临时表失败:{e}"))?;
             summary_app
                 .flush()
                 .map_err(|e| format!("刷新score_summary失败:{e}"))?;
@@ -1128,91 +1248,30 @@ pub fn write_score_batches_from_channel(
                 .flush()
                 .map_err(|e| format!("刷新rule_details失败:{e}"))?;
         }
-        rank_scene_rows(&mut scene_rows);
-        {
-            let mut scene_app = tx
-                .appender(scene_target)
-                .map_err(|e| format!("scene_details appender创建失败:{e}"))?;
-            (|app: &mut Appender<'_>, rows: &[SceneDetails]| -> Result<(), String> {
-                if rows.is_empty() {
-                    return Ok(());
-                }
-
-                let mut ts_code =
-                    StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(12));
-                let mut trade_date =
-                    StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(8));
-                let mut scene_name =
-                    StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(16));
-                let mut direction =
-                    StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(6));
-                let mut stage =
-                    StringBuilder::with_capacity(rows.len(), rows.len().saturating_mul(8));
-                let mut stage_score = Vec::with_capacity(rows.len());
-                let mut risk_score = Vec::with_capacity(rows.len());
-                let mut confirm_strength = Vec::with_capacity(rows.len());
-                let mut risk_intensity = Vec::with_capacity(rows.len());
-                let mut scene_rank = Vec::with_capacity(rows.len());
-                for row in rows {
-                    ts_code.append_value(&row.ts_code);
-                    trade_date.append_value(&row.trade_date);
-                    scene_name.append_value(&row.scene_name);
-                    direction.append_value(&row.direction);
-                    stage.append_option(row.stage.as_deref());
-                    stage_score.push(row.stage_score);
-                    risk_score.push(row.risk_score);
-                    confirm_strength.push(row.confirm_strength);
-                    risk_intensity.push(row.risk_intensity);
-                    scene_rank.push((|rank: Option<i64>,
-                                      label: &str|
-                     -> Result<Option<i32>, String> {
-                        rank.map(|value| {
-                            i32::try_from(value)
-                                .map_err(|_| format!("{label}超出INTEGER范围: {value}"))
-                        })
-                        .transpose()
-                    })(
-                        row.scene_rank, "scene_details.scene_rank"
-                    )?);
-                }
-
-                let schema = Schema::new(vec![
-                    Field::new("ts_code", DataType::Utf8, false),
-                    Field::new("trade_date", DataType::Utf8, false),
-                    Field::new("scene_name", DataType::Utf8, false),
-                    Field::new("direction", DataType::Utf8, false),
-                    Field::new("stage", DataType::Utf8, true),
-                    Field::new("stage_score", DataType::Float64, false),
-                    Field::new("risk_score", DataType::Float64, false),
-                    Field::new("confirm_strength", DataType::Float64, false),
-                    Field::new("risk_intensity", DataType::Float64, false),
-                    Field::new("scene_rank", DataType::Int32, true),
-                ]);
-                let batch = RecordBatch::try_new(
-                    Arc::new(schema),
-                    vec![
-                        score_string_array(ts_code.finish()),
-                        score_string_array(trade_date.finish()),
-                        score_string_array(scene_name.finish()),
-                        score_string_array(direction.finish()),
-                        score_string_array(stage.finish()),
-                        score_float64_array(stage_score),
-                        score_float64_array(risk_score),
-                        score_float64_array(confirm_strength),
-                        score_float64_array(risk_intensity),
-                        (|values: Vec<Option<i32>>| -> ArrayRef {
-                            Arc::new(Int32Array::from(values))
-                        })(scene_rank),
-                    ],
-                )
-                .map_err(|e| format!("创建scene_details批次失败:{e}"))?;
-                app.append_record_batch(batch)
-                    .map_err(|e| format!("批量插入scene_details失败:{e}"))
-            })(&mut scene_app, &scene_rows)?;
-            scene_app
-                .flush()
-                .map_err(|e| format!("刷新scene_details失败:{e}"))?;
-        }
+        tx.execute(
+            &format!(
+                r#"
+                INSERT INTO {scene_target}
+                SELECT ts_code, trade_date, scene_name, direction, stage,
+                    stage_score, risk_score, confirm_strength, risk_intensity,
+                    CAST(ROW_NUMBER() OVER (
+                        PARTITION BY trade_date, scene_name
+                        ORDER BY CASE stage
+                            WHEN 'confirm' THEN 3 WHEN 'trigger' THEN 2
+                            WHEN 'observe' THEN 1 WHEN 'fail' THEN 0 ELSE -1 END DESC,
+                            confirm_strength DESC,
+                            (confirm_strength - risk_intensity) DESC,
+                            (abs(stage_score) - abs(risk_score)) DESC,
+                            total_score DESC, ts_code ASC
+                    ) AS INTEGER)
+                FROM scene_details_stage
+            "#
+            ),
+            [],
+        )
+        .map_err(|e| format!("写入场景排名失败:{e}"))?;
+        tx.execute("DROP TABLE scene_details_stage", [])
+            .map_err(|e| format!("清理场景临时表失败:{e}"))?;
         profile.receive_and_append_batches_ms =
             receive_and_append_started_at.elapsed().as_millis() as u64;
         profile.batch_count = batch_count;

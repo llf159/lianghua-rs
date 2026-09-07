@@ -8,8 +8,8 @@ use std::{
 use chrono::{DateTime, Utc};
 use lianghua_app_data::{
     import::{
-        copy_directory_recursive, managed_source_file_name, resolve_managed_source_file_path,
-        resolve_source_root, validate_target_relative_path,
+        copy_directory_recursive, is_managed_source_temporary_path, managed_source_file_name,
+        resolve_managed_source_file_path, resolve_source_root, validate_target_relative_path,
     },
     viewer::{
         preview_managed_source_dataset as core_preview_managed_source_dataset,
@@ -222,6 +222,9 @@ fn append_directory_to_zip<W: Write + Seek>(
         let relative_path = entry_path
             .strip_prefix(source_root)
             .map_err(|error| error.to_string())?;
+        if is_managed_source_temporary_path(relative_path) {
+            continue;
+        }
         let archive_path = Path::new(archive_root).join(relative_path);
         let mut archive_name = archive_path.to_string_lossy().replace('\\', "/");
 

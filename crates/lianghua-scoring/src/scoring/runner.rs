@@ -34,9 +34,7 @@ use crate::scoring::{
     },
 };
 
-// In-memory validation retains every output row until all stocks finish. Keep
-// its input batches smaller than the streaming-to-DB path so each Rayon worker
-// does not also pin 128 stocks worth of indicator columns at the same time.
+// Bound input and output retained by each worker while keeping batched reads.
 const SCORING_MEMORY_GROUP_SIZE: usize = 32;
 
 #[derive(Debug, Clone, Copy)]
@@ -361,7 +359,7 @@ pub fn scoring_all_to_db(
         .to_str()
         .ok_or_else(|| "原始数据库路径不是有效UTF-8".to_string())?;
 
-    let (tx, rx) = sync_channel(8);
+    let (tx, rx) = sync_channel(2);
     let abort_tx = tx.clone();
     let db_path = out_db_path.to_string();
     let source_db_path = source_db_path.to_string();
@@ -381,35 +379,34 @@ pub fn scoring_all_to_db(
     });
 
     let compute_started_at = time::Instant::now();
-    let compute_result =
-        tc_list
-            .par_chunks(128)
-            .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
-                let worker_reader =
-                    DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
-                let batch = scoring_stock_group_batch(
-                    &worker_reader,
-                    source_dir,
-                    adj_type,
-                    start_date,
-                    end_date,
-                    &query_start_date,
-                    need_rows,
-                    &rules_cache,
-                    &rule_scene_meta,
-                    &scenes,
-                    &st_list,
-                    &total_share_map,
-                    &used_cyq_chen_keys,
-                    uses_similarity_rank,
-                    ts_group,
-                    ScoringMemoryMode::All,
-                )?;
-                sender
-                    .send(ScoreWriteMessage::Batch(batch))
-                    .map_err(|e| format!("发送评分批次失败:{e}"))?;
-                Ok(())
-            });
+    let compute_result = tc_list
+        .par_chunks(SCORING_MEMORY_GROUP_SIZE)
+        .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
+            let worker_reader =
+                DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
+            let batch = scoring_stock_group_batch(
+                &worker_reader,
+                source_dir,
+                adj_type,
+                start_date,
+                end_date,
+                &query_start_date,
+                need_rows,
+                &rules_cache,
+                &rule_scene_meta,
+                &scenes,
+                &st_list,
+                &total_share_map,
+                &used_cyq_chen_keys,
+                uses_similarity_rank,
+                ts_group,
+                ScoringMemoryMode::All,
+            )?;
+            sender
+                .send(ScoreWriteMessage::Batch(batch))
+                .map_err(|e| format!("发送评分批次失败:{e}"))?;
+            Ok(())
+        });
     let compute_and_send_batches_ms = compute_started_at.elapsed().as_millis() as u64;
 
     if let Err(err) = &compute_result {

@@ -54,7 +54,28 @@ pub fn managed_source_file_name(file_id: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::managed_source_file_name;
+    use super::{is_managed_source_temporary_path, managed_source_file_name};
+    use std::path::Path;
+
+    #[test]
+    fn export_skips_temporary_artifacts_but_keeps_database_wal_and_backups() {
+        for name in [
+            ".cyq_chen.db.rebuild-123.tmp",
+            ".cyq_chen.db.rebuild-123.tmp.wal",
+            "cyq_chen.db.tmp/duckdb_temp_storage-0.tmp",
+            ".score_rule.toml.123.tmp",
+        ] {
+            assert!(is_managed_source_temporary_path(Path::new(name)), "{name}");
+        }
+        for name in [
+            "cyq_chen.db",
+            "cyq_chen.db.wal",
+            "chip_change_rule_backups/strategy.toml",
+            "strategy_snapshots/rank_compute/meta.json",
+        ] {
+            assert!(!is_managed_source_temporary_path(Path::new(name)), "{name}");
+        }
+    }
 
     #[test]
     fn resolves_all_specialized_managed_assets() {
@@ -86,6 +107,18 @@ pub fn resolve_managed_source_file_path(
     Ok((target_relative_path, source_root.join(file_name)))
 }
 
+/// Temporary files and spill directories are not portable source assets.
+/// Keep ordinary database WAL files: they can contain committed data.
+pub fn is_managed_source_temporary_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let Component::Normal(name) = component else {
+            return false;
+        };
+        let name = name.to_string_lossy();
+        name.ends_with(".tmp") || name.ends_with(".tmp.wal") || name == ".cyq_chen.rebuild.lock"
+    })
+}
+
 pub fn copy_directory_recursive(source: &Path, target: &Path) -> Result<u64, String> {
     fs::create_dir_all(target).map_err(|error| error.to_string())?;
     let mut file_count = 0u64;
@@ -93,6 +126,9 @@ pub fn copy_directory_recursive(source: &Path, target: &Path) -> Result<u64, Str
     for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let entry_path = entry.path();
+        if is_managed_source_temporary_path(Path::new(&entry.file_name())) {
+            continue;
+        }
         let entry_type = entry.file_type().map_err(|error| error.to_string())?;
         let target_path = target.join(entry.file_name());
 
