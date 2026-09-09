@@ -4,6 +4,7 @@ import { ensureManagedSourcePath } from "../../apis/managedSource";
 import { getStrategyManagePage, type StrategyManageRuleItem } from "../../apis/strategyManage";
 import {
   getRuleLayerBacktestDefaults,
+  getRuleLayerBacktestDetail,
   runRankLayerBacktest,
   runRuleExpressionCalibration,
   runRuleExpressionValidation,
@@ -47,10 +48,6 @@ import {
   ExpressionValidationSamplesPanel,
   type SceneLayerValidationReturnState,
 } from "./ExpressionValidationSamplesPage";
-import {
-  readTransientStrategyBacktestResult,
-  writeTransientStrategyBacktestResult,
-} from "../../shared/transientSceneLayerBacktestState";
 import "./css/SceneLayerBacktestPage.css";
 
 type RuleSummarySortKey =
@@ -707,9 +704,8 @@ export default function SceneLayerBacktestPage() {
   const [ruleLoading, setRuleLoading] = useState(false);
   const [ruleTransientLoading, setRuleTransientLoading] = useState(false);
   const [ruleError, setRuleError] = useState("");
-  const [ruleResult, setRuleResult] = useState<RuleLayerBacktestData | null>(() =>
-    readTransientStrategyBacktestResult(),
-  );
+  const [ruleResult, setRuleResult] = useState<RuleLayerBacktestData | null>(null);
+  const [ruleResultSource, setRuleResultSource] = useState<"stored" | "transient" | null>(null);
   const [strategyRuleOptions, setStrategyRuleOptions] = useState<StrategyManageRuleItem[]>([]);
   const [validationImportRuleName, setValidationImportRuleName] = useState("");
   const [validationExpression, setValidationExpression] = useState("");
@@ -751,12 +747,6 @@ export default function SceneLayerBacktestPage() {
     () => buildBoardFilterOptions(STOCK_PICK_BOARD_OPTIONS, excludeStBoard),
     [excludeStBoard],
   );
-
-  useEffect(() => {
-    return () => {
-      writeTransientStrategyBacktestResult(null);
-    };
-  }, []);
 
   useEffect(() => {
     const returnState = locationState?.validationReturnState;
@@ -931,10 +921,6 @@ export default function SceneLayerBacktestPage() {
 
   const allSceneSummaries = result?.all_scene_summaries ?? [];
   const allRuleSummaries = ruleResult?.all_rule_summaries ?? [];
-  const ruleValidationDetailByName = useMemo(() => {
-    const details = ruleResult?.rule_validation_details ?? [];
-    return new Map(details.map((item) => [item.combo_key, item]));
-  }, [ruleResult]);
   const validationComboRows = validationResult?.combo_results ?? EMPTY_VALIDATION_COMBO_RESULTS;
   const rankLayerSummaries = rankResult?.layer_summaries ?? [];
   const rankTopKSummaries = rankResult?.top_k_summaries ?? [];
@@ -1494,7 +1480,7 @@ export default function SceneLayerBacktestPage() {
     }
 
     setRuleResult(null);
-    writeTransientStrategyBacktestResult(null);
+    setRuleResultSource(null);
     setRuleLoading(true);
     setRuleError("");
     try {
@@ -1517,10 +1503,10 @@ export default function SceneLayerBacktestPage() {
       });
       const compacted = compactRuleLayerBacktestPayload(data);
       setRuleResult(compacted);
-      writeTransientStrategyBacktestResult(compacted);
+      setRuleResultSource("stored");
     } catch (runError) {
       setRuleResult(null);
-      writeTransientStrategyBacktestResult(null);
+      setRuleResultSource(null);
       setRuleError(`执行策略回测失败: ${String(runError)}`);
     } finally {
       setRuleLoading(false);
@@ -1553,7 +1539,7 @@ export default function SceneLayerBacktestPage() {
     }
 
     setRuleResult(null);
-    writeTransientStrategyBacktestResult(null);
+    setRuleResultSource(null);
     setRuleTransientLoading(true);
     setRuleError("");
     try {
@@ -1576,10 +1562,10 @@ export default function SceneLayerBacktestPage() {
       });
       const compacted = compactRuleLayerBacktestPayload(data);
       setRuleResult(compacted);
-      writeTransientStrategyBacktestResult(compacted);
+      setRuleResultSource("transient");
     } catch (runError) {
       setRuleResult(null);
-      writeTransientStrategyBacktestResult(null);
+      setRuleResultSource(null);
       setRuleError(`执行变更策略回测验证失败: ${String(runError)}`);
     } finally {
       setRuleTransientLoading(false);
@@ -1616,12 +1602,20 @@ export default function SceneLayerBacktestPage() {
     setValidationError("");
   }
 
-  function openStoredRuleValidationDetail(ruleName: string) {
-    const combo = ruleValidationDetailByName.get(ruleName);
+  async function openStoredRuleValidationDetail(ruleName: string) {
     const matched = strategyRuleOptions.find((item) => item.name === ruleName);
-
-    if (!combo) {
-      setRuleError(`策略 ${ruleName} 没有可用的详细统计，请重新执行策略回测。`);
+    const transientCombo =
+      ruleResultSource === "transient"
+        ? ruleResult?.rule_validation_details.find((item) => item.combo_key === ruleName)
+        : undefined;
+    const normalizedStart = normalizeDateInput(startDateInput);
+    const normalizedEnd = normalizeDateInput(endDateInput);
+    if (!matched || !normalizedStart || !normalizedEnd) {
+      setRuleError(`策略 ${ruleName} 没有可用的详细配置。`);
+      return;
+    }
+    const marketValueFilter = readManualMarketValueFilter(setRuleError);
+    if (!marketValueFilter) {
       return;
     }
 
@@ -1631,7 +1625,7 @@ export default function SceneLayerBacktestPage() {
       Number.isFinite(matched?.points) && Number(matched?.points) < 0 ? "negative" : "positive";
 
     setValidationImportRuleName(ruleName);
-    setValidationExpression(combo.formula);
+    setValidationExpression(transientCombo?.formula ?? matched.when ?? "");
     setValidationDirection(direction);
     setValidationScopeWay(parsedScopeWay.scopeWay);
     setValidationConsecThresholdText(String(parsedScopeWay.consecThreshold));
@@ -1647,16 +1641,65 @@ export default function SceneLayerBacktestPage() {
     setValidationDetailModalOpen(false);
     setValidationError("");
     setRuleError("");
-    setShouldAutoOpenDetail(true);
-    setValidationResult({
-      import_rule_name: ruleName,
-      import_rule_explain: matched?.explain?.trim() || `策略详细统计：${ruleName}`,
-      scope_way: matched?.scope_way || parsedScopeWay.scopeWay,
-      scope_windows: scopeWindows,
-      sample_limit_per_group: VALIDATION_DEFAULT_SAMPLE_LIMIT,
-      combo_results: [combo],
-      best_combo_key: combo.combo_key,
-    });
+    if (ruleResultSource === "transient") {
+      if (!transientCombo) {
+        setRuleError(`变更策略 ${ruleName} 没有可用的详细统计。`);
+        return;
+      }
+      const backtest = compactRuleLayerBacktestPayload(transientCombo.backtest);
+      const detail =
+        backtest === transientCombo.backtest
+          ? transientCombo
+          : { ...transientCombo, backtest };
+      setShouldAutoOpenDetail(true);
+      setValidationResult({
+        import_rule_name: ruleName,
+        import_rule_explain: matched.explain?.trim() || `策略详细统计：${ruleName}`,
+        scope_way: matched.scope_way || parsedScopeWay.scopeWay,
+        scope_windows: scopeWindows,
+        sample_limit_per_group: VALIDATION_DEFAULT_SAMPLE_LIMIT,
+        combo_results: [detail],
+        best_combo_key: detail.combo_key,
+      });
+      return;
+    }
+    setValidationLoading(true);
+    try {
+      const combo = await getRuleLayerBacktestDetail({
+        sourcePath,
+        ruleName,
+        stockAdjType: stockAdjType.trim() || "qfq",
+        indexTsCode: indexTsCode.trim(),
+        indexBeta: Number(indexBeta),
+        conceptBeta: Number(conceptBeta),
+        industryBeta: Number(industryBeta),
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+        minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerDay) || 1),
+        minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
+        backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
+        excludeStBoard: excludeStBoard || undefined,
+        ...marketValueFilter,
+      });
+      const compacted = compactRuleLayerBacktestPayload(combo.backtest);
+      const detail = compacted === combo.backtest ? combo : { ...combo, backtest: compacted };
+      setShouldAutoOpenDetail(true);
+      setValidationResult({
+        import_rule_name: ruleName,
+        import_rule_explain: matched.explain?.trim() || `策略详细统计：${ruleName}`,
+        scope_way: matched.scope_way || parsedScopeWay.scopeWay,
+        scope_windows: scopeWindows,
+        sample_limit_per_group: VALIDATION_DEFAULT_SAMPLE_LIMIT,
+        combo_results: [detail],
+        best_combo_key: detail.combo_key,
+      });
+    } catch (detailError) {
+      setValidationResult(null);
+      setRuleError(`读取策略 ${ruleName} 详细统计失败: ${String(detailError)}`);
+    } finally {
+      setValidationLoading(false);
+    }
     setValidationSampleLimitText(String(VALIDATION_DEFAULT_SAMPLE_LIMIT));
   }
 
@@ -2830,7 +2873,7 @@ export default function SceneLayerBacktestPage() {
                           <button
                             type="button"
                             className="scene-layer-validation-detail-link"
-                            onClick={() => openStoredRuleValidationDetail(item.rule_name)}
+                            onClick={() => void openStoredRuleValidationDetail(item.rule_name)}
                           >
                             {item.rule_name}
                           </button>

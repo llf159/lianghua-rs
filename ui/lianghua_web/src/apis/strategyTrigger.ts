@@ -691,6 +691,13 @@ export type RuleLayerBacktestQuery = {
   totalMvMax?: number
 }
 
+export type RuleLayerBacktestDetailQuery = Omit<
+  RuleLayerBacktestQuery,
+  "parallelBatchSize"
+> & {
+  ruleName: string
+}
+
 export type RankLayerBacktestQuery = {
   sourcePath: string
   stockAdjType?: string
@@ -759,6 +766,10 @@ export async function runTransientSceneLayerBacktest(query: SceneLayerBacktestQu
 
 export async function getRuleLayerBacktestDefaults(sourcePath: string) {
   return invoke<RuleLayerBacktestDefaultsData>('get_rule_layer_backtest_defaults', { sourcePath })
+}
+
+export async function getRuleLayerBacktestDetail(query: RuleLayerBacktestDetailQuery) {
+  return invoke<RuleValidationComboResult>('get_rule_layer_backtest_detail', query)
 }
 
 export async function runRuleLayerBacktest(query: RuleLayerBacktestQuery) {

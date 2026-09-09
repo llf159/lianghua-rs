@@ -45,9 +45,10 @@ use crate::{
         },
         rule::{
             DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE, RuleLayerConfig,
-            RuleLayerDailyScoreLayers, RuleLayerFromDbInput, RuleLayerMetricsWithValidation,
-            RuleLayerRuntimeCache, RuleLayerSamplePointRef,
+            RuleLayerDailyScoreLayers, RuleLayerFromDbInput, RuleLayerMetrics,
+            RuleLayerMetricsWithValidation, RuleLayerRuntimeCache, RuleLayerSamplePointRef,
             build_rule_layer_runtime_cache_from_stock_data_with_ts_filter,
+            calc_all_rule_layer_metrics_from_db_map_with_ts_filter,
             calc_all_rule_layer_metrics_with_validation_from_compact_rows_map,
             calc_all_rule_layer_metrics_with_validation_from_db_map_with_ts_filter,
             calc_rule_layer_metrics_from_cache, calc_rule_layer_metrics_from_db_with_ts_filter,
@@ -2434,7 +2435,15 @@ struct ValidationSimilarityCache {
     total_samples: f64,
     rule_names: Vec<String>,
     rule_hit_counts: Vec<usize>,
-    pair_to_rule_indices: HashMap<String, HashMap<String, Vec<usize>>>,
+    pair_to_rule_indices: HashMap<String, Vec<usize>>,
+}
+
+fn validation_pair_key(ts_code: &str, trade_date: &str) -> String {
+    let mut key = String::with_capacity(ts_code.len() + trade_date.len() + 1);
+    key.push_str(ts_code);
+    key.push('\0');
+    key.push_str(trade_date);
+    key
 }
 
 fn empty_validation_similarity_cache() -> ValidationSimilarityCache {
@@ -2497,7 +2506,7 @@ fn load_validation_similarity_cache_optional(
         let mut rule_names = Vec::new();
         let mut rule_name_to_index = HashMap::<String, usize>::new();
         let mut rule_hit_counts = Vec::new();
-        let mut pair_to_rule_indices = HashMap::<String, HashMap<String, Vec<usize>>>::new();
+        let mut pair_to_rule_indices = HashMap::<String, Vec<usize>>::new();
 
         while let Some(row) = rows
             .next()
@@ -2518,9 +2527,7 @@ fn load_validation_similarity_cache_optional(
 
             rule_hit_counts[rule_index] += 1;
             pair_to_rule_indices
-                .entry(ts_code)
-                .or_default()
-                .entry(trade_date)
+                .entry(validation_pair_key(&ts_code, &trade_date))
                 .or_default()
                 .push(rule_index);
         }
@@ -2548,10 +2555,10 @@ fn build_validation_similarity_rows(
     let mut overlap_hit_count = HashMap::<usize, usize>::new();
 
     for sample in triggered_samples {
-        let Some(date_map) = similarity_cache.pair_to_rule_indices.get(&sample.ts_code) else {
-            continue;
-        };
-        let Some(rule_indices) = date_map.get(&sample.trade_date) else {
+        let Some(rule_indices) = similarity_cache
+            .pair_to_rule_indices
+            .get(&validation_pair_key(&sample.ts_code, &sample.trade_date))
+        else {
             continue;
         };
 
@@ -2636,6 +2643,91 @@ fn build_validation_similarity_rows_from_overlap(
     });
     out.truncate(20);
     out
+}
+
+fn load_validation_similarity_rows_for_rule(
+    source_path: &str,
+    start_date: &str,
+    end_date: &str,
+    triggered_samples: &[crate::simulate::rule::RuleLayerSamplePoint],
+    exclude_rule_name: &str,
+    explain_map: &HashMap<String, String>,
+) -> Result<Vec<RuleValidationSimilarityRow>, String> {
+    if triggered_samples.is_empty() {
+        return Ok(Vec::new());
+    }
+    let current_hits = triggered_samples
+        .iter()
+        .map(|sample| validation_pair_key(&sample.ts_code, &sample.trade_date))
+        .collect::<HashSet<_>>();
+    let result_conn = open_result_conn(source_path)?;
+    let total_samples = result_conn
+        .query_row(
+            "SELECT COUNT(*) FROM score_summary WHERE trade_date >= ? AND trade_date <= ?",
+            params![start_date, end_date],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("读取验证样本总数失败: {e}"))?
+        .max(0) as f64;
+    let mut stmt = result_conn
+        .prepare(
+            r#"
+            SELECT rule_name, ts_code, trade_date
+            FROM rule_details
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
+              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > 1e-12
+            "#,
+        )
+        .map_err(|e| format!("预编译单策略相似度查询失败: {e}"))?;
+    let mut rows = stmt
+        .query(params![start_date, end_date])
+        .map_err(|e| format!("查询单策略相似度失败: {e}"))?;
+    let mut existing_counts = HashMap::<String, usize>::new();
+    let mut overlap_counts = HashMap::<String, usize>::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取单策略相似度失败: {e}"))?
+    {
+        let rule_name: String = row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?;
+        let ts_code: String = row.get(1).map_err(|e| format!("读取代码失败: {e}"))?;
+        let trade_date: String = row.get(2).map_err(|e| format!("读取交易日失败: {e}"))?;
+        *existing_counts.entry(rule_name.clone()).or_default() += 1;
+        if current_hits.contains(&validation_pair_key(&ts_code, &trade_date)) {
+            *overlap_counts.entry(rule_name).or_default() += 1;
+        }
+    }
+
+    let combo_hit_count = triggered_samples.len() as f64;
+    let mut out = overlap_counts
+        .into_iter()
+        .filter_map(|(rule_name, overlap_samples)| {
+            if overlap_samples == 0 || rule_name == exclude_rule_name {
+                return None;
+            }
+            let existing_count = existing_counts.get(&rule_name).copied().unwrap_or(0) as f64;
+            Some(RuleValidationSimilarityRow {
+                explain: explain_map.get(&rule_name).cloned(),
+                rule_name,
+                overlap_samples,
+                overlap_rate_vs_validation: Some(overlap_samples as f64 / combo_hit_count),
+                overlap_rate_vs_existing: (existing_count > 0.0)
+                    .then(|| overlap_samples as f64 / existing_count),
+                overlap_lift: (total_samples > 0.0 && existing_count > 0.0).then(|| {
+                    overlap_samples as f64 * total_samples / (combo_hit_count * existing_count)
+                }),
+            })
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|left, right| {
+        right
+            .overlap_samples
+            .cmp(&left.overlap_samples)
+            .then_with(|| left.rule_name.cmp(&right.rule_name))
+    });
+    out.truncate(20);
+    Ok(out)
 }
 
 fn compare_option_f64_desc(left: Option<f64>, right: Option<f64>) -> std::cmp::Ordering {
@@ -2753,10 +2845,11 @@ impl<'a> ValidationSampleAccumulator<'a> {
     }
 
     fn update_similarity_overlap(&mut self, ts_code: &str, trade_date: &str) {
-        let Some(date_map) = self.similarity_cache.pair_to_rule_indices.get(ts_code) else {
-            return;
-        };
-        let Some(rule_indices) = date_map.get(trade_date) else {
+        let Some(rule_indices) = self
+            .similarity_cache
+            .pair_to_rule_indices
+            .get(&validation_pair_key(ts_code, trade_date))
+        else {
             return;
         };
 
@@ -6163,6 +6256,128 @@ fn build_rule_contribution_averages(
     Ok(out)
 }
 
+fn load_daily_max_rank(
+    source_path: &str,
+    start_date: &str,
+    end_date: &str,
+    allowed_ts_codes: Option<&HashSet<String>>,
+) -> Result<HashMap<String, i64>, String> {
+    let result_conn = open_result_conn(source_path)?;
+    let mut stmt = result_conn
+        .prepare(
+            r#"
+            SELECT ts_code, trade_date, rank
+            FROM score_summary
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+              AND rank IS NOT NULL
+              AND rank > 0
+            "#,
+        )
+        .map_err(|e| format!("预编译策略回测每日排名上限查询失败: {e}"))?;
+    let mut rows = stmt
+        .query(params![start_date, end_date])
+        .map_err(|e| format!("查询策略回测每日排名上限失败: {e}"))?;
+    let mut daily_max_rank: HashMap<String, i64> = HashMap::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取策略回测每日排名上限失败: {e}"))?
+    {
+        let ts_code: String = row.get(0).map_err(|e| format!("读取总榜代码失败: {e}"))?;
+        if !ts_code_allowed_by_filter(allowed_ts_codes, &ts_code) {
+            continue;
+        }
+        let trade_date: String = row.get(1).map_err(|e| format!("读取总榜日期失败: {e}"))?;
+        let rank: i64 = row.get(2).map_err(|e| format!("读取总榜排名失败: {e}"))?;
+        daily_max_rank
+            .entry(trade_date)
+            .and_modify(|max_rank| *max_rank = (*max_rank).max(rank))
+            .or_insert(rank);
+    }
+    Ok(daily_max_rank)
+}
+
+fn build_one_rule_contribution_average(
+    source_path: &str,
+    rule_name: &str,
+    start_date: &str,
+    end_date: &str,
+    allowed_ts_codes: Option<&HashSet<String>>,
+    daily_max_rank: &HashMap<String, i64>,
+) -> Result<RuleContributionAverages, String> {
+    let result_conn = open_result_conn(source_path)?;
+    let mut stmt = result_conn
+        .prepare(
+            r#"
+            SELECT
+                d.ts_code,
+                d.trade_date,
+                TRY_CAST(d.rule_score AS DOUBLE),
+                s.rank
+            FROM rule_details AS d
+            LEFT JOIN score_summary AS s
+              ON s.ts_code = d.ts_code
+             AND s.trade_date = d.trade_date
+            WHERE d.rule_name = ?
+              AND d.trade_date >= ?
+              AND d.trade_date <= ?
+              AND TRY_CAST(d.rule_score AS DOUBLE) IS NOT NULL
+              AND ABS(TRY_CAST(d.rule_score AS DOUBLE)) > 1e-12
+            "#,
+        )
+        .map_err(|e| format!("预编译单策略贡献度查询失败: {e}"))?;
+    let mut rows = stmt
+        .query(params![rule_name, start_date, end_date])
+        .map_err(|e| format!("查询单策略贡献度失败: {e}"))?;
+    let mut daily_aggregates: HashMap<String, RuleDayAgg> = HashMap::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取单策略贡献度失败: {e}"))?
+    {
+        let ts_code: String = row.get(0).map_err(|e| format!("读取规则代码失败: {e}"))?;
+        if !ts_code_allowed_by_filter(allowed_ts_codes, &ts_code) {
+            continue;
+        }
+        let trade_date: String = row.get(1).map_err(|e| format!("读取规则日期失败: {e}"))?;
+        let rule_score: f64 = row.get(2).map_err(|e| format!("读取规则分数失败: {e}"))?;
+        if !rule_score.is_finite() {
+            continue;
+        }
+        let aggregate = daily_aggregates.entry(trade_date.clone()).or_default();
+        aggregate.trigger_count += 1;
+        let (Some(rank), Some(max_rank)) = (
+            row.get::<usize, Option<i64>>(3)
+                .map_err(|e| format!("读取总榜排名失败: {e}"))?
+                .filter(|rank| *rank > 0),
+            daily_max_rank.get(&trade_date),
+        ) else {
+            continue;
+        };
+        if *max_rank > 0 {
+            aggregate.contribution_score +=
+                rule_score * (*max_rank + 1 - rank) as f64 / *max_rank as f64;
+        }
+    }
+
+    let mut accumulator = RuleContributionAccumulator::default();
+    for aggregate in daily_aggregates.into_values() {
+        if aggregate.trigger_count <= 0 {
+            continue;
+        }
+        accumulator.contribution_sum += aggregate.contribution_score;
+        accumulator.contribution_days += 1;
+        accumulator.trigger_count += aggregate.trigger_count;
+    }
+    Ok(RuleContributionAverages {
+        avg_contribution_score: (accumulator.contribution_days > 0).then_some(
+            accumulator.contribution_sum / accumulator.contribution_days as f64,
+        ),
+        avg_contribution_per_trigger: (accumulator.trigger_count > 0).then_some(
+            accumulator.contribution_sum / accumulator.trigger_count as f64,
+        ),
+    })
+}
+
 fn ts_code_allowed_by_filter(allowed_ts_codes: Option<&HashSet<String>>, ts_code: &str) -> bool {
     let Some(allowed_ts_codes) = allowed_ts_codes else {
         return true;
@@ -6788,6 +7003,33 @@ fn build_one_rule_backtest_summary_and_detail(
     });
 
     (summary, detail)
+}
+
+fn build_one_rule_backtest_summary(
+    rule_name: &str,
+    metrics: RuleLayerMetrics,
+    contribution_average: RuleContributionAverages,
+) -> RuleLayerRuleSummary {
+    let decay_daily_values = build_rule_directional_excess_daily_values(&metrics.points);
+    let decay_validations = build_decay_validations_from_daily_values(decay_daily_values.clone());
+    RuleLayerRuleSummary {
+        rule_name: rule_name.to_string(),
+        point_count: metrics.points.len(),
+        avg_residual_mean: metrics.avg_residual_mean,
+        avg_excess_residual_mean: metrics.avg_excess_residual_mean,
+        avg_er_change: metrics.avg_er_change,
+        er_change_sample_count: metrics.er_change_sample_count,
+        profit_loss_ratio: metrics.profit_loss_ratio,
+        spread_mean: None,
+        avg_contribution_score: contribution_average.avg_contribution_score,
+        avg_contribution_per_trigger: contribution_average.avg_contribution_per_trigger,
+        ic_mean: metrics.ic_mean,
+        ic_std: metrics.ic_std,
+        icir: metrics.icir,
+        ic_t_value: metrics.ic_t_value,
+        decay_validations,
+        decay_daily_values,
+    }
 }
 
 fn split_and_sort_rule_backtest_summaries_and_details(
@@ -7443,103 +7685,17 @@ pub fn run_rule_layer_backtest(
             });
         }
 
-        let (rule_options, rule_meta_map) = load_rule_meta(source_path)?;
-        let explain_map = rule_meta_map
-            .iter()
-            .map(|(rule_name, meta)| (rule_name.clone(), meta.explain.clone()))
-            .collect::<HashMap<_, _>>();
-        let has_rule_meta_match = rule_options
-            .iter()
-            .any(|rule_name| rule_meta_map.contains_key(rule_name));
-        let stock_meta_map = if has_rule_meta_match {
-            load_validation_sample_stock_meta_map(source_path)?
-        } else {
-            HashMap::new()
-        };
-        let similarity_cache = if has_rule_meta_match {
-            load_validation_similarity_cache_optional(
-                source_path,
-                &params.start_date,
-                &params.end_date,
-            )?
-        } else {
-            empty_validation_similarity_cache()
-        };
-        let contribution_averages = if params.allowed_ts_codes.is_some() {
-            // 股票范围过滤需要逐行计算贡献度；把原始行限制在这个作用域内，确保在
-            // 进入策略并发前释放，避免与运行时缓存及每策略校验数据同时常驻。
-            let (summary_rows, detail_rows) =
-                (|source_path: &str,
-                  start_date: &str,
-                  end_date: &str,
-                  allowed_ts_codes: Option<&HashSet<String>>|
-                 -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>), String> {
-                    let result_conn = open_result_conn(source_path)?;
-                    let summaries = load_score_summary_rows_from_db(
-                        source_path,
-                        start_date,
-                        end_date,
-                        allowed_ts_codes,
-                    )?;
-
-                    let mut detail_stmt = result_conn
-                        .prepare(
-                            r#"
-            SELECT ts_code, trade_date, rule_name, TRY_CAST(rule_score AS DOUBLE)
-            FROM rule_details
-            WHERE trade_date >= ?
-              AND trade_date <= ?
-              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
-            ORDER BY trade_date ASC, rule_name ASC, ts_code ASC
-            "#,
-                        )
-                        .map_err(|e| format!("预编译策略回测规则原始行失败: {e}"))?;
-                    let mut detail_rows = detail_stmt
-                        .query(params![start_date, end_date])
-                        .map_err(|e| format!("查询策略回测规则原始行失败: {e}"))?;
-                    let mut details = Vec::new();
-                    while let Some(row) = detail_rows
-                        .next()
-                        .map_err(|e| format!("读取策略回测规则原始行失败: {e}"))?
-                    {
-                        let rule_score: f64 =
-                            row.get(3).map_err(|e| format!("读取规则分数失败: {e}"))?;
-                        let item = ScoreDetails {
-                            ts_code: row.get(0).map_err(|e| format!("读取规则代码失败: {e}"))?,
-                            trade_date: row.get(1).map_err(|e| format!("读取规则日期失败: {e}"))?,
-                            rule_name: row.get(2).map_err(|e| format!("读取规则名称失败: {e}"))?,
-                            rule_score,
-                        };
-                        if rule_score.is_finite()
-                            && ts_code_allowed_by_filter(allowed_ts_codes, &item.ts_code)
-                        {
-                            details.push(item);
-                        }
-                    }
-
-                    Ok((summaries, details))
-                })(
-                    source_path,
-                    &params.start_date,
-                    &params.end_date,
-                    params.allowed_ts_codes.as_ref(),
-                )?;
-            build_rule_contribution_averages_from_rows(
-                &summary_rows,
-                &detail_rows,
-                &params.start_date,
-                &params.end_date,
-            )
-        } else {
-            build_rule_contribution_averages(
-                source_path,
-                &rule_options,
-                &params.start_date,
-                &params.end_date,
-            )?
-        };
-        let summary_detail_items =
-            calc_all_rule_layer_metrics_with_validation_from_db_map_with_ts_filter(
+        let (rule_options, _) = load_rule_meta(source_path)?;
+        // 这里只共享按日期压缩后的排名上限。策略命中行与贡献度聚合由当前
+        // Rayon 策略线程按 rule_name 查询并在返回前释放。
+        let daily_max_rank = load_daily_max_rank(
+            source_path,
+            &params.start_date,
+            &params.end_date,
+            params.allowed_ts_codes.as_ref(),
+        )?;
+        let mut all_rule_summaries =
+            calc_all_rule_layer_metrics_from_db_map_with_ts_filter(
                 source_conn,
                 source_path,
                 &rule_options,
@@ -7553,21 +7709,30 @@ pub fn run_rule_layer_backtest(
                 &layer_config,
                 params.allowed_ts_codes.as_ref(),
                 params.parallel_batch_size,
-                |one_rule_name, validation| {
-                    Ok(build_one_rule_backtest_summary_and_detail(
+                |one_rule_name, metrics| {
+                    let contribution_average = build_one_rule_contribution_average(
+                        source_path,
                         one_rule_name,
-                        validation,
-                        &rule_meta_map,
-                        &contribution_averages,
-                        &explain_map,
-                        params,
-                        &similarity_cache,
-                        &stock_meta_map,
+                        &params.start_date,
+                        &params.end_date,
+                        params.allowed_ts_codes.as_ref(),
+                        &daily_max_rank,
+                    )?;
+                    Ok(build_one_rule_backtest_summary(
+                        one_rule_name,
+                        metrics,
+                        contribution_average,
                     ))
                 },
-            );
-        let (all_rule_summaries, rule_validation_details) =
-            split_and_sort_rule_backtest_summaries_and_details(summary_detail_items?);
+            )?;
+        all_rule_summaries.sort_by(|a, b| {
+            b.profit_loss_ratio
+                .unwrap_or(f64::NEG_INFINITY)
+                .partial_cmp(&a.profit_loss_ratio.unwrap_or(f64::NEG_INFINITY))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.point_count.cmp(&a.point_count))
+                .then_with(|| a.rule_name.cmp(&b.rule_name))
+        });
         let decay_validations = build_all_rule_decay_validations(&all_rule_summaries);
 
         let (
@@ -7621,9 +7786,146 @@ pub fn run_rule_layer_backtest(
             layer_summaries: Vec::new(),
             is_all_rules: true,
             all_rule_summaries,
-            rule_validation_details,
+            rule_validation_details: Vec::new(),
         })
     })(&source_conn, &source_path, None, &params)
+}
+
+pub fn get_rule_layer_backtest_detail(
+    source_path: String,
+    rule_name: String,
+    stock_adj_type: Option<String>,
+    index_ts_code: String,
+    index_beta: Option<f64>,
+    concept_beta: Option<f64>,
+    industry_beta: Option<f64>,
+    start_date: String,
+    end_date: String,
+    min_samples_per_rule_day: Option<usize>,
+    min_listed_trade_days: Option<usize>,
+    backtest_period: Option<usize>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
+    total_mv_min: Option<f64>,
+    total_mv_max: Option<f64>,
+) -> Result<RuleValidationComboResult, String> {
+    validate_backtest_strategy_expressions(&source_path)?;
+    let rule_name = rule_name.trim().to_string();
+    if rule_name.is_empty() {
+        return Err("rule_name不能为空".to_string());
+    }
+    let source_db = source_db_path(&source_path);
+    let source_db_str = source_db
+        .to_str()
+        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
+    let source_conn =
+        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+    let (resolved_board, exclude_st_board, total_mv_min, total_mv_max, allowed_ts_codes) =
+        build_backtest_stock_filter(
+            &source_path,
+            board,
+            exclude_st_board,
+            total_mv_min,
+            total_mv_max,
+        )?;
+    let params = RuleLayerBacktestRunParams {
+        stock_adj_type: stock_adj_type
+            .unwrap_or_else(|| "qfq".to_string())
+            .trim()
+            .to_string(),
+        index_ts_code: index_ts_code.trim().to_string(),
+        index_beta: index_beta.unwrap_or(0.5),
+        concept_beta: concept_beta.unwrap_or(0.2),
+        industry_beta: industry_beta.unwrap_or(0.0),
+        start_date: start_date.trim().to_string(),
+        end_date: end_date.trim().to_string(),
+        min_samples_per_day: min_samples_per_rule_day.unwrap_or(5),
+        min_listed_trade_days: min_listed_trade_days
+            .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
+        backtest_period: backtest_period.unwrap_or(1),
+        parallel_batch_size: 1,
+        resolved_board,
+        exclude_st_board,
+        total_mv_min,
+        total_mv_max,
+        allowed_ts_codes,
+    };
+    let layer_config = RuleLayerConfig {
+        min_samples_per_day: params.min_samples_per_day,
+        backtest_period: params.backtest_period,
+        min_listed_trade_days: params.min_listed_trade_days,
+    };
+    let (_, rule_meta_map) = load_rule_meta(&source_path)?;
+    if !rule_meta_map.contains_key(&rule_name) {
+        return Err(format!("策略 {rule_name} 没有可用的详细配置"));
+    }
+    let explain_map = rule_meta_map
+        .iter()
+        .map(|(name, meta)| (name.clone(), meta.explain.clone()))
+        .collect::<HashMap<_, _>>();
+    let stock_meta_map = load_validation_sample_stock_meta_map(&source_path)?;
+    let daily_max_rank = load_daily_max_rank(
+        &source_path,
+        &params.start_date,
+        &params.end_date,
+        params.allowed_ts_codes.as_ref(),
+    )?;
+    let rule_names = vec![rule_name.clone()];
+    let mut details = calc_all_rule_layer_metrics_with_validation_from_db_map_with_ts_filter(
+        &source_conn,
+        &source_path,
+        &rule_names,
+        &params.stock_adj_type,
+        &params.index_ts_code,
+        params.index_beta,
+        params.concept_beta,
+        params.industry_beta,
+        &params.start_date,
+        &params.end_date,
+        &layer_config,
+        params.allowed_ts_codes.as_ref(),
+        1,
+        |one_rule_name, validation| {
+            let contribution_average = build_one_rule_contribution_average(
+                &source_path,
+                one_rule_name,
+                &params.start_date,
+                &params.end_date,
+                params.allowed_ts_codes.as_ref(),
+                &daily_max_rank,
+            )?;
+            let contribution_averages = HashMap::from([(
+                one_rule_name.to_string(),
+                contribution_average,
+            )]);
+            let similarity_cache = empty_validation_similarity_cache();
+            let similarity_rows = load_validation_similarity_rows_for_rule(
+                &source_path,
+                &params.start_date,
+                &params.end_date,
+                &validation.triggered_samples,
+                one_rule_name,
+                &explain_map,
+            )?;
+            let (_, detail) = build_one_rule_backtest_summary_and_detail(
+                one_rule_name,
+                validation,
+                &rule_meta_map,
+                &contribution_averages,
+                &explain_map,
+                &params,
+                &similarity_cache,
+                &stock_meta_map,
+            );
+            let mut detail = detail
+                .ok_or_else(|| format!("策略 {one_rule_name} 没有可用的详细统计"))?;
+            detail.similarity_rows = similarity_rows;
+            Ok(detail)
+        },
+    )?;
+    details
+        .pop()
+        .ok_or_else(|| format!("策略 {rule_name} 没有可用的详细统计"))
 }
 
 pub fn run_rank_layer_backtest(
@@ -8269,8 +8571,9 @@ mod tests {
         ValidationSeedRule, ValidationSimilarityCache, ValidationVariant,
         build_industry_maps_from_rows, build_rank_layer_sample_groups,
         build_recent_decay_dist_points, build_rule_basket_decay_from_daily_groups,
-        build_rule_contribution_averages, build_rule_contribution_averages_from_rows,
-        build_rule_decay_validations, build_validation_cached_rule,
+        build_one_rule_contribution_average, build_rule_contribution_averages,
+        build_rule_contribution_averages_from_rows, build_rule_decay_validations,
+        build_validation_cached_rule,
         build_validation_calibration_specs, build_validation_return_distribution,
         build_validation_return_distribution_from_counts, build_validation_sample_groups,
         build_validation_score_layer_details,
@@ -8280,7 +8583,7 @@ mod tests {
         collect_validation_assigned_names, derive_validation_volatility_group,
         estimate_net_money_flow_yuan, money_flow_rank_items, money_outflow_rank_items,
         resolve_validation_sample_board_label, resolve_validation_trigger_count,
-        scope_way_config_label, trailing_period_gain,
+        load_daily_max_rank, scope_way_config_label, trailing_period_gain, validation_pair_key,
     };
     use crate::data::ScopeWay;
 
@@ -8696,6 +8999,27 @@ explain = "test"
         assert_eq!(rule_b.avg_contribution_score, Some(3.0));
         assert_eq!(rule_b.avg_contribution_per_trigger, Some(3.0));
         assert!(!averages.contains_key("未请求规则"));
+
+        let daily_max_rank =
+            load_daily_max_rank(source_dir_str, "20240102", "20240103", None)
+                .expect("load daily max rank");
+        let streamed_rule_a = build_one_rule_contribution_average(
+            source_dir_str,
+            "规则A",
+            "20240102",
+            "20240103",
+            None,
+            &daily_max_rank,
+        )
+        .expect("query one rule contribution average");
+        assert_eq!(
+            streamed_rule_a.avg_contribution_score,
+            rule_a.avg_contribution_score
+        );
+        assert_eq!(
+            streamed_rule_a.avg_contribution_per_trigger,
+            rule_a.avg_contribution_per_trigger
+        );
     }
 
     #[test]
@@ -9242,12 +9566,12 @@ explain = "test"
             rule_hit_counts: vec![3, 1],
             pair_to_rule_indices: HashMap::from([
                 (
-                    "000001.SZ".to_string(),
-                    HashMap::from([("20240102".to_string(), vec![0, 1])]),
+                    validation_pair_key("000001.SZ", "20240102"),
+                    vec![0, 1],
                 ),
                 (
-                    "000002.SZ".to_string(),
-                    HashMap::from([("20240103".to_string(), vec![0])]),
+                    validation_pair_key("000002.SZ", "20240103"),
+                    vec![0],
                 ),
             ]),
         };

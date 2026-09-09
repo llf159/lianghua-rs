@@ -374,10 +374,19 @@ pub fn calc_rule_layer_metrics_from_db_with_ts_filter(
         &input.layer_config,
         allowed_ts_codes,
     )?;
-    let rule_rows = load_rule_rows_filtered(source_dir, input, allowed_ts_codes)?;
-    let triggered_score_map = build_triggered_score_map(rule_rows);
-
-    calc_rule_layer_metrics_from_cache(&runtime_cache, &triggered_score_map, &input.layer_config)
+    let triggered_scores = load_triggered_score_column_for_name_filtered(
+        source_dir,
+        &input.rule_name,
+        &input.start_date,
+        &input.end_date,
+        allowed_ts_codes,
+        &runtime_cache,
+    )?;
+    calc_rule_layer_metrics_from_score_column(
+        &runtime_cache,
+        &triggered_scores,
+        &input.layer_config,
+    )
 }
 
 pub fn calc_all_rule_layer_metrics_from_db(
@@ -423,6 +432,44 @@ pub fn calc_all_rule_layer_metrics_from_db_with_ts_filter(
     layer_config: &RuleLayerConfig,
     allowed_ts_codes: Option<&HashSet<String>>,
 ) -> Result<Vec<(String, RuleLayerMetrics)>, String> {
+    calc_all_rule_layer_metrics_from_db_map_with_ts_filter(
+        source_conn,
+        source_dir,
+        rule_names,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+        allowed_ts_codes,
+        DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE,
+        |rule_name, metrics| Ok((rule_name.to_string(), metrics)),
+    )
+}
+
+pub fn calc_all_rule_layer_metrics_from_db_map_with_ts_filter<T, F>(
+    source_conn: &Connection,
+    source_dir: &str,
+    rule_names: &[String],
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+    allowed_ts_codes: Option<&HashSet<String>>,
+    parallel_batch_size: usize,
+    map_result: F,
+) -> Result<Vec<T>, String>
+where
+    T: Send,
+    F: Fn(&str, RuleLayerMetrics) -> Result<T, String> + Sync,
+{
     validate_rule_common_input(
         stock_adj_type,
         index_ts_code,
@@ -451,33 +498,30 @@ pub fn calc_all_rule_layer_metrics_from_db_with_ts_filter(
         layer_config,
         allowed_ts_codes,
     )?;
-    let triggered_score_map_by_rule = load_triggered_score_maps_for_names_filtered(
-        source_dir,
-        rule_names,
-        start_date,
-        end_date,
-        allowed_ts_codes,
-    )?;
-
-    let grouped_results: Vec<Result<(String, RuleLayerMetrics), String>> = rule_names
-        .par_iter()
-        .map(|rule_name| {
-            let empty_triggered_score_map = TriggeredScoreMap::new();
-            let triggered_score_map = triggered_score_map_by_rule
-                .get(rule_name)
-                .unwrap_or(&empty_triggered_score_map);
-            let metrics = calc_rule_layer_metrics_from_cache(
-                &runtime_cache,
-                triggered_score_map,
-                layer_config,
-            )?;
-            Ok((rule_name.clone(), metrics))
-        })
-        .collect();
-
-    let mut out = Vec::with_capacity(grouped_results.len());
-    for item in grouped_results {
-        out.push(item?);
+    let mut out = Vec::with_capacity(rule_names.len());
+    for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
+        let batch_results = rule_batch
+            .par_iter()
+            .map(|rule_name| {
+                let triggered_scores = load_triggered_score_column_for_name_filtered(
+                    source_dir,
+                    rule_name,
+                    start_date,
+                    end_date,
+                    allowed_ts_codes,
+                    &runtime_cache,
+                )?;
+                let metrics = calc_rule_layer_metrics_from_score_column(
+                    &runtime_cache,
+                    &triggered_scores,
+                    layer_config,
+                )?;
+                map_result(rule_name, metrics)
+            })
+            .collect::<Vec<_>>();
+        for item in batch_results {
+            out.push(item?);
+        }
     }
 
     Ok(out)
@@ -568,23 +612,20 @@ where
     // 在计算前同时常驻，峰值内存不会随该参数下降。
     let mut grouped_results = Vec::with_capacity(rule_names.len());
     for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
-        let triggered_score_map_by_rule = load_triggered_score_maps_for_names_filtered(
-            source_dir,
-            rule_batch,
-            start_date,
-            end_date,
-            allowed_ts_codes,
-        )?;
         let mut batch_results: Vec<Result<T, String>> = rule_batch
             .par_iter()
             .map(|rule_name| {
-                let empty_triggered_score_map = TriggeredScoreMap::new();
-                let triggered_score_map = triggered_score_map_by_rule
-                    .get(rule_name)
-                    .unwrap_or(&empty_triggered_score_map);
-                let metrics = calc_rule_layer_metrics_with_samples_from_cache(
+                let triggered_scores = load_triggered_score_column_for_name_filtered(
+                    source_dir,
+                    rule_name,
+                    start_date,
+                    end_date,
+                    allowed_ts_codes,
                     &runtime_cache,
-                    triggered_score_map,
+                )?;
+                let metrics = calc_rule_layer_metrics_with_samples_from_score_column(
+                    &runtime_cache,
+                    &triggered_scores,
                     layer_config,
                 )?;
                 map_result(rule_name, metrics)
@@ -651,23 +692,20 @@ where
     )?;
     let mut grouped_results = Vec::with_capacity(rule_names.len());
     for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
-        let triggered_score_map_by_rule = load_triggered_score_maps_for_names_filtered(
-            source_dir,
-            rule_batch,
-            start_date,
-            end_date,
-            allowed_ts_codes,
-        )?;
         let mut batch_results: Vec<Result<T, String>> = rule_batch
             .par_iter()
             .map(|rule_name| {
-                let empty_triggered_score_map = TriggeredScoreMap::new();
-                let triggered_score_map = triggered_score_map_by_rule
-                    .get(rule_name)
-                    .unwrap_or(&empty_triggered_score_map);
-                let metrics = calc_rule_layer_metrics_with_validation_from_cache(
+                let triggered_scores = load_triggered_score_column_for_name_filtered(
+                    source_dir,
+                    rule_name,
+                    start_date,
+                    end_date,
+                    allowed_ts_codes,
                     &runtime_cache,
-                    triggered_score_map,
+                )?;
+                let metrics = calc_rule_layer_metrics_with_validation_from_score_column(
+                    &runtime_cache,
+                    &triggered_scores,
                     layer_config,
                 )?;
                 map_result(rule_name, metrics)
@@ -1750,9 +1788,21 @@ pub fn calc_rule_layer_metrics_with_samples_from_cache(
     layer_config: &RuleLayerConfig,
 ) -> Result<RuleLayerMetricsWithSamples, String> {
     let triggered_scores = runtime_cache.encode_triggered_scores(triggered_score_map);
+    calc_rule_layer_metrics_with_samples_from_score_column(
+        runtime_cache,
+        &triggered_scores,
+        layer_config,
+    )
+}
+
+fn calc_rule_layer_metrics_with_samples_from_score_column(
+    runtime_cache: &RuleLayerRuntimeCache,
+    triggered_scores: &TriggeredScoreColumn,
+    layer_config: &RuleLayerConfig,
+) -> Result<RuleLayerMetricsWithSamples, String> {
     let computation = compute_rule_layer_from_runtime_cache(
         runtime_cache,
-        Some(&triggered_scores),
+        Some(triggered_scores),
         layer_config,
         RuleLayerCollectOptions {
             metrics: true,
@@ -1798,9 +1848,21 @@ pub fn calc_rule_layer_metrics_with_validation_from_cache(
     layer_config: &RuleLayerConfig,
 ) -> Result<RuleLayerMetricsWithValidation, String> {
     let triggered_scores = runtime_cache.encode_triggered_scores(triggered_score_map);
+    calc_rule_layer_metrics_with_validation_from_score_column(
+        runtime_cache,
+        &triggered_scores,
+        layer_config,
+    )
+}
+
+fn calc_rule_layer_metrics_with_validation_from_score_column(
+    runtime_cache: &RuleLayerRuntimeCache,
+    triggered_scores: &TriggeredScoreColumn,
+    layer_config: &RuleLayerConfig,
+) -> Result<RuleLayerMetricsWithValidation, String> {
     let computation = compute_rule_layer_from_runtime_cache(
         runtime_cache,
-        Some(&triggered_scores),
+        Some(triggered_scores),
         layer_config,
         RuleLayerCollectOptions {
             metrics: true,
@@ -1824,9 +1886,17 @@ pub fn calc_rule_layer_metrics_from_cache(
     layer_config: &RuleLayerConfig,
 ) -> Result<RuleLayerMetrics, String> {
     let triggered_scores = runtime_cache.encode_triggered_scores(triggered_score_map);
+    calc_rule_layer_metrics_from_score_column(runtime_cache, &triggered_scores, layer_config)
+}
+
+fn calc_rule_layer_metrics_from_score_column(
+    runtime_cache: &RuleLayerRuntimeCache,
+    triggered_scores: &TriggeredScoreColumn,
+    layer_config: &RuleLayerConfig,
+) -> Result<RuleLayerMetrics, String> {
     Ok(compute_rule_layer_from_runtime_cache(
         runtime_cache,
-        Some(&triggered_scores),
+        Some(triggered_scores),
         layer_config,
         RuleLayerCollectOptions {
             metrics: true,
@@ -2485,32 +2555,72 @@ fn build_triggered_score_map(rule_rows: Vec<RuleDbRow>) -> TriggeredScoreMap {
     rows_by_ts
 }
 
-fn load_triggered_score_maps_for_names_filtered(
+fn load_triggered_score_column_for_name_filtered(
     source_dir: &str,
-    rule_names: &[String],
+    rule_name: &str,
     start_date: &str,
     end_date: &str,
     allowed_ts_codes: Option<&HashSet<String>>,
-) -> Result<HashMap<String, TriggeredScoreMap>, String> {
-    let rule_rows = load_rule_rows_for_names_filtered(
-        source_dir,
-        rule_names,
-        start_date,
-        end_date,
-        allowed_ts_codes,
-    )?;
-    let mut rows_by_rule: HashMap<String, TriggeredScoreMap> = HashMap::new();
-
-    for row in rule_rows {
-        rows_by_rule
-            .entry(row.rule_name)
-            .or_default()
-            .entry(row.ts_code)
-            .or_default()
-            .insert(row.trade_date, row.rule_score);
+    runtime_cache: &RuleLayerRuntimeCache,
+) -> Result<TriggeredScoreColumn, String> {
+    if rule_name.trim().is_empty() || runtime_cache.score_column_len == 0 {
+        return Ok(TriggeredScoreColumn::empty());
     }
-
-    Ok(rows_by_rule)
+    let result_db = result_db_path(source_dir);
+    if !result_db.exists() {
+        return Ok(TriggeredScoreColumn::empty());
+    }
+    let result_db_str = result_db
+        .to_str()
+        .ok_or_else(|| "result_db路径不是有效UTF-8".to_string())?;
+    let conn = Connection::open(result_db_str)
+        .map_err(|e| format!("打开scoring_result.db失败:{e}"))?;
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT ts_code, trade_date, TRY_CAST(rule_score AS DOUBLE)
+            FROM rule_details
+            WHERE rule_name = ?
+              AND trade_date >= ?
+              AND trade_date <= ?
+              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
+            ORDER BY trade_date ASC, ts_code ASC
+            "#,
+        )
+        .map_err(|e| format!("预编译单策略rule_details查询失败:{e}"))?;
+    let mut rows = stmt
+        .query(params_from_iter([
+            rule_name.trim(),
+            start_date.trim(),
+            end_date.trim(),
+        ]))
+        .map_err(|e| format!("查询单策略rule_details失败:{e}"))?;
+    let mut indexed_scores = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取单策略rule_details失败:{e}"))?
+    {
+        let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
+        let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
+        let rule_score: f64 = row.get(2).map_err(|e| format!("读取rule_score失败:{e}"))?;
+        if !rule_score.is_finite() || !ts_code_allowed(allowed_ts_codes, &ts_code) {
+            continue;
+        }
+        let (Some(&ts_code_id), Some(&day_group_id)) = (
+            runtime_cache.ts_code_ids.get(&ts_code),
+            runtime_cache.day_group_ids.get(&trade_date),
+        ) else {
+            continue;
+        };
+        indexed_scores.push((
+            runtime_cache.day_groups[day_group_id].score_offset + ts_code_id as usize,
+            rule_score,
+        ));
+    }
+    Ok(TriggeredScoreColumn::from_indexed(
+        runtime_cache.score_column_len,
+        indexed_scores,
+    ))
 }
 
 fn build_triggered_score_maps_from_detail_rows(
