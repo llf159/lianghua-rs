@@ -12,6 +12,7 @@
   max-height: none !important;
   overflow: visible !important;
   overscroll-behavior: auto;
+  touch-action: pan-x pan-y;
 }
 
 table thead {
@@ -22,7 +23,8 @@ table thead {
 }
 
 [class*="table-wrap"] {
-  overscroll-behavior: contain;
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: auto;
   scrollbar-width: thin;
   scrollbar-color: #cbd5e1 transparent;
 }

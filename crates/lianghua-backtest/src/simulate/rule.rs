@@ -189,6 +189,7 @@ pub struct RuleLayerRuntimeCache {
     score_column_len: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct RuleDbRow {
     rule_name: String,
@@ -2538,6 +2539,7 @@ fn validate_rule_common_input(
     layer_config.validate()
 }
 
+#[cfg(test)]
 fn build_triggered_score_map(rule_rows: Vec<RuleDbRow>) -> TriggeredScoreMap {
     let mut rows_by_ts: TriggeredScoreMap = HashMap::new();
     for RuleDbRow {
@@ -2573,8 +2575,8 @@ fn load_triggered_score_column_for_name_filtered(
     let result_db_str = result_db
         .to_str()
         .ok_or_else(|| "result_db路径不是有效UTF-8".to_string())?;
-    let conn = Connection::open(result_db_str)
-        .map_err(|e| format!("打开scoring_result.db失败:{e}"))?;
+    let conn =
+        Connection::open(result_db_str).map_err(|e| format!("打开scoring_result.db失败:{e}"))?;
     let mut stmt = conn
         .prepare(
             r#"
@@ -3243,6 +3245,7 @@ fn build_industry_series_cache(
     load_industry_trend_series_map(source_dir, &names, start_date.trim(), end_date.trim())
 }
 
+#[cfg(test)]
 fn load_rule_rows_filtered(
     source_dir: &str,
     input: &RuleLayerFromDbInput,
@@ -3270,6 +3273,7 @@ fn load_rule_rows_filtered(
     })
 }
 
+#[cfg(test)]
 fn load_rule_rows_for_names_filtered(
     source_dir: &str,
     rule_names: &[String],

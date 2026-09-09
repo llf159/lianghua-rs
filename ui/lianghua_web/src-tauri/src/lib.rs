@@ -179,7 +179,7 @@ use {
         RankComputeRunResult, RankComputeStatus,
     },
     strategy::statistics::{
-        get_rule_layer_backtest_detail as core_get_rule_layer_backtest_detail,
+        get_cached_rule_layer_backtest_detail as core_get_cached_rule_layer_backtest_detail,
         get_market_analysis as core_get_market_analysis,
         get_market_contribution as core_get_market_contribution,
         get_rule_layer_backtest_defaults as core_get_rule_layer_backtest_defaults,
@@ -1188,45 +1188,12 @@ fn get_rule_layer_backtest_defaults(
 }
 
 #[tauri::command]
-async fn get_rule_layer_backtest_detail(
+async fn get_cached_rule_layer_backtest_detail(
     source_path: String,
     rule_name: String,
-    stock_adj_type: Option<String>,
-    index_ts_code: String,
-    index_beta: Option<f64>,
-    concept_beta: Option<f64>,
-    industry_beta: Option<f64>,
-    start_date: String,
-    end_date: String,
-    min_samples_per_rule_day: Option<usize>,
-    min_listed_trade_days: Option<usize>,
-    backtest_period: Option<usize>,
-    board: Option<String>,
-    exclude_st_board: Option<bool>,
-    total_mv_min: Option<f64>,
-    total_mv_max: Option<f64>,
-) -> Result<lianghua_app_strategy::statistics::RuleValidationComboResult, String> {
+) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        run_with_heap_trim(|| {
-            core_get_rule_layer_backtest_detail(
-                source_path,
-                rule_name,
-                stock_adj_type,
-                index_ts_code,
-                index_beta,
-                concept_beta,
-                industry_beta,
-                start_date,
-                end_date,
-                min_samples_per_rule_day,
-                min_listed_trade_days,
-                backtest_period,
-                board,
-                exclude_st_board,
-                total_mv_min,
-                total_mv_max,
-            )
-        })
+        core_get_cached_rule_layer_backtest_detail(source_path, rule_name)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2673,7 +2640,7 @@ pub fn run() {
             get_strategy_triggered_stocks,
             get_scene_layer_backtest_defaults,
             get_rule_layer_backtest_defaults,
-            get_rule_layer_backtest_detail,
+            get_cached_rule_layer_backtest_detail,
             get_market_analysis,
             get_dragon_tiger_market_data,
             get_dragon_tiger_stock_detail,

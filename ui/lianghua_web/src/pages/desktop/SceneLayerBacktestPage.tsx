@@ -3,8 +3,8 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import { getStrategyManagePage, type StrategyManageRuleItem } from "../../apis/strategyManage";
 import {
+  getCachedRuleLayerBacktestDetail,
   getRuleLayerBacktestDefaults,
-  getRuleLayerBacktestDetail,
   runRankLayerBacktest,
   runRuleExpressionCalibration,
   runRuleExpressionValidation,
@@ -705,7 +705,6 @@ export default function SceneLayerBacktestPage() {
   const [ruleTransientLoading, setRuleTransientLoading] = useState(false);
   const [ruleError, setRuleError] = useState("");
   const [ruleResult, setRuleResult] = useState<RuleLayerBacktestData | null>(null);
-  const [ruleResultSource, setRuleResultSource] = useState<"stored" | "transient" | null>(null);
   const [strategyRuleOptions, setStrategyRuleOptions] = useState<StrategyManageRuleItem[]>([]);
   const [validationImportRuleName, setValidationImportRuleName] = useState("");
   const [validationExpression, setValidationExpression] = useState("");
@@ -1480,7 +1479,6 @@ export default function SceneLayerBacktestPage() {
     }
 
     setRuleResult(null);
-    setRuleResultSource(null);
     setRuleLoading(true);
     setRuleError("");
     try {
@@ -1503,10 +1501,8 @@ export default function SceneLayerBacktestPage() {
       });
       const compacted = compactRuleLayerBacktestPayload(data);
       setRuleResult(compacted);
-      setRuleResultSource("stored");
     } catch (runError) {
       setRuleResult(null);
-      setRuleResultSource(null);
       setRuleError(`执行策略回测失败: ${String(runError)}`);
     } finally {
       setRuleLoading(false);
@@ -1539,7 +1535,6 @@ export default function SceneLayerBacktestPage() {
     }
 
     setRuleResult(null);
-    setRuleResultSource(null);
     setRuleTransientLoading(true);
     setRuleError("");
     try {
@@ -1562,10 +1557,8 @@ export default function SceneLayerBacktestPage() {
       });
       const compacted = compactRuleLayerBacktestPayload(data);
       setRuleResult(compacted);
-      setRuleResultSource("transient");
     } catch (runError) {
       setRuleResult(null);
-      setRuleResultSource(null);
       setRuleError(`执行变更策略回测验证失败: ${String(runError)}`);
     } finally {
       setRuleTransientLoading(false);
@@ -1604,18 +1597,9 @@ export default function SceneLayerBacktestPage() {
 
   async function openStoredRuleValidationDetail(ruleName: string) {
     const matched = strategyRuleOptions.find((item) => item.name === ruleName);
-    const transientCombo =
-      ruleResultSource === "transient"
-        ? ruleResult?.rule_validation_details.find((item) => item.combo_key === ruleName)
-        : undefined;
-    const normalizedStart = normalizeDateInput(startDateInput);
-    const normalizedEnd = normalizeDateInput(endDateInput);
-    if (!matched || !normalizedStart || !normalizedEnd) {
+
+    if (!matched) {
       setRuleError(`策略 ${ruleName} 没有可用的详细配置。`);
-      return;
-    }
-    const marketValueFilter = readManualMarketValueFilter(setRuleError);
-    if (!marketValueFilter) {
       return;
     }
 
@@ -1625,7 +1609,7 @@ export default function SceneLayerBacktestPage() {
       Number.isFinite(matched?.points) && Number(matched?.points) < 0 ? "negative" : "positive";
 
     setValidationImportRuleName(ruleName);
-    setValidationExpression(transientCombo?.formula ?? matched.when ?? "");
+    setValidationExpression(matched.when ?? "");
     setValidationDirection(direction);
     setValidationScopeWay(parsedScopeWay.scopeWay);
     setValidationConsecThresholdText(String(parsedScopeWay.consecThreshold));
@@ -1641,50 +1625,13 @@ export default function SceneLayerBacktestPage() {
     setValidationDetailModalOpen(false);
     setValidationError("");
     setRuleError("");
-    if (ruleResultSource === "transient") {
-      if (!transientCombo) {
-        setRuleError(`变更策略 ${ruleName} 没有可用的详细统计。`);
-        return;
-      }
-      const backtest = compactRuleLayerBacktestPayload(transientCombo.backtest);
-      const detail =
-        backtest === transientCombo.backtest
-          ? transientCombo
-          : { ...transientCombo, backtest };
-      setShouldAutoOpenDetail(true);
-      setValidationResult({
-        import_rule_name: ruleName,
-        import_rule_explain: matched.explain?.trim() || `策略详细统计：${ruleName}`,
-        scope_way: matched.scope_way || parsedScopeWay.scopeWay,
-        scope_windows: scopeWindows,
-        sample_limit_per_group: VALIDATION_DEFAULT_SAMPLE_LIMIT,
-        combo_results: [detail],
-        best_combo_key: detail.combo_key,
-      });
-      return;
-    }
     setValidationLoading(true);
     try {
-      const combo = await getRuleLayerBacktestDetail({
-        sourcePath,
-        ruleName,
-        stockAdjType: stockAdjType.trim() || "qfq",
-        indexTsCode: indexTsCode.trim(),
-        indexBeta: Number(indexBeta),
-        conceptBeta: Number(conceptBeta),
-        industryBeta: Number(industryBeta),
-        startDate: normalizedStart,
-        endDate: normalizedEnd,
-        minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerDay) || 1),
-        minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
-        backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
-        board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
-        excludeStBoard: excludeStBoard || undefined,
-        ...marketValueFilter,
-      });
+      const combo = await getCachedRuleLayerBacktestDetail({ sourcePath, ruleName });
       const compacted = compactRuleLayerBacktestPayload(combo.backtest);
       const detail = compacted === combo.backtest ? combo : { ...combo, backtest: compacted };
       setShouldAutoOpenDetail(true);
+      setValidationExpression(detail.formula);
       setValidationResult({
         import_rule_name: ruleName,
         import_rule_explain: matched.explain?.trim() || `策略详细统计：${ruleName}`,
@@ -1696,7 +1643,7 @@ export default function SceneLayerBacktestPage() {
       });
     } catch (detailError) {
       setValidationResult(null);
-      setRuleError(`读取策略 ${ruleName} 详细统计失败: ${String(detailError)}`);
+      setRuleError(`读取策略 ${ruleName} 已计算明细失败: ${String(detailError)}`);
     } finally {
       setValidationLoading(false);
     }
@@ -2686,71 +2633,6 @@ export default function SceneLayerBacktestPage() {
 
       {ruleResult ? (
         <section className="scene-layer-card">
-          <div className="scene-layer-layer-summary">
-            <h3>策略回测汇总</h3>
-            <p className="scene-layer-validation-table-hint">
-              组合衰减先按每条策略方向归一化，再计算每个交易日全部有效策略的平均超额，比较最近 20/40/60 日与此前历史；每条策略在同一天等权。
-            </p>
-            <div className="scene-layer-contrib-table-wrap">
-              <table className="scene-layer-contrib-table">
-                <thead>
-                  <tr>
-                    <th>策略</th>
-                    <th>区间</th>
-                    <th>指数</th>
-                    <th>Beta（指/概/行）</th>
-                    <th>限定板块</th>
-                    <th>总市值范围</th>
-                    <th>策略数</th>
-                    <th>最小样本阈值</th>
-                    <th>最少上市交易日</th>
-                    <th>回测周期（天）</th>
-                    <th>平均贡献度</th>
-                    <th>平均单次贡献</th>
-                    <th>盈亏比</th>
-                    <th>超额残差（日度）</th>
-                    <th>组合近期衰减</th>
-                    <th title="收益统计区间最后一天 ER(20) 减触发日 ER(20)">ΔER(20)</th>
-                    <th>IC 均值</th>
-                    <th>IC t值</th>
-                    <th>ICIR</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td>全部策略</td>
-                    <td>{formatDateLabel(ruleResult.start_date)} ~ {formatDateLabel(ruleResult.end_date)}</td>
-                    <td>{ruleResult.index_ts_code}</td>
-                    <td>{formatNumber(ruleResult.index_beta, 2)} / {formatNumber(ruleResult.concept_beta, 2)} / {formatNumber(ruleResult.industry_beta, 2)}</td>
-                    <td>{formatBacktestBoardLabel(ruleResult)}</td>
-                    <td>{formatMarketValueRange(ruleResult)}</td>
-                    <td>{allRuleSummaries.length}</td>
-                    <td>{ruleResult.min_samples_per_rule_day}</td>
-                    <td>{ruleResult.min_listed_trade_days}</td>
-                    <td>{ruleResult.backtest_period}</td>
-                    <td>{formatNumber(ruleResult.avg_contribution_score, 2)}</td>
-                    <td>{formatNumber(ruleResult.avg_contribution_per_trigger, 2)}</td>
-                    <td>{formatProfitLossRatio(ruleResult.profit_loss_ratio)}</td>
-                    <td className={residualMetricHighlightClass(ruleResult.avg_excess_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}>
-                      {renderResidualMetric(ruleResult.avg_excess_residual_mean, resolveResidualDirection(ruleResult.avg_contribution_score))}
-                    </td>
-                    <td className="scene-layer-decay-cell">
-                      {renderDecayValidations(
-                        ruleResult.decay_validations,
-                        "all-rules",
-                        "策略篮子方向超额",
-                      )}
-                    </td>
-                    <td>{formatNumber(ruleResult.avg_er_change, 4)}</td>
-                    <td className={metricHighlightClass("ic", ruleResult.ic_mean)}>{formatNumber(ruleResult.ic_mean)}</td>
-                    <td className={metricHighlightClass("t", ruleResult.ic_t_value)}>{formatNumber(ruleResult.ic_t_value)}</td>
-                    <td className={metricHighlightClass("ir", ruleResult.icir)}>{formatNumber(ruleResult.icir)}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-
           {allRuleSummaries.length === 0 ? (
             <div className="scene-layer-empty">当前没有可回测的策略。</div>
           ) : null}

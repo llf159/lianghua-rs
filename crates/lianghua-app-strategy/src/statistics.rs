@@ -1,8 +1,13 @@
 use std::{
     cmp::Ordering,
+    collections::hash_map::DefaultHasher,
     collections::{HashMap, HashSet},
+    fs::{self, File},
+    hash::{Hash, Hasher},
+    io::{BufReader, BufWriter, Write},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use duckdb::{Connection, params, params_from_iter};
@@ -12,6 +17,8 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+use crate::scoring_model::ScoreDetails;
 use crate::{
     data::{
         DataReader, RuleKind, RuleStage, RuleTag, RuntimeKeyCollectOptions, ScopeWay, ScoreRule,
@@ -36,7 +43,7 @@ use crate::{
         inject_stock_extra_fields, load_st_list, load_total_share_map,
     },
     scoring::{CachedRule, evaluate_cached_rule_scores},
-    scoring_model::{CompactRuleScore, SceneBacktestRow, ScoreBatch, ScoreDetails, ScoreSummary},
+    scoring_model::{CompactRuleScore, SceneBacktestRow, ScoreBatch, ScoreSummary},
     simulate::{
         DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, build_backtest_sample_eligibility,
         rank::{
@@ -45,10 +52,9 @@ use crate::{
         },
         rule::{
             DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE, RuleLayerConfig,
-            RuleLayerDailyScoreLayers, RuleLayerFromDbInput, RuleLayerMetrics,
-            RuleLayerMetricsWithValidation, RuleLayerRuntimeCache, RuleLayerSamplePointRef,
+            RuleLayerDailyScoreLayers, RuleLayerFromDbInput, RuleLayerMetricsWithValidation,
+            RuleLayerRuntimeCache, RuleLayerSamplePointRef,
             build_rule_layer_runtime_cache_from_stock_data_with_ts_filter,
-            calc_all_rule_layer_metrics_from_db_map_with_ts_filter,
             calc_all_rule_layer_metrics_with_validation_from_compact_rows_map,
             calc_all_rule_layer_metrics_with_validation_from_db_map_with_ts_filter,
             calc_rule_layer_metrics_from_cache, calc_rule_layer_metrics_from_db_with_ts_filter,
@@ -446,6 +452,118 @@ const RULE_BACKTEST_EPS: f64 = 1e-12;
 const VALIDATION_MAX_COMBINATIONS: usize = 256;
 const VALIDATION_CONTINUATION_TTL: Duration = Duration::from_secs(30 * 60);
 const RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP: usize = 5;
+
+struct ActiveRuleBacktestDetailCache {
+    source_path: String,
+    directory: PathBuf,
+}
+
+static RULE_BACKTEST_DETAIL_CACHE: OnceLock<Mutex<Option<ActiveRuleBacktestDetailCache>>> =
+    OnceLock::new();
+
+struct RuleBacktestDetailCacheWriter {
+    directory: PathBuf,
+    committed: bool,
+}
+
+impl RuleBacktestDetailCacheWriter {
+    fn new() -> Result<Self, String> {
+        let cache = RULE_BACKTEST_DETAIL_CACHE.get_or_init(|| Mutex::new(None));
+        let previous = cache
+            .lock()
+            .map_err(|_| "策略回测明细缓存锁已损坏".to_string())?
+            .take();
+        if let Some(previous) = previous {
+            let _ = fs::remove_dir_all(previous.directory);
+        }
+
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let cache_root = std::env::temp_dir().join("lianghua-rule-backtest-details");
+        let _ = fs::remove_dir_all(&cache_root);
+        let directory = cache_root.join(format!("{created_at:x}-{:x}", random::<u64>()));
+        fs::create_dir_all(&directory)
+            .map_err(|error| format!("创建策略回测明细缓存失败: {error}"))?;
+        Ok(Self {
+            directory,
+            committed: false,
+        })
+    }
+
+    fn write(&self, rule_name: &str, detail: &RuleValidationComboResult) -> Result<(), String> {
+        let file = File::create(rule_backtest_detail_cache_path(&self.directory, rule_name))
+            .map_err(|error| format!("创建策略 {rule_name} 明细缓存失败: {error}"))?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer(&mut writer, detail)
+            .map_err(|error| format!("写入策略 {rule_name} 明细缓存失败: {error}"))?;
+        writer
+            .flush()
+            .map_err(|error| format!("刷新策略 {rule_name} 明细缓存失败: {error}"))
+    }
+
+    fn commit(mut self, source_path: &str) -> Result<(), String> {
+        let cache = RULE_BACKTEST_DETAIL_CACHE.get_or_init(|| Mutex::new(None));
+        let previous = cache
+            .lock()
+            .map_err(|_| "策略回测明细缓存锁已损坏".to_string())?
+            .replace(ActiveRuleBacktestDetailCache {
+                source_path: source_path.trim().to_string(),
+                directory: self.directory.clone(),
+            });
+        self.committed = true;
+        if let Some(previous) = previous {
+            let _ = fs::remove_dir_all(previous.directory);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RuleBacktestDetailCacheWriter {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+}
+
+fn rule_backtest_detail_cache_path(directory: &Path, rule_name: &str) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    rule_name.hash(&mut hasher);
+    directory.join(format!("{:016x}.json", hasher.finish()))
+}
+
+pub fn get_cached_rule_layer_backtest_detail(
+    source_path: String,
+    rule_name: String,
+) -> Result<serde_json::Value, String> {
+    let rule_name = rule_name.trim();
+    if rule_name.is_empty() {
+        return Err("rule_name不能为空".to_string());
+    }
+    let cache = RULE_BACKTEST_DETAIL_CACHE.get_or_init(|| Mutex::new(None));
+    let directory = {
+        let active = cache
+            .lock()
+            .map_err(|_| "策略回测明细缓存锁已损坏".to_string())?;
+        let active = active
+            .as_ref()
+            .ok_or_else(|| "当前没有已完成的策略回测明细缓存，请重新执行策略回测".to_string())?;
+        if active.source_path != source_path.trim() {
+            return Err("策略回测明细缓存与当前数据目录不一致，请重新执行策略回测".to_string());
+        }
+        active.directory.clone()
+    };
+    let file = File::open(rule_backtest_detail_cache_path(&directory, rule_name))
+        .map_err(|error| format!("读取策略 {rule_name} 明细缓存失败: {error}"))?;
+    let detail: serde_json::Value = serde_json::from_reader(BufReader::new(file))
+        .map_err(|error| format!("解析策略 {rule_name} 明细缓存失败: {error}"))?;
+    if detail.get("combo_key").and_then(serde_json::Value::as_str) != Some(rule_name) {
+        return Err(format!("策略 {rule_name} 明细缓存校验失败"));
+    }
+    Ok(detail)
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RuleValidationUnknownConfig {
@@ -2438,12 +2556,153 @@ struct ValidationSimilarityCache {
     pair_to_rule_indices: HashMap<String, Vec<usize>>,
 }
 
+struct CompactRuleSimilarityCache {
+    total_samples: f64,
+    rule_names: Vec<String>,
+    rule_hit_counts: Vec<usize>,
+    hits_by_pair: Vec<(u64, u32)>,
+}
+
 fn validation_pair_key(ts_code: &str, trade_date: &str) -> String {
     let mut key = String::with_capacity(ts_code.len() + trade_date.len() + 1);
     key.push_str(ts_code);
     key.push('\0');
     key.push_str(trade_date);
     key
+}
+
+fn validation_pair_hash(ts_code: &str, trade_date: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    ts_code.hash(&mut hasher);
+    trade_date.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn load_compact_rule_similarity_cache(
+    source_path: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<CompactRuleSimilarityCache, String> {
+    let result_conn = open_result_conn(source_path)?;
+    let total_samples = result_conn
+        .query_row(
+            "SELECT COUNT(*) FROM score_summary WHERE trade_date >= ? AND trade_date <= ?",
+            params![start_date, end_date],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| format!("读取策略相似度总样本数失败: {error}"))?
+        .max(0) as f64;
+    let mut stmt = result_conn
+        .prepare(
+            r#"
+            SELECT rule_name, ts_code, trade_date
+            FROM rule_details
+            WHERE trade_date >= ?
+              AND trade_date <= ?
+              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
+              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > 1e-12
+            "#,
+        )
+        .map_err(|error| format!("预编译策略相似度紧凑缓存查询失败: {error}"))?;
+    let mut rows = stmt
+        .query(params![start_date, end_date])
+        .map_err(|error| format!("查询策略相似度紧凑缓存失败: {error}"))?;
+    let mut rule_names = Vec::new();
+    let mut rule_name_to_index = HashMap::<String, u32>::new();
+    let mut rule_hit_counts = Vec::new();
+    let mut hits_by_pair = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("读取策略相似度紧凑缓存失败: {error}"))?
+    {
+        let rule_name: String = row
+            .get(0)
+            .map_err(|error| format!("读取规则名失败: {error}"))?;
+        let ts_code: String = row
+            .get(1)
+            .map_err(|error| format!("读取代码失败: {error}"))?;
+        let trade_date: String = row
+            .get(2)
+            .map_err(|error| format!("读取交易日失败: {error}"))?;
+        let rule_index = if let Some(index) = rule_name_to_index.get(&rule_name) {
+            *index
+        } else {
+            let index = u32::try_from(rule_names.len())
+                .map_err(|_| "策略数量超过紧凑相似度缓存上限".to_string())?;
+            rule_name_to_index.insert(rule_name.clone(), index);
+            rule_names.push(rule_name);
+            rule_hit_counts.push(0);
+            index
+        };
+        rule_hit_counts[rule_index as usize] += 1;
+        hits_by_pair.push((validation_pair_hash(&ts_code, &trade_date), rule_index));
+    }
+    hits_by_pair.sort_unstable();
+    hits_by_pair.shrink_to_fit();
+    Ok(CompactRuleSimilarityCache {
+        total_samples,
+        rule_names,
+        rule_hit_counts,
+        hits_by_pair,
+    })
+}
+
+fn build_compact_rule_similarity_rows(
+    cache: &CompactRuleSimilarityCache,
+    triggered_samples: &[crate::simulate::rule::RuleLayerSamplePoint],
+    exclude_rule_name: &str,
+    explain_map: &HashMap<String, String>,
+) -> Vec<RuleValidationSimilarityRow> {
+    if triggered_samples.is_empty() {
+        return Vec::new();
+    }
+    let mut overlap_counts = HashMap::<u32, usize>::new();
+    for sample in triggered_samples {
+        let pair_hash = validation_pair_hash(&sample.ts_code, &sample.trade_date);
+        let start = cache
+            .hits_by_pair
+            .partition_point(|(candidate, _)| *candidate < pair_hash);
+        for (_, rule_index) in cache.hits_by_pair[start..]
+            .iter()
+            .take_while(|(candidate, _)| *candidate == pair_hash)
+        {
+            *overlap_counts.entry(*rule_index).or_default() += 1;
+        }
+    }
+    let trigger_count = triggered_samples.len() as f64;
+    let mut rows = overlap_counts
+        .into_iter()
+        .filter_map(|(rule_index, overlap_samples)| {
+            let rule_name = cache.rule_names.get(rule_index as usize)?;
+            if rule_name == exclude_rule_name {
+                return None;
+            }
+            let existing_count = cache
+                .rule_hit_counts
+                .get(rule_index as usize)
+                .copied()
+                .unwrap_or(0) as f64;
+            Some(RuleValidationSimilarityRow {
+                rule_name: rule_name.clone(),
+                explain: explain_map.get(rule_name).cloned(),
+                overlap_samples,
+                overlap_rate_vs_validation: Some(overlap_samples as f64 / trigger_count),
+                overlap_rate_vs_existing: (existing_count > 0.0)
+                    .then_some(overlap_samples as f64 / existing_count),
+                overlap_lift: (cache.total_samples > 0.0 && existing_count > 0.0).then_some(
+                    overlap_samples as f64 * cache.total_samples / (trigger_count * existing_count),
+                ),
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right
+            .overlap_samples
+            .cmp(&left.overlap_samples)
+            .then_with(|| left.rule_name.cmp(&right.rule_name))
+    });
+    rows.truncate(20);
+    rows
 }
 
 fn empty_validation_similarity_cache() -> ValidationSimilarityCache {
@@ -2643,91 +2902,6 @@ fn build_validation_similarity_rows_from_overlap(
     });
     out.truncate(20);
     out
-}
-
-fn load_validation_similarity_rows_for_rule(
-    source_path: &str,
-    start_date: &str,
-    end_date: &str,
-    triggered_samples: &[crate::simulate::rule::RuleLayerSamplePoint],
-    exclude_rule_name: &str,
-    explain_map: &HashMap<String, String>,
-) -> Result<Vec<RuleValidationSimilarityRow>, String> {
-    if triggered_samples.is_empty() {
-        return Ok(Vec::new());
-    }
-    let current_hits = triggered_samples
-        .iter()
-        .map(|sample| validation_pair_key(&sample.ts_code, &sample.trade_date))
-        .collect::<HashSet<_>>();
-    let result_conn = open_result_conn(source_path)?;
-    let total_samples = result_conn
-        .query_row(
-            "SELECT COUNT(*) FROM score_summary WHERE trade_date >= ? AND trade_date <= ?",
-            params![start_date, end_date],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|e| format!("读取验证样本总数失败: {e}"))?
-        .max(0) as f64;
-    let mut stmt = result_conn
-        .prepare(
-            r#"
-            SELECT rule_name, ts_code, trade_date
-            FROM rule_details
-            WHERE trade_date >= ?
-              AND trade_date <= ?
-              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
-              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > 1e-12
-            "#,
-        )
-        .map_err(|e| format!("预编译单策略相似度查询失败: {e}"))?;
-    let mut rows = stmt
-        .query(params![start_date, end_date])
-        .map_err(|e| format!("查询单策略相似度失败: {e}"))?;
-    let mut existing_counts = HashMap::<String, usize>::new();
-    let mut overlap_counts = HashMap::<String, usize>::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取单策略相似度失败: {e}"))?
-    {
-        let rule_name: String = row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?;
-        let ts_code: String = row.get(1).map_err(|e| format!("读取代码失败: {e}"))?;
-        let trade_date: String = row.get(2).map_err(|e| format!("读取交易日失败: {e}"))?;
-        *existing_counts.entry(rule_name.clone()).or_default() += 1;
-        if current_hits.contains(&validation_pair_key(&ts_code, &trade_date)) {
-            *overlap_counts.entry(rule_name).or_default() += 1;
-        }
-    }
-
-    let combo_hit_count = triggered_samples.len() as f64;
-    let mut out = overlap_counts
-        .into_iter()
-        .filter_map(|(rule_name, overlap_samples)| {
-            if overlap_samples == 0 || rule_name == exclude_rule_name {
-                return None;
-            }
-            let existing_count = existing_counts.get(&rule_name).copied().unwrap_or(0) as f64;
-            Some(RuleValidationSimilarityRow {
-                explain: explain_map.get(&rule_name).cloned(),
-                rule_name,
-                overlap_samples,
-                overlap_rate_vs_validation: Some(overlap_samples as f64 / combo_hit_count),
-                overlap_rate_vs_existing: (existing_count > 0.0)
-                    .then(|| overlap_samples as f64 / existing_count),
-                overlap_lift: (total_samples > 0.0 && existing_count > 0.0).then(|| {
-                    overlap_samples as f64 * total_samples / (combo_hit_count * existing_count)
-                }),
-            })
-        })
-        .collect::<Vec<_>>();
-    out.sort_by(|left, right| {
-        right
-            .overlap_samples
-            .cmp(&left.overlap_samples)
-            .then_with(|| left.rule_name.cmp(&right.rule_name))
-    });
-    out.truncate(20);
-    Ok(out)
 }
 
 fn compare_option_f64_desc(left: Option<f64>, right: Option<f64>) -> std::cmp::Ordering {
@@ -6369,12 +6543,10 @@ fn build_one_rule_contribution_average(
         accumulator.trigger_count += aggregate.trigger_count;
     }
     Ok(RuleContributionAverages {
-        avg_contribution_score: (accumulator.contribution_days > 0).then_some(
-            accumulator.contribution_sum / accumulator.contribution_days as f64,
-        ),
-        avg_contribution_per_trigger: (accumulator.trigger_count > 0).then_some(
-            accumulator.contribution_sum / accumulator.trigger_count as f64,
-        ),
+        avg_contribution_score: (accumulator.contribution_days > 0)
+            .then_some(accumulator.contribution_sum / accumulator.contribution_days as f64),
+        avg_contribution_per_trigger: (accumulator.trigger_count > 0)
+            .then_some(accumulator.contribution_sum / accumulator.trigger_count as f64),
     })
 }
 
@@ -6437,6 +6609,7 @@ fn load_score_summary_rows_from_db(
     Ok(summaries)
 }
 
+#[cfg(test)]
 fn build_rule_contribution_averages_from_rows(
     summary_rows: &[ScoreSummary],
     detail_rows: &[ScoreDetails],
@@ -7003,33 +7176,6 @@ fn build_one_rule_backtest_summary_and_detail(
     });
 
     (summary, detail)
-}
-
-fn build_one_rule_backtest_summary(
-    rule_name: &str,
-    metrics: RuleLayerMetrics,
-    contribution_average: RuleContributionAverages,
-) -> RuleLayerRuleSummary {
-    let decay_daily_values = build_rule_directional_excess_daily_values(&metrics.points);
-    let decay_validations = build_decay_validations_from_daily_values(decay_daily_values.clone());
-    RuleLayerRuleSummary {
-        rule_name: rule_name.to_string(),
-        point_count: metrics.points.len(),
-        avg_residual_mean: metrics.avg_residual_mean,
-        avg_excess_residual_mean: metrics.avg_excess_residual_mean,
-        avg_er_change: metrics.avg_er_change,
-        er_change_sample_count: metrics.er_change_sample_count,
-        profit_loss_ratio: metrics.profit_loss_ratio,
-        spread_mean: None,
-        avg_contribution_score: contribution_average.avg_contribution_score,
-        avg_contribution_per_trigger: contribution_average.avg_contribution_per_trigger,
-        ic_mean: metrics.ic_mean,
-        ic_std: metrics.ic_std,
-        icir: metrics.icir,
-        ic_t_value: metrics.ic_t_value,
-        decay_validations,
-        decay_daily_values,
-    }
 }
 
 fn split_and_sort_rule_backtest_summaries_and_details(
@@ -7685,54 +7831,92 @@ pub fn run_rule_layer_backtest(
             });
         }
 
-        let (rule_options, _) = load_rule_meta(source_path)?;
-        // 这里只共享按日期压缩后的排名上限。策略命中行与贡献度聚合由当前
-        // Rayon 策略线程按 rule_name 查询并在返回前释放。
-        let daily_max_rank = load_daily_max_rank(
+        let (rule_options, rule_meta_map) = load_rule_meta(source_path)?;
+        let explain_map = rule_meta_map
+            .iter()
+            .map(|(name, meta)| (name.clone(), meta.explain.clone()))
+            .collect::<HashMap<_, _>>();
+        let stock_meta_map = load_validation_sample_stock_meta_map(source_path)?;
+        let similarity_cache =
+            load_compact_rule_similarity_cache(source_path, &params.start_date, &params.end_date)?;
+        let (contribution_averages, daily_max_rank) = if params.allowed_ts_codes.is_none() {
+            (
+                build_rule_contribution_averages(
+                    source_path,
+                    &rule_options,
+                    &params.start_date,
+                    &params.end_date,
+                )?,
+                None,
+            )
+        } else {
+            (
+                HashMap::new(),
+                Some(load_daily_max_rank(
+                    source_path,
+                    &params.start_date,
+                    &params.end_date,
+                    params.allowed_ts_codes.as_ref(),
+                )?),
+            )
+        };
+        let detail_cache = RuleBacktestDetailCacheWriter::new()?;
+        let items = calc_all_rule_layer_metrics_with_validation_from_db_map_with_ts_filter(
+            source_conn,
             source_path,
+            &rule_options,
+            &params.stock_adj_type,
+            &params.index_ts_code,
+            params.index_beta,
+            params.concept_beta,
+            params.industry_beta,
             &params.start_date,
             &params.end_date,
+            &layer_config,
             params.allowed_ts_codes.as_ref(),
+            params.parallel_batch_size,
+            |one_rule_name, validation| {
+                let contribution_average =
+                    if let Some(average) = contribution_averages.get(one_rule_name) {
+                        average.clone()
+                    } else {
+                        build_one_rule_contribution_average(
+                            source_path,
+                            one_rule_name,
+                            &params.start_date,
+                            &params.end_date,
+                            params.allowed_ts_codes.as_ref(),
+                            daily_max_rank
+                                .as_ref()
+                                .ok_or_else(|| "策略贡献度排名上限缺失".to_string())?,
+                        )?
+                    };
+                let one_rule_contribution_averages =
+                    HashMap::from([(one_rule_name.to_string(), contribution_average)]);
+                let similarity_rows = build_compact_rule_similarity_rows(
+                    &similarity_cache,
+                    &validation.triggered_samples,
+                    one_rule_name,
+                    &explain_map,
+                );
+                let (summary, detail) = build_one_rule_backtest_summary_and_detail(
+                    one_rule_name,
+                    validation,
+                    &rule_meta_map,
+                    &one_rule_contribution_averages,
+                    &explain_map,
+                    params,
+                    &empty_validation_similarity_cache(),
+                    &stock_meta_map,
+                );
+                if let Some(mut detail) = detail {
+                    detail.similarity_rows = similarity_rows;
+                    detail_cache.write(one_rule_name, &detail)?;
+                }
+                Ok((summary, None))
+            },
         )?;
-        let mut all_rule_summaries =
-            calc_all_rule_layer_metrics_from_db_map_with_ts_filter(
-                source_conn,
-                source_path,
-                &rule_options,
-                &params.stock_adj_type,
-                &params.index_ts_code,
-                params.index_beta,
-                params.concept_beta,
-                params.industry_beta,
-                &params.start_date,
-                &params.end_date,
-                &layer_config,
-                params.allowed_ts_codes.as_ref(),
-                params.parallel_batch_size,
-                |one_rule_name, metrics| {
-                    let contribution_average = build_one_rule_contribution_average(
-                        source_path,
-                        one_rule_name,
-                        &params.start_date,
-                        &params.end_date,
-                        params.allowed_ts_codes.as_ref(),
-                        &daily_max_rank,
-                    )?;
-                    Ok(build_one_rule_backtest_summary(
-                        one_rule_name,
-                        metrics,
-                        contribution_average,
-                    ))
-                },
-            )?;
-        all_rule_summaries.sort_by(|a, b| {
-            b.profit_loss_ratio
-                .unwrap_or(f64::NEG_INFINITY)
-                .partial_cmp(&a.profit_loss_ratio.unwrap_or(f64::NEG_INFINITY))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| b.point_count.cmp(&a.point_count))
-                .then_with(|| a.rule_name.cmp(&b.rule_name))
-        });
+        let (all_rule_summaries, _) = split_and_sort_rule_backtest_summaries_and_details(items);
         let decay_validations = build_all_rule_decay_validations(&all_rule_summaries);
 
         let (
@@ -7746,7 +7930,7 @@ pub fn run_rule_layer_backtest(
             icir,
             ic_t_value,
         ) = aggregate_all_rule_summary_metrics(&all_rule_summaries);
-        Ok(RuleLayerBacktestData {
+        let result = RuleLayerBacktestData {
             rule_name: String::new(),
             stock_adj_type: params.stock_adj_type.clone(),
             index_ts_code: params.index_ts_code.clone(),
@@ -7787,145 +7971,10 @@ pub fn run_rule_layer_backtest(
             is_all_rules: true,
             all_rule_summaries,
             rule_validation_details: Vec::new(),
-        })
+        };
+        detail_cache.commit(source_path)?;
+        Ok(result)
     })(&source_conn, &source_path, None, &params)
-}
-
-pub fn get_rule_layer_backtest_detail(
-    source_path: String,
-    rule_name: String,
-    stock_adj_type: Option<String>,
-    index_ts_code: String,
-    index_beta: Option<f64>,
-    concept_beta: Option<f64>,
-    industry_beta: Option<f64>,
-    start_date: String,
-    end_date: String,
-    min_samples_per_rule_day: Option<usize>,
-    min_listed_trade_days: Option<usize>,
-    backtest_period: Option<usize>,
-    board: Option<String>,
-    exclude_st_board: Option<bool>,
-    total_mv_min: Option<f64>,
-    total_mv_max: Option<f64>,
-) -> Result<RuleValidationComboResult, String> {
-    validate_backtest_strategy_expressions(&source_path)?;
-    let rule_name = rule_name.trim().to_string();
-    if rule_name.is_empty() {
-        return Err("rule_name不能为空".to_string());
-    }
-    let source_db = source_db_path(&source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
-    let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
-    let (resolved_board, exclude_st_board, total_mv_min, total_mv_max, allowed_ts_codes) =
-        build_backtest_stock_filter(
-            &source_path,
-            board,
-            exclude_st_board,
-            total_mv_min,
-            total_mv_max,
-        )?;
-    let params = RuleLayerBacktestRunParams {
-        stock_adj_type: stock_adj_type
-            .unwrap_or_else(|| "qfq".to_string())
-            .trim()
-            .to_string(),
-        index_ts_code: index_ts_code.trim().to_string(),
-        index_beta: index_beta.unwrap_or(0.5),
-        concept_beta: concept_beta.unwrap_or(0.2),
-        industry_beta: industry_beta.unwrap_or(0.0),
-        start_date: start_date.trim().to_string(),
-        end_date: end_date.trim().to_string(),
-        min_samples_per_day: min_samples_per_rule_day.unwrap_or(5),
-        min_listed_trade_days: min_listed_trade_days
-            .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
-        backtest_period: backtest_period.unwrap_or(1),
-        parallel_batch_size: 1,
-        resolved_board,
-        exclude_st_board,
-        total_mv_min,
-        total_mv_max,
-        allowed_ts_codes,
-    };
-    let layer_config = RuleLayerConfig {
-        min_samples_per_day: params.min_samples_per_day,
-        backtest_period: params.backtest_period,
-        min_listed_trade_days: params.min_listed_trade_days,
-    };
-    let (_, rule_meta_map) = load_rule_meta(&source_path)?;
-    if !rule_meta_map.contains_key(&rule_name) {
-        return Err(format!("策略 {rule_name} 没有可用的详细配置"));
-    }
-    let explain_map = rule_meta_map
-        .iter()
-        .map(|(name, meta)| (name.clone(), meta.explain.clone()))
-        .collect::<HashMap<_, _>>();
-    let stock_meta_map = load_validation_sample_stock_meta_map(&source_path)?;
-    let daily_max_rank = load_daily_max_rank(
-        &source_path,
-        &params.start_date,
-        &params.end_date,
-        params.allowed_ts_codes.as_ref(),
-    )?;
-    let rule_names = vec![rule_name.clone()];
-    let mut details = calc_all_rule_layer_metrics_with_validation_from_db_map_with_ts_filter(
-        &source_conn,
-        &source_path,
-        &rule_names,
-        &params.stock_adj_type,
-        &params.index_ts_code,
-        params.index_beta,
-        params.concept_beta,
-        params.industry_beta,
-        &params.start_date,
-        &params.end_date,
-        &layer_config,
-        params.allowed_ts_codes.as_ref(),
-        1,
-        |one_rule_name, validation| {
-            let contribution_average = build_one_rule_contribution_average(
-                &source_path,
-                one_rule_name,
-                &params.start_date,
-                &params.end_date,
-                params.allowed_ts_codes.as_ref(),
-                &daily_max_rank,
-            )?;
-            let contribution_averages = HashMap::from([(
-                one_rule_name.to_string(),
-                contribution_average,
-            )]);
-            let similarity_cache = empty_validation_similarity_cache();
-            let similarity_rows = load_validation_similarity_rows_for_rule(
-                &source_path,
-                &params.start_date,
-                &params.end_date,
-                &validation.triggered_samples,
-                one_rule_name,
-                &explain_map,
-            )?;
-            let (_, detail) = build_one_rule_backtest_summary_and_detail(
-                one_rule_name,
-                validation,
-                &rule_meta_map,
-                &contribution_averages,
-                &explain_map,
-                &params,
-                &similarity_cache,
-                &stock_meta_map,
-            );
-            let mut detail = detail
-                .ok_or_else(|| format!("策略 {one_rule_name} 没有可用的详细统计"))?;
-            detail.similarity_rows = similarity_rows;
-            Ok(detail)
-        },
-    )?;
-    details
-        .pop()
-        .ok_or_else(|| format!("策略 {rule_name} 没有可用的详细统计"))
 }
 
 pub fn run_rank_layer_backtest(
@@ -8303,13 +8352,14 @@ pub fn run_transient_rule_layer_backtest(
         HashMap::new()
     };
     let similarity_cache = if has_rule_meta_match {
-        load_validation_similarity_cache_optional(
-            &source_path,
-            &params.start_date,
-            &params.end_date,
-        )?
+        load_compact_rule_similarity_cache(&source_path, &params.start_date, &params.end_date)?
     } else {
-        empty_validation_similarity_cache()
+        CompactRuleSimilarityCache {
+            total_samples: 0.0,
+            rule_names: Vec::new(),
+            rule_hit_counts: Vec::new(),
+            hits_by_pair: Vec::new(),
+        }
     };
     let contribution_averages = build_rule_contribution_averages_from_compact_rows(
         &summary_rows,
@@ -8318,6 +8368,7 @@ pub fn run_transient_rule_layer_backtest(
         &params.start_date,
         &params.end_date,
     );
+    let detail_cache = RuleBacktestDetailCacheWriter::new()?;
     let summary_detail_items = calc_all_rule_layer_metrics_with_validation_from_compact_rows_map(
         &source_conn,
         &source_path,
@@ -8335,19 +8386,30 @@ pub fn run_transient_rule_layer_backtest(
         &layer_config,
         params.parallel_batch_size,
         |one_rule_name, validation| {
-            Ok(build_one_rule_backtest_summary_and_detail(
+            let similarity_rows = build_compact_rule_similarity_rows(
+                &similarity_cache,
+                &validation.triggered_samples,
+                one_rule_name,
+                &explain_map,
+            );
+            let (summary, detail) = build_one_rule_backtest_summary_and_detail(
                 one_rule_name,
                 validation,
                 &rule_meta_map,
                 &contribution_averages,
                 &explain_map,
                 &params,
-                &similarity_cache,
+                &empty_validation_similarity_cache(),
                 &stock_meta_map,
-            ))
+            );
+            if let Some(mut detail) = detail {
+                detail.similarity_rows = similarity_rows;
+                detail_cache.write(one_rule_name, &detail)?;
+            }
+            Ok((summary, None))
         },
     );
-    let (all_rule_summaries, rule_validation_details) =
+    let (all_rule_summaries, _) =
         split_and_sort_rule_backtest_summaries_and_details(summary_detail_items?);
     let decay_validations = build_all_rule_decay_validations(&all_rule_summaries);
 
@@ -8362,7 +8424,7 @@ pub fn run_transient_rule_layer_backtest(
         icir,
         ic_t_value,
     ) = aggregate_all_rule_summary_metrics(&all_rule_summaries);
-    Ok(RuleLayerBacktestData {
+    let result = RuleLayerBacktestData {
         rule_name: String::new(),
         stock_adj_type: params.stock_adj_type,
         index_ts_code: params.index_ts_code,
@@ -8401,8 +8463,10 @@ pub fn run_transient_rule_layer_backtest(
         layer_summaries: Vec::new(),
         is_all_rules: true,
         all_rule_summaries,
-        rule_validation_details,
-    })
+        rule_validation_details: Vec::new(),
+    };
+    detail_cache.commit(&source_path)?;
+    Ok(result)
 }
 
 pub fn run_transient_rank_layer_backtest(
@@ -8567,23 +8631,24 @@ mod tests {
     };
 
     use super::{
-        PreparedValidationCombo, VALIDATION_EPS, ValidationSampleRawRow, ValidationSampleStockMeta,
-        ValidationSeedRule, ValidationSimilarityCache, ValidationVariant,
-        build_industry_maps_from_rows, build_rank_layer_sample_groups,
-        build_recent_decay_dist_points, build_rule_basket_decay_from_daily_groups,
-        build_one_rule_contribution_average, build_rule_contribution_averages,
+        CompactRuleSimilarityCache, PreparedValidationCombo, VALIDATION_EPS,
+        ValidationSampleRawRow, ValidationSampleStockMeta, ValidationSeedRule,
+        ValidationSimilarityCache, ValidationVariant, build_compact_rule_similarity_rows,
+        build_industry_maps_from_rows, build_one_rule_contribution_average,
+        build_rank_layer_sample_groups, build_recent_decay_dist_points,
+        build_rule_basket_decay_from_daily_groups, build_rule_contribution_averages,
         build_rule_contribution_averages_from_rows, build_rule_decay_validations,
-        build_validation_cached_rule,
-        build_validation_calibration_specs, build_validation_return_distribution,
-        build_validation_return_distribution_from_counts, build_validation_sample_groups,
-        build_validation_score_layer_details,
+        build_validation_cached_rule, build_validation_calibration_specs,
+        build_validation_return_distribution, build_validation_return_distribution_from_counts,
+        build_validation_sample_groups, build_validation_score_layer_details,
         build_validation_score_layer_details_from_daily_layers, build_validation_similarity_rows,
         build_validation_triggered_scores, build_validation_triggered_scores_for_combos,
         calibration_stability_factor, collect_rule_validation_runtime_keys,
         collect_validation_assigned_names, derive_validation_volatility_group,
-        estimate_net_money_flow_yuan, money_flow_rank_items, money_outflow_rank_items,
-        resolve_validation_sample_board_label, resolve_validation_trigger_count,
-        load_daily_max_rank, scope_way_config_label, trailing_period_gain, validation_pair_key,
+        estimate_net_money_flow_yuan, load_daily_max_rank, money_flow_rank_items,
+        money_outflow_rank_items, resolve_validation_sample_board_label,
+        resolve_validation_trigger_count, scope_way_config_label, trailing_period_gain,
+        validation_pair_hash, validation_pair_key,
     };
     use crate::data::ScopeWay;
 
@@ -9000,9 +9065,8 @@ explain = "test"
         assert_eq!(rule_b.avg_contribution_per_trigger, Some(3.0));
         assert!(!averages.contains_key("未请求规则"));
 
-        let daily_max_rank =
-            load_daily_max_rank(source_dir_str, "20240102", "20240103", None)
-                .expect("load daily max rank");
+        let daily_max_rank = load_daily_max_rank(source_dir_str, "20240102", "20240103", None)
+            .expect("load daily max rank");
         let streamed_rule_a = build_one_rule_contribution_average(
             source_dir_str,
             "规则A",
@@ -9565,14 +9629,8 @@ explain = "test"
             rule_names: vec!["规则A".to_string(), "规则B".to_string()],
             rule_hit_counts: vec![3, 1],
             pair_to_rule_indices: HashMap::from([
-                (
-                    validation_pair_key("000001.SZ", "20240102"),
-                    vec![0, 1],
-                ),
-                (
-                    validation_pair_key("000002.SZ", "20240103"),
-                    vec![0],
-                ),
+                (validation_pair_key("000001.SZ", "20240102"), vec![0, 1]),
+                (validation_pair_key("000002.SZ", "20240103"), vec![0]),
             ]),
         };
         let triggered_samples = vec![
@@ -9614,6 +9672,38 @@ explain = "test"
         assert_eq!(rows[1].overlap_rate_vs_existing, Some(1.0));
         assert_eq!(rows[1].overlap_lift, Some(6.0));
         assert!(rows[1].explain.is_none());
+
+        let mut hits_by_pair = vec![
+            (validation_pair_hash("000001.SZ", "20240102"), 0),
+            (validation_pair_hash("000001.SZ", "20240102"), 1),
+            (validation_pair_hash("000002.SZ", "20240103"), 0),
+        ];
+        hits_by_pair.sort_unstable();
+        let compact_rows = build_compact_rule_similarity_rows(
+            &CompactRuleSimilarityCache {
+                total_samples: 12.0,
+                rule_names: vec!["规则A".to_string(), "规则B".to_string()],
+                rule_hit_counts: vec![3, 1],
+                hits_by_pair,
+            },
+            &triggered_samples,
+            "",
+            &explain_map,
+        );
+        assert_eq!(compact_rows.len(), rows.len());
+        for (compact, expected) in compact_rows.iter().zip(&rows) {
+            assert_eq!(compact.rule_name, expected.rule_name);
+            assert_eq!(compact.overlap_samples, expected.overlap_samples);
+            assert_eq!(
+                compact.overlap_rate_vs_validation,
+                expected.overlap_rate_vs_validation
+            );
+            assert_eq!(
+                compact.overlap_rate_vs_existing,
+                expected.overlap_rate_vs_existing
+            );
+            assert_eq!(compact.overlap_lift, expected.overlap_lift);
+        }
     }
 
     #[test]
