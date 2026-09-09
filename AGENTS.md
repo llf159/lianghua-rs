@@ -11,6 +11,7 @@
 
 - 根包只承载 `src/main.rs` 和 `src/bin` 下的仓库内二进制，不提供 `src/lib.rs` 聚合接口。
 - 根目录二进制必须直接依赖 data、scoring、backtest 等能力所有者，禁止恢复 `lianghua_rs::*` 兼容导出。
+- Tauri 开发构建必须以 `opt-level = 3` 编译 `lianghua-app-strategy`；应用层拆 crate 后，策略回测的跨 crate 泛型实例化与结果组装由该 crate 承接，不能只优化 backtest/data/scoring。
 - 只运行 `cargo check -p lianghua-rs` 以及实际改动二进制的测试。
 - `chip_behavior_sample` 固定使用 120 个交易日预热和 1% 等比分桶，并从每只股票可计算的最早日期连续演化状态，与新筹码引擎默认口径保持一致且避免报告截取起点改变结果；它是研究口径，不代表参数已经完成统计寻优。
 - `docs/筹码博弈策略.toml` 对高位接力只给 0.20 的低权重，不设置筹码分数硬下限：目的是承认新资金接力的不确定性并缓解归零饱和，同时保留高位派发的主要方向；调整该值后必须复跑常规与反差两组样本。
